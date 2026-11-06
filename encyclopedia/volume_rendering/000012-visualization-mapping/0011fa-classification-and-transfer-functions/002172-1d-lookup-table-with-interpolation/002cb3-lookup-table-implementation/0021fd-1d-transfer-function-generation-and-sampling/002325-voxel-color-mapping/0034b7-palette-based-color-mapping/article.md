@@ -1,0 +1,117 @@
+# Palette-based Color Mapping
+
+Also called: Color index UV mapping, Texture palette atlas
+
+## Overview
+Palette-based color mapping maps discrete color indices to UV coordinates on a square texture atlas, avoiding the storage of per-voxel color data in vertex buffers [S1, unofficial]. It differs from [Scalar/Component to Color Mapping](6697-scalar-component-to-color-mapping.md) by using a pre-computed lookup table (palette) rather than procedural or analytical functions to determine color, and from [Voxel Color Mapping](2970-voxel-color-mapping.md) by explicitly decoupling the color definition from the vertex geometry via a shared texture resource [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A list of unique color indices (integers) and their corresponding RGB values (e.g., from a model file).
+*   **Output:** A square texture atlas (`paletteBitmap`) containing the colors, and a mapping structure (`colorIndexToUV`) associating each color index with its UV coordinates for sampling.
+
+**Data Structures:**
+1.  `colorIndexToUV`: A map where keys are integer color indices and values are 2D float arrays `[u, v]`.
+2.  `paletteBitmap`: A square bitmap of size `side x side` with `ARGB_8888` configuration (8 bits per channel: Alpha, Red, Green, Blue).
+
+**Steps:**
+1.  **Count Indices:** Determine the total number of unique color indices ($N$) present in the source data [S1, unofficial].
+2.  **Calculate Palette Size:** Compute the side length ($S$) of the square palette:
+    $$ S = \max(8, \lceil \sqrt{N} \rceil) $$
+    The minimum size of 8 is enforced to ensure GPU sampling stability and prevent border bleeding with `GL_NEAREST` filtering on some mobile GPUs [S1, unofficial].
+3.  **Sort Indices:** Sort the unique color indices deterministically (e.g., ascending order) to ensure consistent assignment [S1, unofficial].
+4.  **Assign Grid Positions:** For each sorted index $i$ (where $0 \le i < N$):
+    *   Calculate grid coordinates $(p_x, p_y)$:
+        $$ p_x = i \pmod S $$
+        $$ p_y = \lfloor i / S \rfloor $$
+    *   Convert RGB values to an ARGB integer (Alpha=255).
+    *   Write the color to the bitmap at $(p_x, p_y)$ [S1, unofficial].
+5.  **Compute UVs:** Calculate the UV coordinates for the center of the texel at $(p_x, p_y)$:
+    $$ u = \frac{p_x + 0.5}{S} $$
+    $$ v = \frac{p_y + 0.5}{S} $$
+    Store the pair $[u, v]$ in `colorIndexToUV` for the current color index [S1, unofficial].
+6.  **Handle Unused Cells:** Any cells in the $S \times S$ grid not assigned a color (if $N < S^2$) should be filled with black (RGB=0,0,0) with Alpha=255 [S1, unofficial].
+7.  **Coordinate System Note:** Do not invert the V coordinate. The `GLUtils.texImage2D` (or equivalent) loads rows top-to-bottom, matching the bitmap layout where $y=0$ is the top [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def build_palette(color_map):
+    """
+    color_map: dict mapping integer color_index -> [r, g, b] (values 0-255)
+    Returns:
+        palette_size: int
+        palette_uv_map: dict mapping color_index -> [u, v]
+        palette_data: list of [r, g, b, a] tuples in row-major order
+    """
+    # 1. Count and sort unique color indices
+    keys = sorted(color_map.keys())
+    num_colors = len(keys)
+    
+    # 2. Calculate palette side length
+    # Minimum 8x8 for GPU sampling stability
+    side = max(8, math.ceil(math.sqrt(num_colors)))
+    
+    # Initialize palette data with black (0,0,0) and alpha 255
+    # Size is side * side
+    palette_data = [(0, 0, 0, 255)] * (side * side)
+    palette_uv_map = {}
+    
+    # 3. Assign colors and compute UVs
+    for i, color_index in enumerate(keys):
+        r, g, b = color_map[color_index]
+        a = 255
+        
+        # Grid position
+        px = i % side
+        py = i // side
+        
+        # Store color in palette data (row-major: py * side + px)
+        idx = py * side + px
+        palette_data[idx] = (r, g, b, a)
+        
+        # Compute UV for center of texel
+        u = (px + 0.5) / side
+        v = (py + 0.5) / side
+        
+        palette_uv_map[color_index] = [u, v]
+        
+    return side, palette_uv_map, palette_data
+```
+
+**Parameters:**
+*   `side`: Must be $\ge 8$. Typical values depend on $N$. For $N=100$, $S=10$. For $N=256$, $S=16$.
+
+**Edge Cases and Pitfalls:**
+*   **Small Palettes:** Using a palette smaller than 8x8 (e.g., 3x3) can cause sampling errors with `GL_NEAREST` on some mobile GPUs due to border bleeding [S1, unofficial].
+*   **V Coordinate Inversion:** Inverting V (e.g., $v = 1 - \frac{p_y + 0.5}{S}$) is incorrect if the texture loading function assumes top-to-bottom row order (standard for many bitmap libraries) [S1, unofficial].
+*   **Unused Cells:** Must be explicitly filled with a neutral color (black) to avoid undefined behavior if an index is missed or if the GPU samples outside the valid range [S1, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Preprocessing:** $O(N \log N)$ due to sorting, where $N$ is the number of unique colors. Palette generation is $O(N)$.
+*   **Memory:** The palette texture requires $S^2 \times 4$ bytes, where $S = \max(8, \lceil \sqrt{N} \rceil)$. This is significantly smaller than storing per-voxel colors if $N \ll \text{voxel count}$.
+*   **Runtime:** $O(1)$ per voxel for UV lookup and texture sampling.
+
+**Measured Performance:**
+*   Specific performance metrics are not provided in the sources [S1, unofficial].
+
+**Scaling:**
+*   Scales linearly with the number of unique colors for preprocessing, but texture size grows quadratically with the square root of colors (i.e., linearly with $N$ in terms of texel count).
+
+**Strengths and Limitations:**
+*   **Strengths:** Reduces vertex buffer size by removing per-voxel color data; allows efficient texture filtering; simple to implement.
+*   **Limitations:** Limited to discrete color sets; requires a texture lookup; palette size must be a square, potentially wasting space if $N$ is not a perfect square.
+
+**When to Use:**
+*   Use when the number of unique colors is small and known in advance, and vertex buffer size is a constraint.
+*   Do not use when continuous color gradients are required or when the color set is too large for a reasonable texture size.
+
+## Background
+This method is documented in the VoxelRenderer project, an unofficial Android OpenGL ES 3.0 voxel renderer [S1, unofficial]. It is used to efficiently render voxel models by mapping color indices to a shared texture atlas, avoiding the overhead of storing color data in vertex buffers for each voxel face.
+
+## Sources
+[S1] Il-castor/VoxelRenderer, https://github.com/Il-castor/VoxelRenderer, fetched 2026-10-26 (unofficial)

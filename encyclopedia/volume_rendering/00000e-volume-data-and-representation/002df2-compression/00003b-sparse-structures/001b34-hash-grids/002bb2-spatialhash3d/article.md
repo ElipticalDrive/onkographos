@@ -1,103 +1,189 @@
 # SpatialHash3D
+
 Also called: Uniform 3D Hash Grid
+
 ## Overview
-SpatialHash3D is a spatial index structure using a uniform 3D hash grid to enable efficient nearest-neighbor and radius-based queries for static datasets, providing O(1) cell lookup [S1, unofficial]. It differs from its siblings by prioritizing implementation simplicity and predictable performance for static data over the adaptive granularity of octrees or the complex balancing of KD-trees, making it suitable for straightforward radius queries where data does not change during the query phase [S1, unofficial].
+SpatialHash3D is a spatial index structure that uses a uniform 3D hash grid to enable efficient nearest-neighbor and radius-based queries for static datasets, providing O(1) cell lookup [S1, unofficial]. It differs from its siblings, such as the [Voxel World Data Structure](1101-voxel-world-data-structure.md) which manages dynamic voxel worlds, and [Hash Grid Loss](2093-hash-grid-loss.md) which focuses on optimization objectives, by prioritizing predictable performance and straightforward implementation for static interpolation tasks [S1, unofficial]. It builds on the general hashing principles of [Hash Grids](936-hash-grids.md) but applies them specifically to uniform 3D spatial partitioning for query acceleration.
+
 ## How it works
-**Inputs and Outputs:**
-- Input: A static array of 3D points, where each point contains coordinates $(x, y, z)$ and an associated value.
-- Output: A hash table mapping cell indices to lists of points, supporting queries for points within a radius or the $k$-nearest neighbors.
+**Inputs:**
+- A set of static sample points $P = \{p_1, p_2, ..., p_N\}$, where each point $p_i$ has 3D coordinates $(x_i, y_i, z_i)$ and associated data (e.g., scalar value).
+- A cell size parameter `cellSize` determining the granularity of the spatial partition [S1, unofficial].
+
+**Outputs:**
+- A hash grid data structure supporting:
+  - `build(points)`: Populates the grid.
+  - `queryRadius(x, y, z, radius)`: Returns all points within a specified Euclidean radius.
+  - `queryKNearest(x, y, z, k)` (optional): Returns the $k$ nearest points.
 
 **Data Structures:**
-- **Hash Table:** A dictionary or array mapping integer cell indices to a list of point references.
-- **Cell Index:** An integer derived from the 3D coordinates.
-- **Point Structure:** Contains `center: [x, y, z]` and associated data [S1, unofficial].
-
-**Parameters:**
-- `cellSize`: The size of each cell in the hash grid, determining the granularity of the spatial partition [S1, unofficial].
-- `queryRadius`: The search radius for radius-based queries [S1, unofficial].
-- `k`: The maximum number of nearest neighbors to return [S1, unofficial].
+- **Hash Grid**: A hash map (dictionary) mapping cell keys to lists of points.
+- **Cell Key**: A tuple or integer representing the grid cell coordinates $(cx, cy, cz)$.
+  - $cx = \lfloor x / \text{cellSize} \rfloor$
+  - $cy = \lfloor y / \text{cellSize} \rfloor$
+  - $cz = \lfloor z / \text{cellSize} \rfloor$
+- **Point Entry**: Stores the point's coordinates and data.
 
 **Steps:**
-1. **Build:** Iterate through all input points. For each point at $(x, y, z)$, calculate the cell index. Insert the point into the list associated with that cell index in the hash table.
-2. **Query Radius:** Given a query point $(q_x, q_y, q_z)$ and a radius $r$:
-   - Calculate the cell index of the query point.
-   - Determine the range of neighboring cells that intersect with the sphere of radius $r$ centered at the query point.
-   - Iterate through all points in these neighboring cells.
-   - Calculate the Euclidean distance $d_i$ from the query point to each candidate point.
-   - Return all points where $d_i \le r$.
-3. **Query K-Nearest:** Similar to radius query, but maintain a priority queue or sorted list of the $k$ closest points found within the relevant cells, capped at $k$ [S1, unofficial].
 
-**Formulas:**
-- Cell Index Calculation: The specific hash function is not detailed, but it maps 3D coordinates to a unique integer index based on `cellSize` [S1, unofficial].
-- Distance: $d_i = \sqrt{(x_i - q_x)^2 + (y_i - q_y)^2 + (z_i - q_z)^2}$
+1. **Build the Grid**:
+   - Initialize an empty hash map `grid`.
+   - For each point $p_i$ in $P$:
+     - Calculate cell coordinates:
+       $$ cx = \lfloor x_i / \text{cellSize} \rfloor $$
+       $$ cy = \lfloor y_i / \text{cellSize} \rfloor $$
+       $$ cz = \lfloor z_i / \text{cellSize} \rfloor $$
+     - Compute cell key $K = (cx, cy, cz)$.
+     - Append $p_i$ to `grid[K]`. If $K$ does not exist, create a new list.
+
+2. **Query Radius**:
+   - Given query point $q = (qx, qy, qz)$ and radius $R$:
+     - Calculate the cell containing $q$:
+       $$ cq_x = \lfloor qx / \text{cellSize} \rfloor $$
+       $$ cq_y = \lfloor qy / \text{cellSize} \rfloor $$
+       $$ cq_z = \lfloor qz / \text{cellSize} \rfloor $$
+     - Determine the range of cells to check. The search radius $R$ spans $\lceil R / \text{cellSize} \rceil$ cells in each dimension. Let $dr = \lceil R / \text{cellSize} \rceil$.
+     - Iterate $dx$ from $-dr$ to $dr$, $dy$ from $-dr$ to $dr$, $dz$ from $-dr$ to $dr$.
+     - For each offset $(dx, dy, dz)$:
+       - Compute neighbor cell key $K_{neighbor} = (cq_x + dx, cq_y + dy, cq_z + dz)$.
+       - If $K_{neighbor}$ exists in `grid`:
+         - For each point $p$ in `grid[K_{neighbor}]`:
+           - Calculate Euclidean distance $d = \| p - q \|$.
+           - If $d \le R$, add $p$ to results.
+
+3. **Query K-Nearest (Optional)**:
+   - Similar to radius query, but maintain a max-heap of size $k$ to track the $k$ closest points found so far.
+   - After checking all relevant cells, return the $k$ points with the smallest distances.
+
+**Parameters:**
+- `cellSize`: The size of each cell in the hash grid. Typical values depend on the scale of the dataset and the expected query radius. A common heuristic is to set `cellSize` equal to the expected query radius or slightly smaller to minimize the number of cells checked [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Empty Neighbors**: If no points are found within the radius, return an empty list. Handle this gracefully in interpolation pipelines to avoid division by zero [S1, unofficial].
+- **Precision**: Use floating-point arithmetic for coordinate calculations. Be aware of potential precision issues when dividing by `cellSize` for very large or very small coordinates.
+- **Boundary Conditions**: The floor operation $\lfloor \cdot \rfloor$ handles negative coordinates correctly in most programming languages, but ensure consistent behavior across platforms.
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 class SpatialHash3D:
     def __init__(self, cell_size):
         self.cell_size = cell_size
-        self.grid = {}  # Map from cell_index to list of points
-
-    def _get_cell_index(self, x, y, z):
-        # Calculate cell coordinates
-        cx = int(x / self.cell_size)
-        cy = int(y / self.cell_size)
-        cz = int(z / self.cell_size)
-        # Hash the cell coordinates to a single integer
-        # Note: Specific hash function not provided in sources [G]
-        return hash((cx, cy, cz))
+        self.grid = {}  # Map from (cx, cy, cz) to list of points
 
     def build(self, points):
-        for point in points:
-            x, y, z = point['center']
-            cell_idx = self._get_cell_index(x, y, z)
-            if cell_idx not in self.grid:
-                self.grid[cell_idx] = []
-            self.grid[cell_idx].append(point)
+        """
+        Insert points into the hash grid.
+        :param points: List of tuples (x, y, z, data)
+        """
+        for x, y, z, data in points:
+            cx = math.floor(x / self.cell_size)
+            cy = math.floor(y / self.cell_size)
+            cz = math.floor(z / self.cell_size)
+            key = (cx, cy, cz)
+            if key not in self.grid:
+                self.grid[key] = []
+            self.grid[key].append((x, y, z, data))
 
-    def query_radius(self, x, y, z, radius):
+    def query_radius(self, qx, qy, qz, radius):
+        """
+        Query all points within a given radius.
+        :param qx, qy, qz: Query point coordinates
+        :param radius: Search radius
+        :return: List of points (x, y, z, data) within radius
+        """
+        cq_x = math.floor(qx / self.cell_size)
+        cq_y = math.floor(qy / self.cell_size)
+        cq_z = math.floor(qz / self.cell_size)
+
+        dr = math.ceil(radius / self.cell_size)
         results = []
-        # Determine range of cells to check
-        # Note: Exact neighbor cell calculation logic not provided in sources [G]
-        # Iterate through relevant cells
-        for cell_idx in self._get_neighbor_cells(x, y, z, radius):
-            if cell_idx in self.grid:
-                for point in self.grid[cell_idx]:
-                    px, py, pz = point['center']
-                    dist = ((px - x)**2 + (py - y)**2 + (pz - z)**2)**0.5
-                    if dist <= radius:
-                        results.append(point)
+
+        for dx in range(-dr, dr + 1):
+            for dy in range(-dr, dr + 1):
+                for dz in range(-dr, dr + 1):
+                    neighbor_key = (cq_x + dx, cq_y + dy, cq_z + dz)
+                    if neighbor_key in self.grid:
+                        for x, y, z, data in self.grid[neighbor_key]:
+                            dist_sq = (x - qx)**2 + (y - qy)**2 + (z - qz)**2
+                            if dist_sq <= radius**2:
+                                results.append((x, y, z, data))
         return results
 
-    def _get_neighbor_cells(self, x, y, z, radius):
-        # Placeholder for neighbor cell iteration logic
-        # This would calculate the bounding box of cells intersecting the sphere
-        return [] # Not given in the sources.
-
-    def query_k_nearest(self, x, y, z, k):
-        # Similar to query_radius but limits results to k nearest
-        # Note: Specific implementation details not provided in sources [G]
-        return []
+    def query_k_nearest(self, qx, qy, qz, k):
+        """
+        Query the k nearest points.
+        :param qx, qy, qz: Query point coordinates
+        :param k: Number of nearest neighbors
+        :return: List of k nearest points (x, y, z, data)
+        """
+        # Reuse query_radius with a sufficiently large radius or implement a more efficient heap-based approach
+        # For simplicity, we use a large radius and then sort
+        # Note: A more efficient implementation would use a max-heap of size k
+        # and prune cells that cannot contain closer points.
+        # Here, we assume a large radius covers all potential k-nearest neighbors.
+        # In practice, one might iterate through cells in order of distance.
+        
+        # Estimate a radius that likely contains k points
+        # This is a heuristic; for exact k-nearest, a more complex search is needed.
+        # For this example, we'll use a fixed large radius or query all and sort.
+        # A better approach is to expand radius until k points are found.
+        
+        radius = 1.0
+        while True:
+            candidates = self.query_radius(qx, qy, qz, radius)
+            if len(candidates) >= k:
+                break
+            radius *= 2
+            if radius > 1e9: # Safety break
+                break
+        
+        # Sort by distance and return k nearest
+        candidates.sort(key=lambda p: (p[0]-qx)**2 + (p[1]-qy)**2 + (p[2]-qz)**2)
+        return candidates[:k]
 ```
 
 ## Subtopics
 
-### [Reprojected Spatial Hash Map Indices](5180-reprojected-spatial-hash-map-indices.md)
-This method optimizes spatial hash lookups in temporal volume rendering by reusing hash indices from the previous frame, thereby reducing the frequency of expensive atomic memory operations on the hash grid. It differs from standard spatial hash lookups by decoupling the index computation from the final shading pass, using a texture-based history buffer to validate and propagate indices across frames.
+### Perfect Spatial Hashing
+A hashing technique for compact storage and efficient indexing of sparse volume data, using an injective map to store volume data in a hash table and offsets in a separate table [S2]. It differs from standard spatial hashing by guaranteeing no collisions for occupied blocks, thus providing O(1) access time with minimal overhead [S2]. Choose this when storage efficiency and collision-free access are critical for sparse datasets [S2].
+
+**Definition**: A perfect spatial hash function $h(\mathbf{p})$ maps a position $\mathbf{p}$ to a unique slot in a hash table $H$ [S2].
+
+**Formula**:
+$$ h(\mathbf{p}) = ((\mathbf{p} \mod \bar{m}) + (\Phi[\mathbf{p}] \mod \bar{r})) \mod \bar{m} $$
+where:
+- $h$ is the hash function [S2].
+- $\mathbf{p}$ is the position [S2].
+- $\bar{m}$ is the cube root of the hash table size [S2].
+- $\bar{r}$ is the cube root of the offset table size [S2].
+- $\Phi[\mathbf{p}]$ is the offset value for position $\mathbf{p}$ stored in the offset table [S2].
+
+**Parameters**:
+- $N$: Number of occupied blocks ($|S| = N$) [S2].
+
+**Layout**:
+- **Hash Table $H$**: 3D hash table of size $m = \bar{m}^3 \approx N$, storing volume data [S2].
+- **Offset Table $\Phi$**: 3D offset table of size $r = \bar{r}^3 = \sigma N$, where $1/6 \le \sigma < 1$ [S2].
+
+**Complexity**: Access time is O(1) for arbitrary locations [S2].
 
 ## Operating characteristics
-- **Time Complexity:** O(1) average case for cell lookup during build and query, assuming uniform distribution and efficient hashing [S1, unofficial]. Query time depends on the number of points in the relevant cells and the search radius.
-- **Memory Complexity:** Proportional to the number of points and the number of occupied cells.
-- **Performance:** Predictable performance for static datasets [S1, unofficial].
-- **Strengths:** Simple implementation, easy radius queries, suitable for static data [S1, unofficial].
-- **Limitations:** Not adaptive to data density; performance degrades if points are not uniformly distributed or if `cellSize` is poorly chosen.
-- **When to use:** Static datasets where simplicity and predictable performance are prioritized [S1, unofficial].
-- **When not to use:** Dynamic datasets requiring frequent updates or highly non-uniform data distributions where adaptive structures like octrees might be better.
+- **Time Complexity**: Build time is O(N) for N points. Query time is O(1) for cell lookup, but radius queries depend on the number of points in the affected cells and the density of the data. In the worst case, if all points fall into the same cell, it degrades to O(N). However, for uniform distributions, it is typically much faster [S1, unofficial].
+- **Memory Complexity**: O(N) to store the points and the hash grid structure. The overhead is minimal compared to other spatial structures like KD-trees or octrees for static data [S1, unofficial].
+- **Measured Performance**: Predictable performance for static datasets [S1, unofficial]. Suitable for real-time applications where query latency must be consistent.
+- **Strengths**: Simple implementation, fast lookups for static data, easy to parallelize.
+- **Limitations**: Not suitable for dynamic datasets where frequent insertions/deletions are required. Performance degrades with high data density in small regions.
+- **When to Use**: Static datasets, nearest-neighbor queries, radius-based queries, interpolation pipelines [S1, unofficial].
+- **When Not to Use**: Dynamic datasets, high-dimensional data, or when memory is extremely constrained and data is highly sparse (consider Perfect Spatial Hashing [S2]).
 
 ## Background
-SpatialHash3D is part of a pipeline for generating scalar fields from drill-hole sample data and rendering them as voxel volumes, specifically within the context of 3D IDW interpolation [S1, unofficial]. It was introduced as a recommended v1 implementation for spatial indexing in this context due to its straightforward nature and suitability for static data [S1, unofficial].
+SpatialHash3D is a fundamental spatial indexing technique used in computer graphics, particularly in volume rendering and interpolation pipelines. It is often employed in tools like Three.js for efficient voxel-based visualization [S1, unofficial]. The concept of spatial hashing has been widely used in various forms, including in game development for collision detection and in scientific computing for particle simulations. The specific application to 3D volume rendering and IDW interpolation is highlighted in recent developments in open-source visualization tools [S1, unofficial]. Perfect Spatial Hashing, a variant, was introduced by Lefebvre and Hoppe in 2006 for compact storage of sparse volumes [S2].
 
 ## Sources
 [S1] feat: 3D IDW interpolation volume and voxel visualisation, https://github.com/darkmine-oss/baselode/pull/50, fetched 2026-10-27 (unofficial)
+[S2] VMesh: Hybrid Volume-Mesh Representation for Efficient View Synthesis, https://core.ac.uk/download/560406650.pdf, fetched 2026-10-27

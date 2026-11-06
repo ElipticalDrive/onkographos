@@ -19,14 +19,14 @@ This method renders a cloud layer by mixing a fixed cloud color with the backgro
 No complex data structures are required. The method relies on standard fragment shader built-ins and uniform variables [S1, unofficial].
 
 **Steps:**
-1.  **Compute Fog Distance:** Calculate the linear fog distance from the clip-space depth.
+1.  **Compute Fog Distance:** Calculate the linear fog distance from the clip-space depth [S1, unofficial].
     $$ d = \frac{\text{clip\_z}}{\text{clip\_w}} $$
     Where $\text{clip\_z}$ is the clip-space depth and $\text{clip\_w}$ is the clip-space w-component [S1, unofficial].
-2.  **Calculate Weighted Average Depth (Optional/Optimization):** To optimize, calculate the weighted average depth of the ray passing through the cloud, using Transmittance as the weight [S2, unofficial]. This allows sampling and blending fog only at this specific depth, avoiding per-sample fog calculations [S2, unofficial]. *Note: The basic implementation below uses the direct fragment depth.*
-3.  **Compute Fog Factor:** Calculate the exponential fog factor using the squared distance.
+2.  **Calculate Weighted Average Depth:** To optimize, calculate the weighted average depth of the ray passing through the cloud, using Transmittance as the weight [S2, unofficial]. This allows sampling and blending fog only at this specific depth, avoiding per-sample fog calculations [S2, unofficial].
+3.  **Compute Fog Factor:** Calculate the exponential fog factor using the squared distance [S1, unofficial].
     $$ f = 1.0 - e^{-k \cdot d^2} $$
     Where $k = 0.000001$ [S1, unofficial].
-4.  **Blend Colors:** Mix the cloud color and background color using the fog factor.
+4.  **Blend Colors:** Mix the cloud color and background color using the fog factor [S1, unofficial].
     $$ C_{out} = \text{mix}(C_{cloud}, C_{bg}, f) $$
 5.  **Output:** Set the fragment color to the blended RGB with a fixed alpha of 0.8 [S1, unofficial].
 
@@ -34,8 +34,8 @@ No complex data structures are required. The method relies on standard fragment 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Inputs: cloud_color (vec3), bg_color (vec3), clip_z (float), clip_w (float)
-# Standard operations: mix(a, b, t) returns a*(1-t) + b*t; exp(x) returns e^x
+# Standard operations: mix(a, b, t) = a * (1.0 - t) + b * t; exp(x) = e^x
+# vec4(r, g, b, a) constructs a 4D vector
 
 def fog_blend_clouds(cloud_color, bg_color, clip_z, clip_w):
     # Step 1: Compute fog distance from clip-space depth
@@ -46,7 +46,7 @@ def fog_blend_clouds(cloud_color, bg_color, clip_z, clip_w):
     fog_factor = 1.0 - exp(-0.000001 * fog_dist * fog_dist)
     
     # Step 3: Mix cloud color with background color
-    blended_rgb = mix(cloud_color, bg_color, fog_factor)
+    blended_rgb = cloud_color * (1.0 - fog_factor) + bg_color * fog_factor
     
     # Step 4: Output with fixed alpha
     return vec4(blended_rgb, 0.8)

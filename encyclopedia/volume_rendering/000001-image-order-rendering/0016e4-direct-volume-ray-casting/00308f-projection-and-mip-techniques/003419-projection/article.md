@@ -1,0 +1,83 @@
+# Projection
+Also called: Direct Volume Rendering via Projection, Orthographic Projection (Summation), Summation Projection, Total Intensity Projection, Voxel Projection
+
+## Overview
+Projection is a direct volume rendering technique that visualizes the total accumulated intensity along rays by summing voxel values along the projection axis [S1, S2, unofficial]. It differs from Maximum Intensity Projection (MIP) [902-maximum-intensity-projection.md] by preserving quantitative density information rather than highlighting only the highest value, and from Forward Projection (aTx) [1492-forward-projection-atx.md] by using simple arithmetic summation without attenuation modeling. It solves the problem of creating a 2D summary of 3D density where total mass or integrated signal is the primary metric of interest.
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D scalar volume grid $V$ of dimensions $D_x \times D_y \times D_z$.
+- Output: A 2D image $I$ of dimensions $D_y \times D_z$ (assuming projection along the X-axis).
+
+**Data Structures:**
+- The input volume is typically stored as a contiguous 3D array (e.g., NumPy array or flat buffer).
+- The output accumulator is a 2D array of floating-point values, initialized to zero.
+
+**Steps:**
+1.  **Initialize Accumulator:** Create a 2D output array $I$ with dimensions matching the Y and Z axes of the input volume, initialized to zero [S1, unofficial].
+    $$ I[y, z] = 0 \quad \forall y \in [0, D_y), z \in [0, D_z) $$
+2.  **Iterate and Sum:** For each slice index $x$ along the projection axis (X-axis in standard medical imaging conventions):
+    - Extract the 2D slice $S_x$ at index $x$.
+    - Add $S_x$ to the corresponding row/column in $I$ [S1, unofficial].
+    $$ I[y, z] \leftarrow I[y, z] + V[x, y, z] $$
+3.  **Classification:** Map the final accumulated scalar value $I[y, z]$ to color using a transfer function $T$. Since opacity is not accumulated, the result is typically rendered as opaque grayscale or mapped to a color map [S1, S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def projection(volume):
+    """
+    Performs orthographic summation projection along the first axis (X).
+    volume: 3D numpy array of shape (Dx, Dy, Dz)
+    returns: 2D numpy array of shape (Dy, Dz)
+    """
+    # Initialize 2D accumulator with zeros
+    # Dimensions correspond to Y and Z axes of the input volume
+    img_proj = np.zeros((volume.shape[1], volume.shape[2]))
+    
+    # Iterate through each slice along the X-axis (first dimension)
+    for i in range(volume.shape[0]):
+        # Extract the 2D slice at index i
+        slice_data = volume[i, :, :]
+        
+        # Add the slice to the accumulator
+        img_proj += slice_data
+        
+    return img_proj
+```
+
+**Parameters:**
+- **Projection Axis:** The axis along which summation occurs. In medical imaging (NIfTI), Dimension 0 is often X (sagittal slices), Dimension 1 is Y (coronal), and Dimension 2 is Z (axial) [S1, unofficial]. The example implementation projects along X.
+- **Data Type:** Floating-point accumulation is required to prevent overflow and maintain precision for summed intensities [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Overflow:** If voxel values are large integers, summation may overflow. Use floating-point types for the accumulator [G].
+- **Axis Orientation:** The choice of projection axis determines the view plane (e.g., projecting along X yields a coronal-like view if Y/Z are spatial). Misalignment with anatomical axes can produce unintuitive results [S1, unofficial].
+- **No Attenuation:** Unlike ray casting, this method does not account for occlusion or density-dependent visibility. High-density structures do not block lower-density ones behind them [S1, S2, unofficial].
+
+## Subtopics
+
+### [Maximum Intensity Projection](902-maximum-intensity-projection.md)
+Selects the maximum value along the ray. Use when highlighting dense structures (bones, contrast) is the goal.
+
+### [Forward Projection (aTx)](1492-forward-projection-atx.md)
+Models attenuation and emission. Use when physical light transport approximation is needed.
+
+### [Minimum Intensity Projection](5299-minimum-intensity-projection.md)
+Selects the minimum value along the ray. Use for visualizing low-density structures like airways.
+
+## Operating characteristics
+- **Time Complexity:** $O(D_x \cdot D_y \cdot D_z)$, as every voxel is visited exactly once. It is significantly faster than ray casting because it avoids per-ray traversal logic and interpolation overhead if using raw voxel access [S1, unofficial].
+- **Memory Complexity:** $O(D_y \cdot D_z)$ for the output image. Input storage is required.
+- **Strengths:** Extremely fast; preserves quantitative total intensity; simple implementation [S1, unofficial].
+- **Limitations:** Lacks depth perception; overlapping structures obscure each other additively rather than visually; no opacity/attenuation modeling [S1, S2, unofficial].
+- **When to use:** Quick visualization of total density; quantitative analysis of integrated signal; pre-processing for other techniques.
+- **When not to use:** When depth cues or occlusion handling is required; when highlighting specific high-intensity features (use MIP) [902-maximum-intensity-projection.md].
+
+## Background
+Projection via summation is a foundational technique in direct volume rendering, often introduced as the simplest alternative to ray casting. It is widely used in medical imaging (CT/MRI) for rapid overview of total density [S1, unofficial]. The method is conceptually related to the forward pass in tomographic reconstruction but applied in reverse for visualization. It is frequently taught alongside MIP as a basic aggregation primitive [S1, S2, unofficial].
+
+## Sources
+[S1] mneela/Volume-Rendering, https://github.com/mneela/Volume-Rendering, fetched 2026-10-27 (unofficial)
+[S2] Volume Rendering Volume Rendering, https://docslib.org/doc/1400821/volume-rendering, fetched 2026-10-28 (unofficial)

@@ -3,7 +3,7 @@
 Also called: Kdtree extraction, KdtreeISO
 
 ## Overview
-Kdtree-based Iso-surface Extraction is a method for extracting iso-surfaces from scalar fields using a hierarchical K-d tree structure built upon an octree, utilizing Quadratic Error Function (QEF) for vertex optimization and clusterability checks for simplification [S1, unofficial]. It differs from its sibling [Adaptive Dual Contouring](3664-adaptive-dual-contouring.md) by explicitly constructing a K-d tree to guide the traversal and subdivision, whereas the sibling relies on adaptive octree refinement without the explicit K-d tree hierarchy for mesh generation. It builds on [Dual Contouring with Octree](1271-dual-contouring-with-octree.md) by replacing the standard octree extraction path with a K-d tree variant when the 'kd' mode is active.
+Kdtree-based Iso-surface Extraction extracts iso-surfaces from scalar fields using a hierarchical K-d tree built upon an octree, applying Quadratic Error Function (QEF) optimization and clusterability checks for vertex simplification [S1, unofficial]. It differs from sibling methods by explicitly constructing a K-d tree to guide traversal and subdivision, while supporting a fallback octree-only mode for standard extraction [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs**
@@ -16,35 +16,36 @@ The core data structure is the `Kdtree` node [S1, unofficial]:
 *   `planeDir`: An integer indicating the splitting plane direction (0, 1, or 2 for x, y, z).
 *   `depth`: The current depth in the K-d tree.
 *   `clusterable`: A boolean flag (default `true`) indicating if the node's vertices can be merged.
-*   `children`: An array of two `Kdtree` pointers (`children[0]` and `children[1]`), initialized to `nullptr`.
-*   The `RectilinearGrid` contains:
-    *   `vertices`: A list of vertex positions.
-    *   `components`: Data structures for solving QEF components.
-    *   `approximate`: The optimized vertex position.
+*   `children`: An array of two `Kdtree` pointers (`children[0]` and `children[1]`), initialized to `None`.
+*   The constructor takes a `QefSolver sum`, `PositionCode minCode`, `PositionCode maxCode`, `int dir`, and `int depth` [S1, unofficial].
+*   `PositionCode` is a 3D integer tuple representing voxel bounds [G].
+*   `QefSolver` holds QEF coefficients and provides `solve()` and `get_variance()` methods [G].
+*   `RectilinearGrid` holds vertex lists, QEF components, and methods `assignSign`, `sampleQef`, `calClusterability`, `combineQef`, `solveComponent`, and `draw` [S1, unofficial].
 
 **Parameters**
-*   `octDepth`: Maximum depth of the underlying octree, typically 8 [S1, unofficial].
-*   `octSize`: Base size unit for the octree, typically 16 [S1, unofficial].
-*   `threshold`: The iso-surface value threshold, read from parameters as a float [S1, unofficial].
+*   `octDepth`: Maximum depth of the underlying octree, set to 8 [S1, unofficial].
+*   `octSize`: Base size unit for the octree, set to 16 [S1, unofficial].
+*   `threshold`: The iso-surface value threshold for extraction and error comparison, read from parameters 'e' as a float [S1, unofficial].
 
 **Algorithm Steps**
 
-1.  **Build Octree:** Construct an initial octree from the scalar field using `Octree::buildWithScalarField`. Pass the minimum code (`-sizeCode / 2`), `octDepth`, the scalar field pointer, and a boolean flag indicating if KD-tree mode is active (`parameters['s'] == 'kd'`) [S1, unofficial].
+1.  **Build Octree:** Construct an initial octree from the scalar field using `Octree::buildWithScalarField`, passing the minimum code (`-octSize / 2`), `octDepth`, the scalar field pointer, and a boolean flag indicating if KD-tree mode is active (`parameters['s'] == 'kd'`) [S1, unofficial].
     *   *Pitfall:* If no sign change is found during octree build, the program exits with an error [S1, unofficial].
 
-2.  **Build K-d Tree (if mode == 'kd'):** If the mode is `'kd'`, build the K-d tree from the octree using `Kdtree::buildFromOctree`. Pass the octree, minimum code (`-sizeCode / 2`), maximum code (`sizeCode / 2`), the scalar field, and a parameter (0) [S1, unofficial].
-    *   The `buildFromOctree` function recursively splits the octree.
-    *   It calculates the approximate error for the current grid. If the error is less than the threshold, it returns the current node as a leaf.
-    *   Otherwise, it determines the splitting axis using `chooseAxisDir`.
-    *   It creates a new `Kdtree` node with the QEF sum, min/max codes, direction, and depth.
-    *   It recursively builds `children[0]` and `children[1]` by splitting the octree bounds.
-    *   For non-leaf nodes, it assigns signs, calculates clusterability (`calClusterability`), and combines QEFs (`combineQef`).
+2.  **Build K-d Tree (if mode == 'kd'):** If the mode is `'kd'`, build the K-d tree from the octree using `Kdtree::buildFromOctree`, passing the octree, minimum code (`-octSize / 2`), maximum code (`octSize / 2`), the scalar field, and a parameter (0) [S1, unofficial].
+    *   The function recursively splits the octree [S1, unofficial].
+    *   It calculates the approximate error for the current grid [S1, unofficial].
+    *   If the error is less than the threshold, it returns the current node as a leaf [S1, unofficial].
+    *   Otherwise, it determines the splitting axis using `chooseAxisDir` [S1, unofficial].
+    *   It creates a new `Kdtree` node with the QEF sum, min/max codes, direction, and depth [S1, unofficial].
+    *   It recursively builds `children[0]` and `children[1]` by splitting the octree bounds [S1, unofficial].
+    *   For non-leaf nodes, it assigns signs, calculates clusterability (`calClusterability`), and combines QEFs (`combineQef`) [S1, unofficial].
     *   If `clusterable` is true, it solves the QEF for each component (`solveComponent`) [S1, unofficial].
 
 3.  **Extract Mesh (if mode == 'kd'):** Call `Kdtree::extractMesh` with the K-d tree root, scalar field, and threshold [S1, unofficial].
-    *   This function initializes a new `Mesh` object.
-    *   It calls `generateVertexIndices` to add vertices to the mesh based on the grid's approximate positions.
-    *   It calls `contourCell` to generate the triangles.
+    *   This function initializes a new `Mesh` object [S1, unofficial].
+    *   It calls `generateVertexIndices` to add vertices to the mesh based on the grid's approximate positions [S1, unofficial].
+    *   It calls `contourCell` to generate the triangles [S1, unofficial].
 
 4.  **Simplify and Extract (if mode == 'oct'):** If the mode is `'oct'`, simplify the octree using `Octree::simplify` with the threshold [S1, unofficial].
     *   Then extract the mesh using `Octree::extractMesh`, passing the octree, scalar field, and references to `intersectionPreservingVerticesCount` and `intersectionFree` [S1, unofficial].
@@ -55,31 +56,54 @@ The core data structure is the `Kdtree` node [S1, unofficial]:
 
 ```python
 def kdtree_iso_extraction(scalar_field, oct_depth=8, oct_size=16, threshold=0.0, mode='kd'):
-    """
-    Main entry point for Kdtree-based Iso-surface Extraction.
-    """
-    # Step 1: Build Octree
-    min_code = PositionCode(-oct_size / 2)
-    max_code = PositionCode(oct_size / 2)
-    octree = Octree.build_with_scalar_field(scalar_field, min_code, oct_depth, threshold, mode == 'kd')
+    """Main entry point for Kdtree-based Iso-surface Extraction."""
+    min_code = [-(oct_size // 2), -(oct_size // 2), -(oct_size // 2)]
+    max_code = [oct_size // 2, oct_size // 2, oct_size // 2]
     
+    # Build octree from scalar field [S1, unofficial]
+    octree = build_octree(scalar_field, min_code, oct_depth, mode == 'kd')
     if octree is None:
-        raise Error("No sign change found during octree build")
+        raise ValueError("No sign change found during octree build") [S1, unofficial]
 
     if mode == 'kd':
-        # Step 2: Build K-d Tree
-        kdtree_root = Kdtree.build_from_octree(octree, min_code, max_code, scalar_field, 0)
-        
-        # Step 3: Extract Mesh
-        mesh = Kdtree.extract_mesh(kdtree_root, scalar_field, threshold)
+        # Build K-d tree from octree [S1, unofficial]
+        kdtree_root = build_kdtree(octree, min_code, max_code, scalar_field, 0, oct_depth, threshold)
+        # Extract mesh via K-d tree [S1, unofficial]
+        mesh = extract_mesh(kdtree_root, scalar_field, threshold)
         return mesh
     else:
-        # Step 4: Oct Mode
-        Octree.simplify(octree, threshold)
+        # Simplify octree directly [S1, unofficial]
+        simplify_octree(octree, threshold)
         intersection_preserving_vertices_count = 0
         intersection_free = False
-        mesh = Octree.extract_mesh(octree, scalar_field, intersection_preserving_vertices_count, intersection_free)
+        # Extract mesh via octree [S1, unofficial]
+        mesh = extract_octree_mesh(octree, scalar_field, intersection_preserving_vertices_count, intersection_free)
         return mesh
+
+class QefSolver:
+    """Holds QEF coefficients and provides solve/variance methods [G]."""
+    def __init__(self):
+        self.coeffs = []
+    def solve(self):
+        """Returns optimized position and error [G]."""
+        return [0.0, 0.0, 0.0], 0.0
+    def get_variance(self, pos):
+        """Returns variance along x, y, z axes [G]."""
+        return [0.0, 0.0, 0.0]
+
+class RectilinearGrid:
+    """Stores vertex data, QEF components, and contouring methods [S1, unofficial]."""
+    def __init__(self):
+        self.vertices = []
+        self.components = []
+        self.approximate = [0.0, 0.0, 0.0]
+    def assign_sign(self, threshold): pass
+    def sample_qef(self, threshold, flag): pass
+    def cal_clusterability(self, threshold): pass
+    def combine_qef(self): pass
+    def solve_component(self, i): pass
+    def draw(self, mesh): pass
+    def is_contouring_leaf(self, threshold): return True [G]
 
 class Kdtree:
     def __init__(self, qef_solver, min_code, max_code, plane_dir, depth):
@@ -91,58 +115,50 @@ class Kdtree:
         self.qef_solver = qef_solver
 
     @staticmethod
-    def build_from_octree(octree, min_code, max_code, scalar_field, depth):
-        # Calculate approximate error
+    def build_from_octree(octree, min_code, max_code, scalar_field, depth, max_depth, threshold):
         qef = QefSolver()
-        # ... (Assume qef is populated from octree nodes) ...
-        
-        # Check if leaf
-        if qef.get_approximate_error() < threshold:
+        # Populate qef from octree data [G]
+        approx, error = qef.solve()
+
+        # Base case: error below threshold or max depth reached [S1, unofficial]
+        if error < threshold or depth >= max_depth:
             node = Kdtree(qef, min_code, max_code, 0, depth)
             node.grid.assign_sign(threshold)
             node.grid.sample_qef(threshold, False)
             return node
 
-        # Choose splitting axis
-        plane_dir = Kdtree.choose_axis_dir(qef, min_code, max_code)
+        # Choose splitting axis based on variance [S1, unofficial]
+        plane_dir = choose_axis_dir(qef, min_code, max_code)
         
-        # Split bounds
-        mid_code = (min_code + max_code) / 2
-        # Adjust mid_code based on plane_dir
-        mid_code[plane_dir] = (min_code[plane_dir] + max_code[plane_dir]) / 2
-        
-        # Recursively build children
-        # Note: Exact splitting logic for octree bounds is implementation-specific
-        # Assuming helper functions to split octree bounds
-        left_max_code = max_code
+        # Split bounds using integer division to guarantee termination [G]
+        mid_code = list(min_code)
+        mid_code[plane_dir] = (min_code[plane_dir] + max_code[plane_dir]) // 2
+
+        left_max_code = list(max_code)
         left_max_code[plane_dir] = mid_code[plane_dir]
-        right_min_code = min_code
+        right_min_code = list(min_code)
         right_min_code[plane_dir] = mid_code[plane_dir]
-        
+
         node = Kdtree(qef, min_code, max_code, plane_dir, depth)
-        node.children[0] = Kdtree.build_from_octree(octree, min_code, left_max_code, scalar_field, depth + 1)
-        node.children[1] = Kdtree.build_from_octree(octree, right_min_code, max_code, scalar_field, depth + 1)
-        
+        node.children[0] = Kdtree.build_from_octree(octree, min_code, left_max_code, scalar_field, depth + 1, max_depth, threshold)
+        node.children[1] = Kdtree.build_from_octree(octree, right_min_code, max_code, scalar_field, depth + 1, max_depth, threshold)
+
         node.grid.assign_sign(threshold)
-        node.cal_clusterability(threshold)
-        node.combine_qef()
-        
+        node.grid.cal_clusterability(threshold)
+        node.grid.combine_qef()
+
         if node.clusterable:
-            for i in range(node.grid.components.size()):
+            for i in range(len(node.grid.components)):
                 node.grid.solve_component(i)
-                
         return node
 
     @staticmethod
     def choose_axis_dir(qef, min_code, max_code):
-        size = max_code - min_code
-        # Variance approach
-        approximate, error = qef.solve()
-        variance = qef.get_variance(approximate)
-        variance[0] *= size[0]
-        variance[1] *= size[1]
-        variance[2] *= size[2]
-        
+        size = [max_code[i] - min_code[i] for i in range(3)]
+        approx, _ = qef.solve()
+        variance = qef.get_variance(approx)
+        variance = [variance[i] * size[i] for i in range(3)]
+
         max_var_dir = 0
         min_var_dir = 1
         if variance[1] > variance[0]:
@@ -152,7 +168,7 @@ class Kdtree:
             max_var_dir = 2
         if variance[min_var_dir] > variance[2]:
             min_var_dir = 2
-            
+
         dir = max_var_dir
         if size[max_var_dir] < 2:
             dir = 3 - max_var_dir - min_var_dir
@@ -162,19 +178,17 @@ class Kdtree:
 
     @staticmethod
     def extract_mesh(root, scalar_field, threshold):
-        mesh = Mesh()
-        Kdtree.generate_vertex_indices(root, mesh, scalar_field, threshold)
-        Kdtree.contour_cell(root, mesh, scalar_field, threshold)
+        mesh = []
+        generate_vertex_indices(root, mesh, scalar_field, threshold)
+        contour_cell(root, mesh, scalar_field, threshold)
         return mesh
 
     @staticmethod
     def generate_vertex_indices(root, mesh, scalar_field, threshold):
         if root is None:
             return
-        # Add vertices from grid
         for v in root.grid.vertices:
-            mesh.add_vertex(v.position, scalar_field)
-        # Recurse
+            mesh.append(v)
         if root.children[0]:
             Kdtree.generate_vertex_indices(root.children[0], mesh, scalar_field, threshold)
         if root.children[1]:
@@ -189,26 +203,38 @@ class Kdtree:
             return
         Kdtree.contour_cell(root.children[0], mesh, scalar_field, threshold)
         Kdtree.contour_cell(root.children[1], mesh, scalar_field, threshold)
+
+def build_octree(scalar_field, min_code, oct_depth, is_kd_mode):
+    """Constructs initial octree from scalar field [G]."""
+    return {"min": min_code, "depth": oct_depth, "is_kd": is_kd_mode}
+
+def simplify_octree(octree, threshold):
+    """Simplifies octree based on threshold [G]."""
+    pass
+
+def extract_octree_mesh(octree, scalar_field, count_ref, free_ref):
+    """Extracts mesh from simplified octree [G]."""
+    return []
 ```
 
 ## Subtopics
 
 ### Octree Mode
-Uses standard octree simplification and extraction. Choose when K-d tree overhead is not desired or when the scalar field structure aligns better with axis-aligned octree splits. See [Dual Contouring with Octree](1271-dual-contouring-with-octree.md).
+Uses standard octree simplification and extraction [S1, unofficial]. Choose when K-d tree overhead is not desired or when the scalar field structure aligns better with axis-aligned octree splits [G]. See [Dual Contouring with Octree](4469-dual-contouring-on-octree.md).
 
 ### K-d Tree Mode
-Uses the K-d tree for adaptive splitting based on QEF variance. Choose when higher fidelity in complex regions is needed and the variance-based splitting provides better adaptation than uniform octree depth.
+Uses the K-d tree for adaptive splitting based on QEF variance [S1, unofficial]. Choose when higher fidelity in complex regions is needed and the variance-based splitting provides better adaptation than uniform octree depth [G].
 
 ## Operating characteristics
-*   **Time Complexity:** Building the K-d tree is $O(N \log N)$ where $N$ is the number of octree nodes, due to recursive splitting and QEF solving. Extraction is linear in the number of leaves.
-*   **Memory Complexity:** $O(N)$ for storing the K-d tree nodes and their associated grids.
-*   **Strengths:** Adaptive resolution based on geometric complexity (QEF error) rather than just scalar field variation. The K-d tree allows for efficient traversal and splitting along the direction of maximum variance.
-*   **Limitations:** Higher memory overhead due to K-d tree structure. More complex implementation than standard octree extraction.
-*   **When to use:** When extracting iso-surfaces from scalar fields with high geometric complexity where uniform octree refinement is inefficient.
-*   **When not to use:** When memory is constrained or when the scalar field is smooth and uniform octree refinement is sufficient.
+*   **Time Complexity:** Building the K-d tree is $O(N \log N)$ where $N$ is the number of octree nodes, due to recursive splitting and QEF solving [G]. Extraction is linear in the number of leaves [S1, unofficial].
+*   **Memory Complexity:** $O(N)$ for storing the K-d tree nodes and their associated grids [S1, unofficial].
+*   **Strengths:** Adaptive resolution based on geometric complexity (QEF error) rather than just scalar field variation [S1, unofficial]. The K-d tree allows for efficient traversal and splitting along the direction of maximum variance [S1, unofficial].
+*   **Limitations:** Higher memory overhead due to K-d tree structure [G]. More complex implementation than standard octree extraction [G].
+*   **When to use:** When extracting iso-surfaces from scalar fields with high geometric complexity where uniform octree refinement is inefficient [G].
+*   **When not to use:** When memory is constrained or when the scalar field is smooth and uniform octree refinement is sufficient [G].
 
 ## Background
-The method is described in the GitHub repository [Danielmelody/KdtreeISO](https://github.com/Danielmelody/KdtreeISO) [S1, unofficial]. It extends the concept of Dual Contouring with Octree by introducing a K-d tree structure to guide the subdivision process, aiming to improve the quality of the extracted mesh in complex regions.
+The method is described in the GitHub repository [Danielmelody/KdtreeISO](https://github.com/Danielmelody/KdtreeISO) [S1, unofficial]. It extends the concept of Dual Contouring with Octree by introducing a K-d tree structure to guide the subdivision process [S1, unofficial].
 
 ## Sources
 [S1] Danielmelody/KdtreeISO, https://github.com/Danielmelody/KdtreeISO, fetched 2026-10-27 (unofficial)

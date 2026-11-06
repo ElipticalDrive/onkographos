@@ -1,0 +1,144 @@
+A physically-based path tracer in safe Rust, USD-native, capable of rendering production datasets like Moana and ALab. - Add pixel reconstruction filters via filter importance sampling by doubleailes · Pull Request #122 · doubleailes/Crust
+
+Add pixel reconstruction filters via filter importance sampling by doubleailes · Pull Request #122 · doubleailes/Crust · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+doubleailes
+commented
+Jul 30, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Implements pixel reconstruction filtering using filter importance sampling (FIS): instead of splatting samples into multiple pixels, each pixel warps its jitter through the filter's distribution and weights radiance by f(x)/p(x). This keeps the renderer's per-pixel machinery (adaptive early-stop, per-pixel QMC domains, inverse-variance blending) intact while enabling smooth, configurable image reconstruction.
+Key Changes
+New filter.rs module: Defines five filter kernels (box, triangle, gaussian, blackman, mitchell) with configurable radii. Box at radius 0.5 is bit-identical to the historical unfiltered jitter, providing a comparison baseline. Mitchell's negative lobes are handled by sampling |f| and carrying the sign in the weight.
+FilterSampler implementation: Tabulates CDFs for filters without analytic inverse CDFs (gaussian, blackman, mitchell); box and triangle use closed-form solutions. The sampler maps uniform [0,1) variates to (offset, weight) pairs, maintaining monotonicity so stratified/QMC sequences stay stratified after warping.
+Integration into Renderer: Modified render_pixel() to apply filter importance sampling to camera jitter. The pixel estimate becomes a weighted average Σwᵢ·Lᵢ / Σwᵢ, which reduces to the plain mean for box and triangle (where all weights are 1.0).
+USD scene support: Added crust:pixelFilter (token) and crust:pixelFilterRadius (float) attributes to RenderSettings, parsed in usd_import.rs. Defaults to triangle at radius 1.0.
+CLI flags: --filter (box|triangle|gaussian|blackman|mitchell) and --filter-radius (pixels) override scene settings. The filter radius is measured from the pixel center; each filter has conventional defaults (box 0.5, triangle 1, gaussian/blackman 1.5, mitchell 2).
+Comprehensive tests: Verify bit-identical behavior for box at 0.5, monotonicity and support bounds, weight normalization (E[w] = 1), and that weighted histograms reproduce the kernel itself.
+Implementation Details
+Tabulation: 64-bin CDF for filters without analytic inverse CDFs; binary search + linear interpolation within bins.
+Weight normalization: For filters with negative lobes, weights are computed as f(x) · Σ|f| / (|f(x)| · Σf), ensuring unbiased reconstruction while handling negative contributions correctly.
+Coordinate system fix: Changed NDC mapping from (pixel + jitter) / (resolution - 1) to (pixel + jitter) / resolution, which correctly tiles [0, 1) and prevents sampling past the image boundary.
+Weighted averaging: Pixel values are computed as Σ(w·L) / Σw to handle variable weights; degenerate cases (e.g., all samples on Mitchell's negative lobes) fall back to the plain mean.
+The filtering is applied at zero cost per sample and preserves adaptive sampling's per-pixel operation.
+https://claude.ai/code/session_017iSyJtL8k3djCExtF2GrHV
+claude
+added 3 commits
+July 30, 2026 08:14
+Add pixel reconstruction filters via filter importance sampling
+…
+c76685f
+```
+The renderer had no reconstruction filter at all: each sample jittered
+uniformly inside its own pixel footprint and contributed to that pixel
+alone — an implicit box filter of radius 0.5. This adds a selectable
+PixelFilter (box | triangle | gaussian | blackman | mitchell), chosen per
+scene with crust:pixelFilter / crust:pixelFilterRadius on the
+RenderSettings prim or per render with --filter / --filter-radius.
+
+Filtering is applied by filter importance sampling rather than splatting:
+each pixel warps its camera jitter through the filter's distribution
+(analytic inverse CDF for box/triangle, 64-bin tabulated |f| CDF for the
+rest) and weights the radiance by f/p; the film keeps a per-pixel weight
+sum and stores the weighted average. FIS is the right fit here because
+every mechanism in this renderer is strictly per-pixel — the adaptive
+early-stop, the OpenQMC per-pixel domain tree, and the inverse-variance
+pass blending would all break under a splatting film whose pixels share
+samples. Mitchell samples |f| and carries the sign in the weight, so its
+negative lobes stay unbiased; the CDF warp is monotone, so stratified QMC
+positions stay stratified.
+
+The default — box at radius 0.5 — evaluates to the identity jitter with
+weight exactly 1.0, so filterless scenes render bit-identically (pinned by
+box_half_radius_is_the_identity_jitter, and verified with check_images.sh
+against goldens from a clean pre-change build: all 12 sample scenes
+identical). Unit tests pin support/monotonicity, E[w] = 1 (an error here
+is an image-wide exposure drift), and that the weighted sample histogram
+reproduces each kernel; an integration test round-trips the USD attrs.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017iSyJtL8k3djCExtF2GrHV
+```
+Divide raster coordinates by the full resolution, not resolution - 1
+…
+fa523b8
+```
+The raster-to-NDC mapping divided by (width - 1) / (height - 1), which
+stretches the w-pixel grid across a viewport meant to be tiled by w
+pixels: a sub-pixel zoom of ~1/w that also let the last row and column
+sample past the top edge of the image plane (v > 1). Pixel i now covers
+[i/w, (i+1)/w) with its center at (i+0.5)/w, tiling [0, 1) exactly — the
+convention the camera's lower-left-corner + s·horizontal mapping expects.
+
+Every image shifts by up to half a pixel (cornellbox at 16 spp: 97% of
+pixels differ, mean abs diff 3.1e-3), so this is deliberately its own
+commit, separate from the bit-identical filter change — golden sets must
+be re-recorded across this boundary.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017iSyJtL8k3djCExtF2GrHV
+```
+Make the triangle filter the default pixel filter
+…
+acb068a
+```
+Default reconstruction changes from box at radius 0.5 (the historical
+unfiltered jitter) to triangle at radius 1.0: proper antialiasing out of
+the box, at a well-understood sharpness cost and with the FIS weight still
+exactly 1. Scenes that author no crust:pixelFilter render differently from
+here on; box at radius 0.5 stays available (--filter box) and still
+reproduces the pre-filter jitter bit-identically, as the escape hatch for
+comparing against old renders — golden sets must be re-recorded across
+this commit.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017iSyJtL8k3djCExtF2GrHV
+```
+qodo-code-review
+Bot
+commented
+Jul 30, 2026
+Copy link
+Copy Markdown
+Contributor
+Qodo reviews are paused for this user.
+Troubleshooting steps vary by plan Learn more →
+On a Teams plan?
+Reviews resume once this user has a paid seat and their Git account is linked in Qodo.
+Link Git account →
+Using GitHub Enterprise Server, GitLab Self-Managed, or Bitbucket Data Center?
+These require an Enterprise plan - Contact us
+Contact us →
+Hide details
+View details
+doubleailes
+merged commit 9e02662
+into
+main
+Jul 30, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+doubleailes
+deleted the
+claude/moana-crust-render-filter-m16wvq
+branch
+July 30, 2026 08:41
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

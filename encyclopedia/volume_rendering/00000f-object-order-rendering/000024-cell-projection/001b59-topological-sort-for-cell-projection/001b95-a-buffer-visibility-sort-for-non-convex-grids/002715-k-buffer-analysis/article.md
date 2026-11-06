@@ -3,31 +3,31 @@
 Also called: k-value Analysis
 
 ## Overview
-k*-Buffer Analysis is a software-based diagnostic method used to determine the optimal fixed buffer size $k$ for the k-buffer visibility sorting algorithm in hardware-assisted volume rendering [S2, unofficial]. It determines the required $k$ size for accurate visibility ordering by recording insertion depth into an ideal A-buffer [S2, unofficial]. Unlike the unbounded A-buffer, which stores all fragments, or conservative sorting schemes like ZSWEEP, the k-buffer limits storage to $k$ entries per pixel, requiring an analysis of how "nearly sorted" the fragment stream is to ensure correct compositing [S2, unofficial].
+k*-Buffer Analysis is a software-based diagnostic method that determines the optimal fixed buffer size $k$ for the k-buffer visibility sorting algorithm in hardware-assisted volume rendering [S2, unofficial]. It measures the required $k$ by recording insertion depths into an ideal A-buffer, avoiding the unbounded memory of a true A-buffer while offering a less conservative sorting scheme than ZSWEEP [S2, unofficial].
 
 ## How it works
-The method consists of two phases: the operational logic of the k-buffer itself and the analytical procedure to derive the required $k$.
+The method consists of two phases: the operational logic of the k-buffer itself and the analytical procedure to derive the required $k$ [S2, unofficial].
 
 ### Inputs and Outputs
 **Inputs:**
-- A set of 3D primitives (e.g., tetrahedra or triangles) from a volume dataset.
-- A camera viewpoint and projection parameters.
+- A stream of fragments generated from 3D primitives (e.g., tetrahedra or triangles) [S2, unofficial].
+- A camera viewpoint and projection parameters [G].
 - A target resolution (e.g., $512 \times 512$) [S2, unofficial].
 
 **Outputs:**
-- The maximum required $k$ ($k_{max}$) for the dataset.
+- The maximum required $k$ ($k_{max}$) for the dataset [S2, unofficial].
 - The distribution of pixels requiring specific $k$ values (e.g., count of pixels where $k > 2$ or $k > 6$) [S2, unofficial].
 - Identification of geometric degeneracies (e.g., sliver cells) causing high $k$ requirements [S2, unofficial].
 
 ### Data Structures
 **A-Buffer (for Analysis):**
 - A 2D array of lists, one per pixel.
-- Each list stores fragments sorted by depth (distance from viewpoint) [S2, unofficial].
+- Each list stores fragments sorted by depth (distance from viewpoint) in increasing order [S2, unofficial].
 
 **k-buffer (for Operational Logic):**
 - A fixed-size array of $k$ entries per pixel.
 - Each entry contains the distance of the fragment from the viewpoint [S2, unofficial].
-- In hardware implementations, entries are often kept unsorted to simplify logic, relying on the property that the input sequence is $k$-nearly sorted [S2, unofficial].
+- In hardware implementations, entries are kept unsorted to simplify logic, relying on the property that the input sequence is $k$-nearly sorted [S2, unofficial].
 
 ### Algorithm Steps
 
@@ -35,11 +35,11 @@ The method consists of two phases: the operational logic of the k-buffer itself 
 This phase simulates an ideal A-buffer to measure the true sorting distance of fragments [S2, unofficial].
 
 1. **Initialize** an A-buffer for the target resolution. Each pixel contains an empty sorted list [S2, unofficial].
-2. **Rasterize** the dataset from the viewpoint, generating a stream of fragments [S2, unofficial].
+2. **Rasterize** the dataset from the viewpoint, generating a stream of fragments [G].
 3. **For each fragment** $f_{new}$ with depth $d_{new}$:
    a. Find the correct insertion position in the pixel's sorted A-buffer list such that depths are in increasing order (for front-to-back compositing) [S2, unofficial].
    b. Let $i$ be the index of the insertion position (0-based) [S2, unofficial].
-   c. **Record** the insertion depth metric: $k_{pixel} = \max(k_{pixel}, i)$ [S2, unofficial]. The definition of $k$ in the analysis is "the number of positions any fragment had to move to its correct position in the sorted order minus one for compositing" [S2, unofficial]. Effectively, if a fragment must be inserted at index $i$, it implies that up to $i$ closer fragments exist. For compositing, we need access to the closest and second closest, so the buffer size requirement relates to this displacement [S2, unofficial].
+   c. **Record** the insertion depth metric: $k_{pixel} = \max(k_{pixel}, i)$ [S2, unofficial]. The definition of $k$ in the analysis is "the number of positions any fragment had to move to its correct position in the sorted order minus one for compositing" [S2, unofficial]. Effectively, if a fragment must be inserted at index $i$, it implies that up to $i$ closer fragments exist [S2, unofficial].
 4. **Aggregate** results:
    a. $k_{max} = \max_{\text{pixels}} (k_{pixel})$ [S2, unofficial].
    b. Count pixels where $k_{pixel} > 2$ [S2, unofficial].
@@ -52,12 +52,12 @@ This phase describes how the determined $k$ is used during rendering [S2, unoffi
 1. **Initialize** a k-buffer of size $k$ for each pixel [S2, unofficial].
 2. **For each fragment** $f_{new}$ arriving at a pixel:
    a. If the k-buffer is not full: insert $f_{new}$ into the buffer [S2, unofficial].
-   b. If the k-buffer is full: determine if $f_{new}$ should replace an existing fragment [S2, unofficial]. For front-to-back compositing, the fragment furthest from the viewer (largest depth) is the least relevant for early ray termination and compositing accuracy of the front surface [S2, unofficial]. Discard the fragment with the largest depth [S2, unofficial].
+   b. If the k-buffer is full: determine if $f_{new}$ should replace an existing fragment [S2, unofficial]. For front-to-back compositing, each time a new fragment $f_{new}$ is inserted, it dislodges the first entry ($f_1$) [S2, unofficial]. Discard the fragment with the largest depth to maintain the closest fragments for compositing [S2, unofficial].
    c. In practice, hardware implementation is simplified by keeping the k-buffer entries unsorted [S2, unofficial].
 3. **Compositing**:
    a. Retrieve the $k$ fragments from the buffer [S2, unofficial].
    b. Sort them by depth (if not kept sorted) [S2, unofficial].
-   c. Perform front-to-back compositing using the pre-integrated table lookup. Note that $k+1$ entries are required for correct compositing of a $k$-nearly sorted sequence because the closest and second closest must be available for the lookup [S2, unofficial].
+   c. Perform front-to-back compositing using the pre-integrated table lookup [S2, unofficial]. Note that $k+1$ entries are required for correct compositing of a $k$-nearly sorted sequence because the closest and second closest must be available for the lookup [S2, unofficial].
 
 ### Parameters
 - **$k$**: The number of fragment entries stored per pixel [S2, unofficial].
@@ -83,46 +83,34 @@ def k_buffer_analysis(primitives, resolution, camera):
     Returns max_k and pixel distribution stats.
     """
     # Initialize A-buffer: list of lists, one per pixel
-    # Each inner list stores fragments sorted by depth (ascending)
     a_buffer = [[[] for _ in range(resolution[1])] for _ in range(resolution[0])]
-    
-    # Track max k per pixel
     k_per_pixel = [[0 for _ in range(resolution[1])] for _ in range(resolution[0])]
-    
+
     # Generate fragments from dataset (standard rasterization step) [G]
-    fragments = []
-    for tri in primitives:
-        screen_verts = [camera.project(v) for v in tri.vertices]
-        for u, v in screen_verts.bounding_box():
-            if screen_verts.contains(u, v):
-                depth = camera.interpolate_depth(u, v, tri)
-                fragments.append({'screen_coords': (u, v), 'depth': depth})
-                
+    fragments = rasterize(primitives, camera, resolution)
+
     for frag in fragments:
         u, v = frag['screen_coords']
         depth = frag['depth']
-        
-        # Find insertion index in sorted A-buffer
+
+        # Find insertion index in sorted A-buffer (increasing depth)
         pixel_list = a_buffer[u][v]
-        insert_idx = 0
+        insert_idx = len(pixel_list)
         for i, existing_frag in enumerate(pixel_list):
             if depth < existing_frag['depth']:
                 insert_idx = i
                 break
-            else:
-                insert_idx = i + 1
-        
+
         # Insert fragment
         pixel_list.insert(insert_idx, frag)
-        
-        # Record k requirement for this pixel
+
+        # Record k requirement: number of positions moved minus one for compositing [S2, unofficial]
         k_per_pixel[u][v] = max(k_per_pixel[u][v], insert_idx)
-        
-    # Aggregate results
+
     max_k = 0
     count_k_gt_2 = 0
     count_k_gt_6 = 0
-    
+
     for u in range(resolution[0]):
         for v in range(resolution[1]):
             k_val = k_per_pixel[u][v]
@@ -132,13 +120,8 @@ def k_buffer_analysis(primitives, resolution, camera):
                 count_k_gt_2 += 1
             if k_val > 6:
                 count_k_gt_6 += 1
-                
-    return {
-        "max_k": max_k,
-        "pixels_k_gt_2": count_k_gt_2,
-        "pixels_k_gt_6": count_k_gt_6,
-        "distribution": k_per_pixel
-    }
+
+    return {"max_k": max_k, "pixels_k_gt_2": count_k_gt_2, "pixels_k_gt_6": count_k_gt_6, "distribution": k_per_pixel}
 
 def k_buffer_insert(buffer, frag, k):
     """
@@ -148,28 +131,27 @@ def k_buffer_insert(buffer, frag, k):
     if len(buffer) < k:
         buffer.append(frag)
         return
-    
-    # Buffer is full. Find the fragment with the largest depth (furthest).
+
+    # Find fragment with largest depth (furthest)
     furthest_idx = 0
     max_depth = buffer[0]['depth']
     for i in range(1, k):
         if buffer[i]['depth'] > max_depth:
             max_depth = buffer[i]['depth']
             furthest_idx = i
-            
-    # If new fragment is closer than the furthest in buffer, replace it.
+
+    # If new fragment is closer than the furthest in buffer, replace it
     if frag['depth'] < max_depth:
         buffer[furthest_idx] = frag
-    # Else, discard the new fragment.
 ```
 
 ## Subtopics
 
 ### ZSWEEP
-A sibling method that uses a conservative technique for compositing samples to avoid memory space explosion in the A-buffer. The k-buffer offers a less conservative sorting scheme but requires analysis to ensure $k$ is sufficient [S2, unofficial]. Choose the k-buffer when memory is constrained but fragment ordering is nearly sorted.
+A sibling method that uses a conservative technique for compositing samples to avoid memory space explosion in the A-buffer [S2, unofficial]. The k-buffer offers a less conservative sorting scheme but requires analysis to ensure $k$ is sufficient [S2, unofficial]. Choose the k-buffer when memory is constrained but fragment ordering is nearly sorted [S2, unofficial].
 
 ### A-buffer Visibility Sort
-The parent method that uses an unbounded buffer. k-buffer analysis determines the fixed size $k$ needed to approximate the A-buffer's behavior efficiently [S2, unofficial]. Choose the k-buffer when rendering non-convex grids with high depth complexity but limited VRAM.
+The parent method that uses an unbounded buffer. k-buffer analysis determines the fixed size $k$ needed to approximate the A-buffer's behavior efficiently [S2, unofficial]. Choose the k-buffer when rendering non-convex grids with high depth complexity but limited VRAM [S2, unofficial].
 
 ## Operating characteristics
 - **Time Complexity**:
@@ -179,11 +161,11 @@ The parent method that uses an unbounded buffer. k-buffer analysis determines th
 - **Measured Performance**:
     - Hardware: Intel Pentium Dual 1.60GHz, NVIDIA GeForce9800 GTX [S1].
     - Datasets:
-        - **F117**: 2.5M fragments, Max A-buffer 481, Max $k$ 15. 71 pixels require $k > 6$ [S2, unofficial].
-        - **Kew**: 2.8M fragments, Max $k$ 3. 0 pixels require $k > 6$ [S2, unofficial].
-        - **Spx2**: 6.6M fragments, Max $k$ 22. 512 pixels require $k > 6$ [S2, unofficial].
-        - **Torso**: 7.2M fragments, Max $k$ 15. 1683 pixels require $k > 6$ [S2, unofficial].
-        - **Fighter**: 5.4M fragments, Max $k$ 3. 0 pixels require $k > 6$ [S2, unofficial].
+        - **F117**: 2,517,674 fragments, Max A-buffer 481, Max $k$ 15. 7,632 pixels require $k > 2$, 71 pixels require $k > 6$ [S2, unofficial].
+        - **Kew**: 2,813,532 fragments, Max $k$ 3. 0 pixels require $k > 2$, 0 pixels require $k > 6$ [S2, unofficial].
+        - **Spx2**: 6,615,778 fragments, Max $k$ 22. 10,626 pixels require $k > 2$, 512 pixels require $k > 6$ [S2, unofficial].
+        - **Torso**: 7,223,435 fragments, Max $k$ 15. 43,317 pixels require $k > 2$, 1,683 pixels require $k > 6$ [S2, unofficial].
+        - **Fighter**: 5,414,884 fragments, Max $k$ 3. 1 pixel requires $k > 2$, 0 pixels require $k > 6$ [S2, unofficial].
 - **Strengths**:
     - Reduces memory requirements compared to A-buffer [S2, unofficial].
     - Simple enough for hardware implementation [S2, unofficial].
