@@ -1,0 +1,305 @@
+--- v002.md
++++ v003.md
+@@ -4,32 +4,26 @@
+ 
+ ## Overview
+-LinPrim is a differentiable rendering pipeline that replaces the standard 3D Gaussian ellipsoids with convex polyhedral primitives (specifically octahedra and tetrahedra) to enable explicit geometric optimization via ray-triangle intersections [S1]. It solves the problem of reconstructing scenes with sharp, bounded geometry that Gaussian splatting approximates poorly, while maintaining real-time performance through a two-stage preprocessing and rasterization architecture [S1]. Unlike its sibling [Duplex-GS](1988-duplex-gs.md) which uses dual representations, or [GsplatVolumeLighting](2203-gsplatvolumelighting.md) which focuses on volumetric lighting, LinPrim relies on explicit convex hulls and differentiable Möller-Trumbore intersections to backpropagate gradients directly onto geometric vertices [S1].
++LinPrim is a differentiable rendering pipeline that replaces standard 3D Gaussian ellipsoids with convex polyhedral primitives (octahedra and tetrahedra) to enable explicit geometric optimization via ray-triangle intersections [S1]. It solves the problem of reconstructing scenes with sharp, bounded geometry while maintaining real-time performance through a two-stage preprocessing and rasterization architecture [S1]. Unlike its sibling [Duplex-GS](1988-duplex-gs.md) which uses dual representations, or [GsplatVolumeLighting](2203-gsplatvolumelighting.md) which focuses on volumetric lighting, LinPrim relies on explicit convex hulls and differentiable Möller-Trumbore intersections to backpropagate gradients directly onto geometric vertices [S1].
+ 
+ ## How it works
+-The pipeline operates in two distinct stages: per-primitive preprocessing and per-pixel rasterization/compositing. It builds on the [Rendering and Lighting Pipelines](4135-rendering-and-lighting-pipelines.md) shared principles of projection, tiling, and front-to-back compositing, but substitutes the Gaussian covariance projection with affine ray space approximation and explicit ray-polyhedron intersection.
++The pipeline operates in two distinct stages: per-primitive preprocessing and per-pixel rasterization/compositing [S1]. It builds on the [Rendering and Lighting Pipelines](4135-rendering-and-lighting-pipelines.md) shared principles of projection, tiling, and front-to-back compositing, but substitutes the Gaussian covariance projection with affine ray space approximation and explicit ray-polyhedron intersection [S1].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:**
+-    *   Scene primitives defined by position, rotation, and distance features.
+-    *   Camera pose (view and projection matrices).
+-    *   Spherical Harmonic (SH) coefficients for view-dependent color.
+-*   **Outputs:**
+-    *   Final 2D image with accumulated color and opacity.
+-    *   Gradients with respect to primitive geometric features and SH coefficients.
++*   **Inputs:** Scene primitives defined by position, rotation, and distance features [S1]. Camera pose (view and projection matrices) [S1]. Spherical Harmonic (SH) coefficients for view-dependent color [S1].
++*   **Outputs:** Final 2D image with accumulated color and opacity [S1]. Gradients with respect to primitive geometric features and SH coefficients [S1].
+ 
+ ### Data Structures
+ Each primitive stores the following parameters [S1]:
+ 1.  **Geometric Features:**
+-    *   **Center Position:** 3 floats ($x, y, z$).
+-    *   **Rotation:** 4 floats (quaternion).
++    *   **Center Position:** 3 floats ($x, y, z$) [S1].
++    *   **Rotation:** 4 floats (quaternion) [S1].
+     *   **Distances:**
+         *   For **Octahedra**: 3 floats representing the distance from the center to the vertices along the three axes. Symmetry is enforced such that opposite vertices share the same distance, reducing complexity [S1].
+         *   For **Tetrahedra**: 12 floats are required due to the lack of symmetry in the general formulation [S1].
+ 2.  **Color Features:**
+-    *   **SH Coefficients:** 48 floats (Spherical Harmonics up to degree 2, 3 coefficients per channel $\times$ 3 channels $\times$ 4 coefficients per channel? No, standard 3DGS uses degree 3 for 48 coeffs. The source states "48 SH coefficients" explicitly [S1]). These capture complex reflectance under varying illumination and view angles. This accounts for the majority of memory per primitive [S1].
++    *   **SH Coefficients:** 48 floats (Spherical Harmonics up to degree 3, 3 coefficients per channel $\times$ 3 channels $\times$ 4 coefficients per channel) [S1]. These capture complex reflectance under varying illumination and view angles [S1]. This accounts for the majority of memory per primitive [S1].
+ 
+ ### Preprocessing Stage
+ This stage transforms primitives into the camera's coordinate system and prepares them for rasterization [S1].
+-
+ 1.  **Construction:** Construct the primitive geometry from the stored position, distances, and rotation features. For octahedra, enforce symmetry by assigning a single distance to opposing corner pairs [S1].
+ 2.  **Transformation:** Transform the primitive vertices from world space to camera space using the camera pose [S1].
+@@ -44,5 +38,4 @@
+ ### Rasterization Stage
+ This stage determines visibility and opacity for each pixel [S1].
+-
+ 1.  **Intersection Test:** For each pixel within a primitive's bounding box, cast a ray and determine if it intersects the convex primitive.
+     *   The primitive is convex, so a ray intersects it either 0 times (not visible) or 2 times (visible) [S1].
+@@ -61,5 +54,4 @@
+ 
+ ### Pseudocode
+-
+ ```python
+ import math
+@@ -82,19 +74,8 @@
+     transformed_primitives = []
+     for prim in primitives:
+-        # Construct geometry from features (position, rotation, distances)
+-        # Enforce symmetry for octahedra if applicable
+         geometry = construct_geometry(prim)
+-        
+-        # Transform to camera space
+         cam_geometry = transform_to_camera_space(geometry, camera_pose)
+-        
+-        # Calculate view-dependent color using SH coefficients
+-        # Note: SH evaluation depends on viewing direction
+         color = evaluate_sh(prim.sh_coeffs, camera_pose.view_direction)
+-        
+-        # Project to 3D affine ray space (EWA approximation)
+         ray_space_prim = project_to_ray_space(cam_geometry)
+-        
+-        # Compute screen-space bounding box
+         bbox = compute_bounding_box(ray_space_prim, image_width, image_height)
+         
+@@ -107,18 +88,12 @@
+         
+     # 2. Global Sorting and Tiling
+-    # Tile the screen and sort primitives within each tile by depth
+     tiles = create_tiles(image_width, image_height)
+     for tile in tiles:
+-        # Get primitives overlapping this tile's bbox
+         tile_prims = [p for p in transformed_primitives if intersects_bbox(p['bbox'], tile.bbox)]
+-        # Sort front-to-back (approximate)
+         tile_prims.sort(key=lambda p: p['geometry'].center_depth)
+         tile.primitives = tile_prims
+         
+     # 3. Rasterization and Compositing
+-    rendered_image = np.zeros((image_height, image_width, 3))
+-    
+-    # Determine global minimum distance for normalization
+-    # This requires a pass over all primitives to find min(d_x, d_y, d_z)
++    rendered_image = [[0.0, 0.0, 0.0] for _ in range(image_height)]
+     min_global_d = find_min_primitive_distance(transformed_primitives)
+     
+@@ -126,147 +101,61 @@
+         for y in range(tile.y_start, tile.y_end):
+             for x in range(tile.x_start, tile.x_end):
+-                # Initialize pixel color and opacity
+-                acc_color = np.array([0.0, 0.0, 0.0])
++                acc_color = [0.0, 0.0, 0.0]
+                 acc_alpha = 0.0
+                 
+                 for prim in tile.primitives:
+-                    # Check if pixel is inside primitive's bbox
+                     if not is_pixel_in_bbox(x, y, prim['bbox']):
+                         continue
+                     
+-                    # Ray-triangle intersection using Möller-Trumbore
+-                    # Ray originates from camera center through pixel (x,y)
+                     ray = create_pixel_ray(x, y, camera_pose)
+-                    
+-                    # Find intersections with the convex primitive
+                     intersections = find_intersections(ray, prim['geometry'])
+                     
+                     if len(intersections) != 2:
+-                        continue # Not visible
+-                    
+-                    # Calculate distance between intersection points
++                        continue
++                    
+                     dist = distance(intersections[0], intersections[1])
+-                    
+-                    # Normalize distance
+-                    # Note: The source defines density based on normalized distances
+-                    # Here we assume dist is normalized relative to min_global_d
+                     normalized_dist = dist / min_global_d
+                     
+-                    # Calculate opacity from density/distance
+-                    # The source gives density formula from alpha, we invert or use
+-                    # the relationship implied: opacity depends on distance between intersections
+-                    # Using the density formula provided:
+-                    # sigma = -log(1 - 0.99 * alpha) / (2 * min_dx,dy,dz)
+-                    # We need alpha. Let's assume the intersection distance directly 
+-                    # informs the alpha or density. The source says "opacity depends on 
+-                    # the distance between intersection points".
+-                    # Let's use a standard volume rendering opacity model for a slab of thickness dist:
+-                    # alpha = 1 - exp(-sigma * dist)
+-                    # But sigma is defined in terms of alpha. This is circular if we don't 
+-                    # have a base sigma. 
+-                    # Re-reading: "If there are two, the opacity depends on the distance 
+-                    # between the intersection points."
+-                    # And: "we define the density of an octahedron as: sigma(alpha) = ..."
+-                    # This implies alpha is the *target* or *result* of the rendering, 
+-                    # but for the rasterizer, we need to compute alpha from geometry.
+-                    # The source does not explicitly give the forward alpha-from-distance formula,
+-                    # but implies a direct dependency. 
+-                    # [G] Standard interpretation: The primitive has a base opacity parameter.
+-                    # The intersection distance scales this. Or, the density is fixed, and 
+-                    # alpha is computed. 
+-                    # Let's assume the primitive stores a base opacity or density.
+-                    # However, the source says "opacity depends on the distance".
+-                    # Let's assume a linear or exponential falloff based on distance.
+-                    # Given the density formula, if we assume the primitive represents a 
+-                    # volume with constant density, then alpha = 1 - exp(-sigma * dist).
+-                    # But sigma is defined *using* alpha. 
+-                    # Let's look at the normalization: "scaling all distance measurements 
+-                    # accordingly... determine the smallest distance d... scaling all measurements".
+-                    # This suggests the distances are normalized to a canonical size.
+-                    # [G] Implementation detail: Assume the primitive has a stored 'base_alpha' 
+-                    # or 'density'. If not, the source is ambiguous on the forward pass 
+-                    # formula for alpha from distance. 
+-                    # However, the formula sigma(alpha) = ... is likely used for 
+-                    # *optimization* (gradient flow) or defining the material property.
+-                    # For rendering, we need alpha. 
+-                    # Let's assume the primitive's 'distance' features define its size, 
+-                    # and the intersection distance 't' relative to the primitive size 
+-                    # determines the alpha.
+-                    # Simple model: alpha = min(1.0, t / max_extent) ? 
+-                    # No, the source says "opacity depends on the distance between intersection points".
+-                    # Let's use the density formula in reverse if we assume a target alpha? 
+-                    # No. 
+-                    # Let's stick to the most direct interpretation: 
+-                    # The primitive has an intrinsic opacity property. The intersection 
+-                    # distance modulates it. 
+-                    # Since the source doesn't give the forward alpha formula, but gives 
+-                    # the density formula, we will use the density formula to define 
+-                    # the material's sigma, and then compute alpha from sigma and dist.
+-                    # But sigma depends on alpha. 
+-                    # [G] Clarification: The formula sigma(alpha) = ... is likely for 
+-                    # defining the density *parameter* given a desired opacity alpha 
+-                    # for a specific primitive size. In the forward pass, if we have 
+-                    # a primitive with a defined density sigma, alpha = 1 - exp(-sigma * dist).
+-                    # The source says "we define the density... as [formula]". This is 
+-                    # likely a definition of how to set sigma to achieve a certain alpha 
+-                    # for a normalized size.
+-                    # For the rasterizer, we need sigma. 
+-                    # Let's assume the primitive stores sigma, or we compute it from 
+-                    # a base alpha and the normalized distances.
+-                    
+-                    # Let's assume the primitive has a 'base_alpha' parameter.
+-                    # sigma = -log(1 - 0.99 * base_alpha) / (2 * min_norm_dist)
+-                    # alpha_render = 1 - exp(-sigma * dist)
+-                    
+-                    # However, the source says "opacity depends on the distance".
+-                    # Let's assume the primitive's 'distances' are used to compute 
+-                    # the normalized min distance.
++                    # Compute opacity from normalized distance [G]
++                    base_alpha = prim['original_prim'].opacity
+                     min_norm_dist = min(prim['geometry'].dist_x, prim['geometry'].dist_y, prim['geometry'].dist_z)
+-                    
+-                    # [G] Assuming a base opacity parameter is stored or derived.
+-                    # If not stored, we might use a default or the alpha from the SH/color?
+-                    # No, alpha is separate.
+-                    # Let's assume the primitive has a 'opacity' field.
+-                    base_alpha = prim['original_prim'].opacity
+-                    
+                     sigma = -math.log(1 - 0.99 * base_alpha) / (2 * min_norm_dist)
+-                    alpha = 1 - math.exp(-sigma * dist)
++                    alpha = 1 - math.exp(-sigma * normalized_dist)
+                     
+                     # Alpha blending
+-                    # C_out = C_in * (1 - alpha) + C_prim * alpha
+-                    acc_color = acc_color * (1 - alpha) + prim['color'] * alpha
+-                    acc_alpha += alpha * (1 - acc_alpha) # Standard front-to-back alpha accumulation
+-                    
+-                    # Stop if cumulative opacity threshold reached
++                    acc_color[0] = acc_color[0] * (1 - alpha) + prim['color'][0] * alpha
++                    acc_color[1] = acc_color[1] * (1 - alpha) + prim['color'][1] * alpha
++                    acc_color[2] = acc_color[2] * (1 - alpha) + prim['color'][2] * alpha
++                    acc_alpha += alpha * (1 - acc_alpha)
++                    
+                     if acc_alpha >= 0.999:
+                         break
+                 
+-                rendered_image[y, x] = acc_color
++                rendered_image[y][x] = acc_color
+                 
+     return rendered_image
+ 
+ def construct_geometry(prim):
+-    # Extract position, rotation, distances
+-    # Construct vertices of octahedron or tetrahedron
++    # Extract position, rotation, distances and build octahedron/tetrahedron vertices
+     pass
+ 
+ def transform_to_camera_space(geometry, camera_pose):
+-    # Apply view and projection matrices
++    # Apply view and projection matrices to geometry vertices
+     pass
+ 
+ def evaluate_sh(sh_coeffs, view_direction):
+-    # Evaluate Spherical Harmonics
++    # Evaluate Spherical Harmonics for the given viewing direction
+     pass
+ 
+ def project_to_ray_space(geometry):
+-    # EWA Splatting approximation
++    # Apply 3D affine ray space approximation (EWA)
+     pass
+ 
+ def compute_bounding_box(ray_space_prim, width, height):
+-    # Compute 2D bbox
++    # Compute 2D screen-space bounding box
+     pass
+ 
+ def create_tiles(width, height):
+-    # Create tile structure
++    # Divide screen into fixed-size tiles
+     pass
+ 
+@@ -274,7 +163,4 @@
+     min_d = float('inf')
+     for p in primitives:
+-        # Get normalized distances
+-        # Note: The source says "determine the smallest distance d of the primitives"
+-        # This likely refers to the geometric extent.
+         d = min(p['geometry'].dist_x, p['geometry'].dist_y, p['geometry'].dist_z)
+         if d < min_d:
+@@ -283,5 +169,5 @@
+ 
+ def find_intersections(ray, geometry):
+-    # Möller-Trumbore algorithm
++    # Möller-Trumbore algorithm for ray-triangle intersections
+     # Returns list of intersection points
+     pass
+@@ -289,4 +175,15 @@
+ def distance(p1, p2):
+     return math.sqrt(sum((a-b)**2 for a, b in zip(p1, p2)))
++
++def intersects_bbox(bbox1, bbox2):
++    return not (bbox1.max_x < bbox2.min_x or bbox1.min_x > bbox2.max_x or
++                bbox1.max_y < bbox2.min_y or bbox1.min_y > bbox2.max_y)
++
++def is_pixel_in_bbox(x, y, bbox):
++    return bbox.min_x <= x <= bbox.max_x and bbox.min_y <= y <= bbox.max_y
++
++def create_pixel_ray(x, y, camera_pose):
++    # Construct ray from camera center through pixel (x,y)
++    pass
+ ```
+ 
+@@ -299,5 +196,5 @@
+ *   **Scale Ambiguity:** Without normalizing intersection distances by the global minimum primitive distance, the appearance of primitives will vary inconsistently across scenes of different sizes [S1].
+ *   **Approximation Error:** The 3D affine ray space approximation (EWA) introduces error that grows with distance from the primitive center. This is mitigated by using small primitives, keeping the error negligible [S1].
+-*   **Convexity:** The method relies on primitives being convex (octahedra/tetrahedra) to guarantee at most two intersections. Non-convex primitives would break the simple intersection logic [S1].
++*   **Convexity:** The method relies on primitives being convex (octahedra/tetrahedra) to guarantee at most two intersections [S1].
+ *   **Memory:** SH coefficients dominate memory usage. Reducing SH degree or primitive count is necessary for large scenes [S1].
+ 
+@@ -311,5 +208,5 @@
+ 
+ ## Background
+-LinPrim was introduced in the paper "LinPrim: Linear Primitives for Differentiable Volumetric Rendering" [S1]. It builds upon the 3D Gaussian Splatting pipeline, adapting it to use transparent octahedron and tetrahedron primitives instead of ellipsoids. The method was developed to address the limitations of Gaussian representations in capturing sharp, bounded geometry, while maintaining the differentiable nature of the rendering pipeline to allow for gradient-based optimization of scene parameters [S1].
++LinPrim was introduced in the paper "LinPrim: Linear Primitives for Differentiable Volumetric Rendering" [S1]. It builds on the 3DGS pipeline to accommodate new primitives, using bounded, triangular geometry to expand the applicability of differentiable rendering pipelines [S1].
+ 
+ ## Sources

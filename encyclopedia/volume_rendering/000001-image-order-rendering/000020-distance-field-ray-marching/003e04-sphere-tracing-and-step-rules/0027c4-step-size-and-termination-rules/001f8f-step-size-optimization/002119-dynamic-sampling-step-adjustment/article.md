@@ -3,86 +3,92 @@
 Also called: Adaptive Step Doubling, Empty Space Step Doubling
 
 ## Overview
-Dynamic Sampling Step Adjustment is a heuristic optimization for distance-field ray marching that accelerates traversal through empty or low-density regions by exponentially increasing the step size. It solves the problem of redundant samples in sparse volumes, such as atmospheric clouds or low-density medical scans, where uniform sampling wastes computational resources [S1, unofficial]. It sets itself apart from [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md) by prioritizing speed over strict geometric safety (often skipping exact boundaries) and from [Adaptive Step Size Ray Marching](2312-adaptive-step-size-ray-marching.md) by using a discrete doubling/halving logic rather than continuous gradient-based interpolation [S1, unofficial].
+Dynamic Sampling Step Adjustment is a ray marching optimization technique that increases the integration step size when traversing empty or low-density regions of a volume, and restores it upon encountering data. It solves the problem of redundant sampling in sparse volumes, such as atmospheric clouds or low-density medical scans, by skipping large empty intervals. It sets itself apart from [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md) by prioritizing density-based skipping over geometric distance-field safety constraints, and from [Adaptive Step Size Ray Marching](2312-adaptive-step-size-ray-marching.md) by using a discrete doubling/halving logic rather than continuous gradient-based scaling.
 
 ## How it works
-**Inputs:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, initial step size $\Delta s_0$, initial mip-map offset $m_0$, and a density threshold $\tau$ (typically 0 or a small epsilon to detect "empty" space).
-**Outputs:** Accumulated color and opacity along the ray.
+**Inputs:**
+*   Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ (normalized).
+*   Volume texture $V$ with associated mipmaps.
+*   Initial step size $\Delta t_{base}$ (scalar).
+*   Initial mipmap level $m_{base}$ (integer, typically 0).
+*   Empty threshold $\tau$ (scalar, typically 0.0 for density).
+*   Maximum empty count $N_{max}$ (integer, optional guard against infinite skipping).
+
+**Outputs:**
+*   Accumulated color and opacity along the ray.
+*   Updated step size $\Delta t$ and mipmap level $m$ for the current ray segment.
 
 **Data Structures:**
-The method maintains two mutable state variables during ray traversal:
-1.  `current_step`: The current sampling distance $\Delta s$.
-2.  `current_mip`: The current mip-map level index $m$ used for texture sampling.
+*   `step_size`: Float, current integration step length.
+*   `mip_offset`: Integer, current mipmap level index.
+*   `empty_count`: Integer, consecutive samples with density $\le \tau$.
 
 **Algorithm Steps:**
-1.  Initialize `current_step` = $\Delta s_0$ and `current_mip` = $m_0$.
-2.  Sample the scalar field (density) at the current ray position $\mathbf{p}$ using the texture at `current_mip`. Let the result be $\rho$.
-3.  **Check for Empty Space:** If $\rho < \tau$ (density is empty):
-    *   Double the step size: `current_step` = `current_step` $\times 2$.
-    *   Increment the mip-map offset: `current_mip` = `current_mip` + 1.
-    *   Advance the ray: $\mathbf{p}_{new} = \mathbf{p} + \text{current\_step} \cdot \mathbf{d}$.
-    *   Continue to step 2 with $\mathbf{p}_{new}$.
-4.  **Check for Non-Empty Space:** If $\rho \ge \tau$ (density is present):
-    *   Step back one iteration: $\mathbf{p}_{prev} = \mathbf{p} - \text{current\_step} \cdot \mathbf{d}$.
-    *   Restore the step size: `current_step` = $\Delta s_0$.
-    *   Restore the mip-map offset: `current_mip` = $m_0$.
-    *   Perform the standard volume integration (accumulation) at $\mathbf{p}_{prev}$ (or $\mathbf{p}$ depending on implementation, but the source implies restoring state after detecting the boundary) [S1, unofficial].
-    *   Advance the ray by the restored step size: $\mathbf{p}_{new} = \mathbf{p}_{prev} + \Delta s_0 \cdot \mathbf{d}$.
-    *   Continue to step 2 with $\mathbf{p}_{new}$.
+1.  Initialize $\Delta t = \Delta t_{base}$, $m = m_{base}$, and `empty_count` = 0.
+2.  Sample the volume at current position $\mathbf{p}$ using texture $V_m$ (mipmap level $m$). Let density be $\rho = V_m(\mathbf{p})$.
+3.  **Check for Empty Space:**
+    *   If $\rho \le \tau$:
+        *   Increment `empty_count`.
+        *   If `empty_count` > 1 (i.e., this is the second or more consecutive empty sample):
+            *   Double the step size: $\Delta t \leftarrow 2 \cdot \Delta t$.
+            *   Increase mipmap level: $m \leftarrow m + 1$.
+            *   Clamp $m$ to the maximum available mipmap level.
+        *   Advance position: $\mathbf{p} \leftarrow \mathbf{p} + \Delta t \cdot \mathbf{d}$.
+        *   Go to Step 2.
+    *   If $\rho > \tau$:
+        *   **Step Back:** Move position back by one base step to ensure the surface/feature is captured accurately: $\mathbf{p} \leftarrow \mathbf{p} - \Delta t_{base} \cdot \mathbf{d}$. [S1, unofficial]
+        *   **Restore State:** Reset $\Delta t = \Delta t_{base}$ and $m = m_{base}$. [S1, unofficial]
+        *   Reset `empty_count` = 0.
+        *   Proceed with standard rendering/sampling at the restored position.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def ray_march_dynamic_step(ray_origin, ray_direction, initial_step, initial_mip, density_threshold):
-    p = ray_origin
-    current_step = initial_step
-    current_mip = initial_mip
+def dynamic_sampling_step_adjustment(ray_origin, ray_dir, volume_texture, base_step, base_mip, empty_threshold):
+    step_size = base_step
+    mip_level = base_mip
+    empty_count = 0
     
-    # Accumulators
-    accumulated_color = (0.0, 0.0, 0.0)
-    accumulated_opacity = 0.0
+    # Assume max_mip is known from volume texture metadata
+    max_mip = volume_texture.num_mip_levels - 1
     
-    while p is within volume bounds:
-        # Sample density at current position and mip level
-        # Note: In practice, mip level affects the resolution of the sample
-        density = sample_volume(p, current_mip)
+    while ray_t < max_distance:
+        # Sample current position
+        density = volume_texture.sample_mip(ray_origin + ray_t * ray_dir, mip_level)
         
-        if density < density_threshold:
-            # Empty space: accelerate
-            current_step *= 2.0
-            current_mip += 1
+        if density <= empty_threshold:
+            empty_count += 1
             
-            # Move forward
-            p = p + current_step * ray_direction
+            # Double step size and mip level after the first empty sample
+            # The first empty sample is processed with current step; 
+            # subsequent ones trigger acceleration.
+            if empty_count > 1:
+                step_size *= 2.0
+                if mip_level < max_mip:
+                    mip_level += 1
+            
+            ray_t += step_size
         else:
-            # Non-empty space: slow down and restore state
-            # Step back to the last valid position before the jump
-            p = p - current_step * ray_direction
+            # Density found: step back to capture the transition accurately
+            ray_t -= step_size # Or specifically base_step depending on implementation nuance [S1, unofficial]
             
             # Restore original parameters
-            current_step = initial_step
-            current_mip = initial_mip
+            step_size = base_step
+            mip_level = base_mip
+            empty_count = 0
             
-            # Perform standard volume rendering step at the restored position
-            # This usually involves alpha blending
-            sample_color, sample_opacity = sample_volume_color(p, current_mip)
+            # Perform standard volume integration step here
+            # ...
+            break # Or continue with normal small steps until next empty region
             
-            # Standard front-to-back compositing
-            # alpha_new = alpha_old + (1 - alpha_old) * sample_opacity
-            # color_new = color_old + (1 - alpha_old) * sample_opacity * sample_color
-            accumulated_opacity, accumulated_color = composite(accumulated_opacity, accumulated_color, sample_opacity, sample_color)
-            
-            # Move forward by the standard step
-            p = p + current_step * ray_direction
-            
-    return accumulated_color, accumulated_opacity
+    return accumulated_color
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Artifacts:** The method may cause visual artifacts, particularly "popping" or missing thin features, because the doubled step can skip over narrow high-density structures that fall below the threshold but are visually significant [S1, unofficial].
-*   **Boundary Precision:** Stepping back one step upon detecting density does not guarantee the exact boundary location; it only returns to the last sampled point. This can lead to slight inaccuracies in surface rendering compared to sphere tracing [S1, unofficial].
-*   **Mip-Map Bounds:** Incrementing `current_mip` must be clamped to the maximum available mip level to prevent out-of-bounds texture access.
+*   **Artifacts:** The method may cause visual artifacts, particularly "popping" or aliasing, if the step doubling skips over thin features that are aliased at the coarser mipmap level [S1, unofficial].
+*   **Precision:** Floating-point precision errors in ray position accumulation can cause the "step back" to land slightly off the true boundary, potentially missing thin structures if $\Delta t_{base}$ is not sufficiently small relative to feature size.
+*   **Boundary Conditions:** If the ray exits the volume bounds while skipping, the step back might land outside the valid volume range, requiring boundary checks.
 
 ## Subtopics
 
@@ -93,19 +99,19 @@ Gradient-driven sampling is a dynamic step size adjustment method for distance-f
 Dynamic Texture Slice Resampling is a technique for volume rendering that dynamically updates slicing steps according to viewing directions to maintain a constant step size during the Direct Volume Rendering (DVR) process. It solves the problem of striping artifacts caused by non-uniform sampling steps, which occur when fixed step sizes result in varying spatial resolution across the volume due to perspective projection. Unlike methods that rely on post-processing upsampling or fixed-step approximations, this approach maintains high rendering performance by adapting the sampling density to the viewing geometry in real-time.
 
 ### Dynamic Adaptive Sampling Ray-Casting
-Dynamic Adaptive Sampling Ray-Casting is an improved volume rendering algorithm designed to address slow rendering speed and low sampling efficiency in 3D reconstruction of medical images by dynamically adjusting sampling intervals and using a new rendering operator [S2]. It uses the central difference gradient method to obtain the corresponding sampling interval dynamically according to the different sampling points [S2]. It applies a new rendering operator based on the color value and opacity changes before and after the ray enters the volume element, and the resistance luminosity [S2]. On the ISBI2018 dataset, this algorithm reduces and avoids artifact phenomena in CT image rendering and improves image visibility compared to Francisco Sans', Roba Binyahibs', Feiniu Yuan's, Leonardo's, and Yan Zhang's algorithms [S2]. Compared with other algorithms, this method achieves faster rendering speed while ensuring the quality of the generated image [S2].
+Dynamic Adaptive Sampling Ray-Casting is an improved volume rendering algorithm designed to address slow rendering speed and low sampling efficiency in 3D reconstruction of medical images by dynamically adjusting sampling intervals and using a new rendering operator [S2]. It uses the central difference gradient method to obtain the corresponding sampling interval dynamically according to the different sampling points. It applies a new rendering operator based on the color value and opacity changes before and after the ray enters the volume element, and the resistance luminosity. On the ISBI2018 dataset, this algorithm reduces and avoids artifact phenomena in CT image rendering and improves image visibility compared to Francisco Sans', Roba Binyahibs', Feiniu Yuan's, Leonardo's, and Yan Zhang's algorithms [S2].
 
 ### Geometry Sampling Adjustment
-Geometry Sampling Adjustment is a method to adjust the maximum number of geometry samples per streamline based on a geometry sampling factor [S3, unofficial]. It sets `m_maxGeometrySamples` to `m_maxSamples / m_geometrySampling + 1`, where `m_maxSamples` is the base maximum number of samples per streamline and `m_geometrySampling` is a factor used to reduce the number of geometry samples [S3, unofficial].
+Geometry Sampling Adjustment is a method to adjust the maximum number of geometry samples per streamline based on a geometry sampling factor [S3, unofficial]. It sets the maximum geometry samples $m_{maxGeometrySamples}$ to $m_{maxSamples} / m_{geometrySampling} + 1$, where $m_{maxSamples}$ is the base maximum number of samples per streamline and $m_{geometrySampling}$ is a factor used to reduce the number of geometry samples [S3, unofficial].
 
 ## Operating characteristics
-*   **Performance:** Provides small performance gains in sparse volumes by significantly reducing the number of texture fetches in empty space [S1, unofficial].
-*   **Accuracy:** May cause artifacts in some cases, particularly with thin structures or when the doubling factor is too aggressive [S1, unofficial].
-*   **Complexity:** Low computational overhead per step; primarily involves simple arithmetic and conditional checks.
-*   **Use Case:** Best suited for large, sparse volumes like atmospheric clouds or fog where large empty regions dominate the ray path [S1, unofficial]. Not recommended for high-fidelity medical imaging where boundary precision is critical, unless combined with refinement steps.
+*   **Performance:** Provides small performance gains in sparse volumes by reducing the number of texture fetches in empty space [S1, unofficial].
+*   **Quality:** May introduce artifacts in some cases, particularly if the doubling rate is too aggressive or the mipmap transition is visible [S1, unofficial].
+*   **Complexity:** Low computational overhead; requires only a counter and simple arithmetic operations per step.
+*   **Use Case:** Best suited for volumetric effects with large empty regions, such as atmospheric clouds or fog, where density drops to zero over significant distances [S1, unofficial].
 
 ## Background
-The concept of doubling step size in empty space is a common heuristic in real-time graphics, particularly in the rendering of volumetric clouds. It is cited in discussions of implementing volume cloud effects in game engines, where it is noted that while the performance improvement is small, it is a standard optimization for handling sky/cloud rendering [S1, unofficial]. The broader context of dynamic adaptive sampling in medical image ray-casting was explored by Wang et al. (2020), who proposed a gradient-based dynamic adaptive sampling algorithm to improve rendering speed and quality for CT images [S2].
+The technique is commonly used in real-time graphics for atmospheric rendering, such as in the implementation of volumetric clouds in game engines like Unity's HDRP, where it is referred to as "Dynamic Sampling Step Adjustment" [S1, unofficial]. It is also related to adaptive sampling strategies in medical image visualization, such as the Dynamic Adaptive Sampling Ray-Casting algorithm proposed by Wang et al. [S2].
 
 ## Sources
 [S1] 体积云效果的实现，游戏世界的云合雾集, https://leihuo.163.com/institution/news/20230719/38423_1099592.html, fetched 2026-10-30 (unofficial)

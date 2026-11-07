@@ -3,33 +3,34 @@
 Also called: OT Loss, Optimal Transport based Loss Function, Sinkhorn Divergences Loss
 
 ## Overview
-Optimal Transport (OT) Loss captures global and long-range correspondences between a rendered image $I$ and a target image $I_{ref}$ by solving a transportation problem, replacing local pixel-wise losses like L1 or L2 [S1]. It differs from [Data Consistency Loss](2976-data-consistency-loss.md) by optimizing for a global matching structure rather than point-wise residuals, and from [Monocular Depth Consistency Loss](4668-monocular-depth-consistency-loss.md) by operating directly in image space color and position rather than depth constraints.
+Optimal Transport (OT) Loss captures global and long-range correspondences between a rendered image $I$ and a target image $I_{ref}$ by solving a transportation problem, replacing local pixel-wise losses like L1 or L2 [S1]. It sets itself apart from [Data Consistency Loss](2976-data-consistency-loss.md) by enforcing a global coupling between pixels rather than independent per-pixel errors, and from [Monocular Depth Consistency Loss](4668-monocular-depth-consistency-loss.md) by operating directly in image space without explicit depth supervision [S1].
 
 ## How it works
-**Inputs:** Rendered image $I$ (resolution $N \times N$), target image $I_{ref}$ (resolution $M \times M$, typically $N=M$), scene parameters $\theta$.
-**Outputs:** Scalar loss value $L$, gradients $\frac{\partial L}{\partial \theta}$.
+**Inputs:** Rendered image $I$ (dimensions $H \times W$, treated as $N$ pixels), target image $I_{ref}$ (dimensions $H \times W$, treated as $M$ pixels, where $N=M$), and scene parameters $\theta$ that define the geometry and appearance of the rendered primitives.
+**Outputs:** Scalar loss value $L$ and gradients $\frac{\partial L}{\partial \theta}$.
 
 **Data Structures:**
-1.  **Cost Matrix $C$**: Size $N \times M$. Element $c(i,j)$ is the unit transportation cost.
-2.  **Transportation Matrix $T$**: Size $N \times M$. Element $T_{ij}$ is the amount of mass transported from pixel $i$ in $I$ to pixel $j$ in $I_{ref}$.
-3.  **Mass Vectors**: $x \in \mathbb{R}^N$ and $y \in \mathbb{R}^M$. In this application, $x_i = 1$ for all $i$, $y_j = 1$ for all $j$ [S1].
+*   **Transportation Matrix $T$**: An $N \times M$ matrix where $T_{ij}$ represents the amount of mass transported from pixel $i$ in $I$ to pixel $j$ in $I_{ref}$.
+*   **Cost Matrix $C$**: An $N \times M$ matrix where $C_{ij} = c(i,j)$ is the unit transportation cost.
 
 **Parameters:**
-*   $\lambda \in [0, 1]$: Balancing weight for color vs. position cost. Typical value: $0.5$ [S1].
+*   $\lambda$: Balancing weight for color vs. position cost. Typical value: $0.5$ [S1].
 *   $\epsilon$: Regularization parameter for Sinkhorn divergence. Typical value: $0.01$ [S1].
 
 **Steps:**
-1.  **Compute Cost Matrix**: For each pixel $p_i$ in $I$ with color $c_i = I(p_i)$ and each pixel $p_j$ in $I_{ref}$ with color $c_j = I_{ref}(p_j)$, compute:
-    $$c(i,j) = \lambda ||c_i - c_j||_2^2 + (1 - \lambda)||p_i - p_j||_2^2$$
-    where $p_i, p_j$ are screen-space coordinates [S1].
-2.  **Solve Optimal Transport**: Compute $T$ by minimizing $\sum_{i,j} T_{ij} c(i,j)$ subject to $\sum_j T_{ij} = 1$ and $\sum_i T_{ij} = 1$. Use the Sinkhorn algorithm with parameter $\epsilon$ [S1].
-3.  **Compute Gradients w.r.t. Proxy Attributes**: Fix $T$. Compute gradients for color $c_k$ and position $p_k$ of the $k$-th point proxy (corresponding to pixel $k$ in $I$):
+1.  **Compute Unit Costs:** For every pair of pixels $(i, j)$, compute the cost $c(i,j)$:
+    $$c(i,j) = \lambda ||c_i - I_{ref}(p_j)||_2^2 + (1 - \lambda)||p_i - p_j||_2^2$$
+    where $c_i = I(p_i)$ is the color at pixel $i$, $p_i$ and $p_j$ are the screen-space coordinates of pixels $i$ and $j$, and $I_{ref}(p_j)$ is the color of the target image at pixel $j$ [S1].
+2.  **Solve Optimal Transport:** Compute the transportation matrix $T$ that minimizes the total cost $\sum_{i,j} T_{ij} c(i,j)$ subject to marginal constraints $\sum_j T_{ij} = 1$ and $\sum_i T_{ij} = 1$. This is solved efficiently using the Sinkhorn algorithm with parameter $\epsilon$ [S1].
+3.  **Compute Loss:** Calculate the total loss:
+    $$L = \sum_{i,j=1}^{N,M} T_{ij} c(i,j)$$
+4.  **Compute Gradients w.r.t. Point Proxies:** Fix the matching matrix $T$ and compute gradients with respect to the color $c_k$ and position $p_k$ of the $k$-th point proxy (associated with pixel $k$ in the rendered image) [S1]:
     $$\frac{\partial L}{\partial c_k} = \sum_{j} T_{kj} \frac{\partial c(k,j)}{\partial c_k}$$
     $$\frac{\partial L}{\partial p_k} = \sum_{j} T_{kj} \frac{\partial c(k,j)}{\partial p_k}$$
-    Note: $\frac{\partial c(k,j)}{\partial c_k} = 2\lambda(c_k - c_j)$ and $\frac{\partial c(k,j)}{\partial p_k} = 2(1-\lambda)(p_k - p_j)$ [S1].
-4.  **Chain Rule to Scene Parameters**: Compute final gradient w.r.t. scene parameter $\theta$ using RGBXY derivatives:
+    Note: $\frac{\partial c(k,j)}{\partial c_k} = 2\lambda (c_k - I_{ref}(p_j))$ and $\frac{\partial c(k,j)}{\partial p_k}$ involves the derivative of the positional term $(1-\lambda)||p_k - p_j||_2^2$ [S1].
+5.  **Chain Rule to Scene Parameters:** Propagate gradients to scene parameters $\theta$ using the RGBXY derivatives (standard derivatives for color and position) [S1]:
     $$\frac{\partial L}{\partial \theta} = \sum_{k=1}^N \left( \frac{\partial L}{\partial c_k} \frac{D c_k}{D \theta} + \frac{\partial L}{\partial p_k} \frac{\partial p_k}{\partial \theta} \right)$$
-    where $\frac{D c_k}{D \theta}$ and $\frac{\partial p_k}{\partial \theta}$ are the standard derivatives of color and position w.r.t. $\theta$ [S1].
+    where $\frac{D c_k}{D \theta}$ and $\frac{\partial p_k}{\partial \theta}$ are the derivatives of the color and position of point proxy $k$ with respect to $\theta$ [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -37,125 +38,100 @@ Optimal Transport (OT) Loss captures global and long-range correspondences betwe
 ```python
 def optimal_transport_loss(I, I_ref, theta, lambda_weight=0.5, epsilon=0.01):
     """
-    I: Rendered image tensor, shape (H, W, 3)
-    I_ref: Target image tensor, shape (H, W, 3)
+    I: Rendered image tensor (H, W, 3)
+    I_ref: Target image tensor (H, W, 3)
     theta: Scene parameters
     lambda_weight: Balancing weight for color vs position
-    epsilon: Sinkhorn regularization
+    epsilon: Sinkhorn regularization parameter
     """
-    # 1. Extract pixel attributes
-    # H, W are assumed equal for simplicity as per source assumption N=M
+    # 1. Extract pixel positions and colors
     H, W, _ = I.shape
     N = H * W
+    M = N # Assuming same resolution
     
-    # Reshape to list of pixels
-    # I_pixels: (N, 3) colors
-    # I_pos: (N, 2) screen coordinates
-    I_pixels = I.reshape(-1, 3)
-    I_ref_pixels = I_ref.reshape(-1, 3)
+    # Create grid of pixel coordinates
+    y_coords, x_coords = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
+    p_i = torch.stack([x_coords.flatten(), y_coords.flatten()], dim=1).float() # (N, 2)
+    p_j = p_i.clone() # Same grid for target
     
-    # Generate screen coordinates
-    # Assuming pixel centers at (x + 0.5, y + 0.5) or similar standard grid
-    # This is a placeholder for coordinate generation logic [G]
-    coords = generate_screen_coordinates(H, W) # Shape (N, 2)
+    # Flatten images
+    c_i = I.flatten(0, 1) # (N, 3)
+    c_j = I_ref.flatten(0, 1) # (M, 3)
     
-    # 2. Compute Cost Matrix C (N, N)
+    # 2. Compute Cost Matrix C (N, M)
     # Color distance: lambda * ||c_i - c_j||^2
+    color_dist = torch.cdist(c_i, c_j, p=2) ** 2 # (N, M)
+    color_term = lambda_weight * color_dist
+    
     # Position distance: (1-lambda) * ||p_i - p_j||^2
+    pos_dist = torch.cdist(p_i, p_j, p=2) ** 2 # (N, M)
+    pos_term = (1 - lambda_weight) * pos_dist
     
-    # Efficient computation using broadcasting
-    # diff_color: (N, N, 3)
-    diff_color = I_pixels[:, None, :] - I_ref_pixels[None, :, :]
-    color_dist = torch.sum(diff_color ** 2, dim=2) # (N, N)
-    
-    # diff_pos: (N, N, 2)
-    diff_pos = coords[:, None, :] - coords[None, :, :]
-    pos_dist = torch.sum(diff_pos ** 2, dim=2) # (N, N)
-    
-    C = lambda_weight * color_dist + (1 - lambda_weight) * pos_dist
+    C = color_term + pos_term # (N, M)
     
     # 3. Solve Optimal Transport using Sinkhorn
-    # Mass vectors are all ones
-    u = torch.ones(N)
-    v = torch.ones(N)
+    # Marginals are uniform (1/N for each pixel)
+    a = torch.ones(N) / N
+    b = torch.ones(M) / M
     
-    # Sinkhorn iteration [G]
-    # K = exp(-C / epsilon)
-    # v = 1 / (K^T @ (1 / (K @ u)))
-    # T = diag(u) @ K @ diag(v)
-    # Note: Source cites Feydy et al. [2019] GPU implementation. 
-    # Standard Sinkhorn loop for clarity:
-    K = torch.exp(-C / epsilon)
-    for _ in range(100): # Iterations for convergence
-        u_new = 1.0 / (K @ v)
-        v = 1.0 / (K.T @ u_new)
-        u = u_new
-    T = torch.diag(u) @ K @ torch.diag(v)
+    # Use GPU implementation of Sinkhorn divergences [S1]
+    # T is the transportation matrix (N, M)
+    T = sinkhorn_divergence(C, a, b, epsilon) 
     
-    # 4. Compute Gradients w.r.t. Color and Position
-    # dL/dc_k = sum_j T_kj * d(c(k,j))/d(c_k)
-    # d(c(k,j))/d(c_k) = 2 * lambda * (c_k - c_j)
-    # dL/dp_k = sum_j T_kj * d(c(k,j))/d(p_k)
-    # d(c(k,j))/d(p_k) = 2 * (1-lambda) * (p_k - p_j)
+    # 4. Compute Loss
+    L = torch.sum(T * C)
     
-    # Gradient w.r.t. I_pixels (colors)
-    # dL/dI_pixels[k] = sum_j T_kj * 2 * lambda * (I_pixels[k] - I_ref_pixels[j])
-    # This can be computed as: 2 * lambda * (T @ I_ref_pixels - (sum(T, axis=1)[:, None] * I_pixels))
-    # Since sum(T, axis=1) = 1 (mass constraint), this simplifies:
-    dL_dI_pixels = 2 * lambda_weight * (T @ I_ref_pixels - I_pixels)
+    # 5. Compute Gradients w.r.t. c_k and p_k
+    # dL/dc_k = sum_j T_kj * d(c(k,j))/dc_k
+    # d(c(k,j))/dc_k = 2 * lambda * (c_k - c_j)
+    # Gradient contribution from color:
+    grad_c_contrib = 2 * lambda_weight * torch.sum(T.unsqueeze(-1) * (c_i.unsqueeze(1) - c_j.unsqueeze(0)), dim=1) # (N, 3)
     
-    # Gradient w.r.t. coords (positions)
-    # dL/dcoords[k] = sum_j T_kj * 2 * (1-lambda) * (coords[k] - coords[j])
-    # Similarly simplifies due to mass constraint:
-    dL_dcoords = 2 * (1 - lambda_weight) * (T @ coords - coords)
+    # dL/dp_k = sum_j T_kj * d(c(k,j))/dp_k
+    # d(c(k,j))/dp_k = 2 * (1-lambda) * (p_k - p_j)
+    # Gradient contribution from position:
+    grad_p_contrib = 2 * (1 - lambda_weight) * torch.sum(T.unsqueeze(-1) * (p_i.unsqueeze(1) - p_j.unsqueeze(0)), dim=1) # (N, 2)
     
-    # 5. Chain Rule to Theta
+    # 6. Chain rule to theta
     # dL/dtheta = sum_k ( dL/dc_k * Dc_k/Dtheta + dL/dp_k * dp_k/Dtheta )
-    # Dc_k/Dtheta and dp_k/Dtheta are provided by the differentiable renderer
-    # For each pixel k, we have gradients w.r.t theta from the renderer
-    # Let's assume we have functions to get these derivatives
+    # Dc_k/Dtheta and dp_k/Dtheta are RGBXY derivatives provided by the differentiable renderer
+    # Assuming we have functions to get these derivatives for each point proxy k
     
-    grad_theta = torch.zeros_like(theta)
-    
+    dL_dtheta = torch.zeros_like(theta)
     for k in range(N):
-        # Get derivatives of color and position of pixel k w.r.t theta
-        # These depend on the specific rendering setup (e.g., Gaussian Splatting, NeRF)
-        # dc_k_dtheta: shape (theta_dim,)
-        # dp_k_dtheta: shape (theta_dim,)
-        dc_k_dtheta, dp_k_dtheta = get_rgbxy_derivatives(k, theta)
+        # Get derivatives of color and position of point proxy k w.r.t theta
+        # Note: In practice, this is vectorized. Here we show the logic.
+        dc_k_dtheta = get_color_derivative(k, theta) # Shape depends on theta
+        dp_k_dtheta = get_position_derivative(k, theta) # Shape depends on theta
         
-        # Add contribution
-        grad_theta += dL_dI_pixels[k] @ dc_k_dtheta + dL_dcoords[k] @ dp_k_dtheta
+        # Accumulate gradient
+        # grad_c_contrib[k] is (3,), dc_k_dtheta is (..., 3) -> dot product
+        # grad_p_contrib[k] is (2,), dp_k_dtheta is (..., 2) -> dot product
+        dL_dtheta += torch.dot(grad_c_contrib[k], dc_k_dtheta) + torch.dot(grad_p_contrib[k], dp_k_dtheta)
         
-    return torch.sum(T * C), grad_theta
+    return L, dL_dtheta
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Precision**: Sinkhorn iterations may not converge exactly; $\epsilon$ controls accuracy vs. speed [S1].
-*   **Boundaries**: The method assumes $N=M$ pixels for direct mapping [S1]. If resolutions differ, upsampling/downsampling or padding is required (not specified in source) [G].
-*   **Degenerate Input**: If images are identical, $T$ approaches identity, gradients vanish.
+*   **Background Pixels:** Background pixels (not covering any geometry) do not contribute to final gradients because they are not associated with any point proxies [S1]. If a foreground mask is provided, background pixels can be excluded from computations to save time [S1].
+*   **Antialiased Pixels:** Pixels at object boundaries may be partially covered by multiple triangles. The implementation associates such a pixel with only one underlying geometric point (the point hit by the pixel center) to avoid complexity [S1].
+*   **Precision:** The Sinkhorn algorithm's accuracy is controlled by $\epsilon$. Smaller values lead to higher accuracy but may be slower [S1].
 
 ## Subtopics
 
-### Sinkhorn Divergences
-An efficient approximation for Optimal Transport. Chosen for GPU efficiency over exact solvers. [Link](sinkhorn-divergences.md) (Hypothetical sibling link).
-
-### RGBXY Derivatives
-The derivative framework used to propagate OT gradients to scene parameters. [Link](rgbxy-derivatives.md) (Hypothetical sibling link).
+### [Rendering as Optimal Transport](9655-rendering-as-optimal-transport.md)
+This method formulates volume rendering as an optimal transport problem in phase space, treating the renderer as a transport map that moves a source distribution of primitives to per-view pixel marginals. It sets itself apart from standard rasterization by defining rendering as a conditional expectation of a joint coupling measure, allowing the entire representation formation process to be viewed as minimizing a transport cost subject to a complexity constraint. See [Rendering as Optimal Transport](9655-rendering-as-optimal-transport.md).
 
 ## Operating characteristics
-*   **Time Complexity**: $O(NM)$ for the approximated optimal transport algorithm, where $N, M$ are total pixel amounts [S1].
-*   **Measured Performance**: On NVIDIA RTX 3090:
-    *   128x128 images: ~0.05s [S1].
-    *   256x256 images: 0.43s [S1].
-    *   512x512 images: 5.72s [S1].
-*   **Strengths**: Captures global and long-range correspondences, avoiding local minima associated with pixel-wise losses [S1].
-*   **Limitations**: Computationally expensive for high resolutions compared to L1/L2. Requires differentiable rendering framework to compute RGBXY derivatives [S1].
-*   **When to Use**: When global structure preservation is critical and computational budget allows for $O(N^2)$ operations.
-*   **When Not to Use**: For real-time applications or very high-resolution images where $O(N^2)$ is prohibitive.
+*   **Time Complexity:** The time complexity of the approximated optimal transport algorithm is $O(NM)$, where $N, M$ are the total pixel amounts in the two images [S1].
+*   **Measured Performance:** On an NVIDIA RTX 3090 GPU, processing a matching between two $128 \times 128$ images takes ~0.05s; $256 \times 256$ takes 0.43s; and $512 \times 512$ takes 5.72s [S1].
+*   **Strengths:** Captures global and long-range correspondences, avoiding the local minima issues of pixel-wise losses [S1].
+*   **Limitations:** Computationally expensive for high resolutions due to $O(NM)$ complexity [S1]. Requires a GPU implementation of Sinkhorn divergences for efficiency [S1].
+*   **When to Use:** When global structure preservation is more important than local pixel accuracy, and computational resources allow for the cost of optimal transport [S1].
+*   **When Not to Use:** For very high-resolution images where the $O(NM)$ cost becomes prohibitive, or when real-time performance is critical [S1].
 
 ## Background
-The method was introduced by Jiankai Xing et al. in "Differentiable Rendering Using RGBXY Derivatives and Optimal Transport" (2022) [S1]. It addresses the limitation of standard pixel-wise losses in differentiable rendering by incorporating global matching. The implementation relies on the GPU Sinkhorn divergence library by Feydy et al. [2019] [S1].
+The Optimal Transport Loss was introduced in the paper "Differentiable Rendering Using RGBXY Derivatives and Optimal Transport" by Jiankai Xing, Fujun Luan, Ling-Qi Yan, Xuejun Hu, Houde Qian, and Kun Xu, published in ACM Transactions on Graphics (SIGGRAPH Asia 2022) [S1]. The method leverages the Sinkhorn divergence algorithm, originally proposed by Cuturi [2013] and optimized for GPU by Feydy et al. [2019], to efficiently approximate the optimal transport plan [S1]. It is used in differentiable rendering frameworks to improve the quality of reconstructed scenes by ensuring global consistency between rendered and target images [S1].
 
 ## Sources
 [S1] Differentiable Rendering Using RGBXY Derivatives and Optimal Transport, https://doi.org/10.1145/3550454.3555479, fetched 2026-10-27

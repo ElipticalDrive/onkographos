@@ -1,0 +1,312 @@
+# Unified Neural Implicit Surface and Radiance Field Rendering
+
+Also called: UNISURF, UNISURF rendering, Unified volume/surface rendering
+
+## Overview
+UNISURF is a unified framework for 3D reconstruction that combines the geometric precision of implicit surface rendering with the structural learning capabilities of volume rendering, enabling accurate surface reconstruction from multi-view RGB images without requiring per-pixel object masks [S1]. Unlike standard Neural Radiance Fields (NeRF) which rely on hierarchical two-stage sampling to resolve ambiguities, UNISURF eliminates this need by parameterizing occupancy directly via a continuous field and using a decaying sampling interval around the estimated surface [S1].
+
+## How it works
+The method unifies surface and volume rendering by replacing the volume density $\sigma$ with a continuous occupancy field $o_\theta$. This allows the model to render both through the volume (for coarse structure) and directly on the surface (for geometric precision) [S1].
+
+### Inputs and Outputs
+*   **Inputs:** Multi-view RGB images, camera intrinsics and extrinsics. No object masks are required [S1].
+*   **Outputs:** A trained occupancy field $o_\theta$, a color field $c_\theta$, and optionally a mesh extracted via MISE [S1].
+
+### Data Structures and Network Architecture
+The model consists of two neural networks:
+1.  **Occupancy Network ($o_\theta$):** An 8-layer MLP with Softplus activation and hidden dimension 256. It maps 3D coordinates $\mathbf{x}$ to occupancy values $o_\theta(\mathbf{x}) \in [0, 1]$ [S1].
+    *   **Initialization:** The network is initialized such that the decision boundary (where $o_\theta(\mathbf{x}) = 0.5$) is a sphere [S1].
+    *   **Encoding:** 3D locations $\mathbf{x}$ are encoded using Fourier features with $k=6$ octaves [S1].
+2.  **Color Network ($c_\theta$):** A 4-layer ReLU MLP. It maps 3D coordinates, surface normals, geometry features, and viewing direction to color [S1].
+    *   **Conditioning:** The color field is conditioned on the surface normal $\mathbf{n}$, a feature vector $\mathbf{h}$ from the geometry network (the output of the occupancy network's hidden layers), and the viewing direction $\mathbf{d}$ [S1].
+    *   **Encoding:** Viewing directions $\mathbf{d}$ are encoded using Fourier features with $k=4$ octaves [S1] [G: The source specifies Fourier features for $\mathbf{x}$ and $\mathbf{d}$ but does not explicitly state if $\mathbf{h}$ or $\mathbf{n}$ are encoded; standard practice implies they are concatenated directly or projected. We assume direct concatenation as per typical MLP inputs unless specified otherwise].
+
+### Rendering Formulation
+The unified rendering equation allows for both volume and surface rendering [S1]:
+
+**Volume Rendering:**
+Samples $\{\mathbf{x}_i\}$ are drawn along the ray. The color is computed as:
+$$
+\hat{C}_v(\mathbf{r}) = \sum_{i=1}^N o_{\theta}(\mathbf{x}_i) \prod_{j < i} (1 - o_{\theta}(\mathbf{x}_j)) c_{\theta}(\mathbf{x}_i, \mathbf{n}_i, \mathbf{h}_i, \mathbf{d})
+$$
+where $o_\theta$ acts as the alpha value (occupancy indicator). For solid objects, this selects the color of the first occupied sample [S1].
+
+**Surface Rendering:**
+The surface intersection $\mathbf{x}_s$ is found via root-finding. The color is computed directly:
+$$
+\hat{C}_s(\mathbf{r}) = c_\theta(\mathbf{x}_s, \mathbf{n}_s, \mathbf{h}_s, \mathbf{d})
+$$
+Surface rendering is approximately twice as fast as volume rendering [S1].
+
+### Sampling Strategy
+The core innovation is a training schedule that gradually decreases the sampling region [S1].
+
+1.  **Surface Intersection ($\mathbf{x}_s$):**
+    *   Find the root of $o_\theta(\mathbf{x}) = 0.5$ along the ray $\mathbf{r} = \mathbf{o} + t\mathbf{d}$.
+    *   Use 256 uniformly sampled points along the ray.
+    *   Apply the secant method with 8 steps to find the depth $t_s$ [S1].
+    *   If no surface intersection is found (ray misses the object), use stratified sampling on the entire ray [S1].
+
+2.  **Volume Sampling Interval:**
+    *   Define an interval $[t_s - \Delta, t_s + \Delta]$ centered at the surface depth $t_s$.
+    *   Draw $N=64$ query points inside this interval using stratified sampling:
+        $$
+        t_i \sim \mathcal{U} \left[ t_s + \left( \frac{2i - 2}{N} - 1 \right) \Delta, t_s + \left( \frac{2i}{N} - 1 \right) \Delta \right]
+        $$
+    *   Draw 32 additional points in the free space between the camera and the lower bound of the interval ($t_s - \Delta$) to reduce free space artifacts [S1].
+
+3.  **Interval Decay Schedule:**
+    *   The interval width $\Delta$ decreases monotonically during training to bootstrap coarse geometry and refine the surface later.
+    *   Schedule:
+        $$
+        \Delta_k = \max(\Delta_{\max} \exp(-k\beta), \Delta_{\min})
+        $$
+        where $k$ is the iteration number [S1].
+
+### Normal Computation
+Surface normals are computed via double backpropagation through the occupancy field [S1]:
+$$
+\mathbf{n}(\mathbf{x}_s) = \frac{\nabla_{\mathbf{x}_s} o_\theta(\mathbf{x}_s)}{\|\nabla_{\mathbf{x}_s} o_\theta(\mathbf{x}_s)\|_2}
+$$
+The gradient $\nabla_{\mathbf{x}_s} o_\theta(\mathbf{x}_s)$ is obtained by differentiating the occupancy network output with respect to its input coordinates [S1].
+
+### Loss Function
+The total loss combines reconstruction and regularization terms [S1]:
+$$
+\mathcal{L} = \mathcal{L}_{rec} + \lambda \mathcal{L}_{reg}
+$$
+1.  **Reconstruction Loss ($\mathcal{L}_{rec}$):** L1 loss between rendered volume color and observed color.
+    $$
+    \mathcal{L}_{rec} = \sum_{\mathbf{r} \in \mathcal{R}} \|\hat{C}_v(\mathbf{r}) - C(\mathbf{r})\|_1
+    $$
+2.  **Surface Regularization Loss ($\mathcal{L}_{reg}$):** Encourages normal consistency by comparing the normal at a surface point $\mathbf{x}_s$ with the normal at a perturbed point $\mathbf{x}_s + \boldsymbol{\epsilon}$, where $\boldsymbol{\epsilon}$ is a small random uniform 3D perturbation.
+    $$
+    \mathcal{L}_{reg} = \sum_{\mathbf{x}_s \in \mathcal{S}} \|\mathbf{n}(\mathbf{x}_s) - \mathbf{n}(\mathbf{x}_s + \boldsymbol{\epsilon})\|_2
+    $$
+
+### Optimization Parameters
+*   **Optimizer:** Adam, learning rate 0.0001 [S1].
+*   **Batch Size:** $M=1024$ pixels per iteration [S1].
+*   **Training Duration:** 450k total iterations [S1].
+*   **Decay Steps:** Two decay steps occur after 200k and 400k iterations (likely resetting or adjusting $\beta$ or $\Delta_{max}$, though the exact mechanism of "decay steps" vs the continuous exponential decay is not fully detailed; the formula (14) suggests continuous decay, but the text mentions "two decay steps". We implement the continuous decay formula as the primary mechanism, noting the steps may refer to specific adjustments not fully elaborated in the provided text. Given the formula is explicit, we follow the formula) [S1].
+*   **Decay Parameters:** $\beta = 1.5 \times 10^{-5}$, $\Delta_{\min} = 0.05$, $\Delta_{\max} = 1.0$ [S1].
+
+### Mesh Extraction
+*   Use the Multiresolution IsoSurface Extraction (MISE) algorithm [S1].
+*   Initial resolution: $64^3$.
+*   Up-sample in 3 steps without gradient-based refinement [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import numpy as np
+
+class UNISURF:
+    def __init__(self, config):
+        # Architecture
+        self.occupancy_net = OccupancyMLP(hidden_dim=256, num_layers=8, activation='softplus')
+        self.color_net = ColorMLP(hidden_dim=256, num_layers=4, activation='relu')
+        
+        # Parameters
+        self.beta = config['beta'] # 1.5e-5
+        self.delta_max = config['delta_max'] # 1.0
+        self.delta_min = config['delta_min'] # 0.05
+        self.num_samples_interval = 64
+        self.num_samples_free = 32
+        self.num_root_points = 256
+        self.num_secant_steps = 8
+        
+        # Optimizer
+        self.optimizer = torch.optim.Adam(list(self.occupancy_net.parameters()) + 
+                                          list(self.color_net.parameters()), lr=0.0001)
+        
+        # Fourier Features
+        self.fourier_x = FourierFeatures(num_octaves=6)
+        self.fourier_d = FourierFeatures(num_octaves=4)
+
+    def forward(self, rays_o, rays_d, iteration_k):
+        """
+        rays_o: (M, 3) camera origins
+        rays_d: (M, 3) normalized ray directions
+        iteration_k: current training iteration number
+        """
+        M = rays_o.shape[0]
+        
+        # 1. Find surface intersection via root finding
+        # Sample 256 points uniformly along the ray (assume max depth 1.0 for simplicity, 
+        # or use a large bound)
+        t_uniform = torch.linspace(0, 1.0, self.num_root_points).to(rays_o.device)
+        t_uniform = t_uniform.unsqueeze(0).expand(M, -1) # (M, 256)
+        points_uniform = rays_o.unsqueeze(1) + t_uniform.unsqueeze(2) * rays_d.unsqueeze(1) # (M, 256, 3)
+        
+        # Compute occupancy
+        occ_uniform = self.occupancy_net(self.fourier_x(points_uniform.view(-1, 3))).view(M, -1) # (M, 256)
+        
+        # Secant method to find root where occ = 0.5
+        t_s = self.secant_method(t_uniform, occ_uniform, target=0.5) # (M,)
+        
+        # 2. Determine sampling interval
+        delta = max(self.delta_max * np.exp(-iteration_k * self.beta), self.delta_min)
+        
+        # 3. Sample points in interval and free space
+        # Interval samples: stratified sampling in [t_s - delta, t_s + delta]
+        t_interval = self.stratified_sampling(t_s, delta, self.num_samples_interval) # (M, 64)
+        points_interval = rays_o.unsqueeze(1) + t_interval.unsqueeze(2) * rays_d.unsqueeze(1) # (M, 64, 3)
+        
+        # Free space samples: 32 points between camera (0) and t_s - delta
+        # Handle rays where t_s - delta < 0 (camera inside object?) - assume t_s > delta usually
+        t_free_lower = torch.clamp(t_s - delta, min=0.0)
+        t_free = self.stratified_sampling(t_free_lower, t_free_lower, self.num_samples_free) # (M, 32)
+        # Note: stratified_sampling for free space is uniform in [0, t_s - delta]
+        # Implementation of stratified_sampling for [a, b] with N samples:
+        # t_i ~ U[a + (2i-2)/N * (b-a), a + 2i/N * (b-a)]
+        # Here a=0, b=t_s-delta.
+        
+        points_free = rays_o.unsqueeze(1) + t_free.unsqueeze(2) * rays_d.unsqueeze(1) # (M, 32, 3)
+        
+        # Combine samples
+        t_all = torch.cat([t_free, t_interval], dim=1) # (M, 96)
+        points_all = torch.cat([points_free, points_interval], dim=1) # (M, 96, 3)
+        
+        # 4. Compute Occupancy and Color
+        occ_all = self.occupancy_net(self.fourier_x(points_all.view(-1, 3))).view(M, -1, 1) # (M, 96, 1)
+        
+        # Compute normals for interval points (approximate using gradient of occ)
+        # Note: Computing gradient for every sample is expensive. 
+        # The paper conditions color on normal at surface. For volume rendering, 
+        # it uses n_i, h_i. The paper says "condition the color field on the surface normal n and feature vector h".
+        # It is ambiguous if n_i is the normal at x_i or the surface normal.
+        # Eq 7 uses n_i, h_i. Eq 8 uses n_s, h_s.
+        # Usually, for volume rendering in this context, h_i is the feature at x_i.
+        # n_i is likely the normal at x_i if we want view-dependent shading, 
+        # but surface normals are only well-defined at the surface.
+        # However, the paper states: "condition the color field c_theta on the surface normal n and a feature vector h of the geometry network".
+        # And Eq 7: c_theta(x_i, n_i, h_i, d).
+        # If n_i is the normal at x_i, we need gradients for all points.
+        # If n_i is the surface normal n_s, it is constant for the ray.
+        # Given "surface rendering... n_s", and "volume rendering... n_i", it implies n_i is computed at x_i.
+        # We will compute gradients for all points.
+        
+        points_all_flat = points_all.view(-1, 3)
+        points_all_flat.requires_grad_(True)
+        occ_all_flat = self.occupancy_net(self.fourier_x(points_all_flat)).view(M, -1)
+        
+        # Double backprop for gradient
+        grad_occ = torch.autograd.grad(occ_all_flat.sum(), points_all_flat, create_graph=True)[0] # (M*96, 3)
+        grad_occ = grad_occ.view(M, -1, 3) # (M, 96, 3)
+        normals = grad_occ / (grad_occ.norm(dim=2, keepdim=True) + 1e-8) # (M, 96, 3)
+        
+        # Get geometry features h_i from occupancy net hidden layers
+        # Assuming we can extract hidden features. For simplicity, we pass points to a feature extractor.
+        # In practice, this requires modifying the occupancy net to return features.
+        # We assume a helper function get_features(x) exists.
+        h_all = self.get_geometry_features(points_all) # (M, 96, H)
+        
+        # Encode viewing direction
+        d_encoded = self.fourier_d(rays_d.unsqueeze(1).expand(-1, points_all.shape[1], -1)) # (M, 96, 3)
+        
+        # Compute Color
+        # Concatenate: x_i, n_i, h_i, d
+        # Note: x_i is already encoded in the network? No, color net takes x, n, h, d.
+        # The paper says c_theta(x, n, h, d).
+        # We need to pass x_i to the color net.
+        
+        # Flatten for color net
+        points_all_flat = points_all.view(-1, 3)
+        normals_flat = normals.view(-1, 3)
+        h_all_flat = h_all.view(-1, h_all.shape[-1])
+        d_all_flat = d_encoded.view(-1, d_encoded.shape[-1])
+        
+        # Color net input: x, n, h, d
+        # We need to encode x for color net? The paper says "encode 3D location x ... using Fourier features".
+        # It doesn't specify if color net uses raw x or encoded x. 
+        # Standard NeRF uses encoded x. We assume encoded x.
+        x_encoded = self.fourier_x(points_all_flat)
+        
+        color_input = torch.cat([x_encoded, normals_flat, h_all_flat, d_all_flat], dim=-1)
+        colors = self.color_net(color_input).view(M, -1, 3) # (M, 96, 3)
+        
+        # 5. Volume Rendering
+        # Alpha = 1 - exp(-sigma * delta). Here alpha = occupancy.
+        # But wait, Eq 7 uses o_theta directly as alpha.
+        # Alpha values are o_theta.
+        alphas = occ_all.squeeze(-1) # (M, 96)
+        
+        # Transmittance
+        # T_i = prod_{j<i} (1 - alpha_j)
+        # Compute cumulative product
+        one_minus_alpha = 1.0 - alphas
+        T = torch.cumprod(one_minus_alpha, dim=1) # (M, 96)
+        T = torch.cat([torch.ones(M, 1).to(T.device), T[:, :-1]], dim=1) # Shift right, T_0 = 1
+        
+        # Weighted sum
+        weights = alphas * T # (M, 96)
+        C_v = torch.sum(weights.unsqueeze(2) * colors, dim=1) # (M, 3)
+        
+        return C_v
+
+    def secant_method(self, t, occ, target=0.5, num_steps=8):
+        # Simple secant method implementation
+        # t: (M, N), occ: (M, N)
+        # Find index where sign changes
+        # This is a simplified placeholder for the actual root finding logic
+        # In practice, one would find the bracket and iterate
+        # For the purpose of this article, we assume a robust root finder is available
+        # or implemented via binary search if secant is unstable.
+        # The paper specifies secant with 8 steps.
+        pass # Implementation detail omitted for brevity, assumes standard numerical method
+
+    def stratified_sampling(self, t_center, delta, N):
+        # Stratified sampling in [t_center - delta, t_center + delta]
+        # t_center: (M,), delta: scalar or (M,)
+        # Returns: (M, N)
+        lower = t_center - delta
+        upper = t_center + delta
+        # Uniform samples within sub-intervals
+        # t_i ~ U[lower + (2i-2)/N * 2*delta, lower + 2i/N * 2*delta]
+        # Width of sub-interval is 2*delta/N
+        w = 2 * delta / N
+        i = torch.arange(N).to(t_center.device)
+        # Random offset within each sub-interval
+        u = torch.rand_like(t_center).unsqueeze(1) # (M, 1)
+        t_samples = lower.unsqueeze(1) + (2*i - 1) * w.unsqueeze(0) + u * w.unsqueeze(0)
+        return t_samples
+
+    def get_geometry_features(self, points):
+        # Placeholder for extracting hidden layer outputs from occupancy_net
+        pass
+
+    def compute_loss(self, C_v, C_obs):
+        L_rec = torch.mean(torch.abs(C_v - C_obs))
+        
+        # Regularization
+        # Sample surface points x_s
+        # Compute normals n_s
+        # Perturb x_s to x_s + eps
+        # Compute n_s_eps
+        # L_reg = mean(||n_s - n_s_eps||)
+        pass
+```
+
+## Operating characteristics
+*   **Time Complexity:** Surface rendering is twice as fast as volume rendering [S1]. The elimination of hierarchical two-stage sampling (required by NeRF) reduces computational overhead during inference [S1].
+*   **Memory Complexity:** Not explicitly given, but the use of explicit gradients/AD through the rendering equation implies standard memory usage for the computational graph. The method avoids storing large intermediate transmittance arrays if using analytic inversion, but the pseudocode above uses standard accumulation.
+*   **Performance:** On the DTU MVS dataset, UNISURF performs nearly on par with state-of-the-art implicit neural reconstruction methods like IDR, which use strong mask supervision, despite not using masks [S1].
+*   **Strengths:**
+    *   Does not require per-pixel object masks [S1].
+    *   Combines coarse geometry learning (volume) with precise surface refinement (surface) [S1].
+    *   Faster inference via surface rendering [S1].
+*   **Limitations:**
+    *   Requires careful tuning of the decay schedule parameters ($\beta, \Delta_{max}, \Delta_{min}$) [S1].
+    *   Initialization as a sphere is required [S1].
+    *   Free space artifacts can occur if not handled by the free-space sampling strategy [S1].
+
+## Background
+UNISURF was introduced in 2021 by Yariv et al. in the paper "UNISURF: Unifying Neural Implicit Surfaces and Radiance Fields for Multi-View Reconstruction" [S1]. It builds on the principles of Neural Radiance Fields (NeRF) and implicit surface representations like those used in IDR. The method addresses the limitation of surface rendering techniques that require input masks and the ambiguity of volume rendering techniques that do not optimize implicit surfaces directly [S1].
+
+## Sources
+[S1] UNISURF: Unifying Neural Implicit Surfaces and Radiance Fields for Multi-View Reconstruction, https://doi.org/10.1109/iccv48922.2021.00554, fetched 2026-10-26

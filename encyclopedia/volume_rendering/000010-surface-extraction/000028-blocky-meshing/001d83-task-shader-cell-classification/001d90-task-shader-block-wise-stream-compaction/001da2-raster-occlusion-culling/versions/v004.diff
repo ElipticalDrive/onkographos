@@ -1,0 +1,168 @@
+--- v003.md
++++ v004.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A min-max texture storing the minimum and maximum scalar values for each voxel block; the current camera view matrix and projection matrix; the isovalue for isosurface extraction.
++- **Input:** A min-max texture storing the minimum and maximum scalar values for each voxel block; the current camera view matrix and projection matrix; the isovalue for isosurface extraction [S3][S4, unofficial].
+ - **Output:** A dense list of indices representing the PVS ($PVS_{curr}$) of occupied blocks, and optionally a secondary list ($PVS_{curr-prev}$) of blocks visible since the previous frame [S3][S4, unofficial].
+ 
+@@ -66,69 +66,72 @@
+ 
+ ```python
+-# Task Shader: Block-wise Stream Compaction
+-# Input: min_max_texture, isovalue, block_coords
+-# Output: task_struct (baseID, num_occupied_blocks, block_occupancy_index)
++import math
+ 
+-task_struct = Task()
+-task_struct.baseID = 0
+-task_struct.num_occupied_blocks = 0
+-task_struct.block_occupancy_index = [0] * 256
++# Data Structures
++class TaskStruct:
++    def __init__(self):
++        self.baseID = 0
++        self.num_occupied_blocks = 0
++        self.block_occupancy_index = [0] * 256
+ 
+-# Analyze 256 blocks
+-for i in range(256):
+-    block_coord = get_block_coord(i)
+-    min_val, max_val = sample_min_max_texture(block_coord)
+-    
+-    # Check occupancy
+-    if isovalue >= min_val and isovalue <= max_val:
+-        task_struct.block_occupancy_index[i] = 1
+-        task_struct.num_occupied_blocks += 1
++def get_block_coord(linear_idx, block_dims):
++    # Converts linear index to 3D block coordinates
++    z = linear_idx // (block_dims[0] * block_dims[1])
++    y = (linear_idx % (block_dims[0] * block_dims[1])) // block_dims[0]
++    x = (linear_idx % (block_dims[0] * block_dims[1])) % block_dims[0]
++    return (x, y, z)
+ 
+-# Dispatch mesh shader workgroups
+-# Each workgroup handles 32 blocks
+-num_workgroups = ceil(task_struct.num_occupied_blocks / 32.0)
+-for wg in range(num_workgroups):
+-    dispatch_mesh_shader(wg, task_struct)
++def sample_min_max_texture(coord, min_max_texture):
++    # Standard 3D texture lookup returning (min_val, max_val)
++    return min_max_texture[coord]
+ 
+-# Mesh Shader: Proxy Geometry Creation
+-# Input: task_struct, mesh_shader_id
+-# Output: vertex_buffer, index_buffer
++def create_quad_proxy(block_coord, block_dims, view_proj_matrix):
++    # Generates a single quad (2 triangles, 6 vertices) representing the block's
++    # bounding box projected into screen space with minimal z-coordinate.
++    # (Standard projection math omitted; returns vertex positions and indices)
++    pass
+ 
+-occupied_count = 0
+-for i in range(256):
+-    if task_struct.block_occupancy_index[i] == 1:
+-        # Compute offset for this occupied block
+-        offset = occupied_count
+-        occupied_count += 1
+-        
+-        # Create proxy geometry (quad) for block at index i
+-        # Quad is bounding box projected to screen space with minimal z
+-        create_quad_proxy(i, offset)
++def run_raster_occlusion_culling(volume_dims, block_dims, isovalue, min_max_texture, view_proj_matrix):
++    # Calculate total blocks
++    num_blocks_x = volume_dims[0] // block_dims[0]
++    num_blocks_y = volume_dims[1] // block_dims[1]
++    num_blocks_z = volume_dims[2] // block_dims[2]
++    total_blocks = num_blocks_x * num_blocks_y * num_blocks_z
++    visibility_buffer = [0] * total_blocks
+ 
+-# Fragment Shader: Visibility Buffer Update
+-# Input: fragment_depth, block_id
+-# Output: visibility_buffer
++    # 1. Task Shader: Block-wise Stream Compaction
++    task_struct = TaskStruct()
++    for i in range(256):
++        coord = get_block_coord(i, block_dims)
++        min_val, max_val = sample_min_max_texture(coord, min_max_texture)
++        if isovalue >= min_val and isovalue <= max_val:
++            task_struct.block_occupancy_index[i] = 1
++            task_struct.num_occupied_blocks += 1
+ 
+-if gl_FragDepth <= depth_buffer[gl_FragCoord.x][gl_FragCoord.y]:
+-    # Passes early depth test
+-    if representative_fragment_test_passed():
+-        # Passes representative fragment test
++    # 2. Mesh Shader: Proxy Geometry Creation
++    # Dispatch mesh shader workgroups. Each workgroup handles 32 blocks.
++    quad_list = []
++    occupied_count = 0
++    for i in range(256):
++        if task_struct.block_occupancy_index[i] == 1:
++            coord = get_block_coord(i, block_dims)
++            quad_list.append(create_quad_proxy(coord, block_dims, view_proj_matrix))
++            occupied_count += 1
++
++    # 3. Rasterization & Visibility Buffer Update
++    # Rasterize proxy geometry with glDepthFunc(GL_LEQUAL)
++    # Representative Fragment Test extension allows early-depth termination
++    # if at least one fragment shader instance was invoked.
++    for block_id, quad in enumerate(quad_list):
++        # Simulate fragment shader invocation and depth test
++        # If fragment passes early depth test and representative fragment test:
+         visibility_buffer[block_id] = 1
+ 
+-# Compute Shader: PVS Generation
+-# Input: visibility_buffer
+-# Output: PVS_curr, PVS_curr_prev
+-
+-PVS_curr = []
+-PVS_curr_prev = []
+-
+-# Bit compactification
+-for block_id in range(total_blocks):
+-    if visibility_buffer[block_id] == 1:
+-        PVS_curr.append(block_id)
+-
+-# Determine blocks visible since last frame
+-# (Implementation detail: compare PVS_curr with previous frame's PVS)
+-# PVS_curr_prev = PVS_curr - PVS_prev
++    # 4. Compute Shader: PVS Generation
++    # Bit compactification kernel creates dense list of indices
++    PVS_curr = [i for i, val in enumerate(visibility_buffer) if val == 1]
++    # Final compute shader pass builds PVS_curr-prev (blocks visible since last frame)
++    PVS_curr_prev = [] # Implementation depends on temporal coherence comparison
++    return PVS_curr, PVS_curr_prev
+ ```
+ 
+@@ -136,14 +139,17 @@
+ 
+ ### [Occlusion Culling Granularity](1671-occlusion-culling-granularity.md)
+-Configures the spatial resolution for raster occlusion culling to match the leaf-level granularity of a reference ray-marching octree. It ensures that the culling proxy geometry aligns with the underlying extraction data structures for direct performance comparison.
++Configures the spatial resolution for raster occlusion culling to match the leaf-level granularity of a reference ray-marching octree. It ensures that the culling proxy geometry aligns with the underlying extraction data structures for direct performance comparison. Choose this variant when precise granularity matching between culling and extraction is required.
+ 
+ ### [Volumetric Occlusion Culling via Occlusion Queries](4594-volumetric-occlusion-culling-via-occlusion-queries.md)
+-Determines if a voxel block is visible by rasterizing its bounding box and checking for fragment depth test passes. It differs from standard binary occlusion culling by incorporating accumulated opacity into the depth test, ensuring that blocks behind fully opaque foreground volumes are correctly culled.
++Determines if a voxel block is visible by rasterizing its bounding box and checking for fragment depth test passes. It differs from standard binary occlusion culling by incorporating accumulated opacity into the depth test, ensuring that blocks behind fully opaque foreground volumes are correctly culled. Choose this variant when opacity-aware culling is necessary.
+ 
+ ### [Hierarchical Raster Occlusion Culling](6061-hierarchical-raster-occlusion-culling.md)
+-A fully GPU-driven technique that reduces rasterization overhead by performing visibility tests on a coarse hierarchy of group nodes rather than individual leaf objects, refining results via ray traversal to the leaf level. It distinguishes itself from standard Raster Occlusion Culling by replacing the exhaustive rasterization of all leaf proxies with a hierarchical culling pass, and from Iterative Raster Occlusion Culling by utilizing a hybrid raster-ray approach for full hierarchy descent.
++A fully GPU-driven technique that reduces rasterization overhead by performing visibility tests on a coarse hierarchy of group nodes rather than individual leaf objects, refining results via ray traversal to the leaf level. It distinguishes itself from standard Raster Occlusion Culling by replacing the exhaustive rasterization of all leaf proxies with a hierarchical culling pass, and from Iterative Raster Occlusion Culling by utilizing a hybrid raster-ray approach for full hierarchy descent. Choose this variant for scenes with deep hierarchies to minimize rasterization costs.
+ 
+ ### Hierarchical Visibility Mask
+-A visibility culling technique where triangles are marked as visible and forwarded to graphics hardware rather than being rendered by the CPU, allowing the GPU to determine actual visibility and handle occlusion [S5, book]. It projects the polygon onto the top meta-tile of a hierarchical structure and recursively checks only those subtiles in which the polygon might be visible, leading to a logarithmic search [S5, book]. If a meta-cell size is approximately the size of a single pixel, it stops recursion and forwards a single point with an associated normal to the graphics hardware [S5, book]. The normal is estimated by calculating the gradient of the field [S5, book]. It differs from Greene's implementation by not rendering the visible portion on the CPU; instead, it relies on the graphics accelerator to determine visible pieces and render them correctly [S5, book].
++A visibility culling technique where triangles are marked as visible and forwarded to graphics hardware rather than being rendered by the CPU, allowing the GPU to determine actual visibility and handle occlusion [S5, book]. It projects the polygon onto the top meta-tile of a hierarchical structure and recursively checks only those subtiles in which the polygon might be visible, leading to a logarithmic search [S5, book]. If a meta-cell size is approximately the size of a single pixel, it stops recursion and forwards a single point with an associated normal to the graphics hardware [S5, book]. The normal is estimated by calculating the gradient of the field [S5, book]. It differs from Greene's implementation by not rendering the visible portion on the CPU; instead, it relies on the graphics accelerator to determine visible pieces and render them correctly [S5, book]. Choose this variant when CPU rendering overhead must be avoided.
++
++### Cluster Visibility Buffer Culling
++A culling technique using a visibility buffer to prune non-visible clusters, performing back-face and occlusion culling without requiring a hierarchical Z-buffer or storing cluster bounds/normal cones [S6]. It avoids full cell rasterisation of clusters that are fully occluded or backfacing by storing visibility bits per cluster [S6]. Choose this variant when working with clustered grid cell data structures and deferred splatting pipelines.
+ 
+ ## Operating characteristics
+@@ -163,5 +169,6 @@
+ [S1] Efficient Direct Isosurface Rasterization of Scalar Volumes, https://doi.org/10.1111/cgf.14670, fetched 2026-10-27
+ [S2] Voxel Cone Tracing - GitHub, https://raw.githubusercontent.com/righier/gidemo/master/report.pdf, fetched 2026-10-27 (unofficial)
+-[S3] Efficient Direct Isosurface Rasterization of Scalar Volumes, https://www.uni-weimar.de/en/chairs/computer-science-department/vr/research/real-time-rendering/efficient-direct-isosurface-rasterization-of-scalar-volumes/, fetched 2026-11-01
++[S3] Efficient Direct Isosurface Rasterization of Scalar Volumes, https://www.uni-weimar.de/en/media/chairs/computer-science-department/vr/research/real-time-rendering/efficient-direct-isosurface-rasterization-of-scalar-volumes/, fetched 2026-11-01
+ [S4] Efficient Direct Isosurface Rasterization of Scalar Volumes - EG, https://diglib.eg.org/items/8a65e0f0-c048-4fce-9d0b-5acf07452485, fetched 2026-10-30 (unofficial)
+-[S5] Fast Isosurface Extraction Methods for Large Image Data sets, https://publications.sci.utah.edu/publications/livnat08/Large-scale-isosurface08.pdf, fetched 2026-10-28 (book)+[S5] Fast Isosurface Extraction Methods for Large Image Data sets, https://publications.sci.utah.edu/publications/livnat08/Large-scale-isosurface08.pdf, fetched 2026-10-28 (book)
++[S6] Clustered Grid Cell Data Structure for Isosurface Rendering, https://doi.org/10.24132/jwscg.2020.28.2, fetched 2026-10-26

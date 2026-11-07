@@ -3,203 +3,137 @@
 Also called: Adaptive Space Subdivision, N³-tree
 
 ## Overview
-The N³-tree with Brick Pool and Node Pool is a hierarchical data structure for voxel rendering that combines an N³-tree for spatial subdivision with a brick pool for volume data and a node pool for tree structure, allowing efficient level-of-detail (LOD) and visibility culling [S1, unofficial]. It differs from sibling methods like [Bricked Volume Hierarchy](5036-bricked-volume-hierarchy.md) by storing all tree nodes in a single 3D texture (the node pool) and using a single pointer per node to access children, rather than storing eight explicit child pointers and neighbor pointers [S1, unofficial]. This design reduces memory requirements by 16x compared to Gobbetti et al. [GMAG08] and improves cache coherence during traversal [S1, unofficial].
+The N³-tree with Brick Pool and Node Pool is a hierarchical data structure for voxel rendering that combines an N³-tree for spatial subdivision with a brick pool for volume data and a node pool for tree structure, allowing efficient Level-of-Detail (LOD) and visibility culling [S1, unofficial]. It differs from sibling methods like [Brick Caching with LRU Replacement](879-brick-caching-with-lru-replacement.md) by integrating the tree traversal logic directly into the GPU shader using a compact, cache-coherent node representation, and from [Bricked Volume Hierarchy](5036-bricked-volume-hierarchy.md) by using a single pointer per node to reduce memory overhead and improve cache coherence [S1, unofficial].
 
 ## How it works
-**Inputs:** Ray origins and directions (computed via rasterization of proxy geometry), volume bounding box, N³-tree structure parameters ($N$, $M$).
-**Outputs:** Accumulated color and opacity for each pixel.
+**Inputs and Outputs:**
+*   **Input:** A volumetric dataset, a viewing ray (origin and direction), and the N³-tree structure parameters ($N$, $M$).
+*   **Output:** Accumulated color and opacity for the ray.
 
 **Data Structures:**
-1.  **Node Pool:** A 3D texture organized into blocks of $N^3$ nodes. Each node is stored as 64 bits (two 32-bit values, fitting in a single luminance-alpha texel) [S1, unofficial]. The layout is:
-    *   Bits 0-29 (30 bits): Child pointer (offset to the block of $N^3$ children). Zero means no children [S1, unofficial].
-    *   Bit 30 (1 bit): Max refinement flag. Indicates if the node is refined to maximum or if original volume data remains [S1, unofficial].
-    *   Bit 31 (1 bit): Constant/Brick flag. 0 = Brick, 1 = Constant [S1, unofficial].
-    *   Bits 32-61 (30 bits) or 32-63 (32 bits):
-        *   If Brick: Pointer to an $M^3$ brick in the Brick Pool [S1, unofficial].
-        *   If Constant: Average RGBA8 value (4 * 8 bits) [S1, unofficial].
-2.  **Brick Pool:** A large 3D texture containing the actual voxel data for leaf nodes. Bricks are of size $M^3$ (typically $M=32$) [S1, unofficial].
+1.  **Node Pool:** A 3D texture organized into blocks of $N^3$ nodes. Each node is stored as 64 bits (two 32-bit values) to fit in a single texel of a luminance-alpha texture [S1, unofficial]. The layout is:
+    *   **30 bits:** Child pointer (for non-leaves; zero means no child).
+    *   **1 bit:** Max refinement flag (indicates if the node is refined to maximum or if original volume contains more data).
+    *   **1 bit:** Constant/Brick flag (stores whether content is a constant RGBA8 value or described by a brick).
+    *   **30/32 bits:** Depending on the flag:
+        *   If Brick: A pointer to an $M^3$ brick in the Brick Pool (30 bits).
+        *   If Constant: The average RGBA8 value (4 * 8 bits) for homogenous leaves [S1, unofficial].
+2.  **Brick Pool:** A large 3D texture containing all bricks. Bricks are $M^3$ voxel grids (typically $M=32$) with 1-voxel padding on all sides for trilinear interpolation [S1, unofficial][S2, unofficial]. The stored voxel count per brick is $V_{brick} = (B_x+1)(B_y+1)(B_z+1)$, where $B_x=B_y=B_z=M$ [S1, unofficial].
 
 **Parameters:**
 *   $N$: Branching factor of the tree. $N=2$ is a standard octree. Trade-off: low $N$ for memory efficiency (deep tree), high $N$ for traversal efficiency (shallow tree) [S1, unofficial].
 *   $M$: Side length of a brick in voxels. Typically $M=32$ [S1, unofficial].
 
 **Algorithm Steps:**
-
-1.  **Initialization:** Rasterize proxy geometry (e.g., screen-covering quad on near plane) to deliver ray origins and directions to the fragment shader. Compute entry and exit points using depth buffers (e.g., front-facing surfaces for entry, back-facing for exit) [S1, unofficial].
+1.  **Initialization:** Rasterize proxy geometry (e.g., a screen-covering quad on the near plane or the volume bounding box) to deliver ray origins and directions to the fragment shader. Compute entry and exit points using depth buffers (e.g., front-facing surfaces for entry, back-facing for exit) [S1, unofficial].
 2.  **Iterative Top-Down Descent:**
-    *   Start at the ray origin. Let $x \in [0, 1]^3$ be the ray's local coordinates in the volume's bounding box.
-    *   Let $c$ be the current node pointer (initially the root).
-    *   Calculate child offset: $offset = \lfloor x \cdot N \rfloor$ [S1, unofficial].
-    *   Fetch child node data from the Node Pool at address $c + offset$ [S1, unofficial].
-    *   Update local coordinates: $x \leftarrow x \cdot N - offset$ [S1, unofficial].
-    *   Repeat until the LOD condition is met.
-    *   *Note:* Recursive DDA is avoided due to GPU inefficiency with indexable memory stacks; iterative descent is used instead [S1, unofficial].
-3.  **LOD Check:** Stop descent when the current node's resolution is sufficient such that a voxel projects to at most one pixel. This determines the appropriate LOD dynamically in the shader [S1, unofficial].
+    *   Start at the ray origin. Locate the current position in the N³-tree using local coordinates $x \in [0, 1]^3$ relative to the volume's bounding box.
+    *   Calculate the child offset: $offset = \lfloor x \cdot N \rfloor$ (integer part of $x \cdot N$).
+    *   Fetch the child node from the Node Pool at `pointer + offset`.
+    *   Update local coordinates: $x \leftarrow x \cdot N - offset$.
+    *   Repeat until the LOD condition is met [S1, unofficial].
+3.  **LOD Check:** Stop descent when the current node's resolution is sufficient such that a voxel projects to at most one pixel. This determines the appropriate LOD dynamically in the shader, avoiding the need for the structure to explicitly store correct LODs [S1, unofficial].
 4.  **Node Evaluation:**
-    *   **If Constant:** Integrate the constant RGBA8 value analytically along the ray distance traversed within the node [S1, unofficial].
+    *   **If Constant:** Integrate the constant value analytically along the ray distance traversed within the node.
     *   **If Brick:** Perform standard ray-marching through the brick until leaving the node. The new position serves as the origin for the next descent [S1, unofficial].
-5.  **Mipmap Collection:** During top-down traversal, collect bricks required for high-quality filtering into a small queue of three elements. These bricks correspond to nodes encountered during descent [S1, unofficial].
-6.  **Brick Sampling:** Perform ray-marching through the brick using quadrilinear filtering across three mipmap levels to approximate cone integration and reduce aliasing [S1, unofficial]. Three levels are the minimum to ensure proper blending when the filter kernel exceeds the next mipmap level [S1, unofficial].
-7.  **Accumulation:** Accumulate color and opacity values using pre-integrated transfer functions [S1, unofficial].
+5.  **Mipmap Collection:** During top-down traversal, collect bricks required for high-quality filtering into a small queue of three elements. This queue is implemented in shader registers without dynamic indexing [S1, unofficial].
+6.  **Brick Sampling:** Perform ray-marching through the brick using quadrilinear filtering across the three collected mipmap levels to approximate cone integration and reduce aliasing [S1, unofficial].
+7.  **Accumulation:** Accumulate color and opacity using pre-integrated transfer functions. Lighting (e.g., pseudo-Phong) can be accounted for using the density gradient as the normal [S1, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 # Constants
 N = 2  # Branching factor
 M = 32 # Brick size
-MAX_ITERATIONS = 100 # Safety limit
+MAX_QUEUE_SIZE = 3
 
-def render_ray(ray_origin, ray_direction, node_pool_texture, brick_pool_texture):
-    # 1. Initialization: Compute entry/exit in local coordinates [0,1]^3
-    # Assuming proxy geometry rasterization provided these values
-    t_entry, t_exit = compute_entry_exit(ray_origin, ray_direction)
+# Data access functions (abstracted)
+def fetch_node(node_ptr, offset):
+    """Fetches a 64-bit node from the Node Pool 3D texture."""
+    # Returns: {child_ptr, is_max_refined, is_constant, value_or_brick_ptr}
+    pass
+
+def fetch_brick(brick_ptr, x, y, z):
+    """Samples the Brick Pool 3D texture with quadrilinear filtering."""
+    pass
+
+def ray_march_brick(brick_ptr, ray_origin, ray_direction, node_extent):
+    """Marches through a brick, collecting mipmap levels."""
+    # Implementation details for quadrilinear filtering across 3 mip levels
+    # Returns accumulated color/opacity for this segment
+    pass
+
+def integrate_constant(constant_value, distance):
+    """Analytically integrates a constant value over a distance."""
+    # Returns accumulated color/opacity
+    pass
+
+def main(ray_origin, ray_direction, root_node_ptr):
+    # 1. Initialization: Entry/Exit points computed externally
+    current_pos = ray_origin
+    current_node_ptr = root_node_ptr
+    local_coords = compute_local_coords(ray_origin) # x in [0,1]^3
     
-    # Local coordinates of entry point
-    x = ray_origin + ray_direction * t_entry
-    x_local = normalize_to_0_1(x)
+    # Queue for mipmap bricks
+    mipmap_queue = [] 
     
-    # Current node pointer (root is typically at index 0 or specific base)
-    current_node_ptr = 0 
-    
-    accumulated_color = vec4(0.0)
-    accumulated_opacity = 0.0
-    
-    # 2. Iterative Top-Down Descent
-    for _ in range(MAX_ITERATIONS):
+    while current_pos is within volume:
+        # 2. Iterative Descent
         # Calculate child offset
-        offset = floor(x_local * N)
+        offset = floor(local_coords * N)
         
-        # Fetch node data from Node Pool
-        # Node is 64-bit, split into two 32-bit values or handled as a struct
-        node_data = fetch_node(node_pool_texture, current_node_ptr + offset)
-        
-        # Parse node data
-        child_ptr = node_data.child_pointer
-        is_max_refined = node_data.max_refinement_flag
-        is_constant = node_data.constant_brick_flag
-        value_or_brick_ptr = node_data.value_or_brick_ptr
+        # Fetch child node
+        node = fetch_node(current_node_ptr, offset)
         
         # Update local coordinates for next level
-        x_local = x_local * N - offset
+        local_coords = local_coords * N - offset
         
-        # Check LOD condition
-        # Stop if resolution is sufficient (voxel <= 1 pixel)
-        # This check is dynamic and performed in shader
-        if is_lod_sufficient(x_local, current_node_ptr):
+        # 3. LOD Check
+        # Check if current resolution is sufficient (voxel <= 1 pixel)
+        if is_lod_sufficient(node, local_coords):
             break
             
-        # Move to child
-        if child_ptr == 0:
-            # No children, treat as leaf/constant if flag indicates
-            # Or handle as empty space
-            break
-        current_node_ptr = child_ptr
-
+        current_node_ptr = node.child_ptr # Move to child
+        # Note: In a real implementation, 'current_node_ptr' logic depends on 
+        # whether we are traversing the tree structure or evaluating the leaf.
+        # The source describes stopping at the leaf/LOD node.
+        
     # 4. Node Evaluation
-    # Determine distance traversed in this node
-    # Note: t_entry/t_exit are global ray parameters. 
-    # We need to map the node's spatial extent to ray parameter space.
-    # For simplicity, assume we have the node's bounds in local coords [0,1]^3
-    node_bounds = get_node_bounds(current_node_ptr, N) # Returns min/max in [0,1]^3
-    
-    # Intersect ray with node bounds to get t_start_node, t_end_node
-    t_start_node, t_end_node = intersect_ray_with_node_bounds(ray_origin, ray_direction, node_bounds)
-    
-    # Clamp to ray segment [t_entry, t_exit]
-    t_start = max(t_start_node, t_entry)
-    t_end = min(t_end_node, t_exit)
-    
-    if t_start >= t_end:
-        return accumulated_color, accumulated_opacity
-
-    # If constant node
-    if is_constant:
-        color = value_or_brick_ptr # RGBA8 value
-        opacity = 1.0 # Or specific opacity from constant value
-        # Analytical integration
-        # Simple accumulation for constant density
-        step = (t_end - t_start) / M # Approximate step size for integration
-        # In practice, integrate over the distance
-        # C_out = C_in * (1 - e^(-sigma * d)) + C_source * (1 - e^(-sigma * d))
-        # Simplified for constant RGBA:
-        accumulated_color = accumulated_color * (1 - opacity) + color * opacity
-        accumulated_opacity = 1.0 - (1.0 - accumulated_opacity) * (1.0 - opacity)
+    if node.is_constant:
+        # Integrate analytically
+        segment_dist = compute_distance_in_node(current_pos, node.extent)
+        color, opacity = integrate_constant(node.value, segment_dist)
     else:
-        # If brick node
-        brick_ptr = value_or_brick_ptr
-        # Collect mipmap levels during traversal (queue of 3)
-        mipmap_levels = collect_mipmaps(current_node_ptr)
+        # Collect bricks for mipmap queue during traversal if not already done
+        # The source implies collecting during top-down traversal.
+        # Here we assume the queue is populated or we fetch the specific brick.
+        brick_ptr = node.value_or_brick_ptr
         
-        # Ray-march through brick
-        # Use quadrilinear filtering across 3 mipmap levels
-        color, opacity = ray_march_brick(ray_origin, ray_direction, t_start, t_end, 
-                                         brick_pool_texture, brick_ptr, mipmap_levels)
-        accumulated_color = accumulated_color * (1 - opacity) + color * opacity
-        accumulated_opacity = 1.0 - (1.0 - accumulated_opacity) * (1.0 - opacity)
+        # 5 & 6. Brick Sampling with Mipmap Collection
+        # The source specifies a queue of 3 elements for high-quality filtering.
+        # We perform ray marching through the brick using these levels.
+        color, opacity = ray_march_brick(brick_ptr, current_pos, ray_direction, node.extent)
         
-        # Update ray origin for next descent
-        ray_origin = ray_origin + ray_direction * t_end
-        x_local = normalize_to_0_1(ray_origin)
-        current_node_ptr = 0 # Restart from root for next segment? 
-                             # Or continue descent from where we left off?
-                             # The text says "new position then serves as the origin for the next descent"
-                             # implying a restart or continued traversal. 
-                             # Given the iterative nature, we likely restart or adjust x_local.
-                             # The text implies "descent stops... new position serves as origin for next descent"
-                             # So we restart the top-down process from the new origin.
-                             # However, to be efficient, we might continue. 
-                             # The text says "mostly the same pointers... will be followed"
-                             # suggesting we might not restart from root.
-                             # But the algorithm description says "Start at ray origin... Locate...".
-                             # Let's assume we restart the descent logic for the new segment.
-                             # But wait, if we are inside a brick, we march until we leave.
-                             # Then we are at a new point. We need to find which node that point is in.
-                             # So we restart the top-down search from the root for the new point.
-                             # This is inefficient. 
-                             # Re-reading: "The new position then serves as the origin for the next descent."
-                             # This implies the descent process is restarted.
-                             # However, "mostly the same pointers... will be followed" suggests cache benefits.
-                             # Let's stick to the text: restart descent.
-                             pass
-
-    return accumulated_color, accumulated_opacity
-
-def is_lod_sufficient(x_local, node_ptr):
-    # Check if current node's resolution is sufficient
-    # This is a dynamic check in the shader
-    # Not given in the sources. [G]
-    return False # Placeholder
-
-def collect_mipmaps(node_ptr):
-    # Collect bricks for 3 mipmap levels
-    # Implemented in shader registers
-    # Not given in the sources. [G]
-    return [0, 1, 2]
-
-def ray_march_brick(origin, direction, t_start, t_end, brick_pool, brick_ptr, mipmap_levels):
-    # Ray-march through brick using quadrilinear filtering
-    # Not given in the sources. [G]
-    return vec4(0.0), 0.0
+    return accumulate(color, opacity)
 ```
 
 ## Subtopics
 
 ### N3-Tree Structure Update Strategy
-A strategy to modify the hierarchical structure when LOD bounds are reached, either by merging bricks or decomposing them [S2, unofficial]. If the useful LOD level is higher than the upper bound of bricks connected to the same tree node, they are merged [S2, unofficial]. If the lower bound is reached, the concerned brick is decomposed into $N^3$ new bricks [S2, unofficial]. This aspect was not implemented in the described work and is left for future work [S2, unofficial].
+A strategy to modify the hierarchical structure when LOD bounds are reached, either by merging bricks or decomposing them [S2, unofficial]. If the useful LOD level is higher than the upper bound of bricks connected to the same tree node, those bricks are merged [S2, unofficial]. If the lower bound is reached, the concerned brick is decomposed into $N^3$ new bricks [S2, unofficial]. This aspect was not implemented in the described work and is left for future work [S2, unofficial].
 
 ## Operating characteristics
-*   **Memory Efficiency:** Reduces memory requirements by 16x compared to Gobbetti et al. [GMAG08] by using a single pointer per node instead of eight child pointers and neighbor pointers [S1, unofficial].
-*   **Cache Coherence:** Improves cache coherence during traversal because children of a node are grouped in one block in the 3D texture node pool, benefiting from 3D texture caches on modern GPUs [S1, unofficial].
-*   **Traversal Efficiency:** Iterative descent is used instead of recursive DDA to avoid inefficiencies with indexable memory stacks on GPUs [S1, unofficial].
-*   **Performance:** The performance cost of using 64-bit nodes is minor as they fit in a single texel of a luminance-alpha texture [S1, unofficial].
-*   **Limitations:** The structure does not exhibit neighbor pointers between adjacent nodes, which might limit some filtering techniques, but this is mitigated by the mipmap collection strategy [S1, unofficial].
+*   **Memory Efficiency:** Uses a single pointer per node (stored in a 3D texture node pool) instead of eight child pointers and neighbor pointers, reducing memory requirements by 16x compared to Gobbetti et al. [GMAG08] [S1, unofficial].
+*   **Cache Coherence:** Grouping children of a node in one block of the 3D texture improves cache coherence during traversal, leveraging 3D texture caches on modern GPUs [S1, unofficial].
+*   **Traversal Efficiency:** Iterative descent is used instead of recursive DDA to avoid inefficient dynamic indexable memory stacks on GPUs [S1, unofficial].
+*   **Performance:** The performance cost of using 64-bit nodes is minor as they fit in a single texel [S1, unofficial].
+*   **Limitations:** The method relies on the GPU's 3D texture cache; performance may vary based on hardware cache efficiency. The structure update strategy (merging/decomposing) is not implemented in the base method [S2, unofficial].
 
 ## Background
-The N³-tree with Brick Pool and Node Pool was introduced in the paper "Ray-Guided Streaming for Efficient and Detailed Voxel Rendering" by Coeurjolly et al. (2009) [S1, unofficial]. It builds on the concept of adaptive space subdivision and N³-trees similar to [LHN05a] [S1, unofficial]. The method was designed to handle large volumetric models efficiently on GPUs by combining hierarchical spatial subdivision with efficient memory management for bricks.
+The method was introduced by Chabert et al. in 2009 [S1, unofficial]. It builds on the N³-tree concept similar to [LHN05a] and is well adapted to store regular data like voxels [S1, unofficial]. The approach addresses the need for efficient rendering of large volumetric models by combining adaptive space subdivision with GPU-friendly data structures [S1, unofficial].
 
 ## Sources
-[S1] Ray-Guided Streaming for Efficient and Detailed Voxel Rendering, https://www-sop.inria.fr/reves/Basilic/2009/CNLE09/CNLE09.pdf, fetched 2026-10-26 (unofficial)
+[S1] [PDF] Ray-Guided Streaming for Efficient and Detailed Voxel Rendering, https://www-sop.inria.fr/reves/Basilic/2009/CNLE09/CNLE09.pdf, fetched 2026-10-26 (unofficial)
 [S2] Représentation et algorithmes pour l'exploration interactive de volumes procéduraux étendus et détaillés, https://inria.hal.science/inria-00598406v1, fetched 2026-10-26 (unofficial)

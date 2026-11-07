@@ -1,94 +1,86 @@
 # Median Depth Rendering
 Also called: Depth Renderer (Median)
 ## Overview
-Median Depth Rendering computes the depth of a ray by determining the weighted median of sample depths along the ray, where weights are derived from the sample opacities. It differs from Expected Depth Rendering, which computes the weighted mean, by providing a robust estimate that is less sensitive to outliers or multi-modal depth distributions [S1, unofficial].
-## How it works
-**Inputs:**
-- `depths`: Array of sample depths along the ray, shape $(N,)$.
-- `weights`: Array of sample weights (typically opacity contributions), shape $(N,)$.
+Median Depth Rendering computes the depth of a ray by determining the weighted median of sample depths, where weights are derived from sample opacities [S1, unofficial]. Unlike Expected Depth Rendering, which calculates the weighted mean (center of mass) of depths, Median Depth Rendering is robust to outliers and discontinuities in the volume, providing a stable depth estimate that is less sensitive to noise or sparse sampling artifacts [8816-expected-depth-rendering.md]. It serves as a differentiable depth estimation method, though its differentiability properties differ from the smooth gradient continuity of the expected value approach [8816-expected-depth-rendering.md].
 
-**Outputs:**
-- `depth`: Scalar depth value for the ray.
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** A set of ray samples, each defined by a depth $d_i$ and an opacity weight $w_i$ (or transmittance/opacity product). The weights must be non-negative.
+- **Outputs:** A single scalar depth value $D$ for the ray, representing the weighted median depth.
 
 **Data Structures:**
-- `depths`: Floating-point array.
-- `weights`: Floating-point array, non-negative.
+- **Samples:** A list or array of tuples/structs $(d_i, w_i)$ for $i = 0 \dots N-1$, where $N$ is the number of samples along the ray.
+- **Weights:** The opacity weights $w_i$ associated with each sample.
 
 **Steps:**
-1.  **Sort:** Sort the samples based on `depths` in ascending order. Let the sorted depths be $d_{(1)}, d_{(2)}, \dots, d_{(N)}$ and the corresponding sorted weights be $w_{(1)}, w_{(2)}, \dots, w_{(N)}$.
-2.  **Cumulative Sum:** Compute the cumulative sum of the sorted weights:
-    $$ W_k = \sum_{i=1}^{k} w_{(i)} $$
-    for $k = 1, \dots, N$. Let $W_{total} = W_N$.
-3.  **Find Median Index:** Find the smallest index $k$ such that:
-    $$ W_k \ge \frac{W_{total}}{2} $$
-4.  **Output:** The median depth is $d_{(k)}$.
+1. **Collect Samples:** Gather all sample depths $d_i$ and their corresponding opacity weights $w_i$ along the ray.
+2. **Sort Samples:** Sort the samples based on their depth values $d_i$ in ascending order. Let the sorted indices be $p_0, p_1, \dots, p_{N-1}$ such that $d_{p_0} \le d_{p_1} \le \dots \le d_{p_{N-1}}$.
+3. **Compute Cumulative Weights:** Calculate the total weight $W_{total} = \sum_{i=0}^{N-1} w_i$. Then, compute the cumulative weight sum $C_k = \sum_{j=0}^{k} w_{p_j}$ for each sorted index $k$.
+4. **Find Median Index:** Identify the smallest index $k$ such that $C_k \ge \frac{W_{total}}{2}$. This index $k$ corresponds to the sample at the weighted median position.
+5. **Return Depth:** The output depth $D$ is the depth value $d_{p_k}$ of the sample at index $k$.
+
+**Parameters:**
+- **method:** The strategy for computing depth. Set to 'median' to use the weighted median depth [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Zero Total Weight:** If $W_{total} = 0$ (all opacities are zero), the median is undefined. A fallback value (e.g., 0 or the last sample depth) should be chosen [G].
+- **Precision:** Sorting and cumulative sum operations are sensitive to floating-point precision. Ensure stable sorting if duplicate depths exist.
+- **Differentiability:** The median operation is not differentiable at points where the median index changes abruptly. In practice, this can cause gradient discontinuities during optimization. Some implementations may use a differentiable approximation or rely on the fact that the median is computed without gradient tracking in some contexts [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def median_depth_rendering(depths: list[float], weights: list[float]) -> float:
+def median_depth_rendering(samples):
     """
-    Computes the weighted median depth.
+    Compute the weighted median depth from a list of samples.
     
     Args:
-        depths: List of sample depths along the ray.
-        weights: List of sample weights (opacities) corresponding to depths.
+        samples: List of tuples (depth, weight)
         
     Returns:
-        The weighted median depth.
+        float: The weighted median depth
     """
-    # Pair depths and weights, then sort by depth
-    samples = sorted(zip(depths, weights), key=lambda x: x[0])
+    if not samples:
+        return 0.0  # Fallback for empty samples [G]
     
-    # Extract sorted depths and weights
-    sorted_depths = [s[0] for s in samples]
-    sorted_weights = [s[1] for s in samples]
+    # Step 1: Sort samples by depth
+    sorted_samples = sorted(samples, key=lambda x: x[0])
     
-    # Calculate total weight
-    total_weight = sum(sorted_weights)
+    # Step 2: Compute total weight
+    total_weight = sum(w for _, w in sorted_samples)
     
-    # Handle edge case of zero total weight
     if total_weight == 0:
-        # [G] Return the first depth or a default value if no valid samples exist.
-        return sorted_depths[0] if sorted_depths else 0.0
-        
-    # Find the median index
+        return 0.0  # Fallback for zero weight [G]
+    
+    # Step 3: Find the median index
     cumulative_weight = 0.0
     half_weight = total_weight / 2.0
     
-    for i, w in enumerate(sorted_weights):
-        cumulative_weight += w
+    for depth, weight in sorted_samples:
+        cumulative_weight += weight
         if cumulative_weight >= half_weight:
-            return sorted_depths[i]
-            
-    # [G] Fallback if loop completes without returning (should not happen if total_weight > 0)
-    return sorted_depths[-1]
+            return depth
+    
+    # Fallback if loop completes without returning (should not happen if total_weight > 0)
+    return sorted_samples[-1][0]
 ```
-
-**Parameters:**
-- `method`: Strategy for computing depth. Set to `'median'` to use the weighted median depth [S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-- **Zero Weights:** If all weights are zero, the total weight is zero. The implementation must handle this, e.g., by returning the first depth or a default value [G].
-- **Precision:** Floating-point precision in cumulative sum calculation may affect the exact median index in cases of very small weights.
-- **Degenerate Input:** If $N=0$, the function should handle empty inputs gracefully [G].
 
 ## Subtopics
 
-### Expected Depth Rendering
-A renderer that computes the expected depth of a ray by calculating the weighted mean of sample depths. It is chosen when a smooth, average depth estimate is preferred over a robust median, but it is more sensitive to outliers in multi-modal depth distributions. Link: [Expected Depth Rendering](5666-expected-depth-rendering.md) (Note: Link placeholder as per instruction to link to siblings, though no specific file name provided for this variant, it is a sibling concept).
+### [Expected Depth Rendering](8816-expected-depth-rendering.md)
+Expected Depth Rendering computes the expected depth of a ray by calculating the weighted mean of sample depths. It serves as a differentiable depth estimation method, distinct from Median Depth Rendering which uses the median of weighted depths [8815-median-depth-rendering.md]. While Median Depth Rendering is robust to outliers, Expected Depth Rendering provides a smooth, differentiable estimate of the center of mass of the volume along the ray, making it suitable for optimization tasks where gradient continuity is prioritized over robustness.
 
 ## Operating characteristics
 - **Time Complexity:** $O(N \log N)$ due to sorting, where $N$ is the number of samples per ray.
-- **Memory Complexity:** $O(N)$ to store sorted depths and weights.
-- **Strengths:** Robust to outliers; provides a single, well-defined depth value even in complex scenes with multiple surfaces.
-- **Limitations:** Less smooth than expected depth; may jump between surfaces in noisy or sparse sampling scenarios.
-- **When to Use:** When robustness to outliers is critical, or when the depth distribution is multi-modal and a single representative depth is needed.
-- **When Not to Use:** When a smooth, average depth is required, or when computational efficiency is paramount and $N$ is large (consider approximate methods).
+- **Memory Complexity:** $O(N)$ to store the samples and cumulative weights.
+- **Strengths:** Robust to outliers and noise in the volume data. Provides a stable depth estimate even with sparse or noisy samples.
+- **Limitations:** Not differentiable at the median point, which can cause gradient issues in optimization. Less smooth than expected depth rendering.
+- **When to Use:** When robustness to outliers is more important than gradient smoothness, or when the volume data contains significant noise or discontinuities.
+- **When Not to Use:** When smooth, continuous gradients are required for optimization, or when the volume data is clean and well-sampled.
 
 ## Background
-Median Depth Rendering is part of the differentiable volume rendering framework, specifically within the depth from ray distance methods. It is implemented in the `ganerf` repository by Barbaroessle [S1, unofficial]. The method leverages the statistical property of the median to provide a robust depth estimate from volumetric samples.
+Median Depth Rendering is a method used in differentiable volume rendering to estimate depth from ray samples. It is part of the broader family of differentiable depth rendering techniques. The method is implemented in the ganerf repository, which provides a framework for neural rendering and inverse volume rendering [S1, unofficial]. The approach is particularly useful in scenarios where robustness to noise and outliers is critical, such as in real-world volumetric data or when dealing with sparse sampling.
 
 ## Sources
 [S1] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)

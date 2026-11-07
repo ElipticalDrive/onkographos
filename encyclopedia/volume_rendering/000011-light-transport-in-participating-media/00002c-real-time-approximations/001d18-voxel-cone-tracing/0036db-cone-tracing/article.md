@@ -1,63 +1,129 @@
 # Cone Tracing
 
-Also called: Cone Marching, Cone Tracing for Soft Shadows
 
 ## Overview
-Cone tracing is an extension of sphere tracing used in Signed Distance Field (SDF) rendering to approximate soft shadows and occlusion by expanding a cone along the marching direction [S1, unofficial]. It differs from standard sphere tracing by accumulating opacity based on the cone's radius relative to the SDF, allowing for soft shadow estimation with minimal additional computational cost compared to hard shadow ray marching [S1, S3, unofficial].
+Cone tracing is an extension of sphere tracing used for Signed Distance Field (SDF) rendering that creates a cone expanding in the marching direction alongside the ray to provide intersection information with minimal additional cost [S1, unofficial]. It distinguishes itself from standard ray marching by aggregating spatial data over a volume rather than at a single point, enabling applications like soft shadow estimation and light scattering approximation in participating media [S2, unofficial].
 
 ## How it works
-**Inputs:**
-*   Surface point $x$ and light direction $\mathbf{l}$ [S3, unofficial].
-*   Signed Distance Field (SDF) function $S(\mathbf{p})$ [S1, unofficial].
-*   Cone aperture angle $\theta$ (controls softness) [S3, unofficial].
-*   Initial step size $d$ (often derived from SDF value) [S1, unofficial].
-
-**Outputs:**
-*   Shadow intensity or occlusion value $\alpha$ [S2, S3, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A Signed Distance Field (SDF) function $SDF(\mathbf{p})$, a starting position $\mathbf{p}_0$, a marching direction $\mathbf{d}$ (typically normalized), and a maximum marching distance $D_{max}$.
+*   **Output:** A boolean indicating intersection, the intersection distance $t$, and potentially accumulated opacity or normal information.
 
 **Data Structures:**
-*   No complex structures required; relies on iterative sampling of the SDF [S1, unofficial].
-
-**Steps:**
-1.  Initialize current position $\mathbf{p} = x$ and accumulated occlusion $\alpha = 0$ [S3, unofficial].
-2.  Initialize cone radius $r = 0$ [S1, unofficial].
-3.  Loop while $\mathbf{p}$ is within bounds and $\alpha < 1$:
-    a.  Query SDF: $s = S(\mathbf{p})$ [S1, unofficial].
-    b.  If $s < 0$, the point is inside geometry; break and return fully occluded [G].
-    c.  Compare $s$ with current cone radius $r$. If $s < r$, the cone has intersected an object [S1, unofficial].
-    d.  Calculate local occlusion contribution $\alpha_2$ based on the ratio $s/r$ or similar metric [S3, unofficial].
-    e.  Update accumulated occlusion: $\alpha = \alpha + (1-\alpha)\alpha_2$ [S3, unofficial].
-    f.  Advance position: $\mathbf{p} = \mathbf{p} + s \cdot \mathbf{l}$ (or fixed step) [S1, unofficial].
-    g.  Expand cone radius: $r = r + \Delta r$, where $\Delta r$ is determined by the aperture angle $\theta$ and step size [S3, unofficial].
-4.  Return shadow intensity $1 - \alpha$ [S2, unofficial].
-
-**Formulas:**
-*   Cone Radius Expansion: The radius $r$ increases linearly with distance. For an aperture angle $\theta$, the radius at distance $d$ from the origin is $r = d \cdot \tan(\theta/2)$ [S3, unofficial].
-*   Occlusion Update: $\delta = \delta + (1-\delta)\alpha_2 f(r)$, where $f(r)$ is a decay factor [S3, unofficial].
+*   No complex data structures are required beyond the SDF evaluator. The method maintains scalar state variables for the current position, current cone radius, and accumulated values.
 
 **Parameters:**
-*   Aperture angles tested: 1°, 5°, 10°, 25° [S3, unofficial].
+*   **Step Size ($\Delta t$):** The distance advanced per iteration. In standard sphere tracing, $\Delta t = SDF(\mathbf{p})$. In cone tracing, the step size is often constrained by the cone geometry to ensure the cone does not skip over thin features. A common approach is $\Delta t = \min(SDF(\mathbf{p}), \text{cone\_radius})$ or a fixed small step if the SDF is not strictly used for stepping but only for intersection testing [S1, unofficial].
+*   **Cone Angle ($\alpha$):** The half-angle of the cone. The radius $r$ at distance $t$ from the apex is $r(t) = t \tan(\alpha)$.
+
+**Algorithm Steps:**
+1.  Initialize current position $\mathbf{p} = \mathbf{p}_0$, current distance $t = 0$, and current cone radius $r = 0$.
+2.  Evaluate the SDF at the current position: $d = SDF(\mathbf{p})$.
+3.  Check for termination:
+    *   If $d < \epsilon$ (where $\epsilon$ is a small threshold, e.g., $10^{-4}$), an intersection has occurred. Return $t$ and intersection data.
+    *   If $t > D_{max}$, no intersection within range. Return failure.
+4.  Update step size:
+    *   To ensure the cone does not miss narrow gaps, the step size $\Delta t$ should be limited by the current cone radius $r$. A robust step is $\Delta t = \min(d, r)$. If $r=0$ (at the start), $\Delta t = d$ [S1, unofficial].
+5.  Advance position: $\mathbf{p} \leftarrow \mathbf{p} + \mathbf{d} \cdot \Delta t$.
+6.  Update distance: $t \leftarrow t + \Delta t$.
+7.  Update cone radius: $r \leftarrow t \tan(\alpha)$.
+8.  (Optional) Accumulate values (e.g., opacity) from the SDF or voxel data within the swept volume. This is often approximated by sampling the SDF or voxel grid at the current position and integrating, though exact integration over the cone volume is complex [S2, unofficial].
+9.  Repeat from step 2.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cone_trace(sdf, p0, direction, max_dist, cone_angle, epsilon=1e-4):
+    """
+    Performs cone tracing against a Signed Distance Field.
+    
+    Args:
+        sdf: Function returning distance to nearest surface.
+        p0: Starting position (vec3).
+        direction: Marching direction (vec3, normalized).
+        max_dist: Maximum marching distance.
+        cone_angle: Half-angle of the cone in radians.
+        epsilon: Intersection threshold.
+        
+    Returns:
+        (hit, distance, normal)
+    """
+    import math
+    
+    p = p0
+    t = 0.0
+    r = 0.0
+    tan_alpha = math.tan(cone_angle)
+    
+    while t < max_dist:
+        # Evaluate SDF at current position
+        d = sdf(p)
+        
+        # Check for intersection
+        if d < epsilon:
+            # Intersection found. Normal can be approximated by gradient of SDF.
+            normal = normalize(sdf_gradient(p)) # [G] Gradient approximation needed
+            return (True, t, normal)
+        
+        # Determine step size
+        # The step is limited by the SDF value and the current cone radius
+        # to prevent skipping over thin geometry.
+        step = d
+        if r < step:
+            step = r
+            
+        # If step is too small, break to avoid infinite loops
+        if step < epsilon:
+            break
+            
+        # Advance
+        t += step
+        p = p0 + direction * t
+        r = t * tan_alpha
+        
+    return (False, t, None)
+```
 
 **Edge Cases and Pitfalls:**
-*   **Geometric Interpretation:** The statement "If the SDF value is smaller than the current radius, the cone has intersected an object" is inaccurate if interpreted as a strict geometric cone [S1, unofficial]. The shape traced by linearly increasing radius is a cone with a hemisphere on the end [S1, unofficial]. Intersection occurs if the distance to the nearest surface is less than the current test radius at any point along the horizontal center line [S1, unofficial].
-*   **Artifacts:** Implementing cone tracing for soft shadows is tricky and prone to artifacts or light leaking [S2, unofficial].
-*   **Cost:** It is computationally expensive [S2, unofficial].
+*   **Geometric Interpretation:** The shape traced by linearly increasing radius is technically a cone with a hemisphere on the end, not a perfect geometric cone. The condition "SDF value < current radius" implies intersection with this composite shape. Strictly speaking, intersection occurs if the distance to the nearest surface is less than the current test radius at any point along the horizontal center line [S1, unofficial].
+*   **Light Leaking:** In applications like soft shadows, cone tracing can suffer from light leaking if the cone aperture is too large relative to the scene features, allowing light to "bleed" through thin occluders [S2, unofficial].
+*   **Performance:** Cone tracing is computationally more expensive than standard ray marching due to the additional radius tracking and potential accumulation steps. It is particularly expensive for soft shadow calculation in real-time applications [S2, unofficial].
 
 ## Subtopics
 
-### Soft Shadows via Cone Tracing
-Soft shadows are achieved by tracing a cone from the surface point $x$ towards the direction of the light [S3, unofficial]. The cone aperture controls how soft and scattered the resulting shadow is [S3, unofficial]. Only the occlusion value $\alpha_2$ is accumulated at each step [S3, unofficial]. Aperture values tested include 1, 5, 10, and 25 degrees [S3, unofficial].
+### [Soft Shadows via Cone Tracing](6043-soft-shadows-via-cone-tracing.md)
+Approximates soft shadow boundaries by aggregating extinction within the cone. Distinguished by its specific application to light transport in participating media, where cone aperture controls softness.
+
+### [Voxel Cone Tracing Anisotropic Filtering](2552-voxel-cone-tracing-anisotropic-filtering.md)
+Variant adapting cone tracing for anisotropic filtering in voxel grids.
+
+### [Customized Cone Tracing](3447-customized-cone-tracing.md)
+Customized implementations of cone tracing for specific scene requirements.
+
+### [Voxel Cone Tracing for Ambient Occlusion](3544-voxel-cone-tracing-for-ambient-occlusion.md)
+Application of cone tracing for ambient occlusion in voxel environments.
+
+### [Voxel Shading via Convolution](4778-voxel-shading-via-convolution.md)
+Uses convolution techniques related to cone tracing for voxel shading.
+
+### [Anisotropic Voxel Representation](4963-anisotropic-voxel-representation.md)
+Anisotropic voxel data structures that may interact with cone tracing methods.
+
+### [Voxel Cone Tracing Global Illumination](6037-voxel-cone-tracing-global-illumination.md)
+Global illumination technique using cone tracing in voxel spaces.
 
 ## Operating characteristics
-*   **Complexity:** Linear in the number of steps; each step requires one SDF query and simple arithmetic [S1, unofficial].
-*   **Performance:** Described as incurring "very little additional cost" to normal sphere trace in some contexts [S1, unofficial], but also described as "quite expensive" and "tricky to get shadows without artifacts" in other implementations [S2, unofficial].
-*   **Strengths:** Provides soft shadow approximation with minimal overhead over hard shadows [S1, unofficial].
-*   **Limitations:** Prone to light leaking and artifacts; expensive for high-quality soft shadows [S2, unofficial].
+*   **Time Complexity:** $O(N)$ where $N$ is the number of marching steps. $N$ depends on the scene complexity and the cone angle. Larger cone angles may require more steps to resolve fine details or may skip steps if not carefully managed, but generally increase the volume of data processed per step.
+*   **Memory Complexity:** $O(1)$ auxiliary memory, assuming the SDF is evaluated on the fly or accessed from a texture. No additional buffers are strictly required for the tracing logic itself.
+*   **Strengths:** Provides smooth soft shadows and light scattering approximations with relatively low overhead compared to full volumetric path tracing. Integrates well with SDF-based rendering pipelines.
+*   **Limitations:** Prone to light leaking and artifacts if not carefully tuned. Computationally expensive for real-time soft shadows in complex scenes. The approximation of the swept volume as a simple cone can lead to inaccuracies in narrow gaps [S1, unofficial].
+*   **When to Use:** Suitable for real-time applications requiring soft shadows or approximate light scattering in SDF-based or voxel-based scenes where full volumetric integration is too expensive.
+*   **When Not to Use:** When precise geometric shadow boundaries are required, or in scenes with very thin geometry where the cone approximation fails to capture occlusion accurately.
 
 ## Background
-Cone tracing is an extension of sphere tracing used for SDF rendering [S1, unofficial]. It was discussed in the context of voxel cone tracing for real-time global illumination [S3, unofficial] and in a thesis on cone tracing [S1, unofficial].
+Cone tracing was introduced as an extension to sphere tracing for SDF rendering. The concept appears in literature discussing SDF rendering techniques, where it is noted to provide useful intersection information with very little additional cost compared to standard sphere tracing [S1, unofficial]. It has been applied in real-time graphics, particularly in voxel-based rendering pipelines, for effects such as soft shadows and ambient occlusion [S2, unofficial].
 
 ## Sources
 [S1] Reading thesis on cone tracing, did the author make a mistake?, https://computergraphics.stackexchange.com/questions/9508/reading-thesis-on-cone-tracing-did-the-author-make-a-mistake, fetched 2026-10-26 (unofficial)
 [S2] Voxel Cone Tracing - GitHub, https://raw.githubusercontent.com/righier/gidemo/master/report.pdf, fetched 2026-10-27 (unofficial)
-[S3] Deferred Voxel Shading for Real Time Global Illumination, https://jose-villegas.github.io/post/deferred_voxel_shading/, fetched 2026-10-27 (unofficial)

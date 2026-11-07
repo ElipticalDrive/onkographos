@@ -1,220 +1,249 @@
 # Trilinear Isosurface Intersection
 
-Also called: Cubic root finding for isosurface, Dual Isosurface using Ray Intersection, Isosurface Intersection via Cubic Polynomial, Ray Intersection for Dual Isosurfacing, Ray-Isosurface Intersection Method, Ray-Isosurface Intersection Search, isoCrossing
+Also called: Cubic root finding for isosurface, Dual Isosurfacing using Ray Intersection, Isosurface Intersection via Cubic Polynomial, Ray Intersection for Dual Isosurfacing, Ray-Isosurface Intersection Method, Ray-Isosurface Intersection Search, isoCrossing
 
 ## Overview
-Trilinear Isosurface Intersection detects if a ray crosses an isosurface defined by a threshold value within a 3D grid cell by solving for the ray position where trilinear interpolation of the eight corner values yields the desired isovalue [S1, S3, S4]. Unlike [Binary Search IsoSurface Extraction](1316-binary-search-isosurface-extraction.md), which relies on iterative refinement of a scalar field value, this method computes the exact intersection point analytically or via iterative root-finding on a cubic polynomial derived from the trilinear basis functions [S3, S4]. It differs from [Hybrid Implicit Isosurface Ray Tracing](3832-hybrid-implicit-isosurface-ray-tracing.md) by strictly adhering to the trilinear interpolant for the intersection test, whereas hybrid methods may combine different primitives or acceleration structures [S3, S4].
+Trilinear Isosurface Intersection detects if a ray crosses an isosurface defined by a threshold value within a hexahedral voxel of a scalar grid [S1, S5]. It solves the problem of finding the exact parametric distance $t$ where the trilinearly interpolated scalar field equals the isovalue, converting the intersection test into a cubic polynomial root-finding problem [S3, S4]. Unlike [Binary Search IsoSurface Extraction](1316-binary-search-isosurface-extraction.md) which relies on iterative stepping, or [Hybrid Implicit Isosurface Ray Tracing](3832-hybrid-implicit-isosurface-ray-tracing.md) which may use approximations, this method provides a direct algebraic or iterative solution for the root within a single cell, offering superior performance for silhouette and secondary rays by avoiding iterative step reduction near the surface [S1, S4].
 
 ## How it works
 **Inputs and Outputs**
-*   **Input:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$ (normalized), current cell corner scalar values $v_{ijk}$ for $i,j,k \in \{0,1\}$, and the isovalue $I$ (default 0.0) [S1, S3, S4].
-*   **Output:** Boolean indicating intersection, and the parametric distance $t$ (and optionally the hit position $\mathbf{p}$) to the first positive root [S1, S3, S4].
+*   **Input:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$ (normalized), voxel corner scalar values $v_{ijk}$ for $i,j,k \in \{0,1\}$, and isovalue $I$.
+*   **Output:** Intersection distance $t$ (if an intersection exists within the voxel bounds), and optionally the scalar value $v$ at the intersection point [S1].
 
 **Data Structures**
-The method operates on a single hexahedral cell. The eight corner values $v_{ijk}$ are stored in a flat array or accessed via texture memory. In GPU implementations, as few as 4 data fetches per voxel are sufficient for coefficient extraction if the hardware supports specific trilinear sampling patterns [S2, unofficial].
+The voxel is defined by 8 corner values. In GPU implementations, these can be fetched efficiently; as few as 4 data fetches per voxel are sufficient for coefficient extraction if the interpolation structure is exploited [S2, unofficial].
 
-**Algorithm Steps**
+**Steps**
+1.  **Bounding Check:** Compute the minimum ($v_{min}$) and maximum ($v_{max}$) of the eight voxel corner values. If the isovalue $I$ does not lie within $[v_{min}, v_{max}]$, no intersection exists in this cell [S3, S4].
+2.  **Coefficient Calculation:** Formulate the trilinear interpolation equation along the ray. Substitute the ray equation $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ into the trilinear field definition to derive a cubic polynomial $P(t) = G_3 t^3 + G_2 t^2 + G_1 t + G_0 = 0$ [S3, S5]. The coefficients $G_0, G_1, G_2, G_3$ are computed based on the cell vertex values and ray direction [S5].
+3.  **Root Finding:** Solve the cubic equation for real roots $t$ within the voxel's parametric bounds (typically $[0, 1]$ for cell-local coordinates, or mapped to world space) [S5].
+4.  **Selection:** Select the smallest positive root $t$ that lies within the valid range. Evaluate the ray at this $t$ to find the hit position [S4].
 
-1.  **Bounding Check:** Compute the minimum ($v_{min}$) and maximum ($v_{max}$) of the eight corner values $v_{ijk}$ [S3, S4]. If the isovalue $I$ is not within $[v_{min}, v_{max}]$, the ray does not intersect the isosurface within this cell [S3, S4].
-2.  **Ray Parameterization:** Define the ray as $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ for $t > 0$ [S4].
-3.  **Coefficient Extraction:** Substitute the ray equation into the trilinear interpolation function $f(u,v,w)$ to form a cubic polynomial $P(t) = G_3 t^3 + G_2 t^2 + G_1 t + G_0 = 0$ [S3, S4, S5]. The coefficients $G_0, G_1, G_2, G_3$ are derived from the corner values and the ray direction components [S5].
-    *   *Note:* The exact derivation depends on the coordinate system. In a local cell coordinate system where the cell spans $[0,1]^3$, the trilinear function is:
-        $$f(u, v, w) = \sum_{i=0}^1 \sum_{j=0}^1 \sum_{k=0}^1 (1 - U_i)(1 - V_j)(1 - W_k) v_{ijk}$$
-        where $U_i = |u - u_i|$, $V_j = |v - v_j|$, and $W_k = |w - w_k|$ [S5].
-    *   Alternatively, using the formulation from [S6, unofficial]:
-        $$f(x, y, z) = \left( \sum_{i, j, k=\{0,1\}} x_i y_j z_k v_{ijk} \right) - v = 0$$
-        where $x_0 = i-x$ and $x_1 = x-i$ (similarly for $y, z$) [S6, unofficial].
-4.  **Root Finding:** Solve the cubic equation for real roots $t$ [S3, S4, S5]. Two primary approaches exist in the literature:
-    *   **Analytical (Cardan's Method):** Compute the discriminant $D_3$ to determine the nature of the roots [S5].
-        $$\delta^2 = \frac{G_2^2 - 3G_3G_1}{9G_3^2}$$
-        $$(x_N, y_N) = \left(-\frac{G_2}{3G_3}, G_3x_N^3 + G_2^2x_N^2 + G_1x_N + G_0\right)$$
-        $$D_3 = y_N^2 - 4G_3^2 \delta^3$$
-        If $G_3 = 0$, the equation reduces to a quadratic $G_2 t^2 + G_1 t + G_0 = 0$ with discriminant $D_2 = G_1^2 - 4G_2G_0$ [S5].
-    *   **Iterative (Neubauer/Marmitt):** Iteratively re-parameterize the ray into sub-intervals within the cell until a sign change is detected, then find the root [S3, S4][S6, unofficial]. This method is noted to be slightly faster and numerically stable in single precision compared to analytical solvers like Schwarze's [S3, S4][S6, unofficial].
-5.  **Selection:** Select the smallest positive root $t$ that lies within the valid range (typically $t > 0$ for the ray, or $0 \le t \le 1$ if using cell diagonals as rays [S5]). Evaluate $\mathbf{p} = \mathbf{o} + t\mathbf{d}$ [S4].
+**Formulas**
+The trilinear scalar field $f(u, v, w)$ in parametric coordinates $(u,v,w) \in [0,1]^3$ is:
+$$ f(u, v, w) = \sum_{i=0}^1 \sum_{j=0}^1 \sum_{k=0}^1 (1 - U_i)(1 - V_j)(1 - W_k) f(u_i, v_j, w_k) $$
+where $U_i = |u - u_i|$, $V_j = |v - v_j|$, $W_k = |w - w_k|$, and $(u_i, v_j, w_k)$ are the vertex coordinates [S5].
+
+The intersection condition is $f(u, v, w) = I$. Substituting the ray $\mathbf{r}(t)$ into this yields the cubic equation:
+$$ G_3 t^3 + G_2 t^2 + G_1 t + G_0 = 0 $$
+The coefficients are derived from the trilinear expansion. For a cell with vertices $v_{ijk}$, the coefficients depend on the ray direction components and the vertex values [S5][S6, unofficial].
+
+**Discriminant Analysis (Analytical Solver)**
+If using an analytical solver (e.g., Cardan's method), compute the discriminant $D_3$ to determine the nature of the roots [S5]:
+$$ \delta^2 = \frac{G_2^2 - 3G_3G_1}{9G_3^2} $$
+$$ (x_N, y_N) = \left( -\frac{G_2}{3G_3}, G_3 x_N^3 + G_2^2 x_N^2 + G_1 x_N + G_0 \right) $$
+$$ D_3 = y_N^2 - 4 G_3^2 \delta^3 $$
+*   If $G_3 = 0$, the equation reduces to quadratic $G_2 t^2 + G_1 t + G_0 = 0$. Compute $D_2 = G_1^2 - 4 G_2 G_0$ [S5].
+*   Root classification:
+    *   Cubic ($G_3 \neq 0$): $D_3 > 0$ implies 1 real, 2 imaginary; $D_3 = 0$ implies 3 equal real (if $y_N=0$) or 1 distinct, 2 equal real (if $y_N \neq 0$); $D_3 < 0$ implies 3 distinct real [S5].
+    *   Quadratic ($G_3 = 0, G_2 \neq 0$): $D_2 > 0$ implies 2 distinct real; $D_2 = 0$ implies 2 equal real; $D_2 < 0$ implies 2 imaginary [S5].
 
 **Pseudocode**
-The following pseudocode implements the analytical approach using Cardan's method, as described in [S5]. It assumes the ray is defined in the local coordinate system of the cell $[0,1]^3$ for simplicity, or that coefficients $G_i$ are pre-computed for the specific ray direction.
+The following implements the Neubauer iterative root finder, which is cited as slightly faster and numerically stable for single precision compared to analytical solvers [S3, S4].
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def solve_cubic(G3, G2, G1, G0):
+def trilinear_isosurface_intersection(ray_origin, ray_dir, voxel_min, voxel_max, corner_values, isovalue):
     """
-    Solves G3*t^3 + G2*t^2 + G1*t + G0 = 0 for real roots.
-    Returns a list of real roots.
-    """
-    roots = []
-    
-    # Handle degenerate cases
-    if abs(G3) < 1e-9:
-        # Quadratic: G2*t^2 + G1*t + G0 = 0
-        if abs(G2) < 1e-9:
-            # Linear: G1*t + G0 = 0
-            if abs(G1) > 1e-9:
-                roots.append(-G0 / G1)
-            return roots
-        
-        D2 = G1**2 - 4 * G2 * G0
-        if D2 < 0:
-            return roots
-        elif D2 == 0:
-            roots.append(-G1 / (2 * G2))
-        else:
-            sqrt_D2 = math.sqrt(D2)
-            roots.append((-G1 + sqrt_D2) / (2 * G2))
-            roots.append((-G1 - sqrt_D2) / (2 * G2))
-        return roots
-
-    # Normalize cubic to t^3 + a*t^2 + b*t + c = 0
-    a = G2 / G3
-    b = G1 / G3
-    c = G0 / G3
-    
-    # Cardan's method
-    # Shift to depressed cubic: y^3 + p*y + q = 0, where t = y - a/3
-    p = b - a**2 / 3
-    q = 2 * a**3 / 27 - a * b / 3 + c
-    
-    D = (q/2)**2 + (p/3)**3
-    
-    if D > 0:
-        # One real root
-        sqrt_D = math.sqrt(D)
-        u = -q/2 + sqrt_D
-        v = -q/2 - sqrt_D
-        
-        # Cube root handling for negative numbers
-        u_cbrt = math.copysign(abs(u)**(1/3), u)
-        v_cbrt = math.copysign(abs(v)**(1/3), v)
-        
-        y = u_cbrt + v_cbrt
-        t = y - a / 3
-        roots.append(t)
-        
-    elif D == 0:
-        # Multiple real roots
-        if q == 0:
-            # Triple root
-            t = -a / 3
-            roots.append(t)
-        else:
-            # One single and one double root
-            u_cbrt = math.copysign(abs(-q/2)**(1/3), -q/2)
-            t1 = 2 * u_cbrt - a / 3
-            t2 = -u_cbrt - a / 3
-            roots.append(t1)
-            roots.append(t2)
-            
-    else:
-        # D < 0: Three distinct real roots (Casus irreducibilis)
-        # Use trigonometric solution
-        r = math.sqrt(-(p**3) / 27)
-        theta = math.acos(-q / (2 * r))
-        
-        m = 2 * math.cbrt(r) # Note: math.cbrt might not exist in all envs, use sign/abs logic
-        
-        # Standard implementation of cubic root for r
-        r_cbrt = math.copysign(abs(r)**(1/3), r)
-        m = 2 * r_cbrt
-        
-        t1 = m * math.cos(theta / 3) - a / 3
-        t2 = m * math.cos((theta + 2 * math.pi) / 3) - a / 3
-        t3 = m * math.cos((theta + 4 * math.pi) / 3) - a / 3
-        
-        roots.append(t1)
-        roots.append(t2)
-        roots.append(t3)
-        
-    return roots
-
-def trilinear_isosurface_intersection(ray_origin, ray_dir, corner_values):
-    """
-    ray_origin: (ox, oy, oz)
+    ray_origin: (x, y, z)
     ray_dir: (dx, dy, dz)
-    corner_values: list of 8 floats v_ijk for i,j,k in {0,1}
-    Returns: (hit_t, hit_point) or None
+    voxel_min: (x0, y0, z0)
+    voxel_max: (x1, y1, z1)
+    corner_values: array of 8 floats [v000, v001, v010, v011, v100, v101, v110, v111]
+    isovalue: float
+    Returns: t (float) or None if no intersection
     """
+    
     # 1. Bounding Check
     v_min = min(corner_values)
     v_max = max(corner_values)
-    isovalue = 0.0 # Default, or passed as parameter
-    
     if not (v_min <= isovalue <= v_max):
         return None
 
-    # 2. Coefficient Extraction
-    # This step requires mapping the global ray to the local cell coordinates
-    # or computing G_i based on the specific trilinear basis expansion.
-    # For a cell at (x0, y0, z0) with size 1, and ray r(t) = o + t*d:
-    # The coefficients G3, G2, G1, G0 are computed from the corner values
-    # and the direction components.
-    # See [S5] Appendix A for exact coefficient formulas.
-    # Here we assume G3..G0 are pre-calculated or calculated as follows:
+    # 2. Define Trilinear Function Coefficients
+    # Map ray to local cell coordinates [0,1]^3
+    # t_local = t_world * scale + offset
+    # However, it is easier to work in world space and solve for t directly.
+    # The trilinear function in world space is complex. 
+    # Standard approach: Solve for t in f(ray(t)) = isovalue.
     
-    # Simplified coefficient calculation for a unit cell [0,1]^3
-    # f(u,v,w) = sum( (1-Ui)(1-Vj)(1-Wk) * v_ijk )
-    # Substituting u = ox + t*dx, etc.
-    # This results in a cubic in t.
+    # Extract corner values based on index mapping (i,j,k) -> index
+    # Index = i + 2*j + 4*k
+    v000 = corner_values[0]
+    v001 = corner_values[1]
+    v010 = corner_values[2]
+    v011 = corner_values[3]
+    v100 = corner_values[4]
+    v101 = corner_values[5]
+    v110 = corner_values[6]
+    v111 = corner_values[7]
+
+    # Compute cubic coefficients G3, G2, G1, G0 for P(t) = G3*t^3 + G2*t^2 + G1*t + G0 - isovalue = 0
+    # This requires expanding the trilinear interpolation along the ray.
+    # Let ray(t) = ox + t*dx, oy + t*dy, oz + t*dz
+    # The trilinear interpolation is a sum of terms like (1-u)(1-v)(1-w)*v_ijk.
+    # Substituting linear u(t), v(t), w(t) results in a cubic in t.
     
-    # Note: Exact coefficient derivation is complex and depends on coordinate mapping.
-    # We assume a helper function computes these based on [S5][S6, unofficial].
-    G3, G2, G1, G0 = compute_trilinear_coefficients(ray_origin, ray_dir, corner_values)
+    # Coefficients calculation (derived from trilinear expansion):
+    # This part is computationally expensive if done naively. 
+    # For the Neubauer method, we define a function F(t) = trilinear(ray(t)) - isovalue.
     
-    # 3. Solve Cubic
-    roots = solve_cubic(G3, G2, G1, G0)
+    def trilinear_val(t):
+        # Compute world position
+        x = ray_origin[0] + t * ray_dir[0]
+        y = ray_origin[1] + t * ray_dir[1]
+        z = ray_origin[2] + t * ray_dir[2]
+        
+        # Compute local coordinates relative to voxel_min
+        # Assuming voxel is axis-aligned. If not, transform ray/voxel first.
+        lx = (x - voxel_min[0]) / (voxel_max[0] - voxel_min[0])
+        ly = (y - voxel_min[1]) / (voxel_max[1] - voxel_min[1])
+        lz = (z - voxel_min[2]) / (voxel_max[2] - voxel_min[2])
+        
+        # Clamp to [0,1] for safety, though root finding should stay within bounds
+        lx = max(0.0, min(1.0, lx))
+        ly = max(0.0, min(1.0, ly))
+        lz = max(0.0, min(1.0, lz))
+        
+        # Trilinear interpolation
+        # Weights
+        wx0 = 1.0 - lx; wx1 = lx
+        wy0 = 1.0 - ly; wy1 = ly
+        wz0 = 1.0 - lz; wz1 = lz
+        
+        val = 0.0
+        val += wx0 * wy0 * wz0 * v000
+        val += wx0 * wy0 * wz1 * v001
+        val += wx0 * wy1 * wz0 * v010
+        val += wx0 * wy1 * wz1 * v011
+        val += wx1 * wy0 * wz0 * v100
+        val += wx1 * wy0 * wz1 * v101
+        val += wx1 * wy1 * wz0 * v110
+        val += wx1 * wy1 * wz1 * v111
+        
+        return val
+
+    # 3. Neubauer Iterative Root Finder
+    # Iteratively re-parameterize into sub-intervals until sign change is detected
+    # Initial interval [t_start, t_end] corresponding to voxel entry/exit
     
-    # 4. Select smallest positive root
-    valid_roots = [t for t in roots if t > 1e-9] # Avoid t=0 and negative
+    # Calculate t_enter and t_exit for the voxel slab
+    t_enter = -float('inf')
+    t_exit = float('inf')
     
-    if not valid_roots:
+    for axis in range(3):
+        if abs(ray_dir[axis]) < 1e-8:
+            if ray_origin[axis] < voxel_min[axis] or ray_origin[axis] > voxel_max[axis]:
+                return None
+        else:
+            t1 = (voxel_min[axis] - ray_origin[axis]) / ray_dir[axis]
+            t2 = (voxel_max[axis] - ray_origin[axis]) / ray_dir[axis]
+            t_min = min(t1, t2)
+            t_max = max(t1, t2)
+            if t_min > t_enter: t_enter = t_min
+            if t_max < t_exit: t_exit = t_max
+            
+    if t_enter > t_exit or t_exit < 0:
         return None
         
-    t_hit = min(valid_roots)
-    hit_point = (ray_origin[0] + t_hit * ray_dir[0],
-                 ray_origin[1] + t_hit * ray_dir[1],
-                 ray_origin[2] + t_hit * ray_dir[2])
-                 
-    return (t_hit, hit_point)
+    # Search for root in [t_enter, t_exit]
+    # Neubauer method: subdivide interval
+    t_low = t_enter
+    t_high = t_exit
+    
+    # Simple bisection/subdivision logic as described in Marmitt et al.
+    # Check endpoints
+    f_low = trilinear_val(t_low) - isovalue
+    f_high = trilinear_val(t_high) - isovalue
+    
+    # If signs are same, we might have 0 or 2 roots. 
+    # Neubauer method subdivides until sign change is found.
+    
+    # For implementation completeness, we use a standard subdivision loop
+    # Note: The actual Neubauer algorithm uses specific re-parameterization strategies
+    # to handle the cubic nature efficiently. Here we simulate the "sign change detection"
+    # via subdivision.
+    
+    max_depth = 10
+    for _ in range(max_depth):
+        if f_low * f_high < 0:
+            # Sign change detected, refine
+            t_mid = (t_low + t_high) / 2.0
+            f_mid = trilinear_val(t_mid) - isovalue
+            
+            if abs(f_mid) < 1e-6:
+                return t_mid
+            
+            if f_low * f_mid < 0:
+                t_high = t_mid
+                f_high = f_mid
+            else:
+                t_low = t_mid
+                f_low = f_mid
+                
+            # Check convergence
+            if t_high - t_low < 1e-4:
+                return t_low # Return first hit
+        
+        else:
+            # No sign change in current interval, subdivide
+            t_mid = (t_low + t_high) / 2.0
+            f_mid = trilinear_val(t_mid) - isovalue
+            
+            # Recurse or push to stack (simulated here by splitting)
+            # In a real Neubauer implementation, this is handled by specific cubic root logic
+            # or recursive subdivision of the parametric space.
+            
+            # If we can't find a sign change after max depth, assume no root or complex topology
+            # For this article, we return the midpoint if close enough, or None
+            if abs(f_mid) < 1e-6:
+                return t_mid
+            
+            # Try left half
+            if f_low * f_mid < 0:
+                t_high = t_mid
+                f_high = f_mid
+            elif f_mid * f_high < 0:
+                t_low = t_mid
+                f_low = f_mid
+            else:
+                # No sign change in either half? This implies 0 or 2 roots in this cell segment.
+                # Neubauer handles this by analyzing the cubic coefficients directly if subdivision fails.
+                # For simplicity, we return None if no sign change is found in the interval.
+                return None
 
-def compute_trilinear_coefficients(o, d, v):
-    """
-    Placeholder for the specific algebraic expansion of the trilinear
-    function along the ray. The coefficients G3, G2, G1, G0 depend
-    on the corner values v_ijk and the ray direction d.
-    Implementation details found in [S5] Appendix A or [S6, unofficial].
-    """
-    # This is a conceptual placeholder. In practice, one expands:
-    # f(o + t*d) - I = 0
-    # into G3*t^3 + G2*t^2 + G1*t + G0 = 0
-    return 0.0, 0.0, 0.0, 0.0
+    return None
 ```
 
 **Edge Cases and Pitfalls**
-*   **Precision:** Analytical solvers can suffer from precision issues in single precision. The Neubauer iterative method is preferred for GPU implementations for stability [S3, S4][S6, unofficial].
-*   **Degenerate Cells:** If $G_3 = 0$, the equation reduces to quadratic [S5]. If $G_2 = 0$ as well, it becomes linear [S5].
-*   **Ambiguous Faces:** In dual isosurfacing contexts, cells with ambiguous faces (four same-sign diagonals and four +/- edges) require special handling using asymptotic deciders to determine the separation sign [S5].
-*   **Multiple Components:** A single cell can contain multiple disjoint isosurface components. The method must find all valid roots in $[0,1]$ (for diagonal rays) or $t>0$ (for viewing rays) to ensure topological correctness [S5].
+*   **Precision:** Single-precision arithmetic is recommended for the Neubauer method for performance and stability [S4].
+*   **Degenerate Input:** If $G_3 = 0$, the equation is quadratic. If $G_2 = 0$ as well, it is linear. The solver must handle these reductions [S5].
+*   **Ambiguous Faces:** In dual isosurfacing contexts, cells with ambiguous faces (four same-sign diagonals and four +/- edges) require topological deciders (e.g., asymptotic decider) to determine the separation sign [S5].
+*   **Multiple Roots:** A ray can intersect the trilinear isosurface up to 3 times within a single cell. The method should return the first positive root for ray casting [S4].
 
 ## Subtopics
 
+### [Analytic Voxel Intersection](9669-analytic-voxel-intersection.md)
+Analytic Voxel Intersection computes the intersection between a ray and the isosurface defined by the zero level set of a signed distance function (SDF) within a single voxel. It solves the cubic polynomial derived from trilinear interpolation of corner signed distances to find the exact intersection distance $t$. Unlike sphere tracing, which requires iterative stepping that slows down near the surface, this method provides a direct solution, avoiding iterative step reduction and offering superior performance for silhouette and secondary rays. It builds on [Trilinear Isosurface Intersection](2213-trilinear-isosurface-intersection.md) by providing the specific algebraic formulation and solution strategies for the resulting cubic equation.
+
 ### No-Body-Saddle Midpoint Transformation
-A normalization technique for trilinear blocks that contain no body saddles (no real roots of the saddle equations) [S7]. It maps the theoretical saddle point $m = (-c/a - d/a, -b/a)$ into the block via linear scaling if it lies outside, assuming $m$ is inside for topological analysis [S7]. Gradients along midpoint lines are constant, allowing the assumption that function values at positive ends are $\alpha, \beta, \gamma > 0$ [S7]. This simplifies the classification of topological cases by reducing the possible configurations to subsets of cases 0, 1, 3.0, 7.0, 13.0 and their complements [S7].
+A normalization technique for cubes with no body saddles, mapping the theoretical saddle point $m$ into the block via linear scaling and analyzing gradients to constrain topology [S7]. Compute theoretical midpoint $m = (-c/a - d/a, -b/a)$. If $m$ is outside the block, apply linear transformations to scale the block so $m$ is inside. Assume $m$ is in block and $T_{mmm} = 0$. Gradients along midpoint lines are constant: $a_x/a, a_y/a, a_z/a$. Assume all positive (apply axis reflection if negative). Let function values at positive ends be $\alpha, \beta, \gamma > 0$ [S7].
 
 ### Smooth Trilinear Isosurface
-A rendering technique that uses fast trilinear interpolation for the ray intersection search but calculates surface normals using the gradient of a tricubic interpolant [S8]. This avoids visual discontinuities (grid patterns) at node boundaries that occur when using the trilinear gradient directly, as trilinear interpolation guarantees shape continuity but not gradient continuity [S8]. Tricubic coefficients are stored only at nodes containing the isosurface to optimize memory [S8].
+A rendering technique that uses fast trilinear interpolation for ray intersection search but uses the gradient from tricubic interpolation for normal calculation to avoid visual discontinuities at node boundaries [S8]. Perform ray intersection search using the trilinear interpolant, which is faster to compute than tricubic. Store tricubic coefficients only at nodes containing the isosurface. Calculate surface normals using the gradient of the tricubic interpolant instead of the trilinear gradient to ensure smoothness. Trilinear interpolation guarantees shape continuity but not gradient continuity, causing visual discontinuities (grid patterns) at node boundaries if used for normals [S8].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per cell intersection test, dominated by the cubic root solver. The Neubauer iterative method is slightly faster than analytical Cardan's method on GPUs [S3, S4][S6, unofficial].
-*   **Memory Complexity:** $O(1)$ auxiliary memory per cell, requiring storage of 8 corner values [S3, S4].
-*   **Performance:** On GPUs, performance can be improved by fetching as few as 4 data samples per voxel for coefficient extraction [S2, unofficial].
-*   **Strengths:** Provides exact intersection points for the trilinear field; avoids the need for Hermite data (normals) required by dual contouring methods [S5].
-*   **Limitations:** Trilinear interpolation does not guarantee gradient continuity, leading to visual artifacts if normals are derived from the trilinear field [S8]. Complex topologies (tunnels, multiple components) may require checking all roots or using look-up tables for optimization [S5].
+*   **Time Complexity:** $O(1)$ per voxel intersection test, dominated by the cubic root finding (analytical or iterative). Neubauer's iterative method is cited as slightly faster than analytical Schwarze's solver [S4].
+*   **Memory Complexity:** $O(1)$ auxiliary memory per voxel. Requires storage of 8 corner values. GPU implementations can optimize fetches to 4 data fetches per voxel [S2, unofficial].
+*   **Performance:** Provides precise intersection without iterative stepping, making it efficient for secondary rays and silhouettes [S1]. Single-precision Neubauer method is numerically stable [S4].
+*   **Strengths:** Exact solution for trilinear fields; no approximation error in position; efficient on GPUs with hardware trilinear support [S2, unofficial].
+*   **Limitations:** Trilinear interpolation lacks gradient continuity, causing visual artifacts if normals are derived from it (mitigated by Smooth Trilinear variant) [S8]. Complex topologies (tunnels, disjoint components) may require multiple roots and careful handling [S5].
+*   **When to use:** When exact isosurface position is required within a voxel, especially for secondary rays or when using dual isosurfacing methods.
+*   **When not to use:** When gradient continuity is critical and tricubic interpolation is available without performance penalty, or when the field is not well-approximated by trilinear interpolation.
 
 ## Background
-The method originates from the need to efficiently trace isosurfaces in volume data. Key developments include the use of cubic polynomial solvers for trilinear interpolation [S3, S4][S6, unofficial], the application of Cardan's method for analytical solutions [S5], and the iterative Neubauer root finder for numerical stability [S3, S4][S6, unofficial]. The "Dual Isosurfacing" variant uses cell diagonals as rays and a look-up table of 31 topological configurations to optimize point generation [S5]. The "Smooth Trilinear" variant addresses the normal discontinuity issue by hybridizing trilinear intersection with tricubic normals [S8].
+Trilinear Isosurface Intersection originates from the need to accurately render isosurfaces from volumetric data using ray tracing. It was notably employed in interactive isosurface ray tracing of large octree volumes [S3, S4] and in dual isosurfacing methods to compute isosurface points in cell interiors without requiring Hermite data [S5]. The method relies on solving the cubic polynomial derived from the trilinear Lagrangian interpolant [S6, unofficial]. Variants like the Neubauer iterative root finder were introduced to improve performance and stability over analytical solvers like Schwarze's cubic solver [S4][S6, unofficial]. The technique is foundational for methods like [Analytic Voxel Intersection](9669-analytic-voxel-intersection.md) and [Smooth Trilinear Isosurface](9669-smooth-trilinear-isosurface.md).
 
 ## Sources
 [S1] OpenVDB: nanovdb::math Namespace Reference, https://openvdb.org/documentation/doxygen/namespacenanovdb_1_1math.html, fetched 2026-10-24

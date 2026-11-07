@@ -1,68 +1,73 @@
 # Closed-Form Volume Rendering with Gaussian Transfer Functions
 
-Also called: Analytically integrated segment with Gaussian TF, Gaussian primitive volume rendering
+Also called: Analytically integrated segment with Gaussian TF, Closed-Form Approximation to the Volume Rendering Integral with Gaussian Transfer Functions, Gaussian primitive volume rendering
 
 ## Overview
-This method solves the emission-absorption volume rendering integral analytically in closed form by modeling the transfer function as a multivariate Gaussian primitive [S1, unofficial]. It sets itself apart from standard ray-marching techniques by eliminating discretization error in the density integration step, assuming linear variation of data values between sampled points [S1, unofficial]. Unlike [Emission-Absorption Volume Rendering](4040-emission-absorption-volume-rendering.md), which relies on numerical integration via Beer's law, this approach computes the exact opacity contribution of a segment using the error function, enabling higher accuracy for smooth transfer functions [S1, unofficial].
+This method computes the emission-absorption volume rendering integral over a line segment in closed form by modeling the transfer function as a multivariate Gaussian primitive [S1, S2, unofficial]. It assumes linear variation of data values between sampled points, allowing the density integral to be solved analytically using the error function [S1, S2, unofficial]. This approach eliminates the sampling error inherent in numerical integration methods like those used in [Emission-Absorption Volume Rendering](4040-emission-absorption-volume-rendering.md), providing exact results for Gaussian-shaped transfer functions [S1, S2, unofficial].
 
 ## How it works
+### Inputs and Outputs
 **Inputs:**
-- Two sampled data values $\vec{v}_1$ and $\vec{v}_2$ at the endpoints of a ray segment.
-- Segment length $l = b - a$.
-- Gaussian transfer function parameters: center $\vec{c}$ and linear transformation matrix $K$.
-- Constant color $C$ and extinction coefficient $\tau$.
+*   Segment endpoints in data space: $\vec{v}_1, \vec{v}_2$ (vectors of dimension $N$, typically 1D or multivariate).
+*   Gaussian transfer function parameters: Center $\vec{c}$ (vector), Linear transformation matrix $\mathbf{K}$ (matrix).
+*   Optical parameters: Constant color $C$, Extinction coefficient $\tau$.
+*   Segment length: $l = \|\vec{v}_2 - \vec{v}_1\|$ (Euclidean distance in data space, or physical length if $\vec{v}$ represents physical coordinates; the derivation in [S1, S2, unofficial] treats $l$ as the parameter scaling the integral, effectively $b-a$ in physical space, but the density integral $\rho'$ is normalized. Note: Eq 4 in [S1, S2, unofficial] defines $\alpha = 1 - e^{-\tau l \rho'(v_1, v_2)}$ where $\rho'$ is the *average* density. The derivation of $\rho'$ assumes integration over $t \in [0,1]$).
 
 **Outputs:**
-- Composite color $I(a, b)$ and opacity $\alpha$ for the segment.
+*   Pixel color $I(a, b)$.
 
-**Data Structures:**
-- Vectors $\vec{v}_1, \vec{v}_2, \vec{c}$ are typically 3D (or $N$-dimensional for multivariate data).
-- Matrix $K$ is $N \times N$.
-- Intermediate vectors $\vec{v}'_1, \vec{v}'_2, \vec{d}$ match the dimensionality of the data space.
+### Data Structures
+No specific data structures are required beyond standard vectors and matrices. The method operates on scalar values and vectors.
 
-**Step-by-Step Method:**
+### Parameters
+*   $\vec{c}$: Center of the Gaussian.
+*   $\mathbf{K}$: Linear transformation matrix defining the shape/orientation of the Gaussian.
+*   $C$: Emissive color (constant over the segment).
+*   $\tau$: Extinction coefficient (constant over the segment).
+*   $l$: Length of the ray segment in physical space ($b-a$).
 
-1.  **Transform Data Points:**
-    Compute the transformed coordinates relative to the Gaussian center:
-    $$ \vec{v}'_1 = K(\vec{v}_1 - \vec{c}) $$
-    $$ \vec{v}'_2 = K(\vec{v}_2 - \vec{c}) $$
-    [S1, unofficial]
+### Steps
+1.  **Transform Endpoints**: Compute the transformed endpoints $\vec{v}'_1$ and $\vec{v}'_2$ in the Gaussian's local space:
+    $$ \vec{v}'_1 = \mathbf{K}(\vec{v}_1 - \vec{c}) $$
+    $$ \vec{v}'_2 = \mathbf{K}(\vec{v}_2 - \vec{c}) $$
+    [S1, S2, unofficial]
 
-2.  **Compute Difference Vector:**
+2.  **Compute Difference Vector**: Calculate the difference vector $\vec{d}$ in the transformed space:
     $$ \vec{d} = \vec{v}'_2 - \vec{v}'_1 $$
-    [S1, unofficial]
+    [S1, S2, unofficial]
 
-3.  **Compute Norm and Projections:**
-    Calculate the Euclidean norm of $\vec{d}$:
+3.  **Compute Norm**: Calculate the Euclidean norm of $\vec{d}$:
     $$ \|\vec{d}\| = \sqrt{\vec{d} \cdot \vec{d}} $$
-    [S1, unofficial]
-    
-    Compute the scalar projections $A$ and $B$:
-    $$ A = \frac{\vec{d} \cdot \vec{v}'_1}{\|\vec{d}\|} $$
-    $$ B = \frac{\vec{d} \cdot \vec{v}'_2}{\|\vec{d}\|} $$
-    Note that $B = A + \|\vec{d}\|$ [S1, unofficial].
+    [S1, S2, unofficial]
 
-4.  **Compute Scaling Factor $S$:**
-    $$ S = e^{-\|\vec{v}'_1\|^2 + A^2} $$
-    [S1, unofficial]
+4.  **Compute Intermediate Scalars**:
+    *   $A = \frac{\vec{d} \cdot \vec{v}'_1}{\|\vec{d}\|}$
+    *   $B = \frac{\vec{d} \cdot \vec{v}'_2}{\|\vec{d}\|}$ (Note: $B = A + \|\vec{d}\|$)
+    *   $S = e^{-\|\vec{v}'_1\|^2 + A^2}$
+    [S1, S2, unofficial]
 
-5.  **Compute Normalized Density Integral $\rho'(v_1, v_2)$:**
-    Using the error function $\text{erf}$:
+5.  **Compute Average Density**: Calculate the normalized density integral $\rho'(v_1, v_2)$ using the error function:
     $$ \rho'(v_1, v_2) = \frac{\sqrt{\pi}}{2} \frac{S}{\|\vec{d}\|} (\text{erf}(B) - \text{erf}(A)) $$
-    [S1, unofficial]
-    
-    *Pitfall:* The numerical approximation for $\text{erf}(z)$ provided in the source is only defined for $z \ge 0$ [S1, unofficial]. Since $\text{erf}$ is an odd function ($\text{erf}(-z) = -\text{erf}(z)$), negative arguments must be handled by taking the absolute value of $z$ for the approximation and negating the result [S1, unofficial].
+    [S1, S2, unofficial]
+    *Note: If $\|\vec{d}\| \approx 0$, the segment is a point. The density is simply $\rho(\vec{v}_1) = e^{-\|\vec{v}'_1\|^2}$. [G]*
 
-6.  **Compute Segment Opacity $\alpha$:**
+6.  **Compute Opacity**: Calculate the opacity $\alpha$ for the segment:
     $$ \alpha = 1 - e^{-\tau l \rho'(v_1, v_2)} $$
-    [S1, unofficial]
+    [S1, S2, unofficial]
 
-7.  **Compute Segment Color $I(a, b)$:**
-    Assuming constant color $C$ and extinction $\tau$:
-    $$ I(a, b) = C \frac{\alpha}{\tau} $$
-    [S1, unofficial]
+7.  **Compute Color**: Calculate the final color contribution:
+    $$ I(a, b) = \frac{C \alpha}{\tau} $$
+    [S1, S2, unofficial]
 
-**Pseudocode:**
+### Error Function Approximation
+The error function $\text{erf}(z)$ is approximated numerically for $z \geq 0$ using the Abramowitz and Stegun approximation [S1, S2, unofficial]:
+$$ \text{erf}(z) \approx 1 - (a_1 t + a_2 t^2 + a_3 t^3) e^{-z^2} $$
+where:
+$$ t = \frac{1}{1 + 0.47047 z} $$
+$$ a_1 = 0.3480242, \quad a_2 = -0.0958798, \quad a_3 = 0.7478556 $$
+For $z < 0$, use the odd symmetry property: $\text{erf}(-z) = -\text{erf}(z)$. [S1, S2, unofficial]
+
+### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
@@ -71,125 +76,95 @@ import math
 
 def erf_approx(z):
     """
-    Approximation of the error function for z >= 0.
-    Source: Abramowitz and Stegun [S1, unofficial].
+    Approximates the error function erf(z) for z >= 0.
+    Uses Abramowitz and Stegun approximation.
     """
     if z < 0:
         return -erf_approx(-z)
     
-    t = 1.0 / (1.0 + 0.47047 * z)
+    # Constants
     a1 = 0.3480242
     a2 = -0.0958798
     a3 = 0.7478556
+    coeff = 0.47047
     
-    # Formula: 1 - (a1*t + a2*t^2 + a3*t^3) * e^(-z^2)
-    poly = a1 * t + a2 * (t ** 2) + a3 * (t ** 3)
-    return 1.0 - poly * math.exp(-(z ** 2))
+    t = 1.0 / (1.0 + coeff * z)
+    poly = a1 * t + a2 * t**2 + a3 * t**3
+    return 1.0 - poly * math.exp(-z**2)
 
-def gaussian_segment_render(v1, v2, c, K, l, tau, C):
+def gaussian_transfer_function(v1, v2, c, K, C, tau, l):
     """
-    Renders a single segment using closed-form Gaussian integration.
+    Computes the closed-form volume rendering integral for a segment
+    with a Gaussian transfer function.
     
     Args:
-        v1: numpy array, data value at start of segment
-        v2: numpy array, data value at end of segment
+        v1: numpy array, start point in data space
+        v2: numpy array, end point in data space
         c: numpy array, Gaussian center
-        K: numpy array, linear transformation matrix (NxN)
-        l: float, segment length (b - a)
-        tau: float, extinction coefficient
+        K: numpy array, Gaussian transformation matrix
         C: numpy array, constant color
+        tau: float, extinction coefficient
+        l: float, segment length in physical space
         
     Returns:
-        color: numpy array, integrated color
-        alpha: float, segment opacity
+        numpy array, resulting color
     """
-    # 1. Transform data points
-    v1_prime = K.dot(v1 - c)
-    v2_prime = K.dot(v2 - c)
+    # Step 1: Transform endpoints
+    v1_prime = K @ (v1 - c)
+    v2_prime = K @ (v2 - c)
     
-    # 2. Difference vector
+    # Step 2: Difference vector
     d = v2_prime - v1_prime
     
-    # 3. Norm and projections
-    norm_d = math.sqrt(d.dot(d))
+    # Step 3: Norm
+    d_norm = math.sqrt(d @ d)
     
-    # Handle degenerate case where segment length in transformed space is 0
-    if norm_d < 1e-9:
-        # If d is zero, the segment is a point in transformed space.
-        # The integral simplifies. rho' becomes rho(v1).
-        # rho(v) = exp(-||v'||^2). 
-        # However, the formula involves division by norm_d.
-        # Limit as norm_d -> 0: erf(B) - erf(A) -> 0.
-        # Using L'Hopital or direct evaluation of density at v1:
-        # rho'(v1, v1) = rho(v1) = exp(-||v1_prime||^2)
-        # But strictly following the source formula requires non-zero d.
-        # [G] Guard against division by zero.
-        rho_prime = math.exp(-v1_prime.dot(v1_prime))
-    else:
-        A = d.dot(v1_prime) / norm_d
-        B = d.dot(v2_prime) / norm_d
-        
-        # 4. Scaling factor S
-        # S = exp(-||v1'||^2 + A^2)
-        norm_v1_prime_sq = v1_prime.dot(v1_prime)
-        S = math.exp(-norm_v1_prime_sq + (A ** 2))
-        
-        # 5. Density integral
-        # rho' = (sqrt(pi)/2) * (S / ||d||) * (erf(B) - erf(A))
-        erf_B = erf_approx(B)
-        erf_A = erf_approx(A)
-        rho_prime = (math.sqrt(math.pi) / 2.0) * (S / norm_d) * (erf_B - erf_A)
-        
-    # 6. Opacity
+    # Handle degenerate case (point)
+    if d_norm < 1e-10:
+        # Density at a single point
+        density = math.exp(-v1_prime @ v1_prime)
+        alpha = 1.0 - math.exp(-tau * l * density)
+        return (C / tau) * alpha
+    
+    # Step 4: Intermediate scalars
+    A = (d @ v1_prime) / d_norm
+    B = (d @ v2_prime) / d_norm
+    # B = A + d_norm # Can be used as check, but computed directly for precision
+    
+    S = math.exp(- (v1_prime @ v1_prime) + A**2)
+    
+    # Step 5: Average density
+    # rho' = (sqrt(pi)/2) * (S / ||d||) * (erf(B) - erf(A))
+    sqrt_pi_over_2 = math.sqrt(math.pi) / 2.0
+    erf_B = erf_approx(B)
+    erf_A = erf_approx(A)
+    
+    rho_prime = sqrt_pi_over_2 * (S / d_norm) * (erf_B - erf_A)
+    
+    # Step 6: Opacity
     alpha = 1.0 - math.exp(-tau * l * rho_prime)
     
-    # 7. Color
-    color = C * (alpha / tau)
-    
-    return color, alpha
+    # Step 7: Color
+    return (C / tau) * alpha
 ```
 
-**Parameters:**
-- $\tau$ (extinction): Not given in the sources.
-- $C$ (color): Not given in the sources.
-- $K, \vec{c}$: Defined by the user's transfer function design.
-
-**Edge Cases and Pitfalls:**
-- **Division by Zero:** If $\|\vec{d}\| \approx 0$, the formula for $\rho'$ divides by zero. This occurs when $\vec{v}_1$ and $\vec{v}_2$ map to the same point in the transformed space. The source does not provide a specific limit formula, but logically $\rho'$ approaches the density value at that point [S1, unofficial].
-- **Error Function Domain:** The numerical approximation for $\text{erf}$ is only valid for $z \ge 0$. Negative arguments must be handled using the odd symmetry property $\text{erf}(-z) = -\text{erf}(z)$ [S1, unofficial].
+### Edge Cases and Pitfalls
+*   **Degenerate Segment**: If $\vec{v}_1 = \vec{v}_2$, $\|\vec{d}\| = 0$. The division by $\|\vec{d}\|$ in the density formula causes a singularity. In this case, the density is simply the value of the Gaussian at the point $\vec{v}_1$ [G].
+*   **Error Function Domain**: The Abramowitz and Stegun approximation is only valid for $z \geq 0$. Negative arguments must be handled by negating the result due to the odd symmetry of the error function [S1, S2, unofficial].
+*   **Precision**: The term $e^{-\|\vec{v}'_1\|^2 + A^2}$ can underflow or overflow if the arguments are large. Care should be taken with numerical stability [G].
+*   **Linear Variation Assumption**: The method assumes data values vary linearly between samples. If the data varies non-linearly, the result is an approximation [S1, S2, unofficial].
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-- Time: $O(1)$ per segment, dominated by matrix-vector multiplications and transcendental functions (exp, erf).
-- Memory: $O(N)$ for storing intermediate vectors, where $N$ is the dimensionality of the data space.
-
-**Measured Performance:**
-- Not given in the sources.
-
-**Scaling:**
-- Not given in the sources.
-
-**Strengths and Limitations:**
-- **Strengths:** Provides an exact analytical solution for the density integral under the assumption of linear data variation, avoiding discretization errors inherent in ray marching [S1, unofficial].
-- **Limitations:** Restricted to transfer functions that can be modeled as multivariate Gaussians. Requires computation of the error function, which is more expensive than simple table lookups [S1, unofficial].
-
-**When to Use:**
-- When high accuracy is required for smooth, Gaussian-like transfer functions and computational cost of transcendental functions is acceptable [S1, unofficial].
-
-**When Not to Use:**
-- For transfer functions that are not well-approximated by Gaussians or when performance constraints prohibit the use of error functions [S1, unofficial].
+*   **Time Complexity**: $O(1)$ per segment, dominated by the computation of the error function and matrix-vector multiplications.
+*   **Memory Complexity**: $O(1)$ auxiliary space.
+*   **Strengths**: Exact integration for Gaussian transfer functions; no sampling artifacts; efficient evaluation.
+*   **Limitations**: Limited to Gaussian-shaped transfer functions; assumes linear data variation; requires computation of the error function which may be slower than simple table lookups for non-Gaussian TFs.
+*   **When to Use**: When the transfer function can be well-approximated by a Gaussian and high accuracy is required without sampling noise.
+*   **When Not to Use**: For arbitrary, non-Gaussian transfer functions where numerical integration is more appropriate.
 
 ## Background
-**Origin:**
-- The method was introduced by Joe M. Kniss, Simon Premoze, Milan Ikits, Aaron Lefohn, and Charles D. Hansen in 2003 [S1, unofficial].
-- Paper: "Closed Form Solution to the Volume Rendering Integral with Gaussian Transfer Functions" [S1, unofficial].
-
-**History and Development:**
-- The work builds on the emission-absorption model and pre-integration techniques [S1, unofficial].
-- It specifically addresses the integration of multivariate transfer functions, which are common in scientific visualization [S1, unofficial].
-
-**Where it is used:**
-- Direct volume rendering of multivariate data sets [S1, unofficial].
+The method was introduced by Joe Kniss, Simon Premoze, Milan Ikits, Aaron Lefohn, and Charles Hansen in 2003 [S1, S2, unofficial]. It is part of the broader field of direct volume rendering, specifically addressing the integration of the emission-absorption equation. The work builds on earlier research in pre-integrated volume rendering [S2, Ref 2, unofficial] and transfer function design [S2, Ref 3, unofficial].
 
 ## Sources
 [S1] Closed Form Solution to the Volume Rendering Integral with Gaussian Transfer Functions, https://escholarship.org/uc/item/3wn025pw, fetched 2026-10-26 (unofficial)
+[S2] Closed-Form Approximations to the Volume Rendering ..., https://www.cs.utah.edu/docs/techreports/2003/pdf/UUCS-03-013.pdf, fetched 2026-10-29 (unofficial)

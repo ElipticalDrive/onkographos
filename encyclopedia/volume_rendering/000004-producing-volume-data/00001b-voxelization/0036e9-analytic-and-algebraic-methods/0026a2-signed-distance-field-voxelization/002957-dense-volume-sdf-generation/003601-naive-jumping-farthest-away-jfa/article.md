@@ -3,66 +3,65 @@
 Also called: InizializationNaive, Naive Jumping Farthest Away (JFA) Initialization, Naive Jumping Farthest Away (JFA) Processing, NaiveJFA, ProcessingNaive
 
 ## Overview
-Naive Jumping Farthest Away (JFA) is a GPU-based algorithm for computing the Signed Distance Field (SDF) and the position of the closest surface point for a dense voxel grid [S1, unofficial]. It solves the problem of efficiently propagating distance information from known surface voxels to empty space using a multi-pass approach where the search radius is halved in each iteration [S1, unofficial]. It differs from its sibling, [Cube SDF Grid Construction](4883-cube-sdf-grid-construction.md), by using a parallel, multi-scale neighborhood search rather than a fixed local stencil, and from its child, [Sequential Jumping Farthest Away (JFA)](7637-sequential-jumping-farthest-away-jfa.md), by executing the propagation loop in parallel on the GPU rather than sequentially on the CPU [S1, unofficial].
+Naive Jumping Farthest Away (JFA) is a GPU-based algorithm for computing the Signed Distance Field (SDF) and the position of the closest surface point for a dense 3D voxel grid [S1, unofficial]. It solves the problem of efficiently propagating distance information from known surface voxels to empty space using a multi-pass approach where the search radius $K$ is halved in each iteration [S1, unofficial]. It differs from its sibling, Cube SDF Grid Construction, by using a logarithmic halving stride strategy rather than a fixed local neighborhood expansion, and from its child, Sequential JFA, by executing the propagation loop in parallel on the GPU rather than sequentially on the CPU [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A dense 3D voxel grid where each voxel is marked as occupied or empty. The grid has dimensions $N \times N \times N$ (where $N$ is `VoxelsPerSide`), a physical origin $(O_x, O_y, O_z)$, and a voxel size $s$.
-- Output: Two arrays of size $N^3$:
-  1. `outSDF`: Float array storing the signed distance value for each voxel.
-  2. `outPositions`: Array of 3D positions storing the physical coordinates of the closest surface point for each voxel.
+*   **Input:** A dense 3D voxel grid representing a mesh or solid. The grid is defined by its side length $N$ (assumed cubic, $N \times N \times N$), voxel size, and origin. Each voxel is marked as occupied or empty.
+*   **Outputs:** Two 3D arrays of size $N \times N \times N$:
+    1.  `SDF`: Stores the signed distance value for each voxel.
+    2.  `Positions`: Stores the 3D physical coordinates of the closest surface point for each voxel.
 
 **Data Structures:**
-The implementation uses a grid view object (`VoxelsGrid`) which provides access to:
-- `mSizeX`, `mSizeY`, `mSizeZ`: Dimensions of the grid (assumed cubic $N \times N \times N$).
-- `mVoxelSize`: The physical size of a single voxel edge.
-- `OriginX()`, `OriginY()`, `OriginZ()`: The physical coordinates of the grid's minimum corner.
-- `Voxel(x, y, z)`: A method returning a boolean indicating if the voxel at $(x, y, z)$ is occupied.
-- `VoxelsPerSide()`: Returns $N$.
+The grid is accessed via a view object (e.g., `DeviceVoxelsGrid` or `VoxelsGrid`) which provides methods to access voxel occupancy (`Voxel(x,y,z)` returns boolean), grid dimensions (`VoxelsPerSide()`), voxel size (`VoxelSize()`), and origin (`OriginX()`, `OriginY()`, `OriginZ()`) [S1, unofficial]. The SDF and Position arrays are stored in device memory (e.g., `CudaPtr<T>`) for GPU access [S1, unofficial].
 
 **Parameters:**
-- $K$: The search radius in voxel units. It starts at $N/2$ and is halved in each iteration until it reaches 1.
+*   $N$: The number of voxels per side of the grid.
+*   $K$: The current search radius in voxel units. It starts at $N/2$ and is halved in each iteration until it reaches 1.
 
 **Algorithm Steps:**
 The algorithm consists of two phases: Initialization and Processing Loop.
 
-1. **Initialization (`InizializationNaive`):**
-   For each voxel $(x, y, z)$ in the grid:
-   a. Compute the physical position:
-      $$ P = (O_x + x \cdot s, O_y + y \cdot s, O_z + z \cdot s) $$
-   b. Check if the voxel is occupied. If not, terminate processing for this thread (or leave SDF as undefined/ignored).
-   c. Identify if the voxel is a **boundary voxel**. A voxel is a boundary voxel if it is occupied and has at least one neighbor in its 26-neighborhood (offsets $dx, dy, dz \in \{-1, 0, 1\}$, excluding $(0,0,0)$) that is either out-of-bounds or empty.
-   d. If it is a boundary voxel:
-      - Set `outSDF[x,y,z] = 0.0f`.
-      - Set `outPositions[x,y,z] = P`.
-   e. If it is not a boundary voxel (i.e., it is interior):
-      - Set `outSDF[x,y,z] = \infty`.
-      - Set `outPositions[x,y,z]` to an undefined state (or $P$, though it will be overwritten).
+1.  **Initialization (`InizializationNaive`):**
+    *   Each thread corresponds to one voxel $(x, y, z)$.
+    *   Compute the linear thread index from $(x, y, z)$ or vice versa.
+    *   Check if the voxel is occupied. If not, terminate the thread (SDF remains undefined or zero, depending on implementation; typically only occupied voxels are processed for SDF in this variant, or empty voxels are skipped) [S1, unofficial].
+    *   Compute the physical position `pos` of the current voxel:
+        $$ \text{pos} = (\text{OriginX} + x \cdot \text{VoxelSize}, \text{OriginY} + y \cdot \text{VoxelSize}, \text{OriginZ} + z \cdot \text{VoxelSize}) $$
+    *   Identify if the voxel is a **boundary voxel**. A boundary voxel is an occupied voxel that has at least one empty or out-of-bounds neighbor in its 26-neighborhood.
+    *   Iterate through the 26 neighbors (offsets $dx, dy, dz \in \{-1, 0, 1\}$, excluding $0,0,0$).
+    *   Calculate neighbor coordinates $(nx, ny, nz) = (x+dx, y+dy, z+dz)$.
+    *   If any neighbor is out of bounds or empty, set a flag `found` to true.
+    *   If `found` is true, set `SDF[x,y,z] = 0.0f` and `Positions[x,y,z] = pos`.
+    *   Otherwise, set `SDF[x,y,z] = INFINITY`.
 
-2. **Processing Loop (`ProcessingNaive`):**
-   Iterate with $K$ starting from $N/2$ down to 1, dividing $K$ by 2 in each step. In each iteration, launch the kernel for all voxels.
-   For each voxel $(x, y, z)$:
-   a. Compute physical position $P_{curr} = (O_x + x \cdot s, O_y + y \cdot s, O_z + z \cdot s)$.
-   b. Initialize `bestDistance = inSDF[x,y,z]` and `bestPosition` to the current stored position (or $P_{curr}$ if `bestDistance` was $\infty$).
-   c. Iterate through the 9 neighbors in the $K$-neighborhood defined by offsets $(dx, dy, dz) \in \{-1, 0, 1\}^3 \setminus \{(0,0,0)\}$:
-      i. Calculate neighbor grid coordinates:
-         $$ nx = x + dx \cdot K $$
-         $$ ny = y + dy \cdot K $$
-         $$ nz = z + dz \cdot K $$
-      ii. **Boundary Check:** If $nx < 0$ or $nx \ge N$ or $ny < 0$ or $ny \ge N$ or $nz < 0$ or $nz \ge N$, skip this neighbor.
-      iii. **Neighbor Evaluation:**
-           - Retrieve `seed = inSDF[nx, ny, nz]`.
-           - If $|\text{seed}| < \infty$:
-             - Retrieve `seedPos = inPositions[nx, ny, nz]`.
-             - Calculate Euclidean distance:
-               $$ d = \sqrt{(P_{curr}.x - seedPos.x)^2 + (P_{curr}.y - seedPos.y)^2 + (P_{curr}.z - seedPos.z)^2} $$
-             - If $d < |\text{bestDistance}|$:
-               - Update `bestDistance = \text{copysign}(d, \text{bestDistance})` (preserving the sign of the current best distance, typically positive for exterior, negative for interior, though JFA primarily propagates magnitude; the sign is usually determined by the initial boundary assignment or a separate inside/outside test. The source specifies `copysignf(distance, bestDistance)`).
-               - Update `bestPosition = seedPos`.
-               - Set `findNewBest = true`.
-   d. If `findNewBest` is true, write:
-      - `outSDF[x,y,z] = bestDistance`
-      - `outPositions[x,y,z] = bestPosition`
+2.  **Processing Loop (`ProcessingNaive`):**
+    *   Initialize $K = N / 2$.
+    *   While $K \ge 1$:
+        *   Launch the `ProcessingNaive` kernel in parallel for all voxels.
+        *   Inside the kernel for voxel $(x, y, z)$:
+            *   If the voxel is not occupied, terminate.
+            *   Initialize `bestDistance = SDF[x,y,z]` and `bestPosition` (undefined or current pos).
+            *   Initialize `findNewBest = false`.
+            *   Compute physical position `voxelPos` of $(x, y, z)$.
+            *   Iterate through the $K$-neighborhood offsets $(dx, dy, dz) \in \{-1, 0, 1\}^3 \setminus \{(0,0,0)\}$.
+            *   Calculate neighbor grid coordinates:
+                $$ nx = x + dx \cdot K $$
+                $$ ny = y + dy \cdot K $$
+                $$ nz = z + dz \cdot K $$
+            *   **Boundary Check:** If $nx < 0$ or $nx \ge N$ or $ny < 0$ or $ny \ge N$ or $nz < 0$ or $nz \ge N$, continue to next neighbor.
+            *   **Neighbor Evaluation:**
+                *   Get `seed = SDF[nx, ny, nz]`.
+                *   If `fabs(seed) < INFINITY`:
+                    *   Get `seedPos = Positions[nx, ny, nz]`.
+                    *   Calculate Euclidean distance:
+                        $$ \text{distance} = \sqrt{(voxelPos.x - seedPos.x)^2 + (voxelPos.y - seedPos.y)^2 + (voxelPos.z - seedPos.z)^2} $$
+                    *   If `distance < fabs(bestDistance)`:
+                        *   Set `findNewBest = true`.
+                        *   Update `bestDistance = copysignf(distance, bestDistance)` (preserving sign of current best distance, typically positive for outside, negative for inside, though JFA often computes unsigned distance first; the source implies signed update based on current best) [S1, unofficial].
+                        *   Update `bestPosition = seedPos`.
+            *   **Update Output:** If `findNewBest` is true, write `SDF[x,y,z] = bestDistance` and `Positions[x,y,z] = bestPosition`.
+        *   Update $K = K / 2$ (integer division).
 
 **Pseudocode:**
 
@@ -71,41 +70,33 @@ The algorithm consists of two phases: Initialization and Processing Loop.
 ```python
 import math
 
-def compute_naive_jfa(grid, N, origin, voxel_size):
+def initialize_naive(grid, sdf_array, pos_array):
     """
-    grid: 3D boolean array [N][N][N], True if occupied, False if empty.
-    N: int, number of voxels per side.
-    origin: tuple (ox, oy, oz), physical origin of the grid.
-    voxel_size: float, size of one voxel edge.
-    
-    Returns:
-    sdf: 3D float array [N][N][N]
-    positions: 3D array of tuples [N][N][N]
+    Initializes SDF and Position arrays for Naive JFA.
+    grid: Object providing Voxel(x,y,z), VoxelsPerSide(), VoxelSize(), OriginX/Y/Z()
+    sdf_array: 3D array of floats, initialized to 0
+    pos_array: 3D array of Positions, initialized to 0
     """
-    INF = float('inf')
-    sdf = [[ [INF for _ in range(N)] for _ in range(N)] for _ in range(N)]
-    positions = [[ [None for _ in range(N)] for _ in range(N)] for _ in range(N)]
+    N = grid.VoxelsPerSide()
     
-    # Helper to get physical position
-    def get_pos(x, y, z):
-        return (origin[0] + x * voxel_size, 
-                origin[1] + y * voxel_size, 
-                origin[2] + z * voxel_size)
-
-    # Step 1: Initialization
+    # Parallel execution assumed over all voxels
     for z in range(N):
         for y in range(N):
             for x in range(N):
-                if not grid[x][y][z]:
+                if not grid.Voxel(x, y, z):
                     continue # Skip empty voxels
                 
-                p_curr = get_pos(x, y, z)
-                is_boundary = False
+                # Compute physical position
+                pos_x = grid.OriginX() + x * grid.VoxelSize()
+                pos_y = grid.OriginY() + y * grid.VoxelSize()
+                pos_z = grid.OriginZ() + z * grid.VoxelSize()
+                current_pos = (pos_x, pos_y, pos_z)
                 
                 # Check 26-neighborhood for boundary condition
-                for dz in [-1, 0, 1]:
+                is_boundary = False
+                for dx in [-1, 0, 1]:
                     for dy in [-1, 0, 1]:
-                        for dx in [-1, 0, 1]:
+                        for dz in [-1, 0, 1]:
                             if dx == 0 and dy == 0 and dz == 0:
                                 continue
                             
@@ -115,111 +106,143 @@ def compute_naive_jfa(grid, N, origin, voxel_size):
                             if nx < 0 or nx >= N or ny < 0 or ny >= N or nz < 0 or nz >= N:
                                 is_boundary = True
                                 break
-                            
-                            # Check if neighbor is empty
-                            if not grid[nx][ny][nz]:
+                            if not grid.Voxel(nx, ny, nz):
                                 is_boundary = True
                                 break
                         if is_boundary: break
                     if is_boundary: break
                 
                 if is_boundary:
-                    sdf[x][y][z] = 0.0
-                    positions[x][y][z] = p_curr
+                    sdf_array[x, y, z] = 0.0
+                    pos_array[x, y, z] = current_pos
                 else:
-                    sdf[x][y][z] = INF
-                    positions[x][y][z] = p_curr # Or undefined, but position is needed for distance calc
+                    sdf_array[x, y, z] = float('inf')
+                    # Position can remain undefined or initialized to current pos
+                    pos_array[x, y, z] = current_pos 
 
-    # Step 2: Processing Loop
-    k = N // 2
-    while k >= 1:
-        new_sdf = [[ [0.0 for _ in range(N)] for _ in range(N)] for _ in range(N)]
-        new_positions = [[ [None for _ in range(N)] for _ in range(N)] for _ in range(N)]
-        
-        for z in range(N):
-            for y in range(N):
-                for x in range(N):
-                    if not grid[x][y][z]:
-                        continue # Keep empty voxels as is or skip
-                    
-                    p_curr = get_pos(x, y, z)
-                    best_dist = sdf[x][y][z]
-                    best_pos = positions[x][y][z]
-                    find_new_best = False
-                    
-                    # Search K-neighborhood
-                    for dz in [-1, 0, 1]:
-                        for dy in [-1, 0, 1]:
-                            for dx in [-1, 0, 1]:
-                                if dx == 0 and dy == 0 and dz == 0:
-                                    continue
-                                
-                                nx = x + dx * k
-                                ny = y + dy * k
-                                nz = z + dz * k
-                                
-                                # Boundary Check
-                                if nx < 0 or nx >= N or ny < 0 or ny >= N or nz < 0 or nz >= N:
-                                    continue
-                                
-                                seed = sdf[nx][ny][nz]
-                                
-                                # Infinity handling
-                                if abs(seed) >= INF:
-                                    continue
-                                
-                                seed_pos = positions[nx][ny][nz]
-                                
-                                # Calculate Euclidean distance
-                                dist = math.sqrt(
-                                    (p_curr[0] - seed_pos[0])**2 + 
-                                    (p_curr[1] - seed_pos[1])**2 + 
-                                    (p_curr[2] - seed_pos[2])**2
-                                )
-                                
-                                if dist < abs(best_dist):
-                                    # Update best distance, preserving sign
-                                    # Note: copysign(d, best_dist) returns d with sign of best_dist
-                                    best_dist = dist if best_dist >= 0 else -dist
-                                    best_pos = seed_pos
-                                    find_new_best = True
+def process_naive_iteration(grid, sdf_array, pos_array, K):
+    """
+    Performs one iteration of Naive JFA with jump distance K.
+    """
+    N = grid.VoxelsPerSide()
+    
+    # Parallel execution assumed over all voxels
+    for z in range(N):
+        for y in range(N):
+            for x in range(N):
+                if not grid.Voxel(x, y, z):
+                    continue
+                
+                # Current best
+                best_dist = sdf_array[x, y, z]
+                best_pos = pos_array[x, y, z]
+                find_new_best = False
+                
+                # Physical position of current voxel
+                curr_x = grid.OriginX() + x * grid.VoxelSize()
+                curr_y = grid.OriginY() + y * grid.VoxelSize()
+                curr_z = grid.OriginZ() + z * grid.VoxelSize()
+                voxel_pos = (curr_x, curr_y, curr_z)
+                
+                # Search K-neighborhood
+                for dx in [-1, 0, 1]:
+                    for dy in [-1, 0, 1]:
+                        for dz in [-1, 0, 1]:
+                            if dx == 0 and dy == 0 and dz == 0:
+                                continue
                             
-                            if find_new_best: break # Optimization: break inner loops if desired, but standard JFA checks all
-                        if find_new_best: break
-                    if find_new_best: break
-                    
-                    if find_new_best:
-                        new_sdf[x][y][z] = best_dist
-                        new_positions[x][y][z] = best_pos
-                    else:
-                        new_sdf[x][y][z] = sdf[x][y][z]
-                        new_positions[x][y][z] = positions[x][y][z]
-        
-        # Update arrays for next iteration
-        sdf = new_sdf
-        positions = new_positions
-        
-        k = k // 2
+                            nx = x + dx * K
+                            ny = y + dy * K
+                            nz = z + dz * K
+                            
+                            # Boundary check
+                            if nx < 0 or nx >= N or ny < 0 or ny >= N or nz < 0 or nz >= N:
+                                continue
+                            
+                            seed_dist = sdf_array[nx, ny, nz]
+                            
+                            # Skip if seed is infinity
+                            if abs(seed_dist) == float('inf'):
+                                continue
+                            
+                            seed_pos = pos_array[nx, ny, nz]
+                            
+                            # Calculate Euclidean distance
+                            dist = math.sqrt(
+                                (voxel_pos[0] - seed_pos[0])**2 +
+                                (voxel_pos[1] - seed_pos[1])**2 +
+                                (voxel_pos[2] - seed_pos[2])**2
+                            )
+                            
+                            # Update if better
+                            if dist < abs(best_dist):
+                                find_new_best = True
+                                # Preserve sign of best_dist
+                                sign = 1.0 if best_dist >= 0 else -1.0
+                                best_dist = sign * dist
+                                best_pos = seed_pos
+                
+                if find_new_best:
+                    sdf_array[x, y, z] = best_dist
+                    pos_array[x, y, z] = best_pos
 
-    return sdf, positions
+def naive_jfa(grid, sdf_array, pos_array):
+    """
+    Main Naive JFA algorithm.
+    """
+    initialize_naive(grid, sdf_array, pos_array)
+    
+    N = grid.VoxelsPerSide()
+    K = N // 2
+    
+    while K >= 1:
+        process_naive_iteration(grid, sdf_array, pos_array, K)
+        K = K // 2
 ```
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Conditions:** Neighbor indices $nx, ny, nz$ must be strictly checked against $0$ and $N$ to avoid out-of-bounds memory access [S1, unofficial].
+*   **Infinity Handling:** Seeds with `fabs(seed) == INFINITY` must be ignored to prevent invalid distance calculations [S1, unofficial].
+*   **Precision:** Euclidean distance calculations should use sufficient floating-point precision. The sign of the distance is preserved from the current best, which assumes the sign is consistent or correctly initialized at boundaries [S1, unofficial].
 
 ## Subtopics
 
 ### [Sequential Jumping Farthest Away (JFA)](7637-sequential-jumping-farthest-away-jfa.md)
-A CPU-based variant of JFA. It differs from Naive JFA by executing the propagation loop sequentially on the CPU rather than in parallel on the GPU. Choose this when GPU resources are unavailable or when debugging the algorithm logic on smaller datasets.
+Sequential JFA is a CPU-based algorithm for computing the SDF and closest surface point position. It differs from Naive JFA by executing the propagation loop sequentially on the CPU rather than in parallel on the GPU. It is chosen when GPU resources are unavailable or when debugging sequential logic.
+
+### [Breadth-First Distance Field Expansion](9703-breadth-first-distance-field-expansion.md)
+Breadth-First Distance Field Expansion computes the SDF by propagating distance values from known surface voxels to empty space using a queue-based breadth-first search. It differs from Naive JFA by processing neighbors in strict distance order (Manhattan distance) rather than using a halving radius strategy, and utilizes a global queue rather than sequential passes. It is chosen when exact distance metrics are required without the approximation errors inherent in JFA.
+
+### Jump Flood Algorithm (JFA) for UV SDF Generation
+Generates metric SDFs on a 2D UV texture by iteratively propagating nearest seed distances, achieving $O(\text{texels} \log \text{texels})$ complexity. It differs from 3D Naive JFA by operating on 2D UV textures and using ping-pong buffers for propagation. It is chosen for large-scale UV-based rendering tasks where 3D voxelization is too expensive.
+
+### Jump Flood Algorithm (JFA) for UV SDF Generation
+Generates metric SDFs on a 2D UV texture by iteratively propagating nearest seed distances, achieving $O(\text{texels} \log \text{texels})$ complexity [S2, unofficial]. It differs from 3D Naive JFA by operating on 2D UV textures and using ping-pong buffers for propagation [S2, unofficial]. It is chosen for large-scale UV-based rendering tasks where 3D voxelization is too expensive [S2, unofficial].
+*   **Definition:** Generates metric SDFs on a 2D UV texture by iteratively propagating nearest seed distances [S2, unofficial].
+*   **Steps:**
+    1.  **Stage 1 (Seed):** Rasterize primitives into UV seed buffer using Bresenham line rasterization [S2, unofficial].
+    2.  **Stage 2 (JFA):** Iterative distance propagation with ping-pong buffers. Jump steps decrease: $\text{texture\_size}/2, \text{texture\_size}/4, \dots, 1$ [S2, unofficial].
+    3.  **Stage 3 (Finalize):** Convert seeds to metric SDF using torus surface metric. Subtract radius for final SDF [S2, unofficial].
+    4.  **Pass B (Render):** Ray march inverted torus and sample ink texture [S2, unofficial].
+*   **Formula:** Complexity: $O(\text{texels} \times \log(\text{max\_texture\_dimension}))$ [S2, unofficial].
+*   **Parameters:** `texture_size` determines the initial jump step and subsequent halving sequence [S2, unofficial].
+*   **Layout:** Seed buffer format: R32I (integer distance storage) [S2, unofficial].
+*   **Pitfalls:** Previous UV-GPU version crashed at $N=10,000$; JFA implementation achieves infinite speedup by avoiding per-primitive ray marching [S2, unofficial].
+*   **Usage:** Enabled via `--uv` CLI flag, recommended for large datasets [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** The algorithm runs in $O(\log N)$ passes (iterations), where $N$ is the grid dimension. Each pass processes $N^3$ voxels. In each pass, each voxel checks 26 neighbors. Thus, total operations are proportional to $26 \cdot N^3 \cdot \log_2(N/2)$.
-- **Memory Complexity:** Requires storage for two $N^3$ float arrays (SDF and Positions). Memory usage is $O(N^3)$.
-- **Measured Performance:** Specific performance metrics (ms) are not provided in the sources for Naive JFA alone, but benchmarking scripts compare it against Tiled JFA and Sequential JFA [S1, unofficial].
-- **Strengths:** Simple implementation; highly parallelizable on GPU; converges quickly due to exponential search radius reduction.
-- **Limitations:** "Naive" parallel execution may lead to race conditions if not handled carefully (though the source implies a synchronous multi-pass approach where each pass completes before the next, avoiding intra-pass race conditions). It does not guarantee exact Euclidean distance, but an approximation bounded by the grid resolution.
-- **When to use:** When a fast, approximate SDF is needed for a dense voxel grid and GPU acceleration is available.
-- **When not to use:** When exact Euclidean distances are required, or when memory bandwidth is a bottleneck for very large grids (consider sparse or tiled variants).
+*   **Time Complexity:** The algorithm performs $\log_2(N)$ iterations. In each iteration, every voxel processes 26 neighbors. Thus, the complexity is $O(N^3 \log N)$ for a grid of size $N \times N \times N$ [S1, unofficial].
+*   **Memory Complexity:** $O(N^3)$ for storing the SDF and Position arrays [S1, unofficial].
+*   **Measured Performance:** Specific measured performance numbers for Naive JFA are not given in the sources. However, benchmarks compare it against Sequential and Tiled JFA implementations, indicating it is a baseline GPU implementation [S1, unofficial].
+*   **Scaling:** Scales linearly with the number of voxels per iteration and logarithmically with the number of iterations. Parallel execution on GPU allows it to handle large grids efficiently compared to sequential CPU versions [S1, unofficial].
+*   **Strengths:** Simple to implement on GPU; parallelizable; faster than sequential CPU implementations for large grids [S1, unofficial].
+*   **Limitations:** Approximate distance field (JFA is an approximation algorithm); requires multiple passes; boundary conditions must be handled carefully [S1, unofficial].
+*   **When to use:** When a fast, approximate SDF is needed on a GPU and exact distance metrics are not critical.
+*   **When not to use:** When exact distance metrics are required (use Breadth-First Distance Field Expansion); when CPU-only resources are available (use Sequential JFA).
 
 ## Background
-The Jumping Flooding Algorithm (JFA) was introduced by [Tat-Seng Chiu](https://www.comp.nus.edu.sg/~tants/jfa/i3d06.pdf) for generating Voronoi diagrams and distance transforms on GPUs [S1, unofficial]. The specific implementation described here, "Naive JFA," is part of a CUDA-based mesh voxelization library [S1, unofficial]. It builds upon the general JFA concept of multi-scale neighborhood search to propagate closest-point information. The library also references work by [Michael Schwarz and Hans-Peter Seidel](https://michael-schwarz.com/research/publ/files/vox-siga10.pdf) on fast parallel surface and solid voxelization [S1, unofficial].
+Naive Jumping Farthest Away (JFA) is based on the Jump Flooding Algorithm (JFA), originally introduced for generating Voronoi diagrams and distance transforms on GPUs [S1, unofficial]. The specific implementation described here is part of a CUDA-based mesh voxelization library that computes SDFs for voxelized meshes [S1, unofficial]. It is used in applications requiring fast SDF generation for volume rendering, CSG operations, and visualization [S1, unofficial]. The algorithm builds on the parent method, Dense Volume SDF Generation, which provides the framework for storing and accessing dense 3D SDF data [S1, unofficial].
 
 ## Sources
 [S1] bigmat18/cuda-mesh-voxelization, https://github.com/bigmat18/cuda-mesh-voxelization, fetched 2026-10-26 (unofficial)
+[S2] Add OpenGL GPU ray marching renderers for Intel HD Graphics 630 with Jump Flood Algorithm optimization, https://github.com/rhythmatician/phyllotaxis-torus/pull/1, fetched 2026-10-26 (unofficial)

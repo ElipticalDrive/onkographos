@@ -1,126 +1,106 @@
 # Parallel Coordinate Plots Generation
-
-Also called: PC Plot Generation
-
+Also called: PCP from Histograms, PC Plot Generation
 ## Overview
-Parallel Coordinate Plots (PCP) Generation is a visualization technique used to represent the joint distribution of scalar attribute pairs in volume rendering transfer functions. It solves the problem of over-plotting and high rendering costs associated with rendering individual data samples by mapping 2D histogram bins directly to geometric primitives (quads) [S1, unofficial]. Unlike point-based or line-based histogram visualizations, this method generates a quad for each nonzero bin in the joint histogram, effectively separating the number of rendered primitives from the number of raw data samples [S1, unofficial].
-
+Parallel Coordinate Plots (PCP) Generation visualizes the joint distribution of two scalar attributes by mapping nonzero entries in a 2D joint histogram to geometric primitives (quads) on parallel axes. It differs from point-based scatter plots by using quads to represent histogram bin occupancy, providing a denser and more intuitive representation of material boundaries in volume rendering transfer function design. This method builds on [Line-based Histogram for 2D Scalar Pairs](6702-line-based-histogram-for-2d-scalar-pairs.md) by utilizing the underlying 2D histogram data structure.
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A set of conditional histogram textures (`texcond`), where each texture slice represents the joint histogram of a pair of scalar attributes (e.g., density and gradient magnitude). Each pixel $P(i, j)$ in the histogram texture contains a data value $v(i, j)$ representing the count of samples falling into bin $(i, j)$.
-*   **Output:** A set of colored quads stored in a transform feedback buffer, ready for direct rendering.
+*   **Input:** A 2D joint histogram texture `texcond` of size $W \times H$, where each pixel $P(i, j)$ stores the count $v(i, j)$ of samples falling into bin $(i, j)$ for attributes $x$ and $y$. An input color $C_0(i, j)$ associated with the bin.
+*   **Output:** A set of colored quads stored in a transform feedback buffer, representing the PCP.
 
 **Data Structures:**
-*   **Conditional Histogram Texture (`texcond`):** A 2D texture array or a series of 2D textures. Each slice corresponds to a specific pair of attributes. The resolution matches the binning of the histogram.
-*   **Transform Feedback Buffer:** A GPU buffer object that captures the output vertices and attributes from the geometry shader stage without reading back to the CPU.
+*   `texcond`: A 2D texture array or single 2D texture containing the histogram counts.
+*   Transform Feedback Buffer: GPU memory buffer storing the generated vertex/quad data.
 
-**Algorithm Steps:**
-1.  **Setup:** Initialize a transform feedback buffer to record the resulting geometry.
-2.  **Iteration:** Loop through all pairs of conditional histograms (or slices of the histogram texture array).
-3.  **Rasterization:** For each histogram slice, draw a regular grid of vertices. The grid dimensions must match the resolution of the input conditional histogram texture slice.
-4.  **Geometry Shader Execution:** For each vertex in the grid, the geometry shader samples the corresponding value $v(i, j)$ from the `texcond` texture at position $(i, j)$.
-    *   If $v(i, j) > 0$, the shader generates a quad.
-    *   The quad starts at position $i$ on the PC axis corresponding to the first attribute (x-axis) and ends at position $j$ on the PC axis corresponding to the second attribute (y-axis).
-5.  **Color Computation:** Compute the final color $C(i, j)$ for the quad by modulating the input base color $C_0(i, j)$ with a ratio derived from the data value. The formula is:
-    $$C(i, j) = C_0(i, j) \frac{\log(v(i, j))}{\log(\Sigma v)}$$
-    Where:
-    *   $v(i, j)$ is the data value (count) at histogram bin $(i, j)$.
-    *   $\Sigma v$ is the total sum of all voxel counts (or total samples) in the histogram.
-    *   $C_0(i, j)$ is the input color associated with the bin.
-6.  **Storage:** Store all generated quads (vertices and colors) in the transform feedback buffer.
-7.  **Rendering:** Render the geometry directly from the transform feedback buffer to the screen. No read-back to the CPU is required.
+**Steps:**
+1.  Initialize the transform feedback buffer to record geometry.
+2.  Loop through all pairs of conditional histograms (or the single joint histogram slice).
+3.  For each histogram slice, draw a regular grid of vertices with dimensions matching the histogram texture size ($W \times H$).
+4.  In the geometry shader, for each vertex corresponding to grid position $(i, j)$:
+    *   Sample the histogram value $v(i, j)$ from `texcond`.
+    *   If $v(i, j) > 0$, generate a quad. The quad starts at position $i$ on the PC axis for attribute $x$ and ends at position $j$ on the PC axis for attribute $y$.
+    *   Compute the final color $C(i, j)$ using the formula below.
+    *   Output the quad with the computed color.
+5.  Store all generated quads in the transform feedback buffer.
+6.  Render the quads directly from the transform feedback buffer to the screen without reading back to the CPU.
+
+**Formula:**
+The final color $C(i, j)$ is computed by modulating the input color $C_0(i, j)$ with the ratio of the natural logarithm of the data value to the natural logarithm of the total voxel number [S1, unofficial]:
+
+$$C(i, j) = C_0(i, j) \frac{\log(v(i, j))}{\log(\Sigma v)}$$
+
+Where:
+*   $v(i, j)$ is the count in the histogram bin $(i, j)$.
+*   $\Sigma v$ is the sum of all values in the histogram (total voxel count).
+*   $\log$ denotes the natural logarithm.
+
+**Parameters:**
+*   Histogram resolution: Determined by the size of `texcond`.
+*   Color modulation: Based on the log-ratio of bin count to total count.
+
+**Edge Cases and Pitfalls:**
+*   **Zero Values:** Pixels with $v(i, j) = 0$ are skipped and do not generate geometry.
+*   **Dynamic Range:** The use of logarithms handles high dynamic range in data values [S1, unofficial].
+*   **Precision:** Standard floating-point precision is assumed for color and histogram values.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pseudocode for GPU-side Geometry Shader Logic
-# Input: texcond (2D texture array), base_color_map (2D texture array)
-# Output: Transform Feedback Buffer containing quads
+# Pseudocode for GPU Geometry Shader logic
+# Input: texcond (2D texture), C0 (input color texture or uniform)
+# Output: Quads in transform feedback buffer
 
-def generate_pcp_quads(texcond, base_color_map):
+def generate_pcp(texcond, C0):
     # 1. Setup transform feedback buffer
     tf_buffer = allocate_transform_feedback_buffer()
     
-    # 2. Calculate total sum of all values for normalization
-    # Note: In a real GPU implementation, this might be done via a reduction pass
-    # or pre-computed. Here we assume a global variable or texture lookup.
-    total_v = sum_all_values(texcond)
+    # 2. Compute total voxel count
+    total_voxels = sum(texcond)
     
-    # 3. Loop through all histogram slices (attribute pairs)
-    for slice_index in range(num_slices):
-        # 4. Draw a regular grid matching the histogram resolution
-        # Let W, H be the width and height of the histogram slice
-        draw_regular_grid(width=W, height=H)
-        
-        # 5. Geometry Shader processes each vertex
-        # The vertex shader passes the grid coordinates (i, j) to the geometry shader
-        # The geometry shader performs the following for each vertex:
-        
-        def geometry_shader_process(vertex_coords):
-            i, j = vertex_coords
+    # 3. Draw grid and generate quads
+    # Draw a grid of vertices matching texcond dimensions
+    draw_grid(width=texcond.width, height=texcond.height)
+    
+    # Geometry shader execution per vertex (i, j)
+    for i in range(texcond.width):
+        for j in range(texcond.height):
+            v_ij = texcond[i, j]
             
-            # Sample the histogram value
-            v_ij = texcond[slice_index].sample(i, j)
-            
-            # Check if the bin is nonzero
             if v_ij > 0:
-                # Compute color modulation factor
-                # Handle log(0) or log(1) edge cases if necessary, 
-                # though v_ij > 0 ensures log(v_ij) is defined.
-                # If total_v is 1, log(total_v) is 0, leading to division by zero.
-                # [G] Guard against division by zero if total_v <= 1.
-                if total_v <= 1:
-                    ratio = 1.0
-                else:
-                    ratio = log(v_ij) / log(total_v)
+                # Compute color modulation
+                # Note: log(0) is undefined, but v_ij > 0 check handles it
+                # log(total_voxels) is assumed > 0
+                log_v = log(v_ij)
+                log_total = log(total_voxels)
                 
-                # Get base color
-                c0 = base_color_map[slice_index].sample(i, j)
+                # Modulate input color
+                # C0[i, j] is the base color for this bin
+                C_final = C0[i, j] * (log_v / log_total)
                 
-                # Compute final color
-                c_final = c0 * ratio
-                
-                # Generate quad geometry
-                # Start at position i on axis X, end at position j on axis Y
-                # The exact vertex positions depend on the PCP coordinate system mapping
-                # Typically, one axis is horizontal, the other vertical.
-                # A quad is generated to represent the bin.
-                quad_vertices = generate_quad_for_bin(i, j)
-                
-                # Attach color to vertices
-                for vertex in quad_vertices:
-                    vertex.color = c_final
+                # Generate quad
+                # Start at position i on axis x, end at position j on axis y
+                quad = create_quad(start_x=i, end_y=j, color=C_final)
                 
                 # Store in transform feedback buffer
-                tf_buffer.store(quad_vertices)
+                tf_buffer.append(quad)
+    
+    # 4. Render from transform feedback buffer
+    render_from_buffer(tf_buffer)
 ```
-
-**Parameters:**
-*   **Histogram Resolution:** Determines the granularity of the PCP. Higher resolution yields more detailed distributions but increases the number of quads.
-*   **Color Mapping ($C_0$):** The base color assigned to each bin, often derived from the transfer function or data attributes.
-
-**Edge Cases and Pitfalls:**
-*   **Zero Values:** Bins with $v(i, j) = 0$ are skipped, avoiding unnecessary geometry generation.
-*   **Logarithm Domain:** The formula uses $\log(v(i, j))$. If $v(i, j) = 0$, the log is undefined, but these bins are filtered out. If $v(i, j) = 1$ and $\Sigma v = 1$, the ratio becomes $0/0$. [G] A guard clause is required to handle cases where $\Sigma v \le 1$ to prevent division by zero.
-*   **Over-plotting:** While this method reduces over-plotting compared to rendering individual samples, dense histograms can still result in many overlapping quads.
+[G] The pseudocode assumes a simplified CPU-side loop for clarity, but the actual implementation uses a GPU geometry shader processing a full-screen or grid-draw call, as described in the source. The `draw_grid` call triggers the geometry shader for each vertex.
 
 ## Subtopics
-
-### PCP from 2D Histograms
-This variant, proposed by Novotny and Hauser [70], explicitly separates the number of polylines to render from the number of data samples by generating the PCP from 2D histograms of adjacent variable pairs. It also utilizes histogram analysis to identify outliers. This approach is chosen when the dataset is large and direct sample rendering is prohibitively expensive, or when outlier detection is integrated into the visualization pipeline.
-
 ## Operating characteristics
-*   **Time Complexity:** The generation cost is proportional to the number of nonzero bins in the joint histograms, not the number of data samples. This makes it efficient for large datasets. The GPU parallelism allows for rapid generation of quads.
-*   **Memory Complexity:** Requires storage for the histogram textures and the transform feedback buffer. The buffer size depends on the number of nonzero bins.
-*   **Performance:** Rendering cost is significantly lower than rendering individual polylines for each sample. The use of transform feedback avoids CPU-GPU synchronization overhead.
-*   **Strengths:** Efficient handling of large datasets; separates rendering cost from data size; integrates outlier detection; leverages GPU parallelism.
-*   **Limitations:** Resolution is limited by the histogram binning; may lose fine-grained detail if bins are too coarse; over-plotting can still occur in dense regions.
-*   **When to use:** When visualizing high-dimensional transfer functions for large volume datasets where direct sample rendering is too slow.
-*   **When not to use:** When exact sample-level detail is required, or when the dataset is small enough that direct rendering is feasible.
+*   **Time Complexity:** Linear with respect to the number of histogram pixels $W \times H$, as each pixel is processed once in the geometry shader.
+*   **Memory Complexity:** Proportional to the number of nonzero histogram entries, as only quads for $v(i, j) > 0$ are generated and stored.
+*   **Performance:** Highly parallel on the GPU due to the use of geometry shaders and transform feedback buffers. No CPU-GPU data transfer is required for the geometry generation step.
+*   **Strengths:** Efficient generation of dense visualizations; handles high dynamic range via logarithmic color modulation; direct rendering from GPU memory.
+*   **Limitations:** Requires GPU support for geometry shaders and transform feedback. The visual density may become overwhelming for very large histograms.
+*   **When to use:** When designing transfer functions for volume rendering and needing to visualize the joint distribution of two scalar attributes efficiently.
+*   **When not to use:** When interactive exploration requires rapid updates and the histogram size is extremely large, potentially causing GPU bottlenecks.
 
 ## Background
-Parallel Coordinate Plots were originally introduced by Inselberg for multivariate data visualization. In the context of volume rendering transfer functions, the specific method of generating PCPs from 2D histograms was proposed by Novotny and Hauser [70] to address the over-plotting issue inherent in rendering individual data samples. This approach was further discussed and implemented in the context of multivariate transfer function design by Zhou et al. [S1, unofficial]. The technique leverages GPU geometry shaders and transform feedback to efficiently generate the geometric representation of the histogram bins.
+This method was proposed in [70] (cited in [S1, unofficial]) and is described in detail in Zhou's dissertation [S1, unofficial]. It is part of a broader framework for multivariate transfer function design in volume rendering, specifically within the context of probabilistic and statistical modeling of scalar data. The approach leverages GPU hardware acceleration to generate complex visualizations from statistical data (histograms) without CPU intervention.
 
 ## Sources
 [S1] MULTIVARIATE TRANSFER FUNCTION DESIGN, https://www.sci.utah.edu/~lzhou/dissertation_final_zhoul.pdf, fetched 2026-10-27 (unofficial)

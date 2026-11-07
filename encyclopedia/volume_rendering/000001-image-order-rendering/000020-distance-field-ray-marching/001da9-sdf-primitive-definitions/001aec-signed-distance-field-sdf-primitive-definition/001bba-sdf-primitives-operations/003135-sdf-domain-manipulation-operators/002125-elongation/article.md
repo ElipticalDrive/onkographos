@@ -1,110 +1,80 @@
 # Elongation
 
+Also called: Elongation operator, elongation transform
+
 ## Overview
-Elongation is a domain manipulation operator for Signed Distance Functions (SDFs) that stretches a primitive along a specific axis or direction. It solves the problem of creating extended geometric structures (such as beams, tubes, or stretched spheres) from compact base primitives without altering the underlying distance metric's continuity. It sets itself apart from siblings like [SDF Rounding](1829-sdf-rounding.md) by modifying the spatial metric to increase length, whereas rounding modifies the surface geometry to soften corners.
+Elongation modifies a Signed Distance Function (SDF) to stretch or compress geometry along a specific axis or direction by applying a non-uniform scaling transformation to the domain. It solves the problem of creating tapered, stretched, or compressed primitives without altering the base shape's intrinsic definition. Unlike [SDF Domain Manipulation Operators](1730-sdf-domain-manipulation-operators.md) which primarily use isometries (reflection, rotation, translation) to tile or mirror space, elongation applies a non-isometric linear transform. This distorts the distance metric, requiring careful handling during ray marching to avoid artifacts [S4, unofficial].
+
 ## How it works
-**Inputs and Outputs**:
-- Input: Query point $\mathbf{p} \in \mathbb{R}^3$, elongation vector $\mathbf{s} \in \mathbb{R}^3$, and base primitive parameters (e.g., height $h$).
-- Output: Transformed distance value $d$.
+**Inputs and Outputs:**
+- Input: Query point $\mathbf{p} \in \mathbb{R}^3$, elongation vector $\mathbf{s} \in \mathbb{R}^3$ (defining the stretch direction and magnitude), and base SDF function $d_{base}$.
+- Output: Transformed distance value $d_{elongated}(\mathbf{p})$.
 
-**Data Structures**:
-- $\mathbf{p}$: 3D float vector.
-- $\mathbf{s}$: 3D float vector defining the elongation direction and magnitude.
-- $h$: Scalar parameter defining the base primitive's scale or height.
+**Data Structures:**
+- $\mathbf{p}$: 3D vector $(p_x, p_y, p_z)$.
+- $\mathbf{s}$: 3D vector $(s_x, s_y, s_z)$.
+- Intermediate vectors $\mathbf{q}, \mathbf{t}, \mathbf{a}, \mathbf{b}$ as defined in the steps.
 
-**Steps**:
-1. **Transform Position**: Compute an intermediate vector $\mathbf{q}$ by subtracting the elongation vector $\mathbf{s}$ from the absolute value of the input position $\mathbf{p}$. Specifically, the source code suggests a more complex transformation involving rotation and scaling for specific primitives (like a stretched sphere or capsule), but the general principle described in the notes is:
-   $$ \mathbf{q} = |\mathbf{p}| - \mathbf{s} $$
-   *Note: The provided source [S1, unofficial] implements a specific elongated primitive (likely a stretched sphere/capsule hybrid) using a coordinate rotation and scaling matrix rather than a simple subtraction. The general "Elongation" operator in domain manipulation typically involves scaling one axis. However, adhering strictly to the provided source's logic for this specific implementation:*
-   
-   The source [S1, unofficial] defines a specific elongated primitive `sdf` where:
-   - $\mathbf{p}$ is split into components $p_x, p_y, p_z$.
-   - $p_x, p_z$ are taken as absolute values.
-   - $p_x, p_z$ are sorted such that $p_x = \max(p_x, p_z)$ and $p_z = \min(p_x, p_z)$.
-   - They are shifted: $p_x \leftarrow p_x - 0.5$, $p_z \leftarrow p_z - 0.5$.
-   - A rotated/scaled vector $\mathbf{q}$ is computed:
-     $$ q_x = p_z $$
-     $$ q_y = h p_y - 0.5 p_x $$
-     $$ q_z = h p_x + 0.5 p_y $$
-   - An elongation/clamping term $s$ is derived from $q_x$:
-     $$ s = \max(0, -q_x) $$
-   - A blend factor $t$ is computed:
-     $$ t = \text{clamp}\left(\frac{q_y - 0.5 p_z}{h^2 + 0.5}, 0.0, 1.0\right) $$
-   - Distances $a$ and $b$ are calculated in the transformed space.
-   - The final distance $d$ is selected based on a condition involving $q_y$ and $q_x$, then normalized by $\sqrt{m}$ and signed.
+**Steps:**
+1.  **Transform Position:** Compute an intermediate point $\mathbf{q}$ by subtracting the elongation vector $\mathbf{s}$ from the absolute value of the input position $\mathbf{p}$. Specifically, for each component $i \in \{x, y, z\}$, compute $q_i = |p_i| - s_i$ [S1, unofficial].
+2.  **Handle Negative Parts:** Identify the negative components of $\mathbf{q}$. Let $\mathbf{s}_{neg}$ be the vector where $s_{neg, i} = \max(0, -q_i)$ and the positive part $\mathbf{q}_{pos}$ where $q_{pos, i} = \max(0, q_i)$ [S1, unofficial].
+3.  **Evaluate Base SDF:** Evaluate the base SDF at the positive part $\mathbf{q}_{pos}$. Let this result be $d_{pos}$ [S1, unofficial].
+4.  **Combine Results:** The final distance is the sum of the evaluated positive part and the maximum of the negative parts (clamped to 0). Specifically, $d_{elongated}(\mathbf{p}) = d_{base}(\mathbf{q}_{pos}) + \max_i(\max(0, -q_i))$ [S1, unofficial].
 
-2. **Evaluate Primitive**: The base SDF is evaluated at the transformed point $\mathbf{q}$. In the specific source [S1, unofficial], this involves calculating intermediate distances $a$ and $b$ in the rotated space.
-
-3. **Combine**: The final distance is derived by combining the results from the transformed space, often involving a square root normalization and sign adjustment.
-
-**Formulas**:
-From [S1, unofficial]:
-$$ m = h^2 + 0.25 $$
-$$ s = \text{relu}(-q_x) $$
-$$ t = \text{clamp}\left(\frac{q_y - 0.5 p_z}{m + 0.25}, 0.0, 1.0\right) $$
-$$ a = m (q_x + s)^2 + q_y^2 $$
-$$ b = m (q_x + 0.5 t)^2 + (q_y - m t)^2 $$
-$$ d = \sqrt{\frac{\min(q_y, -q_x m - q_y 0.5) > 0.0 ? a : \min(a, b) + q_z^2}{m}} \cdot \text{sign}(\max(q_z, -p_y)) $$
-
-**Parameters**:
-- $h$: Height/scale factor. Typical value: $1.0$ or derived from primitive dimensions.
-
-**Edge Cases**:
-- Precision issues near $q_x = 0$ where the elongation term $s$ switches behavior.
-- Division by zero if $m + 0.25$ is zero (unlikely if $h$ is real).
-
-**Pseudocode**:
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def elongated_sdf(p, h):
-    # Unpack p
-    px, py, pz = p[0], p[1], p[2]
+def elongation_sdf(p, s, base_sdf):
+    # Step 1: Transform position
+    # q = abs(p) - s
+    qx = abs(p.x) - s.x
+    qy = abs(p.y) - s.y
+    qz = abs(p.z) - s.z
     
-    # Absolute values and sorting
-    px, pz = abs(px), abs(pz)
-    px, pz = max(px, pz), min(px, pz)
+    # Step 2: Handle negative parts
+    # s_neg = max(0, -q)
+    sx_neg = max(0.0, -qx)
+    sy_neg = max(0.0, -qy)
+    sz_neg = max(0.0, -qz)
     
-    # Shift
-    px, pz = px - 0.5, pz - 0.5
+    # q_pos = max(0, q)
+    qx_pos = max(0.0, qx)
+    qy_pos = max(0.0, qy)
+    qz_pos = max(0.0, qz)
     
-    # Compute q
-    qx = pz
-    qy = h * py - 0.5 * px
-    qz = h * px + 0.5 * py
+    # Step 3: Evaluate base SDF at positive part
+    d_pos = base_sdf(vec3(qx_pos, qy_pos, qz_pos))
     
-    # Compute s and t
-    m = h**2 + 0.25
-    s = max(0.0, -qx)
-    t = max(0.0, min(1.0, (qy - 0.5 * pz) / (m + 0.25)))
+    # Step 4: Combine results
+    # max_neg = max(sx_neg, sy_neg, sz_neg)
+    max_neg = max(sx_neg, sy_neg, sz_neg)
     
-    # Compute a and b
-    a = m * (qx + s)**2 + qy**2
-    b = m * (qx + 0.5 * t)**2 + (qy - m * t)**2
-    
-    # Select distance
-    cond = min(qy, -qx * m - qy * 0.5) > 0.0
-    d_sq = a if cond else min(a, b)
-    
-    # Final distance
-    d = math.sqrt((d_sq + qz**2) / m) * math.copysign(1.0, max(qz, -py))
-    
-    return d
+    return d_pos + max_neg
 ```
+
+**Parameters:**
+- $\mathbf{s}$: The elongation vector. Typical values depend on the desired stretch. If $\mathbf{s} = \mathbf{0}$, the operator acts as an identity (after absolute value reflection).
+
+**Edge Cases and Pitfalls:**
+- **Precision:** When $\mathbf{p}$ is close to $\mathbf{s}$, $q_i$ approaches 0. Floating-point errors in $|p_i| - s_i$ can cause small discontinuities in the derivative if not handled with epsilon guards [G].
+- **Non-Isometry:** Since elongation is a non-uniform scaling, the Lipschitz constant changes. Ray marching step sizes must be reduced by the maximum scaling factor to avoid missing the surface [S4, unofficial].
+- **Degenerate Input:** If $\mathbf{s}$ has large components, the "negative part" logic effectively extends the domain of the base SDF into regions where it might not be defined or smooth. The base SDF must be robust to the transformed coordinates.
+
 ## Subtopics
 
 ### [End-point Corrector](4063-end-point-corrector.md)
-The End-point Corrector is a technique used in volume rendering of vector fields to address radius shrinkage and field variation divergence near skeleton end-points. It forces an additional sampling position or adjusts streamline endpoints to increase the correlation between the minima of individual primitives and the global field. It sets itself apart from standard elongation by specifically targeting the boundary artifacts at the start and end of streamlines or skeleton segments, rather than modifying the length along the tangent.
+A technique for volume rendering of vector fields to address radius shrinkage near skeleton end-points. It differs from standard elongation by targeting boundary artifacts at streamline endpoints rather than modifying length along the tangent.
 
 ## Operating characteristics
-- **Time Complexity**: $O(1)$ per query, involving basic arithmetic operations.
-- **Memory Complexity**: $O(1)$, no additional data structures required.
-- **Strengths**: Efficiently creates elongated shapes without complex mesh generation. Maintains analytical distance properties for ray marching.
-- **Limitations**: The specific implementation in [S1, unofficial] is complex and tied to a specific primitive shape (stretched sphere/capsule). General elongation via simple axis scaling may distort the distance metric if not handled carefully, though domain manipulation operators generally preserve the SDF property by transforming the input space.
-- **When to use**: When creating extended geometric primitives like beams, pillars, or stretched spheres in ray marching.
+- **Time Complexity:** $O(1)$ per evaluation, dominated by the base SDF evaluation.
+- **Memory Complexity:** $O(1)$ auxiliary storage.
+- **Performance:** Fast, but requires smaller ray marching steps due to non-isometric distortion [S4, unofficial].
+- **Strengths:** Simple to implement; allows for tapered or stretched primitives without complex geometry.
+- **Limitations:** Distorts the distance metric, potentially causing ray marching artifacts if step sizes are not adjusted. The absolute value operation introduces non-differentiability at $p_i = 0$ unless the base SDF handles it gracefully.
+
 ## Background
-The specific implementation of elongation for a stretched primitive is found in the Torch-Sphere-Tracer repository [S1, unofficial]. Domain manipulation operators as a class are used in SDF rendering to create complex structures from simple primitives by transforming the query space.
+The specific formulation of elongation as described in the source code involves a complex transformation involving absolute values, subtraction of an elongation vector, and a combination of positive and negative parts. This approach is documented in the unofficial repository [S1, unofficial]. The general principle of domain manipulation for SDFs is widely used in procedural modeling [S3, unofficial].
+
 ## Sources
 [S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)

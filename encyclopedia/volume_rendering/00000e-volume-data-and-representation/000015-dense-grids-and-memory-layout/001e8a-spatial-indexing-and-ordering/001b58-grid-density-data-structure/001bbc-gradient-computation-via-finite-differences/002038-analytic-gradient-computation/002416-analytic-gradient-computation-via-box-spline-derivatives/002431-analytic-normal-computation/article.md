@@ -3,106 +3,122 @@
 Also called: Exact Gradient for Spline
 
 ## Overview
-Analytic Normal Computation computes surface normal vectors for volume rendering by deriving the gradient directly from the underlying spline basis function, rather than approximating it via finite differences. It solves the problem of normal inaccuracy inherent in numerical differencing, where the choice of offset step size creates a trade-off between rounding errors (small offsets) and approximation errors (large offsets). It is distinguished from its parent method, Analytic Gradient Computation via Box-Spline Derivatives, by specifically focusing on the normal vector derivation for isosurface rendering, ensuring consistent accuracy regardless of zoom level or viewing angle.
+Analytic Normal Computation computes surface normal vectors by evaluating the exact derivative of the underlying spline function, rather than approximating gradients via finite differences. It solves the problem of numerical instability and approximation errors inherent in finite difference methods, particularly when offset values are poorly chosen. It is distinguished from its sibling [Analytic Normal Computation for SDF Grids](9645-analytic-normal-computation-for-sdf-grids.md) by providing the general framework for spline-based normal derivation, whereas the SDF variant leverages the specific bilinear structure of trilinearly interpolated Signed Distance Function grids.
 
 ## How it works
-The method relies on the mathematical property that the derivative of a box-spline is another box-spline (or a linear combination thereof). By evaluating this analytic derivative at the ray intersection point, the gradient $\nabla f$ is obtained exactly. The normal vector $\mathbf{n}$ is then normalized:
-
-$$ \mathbf{n} = \frac{\nabla f}{\|\nabla f\|} $$
-
-**Inputs:**
-- Ray origin $\mathbf{o}$ and direction $\mathbf{d}$.
-- Current intersection point $\mathbf{p}$ on the isosurface.
-- The box-spline coefficients defining the volume data.
-- The specific box-spline basis function definition (e.g., FCC box-spline).
-
-**Outputs:**
-- Normal vector $\mathbf{n}$ at $\mathbf{p}$.
+**Inputs and Outputs:**
+*   **Input:** The position $\mathbf{p}$ within a voxel, the control points (or sample values) of the underlying box-spline basis, and the specific box-spline basis function definition.
+*   **Output:** The normal vector $\mathbf{n} = -\nabla f(\mathbf{p})$, where $f(\mathbf{p})$ is the scalar field value at $\mathbf{p}$.
 
 **Data Structures:**
-- The voxel grid stores scalar values. The analytic computation requires accessing the same set of control points (samples) as the scalar value interpolation but applies different weights corresponding to the derivative of the basis functions.
+The method relies on the spatial indexing of the FCC (Face-Centered Cubic) grid and the precomputed box-spline coefficients. No additional data structures are required beyond those used for the scalar field evaluation itself.
 
 **Steps:**
-1. Identify the voxel containing the intersection point $\mathbf{p}$.
-2. Retrieve the relevant box-spline control points (coefficients) surrounding $\mathbf{p}$.
-3. Evaluate the analytic derivative of the box-spline basis function at $\mathbf{p}$. This involves computing the directional derivatives of the spline basis functions.
-4. Sum the contributions of the control points weighted by the analytic derivative values to form the gradient vector $\nabla f$.
-5. Normalize $\nabla f$ to obtain the unit normal $\mathbf{n}$.
+1.  **Evaluate Scalar Field:** Compute the scalar value $f(\mathbf{p})$ using the standard box-spline evaluation algorithm. This involves fetching the relevant control points and computing the weighted sum based on the basis function.
+2.  **Compute Analytic Derivative:** Instead of perturbing $\mathbf{p}$ by a small offset $\delta$ to estimate $\frac{\partial f}{\partial x}$, $\frac{\partial f}{\partial y}$, and $\frac{\partial f}{\partial z}$, compute the directional derivatives directly. The derivative of a box-spline is another box-spline (or a linear combination thereof).
+3.  **Reuse Samples:** The computation of the gradient components reuses the fetched control points from Step 1. The directional derivatives are expressed as other box-splines evaluated at the same position $\mathbf{p}$.
+4.  **Normalize:** Normalize the resulting gradient vector $\nabla f(\mathbf{p})$ to obtain the unit normal $\mathbf{n}$.
+
+**Formulas:**
+Let the scalar field be $f(\mathbf{p}) = \sum_{i} c_i B_i(\mathbf{p})$, where $c_i$ are coefficients and $B_i$ are box-spline basis functions.
+The gradient is:
+$$ \nabla f(\mathbf{p}) = \sum_{i} c_i \nabla B_i(\mathbf{p}) $$
+The analytic derivative $\nabla B_i(\mathbf{p})$ is computed exactly using the properties of box-splines, avoiding the limit definition:
+$$ \nabla B_i(\mathbf{p}) = \lim_{\delta \to 0} \frac{B_i(\mathbf{p} + \delta \mathbf{v}) - B_i(\mathbf{p})}{\delta} $$
+where $\mathbf{v}$ is the direction vector. In practice, this limit is replaced by the closed-form derivative of the spline basis.
 
 **Parameters:**
-- None. The method is exact and does not rely on a step size $\delta$.
+*   **Offset $\delta$:** Not used. This is the key distinction from finite difference methods.
 
 **Edge Cases and Pitfalls:**
-- **Rounding-off error in finite differences:** If using finite differences, offsets $\delta$ that are too small lead to precision loss due to floating-point rounding.
-- **Approximation error in finite differences:** Offsets $\delta$ that are too large lead to inaccurate normals because the linear approximation deviates from the true curve.
-- **Zoom level:** While analytic normals remain accurate, the rendering quality may decrease when zoomed in if the step size for ray marching is fixed. This is a rendering artifact, not a normal computation error, and can be mitigated by using adaptive stepsizes based on viewing angle and distance from the camera [S1].
+*   **Finite Difference Pitfalls:** As noted in [S1], finite difference normals are inaccurate if the offset $\delta$ is too small (due to rounding-off error) or too large (due to poor approximation of the derivative). Analytic computation avoids this entirely.
+*   **Precision:** Standard floating-point precision is sufficient. The method is numerically stable.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_analytic_normal(p, coefficients, basis_function):
+def compute_analytic_normal(p, grid, basis_function):
     """
-    Computes the normal vector at point p using analytic derivatives.
+    Computes the normal at position p using analytic derivatives of the box-spline.
     
     Args:
-        p: Intersection point (vec3).
-        coefficients: Array of box-spline control points.
-        basis_function: The box-spline basis function object/method.
+        p: 3D vector, position in voxel space.
+        grid: Data structure containing box-spline coefficients.
+        basis_function: Function object defining the box-spline B and its derivative dB.
         
     Returns:
-        n: Normalized normal vector (vec3).
+        n: 3D vector, the unit normal.
     """
-    # 1. Determine the local voxel and relative position
-    # (Implementation details depend on the specific grid layout, e.g., FCC)
-    local_coords = get_local_coords(p)
+    # 1. Evaluate scalar field and gradient components simultaneously
+    # The basis function must provide both B(p) and dB/dx, dB/dy, dB/dz
     
-    # 2. Evaluate the analytic gradient
-    # The gradient is the sum of coefficients multiplied by the derivative of the basis function
-    # dN/dx, dN/dy, dN/dz are the partial derivatives of the box-spline basis function N
+    scalar_value = 0.0
     grad_x = 0.0
     grad_y = 0.0
     grad_z = 0.0
     
-    for i in range(num_control_points):
-        coeff = coefficients[i]
-        # Evaluate the derivative of the basis function at local_coords
-        # This is the core analytic step, replacing finite difference approximation
-        dN_dx = basis_function.derivative_x(local_coords, i)
-        dN_dy = basis_function.derivative_y(local_coords, i)
-        dN_dz = basis_function.derivative_z(local_coords, i)
-        
-        grad_x += coeff * dN_dx
-        grad_y += coeff * dN_dy
-        grad_z += coeff * dN_dz
-        
-    gradient = vec3(grad_x, grad_y, grad_z)
+    # Fetch relevant control points for the voxel containing p
+    # This step is identical to standard volume rendering evaluation
+    control_points = grid.get_control_points_around(p)
     
-    # 3. Normalize
-    length = sqrt(gradient.x**2 + gradient.y**2 + gradient.z**2)
-    if length == 0:
-        return vec3(0, 0, 1) # Default normal if gradient is zero
-    return gradient / length
+    for cp in control_points:
+        # Evaluate basis function and its derivatives at p
+        b_val, db_dx, db_dy, db_dz = basis_function.evaluate_with_derivatives(p, cp)
+        
+        # Accumulate scalar value
+        scalar_value += cp.value * b_val
+        
+        # Accumulate gradient components
+        grad_x += cp.value * db_dx
+        grad_y += cp.value * db_dy
+        grad_z += cp.value * db_dz
+        
+    # 2. Form the gradient vector
+    gradient = Vector3(grad_x, grad_y, grad_z)
+    
+    # 3. Normalize to get the normal
+    # Note: Normal points in the direction of decreasing scalar field
+    # depending on convention, but typically n = -grad(f) for isosurfaces
+    if gradient.length() > 0:
+        normal = -gradient.normalize()
+    else:
+        normal = Vector3(0, 0, 1) # Default fallback
+        
+    return normal
 ```
 
 ## Subtopics
 
 ### [Analytic Normal Computation for SDF Grids](9645-analytic-normal-computation-for-sdf-grids.md)
-Computes the surface normal $\mathbf{n}$ for a differentiable implicit function $f$ defined by a cubic polynomial within a voxel, using analytic derivatives instead of numerical differencing to ensure $C^2$ continuity inside the voxel.
+Computes normals for SDF grids using analytic derivatives of cubic polynomials within a voxel. It is chosen when working with Signed Distance Functions and requires smooth normals without interpolation across boundaries.
+
+### [Analytic Normal Interpolation for SDF Grids](9650-analytic-normal-interpolation-for-sdf-grids.md)
+Interpolates normals from neighboring voxels to ensure continuity. It is chosen when inter-voxel continuity is prioritized over strict analytic accuracy within a single voxel.
 
 ## Operating characteristics
-- **Accuracy:** The analytic formula always results in accurate normal values, avoiding the pitfalls of offset selection inherent in finite difference methods [S1].
-- **Performance:** The computation overhead is lower than finite differences because the data fetch overhead is reduced. The analytic method requires fetching the same samples as the scalar value but avoids the additional fetches required for finite difference offsets [S1].
-- **Measured Performance:**
-    - MRI-Head: 65.2 fps (analytic) vs 51.7 fps (finite difference), 1.3x speed-up.
-    - VisMale: 68.9 fps (analytic) vs 55.1 fps (finite difference), 1.3x speed-up.
-    - CT-Head: 54.6 fps (analytic) vs 45.1 fps (finite difference), 1.2x speed-up.
-    - Carp: 22.3 fps (analytic) vs 22.2 fps (finite difference), 1.0x speed-up [S1].
-- **Strengths:** Consistent accuracy across all zoom levels and viewing angles; lower data fetch overhead.
-- **Limitations:** Requires the ability to evaluate analytic derivatives of the basis function; rendering quality may still degrade when zoomed in if ray marching step size is not adaptive [S1].
+**Time and Memory Complexity:**
+The time complexity is comparable to scalar field evaluation, as the gradient components are computed simultaneously with the scalar value. Memory complexity is $O(1)$ per voxel evaluation, as no additional storage is needed.
+
+**Measured Performance:**
+According to [S1], the analytic method offers a speed-up over finite difference methods due to lower data fetch overhead. The measured speed-ups are:
+*   MRI-Head: 1.3x
+*   VisMale: 1.3x
+*   CT-Head: 1.2x
+*   Carp: 1.0x
+
+**Strengths and Limitations:**
+*   **Strengths:** Always results in accurate normal values regardless of offset choice. Lower computation overhead due to reduced data fetches. No numerical instability from small offsets.
+*   **Limitations:** Requires the implementation of analytic derivatives for the specific spline basis, which may be more complex than simple finite differences.
+
+**When to Use:**
+Use when high-quality, accurate normals are required and the underlying scalar field is represented by box-splines or similar analytic bases. It is particularly advantageous when the cost of fetching additional samples for finite differences is significant.
+
+**When Not to Use:**
+If the scalar field is not represented by an analytic basis (e.g., simple trilinear interpolation without spline refinement), analytic derivatives may not be available or may not offer a significant advantage over finite differences.
 
 ## Background
-This method is described in the context of GPU isosurface raycasting of FCC (Face-Centered Cubic) datasets. It is part of a pipeline that includes quasi-interpolation prefiltering and min/max cell construction. The approach leverages the properties of box-splines to provide exact gradients, improving the visual quality of isosurface images compared to finite difference approximations.
+This method is described in "GPU Isosurface Raycasting of FCC Datasets" by Kim et al. [S1]. It was developed to improve the quality of isosurface rendering for Face-Centered Cubic (FCC) datasets by avoiding the inaccuracies of finite difference normal computation. The approach leverages the mathematical properties of box-splines, where the derivative of a box-spline is another box-spline, allowing for efficient and exact gradient computation.
 
 ## Sources
 [S1] GPU Isosurface Raycasting of FCC Datasets, https://minho-kim-uos.github.io/papers/kim12gpu.pdf, fetched 2026-10-29

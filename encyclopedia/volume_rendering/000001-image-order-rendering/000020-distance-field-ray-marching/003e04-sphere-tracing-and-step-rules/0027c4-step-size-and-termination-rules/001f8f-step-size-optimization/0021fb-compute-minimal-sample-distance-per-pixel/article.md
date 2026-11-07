@@ -2,101 +2,92 @@
 
 
 ## Overview
-This method computes the minimal sample distance per pixel by projecting each dataset cell axis onto the viewport, accounting for camera and volume transforms [S1, unofficial]. It differs from general screen-space pixel coverage calculations by focusing on the angular spread of the voxel as seen from the camera center, providing a normalized measure of how "large" a voxel appears in viewing space [S1, unofficial]. It serves as a foundational step for adaptive step sizing in distance-field ray marching by establishing a lower bound on the step size required to resolve the finest geometric detail visible in the current view [S1, unofficial].
+This method calculates the minimal sample distance required per pixel to resolve the finest visible voxel detail in a volume dataset, accounting for camera and volume transformations [S1, unofficial]. It serves as a screen-space coverage metric to ensure that ray marching steps are small enough to prevent aliasing of voxel boundaries, distinguishing it from geometric SDF-based step rules [S1, unofficial].
 
 ## How it works
 **Inputs:**
-*   `renderer`: A pointer to the rendering context, providing camera position, orientation, and viewport dimensions [S1, unofficial].
-*   `volume`: A pointer to the volume dataset, providing the geometry, transformation matrix, and cell dimensions [S1, unofficial].
+*   `renderer`: A pointer to the rendering context providing camera position, orientation, and viewport dimensions [S1, unofficial].
+*   `volume`: A pointer to the volume object providing the dataset geometry, extent, and transformation matrix [S1, unofficial].
 
 **Outputs:**
-*   `minimal_sample_distance`: A scalar value representing the minimum distance between samples along the ray for the current pixel [S1, unofficial].
+*   A scalar value representing the minimal sample distance (step size) for the pixel or region [S1, unofficial].
+*   A boolean flag `IgnoreSampleDistancePerPixel` indicating whether the calculation should be skipped due to degenerate geometry [S1, unofficial].
 
 **Data Structures:**
-*   The method operates on the volume's cell axes (typically the local x, y, and z axes of the voxel grid).
-*   The camera state includes the view direction vector $\mathbf{v}$ and the projection matrix parameters.
+*   The method operates on the volume's cell axes (local coordinate vectors defining the voxel dimensions) and the camera's projection matrix. Exact internal data structures for the projection calculation are not specified in the source [S1, unofficial].
 
 **Steps:**
-1.  **Retrieve Context:** Obtain the camera transformation matrix $\mathbf{M}_{cam}$ from the `renderer` and the volume transformation matrix $\mathbf{M}_{vol}$ from the `volume` [S1, unofficial].
-2.  **Define Cell Axes:** Identify the three orthogonal unit vectors $\mathbf{u}_x, \mathbf{u}_y, \mathbf{u}_z$ representing the local axes of the dataset cells [S1, unofficial].
-3.  **Transform Axes:** Transform the cell axes into the world or view space. For each axis $\mathbf{u}_i$, compute the transformed axis $\mathbf{u}'_i = \mathbf{M}_{vol} \mathbf{u}_i$ (assuming $\mathbf{M}_{vol}$ maps local to world) and then project into view space using the camera's inverse or view matrix [S1, unofficial].
-4.  **Project to Viewport:** Project the transformed axes onto the viewport plane. This involves calculating the angular spread or screen-space extent of each axis relative to the camera center [S1, unofficial].
-5.  **Compute Minimal Distance:** Determine the minimal sample distance based on the projected sizes of the axes. The method typically selects the smallest projected dimension to ensure the finest detail is captured [S1, unofficial].
-6.  **Handle Degeneracy:** Check if any axis is degenerate, specifically if an axis is aligned with the view direction [S1, unofficial].
-    *   If an axis is aligned with the view direction, the projection becomes singular or zero. In this case, set a flag `IgnoreSampleDistancePerPixel` to true [S1, unofficial]. This indicates that the standard projection-based calculation is invalid for this orientation, and a fallback or alternative step size strategy should be used [S1, unofficial].
+1.  **Retrieve Context:** Obtain the camera model (view and projection matrices) from the `renderer` and the voxel geometry (axis vectors and origin) from the `volume` [S1, unofficial].
+2.  **Project Axes:** Project each of the dataset's cell axes onto the viewport plane. This involves transforming the voxel corners or axis vectors from world space to clip space and then to normalized device coordinates (NDC) [S1, unofficial].
+3.  **Evaluate Coverage:** Compute the angular spread or projected size of the voxel as seen from the camera center. This metric represents the minimal distance required to distinguish adjacent voxels in screen space [S1, unofficial].
+4.  **Check Degeneracy:** Determine if any cell axis is degenerate, specifically if an axis is aligned with the view direction. If an axis is parallel to the view vector, the projected size becomes zero or undefined, leading to numerical instability [S1, unofficial].
+5.  **Set Flag:** If a degenerate axis is detected, set `IgnoreSampleDistancePerPixel` to `true` and return a default or maximal step size [S1, unofficial].
+6.  **Compute Distance:** If no degeneracy exists, calculate the minimal sample distance based on the projected voxel size. The step size is typically derived from the smallest projected dimension to ensure Nyquist compliance for the finest visible detail [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def compute_minimal_sample_distance_per_pixel(renderer, volume):
-    # Get camera and volume matrices
-    view_matrix = renderer.get_view_matrix()
-    vol_matrix = volume.get_transformation_matrix()
+    # Get camera and volume data
+    camera = renderer.get_camera()
+    projection_matrix = camera.get_projection_matrix()
+    view_matrix = camera.get_view_matrix()
+    voxel_axes = volume.get_cell_axes() # List of 3D vectors
+    voxel_origin = volume.get_origin()
     
-    # Get cell dimensions (assuming unit axes for direction, scaled by cell size)
-    cell_size = volume.get_cell_size() # Returns (dx, dy, dz)
-    
-    # Define local cell axes
-    axes = [
-        [cell_size[0], 0, 0],
-        [0, cell_size[1], 0],
-        [0, 0, cell_size[2]]
-    ]
-    
-    minimal_distance = infinity
-    
-    for axis in axes:
-        # Transform axis to world/view space
-        # Note: Exact transformation depends on coordinate system conventions
-        transformed_axis = transform_vector(axis, vol_matrix)
-        view_axis = transform_vector(transformed_axis, view_matrix)
-        
-        # Check for degeneracy: axis aligned with view direction
-        # View direction is typically (0, 0, -1) in view space or derived from camera
-        view_direction = renderer.get_view_direction()
-        
-        # Dot product to check alignment
-        dot_product = dot(view_axis, view_direction)
-        
-        if abs(dot_product) > 0.99: # Threshold for "aligned"
-            # Axis is parallel to view direction; projection is degenerate
-            return {"distance": None, "ignore_flag": True}
-        
-        # Project axis onto viewport plane
-        # This involves calculating the screen-space length or angular size
-        projected_length = project_to_viewport(view_axis, renderer.get_viewport())
-        
-        # Update minimal distance
-        if projected_length < minimal_distance:
-            minimal_distance = projected_length
+    # Check for degenerate axes
+    view_direction = camera.get_direction()
+    for axis in voxel_axes:
+        # Check if axis is aligned with view direction
+        # Dot product close to 1 or -1 indicates alignment
+        if abs(dot(normalize(axis), normalize(view_direction))) > 0.999:
+            return {
+                "distance": None,
+                "ignore_flag": True
+            }
             
-    return {"distance": minimal_distance, "ignore_flag": False}
+    # Project axes to screen space
+    # Transform voxel corners or axes to clip space
+    clip_corners = []
+    for corner in volume.get_voxel_corners():
+        world_pos = voxel_origin + corner
+        clip_pos = transform(projection_matrix, transform(view_matrix, world_pos))
+        clip_corners.append(clip_pos)
+        
+    # Compute projected size in NDC
+    # Calculate the spread of the voxel in screen coordinates
+    ndc_spread = compute_ndc_spread(clip_corners)
+    
+    # Derive minimal sample distance
+    # The step size must be small enough to resolve the smallest projected feature
+    minimal_distance = compute_step_from_spread(ndc_spread, camera)
+    
+    return {
+        "distance": minimal_distance,
+        "ignore_flag": False
+    }
 ```
 
 **Parameters:**
-*   `renderer`: VTK `vtkRenderer` pointer [S1, unofficial].
-*   `volume`: VTK `vtkVolume` pointer [S1, unofficial].
+*   `IgnoreSampleDistancePerPixel`: Boolean flag. If `true`, the renderer should ignore the computed minimal distance and use a default or previous step size [S1, unofficial].
 
 **Edge Cases:**
-*   **Degenerate Axes:** If a dataset axis is aligned with the view direction, the projection method fails. The method must detect this and set `IgnoreSampleDistancePerPixel` to true [S1, unofficial].
-*   **Precision:** Floating-point precision in matrix transformations can affect the accuracy of the projected lengths, especially for very small or very large volumes [S1, unofficial].
+*   **Degenerate Axes:** If a voxel axis is aligned with the view direction, the projected size is zero. The method must detect this and set the ignore flag to prevent division by zero or infinite step sizes [S1, unofficial].
 
 ## Subtopics
 
 ### [Projected Voxel Size / LOD Calculation](4189-projected-voxel-size-lod-calculation.md)
-This method computes a scalar metric representing the projected size of a voxel relative to the camera, primarily used for Level of Detail (LOD) decisions and step size adaptation in distance-field ray marching. It differs from general screen-space pixel coverage calculations by focusing on the angular spread of the voxel as seen from the camera center, providing a normalized measure of how "large" a voxel appears in viewing space.
+Computes a scalar metric of the projected voxel size for LOD decisions. It evaluates the angular spread of the voxel to provide a normalized measure of appearance, setting it apart by focusing on Level of Detail selection rather than just step size safety.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per pixel, as it involves a fixed number of matrix-vector multiplications and projections (3 axes).
-*   **Memory Complexity:** $O(1)$ auxiliary memory.
-*   **Strengths:** Provides a geometrically accurate lower bound for step size based on the current view. It adapts automatically to camera movement and volume orientation.
-*   **Limitations:** Fails (requires fallback) when axes are aligned with the view direction. It does not account for density gradients or SDF values, only geometric projection.
-*   **When to Use:** As a pre-processing step for adaptive ray marching where geometric resolution is the primary constraint.
-*   **When Not to Use:** When the volume has complex internal structures that require sampling based on density rather than just cell size, or when the view direction is likely to align with dataset axes frequently.
+*   **Complexity:** The calculation is performed per pixel or per region, involving matrix multiplications and vector projections. Complexity is $O(1)$ per pixel relative to the number of voxels, but depends on the number of axes (constant 3 for 3D).
+*   **Performance:** Provides accurate step sizing for aliasing prevention but adds overhead to the rendering loop.
+*   **Strengths:** Ensures visual fidelity by respecting screen-space resolution limits.
+*   **Limitations:** Requires access to camera and volume transforms. Degenerate cases (view aligned with axes) require special handling [S1, unofficial].
 
 ## Background
-This method is part of the VTK (Visualization Toolkit) multi-volume ray casting implementation, specifically within the `vtkMultiVolumeRayCastMapper` or related classes. It was developed to support efficient rendering of multiple volumes by adapting the sampling rate to the visual importance of the data [S1, unofficial]. The approach is rooted in standard computer graphics techniques for view-dependent LOD and sampling, adapted for volume rendering contexts [S1, unofficial].
+This method is implemented in the `vtkMultiVolumeRayCaster` within the VTK ecosystem [S1, unofficial]. It addresses the need for screen-space adaptive sampling in volume rendering to prevent aliasing artifacts when voxel sizes vary significantly in screen space.
 
 ## Sources
 [S1] bozorgi/VTKMultiVolumeRayCaster, https://github.com/bozorgi/VTKMultiVolumeRayCaster, fetched 2026-10-26 (unofficial)

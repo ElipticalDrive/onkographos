@@ -1,0 +1,267 @@
+# C-ToF Gaussian Splatting Image Formation
+
+Also called: C-ToF GS phasor formation model, C-ToF GS raw image formation model
+
+## Overview
+This method defines the forward rendering equations for continuous-wave time-of-flight (C-ToF) cameras within a 3D Gaussian Splatting framework, enabling the reconstruction of dynamic scenes from monocular raw sensor samples [S1]. It extends standard Gaussian splatting by modeling the complex physics of modulated light propagation, specifically addressing the under-constrained nature of depth optimization in single-camera dynamic settings where the measured signal (phasor or raw quad) is not the property of interest (depth) [S1]. Unlike neural volumetric approaches, this primitive-based method achieves 100× faster optimization and rendering while maintaining similar or better accuracy, and it avoids the need for additional constraints like camera motion or RGB integration required by prior works such as ToRF [S1].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   A set of $N$ 3D Gaussians $\mathcal{G} = \{G_k\}_{k=1}^N$.
+*   Camera parameters: modulation frequency $f$, speed of light $c$, and intrinsic/extrinsic matrices.
+*   For the raw image model: a temporal offset $t$ for each raw frame in the quartet.
+
+**Outputs:**
+*   **Phasor Model:** A complex-valued phasor image $\mathbf{p}(\mathbf{x})$ at pixel coordinates $\mathbf{x}$.
+*   **Raw Image Model:** A vector of four raw intensity values $\mathbf{q}(\mathbf{x})$ corresponding to the phase offsets $\phi \in \{0, \pi/2, \pi, 3\pi/2\}$.
+*   **Mean Depth:** A scalar depth map $d(\mathbf{x})$ derived from the Gaussian distribution (computed separately, see below).
+
+### Data Structures
+Each Gaussian $G_k$ stores the following properties [S1]:
+1.  **Center:** $\mathbf{x}_k \in \mathbb{R}^3$.
+2.  **Covariance:** $\Sigma_k \in \mathbb{R}^{3 \times 3}$, describing 3D scale and rotation.
+3.  **Opacity:** $o_k \in [0, 1]$.
+4.  **Reflectivity:** $r_k \in [0, 1]$, view-dependent, parameterized by 16 spherical harmonic (SH) coefficients.
+5.  **Distance:** $d_k$, the distance from the camera center to the Gaussian center $\mathbf{x}_k$.
+6.  **Source Intensity:** $s_k$ (or constant $s$), representing emitted signal intensity.
+
+*Note: View-dependent color $\mathbf{c}_k$ is used in standard RGB splatting but is replaced by reflectivity $r_k$ and source intensity $s$ in the C-ToF models.*
+
+### Formulas and Definitions
+
+**1. Standard C-ToF Physics (Reference)**
+The standard derivation of depth $d_{\text{ToF}}$ from raw frames $Q_\phi$ assumes simultaneous capture and opaque Lambertian surfaces [S1]:
+$$
+d_{\text{ToF}} = \frac{c}{4\pi f} \psi, \quad \text{where} \quad \psi = \arctan\left(\frac{Q_0 - Q_\pi}{Q_{\pi/2} - Q_{3\pi/2}}\right)
+$$
+The complex phasor representation of the C-ToF signal is [S1]:
+$$
+a \cdot W(d_{\text{path}}) = a \cdot \exp\left(i \frac{2\pi d_{\text{path}} f}{c}\right) = (Q_0 - Q_\pi) + i(Q_{\pi/2} - Q_{3\pi/2})
+$$
+where $a = 2A$, $d_{\text{path}} = 2d_{\text{ToF}}$, phase $\psi = \angle W(d_{\text{path}})$, and amplitude $A = |a \cdot W(d_{\text{path}})| / 2$.
+
+**2. C-ToF GS Phasor Formation Model**
+This model renders the complex phasor $\mathbf{p}(\mathbf{x})$ at pixel $\mathbf{x}$ [S1]:
+$$
+\mathbf{p}(\mathbf{x}) = \mathbf{p}^{\text{bg}} T_N + \sum_{k=1}^N \frac{2s \cdot r_k}{d_k^2} W(d_k) o_k \mathcal{G}_k^{2\text{D}}(\mathbf{x}) T_k^2
+$$
+Definitions:
+*   $\mathbf{p}^{\text{bg}}$: Background phasor intensity.
+*   $T_N = \prod_{l=1}^N (1 - o_l \mathcal{G}_l^{2\text{D}}(\mathbf{x}))$: Final transmittance.
+*   $T_k = \prod_{l=1}^{k-1} (1 - o_l \mathcal{G}_l^{2\text{D}}(\mathbf{x}))$: Transmittance before Gaussian $k$.
+*   $\mathcal{G}_k^{2\text{D}}(\mathbf{x})$: 2D Gaussian projection of $G_k$ at pixel $\mathbf{x}$.
+*   $W(d_k) = \exp(i \psi_k)$: Phase weighting function, where $\psi_k = \frac{4\pi d_k f}{c}$.
+*   The term $T_k^2$ accounts for the round-trip light travel (transmission squared).
+*   $r_k$ is the view-dependent surface reflectivity.
+
+**3. C-ToF GS Raw Image Formation Model**
+This model renders the four raw intensity samples $\mathbf{q}(\mathbf{x})$ for dynamic scenes, allowing arbitrary time $t$ [S1]:
+$$
+\mathbf{q}(\mathbf{x}) = \mathbf{q}^{\text{bg}} T_N + \sum_{k=1}^N \frac{s_k^{T_N}}{d_k^2} \phi(d_k) o_k \mathcal{G}_k^{2\text{D}}(\mathbf{x}) T_k^2
+$$
+Definitions:
+*   $\mathbf{q}^{\text{bg}}$: Background raw intensity vector.
+*   $\phi(d_k)$: Modulated raw sample quad vector replacing the phasor:
+    $$
+    \phi(d_k) = \begin{bmatrix} \sin(\psi_k) \\ \cos(\psi_k) \\ -\sin(\psi_k) \\ -\cos(\psi_k) \end{bmatrix}
+    $$
+    where $\psi_k = \frac{4\pi d_k f}{c}$.
+*   $s_k^{T_N}$: Source intensity modulated by final transmittance (Note: Source text writes $s_k^{T_N}$; context implies scaling by transmittance or similar attenuation factor, but strictly follows source notation).
+
+**4. Mean Gaussian Depth**
+The depth property of interest is computed as the weighted mean of Gaussian distances [S1]:
+$$
+d(\mathbf{x}) = \sum_{k=1}^N d_k o_k \mathcal{G}_k^{\text{D}}(\mathbf{x}) T_k
+$$
+*Note: $\mathcal{G}_k^{\text{D}}(\mathbf{x})$ refers to the 1D depth projection or the contribution of the Gaussian to the depth integral along the ray.*
+
+### Parameters
+*   **Modulation Frequency ($f$):** The frequency of the sinusoidal light modulation. Typical values result in an unambiguous depth range $d_u$ of 5–10 m [S1].
+*   **Speed of Light ($c$):** Physical constant.
+*   **Unambiguous Depth Range ($d_u$):** $d_u = \frac{c}{2f}$. Depths exceeding this range wrap around to $[0, d_u]$ [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def render_c_tof_phasor(gaussians, camera, pixel_coords):
+    """
+    Renders the C-ToF phasor image using the phasor formation model.
+    
+    Args:
+        gaussians: List of Gaussian objects with attributes:
+            - center: (3,) array
+            - cov3d: (3,3) covariance matrix
+            - opacity: scalar in [0, 1]
+            - reflectivity_sh: (16, 3) SH coefficients for reflectivity
+            - source_intensity: scalar s
+        camera: Camera object with attributes:
+            - intrinsic_matrix: (3,3)
+            - extrinsic_matrix: (4,4)
+            - modulation_frequency: float f
+            - background_phasor: complex scalar p_bg
+        pixel_coords: (H, W, 2) array of pixel coordinates (u, v)
+        
+    Returns:
+        phasor_image: (H, W) complex array
+    """
+    H, W = pixel_coords.shape[:2]
+    phasor_image = np.zeros((H, W), dtype=np.complex128)
+    
+    # Sort Gaussians by depth for correct alpha blending
+    # Note: In practice, this requires a depth sort per pixel or tile
+    # Here we assume a simplified single-pass accumulation for clarity
+    # [G] Standard GS rasterization logic (project, sort, blend) is assumed implemented
+    
+    c = 299792458.0  # Speed of light
+    f = camera.modulation_frequency
+    
+    for k in range(len(gaussians)):
+        g = gaussians[k]
+        
+        # 1. Project Gaussian to 2D
+        # [G] Standard 3D to 2D projection using Jacobian of projection matrix
+        # Returns 2D mean mu_2d and 2D covariance Sigma_2d
+        mu_2d, Sigma_2d = project_gaussian_2d(g.center, g.cov3d, camera)
+        
+        # 2. Evaluate 2D Gaussian at pixel coordinates
+        # G_2D(x) = exp(-0.5 * (x - mu)^T Sigma^-1 (x - mu))
+        # Vectorized over all pixels
+        diff = pixel_coords - mu_2d  # (H, W, 2)
+        # Compute Mahalanobis distance
+        # [G] Inverse of Sigma_2d
+        inv_Sigma = np.linalg.inv(Sigma_2d)
+        dist_sq = np.sum(diff @ inv_Sigma * diff, axis=2)  # (H, W)
+        G_2D = np.exp(-0.5 * dist_sq)
+        
+        # 3. Compute Transmittance T_k
+        # T_k = product_{l=1}^{k-1} (1 - o_l * G_l^2D)
+        # [G] This requires maintaining a running transmittance buffer during rasterization
+        # For this pseudocode, assume T_k is passed or computed in a loop
+        # We will compute T_k^2 directly if T_k is available
+        # Let's assume T_k is computed in the main rasterizer loop
+        
+        # 4. Compute Phase Weighting W(d_k)
+        d_k = distance_from_camera(g.center, camera)
+        psi_k = 4 * np.pi * d_k * f / c
+        W_dk = np.exp(1j * psi_k)
+        
+        # 5. Compute Reflectivity r_k
+        # [G] Evaluate SH coefficients for view direction
+        view_dir = normalize(camera.center - g.center)
+        r_k = evaluate_sh(g.reflectivity_sh, view_dir)
+        
+        # 6. Accumulate contribution
+        # Term: (2 * s * r_k / d_k^2) * W(d_k) * o_k * G_2D * T_k^2
+        # Note: T_k^2 is specific to C-ToF round-trip model
+        term = (2 * g.source_intensity * r_k / (d_k**2)) * W_dk * g.opacity * G_2D * (T_k**2)
+        
+        phasor_image += term
+        
+    # Add background
+    phasor_image += camera.background_phasor * T_N
+    
+    return phasor_image
+
+def render_c_tof_raw(gaussians, camera, pixel_coords, time_offsets):
+    """
+    Renders the C-ToF raw image quartet using the raw image formation model.
+    
+    Args:
+        time_offsets: (4,) array of phase offsets phi in {0, pi/2, pi, 3pi/2}
+        ... (other args same as above)
+        
+    Returns:
+        raw_image: (H, W, 4) array
+    """
+    H, W = pixel_coords.shape[:2]
+    raw_image = np.zeros((H, W, 4))
+    
+    c = 299792458.0
+    f = camera.modulation_frequency
+    
+    for k in range(len(gaussians)):
+        g = gaussians[k]
+        
+        mu_2d, Sigma_2d = project_gaussian_2d(g.center, g.cov3d, camera)
+        diff = pixel_coords - mu_2d
+        inv_Sigma = np.linalg.inv(Sigma_2d)
+        dist_sq = np.sum(diff @ inv_Sigma * diff, axis=2)
+        G_2D = np.exp(-0.5 * dist_sq)
+        
+        d_k = distance_from_camera(g.center, camera)
+        psi_k = 4 * np.pi * d_k * f / c
+        
+        view_dir = normalize(camera.center - g.center)
+        r_k = evaluate_sh(g.reflectivity_sh, view_dir)
+        
+        # Phi(d_k) vector: [sin(psi), cos(psi), -sin(psi), -cos(psi)]
+        phi_vec = np.array([np.sin(psi_k), np.cos(psi_k), -np.sin(psi_k), -np.cos(psi_k)])
+        
+        # Term: (s_k^{T_N} / d_k^2) * phi(d_k) * o_k * G_2D * T_k^2
+        # [G] s_k^{T_N} is treated as source intensity scaled by transmittance
+        # Assuming s_k is scalar source intensity
+        term = (g.source_intensity / (d_k**2)) * phi_vec * g.opacity * G_2D * (T_k**2)
+        
+        raw_image += term[:, :, np.newaxis] * (1.0 / 4) # Normalize if needed, source doesn't specify scaling factor for sum
+        
+    raw_image += camera.background_raw * T_N
+    
+    return raw_image
+
+def compute_mean_depth(gaussians, camera, pixel_coords):
+    """
+    Computes the mean Gaussian depth.
+    """
+    H, W = pixel_coords.shape[:2]
+    depth_map = np.zeros((H, W))
+    
+    for k in range(len(gaussians)):
+        g = gaussians[k]
+        mu_2d, Sigma_2d = project_gaussian_2d(g.center, g.cov3d, camera)
+        diff = pixel_coords - mu_2d
+        inv_Sigma = np.linalg.inv(Sigma_2d)
+        dist_sq = np.sum(diff @ inv_Sigma * diff, axis=2)
+        G_2D = np.exp(-0.5 * dist_sq)
+        
+        d_k = distance_from_camera(g.center, camera)
+        
+        # Depth contribution: d_k * o_k * G_k^D * T_k
+        # [G] G_k^D is the 1D depth projection, often approximated by G_2D for mean depth
+        term = d_k * g.opacity * G_2D * T_k
+        depth_map += term
+        
+    return depth_map
+```
+
+### Pitfalls and Edge Cases
+1.  **Depth-Phasor Mismatch:** Fitting C-ToF raw quads or phasors volumetrically does not guarantee consistency with the rendered mean depth. This discrepancy arises because sine/cosine functions oscillate between convex/concave regions, violating Jensen's inequality equality unless all Gaussians are clustered at the same z-position along each ray [S1].
+2.  **Motion Blur in Quartets:** Capturing four frames for C-ToF requires 120 Hz raw capture for 30 Hz depth. If the scene moves within the quartet, depth errors occur because light arrives from different world points. The raw image model allows rendering at arbitrary time $t$, but correspondence across time must be resolved during optimization [S1].
+3.  **Unambiguous Depth Range:** C-ToF cameras can only measure depth unambiguously up to $d_u = c / 2f$. Depths over this range map back to $[0, d_u]$ due to sinusoidal periodicity. Typical $d_u$ is 5–10 m [S1].
+4.  **Initialization Sensitivity:** Optimization is sensitive to initialization and hyperparameters. Unlike ToRF, this method does not require moving the camera, making it suitable for static cameras but potentially brittle without good initialization [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The method achieves 100× faster optimization and rendering compared to neural volumetric approaches [S1]. This is due to the use of fast primitive-based scene representation (3D Gaussian Splatting) rather than neural networks.
+*   **Memory Complexity:** Depends on the number of Gaussians $N$. Each Gaussian stores center, covariance, opacity, and SH coefficients for reflectivity (16 coefficients).
+*   **Strengths:**
+    *   Fast optimization and rendering.
+    *   Suitable for static cameras (unlike ToRF which requires camera motion).
+    *   More stable optimization for dynamic scenes with a single camera compared to F-ToRF [S1].
+    *   Handles dynamic scenes by rendering raw quads at arbitrary time $t$.
+*   **Limitations:**
+    *   Under-constrained depth optimization in single-camera dynamic settings.
+    *   Depth-Phasor mismatch can lead to geometric inaccuracies if not addressed with heuristics.
+    *   Sensitive to motion blur within the 4-frame quartet.
+    *   Limited by the unambiguous depth range of the C-ToF sensor.
+*   **When to Use:** When high-fidelity dynamic 3D reconstruction from a single viewpoint is needed quickly, and the scene is within the unambiguous depth range of the C-ToF camera.
+*   **When Not to Use:** When the scene contains large motions within the 4-frame capture window, or when the scene depth exceeds the unambiguous range of the camera.
+
+## Background
+The method was introduced by Runfeng Li, Mikhail Okunev, Zixuan Guo, Anh Ha Duong, Christian Richardt, Matthew O'Toole, and James Tompkin in the paper "Time of the Flight of the Gaussians: Optimizing Depth Indirectly in Dynamic Radiance Fields" [S1]. It builds upon 3D Gaussian Splatting [13] and C-ToF imaging principles [26, 8]. The work addresses the challenge of reconstructing dynamic scenes from monocular C-ToF cameras, where depth is not directly measured but derived from raw sensor samples. Previous works like ToRF [1] required additional constraints (camera motion, RGB integration), while F-ToRF [26] struggled with stability in dynamic single-camera settings. This method leverages the speed of Gaussian splatting to achieve faster optimization while incorporating C-ToF physics.
+
+## Sources
+[S1] Time of the Flight of the Gaussians: Optimizing Depth Indirectly in Dynamic Radiance Fields, https://doi.org/10.1109/cvpr52734.2025.01958, fetched 2026-10-26
