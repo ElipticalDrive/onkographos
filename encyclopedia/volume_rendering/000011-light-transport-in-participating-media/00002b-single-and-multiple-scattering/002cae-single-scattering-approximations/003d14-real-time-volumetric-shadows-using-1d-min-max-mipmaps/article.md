@@ -1,0 +1,162 @@
+# Real-Time Volumetric Shadows using 1D Min-Max Mipmaps
+
+Also called: 1D Min-Max Mipmap Volumetric Shadows
+
+## Overview
+This method computes volumetric shadows for single-scattering participating media in real-time on the GPU by evaluating the scattering integral over the intersections of camera rays with a shadow map treated as a 2D height field [S1]. It distinguishes itself from sibling methods by using epipolar rectification to reduce the problem to 1D height fields and employing 1D min-max mipmaps to find lit segments in parallel, allowing all camera rays to be processed simultaneously using only standard pixel shader features without requiring GPGPU APIs or camera rectification [S1].
+
+## How it works
+The algorithm evaluates the single-scattering integral by determining which segments of a camera ray are illuminated by the light source. It avoids the sequential dependency of incremental integration and the vertex-heavy approach of shadow volume methods by operating directly on pixels and using an acceleration structure for visibility [S1].
+
+### Inputs and Outputs
+*   **Inputs:** Camera position and projection, light position and projection, volume density field (implicitly defined by the shadow map depth), extinction coefficient $\sigma_t$.
+*   **Outputs:** Final color buffer with volumetric shadows applied.
+
+### Data Structures
+1.  **Shadow Map:** A 2D depth texture rendered from the light's perspective.
+2.  **Rectified Shadow Map:** A transformed 2D texture where rows correspond to epipolar lines.
+3.  **1D Min-Max Mipmap:** For each row of the rectified shadow map, a mipmap structure is built. Each level stores the minimum and maximum depth values for blocks of texels. This allows for early-out traversal during ray marching.
+
+### Steps
+1.  **Render Depth Maps:** Render a depth map from the camera and a shadow map from the light [S1].
+2.  **Epipolar Rectification:** Transform the shadow map into an epipolar rectified coordinate system. In this system, each camera ray intersects the shadow map along a single row (an epipolar slice) [S1].
+3.  **Low-Rank Approximation:** Compute a low-rank approximation for the non-visibility terms in the scattering integral (such as phase function and emission) to simplify the per-pixel computation [S1].
+4.  **Build 1D Min-Max Mipmaps:** For each row of the rectified shadow map, construct a 1D min-max mipmap. This structure stores the min and max depth values for hierarchical blocks of the row [S1].
+5.  **Ray Traversal and Integration:** For each pixel (camera ray):
+    *   Identify the corresponding row in the rectified shadow map.
+    *   Traverse the 1D min-max mipmap for that row to find intervals (lit segments) where the ray is not occluded by the volume geometry.
+    *   Accumulate the scattering integral over these lit segments.
+6.  **Epipole Handling:** If the epipole (the projection of the light position onto the image plane) is on or near the screen, the standard rectification becomes degenerate. In this case, compute the scattering near the epipole using brute-force ray marching [S1].
+
+### Pseudocode
+The following pseudocode illustrates the core traversal logic for a single camera ray after rectification. It assumes the rectified shadow map row is accessible and the mipmap is pre-computed.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_volumetric_shadow(ray_origin, ray_direction, shadow_map_row, mipmap_levels, sigma_t):
+    """
+    Computes the scattering integral for a single ray using 1D min-max mipmap traversal.
+    
+    Args:
+        ray_origin: 3D vector, origin of the camera ray.
+        ray_direction: 3D vector, direction of the camera ray.
+        shadow_map_row: Array of depth values for the current epipolar row.
+        mipmap_levels: List of arrays, where each level contains (min_depth, max_depth) tuples.
+        sigma_t: Float, total extinction coefficient.
+        
+    Returns:
+        Float, the accumulated scattering contribution.
+    """
+    # 1. Determine the range of the ray to test against the shadow map
+    # This depends on the camera frustum and the extent of the rectified shadow map.
+    # For simplicity, assume we have a valid interval [t_min, t_max] along the ray.
+    t_min, t_max = get_ray_bounds(ray_origin, ray_direction, shadow_map_row)
+    
+    accumulated_scattering = 0.0
+    t_current = t_min
+    
+    # 2. Traverse the mipmap to find lit segments
+    # We iterate through the mipmap levels to skip occluded regions
+    level = len(mipmap_levels) - 1
+    index = 0
+    
+    while t_current < t_max and level >= 0:
+        # Get the min/max depth for the current block at this level
+        block_min, block_max = mipmap_levels[level][index]
+        
+        # Convert depth bounds to ray parameter t bounds
+        # Assuming rectified coordinates map linearly to t for this row
+        t_block_min, t_block_max = depth_to_t(block_min, block_max, ray_origin, ray_direction)
+        
+        # Check for overlap between current ray segment and block
+        t_start = max(t_current, t_block_min)
+        t_end = min(t_max, t_block_max)
+        
+        if t_start < t_end:
+            # The block is potentially lit. We need to drill down or integrate.
+            # If we are at the base level (leaf), we integrate over the segment.
+            if level == 0:
+                # Integrate scattering over [t_start, t_end]
+                # Transmittance T(t) = exp(-sigma_t * t)
+                # Scattering contribution involves in-scattering term S(t)
+                # Integral: int_{t_start}^{t_end} S(t) * T(t) dt
+                contribution = integrate_scattering(t_start, t_end, sigma_t)
+                accumulated_scattering += contribution
+                t_current = t_end
+            else:
+                # Drill down to the next level
+                # Calculate the child index in the next level
+                child_index = index * 2
+                level -= 1
+                # Adjust index to point to the correct child block
+                # This logic depends on the specific mipmap layout (e.g., binary tree)
+                index = child_index
+        else:
+            # Block is fully occluded or out of bounds, skip it
+            # Move to the next block at the current level
+            index += 1
+            if index >= len(mipmap_levels[level]):
+                # End of row, break
+                break
+    
+    # 3. Handle the epipole case if necessary
+    # If the ray passes near the epipole, the rectification is invalid.
+    # Use brute force ray marching instead.
+    if is_near_epipole(ray_origin, ray_direction):
+        accumulated_scattering = brute_force_ray_march(ray_origin, ray_direction, sigma_t)
+        
+    return accumulated_scattering
+
+def integrate_scattering(t_start, t_end, sigma_t):
+    """
+    Integrates the scattering term over a segment [t_start, t_end].
+    Assumes constant sigma_t and a simplified in-scattering term S.
+    """
+    # T(t) = exp(-sigma_t * t)
+    # Integral of S * exp(-sigma_t * t) dt from t_start to t_end
+    # = S * [-1/sigma_t * exp(-sigma_t * t)] from t_start to t_end
+    # = S / sigma_t * (exp(-sigma_t * t_start) - exp(-sigma_t * t_end))
+    
+    # Note: The actual S term may vary with position and direction.
+    # For this simplified example, we assume S is constant or pre-computed.
+    S = get_in_scattering_term(t_start) # Placeholder for actual S calculation
+    term1 = exp(-sigma_t * t_start)
+    term2 = exp(-sigma_t * t_end)
+    return (S / sigma_t) * (term1 - term2)
+
+def depth_to_t(depth_min, depth_max, ray_origin, ray_direction):
+    """
+    Converts depth values in the rectified shadow map to ray parameter t.
+    This requires the inverse of the projection matrix and the ray equation.
+    """
+    # Convert depth to 3D points in world space
+    p_min = depth_to_world(depth_min, ray_origin, ray_direction)
+    p_max = depth_to_world(depth_max, ray_origin, ray_direction)
+    
+    # Calculate t values
+    # t = (p - ray_origin) . ray_direction (assuming ray_direction is normalized)
+    t_min = dot(p_min - ray_origin, ray_direction)
+    t_max = dot(p_max - ray_origin, ray_direction)
+    
+    return t_min, t_max
+```
+
+### Parameters and Edge Cases
+*   **Extinction Coefficient ($\sigma_t$):** Must be provided. Typical values depend on the medium density.
+*   **Epipole Proximity:** When the light is near the camera or the epipole falls within the screen bounds, the epipolar rectification becomes singular. The algorithm switches to brute-force ray marching for these specific rays [S1].
+*   **Precision:** The method relies on accurate depth comparisons. Floating-point precision errors in the rectification or mipmap construction can lead to artifacts.
+*   **High-Resolution Shadow Maps:** The method handles high-resolution shadow maps easily because the outer loop is over pixels, not shadow volume elements [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The traversal of the 1D min-max mipmap allows for logarithmic-time skipping of occluded regions, making the average case efficient. However, worst-case performance (e.g., highly complex geometry with many small lit segments) is not guaranteed to be as fast as incremental integration [S1].
+*   **Memory Complexity:** Requires storing the shadow map, the rectified shadow map, and the 1D min-max mipmaps for each row. The memory usage scales with the resolution of the shadow map and the number of rows.
+*   **Performance:** Achieves real-time performance on GPUs using only DirectX 9 pixel shader features, avoiding the overhead of GPGPU APIs like CUDA or OpenCL [S1]. It is significantly faster than incremental integration methods on complex scenes like forests, which are worst-case scenarios for this algorithm [S1].
+*   **Strengths:** Parallel processing of all camera rays; no need for camera rectification; easy handling of high-resolution shadow maps; support for textured lights.
+*   **Limitations:** Sacrifices worst-case performance guarantees; degenerate cases near the epipole require brute-force marching, which can be slow if many rays are affected.
+
+## Background
+The method was introduced by [S1] as a real-time algorithm for computing volumetric shadows in single-scattering media. It builds upon the use of min-max mipmaps for accelerating soft shadows and global illumination [G]. Unlike previous methods such as Baran et al. [2010] (incremental integration) or Billeter et al. [2010] (shadow volumes), this approach is designed specifically for GPU pixel shaders, enabling broad compatibility with hardware that does not support GPGPU APIs [S1].
+
+## Sources
+[S1] Real-Time Volumetric Shadows using 1D Min-Max Mipmaps, https://groups.csail.mit.edu/graphics/mmvs/mmvs.pdf, fetched 2026-10-28

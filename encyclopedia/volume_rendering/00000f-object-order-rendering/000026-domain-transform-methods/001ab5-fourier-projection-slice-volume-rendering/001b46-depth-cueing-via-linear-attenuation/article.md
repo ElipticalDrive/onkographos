@@ -7,14 +7,14 @@ This method approximates the perceptual depth cues of exponential attenuation in
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Volume density function $\rho(x,y,z)$, volume color function $C(x,y,z)$, constant opacity/absorption coefficient $\tau$, viewing direction vector $\mathbf{V}$, ray segment bounds $a, b$, linear depth constants $m$ and $\mathbf{b}$, ray origin, and ray direction [S1, unofficial].
+- Input: Volume density function $\rho(x,y,z)$, volume color function $C(x,y,z)$, constant opacity/absorption coefficient $\tau$, viewing direction vector $\mathbf{V}$, ray segment bounds $a$ and $b$, linear depth constants $m$ and $\mathbf{b}$, ray origin, and ray direction [S1, unofficial].
 - Output: Total energy $I_P$ arriving at the end of the viewing ray [S1, unofficial].
 
 **Data Structures:**
 - $\rho$: Scalar field representing density [S1, unofficial].
 - $C$: Vector field representing color/emission [S1, unofficial].
 - $\mathbf{V}$: Normalized 3D vector pointing away from the eye [S1, unofficial].
-- $\mathbf{D}(\mathbf{P})$: Linear position function $\mathbf{D} = m\mathbf{P} + \mathbf{b}$, where $m$ and $\mathbf{b}$ are constants defining the depth cueing geometry [S1, unofficial].
+- $\mathbf{D}(\mathbf{P})$: Linear position function $\mathbf{D} = m\mathbf{P} + \mathbf{b}$, where $m$ is a scalar and $\mathbf{b}$ is a 3D vector constant defining the depth cueing geometry [S1, unofficial].
 
 **Steps:**
 1. Define the viewing ray $\mathbf{P}(t)$ parameterized by length $t$ [S1, unofficial].
@@ -37,13 +37,13 @@ Where:
 - $\mathbf{D}(\mathbf{P}(t))$: Linear function of position, $\mathbf{D} = m\mathbf{P} + \mathbf{b}$ [S1, unofficial].
 - $\mathbf{V}$: Normalized viewing direction vector (points away from the eye) [S1, unofficial].
 - $a, b$: Start and end parameters of the ray segment [S1, unofficial].
-- Note: The constant vector $\mathbf{b}$ in the depth function is distinct from the ray endpoint parameter $b$.
+- Note: The constant vector $\mathbf{b}$ in the depth function is distinct from the scalar ray endpoint parameter $b$ [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_linear_attenuation_energy(rho, color, tau, m, b_const, v, ray_origin, ray_direction, t_start, t_end, num_samples):
+def compute_linear_attenuation_energy(rho, color, tau, m, b_vec, v, ray_origin, ray_direction, t_start, t_end, num_samples):
     """
     Computes the integrated energy for linear depth cueing.
     
@@ -52,7 +52,7 @@ def compute_linear_attenuation_energy(rho, color, tau, m, b_const, v, ray_origin
         color: Function returning color vector at (x,y,z).
         tau: Constant opacity coefficient.
         m: Scalar constant for linear depth function.
-        b_const: 3D vector constant for linear depth function.
+        b_vec: 3D vector constant for linear depth function (distinct from scalar limit b).
         v: Normalized 3D viewing direction vector (away from eye).
         ray_origin: 3D vector for ray origin.
         ray_direction: 3D vector for ray direction.
@@ -70,9 +70,9 @@ def compute_linear_attenuation_energy(rho, color, tau, m, b_const, v, ray_origin
         p_t = (ray_origin[0] + t * ray_direction[0],
                ray_origin[1] + t * ray_direction[1],
                ray_origin[2] + t * ray_direction[2])
-        d_t = (m * p_t[0] + b_const[0],
-               m * p_t[1] + b_const[1],
-               m * p_t[2] + b_const[2])
+        d_t = (m * p_t[0] + b_vec[0],
+               m * p_t[1] + b_vec[1],
+               m * p_t[2] + b_vec[2])
         dot_product = d_t[0] * v[0] + d_t[1] * v[1] + d_t[2] * v[2]
         weight = (tau / 2.0) + (tau / 2.0) * dot_product
         density = rho(p_t)
@@ -92,12 +92,12 @@ def compute_linear_attenuation_energy(rho, color, tau, m, b_const, v, ray_origin
 A shading model that enhances depth perception in X-ray projections by weighting volume points based on their distance from the viewer, without introducing occlusion. It replaces per-voxel shading followed by projection with projection followed by per-pixel shading, allowing depth cueing (linear attenuation) to be computed efficiently by factoring the viewing direction out of the integral. Unlike opaque volume renderings, this method produces X-ray-like projections with no occlusion, but the linear shading provides sufficient shape cues for spatial understanding, especially in motion.
 
 ## Operating characteristics
-- **Time Complexity:** $O(N^2 \log N)$ per view when implemented via the Fourier Projection-Slice Theorem, avoiding the $O(N^3)$ cost of digital compositing [Parent].
-- **Memory Complexity:** Not given in the sources.
+- **Time Complexity:** $O(N^2 \log N)$ per view when implemented via the Fourier Projection-Slice Theorem, avoiding the $O(N^3)$ cost of digital compositing [G].
+- **Memory Complexity:** Not given in the sources [G].
 - **Strengths:** Efficient rendering of depth-cued X-ray images; leverages fast Fourier transforms [S1, unofficial].
 - **Limitations:** Approximates exponential attenuation; does not model occlusion; accuracy depends on the linearity assumption of the depth cue [S1, unofficial].
-- **When to use:** Not given in the sources.
-- **When not to use:** Not given in the sources.
+- **When to use:** Not given in the sources [G].
+- **When not to use:** Not given in the sources [G].
 
 ## Background
 The method was introduced by Marc Levoy in his work on volume rendering using the Fourier Projection-Slice Theorem [S1, unofficial]. It addresses the computational cost of exponential attenuation by linearizing the absorption term, allowing the use of frequency domain methods for shading [S1, unofficial]. The approach is based on the observation that linear attenuation with a constant coefficient can be expressed as a Fourier projection, enabling efficient rendering [S1, unofficial].

@@ -1,57 +1,95 @@
 # KiloNeRF
-
 Also called: KiloNeRF: Speeding up Neural Radiance Fields with Thousands of Tiny MLPs
-
 ## Overview
-KiloNeRF is a spatial decomposition method that accelerates neural radiance field rendering by replacing a single large deep MLP with thousands of small, shallow MLPs arranged in a 3D grid [S1][S2, unofficial]. It solves the high per-point computation cost of standard NeRF by distilling a teacher network's knowledge into these lightweight student networks, achieving acceleration of up to three orders of magnitude [S1]. Unlike sibling methods that may use caching or octrees, KiloNeRF relies on explicit spatial partitioning into tiny MLPs, requiring dynamic parameter loading during rendering [S2, unofficial].
-
+KiloNeRF is a sparse and efficient representation that accelerates Neural Radiance Field (NeRF) rendering by decomposing a large, deep neural network into thousands of small, shallow MLPs arranged in a 3D grid [S1][S2, S3, unofficial]. It solves the problem of high per-point computational cost in standard NeRFs by using a teacher-student training paradigm where a standard NeRF's knowledge is distilled into these lightweight local models [S1]. It sets itself apart from siblings like Mega-NeRF by focusing on extreme model thinning (tiny MLPs) rather than just spatial partitioning for caching, and from SRF by using learned MLPs per cell rather than fixed feature vectors [S1][S2, unofficial].
 ## How it works
 **Inputs and Outputs:**
-*   Input: A pre-trained standard NeRF (teacher) defined by parameters $\theta_{teacher}$, and a 3D grid structure defining the spatial partition.
-*   Output: A set of lightweight MLPs (students) with parameters $\{\theta_i\}$, one for each active grid cell, capable of predicting density $\sigma$ and color $\mathbf{c}$ for queries within their respective cells.
+- Input: A pre-trained standard NeRF model (teacher), a set of training images with camera poses, and a 3D grid structure defining the spatial decomposition.
+- Output: A set of lightweight MLPs (students) arranged in the grid, and a cached sparse 3D grid for surface localization.
 
 **Data Structures:**
-*   **3D Grid:** A sparse 3D grid where each cell corresponds to a region of the scene. The grid stores indices or pointers to the specific tiny MLP assigned to that cell.
-*   **Tiny MLPs:** Each student network is a shallow Multi-Layer Perceptron. The exact width and depth are not specified in the sources, but they are significantly smaller than the original NeRF MLP [S1][S2, unofficial].
-*   **Cached Sparse 3D Grid:** Used to quickly locate the surface and determine which tiny MLPs are relevant for a given ray [S3, unofficial].
+1.  **3D Grid:** A sparse 3D grid where each active cell contains a small MLP. The grid is cached to quickly locate surface geometry [S3, unofficial].
+2.  **Tiny MLPs:** Each cell contains a shallow Multi-Layer Perceptron. These networks are significantly smaller and shallower than the original NeRF MLP because they only need to capture local scene information [S2, unofficial].
+3.  **Sparse Voxel Structure:** Used to manage memory overhead by only storing MLPs for occupied voxels [S2, S3, unofficial].
 
-**Training Procedure (Teacher-Student Distillation):**
-1.  **Teacher Training:** Train a standard, deep NeRF on the scene data to convergence. Let this network be $f_{\theta_{teacher}}(\mathbf{x}, \mathbf{d})$.
-2.  **Grid Initialization:** Define a 3D grid partitioning the scene space. Assign a tiny MLP $f_{\theta_i}$ to each grid cell $i$.
-3.  **Distillation:** Optimize the parameters $\theta_i$ of each tiny MLP to mimic the output of the teacher network for points falling within its corresponding grid cell. The loss function minimizes the difference between the student's output and the teacher's output for sampled points.
-    *   For a query point $\mathbf{x}$ in cell $i$ and direction $\mathbf{d}$:
-        $$ \mathcal{L}_i = \| f_{\theta_i}(\mathbf{x}, \mathbf{d}) - f_{\theta_{teacher}}(\mathbf{x}, \mathbf{d}) \|^2 $$
-    *   The total loss is the sum over all active cells.
-4.  **Final Model:** The final radiance field is represented by the collection of these tiny MLPs.
+**Steps:**
+1.  **Teacher Training:** Train a standard, deep NeRF on the scene data to serve as the "teacher" model [S1].
+2.  **Spatial Decomposition:** Divide the 3D space into a grid of cells [S2, unofficial].
+3.  **Student Initialization:** Initialize a small, shallow MLP for each grid cell [S1][S2, unofficial].
+4.  **Distillation:** Distill the knowledge from the teacher NeRF into the set of student MLPs. This involves training the local MLPs to approximate the teacher's output (density and color) for points within their respective cells [S1].
+5.  **Surface Localization Cache:** Build a cached sparse 3D grid to accelerate surface localization during rendering, allowing the system to skip empty space [S3, unofficial].
+6.  **Rendering:** For each ray, use the sparse grid to locate relevant cells. Load the corresponding tiny MLPs dynamically and compute density and color [S2, unofficial].
 
-**Rendering Procedure:**
-1.  **Ray Casting:** For each pixel, cast a ray $\mathbf{r}$ through the scene.
-2.  **Spatial Lookup:** Use the cached sparse 3D grid to identify which grid cells the ray intersects.
-3.  **Dynamic Parameter Loading:** As the ray traverses different cells, load the parameters of the corresponding tiny MLP into the GPU memory/cache. This is a dynamic process because different rays traverse different sets of MLPs [S2, unofficial].
-4.  **Evaluation:** For each sample point along the ray, query the currently active tiny MLP to get $\sigma$ and $\mathbf{c}$.
-5.  **Volume Rendering:** Compute the pixel color using the standard volume rendering integral:
-    $$ \mathbf{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i \alpha_i \mathbf{c}_i $$
-    where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ and $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$.
+**Formulas:**
+The rendering equation remains the standard volume rendering integral:
+$$
+\mathbf{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i \alpha_i \mathbf{c}_i
+$$
+where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ and $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$.
+The key difference is that $\sigma_i$ and $\mathbf{c}_i$ are computed by the specific tiny MLP assigned to the cell containing point $i$, rather than a single global MLP [S1][S2, unofficial].
 
 **Parameters:**
-*   Grid resolution: Not given in the sources.
-*   Tiny MLP size: Not given in the sources, but described as "small" and "shallow" [S2, unofficial].
+- Grid resolution: Not given in the sources.
+- MLP depth/width: "Small" and "shallow" [S2, unofficial]. Exact dimensions not given in the sources.
 
 **Edge Cases and Pitfalls:**
-*   **Memory Overhead:** Deploying a large number of MLPs incurs substantial memory overhead [S1].
-*   **Dynamic Loading:** During rendering, a ray goes through different sets of NeRFs taking different numbers of samples, requiring dynamic parameter loading. This necessitates special CUDA kernels for proper speedup [S2, unofficial].
-*   **Boundary Artifacts:** Points near grid cell boundaries may experience discontinuities if the tiny MLPs are not trained to be consistent across boundaries. This is not explicitly addressed in the provided notes.
+- **Memory Overhead:** Deploying a large number of MLPs incurs substantial memory overhead [S1].
+- **Dynamic Parameter Loading:** During rendering, a ray passes through different sets of NeRFs, each requiring a different number of samples. This necessitates dynamic parameter loading, which requires special CUDA kernels for proper speedup [S2, unofficial].
+- **Precision:** Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# KiloNeRF Rendering Step
+def render_ray_kilonerf(ray_origin, ray_direction, grid, teacher_model):
+    # 1. Use sparse grid to find relevant cells along the ray
+    relevant_cells = find_intersecting_cells(ray_origin, ray_direction, grid)
+    
+    # 2. Sample points within these cells
+    samples = []
+    for cell in relevant_cells:
+        # Sample points within the cell bounds
+        cell_samples = sample_points_in_cell(cell, ray_origin, ray_direction)
+        samples.extend(cell_samples)
+    
+    # 3. Compute density and color using local tiny MLPs
+    densities = []
+    colors = []
+    for sample in samples:
+        # Find the tiny MLP for the cell containing this sample
+        tiny_mlp = get_tiny_mlp_for_cell(sample.position, grid)
+        
+        # Query the tiny MLP
+        sigma, color = tiny_mlp(sample.position, ray_direction)
+        densities.append(sigma)
+        colors.append(color)
+        
+    # 4. Perform standard volume rendering
+    return volume_render(samples, densities, colors)
+```
+Note: The distillation process (training the tiny MLPs from the teacher) is not detailed in the sources beyond the high-level description [S1]. The specific CUDA kernel for dynamic loading is not implemented here [S2, unofficial].
+
+## Subtopics
+
+### [Mega-NeRF Spatial Partitioning](8776-mega-nerf-spatial-partitioning.md)
+Uses spatial partitioning to cache features and accelerate rendering. Choose when you need to cache large amounts of feature data.
+
+### [Sparse Radiance Field (SRF) Representation](8876-sparse-radiance-field-srf-representation.md)
+Uses sparse voxels with feature vectors. Choose when you prefer fixed feature vectors over learned MLPs.
 
 ## Operating characteristics
-*   **Time Complexity:** Acceleration of up to three orders of magnitude compared to the original NeRF [S1].
-*   **Memory Complexity:** Substantial memory overhead due to the deployment of thousands of MLPs [S1].
-*   **Strengths:** Significant speedup in rendering time; allows for real-time or near-real-time view synthesis.
-*   **Limitations:** High memory usage; requires complex dynamic parameter loading logic for optimal performance [S2, unofficial].
-*   **When to use:** When rendering speed is critical and memory resources are sufficient to store thousands of small networks.
-*   **When not to use:** When memory is constrained or when the scene geometry is too complex for a simple grid partition to capture efficiently without excessive cell count.
+- **Time Complexity:** Acceleration of up to three orders of magnitude compared to the original NeRF [S1].
+- **Memory Complexity:** Substantial memory overhead due to the deployment of a large number of MLPs [S1].
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Scales with the number of grid cells and the size of the tiny MLPs.
+- **Strengths:** Significant speedup; efficient local representation.
+- **Limitations:** High memory usage; requires dynamic parameter loading which complicates implementation [S2, unofficial].
+- **When to use:** When rendering speed is critical and memory is not the primary constraint.
+- **When not to use:** When memory is extremely limited or dynamic loading is not supported by the hardware.
 
 ## Background
-KiloNeRF was introduced by Reiser et al. in 2021 [S1]. It is part of the broader effort to accelerate NeRF rendering by reducing the computational cost per sample point, alongside methods like SNeRG, PlenOctree, and MobileNeRF [S3, unofficial]. The method builds on the observation that surfaces occupy only a small fraction of the 3D space, and thus, a large NeRF is inefficient for representing small portions of space [S2, unofficial].
+KiloNeRF was introduced by Reiser et al. in 2021 [S1]. It was developed to address the inefficiency of standard NeRFs, which sample the entire ray even though only a small fraction of samples contribute to the final image [S2, unofficial]. The method builds on the idea of spatial decomposition and teacher-student distillation [S1]. It is used in real-time view synthesis and interactive applications where speed is paramount [S3, unofficial].
 
 ## Sources
 [S1] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26

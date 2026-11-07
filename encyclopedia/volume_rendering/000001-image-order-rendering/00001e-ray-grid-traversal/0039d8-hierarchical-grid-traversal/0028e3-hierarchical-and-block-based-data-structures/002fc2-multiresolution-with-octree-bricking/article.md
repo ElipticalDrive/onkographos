@@ -1,94 +1,101 @@
 # Multiresolution with Octree Bricking
 
-Also called: Octree-based multiresolution
+Also called: Octree-based multiresolution, Octree-based multiresolution encoding
 
 ## Overview
-Multiresolution with Octree Bricking is a data representation and rendering technique for large volumetric datasets that provides high-fidelity results in regions of interest while maintaining the context of the whole volume at a lower resolution [S1]. It sets itself apart from siblings like [Ray-marching reference (min-max octree accelerated)](1554-ray-marching-reference-min-max-octree-accelerated.md) by explicitly structuring the volume into hierarchical "bricks" (sub-volumes) rather than just using occupancy flags for pruning, allowing for adaptive resolution based on spatial locality [S1].
+Multiresolution with Octree Bricking encodes volumetric data at varying resolutions into a spatial octree hierarchy to enable adaptive, high-fidelity rendering of large datasets [S1, unofficial][S2]. It solves the problem of limited memory and rendering performance by allowing the system to selectively query and render nodes at resolutions appropriate to their distance from the viewer or their visual importance [S1, unofficial]. Unlike sibling methods that may use fixed brick sizes or hardware-accelerated BVH traversal for static structures, this method explicitly links octree depth to resolution levels, subsampling children to form parent nodes, and relies on a software-managed out-of-core loading strategy for datasets exceeding texture memory [S1, unofficial][S2].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A large volumetric dataset (scalar or vector field).
-*   **Output:** A hierarchical data structure (octree) where nodes represent bricks of varying resolution, enabling efficient ray traversal and rendering.
+- Input: A volumetric dataset (scalar or vector field).
+- Output: A rendered image using adaptive resolution nodes.
 
 **Data Structures:**
-The core structure is an octree. Each node in the octree represents a "brick," which is a cubical sub-volume of the original dataset.
-*   **Leaf Nodes:** Contain the actual voxel data for a specific brick. The resolution of the data within a leaf brick is determined by the depth of the leaf in the octree.
-*   **Internal Nodes:** Represent the spatial subdivision of the volume. They do not store voxel data but define the hierarchy and potentially aggregate metadata (though specific aggregation methods like min/max are not detailed in the primary source for this specific method, unlike its siblings [S1]).
+The core structure is an octree.
+- **Nodes:** Each node represents a cubic region of space.
+- **Resolution Association:** Each octree level $L$ corresponds to a specific resolution. Level $L$ has half the resolution (linear dimension) of level $L+1$.
+- **Leaf Nodes:** Represent the original, highest-resolution data.
+- **Internal Nodes:** Store data at a lower resolution, derived from their eight children.
+- **Root Node:** Represents the coarsest resolution (single voxel or small brick covering the entire volume).
+- **Out-of-Core Storage:** For datasets larger than memory, nodes are stored on disk. A hierarchy file may store connectivity information [S1, unofficial].
 
-**Steps:**
-1.  **Partitioning:** The input volume is partitioned into axis-aligned cubical bricks. The size of these bricks and the resolution within them are determined by the octree depth [S1].
-2.  **Hierarchical Encoding:** An octree is constructed to encode this hierarchical bricking. Deeper nodes in the octree correspond to smaller bricks with higher resolution, while shallower nodes correspond to larger bricks with lower resolution [S1].
-3.  **Rendering:** During ray traversal, the octree is traversed. Rays access the appropriate brick resolution based on the current node depth, allowing for high resolution in areas of interest and lower resolution elsewhere [S1].
+**Construction (Preprocessing):**
+1.  **Bricking:** Partition the volume into bricks. The sources describe this as "hierarchical volume bricking" [S2].
+2.  **Tree Construction:** Build the octree in a single preprocessing step [S1, unofficial].
+3.  **Leaf Assignment:** Assign the original high-resolution data to the leaf nodes [S1, unofficial].
+4.  **Bottom-Up Subsampling:** For each internal node, compute its data by subsampling its eight children. The specific subsampling method (e.g., averaging, min/max) is not detailed in the provided sources, but the result is a lower-resolution representation [S1, unofficial].
+5.  **Root Assignment:** The root node contains the coarsest resolution data [S1, unofficial].
 
-**Formulas:**
-Not given in the sources.
-
-**Parameters:**
-*   **Brick Size:** Not given in the sources.
-*   **Octree Depth:** Determined by the data dimensions and desired level of detail [S1].
-
-**Edge Cases and Pitfalls:**
-*   **Boundary Handling:** The partitioning into axis-aligned bricks must handle the volume boundaries correctly [S1].
-*   **Data Sparsity:** While the method is designed for large datasets, handling sparse data may require specific adaptations (e.g., as seen in AMR extensions [S1]).
+**Rendering (Per Frame):**
+1.  **Node Selection:** Traverse the octree to select a set of nodes that match current parameters, such as display resolution or distance from the camera [S1, unofficial].
+    -   **Selection Criteria:** High-resolution nodes are chosen for areas of interest or close to the center of attention. Low-resolution nodes are chosen for distant regions [S1, unofficial].
+    -   **Quality Parameter:** Image quality is defined by a combination of importance metrics or user-specified bias parameters [S1, unofficial].
+2.  **Loading:** If the selected nodes are not in memory (texture memory or GPU cache), load them from disk (out-of-core) [S1, unofficial].
+3.  **Sorting:** Sort the selected nodes in back-to-front order relative to the camera [S1, unofficial].
+4.  **Rendering:** Render the sorted nodes using standard volume rendering techniques (e.g., ray-marching) [S1, unofficial].
+5.  **Artifact Mitigation:** To reduce artifacts at resolution boundaries, transfer functions in lower-resolution nodes may be modified [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pseudocode for constructing and using the octree-based multiresolution structure
-# Note: The specific construction algorithm (e.g., how bricks are split) is not detailed in the source.
-# This pseudocode assumes a generic octree traversal for rendering.
-
-class OctreeNode:
-    def __init__(self, is_leaf, children=None, data=None):
-        self.is_leaf = is_leaf
-        self.children = children  # List of 8 child nodes if not leaf
-        self.data = data          # Voxel data if leaf
-
-def render_ray_octree_bricking(ray, root_node):
-    """
-    Renders a single ray using the octree-based multiresolution structure.
-    """
-    # Start traversal from the root
-    current_node = root_node
+def render_multiresolution_octree(camera, volume_data, quality_params):
+    # 1. Preprocessing (Done once)
+    octree = build_octree(volume_data)
+    # Leaves hold original data. Internal nodes hold subsampled data from children.
     
-    # Traverse the octree
-    while current_node is not None:
-        if current_node.is_leaf:
-            # Access the brick data at the current resolution
-            # Perform ray-marching or sampling within this brick
-            sample = sample_ray_in_brick(ray, current_node.data)
-            return sample
+    # 2. Per-Frame Selection
+    selected_nodes = []
+    traverse_and_select(octree.root, camera, quality_params, selected_nodes)
+    
+    # 3. Out-of-Core Loading
+    loaded_nodes = []
+    for node in selected_nodes:
+        if not node.in_memory:
+            node.data = load_from_disk(node.path)
+            node.in_memory = True
+        loaded_nodes.append(node)
+        
+    # 4. Sorting
+    # Sort back-to-front relative to camera
+    loaded_nodes.sort(key=lambda n: distance_to_camera(n.center, camera.position))
+    
+    # 5. Rendering
+    render_buffer = initialize_buffer()
+    for node in loaded_nodes:
+        render_volume_region(render_buffer, node.data, camera, node.resolution)
+        
+    return render_buffer
+
+def traverse_and_select(node, camera, params, selected):
+    # Determine if this node is needed based on distance/importance
+    if is_node_visible_and_needed(node, camera, params):
+        # If leaf or selected for current resolution, add to list
+        if node.is_leaf or node.resolution_matches_display():
+            selected.append(node)
         else:
-            # Determine which child brick the ray enters
-            child_index = get_child_index(ray, current_node)
-            
-            # Check if the child exists (pruning empty regions)
-            if child_index < len(current_node.children):
-                current_node = current_node.children[child_index]
-            else:
-                # Child is empty or not present
-                return None  # Or handle as empty space
-    
-    return None
+            # Recurse to children if higher resolution is needed
+            for child in node.children:
+                traverse_and_select(child, camera, params, selected)
 ```
 
 ## Subtopics
 
 ### [Bricked Multiresolution Tensor Approximation](7469-bricked-multiresolution-tensor-approximation.md)
-Combines offline tensor-based compression with an adaptive, view-dependent loader for out-of-core rendering. Choose when working memory is limited and on-demand reconstruction is acceptable.
+Combines offline tensor-based compression (Tucker decomposition) with an adaptive, view-dependent loader. It sets itself apart by using rank-reduced approximations for bricks and maintaining a GPU cache for on-demand reconstruction, enabling stack-less ray-casting. Choose this when working memory is severely limited and interactive frame rates are required for very large datasets.
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Measured Performance:** Not given in the sources.
-*   **Strengths:** Enables high-fidelity rendering in regions of interest while maintaining context; suitable for large datasets [S1].
-*   **Limitations:** Not given in the sources.
-*   **When to Use:** Large volumetric datasets where adaptive resolution is beneficial [S1].
-*   **When Not to Use:** Not given in the sources.
+- **Time Complexity:** Construction is $O(N)$ where $N$ is the number of voxels, assuming constant-time subsampling. Rendering complexity depends on the number of selected nodes and their resolutions. Adaptive selection reduces the number of high-resolution samples.
+- **Memory Complexity:** The octree structure itself is small. The data storage is $O(N)$ if all levels are stored, but out-of-core strategies allow rendering datasets larger than physical memory by loading only necessary nodes [S1, unofficial].
+- **Performance:** Enables rendering of large datasets that would otherwise not fit in texture memory [S1, unofficial]. Performance scales with the efficiency of the out-of-core loading and the selectivity of the node selection criteria.
+- **Strengths:** Adaptive resolution improves performance for distant objects; out-of-core support handles massive datasets.
+- **Limitations:** Requires preprocessing; potential artifacts at resolution boundaries if transfer functions are not adjusted [S1, unofficial]; disk I/O latency if node selection is poor.
+- **When to Use:** Large volumetric datasets where interactive or near-interactive rendering is needed, and memory is constrained.
+- **When Not to Use:** Small datasets that fit entirely in memory; scenes requiring uniform high resolution everywhere.
 
 ## Background
-This technique was introduced by LaMar et al. [S1]. It is part of the broader field of volume visualization for large datasets, where hierarchical data structures are used to manage memory and rendering efficiency [S1]. Similar approaches have been presented by Boada et al. [S1].
+This technique was introduced by LaMar et al. [S2] for large dataset rendering, employing an octree to encode hierarchical volume "bricking" [S2]. A similar approach was presented by Boada and colleagues [S2]. The method is described in detail in [S1, unofficial], which discusses its application in volume visualization on large-scale displays. It builds on the general principle of multiresolution techniques where data is encoded in a spatial hierarchy (e.g., octree) for selective querying [S1, unofficial].
 
 ## Sources
-[S1] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
+[S1] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)
+[S2] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27

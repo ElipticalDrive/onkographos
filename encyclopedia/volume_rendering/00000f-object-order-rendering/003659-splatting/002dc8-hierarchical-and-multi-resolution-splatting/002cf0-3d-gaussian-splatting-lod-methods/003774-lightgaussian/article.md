@@ -1,0 +1,136 @@
+# LightGaussian
+
+
+## Overview
+LightGaussian is a compression method for 3D Gaussian Splatting that reduces model size and improves rendering speed by combining structured pruning with Spherical Harmonic (SH) factorization and vector quantization [S1, S3, unofficial]. It achieves significant size reduction (up to 15x) and high frame rates (>200 FPS) with minimal quality degradation, distinguishing itself from sibling methods like CityGaussian by focusing on attribute-level compression (SH and position) rather than purely spatial clustering or octree-based spatial pruning [S2][S3, unofficial].
+
+## How it works
+LightGaussian reduces the computational and memory footprint of 3D Gaussian Splatting through a three-stage pipeline: importance-based pruning, SH distillation/factorization, and vector quantization [S1, S3, unofficial].
+
+**Inputs and Outputs:**
+- Input: A trained 3D Gaussian Splatting model with $N$ Gaussians, each defined by position $\mathbf{p}$, covariance $\mathbf{\Sigma}$ (or scale/rotation), opacity $\alpha$, and SH coefficients $\mathbf{c}_{l,m}$ for bands $l=0 \dots L$.
+- Output: A compressed model with $N' < N$ Gaussians, where attributes are quantized and SH coefficients are reduced in dimensionality.
+
+**Data Structures:**
+1.  **Pruned Gaussian Set:** A subset of the original $N$ Gaussians.
+2.  **Quantized Attributes:**
+    -   Position: Compressed using octree-based lossless compression (G-PCC) [S2].
+    -   SH Coefficients: Factorized and quantized to lower bands [S1, S3, unofficial].
+    -   Opacity/Scale/Rotation: Quantized (e.g., opacity to 8-bit) [S3, unofficial].
+
+**Steps:**
+1.  **Importance Scoring:** Calculate an importance score for each Gaussian based on its contribution to the training views. The score is typically the average alpha-weighted contribution [S3, unofficial].
+2.  **Structured Pruning:** Rank Gaussians by importance and prune those with the lowest scores. The pruning ratio is typically 30–80% [S3, unofficial]. The total count is kept constant during the initial phase or reduced based on the target compression ratio [S1, unofficial].
+3.  **SH Distillation:** Apply knowledge distillation to transfer information from higher-order SH bands to lower-order bands. This reduces the dimensionality of the SH representation [S1, S3, unofficial].
+4.  **Vector Quantization:** Apply vector quantization to the remaining SH coefficients and other attributes (scale, rotation) to further reduce size [S1, S3, unofficial].
+5.  **Position Compression:** Encode the positions of the remaining Gaussians using octree-based lossless compression (G-PCC) due to the sensitivity of rasterization accuracy to position errors [S2].
+
+**Formulas:**
+-   Importance Score $I_i$: Not explicitly defined in sources, but described as "average alpha-weighted contribution" [S3, unofficial].
+-   Size Reduction: Achieves up to 15x reduction [S3, unofficial].
+
+**Parameters:**
+-   Pruning Ratio: 30–80% [S3, unofficial].
+-   SH Bands: Reduced to lower bands [S1, S3, unofficial].
+
+**Edge Cases:**
+-   Position sensitivity: Rasterization accuracy is sensitive to position errors, hence the use of lossless compression for positions [S2].
+-   Quality trade-off: Pruning and quantization introduce quality loss, but it is kept below 0.5 dB [S3, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# LightGaussian Compression Pipeline
+# Inputs: gaussians (list of Gaussian objects), training_views (list of views)
+# Outputs: compressed_gaussians (list of compressed Gaussian objects)
+
+def lightgaussian_compress(gaussians, training_views):
+    # Step 1: Importance Scoring
+    importance_scores = []
+    for g in gaussians:
+        # Calculate average alpha-weighted contribution
+        # This requires rendering the Gaussian on training views and accumulating opacity-weighted error/impact
+        score = compute_importance(g, training_views)
+        importance_scores.append(score)
+
+    # Step 2: Structured Pruning
+    # Rank by importance and prune bottom 30-80%
+    # Let's assume a target retention rate of 20% (80% pruning) for demonstration
+    retention_rate = 0.2
+    num_to_keep = int(len(gaussians) * retention_rate)
+    
+    # Sort indices by importance score descending
+    sorted_indices = sorted(range(len(importance_scores)), key=lambda i: importance_scores[i], reverse=True)
+    keep_indices = sorted_indices[:num_to_keep]
+    
+    pruned_gaussians = [gaussians[i] for i in keep_indices]
+
+    # Step 3: SH Distillation
+    # Distill higher-order SH bands to lower-order bands
+    for g in pruned_gaussians:
+        g.sh_coeffs = distill_sh(g.sh_coeffs, target_bands=2) # Example: reduce to 2 bands
+
+    # Step 4: Vector Quantization
+    # Quantize SH coefficients and other attributes
+    for g in pruned_gaussians:
+        g.sh_coeffs = vector_quantize(g.sh_coeffs)
+        g.opacity = quantize_8bit(g.opacity)
+        g.scale = vector_quantize(g.scale)
+        g.rotation = vector_quantize(g.rotation)
+
+    # Step 5: Position Compression (G-PCC)
+    # Compress positions using octree-based lossless compression
+    positions = [g.position for g in pruned_gaussians]
+    compressed_positions = gpcc_compress(positions)
+    
+    # Reconstruct compressed Gaussians
+    compressed_gaussians = []
+    for i, g in enumerate(pruned_gaussians):
+        g.position = compressed_positions[i] # Decompressed during rendering
+        compressed_gaussians.append(g)
+
+    return compressed_gaussians
+
+def compute_importance(gaussian, views):
+    # Placeholder for importance calculation
+    # Typically involves rendering the Gaussian's contribution to each view
+    # and summing the alpha-weighted error or impact
+    total_contribution = 0
+    for view in views:
+        # Render Gaussian on view
+        contribution = render_gaussian_contribution(gaussian, view)
+        total_contribution += contribution
+    return total_contribution / len(views)
+
+def distill_sh(sh_coeffs, target_bands):
+    # Placeholder for SH distillation
+    # Transfers information from higher bands to lower bands
+    # Implementation depends on specific distillation technique
+    return sh_coeffs[:, :target_bands] # Simplified: just keep lower bands
+
+def vector_quantize(data):
+    # Placeholder for vector quantization
+    # Implementation depends on specific VQ technique
+    return data # Simplified: no quantization for demonstration
+
+def gpcc_compress(positions):
+    # Placeholder for G-PCC compression
+    # Implementation uses octree-based lossless compression
+    return positions # Simplified: no compression for demonstration
+```
+
+## Operating characteristics
+-   **Performance:** Achieves over 200 FPS [S1, unofficial].
+-   **Quality:** On the MipNeRF360 dataset, LightGaussian achieves SSIM 0.857, PSNR 28.45, and LPIPS 0.210 [S2].
+-   **Size:** Reduces model size to 42.48 MB on MipNeRF360, a 15x reduction compared to the original [S2][S3, unofficial].
+-   **Strengths:** High compression ratio, fast rendering, minimal quality loss.
+-   **Limitations:** Pruning may remove important Gaussians if not done carefully; SH distillation may lose high-frequency details.
+
+## Background
+LightGaussian was introduced in NeurIPS'23 [S3, unofficial]. It addresses the need for efficient 3D Gaussian Splatting for mobile/web/streaming applications by compressing the Gaussian attributes [S3, unofficial].
+
+## Sources
+[S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S2] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+[S3] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)

@@ -1,104 +1,89 @@
 # Fast Projection for Octree Nodes
 
+Also called: Projected Center Translation, 2D Translation Vector Projection
 
 ## Overview
-Fast Projection for Octree Nodes computes the projected center of an octree node from its parent's projected center using a simple 2D translation [S1]. It determines the subdivisions and pixels affected by the projection using 32-bit integer arithmetic, and recursively updates occlusion maps [S1].
+Fast Projection for Octree Nodes accelerates the mapping of 3D octree geometry to 2D screen space by computing the projected center of child nodes from their parents using precomputed 2D translation vectors. It solves the bottleneck of repeated full projection matrix multiplications during hierarchical traversal. Unlike [Point Location](2076-point-location.md) which finds spatial coordinates, or [Voxel Child Address Calculation](2495-voxel-child-address-calculation.md) which handles linear memory offsets, this method specifically optimizes the screen-space footprint calculation for occlusion and depth cueing in object-order ray casting [S1].
 
 ## How it works
-**Inputs and Outputs:**
-- Input: Parent node's projected center $(cx_p, cy_p)$, octree level $L$, and octant index $i \in \{0, \dots, 7\}$ [S1].
-- Output: Child node's projected center $(cx_c, cy_c)$, subdivision indices, and affected pixel ranges [S1].
+**Inputs:**
+- Parent node's projected center $(x_p, y_p)$ in screen space.
+- Octree level $L$ (depth from root).
+- Child octant index $i \in \{0, \dots, 7\}$.
+
+**Outputs:**
+- Child node's projected center $(x_c, y_c)$.
 
 **Data Structures:**
-- **Translation Vectors:** For each octree level $L$, eight constant 2D integer vectors $\vec{T}_{L, i}$ are preprocessed [S1]. These vectors represent the offset from the parent's projected center to each of the eight children's projected centers in screen space [S1].
-- **Occlusion Map (HOM):** A 2D array of 32-bit integers used to track visibility [S1]. Values indicate occlusion status, such as opaque areas marked with constants like 16 (e.g., $P[x, y] = 16$) [S1].
+- `Translations[L][8][2]`: A 3D array of 32-bit integers.
+  - `L`: Octree level index.
+  - `8`: The eight possible octants (children).
+  - `2`: The $(dx, dy)$ translation components.
+  - These vectors are precomputed based on the projection matrix and the geometric subdivision of the octree at level $L$.
 
 **Steps:**
-1. **Preprocessing:** Compute and store eight 2D translation vectors $\vec{T}_{L, i}$ for each relevant octree level $L$ [S1].
-2. **Child Projection:** For a parent node at level $L-1$ with projected center $(cx_p, cy_p)$, compute the projected center of child $i$ at level $L$ using:
-   $$
-   \begin{bmatrix} cx_c \\ cy_c \end{bmatrix} = \begin{bmatrix} cx_p \\ cy_p \end{bmatrix} + \vec{T}_{L, i}
-   $$
-   This uses simple 2D integer translation [S1].
-3. **Subdivision and Pixel Assignment:** Use 32-bit integer arithmetic to determine the bounding box of the projected child node and calculate the range of pixels $[x_{min}, x_{max}] \times [y_{min}, y_{max}]$ covered by the node [S1].
-4. **Occlusion Map Update:** Recursively update the Hierarchical Occlusion Map (HOM) using 32-bit integer arithmetic [S1]. If a child node is occluded or fully opaque, mark the corresponding region in the HOM [S1].
-5. **Depth Cueing:** Compute the depth component for fast depth cueing using the same projection logic, ensuring consistent depth values for shading [S1].
+1. **Preprocessing:** For each octree level $L$, compute the 8 translation vectors $(dx_{L,i}, dy_{L,i})$ corresponding to the 8 children. These represent the screen-space displacement from the parent's center to each child's center.
+2. **Lookup:** Retrieve the translation vector $(dx, dy) = \text{Translations}[L][i]$ for the specific child octant $i$.
+3. **Addition:** Compute the child's projected center using integer arithmetic:
+   $$ x_c = x_p + dx $$
+   $$ y_c = y_p + dy $$
+4. **Recursive Update:** Use the resulting $(x_c, y_c)$ to determine affected pixels and update occlusion maps or depth buffers recursively.
 
 **Parameters:**
-- **Arithmetic:** 32-bit integer arithmetic is used for subdivision determination, pixel assignment, and recursive HOM updates [S1].
-- **Translation Vectors:** Precomputed per level [S1]. The exact derivation from the camera projection matrix and octree geometry is Not given in the sources.
+- **Arithmetic Precision:** 32-bit integer arithmetic is used for all subdivision determination, pixel assignment, and recursive updates [S1]. This ensures speed and avoids floating-point overhead.
+- **Precomputed Vectors:** Eight constant 2D translation vectors per octree level [S1].
 
 **Edge Cases and Pitfalls:**
-- **Precision:** Not given in the sources.
-- **Boundary Conditions:** Not given in the sources.
-- **Degenerate Input:** Not given in the sources.
+- **Precision:** Using 32-bit integers may lead to overflow or quantization errors at very high resolutions or deep octree levels. The sources specify 32-bit integers are used, implying the resolution and depth are constrained to fit within this range [S1].
+- **Boundary Conditions:** The translation vectors must be correctly calculated for the specific projection matrix (perspective or orthographic) and viewport dimensions. Incorrect precomputation leads to misaligned pixel coverage.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Precomputed translation vectors for each octree level L
-# T[L][i] = (dx, dy) for i in 0..7
-# Derivation from projection matrix is Not given in the sources [S1]
-T = {} 
+# Precomputed structure: translations[level][octant_index][2]
+# Each element is a 32-bit integer (dx, dy)
 
-# Simple node container
-Node = type('Node', (), {'center': None, 'level': 0, 'size': 0})
-
-def project_child_center(parent_center, level, octant_index):
-    """Compute projected center of a child node from its parent's projected center."""
-    dx, dy = T[level][octant_index]
-    # 32-bit integer arithmetic as specified [S1]
-    cx_c = parent_center[0] + dx
-    cy_c = parent_center[1] + dy
-    return (cx_c, cy_c)
-
-def update_hierarchical_occlusion_map(node_center, node_size, hom):
-    """Recursively update the occlusion map for the projected node area."""
-    # Determine pixel bounds using 32-bit integer arithmetic [S1]
-    x_min = node_center[0] - node_size
-    x_max = node_center[0] + node_size
-    y_min = node_center[1] - node_size
-    y_max = node_center[1] + node_size
-    # Clip to screen bounds (standard guard [G])
-    x_min = max(0, x_min)
-    x_max = min(hom.shape[1], x_max)
-    y_min = max(0, y_min)
-    y_max = min(hom.shape[0], y_max)
-    # Mark occluded/opaque pixels (e.g., P[x, y] = 16 for opaque [S1])
-    for y in range(y_min, y_max):
-        for x in range(x_min, x_max):
-            hom[y][x] = 16
-
-def traverse_octree(node, hom):
-    """Traverse octree nodes using fast projection and HOM updates."""
-    # Check occlusion before processing (standard guard [G])
-    # is_occluded logic is Not given in the sources [S1]
-    # Project children and update HOM recursively [S1]
-    for i in range(8):
-        child_center = project_child_center(node.center, node.level + 1, i)
-        child_size = node.size // 2
-        update_hierarchical_occlusion_map(child_center, child_size, hom)
-        # Depth cueing computed in the same way [S1]
-        # Recursive traversal or thread launch is Not given in the sources [S1]
+def compute_child_projected_center(parent_center_x, parent_center_y, level, octant_index, translations):
+    """
+    Computes the projected center of an octree child node.
+    
+    Args:
+        parent_center_x (int): X coordinate of the parent's projected center.
+        parent_center_y (int): Y coordinate of the parent's projected center.
+        level (int): Current octree level.
+        octant_index (int): Index of the child octant (0-7).
+        translations (list): Precomputed translation vectors [level][octant][2].
+        
+    Returns:
+        tuple: (child_x, child_y) as 32-bit integers.
+    """
+    # Retrieve precomputed translation vector for this level and octant
+    dx, dy = translations[level][octant_index]
+    
+    # Compute child center using 32-bit integer arithmetic
+    child_x = parent_center_x + dx
+    child_y = parent_center_y + dy
+    
+    return child_x, child_y
 ```
 
 ## Subtopics
 
 ### [Sparse Octree Filtering with Node Map](2337-sparse-octree-filtering-with-node-map.md)
-This method reduces the number of threads launched during sparse voxel octree filtering by using a hierarchical 2D node map to detect and terminate redundant thread execution. It sets itself apart from naive per-pixel thread launching by terminating threads that target the same common ancestor node, achieving a speedup of > 2x.
+Sparse Octree Filtering with Node Map reduces the computational overhead of MIP-map generation for sparse voxel octrees by eliminating redundant thread execution during the filtering pass. It achieves this by constructing a 2D hierarchical node map derived from the light-view map, which allows threads to detect when they are targeting the same octree node and terminate all but one. This method sets itself apart from naive parallel filtering by explicitly handling the spatial coherence of photon distribution in the light-view map, yielding a speedup of greater than 2x compared to methods without this heuristic.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ projection per node due to precomputed translations [S1]. HOM updates are proportional to the projected area [S1].
-- **Memory Complexity:** $O(W \times H)$ for the HOM, where $W$ and $H$ are screen dimensions [S1]. Precomputed translation vectors require $O(L \times 8)$ space, where $L$ is the max octree depth [S1].
-- **Measured Performance:** Not given in the sources.
-- **Strengths:** Efficient occlusion culling via HOM; fast projection using integer arithmetic [S1].
-- **Limitations:** Requires precomputation of translation vectors; 32-bit integer arithmetic may limit precision at high resolutions [S1].
-- **When to Use:** Sparse voxel octree rendering with significant occlusion [S1].
-- **When Not to Use:** Dense volumes where occlusion culling is ineffective; very high resolutions where 32-bit integer precision is insufficient [S1].
+- **Time Complexity:** $O(1)$ per node projection, as it involves only array lookup and two integer additions. This is significantly faster than full matrix-vector multiplication.
+- **Memory Complexity:** $O(L \times 8 \times 2)$ integers for the translation tables, where $L$ is the maximum octree depth. This is negligible compared to the octree data itself.
+- **Performance:** The method enables fast determination of subdivisions and affected pixels, and quick recursive updates of occlusion maps [S1]. It is particularly effective in object-order ray casting where many nodes are traversed.
+- **Strengths:** High speed due to integer arithmetic and precomputation; low memory overhead.
+- **Limitations:** Limited to scenarios where 32-bit integer precision is sufficient for the screen resolution and octree depth. Requires precomputation step.
+- **When to use:** When projecting octree nodes to screen space for occlusion culling or depth cueing in object-order rendering.
+- **When not to use:** When high-precision floating-point projection is required, or when the octree depth exceeds the precision limits of 32-bit integers.
 
 ## Background
-Originated in the context of object-order ray-casting algorithms for sparse voxel octrees [S1]. The method leverages hierarchical occlusion maps (HOMs) to optimize rendering [S1].
+The method was introduced in "A new object-order ray-casting algorithm" [S1]. It is part of a broader approach to optimizing object-order ray casting by leveraging hierarchical data structures and efficient screen-space mapping. The use of 32-bit integer arithmetic for subdivision and pixel assignment was a key innovation for performance at the time of publication.
 
 ## Sources
 [S1] A new object-order ray-casting algorithm, https://doi.org/10.5555/602099.602130, fetched 2026-10-26

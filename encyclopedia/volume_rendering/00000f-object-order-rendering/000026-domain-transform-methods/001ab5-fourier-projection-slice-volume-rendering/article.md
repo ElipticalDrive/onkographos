@@ -1,229 +1,224 @@
 # Fourier Projection-Slice Volume Rendering
 
-Also called: FDVR, FT-based DVR, Fourier Domain Volume Rendering, Fourier projection rendering
+Also called: FT-based DVR, Fourier Domain Volume Rendering, Fourier projection rendering
 
 ## Overview
-Fourier Projection-Slice Volume Rendering (FDVR) is an indirect volume rendering technique that generates attenuation-only images (X-ray-like projections) by exploiting the Fourier projection-slice theorem [S1, S3, S4, S13, unofficial]. It solves the problem of high computational complexity in spatial domain ray-casting by transforming the volume into the frequency domain once, then generating views via 2D resampling and inverse transforms, reducing per-view complexity from $O(N^3)$ to $O(N^2 \log N)$ [S3, S13, unofficial]. Unlike [Ray Casting](52-ray-casting.md) or [Digital Compositing](53-digital-compositing.md), FDVR produces order-independent linear projections without hidden surface effects or transparency control [S3, S9, unofficial].
+Fourier Projection-Slice Volume Rendering (FDVR) is an indirect volume rendering technique that generates attenuation-only, X-ray-like projections of a 3D scalar volume by exploiting the Fourier projection-slice theorem [S1, S3, S4, S5, unofficial][S8][S13, S15, unofficial]. It solves the problem of high computational complexity in spatial domain ray-casting by transforming the volume into the frequency domain once, then generating views via 2D resampling and inverse transforms, reducing per-view complexity from $O(N^3)$ to $O(N^2 \log N)$ [S1, S3, S4, S6, unofficial][S7, S8][S12, S13, unofficial]. Unlike [Ray Casting](52-ray-casting.md) or [Digital Compositing](53-digital-compositing.md), FDVR produces line-integral projections without hidden surface effects or direct transparency control, making it suitable for interactive X-ray simulation and medical imaging where occlusion is not required [S3, S4, S10, S13, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A 3D scalar volume $f(x, y, z)$ of size $N \times N \times N$, sampled on a regular grid. $N$ is typically an integer power of two for FFT efficiency [S3, S12, unofficial].
-*   **Output:** A 2D projection image $I(u, v)$ representing the line integral of density along viewing rays [S2, S14, unofficial].
+The method follows the three-stage pipeline of domain-transform methods: Global Transformation, Slice Extraction, and Inverse Transformation [S1, S824-fourier-projection-slice-volume-rendering.md, S895-hartley-transform-for-memory-reduction.md, S5396-dct-based-volume-rendering.md, unofficial].
 
-**Data Structures:**
-*   **3D Spectrum:** An array of $N^3$ complex coefficients (or real coefficients if using Hartley Transform). Requires 32-bit floating point precision for accuracy, increasing memory by a factor of 4 compared to 8-bit input volume [S3, S15, unofficial]. If using double precision, 16 bytes per voxel are required [S4, S11, unofficial].
-*   **2D Slice:** An array of $N^2$ coefficients extracted from the 3D spectrum [S3, S15, unofficial].
-*   **Interpolation Filter:** A filter $H(s)$ with nonzero width $W$ (typically $W=4$) used to resample the 3D spectrum [S3, S15, unofficial].
+### Inputs and Outputs
+*   **Input:** A 3D scalar volume $f(x, y, z)$ of size $N \times N \times N$ (typically $N$ is a power of two for FFT efficiency) [S4, S13, S15, unofficial].
+*   **Output:** A 2D projection image $I(u, v)$ of resolution $M \times M$ (typically $M=N$) representing the density integral along viewing rays [S3, S4, S16, unofficial].
+*   **Parameters:**
+    *   $V$: Normalized viewing direction vector (points away from the eye) [S4, S16, unofficial].
+    *   $W$: Nonzero width of the interpolating filter used during slice extraction (typical value: 4) [S4, S16, unofficial].
+    *   $k_2$: Zero-padding factor (typical value: $4/3$, i.e., 16% margin) [S4, unofficial].
 
-**Preprocessing (One-time):**
-1.  **Origin Shift:** Rearrange spatial data to move the origin from corner $[0,0,0]$ to the center (wrap-around operation) [S12, unofficial].
-2.  **Vignetting Correction (Optional but recommended):** Premultiply the volume data $f(x)$ by the reciprocal of the filter response $p_m(x) = 1/H(x)$ before the forward transformation to correct for attenuation at the periphery [S10, S11, S13, unofficial].
-3.  **Zero Padding (Optional):** To mitigate ghosting artifacts, surround the data with a margin of zeros. If the volume width is increased by a factor $k_2$ (e.g., $k_2 = 4/3$, a 16% margin), memory and preprocessing costs increase by $k_2^3$ [S3, S15, unofficial].
-4.  **3D Transform:** Compute the 3D Discrete Fourier Transform (DFT) or Discrete Hartley Transform (DHT) of the volume $f(x)$ to obtain the frequency domain representation $F(s)$ [S3, S4, S13, unofficial].
-    $$F(\omega_1, \omega_2, \omega_3) = \int_{-\infty}^{\infty} \int_{-\infty}^{\infty} \int_{-\infty}^{\infty} f(x, y, z) e^{-i2\pi(x\omega_1 + y\omega_2 + z\omega_3)} dx dy dz$$
-    [S2, S14, unofficial]
+### Data Structures
+1.  **Input Volume:** Scalar array, typically 8 bits per voxel [S16, unofficial].
+2.  **3D Spectrum:** Array of $N^3$ complex coefficients (or real if using Hartley Transform). Requires 32-bit floating point precision (16 bytes per voxel if complex double precision is used, or 8 bytes if complex float) [S4, S5, S11, S16, unofficial].
+3.  **2D Slice:** Array of $M^2$ complex coefficients extracted from the 3D spectrum [S4, S16, unofficial].
 
-**Per-View Rendering:**
-1.  **Define View:** Let $V$ be the normalized viewing direction vector (pointing away from the eye) [S3, unofficial].
-2.  **Slice Extraction:** Extract a 2D slice from the 3D spectrum $F(s)$ along a plane passing through the origin and perpendicular to $V$ [S3, S13, unofficial]. Since the slicing plane rarely coincides with the integer lattice of the 3D spectrum, interpolation is required.
-    *   Interpolate $F(s)$ along the extraction plane using filter $H(s)$ [S4, S13, unofficial].
-    *   Resample the interpolated spectrum to obtain a 2D spectrum $I(u, v)$ [S4, S13, unofficial].
-    *   Cost: $O(W^3 N^2)$, where $W$ is the filter width [S3, unofficial].
-3.  **Inverse Transform:** Compute the 2D Inverse Fast Fourier Transform (IFFT) or Inverse Fast Hartley Transform (IFHT) of the 2D slice $I(u, v)$ to generate the spatial domain projection image [S2, S3, S13, unofficial].
-    $$I(u, v) = \int_{-\infty}^{\infty} \int_{-\infty}^{\infty} \int_{-\infty}^{\infty} f(x, y, z) e^{-i2\pi(x\omega_1(u, v) + y\omega_2(u, v) + z\omega_3(u, v))} dx dy dz$$
-    [S2, unofficial]
-4.  **Post-processing:** Rescale intensity values to a valid range and display [S14, unofficial].
+### Steps
 
-**Pseudocode:**
+1.  **Preprocessing (Global Transformation):**
+    *   **Zero-Padding:** To mitigate ghosting artifacts caused by periodic boundary conditions of the DFT, zero-pad the input volume $f(x)$ by a factor of $k_2$. This creates a margin of zeros around the data [S4, S16, unofficial].
+    *   **Vignetting Correction:** Premultiply the padded volume data $f(x)$ by the reciprocal of the interpolation filter response $P_m(x) = 1/H(x)$ before the forward transform. This ensures that the filter response $H(s)$ and $P_m(s)$ cancel during interpolation, preventing attenuation of the image periphery [S5, S11, S12, S14, unofficial].
+    *   **3D FFT:** Compute the 3D Discrete Fourier Transform (DFT) of the corrected volume to obtain the frequency domain representation $F(s)$ [S4, S5, unofficial][S7][S13, S14, unofficial]. If memory efficiency is prioritized, a Discrete Hartley Transform (DHT) may be used, though it requires a correction pass as it is not separable [S4, S15, unofficial].
+    *   **Origin Shift:** Rearrange the spectrum so that the origin (zero frequency) is at the center of the 3D array [S13, unofficial].
+
+2.  **Per-View Rendering (Slice Extraction):**
+    *   **Define Slice Plane:** Define a 2D plane passing through the origin of the frequency domain and perpendicular to the viewing direction $V$ [S4, S16, unofficial].
+    *   **Interpolation:** Since the arbitrary plane does not align with the integer lattice of the 3D spectrum, interpolate the values of $F(s)$ along the plane using a filter $H(s)$ (e.g., tricubic spline) [S5, S16, unofficial]. This step has complexity $O(W^3 M^2)$ [S4, unofficial].
+    *   **Resampling:** Resample the interpolated values onto a regular 2D grid to form the 2D spectrum $I(u, v)$ [S5, S12, unofficial].
+
+3.  **Inverse Transformation:**
+    *   **2D IFFT:** Perform a 2D Inverse Fast Fourier Transform (IFFT) on the 2D slice $I(u, v)$ to obtain the spatial domain projection image [S3, S5, S6, S13, S15, unofficial].
+    *   **Scaling:** Rescale the resulting intensity values to the valid display range [S15, unofficial].
+
+### Formulas
+The 3D Fourier transform of the spatial density function $f(x, y, z)$ is:
+$$F(\omega_1, \omega_2, \omega_3) = \int_{-\infty}^{\infty} \int_{-\infty}^{\infty} \int_{-\infty}^{\infty} f(x, y, z) e^{-i2\pi(x\omega_1 + y\omega_2 + z\omega_3)} dx dy dz \quad [S3, unofficial]$$
+
+The Fourier projection-slice theorem states that the 2D Fourier transform of the projection is equal to a central slice of the 3D Fourier transform:
+$$I(u, v) = F(\omega_1(u, v), \omega_2(u, v), \omega_3(u, v)) \quad [S3, S15, unofficial]$$
+
+The rendering operator $\Pi_V$ is defined as:
+$$\Pi_V(f) = F_2^{-1} \{ F_3 \{ f \} \delta_V^{-1} \} \quad [S4, S16, unofficial]$$
+where $\delta_V^{-1}$ restricts the spectrum to a plane passing through the origin and perpendicular to viewing direction $V$, and $F_N, F_N^{-1}$ are forward and inverse N-dimensional Fourier transforms.
+
+### Pseudocode
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def fourier_projection_slice_rendering(volume, view_direction):
+def fourier_projection_slice_rendering(volume, view_direction, filter_width=4, padding_factor=4/3):
     """
-    volume: 3D numpy array of shape (N, N, N), real-valued scalar field.
-    view_direction: 3D numpy array, normalized vector V pointing away from eye.
-    Returns: 2D numpy array of shape (N, N), the projection image.
+    Renders an X-ray-like projection of a 3D volume using the Fourier Projection-Slice Theorem.
+    
+    Args:
+        volume: 3D numpy array of shape (N, N, N), scalar values.
+        view_direction: 3D numpy array, normalized vector pointing away from the eye.
+        filter_width: Width of the interpolation filter (W).
+        padding_factor: Factor by which to increase volume size (k2).
+        
+    Returns:
+        2D numpy array of shape (M, M), the projection image.
     """
     N = volume.shape[0]
     
-    # --- Preprocessing (Assumed done once, stored in global state) ---
-    # 1. Shift origin to center
-    volume_centered = fftshift(volume)
+    # Step 1: Preprocessing
+    # Calculate padded size
+    padded_size = int(N * padding_factor)
     
-    # 2. Vignetting correction (if enabled)
-    # p_m(x) = 1 / H(x). In practice, H(x) is the spatial response of the interpolation filter.
-    # For simplicity, we assume this is pre-computed or negligible for basic implementation.
-    # volume_corrected = volume_centered * vignetting_correction_mask
+    # Zero-pad the volume
+    padded_volume = np.zeros((padded_size, padded_size, padded_size), dtype=volume.dtype)
+    # Center the original volume in the padded volume
+    start_idx = (padded_size - N) // 2
+    padded_volume[start_idx:start_idx+N, start_idx:start_idx+N, start_idx:start_idx+N] = volume
     
-    # 3. 3D FFT
-    # Note: Real input allows use of RFFT for efficiency, but standard FFT is shown for clarity.
-    spectrum = fftn(volume_centered)
+    # Vignetting Correction: Premultiply by reciprocal of filter response
+    # Note: In practice, P_m(x) is the spatial domain representation of 1/H(s).
+    # For a sinc-like ideal filter, this is complex. Approximations or specific
+    # filter kernels (e.g., Lanczos) are used. Here we assume a function get_vignetting_correction()
+    # returns the correction mask.
+    vignetting_mask = get_vignetting_correction(padded_size, filter_width)
+    corrected_volume = padded_volume * vignetting_mask
     
-    # --- Per-View Rendering ---
+    # 3D FFT
+    # Shift origin to center before FFT if using libraries that expect origin at corner,
+    # or shift after. Standard FFT assumes origin at (0,0,0).
+    # We compute FFT of the centered data.
+    spectrum = np.fft.fftn(corrected_volume)
     
-    # 1. Define the slicing plane in frequency domain
-    # The plane passes through the origin (center of spectrum) and is perpendicular to V.
-    # We need to map 2D image coordinates (u, v) to 3D frequency coordinates (w1, w2, w3).
+    # Shift zero frequency to center for easier slicing logic
+    spectrum = np.fft.fftshift(spectrum)
     
-    # Create 2D grid for the output image
-    u, v = np.meshgrid(np.arange(-N/2, N/2), np.arange(-N/2, N/2))
+    # Step 2: Slice Extraction
+    # Define the 2D plane perpendicular to view_direction passing through origin.
+    # We need to map 2D grid coordinates (u, v) to 3D frequency coordinates.
+    M = N # Output resolution matches input for simplicity, or specified separately
+    u_coords = np.linspace(-0.5, 0.5, M)
+    v_coords = np.linspace(-0.5, 0.5, M)
+    U, V = np.meshgrid(u_coords, v_coords)
     
-    # Define two orthogonal vectors U_vec and V_vec in the frequency domain
-    # that span the plane perpendicular to view_direction.
-    # Let V_vec = view_direction.
-    # Choose an arbitrary vector not parallel to V, e.g., [1, 0, 0] unless V is [1,0,0].
-    arbitrary = np.array([1.0, 0.0, 0.0])
-    if np.abs(np.dot(view_direction, arbitrary)) > 0.9:
-        arbitrary = np.array([0.0, 1.0, 0.0])
+    # Construct 3D coordinates on the slice plane
+    # Basis vectors orthogonal to view_direction
+    # This part requires constructing an orthonormal basis for the plane.
+    # Let V_dir = view_direction.
+    # Find two vectors u_vec, v_vec orthogonal to V_dir and each other.
+    u_vec, v_vec = get_orthonormal_basis(view_direction)
     
-    U_vec = np.cross(view_direction, arbitrary)
-    U_vec = U_vec / np.linalg.norm(U_vec)
-    V_vec = np.cross(view_direction, U_vec)
-    V_vec = V_vec / np.linalg.norm(V_vec)
+    # 3D coordinates in frequency space (normalized)
+    # The slice is at frequency 0 along the view direction
+    freq_x = U * u_vec[0] + V * v_vec[0]
+    freq_y = U * u_vec[1] + V * v_vec[1]
+    freq_z = U * u_vec[2] + V * v_vec[2]
     
-    # Map 2D indices to 3D frequency coordinates
-    # The resolution of the slice should match the Nyquist criterion.
-    # For simplicity, we assume N samples cover the relevant frequency range.
-    # Frequency coordinates are scaled by 1/N relative to array indices.
-    freq_u = u / N
-    freq_v = v / N
+    # Interpolate the 3D spectrum at these coordinates
+    # Using scipy.ndimage.map_coordinates or similar tricubic interpolation
+    # Coordinates must be in index space, not normalized frequency
+    # Map normalized freq [-0.5, 0.5] to array indices [0, padded_size-1]
+    # Center is at padded_size/2
     
-    # 3D coordinates on the slice
-    w1 = freq_u * U_vec[0] + freq_v * V_vec[0]
-    w2 = freq_u * U_vec[1] + freq_v * V_vec[1]
-    w3 = freq_u * U_vec[2] + freq_v * V_vec[2]
+    indices_x = (freq_x + 0.5) * padded_size
+    indices_y = (freq_y + 0.5) * padded_size
+    indices_z = (freq_z + 0.5) * padded_size
     
-    # 2. Interpolate and Resample
-    # Since w1, w2, w3 are continuous, we must interpolate from the discrete spectrum.
-    # This is the most expensive step.
-    # Using trilinear or tricubic interpolation from the 3D spectrum array.
-    # Note: The spectrum array indices correspond to integer frequencies.
-    # We must map continuous frequencies to array indices.
-    # Index = (Frequency * N) + N/2 (to handle negative frequencies and 0-centering)
+    # Create coordinate arrays for interpolation
+    coords = np.array([indices_z, indices_y, indices_x]) # Note: FFTN order is z,y,x or similar depending on implementation
     
-    idx1 = (w1 * N) + N/2
-    idx2 = (w2 * N) + N/2
-    idx3 = (w3 * N) + N/2
+    # Perform interpolation
+    # grid_order=3 for cubic interpolation
+    slice_spectrum = scipy.ndimage.map_coordinates(spectrum, coords, order=3, mode='constant', cval=0.0)
     
-    # Perform interpolation (e.g., trilinear)
-    # This requires a helper function for multi-dimensional interpolation
-    slice_spectrum = interpolate_3d(spectrum, idx1, idx2, idx3)
+    # Step 3: Inverse Transformation
+    # 2D IFFT
+    # The result of map_coordinates is already on a 2D grid (M, M)
+    projection_image = np.fft.ifft2(slice_spectrum)
     
-    # 3. Inverse 2D FFT
-    # The result of the interpolation is the 2D spectrum I(u,v)
-    # Apply Inverse FFT to get the spatial projection
-    projection = np.real(ifft2(slice_spectrum))
+    # Take real part (imaginary part should be near zero for real input)
+    projection_image = np.real(projection_image)
     
-    return projection
+    # Scale and return
+    return projection_image
 
-def interpolate_3d(data, x, y, z):
+def get_orthonormal_basis(view_direction):
     """
-    Trilinear interpolation of 3D array 'data' at continuous coordinates x, y, z.
-    Assumes data is centered and periodic (wrapped).
+    Returns two orthonormal vectors u_vec, v_vec orthogonal to view_direction.
     """
-    # Handle boundary conditions by wrapping
-    x = x % data.shape[0]
-    y = y % data.shape[1]
-    z = z % data.shape[2]
+    v = view_direction / np.linalg.norm(view_direction)
+    # Pick an arbitrary vector not parallel to v
+    if abs(v[0]) < 0.9:
+        arbitrary = np.array([1, 0, 0])
+    else:
+        arbitrary = np.array([0, 1, 0])
     
-    x0 = np.floor(x).astype(int)
-    y0 = np.floor(y).astype(int)
-    z0 = np.floor(z).astype(int)
+    u_vec = np.cross(v, arbitrary)
+    u_vec = u_vec / np.linalg.norm(u_vec)
+    v_vec = np.cross(v, u_vec)
+    v_vec = v_vec / np.linalg.norm(v_vec)
     
-    x1 = (x0 + 1) % data.shape[0]
-    y1 = (y0 + 1) % data.shape[1]
-    z1 = (z0 + 1) % data.shape[2]
-    
-    dx = x - x0
-    dy = y - y0
-    dz = z - z0
-    
-    # Trilinear interpolation formula
-    val = (1-dx)*(1-dy)*(1-dz)*data[x0, y0, z0] + \
-          dx*(1-dy)*(1-dz)*data[x1, y0, z0] + \
-          (1-dx)*dy*(1-dz)*data[x0, y1, z0] + \
-          dx*dy*(1-dz)*data[x1, y1, z0] + \
-          (1-dx)*(1-dy)*dz*data[x0, y0, z1] + \
-          dx*(1-dy)*dz*data[x1, y0, z1] + \
-          (1-dx)*dy*dz*data[x0, y1, z1] + \
-          dx*dy*dz*data[x1, y1, z1]
-          
-    return val
+    return u_vec, v_vec
+
+def get_vignetting_correction(size, filter_width):
+    """
+    Placeholder for vignetting correction mask generation.
+    In practice, this involves the inverse Fourier transform of 1/H(s).
+    """
+    # Not given in the sources. Implementation depends on the specific interpolation filter H(s).
+    return np.ones((size, size, size))
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Ghosting Artifacts:** Convolution with a finite support interpolation filter causes incomplete suppression of periodic replicas in the spatial domain, appearing as ghosting [S3, S4, S13, unofficial]. Solutions include using a wider interpolation filter (increasing cost by $k_1^3$) or zero-padding the input volume (increasing memory by $k_2^3$) [S3, unofficial].
-*   **Vignetting:** Unless $H(s)$ is an ideal lowpass filter, its response attenuates the periphery of the volume and projected image [S10, S11, unofficial]. Corrected by premultiplying $f(x)$ by $1/H(x)$ before the forward FFT [S10, S11, S13, unofficial].
-*   **Aliasing:** If the projection slice resolution is too low, overlapping copies of rendered data occur [S9, S12, unofficial]. Ensure slice resolution meets Nyquist criterion or reduce resampling area to low frequencies (results in blurry preview) [S12, unofficial].
-*   **Hardware Limits:** 3D FFT requires two copies of data in GPU memory, limiting rendered data size to half of available graphics memory [S12, unofficial]. Non-power-of-two resolutions require zero-padding [S12, unofficial].
+### Edge Cases and Pitfalls
+*   **Ghosting Artifacts:** Convolution with a finite-support interpolation filter causes incomplete suppression of periodic replicas in the spatial domain, appearing as ghosting [S4, S5, S11, S16, unofficial]. Mitigation includes zero-padding (increasing memory by $k_2^3$) or using wider interpolation filters (increasing per-view time by $k_1^3$) [S4, unofficial].
+*   **Vignetting:** Unless an ideal lowpass filter is used, the filter response attenuates the periphery of the volume. Mitigation involves premultiplying the volume by the reciprocal of the filter response before the forward transform [S5, S11, S12, S14, unofficial].
+*   **Aliasing:** The output image resolution must meet the Nyquist criterion. If the projection slice resolution is too low, overlapping copies of rendered data occur [S2, S3, S10, S13, unofficial].
+*   **Memory Cost:** The frequency domain representation requires 16 bytes per voxel (complex double precision) or 8 bytes (complex float), significantly higher than the 1 byte per voxel in the spatial domain [S5, S11, S12, unofficial].
+*   **Lack of Occlusion:** The method produces line integrals where voxels on a viewing ray contribute equally regardless of distance, resulting in no occlusion or hidden surface removal [S3, S4, S5, S11, S12, S15, unofficial].
 
 ## Subtopics
 
 ### [Implementation Details for Fourier Volume Rendering](846-implementation-details-for-fourier-volume-rendering.md)
-This article details the specific algorithmic steps, data structures, and parameter choices required to implement the Fourier Projection-Slice Volume Rendering method [Parent](824-fourier-projection-slice-volume-rendering.md). It solves the problem of efficiently generating attenuation-only images (X-ray-like projections) and shaded volume renderings by exploiting the Fourier projection-slice theorem. What sets this implementation apart from standard digital compositing is the use of frequency-domain slicing and inverse transformation, reducing the per-view complexity from $O(N^3)$ to $O(N^2 \log N)$.
+This article details the specific algorithmic steps, data structures, and parameter choices required to implement Fourier Volume Rendering (FVR) as described in the foundational literature. It solves the practical engineering problems of spectral leakage (ghosting), numerical stability in frequency-domain operations, and performance optimization for the 3D FFT and slice extraction pipeline. It sets itself apart from generic descriptions by providing exact margin sizes, interpolation kernels, and stability thresholds for degenerate cases, building on [Fourier Projection-Slice Volume Rendering](824-fourier-projection-slice-volume-rendering.md).
 
 ### [Depth Cueing via Linear Attenuation](966-depth-cueing-via-linear-attenuation.md)
 This method approximates the perceptual depth cues of exponential attenuation in volume rendering by replacing the variable absorption coefficient with a linear function of position, enabling the integrand to be evaluated as a Fourier projection. It sets itself apart from standard exponential attenuation models by allowing efficient computation via the Fourier Projection-Slice Theorem.
 
 ### [Fourier Volume Rendering](6050-fourier-volume-rendering.md)
-Fourier Volume Rendering (FVR) is a direct volume rendering technique that computes X-ray-like projections of a three-dimensional dataset by exploiting the Fourier projection-slice theorem. It reduces the computational complexity from $O(N^3)$ to $O(N^2 \log N)$ by transforming the volume into the frequency domain once, then generating views via 2D resampling and inverse transforms. Unlike [Ray Casting](52-ray-casting.md) or [Digital Compositing](53-digital-compositing.md), FVR produces attenuation-only images without hidden surface effects or transparency control.
+Fourier Volume Rendering (FVR) is a direct volume rendering technique that computes X-ray-like attenuation-only projections of a three-dimensional dataset by exploiting the Fourier projection-slice theorem. It reduces the per-view computational complexity from $O(N^3)$ to $O(N^2 \log N)$ by computing a 3D frequency transform once during preprocessing, then generating views via 2D resampling and inverse transforms. Unlike [Ray Casting](52-ray-casting.md) or [Digital Compositing](53-digital-compositing.md), FVR produces line-integral projections without hidden surface effects or direct transparency control.
 
 ### Fourier Projection-Slice Integration over Irregular Domains
-A technique to compute integrals of functions over irregular spatial domains by decomposing the domain into spatially disjoint intervals and summing their Fourier projection-slice integrals [S3, unofficial]. It decomposes the ray segment connecting two interior points into spatially disjoint intervals, computes each interval integral using the projection-slice theorem, and applies recursive subdivision of volumes into octants to compute final images [S3, unofficial]. Time complexity is $O(N^2 \log^2 N)$ for the octant subdivision algorithm [S3, unofficial]. Applications include rendering spatially clipped volumes for medical visualization, fast calculation of inter-element attenuation for zonal radiosity algorithms, and approximate visibility determination for geometrically defined scenes [S3, unofficial].
+A technique to compute integrals of functions over irregular spatial domains by decomposing the domain into spatially disjoint intervals and summing their Fourier projection-slice integrals [S4, unofficial]. It decomposes the ray segment connecting two interior points into spatially disjoint intervals, computes each interval integral using the projection-slice theorem, and applies recursive subdivision of volumes into octants [S4, unofficial]. Time complexity is $O(N^2 \log^2 N)$ for the octant subdivision algorithm [S4, unofficial]. Applications include rendering spatially clipped volumes for medical visualization, fast calculation of inter-element attenuation for zonal radiosity algorithms, and approximate visibility determination for geometrically defined scenes [S4, unofficial].
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-*   **Preprocessing:** $O(N^3 \log N)$ operations to compute the 3D spectrum [S3, S9, S12, S14, S15, unofficial].
-*   **Per-View Rendering:** $O(N^2 \log N)$ operations for the inverse transform, plus $O(W^3 N^2)$ for slice extraction where $W$ is the nonzero width of the interpolating filter [S3, unofficial]. The slicing step alone performs in $O(M^2)$ for an $M \times M$ slice [S7].
-*   **Memory:** Requires 16 bytes per voxel (pair of floating point numbers, 64-bit double precision) for the frequency domain representation, compared to 1 byte per voxel in spatial domain [S4, S11, unofficial]. If using 32-bit floats, 8 bytes per voxel [S3, unofficial].
-
-**Measured Performance:**
-*   For $N=256$, volume rendering using digital compositing requires 16M operations, while rendering using the projection-slice theorem requires only 512K operations, a speedup of more than an order of magnitude [S3, unofficial].
-*   On a 36 MHz Silicon Graphics 4D/320 VGX workstation, no optimization was attempted [S15, unofficial].
-*   GPU implementations accelerated the rendering stage by a factor of 17 [S14, unofficial].
-
-**Strengths and Limitations:**
-*   **Strengths:** Fast generation of attenuation-only images; interactive frame rates achievable on GPU; supports filtering (lowpass, highpass, bandpass) with little overhead [S14, unofficial].
-*   **Limitations:** Does not handle occlusion or hidden surface removal; lacks depth information (voxels on a viewing ray contribute equally regardless of distance) [S3, S4, S9, S11, S14, unofficial]; cannot implement local (image-space) operations or non-trivial shading models directly [S6, S8]; high interpolation cost and ghosting artifacts [S4, S10, S13, unofficial]; limited to parallel projection [S14, unofficial].
-
-**When to Use:**
-*   Used for generating X-rays, MR angiography, and attenuation-only renderings where speed is prioritized over occlusion [S3, S9, unofficial].
-*   Useful for interactive segmentation and previewing large datasets [S12, S15, unofficial].
-
-**When Not to Use:**
-*   When occlusion, transparency, or complex lighting models are required [S3, unofficial][S6, S8][S14, unofficial].
-*   When high-quality depth cues are essential without approximation [S3, unofficial].
+*   **Time Complexity:** Preprocessing is $O(N^3 \log N)$ for the 3D FFT [S4, unofficial][S7][S10, S13, S15, unofficial]. Per-view rendering is $O(M^2 \log M)$ for the 2D IFFT plus $O(W^3 M^2)$ for slice extraction, where $W$ is the filter width [S4, unofficial][S7, S8][S10, S13, unofficial]. For $N=256$, preprocessing is ~16M operations, while per-view is significantly faster than spatial domain $O(N^3)$ [S4, S16, unofficial].
+*   **Memory Complexity:** Requires $O(N^3)$ memory for the 3D spectrum. Complex arithmetic doubles the storage requirement compared to real-valued spatial data (16 bytes/voxel for double precision complex vs 1 byte/voxel for 8-bit spatial) [S4, S5, S11, S12, unofficial].
+*   **Performance:** Achieves interactive framerates on GPU hardware for volumes up to $256^3$ [S10, S13, S15, unofficial]. The interpolation step is often the bottleneck due to high constant factors [S5, S11, unofficial].
+*   **Strengths:** Fast generation of attenuation-only projections; suitable for X-ray simulation and MR angiography; allows filtering (lowpass, highpass) with little overhead [S3, S4, unofficial][S8][S15, unofficial].
+*   **Limitations:** No occlusion or hidden surface removal; limited to parallel projection; cannot model complex optical phenomena like emission or scattering directly; high memory usage; sensitive to interpolation artifacts (ghosting) [S3, S4, S5, unofficial][S7][S11, S15, unofficial].
+*   **When to Use:** When speed is prioritized over occlusion, such as in medical X-ray simulation or quick previews [S4, S10, S12, unofficial].
+*   **When Not to Use:** When realistic depth cues, occlusion, or complex lighting models are required [S3, S4, S15, unofficial].
 
 ## Background
-**Origin:**
-*   First applied by Dunne, Malzbender, and Napel et al. [S6, S8].
-*   The first method rendering directly from the frequency domain was developed by Chiueh et al. [S6].
-*   Developed by Levoy, Totsuka, and Malzbender [S14, unofficial]. Levoy and Malzbender independently applied the projection-slice theorem to DVR [S8].
-*   The Fast Fourier Transform (FFT) was originally introduced by Cooley [S14, unofficial]. The Fast Hartley Transform (FHT) was proposed by Bracewell and Hao as an alternative to FFT [S14, unofficial].
-
-**History and Development:**
-*   Levoy and Totsuka extended the method with depth cues and shading [S14, unofficial].
-*   Viola et al. proposed single-resolution slice-based rendering [S6].
-*   Jansen et al. performed FDVR directly on graphics hardware [S8].
-*   Implemented on GPU using CUDA and OpenGL shaders to achieve interactive framerates [S14, unofficial].
-
-**Usage:**
-*   Used to render human skull (CT data), Utah teapot (3D scan-converted), and turbine blade [S11, unofficial].
-*   Implemented on programmable graphics hardware (GPU) using shader programs to achieve highly interactive framerates [S12, unofficial].
+FDVR was first applied by Dunne, Malzbender, and Napel et al. in the early 1990s for attenuation-only rendering and MR angiography [S4, unofficial][S7, S9]. Levoy and Totsuka independently generalized the method to include shading and depth cueing in the frequency domain [S5, unofficial][S9][S15, unofficial]. The method was later implemented on graphics hardware (GPU) by Jansen et al. and Viola et al. to achieve interactive framerates [S9][S10, S13, S15, unofficial]. The Fast Fourier Transform (FFT) was originally introduced by Cooley, and the Fast Hartley Transform (FHT) was proposed by Bracewell and Hao as an alternative [S15, unofficial].
 
 ## Sources
-[S1] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)
-[S2] Interactive Volume-Rendering Techniques for Medical Data Visualization, https://doi.org/10.2312/diss.20018138, fetched 2026-10-26 (unofficial)
-[S3] PDF Volume Rendering using the Fourier Projection-Slice Theorem, https://graphics.stanford.edu/papers/fourier/fourier.pdf, fetched 2026-10-27 (unofficial)
-[S4] PDF Frequency Domain Volume Rendering - Stanford University, https://graphics.stanford.edu/papers/fvr/totsuka-fvr-sig93.pdf, fetched 2026-10-27 (unofficial)
-[S5] Fourier Volume Rendering, https://core.ac.uk/works/16671645, fetched 2026-10-27 (unofficial)
-[S6] PDF State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
-[S7] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
-[S8] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
-[S9] PDF GPU-based Frequency Domain Volume Rendering - TU Wien, https://www.cg.tuwien.ac.at/research/publications/2004/Viola-2004-GPU/Viola-2004-GPU-Paper.pdf, fetched 2026-10-27 (unofficial)
-[S10] PDF FREQUENCY DOMAIN VOLUME RENDERING Takashi Totsuka Marc Levoy ..., http://i.stanford.edu/pub/cstr/reports/csl/tr/93/570/CSL-TR-93-570.pdf, fetched 2026-10-27 (unofficial)
-[S11] Frequency Domain Volume Rendering - studylib.net, https://studylib.net/doc/18162906/frequency-domain-volume-rendering, fetched 2026-10-27 (unofficial)
-[S12] PDF Hardware-Accelerated Frequency Domain Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2004/viola-2004-har2/viola-2004-har2-Paper.pdf, fetched 2026-10-27 (unofficial)
-[S13] Frequency Domain Volume Rendering, https://graphics.stanford.edu/papers/fvr/fvr.pdf, fetched 2026-10-27 (unofficial)
-[S14] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
-[S15] Fourier Projection-Slice Theorem in Volume Rendering, https://www.scribd.com/document/796298963/Marc-Levoy-Volume-rendering-using-the-Fourier-projection-slice-theorem, fetched 2026-10-27 (unofficial)
+[S1] Direct Volume Rendering Direct Volume Rendering. What is volume rendering?. Accumulate information along 1 dimension line through volume. Volume rendering vs. isosurfaces. No intermediate geometry No , https://www.slideserve.com/lenci/direct-volume-rendering, fetched 2026-10-25 (unofficial)
+[S2] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)
+[S3] Interactive Volume-Rendering Techniques for Medical Data Visualization, https://doi.org/10.2312/diss.20018138, fetched 2026-10-26 (unofficial)
+[S4] PDF Volume Rendering using the Fourier Projection-Slice Theorem, https://graphics.stanford.edu/papers/fourier/fourier.pdf, fetched 2026-10-27 (unofficial)
+[S5] PDF Frequency Domain Volume Rendering - Stanford University, https://graphics.stanford.edu/papers/fvr/totsuka-fvr-sig93.pdf, fetched 2026-10-27 (unofficial)
+[S6] Fourier Volume Rendering, https://core.ac.uk/works/16671645, fetched 2026-10-27 (unofficial)
+[S7] PDF State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S8] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S9] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
+[S10] PDF GPU-based Frequency Domain Volume Rendering - TU Wien, https://www.cg.tuwien.ac.at/research/publications/2004/Viola-2004-GPU/Viola-2004-GPU-Paper.pdf, fetched 2026-10-27 (unofficial)
+[S11] PDF FREQUENCY DOMAIN VOLUME RENDERING Takashi Totsuka Marc Levoy ..., http://i.stanford.edu/pub/cstr/reports/csl/tr/93/570/CSL-TR-93-570.pdf, fetched 2026-10-27 (unofficial)
+[S12] Frequency Domain Volume Rendering - studylib.net, https://studylib.net/doc/18162906/frequency-domain-volume-rendering, fetched 2026-10-27 (unofficial)
+[S13] PDF Hardware-Accelerated Frequency Domain Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2004/viola-2004-har2/viola-2004-har2-Paper.pdf, fetched 2026-10-27 (unofficial)
+[S14] Frequency Domain Volume Rendering, https://graphics.stanford.edu/papers/fvr/fvr.pdf, fetched 2026-10-27 (unofficial)
+[S15] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
+[S16] Fourier Projection-Slice Theorem in Volume Rendering, https://www.scribd.com/document/796298963/Marc-Levoy-Volume-rendering-using-the-Fourier-projection-slice-theorem, fetched 2026-10-27 (unofficial)

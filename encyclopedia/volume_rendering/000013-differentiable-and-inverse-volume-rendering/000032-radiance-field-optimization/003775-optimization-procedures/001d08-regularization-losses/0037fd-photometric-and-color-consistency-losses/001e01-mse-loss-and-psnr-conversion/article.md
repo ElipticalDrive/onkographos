@@ -3,182 +3,169 @@
 Also called: MSE (Mean Squared Error), MSE Calculation, MSE Loss, Mean Squared Error, Mean Squared Error Loss, img2mse
 
 ## Overview
-The Mean Squared Error (MSE) loss computes the average of the squared differences between predicted and target RGB values, serving as the primary photometric optimization objective in radiance-field training [S2, S4, S6, S7, unofficial]. It is often accompanied by the Peak Signal-to-Noise Ratio (PSNR), a logarithmic metric derived from MSE that quantifies reconstruction fidelity for logging and evaluation [S1, S6, unofficial]. Unlike structural metrics such as SSIM, MSE is sensitive to pixel-level intensity errors and large smooth regions, making it a standard baseline for differentiable volume rendering [S1, unofficial].
+The Mean Squared Error (MSE) loss computes the average of the squared differences between predicted and target RGB values, serving as the primary photometric fidelity metric for training differentiable volume rendering models [S2, S4, unofficial]. It is often accompanied by the Peak Signal-to-Noise Ratio (PSNR), a logarithmic transformation of MSE used for evaluation and logging, where higher values indicate better reconstruction quality [S1, S2, unofficial]. Unlike structural metrics such as SSIM, MSE focuses strictly on pixel-wise intensity differences, making it sensitive to large smooth regions but less responsive to small, high-frequency features [S1, unofficial].
 
 ## How it works
-**Inputs:**
-- Predicted RGB values ($x$): Tensor of shape $(B, H, W, 3)$ or $(B, N, 3)$, where $B$ is batch size, $H, W$ are spatial dimensions, and $N$ is the number of samples/pixels. Values are typically in $[0, 1]$.
-- Target RGB values ($y$): Tensor of identical shape to $x$, representing ground-truth images or sampled colors.
-
-**Outputs:**
-- MSE Loss: Scalar float representing the mean squared error.
-- PSNR: Scalar float representing the Peak Signal-to-Noise Ratio.
+**Inputs and Outputs:**
+*   **Inputs:** Predicted RGB tensor $\hat{C}$ (shape: $[B, H, W, 3]$ or flattened $[N, 3]$) and Target RGB tensor $C_{gt}$ (same shape). Optional: Binary mask $M$ for volumetric or masked evaluation.
+*   **Outputs:** Scalar loss value (MSE) and optionally the PSNR metric.
 
 **Data Structures:**
-- No complex data structures required. Standard dense tensors or arrays are used. For masked variants, a boolean mask of shape $(B, H, W)$ or $(B, N)$ is used to select valid voxels/pixels [S6, unofficial].
+*   Tensors are typically stored in contiguous memory layouts (e.g., row-major for images). For batched operations, the first dimension is the batch size $B$.
+*   Values are usually 32-bit floating point (`float32`).
 
 **Steps:**
-1. **Compute Element-wise Difference:** Calculate the difference between predicted and target values: $d = x - y$.
-2. **Square the Difference:** Square each element of the difference tensor: $s = d^2$.
-3. **Aggregate:**
-   - **Standard MSE:** Flatten spatial dimensions (and batch if computing global loss) and compute the mean. For a batch of images, flatten to $(B, -1)$ and average over the flattened spatial dimension, then optionally average over the batch [S3, unofficial].
-     $$MSE = \frac{1}{N} \sum_{i=1}^{N} (x_i - y_i)^2$$
-     where $N$ is the total number of elements averaged over [S1, S5, unofficial].
-   - **Masked MSE:** If a boolean mask $m$ is provided (where $m_i = 1$ if valid, $0$ otherwise), compute the mean only over valid elements:
-     $$MSE_{masked} = \frac{1}{N_{mask}} \sum_{i \in mask} (x_i - y_i)^2$$
-     where $N_{mask}$ is the count of true values in the mask [S6, unofficial].
-4. **Compute PSNR:** Convert the MSE to PSNR.
-   - If $MSE > 0$:
-     $$PSNR = 20 \cdot \log_{10}\left(\frac{1}{\sqrt{MSE}}\right) = -10 \cdot \log_{10}(MSE)$$
-   - If $MSE = 0$: $PSNR = \infty$ [S1, S6, unofficial].
+
+1.  **Compute Element-wise Difference:** Calculate the difference between predicted and target values.
+    $$ D = \hat{C} - C_{gt} $$
+2.  **Square the Difference:** Square each element of the difference tensor.
+    $$ S = D^2 $$
+3.  **Aggregate (Standard):** Flatten spatial dimensions and average over all elements (or batch and spatial dimensions).
+    $$ MSE = \frac{1}{N} \sum_{i=1}^{N} S_i $$
+    where $N$ is the total number of elements (e.g., $B \times H \times W \times 3$) [S3, unofficial].
+4.  **Aggregate (Masked):** If a binary mask $M$ is provided (where $M_{ijk} \in \{0, 1\}$), compute the mean only over masked elements.
+    $$ MSE_{mask} = \frac{1}{N_{mask}} \sum_{i,j,k} M_{ijk} S_{ijk} $$
+    where $N_{mask} = \sum M_{ijk}$ is the count of valid voxels/pixels [S6, unofficial].
+5.  **Compute PSNR:** Convert the MSE to PSNR using the logarithmic scale.
+    $$ PSNR = -10 \cdot \log_{10}(MSE) $$
+    Alternatively, derived from the signal-to-noise ratio of the peak signal (assumed to be 1.0 for normalized [0,1] data):
+    $$ PSNR = 20 \cdot \log_{10}\left(\frac{1}{\sqrt{MSE}}\right) $$
+    [S1, S6, unofficial].
 
 **Parameters:**
-- `mask_threshold_rel`: In masked volume metrics, the relative threshold applied to the normalized mask volume to create the boolean mask. Default value is 0.01 [S6, unofficial].
-- `delta`: In Huber loss variants (not pure MSE), the threshold for switching from L2 to L1. Default 0.1 [S9, unofficial].
+*   **Normalization:** Input RGB values are typically normalized to $[0, 1]$ [S2, unofficial].
+*   **Mask Threshold:** In volumetric masked evaluation, a relative threshold (`mask_threshold_rel`, default 0.01) is applied to the maximum mask volume value to generate the boolean mask [S6, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Division by Zero/Log of Zero:** If $MSE = 0$, $PSNR$ becomes infinity. Implementations should handle this explicitly, often returning `inf` or a large constant [S6, unofficial].
+*   **Empty Mask:** If the mask contains no true values ($N_{mask} = 0$), the masked MSE is undefined. This should raise an error or return `NaN` [S6, unofficial].
+*   **Dimension Mismatch:** Inputs must have identical shapes. For vector-based volume comparisons, size checks are required [S7, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import math
 import numpy as np
 
-def compute_mse(predicted: np.ndarray, target: np.ndarray) -> float:
+def compute_mse(predicted: np.ndarray, target: np.ndarray, mask: np.ndarray = None) -> float:
     """
-    Computes Mean Squared Error between predicted and target RGB values.
+    Computes Mean Squared Error between predicted and target arrays.
+    
     Args:
-        predicted: Array of shape (..., 3) or (..., H, W, 3).
-        target: Array of same shape as predicted.
+        predicted: Array of predicted values (e.g., RGB).
+        target: Array of ground truth values.
+        mask: Optional boolean array of the same shape. If provided, computes masked MSE.
+        
     Returns:
-        Scalar MSE value.
+        float: The MSE value.
     """
-    # 1. Compute element-wise difference
+    # 1. Compute difference
     diff = predicted - target
     
-    # 2. Square the difference
-    squared_diff = diff ** 2
+    # 2. Square difference
+    sq_error = diff ** 2
     
-    # 3. Average over all dimensions except the batch dimension (if present)
-    # Assuming the last dimension is RGB (size 3) or spatial dims are flattened.
-    # Standard implementation flattens spatial dims and averages over batch and pixels.
-    # If input is (B, H, W, 3), we want mean over B, H, W.
-    # np.mean squares the error and averages over all axes.
-    mse = np.mean(squared_diff)
-    
+    if mask is not None:
+        # 3. Apply mask
+        masked_sq_error = sq_error * mask
+        
+        # 4. Count valid elements
+        n_valid = np.sum(mask)
+        
+        if n_valid == 0:
+            raise RuntimeError("Mask has no true values; cannot compute masked MSE.")
+            
+        # 5. Average over valid elements
+        mse = np.sum(masked_sq_error) / n_valid
+    else:
+        # 3. Flatten and average (standard MSE)
+        mse = np.mean(sq_error)
+        
     return float(mse)
 
-def compute_psnr(mse: float) -> float:
+def mse_to_psnr(mse: float) -> float:
     """
-    Converts MSE to Peak Signal-to-Noise Ratio.
+    Converts MSE to PSNR.
+    
     Args:
         mse: Mean Squared Error value.
+        
     Returns:
-        PSNR value. Returns infinity if MSE is 0.
+        float: PSNR in decibels.
     """
     if mse <= 0:
-        return math.inf
-    # PSNR = 20 * log10(1 / sqrt(MSE)) = -10 * log10(MSE)
-    psnr = -10.0 * math.log10(mse)
-    return float(psnr)
-
-def compute_masked_mse_psnr(predicted: np.ndarray, target: np.ndarray, mask: np.ndarray) -> dict:
-    """
-    Computes MSE and PSNR only for voxels/pixels where mask is True.
-    Args:
-        predicted: Array of shape (..., 3).
-        target: Array of same shape.
-        mask: Boolean array of shape (...,).
-    Returns:
-        Dictionary with 'masked_mse', 'masked_psnr', 'masked_voxel_count'.
-    """
-    # 1. Create boolean mask if not already boolean (optional, based on source logic)
-    # Source [S6, unofficial] uses a threshold on a volume to create mask, but here we assume mask is provided.
-    
-    # 2. Check for empty mask
-    if not np.any(mask):
-        raise RuntimeError("Mask has no true values (empty region).")
+        # Avoid log(0); return infinity or a large number
+        return float('inf')
         
-    # 3. Apply mask
-    # Flatten arrays to 1D for easy indexing, keeping RGB channels intact or flattening them?
-    # Source [S6, unofficial] implies voxel-wise comparison. Assuming predicted/target are (N, 3) or (N,).
-    # We compare per-voxel. If RGB, we might average RGB or treat as 3-channel vector.
-    # Standard MSE in [S1, unofficial] treats x and y as vectors.
-    
-    # Flatten spatial/batch dims, keep last dim (RGB) if needed, or flatten all?
-    # [S1, unofficial] formula sums over N pixels. [S6, unofficial] sums over N voxels.
-    # Let's assume we flatten everything to a list of values for MSE calculation 
-    # OR calculate MSE per channel and average? 
-    # Standard `tf.reduce_mean(tf.square(x-y))` flattens all.
-    
-    pred_flat = predicted[mask]
-    tgt_flat = target[mask]
-    
-    # 4. Compute squared error
-    sq_error = (pred_flat - tgt_flat) ** 2
-    
-    # 5. Mean over all remaining elements
-    masked_mse = float(np.mean(sq_error))
-    
-    # 6. Compute PSNR
-    masked_psnr = compute_psnr(masked_mse)
-    
-    masked_voxel_count = int(np.sum(mask))
-    
-    return {
-        'masked_mse': masked_mse,
-        'masked_psnr': masked_psnr,
-        'masked_voxel_count': masked_voxel_count
-    }
-```
+    # Formula: 10 * log10(1 / MSE) or 20 * log10(1 / sqrt(MSE))
+    psnr = -10.0 * math.log10(mse)
+    return psnr
 
-**Edge Cases and Pitfalls:**
-- **Zero MSE:** If the prediction perfectly matches the target, MSE is 0. The logarithm in PSNR calculation is undefined. The implementation must return infinity or a large constant [S6, unofficial].
-- **Empty Mask:** If the boolean mask selects no voxels/pixels, the mean is undefined. Raise a `RuntimeError` or handle gracefully [S6, unofficial].
-- **Precision:** Use float32 or float64. Squaring small differences can lead to precision loss if not careful, but standard float32 is typically sufficient for RGB [0,1] [S7, unofficial].
+def compute_psnr(predicted: np.ndarray, target: np.ndarray, mask: np.ndarray = None) -> float:
+    """
+    Computes PSNR directly from predicted and target arrays.
+    """
+    mse = compute_mse(predicted, target, mask)
+    return mse_to_psnr(mse)
+```
 
 ## Subtopics
 
 ### [PSNR Metric Calculation](2742-psnr-metric-calculation.md)
-Peak Signal-to-Noise Ratio (PSNR) evaluates the quality of reconstructed images in novel view synthesis and volume rendering by comparing rendered output against ground-truth reference images. It quantifies the logarithmic ratio between the maximum possible pixel intensity and the Mean Squared Error (MSE) between the two images, providing a single scalar value where higher indicates better fidelity. Unlike structural metrics such as SSIM, PSNR measures pixel-level photometric error averaged over the entire frame, making it sensitive to large smooth regions but less responsive to small, high-frequency details like specular highlights.
+Peak Signal-to-Noise Ratio (PSNR) is a standard benchmark metric used to evaluate the photometric fidelity of reconstructed or rendered images against ground-truth references in differentiable volume rendering pipelines. It quantifies the mean squared error (MSE) between predicted and target pixel values, converting this error into a logarithmic decibel (dB) scale where higher values indicate better quality. Unlike structural metrics such as SSIM, PSNR focuses strictly on pixel-wise intensity differences, making it sensitive to large smooth regions but less responsive to small, high-frequency features like specular highlights. See [PSNR Metric Calculation](2742-psnr-metric-calculation.md).
 
 ### [SSIM Metric Calculation](3650-ssim-metric-calculation.md)
-The Structural Similarity Index (SSIM) measures the perceived distortion between a rendered image and a ground truth image by comparing local patterns of pixel intensities, assuming the human visual system is highly adapted to structured natural scene information. It serves as a standard benchmark for image quality in radiance-field optimization, complementing pixel-wise metrics like MSE and PSNR. It provides a value between -1 and 1, where 1 indicates identical images.
+The Structural Similarity Index (SSIM) measures the perceived distortion between a rendered image and a ground truth image by comparing local patterns of pixel intensities, assuming the human visual system is highly adapted to structured natural scene information. It serves as a standard benchmark for image quality in radiance-field optimization, complementing pixel-wise metrics like MSE and PSNR. It provides a value between -1 and 1, where 1 indicates identical images. See [SSIM Metric Calculation](3650-ssim-metric-calculation.md).
 
 ### [Normal-L2 Score Computation](3842-normal-l2-score-computation.md)
-The Normal-L2 score evaluates surface geometry by computing the mean squared L2 distance between predicted surface normals and reference normals from a ground-truth mesh. It is computed only on the intersection of predicted and ground-truth masks, distinguishing it from silhouette metrics like iIoU which evaluate mask alignment separately.
+The Normal-L2 score evaluates surface geometry by computing the mean squared L2 distance between predicted surface normals and reference normals from a ground-truth mesh. It is computed only on the intersection of predicted and ground-truth masks, distinguishing it from silhouette metrics like iIoU which evaluate mask alignment separately. See [Normal-L2 Score Computation](3842-normal-l2-score-computation.md).
 
 ### [Minkowski's Metric](4347-minkowski-s-metric.md)
-Minkowski's Metric is a full-reference mathematical distance measure that treats images as 2D signals to quantify dissimilarity between a reference image $x$ and a test image $y$. It generalizes the Mean Squared Error (MSE) by allowing the exponent $\gamma$ to vary, thereby controlling the sensitivity to large errors versus small errors. Unlike its sibling [PSNR Metric Calculation](2742-psnr-metric-calculation.md) which is a logarithmic transformation of MSE, or [SSIM Metric Calculation](3650-ssim-metric-calculation.md) which models structural information, Minkowski's Metric operates directly on pixel-wise intensity differences.
+Minkowski's Metric is a full-reference mathematical distance measure that treats images as 2D signals to quantify dissimilarity between a reference image $x$ and a test image $y$. It generalizes the Mean Squared Error (MSE) by allowing the exponent $\gamma$ to vary, thereby controlling the sensitivity to large errors versus small errors. Unlike its sibling [PSNR Metric Calculation](2742-psnr-metric-calculation.md) which is a logarithmic transformation of MSE, or [SSIM Metric Calculation](3650-ssim-metric-calculation.md) which models structural information, Minkowski's Metric operates directly on pixel-wise intensity differences. See [Minkowski's Metric](4347-minkowski-s-metric.md).
 
 ### Masked Volume Metrics
-A method to exclude empty froxels from evaluation metrics by including only froxels affected by radiance [S8, unofficial]. A froxel is included if any of its RGB channels contain a non-zero value at any point during the test scenario [S8, unofficial]. The Region of Interest (ROI) is computed separately for each tested algorithm; the union of the scenario's ROI and the ground truth's ROI is used to create $ROI_{effective}$, ensuring only relevant froxels are included while excluding completely empty regions [S8, unofficial].
+A method to exclude empty froxels from evaluation metrics by including only froxels affected by radiance [S8, unofficial]. A froxel is included if any of its RGB channels contain a non-zero value at any point during the test scenario [S8, unofficial]. The Region of Interest (ROI) is computed separately for each tested algorithm; the union of the scenario's ROI and the ground truth's ROI is used to create $ROI_{effective}$, ensuring only relevant froxels are included while excluding completely empty regions [S8, unofficial]. The formula is $ROI_{effective} = ROI_{scenario} \cup ROI_{truth}$ [S8, unofficial].
 
 ### MSE Bias-Variance Decomposition
-Treating the TAA algorithm as a biased estimator to analyze correctness using Mean Squared Error (MSE), decomposed into variance and bias squared [S8, unofficial]. The MSE is defined as $\text{MSE}[F] = \mathbb{E}[(F - G)^2] = V[F] + \beta[F]^2$, where $F$ is the output of the estimator, $G$ is the true value, $V[F]$ is the variance, and $\beta[F]$ is the bias [S8, unofficial].
+Treating the TAA algorithm as a biased estimator to analyze correctness using Mean Squared Error (MSE), decomposed into variance and bias squared [S8, unofficial]. The formula is $MSE[F] = E[(F - G)^2] = V[F] + \beta[F]^2$, where $F$ is the output of the estimator, $G$ is the true value (ground truth), $V[F]$ is the variance of the estimator, and $\beta[F]$ is its bias [S8, unofficial].
 
 ### Training Loss Computation with Huber and Masking
-In some implementations, the Huber loss is used instead of MSE for robustness. The predicted RGB is split from depth, ground truth RGB is blended with background, and per-ray Huber loss is computed with $\delta=0.1$, masked by ray validity, and averaged over valid rays [S9, unofficial].
+In some pipelines, Huber loss is used instead of MSE for RGB, particularly when blending ground truth RGB with background to match rendering conditions [S9, unofficial]. The per-ray Huber loss is computed with a delta parameter (e.g., 0.1) and masked by ray validity, then averaged over valid rays [S9, unofficial].
 
 ### Area Loss Scaling
 Scaling the loss of each pixel by the area of that pixel's footprint in the original image to ensure low-resolution pixels have comparable influence to high-resolution pixels in multiscale datasets [S10]. For a downsampling factor of $k$, the area factor is $k^2$ [S10].
 
 ### IoU Loss
-A binary segmentation loss metric that computes the ratio of overlapping voxels above a threshold to the total union of predicted and target voxels [S11, unofficial]. Formula: $\text{IoU} = \frac{|\{v \mid \hat{v} > \tau\} \cap \{v \mid t_v > 0\}|}{|\{v \mid \hat{v} > \tau\} \cup \{v \mid t_v > 0\}|}$, with default threshold $\tau=0.9$ [S11, unofficial].
+A binary segmentation loss metric that computes the ratio of overlapping voxels above a threshold to the total union of predicted and target voxels [S11, unofficial]. The formula is $\text{IoU} = \frac{|\{v \mid \hat{v} > \tau\} \cap \{v \mid t_v > 0\}|}{|\{v \mid \hat{v} > \tau\} \cup \{v \mid t_v > 0\}|}$, where $\tau$ is the prediction threshold (default 0.9) [S11, unofficial].
 
 ### Greedy proposal matching
-A fast assignment strategy used during Phase 1 to compute the L2 matching loss between heuristic samples and learnt proposals [S12, unofficial]. For each heuristic sample, the closest proposal from the learnt proposer set is found. Optimal matching (Hungarian algorithm) or strict 1-1 greedy matching significantly slows training [S12, unofficial].
+A fast assignment strategy used during Phase 1 to compute the L2 matching loss between heuristic samples and learnt proposals [S12, unofficial]. For each heuristic sample, the closest proposal from the learnt proposer set is found [S12, unofficial]. Optimal matching (Hungarian algorithm) or strict 1-1 greedy matching significantly slows training [S12, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$, where $N$ is the number of pixels or voxels being compared. The operation is element-wise and highly parallelizable on GPUs [S3, S7, unofficial].
-- **Memory Complexity:** $O(N)$ to store the difference and squared difference tensors, or $O(1)$ if computed in a streaming fashion [S7, unofficial].
-- **Performance:** Extremely fast to compute. It is the dominant cost in the loss calculation phase but negligible compared to the forward pass of the neural network [S4, unofficial].
-- **Strengths:** Simple to implement, differentiable, and widely understood. Provides a direct measure of pixel intensity error [S2, unofficial].
-- **Limitations:** Does not account for structural similarity or human perception. Can be sensitive to noise and outliers (large errors dominate the loss) [S1, unofficial].
-- **When to use:** Standard training for NeRF-like models where photometric accuracy is the primary goal [S4, unofficial].
-- **When not to use:** When structural fidelity is more important than pixel-perfect intensity (use SSIM) or when robustness to outliers is needed (use Huber or L1) [S9, unofficial].
+**Time and Memory Complexity:**
+*   **Time:** $O(N)$, where $N$ is the number of pixels or voxels being compared. The operation is element-wise and highly parallelizable on GPUs [S3, unofficial].
+*   **Memory:** $O(N)$ to store the difference and squared error tensors, or $O(1)$ if computed incrementally/streaming [S5, unofficial].
+
+**Measured Performance:**
+*   MSE is the dominant loss function in NeRF-like architectures due to its simplicity and differentiability [S2, S4, unofficial].
+*   Typical PSNR values for NeRF on the Blender dataset range from 28 to 33 dB depending on the variant (e.g., Mip-NeRF achieves ~29.6-33.7 dB on test sets) [S10].
+
+**Strengths and Limitations:**
+*   **Strengths:** Simple to implement, differentiable everywhere, standard benchmark for comparison [S2, S4, unofficial].
+*   **Limitations:** Does not account for structural similarity or perceptual quality as well as SSIM or LPIPS; sensitive to noise and outliers [S1, unofficial].
+
+**When to Use:**
+*   Standard training of radiance fields where pixel-wise accuracy is the primary goal [S4, unofficial].
+*   Baseline evaluation of reconstruction quality [S2, unofficial].
+
+**When Not to Use:**
+*   When perceptual quality is more important than pixel-wise accuracy (use LPIPS or SSIM) [S1, unofficial].
+*   When dealing with significant outliers or noise that should be ignored (use Huber loss or masked MSE) [S9, unofficial].
 
 ## Background
-The Mean Squared Error (MSE) is a fundamental statistical measure used in signal processing and computer vision. In the context of neural volume rendering, it was popularized by the original NeRF paper [S1, unofficial] as the primary loss function for optimizing radiance fields. It is often used in conjunction with PSNR for evaluation [S1, unofficial]. Variants like masked MSE are used in volumetric datasets to ignore empty space [S6, unofficial]. The bias-variance decomposition of MSE is also used in analyzing temporal anti-aliasing in volumetric rendering [S8, unofficial].
+The Mean Squared Error (MSE) is a fundamental statistical measure of the average squared difference between estimated values and the actual value [S5, unofficial]. In the context of neural volume rendering, it was popularized by the original NeRF paper and subsequent implementations as the primary photometric loss function [S1, S2, S4, unofficial]. It is widely used in computer vision and image processing for regression tasks and image reconstruction [S7, unofficial].
 
 ## Sources
 [S1] bmild/nerf, https://github.com/bmild/nerf, fetched 2026-10-26 (unofficial)

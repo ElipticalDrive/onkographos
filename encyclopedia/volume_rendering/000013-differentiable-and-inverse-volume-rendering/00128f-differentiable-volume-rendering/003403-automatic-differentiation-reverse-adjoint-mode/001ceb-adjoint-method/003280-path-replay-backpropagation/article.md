@@ -1,0 +1,140 @@
+# Path Replay Backpropagation
+
+Also called: Radiative Backpropagation
+
+## Overview
+Path Replay Backpropagation (PRB) is an efficient differentiation technique for inverse rendering that computes gradients of a scalar loss function with respect to scene parameters by replaying primal Monte Carlo paths using pseudorandom number generators, thereby avoiding the storage of large computational graphs [S1, unofficial]. It is an adjoint-based method that builds complete differential paths to solve the differential rendering equation, distinguishing itself from Radiative Backpropagation (RB) by solving the quadratic time complexity issue through a two-pass approach that achieves linear time complexity in path length [S2, unofficial].
+
+## How it works
+PRB operates in two distinct phases: a primal pass to estimate the rendering integral and store necessary state, and an adjoint pass to replay the path and compute gradients. This method relies on the material form parameterization, where the goal is to compute the gradient of the loss $L$ with respect to scene parameters $\pi$ [S1, unofficial].
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   Scene parameters $\pi$ (e.g., BRDF properties, geometry).
+    *   A scalar loss function $L(I)$, where $I$ is the rendered image intensity.
+    *   A random seed for the primal path tracing.
+    *   The primal path estimate $\hat{f}(\bar{\boldsymbol{p}})$, which is the result of the primal pass.
+*   **Outputs**:
+    *   The gradient $\frac{\partial L}{\partial \pi}$.
+
+### Data Structures
+The primary data structure stored during the primal pass is the scalar path estimate $\hat{f}(\bar{\boldsymbol{p}})$ [S1, unofficial]. Unlike full computation graph recording, PRB does not store the sequence of vertices or the full computational transcript. Instead, it relies on the ability to deterministically regenerate path segments using the same random seed [S1, unofficial].
+
+### Steps
+1.  **Primal Pass**: Trace rays from the sensor to estimate the rendered image intensity. Store the final scalar path estimate $\hat{f}(\bar{\boldsymbol{p}})$ for each pixel/ray [S1, unofficial].
+2.  **Adjoint Pass (Replay)**: Replay the primal path $\bar{\boldsymbol{p}}$ using the same random seed used in the primal pass. This regeneration allows the system to access the specific vertices and segments of the path without having stored them explicitly [S1, unofficial].
+3.  **Gradient Computation**: For each segment $n$ of the replayed path, compute the derivative $\frac{\partial g_n(\bar{\boldsymbol{p}})}{\partial \pi}$ using automatic differentiation (auto-diff) only on that specific segment [S1, unofficial].
+4.  **Combination**: Combine the segment derivatives using the product rule formula to obtain the total gradient [S1, unofficial].
+
+### Formulas
+The gradient of the loss $L$ with respect to scene parameters $\pi$ is derived using the chain rule and the material path formulation [S1, unofficial]:
+
+$$
+\frac{\partial L}{\partial \pi} = \int_{\hat{\Omega}} \frac{\partial L}{\partial I} \frac{\partial \hat{f}(\bar{\boldsymbol{p}})}{\partial I} \frac{\partial I}{\partial \pi} d\mu(\bar{\boldsymbol{p}})
+$$
+
+This formulation avoids explicitly computing or storing $\frac{\partial I}{\partial \pi}$ [S1, unofficial]. The term $\frac{\partial \hat{f}(\bar{\boldsymbol{p}})}{\partial \pi}$ is expanded using the product rule. Let $g_n(\bar{\boldsymbol{p}})$ be the contribution of the $n$-th segment of the path $\bar{\boldsymbol{p}}$, defined as [S1, unofficial]:
+
+$$
+g_n(\bar{\boldsymbol{p}}) = \begin{cases} 
+f_v(\bar{x}, n) J(p_n), & 0 \le n \le N \\ 
+G(x_{n-N-1} \leftrightarrow x_{n-N}), & N < n \le 2N 
+\end{cases}
+$$
+
+where $N$ is the number of vertices in the path, $f_v$ is the volume scattering function, $J$ is the Jacobian, and $G$ represents the boundary term contribution [S1, unofficial]. The derivative of the path estimate is then [S1, unofficial]:
+
+$$
+\frac{\partial \hat{f}(\bar{\boldsymbol{p}})}{\partial \pi} = \sum_n \frac{\partial g_n(\bar{\boldsymbol{p}})}{\partial \pi} \prod_{n' \ne n} g_{n'}(\bar{\boldsymbol{p}}) = \sum_n \frac{\partial g_n(\bar{\boldsymbol{p}})}{\partial \pi} \frac{\hat{f}(\bar{\boldsymbol{p}})}{g_n(\bar{\boldsymbol{p}})}
+$$
+
+This transformation allows the gradient to be computed by applying auto-diff only to the specific segment $n$, significantly reducing the size of the computational graph [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def path_replay_backpropagation(scene_params, loss_fn, random_seed, max_path_length):
+    """
+    Computes the gradient of the loss with respect to scene parameters
+    using Path Replay Backpropagation.
+    
+    Args:
+        scene_params: Parameters of the scene (e.g., BRDF coefficients).
+        loss_fn: Scalar loss function dependent on rendered image I.
+        random_seed: Seed for deterministic path generation.
+        max_path_length: Maximum number of bounces N.
+        
+    Returns:
+        gradient: Gradient of loss with respect to scene_params.
+    """
+    # Step 1: Primal Pass
+    # Trace rays and compute the path estimate.
+    # We only store the scalar result, not the full graph.
+    path_estimates = []
+    for pixel in pixels:
+        rng = RandomState(random_seed)
+        # Generate path vertices deterministically
+        path_vertices = generate_path(scene_params, rng, max_path_length)
+        # Compute scalar path estimate f_hat(p_bar)
+        f_hat = compute_path_integral(path_vertices, scene_params)
+        path_estimates.append((f_hat, path_vertices, rng))
+        
+    # Step 2: Adjoint Pass (Replay)
+    gradient = 0.0
+    for f_hat, path_vertices, rng in path_estimates:
+        # Replay the path using the same seed to regenerate vertices
+        # Note: In practice, we might just re-use the stored vertices if 
+        # memory allows, but the core PRB concept is regenerating via seed.
+        # Here we assume we can regenerate or access segments.
+        
+        # Compute dL/dI (gradient of loss w.r.t image intensity)
+        dL_dI = compute_loss_gradient(loss_fn, f_hat)
+        
+        # For each segment n in the path
+        for n in range(len(path_vertices)):
+            # Extract segment n
+            segment_n = get_segment(path_vertices, n)
+            
+            # Compute derivative of segment n w.r.t params using auto-diff
+            # Only on this specific segment, not the whole path
+            dg_n_dpi = auto_diff_gradient(segment_n, scene_params)
+            
+            # Compute the product of all other segments
+            # Using the formula: product_{n' != n} g_{n'} = f_hat / g_n
+            g_n = get_segment_contribution(segment_n)
+            
+            if g_n != 0:
+                # Avoid division by zero
+                other_segments_product = f_hat / g_n
+            else:
+                other_segments_product = 0.0
+                
+            # Accumulate gradient contribution
+            # dL/dpi = sum_n ( dL/dI * dg_n/dpi * product_{n'!=n} g_{n'} )
+            # Note: The formula in [S1, unofficial] shows dL/dpi = integral ... 
+            # In discrete Monte Carlo, we sum over samples.
+            # The term dL/dI is constant for the pixel.
+            gradient += dL_dI * dg_n_dpi * other_segments_product
+            
+    return gradient
+```
+
+### Parameters and Edge Cases
+*   **Random Seed**: The same random seed must be used in both the primal and adjoint passes to ensure the replayed path matches the primal path exactly [S1, unofficial].
+*   **Zero Division**: If $g_n(\bar{\boldsymbol{p}}) = 0$, the term $\frac{\hat{f}(\bar{\boldsymbol{p}})}{g_n(\bar{\boldsymbol{p}})}$ is undefined. In practice, this requires a guard condition [G].
+*   **Path Length**: The method is linear in path length, making it suitable for deep paths where quadratic methods like RB become prohibitive [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: Linear in path length [S2, unofficial]. This is a significant improvement over Radiative Backpropagation (RB), which has quadratic complexity due to the recursion of building complete light path integrals at every intersection [S2, unofficial].
+*   **Memory Complexity**: Constant memory complexity with respect to the path length, as it does not store the full computation graph or per-bounce data [S2, unofficial]. It only stores the scalar path estimate $\hat{f}(\bar{\boldsymbol{p}})$ [S1, unofficial].
+*   **Measured Performance**: In Experiment 1 (Veach Door scene, 480x270 resolution, 16 spp primal, 4 spp adjoint), PRB required 3.00 GiB of peak memory and 2.46 seconds for gradient computation, compared to RB's 3.51 GiB and 2.52 seconds [S2, unofficial].
+*   **Strengths**: Unbiased gradient computation, low memory footprint, and linear time complexity [S1, unofficial][S2, unofficial].
+*   **Limitations**: Requires deterministic path generation (same random seed) for accurate replay [S1, unofficial].
+
+## Background
+Path Replay Backpropagation (PRB) was introduced by Vicini et al. [VSJ21] to address the issues of large computational graphs and high memory consumption associated with direct application of automatic differentiation to Monte Carlo estimators [S1, unofficial]. It is an adjoint-based method similar to Radiative Backpropagation (RB) [NDSRJ20] but improves upon RB's quadratic time complexity by using a two-pass approach [S2, unofficial]. PRB has been used as a baseline in inverse rendering optimization experiments, such as optimizing BRDF material properties in the Veach door scene [S2, unofficial].
+
+## Sources
+[S1] A Survey on Physics-based Differentiable Rendering, https://arxiv.org/pdf/2504.01402, fetched 2026-10-29 (unofficial)
+[S2] Differentiable Neural Radiosity, https://arxiv.org/abs/2201.13190, fetched 2026-10-29 (unofficial)

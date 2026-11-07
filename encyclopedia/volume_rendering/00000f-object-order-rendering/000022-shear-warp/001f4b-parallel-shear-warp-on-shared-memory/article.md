@@ -1,0 +1,117 @@
+# Parallel Shear-Warp on Shared Memory
+
+Also called: Parallel Rendering (Shared Memory), Real-time volume rendering on shared memory multiprocessors using the shear-warp factorization
+
+## Overview
+This method is a parallel volume rendering algorithm designed for shared-memory multiprocessors that minimizes computation, synchronization, and data communication time [S2, unofficial]. It builds on [Shear-warp](24-shear-warp.md) to leverage hardware support for low-latency fine-grain communication and hardware caching [S2, unofficial]. It is distinguished from distributed-memory approaches by using image decomposition where inter-node communication is performed via actual memory transfers rather than network packets [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume dataset (typically $256^3$ or $128^3$ voxels), a viewing transformation matrix, and a shared-memory multiprocessor architecture.
+*   **Output:** A 2D rendered image.
+
+**Data Structures:**
+*   **Volume Data:** Stored in physically contiguous memory accessible by all processors [S1, unofficial].
+*   **Image Buffer:** Partitioned across processors (image decomposition) [S1, unofficial].
+*   **Task Queue:** Used for dynamic load balancing to minimize synchronization events [S2, unofficial].
+
+**Steps:**
+1.  **Factorization:** Decompose the viewing transformation matrix $M_{view}$ into permutation $P$, shear $S$, and warp $M_{warp2D}$ as defined in [Shear-warp](24-shear-warp.md) [S2, unofficial].
+2.  **Image Decomposition:** Partition the output image space among the available processors [S1, unofficial].
+3.  **Shear and Resampling:** Each processor computes the sheared slices. Because the algorithm is based on the shear-warp factorization, sampling rays are perpendicular to slices, allowing fixed interpolation weights computed once per frame [S2, unofficial].
+4.  **Compositing:** Processors composite the sheared slices into their assigned image regions using front-to-back compositing [S2, unofficial].
+5.  **Warp:** Apply the 2D warp matrix $M_{warp2D}$ to transform the intermediate image to the final image space [S2, unofficial].
+6.  **Dynamic Load Balancing:** Tasks are distributed dynamically to minimize synchronization time [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def parallel_shear_warp_shared_memory(volume, view_matrix, num_processors):
+    # 1. Factorize view matrix
+    P, S, M_warp2D = factorize_view_matrix(view_matrix)
+    
+    # 2. Partition image space among processors
+    # Each processor gets a subset of pixels to render
+    image_regions = partition_image(num_processors)
+    
+    # 3. Dynamic task assignment
+    # Tasks are chunks of work (e.g., slices or pixel groups)
+    task_queue = create_task_queue(volume, S, image_regions)
+    
+    results = {}
+    
+    for processor_id in range(num_processors):
+        # Get next task from shared queue (minimizes synchronization)
+        task = task_queue.get_next_task()
+        
+        if task is None:
+            break
+            
+        # Compute sheared slice for the task's region
+        # S ensures rays are perpendicular to slices
+        sheared_data = shear_volume_slice(volume, S, task.slice_index)
+        
+        # Composite into the assigned image region
+        # Uses front-to-back compositing
+        rendered_region = composite_front_to_back(
+            sheared_data, 
+            task.image_region, 
+            alpha_threshold=0.95 # Early ray termination
+        )
+        
+        results[processor_id] = rendered_region
+        
+    # 4. Warp the final image
+    # Combine regions and apply 2D warp
+    final_image = combine_regions(results)
+    final_image = apply_2d_warp(final_image, M_warp2D)
+    
+    return final_image
+```
+
+**Parameters:**
+*   **Alpha Threshold:** Typically 0.95 for early ray termination [S2, unofficial].
+*   **Dataset Size:** Demonstrated on $256^3$ and $128^3$ voxel datasets [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Cache Locality:** Cache locality requirements impose a limit on parallelism. Shared-memory machines with hundreds of processors are only useful for rendering very large data sets [S2, unofficial].
+*   **Scalability:** Building systems with larger amounts of shared memory becomes prohibitively expensive [S1, unofficial].
+
+## Subtopics
+
+### [VolumePro Ray-Casting with Slice-by-Slice Processing](1865-volumepro-ray-casting-with-slice-by-slice-processing.md)
+Uses slice-by-slice processing for ray-casting, differing in its approach to memory access patterns compared to the shear-warp factorization.
+
+### [Affine-Transformations Method](2038-affine-transformations-method.md)
+Applies affine transformations directly to the volume, lacking the shear-warp optimization for fixed interpolation weights.
+
+### [Shear-Warp Algorithm](4304-shear-warp-algorithm.md)
+The serial baseline algorithm that this method parallelizes.
+
+### [Perspective Projection Rendering](5558-perspective-projection-rendering.md)
+General perspective rendering, whereas this method specifically targets shared-memory parallelism.
+
+### [Hybrid Shear-Warp and Polygon Rendering](5876-hybrid-shear-warp-and-polygon-rendering.md)
+Combines volume and polygon rendering, unlike this pure volume method.
+
+### [Perspective Shear-Warp](6047-perspective-shear-warp.md)
+Extends shear-warp to perspective projection, which this method can also support via the warp matrix.
+
+### [VolumePro 500 Implementation](8161-volumepro-500-implementation.md)
+A specific hardware implementation of volume rendering techniques.
+
+## Operating characteristics
+*   **Time Complexity:** Computation time is low because it is based on the shear-warp algorithm, which is over five times faster than previous serial algorithms [S2, unofficial].
+*   **Memory Complexity:** Requires physically contiguous shared memory [S1, unofficial].
+*   **Measured Performance:** Renders $256^3$ voxel medical data sets at over 10 Hz and $128^3$ voxel data sets at over 30 Hz on a 16-processor Silicon Graphics Challenge [S2, unofficial].
+*   **Scaling:** Limited by cache locality requirements; scaling to hundreds of processors is only effective for very large data sets [S2, unofficial].
+*   **Strengths:** Minimizes computation, synchronization, and data communication time; leverages hardware caching to hide latency [S2, unofficial].
+*   **Limitations:** Prohibitively expensive to build systems with larger amounts of shared memory; cannot easily be extended [S1, unofficial].
+
+## Background
+This method was presented by Philippe Lacroute in January 1995 [S2, unofficial]. It was implemented on a 16-processor Silicon Graphics Challenge to demonstrate real-time volume rendering capabilities [S2, unofficial]. The work concluded that on shared-memory architectures, data redistribution and communication costs do not dominate rendering time, but cache locality imposes a limit on parallelism [S2, unofficial].
+
+## Sources
+[S1] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)
+[S2] The Perspective Shear-Warp Algorithm in a Virtual Environment., https://www.researchgate.net/publication/220943822_The_Perspective_Shear-Warp_Algorithm_in_a_Virtual_Environment, fetched 2026-10-29 (unofficial)

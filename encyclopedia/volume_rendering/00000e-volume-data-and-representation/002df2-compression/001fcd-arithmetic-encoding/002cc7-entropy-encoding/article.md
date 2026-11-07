@@ -3,76 +3,105 @@
 Also called: Arithmetic Coding, Entropy Coding, Huffman Coding, Lossless Compression, 熵编码
 
 ## Overview
-Entropy encoding is a lossless data compression technique that reduces the size of volume data by exploiting the statistical distribution of voxel values or coefficients [S1][S2][S3]. It assigns shorter codewords to frequent values and longer codewords to infrequent ones, achieving high compression ratios [S1][S2][S3]. Unlike fixed-length encodings, it is variable-length, which hinders quick random access reconstruction, making it less suitable for direct massively parallel GPU rendering without pre-decoding [S2][S3]. It is frequently used in compressed volume rendering, often in hybrid schemes combined with Run-Length Encoding (RLE) to mitigate decoding overhead [S2][S3].
+Entropy encoding is a lossless compression method that minimizes storage or transmission costs for a discrete dataset by mapping each data point to a variable-length bit string, allowing a receiver to invert the mapping and recover the exact original data [S1]. It solves the problem of inefficient fixed-width storage by assigning shorter codewords to frequent voxel values and longer codewords to infrequent ones, thereby reducing the average bits per element [S2, S3]. Unlike its parent [Arithmetic Encoding](2127-arithmetic-encoding.md), which uses a context model to estimate probabilities for a single stream, entropy encoding generally refers to the broader class of techniques (including Huffman and Golomb-Rice) that map symbols to bit lengths based on frequency or numerical range [S1, S2]. It sets itself apart from siblings like [MLZC 3-D Encoding/2-D Decoding](2501-mlzc-3-d-encoding-2-d-decoding.md) and [3-D ESCOT](8257-3-d-escot.md) by focusing on the statistical distribution of values rather than spatial prediction or transform coding, and from [rANS](5011-rans-asymmetric-numeral-systems.md) by often implying variable-length codewords that hinder random access [S2, S3].
 
 ## How it works
-**Inputs:** A stream of voxel values or transformed coefficients (e.g., wavelet coefficients) [S1][S2].
-**Outputs:** A binary bitstream representing the compressed data [S1].
+**Inputs and Outputs:**
+- Input: A discrete dataset $X = (x_1, \dots, x_N)$ of voxel values or coefficients, and a probability model $p_x(x)$ representing the underlying distribution of $x$ [S1, S2].
+- Output: A compressed bitstream $Z$ consisting of variable-length bit strings, and typically the probability model or codebook parameters required for decoding [S1, S2].
 
 **Data Structures:**
-1. **Frequency Table:** A map or array storing the count or probability of each unique value in the input stream [S1][S2].
-2. **Codeword Table:** A map from each unique value to its assigned variable-length binary codeword [S1][S2].
+- **Codebook/Table:** A mapping from symbol values (voxel values or coefficients) to variable-length bit strings (codewords). For Huffman coding, this is often a binary tree or a lookup table. For fixed-length Huffman coders combined with RLE, the table maps symbols to fixed-length indices [S2, S3].
+- **Probability Model:** A set of probabilities $p_x(x)$ for each symbol $x$, either static or learned/estimated from the data [S1].
 
 **Steps:**
-1. **Analyze Distribution:** Scan the input data to count the frequency of each distinct value [S1][S2].
-2. **Assign Codewords:** Generate variable-length codewords based on frequency. Frequent values receive shorter codewords; infrequent values receive longer codewords [S1][S2]. Common methods include Huffman coding or arithmetic coding [S1][S2][S4, unofficial].
-3. **Encode Stream:** Replace each value in the input stream with its corresponding codeword and write the resulting bits to the output bitstream [S1].
+1. **Analyze Distribution:** Determine the frequency or probability $p_x(x)$ of each symbol $x$ in the dataset $X$ [S1, S2].
+2. **Assign Codewords:** Assign variable-length bit strings to each symbol such that frequent symbols get shorter codewords and infrequent symbols get longer codewords [S2, S3].
+   - *Note:* The ideal length for symbol $x$ is $-\log_2 p_x(x)$ bits [S1].
+   - *Note:* In practice, integer lengths are used. Huffman coding constructs a prefix-free code to minimize the expected length [S2].
+   - *Note:* Arithmetic coding can achieve lengths arbitrarily close to $-\log_2 p_x(x)$ even if non-integer, by encoding the entire sequence into a single interval [S1].
+3. **Encode Data Stream:** Replace each $x_i$ in $X$ with its assigned codeword to form the bitstream [S2].
+   - *Note:* If using arithmetic coding, the encoder maintains a current interval $[L, H)$ and narrows it based on the cumulative probabilities of the input symbols [S1].
+   - *Note:* If using fixed-length Huffman combined with RLE, encode runs of identical values as (count, symbol) pairs, where count and symbol are encoded using fixed-length Huffman codes [S3].
+4. **Output Bitstream:** Write the concatenated codewords to the output stream [S2].
 
 **Formulas:**
-The Shannon entropy lower bound is $H = - \sum_x p_x(x) \log p_x(x)$, where $p_x(x)$ is the underlying distribution of $x$, providing the minimum expected number of bits per element [S1]. The bit rate for a dataset $X = (x_1, \dots, x_N)$ is $R(X) = -\frac{1}{N} \sum_{i=1}^N \log p_x(x_i)$ [S1]. Each $x_i$ is encoded to a bit string of length $-\log p_x(x_i)$ bits, achievable arbitrarily closely on average by an arithmetic coder [S1].
+- **Shannon Entropy Lower Bound:**
+  $$H = - \sum_{x} p_x(x) \log_2 p_x(x)$$
+  where $p_x(x)$ is the underlying distribution of $x$. This provides the minimum expected number of bits per element [S1].
+- **Bit Rate for Dataset X:**
+  $$R(X) = -\frac{1}{N} \sum_{i=1}^{N} \log_2 p_x(x_i)$$
+  This is the average number of bits per element for the dataset [S1].
 
 **Parameters:**
-*   **Codeword Assignment Strategy:** Huffman coding or arithmetic coding [S1][S2][S4, unofficial].
-*   **Combination with RLE:** Fixed-length Huffman coders are sometimes combined with RLE to accelerate decoding [S2][S3].
+- **Probability Model:** Typically estimated from the data histogram. In deep learning contexts, parameters $\phi$ are learned jointly with the encoder/decoder [S1].
+- **Codebook Size:** Depends on the number of unique symbols. For 8-bit voxels, this is up to 256 entries [S2].
 
 **Edge Cases and Pitfalls:**
-*   **Random Access:** Variable-length encoding makes it difficult to quickly reconstruct an arbitrary sequence of data, which is critical in massively parallel GPU settings [S2][S3].
-*   **Decoding Complexity:** Entropy encoding implies significantly more computational work during decoding compared to fixed-length schemes [S2][S3].
-*   **Precision:** Not given in the sources.
+- **Random Access:** Variable-length encoding hinders quick random access reconstruction, which is critical in massively parallel GPU settings [S2, S3]. Decoding requires processing all preceding bits to find the start of a symbol [S2].
+- **Computational Cost:** Entropy encoding implies more work during decoding compared to fixed-length encoding [S2, S3].
+- **Precision:** Arithmetic coding requires high-precision arithmetic to avoid interval underflow/overflow, though practical implementations use renormalization [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def entropy_encode(input_values):
-    # Step 1: Analyze distribution
-    N = len(input_values)
-    freq = {}
-    for x in input_values:
-        freq[x] = freq.get(x, 0) + 1
+def entropy_encode(dataset, probability_model):
+    """
+    Encode a dataset using entropy encoding.
+    
+    Args:
+        dataset: List of symbols (e.g., voxel values).
+        probability_model: Dictionary mapping symbol to probability p_x(x).
         
-    # Step 2: Assign codewords based on frequency
-    # [G] Standard Huffman tree construction or arithmetic coding interval mapping
-    codeword_table = {}
-    for x, count in freq.items():
-        p = count / N
-        # [G] Variable-length codeword assigned; length approximates -log2(p)
-        codeword_table[x] = [0] # [G] Standard codeword generation omitted; uses Huffman or arithmetic coding [G]
+    Returns:
+        bitstream: List of bits (0s and 1s).
+    """
+    bitstream = []
+    
+    # Step 1: Generate codebook based on probability model
+    # This step is implementation-dependent (Huffman tree construction, etc.)
+    codebook = generate_codebook(probability_model)
+    
+    # Step 2: Encode each symbol
+    for symbol in dataset:
+        codeword = codebook[symbol]
+        bitstream.extend(codeword)
         
-    # Step 3: Encode stream
-    output_bits = []
-    for x in input_values:
-        output_bits.extend(codeword_table[x])
-    return output_bits
+    return bitstream
+
+def generate_codebook(probability_model):
+    """
+    Generate a Huffman codebook from probabilities.
+    This is a simplified placeholder for the actual Huffman algorithm.
+    """
+    # In a real implementation, this would build a Huffman tree
+    # and assign binary codewords to each symbol.
+    # For the purpose of this article, we assume a pre-computed codebook.
+    # The codebook maps each symbol to a list of bits.
+    return {} # Placeholder
 ```
 
 ## Subtopics
 
+### [Variable-Length Coding](7012-variable-length-coding.md)
+Variable-Length Coding (VLC) is a lossless compression technique used in volume rendering that reduces storage requirements by exploiting the local value range of data bricks. It solves the problem of inefficient fixed-width storage when voxel values within a brick are clustered within a narrow range. Unlike its parent [Entropy Encoding](5360-entropy-encoding.md), which maps symbols to bit lengths based on frequency, VLC maps symbols to bit lengths based on the numerical range of the data block, storing a base value and narrow-range differences.
+
 ### Golomb-Rice Encoding
-An entropy encoder favored over arithmetic and Huffman coding in some volume rendering contexts because it offers better random access capabilities and lower computational complexity [S2][S3]. It is used when fast random access for reconstruction is required [S2].
+Golomb-Rice encoding is an entropy encoder favored over arithmetic and Huffman coding for volume rendering because it has better random access capabilities and lower computational complexity [S3]. It is particularly effective for data with a geometric distribution, such as wavelet coefficients or prediction errors [S2, S3].
 
 ## Operating characteristics
-*   **Time Complexity:** Decoding requires significantly more computational work than fixed-length encoding [S2][S3].
-*   **Memory Complexity:** Not given in the sources.
-*   **Measured Performance:** Not given in the sources.
-*   **Scaling:** Not given in the sources.
-*   **Strengths:** High compression ratio due to exploitation of data distribution [S1][S2][S3].
-*   **Limitations:** Variable-length nature hinders quick random access reconstruction, which is critical in massively parallel GPU settings [S2][S3]. Implies more work during decoding [S2][S3].
-*   **When to use:** When high compression ratios are needed for on-disk storage and decoding can be performed before rendering time, or when combined with RLE to accelerate decoding [S2][S3].
-*   **When not to use:** When fast random access is required directly on the GPU during rendering, in which case Golomb-Rice or fixed-length schemes may be preferred [S2][S3].
+- **Time Complexity:** Encoding and decoding complexity depends on the specific method. Huffman coding is $O(N)$ for both encoding and decoding if a codebook is used [S2]. Arithmetic coding is also $O(N)$ but with a higher constant factor due to interval arithmetic [S4, unofficial]. Golomb-Rice encoding is $O(N)$ and generally faster than arithmetic coding [S3].
+- **Memory Complexity:** Requires storage for the codebook or probability model, which is typically small (e.g., 256 entries for 8-bit data) [S2].
+- **Measured Performance:** Arithmetic coding provides better compression ratios than Huffman coding but is more computationally expensive [S4, unofficial]. Golomb-Rice offers a good balance between compression ratio and speed, with better random access than Huffman or arithmetic coding [S3].
+- **Scaling:** Compression ratio improves with larger datasets where the probability distribution is more stable [S1].
+- **Strengths:** High compression ratios for data with skewed distributions; lossless reconstruction [S2, S3].
+- **Limitations:** Poor random access support due to variable-length codewords; higher decoding computational cost compared to fixed-length encoding [S2, S3].
+- **When to use:** When storage or transmission bandwidth is the primary constraint, and random access is not critical or can be handled by pre-decoding [S2].
+- **When not to use:** When fast random access is required for interactive rendering on GPUs [S2, S3].
 
 ## Background
-Entropy encoding has been widely used in compressed volume rendering since early applications [S2][S3]. Huffman encoding and arithmetic encoding are frequently used, often combined with RLE [S2][S3]. Research has focused on finding encoding schemes with fast random access for reconstruction, such as Golomb-Rice encoding, to address the limitations of traditional entropy encoders in parallel settings [S2][S3]. A survey by Komma et al. benchmarks and analyzes lossless compression encodings for compressed volume data, including entropy encodings [S2][S3].
+Entropy encoding has its roots in information theory, specifically Shannon's work on entropy [S1]. In the context of volume rendering, it has been widely used since the early applications of compressed DVR, often in conjunction with RLE or DPCM [S3][S4, unofficial]. Key surveys and benchmarks, such as those by Komma et al. [KFDB07], have analyzed its effectiveness for compressed volume data [S2, S3]. The method is commonly used in compressed volume rendering, often combined with RLE or prediction methods [S3][S4, unofficial].
 
 ## Sources
 [S1] Deep Implicit Volume Compression, https://doi.org/10.1109/cvpr42600.2020.00137, fetched 2026-10-26

@@ -3,63 +3,61 @@
 Also called: DPBF, Differentiable Splatting, Point Radiance Fields, Point-Based Radiance Fields
 
 ## Overview
-Differentiable Point-Based Radiance Fields (DPBF) is a scene representation that models radiance using a point cloud augmented with local spherical harmonic coefficients per point, enabling efficient view synthesis via differentiable splat rendering [S1]. Unlike NeRF which uses volumetric rendering and requires many evaluations per ray, this method uses forward mapping via splatting, allowing image synthesis via a single forward pass [S1]. It optimizes a learned point cloud directly for each scene to reconstruct geometry and radiance simultaneously, without requiring additional learned or explicit priors [S1].
+Differentiable Point-Based Radiance Fields (DPBF) is a scene representation and rendering method that models radiance using a point cloud augmented with per-point spherical harmonic coefficients, enabling efficient view synthesis via differentiable splat rendering [S1]. Unlike volumetric approaches like NeRF that require ray-marching and network evaluations per sample, DPBF uses a forward-mapping splat-based rasterizer, allowing image synthesis in a single pass and achieving training speeds up to 300x faster than NeRF with less than 10 MB of memory for static scenes [S1]. It optimizes a learned point cloud directly for geometry and radiance simultaneously without requiring external priors or neural networks for feature decoding [S1].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Inputs:** A set of $N$ training images $I^j$ ($j=1 \dots N$) with known camera intrinsics and extrinsics, and image-space object masks for the training views [S1].
-*   **Outputs:** A rendered image $\hat{I}^j$ for any novel view, and the optimized point cloud parameters (positions and spherical harmonic coefficients) [S1].
+**Inputs:** A set of $N$ training images $I^j$ with known camera intrinsics and extrinsics, and binary object masks for each image defining the visual hull [S1].
+**Outputs:** A rendered image $\hat{I}^j$ for any novel view, and an optimized point cloud representation [S1].
 
 **Data Structures:**
-The scene is represented as a point cloud. Each point $i$ stores:
-1.  **Position:** A 3D vector $p_i \in \mathbb{R}^3$ [S1].
-2.  **Appearance:** Spherical Harmonic (SH) coefficients $h_{i,lm}$ for $l \in \{0, \dots, l_{max}\}$ and $m \in \{-l, \dots, l\}$ [S1]. The maximum degree $l_{max}$ is typically 2 [S1].
+*   **Point Cloud:** A list of $M$ points. Each point $i$ stores:
+    *   Position $p_i \in \mathbb{R}^3$.
+    *   Spherical Harmonic (SH) coefficients $h_{i,lm}$ for $l \in [0, l_{max}]$ and $m \in [-l, l]$. These coefficients define the view-dependent appearance [S1].
+*   **Splat Radius:** A scalar $r$ defining the Gaussian kernel width [S1].
+*   **Rasterization Limit:** An integer $n$ limiting the number of points considered per pixel [S1].
 
 **Parameters:**
-*   Splatting radius $r$: $0.008$ [S1].
-*   Rasterization parameter $n$ (max points considered per pixel): $15$ [S1].
-*   Total epochs: $20$ [S1].
+*   Splatting radius $r = 0.008$ [S1].
+*   Rasterization limit $n = 15$ [S1].
+*   Maximum SH degree $l_{max} = 2$ [S1].
+*   TV weight $\lambda_{TV} = 0.01$ [S1].
 *   Learning rate decay factor: $0.93$ per epoch [S1].
-*   Initial learning rate for SH parameters: $3 \times 10^{-3}$ [S1].
-*   Initial learning rate for positions: $8 \times 10^{-4}$ [S1].
-*   TV weight $\lambda_{TV}$: $0.01$ [S1].
-*   Coarse-to-fine update repetitions: $2$ [S1].
-*   Neighbor count $K$ for point generation: Not given in the sources.
-*   Outlier threshold: Not given in the sources.
+*   Total epochs: $20$ [S1].
+*   Initial learning rates: $3 \times 10^{-3}$ for SH coefficients, $8 \times 10^{-4}$ for positions [S1].
 
-**Algorithm Steps:**
+**Initialization:**
+1.  **Position:** Initialize points randomly within the visual hull defined by image-space masks using rejection sampling. Uniformly sample random 3D points, project them into each image, and keep them only if they fall within all masks [S1].
+2.  **Appearance:** Initialize SH parameters by sampling from a normal distribution with zero mean and standard deviation of one [S1].
 
-1.  **Initialization:**
-    *   Initialize point positions using rejection sampling within the visual hull defined by image-space masks: uniformly sample random 3D points, project them into each training image, and keep them only if they fall within all masks [S1].
-    *   Initialize SH parameters by sampling from a normal distribution with zero mean and standard deviation of one [S1].
+**Rendering Pipeline:**
+For a given camera view $j$ and pixel $u$:
+1.  **Opacity Calculation:** Compute the opacity $\alpha^j_i(u)$ of point $i$ using a Gaussian kernel of radius $r$:
+    $$ \alpha^j_i(u) = \frac{1}{\sqrt{2\pi r^2}} e^{-\frac{\|p^j_i - u\|^2}{2r^2}} $$
+    where $p^j_i$ is the projected 2D position of point $i$ in image $j$ [S1].
+2.  **Color Calculation:** Compute the color $c^j_i$ of point $i$ for view direction $v^j_i$ using SH coefficients:
+    $$ c^j_i = \sum_{l=0}^{l_{max}} \sum_{m=-l}^{l} h_{i,lm} Y_{lm}(v^j_i) $$
+    where $Y_{lm}$ are the spherical harmonic basis functions [S1].
+3.  **Sorting:** Sort points by z-distance (front-to-back) relative to the camera [S1].
+4.  **Alpha Blending:** Compute the net contribution $A^j_i(u)$ of the $i$-th point:
+    $$ A^j_i(u) = \alpha^j_i(u) \prod_{k=1}^{i-1} (1 - \alpha^j_k(u)) $$
+    where points are sorted front-to-back [S1].
+5.  **Image Synthesis:** Compute the final rendered pixel value $\hat{I}^j(u)$:
+    $$ \hat{I}^j(u) = \sum_{i=1}^{n} A^j_i(u) c^j_i $$
+    Only points within a certain maximum distance of $u$ with non-negligible opacity are considered [S1].
 
-2.  **Rendering (Differentiable Splat Rendering):**
-    For each training image $j$ and pixel $u$:
-    *   Identify points $i$ within a maximum distance of $u$ with non-negligible opacity [S1].
-    *   Compute opacity $\alpha^j_i(u)$ using a Gaussian kernel of radius $r$:
-        $$ \alpha^j_i(u) = \frac{1}{\sqrt{2\pi r^2}} e^{-\frac{\|p^j_i - u\|^2}{2r^2}} $$
-        where $p^j_i$ is the projection of point $i$'s position into image $j$ [S1].
-    *   Sort the identified points by $z$-distance (front-to-back) [S1].
-    *   Compute the per-point color $c_i$ using the SH coefficients and the viewing direction $v_i$ from the camera to point $i$:
-        $$ c_i = \sum_{l=0}^{l_{max}} \sum_{m=-l}^{l} h_{i,lm} Y_{lm}(v_i) $$
-        where $Y_{lm}$ are the spherical harmonic basis functions [S1].
-    *   Compute the net contribution $A^j_i(u)$ of the $i$-th point:
-        $$ A^j_i(u) = \alpha^j_i(u) \prod_{k=1}^{i-1} (1 - \alpha^j_k(u)) $$
-        where points are sorted front-to-back [S1].
-    *   Compute the final rendered pixel value $\hat{I}^j(u)$ via alpha blending:
-        $$ \hat{I}^j(u) = \sum_{i=1}^{n} A^j_i(u) c_i $$
-        where $n$ is the number of points considered (limited to $15$) [S1].
+**Training Optimization:**
+The model is optimized using stochastic gradient descent to minimize the loss function $L$:
+$$ L = \sum_{j=1}^{N} ||I^j - \hat{I}^j||^2_2 + \lambda_{TV} TV(\hat{I}^j) $$
+where $TV(\cdot) = |\nabla_x \cdot|_1 + |\nabla_y \cdot|_1$ is the anisotropic total variation penalty [S1].
 
-3.  **Optimization (Training):**
-    *   Compute the loss $L$:
-        $$ L = \sum_{j=1}^{N} ||I^j - \hat{I}^j||^2_2 + \lambda_{TV} TV(\hat{I}^j) $$
-        where $TV(\cdot) = |\nabla_x \cdot|_1 + |\nabla_y \cdot|_1$ is the anisotropic total variation penalty [S1].
-    *   Update point positions and SH parameters using stochastic gradient descent with the specified learning rates and decay [S1].
-    *   After the initial training, apply a coarse-to-fine update scheme twice [S1]:
-        1.  **Voxel-based Point Cloud Reduction:** Assume a voxel discretization. For each voxel, aggregate all points inside by averaging their position and spherical harmonics into one single point [S1].
-        2.  **Outlier Removal:** For each point, compute the distance to its neighbors and the standard deviation of these distances. Filter out outliers whose standard deviation is beyond a threshold [S1].
-        3.  **Point Generation:** Insert new points by generating a single new point for each existing point. Set all parameters (including position) to the average of the point’s nearest $K$ neighbors [S1].
-    *   Fine-tune the model with half of the original learning rate in a refinement step [S1].
+**Coarse-to-Fine Update Scheme:**
+To prevent dense clusters and improve representation efficiency, the following stages are repeated twice [S1]:
+1.  **Voxel-based Point Cloud Reduction:** Assume a voxel discretization. For each voxel, aggregate all points inside by averaging their position and SH coefficients into a single point [S1].
+2.  **Outlier Removal:** For each point, compute the distance to its neighbors and the standard deviation of these distances. Filter out outliers whose standard deviation exceeds a threshold [S1].
+3.  **Point Generation:** Insert new points by generating a single new point for each existing point. Set all parameters (including position) to the average of the point’s nearest $K$ neighbors [S1].
+
+**Refinement:**
+After the coarse-to-fine updates, fine-tune the model with half of the original learning rate [S1].
 
 **Pseudocode:**
 
@@ -68,187 +66,170 @@ The scene is represented as a point cloud. Each point $i$ stores:
 ```python
 import numpy as np
 
-def spherical_harmonics_basis(l, m, v):
+def spherical_harmonics_basis(l_max, direction):
     """
-    Computes the value of the spherical harmonic basis function Y_lm for direction v.
-    v is a 3D vector (x, y, z).
+    Computes spherical harmonic basis functions for a given direction.
+    Returns a vector of basis values.
     """
-    # Implementation of Y_lm(v) required. 
-    # Standard SH basis functions depend on theta and phi derived from v.
-    # For l=0, m=0: Y_00 = 1/sqrt(4*pi)
-    # For l=1, m=-1,0,1: Linear combinations of x, y, z.
-    # For l=2, m=-2..2: Quadratic combinations.
-    # This function must be implemented according to the specific SH convention used.
+    # Implementation of Y_lm(v) for l in [0, l_max]
+    # This is a standard mathematical function, assumed available
     pass
 
-def render_image(points, camera_intrinsics, camera_extrinsics, r, n_max_points):
+def compute_color(sh_coeffs, direction):
     """
-    Renders an image from a point cloud using differentiable splatting.
-    
-    Args:
-        points: List of dicts, each with 'pos' (3D vector) and 'sh_coeffs' (dict of (l,m) -> value).
-        camera_intrinsics: Matrix for projection.
-        camera_extrinsics: Matrix for world-to-camera transformation.
-        r: Splatting radius.
-        n_max_points: Maximum number of points to consider per pixel.
-        
-    Returns:
-        rendered_image: 2D array (H, W, 3).
+    Computes color from SH coefficients and view direction.
+    sh_coeffs: array of shape (num_points, num_coeffs)
+    direction: array of shape (num_points, 3)
     """
-    H, W = image_height, image_width # Assumed known from context
-    rendered_image = np.zeros((H, W, 3))
-    
-    # Pre-project points to image space and compute viewing directions
-    projected_points = []
-    for p in points:
-        # Transform position to camera space
-        pos_cam = camera_extrinsics @ np.append(p['pos'], 1)
-        pos_cam = pos_cam[:3] / pos_cam[3]
-        
-        # Project to image coordinates
-        pos_img = camera_intrinsics @ pos_cam
-        u, v = pos_img[0], pos_img[1]
-        
-        # Check if within image bounds
-        if 0 <= u < W and 0 <= v < H:
-            # Compute viewing direction (from camera center to point)
-            # Camera center in world space is inverse of extrinsics, 
-            # but direction is often approximated by -pos_cam or normalized vector.
-            # Standard DPBF uses vector from camera to point.
-            cam_center_world = np.linalg.inv(camera_extrinsics)[:3, 3]
-            view_dir = p['pos'] - cam_center_world
-            view_dir = view_dir / np.linalg.norm(view_dir)
-            
-            projected_points.append({
-                'u': u, 'v': v,
-                'z': pos_cam[2],
-                'view_dir': view_dir,
-                'sh_coeffs': p['sh_coeffs']
-            })
-    
-    # Sort points by z-distance (front-to-back)
-    projected_points.sort(key=lambda k: k['z'])
-    
-    # Rasterize
-    for point in projected_points:
-        u, v = point['u'], point['v']
-        z = point['z']
-        view_dir = point['view_dir']
-        sh_coeffs = point['sh_coeffs']
-        
-        # Compute opacity
-        # Alpha blending is done per pixel. 
-        # Optimization: only consider points within a certain max distance.
-        # Here we iterate over pixels affected by this point.
-        # For simplicity, we assume a bounding box around (u,v) with radius r.
-        # In practice, this is done via a grid or hash map for efficiency.
-        
-        # Compute color
-        color = np.zeros(3)
-        l_max = 2
-        for l in range(l_max + 1):
-            for m in range(-l, l + 1):
-                coeff = sh_coeffs.get((l, m), 0.0)
-                y_val = spherical_harmonics_basis(l, m, view_dir)
-                # SH coefficients are typically RGB vectors per (l,m)
-                # Assuming sh_coeffs stores RGB values for each (l,m)
-                # If sh_coeffs is flattened, reshape accordingly.
-                # For this pseudocode, assume sh_coeffs[(l,m)] is a 3D vector.
-                color += coeff * y_val
-        
-        # Compute opacity at pixel (u,v)
-        # Note: In a real rasterizer, we iterate over pixels. 
-        # Here we approximate the contribution to the pixel (u,v) directly.
-        # The Gaussian kernel is centered at (u,v).
-        # Since we are iterating points, we need to know which pixels they affect.
-        # Let's assume we have a list of pixels affected by this point.
-        # For the sake of the algorithm description, we compute alpha for the center pixel.
-        # In reality, alpha is computed for all pixels in the splat's bounding box.
-        
-        # To make this pseudocode complete for a single pixel update:
-        # We need to accumulate alpha and color for each pixel.
-        pass
+    basis = spherical_harmonics_basis(l_max=2, direction=direction)
+    # basis shape: (num_points, num_coeffs)
+    # sh_coeffs shape: (num_points, num_coeffs)
+    return np.sum(sh_coeffs * basis, axis=1)
 
-def train_dpbf(points, images, masks, camera_params, epochs=20, lr_sh=3e-3, lr_pos=8e-4, decay=0.93, lambda_tv=0.01, r=0.008, n=15):
+def gaussian_opacity(point_2d, pixel_2d, radius=0.008):
     """
-    Trains the DPBF model.
+    Computes opacity of a point at a pixel using Gaussian kernel.
+    """
+    dist_sq = np.sum((point_2d - pixel_2d)**2)
+    return (1.0 / np.sqrt(2 * np.pi * radius**2)) * np.exp(-dist_sq / (2 * radius**2))
+
+def render_image(points_3d, sh_coeffs, camera_intrinsics, camera_extrinsics, image_shape):
+    """
+    Renders an image from a point cloud.
+    points_3d: (N, 3)
+    sh_coeffs: (N, num_coeffs)
+    """
+    # Project points to 2D
+    # Assuming standard projection logic
+    points_2d, depths = project_points(points_3d, camera_intrinsics, camera_extrinsics)
+    
+    # Sort points by depth (front-to-back)
+    sort_indices = np.argsort(depths)
+    points_2d_sorted = points_2d[sort_indices]
+    sh_coeffs_sorted = sh_coeffs[sort_indices]
+    depths_sorted = depths[sort_indices]
+    
+    # Initialize output image
+    image = np.zeros(image_shape)
+    
+    # Rasterization limit
+    n = 15
+    
+    for y in range(image_shape[0]):
+        for x in range(image_shape[1]):
+            pixel = np.array([x, y])
+            accumulated_alpha = 0.0
+            accumulated_color = np.zeros(3)
+            
+            # Consider only top n points or those with non-negligible opacity
+            # In practice, use a spatial index or bounding box check for efficiency
+            # Here we iterate for clarity, assuming points are pre-filtered by distance
+            for i in range(min(n, len(points_2d_sorted))):
+                p_2d = points_2d_sorted[i]
+                # Check if point is close enough to pixel
+                if np.linalg.norm(p_2d - pixel) > threshold:
+                    break
+                
+                alpha = gaussian_opacity(p_2d, pixel)
+                if alpha < 1e-6:
+                    continue
+                
+                # Compute color
+                # Direction vector from camera to point
+                # Need to reconstruct 3D position from depth and 2D projection
+                # For simplicity, assume direction is precomputed or derived
+                direction = get_view_direction(p_2d, depths_sorted[i], camera_intrinsics)
+                color = compute_color(sh_coeffs_sorted[i], direction)
+                
+                # Alpha blending
+                net_contribution = alpha * (1.0 - accumulated_alpha)
+                accumulated_color += net_contribution * color
+                accumulated_alpha += net_contribution
+                
+                if accumulated_alpha > 0.99: # Early exit optimization
+                    break
+            
+            image[y, x] = accumulated_color
+            
+    return image
+
+def train_dpbf(training_images, masks, num_points=10000):
+    """
+    Main training loop.
     """
     # 1. Initialization
-    # Initialize positions using rejection sampling with masks
-    # Initialize SH coefficients from N(0, 1)
+    # Rejection sampling for positions within visual hull
+    points_3d = initialize_positions(masks, num_points)
+    # Sample SH coefficients from N(0, 1)
+    sh_coeffs = np.random.normal(0, 1, (num_points, num_coeffs))
     
-    for epoch in range(epochs):
-        # 2. Forward Pass
+    # Optimizer setup
+    lr_sh = 3e-3
+    lr_pos = 8e-4
+    decay = 0.93
+    
+    for epoch in range(20):
+        # 2. Coarse-to-Fine Updates (repeated twice)
+        for _ in range(2):
+            # Stage 1: Voxel-based Reduction
+            points_3d, sh_coeffs = voxel_reduce(points_3d, sh_coeffs)
+            
+            # Stage 2: Outlier Removal
+            points_3d, sh_coeffs = remove_outliers(points_3d, sh_coeffs)
+            
+            # Stage 3: Point Generation
+            points_3d, sh_coeffs = generate_points(points_3d, sh_coeffs, K=5)
+            
+        # 3. Gradient Step
+        # Render all training views
         rendered_images = []
-        for j, (image, camera) in enumerate(zip(images, camera_params)):
-            # Render image j
-            # Use differentiable splat rendering
-            rendered = render_image(points, camera['intrinsics'], camera['extrinsics'], r, n)
+        for img, mask in zip(training_images, masks):
+            # Use current camera pose for this image
+            rendered = render_image(points_3d, sh_coeffs, ...)
             rendered_images.append(rendered)
-        
-        # 3. Loss Computation
+            
+        # Compute Loss
         loss = 0
-        for j in range(len(images)):
-            mse = np.sum((images[j] - rendered_images[j])**2)
-            tv = total_variation(rendered_images[j])
-            loss += mse + lambda_tv * tv
-        
-        # 4. Backward Pass and Update
-        # Compute gradients w.r.t. positions and SH coefficients
-        # Update using SGD
-        positions_grad = ...
-        sh_grads = ...
-        
-        # Update parameters
-        for i, p in enumerate(points):
-            p['pos'] -= lr_pos * positions_grad[i]
-            for l in range(3):
-                for m in range(-l, l+1):
-                    p['sh_coeffs'][(l,m)] -= lr_sh * sh_grads[i][(l,m)]
+        for rendered, target in zip(rendered_images, training_images):
+            mse = np.mean((rendered - target)**2)
+            tv = total_variation(rendered)
+            loss += mse + 0.01 * tv
+            
+        # Backpropagate and update
+        # Note: In practice, use an autograd framework
+        gradients = compute_gradients(loss, points_3d, sh_coeffs)
+        points_3d -= lr_pos * gradients['pos']
+        sh_coeffs -= lr_sh * gradients['sh']
         
         # Decay learning rates
         lr_sh *= decay
         lr_pos *= decay
-
-    # 5. Coarse-to-Fine Updates (Repeat 2 times)
-    for _ in range(2):
-        # Stage 1: Voxel-based Point Cloud Reduction
-        # Aggregate points in each voxel by averaging pos and SH
-        points = voxel_reduce(points)
         
-        # Stage 2: Outlier Removal
-        # Compute distance to neighbors, std dev, filter outliers
-        points = remove_outliers(points)
-        
-        # Stage 3: Point Generation
-        # Generate new points as average of K nearest neighbors
-        points = generate_points(points)
-        
-    # 6. Fine-tuning
-    # Reduce learning rate by half and continue training
+    # 4. Refinement
     lr_sh /= 2
     lr_pos /= 2
-    for _ in range(5): # Example additional epochs
-        # Same training loop as above
+    # Run a few more epochs with refined LR
+    for _ in range(5):
+        # ... same as above ...
         pass
-
-    return points
+        
+    return points_3d, sh_coeffs
 ```
 
-**Subtopics:**
-*   **Voxel-based Point Cloud Reduction:** A step in the coarse-to-fine update that aggregates points within a voxel by averaging their position and SH coefficients to avoid dense clusters [S1].
-*   **Outlier Removal:** A step that filters points based on the standard deviation of distances to their neighbors to remove noise [S1].
-*   **Point Generation:** A step that inserts new points by averaging the parameters of the nearest $K$ neighbors of existing points to densify the representation [S1].
+## Subtopics
+
+### [Pulsar Sphere-based Neural Rendering](9397-pulsar-sphere-based-neural-rendering.md)
+Pulsar is an efficient, sphere-based differentiable renderer that maps a 3D scene representation consisting of millions of spheres to a rendered feature image using camera parameters (rotation $R$, translation $t$, intrinsic $K$). It solves the problem of real-time rendering and optimization for large-scale point-based radiance fields by replacing traditional acceleration structures (like BVHs or k-d-trees) with parallelized bounding box projections and sorting. Unlike its parent method, Differentiable Point-Based Radiance Fields, which may rely on general splatting, Pulsar specifically optimizes the projection step to handle millions of spheres with low latency, enabling real-time performance.
 
 ## Operating characteristics
-*   **Time Complexity:** Training is up to 300x faster than NeRF [S1]. Inference is a single forward pass, approximately 400x faster than Point-NeRF and 750x faster than NeRF-t [S1].
-*   **Memory Complexity:** Less than 10 MB for a static scene [S1]. This is significantly less than Kopanas et al. which requires multiple gigabytes [S1].
-*   **Measured Performance:** On novel video view synthesis, the method achieves 34.6 dB PSNR in 30 min training and 40 ms inference, compared to STNeRF's 32.1 dB in 50 h training and 30 s inference [S1].
-*   **Strengths:** Memory efficient, fast training and inference, no need for neural networks or separate geometry priors [S1].
-*   **Limitations:** Requires object masks for initialization, can only render foreground components, and cannot handle semi-transparent objects like fur [S1]. With many input views, quality may be slightly lower than volumetric methods for a fixed SH degree [S1].
+*   **Time Complexity:** Training is up to 300x faster than NeRF [S1]. Inference is a single forward pass, approximately 750x faster than NeRF-t (40 ms vs 30 s) and 2x faster than STNeRF (40 ms vs 30 s) on novel video view synthesis [S1].
+*   **Memory Complexity:** Less than 10 MB for a static scene [S1]. This is significantly lower than methods like Kopanas et al. which require multiple gigabytes [S1].
+*   **Performance:** On novel video view synthesis, DPBF achieves 34.6 dB PSNR in 30 min training and 40 ms inference, compared to STNeRF's 32.1 dB in 50 h training and 30 s inference [S1].
+*   **Strengths:** High efficiency in both training and inference; no need for neural networks or separate geometry priors; good quality with few input views due to regularization [S1].
+*   **Limitations:** Requires object masks for initialization, limiting it to foreground scene components; cannot handle semi-transparent objects (e.g., fur) due to the splatting representation; slightly lower quality than NeRF when many input views are provided for a fixed SH degree [S1].
 
 ## Background
-DPBF was introduced by Qiang Zhang et al. in 2022 [S1]. It departs from volume-based representations in favor of a learned point representation to improve memory and runtime efficiency [S1]. The method builds on splatting techniques [S1] and uses spherical harmonics for view-dependent modeling [S1].
+DPBF was introduced by Qiang Zhang at Princeton University in 2022 [S1]. It was presented at the ACM SIGGRAPH Asia 2022 conference (SA '22) [S1]. The method departs from volumetric representations in favor of a learned point representation to improve memory and runtime efficiency [S1]. It builds on splatting methods [Zwicker et al. 2001] and spherical harmonics for view-dependent modeling [Wood et al. 2000] [S1].
 
 ## Sources
 [S1] Differentiable Point-Based Radiance Fields for Efficient View Synthesis, https://doi.org/10.1145/3550469.3555413, fetched 2026-10-26

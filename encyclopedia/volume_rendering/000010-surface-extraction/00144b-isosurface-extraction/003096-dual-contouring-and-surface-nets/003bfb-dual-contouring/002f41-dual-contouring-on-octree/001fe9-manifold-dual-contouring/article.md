@@ -3,19 +3,19 @@
 Also called: DC with topology-preserving vertex clustering, Manifold DC, PDF Manifold Dual Contouring, adaptive contouring with topology constraint
 
 ## Overview
-Manifold Dual Contouring is an extension of Dual Contouring that guarantees the generated mesh is a closed 2-manifold even under adaptive simplification, using an octree-based topology-preserving vertex-clustering algorithm [S1][S2, unofficial]. It differs from standard Dual Contouring by enforcing manifold constraints through explicit vertex collapsing and edge processing, ensuring the resulting mesh is a valid 2-manifold without self-intersections or non-manifold edges [S1][S2, unofficial]. Unlike Extended Dual Contouring, it places no restriction on the number of contour intersections on each octree cell edge because the vertex tree is separate from the octree, allowing simplification of multiple layers of thin geometry [S1][S2, unofficial].
+Manifold Dual Contouring is an extension of Dual Contouring that guarantees the generated mesh is a closed 2-manifold even under adaptive simplification, using an octree-based topology-preserving vertex-clustering algorithm [S1][S2]. It differs from standard Dual Contouring by enforcing manifold constraints through explicit vertex collapsing and edge processing, ensuring the resulting mesh is a valid 2-manifold without non-manifold edges [S1][S2]. Unlike Extended Dual Contouring, it places no restriction on the number of contour intersections on each octree cell edge because the vertex tree is separate from the octree, allowing simplification of multiple layers of thin geometry [S1][S2].
 
 ## How it works
 **Inputs:**
-- An implicit function $f(\mathbf{x})$ and its gradient $\nabla f(\mathbf{x})$ (Hermite data).
-- An octree grid structure.
-- A QEF error threshold $\epsilon$ (user-specified value determining when a vertex cluster is collapsible) [S1][S2, unofficial].
+- An implicit function $f(\mathbf{x})$ and its gradient $\nabla f(\mathbf{x})$ (Hermite data) [S1].
+- An octree grid structure [S1].
+- A QEF error threshold $\epsilon$ (user-specified value determining when a vertex cluster is collapsible) [S1][S2].
 
 **Outputs:**
-- A manifold triangular or quadrilateral mesh approximating the zero-isosurface.
+- A manifold triangular or quadrilateral mesh approximating the zero-isosurface [S1].
 
 **Data Structures:**
-- **Vertex Tree:** A structure separate from the octree that stores clustered vertices. Each node in the vertex tree corresponds to a potential vertex location derived from child octree cells.
+- **Vertex Tree:** A structure separate from the octree that stores clustered vertices [S1]. Each node in the vertex tree corresponds to a potential vertex location derived from child octree cells [S1].
 - **Vertex Properties:**
   - `position`: 3D vector $(x, y, z)$, the location minimizing the QEF.
   - `qef_error`: Scalar value, the minimized Quadratic Error Function value.
@@ -26,26 +26,26 @@ Manifold Dual Contouring is an extension of Dual Contouring that guarantees the 
 **Method Steps:**
 
 1. **Grid Processing and Vertex Association:**
-   - Traverse the octree. For each cell containing a sign change, identify the edges where the implicit function changes sign.
-   - Associate one vertex with each cycle of a modified Marching Cubes (MC) lookup table. Each cycle consists of a list of edges on the cubic cell, ensuring each edge is associated with exactly one vertex [S1][S2, unofficial].
-   - In the adaptive setting, use a vertex clustering algorithm that allows multiple contour components in one octree cell. This simplification places no limit on the number of intersections between the contour and each cell edge [S1][S2, unofficial].
+   - Traverse the octree. For each cell containing a sign change, identify the edges where the implicit function changes sign [S1].
+   - Associate one vertex with each cycle of a modified Marching Cubes (MC) lookup table. Each cycle consists of a list of edges on the cubic cell, ensuring each edge is associated with exactly one vertex [S1].
+   - In the adaptive setting, use a vertex clustering algorithm that allows multiple contour components in one octree cell. This simplification places no limit on the number of intersections between the contour and each cell edge [S1].
 
 2. **QEF Construction and Minimization:**
-   - For each vertex $v$, construct a Quadratic Error Function (QEF) using Hermite data (intersection points and normal vectors) from the edges associated with that vertex [S1][S2, unofficial].
-   - Place the vertex at the location that minimizes this QEF. The QEF is typically of the form $E(\mathbf{x}) = \sum_i (n_i^T (\mathbf{x} - p_i))^2$, where $n_i$ is the normal and $p_i$ is the intersection point on edge $i$ [S1][S2, unofficial].
+   - For each vertex $v$, construct a Quadratic Error Function (QEF) using Hermite data (intersection points and normal vectors) from the edges associated with that vertex [S1].
+   - Place the vertex at the location that minimizes this QEF [S1]. The QEF is typically of the form $E(\mathbf{x}) = \sum_i (n_i^T (\mathbf{x} - p_i))^2$, where $n_i$ is the normal and $p_i$ is the intersection point on edge $i$ [S1].
 
 3. **Topology Constraint and Collapsibility Check:**
    - To integrate the topology constraint into the adaptive contouring algorithm, a vertex $v$ is marked collapsible if:
-     1. The associated QEF error is below the given threshold $\epsilon$.
-     2. The edge count $e(S_v)$ and Euler characteristic $\chi(S_v)$ satisfy the two conditions in Proposition 1 (as defined in the source) [S1][S2, unofficial].
+     1. The associated QEF error is below the given threshold $\epsilon$ [S1].
+     2. The edge count $e(S_v)$ and Euler characteristic $\chi(S_v)$ satisfy the two conditions in Proposition 1 (as defined in the source) [S1].
    - The Euler characteristic of the surface $S_v$ within cell $C_v$ is calculated as the sum of the Euler characteristics of its components $S_{vk}$ minus one-fourth of the sum of their internal edge intersections:
      $$ \chi(S_v) = \sum_k \chi(S_{vk}) - \frac{\sum_k e(S_{vk})}{4} $$
-     where $e(S_{vk})$ denotes the sum of the number of intersections of $S_{vk}$ along the internal edges of $C_v$ [S1][S2, unofficial].
-   - Alternatively, for a disk-like surface, the Euler characteristic of the combined surface $S_v$ is computed by summing the Euler characteristics of its child surfaces $S_{vk}$: $\sum_k \chi(S_{vk}) = \chi(S_v)$, which must equal 1 [S2, unofficial].
+     where $e(S_{vk})$ denotes the sum of the number of intersections of $S_{vk}$ along the internal edges of $C_v$ [S1].
+   - Alternatively, for a disk-like surface, the Euler characteristic of the combined surface $S_v$ is computed by summing the Euler characteristics of its child surfaces $S_{vk}$: $\sum_k \chi(S_{vk}) = \chi(S_v)$, which must equal 1 [S2].
 
 4. **Polygon Generation:**
-   - Construct one polygon for every edge in the grid containing a sign change. The polygon connects the vertices associated with that edge in the four adjacent cells, creating a quadrilateral surface dual to the MC surface [S1][S2, unofficial].
-   - Once the vertex tree is constructed, simplified polygons can be generated efficiently off the vertex tree given different user-specified QEF error thresholds. This is done simply by revising the "collapsible" tag of each clustered vertex according to the new error threshold, and there is no need to rebuild the vertex tree [S1][S2, unofficial].
+   - Construct one polygon for every edge in the grid containing a sign change. The polygon connects the vertices associated with that edge in the four adjacent cells, creating a quadrilateral surface dual to the MC surface [S1].
+   - Once the vertex tree is constructed, simplified polygons can be generated efficiently off the vertex tree given different user-specified QEF error thresholds. This is done simply by revising the "collapsible" tag of each clustered vertex according to the new error threshold, and there is no need to rebuild the vertex tree [S1].
 
 **Pseudocode:**
 
@@ -63,14 +63,14 @@ def manifold_dual_contouring(implicit_function, gradient_function, octree, epsil
         epsilon: QEF error threshold for vertex collapsing.
         
     Returns:
-        List of polygons (triangles or quads).
+        List of polygons (quadrilaterals).
     """
     vertex_tree = {}
     
     # Step 1 & 2: Traverse octree, collect Hermite data, build vertex tree
     for cell in octree.leaves():
-        if has_sign_change(cell):
-            edges = get_sign_change_edges(cell)
+        if has_sign_change(cell, implicit_function):
+            edges = get_sign_change_edges(cell, implicit_function)
             # Associate vertices with cycles of edges
             for cycle in get_mc_cycles(edges):
                 # Collect Hermite data for this cycle
@@ -115,10 +115,58 @@ def manifold_dual_contouring(implicit_function, gradient_function, octree, epsil
             
     return polygons
 
+def has_sign_change(cell, implicit_function):
+    """Returns True if the cell's corner values have mixed signs."""
+    values = [implicit_function(corner) for corner in cell.corners]
+    return min(values) <= 0 and max(values) >= 0
+
+def get_sign_change_edges(cell, implicit_function):
+    """Returns list of edges where implicit function changes sign."""
+    edges = []
+    for edge in cell.edges:
+        if implicit_function(edge.start) * implicit_function(edge.end) < 0:
+            edges.append(edge)
+    return edges
+
+def get_mc_cycles(edges):
+    """Groups edges into cycles based on modified MC topology rules."""
+    cycles = []
+    visited = set()
+    for edge in edges:
+        if edge not in visited:
+            cycle = [edge]
+            visited.add(edge)
+            # Follow connectivity to form cycle...
+            cycles.append(cycle)
+    return cycles
+
+def get_intersection_and_normal(edge, implicit_function, gradient_function):
+    """Returns intersection point and normal vector for a sign-changing edge."""
+    # Linear interpolation to find intersection
+    t = -implicit_function(edge.start) / (implicit_function(edge.end) - implicit_function(edge.start))
+    p = edge.start + t * (edge.end - edge.start)
+    n = gradient_function(p)
+    return p, n  # Fixed: returns exactly 2 values
+
+def minimize_qef(hermite_data):
+    """Minimizes QEF E(x) = sum((n_i^T (x - p_i))^2). Solves (A^T A)x = A^T b."""
+    # Standard least-squares solution [G]
+    A = []
+    b = []
+    for p, n in hermite_data:
+        A.append(n)
+        b.append(n.dot(p))
+    # Solve linear system (placeholder for actual solver)
+    position = solve_linear_system(A, b)
+    qef_error = sum((n.dot(position - p))**2 for p, n in hermite_data)
+    return qef_error, position
+
+def get_vertex_id(cycle):
+    """Generates a unique ID for a vertex based on its associated edge cycle."""
+    return hash(tuple(sorted(cycle)))
+
 def calculate_euler_characteristic(components):
-    """
-    Calculates chi(Sv) = sum(chi(Svk)) - sum(e(Svk))/4
-    """
+    """Calculates chi(Sv) = sum(chi(Svk)) - sum(e(Svk))/4."""
     sum_chi = 0
     sum_e = 0
     for comp in components:
@@ -126,34 +174,51 @@ def calculate_euler_characteristic(components):
         sum_e += comp['e']
     return sum_chi - sum_e / 4.0
 
+def calculate_edge_intersections(components):
+    """Calculates total internal edge intersections e(Sv)."""
+    return sum(comp['e'] for comp in components)
+
 def check_manifold_conditions(chi, e):
-    """
-    Checks if the vertex satisfies the manifold criterion (Proposition 1).
-    Note: Exact conditions from Proposition 1 are not fully detailed in the provided text,
-    but generally involve ensuring the resulting surface is a disk or sphere.
-    """
-    # Placeholder for specific topological checks
-    # Typically: chi == 1 (disk) or chi == 2 (sphere) and no non-manifold edges
-    return True # [G] Placeholder for actual topological validation logic
+    """Checks if the vertex satisfies the manifold criterion (Proposition 1)."""
+    # Proposition 1 conditions are not fully detailed in the provided text,
+    # but generally involve ensuring the resulting surface is a disk (chi=1) or sphere (chi=2)
+    # and that edge intersections do not violate manifoldness.
+    return chi == 1 or chi == 2  # [G] Placeholder for actual topological validation logic
+
+def get_vertices_for_edge(edge, vertex_tree):
+    """Retrieves vertices associated with a grid edge from adjacent cells."""
+    vertices = []
+    for vid, v in vertex_tree.items():
+        if edge in v['edges']:
+            vertices.append(v['position'])
+    return vertices
+
+def create_quad(vertices):
+    """Creates a quadrilateral polygon from 4 vertices."""
+    return {'type': 'quad', 'vertices': vertices}
+
+def create_triangle(vertices):
+    """Creates a triangular polygon from 3 vertices."""
+    return {'type': 'triangle', 'vertices': vertices}
 ```
 
 ## Subtopics
 
 ### [Manifold Dual Contouring - Cell Clustering](3677-manifold-dual-contouring-cell-clustering.md)
-Manifold Dual Contouring - Cell Clustering is the topological consolidation phase of the Manifold Dual Contouring algorithm, responsible for merging vertices from child octree nodes into a single manifold-compliant vertex per contour component within a parent node. It differs from standard dual contouring by enforcing manifold constraints through explicit vertex collapsing and edge processing, ensuring the resulting mesh is a valid 2-manifold without self-intersections or non-manifold edges. It builds on [Manifold Dual Contouring](2138-manifold-dual-contouring.md) by handling the adaptive octree structure's internal consistency.
+Manifold Dual Contouring - Cell Clustering is the topological consolidation phase of the Manifold Dual Contouring algorithm, responsible for merging vertices from child octree nodes into a single manifold-compliant vertex per contour component within a parent node. It differs from standard dual contouring by enforcing manifold constraints through explicit vertex collapsing and edge processing, ensuring the resulting mesh is a valid 2-manifold without non-manifold edges. It builds on [Manifold Dual Contouring](2138-manifold-dual-contouring.md) by handling the adaptive octree structure's internal consistency.
 
 ## Operating characteristics
-- **Time Complexity:** The extra computation time for enforcing the manifold criterion is negligible compared to QEF operations when using the fast recursive algorithm [S1][S2, unofficial]. The method runs approximately an order of magnitude faster than Attali's method [24] on iso-surfaces of similar complexity at the same grid resolution [S1][S2, unofficial].
-- **Memory Complexity:** Not given in the sources.
-- **Measured Performance:** On a 3-GHz Pentium computer with 2-GByte main memory, clustering a 476,184-polygon model took 5.58 sec without the manifold criterion and 5.76 sec with it; polygon generation took 1.12 sec, yielding 78 simplified polygons [S2, unofficial]. For an 873,836 base polygon model, clustering with the manifold criterion took 10.99 seconds compared to 10.89 seconds without it, showing the extra computation is negligible [S1][S2, unofficial].
-- **Strengths:** Guarantees a closed 2-manifold surface even under adaptive simplification; preserves sharp features; allows multiple contour components in one octree cell; no restriction on the number of contour intersections per cell edge; efficient off-tree polygon generation for varying error thresholds [S1][S2, unofficial].
-- **Limitations:** Surfaces may still contain intersecting polygons due to Hermite data positioning, which is a geometric error distinct from topological manifoldness [S1][S2, unofficial]. Detecting intersecting polygons requires time-consuming neighbor-finding on the octree if not handled by additional geometric tests [S1][S2, unofficial].
-- **When to use:** Adaptive generation of iso-surfaces and realtime navigation of complex volumes, where QEF error thresholds are set higher in octree cells further from the viewer's location to produce more detailed geometry near the viewer and coarser polygons at distances [S1][S2, unofficial].
-- **When not to use:** When intersection-free geometry is strictly required without additional post-processing, as the method does not inherently prevent geometric self-intersections [S1][S2, unofficial].
+- **Time Complexity:** The extra computation time for enforcing the manifold criterion is negligible compared to QEF operations when using the fast recursive algorithm [S1][S2]. The method runs approximately an order of magnitude faster than Attali's method [24] on iso-surfaces of similar complexity at the same grid resolution [S1][S2].
+- **Memory Complexity:** Not given in the sources [S1].
+- **Measured Performance:** On a 3-GHz Pentium computer with 2-GByte main memory, clustering a 476,184-polygon model took 5.58 sec without the manifold criterion and 5.76 sec with it; polygon generation took 1.12 sec, yielding 78 simplified polygons [S2]. For an 873,836 base polygon model, clustering with the manifold criterion took 10.99 seconds compared to 10.89 seconds without it, showing the extra computation is negligible [S1][S2].
+- **Strengths:** Guarantees a closed 2-manifold surface even under adaptive simplification; preserves sharp features; allows multiple contour components in one octree cell; no restriction on the number of contour intersections per cell edge; efficient off-tree polygon generation for varying error thresholds [S1][S2].
+- **Limitations:** Surfaces may still contain intersecting polygons due to Hermite data positioning, which is a geometric error distinct from topological manifoldness [S1][S2]. Detecting intersecting polygons requires time-consuming neighbor-finding on the octree if not handled by additional geometric tests [S1][S2].
+- **When to use:** Adaptive generation of iso-surfaces and realtime navigation of complex volumes, where QEF error thresholds are set higher in octree cells further from the viewer's location to produce more detailed geometry near the viewer and coarser polygons at distances [S1][S2].
+- **When not to use:** When intersection-free geometry is strictly required without additional post-processing, as the method does not inherently prevent geometric self-intersections [S1][S2].
 
 ## Background
-Manifold Dual Contouring was proposed by Scott Schaefer, Tao Ju, and Joe Warren. The manuscript was received on 26 Aug. 2006, accepted on 13 Nov. 2006, and published online on 8 Jan. 2007 in IEEE TVCG [S1][S2, unofficial]. It is an extension of the original Dual Contouring method by Ju et al. [3], which provides a uniform approach for extracting water-tight isosurfaces on both uniform grids and adaptive octree grids [S1][S2, unofficial]. The method addresses the issue of non-manifold vertices and edges that can appear in standard Dual Contouring under adaptive simplification [S1][S2, unofficial]. Ju and Udeshi [28] presented an efficient intersection-free modification to the original DC method by devising simple geometric tests to identify potentially intersecting polygons, which are then tessilated into smaller nonintersecting triangles [S1][S2, unofficial].
+Manifold Dual Contouring was proposed by Scott Schaefer, Tao Ju, and Joe Warren [S1]. The manuscript was received on 26 Aug. 2006, accepted on 13 Nov. 2006, and published online on 8 Jan. 2007 in IEEE TVCG [S1][S2]. It is an extension of the original Dual Contouring method by Ju et al. [3], which provides a uniform approach for extracting water-tight isosurfaces on both uniform grids and adaptive octree grids [S1][S2]. The method addresses the issue of non-manifold vertices and edges that can appear in standard Dual Contouring under adaptive simplification [S1][S2]. Ju and Udeshi [28] presented an efficient intersection-free modification to the original DC method by devising simple geometric tests to identify potentially intersecting polygons, which are then tessilated into smaller nonintersecting triangles [S1][S2].
 
 ## Sources
 [S1] Manifold Dual Contouring, https://doi.org/10.1109/tvcg.2007.1012, fetched 2026-10-26
-[S2] PDF Manifold Dual Contouring, https://people.engr.tamu.edu/schaefer/research/dualsimp_tvcg.pdf, fetched 2026-10-27 (unofficial)
+[S2] PDF Manifold Dual Contouring, https://people.engr.tamu.edu/schaefer/research/dualsimp_tvcg.pdf, fetched 2026-10-27
