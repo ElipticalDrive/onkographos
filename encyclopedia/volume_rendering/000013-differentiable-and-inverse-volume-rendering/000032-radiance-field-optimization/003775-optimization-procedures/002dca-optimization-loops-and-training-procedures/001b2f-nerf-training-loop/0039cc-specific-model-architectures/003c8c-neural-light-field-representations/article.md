@@ -1,29 +1,20 @@
 # Neural Light Field Representations
 
-Also called: NeLF, R2L (Ray-to-Light), Radiance-to-Light
+Also called: NeLF, Neural Light Field
 
 ## Overview
-Neural Light Field Representations (NeLF) replace the iterative volumetric ray-marching of Neural Radiance Fields (NeRF) with a direct mapping from camera ray parameters to final pixel color [9257-neural-light-field-nelf.md]. This eliminates the sampling bottleneck, achieving significant runtime speedups and FLOPs reduction while maintaining comparable rendering quality [9256-neural-light-field-nelf-via-r2l-distillation.md]. Unlike standard NeRF, which requires iterative alpha-composition, NeLF predicts the final RGB value in a single forward pass [9257-neural-light-field-nelf.md].
+Neural Light Field Representations map camera rays directly to pixel colors, bypassing the volumetric ray-marching and alpha-compositing steps required by standard Neural Radiance Fields (NeRF) [S1]. Unlike NeRF, which predicts density and color at sampled points along a ray, these methods treat the scene as a light field, outputting the final RGB value in a single forward pass [S1]. This family is distinguished by its use of distillation from a pre-trained NeRF teacher to a deep student network, enabling inference speeds orders of magnitude faster than iterative sampling methods [S1].
 
 ## Shared principles
-All methods in this family compute a radiance field function $f_\theta(\mathbf{x}, \mathbf{d})$ that outputs volume density $\sigma$ and color $\mathbf{c}$ for a query point $\mathbf{x}$ and direction $\mathbf{d}$. The final pixel color $\mathbf{C}(\mathbf{r})$ for a ray $\mathbf{r}$ is computed via the standard volume rendering integral:
-$$
-\mathbf{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i \alpha_i \mathbf{c}_i
-$$
-where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ and $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$. The architectural variations lie in how $\sigma_i$ and $\mathbf{c}_i$ are generated from the input coordinates, how the network is structured (depth, width, connectivity), and what auxiliary inputs (embeddings, priors, features) are fused into the computation.
+All methods in this family replace the volumetric rendering integral with a direct regression function $G_\phi(\mathbf{r}) \rightarrow \mathbf{c}$, where $\mathbf{r}$ is the ray representation and $\mathbf{c}$ is the RGB color [S1]. The core mechanism involves **R2L (Radiance Field to Light Field) Distillation**: a standard NeRF teacher $F_{\Theta^*}$ is trained first, and its outputs are used to generate pseudo-training data for a student network $G_\phi$ [S1]. The student network typically employs a deep Multi-Layer Perceptron (MLP) with residual connections to handle the high-dimensional input space without vanishing gradients [S1]. Input representation usually involves concatenating spatial coordinates of multiple sampled points along the ray, rather than using Plücker coordinates or single-point queries [S1].
 
 ## Subtopics
 
-### [R2L (Neural Light Field)](8670-r2l-neural-light-field.md)
-A deep neural light field network trained via distillation from a pre-trained NeRF teacher. It uses a much deeper network with extensive internal residual blocks, trading width for depth under the same FLOPs budget. It outperforms depth-dependent methods on reflective surfaces [8670-r2l-neural-light-field.md].
-
-### [Neural Light Field (NeLF) via R2L Distillation](9256-neural-light-field-nelf-via-r2l-distillation.md)
-A specific implementation of NeLF using R2L distillation. It maps a 4D oriented ray directly to 3D RGB color in a single forward pass, bypassing NeRF's sampling bottleneck. It uses concatenated spatial coordinates of sampled points along the ray as input [9256-neural-light-field-nelf-via-r2l-distillation.md].
-
 ### [Neural Light Field (NeLF)](9257-neural-light-field-nelf.md)
-The general concept of representing a 3D scene as a direct mapping from camera ray parameters to RGB values. It eliminates iterative volumetric ray-marching overhead, achieving significant runtime speedups compared to NeRF and variants like KiloNeRF [9257-neural-light-field-nelf.md].
+NeLF is a specific implementation using an 88-layer deep residual MLP to map 4D oriented rays to RGB. It sets itself apart by using stratified sampling during training and hard example mining to stabilize learning, while using evenly spaced sampling during inference. Choose this method when inference speed is critical and a pre-trained NeRF model is available for distillation.
 
 ## Background
-The concept of Neural Light Fields was introduced to address the computational inefficiency of iterative volume rendering in NeRF. By learning a direct mapping from ray parameters to color, these methods aim to retain the quality of neural radiance fields while enabling real-time or near-real-time rendering. The approach relies heavily on knowledge distillation from a pre-trained NeRF teacher to supervise the training of the deep student networks, as direct training from 2D images is often infeasible for such deep architectures [9257-neural-light-field-nelf.md].
+The Neural Light Field (NeLF) approach was introduced to address the computational bottleneck of ray-marching in NeRF [S1]. By distilling the volumetric knowledge into a direct light field mapping, it enables real-time novel view synthesis [S1]. The method relies on the observation that a sufficiently deep residual network can approximate the complex light transport captured by NeRF [S1].
 
 ## Sources
+[S1] Neural Light Field (NeLF) via R2L Distillation, 2021

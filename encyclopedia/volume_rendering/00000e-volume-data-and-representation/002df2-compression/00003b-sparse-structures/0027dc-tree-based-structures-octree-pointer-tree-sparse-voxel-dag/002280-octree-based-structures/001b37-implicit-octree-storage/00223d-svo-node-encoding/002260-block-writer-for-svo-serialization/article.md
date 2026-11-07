@@ -3,7 +3,7 @@
 Also called: BlockWriter class
 
 ## Overview
-The Block Writer is a utility class responsible for serializing Sparse Voxel Octree (SVO) nodes into a binary file format. It solves the problem of persisting tree topology and data by tracking the cumulative byte and element counts during the write process. It differs from its siblings, such as the [SVO Binary Serialization Format](5123-svo-binary-serialization-format.md) which defines the complete file structure and validation logic, and the [WideNodeDescriptor Binary Layout](5156-widenodedescriptor-binary-layout.md) which defines specific node packing, by focusing specifically on the stream output mechanics and state tracking of the serialization process [S1, unofficial].
+The Block Writer is a class that serializes Sparse Voxel Octree (SVO) nodes to a binary file while tracking cumulative byte and element counts [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
@@ -16,69 +16,49 @@ The class maintains two internal counters:
 2.  `element_count`: Tracks the number of elements written, calculated based on a constant block size.
 
 **Parameters:**
-*   `Block::ELEMENT_SIZE`: A constant value of 4, used to determine the size of an element for the `element_count` calculation [S1, unofficial].
+*   `Block::ELEMENT_SIZE`: A constant value of 4, used to calculate the element count [S1, unofficial].
 
 **Steps:**
-1.  The writer receives a node via the `operator<<` overload.
-2.  The node's data is written to the underlying binary stream.
-3.  The `byte_count` is incremented by the number of bytes written for the node.
-4.  The `element_count` is incremented by the number of elements in the node, derived from the written byte count divided by `Block::ELEMENT_SIZE` [S1, unofficial].
+1.  The `operator<<(node)` method receives an SVO node.
+2.  The node is written to the underlying binary stream.
+3.  `byte_count` is incremented by the number of bytes written for the node.
+4.  `element_count` is updated based on `byte_count` and `Block::ELEMENT_SIZE` [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 class BlockWriter:
-    def __init__(self):
+    def __init__(self, stream):
+        self.stream = stream
         self.byte_count = 0
         self.element_count = 0
-        # The underlying binary stream is assumed to be available
-        # via self.stream or similar context
 
-    def write_node(self, node):
-        """
-        Writes a node to the binary stream and updates counters.
-        
-        Args:
-            node: The SVO node object to serialize.
-        """
-        # Serialize the node to the binary stream
-        # The exact serialization logic of the node is handled by 
-        # the node's own serialization method or the specific 
-        # binary layout (e.g., WideNodeDescriptor)
-        bytes_written = self.stream.write(node.serialize())
-        
-        # Update byte count
+    def __lshift__(self, node):
+        """Writes a node to the binary stream and updates counters."""
+        bytes_written = self.stream.write(node)
         self.byte_count += bytes_written
-        
-        # Update element count based on Block::ELEMENT_SIZE
         # Block::ELEMENT_SIZE is 4
-        elements_written = bytes_written // 4
-        self.element_count += elements_written
+        self.element_count = self.byte_count // 4
+        return self
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Alignment:** The division by `Block::ELEMENT_SIZE` (4) assumes that the node serialization produces byte counts that are multiples of 4, or that the element count is an integer approximation. If the underlying node serialization does not align to 4-byte boundaries, the element count may be inaccurate [S1, unofficial].
-*   **Stream Errors:** The pseudocode assumes `stream.write` succeeds. In a robust implementation, errors from the underlying stream should be checked and propagated [G].
+Not given in the sources.
 
 ## Subtopics
 
 ### [SVO Binary Serialization Format](5123-svo-binary-serialization-format.md)
-Defines the complete file structure, including magic headers, versioning, and validation logic, which the Block Writer operates within.
+A binary file format for serializing SVOs that stores tree topology, leaf specifications, and arbitrary data arrays with strict bounds checking and overflow protection. It differs from its sibling by defining the complete file structure and validation logic rather than just the node descriptor packing.
 
 ### [WideNodeDescriptor Binary Layout](5156-widenodedescriptor-binary-layout.md)
-Defines the specific binary layout for wide nodes, which the Block Writer serializes using its `operator<<` mechanism.
+The on-disk or in-memory serialization format for a "wide" node in an SVO. It stores structural topology and offsets to children, enabling efficient traversal without explicit pointers. It differs from standard SVO node encodings by using 64-bit masks and base offsets for larger subtrees or denser packing.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per node write, assuming the node serialization itself is $O(1)$ (i.e., the node has a fixed size).
-*   **Memory Complexity:** $O(1)$ auxiliary memory for the counters.
-*   **Strengths:** Simple, lightweight, and efficient for tracking serialization progress.
-*   **Limitations:** Does not handle file headers, footers, or validation logic; these are handled by the broader serialization format [S1, unofficial].
-*   **When to use:** When implementing the low-level stream writing component of an SVO serializer.
-*   **When not to use:** When a complete file format with validation and metadata is required; use the [SVO Binary Serialization Format](5123-svo-binary-serialization-format.md) instead.
+Not given in the sources.
 
 ## Background
-The Block Writer is part of the `zazen` project, a ray tracer for sparse voxel octrees developed by Gabriel Muller. It is used in the context of serializing SVO data for efficient storage and transfer [S1, unofficial].
+The method originates from the `zazen` project, a ray tracer for sparse voxel octrees developed by Gabriel Muller [S1, unofficial].
 
 ## Sources
 [S1] gabrielmuller/zazen, https://github.com/gabrielmuller/zazen, fetched 2026-10-26 (unofficial)

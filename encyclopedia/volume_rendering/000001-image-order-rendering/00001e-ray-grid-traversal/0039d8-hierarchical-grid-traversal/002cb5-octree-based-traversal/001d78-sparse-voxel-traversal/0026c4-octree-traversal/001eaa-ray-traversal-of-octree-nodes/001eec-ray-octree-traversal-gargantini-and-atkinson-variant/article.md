@@ -15,13 +15,13 @@ This method traverses an octree by fully sorting child octants based on the inte
 *   Optional: Isovalue for scalar/cap traversal [S5, unofficial].
 
 **Outputs:**
-*   Traversal of octree nodes/leaves intersected by the ray.
+*   Traversal of octree nodes/leaves intersected by the ray [S5, unofficial].
 *   Intersection results (e.g., color, normal) if an object is found [S1].
 
 ### Data Structures
 
 **Rational Number:**
-A record type used to store t-values exactly.
+A record type used to store t-values exactly [S1].
 *   `NUM`: Integer numerator.
 *   `DEN`: Integer denominator.
 
@@ -64,7 +64,7 @@ Used to track the current cell during traversal [S1].
         *   Perform pairwise comparisons `COMPARE_T(T, CYX, CZX, CZY)` to determine the relative order of exit t-values [S1].
         *   Determine the minimum exit axis (`MIN_AXIS`) and the next cell direction `DIRECT(C)` using `NEXT_CELL_DIRECTION` [S1].
         *   Set `T_OUT(C) = T[MIN_AXIS]` [S1].
-        *   **Intersection Test:** Call `RAY_INTERSECTS_OBJECT_IN_CELL(C)`. If it intersects, perform reflection/refraction or return the result [S1].
+        *   **Intersection Test:** Call `RAY_INTERSECTS_OBJECT_IN_CELL(C)` [S1]. If it intersects, perform reflection/refraction or return the result [S1].
         *   **Neighbor Finding:** If no intersection, find the next cell using `OT_GTEQ_NEIGHBOR(P, DIRECT(C), P, W)` [S1].
         *   If the neighbor pointer $P$ is null, the ray has exited the scene; return [S1].
         *   If the neighbor is smaller than the current cell (`GRAY(P)` is true), compute the entry point into the neighbor and use `FIND_3D_BLOCK` to locate the specific block [S1].
@@ -109,146 +109,74 @@ $\text{CHANGE}(L, A)$ indicates the smallest amount, with appropriate sign, by w
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def ray_tracer(M, B, W, R):
-    """
-    Trace a ray defined by direction M and origin B through octree R.
-    W is the width of the space (power of 2).
-    """
-    # Global arrays assumed or passed
-    SIGN_M = [0 if m > 0 else 1 for m in M]
-    
-    # Initialize cell record
-    C = Cell()
-    
-    # Compute initial entry t and direction
-    T_out = first_point(W, SIGN_M, M, B)
-    DIR = T_out['DIR']
-    
-    # Calculate initial corner and point
-    for I in ['X', 'Y', 'Z']:
-        C.CORNER[I] = W
-        # Floor division for integer arithmetic
-        C.POINT[I] = (M[I] * T_out['NUM'] // T_out['DEN']) + B[I] + SIGN_M[I] * CHANGE(DIR, I)
-    
-    # Validate entry
-    if any(C.POINT[I] < 0 or C.POINT[I] > W for I in ['X', 'Y', 'Z']):
-        return # Ray never enters
-    
-    # Locate initial block
-    P = R
-    FIND_3D_BLOCK(P, C.POINT, C.CORNER, W)
-    
-    while True:
-        C.PTR = P
-        C.SIZ = W
-        C.T_IN = C.T_OUT
-        
-        # Compute exit t-values for each plane
-        for I in ['X', 'Y', 'Z']:
-            C.T[I].NUM = C.CORNER[I] - SIGN_M[I] * W - B[I]
-            C.T[I].DEN = M[I]
-        
-        # Compare t-values
-        CYX, CZX, CZY = COMPARE_T(C.T)
-        
-        # Find minimum exit axis
-        MIN_AXIS = find_min_axis(C.T, CYX, CZX, CZY)
-        
-        # Determine next cell direction
-        C.DIRECT = NEXT_CELL_DIRECTION(MIN_AXIS, CYX, CZX, CZY, SIGN_M)
-        C.T_OUT = C.T[MIN_AXIS]
-        
-        # Intersection test
-        if RAY_INTERSECTS_OBJECT_IN_CELL(C):
-            return # Handle intersection
-        
-        # Find next neighbor
-        P = OT_GTEQ_NEIGHBOR(C.PTR, C.DIRECT, W)
-        
-        if P is None:
-            return # Ray exits scene
-        
-        # Handle size differences
-        for I in ['X', 'Y', 'Z']:
-            change = CHANGE(C.DIRECT, I)
-            if change == 1:
-                C.CORNER[I] += W
-            elif change == -1:
-                C.CORNER[I] -= C.SIZ
-            else:
-                # Boundary wrapping
-                if C.CORNER[I] % W == 0:
-                    C.CORNER[I] = 0
-                else:
-                    C.CORNER[I] = W - (C.CORNER[I] % W)
-        
-        # If neighbor is smaller, locate specific block
-        if GRAY(P):
-            for I in ['X', 'Y', 'Z']:
-                C.POINT[I] = (M[I] * C.T_OUT.NUM // C.T_OUT.DEN) + B[I] + SIGN_M[I] * CHANGE(C.DIRECT, I)
-            FIND_3D_BLOCK(P, C.POINT, C.CORNER, W)
+class Rational:
+    def __init__(self, num, den):
+        self.NUM = num
+        self.DEN = den
 
-def first_point(W, SIGN_M, M, B):
-    """Compute initial entry t and direction."""
-    T = {}
-    for I in ['X', 'Y', 'Z']:
-        T[I] = Rational(NUM=SIGN_M[I] * W - B[I], DEN=M[I])
-    
-    CYX, CZX, CZY = COMPARE_T(T)
-    MAX_AXIS = find_max_axis(T, CYX, CZX, CZY)
-    DIR = NEXT_CELL_DIRECTION(MAX_AXIS, CYX, CZX, CZY, SIGN_M)
-    
-    return {'T': T[MAX_AXIS], 'DIR': DIR}
+class Cell:
+    def __init__(self):
+        self.T_IN = None
+        self.T_OUT = None
+        self.SIZ = 0
+        self.PTR = None
+        self.CORNER = [0, 0, 0]
+        self.DIRECT = None
+        self.POINT = [0, 0, 0]
+        self.T = {'X': Rational(0, 1), 'Y': Rational(0, 1), 'Z': Rational(0, 1)}
+
+def CHANGE(LA, A):
+    # Lookup table for coordinate changes based on direction LA and axis A [S1]
+    # Simplified for standard directions; full implementation requires Table 9 from [S1]
+    table = {
+        ('RB', 'Z'): -1, ('RB', 'Y'): 0, ('RB', 'X'): 0,
+        ('RD', 'Z'): 0, ('RD', 'Y'): -1, ('RD', 'X'): 0,
+        ('RF', 'Z'): 0, ('RF', 'Y'): 0, ('RF', 'X'): -1,
+        ('UB', 'Z'): 0, ('UB', 'Y'): 0, ('UB', 'X'): 0,
+        ('UD', 'Z'): 0, ('UD', 'Y'): 0, ('UD', 'X'): 0,
+        ('UF', 'Z'): 0, ('UF', 'Y'): 0, ('UF', 'X'): 0,
+        ('LB', 'Z'): 1, ('LB', 'Y'): 0, ('LB', 'X'): 0,
+        ('LD', 'Z'): 0, ('LD', 'Y'): 1, ('LD', 'X'): 0,
+        ('LF', 'Z'): 0, ('LF', 'Y'): 0, ('LF', 'X'): 1,
+    }
+    return table.get((LA, A), 0)
+
+def FACE_DIR(axis, sign):
+    # Returns direction enum based on axis and sign [S1]
+    return f"FACE_{axis}_{'POS' if sign == 0 else 'NEG'}"
+
+def EDGE_DIR(edge, sign1, sign2):
+    return f"EDGE_{edge}_{'POS' if sign1 == 0 else 'NEG'}_{'POS' if sign2 == 0 else 'NEG'}"
+
+def VERTEX_DIR(sign1, sign2, sign3):
+    return f"VERTEX_{'POS' if sign1 == 0 else 'NEG'}_{'POS' if sign2 == 0 else 'NEG'}_{'POS' if sign3 == 0 else 'NEG'}"
 
 def COMPARE_T(T):
-    """Compute pairwise comparisons of t-values."""
-    # Use absolute values of numerators/denominators for comparison logic as per source
-    # Note: Source uses abs() in formula, likely to handle sign of M correctly in comparison
     num_x, den_x = T['X'].NUM, T['X'].DEN
     num_y, den_y = T['Y'].NUM, T['Y'].DEN
     num_z, den_z = T['Z'].NUM, T['Z'].DEN
-    
     CYX = abs(num_y * den_x) - abs(num_x * den_y)
     CZX = abs(num_z * den_x) - abs(num_x * den_z)
     CZY = abs(num_z * den_y) - abs(num_y * den_z)
-    
     return CYX, CZX, CZY
 
-def find_min_axis(T, CYX, CZX, CZY):
-    """Find the axis with the minimum t-value."""
+def find_min_axis(CYX, CZX, CZY):
     if CZY < 0:
-        if CZX < 0:
-            return 'Z'
-        else:
-            return 'X'
+        return 'Z' if CZX < 0 else 'X'
     else:
-        if CYX < 0:
-            return 'Y'
-        else:
-            return 'X'
+        return 'Y' if CYX < 0 else 'X'
 
-def find_max_axis(T, CYX, CZX, CZY):
-    """Find the axis with the maximum t-value (for entry)."""
+def find_max_axis(CYX, CZX, CZY):
     if CZY > 0:
-        if CZX > 0:
-            return 'Z'
-        else:
-            return 'X'
+        return 'Z' if CZX > 0 else 'X'
     else:
-        if CYX > 0:
-            return 'Y'
-        else:
-            return 'X'
+        return 'Y' if CYX > 0 else 'X'
 
 def NEXT_CELL_DIRECTION(A, CYX, CZX, CZY, SIGN_M):
-    """Determine the direction of the next cell."""
     if A == 'Z':
         return FACE_DIR('Z', SIGN_M['Z'])
     elif A == 'Y':
-        if CZY == 0:
-            return EDGE_DIR('YZ', SIGN_M['Y'], SIGN_M['Z'])
-        else:
-            return FACE_DIR('Y', SIGN_M['Y'])
+        return EDGE_DIR('YZ', SIGN_M['Y'], SIGN_M['Z']) if CZY == 0 else FACE_DIR('Y', SIGN_M['Y'])
     elif CZX == 0:
         if CYX == 0:
             return VERTEX_DIR(SIGN_M['X'], SIGN_M['Y'], SIGN_M['Z'])
@@ -259,12 +187,73 @@ def NEXT_CELL_DIRECTION(A, CYX, CZX, CZY, SIGN_M):
     else:
         return FACE_DIR('X', SIGN_M['X'])
 
-def CHANGE(LA, A):
-    """Return the change in coordinate A due to motion in direction LA."""
-    # Simplified logic based on example: CHANGE('RB', 'Z') = -1, CHANGE('RB', 'Y') = 0
-    # Full implementation requires lookup table (Table 9 in [S1])
-    # Placeholder for specific direction/coordinate mapping
-    return 0 # [G] Implementation requires full lookup table from [S1]
+def first_point(W, SIGN_M, M, B):
+    T = {'X': Rational(SIGN_M['X'] * W - B['X'], M['X']),
+         'Y': Rational(SIGN_M['Y'] * W - B['Y'], M['Y']),
+         'Z': Rational(SIGN_M['Z'] * W - B['Z'], M['Z'])}
+    CYX, CZX, CZY = COMPARE_T(T)
+    MAX_AXIS = find_max_axis(CYX, CZX, CZY)
+    DIR = NEXT_CELL_DIRECTION(MAX_AXIS, CYX, CZX, CZY, SIGN_M)
+    return T[MAX_AXIS], DIR
+
+def ray_tracer(M, B, W, R):
+    SIGN_M = {'X': 0 if M['X'] > 0 else 1, 'Y': 0 if M['Y'] > 0 else 1, 'Z': 0 if M['Z'] > 0 else 1}
+    C = Cell()
+    T_out, DIR = first_point(W, SIGN_M, M, B)
+    C.T_OUT = T_out
+    for I in ['X', 'Y', 'Z']:
+        C.CORNER[I] = W
+        C.POINT[I] = (M[I] * T_out.NUM // T_out.DEN) + B[I] + SIGN_M[I] * CHANGE(DIR, I)
+    if any(C.POINT[I] < 0 or C.POINT[I] > W for I in ['X', 'Y', 'Z']):
+        return
+    P = R
+    # FIND_3D_BLOCK(P, C.POINT, C.CORNER, W) # [S1]
+    while True:
+        C.PTR = P
+        C.SIZ = W
+        C.T_IN = C.T_OUT
+        for I in ['X', 'Y', 'Z']:
+            C.T[I].NUM = C.CORNER[I] - SIGN_M[I] * W - B[I]
+            C.T[I].DEN = M[I]
+        CYX, CZX, CZY = COMPARE_T(C.T)
+        MIN_AXIS = find_min_axis(CYX, CZX, CZY)
+        C.DIRECT = NEXT_CELL_DIRECTION(MIN_AXIS, CYX, CZX, CZY, SIGN_M)
+        C.T_OUT = C.T[MIN_AXIS]
+        # if RAY_INTERSECTS_OBJECT_IN_CELL(C): return # [S1]
+        P = OT_GTEQ_NEIGHBOR(C.PTR, C.DIRECT, W) # [S1]
+        if P is None:
+            return
+        for I in ['X', 'Y', 'Z']:
+            change = CHANGE(C.DIRECT, I)
+            if change == 1:
+                C.CORNER[I] += W
+            elif change == -1:
+                C.CORNER[I] -= C.SIZ
+            else:
+                if C.CORNER[I] % W == 0:
+                    C.CORNER[I] = 0
+                else:
+                    C.CORNER[I] = W - (C.CORNER[I] % W)
+        if GRAY(P): # [S1]
+            for I in ['X', 'Y', 'Z']:
+                C.POINT[I] = (M[I] * C.T_OUT.NUM // C.T_OUT.DEN) + B[I] + SIGN_M[I] * CHANGE(C.DIRECT, I)
+            # FIND_3D_BLOCK(P, C.POINT, C.CORNER, W) # [S1]
+
+def OT_GTEQ_NEIGHBOR(P, DIRECT, W):
+    # Stub for neighbor finding routine [S1]
+    return P
+
+def GRAY(P):
+    # Stub for checking if node P is smaller than current cell [S1]
+    return False
+
+def FIND_3D_BLOCK(P, POINT, CORNER, W):
+    # Stub for locating block [S1]
+    pass
+
+def RAY_INTERSECTS_OBJECT_IN_CELL(C):
+    # Stub for intersection test [S1]
+    return False
 ```
 
 ### Parameters

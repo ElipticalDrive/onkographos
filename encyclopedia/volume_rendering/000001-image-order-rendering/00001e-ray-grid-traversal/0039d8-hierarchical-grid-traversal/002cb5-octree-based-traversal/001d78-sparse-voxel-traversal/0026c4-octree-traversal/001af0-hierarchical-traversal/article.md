@@ -6,14 +6,14 @@ Also called: Hierarchical Octree Traversal, Kay & Kajiya Hierarchy Traversal, Ka
 Hierarchical traversal is a method for accelerating ray-object intersection by navigating a spatial hierarchy of grids, such as an Octree or Sparse Voxel Octree (SVO), where each higher-level cell covers a $2 \times 2$ area of the level below [S1, unofficial]. It solves the problem of excessive traversal steps in dense or large datasets by allowing the ray to take larger steps through empty space at coarser levels, reducing the total number of intersection tests compared to non-hierarchical traversal [S1, unofficial]. Unlike flat grid traversal which checks every voxel, hierarchical methods skip entire subtrees when a node is determined to be inactive or empty, a principle first formalized for general ray-object intersection by Kay and Kajiya [S4, unofficial].
 
 ## How it works
-**Inputs:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, and a hierarchical data structure (Octree or SVO) where nodes represent bounding volumes.
-**Outputs:** A list of intersected leaf nodes or a boolean indicating if any active descendant exists within a distance threshold.
+**Inputs:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, and a hierarchical data structure where nodes represent bounding volumes [S4, unofficial].
+**Outputs:** A list of intersected leaf nodes or a boolean indicating if any active descendant exists within a distance threshold [S2, unofficial].
 
 **Data Structures:**
 1.  **Hierarchical Grid:** Cells are named by the area they cover in Level 0. Level 0 cells are $1 \times 1$, Level 1 cells are $2 \times 2$, Level 2 cells are $4 \times 4$ [S1, unofficial].
 2.  **Node Representation:**
-    *   **Branch Node:** Contains indices to 8 children. In SVO implementations, children are stored in a vector or array. A node is a Branch if it has children; otherwise, it is a Leaf or Empty [S1, unofficial].
-    *   **Leaf Node:** Represents a voxel or a block of voxels. In BVH-based variants, leaf nodes may be identified by setting the high bit ($0x80000000$) of the child indices [S2, unofficial].
+    *   **Branch Node:** Contains indices to 8 children. In SVO implementations, children are stored in a vector or array [S1, unofficial]. A node is a Branch if it has children; otherwise, it is a Leaf or Empty.
+    *   **Leaf Node:** Represents a voxel or a block of voxels. In BVH-based variants, leaf nodes are identified by setting the high bit ($0x80000000$) of the child indices [S2, unofficial].
     *   **Activity Flag:** Nodes track if they or any descendant are "active" (occupied) [S5, unofficial].
 
 **Algorithm Steps:**
@@ -30,7 +30,7 @@ Hierarchical traversal is a method for accelerating ray-object intersection by n
         *   Maintain a stack of nodes to visit.
         *   While the stack is not empty:
             *   Pop the top node.
-            *   If the node is a Leaf, process it (e.g., check for sign change or sample data) [S3, unofficial].
+            *   If the node is a Leaf, return whether it has a sign change [S3, unofficial].
             *   If the node is a Branch:
                 *   Identify intersecting children.
                 *   If both left and right children need descending, push the child with the smaller intersection distance ($t_{left} < t_{right}$) onto the stack, then descend into the closer child [S2, unofficial].
@@ -46,121 +46,108 @@ Hierarchical traversal is a method for accelerating ray-object intersection by n
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def traverse_hierarchical(ray_origin, ray_direction, root_node, max_depth):
+def traverse_hierarchical(ray_origin, ray_direction, root_node_idx, max_depth, node_pool):
     """
     Traverses a Sparse Voxel Octree to find active leaves intersected by the ray.
-    Assumes a standard SVO structure where nodes are indexed in a pool.
+    node_pool: list of dicts with keys 'active' (bool), 'children' (list of 8 ints or None), 'bbox' (2x3 array).
     """
-    # Stack stores (node_index, t_min, t_max)
-    # t_min/t_max are the entry/exit distances of the ray into the node's bounding box
-    stack = [(0, 0.0, float('inf'))]  # Start with root at index 0
+    EPSILON = 1e-4
+    # Clamp small direction components to avoid division by zero [S2, unofficial]
+    d = [max(abs(ray_direction[i]), EPSILON) * (1 if ray_direction[i] >= 0 else -1) for i in range(3)]
     
+    stack = [(root_node_idx, 0.0, float('inf'))]
     active_leaves = []
     
     while stack:
         node_idx, t_entry, t_exit = stack.pop()
         
-        # Safety check for depth or invalid index
-        if node_idx >= len(node_pool) or node_idx == 0: # Assuming 0 is root or invalid
+        if node_idx >= len(node_pool) or node_idx == 0:
+            continue
+        if len(stack) > max_depth:
             continue
             
         node = node_pool[node_idx]
         
-        # Check if node is active
-        if not is_node_active(node):
-            continue
-            
-        # Check if node is a leaf
-        if is_leaf(node):
-            # Process leaf (e.g., check for surface, sample volume)
-            # For activity check, just recording it is sufficient
+        # Leaf identification: high bit set indicates leaf [S2, unofficial]
+        if node_idx & 0x80000000:
             active_leaves.append(node_idx)
             continue
             
-        # If branch, find intersecting children
-        # In SVO, children are stored in a specific order (0-7)
-        # We need to compute which of the 8 children the ray intersects
-        children_indices = get_children_indices(node)
-        
-        # Compute bounding boxes for children and test intersection
-        # This part depends on the specific coordinate system and child layout
-        # Assuming a standard octree layout where children are 2x2x2 subdivisions
-        
-        intersecting_children = []
+        # Activity check: skip if inactive [S5, unofficial]
+        if not node.get('active', False):
+            continue
+            
+        # Compute child bounding boxes and test intersection
+        children = node.get('children', [None] * 8)
         for i in range(8):
-            child_idx = children_indices[i]
+            child_idx = children[i]
             if child_idx is None:
                 continue
                 
-            # Get child bounding box
-            child_bbox = get_child_bbox(node, i)
+            # Compute child bounding box from parent bounds and child index [G]
+            child_bbox = compute_child_bbox(node['bbox'], i)
+            t_min, t_max = ray_box_intersect(ray_origin, d, child_bbox)
             
-            # Ray-box intersection
-            t_min, t_max = ray_box_intersect(ray_origin, ray_direction, child_bbox)
-            
-            # If intersects and within current node's range
             if t_min < t_exit and t_max > t_entry:
-                intersecting_children.append((child_idx, t_min, t_max))
-        
-        # Sort children by t_min to process closest first (optional but efficient)
-        intersecting_children.sort(key=lambda x: x[1])
-        
-        # Push to stack
-        for child_idx, t_min, t_max in intersecting_children:
-            stack.append((child_idx, t_min, t_max))
-            
+                stack.append((child_idx, t_min, t_max))
+                
     return active_leaves
 
-def is_node_active(node):
-    """
-    Recursively checks if a node or any of its descendants are active.
-    Optimized by caching the active flag in the node if possible.
-    """
-    if node.is_active_cached:
-        return node.is_active_cached
-        
-    if node.is_leaf:
-        # Leaf is active if it contains data
-        active = node.has_data
-    else:
-        # Branch is active if any child is active
-        active = False
-        for child_idx in node.children:
-            if child_idx is not None:
-                child = node_pool[child_idx]
-                if is_node_active(child):
-                    active = True
-                    break
-                    
-    node.is_active_cached = active
-    return active
+def is_node_active(node_idx, node_pool):
+    """Recursively checks if a node or any of its descendants are active [S5, unofficial]."""
+    if node_idx is None:
+        return False
+    node = node_pool[node_idx]
+    if node.get('active', False):
+        return True
+    for child_idx in node.get('children', []):
+        if child_idx is not None and is_node_active(child_idx, node_pool):
+            return True
+    return False
+
+def ray_box_intersect(o, d, bbox):
+    """Standard slab intersection test for ray and axis-aligned bounding box."""
+    t_min = -float('inf')
+    t_max = float('inf')
+    for i in range(3):
+        inv_d = 1.0 / d[i]
+        t1 = (bbox[0][i] - o[i]) * inv_d
+        t2 = (bbox[1][i] - o[i]) * inv_d
+        t_min = max(t_min, min(t1, t2))
+        t_max = min(t_max, max(t1, t2))
+    return t_min, t_max
+
+def compute_child_bbox(parent_bbox, child_idx):
+    """Returns bounding box for a child based on parent bounds and child index [G]."""
+    # Implementation depends on coordinate system; returns placeholder bbox for structure
+    return parent_bbox
 ```
 
 **Parameters:**
-*   **Max Depth:** Limits the recursion depth to prevent infinite loops or excessive memory usage. Typical values depend on the resolution of the underlying grid [S1, unofficial].
+*   **Max Depth:** Limits the recursion depth to prevent infinite loops or excessive memory usage.
 *   **Threshold Distance:** The maximum $t$ value for which a hit is considered valid (e.g., 10000.0) [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
 *   **Precision:** Small ray direction components can cause division by zero in ray-box intersection tests. Guard against this by clamping small components to a small epsilon value (e.g., $10^{-4}$) [S2, unofficial].
 *   **Boundary Voxels:** Special handling may be required for voxels at the boundary of the grid, where step masks might be zero [S2, unofficial].
-*   **Leaf Identification:** In BVH implementations, leaf nodes are often identified by setting the high bit of child indices ($0x80000000$). If a leaf is the last element and has no sibling, its right child is set to an empty node index (0) [S2, unofficial].
+*   **Leaf Identification:** In BVH implementations, leaf nodes are identified by setting the high bit of child indices ($0x80000000$). If a leaf is the last element and has no sibling, its right child is set to an empty node index (0) [S2, unofficial].
 
 ## Subtopics
 
 ### [Leaf Collection](899-leaf-collection.md)
-Leaf Collection is the post-traversal phase of hierarchical ray-grid traversal that identifies and gathers all terminal nodes (leaves) intersected by the ray grid. It solves the problem of converting a sparse, hierarchical traversal path into a contiguous list of active volumetric blocks required for subsequent ray marching or shading. Unlike sibling methods that may integrate traversal and shading or use different culling strategies, Leaf Collection strictly separates the identification of relevant geometry from the computation of radiance, enabling efficient memory compaction and parallel processing.
+Leaf Collection is the post-traversal phase of hierarchical ray-grid traversal that identifies and gathers all terminal nodes (leaves) intersected by the ray grid [G]. It solves the problem of converting a sparse, hierarchical traversal path into a contiguous list of active volumetric blocks required for subsequent ray marching or shading [G]. Unlike sibling methods that may integrate traversal and shading or use different culling strategies, Leaf Collection strictly separates the identification of relevant geometry from the computation of radiance, enabling efficient memory compaction and parallel processing [G].
 
 ### [Point Plane Test Traversal](982-point-plane-test-traversal.md)
 Point Plane Test Traversal is a method for locating the specific child tetrahedron within a TET-AMR (Tetrahedral Adaptive Mesh Refinement) refinement tree that contains a given query point. It solves the in-element lookup problem by traversing from the coarse root to the leaf (or max depth) using geometric half-space tests against planes defined by edge midpoints, avoiding the redundancy of checking all eight children individually. It is distinguished from [Leaf Collection](899-leaf-collection.md) by its on-the-fly vertex computation and from [VolumeHDDA](2353-volumehdda.md) by its reliance on explicit geometric plane tests rather than incremental rasterization logic.
 
 ### [Mesh BVH](1062-mesh-bvh.md)
-Mesh BVH is a GPU-accelerated bounding volume hierarchy designed for efficient distance queries and sign evaluation on triangle meshes. It solves the performance bottleneck of testing all triangles in large meshes by enabling hierarchical pruning during ray-mesh intersection or point-to-mesh distance calculations. It is distinguished from its siblings by its specific integration into the `isoext.sdf.TriangleMeshSDF` pipeline for signed distance field computation, prioritizing raw speed for refractive path searches over guaranteed convergence properties found in interval-based refinement methods.
+Mesh BVH is a GPU-accelerated bounding volume hierarchy designed for efficient distance queries and sign evaluation on triangle meshes [G]. It solves the performance bottleneck of testing all triangles in large meshes by enabling hierarchical pruning during ray-mesh intersection or point-to-mesh distance calculations [G]. It is distinguished from its siblings by its specific integration into the `isoext.sdf.TriangleMeshSDF` pipeline for signed distance field computation, prioritizing raw speed for refractive path searches over guaranteed convergence properties found in interval-based refinement methods [G].
 
 ### [Multi-Resolution Rendering with K-D Tree](1942-multi-resolution-rendering-with-k-d-tree.md)
 Multi-resolution rendering with K-D Tree is a hierarchical volume rendering technique that accelerates image-order ray casting by storing approximations of the underlying data within K-D tree nodes. It solves the performance bottleneck of rendering large, high-resolution datasets by allowing the renderer to skip detailed traversal when the data within a spatial region can be represented by a simple model within a user-specified error threshold. Unlike wavelet-based methods which store only detail coefficients, this method stores a complete model for each region, enabling fast "preview" images and adaptive detail. It builds on [Hierarchical Traversal](896-hierarchical-traversal.md).
 
 ### VolumeHDDA
-VolumeHDDA is a specialized Hierarchical Digital Differential Analyzer for traversing sparse voxel trees (such as OpenVDB grids) to find ray intersections with active values [S1, S2, unofficial]. It solves the problem of efficiently identifying contiguous active segments along a ray in a hierarchical data structure, skipping inactive regions and coarse tiles when necessary [S1, S2, unofficial]. It differs from its siblings by explicitly templating on a `ChildNodeLevel` to define the entry point for hierarchical recursion, ensuring the traversal terminates at the leaf node level rather than the voxel level [S1, S2, unofficial].
+VolumeHDDA is a specialized Hierarchical Digital Differential Analyzer for traversing sparse voxel trees to find ray intersections with active values [G]. It solves the problem of efficiently identifying contiguous active segments along a ray in a hierarchical data structure, skipping inactive regions and coarse tiles when necessary [G]. It differs from its siblings by explicitly templating on a `ChildNodeLevel` to define the entry point for hierarchical recursion, ensuring the traversal terminates at the leaf node level rather than the voxel level [G].
 
 ### [Coarse Mesh Traversal](3062-coarse-mesh-traversal.md)
 Coarse Mesh Traversal accelerates volume rendering by decoupling global traversal from local sampling [G]. It constructs a simplified coarse mesh from the underlying dataset (typically a refinement tree or AMR structure) to perform fast global culling and bounding volume hierarchy (BVH) traversal, while deferring detailed sampling to a finer level [G]. It sets itself apart from sibling methods like [Leaf Collection](899-leaf-collection.md) and [Point Plane Test Traversal](982-point-plane-test-traversal.md) by explicitly managing the granularity of the coarse mesh to balance BVH efficiency against the overhead of the underlying refinement tree traversal [G].

@@ -1,1736 +1,453 @@
-3D Skew-Normal Splatting
-arXiv:2605.15010v2 [cs.CV] 15 May 2026
-Xiangru Wu
-Fudan University
-xiangruwu22@m.fudan.edu.cn
-Ke Fan
-Fudan University
-kfan21@m.fudan.edu.cn
-Yanwei Fu
-Fudan University
-yanweifu@fudan.edu.cn
-Abstract
-3D Gaussian Splatting (3DGS) has emerged as a leading representation for realtime novel view synthesis and has been widely adopted in various downstream
-applications. The core strength of 3DGS lies in its efficient kernel-based scene
-representation, where Gaussian primitives provide favorable mathematical and
-computational properties. However, under a finite primitive budget, the symmetric
-shape of each primitive directly affects representation compactness, especially
-near asymmetric structures such as object boundaries and one-sided surfaces.
-Recent works have explored more complex kernel distributions; however, they
-either remain within the elliptical family or rely on hard truncation, which limits
-continuous shape control and introduces distributional discontinuities. In this
-paper, we propose Skew-Normal Splatting (SNS), which adopts the Azzalini SkewNormal distribution as the fundamental primitive. By introducing a learnable and
-bounded skewness parameter, SNS can continuously interpolate between symmetric
-Gaussians and Half-Gaussian-like shapes, enabling flexible modeling of both sharp
-boundaries and interior regions. Moreover, SNS preserves analytical tractability
-under affine transformations and marginalization. This property allows seamless
-integration into existing Gaussian Splatting rasterization pipelines. Furthermore, to
-address the strong coupling between scale, rotation, and skewness parameters, we
-introduce a decoupled parameterization and a block-wise optimization strategy to
-enhance training stability and accuracy. Extensive experiments on standard novelview synthesis benchmarks show that SNS consistently improves reconstruction
-quality over Gaussian and recent non-Gaussian kernels, with clearer benefits on
-sharp boundaries and thin or one-sided structures.
-1
-Introduction
-In the field of novel view synthesis, the increasing demand for real-time interactivity has exposed
-the limitations of traditional NeRF-based [1, 2, 3, 4] methods regarding rendering efficiency and
-training overhead. Since its introduction, 3D Gaussian Splatting [5] has rapidly emerged as a
-dominant alternative to early NeRF approaches. By leveraging explicit scene representations and
-fast, differentiable rendering, it achieves a superior balance between visual fidelity and computational
-performance and has been widely used in fields such as robotics [6], autonomous driving [7], and
-cultural heritage preservation [8]. The success of 3D Gaussian Splatting is attributed to its use
-of Gaussian functions as kernels, which provide powerful approximation capabilities alongside
-mathematical and computational efficiency [9, 10]. Nevertheless, the universal approximation
-property of kernel-based methods remains largely a theoretical guarantee, typically predicated on
-the availability of an infinite and sufficiently dense distribution of kernels. In the practical regime
-of a finite primitive budget, the distributional form of each kernel directly dictates representation
-compactness and reconstruction accuracy. Symmetric Gaussian kernels often require multiple
-overlapping primitives to approximate sharp boundaries, leading to redundant representations and
-blurred reconstructions.
-Preprint.
-Figure 1: Reconstruction results. We fit a square wave with different basis models using a sum of four
-primitives from: (a) Gaussian, (b) Skew-Normal, and (c) Half-Gaussian distributions. Their parameters are optimized via gradient descent. Our Skew-Normal model achieves the lowest Mean-Squared
-Error (MSE), demonstrating its better capability in approximating signals with sharp discontinuities.
-Recent efforts [11, 12, 13] have investigated the use of more sophisticated distributions as alternatives
-to the standard Gaussian. Despite some success, these methods still have limitations. Both Generalized
-Exponential Splatting (GES) [13] and Student Splatting and Scooping (SSS) [11] propose to extend
-the Gaussian primitive by modifying the radial density post-whitening; however, such methods are
-still restricted to the elliptical distribution family, which imposes a persistent radial symmetry on the
-representation. Among these efforts, HGS [12] adopts the Half-Gaussian distribution, representing an
-early attempt to introduce asymmetric kernels into scene modeling. However, this approach relies on
-a hard truncation scheme that simply divides a Gaussian distribution at its centroid, thereby offering
-only limited expressivity in terms of skewness. Furthermore, such truncation inherently introduces
-discontinuities into the primitive’s distribution.
-To further characterize the asymmetry that is prevalent in real data, many works in Statistics [14, 15,
-16, 17, 18, 19] extend the Gaussian distribution with additional shape parameters to capture skewness.
-These distributions are widely used in fields such as economics and finance, biomedicine, and spatial
-statistics [20, 21, 22, 23, 24]. Among these works, Azzalini’s Skew-Normal distribution [25] is
-widely regarded as a classical extension of the Gaussian distribution, due to its simplicity and clear
-probabilistic construction, providing a useful reference for our work.
-To this end, we propose Skew-Normal Splatting (SNS), which employs the Skew-Normal distribution
-of Azzalini as the underlying primitive for scene modeling. By subsuming the standard Gaussian
-and half-Gaussian distributions as special or limiting cases, the Skew-Normal distribution provides a
-continuous and tunable mechanism for asymmetric modeling. On one hand, it offers the flexibility
-to capture non-symmetric structures such as sharp edges and corners; on the other, it maintains the
-capacity to effectively represent the interior regions of objects. As Fig. 1 shows, we fit the same
-1D square wave using Gaussian, Skew-Normal, and Half-Gaussian kernels, respectively. For a fair
-comparison, all methods are restricted to 4 components and optimized via gradient descent. The
-Gaussian model exhibits boundary ringing-like artifacts, including overshoot and undershoot near step
-transitions. The Half-Gaussian method offers a marginal improvement but introduces discontinuities
-and sharp peaks at the step changes. In contrast, SNS can effectively fit both sharp edges and flat
-portions of the square wave, demonstrating its superior representational capacity.
-Furthermore, the SNS remains analytically tractable under affine transformations and marginalization.
-Leveraging this mathematical convenience, we re-derive the projection and integration routines
-required to incorporate SNS into the splat-based rasterization pipeline, thereby enabling highly
-efficient computation.
-Beyond its representational benefits, the transition to asymmetric primitives introduces new analytical
-and optimization challenges. We observe that the location parameter of a Skew-Normal distribution
-does not coincide with its spatial mean. We thus derive a corrected operational center to ensure
-accurate bounding-box localization. Furthermore, to resolve the optimization instability caused
-by the coupling between orientation and skewness, we introduce a decoupled parameterization in
-the primitive’s canonical coordinate system, supported by a block-wise alternating update strategy.
-This design effectively reduces parameter interference, ensuring stable convergence and improved
-generalization. Formally, our contributions include:
-2
-SNS
-eye/camera
-lights
-(b) 2D Projection of SNS
-GS
-eye/camera
-lights
-(a) 3D reconstruction using SNS (top) and GS (bottom) primitives
-(c) 2D Projection of GS
-Figure 2: Comparison between Skew-Normal and Gaussian primitives. Standard Gaussian
-primitives are symmetric and often require multiple overlapping kernels to approximate sharp or
-one-sided structures. By contrast, SNS introduces a learnable skewness parameter, enabling diverse
-asymmetric primitives to accurately fit sharp corners and flat surfaces.
-• We introduce Azzalini’s Skew-Normal distribution to Gaussian Splatting, which has varying
-degrees of skewness for 3D scene modeling and can simultaneously handle object boundaries
-and interiors.
-• We derive a complete analytical framework for Skew-Normal kernels, including closed-form
-affine projection, corrected footprint localization, and efficient gradient computation for
-rasterization, preserving compatibility with existing 3DGS pipelines.
-• We identify the optimization coupling between geometric and skewness parameters and
-propose a decoupled reparameterization along with a block-wise alternating update scheme
-to enhance training stability.
-• SNS achieves consistent PSNR gains over recent non-Gaussian variants and improves visual
-preservation of sharp structures and object completeness.
-2
-Related Work
-NeRF methods. Early approaches to 3D reconstruction such as SfM [26, 27] and MVS [28, 29]
-typically rely on explicit geometric estimation. Recently, Neural Radiance Fields (NeRF) [1, 2]
-implicitly learn scene geometry and appearance by parameterizing volumetric density and color
-through neural networks, utilizing volume rendering to synthesize novel views. Mip-NeRF [3] and
-Mip-NeRF 360 [4] reduce aliasing and extend NeRF to unbounded scenes, while explicit or hybrid
-representations such as Plenoxels [30] and K-Planes [31] improve training and rendering efficiency.
-Beyond reconstruction, NeRF has been extended to sparse-view synthesis [32, 33], object-centric
-decomposition [34, 35], neural surface reconstruction [36, 37], and dynamic scene modeling [38, 39],
-substantially advancing neural 3D representations. Despite their strong rendering quality, NeRF-based
-methods typically rely on dense ray sampling and implicit network evaluation, which makes training
-and rendering computationally expensive compared with explicit splatting-based representations.
-Splatting methods. The 3DGS [5] models the scene with optimizable Gaussian elements and projects
-them onto the image plane through an efficient splatting rasterizer, thereby significantly accelerating
-the rendering process. Building upon this paradigm, several works have improved 3DGS across
-multiple dimensions. Mip-Splatting [40] focuses on anti-aliasing and multi-scale rendering, while
-Scaffold-GS [41] and Octree-GS [42] introduce hierarchical structures to enhance representation
-efficiency. To optimize the growth and pruning strategies of Gaussian primitives, Pixel-GS [43] and
-AbsGS [44] refine the density control mechanisms. Furthermore, 3DGS has been extended to a
-broader range of applications: GaussianEditor [45, 46] enables scene editing within the Gaussian
-representation, and 4DGS [47, 48] further generalizes the framework to dynamic scene modeling.
-Collectively, these advancements have established 3DGS as a powerful alternative for efficient 3D
-scene representation and rendering. Beyond these domains, the framework has also been applied
-to 3D content generation [49, 50, 51, 52], language-driven scene understanding [53, 54, 55], and
-3
-3D scene segmentation [56, 57]. More recently, several works have explored extending 3DGS by
-modifying the underlying kernel functions of the Gaussian primitives. For instance, GES [13] adopts
-the Generalized Exponential Function, while SSS employs the Student’s t-distribution [11]. Pushing
-this further, 3D-HGS [12] introduces the half-Gaussian distribution to facilitate the representation
-of more irregular primitives. Unlike GES and SSS, which modify the radial profile after whitening
-and therefore remain largely symmetric in canonical space, our SNS introduces directional skewness
-as an intrinsic primitive parameter. Unlike 3D-HGS, SNS avoids hard truncation and provides a
-continuous path from Gaussian-like to half-Gaussian-like shapes.
-3
-Method
-3.1
-Gaussian Splatting
-Scene Representation. 3DGS models the scene using 3D Gaussian kernels. Each kernel is parameterized by a center position µ ∈ R3 , a 3D covariance matrix Σ ∈ R3×3 , an opacity value o ∈ [0, 1],
-and view-dependent color features c. To ensure positive semi-definiteness during optimization,
-Σ is factorized into a scaling matrix S ∈ R3×3 and a rotation matrix R ∈ R3×3 , formulated as:
-Σ = RSS ⊤ R⊤ . These 3D Gaussians are projected onto the 2D screen space to render images. Given
-a viewing transformation matrix W and the Jacobian of the affine projection approximation J, the
-2D covariance matrix, denoted by Σ′ , can be computed as: Σ′ = JW ΣW ⊤ J ⊤ .
-Volumetric Alpha-Blending. The rendering process evaluates the final color C(u) at pixel u through
-a tile-based rasterizer. Analogous to volumetric rendering, 3DGS performs alpha-blending by sorting
-the projected Gaussians along the ray corresponding to the pixel from front to back. For a set of N
-ordered, intersecting Gaussians, the pixel color is aggregated as [5]:
-C(u) =
-N
-X
-ci ai (u)
-i=1
-i−1
-Y
-(1 − aj (u)) ,
-(1)
-j=1
-where ci is the color evaluated from the SH coefficients. The term ai (u) denotes the spatial influence
-of the i-th Gaussian evaluated at pixel u, which is obtained by multiplying the learned opacity oi with
-the 2D Gaussian kernel:
-
-
-1
-⊤ −1
-(2)
-ai (u) = oi exp − (u − µ̂i ) Σ̂i (u − µ̂i ) ,
-2
-where µ̂i is the projected 2D center position.
-3.2
-3D Skew-Normal Kernel
-We inherit Azzalini’s definition of the Skew-Normal Distribution (SND), which provides directional
-asymmetry through a new parameter α. A d-dimensional SND random variable Y is denoted
-as Y ∼ SN d (µ, Ω, α), where the parameters are called location, scale matrix, and slant [25],
-respectively. The slant parameter α is highly coupled with Ω. When α is kept fixed, applying
-a spatial rotation to the model does not only reorient the primitive but also changes its intrinsic
-geometric shape. To decouple the shape from the orientation, we propose an unnormalized and
-reparameterized 3D Skew-Normal kernel, which is defined by a location vector µ ∈ R3 , a scale
-matrix Ω = RSS ⊤ R⊤ ∈ R3×3 , and a learnable latent variable k ∈ R3 :
-
-SN (x; µ, Ω, k) = G3 (x − µ; Ω) Φ α⊤ ω −1 (x − µ) ,
-(3)
-
-1/2
-where α = ωRS −1 k, ω = (Ω ⊙ I3 ) , G3 (x − µ; Ω) = exp − 21 (x − µ)⊤ Ω−1 (x − µ) , and Φ(·)
-denotes the cumulative distribution function (CDF) of the standard univariate normal distribution.
-The symbol ⊙ refers to the Hadamard product. This formulation provides four main advantages:
-Continuous Shape Interpolation. The Skew-Normal distribution includes the Gaussian and halfGaussian as limiting cases, providing a natural continuum between symmetric and maximally skewed
-geometries. It reduces to a Gaussian ellipsoid when α = 0, and approaches a half-ellipsoid as
-∥α∥ → ∞. As illustrated in Fig. 3, this continuous interpolation enables a single kernel to represent
-a broad spectrum of geometric structures. By increasing the magnitude from ∥k1 ∥ ≈ 2.24 to
-4∥k1 ∥ ≈ 8.94, the kernel reshapes into a sharp half-ellipsoid. Crucially, further scaling to 20∥k1 ∥
-4
-(a) Baseline: k = 0
-4
-(b) Ref: (R1, k1)
-4
-3
-3
-3
-2
-2
-2
-1
-1
-1
-0
-0
-0
-1
-1
-1
-2
-2
-2
-3
-3
-4
-= [0.0, 0.0]
-4
-3
-4
-2
-1
-0
-1
-2
-(d) Direction: (R1, k2)
-3
-4
-4
-3
-= [2.1, 0.2]
-4
-3
-4
-2
-1
-0
-1
-2
-(e) Magnitude: (R1, 4k1)
-3
-4
-4
-3
-3
-2
-2
-2
-1
-1
-1
-0
-0
-0
-1
-1
-1
-2
-2
-2
-3
-3
-4
-4
-3
-2
-1
-0
-1
-2
-3
-4
-4
-3
-= [8.6, 0.8]
-4
-3
-2
-= [ 0.2, 2.1]
-4
-1
-0
-1
-2
-3
-4
-3
-= [2.5, 0.9]
-(c) Rotation: (R2, k1)
-4
-3
-4
-4
-2
-1
-0
-1
-2
-3
-4
-1
-0
-1
-2
-3
-4
-(f) Extreme: (R1, 20k1)
-= [42.8, 3.9]
-4
-3
-2
-Figure 3: Parameter decoupling of bivariate SND. These panels demonstrate the continuous shape
-interpolation and decoupled control of the Skew-Normal density. (a) Baseline standard symmetric
-Gaussian. (b vs. d) Directional control via the orientation of k. (b, e, f) Magnitude variation and
-rapid convergence. (b vs. c) Intrinsic nature demonstrated via rigid global rotation R. In each panel,
-the dashed line indicates the symmetric Gaussian base and the solid lines depict the Skew-Normal
-density. All panels share an identical scaling matrix S.
-yields a slight visual change, demonstrating that the skewness converges rapidly to its limiting form.
-Such flexibility extends the expressive power of Gaussian kernels while preserving a compact and
-principled parameterization.
-Bounded Skewness. The shape of the SND is influenced by the slant α and the scale matrix Ω. To
-provide a single, scalar measure of skewness, Mardia’s measure of skewness [25] is expressed as:
-2 
-
-3
-(2/π)α∗2
-4−π
-M
-γ1,d
-=
-,
-(4)
-2
-1 + (1 − 2/π)α∗2
-1
-M
-where α∗ = α⊤ Ω̄α 2 ∈ [0, ∞). As shown in Eq.(4), γ1,d
-is monotonically increasing with respect
-2
-M
-to α∗ . When α∗ = 0, γ1,d
-= 0; when α∗ → ∞, γ1,d → 2(π−4)
-(π−2)3 , which is approximately 0.99067.
-Therefore, the skewness of the SND is confined to a bounded region, preventing the distribution from
-being excessively stretched. This bounded property is important for the 3DGS framework. 3DGS
-relies on tile-based rasterization, which requires primitives to have a spatially compact footprint
-for efficient bounding box calculation. An unbounded asymmetric tail would cause a primitive to
-intersect with an excessive number of tiles, degrading rendering performance. On the other hand,
-the local affine approximation (via Jacobian J) employed in 3DGS is fundamentally predicated on
-a localized spatial footprint. An arbitrarily extended tail would violate this assumption and lead to
-instability during optimization.
-Decoupled Skewness Measure. By defining the slant parameter as α = ωRS −1 k, we decouple the
-asymmetry of the distribution from its affine transformation components (i.e., R and S). Under this
-reparameterization, the term α∗ in Eq.(4) reduces to the L2 -norm of the skew vector k, implying that
-M
-γ1,d
-is solely determined by ∥k∥2 . It reveals that the magnitude of k comprehensively encapsulates the
-departure from normality. In Fig. 3, panels (b) and (c) share the same k1 but differ in rotation R. The
-resulting density in (c) is a rigid rotation of (b), verifying that k is an intrinsic property defined in the
-primitive’s canonical coordinate system; varying R only alters global orientation without deforming
-5
-the asymmetric kernel itself. Additionally, shifting k’s orientation (e.g., rotating k1 = (2, −1)⊤ to
-k2 while maintaining ∥k1 ∥ = ∥k2 ∥) dictates the specific axis of the skew, remapping the kernel’s
-asymmetry to a new direction.
-Closed-form 2D Projection. The SND is closed under affine transformations. We derive the
-analytical form by projecting a 3D primitive to the 2D image plane. This derivation requires an affine
-transformation matrix A = JW ∈ R2×3 . Formally, a 2D Skew-Normal kernel is described by:
-
-SN 2D (u; µ2D , Ω2D , m2D ) = G2 (u − µ2D ; Ω2D ) Φ (m2D )⊤ (u − µ2D ) .
-(5)
-where u ∈ R2 denotes the pixel coordinate,
-Ω2D = AΩA⊤ ,
-µ2D = Aµ,
-(Ω2D )−1 ARSk
-.
-m2D = p
-1 + k ⊤ k − (ARSk)⊤ (Ω2D )−1 ARSk
-(6)
-The reparameterization of α is essential; otherwise, the diagonal matrix ω remains coupled with the
-inverse 2D covariance, which complicates gradient backpropagation. Although the reparameterized
-expression for m2D appears computationally heavy, we reduce the training cost by restructuring the
-backward propagation paths through algebraic reductions. Details are in appendix A.1 and B.
-3.3
-Forward Modeling of Splatting
-Restricting primitives strictly to a positive density space bounds their representational capacity.
-Following SSS, we allow signed opacity values oi ∈ [−1, 1], enabling primitives to both contribute
-color and subtract volumetric density from the scene. This subtractive capability can represent
-complex topologies with fewer kernels. At a pixel u, the front-to-back alpha blending evaluates as:
-C(u) =
-X
-ci oi SNi2D (u)
-i−1
-Y
-
-1 − oj SNj2D (u) ,
-(7)
-j=1
-i∈N
+# 3D Skew-Normal Splatting
+
+Xiangru Wu Fudan University xiangruwu22@m.fudan.edu.cn
+
+Ke Fan Fudan University kfan21@m.fudan.edu.cn
+
+Yanwei Fu Fudan University yanweifu@fudan.edu.cn
+
+## Abstract
+
+3D Gaussian Splatting (3DGS) has emerged as a leading representation for realtime novel view synthesis and has been widely adopted in various downstream applications. The core strength of 3DGS lies in its efficient kernel-based scene representation, where Gaussian primitives provide favorable mathematical and computational properties. However, under a finite primitive budget, the symmetric shape of each primitive directly affects representation compactness, especially near asymmetric structures such as object boundaries and one-sided surfaces. Recent works have explored more complex kernel distributions; however, they either remain within the elliptical family or rely on hard truncation, which limits continuous shape control and introduces distributional discontinuities. In this paper, we propose Skew-Normal Splatting (SNS), which adopts the Azzalini Skew-Normal distribution as the fundamental primitive. By introducing a learnable and bounded skewness parameter, SNS can continuously interpolate between symmetric Gaussians and Half-Gaussian-like shapes, enabling flexible modeling of both sharp boundaries and interior regions. Moreover, SNS preserves analytical tractability under affine transformations and marginalization. This property allows seamless integration into existing Gaussian Splatting rasterization pipelines. Furthermore, to address the strong coupling between scale, rotation, and skewness parameters, we introduce a decoupled parameterization and a block-wise optimization strategy to enhance training stability and accuracy. Extensive experiments on standard novelview synthesis benchmarks show that SNS consistently improves reconstruction quality over Gaussian and recent non-Gaussian kernels, with clearer benefits on sharp boundaries and thin or one-sided structures.
+
+## 1 Introduction
+
+In the field of novel view synthesis, the increasing demand for real-time interactivity has exposed the limitations of traditional NeRF-based [1, 2, 3, 4] methods regarding rendering efficiency and training overhead. Since its introduction, 3D Gaussian Splatting [5] has rapidly emerged as a dominant alternative to early NeRF approaches. By leveraging explicit scene representations and fast, differentiable rendering, it achieves a superior balance between visual fidelity and computational performance and has been widely used in fields such as robotics [6], autonomous driving [7], and cultural heritage preservation [8]. The success of 3D Gaussian Splatting is attributed to its use of Gaussian functions as kernels, which provide powerful approximation capabilities alongside mathematical and computational efficiency [9, 10]. Nevertheless, the universal approximation property of kernel-based methods remains largely a theoretical guarantee, typically predicated on the availability of an infinite and sufficiently dense distribution of kernels. In the practical regime of a finite primitive budget, the distributional form of each kernel directly dictates representation compactness and reconstruction accuracy. Symmetric Gaussian kernels often require multiple overlapping primitives to approximate sharp boundaries, leading to redundant representations and blurred reconstructions.
+
+
+
+Figure 1: Reconstruction results. We fit a square wave with different basis models using a sum of four primitives from: (a) Gaussian, (b) Skew-Normal, and (c) Half-Gaussian distributions. Their parameters are optimized via gradient descent. Our Skew-Normal model achieves the lowest Mean-Squared Error (MSE), demonstrating its better capability in approximating signals with sharp discontinuities.
+
+Recent efforts [11, 12, 13] have investigated the use of more sophisticated distributions as alternatives to the standard Gaussian. Despite some success, these methods still have limitations. Both Generalized Exponential Splatting (GES) [13] and Student Splatting and Scooping (SSS) [11] propose to extend the Gaussian primitive by modifying the radial density post-whitening; however, such methods are still restricted to the elliptical distribution family, which imposes a persistent radial symmetry on the representation. Among these efforts, HGS [12] adopts the Half-Gaussian distribution, representing an early attempt to introduce asymmetric kernels into scene modeling. However, this approach relies on a hard truncation scheme that simply divides a Gaussian distribution at its centroid, thereby offering only limited expressivity in terms of skewness. Furthermore, such truncation inherently introduces discontinuities into the primitive's distribution.
+
+To further characterize the asymmetry that is prevalent in real data, many works in Statistics [14, 15, 16, 17, 18, 19] extend the Gaussian distribution with additional shape parameters to capture skewness. These distributions are widely used in fields such as economics and finance, biomedicine, and spatial statistics [20, 21, 22, 23, 24]. Among these works, Azzalini's Skew-Normal distribution [25] is widely regarded as a classical extension of the Gaussian distribution, due to its simplicity and clear probabilistic construction, providing a useful reference for our work.
+
+To this end, we propose Skew-Normal Splatting (SNS), which employs the Skew-Normal distribution of Azzalini as the underlying primitive for scene modeling. By subsuming the standard Gaussian and half-Gaussian distributions as special or limiting cases, the Skew-Normal distribution provides a continuous and tunable mechanism for asymmetric modeling. On one hand, it offers the flexibility to capture non-symmetric structures such as sharp edges and corners; on the other, it maintains the capacity to effectively represent the interior regions of objects. As Fig. 1 shows, we fit the same 1D square wave using Gaussian, Skew-Normal, and Half-Gaussian kernels, respectively. For a fair comparison, all methods are restricted to 4 components and optimized via gradient descent. The Gaussian model exhibits boundary ringing-like artifacts, including overshoot and undershoot near step transitions. The Half-Gaussian method offers a marginal improvement but introduces discontinuities and sharp peaks at the step changes. In contrast, SNS can effectively fit both sharp edges and flat portions of the square wave, demonstrating its superior representational capacity.
+
+Furthermore, the SNS remains analytically tractable under affine transformations and marginalization. Leveraging this mathematical convenience, we re-derive the projection and integration routines required to incorporate SNS into the splat-based rasterization pipeline, thereby enabling highly efficient computation.
+
+Beyond its representational benefits, the transition to asymmetric primitives introduces new analytical and optimization challenges. We observe that the location parameter of a Skew-Normal distribution does not coincide with its spatial mean. We thus derive a corrected operational center to ensure accurate bounding-box localization. Furthermore, to resolve the optimization instability caused by the coupling between orientation and skewness, we introduce a decoupled parameterization in the primitive's canonical coordinate system, supported by a block-wise alternating update strategy. This design effectively reduces parameter interference, ensuring stable convergence and improved generalization. Formally, our contributions include:
+
+
+
+Figure 2: Comparison between Skew-Normal and Gaussian primitives. Standard Gaussian primitives are symmetric and often require multiple overlapping kernels to approximate sharp or one-sided structures. By contrast, SNS introduces a learnable skewness parameter, enabling diverse asymmetric primitives to accurately fit sharp corners and flat surfaces.
+
+- We introduce Azzalini's Skew-Normal distribution to Gaussian Splatting, which has varying degrees of skewness for 3D scene modeling and can simultaneously handle object boundaries and interiors.
+- We derive a complete analytical framework for Skew-Normal kernels, including closed-form affine projection, corrected footprint localization, and efficient gradient computation for rasterization, preserving compatibility with existing 3DGS pipelines.
+- We identify the optimization coupling between geometric and skewness parameters and propose a decoupled reparameterization along with a block-wise alternating update scheme to enhance training stability.
+- SNS achieves consistent PSNR gains over recent non-Gaussian variants and improves visual preservation of sharp structures and object completeness.
+
+## 2 Related Work
+
+NeRF methods. Early approaches to 3D reconstruction such as SfM [26, 27] and MVS [28, 29] typically rely on explicit geometric estimation. Recently, Neural Radiance Fields (NeRF) [1, 2] implicitly learn scene geometry and appearance by parameterizing volumetric density and color through neural networks, utilizing volume rendering to synthesize novel views. Mip-NeRF [3] and Mip-NeRF 360 [4] reduce aliasing and extend NeRF to unbounded scenes, while explicit or hybrid representations such as Plenoxels [30] and K-Planes [31] improve training and rendering efficiency. Beyond reconstruction, NeRF has been extended to sparse-view synthesis [32, 33], object-centric decomposition [34, 35], neural surface reconstruction [36, 37], and dynamic scene modeling [38, 39], substantially advancing neural 3D representations. Despite their strong rendering quality, NeRF-based methods typically rely on dense ray sampling and implicit network evaluation, which makes training and rendering computationally expensive compared with explicit splatting-based representations.
+
+Splatting methods. The 3DGS [5] models the scene with optimizable Gaussian elements and projects them onto the image plane through an efficient splatting rasterizer, thereby significantly accelerating the rendering process. Building upon this paradigm, several works have improved 3DGS across multiple dimensions. Mip-Splatting [40] focuses on anti-aliasing and multi-scale rendering, while Scaffold-GS [41] and Octree-GS [42] introduce hierarchical structures to enhance representation efficiency. To optimize the growth and pruning strategies of Gaussian primitives, Pixel-GS [43] and AbsGS [44] refine the density control mechanisms. Furthermore, 3DGS has been extended to a broader range of applications: GaussianEditor [45, 46] enables scene editing within the Gaussian representation, and 4DGS [47, 48] further generalizes the framework to dynamic scene modeling. Collectively, these advancements have established 3DGS as a powerful alternative for efficient 3D scene representation and rendering. Beyond these domains, the framework has also been applied to 3D content generation [49, 50, 51, 52], language-driven scene understanding [53, 54, 55], and
+
+3D scene segmentation [56, 57]. More recently, several works have explored extending 3DGS by modifying the underlying kernel functions of the Gaussian primitives. For instance, GES [13] adopts the Generalized Exponential Function, while SSS employs the Student's t-distribution [11]. Pushing this further, 3D-HGS [12] introduces the half-Gaussian distribution to facilitate the representation of more irregular primitives. Unlike GES and SSS, which modify the radial profile after whitening and therefore remain largely symmetric in canonical space, our SNS introduces directional skewness as an intrinsic primitive parameter. Unlike 3D-HGS, SNS avoids hard truncation and provides a continuous path from Gaussian-like to half-Gaussian-like shapes.
+
+#### 3 Method
+
+#### 3.1 Gaussian Splatting
+
+Scene Representation. 3DGS models the scene using 3D Gaussian kernels. Each kernel is parameterized by a center position µ ∈ R 3 , a 3D covariance matrix Σ ∈ R 3×3 , an opacity value o ∈ [0, 1], and view-dependent color features c. To ensure positive semi-definiteness during optimization, Σ is factorized into a scaling matrix S ∈ R 3×3 and a rotation matrix R ∈ R 3×3 , formulated as: Σ = RSS⊤R⊤. These 3D Gaussians are projected onto the 2D screen space to render images. Given a viewing transformation matrix W and the Jacobian of the affine projection approximation J, the 2D covariance matrix, denoted by Σ ′ , can be computed as: Σ ′ = JWΣW⊤J ⊤.
+
+Volumetric Alpha-Blending. The rendering process evaluates the final color C(u) at pixel u through a tile-based rasterizer. Analogous to volumetric rendering, 3DGS performs alpha-blending by sorting the projected Gaussians along the ray corresponding to the pixel from front to back. For a set of N ordered, intersecting Gaussians, the pixel color is aggregated as [5]:
+
+|                                                                               | $\mathcal{N}$ | $i-1$ |     |
+|-------------------------------------------------------------------------------|---------------|-------|-----|
+| $C(u) = \sum_{i=1}^{\mathcal{N}} c_i a_i(u) \prod_{j=1}^{i-1} (1 - a_j(u))$ , |               |       | (1) |
+
+where ci is the color evaluated from the SH coefficients. The term ai(u) denotes the spatial influence of the i-th Gaussian evaluated at pixel u, which is obtained by multiplying the learned opacity oi with the 2D Gaussian kernel:
+
+$$a_i(u) = o_i \exp \left( -\frac{1}{2}(u - \hat{\mu}_i)^\top \hat{\Sigma}_i^{-1}(u - \hat{\mu}_i) \right), \quad (2)$$
+
+where µˆi is the projected 2D center position.
+
+#### 3.2 3D Skew-Normal Kernel
+
+We inherit Azzalini's definition of the Skew-Normal Distribution (SND), which provides directional asymmetry through a new parameter α. A d-dimensional SND random variable Y is denoted as Y ∼ SN d(µ, Ω, α), where the parameters are called location, scale matrix, and slant [25], respectively. The slant parameter α is highly coupled with Ω. When α is kept fixed, applying a spatial rotation to the model does not only reorient the primitive but also changes its intrinsic geometric shape. To decouple the shape from the orientation, we propose an unnormalized and reparameterized 3D Skew-Normal kernel, which is defined by a location vector µ ∈ R 3 , a scale matrix Ω = RSS⊤R⊤ ∈ R 3×3 , and a learnable latent variable k ∈ R 3 :
+
+$$SN(x; \mu, \Omega, k) = G_3(x - \mu; \Omega) \Phi \left( \alpha^\top \omega^{-1}(x - \mu) \right), \quad (3)$$
+
+where α = ωRS−1k, ω = (Ω ⊙ I3) 1/2 , G3(x − µ; Ω) = exp − 2 (x − µ) ⊤Ω −1 (x − µ) , and Φ(·) denotes the cumulative distribution function (CDF) of the standard univariate normal distribution. The symbol ⊙ refers to the Hadamard product. This formulation provides four main advantages:
+
+Continuous Shape Interpolation. The Skew-Normal distribution includes the Gaussian and half-Gaussian as limiting cases, providing a natural continuum between symmetric and maximally skewed geometries. It reduces to a Gaussian ellipsoid when α = 0, and approaches a half-ellipsoid as ∥α∥ → ∞. As illustrated in Fig. 3, this continuous interpolation enables a single kernel to represent a broad spectrum of geometric structures. By increasing the magnitude from ∥k1∥ ≈ 2.24 to 4∥k1∥ ≈ 8.94, the kernel reshapes into a sharp half-ellipsoid. Crucially, further scaling to 20∥k1∥
+
+
+
+Figure 3: Parameter decoupling of bivariate SND. These panels demonstrate the continuous shape interpolation and decoupled control of the Skew-Normal density. (a) Baseline standard symmetric Gaussian. (b vs. d) Directional control via the orientation of k. (b, e, f) Magnitude variation and rapid convergence. (b vs. c) Intrinsic nature demonstrated via rigid global rotation R. In each panel, the dashed line indicates the symmetric Gaussian base and the solid lines depict the Skew-Normal density. All panels share an identical scaling matrix S.
+
+yields a slight visual change, demonstrating that the skewness converges rapidly to its limiting form. Such flexibility extends the expressive power of Gaussian kernels while preserving a compact and principled parameterization.
+
+Bounded Skewness. The shape of the SND is influenced by the slant α and the scale matrix Ω. To provide a single, scalar measure of skewness, Mardia's measure of skewness [25] is expressed as:
+
+
+$$\gamma_{1,d}^M = \left( \frac{4 - \pi}{2} \right)^2 \left( \frac{(2/\pi)\alpha_*^2}{1 + (1 - 2/\pi)\alpha_*^2} \right)^3, \quad (4)$$
+
+where α∗ = α ⊤Ω¯α 1 2 ∈ 0,∞). As shown in Eq.[\(4\), γM 1,d is monotonically increasing with respect to α∗. When α∗ = 0, γM 1,d = 0; when α∗ → ∞, γ1,d → 2(π−4)2 (π−2)3 , which is approximately 0.99067. Therefore, the skewness of the SND is confined to a bounded region, preventing the distribution from being excessively stretched. This bounded property is important for the 3DGS framework. 3DGS relies on tile-based rasterization, which requires primitives to have a spatially compact footprint for efficient bounding box calculation. An unbounded asymmetric tail would cause a primitive to intersect with an excessive number of tiles, degrading rendering performance. On the other hand, the local affine approximation (via Jacobian J) employed in 3DGS is fundamentally predicated on a localized spatial footprint. An arbitrarily extended tail would violate this assumption and lead to instability during optimization.
+
+Decoupled Skewness Measure. By defining the slant parameter as α = ωRS−1k, we decouple the asymmetry of the distribution from its affine transformation components (i.e., R and S). Under this reparameterization, the term α∗ in Eq.\(4\) reduces to the L2-norm of the skew vector k, implying that γM 1,d is solely determined by ∥k∥2. It reveals that the magnitude of k comprehensively encapsulates the departure from normality. In Fig. 3, panels (b) and (c) share the same k1 but differ in rotation R. The resulting density in (c) is a rigid rotation of (b), verifying that k is an intrinsic property defined in the primitive's canonical coordinate system; varying R only alters global orientation without deforming
+
+the asymmetric kernel itself. Additionally, shifting k's orientation (e.g., rotating k1 = (2, −1)⊤ to k2 while maintaining ∥k1∥ = ∥k2∥) dictates the specific axis of the skew, remapping the kernel's asymmetry to a new direction.
+
+Closed-form 2D Projection. The SND is closed under affine transformations. We derive the analytical form by projecting a 3D primitive to the 2D image plane. This derivation requires an affine transformation matrix A = JW ∈ R 2×3 . Formally, a 2D Skew-Normal kernel is described by:
+
+
+$$SN^{2D}(u; \mu^{2D}, \Omega^{2D}, m^{2D}) = G_2(u - \mu^{2D}; \Omega^{2D}) \Phi \left( (m^{2D})^\top (u - \mu^{2D}) \right). \quad (5)$$
+
+where u ∈ R 2 denotes the pixel coordinate,
+
+
+$$\mu^{2D} = A\mu, \quad \Omega^{2D} = A\Omega A^\top,$$
+
+$$m^{2D} = \frac{(\Omega^{2D})^{-1} ARSk}{\sqrt{1 + k^\top k} - (ARSk)^\top (\Omega^{2D})^{-1} ARSk}. \quad (6)$$
+
+The reparameterization of α is essential; otherwise, the diagonal matrix ω remains coupled with the inverse 2D covariance, which complicates gradient backpropagation. Although the reparameterized expression for m2D appears computationally heavy, we reduce the training cost by restructuring the backward propagation paths through algebraic reductions. Details are in appendix A.1 and B.
+
+#### 3.3 Forward Modeling of Splatting
+
+Restricting primitives strictly to a positive density space bounds their representational capacity. Following SSS, we allow signed opacity values oi ∈ [−1, 1], enabling primitives to both contribute color and subtract volumetric density from the scene. This subtractive capability can represent complex topologies with fewer kernels. At a pixel u, the front-to-back alpha blending evaluates as:
+
+$$C(u) = \sum_{i \in \mathcal{N}} c_i o_i SN_i^{2D}(u) \prod_{j=1}^{i-1} (1 - o_j SN_j^{2D}(u)), \quad (7)$$
+
 where N is the depth-sorted set of intersecting kernels.
-Traditional splatting frameworks, such as 3DGS and SSS, anchor their tile-based bounding boxes to
-the nominal location parameter µ2D , which is the mean of the distribution. As shown in Fig. 3, µ2D
-deviates from the spatial mean because the slant parameter α shifts the probability mass. Relying on
-µ2D for bounding boxes localization is ineffective in capturing the spatial density of skewed objects.
-To address this, we physically shift the 2D footprint to the true spatial mean, deriving the corrected
-operational center, µbbox , as a deterministic spatial offset:
-r
-2
-ARSk
-µbbox = µ2D +
-·√
-.
-(8)
-π
-1 + k⊤ k
-3.4
-Stable Optimization via Parameter Decoupling
-Optimizing Skew-Normal kernels is particularly challenging due to the coupling between the geometric and skewness parameters. We update the positional parameters µ using Stochastic Gradient
-Hamiltonian Monte Carlo (SGHMC) [11], which introduces stochasticity to help the model escape
-local minima. The greater challenge, however, comes from the slant parameter α, as it deeply couples
-the rotation R, scaling S, and the latent variable k. We decouple them from two perspectives:
-Internal parameter dependencies. As in Sec. 3.2, the magnitude of parameter k explicitly determines the skewness. We therefore factorize k into an independent magnitude scalar mk ∈ R+ and a
-direction vector dk ∈ R3 (∥dk ∥2 = 1). We further parametrize the magnitude and direction as:
-mk =
-8
-,
-1 + exp(− x6 )
-dk =
-v
-∥v∥2 + ϵ
-,
-(9)
-where x ∈ R, v ∈ R3 . This structural decomposition isolates the skew direction and skew intensity,
-allowing the model to optimize them independently.
-6
-Table 1: Quantitative comparison with baselines. The best and second-best results are highlighted
-in dark red and light red, respectively.
-Dataset
-Method
-Mip-NeRF360
-PSNR ↑ SSIM↑ LPIPS↓
-Tanks&Temples
-PSNR ↑ SSIM↑ LPIPS↓
-Deep Blending
-PSNR ↑ SSIM↑ LPIPS↓
-Mip-NeRF
-3DGS
-GES
-3DHGS
-Fre-GS
-Scaffold-GS
-3DGS-MCMC
-SSS
-29.23
-28.69
-28.72
-29.56
-27.85
-28.84
-29.89
-29.90
-0.844
-0.870
-0.794
-0.873
-0.826
-0.848
-0.900
-0.893
-0.207
-0.182
-0.250
-0.178
-0.209
-0.220
-0.190
-0.145
-22.22
-23.14
-23.34
-24.50
-23.96
-23.96
-24.29
-24.87
-0.759
-0.841
-0.836
-0.857
-0.841
-0.853
-0.860
-0.873
-0.257
-0.183
-0.198
-0.169
-0.183
-0.177
-0.190
-0.138
-29.40
-29.41
-29.82
-29.76
-29.93
-30.21
-29.67
-30.07
-0.901
-0.903
-0.901
-0.905
-0.904
-0.906
-0.890
-0.907
-0.245
-0.243
-0.252
-0.242
-0.240
-0.254
-0.320
-0.247
-Ours
-30.17
-0.895
-0.144
-25.08
-0.877
-0.132
-30.30
-0.912
-0.244
-Inter-parameter interference. Although decomposing k into magnitude and direction improves
-stability, updating shape parameters (R, S, mk , dk ) simultaneously still leads to suboptimal convergence. Specifically, adjustments to the base ellipsoid’s orientation frequently conflict with the
-skew direction. To address this, we divide the training process into two phases. First, all parameters
-(R, S, mk , dk ) are jointly optimized using standard Adam to establish a reasonable global structure.
-In the second phase, a Block Coordinate Descent (BCD) strategy is activated. The optimization
-follows a cyclic alternating schedule: in the first part of each cycle, the ellipsoidal base parameters
-(R, S) are updated while the skew parameters (mk , dk ) are frozen; in the second part, (mk , dk ) are
-refined while (R, S) are held constant.
-While SGHMC is utilized for the positional parameters µ, the Adam optimizer is employed for all
-remaining variables. SGHMC naturally provides stochastic global search, preventing positional
-parameters from collapsing into local minima. Meanwhile, the alternating update scheme governs the
-shape parameters, ensuring geometric stability throughout training.
-4
-Experiments
-Datasets and Metrics. We evaluate SNS on 11 scenes across 3 datasets to validate our contributions:
-7 scenes from Mip-NeRF 360 [4], 2 scenes from Tanks & Temples [58], and 2 scenes from Deep
-Blending [59]. Following the standard evaluation metrics, we employ three metrics: Peak Signal-toNoise Ratio (PSNR), Structural Similarity Index Measure (SSIM), and Learned Perceptual Image
-Patch Similarity (LPIPS). We report dataset-level averages, with per-scene results in the appendix.
-Baselines. (1) kernel-level variants such as GES [13], 3D-HGS [12] and SSS [11], which introduce
-non-Gaussian primitives; (2) optimization-focused methods like Scaffold-GS [41], Fre-GS [60]
-and 3DGS-MCMC [61]; and (3) Neural Radiance Field method such as Mip-NeRF [3]. For a fair
-comparison, we use the results either from original papers or run publicly available implementations
-under the same settings.
-Implementation Details. Our model is implemented in PyTorch, with the core rasterization engine
-extended from the 3DGS framework to support the asymmetric 2D Skew-Normal kernel. All
-experiments are conducted on NVIDIA RTX A6000 GPUs. In terms of computational efficiency,
-SNS demonstrates a training overhead comparable to SSS; for instance, in the drjohnson scene, SNS
-completes 30,000 iterations in 38m 4s (29.89 dB PSNR), while SSS requires 38m 7s (29.66 dB
-PSNR) on the same test set.
-4.1
-Results
-Performance Comparison.
-We report the quantitative comparison of our method with state-of-the-art methods in Tab. 1. Overall,
-our method achieves the best or highly competitive results across all datasets and metrics, validating
-the effectiveness and robustness of the proposed approach. Our method showed the most consistent
-7
-GT
-3DGS
-GES
-3DHGS
-3DGS-MCMC
-SSS
-Ours
-(a) kitchen
-(b) bonsai
-(c) room
-(d) train
-(e) drjohnson
-Figure 4: Reconstruction quality. We visualize five representative scenes, highlighting and zooming
-in on regions exhibiting the most prominent differences for comparison.
-and strongest performance on PSNR, achieving 30.17 on Mip-NeRF360, 25.08 on Tanks&Temples,
-and 30.30 on Deep Blending. The improvement is most notable on Tanks&Temples. Compared
-with SSS, the strongest baseline, our method achieves higher PSNR (24.87→25.08) and SSIM
-(0.873→0.877), and lower LPIPS (0.138→0.132) on Tanks&Temples. SNS remains highly competitive on SSIM for Mip-NeRF360 and LPIPS for Deep Blending, achieving results nearly on par with
-the best-performing methods.
-Qualitative Results. Our method demonstrates better object completeness across multiple scenes in
-Fig. 4. For locally complex objects, such as the curtain above the window in the room scene and
-the tower-shaped structure in the train scene, our method maintains the complete structure and clear
-boundaries. In contrast, SSS and 3DGS-MCMC exhibit noticeable missing regions in the train scene,
-while GS and 3DHGS produce holes and fuzzy boundaries in the room scene.
-In terms of texture clarity, our method more effectively preserves high-frequency details. For example,
-the wavy stripes on top of the transparent plastic box in the bonsai scene, the texture and shadows
-on the cloth behind the chair in the kitchen scene, and the distant trees in the train scene are all
-reconstructed and rendered with clearer details. By contrast, the original GS produces over-smoothed
-reconstructions in texture-rich regions, leading to noticeable blur. Besides, in the drjohnson scene,
-SNS exhibits the mildest artifacts among all compared methods. These results show that our method
-better handles complex regions in novel view synthesis.
-Different kernels comparison. Table 2 provides the detailed PSNR scores evaluated with GS, GES,
-HGS, SSS, and our SNS. In this comparison, we treat standard 3DGS as the baseline. Across all
-8
-Table 2: Per-scene PSNR comparison of various reconstruction kernels. We provide a detailed
-PSNR evaluation of the methods using different base kernels across the Mip-NeRF 360, Deep
-Blending, and Tanks&Temples datasets. The best and second-best results are highlighted in dark red
-and light red, respectively.
-Method
-3DGS
-GES
-3D-HGS
-SSS
-SNS (Ours)
-Bicycle
-Bonsai
-Mip-NeRF 360
-Counter Garden Kitchen
-Room
-Stump
-Tanks&Temples
-Train
-Truck
-25.25
-24.87
-25.39
-25.68
-25.85
-31.98
-31.97
-33.30
-33.50
-33.70
-28.70
-28.75
-29.62
-29.87
-30.27
-30.63
-31.17
-32.12
-32.57
-33.02
-26.55
-26.17
-26.64
-27.17
-27.31
-21.09
-21.73
-22.95
-23.32
-23.61
-27.41
-27.07
-27.68
-28.09
-28.22
-30.32
-31.07
-32.17
-32.43
-32.81
-Deep Blending
-Playroom DrJohnson
-25.18
-24.94
-26.04
-26.41
-26.56
-30.04
-30.29
-30.20
-30.47
-30.71
-28.77
-29.35
-29.32
-29.66
-29.89
-Table 3: Summary ablation across datasets. We present the average performance of our Full SNS
-compared with its ablated versions across three main datasets. The best and second-best results are
-highlighted in dark red and light red, respectively.
-Dataset
-Model Variants
-Mip-NeRF360
-PSNR ↑ SSIM↑ LPIPS↓
-Tanks&Temples
-PSNR ↑ SSIM↑ LPIPS↓
-Deep Blending
-PSNR ↑ SSIM↑ LPIPS↓
-Vanilla SNS
-k-decomposition
-Alternating Optimization
-30.0643
-30.1204
-30.1390
-0.8942
-0.8950
-0.8949
-0.1443
-0.1442
-0.1445
-25.0388
-25.0090
-25.0328
-0.8765
-0.8768
-0.8776
-0.1324
-0.1319
-0.1322
-30.1581
-30.1185
-30.2969
-0.9097
-0.9118
-0.9122
-0.2448
-0.2441
-0.2436
-Full SNS
-30.1700
-0.8954
-0.1445
-25.0839
-0.8775
-0.1325
-30.3034
-0.9119
-0.2444
-scenes, SNS outperforms all other models by at least 0.1 dB. For example, our method outperforms
-SSS by 0.45 dB on the Room scene, 0.29 dB on the Train scene, and 0.24 dB on the Playroom scene.
-Overall, our SN formulation consistently delivers the best performance across all tested 3D scenes.
-4.2
-Ablations
-Table 3 details the ablation study on individual module contributions. Using the vanilla Skew-Normal
-distribution as our baseline, we compare three configurations: (1) k-decomposition: Decomposes
-the skew vector k into magnitude and direction, without alternating optimization. (2) Alternating
-optimization: Alternately optimizes (R, S) and k, without k-decomposition. (3) Full model:
-Incorporates both k-decomposition and alternating optimization. Full experimental results are
-available in Appendix C.
-Both modules contribute to the final performance through distinct mechanisms. Alternating optimization yields consistent improvements in pixel-level reconstruction, increasing mean PSNR from
-30.06 to 30.14 on Mip-NeRF 360 and from 30.16 to 30.30 on Deep Blending. This indicates that
-alternating updates for (R, S) and k effectively decouple geometric parameters from skew parameters, stabilizing the optimization process. Meanwhile, k-decomposition consistently enhances SSIM
-and LPIPS across all datasets, suggesting that decomposing the skew vector into magnitude and
-direction provides a superior parameterization that improves optimization dynamics. The full model
-delivers the most significant gains in PSNR, while maintaining highly competitive LPIPS and SSIM
-performance across scenes. Thus, these results suggest that the two optimization components provide
-complementary but moderate gains. The full model achieves the best average PSNR across all
-datasets, while individual variants may slightly outperform it on perceptual metrics in some cases,
-indicating that the modules mainly improve reconstruction fidelity and stability rather than uniformly
-optimizing every metric.
-5
-Conclusion
-We propose Skew-Normal Splatting, which introduces controllable skewness into Gaussian Splatting
-to better represent asymmetric geometries, sharp boundaries, and one-sided structures. SNS preserves
-analytical projection for efficient splatting and further improves optimization stability through
-decoupled parameterization and block-wise updates. Experiments show consistent improvements
-over existing Gaussian and non-Gaussian kernels.
-9
-References
-[1] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi,
-and Ren Ng. NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis. In
-Andrea Vedaldi, Horst Bischof, Thomas Brox, and Jan-Michael Frahm, editors, Computer Vision
-- ECCV 2020 - 16th European Conference, Glasgow, UK, August 23-28, 2020, Proceedings,
-Part I, Lecture Notes in Computer Science, pages 405–421. Springer, 2020.
-[2] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi,
-and Ren Ng. NeRF: representing scenes as neural radiance fields for view synthesis. Commun.
-ACM, 65(1):99–106, 2022.
-[3] Jonathan T. Barron, Ben Mildenhall, Matthew Tancik, Peter Hedman, Ricardo Martin-Brualla,
-and Pratul P. Srinivasan. Mip-NeRF: A Multiscale Representation for Anti-Aliasing Neural
-Radiance Fields. In 2021 IEEE/CVF International Conference on Computer Vision, ICCV 2021,
-Montreal, QC, Canada, October 10-17, 2021, pages 5835–5844. IEEE, 2021.
-[4] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, and Peter Hedman.
-Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields. In IEEE/CVF Conference
-on Computer Vision and Pattern Recognition, CVPR 2022, New Orleans, LA, USA, June 18-24,
-2022, pages 5460–5469. IEEE, 2022.
-[5] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3D Gaussian
-Splatting for Real-Time Radiance Field Rendering. ACM Trans. Graph., 42(4):139:1–139:14,
-2023.
-[6] Nikhil Varma Keetha, Jay Karhade, Krishna Murthy Jatavallabhula, Gengshan Yang, Sebastian A. Scherer, Deva Ramanan, and Jonathon Luiten. SplaTAM: Splat, Track & Map 3D
-Gaussians for Dense RGB-D SLAM. In IEEE/CVF Conference on Computer Vision and Pattern
-Recognition, CVPR 2024, Seattle, WA, USA, June 16-22, 2024, pages 21357–21366. IEEE,
-2024.
-[7] Xiaoyu Zhou, Zhiwei Lin, Xiaojun Shan, Yongtao Wang, Deqing Sun, and Ming-Hsuan
-Yang. DrivingGaussian: Composite Gaussian Splatting for Surrounding Dynamic Autonomous
-Driving Scenes. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR
-2024, Seattle, WA, USA, June 16-22, 2024, pages 21634–21643. IEEE, 2024.
-[8] Mahtab Dahaghin, Myrna C. Silva, Kourosh Riahidehkordi, Matteo Toso, and Alessio Del Bue.
-Gaussian Heritage: 3D Digitization of Cultural Heritage with Integrated Object Segmentation.
-CoRR, abs/2409.19039, 2024.
-[9] Matthias Zwicker, Hanspeter Pfister, Jeroen Van Baar, and Markus Gross. Ewa volume splatting.
-In Proceedings Visualization, 2001. VIS’01., pages 29–538. IEEE, 2001.
-[10] Matthias Zwicker, Hanspeter Pfister, Jeroen Van Baar, and Markus Gross. Ewa splatting. IEEE
-Transactions on Visualization & Computer Graphics, 8(03):223–238, 2002.
-[11] Jialin Zhu, Jiangbei Yue, Feixiang He, and He Wang. 3D Student Splatting and Scooping. In
-IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2025, Nashville,
-TN, USA, June 11-15, 2025, pages 21045–21054. Computer Vision Foundation / IEEE, 2025.
-[12] Haolin Li, Jinyang Liu, Mario Sznaier, and Octavia I. Camps. 3D-HGS: 3D Half-Gaussian
-Splatting. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2025,
-Nashville, TN, USA, June 11-15, 2025, pages 10996–11005. Computer Vision Foundation /
-IEEE, 2025.
-[13] Abdullah Hamdi, Luke Melas-Kyriazi, Jinjie Mai, Guocheng Qian, Ruoshi Liu, Carl Vondrick,
-Bernard Ghanem, and Andrea Vedaldi. GES: Generalized Exponential Splatting for Efficient Radiance Field Rendering. In IEEE/CVF Conference on Computer Vision and Pattern Recognition,
-CVPR 2024, Seattle, WA, USA, June 16-22, 2024, pages 19812–19822. IEEE, 2024.
-[14] Debasis Kundu. Geometric Skew Normal Distribution. Sankhya B, 76:167 – 189, 2014.
-10
-[15] David Elal-Olivero. ALPHA-SKEW-NORMAL DISTRIBUTION. Proyecciones (antofagasta),
-29:224–240, 2010.
-[16] Valentina Mameli and Monica Musio. A Generalization of the Skew-Normal Distribution: The
-Beta Skew-Normal. Communications in Statistics - Theory and Methods, 42:2229 – 2244, 2011.
-[17] Govind S. Mudholkar and Alan David Hutson. The epsilon-skew-normal distribution for
-analyzing near-normal data. Journal of Statistical Planning and Inference, 83:291–309, 2000.
-[18] Reinaldo Boris Arellano-Valle and Adelchi Azzalini. On the Unification of Families of Skewnormal Distributions. Scandinavian Journal of Statistics, 33, 2006.
-[19] Barry C Arnold and Robert J Beaver. Hidden truncation models. Sankhyā: The Indian Journal
-of Statistics, Series A, pages 23–35, 2000.
-[20] Raluca Vernic. Multivariate skew-normal distributions with applications in insurance. Insurance:
-Mathematics and economics, 38(2):413–426, 2006.
-[21] Benoı^t Carmichael and Alain Coën. Asset pricing with skewed-normal return. Finance
-Research Letters, 10(2):50–57, 2013.
-[22] Sylvia Frühwirth-Schnatter and Saumyadipta Pyne. Bayesian inference for finite mixtures of
-univariate and multivariate skew-normal and skew-t distributions. Biostatistics, 11(2):317–336,
-2010.
-[23] Kjartan Rimstad and Henning Omre. Skew-Gaussian random fields. Spatial Statistics, 10:43–62,
-2014.
-[24] Hao Zhang and Abdel El-Shaarawi. On spatial skew-Gaussian processes and applications.
-Environmetrics: The official journal of the International Environmetrics Society, 21(1):33–47,
-2010.
-[25] A. Azzalini and A. Capitanio. Statistical Applications of the Multivariate Skew Normal Distribution. Journal of the Royal Statistical Society Series B: Statistical Methodology, 61(3):579–602,
-September 1999.
-[26] Johannes L. Schönberger and Jan-Michael Frahm. Structure-from-Motion Revisited. In 2016
-IEEE Conference on Computer Vision and Pattern Recognition, CVPR 2016, Las Vegas, NV,
-USA, June 27-30, 2016, pages 4104–4113. IEEE Computer Society, 2016.
-[27] Xingkui Wei, Yinda Zhang, Zhuwen Li, Yanwei Fu, and Xiangyang Xue. DeepSFM: Structure
-from Motion via Deep Bundle Adjustment. In Andrea Vedaldi, Horst Bischof, Thomas Brox,
-and Jan-Michael Frahm, editors, Computer Vision - ECCV 2020 - 16th European Conference,
-Glasgow, UK, August 23-28, 2020, Proceedings, Part I, Lecture Notes in Computer Science,
-pages 230–247. Springer, 2020.
-[28] Yao Yao, Zixin Luo, Shiwei Li, Tian Fang, and Long Quan. MVSNet: Depth Inference for
-Unstructured Multi-view Stereo. In Vittorio Ferrari, Martial Hebert, Cristian Sminchisescu,
-and Yair Weiss, editors, Computer Vision - ECCV 2018 - 15th European Conference, Munich,
-Germany, September 8-14, 2018, Proceedings, Part VIII, Lecture Notes in Computer Science,
-pages 785–801. Springer, 2018.
-[29] Chenjie Cao, Xinlin Ren, and Yanwei Fu. MVSFormer: Multi-View Stereo by Learning Robust
-Image Features and Temperature-based Depth. Trans. Mach. Learn. Res., 2022, 2022.
-[30] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht, and Angjoo
-Kanazawa. Plenoxels: Radiance Fields without Neural Networks. In IEEE/CVF Conference on
-Computer Vision and Pattern Recognition, CVPR 2022, New Orleans, LA, USA, June 18-24,
-2022, pages 5491–5500. IEEE, 2022.
-[31] Sara Fridovich-Keil, Giacomo Meanti, Frederik Rahbæk Warburg, Benjamin Recht, and Angjoo
-Kanazawa. K-Planes: Explicit Radiance Fields in Space, Time, and Appearance. In IEEE/CVF
-Conference on Computer Vision and Pattern Recognition, CVPR 2023, Vancouver, BC, Canada,
-June 17-24, 2023, pages 12479–12488. IEEE, 2023.
-11
-[32] Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa. pixelNeRF: Neural Radiance
-Fields From One or Few Images. In IEEE Conference on Computer Vision and Pattern
-Recognition, CVPR 2021, virtual, June 19-25, 2021, pages 4578–4587. Computer Vision
-Foundation / IEEE, 2021.
-[33] Qianqian Wang, Zhicheng Wang, Kyle Genova, Pratul P. Srinivasan, Howard Zhou, Jonathan T.
-Barron, Ricardo Martin-Brualla, Noah Snavely, and Thomas A. Funkhouser. IBRNet: Learning
-Multi-View Image-Based Rendering. In IEEE Conference on Computer Vision and Pattern
-Recognition, CVPR 2021, virtual, June 19-25, 2021, pages 4690–4699. Computer Vision
-Foundation / IEEE, 2021.
-[34] Hong-Xing Yu, Leonidas J. Guibas, and Jiajun Wu. Unsupervised Discovery of Object Radiance
-Fields. In The Tenth International Conference on Learning Representations, ICLR 2022, Virtual
-Event, April 25-29, 2022. OpenReview.net, 2022.
-[35] Di Qi, Tong Yang, and Xiangyu Zhang. Slot-guided Volumetric Object Radiance Fields. In
-Alice Oh, Tristan Naumann, Amir Globerson, Kate Saenko, Moritz Hardt, and Sergey Levine,
-editors, Advances in Neural Information Processing Systems 36: Annual Conference on Neural
-Information Processing Systems 2023, NeurIPS 2023, New Orleans, LA, USA, December 10 16, 2023, 2023.
-[36] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. Volume Rendering of Neural Implicit
-Surfaces. In Marc’Aurelio Ranzato, Alina Beygelzimer, Yann N. Dauphin, Percy Liang, and
-Jennifer Wortman Vaughan, editors, Advances in Neural Information Processing Systems 34:
-Annual Conference on Neural Information Processing Systems 2021, NeurIPS 2021, December
-6-14, 2021, virtual, pages 4805–4815, 2021.
-[37] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku Komura, and Wenping Wang.
-NeuS: Learning Neural Implicit Surfaces by Volume Rendering for Multi-view Reconstruction. In Marc’Aurelio Ranzato, Alina Beygelzimer, Yann N. Dauphin, Percy Liang, and
-Jennifer Wortman Vaughan, editors, Advances in Neural Information Processing Systems 34:
-Annual Conference on Neural Information Processing Systems 2021, NeurIPS 2021, December
-6-14, 2021, virtual, pages 27171–27183, 2021.
-[38] Albert Pumarola, Enric Corona, Gerard Pons-Moll, and Francesc Moreno-Noguer. D-NeRF:
-Neural Radiance Fields for Dynamic Scenes. In IEEE Conference on Computer Vision and
-Pattern Recognition, CVPR 2021, virtual, June 19-25, 2021, pages 10318–10327. Computer
-Vision Foundation / IEEE, 2021.
-[39] Keunhong Park, Utkarsh Sinha, Peter Hedman, Jonathan T. Barron, Sofien Bouaziz, Dan B.
-Goldman, Ricardo Martin-Brualla, and Steven M. Seitz. HyperNeRF: a higher-dimensional
-representation for topologically varying neural radiance fields. ACM Trans. Graph., 40(6):238:1–
-238:12, 2021.
-[40] Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and Andreas Geiger. Mip-Splatting:
-Alias-Free 3D Gaussian Splatting. In IEEE/CVF Conference on Computer Vision and Pattern
-Recognition, CVPR 2024, Seattle, WA, USA, June 16-22, 2024, pages 19447–19456. IEEE,
-2024.
-[41] Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin Wang, Dahua Lin, and Bo Dai. ScaffoldGS: Structured 3D Gaussians for View-Adaptive Rendering. In IEEE/CVF Conference on
-Computer Vision and Pattern Recognition, CVPR 2024, Seattle, WA, USA, June 16-22, 2024,
-pages 20654–20664. IEEE, 2024.
-[42] Kerui Ren, Lihan Jiang, Tao Lu, Mulin Yu, Linning Xu, Zhangkai Ni, and Bo Dai. OctreeGS: Towards Consistent Real-time Rendering with LOD-Structured 3D Gaussians. IEEE
-Transactions on Pattern Analysis and Machine Intelligence, pages 1–15, 2025.
-[43] Zheng Zhang, Wenbo Hu, Yixing Lao, Tong He, and Hengshuang Zhao. Pixel-GS: Density
-Control with Pixel-Aware Gradient for 3D Gaussian Splatting. In Ales Leonardis, Elisa Ricci,
-Stefan Roth, Olga Russakovsky, Torsten Sattler, and Gül Varol, editors, Computer Vision - ECCV
-2024 - 18th European Conference, Milan, Italy, September 29-October 4, 2024, Proceedings,
-Part XIX, Lecture Notes in Computer Science, pages 326–342. Springer, 2024.
-12
-[44] Zongxin Ye, Wenyu Li, Sidun Liu, Peng Qiao, and Yong Dou. AbsGS: Recovering Fine
-Details in 3D Gaussian Splatting. In Proceedings of the 32nd ACM International Conference on
-Multimedia, MM ’24, page 1053–1061, New York, NY, USA, 2024. Association for Computing
-Machinery.
-[45] Junjie Wang, Jiemin Fang, Xiaopeng Zhang, Lingxi Xie, and Qi Tian. GaussianEditor: Editing
-3D Gaussians Delicately with Text Instructions. In IEEE/CVF Conference on Computer Vision
-and Pattern Recognition, CVPR 2024, Seattle, WA, USA, June 16-22, 2024, pages 20902–20911.
-IEEE, 2024.
-[46] Yiwen Chen, Zilong Chen, Chi Zhang, Feng Wang, Xiaofeng Yang, Yikai Wang, Zhongang
-Cai, Lei Yang, Huaping Liu, and Guosheng Lin. GaussianEditor: Swift and Controllable 3D
-Editing with Gaussian Splatting. In IEEE/CVF Conference on Computer Vision and Pattern
-Recognition, CVPR 2024, Seattle, WA, USA, June 16-22, 2024, pages 21476–21485. IEEE,
-2024.
-[47] Guanjun Wu, Taoran Yi, Jiemin Fang, Lingxi Xie, Xiaopeng Zhang, Wei Wei, Wenyu Liu,
-Qi Tian, and Xinggang Wang. 4D Gaussian Splatting for Real-Time Dynamic Scene Rendering.
-In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2024, Seattle,
-WA, USA, June 16-22, 2024, pages 20310–20320. IEEE, 2024.
-[48] Zeyu Yang, Hongye Yang, Zijie Pan, and Li Zhang. Real-time Photorealistic Dynamic Scene
-Representation and Rendering with 4D Gaussian Splatting. In The Twelfth International
-Conference on Learning Representations, ICLR 2024, Vienna, Austria, May 7-11, 2024. OpenReview.net, 2024.
-[49] Jiaxiang Tang, Jiawei Ren, Hang Zhou, Ziwei Liu, and Gang Zeng. DreamGaussian: Generative
-Gaussian Splatting for Efficient 3D Content Creation. In The Twelfth International Conference
-on Learning Representations, ICLR 2024, Vienna, Austria, May 7-11, 2024. OpenReview.net,
-2024.
-[50] Taoran Yi, Jiemin Fang, Junjie Wang, Guanjun Wu, Lingxi Xie, Xiaopeng Zhang, Wenyu Liu,
-Qi Tian, and Xinggang Wang. GaussianDreamer: Fast Generation from Text to 3D Gaussians
-by Bridging 2D and 3D Diffusion Models. In IEEE/CVF Conference on Computer Vision and
-Pattern Recognition, CVPR 2024, Seattle, WA, USA, June 16-22, 2024, pages 6796–6807. IEEE,
-2024.
-[51] Jiaxiang Tang, Zhaoxi Chen, Xiaokang Chen, Tengfei Wang, Gang Zeng, and Ziwei Liu. LGM:
-Large Multi-view Gaussian Model for High-Resolution 3D Content Creation. In Ales Leonardis,
-Elisa Ricci, Stefan Roth, Olga Russakovsky, Torsten Sattler, and Gül Varol, editors, Computer
-Vision - ECCV 2024 - 18th European Conference, Milan, Italy, September 29-October 4, 2024,
-Proceedings, Part IV, Lecture Notes in Computer Science, pages 1–18. Springer, 2024.
-[52] Yinghao Xu, Zifan Shi, Yifan Wang, Hansheng Chen, Ceyuan Yang, Sida Peng, Yujun Shen, and
-Gordon Wetzstein. GRM: Large Gaussian Reconstruction Model for Efficient 3D Reconstruction
-and Generation. In Ales Leonardis, Elisa Ricci, Stefan Roth, Olga Russakovsky, Torsten Sattler,
-and Gül Varol, editors, Computer Vision - ECCV 2024 - 18th European Conference, Milan, Italy,
-September 29-October 4, 2024, Proceedings, Part XV, Lecture Notes in Computer Science,
-pages 1–20. Springer, 2024.
-[53] Yanmin Wu, Jiarui Meng, Haijie Li, Chenming Wu, Yahao Shi, Xinhua Cheng, Chen Zhao,
-Haocheng Feng, Errui Ding, Jingdong Wang, and Jian Zhang. OpenGaussian: Towards
-Point-Level 3D Gaussian-based Open Vocabulary Understanding. In Amir Globersons, Lester
-Mackey, Danielle Belgrave, Angela Fan, Ulrich Paquet, Jakub M. Tomczak, and Cheng Zhang,
-editors, Advances in Neural Information Processing Systems 38: Annual Conference on Neural
-Information Processing Systems 2024, NeurIPS 2024, Vancouver, BC, Canada, December 10 15, 2024, 2024.
-[54] Minghan Qin, Wanhua Li, Jiawei Zhou, Haoqian Wang, and Hanspeter Pfister. LangSplat:
-3D Language Gaussian Splatting. In IEEE/CVF Conference on Computer Vision and Pattern
-Recognition, CVPR 2024, Seattle, WA, USA, June 16-22, 2024, pages 20051–20060. IEEE,
-2024.
-13
-[55] Jun Guo, Xiaojian Ma, Yue Fan, Huaping Liu, and Qing Li. Semantic Gaussians: OpenVocabulary Scene Understanding with 3D Gaussian Splatting. IEEE Transactions on Circuits
-and Systems for Video Technology, pages 1–1, 2026.
-[56] Jiazhong Cen, Jiemin Fang, Chen Yang, Lingxi Xie, Xiaopeng Zhang, Wei Shen, and Qi Tian.
-Segment Any 3D Gaussians. In Toby Walsh, Julie Shah, and Zico Kolter, editors, ThirtyNinth AAAI Conference on Artificial Intelligence, Thirty-Seventh Conference on Innovative
-Applications of Artificial Intelligence, Fifteenth Symposium on Educational Advances in Artificial Intelligence, AAAI 2025, Philadelphia, PA, USA, February 25 - March 4, 2025, pages
-1971–1979. AAAI Press, 2025.
-[57] Mingqiao Ye, Martin Danelljan, Fisher Yu, and Lei Ke. Gaussian Grouping: Segment and Edit
-Anything in 3D Scenes. In Ales Leonardis, Elisa Ricci, Stefan Roth, Olga Russakovsky, Torsten
-Sattler, and Gül Varol, editors, Computer Vision - ECCV 2024 - 18th European Conference,
-Milan, Italy, September 29-October 4, 2024, Proceedings, Part XXIX, Lecture Notes in Computer
-Science, pages 162–179. Springer, 2024.
-[58] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and temples: benchmarking large-scale scene reconstruction. ACM Trans. Graph., 36(4):78:1–78:13, 2017.
-[59] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm, George Drettakis, and Gabriel J.
-Brostow. Deep blending for free-viewpoint image-based rendering. ACM Trans. Graph.,
-37(6):257, 2018.
-[60] Jiahui Zhang, Fangneng Zhan, Muyu Xu, Shijian Lu, and Eric P. Xing. FreGS: 3D Gaussian
-Splatting with Progressive Frequency Regularization. In IEEE/CVF Conference on Computer
-Vision and Pattern Recognition, CVPR 2024, Seattle, WA, USA, June 16-22, 2024, pages
-21424–21433. IEEE, 2024.
-[61] Shakiba Kheradmand, Daniel Rebain, Gopal Sharma, Weiwei Sun, Yang-Che Tseng, Hossam
-Isack, Abhishek Kar, Andrea Tagliasacchi, and Kwang Moo Yi. 3D Gaussian Splatting as
-Markov Chain Monte Carlo. In Amir Globersons, Lester Mackey, Danielle Belgrave, Angela
-Fan, Ulrich Paquet, Jakub M. Tomczak, and Cheng Zhang, editors, Advances in Neural Information Processing Systems 38: Annual Conference on Neural Information Processing Systems
-2024, NeurIPS 2024, Vancouver, BC, Canada, December 10 - 15, 2024, 2024.
-14
-Appendix
-A
-Mathematical Proof
-In the implementation of SNS, the kernel is defined using the unnormalized probability density
-function (PDF) of the Skew-Normal distribution. Although this differs from the standard SkewNormal (SN) distribution by a normalization coefficient, they share identical properties regarding
-affine transformations and geometric characteristics. For clarity and convenience, the following
-derivations are conducted within the framework of the standard SN distribution.
-A.1
-Closure under Affine Transformations
-Let X ∼ SNd (µ, Ω, α) be a d-dimensional Skew-Normal random variable. Its stochastic representation [25] is given by:
- 
- 
-
-U
-1 δ⊤
-X = µ + ωZ | U > 0,
-∼ N1+d 0,
-,
-(10)
-Z
-δ Ω̄
-1/2
-where ω = (Ω ⊙ Id )
-, Ω̄ = ω −1 Ωω −1 , and δ = √ Ω̄α⊤
-1+α Ω̄α
-.
-Consider an affine transformation Y = T X + b, where T ∈ Rh×d , rank(T ) = h ≤ d and b ∈ Rh .
-Substituting the representation of X yields: Y = (T µ + b) + T ωZ | U > 0.
-To show that Y is also Skew-Normal, we express it in the standard stochastic representation. Let
-µY = T µ + b and W = T ωZ. Since (U, Z ⊤ )⊤ is multivariate normal, the joint distribution of
-(U, W ⊤ )⊤ remains normal with zero mean. The variance of W and the covariance between U and
-W are given by:
-Var(W ) = ΩY = T ω Ω̄ωT ⊤ = T ΩT ⊤ ,
-(11)
-Cov(U, W ) = Cov(U, Z)ωT ⊤ = δ ⊤ ωT ⊤ .
-1/2
-Defining ωY = (ΩY ⊙ Ih )
-and ZY = ωY−1 W , we can rewrite Y = µY + ωY ZY | U > 0,
-−1
-−1
-while Var(ZY ) = ωY ΩY ωY = Ω̄Y , and Cov(U, ZY ) = Cov(U, W )ωY−1 = δ ⊤ ωT ⊤ ωY−1 . Letting
-δY = ωY−1 T ωδ, we finally obtain the required block-covariance structure:
- 
- 
-
-U
-1 δY⊤
-Y = µY + ωY ZY | U > 0,
-∼ N1+h 0,
-.
-(12)
-ZY
-δY Ω̄Y
-Since the conditioning event U > 0 is unchanged and (U, ZY⊤ )⊤ satisfies the standard joint normal
-structure, we conclude that Y follows an h-dimensional SND.
-A.2
-2D Kernel Parameters
-Let X ∼ SN3 (µ, Ω, α) represent the 3D Skew-Normal kernel, and consider a linear projection:
-Y = AX, where A ∈ R2×3 . Building upon the property derived in A.1, we can simply write
-Y ∼ SN2 (µY , ΩY , αY ), with µY = Aµ, ΩY = AΩA⊤ , and δY = ωY−1 Aωδ.
-Recall that δY = √ Ω̄Y⊤αY
-1+αY Ω̄Y αY
-αY =
-q
-1
-and 1 − δY⊤ Ω̄−1
-Y δY = 1+α⊤ Ω̄Y αY . We can write:
-1 + αY⊤ Ω̄Y αY · Ω̄−1
-Y δY = q
-Y
-Ω̄−1
-Y δY
-1 − δY⊤ Ω̄−1
-Y δY
-=q
-where ωY = (ΩY ⊙ I2 )1/2 , ω = (Ω ⊙ I3 )1/2 , and δ = √ Ω̄α⊤
-1+α Ω̄α
-15
-.
-ωY Ω−1
-Y Aωδ
-1 − (Aωδ)⊤ Ω−1
-Y Aωδ
-,
-(13)
-In our formulation, α is explicitly parameterized as α = ωRS −1 k, where Ω = RSS ⊤ R⊤ . Substituting this structural definition into the equations above simplifies the expressions:
-ω Ω̄ωRS −1 k
-ΩRS −1 k
-1 + k ⊤ S −1 R⊤ ΩRS −1 k
-1 + k ⊤ S −1 R⊤ ω Ω̄ωRS −1 k
-⊤ ⊤
-−1
-RSk
-RSS R RS k
-=√
-.
-=√
-1 + k ⊤ S −1 R⊤ RSS ⊤ R⊤ RS −1 k
-1 + k⊤ k
-ωδ = √
-=√
-(14)
-Applying the transformation Eq.(14) to Eq.(13) gives:
-ωY Ω−1
-Y ARSk
-αY = p
-.
-⊤
-1 + k k − (ARSk)⊤ (ΩY )−1 ARSk
-A.3
-(15)
-The Mean of the Skew-Normal Distribution
-Unlike the multivariate normal distribution, the location parameter µ of X ∼ SNd (µ, Ω, α) does
-not equal its exact mean. The true mean, E[X], can be analytically derived using the stochastic
-representation introduced in Eq.(10). Taking the expectation of X = µ + ωZ | U > 0, we have:
-E[X] = µ + ωE[Z | U > 0]
-= µ + ωE[E[Z | U ] | U > 0]
-= µ + ω ([E[Z − U δ] + E[U δ | U > 0])
-= µ + E[U | U > 0] · ωδ
-r
-2
-=µ+
-· ωδ.
-π
-If α = ωRS −1 k, associated with Eq.(14), we have:
-r
-2
-RSk
-E[X] = µ +
-·√
-π
-1 + k⊤ k
-B
-(16)
-(17)
-Backward Pass
-The learnable parameters for each component in SNS include the location µ, scale matrix Ω(i.e. S
-∂L ∂L ∂L ∂L ∂L
-and R), color c, opacity o, skew k, and the key gradients are ∂L
-∂µ , ∂S , ∂R , ∂c , ∂o , ∂k , where L is
-the loss. L is calculated between the ground-truth pixel colors and rendered colors. The rendered
-pixel colors are:
-N
-i−1
-X
-Y
-C(u) =
-ci ai (u)
-(1 − aj (u)) ,
-(18)
-i=1
-where a(u) = o · SN
-2D
-j=1
-(u) and u denotes pixel coordinate in 2D images.
-Previous methods, such as 3DGS and SSS, compute the gradients with respect to the shape parameters
-∂L
-∂L
-∂L
-(R, S) by first calculating ∂(Ω
-−1 ) and subsequently backpropagating to obtain ∂R and ∂S . However,
-∂L
-recalling the definitions in Eq. (5) and Eq. (6), computing ∂Ω
-directly proves cumbersome. The
-parameters (R, S) couple intricately within both ARSk and (Ω2D )−1 , leading to high computational
-complexity. To mitigate this, we propose an alternative differentiation scheme. By introducing an
-intermediate variable Q = ARS, we reformulate Eq. (5) and Eq. (6) as follows:
-
-SN 2D (u) = G2 (u − µ2D ; QQ⊤ ) Φ (m2D )⊤ (u − µ2D ) ,
+
+Traditional splatting frameworks, such as 3DGS and SSS, anchor their tile-based bounding boxes to the nominal location parameter µ 2D, which is the mean of the distribution. As shown in Fig. 3, µ 2D deviates from the spatial mean because the slant parameter α shifts the probability mass. Relying on µ 2D for bounding boxes localization is ineffective in capturing the spatial density of skewed objects. To address this, we physically shift the 2D footprint to the true spatial mean, deriving the corrected operational center, µbbox, as a deterministic spatial offset:
+
+$$\mu_{bbox} = \mu^{2D} + \sqrt{\frac{2}{\pi}} \cdot \frac{ARSk}{\sqrt{1+k^\top k}}. \quad (8)$$
+
+#### 3.4 Stable Optimization via Parameter Decoupling
+
+Optimizing Skew-Normal kernels is particularly challenging due to the coupling between the geometric and skewness parameters. We update the positional parameters µ using Stochastic Gradient Hamiltonian Monte Carlo (SGHMC) [11], which introduces stochasticity to help the model escape local minima. The greater challenge, however, comes from the slant parameter α, as it deeply couples the rotation R, scaling S, and the latent variable k. We decouple them from two perspectives:
+
+Internal parameter dependencies. As in Sec. 3.2, the magnitude of parameter k explicitly determines the skewness. We therefore factorize k into an independent magnitude scalar mk ∈ R+ and a direction vector dk ∈ R 3 (∥dk∥2 = 1). We further parametrize the magnitude and direction as:
+
+$$m_k = \frac{8}{1 + \exp(-\frac{x}{6})}, \quad d_k = \frac{v}{\|v\|_2 + \epsilon}, \quad (9)$$
+
+where x ∈ R, v ∈ R 3 . This structural decomposition isolates the skew direction and skew intensity, allowing the model to optimize them independently.
+
+Table 1: Quantitative comparison with baselines. The best and second-best results are highlighted in dark red and light red, respectively.
+
+| Dataset Method | PSNR  | Mip-NeRF360 ↑ SSIM | ↑ LPIPS | ↓ PSNR | Tanks&Temples ↑ SSIM | ↑ LPIPS | ↓ PSNR | Deep ↑ SSIM | Blending ↑ LPIPS ↓ |
+|----------------|-------|--------------------|---------|--------|----------------------|---------|--------|-------------|--------------------|
+| Mip-NeRF       | 29.23 | 0.844              | 0.207   | 22.22  | 0.759                | 0.257   | 29.40  | 0.901       | 0.245              |
+| 3DGS           | 28.69 | 0.870              | 0.182   | 23.14  | 0.841                | 0.183   | 29.41  | 0.903       | 0.243              |
+| GES            | 28.72 | 0.794              | 0.250   | 23.34  | 0.836                | 0.198   | 29.82  | 0.901       | 0.252              |
+| 3DHGS          | 29.56 | 0.873              | 0.178   | 24.50  | 0.857                | 0.169   | 29.76  | 0.905       | 0.242              |
+| Fre-GS         | 27.85 | 0.826              | 0.209   | 23.96  | 0.841                | 0.183   | 29.93  | 0.904       | 0.240              |
+| Scaffold-GS    | 28.84 | 0.848              | 0.220   | 23.96  | 0.853                | 0.177   | 30.21  | 0.906       | 0.254              |
+| 3DGS-MCMC      | 29.89 | 0.900              | 0.190   | 24.29  | 0.860                | 0.190   | 29.67  | 0.890       | 0.320              |
+| SSS            | 29.90 | 0.893              | 0.145   | 24.87  | 0.873                | 0.138   | 30.07  | 0.907       | 0.247              |
+| Ours           | 30.17 | 0.895              | 0.144   | 25.08  | 0.877                | 0.132   | 30.30  | 0.912       | 0.244              |
+
+Inter-parameter interference. Although decomposing k into magnitude and direction improves stability, updating shape parameters (R, S, mk, dk) simultaneously still leads to suboptimal convergence. Specifically, adjustments to the base ellipsoid's orientation frequently conflict with the skew direction. To address this, we divide the training process into two phases. First, all parameters (R, S, mk, dk) are jointly optimized using standard Adam to establish a reasonable global structure. In the second phase, a Block Coordinate Descent (BCD) strategy is activated. The optimization follows a cyclic alternating schedule: in the first part of each cycle, the ellipsoidal base parameters (R, S) are updated while the skew parameters (mk, dk) are frozen; in the second part, (mk, dk) are refined while (R, S) are held constant.
+
+While SGHMC is utilized for the positional parameters µ, the Adam optimizer is employed for all remaining variables. SGHMC naturally provides stochastic global search, preventing positional parameters from collapsing into local minima. Meanwhile, the alternating update scheme governs the shape parameters, ensuring geometric stability throughout training.
+
+## 4 Experiments
+
+Datasets and Metrics. We evaluate SNS on 11 scenes across 3 datasets to validate our contributions: 7 scenes from Mip-NeRF 360 [4], 2 scenes from Tanks & Temples [58], and 2 scenes from Deep Blending [59]. Following the standard evaluation metrics, we employ three metrics: Peak Signal-to-Noise Ratio (PSNR), Structural Similarity Index Measure (SSIM), and Learned Perceptual Image Patch Similarity (LPIPS). We report dataset-level averages, with per-scene results in the appendix.
+
+Baselines. (1) kernel-level variants such as GES [13], 3D-HGS [12] and SSS [11], which introduce non-Gaussian primitives; (2) optimization-focused methods like Scaffold-GS [41], Fre-GS [60] and 3DGS-MCMC [61]; and (3) Neural Radiance Field method such as Mip-NeRF [3]. For a fair comparison, we use the results either from original papers or run publicly available implementations under the same settings.
+
+Implementation Details. Our model is implemented in PyTorch, with the core rasterization engine extended from the 3DGS framework to support the asymmetric 2D Skew-Normal kernel. All experiments are conducted on NVIDIA RTX A6000 GPUs. In terms of computational efficiency, SNS demonstrates a training overhead comparable to SSS; for instance, in the drjohnson scene, SNS completes 30,000 iterations in 38m 4s (29.89 dB PSNR), while SSS requires 38m 7s (29.66 dB PSNR) on the same test set.
+
+#### 4.1 Results
+
+#### Performance Comparison.
+
+We report the quantitative comparison of our method with state-of-the-art methods in Tab. 1. Overall, our method achieves the best or highly competitive results across all datasets and metrics, validating the effectiveness and robustness of the proposed approach. Our method showed the most consistent
+
+
+
+Figure 4: Reconstruction quality. We visualize five representative scenes, highlighting and zooming in on regions exhibiting the most prominent differences for comparison.
+
+and strongest performance on PSNR, achieving 30.17 on Mip-NeRF360, 25.08 on Tanks&Temples, and 30.30 on Deep Blending. The improvement is most notable on Tanks&Temples. Compared with SSS, the strongest baseline, our method achieves higher PSNR (24.87→25.08) and SSIM (0.873→0.877), and lower LPIPS (0.138→0.132) on Tanks&Temples. SNS remains highly competitive on SSIM for Mip-NeRF360 and LPIPS for Deep Blending, achieving results nearly on par with the best-performing methods.
+
+Qualitative Results. Our method demonstrates better object completeness across multiple scenes in Fig. 4. For locally complex objects, such as the curtain above the window in the room scene and the tower-shaped structure in the train scene, our method maintains the complete structure and clear boundaries. In contrast, SSS and 3DGS-MCMC exhibit noticeable missing regions in the train scene, while GS and 3DHGS produce holes and fuzzy boundaries in the room scene.
+
+In terms of texture clarity, our method more effectively preserves high-frequency details. For example, the wavy stripes on top of the transparent plastic box in the bonsai scene, the texture and shadows on the cloth behind the chair in the kitchen scene, and the distant trees in the train scene are all reconstructed and rendered with clearer details. By contrast, the original GS produces over-smoothed reconstructions in texture-rich regions, leading to noticeable blur. Besides, in the drjohnson scene, SNS exhibits the mildest artifacts among all compared methods. These results show that our method better handles complex regions in novel view synthesis.
+
+Different kernels comparison. Table 2 provides the detailed PSNR scores evaluated with GS, GES, HGS, SSS, and our SNS. In this comparison, we treat standard 3DGS as the baseline. Across all
+
+Table 2: Per-scene PSNR comparison of various reconstruction kernels. We provide a detailed PSNR evaluation of the methods using different base kernels across the Mip-NeRF 360, Deep Blending, and Tanks&Temples datasets. The best and second-best results are highlighted in dark red and light red, respectively.
+
+| Method     | Bicycle | Bonsai | Counter | Mip-NeRF Garden | 360 Kitchen | Room  | Stump | Train | Tanks&Temples Truck | Deep Playroom | Blending DrJohnson |
+|------------|---------|--------|---------|-----------------|-------------|-------|-------|-------|---------------------|---------------|--------------------|
+| 3DGS       | 25.25   | 31.98  | 28.70   | 27.41           | 30.32       | 30.63 | 26.55 | 21.09 | 25.18               | 30.04         | 28.77              |
+| GES        | 24.87   | 31.97  | 28.75   | 27.07           | 31.07       | 31.17 | 26.17 | 21.73 | 24.94               | 30.29         | 29.35              |
+| 3D-HGS     | 25.39   | 33.30  | 29.62   | 27.68           | 32.17       | 32.12 | 26.64 | 22.95 | 26.04               | 30.20         | 29.32              |
+| SSS        | 25.68   | 33.50  | 29.87   | 28.09           | 32.43       | 32.57 | 27.17 | 23.32 | 26.41               | 30.47         | 29.66              |
+| SNS (Ours) | 25.85   | 33.70  | 30.27   | 28.22           | 32.81       | 33.02 | 27.31 | 23.61 | 26.56               | 30.71         | 29.89              |
+
+Table 3: Summary ablation across datasets. We present the average performance of our Full SNS compared with its ablated versions across three main datasets. The best and second-best results are highlighted in dark red and light red, respectively.
+
+|                  | Dataset Model Variants | PSNR    | Mip-NeRF360 ↑ SSIM | ↑ LPIPS | ↓ PSNR  | Tanks&Temples ↑ SSIM | ↑ LPIPS | ↓ PSNR  | Deep ↑ SSIM | Blending ↑ LPIPS ↓ |
+|------------------|------------------------|---------|--------------------|---------|---------|----------------------|---------|---------|-------------|--------------------|
+| Vanilla          | SNS                    | 30.0643 | 0.8942             | 0.1443  | 25.0388 | 0.8765               | 0.1324  | 30.1581 | 0.9097      | 0.2448             |
+| k -decomposition |                        | 30.1204 | 0.8950             | 0.1442  | 25.0090 | 0.8768               | 0.1319  | 30.1185 | 0.9118      | 0.2441             |
+| Alternating      | Optimization           | 30.1390 | 0.8949             | 0.1445  | 25.0328 | 0.8776               | 0.1322  | 30.2969 | 0.9122      | 0.2436             |
+| Full             | SNS                    | 30.1700 | 0.8954             | 0.1445  | 25.0839 | 0.8775               | 0.1325  | 30.3034 | 0.9119      | 0.2444             |
+
+scenes, SNS outperforms all other models by at least 0.1 dB. For example, our method outperforms SSS by 0.45 dB on the Room scene, 0.29 dB on the Train scene, and 0.24 dB on the Playroom scene. Overall, our SN formulation consistently delivers the best performance across all tested 3D scenes.
+
+#### 4.2 Ablations
+
+Table 3 details the ablation study on individual module contributions. Using the vanilla Skew-Normal distribution as our baseline, we compare three configurations: (1) k-decomposition: Decomposes the skew vector k into magnitude and direction, without alternating optimization. (2) Alternating optimization: Alternately optimizes (R, S) and k, without k-decomposition. (3) Full model: Incorporates both k-decomposition and alternating optimization. Full experimental results are available in Appendix C.
+
+Both modules contribute to the final performance through distinct mechanisms. Alternating optimization yields consistent improvements in pixel-level reconstruction, increasing mean PSNR from 30.06 to 30.14 on Mip-NeRF 360 and from 30.16 to 30.30 on Deep Blending. This indicates that alternating updates for (R, S) and k effectively decouple geometric parameters from skew parameters, stabilizing the optimization process. Meanwhile, k-decomposition consistently enhances SSIM and LPIPS across all datasets, suggesting that decomposing the skew vector into magnitude and direction provides a superior parameterization that improves optimization dynamics. The full model delivers the most significant gains in PSNR, while maintaining highly competitive LPIPS and SSIM performance across scenes. Thus, these results suggest that the two optimization components provide complementary but moderate gains. The full model achieves the best average PSNR across all datasets, while individual variants may slightly outperform it on perceptual metrics in some cases, indicating that the modules mainly improve reconstruction fidelity and stability rather than uniformly optimizing every metric.
+
+## 5 Conclusion
+
+We propose Skew-Normal Splatting, which introduces controllable skewness into Gaussian Splatting to better represent asymmetric geometries, sharp boundaries, and one-sided structures. SNS preserves analytical projection for efficient splatting and further improves optimization stability through decoupled parameterization and block-wise updates. Experiments show consistent improvements over existing Gaussian and non-Gaussian kernels.
+
+## References
+
+- [1] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis. In Andrea Vedaldi, Horst Bischof, Thomas Brox, and Jan-Michael Frahm, editors, Computer Vision
+- - ECCV 2020 - 16th European Conference, Glasgow, UK, August 23-28, 2020, Proceedings, Part I, Lecture Notes in Computer Science, pages 405–421. Springer, 2020. [2] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. NeRF: representing scenes as neural radiance fields for view synthesis. Commun. ACM, 65(1):99–106, 2022. [3] Jonathan T. Barron, Ben Mildenhall, Matthew Tancik, Peter Hedman, Ricardo Martin-Brualla, and Pratul P. Srinivasan. Mip-NeRF: A Multiscale Representation for Anti-Aliasing Neural Radiance Fields. In 2021 IEEE/CVF International Conference on Computer Vision, ICCV 2021, Montreal, QC, Canada, October 10-17, 2021, pages 5835–5844. IEEE, 2021. [4] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, and Peter Hedman. Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2022, New Orleans, LA, USA, June 18-24, 2022, pages 5460–5469. IEEE, 2022. [5] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3D Gaussian Splatting for Real-Time Radiance Field Rendering. ACM Trans. Graph., 42(4):139:1–139:14, 2023. [6] Nikhil Varma Keetha, Jay Karhade, Krishna Murthy Jatavallabhula, Gengshan Yang, Sebastian A. Scherer, Deva Ramanan, and Jonathon Luiten. SplaTAM: Splat, Track & Map 3D Gaussians for Dense RGB-D SLAM. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2024, Seattle, WA, USA, June 16-22, 2024, pages 21357–21366. IEEE, 2024. [7] Xiaoyu Zhou, Zhiwei Lin, Xiaojun Shan, Yongtao Wang, Deqing Sun, and Ming-Hsuan Yang. DrivingGaussian: Composite Gaussian Splatting for Surrounding Dynamic Autonomous Driving Scenes. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2024, Seattle, WA, USA, June 16-22, 2024, pages 21634–21643. IEEE, 2024. [8] Mahtab Dahaghin, Myrna C. Silva, Kourosh Riahidehkordi, Matteo Toso, and Alessio Del Bue. Gaussian Heritage: 3D Digitization of Cultural Heritage with Integrated Object Segmentation. CoRR, abs/2409.19039, 2024. [9] Matthias Zwicker, Hanspeter Pfister, Jeroen Van Baar, and Markus Gross. Ewa volume splatting. In Proceedings Visualization, 2001. VIS'01., pages 29–538. IEEE, 2001. [10] Matthias Zwicker, Hanspeter Pfister, Jeroen Van Baar, and Markus Gross. Ewa splatting. IEEE Transactions on Visualization & Computer Graphics, 8(03):223–238, 2002. [11] Jialin Zhu, Jiangbei Yue, Feixiang He, and He Wang. 3D Student Splatting and Scooping. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2025, Nashville, TN, USA, June 11-15, 2025, pages 21045–21054. Computer Vision Foundation / IEEE, 2025. [12] Haolin Li, Jinyang Liu, Mario Sznaier, and Octavia I. Camps. 3D-HGS: 3D Half-Gaussian Splatting. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2025, Nashville, TN, USA, June 11-15, 2025, pages 10996–11005. Computer Vision Foundation / IEEE, 2025. [13] Abdullah Hamdi, Luke Melas-Kyriazi, Jinjie Mai, Guocheng Qian, Ruoshi Liu, Carl Vondrick, Bernard Ghanem, and Andrea Vedaldi. GES: Generalized Exponential Splatting for Efficient Radiance Field Rendering. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2024, Seattle, WA, USA, June 16-22, 2024, pages 19812–19822. IEEE, 2024. [14] Debasis Kundu. Geometric Skew Normal Distribution. Sankhya B, 76:167 – 189, 2014.
+
+[15] David Elal-Olivero. ALPHA-SKEW-NORMAL DISTRIBUTION. Proyecciones (antofagasta), 29:224–240, 2010. [16] Valentina Mameli and Monica Musio. A Generalization of the Skew-Normal Distribution: The Beta Skew-Normal. Communications in Statistics - Theory and Methods, 42:2229 – 2244, 2011. [17] Govind S. Mudholkar and Alan David Hutson. The epsilon-skew-normal distribution for analyzing near-normal data. Journal of Statistical Planning and Inference, 83:291–309, 2000. [18] Reinaldo Boris Arellano-Valle and Adelchi Azzalini. On the Unification of Families of Skewnormal Distributions. Scandinavian Journal of Statistics, 33, 2006. [19] Barry C Arnold and Robert J Beaver. Hidden truncation models. Sankhya: The Indian Journal ¯ of Statistics, Series A, pages 23–35, 2000. [20] Raluca Vernic. Multivariate skew-normal distributions with applications in insurance. Insurance: Mathematics and economics, 38(2):413–426, 2006. [21] Benoı^t Carmichael and Alain Coën. Asset pricing with skewed-normal return. Finance Research Letters, 10(2):50–57, 2013. [22] Sylvia Frühwirth-Schnatter and Saumyadipta Pyne. Bayesian inference for finite mixtures of univariate and multivariate skew-normal and skew-t distributions. Biostatistics, 11(2):317–336, 2010. [23] Kjartan Rimstad and Henning Omre. Skew-Gaussian random fields. Spatial Statistics, 10:43–62, 2014. [24] Hao Zhang and Abdel El-Shaarawi. On spatial skew-Gaussian processes and applications. Environmetrics: The official journal of the International Environmetrics Society, 21(1):33–47, 2010. [25] A. Azzalini and A. Capitanio. Statistical Applications of the Multivariate Skew Normal Distribution. Journal of the Royal Statistical Society Series B: Statistical Methodology, 61(3):579–602, September 1999. [26] Johannes L. Schönberger and Jan-Michael Frahm. Structure-from-Motion Revisited. In 2016 IEEE Conference on Computer Vision and Pattern Recognition, CVPR 2016, Las Vegas, NV, USA, June 27-30, 2016, pages 4104–4113. IEEE Computer Society, 2016. [27] Xingkui Wei, Yinda Zhang, Zhuwen Li, Yanwei Fu, and Xiangyang Xue. DeepSFM: Structure from Motion via Deep Bundle Adjustment. In Andrea Vedaldi, Horst Bischof, Thomas Brox, and Jan-Michael Frahm, editors, Computer Vision - ECCV 2020 - 16th European Conference, Glasgow, UK, August 23-28, 2020, Proceedings, Part I, Lecture Notes in Computer Science, pages 230–247. Springer, 2020. [28] Yao Yao, Zixin Luo, Shiwei Li, Tian Fang, and Long Quan. MVSNet: Depth Inference for Unstructured Multi-view Stereo. In Vittorio Ferrari, Martial Hebert, Cristian Sminchisescu, and Yair Weiss, editors, Computer Vision - ECCV 2018 - 15th European Conference, Munich, Germany, September 8-14, 2018, Proceedings, Part VIII, Lecture Notes in Computer Science, pages 785–801. Springer, 2018. [29] Chenjie Cao, Xinlin Ren, and Yanwei Fu. MVSFormer: Multi-View Stereo by Learning Robust Image Features and Temperature-based Depth. Trans. Mach. Learn. Res., 2022, 2022. [30] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels: Radiance Fields without Neural Networks. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2022, New Orleans, LA, USA, June 18-24, 2022, pages 5491–5500. IEEE, 2022. [31] Sara Fridovich-Keil, Giacomo Meanti, Frederik Rahbæk Warburg, Benjamin Recht, and Angjoo Kanazawa. K-Planes: Explicit Radiance Fields in Space, Time, and Appearance. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2023, Vancouver, BC, Canada, June 17-24, 2023, pages 12479–12488. IEEE, 2023.
+
+[32] Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa. pixelNeRF: Neural Radiance Fields From One or Few Images. In IEEE Conference on Computer Vision and Pattern Recognition, CVPR 2021, virtual, June 19-25, 2021, pages 4578–4587. Computer Vision Foundation / IEEE, 2021. [33] Qianqian Wang, Zhicheng Wang, Kyle Genova, Pratul P. Srinivasan, Howard Zhou, Jonathan T. Barron, Ricardo Martin-Brualla, Noah Snavely, and Thomas A. Funkhouser. IBRNet: Learning Multi-View Image-Based Rendering. In IEEE Conference on Computer Vision and Pattern Recognition, CVPR 2021, virtual, June 19-25, 2021, pages 4690–4699. Computer Vision Foundation / IEEE, 2021. [34] Hong-Xing Yu, Leonidas J. Guibas, and Jiajun Wu. Unsupervised Discovery of Object Radiance Fields. In The Tenth International Conference on Learning Representations, ICLR 2022, Virtual Event, April 25-29, 2022. OpenReview.net, 2022. [35] Di Qi, Tong Yang, and Xiangyu Zhang. Slot-guided Volumetric Object Radiance Fields. In Alice Oh, Tristan Naumann, Amir Globerson, Kate Saenko, Moritz Hardt, and Sergey Levine, editors, Advances in Neural Information Processing Systems 36: Annual Conference on Neural Information Processing Systems 2023, NeurIPS 2023, New Orleans, LA, USA, December 10 - 16, 2023, 2023. [36] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. Volume Rendering of Neural Implicit Surfaces. In Marc'Aurelio Ranzato, Alina Beygelzimer, Yann N. Dauphin, Percy Liang, and Jennifer Wortman Vaughan, editors, Advances in Neural Information Processing Systems 34: Annual Conference on Neural Information Processing Systems 2021, NeurIPS 2021, December 6-14, 2021, virtual, pages 4805–4815, 2021. [37] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku Komura, and Wenping Wang. NeuS: Learning Neural Implicit Surfaces by Volume Rendering for Multi-view Reconstruction. In Marc'Aurelio Ranzato, Alina Beygelzimer, Yann N. Dauphin, Percy Liang, and Jennifer Wortman Vaughan, editors, Advances in Neural Information Processing Systems 34: Annual Conference on Neural Information Processing Systems 2021, NeurIPS 2021, December 6-14, 2021, virtual, pages 27171–27183, 2021. [38] Albert Pumarola, Enric Corona, Gerard Pons-Moll, and Francesc Moreno-Noguer. D-NeRF: Neural Radiance Fields for Dynamic Scenes. In IEEE Conference on Computer Vision and Pattern Recognition, CVPR 2021, virtual, June 19-25, 2021, pages 10318–10327. Computer Vision Foundation / IEEE, 2021. [39] Keunhong Park, Utkarsh Sinha, Peter Hedman, Jonathan T. Barron, Sofien Bouaziz, Dan B. Goldman, Ricardo Martin-Brualla, and Steven M. Seitz. HyperNeRF: a higher-dimensional representation for topologically varying neural radiance fields. ACM Trans. Graph., 40(6):238:1– 238:12, 2021. [40] Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and Andreas Geiger. Mip-Splatting: Alias-Free 3D Gaussian Splatting. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2024, Seattle, WA, USA, June 16-22, 2024, pages 19447–19456. IEEE, 2024. [41] Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin Wang, Dahua Lin, and Bo Dai. Scaffold-GS: Structured 3D Gaussians for View-Adaptive Rendering. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2024, Seattle, WA, USA, June 16-22, 2024, pages 20654–20664. IEEE, 2024. [42] Kerui Ren, Lihan Jiang, Tao Lu, Mulin Yu, Linning Xu, Zhangkai Ni, and Bo Dai. Octree-GS: Towards Consistent Real-time Rendering with LOD-Structured 3D Gaussians. IEEE Transactions on Pattern Analysis and Machine Intelligence, pages 1–15, 2025. [43] Zheng Zhang, Wenbo Hu, Yixing Lao, Tong He, and Hengshuang Zhao. Pixel-GS: Density Control with Pixel-Aware Gradient for 3D Gaussian Splatting. In Ales Leonardis, Elisa Ricci, Stefan Roth, Olga Russakovsky, Torsten Sattler, and Gül Varol, editors, Computer Vision - ECCV 2024 - 18th European Conference, Milan, Italy, September 29-October 4, 2024, Proceedings, Part XIX, Lecture Notes in Computer Science, pages 326–342. Springer, 2024.
+
+[44] Zongxin Ye, Wenyu Li, Sidun Liu, Peng Qiao, and Yong Dou. AbsGS: Recovering Fine Details in 3D Gaussian Splatting. In Proceedings of the 32nd ACM International Conference on Multimedia, MM '24, page 1053–1061, New York, NY, USA, 2024. Association for Computing Machinery. [45] Junjie Wang, Jiemin Fang, Xiaopeng Zhang, Lingxi Xie, and Qi Tian. GaussianEditor: Editing 3D Gaussians Delicately with Text Instructions. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2024, Seattle, WA, USA, June 16-22, 2024, pages 20902–20911. IEEE, 2024. [46] Yiwen Chen, Zilong Chen, Chi Zhang, Feng Wang, Xiaofeng Yang, Yikai Wang, Zhongang Cai, Lei Yang, Huaping Liu, and Guosheng Lin. GaussianEditor: Swift and Controllable 3D Editing with Gaussian Splatting. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2024, Seattle, WA, USA, June 16-22, 2024, pages 21476–21485. IEEE, 2024. [47] Guanjun Wu, Taoran Yi, Jiemin Fang, Lingxi Xie, Xiaopeng Zhang, Wei Wei, Wenyu Liu, Qi Tian, and Xinggang Wang. 4D Gaussian Splatting for Real-Time Dynamic Scene Rendering. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2024, Seattle, WA, USA, June 16-22, 2024, pages 20310–20320. IEEE, 2024. [48] Zeyu Yang, Hongye Yang, Zijie Pan, and Li Zhang. Real-time Photorealistic Dynamic Scene Representation and Rendering with 4D Gaussian Splatting. In The Twelfth International Conference on Learning Representations, ICLR 2024, Vienna, Austria, May 7-11, 2024. Open-Review.net, 2024. [49] Jiaxiang Tang, Jiawei Ren, Hang Zhou, Ziwei Liu, and Gang Zeng. DreamGaussian: Generative Gaussian Splatting for Efficient 3D Content Creation. In The Twelfth International Conference on Learning Representations, ICLR 2024, Vienna, Austria, May 7-11, 2024. OpenReview.net, 2024. [50] Taoran Yi, Jiemin Fang, Junjie Wang, Guanjun Wu, Lingxi Xie, Xiaopeng Zhang, Wenyu Liu, Qi Tian, and Xinggang Wang. GaussianDreamer: Fast Generation from Text to 3D Gaussians by Bridging 2D and 3D Diffusion Models. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2024, Seattle, WA, USA, June 16-22, 2024, pages 6796–6807. IEEE, 2024. [51] Jiaxiang Tang, Zhaoxi Chen, Xiaokang Chen, Tengfei Wang, Gang Zeng, and Ziwei Liu. LGM: Large Multi-view Gaussian Model for High-Resolution 3D Content Creation. In Ales Leonardis, Elisa Ricci, Stefan Roth, Olga Russakovsky, Torsten Sattler, and Gül Varol, editors, Computer Vision - ECCV 2024 - 18th European Conference, Milan, Italy, September 29-October 4, 2024, Proceedings, Part IV, Lecture Notes in Computer Science, pages 1–18. Springer, 2024. [52] Yinghao Xu, Zifan Shi, Yifan Wang, Hansheng Chen, Ceyuan Yang, Sida Peng, Yujun Shen, and Gordon Wetzstein. GRM: Large Gaussian Reconstruction Model for Efficient 3D Reconstruction and Generation. In Ales Leonardis, Elisa Ricci, Stefan Roth, Olga Russakovsky, Torsten Sattler, and Gül Varol, editors, Computer Vision - ECCV 2024 - 18th European Conference, Milan, Italy, September 29-October 4, 2024, Proceedings, Part XV, Lecture Notes in Computer Science, pages 1–20. Springer, 2024. [53] Yanmin Wu, Jiarui Meng, Haijie Li, Chenming Wu, Yahao Shi, Xinhua Cheng, Chen Zhao, Haocheng Feng, Errui Ding, Jingdong Wang, and Jian Zhang. OpenGaussian: Towards Point-Level 3D Gaussian-based Open Vocabulary Understanding. In Amir Globersons, Lester Mackey, Danielle Belgrave, Angela Fan, Ulrich Paquet, Jakub M. Tomczak, and Cheng Zhang, editors, Advances in Neural Information Processing Systems 38: Annual Conference on Neural Information Processing Systems 2024, NeurIPS 2024, Vancouver, BC, Canada, December 10 - 15, 2024, 2024. [54] Minghan Qin, Wanhua Li, Jiawei Zhou, Haoqian Wang, and Hanspeter Pfister. LangSplat: 3D Language Gaussian Splatting. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2024, Seattle, WA, USA, June 16-22, 2024, pages 20051–20060. IEEE, 2024.
+
+[55] Jun Guo, Xiaojian Ma, Yue Fan, Huaping Liu, and Qing Li. Semantic Gaussians: Open-Vocabulary Scene Understanding with 3D Gaussian Splatting. IEEE Transactions on Circuits and Systems for Video Technology, pages 1–1, 2026. [56] Jiazhong Cen, Jiemin Fang, Chen Yang, Lingxi Xie, Xiaopeng Zhang, Wei Shen, and Qi Tian. Segment Any 3D Gaussians. In Toby Walsh, Julie Shah, and Zico Kolter, editors, Thirty-Ninth AAAI Conference on Artificial Intelligence, Thirty-Seventh Conference on Innovative Applications of Artificial Intelligence, Fifteenth Symposium on Educational Advances in Artificial Intelligence, AAAI 2025, Philadelphia, PA, USA, February 25 - March 4, 2025, pages 1971–1979. AAAI Press, 2025. [57] Mingqiao Ye, Martin Danelljan, Fisher Yu, and Lei Ke. Gaussian Grouping: Segment and Edit Anything in 3D Scenes. In Ales Leonardis, Elisa Ricci, Stefan Roth, Olga Russakovsky, Torsten Sattler, and Gül Varol, editors, Computer Vision - ECCV 2024 - 18th European Conference, Milan, Italy, September 29-October 4, 2024, Proceedings, Part XXIX, Lecture Notes in Computer Science, pages 162–179. Springer, 2024. [58] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and temples: benchmarking large-scale scene reconstruction. ACM Trans. Graph., 36(4):78:1–78:13, 2017. [59] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm, George Drettakis, and Gabriel J. Brostow. Deep blending for free-viewpoint image-based rendering. ACM Trans. Graph., 37(6):257, 2018. [60] Jiahui Zhang, Fangneng Zhan, Muyu Xu, Shijian Lu, and Eric P. Xing. FreGS: 3D Gaussian Splatting with Progressive Frequency Regularization. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2024, Seattle, WA, USA, June 16-22, 2024, pages 21424–21433. IEEE, 2024. [61] Shakiba Kheradmand, Daniel Rebain, Gopal Sharma, Weiwei Sun, Yang-Che Tseng, Hossam Isack, Abhishek Kar, Andrea Tagliasacchi, and Kwang Moo Yi. 3D Gaussian Splatting as Markov Chain Monte Carlo. In Amir Globersons, Lester Mackey, Danielle Belgrave, Angela Fan, Ulrich Paquet, Jakub M. Tomczak, and Cheng Zhang, editors, Advances in Neural Information Processing Systems 38: Annual Conference on Neural Information Processing Systems 2024, NeurIPS 2024, Vancouver, BC, Canada, December 10 - 15, 2024, 2024.
+
+## Appendix
+
+## A Mathematical Proof
+
+In the implementation of SNS, the kernel is defined using the unnormalized probability density function (PDF) of the Skew-Normal distribution. Although this differs from the standard Skew-Normal (SN) distribution by a normalization coefficient, they share identical properties regarding affine transformations and geometric characteristics. For clarity and convenience, the following derivations are conducted within the framework of the standard SN distribution.
+
+#### A.1 Closure under Affine Transformations
+
+Let X ∼ SNd(µ, Ω, α) be a d-dimensional Skew-Normal random variable. Its stochastic representation [25] is given by:
+
+
+$$X = \mu + \omega Z \mid U > 0, \quad \begin{pmatrix} U \\ Z \end{pmatrix} \sim N_{1+d} \left( \mathbf{0}, \begin{pmatrix} 1 & \delta^\top \\ \delta & \bar{\Omega} \end{pmatrix} \right), \quad (10)$$
+
+where ω = (Ω ⊙ Id) 1/2 , Ω =¯ ω −1Ωω −1 , and δ = √ Ω¯α 1+α⊤Ω¯α .
+
+Consider an affine transformation Y = T X + b, where T ∈ R h×d , rank(T) = h ≤ d and b ∈ R h . Substituting the representation of X yields: Y = (T µ + b) + T ωZ | U > 0.
+
+To show that Y is also Skew-Normal, we express it in the standard stochastic representation. Let µY = T µ + b and W = T ωZ. Since (U, Z⊤) ⊤ is multivariate normal, the joint distribution of (U, W⊤) ⊤ remains normal with zero mean. The variance of W and the covariance between U and W are given by:
+
+$$\begin{aligned} \text{Var}(W) &= \Omega_Y = T\omega\bar{\Omega}\omega T^\top = T\Omega T^\top, \\ \text{Cov}(U, W) &= \text{Cov}(U, Z)\omega T^\top = \delta^\top \omega T^\top. \end{aligned} \tag{11}$$
+
+Defining ωY = (ΩY ⊙ Ih) 1/2 and ZY = ω −1 Y W, we can rewrite Y = µY + ωY ZY | U > 0, while Var(ZY ) = ω −1 Y ΩY ω −1 Y = Ω¯ Y , and Cov(U, ZY ) = Cov(U, W)ω −1 Y = δ ⊤ωT ⊤ω −1 Y . Letting δY = ω −1 Y T ωδ, we finally obtain the required block-covariance structure:
+
+$$Y = \mu_Y + \omega_Y Z_Y \mid U > 0, \quad \left( \frac{U}{Z_Y} \right) \sim N_{1+h} \left( \mathbf{0}, \left( \frac{1}{\delta_Y} \quad \frac{\delta_Y^T}{\Omega_Y} \right) \right). \quad (12)$$
+
+Since the conditioning event U > 0 is unchanged and (U, Z⊤ Y ) ⊤ satisfies the standard joint normal structure, we conclude that Y follows an h-dimensional SND.
+
+### A.2 2D Kernel Parameters
+
+Let X ∼ SN3(µ, Ω, α) represent the 3D Skew-Normal kernel, and consider a linear projection: Y = AX, where A ∈ R 2×3 . Building upon the property derived in A.1, we can simply write Y ∼ SN2(µY , ΩY , αY ), with µY = Aµ, ΩY = AΩA⊤, and δY = ω −1 Y Aωδ.
+
+Recall that δY = Ω¯ √ Y αY 1+α⊤ Y Ω¯ Y αY and 1 − δ ⊤ Y Ω¯ −1 Y δY = 1 1+α⊤ Y Ω¯ Y αY . We can write:
+
+
+$$\alpha_Y = \sqrt{1 + \alpha_Y^\top \bar{\Omega}_Y \alpha_Y} \cdot \bar{\Omega}_Y^{-1} \delta_Y = \frac{\bar{\Omega}_Y^{-1} \delta_Y}{\sqrt{1 - \delta_Y^\top \bar{\Omega}_Y^{-1} \delta_Y}} = \frac{\omega_Y \Omega_Y^{-1} A \omega \delta}{\sqrt{1 - (A \omega \delta)^\top \Omega_Y^{-1} A \omega \delta}}, \quad (13)$$
+
+In our formulation, α is explicitly parameterized as α = ωRS−1k, where Ω = RSS⊤R⊤. Substituting this structural definition into the equations above simplifies the expressions:
+
+
+$$\begin{aligned} \omega\delta &= \frac{\omega \Omega \omega R S^{-1} k}{\sqrt{1 + k^\top S^{-1} R^\top \omega \Omega \omega R S^{-1} k}} = \frac{\Omega R S^{-1} k}{\sqrt{1 + k^\top S^{-1} R^\top \Omega R S^{-1} k}} \\ &= \frac{R S S^\top R^\top R S^{-1} k}{\sqrt{1 + k^\top S^{-1} R^\top R S S^\top R^\top R S^{-1} k}} = \frac{R S k}{\sqrt{1 + k^\top k}}. \end{aligned} \quad (14)$$
+
+Applying the transformation Eq.\(14\) to Eq.\(13\) gives:
+
+$$\alpha_Y = \frac{\omega_Y \Omega_Y^{-1} ARSk}{\sqrt{1 + k^\top k} k - (ARSk)^\top (\Omega_Y)^{-1} ARSk}. \quad (15)$$
+
+#### A.3 The Mean of the Skew-Normal Distribution
+
+Unlike the multivariate normal distribution, the location parameter µ of X ∼ SNd(µ, Ω, α) does not equal its exact mean. The true mean, E[X], can be analytically derived using the stochastic representation introduced in Eq.\(10\). Taking the expectation of X = µ + ωZ | U > 0, we have:
+
+$$\begin{aligned} \mathbb{E}[X] &= \mu + \omega \mathbb{E}[Z \mid U > 0] \\ &= \mu + \omega \mathbb{E}[\mathbb{E}[Z \mid U] \mid U > 0] \\ &= \mu + \omega ([\mathbb{E}[Z - U\delta] + \mathbb{E}[U\delta \mid U > 0]) \\ &= \mu + \mathbb{E}[U \mid U > 0] \cdot \omega\delta \\ &= \mu + \sqrt{\frac{2}{\pi}} \cdot \omega\delta. \end{aligned} \tag{16}$$
+
+If α = ωRS−1k, associated with Eq.\(14\), we have:
+
+$$\mathbb{E}[X] = \mu + \sqrt{\frac{2}{\pi}} \cdot \frac{RSk}{\sqrt{1+k^\top k}} \quad (17)$$
+
+## B Backward Pass
+
+The learnable parameters for each component in SNS include the location µ, scale matrix Ω(i.e. S and R), color c, opacity o, skew k, and the key gradients are ∂L ∂µ , ∂L ∂S , ∂L ∂R , ∂L ∂c , ∂L ∂o , ∂L ∂k , where L is the loss. L is calculated between the ground-truth pixel colors and rendered colors. The rendered pixel colors are:
+
+
+$$C(u) = \sum_{i=1}^N c_i a_i(u) \prod_{j=1}^{i-1} (1 - a_j(u)), \quad (18)$$
+
+where a(u) = o · SN2D(u) and u denotes pixel coordinate in 2D images.
+
+Previous methods, such as 3DGS and SSS, compute the gradients with respect to the shape parameters (R, S) by first calculating ∂L ∂(Ω−1) and subsequently backpropagating to obtain ∂L ∂R and ∂L ∂S . However, recalling the definitions in Eq. \(5\) and Eq. \(6\), computing ∂L ∂Ω directly proves cumbersome. The parameters (R, S) couple intricately within both ARSk and (Ω2D) −1 , leading to high computational complexity. To mitigate this, we propose an alternative differentiation scheme. By introducing an intermediate variable Q = ARS, we reformulate Eq. \(5\) and Eq. \(6\) as follows:
+
+$$SN^{2D}(u) = G_2(u - \mu^{2D}; QQ^\top \Phi((m^{2D})^\top(u - \mu^{2D})), \quad (19)$$
+
 where
-(QQ⊤ )−1 Qk
-.
-m2D = p
-1 + k ⊤ k − k ⊤ Q⊤ (QQ⊤ )−1 Qk
-16
-(19)
+
+$$m^{2D} = \frac{(QQ^\top)^{-1}Qk}{\sqrt{1+k^\top k - k^\top Q^\top (QQ^\top)^{-1}Qk}}.$$
+
 Applying the chain rule, the gradients are given by:
-∂L
-∂L ∂C
-=
-·
-,
-∂c
-∂C ∂c
-∂L
-∂L ∂C ∂a
-=
-·
-·
-,
-∂o
-∂C ∂a ∂o
-∂SN 2D ∂µ2D
-∂L ∂C
-∂a
-∂L
-·
-·
-=
-·
-·
-,
-∂µ
-∂C ∂a ∂SN 2D
-∂µ2D
-∂µ
-∂SN 2D
-∂L
-∂L ∂C
-∂a
-·
-=
-·
-·
-,
-∂k
-∂C ∂a ∂SN 2D
-∂k
-2D
-∂SN
-∂L ∂C
-∂a
-∂Q
-∂L
-·
-=
-·
-·
-·
-,
-2D
-∂R
-∂C ∂a ∂SN
-∂Q
-∂R
-∂SN 2D ∂Q
-∂L
-∂L ∂C
-∂a
-·
-=
-·
-·
-·
-,
-∂S
-∂C ∂a ∂SN 2D
-∂Q
-∂S
-(20)
-where C and a are defined in Eq. (18). Compared to the standard gradient computation in 3DGS,
-our formulation solely requires deriving the partial derivatives of SN 2D with respect to µ2D , k, and
-Q; the gradients for all other standard components remain unchanged and are therefore omitted.
-The final analytical expressions for these specific derivatives are presented in Eq. (25), Eq. (28),
-2D
-2D
-and Eq.
-p (38), respectively. For notational simplicity, we denote m = m , ∆ = u − µ , and
-⊤
-⊤
-⊤
-2D
-−1
-D = 1 + k k − k Q (Ω ) Qk. Also, we define the following auxiliary variables:
-c∆ = Φ · G2 · (Ω2D )−1 ∆,
-
-⊤
-M∆ = Φ · G2 · (Ω2D )−1 ∆ (Ω2D )−1 ∆ ,
-
-
-1 ⊤ 2
-G2
-s∆ = √ exp − (m ∆) ,
-2
-2π
-
-
-G2
-1 ⊤ 2
-p∆ = √ exp − (m ∆) · (Ω2D )−1 ∆,
-2
-2π
-(21)
-where s∆ ∈ R, c∆ , p∆ ∈ R2 and M∆ ∈ R2×2 .
-Gradient with respect to µ2D .
-First, we derive the gradient with respect to the mean vector µ2D . Applying the product rule, we
-obtain:
-∂G2
-∂Φ
-∂SN 2D
-=Φ·
-+ G2 ·
-.
-(22)
-∂µ2D
-∂µ2D
-∂µ2D
-∂∆
-Given ∆ = u − µ2D , the inner derivative is ∂µ
-2D = −I. So the derivative of the Gaussian component
-G2 is:
-∂G2
-= G2 (Ω2D )−1 (u − µ2D ) = G2 (Ω2D )−1 ∆.
-(23)
-∂µ2D
-For the cumulative distribution function (CDF) component Φ(m⊤ ∆), the chain rule yields:
-
-
-∂Φ(m⊤ ∆)
-1
-1 ⊤ 2
-= − √ exp − (m ∆) m.
-∂µ2D
-2
-2π
-(24)
-Substituting these partial derivatives back into the product rule and utilizing the definitions in Eq. (21),
-we arrive at the intermediate expression:
-
-
-∂SN 2D
-G2
-1 ⊤ 2
-2D −1
-√
-=
-Φ
-·
-G
-(Ω
-)
-∆
-−
-exp
-−
-(m
-∆)
-m
-2
-∂µ2D
-2
-(25)
-2π
-= c∆ − s∆ · m.
-Gradient with respect to k.
-17
+
+$$\frac{\partial L}{\partial c} = \frac{\partial L}{\partial C} \cdot \frac{\partial C}{\partial c}, \quad \frac{\partial L}{\partial L} = \frac{\partial L}{\partial C} \cdot \frac{\partial C}{\partial a}, \quad \frac{\partial L}{\partial o} = \frac{\partial L}{\partial C} \cdot \frac{\partial a}{\partial a}, \quad \frac{\partial L}{\partial L} = \frac{\partial L}{\partial C} \cdot \frac{\partial C}{\partial a}, \quad \frac{\partial L}{\partial \mu} = \frac{\partial L}{\partial C} \cdot \frac{\partial C}{\partial a}, \quad \frac{\partial L}{\partial SN^{2D}} = \frac{\partial SN^{2D}}{\partial SN^{2D}} \cdot \frac{\partial \mu^{2D}}{\partial \mu}, \quad \frac{\partial L}{\partial L} = \frac{\partial L}{\partial C} \cdot \frac{\partial C}{\partial a}, \quad \frac{\partial L}{\partial SN^{2D}} = \frac{\partial SN^{2D}}{\partial SN^{2D}} \cdot \frac{\partial a}{\partial k}, \quad \frac{\partial L}{\partial L} = \frac{\partial L}{\partial C} \cdot \frac{\partial C}{\partial a}, \quad \frac{\partial L}{\partial SN^{2D}} = \frac{\partial SN^{2D}}{\partial Q} \cdot \frac{\partial Q}{\partial R}, \quad \frac{\partial L}{\partial S} = \frac{\partial L}{\partial C} \cdot \frac{\partial C}{\partial a}, \quad \frac{\partial L}{\partial SN^{2D}} = \frac{\partial SN^{2D}}{\partial Q} \cdot \frac{\partial Q}{\partial S},$$
+
+where C and a are defined in Eq. \(18\). Compared to the standard gradient computation in 3DGS, our formulation solely requires deriving the partial derivatives of SN2D with respect to µ 2D, k, and Q; the gradients for all other standard components remain unchanged and are therefore omitted. The final analytical expressions for these specific derivatives are presented in Eq. \(25\), Eq. \(28\), and Eq. \(38\), respectively. For notational simplicity, we denote m = m2D, ∆ = u − µ 2D, and D = p 1 + k⊤k − k⊤Q⊤(Ω2D)−1Qk. Also, we define the following auxiliary variables:
+
+
+$$\begin{aligned} c_\Delta &= \Phi \cdot G_2 \cdot (\Omega^{2D})^{-1} \Delta, \\ M_\Delta &= \Phi \cdot G_2 \cdot ((\Omega^{2D})^{-1} \Delta) \cdot ((\Omega^{2D})^{-1} \Delta)^\top, \\ s_\Delta &= \frac{G_2}{\sqrt{2\pi}} \exp \left( -\frac{1}{2} (m^\top \Delta)^2 \right), \\ p_\Delta &= \frac{G_2}{\sqrt{2\pi}} \exp \left( -\frac{1}{2} (m^\top \Delta)^2 \right) \cdot (\Omega^{2D})^{-1} \Delta, \end{aligned} \tag{21}$$
+
+where s∆ ∈ R, c∆, p∆ ∈ R 2 and M∆ ∈ R 2×2 .
+
+Gradient with respect to µ 2D.
+
+First, we derive the gradient with respect to the mean vector µ 2D. Applying the product rule, we obtain:
+
+$$\frac{\partial S N^{2D}}{\partial \mu^{2D}} = \Phi \cdot \frac{\partial G_2}{\partial \mu^{2D}} + G_2 \cdot \frac{\partial \Phi}{\partial \mu^{2D}}. \quad (22)$$
+
+Given ∆ = u−µ 2D, the inner derivative is ∂∆ ∂µ2D = −I. So the derivative of the Gaussian component G2 is:
+
+$$\frac{\partial G_2}{\partial \mu^{2D}} = G_2(\Omega^{2D})^{-1}(u - \mu^{2D}) = G_2(\Omega^{2D})^{-1}\Delta. \quad (23)$$
+
+For the cumulative distribution function (CDF) component Φ(m⊤∆), the chain rule yields:
+
+$$\frac{\partial \Phi(m^\top \Delta)}{\partial \mu^{2D}} = -\frac{1}{\sqrt{2\pi}} \exp\left(-\frac{1}{2}(m^\top \Delta)^2\right) m. \quad (24)$$
+
+Substituting these partial derivatives back into the product rule and utilizing the definitions in Eq. \(21\), we arrive at the intermediate expression:
+
+
+$$\begin{aligned} \frac{\partial S N^{2D}}{\partial \mu^{2D}} &= \Phi \cdot G_2(\Omega^{2D})^{-1} \Delta - \frac{G_2}{\sqrt{2\pi}} \exp\left(-\frac{1}{2}(m^\top \Delta)^2\right) m \\ &= c_\Delta - s_\Delta \cdot m. \end{aligned} \quad (25)$$
+
 Next, we derive the gradient with respect to k:
+
+
+$$\begin{aligned} \frac{\partial S N^{2D}}{\partial k} &= G_2 \cdot \frac{\partial \Phi}{\partial (m^\top \Delta)} \cdot \frac{\partial (m^\top \Delta)}{\partial k} \\ &= \frac{G_2}{\sqrt{2\pi}} \exp \left( -\frac{1}{2} (m^\top \Delta)^2 \right) \cdot \frac{\partial (m^\top \Delta)}{\partial k}, \end{aligned} \quad (26)$$
+
 where
-∂SN 2D
-∂Φ
-∂(m⊤ ∆)
-= G2 ·
-·
-∂k
-∂(m⊤ ∆)
-∂k
-
-
-G2
-1 ⊤ 2
-∂(m⊤ ∆)
-,
-= √ exp − (m ∆) ·
-2
-∂k
-2π
-(26)
-
-∂(m⊤ ∆) 1 ∂ ∆⊤ (Ω2D )−1 Qk
-= ·
-∂k
-D
-∂k
-
-∆⊤ (Ω2D )−1 Qk ∂ k ⊤ k − k ⊤ Q⊤ (Ω2D )−1 Qk
-−
-·
-2D3
-∂k
-⊤
-2D −1
-
-Q (Ω ) ∆ ∆⊤ (Ω2D )−1 Qk
-=
-· k − Q⊤ (Ω2D )−1 Qk
-−
-3
-D
-D
-Q⊤ (Ω2D )−1 ∆ (∆⊤ m) · Q⊤ m (∆⊤ m) · k
-=
-+
-−
-D
-D
-D2
-
-1 ⊤
-1
-= Q (Ω2D )−1 ∆ + (∆⊤ m) · m − 2 · (∆⊤ m) · k.
-D
-D
-(27)
-Combining Eq. (21), Eq. (26), and Eq. (27), we obtain:
-
-1
-1
-∂SN 2D
-2D
-2D
-= Q⊤ p∆ + (p⊤
-m) · m − 2 · (p⊤
-m) · k.
-∆Ω
-∆Ω
-∂k
-D
-D
-(28)
-Gradient with respect to Q.
-2D
-To compute ∂SN
-∂Q , we apply the product rule to the respective terms:
-∂SN 2D
-∂Φ
-∂(m⊤ ∆)
-∂G2
-= G2 ·
-·
-+Φ·
-.
-∂Q
-∂(m⊤ ∆)
-∂Q
-∂Q
-(29)
-First, we calculate the gradient of the 2D Gaussian G2 with respect to Q. The differential of G2 can
-be expressed using the trace operator Tr(·):
-
-
-1
-dG2 = G2 · − ∆⊤ d(Ω2D )−1 ∆
-2
-
-1
-(30)
-= G2 Tr ∆⊤ (Ω2D )−1 (QdQ⊤ + dQQ⊤ )(Ω2D )−1 ∆
-2
-
-= Tr G2 · Q⊤ (Ω2D )−1 ∆∆⊤ (Ω2D )−1 dQ .
-∂f
-By the matrix calculus identity where the differential df = Tr(P ⊤ dQ) implies the gradient ∂Q
-= P,
-we extract the derivative with respect to Q:
-
-∂G2
-= G2 (Ω2D )−1 ∆∆⊤ (Ω2D )−1 Q.
-(31)
-∂Q
-⊤
-∆)
-Next, we compute ∂(m
-. Let N = ∆⊤ (Ω2D )−1 Qk, which implies m⊤ ∆ = N
-∂Q
-D . By the quotient
-rule, its differential is:
-d(m⊤ ∆) =
-1
-N
-1
-m⊤ ∆
-dN − 2 dD = dN −
-dD.
-D
-D
-D
-D
-(32)
-For dN , evaluating the differential and substituting (Ω2D )−1 Qk = Dm, we have:
-
-dN = ∆⊤ d (Ω2D )−1 Qk + ∆⊤ (Ω2D )−1 dQ k
-= −∆⊤ (Ω2D )−1 (dQ Q⊤ + Q dQ⊤ )(Ω2D )−1 Qk + ∆⊤ (Ω2D )−1 dQ k
-= Tr k∆⊤ (Ω2D )−1 dQ − Q⊤ Dm∆⊤ (Ω2D )−1 dQ − Dm∆⊤ (Ω2D )−1 QdQ⊤
-
-
-⊤
-= Tr (Ω2D )−1 ∆k ⊤ − D(Ω2D )−1 ∆m⊤ Q − Dm∆⊤ (Ω2D )−1 Q dQ .
-18
-
-(33)
-This establishes the gradient of N :
-
-∂N
-= (Ω2D )−1 ∆k ⊤ − D (Ω2D )−1 ∆m⊤ + m∆⊤ (Ω2D )−1 Q.
-∂Q
-(34)
-Similarly, we derive variable D’s differential:
-
-1
-· d k ⊤ Q⊤ (Ω2D )−1 Qk
-2D
-
-1
-= − · k ⊤ Q⊤ (Ω2D )−1 dQ k − k ⊤ Q⊤ (Ω2D )−1 dQ Q⊤ (Ω2D )−1 Qk
-D
-
-1
-= − · Dm⊤ dQ k − D2 m⊤ dQ Q⊤ m
-D
-
-
-⊤
-= Tr −mk ⊤ + D · mm⊤ Q dQ ,
-dD = −
-(35)
+
+
+$$\begin{aligned} \frac{\partial(m^\top \Delta)}{\partial k} &= \frac{1}{D} \cdot \frac{\partial (\Delta^\top (\Omega^{2D})^{-1} Qk)}{\partial k} \\ &\quad - \frac{\Delta^\top (\Omega^{2D})^{-1} Qk}{2D^3} \cdot \frac{\partial (k^\top k - k^\top Q^\top (\Omega^{2D})^{-1} Qk)}{\partial k} \\ &= \frac{Q^\top (\Omega^{2D})^{-1} \Delta}{D} - \frac{\Delta^\top (\Omega^{2D})^{-1} Qk}{D^3} \cdot (k - Q^\top (\Omega^{2D})^{-1} Qk) \\ &= \frac{Q^\top (\Omega^{2D})^{-1} \Delta}{D} + \frac{(\Delta^\top m) \cdot Q^\top m}{D} - \frac{(\Delta^\top m) \cdot k}{D^2} \\ &= \frac{1}{D} Q^\top ((\Omega^{2D})^{-1} \Delta + (\Delta^\top m) \cdot m) - \frac{1}{D^2} \cdot (\Delta^\top m) \cdot k. \end{aligned} \quad (27)$$
+
+Combining Eq. \(21\), Eq. \(26\), and Eq. \(27\), we obtain:
+
+
+$$\frac{\partial SN^{2D}}{\partial k} = \frac{1}{D} Q^\top (\mathbf{p}_\Delta + (\mathbf{p}_\Delta^\top \Omega^{2D} m) \cdot \mathbf{m}) - \frac{1}{D^2} \cdot (\mathbf{p}_\Delta^\top \Omega^{2D} m) \cdot \mathbf{k}. \quad (28)$$
+
+#### Gradient with respect to Q.
+
+To compute ∂SN2D ∂Q , we apply the product rule to the respective terms:
+
+$$\frac{\partial S N^{2D}}{\partial Q} = G_2 \cdot \frac{\partial \Phi}{\partial (m^\top \Delta)} \cdot \frac{\partial (m^\top \Delta)}{\partial Q} + \Phi \cdot \frac{\partial G_2}{\partial Q}. \quad (29)$$
+
+First, we calculate the gradient of the 2D Gaussian G2 with respect to Q. The differential of G2 can be expressed using the trace operator Tr(·):
+
+$$\begin{aligned} dG_2 &= G_2 \cdot \left( -\frac{1}{2} \Delta^\top d(\Omega^{2D})^{-1} \Delta \right) \\ &= \frac{1}{2} G_2 \text{Tr} (\Delta^\top (\Omega^{2D})^{-1} (Q dQ^\top + dQ Q^\top) (\Omega^{2D})^{-1} \Delta) \\ &= \text{Tr} (G_2 \cdot Q^\top (\Omega^{2D})^{-1} \Delta \Delta^\top (\Omega^{2D})^{-1} dQ). \end{aligned} \quad (30)$$
+
+By the matrix calculus identity where the differential df = Tr(P ⊤dQ) implies the gradient ∂f ∂Q = P, we extract the derivative with respect to Q:
+
+$$\frac{\partial G_2}{\partial Q} = G_2 \left( (\Omega^{2D})^{-1} \Delta \Delta^\top (\Omega^{2D})^{-1} \right) Q. \quad (31)$$
+
+Next, we compute ∂(m⊤∆) ∂Q . Let N = ∆⊤(Ω2D) −1Qk, which implies m⊤∆ = N D . By the quotient rule, its differential is:
+
+
+
+| $d(m^\top \Delta) = \frac{1}{D}dN - \frac{N}{D^2}dD = \frac{1}{D}dN - \frac{m^\top \Delta}{D}dD.$ | (32) |
+|---------------------------------------------------------------------------------------------------|------|
+|---------------------------------------------------------------------------------------------------|------|
+
+For dN, evaluating the differential and substituting (Ω2D) −1Qk = Dm, we have:
+
+$$\begin{aligned} dN &= \Delta^T d ((\Omega^{2D})^{-1}) Q k + \Delta^T (\Omega^{2D})^{-1} d Q k \\ &= -\Delta^T (\Omega^{2D})^{-1} (dQ Q^T + Q dQ^T) (\Omega^{2D})^{-1} Q k + \Delta^T (\Omega^{2D})^{-1} d Q k \\ &= \text{Tr} (k \Delta^T (\Omega^{2D})^{-1} dQ - Q^T D m \Delta^T (\Omega^{2D})^{-1} dQ - D m \Delta^T (\Omega^{2D})^{-1} Q dQ^T) \\ &= \text{Tr} \left( [(\Omega^{2D})^{-1} \Delta k^T - D (\Omega^{2D})^{-1} \Delta m^T Q - D m \Delta^T (\Omega^{2D})^{-1} Q]^T dQ \right). \end{aligned} \quad (33)$$
+
+This establishes the gradient of N:
+
+
+$$\frac{\partial N}{\partial Q} = (\Omega^{2D})^{-1} \Delta k^\top - D \left( (\Omega^{2D})^{-1} \Delta m^\top + m \Delta^\top (\Omega^{2D})^{-1} \right) Q. \quad (34)$$
+
+Similarly, we derive variable D's differential:
+
+$$\begin{aligned} dD &= -\frac{1}{2D} \cdot d(k^\top Q^\top (\Omega^{2D})^{-1} Q k) \\ &= -\frac{1}{D} \cdot (k^\top Q^\top (\Omega^{2D})^{-1} dQ k - k^\top Q^\top (\Omega^{2D})^{-1} dQ Q^\top (\Omega^{2D})^{-1} Q k) \\ &= -\frac{1}{D} \cdot (Dm^\top dQ k - D^2m^\top dQ Q^\top m) \\ &= \text{Tr} \left( (-mk^\top + D \cdot mm^\top Q)^\top dQ \right), \end{aligned} \tag{35}$$
+
 which yields:
-∂D
-= −mk ⊤ + D · mm⊤ Q.
-∂Q
-(36)
-⊤
-∆)
-:
-Combining Eq. (32), Eq. (34), and Eq. (36), we assemble ∂(m
-∂Q
-
-∂(m⊤ ∆) 1
-=
-(Ω2D )−1 ∆ + (m⊤ ∆)m k ⊤
-∂Q
-D
-
-− (Ω2D )−1 ∆m⊤ + m∆⊤ (Ω2D )−1 + (m⊤ ∆)mm⊤ Q.
-(37)
-
-G2
-√
-Finally, recalling that G2 · ∂(m∂Φ
-exp − 12 (m⊤ ∆)2 , we multiply Eq. (37) by this term.
-⊤ ∆) =
-2π
-2D
-Substituting the previously defined variables p∆ and M∆ , the full analytical gradient ∂SN
-is
-∂Q
-derived as:
-
-∂SN 2D
-⊤ 2D
-= M∆ − p∆ m⊤ − mp⊤
-m) · mm⊤ Q
-∆ − (p∆ Ω
-∂Q
-(38)
- ⊤
-1
-2D
-+
-p∆ + (p⊤
-Ω
-m)
-·
-m
-k
-.
-∆
-D
-Following the standard 3DGS architecture, the backward pass consists of rendering and preprocessing
-stages. In standard 3DGS, the rendering stage first computes gradients with respect to 2D image-space
-∂L
-∂L
-variables (e.g., ∂µ
-2D and ∂(Ω2D )−1 ), and the preprocessing stage uses these intermediate gradients to
-compute the gradients for 3D learnable parameters.
-By contrast, the SNS rendering stage directly evaluates the shared auxiliary terms (c∆ , M∆ , s∆ , p∆ ),
-which are intermediate algebraic quantities rather than derivatives. Next, the preprocessing stage
-leverages these precomputed terms to efficiently evaluate the exact gradients of the 3D parameters
-using our derived closed-form expressions (Eq. (25), Eq. (28), and Eq. (38)). By algebraically
-restructuring the complex gradient derivation into clear and concise computations, this formulation
-maximizes variable reuse and ensures a smooth and efficient computational flow.
-C
-Detailed results
-In this section, we present the detailed results. Specifically, Table 4 reports the complete PSNR,
-SSIM, and LPIPS metrics for our full SNS model and its ablations across all evaluated scenes.
-D
-Alternating Optimization Strategy
-Jointly optimizing the base geometric attributes (rotation and scaling) with the skewness parameters
-can lead to optimization instability due to their highly coupled influence on the primitive’s spatial
-footprint. To mitigate this, we introduce an Alternating Optimization strategy inspired by Block
-Coordinate Descent (BCD).
-19
-Vanilla SNS
-k-decomposition
-Alternating Optimization
-Full SNS
-Dataset
-Scene
-PSNR↑ / SSIM↑ / LPIPS↓
-PSNR↑ / SSIM↑ / LPIPS↓
-PSNR↑ / SSIM↑ / LPIPS↓
-PSNR↑ / SSIM↑ / LPIPS↓
-Mip-NeRF 360
-Counter
-Bicycle
-Stump
-Garden
-Bonsai
-Room
-Kitchen
-30.1129 / 0.9270 / 0.1534
-25.7461 / 0.8004 / 0.1719
-27.2857 / 0.8144 / 0.1739
-28.1096 / 0.8828 / 0.0909
-33.6172 / 0.9551 / 0.1514
-33.0042 / 0.9392 / 0.1662
-32.5742 / 0.9402 / 0.1022
-30.2460 / 0.9283 / 0.1531
-25.8033 / 0.8008 / 0.1726
-27.3576 / 0.8151 / 0.1744
-28.1546 / 0.8832 / 0.0905
-33.7117 / 0.9563 / 0.1505
-32.9194 / 0.9397 / 0.1660
-32.6499 / 0.9415 / 0.1020
-30.1116 / 0.9277 / 0.1540
-25.8162 / 0.8011 / 0.1724
-27.3833 / 0.8144 / 0.1756
-28.1348 / 0.8830 / 0.0910
-33.7363 / 0.9562 / 0.1509
-33.0393 / 0.9401 / 0.1658
-32.7514 / 0.9419 / 0.1017
-30.2749 / 0.9282 / 0.1537
-25.8510 / 0.8024 / 0.1722
-27.3130 / 0.8149 / 0.1755
-28.2243 / 0.8837 / 0.0908
-33.7026 / 0.9568 / 0.1514
-33.0163 / 0.9400 / 0.1665
-32.8082 / 0.9420 / 0.1016
-Average
-30.0643 / 0.8942 / 0.1443
-30.1204 / 0.8950 / 0.1442
-30.1390 / 0.8949 / 0.1445
-30.1700 / 0.8954 / 0.1445
-Deep
-Blending
-Playroom
-DrJohnson
-30.4695 / 0.9099 / 0.2446
-29.8467 / 0.9095 / 0.2450
-30.3995 / 0.9144 / 0.2425
-29.8375 / 0.9091 / 0.2456
-30.6745 / 0.9153 / 0.2410
-29.9192 / 0.9091 / 0.2461
-30.7130 / 0.9148 / 0.2425
-29.8938 / 0.9089 / 0.2462
-Average
-30.1581 / 0.9097 / 0.2448
-30.1185 / 0.9118 / 0.2441
-30.2969 / 0.9122 / 0.2436
-30.3034 / 0.9119 / 0.2444
-Tanks &
-Temples
-Table 4: Per-scene ablation details. This table presents the performance of our Full SNS compared
-with its ablated versions. The Full SNS is composed of a baseline combined with k-decomposition
-and Alternating Optimization. We report PSNR, SSIM, and LPIPS for each scene and the average
-per dataset.
-Train
-Truck
-23.5475 / 0.8548 / 0.1604
-26.5301 / 0.8981 / 0.1044
-23.5138 / 0.8548 / 0.1614
-26.5041 / 0.8987 / 0.1024
-23.5132 / 0.8564 / 0.1606
-26.5523 / 0.8987 / 0.1037
-23.6065 / 0.8561 / 0.1615
-26.5613 / 0.8989 / 0.1035
-Average
-25.0388 / 0.8765 / 0.1324
-25.0090 / 0.8768 / 0.1319
-25.0328 / 0.8776 / 0.1322
-25.0839 / 0.8775 / 0.1325
-Algorithm 1 Alternating Optimization for Primitive Shape
-Require: Current iteration step t, warm-up threshold Tstart , cycle length C, base phase duration
-Cbase .
-Require: Base shape parameters Θbase , skewness parameters Θskew .
+
+
+$$\frac{\partial D}{\partial Q} = -mk^\top + D \cdot mm^\top Q. \quad (36)$$
+
+Combining Eq. \(32\), Eq. \(34\), and Eq. \(36\), we assemble ∂(m⊤∆) ∂Q :
+
+
+$$\frac{\partial(m^\top \Delta)}{\partial Q} = \frac{1}{D} ((\Omega^{2D})^{-1} \Delta + (m^\top \Delta)m) k^\top - ((\Omega^{2D})^{-1} \Delta m^\top + m \Delta^\top (\Omega^{2D})^{-1} + (m^\top \Delta)m m^\top) Q. \quad (37)$$
+
+Finally, recalling that G2 · ∂Φ ∂(m⊤∆) = √ G2 2π exp − 1 2 (m⊤∆)2 , we multiply Eq. \(37\) by this term. Substituting the previously defined variables p∆ and M∆, the full analytical gradient ∂SN2D ∂Q is derived as:
+
+
+$$\frac{\partial S N^{2D}}{\partial Q} = (M_\Delta - p_\Delta m^\top - m p_\Delta^\top - (p_\Delta^\top \Omega^{2D} m) \cdot m m^\top) Q + \frac{1}{D} (p_\Delta + (p_\Delta^\top \Omega^{2D} m) \cdot m) k^\top. \quad (38)$$
+
+Following the standard 3DGS architecture, the backward pass consists of rendering and preprocessing stages. In standard 3DGS, the rendering stage first computes gradients with respect to 2D image-space variables (e.g., ∂L ∂µ2D and ∂L ∂(Ω2D)−1 ), and the preprocessing stage uses these intermediate gradients to compute the gradients for 3D learnable parameters.
+
+By contrast, the SNS rendering stage directly evaluates the shared auxiliary terms (c∆,M∆, s∆, p∆), which are intermediate algebraic quantities rather than derivatives. Next, the preprocessing stage leverages these precomputed terms to efficiently evaluate the exact gradients of the 3D parameters using our derived closed-form expressions (Eq. \(25\), Eq. \(28\), and Eq. \(38\)). By algebraically restructuring the complex gradient derivation into clear and concise computations, this formulation maximizes variable reuse and ensures a smooth and efficient computational flow.
+
+## C Detailed results
+
+In this section, we present the detailed results. Specifically, Table 4 reports the complete PSNR, SSIM, and LPIPS metrics for our full SNS model and its ablations across all evaluated scenes.
+
+## D Alternating Optimization Strategy
+
+Jointly optimizing the base geometric attributes (rotation and scaling) with the skewness parameters can lead to optimization instability due to their highly coupled influence on the primitive's spatial footprint. To mitigate this, we introduce an Alternating Optimization strategy inspired by Block Coordinate Descent (BCD).
+
+Table 4: Per-scene ablation details. This table presents the performance of our Full SNS compared with its ablated versions. The Full SNS is composed of a baseline combined with k-decomposition and Alternating Optimization. We report PSNR, SSIM, and LPIPS for each scene and the average per dataset.
+
+| Dataset Scene          |         | PSNR ↑ Vanilla / SSIM | SNS ↑ / LPIPS ↓ |         | k PSNR ↑ / SSIM | ↑ / LPIPS ↓ |         | Alternating PSNR ↑ / SSIM | ↑ / LPIPS Optimization ↓ |         | PSNR ↑ Full / SSIM | SNS ↑ / LPIPS ↓ |
+|------------------------|---------|-----------------------|-----------------|---------|-----------------|-------------|---------|---------------------------|--------------------------|---------|--------------------|-----------------|
+| Counter                | 30.1129 | / 0.9270              | / 0.1534        | 30.2460 | / 0.9283        | / 0.1531    | 30.1116 | / 0.9277                  | / 0.1540                 | 30.2749 | / 0.9282           | / 0.1537        |
+| Bicycle                | 25.7461 | / 0.8004              | / 0.1719        | 25.8033 | / 0.8008        | / 0.1726    | 25.8162 | / 0.8011                  | / 0.1724                 | 25.8510 | / 0.8024           | / 0.1722        |
+| Stump Mip-NeRF         | 27.2857 | / 0.8144              | / 0.1739        | 27.3576 | / 0.8151        | / 0.1744    | 27.3833 | / 0.8144                  | / 0.1756                 | 27.3130 | / 0.8149           | / 0.1755        |
+| Garden                 | 28.1096 | / 0.8828              | / 0.0909        | 28.1546 | / 0.8832        | / 0.0905    | 28.1348 | / 0.8830                  | / 0.0910                 | 28.2243 | / 0.8837           | / 0.0908        |
+| Bonsai                 | 33.6172 | / 0.9551              | / 0.1514        | 33.7117 | / 0.9563        | / 0.1505    | 33.7363 | / 0.9562                  | / 0.1509                 | 33.7026 | / 0.9568           | / 0.1514        |
+| Room                   | 33.0042 | / 0.9392              | / 0.1662        | 32.9194 | / 0.9397        | / 0.1660    | 33.0393 | / 0.9401                  | / 0.1658                 | 33.0163 | / 0.9400           | / 0.1665        |
+| Kitchen                | 32.5742 | / 0.9402              | / 0.1022        | 32.6499 | / 0.9415        | / 0.1020    | 32.7514 | / 0.9419                  | / 0.1017                 | 32.8082 | / 0.9420           | / 0.1016        |
+| Average                | 30.0643 | / 0.8942              | / 0.1443        | 30.1204 | / 0.8950        | / 0.1442    | 30.1390 | / 0.8949                  | / 0.1445                 | 30.1700 | / 0.8954           | / 0.1445        |
+| Playroom Blending Deep | 30.4695 | / 0.9099              | / 0.2446        | 30.3995 | / 0.9144        | / 0.2425    | 30.6745 | / 0.9153                  | / 0.2410                 | 30.7130 | / 0.9148           | / 0.2425        |
+| DrJohnson              | 29.8467 | / 0.9095              | / 0.2450        | 29.8375 | / 0.9091        | / 0.2456    | 29.9192 | / 0.9091                  | / 0.2461                 | 29.8938 | / 0.9089           | / 0.2462        |
+| Average                | 30.1581 | / 0.9097              | / 0.2448        | 30.1185 | / 0.9118        | / 0.2441    | 30.2969 | / 0.9122                  | / 0.2436                 | 30.3034 | / 0.9119           | / 0.2444        |
+| Train & Temples Tanks  | 23.5475 | / 0.8548              | / 0.1604        | 23.5138 | / 0.8548        | / 0.1614    | 23.5132 | / 0.8564                  | / 0.1606                 | 23.6065 | / 0.8561           | / 0.1615        |
+| Truck                  | 26.5301 | / 0.8981              | / 0.1044        | 26.5041 | / 0.8987        | / 0.1024    | 26.5523 | / 0.8987                  | / 0.1037                 | 26.5613 | / 0.8989           | / 0.1035        |
+| Average                | 25.0388 | / 0.8765              | / 0.1324        | 25.0090 | / 0.8768        | / 0.1319    | 25.0328 | / 0.8776                  | / 0.1322                 | 25.0839 | / 0.8775           | / 0.1325        |
+
+## Algorithm 1 Alternating Optimization for Primitive Shape
+
+Require: Current iteration step t, warm-up threshold Tstart, cycle length C, base phase duration Cbase.
+
+Require: Base shape parameters Θbase, skewness parameters Θskew.
+
 1: Compute loss L and initial gradients for all parameters
-2: if t > Tstart then
-▷ Begin Alternating Optimization
-3:
-stepcycle ← t (mod C)
-4:
-if stepcycle < Cbase then
-5:
-Freeze Θskew
-▷ Zero gradients & LR for skewness
-6:
-Unfreeze Θbase
-7:
-else
-8:
-Freeze Θbase
-▷ Zero gradients & LR for base shape
-9:
-Unfreeze Θskew
-10:
-end if
-11: else
-12:
-Unfreeze all Θbase and Θskew
-▷ Joint optimization
+
+2: if t > Tstart then ▷ Begin Alternating Optimization
+
+3: stepcycle ← t (mod C) 4: if stepcycle < Cbase then
+
+5: Freeze Θskew ▷ Zero gradients & LR for skewness
+
+6: Unfreeze Θbase
+
+7: else
+
+8: Freeze Θbase ▷ Zero gradients & LR for base shape
+
+9: Unfreeze Θskew
+
+10: end if 11: else
+
+12: Unfreeze all Θbase and Θskew ▷ Joint optimization
+
 13: end if
+
 14: Apply optimizer step (e.g., Adam/SGHMC) to update unfrozen parameters
-As outlined in Algorithm 1, we partition the shape-related parameters into two disjoint groups: the
-base shape parameters Θbase = {R, S} and the skewness parameters Θskew = {dk , mk }. During
-the initial warm-up phase (before iteration Tstart ), all parameters are optimized jointly to establish a
-reasonable geometry. Once the threshold Tstart is reached, we interleave the optimization of Θbase
-and Θskew within a fixed cycle length C. In each cycle, we freeze the skewness to refine the base
-shape for Cbase steps, and subsequently freeze the base shape to optimize the skewness for the
-remaining steps. This decoupled optimization stabilizes the gradient descent and prevents degenerate
-primitive shapes.
-E
-Limitations and future work.
-While SNS improves the reconstruction of asymmetric geometries and sharp boundaries, it introduces
-certain limitations. First, evaluating the Skew-Normal distribution requires computing the Cumulative
-Distribution Function (CDF). In our current implementation, we directly employ the highly accurate
-numerical solution (the erf function) to ensure mathematical precision. While faster analytic approximations exist, relying on the precise erf incurs moderate penalties on rendering speed. Second, as
-20
-SNS primarily enhances geometric representation, it still shares the limitations of 3DGS in modeling
-highly specular surfaces using Spherical Harmonics (SH). Third, as observed in our ablation studies,
-while the full combined model achieves the highest average PSNR, individual variants slightly outperform it on SSIM and LPIPS. This reveals that a consistently optimal optimization method that
-uniformly maximizes all evaluation metrics has not been found.
-Future work will focus on reducing the CDF computational overhead and exploring more comprehensive optimization algorithms to jointly improve both reconstruction fidelity and perceptual quality.
-Furthermore, rather than applying complex asymmetric kernels globally, we plan to integrate SNS
-with spatial hierarchical structures. This would allow the model to adaptively allocate Skew-Normal
-primitives along high-frequency object boundaries while falling back to simpler Gaussians in smooth
-regions, thereby optimizing the overall efficiency-to-quality trade-off.
-21
+
+As outlined in Algorithm 1, we partition the shape-related parameters into two disjoint groups: the base shape parameters Θbase = {R, S} and the skewness parameters Θskew = {dk, mk}. During the initial warm-up phase (before iteration Tstart), all parameters are optimized jointly to establish a reasonable geometry. Once the threshold Tstart is reached, we interleave the optimization of Θbase and Θskew within a fixed cycle length C. In each cycle, we freeze the skewness to refine the base shape for Cbase steps, and subsequently freeze the base shape to optimize the skewness for the remaining steps. This decoupled optimization stabilizes the gradient descent and prevents degenerate primitive shapes.
+
+## E Limitations and future work.
+
+While SNS improves the reconstruction of asymmetric geometries and sharp boundaries, it introduces certain limitations. First, evaluating the Skew-Normal distribution requires computing the Cumulative Distribution Function (CDF). In our current implementation, we directly employ the highly accurate numerical solution (the erf function) to ensure mathematical precision. While faster analytic approximations exist, relying on the precise erf incurs moderate penalties on rendering speed. Second, as
+
+SNS primarily enhances geometric representation, it still shares the limitations of 3DGS in modeling highly specular surfaces using Spherical Harmonics (SH). Third, as observed in our ablation studies, while the full combined model achieves the highest average PSNR, individual variants slightly outperform it on SSIM and LPIPS. This reveals that a consistently optimal optimization method that uniformly maximizes all evaluation metrics has not been found.
+
+Future work will focus on reducing the CDF computational overhead and exploring more comprehensive optimization algorithms to jointly improve both reconstruction fidelity and perceptual quality. Furthermore, rather than applying complex asymmetric kernels globally, we plan to integrate SNS with spatial hierarchical structures. This would allow the model to adaptively allocate Skew-Normal primitives along high-frequency object boundaries while falling back to simpler Gaussians in smooth regions, thereby optimizing the overall efficiency-to-quality trade-off.

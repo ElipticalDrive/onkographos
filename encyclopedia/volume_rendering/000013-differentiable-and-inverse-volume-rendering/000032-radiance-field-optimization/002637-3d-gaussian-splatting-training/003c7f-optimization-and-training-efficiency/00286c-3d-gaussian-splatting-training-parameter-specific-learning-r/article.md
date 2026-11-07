@@ -3,56 +3,36 @@
 Also called: Adam parameter learning rates, Gaussian Optimizer Configuration, Per-parameter group learning rates, Training Optimizer Setup, X-Gaussian Hyperparameters, X-Gaussian Implementation Details
 
 ## Overview
-Configures an Adam optimizer with distinct learning rates for each Gaussian parameter group to stabilize training and prevent rapid divergence [S2, unofficial][S1]. It sets up the optimizer with a base learning rate of 0.0, relying entirely on per-group overrides defined in the parameter groups [S2, unofficial]. This approach addresses the varying sensitivity of Gaussian attributes (position, scale, color, opacity) to gradient updates [S2, unofficial].
+Configures the Adam optimizer with distinct learning rates for each Gaussian parameter group to stabilize training and prevent rapid divergence [S2, unofficial]. It addresses the varying sensitivity of Gaussian attributes (position, scale, opacity, color) to gradient updates, ensuring that parameters prone to instability (like position) are updated more conservatively than robust parameters (like color) [S1][S2, unofficial].
 
 ## How it works
+The method initializes a PyTorch `torch.optim.Adam` optimizer with a base learning rate of 0.0, delegating rate control to parameter-specific groups [S2, unofficial]. It verifies that all required parameters are marked as trainable before instantiation [S2, unofficial].
+
 **Inputs:**
-- A list of Gaussian parameters to optimize, typically including means (3D positions), scales, rotations, opacities, and colors (SH coefficients).
-- Configuration flags indicating optimization mode (e.g., isotropic vs. anisotropic).
+- Gaussian parameters: means ($\mathbf{p}$), scales ($\mathbf{s}$), opacities ($\alpha$), colors ($\mathbf{c}$), rotations ($\mathbf{q}$), and spherical harmonics coefficients (if used).
+- Configuration flags: isotropic mode (boolean).
 
 **Outputs:**
-- An initialized `torch.optim.Adam` optimizer instance configured with specific learning rates for each parameter group.
+- An Adam optimizer instance configured with per-group learning rates.
 
 **Data Structures:**
-- **Parameter Groups:** A list of dictionaries passed to the optimizer. Each dictionary contains:
-  - `params`: A list of tensors (the specific Gaussian attributes).
-  - `lr`: The learning rate for this group.
-- **Gaussian State:**
-  - `means`: 3D position values.
-  - `scales`: Pre-activation scale values.
-  - `opacities`: Pre-activation opacity values.
-  - `colours`: RGB color values (or SH coefficients).
-  - `quaternions`: Rotation representations (excluded in isotropic mode).
+- **Parameter Groups**: A list of dictionaries passed to the optimizer. Each dictionary contains:
+  - `params`: A list of tensors corresponding to a specific attribute (e.g., all mean vectors).
+  - `lr`: The specific learning rate for this group.
 
 **Steps:**
-1. **Verify Trainability:** Ensure all required parameters are marked as trainable. If `isotropic=True`, quaternions must not be marked as trainable; otherwise, raise a `RuntimeError` [S2, unofficial].
-2. **Define Parameter Groups:** Create groups for each attribute with specific learning rates.
-3. **Initialize Optimizer:** Instantiate `torch.optim.Adam` with `lr=0.0` and `eps=1e-15` [S2, unofficial]. The actual learning rates are applied via the parameter groups.
-
-**Formulas and Values:**
-The Adam optimizer uses the following hyperparameters [S1]:
-$$ \beta_1 = 0.9, \quad \beta_2 = 0.999, \quad \epsilon = 1 \times 10^{-15} $$
-
-Learning rates vary by source and parameter:
-
-| Parameter | Learning Rate | Source | Notes |
-|-----------|---------------|--------|-------|
-| Opacities | $8 \times 10^{-3}$ | [S1] | |
-| Opacities | 0.00085 | [S2, unofficial] | |
-| Opacities | 0.05 | [S2, unofficial] | For `pre_act_opacities` |
-| Scales | $5 \times 10^{-3}$ | [S1] | |
-| Scales | 0.001 | [S2, unofficial] | |
-| Scales | 0.05 | [S2, unofficial] | For `pre_act_scales` |
-| Colours | $2 \times 10^{-3}$ | [S1] | For point features |
-| Colours | 0.02 | [S2, unofficial] | |
-| Colours | 0.05 | [S2, unofficial] | For RGB colors |
-| Means | $1.9 \times 10^{-4}$ | [S1] | Initial value |
-| Means | 0.00015 | [S2, unofficial] | |
-| Means | 0.05 | [S2, unofficial] | For 3D positions |
-| Rotation | $1 \times 10^{-3}$ | [S1] | |
-
-**Decay Schedule:**
-In the X-Gaussian implementation, the learning rate for position decays exponentially from $1.9 \times 10^{-4}$ to $1.9 \times 10^{-6}$ over $2 \times 10^4$ iterations [S1].
+1. **Verify Trainability**: Call `gaussians.check_if_trainable()` to ensure all parameters intended for optimization are flagged. If `isotropic=True` and quaternions are marked as trainable, raise a `RuntimeError` [S2, unofficial].
+2. **Define Groups**: Create parameter groups with the following learning rates:
+   - **Opacities**: $8 \times 10^{-3}$ [S1] or $0.00085$ [S2, unofficial].
+   - **Scales**: $5 \times 10^{-3}$ [S1] or $0.001$ [S2, unofficial].
+   - **Colors**: $2 \times 10^{-3}$ [S1] or $0.05$ [S2, unofficial].
+   - **Means (Positions)**: $1.9 \times 10^{-4}$ (initial) [S1] or $0.00015$ [S2, unofficial].
+   - **Rotations**: $1 \times 10^{-3}$ [S1].
+   - **Point Features (SH)**: $2 \times 10^{-3}$ [S1].
+   - **Pre-activation Opacities**: $0.05$ [S2, unofficial].
+   - **Pre-activation Scales**: $0.05$ [S2, unofficial].
+   - **Means (Pre-activation)**: $0.05$ [S2, unofficial].
+3. **Initialize Optimizer**: Instantiate `torch.optim.Adam` with `lr=0.0`, `eps=1e-15`, $\beta_1=0.9$, $\beta_2=0.999$ [S1][S2, unofficial]. Pass the defined parameter groups.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -62,68 +42,71 @@ import torch
 
 def setup_optimizer(gaussians, isotropic=True):
     """
-    Initialize Adam optimizer with parameter-specific learning rates.
+    Configures Adam optimizer with per-parameter learning rates.
     
     Args:
         gaussians: Object containing Gaussian attributes.
-        isotropic: Boolean flag for isotropic mode.
+        isotropic: Boolean flag for isotropic scaling mode.
         
     Returns:
-        torch.optim.Adam optimizer instance.
+        torch.optim.Adam: Configured optimizer.
     """
     # Step 1: Verify trainability
-    # Check if all required parameters are marked as trainable
-    # [G] Assuming gaussians.check_if_trainable() validates the state
-    if not gaussians.check_if_trainable():
-        raise RuntimeError("Not all parameters are marked as trainable.")
-        
-    # Pitfall: In isotropic mode, quaternions are excluded from optimization
-    if isotropic:
-        # [G] Ensure quaternions are not in the trainable list
-        # This check is implicit in check_if_trainable or handled separately
-        pass
-        
+    # [G] Implementation detail: This method typically checks internal flags
+    # and raises RuntimeError if quaternions are trainable in isotropic mode.
+    gaussians.check_if_trainable(isotropic=isotropic)
+    
     # Step 2: Define parameter groups with specific learning rates
-    # Note: Learning rates differ between [S1] and [S2, unofficial]. 
-    # This implementation follows [S2, unofficial] values for consistency with the 
-    # "pre-activation" and specific group naming.
+    # Note: Sources [S1] and [S2, unofficial] provide conflicting values. 
+    # [S1] uses smaller, decayed rates for position; [S2, unofficial] uses uniform 0.05 for 
+    # pre-activation parameters and different fixed rates for others.
+    # We list the groups as defined in [S2, unofficial] for the 'setup_optimizer' alias,
+    # but acknowledge [S1] values for standard 3DGS.
     
     param_groups = []
     
     # Opacities
-    # [S2, unofficial] uses 0.00085 for opacities, 0.05 for pre_act_opacities
-    # Assuming 'opacities' refers to the stored pre-activation values
     param_groups.append({
-        'params': gaussians.opacities,
+        'params': gaussians.get_opacities(),
         'lr': 0.00085  # [S2, unofficial]
     })
     
     # Scales
-    # [S2, unofficial] uses 0.001 for scales, 0.05 for pre_act_scales
     param_groups.append({
-        'params': gaussians.scales,
-        'lr': 0.001  # [S2, unofficial]
+        'params': gaussians.get_scales(),
+        'lr': 0.001    # [S2, unofficial]
     })
     
-    # Colours
-    # [S2, unofficial] uses 0.02 for colours, 0.05 for RGB colors
+    # Colors
     param_groups.append({
-        'params': gaussians.colours,
-        'lr': 0.02  # [S2, unofficial]
+        'params': gaussians.get_colors(),
+        'lr': 0.05     # [S2, unofficial]
     })
     
-    # Means
-    # [S2, unofficial] uses 0.00015 for means, 0.05 for 3D positions
+    # Means (Positions)
     param_groups.append({
-        'params': gaussians.means,
+        'params': gaussians.get_means(),
         'lr': 0.00015  # [S2, unofficial]
     })
     
-    # Step 3: Initialize Adam optimizer
-    # Base lr is 0.0; actual rates are in param_groups
+    # Pre-activation parameters (if used)
+    param_groups.append({
+        'params': gaussians.get_pre_act_opacities(),
+        'lr': 0.05     # [S2, unofficial]
+    })
+    param_groups.append({
+        'params': gaussians.get_pre_act_scales(),
+        'lr': 0.05     # [S2, unofficial]
+    })
+    param_groups.append({
+        'params': gaussians.get_pre_act_means(),
+        'lr': 0.05     # [S2, unofficial]
+    })
+    
+    # Step 3: Initialize Adam
     optimizer = torch.optim.Adam(
         param_groups,
-        lr=0.0,
+        lr=0.0,       # Base LR is 0; per-group LR is used
         eps=1e-15,
         betas=(0.9, 0.999)
     )
@@ -132,20 +115,25 @@ def setup_optimizer(gaussians, isotropic=True):
 ```
 
 **Edge Cases and Pitfalls:**
-- **Isotropic Mode:** Quaternions are excluded from optimization. If marked as trainable when `isotropic=True`, `check_if_trainable` raises a `RuntimeError` [S2, unofficial].
-- **Precision:** The epsilon value is set to $1 \times 10^{-15}$ to handle potential numerical instability in small gradients [S1][S2, unofficial].
-- **Disagreement:** Learning rates for the same parameters (e.g., means, opacities) differ significantly between [S1] and [S2, unofficial]. [S1] reports higher rates for means ($1.9 \times 10^{-4}$) and opacities ($8 \times 10^{-3}$), while [S2, unofficial] reports lower rates for means (0.00015) and opacities (0.00085). Implementers should choose based on the specific training scenario (e.g., X-ray vs. standard RGB) [S1][S2, unofficial].
+- **Isotropic Mode**: If `isotropic=True`, quaternions must not be marked as trainable. The `check_if_trainable` function enforces this [S2, unofficial].
+- **Parameterization**: Standard 3DGS uses logarithmic parameterization for scales ($\log \sigma$) to allow fast evolution for distant Gaussians [S3]. However, this can cause instability (explosion) in outdoor scenes [S3]. Some variants use linear parameterization for scales [S3].
+- **Learning Rate Decay**: In some configurations (e.g., X-Gaussian), the position learning rate decays exponentially from $1.9 \times 10^{-4}$ to $1.9 \times 10^{-6}$ [S1].
+
+## Subtopics
+
+### BOGausS Optimizer
+A modified Stochastic Gradient Descent optimizer that ensures unbiased state estimation for sparsely-viewed and split Gaussians, using precision-aware updates for localization and size parameters [S3]. It differs from standard Adam by making the iteration counter $t$ Gaussian-dependent, incremented only when a specific Gaussian is updated, allowing $t$ to refer to the Gaussian's lifespan [S3]. It uses a scaling factor $\Delta_\theta$ based on confidence intervals for localization and size, and linearly parameterizes sizes ($\theta_\sigma = \sigma$) instead of logarithmically [S3].
 
 ## Operating characteristics
-- **Time Complexity:** Initialization is $O(N)$ where $N$ is the number of parameter groups. The optimizer step complexity is dominated by the Adam update, which is $O(1)$ per parameter per iteration.
-- **Memory Complexity:** $O(N)$ for storing the first and second moment estimates for each parameter.
-- **Strengths:** Stabilizes training by preventing large updates to sensitive parameters like position and scale [S2, unofficial].
-- **Limitations:** Requires careful tuning of per-group rates. Disagreement between sources makes it difficult to provide a single "best" set of values [S1][S2, unofficial].
-- **When to use:** When training 3D Gaussians with Adam, especially if divergence is observed with uniform learning rates.
+- **Stability**: Prevents rapid divergence of sensitive parameters like position and scale [S2, unofficial].
+- **Convergence**: Allows robust parameters like color to converge faster with higher learning rates [S2, unofficial].
+- **Memory**: Minimal overhead; only requires storing per-group learning rates in the optimizer state [S2, unofficial].
+- **Performance**: Standard Adam with per-group rates is the baseline for 3DGS training [S1][S2, unofficial]. BOGausS offers improved convergence for sparse views but requires maintaining per-Gaussian state counters [S3].
 
 ## Background
-Originated from the 3D Gaussian Splatting framework [S2, unofficial]. The X-Gaussian variant adapted these hyperparameters for X-ray novel view synthesis [S1]. The method is part of the broader effort to optimize radiance fields using differentiable rendering [S1][S2, unofficial].
+Originated from the 3D Gaussian Splatting paper [S1] and subsequent implementation details in various repositories [S2, unofficial]. The specific configuration with pre-activation parameters and distinct rates is detailed in unofficial implementations [S2, unofficial]. The BOGausS variant was proposed to address biases in standard Adam for sparse views [S3].
 
 ## Sources
 [S1] Radiative Gaussian Splatting for Efficient X-Ray Novel View Synthesis, https://doi.org/10.1007/978-3-031-73232-4_16, fetched 2026-10-26
 [S2] Fhz2346/3D-Gaussian-Splatting, https://github.com/Fhz2346/3D-Gaussian-Splatting, fetched 2026-10-27 (unofficial)
+[S3] BOGausS: Better Optimized Gaussian Splatting, https://doi.org/10.23919/eusipco63237.2025.11226626, fetched 2026-10-26

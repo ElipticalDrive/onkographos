@@ -3,48 +3,42 @@
 Also called: Fourth-order Runge-Kutta, RK4 Integrator, Runge-Kutta 4 Integrator, Runge-Kutta 4th order
 
 ## Overview
-Runge-Kutta 4 (RK4) is a higher-order numerical integration method for volume rendering that queries the vector field at four distinct positions to compute a single ray step, significantly reducing truncation error compared to the zero-order [Rectangle Rule](2082-zero-order-integration-rectangle-rule.md) and first-order [Euler Integration](3839-runge-kutta-2-3-ode-solver.md) methods. It sets itself apart by achieving an error order of $O(dt^5)$ per step, allowing for larger step sizes while maintaining accuracy, though it requires four texture lookups per step rather than one.
+Runge-Kutta 4 (RK4) is a higher-order numerical integration method for volume rendering that queries the vector field at four distinct positions to compute a single step, significantly reducing truncation error compared to the zero-order [Rectangle Rule](2082-zero-order-integration-rectangle-rule.md) and first-order [Euler Integration](3839-runge-kutta-2-3-ode-solver.md) methods [S2, unofficial]. It sets itself apart by achieving a local truncation error of $O(dt^5)$ per step, allowing for larger step sizes while maintaining accuracy, at the cost of four vector field samples per step rather than one [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Current position $x_n$ (or $x_i$), step size $dt$ (or $\delta$), and optionally a time parameter $t_{\text{func}}$ for unsteady fields.
-*   **Output:** Next position $x_{n+1}$ (or $x_{i+1}$).
+*   **Input:** Current position $x_n$ (or $x_i$), step size $dt$ (or $\delta$), and optionally a time parameter $t_{\text{func}}$ for unsteady fields [S2, unofficial][S3, unofficial].
+*   **Output:** Next position $x_{n+1}$ (or $x_{i+1}$) [S2, unofficial][S3, unofficial].
 
 **Data Structures:**
-*   Position: 3D vector (float/double).
-*   Vector Field Sample: 3D vector (velocity) plus optional scalar component (e.g., density or weight) returned as a 4D vector in some implementations [S1, unofficial].
+*   Position: 3D vector (float/double) [S2, unofficial].
+*   Vector Field Sample: 3D velocity vector plus an optional scalar component (e.g., density or weight), returned as a 4D vector in GPU implementations [S2, unofficial].
 
 **Formulas:**
-The method computes four intermediate slopes ($k_1$ through $k_4$ or $v_0$ through $v_3$) and combines them with specific weights.
-
-Using the notation from [S1, unofficial]:
+The method computes four intermediate slopes and combines them with specific weights [S2, unofficial]. Using the notation from [S2, unofficial] for steady fields:
 $$k_1 = dt \cdot v(x_n)$$
 $$k_2 = dt \cdot v(x_n + k_1/2)$$
 $$k_3 = dt \cdot v(x_n + k_2/2)$$
 $$k_4 = dt \cdot v(x_n + k_3)$$
 $$x_{n+1} = x_n + \frac{k_1}{6} + \frac{k_2}{3} + \frac{k_3}{3} + \frac{k_4}{6} + O(dt^5)$$
+where $x_n$ is the current position, $x_{n+1}$ is the next position, $dt$ is the step size, $v(x)$ is the vector field at position $x$, and $O(dt^5)$ is the local truncation error [S2, unofficial].
 
-Using the notation from [S2, unofficial] for unsteady fields:
+For unsteady fields, the notation from [S3, unofficial] applies:
 $$v_0 = \nu(x_i, t_{\text{func}})$$
-$$v_1 = \nu(x_i + \frac{1}{2} \delta v_0, t_{\text{func}})$$
-$$v_2 = \nu(x_i + \frac{1}{2} \delta v_1, t_{\text{func}})$$
+$$v_1 = \nu(x_i + \tfrac{1}{2} \delta v_0, t_{\text{func}})$$
+$$v_2 = \nu(x_i + \tfrac{1}{2} \delta v_1, t_{\text{func}})$$
 $$v_3 = \nu(x_i + \delta v_2, t_{\text{func}})$$
-$$x_{i+1} = x_i + \frac{1}{6} \delta (v_0 + 2v_1 + 2v_2 + v_3)$$
-
-Where:
-*   $x_n, x_i$: Current position.
-*   $x_{n+1}, x_{i+1}$: Next position.
-*   $dt, \delta$: Step size.
-*   $v(x), \nu(x, t)$: Vector field value at position $x$ (and time $t$).
-*   $O(dt^5)$: Local truncation error term [S1, unofficial].
+$$x_{i+1} = x_i + \tfrac{1}{6} \delta (v_0 + 2v_1 + 2v_2 + v_3)$$
+where $\delta$ is the step size and $t_{\text{func}}$ is the function time [S3, unofficial].
 
 **Parameters:**
-*   **Step Size ($dt$ or $\delta$):** In real-time applications, this is often dynamic, adjusted to maintain frame rate [S2, unofficial]. For steady fields, $t_{\text{func}}$ is ignored or fixed [S2, unofficial].
+*   **Step Size ($dt$ or $\delta$):** In real-time applications, the step size is often dynamic, adjusted to maintain frame rate [S2, unofficial][S3, unofficial]. For steady fields, $t_{\text{func}}$ is ignored or set to a fixed value [S3, unofficial].
 
 **Pitfalls and Edge Cases:**
-*   **Vortex Behavior:** While RK4 generally stays within vortices better than Euler, it may sometimes converge to the center of vortices instead of escaping them [S1, unofficial].
-*   **Precision:** The error is smaller by an order of magnitude compared to Euler, but the method is approximately 4x slower due to the four samples [S1, unofficial].
-*   **Unsteady Fields:** If the field is time-dependent, the step size $\delta$ and function time $t_{\text{func}}$ must be synchronized to maintain real-time behavior [S2, unofficial].
+*   **Vortex Behavior:** RK4 stays within vortices better than Euler, but may sometimes converge to the center of vortices instead of escaping them [S2, unofficial].
+*   **Precision vs Performance:** The error is smaller by an order of magnitude compared to Euler, but the method is approximately 4x slower due to the four required samples [S2, unofficial].
+*   **Unsteady Fields:** If the field is time-dependent, the step size $\delta$ and function time $t_{\text{func}}$ must be synchronized to maintain real-time behavior [S3, unofficial].
+*   **Isotropic Regions:** When integrating tensorlines, integration stops immediately if the line enters an isotropic region, as directional information is lost [S1, book].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -57,67 +51,45 @@ def rk4_integrate(pos, dt, vector_field_sampler):
     Args:
         pos: Current position (float3).
         dt: Step size (float).
-        vector_field_sampler: Function that returns (velocity: float3, scalar: float) 
-                              at a given position. For unsteady fields, it may accept time.
+        vector_field_sampler: Function returning (velocity: float3, scalar: float) at a position.
     
     Returns:
         next_pos: New position (float3).
-        scalar_accum: Accumulated scalar value (float), if applicable.
     """
     # Step 1: Sample k1 at current position
-    k1_vel, k1_scalar = vector_field_sampler(pos)
+    k1 = dt * vector_field_sampler(pos)
     
-    # Step 2: Sample k2 at pos + dt/2 * k1
-    # Note: k1 is velocity, so dt * k1 is displacement. 
-    # The formula uses k1/2, which implies (dt * k1) / 2 = dt/2 * k1.
-    pos_k2 = pos + (dt * 0.5) * k1_vel
-    k2_vel, k2_scalar = vector_field_sampler(pos_k2)
+    # Step 2: Sample k2 at pos + k1/2
+    k2 = dt * vector_field_sampler(pos + k1 / 2.0)
     
-    # Step 3: Sample k3 at pos + dt/2 * k2
-    pos_k3 = pos + (dt * 0.5) * k2_vel
-    k3_vel, k3_scalar = vector_field_sampler(pos_k3)
+    # Step 3: Sample k3 at pos + k2/2
+    k3 = dt * vector_field_sampler(pos + k2 / 2.0)
     
-    # Step 4: Sample k4 at pos + dt * k3
-    pos_k4 = pos + dt * k3_vel
-    k4_vel, k4_scalar = vector_field_sampler(pos_k4)
+    # Step 4: Sample k4 at pos + k3
+    k4 = dt * vector_field_sampler(pos + k3)
     
-    # Step 5: Weighted sum
-    # Weights: 1/6, 2/6, 2/6, 1/6
-    dt_sixth = dt / 6.0
-    
-    # Velocity update
-    next_vel = dt_sixth * (k1_vel + 2.0 * k2_vel + 2.0 * k3_vel + k4_vel)
-    next_pos = pos + next_vel
-    
-    # Scalar update (if the vector field sampler returns a scalar component like density)
-    # This is an extension; standard RK4 for trajectory only updates position.
-    # If scalar advection is required, it is typically done alongside position.
-    # Here we assume the scalar is just returned for context or simple accumulation.
-    # For pure trajectory integration, scalar is ignored.
-    # If scalar integration is needed, it would follow a similar weighted sum.
-    # Based on [S1, unofficial] code listing, the scalar component (v.w) is returned but not 
-    # explicitly integrated in the position formula. It is often used for coloring.
-    
-    return next_pos, (k1_scalar + 2.0 * k2_scalar + 2.0 * k3_scalar + k4_scalar) * dt_sixth
+    # Step 5: Weighted sum for displacement
+    return pos + (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0
 ```
 
 ## Subtopics
 
 ### Euler Integration
-A first-order integrator that uses only the current position and vector field value to compute the next step ($x_{n+1} = x_n + dt \cdot v(x_n)$). It has a local error of $O(dt^2)$ and is significantly less accurate than RK4, often escaping vortices even at small step sizes [S1, unofficial]. It is used when performance is critical and accuracy requirements are low.
+A first-order integrator that uses only the current position and vector field value to compute the next step ($x_{n+1} = x_n + dt \cdot v(x_n)$) [S2, unofficial]. It has a local error of $O(dt^2)$ and is significantly less accurate than RK4, often escaping vortices even at small step sizes [S2, unofficial]. It is used when performance is critical and accuracy requirements are low [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per step, but requires 4 vector field samples (texture lookups) per step, making it approximately 4x slower than Euler integration [S1, unofficial].
-*   **Memory Complexity:** $O(1)$ auxiliary memory per step.
-*   **Accuracy:** Local truncation error is $O(dt^5)$, significantly smaller than Euler's $O(dt^2)$ [S1, unofficial]. RK4 with a large step size (e.g., $dt=1$) can have less error than Euler with a smaller step size (e.g., $dt=0.5$) [S1, unofficial].
-*   **Strengths:** High accuracy for smooth vector fields; better preservation of flow features like vortices compared to lower-order methods [S1, unofficial].
-*   **Limitations:** Higher computational cost; may converge to vortex centers in specific flow configurations [S1, unofficial]; requires careful step size selection for real-time performance [S2, unofficial].
-*   **When to use:** When visual accuracy of streamlines or particle paths is more important than raw performance, or when large step sizes are needed to cover long distances without excessive error.
-*   **When not to use:** When real-time performance is the primary constraint and the vector field is simple or low-resolution, or when adaptive step sizing is required (in which case RK2/3 might be preferred).
+*   **Time Complexity:** $O(1)$ per step, but requires 4 vector field samples (texture lookups) per step, making it approximately 4x slower than Euler integration [S2, unofficial].
+*   **Memory Complexity:** Not given in the sources.
+*   **Accuracy:** Local truncation error is $O(dt^5)$, significantly smaller than Euler's $O(dt^2)$ [S2, unofficial]. RK4 with a large step size (e.g., $dt=1$) can have less error than Euler with a smaller step size (e.g., $dt=0.5$) [S2, unofficial].
+*   **Strengths:** Better preservation of flow features like vortices compared to lower-order methods [S2, unofficial].
+*   **Limitations:** Higher computational cost; may converge to vortex centers in specific flow configurations [S2, unofficial]; requires careful step size selection for real-time performance [S3, unofficial].
+*   **When to use:** When visual accuracy of streamlines or particle paths is more important than raw performance, or when large step sizes are needed to cover long distances without excessive error [S2, unofficial].
+*   **When not to use:** When real-time performance is the primary constraint and the vector field is simple or low-resolution, or when adaptive step sizing is required (in which case RK2/3 might be preferred) [S2, unofficial][G].
 
 ## Background
-The Runge-Kutta methods were developed by Carl Runge and Martin Wilhelm Kutta in the early 20th century. In the context of volume rendering and vector field visualization, RK4 is widely used as a standard high-order integrator for streamlines and pathlines. It is implemented in various real-time visualization systems, such as those using CUDA for GPU acceleration [S1, unofficial], and in academic research on real-time smoke volume rendering [S2, unofficial]. The method is preferred over Euler integration when the visual fidelity of the flow topology is critical.
+In the context of volume rendering and vector field visualization, RK4 is widely used as a standard high-order integrator for streamlines and pathlines [S1, book]. It is implemented in real-time visualization systems using CUDA for GPU acceleration [S2, unofficial], and in academic research on real-time smoke volume rendering [S3, unofficial]. The method is preferred over Euler integration when the visual fidelity of the flow topology is critical [S2, unofficial].
 
 ## Sources
-[S1] Realtime visualization of 3D vector fields using CUDA, https://marekfiser.com/projects/realtime-visualization-of-3D-vector-fields-using-CUDA/, fetched 2026-10-28 (unofficial)
-[S2] Real-Time Smoke Volume Rendering, http://v22015081501727525.yourvserver.net/webpage/dirkfiles/betreutearbeiten/Sowinski_MA_2012.pdf, fetched 2026-10-31 (unofficial)
+[S1] A Visual Approach to Analysis of Stress Tensor Fields, https://doi.org/10.4230/dfu.vol2.sciviz.2011.188, fetched 2026-10-26 (book)
+[S2] Realtime visualization of 3D vector fields using CUDA | Marek's blog, https://marekfiser.com/projects/realtime-visualization-of-3D-vector-fields-using-CUDA/, fetched 2026-10-28 (unofficial)
+[S3] Real-Time Smoke Volume Rendering, http://v22015081501727525.yourvserver.net/webpage/dirkfiles/betreutearbeiten/Sowinski_MA_2012.pdf, fetched 2026-10-31 (unofficial)

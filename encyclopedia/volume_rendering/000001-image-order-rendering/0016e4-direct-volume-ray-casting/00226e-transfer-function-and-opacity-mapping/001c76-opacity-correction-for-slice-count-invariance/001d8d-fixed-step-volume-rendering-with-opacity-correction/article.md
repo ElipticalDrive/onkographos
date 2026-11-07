@@ -1,64 +1,58 @@
 # Fixed-Step Volume Rendering with Opacity Correction
 
-Also called: Fixed-Step Volume Rendering, Opacity-Corrected Fixed-Step Ray Casting
 
 ## Overview
-Fixed-Step Volume Rendering with Opacity Correction is a direct volume ray casting method that ensures image intensity invariance with respect to the number of samples taken along a ray [S1, unofficial]. It achieves this by scaling the per-sample opacity based on a fixed reference step size, allowing the renderer to use a constant number of samples (or a fixed step size) regardless of the ray length or volume resolution [S1, unofficial]. This distinguishes it from standard ray casting, where opacity accumulates differently based on sample density, and from adaptive sampling methods that vary step sizes dynamically [S1, unofficial].
+Fixed-Step Volume Rendering with Opacity Correction is a direct volume ray casting method that scales per-sample opacity using a fixed reference length to maintain consistent image intensity regardless of the number of samples along a ray [S1, unofficial].
 
 ## How it works
-The method performs front-to-back compositing along rays intersecting the volume. It uses a fixed reference length to correct opacity values, ensuring that the final pixel color remains consistent even if the number of samples ($n_{samples}$) varies due to ray length or resolution changes [S1, unofficial].
+The method performs front-to-back compositing along rays intersecting the volume [S1, unofficial]. It uses a fixed reference length to correct opacity values, ensuring that the final pixel color remains consistent even if the number of samples ($n_{samples}$) varies due to ray length or resolution changes [S1, unofficial].
 
 **Inputs and Outputs:**
-- **Input:** Ray direction, volume dimensions, transfer function, volume data.
-- **Output:** Pixel color (RGB) and accumulated opacity.
+- **Input:** Ray origin, ray direction, volume dimensions, transfer function, volume data, fixed step size [S1, unofficial].
+- **Output:** Pixel color (RGB) and accumulated opacity [S1, unofficial].
 
 **Data Structures:**
-- `samplevals`: Array of scalar values at sample positions.
-- `s0`, `back`: Arrays of 3 unsigned chars (RGB) for seed and current sample colors.
-- `s0a`, `backa`: Double-precision floats for seed and current sample opacity.
-- `total`: Array of 3 doubles for accumulated color.
-- `totala`: Double-precision float for accumulated opacity.
-- `pixel`: Pointer to output image buffer (unsigned char).
+- `samplevals`: Array of scalar values at sample positions [S1, unofficial].
+- `s0`, `back`: Arrays of 3 unsigned chars (RGB) for seed and current sample colors [S1, unofficial].
+- `s0a`, `backa`: Double-precision floats for seed and current sample opacity [S1, unofficial].
+- `total`: Array of 3 doubles for accumulated color [S1, unofficial].
+- `totala`: Double-precision float for accumulated opacity [S1, unofficial].
+- `pixel`: Pointer to output image buffer (unsigned char) [S1, unofficial].
 
 **Parameters:**
 - `500.0`: A constant representing the fixed reference step size or reference length [S1, unofficial].
 - `nsamples`: The number of samples along the ray [S1, unofficial].
 
 **Algorithm Steps:**
-1.  **Ray Intersection:** Intersect the ray with the volume bounding box to determine the start and end points. Calculate the number of samples ($n_{samples}$) and the sample positions [S1, unofficial].
-2.  **Sampling:** For each sample position, interpolate the volume data to get the scalar value [S1, unofficial].
-3.  **Seed Initialization:**
-    - Apply the transfer function to the first sample value to get initial color $s0$ and opacity $s0a$ [S1, unofficial].
-    - Apply opacity correction to the seed opacity:
-      $$ s0a = 1.0 - (1.0 - s0a)^{(500.0 / n_{samples})} $$
-    - Initialize accumulated color `total` by scaling $s0$ components by $1/256.0$:
-      $$ total[c] = s0[c] / 256.0 \quad \text{for } c \in \{0, 1, 2\} $$
-    - Initialize accumulated opacity `totala` to $s0a$ [S1, unofficial].
-4.  **Iterative Compositing:** For each subsequent sample $l$ from $1$ to $n_{samples}-1$:
-    - Apply the transfer function to the current sample value to get back color `back` and opacity `backa` [S1, unofficial].
-    - Apply opacity correction to the current sample opacity:
-      $$ backa = 1.0 - (1.0 - backa)^{(500.0 / n_{samples})} $$
-    - Composite the current sample into the accumulated color:
-      $$ total[c] = total[c] + (1.0 - totala) \times backa \times (back[c] / 256.0) \quad \text{for } c \in \{0, 1, 2\} $$
-    - Update accumulated opacity:
-      $$ totala = totala + (1.0 - totala) \times backa $$
-5.  **Output:** Scale the accumulated color components by $256.0$ and cast to unsigned char to store in the pixel buffer [S1, unofficial].
+1. **Ray Intersection:** Intersect the ray with the volume to determine sample positions and the number of samples ($n_{samples}$) [S1, unofficial].
+2. **Sampling:** For each sample position, interpolate the volume data to get the scalar value [S1, unofficial].
+3. **Seed Initialization:** Apply the transfer function to the first sample value to get initial color $s0$ and opacity $s0a$ [S1, unofficial]. Apply opacity correction to the seed opacity:
+   $$ s0a = 1.0 - (1.0 - s0a)^{(500.0 / n_{samples})} $$
+   Initialize accumulated color `total` by scaling $s0$ components by $1/256.0$:
+   $$ total[c] = s0[c] / 256.0 \quad \text{for } c \in \{0, 1, 2\} $$
+   Initialize accumulated opacity `totala` to $s0a$ [S1, unofficial].
+4. **Iterative Compositing:** For each subsequent sample $l$ from $1$ to $n_{samples}-1$:
+   - Apply the transfer function to the current sample value to get back color `back` and opacity `backa` [S1, unofficial].
+   - Apply opacity correction to the current sample opacity:
+     $$ backa = 1.0 - (1.0 - backa)^{(500.0 / n_{samples})} $$
+   - Composite the current sample into the accumulated color:
+     $$ total[c] = total[c] + (1.0 - totala) \times backa \times (back[c] / 256.0) \quad \text{for } c \in \{0, 1, 2\} $$
+   - Update accumulated opacity:
+     $$ totala = totala + (1.0 - totala) \times backa $$
+5. **Output:** Scale the accumulated color components by $256.0$ and cast to unsigned char to store in the pixel buffer [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def fixed_step_volume_rendering(ray_dir, volume_dims, transfer_function, volume_data):
-    # Step 1: Intersect ray with volume
-    samples, nsamples = intersect_volume(ray_dir, volume_dims)
+def fixed_step_volume_rendering(ray_o, ray_d, vol_min, vol_max, step_size, transfer_function, volume_data, vol_dims):
+    # Step 1: Intersect ray with volume bounding box
+    samples, nsamples = intersect_volume(ray_o, ray_d, vol_min, vol_max, step_size)
     
-    if nsamples == 0:
-        return (0, 0, 0, 0.0)
-
     # Step 2: Sample volume data
     sample_vals = []
     for k in range(nsamples):
-        val = interpolate(samples[k], volume_dims, volume_data)
+        val = interpolate(samples[k], vol_dims, volume_data)
         sample_vals.append(val)
 
     # Step 3: Initialize with seed value
@@ -70,7 +64,7 @@ def fixed_step_volume_rendering(ray_dir, volume_dims, transfer_function, volume_
     s0a = 1.0 - (1.0 - s0a) ** (500.0 / nsamples)
     
     # Initialize accumulated color and opacity
-    total = [s0[0] / 256.0, s0[1] / 256.0, s0[2] / 256.0]
+    total = [float(s0[0]) / 256.0, float(s0[1]) / 256.0, float(s0[2]) / 256.0]
     totala = s0a
 
     # Step 4: Iterate through remaining samples
@@ -84,7 +78,7 @@ def fixed_step_volume_rendering(ray_dir, volume_dims, transfer_function, volume_
         
         # Composite current sample
         for c in range(3):
-            total[c] = total[c] + (1.0 - totala) * backa * (back[c] / 256.0)
+            total[c] = total[c] + (1.0 - totala) * backa * (float(back[c]) / 256.0)
         
         # Update accumulated opacity
         totala = totala + (1.0 - totala) * backa
@@ -96,19 +90,48 @@ def fixed_step_volume_rendering(ray_dir, volume_dims, transfer_function, volume_
         int(total[2] * 256.0)
     ]
     return (pixel_color[0], pixel_color[1], pixel_color[2], totala)
+
+def intersect_volume(ray_o, ray_d, vol_min, vol_max, step_size):
+    tmin = (vol_min[0] - ray_o[0]) / ray_d[0]
+    tmax = (vol_max[0] - ray_o[0]) / ray_d[0]
+    if tmin > tmax: tmin, tmax = tmax, tmin
+    tymin = (vol_min[1] - ray_o[1]) / ray_d[1]
+    tymax = (vol_max[1] - ray_o[1]) / ray_d[1]
+    if tymin > tymax: tymin, tymax = tymax, tymin
+    if tmin > tymax or tymin > tmax: return [], 0
+    if tymin > tmin: tmin = tymin
+    if tymax < tmax: tmax = tymax
+    tzmin = (vol_min[2] - ray_o[2]) / ray_d[2]
+    tzmax = (vol_max[2] - ray_o[2]) / ray_d[2]
+    if tzmin > tzmax: tzmin, tzmax = tzmax, tzmin
+    if tmin > tzmax or tzmin > tmax: return [], 0
+    if tzmin > tmin: tmin = tzmin
+    if tzmax < tmax: tmax = tzmax
+    if tmax < 0: return [], 0
+    samples = []
+    t = tmin
+    while t <= tmax:
+        samples.append([ray_o[0] + t * ray_d[0], ray_o[1] + t * ray_d[1], ray_o[2] + t * ray_d[2]])
+        t += step_size
+    return samples, len(samples)
+
+def interpolate(point, dims, data):
+    x, y, z = point
+    ix, iy, iz = int(x), int(y), int(z)
+    ix = max(0, min(ix, dims[0] - 1))
+    iy = max(0, min(iy, dims[1] - 1))
+    iz = max(0, min(iz, dims[2] - 1))
+    return data[ix][iy][iz]
 ```
 
 **Edge Cases and Pitfalls:**
-- If $n_{samples}$ is zero, the ray does not intersect the volume; return black/transparent [S1, unofficial].
-- Precision issues may arise if $n_{samples}$ is very large, causing the exponent $(500.0 / n_{samples})$ to become very small, potentially leading to underflow in opacity correction [S1, unofficial].
-- The color scaling by $1/256.0$ assumes the transfer function outputs values in a specific range (likely 0-255 or 0-65535 scaled to 0-1 via division) [S1, unofficial].
+- If $n_{samples}$ is zero, the division by $n_{samples}$ in the opacity correction exponent causes a runtime error; implementations should guard against this [G].
+- The color scaling by $1/256.0$ assumes the transfer function outputs integer values in the range 0–255 [S1, unofficial].
 
 ## Operating characteristics
 - **Time Complexity:** $O(n_{samples})$ per ray, where $n_{samples}$ is the number of samples along the ray [S1, unofficial].
 - **Memory Complexity:** $O(n_{samples})$ for storing sample values and intermediate compositing variables [S1, unofficial].
 - **Performance:** The method is efficient as it uses a fixed number of samples per ray, avoiding dynamic branching or adaptive sampling overhead [S1, unofficial].
-- **Strengths:** Ensures consistent visual appearance regardless of ray length or sampling density [S1, unofficial].
-- **Limitations:** The fixed reference length (500.0) may not be optimal for all volume sizes or resolutions, potentially leading to over- or under-saturation if the volume dimensions differ significantly from the reference [S1, unofficial].
 
 ## Background
 This method is part of a direct volume ray casting implementation found in the `ncotta/VolumeRendering` repository [S1, unofficial]. It builds on the concept of opacity correction for slice count invariance, extending it to fixed-step ray casting [S1, unofficial]. The specific implementation and formulas are derived from the source code provided in the repository [S1, unofficial].

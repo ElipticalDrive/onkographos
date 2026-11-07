@@ -1,0 +1,67 @@
+# Photophoretic-Trap Volumetric Display
+
+Also called: Optical Trap Display (OTD), Photophoretic optical trapping display, Smalley Photophoretic Trap Display
+
+## Overview
+The Photophoretic-Trap Volumetric Display (also known as the Optical Trap Display or OTD) is a free-space volumetric display that creates luminous image points in mid-air by trapping a microscopic particle using photophoretic forces and illuminating it with RGB lasers [S1, S2, unofficial]. It solves the "clipping" limitation inherent in holographic and light-field displays, where image points are physically separated from the scattering surface, thereby restricting viewing angles and preventing geometries such as long-throw projections or wrap-around displays [S1, unofficial]. By co-locating the scattering surface (the trapped particle) with the image point, the OTD provides a 360° in-plane viewing angle around every voxel at any depth, enabling unconstrained viewing geometries [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A 3D coordinate path for the particle; a sequence of RGB illumination intensities synchronized with the particle's position.
+*   **Output:** A 3D image formed by the persistence of vision (POV) of a single illuminated particle moving through free space [S1, unofficial].
+
+**Data Structures**
+*   **Particle:** A spherical, absorbing particle (typically cellulose) with a diameter $d$. The demonstrated system uses particles with an average diameter of approximately $10 \mu m$, though early trials used particles ranging from $5 \mu m$ to $100 \mu m$ [S1, unofficial].
+*   **Trap Configuration:** A laser beam shaped by optical aberrations. Specifically, a combination of fixed spherical aberration and variable oblique astigmatism [S1, unofficial].
+*   **Illumination Source:** A system of collinear Red, Green, and Blue (RGB) lasers [S1, S2, unofficial].
+
+**Method Steps**
+1.  **Trap Formation:** A near-invisible trapping laser (wavelength $405 nm$) is passed through an optical system that introduces spherical aberration and variable astigmatism. This is achieved by tilting a sagittal lens to add astigmatism to the fixed spherical aberration, creating tunable regions of high and low optical intensity near the lens focus [S1, unofficial]. These aberrations create a photophoretic trap capable of isolating a single particle [S1, unofficial].
+2.  **Particle Isolation:** A cellulose particle is introduced into the trap region. The photophoretic force, arising from thermal creep due to uneven heating of the particle by the trap laser, confines the particle in the low-intensity region [S1, unofficial].
+3.  **Scanning:** The trap (and the confined particle) is scanned through a 3D display volume. The scanning speed demonstrated was $10 Hz$ [S1, unofficial].
+4.  **Illumination:** As the particle scans, it is illuminated by the collinear RGB laser system. The color and intensity of the illumination are synchronized with the particle's position to generate specific voxels [S1, S2, unofficial].
+5.  **Image Formation:** The rapid movement of the illuminated particle creates a 3D image in free space via persistence of vision (POV) [S1, unofficial].
+
+**Formulas**
+The photophoretic force in the continuous regime (where the particle diameter is much larger than the gas mean free path) is given by [S1, unofficial]:
+
+$$
+F_{cont} = \frac{\pi d^2 R T}{3 \eta M p} \nabla T
+$$
+
+Where:
+*   $F_{cont}$ is the photophoretic force.
+*   $d$ is the diameter of the particle.
+*   $R$ is the gas constant.
+*   $T$ is the temperature.
+*   $\eta$ is the viscosity of the gas.
+*   $M$ is the molecular weight of the gas.
+*   $p$ is the gas pressure.
+*   $\nabla T$ is the gradient of the temperature.
+
+**Parameters**
+*   **Trap Wavelength:** $405 nm$ (near-invisible) [S1, S2, unofficial].
+*   **Illumination:** RGB lasers [S1, S2, unofficial].
+*   **Particle Size:** Demonstrated image points are approximately $10 \mu m$ in dimension [S1, unofficial].
+*   **Scanning Speed:** $10 Hz$ [S1, unofficial].
+*   **Gas Conditions:** Standard pressure and room temperature. The gas mean free path is $68 nm$, which is much smaller than the particle diameters ($5-100 \mu m$), placing the system in the 'continuous' regime [S1, unofficial].
+
+**Pitfalls and Edge Cases**
+*   **Viewing Angle:** The image is visible from every angle, with the possible exception of the line forming the optical axis [S1, unofficial].
+*   **Particle Size Selection:** Early trials used particles ranging from $5 \mu m$ to $100 \mu m$. Smaller particles yield finer detail but may be harder to trap or maintain stability; larger particles increase resolution limits [S1, unofficial].
+*   **Regime Validity:** The force formula provided is valid only in the continuous regime. If particle size approaches the gas mean free path ($68 nm$), the formula requires modification [S1, unofficial].
+
+## Operating characteristics
+*   **Resolution:** Demonstrated image points of approximately $10 \mu m$ dimension [S1, unofficial].
+*   **Viewing Angle:** 360° in-plane viewing angle around every image point at any depth, overcoming the clipping limitations of holographic displays [S1, unofficial].
+*   **Color:** Full-color capability using RGB illumination [S1, unofficial].
+*   **Speckle:** Low apparent speckle [S1, unofficial].
+*   **Geometries:** Capable of producing image geometries unobtainable with holographic and light-field technologies, including long-throw projections, tall sandtables, and wrap-around displays [S1, unofficial].
+*   **Limitations:** The system relies on a single particle scanned over time, limiting the number of simultaneous voxels compared to parallel scanning methods. The optical axis line is a blind spot [S1, unofficial].
+
+## Background
+The Photophoretic-Trap Volumetric Display was introduced by Smalley et al. in 2018 [S1, unofficial]. It advances the state of the art by providing full-color, free-space images with fine detail, overcoming the coarse or inertial limitations of earlier levitation displays [S1, unofficial]. The technology is based on photophoretic optical particle trapping, which uses thermal forces from thermal accommodation and the radiometer effect rather than radiation pressure and gradient forces used in optical tweezers [S1, unofficial].
+
+## Sources
+[S1] A photophoretic-Trap volumetric display (i.e. holograms) [2018], https://www.researchgate.net/publication/322723302_A_photophoretic-Trap_volumetric_display, fetched 2026-10-26 (unofficial)
+[S2] ボリュメトリックディスプレイ, https://www.jstage.jst.go.jp/article/jvrsj/29/3/29_27/_pdf/-char/ja, fetched 2026-10-30 (unofficial)

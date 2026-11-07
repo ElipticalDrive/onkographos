@@ -3,95 +3,96 @@
 Also called: Knowledge Distillation for SDF, SDF Distillation
 
 ## Overview
-MLP Distillation compresses a high-capacity Signed Distance Function (SDF) network into a smaller, more efficient network while preserving geometric accuracy. It solves the inference latency and memory overhead of large MLPs by transferring knowledge from a teacher model to a student model. Unlike [Sphere Loss](2750-sphere-loss.md), which enforces geometric constraints via local sphere approximations, distillation directly minimizes the output discrepancy between the two networks.
+MLP Distillation compresses a large, high-capacity Signed Distance Function (SDF) network into a smaller, more efficient MLP while preserving geometric accuracy. It solves the problem of high inference latency and memory usage associated with large neural implicit representations by transferring knowledge from a "teacher" model to a "student" model. Unlike standard training which learns geometry from scratch, this method minimizes the output discrepancy between the two networks at sampled points, allowing the small network to inherit the teacher's geometric priors. It sets itself apart from sibling methods like Sphere Loss by focusing on direct output-space alignment rather than geometric constraints on the field's curvature or local shape.
 
 ## How it works
-**Inputs:**
-- Teacher SDF network $f$ (large capacity).
-- Student SDF network $f_{\text{small}}$ (small capacity).
-- Training ray set $\mathcal{R}$.
-
-**Outputs:**
-- Distilled student network $f_{\text{small}}$.
+**Inputs and Outputs:**
+- **Input:** A pre-trained large SDF network $f$ (teacher) with channel width 256, and a randomly initialized small SDF network $f_{\text{small}}$ (student) with channel width 16. A set of training rays $\mathbf{r}$ sampled from the training dataset.
+- **Output:** The weights of the distilled small SDF network $f_{\text{small}}$.
 
 **Data Structures:**
-- Teacher MLP: 256 channels per hidden layer [S1].
-- Student MLP: 16 channels per hidden layer [S1].
-- Sampled points $\mathbf{x}_i$ along rays $\mathbf{r} \in \mathcal{R}$.
+- **Teacher Network $f$:** Multi-Layer Perceptron (MLP) with 256 hidden units.
+- **Student Network $f_{\text{small}}$:** Multi-Layer Perceptron (MLP) with 16 hidden units.
+- **Sampled Points $\mathbf{x}_i$:** 3D coordinates along the training rays.
 
 **Parameters:**
-- Distillation iterations: 5,000 [S1].
-- Loss function: L1 [S1].
+- **Distillation Iterations:** 5,000 iterations.
+- **Loss Function:** L1 loss.
+- **Gradient Handling:** Stop gradient applied to teacher outputs.
 
-**Steps:**
-1. Sample random rays from the training set for 5,000 iterations [S1].
-2. For each ray, evaluate the teacher network $f(\mathbf{x}_i)$ and student network $f_{\text{small}}(\mathbf{x}_i)$ at sampled points $\mathbf{x}_i$.
-3. Compute the distillation loss $\mathcal{L}_{\text{dist}}$ using the L1 norm between the teacher and student outputs, applying a stop gradient to the teacher's output to prevent backpropagation into it [S1]:
+**Algorithm:**
+1. **Sampling:** For each of the 5,000 distillation iterations, sample a batch of random rays $\mathbf{r}$ from the training set.
+2. **Point Evaluation:** For each ray, evaluate the teacher network $f$ and the student network $f_{\text{small}}$ at the sampled points $\mathbf{x}_i$ along the ray.
+3. **Loss Calculation:** Compute the distillation loss $\mathcal{L}_{\text{dist}}$ using the L1 norm of the difference between the teacher's and student's SDF outputs. A stop gradient operation is applied to the teacher's output to prevent it from updating during this phase.
    $$
    \mathcal{L}_{\text{dist}}(\mathbf{r}) := \sum_{i=0}^{N-1} |f(\mathbf{x}_i) - f_{\text{small}}(\mathbf{x}_i)|
    $$
-4. Update the weights of $f_{\text{small}}$ to minimize $\mathcal{L}_{\text{dist}}$.
-5. After distillation, discard the original teacher network $f$ and use $f_{\text{small}}$ for the subsequent finetuning stage [S1].
+   where $N$ is the number of sampled points per ray.
+4. **Optimization:** Update the weights of $f_{\text{small}}$ by minimizing $\mathcal{L}_{\text{dist}}$ using gradient descent.
+5. **Replacement:** After 5,000 iterations, discard the original teacher network $f$ and replace it with the distilled network $f_{\text{small}}$ for subsequent finetuning stages.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Assume teacher_model and student_model are initialized
-# teacher_model has 256 channels, student_model has 16 channels
+# Initialization
+teacher_model = LargeSDFMLP(channels=256) # Pre-trained
+student_model = SmallSDFMLP(channels=16) # Random initialization
+distill_iterations = 5000
 
-distillation_iterations = 5000
-optimizer = Adam(student_model.parameters())
+# Distillation Loop
+for iteration in range(distill_iterations):
+    # 1. Sample random rays from training set
+    rays = sample_training_rays(batch_size=B)
+    
+    # 2. Evaluate networks at sampled points
+    # Assume rays contain points x_i
+    points = rays.points
+    
+    # Teacher forward pass (no gradient needed for student update)
+    with torch.no_grad():
+        teacher_outputs = teacher_model(points)
+        
+    # Student forward pass
+    student_outputs = student_model(points)
+    
+    # 3. Compute L1 Loss
+    # Stop gradient is implicitly handled by torch.no_grad() on teacher
+    loss = torch.mean(torch.abs(teacher_outputs - student_outputs))
+    
+    # 4. Optimize student model
+    student_optimizer.zero_grad()
+    loss.backward()
+    student_optimizer.step()
 
-for iteration in range(distillation_iterations):
-    # Sample random rays from training set
-    rays = sample_random_rays(training_set)
-    
-    total_loss = 0.0
-    
-    for ray in rays:
-        # Sample points along the ray
-        points = sample_points_along_ray(ray)
-        
-        # Forward pass through teacher (no gradient needed)
-        with torch.no_grad():
-            teacher_outputs = teacher_model(points)
-        
-        # Forward pass through student
-        student_outputs = student_model(points)
-        
-        # Compute L1 loss
-        loss = torch.mean(torch.abs(teacher_outputs - student_outputs))
-        
-        # Backward pass and update student
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        
-        total_loss += loss.item()
-    
-    # Optional: log total_loss
+# 5. Replace teacher with student for finetuning
+final_sdf_model = student_model
 ```
 
 **Edge Cases and Pitfalls:**
-- The teacher network must be fully trained before distillation begins [S1].
-- The stop gradient is critical; without it, the teacher's weights would also update, potentially destabilizing the knowledge transfer [S1].
-- Precision issues may arise if the student network is too small to capture the teacher's geometry; 16 channels is specified as sufficient in the source [S1].
+- **Precision:** Ensure the student network is initialized with appropriate weights to avoid vanishing gradients during the initial distillation steps.
+- **Boundaries:** The method assumes the sampled points $\mathbf{x}_i$ are within the domain where the teacher model provides meaningful SDF values. Points far from the surface may introduce noise if the teacher's SDF is not well-behaved in empty space.
+- **Degenerate Input:** If the training rays do not cover the scene uniformly, the distilled model may inherit biases from the teacher's sampling distribution.
 
 ## Subtopics
 
 ### [Progressive Volume Distillation](7388-progressive-volume-distillation.md)
-A systematic distillation method that allows any-to-any conversions between different NeRF architectures (MLP, sparse tensors, low-rank tensors, hashtables) by performing distillation progressively on different levels of volume representations, from shallower to deeper.
+Progressive Volume Distillation (PVD) is a systematic method for converting trained Neural Radiance Field (NeRF) models between heterogeneous architectures, including MLPs, sparse tensors, low-rank tensors, and hash tables. It solves the problem of architectural incompatibility by constructing a unified two-level view of volume representations and performing distillation progressively from shallower to deeper levels. Unlike methods that distill only between identical architectures, PVD enables any-to-any conversion while maintaining teacher performance, leveraging a block-wise training strategy to accelerate the process significantly.
+
+### [Probabilistic Directed Distance Field (PDDF) Training](9296-probabilistic-directed-distance-field-pddf-training.md)
+Probabilistic Directed Distance Field (PDDF) Training is a method for learning directed distance fields (DDFs) from mesh data by allowing the depth output to be a probability distribution rather than a scalar. This approach solves the problem of representing discontinuous depth and visibility fields with a continuous ($C^1$) neural network, which is essential for handling occlusions and surface boundaries without artifacts. It sets itself apart from standard SDF training by explicitly modeling view-dependent discontinuities through a mixture of Dirac deltas, enabling differentiable rendering via ray-casting that depends only on a single forward pass.
 
 ## Operating characteristics
-- **Time Complexity:** Linear with respect to the number of sampled points and iterations. The distillation phase adds 5,000 iterations of training overhead [S1].
-- **Memory Complexity:** The student network uses significantly less memory than the teacher (16 channels vs. 256 channels) [S1].
-- **Performance:** Enables real-time rendering by reducing inference cost, as the distilled model replaces the large teacher network [S1].
-- **Strengths:** Simple to implement, effective at preserving geometry, reduces model size.
-- **Limitations:** Requires a pre-trained large teacher network; distillation quality depends on the capacity of the student network.
+- **Time Complexity:** The distillation process requires 5,000 iterations of forward and backward passes through both the teacher and student networks. The teacher's forward pass is gradient-free, reducing computational cost compared to joint training.
+- **Memory Complexity:** The student network uses significantly less memory than the teacher (16 channels vs. 256 channels), making it suitable for real-time rendering applications where memory bandwidth is a bottleneck.
+- **Measured Performance:** The method enables the use of a small 16-channel MLP for inference while maintaining the geometric accuracy of a 256-channel MLP.
+- **Strengths:** Significant reduction in model size and inference latency; preserves high-quality geometry learned by the teacher.
+- **Limitations:** Requires a pre-trained large teacher model; distillation quality depends on the coverage of sampled points.
+- **When to Use:** When real-time rendering is required but the initial training used a large, slow network.
+- **When Not to Use:** When the teacher model is not available or when the scene geometry is too complex for a small MLP to capture even with distillation.
 
 ## Background
-MLP Distillation is used in [HybridNeRF](https://doi.org/10.1109/cvpr52733.2024.01858) to compress the SDF representation learned during the initial training phase. The authors found that a large 256-channel MLP is necessary for accurate geometry learning, but a smaller 16-channel network suffices for inference after distillation [S1]. This approach avoids the need for separate background models, which double inference and memory costs [S1].
+MLP Distillation was introduced in the context of HybridNeRF, an efficient neural rendering method that combines volumetric and surface-based approaches. The method addresses the challenge of complex backgrounds and the high cost of separate NeRF background models. By distilling a large SDF into a smaller one, it enables real-time rendering without doubling inference costs. The approach builds on SDF Training with Eikonal Loss, using the large network to learn accurate scene geometry before compression.
 
 ## Sources
 [S1] HybridNeRF: Efficient Neural Rendering via Adaptive Volumetric Surfaces, https://doi.org/10.1109/cvpr52733.2024.01858, fetched 2026-10-26

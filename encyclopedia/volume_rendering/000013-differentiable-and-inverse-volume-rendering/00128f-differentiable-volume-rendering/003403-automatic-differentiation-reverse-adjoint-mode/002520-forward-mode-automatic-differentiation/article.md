@@ -1,208 +1,146 @@
 # Forward-Mode Automatic Differentiation
 
-Also called: Tangent Mode AD, Forward Differentiation, Forward mode differentiation
+Also called: Forward Differentiation, Forward mode differentiation, Tangent Mode AD
 
 ## Overview
-Forward-mode automatic differentiation (AD) computes the derivatives of the volume rendering output with respect to input parameters by propagating tangent vectors (derivatives) forward through the computational graph alongside the primal values [S1][S3, unofficial]. It replaces every variable in the rendering equation with a tuple containing the value and its derivative with respect to a specific parameter $w$, applying the chain rule at each arithmetic operation [S1]. Unlike reverse-mode AD, which requires storing all intermediate states for a backward pass, forward-mode AD computes the gradient for a single parameter simultaneously with the forward evaluation, making it memory-efficient for low-dimensional parameter spaces but computationally expensive for high-dimensional inputs [S1][S3, unofficial].
+Forward-mode automatic differentiation computes the derivatives of a function's output with respect to its input parameters by propagating derivative information from inputs to outputs through the computational graph [S1, S2][S4, unofficial][S5, S6]. It solves the problem of obtaining exact gradients for differentiable rendering without the approximation errors of finite differences or the symbolic explosion of symbolic differentiation [S1][S3, unofficial]. Unlike reverse-mode (adjoint) differentiation, which propagates gradients from the output back to the inputs and is efficient for high-dimensional inputs, forward-mode is efficient when the number of input parameters is small relative to the output dimension [S1, S2][S4, unofficial]. In volume rendering, it is typically used for optimizing low-dimensional parameters like camera viewpoint, whereas it becomes unfeasible for high-dimensional inputs like transfer functions or volumetric fields [S2][S4, unofficial][S5, S6].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** The rendering parameters (e.g., camera pose, transfer function coefficients, volume density field values) with respect to which gradients are desired.
-*   **Outputs:** The rendered color $\hat{C}(\mathbf{r})$ and its derivative $\frac{d\hat{C}}{dw}$ with respect to the parameter $w$.
+- **Input:** A differentiable function $f: \mathbb{R}^p \to \mathbb{R}^m$ representing the rendering pipeline, where $p$ is the number of parameters to differentiate and $m$ is the number of output pixels/components.
+- **Output:** The gradient of the output with respect to the specified input parameters, $\frac{\partial f}{\partial w_i}$ for each parameter $w_i$.
 
 **Data Structures:**
-The core data structure is a "forward variable" (often named `fvar` or `dual`), which wraps a scalar value and its derivative(s) [S1][S2, unofficial].
+The core data structure is the **forward variable** (often implemented as a dual number or a custom struct `fvar`), which wraps a scalar value and its derivative vector [S2][S3, S4, unofficial].
 
-1.  **Single Parameter (`fvar`):**
-    ```cpp
-    template <typename T>
-    struct fvar {
-        T value;      // The primal value (e.g., density, color component)
-        T derivative; // The derivative with respect to the single parameter w
-    };
-    ```
-    *Note: For multiple parameters, `derivative` becomes an array or vector of size $p$ [S1][S3, unofficial].*
-
-2.  **Multi-Parameter (`dual`):**
-    ```cpp
-    template <typename Scalar, int Dimension>
-    struct dual {
-        Scalar value_;       // The primal value
-        Vector<Scalar, Dimension> grad_; // Derivatives w.r.t. Dimension parameters
-    };
-    ```
-    *Note: `Dimension` corresponds to the number of parameters $p$ [S2, unofficial].*
+1.  **Dual Number / Forward Variable (`fvar`):**
+    -   **Value:** The original scalar value $v$.
+    -   **Derivative:** A vector of size $p$ storing $\frac{dv}{dw_1}, \dots, \frac{dv}{dw_p}$ [S2][S3, S4, unofficial].
+    -   **Layout (C++ style):**
+        ```cpp
+        template <typename T, int p>
+        struct fvar {
+            T value;
+            T derivatives[p];
+        };
+        ```
+    -   **Layout (Python/Dr.Jit style):** A tensor where the last dimension or a specific axis holds the derivative components corresponding to the $p$ parameters [S5, S6].
 
 **Numbered Steps:**
 
 1.  **Initialization:**
-    *   For constant variables (e.g., fixed step sizes, fixed ray origins not being optimized), initialize the derivative to zero:
-        $$ \tilde{x}_{\text{const}} = \langle x_{\text{const}}, 0 \rangle $$
-    *   For the parameter $w$ of interest, initialize the derivative to one (unit tangent):
-        $$ \tilde{w} = \langle w, 1 \rangle $$
-    *   If computing derivatives for multiple parameters $w_1, \dots, w_p$, extend the derivative storage to hold $p$ values [S1][S3, unofficial].
+    -   Identify the $p$ parameters $w_1, \dots, w_p$ with respect to which derivatives are desired [S2][S4, unofficial].
+    -   Initialize constant variables with zero derivative: $\tilde{x}_{const} = \langle x_{const}, \mathbf{0} \rangle$ [S2].
+    -   Initialize the $i$-th parameter $w_i$ with a unit derivative vector: $\tilde{w}_i = \langle w_i, \mathbf{e}_i \rangle$, where $\mathbf{e}_i$ is a vector with 1 at index $i$ and 0 elsewhere [S1, S2].
+    -   If computing derivatives for multiple parameters simultaneously, extend the derivative vector to size $p$ [S2][S4, unofficial].
 
-2.  **Operator Overloading:**
-    Replace standard arithmetic operations with overloaded versions that compute both the primal value and the derivative using the chain rule. The forward variable $\tilde{a} = \langle a, \frac{da}{dw} \rangle$ is used for all calculations [S1].
+2.  **Forward Propagation (Tracing):**
+    -   Execute the rendering algorithm using the `fvar` type instead of standard floating-point types [S2][S4, unofficial].
+    -   Operator overloading ensures that every arithmetic operation (addition, multiplication, etc.) computes both the value and the derivative according to the chain rule [S2][S4, unofficial].
+    -   For each operation $c = f(a, b)$, the forward function computes:
+        $$ \tilde{c} = \tilde{f}(\tilde{a}, \tilde{b}) = \left\langle f(a, b), \frac{\partial f}{\partial a} \frac{da}{dw} + \frac{\partial f}{\partial b} \frac{db}{dw} \right\rangle $$
+        [S2]
 
-    *   **Addition:** $\tilde{c} = \tilde{a} + \tilde{b}$
-        $$ c = a + b $$
-        $$ \frac{dc}{dw} = \frac{da}{dw} + \frac{db}{dw} $$
-    *   **Multiplication:** $\tilde{c} = \tilde{a} \cdot \tilde{b}$
-        $$ c = a \cdot b $$
-        $$ \frac{dc}{dw} = a \frac{db}{dw} + b \frac{da}{dw} $$
-    *   **Division:** $\tilde{c} = \tilde{a} / \tilde{b}$
-        $$ c = a / b $$
-        $$ \frac{dc}{dw} = \frac{b \frac{da}{dw} - a \frac{db}{dw}}{b^2} $$
-    *   **Elementary Functions:**
-        *   Square Root ($\tilde{c} = \sqrt{\tilde{a}}$):
-            $$ c = \sqrt{a}, \quad \frac{dc}{dw} = \frac{1}{2\sqrt{a}} \frac{da}{dw} $$
-        *   Sine ($\tilde{c} = \sin(\tilde{a})$):
-            $$ c = \sin(a), \quad \frac{dc}{dw} = \cos(a) \frac{da}{dw} $$
-        *   Cosine ($\tilde{c} = \cos(\tilde{a})$):
-            $$ c = \cos(a), \quad \frac{dc}{dw} = -\sin(a) \frac{da}{dw} $$
-        *   Absolute Value ($\tilde{c} = |\tilde{a}|$):
-            $$ c = |a|, \quad \frac{dc}{dw} = \text{sgn}(a) \frac{da}{dw} $$
-            *Pitfall: The derivative is undefined at $a=0$. In practice, a small epsilon or subgradient is often used [S2, unofficial].*
+3.  **Gradient Retrieval:**
+    -   After the forward pass, the output variable $\tilde{y}$ contains the rendered value and the accumulated gradients $\frac{\partial y}{\partial w_i}$ in its derivative component [S5, S6].
+    -   Extract the derivative vector from the output to obtain the gradient image [S5, S6].
 
-3.  **Execution:**
-    Execute the volume rendering algorithm (e.g., Direct Volume Rendering) using the `fvar` type for all variables. The rendering integral is evaluated as:
-    $$ \tilde{C}(\mathbf{r}) = \sum_{i=1}^N \tilde{T}_i (1 - \exp(-\tilde{\sigma}_i \delta_i)) \tilde{\mathbf{c}}_i $$
-    where each term ($\tilde{T}_i, \tilde{\sigma}_i, \tilde{\mathbf{c}}_i$) is a forward variable. The exponential and transmittance calculations also use overloaded operators [S1][S3, unofficial].
-
-4.  **Result Extraction:**
-    The final rendered color $\hat{C}$ is the `value` component of the result, and the gradient $\frac{d\hat{C}}{dw}$ is the `derivative` component [S1].
+**Formulas:**
+-   **Addition:** $\tilde{a} + \tilde{b} = \langle a+b, \frac{da}{dw} + \frac{db}{dw} \rangle$ [S2][S3, unofficial]
+-   **Multiplication:** $\tilde{a} \cdot \tilde{b} = \langle a \cdot b, a \frac{db}{dw} + b \frac{da}{dw} \rangle$ [S2][S3, unofficial]
+-   **Chain Rule (General):** $\frac{dz}{dx} = \frac{dz}{dy} \cdot \frac{dy}{dx}$ [S1]
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
+# Define the forward variable structure
 class Fvar:
-    """Forward variable for single parameter differentiation."""
-    def __init__(self, value, derivative=0.0):
+    def __init__(self, value, derivs):
         self.value = value
-        self.derivative = derivative
+        self.derivs = derivs  # Array of size p
 
     def __add__(self, other):
-        if isinstance(other, (int, float)):
-            other = Fvar(other, 0.0)
         return Fvar(
             self.value + other.value,
-            self.derivative + other.derivative
+            [self.derivs[i] + other.derivs[i] for i in range(len(self.derivs))]
         )
 
     def __mul__(self, other):
-        if isinstance(other, (int, float)):
-            other = Fvar(other, 0.0)
+        # Product rule: d(uv) = u dv + v du
+        new_derivs = [
+            self.value * other.derivs[i] + other.value * self.derivs[i]
+            for i in range(len(self.derivs))
+        ]
         return Fvar(
             self.value * other.value,
-            self.value * other.derivative + other.value * self.derivative
+            new_derivs
         )
-
-    def __truediv__(self, other):
-        if isinstance(other, (int, float)):
-            other = Fvar(other, 0.0)
-        denom = other.value * other.value
-        return Fvar(
-            self.value / other.value,
-            (other.value * self.derivative - self.value * other.derivative) / denom
-        )
-
-    def exp(self):
-        val = math.exp(self.value)
-        return Fvar(val, val * self.derivative)
-
-    def sqrt(self):
-        val = math.sqrt(self.value)
-        # Guard against division by zero if value is 0
-        if self.value == 0:
-            return Fvar(0.0, 0.0) # Subgradient or limit
-        return Fvar(val, self.derivative / (2.0 * val))
 
     def sin(self):
-        val = math.sin(self.value)
-        return Fvar(val, self.derivative * math.cos(self.value))
+        # Chain rule: d(sin(u)) = cos(u) du
+        new_derivs = [
+            self.derivs[i] * math.cos(self.value)
+            for i in range(len(self.derivs))
+        ]
+        return Fvar(
+            math.sin(self.value),
+            new_derivs
+        )
 
-    def cos(self):
-        val = math.cos(self.value)
-        return Fvar(val, -self.derivative * math.sin(self.value))
+# Example: Compute derivative of f(x) = x^2 with respect to x
+p = 1  # Number of parameters
+x_val = 3.0
+# Initialize x with derivative 1.0 (d(x)/d(x) = 1)
+x = Fvar(x_val, [1.0])
 
-def render_forward_mode(rays, params):
-    """
-    Simulates a single ray's forward differentiation.
-    params: dict containing 'sigma' (density) and 'color' (c) as Fvar objects.
-    """
-    # Initialize transmittance T = 1.0, dT/dw = 0.0
-    T = Fvar(1.0, 0.0)
-    C = Fvar(0.0, 0.0)
-    
-    # Assume N samples along the ray
-    N = len(params['sigma'])
-    
-    for i in range(N):
-        sigma = params['sigma'][i]
-        c = params['color'][i]
-        delta = params['delta'][i] # Step size, assumed constant/zero derivative unless optimized
-        
-        # Compute opacity: alpha = 1 - exp(-sigma * delta)
-        # Note: delta is treated as constant here for simplicity
-        exponent = sigma * delta
-        exp_val = exponent.exp()
-        alpha = Fvar(1.0, 0.0) - exp_val
-        
-        # Update transmittance: T_new = T * exp(-sigma * delta)
-        # T is already exp(-sum_{j<i} sigma_j delta_j)
-        # We multiply current T by exp(-sigma_i * delta_i)
-        # But in the standard DVR sum, T_i is the transmittance BEFORE sample i
-        # So we use current T to weight the emission, then update T for next step
-        
-        # Contribution: T * alpha * c
-        contribution = T * alpha * c
-        C = C + contribution
-        
-        # Update T for next iteration: T = T * exp(-sigma * delta)
-        T = T * exp_val
-        
-    return C.value, C.derivative
+# Compute f(x) = x * x using overloaded operators
+y = x * x
+
+# Result
+print(y.value)    # 9.0
+print(y.derivs)   # [6.0] (since d(x^2)/dx = 2x = 6)
 ```
+
+**Edge Cases and Pitfalls:**
+-   **High Dimensionality:** Forward-mode becomes computationally infeasible for high-dimensional inputs (e.g., 3D volumetric fields or large transfer functions) because the derivative vector size $p$ grows linearly, requiring $O(p)$ operations per arithmetic step [S2][S4, unofficial].
+-   **Latent Variables:** If a scene parameter depends on another differentiable parameter (latent variable), gradients must be propagated from the latent variable to the parameter *before* rendering, or the computational graph may be incorrectly traced [S5, S6].
+-   **Gradient Overwriting:** When propagating gradients through complex graphs with shared dependencies, standard forward propagation might overwrite intermediate gradient values. Flags like `dr.ADFlag.ClearEdges` (in Dr.Jit) are required to preserve gradients in intermediate nodes [S5, S6].
+-   **Visualization Range:** Gradient values are not bounded to $[0, 1]$. Direct visualization as RGB images will clip or distort results; colormapping with symmetric limits (e.g., $[-v_{lim}, v_{lim}]$) is required [S5, S6].
 
 ## Subtopics
 
 ### [Dual Number Automatic Differentiation for Scalar Fields](5494-dual-number-automatic-differentiation-for-scalar-fields.md)
-Computes the gradient of a scalar field at a point using forward-mode automatic differentiation by evaluating the field on dual numbers representing coordinate perturbations.
+Computes exact gradients of scalar fields using dual numbers, suitable for GPU kernels with critical memory footprints.
+
+### [Adjoint Method](789-adjoint-method.md)
+Reverse-mode differentiation, efficient for high-dimensional inputs.
+
+### [Neural Field Derivatives via Autograd](1266-neural-field-derivatives-via-autograd.md)
+Uses framework-level autograd for neural fields.
+
+### [Differentiable Rendering via Gradient-Based Optimization](1989-differentiable-rendering-via-gradient-based-optimization.md)
+Uses gradients for optimization, typically via reverse mode.
+
+### [Automatic Differentiation for Rendering](6806-automatic-differentiation-for-rendering.md)
+General overview of AD in rendering.
 
 ## Operating characteristics
-**Time Complexity:**
-The computational cost scales linearly with the number of parameters $p$ [S1][S3, unofficial]. Each arithmetic operation in the rendering pipeline must be performed for each parameter's derivative. If $p$ parameters are optimized, the work is roughly $p$ times the cost of the forward pass [S1].
-
-**Memory Complexity:**
-Memory usage is $O(np)$, where $n$ is the number of intermediate values (e.g., pixel count $\times$ samples) and $p$ is the number of parameters [S1][S3, unofficial]. Unlike reverse-mode AD, it does not need to store the entire computational graph, only the current state's derivatives [S3, unofficial].
-
-**Strengths:**
-*   Efficient for optimizing a small number of parameters, such as camera viewpoint (2-3 parameters: longitude, latitude, distance) [S1][S3, unofficial].
-*   No need to store intermediate states for backpropagation, reducing peak memory usage compared to reverse-mode AD for low $p$ [S3, unofficial].
-*   Simple implementation via operator overloading [S1].
-
-**Limitations:**
-*   Unfeasible for high-dimensional input data, such as optimizing a full 3D volumetric field or a large Transfer Function (TF) grid, because $p$ becomes very large [S1][S3, unofficial].
-*   Requires re-running the forward pass (or extending the derivative array) for each additional parameter if not using multi-parameter dual numbers efficiently [S1].
-
-**When to Use:**
-*   Optimizing camera parameters.
-*   Optimizing a small set of global scalar parameters (e.g., lighting intensity, single TF coefficient).
-
-**When Not to Use:**
-*   Optimizing dense 3D volume data.
-*   Optimizing large Transfer Function tables.
-*   When the number of parameters $p$ is large relative to the number of outputs.
+-   **Time Complexity:** $O(d \cdot T)$, where $d$ is the number of input parameters and $T$ is the time complexity of the original algorithm [S1]. It scales linearly with the number of parameters $p$ [S2][S4, unofficial].
+-   **Memory Complexity:** $O(n \cdot p)$, where $n$ is the number of intermediate results (e.g., image size $W \times H \times 4$) and $p$ is the number of parameters [S2][S4, unofficial].
+-   **Performance:** Efficient for low-dimensional inputs (e.g., camera pose with 2-6 parameters) [S2][S4, unofficial]. Inefficient for high-dimensional inputs (e.g., transfer functions with thousands of texels) [S2][S4, unofficial].
+-   **Strengths:** Simpler implementation than source transformation; easier to integrate into existing code via operator overloading or tracing [S1]. Provides exact gradients without approximation errors [S1][S3, unofficial].
+-   **Limitations:** Not suitable for optimization tasks with many parameters (e.g., volume reconstruction) because each parameter requires a separate pass or significant memory overhead [S5, S6].
+-   **When to Use:** Visualizing the effect of individual parameters (e.g., "what if I change this color?"), optimizing camera parameters, or differentiating with respect to a small number of scene parameters [S2][S4, unofficial][S5, S6].
+-   **When Not to Use:** Optimizing high-dimensional parameters like transfer functions or volumetric densities [S2][S4, unofficial].
 
 ## Background
-Forward-mode automatic differentiation was introduced as a method to compute derivatives by propagating derivatives right-to-left (top-to-bottom in the computation graph) [S1]. It is based on the algebraic properties of dual numbers, where a number is represented as $a + \epsilon b$ with $\epsilon^2 = 0$ [S2, unofficial]. In the context of volume rendering, it was formalized in the DiffDVR framework to provide an alternative to the adjoint method for gradient computation [S1]. The method is particularly relevant in differentiable rendering for its simplicity in handling low-dimensional optimization problems [S3, unofficial].
+Forward-mode automatic differentiation was introduced as a method to compute derivatives by recursively applying the chain rule to elementary operations [S1]. It is often implemented using dual numbers or custom data types (`fvar`) with operator overloading [S2][S3, unofficial]. In the context of differentiable rendering, it has been used in systems like DiffDVR for direct volume rendering [S2] and in Mitsuba/Dr.Jit for forward inverse rendering [S5, S6]. It is particularly noted for its educational value in visualizing parameter effects [S5, S6].
 
 ## Sources
-[S1] Differentiable Direct Volume Rendering, https://arxiv.org/abs/2107.12672v1, fetched 2026-10-26
-[S2] planaria/dmc, https://github.com/planaria/dmc, fetched 2026-10-26 (unofficial)
-[S3] (PDF) Differentiable Direct Volume Rendering - ResearchGate, https://www.researchgate.net/publication/353510271_Differentiable_Direct_Volume_Rendering, fetched 2026-10-30 (unofficial)
+[S1] Physics-based differentiable rendering, https://doi.org/10.1145/3388769.3407454, fetched 2026-10-29
+[S2] Differentiable Direct Volume Rendering, https://arxiv.org/abs/2107.12672v1, fetched 2026-10-26
+[S3] planaria/dmc, https://github.com/planaria/dmc, fetched 2026-10-26 (unofficial)
+[S4] (PDF) Differentiable Direct Volume Rendering - ResearchGate, https://www.researchgate.net/publication/353510271_Differentiable_Direct_Volume_Rendering, fetched 2026-10-30 (unofficial)
+[S5] Forward inverse rendering, https://mitsuba.readthedocs.io/en/stable/src/inverse_rendering/forward_inverse_rendering.html, fetched 2026-10-29
+[S6] Forward inverse rendering, https://mitsuba.readthedocs.io/en/latest/src/inverse_rendering/forward_inverse_rendering.html, fetched 2026-10-29

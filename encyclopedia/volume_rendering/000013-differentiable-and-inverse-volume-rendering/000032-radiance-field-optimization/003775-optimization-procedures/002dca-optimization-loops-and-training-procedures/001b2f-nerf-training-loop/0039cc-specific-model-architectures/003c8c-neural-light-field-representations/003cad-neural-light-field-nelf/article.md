@@ -1,0 +1,311 @@
+# Neural Light Field (NeLF)
+
+Also called: R2L (Neural Light Field with Distillation), R2L network, Neural Light Field with Distillation
+
+## Overview
+Neural Light Field (NeLF) via R2L Distillation is a method for efficient novel view synthesis that represents a 3D scene as a Neural Light Field rather than a Neural Radiance Field [S1]. It maps camera ray origin and direction directly to RGB values, avoiding ray-marching and iterative sampling [S1]. The method distills a pre-trained NeRF teacher model into a deep residual MLP student model, enabling a single forward pass per ray [S1]. It sets itself apart from standard NeRF by eliminating the need for point sampling along the ray and from other NeLF works by employing a deep (88-layer) residual architecture trained with hard-example mining and pseudo-data distillation [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 4D oriented ray, parameterized by origin $(x_o, y_o, z_o)$ and normalized direction $(x_d, y_d, z_d)$.
+*   **Output:** A 3D RGB color vector $(r, g, b)$.
+
+**Data Structures:**
+The student network $G_\phi$ is a deep Multi-Layer Perceptron (MLP) with residual connections.
+*   **Input Representation:** Instead of a single point query, the input is a concatenation of spatial coordinates of $K$ sampled points along the ray, forming a $3K$-dimensional vector. The standard value is $K=16$ [S1].
+*   **Network Configurations:**
+    *   **W256D88:** Width 256, Depth 88 layers. Approx. 12M FLOPs per ray [S1].
+    *   **W181D88:** Width 181, Depth 88 layers. Approx. 6M FLOPs per ray [S1].
+    *   Other variants include W256D44 and W363D22 (6M FLOPs) [S1].
+*   **Positional Encoding:** Input coordinates are enriched with positional encoding following NeRF [S1, S53].
+
+**Numbered Steps:**
+
+1.  **Teacher Training:** Train a standard NeRF teacher model $F_{\Theta^*}$ on the original training images until convergence [S1]. $F_{\Theta^*}$ maps 5D coordinates (spatial location and viewing direction) to volume density and radiance [S1].
+2.  **Pseudo Data Generation:**
+    *   Infer a viewing bounding box from the training data camera poses [S1].
+    *   Randomly sample ray origins $(x_o, y_o, z_o)$ and normalized directions $(x_d, y_d, z_d)$ from a uniform distribution $U$ within the bounding box [S1]:
+        $$
+        \begin{aligned}
+        x_o &\sim U(x_{o,\min}, x_{o,\max}), & y_o &\sim U(y_{o,\min}, y_{o,\max}), & z_o &\sim U(z_{o,\min}, z_{o,\max}) \\
+        x_d &\sim U(x_{d,\min}, x_{d,\max}), & y_d &\sim U(y_{d,\min}, y_{d,\max}), & z_d &\sim U(z_{d,\min}, z_{d,\max})
+        \end{aligned}
+        $$
+    *   Query the pre-trained teacher $F_{\Theta^*}$ with the sampled 6D input to obtain the target RGB value $(\hat{r}, \hat{g}, \hat{b})$ [S1]:
+        $$
+        (\hat{r}, \hat{g}, \hat{b}) = F_{\Theta^*}(x_o, y_o, z_o, x_d, y_d, z_d)
+        $$
+    *   Generate a dataset of pseudo images (default size $S=10,000$) [S1].
+3.  **Student Network Architecture:** Construct $G_\phi$ as a deep residual MLP with 88 layers [S1]. The network uses extensive residual blocks in internal layers to handle the depth without vanishing gradients [S1].
+4.  **Training Loop:**
+    *   **Ray Sampling:** For each training iteration, sample $K=16$ points along the ray using **stratified sampling** to prevent overfitting to specific point locations [S1]. Concatenate their coordinates to form the $3K$-dimensional input vector [S1].
+    *   **Forward Pass:** Compute the predicted RGB $\mathbf{c} = G_\phi(x_o, y_o, z_o, x_d, y_d, z_d)$ [S1].
+    *   **Loss Calculation:** Compute the Mean Squared Error (MSE) between the prediction and the teacher's output [S1]:
+        $$
+        L = \text{MSE}(G_\phi(x_o, y_o, z_o, x_d, y_d, z_d), (\hat{r}, \hat{g}, \hat{b}))
+        $$
+    *   **Hard Example Mining:**
+        *   Maintain a pool of hard examples (rays with larger loss values) [S1].
+        *   In each iteration, sort batch losses in ascending order.
+        *   Add the top $r$ percent of samples to the pool [S1].
+        *   Randomly pick $r$ percent of samples from the pool to augment the training batch [S1]. Default $r=0.2$ [S1].
+    *   **Optimization:** Update $\phi$ using the Adam optimizer [S1].
+5.  **Inference (Testing):**
+    *   For each pixel, sample $K=16$ points **evenly spaced** along the ray [S1].
+    *   Concatenate coordinates and query $G_\phi$ for the final RGB color [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+
+class ResidualBlock(nn.Module):
+    """Simple residual block for the NeLF network."""
+    def __init__(self, width):
+        super(ResidualBlock, self).__init__()
+        self.fc1 = nn.Linear(width, width)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(width, width)
+        
+    def forward(self, x):
+        out = self.fc1(x)
+        out = self.relu(out)
+        out = self.fc2(out)
+        return x + out  # Residual connection
+
+class NeLF(nn.Module):
+    """
+    Deep Residual MLP for Neural Light Field.
+    Config: W256D88 (width=256, depth=88) or W181D88.
+    """
+    def __init__(self, width=256, depth=88, input_dim=48): # 16 points * 3 coords
+        super(NeLF, self).__init__()
+        self.input_dim = input_dim
+        self.width = width
+        
+        # Initial linear layer
+        self.input_layer = nn.Linear(input_dim, width)
+        self.relu = nn.ReLU()
+        
+        # Deep residual blocks
+        self.residual_blocks = nn.ModuleList([
+            ResidualBlock(width) for _ in range(depth)
+        ])
+        
+        # Output layer
+        self.output_layer = nn.Linear(width, 3) # RGB
+
+    def forward(self, x):
+        # x shape: (batch_size, 3*K)
+        out = self.input_layer(x)
+        out = self.relu(out)
+        
+        for block in self.residual_blocks:
+            out = block(out)
+            
+        rgb = self.output_layer(out)
+        return rgb
+
+def generate_pseudo_data(teacher_model, num_images, bounding_box):
+    """
+    Generate pseudo training data by querying the NeRF teacher.
+    bounding_box: dict with min/max for x, y, z of origin and direction.
+    """
+    pseudo_inputs = []
+    pseudo_targets = []
+    
+    for _ in range(num_images):
+        # Sample ray origin and direction uniformly within bounding box
+        xo = torch.rand(1) * (bounding_box['xo_max'] - bounding_box['xo_min']) + bounding_box['xo_min']
+        yo = torch.rand(1) * (bounding_box['yo_max'] - bounding_box['yo_min']) + bounding_box['yo_min']
+        zo = torch.rand(1) * (bounding_box['zo_max'] - bounding_box['zo_min']) + bounding_box['zo_min']
+        
+        xd = torch.rand(1) * (bounding_box['xd_max'] - bounding_box['xd_min']) + bounding_box['xd_min']
+        yd = torch.rand(1) * (bounding_box['yd_max'] - bounding_box['yd_min']) + bounding_box['yd_min']
+        zd = torch.rand(1) * (bounding_box['zd_max'] - bounding_box['zd_min']) + bounding_box['zd_min']
+        
+        # Normalize direction if necessary (teacher expects normalized)
+        # Note: Source says "normalized directions", assuming sampling produces normalized or teacher handles it.
+        # Assuming the source implies sampling from a box that respects normalization or teacher normalizes.
+        # For implementation safety, we assume the teacher F_theta* handles the 6D input as defined in [S1].
+        
+        input_6d = torch.cat([xo, yo, zo, xd, yd, zd], dim=0)
+        
+        # Query teacher
+        # Teacher returns density and RGB. We only need RGB.
+        # Assuming teacher_model returns (density, rgb)
+        with torch.no_grad():
+            density, rgb = teacher_model(input_6d)
+            
+        pseudo_inputs.append(input_6d)
+        pseudo_targets.append(rgb)
+        
+    return torch.stack(pseudo_inputs), torch.stack(pseudo_targets)
+
+def stratified_sample_points(ray_origin, ray_direction, num_points=16):
+    """
+    Sample K points along a ray using stratified sampling.
+    Returns concatenated coordinates of shape (3*K).
+    """
+    # Assuming ray_origin and ray_direction are tensors of shape (3,)
+    # Stratified sampling: divide the ray segment into N intervals and sample uniformly within each
+    # For simplicity, we assume a fixed near/far range or relative sampling.
+    # NeRF typically samples between t_near and t_far.
+    # Here we assume a normalized parameter t in [0, 1] or similar, or specific bounds.
+    # The source mentions "randomly sampled along the ray using stratified sampling".
+    # We implement a generic stratified sampler for t in [0, 1].
+    
+    t = torch.rand(num_points)
+    # Stratified: add small jitter or divide range
+    # Standard stratified: t_i = (i + u) / N where u ~ U(0,1)
+    indices = torch.arange(num_points)
+    u = torch.rand(num_points)
+    t_stratified = (indices + u) / num_points
+    
+    # Map t to 3D points: P = Origin + t * Direction * Scale
+    # Assuming a scale factor or fixed length for the ray segment of interest.
+    # The source does not specify the ray length scaling, but NeRF uses near/far planes.
+    # We assume a helper `get_ray_points` exists or we use a standard bounding box intersection.
+    # For self-contained pseudocode, we assume a simple linear interpolation over a unit segment 
+    # or that the caller provides the t bounds.
+    # Let's assume a standard NeRF-like setup where t is in [0, 1] relative to a max depth.
+    # To be precise, we need the ray bounds. Since not given, we assume a normalized ray segment [0, 1].
+    
+    points = ray_origin.unsqueeze(0) + t_stratified.unsqueeze(1) * ray_direction.unsqueeze(0)
+    
+    # Concatenate coordinates: (x1, y1, z1, x2, y2, z2, ...)
+    return points.flatten()
+
+def train_step(student_model, teacher_model, batch_size, hard_example_ratio, bounding_box, optimizer):
+    """
+    One training iteration.
+    """
+    student_model.train()
+    
+    # 1. Sample rays for the batch
+    # In practice, these come from the pseudo dataset or real images.
+    # Here we simulate sampling from the pseudo distribution for demonstration.
+    # Real implementation would load from a DataLoader of pseudo data.
+    
+    # For the purpose of the algorithm description, we assume we have a batch of rays
+    # and their corresponding teacher targets.
+    # Let's assume `batch_rays` is (batch_size, 6) and `batch_targets` is (batch_size, 3)
+    # generated by generate_pseudo_data.
+    
+    # 2. For each ray in the batch, sample K points
+    # This is usually done in the DataLoader or a custom collate function.
+    # Here we assume `ray_points` is (batch_size, 3*K)
+    
+    # 3. Forward pass
+    predictions = student_model(ray_points)
+    
+    # 4. Compute Loss
+    loss = nn.MSELoss()(predictions, batch_targets)
+    
+    # 5. Backward pass
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    
+    return loss.item()
+
+def train_neLF(teacher_model, bounding_box, num_pseudo_images=10000, 
+               num_iterations=1000000, batch_size=98304, 
+               hard_example_ratio=0.2, width=256, depth=88):
+    """
+    Full training procedure for R2L.
+    """
+    # 1. Generate Pseudo Data
+    print("Generating pseudo data...")
+    pseudo_inputs, pseudo_targets = generate_pseudo_data(teacher_model, num_pseudo_images, bounding_box)
+    
+    # 2. Initialize Student Model
+    # Input dim is 3 * K = 3 * 16 = 48
+    student_model = NeLF(width=width, depth=depth, input_dim=48)
+    optimizer = optim.Adam(student_model.parameters(), lr=5e-4)
+    
+    # 3. Hard Example Pool
+    hard_pool = []
+    
+    # 4. Training Loop
+    print("Training R2L...")
+    for i in range(num_iterations):
+        # Sample batch from pseudo data
+        indices = torch.randperm(num_pseudo_images)[:batch_size]
+        batch_inputs = pseudo_inputs[indices]
+        batch_targets = pseudo_targets[indices]
+        
+        # Sample K points for each ray in the batch (Stratified)
+        # Note: In a real implementation, this would be part of the data loading pipeline.
+        # We assume batch_inputs contains ray origins and directions.
+        # We need to expand this to K points per ray.
+        
+        # Placeholder for point sampling logic which is complex to vectorize simply here.
+        # We assume `ray_points` is prepared.
+        ray_points = prepare_ray_points(batch_inputs, K=16, stratified=True)
+        
+        # Forward
+        predictions = student_model(ray_points)
+        loss = nn.MSELoss()(predictions, batch_targets)
+        
+        # Backward
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        # Hard Example Mining
+        # Calculate loss per sample
+        sample_losses = nn.MSELoss(reduction='none')(predictions, batch_targets).mean(dim=1)
+        
+        # Sort losses
+        sorted_indices = torch.argsort(sample_losses)
+        num_hard = int(batch_size * hard_example_ratio)
+        
+        # Add top r% to pool
+        hard_candidates = sorted_indices[-num_hard:]
+        hard_pool.extend(hard_candidates.tolist())
+        
+        # Randomly pick r% from pool to augment batch (simplified: just replace some in next batch or mix)
+        # The source says "augment the training batch".
+        # Implementation: In the next iteration, replace some random samples with hard examples.
+        if len(hard_pool) > 0:
+            num_to_replace = int(batch_size * hard_example_ratio)
+            replace_indices = torch.randperm(batch_size)[:num_to_replace]
+            hard_indices = torch.randint(0, len(hard_pool), (num_to_replace,))
+            # Note: This logic is simplified. The source describes maintaining a pool and picking from it.
+            # A more accurate implementation would store the actual ray data in the pool.
+            pass
+            
+    return student_model
+```
+
+**Edge Cases and Pitfalls:**
+*   **Vanishing Gradients:** Deep networks for NeRF/NeLF suffer from diminishing returns if not designed carefully. Residual connections are critical to enable greater depth; without them, the network is barely trainable [S1].
+*   **Overfitting:** Deep networks require abundant data. Training on only original images (typically <100) leads to severe overfitting (e.g., 19.81 PSNR vs 26.67 with pseudo data) [S1]. Pseudo data size must be sufficient (saturation around 5k-10k images) [S1].
+*   **Input Representation:** Using Plücker coordinates instead of concatenated spatial coordinates results in lower quality (29.08 PSNR vs 29.50 PSNR on Lego scene) [S1].
+*   **Reflection Surfaces:** Methods relying on ground-truth depth (like DONeRF) fail on reflective surfaces (water, mirrors) because depth is ambiguous. NeLF via R2L does not rely on depth and handles these well [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Single forward pass per ray. FLOPs reduction of 26–35× per camera ray compared to NeRF [S1].
+*   **Memory Complexity:** Storage size is comparable to or slightly larger than NeRF (e.g., 23.7 MB for R2L vs 2.4 MB for NeRF teacher, due to larger network size) [S1].
+*   **Measured Performance:**
+    *   **Speed:** 28–31× wall-time speedup over NeRF on synthetic scenes [S1]. 2× faster than DONeRF-16-noGT [S1].
+    *   **Quality:** 1.4–2.8 dB average PSNR improvement over NeRF on synthetic scenes [S1].
+    *   **Hardware:** Benchmarked on NVIDIA V100, GeForce 2080Ti, and CPU [S1].
+*   **Strengths:** High speed, high quality, no need for ground-truth depth, handles reflections well, single forward pass [S1].
+*   **Limitations:** Requires a pre-trained NeRF teacher, deep network training requires significant pseudo data and careful architecture (residuals) [S1].
+*   **When to use:** When efficient novel view synthesis is required and a NeRF teacher can be trained first. When ground-truth depth is unavailable or unreliable (e.g., reflections) [S1].
+*   **When not to use:** When memory footprint must be minimized (R2L is larger than NeRF), or when real-time training from scratch is needed without distillation [S1].
+
+## Background
+*   **Origin:** The method was introduced in the paper "R2L: Distilling Neural Radiance Field to Neural Light Field for Efficient Novel View Synthesis" [S1].
+*   **History:** It addresses the efficiency bottleneck of NeRF, which requires multiple forward passes (ray marching) per ray [S1]. Previous NeLF attempts used shallow MLPs (6-8 layers) and achieved limited speedup (~5×) [S1]. R2L bridges the gap by using a deep residual MLP and distillation [S1].
+*   **Usage:** Used for efficient novel view synthesis in computer graphics and vision, particularly for synthetic and real-world scenes [S1].
+
+## Sources
+[S1] R2L: Distilling Neural Radiance Field to Neural Light Field for Efficient Novel View Synthesis, https://doi.org/10.1007/978-3-031-19821-2_35, fetched 2026-10-26
