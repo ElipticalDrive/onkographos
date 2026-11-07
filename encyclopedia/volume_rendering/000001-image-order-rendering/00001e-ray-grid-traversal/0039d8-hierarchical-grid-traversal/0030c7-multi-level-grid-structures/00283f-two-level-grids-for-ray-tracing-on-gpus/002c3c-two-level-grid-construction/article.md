@@ -1,0 +1,135 @@
+# Two-Level Grid Construction
+
+Also called: Two-Level Grids for Ray Tracing on GPUs construction, Two-level nested grids
+
+## Overview
+Two-Level Grid Construction is a massively parallel, sort-based algorithm for building a fixed-depth hierarchical acceleration structure for ray tracing dynamic scenes on GPUs [S1, S2, unofficial]. It solves the problem of constructing high-quality acceleration structures for non-uniform primitive distributions with linear work complexity and fast build times, overcoming the "teapot in a stadium" problem where uniform grids fail in sparse regions [S1, unofficial]. Unlike uniform grids, it adapts resolution per top-level cell, providing better acceleration for non-uniform distributions while consuming less memory due to a reduced number of cells [S1, unofficial].
+
+## How it works
+The algorithm constructs a sparse top-level uniform grid where each cell contains a sub-grid (leaf grid) of arbitrary resolution. The construction relies on sorting pairs of (key, primitive_id) to compactly store primitive references.
+
+### Inputs and Outputs
+- **Input**: A set of $N$ triangles (primitives) and the scene bounding box.
+- **Output**: 
+  - A top-level grid structure containing cell data (leaf location, resolution, flags).
+  - A leaf grid structure containing cell data (start/end indices of references).
+  - A reference array containing primitive indices, sorted by leaf cell location.
+
+### Data Structures
+**Top-Level Cell** (32-bit integer for location of first leaf cell, 24-bit integer for cell resolution, 8-bit flags) [S1, unofficial].
+- Resolution is limited to $256^3$ due to the 24-bit storage [S1, unofficial].
+- Flags denote status such as "is empty" or "has children" [S1, unofficial].
+
+**Leaf Cell** (32-bit integer for start of primitive references, 32-bit integer for end of primitive references) [S1, unofficial].
+
+**Reference Array**: 32-bit primitive indices, sorted by leaf cell location [S1, unofficial].
+
+### Parameters
+- **Grid Density ($\lambda$)**: A user-defined constant used to determine grid resolution.
+  - Global top-level density: $\lambda = 1.2$ [S2, unofficial].
+  - Top-level density for hybrid intersector optimization: $\lambda = 1/16$ primitives referenced in the leaves [S2, unofficial].
+- **Radix Sort**: Uses a fast GPU implementation by Billeter et al. [BOA09], sorting by leaf location key [S1, S2, unofficial]. The sort considers only required bits (up to two bits at a time) based on the known size of the largest key [S2, unofficial].
+
+### Algorithm Steps
+1. **Compute Scene Bounds**: Calculate the bounding box $b$ of the scene [S1, unofficial].
+2. **Compute Top-Level Resolution**: Determine the resolution $r$ of the top-level grid using the density heuristic [S1, unofficial].
+3. **Upload Triangles**: Upload triangle data to GPU memory [S1, unofficial].
+4. **Build Top-Level Uniform Grid**: Use a sort-based approach (Kalojanov and Slusallek [KS09]) to build the top-level uniform grid. This yields sorted top-level pairs, the number of top-level references $n$, and top-level cell ranges $tlc$ [S1, unofficial].
+5. **Compute Leaf Cell Locations**:
+   - Initialize an array $Acc$ of zeros of size $r_x \times r_y \times r_z + 1$ [S1, unofficial].
+   - Count leaf cells for each top-level cell based on bounds, resolution, and top-level cell ranges [S1, unofficial].
+   - Perform an exclusive scan on $Acc$ to determine start positions [S1, unofficial].
+   - Initialize top-level cell data with leaf locations and resolutions using the scanned array [S1, unofficial].
+6. **Compute Reference Array Size**:
+   - Initialize array $Arc$ of size $G+1$ (where $G=128$) with zeros [S1, unofficial].
+   - Count leaf references using a fast conservative triangle-cell intersection test (bounding box only) [S1, unofficial].
+   - Perform an exclusive scan on $Arc$ [S1, unofficial].
+   - Allocate leaf pairs array $A_p$ of size $m$, where $m$ is the final value in $Arc$ [S1, unofficial].
+7. **Write Pairs to Array**:
+   - For each primitive, compute its leaf cell location in the leaf array using the leaf index and the first leaf location of the corresponding top-level cell [S1, unofficial].
+   - Use a precise triangle-cell intersection test (including plane intersection) to generate pairs of (leaf location, primitive index) [S1, unofficial].
+   - Write these pairs to the allocated array $A_p$. Atomic increment on shared memory may be used for convenience [S1, unofficial].
+8. **Sort Leaf Pairs**: Sort the leaf pairs array $A_p$ using radix sort by leaf location key [S1, unofficial].
+9. **Extract Leaf Cells**:
+   - Scan sorted pairs to find range borders (where key changes) [S1, unofficial].
+   - Store start and end indices of primitive references for each leaf cell in the leaf array [S1, unofficial].
+   - Extract the reference array out of the pairs array to compact the data and free space after outputting the leaf array [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def construct_two_level_grid(triangles, scene_bounds):
+    # 1. Compute Bounds
+    b = compute_bounds(triangles)
+    
+    # 2. Compute Top-Level Resolution
+    # Uses density heuristic: R = d * sqrt(lambda * N / V)
+    # lambda = 1.2 globally [S2, unofficial]
+    r = compute_top_level_resolution(b, len(triangles))
+    
+    # 3. Upload Triangles
+    t = upload_triangles_to_gpu(triangles)
+    
+    # 4. Build Top-Level Uniform Grid (Sort-Based)
+    # Returns sorted top-level pairs, number of refs, and cell ranges
+    data = build_uniform_grid(t, b, r)
+    atl_p = get_sorted_top_level_pairs(data)
+    n = get_number_of_top_level_references(data)
+    tlc = get_top_level_cell_ranges(data)
+    
+    # 5. Compute Leaf Cell Locations
+    # G = (ry, rz), B = rx
+    G = (r.y, r.z)
+    B = r.x
+    Acc = array_of_zeros(B * G[0] * G[1] + 1)
+    Acc = count_leaf_cells(b, r, tlc)
+    Acc = exclusive_scan(Acc, B * G[0] * G[1] + 1)
+    tlc = initialize_top_level_cell_data(Acc, tlc)
+    
+    # 6. Compute Reference Array Size
+    G_const = 128
+    B_const = 256
+    Arc = array_of_zeros(G_const + 1)
+    Arc = count_leaf_refs(t, b, r, n, atl_p, tlc)
+    Arc = exclusive_scan(Arc, G_const + 1)
+    m = Arc[G_const]
+    Ap = allocate_leaf_pairs_array(m)
+    
+    # 7. Fill Reference Array
+    # Use conservative intersection for size, precise for content
+    Ap = write_pairs(t, b, r, n, atl_p, tlc, Arc)
+    
+    # 8. Sort Leaf Pairs
+    Ap = sort_radix(Ap)
+    
+    # 9. Extract Leaf Cells
+    leaves = extract_cell_ranges(Ap, m)
+    
+    # Compact data: extract reference array from pairs array
+    reference_array = extract_reference_array(Ap)
+    
+    return tlc, leaves, reference_array
+```
+
+### Edge Cases and Pitfalls
+- **Leaf Index Uniqueness**: Leaf indices relative to a top-level cell are not unique across the entire grid (e.g., multiple top-level cells may have a leaf index 0). To ensure a single sort yields the correct reference array, the key used for sorting must be the absolute memory location of the leaf cell in the global leaf array, not the relative index [S1, unofficial].
+- **GPU Memory Allocation**: GPU memory allocation is static. The size of the reference array must be computed in advance using a conservative intersection test (bounding box only) before the precise intersection test is performed during pair generation [S1, unofficial].
+- **Complexity Constraints**: The complexity would not be linear if the cell resolution could not be determined in constant time. This requires knowing the number of overlapped primitives and the extent of the bounding box of each top-level cell [S1, unofficial].
+- **Density Selection**: Choosing different density or resolution for different top-level cells provides higher quality but makes construction too slow [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: Linear work complexity $O(N)$ with respect to the number of primitives and cells, due to the use of radix sort and constant-time resolution computation [S1, S2, unofficial].
+- **Memory Complexity**: The main memory bottleneck is the space required to store the references. Two-level grids consume less memory than uniform grids mainly because of the reduced amount of cells [S1, unofficial].
+- **Performance**: The runtime is independent of the primitive distribution in the scene, similar to sort-based uniform grid construction [S1, unofficial]. The most time-consuming stages (writing pairs and sorting) are memory bandwidth limited [S1, unofficial].
+- **Strengths**: Handles non-uniform primitive distributions more robustly than uniform grids; fast construction on GPUs; linear complexity.
+- **Limitations**: Static memory allocation requires conservative pre-computation; resolution is limited to $256^3$ per top-level cell due to bit packing [S1, unofficial].
+- **When to Use**: Dynamic scenes with non-uniform primitive distributions requiring fast build times.
+- **When Not to Use**: Scenes where uniform distribution is guaranteed and memory bandwidth for references is extremely constrained, or when variable resolution per top-level cell is critical for quality (as it slows construction) [S2, unofficial].
+
+## Background
+The two-level grid is a fixed-depth hierarchical acceleration structure introduced for ray tracing dynamic scenes on GPUs. It is a member of a class of hierarchical grids introduced by Jevans and Wyvill [JW89], but its application to ray tracing on GPUs was not studied before this work [S1, unofficial]. The construction algorithm was proposed by Kalojanov, Billeter, and Slusallek, building on the sort-based uniform grid construction by Kalojanov and Slusallek [KS09] and using radix sort by Billeter et al. [BOA09]. The structure was tested on models such as the Thai Statue (10 million triangles) on a GTX 285 graphics card with 1GB of memory [S1, S2, unofficial].
+
+## Sources
+[S1] Two-Level Grids for Ray Tracing on GPUs, https://webhome.cs.uvic.ca/~blob/downloads/tyler/paper1227_final.pdf, fetched 2026-10-25 (unofficial)
+[S2] Two-Level Grids for Ray Tracing on GPUs, https://studylib.net/doc/18458638/two-level-grids-for-ray-tracing-on-gpus, fetched 2026-10-25 (unofficial)

@@ -1,0 +1,63 @@
+# Lasso Contour Rendering
+
+
+## Overview
+Lasso Contour Rendering is an interactive, pixel-based outline generation method that allows users to manually define regions of interest within a volume using a freehand "lasso" selection tool [S1, unofficial]. Unlike automatic contour methods that detect edges based on scalar field gradients, this approach relies on user intent to highlight specific structures. It is distinguished by its integration into a real-time rendering pipeline where the contour is rendered dynamically only when the user is actively drawing, leveraging offscreen render passes to composite the selection overlay [S1, unofficial].
+
+## How it works
+The method operates within a WebGPU-based volume rendering framework, utilizing a specific render pipeline and input handler to manage the interactive state [S1, unofficial].
+
+**Inputs and Outputs:**
+*   **Input:** User mouse/touch events indicating the drawing state; the current volume data (implicitly accessed via the renderer context).
+*   **Output:** A visual overlay of the lasso contour on the rendered volume.
+
+**Data Structures:**
+*   `gLassoRenderPipeline`: A render pipeline object responsible for drawing the lasso shape.
+*   `gLassoInputHandler`: An input handler object tracking the state of the drawing interaction.
+*   **State:** A boolean flag `isCurrentlyDrawing()` indicating if the user is in the process of defining the lasso.
+
+**Steps:**
+1.  **Check Interaction State:** The system queries the input handler to determine if the user is actively drawing a lasso.
+    *   Condition: `gLassoInputHandler.isCurrentlyDrawing()` returns `true`.
+2.  **Render Contour:** If the condition is met, the active lasso contour is rendered.
+    *   Action: Call `gLassoRenderPipeline.render()` passing the offscreen render pass context.
+    *   Note: The specific geometry of the lasso (a series of connected line segments or a closed path) is defined by the user's input coordinates during the drawing phase, but the rendering step simply invokes the pipeline to draw this accumulated path [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_lasso_step():
+    # Check if the user is actively drawing a lasso selection
+    if gLassoInputHandler.isCurrentlyDrawing():
+        # Render the currently defined lasso contour using the dedicated pipeline
+        # The pipeline handles the drawing of the path accumulated from user input
+        gLassoRenderPipeline.render(offscreen_render_pass)
+```
+
+**Parameters:**
+*   Not given in the sources.
+
+**Edge Cases:**
+*   If the user is not drawing, the lasso rendering step is skipped entirely, ensuring performance is not impacted by unnecessary draw calls [S1, unofficial].
+*   The method assumes the existence of the `gLassoRenderPipeline` and `gLassoInputHandler` objects, which are part of the specific implementation framework [S1, unofficial].
+
+## Subtopics
+
+### Flow Contours
+Flow Contours is a variant technique designed for visualizing flow data, such as in medical or fluid dynamics simulations [S2]. Unlike standard volume contours that rely on high gradients, flow data often lacks sharp boundaries, making traditional edge detection less effective [S2]. This method uses a transfer function widget based on a sine function to control the frequency and amplitude of the contours, allowing users to reveal flow structures like vortices, sinks, and sources [S2]. It combines these contours with silhouettes (projected 2D gradients) to remove visual clutter and highlight major structures [S2]. This approach is particularly useful for identifying critical points in turbulent flows, such as the origin of vortices, which might be missed by boundary-only visualization [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** The method is designed for real-time interaction, as it only renders the lasso when the user is actively drawing [S1, unofficial].
+*   **Strengths:** Provides precise, user-directed highlighting of specific volume regions without the need for complex threshold tuning or gradient calculation [S1, unofficial].
+*   **Limitations:** Requires user interaction; not suitable for automatic, global feature extraction [S1, unofficial].
+*   **Hardware:** Implemented using WebGPU, requiring hardware supporting WebGPU standards [S1, unofficial].
+
+## Background
+Lasso Contour Rendering is part of an interactive volume rendering demo project, specifically implemented in a WebGPU-based medical volume renderer [S1, unofficial]. The technique is associated with the work of Nikolai Svakhine, Yun Jang, David Ebert, and Kelly Gaither in the context of volume illustration for medicine and flows [S2]. While the lasso mechanism itself is a general interactive tool, its application to flow contours highlights the need for specialized transfer functions (sine-based) to handle the low-gradient nature of flow data [S2].
+
+## Sources
+[S1] dongeronimo/webgpu_volume_renderer_demo, https://github.com/dongeronimo/webgpu_volume_renderer_demo, fetched 2026-10-29 (unofficial)
+[S2] Volume illustration for medicine and flows, https://doi.org/10.1145/1185657.1185694, fetched 2026-10-28

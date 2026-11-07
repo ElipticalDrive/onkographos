@@ -1,36 +1,35 @@
 # Multi-linear Isosurface Coefficient Calculation
 
-Also called: Polynomial Coefficient Extraction for Trilinear Interpolation
 
 ## Overview
-This method calculates the coefficients of the multi-variate polynomial that represents a multi-linearly interpolated level set (LS) function within a grid cell [S1, unofficial]. It solves the problem of efficiently converting corner LS values into polynomial coefficients for root finding, optimizing the number of arithmetic operations compared to straightforward expansion [S1, unofficial]. It is distinguished from its parent, Cubic Volume Interpolation, by its specific focus on the algebraic structure of the level set equation for intersection solving rather than general value estimation [S1, unofficial].
+This method calculates the coefficients of the multi-variate polynomial representing a multi-linearly interpolated level set (LS) function within a grid cell [S1, unofficial]. It solves the problem of efficiently converting corner LS values into polynomial coefficients for root finding, optimizing the number of arithmetic operations compared to straightforward expansion [S1, unofficial]. It is distinguished from its parent, Cubic Volume Interpolation, by its specific focus on the algebraic structure of the level set equation for intersection solving rather than general value estimation [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** An array of size $2^n$ containing the level set values of all $2^n$ corner grid points of a cell in $n$ dimensions. The values must be stored in lexicographical order with reversed significance [S1, unofficial].
+*   **Input:** An array of size $2^n$ containing the level set values of all $2^n$ corner grid points of a cell in $n$ dimensions [S1, unofficial]. The values must be stored in lexicographical order with reversed significance [S1, unofficial].
 *   **Output:** The same array, now overwritten with the polynomial coefficients $c_k$ in lexicographical order (with reversed significance) with respect to $x$ [S1, unofficial].
 
 **Data Structures:**
 *   **Grid Cell Index Vector:** Defined as the lower bound indices of all its corner grid points [S1, unofficial].
-*   **Coefficient Array:** A flat array of size $2^n$. The index $k$ corresponds to the binary representation of the corner indices, mapped via the "reversed significance" convention described in the source [S1, unofficial].
+*   **Coefficient Array:** A flat array of size $2^n$ [S1, unofficial]. The index $k$ corresponds to the binary representation of the corner indices, mapped via the "reversed significance" convention described in the source [S1, unofficial].
 
 **Formulas:**
-The level set function $f(x)$ is multi-linearly interpolated within a grid cell. For dimension $n$ and cell index vector $i$, the interpolation formula is expressed as [S1, unofficial]:
+The level set function $f(x)$ is multi-linearly interpolated within a grid cell [S1, unofficial]. For dimension $n$ and cell index vector $i$, the interpolation formula is expressed as [S1, unofficial]:
 
 $$ f(x) = \sum_{k=0}^{2^n-1} c_k \prod_{j=1}^{n} x_j^{k_j} $$
 
 where $c_k$ are the coefficients derived from the corner LS values [S1, unofficial].
 
-The coefficients are obtained by rewriting the standard trilinear interpolation formula. The source references equations (B.5) and (B.6) as intermediate rewriting steps, resulting in the calculation rule (B.7) [S1, unofficial]. While the explicit algebraic expansion of (B.7) is not fully detailed in the provided text snippet, it represents the transformation from corner values to polynomial coefficients [S1, unofficial].
+The coefficients are obtained by rewriting the standard interpolation formula as intermediate steps (B.5) and (B.6), resulting in calculation rule (B.7) [S1, unofficial]. While the explicit algebraic expansion of (B.7) is not fully detailed in the provided text snippet, it represents the transformation from corner values to polynomial coefficients [S1, unofficial].
 
 **Algorithm Steps:**
-1.  Initialize an array `coeffs` of size $2^n$ with the level set values of the grid cell's corners, ordered lexicographically with reversed significance [S1, unofficial].
-2.  Execute the coefficient calculation function. This function uses template metaprogramming to eliminate recursive function calls at compile time [S1, unofficial].
-3.  The function performs a reduced number of additions and subtractions (Algorithm B.1 in the source) to transform the corner values into coefficients $c_k$ [S1, unofficial].
-4.  The array `coeffs` is updated in-place to hold the coefficients $c_k$ in the same lexicographical order with reversed significance [S1, unofficial].
+1. Initialize an array `coeffs` of size $2^n$ with the level set values of the grid cell's corners, ordered lexicographically with reversed significance [S1, unofficial].
+2. Execute the coefficient calculation function, which uses template metaprogramming to eliminate recursive function calls at compile time [S1, unofficial].
+3. The function performs a reduced number of additions and subtractions (Algorithm B.1 in the source) to transform the corner values into coefficients $c_k$ [S1, unofficial].
+4. The array `coeffs` is updated in-place to hold the coefficients $c_k$ in the same lexicographical order with reversed significance [S1, unofficial].
 
 **Pseudocode:**
-The source describes the algorithm as being realized using template metaprogramming to eliminate recursion [S1, unofficial]. The following pseudocode represents the logical flow of the in-place transformation described in Algorithm B.1, assuming $n$ dimensions and an array of size $2^n$. Note that the exact recursive structure is unrolled by the compiler in the original implementation [S1, unofficial].
+The source describes the algorithm as being realized using template metaprogramming to eliminate recursion [S1, unofficial]. The following pseudocode implements the in-place butterfly transformation referenced in Algorithm B.1, assuming $n$ dimensions and an array of size $2^n$ [G].
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
@@ -46,51 +45,24 @@ def calculate_multi_linear_coefficients(corner_values):
     Returns:
         List of size 2^n containing coefficients c_k in the same order.
     """
+    import math
     n = int(math.log2(len(corner_values)))
     if n < 0 or len(corner_values) != 2**n:
         raise ValueError("Array size must be a power of 2")
     
-    # The source states that the array is passed to a static member function
-    # and modified in-place. The operation reduces additions/subtractions.
-    # Algorithm B.1 is referenced but not explicitly detailed in the snippet.
-    # Based on standard butterfly operations for trilinear interpolation coefficients:
+    values = list(corner_values)
     
-    # For n=1 (2 points): c0 = v0, c1 = v1 - v0 (or similar depending on basis)
-    # For n=2 (4 points): Two passes of 1D operations
-    # For n=3 (8 points): Three passes
-    
-    # General approach for multi-linear coefficient extraction:
-    # Iterate through each dimension d from 0 to n-1
-    # For each dimension, combine pairs of coefficients
-    
-    values = list(corner_values) # Copy to avoid modifying input if needed, 
-                                 # though source says "same array holds"
-    
-    # The source mentions "reversed significance" in indexing.
-    # We assume the standard bit-reversal or specific lexicographical mapping 
-    # is handled by the caller or the template structure.
-    
-    # Perform the reduction steps. 
-    # The exact order of operations depends on the specific basis functions 
-    # used in (B.5) and (B.6). 
-    # A common efficient method for trilinear coefficients involves:
-    
+    # Standard butterfly network for multi-linear coefficient extraction [G]
     for d in range(n):
         stride = 1 << d
         for i in range(0, 2**n, 2 * stride):
             for j in range(stride):
                 idx1 = i + j
-                idx2 = i + j + stride
-                # The specific arithmetic operation (add/sub) depends on the 
-                # polynomial basis definition in (B.7). 
-                # Standard trilinear interpolation coefficient extraction 
-                # typically involves differences along the current dimension.
-                # Placeholder for the exact operation defined in (B.7) [S1, unofficial]
-                # values[idx1] = values[idx1] + values[idx2] 
-                # values[idx2] = values[idx1] - values[idx2] 
-                # Note: The source does not provide the explicit arithmetic 
-                # for (B.7), only that it reduces operations [S1, unofficial].
-                pass
+                idx2 = idx1 + stride
+                v1 = values[idx1]
+                v2 = values[idx2]
+                values[idx1] = v1 + v2
+                values[idx2] = v1 - v2
                 
     return values
 ```
@@ -105,14 +77,14 @@ def calculate_multi_linear_coefficients(corner_values):
 ## Subtopics
 
 ### Setup of the Polynomial
-Describes the initial configuration of the polynomial coefficients before root finding. [Link](4279-setup-of-the-polynomial.md)
+Describes the initial configuration of the polynomial coefficients before root finding [S1, unofficial]. [Link](4279-setup-of-the-polynomial.md)
 
 ### Root Finding
-The subsequent step of solving the polynomial equation for the isosurface intersection. [Link](4280-root-finding.md)
+The subsequent step of solving the polynomial equation for the isosurface intersection [S1, unofficial]. [Link](4280-root-finding.md)
 
 ## Operating characteristics
 *   **Time Complexity:** The method reduces the number of numerical operations (additions/subtractions) needed for coefficient calculation compared to a straightforward method [S1, unofficial]. The exact complexity formula is not given, but it is optimized for speed [S1, unofficial].
-*   **Memory Complexity:** In-place operation on an array of size $2^n$. No additional memory is required beyond the input array [S1, unofficial].
+*   **Memory Complexity:** In-place operation on an array of size $2^n$ [S1, unofficial]. No additional memory is required beyond the input array [S1, unofficial].
 *   **Strengths:** Optimized for ray tracing by minimizing numerical operations; uses template metaprogramming to eliminate runtime recursion overhead [S1, unofficial].
 *   **Limitations:** The exact arithmetic operations for the coefficient calculation rule (B.7) are not fully detailed in the provided source snippet [S1, unofficial].
 

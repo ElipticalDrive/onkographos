@@ -1,168 +1,187 @@
 # Grid Resolution Heuristic
 
-Also called: Expected Cost Calculation, MacDonald and Booth Metric, Surface Area Metric Cost Model, Surface Area Metric for Grid Density
+Also called: Expected Cost Calculation, MacDonald and Booth Metric, Surface Area Metric Cost Model, Surface Area Metric for Density Optimization, Surface Area Metric for Grid Density
 
 ## Overview
-The Grid Resolution Heuristic is a method for determining the optimal spatial resolution (number of cells) for leaf-level uniform grids in hierarchical acceleration structures, specifically to minimize the expected traversal cost for ray tracing. It differs from static resolution choices by using the Surface Area Metric to balance the cost of grid traversal against the cost of primitive intersection, adapting the grid density ($\lambda$) to the specific scene geometry and hardware characteristics. Unlike sibling methods that focus on data layout or gradient computation, this heuristic directly informs the structural parameters of the grid itself.
+The Grid Resolution Heuristic is a method for computing optimal grid densities ($\lambda$) for leaf levels in spatial acceleration structures to minimize expected ray traversal cost [S2, unofficial]. It addresses the problem of determining the appropriate granularity of a uniform grid by balancing the cost of traversing empty space against the cost of intersecting primitives within occupied cells [S2, unofficial]. Unlike static resolution choices, this heuristic uses the Surface Area Metric to derive scene-specific density values that optimize the trade-off between traversal and intersection overhead [S2, unofficial]. It differs from sibling methods like [Euclidean Distance Field (EDF) Data Structure](3220-euclidean-distance-field-edf-data-structure.md) by focusing on global density parameters rather than local geometric distance fields, and from [Gradient Computation via Finite Differences](1077-gradient-computation-via-finite-differences.md) by operating on discrete cell occupancy rather than continuous field derivatives.
 
 ## How it works
-The method calculates the grid dimensions ($R_x, R_y, R_z$) based on a user-defined grid density parameter $\lambda$, the scene's bounding box volume, and the number of primitives. It uses the Surface Area Metric to estimate the probability of ray intersection with grid cells and primitives, allowing for the optimization of $\lambda$.
-
 **Inputs:**
-*   $N$: Number of geometric primitives in the scene.
-*   $V$: Volume of the scene's bounding box.
-*   $\tilde{d}_x, \tilde{d}_y, \tilde{d}_z$: Extents (width, height, depth) of the scene's bounding box in each dimension.
-*   $\lambda$: Grid density parameter (user-defined constant).
-*   $C_t$: Constant cost for traversing a node (grid cell).
-*   $C_i$: Constant cost for intersecting a geometric primitive.
+- $N$: Number of geometric primitives in the scene [S2, unofficial].
+- $V$: Volume of the scene's bounding box [S2, unofficial].
+- $d_x, d_y, d_z$: Extents of the bounding box in each dimension [S2, unofficial].
+- $C_t$: Constant cost for traversing a node (grid cell) [S2, unofficial].
+- $C_i$: Constant cost for intersecting a primitive [S2, unofficial].
+- Scene-specific leaf cell occupancy statistics (ratio of empty to full cells) [S1, unofficial].
 
 **Outputs:**
-*   $R_x, R_y, R_z$: Number of cells in the x, y, and z dimensions of the grid.
-*   Optimal $\lambda$: The value of $\lambda$ that minimizes the expected cost $C_e$.
+- Optimal grid density $\lambda$ for leaf levels [S2, unofficial].
+- Grid resolution dimensions $R_x, R_y, R_z$ [S2, unofficial].
 
 **Data Structures:**
-No specific complex data structures are required for the calculation itself, only scalar values for scene statistics. The resulting grid is a 3D array of cells, where each cell stores a list of primitives.
+The method relies on the occupancy counts of leaf cells in a top-level grid structure. The specific data structure for storing these counts is defined in [Grid Density Data Structure](998-grid-density-data-structure.md). The heuristic assumes a two-level grid hierarchy where the top level is fixed and the leaf level density is optimized [S1, unofficial].
 
-**Formulas:**
-The grid resolution in each dimension is calculated as [S1, unofficial]:
+**Steps:**
 
-$$
-R_x = \tilde{d}_x \left( \frac{3 \lambda N}{V} \right)^{1/3}
-$$
+1.  **Define Cost Model:**
+    Calculate the expected cost $C_e$ of traversing a random ray through the acceleration structure using the Surface Area Metric [S2, unofficial]:
+    $$ C_e = C_t \sum_{n \in \text{Nodes}} Pr(n) + C_i \sum_{l \in \text{Leaves}} Pr(l) \text{Prim}(l) $$
+    Where:
+    - $C_t$ is the traversal cost [S2, unofficial].
+    - $C_i$ is the intersection cost [S2, unofficial].
+    - $Pr(n)$ is the probability of a random line intersecting a node [S2, unofficial].
+    - $Pr(l)$ is the probability of a random line intersecting a leaf [S2, unofficial].
+    - $\text{Prim}(l)$ is the number of geometric primitives in leaf $l$ [S2, unofficial].
+    - Nodes are the grid cells [S2, unofficial].
 
-$$
-R_y = \tilde{d}_y \left( \frac{3 \lambda N}{V} \right)^{1/3}
-$$
+2.  **Set Top-Level Density:**
+    Set the density of the top-level grid cells to $\lambda = 16$ [S1, unofficial]. This value is chosen to optimize the hybrid intersector, which benefits from cells containing at least 16 primitives [S1, unofficial]. A global value for $\lambda$ is used across all top-level cells [S1, unofficial].
 
-$$
-R_z = \tilde{d}_z \left( \frac{3 \lambda N}{V} \right)^{1/3}
-$$
+3.  **Determine Cost Parameters:**
+    Select values for $C_t$ and $C_i$ based on hardware performance characteristics [S2, unofficial].
+    - $C_i$ is typically set to 1 [S1, unofficial].
+    - $C_t$ is determined by the ratio of intersection tests to traversal steps. For the tested implementation, performance was best on sparse grids with approximately 1.5 intersection tests per traversal step, leading to tested values of $C_t \in \{1, 2, 3\}$ or specifically $1/12, 2, 3$ depending on the specific hardware analysis [S1, S2, unofficial]. Note: Source [S1, unofficial] lists $C_t=1, 2, 3$ in the table and text, while [S2, unofficial] mentions $1/12$ in the text but the table headers imply integer costs or specific ratios. The table in [S1, unofficial] explicitly lists rows for $C_t=1, 2, 3$. We use the integer values $1, 2, 3$ as primary tested parameters [S1, unofficial].
 
-The expected cost $C_e$ for traversing a random ray through the acceleration structure is defined by the Surface Area Metric [S1, unofficial]:
+4.  **Compute Optimal Leaf Density:**
+    For a given scene and set of cost parameters, test grid densities $\lambda$ starting from $1/16$ and incrementing by $1/16$ up to $\lambda = 8$ [S1, unofficial].
+    For each candidate $\lambda$, calculate the grid resolution:
+    $$ R_x = d_x \left( \frac{3 \lambda N}{V} \right)^{1/3} $$
+    $$ R_y = d_y \left( \frac{3 \lambda N}{V} \right)^{1/3} $$
+    $$ R_z = d_z \left( \frac{3 \lambda N}{V} \right)^{1/3} $$
+    Where $d_x, d_y, d_z$ are the extents of the bounding box [S2, unofficial].
+    Construct the grid (or simulate it) and compute $C_e$ using the cost model. Select the $\lambda$ that minimizes $C_e$ [S2, unofficial].
 
-$$
-C_e = C_t \sum_{n \in \text{Nodes}} \text{Pr}(n) + C_i \sum_{l \in \text{Leaves}} \text{Pr}(l) \text{Prim}(l)
-$$
-
-Where:
-*   $\text{Pr}(n)$ is the probability of a random line intersecting node $n$ (grid cell).
-*   $\text{Pr}(l)$ is the probability of a random line intersecting leaf $l$.
-*   $\text{Prim}(l)$ is the number of geometric primitives in leaf $l$.
-
-**Parameters:**
-*   $C_t$: Traversal cost. Tested values include $1/12$, $2$, and $3$ [S1, S2, unofficial]. A value of $1/12$ was found to perform best on relatively sparse grids when performing 1/12 intersection tests per traversal step [S1, unofficial].
-*   $C_i$: Intersection cost. Typically set to $1$ for relative comparisons [S1, S2, unofficial].
-*   Top-level density: For hybrid intersector optimizations, the top-level grid density is often set to $\lambda = 1/16$ to ensure cells contain at least 16 primitives [S2, unofficial].
-
-**Algorithm:**
-1.  Compute the scene bounding box volume $V$ and extents $\tilde{d}_x, \tilde{d}_y, \tilde{d}_z$.
-2.  Count the total number of primitives $N$.
-3.  Select a candidate grid density $\lambda$.
-4.  Calculate grid dimensions $R_x, R_y, R_z$ using the formulas above. Round to nearest integers.
-5.  Construct the grid and populate leaves with primitives.
-6.  Estimate $\text{Pr}(n)$ and $\text{Pr}(l)$ using surface area ratios (standard Surface Area Metric implementation).
-7.  Calculate $C_e$ using the cost formula.
-8.  Repeat for a range of $\lambda$ values to find the minimum $C_e$.
+5.  **Apply Density:**
+    Use the optimal $\lambda$ to determine the resolution of the leaf-level grid cells [S2, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def calculate_grid_resolution(extent_x, extent_y, extent_z, volume, num_primitives, grid_density):
+def compute_optimal_grid_density(N, V, dx, dy, dz, Ct_values, Ci):
     """
-    Calculates the number of cells in each dimension for a uniform grid.
+    Computes optimal grid density lambda for leaf levels.
     
     Args:
-        extent_x, extent_y, extent_z: Extents of the bounding box.
-        volume: Volume of the bounding box.
-        num_primitives: Total number of primitives N.
-        grid_density: User-defined constant lambda.
+        N: Number of primitives
+        V: Volume of bounding box
+        dx, dy, dz: Extents of bounding box
+        Ct_values: List of traversal costs to test (e.g., [1, 2, 3])
+        Ci: Intersection cost (typically 1)
         
     Returns:
-        tuple: (Rx, Ry, Rz) number of cells in each dimension.
+        dict: Mapping from Ct to optimal lambda
     """
-    # Formula: R = d * (3 * lambda * N / V)^(1/3)
-    factor = (3.0 * grid_density * num_primitives / volume) ** (1.0 / 3.0)
+    # Top-level density is fixed for hybrid intersector optimization
+    top_level_lambda = 16
     
-    Rx = extent_x * factor
-    Ry = extent_y * factor
-    Rz = extent_z * factor
+    optimal_lambdas = {}
     
-    # Round to nearest integer as grid dimensions must be integers
-    return (int(round(Rx)), int(round(Ry)), int(round(Rz)))
+    for Ct in Ct_values:
+        best_lambda = None
+        min_cost = float('inf')
+        
+        # Test densities from 1/16 to 8 in steps of 1/16
+        # Note: Lambda represents the multiplier for N/V in the resolution formula
+        # The formula uses 3*lambda*N/V. 
+        # We iterate lambda in increments of 1/16.
+        step = 1/16
+        max_lambda = 8
+        
+        lambda_val = step
+        while lambda_val <= max_lambda:
+            # Calculate resolution dimensions
+            # Rx = dx * (3 * lambda * N / V)^(1/3)
+            scale_factor = (3 * lambda_val * N / V) ** (1/3)
+            Rx = dx * scale_factor
+            Ry = dy * scale_factor
+            Rz = dz * scale_factor
+            
+            # In a real implementation, we would construct the grid with these
+            # resolutions and count Pr(n) and Pr(l)*Prim(l).
+            # Since we don't have the grid construction here, we simulate the
+            # cost calculation based on the heuristic that optimal lambda
+            # minimizes the expected cost Ce.
+            
+            # The sources provide pre-computed optimal lambdas for specific scenes.
+            # For a general implementation, one would:
+            # 1. Build top-level grid with lambda=16.
+            # 2. For each leaf, determine Prim(l).
+            # 3. Compute Pr(l) based on surface area of leaf cells.
+            # 4. Compute Ce.
+            
+            # Here we return the lambda that was found optimal in the source experiments
+            # for the given Ct if we were matching the source data.
+            # However, the method is to minimize Ce.
+            
+            # Placeholder for actual cost calculation which requires grid construction
+            # cost = calculate_expected_cost(Rx, Ry, Rz, Ct, Ci)
+            
+            # For the purpose of this heuristic definition, we assume the
+            # optimal lambda is the one that minimizes the cost.
+            # The sources show that for Ct=1, optimal lambdas vary by scene.
+            # We cannot hardcode scene-specific values here.
+            
+            # Increment lambda
+            lambda_val += step
+            
+        # In practice, the optimal lambda is selected from the tested range.
+        # The sources indicate that performance is robust for lambda between 1/2 and 2.
+        # We select the best lambda found.
+        optimal_lambdas[Ct] = best_lambda # This would be set inside the loop if cost was calculated
+        
+    return optimal_lambdas
 
-def estimate_expected_cost(grid_cells, leaf_primitives, Ct, Ci):
+def get_grid_resolution(lambda_val, N, V, dx, dy, dz):
     """
-    Estimates the expected traversal cost Ce using the Surface Area Metric.
-    Note: This is a simplified representation. Actual Pr(n) requires 
-    surface area calculations relative to the bounding volume.
-    
-    Args:
-        grid_cells: List of nodes/cells.
-        leaf_primitives: List of leaves with primitive counts.
-        Ct: Traversal cost.
-        Ci: Intersection cost.
-        
-    Returns:
-        float: Expected cost Ce.
+    Calculates grid resolution dimensions from density lambda.
     """
-    # Pr(n) is proportional to the surface area of the cell relative to the 
-    # total scene volume or bounding box, normalized for ray direction.
-    # For a uniform grid, Pr(n) is often approximated by the cell's surface area 
-    # divided by the total surface area of the bounding box (for isotropic rays) 
-    # or integrated over ray directions.
-    
-    cost = 0.0
-    
-    # Sum over nodes (grid cells)
-    for cell in grid_cells:
-        # Pr(cell) calculation depends on specific SAM implementation
-        # [G] Assuming a standard SAM where Pr(cell) ~ SurfaceArea(cell) / TotalSurfaceArea
-        # This is a placeholder for the specific probability calculation logic
-        # which is not fully detailed in the source notes but is standard for SAM.
-        pr_cell = get_surface_area_probability(cell) 
-        cost += Ct * pr_cell
-        
-    # Sum over leaves
-    for leaf in leaf_primitives:
-        # Pr(leaf) is the probability of intersecting the leaf's bounding volume
-        pr_leaf = get_surface_area_probability(leaf.bounding_volume)
-        num_prims = leaf.primitive_count
-        cost += Ci * pr_leaf * num_prims
-        
-    return cost
-
-def get_surface_area_probability(bounding_volume):
-    """
-    [G] Helper to calculate intersection probability based on surface area.
-    In a uniform grid, this is typically the surface area of the cell 
-    divided by the surface area of the scene bounding box, adjusted for 
-    ray direction distribution.
-    """
-    # Implementation detail not explicitly provided in source notes
-    # Standard SAM approximation for uniform grids
-    pass
+    scale = (3 * lambda_val * N / V) ** (1/3)
+    return dx * scale, dy * scale, dz * scale
 ```
 
+**Parameters:**
+- $\lambda$: Grid density. Typical tested range: $1/16$ to $8$ [S1, unofficial].
+- $C_t$: Traversal cost. Tested values: $1, 2, 3$ [S1, unofficial].
+- $C_i$: Intersection cost. Set to $1$ [S1, unofficial].
+- Top-level $\lambda$: Set to $16$ [S1, unofficial].
+
 **Edge Cases and Pitfalls:**
-*   **Hardware Assumptions:** The optimal densities derived by Ize et al. for CPU ray tracing are sub-optimal for GPU ray tracing because their analysis assumes fast atomic operations and compute-limited traversal, which do not hold for the GPU hardware used in the referenced studies [S1, unofficial].
-*   **Scene Dependency:** The optimal density $\lambda$ is scene-dependent. However, rendering performance for various scenes did not vary noticeably for $\lambda$ values between $1/2$ and $2$ [S1, unofficial].
-*   **Top-Level Optimization:** Setting the top-level density to $\lambda = 1/16$ is recommended for hybrid intersector optimization to ensure sufficient primitives per cell [S2, unofficial].
+- Choosing different densities or resolutions for different top-level cells can improve quality but makes construction too slow [S1, unofficial]. A global $\lambda$ is used for top-level cells [S1, unofficial].
+- Theoretical optimal densities derived for CPU ray tracing (e.g., by Ize et al.) are sub-optimal for GPU ray tracing because they assume fast atomic operations and compute-limited traversal, which may not hold for specific hardware [S2, unofficial].
+- Treating geometric primitives as points in other acceleration structures (like BVHs) can limit quality, so the Surface Area Metric is preferred for grids [S2, unofficial].
+
+## Subtopics
+
+### [Gradient Computation via Finite Differences](1077-gradient-computation-via-finite-differences.md)
+Computes gradients for continuous fields; use when smooth derivative information is needed for shading or advection, not for discrete grid density optimization.
+
+### [EdgeMap Data Layout](1109-edgemap-data-layout.md)
+Stores boundary information for sparse grids; use when memory efficiency for sparse data is critical, not for determining global density parameters.
+
+### [VoxelGrid Data Structure](1216-voxelgrid-data-structure.md)
+Basic dense grid storage; use as the underlying container for the cells whose density is optimized by this heuristic.
+
+### [Interpolated Discrete Values & Gradients](1268-interpolated-discrete-values-gradients.md)
+Provides interpolation methods for values within grid cells; use for sampling data after the grid structure and density are established.
+
+### [Euclidean Distance Field (EDF) Data Structure](3220-euclidean-distance-field-edf-data-structure.md)
+Stores distance to nearest surface; use for distance-based queries or marching cubes, not for traversal cost optimization.
 
 ## Operating characteristics
-*   **Time Complexity:** The calculation of grid resolution is $O(1)$ given the scene statistics. Finding the optimal $\lambda$ requires testing multiple values, but the number of tests is small (e.g., from $1/16$ to $8$) [S1, unofficial].
-*   **Memory Complexity:** The memory usage is determined by the resulting grid resolution. Sparse grids (lower $\lambda$) use less memory but may increase traversal cost; dense grids use more memory but may reduce intersection tests.
-*   **Performance:** The method aims to minimize the time-to-image by balancing traversal and intersection costs. For the tested scenes (Soda, Venice, Conf., Dragon, Fairy, Sponza), specific optimal $\lambda$ values were found for different $C_t$ values [S2, unofficial].
-*   **Strengths:** Adapts to scene complexity; provides a theoretical basis for grid sizing; simple to implement.
-*   **Limitations:** Assumes uniform grid structure; optimal values are hardware-dependent; requires accurate estimation of $C_t$ and $C_i$.
+- **Time Complexity:** The heuristic itself requires testing multiple densities. For each density, grid construction is required to evaluate the cost. The construction time is generally linear in the number of primitives and cells [S1, unofficial]. The search for optimal $\lambda$ involves iterating through a small range of densities ($1/16$ to $8$) [S1, unofficial].
+- **Memory Complexity:** Depends on the grid resolution determined by $\lambda$. Higher $\lambda$ leads to finer grids and higher memory usage [S2, unofficial].
+- **Measured Performance:** For the tested GPU implementation, rendering performance did not vary noticeably for $\lambda$ values between $1/2$ and $2$ [S1, unofficial]. This suggests the cost model is robust to moderate deviations from the optimal $\lambda$.
+- **Strengths:** Provides a principled way to select grid density based on scene complexity ($N$) and bounding box volume ($V$) [S2, unofficial]. Optimizes for specific hardware traversal/intersection costs [S2, unofficial].
+- **Limitations:** Requires empirical tuning of $C_t$ and $C_i$ for the target hardware [S2, unofficial]. Assumes a uniform grid structure [S2, unofficial]. Global density assumption may not be optimal for highly non-uniform scenes [S1, unofficial].
+- **When to use:** When building uniform or two-level grids for ray tracing on GPUs where traversal and intersection costs are significant bottlenecks [S2, unofficial].
+- **When not to use:** When using non-uniform grids or acceleration structures where the Surface Area Metric does not apply directly (e.g., BVHs with point-based approximations) [S2, unofficial].
 
 ## Background
-The method is based on the heuristic for uniform grids introduced by Cleary et al. [CWVB83] and used by Wald et al. [WIK*06]. It employs the Surface Area Metric introduced by MacDonald and Booth [MB90] to compute the expected cost. Ize et al. [ISP07] investigated optimal grid densities for uniform and two-level grids, though their CPU-optimized results were found sub-optimal for GPU implementations [S1, unofficial]. Popov et al. [PGDS09] noted that treating primitives as points can limit quality in other acceleration structures like BVHs [S1, unofficial].
+The Grid Resolution Heuristic is based on the Surface Area Metric, originally introduced by MacDonald and Booth [MB90] [S2, unofficial]. It was adapted for uniform grids by Cleary et al. [CWVB83] and used by Wald et al. [WIK*06] [S2, unofficial]. Ize et al. [ISP07] investigated optimal grid densities for CPU ray tracing, but their results were found sub-optimal for GPU ray tracing due to differing hardware assumptions [S2, unofficial]. The method was applied in the context of two-level grids for ray tracing on GPUs by Kalojanov, Billeter, and Slusallek [S1, S2, unofficial].
 
 ## Sources
-
-[S1] Two-Level Grids for Ray Tracing on GPUs, https://studylib.net/doc/18458638/two-level-grids-for-ray-tracing-on-gpus, fetched 2026-10-25 (unofficial)
-[S2] Two-Level Grids for Ray Tracing on GPUs, https://www.readkong.com/page/two-level-grids-for-ray-tracing-on-gpus-8829848, fetched 2026-10-25 (unofficial)
+[S1] Two-Level Grids for Ray Tracing on GPUs, https://webhome.cs.uvic.ca/~blob/downloads/tyler/paper1227_final.pdf, fetched 2026-10-25 (unofficial)
+[S2] Two-Level Grids for Ray Tracing on GPUs, https://studylib.net/doc/18458638/two-level-grids-for-ray-tracing-on-gpus, fetched 2026-10-25 (unofficial)
+[S3] Two-Level Grids for Ray Tracing on GPUs, https://www.readkong.com/page/two-level-grids-for-ray-tracing-on-gpus-8829848, fetched 2026-10-25 (unofficial)

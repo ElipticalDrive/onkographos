@@ -1,0 +1,165 @@
+--- v002.md
++++ v003.md
+@@ -1,91 +1,101 @@
+ # Mass Point Centering for Dual Contouring
+ 
+-Also called: Centered QEF Solver, Centroid-Shifted Least Squares
++Also called: Centered QEF Solver, Centroid-Shifted QEF
+ 
+ ## Overview
+-Mass Point Centering adjusts the linear system $A^T A x = A^T b$ for dual contouring by centering the solution around the centroid of the sample points, improving numerical stability [S1, unofficial]. It shifts the problem to a local coordinate frame to prevent precision loss when intersection points are far from the origin [S1, unofficial].
++Mass Point Centering improves the numerical stability of the Quadratic Error Function (QEF) solver in Dual Contouring by shifting the solution space to the centroid of the sample points [S1, unofficial]. It addresses the problem of ill-conditioned linear systems that arise when intersection points are far from the origin, ensuring robust convergence for the dual vertex position [S1, unofficial]. It differs from [Brute-Force QEF Solver](4403-brute-force-qef-solver.md) by optimizing the conditioning of the matrix system rather than just accumulating errors, and from [QEF Solver Initialization](4722-qef-solver-initialization.md) by actively modifying the right-hand side vector to reflect the shifted coordinate system.
+ 
+ ## How it works
+ **Inputs:**
+-- `ata`: $3 \times 3$ symmetric matrix $A^T A$, stored as 6 floats $(m_{00}, m_{01}, m_{02}, m_{11}, m_{12}, m_{22})$ [S1, unofficial].
+-- `atb`: $3 \times 1$ vector $A^T b$, stored as 3 floats $(atb_x, atb_y, atb_z)$ [S1, unofficial].
+-- `num_points`: Integer count of samples $n$ [S1, unofficial].
+-- `centroid`: Temporary storage for the centroid $C$ [S1, unofficial].
++- `data`: A structure containing:
++  - `numPoints`: Integer count of edge intersection points.
++  - `massPoint_x, massPoint_y, massPoint_z`: Pre-computed centroid coordinates of the input points.
++  - `ata_00, ata_01, ata_02, ata_11, ata_12, ata_22`: Elements of the symmetric $3 \times 3$ matrix $A^T A$.
++  - `atb_x, atb_y, atb_z`: Elements of the vector $A^T b$.
++- `svd_tol`: Tolerance for Singular Value Decomposition (SVD).
++- `svd_sweeps`: Number of SVD sweeps.
++- `pinv_tol`: Tolerance for pseudo-inverse calculation.
+ 
+ **Outputs:**
+-- `x`: The $3 \times 1$ solution vector (dual vertex position) [S1, unofficial].
+-- `has_solution`: Boolean indicating if the solver converged [S1, unofficial].
++- `x`: The computed dual vertex position in the shifted coordinate system, shifted back to the original frame.
++- `hasSolution`: Boolean indicating if a valid solution was found.
+ 
+ **Data Structures:**
+-The symmetric matrix $A^T A$ uses a compact `SMat3` layout:
+-```python
+-class SMat3:
+-    m00: float
+-    m01: float
+-    m02: float
+-    m11: float
+-    m12: float
+-    m22: float
+-```
+-Vectors are standard 3D arrays `[x, y, z]`.
++- `SMat3`: A symmetric $3 \times 3$ matrix stored with 6 floats: `m00, m01, m02, m11, m12, m22`.
++- `Vector3`: A 3D vector with components `x, y, z`.
+ 
+ **Steps:**
+-1. **Validate Input:** If `num_points` is 0, raise an exception [S1, unofficial].
+-2. **Compute Centroid:** Load the raw point sum into `centroid` and scale by $1/n$ to obtain $C = \frac{1}{n} \sum p_i$ [S1, unofficial].
+-3. **Setup Matrices:** Load pre-computed $A^T A$ into `ata` and $A^T b$ into `atb` [S1, unofficial].
+-4. **Adjust Right-Hand Side:** Compute $t = (A^T A) C$ and update `atb` to $b' = b - t$ [S1, unofficial].
+-5. **Solve System:** Solve the shifted linear system $A^T A x' = b'$ for $x'$ using a symmetric solver [S1, unofficial].
+-6. **Shift Solution:** Recover the true solution $x = x' + C$ [S1, unofficial].
+-7. **Reset State:** Restore `atb` to its original values and return $x$ [S1, unofficial].
++1. **Guard:** If `data.numPoints` is 0, throw an `ArgumentException` [S1, unofficial].
++2. **Compute Centroid:** Calculate the mass point (centroid) $M$ as the average of the input points. The source code assumes `data.massPoint` is pre-scaled or computed as:
++   $$ M = \frac{1}{N} \sum_{i=1}^{N} P_i $$
++   where $N$ is `data.numPoints` [S1, unofficial].
++3. **Setup Matrices:** Initialize the symmetric matrix $A$ (stored in `ata`) and vector $B$ (stored in `atb`) from the input data [S1, unofficial].
++4. **Adjust Right-Hand Side:** Compute the adjustment term $T = A M$. Subtract this from $B$:
++   $$ B_{new} = B_{old} - A M $$
++   In the source, this is done via `vmul_symmetric` which computes $A \times M$ [S1, unofficial].
++5. **Solve System:** Solve the linear system $A x' = B_{new}$ for $x'$ using SVD [S1, unofficial].
++6. **Shift Solution:** Recover the final position $x$ by adding the centroid back:
++   $$ x = x' + M $$
++7. **Reset:** Reset `atb` to its original state if required by the caller's context, and return the result [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def solve_mass_point_centering(ata: SMat3, atb: Vec3, num_points: int, centroid: Vec3, svd_tol: float, svd_sweeps: int, pinv_tol: float) -> Vec3:
+-    if num_points == 0:
+-        raise ValueError("No points provided")
++def mass_point_centering(data, svd_tol, svd_sweeps, pinv_tol):
++    # Step 1: Guard
++    if data.numPoints == 0:
++        raise ArgumentException("No points provided")
++
++    # Step 2: Compute Centroid (Assuming data.massPoint is sum, not average, based on scaling factor)
++    # Note: Source shows massPoint *= (1.0f / data.numPoints), implying data.massPoint is the sum.
++    massPoint = Vector3(data.massPoint_x, data.massPoint_y, data.massPoint_z)
++    massPoint.x /= data.numPoints
++    massPoint.y /= data.numPoints
++    massPoint.z /= data.numPoints
++
++    # Step 3: Setup Matrices
++    # A is symmetric 3x3
++    A = SMat3(data.ata_00, data.ata_01, data.ata_02, data.ata_11, data.ata_12, data.ata_22)
++    # B is vector
++    B = Vector3(data.atb_x, data.atb_y, data.atb_z)
++
++    # Step 4: Adjust Right-Hand Side
++    # T = A * massPoint
++    T = A.vmul_symmetric(massPoint)
++    B_new = B - T
++
++    # Step 5: Solve System A * x_prime = B_new
++    x_prime = Vector3(0, 0, 0)
++    # SVD.solveSymmetric modifies x in-place
++    success = SVD.solveSymmetric(A, B_new, x_prime, svd_tol, svd_sweeps, pinv_tol)
++
++    # Step 6: Shift Solution
++    x = x_prime + massPoint
++
++    # Step 7: Reset ATB (if required by context, otherwise omitted in pure math)
++    # B is reset to original data.atb in source, but mathematically we just return x
+     
+-    t = vmul_symmetric(ata, centroid)
+-    atb_adj = [atb[i] - t[i] for i in range(3)]
+-    
+-    # Solve (A^T A) x' = b' using symmetric SVD solver [G]
+-    x_prime = solve_symmetric(ata, atb_adj, svd_tol, svd_sweeps, pinv_tol)
+-    
+-    x = [x_prime[i] + centroid[i] for i in range(3)]
+-    return x
+-
+-def vmul_symmetric(mat: SMat3, vec: Vec3) -> Vec3:
+-    return [
+-        mat.m00 * vec[0] + mat.m01 * vec[1] + mat.m02 * vec[2],
+-        mat.m01 * vec[0] + mat.m11 * vec[1] + mat.m12 * vec[2],
+-        mat.m02 * vec[0] + mat.m12 * vec[1] + mat.m22 * vec[2]
+-    ]
+-
+-def solve_symmetric(ata: SMat3, atb: Vec3, svd_tol: float, svd_sweeps: int, pinv_tol: float) -> Vec3:
+-    # Standard symmetric SVD-based least squares solver [G]
+-    # Decomposes ata = U S V^T, computes x' = V S^+ U^T atb
+-    import numpy as np
+-    U, s, Vt = np.linalg.svd(np.array([[ata.m00, ata.m01, ata.m02],
+-                                       [ata.m01, ata.m11, ata.m12],
+-                                       [ata.m02, ata.m12, ata.m22]]))
+-    s_inv = np.where(s > svd_tol, 1.0 / s, 0.0)
+-    return (Vt.T * s_inv) @ (U.T @ np.array(atb))
++    return x, success
+ ```
+ 
+ **Parameters:**
+-- `svd_tol`: Tolerance for SVD singularity detection. Not given in the sources.
+-- `svd_sweeps`: Number of sweeps for iterative SVD. Not given in the sources.
+-- `pinv_tol`: Tolerance for pseudo-inverse calculation. Not given in the sources.
++- `svd_tol`: Not given in the sources.
++- `svd_sweeps`: Not given in the sources.
++- `pinv_tol`: Not given in the sources.
+ 
+ **Edge Cases:**
+-- **Zero Points:** The method explicitly checks for `num_points == 0` and throws an exception [S1, unofficial].
+-- **Precision:** Centering prevents loss of significance when coordinates are large, as the system is solved around the origin of the local sample cluster [S1, unofficial].
++- **Zero Points:** If `numPoints` is 0, the method throws an exception [S1, unofficial].
++- **Precision:** The centering technique specifically targets numerical stability issues in floating-point arithmetic when points are distant from the origin [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ## Operating characteristics
+-Not given in the sources.
++**Time Complexity:** Dominated by the SVD solve, typically $O(1)$ for fixed-size $3 \times 3$ systems, but depends on the number of SVD sweeps.
++**Memory Complexity:** $O(1)$ auxiliary memory.
++**Strengths:** Improves numerical stability for ill-conditioned QEF systems [S1, unofficial].
++**Limitations:** Requires pre-computation of the centroid and matrix-vector multiplication overhead.
++**When to use:** When intersection points are far from the cell origin or when standard QEF solvers fail to converge due to precision loss.
+ 
+ ## Background
+-Not given in the sources.
++This method is implemented in the `DualContouringCSharp` repository by tuckbone [S1, unofficial]. It is a practical implementation detail for robust dual contouring rather than a widely published academic algorithm with a distinct citation.
+ 
+ ## Sources

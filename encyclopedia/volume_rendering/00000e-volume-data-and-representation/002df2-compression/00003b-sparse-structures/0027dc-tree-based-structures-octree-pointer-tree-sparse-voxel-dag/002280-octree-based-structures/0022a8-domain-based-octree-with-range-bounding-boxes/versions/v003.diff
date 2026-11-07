@@ -1,0 +1,292 @@
+--- v002.md
++++ v003.md
+@@ -4,159 +4,33 @@
+ 
+ ## Overview
+-The Domain-based Octree with Range Bounding Boxes is an acceleration structure for fiber surface extraction in tetrahedral meshes, utilizing an octree over the spatial domain to store interval ranges (RBBs) at each node [S1]. It solves the problem of efficiently identifying tetrahedra that intersect a given FSCP (Fiber Surface Control Polygon) edge by filtering candidates via 2-D intersection tests in range space [S1]. Unlike its sibling [Domain-based BVH with Range Bounding Boxes](2808-domain-based-bvh-with-range-bounding-boxes.md), the octree is strictly domain-based, which may result in more returned tetrahedra and larger memory requirements, but offers a simpler hierarchical structure based on regular spatial subdivision [S1].
++The Domain-based Octree with Range Bounding Boxes is an acceleration structure for fiber surface extraction in tetrahedral meshes, utilizing an octree over the spatial domain to store interval ranges (RBBs) at each node [S1]. It solves the problem of efficiently identifying tetrahedra that intersect a given FSCP (Fiber Surface Control Polygon) edge by filtering candidates via 2-D intersection tests in range space [S1]. Unlike its sibling [Domain-based BVH with Range Bounding Boxes](2808-domain-based-bvh-with-range-bounding-boxes.md), the octree is strictly domain-based, which may result in more returned tetrahedra and larger memory requirements [S1].
+ 
+ ## How it works
+ **Inputs:**
+-- A tetrahedral mesh with a scalar function $f$ defined on it.
+-- An FSCP edge $e$ (a line segment in 3D space).
+-- Construction parameters: $n_T$ (minimum tetrahedra per node threshold) and $\alpha$ (RBB size fraction termination threshold).
++- A tetrahedral mesh with a scalar function $f$ defined on it [S1].
++- An FSCP edge $e$ (a line segment in 3D space) [S1].
++- Construction parameters: $n_T$ (minimum tetrahedra per node threshold) and $\alpha$ (RBB size fraction termination threshold) [S1].
+ 
+ **Outputs:**
+-- A set of candidate tetrahedra that potentially intersect the FSCP edge $e$.
++- A set of candidate tetrahedra that potentially intersect the FSCP edge $e$ [S1].
+ 
+ **Data Structures:**
+ - **Octree Node:**
+-  - `children`: Array of 8 pointers to child nodes (null if leaf or empty).
+-  - `rbb_min`: 3D vector $(min_x, min_y, min_z)$ representing the minimum bounds of the function range in the node's volume.
+-  - `rbb_max`: 3D vector $(max_x, max_y, max_z)$ representing the maximum bounds of the function range in the node's volume.
+-  - `tets`: List of tetrahedra indices (only present if the node is a leaf or below $n_T$ threshold).
++  - `children`: Array of up to 8 pointers to child nodes (null if leaf or empty) [S1].
++  - `rbb_min`: 3D vector $(min_x, min_y, min_z)$ representing the minimum bounds of the function range in the node's volume [S1].
++  - `rbb_max`: 3D vector $(max_x, max_y, max_z)$ representing the maximum bounds of the function range in the node's volume [S1].
++  - `tets`: List of tetrahedron indices (populated only at leaf nodes or nodes below the $n_T$ threshold) [S1].
+ 
+ **Algorithm Steps:**
++1. Off-line construction: Compute the octree of the domain in a top-to-bottom fashion by recursively dividing the domain into octants [S1].
++2. At each node, take the RBBs of the child nodes and compute the component-wise $(min, max)$ to find the RBB of the entire node [S1].
++3. Stop descending to individual tetrahedra if the number of tetrahedra per node is above a threshold $n_T$; compute the base level RBB from the vertices of the tetrahedra if below $n_T$ [S1].
++4. Terminate recursion if a node's RBB is smaller than a fraction $\alpha$ of the RBB of the entire mesh [S1].
++5. On-line query: Start at the root node. Recursively visit children only if the child's RBB intersects or overlaps the FSCP edge $e$ [S1].
++6. Replace simple point-in-interval tests with polygon-polygon intersection/inclusion tests between the FSCP and the image of the cell, approximated by a conservative test of axis-aligned bounding boxes (AABB) of the polygons in the range, accepting false positives [S1].
+ 
+-1.  **Off-line Construction:**
+-    1.  Compute the octree of the domain $Dom_f$ in a top-to-bottom fashion by recursively dividing the domain into octants [S1].
+-    2.  For each node, determine the set of tetrahedra contained within its spatial volume.
+-    3.  If the number of tetrahedra in the node is greater than or equal to $n_T$:
+-        - Do not descend to children for RBB computation if they are not needed for further subdivision, or compute RBB from children if they exist.
+-        - *Note:* The source states "we do not descend all the way to individual tetrahedra, instead providing a threshold $n_T$ on the minimum number of tetrahedra per node, below which the base level RBB is computed from the vertices of the tetrahedra" [S1]. This implies that if a node has $\ge n_T$ tets, it might be a leaf or we stop refining based on count. However, the termination criterion $\alpha$ also applies.
+-    4.  If the number of tetrahedra is less than $n_T$:
+-        - Compute the RBB for the node from the vertices of the tetrahedra. For each tetrahedron, project its vertices into the range space (values of $f$). The RBB of the node is the union of the RBBs of its children (if they exist) or the bounding box of the scalar values of the vertices of the contained tetrahedra [S1].
+-        - Specifically, $RBB_{node}.min = \min(RBB_{child_i}.min)$ and $RBB_{node}.max = \max(RBB_{child_i}.max)$ for all children $i$ [S1].
+-    5.  Terminate recursion for a node if its RBB size (e.g., volume or max dimension) is smaller than a fraction $\alpha$ of the RBB of the entire mesh [S1]. This prevents arbitrarily deep sub-trees in regions where the function range concentrates [S1].
+-
+-2.  **On-line Query:**
+-    1.  Start at the root node.
+-    2.  For the current node, check if its RBB intersects or overlaps the FSCP edge $e$ in the 2-D range space.
+-        - The FSCP edge $e$ is treated as a line segment in the range space (or the test is a conservative AABB intersection between the edge's projection and the node's RBB) [S1].
+-        - This is a conservative test: it accepts false positives (nodes whose RBB overlaps $e$ but whose actual tetrahedra do not intersect $e$) [S1].
+-    3.  If the RBB intersects $e$:
+-        - If the node is a leaf (or has $< n_T$ tets), return all tetrahedra in the node as candidates.
+-        - If the node has children, recursively visit each child that also intersects $e$.
+-    4.  If the RBB does not intersect $e$, prune the branch.
+-
+-**Pseudocode:**
+-
+-```python
+-class OctreeNode:
+-    def __init__(self, rbb_min, rbb_max, children=None, tets=None):
+-        self.rbb_min = rbb_min  # Vector3
+-        self.rbb_max = rbb_max  # Vector3
+-        self.children = children or []  # List of OctreeNode, max 8
+-        self.tets = tets or []  # List of Tetrahedron indices
+-
+-def compute_rbb(tetrahedra):
+-    """Compute the bounding box of scalar values for a list of tetrahedra."""
+-    min_val = infinity
+-    max_val = -infinity
+-    for tet in tetrahedra:
+-        for vertex in tet.vertices:
+-            val = f(vertex)  # Scalar function value
+-            if val < min_val: min_val = val
+-            if val > max_val: max_val = val
+-    return (min_val, max_val)
+-
+-def build_octree(domain_octant, tetrahedra_in_octant, nT, alpha, global_rbb_size):
+-    """
+-    Recursively build the octree.
+-    domain_octant: Spatial bounds of the current node.
+-    tetrahedra_in_octant: List of tetrahedra intersecting this spatial volume.
+-    """
+-    # Termination criterion based on RBB size
+-    if len(tetrahedra_in_octant) == 0:
+-        return None
+-    
+-    # Compute RBB for current node
+-    # If we have children, we aggregate their RBBs. 
+-    # If we are at the base level (below nT), we compute from vertices.
+-    
+-    # Check if we should subdivide
+-    # The source implies we stop if RBB is too small OR if we hit nT threshold logic.
+-    # "Stop descending... if number of tetrahedra per node is above a threshold nT" 
+-    # is slightly ambiguous. It likely means: if count >= nT, we might keep it as a node 
+-    # with aggregated RBB from children, or if count < nT, we compute base RBB.
+-    # Let's follow the explicit instruction: "below which the base level RBB is computed... 
+-    # but nT can be set to 1". And "Terminate recursion if node's RBB is smaller than alpha".
+-    
+-    current_rbb = compute_rbb(tetrahedra_in_octant)
+-    
+-    # Check alpha termination
+-    current_rbb_size = volume_or_extent(current_rbb) # Implementation detail [G]
+-    if current_rbb_size < alpha * global_rbb_size:
+-        return OctreeNode(current_rbb, tetrahedra_in_octant)
+-
+-    # Subdivide if not a leaf
+-    # Assuming we subdivide into 8 octants
+-    sub_octants = split_octant(domain_octant)
+-    new_children = []
+-    for sub_octant in sub_octants:
+-        sub_tets = filter_tetrahedra(tetrahedra_in_octant, sub_octant)
+-        child = build_octree(sub_octant, sub_tets, nT, alpha, global_rbb_size)
+-        if child is not None:
+-            new_children.append(child)
+-    
+-    # If we have children, we might need to recompute RBB from children if we didn't 
+-    # compute it from vertices directly, but the source says "take the RBBs of the child nodes 
+-    # and compute the (min, max)... to find the RBB of the entire node".
+-    # So if we have children, we use their RBBs.
+-    if new_children:
+-        final_min = min(c.rbb_min for c in new_children)
+-        final_max = max(c.rbb_max for c in new_children)
+-        return OctreeNode(final_min, final_max, new_children)
+-    else:
+-        # No children (all empty or pruned), return leaf with computed RBB
+-        return OctreeNode(current_rbb, tetrahedra_in_octant)
+-
+-def query_octree(node, edge_e):
+-    """
+-    Query the octree for tetrahedra intersecting edge_e in range space.
+-    edge_e: Line segment in 3D, but tested against RBB in Range space.
+-    """
+-    if node is None:
+-        return []
+-    
+-    # Conservative test: Does the RBB of the node intersect the edge e in range space?
+-    # The edge e projects to a line segment in the range space (or is treated as such).
+-    # We check if the AABB of the edge's range projection overlaps with node.RBB.
+-    if not rbb_intersects_edge(node.rbb_min, node.rbb_max, edge_e):
+-        return []
+-    
+-    candidates = []
+-    if not node.children:
+-        # Leaf node
+-        candidates.extend(node.tets)
+-    else:
+-        for child in node.children:
+-            candidates.extend(query_octree(child, edge_e))
+-            
+-    return candidates
+-
+-def rbb_intersects_edge(rbb_min, rbb_max, edge_e):
+-    """
+-    Check if the RBB (in range space) intersects the projection of edge e.
+-    Conservative AABB test.
+-    """
+-    # Project edge endpoints to range space
+-    p1_range = f(edge_e.p1)
+-    p2_range = f(edge_e.p2)
+-    
+-    # Create AABB for the edge in range space
+-    edge_min = min(p1_range, p2_range)
+-    edge_max = max(p1_range, p2_range)
+-    
+-    # Check AABB overlap
+-    return (rbb_min.x <= edge_max.x and rbb_max.x >= edge_min.x and
+-            rbb_min.y <= edge_max.y and rbb_max.y >= edge_min.y and
+-            rbb_min.z <= edge_max.z and rbb_max.z >= edge_min.z)
+-```
++**Formulas:**
++- RBB aggregation: $RBB_{node}.min = \min_i(RBB_{child_i}.min)$ and $RBB_{node}.max = \max_i(RBB_{child_i}.max)$ for all children $i$ [S1].
++- Termination check: $size(RBB_{node}) < \alpha \times size(RBB_{mesh})$ [S1].
+ 
+ **Parameters:**
+@@ -165,7 +39,94 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- The octree is not necessarily balanced, and sub-trees can be arbitrarily deep, leading to many line-bounding-box intersection tests [S1].
+-- For 5-subdivided regular grids, the minimum number of tets per octree leaf is 5 (one voxel), causing the RBB of a leaf to intersect a FSCP edge even if none of its tets are actually intersected (false positives) [S1].
++- The octree is not necessarily balanced and sub-trees can be arbitrarily deep, leading to many line-bounding-box intersection tests [S1].
++- For 5-subdivided regular grids, the minimum number of tets per octree leaf is 5 (one voxel), causing the RBB of a leaf to intersect a FSCP edge even if none of its tets are actually intersected [S1].
+ - The conservative AABB test in range space may return tetrahedra that do not actually intersect the FSCP edge, but these are discarded by the subsequent fiber surface extraction algorithm [S1].
++
++**Pseudocode:**
++```python
++def compute_rbb_from_tets(tetrahedra, eval_f):
++    """Compute the bounding box of scalar values for a list of tetrahedra."""
++    min_val = float('inf')
++    max_val = float('-inf')
++    for tet in tetrahedra:
++        for vertex in tet.vertices:
++            val = eval_f(vertex)
++            if val < min_val: min_val = val
++            if val > max_val: max_val = val
++    return (min_val, max_val)
++
++def split_octant(bounds):
++    """Divide a spatial bounding box into 8 sub-octants."""
++    (min_x, min_y, min_z), (max_x, max_y, max_z) = bounds
++    mid_x, mid_y, mid_z = (min_x + max_x) / 2, (min_y + max_y) / 2, (min_z + max_z) / 2
++    sub_bounds = []
++    for dx in (0, 1):
++        for dy in (0, 1):
++            for dz in (0, 1):
++                sub_bounds.append(((min_x + dx*(mid_x-min_x), min_y + dy*(mid_y-min_y), min_z + dz*(mid_z-min_z)),
++                                   (mid_x + dx*(max_x-mid_x), mid_y + dy*(max_y-mid_y), mid_z + dz*(max_z-mid_z))))
++    return sub_bounds
++
++def tet_intersects_box(tet, box):
++    """Check if a tetrahedron intersects a spatial bounding box."""
++    # Standard axis-aligned bounding box intersection test for tetrahedra
++    tet_min = min(v for vertex in tet.vertices for v in vertex)
++    tet_max = max(v for vertex in tet.vertices for v in vertex)
++    box_min, box_max = box
++    return not (tet_max < box_min or tet_min > box_max)
++
++def build_octree(spatial_bounds, tetrahedra, nT, alpha, global_rbb_size, eval_f):
++    if not tetrahedra:
++        return None
++
++    # Compute RBB from vertices if below nT, otherwise aggregate from children
++    if len(tetrahedra) < nT:
++        rbb_min, rbb_max = compute_rbb_from_tets(tetrahedra, eval_f)
++        rbb_size = max(rbb_max[i] - rbb_min[i] for i in range(3))
++        if rbb_size < alpha * global_rbb_size:
++            return {'rbb_min': rbb_min, 'rbb_max': rbb_max, 'children': [], 'tets': tetrahedra}
++
++    # Subdivide into 8 octants
++    sub_bounds = split_octant(spatial_bounds)
++    children = []
++    for bounds in sub_bounds:
++        sub_tets = [tet for tet in tetrahedra if tet_intersects_box(tet, bounds)]
++        child = build_octree(bounds, sub_tets, nT, alpha, global_rbb_size, eval_f)
++        if child is not None:
++            children.append(child)
++
++    if children:
++        # Aggregate RBB from children
++        rbb_min = min(c['rbb_min'][i] for c in children for i in range(3))
++        rbb_max = max(c['rbb_max'][i] for c in children for i in range(3))
++        return {'rbb_min': rbb_min, 'rbb_max': rbb_max, 'children': children, 'tets': []}
++    else:
++        # No children, compute RBB from current tets
++        rbb_min, rbb_max = compute_rbb_from_tets(tetrahedra, eval_f)
++        return {'rbb_min': rbb_min, 'rbb_max': rbb_max, 'children': [], 'tets': tetrahedra}
++
++def query_octree(node, edge_p1, edge_p2, eval_f):
++    if node is None:
++        return []
++
++    # Project edge endpoints to range space
++    p1_range = eval_f(edge_p1)
++    p2_range = eval_f(edge_p2)
++    edge_min = [min(p1_range[i], p2_range[i]) for i in range(3)]
++    edge_max = [max(p1_range[i], p2_range[i]) for i in range(3)]
++
++    # Conservative AABB intersection test in range space
++    intersects = all(node['rbb_min'][i] <= edge_max[i] and node['rbb_max'][i] >= edge_min[i] for i in range(3))
++    if not intersects:
++        return []
++
++    candidates = []
++    if not node['children']:
++        candidates.extend(node['tets'])
++    else:
++        for child in node['children']:
++            candidates.extend(query_octree(child, edge_p1, edge_p2, eval_f))
++    return candidates
++```
+ 
+ ## Subtopics
+@@ -175,10 +136,10 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Construction is $O(N)$ where $N$ is the number of tetrahedra, assuming balanced subdivision, but can be worse due to unbalanced trees [S1]. Query time is proportional to the number of visited nodes, which depends on the selectivity of the RBB tests.
+-- **Memory Complexity:** Depends on the depth and branching factor. The source notes that the octree uses more memory than the BVH variant [S1].
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
+ - **Measured Performance:** On the EthaneDiol dataset, an octree with $\alpha=0.001$ used 649.736 MB memory, took 2.362s pre-processing, queried 35.260% of tetrahedra, and took 0.311s for extraction [S1]. Average speedup over non-accelerated algorithm: 18x [S1].
+-- **Strengths:** Simple hierarchical structure; effective culling of large empty regions; conservative test allows fast rejection.
++- **Strengths:** Effective culling of large empty regions; conservative test allows fast rejection [S1].
+ - **Limitations:** Unbalanced trees can lead to deep recursion; conservative test returns false positives; less efficient than BVH in terms of memory and query speed for complex polygons [S1].
+-- **When to use:** When a simple, domain-based spatial hierarchy is preferred over a range-based BVH, or when the data distribution is regular.
++- **When to use:** When a simple, domain-based spatial hierarchy is preferred over a range-based BVH [S1].
+ - **When not to use:** When memory is constrained or when the FSCP geometry is highly complex and requires precise culling (BVH is better) [S1].
+ 

@@ -1,0 +1,3906 @@
+ROSplat
+=======
+
+_The Online ROS2-Based Gaussian Splatting-Enabled Visualizer_
+
+[Shady Gmira](https://www.linkedin.com/in/shady-gmira-ba678121a/)
+
+![Project Image](https://github.com/shadygm/ROSplat/blob/main/assets/images/image.png) ![Demo Animation](https://github.com/shadygm/ROSplat/raw/main/assets/gifs/output.gif)
+
+Overview
+--------
+
+ROSplat is the first online ROS2-based visualizer that leverages Gaussian splatting to render complex 3D scenes. It is designed to efficiently visualize millions of Gaussians by using custom ROS2 messages and GPU-accelerated sorting and rendering techniques. ROSplat also supports data loading from PLY files.
+
+Features
+--------
+
+*   **Real-Time Visualization:** Render millions of Gaussian "splats" in real time.
+*   **ROS2 Integration:** Built on ROS2 for online data exchange of Gaussians, Images, and IMU data.
+*   **Custom Gaussian Messages:** Uses custom message types (_SingleGaussian_ and _GaussianArray_) to encapsulate properties such as position, rotation, scale, opacity, and spherical harmonics.
+*   **Portable Vulkan Rendering:** Uses Spirula Studio's Vulkan projection,
+    tile sorting, and Gaussian rasterization through a small native bridge.
+*   **Vulkan ImGui UI:** The application and all dynamic textures use
+    Dear ImGui through wgpu-py's Vulkan backend; there is no CUDA, Torch,
+    gsplat, or OpenGL renderer path.
+
+Setup
+-----
+
+The supported container targets **Ubuntu 26.04 LTS**, **ROS 2 Lyrical**, and a
+Vulkan 1.2-capable GPU. The renderer requires Vulkan buffer device addresses
+and timeline semaphores, matching Spirula Studio's backend requirements.
+
+### Dependencies
+
+*   Docker with the Compose plugin
+*   A Vulkan 1.2-capable GPU and current graphics driver
+*   [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+    when using an NVIDIA GPU through Docker
+
+The Docker image builds the pinned Spirula Studio source, its Slang shaders,
+the ROSplat native bridge, ROS, the Vulkan UI dependencies, and the generated
+`gaussian_interface` messages. CUDA and PyTorch are not required.
+
+### Docker-Based Setup
+
+Docker is the supported setup path. On Arch Linux, install the NVIDIA Container Toolkit once:
+
+    sudo pacman -S --needed nvidia-container-toolkit
+
+The Compose service requests every available GPU through the toolkit's CDI device. Confirm the CDI devices are visible with:
+
+    nvidia-ctk cdi list
+
+Then build and run ROSplat:
+
+    ./docker/run_docker.sh -b    # Build rosplat:lyrical-vulkan once
+    ./docker/launch_ui.sh        # Start/reuse the container and launch ROSplat
+
+For an interactive development shell or cleanup:
+
+    ./docker/run_docker.sh -u
+    ./docker/run_docker.sh -c
+
+Run the unit-test suite inside the development container with:
+
+    docker compose -f docker/docker-compose.yml exec rosplat rosplat-entrypoint python3 -m unittest discover -s tests
+
+The Compose configuration enables the graphics, display, and utility driver
+capabilities required for Vulkan and X11 presentation. `wgpu-py` is forced to
+Vulkan and ROSplat rejects a different backend at startup.
+
+### Native build without Docker
+
+Initialize the pinned renderer dependency and build the bridge:
+
+    git submodule update --init --recursive
+    cmake -S . -B build-native -G Ninja -DCMAKE_BUILD_TYPE=Release
+    cmake --build build-native --target rosplat_spirula
+
+The first configure downloads Spirula's pinned Slang compiler and the first
+build compiles its SPIR-V shader set. ROSplat finds
+`build-native/librosplat_spirula.so` automatically. Override the path with
+`ROSPLAT_SPIRULA_LIBRARY` when installing elsewhere.
+
+### Third-party licensing
+
+Spirula Studio stays pinned and unmodified in `external/spirula-studio`, with
+its upstream history and GPL-3.0 license intact. ROSplat-owned bridge code is
+under `native/`. See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for the
+exact revision and license boundary. ROSplat itself is GPL-3.0, so the combined
+distribution is license-compatible without relicensing upstream files.
+
+Building the Gaussian Messages
+------------------------------
+
+ROSplat defines two custom ROS2 messages to handle Gaussian data, located in the `gaussian_interface/msg` folder.
+
+> **Note:** The Gaussian messages are based on the [original Gaussian Splatting implementation by graphdeco-inria](https://github.com/graphdeco-inria/gaussian-splatting).
+
+### Message Definitions
+
+#### 1\. SingleGaussian.msg
+
+    # Gaussian.msg
+    
+    # 3D Pose
+    float32[3] xyz
+    
+    # Rotation as Quaternion
+    float32[4] rotation
+    
+    # Scale along each axis
+    float32[3] scale
+    
+    # Opacity
+    # Quantized as a number between 0-255 instead of 0-1
+    uint8 opacity
+    
+    # Spherical Harmonics
+    float32[] spherical_harmonics
+
+#### 2\. GaussianArray.msg
+
+    gaussian_interface/SingleGaussian[] gaussians
+
+### Building the Messages Without Docker
+
+**a) Build your workspace using colcon:**
+
+    colcon build --packages-select gaussian_interface
+
+**b) Source your workspace:**
+
+    . install/setup.bash
+
+> **Important:** Depending on your shell, you might need to adjust these commands.
+
+Usage
+-----
+
+Inside the Docker container the messages are already built and sourced. For a manual installation, build the messages first and then launch the visualizer from the project's root directory:
+
+    python3 -m rosplat.main
+
+### Testing Gaussian Visualization
+
+The development container is a reusable background service. Build it once
+after cloning or whenever Docker/native dependencies change:
+
+```bash
+./docker/run_docker.sh -b
+```
+
+Normal Python source edits are bind-mounted into `/workspace` immediately and
+do not require rebuilding or recreating the container. Use the two host-side
+helpers from the repository root:
+
+```bash
+# Terminal 1: start/reuse the container and run the Vulkan ImGui app
+./docker/launch_ui.sh
+
+# Terminal 2: stream a repository PLY using the same container
+./docker/publish_ply.sh data/horse.ply
+```
+
+The publisher accepts the existing options after the PLY path:
+
+```bash
+./docker/publish_ply.sh data/horse.ply --batch-size 10000 --rate 10
+./docker/publish_ply.sh data/horse.ply --topic /my_gaussians
+```
+
+The default topic is `/gaussian_test`. In ROSplat, select it in **ROS
+Settings** and click **Add**. The publisher waits for that subscription before
+sending anything, so either terminal can be started first.
+
+Closing the UI or publisher only stops that foreground process; the container
+continues running and is reused by the next command. Check or stop it explicitly:
+
+```bash
+docker compose -f docker/docker-compose.yml ps
+./docker/run_docker.sh -c
+```
+
+Use `-c` only when you intentionally want to stop the development service.
+
+Contributions
+-------------
+
+Contributions and feedback are welcome!
+
+Acknowledgments
+---------------
+
+I'm glad to have worked on such a challenging topic and grateful for the invaluable advice and support I received throughout this project.
+
+Special thanks to [Qihao Yuan](https://scholar.google.com/citations?user=14GwKcMAAAAJ&hl=en) and [Kailai Li](https://kailaili.github.io/) for their guidance and encouragement as well as the constructive feedback that helped shape this work.
+
+This project was additionally influenced by [limacv](https://github.com/limacv) 's implementation of the [GaussianSplattingViewer](https://github.com/limacv/GaussianSplattingViewer) repository.
+
+Contact
+-------
+
+For questions or further information, please email: **shady.gmira\[at\]gmail.com**
+
+### misc/benchmark_streaming.py
+```
+#!/usr/bin/env python3
+"""Benchmark the existing ROS GaussianArray streaming path phase by phase."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import resource
+import statistics
+import sys
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import numpy as np
+from gaussian_interface.msg import GaussianArray
+from rclpy.serialization import deserialize_message, serialize_message
+
+from misc.generate_gaussian_bag import make_gaussian_batch
+from rosplat.config.world_settings import WorldSettings
+from rosplat.core.gaussian_representation import (
+    GaussianData,
+    combine_gaussians,
+    from_ply,
+)
+from rosplat.render.camera import Camera
+from rosplat.render.renderer import SpirulaRenderer
+
+
+def _slice(data: GaussianData, count: int) -> GaussianData:
+    return GaussianData(
+        data.xyz[:count],
+        data.rot[:count],
+        data.scale[:count],
+        data.opacity[:count],
+        data.sh[:count],
+    )
+
+
+def _elapsed(callable_):
+    started = time.perf_counter()
+    value = callable_()
+    return value, time.perf_counter() - started
+
+
+def _mib(byte_count: int | float) -> float:
+    return byte_count / (1024 * 1024)
+
+
+def run_benchmark(
+    ply_path: Path,
+    *,
+    limit: int,
+    batch_size: int,
+    width: int,
+    height: int,
+    render_samples: int,
+) -> dict:
+    source, ply_seconds = _elapsed(lambda: from_ply(ply_path))
+    count = min(limit, len(source)) if limit else len(source)
+    source = _slice(source, count)
+    bytes_per_splat = (11 + source.sh_dim) * 4
+
+    camera = Camera(height, width)
+    renderer, renderer_init_seconds = _elapsed(
+        lambda: SpirulaRenderer(
+            width,
+            height,
+            SimpleNamespace(world_camera=camera),
+        )
+    )
+
+    timings = {
+        "message_build": 0.0,
+        "cdr_serialize": 0.0,
+        "cdr_deserialize": 0.0,
+        "message_to_numpy": 0.0,
+        "spirula_append": 0.0,
+        "legacy_host_concat": 0.0,
+    }
+    wire_bytes = 0
+    legacy_scene = None
+    legacy_cumulative_copy_bytes = 0
+    geometric_growth_copy_bytes = 0
+    previous_capacity = renderer.capacity
+
+    try:
+        for batch_number, start in enumerate(range(0, count, batch_size)):
+            end = min(start + batch_size, count)
+            message, elapsed = _elapsed(
+                lambda start=start, end=end: make_gaussian_batch(
+                    source,
+                    start,
+                    end,
+                    refresh=start == 0,
+                )
+            )
+            timings["message_build"] += elapsed
+
+            payload, elapsed = _elapsed(lambda: serialize_message(message))
+            timings["cdr_serialize"] += elapsed
+            wire_bytes += len(payload)
+
+            received, elapsed = _elapsed(
+                lambda: deserialize_message(payload, GaussianArray)
+            )
+            timings["cdr_deserialize"] += elapsed
+
+            batch, elapsed = _elapsed(
+                lambda: WorldSettings.convert_gaussian_array(received)
+            )
+            timings["message_to_numpy"] += elapsed
+            if batch is None:
+                raise RuntimeError("benchmark generated an empty batch")
+
+            old_count = renderer.splat_count
+            _, elapsed = _elapsed(
+                lambda: renderer.append_gaussians(
+                    batch,
+                    refresh=batch_number == 0,
+                )
+            )
+            timings["spirula_append"] += elapsed
+            current_capacity = renderer.capacity
+            if current_capacity != previous_capacity and old_count:
+                geometric_growth_copy_bytes += old_count * bytes_per_splat
+            previous_capacity = current_capacity
+
+            legacy_scene, elapsed = _elapsed(
+                lambda: combine_gaussians([legacy_scene, batch])
+            )
+            timings["legacy_host_concat"] += elapsed
+            if batch_number:
+                legacy_cumulative_copy_bytes += len(legacy_scene) * bytes_per_splat
+
+        rgba, first_render_seconds = _elapsed(renderer.render_rgba8)
+        dirty_render_seconds = []
+        for _ in range(render_samples):
+            renderer.update_camera_pose()
+            _, elapsed = _elapsed(renderer.render_rgba8)
+            dirty_render_seconds.append(elapsed)
+        raw_bytes = sum(
+            array.nbytes
+            for array in (
+                source.xyz,
+                source.rot,
+                source.scale,
+                source.opacity,
+                source.sh,
+            )
+        )
+        processing_seconds = sum(
+            timings[name]
+            for name in (
+                "message_build",
+                "cdr_serialize",
+                "cdr_deserialize",
+                "message_to_numpy",
+                "spirula_append",
+            )
+        )
+        result = {
+            "input": {
+                "path": str(ply_path),
+                "splats": count,
+                "batch_size": batch_size,
+                "batches": (count + batch_size - 1) // batch_size,
+                "sh_floats_per_splat": source.sh_dim,
+                "raw_soa_mib": _mib(raw_bytes),
+                "cdr_wire_mib": _mib(wire_bytes),
+            },
+            "seconds": {
+                "ply_load": ply_seconds,
+                "renderer_init": renderer_init_seconds,
+                **timings,
+                "stream_processing_sum": processing_seconds,
+                "first_render": first_render_seconds,
+                "dirty_render_mean": statistics.fmean(dirty_render_seconds)
+                if dirty_render_seconds
+                else None,
+                "dirty_render_median": statistics.median(dirty_render_seconds)
+                if dirty_render_seconds
+                else None,
+                "dirty_render_min": min(dirty_render_seconds)
+                if dirty_render_seconds
+                else None,
+                "dirty_render_max": max(dirty_render_seconds)
+                if dirty_render_seconds
+                else None,
+            },
+            "throughput_splats_per_second": count / processing_seconds,
+            "copies": {
+                "legacy_host_concat_mib": _mib(legacy_cumulative_copy_bytes),
+                "legacy_host_plus_cuda_projection_mib": _mib(
+                    legacy_cumulative_copy_bytes * 2
+                ),
+                "new_geometric_device_growth_mib": _mib(
+                    geometric_growth_copy_bytes
+                ),
+            },
+            "renderer": {
+                "splats": renderer.splat_count,
+                "capacity": renderer.capacity,
+                "render_shape": list(rgba.shape),
+                "nonblack_rgb_pixels": int(np.count_nonzero(np.any(rgba[..., :3], axis=2))),
+            },
+            "process_peak_rss_mib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            / 1024,
+        }
+        return result
+    finally:
+        renderer.shutdown()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--ply-path", type=Path, required=True)
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=100_000,
+        help="Maximum splats to process; 0 means the complete input.",
+    )
+    parser.add_argument("--batch-size", type=int, default=1_000)
+    parser.add_argument("--width", type=int, default=640)
+    parser.add_argument("--height", type=int, default=360)
+    parser.add_argument(
+        "--render-samples",
+        type=int,
+        default=5,
+        help="Number of additional dirty-camera frames to time after the first render.",
+    )
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+    if args.limit < 0:
+        parser.error("--limit cannot be negative")
+    if args.batch_size <= 0:
+        parser.error("--batch-size must be positive")
+    if args.render_samples < 0:
+        parser.error("--render-samples cannot be negative")
+
+    result = run_benchmark(
+        args.ply_path,
+        limit=args.limit,
+        batch_size=args.batch_size,
+        width=args.width,
+        height=args.height,
+        render_samples=args.render_samples,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return
+
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### misc/generate_gaussian_bag.py
+```
+#!/usr/bin/env python3
+"""Stream a Gaussian-splat PLY over a ROS 2 ``GaussianArray`` topic."""
+
+import argparse
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import numpy as np
+import rclpy
+from gaussian_interface.msg import GaussianArray, SingleGaussian
+from rclpy.duration import Duration
+from rclpy.node import Node
+
+from rosplat.core.gaussian_representation import GaussianData, from_ply
+
+
+def make_gaussian_batch(
+    gaussian_data: GaussianData,
+    start: int,
+    end: int,
+    *,
+    refresh: bool,
+) -> GaussianArray:
+    """Serialize the half-open range ``[start, end)`` into one ROS message."""
+    message = GaussianArray()
+    message.refresh = refresh
+    message.gaussians = [SingleGaussian() for _ in range(end - start)]
+
+    for output_index, source_index in enumerate(range(start, end)):
+        gaussian = message.gaussians[output_index]
+        gaussian.xyz = gaussian_data.xyz[source_index].tolist()
+        gaussian.rotation = gaussian_data.rot[source_index].tolist()
+        gaussian.scale = gaussian_data.scale[source_index].tolist()
+        gaussian.opacity = int(
+            np.clip(gaussian_data.opacity[source_index, 0] * 255.0, 0, 255)
+        )
+        gaussian.spherical_harmonics = gaussian_data.sh[source_index].tolist()
+
+    return message
+
+
+class GaussianPublisher(Node):
+    """Publish one PLY scene in bounded batches, then stop."""
+
+    def __init__(
+        self,
+        gaussian_data: GaussianData,
+        *,
+        topic: str,
+        batch_size: int,
+        rate: float,
+        wait_for_subscriber: bool,
+    ) -> None:
+        super().__init__("gaussian_publisher")
+        self.gaussian_data = gaussian_data
+        self.publisher = self.create_publisher(GaussianArray, topic, 10)
+        self.topic = topic
+        self.batch_size = batch_size
+        self.wait_for_subscriber = wait_for_subscriber
+        self.next_index = 0
+        self.finished = False
+        self._waiting_logged = False
+        self.timer = self.create_timer(1.0 / rate, self.publish_next_batch)
+
+        sh_degree = int((gaussian_data.sh_dim // 3) ** 0.5 - 1)
+        self.get_logger().info(
+            f"Loaded {len(gaussian_data):,} Gaussians at SH degree {sh_degree}; "
+            f"streaming batches of {batch_size:,} on {topic} at up to {rate:g} Hz."
+        )
+
+    def publish_next_batch(self) -> None:
+        if self.wait_for_subscriber and self.publisher.get_subscription_count() == 0:
+            if not self._waiting_logged:
+                self.get_logger().info(f"Waiting for a subscriber on {self.topic}...")
+                self._waiting_logged = True
+            return
+
+        start = self.next_index
+        end = min(start + self.batch_size, len(self.gaussian_data))
+        started_at = time.perf_counter()
+        message = make_gaussian_batch(
+            self.gaussian_data,
+            start,
+            end,
+            refresh=start == 0,
+        )
+        self.publisher.publish(message)
+        self.next_index = end
+
+        self.get_logger().info(
+            f"Published {start:,}:{end:,} ({end / len(self.gaussian_data):.1%}) "
+            f"in {time.perf_counter() - started_at:.3f}s."
+        )
+
+        if end == len(self.gaussian_data):
+            self.finished = True
+            self.timer.cancel()
+            self.get_logger().info("Finished streaming the PLY scene.")
+
+
+def main(args=None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--ply-path", "--ply_path", required=True, dest="ply_path")
+    parser.add_argument("--topic", default="/gaussian_test")
+    parser.add_argument("--batch-size", type=int, default=1_000)
+    parser.add_argument("--rate", type=float, default=30.0)
+    parser.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="Publish immediately instead of waiting for a subscriber.",
+    )
+    cli_args, ros_args = parser.parse_known_args(args)
+
+    if cli_args.batch_size <= 0:
+        parser.error("--batch-size must be positive")
+    if cli_args.rate <= 0:
+        parser.error("--rate must be positive")
+
+    gaussian_data = from_ply(cli_args.ply_path)
+    rclpy.init(args=ros_args)
+    node = GaussianPublisher(
+        gaussian_data,
+        topic=cli_args.topic,
+        batch_size=cli_args.batch_size,
+        rate=cli_args.rate,
+        wait_for_subscriber=not cli_args.no_wait,
+    )
+
+    try:
+        while rclpy.ok() and not node.finished:
+            rclpy.spin_once(node, timeout_sec=0.1)
+        if node.finished:
+            acknowledged = node.publisher.wait_for_all_acked(Duration(seconds=30.0))
+            if acknowledged:
+                node.get_logger().info("All published batches were acknowledged.")
+            else:
+                node.get_logger().warning(
+                    "Timed out waiting for all published batches to be acknowledged."
+                )
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### misc/test_gaussian_msgs.py
+```
+import rclpy
+from rclpy.node import Node
+from gaussian_interface.msg import SingleGaussian
+
+
+class MinimalPublisher(Node):
+    def __init__(self):
+        super().__init__('minimal_publisher')
+
+        self.publisher = self.create_publisher(
+            SingleGaussian,
+            'gaussian',
+            10
+        )
+        timer_period = 0.5
+        self.timer = self.create_timer(timer_period, self.timer_callback)
+        self.i = 0
+
+    def timer_callback(self):
+        msg = SingleGaussian()
+        msg.opacity = 1.0
+        msg.scale.x = 0.0
+        msg.scale.y = 0.0
+        msg.scale.z = 0.0
+
+        msg.xyz.x = 0.0
+        msg.xyz.y = 0.0
+        msg.xyz.z = 0.0
+
+        msg.rotation.x = 0.0
+        msg.rotation.y = 0.0
+        msg.rotation.z = 0.0
+        msg.rotation.w = 1.0
+
+        # publish
+        self.publisher.publish(msg)
+        self.get_logger().info('Publishing: "%s"' % msg)
+    
+def main(args=None):
+    rclpy.init(args=args)
+
+    minimal_publisher = MinimalPublisher()
+
+    rclpy.spin(minimal_publisher)
+
+    # Destroy the node explicitly
+    minimal_publisher.destroy_node()
+    rclpy.shutdown()
+if __name__ == '__main__':
+    main()
+```
+
+### native/spirula_bridge.cpp
+```
+#include "spirula_bridge.h"
+
+#include "backend/api/BackendRuntime.h"
+#include "backend/api/BackendTypes.h"
+#include "core/Tensor.h"
+#include "engine/Engine.h"
+#include "engine/EngineState.h"
+#include "kernels/optim/Optimizer.cuh"
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <limits>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace {
+
+thread_local std::string g_last_error;
+
+template <typename Fn>
+int guard(Fn&& fn) noexcept {
+    try {
+        fn();
+        g_last_error.clear();
+        return 1;
+    } catch (const std::exception& error) {
+        g_last_error = error.what();
+    } catch (...) {
+        g_last_error = "unknown native exception";
+    }
+    return 0;
+}
+
+TorchTensorView view_1d(void* pointer, int64_t count, int channels) {
+    return TorchTensorView{
+        reinterpret_cast<uint64_t>(pointer),
+        sizeof(float),
+        {count, channels},
+    };
+}
+
+TorchTensorView view_2d(void* pointer, int64_t rows, int64_t columns, int channels) {
+    return TorchTensorView{
+        reinterpret_cast<uint64_t>(pointer),
+        sizeof(float),
+        {rows, columns, channels},
+    };
+}
+
+struct DeviceScene {
+    float3* means = nullptr;
+    float4* quats = nullptr;
+    float3* scales = nullptr;
+    float* opacities = nullptr;
+    float3* features_dc = nullptr;
+    float3* features_sh = nullptr;
+    int64_t count = 0;
+    int64_t capacity = 0;
+    int sh_degree = 0;
+    int num_sh = 0;
+
+    void release() {
+        backend::device_free(means);
+        backend::device_free(quats);
+        backend::device_free(scales);
+        backend::device_free(opacities);
+        backend::device_free(features_dc);
+        backend::device_free(features_sh);
+        means = nullptr;
+        quats = nullptr;
+        scales = nullptr;
+        opacities = nullptr;
+        features_dc = nullptr;
+        features_sh = nullptr;
+        count = 0;
+        capacity = 0;
+        sh_degree = 0;
+        num_sh = 0;
+    }
+};
+
+struct HostRender {
+    float3* rgb = nullptr;
+    float* scalar = nullptr;
+    size_t rgb_pixels = 0;
+    size_t scalar_pixels = 0;
+
+    void resize_rgb(size_t requested_pixels) {
+        if (requested_pixels <= rgb_pixels) return;
+        backend::host_free_pinned(rgb);
+        rgb = static_cast<float3*>(
+            backend::host_malloc_pinned(requested_pixels * sizeof(float3)));
+        if (!rgb)
+            throw std::runtime_error("failed to allocate pinned RGB readback buffer");
+        rgb_pixels = requested_pixels;
+    }
+
+    void resize_scalar(size_t requested_pixels) {
+        if (requested_pixels <= scalar_pixels) return;
+        backend::host_free_pinned(scalar);
+        scalar = static_cast<float*>(
+            backend::host_malloc_pinned(requested_pixels * sizeof(float)));
+        if (!scalar)
+            throw std::runtime_error("failed to allocate pinned scalar readback buffer");
+        scalar_pixels = requested_pixels;
+    }
+
+    void release() {
+        backend::host_free_pinned(rgb);
+        backend::host_free_pinned(scalar);
+        rgb = nullptr;
+        scalar = nullptr;
+        rgb_pixels = 0;
+        scalar_pixels = 0;
+    }
+};
+
+class Renderer {
+public:
+    std::mutex mutex;
+    DeviceScene scene;
+    HostRender host;
+    int width = 0;
+    int height = 0;
+    bool camera_ready = false;
+    RosplatSpirulaOutputMode output_mode = ROSPLAT_SPIRULA_OUTPUT_COLOR;
+    int requested_sh_degree = -1;
+    float scale_modifier = 1.0f;
+
+    void reset(int sh_degree, int64_t initial_capacity) {
+        if (sh_degree < 0 || sh_degree > 4)
+            throw std::invalid_argument("SH degree must be in [0, 4]");
+        if (initial_capacity < 0)
+            throw std::invalid_argument("initial capacity cannot be negative");
+
+        engine_reset();
+        scene.release();
+        scene.sh_degree = sh_degree;
+        scene.num_sh = (sh_degree + 1) * (sh_degree + 1) - 1;
+        reserve(initial_capacity);
+        bind_scene();
+    }
+
+    template <typename T>
+    static T* grow_buffer(T* old_pointer, int64_t old_count, int64_t new_count) {
+        if (new_count == 0) return nullptr;
+        T* next = static_cast<T*>(
+            backend::device_malloc_checked(static_cast<size_t>(new_count) * sizeof(T),
+                                           "ROSplat streaming scene"));
+        if (old_pointer && old_count > 0) {
+            backend::memcpy_sync(next, old_pointer,
+                                 static_cast<size_t>(old_count) * sizeof(T),
+                                 backend::MemcpyKind::DeviceToDevice);
+        }
+        backend::device_free(old_pointer);
+        return next;
+    }
+
+    void reserve(int64_t requested) {
+        if (requested <= scene.capacity) return;
+        int64_t next = std::max<int64_t>(requested, std::max<int64_t>(4096, scene.capacity * 2));
+        scene.means = grow_buffer(scene.means, scene.count, next);
+        scene.quats = grow_buffer(scene.quats, scene.count, next);
+        scene.scales = grow_buffer(scene.scales, scene.count, next);
+        scene.opacities = grow_buffer(scene.opacities, scene.count, next);
+        scene.features_dc = grow_buffer(scene.features_dc, scene.count, next);
+        if (scene.num_sh > 0) {
+            scene.features_sh = grow_buffer(
+                scene.features_sh,
+                scene.count * static_cast<int64_t>(scene.num_sh),
+                next * static_cast<int64_t>(scene.num_sh));
+        }
+        scene.capacity = next;
+        bind_scene();
+    }
+
+    void bind_scene() {
+        auto& state = engine();
+        state.cur_num_splats = scene.count;
+        state.max_num_splats = scene.capacity;
+        state.num_sh = scene.num_sh;
+        state.sh_degree = scene.sh_degree;
+
+        state.world.means = DeviceVector<float3>(
+            view_1d(scene.means, scene.capacity, 3));
+        state.world.quats = DeviceVector<float4>(
+            view_1d(scene.quats, scene.capacity, 4));
+        state.world.scales = DeviceVector<float3>(
+            view_1d(scene.scales, scene.capacity, 3));
+        state.world.opacities = DeviceVector<float>(
+            view_1d(scene.opacities, scene.capacity, 1));
+        state.world.features_dc = DeviceVector<float3>(
+            view_1d(scene.features_dc, scene.capacity, 3));
+        if (scene.num_sh > 0) {
+            state.world.features_sh = DeviceTensor2D<float3>(
+                view_2d(scene.features_sh, scene.capacity, scene.num_sh, 3));
+        } else {
+            state.world.features_sh = DeviceTensor2D<float3>();
+        }
+        state.world.initialized = scene.capacity > 0;
+    }
+
+    void append(int64_t batch_count,
+                const float* means,
+                const float* quats,
+                const float* scales,
+                const float* opacities,
+                const float* dc,
+                const float* sh) {
+        if (batch_count < 0)
+            throw std::invalid_argument("append count cannot be negative");
+        if (batch_count == 0) return;
+        if (!means || !quats || !scales || !opacities || !dc)
+            throw std::invalid_argument("append received a null required array");
+        if (scene.num_sh > 0 && !sh)
+            throw std::invalid_argument("append received null higher-order SH data");
+        if (scene.count > std::numeric_limits<int64_t>::max() - batch_count)
+            throw std::overflow_error("splat count overflow");
+
+        const int64_t offset = scene.count;
+        reserve(offset + batch_count);
+        backend::memcpy_sync(scene.means + offset, means,
+                             static_cast<size_t>(batch_count) * sizeof(float3),
+                             backend::MemcpyKind::HostToDevice);
+        backend::memcpy_sync(scene.quats + offset, quats,
+                             static_cast<size_t>(batch_count) * sizeof(float4),
+                             backend::MemcpyKind::HostToDevice);
+        backend::memcpy_sync(scene.scales + offset, scales,
+                             static_cast<size_t>(batch_count) * sizeof(float3),
+                             backend::MemcpyKind::HostToDevice);
+        backend::memcpy_sync(scene.opacities + offset, opacities,
+                             static_cast<size_t>(batch_count) * sizeof(float),
+                             backend::MemcpyKind::HostToDevice);
+        backend::memcpy_sync(scene.features_dc + offset, dc,
+                             static_cast<size_t>(batch_count) * sizeof(float3),
+                             backend::MemcpyKind::HostToDevice);
+        if (scene.num_sh > 0) {
+            backend::memcpy_sync(
+                scene.features_sh + offset * scene.num_sh, sh,
+                static_cast<size_t>(batch_count) * scene.num_sh * sizeof(float3),
+                backend::MemcpyKind::HostToDevice);
+        }
+        scene.count += batch_count;
+        bind_scene();
+    }
+
+    void set_camera(int requested_width,
+                    int requested_height,
+                    const float* view_matrix,
+                    const float* intrinsics) {
+        if (requested_width <= 0 || requested_height <= 0)
+            throw std::invalid_argument("render dimensions must be positive");
+        if (!view_matrix || !intrinsics)
+            throw std::invalid_argument("camera arrays cannot be null");
+
+        float dist_coeffs[8] = {};
+        set_camera_params(
+            requested_width,
+            requested_height,
+            "PINHOLE",
+            "NONE",
+            TorchTensorView{reinterpret_cast<uint64_t>(view_matrix), sizeof(float), {1, 4, 4}},
+            TorchTensorView{reinterpret_cast<uint64_t>(intrinsics), sizeof(float), {1, 4}},
+            TorchTensorView{reinterpret_cast<uint64_t>(dist_coeffs), sizeof(float), {1, 8}});
+        width = requested_width;
+        height = requested_height;
+        camera_ready = true;
+    }
+
+    void set_render_options(int requested_output_mode,
+                            int requested_degree) {
+        if (requested_output_mode < ROSPLAT_SPIRULA_OUTPUT_COLOR ||
+            requested_output_mode > ROSPLAT_SPIRULA_OUTPUT_OPACITY) {
+            throw std::invalid_argument("render output mode must be color, depth, or opacity");
+        }
+        if (requested_degree < -1 || requested_degree > 4) {
+            throw std::invalid_argument("active SH degree must be -1 or in [0, 4]");
+        }
+        output_mode = static_cast<RosplatSpirulaOutputMode>(requested_output_mode);
+        requested_sh_degree = requested_degree;
+    }
+
+    void set_scale_modifier(float requested_modifier) {
+        if (!std::isfinite(requested_modifier) || requested_modifier <= 0.0f)
+            throw std::invalid_argument("scale modifier must be positive and finite");
+        if (requested_modifier == scale_modifier)
+            return;
+
+        const float log_delta = std::log(requested_modifier / scale_modifier);
+        const int64_t numel = scene.count * 3;
+        if (numel > 0) {
+            constexpr int64_t max_chunk = 1 << 20;
+            const int64_t chunk = std::min(numel, max_chunk);
+            std::vector<float> host_delta(static_cast<size_t>(chunk), log_delta);
+            float* device_delta = static_cast<float*>(backend::device_malloc_checked(
+                static_cast<size_t>(chunk) * sizeof(float),
+                "ROSplat scale modifier scratch"));
+            try {
+                backend::memcpy_sync(
+                    device_delta, host_delta.data(),
+                    static_cast<size_t>(chunk) * sizeof(float),
+                    backend::MemcpyKind::HostToDevice);
+                float* scales = reinterpret_cast<float*>(scene.scales);
+                for (int64_t offset = 0; offset < numel; offset += chunk) {
+                    const int64_t count = std::min(chunk, numel - offset);
+                    float_add_into(
+                        DeviceVector<float>(view_1d(scales + offset, count, 1)),
+                        DeviceVector<float>(view_1d(device_delta, count, 1)),
+                        count);
+                }
+            } catch (...) {
+                backend::device_free(device_delta);
+                throw;
+            }
+            backend::device_free(device_delta);
+        }
+        scale_modifier = requested_modifier;
+    }
+
+    void render(uint8_t* output, size_t output_bytes) {
+        if (!output) throw std::invalid_argument("render output cannot be null");
+        if (!camera_ready) throw std::runtime_error("camera has not been configured");
+        const size_t pixel_count = static_cast<size_t>(width) * height;
+        if (output_bytes < pixel_count * 4)
+            throw std::invalid_argument("render output buffer is too small");
+        if (scene.count == 0) {
+            for (size_t index = 0; index < pixel_count; ++index) {
+                output[index * 4 + 0] = 0;
+                output[index * 4 + 1] = 0;
+                output[index * 4 + 2] = 0;
+                output[index * 4 + 3] = 255;
+            }
+            return;
+        }
+
+        const int render_sh_degree = requested_sh_degree < 0
+            ? scene.sh_degree
+            : std::min(requested_sh_degree, scene.sh_degree);
+        forward_3dgs("3dgs", render_sh_degree, true);
+        auto& state = engine();
+        if (output_mode == ROSPLAT_SPIRULA_OUTPUT_COLOR) {
+            auto& rgb = std::get<0>(state.fwd.renders);
+            if (!rgb.data_ptr())
+                throw std::runtime_error("Spirula produced no RGB render buffer");
+            host.resize_rgb(pixel_count);
+            backend::memcpy_sync(host.rgb, rgb.data_ptr(),
+                                 pixel_count * sizeof(float3),
+                                 backend::MemcpyKind::DeviceToHost);
+            for (size_t index = 0; index < pixel_count; ++index) {
+                const float3 color = host.rgb[index];
+                write_gray_or_rgb(output, index, color.x, color.y, color.z);
+            }
+            return;
+        }
+
+        host.resize_scalar(pixel_count);
+        if (output_mode == ROSPLAT_SPIRULA_OUTPUT_DEPTH) {
+            auto& depth = std::get<1>(state.fwd.renders);
+            if (!depth.data_ptr())
+                throw std::runtime_error("Spirula produced no depth render buffer");
+            backend::memcpy_sync(host.scalar, depth.data_ptr(),
+                                 pixel_count * sizeof(float),
+                                 backend::MemcpyKind::DeviceToHost);
+            write_depth(output, pixel_count);
+            return;
+        }
+
+        auto& transmittance = state.fwd.render_Ts;
+        if (!transmittance.data_ptr())
+            throw std::runtime_error("Spirula produced no transmittance render buffer");
+        backend::memcpy_sync(host.scalar, transmittance.data_ptr(),
+                             pixel_count * sizeof(float),
+                             backend::MemcpyKind::DeviceToHost);
+        for (size_t index = 0; index < pixel_count; ++index) {
+            const float opacity = 1.0f - host.scalar[index];
+            write_gray_or_rgb(output, index, opacity, opacity, opacity);
+        }
+    }
+
+    void shutdown() {
+        engine_reset();
+        scene.release();
+        host.release();
+        width = 0;
+        height = 0;
+        camera_ready = false;
+        output_mode = ROSPLAT_SPIRULA_OUTPUT_COLOR;
+        requested_sh_degree = -1;
+        scale_modifier = 1.0f;
+    }
+
+private:
+    static void write_gray_or_rgb(uint8_t* output, size_t index,
+                                  float red, float green, float blue) {
+        output[index * 4 + 0] = to_u8(red);
+        output[index * 4 + 1] = to_u8(green);
+        output[index * 4 + 2] = to_u8(blue);
+        // Keep the ImGui texture opaque; the RGB channels already contain
+        // the composited color or the complete scalar visualization.
+        output[index * 4 + 3] = 255;
+    }
+
+    void write_depth(uint8_t* output, size_t pixel_count) const {
+        float min_depth = std::numeric_limits<float>::infinity();
+        float max_depth = -std::numeric_limits<float>::infinity();
+        for (size_t index = 0; index < pixel_count; ++index) {
+            const float depth = host.scalar[index];
+            if (std::isfinite(depth) && depth > 0.0f) {
+                min_depth = std::min(min_depth, depth);
+                max_depth = std::max(max_depth, depth);
+            }
+        }
+
+        const bool have_depth = std::isfinite(min_depth);
+        const float range = max_depth - min_depth;
+        for (size_t index = 0; index < pixel_count; ++index) {
+            const float depth = host.scalar[index];
+            float intensity = 0.0f;
+            if (have_depth && std::isfinite(depth) && depth > 0.0f) {
+                intensity = range > 1e-6f
+                    ? 1.0f - (depth - min_depth) / range
+                    : 1.0f;
+            }
+            write_gray_or_rgb(output, index, intensity, intensity, intensity);
+        }
+    }
+
+    static uint8_t to_u8(float value) {
+        value = std::clamp(value, 0.0f, 1.0f);
+        return static_cast<uint8_t>(std::lround(value * 255.0f));
+    }
+};
+
+Renderer& renderer() {
+    static Renderer instance;
+    return instance;
+}
+
+}  // namespace
+
+extern "C" {
+
+const char* rosplat_spirula_last_error(void) {
+    return g_last_error.c_str();
+}
+
+int rosplat_spirula_device_count(void) {
+    try {
+        g_last_error.clear();
+        return backend::device_count();
+    } catch (const std::exception& error) {
+        g_last_error = error.what();
+        return -1;
+    }
+}
+
+int rosplat_spirula_device_info(int index, RosplatSpirulaDeviceInfo* info) {
+    return guard([&] {
+        if (!info) throw std::invalid_argument("device info output cannot be null");
+        const backend::DeviceInfo source = backend::device_info(index);
+        std::memset(info, 0, sizeof(*info));
+        std::strncpy(info->name, source.name, sizeof(info->name) - 1);
+        info->vram_bytes = source.vram_bytes;
+        info->usable = source.usable ? 1 : 0;
+    });
+}
+
+int rosplat_spirula_select_device(int index) {
+    return guard([&] {
+        if (!backend::device_select(index))
+            throw std::runtime_error("Vulkan device selection failed");
+    });
+}
+
+int rosplat_spirula_reset_scene(int sh_degree, int64_t initial_capacity) {
+    Renderer& instance = renderer();
+    std::lock_guard<std::mutex> lock(instance.mutex);
+    return guard([&] { instance.reset(sh_degree, initial_capacity); });
+}
+
+int rosplat_spirula_append(int64_t count,
+                           const float* means_xyz,
+                           const float* quaternions_wxyz,
+                           const float* log_scales_xyz,
+                           const float* opacity_logits,
+                           const float* features_dc_rgb,
+                           const float* features_sh_rgb) {
+    Renderer& instance = renderer();
+    std::lock_guard<std::mutex> lock(instance.mutex);
+    return guard([&] {
+        instance.append(count, means_xyz, quaternions_wxyz, log_scales_xyz,
+                        opacity_logits, features_dc_rgb, features_sh_rgb);
+    });
+}
+
+int rosplat_spirula_set_camera(int width,
+                               int height,
+                               const float* view_matrix_4x4,
+                               const float* intrinsics_fx_fy_cx_cy) {
+    Renderer& instance = renderer();
+    std::lock_guard<std::mutex> lock(instance.mutex);
+    return guard([&] {
+        instance.set_camera(width, height, view_matrix_4x4,
+                            intrinsics_fx_fy_cx_cy);
+    });
+}
+
+int rosplat_spirula_set_render_options(int output_mode, int sh_degree) {
+    Renderer& instance = renderer();
+    std::lock_guard<std::mutex> lock(instance.mutex);
+    return guard([&] { instance.set_render_options(output_mode, sh_degree); });
+}
+
+int rosplat_spirula_set_scale_modifier(float modifier) {
+    Renderer& instance = renderer();
+    std::lock_guard<std::mutex> lock(instance.mutex);
+    return guard([&] { instance.set_scale_modifier(modifier); });
+}
+
+int rosplat_spirula_render_rgba8(uint8_t* output_rgba, size_t output_bytes) {
+    Renderer& instance = renderer();
+    std::lock_guard<std::mutex> lock(instance.mutex);
+    return guard([&] { instance.render(output_rgba, output_bytes); });
+}
+
+int64_t rosplat_spirula_splat_count(void) {
+    Renderer& instance = renderer();
+    std::lock_guard<std::mutex> lock(instance.mutex);
+    return instance.scene.count;
+}
+
+int64_t rosplat_spirula_capacity(void) {
+    Renderer& instance = renderer();
+    std::lock_guard<std::mutex> lock(instance.mutex);
+    return instance.scene.capacity;
+}
+
+void rosplat_spirula_shutdown(void) {
+    Renderer& instance = renderer();
+    std::lock_guard<std::mutex> lock(instance.mutex);
+    (void)guard([&] { instance.shutdown(); });
+}
+
+}  // extern "C"
+```
+
+### native/spirula_bridge.h
+```
+#pragma once
+
+#include <stddef.h>
+#include <stdint.h>
+
+#if defined(_WIN32)
+#  define ROSPLAT_API __declspec(dllexport)
+#else
+#  define ROSPLAT_API __attribute__((visibility("default")))
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct RosplatSpirulaDeviceInfo {
+    char name[256];
+    uint64_t vram_bytes;
+    int usable;
+} RosplatSpirulaDeviceInfo;
+
+typedef enum RosplatSpirulaOutputMode {
+    ROSPLAT_SPIRULA_OUTPUT_COLOR = 0,
+    ROSPLAT_SPIRULA_OUTPUT_DEPTH = 1,
+    ROSPLAT_SPIRULA_OUTPUT_OPACITY = 2,
+} RosplatSpirulaOutputMode;
+
+ROSPLAT_API const char* rosplat_spirula_last_error(void);
+ROSPLAT_API int rosplat_spirula_device_count(void);
+ROSPLAT_API int rosplat_spirula_device_info(
+    int index,
+    RosplatSpirulaDeviceInfo* info
+);
+ROSPLAT_API int rosplat_spirula_select_device(int index);
+
+/*
+ * Reset the active scene and reserve device storage. `sh_degree` is 0..4 and
+ * `initial_capacity` may be zero. Scale and opacity inputs use Spirula's raw
+ * training representation: log(scale) and logit(opacity).
+ */
+ROSPLAT_API int rosplat_spirula_reset_scene(
+    int sh_degree,
+    int64_t initial_capacity
+);
+
+/* Append one contiguous struct-of-arrays batch to the device-resident scene. */
+ROSPLAT_API int rosplat_spirula_append(
+    int64_t count,
+    const float* means_xyz,
+    const float* quaternions_wxyz,
+    const float* log_scales_xyz,
+    const float* opacity_logits,
+    const float* features_dc_rgb,
+    const float* features_sh_rgb
+);
+
+/* OpenCV camera convention: +Z forward, +Y down, row-major world-to-camera. */
+ROSPLAT_API int rosplat_spirula_set_camera(
+    int width,
+    int height,
+    const float* view_matrix_4x4,
+    const float* intrinsics_fx_fy_cx_cy
+);
+
+/* `sh_degree` is -1 for the scene maximum, or an explicit degree 0..4. */
+ROSPLAT_API int rosplat_spirula_set_render_options(
+    int output_mode,
+    int sh_degree
+);
+
+/* Apply a positive global multiplier to every Gaussian's scale. */
+ROSPLAT_API int rosplat_spirula_set_scale_modifier(float modifier);
+
+/* Render top-to-bottom RGBA8 into caller-owned storage. */
+ROSPLAT_API int rosplat_spirula_render_rgba8(
+    uint8_t* output_rgba,
+    size_t output_bytes
+);
+
+ROSPLAT_API int64_t rosplat_spirula_splat_count(void);
+ROSPLAT_API int64_t rosplat_spirula_capacity(void);
+ROSPLAT_API void rosplat_spirula_shutdown(void);
+
+#ifdef __cplusplus
+}
+#endif
+```
+
+### rosplat/__init__.py
+```
+
+```
+
+### rosplat/main.py
+```
+import os
+
+os.environ.setdefault("WGPU_BACKEND_TYPE", "Vulkan")
+
+from imgui_bundle import imgui
+import rclpy
+import wgpu
+from rendercanvas.auto import RenderCanvas, loop
+
+from rosplat.config import WorldSettings
+from rosplat.gui import main_ui, shutdown_ros
+from rosplat.gui.vulkan_texture import VulkanTextureRegistry
+from rosplat.gui.wgpu_backend import CANVAS_OPTIONS, RosplatImguiRenderer
+from rosplat.input import InputHandler
+
+
+class App:
+    """ROSplat's Dear ImGui UI running through wgpu-py's Vulkan backend."""
+
+    def __init__(self) -> None:
+        self.world_settings = WorldSettings()
+        self.world_camera = self.world_settings.world_camera
+        self.canvas = None
+        self.imgui_renderer = None
+        self.texture_registry = None
+        self._shutdown_done = False
+
+    def post_init(self) -> None:
+        self.world_settings.input_handler = InputHandler(self.world_settings)
+        self.world_settings.create_gaussian_renderer(self.texture_registry)
+
+    def update_camera_lazy(self) -> None:
+        if self.world_camera.dirty_pose:
+            self.world_settings.update_camera_pose()
+            self.world_camera.dirty_pose = False
+        if self.world_camera.dirty_intrinsic:
+            self.world_settings.update_camera_intrin()
+            self.world_camera.dirty_intrinsic = False
+
+    def show_gui(self) -> None:
+        self.update_camera_lazy()
+        if self.world_settings.have_new_gaussians:
+            self.world_settings.update_activated_render_state()
+        imgui.dock_space_over_viewport(
+            dockspace_id=0,
+            viewport=imgui.get_main_viewport(),
+        )
+        main_ui(this_world_settings=self.world_settings)
+
+    def shutdown(self) -> None:
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
+        self.world_settings.shutdown()
+        if self.texture_registry is not None:
+            self.texture_registry.shutdown()
+        if self.imgui_renderer is not None:
+            self.imgui_renderer.shutdown()
+        shutdown_ros()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+    def run(self) -> None:
+        self.canvas = RenderCanvas(**CANVAS_OPTIONS)
+        adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
+        if adapter is None:
+            raise RuntimeError("No WebGPU adapter was available")
+        if adapter.info["backend_type"].lower() != "vulkan":
+            raise RuntimeError(
+                "ROSplat requires wgpu's Vulkan backend, got "
+                f"{adapter.info['backend_type']}"
+            )
+        device = adapter.request_device_sync()
+        self.imgui_renderer = RosplatImguiRenderer(device, self.canvas)
+        self.texture_registry = VulkanTextureRegistry(
+            device, self.imgui_renderer.backend
+        )
+
+        io = imgui.get_io()
+        io.config_flags |= imgui.ConfigFlags_.docking_enable
+        io.set_ini_filename("imgui.ini")
+        self.post_init()
+        self.imgui_renderer.set_gui(self.show_gui)
+        self.canvas.request_draw(self.imgui_renderer.render)
+        try:
+            loop.run()
+        finally:
+            self.shutdown()
+
+
+def main() -> None:
+    if not rclpy.ok():
+        rclpy.init()
+    App().run()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### misc/experiments/dataanalysis.py
+```
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+import glob
+
+# Color palette for backends
+color_map = {
+    "CPU": "#33a02c",     # green
+    "Cupy": "#1f78b4",    # blue
+    "Torch": "#ff7f00",   # orange
+}
+
+# File patterns
+backends = {
+    "CPU": "./cpu*.csv",
+    "Cupy": "./cupy*.csv",
+    "Torch": "./torch*.csv"
+}
+# Set font to 18 point
+plt.rcParams.update({'font.size': 18})
+
+backend_results = {}
+
+# --- Line Plot Prep ---
+for name, pattern in backends.items():
+    matched_files = sorted(glob.glob(pattern))
+    print(f"[{name}] Matched files:", matched_files)
+    
+    fps_data = []
+    for file in matched_files:
+        df = pd.read_csv(file, sep=" ", header=None, names=["FPS", "Splats"])
+        fps_data.append(df)
+
+    if not fps_data:
+        print(f"No files matched for {name}, skipping.")
+        continue
+
+    combined = pd.concat(fps_data)
+    grouped = combined.groupby("Splats")["FPS"]
+    mean_fps = grouped.mean()
+
+    backend_results[name] = {
+        "splats": mean_fps.index.to_numpy(),
+        "mean_fps": mean_fps.to_numpy()
+    }
+
+# --- Plot: Smoothed FPS vs Splats ---
+plt.figure(figsize=(10, 6))
+
+for name, data in backend_results.items():
+    splats = data["splats"]
+    mean_fps = data["mean_fps"]
+
+    smoothed_fps = np.convolve(mean_fps, np.ones(15)/15, mode='same')
+
+    plt.plot(
+        splats,
+        smoothed_fps,
+        label=name,
+        color=color_map[name],
+        linewidth=1.8
+    )
+
+# Styling for 18-point fonts
+plt.xlabel("Number of Splats", fontsize=18)
+plt.ylabel("FPS", fontsize=18)
+plt.ylim(bottom=0)
+plt.grid(True, linestyle='--', linewidth=0.5)
+plt.legend(fontsize=18, loc="upper right")
+plt.tick_params(axis='both', labelsize=18)
+plt.tight_layout()
+plt.savefig("fps_vs_splats_styled.png", dpi=300)
+plt.show()
+
+# --- Bar Chart: Mean FPS Comparison with Std Dev ---
+
+# --- Bar Chart: % Improvement Between Methods ---
+
+# Compute mean FPS again
+mean_fps_dict = {}
+for name, pattern in backends.items():
+    matched_files = sorted(glob.glob(pattern))
+    fps_data = []
+
+    for file in matched_files:
+        df = pd.read_csv(file, sep=" ", header=None, names=["FPS", "Splats"])
+        fps_data.append(df)
+
+    if not fps_data:
+        continue
+
+    combined = pd.concat(fps_data)
+    grouped = combined.groupby("Splats")["FPS"]
+    mean_fps = grouped.mean()
+    mean_fps_dict[name] = mean_fps.mean()
+
+# Compute relative improvements
+comparisons = [
+    ("Torch", "CPU"),
+    ("Cupy", "CPU"),
+    ("Cupy", "Torch"),
+]
+
+labels = []
+improvements = []
+
+for a, b in comparisons:
+    if b not in mean_fps_dict or a not in mean_fps_dict:
+        continue
+    rel_improvement = ((mean_fps_dict[a] - mean_fps_dict[b]) / mean_fps_dict[b]) * 100
+    labels.append(f"{a} vs {b}")  # Only used for the x-axis labels.
+    improvements.append(rel_improvement)
+
+# Bar plot with adjacent bars.
+x = np.arange(len(labels))
+bar_width = 1  # Bars will directly touch one another.
+
+plt.figure(figsize=(8, 6))
+bars = plt.bar(x, improvements, color="#444444", width=bar_width, edgecolor="black")
+
+# Add percentage labels below each bar.
+offset = 1  # vertical offset from zero.
+for bar, value in zip(bars, improvements):
+    x_center = bar.get_x() + bar.get_width() / 2
+    if value >= 0:
+        # For positive bars, place the label below the bar (below zero).
+        text_y = 0 - offset
+        va = 'top'
+    else:
+        # For negative bars, place the label above the bar (above zero).
+        text_y = 0 + offset
+        va = 'bottom'
+    
+    plt.text(
+        x_center,
+        text_y,
+        f"{value:.1f}%",
+        ha='center',
+        va=va,
+        fontsize=18,
+        color="black"
+    )
+
+plt.ylabel("Relative FPS Improvement (%)", fontsize=18)
+plt.xticks(x, labels, fontsize=18)
+plt.ylim(-10, 40)
+plt.yticks(fontsize=18)
+plt.grid(axis='y', linestyle='-', linewidth=0.5)
+plt.tight_layout()
+plt.savefig("bar_fps_percentage_comparison.png", dpi=300)
+plt.show()
+```
+
+### misc/experiments/memoryanalysis.py
+```
+import pandas as pd
+import matplotlib.pyplot as plt
+import glob
+
+# Set global font size to 18 pt for all plot elements
+plt.rcParams.update({'font.size': 18})
+
+def load_all_memory(files_pattern):
+    files = sorted(glob.glob(files_pattern))
+    all_dfs = []
+
+    for f in files:
+        df = pd.read_csv(f, sep=" ", header=None, names=["Splats", "Usage_MB"])
+        df.sort_values("Splats", inplace=True)  # Ensure order for plotting
+        all_dfs.append(df)
+
+    return files, all_dfs
+
+def plot_memory_usage( files, dfs, color, avg_label, output_filename):
+    plt.figure(figsize=(10, 5))
+
+    # Interpolate all files to align on common X values (union of all)
+    all_splats = sorted(set().union(*[set(df["Splats"]) for df in dfs]))
+    aligned_usages = []
+
+    for df in dfs:
+        interp = pd.Series(df["Usage_MB"].values, index=df["Splats"])
+        interp = interp.reindex(all_splats).interpolate().fillna(method='bfill').fillna(method='ffill')
+        aligned_usages.append(interp)
+
+    # Compute mean across all files
+    avg_usage = pd.concat(aligned_usages, axis=1).mean(axis=1)
+
+    # Plot mean line only
+    plt.plot(avg_usage.index, avg_usage.values, color=color, label=avg_label, linewidth=2.0)
+
+    plt.xlabel("Number of Gaussians")
+    plt.ylabel("Memory Usage (MB)")
+    plt.grid(True, linestyle='--', linewidth=0.5)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_filename, dpi=300)
+    plt.show()
+
+# --- RAM ---
+ram_files, ram_dfs = load_all_memory("ram*.csv")
+plot_memory_usage(
+    files=ram_files,
+    dfs=ram_dfs,
+    color="#1f78b4",  # Changed to blue
+    avg_label="Average RAM Usage",
+    output_filename="gaussian_vs_ram_usage_avg.png"
+)
+
+# --- VRAM ---
+vram_files, vram_dfs = load_all_memory("vram*.csv")
+plot_memory_usage(
+    files=vram_files,
+    dfs=vram_dfs,
+    color="#33a02c",  # Changed to green
+    avg_label="Average VRAM Usage",
+    output_filename="gaussian_vs_vram_usage_avg.png"
+)
+```
+
+### rosplat/config/__init__.py
+```
+from .world_settings import WorldSettings, RendererType
+
+__all__ = ['WorldSettings', 'RendererType']
+```
+
+### rosplat/config/world_settings.py
+```
+from __future__ import annotations
+
+from collections import deque
+from enum import Enum
+import threading
+from typing import Optional
+
+import numpy as np
+
+from gaussian_interface.msg import GaussianArray, SingleGaussian
+from rosplat.core import gaussian_representation, util
+from rosplat.core.gaussian_representation import GaussianData
+from rosplat.render.camera import Camera
+from rosplat.render.renderer import RenderOutputMode, SpirulaRenderer
+
+
+MAX_GAUSSIANS = 50_000_000
+
+
+class RendererType(Enum):
+    SPIRULA_VULKAN = "Spirula Vulkan"
+    UNKNOWN = "Unknown"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+class WorldSettings:
+    """Camera, streamed scene state, and the single Spirula renderer."""
+
+    def __init__(self) -> None:
+        self.world_camera = Camera(720, 1280)
+        self.input_handler = None
+        self.texture_registry = None
+        self.gauss_renderer: Optional[SpirulaRenderer] = None
+        self.gauss_renderer_type = RendererType.UNKNOWN
+
+        self.gaussian_set: Optional[GaussianData] = gaussian_representation.naive_gaussian()
+        self._gaussian_count = len(self.gaussian_set)
+        self._full_scene_dirty = True
+        self._pending_batches: deque[tuple[Optional[GaussianData], bool]] = deque()
+        self._pending_lock = threading.Lock()
+        self.have_new_gaussians = True
+
+        self.time_scale = 5.0
+        self.model_transform_speed = 100.0
+        self.scale_modifier = 1.0
+        self.render_output = RenderOutputMode.COLOR
+        self.active_sh_degree: Optional[int] = None
+        self.inverse_movements = False
+        self.overwrite_gaussians = False
+        self.model_transform = np.eye(4, dtype=np.float32)
+
+    def process_model_translation(self, dx: float, dy: float) -> None:
+        translation = np.eye(4, dtype=np.float32)
+        translation[0, 3] = dx * self.model_transform_speed
+        translation[1, 3] = dy * self.model_transform_speed
+        self.model_transform = translation @ self.model_transform
+        if self.gauss_renderer:
+            self.gauss_renderer.set_model_matrix(self.model_transform)
+
+    def update_camera_pose(self) -> None:
+        if self.gauss_renderer:
+            self.gauss_renderer.update_camera_pose()
+
+    def update_camera_intrin(self) -> None:
+        if self.gauss_renderer:
+            self.gauss_renderer.update_camera_intrin()
+
+    def update_window_size(self, width: int, height: int) -> None:
+        width, height = int(width), int(height)
+        if width <= 0 or height <= 0:
+            return
+        resized = (width, height) != (self.world_camera.w, self.world_camera.h)
+        if resized:
+            self.world_camera.w = width
+            self.world_camera.h = height
+            self.world_camera.dirty_intrinsic = True
+        if self.gauss_renderer:
+            self.gauss_renderer.set_render_resolution(width, height)
+            if resized:
+                self.gauss_renderer.update_camera_intrin()
+                self.world_camera.dirty_intrinsic = False
+
+    def check_inputs(self) -> None:
+        if self.input_handler:
+            self.input_handler.check_inputs()
+
+    def update_render_output(self, mode: RenderOutputMode) -> None:
+        self.render_output = RenderOutputMode(mode)
+        if self.gauss_renderer:
+            self.gauss_renderer.set_render_output(self.render_output)
+
+    def update_sh_degree(self, degree: Optional[int]) -> None:
+        self.active_sh_degree = degree
+        if self.gauss_renderer:
+            self.gauss_renderer.set_sh_degree(degree)
+
+    def update_scale_modifier(self, modifier: float) -> None:
+        self.scale_modifier = float(modifier)
+        if self.gauss_renderer:
+            self.gauss_renderer.set_scale_modifier(self.scale_modifier)
+
+    def get_camera_pose(self):
+        return self.world_camera.get_pose()
+
+    def create_gaussian_renderer(self, texture_registry=None) -> None:
+        if self.gauss_renderer:
+            self.gauss_renderer.shutdown()
+        self.texture_registry = texture_registry
+        self.gauss_renderer = SpirulaRenderer(
+            self.world_camera.w,
+            self.world_camera.h,
+            self,
+            texture_registry=texture_registry,
+        )
+        self.gauss_renderer_type = RendererType.SPIRULA_VULKAN
+        self._full_scene_dirty = True
+        self.update_activated_render_state(full_update=True)
+
+    def get_renderer_type(self) -> RendererType:
+        return self.gauss_renderer_type
+
+    def process_translation(self, dx: float, dy: float, dz: float) -> None:
+        self.world_camera.process_translation(
+            dx * self.time_scale,
+            dy * self.time_scale,
+            dz * self.time_scale,
+        )
+
+    def get_num_gaussians(self) -> int:
+        with self._pending_lock:
+            return self._gaussian_count
+
+    @staticmethod
+    def convert_gaussian(gaussian: SingleGaussian) -> GaussianData:
+        return GaussianData(
+            xyz=np.asarray(gaussian.xyz, dtype=np.float32).reshape(1, 3),
+            rot=np.asarray(gaussian.rotation, dtype=np.float32).reshape(1, 4),
+            scale=np.asarray(gaussian.scale, dtype=np.float32).reshape(1, 3),
+            opacity=np.asarray([[gaussian.opacity / 255.0]], dtype=np.float32),
+            sh=np.asarray(gaussian.spherical_harmonics, dtype=np.float32).reshape(1, -1),
+        )
+
+    @staticmethod
+    def convert_gaussian_array(gaussians: GaussianArray) -> Optional[GaussianData]:
+        messages = gaussians.gaussians
+        count = len(messages)
+        if count == 0:
+            return None
+        sh_dim = len(messages[0].spherical_harmonics)
+        if sh_dim == 0:
+            raise ValueError("Gaussian messages must contain spherical harmonics")
+
+        xyz = np.empty((count, 3), dtype=np.float32)
+        rot = np.empty((count, 4), dtype=np.float32)
+        scale = np.empty((count, 3), dtype=np.float32)
+        opacity = np.empty((count, 1), dtype=np.float32)
+        sh = np.empty((count, sh_dim), dtype=np.float32)
+        for index, gaussian in enumerate(messages):
+            if len(gaussian.spherical_harmonics) != sh_dim:
+                raise ValueError("A streamed batch cannot mix SH layouts")
+            xyz[index] = gaussian.xyz
+            rot[index] = gaussian.rotation
+            scale[index] = gaussian.scale
+            opacity[index, 0] = gaussian.opacity / 255.0
+            sh[index] = gaussian.spherical_harmonics
+        return GaussianData(xyz, rot, scale, opacity, sh)
+
+    def _queue_batch(self, batch: Optional[GaussianData], refresh: bool) -> None:
+        batch_count = len(batch) if batch is not None else 0
+        with self._pending_lock:
+            if refresh:
+                self._pending_batches.clear()
+                self._gaussian_count = batch_count
+                self.gaussian_set = batch
+            else:
+                available = MAX_GAUSSIANS - self._gaussian_count
+                if available <= 0:
+                    return
+                if batch is not None and batch_count > available:
+                    batch = GaussianData(
+                        batch.xyz[:available],
+                        batch.rot[:available],
+                        batch.scale[:available],
+                        batch.opacity[:available],
+                        batch.sh[:available],
+                    )
+                    batch_count = available
+                self._gaussian_count += batch_count
+            self._pending_batches.append((batch, refresh))
+            self._full_scene_dirty = False
+            self.have_new_gaussians = True
+
+    def append_gaussian(self, gaussian: SingleGaussian) -> None:
+        self._queue_batch(
+            self.convert_gaussian(gaussian),
+            refresh=self.overwrite_gaussians,
+        )
+
+    def append_gaussians(self, gaussians: GaussianArray) -> None:
+        batch = self.convert_gaussian_array(gaussians)
+        refresh = bool(gaussians.refresh or self.overwrite_gaussians)
+        if refresh:
+            util.logger.info("Received refresh signal, replacing the Vulkan scene")
+        self._queue_batch(batch, refresh=refresh)
+
+    def _drain_pending(self) -> list[tuple[Optional[GaussianData], bool]]:
+        with self._pending_lock:
+            pending = list(self._pending_batches)
+            self._pending_batches.clear()
+            return pending
+
+    def reset_gaussians(self) -> None:
+        with self._pending_lock:
+            self._pending_batches.clear()
+            self.gaussian_set = gaussian_representation.naive_gaussian()
+            self._gaussian_count = len(self.gaussian_set)
+            self._full_scene_dirty = True
+            self.have_new_gaussians = True
+
+    def load_ply(self, file_path: str) -> None:
+        loaded = gaussian_representation.from_ply(file_path)
+        with self._pending_lock:
+            self._pending_batches.clear()
+            self.gaussian_set = loaded
+            self._gaussian_count = len(loaded)
+            self._full_scene_dirty = True
+            self.have_new_gaussians = True
+        self.update_activated_render_state(full_update=True)
+
+    def update_activated_render_state(self, full_update: bool = False) -> None:
+        """Apply queued ROS batches on the GUI/render thread."""
+        if not self.gauss_renderer:
+            return
+
+        pending = self._drain_pending()
+        if pending:
+            for batch, refresh in pending:
+                if batch is None:
+                    if refresh:
+                        self.gauss_renderer.reset_gaussians()
+                    continue
+                self.gauss_renderer.append_gaussians(batch, refresh=refresh)
+        elif full_update or self._full_scene_dirty:
+            if self.gaussian_set is None or len(self.gaussian_set) == 0:
+                self.gauss_renderer.reset_gaussians()
+            else:
+                self.gauss_renderer.update_gaussian_data(
+                    self.gaussian_set,
+                    full_update=True,
+                )
+
+        self.gauss_renderer.set_scale_modifier(self.scale_modifier)
+        self.gauss_renderer.set_render_output(self.render_output)
+        self.gauss_renderer.set_sh_degree(self.active_sh_degree)
+        self.gauss_renderer.set_model_matrix(self.model_transform)
+        self.gauss_renderer.update_camera_pose()
+        self.gauss_renderer.update_camera_intrin()
+        self.gauss_renderer.set_render_resolution(
+            self.world_camera.w,
+            self.world_camera.h,
+        )
+        with self._pending_lock:
+            self._full_scene_dirty = False
+            self.have_new_gaussians = bool(self._pending_batches)
+
+    def shutdown(self) -> None:
+        if self.gauss_renderer:
+            self.gauss_renderer.shutdown()
+            self.gauss_renderer = None
+            self.gauss_renderer_type = RendererType.UNKNOWN
+```
+
+### rosplat/core/__init__.py
+```
+"""
+This file makes the 'core' directory a Python package and exposes key components.
+"""
+
+from .gaussian_representation import GaussianData
+from . import util
+
+__all__ = ['GaussianData', 'util']
+```
+
+### rosplat/core/gaussian_representation.py
+```
+from __future__ import annotations
+import math
+from pathlib import Path
+from typing import List, Optional
+import numpy as np
+from plyfile import PlyData
+from dataclasses import dataclass
+from . import util
+
+
+@dataclass
+class GaussianData:
+    xyz: np.ndarray      # shape: (N, 3)
+    rot: np.ndarray      # shape: (N, 4)
+    scale: np.ndarray    # shape: (N, 3)
+    opacity: np.ndarray  # shape: (N, 1)
+    sh: np.ndarray       # shape: (N, sh_dim)
+
+    def flat(self) -> np.ndarray:
+        """
+        Returns a contiguous 2D array (N x total_dims) where each row is the concatenation of:
+          [xyz, rot, scale, opacity, sh]
+        """
+        combined = np.concatenate([self.xyz, self.rot, self.scale, self.opacity, self.sh], axis=-1)
+        return np.ascontiguousarray(combined)
+    
+    def __len__(self) -> int:
+        return len(self.xyz)
+    
+    @property 
+    def sh_dim(self) -> int:
+        return self.sh.shape[-1]
+
+
+def combine_gaussians(gaussians: List[Optional[GaussianData]]) -> Optional[GaussianData]:
+    """
+    Combines multiple GaussianData instances into one.
+    Filters out any None entries.
+    """
+    valid_gaussians = [g for g in gaussians if g is not None]
+    if not valid_gaussians:
+        return None
+    if len(valid_gaussians) == 1:
+        return valid_gaussians[0]
+    
+    combined = GaussianData(
+        xyz=np.concatenate([g.xyz for g in valid_gaussians], axis=0),
+        rot=np.concatenate([g.rot for g in valid_gaussians], axis=0),
+        scale=np.concatenate([g.scale for g in valid_gaussians], axis=0),
+        opacity=np.concatenate([g.opacity for g in valid_gaussians], axis=0),
+        sh=np.concatenate([g.sh for g in valid_gaussians], axis=0)
+    )
+    return combined
+
+
+def naive_gaussian() -> GaussianData:
+    """
+    Creates a set of 4 naive Gaussians with hard-coded values.
+    """
+    xyz = np.array([
+        0, 0, 0,
+        1, 0, 0,
+        0, 1, 0,
+        0, 0, 1,
+    ], dtype=np.float32).reshape(-1, 3)
+
+    rot = np.array([
+        1, 0, 0, 0,
+        1, 0, 0, 0,
+        1, 0, 0, 0,
+        1, 0, 0, 0,
+    ], dtype=np.float32).reshape(-1, 4)
+
+    scale = np.array([
+        0.03, 0.03, 0.03,
+        0.2,  0.03, 0.03,
+        0.03, 0.2,  0.03,
+        0.03, 0.03, 0.2,
+    ], dtype=np.float32).reshape(-1, 3)
+
+    opacity = np.array([1, 1, 1, 1], dtype=np.float32).reshape(-1, 1)
+
+    sh = np.array([
+        1, 0, 1,
+        1, 0, 0,
+        0, 1, 0,
+        0, 0, 1,
+    ], dtype=np.float32).reshape(-1, 3)
+    # Normalize the spherical-harmonics coefficients as in the reference.
+    sh = (sh - 0.5) / 0.28209
+
+    return GaussianData(xyz, rot, scale, opacity, sh)
+
+
+def _infer_sh_degree(num_extra_features: int) -> int:
+    """Infer an SH degree from the number of non-DC RGB coefficients."""
+    if num_extra_features % 3 != 0:
+        raise ValueError(
+            f"Invalid spherical-harmonics layout: {num_extra_features} extra "
+            "features cannot be divided across RGB channels"
+        )
+
+    coefficients_per_channel = num_extra_features // 3 + 1
+    root = math.isqrt(coefficients_per_channel)
+    if root * root != coefficients_per_channel:
+        raise ValueError(
+            f"Invalid spherical-harmonics layout: found {num_extra_features} "
+            "extra features; supported SH degrees 0-3 use 0, 9, 24, or 45"
+        )
+
+    return root - 1
+
+
+def from_ply(ply_path: Path, max_sh_degree: int = 3) -> GaussianData:
+    """
+    Loads Gaussians from a PLY file and returns a GaussianData instance.
+    Expects the PLY file to have properties corresponding to positions, opacity,
+    spherical harmonics (DC and extra), scales, and rotations.
+    """
+    plydata = PlyData.read(ply_path)
+    element = plydata.elements[0]
+
+    # Load positions.
+    xyz = np.stack([
+        np.asarray(element["x"]),
+        np.asarray(element["y"]),
+        np.asarray(element["z"])
+    ], axis=1).astype(np.float32)
+
+    # Load and transform opacities.
+    opacities = np.asarray(element["opacity"], dtype=np.float32)[..., np.newaxis]
+    opacities = 1 / (1 + np.exp(-opacities))
+
+    # Load DC features for spherical harmonics.
+    features_dc = np.empty((xyz.shape[0], 3, 1), dtype=np.float32)
+    features_dc[:, 0, 0] = np.asarray(element["f_dc_0"])
+    features_dc[:, 1, 0] = np.asarray(element["f_dc_1"])
+    features_dc[:, 2, 0] = np.asarray(element["f_dc_2"])
+
+    if not 0 <= max_sh_degree <= 3:
+        raise ValueError("max_sh_degree must be between 0 and 3")
+
+    # Load extra SH features. PLY files commonly store any degree from 0 to 3,
+    # so infer the available degree rather than requiring all degree-3 fields.
+    extra_f_names = sorted(
+        [prop.name for prop in element.properties if prop.name.startswith("f_rest_")],
+        key=lambda x: int(x.split('_')[-1])
+    )
+    available_sh_degree = _infer_sh_degree(len(extra_f_names))
+    if available_sh_degree > 3:
+        raise ValueError(
+            f"Unsupported SH degree {available_sh_degree}; ROSplat supports degrees 0-3"
+        )
+
+    features_extra = np.empty((xyz.shape[0], len(extra_f_names)), dtype=np.float32)
+    for idx, attr_name in enumerate(extra_f_names):
+        features_extra[:, idx] = np.asarray(element[attr_name])
+    available_extra_per_channel = (available_sh_degree + 1) ** 2 - 1
+    features_extra = features_extra.reshape(
+        (xyz.shape[0], 3, available_extra_per_channel)
+    )
+    requested_extra_per_channel = (min(available_sh_degree, max_sh_degree) + 1) ** 2 - 1
+    features_extra = features_extra[:, :, :requested_extra_per_channel]
+    features_extra = np.transpose(features_extra, (0, 2, 1))
+
+    # Load scales.
+    scale_names = sorted(
+        [prop.name for prop in element.properties if prop.name.startswith("scale_")],
+        key=lambda x: int(x.split('_')[-1])
+    )
+    scales = np.empty((xyz.shape[0], len(scale_names)), dtype=np.float32)
+    for idx, attr_name in enumerate(scale_names):
+        scales[:, idx] = np.asarray(element[attr_name])
+    scales = np.exp(scales).astype(np.float32)
+
+    # Load rotations.
+    rot_names = sorted(
+        [prop.name for prop in element.properties if prop.name.startswith("rot")],
+        key=lambda x: int(x.split('_')[-1])
+    )
+    rots = np.empty((xyz.shape[0], len(rot_names)), dtype=np.float32)
+    for idx, attr_name in enumerate(rot_names):
+        rots[:, idx] = np.asarray(element[attr_name])
+    # Normalize quaternions.
+    rots = rots / np.linalg.norm(rots, axis=-1, keepdims=True)
+    rots = rots.astype(np.float32)
+
+    # Concatenate DC and extra features to form SH coefficients.
+    sh = np.concatenate([
+        features_dc.reshape(-1, 3),
+        features_extra.reshape(xyz.shape[0], -1)
+    ], axis=-1).astype(np.float32)
+
+    return GaussianData(xyz, rots, scales, opacities, sh)
+
+
+def main():
+    # Test using naive gaussians.
+    naive = naive_gaussian()
+    print("Naive gaussians flat shape:", naive.flat().shape)
+
+    # Example: Loading from a PLY file.
+    ply_file = Path("../../dataset/ply/bonsai/point_cloud/iteration_7000/point_cloud.ply")
+    try:
+        gaussians = from_ply(ply_file)
+        print("Loaded Gaussians count:", len(gaussians))
+        print("Flat shape:", gaussians.flat().shape)
+        # Print properties for Gaussian at index 99 if it exists.
+        if len(gaussians) > 99:
+            print("Gaussian index 99:")
+            print(" Position:", gaussians.xyz[99])
+            print(" Opacity:", gaussians.opacity[99])
+            print(" Scale:", gaussians.scale[99])
+            print(" Rotation:", gaussians.rot[99])
+        else:
+            print("Less than 100 gaussians loaded.")
+    except Exception as e:
+        print(f"Error loading PLY data: {e}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### rosplat/core/util.py
+```
+"""Shared logging configuration."""
+
+import sys
+
+from loguru import logger
+
+
+logger.remove()
+logger.add(sys.stderr, level="INFO")
+```
+
+### rosplat/gui/__init__.py
+```
+from .imgui_manager import main_ui, shutdown_ros
+
+__all__ = ['main_ui', 'shutdown_ros']
+```
+
+### rosplat/gui/imgui_manager.py
+```
+import queue
+from datetime import datetime
+
+import numpy as np
+from PIL import Image
+
+# ImGui Bundle
+from imgui_bundle import (
+    imgui,
+    immapp,
+    implot,
+    portable_file_dialogs as pfd,
+)
+# Local modules
+from rosplat.core import util
+from rosplat.render.renderer import RenderOutputMode
+from rosplat.ros import ROSNodeManager
+
+
+# === Global State ===
+world_settings = None
+frame_queue = queue.Queue(maxsize=10)
+latest_frame = [None]  # mutable container
+imu_queue = queue.Queue(maxsize=1)
+ros_node_manager = ROSNodeManager()
+
+def shutdown_ros() -> None:
+    """Stop ROS listeners and their executor before rclpy is shut down."""
+    ros_node_manager.shutdown()
+
+# IMU history
+accel_x, accel_y, accel_z = [], [], []
+gyro_x, gyro_y, gyro_z = [], [], []
+
+
+def take_screenshot(filename: str = "screenshot.png") -> None:
+    """Save the most recent Spirula render without reading a GL framebuffer."""
+    renderer = world_settings.gauss_renderer
+    if renderer is None:
+        util.logger.warning("Cannot take a screenshot before the renderer starts")
+        return
+    Image.fromarray(renderer.latest_rgba, mode="RGBA").save(filename)
+    util.logger.info(f"[Screenshot saved] {filename}")
+
+
+class CircularBuffer:
+    def __init__(self, max_size: int = 2000) -> None:
+        self.max_size = max_size
+        self.data = np.full(max_size, np.nan, dtype=np.float32)
+        self.offset = 0
+        self.size = 0
+
+    def add_point(self, value: float) -> None:
+        self.data[self.offset] = value
+        self.offset = (self.offset + 1) % self.max_size
+        self.size = min(self.size + 1, self.max_size)
+
+    def get_data(self) -> np.ndarray:
+        return self.data[:self.size] if self.size < self.max_size else np.roll(self.data, -self.offset)
+
+
+class ScrollingBuffer:
+    def __init__(self, max_size: int = 2000) -> None:
+        self.max_size = max_size
+        self.data = np.full((max_size, 2), np.nan, dtype=np.float32)
+        self.offset = 0
+        self.size = 0
+
+    def add_point(self, x: float, y: float) -> None:
+        self.data[self.offset] = [x, y]
+        self.offset = (self.offset + 1) % self.max_size
+        self.size = min(self.size + 1, self.max_size)
+
+    def get_data(self) -> np.ndarray:
+        return self.data[:self.size].T if self.size < self.max_size else np.roll(self.data, -self.offset).T
+
+def set_image(image) -> None:
+    latest_frame[0] = image
+
+@immapp.static(open_file_dialog=None)
+def load_file() -> None:
+    """
+    Display a file dialog to load a PLY file into the current world settings.
+    """
+    static = load_file
+    if imgui.button("Open PLY"):
+        static.open_file_dialog = pfd.open_file("Select a file")
+    if static.open_file_dialog and static.open_file_dialog.ready():
+        file = static.open_file_dialog.result()
+        if file and file[0].lower().endswith(".ply"):
+            try:
+                world_settings.load_ply(file[0])
+            except (OSError, ValueError) as error:
+                util.logger.error(f"Could not load PLY '{file[0]}': {error}")
+        elif file:
+            util.logger.error(f"Selected file is not a PLY file: {file[0]}")
+        static.open_file_dialog = None
+
+RENDER_OUTPUT_LABELS = {
+    RenderOutputMode.COLOR: "Color",
+    RenderOutputMode.DEPTH: "Depth",
+    RenderOutputMode.OPACITY: "Opacity",
+}
+
+
+def _status_row(label: str, value: str) -> None:
+    imgui.table_next_row()
+    imgui.table_set_column_index(0)
+    imgui.text_disabled(label)
+    imgui.table_set_column_index(1)
+    imgui.text_wrapped(value)
+
+
+def _item_tooltip(message: str) -> None:
+    if imgui.is_item_hovered():
+        imgui.set_tooltip(message)
+
+
+@immapp.static(scale_modifier=None, settings_id=None)
+def display_renderer_tab() -> None:
+    """Display scene actions, renderer status, and visualization controls."""
+    static = display_renderer_tab
+    renderer = world_settings.gauss_renderer
+    if static.settings_id != id(world_settings):
+        static.settings_id = id(world_settings)
+        static.scale_modifier = world_settings.scale_modifier
+
+    imgui.separator_text("Status")
+    if renderer is None:
+        imgui.text_disabled("Renderer is initializing...")
+    elif imgui.begin_table("RendererStatus", 2):
+        _status_row("Device", renderer.device_name)
+        _status_row("Frame rate", f"{imgui.get_io().framerate:.1f} FPS")
+        _status_row("Splats", f"{world_settings.get_num_gaussians():,}")
+        _status_row("Scene SH", f"Degree {renderer.scene_sh_degree}")
+        imgui.end_table()
+
+    imgui.separator_text("Scene")
+    load_file()
+    imgui.same_line()
+    if imgui.button("Clear"):
+        world_settings.reset_gaussians()
+    imgui.same_line()
+    if imgui.button("Capture"):
+        take_screenshot(f"screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+
+    imgui.separator_text("Appearance")
+    output_modes = list(RenderOutputMode)
+    current_output = output_modes.index(world_settings.render_output)
+    imgui.text("Output")
+    imgui.set_next_item_width(-1)
+    changed, current_output = imgui.combo(
+        "##RenderOutput",
+        current_output,
+        [RENDER_OUTPUT_LABELS[mode] for mode in output_modes],
+    )
+    _item_tooltip(
+        "Color shows spherical-harmonic shading. Depth is auto-normalized "
+        "per frame. Opacity shows accumulated Gaussian coverage."
+    )
+    if changed:
+        world_settings.update_render_output(output_modes[current_output])
+
+    scene_degree = renderer.scene_sh_degree if renderer is not None else 0
+    sh_options = [f"Auto (scene degree {scene_degree})", "0 — DC only"]
+    sh_options.extend(str(degree) for degree in range(1, scene_degree + 1))
+    requested_degree = world_settings.active_sh_degree
+    current_sh = 0 if requested_degree is None else min(requested_degree, scene_degree) + 1
+    imgui.text("Spherical harmonics")
+    imgui.set_next_item_width(-1)
+    if renderer is None:
+        imgui.begin_disabled()
+    changed, current_sh = imgui.combo("##SphericalHarmonics", current_sh, sh_options)
+    _item_tooltip(
+        "Lower degrees remove view-dependent color detail. Auto uses the "
+        "highest degree stored in the current scene."
+    )
+    if renderer is None:
+        imgui.end_disabled()
+    if changed:
+        degree = None if current_sh == 0 else current_sh - 1
+        world_settings.update_sh_degree(degree)
+
+    imgui.text("Splat scale")
+    imgui.set_next_item_width(-70)
+    _, static.scale_modifier = imgui.slider_float(
+        "##SplatScale",
+        static.scale_modifier,
+        0.05,
+        3.0,
+        "%.2f×",
+    )
+    scale_edit_finished = imgui.is_item_deactivated_after_edit()
+    _item_tooltip(
+        "Multiplies every Gaussian's scale. The value is applied when you "
+        "release the control to keep large streamed scenes responsive."
+    )
+    imgui.same_line()
+    if imgui.button("Reset##SplatScale"):
+        static.scale_modifier = 1.0
+        world_settings.update_scale_modifier(1.0)
+    elif scale_edit_finished:
+        world_settings.update_scale_modifier(static.scale_modifier)
+
+
+@immapp.static(
+    selected_topic="",
+    available_topics=[],
+    active_topics=[],
+    prev_time=-1.0
+)
+def display_streams_tab() -> None:
+    """
+    Display ROS topic discovery and subscription management.
+    """
+    static = display_streams_tab
+    imgui.text_wrapped("Discover ROS 2 topics and subscribe them to ROSplat.")
+
+    current_time = imgui.get_time()
+    if static.prev_time == -1.0 or current_time - static.prev_time > 1.0:
+        static.available_topics = ros_node_manager._graph.get_topic_names_and_types()
+        static.prev_time = current_time
+
+    if imgui.button("Refresh topics"):
+        static.available_topics = ros_node_manager._graph.get_topic_names_and_types()
+
+    if imgui.begin_table("TopicsTable", 3):
+        imgui.table_next_column()
+        imgui.text("Available Topics")
+        for topic in static.available_topics:
+            topic_name = topic[0]
+            selected = (static.selected_topic == topic_name)
+            changed, selected = imgui.selectable(topic_name, selected)
+            if changed and selected:
+                static.selected_topic = topic_name
+
+        imgui.table_next_column()
+        imgui.text("Message Type")
+        for topic in static.available_topics:
+            imgui.text(topic[1][0])
+
+        imgui.table_next_column()
+        imgui.text("Subscriptions")
+        for i, topic in enumerate(static.active_topics.copy()):
+            changed, active = imgui.checkbox(f"{i}", True)
+            imgui.same_line()
+            imgui.text(topic)
+            if topic not in [t[0] for t in static.available_topics] or not active:
+                static.active_topics.remove(topic)
+                ros_node_manager.kill_listener(topic)
+        imgui.end_table()
+
+    is_valid = static.selected_topic and static.selected_topic not in static.active_topics
+    if not is_valid:
+        imgui.begin_disabled()
+    if imgui.button("Subscribe"):
+        static.active_topics.append(static.selected_topic)
+        static.active_topics.sort()
+        ros_node_manager.add_listener(static.selected_topic)
+        static.selected_topic = ""
+    if not is_valid:
+        imgui.end_disabled()
+
+
+
+def display_camera_tab() -> None:
+    """
+    Placeholder for camera settings tab.
+    """
+    imgui.text("Camera settings go here.")
+
+
+@immapp.static(image_texture=None, last_frame=None)
+def display_frames_tab() -> None:
+    """Display the latest ROS image using the active ImGui backend texture."""
+    static = display_frames_tab
+
+    # Grab the latest image from shared memory
+    if latest_frame[0] is not None and latest_frame[0] is not static.last_frame:
+        static.last_frame = latest_frame[0]
+        frame = np.asarray(static.last_frame)
+        if frame.shape[-1] == 3:
+            alpha = np.full((*frame.shape[:2], 1), 255, dtype=np.uint8)
+            frame = np.concatenate((frame, alpha), axis=-1)
+        static.image_texture = world_settings.texture_registry.upload(
+            "ros-image-frame", np.ascontiguousarray(frame, dtype=np.uint8)
+        )
+
+    frame = static.last_frame
+
+    if frame is None:
+        imgui.text("Waiting for frame...")
+        return
+
+    avail_w, avail_h = imgui.get_content_region_avail()
+    if implot.begin_plot("Live Frame", size=(avail_w, avail_h)):
+        implot.setup_axes(
+            "X", "Y",
+            implot.AxisFlags_.no_tick_labels,
+            implot.AxisFlags_.no_tick_labels
+        )
+        implot.plot_image(
+            "Frame",
+            static.image_texture,
+            (0, 0),
+            (avail_w, avail_h)
+        )
+        implot.end_plot()
+
+
+
+def update_imu_queue(lin_accel: np.ndarray, ang_vel: np.ndarray) -> None:
+    """
+    Thread-safe update to the IMU data queue.
+    """
+    try:
+        imu_queue.get_nowait()
+    except queue.Empty:
+        pass
+    imu_queue.put((lin_accel, ang_vel))
+
+
+def update_imu(lin_accel: np.ndarray, ang_vel: np.ndarray) -> None:
+    """
+    Append IMU data to the global lists.
+    """
+    accel_x.extend(lin_accel)
+    accel_y.extend(lin_accel[1:])
+    accel_z.extend(lin_accel[2:])
+    gyro_x.extend(ang_vel)
+    gyro_y.extend(ang_vel[1:])
+    gyro_z.extend(ang_vel[2:])
+
+
+@immapp.static(auto_fit_accel=True, auto_fit_gyro=True)
+def display_imu_tab() -> None:
+    """
+    Display IMU acceleration and gyro plots.
+    """
+    static = display_imu_tab
+    _, static.auto_fit_accel = imgui.checkbox("Auto-Fit Acceleration Plot", static.auto_fit_accel)
+    _, static.auto_fit_gyro = imgui.checkbox("Auto-Fit Gyro Plot", static.auto_fit_gyro)
+
+    def _plot(name, x_data, y_data, fit_flag):
+        if implot.begin_plot(name):
+            flags = implot.AxisFlags_.auto_fit if fit_flag else 0
+            implot.setup_axes("Sample Index", name, flags, flags)
+            if len(x_data) > 0:
+                xs = np.arange(len(x_data), dtype=np.float32)
+                implot.plot_line(f"{name} X", xs, np.array(x_data, dtype=np.float32))
+            implot.end_plot()
+
+    _plot("Acceleration", accel_x, accel_y, static.auto_fit_accel)
+    _plot("Gyroscope", gyro_x, gyro_y, static.auto_fit_gyro)
+
+
+def set_gaussian(msg) -> None:
+    """
+    Append new Gaussian data from a message.
+    """
+    if msg is not None:
+        world_settings.append_gaussians(msg)
+
+
+def main_ui(this_world_settings) -> None:
+    """
+    Entry point for the main UI.
+    """
+    global world_settings
+    if world_settings is None:
+        world_settings = this_world_settings
+
+    if imgui.begin("Main Application"):
+        if imgui.begin_tab_bar("MainTabs"):
+            if imgui.begin_tab_item("Renderer")[0]:
+                display_renderer_tab()
+                imgui.end_tab_item()
+            if imgui.begin_tab_item("Streams")[0]:
+                display_streams_tab()
+                imgui.end_tab_item()
+            if imgui.begin_tab_item("Camera")[0]:
+                display_camera_tab()
+                imgui.end_tab_item()
+            if imgui.begin_tab_item("Frames")[0]:
+                display_frames_tab()
+                imgui.end_tab_item()
+            if imgui.begin_tab_item("IMU")[0]:
+                display_imu_tab()
+                imgui.end_tab_item()
+            imgui.end_tab_bar()
+        imgui.end()
+
+
+
+    if imgui.begin("Splat"):
+        avail_w, avail_h = imgui.get_content_region_avail()
+        
+        # Cast both to int
+        avail_w = int(avail_w)
+        avail_h = int(avail_h)
+
+        if avail_w > 0 and avail_h > 0:
+            this_world_settings.update_window_size(avail_w, avail_h)
+            tex = this_world_settings.gauss_renderer.draw()
+            vec2 = imgui.ImVec2(avail_w, avail_h)
+            imgui.image(tex, vec2)
+            if imgui.is_window_hovered():
+                this_world_settings.check_inputs()
+        imgui.end()
+```
+
+### rosplat/gui/vulkan_texture.py
+```
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Hashable
+
+import numpy as np
+import wgpu
+from imgui_bundle import imgui
+
+
+@dataclass
+class _TextureRecord:
+    width: int
+    height: int
+    texture: object
+    texture_ref: imgui.ImTextureRef
+
+
+class VulkanTextureRegistry:
+    """Upload reusable RGBA textures for wgpu-py's Dear ImGui renderer."""
+
+    def __init__(self, device, imgui_backend) -> None:
+        self._device = device
+        self._imgui_backend = imgui_backend
+        self._textures: dict[Hashable, _TextureRecord] = {}
+
+    def upload(self, owner: Hashable, rgba: np.ndarray) -> imgui.ImTextureRef:
+        pixels = np.ascontiguousarray(rgba, dtype=np.uint8)
+        if pixels.ndim != 3 or pixels.shape[2] != 4:
+            raise ValueError("Vulkan textures require a height x width x 4 RGBA array")
+
+        height, width = pixels.shape[:2]
+        if width <= 0 or height <= 0:
+            raise ValueError("Vulkan textures cannot be empty")
+
+        record = self._textures.get(owner)
+        if record is None or (record.width, record.height) != (width, height):
+            self.release(owner)
+            texture = self._device.create_texture(
+                label="ROSplat RGBA texture",
+                size=(width, height, 1),
+                format=wgpu.TextureFormat.rgba8unorm,
+                usage=wgpu.TextureUsage.COPY_DST | wgpu.TextureUsage.TEXTURE_BINDING,
+            )
+            texture_ref = self._imgui_backend.register_texture(texture.create_view())
+            record = _TextureRecord(width, height, texture, texture_ref)
+            self._textures[owner] = record
+
+        self._device.queue.write_texture(
+            {
+                "texture": record.texture,
+                "mip_level": 0,
+                "origin": (0, 0, 0),
+            },
+            pixels,
+            {"offset": 0, "bytes_per_row": width * 4},
+            (width, height, 1),
+        )
+        return record.texture_ref
+
+    def release(self, owner: Hashable) -> None:
+        record = self._textures.pop(owner, None)
+        if record is None:
+            return
+        self._imgui_backend.unregister_texture(record.texture_ref)
+        record.texture.destroy()
+
+    def shutdown(self) -> None:
+        for owner in list(self._textures):
+            self.release(owner)
+```
+
+### rosplat/gui/wgpu_backend.py
+```
+from imgui_bundle import imgui, implot
+from wgpu.utils.imgui import ImguiRenderer
+
+
+CANVAS_OPTIONS = {
+    "title": "ROSplat",
+    "size": (1280, 720),
+    "update_mode": "fastest",
+    "vsync": False,
+}
+
+
+class RosplatImguiRenderer(ImguiRenderer):
+    """WGPU renderer that owns ROSplat's Dear ImGui and ImPlot contexts."""
+
+    KEY_MAP = {
+        **ImguiRenderer.KEY_MAP,
+        # rendercanvas's GLFW backend emits a literal space. Keep the named
+        # spelling too so this remains correct with other canvas backends.
+        " ": imgui.Key.space,
+        "Space": imgui.Key.space,
+    }
+
+    def __init__(self, device, canvas, render_target_format=None):
+        super().__init__(device, canvas, render_target_format)
+        # WGPU creates the Dear ImGui context, but ImPlot has a separate
+        # context that must be created afterwards.
+        self._implot_context = implot.create_context()
+
+    def render(self):
+        imgui.set_current_context(self.imgui_context)
+        implot.set_current_context(self._implot_context)
+        return super().render()
+
+    def shutdown(self) -> None:
+        """Destroy ImPlot before its parent Dear ImGui context disappears."""
+        if self._implot_context is None:
+            return
+        imgui.set_current_context(self.imgui_context)
+        implot.destroy_context(self._implot_context)
+        self._implot_context = None
+```
+
+### rosplat/input/__init__.py
+```
+from .input_handler import InputHandler
+
+__all__ = ['InputHandler']
+```
+
+### rosplat/input/input_handler.py
+```
+import time
+from imgui_bundle import imgui
+
+
+CAMERA_MOVE_DIRECTIONS = {
+    imgui.Key.w: (0, 1, 0),
+    imgui.Key.s: (0, -1, 0),
+    imgui.Key.a: (-1, 0, 0),
+    imgui.Key.d: (1, 0, 0),
+    imgui.Key.space: (0, 0, 1),
+    imgui.Key.left_ctrl: (0, 0, -1),
+}
+
+
+class InputHandler:
+    def __init__(self, world_settings):
+        """
+        Handles free-flight camera movement using ImGui input API.
+        Reimplements original behavior using new-style polling.
+        """
+        self.world_settings = world_settings
+        self.cam = world_settings.world_camera
+
+        self.last_time = time.time()
+        self.last_mouse_pos = None
+
+    def check_inputs(self):
+        # Time delta
+        now = time.time()
+        dt = now - self.last_time
+        self.last_time = now
+
+        cam = self.cam
+        # Get current mouse state
+        mouse = imgui.get_io().mouse_pos
+        x, y = mouse.x, mouse.y
+        left_pressed = imgui.is_mouse_down(imgui.MouseButton_.left)
+        middle_pressed = imgui.is_mouse_down(imgui.MouseButton_.middle)
+
+        dragging = left_pressed or middle_pressed
+
+        # Handle mouse drag (rotation or panning)
+        if dragging:
+            if self.last_mouse_pos is not None:
+                dx = x - self.last_mouse_pos[0]
+                dy = y - self.last_mouse_pos[1]
+
+                # Apply movement based on which button is pressed
+                if left_pressed:
+                    cam.is_rotating = True
+                    cam.process_mouse_delta(dx, -dy)
+                if middle_pressed:
+                    cam.is_panning = True
+                    cam.process_mouse_delta(dx, -dy)
+            self.last_mouse_pos = (x, y)
+        else:
+            cam.is_rotating = False
+            cam.is_panning = False
+            self.last_mouse_pos = None
+
+        # Scroll (via ImGui)
+        io = imgui.get_io()
+        if io.mouse_wheel != 0.0:
+            cam.process_scroll(0.0, io.mouse_wheel)
+
+        if io.want_text_input:
+            return
+
+        # 6) Keyboard movement
+        speed = cam.trans_sensitivity * dt
+        if imgui.is_key_down(imgui.Key.left_shift):
+            speed *= 3.0
+
+        # Camera translation is expressed in local coordinates and is
+        # renderer-independent: +X right, +Y forward, +Z up.
+        for key, (dx, dy, dz) in CAMERA_MOVE_DIRECTIONS.items():
+            if imgui.is_key_down(key):
+                cam.process_translation(dx * speed, dy * speed, dz * speed)
+
+        # Camera roll
+        if imgui.is_key_down(imgui.Key.q):
+            cam.process_roll(-1)
+        if imgui.is_key_down(imgui.Key.e):
+            cam.process_roll(1)
+```
+
+### rosplat/render/__init__.py
+```
+from .camera import Camera
+
+__all__ = ['Camera']
+```
+
+### rosplat/render/camera.py
+```
+# camera.py
+import math
+import numpy as np
+from rosplat.core import util
+import glm
+
+class Camera:
+    """
+    Free‐flight camera with full basis‐vector orientation:
+      • front, up, right kept orthonormal
+      • yaw/pitch/roll all performed via axis‐angle
+      • auxiliary intrinsics + legacy getters preserved
+    """
+
+    def __init__(self, height: int, width: int) -> None:
+        # viewport
+        self.h = height
+        self.w = width
+
+        # clipping & FOV
+        self.znear = 0.01
+        self.zfar  = 100.0
+        self.fovy  = np.pi / 2
+
+        # position & orientation vectors
+        self.position = np.array([0.0, 0.0, 3.0], dtype=np.float32)
+        # look‐direction
+        self.front = np.array([0.0, 0.0, -1.0], dtype=np.float32)
+        # conventional right-handed world up
+        self.up    = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+
+        # derive right from front × up
+        self._reorthonormalize()
+
+        # mouse‐look state
+        self.last_x = width / 2
+        self.last_y = height / 2
+        self.is_rotating = False
+        self.is_panning  = False
+
+        # “dirty” flags
+        self.dirty_pose      = True
+        self.dirty_intrinsic = True
+
+        # sensitivities
+        self.rot_sensitivity   = 0.002   # radians per pixel
+        self.trans_sensitivity = 2.5     # units per second
+        self.zoom_sensitivity  = 0.1
+        self.roll_sensitivity  = 0.03    # radians per keypress
+
+        self.log = util.logger
+
+    def _reorthonormalize(self):
+        """Ensure front, up, right remain an orthonormal basis."""
+        self.front /= np.linalg.norm(self.front)
+        self.up    -= self.front * np.dot(self.front, self.up)
+        self.up    /= np.linalg.norm(self.up)
+        self.right  = np.cross(self.front, self.up)
+        self.right /= np.linalg.norm(self.right)
+
+    def _rotate_vec(self, v: np.ndarray, axis: np.ndarray, angle: float) -> np.ndarray:
+        """Rodrigues’ rotation of v around axis by angle."""
+        axis = axis / np.linalg.norm(axis)
+        cosA = math.cos(angle)
+        sinA = math.sin(angle)
+        return (
+            v * cosA
+            + np.cross(axis, v) * sinA
+            + axis * np.dot(axis, v) * (1 - cosA)
+        )
+
+    #
+    # === Controls: translation, scroll, mouse‐drag ===
+    #
+
+    def process_translation(self, dx: float, dy: float, dz: float) -> None:
+        """
+        Move in local camera space:
+          • forward/back = dy
+          • right/left   = dx
+          • up/down      = dz
+        """
+        move = self.front*dy + self.right*dx + self.up*dz
+        self.position += move
+        self.dirty_pose = True
+
+    def process_scroll(self, xoffset: float, yoffset: float) -> None:
+        """Zoom along the current look‐direction."""
+        self.position += self.front * yoffset * self.zoom_sensitivity
+        self.dirty_pose = True
+
+    def process_mouse(self, xpos: float, ypos: float) -> None:
+        dx = xpos - self.last_x
+        dy = self.last_y - ypos
+        self.last_x = xpos
+        self.last_y = ypos
+
+        if self.is_rotating:
+            self._rotate_camera(dx, dy)
+        elif self.is_panning:
+            self._pan_camera(dx, dy)
+
+    def process_mouse_delta(self, dx: float, dy: float) -> None:
+        """
+        Process a relative mouse motion:
+        • dx, dy = difference in pixels since last frame
+        • Applies rotation (yaw/pitch) or panning depending on active mode
+        """
+        if self.is_rotating:
+            self._rotate_camera(dx, dy)
+        elif self.is_panning:
+            self._pan_camera(dx, dy)
+
+
+    def _pan_camera(self, dx: float, dy: float) -> None:
+        """
+        Slide camera parallel to view plane:
+          • horizontal (dx) along right
+          • vertical   (dy) along up
+        """
+        self.position += (self.right*dx + self.up*dy) * self.trans_sensitivity * 0.01
+        self.dirty_pose = True
+
+    #
+    # === Axis‐angle rotations ===
+    #
+
+    def _rotate_camera(self, dx: float, dy: float) -> None:
+        """
+        Yaw (around up) then pitch (around right), both respecting current roll.
+        """
+        # yaw: negative dx → turn right
+        ang_yaw   = -dx * self.rot_sensitivity
+        self.front = self._rotate_vec(self.front, self.up, ang_yaw)
+
+        # pitch: positive dy → look up
+        self._reorthonormalize()
+        ang_pitch = +dy * self.rot_sensitivity
+        self.front = self._rotate_vec(self.front, self.right, ang_pitch)
+        self.up    = self._rotate_vec(self.up,    self.right, ang_pitch)
+
+        self._reorthonormalize()
+        self.dirty_pose = True
+
+    def process_roll(self, direction: float) -> None:
+        """
+        Roll around the view axis:
+          • +direction → CCW from camera POV
+          • −direction → CW
+        """
+        angle = direction * self.roll_sensitivity
+        self.up    = self._rotate_vec(self.up,    self.front, angle)
+        self.right = self._rotate_vec(self.right, self.front, angle)
+        self._reorthonormalize()
+        self.dirty_pose = True
+
+    #
+    # === Matrices & auxiliary getters ===
+    #
+
+    def get_view_matrix(self) -> np.ndarray:
+        """Look‐at using position + front/up."""
+        pos   = glm.vec3(*self.position)
+        tgt   = glm.vec3(*(self.position + self.front))
+        upv   = glm.vec3(*self.up)
+        return np.array(glm.lookAt(pos, tgt, upv), dtype=np.float32)
+
+    def get_view_matrix_opencv(self) -> np.ndarray:
+        """Return a world-to-camera matrix using Spirula's OpenCV axes.
+
+        ``glm.lookAt`` uses graphics camera coordinates, where the camera looks
+        down negative Z and positive Y points up. Spirula expects positive Z
+        in front of the camera and positive Y pointing down.
+        """
+        opengl_to_opencv = np.diag([1.0, -1.0, -1.0, 1.0]).astype(np.float32)
+        return opengl_to_opencv @ self.get_view_matrix()
+
+    def get_view_matrix_glm(self) -> np.ndarray:
+        """Alias for backward compatibility."""
+        return self.get_view_matrix()
+
+    def get_project_matrix(self) -> np.ndarray:
+        """Perspective projection."""
+        return np.array(
+            glm.perspective(self.fovy, self.w/self.h, self.znear, self.zfar),
+            dtype=np.float32
+        )
+
+    def get_pose(self) -> np.ndarray:
+        """Legacy: return camera position."""
+        return self.position.copy()
+
+    def get_intrinsics_matrix(self) -> np.ndarray:
+        """3×3 pinhole intrinsics."""
+        f = self.h / (2 * math.tan(self.fovy/2))
+        return np.array([
+            [f, 0, self.w/2],
+            [0, f, self.h/2],
+            [0, 0, 1]
+        ], dtype=np.float32)
+
+    def get_htanfovxy_focal(self) -> list:
+        """
+        [tan(fov_x/2), tan(fov_y/2), focal_length].
+        """
+        htany = math.tan(self.fovy/2)
+        htanx = htany * (self.w / self.h)
+        focal = self.w / (2 * htanx) if htanx != 0 else 0
+        return [htanx, htany, focal]
+```
+
+### rosplat/ros/__init__.py
+```
+__all__ = ['ROSNodeManager']
+
+
+def __getattr__(name):
+    if name == 'ROSNodeManager':
+        from .ros_util import ROSNodeManager
+
+        return ROSNodeManager
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+```
+
+### rosplat/ros/image_conversion.py
+```
+"""Lightweight conversion helpers for ``sensor_msgs/msg/Image`` messages."""
+
+from typing import Protocol
+
+import numpy as np
+
+
+class ImageMessage(Protocol):
+    height: int
+    width: int
+    encoding: str
+    is_bigendian: int
+    step: int
+    data: bytes
+
+
+_ENCODINGS = {
+    "rgb8": (np.dtype("u1"), 3),
+    "bgr8": (np.dtype("u1"), 3),
+    "rgba8": (np.dtype("u1"), 4),
+    "bgra8": (np.dtype("u1"), 4),
+    "mono8": (np.dtype("u1"), 1),
+    "8uc1": (np.dtype("u1"), 1),
+    "mono16": (np.dtype("u2"), 1),
+    "16uc1": (np.dtype("u2"), 1),
+}
+
+
+def image_to_rgb8(message: ImageMessage) -> np.ndarray:
+    """Convert a common ROS image encoding to a contiguous RGB8 array.
+
+    The converter deliberately supports the encodings ROSplat displays instead
+    of pulling in the full OpenCV and cv_bridge dependency stack.
+    """
+    encoding = message.encoding.lower()
+    try:
+        dtype, channels = _ENCODINGS[encoding]
+    except KeyError as error:
+        supported = ", ".join(sorted(_ENCODINGS))
+        raise ValueError(
+            f"Unsupported image encoding {message.encoding!r}; supported: {supported}"
+        ) from error
+
+    height = int(message.height)
+    width = int(message.width)
+    step = int(message.step)
+    if height <= 0 or width <= 0:
+        raise ValueError(f"Invalid image dimensions: {width}x{height}")
+
+    bytes_per_pixel = dtype.itemsize * channels
+    packed_row_size = width * bytes_per_pixel
+    if step < packed_row_size:
+        raise ValueError(
+            f"Image step {step} is smaller than the packed row size {packed_row_size}"
+        )
+
+    raw = np.frombuffer(message.data, dtype=np.uint8)
+    required_size = height * step
+    if raw.size < required_size:
+        raise ValueError(
+            f"Image data has {raw.size} bytes, but {required_size} are required"
+        )
+
+    packed = np.ascontiguousarray(
+        raw[:required_size].reshape(height, step)[:, :packed_row_size]
+    )
+    if dtype.itemsize > 1:
+        byte_order = ">" if bool(message.is_bigendian) else "<"
+        dtype = dtype.newbyteorder(byte_order)
+
+    pixels = packed.view(dtype).reshape(height, width, channels)
+
+    if encoding == "bgr8":
+        rgb = pixels[:, :, ::-1]
+    elif encoding == "bgra8":
+        rgb = pixels[:, :, [2, 1, 0]]
+    elif encoding == "rgba8":
+        rgb = pixels[:, :, :3]
+    elif channels == 1:
+        grayscale = pixels[:, :, 0]
+        if dtype.itemsize > 1:
+            grayscale = (
+                grayscale.astype(np.uint32) * 255 // np.iinfo(np.uint16).max
+            ).astype(np.uint8)
+        rgb = np.repeat(grayscale[:, :, None], 3, axis=2)
+    else:
+        rgb = pixels
+
+    return np.ascontiguousarray(rgb, dtype=np.uint8)
+```
+
+### rosplat/ros/ros_util.py
+```
+import threading
+from enum import Enum
+from typing import Optional, Tuple, Dict, List
+import time
+
+import numpy as np
+import rclpy
+from rclpy.executors import SingleThreadedExecutor, MultiThreadedExecutor
+from rclpy.node import Node
+from sensor_msgs.msg import Image, CameraInfo, PointCloud2, Imu
+from geometry_msgs.msg import PoseStamped
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+
+import rosplat.core.util as util
+import rosplat.gui.imgui_manager as imgui_manager
+from rosplat.ros.image_conversion import image_to_rgb8
+
+try:
+    from gaussian_interface.msg import SingleGaussian, GaussianArray
+except ImportError:
+    util.logger.error("Could not import SingleGaussian message. Make sure the package is built and sourced correctly.")
+    SingleGaussian = None
+    GaussianArray = None
+
+class MsgType(Enum):
+    IMAGE = ("sensor_msgs/msg/Image", Image)
+    CAMERA_INFO = ("sensor_msgs/msg/CameraInfo", CameraInfo)
+    POINT_CLOUD2 = ("sensor_msgs/msg/PointCloud2", PointCloud2)
+    IMU = ("sensor_msgs/msg/Imu", Imu)
+    POSE_STAMPED = ("geometry_msgs/msg/PoseStamped", PoseStamped)
+    GAUSSIAN = ("gaussian_interface/msg/SingleGaussian", SingleGaussian)
+    GAUSSIAN_ARRAY = ("gaussian_interface/msg/GaussianArray", GaussianArray)
+
+def list_topics():
+    if not rclpy.ok():
+        rclpy.init()
+
+    util.logger.error(rclpy.ok)
+    
+    node = rclpy.create_node('list_topics')
+    exec = SingleThreadedExecutor()
+    exec.add_node(node)
+    exec.spin_once(timeout_sec=0.5)      # process discovery events
+    topics = node.get_topic_names_and_types()
+    exec.shutdown()
+    node.destroy_node()
+    rclpy.shutdown()
+    return sorted(topics, key=lambda x: x[0])
+
+    return sorted(topics, key=lambda x: x[0])
+
+def get_message_class(message_type_str: str):
+    """
+    Retrieve the message class corresponding to the message type string.
+    """
+    util.logger.info(f"Getting message class for {message_type_str}")
+    for msg_type in MsgType:
+        if msg_type.value[0] == message_type_str:
+            return msg_type.value[1]
+    return None
+
+class SingleNode(Node):
+    """
+    A node that subscribes to a specific topic and routes received messages to the appropriate handler.
+    """
+    def __init__(self, node_idx: int, topic_name: str, msg_type) -> None:
+        # Create a valid node name by combining a counter and a sanitized topic name.
+        node_name = f"listener_{node_idx}_{topic_name.replace('/', '_')}"
+        super().__init__(node_name)
+        self.topic_name = topic_name
+        self.msg_type = msg_type
+
+        qos = QoSProfile(depth=1000)
+        qos.reliability = ReliabilityPolicy.RELIABLE
+        qos.durability = DurabilityPolicy.VOLATILE
+
+        self.subscriber = self.create_subscription(
+            msg_type,
+            topic_name,
+            self.callback,
+            qos
+        )
+
+    def callback(self, msg) -> None:
+        """
+        Callback method that selects the proper update method based on the message type.
+        """
+        if self.msg_type == Image:
+            self.update_image(msg)
+        elif self.msg_type == Imu:
+            self.update_imu(msg)
+        elif SingleGaussian is not None and self.msg_type == SingleGaussian:
+            self.update_gaussian(msg)
+        elif GaussianArray is not None and self.msg_type == GaussianArray:
+            self.update_gaussian(msg)
+
+    def update_gaussian(self, msg) -> None:
+        """
+        Process and pass a gaussian message to the UI.
+        """
+        imgui_manager.set_gaussian(msg)
+
+    def update_imu(self, msg) -> None:
+        """
+        Process and update IMU data in the UI.
+        """
+        try:
+            lin_accel = np.array([msg.linear_acceleration.x,
+                                  msg.linear_acceleration.y,
+                                  msg.linear_acceleration.z])
+            ang_vel = np.array([msg.angular_velocity.x,
+                                msg.angular_velocity.y,
+                                msg.angular_velocity.z])
+            imgui_manager.update_imu(lin_accel, ang_vel)
+        except Exception as e:
+            util.logger.error(f"Error updating IMU: {e}")
+
+    def update_image(self, msg) -> None:
+        """
+        Convert the ROS image message to an RGB NumPy array and update the UI.
+        """
+        try:
+            img = image_to_rgb8(msg)
+            imgui_manager.set_image(img)
+        except Exception as e:
+            util.logger.error(f"Error converting image: {e}")
+
+    def destroy(self) -> None:
+        """
+        Clean up the node.
+        """
+        try:
+            self.destroy_node()
+        except Exception:
+            pass
+
+class ROSNodeManager:
+    """
+    Manager class that handles spinning ROS nodes in a single MultiThreadedExecutor.
+    """
+    def __init__(self) -> None:
+        if not rclpy.ok():
+            rclpy.init()
+
+        self.executor = rclpy.executors.MultiThreadedExecutor()
+        self._graph = GraphWatcher()
+        self.executor.add_node(self._graph)
+
+        self.nodes: Dict[str, SingleNode] = {}
+        self.node_idx_counter: int = 0
+        self._lock = threading.Lock()
+        self._is_shutdown = False
+
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+        self._thread.start()
+
+    def _spin(self):
+        """Run the executor in a dedicated background thread."""
+        self.executor.spin()
+
+    def get_msg_type(self, topic_name: str):
+        """
+        Check the topic and return its corresponding message type.
+        """
+        topics = self._graph.get_topic_names_and_types()
+        for name, type_list in topics:
+            if name == topic_name and type_list:
+                message_class = get_message_class(type_list[0])
+                return message_class
+        return None
+
+    def add_listener(self, topic_name: str) -> None:
+        """
+        Create and add a node that listens to messages on the given topic.
+        """
+        with self._lock:
+            if topic_name in self.nodes:
+                util.logger.info(f"Node for topic {topic_name} already exists.")
+                return
+
+            msg_type = self.get_msg_type(topic_name)
+            if msg_type is None:
+                util.logger.error(f"Could not determine message type for topic {topic_name}")
+                return
+
+            node = SingleNode(self.node_idx_counter, topic_name, msg_type)
+            self.node_idx_counter += 1
+
+            self.executor.add_node(node)
+            self.nodes[topic_name] = node
+            util.logger.info(f"Added listener for topic {topic_name}")
+
+    def kill_listener(self, topic_name: str) -> None:
+        """
+        Remove the listener node for the specified topic and clean it up.
+        """
+        with self._lock:
+            if topic_name in self.nodes:
+                node = self.nodes.pop(topic_name)
+                self.executor.remove_node(node)
+                node.destroy()
+                util.logger.info(f"Killed listener for topic {topic_name}")
+            else:
+                util.logger.error(f"Node for topic {topic_name} does not exist.")
+
+    def shutdown(self):
+        """
+        Shutdown the executor and clean up all nodes.
+        """
+        with self._lock:
+            if self._is_shutdown:
+                return
+            self._is_shutdown = True
+            nodes = list(self.nodes.items())
+            self.nodes.clear()
+
+        for topic_name, node in nodes:
+            self.executor.remove_node(node)
+            node.destroy()
+            util.logger.info(f"Killed listener for topic {topic_name}")
+
+        self.executor.remove_node(self._graph)
+        self._graph.shutdown()
+        self.executor.shutdown()
+        if self._thread.is_alive():
+            self._thread.join(timeout=5.0)
+        if self._thread.is_alive():
+            util.logger.warning("ROS executor thread did not stop within five seconds.")
+        util.logger.info("ROSNodeManager shutdown complete.")
+
+class GraphWatcher(Node):
+    """
+    A node that can initialize ROS graph monitoring, but only starts its executor when explicitly requested.
+    """
+    def __init__(self):
+        super().__init__('graph_watcher')
+        self.executor = None
+        self._thread = None
+        self._stop_event = threading.Event()
+
+    def start(self):
+        if self.executor is not None:
+            util.logger.warning("GraphWatcher already started.")
+            return
+
+        if not rclpy.ok():
+            rclpy.init()
+
+        try:
+            self.executor = SingleThreadedExecutor()
+            self.executor.add_node(self)
+            self._thread = threading.Thread(target=self._spin, daemon=True)
+            self._thread.start()
+            util.logger.info("GraphWatcher started.")
+        except Exception as e:
+            util.logger.error(f"Failed to start GraphWatcher: {e}")
+            self.executor = None
+
+
+    def _spin(self):
+        while rclpy.ok() and not self._stop_event.is_set():
+            self.executor.spin_once(timeout_sec=0.1)
+
+    def get_topic_names_and_types(self):
+        return super().get_topic_names_and_types()
+
+    def get_node_names_and_namespaces(self):
+        return super().get_node_names_and_namespaces()
+
+    def shutdown(self):
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join()
+        if self.executor is not None:
+            self.executor.shutdown()
+        self.destroy_node()
+        util.logger.info("GraphWatcher shutdown complete.")
+```
+
+### rosplat/render/renderer/SpirulaRenderer.py
+```
+from __future__ import annotations
+
+import ctypes
+from enum import IntEnum
+import math
+import os
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+
+from rosplat.core import util
+from rosplat.core.gaussian_representation import GaussianData
+from rosplat.render.renderer.base_gaussian_renderer import GaussianRenderBase
+
+
+class SpirulaError(RuntimeError):
+    """Raised when the native Spirula Vulkan bridge reports an error."""
+
+
+class RenderOutputMode(IntEnum):
+    """Visual buffers exposed by the native Spirula renderer."""
+
+    COLOR = 0
+    DEPTH = 1
+    OPACITY = 2
+
+
+class _DeviceInfo(ctypes.Structure):
+    _fields_ = [
+        ("name", ctypes.c_char * 256),
+        ("vram_bytes", ctypes.c_uint64),
+        ("usable", ctypes.c_int),
+    ]
+
+
+def _library_candidates() -> list[Path]:
+    project_root = Path(__file__).resolve().parents[3]
+    candidates = []
+    configured = os.environ.get("ROSPLAT_SPIRULA_LIBRARY")
+    if configured:
+        candidates.append(Path(configured))
+    candidates.extend(
+        [
+            project_root / "build-native" / "librosplat_spirula.so",
+            project_root / "build" / "native" / "librosplat_spirula.so",
+            Path("/opt/rosplat-native/lib/rosplat/librosplat_spirula.so"),
+            Path("/usr/local/lib/rosplat/librosplat_spirula.so"),
+        ]
+    )
+    return candidates
+
+
+def _load_library() -> ctypes.CDLL:
+    for candidate in _library_candidates():
+        if candidate.is_file():
+            return ctypes.CDLL(str(candidate))
+    searched = "\n  ".join(str(path) for path in _library_candidates())
+    raise SpirulaError(
+        "The ROSplat Spirula Vulkan bridge is not built. Searched:\n"
+        f"  {searched}\n"
+        "Build it with: cmake -S . -B build-native -G Ninja "
+        "-DCMAKE_BUILD_TYPE=Release && cmake --build build-native"
+    )
+
+
+def _as_pointer(array: Optional[np.ndarray]) -> ctypes.c_void_p:
+    if array is None or array.size == 0:
+        return ctypes.c_void_p()
+    return ctypes.c_void_p(array.ctypes.data)
+
+
+class _Bridge:
+    def __init__(self, library: Optional[ctypes.CDLL] = None) -> None:
+        self.lib = library if library is not None else _load_library()
+        self._configure_signatures()
+
+    def _configure_signatures(self) -> None:
+        lib = self.lib
+        lib.rosplat_spirula_last_error.restype = ctypes.c_char_p
+        lib.rosplat_spirula_device_count.restype = ctypes.c_int
+        lib.rosplat_spirula_device_info.argtypes = [
+            ctypes.c_int,
+            ctypes.POINTER(_DeviceInfo),
+        ]
+        lib.rosplat_spirula_device_info.restype = ctypes.c_int
+        lib.rosplat_spirula_select_device.argtypes = [ctypes.c_int]
+        lib.rosplat_spirula_select_device.restype = ctypes.c_int
+        lib.rosplat_spirula_reset_scene.argtypes = [ctypes.c_int, ctypes.c_int64]
+        lib.rosplat_spirula_reset_scene.restype = ctypes.c_int
+        lib.rosplat_spirula_append.argtypes = [
+            ctypes.c_int64,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        lib.rosplat_spirula_append.restype = ctypes.c_int
+        lib.rosplat_spirula_set_camera.argtypes = [
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        lib.rosplat_spirula_set_camera.restype = ctypes.c_int
+        lib.rosplat_spirula_set_render_options.argtypes = [ctypes.c_int, ctypes.c_int]
+        lib.rosplat_spirula_set_render_options.restype = ctypes.c_int
+        lib.rosplat_spirula_set_scale_modifier.argtypes = [ctypes.c_float]
+        lib.rosplat_spirula_set_scale_modifier.restype = ctypes.c_int
+        lib.rosplat_spirula_render_rgba8.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+        ]
+        lib.rosplat_spirula_render_rgba8.restype = ctypes.c_int
+        lib.rosplat_spirula_splat_count.restype = ctypes.c_int64
+        lib.rosplat_spirula_capacity.restype = ctypes.c_int64
+        lib.rosplat_spirula_shutdown.restype = None
+
+    def error(self) -> SpirulaError:
+        raw = self.lib.rosplat_spirula_last_error()
+        message = raw.decode("utf-8", errors="replace") if raw else "unknown error"
+        return SpirulaError(message)
+
+    def require(self, result: int) -> None:
+        if not result:
+            raise self.error()
+
+
+class SpirulaRenderer(GaussianRenderBase):
+    """Spirula's Vulkan 3DGS renderer with an ImGui-compatible texture."""
+
+    def __init__(
+        self,
+        width: int,
+        height: int,
+        world_settings,
+        bridge=None,
+        texture_registry=None,
+    ) -> None:
+        super().__init__()
+        self.width = int(width)
+        self.height = int(height)
+        self.world_settings = world_settings
+        self._bridge = bridge if bridge is not None else _Bridge()
+        self._texture_registry = texture_registry
+        self._texture = None
+        self._rgba = np.zeros((self.height, self.width, 4), dtype=np.uint8)
+        self._model_matrix = np.eye(4, dtype=np.float32)
+        self._scale_modifier = 1.0
+        self._sh_degree = 0
+        self._active_sh_degree: Optional[int] = None
+        self._output_mode = RenderOutputMode.COLOR
+        self._scene_ready = False
+        self._camera_dirty = True
+        self._render_dirty = True
+        self._texture_dirty = True
+
+        count = self._bridge.lib.rosplat_spirula_device_count()
+        if count < 0:
+            raise self._bridge.error()
+        if count == 0:
+            raise SpirulaError("No usable Vulkan 1.2 device was found")
+        info = _DeviceInfo()
+        self._bridge.require(self._bridge.lib.rosplat_spirula_device_info(0, info))
+        if not info.usable:
+            raise SpirulaError(f"Vulkan device is not usable: {info.name.decode()}")
+        self._bridge.require(self._bridge.lib.rosplat_spirula_select_device(0))
+        self._device_name = info.name.decode("utf-8", errors="replace")
+        self._device_vram_bytes = int(info.vram_bytes)
+        util.logger.info(
+            "Spirula Vulkan renderer initialized on {} ({:.1f} GiB)",
+            self._device_name,
+            self._device_vram_bytes / (1024**3),
+        )
+
+    @staticmethod
+    def _sh_layout(gaussians: GaussianData) -> tuple[int, int]:
+        if gaussians.sh_dim % 3 != 0:
+            raise ValueError("SH data must contain RGB coefficient triplets")
+        coefficients = gaussians.sh_dim // 3
+        root = math.isqrt(coefficients)
+        if root * root != coefficients:
+            raise ValueError(f"Invalid SH coefficient count: {coefficients}")
+        degree = root - 1
+        if not 0 <= degree <= 4:
+            raise ValueError(f"Spirula supports SH degrees 0 through 4, got {degree}")
+        return degree, coefficients
+
+    @staticmethod
+    def _native_arrays(gaussians: GaussianData, scale_modifier: float):
+        count = len(gaussians)
+        _, coefficients = SpirulaRenderer._sh_layout(gaussians)
+        means = np.ascontiguousarray(gaussians.xyz, dtype=np.float32)
+        quats = np.ascontiguousarray(gaussians.rot, dtype=np.float32)
+        activated_scales = np.asarray(gaussians.scale, dtype=np.float32) * scale_modifier
+        log_scales = np.ascontiguousarray(
+            np.log(np.clip(activated_scales, 1e-12, None)), dtype=np.float32
+        )
+        activated_opacity = np.asarray(gaussians.opacity, dtype=np.float32).reshape(-1)
+        activated_opacity = np.clip(activated_opacity, 1e-6, 1.0 - 1e-6)
+        opacity_logits = np.ascontiguousarray(
+            np.log(activated_opacity) - np.log1p(-activated_opacity),
+            dtype=np.float32,
+        )
+        sh = np.ascontiguousarray(
+            np.asarray(gaussians.sh, dtype=np.float32).reshape(count, coefficients, 3)
+        )
+        dc = np.ascontiguousarray(sh[:, 0, :])
+        higher = np.ascontiguousarray(sh[:, 1:, :]) if coefficients > 1 else None
+        return means, quats, log_scales, opacity_logits, dc, higher
+
+    def _reset_for(self, gaussians: GaussianData, capacity: Optional[int] = None) -> None:
+        degree, _ = self._sh_layout(gaussians)
+        self._sh_degree = degree
+        reserve = len(gaussians) if capacity is None else max(len(gaussians), capacity)
+        self._bridge.require(
+            self._bridge.lib.rosplat_spirula_reset_scene(degree, reserve)
+        )
+        self._scene_ready = True
+
+    def append_gaussians(self, gaussian_set: GaussianData, refresh: bool = False) -> None:
+        if gaussian_set is None or len(gaussian_set) == 0:
+            return
+        degree, _ = self._sh_layout(gaussian_set)
+        if refresh or not self._scene_ready:
+            self._reset_for(gaussian_set)
+        elif degree != self._sh_degree:
+            raise SpirulaError(
+                f"A streamed scene cannot change SH degree ({self._sh_degree} to {degree})"
+            )
+
+        arrays = self._native_arrays(gaussian_set, self._scale_modifier)
+        self._bridge.require(
+            self._bridge.lib.rosplat_spirula_append(
+                len(gaussian_set), *(_as_pointer(array) for array in arrays)
+            )
+        )
+        self.gaussians = gaussian_set
+        self._render_dirty = True
+
+    def update_gaussian_data(
+        self, gaussian_set: GaussianData, full_update: bool = False
+    ) -> None:
+        self.append_gaussians(gaussian_set, refresh=True)
+
+    def reset_gaussians(self) -> None:
+        self._bridge.require(self._bridge.lib.rosplat_spirula_reset_scene(0, 0))
+        self.gaussians = None
+        self._scene_ready = False
+        self._sh_degree = 0
+        self._render_dirty = True
+
+    def set_render_resolution(self, width: int, height: int) -> None:
+        width, height = int(width), int(height)
+        if width <= 0 or height <= 0:
+            return
+        if (width, height) != (self.width, self.height):
+            self.width, self.height = width, height
+            self._rgba = np.zeros((height, width, 4), dtype=np.uint8)
+            self._texture = None
+            self._camera_dirty = True
+            self._render_dirty = True
+            self._texture_dirty = True
+
+    def set_model_matrix(self, model_matrix) -> None:
+        matrix = np.ascontiguousarray(model_matrix, dtype=np.float32)
+        if matrix.shape != (4, 4):
+            raise ValueError("model matrix must be 4x4")
+        if not np.array_equal(matrix, self._model_matrix):
+            self._model_matrix = matrix
+            self._camera_dirty = True
+            self._render_dirty = True
+
+    def set_scale_modifier(self, modifier: float) -> None:
+        modifier = float(modifier)
+        if modifier <= 0:
+            raise ValueError("scale modifier must be positive")
+        if modifier == self._scale_modifier:
+            return
+        self._bridge.require(
+            self._bridge.lib.rosplat_spirula_set_scale_modifier(modifier)
+        )
+        self._scale_modifier = modifier
+        self._render_dirty = True
+
+    def _apply_render_options(self) -> None:
+        degree = -1 if self._active_sh_degree is None else self._active_sh_degree
+        self._bridge.require(
+            self._bridge.lib.rosplat_spirula_set_render_options(
+                int(self._output_mode), degree
+            )
+        )
+        self._render_dirty = True
+
+    def set_render_output(self, mode: RenderOutputMode) -> None:
+        mode = RenderOutputMode(mode)
+        if mode == self._output_mode:
+            return
+        self._output_mode = mode
+        self._apply_render_options()
+
+    def set_sh_degree(self, degree: Optional[int]) -> None:
+        if degree is not None:
+            degree = int(degree)
+            if not 0 <= degree <= 4:
+                raise ValueError("active SH degree must be between 0 and 4")
+        if degree == self._active_sh_degree:
+            return
+        self._active_sh_degree = degree
+        self._apply_render_options()
+
+    def sort_and_update(self) -> None:
+        # Spirula performs tile-key generation and radix sorting every render.
+        return
+
+    def update_vsync(self) -> None:
+        # rendercanvas/wgpu owns the Vulkan swapchain and present mode.
+        return
+
+    def update_camera_pose(self) -> None:
+        self._camera_dirty = True
+        self._render_dirty = True
+
+    def update_camera_intrin(self) -> None:
+        self._camera_dirty = True
+        self._render_dirty = True
+
+    def _sync_camera(self) -> None:
+        if not self._camera_dirty:
+            return
+        camera = self.world_settings.world_camera
+        view_gl = np.asarray(camera.get_view_matrix(), dtype=np.float32)
+        gl_to_cv = np.diag([1.0, -1.0, -1.0, 1.0]).astype(np.float32)
+        view_cv = np.ascontiguousarray(gl_to_cv @ view_gl @ self._model_matrix)
+
+        focal = camera.h / (2.0 * math.tan(camera.fovy / 2.0))
+        intrinsics = np.ascontiguousarray(
+            [focal, focal, camera.w / 2.0, camera.h / 2.0], dtype=np.float32
+        )
+        self._bridge.require(
+            self._bridge.lib.rosplat_spirula_set_camera(
+                self.width,
+                self.height,
+                _as_pointer(view_cv),
+                _as_pointer(intrinsics),
+            )
+        )
+        self._camera_dirty = False
+
+    def render_rgba8(self) -> np.ndarray:
+        """Render into the reusable host RGBA8 buffer without requiring a UI."""
+        self._sync_camera()
+        if self._render_dirty:
+            self._bridge.require(
+                self._bridge.lib.rosplat_spirula_render_rgba8(
+                    _as_pointer(self._rgba), self._rgba.nbytes
+                )
+            )
+            self._render_dirty = False
+            self._texture_dirty = True
+        return self._rgba
+
+    def draw(self):
+        self.render_rgba8()
+        if self._texture_dirty:
+            if self._texture_registry is None:
+                raise SpirulaError("The Vulkan ImGui texture registry is not initialized")
+            self._texture = self._texture_registry.upload(self, self._rgba)
+            self._texture_dirty = False
+        return self._texture
+
+    @property
+    def splat_count(self) -> int:
+        return int(self._bridge.lib.rosplat_spirula_splat_count())
+
+    @property
+    def capacity(self) -> int:
+        return int(self._bridge.lib.rosplat_spirula_capacity())
+
+    @property
+    def scene_sh_degree(self) -> int:
+        return self._sh_degree
+
+    @property
+    def active_sh_degree(self) -> int:
+        if self._active_sh_degree is None:
+            return self._sh_degree
+        return min(self._active_sh_degree, self._sh_degree)
+
+    @property
+    def output_mode(self) -> RenderOutputMode:
+        return self._output_mode
+
+    @property
+    def device_name(self) -> str:
+        return self._device_name
+
+    @property
+    def device_vram_bytes(self) -> int:
+        return self._device_vram_bytes
+
+    @property
+    def latest_rgba(self) -> np.ndarray:
+        return self._rgba
+
+    def shutdown(self) -> None:
+        if self._texture_registry is not None:
+            self._texture_registry.release(self)
+        self._texture = None
+        self._bridge.lib.rosplat_spirula_shutdown()
+```
+
+### rosplat/render/renderer/__init__.py
+```
+from .base_gaussian_renderer import GaussianRenderBase
+from .SpirulaRenderer import RenderOutputMode, SpirulaError, SpirulaRenderer
+
+__all__ = [
+    "GaussianRenderBase",
+    "RenderOutputMode",
+    "SpirulaRenderer",
+    "SpirulaError",
+]
+```
+
+### rosplat/render/renderer/base_gaussian_renderer.py
+```
+class GaussianRenderBase:
+    def __init__(self):
+        self.gaussians = None  # Expected to be a GaussianSet instance
+        self._reduce_updates = True
+
+    @property
+    def reduce_updates(self) -> bool:
+        return self._reduce_updates
+
+    @reduce_updates.setter
+    def reduce_updates(self, val: bool):
+        self._reduce_updates = val
+        self.update_vsync()
+
+    def update_vsync(self) -> None:
+        print("VSync is not supported")
+
+    def update_gaussian_data(self, gaussian_set, full_update: bool = False) -> None:
+        raise NotImplementedError()
+
+    def sort_and_update(self) -> None:
+        raise NotImplementedError()
+
+    def set_scale_modifier(self, modifier: float) -> None:
+        raise NotImplementedError()
+
+    def set_render_output(self, mode) -> None:
+        raise NotImplementedError()
+
+    def set_sh_degree(self, degree) -> None:
+        raise NotImplementedError()
+
+    def update_camera_pose(self) -> None:
+        raise NotImplementedError()
+
+    def update_camera_intrin(self) -> None:
+        raise NotImplementedError()
+
+    def draw(self) -> int:
+        raise NotImplementedError()
+
+    def set_model_matrix(self, model_mat) -> None:
+        raise NotImplementedError()
+
+    def reset_gaussians(self) -> None:
+        raise NotImplementedError()
+
+    def set_render_resolution(self, w: int, h: int) -> None:
+        raise NotImplementedError()
+```

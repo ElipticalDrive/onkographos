@@ -1,0 +1,74 @@
+# Oriented Gaussian Splatting
+
+Also called: Definition 2, Oriented Gaussian, Reciprocal Oriented Gaussian
+
+## Overview
+Oriented Gaussian Splatting is a variant of 3D Gaussian Splatting where each primitive is assigned a learnable oriented normal vector $n_i$ to create a reciprocal attenuation model, enabling the derivation of explicit geometric fields (normal and occupancy) via the Objects as Volumes framework [S1]. It differs from standard Gaussian Splatting by restoring reciprocity ($\sigma(x, w) = \sigma(x, -w)$), which is broken by standard attenuation, thereby allowing the extraction of watertight meshes and consistent normals [S1].
+
+## How it works
+**Inputs:** A set of $N$ 3D Gaussians $\{G_i\}_{i=1}^N$, each defined by center $\mu_i$, covariance $\Sigma_i$, opacity $\alpha_i$, and color $c_i$.
+**Outputs:** A scene representation supporting differentiable rendering of RGB, depth, and normals, and a mesh extracted from the geometric fields.
+
+**Data Structures:**
+Each Gaussian $i$ stores:
+- $\mu_i \in \mathbb{R}^3$: Center position.
+- $\Sigma_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix (or rotation $R_i$ and scale $S_i$ such that $\Sigma_i = R_i S_i S_i^T R_i^T$).
+- $\alpha_i \in [0, 1]$: Opacity.
+- $c_i$: Color (SH coefficients or RGB).
+- $n_i \in S^2$: Learnable oriented normal vector.
+
+**Standard Gaussian Function:**
+$$G_i(\mathbf{x}) = \alpha_i \exp\left(-\frac{1}{2}(\mathbf{x} - \mu_i)^T \Sigma_i^{-1} (\mathbf{x} - \mu_i)\right)$$
+
+**Oriented Attenuation Coefficient:**
+The attenuation is modified to be reciprocal by restricting it to a half-space defined by $n_i$:
+$$\bar{\sigma}_i(\mathbf{x}, \mathbf{w}) = \mathbf{1}_{n_i^T(\mathbf{x}-\mu_i) \geq 0} |\mathbf{w} \cdot \nabla \log(1 - G_i(\mathbf{x}))|$$
+where $\mathbf{1}$ is the indicator function, $\mathbf{w}$ is the view direction, and $\nabla \log(1 - G_i(\mathbf{x}))$ is the gradient of the log-vacancy of the Gaussian.
+
+**Vacancy Field:**
+The vacancy field $v(\mathbf{x})$ is approximated by iterating over all training camera rays $\mathcal{T}_c$ to find the maximum product of unobstructed transmittance:
+$$v(\mathbf{x}) = \max_{(\mathbf{o}, \mathbf{w}) \in \mathcal{T}_c} \left\{ \prod_{i=1}^N \left( 1 - \bar{G}_{\mathbf{o}, \mathbf{w}}^{(i)}(t) \right) : \mathbf{x} = \mathbf{o} + t\mathbf{w}, t > 0 \right\}$$
+where $\bar{G}_{\mathbf{o}, \mathbf{w}}^{(i)}(t) = G_i(\mathbf{o} + \min(t, t_{G_i}^{\mathbf{o},\mathbf{w}})\mathbf{w})$ and $t_{G_i}^{\mathbf{o},\mathbf{w}} := \arg \max_{t \geq 0} G_i(\mathbf{o} + t\mathbf{w})$.
+
+**Gaussian Vector and Normal Fields:**
+The vector field $V(\mathbf{x})$ is the gradient of the log-vacancy, computed as the sum of gradients of Gaussian components oriented towards the query point:
+$$V(\mathbf{x}) := \nabla \log v(\mathbf{x}) = \sum_{i=1}^N \mathbf{1}_{n_i^T(\mathbf{x}-\mu_i) \geq 0} \nabla \log(1 - G_i(\mathbf{x}))$$
+The normal field is the normalized vector field:
+$$\mathcal{N}(\mathbf{x}) := \frac{V(\mathbf{x})}{\|V(\mathbf{x})\|}$$
+
+**Training Loss:**
+The total loss combines photometric, depth-normal consistency, normal alignment, and multi-view losses:
+$$\mathcal{L} = \mathcal{L}_{\text{RGB}} + \lambda_{\text{DN}} \mathcal{L}_{\text{DN}} + \lambda_{\text{N}} \mathcal{L}_{\text{N}} + \mathcal{L}_{\text{MV}}$$
+Parameters: $\lambda_{\text{DN}} = 0.05$, $\lambda_{\text{N}} = 0.05$, $\lambda_{\text{pc}} = 0.6$, $\lambda_{\text{gc}} = 0.02$.
+Normal alignment loss:
+$$\mathcal{L}_N = \sum_p 1 - N(p) \cdot \nabla D(p)$$
+where $N(p)$ is the rendered oriented normal at pixel $p$ and $\nabla D(p)$ is the image-space gradient of the rendered depth.
+
+**Densification:**
+Every $K$ iterations:
+1. Compute errors $\mathcal{L}_N(p)$ across all training views.
+2. Propagate errors to individual Gaussians via their blending weights.
+3. Clone high-error Gaussians with flipped normals to close holes in the wrapping shell.
+
+**Mesh Extraction (Pivot-Based Marching Tetrahedra):**
+1. Spawn two Delaunay pivots per Gaussian: the center $\mu_i$ and $\mu_i + 3s_i n_i$, where $s_i = \|S_i R_i^T n_i\|_2$ is the ellipsoid scaling along $n_i$.
+2. Compute occupancy values at each pivot using the vacancy lower bound (Eq. 7).
+3. Apply Marching Tetrahedra on the resulting Delaunay triangulation.
+4. Refine vertices to the 0.5-isosurface via binary search.
+
+**Mesh Extraction (Primal Adaptive Meshing):**
+1. **Vertices Initialization:** Initialize vertices by sampling marching tetrahedra mesh faces, weighting each face inversely proportional to its distance from the nearest training camera.
+2. **Isosurface Refinement:** Project vertices onto the 0.5-isosurface of $v$ via iterative Newton update:
+   $$x_{i+1} = x_i + \frac{1}{2}(0.5 - v(x_i))\mathcal{N}(x_i)$$
+3. **Filtering:** Remove vertices $x$ with $|0.5 - v(x)| > \epsilon$. Iterate stages 1-3 until no points are removed.
+4. **Delaunay:** Compute Delaunay tetrahedralization of remaining vertices and classify tetrahedra as inside/outside based on vacancy of sampled interior points.
+5. **Mesh extraction:** Extract triangle faces separating inside and outside tetrahedra.
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Originated in "From Blobs to Spokes: High-Fidelity Surface Reconstruction via Oriented Gaussians" [S1]. It builds on the Objects as Volumes framework [S1] to address the lack of reciprocity in standard Gaussian Splatting, enabling explicit geometric field derivation.
+
+## Sources
+[S1] From Blobs to Spokes: High-Fidelity Surface Reconstruction via Oriented Gaussians, https://doi.org/10.1007/978-3-032-37095-2_4, fetched 2026-10-29

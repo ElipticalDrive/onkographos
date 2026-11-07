@@ -1,0 +1,163 @@
+# Mesh-Embedded Gaussian Splatting
+
+Also called: Gaussian-Mesh association
+
+## Overview
+Mesh-Embedded Gaussian Splatting is a hybrid 3D representation that disentangels motion and appearance by embedding 3D Gaussians onto a canonical triangle mesh (such as SMPL-X or FLAME) [S1, unofficial]. Unlike methods relying on MLP-based linear blend skinning (LBS) fields for motion, this approach controls Gaussian rotation and translation directly via the mesh geometry, enabling compatibility with skeletal animation, blend shapes, and mesh editing [S1, unofficial]. It builds on [Gaussian Geometry Parameters Prediction](8442-gaussian-geometry-parameters-prediction.md) by providing a structured, mesh-driven initialization and parameterization scheme.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A canonical triangle mesh (vertices $V$, normals $n$, topology), monocular video frames, and initial Gaussian parameters.
+*   **Output:** A set of 3D Gaussians defined by embedding parameters on the mesh, optimized for photorealistic rendering of human avatars.
+
+**Data Structures:**
+Each Gaussian $i$ is defined by two sets of parameters:
+1.  **Pose-Invariant Properties (Canonical Space):**
+    *   Canonical rotation quaternion $q_i$
+    *   Canonical scaling vector $s_i$
+    *   Opacity $\alpha_i$
+    *   Color coefficients $c_i$ (typically SH coefficients)
+2.  **Embedding Parameters (Mesh Association):**
+    *   Triangle index $k_i$
+    *   Barycentric coordinates $(u_i, v_i)$ within triangle $k_i$
+    *   Displacement $d_i$ along the interpolated normal
+
+**Formulas:**
+The 3D position $P$ and normal $n$ of a Gaussian in the canonical space are derived from the mesh geometry using barycentric interpolation [S1, unofficial]:
+
+$$
+P(k, u, v) = u V_1 + v V_2 + (1 - u - v) V_3 \quad (1)
+$$
+
+$$
+n(k, u, v) = u n_1 + v n_2 + (1 - u - v) n_3 \quad (2)
+$$
+
+where $V_1, V_2, V_3$ are the vertices of triangle $k$, and $n_1, n_2, n_3$ are the per-vertex normals. The final position in posed space is obtained by applying the mesh deformation (rigid transformation or skinning) to $P$ and adding the displacement $d$ along the deformed normal $n$.
+
+The pose-dependent rotation $q_{pose}$ and scaling $s_{pose}$ are computed dynamically based on mesh warping [S1, unofficial]:
+*   **Rotation:** Interpolated from per-vertex quaternions using barycentric weights $(u, v)$.
+*   **Scaling:** Derived from the area change of the embedded triangle relative to the canonical state.
+
+**Algorithm Steps:**
+1.  **Initialization:** Assign each Gaussian an initial embedding $(k, u, v, d)$ on the canonical mesh. Initialize pose-invariant parameters ($q, s, \alpha, c$).
+2.  **Lifted Optimization:** Simultaneously optimize Gaussian parameters and embedding parameters.
+    *   Compute the 3D position and normal for each Gaussian using Eq. (1) and (2).
+    *   Apply mesh deformation to obtain posed position and normal.
+    *   Compute pose-dependent rotation and scaling based on local mesh deformation.
+    *   Render the scene using differentiable rasterization.
+    *   Compute loss against input images.
+    *   Backpropagate to update all parameters.
+3.  **Cross-Triangle Handling:** If an update to $(u, v)$ causes the embedding point to cross a triangle boundary:
+    *   Detect the boundary crossing.
+    *   Re-express the barycentric coordinates in the neighboring triangle to maintain differentiability [S1, unofficial].
+4.  **Adapted Cloning/Splitting:** Modify the standard 3D Gaussian clone and split operations to respect the mesh embedding constraints, ensuring new Gaussians are correctly associated with the mesh topology [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_gaussian_pose(gaussian, mesh, pose_transform):
+    """
+    Computes the posed position, rotation, and scaling for a single Gaussian.
+    
+    Args:
+        gaussian: Dict with keys 'k' (triangle index), 'u', 'v', 'd', 
+                  'q_canon', 's_canon', 'alpha', 'color'
+        mesh: Dict with keys 'vertices', 'normals', 'triangle_vertices' (list of 3 vertices per triangle)
+        pose_transform: Function applying skeletal animation/skinning to mesh vertices and normals
+    
+    Returns:
+        posed_position, posed_rotation, posed_scaling
+    """
+    # 1. Get canonical triangle vertices and normals
+    k = gaussian['k']
+    u = gaussian['u']
+    v = gaussian['v']
+    
+    V1, V2, V3 = mesh['triangle_vertices'][k]
+    n1, n2, n3 = mesh['normals'][k] # Assuming per-vertex normals stored per triangle
+    
+    # 2. Compute canonical position and normal (Phong surface)
+    # P = u*V1 + v*V2 + (1-u-v)*V3
+    P_canon = u * V1 + v * V2 + (1 - u - v) * V3
+    n_canon = u * n1 + v * n2 + (1 - u - v) * n3
+    
+    # 3. Apply mesh deformation (pose transform)
+    # This deforms the entire mesh, including vertices and normals
+    P_posed, n_posed = pose_transform(P_canon, n_canon)
+    
+    # 4. Apply displacement along normal
+    d = gaussian['d']
+    final_position = P_posed + d * n_posed
+    
+    # 5. Compute pose-dependent rotation
+    # Interpolate per-vertex quaternions from the mesh
+    q1, q2, q3 = mesh['vertex_quaternions'][k]
+    q_pose = interpolate_quaternion(q1, q2, q3, u, v)
+    
+    # 6. Compute pose-dependent scaling
+    # Based on area change of the embedded triangle
+    s_pose = compute_area_scaling(mesh, k, u, v)
+    
+    # 7. Combine with canonical parameters
+    # Total rotation is composition of canonical and pose-dependent
+    q_total = q_pose * gaussian['q_canon'] # Order may vary based on convention
+    s_total = s_pose * gaussian['s_canon']
+    
+    return final_position, q_total, s_total
+
+def handle_cross_triangle_update(gaussian, mesh, gradient_u, gradient_v):
+    """
+    Handles the case where barycentric update crosses a triangle boundary.
+    Re-expresses the update in the neighboring triangle.
+    """
+    # Check if u < 0, v < 0, or u + v > 1
+    if gaussian['u'] < 0 or gaussian['v'] < 0 or gaussian['u'] + gaussian['v'] > 1:
+        # Find neighboring triangle
+        neighbor_k = find_neighbor_triangle(gaussian['k'], gaussian['u'], gaussian['v'])
+        
+        # Convert barycentric coordinates to the new triangle
+        # This involves a coordinate transformation
+        new_u, new_v = transform_barycentric(gaussian['k'], neighbor_k, gaussian['u'], gaussian['v'])
+        
+        # Update embedding
+        gaussian['k'] = neighbor_k
+        gaussian['u'] = new_u
+        gaussian['v'] = new_v
+        
+        # Note: Gradients must be adjusted accordingly for backpropagation
+        # This is a complex operation requiring careful Jacobian handling
+        pass
+```
+
+**Parameters:**
+*   **Learning Rate:** Not specified in sources.
+*   **Displacement Limit:** Not specified in sources.
+*   **Mesh Type:** SMPL-X or FLAME [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Cross-Triangle Updates:** Barycentric coordinates are only differentiable within a triangle. Updates that move the embedding across a triangle boundary must be handled by re-expressing the barycentric update in the neighboring triangle [S1, unofficial]. Failure to do so breaks differentiability.
+*   **Mesh Deformation:** The method assumes the mesh deformation is known or can be estimated. Errors in mesh deformation propagate to Gaussian positions.
+
+## Operating characteristics
+*   **Performance:** Achieves over 300 FPS on an NVIDIA RTX 3090 GPU and 30 FPS on an iPhone 13 [S1, unofficial].
+*   **Memory:** Not specified in sources.
+*   **Strengths:**
+    *   Explicit motion control via mesh, enabling compatibility with various animation techniques (skeletal animation, blend shapes, mesh editing) [S1, unofficial].
+    *   Disentangles motion (mesh) from appearance (Gaussians), allowing high-fidelity rendering of high-frequency details [S1, unofficial].
+    *   Real-time rendering capability in engines like Unity [S1, unofficial].
+*   **Limitations:**
+    *   Requires a canonical mesh (e.g., SMPL-X).
+    *   Cross-triangle updates add complexity to the optimization process [S1, unofficial].
+*   **When to use:** When explicit control over avatar motion is required, and high-fidelity appearance is needed, especially for human avatars.
+*   **When not to use:** For scenes without a clear underlying mesh structure or when motion is not the primary focus.
+
+## Background
+*   **Origin:** SplattingAvatar, presented by Zhijing Shao et al. in 2024 [S1, unofficial].
+*   **History:** Builds on 3D Gaussian Splatting [23] and Phong surface concepts [38]. It addresses limitations of MLP-based deformation methods by providing explicit mesh control.
+*   **Usage:** Used for creating realistic, real-time human avatars from monocular videos. Ported to Unity for real-time rendering [S1, unofficial].
+
+## Sources
+[S1] SplattingAvatar: Realistic Real-Time Human Avatars with Mesh-Embedded Gaussian Splatting, https://arxiv.org/abs/2403.05087, fetched 2026-10-27 (unofficial)

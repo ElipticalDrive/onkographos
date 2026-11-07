@@ -1,8 +1,8 @@
 # Tree64
-Also called: contree, wide 4³ trees
+Also called: Sparse 64-trees, contree, wide 4³ trees
 
 ## Overview
-Tree64 is a sparse voxel tree data structure with a 4³ branching factor, designed to reduce tree depth and per-voxel overhead compared to standard octrees [S1, unofficial]. It achieves higher ray traversal throughput by utilizing compact node layouts and optimized GPU traversal kernels, making it suitable for real-time rendering of large, sparse voxel scenes [S1, unofficial].
+Tree64 is a sparse voxel tree with a 4³ branching factor, designed to reduce tree depth and per-voxel overhead compared to standard octrees [S1, unofficial]. It achieves higher ray traversal throughput by utilizing compact 12-byte node layouts and optimized GPU traversal kernels, making it suitable for real-time rendering of large, sparse voxel scenes [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
@@ -11,23 +11,19 @@ Tree64 is a sparse voxel tree data structure with a 4³ branching factor, design
 
 **Data Structures:**
 - **Node Layout:** Each node consumes 12 bytes of memory [S1, unofficial].
-- **Branching Factor:** 64 children per node (4×4×4 sub-volumes) [S1, unofficial].
-- **Pointer Encoding:** Relative pointers are stored as "backwards" references to allow tree construction without intermediate buffers (parent nodes appear after children) [S1, unofficial]. Far pointers are signaled by a reserved upper range in the pointer value rather than a dedicated bit [S1, unofficial].
-- **Morton Ordering:** Trees are built in depth-first order, resulting in a Z-curve (Morton) layout in memory, which improves spatial locality and memory bandwidth utilization [S1, unofficial].
+- **Fields:** A 64-bit child mask, a 1-bit leaf flag, and a 31-bit child pointer. Only children that exist are stored [S2].
+- **Pointer Encoding:** Relative pointers are stored "backwards" so parent nodes appear after their children in memory, allowing tree construction without intermediate buffers [S1, unofficial]. Far pointers are signaled by a reserved upper range in the 31-bit field rather than a dedicated bit [S1, unofficial].
+- **Memory Layout:** Trees are built in depth-first order, resulting in a Z-curve (Morton) layout that improves spatial locality and memory bandwidth utilization [S1, unofficial].
 
 **Algorithm Steps:**
 1. **Tree Construction:**
    - Recursively subdivide the 3D domain into 4×4×4 blocks.
    - Store nodes in a linear array following a depth-first traversal order.
-   - Encode child pointers relative to the current node, using the reserved range for far pointers [S1, unofficial].
-   - *Note:* The specific bit-packing of the 12-byte node structure (type flags, child pointers, data) is not fully detailed in the sources, but Voxtree implements a similar concept by packing node type into the address field [S1, unofficial].
-
+   - Encode child pointers relative to the current node using the backwards scheme; use the reserved upper range for far pointers [S1, unofficial].
 2. **Ray Traversal (GPU):**
    - **Coordinate System:** Mirror the coordinate system to the negative ray octant to simplify intersection calculations and node bounds clamping, removing the need for face plane offsets [S1, unofficial].
-   - **Traversal Loop:**
-     - Use a ray marching algorithm optimized for bitmasks to allow longer ray steps and reduce divergence [S1, unofficial].
-     - Maintain an ancestor node stack in group-shared memory to achieve a ~9% speedup compared to local array variables [S1, unofficial].
-     - Traverse from root to leaf, skipping empty subtrees based on node type/flags.
+   - **Traversal Loop:** Use a ray marching algorithm optimized for bitmasks to allow longer ray steps and reduce divergence [S1, unofficial].
+   - **Stack Management:** Maintain an ancestor node stack in group-shared memory, resulting in a ~9% speedup compared to a local array variable [S1, unofficial].
    - **Initial Implementation:** A top-down recursive DDA over bitmasks was used initially, performing 11-15% faster than ESVO for primary rays [S1, unofficial].
 
 **Parameters:**
@@ -35,85 +31,108 @@ Tree64 is a sparse voxel tree data structure with a 4³ branching factor, design
 - Node size: 12 bytes [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Editing:** The structure uses a traditional chunk hierarchy for bookkeeping. Trees within each chunk are fully rebuilt upon changes, which impacts dynamic update performance [S1, unofficial].
-- **Precision:** The use of "backwards" relative pointers requires careful handling of pointer arithmetic to avoid overflow or incorrect addressing, especially with far pointers [S1, unofficial].
+- **Editing:** Uses a traditional chunk hierarchy for bookkeeping; trees within each chunk are fully rebuilt upon changes [S1, unofficial].
+- **Compression:** Edits with compressed nodes are more complicated and require a pool allocator [S2].
+- **Deduplication:** Deduplicates less well than a DAG because the node layout cannot represent complete leaf paths [S2].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Simplified representation of Tree64 node structure
-class Tree64Node:
-    # 12 bytes total layout (exact bit fields not specified in sources)
-    # Assumed fields based on description:
-    type_flags: int      # Indicates empty, leaf, or branch
-    child_ptr_0: int     # Relative pointer to child 0
-    child_ptr_1: int     # Relative pointer to child 1
-    # ... up to child_ptr_63
-    # Data field for leaf nodes (density/opacity)
+def traverse_tree64(origin, direction, max_t, root_ptr, nodes, shared_stack):
+    # 1. Mirror ray to positive octant to simplify bounds and step calculation
+    inv_dir = [1.0/d if d != 0.0 else float('inf') for d in direction]
+    t_min = [(0.0 - origin[i]) * inv_dir[i] if inv_dir[i] != float('inf') else 0.0 for i in range(3)]
+    t_max = [(4.0 - origin[i]) * inv_dir[i] if inv_dir[i] != float('inf') else 4.0 for i in range(3)]
+    t_enter = max(t_min)
+    t_exit = min(t_max)
+    if t_enter >= t_exit or t_exit < 0.0:
+        return None
 
-def traverse_ray_tree64(ray_origin, ray_direction, root_node, shared_stack):
-    """
-    GPU kernel for traversing a Tree64 structure.
-    """
-    # Mirror coordinates to negative ray octant for simplified bounds
-    mirrored_origin = mirror_to_negative_octant(ray_origin)
-    mirrored_direction = mirror_to_negative_octant(ray_direction)
-    
-    current_node = root_node
-    stack = shared_stack # Group-shared memory for ancestor stack
-    
-    while current_node is not None:
-        # Check node type
-        if is_empty(current_node):
-            # Skip this subtree
-            current_node = pop_stack(stack)
-            continue
-        elif is_leaf(current_node):
-            # Sample density/opacity
-            sample = sample_leaf(current_node, mirrored_origin, mirrored_direction)
-            return sample
-        else:
-            # Determine which child to visit next
-            # Use bitmask optimization for longer steps
-            child_index = get_next_child_bitmask(current_node, mirrored_origin, mirrored_direction)
-            
-            # Push current node to stack if needed for backtracking
-            if needs_backtracking(current_node):
-                push_stack(stack, current_node)
-            
-            # Follow pointer
-            # Handle far pointers via reserved range check
-            current_node = follow_relative_pointer(current_node, child_index)
-            
-    return EMPTY
+    current_pos = [origin[i] + t_enter * direction[i] for i in range(3)]
+    current_t = t_enter
+    node_ptr = root_ptr
+    stack_top = 0
+
+    while current_t < max_t:
+        node = nodes[node_ptr & 0x7FFFFFFF]
+        is_far = node_ptr & 0x80000000
+
+        # Leaf node: sample density/opacity
+        if node['is_leaf']:
+            return sample_leaf(node, current_pos, current_t)
+
+        # Determine cell index (0-63) within the 4x4x4 block
+        cell_x = int(current_pos[0]) % 4
+        cell_y = int(current_pos[1]) % 4
+        cell_z = int(current_pos[2]) % 4
+        cell_idx = (cell_z << 4) | (cell_y << 2) | cell_x
+
+        # Check bitmask for existing children
+        if not (node['mask'] & (1 << cell_idx)):
+            if stack_top > 0:
+                node_ptr = shared_stack[stack_top - 1]
+                stack_top -= 1
+                current_pos = [0.0, 0.0, 0.0]
+                current_t = 0.0
+                continue
+            return None
+
+        # Follow backwards relative pointer
+        child_ptr = node['ptrs'][cell_idx]
+        if is_far:
+            child_ptr = (node_ptr & 0x7FFFFFFF) - child_ptr
+
+        # Push current node to shared stack for backtracking
+        shared_stack[stack_top] = node_ptr
+        stack_top += 1
+
+        # Step to next 4x4x4 boundary
+        step_t = min([(4.0 - current_pos[i]) * inv_dir[i] for i in range(3) if inv_dir[i] != float('inf')])
+        current_t += step_t
+        current_pos = [current_pos[i] + step_t * direction[i] for i in range(3)]
+        node_ptr = child_ptr
+
+    return None
+
+def sample_leaf(node, pos, t):
+    # Standard trilinear interpolation or direct lookup based on node data
+    return node['data']
+
+def compute_far_address(base_ptr, relative_ptr):
+    # Reserved upper range handling: if relative_ptr >= 0x80000000, adjust base
+    if relative_ptr & 0x80000000:
+        return base_ptr - (relative_ptr & 0x7FFFFFFF)
+    return base_ptr - relative_ptr
 ```
 
 ## Subtopics
 
 ### [Voxtree](4994-voxtree.md)
-A Rust implementation of a 64-way sparse voxel tree that builds on Tree64 concepts, focusing on CPU performance and dynamic updates with a specific memory layout.
+A Rust implementation of a 64-way sparse voxel tree that builds on Tree64 concepts, focusing on CPU performance and dynamic updates with a specific memory layout and address-shifting mechanism.
 
 ## Operating characteristics
 **Time and Memory Complexity:**
 - **Editing Cost:** Approximately $O(\log m)$ due to path copying capabilities, though full chunk rebuilds are required for changes [S1, unofficial].
-- **Memory:** 12 bytes per node [S1, unofficial].
+- **Memory:** 12 bytes per node [S1, unofficial]. Memory is about 0.19 bytes per Voxel when fully populated, nearly 3x less than SVOs [S2].
 
 **Measured Performance:**
 - **Hardware:** Tested on GPU (Vulkan SDK required) [S1, unofficial].
 - **Scenes:**
-  - **Eco House 2k (448k * 8³ voxels):** 107.5 Mrays/s for primary rays, 93.9 Mrays/s for primary + 1 diffuse bounce (0.87x ratio) [S1, unofficial].
-  - **Bistro 4k (975k * 8³ voxels):** 109.7 Mrays/s for primary rays, 92.6 Mrays/s for primary + 1 diffuse bounce (0.84x ratio) [S1, unofficial].
-  - **Forest Lake 2k (807k * 8³ voxels):** 112.1 Mrays/s for primary rays, 99.5 Mrays/s for primary + 1 diffuse bounce (0.89x ratio) [S1, unofficial].
-  - **Sponza 2k:** 182.6 Mrays/s for primary rays, 124.2 Mrays/s for primary + 1 diffuse bounce [S1, unofficial].
-- **Comparison:** Outperforms ESVO, PlainDDA, and MultiDDA in primary ray throughput on these scenes [S1, unofficial]. Comparable to XBrickMap and StdBVH in some metrics, but with lower CPU/GPU sync overhead than ESVO and BVH variants [S1, unofficial].
+  - **Sponza 2k:** 182.6 Mrays/s for primary rays and 124.2 Mrays/s for primary + 1 diffuse bounce [S1, unofficial].
+  - **Eco House 2k (448k * 8³ voxels):** 107.5 Mrays/s for primary rays, 93.9 Mrays/s for primary + 1 diffuse bounce [S1, unofficial].
+  - **Bistro 4k (975k * 8³ voxels):** 109.7 Mrays/s for primary rays, 92.6 Mrays/s for primary + 1 diffuse bounce [S1, unofficial].
+  - **Forest Lake 2k (807k * 8³ voxels):** 112.1 Mrays/s for primary rays, 99.5 Mrays/s for primary + 1 diffuse bounce [S1, unofficial].
+  - **Bistro 8k:** 224 MB total size (0.62 bytes per Voxel), against 368 MB for ESVO [S2].
+- **Comparison:** Traversal is fast because each level skips 4³ cells and the tree is half as deep as an octree [S2]. Outperforms ESVO, PlainDDA, and MultiDDA in primary ray throughput on tested scenes [S1, unofficial].
 
 **Strengths and Limitations:**
-- **Strengths:** Shallower trees than octrees, lower per-voxel overhead, high throughput for coherent rays, efficient memory usage (12 bytes/node) [S1, unofficial].
-- **Limitations:** Full chunk rebuilds on edits, potential divergence in ray marching if not optimized, complex pointer encoding [S1, unofficial].
+- **Strengths:** Shallower trees than octrees, lower per-voxel overhead, high throughput for coherent rays, efficient memory usage [S1, unofficial].
+- **Limitations:** Full chunk rebuilds on edits, complex pointer encoding, reduced deduplication compared to DAGs [S1, unofficial][S2].
 
 ## Background
-Tree64 was introduced as part of the VoxelRT project, an open-source real-time voxel renderer [S1, unofficial]. It builds upon earlier work on sparse voxel octrees and wide branching factor trees, aiming to balance traversal speed and memory efficiency for real-time applications [S1, unofficial]. The structure is closely related to the work of Laine and Karras on efficient-sparse-voxel-octrees [S1, unofficial].
+Tree64 was introduced as part of the VoxelRT project, an open-source real-time voxel renderer [S1, unofficial]. The structure is closely related to the work of Laine and Karras on efficient-sparse-voxel-octrees [S1, unofficial]. Wide 4³ trees are positioned as an alternative to standard octrees, trading some deduplication potential for shallower depth and faster traversal [S1, unofficial][S2].
 
 ## Sources
 [S1] dubiousconst282/VoxelRT, https://github.com/dubiousconst282/VoxelRT, fetched 2026-10-24 (unofficial)
+[S2] https://github.com/theHimanshuShekhar/bhayanakvoxel/blob/research/voxel-data-structures/docs/research/voxel-data-structures.md, https://github.com/theHimanshuShekhar/bhayanakvoxel/blob/research/voxel-data-structures/docs/research/voxel-data-structures.md, fetched 2026-10-28

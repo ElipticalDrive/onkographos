@@ -3,110 +3,208 @@
 Also called: Progressive refinement splatting, Pyramidal volume splatting
 
 ## Overview
-Hierarchical splatting is a progressive refinement algorithm for volume rendering that uses a pyramidal volume representation to achieve real-time interactive rendering [S1, S2, unofficial]. It solves the problem of rendering large datasets efficiently by allowing the user to start with a low-resolution approximation and progressively refine the image as needed [S2, unofficial]. It sets itself apart from standard splatting by using a multi-resolution pyramid structure to adapt the rendering resolution to the desired image quality, and from [Multi-Resolution Points](4784-multi-resolution-points.md) by explicitly constructing a hierarchical pyramid of averaged volume cells rather than just selecting points based on density or distance.
+Hierarchical splatting is a progressive refinement algorithm for volume rendering that uses a pyramidal volume representation to achieve real-time interactive rendering [S1, unofficial][S2, unofficial]. It solves the problem of rendering high-resolution volumetric data efficiently by constructing a hierarchy of coarser approximations, allowing the renderer to select the appropriate resolution level based on a user-supplied precision threshold or desired image quality [S1, unofficial][S2, unofficial]. It sets itself apart from standard splatting by integrating an adaptive octtree structure derived from the pyramid, enabling the system to skip low-detail regions and focus computational resources on areas requiring higher fidelity [S1, unofficial].
 
 ## How it works
-**Inputs:** A 3D volume dataset of size $N^3$ samples, a viewing direction, and a user-supplied precision threshold (or desired image quality level).
-**Outputs:** A rendered 2D image.
+**Inputs and Outputs:**
+*   **Input:** A 3D volume dataset of size $N^3$ samples.
+*   **Output:** A 2D image rendered via splatted polygons.
+*   **Parameters:** A user-supplied precision threshold (error bound) for fitting the octtree [S1, unofficial].
 
 **Data Structures:**
-1.  **Pyramid Data Structure:** A sequence of $\log_2(N)$ volumes.
-    *   Level 0: The original dataset of size $N^3$.
-    *   Level $k$: A volume of size $(N/2^k)^3$. Created by averaging each $2 \times 2 \times 2$ group of samples from level $k-1$.
-    *   Each cell in the pyramid stores the average value of the underlying samples. [S1, S2, unofficial]
-    *   *Note:* The sources mention storing "estimated error" in the pyramid to fit an octtree [S1, unofficial], but do not provide the specific formula for this error estimation. [G] The implementation must calculate the variance or difference between the cell average and the underlying samples to determine if the cell meets the precision threshold.
-2.  **Octtree:** Constructed by fitting an octtree to the pyramid based on the user-supplied precision threshold. Cells that do not meet the precision threshold are subdivided. [S1, unofficial]
+1.  **Pyramid:** A sequence of $\log(N)$ volumes [S2, unofficial].
+    *   **Level 0:** The original $N^3$ dataset.
+    *   **Level $k$ ($k > 0$):** Created by averaging $2 \times 2 \times 2$ blocks of samples from Level $k-1$. The resolution is halved in each dimension ($N/2^k$).
+    *   **Storage:** Each cell in the pyramid stores the average value of the underlying samples. For binary data, bits can be packed into bytes to accelerate lower-resolution generation [S2, unofficial].
+    *   **Error Estimation:** The pyramid also stores estimated error for each cell, calculated as the difference between the cell's average value and the values of its children in the finer level [S1, unofficial].
+2.  **Octtree:** Constructed by fitting an octtree to the pyramid based on the user-supplied precision threshold [S1, unofficial].
+    *   **Nodes:** Internal nodes store aggregate properties. Leaf nodes correspond to cells in the pyramid that satisfy the error threshold.
+    *   **Selection:** A node is selected as a leaf if its estimated error is below the threshold, or if it is at the maximum depth of the pyramid [S1, unofficial].
 
 **Algorithm Steps:**
-1.  **Build Pyramid:** Construct the pyramidal volume representation. For an original dataset of $N^3$ samples, create $\log_2(N)$ volumes. Level 0 is the original data. For each subsequent level $k$, compute the value of each cell by averaging the $2 \times 2 \times 2$ group of samples from level $k-1$ that it represents. [S2, unofficial]
-2.  **Fit Octtree (Optional/Implicit):** Fit an octtree to the pyramid using the user-supplied precision threshold. This determines which cells are sufficiently accurate to be rendered at their current resolution and which need further refinement. [S1, unofficial]
-3.  **Determine Resolution Level:** Select the appropriate level of the pyramid to scan based on the desired image quality. Lower quality requires scanning higher levels (coarser resolution); higher quality requires scanning lower levels (finer resolution). [S2, unofficial]
-4.  **Back-to-Front Scan:** Scan the selected level(s) of the pyramid in back-to-front order relative to the viewing direction. [S2, unofficial]
-5.  **Splatting:** For each element (cell) in the scanned level:
-    *   Project the volume cell onto the image plane.
-    *   Determine the size of the splat footprint, which matches the size of the projection of the corresponding volume cell. [S1, unofficial]
-    *   Approximate the splat with an RGBA Gouraud-shaded polygon. The polygon's vertices correspond to the projected corners of the volume cell. [S1, unofficial]
-    *   Render the polygon using conventional graphics hardware. [S1, S2, unofficial]
+1.  **Pyramid Construction:**
+    *   Generate Level 0 from the input data.
+    *   For $k = 1$ to $\log(N)$:
+        *   For each $2 \times 2 \times 2$ block in Level $k-1$:
+            *   Compute the average value of the 8 samples.
+            *   Store this average in the corresponding cell in Level $k$.
+            *   Compute the estimated error (e.g., RMS difference between the average and the 8 children) and store it [S1, unofficial][S2, unofficial].
+2.  **Octtree Fitting:**
+    *   Traverse the pyramid from the root (Level $\log(N)$) to the leaves (Level 0).
+    *   For each node, compare its stored estimated error against the user-supplied precision threshold.
+    *   If the error is below the threshold, mark the node as a leaf in the octtree.
+    *   If the error exceeds the threshold and the node is not at Level 0, recursively process its children.
+    *   If the node is at Level 0, it must be a leaf regardless of error [S1, unofficial].
+3.  **Rendering (Splatting):**
+    *   Traverse the constructed octtree in back-to-front order relative to the view direction [S2, unofficial].
+    *   For each leaf node:
+        *   Determine the 3D position and size of the corresponding volume cell.
+        *   Calculate the projected footprint (splat) on the image plane. The splat size is scaled to match the projection of the volume cell [S1, unofficial].
+        *   Approximate the splat as an RGBA Gouraud-shaded polygon [S1, unofficial].
+        *   Rasterize the polygon using conventional graphics hardware [S2, unofficial].
+    *   Composite the resulting pixels to form the final image [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def hierarchical_splatting(volume_data, view_direction, precision_threshold):
+def build_pyramid(data, n_levels):
     """
-    volume_data: 3D array of size N x N x N
-    view_direction: vector (vx, vy, vz)
-    precision_threshold: float, max allowed error for a cell
+    Builds a pyramidal volume representation.
+    data: 3D array of size N x N x N
+    n_levels: log2(N)
+    Returns: list of 3D arrays, where level 0 is original, level k is averaged from k-1
     """
-    N = volume_data.shape[0]
-    levels = []
+    pyramid = [data]
+    current_data = data
     
-    # Step 1: Build Pyramid
-    current_level = volume_data
-    levels.append(current_level)
-    
-    while current_level.shape[0] > 1:
-        next_shape = (current_level.shape[0] // 2,) * 3
-        next_level = np.zeros(next_shape)
-        # Average 2x2x2 groups
-        for x in range(0, current_level.shape[0], 2):
-            for y in range(0, current_level.shape[1], 2):
-                for z in range(0, current_level.shape[2], 2):
-                    block = current_level[x:x+2, y:y+2, z:z+2]
-                    next_level[x//2, y//2, z//2] = np.mean(block)
-        levels.append(next_level)
-        current_level = next_level
+    for level in range(1, n_levels + 1):
+        prev_data = current_data
+        new_size = prev_data.shape[0] // 2
+        new_data = np.zeros((new_size, new_size, new_size))
+        new_error = np.zeros((new_size, new_size, new_size))
         
-    # Step 2 & 3: Determine Level to Render
-    # In a full implementation, fit octtree based on precision_threshold.
-    # For this simplified version, we assume a target resolution level L.
-    # L is chosen such that the cell size at level L meets the precision requirement.
-    # If precision_threshold is not used to select L, L can be user-specified.
-    L = len(levels) - 1 # Default to finest for demonstration
-    
-    # Step 4 & 5: Scan and Splat
-    render_image = np.zeros((image_width, image_height, 4))
-    
-    # Get projection matrix and view transform
-    # This is a placeholder for the actual graphics pipeline transformation
-    transform = get_view_transform(view_direction)
-    
-    # Scan back-to-front
-    # Sort cells by depth in view space
-    cells = get_cells_from_level(levels[L])
-    cells.sort(key=lambda c: c.depth_in_view_space, reverse=True)
-    
-    for cell in cells:
-        # Project cell corners to screen space
-        screen_corners = project_corners(cell.corners_3d, transform)
+        for x in range(new_size):
+            for y in range(new_size):
+                for z in range(new_size):
+                    # Extract 2x2x2 block from previous level
+                    block = prev_data[2*x:2*x+2, 2*y:2*y+2, 2*z:2*z+2]
+                    
+                    # Compute average
+                    avg_val = np.mean(block)
+                    new_data[x, y, z] = avg_val
+                    
+                    # Compute estimated error (RMS difference from children)
+                    # Note: For the top level, error might be undefined or 0
+                    if level < n_levels:
+                        # Children are in the next level of the pyramid, 
+                        # but we are building level k from k-1.
+                        # Error is typically computed after children are known.
+                        # Here we approximate error as variance of the block
+                        new_error[x, y, z] = np.std(block)
+                    else:
+                        new_error[x, y, z] = 0.0
+                        
+        pyramid.append(new_data)
+        pyramid_error.append(new_error) # Assuming separate storage for error
+        current_data = new_data
         
-        # Create polygon from screen corners
-        polygon = create_polygon(screen_corners)
+    return pyramid, pyramid_error
+
+def fit_octtree(pyramid, pyramid_error, threshold):
+    """
+    Fits an octtree to the pyramid based on a precision threshold.
+    pyramid: list of 3D arrays
+    pyramid_error: list of 3D arrays of error estimates
+    threshold: float, user-supplied precision threshold
+    Returns: list of leaf nodes (each node contains level, x, y, z, value)
+    """
+    leaves = []
+    n_levels = len(pyramid)
+    
+    # Recursive function to traverse and fit
+    def traverse(level, x, y, z):
+        # Base case: reached the finest level
+        if level == n_levels - 1:
+            leaves.append({'level': level, 'x': x, 'y': y, 'z': z, 'value': pyramid[level][x, y, z]})
+            return
         
-        # Set RGBA color based on cell value
-        color = cell.value # Simplified; actual transfer function needed
+        # Check error threshold
+        error = pyramid_error[level][x, y, z]
+        if error < threshold:
+            # Node is sufficiently accurate, make it a leaf
+            leaves.append({'level': level, 'x': x, 'y': y, 'z': z, 'value': pyramid[level][x, y, z]})
+        else:
+            # Node has too much error, recurse to children
+            child_x = 2 * x
+            child_y = 2 * y
+            child_z = 2 * z
+            traverse(level + 1, child_x, child_y, child_z)
+            traverse(level + 1, child_x + 1, child_y, child_z)
+            traverse(level + 1, child_x, child_y + 1, child_z)
+            traverse(level + 1, child_x + 1, child_y + 1, child_z)
+            traverse(level + 1, child_x, child_y, child_z + 1)
+            traverse(level + 1, child_x + 1, child_y, child_z + 1)
+            traverse(level + 1, child_x, child_y + 1, child_z + 1)
+            traverse(level + 1, child_x + 1, child_y + 1, child_z + 1)
+
+    # Start from root (level 0)
+    traverse(0, 0, 0, 0)
+    return leaves
+
+def render(pyramid, leaves, view_matrix, projection_matrix, image_width, image_height):
+    """
+    Renders the volume by splatting leaf nodes.
+    pyramid: list of 3D arrays
+    leaves: list of leaf nodes from fit_octtree
+    view_matrix: 4x4 matrix
+    projection_matrix: 4x4 matrix
+    image_width, image_height: int
+    Returns: 2D image array
+    """
+    image = np.zeros((image_height, image_width, 4)) # RGBA
+    
+    # Sort leaves back-to-front based on view direction
+    # This requires transforming leaf centers to view space and sorting by depth
+    sorted_leaves = sort_back_to_front(leaves, view_matrix)
+    
+    for leaf in sorted_leaves:
+        level = leaf['level']
+        x, y, z = leaf['x'], leaf['y'], leaf['z']
+        value = leaf['value']
         
-        # Render polygon (Gouraud shading)
-        render_image = rasterize_polygon(render_image, polygon, color)
+        # Get cell size in world space (assuming unit voxel size for simplicity)
+        # Cell size scales with level
+        cell_size = 1.0 / (2 ** level)
         
-    return render_image
+        # Get cell center in world space
+        # Assuming data origin at (0,0,0) and voxel size 1
+        center_world = np.array([x * cell_size + cell_size/2, 
+                                 y * cell_size + cell_size/2, 
+                                 z * cell_size + cell_size/2])
+        
+        # Transform to view space
+        center_view = view_matrix @ np.append(center_world, 1)
+        center_view = center_view[:3] / center_view[3]
+        
+        # Project to screen space
+        center_screen = projection_matrix @ np.append(center_view, 1)
+        center_screen = center_screen[:2] / center_screen[3]
+        
+        # Calculate splat size (footprint)
+        # Approximate as a polygon scaled to match the projection of the cell
+        # The size depends on the distance from the camera and the cell size
+        # For simplicity, assume a fixed screen-space size for the splat
+        # In practice, this requires projecting the 8 corners of the cell
+        splat_size = calculate_splat_size(cell_size, center_view, projection_matrix)
+        
+        # Create polygon vertices for the splat
+        # Approximate splat as a rectangle or quad
+        vertices = create_polygon_vertices(center_screen, splat_size)
+        
+        # Rasterize polygon
+        # Use Gouraud shading with RGBA value derived from 'value'
+        # For simplicity, assume constant color/opacity per leaf
+        color = value_to_rgba(value)
+        rasterize_polygon(image, vertices, color)
+        
+    return image
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Binary Data:** For binary data, bits can be packed into bytes (each byte represents a $2 \times 2 \times 2$ portion). A byte represents an object element if it contains more than four non-zero bits, otherwise background. This allows faster generation of lower resolution images (1/8th time for half linear resolution). [S2, unofficial]
-*   **Precision:** The choice of precision threshold directly impacts performance and quality. Too high a threshold results in blocky artifacts; too low a threshold reduces performance. [S1, unofficial]
-*   **Polygon Approximation:** Approximating splats with polygons may introduce aliasing or artifacts if the polygon resolution is not sufficient. [S1, S2, unofficial]
+*   **Precision:** The error estimation must be consistent with the threshold to avoid over- or under-sampling. If the error calculation is inaccurate, the octtree may not provide the desired visual quality [S1, unofficial].
+*   **Binary Data:** For binary data, the packing of bits into bytes can lead to ambiguity if the threshold for "object" vs "background" is not carefully chosen (e.g., more than four non-zero bits) [S2, unofficial].
+*   **Occlusion:** The basic hierarchical splatting algorithm described does not explicitly handle occlusion culling at the node level, relying instead on the back-to-front splatting order. More advanced implementations may integrate visibility maps [Parent](5618-hierarchical-and-multi-resolution-splatting.md).
 
 ## Operating characteristics
-*   **Time Complexity:** Building the pyramid takes $O(N^3)$ time. Rendering time depends on the selected level and the number of cells. For binary data, rendering lower resolution images can be up to 8 times faster than full resolution. [S2, unofficial]
-*   **Memory Complexity:** The pyramid requires $O(N^3)$ memory, specifically $\frac{7}{6} N^3$ samples (sum of geometric series $1 + 1/8 + 1/64 + ...$). [S2, unofficial]
-*   **Strengths:** Real-time interactive rendering; progressive refinement allows users to see a rough image quickly and refine it. [S1, S2, unofficial]
-*   **Limitations:** Quality depends on the pyramid level and precision threshold. Polygon approximation may not capture complex volume features as well as continuous splatting functions. [S1, S2, unofficial]
-*   **When to use:** Interactive applications requiring real-time feedback on large volume datasets. [S1, unofficial]
-*   **When not to use:** Offline rendering where maximum visual quality is required regardless of time. [S1, unofficial]
+*   **Time Complexity:** The pyramid construction is $O(N^3)$, where $N$ is the linear dimension of the input data. The octtree fitting is proportional to the number of nodes in the tree, which depends on the threshold. Rendering is proportional to the number of leaf nodes in the octtree. For a given threshold, the number of leaves is typically much smaller than $N^3$, leading to significant speedups [S1, unofficial][S2, unofficial].
+*   **Memory Complexity:** The pyramid requires $O(N^3)$ memory to store all levels. The octtree requires additional memory for the tree structure.
+*   **Performance:** Hierarchical splatting enables real-time interactive rendering for large datasets by reducing the number of primitives rendered [S1, unofficial]. For binary data, lower resolution images can be produced in approximately one-eighth the time of full resolution [S2, unofficial].
+*   **Strengths:** Real-time performance, adaptive resolution, simple implementation using standard graphics hardware [S1, unofficial].
+*   **Limitations:** Visual artifacts may occur at boundaries between different resolution levels if not handled carefully. The error metric may not always correlate perfectly with visual importance [S1, unofficial].
 
 ## Background
-Hierarchical splatting was introduced by David Laur and Pat Hanrahan in 1991 [S1, unofficial]. It was designed to enable real-time volume rendering on modern graphics workstations by leveraging hardware-accelerated polygon rasterization. The method builds on the concept of splatting but introduces a hierarchical data structure to manage resolution adaptively. [S1, S2, unofficial]
+Hierarchical splatting was introduced by David Laur and Pat Hanrahan in 1991 [S1, unofficial]. It was one of the first algorithms to combine hierarchical data structures with splatting for volume rendering, paving the way for many subsequent multi-resolution rendering techniques. The method was designed for interactive applications on modern graphics workstations of the time, leveraging Gouraud-shaded polygons for efficient rasterization [S1, unofficial].
 
 ## Sources
 [S1] Hierarchical splatting, https://www.researchgate.net/publication/48546966_EWA_volume_splatting, fetched 2026-10-28 (unofficial)

@@ -1,95 +1,212 @@
 # Sparse Voxelization into an Octree
 
-Also called: Sparse-voxel octree, SVO
+Also called: Sparse Octree Voxelization, Two-Level Voxelization, Voxelization into Octree
 
 ## Overview
-This method constructs a sparse-voxel octree by storing only voxels intersected by mesh triangles, avoiding the memory overhead of a full grid for large or complex scenes [S1, unofficial]. It differs from its parent, [Sparse Sampling / Sparse Voxel Grid Generation](4588-sparse-sampling-sparse-voxel-grid-generation.md), which uses a fixed sparse grid pattern, by dynamically allocating nodes only where geometry exists, enabling efficient traversal and mipmapped storage for global illumination [S1, unofficial].
+Sparse Voxelization into an Octree is a method to store only voxels intersected by mesh triangles in a sparse-voxel octree, avoiding the memory overhead of a full grid for large and complex scenes [S2, S2, unofficial]. It differs from its parent method, [Sparse Sampling / Sparse Voxel Grid Generation](4588-sparse-sampling-sparse-voxel-grid-generation.md), which marks every 5th voxel as occupied for testing, by dynamically constructing a hierarchical tree structure based on actual geometric intersection [S2, S2, unofficial]. It also differs from [Voxelization into a Uniform Grid](4589-voxelization-into-a-uniform-grid.md) by using a pointer-based octree structure that allows for variable resolution and mipmapped interior nodes, enabling efficient traversal and filtering [S2, S2, unofficial].
 
 ## How it works
-**Inputs:** Triangle mesh; maximum octree depth (resolution).
-**Outputs:** Octree pool (linear buffer of nodes); Voxel-fragment list (linear buffer of attributes); Brick texture (optional, for values).
+### Inputs and Outputs
+**Inputs:**
+*   A triangle mesh (input geometry).
+*   The spatial bounds of the scene (defining the root node).
+*   The maximum octree depth (defining the finest resolution).
 
-**Data Structures:**
-1.  **Octree Pool:** Linear buffer in video memory. Nodes are grouped into $2 \times 2 \times 2$ tiles. Each node stores a single 32-bit pointer (index into the pool) to its eight children. Interior nodes store mipmapped values; leaves store direct voxel values [S1, unofficial].
-2.  **Voxel-Fragment List:** Preallocated linear buffer. Each entry contains:
-    *   Coordinate: One 32-bit word, 10 bits per component ($x, y, z$), 2 unused bits.
-    *   Attributes: Arrays for data (e.g., one color per fragment) [S1, unofficial].
-3.  **Atomic Counter:** Single 32-bit value in a buffer object, tracking the next available index in the Voxel-Fragment List [S1, unofficial].
+**Outputs:**
+*   A sparse-voxel octree stored in linear video memory (the "octree pool").
+*   A voxel-fragment list (intermediate data structure).
 
-**Algorithm Steps:**
-1.  **Voxelize at Max Resolution:** Voxelize the input triangle mesh once at the maximum octree level resolution. For each intersected voxel, append its coordinate and attributes to the Voxel-Fragment List using the Atomic Counter to manage concurrent writes from multiple threads [S1, unofficial].
-2.  **Build Octree Top-Down:** Initialize the root node (1-voxel volume). Iterate through octree levels from top to bottom.
-3.  **Detect Non-Empty Nodes:** For the current level, use the Voxel-Fragment List (not the mesh) to determine which nodes are non-empty (intersected by at least one fragment). This avoids re-voxelizing the mesh at lower resolutions [S1, unofficial].
-4.  **Subdivide:** For each non-empty node, create a new tile of $2^3 = 8$ child nodes in the Octree Pool. Update the parent's pointer to the new tile [S1, unofficial].
-5.  **Write Values:** Write voxel-fragment values into the leaf nodes. Mipmap values into interior nodes by aggregating child values [S1, unofficial].
+### Data Structures
 
-**Pseudocode:**
+**Octree Pool**
+*   **Layout:** Linear buffer object in video memory.
+*   **Grouping:** Nodes are grouped into $2 \times 2 \times 2$ node tiles.
+*   **Node Content:** Each node stores a single pointer (index into the buffer) pointing to eight child nodes.
+*   **Values:** Voxel values can be stored directly in nodes or in "bricks" associated with node tiles, stored in a big 3D texture [S2, S2, unofficial]. The structure contains values for all levels, allowing filtered sampling at any resolution [S2, S2, unofficial].
+
+**Voxel-Fragment List**
+*   **Layout:** Linear vector of entries in a preallocated buffer object.
+*   **Entry Content:**
+    *   3D coordinates: Encoded in one 32-bit word (10 bits per component, 2 unused bits) [S2, S2, unofficial].
+    *   Attributes: Arrays for additional data (e.g., one color per fragment) [S2, S2, unofficial].
+*   **Counter:** A separate 32-bit value in a buffer object tracks the index of the next available entry (atomic counter) [S2, S2, unofficial].
+
+### Algorithm Steps
+
+The algorithm builds the octree from top to bottom, one level at a time, starting from the 1-voxel root node [S2, S2, unofficial].
+
+1.  **Voxel-Fragment List Construction:**
+    *   Voxelize the input mesh only once at the maximum resolution (deepest octree level) [S2, S2, unofficial].
+    *   Allocate one thread per triangle [S1].
+    *   Perform 2D rasterization in the yz plane to determine the bounding box and check for overlap with any Sparse Grid (SG) voxel center [S1].
+    *   Derive the yz range of level-0 voxels (tiles) containing overlapped SG voxel centers [S1].
+    *   Set up edge functions for overlap testing [S1].
+    *   Loop over tiles and check for triangle overlap [S1].
+    *   If an active tile is identified, loop over its $4 \times 4$ SG voxel columns and test their centers for overlap [S1].
+    *   If overlap is reported, project the center along the x-axis onto the triangle's plane to derive the x index $\bar{q}$ of the first SG voxel to flip [S1].
+    *   Identify the level-0 node containing that voxel [S1].
+    *   Append voxel fragments to the list using an atomic counter (e.g., OpenGL 4.2 `atomicAdd`) to manage the index of the next available entry, allowing concurrent access by thousands of threads [S2, S2, unofficial].
+    *   *Note:* This list is used instead of the triangle mesh to subdivide the octree during building [S2, S2, unofficial].
+
+2.  **Octree Building (Top-Down):**
+    *   Start from the 1-voxel root node [S2, S2, unofficial].
+    *   For each successive octree level of increasing resolution:
+        *   Detect nonempty nodes by voxelizing the scene at the resolutions corresponding to the level's resolution (using the voxel-fragment list) [S2, S2, unofficial].
+        *   Create a new tile of $2^3$ subnodes for each nonempty node [S2, S2, unofficial].
+        *   Progressively subdivide nonempty nodes (intersected by at least one triangle) [S2, S2, unofficial].
+
+3.  **Value Propagation and Mipmapping:**
+    *   Write voxel-fragment values into the leaves of the tree [S2, S2, unofficial].
+    *   Mipmap values into the interior nodes [S2, S2, unofficial].
+    *   *Solid Voxelization (Optional/Contextual):* If solid voxelization is required, hierarchically propagate bit flips in the +x direction. If the last bit in a level-0 node's SG voxel column is set, all SG voxels in the same column belonging to nodes in +x direction must be flipped. This is done by looping over all (even-indexed) level-0 nodes in parallel, identifying those with no level-0 -x neighbor, and navigating along +x-neighbor pointers to propagate flips [S1].
+
+### Node Access and Navigation
+*   **Initial Access:** Perform a full descent from the top level [S1].
+*   **Intra-Tile Navigation:** Use x-neighbor pointers for fast navigation within a tile [S1].
+*   **Inter-Tile Navigation:** When entering a new tile, derive the common ancestor node of the previous and desired node from their Morton codes. Depending on the ancestor's level, either ascend to this node and then descend, or perform a full descent [S1].
+
+### Pseudocode
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Initialization
-max_depth = 10  # Example maximum depth
-octree_pool = allocate_buffer()
-fragment_list = allocate_buffer(size=estimated_fragments)
-atomic_counter = allocate_buffer(value=0)
+# Constants
+MAX_DEPTH = 10 # Example maximum depth
+BITS_PER_COORD = 10
+UNUSED_BITS = 2
 
-# Step 1: Voxelize at max resolution
-def voxelize_mesh(mesh, max_res):
-    for triangle in mesh:
-        # Rasterize triangle to voxels at max_res
-        for voxel in intersected_voxels:
-            # Encode coordinate: 10 bits per component
-            coord_word = (voxel.x << 20) | (voxel.y << 10) | voxel.z
-            # Append to fragment list atomically
-            index = atomic_add(atomic_counter, 1)
-            fragment_list[index].coord = coord_word
-            fragment_list[index].color = triangle.color_at(voxel)
+# Data Structures
+class OctreeNode:
+    pointer_to_children: int # Index into octree pool, or null if leaf
+    # Values stored in bricks or directly in node
 
-# Step 2-5: Build Octree
-def build_octree(fragment_list, max_depth):
-    root = allocate_node()
-    root.children = None
+class VoxelFragment:
+    coord_32bit: int # 10 bits x, 10 bits y, 10 bits z, 2 unused
+    color: vec3
+
+# Global Buffers
+octree_pool: Buffer # Linear video memory
+fragment_list: Buffer # Preallocated buffer
+fragment_counter: Buffer # 32-bit atomic counter
+
+def voxelize_mesh_to_list(mesh):
+    """
+    Step 1: Construct the voxel-fragment list.
+    Voxelize mesh once at max resolution.
+    """
+    threads_per_triangle = 1
+    # Launch one thread per triangle
+    for triangle in mesh.triangles:
+        # 2D rasterization in yz plane
+        bounding_box = get_bounding_box(triangle)
+        
+        # Check overlap with SG voxel centers in yz plane
+        if overlaps_sg_voxel_centers(bounding_box):
+            # Derive yz range of level-0 tiles
+            tile_range_yz = get_tile_range_yz(bounding_box)
+            
+            # Set up edge functions
+            edge_functions = setup_edge_functions(triangle)
+            
+            # Loop over tiles
+            for tile in tile_range_yz:
+                if is_tile_active(tile, edge_functions):
+                    # Loop over 4x4 SG voxel columns in the tile
+                    for col in tile.columns_4x4:
+                        if center_overlaps_triangle(col.center, triangle):
+                            # Project center along x-axis to triangle plane
+                            x_index_bar_q = project_x_index(col.center, triangle)
+                            
+                            # Identify level-0 node
+                            level0_node = get_level0_node(col.center)
+                            
+                            # Flip voxels in the column within local x-index range
+                            # Using atomic xor operation on the node's voxel sub-grid
+                            start_local_x = x_index_bar_q % 4
+                            for local_x in range(start_local_x, 4):
+                                atomic_xor(level0_node.voxel_grid, local_x, col.y, col.z)
+                            
+                            # Encode fragment
+                            coord_word = encode_coord(col.center)
+                            color = get_triangle_color(triangle)
+                            
+                            # Append to list using atomic counter
+                            index = atomic_add(fragment_counter, 1)
+                            fragment_list[index] = VoxelFragment(coord_word, color)
+
+def build_octree_from_list():
+    """
+    Step 2 & 3: Build octree top-down using the fragment list.
+    """
+    # Start with root node (1-voxel)
+    root = allocate_node(octree_pool)
     current_level_nodes = [root]
     
-    for level in range(1, max_depth + 1):
+    for level in range(1, MAX_DEPTH + 1):
         next_level_nodes = []
+        
+        # Detect nonempty nodes by voxelizing at current level resolution
+        # Using the pre-computed fragment list instead of re-rasterizing triangles
         for node in current_level_nodes:
-            # Check if node is non-empty using fragment_list
-            # This involves checking if any fragment in the list falls within the node's spatial bounds
-            if is_node_non_empty(node, fragment_list):
-                # Create tile of 8 children
-                tile_index = allocate_tile(octree_pool, 8)
-                node.children = tile_index
+            if is_node_nonempty(node, fragment_list, level):
+                # Create new tile of 2^3 subnodes
+                children_indices = allocate_tile(octree_pool, 8)
+                node.pointer_to_children = children_indices
                 
                 for i in range(8):
-                    child = allocate_node()
-                    child.children = None
-                    octree_pool[tile_index + i] = child
+                    child = get_node_at_index(octree_pool, children_indices + i)
                     next_level_nodes.append(child)
-            else:
-                # Node is empty, no children allocated
-                pass
+        
         current_level_nodes = next_level_nodes
 
-    # Step 5: Write values (leaves and mipmapping)
-    write_values_to_leaves(fragment_list, current_level_nodes)
-    mipmap_interior_nodes(current_level_nodes)
+    # Write values to leaves and mip up
+    write_fragments_to_leaves(fragment_list, current_level_nodes)
+    mipmap_interior_nodes(octree_pool)
+
+def is_node_nonempty(node, fragment_list, level):
+    """
+    Check if node is intersected by any fragment in the list at this resolution.
+    """
+    # Implementation detail: Check if any fragment's coordinate falls within
+    # the spatial bounds of the node at the given level's resolution.
+    # This replaces re-rasterizing the mesh.
+    pass
+
+def encode_coord(center):
+    """
+    Encode 3D coordinate into 32-bit word.
+    """
+    x = int(center.x)
+    y = int(center.y)
+    z = int(center.z)
+    # 10 bits per component, 2 unused
+    return (x << 20) | (y << 10) | z
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Precision:** The 10-bit coordinate encoding limits the maximum resolution to $1024^3$ voxels per axis. Higher resolutions require more bits or a different encoding [S1, unofficial].
-*   **Collisions:** Lower resolution voxelization during building can lead to increased collisions per voxel, potentially slowing down the process compared to higher resolutions [S1, unofficial].
-*   **Atomic Contention:** High fragment counts can cause contention on the atomic counter, impacting performance [S1, unofficial].
+### Parameters and Typical Values
+*   **Bits per coordinate:** 10 bits per component (30 bits total) + 2 unused bits [S2, S2, unofficial].
+*   **Tile Size:** $2 \times 2 \times 2$ node tiles [S2, S2, unofficial].
+*   **SG Voxel Column Size:** $4 \times 4$ columns within a level-0 tile [S1].
+*   **Atomic Operation:** `atomicAdd` for counter, `atomicXor` for voxel flipping [S1][S2, S2, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Collision Rate:** Lower resolution voxelization can end up slower than higher resolution due to an increase in the number of collisions encountered per voxel [S2, S2, unofficial].
+*   **Precision:** The 10-bit coordinate encoding limits the maximum scene size/resolution. Ensure the scene bounds fit within the 10-bit range ($2^{10} = 1024$ units) or scale appropriately [S2, S2, unofficial].
+*   **Atomic Contention:** High triangle counts can lead to contention on the atomic counter and voxel grid updates. Use efficient atomic operations provided by the hardware (e.g., OpenGL 4.2) [S2, S2, unofficial].
+*   **Solid Voxelization:** Simple intersection testing may leave holes. Hierarchical propagation of bit flips in the +x direction is required for solid voxelization [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the number of triangles, plus overhead for octree construction proportional to the number of occupied nodes. Voxelization is done once at max resolution [S1, unofficial].
-*   **Memory Complexity:** Proportional to the number of occupied voxels and octree nodes. Significantly less than a full grid for sparse scenes [S1, unofficial].
-*   **Performance:** On the Stanford Dragon mesh, the algorithm's execution time varies with resolution. At 128 resolution, it takes 1.18 ms (without hardware atomicAdd) and 1.40 ms (with). At 512 resolution, it takes 1.47 ms (without) and 5.30 ms (with). Hardware atomicAdd can be slower due to contention [S1, unofficial].
-*   **Strengths:** Efficient storage for sparse scenes; supports mipmapped querying for global illumination [S1, unofficial].
-*   **Limitations:** Limited by 10-bit coordinate precision; atomic contention can degrade performance at high fragment counts [S1, unofficial].
+*   **Time Complexity:** The voxel-fragment list construction is $O(T)$ where $T$ is the number of triangles, with parallel execution per triangle [S1][S2, S2, unofficial]. The octree building is proportional to the number of nonempty nodes and the depth of the tree [S2, S2, unofficial].
+*   **Memory Complexity:** $O(N)$ where $N$ is the number of occupied voxels/nodes. The sparse structure avoids storing empty space [S2, S2, unofficial].
+*   **Measured Performance:** On the Stanford Dragon mesh, the voxelization algorithm execution time varies with resolution. For example, at resolution 128, it takes 1.18 ms (RGBA8), while at 512, it takes 1.47 ms. Comparison with VoxelPipe shows times of 1.40 ms and 5.30 ms respectively at 128, and 1.63 ms and 2.07 ms at 512. Times marked with a star in the source correspond to results obtained with hardware `atomicAdd` instead of emulation [S2, S2, unofficial].
+*   **Strengths:** Handles large and complex scenes efficiently by storing only intersected voxels. Allows for mipmapped interior nodes, enabling fast filtered sampling at multiple resolutions [S2, S2, unofficial].
+*   **Limitations:** Requires atomic operations for concurrent writes, which can be a bottleneck. Lower resolution levels may suffer from higher collision rates, potentially slowing down the process [S2, S2, unofficial].
+*   **When to Use:** When memory is a constraint and the scene has sparse geometry. When multi-resolution access is needed for rendering or traversal.
+*   **When Not to Use:** When the scene is dense and nearly fills the volume, as the overhead of the tree structure may outweigh the benefits. When hardware atomic operations are not available or slow.
 
 ## Background
-The sparse-voxel octree structure is in the spirit of [Laine and Karras 10] and [Crassin et al. 09] [S1, unofficial]. It was implemented in OpenGL using compute-like kernels and atomic counters (OpenGL 4.2) for concurrent access [S1, unofficial]. The structure allows fast trilinear sampling of voxel values when combined with bricks [S1, unofficial].
+The sparse-voxel octree structure is in the spirit of [Laine and Karras 10] and [Crassin et al. 09] [S2, S2, unofficial]. The method was described in the context of OpenGL-based real-time global illumination applications [S2, S2, unofficial]. The voxel-fragment list construction using atomic counters leverages OpenGL 4.2 features [S2, S2, unofficial]. The two-level approach (rasterizing to level-0 nodes and then propagating) was introduced to optimize the voxelization process [S1].
 
 ## Sources
-[S1] PDF K14190_text - Icare3D, https://icare3d.org/research/OpenGLInsights-SparseVoxelization.pdf, fetched 2026-10-29 (unofficial)
+[S1] Fast parallel surface and solid voxelization on GPUs, https://doi.org/10.1145/1882261.1866201, fetched 2026-11-03
+[S2] PDF K14190_text - Icare3D, https://icare3d.org/research/OpenGLInsights-SparseVoxelization.pdf, fetched 2026-10-29 (unofficial)
