@@ -1,0 +1,50 @@
+# Window-Length Encoding
+
+Also called: RL encoding
+
+## Overview
+Window-Length Encoding is a compression technique applied to intermediate images in distributed volume rendering to reduce network transfer time [S1]. It differs from sibling methods by specifically targeting the pixel data of rendered intermediate images rather than raw voxel data, leveraging the spatial coherence of distant views to achieve significant bandwidth savings [S1].
+
+## How it works
+Window-Length Encoding applies run-length encoding (RLE) to the pixel values of intermediate images generated during the rendering process [S1]. The method compresses contiguous runs of identical color values to reduce the payload size before transmission over the network [S1].
+
+**Inputs and Outputs:**
+*   **Input:** An intermediate image (e.g., 500x500 pixels) containing color values.
+*   **Output:** A compressed byte stream representing the run-length encoded image.
+
+**Data Structures:**
+The specific bit-packing or field layout is not given in the sources [G]. Standard RLE implies storing pairs of (count, value), but the exact integer sizes or endianness are not specified [S1].
+
+**Steps:**
+1.  Scan the intermediate image pixels, typically in row-major order.
+2.  Identify contiguous runs of identical pixel values.
+3.  Encode each run as a count-value pair.
+4.  Transmit the encoded stream to the compositor [S1].
+
+**Parameters:**
+*   **Encoding Time:** Approximately 1 ms [S1].
+*   **Decoding Time:** Approximately 1 ms [S1]
+
+**Edge Cases and Pitfalls:**
+*   **Content Dependency:** Encoding efficiency is highly dependent on image content [S1].
+*   **Inefficient Cases:** Views within the volume produce large, complex images with few contiguous color runs, which cannot be effectively window-encoded [S1].
+*   **Efficient Cases:** Distant views of the volume produce images with large contiguous color runs, resulting in efficient compression [S1].
+
+## Subtopics
+
+### Window-Length Encoded Image Compositing
+This variant involves the compositor receiving and processing the window-length encoded images. The compositor implicitly handles the decoding and compositing of these images in a single step [S1].
+*   **Compositing Time:** Approximately 10 ms per input intermediate image, including the implicit handling of the encoded data [S1].
+
+## Operating characteristics
+*   **Network Impact:** On a Gigabit Ethernet network (1000 Mb/s), sending a 500x500 pixel intermediate image without compression takes approximately 10 ms [S1]. With Window-Length Encoding, the propagation time becomes unmeasurable (less than 1 ms) [S1].
+*   **Total Overhead:** The encoding and decoding operations each take approximately 1 ms [S1].
+*   **Scaling:** Performance is dataset and viewpoint dependent [S1].
+*   **Strengths:** Significant reduction in network propagation time for suitable images (distant views) [S1].
+*   **Limitations:** Ineffective for complex internal views where pixel runs are short or non-existent [S1].
+
+## Background
+Window-Length Encoding was used in a distributed-data implementation of the Perspective Shear-Warp volume rendering algorithm for visualizing large astronomical cubes [S1]. The system ran on a Linux cluster connected via Gigabit Ethernet to the front-end interface machine [S1]. The technique was employed to mitigate the latency of transferring intermediate render results between cluster nodes [S1].
+
+## Sources
+[S1] "A Distributed-Data Implementation of the Perspective Shear-Warp Volume Rendering Algorithm for Visualisation of Large Astronomical Cubes", http://web.eng.ucsd.edu/~jschulze/projects/Beeson2003.pdf, fetched 2026-10-29

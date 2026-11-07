@@ -3,285 +3,256 @@
 Also called: LQ/HQ Volume Rendering, Volume Raycasting with Window/Level and Bricking, Window/Level Volume Rendering
 
 ## Overview
-Window/Level Volume Raycasting with Bricking is a direct volume rendering technique that combines spatial decomposition (bricking) with adaptive resolution selection (Window/Level) to efficiently render large medical datasets on standard hardware. It solves the problem of memory bandwidth bottlenecks and cache inefficiencies inherent in linear volume layouts by partitioning data into fixed-size chunks (bricks) and dynamically selecting between low-quality (LQ) and high-quality (HQ) rendering paths based on user-defined window/level parameters or performance constraints. Unlike sibling methods that rely on global hierarchical structures like octrees or wavelets, this approach uses a flat brick-based layout with CPU-side acceleration logic, distinguishing it by its explicit integration of window/level transfer function mapping and dual-resolution marching strategies within a single rendering pipeline [S1, S2, unofficial].
+Window/Level Volume Raycasting with Bricking is a direct volume rendering technique that combines spatial decomposition (bricking) with user-defined intensity windowing to accelerate the rendering of large medical datasets on standard PC hardware [S2, unofficial]. It solves the performance bottleneck of accessing large, contiguous volume data by storing it in fixed-size bricks and traversing them during ray marching, while simultaneously allowing the user to adjust the visibility of tissue types via window/level parameters [S1, unofficial][S2, unofficial]. It differs from sibling methods like [Wavelet-based Volume Rendering](1052-wavelet-based-volume-rendering.md) by using a spatial brick layout rather than frequency-domain transforms, and from [Level-of-Detail Volume Rendering via 3D Textures](1706-level-of-detail-volume-rendering-via-3d-textures.md) by relying on CPU-side brick traversal and explicit window/level mapping rather than hardware mipmaps for LOD [S1, unofficial][S2, unofficial].
 
 ## How it works
-The method operates by decomposing the volume into a 3D grid of bricks, managing two resolution levels (LQ and HQ), and executing a ray-marching loop that adapts its step size and sampling density based on the selected quality mode.
+The method operates in two phases: data preparation (bricking and metadata extraction) and runtime raycasting (brick traversal, window/level mapping, and shading).
 
 ### Inputs and Outputs
 **Inputs:**
-*   **Volume Data:** Stored in a bricked layout. Dimensions: `volumeWidth`, `volumeHeight`, `volumeDepth` [S1, unofficial].
-*   **Voxel Spacing:** Buffer containing spacing in x, y, z dimensions (`voxelSpacingBuffer`) [S1, unofficial].
-*   **Window/Level Parameters:** `gLevel` (window center) and `gWindow` (window width) for voxel-to-color mapping [S1, unofficial].
-*   **Bricking Parameters:** `chunkSize` (dimensions of a brick), `numChunksX`, `numChunksY`, `numChunksZ` [S1, unofficial].
-*   **Camera/View:** View matrix, projection matrix, and ray origins/directions derived from the view frustum [S1, unofficial].
-*   **Clipping Bounds:** `xmin, xmax, ymin, ymax, zmin, zmax` defining the cutting cube. Defaults to -1.0 and 1.0 if no cutting cube is specified [S1, unofficial].
+*   Raw volume data (e.g., DICOM series) [S1, unofficial].
+*   Window center ($gLevel$) and window width ($gWindow$) for intensity mapping [S1, unofficial].
+*   Voxel spacing ($voxelSpacingBuffer$) for geometric accuracy [S1, unofficial].
+*   Volume dimensions ($volumeWidth, volumeHeight, volumeDepth$) [S1, unofficial].
+*   Bricking parameters: chunk size ($chunkSize$) and number of chunks ($numChunksX, numChunksY, numChunksZ$) [S1, unofficial].
+*   Rendering mode flag ($usingHQ$): determines whether Low Quality (LQ) or High Quality (HQ) parameters are used [S1, unofficial].
+*   Cutting cube bounds ($xmin, xmax, ymin, ymax, zmin, zmax$) for clipping [S1, unofficial].
 
 **Outputs:**
-*   **Rendered Image:** An offscreen render pass containing the composited volume [S1, unofficial].
+*   A rendered image (color and opacity) on the screen or offscreen buffer [S1, unofficial].
 
 ### Data Structures
-1.  **Brick Buffer:** A 3D array of bricks. Each brick contains a linear array of voxel values. The total number of bricks is `numChunksX * numChunksY * numChunksZ` [S1, unofficial].
-2.  **Mesh Buffer:** A pre-generated mesh buffer for a cube, retrieved via `gMeshBufferManager` with key "cube" [S1, unofficial].
-3.  **Quality Flags:** Boolean or configuration flags distinguishing LQ and HQ modes, which dictate specific thresholds and step multipliers [S1, unofficial].
+1.  **Brick Layout:** The volume is decomposed into 3D bricks of size $chunkSize \times chunkSize \times chunkSize$. The total number of bricks is $numChunksX \times numChunksY \times numChunksZ$ [S1, unofficial].
+2.  **Metadata Buffer:** Contains voxel spacing and volume dimensions [S1, unofficial].
+3.  **Parameter Sets:** Two sets of thresholds and constants are maintained, one for LQ and one for HQ, selected by the $usingHQ$ flag [S1, unofficial]:
+    *   $gDensityForMarchSpaceSkipping$: Threshold to skip marching steps.
+    *   $skipMultiplier$: Multiplier for step skipping.
+    *   $subtleSurfaceThreshold$: Threshold for subtle surface detection.
+    *   $surfaceThreshold$: Threshold for surface rendering.
+    *   $maxSteps$: Maximum ray marching steps.
+    *   $minGradientMagnitude$: Minimum gradient for calculation.
+    *   $accumulatedThreshold$: Threshold for accumulated opacity to terminate early.
+    *   $transmittanceThreshold$: Threshold for transmittance to terminate early.
+    *   $gUseGradientLQ/HQ$: Boolean flag for gradient calculation.
+    *   $gAmbient$: Ambient lighting intensity [S1, unofficial].
 
-### Parameters and Typical Values
-The method switches between LQ and HQ modes, using different parameter sets for each. Let `usingHQ` be a boolean flag.
+### Numbered Steps
 
-*   **Density Thresholds for Marching Space Skipping:**
-    *   `densityForMarchSpaceSkipping`: Uses `gDensityForMarchSpaceSkippingLQ` if `!usingHQ`, else `gDensityForMarchSpaceSkippingHQ` [S1, unofficial].
-*   **Step Skipping Multiplier:**
-    *   `skipMultiplier`: Uses `gSkipMultiplierLQ` if `!usingHQ`, else `gSkipMultiplierHQ` [S1, unofficial].
-*   **Surface Detection Thresholds:**
-    *   `subtleSurfaceThreshold`: Uses `gSubtleSurfaceThresholdLQ` if `!usingHQ`, else `gSubtleSurfaceThresholdHQ` [S1, unofficial].
-    *   `surfaceThreshold`: Uses `gSurfaceThresholdLQ` if `!usingHQ`, else `gSurfaceThresholdHQ` [S1, unofficial].
-*   **Ray Marching Limits:**
-    *   `maxSteps`: Uses `gMaxStepsLQ` if `!usingHQ`, else `gMaxStepsHQ` [S1, unofficial].
-*   **Gradient Calculation:**
-    *   `toggleGradient`: Boolean flag. Uses `gUseGradientLQ` if `!usingHQ`, else `gUseGradientHQ` [S1, unofficial].
-    *   `minGradientMagnitude`: Uses `gMinGradientMagnitudeLQ` if `!usingHQ`, else `gMinGradientMagnitudeHQ` [S1, unofficial].
-*   **Early Termination Thresholds:**
-    *   `accumulatedThreshold`: Uses `gAccumulatedThresholdLQ` if `!usingHQ`, else `gAccumulatedThresholdHQ` [S1, unofficial].
-    *   `transmittanceThreshold`: Uses `gTransmittanceThresholdLQ` if `!usingHQ`, else `gTransmittanceThresholdHQ` [S1, unofficial].
-*   **Lighting:**
-    *   `gAmbient`: Ambient lighting intensity constant [S1, unofficial].
+1.  **Data Loading and Bricking:**
+    *   Read the raw volume data.
+    *   Decompose the volume into bricks of size $chunkSize$.
+    *   Store bricks in memory or disk, indexed by $(x, y, z)$ chunk coordinates [S1, unofficial][S2, unofficial].
 
-### Algorithm Steps
+2.  **Ray Initialization:**
+    *   For each pixel in the viewport, compute the ray origin and direction in world space.
+    *   Transform the ray into volume space using the inverse of the volume's transformation matrix [S1, unofficial].
+    *   Initialize ray parameters: $t_{min}$ and $t_{max}$ based on the intersection with the volume bounding box and the cutting cube bounds ($xmin, xmax, \dots$) [S1, unofficial].
 
-1.  **Initialization:**
-    *   Retrieve the cube mesh buffer from `gMeshBufferManager` using key "cube" [S1, unofficial].
-    *   Determine the current quality mode (LQ or HQ) based on user input or system load.
-    *   Select the corresponding parameter set (thresholds, multipliers, max steps) based on the `usingHQ` flag [S1, unofficial].
+3.  **Brick Traversal:**
+    *   Traverse the ray through the brick hierarchy.
+    *   For each brick intersected by the ray:
+        *   Load the brick data into memory [S1, unofficial].
+        *   Compute the entry and exit points of the ray within the current brick [S2, unofficial].
+        *   Perform ray marching within the brick (see Step 4).
 
-2.  **Ray Generation:**
-    *   For each pixel in the viewport, generate a ray origin and direction in world space.
-    *   Transform the ray into the volume's local coordinate system using the inverse view matrix.
-    *   Calculate the intersection of the ray with the volume bounds (or the cutting cube bounds `xmin, xmax, ...`) to determine the entry and exit points [S1, unofficial].
-
-3.  **Brick Addressing Optimization:**
-    *   To minimize performance penalties from branch prediction failures on CPUs with long pipelines, avoid `if-else` statements for brick boundary checks during the ray march [S2, unofficial].
-    *   Instead, use a branchless addressing scheme or pre-computed offsets where possible. If a branch is necessary, structure it to minimize pipeline flushes [S2, unofficial].
-    *   *Note:* Standard linear addressing is faster. The bricked layout requires computing two offsets (brick offset + element offset). The optimization aims to keep the common case (data within one brick) fast [S2, unofficial].
-
-4.  **Ray Marching Loop:**
-    *   Initialize `accumulatedOpacity = 0.0`, `transmittance = 1.0`, `color = (0, 0, 0)`.
-    *   Initialize `currentPos` to the ray entry point.
-    *   Loop while `currentPos` is within the volume bounds and `transmittance > transmittanceThreshold` and `stepCount < maxSteps`:
-        *   **Voxel Sampling:**
-            *   Calculate the brick index and local element index for `currentPos`.
-            *   Sample the voxel value $V$ at `currentPos` using trilinear interpolation [S1, unofficial].
-        *   **Window/Level Transformation:**
-            *   Map the voxel value $V$ to an opacity $\alpha$ and color $C$ using the window/level parameters:
-                $$ \alpha = \text{clamp}\left(\frac{V - (gLevel - gWindow/2)}{gWindow}, 0.0, 1.0\right) $$
-                *(Note: Exact transfer function implementation may vary, but this is the standard window/level mapping)* [S1, unofficial].
-        *   **Gradient Calculation (Optional):**
-            *   If `toggleGradient` is true, compute the gradient $\nabla V$ at `currentPos` using a 26-connected neighborhood [S2, unofficial].
-            *   If $|\nabla V| < minGradientMagnitude$, set gradient to zero [S1, unofficial].
-        *   **Marching Space Skipping:**
-            *   If $V < densityForMarchSpaceSkipping$, skip steps:
-                $$ currentPos += skipMultiplier \times voxelSpacing \times rayDirection $$
-            *   Else, advance by one voxel spacing:
-                $$ currentPos += voxelSpacing \times rayDirection $$
-        *   **Compositing:**
-            *   Update color and opacity using front-to-back compositing:
-                $$ color = color + C \times \alpha \times transmittance $$
-                $$ transmittance = transmittance \times (1.0 - \alpha) $$
-        *   **Early Termination:**
-            *   If `accumulatedOpacity > accumulatedThreshold` or `transmittance < transmittanceThreshold`, break loop [S1, unofficial].
+4.  **Ray Marching and Window/Level Mapping:**
+    *   For each step along the ray within the brick:
+        *   **Addressing:** Compute the voxel coordinates. Use the refined addressing scheme to minimize pipeline flushes (see Subtopics) [S2, unofficial].
+        *   **Sampling:** Interpolate the voxel value $V$ at the current position [S2, unofficial].
+        *   **Window/Level Transformation:** Map the raw voxel value $V$ to an opacity $\alpha$ and color $C$ using the window/level parameters:
+            $$
+            \alpha = \begin{cases} 
+            0 & \text{if } V \leq gLevel - \frac{gWindow}{2} \\
+            \frac{V - (gLevel - \frac{gWindow}{2})}{gWindow} & \text{if } gLevel - \frac{gWindow}{2} < V < gLevel + \frac{gWindow}{2} \\
+            1 & \text{if } V \geq gLevel + \frac{gWindow}{2}
+            \end{cases}
+            $$
+            [S1, unofficial] (Note: The exact transfer function may vary, but the window/level concept maps intensity to opacity/visibility).
+        *   **Gradient Calculation (Optional):** If $gUseGradient$ is true, compute the gradient $\nabla V$ using a 26-connected neighborhood [S2, unofficial].
+        *   **Shading:** Compute the lighting contribution using Phong shading if enabled, combining ambient ($gAmbient$) and diffuse/specular components based on the gradient [S1, unofficial].
+        *   **Step Skipping:** If $V < gDensityForMarchSpaceSkipping$, skip the next $skipMultiplier$ steps to accelerate traversal [S1, unofficial].
+        *   **Accumulation:** Update the accumulated color $C_{acc}$ and opacity $A_{acc}$:
+            $$
+            C_{acc} = C_{acc} + C \cdot \alpha \cdot (1 - A_{acc})
+            $$
+            $$
+            A_{acc} = A_{acc} + \alpha \cdot (1 - A_{acc})
+            $$
+        *   **Early Termination:** If $A_{acc} > accumulatedThreshold$ or $1 - A_{acc} < transmittanceThreshold$, terminate the ray [S1, unofficial].
 
 5.  **Rendering:**
-    *   Call `gVolumeRenderPipeline!.render` with the offscreen render pass, vertex buffer, index buffer, and index count [S1, unofficial].
+    *   Pass the final pixel color to the GPU for display [S1, unofficial].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_volume_bricks(volume_data, brick_layout, camera, window_level, quality_mode):
+def render_volume_ray_casting_bricks(volume_data, brick_layout, params, window_center, window_width):
     """
-    Renders a bricked volume using window/level raycasting.
+    Main rendering loop for Window/Level Volume Raycasting with Bricking.
     
     Args:
-        volume_data: 3D array of voxel values.
-        brick_layout: Object containing chunkSize, numChunksX, numChunksY, numChunksZ.
-        camera: Object with viewMatrix, projectionMatrix, width, height.
-        window_level: Object with gLevel, gWindow.
-        quality_mode: 'LQ' or 'HQ'.
+        volume_data: Array of voxel values.
+        brick_layout: Structure containing brick dimensions and chunk counts.
+        params: Dictionary of LQ/HQ parameters (thresholds, multipliers, etc.).
+        window_center: gLevel.
+        window_width: gWindow.
         
     Returns:
         Rendered image buffer.
     """
+    # Initialize output buffer
+    image = create_empty_buffer(params['volumeWidth'], params['volumeHeight'])
     
-    # 1. Select parameters based on quality mode
-    if quality_mode == 'LQ':
-        max_steps = gMaxStepsLQ
-        skip_multiplier = gSkipMultiplierLQ
-        density_threshold = gDensityForMarchSpaceSkippingLQ
-        surface_threshold = gSurfaceThresholdLQ
-        subtle_surface_threshold = gSubtleSurfaceThresholdLQ
-        min_gradient_mag = gMinGradientMagnitudeLQ
-        accumulated_threshold = gAccumulatedThresholdLQ
-        transmittance_threshold = gTransmittanceThresholdLQ
-        use_gradient = gUseGradientLQ
-    else: # HQ
-        max_steps = gMaxStepsHQ
-        skip_multiplier = gSkipMultiplierHQ
-        density_threshold = gDensityForMarchSpaceSkippingHQ
-        surface_threshold = gSurfaceThresholdHQ
-        subtle_surface_threshold = gSubtleSurfaceThresholdHQ
-        min_gradient_mag = gMinGradientMagnitudeHQ
-        accumulated_threshold = gAccumulatedThresholdHQ
-        transmittance_threshold = gTransmittanceThresholdHQ
-        use_gradient = gUseGradientHQ
-
-    ambient_light = gAmbient
-    voxel_spacing = get_voxel_spacing() # From voxelSpacingBuffer
+    # Precompute window/level bounds
+    lower_bound = window_center - window_width / 2.0
+    upper_bound = window_center + window_width / 2.0
     
-    # 2. Initialize output buffer
-    image_width = camera.width
-    image_height = camera.height
-    output_buffer = zeros((image_height, image_width, 3))
+    # Determine which parameter set to use (LQ or HQ)
+    is_hq = params['usingHQ']
+    density_skip = params['densityForMarchSpaceSkippingHQ'] if is_hq else params['densityForMarchSpaceSkippingLQ']
+    skip_mult = params['skipMultiplierHQ'] if is_hq else params['skipMultiplierLQ']
+    max_steps = params['maxStepsHQ'] if is_hq else params['maxStepsLQ']
+    acc_thresh = params['accumulatedThresholdHQ'] if is_hq else params['accumulatedThresholdLQ']
+    trans_thresh = params['transmittanceThresholdHQ'] if is_hq else params['transmittanceThresholdLQ']
+    use_gradient = params['useGradientHQ'] if is_hq else params['useGradientLQ']
+    min_grad_mag = params['minGradientMagnitudeHQ'] if is_hq else params['minGradientMagnitudeLQ']
+    surface_thresh = params['surfaceThresholdHQ'] if is_hq else params['surfaceThresholdLQ']
+    subtle_thresh = params['subtleSurfaceThresholdHQ'] if is_hq else params['subtleSurfaceThresholdLQ']
+    ambient = params['gAmbient']
     
-    # 3. Generate rays and march
-    for y in range(image_height):
-        for x in range(image_width):
-            # Generate ray in world space
-            ray_origin, ray_direction = generate_ray(x, y, camera)
+    # Iterate over each pixel
+    for y in range(params['volumeHeight']):
+        for x in range(params['volumeWidth']):
+            # Compute ray origin and direction for this pixel
+            ray_origin, ray_direction = compute_ray_for_pixel(x, y, params)
             
-            # Transform to volume space
-            inv_view = inverse(camera.viewMatrix)
-            ray_origin = transform_point(inv_view, ray_origin)
-            ray_direction = transform_vector(inv_view, ray_direction)
-            ray_direction = normalize(ray_direction)
+            # Initialize ray marching state
+            t = ray_origin.t_min
+            accumulated_color = [0.0, 0.0, 0.0]
+            accumulated_alpha = 0.0
             
-            # Intersect with volume bounds
-            entry_t, exit_t = intersect_volume_bounds(ray_origin, ray_direction, brick_layout)
-            
-            if entry_t is None or exit_t is None:
-                continue
+            # Ray marching loop
+            steps_taken = 0
+            while t < ray_origin.t_max and accumulated_alpha < acc_thresh and (1.0 - accumulated_alpha) > trans_thresh and steps_taken < max_steps:
                 
-            current_pos = ray_origin + ray_direction * entry_t
-            accumulated_opacity = 0.0
-            transmittance = 1.0
-            color = (0.0, 0.0, 0.0)
-            step_count = 0
-            
-            while step_count < max_steps and transmittance > transmittance_threshold:
-                # Check if current_pos is within volume bounds
-                if not is_inside_volume(current_pos, brick_layout):
-                    break
+                # Get current 3D position
+                pos = ray_origin + ray_direction * t
                 
-                # 4. Address brick and sample voxel
-                # Optimized addressing to avoid pipeline flushes
-                brick_idx, local_idx = get_brick_and_local_index(current_pos, brick_layout)
-                voxel_value = sample_voxel(volume_data, brick_idx, local_idx, current_pos)
+                # Check if position is within cutting cube bounds
+                if not is_inside_cutting_cube(pos, params):
+                    t += step_size
+                    steps_taken += 1
+                    continue
                 
-                # 5. Window/Level Transformation
-                # Map voxel value to opacity
-                lower_bound = window_level.gLevel - window_level.gWindow / 2.0
-                upper_bound = window_level.gLevel + window_level.gWindow / 2.0
+                # Address the brick and voxel
+                # Use refined addressing to avoid pipeline flushes (see Subtopics)
+                brick_idx, local_idx = address_brick_voxel(pos, brick_layout)
+                voxel_value = volume_data[brick_idx][local_idx]
                 
-                if voxel_value < lower_bound:
+                # Window/Level Mapping
+                if voxel_value <= lower_bound:
                     alpha = 0.0
-                elif voxel_value > upper_bound:
+                elif voxel_value >= upper_bound:
                     alpha = 1.0
                 else:
-                    alpha = (voxel_value - lower_bound) / window_level.gWindow
+                    alpha = (voxel_value - lower_bound) / window_width
                 
-                # Map voxel value to color (simplified grayscale for demonstration)
-                # In practice, this uses a transfer function
-                color_val = voxel_value / 255.0
-                sample_color = (color_val, color_val, color_val)
+                # Step skipping optimization
+                if voxel_value < density_skip:
+                    t += step_size * skip_mult
+                    steps_taken += int(skip_mult)
+                    continue
                 
-                # 6. Gradient Calculation (Optional)
-                gradient = (0.0, 0.0, 0.0)
+                # Gradient calculation (if enabled)
+                gradient = [0.0, 0.0, 0.0]
                 if use_gradient:
-                    gradient = compute_gradient(volume_data, brick_idx, local_idx, current_pos, brick_layout)
-                    if magnitude(gradient) < min_gradient_mag:
-                        gradient = (0.0, 0.0, 0.0)
+                    gradient = compute_gradient_26_connected(pos, volume_data, brick_layout, min_grad_mag)
                 
-                # 7. Marching Space Skipping
-                if voxel_value < density_threshold:
-                    step_size = skip_multiplier * voxel_spacing
-                else:
-                    step_size = voxel_spacing
+                # Shading (Phong)
+                color = compute_phong_shading(gradient, ambient, surface_thresh, subtle_thresh)
                 
-                # 8. Compositing
-                # Front-to-back compositing
-                contribution = sample_color * alpha * transmittance
-                color = color + contribution
-                transmittance = transmittance * (1.0 - alpha)
-                accumulated_opacity = accumulated_opacity + alpha * transmittance # Note: standard formula uses pre-multiplied alpha
-                
-                # 9. Early Termination
-                if accumulated_opacity > accumulated_threshold:
-                    break
+                # Accumulate
+                weight = alpha * (1.0 - accumulated_alpha)
+                accumulated_color = [
+                    accumulated_color[0] + color[0] * weight,
+                    accumulated_color[1] + color[1] * weight,
+                    accumulated_color[2] + color[2] * weight
+                ]
+                accumulated_alpha += weight
                 
                 # Advance ray
-                current_pos = current_pos + ray_direction * step_size
-                step_count += 1
+                t += step_size
+                steps_taken += 1
             
             # Store result
-            output_buffer[y, x] = color
+            image[y][x] = accumulated_color
             
-    return output_buffer
+    return image
 
-def get_brick_and_local_index(pos, brick_layout):
+def address_brick_voxel(pos, brick_layout):
     """
-    Returns brick index and local element index for a given position.
-    Optimized to minimize branch mispredictions.
+    Addresses data in a bricked volume layout.
+    Returns (brick_index, local_index).
+    Uses branchless or optimized branching to avoid pipeline flushes.
     """
-    # Calculate global voxel index
-    gx = floor(pos.x / voxel_spacing.x)
-    gy = floor(pos.y / voxel_spacing.y)
-    gz = floor(pos.z / voxel_spacing.z)
+    # Compute global voxel coordinates
+    gx, gy, gz = pos_to_voxel_coords(pos, brick_layout)
     
-    # Calculate brick index
-    bx = floor(gx / brick_layout.chunkSize)
-    by = floor(gy / brick_layout.chunkSize)
-    bz = floor(gz / brick_layout.chunkSize)
+    # Compute brick coordinates
+    bx = gx // brick_layout.chunk_size
+    by = gy // brick_layout.chunk_size
+    bz = gz // brick_layout.chunk_size
     
-    # Calculate local index within brick
-    lx = gx % brick_layout.chunkSize
-    ly = gy % brick_layout.chunkSize
-    lz = gz % brick_layout.chunkSize
+    # Compute local coordinates within brick
+    lx = gx % brick_layout.chunk_size
+    ly = gy % brick_layout.chunk_size
+    lz = gz % brick_layout.chunk_size
     
-    # Flatten brick index
-    brick_idx = bz * brick_layout.numChunksY * brick_layout.numChunksX + by * brick_layout.numChunksX + bx
+    # Check if neighbor access requires crossing brick boundaries
+    # This is the critical part for performance (see Subtopics)
+    # If all neighbors are within the same brick, use single offset
+    # Otherwise, compute brick offset + element offset
     
-    # Flatten local index
-    local_idx = lz * brick_layout.chunkSize * brick_layout.chunkSize + ly * brick_layout.chunkSize + lx
+    # Simplified addressing for single voxel
+    brick_index = compute_brick_index(bx, by, bz, brick_layout.num_chunks)
+    local_index = compute_local_index(lx, ly, lz, brick_layout.chunk_size)
     
-    return brick_idx, local_idx
-
-def sample_voxel(volume_data, brick_idx, local_idx, pos):
-    """
-    Samples voxel value using trilinear interpolation.
-    """
-    # Get brick data
-    brick_data = volume_data.bricks[brick_idx]
-    
-    # Get surrounding voxels for interpolation
-    # ... (implementation details for trilinear interpolation)
-    pass
+    return brick_index, local_index
 ```
+
+### Parameters with Typical Values
+*   $chunkSize$: Not given in the sources.
+*   $gLevel$ (Window Center): Depends on the dataset (e.g., Hounsfield units for CT).
+*   $gWindow$ (Window Width): Depends on the dataset.
+*   $gDensityForMarchSpaceSkippingLQ/HQ$: Not given in the sources.
+*   $skipMultiplierLQ/HQ$: Not given in the sources.
+*   $maxStepsLQ/HQ$: Not given in the sources.
+*   $accumulatedThresholdLQ/HQ$: Not given in the sources.
+*   $transmittanceThresholdLQ/HQ$: Not given in the sources.
+
+### Edge Cases and Pitfalls
+*   **Pipeline Flushes:** Using `if-else` statements to check brick boundaries during addressing can cause CPU pipeline flushes on architectures with long instruction pipelines, significantly degrading performance [S2, unofficial].
+*   **Boundary Conditions:** When a ray crosses a brick boundary, the addressing logic must correctly handle the transition between bricks to avoid accessing invalid memory [S2, unofficial].
+*   **Precision:** Floating-point precision in ray marching and coordinate transformation can lead to artifacts, especially at large scales [S1, unofficial].
 
 ## Subtopics
 
 ### Refined Data Addressing for Bricked Volumes
-An addressing scheme designed to minimize the performance penalty of computing two offsets (brick offset + element offset) in a bricked volume layout, specifically avoiding pipeline flushes caused by conditional branches in if-else statements [S2, unofficial]. It works by testing if the needed data elements can be addressed within one brick; if true, it addresses data elements as fast as in a linear volume (single offset); if false, it performs costly address calculations [S2, unofficial]. The pitfall is that using an if-else statement to check brick boundaries incurs pipeline flushes on CPUs with long instruction pipelines that use branch prediction, as the CPU may flush the pipeline if the branch outcome is false [S2, unofficial].
+An addressing scheme designed to minimize the performance penalty of computing two offsets (brick offset + element offset) in a bricked volume layout, specifically avoiding pipeline flushes caused by conditional branches in if-else statements [S2, unofficial]. It works by first testing if the needed data elements can be addressed within one brick; if true, it addresses data elements as fast as in a linear volume (single offset); if false, it performs the costly address calculations [S2, unofficial]. The pitfall is that using an if-else statement to check brick boundaries incurs pipeline flushes on CPUs with long instruction pipelines that use branch prediction, as the CPU may flush the pipeline if the branch outcome is false [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the average number of ray-marching steps per pixel. The step count $M$ is reduced by marching space skipping and early termination [S1, unofficial].
-*   **Memory Complexity:** $O(V)$, where $V$ is the total number of voxels. The bricked layout allows for streaming and caching of bricks, reducing the effective memory footprint seen by the CPU cache [S2, unofficial].
-*   **Measured Performance:** Tested on a Pentium 4 Xeon with 512KB Level-2 cache [S2, unofficial]. The method shows significant performance gains over linear volume layouts due to improved cache locality and reduced branch mispredictions when using the refined addressing scheme [S2, unofficial].
-*   **Strengths:** Efficient handling of large datasets; adaptive resolution allows for real-time interaction; simple data structure (bricks) compared to octrees or wavelets.
-*   **Limitations:** Performance is sensitive to CPU branch prediction; LQ mode may introduce artifacts; brick boundaries can cause visible seams if not handled carefully.
-*   **When to Use:** Real-time visualization of large medical volumes on standard PC hardware where GPU memory is limited or CPU-side optimization is preferred [S1, S2, unofficial].
-*   **When Not to Use:** When high-quality surface rendering is required without artifacts; when GPU-based acceleration is available and preferred.
+*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the number of steps per ray. Step skipping reduces $M$ effectively.
+*   **Memory Complexity:** $O(V)$, where $V$ is the volume size, plus overhead for brick metadata.
+*   **Measured Performance:** Tested on a Pentium 4 Xeon with 512KB Level-2 cache [S2, unofficial].
+*   **Strengths:** Efficient handling of large datasets via bricking; user-friendly window/level adjustment; CPU-side optimization for addressing [S1, unofficial][S2, unofficial].
+*   **Limitations:** Performance sensitive to CPU pipeline behavior; requires careful tuning of LQ/HQ parameters; not as scalable as GPU-based methods for very large volumes [S1, unofficial][S2, unofficial].
+*   **When to use:** Real-time rendering of large medical datasets on standard PC hardware where GPU acceleration is limited or unavailable [S2, unofficial].
+*   **When not to use:** When extremely high frame rates are required for massive volumes, or when GPU-based acceleration is available [S1, unofficial].
 
 ## Background
-The method originates from research on real-time mono- and multi-volume rendering of large medical datasets on standard PC hardware [S2, unofficial]. It was developed to address the limitations of linear volume layouts, which suffer from poor cache performance and high memory bandwidth requirements. The bricked layout and window/level adaptation were introduced to improve performance on CPUs with long pipelines and limited cache sizes [S2, unofficial]. The implementation details, including the specific parameter sets and rendering pipeline, are documented in a WebGPU volume renderer demo [S1, unofficial].
+The method originates from research on real-time mono- and multi-volume rendering of large medical datasets on standard PC hardware [S2, unofficial]. It builds on the principles of multiresolution and level of detail, specifically using bricking for spatial decomposition [S2, unofficial]. The implementation details are also found in a WebGPU volume renderer demo, which integrates window/level mapping and brick-based traversal [S1, unofficial].
 
 ## Sources
 [S1] dongeronimo/webgpu_volume_renderer_demo, https://github.com/dongeronimo/webgpu_volume_renderer_demo, fetched 2026-10-29 (unofficial)

@@ -1,861 +1,298 @@
 Received 9 September 2024, accepted 29 December 2024, date of publication 6 January 2025, date of current version 9 January 2025.
+
 Digital Object Identifier 10.1109/ACCESS.2025.3526202
-Efficient Encoding and Decoding of Voxelized
-Models for Machine Learning-Based Applications
-DAMJAN STRNAD 1 , ŠTEFAN KOHEK 1 , BORUT ŽALIK
-LIBOR VÁŠA 2 , AND ANDREJ NERAT 1
-1 , (Member, IEEE),
-1 Faculty of Electrical Engineering and Computer Science, University of Maribor, 2000 Maribor, Slovenia
-2 Faculty of Applied Sciences, University of West Bohemia, 301 00 Pilsen, Czech Republic
+
+# Efficient Encoding and Decoding of Voxelized Models for Machine Learning-Based Applications
+
+DAMJAN ST[RN](https://orcid.org/0000-0002-0213-3769)A[D](https://orcid.org/0000-0003-4468-0290) 1 , ŠTEFAN KOHE[K](https://orcid.org/0000-0002-6210-0889) 1 , BORUT ŽALI[K](https://orcid.org/0000-0003-4372-5020) 1 , (Member, IEEE),
+
+LIBOR VÁŠA 2 , AND ANDREJ NERA[T](https://orcid.org/0000-0003-1559-9776) 1
+
+1Faculty of Electrical Engineering and Computer Science, University of Maribor, 2000 Maribor, Slovenia
+
+2Faculty of Applied Sciences, University of West Bohemia, 301 00 Pilsen, Czech Republic
+
 Corresponding author: Damjan Strnad (damjan.strnad@um.si)
-This work was supported in part by Slovenian Research and Innovation Agency under Grant P2-0041 and Grant J2-4458, and in part by
-Czech Science Foundation under Grant 23-04622L.
-ABSTRACT Point clouds have become a popular training data for many practical applications of machine
-learning in the fields of environmental modeling and precision agriculture. In order to reduce high space
-requirements and the effect of noise in the data, point clouds are often transformed to a structured
-representation such as a voxel grid. Storing, transmitting and consuming voxelized geometry, however,
-remains a challenging problem for machine learning pipelines running on devices with limited amount of
-on-chip memory with low access latency. A viable solution is to store the data in a compact encoded format,
-and perform on-the-fly decoding when it is needed for processing. Such on-demand expansion must be fast
-in order to avoid introducing substantial additional delay to the pipeline. This can be achieved by parallel
-decoding, which is particularly suitable for massively parallel architecture of GPUs on which the majority of
-machine learning is currently executed. In this paper, we present such method for efficient and parallelizable
-encoding/decoding of voxelized geometry. The method employs multi-level context-aware prediction of
-voxel occupancy based on the extracted binary feature prediction table, and encodes the residual grid with a
-pointerless sparse voxel octree (PSVO). We particularly focused on encoding the datasets of voxelized trees,
-obtained from both synthetic tree models and LiDAR point clouds of real trees. The method achieved 15.6%
-and 12.8% reduction of storage size with respect to plain PSVO on synthetic and real dataset, respectively.
-We also tested the method on a general set of diverse voxelized objects, where an average 11% improvement
-of storage space was achieved.
-INDEX TERMS Voxel grid, feature prediction, tree models, prediction-based encoding, key voxels,
-residuals, sparse voxel octree.
-I. INTRODUCTION
-Remote sensing of environment, enabled by contemporary
-satellite, airborne, and terrestrial sensor platforms, has led
-to important advances in environmental monitoring [1], [2],
-[3], [4], [5], disaster detection and prevention [6], [7], [8],
-and precision agriculture [9], [10], [11]. It has also generated
-massive amounts of data at high level of detail. An example
-of this is detailed mapping of woody vegetation, which can be
-used to build machine learning-based decision support tools
-for optimizing management practices in forestry [12], [13]
-The associate editor coordinating the review of this manuscript and
-approving it for publication was Byung-Gyu Kim.
-VOLUME 13, 2025
-and precision horticulture [14], [15]. For instance, LiDARbased scanning is becoming a viable solution for collecting
-structural information about individual trees (e.g., the tree
-branching exposed during its dormant period) in extensive
-orchards [16], which has compelling applications for both
-fruit growers and researchers in the field of phenology [17],
-[18], [19]. The obtained point clouds can be used for
-estimation of tree’s biomass, canopy size [20], [21], density [22], [23], and yield [24], [25]. By analyzing the changes
-detected in consecutive tree surveys, improved models of
-plant growth can be built [26], [27], and the effects of different
-orchard management strategies [28] and interventions, such
-as pruning [29], [30], on tree development can be evaluated.
-2025 The Authors. This work is licensed under a Creative Commons Attribution 4.0 License.
-For more information, see https://creativecommons.org/licenses/by/4.0/
-5551
-D. Strnad et al.: Efficient Encoding and Decoding of Voxelized Models for Machine Learning-Based Applications
-In order to train complex machine learning models, such
-as deep neural networks, it is necessary to maintain large
-archives of tree point clouds. However, the storage and
-transfer of point clouds in raw format can be prohibitive
-for efficient implementation of machine learning pipelines.
-While there exist several neural network architectures that
-operate directly on unstructured point clouds [31], [32], they
-are typically constrained to treat the input in permutation
-invariant way. This may introduce unnecessary complexity
-when full precision is not required or justified (e.g., due to
-noise inherent in sensor data). In such cases, it is practical
-to convert the point clouds to a structured grid format by
-voxelization, and store only a binary occupancy value for
-each voxel. However, a 10003 voxel grid in bitmap format
-requires more than 100 MiB of storage, which limits the
-number of grids that can be held in memory at any time. With
-the increasing size of datasets used in state-of-the-art deep
-learning algorithms, this becomes a significant limitation.
-Fortunately, voxelization of geometric objects typically
-produces voxel grids with very low percentage of occupied
-voxels. The sparsity of a grid allows efficient reduction of
-its storage space by using hierarchical space partitioning
-structures, such as a sparse voxel octree (SVO) [33] or a
-sparse voxel directed acyclic graph (SVDAG) [34]. Low
-memory footprint is especially important for the training
-of large voxel-based machine learning models [35], where
-keeping as many training samples in low-latency on-chip
-memory as possible is desirable. This calls for finding even
-more efficient ways for representing voxelized geometry,
-provided that they support fast on-the-fly decoding.
-In this paper, we propose a fast multi-level predictionbased method for pointerless SVO (PSVO) encoding of
-high-resolution voxel grids. The proposed encoding scheme
-incorporates context-based prediction of intermediate voxels
-from a sparser grid of uniformly spaced key voxels.
-Prediction rules are stored compactly as feature prediction
-tables that determine the target voxel occupancy based on
-the occupancies of its context voxels. Using the predictions,
-the original voxel grid is transformed into an even sparser
-grid consisting of regularly spaced key voxels and prediction
-residuals at intermediate locations. We show that such
-transformation allows more efficient SVO encoding of the
-resulting grids, as well as their fast parallel decoding.
-Motivated by the attractive use cases in precision horticulture and forestry, we focus in particular on efficient
-representation of voxelized tree models, which are among the
-most structurally complex natural objects. We do, however,
-demonstrate a more general applicability of the proposed
-approach for encoding diverse geometrical objects, where
-substantial storage savings can be also achieved.
-The rest of the paper is organized as follows. In Section II,
-we describe related work in voxel grid encoding and compression. Section III describes our proposed prediction-based
-method in detail, while Section IV reports the experimental
-results. Section V concludes the paper.
-5552
-II. BACKGROUND AND RELATED WORK
-The most popular hierarchical encoding technique for sparse
-voxel grids is the SVO [33], where the grid is subdivided
-recursively in half along the three coordinate axes. The root
-of the tree represents the whole grid, and stores an 8-bit
-binary code indicating the occupancy status of its subgrids.
-Empty subgrids are skipped, while subgrids containing any
-occupied voxels are subdivided further, terminating at the
-level of individual voxels. The result is a tree structure in
-which each node contains the code and an array of pointers
-(typically address offsets) to its subnodes. Using the pointers
-allows navigating down a single branch of the SVO without
-the need to reconstruct the grid completely. This is important
-particularly in cases when one needs to determine particular
-voxel’s occupancy quickly, such as during rendering.
-For the purpose of offline storage, the pointer-based SVO is
-linearized by a depth-first traversal of the tree, during which
-the offsets to child node locations in the output stream are
-calculated. Since the offset value for a particular subnode
-depends on the cumulative size of preceding siblings’
-subtrees, the number of bits required for storing different
-pointers may vary considerably. This was recognized in a
-recent work by Madoš et al. [36], who presented clustered
-SVO (CSVO) as an efficient encoding technique for SVOs
-with variable-size pointers. However, pointers contribute a
-substantial part to the size of the resulting stream. In cases
-where individual voxel queries are not required, such as
-in model archiving, pointers can be omitted in the SVO
-representation, since the tree structure can be derived from
-code values alone. By using a pointerless SVO (PSVO),
-substantial gains in storage space can be achieved.
-A conventional PSVO stores all occupied voxels in the
-leaves of the octree, as illustrated for a 2D case in the
-bottom left part of Figure 1. Such basic approach can be
-inefficient for solid geometry with larger clusters of occupied
-voxels, which occur in the interior of filled objects. In the
-case of voxelized trees, it can be beneficial to fill the
-interior of models, which allows fast estimation of tree’s
-total aboveground biomass [37], [38], balance [29], and tree
-pruning severity [39]. A possible optimization of PSVO that
-encodes filled geometry more efficiently is a variant of a
-technique called complete branch optimization (CBO) [40].
-It works by storing a single child node with zero code for
-every internal node that corresponds to a cubic subspace of all
-occupied voxels. Since zero code in a child node contradicts
-the occupied child status in the parent node, the decoder can
-detect such case and interpret it correctly. The bottom right
-part of Figure 1 shows an example.
-SVDAG is an alternative hierarchical data structure for
-efficient representation of sparse voxel grids [34]. It is
-particularly efficient for capturing repetitive geometric patterns, which would lead to multiple instances of identical
-subtrees in an SVO. In later studies, symmetry-aware [41]
-and pointerless [42] variants of SVDAG were introduced.
-In natural objects, where exact repetition of structure is rare,
-VOLUME 13, 2025
-D. Strnad et al.: Efficient Encoding and Decoding of Voxelized Models for Machine Learning-Based Applications
-FIGURE 1. A 2D grid example (top) and its encoding using ordinary SVO (bottom left) and improved SVO with complete
-branch optimization (bottom right).
-lossy SVDAGs [43] can be used for template-based geometry
-approximation, but with highly ramified objects like trees this
-may lead to loss of important structural information.
-Several methods have been proposed for lossless compression of point clouds [44] that carry over ideas from
-progressive compression of geometric meshes [45], [46].
-Among the voxel-based approaches, octrees have been first
-used for representation of quantized point clouds in [47],
-however, no prediction was used to reduce the code length.
-In [48], predictive coding based on planar approximation
-of the coarse surface was employed in order to predict
-non-empty cells on the finer level of progressive point cloud
-reconstruction. In [49], the code value or bit position of the
-parent node in the octree structure is used as a context for
-entropy coding of child codes. In [50], another octree-based
-method for progressive coding of point clouds is presented,
-where the reordering of child traversal is used to reduce the
-entropy of occupancy codes. The traversal is done according
-to the decreasing occupancy probabilities of subcells, which
-are computed with respect to the distance from a local planar
-approximation of object’s surface. The methods above focus
-on progressive coding where occupancy predictions are being
-made between different levels of the octree.
-Current state-of-the-art approaches for compression of
-quantized point clouds employ trained machine learning
-models as occupancy predictors [51]. Such methods typically incorporate large neural network models that capture
-occupancy patterns at multiple scales, which enables them
-to achieve high prediction accuracy. However, the typical
-decoding times for these methods are not suitable for on-thefly decoding of grids, for instance within another machine
-learning pipeline or in interactive visualization. Moreover,
-keeping another neural network model for grid decoding
-takes up additional memory on the device.
-VOLUME 13, 2025
-An alternative technique, tailored specifically for compact
-representation of rasterized shapes, is chain coding. While
-several kinds of chain codes exist for describing 2D shapes,
-the number of their applications in 3D is limited [52], [53],
-although specific variants for geometric tree models have
-been presented [54], [55].
-III. METHODOLOGY
-In this section, we first provide a high-level overview of the
-proposed methodology, followed by a detailed description of
-the individual steps.
-A. A CONCEPT OVERVIEW
-The overall concept of the proposed method for encoding
-voxelized tree models is illustrated in Figure 2. In the
-proposed method, predictions are made on multiple levels
-using feature prediction tables that map voxel’s context into
-its predicted occupancy. The prediction context represents a
-certain arrangement of nearby voxels (i.e., context voxels)
-with already known occupancy values.
-B. FEATURE PREDICTION TABLE CONSTRUCTION
-Model-specific feature prediction tables are built by statistical
-analysis of the object’s voxel grid. For every combination
-of context voxels’ occupancy values, the more frequent
-occupancy value of the corresponding target voxels across
-the whole grid is determined and used as a prediction in the
-encoding and decoding stage. A sequence of context voxels’
-binary occupancies forms an index into a prediction table.
-This allows storing the feature prediction tables in the output
-stream in a very compact form.
-During encoding, a context-based prediction from the
-feature prediction table is used in combination with
-the true value to determine a residual. During decoding,
-5553
-D. Strnad et al.: Efficient Encoding and Decoding of Voxelized Models for Machine Learning-Based Applications
+
+This work was supported in part by Slovenian Research and Innovation Agency under Grant P2-0041 and Grant J2-4458, and in part by Czech Science Foundation under Grant 23-04622L.
+
+ABSTRACT Point clouds have become a popular training data for many practical applications of machine learning in the fields of environmental modeling and precision agriculture. In order to reduce high space requirements and the effect of noise in the data, point clouds are often transformed to a structured representation such as a voxel grid. Storing, transmitting and consuming voxelized geometry, however, remains a challenging problem for machine learning pipelines running on devices with limited amount of on-chip memory with low access latency. A viable solution is to store the data in a compact encoded format, and perform on-the-fly decoding when it is needed for processing. Such on-demand expansion must be fast in order to avoid introducing substantial additional delay to the pipeline. This can be achieved by parallel decoding, which is particularly suitable for massively parallel architecture of GPUs on which the majority of machine learning is currently executed. In this paper, we present such method for efficient and parallelizable encoding/decoding of voxelized geometry. The method employs multi-level context-aware prediction of voxel occupancy based on the extracted binary feature prediction table, and encodes the residual grid with a pointerless sparse voxel octree (PSVO). We particularly focused on encoding the datasets of voxelized trees, obtained from both synthetic tree models and LiDAR point clouds of real trees. The method achieved 15.6% and 12.8% reduction of storage size with respect to plain PSVO on synthetic and real dataset, respectively. We also tested the method on a general set of diverse voxelized objects, where an average 11% improvement of storage space was achieved.
+
+INDEX TERMS Voxel grid, feature prediction, tree models, prediction-based encoding, key voxels, residuals, sparse voxel octree.
+
+### I. INTRODUCTION
+
+Remote sensing of environment, enabled by contemporary satellite, airborne, and terrestrial sensor platforms, has led to important advances in environmental monitoring [1], [2], [3], [4], [5], disaster detection and prevention [6], [7], [8], and precision agriculture [9], [10], [11]. It has also generated massive amounts of data at high level of detail. An example of this is detailed mapping of woody vegetation, which can be used to build machine learning-based decision support tools for optimizing management practices in forestry [12], [13]
+
+The associate editor coordinating the review of this manuscript and approving it for publication was Byung-Gyu Kim.
+
+and precision horticulture [14], [15]. For instance, LiDARbased scanning is becoming a viable solution for collecting structural information about individual trees (e.g., the tree branching exposed during its dormant period) in extensive orchards [16], which has compelling applications for both fruit growers and researchers in the field of phenology [17], [18], [19]. The obtained point clouds can be used for estimation of tree's biomass, canopy size [20], [21], density [22], [23], and yield [24], [25]. By analyzing the changes detected in consecutive tree surveys, improved models of plant growth can be built [26], [27], and the effects of different orchard management strategies [28] and interventions, such as pruning [29], [30], on tree development can be evaluated.
+
+In order to train complex machine learning models, such as deep neural networks, it is necessary to maintain large archives of tree point clouds. However, the storage and transfer of point clouds in raw format can be prohibitive for efficient implementation of machine learning pipelines. While there exist several neural network architectures that operate directly on unstructured point clouds [31], [32], they are typically constrained to treat the input in permutation invariant way. This may introduce unnecessary complexity when full precision is not required or justified (e.g., due to noise inherent in sensor data). In such cases, it is practical to convert the point clouds to a structured grid format by voxelization, and store only a binary occupancy value for each voxel. However, a 10003 voxel grid in bitmap format requires more than 100 MiB of storage, which limits the number of grids that can be held in memory at any time. With the increasing size of datasets used in state-of-the-art deep learning algorithms, this becomes a significant limitation.
+
+Fortunately, voxelization of geometric objects typically produces voxel grids with very low percentage of occupied voxels. The sparsity of a grid allows efficient reduction of its storage space by using hierarchical space partitioning structures, such as a sparse voxel octree (SVO) [33] or a sparse voxel directed acyclic graph (SVDAG) [34]. Low memory footprint is especially important for the training of large voxel-based machine learning models [35], where keeping as many training samples in low-latency on-chip memory as possible is desirable. This calls for finding even more efficient ways for representing voxelized geometry, provided that they support fast on-the-fly decoding.
+
+In this paper, we propose a fast multi-level predictionbased method for pointerless SVO (PSVO) encoding of high-resolution voxel grids. The proposed encoding scheme incorporates context-based prediction of intermediate voxels from a sparser grid of uniformly spaced key voxels. Prediction rules are stored compactly as feature prediction tables that determine the target voxel occupancy based on the occupancies of its context voxels. Using the predictions, the original voxel grid is transformed into an even sparser grid consisting of regularly spaced key voxels and prediction residuals at intermediate locations. We show that such transformation allows more efficient SVO encoding of the resulting grids, as well as their fast parallel decoding.
+
+Motivated by the attractive use cases in precision horticulture and forestry, we focus in particular on efficient representation of voxelized tree models, which are among the most structurally complex natural objects. We do, however, demonstrate a more general applicability of the proposed approach for encoding diverse geometrical objects, where substantial storage savings can be also achieved.
+
+The rest of the paper is organized as follows. In Section II, we describe related work in voxel grid encoding and compression. Section III describes our proposed prediction-based method in detail, while Section IV reports the experimental results. Section V concludes the paper.
+
+# II. BACKGROUND AND RELATED WORK
+
+The most popular hierarchical encoding technique for sparse voxel grids is the SVO [33], where the grid is subdivided recursively in half along the three coordinate axes. The root of the tree represents the whole grid, and stores an 8-bit binary code indicating the occupancy status of its subgrids. Empty subgrids are skipped, while subgrids containing any occupied voxels are subdivided further, terminating at the level of individual voxels. The result is a tree structure in which each node contains the code and an array of pointers (typically address offsets) to its subnodes. Using the pointers allows navigating down a single branch of the SVO without the need to reconstruct the grid completely. This is important particularly in cases when one needs to determine particular voxel's occupancy quickly, such as during rendering.
+
+For the purpose of offline storage, the pointer-based SVO is linearized by a depth-first traversal of the tree, during which the offsets to child node locations in the output stream are calculated. Since the offset value for a particular subnode depends on the cumulative size of preceding siblings' subtrees, the number of bits required for storing different pointers may vary considerably. This was recognized in a recent work by Madoš et al. [36], who presented clustered SVO (CSVO) as an efficient encoding technique for SVOs with variable-size pointers. However, pointers contribute a substantial part to the size of the resulting stream. In cases where individual voxel queries are not required, such as in model archiving, pointers can be omitted in the SVO representation, since the tree structure can be derived from code values alone. By using a pointerless SVO (PSVO), substantial gains in storage space can be achieved.
+
+A conventional PSVO stores all occupied voxels in the leaves of the octree, as illustrated for a 2D case in the bottom left part of Figure 1. Such basic approach can be inefficient for solid geometry with larger clusters of occupied voxels, which occur in the interior of filled objects. In the case of voxelized trees, it can be beneficial to fill the interior of models, which allows fast estimation of tree's total aboveground biomass [37], [38], balance [29], and tree pruning severity [39]. A possible optimization of PSVO that encodes filled geometry more efficiently is a variant of a technique called complete branch optimization (CBO) [40]. It works by storing a single child node with zero code for every internal node that corresponds to a cubic subspace of all occupied voxels. Since zero code in a child node contradicts the occupied child status in the parent node, the decoder can detect such case and interpret it correctly. The bottom right part of Figure 1 shows an example.
+
+SVDAG is an alternative hierarchical data structure for efficient representation of sparse voxel grids [34]. It is particularly efficient for capturing repetitive geometric patterns, which would lead to multiple instances of identical subtrees in an SVO. In later studies, symmetry-aware [41] and pointerless [42] variants of SVDAG were introduced. In natural objects, where exact repetition of structure is rare,
+
+
+
+FIGURE 1. A 2D grid example (top) and its encoding using ordinary SVO (bottom left) and improved SVO with complete branch optimization (bottom right).
+
+lossy SVDAGs [43] can be used for template-based geometry approximation, but with highly ramified objects like trees this may lead to loss of important structural information.
+
+Several methods have been proposed for lossless compression of point clouds [44] that carry over ideas from progressive compression of geometric meshes [45], [46]. Among the voxel-based approaches, octrees have been first used for representation of quantized point clouds in [47], however, no prediction was used to reduce the code length. In [48], predictive coding based on planar approximation of the coarse surface was employed in order to predict non-empty cells on the finer level of progressive point cloud reconstruction. In [49], the code value or bit position of the parent node in the octree structure is used as a context for entropy coding of child codes. In [50], another octree-based method for progressive coding of point clouds is presented, where the reordering of child traversal is used to reduce the entropy of occupancy codes. The traversal is done according to the decreasing occupancy probabilities of subcells, which are computed with respect to the distance from a local planar approximation of object's surface. The methods above focus on progressive coding where occupancy predictions are being made between different levels of the octree.
+
+Current state-of-the-art approaches for compression of quantized point clouds employ trained machine learning models as occupancy predictors [51]. Such methods typically incorporate large neural network models that capture occupancy patterns at multiple scales, which enables them to achieve high prediction accuracy. However, the typical decoding times for these methods are not suitable for on-thefly decoding of grids, for instance within another machine learning pipeline or in interactive visualization. Moreover, keeping another neural network model for grid decoding takes up additional memory on the device.
+
+An alternative technique, tailored specifically for compact representation of rasterized shapes, is chain coding. While several kinds of chain codes exist for describing 2D shapes, the number of their applications in 3D is limited [52], [53], although specific variants for geometric tree models have been presented [54], [55].
+
+### III. METHODOLOGY
+
+In this section, we first provide a high-level overview of the proposed methodology, followed by a detailed description of the individual steps.
+
+# A. A CONCEPT OVERVIEW
+
+The overall concept of the proposed method for encoding voxelized tree models is illustrated in Figure 2. In the proposed method, predictions are made on multiple levels using feature prediction tables that map voxel's context into its predicted occupancy. The prediction context represents a certain arrangement of nearby voxels (i.e., context voxels) with already known occupancy values.
+
+### B. FEATURE PREDICTION TABLE CONSTRUCTION
+
+Model-specific feature prediction tables are built by statistical analysis of the object's voxel grid. For every combination of context voxels' occupancy values, the more frequent occupancy value of the corresponding target voxels across the whole grid is determined and used as a prediction in the encoding and decoding stage. A sequence of context voxels' binary occupancies forms an index into a prediction table. This allows storing the feature prediction tables in the output stream in a very compact form.
+
+During encoding, a context-based prediction from the feature prediction table is used in combination with the true value to determine a residual. During decoding,
+
+
+
 FIGURE 2. Overview of the encoding method.
-the reverse process is employed to infer the true value from
-the combination of a prediction and a corresponding residual.
-A single feature prediction table can be used on multiple
-levels, or a separate map can be built for each prediction
-level. The number of prediction levels is specified by an input
-parameter p, which determines the initial stride between the
-key voxels.
-C. PREDICTION-BASED ENCODING AND DECODING
-Prediction-based encoding of the input voxel grid starts at
-the sparsest level (denoted by L0 ) from a set of regularly
-distributed key voxels with a selected initial stride s0 = 2p ,
-where p is a method parameter. The occupancy values of these
-initial key voxels are stored in the output grid directly. They
-correspond to the corner voxels of a cube with lateral size of
-s0 + 1 voxels (blue voxels in Figure 3). Their occupancies
-constitute the initial context for predicting the occupancies
-of 19 other voxels, which make up the corners of 8 smaller
-cubes. At each scale, three prediction steps are executed in
-sequence, each one providing the prediction context for the
-next one:
-1) The occupancy of the central voxel (green voxel in
-Figure 3) is first predicted from the initial key voxel
-context using the feature prediction table 1, and the
-binary prediction residual is stored at the corresponding
-location in the output grid.
-2) The occupancies of cube’s side centers (pink voxels in
-Figure 3) are predicted next using feature prediction
-table 2 and the residuals stored in the output.
-3) Finally, the occupancies of cube’s edge centers (yellow
-voxels in Figure 3) are predicted using feature prediction
-table 3 and the residuals stored in the output.
-Once the processing at level L0 is finished, the encoded
-voxels become the key voxels, and the prediction and
-encoding of residuals are repeated on the next level L1 with
-stride s1 = s20 . The process is repeated p-times, where
-on the last level the occupancy of each target voxel is
-predicted using a subset of its 26-voxel neighbourhood as
-a context. In general, stride si = 2p−i is used to encode
-level Li .
-5554
-FIGURE 3. Voxel types used in different steps of grid encoding on the
-same level of recursion: the central voxel (green) is predicted first using
-the key voxels (blue), which is followed by the prediction of side centers
-(pink) and edge centers (yellow).
-Next, we present a formal description of the encoding
-process. Let vx,y,z denote a voxel at integer grid coordinates
-(x, y, z), where x ∈ {0 . . . , X − 1}, y ∈ {0 . . . , Y − 1},
-z ∈ {0 . . . , Z −1} and X ×Y ×Z is the grid dimension. At level
-Li with stride si , the key voxels with known occupancy
-values have coordinates (qx · si , qy · si , qz · si ) for qx ∈
-{0, . . . ⌊X /si ⌋}, qy ∈ {0, . . . ⌊Y /si ⌋}, qz ∈ {0, . . . ⌊Z /si ⌋},.
-The key voxels at level Li form the cube corners, which are
-separated by si − 1 intermediate voxels in each direction.
-Let us denote s2i by ri . The arrangement of context voxels
-used in the prediction steps is as follows:
-• In step 1, the occupancy of each central voxel
-vx,y,z is predicted using the nearest eight key voxels
-vx±ri ,y±ri ,z±ri (Figure 4a). The feature prediction table 1,
-used for this step, is 28 = 256 bits in size.
-• In step 2, the occupancy of each cube face center is
-predicted using six context voxels, namely four surrounding key voxels and two nearest voxels determined
-in the previous step. For instance, the occupancy of voxel
-vx,y,z , which is the center of a cube face orthogonal to the
-grid x direction, is done using key voxels vx,y±ri ,z±ri and
-cube centers vx±ri ,y,z (Figure 4b). The corresponding
-feature prediction table 2 requires 26 = 64 bits.
-VOLUME 13, 2025
-D. Strnad et al.: Efficient Encoding and Decoding of Voxelized Models for Machine Learning-Based Applications
-• In step 3, the occupancy of each cube edge center
-is predicted using a context consisting of two nearest
-corner voxels and four nearest face centers determined in
-the previous step. For instance, the occupancy of voxel
-vx,y,z , which is the middle voxel of a cube edge parallel
-to the grid z direction, is done using key voxels vx,y,z±ri
-and face centers vx±ri ,y±ri ,z (Figure 4c). Another 64 bits
-are required for storing the feature prediction table 3 for
-this step.
-(i.e., spacing) between context voxels, but always at full
-grid resolution. This differs from existing approaches that
-predict voxel occupancy using a local context of its SVO
-node, where a different resolution is used at each level of
-the SVO.
-The process of decoding is symmetric to encoding. The
-value of p and the corresponding number of feature prediction
-tables are obtained from the input stream’s header. The grid
-of mixed key voxel and residual values is reconstructed from
-the PSVO code in the rest of the stream. This is followed
-by the same coarse-to-fine procedure of voxel occupancy
-predictions, which are combined with the residuals and stored
-in the corresponding grid cells.
-IV. RESULTS AND DISCUSSION
-In this section, we describe the experiments that were
-performed to evaluate the efficiency of the proposed method.
-The main performance metric was the storage size reduction
-obtained by the proposed method with respect to no use of
-feature-based prediction. Decoding times with and without
-parallelization were also collected to assess the suitability of
-the method for on-the-fly reconstruction of voxel grids in a
-machine learning pipeline.
-A. DATA
-FIGURE 4. Prediction contexts for steps 1–3 of the encoding/decoding
-iteration.
-For non-cubic grids and grids whose dimensions are not
-equal to 2d for some d ∈ Z+ , some prediction contexts will
-include non-existing voxels outside of the grid, whose values
-are taken to be 0. The feature prediction tables for prediction
-steps 1-3 are concatenated and the resulting 48 bytes are
-stored in the output stream as part of a binary header. This
-can be done for each prediction level separately, such that the
-total header size amounts to p · 48 bytes for feature prediction
-tables, plus an additional byte for storing the number of
-levels p. Alternatively, only the top-level feature prediction
-table can be stored and used for predictions on all levels,
-which is indicated by storing p = 0.
-The output of the above procedure is a new voxel grid in
-which the initial key voxels’ actual values are interspersed
-among the prediction residuals for all other voxels. The
-obtained residual grid is then encoded with a PSVO. The
-PSVO is finally linearized by concatenating the codes in
-the depth-first traversal order of octree nodes. The resulting
-binary sequence is stored in the output stream following the
-header. A novelty of the proposed approach is that prediction
-contexts on different levels are modelled with different strides
-VOLUME 13, 2025
-Two datasets of tree models were used in the experiments.
-The first dataset consists of realistic and geometrically
-versatile tree models generated using the EduApple software [56]. EduApple is a tree growth simulator, which allows
-extensive customization of generated trees’ characteristics
-through user-specified parameters. Tree growth is guided by
-the availability of light in different parts of the canopy, but
-is otherwise randomized in order to support varying tree
-shapes. By modulating the simulation parameters, a dataset
-of 400 high-detail synthetic tree models was obtained.
-These cover a diverse spectrum of tree forms with varying
-branching complexity, from juvenile trees characterized by
-sparse two-level branching to fully developed mature trees
-featuring dense and highly ramified canopy. Some examples
-of generated tree models are shown in Figure 5.
-Tree models were densely sampled to produce the point
-clouds, which were then voxelized by using each model’s
-bounding box to define the extent of a voxel grid. A 1 cm3 grid
-resolution was found to be sufficient for preserving enough
-structural detail and clear separation of smaller twigs. Filling
-of the tree interior was performed by executing a flood-fill
-algorithm of the exterior, seeded by an unoccupied edge
-voxel, and inverting the result. The average number of
-voxels per grid across all 400 models in the final dataset
-was 63,406,098, while the average occupancy was 0.277%.
-The dataset size in raw (uncompressed) form, where each
-voxel is stored using one bit, was 2.953 GiB. The entropy
-of the dataset was 0.02839 bits per voxel, which means
-that 85.823 MiB was the theoretical lower bound for the
-dataset size when using optimal lossless entropy coding.
-5555
-D. Strnad et al.: Efficient Encoding and Decoding of Voxelized Models for Machine Learning-Based Applications
+
+the reverse process is employed to infer the true value from the combination of a prediction and a corresponding residual. A single feature prediction table can be used on multiple levels, or a separate map can be built for each prediction level. The number of prediction levels is specified by an input parameter p, which determines the initial stride between the key voxels.
+
+
+
+# C. PREDICTION-BASED ENCODING AND DECODING
+
+Prediction-based encoding of the input voxel grid starts at the sparsest level (denoted by L*0) from a set of regularly distributed *key voxels with a selected initial stride s*0 = 2 *p , where p is a method parameter. The occupancy values of these initial key voxels are stored in the output grid directly. They correspond to the corner voxels of a cube with lateral size of *s*0 + 1 voxels (blue voxels in Figure 3\). Their occupancies constitute the initial context for predicting the occupancies of 19 other voxels, which make up the corners of 8 smaller cubes. At each scale, three prediction steps are executed in sequence, each one providing the prediction context for the next one:
+
+- 1) The occupancy of the central voxel (green voxel in Figure 3\) is first predicted from the initial key voxel context using the feature prediction table 1, and the binary prediction residual is stored at the corresponding location in the output grid.
+- 2) The occupancies of cube's side centers (pink voxels in Figure 3\) are predicted next using feature prediction table 2 and the residuals stored in the output.
+- 3) Finally, the occupancies of cube's edge centers (yellow voxels in Figure 3\) are predicted using feature prediction table 3 and the residuals stored in the output.
+
+Once the processing at level L*0 is finished, the encoded voxels become the key voxels, and the prediction and encoding of residuals are repeated on the next level *L*1 with stride *s*1 = *s*0 2 . The process is repeated *p-times, where on the last level the occupancy of each target voxel is predicted using a subset of its 26-voxel neighbourhood as a context. In general, stride si = 2 p−i is used to encode level Li .
+
+FIGURE 3. Voxel types used in different steps of grid encoding on the same level of recursion: the central voxel (green) is predicted first using the key voxels (blue), which is followed by the prediction of side centers (pink) and edge centers (yellow).
+
+Next, we present a formal description of the encoding process. Let vx,y,z denote a voxel at integer grid coordinates (x, y,z), where x ∈ {0 . . . , X − 1}, y ∈ {0 . . . , Y − 1}, z ∈ {0 . . . , Z−1} and X×Y ×Z is the grid dimension. At level Li with stride si , the key voxels with known occupancy values have coordinates (qx · si, qy · si, qz · si) for qx ∈ {0, . . . ⌊X/si⌋}, qy ∈ {0, . . . ⌊Y /si⌋}, qz ∈ {0, . . . ⌊Z/si⌋},. The key voxels at level Li form the cube corners, which are separated by si − 1 intermediate voxels in each direction.
+
+Let us denote si 2 by ri . The arrangement of context voxels used in the prediction steps is as follows:
+
+- In step 1, the occupancy of each central voxel vx,y,z is predicted using the nearest eight key voxels vx±ri,y±ri,z±ri (Figure 4a\). The feature prediction table 1, used for this step, is 28 = 256 bits in size.
+- In step 2, the occupancy of each cube face center is predicted using six context voxels, namely four surrounding key voxels and two nearest voxels determined in the previous step. For instance, the occupancy of voxel vx,y,z , which is the center of a cube face orthogonal to the grid x direction, is done using key voxels vx,y±ri,z±ri and cube centers vx±ri,y,z (Figure 4b\). The corresponding feature prediction table 2 requires 26 = 64 bits.
+
+- In step 3, the occupancy of each cube edge center is predicted using a context consisting of two nearest corner voxels and four nearest face centers determined in the previous step. For instance, the occupancy of voxel vx,y,z , which is the middle voxel of a cube edge parallel to the grid z direction, is done using key voxels vx,y,z±ri and face centers vx±ri,y±ri,z (Figure 4c\). Another 64 bits are required for storing the feature prediction table 3 for this step.
+
+FIGURE 4. Prediction contexts for steps 1–3 of the encoding/decoding iteration.
+
+For non-cubic grids and grids whose dimensions are not equal to 2*d* for some d ∈ Z +, some prediction contexts will include non-existing voxels outside of the grid, whose values are taken to be 0. The feature prediction tables for prediction steps 1-3 are concatenated and the resulting 48 bytes are stored in the output stream as part of a binary header. This can be done for each prediction level separately, such that the total header size amounts to p·48 bytes for feature prediction tables, plus an additional byte for storing the number of levels p. Alternatively, only the top-level feature prediction table can be stored and used for predictions on all levels, which is indicated by storing p = 0.
+
+The output of the above procedure is a new voxel grid in which the initial key voxels' actual values are interspersed among the prediction residuals for all other voxels. The obtained residual grid is then encoded with a PSVO. The PSVO is finally linearized by concatenating the codes in the depth-first traversal order of octree nodes. The resulting binary sequence is stored in the output stream following the header. A novelty of the proposed approach is that prediction contexts on different levels are modelled with different strides (i.e., spacing) between context voxels, but always at full grid resolution. This differs from existing approaches that predict voxel occupancy using a local context of its SVO node, where a different resolution is used at each level of the SVO.
+
+The process of decoding is symmetric to encoding. The value of p and the corresponding number of feature prediction tables are obtained from the input stream's header. The grid of mixed key voxel and residual values is reconstructed from the PSVO code in the rest of the stream. This is followed by the same coarse-to-fine procedure of voxel occupancy predictions, which are combined with the residuals and stored in the corresponding grid cells.
+
+
+
+### IV. RESULTS AND DISCUSSION
+
+In this section, we describe the experiments that were performed to evaluate the efficiency of the proposed method. The main performance metric was the storage size reduction obtained by the proposed method with respect to no use of feature-based prediction. Decoding times with and without parallelization were also collected to assess the suitability of the method for on-the-fly reconstruction of voxel grids in a machine learning pipeline.
+
+### A. DATA
+
+Two datasets of tree models were used in the experiments. The first dataset consists of realistic and geometrically versatile tree models generated using the EduApple software [56]. EduApple is a tree growth simulator, which allows extensive customization of generated trees' characteristics through user-specified parameters. Tree growth is guided by the availability of light in different parts of the canopy, but is otherwise randomized in order to support varying tree shapes. By modulating the simulation parameters, a dataset of 400 high-detail synthetic tree models was obtained. These cover a diverse spectrum of tree forms with varying branching complexity, from juvenile trees characterized by sparse two-level branching to fully developed mature trees featuring dense and highly ramified canopy. Some examples of generated tree models are shown in Figure 5.
+
+Tree models were densely sampled to produce the point clouds, which were then voxelized by using each model's bounding box to define the extent of a voxel grid. A 1 cm3 grid resolution was found to be sufficient for preserving enough structural detail and clear separation of smaller twigs. Filling of the tree interior was performed by executing a flood-fill algorithm of the exterior, seeded by an unoccupied edge voxel, and inverting the result. The average number of voxels per grid across all 400 models in the final dataset was 63,406,098, while the average occupancy was 0.277%. The dataset size in raw (uncompressed) form, where each voxel is stored using one bit, was 2.953 GiB. The entropy of the dataset was 0.02839 bits per voxel, which means that 85.823 MiB was the theoretical lower bound for the dataset size when using optimal lossless entropy coding.
+
+
+
 FIGURE 5. Examples of models from the synthetic tree dataset.
+
+
+
 FIGURE 6. Examples of point clouds from the LiDAR-based tree dataset.
-However, a more efficient storage can be achieved by
-exploiting the specific structure and redundancy in the data.
-The second tree dataset is a publicly available dataset
-of 691 single tree point clouds from terrestrial laser
-scanning [57]. A selection of point clouds is shown in
-Figure 6. The point clouds were converted to voxel grids
-with 5 cm voxel lateral size. To reduce the effects of noise,
-morphological closing with a cubical structural element
-5 voxels wide was performed, and the remaining single
-isolated voxels were filtered out. The raw dataset size with
-one bit per voxel was 1.407 GiB. The average number of
-voxels per grid was 17,495,475, with average occupancy
-0.558%. The data entropy was 0.04122 bits per voxel, and
-the lower bound for the size of the entropy-coded dataset was
-59.4 MiB.
-5556
-In order to assess the usefulness of the proposed method for
-encoding general geometry, we have also tested its efficiency
-on a small set of publicly available models shown in Figure 7.
-Both hollow and filled variants of voxelized objects were
-used. The main properties of the voxelized objects are
-collected in Table 1.
-B. EXPERIMENTAL SETUP
-All of the experiments were performed on a personal
-computer with an AMD Ryzen 9 7950 × 3D CPU, 64 GB
-of RAM, and an Nvidia GeForce RTX 4090 graphics card.
-The operating system was Linux, kernel version 6.8.8. The
-proposed method was implemented in C++ and compiled
-using the Clang compiler version 17.0.6.
-VOLUME 13, 2025
-D. Strnad et al.: Efficient Encoding and Decoding of Voxelized Models for Machine Learning-Based Applications
+
+However, a more efficient storage can be achieved by exploiting the specific structure and redundancy in the data.
+
+The second tree dataset is a publicly available dataset of 691 single tree point clouds from terrestrial laser scanning [57]. A selection of point clouds is shown in Figure 6. The point clouds were converted to voxel grids with 5 cm voxel lateral size. To reduce the effects of noise, morphological closing with a cubical structural element 5 voxels wide was performed, and the remaining single isolated voxels were filtered out. The raw dataset size with one bit per voxel was 1.407 GiB. The average number of voxels per grid was 17,495,475, with average occupancy 0.558%. The data entropy was 0.04122 bits per voxel, and the lower bound for the size of the entropy-coded dataset was 59.4 MiB.
+
+In order to assess the usefulness of the proposed method for encoding general geometry, we have also tested its efficiency on a small set of publicly available models shown in Figure 7. Both hollow and filled variants of voxelized objects were used. The main properties of the voxelized objects are collected in Table 1.
+
+# B. EXPERIMENTAL SETUP
+
+All of the experiments were performed on a personal computer with an AMD Ryzen 9 7950 × 3D CPU, 64 GB of RAM, and an Nvidia GeForce RTX 4090 graphics card. The operating system was Linux, kernel version 6.8.8. The proposed method was implemented in C++ and compiled using the Clang compiler version 17.0.6.
+
 FIGURE 7. General objects used in the experiments.
+
 TABLE 1. Properties of voxelized objects from Figure 7.
-The aim of the experiments was to determine the efficiency
-of the proposed context-based prediction method in reducing
-the size of the PSVO-encoded binary stream. As a baseline
-reference, we have used the PSVO encoding of objects
-without prediction. Separate experiments were performed
-to assess the effects of different options when using the
-proposed method on tree datasets. In particular, the encoding
-efficiency has been compared for a varying number of
-prediction levels p, which determines the sparsity of initial
-key voxel locations. We have also compared the results of
-using a single feature prediction table for making predictions
-on all levels vs. using a separate feature prediction table for
-each prediction level.
-C. EXPERIMENTAL RESULTS
-In this section, we report the results of experiments performed
-on individual datasets. In the case of tree datasets, the results
-are reported as total storage reductions for the whole datasets,
-while separate reports are provided for individual objects
-from Figure 7.
-VOLUME 13, 2025
-1) SYNTHETIC TREE DATASET
-Table 2 shows the total storage size required for the
-synthetic tree dataset when the models are encoded using the
-basic PSVO, the PSVO with complete branch optimization
-(PSVO+CBO), and the proposed prediction-based method.
-The optimal value p = 3 and separate feature prediction
-tables for all prediction levels were used. It can be seen that
-the prediction-based encoding reduced the tree dataset size by
-15.6% relative to the PSVO, and by 13.7% with respect to the
-PSVO+CBO. By encoding clusters of occupied voxels more
-efficiently, the PSVO+CBO achieves a small but noticeable
-1.9% decrease of dataset size. The CBO technique could be
-used by our proposed method, but the experiments showed
-that it is not beneficial to do so. The reason is that accurate
-predictions within solid regions generate zero residual values
-in the output grid, which undermines the efficiency of the
-CBO technique in the subsequent PSVO encoding step.
-TABLE 2. Encoded synthetic tree dataset size (in MiB) when using
-baseline PSVO, PSVO with complete branch optimization, and the
-proposed method.
-Table 3 summarizes the results of the proposed method
-when testing with different values of p and either a single
-feature prediction table or separate feature prediction tables
-for each prediction level. It demonstrates that three levels of
-prediction with separate feature prediction tables provide an
-overall best result. However, the results are only marginally
-worse if a single feature prediction table is used with the
-same p, which suggests that the features extracted from the
-5557
-D. Strnad et al.: Efficient Encoding and Decoding of Voxelized Models for Machine Learning-Based Applications
-densest grid of key voxels are mostly re-usable on sparser
-levels of prediction.
-TABLE 3. Encoded synthetic tree dataset size (in MiB) when using the
-proposed method with different number of prediction levels p in
-combination with a single or multiple feature prediction tables
-(i.e. separate feature prediction table for each prediction level). Size
-ratios to baseline are shown in parentheses.
-2) LiDAR TREE DATASET
-The results of experiment with the LiDAR-based tree dataset
-are collected in Table 4. It can be observed that the dataset
-size reduction is 12.8% and 10.3% with respect to the basic
-and improved PSVO, respectively. Compared to the previous
-experiment, the improvement achieved here is smaller. This
-can be partly attributed to the noisy and disconnected
-structure of point cloud-based models, where LiDAR fails to
-capture the obscured and finer structural details.
-with respect to plain PSVO encoding. The optimal number
-of prediction levels ranges from 5 to 7. When compared
-with the PSVO+CBO encoding, the proposed method is 42%
-better on average. The difference is not so high for hollow
-objects, as demonstrated by the report in Table 7. Here, the
-optimal prediction depth is between 2 and 4, while the typical
-storage savings are in the range of 8 − 12% with an average
-of 10.6%.
-The results reported in Table 7 are obtained using separate
-feature prediction tables for each prediction level. Unlike in
-the case of the tree dataset, re-using a single feature prediction
-table on all levels yields considerably worse outcome for
-general objects, with average storage savings dropping
-to 5.2%.
+
+The aim of the experiments was to determine the efficiency of the proposed context-based prediction method in reducing the size of the PSVO-encoded binary stream. As a baseline reference, we have used the PSVO encoding of objects without prediction. Separate experiments were performed to assess the effects of different options when using the proposed method on tree datasets. In particular, the encoding efficiency has been compared for a varying number of prediction levels p, which determines the sparsity of initial key voxel locations. We have also compared the results of using a single feature prediction table for making predictions on all levels vs. using a separate feature prediction table for each prediction level.
+
+# C. EXPERIMENTAL RESULTS
+
+In this section, we report the results of experiments performed on individual datasets. In the case of tree datasets, the results are reported as total storage reductions for the whole datasets, while separate reports are provided for individual objects from Figure 7.
+
+# 1) SYNTHETIC TREE DATASET
+
+Table 2 shows the total storage size required for the synthetic tree dataset when the models are encoded using the basic PSVO, the PSVO with complete branch optimization (PSVO+CBO), and the proposed prediction-based method. The optimal value p = 3 and separate feature prediction tables for all prediction levels were used. It can be seen that the prediction-based encoding reduced the tree dataset size by 15.6% relative to the PSVO, and by 13.7% with respect to the PSVO+CBO. By encoding clusters of occupied voxels more efficiently, the PSVO+CBO achieves a small but noticeable 1.9% decrease of dataset size. The CBO technique could be used by our proposed method, but the experiments showed that it is not beneficial to do so. The reason is that accurate predictions within solid regions generate zero residual values in the output grid, which undermines the efficiency of the CBO technique in the subsequent PSVO encoding step.
+
+| Object         | Grid dimension  | Occupy and |        |
+|----------------|-----------------|------------|--------|
+|                |                 | hollow     | filled |
+| Armadillo [58] | 255 × 303 × 231 | 1.3%       | 11.3%  |
+| Brain [59]     | 214 × 177 × 187 | 5.1%       | 38.5%  |
+| Bunny [58]     | 162 × 163 × 124 | 2.8%       | 28.3%  |
+| Cow [59]       | 384 × 692 × 500 | 0.6%       | 18.0%  |
+| Crab [60]      | 384 × 238 × 132 | 1.3%       | 5.1%   |
+| Dragon [58]    | 564 × 253 × 398 | 1.4%       | 18.3%  |
+| Elephant [59]  | 227 × 467 × 288 | 1.3%       | 17.5%  |
+| Gear [61]      | 225 × 225 × 51  | 6.2%       | 47.2%  |
+| Horse [59]     | 85 × 184 × 151  | 2.2%       | 23.7%  |
+| Lucy [58]      | 466 × 267 × 790 | 0.9%       | 10.7%  |
+
+TABLE 2. Encoded synthetic tree dataset size (in MiB) when using baseline PSVO, PSVO with complete branch optimization, and the proposed method.
+
+| Encoded dataset size   |   | PATS+CBO | Proposed |
+|------------------------|---|----------|----------|
+| Size ratio to baseline | 1 | 0.241    | 0.204    |
+|                        |   | 0.981    | 0.844    |
+
+Table 3 summarizes the results of the proposed method when testing with different values of p and either a single feature prediction table or separate feature prediction tables for each prediction level. It demonstrates that three levels of prediction with separate feature prediction tables provide an overall best result. However, the results are only marginally worse if a single feature prediction table is used with the same p, which suggests that the features extracted from the densest grid of key voxels are mostly re-usable on sparser levels of prediction.
+
+TABLE 3. Encoded synthetic tree dataset size (in MiB) when using the proposed method with different number of prediction levels p in combination with a single or multiple feature prediction tables (i.e. separate feature prediction table for each prediction level). Size ratios to baseline are shown in parentheses.
+
+| p | Single feature prediction table | Multiple feature prediction tables |
+|----------|----------------------------------------|-------------------------------------------|
+| 1        | 23.048 (0.927)                         | /                                         |
+| 2        | 21.176 (0.852)                         | 21.097 (0.848)                            |
+| 3        | 21.069 (0.847)                         | 20.984 (0.844)                            |
+| 4        | 21.069 (0.847)                         | 20.995 (0.844)                            |
+
+# 2) LiDAR TREE DATASET
+
+The results of experiment with the LiDAR-based tree dataset are collected in Table 4. It can be observed that the dataset size reduction is 12.8% and 10.3% with respect to the basic and improved PSVO, respectively. Compared to the previous experiment, the improvement achieved here is smaller. This can be partly attributed to the noisy and disconnected structure of point cloud-based models, where LiDAR fails to capture the obscured and finer structural details.
+
+TABLE 4. Encoded LiDAR-based tree dataset size (in MiB) when using baseline PSVO, PSVO with complete branch optimization, and the proposed method.
+
+As with synthetic tree models, the optimal prediction depth for this experiment was p = 3 (Table 5\). Reusing a single feature prediction table on all prediction levels yielded slightly worse results than using separate feature prediction tables.
+
+TABLE 5. Encoded LiDAR-based tree dataset size (in MiB) when using the proposed method with different number of prediction levels p in combination with a single or multiple feature prediction tables (i.e. separate feature prediction table for each prediction level). Size ratios to baseline are shown in parentheses.
+
+# 3) GENERAL OBJECTS DATASET
+
+In contrast with trees, whose geometry is highly non-convex and irregular, the objects from Figure 7 are more compact and regular. For filled objects, this makes predictions more accurate and results in fewer non-zero residuals. Consequently, there is a greater opportunity for storage savings. This is supported by the results in Table 6, which demonstrate that the prediction-based encoding method reduces the space requirements of filled objects by a factor between 3 and 20 with respect to plain PSVO encoding. The optimal number of prediction levels ranges from 5 to 7. When compared with the PSVO+CBO encoding, the proposed method is 42% better on average. The difference is not so high for hollow objects, as demonstrated by the report in Table 7. Here, the optimal prediction depth is between 2 and 4, while the typical storage savings are in the range of 8 − 12% with an average of 10.6%.
+
+The results reported in Table 7 are obtained using separate feature prediction tables for each prediction level. Unlike in the case of the tree dataset, re-using a single feature prediction table on all levels yields considerably worse outcome for general objects, with average storage savings dropping to 5.2%.
+
 TABLE 6. Storage sizes (in bytes) for encoded filled objects from Figure 7.
-TABLE 4. Encoded LiDAR-based tree dataset size (in MiB) when using
-baseline PSVO, PSVO with complete branch optimization, and the
-proposed method.
-TABLE 7. Storage sizes (in bytes) for encoded hollow objects from
-Figure 7 The results for PSVO+CBO are not shown because they are
-identical to those of the basic PSVO.
-As with synthetic tree models, the optimal prediction
-depth for this experiment was p = 3 (Table 5). Reusing a
-single feature prediction table on all prediction levels yielded
-slightly worse results than using separate feature prediction
-tables.
-TABLE 5. Encoded LiDAR-based tree dataset size (in MiB) when using the
-proposed method with different number of prediction levels p in
-combination with a single or multiple feature prediction tables
-(i.e. separate feature prediction table for each prediction level). Size
-ratios to baseline are shown in parentheses.
-3) GENERAL OBJECTS DATASET
-In contrast with trees, whose geometry is highly non-convex
-and irregular, the objects from Figure 7 are more compact
-and regular. For filled objects, this makes predictions more
-accurate and results in fewer non-zero residuals. Consequently, there is a greater opportunity for storage savings.
-This is supported by the results in Table 6, which demonstrate
-that the prediction-based encoding method reduces the space
-requirements of filled objects by a factor between 3 and 20
-5558
-4) DECODING TIME
-The encoding and decoding parts of the proposed method are
-symmetric, and thus require similar amount of time. However,
-fast decoding is particularly important for on-the-fly voxel
-grid reconstruction, e.g. within a machine learning pipeline.
-An experiment was performed measuring the run-time of substeps, namely SVO decoding and voxel grid reconstruction
-from residuals and feature prediction tables. Parallelization
-of the latter sub-step on the GPU was realized using
-OpenMP in combination with the Clang compiler. The
-complete synthetic tree dataset was decoded in 3.76 seconds,
-or 9.4 ms per tree, with approximately 4% of the time
-spent in SVO decoding and the rest in the reconstruction of
-the original voxel grid from predictions and residuals. The
-achieved run-times render the proposed approach suitable
-for on-demand decoding of training batches in machine
-learning.
-VOLUME 13, 2025
-D. Strnad et al.: Efficient Encoding and Decoding of Voxelized Models for Machine Learning-Based Applications
-V. CONCLUSION
-This paper proposed an efficient method for encoding and
-decoding of voxelized geometric models. The proposed
-approach uses multi-level prediction of voxel occupancy
-based on the known context starting from a sparse grid of key
-voxels, and encodes the residuals with a PSVO. Experimental
-results showed that storage savings in the range of 10–15%
-can be achieved with respect to plain PSVO and PSVO+CBO
-for synthetic and LiDAR-based tree models, while 8–12%
-gains were demonstrated when encoding general objects.
-Contemporary machine learning tasks typically require
-huge quantities of training data which do not fit the working
-memory of a training device and must be continuously
-fetched from an external source. Maintaining the training
-data in on-chip memory in an encoded format and decoding
-it on-the-fly for repetitive consumption by the training
-pipeline is therefore an attractive and viable use case. To this
-end, the decoding should not incorporate time-consuming
-decompression steps and should be easily implementable on
-a parallel architecture, such as a GPU, which drives most
-of today’s machine learning tasks. The proposed method
-fits these requirements well since it can be parallelized in
-a straightforward manner, achieving average decoding times
-of less than 10 milliseconds for individual synthetic tree
-objects.
-The proposed approach also has some limitations. For
-instance, the voxel grid is reconstructed directly at the highest
-resolution by filling gaps at successively smaller strides. As a
-result, the method does not support progressive refinement,
-a feature that would make it suitable for rendering at
-increasing levels of detail [47]. Additionally, while individual
-voxel queries can be answered using localized grid decoding,
-efficiently handling a sequence of queries would require a
-smart caching strategy. Consequently, the proposed method
-may not be efficient for real-time rendering with ray tracing
-of large scenes.
-In future work, the proposed methodology could be
-extended with more advanced voxel occupancy prediction
-rules, balancing between the overhead of rule storage and
-the size of encoded residuals. Another promising direction of
-research is near-lossless encoding of voxelized objects with
-constrained local and global distortion to preserve important
-features for downstream machine learning tasks.
-REFERENCES
-[1] H. A. T. Nguyen, T. Sophea, S. H. Gheewala, R. Rattanakom,
-T. Areerob, and K. Prueksakorn, ‘‘Integrating remote sensing and
-machine learning into environmental monitoring and assessment of
-land use change,’’ Sustain. Prod. Consumption, vol. 27, pp. 1239–1254,
-Jul. 2021.
-[2] W. Tang, F. He, A. K. Bashir, X. Shao, Y. Cheng, and K. Yu, ‘‘A
-remote sensing image rotation object detection approach for real-time
-environmental monitoring,’’ Sustain. Energy Technol. Assessments, vol. 57,
-Jun. 2023, Art. no. 103270.
-[3] B. Verma, M. Porwal, A. K. Jha, R. G. Vyshnavi, A. Rajpoot,
-and A. K. Nagar, ‘‘Enhancing precision agriculture and environmental
-monitoring using proximal remote sensing,’’ J. Experim. Agricult. Int.,
-vol. 45, no. 8, pp. 162–176, Jul. 2023.
-VOLUME 13, 2025
-[4] G. Tmusić, S. Manfreda, H. Aasen, M. R. James, G. Gonçalves,
-E. Ben-Dor, A. Brook, M. Polinova, J. J. Arranz, J. Mészáros, R. Zhuang,
-K. Johansen, Y. Malbeteau, I. P. de Lima, C. Davids, S. Herban,
-and M. F. McCabe, ‘‘Current practices in UAS-based environmental
-monitoring,’’ Remote Sens., vol. 12, no. 6, p. 1001, Mar. 2020.
-[5] R. Odongo, ‘‘Remote sensing applications in environmental monitoring,’’
-Eur. J. Natural Sci., vol. 1, no. 1, pp. 1–12, 2023.
-[6] H. S. Munawar, A. W. A. Hammad, and S. T. Waller, ‘‘Remote sensing
-methods for flood prediction: A review,’’ Sensors, vol. 22, no. 3, p. 960,
-Jan. 2022.
-[7] R. Huang and T. Chen, ‘‘Landslide recognition from multi-feature remote
-sensing data based on improved transformers,’’ Remote Sens., vol. 15,
-no. 13, p. 3340, Jun. 2023.
-[8] E. Alipouri, M. H. Nami, and M. Naderi, ‘‘An overview of the application
-of remote sensing technologies in disaster management (with an emphasis
-on natural Hazards),’’ Disaster Prevention Manage. Knowl., vol. 13, no. 4,
-pp. 508–525, Feb. 2024.
-[9] D. Kumar, A. K. Pradhan, R. Jain, V. Kumar, S. Murmu, I. Samal,
-and H. S. Chaurasia, ‘‘Remote sensing in precision agriculture: Current
-status and applications,’’ in Advances in Geographical and Environmental
-Sciences. Cham, Switzerland: Springer, 2024, pp. 23–41.
-[10] M. Zude-Sasse, E. Akbari, N. Tsoulias, V. Psiroukis, S. Fountas, and
-R. Ehsani, Sensing in Precision Horticulture. Cham, Switzerland: Springer,
-Nov. 2021, pp. 221–251.
-[11] R. P. Sishodia, R. L. Ray, and S. K. Singh, ‘‘Applications of remote sensing
-in precision agriculture: A review,’’ Remote Sens., vol. 12, no. 19, p. 3136,
-Sep. 2020.
-[12] A. P. D. Corte, D. V. Souza, F. E. Rex, C. R. Sanquetta, M. Mohan,
-C. A. Silva, A. M. A. Zambrano, G. Prata, D. R. Alves De Almeida,
-J. W. Trautenmuller, C. Klauberg, A. de Moraes, M. N. Sanquetta,
-B. Wilkinson, and E. N. Broadbent, ‘‘Forest inventory with high-density
-UAV-LiDAR: Machine learning approaches for predicting individual
-tree attributes,’’ Comput. Electron. Agricult., vol. 179, Dec. 2020,
-Art. no. 105815.
-[13] T. Arumäe, M. Lang, A. Sims, and D. Laarmann, ‘‘Planning of commercial
-thinnings using machine learning and airborne LiDAR data,’’ Forests,
-vol. 13, no. 2, p. 206, Jan. 2022.
-[14] C. Zhang, J. Valente, L. Kooistra, L. Guo, and W. Wang, ‘‘Orchard
-management with small unmanned aerial vehicles: A survey of sensing
-and analysis approaches,’’ Precis. Agricult., vol. 22, no. 6, pp. 2007–2052,
-Dec. 2021.
-[15] A. Ozdarici-Ok and A. O. Ok, ‘‘Using remote sensing to identify individual
-tree species in orchards: A review,’’ Scientia Horticulturae, vol. 321,
-Nov. 2023, Art. no. 112333.
-[16] V. Méndez, J. R. Rosell-Polo, M. Pascual, and A. Escola, ‘‘Multi-tree
-woody structure reconstruction from mobile terrestrial laser scanner point
-clouds based on a dual neighbourhood connectivity graph algorithm,’’
-Biosystems Eng., vol. 148, pp. 34–47, Aug. 2016.
-[17] A. F. Colaço, J. P. Molin, J. R. Rosell-Polo, and A. Escola, ‘‘Application
-of light detection and ranging and ultrasonic sensors to high-throughput
-phenotyping and precision horticulture: Current status and challenges,’’
-Horticulture Res., vol. 5, no. 1, pp. 1–20, Jul. 2018.
-[18] A. Scalisi, L. McClymont, M. Peavey, P. Morton, S. Scheding,
-J. Underwood, and I. Goodwin, ‘‘Detecting, mapping and digitising canopy
-geometry, fruit number and peel colour in pear trees with different
-architecture,’’ Scientia Horticulturae, vol. 326, Feb. 2024, Art. no. 112737.
-[19] G. Rivera, R. Porras, R. Florencia, and J. P. Sánchez-Solís, ‘‘LiDAR
-applications in precision agriculture for cultivating crops: A review of
-recent advances,’’ Comput. Electron. Agricult., vol. 207, Apr. 2023,
-Art. no. 107737.
-[20] A. Escola, J. A. Martínez-Casasnovas, J. Rufat, J. Arnó, A. Arbonés,
-F. Sebé, M. Pascual, E. Gregorio, and J. R. Rosell-Polo, ‘‘Mobile terrestrial
-laser scanner applications in precision fruticulture/horticulture and tools to
-extract information from canopy point clouds,’’ Precis. Agricult., vol. 18,
-no. 1, pp. 111–132, Feb. 2017.
-[21] J. Murray, J. T. Fennell, G. A. Blackburn, J. D. Whyatt, and B. Li, ‘‘The
-novel use of proximal photogrammetry and terrestrial LiDAR to quantify
-the structural complexity of orchard trees,’’ Precis. Agricult., vol. 21, no. 3,
-pp. 473–483, Jun. 2020.
-[22] F. Westling, K. Mahmud, J. Underwood, and I. Bally, ‘‘Replacing
-traditional light measurement with LiDAR based methods in orchards,’’
-Comput. Electron. Agricult., vol. 179, Dec. 2020, Art. no. 105798.
-5559
-D. Strnad et al.: Efficient Encoding and Decoding of Voxelized Models for Machine Learning-Based Applications
-[23] A. Scalisi, L. McClymont, J. Underwood, P. Morton, S. Scheding, and
-I. Goodwin, ‘‘Reliability of a commercial platform for estimating flower
-cluster and fruit number, yield, tree geometry and light interception in apple
-trees under different rootstocks and row orientations,’’ Comput. Electron.
-Agricult., vol. 191, Dec. 2021, Art. no. 106519.
-[24] J. Gené-Mola, E. Gregorio, F. Auat Cheein, J. Guevara, J. Llorens,
-R. Sanz-Cortiella, A. Escola, and J. R. Rosell-Polo, ‘‘Fruit detection,
-yield prediction and canopy geometric characterization using LiDAR
-with forced air flow,’’ Comput. Electron. Agricult., vol. 168, Jan. 2020,
-Art. no. 105121.
-[25] M. S. Islam, A. Scalisi, M. G. O’Connell, P. Morton, S. Scheding,
-J. Underwood, and I. Goodwin, ‘‘A ground-based platform for reliable
-estimates of fruit number, size, and color in stone fruit orchards,’’
-HortTechnology, vol. 32, no. 6, pp. 510–522, Dec. 2022.
-[26] Š. Kohek, B. Žalik, D. Strnad, S. Kolmanic, and N. Lukac, ‘‘Simulationdriven 3D forest growth forecasting based on airborne topographic LiDAR
-data and shading,’’ Int. J. Appl. Earth Observ. Geoinf., vol. 111, Jul. 2022,
-Art. no. 102844.
-[27] D. Mongus, M. Brumen, D. Žlaus, Š. Kohek, R. Tomažič, U. Kerin, and
-S. Kolmanič, ‘‘A complete environmental intelligence system for LiDARbased vegetation management in power-line corridors,’’ Remote Sens.,
-vol. 13, no. 24, p. 5159, Dec. 2021.
-[28] T. Caras, R. N. Lati, D. Holland, V. M. Dubinin, K. Hatib, I. Shulner,
-O. Keiesar, G. Liddor, and T. Paz-Kagan, ‘‘Monitoring the effects of weed
-management strategies on tree canopy structure and growth using UAVLiDAR in a young almond orchard,’’ Comput. Electron. Agricult., vol. 216,
-Jan. 2024, Art. no. 108467.
-[29] D. Strnad and Š. Kohek, ‘‘Constrained multi-objective optimization of
-simulated tree pruning with heterogeneous criteria,’’ Appl. Sci., vol. 11,
-no. 22, p. 10781, Nov. 2021.
-[30] F. Westling, J. Underwood, and M. Bryson, ‘‘A procedure for automated
-tree pruning suggestion using LiDAR scans of fruit trees,’’ Comput.
-Electron. Agricult., vol. 187, Aug. 2021, Art. no. 106274.
-[31] R. Q. Charles, H. Su, M. Kaichun, and L. J. Guibas, ‘‘PointNet: Deep
-learning on point sets for 3D classification and segmentation,’’ in Proc.
-IEEE Conf. Comput. Vis. Pattern Recognit. (CVPR), Jul. 2017, pp. 77–85.
-[32] Y. Guo, H. Wang, Q. Hu, H. Liu, L. Liu, and M. Bennamoun, ‘‘Deep
-learning for 3D point clouds: A survey,’’ IEEE Trans. Pattern Anal. Mach.
-Intell., vol. 43, no. 12, pp. 4338–4364, Dec. 2021.
-[33] D. Meagher, ‘‘Geometric modeling using octree encoding,’’ Comput.
-Graph. Image Process., vol. 19, no. 1, p. 85, May 1982.
-[34] V. Kämpe, E. Sintorn, and U. Assarsson, ‘‘High resolution sparse voxel
-DAGs,’’ ACM Trans. Graph., vol. 32, no. 4, pp. 1–13, Jul. 2013.
-[35] S. A. Bello, S. Yu, C. Wang, J. M. Adam, and J. Li, ‘‘Deep learning on 3D
-point clouds,’’ Remote Sens., vol. 12, no. 11, p. 1729, 2020.
-[36] B. Mados, E. Chovancová, M. Chovanec, and N. Ádám, ‘‘CSVO:
-Clustered sparse voxel octrees—A hierarchical data structure for geometry
-representation of voxelized 3D scenes,’’ Symmetry, vol. 14, no. 10, p. 2114,
-Oct. 2022.
-[37] A. Bienert, C. Hess, H.-G. Maas, and G. von Oheimb, ‘‘A voxel-based
-technique to estimate the volume of trees from terrestrial laser scanner
-data,’’ Int. Arch. Photogramm., Remote Sens. Spatial Inf. Sci., vol. 5,
-pp. 101–106, Jun. 2014.
-[38] E. Kim, W.-K. Lee, M. Yoon, J.-Y. Lee, Y. Son, and K. Abu Salim,
-‘‘Estimation of voxel-based above-ground biomass using airborne LiDAR
-data in an intact tropical rain forest, Brunei,’’ Forests, vol. 7, no. 11, p. 259,
-Oct. 2016.
-[39] X. Dong, W.-Y. Kim, Z. Yu, J.-Y. Oh, R. Ehsani, and K.-H. Lee, ‘‘Improved
-voxel-based volume estimation and pruning severity mapping of apple
-trees during the pruning period,’’ Comput. Electron. Agricult., vol. 219,
-Apr. 2024, Art. no. 108834.
-[40] J. Schultke. SVO Optimization. Accessed: Dec. 30, 2024.
-[Online]. Available: https://eisenwave.github.io/voxel-compressiondocs/svo/optimization.html
-[41] A. J. Villanueva, F. Marton, and E. Gobbetti, ‘‘Symmetry-aware sparse
-voxel DAGs (SSVDAGs) for compression-domain tracing of highresolution geometric scenes,’’ J. Comput. Graph. Techn. Vol, vol. 6, no. 2,
-pp. 1–30, Jan. 2017.
-[42] L. Vokorokos, B. Mados, and Z. Bilanová, ‘‘PSVDAG: Compact voxelized
-representation of 3D scenes using pointerless sparse voxel directed acyclic
-graphs,’’ Comput. Informat., vol. 39, no. 3, pp. 587–616, 2020.
-5560
-[43] R. van der Laan, L. Scandolo, and E. Eisemann, ‘‘Lossy geometry
-compression for high resolution voxel scenes,’’ Proc. ACM Comput.
-Graph. Interact. Techn., vol. 3, no. 1, pp. 1–13, Apr. 2020.
-[44] C. Cao, M. Preda, V. Zakharchenko, E. S. Jang, and T. Zaharia,
-‘‘Compression of sparse and dense dynamic point clouds—Methods and
-standards,’’ Proc. IEEE, vol. 109, no. 9, pp. 1537–1558, Sep. 2021.
-[45] P.-M. Gandoin and O. Devillers, ‘‘Progressive lossless compression of
-arbitrary simplicial complexes,’’ ACM Trans. Graph., vol. 21, no. 3,
-pp. 372–379, Jul. 2002.
-[46] J. Peng and C.-C.-J. Kuo, ‘‘Geometry-guided progressive lossless 3D
-mesh coding with octree (OT) decomposition,’’ in Proc. ACM SIGGRAPH
-Papers, NY, NY, USA, Jul. 2005, pp. 609–616.
-[47] M. Botsch, A. Wiratanaya, and L. Kobbelt, ‘‘Efficient high quality
-rendering of point sampled geometry,’’ in Proc. Eurographics Workshop
-Rendering, Jul. 2002, pp. 53–64.
-[48] R. Schnabel and R. Klein, ‘‘Octree-based point-cloud compression,’’
-in Proc. 3rd Eurographics / IEEE VGTC Symp. Point-Based Graph.,
-Jul. 2006, pp. 111–121.
-[49] D. C. Garcia and R. L. de Queiroz, ‘‘Intra-frame context-based octree
-coding for point-cloud geometry,’’ in Proc. 25th IEEE Int. Conf. Image
-Process. (ICIP), Oct. 2018, pp. 1807–1811.
-[50] J. Hu, Y. Zhang, D. Zhao, G. Yang, F. Chen, C. Zhou, and W. Chen,
-‘‘A robust deep learning approach for the quantitative characterization
-and clustering of peach tree crowns based on UAV images,’’ IEEE Trans.
-Geosci. Remote Sens., vol. 60, 2022, Art. no. 4408613.
-[51] J. Wang, D. Ding, Z. Li, X. Feng, C. Cao, and Z. Ma, ‘‘Sparse tensor-based
-multiscale representation for point cloud geometry compression,’’ IEEE
-Trans. Pattern Anal. Mach. Intell., vol. 45, no. 1, pp. 1–18, Jul. 2022.
-[52] L. A. Martínez, E. Bribiesca, and A. Guzmán, ‘‘Chain coding representation of voxel-based objects with enclosing, edging and intersecting trees,’’
-Pattern Anal. Appl., vol. 20, no. 3, pp. 825–844, Aug. 2017.
-[53] H. Sánchez-Cruz, H. H. López-Valdez, and F. J. Cuevas, ‘‘A new relative
-chain code in 3D,’’ Pattern Recognit., vol. 47, no. 2, pp. 769–788,
-Feb. 2014.
-[54] E. Bribiesca, ‘‘A method for representing 3D tree objects using chain
-coding,’’ J. Vis. Commun. Image Represent., vol. 19, no. 3, pp. 184–198,
-Apr. 2008.
-[55] D. Strnad, Š. Kohek, A. Nerat, and B. Žalik, ‘‘Efficient representation of
-geometric tree models with Level-of-Detail using compressed 3D chain
-code,’’ IEEE Trans. Vis. Comput. Graphics, vol. 26, no. 11, pp. 3177–3188,
-Nov. 2020.
-[56] Š. Kohek, N. Guid, S. Tojnko, T. Unuk, and S. Kolmanic, ‘‘EduAPPLE:
-Interactive teaching tool for apple tree crown formation,’’ HortTechnology,
-vol. 25, no. 2, pp. 238–246, Apr. 2015.
-[57] D. Seidel. Single Tree Point Clouds From Terrestrial Laser Scanning.
-Accessed: Dec. 30, 2024, doi: 10.25625/FOHUJM.
-[58] Stanford Comput. Graph. Lab. Stanford 3D Scanning Repository.
-Accessed: Dec. 30, 2024. [Online]. Available: https://graphics.
-stanford.edu/data/3Dscanrep/
-[59] Suggestive
-Contours.
-Suggestive
-Contour
-Gallery.
-Accessed: Dec. 30, 2024. [Online]. Available: https://gfx.cs.
-princeton.edu/proj/sugcon/models/
-[60] ThreeDScans Model Gallery. Accessed: Dec. 30, 2024. [Online]. Available: https://threedscans.com
-[61] 3DExport. Gear Model. Accessed: Dec. 30, 2024. [Online]. Available:
-https://3dexport.com/free-3dmodel-16-tooth-spur-gear-139745.htm
-DAMJAN STRNAD received the M.Sc. and Ph.D.
-degrees in computer science from the University of
-Maribor, Slovenia, in 2000 and 2006, respectively.
-He is currently associated with the Laboratory for
-Geospatial Modelling, Multimedia and Artificial
-Intelligence, Faculty of Electrical Engineering and
-Computer Science, University of Maribor. His
-research interests include computer graphics, artificial intelligence, and optimization algorithms.
-VOLUME 13, 2025
-D. Strnad et al.: Efficient Encoding and Decoding of Voxelized Models for Machine Learning-Based Applications
-ŠTEFAN KOHEK received the B.Eng. and M.E.
-degrees in computer science from the University
-of Maribor in 2010 and 2012, respectively, and the
-Ph.D. degree, in 2019. He is currently a Teaching
-Assistant, a Lecturer, and a Researcher with the
-Laboratory for Geospatial Modelling, Multimedia
-and Artificial Intelligence, Faculty of Electrical
-Engineering and Computer Science, University
-of Maribor. His current research interests include
-computer graphics, tree growth simulations, optimization techniques, parallel computing, data compression, remote sensing
-data processing, and artificial intelligence techniques for data processing.
-BORUT ŽALIK (Member, IEEE) received the
-B.Sc. degree in electrical engineering, in 1985,
-and the M.Sc. and Ph.D. degrees in computer
-science, in 1989 and 1993, respectively. He is
-currently associated with the Laboratory for
-Geospatial Modelling, Multimedia, and Artificial
-Intelligence, Faculty of Electrical Engineering
-and Computer Science, University of Maribor,
-Slovenia. He is a Professor of computer science
-with the University of Maribor. His research
-interests include computational geometry, geometric data compression,
-scientific visualization, and geographic information systems. He is an ACM
+
+|                       | Approximate position | PSP (Cover)     | Posed (Cover)   | Posed (Cover) |
+|-----------------------|----------------------|-----------------|-----------------|---------------|
+| Armadillo ( $p = 6$ ) | 310.94               | 78,082 (0.251)  | 46,556 (0.150)  |               |
+| Brain ( $p = 6$ )     | 418,439              | 111,335 (0.266) | 61,871 (0.148)  |               |
+| Bunny ( $p = 6$ )     | 141,691              | 33,035 (0.233)  | 19,032 (0.134)  |               |
+| Cow ( $p = 7$ )       | 4,026,165            | 340,863 (0.085) | 261,499 (0.050) |               |
+| Crab ( $p = 5$ )      | 105,912              | 51,264 (0.484)  | 32,161 (0.304)  |               |
+| Dragon ( $p = 7$ )    | 1,562,276            | 284,460 (0.182) | 169,435 (0.108) |               |
+| Elephant ( $p = 7$ )  | 831,358              | 142,766 (0.172) | 84,578 (0.178)  |               |
+| Gear ( $p = 6$ )      | 188,419              | 49,675 (0.264)  | 20,305 (0.108)  |               |
+| Horse ( $p = 5$ )     | 64,494               | 17,784 (0.379)  | 10,852 (0.211)  |               |
+| Lucy ( $p = 7$ )      | 1,615,312            | 326,696 (0.202) | 189,253 (0.117) |               |
+
+TABLE 7. Storage sizes (in bytes) for encoded hollow objects from Figure 7 The results for PSVO+CBO are not shown because they are identical to those of the basic PSVO.
+
+|                        |  | PROPOSED | PROPOSED |
+|------------------------|--|----------|----------|
+| Encoded dataset size   |  | 17,665   | 15,442   |
+| Size ratio to baseline |  | 1        | 0,872    |
+
+|  | Model (opt. p)        | PSVO    | Proposed        |
+|--|-----------------------|---------|-----------------|
+|  | Amradillo ( $p = 3$ ) | 74,682  | 64,143 (0.886)  |
+|  | Brain ( $p = 3$ )     | 115,233 | 106,886 (0.928) |
+|  | Bunny ( $p = 3$ )     | 30,651  | 27,454 (0.896)  |
+|  | Cow ( $p = 3$ )       | 321,545 | 283,459 (0.882) |
+|  | Crab ( $p = 2$ )      | 50,022  | 45,713 (0.914)  |
+|  | Dragon ( $p = 3$ )    | 269,511 | 241,316 (0.895) |
+|  | Elephant ( $p = 3$ )  | 137,351 | 123,576 (0.900) |
+|  | Gear ( $p = 4$ )      | 50,593  | 37,707 (0.745)  |
+|  | Horse ( $p = 2$ )     | 117,174 | 15,480 (0.900)  |
+|  | Lucy ( $p = 3$ )      | 308,016 | 281,750 (0.915) |
+
+### 4) DECODING TIME
+
+The encoding and decoding parts of the proposed method are symmetric, and thus require similar amount of time. However, fast decoding is particularly important for on-the-fly voxel grid reconstruction, e.g. within a machine learning pipeline. An experiment was performed measuring the run-time of substeps, namely SVO decoding and voxel grid reconstruction from residuals and feature prediction tables. Parallelization of the latter sub-step on the GPU was realized using OpenMP in combination with the Clang compiler. The complete synthetic tree dataset was decoded in 3.76 seconds, or 9.4 ms per tree, with approximately 4% of the time spent in SVO decoding and the rest in the reconstruction of the original voxel grid from predictions and residuals. The achieved run-times render the proposed approach suitable for on-demand decoding of training batches in machine learning.
+
+| p | Single features prediction table | Multiple feature prediction tables |
+|----------|-----------------------------------------|-------------------------------------------|
+| 1        | 17.596 (0.990)                          | /                                         |
+| 2        | 15.675 (0.882)                          | 15.633 (0.880)                            |
+| 3        | 15.526 (0.874)                          | 15.484 (0.872)                            |
+| 4        | 15.592 (0.874)                          | 15.504 (0.873)                            |
+
+- V. CONCLUSION This paper proposed an efficient method for encoding and decoding of voxelized geometric models. The proposed approach uses multi-level prediction of voxel occupancy based on the known context starting from a sparse grid of key voxels, and encodes the residuals with a PSVO. Experimental results showed that storage savings in the range of 10–15% can be achieved with respect to plain PSVO and PSVO+CBO for synthetic and LiDAR-based tree models, while 8–12% gains were demonstrated when encoding general objects. Contemporary machine learning tasks typically require huge quantities of training data which do not fit the working memory of a training device and must be continuously fetched from an external source. Maintaining the training data in on-chip memory in an encoded format and decoding it on-the-fly for repetitive consumption by the training pipeline is therefore an attractive and viable use case. To this end, the decoding should not incorporate time-consuming decompression steps and should be easily implementable on a parallel architecture, such as a GPU, which drives most of today's machine learning tasks. The proposed method fits these requirements well since it can be parallelized in a straightforward manner, achieving average decoding times of less than 10 milliseconds for individual synthetic tree objects. The proposed approach also has some limitations. For instance, the voxel grid is reconstructed directly at the highest resolution by filling gaps at successively smaller strides. As a result, the method does not support progressive refinement, a feature that would make it suitable for rendering at increasing levels of detail [47]. Additionally, while individual voxel queries can be answered using localized grid decoding, efficiently handling a sequence of queries would require a smart caching strategy. Consequently, the proposed method may not be efficient for real-time rendering with ray tracing of large scenes. In future work, the proposed methodology could be extended with more advanced voxel occupancy prediction rules, balancing between the overhead of rule storage and the size of encoded residuals. Another promising direction of research is near-lossless encoding of voxelized objects with constrained local and global distortion to preserve important features for downstream machine learning tasks. REFERENCES [1] H. A. T. Nguyen, T. Sophea, S. H. Gheewala, R. Rattanakom,
+- T. Areerob, and K. Prueksakorn, ''Integrating remote sensing and machine learning into environmental monitoring and assessment of land use change,'' Sustain. Prod. Consumption, vol. 27, pp. 1239–1254, Jul. 2021. [2] W. Tang, F. He, A. K. Bashir, X. Shao, Y. Cheng, and K. Yu, ''A remote sensing image rotation object detection approach for real-time environmental monitoring,'' Sustain. Energy Technol. Assessments, vol. 57, Jun. 2023, Art. no. 103270. [3] B. Verma, M. Porwal, A. K. Jha, R. G. Vyshnavi, A. Rajpoot, and A. K. Nagar, ''Enhancing precision agriculture and environmental monitoring using proximal remote sensing,'' J. Experim. Agricult. Int., vol. 45, no. 8, pp. 162–176, Jul. 2023. [4] G. Tmusić, S. Manfreda, H. Aasen, M. R. James, G. Gonçalves,
+  - E. Ben-Dor, A. Brook, M. Polinova, J. J. Arranz, J. Mészáros, R. Zhuang,
+  - K. Johansen, Y. Malbeteau, I. P. de Lima, C. Davids, S. Herban, and M. F. McCabe, ''Current practices in UAS-based environmental monitoring,'' Remote Sens., vol. 12, no. 6, p. 1001, Mar. 2020. [5] R. Odongo, ''Remote sensing applications in environmental monitoring,'' Eur. J. Natural Sci., vol. 1, no. 1, pp. 1–12, 2023. [6] H. S. Munawar, A. W. A. Hammad, and S. T. Waller, ''Remote sensing methods for flood prediction: A review,'' Sensors, vol. 22, no. 3, p. 960, Jan. 2022. [7] R. Huang and T. Chen, ''Landslide recognition from multi-feature remote sensing data based on improved transformers,'' Remote Sens., vol. 15, no. 13, p. 3340, Jun. 2023. [8] E. Alipouri, M. H. Nami, and M. Naderi, ''An overview of the application of remote sensing technologies in disaster management (with an emphasis on natural Hazards),'' Disaster Prevention Manage. Knowl., vol. 13, no. 4, pp. 508–525, Feb. 2024. [9] D. Kumar, A. K. Pradhan, R. Jain, V. Kumar, S. Murmu, I. Samal, and H. S. Chaurasia, ''Remote sensing in precision agriculture: Current status and applications,'' in Advances in Geographical and Environmental Sciences. Cham, Switzerland: Springer, 2024, pp. 23–41. [10] M. Zude-Sasse, E. Akbari, N. Tsoulias, V. Psiroukis, S. Fountas, and
+  - R. Ehsani, Sensing in Precision Horticulture. Cham, Switzerland: Springer, Nov. 2021, pp. 221–251. [11] R. P. Sishodia, R. L. Ray, and S. K. Singh, ''Applications of remote sensing in precision agriculture: A review,'' Remote Sens., vol. 12, no. 19, p. 3136, Sep. 2020. [12] A. P. D. Corte, D. V. Souza, F. E. Rex, C. R. Sanquetta, M. Mohan,
+    - C. A. Silva, A. M. A. Zambrano, G. Prata, D. R. Alves De Almeida,
+    - J. W. Trautenmuller, C. Klauberg, A. de Moraes, M. N. Sanquetta,
+  - B. Wilkinson, and E. N. Broadbent, ''Forest inventory with high-density UAV-LiDAR: Machine learning approaches for predicting individual tree attributes,'' Comput. Electron. Agricult., vol. 179, Dec. 2020, Art. no. 105815. [13] T. Arumäe, M. Lang, A. Sims, and D. Laarmann, ''Planning of commercial thinnings using machine learning and airborne LiDAR data,'' Forests, vol. 13, no. 2, p. 206, Jan. 2022. [14] C. Zhang, J. Valente, L. Kooistra, L. Guo, and W. Wang, ''Orchard management with small unmanned aerial vehicles: A survey of sensing and analysis approaches,'' Precis. Agricult., vol. 22, no. 6, pp. 2007–2052, Dec. 2021. [15] A. Ozdarici-Ok and A. O. Ok, ''Using remote sensing to identify individual tree species in orchards: A review,'' Scientia Horticulturae, vol. 321, Nov. 2023, Art. no. 112333. [16] V. Méndez, J. R. Rosell-Polo, M. Pascual, and A. Escola, ''Multi-tree woody structure reconstruction from mobile terrestrial laser scanner point clouds based on a dual neighbourhood connectivity graph algorithm,'' Biosystems Eng., vol. 148, pp. 34–47, Aug. 2016. [17] A. F. Colaço, J. P. Molin, J. R. Rosell-Polo, and A. Escola, ''Application of light detection and ranging and ultrasonic sensors to high-throughput phenotyping and precision horticulture: Current status and challenges,'' Horticulture Res., vol. 5, no. 1, pp. 1–20, Jul. 2018. [18] A. Scalisi, L. McClymont, M. Peavey, P. Morton, S. Scheding,
+  - J. Underwood, and I. Goodwin, ''Detecting, mapping and digitising canopy geometry, fruit number and peel colour in pear trees with different architecture,'' Scientia Horticulturae, vol. 326, Feb. 2024, Art. no. 112737. [19] G. Rivera, R. Porras, R. Florencia, and J. P. Sánchez-Solís, ''LiDAR applications in precision agriculture for cultivating crops: A review of recent advances,'' Comput. Electron. Agricult., vol. 207, Apr. 2023, Art. no. 107737. [20] A. Escola, J. A. Martínez-Casasnovas, J. Rufat, J. Arnó, A. Arbonés,
+  - F. Sebé, M. Pascual, E. Gregorio, and J. R. Rosell-Polo, ''Mobile terrestrial laser scanner applications in precision fruticulture/horticulture and tools to extract information from canopy point clouds,'' Precis. Agricult., vol. 18, no. 1, pp. 111–132, Feb. 2017. [21] J. Murray, J. T. Fennell, G. A. Blackburn, J. D. Whyatt, and B. Li, ''The novel use of proximal photogrammetry and terrestrial LiDAR to quantify the structural complexity of orchard trees,'' Precis. Agricult., vol. 21, no. 3, pp. 473–483, Jun. 2020. [22] F. Westling, K. Mahmud, J. Underwood, and I. Bally, ''Replacing traditional light measurement with LiDAR based methods in orchards,'' Comput. Electron. Agricult., vol. 179, Dec. 2020, Art. no. 105798.
+
+
+
+
+
+
+
+- [23] A. Scalisi, L. McClymont, J. Underwood, P. Morton, S. Scheding, and
+- I. Goodwin, ''Reliability of a commercial platform for estimating flower cluster and fruit number, yield, tree geometry and light interception in apple trees under different rootstocks and row orientations,'' Comput. Electron. Agricult., vol. 191, Dec. 2021, Art. no. 106519. [24] J. Gené-Mola, E. Gregorio, F. Auat Cheein, J. Guevara, J. Llorens,
+- R. Sanz-Cortiella, A. Escola, and J. R. Rosell-Polo, ''Fruit detection, yield prediction and canopy geometric characterization using LiDAR with forced air flow,'' Comput. Electron. Agricult., vol. 168, Jan. 2020, Art. no. 105121. [25] M. S. Islam, A. Scalisi, M. G. O'Connell, P. Morton, S. Scheding,
+- J. Underwood, and I. Goodwin, ''A ground-based platform for reliable estimates of fruit number, size, and color in stone fruit orchards,'' HortTechnology, vol. 32, no. 6, pp. 510–522, Dec. 2022. [26] Š. Kohek, B. Žalik, D. Strnad, S. Kolmanic, and N. Lukac, ''Simulationdriven 3D forest growth forecasting based on airborne topographic LiDAR data and shading,'' Int. J. Appl. Earth Observ. Geoinf., vol. 111, Jul. 2022, Art. no. 102844. [27] D. Mongus, M. Brumen, D. Žlaus, Š. Kohek, R. Tomažič, U. Kerin, and
+- S. Kolmanič, ''A complete environmental intelligence system for LiDARbased vegetation management in power-line corridors,'' Remote Sens., vol. 13, no. 24, p. 5159, Dec. 2021. [28] T. Caras, R. N. Lati, D. Holland, V. M. Dubinin, K. Hatib, I. Shulner,
+- O. Keiesar, G. Liddor, and T. Paz-Kagan, ''Monitoring the effects of weed management strategies on tree canopy structure and growth using UAV-LiDAR in a young almond orchard,'' Comput. Electron. Agricult., vol. 216, Jan. 2024, Art. no. 108467. [29] D. Strnad and Š. Kohek, ''Constrained multi-objective optimization of simulated tree pruning with heterogeneous criteria,'' Appl. Sci., vol. 11, no. 22, p. 10781, Nov. 2021. [30] F. Westling, J. Underwood, and M. Bryson, ''A procedure for automated tree pruning suggestion using LiDAR scans of fruit trees,'' Comput. Electron. Agricult., vol. 187, Aug. 2021, Art. no. 106274. [31] R. Q. Charles, H. Su, M. Kaichun, and L. J. Guibas, ''PointNet: Deep learning on point sets for 3D classification and segmentation,'' in Proc. IEEE Conf. Comput. Vis. Pattern Recognit. (CVPR), Jul. 2017, pp. 77–85. [32] Y. Guo, H. Wang, Q. Hu, H. Liu, L. Liu, and M. Bennamoun, ''Deep learning for 3D point clouds: A survey,'' IEEE Trans. Pattern Anal. Mach. Intell., vol. 43, no. 12, pp. 4338–4364, Dec. 2021. [33] D. Meagher, ''Geometric modeling using octree encoding,'' Comput. Graph. Image Process., vol. 19, no. 1, p. 85, May 1982. [34] V. Kämpe, E. Sintorn, and U. Assarsson, ''High resolution sparse voxel DAGs,'' ACM Trans. Graph., vol. 32, no. 4, pp. 1–13, Jul. 2013. [35] S. A. Bello, S. Yu, C. Wang, J. M. Adam, and J. Li, ''Deep learning on 3D point clouds,'' Remote Sens., vol. 12, no. 11, p. 1729, 2020. [36] B. Mados, E. Chovancová, M. Chovanec, and N. Ádám, ''CSVO: Clustered sparse voxel octrees—A hierarchical data structure for geometry representation of voxelized 3D scenes,'' Symmetry, vol. 14, no. 10, p. 2114, Oct. 2022. [37] A. Bienert, C. Hess, H.-G. Maas, and G. von Oheimb, ''A voxel-based technique to estimate the volume of trees from terrestrial laser scanner data,'' Int. Arch. Photogramm., Remote Sens. Spatial Inf. Sci., vol. 5, pp. 101–106, Jun. 2014. [38] E. Kim, W.-K. Lee, M. Yoon, J.-Y. Lee, Y. Son, and K. Abu Salim, ''Estimation of voxel-based above-ground biomass using airborne LiDAR data in an intact tropical rain forest, Brunei,'' Forests, vol. 7, no. 11, p. 259, Oct. 2016. [39] X. Dong, W.-Y. Kim, Z. Yu, J.-Y. Oh, R. Ehsani, and K.-H. Lee, ''Improved voxel-based volume estimation and pruning severity mapping of apple trees during the pruning period,'' Comput. Electron. Agricult., vol. 219, Apr. 2024, Art. no. 108834. [40] J. Schultke. SVO Optimization. Accessed: Dec. 30, 2024. [Online]. Available: https://eisenwave.github.io/voxel-compressiondocs/svo/optimization.html [41] A. J. Villanueva, F. Marton, and E. Gobbetti, ''Symmetry-aware sparse voxel DAGs (SSVDAGs) for compression-domain tracing of highresolution geometric scenes,'' J. Comput. Graph. Techn. Vol, vol. 6, no. 2, pp. 1–30, Jan. 2017. [42] L. Vokorokos, B. Mados, and Z. Bilanová, ''PSVDAG: Compact voxelized representation of 3D scenes using pointerless sparse voxel directed acyclic graphs,'' Comput. Informat., vol. 39, no. 3, pp. 587–616, 2020. [43] R. van der Laan, L. Scandolo, and E. Eisemann, ''Lossy geometry compression for high resolution voxel scenes,'' Proc. ACM Comput. Graph. Interact. Techn., vol. 3, no. 1, pp. 1–13, Apr. 2020. [44] C. Cao, M. Preda, V. Zakharchenko, E. S. Jang, and T. Zaharia, ''Compression of sparse and dense dynamic point clouds—Methods and standards,'' Proc. IEEE, vol. 109, no. 9, pp. 1537–1558, Sep. 2021. [45] P.-M. Gandoin and O. Devillers, ''Progressive lossless compression of arbitrary simplicial complexes,'' ACM Trans. Graph., vol. 21, no. 3, pp. 372–379, Jul. 2002. [46] J. Peng and C.-C.-J. Kuo, ''Geometry-guided progressive lossless 3D mesh coding with octree (OT) decomposition,'' in Proc. ACM SIGGRAPH Papers, NY, NY, USA, Jul. 2005, pp. 609–616. [47] M. Botsch, A. Wiratanaya, and L. Kobbelt, ''Efficient high quality rendering of point sampled geometry,'' in Proc. Eurographics Workshop Rendering, Jul. 2002, pp. 53–64. [48] R. Schnabel and R. Klein, ''Octree-based point-cloud compression,'' in Proc. 3rd Eurographics / IEEE VGTC Symp. Point-Based Graph., Jul. 2006, pp. 111–121. [49] D. C. Garcia and R. L. de Queiroz, ''Intra-frame context-based octree coding for point-cloud geometry,'' in Proc. 25th IEEE Int. Conf. Image Process. (ICIP), Oct. 2018, pp. 1807–1811. [50] J. Hu, Y. Zhang, D. Zhao, G. Yang, F. Chen, C. Zhou, and W. Chen, ''A robust deep learning approach for the quantitative characterization and clustering of peach tree crowns based on UAV images,'' IEEE Trans. Geosci. Remote Sens., vol. 60, 2022, Art. no. 4408613. [51] J. Wang, D. Ding, Z. Li, X. Feng, C. Cao, and Z. Ma, ''Sparse tensor-based multiscale representation for point cloud geometry compression,'' IEEE Trans. Pattern Anal. Mach. Intell., vol. 45, no. 1, pp. 1–18, Jul. 2022. [52] L. A. Martínez, E. Bribiesca, and A. Guzmán, ''Chain coding representation of voxel-based objects with enclosing, edging and intersecting trees,'' Pattern Anal. Appl., vol. 20, no. 3, pp. 825–844, Aug. 2017. [53] H. Sánchez-Cruz, H. H. López-Valdez, and F. J. Cuevas, ''A new relative chain code in 3D,'' Pattern Recognit., vol. 47, no. 2, pp. 769–788, Feb. 2014. [54] E. Bribiesca, ''A method for representing 3D tree objects using chain coding,'' J. Vis. Commun. Image Represent., vol. 19, no. 3, pp. 184–198, Apr. 2008. [55] D. Strnad, Š. Kohek, A. Nerat, and B. Žalik, ''Efficient representation of geometric tree models with Level-of-Detail using compressed 3D chain code,'' IEEE Trans. Vis. Comput. Graphics, vol. 26, no. 11, pp. 3177–3188, Nov. 2020. [56] Š. Kohek, N. Guid, S. Tojnko, T. Unuk, and S. Kolmanic, ''EduAPPLE: Interactive teaching tool for apple tree crown formation,'' HortTechnology, vol. 25, no. 2, pp. 238–246, Apr. 2015. [57] D. Seidel. Single Tree Point Clouds From Terrestrial Laser Scanning. Accessed: Dec. 30, 2024, doi: [10.25625/FOHUJM.](http://dx.doi.org/10.25625/FOHUJM) [58] Stanford Comput. Graph. Lab. Stanford 3D Scanning Repository. Accessed: Dec. 30, 2024. [Online]. Available: https://graphics. stanford.edu/data/3Dscanrep/ [59] Suggestive Contours. Suggestive Contour Gallery. Accessed: Dec. 30, 2024. [Online]. Available: https://gfx.cs. princeton.edu/proj/sugcon/models/ [60] ThreeDScans Model Gallery. Accessed: Dec. 30, 2024. [Online]. Available: https://threedscans.com [61] 3DExport. Gear Model. Accessed: Dec. 30, 2024. [Online]. Available: https://3dexport.com/free-3dmodel-16-tooth-spur-gear-139745.htm DAMJAN STRNAD received the M.Sc. and Ph.D. degrees in computer science from the University of Maribor, Slovenia, in 2000 and 2006, respectively. He is currently associated with the Laboratory for Geospatial Modelling, Multimedia and Artificial Intelligence, Faculty of Electrical Engineering and Computer Science, University of Maribor. His research interests include computer graphics, artificial intelligence, and optimization algorithms.
+
+
+
+ŠTEFAN KOHEK received the B.Eng. and M.E. degrees in computer science from the University of Maribor in 2010 and 2012, respectively, and the Ph.D. degree, in 2019. He is currently a Teaching Assistant, a Lecturer, and a Researcher with the Laboratory for Geospatial Modelling, Multimedia and Artificial Intelligence, Faculty of Electrical Engineering and Computer Science, University of Maribor. His current research interests include computer graphics, tree growth simulations, opti-
+
+mization techniques, parallel computing, data compression, remote sensing data processing, and artificial intelligence techniques for data processing.
+
+BORUT ŽALIK (Member, IEEE) received the B.Sc. degree in electrical engineering, in 1985, and the M.Sc. and Ph.D. degrees in computer science, in 1989 and 1993, respectively. He is currently associated with the Laboratory for Geospatial Modelling, Multimedia, and Artificial Intelligence, Faculty of Electrical Engineering and Computer Science, University of Maribor, Slovenia. He is a Professor of computer science with the University of Maribor. His research
+
+
+
+interests include computational geometry, geometric data compression, scientific visualization, and geographic information systems. He is an ACM
+
 Senior Member.
-VOLUME 13, 2025
-LIBOR VÁŠA is currently an Associate Professor
-with the Department of Computer Science and
-Engineering, University of West Bohemia, Czech
-Republic. Previously, he was a Researcher with
-TU Chemnitz, Germany. His research interests
-include processing of static and dynamic triangle
-meshes with a particular focus on compression
-algorithms as well as compression of other kinds of
-geometric data, such as mocap data and molecule
-simulations. Additionally, he is also active in the
+
+LIBOR VÁŠA is currently an Associate Professor with the Department of Computer Science and Engineering, University of West Bohemia, Czech Republic. Previously, he was a Researcher with TU Chemnitz, Germany. His research interests include processing of static and dynamic triangle meshes with a particular focus on compression algorithms as well as compression of other kinds of geometric data, such as mocap data and molecule simulations. Additionally, he is also active in the
+
+
+
+
+
 field of perceptual evaluation of mesh processing algorithms.
-ANDREJ NERAT received the B.Sc. degree in
-computer science, in 2004. He is currently pursuing the Ph.D. degree. He is associated with the
-Laboratory for Geospatial Modelling, Multimedia,
-and Artificial Intelligence, Faculty of Electrical
-Engineering and Computer Science, University
-of Maribor. His research interests include computational geometry, artificial intelligence, and
-computer graphics.
-5561
+
+ANDREJ NERAT received the B.Sc. degree in computer science, in 2004. He is currently pursuing the Ph.D. degree. He is associated with the Laboratory for Geospatial Modelling, Multimedia, and Artificial Intelligence, Faculty of Electrical Engineering and Computer Science, University of Maribor. His research interests include computational geometry, artificial intelligence, and computer graphics.

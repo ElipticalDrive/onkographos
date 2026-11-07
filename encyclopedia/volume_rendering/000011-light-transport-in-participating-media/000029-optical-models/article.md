@@ -1,9 +1,8 @@
 # Optical models
 
-Also called: Volume optical models, Participating media optical models
 
 ## Overview
-Optical models define the physical laws governing light transport within participating media, describing how radiance changes due to absorption, emission, and scattering as it propagates through a volume [S1, unofficial]. They solve the problem of determining the final pixel color by integrating these interactions along a viewing ray, ranging from simplified attenuation models to the full integro-differential Radiative Transfer Equation [S1, S5]. What sets this family apart from sibling articles like [Single and multiple scattering](35-single-and-multiple-scattering.md) is that it focuses on the *constitutive equations* (the differential or integral forms of light transport) rather than the numerical *solvers* (ray marching, path tracing, or photon mapping) used to evaluate them.
+Optical models define the physical laws governing light transport within participating media, describing how radiance changes due to absorption, emission, and scattering as it propagates through a volume [S1, unofficial]. They solve the problem of determining the final pixel color by integrating these interactions along a viewing ray, ranging from simplified attenuation models to the full integro-differential Radiative Transfer Equation [S1, S5, unofficial]. What sets this family apart from sibling articles like [Single and multiple scattering](35-single-and-multiple-scattering.md) is that it focuses on the *constitutive equations* (the differential or integral forms of light transport) rather than the numerical *solvers* (ray marching, path tracing, or photon mapping) used to evaluate them [G].
 
 ## Shared principles
 All optical models in this family are derived from the conservation of energy for a differential cylinder of light passing through a medium [S1, unofficial]. They share the following core definitions and mechanisms:
@@ -13,8 +12,8 @@ Any volumetric effect is composed of three fundamental characteristics [S1, unof
 *   **Absorption:** The loss of radiant energy along a ray due to energy conversion (e.g., to heat). It is described by the absorption coefficient $\sigma_a$ (units: $m^{-1}$) [S1, unofficial].
 *   **Emission:** The addition of radiant energy where the medium is luminous (e.g., flames). It is described by the emissive term $L_e(\mathbf{p}, \boldsymbol{\omega})$, representing radiance emitted per unit length [S1, unofficial].
 *   **Scattering:** The redirection of light rays upon collision with particles. It is split into:
-    *   *In-scattering:* Light from other directions reflected into the view ray.
-    *   *Out-scattering:* Light from the view ray reflected away.
+    *   *In-scattering:* Light from other directions reflected into the view ray [S1, unofficial].
+    *   *Out-scattering:* Light from the view ray reflected away [S1, unofficial].
     In most lighting calculations, out-scattering is folded into the **extinction** term because its net effect on the view ray is identical to absorption [S1, unofficial].
 
 **2. Notation**
@@ -23,13 +22,13 @@ Any volumetric effect is composed of three fundamental characteristics [S1, unof
 *   $L$: Radiance quantity.
 *   $L_i$: Incoming radiance.
 *   $L_o$: Outgoing radiance.
-*   $\sigma_t$: Total extinction coefficient, $\sigma_t = \sigma_a + \sigma_s$ [S1, S5].
+*   $\sigma_t$: Total extinction coefficient, $\sigma_t = \sigma_a + \sigma_s$ [S1, S5, unofficial].
 
 **3. Differential Forms**
 The change in radiance $dL$ over a differential path length $dt$ is governed by the balance of loss and gain terms [S1, unofficial]:
 *   **Absorption Model:** $dL = -\sigma_a L_i dt$ [S1, unofficial].
 *   **Emission Model:** $dL = \sigma_e dt$ (where $\sigma_e$ is the emission coefficient) [S1, unofficial].
-*   **General RTE:** Combines extinction (loss) and source terms (gain from emission and in-scattering) [S5].
+*   **General RTE:** Combines extinction (loss) and source terms (gain from emission and in-scattering) [G].
 
 **4. Transmittance**
 The fraction of light surviving transmission through a medium is defined by the Beer-Lambert law [S3, unofficial]:
@@ -37,6 +36,9 @@ $$ T = e^{-\tau} $$
 where $\tau$ is the optical depth (integrated extinction) [S3, unofficial].
 
 ## Subtopics
+
+### [Base Gaseous Illumination Renderer](794-base-gaseous-illumination-renderer.md)
+The foundational volume rendering method used in volume illustration pipelines to simulate the appearance of translucent, gaseous, or semi-transparent media. It solves the problem of visualizing internal structures in volumetric data by combining an opacity transfer function with an atmospheric illumination model. Unlike surface-based rendering, it treats the volume as a continuous medium where light interacts with the scalar field values directly. It is distinguished from its siblings by its specific reliance on an atmospheric (gaseous) lighting model rather than standard surface shading, though the framework is extensible to Phong illumination and linear accumulation.
 
 ### [Absorption-only model](839-absorption-only-model.md)
 Computes light attenuation through a medium that absorbs all intercepted light without scattering or emitting. It solves for radiance decay along a ray, effectively simulating a cloud of black smoke or X-ray projection. Unlike the [Emission-Absorption Model](927-emission-absorption-model.md), it assumes zero scattering ($\sigma_s = 0$) and surfaces that only emit light without reflecting or transmitting.
@@ -78,9 +80,11 @@ Generates cloud-like images that illustrate internal structure, instead of conto
 A method to define participating media by summing multiple phase terms, each with its own density, phase function, and absorption, to produce a composite medium [S3, unofficial]. It allows for complex scattering behaviors by combining terms like Rayleigh, Mie-Hazy, and Mie-Murky, with parameters including density (optical depth in RGB), phase function (directional scattering distribution applied per-channel), and absorption (optical depth of light absorption in RGB) [S3, unofficial].
 
 ## Background
-The mathematical foundation of volume rendering lies in the Radiative Transfer Equation (RTE), which has roots in astrophysics and nuclear engineering [S5, S6]. In computer graphics, the field was formalized in the early 1980s. Key early works include Blinn's 1982 paper on volume rendering [S2, unofficial], Kajiya's 1984 work on the rendering equation [S2, unofficial], and Max's 1986 volume rendering equation [S2, unofficial]. Sabella (1988) introduced ray-casting methods using accurate light-scattering models for clouds [S2, unofficial]. The standard volume rendering equation, often attributed to Max, treats opacity as a ray-dependent quantity [S3, unofficial]. Modern production rendering extends these physical models with empirical adjustments to achieve desired artistic looks [S1, unofficial].
+The mathematical foundation of volume rendering lies in the Radiative Transfer Equation (RTE), which has roots in astrophysics and nuclear engineering [G]. In computer graphics, the field was formalized in the early 1980s [G]. Sabella (1988) introduced ray-casting methods using accurate light-scattering models for clouds, building on Blinn (1982), Kajiya (1984), and Max (1986) [S2, unofficial]. The standard volume rendering equation, often attributed to Max, treats opacity as a ray-dependent quantity [S3, unofficial]. Modern production rendering extends these physical models with empirical adjustments to achieve desired artistic looks [S1, unofficial].
 
 ## Sources
 [S1] Production Volume Rendering, https://cg.informatik.uni-freiburg.de/intern/seminar/volumeRenderingProductionFundamentals2011.pdf, fetched 2026-10-27 (unofficial)
 [S2] A Parallel, Feed-Forward Volume Rendering Algorithm, https://www.cs.unc.edu/techreports/91-029.pdf, fetched 2026-10-27 (unofficial)
 [S3] Volumetric Light Scattering in Fallout 4, https://www.scribd.com/document/748135006/Fast-Flexible-Physically-Based-Volumetric-Light-Scattering, fetched 2026-10-29 (unofficial)
+[S4] GPU-Enabled Volume Renderer for Use with MATLAB, https://doi.org/10.3390/digital4040049, fetched 2026-10-29
+[S5] PDF Volume Rendering - faculty.cc.gatech.edu, https://faculty.cc.gatech.edu/~hays/compvision2025spring/lectures/26.pdf, fetched 2026-10-26 (unofficial)

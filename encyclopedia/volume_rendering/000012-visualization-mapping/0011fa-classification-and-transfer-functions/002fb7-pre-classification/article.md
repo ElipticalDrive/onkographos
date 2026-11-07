@@ -1,0 +1,125 @@
+# Pre-classification
+
+Also called: Transfer Function Application (in pre-sampling context)
+
+## Overview
+Pre-classification is a volume rendering technique where the transfer function (TF) is applied to scalar values at the grid points (voxels) before sampling interpolation occurs [S2][S3, unofficial]. It maps every scalar value at the grid into color and opacity, which are then assigned at the resampling points [S2]. This approach suppresses high-frequency information introduced by nonlinear transfer functions, resulting in rendered images that appear blurry compared to post-classification methods [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A volume dataset $V$ where each voxel $i$ has a scalar value $v_i$. A transfer function $T$ that maps scalar values to optical properties.
+*   **Output:** A 2D image where each pixel is accumulated from interpolated optical properties (color $C$ and opacity $\alpha$) derived from the pre-classified voxels.
+
+**Data Structures:**
+The volume is stored as a 3D grid of scalar values. The transfer function is typically implemented as a 1D lookup table (LUT) or a shader function that maps a scalar input to a color vector $C \in [0, 1]^3$ (or $[0, 255]^3$) and an opacity $\alpha \in [0, 1]$ [S3, unofficial][S2].
+
+**Steps:**
+1.  **Pre-classification:** For each voxel $i$ in the volume grid with scalar value $v_i$, evaluate the transfer function $T$ to obtain the color $C_i = T(v_i)$ and opacity $\alpha_i = T_\alpha(v_i)$ [S2][S3, unofficial].
+2.  **Ray Casting:** For each pixel, cast a ray through the volume.
+3.  **Interpolation:** Sample the pre-classified optical properties along the ray. The color $C_{sample}$ and opacity $\alpha_{sample}$ at a sample point are obtained by interpolating the $C_i$ and $\alpha_i$ values of the surrounding voxels [S2][S3, unofficial].
+4.  **Accumulation:** Composite the interpolated samples using standard volume rendering integration (e.g., front-to-back compositing) to produce the final pixel color [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pre-classification step (performed once or when volume/TF changes)
+def preclassify_volume(volume, transfer_function):
+    """
+    Applies transfer function to all voxels.
+    volume: 3D array of scalar values.
+    transfer_function: callable mapping scalar -> (color, opacity).
+    Returns:
+        colors: 3D array of RGB values.
+        opacities: 3D array of alpha values.
+    """
+    colors = np.zeros_like(volume, shape=(volume.shape[0], volume.shape[1], volume.shape[2], 3))
+    opacities = np.zeros_like(volume)
+    
+    for x in range(volume.shape[0]):
+        for y in range(volume.shape[1]):
+            for z in range(volume.shape[2]):
+                val = volume[x, y, z]
+                c, a = transfer_function(val)
+                colors[x, y, z] = c
+                opacities[x, y, z] = a
+    return colors, opacities
+
+# Ray casting step
+def raycast_preclassified(colors, opacities, ray_origin, ray_direction, volume_bounds):
+    """
+    Renders a single ray using pre-classified data.
+    """
+    # Intersect ray with volume bounds
+    t_min, t_max = intersect_box(ray_origin, ray_direction, volume_bounds)
+    if t_max < t_min:
+        return (0, 0, 0, 0) # Transparent background
+    
+    # Step along ray
+    current_color = (0, 0, 0)
+    current_alpha = 0
+    t = t_min
+    
+    while t < t_max:
+        # Get sample position
+        pos = ray_origin + t * ray_direction
+        
+        # Interpolate pre-classified color and opacity at pos
+        # Using trilinear interpolation of the pre-computed colors and opacities
+        sample_color, sample_alpha = interpolate_3d(colors, opacities, pos)
+        
+        # Front-to-back compositing
+        # C_out = C_in + (1 - C_in_alpha) * C_sample * alpha_sample
+        # A_out = A_in + (1 - A_in_alpha) * alpha_sample
+        
+        r, g, b = current_color
+        a = current_alpha
+        
+        sr, sg, sb = sample_color
+        sa = sample_alpha
+        
+        # Update accumulated color and alpha
+        new_a = a + (1 - a) * sa
+        if new_a >= 1.0:
+            new_a = 1.0
+            
+        # Weighted contribution of the sample
+        weight = (1 - a) * sa / new_a if new_a > 0 else 0
+        
+        current_color = (
+            r * (1 - weight) + sr * weight,
+            g * (1 - weight) + sg * weight,
+            b * (1 - weight) + sb * weight
+        )
+        current_alpha = new_a
+        
+        t += step_size
+        
+    return current_color, current_alpha
+```
+
+**Parameters:**
+*   **Transfer Function $T$:** Defines the mapping from scalar to optical properties. Common implementations include piecewise linear functions or lookup tables [S3, unofficial].
+*   **Interpolation Method:** Typically trilinear interpolation is used for both color and opacity during the sampling phase [S2][S3, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Blurriness:** Pre-classification suppresses high-frequency information introduced by nonlinear transfer functions, causing the rendered image to appear blurry [S2]. This is particularly noticeable when the image resolution is higher than the volume resolution.
+*   **Color Bleeding:** If color interpolation is not done with opacity-weighted colors, color bleeding can occur. However, standard pre-classification with opacity-weighted interpolation prevents this [S2].
+*   **Aliasing:** While post-classification is prone to aliasing ("striping" artifacts), pre-classification avoids this by smoothing the high frequencies, but at the cost of detail [S2].
+
+## Operating characteristics
+*   **Time Complexity:** The pre-classification step is $O(N)$ where $N$ is the number of voxels, performed once. Ray casting remains $O(R \cdot S)$ where $R$ is the number of rays and $S$ is the number of samples per ray.
+*   **Memory Complexity:** Requires storing additional 3D arrays for pre-classified colors and opacities, increasing memory usage by a factor of 4 (RGB + Alpha) compared to storing only scalar values [S2][S3, unofficial].
+*   **Performance:** Generally slower than post-classification in terms of memory bandwidth due to the larger data size, but can be faster if the transfer function evaluation is expensive, as it is done once per voxel rather than per sample [S2][S3, unofficial].
+*   **Strengths:** Prevents color bleeding; avoids aliasing artifacts associated with post-classification; suitable for pre-processing tasks like segmentation [S1, unofficial][S2].
+*   **Limitations:** Produces blurry images; loses high-frequency details; higher memory consumption [S2].
+*   **When to use:** When visual smoothness is preferred over sharp edges; when color bleeding is a concern; when the transfer function evaluation is computationally expensive.
+*   **When not to use:** When sharp edges and high-frequency details are critical; when memory is constrained.
+
+## Background
+Pre-classification and post-classification were introduced as fundamental approaches to volume rendering classification [S2]. The distinction lies in the order of applying the transfer function and sampling interpolation [S2][S3, unofficial]. Pre-classification was one of the earliest methods, often used in early ray casting implementations [S1, unofficial]. It is contrasted with post-classification, which interpolates raw data values first and then applies the transfer function [S3, unofficial]. Pre-integrated classification, proposed by Röttger et al. and Engel et al., was developed to address the under-sampling problem and improve quality in pre-classification by simulating infinitely many interpolated samples between grid points [S2].
+
+## Sources
+[S1] Volume Ray Casting Techniques, https://www.scribd.com/document/102700078/03-raycasting, fetched 2026-10-25 (unofficial)
+[S2] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
+[S3] PDF Direct Volume Rendering - KTH, https://www.kth.se/social/files/565e35dff27654457fb84363/08_VolumeRendering.pdf, fetched 2026-10-27 (unofficial)

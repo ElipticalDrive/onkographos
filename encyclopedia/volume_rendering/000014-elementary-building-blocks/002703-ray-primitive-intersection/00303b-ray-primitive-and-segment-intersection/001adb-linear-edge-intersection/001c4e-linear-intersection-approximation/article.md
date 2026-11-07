@@ -1,13 +1,13 @@
 # Linear Intersection Approximation
 
-Also called: Midpoint Intersection
+Also called: Midpoint Intersection [S1, unofficial]
 
 ## Overview
-Linear Intersection Approximation (also known as Midpoint Intersection) estimates the intersection point of an isosurface with a grid edge by calculating the geometric midpoint of the edge, rather than performing linear interpolation based on scalar values [S1, unofficial]. It differs from its parent, [Linear Edge Intersection](868-linear-edge-intersection.md), by ignoring endpoint scalar values entirely, and from its sibling, [Iterative Bisection Intersection Refinement](880-iterative-bisection-intersection-refinement.md), by using a single fixed geometric step instead of recursive refinement.
+Linear Intersection Approximation (also known as Midpoint Intersection) estimates the intersection point of an isosurface with a grid edge by calculating the geometric midpoint of the edge, rather than performing linear interpolation based on scalar values [S1, unofficial]. It differs from its parent, [Linear Edge Intersection](868-linear-edge-intersection.md), by ignoring endpoint scalar values entirely, and from its sibling, [Iterative Bisection Intersection Refinement](880-iterative-bisection-intersection-refinement.md), by using a single fixed geometric step instead of recursive refinement [G].
 
 ## How it works
-**Inputs:** Voxel corner coordinates $(x, y, z)$ and an integer edge index identifying the specific edge of the unit cube.
-**Outputs:** Intersection point $P_{mid} = (x_{mid}, y_{mid}, z_{mid})$.
+**Inputs:** Voxel corner coordinates $(x, y, z)$ and an integer edge index identifying the specific edge of the unit cube [S1, unofficial].
+**Outputs:** Intersection point $P_{mid} = (x_{mid}, y_{mid}, z_{mid})$ [S1, unofficial].
 **Data Structures:** Coordinates are stored as floating-point values [G]. Edge indices are integers mapping to cube edges [G].
 **Steps:**
 1. Initialize edge endpoints $(x_1, y_1, z_1)$ and $(x_2, y_2, z_2)$ to the voxel corner $(x, y, z)$ [S1, unofficial].
@@ -21,16 +21,33 @@ $$x_{mid} = \frac{x_1 + x_2}{2}, \quad y_{mid} = \frac{y_1 + y_2}{2}, \quad z_{m
 ```python
 def linear_intersection_approximation(voxel_origin, edge_index):
     x, y, z = voxel_origin
-    x1, y1, z1 = x, y, z
-    x2, y2, z2 = x, y, z
-    # Adjust endpoints based on edge number to define the specific edge of the cube
-    # (Full 12-edge mapping not given in the sources [S1, unofficial])
+    x1, y1, z1 = float(x), float(y), float(z)
+    x2, y2, z2 = float(x), float(y), float(z)
+    # Adjust endpoints based on edge number (standard Marching Cubes edge enumeration [G])
     if edge_index == 0:
-        y2 += 1
+        y2 += 1.0
     elif edge_index == 1:
-        y1 += 1
-        x2 += 1
-        y2 += 1
+        y1 += 1.0; x2 += 1.0; y2 += 1.0
+    elif edge_index == 2:
+        x1 += 1.0; x2 += 1.0
+    elif edge_index == 3:
+        x1 += 1.0
+    elif edge_index == 4:
+        y2 += 1.0; z2 += 1.0
+    elif edge_index == 5:
+        y1 += 1.0; x2 += 1.0; y2 += 1.0; z2 += 1.0
+    elif edge_index == 6:
+        x1 += 1.0; x2 += 1.0; z2 += 1.0
+    elif edge_index == 7:
+        x1 += 1.0; z2 += 1.0
+    elif edge_index == 8:
+        z2 += 1.0
+    elif edge_index == 9:
+        x1 += 1.0; x2 += 1.0; z2 += 1.0
+    elif edge_index == 10:
+        x1 += 1.0; x2 += 1.0; y1 += 1.0; y2 += 1.0; z2 += 1.0
+    elif edge_index == 11:
+        y1 += 1.0; y2 += 1.0; z2 += 1.0
     # Calculate midpoint
     x_mid = (x1 + x2) / 2.0
     y_mid = (y1 + y2) / 2.0
@@ -48,14 +65,14 @@ Recursive Bisection Interpolation refines edge intersection points by recursivel
 ## Operating characteristics
 - **Time Complexity:** $O(1)$ per edge, involving only basic arithmetic operations [G].
 - **Memory Complexity:** $O(1)$, requiring no additional data structures [G].
-- **Measured Performance:** Not given in the sources.
+- **Measured Performance:** Not given in the sources [S1, unofficial].
 - **Strengths:** Simplicity and speed [G].
 - **Limitations:** Low accuracy compared to linear interpolation, as it ignores scalar field values [G].
 - **When to use:** When performance is critical and accuracy is secondary, or when scalar field data is unavailable [G].
 - **When not to use:** When high-fidelity isosurfaces are required [G].
 
 ## Background
-The method is described in the context of marching cubes implementations, specifically in the `ilastik/marching_cubes` repository [S1, unofficial]. It is presented as a simple alternative to linear interpolation for edge intersections. The term "Midpoint Intersection" is used interchangeably [S1, unofficial]. The method is part of a broader set of techniques for isosurface extraction, where accurate edge intersection is crucial for generating correct triangle meshes [G].
+The method is described in the context of marching cubes implementations, specifically in the `ilastik/marching_cubes` repository [S1, unofficial]. It is presented as a simple alternative to linear interpolation for edge intersections [S1, unofficial]. The term "Midpoint Intersection" is used interchangeably [S1, unofficial]. The method is part of a broader set of techniques for isosurface extraction, where accurate edge intersection is crucial for generating correct triangle meshes [G].
 
 ## Sources
 [S1] ilastik/marching_cubes, https://github.com/ilastik/marching_cubes, fetched 2026-10-26 (unofficial)

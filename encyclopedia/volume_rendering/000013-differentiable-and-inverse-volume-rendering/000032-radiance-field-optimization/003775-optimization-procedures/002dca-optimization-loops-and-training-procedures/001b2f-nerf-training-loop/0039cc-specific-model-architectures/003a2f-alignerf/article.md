@@ -1,148 +1,140 @@
 # AligNeRF
 
-Also called: Alignment-Aware Neural Radiance Fields
+Also called: AligNeRF: High-Fidelity Neural Radiance Fields via Alignment-Aware Training
 
 ## Overview
-AligNeRF is a training strategy and architectural modification for Neural Radiance Fields (NeRF) designed to improve high-frequency detail recovery and robustness to misalignment caused by moving objects or camera calibration errors in high-resolution settings [S1]. It distinguishes itself from standard NeRF variants by combining a convolution-augmented architecture with a staged, alignment-aware fine-tuning procedure that utilizes patch-based sampling and optical flow estimation, rather than relying solely on random ray sampling [S1, S2].
+AligNeRF is an alignment-aware training strategy for Neural Radiance Fields (NeRF) that addresses rendering artifacts caused by misalignment from moving objects or camera calibration errors, while improving high-frequency detail recovery in high-resolution settings [S1, S2]. It distinguishes itself from standard NeRF variants by combining a convolution-augmented architecture with a staged training procedure that switches from random ray sampling to patch-based sampling, explicitly optimizing for spatial alignment between rendered and ground truth patches [S1].
 
 ## How it works
-AligNeRF builds on [Specific Model Architectures](8585-specific-model-architectures.md) by modifying the baseline (specifically mip-NeRF 360) to support local neighborhood information and alignment correction.
+AligNeRF builds on the mip-NeRF 360 baseline [S1]. The method modifies the standard NeRF pipeline through architectural changes (convolutional post-processing) and a two-stage training loop (pre-training followed by alignment-aware fine-tuning) [S1].
 
 ### Inputs and Outputs
-*   **Inputs:** 3D spatial coordinates $\mathbf{x}$, viewing directions $\mathbf{d}$, and estimated optical flow fields between source images [S1].
-*   **Outputs:** Rendered color $\mathbf{c}$ and volume density $\sigma$ for each pixel, derived from patch-based rendering [S1].
+*   **Inputs:** Camera poses, intrinsics, and a set of input images.
+*   **Outputs:** Rendered images for novel viewpoints.
 
 ### Data Structures
-The method modifies the standard NeRF output layer and introduces a post-processing convolutional network.
-1.  **Feature Space Output:** The final MLP layer outputs $N$ channels (feature space) instead of 3 (RGB) [S1].
-2.  **Convolutional Network:** A 3-layer CNN with ReLU activations and $3 \times 3$ kernels processes the rendered feature maps [S1].
-3.  **Padding:** "Reflectance" padding is used for CNN inputs to prevent checkerboard artifacts; padding values are removed from outputs [S1].
+*   **MLP Network ($F_\Theta$):** Maps 3D position $\mathbf{x}$ and viewing direction $\mathbf{d}$ to a feature vector $\mathbf{f} \in \mathbb{R}^N$ and volume density $\sigma$. The final layer output channels are changed from 3 (RGB) to $N$ [S1].
+*   **Convolutional Network ($C$):** A 3-layer CNN with ReLU activations and $3 \times 3$ kernels [S1].
+*   **Perceptron Layer ($P$):** A feed-forward layer mapping the CNN output from feature space to RGB space [S1].
+*   **Patches:**
+    *   Rendered patch $R$: Size $32 \times 32$ pixels [S1].
+    *   Ground truth patch $G$: Size $48 \times 48$ pixels [S1].
+    *   Subpatches $G_i$: $32 \times 32$ sub-regions extracted from $G$ [S1].
 
-### Steps
-1.  **Staged Training:**
-    *   **Stage 1 (Pre-training):** Train the model using standard random ray sampling and RGB-space numerical integration [S1].
-    *   **Stage 2 (Fine-tuning):** Switch to the alignment-aware strategy [S1].
+### Numbered Steps
 
-2.  **Patch-Based Sampling:**
-    *   Instead of random rays, sample a batch of rays corresponding to a local image region (patch) [S1].
-    *   Standard patch size is $32 \times 32$ pixels [S1].
-    *   During fine-tuning, sample a larger ground truth patch $G$ (e.g., $48 \times 48$ pixels) [S1].
+1.  **Pre-training Stage:** Train the standard NeRF model (using mip-NeRF 360 as baseline) using random ray sampling and standard RGB rendering loss [S1].
+2.  **Architecture Modification:**
+    a. Switch from random ray sampling to **patch-based sampling**. Gather a $32 \times 32$ local image region during each iteration [S1].
+    b. Modify the MLP output head to output $N$ channels (feature space) instead of 3 (RGB) [S1].
+    c. Perform numerical integration along the ray in the feature space to produce a feature map, rather than in RGB space [S1].
+    d. Apply the 3-layer CNN to the rendered feature map. Use "reflectance" padding for CNN inputs and remove padding values in outputs to prevent checkerboard artifacts [S1].
+    e. Apply the perceptron layer to convert the CNN output to RGB [S1].
+3.  **Alignment-Aware Fine-tuning Stage:**
+    a. During each iteration, sample a larger ground truth patch $G$ of size $48 \times 48$ [S1].
+    b. Render a patch $R$ of size $32 \times 32$ [S1].
+    c. Search over all possible $32 \times 32$ subpatches $G_i$ within $G$ to find the best match with $R$ [S1].
+    d. Compute the loss using the alignment-aware metric (see Formulas) [S1].
 
-3.  **Feature-Space Rendering:**
-    *   Compute the volumetric rendering integral in the $N$-dimensional feature space rather than RGB space [S1].
-    *   This yields a rendered feature patch $R$ [S1].
+### Formulas
+The standard volume rendering equation is applied in feature space:
+$$ \mathbf{f} = \sum_{i=1}^{N} T_i \alpha_i \mathbf{f}_i, \quad T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right), \quad \alpha_i = 1 - \exp(-\sigma_i \delta_i) $$
+where $\mathbf{f}_i$ is the feature vector at sample $i$ [S1].
 
-4.  **Convolutional Refinement:**
-    *   Apply the 3-layer CNN to the rendered feature patch $R$ to incorporate neighborhood information [S1].
-    *   Use a feed-forward perceptron layer to map the CNN output back to RGB space [S1].
+The alignment-aware loss function $L_{PM}$ is defined as:
+$$ L_{PM}(G, R) = \min_{i=1,...,N} \left( D(G_i, R) + \lambda \cdot D_{coord}(G_i, R) \right) $$
+where:
+*   $D(G_i, R) = \| G_i - R \|_2$ is the Euclidean distance between the subpatch $G_i$ and rendered patch $R$ [S1].
+*   $D_{coord}(G_i, R) = \sqrt{\Delta x^2 + \Delta y^2}$ is the coordinate distance, where $\Delta x$ and $\Delta y$ are the horizontal and vertical offsets between $G_i$ and $R$ [S1].
+*   $\lambda$ is a regularization parameter, empirically set to $0.01$ [S1].
 
-5.  **Alignment-Aware Loss Calculation:**
-    *   Estimate optical flow to handle moving objects [S1].
-    *   Search for the best-matching subpatch $G_i$ within the larger ground truth patch $G$ that aligns with the rendered patch $R$ [S1].
-    *   Compute the loss using a combination of pixel distance and coordinate regularization [S1]:
-        $$ L_{PM}(G, R) = \min_{i=1,...,N} \left( D(G_i, R) + \lambda \cdot D_{coord}(G_i, R) \right) $$
-        where:
-        *   $D(G_i, R) = \|G_i - R\|_2$ is the Euclidean distance between the subpatch and rendered patch.
-        *   $D_{coord}(G_i, R) = \sqrt{\Delta x^2 + \Delta y^2}$ is the coordinate offset penalty, where $\Delta x$ and $\Delta y$ are the horizontal and vertical offsets between $G_i$ and $R$.
-        *   $\lambda$ is a regularization weight, empirically set to $0.01$ [S1].
+### Parameters
+*   **Patch Size (Rendered):** $32 \times 32$ pixels [S1].
+*   **Patch Size (Ground Truth):** $48 \times 48$ pixels [S1].
+*   **CNN Kernel Size:** $3 \times 3$ [S1].
+*   **Regularization Weight ($\lambda$):** $0.01$ [S1].
 
 ### Pseudocode
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def alignerf_training(model, images, optical_flows, config):
-    """
-    Staged training for AligNeRF.
-    config.patch_size: int, default 32
-    config.gt_patch_size: int, default 48
-    config.lambda_reg: float, default 0.01
-    config.feature_channels: int, N
-    """
-    
-    # Stage 1: Normal Pre-training
-    for epoch in range(pretrain_epochs):
-        rays = sample_random_rays(images)
-        # Standard NeRF rendering in RGB space
-        colors, densities = model(rays)
-        loss = mse_loss(colors, rays.gt_colors)
-        optimize(loss)
+def alignerf_training(input_images, camera_poses, num_iterations):
+    # Stage 1: Pre-training
+    model = init_mlp_mipnerf360()
+    for iteration in range(pre_train_iterations):
+        rays = sample_random_rays(camera_poses)
+        color_rgb, sigma = model.forward(rays)
+        loss = mse_loss(color_rgb, ground_truth_rgb)
+        model.update(loss)
 
     # Stage 2: Alignment-Aware Fine-tuning
-    for epoch in range(finetune_epochs):
-        # 1. Patch-based sampling
-        # Sample a batch of rays forming a 32x32 patch
-        patch_rays = sample_patch_rays(images, size=config.patch_size)
+    # Modify model output to N channels
+    model.output_channels = N
+    cnn = init_conv_network(layers=3, kernel_size=3)
+    perceptron = init_perceptron()
+    
+    for iteration in range(fine_tune_iterations):
+        # Patch-based sampling
+        patch_coords = sample_patch_centers(camera_poses, patch_size=32)
         
-        # 2. Feature-space rendering
-        # MLP outputs N-channel features
-        feature_features, densities = model(patch_rays)
+        # Render feature map
+        rays = rays_from_patch(patch_coords)
+        feature_map, sigma = model.forward(rays)
         
-        # Numerical integration in feature space
-        rendered_features = volumetric_render_integral(feature_features, densities)
+        # Convolutional post-processing
+        # Reflectance padding applied internally or explicitly
+        conv_output = cnn.forward(feature_map, padding='reflect')
+        # Remove padding values
+        conv_output = remove_padding(conv_output)
         
-        # 3. Convolutional refinement
-        # Apply 3-layer CNN with reflectance padding
-        refined_features = conv_network(rendered_features)
+        # Convert to RGB
+        rendered_patch_R = perceptron.forward(conv_output)
         
-        # Perceptron to RGB
-        rendered_patch = perceptron_layer(refined_features)
+        # Ground truth patch G (48x48)
+        ground_truth_patch_G = extract_patch(input_images, patch_coords, size=48)
         
-        # 4. Alignment-aware loss
-        # Sample larger GT patch (48x48)
-        gt_patch = extract_gt_patch(images, size=config.gt_patch_size)
-        
-        # Estimate optical flow to warp GT or align coordinates
-        # Note: Exact warping logic depends on optical flow implementation [S1]
-        # Here we assume optical flow provides alignment offsets
-        
+        # Alignment-aware loss
         best_loss = infinity
         best_offset = (0, 0)
         
-        # Search over all possible subpatches Gi in G
-        for i in range(gt_patch.width - config.patch_size + 1):
-            for j in range(gt_patch.height - config.patch_size + 1):
-                subpatch = gt_patch[i:i+config.patch_size, j:j+config.patch_size]
-                
-                # Pixel distance
-                d_pixel = l2_norm(subpatch - rendered_patch)
-                
-                # Coordinate regularization
-                # Delta x/y are offsets of this subpatch relative to rendered patch center/origin
-                delta_x = i - center_x
-                delta_y = j - center_y
-                d_coord = sqrt(delta_x**2 + delta_y**2)
-                
-                total_loss = d_pixel + config.lambda_reg * d_coord
-                
-                if total_loss < best_loss:
-                    best_loss = total_loss
-                    best_offset = (i, j)
+        # Search over all 32x32 subpatches in 48x48 G
+        # Number of subpatches = (48-32+1)^2 = 256
+        for i in range(256):
+            subpatch_Gi = extract_subpatch(ground_truth_patch_G, index=i, size=32)
+            
+            # Euclidean distance
+            dist_color = l2_norm(subpatch_Gi - rendered_patch_R)
+            
+            # Coordinate distance (offset between subpatch center and R center)
+            offset_x, offset_y = get_offset(i, patch_size=32, full_size=48)
+            dist_coord = sqrt(offset_x**2 + offset_y**2)
+            
+            # Combined loss
+            current_loss = dist_color + 0.01 * dist_coord
+            
+            if current_loss < best_loss:
+                best_loss = current_loss
+                best_offset = (offset_x, offset_y)
         
-        optimize(best_loss)
+        model.update(best_loss)
+        cnn.update(best_loss)
+        perceptron.update(best_loss)
 ```
 
-### Parameters
-*   **Patch Size:** $32 \times 32$ pixels [S1].
-*   **Ground Truth Patch Size:** $48 \times 48$ pixels (during fine-tuning) [S1].
-*   **Regularization Weight ($\lambda$):** $0.01$ [S1].
-*   **CNN Kernels:** $3 \times 3$ [S1].
-*   **Feature Channels ($N$):** Larger than 3 (exact value not specified in sources, but implied to be a hyperparameter) [S1].
-
 ### Edge Cases and Pitfalls
-*   **Checkerboard Artifacts:** Mitigated by using "reflectance" padding in the CNN and removing padding values from outputs [S1].
-*   **Multiview Inconsistency:** The shallow CNN does not perform upsampling, which helps avoid multiview inconsistencies [S1].
-*   **Blurry Renderings:** If the rendered patch $R$ is too blurry, it may match multiple subpatches $G_i$ equally well. The coordinate regularization term $D_{coord}$ penalizes large offsets to resolve this ambiguity [S1].
+*   **Checkerboard Artifacts:** Standard padding in CNNs can cause checkerboard artifacts. AligNeRF uses "reflectance" padding and explicitly removes padding values from the output to prevent this [S1].
+*   **Blurry Renderings:** If the NeRF renders a very blurry patch $R$, it may match multiple subpatches $G_i$ equally well. The coordinate distance term $D_{coord}$ acts as a regularization penalty to resolve this ambiguity [S1].
+*   **Multiview Inconsistency:** Because the CNN is shallow and performs no upsampling, multiview inconsistency is not observed [S1].
 
 ## Operating characteristics
-*   **Performance:** On outdoor datasets, AligNeRF achieves a PSNR more than 3 points higher than standard NeRF and better than the best mip-NeRF results [S2].
-*   **Efficiency:** The method does not significantly increase training time despite the additional convolutional and alignment steps [S2].
-*   **Scalability:** The approach is designed to be plug-and-play for both point-sampling and frustum-based NeRF variants [S1].
-*   **Strengths:** Improves high-frequency detail recovery and handles misalignment from moving objects [S1, S2].
-*   **Limitations:** Relies on accurate optical flow estimation for moving objects [S1].
+*   **Performance:** On outdoor datasets, AligNeRF achieves a PSNR more than 3 points higher than standard NeRF and better than the best mip-NeRF result [S2].
+*   **Training Time:** The method does not significantly increase training time compared to the baseline [S2].
+*   **Complexity:** The addition of a shallow 3-layer CNN and the search over subpatches adds computational overhead per iteration, but the shallow nature of the CNN keeps it manageable [S1].
+*   **Strengths:** Improves high-frequency detail recovery; handles misalignment from moving objects; easy to plug into existing NeRF-like models (point-sampling or frustum-based) [S1, S2].
+*   **Limitations:** Requires patch-based sampling instead of random ray sampling; relies on the assumption that local neighborhood information is beneficial [S1].
 
 ## Background
-AligNeRF was introduced by Yifan Jiang, Peter Hedman, Ben Mildenhall, Dejia Xu, Jonathan T. Barron, Zhangyang Wang, and Tianfan Xue from the University of Texas at Austin, Google Research, and The Chinese University of Hong Kong [S1]. It was presented at CVPR 2023, addressing limitations of NeRF in high-resolution settings and scenes with moving objects [S1].
+AligNeRF was introduced by Yifan Jiang, Peter Hedman, Ben Mildenhall, Dejia Xu, Jonathan T. Barron, Zhangyang Wang, and Tianfan Xue from the University of Texas at Austin, Google Research, and The Chinese University of Hong Kong [S1]. It was published in CVPR 2023 (arXiv:2211.09682v1, Nov 2022) [S1]. The method addresses limitations of training NeRF on high-resolution images and misalignment issues [S2].
 
 ## Sources
 [S1] AligNeRF: High-Fidelity Neural Radiance Fields via Alignment-Aware Training, https://doi.org/10.1109/cvpr52729.2023.00013, fetched 2026-10-26

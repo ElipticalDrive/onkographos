@@ -1,0 +1,42 @@
+# Hybrid and Parallel Rendering
+
+Also called: Hybrid Volume Rendering, Parallel Splatting, Axis-Aligned Splatting Framework
+
+## Overview
+Hybrid and Parallel Rendering encompasses techniques that combine the precomputation efficiency of splatting with the accumulation logic of ray casting, or leverage parallel processing and hardware acceleration to render volumetric data efficiently [S1, unofficial][S2]. It solves the problem of inefficient and inaccurate perspective projection in traditional voxel-driven splatting, where mapping 3D footprints to the 2D image plane is complex and slow, by using ray-driven intersection or parallel slice-based processing [S2]. Unlike pure splatting methods that rely solely on rasterization pipelines, this family includes ray-driven approaches that use spatial acceleration structures and early ray termination, as well as parallel frameworks that process voxels in slices perpendicular to the viewing direction to optimize memory bandwidth and traversal order [S2].
+
+## Shared principles
+The Hybrid and Parallel Rendering family shares the fundamental mechanism of decoupling the geometric projection of volumetric primitives from the final pixel accumulation, often utilizing parallel execution or ray-based intersection logic to handle perspective and occlusion more robustly than immediate-mode splatting [S1, unofficial][S2].
+
+1.  **Hybrid Accumulation Logic:** Methods in this family combine the object-order projection of splats with the ray-order accumulation of ray casting. Instead of rasterizing splats directly to the screen, the system may spawn rays to intersect splat footprints suspended in object space, allowing for the use of ray-tracing optimizations such as early ray termination and spatial acceleration structures [S2].
+2.  **Parallel Slice Processing:** For hardware-accelerated frameworks, the volume is processed in slices perpendicular to the major axis that is most parallel to the viewing direction [S2]. This axis-aligned traversal order minimizes memory access conflicts and optimizes cache usage on GPU architectures [S2].
+3.  **Proxy Geometry:** Voxels are represented by proxy geometry, typically textured quads, which are attached to each voxel [S2]. These proxies are transformed and rasterized, but the accumulation may occur in intermediate buffers (slice-by-slice) or directly in an accumulation buffer (splat-every-sample) [S2].
+4.  **Parallel Execution:** The projection and bounding box computation for splats are performed in parallel, often using thread pools or GPU compute shaders, to distribute the computational load of transforming and filtering primitives [S1, unofficial].
+
+## Subtopics
+
+### [Ray-Driven Splatting](1156-ray-driven-splatting.md)
+Ray-driven splatting is a hybrid technique that combines the precomputation of splatting with the accumulation logic of ray casting. It solves the problem of inefficient and inaccurate perspective projection in traditional voxel-driven splatting, where mapping 3D footprints to the 2D image plane becomes complex and slow. Unlike traditional splatting, which is sensitive to perspective transforms, this method spawns rays to intersect splats suspended in object space, enabling the use of ray-tracing optimizations like early ray termination and spatial acceleration structures. See [Ray-Driven Splatting](1156-ray-driven-splatting.md).
+
+### [Splat/Mesh Blending with Transition Smoothing](2145-splat-mesh-blending-with-transition-smoothing.md)
+This method solves the visual discontinuities that appear when rendering a surface using both polygonal meshes and point-based splats simultaneously. It achieves smooth transitions by reusing the natural weight falloff of the splat representation to linearly blend between the polygonal and splat rendering results. Unlike alternatives that rasterize additional geometry at the transition boundary, this approach integrates blending into the standard multi-pass splatting pipeline, avoiding increased rendering cost and complexity. See [Splat/Mesh Blending with Transition Smoothing](2145-splat-mesh-blending-with-transition-smoothing.md).
+
+### [Splatting and Point-based Rendering](4975-splatting-and-point-based-rendering.md)
+Splatting and Point-based Rendering is an object-order volume rendering method where 3D data volumes are projected onto a 2D plane and blended to form the final image. It solves the problem of efficiently rendering volumetric data by avoiding the per-ray traversal of image-order methods, instead leveraging specialized texture hardware to perform fast compositing. It sets itself apart from its siblings, such as [Ray-Driven Splatting](1156-ray-driven-splatting.md) which computes visibility via ray casting, and [Splat/Mesh Blending with Transition Smoothing](2145-splat-mesh-blending-with-transition-smoothing.md) which focuses on geometric transitions, by explicitly converting the volume into 2D texture maps to exploit hardware blending capabilities. See [Splatting and Point-based Rendering](4975-splatting-and-point-based-rendering.md).
+
+### Parallel Splatting
+Parallel splatting refers to the implementation of splatting algorithms using parallel computing frameworks to accelerate the projection and filtering steps [S1, unofficial].
+- **Step:** Iterate splats in parallel using `rayon::par_iter().filter_map()`. For each splat, run projection and bounding box computation. Return `Some(Projected)` if valid, `None` otherwise [S1, unofficial]. If a `rayon::ThreadPool` is provided, install the projection closure into the pool. Otherwise, run sequentially [S1, unofficial].
+
+### Hardware-Accelerated Axis-Aligned Splatting Framework
+A rendering framework for regular or rectilinear volumes using axis-aligned splatting with three traversal orders, processing voxels in slices perpendicular to the axis most parallel to the viewing direction [S2].
+- **Definition:** The framework applies an adaptive EWA volume splatting approach in a hardware-accelerated pipeline [S2].
+- **Step:** Process voxels in slices perpendicular to the major axis that is most parallel to the viewing direction [S2]. Attach a textured quad (proxy geometry) representing a splat at each voxel [S2]. Process splats in two stages: First, add contributions from splats in one slice to an intermediate buffer. Second, perform back-to-front or front-to-back composition of each slice in an accumulation buffer to yield final results (slice-by-slice composition) [S2].
+- **Comparison:** Slice-by-slice composition uses an intermediate buffer and accumulation buffer. Splat-every-sample composition is an alternative that does not use an intermediate buffer [S2].
+
+## Background
+The concept of hybrid rendering, specifically ray-driven splatting, was introduced by Muller and Yagel, who proposed spawning rays to intersect splats suspended in object space to handle perspective projection more accurately than traditional voxel-driven methods [S2]. The hardware-accelerated axis-aligned splatting framework was developed by Chen et al. to address memory bandwidth bottlenecks and improve rendering performance for regular volume datasets by utilizing retained-mode schemes and proxy geometry compression [S2]. Parallel splatting implementations, such as those using Rust's `rayon` crate, have emerged more recently to leverage multi-core CPU architectures for real-time Gaussian splatting [S1, unofficial].
+
+## Sources
+[S1] Tsplat – Run Gaussian splatting in your terminal, https://github.com/darshanmakwana412/tsplat, fetched 2026-10-26 (unofficial)
+[S2] Hardware-Accelerated Adaptive EWA Volume Splatting, https://publications.ri.cmu.edu/storage/publications/pub_files/pub4/chen_wei_2004_1/chen_wei_2004_1.pdf, fetched 2026-10-27

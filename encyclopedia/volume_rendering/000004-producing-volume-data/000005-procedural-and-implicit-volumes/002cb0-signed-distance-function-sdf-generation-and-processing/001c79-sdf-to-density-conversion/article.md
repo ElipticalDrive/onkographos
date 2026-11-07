@@ -20,8 +20,8 @@ SDF to Density Conversion maps a Signed Distance Function (SDF) value into a vol
 **Steps:**
 1.  **Compute Signed Distance:** Evaluate the SDF at the sample point to get $d$. Define $s = -d$ [S4, unofficial].
 2.  **Compute Intermediate Density ($\psi$ and $\rho$):** Apply a piecewise exponential function to $s$, then scale by $\alpha$ [S3, unofficial][S4, unofficial].
-    *   If $s \le 0$ (inside surface): $\psi = 0.5 \cdot \exp(s / \beta)$
-    *   If $s > 0$ (outside surface): $\psi = 1 - 0.5 \cdot \exp(-s / \beta)$
+    *   If $s \le 0$ (inside surface): $\psi = 0.5 \cdot \exp(s / \beta)$ [S3, unofficial][S4, unofficial].
+    *   If $s > 0$ (outside surface): $\psi = 1 - 0.5 \cdot \exp(-s / \beta)$ [S3, unofficial][S4, unofficial].
     *   Scale by $\alpha$: $\rho = \alpha \cdot \psi$ [S3, unofficial][S4, unofficial].
 3.  **Compute Final Density ($\sigma$):** Normalize by the ray segment length $\Delta t$ to ensure density is independent of sampling resolution [S3, unofficial][S4, unofficial].
     *   $\sigma = -\ln(1 - \rho) / \Delta t$ [S3, unofficial][S4, unofficial].
@@ -61,7 +61,7 @@ def sdf_to_density_pipeline(signed_distance: torch.Tensor, delta_t: torch.Tensor
     """Full pipeline for SDF to Density Conversion."""
     rho = sdf_to_density(signed_distance, alpha, beta)
     
-    # Guard: pad last segment delta to prevent division by zero [S3, unofficial]
+    # Pad last segment delta to prevent division by zero [S3, unofficial]
     delta_t_safe = torch.where(delta_t > 1e-10, delta_t, torch.tensor(1e10, device=delta_t.device))
     sigma = compute_final_density(rho, delta_t_safe)
     
@@ -111,7 +111,7 @@ DensityRegion extends VolumeRegion by scaling absorption, scattering, extinction
 ## Operating characteristics
 *   **Time Complexity:** Linear with respect to the number of sample points along the ray [G]. The SDF evaluation is the dominant cost if the SDF is complex (e.g., neural network) [G].
 *   **Memory Complexity:** Linear with respect to the number of sample points [G].
-*   **Measured Performance:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources. [G]
 *   **Scaling:** Scales with the number of samples per ray and the number of rays [G].
 *   **Strengths:** Differentiable, allowing gradient-based optimization of SDF parameters [S3, unofficial][S4, unofficial]. Efficiently represents thin structures and open surfaces [S1, unofficial].
 *   **Limitations:** Sensitive to sampling density. If $\Delta t$ is too large, the density approximation may be inaccurate [G]. Numerical stability requires $\rho < 1$ for the logarithmic conversion [G].
@@ -119,7 +119,7 @@ DensityRegion extends VolumeRegion by scaling absorption, scattering, extinction
 *   **When Not to Use:** When explicit meshes are available and preferred, or when real-time performance is critical and SDF evaluation is too expensive [G].
 
 ## Background
-The method originates from neural volume rendering techniques that use SDFs as implicit surface representations [S3, unofficial][S4, unofficial]. It was popularized by works such as VolSDF, which demonstrated the effectiveness of converting SDFs to density for differentiable rendering [S2]. The specific piecewise exponential function is a common choice for mapping signed distances to densities, ensuring smooth transitions and differentiability [S3, unofficial][S4, unofficial].
+The method originates from neural volume rendering techniques that use SDFs as implicit surface representations [S3, unofficial][S4, unofficial]. The specific piecewise exponential function is a common choice for mapping signed distances to densities, ensuring smooth transitions and differentiability [S3, unofficial][S4, unofficial].
 
 ## Sources
 [S1] ShengzhiWu/taichi-volume-renderer, https://github.com/ShengzhiWu/taichi-volume-renderer, fetched 2026-10-26 (unofficial)
