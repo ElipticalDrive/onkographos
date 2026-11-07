@@ -1,0 +1,278 @@
+# EWA Splatting
+
+Also called: EWA Volume Splatting, Elliptical Weighted Average (EWA) Splatting, Elliptical Weighted Average Volume Splatting, Zwicker EWA Volume Splatting, Zwicker EWA splatting
+
+## Overview
+EWA Splatting is a high-quality volume rendering technique that eliminates aliasing artifacts by replacing the standard footprint function with a band-limited resampling filter [S1, unofficial][S2][S8, S10, unofficial]. It solves the problem of incorrect visibility determination and high-frequency sampling errors inherent in basic splatting, where reconstruction kernels are assumed non-overlapping [S1, S8, unofficial]. Unlike basic splatting which uses isotropic or simple elliptical footprints, EWA Splatting combines an elliptical Gaussian reconstruction kernel with a Gaussian low-pass filter, ensuring the footprint respects the Nyquist frequency of the rasterized image [S1, unofficial][S2][S5, S8, S15, unofficial]. It builds on [Splat Kernels and Footprints](8724-splat-kernels-and-footprints.md) by introducing a rigorous derivation of the footprint via ray-space transformation and affine approximation of perspective projection [S8, S10, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Volume data represented as a set of particles (voxels), each defined by position $\mathbf{p}_k$, extinction coefficient $g_k$, emission coefficient $c_{\lambda k}$, and a 3D elliptical Gaussian reconstruction kernel with variance matrix $\mathbf{V}_k$ in object space. Camera parameters: Model-View matrix (rotational part $\mathbf{W}$) and Projection matrix.
+*   **Output:** A 2D image where each pixel color is the accumulated contribution of splats composited back-to-front.
+
+**Data Structures:**
+*   **Voxel Particle $k$:**
+    *   $\mathbf{p}_k$: 3D position in object space.
+    *   $g_k$: Extinction coefficient.
+    *   $c_{\lambda k}$: Emission coefficient (assumed constant within the kernel support).
+    *   $\mathbf{V}_k$: $3 \times 3$ symmetric positive-definite variance matrix of the reconstruction kernel in object space.
+*   **Resampling Filter $\rho_k(\mathbf{x})$:** A 2D Gaussian function defined in screen space coordinates $\mathbf{x} = (x_0, x_1)^T$.
+    *   Center: $\mathbf{x}_k$ (projected screen position).
+    *   Covariance: Derived from $\mathbf{V}_k$ via transformation.
+    *   Normalization factor: Derived from Jacobian determinants.
+
+**Numbered Steps:**
+
+1.  **Interpret Volume as Particles:** Treat volume data as a set of absorbing/emitting particles [S6, unofficial][S11][S15, unofficial].
+2.  **Transform to Camera Space:** Map voxel position $\mathbf{p}_k$ and kernel variance $\mathbf{V}_k$ from object space to camera space using the viewing transformation $\mathbf{W}$ [S8, S10, unofficial].
+    *   Camera space coordinates $\mathbf{u}_k = (u_{k_0}, u_{k_1}, u_{k_2})^T$. Origin is center of projection; image plane is $u_2 = 1$ [S6, unofficial][S11].
+    *   Transform variance: $\mathbf{V}_k^{cam} = \mathbf{W} \mathbf{V}_k \mathbf{W}^T$ [S6, unofficial][S11].
+3.  **Compute Jacobian:** Calculate the Jacobian matrix $\mathbf{J}_{\mathbf{u}_k}$ of the perspective projection at $\mathbf{u}_k$ [S6, unofficial][S11].
+    $$ \mathbf{J}_{\mathbf{u}_k} = \begin{pmatrix} \frac{1}{u_{k_2}} & 0 & -\frac{u_{k_0}}{u_{k_2}^2} \\ 0 & \frac{1}{u_{k_2}} & -\frac{u_{k_1}}{u_{k_2}^2} \\ \frac{u_{k_0}}{\|\mathbf{u}_k\|} & \frac{u_{k_1}}{\|\mathbf{u}_k\|} & \frac{u_{k_2}}{\|\mathbf{u}_k\|} \end{pmatrix} $$
+    where $\|\mathbf{u}_k\| = \sqrt{u_{k_0}^2 + u_{k_1}^2 + u_{k_2}^2}$ [S6, unofficial][S11].
+4.  **Transform to Image Space:** Compute the variance matrix in image space $\mathbf{V}_k^{img}$ by applying the Jacobian [S6, unofficial][S11]:
+    $$ \mathbf{V}_k^{img} = \mathbf{J}_{\mathbf{u}_k} \mathbf{V}_k^{cam} \mathbf{J}_{\mathbf{u}_k}^T = \mathbf{J}_{\mathbf{u}_k} \mathbf{W} \mathbf{V}_k \mathbf{W}^T \mathbf{J}_{\mathbf{u}_k}^T $$
+    [S6, unofficial][S11].
+5.  **Project to Screen Coordinates:** Perform perspective division to get 2D screen coordinates $\mathbf{x}_k$:
+    $$ \mathbf{x}_k = \left( \frac{u_{k_0}}{u_{k_2}}, \frac{u_{k_1}}{u_{k_2}} \right)^T $$
+    [S6, unofficial][S11].
+6.  **Derive 2D Resampling Filter:**
+    *   Extract the $2 \times 2$ submatrix $\hat{\mathbf{V}}_k$ from $\mathbf{V}_k^{img}$ by skipping the third row and column [S6, unofficial][S11][S15, unofficial].
+    *   Define the low-pass filter variance $\mathbf{V}_h$. Typically $\mathbf{V}_h = \mathbf{I}$ (identity matrix) [S6, unofficial][S11].
+    *   Compute the inverse covariance matrix $\mathbf{M}_k$:
+        $$ \mathbf{M}_k = (\hat{\mathbf{V}}_k + \mathbf{V}_h)^{-1} $$
+        [S6, unofficial][S11].
+    *   Compute the normalization factor $N_k$:
+        $$ N_k = \frac{1}{2\pi |\mathbf{J}_{\mathbf{u}_k}^{-1}| |\mathbf{W}^{-1}| |\hat{\mathbf{V}}_k + \mathbf{V}_h|^{\frac{1}{2}}} $$
+        Note: $|\mathbf{J}_{\mathbf{u}_k}^{-1}|$ is the determinant of the inverse Jacobian. Since $\mathbf{J}_{\mathbf{u}_k}$ maps camera to image, its inverse maps image to camera. The determinant accounts for the area scaling [S6, unofficial][S11].
+    *   The resampling filter (footprint) is:
+        $$ \rho_k(\mathbf{x}) = N_k e^{-\frac{1}{2} (\mathbf{x} - \mathbf{x}_k)^T \mathbf{M}_k (\mathbf{x} - \mathbf{x}_k)} $$
+        [S6, unofficial][S11].
+7.  **Rasterize Footprints:** Rasterize $\rho_k(\mathbf{x})$ as a 2D Gaussian splat centered at $\mathbf{x}_k$ with shape defined by $\mathbf{M}_k$ [S6, unofficial][S11]. This is typically done by evaluating the Gaussian on a grid covering the bounding box of the ellipse $(\mathbf{x} - \mathbf{x}_k)^T \mathbf{M}_k (\mathbf{x} - \mathbf{x}_k) \leq r^2$, where $r$ is a cutoff radius (typically $1 \leq r \leq 3$) [S6, unofficial][S11].
+8.  **Composite Back-to-Front:** Sort particles by view-space depth $u_{k_2}$ (front to back) [S3][S8, S15, unofficial]. Accumulate contributions to the image buffer using alpha blending. The intensity contribution of particle $k$ to pixel $\hat{\mathbf{x}}$ is modulated by the attenuation from previous particles:
+    $$ I_\lambda(\hat{\mathbf{x}}) \approx \sum_k c_{\lambda k} g_k o_k \rho_k(\hat{\mathbf{x}}) $$
+    where $o_k$ is an approximation of the attenuation factor $\prod_{j=0}^{k-1} (1 - g_j q_j(\hat{\mathbf{x}}))$, assumed constant within the footprint support [S8, S15, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def ewa_splatting(volume_particles, view_matrix, proj_matrix, image_width, image_height):
+    """
+    Renders volume particles using EWA Splatting.
+    
+    Args:
+        volume_particles: List of dicts with keys:
+            'p': (3,) object space position
+            'g': extinction coefficient
+            'c': emission color (3,)
+            'V': (3,3) object space variance matrix
+        view_matrix: (4,4) Model-View matrix
+        proj_matrix: (4,4) Projection matrix
+        image_width, image_height: int
+        
+    Returns:
+        image: (image_height, image_width, 3) float array
+    """
+    # Initialize image buffer
+    image = np.zeros((image_height, image_width, 3))
+    
+    # Extract rotational part W (3x3) from view matrix
+    W = view_matrix[:3, :3]
+    W_inv = np.linalg.inv(W)
+    
+    # Sort particles by camera space z (depth)
+    # Camera space z is view_matrix[2, :3] . p + view_matrix[2, 3]
+    # Assuming view_matrix transforms object to camera
+    for p in volume_particles:
+        p_cam = W @ p['p'] + view_matrix[:3, 3] # Simplified: assuming translation handled separately or p is already relative
+        # Actually, standard MVP: u = V * p. 
+        # Let's assume p['p'] is in object space.
+        # Camera coordinates u = (u0, u1, u2)
+        # u = R * p + t
+        u = W @ p['p'] + view_matrix[:3, 3]
+        p['u'] = u
+        p['depth'] = u[2]
+    
+    volume_particles.sort(key=lambda x: x['depth'], reverse=True) # Back to front for accumulation? 
+    # Splatting usually sorts front-to-back for correct alpha blending if using standard over operator.
+    # However, EWA derivation assumes back-to-front compositing in the integral, 
+    # but rasterization accumulates. Standard alpha blending requires front-to-back.
+    # S8 says "Composite the splat contributions back to front". 
+    # S6 says "Compositing: Contributions are accumulated... back-to-front".
+    # Let's stick to the source: Back-to-Front.
+    # Note: If using standard OpenGL blending (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA), 
+    # order matters. EWA assumes the attenuation factor is pre-computed or approximated.
+    
+    for k in volume_particles:
+        u_k = k['u']
+        u2 = u_k[2]
+        
+        # Avoid division by zero
+        if abs(u2) < 1e-6:
+            continue
+            
+        # 1. Compute Jacobian J_u_k
+        norm_u = np.linalg.norm(u_k)
+        J = np.array([
+            [1/u2, 0, -u_k[0]/(u2**2)],
+            [0, 1/u2, -u_k[1]/(u2**2)],
+            [u_k[0]/norm_u, u_k[1]/norm_u, u_k[2]/norm_u]
+        ])
+        
+        # 2. Transform Variance to Image Space
+        # V_cam = W * V_obj * W^T
+        V_cam = W @ k['V'] @ W.T
+        # V_img = J * V_cam * J^T
+        V_img = J @ V_cam @ J.T
+        
+        # 3. Project to Screen
+        x_k = np.array([u_k[0]/u2, u_k[1]/u2])
+        
+        # 4. Extract 2x2 submatrix V_hat_k
+        V_hat_k = V_img[:2, :2]
+        
+        # 5. Low-pass filter variance (Identity)
+        V_h = np.eye(2)
+        
+        # 6. Compute M_k
+        M_k = np.linalg.inv(V_hat_k + V_h)
+        
+        # 7. Compute Normalization
+        # Det(J^-1) = 1 / Det(J)
+        det_J = np.linalg.det(J)
+        det_W_inv = np.linalg.det(W_inv)
+        det_V_sum = np.linalg.det(V_hat_k + V_h)
+        
+        # Handle negative determinants if any (should be positive for valid transforms)
+        if det_J == 0 or det_W_inv == 0 or det_V_sum <= 0:
+            continue
+            
+        N_k = 1.0 / (2 * np.pi * abs(det_J) * abs(det_W_inv) * np.sqrt(det_V_sum))
+        
+        # 8. Rasterize
+        # Determine bounding box of the ellipse
+        # (x - x_k)^T M_k (x - x_k) <= r^2
+        # Use cutoff radius r=3
+        r = 3.0
+        # Eigenvalues of M_k to determine extent
+        eigvals = np.linalg.eigvalsh(M_k)
+        # Max extent in x and y
+        max_extent_x = r / np.sqrt(max(eigvals[0], 1e-9))
+        max_extent_y = r / np.sqrt(max(eigvals[1], 1e-9))
+        
+        x_min = int(max(0, x_k[0] - max_extent_x))
+        x_max = int(min(image_width, x_k[0] + max_extent_x))
+        y_min = int(max(0, x_k[1] - max_extent_y))
+        y_max = int(min(image_height, x_k[1] + max_extent_y))
+        
+        for y in range(y_min, y_max):
+            for x in range(x_min, x_max):
+                dx = x - x_k[0]
+                dy = y - x_k[1]
+                pos = np.array([dx, dy])
+                
+                exponent = -0.5 * pos @ M_k @ pos
+                if exponent > 0: # Outside cutoff
+                    continue
+                    
+                weight = N_k * np.exp(exponent)
+                
+                # Accumulate
+                # Simplified: just add color * weight * extinction
+                # Attenuation o_k is ignored for simplicity in this basic implementation
+                # or assumed to be 1.0 for the first few splats or pre-computed.
+                # S8: o_k is approx constant.
+                
+                color = k['c']
+                extinction = k['g']
+                
+                # Add to image
+                # Note: Standard alpha blending requires handling alpha.
+                # EWA footprint rho_k is the weight.
+                # The intensity contribution is c * g * rho.
+                # If we treat rho as alpha, we need to blend.
+                # For simplicity, assuming opaque accumulation or pre-multiplied alpha.
+                image[y, x] += color * extinction * weight
+
+    return image
+```
+
+**Parameters:**
+*   **Cutoff radius $r$:** Truncates the Gaussian kernel. Typical value $1 \leq r \leq 3$ [S6, unofficial][S11].
+*   **Low-pass filter variance $\mathbf{V}_h$:** Usually the identity matrix $\mathbf{I}$ [S6, unofficial][S11].
+*   **Reconstruction Kernel:** 3D Elliptical Gaussian [S6, S9, S15, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Singularity:** If $u_{k_2} \approx 0$ (point at center of projection), the Jacobian is undefined. Guard against division by zero [S6, unofficial][S11].
+*   **Numerical Stability:** The condition number of the inverse 2D-to-2D projective mapping increases rapidly when the projection approaches a line, causing instability in the conic representation [S12, unofficial].
+*   **Overlap Assumption:** Basic splatting assumes non-overlapping kernels, leading to aliasing. EWA handles overlap via the low-pass filter, but compositing order (back-to-front) is critical for correct attenuation approximation [S1, S8, S15, unofficial].
+*   **Non-spherical Kernels:** If kernels are not radially symmetric (e.g., irregular grids), care must be taken to ensure contributions sum correctly [S9, S15, unofficial].
+
+## Subtopics
+
+### [Deferred Surface Splatting](1072-deferred-surface-splatting.md)
+Deferred Surface Splatting is a rendering technique that converts unstructured point clouds into continuous, shaded surfaces by projecting points as splats into a deferred rendering pipeline. It solves sparse dot cloud aliasing and transparency artifacts by assigning each point sample an extent drawn as a small oriented primitive (a splat) carrying a radially decreasing reconstruction kernel. It differs from its parent [EWA Splatting](1069-ewa-splatting.md) by using screen-aligned spherical impostors with isotropic linear falloff rather than anisotropic, correctly band-limited EWA footprints, trading accurate filtering for a formulation that requires no per-point normals or radii. It differs from siblings like [Phong Splatting](2802-phong-splatting.md) by deferring the lighting calculation to a final screen-space pass, allowing multiple light sources to be applied efficiently without re-projecting geometry [G].
+
+### [Opacity-Thin-Side (OTS)](1155-opacity-thin-side-ots.md)
+Opacity-Thin-Side (OTS) is a parameterization scheme for EWA-based splatting that ensures robust gradient-descent optimization by dynamically scaling the learned weight $\theta$ such that the projected amplitude $a'$ equals $\theta$ when viewing the Gaussian along its thinnest side (shortest axis). It differs from standard EWA splatting, which preserves the integral of extinction (mass), and 3D Gaussian Splatting (3DGS), which preserves the 2D projected amplitude regardless of view, by preserving the 3D unbounded integral (view-independent mass) while ensuring the 2D projection behaves as an ordinary integral relative to the thinnest view.
+
+### [OTS (EWA-Based Splatting)](1181-ots-ewa-based-splatting.md)
+OTS (Opacity-Thin-Side) is a splatting method using unnormalized Gaussians that preserves the 2D amplitude $a'$ (called 'opacity') across projections, unlike EWA Splatting which preserves the weight $w$. It differs from standard EWA Splatting by requiring a Jacobian determinant correction to preserve the integral of the extinction coefficient under perspective projection.
+
+### [GPU-Accelerated Volume Splatting With Elliptical RBFs](1186-gpu-accelerated-volume-splatting-with-elliptical-rbfs.md)
+This method renders scattered volumetric data represented as 3D ellipsoidal Radial Basis Functions (RBFs) using a post-shaded, kernel-centric approach. It extends high-quality image-aligned sheet-buffer splatting to irregular grids by slicing kernels into parallel, image-aligned density planes, rasterizing them as 2D footprints, and compositing them. Unlike fragment-centric methods that evaluate Gaussian functions per pixel, this technique leverages hard-wired GPU polygonal rasterization, achieving two orders of magnitude higher frame rates. It differs from its parent [EWA Splatting](1069-ewa-splatting.md) by supporting general ellipsoidal kernels and using a flat spatial decomposition with active cell lists rather than screen-aligned spherical impostors.
+
+### [Ellipsoidal Kernel Splatting with Warped Slicing](1290-ellipsoidal-kernel-splatting-with-warped-slicing.md)
+Ellipsoidal Kernel Splatting with Warped Slicing is a volume rendering technique that represents point samples as 3D ellipsoids and rasterizes them by slicing the ellipsoid into 2D polygons. It solves the problem of efficiently computing the intersection of general ellipsoids with screen-aligned slicing planes on GPU hardware, where direct analytical slicing requires expensive square roots and conditional statements. The method warps the slicing planes from screen space into the coordinate system of a unit sphere, allowing the use of hard-wired GPU texture mapping and blending on radially symmetric kernel slices. It differs from its parent [EWA Splatting](1069-ewa-splatting.md) by explicitly slicing the kernel into discrete polygons for incremental rasterization rather than rasterizing the entire projected footprint, and it avoids the pre-integrated slab approach of earlier image-aligned splatting by using point-sampled slices.
+
+### [Perspective Correct Splat Rasterization with EWA Approximation](2095-perspective-correct-splat-rasterization-with-ewa-approximati.md)
+This method is an improved splat rendering pipeline that combines a perspectively correct fast splat rasterization procedure with an approximation of the Elliptical Weighted Average (EWA) filter. It solves the problem of aliasing artifacts and visual holes in point-sampled geometry rendering, particularly when the model is viewed from flat angles or shifted from the viewing axis. Unlike its siblings, it uses an affine approximation to the projective mapping to ensure perspective-correct splat shapes without requiring per-point normals or complex anisotropic footprint calculations, trading exact band-limited footprints for a formulation that avoids holes and Moiré patterns. It builds on [EWA Splatting](1069-ewa-splatting.md) by replacing the standard EWA covariance computation with a faster, perspective-correct affine approximation.
+
+### [Adaptive EWA Volume Splatting](2137-adaptive-ewa-volume-splatting.md)
+Adaptive EWA Volume Splatting is a rendering technique that simplifies the computationally expensive Elliptical Weighted Average (EWA) resampling filter by classifying volume particles into three cases based on their distance from the viewpoint. It solves the problem of high computational cost in full EWA splatting while maintaining aliasing-free quality. Unlike full EWA splatting, which always computes the combined covariance of the reconstruction and low-pass filters, this method uses only the reconstruction filter for close particles (magnification) and only the low-pass filter for far particles (minification), resorting to full EWA only in the transition zone.
+
+### [EWA Approximation with Tangent Vector Adjustment](2143-ewa-approximation-with-tangent-vector-adjustment.md)
+A high-quality filtering technique for point-based rendering that approximates the EWA resampling filter by dynamically adjusting the tangent vectors of isotropic splats during setup to prevent aliasing during minification, without requiring expensive per-fragment convolution. It sets itself apart from the original EWA framework by using projective mapping and tangent adjustment rather than affine mapping and Gaussians for both reconstruction and low-pass filters, and from Botsch et al. [BHZK05] by avoiding per-fragment filter evaluation, thus eliminating the fragment shader bottleneck.
+
+### [Phong Splatting](2802-phong-splatting.md)
+Phong Splatting is a surface splatting technique that assigns a linearly varying normal field to each elliptical splat, enabling per-pixel Phong shading without surface connectivity. It solves the piecewise constant shading artifacts of standard point-based rendering by providing smooth, Phong-like shading quality on modern GPUs. Unlike its sibling [EWA Splatting](1069-ewa-splatting.md), which uses a simplified isotropic kernel, Phong Splatting uses elliptical splats with projectively correct per-pixel parameterization, trading the simplicity of isotropic filtering for superior visual quality and exact depth values.
+
+### [EWA Splatting Renderer (Mesh-Free)](4665-ewa-splatting-renderer-mesh-free.md)
+A mesh-free rendering pipeline that projects raw point clouds directly to 2D camera views using EWA projection and Z-buffer occlusion, producing RGB images, label maps, and 2D-to-3D index maps without mesh reconstruction. It differs from its parent [EWA Splatting](1069-ewa-splatting.md) by using simplified screen-aligned spherical impostors with isotropic linear falloff, trading anisotropic, correctly band-limited footprints for a formulation that requires no per-point normals or radii.
+
+### EWA Surface Splatting
+EWA Surface Splatting is a method where EWA volume splats reduce to surface splats suitable for high-quality iso-surface rendering by flattening the 3D Gaussian kernel along the volume gradient [S9, unofficial]. For each point in object-space, quadrilaterals are deformed and texture-mapped with a Gaussian texture to result in the correct screen-space EWA splat after projection [S9, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot A)$, where $N$ is the number of particles and $A$ is the average number of pixels covered by a splat (area of the footprint). The computation of the footprint involves matrix operations per particle, which is constant time relative to image resolution but depends on the number of particles.
+*   **Memory Complexity:** $O(N)$ to store particle data and $O(W \cdot H)$ for the image buffer.
+*   **Measured Performance:** Rendering time was approximately 11 seconds per frame for the UNC CT scan, engine, and foot datasets on an 866 MHz Pentium-III processor [S1, S8, S10, unofficial]. On a GeForce FX Ultra 5900, a CT scan of a human head ($256^2 \times 225$) and an engine ($256^2 \times 110$) were rendered [S9, unofficial].
+*   **Scaling:** Performance degrades with increasing particle count and footprint size. Adaptive EWA splatting reduces cost for distant particles [S6, unofficial][S11].
+*   **Strengths:** High-quality antialiasing without excessive blurring; handles arbitrary elliptical kernels; suitable for regular, rectilinear, and irregular volume datasets; universal splat primitive for surface and volume data [S2][S7, abstract only, unofficial][S8, S15, unofficial].
+*   **Limitations:** Computationally expensive due to matrix inversions and determinant calculations; assumes self-occlusion is ignored; attenuation factor approximation can cause artifacts if not handled correctly; basic splatting methods suffer from artifacts due to incorrect visibility determination if kernels overlap significantly without proper filtering [S1, S8, S15, unofficial].
+*   **When to Use:** When high-quality, alias-free volume rendering is required, especially for non-spherical kernels or irregular grids.
+*   **When Not to Use:** When real-time performance is critical and hardware acceleration for EWA is not available, or when the volume data is sparse and simple splatting suffices.
+
+## Background
+EWA Splatting was introduced by Matthias Zwicker, Hanspeter Pfister, Jeroen van Baar, and Markus Gross in 2001 [S8, unofficial]. It is named after Heckbert's Elliptical Weighted Average (EWA) filter for texture mapping due to the similarity in derivation [S7, abstract only, unofficial][S10, unofficial]. The method addresses the limitations of Westover's original splatting framework, which did not account for sampling rate changes due to perspective projections, leading to aliasing artifacts [S8, S15, unofficial]. It was presented at IEEE Visualization in October 2001 [S8, unofficial].
+
+## Sources
+[S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)
+[S2] EWA splatting, https://doi.org/10.1109/tvcg.2002.1021576, fetched 2026-10-26
+[S3] Does 3D Gaussian Splatting Need Accurate Volumetric Rendering?, https://doi.org/10.1111/cgf.70032, fetched 2026-10-26
+[S4] Hardware Accelerated Point Rendering of Isosurfaces, http://wscg.zcu.cz/wscg2003/Papers_2003/J61.pdf, fetched 2026-10-26 (unofficial)
+[S5] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26 (unofficial)
+[S6] Hardwareaccelerated adaptive ewa volume splatting, https://core.ac.uk/works/16783031, fetched 2026-10-28 (unofficial)
+[S7] EWA Volume Splatting - ETH Z, https://cgl.ethz.ch/research/past_projects/surfels/ewavolumesplatting/index.html, fetched 2026-10-27 (abstract only, unofficial)
+[S8] EWA Volume Splatting, https://vcg.seas.harvard.edu/publications/20011001-ewa-volume-splatting/paper, fetched 2026-10-27 (unofficial)
+[S9] Hardware-Accelerated Volume Rendering, https://vcg.seas.harvard.edu/publications/20040101-hardware-accelerated-volume-rendering/paper, fetched 2026-10-27 (unofficial)
+[S10] PDF EWA Splatting: A Novel Framework for Volume Rendering, https://visgraf.github.io/3D-vision/papers/slides/ewa-slides.pdf, fetched 2026-10-27 (unofficial)
+[S11] Hardware-Accelerated Adaptive EWA Volume Splatting, https://publications.ri.cmu.edu/storage/publications/pub_files/pub4/chen_wei_2004_1/chen_wei_2004_1.pdf, fetched 2026-10-27
+[S12] sebastianlipponer/surface_splatting, https://github.com/sebastianlipponer/surface_splatting, fetched 2026-10-28 (unofficial)
+[S13] arminkz/PointCloudRendering, https://github.com/arminkz/PointCloudRendering, fetched 2026-10-28 (unofficial)
+[S14] Volumetric Points - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/teaching/cse616/volPts.pdf, fetched 2026-10-29 (unofficial)
+[S15] PDF Review of - EWA Splatting: A Novel Framework for Volume Rendering Based ..., https://visgraf.github.io/3D-vision/papers/reports/IMPA_EWA.pdf, fetched 2026-10-29 (unofficial)

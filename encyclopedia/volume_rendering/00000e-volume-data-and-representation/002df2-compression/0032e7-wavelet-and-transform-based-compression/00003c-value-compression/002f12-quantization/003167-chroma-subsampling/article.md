@@ -1,0 +1,86 @@
+# Chroma Subsampling
+
+Also called: Chroma Subsampling for Volumetric Data, Chroma subsampling for volume, Color component subsampling
+
+## Overview
+Chroma subsampling for volumetric data reduces the bitrate of color information by lowering the spatial resolution of chrominance components (U, V) while maintaining full resolution for luminance (Y) [S1]. Unlike direct subsampling which causes significant information loss in sparse volumes, this method defines one color value for every eight adjacent voxel corners, preserving color fidelity at low bitrates [S1]. It sets itself apart from sibling quantization methods by specifically addressing the sparsity and geometric structure of volumetric data, preventing the complete loss of color information (resulting in grey objects) that occurs when chroma is not subsampled [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of existing voxels, each containing a color value (typically in YUV or RGB space) and a validity flag (existing/non-existing).
+*   **Output:** A compressed representation where chrominance values are stored at a lower spatial density (1 value per 8-corner group), while luminance remains at full resolution.
+
+**Data Structures:**
+The method operates on groups of eight adjacent voxel corners. The specific data structure is not explicitly defined beyond the logical grouping of corners. The output stores a single chrominance value for the group if valid, or a marker for transparency if invalid.
+
+**Steps:**
+1.  **Grouping:** Divide the volume into groups of eight adjacent voxel corners.
+2.  **Validity Check:** Determine if any voxel in the current group of eight corners exists (is non-transparent).
+3.  **Value Assignment:**
+    *   If **no** existing voxel is present in any of the eight corners, define the subsampled voxel as **transparent** [S1].
+    *   If **one or more** voxels are present in the eight adjacent corners, calculate the **median** value of the existing voxels' chrominance components and use this as the color value for the subsampled voxel [S1].
+4.  **Decoding (Reconstruction):**
+    *   For missing values in the reconstructed volume, interpolate from neighboring voxels or repeat the preceding sample [S1].
+    *   The repeating approach is employed in simulations because viewers' sense of color is barely affected by this approximation [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def chroma_subsampling_encode(voxel_corners):
+    """
+    Encodes chroma for a group of 8 voxel corners.
+    voxel_corners: List of 8 tuples (exists: bool, color: tuple)
+    Returns: subsampled_color or None (transparent)
+    """
+    existing_colors = [c for exists, c in voxel_corners if exists]
+    
+    if not existing_colors:
+        return None  # Transparent
+    
+    # Use median of existing chrominance values
+    # Assuming color is (Y, U, V) or similar
+    # Median is calculated per component
+    subsampled_u = median([c[1] for c in existing_colors])
+    subsampled_v = median([c[2] for c in existing_colors])
+    
+    return (subsampled_u, subsampled_v)
+
+def chroma_subsampling_decode(subsampled_value, neighbors):
+    """
+    Decodes a missing chroma value by repeating or interpolating.
+    subsampled_value: The value from the subsampled grid (or None)
+    neighbors: List of valid neighboring chroma values
+    Returns: Reconstructed chroma value
+    """
+    if subsampled_value is not None:
+        return subsampled_value
+    
+    # Fallback: Repeat preceding sample or interpolate
+    # The source specifies repeating is used in simulation
+    if neighbors:
+        return neighbors[0] # Repeat first available neighbor
+    return None
+```
+
+**Parameters:**
+*   **Group Size:** 8 adjacent corners (fixed).
+*   **Aggregation Function:** Median (chosen for better sharpness and outlier resistance compared to average) [S1].
+*   **Interpolation Method:** Repeating preceding sample (used in simulation) or interpolation from neighbors [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Empty Groups:** If no voxels exist in a group, the result is transparent. Failure to handle this may lead to undefined behavior or artifacts [S1].
+*   **Outliers:** The median method is specifically chosen to ignore high-difference outlier values, which average would distort [S1].
+*   **Color Loss:** Without subsampling, chroma information can be completely lost at low bitrates, resulting in grey objects [S1].
+
+## Operating characteristics
+*   **Compression Ratio:** Chroma subsampling significantly reduces bitrate. In the Leo sequence experiment, it achieved 39.30 dB PSNR at 1.18 bits per voxel (bpv), whereas non-subsampling required 2.90 bpv for the same quality [S1].
+*   **Quality:** Maintains better color quality at low bitrates compared to non-subsampling approaches [S1].
+*   **Limitations:** The method is specific to volumetric data with sparse surfaces; it relies on the assumption that viewers' color perception is less affected by interpolation/repetition errors than luminance errors [S1].
+*   **Performance:** The median calculation adds computational overhead compared to simple averaging, but provides better sharpness [S1].
+
+## Background
+Chroma subsampling is a technique originally developed for image and video compression (e.g., YUV 4:2:0) to reduce bandwidth by exploiting human visual system insensitivity to high-frequency color changes [S1]. In the context of volume rendering, it was adapted to handle the sparsity and 3D nature of volumetric data, where direct subsampling causes significant information loss [S1]. The specific volumetric implementation described here was proposed in research focused on realistic view synthesis applications [S1].
+
+## Sources
+[S1] Colour volumetric compression for realistic view synthesis applications, https://doi.org/10.1007/s11042-010-0484-4, fetched 2026-10-26

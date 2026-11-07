@@ -3,95 +3,85 @@
 Also called: Midpoint Refinement, Surface Shifting
 
 ## Overview
-Recursive Bisection Interpolation refines edge intersection points by recursively bisecting the edge until the midpoint crosses the isovalue, reducing geometric holes between different Level of Detail (LOD) representations [S1, unofficial]. It differs from its parent [Linear Intersection Approximation](1232-linear-intersection-approximation.md) by using a binary search on the scalar field values to locate the intersection, rather than assuming a linear gradient across the edge [S1, unofficial].
+Recursive Bisection Interpolation refines edge intersection points by recursively bisecting the edge until the midpoint crosses the isovalue, reducing geometric holes between different Levels of Detail (LODs) [S1, unofficial]. It sets itself apart from its parent [Linear Intersection Approximation](1232-linear-intersection-approximation.md) by using a binary search on the scalar field values rather than a single linear interpolation step, ensuring the intersection point lies within a sub-segment that contains the zero-crossing [S1, unofficial].
 
 ## How it works
-**Inputs:** Edge endpoints $a$ and $b$ with associated scalar values $value_a$ and $value_b$, and a target isovalue $iso$.
-**Output:** The intersection point $p$ on the edge.
-**Data Structures:** No persistent data structures; the method is stateless and operates on local edge geometry.
+**Inputs and Outputs:**
+- Input: Edge endpoints $a$ and $b$ (3D vectors), their scalar field values $value_a$ and $value_b$, and the target isovalue $iso$.
+- Output: Intersection point $p$ (3D vector) on the edge.
 
-**Steps:**
-1.  Compute the midpoint $c$ of the edge:
-    $$c = \frac{a + b}{2}$$
-2.  Evaluate the scalar field at the midpoint to obtain $value_c$.
-3.  Check if the isovalue lies between $value_a$ and $value_c$:
-    $$ (value_a - iso)(value_c - iso) < 0 $$
-    If true, the intersection lies in the half-edge $[a, c]$. Recursively apply the algorithm to $[a, c]$.
-4.  Else, check if the isovalue lies between $value_b$ and $value_c$:
-    $$ (value_b - iso)(value_c - iso) < 0 $$
-    If true, the intersection lies in the half-edge $[b, c]$. Recursively apply the algorithm to $[b, c]$.
-5.  If neither condition is met (the midpoint does not cross the isovalue, implying the function is monotonic or flat in a way that linear interpolation is deemed sufficient or the recursion depth limit is reached), return the linear interpolation result:
-    $$ p = a + \frac{iso - value_a}{value_b - value_a}(b - a) $$
+**Data Structures:**
+- No persistent data structures; the method is stateless and recursive.
 
 **Parameters:**
-*   `surface_shift` (int): A boolean flag (0 or 1) that enables this method instead of standard linear interpolation [S1, unofficial].
-*   Recursion Depth: Not explicitly defined in the source, but implied by the need to terminate recursion [S1, unofficial].
+- `surface_shift` (int): Boolean flag (0 or 1) to enable recursive bisection interpolation instead of standard linear interpolation [S1, unofficial].
+
+**Steps:**
+1. Calculate the midpoint $c$ of the edge: $c = \frac{a + b}{2}$.
+2. Evaluate the scalar field at the midpoint to get $value_c$ [S1, unofficial].
+3. Check if the isovalue lies between $value_a$ and $value_c$:
+   - If $(value_a - iso)(value_c - iso) < 0$, the intersection is in the first half. Recursively call the function with endpoints $a$ and $c$ [S1, unofficial].
+   - Else, check if the isovalue lies between $value_b$ and $value_c$:
+     - If $(value_b - iso)(value_c - iso) < 0$, the intersection is in the second half. Recursively call the function with endpoints $b$ and $c$ [S1, unofficial].
+     - Otherwise, the linear interpolation assumption holds for this segment (or the values are too close to distinguish via bisection). Return the linear interpolation result [S1, unofficial].
+
+**Formula:**
+- Linear interpolation fallback:
+  $$p = a + \frac{iso - value_a}{value_b - value_a}(b - a)$$
+- Midpoint crossing check:
+  $$(value_a - iso)(value_c - iso) < 0$$
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def recursive_bisection_interpolation(a, b, value_a, value_b, iso, depth=0, max_depth=10):
-    """
-    Recursively bisects an edge to find the isosurface intersection.
-    
-    Args:
-        a: Vector3, start point of the edge.
-        b: Vector3, end point of the edge.
-        value_a: Float, scalar value at point a.
-        value_b: Float, scalar value at point b.
-        iso: Float, the isovalue threshold.
-        depth: Int, current recursion depth.
-        max_depth: Int, maximum allowed recursion depth.
-        
-    Returns:
-        Vector3, the intersection point.
-    """
-    # Base case: if depth exceeds limit or values are identical, fallback to linear interpolation
-    if depth >= max_depth or abs(value_b - value_a) < 1e-9:
-        # Linear interpolation formula
-        t = (iso - value_a) / (value_b - value_a)
-        return a + t * (b - a)
-
-    # Step 1: Compute midpoint
+def recursive_bisection_interpolation(a, b, value_a, value_b, iso):
+    # Calculate midpoint
     c = (a + b) / 2.0
     
-    # Step 2: Evaluate scalar at midpoint (implementation detail: call volume sampling function)
-    value_c = sample_volume(c) # [G] Assumes a function to retrieve scalar value at c
+    # Evaluate value at midpoint
+    # [G] In a real implementation, value_c is obtained by trilinear interpolation 
+    # from the voxel grid at position c.
+    value_c = evaluate_scalar_field(c)
     
-    # Step 3: Check if isovalue is in [a, c]
+    # Check first half [a, c]
     if (value_a - iso) * (value_c - iso) < 0:
-        return recursive_bisection_interpolation(a, c, value_a, value_c, iso, depth + 1, max_depth)
+        return recursive_bisection_interpolation(a, c, value_a, value_c, iso)
     
-    # Step 4: Check if isovalue is in [b, c]
-    elif (value_b - iso) * (value_c - iso) < 0:
-        return recursive_bisection_interpolation(b, c, value_b, value_c, iso, depth + 1, max_depth)
+    # Check second half [b, c]
+    if (value_b - iso) * (value_c - iso) < 0:
+        return recursive_bisection_interpolation(b, c, value_b, value_c, iso)
     
-    # Step 5: Fallback to linear interpolation if midpoint doesn't cross
-    else:
-        t = (iso - value_a) / (value_b - value_a)
-        return a + t * (b - a)
+    # Fallback to linear interpolation
+    # Handle division by zero if value_a == value_b
+    if value_b == value_a:
+        return a  # [G] Arbitrary choice if values are identical
+    
+    t = (iso - value_a) / (value_b - value_a)
+    return a + t * (b - a)
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** If $value_a$, $value_b$, and $value_c$ are all equal to $iso$, the product checks will fail, falling back to linear interpolation which may be undefined (division by zero) if $value_b == value_a$. The pseudocode guards against division by zero with a small epsilon check.
-*   **Non-monotonicity:** If the scalar field is not monotonic along the edge, the bisection might converge to a local crossing or fail to find the correct global crossing if multiple crossings exist. The method assumes a single crossing or that the linear fallback is acceptable for non-crossing midpoints [S1, unofficial].
+- **Precision:** Deep recursion may suffer from floating-point precision errors if the edge is very small or the scalar field varies slowly.
+- **Boundaries:** The method assumes the scalar field can be evaluated at any point within the edge.
+- **Degenerate Input:** If $value_a = value_b = iso$, the linear interpolation formula divides by zero. The pseudocode handles this by returning $a$ [G].
 
 ## Subtopics
 
-### Extended Time Lag for Parallel Boundaries
-This variant prevents refinement dependencies between adjacent blocks and artifacts due to simplification bias near boundaries in parallel processing [S2]. It prevents the contraction of edge $ab$ as long as the sphere centered on the middle of $ab$ with radius $rad(c)$ is not totally included in the current block [S2]. The radius is calculated as $rad(c) = (||a - b|| + rad(a) + rad(b)) / 2$, where $rad(x) = 1$ if $x$ is an original vertex of the isosurface [S2].
+### [Extended Time Lag for Parallel Boundaries](5675-extended-time-lag-for-parallel-boundaries.md)
+A geometric constraint technique used during hierarchical isosurface extraction to prevent refinement dependencies and topological artifacts at the interfaces of adjacent sub-blocks. It extends the standard time lag method by enforcing a local inclusion check against block boundaries, ensuring that edge contractions do not create geometric inconsistencies between neighbors. Unlike the original time lag which applies globally, this extension specifically targets the borders of current sub-blocks to maintain consistency in parallel or partitioned rendering environments.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(\log(1/\epsilon))$ per edge, where $\epsilon$ is the desired precision, due to binary search. This is slower than standard linear interpolation $O(1)$ but faster than exhaustive search.
-*   **Memory Complexity:** $O(\log(1/\epsilon))$ stack space for recursion.
-*   **Strengths:** Reduces geometric holes between different LODs by providing a more accurate intersection point that respects the scalar field's local behavior [S1, unofficial].
-*   **Limitations:** Computationally more expensive than linear interpolation. Requires scalar field evaluation at midpoints, which may involve texture lookups or grid accesses.
-*   **When to use:** When visual continuity between LOD levels is critical and the scalar field is smooth enough for bisection to converge reliably [S1, unofficial].
+- **Time Complexity:** $O(\log(\frac{L}{\epsilon}))$ where $L$ is the edge length and $\epsilon$ is the desired precision or minimum segment size. In the worst case, it performs more computations than linear interpolation.
+- **Memory Complexity:** $O(\log(\frac{L}{\epsilon}))$ stack space due to recursion.
+- **Measured Performance:** Not given in the sources.
+- **Strengths:** Reduces geometric holes between different LODs by ensuring intersection points are more accurately located within the scalar field's zero-crossing [S1, unofficial].
+- **Limitations:** Computationally more expensive than linear interpolation.
+- **When to use:** When visual quality at LOD boundaries is critical and performance allows for additional computation per edge [S1, unofficial].
+- **When not to use:** When performance is paramount or the scalar field is smooth enough that linear interpolation provides sufficient accuracy.
 
 ## Background
-The method is associated with the "Surface Shifting" technique used in implementations of Marching Cubes and Marching Tetracubes to reduce holes between different LODs [S1, unofficial]. The concept of extending time lag for parallel boundaries to prevent artifacts near block boundaries originates from research on parallel extraction and simplification of large isosurfaces [S2].
+Recursive Bisection Interpolation, also known as Surface Shifting, is implemented in the OpenGL Marching Cubes/Tetrahedra Geometry Shader framework by AnBenLa [S1, unofficial]. It is used in conjunction with Simple LOD and Transvoxel algorithm implementations to improve mesh quality [S1, unofficial]. The method was described in the context of a GitHub repository for real-time volume visualization [S1, unofficial].
 
 ## Sources
 [S1] AnBenLa/OpenGL-MarchingCubes-MarchingTetrahedra-GeometryShader, https://github.com/AnBenLa/OpenGL-MarchingCubes-MarchingTetrahedra-GeometryShader, fetched 2026-10-27 (unofficial)
-[S2] Parallel extraction and simplification of large isosurfaces using an extended tandem algorithm, https://doi.org/10.1016/j.cad.2009.04.016, fetched 2026-10-26

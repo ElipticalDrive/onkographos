@@ -1,0 +1,144 @@
+# Fuzzy-Logic Rule Based Semantic Layer
+
+Also called: Antecedent Evaluation, Fuzzy Logic on GPU, GPU-based fuzzy logic volume rendering, Interaction-Dependent Semantic Volume Rendering, Interaction-Dependent Semantics for Illustrative Volume Rendering, Semantic layers for illustrative volume rendering, Semantics-driven rendering with interaction-dependent rules
+
+## Overview
+This method implements a rendering framework where illustration rules are evaluated per frame based on interaction-dependent semantics (e.g., mouse cursor position, view direction, slicing plane distance) to alter the visual style interactively, using fuzzy logic to map data and interaction features to rendering attributes [S1]. It extends earlier semantic layer concepts by introducing interaction-dependent semantics that are evaluated for each frame, allowing for more expressive interactive illustrations [S1]. Unlike traditional transfer functions that map data values directly to opacity and color, this method uses a linguistic formulation of rules to map data features and interaction parameters to visual styles and rendering techniques (such as flatness or specific color palettes) [S1]. It is distinct from static fuzzy classification methods by its reliance on GPU-accelerated, per-frame evaluation of fuzzy logic rules to handle dynamic user interaction [S1].
+
+## How it works
+The system operates by parsing fuzzy logic rules on the CPU to generate shader code and texture arrays, which are then executed on the GPU during volume ray casting [S1]. The process involves three types of semantics: Data semantics (e.g., tissue density), Interaction-dependent semantics (e.g., distance to mouse, view angle), and Illustration semantics (e.g., style descriptions like 'bone-style is transparent') [S1].
+
+### Inputs and Outputs
+**Inputs:**
+*   **Volume Data:** 3D scalar field (e.g., CT scan densities) [S1].
+*   **Fuzzy Logic Rule Base:** A set of linguistic rules defining mappings from attributes to styles [S1].
+*   **Interaction Parameters:** Dynamic values updated per frame, such as distance to mouse cursor, distance to slicing plane, distance to image plane, viewpoint, and user focus [S1].
+*   **Membership Functions:** Defined for each semantic attribute (e.g., "low", "middle", "high" for distance) [S1].
+
+**Outputs:**
+*   **Rendering Attributes:** Per-sample values for opacity, color, and style parameters (e.g., flatness) [S1].
+*   **Final Image:** The composited volume rendering with illustrative styles applied based on the evaluated rules [S1].
+
+### Data Structures
+1.  **Fuzzy Logic Expression Tree:** Constructed on the CPU from the rule base. Nodes represent logical operations ('and', 'or', 'not') or operands (membership functions) [S1].
+2.  **1D Texture Array:** Stores the membership functions for all semantic attributes used in the antecedents of the rules. Each membership function is sampled into a 1D texture [S1].
+3.  **Pre-calculated Fuzzy Logic Functions Texture Array:** Stores pre-computed results of fuzzy logic operations (min, max, 1.0-x) to accelerate GPU evaluation [S1].
+4.  **Shader Program:** Generated code that implements the expression tree and calls `GetColor()` for each sample [S1].
+
+### Numbered Steps
+1.  **Parse Rule Base (CPU):** The fuzzy logic rule base is parsed to build a fuzzy logic expression tree containing 'and', 'or', and 'not' operations [S1].
+2.  **Translate to Shader Code (CPU):** The expression tree is translated into shader code. Nodes are substituted with corresponding GPU operations: 'and' becomes `min`, 'or' becomes `max`, 'not' becomes `1.0 - operand` [S1].
+3.  **Encode Membership Functions (CPU):** Membership functions are evaluated and stored as 1D textures, which are combined into a 1D texture array [S1]. Leaf nodes of the expression tree are substituted with texture lookups in this array [S1].
+4.  **Upload to GPU:** The generated shader code and texture arrays are uploaded to the GPU [S1].
+5.  **Execute Shader (GPU):** For each frame, the shader program performs volume ray casting. For each sample point, `GetColor()` is called, which evaluates the fuzzy logic rules using the interaction-dependent parameters and membership functions [S1].
+6.  **Implication and Aggregation (GPU):** The evaluated antecedent value $a$ (in $[0, 1]$) is used to truncate the membership function $m(x)$ of the consequent style via implication: $m'(x) = \min(m(x), a)$ [S1]. Aggregation sums the membership functions for each style across all rules [S1].
+7.  **Defuzzification (GPU):** A crisp value for each style is derived from the aggregated membership functions, typically using the centroid method [S1].
+8.  **Render:** The final color and opacity are computed based on the defuzzified style values and composited into the image [S1].
+
+### Formulas
+*   **AND Operation:** $\text{result} = \min(\text{operand}_1, \text{operand}_2)$ [S1].
+*   **OR Operation:** $\text{result} = \max(\text{operand}_1, \text{operand}_2)$ [S1].
+*   **NOT Operation:** $\text{result} = 1.0 - \text{operand}$ [S1].
+*   **Implication:** Given an antecedent value $a \in [0, 1]$ and a membership function $m(x)$ for a style, the implication is $m'(x) = \min(m(x), a)$ [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# GPU Shader Code Structure
+
+# Texture arrays passed from CPU
+# membership_functions: 1D texture array containing all membership functions
+# logic_functions: 1D texture array for pre-calculated fuzzy logic ops (optional optimization)
+
+def GetColor(position, data_value, interaction_params):
+    """
+    Evaluates fuzzy logic rules for a single sample point.
+    interaction_params: dict containing 'dist_mouse', 'dist_plane', etc.
+    """
+    
+    # 1. Evaluate Antecedents
+    # Example rule: if (dist_mouse is low AND data is high) OR (dist_plane is low) then ...
+    
+    # Lookup membership functions from texture array
+    # Assume index 0 is 'dist_mouse low', index 1 is 'data high', index 2 is 'dist_plane low'
+    val_dist_mouse_low = texture1DArray(membership_functions, index=0, interaction_params['dist_mouse'])
+    val_data_high = texture1DArray(membership_functions, index=1, data_value)
+    val_dist_plane_low = texture1DArray(membership_functions, index=2, interaction_params['dist_plane'])
+    
+    # Apply fuzzy logic operations (min for AND, max for OR)
+    antecedent_part1 = min(val_dist_mouse_low, val_data_high)
+    antecedent = max(antecedent_part1, val_dist_plane_low)
+    
+    # 2. Implication
+    # Assume consequent style 'skin_style' has membership function at index 3
+    val_skin_style = texture1DArray(membership_functions, index=3, position) # or data_value depending on style definition
+    implied_skin_style = min(val_skin_style, antecedent)
+    
+    # 3. Aggregation and Defuzzification
+    # In a real implementation, multiple rules contribute to the same style.
+    # Here we assume a single rule for simplicity.
+    # Defuzzification (e.g., centroid) would be applied to implied_skin_style.
+    # For this example, we assume the defuzzified value directly influences the output color/opacity.
+    
+    # 4. Return Rendering Attributes
+    # The actual color/opacity calculation depends on the shader program template
+    # and the specific illustration technique (e.g., flat rendering mode).
+    return vec4(color, opacity)
+
+def main():
+    vec4 vecRayColor = vec4(0.0, 0.0, 0.0, 0.0)
+    vec4 vecPosition = vec4(0.0, 0.0, 0.0, 0.0)
+    
+    # Volume Ray Casting Loop
+    while (not all samples processed):
+        vec4 vecSampleColor = GetColor(vecPosition, data_value, interaction_params)
+        
+        if (vecSampleColor.a > 0.0):
+            # Standard volume rendering accumulation
+            # vecRayColor = vecRayColor + vecSampleColor * (1.0 - vecRayColor.a)
+            pass
+            
+        vecPosition += ray_direction * sample_distance
+        
+    return vecRayColor
+```
+
+### Parameters
+*   **Interaction-dependent parameters:** Distance to mouse cursor, distance to slicing plane, distance to image plane, viewpoint, user focus [S1].
+*   **Flatness parameter:** A semantic parameter describing the trade-off between showing spatial relationships and showing important regions. It is evaluated locally per sample [S1].
+*   **Membership Function Granularity:** Not given in the sources.
+*   **Defuzzification Method:** Centroid method is used [S1].
+
+### Edge Cases and Pitfalls
+*   **Performance:** Evaluating fuzzy logic rules for a 3D volume several times per second is computationally expensive. Modern CPUs are not capable of this, requiring GPU implementation [S1].
+*   **Shader Update Cost:** Updating the shader program when rules change takes less than one second on a modern desktop PC, but it is the most costly operation in the system [S1].
+*   **Pre-segmentation:** The method does not use pre-segmentation of data, relying instead on density and interaction-dependent rules to define styles [S1].
+*   **Precision:** Not given in the sources.
+
+## Subtopics
+
+### [Fuzzy Set-Based Volume Selection and Intersection](6430-fuzzy-set-based-volume-selection-and-intersection.md)
+A method to define three volume sets (Selection S, Ghost G, Background B) using selection functions fV and transformation T, and opacity transfer functions to create membership functions for fuzzy set operations, allowing control over intersections.
+
+### [Artistic Volume Rendering Template](7040-artistic-volume-rendering-template.md)
+A direct volume rendering approach using shader program templates. Viewing rays are cast through volume, sampled at equidistant positions. Opacity transfer function determines visibility. Color evaluation depends on fuzzy logic rules via artistic styles.
+
+### [Semantics by Analogy](7439-semantics-by-analogy.md)
+A method for specifying semantic mappings where the interpretation of data values (fuzzy membership functions) is defined through analogy, i.e., by brushing on renderings of the properties of interest.
+
+## Operating characteristics
+*   **Time Complexity:** Per-frame evaluation of fuzzy logic rules for all samples. The cost is dominated by the number of samples and the complexity of the rule base. The shader update cost is negligible if rules do not change [S1].
+*   **Memory Complexity:** Storage for membership functions in 1D texture arrays and pre-calculated fuzzy logic functions. The size depends on the number of attributes and the resolution of the membership functions [S1].
+*   **Measured Performance:** 23fps for Visible Human dataset ($256^3$, viewport $512^2$, sample distance 1.0), 20fps for Human body dataset ($256^2 \times 415$, viewport $512^2$, sample distance 1.0), and 6fps for CT-scan leg dataset ($147 \times 162 \times 429$, viewport $512^2$, sample distance 1.0) on a GeForce 8800 GTX graphics card [S1].
+*   **Strengths:** Enables interactive, expression illustrations with interaction-dependent semantics. Allows linguistic specification of rendering rules. GPU acceleration makes per-frame evaluation feasible [S1].
+*   **Limitations:** Computationally expensive if not implemented on GPU. Shader update is required when rules change. No pre-segmentation support [S1].
+*   **When to use:** When interactive, style-driven volume rendering with user-defined linguistic rules is required.
+*   **When not to use:** When static, high-performance rendering without interaction-dependent styles is sufficient, or when hardware does not support GPU-based fuzzy logic evaluation [S1].
+
+## Background
+The method was introduced by Peter Rautek, Stefan Bruckner, and M. Eduard Gröller in the paper "Interaction-Dependent Semantics for Illustrative Volume Rendering" published in the Eurographics/ IEEE-VGTC Symposium on Visualization 2008 [S1]. It extends earlier work by Bruckner and Gröller on style transfer functions and semantic layers [S1]. The work was part of the ex vis ation project supported by the Austrian Science Fund (FWF) grant no. P18322 [S1].
+
+## Sources
+[S1] Interaction‐Dependent Semantics for Illustrative Volume Rendering, https://doi.org/10.1111/j.1467-8659.2008.01216.x, fetched 2026-11-03
+[S2] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27

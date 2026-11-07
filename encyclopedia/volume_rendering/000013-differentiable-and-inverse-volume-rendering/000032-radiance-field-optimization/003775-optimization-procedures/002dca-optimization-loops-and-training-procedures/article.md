@@ -1,106 +1,70 @@
 # Optimization Loops and Training Procedures
 
-Also called: Radiance-field training loops, Neural volume rendering optimization
+Also called: Inverse Rendering Loop
 
 ## Overview
-This family defines the iterative procedures used to minimize the photometric error between rendered images and ground-truth observations by updating the parameters of differentiable volume or radiance fields. It differs from the underlying field representations (e.g., [Neural Radiance Fields](4972-neural-radiance-fields.md), [Plenoxels](5942-plenoxels.md)) by focusing on the optimization dynamics—specifically how rays are sampled, how gradients are propagated, and how hyperparameters like learning rates and regularization are scheduled.
+This family defines the iterative procedures used to minimize the photometric error between rendered images and ground-truth observations by updating the parameters of differentiable volume or radiance fields [S1, unofficial]. It differs from the underlying field representations (e.g., [Neural Radiance Fields](4972-neural-radiance-fields.md), [Plenoxels](5942-plenoxels.md)) by focusing on the optimization dynamics—specifically how rays are sampled, how gradients are propagated, and how hyperparameters like learning rates and regularization are scheduled [G].
 
 ## Shared principles
-All methods in this family share the core objective of minimizing a photometric loss $\mathcal{L}$ between the rendered color $\hat{C}(\mathbf{r})$ and the ground-truth color $C(\mathbf{r})$ for a batch of rays $\mathcal{R}$:
+All methods in this family share the core objective of minimizing a photometric loss $\mathcal{L}$ between the rendered color $\hat{C}(\mathbf{r})$ and the ground-truth color $C(\mathbf{r})$ for a batch of rays $\mathcal{R}$ [G]. The optimization loop generally follows these steps: ray sampling, forward pass, loss computation, backpropagation, and scheduling [G]. The conceptual pseudocode for the inverse problem loop is [S1, unofficial]:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-$$
-\mathcal{L} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \left\| \hat{C}(\mathbf{r}) - C(\mathbf{r}) \right\|_2^2
-$$
-
-The optimization loop generally follows these steps:
-1.  **Ray Sampling**: Random pixels are selected from training images. Ray origins and directions are computed using camera intrinsics ($K$) and extrinsics ($c2w$).
-2.  **Forward Pass**: Points are sampled along rays within near/far bounds. The field model predicts density ($\sigma$) and color ($c$). Differentiable volume rendering computes the final pixel color.
-3.  **Loss Computation**: The Mean Squared Error (MSE) is calculated. Additional terms (e.g., Eikonal, TV) may be added.
-4.  **Backpropagation**: Gradients are computed and weights are updated via an optimizer (typically Adam).
-5.  **Scheduling**: Learning rates and other hyperparameters are adjusted based on the current step or epoch.
+```python
+def inverse_rendering_loop(theta, samples, targets, optimizer, num_steps):
+    """
+    Standard inverse rendering optimization loop.
+    """
+    # 1. Initialization
+    theta = initialize_params(theta)
+    
+    for step in range(num_steps):
+        # 2. Forward Pass
+        prediction = trace(theta, samples)
+        
+        # 3. Loss Computation
+        loss = distance(prediction, targets)
+        
+        # 4. Backpropagation
+        gradient = backward(loss, theta)
+        
+        # 5. Update
+        theta = optimizer.update(theta, gradient)
+        
+    return theta
+```
+Differentiation strategies fall into three main categories: reverse-mode automatic differentiation, the adjoint method, and analytic inversion or explicit gradients [G]. Choosing a faithful model, identifiable parameters, a stable estimator, and a good initialization remains difficult even when the loop structure is simple [S1, unofficial].
 
 ## Subtopics
 
 ### [NeRF Training Loop](970-nerf-training-loop.md)
-The standard training loop for coordinate-based neural fields (MLP or SIREN). It iterates over epochs, sampling random pixels, generating ray bundles, performing forward passes, and updating weights via backpropagation. It supports features like perturbative sampling, view-dependent encoding, and checkpointing. Choose this for standard NeRF-style reconstruction.
+Iterative optimization procedure minimizing photometric difference between rendered images and ground-truth views by updating a neural radiance field. Sets itself apart by computing gradients for backpropagation and including adaptive sampling and occupancy grid pruning steps specific to training. Choose for standard NeRF-style reconstruction.
 
 ### [Optimization Configuration (Adam + Exponential Decay + Selective L2)](2133-optimization-configuration-adam-exponential-decay-selective-.md)
-A specific hyperparameter configuration combining Adam with staircase exponential decay and selective L2 regularization. It uses a learning rate schedule that holds the initial rate for 10,000 steps, then decays by 1/3 every 10,000 steps. Crucially, it applies L2 weight decay ($10^{-6}$) only to MLP components, excluding positional encodings and appearance embeddings to prevent divergence. Choose this when high numerical stability and controlled regularization of embeddings are required.
+Hyperparameter setup combining Adam with staircase exponential decay and selective L2 weight decay on MLPs, excluding positional encodings and appearance embeddings. Differs by explicitly masking L2 regularization to prevent divergence and using a decay schedule holding the initial rate for 10,000 steps. Choose when high numerical stability and controlled regularization are required.
 
 ### [Neural Volume Rendering Training (MSE)](3429-neural-volume-rendering-training-mse.md)
-Focuses on the basic MSE minimization for neural volume rendering. It serves as the foundational loss computation step for many other methods. Choose this for simple volumetric field training without complex regularization or stage-based strategies.
+Training procedure for implicit neural representations of 3D volumes minimizing difference between reconstructed volume and ground-truth input. Sets itself apart by operating on volumetric data patches rather than ray-based pixel supervision. Choose for simple volumetric field training without complex regularization.
 
 ### [Stage-based Differentiable Volume/Radiance Field Training](4241-stage-based-differentiable-volume-radiance-field-training.md)
-Alternates between image-based and ray-based sampling modes, applies stochastic preconditioning with exponential alpha decay, and optionally upsamples parameters between stages. Choose this for large-scale scenes or hierarchical representations where multi-resolution training is beneficial.
+Stage-based optimization loop alternating between image-based and ray-based sampling modes, applying stochastic preconditioning with exponential alpha decay, and optionally upsampling parameters. Distinguishes itself by explicitly managing memory via ray batching and progressively refining field resolution. Choose for large-scale scenes or hierarchical representations.
+
+### [Photometric Optimization](5790-photometric-optimization.md)
+Not given in the sources.
 
 ### [Staggered Optimization Scheme](5832-staggered-optimization-scheme.md)
-Decouples the optimization of shape and Point Spread Function (PSF) into two sequential sub-problems. Choose this when dealing with systems where optical blur or PSF estimation is coupled with geometry reconstruction, to manage computational cost and bias.
+Training procedure decoupling geometric shape and PSF parameter optimization into two sequential sub-problems. Solves computational bias from simultaneous optimization by alternating between approximate narrow-band FT for shape and exact full-frequency FT for PSF. Choose when optical blur or PSF estimation is coupled with geometry reconstruction.
 
-### [Radiometric Self-Calibration](1820-radiometric-self-calibration.md)
-Optimizes radiometric parameters (e.g., exposure, tone mapping) alongside the scene representation. Choose this for real-world datasets with varying lighting conditions or unknown camera response functions.
+### [Optimization Baselines](6675-optimization-baselines.md)
+Classical evolutionary baseline using covariance matrix adaptation (CMA-ES). Choose for establishing performance baselines without gradient-based methods.
 
-### [TensoRF](3026-tensorf.md)
-Uses tensor decomposition for efficient optimization of high-dimensional fields. Choose this for memory-constrained environments or when faster convergence via low-rank approximations is needed.
+### [Generalized Rendering Models](6681-generalized-rendering-models.md)
+Optimizes rendering models for consistency across subjects with high inter-patient variations, showing benefits of deep architectures over manual transfer functions. Choose for clinical or cross-subject applications.
 
-### [3D Gaussian Splatting Training](3761-3d-gaussian-splatting-training.md)
-Optimizes 3D Gaussians (position, covariance, color, opacity) using rasterization-based differentiable rendering. Choose this for real-time rendering applications and explicit surface representations.
-
-### [Refractive Index Tomography using Neural Fields](4146-refractive-index-tomography-using-neural-fields.md)
-Optimizes neural fields to represent refractive index distributions. Choose this for scientific imaging and tomography applications involving transparent media.
-
-### [Neural Transient Fields (NeTF)](4760-neural-transient-fields-netf.md)
-Extends optimization to 4D (3D space + time) for dynamic scenes. Choose this for capturing and rendering time-varying phenomena.
-
-### [HybridNeRF](6363-hybridnerf.md)
-Combines neural fields with explicit geometry (e.g., meshes) for optimization. Choose this when hybrid representations offer better convergence or rendering quality for specific scene types.
-
-### [Color Volume Optimization and Density Initialization](842-color-volume-optimization-and-density-initialization.md)
-Focuses on initializing density fields and optimizing color volumes. Choose this for methods that rely on explicit volume grids rather than implicit neural fields.
-
-### [Neural Volumes](912-neural-volumes.md)
-Optimizes neural volumes using 3D convolutions. Choose this for grid-based neural representations.
-
-### [Best Viewpoint Selection via Opacity Entropy](1121-best-viewpoint-selection-via-opacity-entropy.md)
-Uses opacity entropy to select optimal viewpoints for training. Choose this for active view synthesis or sparse view reconstruction.
-
-### [Regularization losses](1413-regularization-losses.md)
-Provides various regularization terms (e.g., TV, Eikonal) used in conjunction with the main photometric loss. Choose this to improve generalization or enforce physical constraints.
-
-### [Hierarchical Grid Optimization](1414-hierarchical-grid-optimization.md)
-Optimizes hierarchical grid structures (e.g., hash grids) for efficient training. Choose this for large-scale scenes requiring multi-resolution representations.
-
-### [Volumetric Inverse Rendering with Differentiable Path Tracing](1523-volumetric-inverse-rendering-with-differentiable-path-tracin.md)
-Uses differentiable path tracing for inverse rendering in volumetric scenes. Choose this for complex lighting and scattering effects.
-
-### [3D Gaussian Splatting](1795-3d-gaussian-splatting.md)
-The underlying representation for 3DGS training. Choose this as the base method for Gaussian-based rendering.
-
-### [Neural Radiance Fields](4972-neural-radiance-fields.md)
-The foundational neural field representation. Choose this as the base method for MLP-based rendering.
-
-### [Plenoxels](5942-plenoxels.md)
-The underlying representation for Plenoxels. Choose this as the base method for voxel-based rendering.
-
-### [NeRF Training Loop](970-nerf-training-loop.md)
-See above.
-
-### [Optimization Configuration (Adam + Exponential Decay + Selective L2)](2133-optimization-configuration-adam-exponential-decay-selective-.md)
-See above.
-
-### [Neural Volume Rendering Training (MSE)](3429-neural-volume-rendering-training-mse.md)
-See above.
-
-### [Stage-based Differentiable Volume/Radiance Field Training](4241-stage-based-differentiable-volume-radiance-field-training.md)
-See above.
-
-### [Staggered Optimization Scheme](5832-staggered-optimization-scheme.md)
-See above.
-
-### Photometric Optimization
-Jointly optimizes feature grids $G_\sigma, G_a$, decoding MLP $f_{\text{MLP}}$, and environment map $E$. For real-world datasets with imperfect camera poses, a TV loss on the feature grid is additionally optimized to reduce noise. The optimization minimizes the photometric loss $\mathcal{L} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \| \hat{C}(\mathbf{r}) - C(\mathbf{r}) \|_2^2$. EgoNeRF does not need a coarse-to-fine reconstruction approach because the balanced feature grid guarantees a nearly uniform ray-grid hitting rate [S1].
+### [Two-Stage Inverse Rendering Optimization](7387-two-stage-inverse-rendering-optimization.md)
+Two-stage pipeline first optimizing geometry using an approximate differentiable renderer (silhouette-based), then optimizing reflectance using a physically-based differentiable renderer (ray-tracing). Choose when decoupling geometry and material optimization improves convergence.
 
 ## Background
-The optimization loops described here originate from the seminal NeRF paper [S2, S6] and subsequent works like EgoNeRF [S1]. The standard NeRF training loop uses Adam with a specific learning rate schedule and MSE loss. EgoNeRF [S1] introduced joint optimization of feature grids and environment maps, along with TV loss for real-world data. The selective L2 regularization and staircase decay schedule [S1] were introduced to stabilize training in large-scale or complex scenes. These methods are widely used in computer vision and graphics for novel view synthesis, 3D reconstruction, and inverse rendering.
+The optimization loops described here originate from differentiable rendering research, formalized as an inverse problem where a differentiable renderer sits inside an optimizer [S1, unofficial]. The standard NeRF training loop uses Adam with a specific learning rate schedule and MSE loss [G]. These methods are widely used in computer vision and graphics for novel view synthesis, 3D reconstruction, and inverse rendering [G].
 
 ## Sources
-[S1] Balanced Spherical Grid for Egocentric View Synthesis, https://doi.org/10.1109/cvpr52729.2023.01592, fetched 2026-10-29
+[S1] Differentiable ray tracing — from paths to gradients | Bai Liping, https://bailiping.com/differentiable-ray-tracing/, fetched 2026-10-28 (unofficial)

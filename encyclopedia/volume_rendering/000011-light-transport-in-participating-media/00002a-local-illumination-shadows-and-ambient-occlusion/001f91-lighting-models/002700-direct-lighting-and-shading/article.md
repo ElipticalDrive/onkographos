@@ -3,120 +3,106 @@
 Also called: Direct Lighting, Lambertian Diffuse with GGX Specular, Lighting and Shading
 
 ## Overview
-Direct Lighting and Shading computes the immediate illumination contribution of light sources at the surface of a volume-rendered object, typically during ray casting or splatting. It differs from its parent [Lighting Models](2056-lighting-models.md) by implementing a specific combination of Lambertian diffuse, ambient floor, emissive terms, and a non-standard GGX-like specular term [S1, unofficial]. Unlike [Shading models](837-shading-models.md) which may cover broader categories, this method focuses on the specific shading pipeline used in voxel-based real-time renderers, often including hard shadow testing via ray re-tracing [S1, unofficial].
+Direct Lighting and Shading evaluates the illumination at a point $\mathbf{p}$ within or on the boundary of a volume by computing contributions from discrete light sources and ambient terms, while approximating surface-like appearance through local shading models. It differs from [Shading models](837-shading-models.md) by explicitly integrating direct light visibility and shadowing into the volume traversal context, and from [Cook-Torrance BRDF](2509-cook-torrance-brdf.md) by often employing simplified or non-standard specular approximations (e.g., modified half-vectors) rather than strict microfacet theory.
 
 ## How it works
-**Inputs:**
-*   Intersection point $P$ and surface normal $\mathbf{n}$ (derived from volume gradient or voxel face).
-*   Light direction $\mathbf{l}$ (normalized).
-*   View direction $\mathbf{v}$ (normalized).
-*   Material properties: albedo/color $C_{mat}$, emissive flag/intensity.
-*   Light properties: color $C_{light}$, intensity.
-
-**Outputs:**
-*   Shaded color contribution $C_{shade}$.
+**Inputs and Outputs:**
+*   **Inputs:** Hit position $\mathbf{p}$, surface normal $\mathbf{n}$ (approximated from volume gradient $\nabla V$), light direction $\mathbf{l}$, view direction $\mathbf{v}$, material properties (albedo $\rho$, diffuse weight $k_d$, emissive flag), and light color/intensity.
+*   **Outputs:** Final shaded color $C_{final}$.
 
 **Data Structures:**
-*   No complex data structures required; operates on scalar and vector values per intersection.
+*   **Material Block:** Contains flags for emissive state (`BLOCK_EMISSIVE`) and material type. In voxel implementations, this is often determined via hash functions (e.g., `hash13`, `hash12`) on block coordinates [S1, unofficial].
+*   **Light Source:** Defined by direction $\mathbf{l}$ and color $C_{light}$.
 
 **Steps:**
-
-1.  **Gradient/Normal Estimation:**
-    If $\mathbf{n}$ is not provided by the traversal, compute it from the volume gradient $\mathbf{g} = \nabla V$ at $P$. Normalize to get $\mathbf{n} = \frac{\mathbf{g}}{\|\mathbf{g}\|}$. [S1, unofficial]
-
-2.  **Diffuse Term Calculation:**
-    Compute the Lambertian diffuse contribution using the dot product of the normal and light direction:
-    $$ C_{diffuse} = \max(\mathbf{n} \cdot \mathbf{l}, 0) \cdot C_{light} $$
-    [S1, unofficial]
-
-3.  **Specular Term Calculation (Non-Standard GGX-like):**
-    Compute the half-vector $\mathbf{h}$. **Note:** This implementation uses a non-standard definition:
-    $$ \mathbf{h} = \text{normalize}(\mathbf{l} - \mathbf{v}) $$
-    [S1, unofficial]
-    *Pitfall:* The standard half-vector is $\mathbf{l} + \mathbf{v}$. Using $\mathbf{l} - \mathbf{v}$ may produce incorrect specular highlights [S1, unofficial].
-    
-    Compute the Fresnel approximation using Schlick's formula with base reflectivity $F_0$ (often 0.04 for dielectrics):
-    $$ F = F_0 + (1 - F_0)(1 - \mathbf{n} \cdot \mathbf{h})^5 $$
-    [S1, unofficial]
-    
-    The specular contribution is:
-    $$ C_{specular} = F \cdot C_{light} $$
-    [S1, unofficial]
-
-4.  **Emissive Contribution:**
-    If the voxel block is marked as emissive (determined by hash functions like `hash13` or `hash12` on block coordinates), add the emissive intensity $C_{emissive}$:
-    $$ C_{emissive\_term} = \begin{cases} C_{emissive} & \text{if BLOCK\_EMISSIVE} \\ 0 & \text{otherwise} \end{cases} $$
-    [S1, unofficial]
-
-5.  **Ambient Floor:**
-    Add a constant ambient term $C_{ambient}$ to prevent black shadows, often combined with the diffuse term or added separately. [S1, unofficial]
-
-6.  **Shadow Testing (Optional):**
-    If shadows are enabled, trace a ray from $P$ in direction $\mathbf{l}$ towards the light source. If the ray hits a non-empty voxel before reaching the light, set $C_{light} = 0$ for direct terms. [S1, unofficial]
-
-7.  **Tone Mapping:**
-    Apply exponential tone mapping to the final lit color $C_{lit}$:
+1.  **Normal Approximation:** Compute the normal $\mathbf{n}$ from the volume gradient $\mathbf{g} = \nabla V$ at $\mathbf{p}$:
+    $$ \mathbf{n} = \frac{\mathbf{g}}{\|\mathbf{g}\|} $$
+    If $\mathbf{g}$ is zero (interior or flat region), use a fallback normal, such as $(0, 1, 0)$ [S1, unofficial].
+2.  **Diffuse Term:** Calculate the Lambertian diffuse contribution:
+    $$ C_{diffuse} = k_d \cdot \max(\mathbf{n} \cdot \mathbf{l}, 0) \cdot C_{light} $$
+    where $k_d$ is the diffuse weight [S1, unofficial].
+3.  **Specular Term:** Compute the specular highlight using a non-standard half-vector $\mathbf{h}$ and Schlick Fresnel approximation:
+    *   Compute half-vector: $\mathbf{h} = \text{normalize}(\mathbf{l} - \mathbf{v})$ [S1, unofficial]. Note: This differs from the standard $\mathbf{l} + \mathbf{v}$.
+    *   Compute Fresnel: $F = F_0 + (1 - F_0)(1 - \mathbf{n} \cdot \mathbf{h})^5$, where $F_0$ is the base reflectivity.
+    *   Compute specular: $C_{specular} = F \cdot (\mathbf{n} \cdot \mathbf{h})^\alpha \cdot C_{light}$, where $\alpha$ is the shininess exponent.
+4.  **Emissive Contribution:** If the block at $\mathbf{p}$ is marked `BLOCK_EMISSIVE` (determined by hash-based checks), add the emissive intensity $C_{emissive}$ to the total [S1, unofficial].
+5.  **Shadowing:** Test for occlusion between $\mathbf{p}$ and the light source. This is typically done by casting a ray in direction $\mathbf{l}$ and checking for non-empty voxels or density along the path. If occluded, set $C_{diffuse} = 0$ and $C_{specular} = 0$ [S1, unofficial].
+6.  **Ambient Term:** Add an ambient floor $C_{ambient}$ to prevent total blackness in shadows. This may be modulated by local density or upward ray transmittance [S1, unofficial].
+7.  **Tone Mapping:** Apply exponential tone mapping to the final lit color $C_{lit}$:
     $$ C_{final} = 1 - \exp(-2 \cdot C_{lit}) $$
-    [S1, unofficial]
+    [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_direct_lighting(n, l, v, light_color, material_color, is_emissive, emissive_color, enable_shadows, trace_ray):
-    # 1. Diffuse
-    diff_factor = max(dot(n, l), 0.0)
-    diffuse = diff_factor * light_color
+def compute_direct_lighting(p, n, l, v, material, light_color, is_shadowed):
+    # Step 1: Diffuse
+    ndotl = max(dot(n, l), 0.0)
+    diffuse = material.k_d * ndotl * light_color
     
-    # 2. Specular (Non-standard half-vector)
-    h = normalize(l - v) # Note: l - v, not l + v
-    f0 = 0.04 # Dielectric base reflectivity
-    fresnel = f0 + (1.0 - f0) * pow(1.0 - dot(n, h), 5.0)
-    specular = fresnel * light_color
+    # Step 2: Specular (Non-standard half-vector)
+    # Note: Standard is normalize(l + v), this implementation uses l - v
+    h = normalize(l - v)
+    ndoth = max(dot(n, h), 0.0)
     
-    # 3. Emissive
-    emissive = emissive_color if is_emissive else vec3(0.0)
+    # Schlick Fresnel approximation
+    f0 = material.f0 # Base reflectivity
+    fresnel = f0 + (1.0 - f0) * pow(1.0 - ndoth, 5.0)
     
-    # 4. Shadow (if enabled)
-    shadow_factor = 1.0
-    if enable_shadows:
-        if trace_ray(p, l): # Returns true if hit
-            shadow_factor = 0.0
-            
-    # 5. Combine
-    lit_color = (diffuse + specular) * shadow_factor + emissive
+    specular = fresnel * pow(ndoth, material.shininess) * light_color
     
-    # 6. Tone Mapping
-    final_color = 1.0 - exp(-2.0 * lit_color)
+    # Step 3: Shadowing
+    if is_shadowed:
+        diffuse = vec3(0.0)
+        specular = vec3(0.0)
+        
+    # Step 4: Emissive
+    emissive = vec3(0.0)
+    if material.is_emissive:
+        emissive = material.emissive_intensity
+        
+    # Step 5: Ambient
+    ambient = material.ambient_floor # Constant or density-modulated
     
-    return final_color
+    # Step 6: Combine
+    lit = diffuse + specular + emissive + ambient
+    
+    # Step 7: Tone Mapping
+    final = 1.0 - exp(-2.0 * lit)
+    
+    return final
 ```
 
 ## Subtopics
 
 ### [Physically-Based Rendering (PBR) Lighting](6815-physically-based-rendering-pbr-lighting.md)
-Calculates direct lighting using a physically-based shading model with Burley diffuse and microfacet specular components, driven by metallic-roughness inputs. It differs from the parent method by replacing the non-standard GGX-like specular term and simple Lambertian diffuse with energy-conserving, view-dependent shading models.
+Calculates direct lighting contributions using a physically-based shading model that separates diffuse and specular components, driven by metallic-roughness material inputs. It differs from its parent [Direct Lighting and Shading](3953-direct-lighting-and-shading.md) by replacing the non-standard GGX-like specular term and Lambertian diffuse with the Burley diffuse model and a microfacet specular model, providing energy-conserving, view-dependent shading.
 
 ### Split-Sum IBL Shading
 A forward shading strategy where each surfel is shaded independently before rasterization using split-sum Image-Based Lighting (IBL), producing a linear HDR color value that enters the splatting pipeline [S2, unofficial]. The outgoing radiance $c_k$ is computed as:
 $$ c_k = k_d \rho L_d(\mathbf{n}) + L_s(\mathbf{r}, r) (F_0 \beta_1 + \beta_2) $$
-where $L_d$ is diffuse irradiance from a pre-convolved environment map, $L_s$ is prefiltered specular radiance, $F_0 = 0.04(1-\rho) + \rho^2$ is base reflectivity, and $k_d = (1-F_0)(1-\rho)$ ensures energy conservation [S2, unofficial].
+where $L_d(\mathbf{n})$ is diffuse irradiance from a pre-convolved environment map, $L_s(\mathbf{r}, r)$ is prefiltered specular radiance queried along the reflection direction $\mathbf{r} = 2(\mathbf{v} \cdot \mathbf{n})\mathbf{n} - \mathbf{v}$, and $(\beta_1, \beta_2)$ are BRDF LUT terms [S2, unofficial]. Base reflectivity is $F_0 = 0.04(1 - \rho) + \rho^2$, and diffuse weight is $k_d = (1 - F_0)(1 - \rho)$ [S2, unofficial].
 
 ### Anisotropic Specular Highlights (Disney)
 A method for generating anisotropic specular highlights using the Disney roughness-to-alpha convention [S3, unofficial].
 
+### Sky Light Estimation with MIS
+Uses Multiple Importance Sampling (MIS) for environment sky light, requiring MIS for both light and phase functions [S4, unofficial]. Steps include converting the cartesian direction to spherical coordinates ($\theta, \phi$), calculating row and column values from these coordinates, and computing the PDF using the method described in 'Sampling A Procedural Sky' [S4, unofficial].
+
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per intersection point, assuming constant-time light queries and shadow ray tracing. Shadow testing adds an additional voxel traversal cost.
-*   **Memory Complexity:** $O(1)$ auxiliary memory.
-*   **Strengths:** Fast, suitable for real-time rendering; simple to implement.
-*   **Limitations:** The non-standard half-vector $\mathbf{l}-\mathbf{v}$ is physically incorrect for standard microfacet models [S1, unofficial]. Exponential tone mapping is a simple approximation. Ambient floor can reduce contrast.
-*   **When to use:** Real-time voxel rendering where performance is critical and physical accuracy of specular highlights is secondary to style.
-*   **When not to use:** Physically-based offline rendering requiring accurate energy conservation and correct microfacet behavior.
+*   **Time Complexity:** $O(1)$ per shading point for the lighting calculation itself, but shadowing requires additional ray traversal steps, potentially $O(N)$ where $N$ is the number of samples along the light ray.
+*   **Memory Complexity:** $O(1)$ for local shading state. IBL variants require storage for environment maps and BRDF LUTs.
+*   **Strengths:** Computationally efficient for real-time applications; provides basic shadowing and surface detail.
+*   **Limitations:** The non-standard half-vector implementation in some voxel shaders produces incorrect specular highlights [S1, unofficial]. Ambient terms are often simplistic approximations.
+*   **When to use:** Real-time voxel rendering where performance is critical and physical accuracy of specular highlights is secondary.
+*   **When not to use:** Offline rendering requiring strict energy conservation or physically accurate specular reflections.
 
 ## Background
-This method originates from real-time voxel world shaders, specifically those found in community-driven GLSL projects like the Voxel-World-Shader [S1, unofficial]. It is characterized by its specific implementation details, such as the non-standard half-vector and exponential tone mapping, which distinguish it from standard PBR pipelines. It is commonly used in voxel-based games and visualizations.
+The method originates from real-time voxel rendering techniques, specifically those implemented in GLSL shaders for procedural voxel worlds [S1, unofficial]. It combines standard local illumination models with voxel-specific optimizations like hash-based block type determination and fast voxel traversal for shadowing. The use of non-standard half-vectors suggests an adaptation for specific visual styles or performance constraints in early voxel engines.
 
 ## Sources
 [S1] GitHub - razzle-reinizu/Voxel-World-Shader: A GLSL voxel-world shader ..., https://github.com/razzle-reinizu/Voxel-World-Shader, fetched 2026-10-25 (unofficial)
 [S2] 3DSS: 3D Surface Splatting for Inverse Rendering, https://doi.org/10.48550/arxiv.2605.05876, fetched 2026-10-26 (unofficial)
 [S3] NiekMSoftware/bad-apple-voxel-raytracer, https://github.com/NiekMSoftware/bad-apple-voxel-raytracer, fetched 2026-10-24 (unofficial)
+[S4] Lighting And Transmittance, https://sergeneren.com/2019/04/26/lighting-and-transmittance/, fetched 2026-10-30 (unofficial)

@@ -3,136 +3,146 @@
 Also called: Kindlmann Contours, Normal Curvature Contours
 
 ## Overview
-Curvature-Controlled Style Contours is a line and edge detection method that regulates contour thickness based on the normal curvature along the view direction to avoid uncontrolled variation in thickness caused by flat vs. fine structures [S1]. Unlike standard dot-product contours which produce uncontrolled thickness (too thick on flat surfaces and too thin on fine structures) [S1], this method uses a curvature-dependent threshold to maintain consistent visual weight across varying surface geometries [S1]. It builds on [Outline and Contour Generation](4137-outline-and-contour-generation.md) by integrating curvature estimates into the contour detection logic and lit sphere map lookups.
+Curvature-Controlled Style Contours is an analytical-style contour generation method that regulates contour thickness based on the normal curvature along the view direction to prevent uncontrolled variation in thickness caused by the difference between flat and fine structures [S1]. Unlike standard dot-product contours which produce lines that are too thick on flat surfaces and too thin on fine structures, this method ensures roughly constant image-space thickness [S1, S2]. It builds on [Outline and Contour Generation](4137-outline-and-contour-generation.md) by introducing a curvature-aware threshold condition.
 
 ## How it works
-**Inputs:** Volumetric scalar field, view vector $v$, user-defined thickness parameter $T$, step size $s$ along the viewing ray.
-**Outputs:** Contour color for each sample point.
+**Inputs and Outputs:**
+*   **Input:** Volumetric scalar field $f(\mathbf{x})$, view vector $\mathbf{v}$, user-defined thickness parameter $T$, and a lit sphere map for style transfer.
+*   **Output:** Rendered image with stylized contours.
 
 **Data Structures:**
-*   **Normal Buffer:** Stores the surface normal $n$ at the current sample point and the previous sample point along the ray.
-*   **Lit Sphere Map:** A 2D texture mapping normal directions to colors.
+*   **Volume Data:** 3D texture or array storing scalar values and pre-computed or on-the-fly normals $\mathbf{n}$.
+*   **Lit Sphere Map:** 2D texture mapping normal directions to style colors.
 
 **Approximation of Normal Curvature ($\kappa_v$):**
-Exact computation of $\kappa_v$ via the geometry tensor (derived from the Hessian matrix) is computationally expensive for fragment programs and requires pre-computation of two additional 3D textures [S1]. Instead, $\kappa_v$ is approximated by the rate of change of the normal direction along the viewing ray [S1]. For a sample at the current position with normal $n_{curr}$ and the previous sample position with normal $n_{prev}$ separated by step size $s$:
-$$ \kappa_v \approx \frac{\| n_{curr} - n_{prev} \|}{s} $$
-This approximation is considered sufficient due to the finite resolution of the volume and introduces negligible additional cost as normals are already evaluated per sample [S1].
+Exact computation of $\kappa_v$ requires the geometry tensor derived from the Hessian matrix, which is too expensive for fragment programs and requires two additional 3D textures for pre-computation [S1]. Instead, $\kappa_v$ is approximated during volume ray casting by calculating the angle between the normal at the current sample point $\mathbf{n}_i$ and the previous normal $\mathbf{n}_{i-1}$ along the viewing ray, divided by the step size $h$ [S1]:
+$$ \kappa_v \approx \frac{\angle(\mathbf{n}_i, \mathbf{n}_{i-1})}{h} $$
+This coarse approximation is sufficient due to the finite resolution of the volume and introduces almost no additional cost as normals are evaluated at every sample point anyway [S1].
 
-**Contour Detection:**
-A sample is defined to be on a contour if the following condition holds [S1]:
-$$ |n \cdot v| \le \sqrt{T \kappa_v (2 - T \kappa_v)} $$
+**Contour Detection Condition:**
+A sample is defined to be on a contour if the following condition is met [S1]:
+$$ |\mathbf{n} \cdot \mathbf{v}| \le \sqrt{T \kappa_v (2 - T \kappa_v)} $$
 where:
-*   $n$ is the normal at the current sample.
-*   $v$ is the view vector.
+*   $\mathbf{n}$ is the surface normal at the sample point.
+*   $\mathbf{v}$ is the view vector.
 *   $T$ is the user-defined thickness value.
-*   $\kappa_v$ is the approximated normal curvature along the view direction.
+*   $\kappa_v$ is the normal curvature along the view direction.
 
-**Style Integration (Lit Sphere Map Adjustment):**
-To allow contour appearance to vary based on style and normal direction, the coordinates for the lit sphere map lookup are adjusted if the sample falls below the contour threshold [S1]. Let $r = \| n_{x,y} \|$ be the length of the eye-space normal $n$ projected onto the lit sphere map (i.e., the magnitude of the x and y components of the normal in eye space) [S1]. The adjusted radius $r'$ is calculated as [S1]:
+**Style Transfer and Coordinate Adjustment:**
+To allow the contour color to vary based on style transfer functions (e.g., highlighting regions based on normal direction), the coordinates for the lit sphere map lookup are adjusted based on the curvature measure [S1]. If a sample falls below the contour threshold (i.e., is detected as a contour), the projected normal coordinates are pushed outwards along the radius of the sphere [S1].
+
+Let $r = |\mathbf{n}_{x,y}|$ be the length of the eye-space normal $\mathbf{n}$ projected onto the lit sphere map. The adjusted length $r'$ is calculated as [S1]:
 $$ r' = \min(1, \delta r) $$
 where $\delta$ is defined as:
-$$ \delta = 1 - \min\left(1, \frac{\sqrt{T \kappa_v (2 - T \kappa_v)} - |n \cdot v|}{\sqrt{T \kappa_v (2 - T \kappa_v)}}\right) $$
-This pushes the coordinates outwards along the radius of the sphere, allowing for varying contour appearance between different styles and based on normal direction [S1].
+$$ \delta = 1 - \min\left(1, \frac{\sqrt{T \kappa_v (2 - T \kappa_v)} - |\mathbf{n} \cdot \mathbf{v}|}{\sqrt{T \kappa_v (2 - T \kappa_v)}}\right) $$
+This adjustment ensures that contours in highlight regions may appear brighter or distinct, varying based on the normal direction and style [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def curvature_controlled_contour(prev_normal, current_normal, view_vector, thickness, step_size, lit_sphere_map):
-    # 1. Approximate normal curvature along view direction
-    # Note: Normals should be normalized before this step
-    normal_diff = current_normal - prev_normal
-    kappa_v = length(normal_diff) / step_size
+def curvature_controlled_contour(ray_origin, ray_direction, volume, thickness_T, lit_sphere_map):
+    # Initialize previous normal for curvature approximation
+    prev_normal = None
     
-    # Guard against division by zero or invalid curvature values
-    # If kappa_v is 0 or very small, the term under sqrt might be negative or zero
-    # The condition |n.v| <= sqrt(...) handles the threshold logic
-    
-    # 2. Calculate curvature-controlled threshold
-    # Term inside sqrt: T * kappa_v * (2 - T * kappa_v)
-    # This term must be non-negative for real solutions.
-    # If T * kappa_v > 2, the term becomes negative. 
-    # In such cases, the square root is undefined. 
-    # Based on the formula structure, if the term is negative, 
-    # the condition |n.v| <= imaginary is never met for real dot products,
-    # implying no contour. However, typically T is small enough.
-    # We clamp the term to 0 to avoid NaNs if it goes slightly negative due to precision.
-    term = thickness * kappa_v * (2 - thickness * kappa_v)
-    if term < 0:
-        term = 0.0
+    # Ray casting loop
+    for sample_point in ray_cast(ray_origin, ray_direction, volume):
+        # 1. Evaluate scalar and normal at current sample
+        scalar_val = volume.sample(sample_point)
+        current_normal = volume.compute_normal(sample_point)
         
-    threshold = sqrt(term)
-    
-    # 3. Check contour condition
-    dot_product = abs(dot(current_normal, view_vector))
-    is_contour = dot_product <= threshold
-    
-    if is_contour:
-        # 4. Adjust lit sphere map coordinates
-        # Project normal onto xy plane (eye space)
-        normal_xy = vec2(current_normal.x, current_normal.y)
-        r = length(normal_xy)
-        
-        # Avoid division by zero in delta calculation if threshold is 0
-        if threshold > 0:
-            ratio = (threshold - dot_product) / threshold
-            # Clamp ratio to [0, 1] for the inner min
-            clamped_ratio = min(1.0, max(0.0, ratio))
-            delta = 1.0 - clamped_ratio
-        else:
-            delta = 1.0
+        # 2. Approximate normal curvature kappa_v
+        # If this is the first sample or prev_normal is None, kappa_v is 0 or undefined
+        if prev_normal is not None:
+            # Calculate angle between current and previous normal
+            # dot_product returns cosine of the angle
+            cos_angle = dot_product(current_normal, prev_normal)
+            # Clamp to [-1, 1] to avoid numerical errors in acos
+            cos_angle = clamp(cos_angle, -1.0, 1.0)
+            angle = acos(cos_angle)
             
-        r_prime = min(1.0, delta * r)
-        
-        # Normalize the xy direction and scale by r_prime
-        if r > 0:
-            direction_xy = normal_xy / r
-            adjusted_uv = vec2(direction_xy.x * r_prime, direction_xy.y * r_prime)
+            # Step size h is assumed to be constant or known from ray marching
+            # Note: In a real implementation, h must be passed or computed
+            kappa_v = angle / step_size
         else:
-            adjusted_uv = vec2(0.0, 0.0)
+            kappa_v = 0.0
             
-        # Lookup color in lit sphere map using adjusted_uv
-        # Note: Lit sphere map usually expects normalized coordinates or specific mapping.
-        # The text implies pushing outwards along the radius.
-        # Assuming lit_sphere_map takes normalized coordinates or handles the radius.
-        # If the map expects normalized (x,y) where x^2+y^2 <= 1:
-        # We need to ensure the direction is preserved.
-        # The text says "push the coordinates outwards along the radius".
-        # If r_prime < r, we are actually pulling inwards if delta < 1?
-        # Let's re-read: delta = 1 - min(1, ...). 
-        # If dot_product is small (close to 0, i.e., orthogonal), ratio is close to 1.
-        # min(1, ratio) is 1. delta is 0. r_prime is 0.
-        # This pulls the coordinate to the center?
-        # Wait, "push outwards" usually means increasing radius.
-        # Let's check the formula again.
-        # delta = 1 - min(1, (threshold - dot) / threshold)
-        # If dot = 0, ratio = 1, min = 1, delta = 0. r' = 0.
-        # If dot = threshold, ratio = 0, min = 0, delta = 1. r' = r.
-        # So at the edge of the contour (dot=threshold), we use original r.
-        # At the center of the contour (dot=0), we use r'=0.
-        # This seems to pull INWARDS.
-        # However, the text says "push the coordinates outwards".
-        # There might be a misunderstanding of "outwards" or the formula interpretation.
-        # Or perhaps "outwards" refers to the direction of the normal projection?
-        # Regardless, we implement the formula as given.
+        prev_normal = current_normal
         
-        color = lit_sphere_map.sample(adjusted_uv)
-        return color
-    else:
-        # Not a contour, return standard color or background
-        return background_color
+        # 3. Check contour condition
+        # |n . v| <= sqrt(T * kappa_v * (2 - T * kappa_v))
+        dot_nv = abs(dot_product(current_normal, ray_direction))
+        
+        # Guard against negative argument in sqrt if kappa_v is large or T is large
+        # The term (2 - T * kappa_v) must be non-negative for real contours
+        # If T * kappa_v > 2, the sqrt argument is negative, implying no contour or invalid state
+        curvature_term = thickness_T * kappa_v
+        if curvature_term > 2.0:
+            is_contour = False
+        else:
+            threshold = sqrt(curvature_term * (2.0 - curvature_term))
+            is_contour = dot_nv <= threshold
+            
+        # 4. Apply style transfer with curvature-based coordinate adjustment
+        if is_contour:
+            # Project normal onto lit sphere map (x, y components)
+            normal_proj = current_normal.xy
+            r = length(normal_proj)
+            
+            # Calculate delta for coordinate adjustment
+            # Numerator: threshold - |n . v|
+            # Denominator: threshold
+            # Note: If threshold is 0, avoid division by zero
+            if threshold > 1e-6:
+                ratio = (threshold - dot_nv) / threshold
+                delta = 1.0 - min(1.0, ratio)
+            else:
+                delta = 1.0
+                
+            # Adjusted radius
+            r_prime = min(1.0, delta * r)
+            
+            # Normalize adjusted normal to get UV coordinates for lit sphere map
+            # If r_prime is 0, handle degenerate case (e.g., default color)
+            if r_prime > 1e-6:
+                adjusted_normal_xy = normalize(normal_proj) * r_prime
+                # Map to UV coordinates for 2D texture lookup
+                u = adjusted_normal_xy.x * 0.5 + 0.5
+                v = adjusted_normal_xy.y * 0.5 + 0.5
+                contour_color = lit_sphere_map.sample(u, v)
+            else:
+                contour_color = default_color
+                
+            # Composite contour color with volume color
+            return composite(contour_color, volume_color)
+        else:
+            # Standard volume rendering without contour emphasis
+            return volume_color
 ```
 
+**Parameters:**
+*   $T$: User-defined thickness value for the contours [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The approximation of $\kappa_v$ using discrete normals is coarse and not accurate as it does not step along the iso-surface, but it is sufficient for visual purposes [S1].
+*   **Boundaries:** If $T \kappa_v > 2$, the term under the square root becomes negative. This should be handled as a non-contour case or clamped [S1].
+*   **Degenerate Input:** If the threshold is zero (flat surface with zero curvature), the division in $\delta$ calculation must be guarded against division by zero [G].
+
+## Subtopics
+
+### Curvature-Based Feature Contouring
+A technique using transfer functions based on surface curvature to render feature contours with roughly constant image-space thickness, specifically applied to clarify the shape and position of individual bones in small animal imaging [S2]. It is often combined with soft isosurfaces and depth cueing in a five-dimensional transfer function [S2].
+
 ## Operating characteristics
-*   **Time Complexity:** The approximation of $\kappa_v$ adds minimal cost as it only requires the previous normal, which is available during ray casting [S1]. It avoids the expensive Hessian-based geometry tensor computation [S1].
-*   **Memory Complexity:** No additional 3D textures are required for pre-computation, unlike the exact geometry tensor method which would need two additional 3D textures [S1].
-*   **Strengths:** Provides consistent contour thickness across varying surface curvatures, addressing the deficiencies of standard dot-product contours [S1]. It is efficient enough for interactive performance [S1].
-*   **Limitations:** The curvature approximation is coarse because it steps along the viewing ray rather than the iso-surface, but this is deemed sufficient for finite resolution volumes [S1].
-*   **When to use:** When illustrative rendering requires consistent contour emphasis on both flat and fine structures [S1].
-*   **When not to use:** When exact geometric curvature is required for scientific accuracy rather than stylistic consistency [S1].
+*   **Time Complexity:** The approximation of $\kappa_v$ adds minimal overhead compared to standard volume ray casting because normals are already computed at each sample point [S1]. It avoids the expensive reconstruction of second-order derivatives (Hessian) required for exact curvature [S1].
+*   **Memory Complexity:** Does not require additional 3D textures for pre-computed geometry tensors, unlike the exact method proposed by Kindlmann et al. [S1].
+*   **Performance:** Allows for interactive performance, whereas the exact geometry tensor approach would not [S1].
+*   **Strengths:** Produces contours of constant thickness, avoiding the visual artifacts of standard dot-product contours (too thick on flat areas, too thin on fine structures) [S1, S2].
+*   **Limitations:** The curvature measure is an approximation and not geometrically exact [S1]. It is primarily designed for direct volume rendering, whereas exact methods were often restricted to iso-surfaces [S1].
 
 ## Background
-The method was proposed by Kindlmann et al. in [KWTM03] to regulate contours based on normal curvature [S1]. Hadwiger et al. [HSS*05] later circumvented the computational issues of the exact method by restricting themselves to iso-surfaces [S1]. The specific approximation using the angle between subsequent normals along the viewing ray was introduced by Bruckner and Gröller in 2007 [S1].
+The method was proposed by Bruckner and Gröller in 2007 as an improvement over the curvature-controlled contours introduced by Kindlmann et al. in 2003 [S1]. Kindlmann et al. originally used the geometry tensor (from the Hessian) for exact curvature, which was too expensive for interactive volume rendering [S1]. Bruckner and Gröller introduced the normal difference approximation to make the method viable for direct volume rendering [S1]. The technique is used in illustrative volume rendering to enhance the perception of form, particularly in medical imaging contexts such as visualizing bone structures in small animal embryos [S2].
 
 ## Sources
 [S1] Style Transfer Functions for Illustrative Volume Rendering, https://doi.org/10.1111/j.1467-8659.2007.01095.x, fetched 2026-10-26
+[S2] Scientific Visualization in Small Animal Imaging, https://sci.utah.edu/scientific-visualization-in-small-animal-imaging/, fetched 2026-10-27

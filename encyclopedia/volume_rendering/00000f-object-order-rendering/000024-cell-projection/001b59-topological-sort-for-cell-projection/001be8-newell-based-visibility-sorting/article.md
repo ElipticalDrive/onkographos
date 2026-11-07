@@ -11,10 +11,10 @@ Newell-based Visibility Sorting is an algorithm to sort cells into a back-to-fro
 - Output: A sorted list of cells in back-to-front order [S1, S2][S3].
 
 **Data structures:**
-- `cells`: List of cell objects containing vertex coordinates and face definitions.
-- `initial_list`: List of cell indices, initially sorted by rear-most depth.
-- `output_list`: List of cell indices, built incrementally.
-- `moved_flag`: Boolean array of size $n$, initialized to false.
+- `cells`: List of cell objects containing vertex coordinates and face definitions [S1, S2][S3].
+- `initial_list`: List of cell indices, initially sorted by rear-most depth [S1, S2][S3].
+- `output_list`: List of cell indices, built incrementally [S1, S2][S3].
+- `moved_flag`: Boolean array of size $n$, initialized to false [S1, S2][S3].
 - `undisturbed_idx`: Integer tracking the position in `initial_list` after which the initial $z$-sort order remains valid for early termination [S1].
 
 **Steps:**
@@ -26,18 +26,21 @@ Newell-based Visibility Sorting is an algorithm to sort cells into a back-to-fro
       i. Remove $A$ from `initial_list` [S1, S2][S3].
       ii. Append $A$ to `output_list` [S1, S2][S3].
    d. If cell $A$ occludes a cell $B$:
-      i. Move $B$ to the rearmost position on `initial_list` [S1, S2][S3].
+      i. Move $B$ to the rearmost position on `initial_list` [S2, S3][S4, unofficial]. (Note: [S1] specifies moving $B$ to the head of the list instead; the head position is used here to maintain early termination validity [S1].)
       ii. Mark $B$ as having been moved (set `moved_flag[B] = true`) [S1, S2][S3].
       iii. Continue testing with $B$ as the new current cell $A$ [S1, S2][S3].
       iv. If $B$ is moved a second time (i.e., `moved_flag[B]` was already true), it indicates a visibility cycle [S1, S2][S3]. In this case, no visibility sort is possible unless one of the cells in the cycle is subdivided [S1, S2][S3].
 
 **Occlusion Test Sequence:**
 Testing pairs of cells for mutual occlusion is the most expensive part [S1, S2][S3]. A sequence of tests of increasing difficulty is used to eliminate the possibility of occlusion early [S1, S2][S3]. Precompute a bounding box for each cell, defining its extent along the $x$, $y$, and $z$ directions, assuming the viewing direction is along the $z$ axis [S1]. The tests in order are:
-1. The $z$ extent of $B$ is in front of the $z$ extent of $A$.
-2. The $x$ extents of $A$ and $B$ do not overlap on the image plane.
-3. The $y$ extents of $A$ and $B$ do not overlap on the image plane.
-4. All vertices of $B$ lie in front of the plane of one of the front-facing faces of $A$.
-5. All vertices of $A$ lie in back of the plane of one of the back-facing faces of $B$.
+1. The $z$ extent of $B$ is in front of the $z$ extent of $A$ [S1].
+2. The $x$ extents of $A$ and $B$ do not overlap on the image plane [S1].
+3. The $y$ extents of $A$ and $B$ do not overlap on the image plane [S1].
+4. All vertices of $B$ lie in front of the plane of one of the front-facing faces of $A$ [S1].
+5. All vertices of $A$ lie in back of the plane of one of the back-facing faces of $B$ [S1].
+If bounding spheres are prepared for each cell, these tests can be replaced or supplemented by:
+19. The cones from the viewpoint to the bounding spheres of cells $A$ and $B$ are disjoint [S1].
+29. The bounding sphere for $A$ is disjoint from and lies behind the bounding sphere for $B$ [S1].
 If none of these tests eliminates the possibility of $A$ obscuring $B$, perform a definitive search for a separating plane between the cells using linear programming [S1] or search for an intersection between the projections of an edge of $A$ and an edge of $B$ [S1].
 
 **Parameters:**
@@ -65,13 +68,15 @@ def newell_visibility_sort(cells):
         a_idx = initial_list[0]
         a = cells[a_idx]
         occluded_b_idx = None
+        occluded_b_pos = -1
 
-        # Step 2b: Test A against other cells
-        for i in range(1, len(initial_list)):
+        # Step 2b: Test A against other cells, bounded by undisturbed_idx [S1]
+        for i in range(1, undisturbed_idx + 1):
             b_idx = initial_list[i]
             b = cells[b_idx]
             if does_a_occlude_b(a, b):
                 occluded_b_idx = b_idx
+                occluded_b_pos = i
                 break
 
         if occluded_b_idx is None:
@@ -80,15 +85,16 @@ def newell_visibility_sort(cells):
             output_list.append(a_idx)
         else:
             # Step 2d: A occludes B
-            b_idx = occluded_b_idx
-            if moved_flag[b_idx]:
+            if moved_flag[occluded_b_idx]:
                 # Step 2d.iv: Visibility cycle detected
                 raise ValueError("Visibility cycle detected. Subdivision required.")
 
-            moved_flag[b_idx] = True
-            # Step 2d.i: Move B to rearmost position (index 0)
-            initial_list.remove(b_idx)
-            initial_list.insert(0, b_idx)
+            moved_flag[occluded_b_idx] = True
+            # Step 2d.i: Move B to head of list (index 0) [S1]
+            initial_list.pop(occluded_b_pos)
+            initial_list.insert(0, occluded_b_idx)
+            # Update undisturbed_idx: order is valid up to the position B was removed from [S1]
+            undisturbed_idx = occluded_b_pos - 1
             # Step 2d.iii: Continue testing with B (it is now at index 0)
             # Loop continues, next iteration picks B as A
 
@@ -154,11 +160,11 @@ An $O(n)$ topological sort for convex grids [G]. Choose for convex grids where p
 
 ## Operating characteristics
 - **Time Complexity:** $O(n^2)$ pair-wise occlusion tests for a data volume of $n$ cells [S1, S2][S3].
-- **Memory Complexity:** Not given in the sources.
-- **Measured Performance:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources [S1].
+- **Measured Performance:** Not given in the sources [S1].
 - **Scaling:** Quadratic complexity makes it inefficient for large $n$ [S1].
-- **Strengths:** General applicability to polyhedra; simple logic.
-- **Limitations:** $O(n^2)$ complexity; visibility cycles require subdivision.
+- **Strengths:** General applicability to polyhedra [S1].
+- **Limitations:** $O(n^2)$ complexity; visibility cycles require subdivision [S1, S2][S3].
 
 ## Background
 The Newell, Newell, and Sancha sort [11] for polygons was extended to the case of polyhedra in [12] [S1, S2][S3]. It is used for correct back-to-front hardware compositing [S1, S2][S3].

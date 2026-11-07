@@ -1,0 +1,237 @@
+# Substitutive LOD with K-wise Moment-Matched Merging
+
+Also called: Cost-aware merging, Cost-increment relocation, Gaussian Hierarchy, Greedy hierarchical LOD, Joint relaxation LOD, Level of Detail (LOD) via Gaussian Merging, Merged Gaussian LOD
+
+## Overview
+Substitutive LOD with K-wise moment-matched merging is a substitutive level-of-detail technique that reduces the number of Gaussian splats by merging groups of $K$ splats into a single representative Gaussian [S1, unofficial]. It addresses the problem of excessive memory footprint and rendering latency in large-scale 3D Gaussian Splatting scenes, particularly for mobile or web-based visualization [S1, unofficial][S2]. Unlike methods that prune or compress existing Gaussians without replacement, this approach maintains visual fidelity by using moment-matching to ensure the merged Gaussian statistically approximates the merged group, guided by specific cost metrics [S1, unofficial]. It sets itself apart from sibling methods like [CoR-GS](1486-cor-gs.md) or [EffGS](3365-effgs.md) by focusing on a structured, cost-aware hierarchical reduction rather than simple density-based culling or vector quantization [S2].
+
+## How it works
+The method operates on a set of 3D Gaussians $\mathcal{G} = \{g_1, \dots, g_N\}$, where each Gaussian $g_i$ is defined by a mean position $\boldsymbol{\mu}_i$, a covariance matrix $\boldsymbol{\Sigma}_i$ (often parameterized via a rotation $\mathbf{R}_i$ and scale $\mathbf{S}_i$), an opacity $\alpha_i$, and spherical harmonic coefficients for color. The goal is to partition $\mathcal{G}$ into disjoint subsets $\mathcal{G}_1, \dots, \mathcal{G}_M$ where $M \ll N$, and replace each subset with a single merged Gaussian $g'_j$.
+
+### Data Structures
+*   **Gaussian List**: An array of $N$ Gaussians. Each Gaussian $g_i$ stores:
+    *   $\boldsymbol{\mu}_i \in \mathbb{R}^3$: Position.
+    *   $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$: Rotation matrix (orthonormal).
+    *   $\mathbf{s}_i \in \mathbb{R}^3$: Scale vector (positive).
+    *   $\alpha_i \in [0, 1]$: Opacity.
+    *   $\mathbf{c}_i$: Color/SH coefficients.
+*   **Partition Map**: An array of size $N$ mapping each Gaussian index to a cluster ID.
+*   **Cost Matrix**: A symmetric $N \times N$ matrix $C$ where $C_{ij}$ represents the cost of merging Gaussian $i$ and $j$ (or a group containing them).
+
+### Parameters
+*   $K$: The number of splats to merge into one. Typical values are not explicitly fixed in the sources but are chosen based on the desired compression ratio [S1, unofficial].
+*   Cost Metric: One of L2, Cauchy–Schwarz, gKL, W2, MMD, or L∞ [S1, unofficial].
+*   Partitioning Algorithm: Greedy hierarchical, Cost-increment relocation, or Joint relaxation [S1, unofficial].
+
+### Steps
+1.  **Initialization**: Start with the full set of Gaussians $\mathcal{G}$.
+2.  **Cost Calculation**: Compute the pairwise or group-wise merging costs using the selected metric. For two Gaussians $i$ and $j$, the cost is often related to the error introduced by replacing them with their moment-matched mean. The sources list L2, Cauchy–Schwarz, gKL, W2, MMD, and L∞ as valid metrics [S1, unofficial].
+3.  **Partitioning**: Apply one of the three algorithms to form clusters:
+    *   **Greedy Hierarchical (à la Runnalls)**: Iteratively merge the pair (or group) with the lowest cost until the target count is reached. This is computationally expensive but optimal for the chosen metric [S1, unofficial].
+    *   **Cost-Increment Relocation**: A faster approximation that relocates Gaussians to minimize the global cost increment. It matches greedy merging within 5.5% at compression factors of four and above [S1, unofficial].
+    *   **Joint Relaxation**: Optimizes the cluster assignments jointly to minimize the total merging error [S1, unofficial].
+4.  **Moment-Matched Merging**: For each cluster $\mathcal{G}_j$, compute the merged Gaussian $g'_j$.
+    *   **Amplitude (Opacity)**: The opacity $\alpha'_j$ is optimized using L2-optimal amplitude fitting to minimize the rendering error [S1, unofficial].
+    *   **Position and Covariance**: The mean $\boldsymbol{\mu}'_j$ and covariance $\boldsymbol{\Sigma}'_j$ are computed as the weighted moments of the cluster. For a cluster with Gaussians $g_i$ having weights $w_i$ (often $\alpha_i$ or volume-based), the merged mean is:
+        $$ \boldsymbol{\mu}'_j = \frac{\sum_{i \in \mathcal{G}_j} w_i \boldsymbol{\mu}_i}{\sum_{i \in \mathcal{G}_j} w_i} $$
+        The merged covariance is:
+        $$ \boldsymbol{\Sigma}'_j = \frac{\sum_{i \in \mathcal{G}_j} w_i (\boldsymbol{\Sigma}_i + (\boldsymbol{\mu}_i - \boldsymbol{\mu}'_j)(\boldsymbol{\mu}_i - \boldsymbol{\mu}'_j)^T)}{\sum_{i \in \mathcal{G}_j} w_i} $$
+    *   **Color**: The color $\mathbf{c}'_j$ is typically the weighted average of the cluster's colors.
+5.  **Output**: The new set of Gaussians $\mathcal{G}' = \{g'_1, \dots, g'_M\}$ replaces the original set.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def substitutive_lod_merge(gaussians, k, metric, algorithm):
+    """
+    Merge K gaussians into 1 using moment-matching.
+    
+    Args:
+        gaussians: List of Gaussian objects with attributes mu, R, s, alpha, c.
+        k: Number of gaussians to merge.
+        metric: String, one of 'L2', 'Cauchy-Schwarz', 'gKL', 'W2', 'MMD', 'L_infinity'.
+        algorithm: String, one of 'greedy_hierarchical', 'cost_increment', 'joint_relaxation'.
+    
+    Returns:
+        List of merged Gaussian objects.
+    """
+    n = len(gaussians)
+    if n <= k:
+        return gaussians
+
+    # Step 1: Compute Cost Matrix
+    # The cost matrix C[i][j] stores the merging cost between gaussian i and j
+    # or the cost of merging a group. For simplicity, we assume pairwise costs
+    # are aggregated for groups.
+    C = compute_cost_matrix(gaussians, metric)
+
+    # Step 2: Partitioning
+    if algorithm == 'greedy_hierarchical':
+        clusters = greedy_hierarchical_partition(gaussians, C, k)
+    elif algorithm == 'cost_increment':
+        clusters = cost_increment_relocation(gaussians, C, k)
+    elif algorithm == 'joint_relaxation':
+        clusters = joint_relaxation_partition(gaussians, C, k)
+    else:
+        raise ValueError("Unknown algorithm")
+
+    # Step 3: Merge Clusters
+    merged_gaussians = []
+    for cluster in clusters:
+        # Compute weighted moments
+        total_weight = sum(g.alpha for g in cluster)
+        if total_weight == 0:
+            # Handle degenerate case: keep one gaussian or skip
+            merged_gaussians.append(cluster[0])
+            continue
+        
+        mu_prime = sum(g.alpha * g.mu for g in cluster) / total_weight
+        sigma_prime = sum(
+            g.alpha * (g.covariance + np.outer(g.mu - mu_prime, g.mu - mu_prime))
+            for g in cluster
+        ) / total_weight
+        
+        # L2-optimal amplitude fitting for opacity
+        # This involves solving a small linear system or optimization
+        # to find alpha_prime that minimizes rendering error.
+        # For implementation, a simplified weighted average or optimization step is used.
+        alpha_prime = compute_l2_optimal_amplitude(cluster, mu_prime, sigma_prime)
+        
+        # Color is weighted average
+        c_prime = sum(g.alpha * g.c for g in cluster) / total_weight
+        
+        # Reconstruct rotation and scale from sigma_prime
+        R_prime, s_prime = decompose_covariance(sigma_prime)
+        
+        new_g = Gaussian(mu=mu_prime, R=R_prime, s=s_prime, alpha=alpha_prime, c=c_prime)
+        merged_gaussians.append(new_g)
+
+    return merged_gaussians
+
+def compute_cost_matrix(gaussians, metric):
+    """
+    Compute pairwise merging costs.
+    """
+    n = len(gaussians)
+    C = np.zeros((n, n))
+    for i in range(n):
+        for j in range(i + 1, n):
+            C[i][j] = C[j][i] = calculate_metric_cost(gaussians[i], gaussians[j], metric)
+    return C
+
+def calculate_metric_cost(g1, g2, metric):
+    """
+    Calculate the cost of merging g1 and g2 based on the metric.
+    """
+    if metric == 'L2':
+        # L2 distance between means, scaled by covariance
+        return np.linalg.norm(g1.mu - g2.mu)**2
+    elif metric == 'Cauchy-Schwarz':
+        # Cauchy-Schwarz divergence
+        return 1 - (g1.alpha * g2.alpha) / (np.linalg.norm(g1.mu) * np.linalg.norm(g2.mu))
+    elif metric == 'gKL':
+        # Generalized KL divergence
+        return kl_divergence(g1, g2)
+    elif metric == 'W2':
+        # Wasserstein-2 distance
+        return wasserstein_2_distance(g1, g2)
+    elif metric == 'MMD':
+        # Maximum Mean Discrepancy
+        return mmd_distance(g1, g2)
+    elif metric == 'L_infinity':
+        # L-infinity norm
+        return np.max(np.abs(g1.mu - g2.mu))
+    else:
+        raise ValueError(f"Unknown metric: {metric}")
+
+def greedy_hierarchical_partition(gaussians, C, k):
+    """
+    Greedy hierarchical merging similar to Runnalls.
+    """
+    clusters = [[i] for i in range(len(gaussians))]
+    while len(clusters) > k:
+        # Find the pair of clusters with the lowest merging cost
+        min_cost = float('inf')
+        best_pair = None
+        for i in range(len(clusters)):
+            for j in range(i + 1, len(clusters)):
+                cost = compute_cluster_cost(clusters[i], clusters[j], C)
+                if cost < min_cost:
+                    min_cost = cost
+                    best_pair = (i, j)
+        
+        # Merge the best pair
+        i, j = best_pair
+        merged_cluster = clusters[i] + clusters[j]
+        clusters.pop(j)
+        clusters.pop(i)
+        clusters.append(merged_cluster)
+    return clusters
+
+def compute_cluster_cost(cluster_i, cluster_j, C):
+    """
+    Compute the cost of merging two clusters.
+    """
+    # Sum of pairwise costs or a specific cluster-level metric
+    cost = 0
+    for idx_i in cluster_i:
+        for idx_j in cluster_j:
+            cost += C[idx_i][idx_j]
+    return cost
+
+def decompose_covariance(sigma):
+    """
+    Decompose covariance matrix into rotation and scale.
+    """
+    # Eigen decomposition
+    eigenvalues, eigenvectors = np.linalg.eigh(sigma)
+    # Ensure positive eigenvalues
+    eigenvalues = np.maximum(eigenvalues, 1e-6)
+    s = np.sqrt(eigenvalues)
+    R = eigenvectors
+    return R, s
+
+def compute_l2_optimal_amplitude(cluster, mu_prime, sigma_prime):
+    """
+    Compute L2-optimal amplitude for the merged gaussian.
+    """
+    # This is a simplified implementation.
+    # In practice, this might involve solving a least-squares problem
+    # to match the integrated density or rendering contribution.
+    # For now, we use a weighted average as a proxy.
+    total_weight = sum(g.alpha for g in cluster)
+    return sum(g.alpha for g in cluster) / total_weight
+```
+
+### Edge Cases and Pitfalls
+*   **Spectral Lower Bounds**: Spectral lower bounds have explicit limits and counterexamples where they fail to accurately predict merging quality [S1, unofficial].
+*   **Precision**: The method relies on accurate covariance decomposition and moment calculation. Numerical instability can occur if Gaussians are very small or nearly degenerate [S1, unofficial].
+*   **Boundary Conditions**: When merging Gaussians at the boundary of a scene, care must be taken to ensure the merged Gaussian does not extend outside the valid volume if bounded rendering is used.
+
+## Subtopics
+
+### Greedy Hierarchical Partitioning
+A top-down merging strategy that iteratively combines the most similar Gaussians. It is optimal for the chosen cost metric but computationally intensive. Choose when accuracy is paramount and performance allows. [Link to specific algorithm if available, otherwise link to [3DGS](1795-3d-gaussian-splatting.md) for general context].
+
+### Cost-Increment Relocation
+A faster, approximate method that relocates Gaussians to minimize the global cost increment. It matches greedy merging within 5.5% at compression factors of four and above. Choose when performance is critical and slight accuracy loss is acceptable.
+
+### Joint Relaxation
+A method that optimizes cluster assignments jointly. Choose when a balance between speed and accuracy is needed, and the problem structure allows for joint optimization.
+
+## Operating characteristics
+*   **Time Complexity**: Depends on the partitioning algorithm. Greedy hierarchical is $O(N^2 \log N)$ or $O(N^2)$ depending on implementation. Cost-increment relocation is faster, typically $O(N \log N)$ or $O(N)$.
+*   **Memory Complexity**: Reduces memory footprint by a factor of $K$. The cost matrix requires $O(N^2)$ memory, which can be a bottleneck for very large $N$. Sparse approximations or on-the-fly cost calculation can mitigate this.
+*   **Measured Performance**: On synthetic mixtures and full DAPI nuclei fits, cost-increment relocation matches greedy merging within 5.5% at compression factors of four and above. Cost-aware merging beats mass-ranked culling with and without amplitude refit on full fits [S1, unofficial].
+*   **Strengths**: Maintains visual fidelity through moment-matching; flexible cost metrics; effective for mobile/web deployment.
+*   **Limitations**: Computational overhead of cost matrix calculation; potential for visual artifacts if merging is too aggressive; spectral lower bounds may fail in some cases.
+*   **When to Use**: Large-scale scenes with memory constraints; mobile or web-based visualization; when high visual fidelity is required despite compression.
+*   **When Not to Use**: Real-time applications with extremely low latency requirements where even the partitioning overhead is prohibitive; scenes where simple culling is sufficient.
+
+## Background
+The method originates from the need to scale 3D Gaussian Splatting to large scenes, particularly for microscopy and web visualization [S1, unofficial]. It builds on the concept of Gaussian hierarchies introduced by Kerbl et al. [18] and addresses aliasing problems by merging small Gaussians, as proposed by Yan et al. [24] [S2]. The specific cost-metric design space and partitioning algorithms were detailed in the Luxar project's supplementary documents [S1, unofficial]. The method is part of a broader family of LOD techniques for 3DGS, including those by Liu et al. [20], Fan et al. [12], and others [S2].
+
+## Sources
+[S1] Luxar: Gaussian splatting for microscopy and scalable interactive web visualisation of multidimensional scientific data, https://doi.org/10.64898/2026.09.22.753676, fetched 2026-10-26 (unofficial)
+[S2] Virtual memory for 3D Gaussian Splatting, https://zenodo.org/records/19690968, fetched 2026-10-26

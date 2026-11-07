@@ -1,16 +1,25 @@
 # Visibility Culling
 
 ## Overview
-Visibility culling in volume rendering identifies and skips the processing of data regions or rays that do not contribute to the final image, thereby reducing computational load and memory bandwidth usage. It differs from its siblings by focusing on the geometric or scalar-based determination of "visible" vs. "invisible" primitives (cells, voxels, or rays) before expensive integration or rasterization occurs, whereas methods like [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md) operate during the ray-marching process itself.
+Visibility culling in volume rendering identifies and skips the processing of data regions or rays that do not contribute to the final image, thereby reducing computational load and memory bandwidth usage [G]. It differs from its siblings by focusing on the geometric or scalar-based determination of "visible" vs. "invisible" primitives (cells, voxels, or rays) before expensive integration or rasterization occurs, whereas methods like [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md) operate during the ray-marching process itself [G].
 ## Shared principles
-The core mechanism of visibility culling is the evaluation of a binary or probabilistic condition to decide whether a data unit (e.g., a voxel, cell, or ray segment) intersects with the view frustum and the transfer function's opacity range. If the condition evaluates to false, the unit is discarded without performing the volume rendering integral. Common mathematical constructs include bounding volume hierarchies (AABBs) for spatial culling and lookup tables mapping scalar value ranges to opacity existence for attribute culling.
+(empty)
 ## Subtopics
+
+### [Occlusion Clipping with Orthogonal Opacity Map](990-occlusion-clipping-with-orthogonal-opacity-map.md)
+See [Occlusion Clipping with Orthogonal Opacity Map](990-occlusion-clipping-with-orthogonal-opacity-map.md).
+
+### [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md)
+See [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md).
+
+### [Ray Filtering](2681-ray-filtering.md)
+See [Ray Filtering](2681-ray-filtering.md).
 
 ### [Probabilistic Culling](2833-probabilistic-culling.md)
 See [Probabilistic Culling](2833-probabilistic-culling.md).
 
-### [Visibility Feedback with Screen Space Subdivision](3439-visibility-feedback-with-screen-space-subdivision.md)
-See [Visibility Feedback with Screen Space Subdivision](3439-visibility-feedback-with-screen-space-subdivision.md).
+### [Adaptive Multi-Step Empty Voxel Skipping](6289-adaptive-multi-step-empty-voxel-skipping.md)
+See [Adaptive Multi-Step Empty Voxel Skipping](6289-adaptive-multi-step-empty-voxel-skipping.md).
 
 ### Screen Regions
 #### definition
@@ -34,19 +43,28 @@ On a PC with two Xeon E5345 processors, 4GB memory, and a GeForce 8800 GTX (768M
 - Adding the look-up table increases the framerate to ~3.48 fps [S2].
 - Adding the hybrid CPU-GPU mesh traversal mechanism to the look-up table optimization increases the framerate to 3.62 fps [S2].
 
-### Ray Filtering
+### 24-Region View-Dependent Visibility Preprocessing
 #### definition
-A technique that filters rays based on whether they intersect with an alpha mask or an Axis-Aligned Bounding Box (AABB), reducing computation for rays that do not pass through the scene [S3, unofficial].
+A preprocessing technique that decomposes the domain of viewing directions into 24 regions on a directional cube to extract a lower number of potentially visible voxels compared to the standard 6-region decomposition, improving extraction rate and rendering speed [S3, unofficial].
 #### step
-1. Split rays into chunks for processing [S3, unofficial].
-2. For each chunk, if `bbox_only` is False, sample points along the rays and check if any point has alpha > 0 in the alpha mask [S3, unofficial].
-3. If `bbox_only` is True, filter based on AABB intersection only [S3, unofficial].
-#### parameter
-**bbox_only**: A boolean flag. If True, filtering is based on AABB intersection. If False, filtering is based on alpha mask density [S3, unofficial].
+1. Decompose the viewing direction domain into 24 regions based on the signs of the $x$ and $y$ components, assuming the principal component of the viewing direction is the $z$ coordinate [S3, unofficial].
+2. Perform preprocessing for all 24 regions. During rendering, select the appropriate precomputed data structure based on the current viewing direction [S3, unofficial].
+#### formula
+The visibility function $v(i, j, k)$ for the case where $x$ and $y$ components are positive is defined as: $v(i, j, k) = 1$ if $k = 0$ or $\exists l, m \text{ s.t. } i - 1 \leq l \leq i, j - 1 \leq m \leq j, v(l, m, k - 1) = 1, b(l, m, k - 1) = 0$; otherwise 0. This checks only four voxels that could hide the current voxel [S3, unofficial].
+#### number
+On a low resolution dataset, decomposing into 24 regions extracts 1.8% of voxels, compared to 3.4% for 6 regions. On a high resolution volume, it extracts 0.9% compared to 1.8% for 6 regions [S3, unofficial].
+
+### Frustum Culling
+#### step
+Call the C++/CUDA function `_C.mark_visible` with positions, viewmatrix, projmatrix, near_n, and far_n to determine visibility [S4, unofficial].
+#### layout
+Return value: A boolean tensor indicating which points are visible within the frustum defined by viewmatrix, projmatrix, near_n, and far_n [S4, unofficial].
 
 ## Background
-Visibility culling techniques have been developed to address the high computational cost of volume rendering, particularly for large datasets and real-time applications. The concept of using screen regions to optimize rasterization overhead was introduced in the context of cell-based first-hit ray casting [S1, unofficial]. The use of scalar range lookup tables for GPU-based culling was proposed for high-quality, semi-analytical volume rendering of Adaptive Mesh Refinement (AMR) data [S2]. Ray filtering based on alpha masks and bounding boxes is utilized in modern neural rendering pipelines, such as collaborative neural radiance fields [S3, unofficial].
+The concept of using screen regions to optimize rasterization overhead was introduced in the context of cell-based first-hit ray casting [S1, unofficial]. The use of scalar range lookup tables for GPU-based culling was proposed for high-quality, semi-analytical volume rendering of Adaptive Mesh Refinement (AMR) data [S2].
+
 ## Sources
 [S1] (PDF) Cell-Based First-Hit Ray Casting, https://www.researchgate.net/publication/2521319_Cell-Based_First-Hit_Ray_Casting, fetched 2026-10-27 (unofficial)
 [S2] High-Quality, Semi-Analytical Volume Rendering for AMR ..., https://people.freedesktop.org/~marcheu/vis09-amr.pdf, fetched 2026-10-26
-[S3] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)
+[S3] Interactive Volume-Rendering Techniques for Medical Data Visualization, https://doi.org/10.2312/diss.20018138, fetched 2026-10-26 (unofficial)
+[S4] brownvc/gftorf, https://github.com/brownvc/gftorf, fetched 2026-10-27 (unofficial)

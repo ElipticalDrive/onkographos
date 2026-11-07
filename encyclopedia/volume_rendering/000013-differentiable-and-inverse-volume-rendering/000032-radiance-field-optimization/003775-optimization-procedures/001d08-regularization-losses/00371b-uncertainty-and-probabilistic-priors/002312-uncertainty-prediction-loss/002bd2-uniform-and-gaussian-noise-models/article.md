@@ -1,26 +1,26 @@
 # Uniform and Gaussian Noise Models
 Also called: Parametric statistical models for uncertainty visualization
 ## Overview
-Uniform and Gaussian Noise Models are parametric statistical methods used to visualize uncertainty in differentiable volume rendering by approximating the distribution of ensemble samples with a uniform or Gaussian distribution [S1]. They differ from their parent method, Uncertainty Prediction Loss, by explicitly modeling the shape of the noise distribution rather than just penalizing its magnitude, and they differ from [Nonparametric Uncertainty Modeling for DVR](5230-nonparametric-uncertainty-modeling-for-dvr.md) by assuming a specific parametric form (uniform or Gaussian) rather than using empirical quantiles [S1].
+Uniform and Gaussian Noise Models are parametric statistical methods used to visualize uncertainty in differentiable volume rendering by approximating the distribution of ensemble samples with a uniform or Gaussian distribution [S1]. They differ from [Nonparametric Uncertainty Modeling for DVR](5230-nonparametric-uncertainty-modeling-for-dvr.md) by assuming a specific parametric form (uniform or Gaussian) rather than using empirical quantiles [S1].
 ## How it works
 **Inputs and Outputs:**
-- Input: A set of noise samples (ensemble predictions) for each voxel or pixel.
-- Output: Visualized uncertainty using parametric distributions (Uniform or Gaussian) characterized by mean and width/variance.
+- Input: A set of noise samples (ensemble predictions) for each voxel or pixel [G].
+- Output: Visualized uncertainty using parametric distributions (Uniform or Gaussian) characterized by mean and width/variance [S1].
 
 **Data Structures:**
 Not given in the sources.
 
 **Steps:**
-1. Collect noise samples for the target region.
+1. Collect noise samples for the target region [G].
 2. Estimate the mean ($\mu$) and width (for Uniform) or variance ($\sigma^2$, for Gaussian) directly from these noise samples [S1].
-3. Construct the parametric distribution using the estimated parameters.
+3. Construct the parametric distribution using the estimated parameters [G].
 4. Visualize the uncertainty based on this distribution [S1].
 
 **Formulas:**
 Not given in the sources. The sources state that mean and width/variance are estimated from noise samples but do not provide the specific mathematical formulas for the estimation or the rendering integration [S1].
 
 **Parameters:**
-- For Gaussian models, the variance estimated from noise samples is a critical parameter. Adjusting this variance can significantly improve classification results [S1].
+- For Gaussian models, the variance estimated from noise samples is a critical parameter [S1]. Adjusting this variance can significantly improve classification results [S1].
 - For Gaussian Mixture Models (GMMs, a related parametric approach mentioned in the same context), four Gaussians per mixture are used, consuming memory comparable to eight quantiles in nonparametric models [S1].
 
 **Edge cases and pitfalls:**
@@ -32,31 +32,19 @@ Not given in the sources. The sources state that mean and width/variance are est
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pseudocode for estimating parameters from noise samples
-# Note: Specific formulas for estimation are not provided in the source [S1]
-
 def estimate_uniform_params(samples):
-    """
-    Estimates mean and width for a uniform distribution from samples.
-    """
     mean = sum(samples) / len(samples)
     # Width estimation formula not given in sources [S1]
-    width = Not given in the sources
+    width = 0.0  # Not given in sources [S1]
     return mean, width
 
 def estimate_gaussian_params(samples):
-    """
-    Estimates mean and variance for a Gaussian distribution from samples.
-    """
     mean = sum(samples) / len(samples)
     # Variance estimation formula not given in sources [S1]
-    variance = Not given in the sources
+    variance = 0.0  # Not given in sources [S1]
     return mean, variance
 
 def visualize_uncertainty(samples, model_type='gaussian'):
-    """
-    Visualizes uncertainty using parametric models.
-    """
     if model_type == 'uniform':
         mu, w = estimate_uniform_params(samples)
         # Visualization logic using Uniform(mu, w) not given in sources [S1]
@@ -74,8 +62,8 @@ Nonparametric Uncertainty Modeling for DVR is a technique that represents volume
 - **Strengths:** Simple parametric assumption; adjusting Gaussian variance can significantly improve classification results [S1].
 - **Limitations:** Can result in thicker bone rendering and fail to localize specific structures (e.g., right-kidney) compared to nonparametric quantile techniques [S1]. RMSE is sensitive to parameter choice [S1].
 - **Memory:** Not given in the sources for pure Uniform/Gaussian models. GMMs (related) consume memory equal to three times the number of Gaussians [S1].
-- **When to use:** When a simple parametric approximation is sufficient and parameter tuning is feasible [S1].
-- **When not:** When the noise distribution is asymmetric or multimodal, or when precise localization is required [S1].
+- **When to use:** Not given in the sources.
+- **When not:** Not given in the sources.
 ## Background
 Originated in the context of Direct Volume Rendering with Nonparametric Models of Uncertainty, where parametric models (Uniform and Gaussian) were used as baselines or alternatives to nonparametric quantile-based approaches [S1]. The method was evaluated on the Osirix OBELIX dataset for bone and kidney classification [S1].
 ## Sources

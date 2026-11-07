@@ -1,0 +1,137 @@
+# DiffNeRF
+
+Also called: RegNeRF differential formalization, RegNeRF with Eq. (13), Regularization of NeRFs using differential geometry
+
+## Overview
+DiffNeRF is a regularization framework for Neural Radiance Fields (NeRF) that uses differential geometry to improve robustness when training with sparse or inconsistent data [S1, unofficial]. It addresses the problem of MLP overfitting and unrealistic interpolation in few-shot scenarios by modifying the NeRF to represent continuous, infinitely differentiable functions [S1, unofficial]. Unlike its sibling RegNeRF, which approximates gradients via finite differences on patch-based dataloaders, DiffNeRF uses automatic differentiation to compute depth gradients directly from the ray-based NeRF representation, allowing regularization of unseen views without specialized dataloader modifications [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A NeRF MLP $F$ mapping spatial coordinates $\mathbf{x} \in \mathbb{R}^3$ and viewing direction $\mathbf{v} \in \mathbb{R}^2$ (or $\mathbb{R}^3$ normalized) to color $\mathbf{c} \in [0, 1]^3$ and volume density $\sigma \in [0, \infty)$ [S1, unofficial]. Training images and camera parameters.
+*   **Output:** A regularized NeRF model and rendered images/depth maps.
+
+**Data Structures:**
+*   **NeRF MLP:** A multi-layer perceptron. The source specifies replacing the standard ReLU activation with Softplus to ensure the function is continuous and infinitely differentiable [S1, unofficial].
+*   **Ray Discretization:** Each ray $r(t) = \mathbf{o} + t\mathbf{v}$ is discretized into $N$ 3D points $\{\mathbf{x}_i\}_{i=1}^N$, where $\mathbf{x}_i = \mathbf{o} + t_i \mathbf{v}$ and $t_i$ are sampled between minimum and maximum depth [S1, unofficial].
+*   **Transmittance:** $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$, where $\alpha_j = 1 - \exp(-\sigma_j \delta_j)$ [S1, unofficial].
+
+**Parameters:**
+*   **Regularization Weight ($\lambda$):** $2 \times 10^{-4}$ for both LLFF and DTU datasets [S1, unofficial].
+*   **Clipping Value ($g_{max}$):** 20 for LLFF; 5 for DTU [S1, unofficial]. This parameter is used in a differentiable clipping function to preserve sharp edges [S1, unofficial].
+
+**Steps:**
+1.  **Modify Activation:** Replace ReLU in the NeRF MLP with Softplus to enable higher-order differentiation [S1, unofficial].
+2.  **Ray Sampling:** For each training pixel, cast a ray $r(t) = \mathbf{o} + t\mathbf{v}$. Sample $N$ points $\mathbf{x}_i$ along the ray [S1, unofficial].
+3.  **Forward Pass:** Query the MLP to obtain $\sigma_i$ and $\mathbf{c}_i$ for each point. Compute transmittance $T_i$ and rendered color $\mathbf{c}(r)$ using standard volume rendering [S1, unofficial].
+4.  **Depth Estimation:** Compute the expected depth $d(\mathbf{o}, \mathbf{v})$ for the ray. The source notes that while NeRFs are defined by $(\mathbf{o}, \mathbf{v})$, the regularization is conceptually based on image-space gradients. To avoid computing the Jacobian of the camera projection $J_C$, DiffNeRF assumes an orthographic projection model for the regularization term [S1, unofficial].
+5.  **Orthographic Assumption:** Assume a local orthonormal basis $(\mathbf{i}, \mathbf{j})$ of the image plane. The origin is parameterized as $\mathbf{C}(x, y) = x\mathbf{i} + y\mathbf{j}$ (assuming the camera center is at the origin for the basis, or rather, the shift in origin corresponds to image coordinates) [S1, unofficial]. The viewing direction $\mathbf{v}$ is fixed for this local basis.
+6.  **Gradient Computation:** Compute the gradient of the depth with respect to the ray origin $\nabla_{\mathbf{o}} d(\mathbf{o}, \mathbf{v})$ using automatic differentiation [S1, unofficial].
+7.  **Regularization Loss:** Compute the depth regularization loss $L_{depth}$ using the simplified form derived from the orthographic assumption. Since $(\mathbf{i}, \mathbf{j}, \mathbf{v})$ is an orthonormal basis, the squared norm of the image-space gradient $\|\nabla_{(x,y)} \tilde{d}(x, y)\|^2$ is equal to $\|\nabla_{\mathbf{o}} d(\mathbf{o}, \mathbf{v})\|^2 - \langle \nabla_{\mathbf{o}} d(\mathbf{o}, \mathbf{v}), \mathbf{v} \rangle^2$ [S1, unofficial].
+    $$ L_{depth} = \sum_{(\mathbf{o}, \mathbf{v})} \text{clip}\left( \|\nabla_{\mathbf{o}} d(\mathbf{o}, \mathbf{v})\|^2 - \langle \nabla_{\mathbf{o}} d(\mathbf{o}, \mathbf{v}), \mathbf{v} \rangle^2, g_{max} \right) $$
+    The sum is over the rays sampled for the current batch. The source indicates this loss is applied to training views and can be applied to unseen views, though regularizing unseen views without data attachment may encourage "floaters" [S1, unofficial].
+8.  **Optimization:** Minimize the total loss (including photometric loss and $L_{depth}$) using gradient descent [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def softplus(x):
+    return F.softplus(x)
+
+def compute_depth_and_grad(o, v, nerf_model, sample_t):
+    """
+    Computes depth and its gradient w.r.t origin o using autograd.
+    o: (batch, 3) ray origins
+    v: (batch, 3) ray directions
+    sample_t: (batch, N) sampled depths
+    """
+    o.requires_grad_(True)
+    
+    # Discretize ray
+    x = o.unsqueeze(1) + sample_t.unsqueeze(2) * v.unsqueeze(1) # (batch, N, 3)
+    
+    # Query NeRF
+    sigma, color = nerf_model(x, v) # Returns sigma: (batch, N), color: (batch, N, 3)
+    
+    # Compute alpha
+    delta = sample_t[:, 1:] - sample_t[:, :-1]
+    delta = torch.cat([delta, delta[:, -1:]], dim=1) # Handle last interval
+    alpha = 1.0 - torch.exp(-sigma * delta)
+    
+    # Compute transmittance
+    T = torch.cumprod(1.0 - alpha, dim=1)
+    T = torch.cat([torch.ones_like(T[:, :1]), T[:, :-1]], dim=1)
+    
+    # Compute rendered color and depth
+    weights = T * alpha.unsqueeze(2) # (batch, N, 3)
+    rendered_color = torch.sum(weights * color, dim=1)
+    rendered_depth = torch.sum(weights.squeeze(2) * sample_t, dim=1)
+    
+    # Compute gradient of depth w.r.t origin
+    grad_o = torch.autograd.grad(
+        rendered_depth.sum(), o, create_graph=True, retain_graph=True
+    )[0] # (batch, 3)
+    
+    return rendered_color, rendered_depth, grad_o
+
+def diffnerf_depth_loss(o, v, grad_o, g_max):
+    """
+    Computes the simplified depth regularization loss.
+    """
+    # Norm squared of gradient w.r.t origin
+    grad_norm_sq = torch.sum(grad_o ** 2, dim=1)
+    
+    # Projection onto viewing direction
+    proj_v = torch.sum(grad_o * v, dim=1)
+    
+    # Image-space gradient norm squared (orthographic approximation)
+    # ||grad_o||^2 - <grad_o, v>^2
+    img_grad_norm_sq = grad_norm_sq - proj_v ** 2
+    
+    # Differentiable clipping
+    loss = torch.clamp(img_grad_norm_sq, max=g_max)
+    
+    return loss.mean()
+
+def train_step(nerf_model, o, v, gt_color, sample_t, lambda_reg, g_max):
+    # Forward pass
+    pred_color, pred_depth, grad_o = compute_depth_and_grad(o, v, nerf_model, sample_t)
+    
+    # Photometric loss
+    photometric_loss = F.mse_loss(pred_color, gt_color)
+    
+    # Regularization loss
+    reg_loss = diffnerf_depth_loss(o, v, grad_o, g_max)
+    
+    total_loss = photometric_loss + lambda_reg * reg_loss
+    
+    # Backward pass
+    total_loss.backward()
+    
+    return total_loss.item()
+```
+
+## Subtopics
+
+### RegNeRF
+The parent method that uses patch-based finite differences for depth regularization. DiffNeRF is a differential formalization of RegNeRF [S1, unofficial].
+
+### DiffNeRF (Normals)
+An extension of DiffNeRF that regularizes Gaussian or mean curvatures using higher-order operators. It is significantly slower than depth regularization [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** DiffNeRF depth regularization is approximately 16% slower than RegNeRF on an NVIDIA V100 16GB GPU. Performance is ~5000 rays/s for DiffNeRF vs ~6000 rays/s for RegNeRF (without appearance regularization) [S1, unofficial]. Normals regularization is much slower (~1100 rays/s) [S1, unofficial].
+*   **Memory Complexity:** Requires storing gradients for the depth computation, increasing memory usage compared to non-differentiable regularization [S1, unofficial].
+*   **Strengths:** Improves PSNR of reconstructed unseen views by 1dB compared to equivalent RegNeRF and outperforms RegNeRF with appearance regularization by almost 0.5dB on LLFF [S1, unofficial]. Produces smoother depth maps and better separates objects from background [S1, unofficial]. Does not require patch-based dataloaders or sampling additional rays from unseen views [S1, unofficial].
+*   **Limitations:** Regularizing unseen views without data attachment encourages the creation of "floaters" (groups of points with non-zero density disjoint from the scene), particularly in textureless background regions or areas observed by a single camera [S1, unofficial]. Computationally slower than finite-difference methods [S1, unofficial].
+*   **When to use:** When training NeRFs with sparse data (e.g., few views) and needing robust geometry estimation without modifying dataloaders for patch sampling.
+*   **When not to use:** When computational speed is critical and the slight performance drop is unacceptable, or when the scene has large textureless background regions where floaters are a significant issue.
+
+## Background
+DiffNeRF was introduced by Thibaud Ehret et al. in the paper "Regularization of NeRFs using differential geometry" (arXiv:2206.14938, 2022) [S1, unofficial]. It builds on the observation that NeRFs can overfit with insufficient data, leading to poor geometry estimates. The method formalizes the depth regularization proposed in RegNeRF [23] using differential geometry, replacing finite differences with automatic differentiation. It was demonstrated on the LLFF and DTU datasets, showing improved performance in few-shot settings (e.g., 3 input views) [S1, unofficial].
+
+## Sources
+[S1] Regularization of NeRFs using differential geometry, https://doi.org/10.48550/arxiv.2206.14938, fetched 2026-10-29 (unofficial)

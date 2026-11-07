@@ -1,103 +1,203 @@
 # Parallelism and Distribution
-
-
 ## Overview
-Parallelism and Distribution addresses the computational bottleneck of volume rendering by distributing ray casting, compositing, or voxel processing tasks across multiple processors, threads, or networked nodes to achieve real-time or near-real-time frame rates. It differs from sibling acceleration techniques like [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md) or [Visibility Culling](6226-visibility-culling.md), which optimize the work per ray, by instead increasing the total throughput of the rendering pipeline through hardware or cluster-level concurrency.
+Parallelism and Distribution addresses the computational bottleneck of volume rendering by distributing ray casting, compositing, or voxel processing tasks across multiple processors, threads, or networked nodes to achieve real-time or near-real-time frame rates [G]. It differs from sibling acceleration techniques like [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md) or [Visibility Culling](6226-visibility-culling.md), which optimize the work per ray, by instead increasing the total throughput of the rendering pipeline through hardware or cluster-level concurrency [G].
 
 ## Shared principles
-The core mechanism of this family is the decomposition of the rendering problem into independent or semi-independent units of work that can be executed concurrently. Common strategies include:
-1.  **Spatial Decomposition:** Dividing the image plane (e.g., by rows or tiles) or the volume space (e.g., by X-axis slices or bricks) among processing units.
-2.  **Task Scheduling:** Using a central manager or distributed scheduler to assign tasks (such as ray segments or voxel blocks) to available workers, often handling load balancing dynamically.
-3.  **Communication Overhead Management:** Minimizing data transfer between processors, either by keeping data local (shared memory) or by optimizing network traffic (e.g., overlapping communication with computation).
-
-Mathematically, if $N$ is the total number of rays or voxels and $P$ is the number of processors, the ideal speedup is $S = N/P$, subject to Amdahl's Law constraints imposed by serial portions of the code (e.g., final image assembly or synchronization).
+This family inherits the core mechanism and common principles from [Parallel and GPU primitives](771-parallel-and-gpu-primitives.md).
 
 ## Subtopics
 
 ### [Parallel Ray Casting with Segment Lists](2565-parallel-ray-casting-with-segment-lists.md)
-Distributes image rows across MPI ranks and OpenMP threads, using segment lists to skip empty space. Chosen when high-performance cluster rendering of large volumes is required.
+Parallel Ray Casting with Segment Lists is a volume rendering acceleration method that combines spatial decomposition of the image plane with ray-space culling via segment lists to skip empty space. It distributes rendering tasks across multiple processors (MPI ranks) and threads (OpenMP), calculating sampling points based on precomputed segment boundaries rather than iterating every voxel. This approach differs from [Parallel Image Compositing with Overlapping](3554-parallel-image-compositing-with-overlapping.md) by handling visibility culling at the ray level before compositing, and from [Ray Compaction](4039-ray-compaction.md) by retaining the full ray structure but skipping empty intervals explicitly via list iteration rather than compacting active rays into a dense array.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def parallel_ray_casting_segment_lists(width, height, cam_pos, ray_dir_func, volume, config):
+    comm_size = config.comm_size
+    thread_nums = config.thread_nums
+    sampling_rate = config.sampling_rate
+    dims = volume.dims
+    my_rank = config.my_rank
+    
+    # Precompute step length
+    dims_norm = math.sqrt(dims.x**2 + dims.y**2 + dims.z**2)
+    step_len = 1.0 / (sampling_rate * dims_norm)
+    
+    # Precompute block offsets
+    block_offsets = {}
+    for k in range(volume.bricks.k):
+        for j in range(volume.bricks.j):
+            for i in range(volume.bricks.i):
+                block = volume.get_block(k, j, i)
+                if block is None:
+                    block_offsets[(k,j,i)] = -1
+                else:
+                    block_offsets[(k,j,i)] = block.data - volume.buf_base
+
+    # Calculate distribution
+    line_nums = math.ceil(height / comm_size)
+    t_line_nums = math.ceil(line_nums / thread_nums)
+    
+    # Parallel region (conceptual)
+    for t_id in range(thread_nums):
+        for i in range(t_line_nums):
+            row = my_rank + (t_id * t_line_nums + i) * comm_size
+            if row >= height:
+                break
+            
+            for col in range(width):
+                # Calculate ray
+                u = (-0.5 + (col + 0.5) / width) * config.aspect
+                v = -0.5 + (row + 0.5) / height
+                ray_dir = ray_dir_func(u, v)
+                ray_dir_norm = math.sqrt(ray_dir[0]**2 + ray_dir[1]**2 + ray_dir[2]**2)
+                ray_dir = (ray_dir[0]/ray_dir_norm, ray_dir[1]/ray_dir_norm, ray_dir[2]/ray_dir_norm)
+                
+                # Get segment info
+                seg = volume.get_ray_distance(cam_pos, ray_dir)
+                seg_list = volume.get_seg_list(cam_pos, ray_dir)
+                point_list = []
+                
+                # Generate sampling points
+                for s_beg, s_end in seg_list:
+                    # Align s_beg to step grid
+                    aligned_beg = seg.x + math.ceil((s_beg - seg.x) / step_len) * step_len
+                    
+                    current = aligned_beg
+                    while current <= s_end:
+                        point_list.append(current)
+                        current += step_len
+                
+                # Composite pixel (implementation not in source)
+                # color = composite(volume, cam_pos, ray_dir, point_list)
+                # image.set_pixel(row, col, color)
+```
 
 ### [Parallel Image Compositing with Overlapping](3554-parallel-image-compositing-with-overlapping.md)
-Sends ray segments to responsible processors during rendering to reduce network congestion. Chosen for distributed rendering where communication latency is a bottleneck.
+Parallel Image Compositing with Overlapping is a distributed rendering strategy where ray segments are transmitted to their responsible processors immediately upon generation, rather than waiting for local ray-casting to complete. This approach solves the network congestion problem inherent in non-overlapping methods, where all processors send large batches of data simultaneously at the end of the frame. It distinguishes itself from [Parallel Ray Casting with Segment Lists](2565-parallel-ray-casting-with-segment-lists.md) by prioritizing continuous, smaller message transfers over batched delivery, and from [Ray Compaction](4039-ray-compaction.md) by maintaining the full segment list structure for visibility sorting rather than compacting rays into dense arrays.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class RaySegment:
+    def __init__(self, color, opacity, depth):
+        self.color = color
+        self.opacity = opacity
+        self.depth = depth
+
+class LinkedListNode:
+    def __init__(self, segment):
+        self.segment = segment
+        self.next = None
+
+class RayBuffer:
+    def __init__(self, width, height):
+        self.width = width
+        self.height = height
+        self.buckets = [[None for _ in range(width)] for _ in range(height)]
+
+    def add_segment(self, pixel_x, pixel_y, segment):
+        node = LinkedListNode(segment)
+        head = self.buckets[pixel_y][pixel_x]
+        if head is None or head.segment.depth >= segment.depth:
+            node.next = head
+            self.buckets[pixel_y][pixel_x] = node
+        else:
+            current = head
+            while current.next is not None and current.next.segment.depth < segment.depth:
+                current = current.next
+            node.next = current.next
+            current.next = node
+
+def parallel_compositing_overlapping(rank, size, image_width, image_height, volume_data):
+    rows_per_proc = image_height // size
+    start_row = rank * rows_per_proc
+    end_row = start_row + rows_per_proc
+    
+    local_buffer = RayBuffer(image_width, rows_per_proc)
+    
+    for y in range(start_row, end_row):
+        for x in range(image_width):
+            ray = generate_ray(x, y)
+            segments = cast_ray(ray, volume_data)
+            
+            for seg in segments:
+                dest_pixel_x = x
+                dest_pixel_y = y - start_row
+                # Send segment to destination processor
+                # send_segment_to_dest(dest_pixel_x, dest_pixel_y, seg)
+                local_buffer.add_segment(dest_pixel_x, dest_pixel_y, seg)
+    
+    final_subimage = [[0.0, 0.0, 0.0] for _ in range(rows_per_proc)]
+    
+    for y in range(rows_per_proc):
+        for x in range(image_width):
+            head = local_buffer.buckets[y][x]
+            r, g, b, a = 0.0, 0.0, 0.0, 0.0
+            
+            while head is not None:
+                seg = head.segment
+                contrib = seg.opacity * (1 - a)
+                r += contrib * seg.color[0]
+                g += contrib * seg.color[1]
+                b += contrib * seg.color[2]
+                a += contrib
+                head = head.next
+            
+            final_subimage[y][x] = [r, g, b]
+            
+    # Send subimage to host
+    # send_subimage_to_host(final_subimage)
+```
 
 ### [Ray Compaction](4039-ray-compaction.md)
-Compacts active rays on GPU by removing terminated ones using atomic operations. Chosen for GPU-based rendering with high variance in ray termination depths.
+Ray Compaction is a parallel primitive used in volume rendering to filter a list of active rays, removing those that have terminated (e.g., reached the volume boundary or accumulated sufficient opacity) and compacting the remaining "alive" rays into a dense, contiguous buffer. It solves the problem of sparse ray lists causing inefficient memory access and underutilized GPU occupancy in subsequent ray-marching steps. It sets itself apart from siblings like [Parallel Ray Casting with Segment Lists](2565-parallel-ray-casting-with-segment-lists.md) by operating directly on per-ray state arrays using atomic counters rather than hierarchical segment structures, and from [Ray Buffer Reordering](4073-ray-buffer-reordering.md) by focusing on the initial compaction logic rather than the double-buffering swap mechanism.
 
-### [Adaptive Sampling and Resolution](1412-adaptive-sampling-and-resolution.md)
-Dynamically adjusts sampling density based on image variance. Chosen for quality optimization rather than pure speed.
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-### [Kernel Selection](1647-kernel-selection.md)
-Selects optimal rendering kernels based on data characteristics. Chosen for heterogeneous data sets.
+```python
+def compact_rays_kernel(rays_alive_old, rays_t_old, rays_alive, rays_t, alive_counter):
+    n = get_global_thread_id()
+    if n < len(rays_t_old):
+        if rays_t_old[n] >= 0:
+            # Atomic increment of alive_counter
+            idx = alive_counter + 1
+            alive_counter += 1
+            rays_alive[idx] = rays_alive_old[n]
+            rays_t[idx] = rays_t_old[n]
+```
 
-### [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md)
-Stops ray marching early based on opacity. Chosen for transparent volumes.
+### [Manager/Workers Parallel Implementation](6359-manager-workers-parallel-implementation.md)
+A parallel architecture using a worker manager and distant workers for load-balanced cluster execution (e.g., Platform LSF-HPC).
 
-### [Adaptive Refinement for Volume Rendering](1892-adaptive-refinement-for-volume-rendering.md)
-Refines sampling in high-frequency regions. Chosen for detail preservation.
+### [Sort-last Parallel Rendering](6889-sort-last-parallel-rendering.md)
+Divides the dataset into portions, renders each portion separately on different processors, and composites all sub-images at the end.
 
-### [Conservative Early Ray Termination](1949-conservative-early-ray-termination.md)
-Guarantees no visible artifacts from early termination. Chosen for strict visual fidelity.
+### [Sort-middle Parallel Rendering](6893-sort-middle-parallel-rendering.md)
+Distributes primitives between the transformation/lighting stage and the rasterization stage of rendering.
 
-### [Inference Ray Marching and Integration](2148-inference-ray-marching-and-integration.md)
-Optimizes ray marching for neural rendering. Chosen for NeRF-based rendering.
-
-### [Ray-guided volume rendering with missing brick reporting](2815-ray-guided-volume-rendering-with-missing-brick-reporting.md)
-Handles distributed storage with missing data. Chosen for cloud-based volume rendering.
-
-### [Intra-ray Parallelism](3135-intra-ray-parallelism.md)
-Parallelizes sampling along a single ray. Chosen for SIMD architectures.
-
-### [Acceleration Structure Rebuild](3266-acceleration-structure-rebuild.md)
-Rebuilds acceleration structures dynamically. Chosen for animated volumes.
-
-### [Adaptive Sampling Step with Early Ray Termination](4573-adaptive-sampling-step-with-early-ray-termination.md)
-Combines adaptive steps with early termination. Chosen for balanced quality/speed.
-
-### [Spatiotemporal Importance Sampling](4696-spatiotemporal-importance-sampling.md)
-Uses temporal coherence for sampling. Chosen for video rendering.
-
-### [Adaptive Undersampling](5397-adaptive-undersampling.md)
-Reduces samples in low-variance areas. Chosen for performance.
-
-### [Visibility Culling](6226-visibility-culling.md)
-Culls invisible volume parts. Chosen for occlusion-heavy scenes.
-
-### [Adaptive Multi-Step Empty Voxel Skipping](6289-adaptive-multi-step-empty-voxel-skipping.md)
-Skips empty regions with variable steps. Chosen for sparse volumes.
-
-### [Performance Optimization Techniques](6301-performance-optimization-techniques.md)
-General optimization strategies. Chosen as a baseline.
-
-### [Temporal Coherence and Caching](6372-temporal-coherence-and-caching.md)
-Caches previous frame data. Chosen for interactive applications.
+### [Temporal Division of Uniform Resolution Data](7094-temporal-division-of-uniform-resolution-data.md)
 
 ### Coalescing Launch Mode
-**Definition:** A launch mode that coalesces input records into batches to reduce workload, providing expansion (many threads spawned for a single input record) but not thread coalescing for SIMD groups [S1, unofficial]. It does not provide the coalescing capability, but it does provide expansion since many threads can be spawned for a single input record [S1, unofficial].
-
-**Step:** Opportunistically merge input records to reduce workload [S1, unofficial].
-
-**Parameter:** Merge targets: rectangles before drawing, draw call parameters into draw instance call parameters, or draw leaf records to pass a list of leaves to draw to a mesh node [S1, unofficial].
-
-**Layout:** Spawns one workgroup for a variable number of input records [S1, unofficial].
-
-### Manager/Workers Parallel Implementation
-**Definition:** A parallel architecture using a worker manager and distant workers for load-balanced cluster execution (e.g., Platform LSF-HPC) [S2].
-
-**Step:** Workers (distant processes) extract, merge, and dump surfaces or send aggregates to other workers [S2]. The worker manager assigns tasks to workers, using the hierarchical structure to find the next best block to extract or the destination worker for aggregates [S2]. Workers have no consciousness of completed tasks or adjacent block processing status; the manager maintains this state [S2].
-
-**Parameter:** Single Worker Mode: The algorithm can run with no modification using only one worker, which processes and aggregates blocks successively [S2].
+A launch mode that coalesces input records into batches to reduce workload, providing expansion (many threads spawned for a single input record) but not thread coalescing for SIMD groups [S1, unofficial]. It does not provide the coalescing capability, but it does provide expansion since many threads can be spawned for a single input record [S1, unofficial]. It opportunistically merges input records to reduce workload [S1, unofficial]. Merge targets include rectangles before drawing, draw call parameters into draw instance call parameters, or draw leaf records to pass a list of leaves to draw to a mesh node [S1, unofficial]. It spawns one workgroup for a variable number of input records [S1, unofficial].
 
 ### Parallel Volume Partitioning (X-axis split)
-**Definition:** Divides a 3D volume rendering task among multiple CPU threads by splitting the X-axis range into contiguous sections [S3, unofficial].
+Divides a 3D volume rendering task among multiple CPU threads by splitting the X-axis range into contiguous sections [S2, unofficial]. Calculate thread count from system processors: `int threads = max(1, sysinfo.dwNumberOfProcessors - 1);` [S2, unofficial]. Compute X-section width: `float x_section = (2.0f * vw.aspx) / threads;` [S2, unofficial]. For each thread i, set start/end bounds: `thread_args[i].start = -vw.aspx + i * x_section; thread_args[i].end = thread_args[i].start + x_section;` [S2, unofficial]. Launch threads with `_beginthreadex` and wait with `WaitForMultipleObjects` [S2, unofficial]. Each thread iterates X from start to end, Y from -vw.aspy to vw.aspy, Z from -vw.aspz to vw.aspz, stepping by voxel_size [S2, unofficial]. Thread argument struct: `iter_3d_thread_args` contains `float start; float end; voxie_frame_t *vf; point3d voxel_size; int func_idx;` [S2, unofficial].
 
-**Step:** Calculate thread count from system processors: `int threads = max(1, sysinfo.dwNumberOfProcessors - 1);` [S3, unofficial]. Compute X-section width: `float x_section = (2.0f * vw.aspx) / threads;` [S3, unofficial]. For each thread i, set start/end bounds: `thread_args[i].start = -vw.aspx + i * x_section; thread_args[i].end = thread_args[i].start + x_section;` [S3, unofficial]. Launch threads with `_beginthreadex` and wait with `WaitForMultipleObjects` [S3, unofficial]. Each thread iterates X from start to end, Y from -vw.aspy to vw.aspy, Z from -vw.aspz to vw.aspz, stepping by voxel_size [S3, unofficial].
+### Williams Distributed Projection
+The system can be well parallelized [S3, unofficial].
 
-**Layout:** Thread argument struct: `iter_3d_thread_args` contains `float start; float end; voxie_frame_t *vf; point3d voxel_size; int func_idx;` [S3, unofficial].
+### Distributed Data Parallel Training
+Multi-GPU training using PyTorch DDP with NCCL backend [S4, unofficial]. Initialize distributed process group with NCCL backend: `dist.init_process_group("nccl", rank=rank, world_size=world_size)` [S4, unofficial]. Wrap model in DDP: `model = DDP(model.to(rank), device_ids=[rank])` [S4, unofficial]. Use `DistributedSampler` for data loading to ensure each GPU processes unique data [S4, unofficial]. Synchronize epoch for sampler: `train_loader.sampler.set_epoch(epoch)` [S4, unofficial]. Master address is `localhost` and port is `12355` [S4, unofficial]. World size equals number of available CUDA devices: `world_size = torch.cuda.device_count()` [S4, unofficial].
 
 ## Background
-Parallel volume rendering has evolved from early shared-memory multi-threading approaches to distributed cluster rendering. Early work focused on splitting the image plane among CPU cores [S3, unofficial]. Later, distributed approaches using MPI and task schedulers like LSF-HPC were developed to handle large-scale isosurface extraction and volume rendering [S2]. More recently, GPU-based parallelism, including ray compaction and mesh shading coalescing, has become dominant for real-time rendering [S1, unofficial].
+Parallel volume rendering has evolved from early shared-memory multi-threading approaches to distributed cluster rendering [G]. Early work focused on splitting the image plane among CPU cores [S2, unofficial].
 
 ## Sources
 [S1] Real-Time Rendering of Ultra-Large and Ultra-Detailed Virtual World using Voxels, https://hal.science/tel-05803730v1, fetched 2026-10-26 (unofficial)
-[S2] Parallel extraction and simplification of large isosurfaces using an extended tandem algorithm, https://doi.org/10.1016/j.cad.2009.04.016, fetched 2026-10-26
-[S3] jtomori/holographic_fractals, https://github.com/jtomori/holographic_fractals, fetched 2026-10-26 (unofficial)
+[S2] jtomori/holographic_fractals, https://github.com/jtomori/holographic_fractals, fetched 2026-10-26 (unofficial)
+[S3] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)
+[S4] suvadityamuk/NeRF-Experiments, https://github.com/suvadityamuk/NeRF-Experiments, fetched 2026-10-27 (unofficial)

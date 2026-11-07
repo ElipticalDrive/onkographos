@@ -1,0 +1,227 @@
+# SN-SVM Color and Opacity Assignment
+
+Also called: HSV-based Color Assignment with Gradient Factor, Image-centric Color and Opacity Assignment
+
+## Overview
+This method assigns color and opacity to voxel groups identified by SN-SVM classification to enhance visual aesthetics, contrast, and boundary details without ad-hoc user input [S1]. It differs from standard transfer function approaches by deriving opacity and hue variation directly from spatial variance and gradient magnitude, respectively, rather than relying on user-defined scalar-to-RGBA mappings [S1]. It builds on [Semantic Label Colormap Generation](4667-semantic-label-colormap-generation.md) by providing the specific mathematical rules for mapping the semantic labels to RGBA values for direct volume rendering.
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   $Z$: The set of $Z$ user-selected voxel groups (classes) identified by SN-SVM classification.
+    *   For each group $i \in \{1, \dots, Z\}$:
+        *   $\xi_{li}, \xi_{hi}$: Lower and upper hue limits for group $i$.
+        *   $\sigma_i^2$: Spatial variance of group $i$.
+    *   For each voxel $v$ in group $Z_v$:
+        *   $G_x, G_y, G_z$: Gradient values along X, Y, Z directions.
+*   **Outputs:**
+    *   An RGBA texture where each voxel $v$ has a color $(R, G, B)$ and opacity $\alpha$.
+
+**Data Structures:**
+*   **Voxel Data:** 3D grid. Each voxel $v$ stores scalar values and gradient components $(G_x, G_y, G_z)$.
+*   **Group Metadata:** An array or map indexed by group ID $i$ storing:
+    *   $\xi_{li}, \xi_{hi}$: Hue range limits.
+    *   $\sigma_i^2$: Spatial variance.
+    *   $S_i$: Saturation value.
+*   **RGBA Texture:** 3D texture or 2D texture array (depending on implementation) storing $(R, G, B, \alpha)$ for each voxel.
+
+**Parameters:**
+*   **Hue Range Width:** The difference $\xi_{hi} - \xi_{li}$ is fixed at 5% of the hue wheel, which corresponds to $18^\circ$ [S1].
+*   **Opacity Floor:** Opacity values are scaled to a minimum of 0.2 [S1].
+*   **SN-SVM Parameter:** $\eta = 0.3$ (used in the preceding classification step, not directly in color assignment, but defines the groups) [S1].
+
+**Steps:**
+
+1.  **Calculate 3D Gradient Magnitude ($G_v$):**
+    For each voxel $v$, compute the gradient magnitude:
+    $$ G_v = \sqrt{G_x^2 + G_y^2 + G_z^2} $$
+    [S1]
+
+2.  **Normalize Gradient Factor ($z_v$):**
+    For each voxel $v$ belonging to group $Z_v$, find the maximum gradient magnitude within that group:
+    $$ G_{max, Z_v} = \max_{u \in Z_v} G_u $$
+    Then compute the normalized gradient factor:
+    $$ z_v = \frac{G_v}{G_{max, Z_v}} $$
+    [S1]
+
+3.  **Calculate Saturation ($S_i$) for each group:**
+    For each group $i$, compute the saturation based on its spatial variance $\sigma_i^2$:
+    $$ S_i = \frac{1}{1 + \sigma_i^2} $$
+    [S1]
+
+4.  **Calculate Raw Opacity ($O_{iv}$):**
+    For each voxel $v$ in group $i$, calculate the raw opacity using the group's spatial variance $\sigma_i^2$ and the voxel's gradient factor $z_v$:
+    $$ O_{iv} = \left( \frac{\sigma_i^2}{\max_j(\sigma_j^2)} \right) \times (1 + z_v) $$
+    where $\max_j(\sigma_j^2)$ is the maximum spatial variance among all $Z$ groups.
+    [S1]
+
+5.  **Scale Opacity:**
+    Scale the calculated opacity values $O_{iv}$ to ensure they fall between 0.2 and 1.0. Let $O_{min}$ and $O_{max}$ be the minimum and maximum raw opacity values across all voxels in all groups.
+    $$ O'_{iv} = 0.2 + (O_{iv} - O_{min}) \times \frac{0.8}{O_{max} - O_{min}} $$
+    If $O_{max} = O_{min}$, set $O'_{iv} = 0.2$ (or 1.0, but 0.2 is the floor).
+    *Note: The source states "scaled to fall between 0.2 and 1.0" [S1]. The exact normalization formula is not provided, but linear scaling to the range [0.2, 1.0] is the standard interpretation.* [G]
+
+6.  **Calculate Hue ($H_{iv}$):**
+    For each voxel $v$ in group $i$, calculate the hue using the group's hue range and the gradient factor:
+    $$ H_{iv} = \xi_{li} + (\xi_{hi} - \xi_{li}) \times z_v $$
+    [S1]
+
+7.  **Convert to RGB and Form RGBA:**
+    Convert the HSV triplet $(H_{iv}, S_i, V)$ to RGB. The Value $V$ is not explicitly defined in the formulas; typically, $V=1$ (maximum brightness) is assumed if not specified, or derived from other factors. The source does not specify $V$. [G]
+    Append the scaled opacity $O'_{iv}$ to form the RGBA quadruple $(R, G, B, \alpha)$.
+    [S1]
+
+8.  **Generate Texture:**
+    Pass the RGBA texture to the rendering stage (e.g., VTK GPU renderer).
+    [S1]
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def calculate_color_and_opacity(voxels, groups):
+    """
+    voxels: List of voxel objects with attributes:
+        - id: unique identifier
+        - group_id: integer ID of the group it belongs to
+        - gx, gy, gz: gradient components
+    groups: Dictionary mapping group_id to group metadata:
+        - xi_l: lower hue limit
+        - xi_h: upper hue limit
+        - sigma_sq: spatial variance
+    """
+    
+    # Step 1 & 2: Calculate Gradient Magnitude and Normalized Gradient Factor
+    # First, find max gradient per group
+    group_max_grad = {}
+    for v in voxels:
+        gid = v.group_id
+        g_mag = math.sqrt(v.gx**2 + v.gy**2 + v.gz**2)
+        if gid not in group_max_grad or g_mag > group_max_grad[gid]:
+            group_max_grad[gid] = g_mag
+            
+    # Calculate z_v for each voxel
+    for v in voxels:
+        gid = v.group_id
+        g_mag = math.sqrt(v.gx**2 + v.gy**2 + v.gz**2)
+        v.z_v = g_mag / group_max_grad[gid]
+        
+    # Step 3: Calculate Saturation for each group
+    group_saturation = {}
+    for gid, g_meta in groups.items():
+        sigma_sq = g_meta['sigma_sq']
+        group_saturation[gid] = 1.0 / (1.0 + sigma_sq)
+        
+    # Step 4: Calculate Raw Opacity
+    # Find max spatial variance across all groups
+    max_sigma_sq = max(g['sigma_sq'] for g in groups.values())
+    
+    raw_opacities = []
+    for v in voxels:
+        gid = v.group_id
+        sigma_sq = groups[gid]['sigma_sq']
+        z_v = v.z_v
+        # Formula: (sigma_i^2 / max(sigma_j^2)) * (1 + z_v)
+        raw_op = (sigma_sq / max_sigma_sq) * (1.0 + z_v)
+        raw_opacities.append((v.id, raw_op))
+        
+    # Step 5: Scale Opacity to [0.2, 1.0]
+    min_raw = min(op for _, op in raw_opacities)
+    max_raw = max(op for _, op in raw_opacities)
+    
+    scaled_opacities = {}
+    if max_raw == min_raw:
+        # Avoid division by zero; set all to floor
+        for vid, _ in raw_opacities:
+            scaled_opacities[vid] = 0.2
+    else:
+        for vid, raw_op in raw_opacities:
+            # Linear scaling to [0.2, 1.0]
+            scaled_op = 0.2 + (raw_op - min_raw) * (0.8 / (max_raw - min_raw))
+            scaled_opacities[vid] = scaled_op
+            
+    # Step 6: Calculate Hue
+    # Hue range is 18 degrees (5% of 360)
+    hue_range = 18.0
+    
+    hues = {}
+    for v in voxels:
+        gid = v.group_id
+        xi_l = groups[gid]['xi_l']
+        xi_h = groups[gid]['xi_h']
+        z_v = v.z_v
+        # Formula: xi_l + (xi_h - xi_l) * z_v
+        h = xi_l + (xi_h - xi_l) * z_v
+        hues[v.id] = h
+        
+    # Step 7: Convert HSV to RGB and form RGBA
+    # Note: Value V is not specified in source. Assuming V=1.0 as standard for "brightness" 
+    # when not defined, or it might be implicit. [G]
+    rgba_texture = {}
+    for v in voxels:
+        vid = v.id
+        h = hues[vid]
+        s = group_saturation[v.group_id]
+        v_val = 1.0 # Assumed default Value
+        
+        # Convert HSV to RGB
+        r, g, b = hsv_to_rgb(h, s, v_val)
+        
+        alpha = scaled_opacities[vid]
+        
+        rgba_texture[vid] = (r, g, b, alpha)
+        
+    return rgba_texture
+
+def hsv_to_rgb(h, s, v):
+    """
+    Standard HSV to RGB conversion.
+    h: Hue in degrees (0-360)
+    s: Saturation (0-1)
+    v: Value (0-1)
+    """
+    h = h % 360
+    c = v * s
+    x = c * (1 - abs((h / 60.0) % 2 - 1))
+    m = v - c
+    
+    if 0 <= h < 60:
+        r, g, b = c, x, 0
+    elif 60 <= h < 120:
+        r, g, b = x, c, 0
+    elif 120 <= h < 180:
+        r, g, b = 0, c, x
+    elif 180 <= h < 240:
+        r, g, b = 0, x, c
+    elif 240 <= h < 300:
+        r, g, b = x, 0, c
+    else:
+        r, g, b = c, 0, x
+        
+    return (r + m, g + m, b + m)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Single Hue Value:** Using a single hue value per group fails to reveal inner structures. The method uses a hue range modulated by the gradient factor to enhance boundaries [S1].
+*   **Transparency:** Opacity values are scaled to ensure no voxel group becomes completely transparent (floor at 0.2) [S1].
+*   **Value Component:** The source does not specify the Value ($V$) component of the HSV color space. It is assumed to be constant (e.g., 1.0) or derived from other factors not described. [G]
+
+## Operating characteristics
+*   **Time Complexity:** The color and opacity assignment is a linear pass over the voxels ($O(N)$ where $N$ is the number of voxels), involving basic arithmetic operations. The dominant cost is likely the SN-SVM classification step preceding it.
+*   **Memory Complexity:** Requires storing gradient magnitudes and normalized gradient factors for each voxel, plus group metadata. The output is an RGBA texture.
+*   **Performance:** The method uses pre-classification DVR, passing the RGBA texture directly to the GPU. This speeds up rendering compared to post-classification pipelines [S1].
+*   **Strengths:** Enhances visual aesthetics and boundary details without ad-hoc user input. Provides real-time feedback as users select and assign voxels [S1].
+*   **Limitations:** Uses pre-classification DVR, which may result in inferior visual results compared to post-classification pipelines that interpolate scalar values before classification [S1]. Adapting to post-classification would require additional 3D textures for group IDs and max gradient magnitudes, causing slower rendering due to dependent table lookups [S1].
+*   **When to use:** When real-time rendering is prioritized and visual aesthetics are important, and the user can accept the limitations of pre-classification DVR.
+*   **When not to use:** When the highest visual fidelity is required and performance is less critical (post-classification is better).
+
+## Background
+*   **Origin:** The method was proposed in "A Novel Image-centric Approach Toward Direct Volume Rendering" [S1].
+*   **History:** It builds on color harmony theory [Tokumaru et al. 2002] and previous work on ad-hoc color assignment [Liu et al. 2011]. It utilizes SN-SVM classification [Khan et al. 2014a] which is sparser than classical SVM [Camps-Valls and Bruzzone 2005].
+*   **Usage:** Implemented in the proposed image-centric approach using Visualization Toolkit (VTK) for GPU rendering [S1].
+
+## Sources
+[S1] A Novel Image-Centric Approach Toward Direct Volume Rendering, https://doi.org/10.1145/3152875, fetched 2026-10-29

@@ -1,0 +1,512 @@
+--- v012.md
++++ v013.md
+@@ -4,54 +4,43 @@
+ 
+ ## Overview
+-EWA Volume Splatting is a high-quality direct volume rendering technique that eliminates aliasing artifacts by replacing the standard footprint function with a band-limited resampling filter [S1, unofficial][S2][S8, unofficial]. It solves the problem of incorrect visibility determination and high-frequency sampling errors inherent in basic back-to-front splatting, where non-overlapping kernel assumptions lead to visual holes and moiré patterns [S1, S8, unofficial]. It sets itself apart from its parent [Splat Kernels and Footprints](8724-splat-kernels-and-footprints.md) by analytically combining an elliptical Gaussian reconstruction kernel with a Gaussian low-pass filter to produce an alias-free footprint, and from alternatives like [Phong Splatting](2802-phong-splatting.md) by prioritizing correct antialiasing over per-pixel surface shading [S2][S15, unofficial].
++EWA Volume Splatting is a high-quality direct volume rendering technique that eliminates aliasing artifacts by replacing the standard footprint function with a band-limited resampling filter [S1, unofficial][S2][S8, unofficial]. It solves the problem of incorrect visibility determination and high-frequency sampling errors inherent in basic splatting, where reconstruction kernels are assumed non-overlapping [S1, S8, unofficial]. It sets itself apart from its parent [Splat Kernels and Footprints](8724-splat-kernels-and-footprints.md) by combining an elliptical Gaussian reconstruction kernel with a Gaussian low-pass filter to produce an aliasing-free footprint, and from alternatives like [Phong Splatting](2802-phong-splatting.md) by prioritizing correct antialiasing over per-pixel surface shading [S2][S15, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Volume data represented as a set of particles (voxels or samples), each with a position, a 3D elliptical Gaussian reconstruction kernel (defined by a variance matrix $\mathbf{V}$ and weight $w$), and an emission coefficient $c_\lambda$. Camera parameters (viewing transformation $\mathbf{W}$, projection matrix).
+-*   **Output:** A 2D image where each pixel color is the accumulated contribution of splatted resampling filters [S6, S8, unofficial].
++*   **Input:** Volume data represented as a set of particles (voxels or samples), each with a position, color/emission coefficient, and extinction coefficient. A viewing transformation matrix $\mathbf{W}$ and camera parameters (center of projection, image plane).
++*   **Output:** A 2D image where each pixel color is the accumulated contribution of splats composited back-to-front.
+ 
+ **Data Structures:**
+-*   **Particle:** Contains position $\mathbf{p}$, 3x3 variance matrix $\mathbf{V}$, weight $w$, and color/emission $c_\lambda$.
+-*   **Resampling Filter ($\rho_k$):** Defined by a 2x2 covariance matrix $\mathbf{M}_k^{-1}$ (derived from $\hat{\mathbf{V}}_k + \mathbf{V}_h$) and a center $\mathbf{x}_k$ in screen space.
+-*   **Footprint Table:** A 1D lookup table storing values of the exponential function $e^{-\frac{1}{2}r}$ to accelerate rasterization [S8, unofficial].
+-
+-**Numbered Steps:**
+-
+-1.  **Interpret Volume Data:** Treat volume data as a set of absorbing and emitting particles, each represented by a 3D elliptical Gaussian reconstruction kernel [S6, S8, unofficial]:
+-    $$G_{\mathbf{V}}(\mathbf{t}-\mathbf{p}) = \frac{1}{(2\pi)^{3/2}|\mathbf{V}|^{1/2}} e^{-\frac{1}{2}(\mathbf{t}-\mathbf{p})^T \mathbf{V}^{-1}(\mathbf{t}-\mathbf{p})}$$
+-    The kernel is truncated where $(\mathbf{t} - \mathbf{p})^T \mathbf{V}^{-1} (\mathbf{t} - \mathbf{p}) \leq r^2$, with typical cutoff radius $1 \leq r \leq 3$ [S6, unofficial][S11].
+-
+-2.  **Transform to Camera Space:** Map the particle position $\mathbf{p}$ and variance matrix $\mathbf{V}$ from object space to camera space using the rotational part of the viewing transformation $\mathbf{W}$ [S6, S8, unofficial]:
+-    $$\mathbf{u}_k = \mathbf{W}\mathbf{p} + \mathbf{t}_{cam}$$
+-    $$\mathbf{V}_{cam} = \mathbf{W}\mathbf{V}\mathbf{W}^T$$
+-    Camera space coordinates are $\mathbf{u} = (u_0, u_1, u_2)$, with the origin at the center of projection and the image plane at $u_2 = 1$ [S6, unofficial].
+-
+-3.  **Compute Jacobian:** Calculate the Jacobian matrix $\mathbf{J}_{\mathbf{u}_k}$ of the perspective projection at the camera-space position $\mathbf{u}_k$ [S6, unofficial][S11]:
+-    $$\mathbf{J}_{\mathbf{u}_k} = \begin{pmatrix} \frac{1}{u_{k_2}} & 0 & -\frac{u_{k_0}}{u_{k_2}^2} \\ 0 & \frac{1}{u_{k_2}} & -\frac{u_{k_1}}{u_{k_2}^2} \\ \frac{u_{k_0}}{\|\mathbf{u}_k\|} & \frac{u_{k_1}}{\|\mathbf{u}_k\|} & \frac{u_{k_2}}{\|\mathbf{u}_k\|} \end{pmatrix}$$
++*   **Particle:** Contains position $\mathbf{p}$, color $c_\lambda$, extinction $g$, and a 3x3 variance matrix $\mathbf{V}$ defining the 3D elliptical Gaussian kernel shape.
++*   **Resampling Filter ($\rho_k$):** A 2D Gaussian footprint defined by a mean $\mathbf{x}_k$ (projected center) and a 2x2 covariance matrix $\mathbf{M}_k^{-1}$ (derived from $\hat{\mathbf{V}}_k + \mathbf{V}_h$).
++*   **1D Lookup Table:** Stores values of $e^{-r}$ to accelerate Gaussian evaluation during rasterization [S8, unofficial].
++
++**Steps:**
++
++1.  **Interpret Volume Data:** Treat volume data as a set of absorbing and emitting particles [S6, unofficial][S11].
++2.  **Transform to Camera Space:** Map object-space coordinates to camera space using the viewing transformation. Camera space origin is at the center of projection; the image plane is at $u_2 = 1$ [S6, unofficial][S11].
++    $$ \mathbf{u}_k = \mathbf{W} \mathbf{p}_k + \mathbf{t} $$
++    (Note: $\mathbf{W}$ is the rotational part of the viewing transformation [S6, unofficial][S11]).
++3.  **Compute Jacobian:** Calculate the Jacobian matrix $\mathbf{J}_{\mathbf{u}_k}$ of the perspective projection at point $\mathbf{u}_k$ [S6, unofficial][S11].
++    $$ \mathbf{J}_{\mathbf{u}_k} = \begin{pmatrix} \frac{1}{u_{k_2}} & 0 & -\frac{u_{k_0}}{u_{k_2}^2} \\ 0 & \frac{1}{u_{k_2}} & -\frac{u_{k_1}}{u_{k_2}^2} \\ \frac{u_{k_0}}{\|\mathbf{u}_k\|} & \frac{u_{k_1}}{\|\mathbf{u}_k\|} & \frac{u_{k_2}}{\|\mathbf{u}_k\|} \end{pmatrix} $$
+     where $\|\mathbf{u}_k\| = \sqrt{u_{k_0}^2 + u_{k_1}^2 + u_{k_2}^2}$ [S6, unofficial][S11].
+-
+-4.  **Transform Variance to Image Space:** Transform the camera-space variance matrix to image space using the Jacobian [S6, unofficial][S11]:
+-    $$\mathbf{V}_k = \mathbf{J}_{\mathbf{u}_k} \mathbf{V}_{cam} \mathbf{J}_{\mathbf{u}_k}^T$$
+-    Note: The sources use $\hat{\mathbf{V}}_k$ to denote the 2x2 submatrix obtained by skipping the third row and column of the full 3x3 matrix $\mathbf{V}_k$ [S6, unofficial][S11].
+-
+-5.  **Project Center:** Project the voxel center from camera space to screen coordinates $\hat{\mathbf{x}}_k = (x_{k_0}, x_{k_1})$ by perspective division:
+-    $$x_{k_0} = \frac{u_{k_0}}{u_{k_2}}, \quad x_{k_1} = \frac{u_{k_1}}{u_{k_2}}$$
+-    (Assuming normalized device coordinates or appropriate scaling to pixel space) [S8, unofficial].
+-
+-6.  **Compute Resampling Filter:** The EWA volume resampling filter $\rho_k(\mathbf{x})$ is the convolution of the integrated footprint function and a 2D Gaussian low-pass filter with variance matrix $\mathbf{V}_h$ (typically the identity matrix $\mathbf{I}$) [S6, S8, unofficial]:
+-    $$\rho_k(\mathbf{x}) = \frac{1}{2\pi |\mathbf{J}_{\mathbf{u}_k}^{-1}| |\mathbf{W}^{-1}| |\hat{\mathbf{V}}_k + \mathbf{V}_h|^{\frac{1}{2}}} e^{-\frac{1}{2} (\mathbf{x} - \mathbf{x}_k)^T \mathbf{M}_k (\mathbf{x} - \mathbf{x}_k)}$$
+-    where $\mathbf{M}_k = (\hat{\mathbf{V}}_k + \mathbf{V}_h)^{-1}$ [S6, unofficial][S11].
+-    *Note: The normalization factor includes determinants of the inverse Jacobian and viewing transformation to preserve energy [S8, unofficial].*
+-
+-7.  **Rasterize Footprint:** Rasterize the elliptical footprint $\rho_k$ in screen space. This is typically done by evaluating the Gaussian function over the bounding box of the ellipse or using a 1D footprint table with forward differencing for efficiency [S8, unofficial]. The filter is band-limited to respect the Nyquist frequency [S1, unofficial].
+-
+-8.  **Composite:** Sort particles back-to-front based on view-space depth (or use sheet-buffer compositing to reduce popping artifacts) and accumulate contributions into the image buffer [S6, S8, unofficial]. The final intensity is approximated as:
+-    $$(I_\lambda \otimes h)(\hat{\mathbf{x}}) \approx \sum_k c_{\lambda k} o_k g_k \rho_k(\hat{\mathbf{x}})$$
+-    where $o_k$ is the attenuation factor, assumed constant within the footprint support [S8, unofficial].
++4.  **Transform Variance Matrix:** Transform the 3D Gaussian kernel's variance matrix $\mathbf{V}_k$ from object space to image space [S6, unofficial][S11].
++    $$ \mathbf{V}_k^{\text{img}} = \mathbf{J}_{\mathbf{u}_k} \mathbf{W} \mathbf{V}_k \mathbf{W}^T \mathbf{J}_{\mathbf{u}_k}^T $$
++5.  **Derive 2D Covariance:** Obtain the 2x2 variance matrix $\hat{\mathbf{V}}_k$ by skipping the third row and column of $\mathbf{V}_k^{\text{img}}$ [S6, unofficial][S11][S15, unofficial].
++    *   *Note:* A matrix with a hat symbol denotes the result of skipping its third row and column [S6, unofficial][S11].
++6.  **Setup Resampling Filter:** Compute the inverse covariance matrix $\mathbf{M}_k$ for the 2D footprint by adding the low-pass filter variance $\mathbf{V}_h$ (usually the 2x2 identity matrix) to $\hat{\mathbf{V}}_k$ [S6, unofficial][S11].
++    $$ \mathbf{M}_k = (\hat{\mathbf{V}}_k + \mathbf{V}_h)^{-1} $$
++7.  **Project Center:** Project the voxel center $\mathbf{u}_k$ to screen coordinates $\hat{\mathbf{x}}_k = (x_{k_0}, x_{k_1})^T$ via perspective division [S6, unofficial][S11].
++8.  **Rasterize Footprint:** Rasterize the 2D Gaussian footprint $\rho_k(\mathbf{x})$ onto the image plane. The footprint function is:
++    $$ \rho_k(\mathbf{x}) = \frac{1}{2\pi |\mathbf{J}_{\mathbf{u}_k}^{-1}| |\mathbf{W}^{-1}| |\hat{\mathbf{V}}_k + \mathbf{V}_h|^{\frac{1}{2}}} e^{-\frac{1}{2} (\mathbf{x} - \mathbf{x}_k)^T \mathbf{M}_k (\mathbf{x} - \mathbf{x}_k)} $$
++    Rasterization can be performed using forward differencing with a 1D lookup table for the exponential term [S8, unofficial].
++9.  **Composite:** Accumulate splat contributions back-to-front to compute the final image [S6, unofficial][S11].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def ewa_volume_splatting(volume_particles, camera_matrix, projection_matrix, image_width, image_height):
++import math
++
++def ewa_volume_splatting(volume_particles, W, projection_matrix, image_width, image_height):
+     """
+     Renders volume data using EWA Volume Splatting.
+@@ -59,148 +48,259 @@
+     Args:
+         volume_particles: List of dicts with keys:
+-            'pos': (3,) array, object space position
+-            'V': (3,3) array, object space variance matrix
+-            'color': (3,) array, emission coefficient
+-            'extinction': float, absorption coefficient
+-        camera_matrix: (4,4) array, world-to-camera transformation
+-        projection_matrix: (4,4) array, camera-to-clip transformation
++            'p': (x, y, z) object space position
++            'V': 3x3 list of lists (variance matrix in object space)
++            'c': (r, g, b) color
++            'g': extinction coefficient
++        W: 3x3 list of lists (rotational part of viewing transformation)
++        projection_matrix: 4x4 OpenGL-style projection matrix
+         image_width: int
+         image_height: int
+         
+     Returns:
+-        image: (image_height, image_width, 3) array, rendered RGB image
++        2D list of (r, g, b) colors
+     """
+-    # Initialize image buffer
+-    image = np.zeros((image_height, image_width, 3))
+-    
+-    # Extract rotational part of viewing transformation W
+-    # Assuming camera_matrix maps world to camera
+-    W = camera_matrix[:3, :3]
+-    
+-    # Precompute inverse determinants for normalization
+-    # Note: |J^-1| and |W^-1| are constant for all particles if W is rigid rotation
+-    # |W^-1| = 1 since W is orthogonal rotation
+-    inv_det_W = 1.0 
+-    
+-    # Sort particles back-to-front by view-space depth
+-    # View-space depth is the z-component in camera space
+-    for p in volume_particles:
+-        p['cam_pos'] = W @ p['pos'] + camera_matrix[:3, 3]
+-        p['depth'] = p['cam_pos'][2]
+-    
+-    volume_particles.sort(key=lambda x: x['depth'], reverse=True)
+-    
+-    for particle in volume_particles:
+-        u = particle['cam_pos']
+-        u0, u1, u2 = u
+-        V_cam = W @ particle['V'] @ W.T
+-        
+-        # Compute Jacobian J at u
+-        norm_u = np.linalg.norm(u)
+-        J = np.array([
+-            [1/u2, 0, -u0/(u2**2)],
+-            [0, 1/u2, -u1/(u2**2)],
++    # Initialize image buffers
++    # We need to accumulate color and weight for proper blending
++    # Standard splatting assumes non-overlapping or uses back-to-front alpha blending.
++    # EWA typically uses a sheet-buffer or back-to-front accumulation.
++    # For simplicity, we assume back-to-front sorting and alpha blending.
++    
++    # 1. Transform particles to camera space and compute splat parameters
++    splats = []
++    
++    for k, particle in enumerate(volume_particles):
++        p_obj = particle['p']
++        V_obj = particle['V']
++        c = particle['c']
++        g = particle['g']
++        
++        # Transform position to camera space
++        # Assuming W is just rotation, we need translation too. 
++        # For this simplified model, we assume W includes translation or p is already relative.
++        # Standard: u = W * p + t. Here we use W as the full 3x3 rotation and assume 
++        # the camera center is handled by the projection logic or p is relative.
++        # Let's assume W is the 3x3 rotation part and we need the full view matrix.
++        # To keep it self-contained, we assume 'W' passed is the 3x3 rotation.
++        # We need the full view transform. Let's assume a standard camera at origin looking down -Z?
++        # No, the formula uses u_k. Let's assume we have a function to get camera coords.
++        
++        # Simplified: Assume p is already in camera space or W handles it.
++        # The source defines u_k as camera space coords.
++        # Let's assume we have a helper to get u_k from p and W.
++        u_k = transform_to_camera(p_obj, W) # Placeholder for full view transform
++        
++        u0, u1, u2 = u_k
++        
++        # 2. Compute Jacobian J_u_k
++        norm_u = math.sqrt(u0**2 + u1**2 + u2**2)
++        if norm_u == 0:
++            continue # Avoid division by zero
++            
++        J = [
++            [1.0/u2, 0, -u0/(u2**2)],
++            [0, 1.0/u2, -u1/(u2**2)],
+             [u0/norm_u, u1/norm_u, u2/norm_u]
+-        ])
+-        
+-        # Transform variance to image space
+-        V_img = J @ V_cam @ J.T
+-        
+-        # Get 2x2 submatrix (skip 3rd row/col)
+-        V_hat = V_img[:2, :2]
+-        
+-        # Low-pass filter variance (Identity matrix)
+-        V_h = np.eye(2)
+-        
+-        # Compute M_k = (V_hat + V_h)^-1
+-        M_k = np.linalg.inv(V_hat + V_h)
+-        
+-        # Project center to screen
+-        x_k = np.array([u0/u2, u1/u2])
+-        
+-        # Normalization factor
+-        # |J^-1| is determinant of inverse Jacobian
+-        # For perspective projection, the relevant scaling for area is 1/u2^2
+-        # The formula uses |J^-1| |W^-1| |V_hat + V_h|^0.5
+-        # Note: The source formula has |J^-1| in numerator. 
+-        # Determinant of J is 1/(u2^2 * norm_u). So |J^-1| = u2^2 * norm_u.
+-        # However, standard EWA derivations often simplify this. 
+-        # We follow the source formula strictly.
+-        det_J_inv = 1.0 / np.linalg.det(J)
+-        det_sum_V = np.linalg.det(V_hat + V_h)
+-        norm_factor = 1.0 / (2 * np.pi * abs(det_J_inv) * inv_det_W * np.sqrt(det_sum_V))
+-        
+-        # Rasterize the footprint
+-        # Determine bounding box of the ellipse in screen space
+-        # The ellipse is defined by (x - x_k)^T M_k (x - x_k) <= r^2
+-        # We use a cutoff radius r=3 for the Gaussian support
+-        r_cutoff = 3.0
+-        
+-        # Get eigenvalues and eigenvectors of M_k to find extent
+-        eigenvalues, eigenvectors = np.linalg.eigh(M_k)
+-        # Major axis length is r_cutoff / sqrt(min_eigenvalue)
+-        # Minor axis length is r_cutoff / sqrt(max_eigenvalue)
+-        max_extent = r_cutoff / np.sqrt(np.min(eigenvalues))
+-        
+-        # Convert to pixel coordinates (assuming x is in NDC or similar, 
+-        # need to map to pixel space. For simplicity, assume x is already in pixel space 
+-        # or scale factors are included in V. 
+-        # In standard EWA, x is in screen/pixel coordinates. 
+-        # The Jacobian derivation above assumes normalized image plane u2=1.
+-        # We must map u0/u2 to pixel coordinates.
+-        # Let's assume a simple mapping: pixel_x = (x + 1) * width / 2
+-        # This requires knowing the frustum. For this generic implementation, 
+-        # we assume x_k is in pixel coordinates or we apply a scale.
+-        # To be precise, we need the projection matrix to map to pixels.
+-        # Let's assume the input 'projection_matrix' maps camera to clip, 
+-        # and we need to map to pixels.
+-        # For the sake of the algorithm description, we assume x_k is in pixel space.
+-        
+-        x_min = int(max(0, x_k[0] - max_extent))
+-        x_max = int(min(image_width, x_k[0] + max_extent))
+-        y_min = int(max(0, x_k[1] - max_extent))
+-        y_max = int(min(image_height, x_k[1] + max_extent))
+-        
+-        for y in range(y_min, y_max):
+-            for x in range(x_min, x_max):
++        ]
++        
++        # 3. Transform Variance Matrix V_k
++        # V_img = J * W * V_obj * W^T * J^T
++        # Note: Source uses W for rotation. If W is just rotation, we need the full transform.
++        # Assuming W passed is the rotation part.
++        # Matrix multiplication helper
++        V_img = mat_mul(mat_mul(mat_mul(J, W), V_obj), mat_transpose(W))
++        V_img = mat_mul(V_img, mat_transpose(J))
++        
++        # 4. Get 2x2 submatrix V_hat_k
++        V_hat_k = [
++            [V_img[0][0], V_img[0][1]],
++            [V_img[1][0], V_img[1][1]]
++        ]
++        
++        # 5. Setup Resampling Filter M_k
++        # V_h is usually identity matrix
++        V_h = [[1.0, 0.0], [0.0, 1.0]]
++        
++        V_total = [
++            [V_hat_k[0][0] + V_h[0][0], V_hat_k[0][1] + V_h[0][1]],
++            [V_hat_k[1][0] + V_h[1][0], V_hat_k[1][1] + V_h[1][1]]
++        ]
++        
++        M_k = mat_inverse(V_total)
++        
++        # 6. Project Center to Screen
++        # Perspective division
++        x_k = (u0 / u2, u1 / u2)
++        
++        # 7. Compute Normalization Factor
++        # Det(J^-1) * Det(W^-1) * Det(V_total)^0.5
++        # Note: Source formula uses |J^-1| |W^-1|. 
++        # |J^-1| = 1/|J|.
++        det_J = det(J)
++        det_W = det(W)
++        det_V_total = det(V_total)
++        
++        if det_V_total <= 0:
++            continue # Invalid covariance
++            
++        norm_factor = 1.0 / (2.0 * math.pi * abs(det_J) * abs(det_W) * math.sqrt(det_V_total))
++        
++        splats.append({
++            'x_k': x_k,
++            'M_k': M_k,
++            'norm_factor': norm_factor,
++            'c': c,
++            'g': g,
++            'u2': u2 # For sorting
++        })
++        
++    # 8. Sort splats back-to-front (by camera space depth u2)
++    # Note: In camera space, u2 is depth. Larger u2 is further away if looking down -Z?
++    # Standard OpenGL: Camera looks down -Z. u2 < 0 is in front.
++    # Source says "origin u=0 is at center of projection... image plane u2=1".
++    # This implies looking down +Z. So larger u2 is further.
++    # Back-to-front means rendering furthest first.
++    splats.sort(key=lambda s: s['u2'], reverse=True)
++    
++    # 9. Rasterize and Composite
++    image = [[(0.0, 0.0, 0.0, 0.0) for _ in range(image_width)] for _ in range(image_height)]
++    
++    for splat in splats:
++        x_k = splat['x_k']
++        M_k = splat['M_k']
++        norm_factor = splat['norm_factor']
++        c = splat['c']
++        g = splat['g']
++        
++        # Determine bounding box of the ellipse
++        # Eigenvalues of M_k give inverse squared semi-axes.
++        # For simplicity, use a fixed radius based on cutoff r (1-3)
++        # The support is (x - x_k)^T M_k (x - x_k) <= r^2
++        # Approximate bounding box
++        # This is complex to compute exactly without eigen decomposition.
++        # We iterate over a reasonable bounding box around x_k.
++        
++        # Get eigenvalues of M_k to find axes
++        # M_k is 2x2 symmetric
++        a, b = M_k[0][0], M_k[0][1]
++        c_m = M_k[1][1]
++        
++        # Trace and Det
++        tr = a + c_m
++        dt = a*c_m - b*b
++        
++        # Eigenvalues
++        sqrt_disc = math.sqrt(tr*tr - 4*dt)
++        lam1 = (tr + sqrt_disc) / 2.0
++        lam2 = (tr - sqrt_disc) / 2.0
++        
++        # Max radius in screen space
++        # r_max = sqrt(r_cutoff^2 / min(lam1, lam2))
++        min_lam = min(lam1, lam2)
++        if min_lam <= 0:
++            continue
++            
++        r_cutoff = 3.0 # Typical value
++        radius = math.sqrt(r_cutoff / min_lam)
++        
++        x_min = int(max(0, math.floor(x_k[0] - radius)))
++        x_max = int(min(image_width - 1, math.ceil(x_k[0] + radius)))
++        y_min = int(max(0, math.floor(x_k[1] - radius)))
++        y_max = int(min(image_height - 1, math.ceil(x_k[1] + radius)))
++        
++        for y in range(y_min, y_max + 1):
++            for x in range(x_min, x_max + 1):
++                # Evaluate Gaussian
+                 dx = x - x_k[0]
+                 dy = y - x_k[1]
+-                delta = np.array([dx, dy])
+-                
+-                # Evaluate Gaussian
+-                exponent = -0.5 * delta @ M_k @ delta
+-                
+-                # Check cutoff
+-                if exponent > -0.5 * r_cutoff**2:
+-                    weight = norm_factor * np.exp(exponent)
++                
++                # Quadratic form
++                val = dx * (M_k[0][0] * dx + M_k[0][1] * dy) + dy * (M_k[1][0] * dx + M_k[1][1] * dy)
++                
++                if val > r_cutoff**2:
++                    continue
+                     
+-                    # Accumulate color
+-                    # Simplified: assume constant attenuation o_k = 1 for this basic version
+-                    # In full EWA, o_k is precomputed or approximated
+-                    color = particle['color'] * particle['extinction'] * weight
++                # Exponential
++                # Use lookup table or math.exp
++                exp_val = math.exp(-0.5 * val)
++                
++                footprint = norm_factor * exp_val
++                
++                # Alpha blending
++                # I_new = I_old * (1 - alpha) + C * alpha
++                # Here footprint acts as the alpha contribution (scaled by g and c)
++                # Source: I_lambda(x) = sum c_k g_k q_k(x) prod (1 - g_j q_j(x))
++                # Simplified: accumulate color and weight
++                
++                # Current pixel
++                curr_r, curr_g, curr_b, curr_a = image[y][x]
++                
++                # Contribution
++                contrib_r = c[0] * g * footprint
++                contrib_g = c[1] * g * footprint
++                contrib_b = c[2] * g * footprint
++                
++                # Update
++                # Using simple alpha blending for demonstration
++                # In true EWA, the footprint IS the alpha/weight
++                new_a = curr_a + g * footprint
++                if new_a > 1.0:
++                    new_a = 1.0
+                     
+-                    # Additive blending (simplified, no alpha compositing for color)
+-                    # For proper volume rendering, alpha compositing is needed.
+-                    # EWA splatting often uses additive blending for density/color 
+-                    # if alpha is handled separately or if it's density visualization.
+-                    # The source mentions "composited back-to-front".
+-                    # Standard alpha blending: C_out = C_in + C_splat * (1 - A_in)
+-                    # Here we assume simple accumulation for demonstration of the filter.
+-                    image[y, x] += color
+-
++                # Weighted average color
++                if new_a > 0:
++                    new_r = (curr_r * curr_a + contrib_r) / new_a
++                    new_g = (curr_g * curr_a + contrib_g) / new_a
++                    new_b = (curr_b * curr_a + contrib_b) / new_a
++                else:
++                    new_r, new_g, new_b = 0, 0, 0
++                    
++                image[y][x] = (new_r, new_g, new_b, new_a)
++                
+     return image
++
++def transform_to_camera(p, W):
++    # Simplified: Assume W is 3x3 rotation and translation is 0 for this example
++    # In reality, need full 4x4 view matrix
++    return (
++        W[0][0]*p[0] + W[0][1]*p[1] + W[0][2]*p[2],
++        W[1][0]*p[0] + W[1][1]*p[1] + W[1][2]*p[2],
++        W[2][0]*p[0] + W[2][1]*p[1] + W[2][2]*p[2]
++    )
++
++def mat_mul(A, B):
++    return [[sum(A[i][k]*B[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
++
++def mat_transpose(A):
++    return [[A[j][i] for j in range(len(A))] for i in range(len(A[0]))]
++
++def mat_inverse(M):
++    # Inverse of 2x2 matrix
++    a, b = M[0][0], M[0][1]
++    c, d = M[1][0], M[1][1]
++    det = a*d - b*c
++    if det == 0:
++        return None
++    return [[d/det, -b/det], [-c/det, a/det]]
++
++def det(M):
++    if len(M) == 2:
++        return M[0][0]*M[1][1] - M[0][1]*M[1][0]
++    # 3x3
++    a,b,c = M[0]
++    d,e,f = M[1]
++    g,h,i = M[2]
++    return a*(e*i - f*h) - b*(d*i - f*g) + c*(d*h - e*g)
+ ```
+ 
+ **Parameters:**
+-*   **Cutoff radius $r$:** Truncation radius for the Gaussian kernel. Typical value $1 \leq r \leq 3$ [S6, unofficial][S11].
+-*   **Low-pass filter variance $\mathbf{V}_h$:** Usually the identity matrix $\mathbf{I}$ [S6, unofficial][S11].
++*   **Cutoff radius $r$:** The Gaussian kernel is truncated where $(\mathbf{t} - \mathbf{p})^T \mathbf{V}^{-1} (\mathbf{t} - \mathbf{p}) \leq r^2$. Typical value: $1 \leq r \leq 3$ [S6, unofficial][S11].
++*   **Low-pass filter variance $\mathbf{V}_h$:** Usually chosen to be the 2x2 identity matrix [S6, unofficial][S11].
+ *   **Reconstruction Kernel:** 3D Elliptical Gaussian [S9, S15, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Aliasing:** Basic splatting assumes non-overlapping kernels, leading to holes. EWA solves this by overlapping, band-limited filters [S1, S8, unofficial].
+-*   **Numerical Stability:** The central conics approach can be numerically unstable when the projection approaches a line (condition number of inverse mapping increases) [S12, unofficial].
+-*   **Perspective Distortion:** The method relies on a local affine approximation (Jacobian) of the perspective projection. This is accurate for small kernels but may introduce errors for very large or distant splats [S6, unofficial][S11].
+-*   **Non-spherical Kernels:** If 3D kernels are not radially symmetric (e.g., sheared, anisotropic), additional care is required to ensure contributions sum correctly [S9, unofficial].
+-*   **Self-occlusion:** The method typically ignores self-occlusion within a single kernel's support [S8, unofficial].
++*   **Aliasing:** Occurs if reconstruction kernels are assumed non-overlapping but must overlap to avoid artifacts [S1, S8, unofficial].
++*   **Numerical Stability:** The centralized conics approach can be numerically unstable when the projection approaches a line [S12, unofficial].
++*   **Non-symmetric Kernels:** If 3D kernels are not radially symmetric (e.g., sheared, anisotropic), additional care is required to ensure contributions sum to one [S9, unofficial].
++*   **Soft Edges:** Ignoring variations in the attenuation factor means edge aliasing cannot be prevented [S8, unofficial].
+ 
+ ## Subtopics
+@@ -236,25 +336,15 @@
+ A mesh-free rendering pipeline that projects raw point clouds directly to 2D camera views using EWA projection and Z-buffer occlusion, producing RGB images, label maps, and 2D-to-3D index maps without mesh reconstruction. It differs from its parent [EWA Splatting](1069-ewa-splatting.md) by using simplified screen-aligned spherical impostors with isotropic linear falloff, trading anisotropic, correctly band-limited footprints for a formulation that requires no per-point normals or radii.
+ 
+-### [EWA Splatting with kNN Covariance Estimation](4690-ewa-splatting-with-knn-covariance-estimation.md)
+-A rendering method that uses per-point 3D covariance estimated from k-nearest neighbours to project an elliptical weighted average (EWA) shape onto the 2D image plane for denser coverage than simple disk splatting. It builds on [EWA Splatting](1069-ewa-splatting.md) by replacing the simplified spherical impostor with an anisotropic footprint derived from local point cloud geometry, trading the need for explicit surface normals for a statistical estimate of local orientation.
+-
+-### Order Independent EWA Volume Splatting
+-Order Independent EWA Volume Splatting is a novel order independent EWA volume splatting method that unifies the advantages of previous OI techniques and provides an efficient high-speed approximation by exploiting the analytical expression of elliptical Gaussian kernels used for the noise [S16, unofficial]. It computes a fast view-dependent approximation of accumulated densities along viewing directions using a per-pixel projective volume rendering approach, then projects the spatially bound kernel functions directly (splats them) thanks to their analytic representation [S16, unofficial]. Unlike ray marching which requires hundreds of evaluations per pixel and is computationally demanding for procedural noise, this method provides interactive visualization [S16, unofficial]. Unlike EWA volume splatting which requires time-consuming back-to-front ordering and introduces rasterization overhead due to overlapping ellipses, this OI method gets rid of ordering to trade realism for speed [S16, unofficial].
+-
+-### EWA Surface Splatting
+-EWA Surface Splatting is a method where EWA volume splats reduce to surface splats suitable for high-quality iso-surface rendering by flattening the 3D Gaussian kernel along the volume gradient [S9, unofficial]. For each point in object-space, it deforms quadrilaterals texture-mapped with a Gaussian texture to result in the correct screen-space EWA splat after projection [S9, unofficial].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot A)$, where $N$ is the number of particles and $A$ is the average number of pixels covered by a splat footprint. The computation of the covariance matrix and Jacobian is $O(1)$ per particle, but the rasterization of the elliptical footprint is the dominant cost.
+-*   **Memory Complexity:** $O(N)$ to store particle data and footprint tables. The image buffer is $O(W \cdot H)$.
+-*   **Measured Performance:** Approximately 11 seconds per frame for the UNC CT scan, engine, and foot datasets on an 866 MHz Pentium-III processor [S1, S8, S10, unofficial]. Rendering time for the Skull data set was 11 seconds on the same hardware [S1, unofficial].
+-*   **Scaling:** Performance degrades with increasing resolution and particle count. Adaptive EWA splatting can improve performance by simplifying the filter for distant particles [S6, unofficial][S11].
+-*   **Strengths:** High-quality antialiasing without excessive blurring; handles arbitrary elliptical kernels; suitable for regular, rectilinear, and irregular volume datasets; universal primitive for surface and volume data [S2][S8, S15, unofficial].
+-*   **Limitations:** Computationally expensive due to the evaluation of the resampling filter; requires back-to-front sorting or sheet-buffer compositing; numerical instability can occur with extreme perspective projections [S1, S8, S12, unofficial].
+-*   **When to use:** When high-quality, alias-free volume rendering is required, especially for non-spherical kernels or irregular grids.
+-*   **When not to use:** When interactive frame rates are critical and hardware acceleration for EWA filtering is not available, or when simple, fast approximations are sufficient.
++*   **Time Complexity:** The computation of the EWA footprint is expensive due to matrix inversions and determinant calculations for each particle [S6, unofficial][S11]. Adaptive EWA splatting reduces this cost by simplifying the filter for distant particles [S6, unofficial][S11].
++*   **Memory Complexity:** Requires storage for the 1D lookup table and the splat parameters (position, covariance, color, extinction) [S8, unofficial].
++*   **Measured Performance:** Rendering time was approximately 11 seconds per frame on an 866 MHz Pentium-III processor for the UNC CT scan, engine, and foot datasets [S1, S8, S10, unofficial].
++*   **Strengths:** Provides high-quality antialiasing without excessive blurring, handles arbitrary elliptical kernels, and supports perspective projection efficiently [S2][S8, S15, unofficial].
++*   **Limitations:** Computationally expensive compared to basic splatting; assumes self-occlusion is ignored and emission coefficient is constant in the support of each footprint [S8, unofficial].
++*   **When to Use:** When high-quality, aliasing-free volume rendering is required, especially for non-spherical kernels or perspective views [S2][S8, unofficial].
++*   **When Not to Use:** When real-time performance is critical and basic splatting quality is sufficient, or when hardware acceleration for EWA is not available [S6, unofficial].
+ 
+ ## Background
+-EWA Volume Splatting was introduced by Matthias Zwicker, Hanspeter Pfister, Jeroen van Baar, and Markus Gross in 2001 [S8, unofficial]. It is named after Heckbert's Elliptical Weighted Average (EWA) filter for texture mapping due to the similarity in derivation [S7, abstract only, unofficial][S8, unofficial]. The method was presented at IEEE Visualization in October 2001 [S8, unofficial]. It addresses the limitations of earlier splatting methods, such as Westover's framework, which did not handle sampling rate changes due to perspective projections, leading to aliasing artifacts [S8, unofficial]. The technique has been widely adopted as a high-quality baseline for volume splatting and has inspired numerous variants and optimizations, including adaptive EWA splatting and GPU-accelerated implementations [S6, unofficial][S11].
++EWA Volume Splatting was introduced by Matthias Zwicker, Hanspeter Pfister, Jeroen van Baar, and Markus Gross in 2001 [S8, unofficial]. It is named after Heckbert's EWA filter for texture mapping due to the similarity in derivation [S7, abstract only, unofficial][S8, unofficial]. The method addresses the limitations of Westover's original splatting framework, which did not deal with sampling rate changes due to perspective projections, leading to aliasing artifacts [S8, unofficial]. It has been used in various volume rendering applications, including medical imaging (CT scans) and scientific visualization [S8, S10, unofficial].
+ 
+ ## Sources
+@@ -273,4 +363,3 @@
+ [S13] arminkz/PointCloudRendering, https://github.com/arminkz/PointCloudRendering, fetched 2026-10-28 (unofficial)
+ [S14] Volumetric Points - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/teaching/cse616/volPts.pdf, fetched 2026-10-29 (unofficial)
+-[S15] PDF Review of - EWA Splatting: A Novel Framework for Volume Rendering Based ..., https://visgraf.github.io/3D-vision/papers/reports/IMPA_EWA.pdf, fetched 2026-10-29 (unofficial)
+-[S16] Volumetric Spot Noise for Procedural 3D Shell Texture Synthesis, https://hal.science/hal-02413269v1, fetched 2026-10-26 (unofficial)+[S15] PDF Review of - EWA Splatting: A Novel Framework for Volume Rendering Based ..., https://visgraf.github.io/3D-vision/papers/reports/IMPA_EWA.pdf, fetched 2026-10-29 (unofficial)

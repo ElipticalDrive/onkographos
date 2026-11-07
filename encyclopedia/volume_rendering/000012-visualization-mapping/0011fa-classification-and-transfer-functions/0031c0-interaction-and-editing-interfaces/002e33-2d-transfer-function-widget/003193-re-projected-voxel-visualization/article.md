@@ -1,0 +1,247 @@
+# Re-projected Voxel Visualization
+
+Also called: Re-projecting a voxel, TF Domain Voxel Projection, Voxel Re-projection, Voxel projection in transfer function domain
+
+## Overview
+Re-projected Voxel Visualization is an interaction technique that maps a spatial voxel to the transfer function (TF) domain to help users interpret local volume characteristics [S1, S2]. It represents the data value and derivatives at a query position and the eight corner samples of the containing voxel as points in the TF domain [S1, S2]. Unlike standard point probes, it visualizes the local gradient and curvature structure by connecting corner points with edges reflecting spatial connectivity [S1, S2]. This allows users to distinguish between homogeneous regions and boundaries based on the geometric configuration of the projected points [S1, S2].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+1.  A 3D scalar volume dataset $V$ with dimensions $D_x \times D_y \times D_z$.
+2.  A query position $P = (x, y, z)$ in the spatial domain, typically provided by a data probe or clipping plane widget [S1, S2].
+3.  A 3D Transfer Function domain defined by axes: Data Value ($v$), First Derivative magnitude ($g$), and Second Derivative ($H$) [S1, S2].
+
+**Outputs:**
+1.  A visualization in the 2D Transfer Function Widget (parent article) consisting of:
+    *   One "query ball" representing the exact properties at $P$.
+    *   Eight "corner balls" representing the properties at the voxel corners.
+    *   Edges connecting the corner balls to form a cube structure [S1, S2].
+
+### Data Structures
+The visualization relies on the following data points in the TF domain:
+*   **Query Point ($Q$):** A single point $(v_Q, g_Q, H_Q)$.
+*   **Corner Points ($C_i$):** Eight points $(v_i, g_i, H_i)$ for $i \in \{0, \dots, 7\}$, corresponding to the voxel corners.
+*   **Connectivity:** A fixed set of 12 edges forming a cube topology, mapping spatial adjacency to TF domain connections [S1, S2].
+
+### Formulas
+The position of each point in the TF domain is determined by the volume data at the corresponding spatial location.
+
+1.  **Data Value ($v$):** The scalar value from the volume dataset.
+    $$ v = V(x, y, z) $$
+
+2.  **First Derivative Magnitude ($g$):** The magnitude of the gradient vector.
+    $$ g = \|\nabla V(x, y, z)\| = \sqrt{\left(\frac{\partial V}{\partial x}\right)^2 + \left(\frac{\partial V}{\partial y}\right)^2 + \left(\frac{\partial V}{\partial z}\right)^2} $$
+
+3.  **Second Derivative ($H$):** The Laplacian or a specific second derivative component used for curvature indication. The sources specify using the second derivative value for color mapping [S1, S2]. Let $H$ be the relevant second derivative value (e.g., Laplacian $\nabla^2 V$ or a specific axis component) [S1, S2].
+
+4.  **Color Mapping for Second Derivative:** The balls are colored based on the sign of $H$ [S1, S2]:
+    $$
+    Color(H) = \begin{cases} 
+    \text{Blue} & \text{if } H < 0 \\
+    \text{White} & \text{if } H = 0 \\
+    \text{Yellow} & \text{if } H > 0 
+    \end{cases}
+    $$
+
+### Numbered Steps
+1.  **Identify Voxel:** Given query position $P=(x,y,z)$, determine the integer voxel indices $(i, j, k)$ such that $i \le x < i+1$, $j \le y < j+1$, $k \le z < k+1$ [S1, S2].
+2.  **Compute Query Properties:** Calculate $v_Q, g_Q, H_Q$ at position $P$ using interpolation or direct sampling if $P$ aligns with grid points [S1, S2].
+3.  **Identify Corner Samples:** Identify the eight corner positions of the voxel $(i,j,k)$ in the spatial domain [S1, S2].
+4.  **Compute Corner Properties:** For each corner $c \in \{0, \dots, 7\}$, calculate $v_c, g_c, H_c$ from the volume data at that corner [S1, S2].
+5.  **Project to TF Domain:** Map each set of properties to a point in the TF widget:
+    *   Query Ball: $(v_Q, g_Q, H_Q)$
+    *   Corner Balls: $(v_c, g_c, H_c)$ for each corner [S1, S2].
+6.  **Apply Color:** Color each ball (Query and Corners) using the $Color(H)$ function defined above [S1, S2].
+7.  **Draw Edges:** Draw edges between the eight corner balls corresponding to the 12 edges of a cube in the spatial domain [S1, S2].
+8.  **Display:** Render the query ball and the connected cube of corner balls in the 2D Transfer Function Widget [S1, S2].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def re_project_voxel(volume, query_pos, tf_widget):
+    """
+    Projects a voxel containing query_pos into the TF domain.
+    
+    Args:
+        volume: 3D array of scalar values.
+        query_pos: Tuple (x, y, z) in spatial coordinates.
+        tf_widget: Object with methods to add points and edges.
+    """
+    # 1. Identify the voxel containing the query position
+    # Assuming volume indices are integers and coordinates are continuous
+    ix = floor(query_pos[0])
+    iy = floor(query_pos[1])
+    iz = floor(query_pos[2])
+    
+    # 2. Compute properties at the query position
+    # Note: Interpolation method for derivatives is not specified in sources [G]
+    # Using central differences for derivatives if possible, or forward/backward at boundaries
+    v_q = interpolate(volume, query_pos)
+    g_q = gradient_magnitude(volume, query_pos)
+    h_q = second_derivative(volume, query_pos)
+    
+    # 3. Define the 8 corners of the voxel
+    corners = []
+    for dx in [0, 1]:
+        for dy in [0, 1]:
+            for dz in [0, 1]:
+                corner_pos = (ix + dx, iy + dy, iz + dz)
+                corners.append(corner_pos)
+    
+    # 4. Compute properties for each corner
+    corner_points = []
+    for corner_pos in corners:
+        v_c = volume[corner_pos[0], corner_pos[1], corner_pos[2]]
+        g_c = gradient_magnitude(volume, corner_pos)
+        h_c = second_derivative(volume, corner_pos)
+        
+        # 5. Map to TF domain coordinates
+        tf_point = (v_c, g_c, h_c)
+        
+        # 6. Determine color based on H
+        if h_c < 0:
+            color = "Blue"
+        elif h_c == 0:
+            color = "White"
+        else:
+            color = "Yellow"
+            
+        corner_points.append({
+            "pos": tf_point,
+            "color": color,
+            "spatial_index": corner_pos
+        })
+        
+    # 7. Compute properties for the query point in TF domain
+    query_tf_point = (v_q, g_q, h_q)
+    if h_q < 0:
+        query_color = "Blue"
+    elif h_q == 0:
+        query_color = "White"
+    else:
+        query_color = "Yellow"
+        
+    # 8. Render in TF Widget
+    # Draw the query ball
+    tf_widget.add_ball(query_tf_point, color=query_color, size="small")
+    
+    # Draw the corner balls
+    for cp in corner_points:
+        tf_widget.add_ball(cp["pos"], color=cp["color"], size="small")
+        
+    # 9. Connect corners with edges reflecting spatial connectivity
+    # The 12 edges of a cube connecting the 8 corners
+    # Indices 0-7 correspond to the corners list order:
+    # 0:(0,0,0), 1:(1,0,0), 2:(0,1,0), 3:(1,1,0), 4:(0,0,1), 5:(1,0,1), 6:(0,1,1), 7:(1,1,1)
+    edges = [
+        (0, 1), (2, 3), (4, 5), (6, 7),  # Edges along x-axis
+        (0, 2), (1, 3), (4, 6), (5, 7),  # Edges along y-axis
+        (0, 4), (1, 5), (2, 6), (3, 7)   # Edges along z-axis
+    ]
+    
+    for idx1, idx2 in edges:
+        p1 = corner_points[idx1]["pos"]
+        p2 = corner_points[idx2]["pos"]
+        tf_widget.add_edge(p1, p2)
+
+def interpolate(volume, pos):
+    # Trilinear interpolation implementation [G]
+    x, y, z = pos
+    ix, iy, iz = floor(x), floor(y), floor(z)
+    fx, fy, fz = x - ix, y - iy, z - iz
+    
+    # Get corner values
+    v000 = volume[ix, iy, iz]
+    v100 = volume[ix+1, iy, iz]
+    v010 = volume[ix, iy+1, iz]
+    v110 = volume[ix+1, iy+1, iz]
+    v001 = volume[ix, iy, iz+1]
+    v101 = volume[ix+1, iy, iz+1]
+    v011 = volume[ix, iy+1, iz+1]
+    v111 = volume[ix+1, iy+1, iz+1]
+    
+    # Interpolate
+    c00 = lerp(v000, v100, fx)
+    c10 = lerp(v010, v110, fx)
+    c01 = lerp(v001, v101, fx)
+    c11 = lerp(v011, v111, fx)
+    
+    b0 = lerp(c00, c10, fy)
+    b1 = lerp(c01, c11, fy)
+    
+    return lerp(b0, b1, fz)
+
+def lerp(a, b, t):
+    return a + t * (b - a)
+
+def gradient_magnitude(volume, pos):
+    # Central difference approximation [G]
+    x, y, z = pos
+    # Handle boundaries by clamping or using one-sided differences [G]
+    # Simplified for interior points
+    dx = volume[ceil(x)+1, floor(y), floor(z)] - volume[floor(x)-1, floor(y), floor(z)]
+    dy = volume[floor(x), ceil(y)+1, floor(z)] - volume[floor(x), floor(y)-1, floor(z)]
+    dz = volume[floor(x), floor(y), ceil(z)+1] - volume[floor(x), floor(y), floor(z)-1]
+    return sqrt(dx*dx + dy*dy + dz*dz)
+
+def second_derivative(volume, pos):
+    # Laplacian approximation [G]
+    x, y, z = pos
+    # Simplified for interior points
+    lap = (volume[ceil(x)+1, floor(y), floor(z)] + volume[floor(x)-1, floor(y), floor(z)] - 2*volume[floor(x), floor(y), floor(z)] +
+           volume[floor(x), ceil(y)+1, floor(z)] + volume[floor(x), floor(y)-1, floor(z)] - 2*volume[floor(x), floor(y), floor(z)] +
+           volume[floor(x), floor(y), ceil(z)+1] + volume[floor(x), floor(y), floor(z)-1] - 2*volume[floor(x), floor(y), floor(z)])
+    return lap
+```
+
+### Parameters and Typical Values
+*   **Ball Size:** The query ball is described as "small" [S1, S2]. The corner balls are not explicitly sized but are implied to be comparable or slightly larger to form the cube structure [S1, S2].
+*   **Color Map:** Strictly Blue (negative), White (zero), Yellow (positive) for the second derivative axis [S1, S2].
+
+### Edge Cases and Pitfalls
+1.  **Boundary Conditions:** If the query position is near the volume boundary, derivative calculations may require one-sided differences or clamping [G].
+2.  **Interpretation of Configurations:**
+    *   **Arc with Varying Color:** Indicates the probe is at a boundary in the volume [S1, S2].
+    *   **Clustered Points:** Indicates the probe is in a homogeneous region [S1, S2].
+3.  **Precision:** The interpretation relies on the visual distinction between an arc and a cluster. Precision in derivative calculation affects the shape of the projected cube [S1, S2].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Time:** $O(1)$ per query. The method requires computing derivatives at one point and eight corners, which is constant time relative to the volume size.
+*   **Memory:** $O(1)$ auxiliary memory for the visualization state (9 points, 12 edges).
+
+### Measured Performance
+Not given in the sources.
+
+### Scaling
+The visualization scales with the number of active probes. Each probe adds 9 points and 12 edges to the TF widget [S1, S2].
+
+### Strengths and Limitations
+*   **Strengths:** Provides immediate visual feedback on local volume structure (homogeneity vs. boundary) without requiring the user to manually adjust TF control points [S1, S2]. Helps users "read" the volume characteristics [S1, S2].
+*   **Limitations:** The role of the second derivative axis is simpler than the other two, requiring fewer control points, which may limit the complexity of TFs that can be effectively designed using this method alone [S1, S2].
+
+### When to Use
+Use when the user needs to understand the local gradient and curvature structure at a specific probe location to inform TF design [S1, S2].
+
+### When Not to Use
+Not suitable for designing complex TFs that require fine-grained control over the second derivative axis, as the sources note this axis is simpler and needs fewer control points [S1, S2].
+
+## Background
+
+### Origin
+The method was introduced in the context of Interactive Volume Rendering Using Multi-Dimensional Transfer Functions [S1, S2].
+
+### History and Development
+It is part of the "dual-domain interaction" approach, where spatial domain probes are mapped to the TF domain [S1, S2]. The technique builds on the understanding of inter-relationships between data values and derivatives [S1, S2].
+
+### Where It Is Used
+Used in classification widgets within the 2D Transfer Function Widget interface [S1, S2].
+
+## Sources
+
+[S1] PDF Interactive Volume Rendering Using Multi-Dimensional Transfer Functions ..., https://publications.sci.utah.edu/publications/jmk01/simian-paper.pdf, fetched 2026-10-27
+[S2] PDF Interactive Volume Rendering Using Multi-Dimensional Transfer Functions ..., https://collections.lib.utah.edu/dl_files/d4/e4/d4e47bfc09e54eee9f532e4f22b17e9214f4c755.pdf, fetched 2026-10-27

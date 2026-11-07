@@ -1,0 +1,191 @@
+# 3D Gaussian Splatting Differentiable Rasterizer > Backward Pass
+
+Also called: ToF Gaussian Rasterization Backward Pass
+
+## Overview
+The backward pass computes the gradients of the rasterization loss with respect to the 3D Gaussian parameters (means, scales, rotations, SH coefficients, opacities) and camera settings, enabling end-to-end differentiable training of Gaussian Avatars. It extends the standard 3D Gaussian Splatting differentiable rasterizer [Parent](4812-3d-2d-hybrid-gaussian-rasterization-with-fallback-sigma.md) to support Time-of-Flight (ToF) phase data and depth, returning gradients for color, phasor, depth, normal, and accumulated opacity channels.
+
+## How it works
+The backward pass reconstructs the forward pass context from saved tensors, restructures arguments for the CUDA kernel, and invokes the C++/CUDA implementation to compute gradients.
+
+### Inputs and Outputs
+**Inputs:**
+- `raster_settings`: Object containing `bg`, `viewmatrix`, `projmatrix`, `tanfovx`, `tanfovy`, `scale_modifier`, `sh_degree`, `campos`, `near_n`, `far_n`, `depth_range`, `use_view_dependent_phase`, `debug`, `n`.
+- `means3D`: $(N, 3)$ tensor of Gaussian centers.
+- `radii`: $(N,)$ tensor of Gaussian radii.
+- `colors_precomp`: $(N, C_c)$ tensor of precomputed color coefficients.
+- `phasors_precomp`: $(N, C_p)$ tensor of precomputed phasor coefficients.
+- `scales`: $(N, 3)$ tensor of Gaussian scales.
+- `rotations`: $(N, 4)$ tensor of Gaussian quaternions.
+- `cov3Ds_precomp`: $(N, 6)$ tensor of precomputed covariances.
+- `sh`: $(N, K, 3)$ tensor of SH coefficients (if not precomp).
+- `sh_p`: $(N, K, 3)$ tensor of SH coefficients for phasors.
+- `geomBuffer`: Buffer for geometry.
+- `binningBuffer`: Buffer for binning.
+- `imgBuffer`: Buffer for image.
+- `num_rendered`: Integer count of rendered Gaussians.
+- `grad_out_color`: $(H, W, C_c)$ tensor of color gradients.
+- `grad_out_phasor`: $(H, W, C_p)$ tensor of phasor gradients.
+- `grad_out_depth`: $(H, W)$ tensor of depth gradients.
+- `grad_out_normal`: $(H, W, 3)$ tensor of normal gradients.
+- `grad_out_acc`: $(H, W)$ tensor of accumulated opacity gradients.
+- `grad_entropy`: $(H, W)$ tensor of entropy gradients.
+- `grad_depth_distortion`: $(H, W)$ tensor of depth distortion gradients.
+- `grad_amp_distortion`: $(H, W)$ tensor of amplitude distortion gradients.
+- `phase_offset`: Scalar or tensor.
+- `dc_offset`: Scalar or tensor.
+- `optimize_phase_offset`: Boolean.
+- `optimize_dc_offset`: Boolean.
+
+**Outputs (Gradients):**
+- `grad_means3D`: $(N, 3)$
+- `grad_means2D`: $(N, 2)$
+- `grad_sh`: $(N, K, 3)$
+- `grad_sh_p`: $(N, K, 3)$
+- `grad_colors_precomp`: $(N, C_c)$
+- `grad_phasors_precomp`: $(N, C_p)$
+- `grad_opacities`: $(N,)$
+- `grad_scales`: $(N, 3)$
+- `grad_rotations`: $(N, 4)$
+- `grad_cov3Ds_precomp`: $(N, 6)$
+- `grad_phase_offset`: Scalar or None
+- `grad_dc_offset`: Scalar or None
+- `None` (placeholder for consistency)
+
+### Data Structures
+The backward pass relies on buffers saved during the forward pass:
+- `geomBuffer`: Stores Gaussian indices and tile information.
+- `binningBuffer`: Stores binning counts and offsets.
+- `imgBuffer`: Stores per-pixel Gaussian lists and accumulation state.
+- `colors_precomp`, `phasors_precomp`, `means3D`, `scales`, `rotations`, `cov3Ds_precomp`, `radii`, `sh`, `sh_p`: Saved from forward pass.
+
+### Steps
+1. **Restore Context**: Retrieve `num_rendered`, `raster_settings`, and all saved tensors (`colors_precomp`, `phasors_precomp`, `means3D`, `scales`, `rotations`, `cov3Ds_precomp`, `radii`, `sh`, `sh_p`, `geomBuffer`, `binningBuffer`, `imgBuffer`) from the autograd context. Retrieve `phase_offset` and `dc_offset`.
+2. **Restructure Arguments**: Pack arguments into a tuple for the CUDA kernel:
+   ```python
+   args = (
+       raster_settings.bg, means3D, radii, colors_precomp, phasors_precomp,
+       scales, rotations, raster_settings.scale_modifier, cov3Ds_precomp,
+       raster_settings.viewmatrix, raster_settings.projmatrix,
+       raster_settings.tanfovx, raster_settings.tanfovy,
+       grad_out_color, grad_out_phasor, grad_out_depth, grad_out_normal,
+       grad_out_acc, grad_entropy, grad_depth_distortion, grad_amp_distortion,
+       sh, sh_p, raster_settings.sh_degree, raster_settings.campos,
+       geomBuffer, num_rendered, binningBuffer, imgBuffer,
+       raster_settings.debug, raster_settings.near_n, raster_settings.far_n,
+       raster_settings.depth_range, raster_settings.use_view_dependent_phase,
+       phase_offset, dc_offset
+   )
+   ```
+3. **Invoke CUDA Kernel**: Call the backward rasterization function:
+   ```python
+   grad_outputs = _C.rasterize_gaussians_backward(*args)
+   ```
+4. **Construct Gradients Tuple**: Return gradients in the order matching the forward pass inputs. If `optimize_phase_offset` is false, `grad_phase_offset` is `None`. If `optimize_dc_offset` is false, `grad_dc_offset` is `None`.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def backward(ctx, grad_out_color, grad_out_phasor, grad_out_depth, grad_out_normal, grad_out_acc, grad_entropy, grad_depth_distortion, grad_amp_distortion):
+    # Restore context
+    num_rendered = ctx.num_rendered
+    raster_settings = ctx.raster_settings
+    saved_tensors = ctx.saved_tensors
+    colors_precomp = saved_tensors[0]
+    phasors_precomp = saved_tensors[1]
+    means3D = saved_tensors[2]
+    scales = saved_tensors[3]
+    rotations = saved_tensors[4]
+    cov3Ds_precomp = saved_tensors[5]
+    radii = saved_tensors[6]
+    sh = saved_tensors[7]
+    sh_p = saved_tensors[8]
+    geomBuffer = saved_tensors[9]
+    binningBuffer = saved_tensors[10]
+    imgBuffer = saved_tensors[11]
+    phase_offset = ctx.phase_offset
+    dc_offset = ctx.dc_offset
+
+    # Debug mode: deep copy to CPU
+    if raster_settings.debug:
+        args_cpu = deep_copy_to_cpu((
+            raster_settings.bg, means3D, radii, colors_precomp, phasors_precomp,
+            scales, rotations, raster_settings.scale_modifier, cov3Ds_precomp,
+            raster_settings.viewmatrix, raster_settings.projmatrix,
+            raster_settings.tanfovx, raster_settings.tanfovy,
+            grad_out_color, grad_out_phasor, grad_out_depth, grad_out_normal,
+            grad_out_acc, grad_entropy, grad_depth_distortion, grad_amp_distortion,
+            sh, sh_p, raster_settings.sh_degree, raster_settings.campos,
+            geomBuffer, num_rendered, binningBuffer, imgBuffer,
+            raster_settings.debug, raster_settings.near_n, raster_settings.far_n,
+            raster_settings.depth_range, raster_settings.use_view_dependent_phase,
+            phase_offset, dc_offset
+        ))
+        try:
+            grad_outputs = _C.rasterize_gaussians_backward(*args_cpu)
+        except Exception as e:
+            save_snapshot('snapshot_bw.dump', args_cpu)
+            raise e
+    else:
+        args = (
+            raster_settings.bg, means3D, radii, colors_precomp, phasors_precomp,
+            scales, rotations, raster_settings.scale_modifier, cov3Ds_precomp,
+            raster_settings.viewmatrix, raster_settings.projmatrix,
+            raster_settings.tanfovx, raster_settings.tanfovy,
+            grad_out_color, grad_out_phasor, grad_out_depth, grad_out_normal,
+            grad_out_acc, grad_entropy, grad_depth_distortion, grad_amp_distortion,
+            sh, sh_p, raster_settings.sh_degree, raster_settings.campos,
+            geomBuffer, num_rendered, binningBuffer, imgBuffer,
+            raster_settings.debug, raster_settings.near_n, raster_settings.far_n,
+            raster_settings.depth_range, raster_settings.use_view_dependent_phase,
+            phase_offset, dc_offset
+        )
+        grad_outputs = _C.rasterize_gaussians_backward(*args)
+
+    # Construct return tuple
+    grad_means3D = grad_outputs[0]
+    grad_means2D = grad_outputs[1]
+    grad_sh = grad_outputs[2]
+    grad_sh_p = grad_outputs[3]
+    grad_colors_precomp = grad_outputs[4]
+    grad_phasors_precomp = grad_outputs[5]
+    grad_opacities = grad_outputs[6]
+    grad_scales = grad_outputs[7]
+    grad_rotations = grad_outputs[8]
+    grad_cov3Ds_precomp = grad_outputs[9]
+    
+    # Handle phase/dc offset gradients
+    if ctx.optimize_phase_offset:
+        grad_phase_offset = grad_outputs[10]
+    else:
+        grad_phase_offset = None
+        
+    if ctx.optimize_dc_offset:
+        grad_dc_offset = grad_outputs[11]
+    else:
+        grad_dc_offset = None
+        
+    return (
+        grad_means3D, grad_means2D, grad_sh, grad_sh_p, grad_colors_precomp,
+        grad_phasors_precomp, grad_opacities, grad_scales, grad_rotations,
+        grad_cov3Ds_precomp, grad_phase_offset, grad_dc_offset, None
+    )
+```
+
+### Edge Cases and Pitfalls
+- **Debug Mode**: If `raster_settings.debug` is true, arguments are deep-copied to CPU before invocation. If an exception is raised, the CPU copy is saved to `snapshot_bw.dump` and printed [S1, unofficial].
+- **Gradient Order**: The order of returned gradients must match the input arguments of the forward function [S1, unofficial].
+- **Phase/DC Offset**: Gradients for `phase_offset` and `dc_offset` are returned as `None` if their respective optimization flags are false [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: Proportional to the number of rendered Gaussians and pixels, similar to the forward pass.
+- **Memory Complexity**: Requires storing forward pass tensors for gradient computation.
+- **Strengths**: Enables differentiable training of Gaussian parameters including phase and depth.
+- **Limitations**: Debug mode incurs significant overhead due to CPU copying.
+
+## Background
+The backward pass is part of the 3D Gaussian Splatting rasterization implementation extended for Time-of-Flight (ToF) data, as described in the gftorf repository [S1, unofficial].
+
+## Sources
+[S1] brownvc/gftorf, https://github.com/brownvc/gftorf, fetched 2026-10-27 (unofficial)

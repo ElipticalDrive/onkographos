@@ -1,189 +1,205 @@
 # Hierarchical Density Adaptation
 
-Also called: On-the-fly coarse sampling
+Also called: On-the-fly coarse sampling, Point Selection Criteria
 
 ## Overview
-Hierarchical Density Adaptation is a sampling strategy for direct volume ray casting that generates a coarse density estimate from a dense feature grid on the fly to guide importance sampling for fine samples. It solves the problem of missing thin or high-frequency surface details when sampling directly from a dense grid, which can occur if coarse sample points fall between grid cells containing significant geometry. Unlike sibling methods that maintain a dedicated, pre-computed coarse grid or train a separate coarse network, this method derives the coarse density by convolving the existing dense density grid with a non-learnable kernel, thereby avoiding additional memory allocation for coarse structures while ensuring robust surface detection.
+Hierarchical Density Adaptation is a sampling strategy for neural volume rendering that controls rendering density using a hierarchy of sampled data to maintain constant frame rates [S1]. It serves as an alternative to opacity-based adaptive sampling, trading image smoothness for rendering speed by controlling the total number of rendered primitives per frame [S1]. It distinguishes itself from standard hierarchical sampling by generating the coarse density estimate on-the-fly from the dense grid via convolution, rather than relying on a separate, pre-allocated coarse network or grid [S2].
 
 ## How it works
-The method operates in two stages: coarse sampling to estimate density distribution, and fine sampling to render color. It relies on a dense density feature grid $G_\sigma$ and a dense appearance feature grid $G_a$.
+The method integrates with a hierarchical sampling framework where a coarse network (or grid) predicts rough density, and a fine network predicts precise color using additional samples placed where coarse density was high [Parent]. The core innovation is the "on-the-fly" generation of the coarse density estimate to avoid memory overhead and ensure surface regions are not skipped [S2].
 
 **Inputs and Outputs:**
-*   **Input:** Dense density grid $G_\sigma$, dense appearance grid $G_a$, camera ray origin $o$, ray direction $\mathbf{d}$, number of coarse samples $N_c$, number of fine samples $N_f$.
-*   **Output:** Pixel color $\hat{C}$.
+*   **Inputs:** Dense density grid $G_\sigma$, ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, number of coarse samples $N_c$, number of fine samples $N_f$.
+*   **Outputs:** Pixel color $\hat{C}$, accumulated transmittance.
 
 **Data Structures:**
-*   $G_\sigma$: A 3D grid storing volume density values $\sigma$. In the primary implementation (EgoNeRF), this is a balanced spherical grid where resolution increases exponentially along the radial direction [S1].
-*   $K$: A non-learnable convolution kernel, specifically an average pooling kernel [S1].
+*   **Dense Density Grid ($G_\sigma$):** A 3D grid storing volume density $\sigma$. In the specific implementation of EgoNeRF, this is a balanced spherical feature grid [S2].
+*   **Convolution Kernel ($K$):** A non-learnable average pooling kernel used to smooth the dense grid [S2].
 
 **Steps:**
 
-1.  **On-the-fly Coarse Density Estimation:**
-    To prevent skipping important surface regions, the density at coarse sample locations is not read directly from $G_\sigma$. Instead, it is computed by convolving $G_\sigma$ with kernel $K$ [S1].
+1.  **Obtain Coarse Density Estimate:**
+    Apply a non-learnable convolution kernel $K$ (average pooling) to the dense density grid $G_\sigma$ to create a coarser estimate on the fly. This prevents skipping important surface regions that might occur if the dense grid were sampled directly at coarse intervals [S2].
     $$ \sigma(\mathbf{x}_{\text{coarse}}) = \mathcal{T}(K * G_\sigma, \mathbf{x}_{\text{coarse}}) $$
-    where $\mathcal{T}$ denotes trilinear (or appropriate spherical) interpolation [S1]. The kernel $K$ acts as an average pooling operation, smoothing the density field to capture broader geometric extents [S1].
+    where $\mathcal{T}$ denotes trilinear interpolation [S2].
 
-2.  **Coarse Sampling:**
-    Sample $N_c$ points $\mathbf{x}_i$ along the ray. In the standard spherical grid implementation, these samples are distributed exponentially along the ray rather than uniformly, to match the exponential increase in grid resolution along the radial direction [S1]. Let $\delta_i$ be the distance between consecutive coarse samples [S1].
+2.  **Sample Coarse Points:**
+    Sample $N_c$ points along the ray. In standard implementations, these are distributed uniformly [S2]. However, in variants with exponentially increasing grid resolution (e.g., spherical grids), they are distributed exponentially [S2].
 
-3.  **Weight Calculation:**
-    Calculate importance sampling weights $w_i$ for each coarse sample based on the estimated density $\sigma_i = \sigma(\mathbf{x}_i)$ and accumulated transmittance $\tau_i$ [S1]:
+3.  **Calculate Importance Sampling Weights:**
+    Compute weights for the coarse samples based on their contribution to the ray integral. The weight $w_i$ for the $i$-th coarse sample is:
     $$ w_i = \tau_i (1 - e^{-\sigma_i \delta_i}) $$
-    where the accumulated transmittance is:
-    $$ \tau_i = e^{-\sum_{j=1}^{i-1} \sigma_j \delta_j} $$
-    with $\tau_1 = 1$ [S1].
+    where:
+    *   $\sigma_i$ is the coarse density at sample $i$.
+    *   $\delta_i$ is the distance between coarse samples $i$ and $i+1$ (or the step size).
+    *   $\tau_i = e^{-\sum_{j=1}^{i-1} \sigma_j \delta_j}$ is the accumulated transmittance up to sample $i$ [S2].
 
-4.  **Fine Sampling:**
-    Sample $N_f$ fine points from the probability distribution defined by the normalized weights $w_i$. These points are used to query the dense grids for precise density and color [S1].
+4.  **Sample Fine Points:**
+    Sample $N_f$ fine points from the probability distribution defined by the normalized weights $w_i$. This is importance sampling, concentrating samples in regions of high density [Parent, S2].
 
-5.  **Rendering:**
-    Render the pixel using the combined set of $N = N_c + N_f$ samples. The color is computed via volume rendering integration [S1]:
-    $$ \hat{C} = \sum_{i=1}^{N} \tau_i (1 - e^{-\sigma(\mathbf{x}_i)\delta_i}) c(\mathbf{x}_i, \mathbf{d}) + \tau_{N+1} c_{\text{env}}(\mathbf{d}) $$
-    where $c(\mathbf{x}_i, \mathbf{d})$ is the color obtained from the appearance grid $G_a$ and an optional decoding MLP, and $c_{\text{env}}(\mathbf{d})$ is the environment map color [S1].
+5.  **Render:**
+    Evaluate the fine network (or feature grid) at all $N_c + N_f$ sample locations to obtain density $\sigma$ and color $c$. Accumulate the color using the volume rendering equation [S2].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def hierarchical_density_adaptation(ray_origin, ray_direction, G_sigma, G_appearance, 
-                                    N_c, N_f, kernel_K, env_map=None):
+def hierarchical_density_adaptation(ray_origin, ray_direction, dense_grid, N_c, N_f, kernel_size=2):
     """
-    Renders a single ray using Hierarchical Density Adaptation.
-    
-    Args:
-        ray_origin: 3D vector (o)
-        ray_direction: 3D vector (d)
-        G_sigma: Dense density grid object with method query_and_smooth(x, kernel)
-        G_appearance: Dense appearance grid object with method query(x, d)
-        N_c: Number of coarse samples
-        N_f: Number of fine samples
-        kernel_K: Convolution kernel (average pooling)
-        env_map: Optional environment map function c_env(d)
-        
-    Returns:
-        pixel_color: Scalar or RGB vector
+    ray_origin: (3,) float array
+    ray_direction: (3,) float array
+    dense_grid: 3D array of density values
+    N_c: int, number of coarse samples
+    N_f: int, number of fine samples
+    kernel_size: int, size of the average pooling kernel
     """
-    # Step 1 & 2: Coarse Sampling and Density Estimation
-    # In spherical grids, samples are distributed exponentially along the ray
-    coarse_points = []
-    coarse_densities = []
-    coarse_transmittances = []
+    # 1. Create coarse density grid on the fly
+    # Apply average pooling to dense_grid
+    coarse_grid = average_pool(dense_grid, kernel_size)
     
-    current_transmittance = 1.0
-    # Determine step sizes based on exponential distribution logic specific to the grid
-    # [G: Assuming a helper function exponential_ray_samples exists for the specific grid topology]
-    distances = exponential_ray_samples(ray_origin, ray_direction, N_c)
+    # 2. Sample N_c coarse points uniformly along the ray
+    # Assuming ray length is known or bounded by a max distance
+    ray_length = get_ray_length(ray_origin, ray_direction, dense_grid.bounds)
+    coarse_t_values = np.linspace(0, ray_length, N_c + 1)[:-1] # Exclude end point if needed, or adjust
+    coarse_points = ray_origin + coarse_t_values[:, None] * ray_direction
     
-    for i, dist in enumerate(distances):
-        x_coarse = ray_origin + dist * ray_direction
+    # 3. Evaluate coarse density at these points
+    coarse_densities = interpolate_3d(coarse_grid, coarse_points)
+    
+    # 4. Calculate weights for importance sampling
+    # Step size delta_i is constant for uniform sampling
+    delta = ray_length / N_c
+    
+    # Calculate accumulated transmittance tau_i
+    # tau_1 = 1.0
+    # tau_i = tau_{i-1} * exp(-sigma_{i-1} * delta)
+    transmittances = np.ones(N_c)
+    for i in range(1, N_c):
+        transmittances[i] = transmittances[i-1] * np.exp(-coarse_densities[i-1] * delta)
         
-        # On-the-fly coarse density: Convolve dense grid with kernel K
-        # This avoids skipping thin surfaces present in G_sigma
-        sigma_coarse = G_sigma.query_and_smooth(x_coarse, kernel_K)
-        
-        coarse_points.append(x_coarse)
-        coarse_densities.append(sigma_coarse)
-        coarse_transmittances.append(current_transmittance)
-        
-        # Update transmittance for next step
-        # delta_i is the distance to the next sample. 
-        # For the last sample, delta is effectively infinite or handled by termination
-        if i < len(distances) - 1:
-            delta_i = distances[i+1] - dist
-        else:
-            delta_i = 0.0 # Or a large value if ray continues, but weight becomes 0 if transmittance is 0
-            
-        current_transmittance *= math.exp(-sigma_coarse * delta_i)
-
-    # Step 3: Calculate Importance Sampling Weights
-    weights = []
-    for i in range(N_c):
-        sigma_i = coarse_densities[i]
-        tau_i = coarse_transmittances[i]
-        # Delta for the segment covered by this sample
-        if i < N_c - 1:
-            delta_i = distances[i+1] - distances[i]
-        else:
-            # For the last coarse sample, we need a delta to compute weight for fine sampling
-            # The source defines w_i = tau_i * (1 - exp(-sigma_i * delta_i))
-            # We assume a standard segment length or infinite for the tail
-            delta_i = distances[i] - distances[i-1] if i > 0 else 1.0 
-            
-        w_i = tau_i * (1.0 - math.exp(-sigma_i * delta_i))
-        weights.append(w_i)
-        
-    # Normalize weights for probability distribution
-    total_weight = sum(weights)
-    if total_weight > 0:
-        probs = [w / total_weight for w in weights]
-    else:
-        probs = [1.0 / N_c] * N_c
-        
-    # Step 4: Fine Sampling
-    # Sample N_f points based on the probability distribution of coarse segments
+    # Calculate weights w_i = tau_i * (1 - exp(-sigma_i * delta))
+    weights = transmittances * (1.0 - np.exp(-coarse_densities * delta))
+    
+    # Normalize weights to form a probability distribution
+    prob_dist = weights / np.sum(weights)
+    
+    # 5. Sample N_f fine points based on prob_dist
+    # Use multinomial sampling or inverse CDF sampling
+    fine_indices = np.random.choice(N_c, size=N_f, p=prob_dist, replace=True)
+    
+    # Interpolate fine points between coarse samples
+    # For each fine sample, pick a coarse interval and sample within it
     fine_points = []
-    # [G: Implementation of sampling from discrete distribution defined by probs]
-    # For each fine sample, pick a coarse segment index k with probability probs[k],
-    # then sample a point uniformly within that segment's distance range.
-    fine_points = sample_from_distribution(probs, distances, N_f)
+    for idx in fine_indices:
+        # Sample uniformly between coarse_t_values[idx] and coarse_t_values[idx+1]
+        t_fine = np.random.uniform(coarse_t_values[idx], coarse_t_values[idx+1])
+        fine_points.append(ray_origin + t_fine * ray_direction)
+    fine_points = np.array(fine_points)
     
+    # 6. Evaluate fine density and color at all points
     # Combine coarse and fine points
-    all_points = coarse_points + fine_points
+    all_points = np.vstack([coarse_points, fine_points])
     
-    # Step 5: Rendering
-    # Sort all points by distance from origin
-    all_points.sort(key=lambda p: distance(ray_origin, p))
+    # Evaluate fine network/grid at all_points to get sigma and color
+    # Note: In EgoNeRF, the same grid is used, but fine samples might use a different decoder or just the dense grid
+    # Here we assume we evaluate the 'fine' representation (which might be the dense grid itself or a fine network)
+    fine_densities, fine_colors = evaluate_fine_representation(all_points, dense_grid)
     
-    pixel_color = 0.0
-    accumulated_transmittance = 1.0
+    # 7. Render
+    # Re-sort all points by depth
+    sorted_indices = np.argsort(all_points[:, 0]) # Assuming ray direction aligns with x for simplicity, or use dot product
+    sorted_points = all_points[sorted_indices]
+    sorted_densities = fine_densities[sorted_indices]
+    sorted_colors = fine_colors[sorted_indices]
     
-    for i, x in enumerate(all_points):
-        # Query dense grids for precise values
-        sigma = G_sigma.query(x)
-        color = G_appearance.query(x, ray_direction)
-        
-        # Determine delta for this sample
-        if i < len(all_points) - 1:
-            delta = distance(all_points[i], all_points[i+1])
+    # Volume rendering accumulation
+    total_transmittance = 1.0
+    accumulated_color = np.zeros(3)
+    
+    for i in range(len(sorted_points)):
+        sigma = sorted_densities[i]
+        color = sorted_colors[i]
+        # Calculate delta for this segment (distance to next point or end of ray)
+        if i < len(sorted_points) - 1:
+            delta_i = np.linalg.norm(sorted_points[i+1] - sorted_points[i])
         else:
-            delta = 0.0 # Or handle tail separately
-            
-        # Volume rendering contribution
-        weight = accumulated_transmittance * (1.0 - math.exp(-sigma * delta))
-        pixel_color += weight * color
-        accumulated_transmittance *= math.exp(-sigma * delta)
+            # Last point, assume small delta or use ray length
+            delta_i = delta # Approximation
         
-    # Add environment map contribution if available
-    if env_map is not None:
-        pixel_color += accumulated_transmittance * env_map(ray_direction)
+        alpha = 1.0 - np.exp(-sigma * delta_i)
+        weight = total_transmittance * alpha
+        accumulated_color += weight * color
+        total_transmittance *= (1.0 - alpha)
         
-    return pixel_color
+    return accumulated_color
+
+def average_pool(grid, kernel_size):
+    """
+    Simple average pooling implementation
+    """
+    # Pad grid if necessary
+    # Apply convolution with uniform kernel
+    # Return downsampled grid
+    pass
+
+def interpolate_3d(grid, points):
+    """
+    Trilinear interpolation
+    """
+    pass
+
+def evaluate_fine_representation(points, dense_grid):
+    """
+    Evaluate the fine density and color.
+    In EgoNeRF, this might just be interpolating from the dense grid G_sigma and appearance grid G_a.
+    """
+    pass
 ```
 
 **Parameters:**
-*   $N_c$: Number of coarse samples along the ray. [S1]
-*   $N_f$: Number of fine samples along the ray. [S1]
-*   $K$: Convolution kernel. Typically an average pooling kernel. [S1]
+*   $N_c$: Number of coarse samples along the ray. Typical values depend on the scene complexity and desired frame rate [S2].
+*   $N_f$: Number of fine samples along the ray. Typically $N_f > N_c$ to refine high-density regions [S2].
+*   Kernel Size: Size of the average pooling kernel $K$. A size of 2 is common for simple downsampling [S2].
 
 **Edge Cases and Pitfalls:**
-*   **Skipping Surface Regions:** Evaluating density directly from the dense grid $G_\sigma$ at coarse points may skip important surface regions if the coarse sampling interval is larger than the feature thickness. This is mitigated by the on-the-fly convolution with $K$ [S1].
-*   **Grid Resolution Mismatch:** In spherical grids, resolution increases exponentially with radius. Uniform sampling may under-sample distant regions. Coarse samples should be distributed exponentially to match the grid structure [S1].
+*   **Skipping Surface Regions:** Evaluating density directly from the dense grid $G_\sigma$ at coarse points might skip important surface regions if the coarse sampling interval is larger than the feature thickness. This is handled by convolving the grid with an average pooling kernel to create a coarser estimate on the fly [S2].
+*   **Precision:** Accumulated transmittance $\tau_i$ can underflow for long rays with high density. Use log-space accumulation if necessary [G].
+*   **Boundary Conditions:** Ensure ray clipping is handled correctly when calculating $\delta_i$ for the last sample [G].
 
 ## Subtopics
 
 ### Environment Map Integration
-This variant integrates an equirectangular environment map $E \in \mathbb{R}^{H \times W \times 3}$ to handle outdoor or large indoor environments where the bounded feature grid (limited by $R_{max}$) cannot represent distant geometry. The environment map represents visibility at almost infinite distance. The rendering equation is extended to include a tail term: $\hat{C} = \sum_{i=1}^{N} \tau_i (1 - e^{-\sigma(\mathbf{x}_i)\delta_i}) c(\mathbf{x}_i, \mathbf{d}) + \tau_{N+1} c_{\text{env}}(\mathbf{d})$, where $c_{\text{env}}(\mathbf{d}) = \mathcal{E}(u, v; \mathbf{d})$ and $(u, v)$ are sampling positions dependent only on the viewing direction $\mathbf{d}$ [S1].
+A variant used for outdoor or large indoor environments where the feature grid is bounded by a maximum radius $R_{max}$ [S2]. It integrates an equirectangular environment map to represent visibility at almost infinite distance [S2].
+*   **What it is:** Extends the rendering equation to include an environment map term for rays that exit the feature grid [S2].
+*   **What sets it apart:** Handles infinite background without requiring an infinitely large feature grid [S2].
+*   **When to choose it:** For egocentric view synthesis or large-scale scenes where the background is static and distant [S2].
+*   **Link:** [Environment Map Integration](4865-hierarchical-sampling.md#environment-map-integration) (Note: No separate article exists, so it is described here).
+*   **Details:**
+    *   **Sampling:** Distribute $N_c$ coarse samples exponentially along the ray rather than uniformly, because the feature grid size increases exponentially along the radial direction [S2].
+    *   **Rendering Equation:**
+        $$ \hat{C} = \sum_{i=1}^{N} \tau_i (1 - e^{-\sigma(\mathbf{x}_i)\delta_i}) c(\mathbf{x}_i, \mathbf{d}) + \tau_{N+1} c_{\text{env}}(\mathbf{d}) $$
+        where $N = N_c + N_f$, $\mathbf{x}_i = \mathbf{o} + t_i \mathbf{d}$, and $c_{\text{env}}$ is the environment map color [S2].
+    *   **Environment Map Fetch:**
+        $$ c_{\text{env}}(\mathbf{d}) = \mathcal{E}(u, v; \mathbf{d}) $$
+        where $(u, v)$ are sampling positions dependent only on viewing direction $\mathbf{d}$ [S2].
+    *   **Parameter:** $E \in \mathbb{R}^{H \times W \times 3}$: An equirectangular environment map representing visibility at almost infinite distance [S2].
 
 ## Operating characteristics
-*   **Memory:** Requires no additional memory for a dedicated coarse grid, as the coarse density is derived from the existing dense grid $G_\sigma$ [S1].
-*   **Time Complexity:** Adds the cost of a convolution operation (average pooling) over the grid or per-sample during the coarse stage, plus the overhead of $N_c$ coarse samples. The total sample count is $N_c + N_f$.
-*   **Strengths:** Prevents aliasing and missing thin structures that occur with direct dense grid sampling. Efficient as it reuses the primary density representation.
-*   **Limitations:** The quality of the coarse estimate depends on the kernel $K$ and the density grid resolution. If the grid is too sparse, even the smoothed estimate may be inaccurate.
-*   **When to use:** When using explicit feature grids (like balanced spherical grids) where maintaining a separate coarse grid is memory-prohibitive or unnecessary, and surface details are thin relative to the coarse sampling interval.
+*   **Time Complexity:** $O(N_c + N_f)$ per ray, where $N_c$ and $N_f$ are the number of coarse and fine samples. The on-the-fly convolution adds a preprocessing cost proportional to the grid size, but this is done once per frame or when the grid changes [S2].
+*   **Memory Complexity:** $O(V)$, where $V$ is the volume of the dense grid. No additional memory is allocated for a separate coarse grid, unlike some other hierarchical methods [S2].
+*   **Measured Performance:** In EgoNeRF, this method allows for real-time rendering of egocentric views by adaptively controlling the number of samples [S2].
+*   **Scaling:** Scales well with resolution because the coarse grid is derived from the dense grid, avoiding the need to manage multiple grid resolutions [S2].
+*   **Strengths:** Memory efficient (no extra coarse grid), adaptive to local density, constant frame rate capability [S1, S2].
+*   **Limitations:** Requires a dense grid that is physically meaningful (not just neural features) for the convolution to be effective [S2]. Performance depends on the quality of the coarse density estimate [S2].
+*   **When to use:** When memory is constrained, or when the density grid is already available and physically meaningful [S2].
+*   **When not to use:** When the density grid is not physically meaningful (e.g., abstract neural features) or when a separate coarse network provides better density estimates [S2].
 
 ## Background
-This method was introduced in the context of EgoNeRF, a radiance field representation using balanced spherical feature grids for egocentric view synthesis [S1]. It was proposed to address the limitations of standard hierarchical sampling when applied to explicit grids, where direct sampling might miss geometry. The approach leverages the physical meaning of volume density in the grid to allow simple convolution-based smoothing for coarse estimation [S1].
+*   **Origin:** The concept of density control for real-time previewing was introduced by [S1] (2000) as "Point Selection Criteria" to control rendering density using a hierarchy of sampled data. The specific implementation of "on-the-fly coarse sampling" using convolution on a dense grid was introduced by [S2] (2023) in the context of EgoNeRF.
+*   **History:** Early volume rendering used opacity control for image smoothness [S1]. Density control was proposed as an alternative for rendering speed [S1]. Neural volume rendering revived hierarchical sampling, and EgoNeRF adapted it for spherical grids with on-the-fly coarse estimation [S2].
+*   **Usage:** Used in real-time volume visualization [S1] and egocentric view synthesis [S2].
 
 ## Sources
-[S1] Balanced Spherical Grid for Egocentric View Synthesis, https://doi.org/10.1109/cvpr52729.2023.01592, fetched 2026-10-29
+[S1] Real-time previewing for volume visualization, https://doi.org/10.1145/197938.197974, fetched 2026-11-01
+[S2] Balanced Spherical Grid for Egocentric View Synthesis, https://doi.org/10.1109/cvpr52729.2023.01592, fetched 2026-10-29

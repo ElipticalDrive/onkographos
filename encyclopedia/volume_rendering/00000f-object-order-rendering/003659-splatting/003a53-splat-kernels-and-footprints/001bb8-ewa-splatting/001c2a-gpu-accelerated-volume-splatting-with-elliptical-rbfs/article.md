@@ -1,0 +1,179 @@
+# GPU-Accelerated Volume Splatting With Elliptical RBFs
+
+Also called: Ellipsoidal Kernel Slicing with Re-orthogonalization, Elliptical RBF Slicing, Elliptical RBF Splatting, Modified Image-Aligned Splatting with Elliptical RBFs, Post-shaded kernel-centric rendering, RBF Volume Splatting, Screen-aligned Ellipsoid Splatting
+
+## Overview
+This method renders scattered volumetric data represented as 3D ellipsoidal Radial Basis Functions (RBFs) using a post-shaded, kernel-centric approach [S1]. It extends high-quality image-aligned sheet-buffer splatting to irregular grids by slicing kernels into parallel, image-aligned density planes, rasterizing them as 2D footprints, and compositing them [S1]. Unlike fragment-centric methods that evaluate Gaussian functions per pixel, this technique leverages hard-wired GPU polygonal rasterization, achieving two orders of magnitude higher frame rates [S1]. It differs from its parent [EWA Splatting](1069-ewa-splatting.md) by supporting general ellipsoidal kernels and using a flat spatial decomposition with active cell lists rather than screen-aligned spherical impostors [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of scattered 3D points, each associated with an ellipsoidal RBF defined by center, orientation, and scale [S1].
+*   **Output:** A 2D image composited from front-to-back or back-to-front [S1].
+
+**Data Structures:**
+1.  **Spatial Decomposition:** A low-resolution 3D regular cubic grid (not an octree) where each cell maintains a list of intersecting RBFs [S1].
+2.  **Textures:** A 2D Gaussian footprint texture representing the in-plane splat shape, and a 1D Gaussian scaling texture containing the scaling function $Ae^{-kz^2}$ indexed by distance from kernel center to slice plane [S1].
+3.  **Active Cell List:** Cells traversed in front-to-back order, containing vertex attribute arrays for rendering [S1].
+
+**Parameters:**
+*   $A$: Amplitude.
+*   $k$: Spread parameter.
+*   $\Delta z$: Sampling distance in screen space, typically 1.0 [S1].
+
+**Algorithm Steps:**
+
+1.  **Preprocessing (CPU):**
+    1.  Load volume data [S1].
+    2.  Slice and rasterize every point onto the low-resolution 3D grid, where each grid point maintains a list of all intersecting points [S1].
+    3.  Traverse the 3D cubic structure in front-to-back order to return a list of data points for each non-empty cell [S1].
+    4.  Flatten the structure onto a set of four 2D textures by copying the contents of every cell [S1].
+    5.  Process the resulting texture with the ellipsoid slicing fragment program to generate attribute vertex arrays for rendering [S1].
+
+2.  **Rendering Setup (Per Viewpoint Change):**
+    1.  Place cells in an active list in front-to-back traversal order of the decomposition data structure [S1].
+
+3.  **Slicing and Rasterization (Per Active Cell):**
+    1.  Pass the current slicing plane and current cell ID as uniform variables to the vertex program [S1].
+    2.  For each data point in the cell, compute the ID of the starting cell (where the first slicing polygon is encountered) by projecting $(startx, starty, startz)$ to the 3D cubic decomposition structure [S1].
+    3.  Assign the starting cell ID to the point in all cells it participates in [S1].
+    4.  Compute the cell ID for each cell sliced by the current sheet buffer [S1].
+    5.  **Culling:** Allow a point/vertex to render only if its starting cell ID matches the current cell ID AND it intersects the current slicing buffer [S1]. If the starting cell ID differs, the point has already been activated and is culled [S1].
+    6.  Call each active cell's associated vertex list using `glDrawArrays` [S1].
+    7.  Remove cells from the active list when `currentSliceZ` has passed even the largest point, determined by comparing with the maximum point diagonal for the cell [S1].
+
+4.  **Kernel Slicing (Per Ellipsoid):**
+    1.  Decompose the 3D Gaussian kernel $G$ into a scaling component and a 2D footprint using separability [S1]:
+        $$G = Ae^{-k(x^2+y^2+z^2)} = Ae^{-kz^2} e^{-k(x^2+y^2)}$$
+        Here, $Ae^{-kz^2}$ is the scaling function and $e^{-k(x^2+y^2)}$ is the splat component [S1].
+    2.  Compute the inverse transformation matrix $M'^{-1}$:
+        $$M' = R_V \cdot R \cdot S$$
+        $$M'^{-1} = S^{-1} \cdot R^{-1} \cdot R_V^{-1}$$
+        where $R_V$ is view rotation, $R$ is object rotation, and $S$ is scaling [S1].
+    3.  Extract the first three columns of $M'^{-1}$ as vectors $u, v, n$:
+        $$[u, v, n] = M'^{-1}$$
+        These vectors are generally non-orthogonal [S1].
+    4.  **Re-orthogonalization:** Compute corrected normalized vectors $u', v', n'$:
+        $$n' = \text{normalize}(u \times v)$$
+        $$u' = \text{normalize}(n' \times n)$$
+        $$v' = \text{normalize}(n' \times u)$$
+        [S1]
+    5.  Compute the final normal vector $n''$ for all slicing planes in unit sphere space:
+        $$n'' = \|n \cdot n'\| \cdot n'$$
+        The length of $n''$ represents the distance between slicing planes [S1].
+    6.  Define the slicing polygon vertices in unit sphere space ($slice_{us}$):
+        $$slice_{us} = \{-u' - v', -u' + v', u' + v', u' - v'\}$$
+        The normal vector in unit sphere space is $n_{us} = n''$ [S1].
+    7.  Transform the slicing polygon to screen space:
+        $$slice_{SS} = M \cdot slice_{US}$$
+        Transform the normal vector to screen space:
+        $$n_{ss} = M \cdot n_{us}$$
+        [S1]
+    8.  **Incremental Slicing:** Perform the (screen space - unit sphere space) transformation once for the initial kernel mapping [S1]. Use simple vector additions to obtain remaining mappings [S1]. The unit sphere space slice distance vector is $n_{us} = (0, 0, n'')$ [S1]. In unit texture space, the slice is defined as $slice_{us} = \{(0, 0, 0), (0, 1, 0), (1, 1, 0), (1, 0, 0)\}$ [S1].
+
+5.  **Rasterization and Shading:**
+    1.  Index the 1D Gaussian scaling texture using the distance between the current slice plane and the kernel center [S1].
+    2.  Rasterize the 2D generic Gaussian footprint texture, scaled by the retrieved factor, onto the screen [S1].
+    3.  Perform color lookup and shading using interpolated densities within the slice $(x, y)$ and across the slice $(z)$, utilizing a transfer function [S1].
+    4.  Composite the rasterized slices using a front-to-back or back-to-front compositing buffer [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+class Vec3:
+    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
+    def __add__(self, o): return Vec3(self.x+o.x, self.y+o.y, self.z+o.z)
+    def __sub__(self, o): return Vec3(self.x-o.x, self.y-o.y, self.z-o.z)
+    def __mul__(self, s): return Vec3(self.x*s, self.y*s, self.z*s)
+    def dot(self, o): return self.x*o.x + self.y*o.y + self.z*o.z
+    def cross(self, o): return Vec3(self.y*o.z-self.z*o.y, self.z*o.x-self.x*o.z, self.x*o.y-self.y*o.x)
+    def norm(self): return math.sqrt(self.x**2 + self.y**2 + self.z**2)
+    def normalize(self): n = self.norm(); return Vec3(self.x/n, self.y/n, self.z/n) if n > 1e-9 else Vec3(0,0,0)
+
+class Mat3:
+    def __init__(self, c0, c1, c2): self.c0, self.c1, self.c2 = c0, c1, c2
+    def __mul__(self, v): return Vec3(self.c0.dot(v), self.c1.dot(v), self.c2.dot(v))
+    def invert(self):
+        inv_det = 1.0 / (self.c0.x*(self.c1.y*self.c2.z - self.c1.z*self.c2.y) - self.c0.y*(self.c1.x*self.c2.z - self.c1.z*self.c2.x) + self.c0.z*(self.c1.x*self.c2.y - self.c1.y*self.c2.x))
+        return Mat3(
+            Vec3((self.c1.y*self.c2.z - self.c1.z*self.c2.y)*inv_det, (self.c0.z*self.c2.y - self.c0.y*self.c2.z)*inv_det, (self.c0.y*self.c1.z - self.c0.z*self.c1.y)*inv_det),
+            Vec3((self.c1.z*self.c2.x - self.c1.x*self.c2.z)*inv_det, (self.c0.x*self.c2.z - self.c0.z*self.c2.x)*inv_det, (self.c0.z*self.c1.x - self.c0.x*self.c1.z)*inv_det),
+            Vec3((self.c1.x*self.c2.y - self.c1.y*self.c2.x)*inv_det, (self.c0.y*self.c2.x - self.c0.x*self.c2.y)*inv_det, (self.c0.x*self.c1.y - self.c0.y*self.c1.x)*inv_det)
+        )
+
+def preprocess_volume(points, grid_res, grid_origin, grid_extent):
+    grid = [[None]*grid_res for _ in range(grid_res)]
+    for i in range(grid_res):
+        for j in range(grid_res):
+            grid[i][j] = {'points': [], 'max_diag': 0.0}
+    for pt in points:
+        cx, cy, cz = pt['center']
+        gx, gy, gz = int((cx-grid_origin.x)/grid_extent*grid_res), int((cy-grid_origin.y)/grid_extent*grid_res), int((cz-grid_origin.z)/grid_extent*grid_res)
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                for dz in range(-1, 2):
+                    nx, ny, nz = gx+dx, gy+dy, gz+dz
+                    if 0 <= nx < grid_res and 0 <= ny < grid_res and 0 <= nz < grid_res:
+                        grid[nx][ny][nz]['points'].append(pt)
+                        pt['starting_cell_id'] = nx * grid_res * grid_res + ny * grid_res + nz
+    vertex_arrays = []
+    for row in grid:
+        for cell in row:
+            if cell['points']:
+                vertex_arrays.append(cell)
+    return vertex_arrays
+
+def compute_slicing_data(ellipsoid_transform, view_matrix):
+    M_prime = view_matrix * ellipsoid_transform
+    M_prime_inv = ellipsoid_transform.invert() * view_matrix.invert()
+    u, v, n = M_prime_inv.c0, M_prime_inv.c1, M_prime_inv.c2
+    n_prime = u.cross(v).normalize()
+    u_prime = n_prime.cross(n).normalize()
+    v_prime = n_prime.cross(u).normalize()
+    n_double_prime = n_prime * abs(n.dot(n_prime))
+    slice_us = [(-u_prime - v_prime), (-u_prime + v_prime), (u_prime + v_prime), (u_prime - v_prime)]
+    n_us = n_double_prime
+    slice_ss = [M_prime * p for p in slice_us]
+    n_ss = M_prime * n_us
+    return slice_ss, n_ss, n_double_prime
+
+def rasterize_polygon(vertices, normal, amplitude, spread):
+    # Standard GPU hardware rasterization stub
+    pass
+
+def render_frame(vertex_arrays, grid, view_matrix, model_matrix, scale_matrix, current_slice_z, current_cell_id):
+    active_cells = vertex_arrays
+    for cell in active_cells:
+        for pt in cell['points']:
+            if pt['starting_cell_id'] != current_cell_id:
+                continue
+            slice_ss, n_ss, n_dist = compute_slicing_data(pt['transform'], view_matrix)
+            rasterize_polygon(slice_ss, n_ss, pt['amplitude'], pt['spread'])
+        if current_slice_z > cell['max_diag']:
+            active_cells.remove(cell)
+```
+
+## Operating characteristics
+*   **Time Complexity:** Setup cost per ellipsoid involves two matrix-matrix multiplications, three cross-products, two normalizations, one dot product, and four matrix-vector multiplications [S1]. Incremental slicing cost is four vector additions and one scalar addition [S1].
+*   **Memory Complexity:** Requires storage for the spatial decomposition grid and vertex attribute arrays [S1].
+*   **Measured Performance:** Tested on a Pentium 4 3GHz, 1 GB RAM, NVidia Quadro FX 3400 (256MB RAM, equivalent to GeForce 6800 GT) at 400x400 pixels resolution [S1].
+    *   Blunt Fin: 34k points (31k non-occluded), Diagonal 0.9-120, 1.6 FPS [S1].
+    *   Combustion: 39k points (35k non-occluded), Diagonal 8.3-27.4, 1.9 FPS [S1].
+    *   Chess Pc.: 84k points (63k non-occluded), Diagonal 1.9-2.5, 3.5 FPS [S1].
+    *   Monster: 91k points (60k non-occluded), Diagonal 2.5-3.0, 4.0 FPS [S1].
+    *   Toy Car: 173k points (117k non-occluded), Diagonal 2.0-4.3, 2.2 FPS [S1].
+    *   Toy Train: 199k points (139k non-occluded), Diagonal 2.0-4.0, 2.1 FPS [S1].
+*   **Scaling:** Achieves splat rendering rates two orders of magnitude higher than explicit kernel function evaluation approaches (e.g., Jang et al. reported 4 fps for <1000 kernels) [S1].
+*   **Strengths:** High performance due to hardware rasterization; post-shaded approach avoids color leakage and pre-shading artifacts; supports irregular grids [S1].
+*   **Limitations:** Elliptical datasets are significantly slower to rasterize than spherical ones due to larger diagonal ranges and overdraw from neighboring point overlaps [S1]. Staircase artifacts may occur from point-sampling the slice function [S1].
+*   **When to use:** Suitable for subdivision volumes and computational science data encoded as irregularly distributed ellipsoidal RBFs [S1].
+*   **When not to use:** Not ideal for spherical RBFs where simpler methods might suffice, or when pre-integrated slab rendering is required to avoid staircase artifacts without additional processing [S1].
+
+## Background
+The method was introduced by Neophytos Neophytou, Klaus Mueller, Kevin T. McDonnell, Wei Hong, Xin Guan, Hong Qin, and Arie Kaufman [S1]. It extends previous work on GPU-accelerated volume splatting [NM05] and image-aligned splatting [MSH*99] to handle generalized ellipsoidal RBF kernels for scattered volume data [S1]. It is used for rendering subdivision volumes and computational science data encoded as irregularly distributed ellipsoidal RBFs, such as those obtained by fitting Gaussian kernels to a mid-level of the subdivision hierarchy or fitting basis functions to a local Delauney triangulation [S1].
+
+## Sources
+[S1] GPU-Accelerated Volume Splatting With Elliptical RBFs, https://doi.org/10.2312/vissym/eurovis06/013-020, fetched 2026-10-26

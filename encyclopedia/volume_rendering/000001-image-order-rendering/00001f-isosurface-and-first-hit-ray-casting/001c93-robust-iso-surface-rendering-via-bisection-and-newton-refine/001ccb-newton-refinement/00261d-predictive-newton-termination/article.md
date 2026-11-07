@@ -3,88 +3,72 @@
 Also called: iso_newton mode 2
 
 ## Overview
-Predictive Newton Termination is an optimization for the Newton refinement step in isosurface ray casting that terminates a vertex's refinement loop early based on a predicted error bound, avoiding a redundant function evaluation. It is distinct from standard Newton refinement [1346-newton-refinement.md] by replacing the final convergence check with a heuristic prediction, and from Guaranteed Interval-Based Refinement Test by relying on local derivative estimates rather than rigorous interval arithmetic. It trades a small increase in residual error for reduced computational cost.
+Predictive Newton Termination is a Newton iteration mode that terminates a vertex step if the predicted next error falls below a tenth of the tolerance, avoiding a confirming function evaluation [S1, unofficial]. It differs from standard Newton refinement [1346-newton-refinement.md] by using a heuristic error prediction instead of a direct convergence check, and from Guaranteed Interval-Based Refinement Test by relying on local derivative estimates rather than interval arithmetic [S2]. The method trades a slight increase in residual error for fewer evaluations per vertex [S1, unofficial].
 
 ## How it works
-**Inputs:**
-- Current position $x$ on the ray.
-- Function value $f(x)$ (signed distance or field value).
-- Gradient $\nabla f(x)$ (or its magnitude $|f'|$).
-- Step size $s$ from the previous Newton iteration.
-- Convergence tolerance $\tau$.
-
-**Outputs:**
-- Boolean flag indicating whether to terminate the vertex.
-- If terminated, the normal is taken from the last evaluation (before the predicted step).
+**Inputs and Outputs:**
+- Inputs: Current position $x$, function value $f$, gradient magnitude $|f'|$, step size $s$ from the previous iteration, and convergence tolerance $\tau$ [S1, unofficial].
+- Outputs: Boolean termination flag, and if terminated, the surface normal computed from the gradient of the previous evaluation [S1, unofficial].
 
 **Data Structures:**
-- Vertex status flags: `1` for converged (confirmed), `2` for predicted termination.
+- Vertex status flags: `1` for converged (confirmed), `2` for predicted termination [S1, unofficial].
 
-**Algorithm:**
-1. Compute the predicted error for the next Newton step. For exponentially decaying fields, the predicted error $E_{pred}$ is calculated as:
-   $$ E_{pred} = \frac{|f'|}{2 |f|} s^2 $$
-   where $|f'|$ is the gradient magnitude, $|f|$ is the absolute function value, and $s$ is the step size taken in the previous iteration.
-2. Compare $E_{pred}$ against the tolerance $\tau$.
-3. If $E_{pred} < \tau / 10$, mark the vertex for termination with flag `2`. Do not perform the next function evaluation.
-4. If the vertex is marked for termination, use the gradient from the *previous* evaluation (the one that produced $f$ and $f'$) to compute the surface normal.
+**Steps:**
+1. Compute the predicted error for the next Newton step.
+2. Compare the predicted error against $\tau / 10$.
+3. If the predicted error is below the threshold, mark the vertex for termination with flag `2` and skip the next function evaluation [S1, unofficial].
+4. If the vertex is marked for termination, compute the surface normal using the gradient from the *previous* evaluation (the one that produced $f$ and $|f'|$) [S1, unofficial].
+
+**Formula:**
+For exponentially decaying fields, the predicted error $E_{pred}$ is calculated as:
+$$ E_{pred} = \frac{|f'|}{2 |f|} s^2 $$
+where $|f'|$ is the gradient magnitude, $|f|$ is the absolute function value, and $s$ is the step size taken in the previous iteration [S1, unofficial].
+
+**Parameters:**
+- Convergence tolerance $\tau$: typical value $10^{-4} h$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Flag Mixing Bug:** In GPU implementations using group-based execution, evaluators originally skipped a group of 64 vertices when the bitwise AND of their `vdone` flags was set. A mix of flag `1` (converged) and flag `2` (predicted) cleared the AND to `0`, causing the group to run in full after convergence. The fix treats any nonzero flag as a termination signal [S1, unofficial].
+- **Normal Accuracy:** Since the normal is taken from the previous evaluation, it is not updated for the final predicted position [S1, unofficial].
+- **Field Assumption:** The error formula assumes exponentially decaying fields [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def predictive_termination(f_val, grad_mag, step_size, tolerance):
-    """
-    Determine if Newton refinement should terminate early.
-    
-    Args:
-        f_val: Current function value f(x)
-        grad_mag: Gradient magnitude |f'(x)|
-        step_size: Step size s from previous iteration
-        tolerance: Convergence tolerance tau
-        
-    Returns:
-        bool: True if termination is predicted
-    """
-    # Avoid division by zero; if f_val is zero, we are already converged
-    if abs(f_val) < 1e-15:
+    """Predictive Newton Termination check.
+    Returns True if the vertex should terminate early."""
+    if abs(f_val) < 1e-15:  # Already converged [G]
         return True
-        
-    # Predicted error for exponentially decaying fields
     predicted_error = (grad_mag / (2.0 * abs(f_val))) * (step_size ** 2)
-    
-    # Terminate if predicted error is below one-tenth of tolerance
     return predicted_error < (tolerance / 10.0)
 ```
-
-**Edge Cases and Pitfalls:**
-- **Flag Mixing Bug:** In GPU implementations using group-based execution, a bug existed where evaluators skipped a group of 64 vertices if the bitwise AND of their `vdone` flags was set. A mix of flag `1` (converged) and flag `2` (predicted) would result in an AND of `0`, causing the group to run in full after convergence. The fix is to treat any nonzero flag as a termination signal [S1, unofficial].
-- **Normal Accuracy:** Since the normal is taken from the previous evaluation, it is not updated for the final predicted position. This is acceptable for the error bounds observed but represents a trade-off in geometric precision.
-- **Field Assumption:** The error formula assumes exponentially decaying fields. Its validity for other field types is not specified in the sources.
 
 ## Subtopics
 
 ### Guaranteed Interval-Based Refinement Test
-A method using interval arithmetic and Krawczyk's formulation to guarantee the existence and uniqueness of a solution within an interval $\mathbf{X}$, or to prune intervals that cannot contain a solution [S2]. It differs from Predictive Newton Termination by providing rigorous mathematical guarantees rather than heuristic predictions. It is chosen when robustness is critical and computational overhead is acceptable.
+A method using interval arithmetic and Krawczyk's formulation to guarantee the existence and uniqueness of a solution within an interval $\mathbf{X}$, or to prune intervals that cannot contain a solution [S2]. It differs from Predictive Newton Termination by providing rigorous mathematical guarantees rather than heuristic predictions [S2]. It is chosen when robustness is critical and computational overhead is acceptable [S2].
 
-**Definition:** Uses interval extensions of Newton-Raphson iteration.
+**Definition:** Uses interval extensions of Newton-Raphson iteration [S2].
 **Steps:**
-1. Prune interval $\mathbf{X}$ if $\emptyset \notin \mathbf{F}(\mathbf{X})$ OR $\mathbf{K}(\mathbf{X}) \cap \mathbf{X} = \emptyset$.
-2. Switch to ordinary 2D Newton iteration if $\mathbf{K}(\mathbf{X}) \subseteq \mathbf{X}$ AND $\|I - \mathbf{M}^+ \mathbf{F}'(\mathbf{X})\| < 1$. This guarantees exactly one unique solution in $\mathbf{X}$ and convergence.
-3. If neither condition is met, recursively subdivide the triangle and keep searching.
+1. Prune interval $\mathbf{X}$ if $\emptyset \notin \mathbf{F}(\mathbf{X})$ OR $\mathbf{K}(\mathbf{X}) \cap \mathbf{X} = \emptyset$ [S2].
+2. Switch to ordinary 2D Newton iteration if $\mathbf{K}(\mathbf{X}) \subseteq \mathbf{X}$ AND $\|I - \mathbf{M}^+ \mathbf{F}'(\mathbf{X})\| < 1$. This guarantees exactly one unique solution in $\mathbf{X}$ and convergence [S2].
+3. If neither condition is met, recursively subdivide the triangle and keep searching [S2].
 
 **Formula:**
 $$ \mathbf{K}(\mathbf{X}) = m_0 - \mathbf{M}^+ f(m_0) + [I - \mathbf{M}^+ \mathbf{F}'(\mathbf{X})](\mathbf{X} - m_0) $$
 where $m_0 = m(\mathbf{X})$ is the midpoint of interval $\mathbf{X}$, $\mathbf{M} = m(\mathbf{F}'(\mathbf{X}))$ is the midpoint of the interval Jacobian, $\mathbf{M}^+$ is its pseudoinverse, $\mathbf{F}(\mathbf{X})$ is the interval representation of $f$, and $\mathbf{F}'(\mathbf{X})$ is the interval Jacobian [S2].
 
 ## Operating characteristics
-- **Performance:** Reduces evaluations per vertex from 2.0-2.6 to 1.3-2.0 on test datasets (amide/mol) at grid spacings $h=0.2$ and $h=0.12$ [S1, unofficial].
-- **Accuracy:** Largest vertex residual was $1.4 \times 10^{-4} h$ with a tolerance of $10^{-4} h$ [S1, unofficial]. This is slightly above the tolerance but considered acceptable for the performance gain.
-- **Complexity:** Time complexity is reduced by avoiding one function evaluation per vertex in predicted cases. Memory complexity is unchanged.
-- **Strengths:** Significant speedup in GPU implementations where function evaluation is expensive.
-- **Limitations:** Provides no guarantee of convergence to the exact root; residual error may exceed tolerance slightly. Relies on the validity of the error prediction model.
+- **Performance:** Reduces evaluations per vertex from 2.0–2.6 to 1.3–2.0 on test datasets (amide/mol) at grid spacings $h=0.2$ and $h=0.12$ [S1, unofficial].
+- **Accuracy:** Largest vertex residual was $1.4 \times 10^{-4} h$ with a tolerance of $10^{-4} h$ [S1, unofficial].
+- **Complexity:** Time complexity is reduced by avoiding one function evaluation per vertex in predicted cases; memory complexity is unchanged.
+- **Strengths:** Significant speedup in GPU implementations where function evaluation is expensive [S1, unofficial].
+- **Limitations:** Provides no guarantee of convergence to the exact root; residual error may exceed tolerance slightly [S1, unofficial]. Relies on the validity of the error prediction model for exponentially decaying fields [S1, unofficial].
 
 ## Background
-Predictive Newton Termination was introduced in the context of optimized GPU isosurface extraction, specifically in the `md_gto_iso_gpu` implementation [S1, unofficial]. It is part of the `iso_newton` mode 2. The method addresses the cost of redundant function evaluations in Newton refinement loops. The associated bug fix regarding vertex group flags was also part of this optimization effort.
+Predictive Newton Termination was introduced in the context of optimized GPU isosurface extraction, specifically in the `md_gto_iso_gpu` implementation [S1, unofficial]. It is part of the `iso_newton` mode 2. The method addresses the cost of redundant function evaluations in Newton refinement loops. The associated bug fix regarding vertex group flags was also part of this optimization effort [S1, unofficial].
 
 ## Sources
 [S1] md_gto_iso_gpu: optimized GPU isosurface extraction (non-blocking jobs, flood, one measured path), https://github.com/scanberg/mdlib/pull/15, fetched 2026-10-28 (unofficial)

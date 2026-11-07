@@ -3,37 +3,45 @@
 Also called: Schneider and Rüdiger technique, Vector Quantization for Volume Data Compression
 
 ## Overview
-Triadic Vector Quantization is a lossy compression method for volumetric data that combines multiresolution decomposition with codebook-based quantization to reduce memory footprint while preserving visual fidelity [S1, unofficial]. It differs from scalar quantization by encoding spatially correlated differences into low-dimensional vectors, and from pure transform coding by using discrete codebooks for efficient hardware decoding [S1, unofficial].
+Triadic Vector Quantization is a lossy compression method for volumetric data that partitions scalar fields into $4^3$ blocks, decomposes each block into a multiresolution representation of three frequency bands, and quantizes the resulting vectors using discrete codebooks [S1, unofficial]. It differs from scalar quantization by grouping spatially correlated differences into fixed-length vectors, and from pure transform coding by relying on hardware-friendly texture lookups for decoding [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-- Input: A 3D scalar volume data set.
-- Output: Compressed data consisting of two codebook textures and a stream of indices, plus the mean value per block.
+- Input: A 3D scalar volume dataset.
+- Output: Two codebook textures, a stream of per-block mean values, and two per-block indices [S1, unofficial].
 
 **Data Structures**
-1.  **Codebook 1 (High-Frequency Band 1):** A 2D texture of size $256 \times 64$. Each entry is a 64-component vector representing quantized high-frequency differences.
-2.  **Codebook 2 (High-Frequency Band 2):** A 2D texture of size $256 \times 8$. Each entry is an 8-component vector representing quantized mid-frequency differences.
-3.  **Block Header:** Stores the mean value of the $4^3$ block (1 scalar).
-4.  **Indices:** Two integer indices per block, one for each codebook texture.
+1. **Codebook 1:** A 2D texture of size $256 \times 64$ storing 64-component codewords [S1, unofficial].
+2. **Codebook 2:** A 2D texture of size $256 \times 8$ storing 8-component codewords [S1, unofficial].
+3. **Block Header:** Stores the block mean value $M$ (1 scalar) and two integer indices, one for each codebook texture [S1, unofficial].
 
 **Steps**
-1.  **Block Partitioning:** Divide the input volume into disjoint blocks of size $4^3$ voxels.
-2.  **Multiresolution Decomposition:** For each block, compute three components:
-    -   **Mean ($M$):** The average value of all 64 voxels in the $4^3$ block.
-    -   **High-Frequency Vector ($V_{64}$):** A 64-component vector containing the difference between each original voxel value and the down-sampled $2^3$ block values.
-    -   **Mid-Frequency Vector ($V_{8}$):** An 8-component vector containing the difference between the $2^3$ down-sampled values and the final mean value.
-3.  **Down-sampling:**
-    -   Create a $2^3$ block by averaging disjoint sets of $2^3$ voxels from the original $4^3$ block.
-    -   Compute the mean of the $2^3$ block.
-4.  **Vector Construction:**
-    -   $V_{64}[i] = \text{Original}[i] - \text{Downsampled}_2[i]$ for $i \in [0, 63]$.
-    -   $V_{8}[j] = \text{Downsampled}_2[j] - \text{Mean}$ for $j \in [0, 7]$.
-    -   $M = \text{Mean}$.
-5.  **Quantization (Codebook Mapping):**
-    -   Map $V_{64}$ to an index in Codebook 1.
-    -   Map $V_{8}$ to an index in Codebook 2.
-    -   The mapping is achieved by finding the codeword in the respective codebook that minimizes the distance to the vector (e.g., Euclidean distance).
-6.  **Storage:** Store the mean $M$, the index for Codebook 1, and the index for Codebook 2 for each block.
+1. **Block Partitioning:** Divide the input volume into disjoint blocks of size $4^3$ voxels [S1, unofficial].
+2. **Down-sampling:** Down-sample each $4^3$ block by a factor of two by averaging disjoint sets of $2^3$ voxels each, producing a $2^3$ block [S1, unofficial].
+3. **Mean Computation:** Compute the arithmetic mean of all 64 voxels in the original $4^3$ block [S1, unofficial].
+4. **High-Frequency Vector Construction:** Store the difference between each original data sample and the corresponding down-sampled value (expanded to 64 components) in a 64-component vector [S1, unofficial].
+5. **Mid-Frequency Vector Construction:** Store the $2^3$ difference values lost when going from the $2^3$ down-sampled block to the final mean value in an 8-component vector [S1, unofficial].
+6. **Mean Vector Construction:** Store the computed mean value of the entire block in a 1-component vector [S1, unofficial].
+7. **Quantization:** Compute an appropriate mapping and codebook containing 64- and 8-component codewords for both high-frequency bands, then map the constructed vectors to indices in the respective codebooks [S1, unofficial].
+8. **Storage:** Store the mean value and the two indices for each block [S1, unofficial].
+
+**Formulas**
+Let $O[i]$ be the original voxel values for $i \in [0, 63]$.
+- Mean: $M = \frac{1}{64} \sum_{i=0}^{63} O[i]$
+- Down-sampled values: $D[j] = \frac{1}{8} \sum_{k \in \text{subblock}_j} O[k]$ for $j \in [0, 7]$
+- Expanded down-sampled: $E[i] = D[\lfloor i/8 \rfloor]$ for $i \in [0, 63]$
+- High-frequency vector: $V_{64}[i] = O[i] - E[i]$ for $i \in [0, 63]$
+- Mid-frequency vector: $V_{8}[j] = D[j] - M$ for $j \in [0, 7]$
+
+**Parameters and Typical Values**
+- Block size: $4^3$ voxels [S1, unofficial].
+- Codebook sizes: $256 \times 64$ and $256 \times 8$ entries [S1, unofficial].
+- Measured compression: Memory dropped from 1.4 GB to 70 MB and from 200 MB to 11.1 MB [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+- **Boundary Conditions:** The method assumes volume dimensions are divisible by 4; padding or truncation is required otherwise [G].
+- **Precision:** Floating-point rounding in mean and difference calculations may introduce quantization error [G].
+- **Codebook Training:** The compression quality depends on codebook generation; the sources do not specify the training algorithm [G].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -42,163 +50,116 @@ Triadic Vector Quantization is a lossy compression method for volumetric data th
 def triadic_vector_quantization_encode(volume, codebook_64, codebook_8):
     """
     Encodes a volume using Triadic Vector Quantization.
-    
     Args:
-        volume: 3D array of shape (D, H, W) containing voxel values.
-        codebook_64: 2D array of shape (256, 64) representing the high-freq codebook.
-        codebook_8: 2D array of shape (256, 8) representing the mid-freq codebook.
-        
+        volume: 3D list of lists of lists of floats, shape (D, H, W).
+        codebook_64: List of 256 tuples, each length 64.
+        codebook_8: List of 256 tuples, each length 8.
     Returns:
-        mean_values: 3D array of shape (D/4, H/4, W/4) storing block means.
-        indices_64: 3D array of shape (D/4, H/4, W/4) storing indices for codebook_64.
-        indices_8: 3D array of shape (D/4, H/4, W/4) storing indices for codebook_8.
+        means: 3D list of floats, shape (D//4, H//4, W//4).
+        indices_64: 3D list of ints, shape (D//4, H//4, W//4).
+        indices_8: 3D list of ints, shape (D//4, H//4, W//4).
     """
-    D, H, W = volume.shape
-    block_size = 4
-    num_blocks_d = D // block_size
-    num_blocks_h = H // block_size
-    num_blocks_w = W // block_size
+    D, H, W = len(volume), len(volume[0]), len(volume[0][0])
+    bs = 4
+    out_d, out_h, out_w = D // bs, H // bs, W // bs
+    means = [[0.0] * out_w for _ in range(out_h)]
+    indices_64 = [[0] * out_w for _ in range(out_h)]
+    indices_8 = [[0] * out_w for _ in range(out_h)]
     
-    mean_values = np.zeros((num_blocks_d, num_blocks_h, num_blocks_w))
-    indices_64 = np.zeros((num_blocks_d, num_blocks_h, num_blocks_w), dtype=int)
-    indices_8 = np.zeros((num_blocks_d, num_blocks_h, num_blocks_w), dtype=int)
-    
-    for d in range(num_blocks_d):
-        for h in range(num_blocks_h):
-            for w in range(num_blocks_w):
+    for d in range(out_d):
+        for h in range(out_h):
+            for w in range(out_w):
                 # Extract 4x4x4 block
-                block = volume[d*block_size:(d+1)*block_size, 
-                              h*block_size:(h+1)*block_size, 
-                              w*block_size:(w+1)*block_size]
+                block = [volume[d*bs + i][h*bs + j][w*bs + k] for i in range(bs) for j in range(bs) for k in range(bs)]
                 
-                # Flatten to 64 components
-                block_flat = block.flatten() # Length 64
-                
-                # Compute Mean of the 4x4x4 block
-                mean_val = np.mean(block_flat)
-                mean_values[d, h, w] = mean_val
+                # Compute mean
+                mean_val = sum(block) / 64.0
+                means[d][h][w] = mean_val
                 
                 # Down-sample to 2x2x2 by averaging disjoint 2x2x2 sets
-                # Reshape to 2x2x2x2x2x2 to average over the inner 2x2x2
-                # Or simply: average (0,0,0)-(1,1,1), (0,0,2)-(1,1,3), etc.
-                # Let's define a helper to average 2x2x2 blocks
-                downsampled_2x2x2 = np.zeros((2, 2, 2))
+                downsampled = []
                 for i in range(2):
                     for j in range(2):
                         for k in range(2):
-                            # Average the 2x2x2 sub-block starting at (2*i, 2*j, 2*k)
-                            sub_block = block[2*i:2*i+2, 2*j:2*j+2, 2*k:2*k+2]
-                            downsampled_2x2x2[i, j, k] = np.mean(sub_block)
-                
-                # Flatten downsampled block
-                downsampled_flat = downsampled_2x2x2.flatten() # Length 8
-                
-                # Compute High-Frequency Vector (64 components)
-                # Difference between original and downsampled (expanded)
-                # The downsampled value is constant for each 2x2x2 group
-                expanded_downsampled = np.zeros(64)
-                idx = 0
-                for i in range(2):
-                    for j in range(2):
-                        for k in range(2):
-                            val = downsampled_2x2x2[i, j, k]
-                            # Fill the corresponding 2x2x2 region in the 64-vector
+                            sub_sum = 0.0
                             for di in range(2):
                                 for dj in range(2):
                                     for dk in range(2):
-                                        expanded_downsampled[idx] = val
-                                        idx += 1
-                                
-                v_64 = block_flat - expanded_downsampled
+                                        sub_sum += block[(2*i + di)*4 + (2*j + dj)] # Flattened index mapping
+                            downsampled.append(sub_sum / 8.0)
                 
-                # Compute Mid-Frequency Vector (8 components)
-                # Difference between downsampled and mean
-                v_8 = downsampled_flat - mean_val
+                # Expand downsampled to 64 components
+                expanded = []
+                for val in downsampled:
+                    expanded.extend([val] * 8)
                 
-                # Quantize v_64 using codebook_64
-                # Find index of codeword with minimum Euclidean distance
-                dists_64 = np.linalg.norm(codebook_64 - v_64, axis=1)
-                idx_64 = np.argmin(dists_64)
-                indices_64[d, h, w] = idx_64
+                # Compute vectors
+                v_64 = [block[i] - expanded[i] for i in range(64)]
+                v_8 = [downsampled[j] - mean_val for j in range(8)]
                 
-                # Quantize v_8 using codebook_8
-                dists_8 = np.linalg.norm(codebook_8 - v_8, axis=1)
-                idx_8 = np.argmin(dists_8)
-                indices_8[d, h, w] = idx_8
+                # Quantize: find index minimizing Euclidean distance
+                def min_index(vec, codebook):
+                    best_idx, best_dist = 0, float('inf')
+                    for idx, codeword in enumerate(codebook):
+                        dist = sum((a - b) ** 2 for a, b in zip(vec, codeword))
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_idx = idx
+                    return best_idx
                 
-    return mean_values, indices_64, indices_8
+                indices_64[d][h][w] = min_index(v_64, codebook_64)
+                indices_8[d][h][w] = min_index(v_8, codebook_8)
+                
+    return means, indices_64, indices_8
 
-def triadic_vector_quantization_decode(mean_values, indices_64, indices_8, codebook_64, codebook_8):
+def triadic_vector_quantization_decode(means, indices_64, indices_8, codebook_64, codebook_8):
     """
     Decodes a volume using Triadic Vector Quantization.
     """
-    num_blocks_d, num_blocks_h, num_blocks_w = mean_values.shape
-    block_size = 4
-    D = num_blocks_d * block_size
-    H = num_blocks_h * block_size
-    W = num_blocks_w * block_size
+    out_d, out_h, out_w = len(means), len(means[0]), len(means[0][0])
+    bs = 4
+    D, H, W = out_d * bs, out_h * bs, out_w * bs
+    volume = [[[0.0] * W for _ in range(H)] for _ in range(D)]
     
-    volume = np.zeros((D, H, W))
-    
-    for d in range(num_blocks_d):
-        for h in range(num_blocks_h):
-            for w in range(num_blocks_w):
-                mean_val = mean_values[d, h, w]
-                idx_64 = indices_64[d, h, w]
-                idx_8 = indices_8[d, h, w]
+    for d in range(out_d):
+        for h in range(out_h):
+            for w in range(out_w):
+                mean_val = means[d][h][w]
+                idx_64 = indices_64[d][h][w]
+                idx_8 = indices_8[d][h][w]
                 
-                # Retrieve codewords
-                v_64 = codebook_64[idx_64] # Length 64
-                v_8 = codebook_8[idx_8]    # Length 8
+                v_64 = codebook_64[idx_64]
+                v_8 = codebook_8[idx_8]
                 
-                # Reconstruct downsampled 2x2x2 block
-                # v_8 = downsampled - mean => downsampled = v_8 + mean
-                downsampled_flat = v_8 + mean_val
-                downsampled_2x2x2 = downsampled_flat.reshape(2, 2, 2)
+                # Reconstruct downsampled 2x2x2
+                downsampled = [v_8[j] + mean_val for j in range(8)]
+                
+                # Expand downsampled
+                expanded = []
+                for val in downsampled:
+                    expanded.extend([val] * 8)
                 
                 # Reconstruct original block
-                # v_64 = original - expanded_downsampled => original = v_64 + expanded_downsampled
-                expanded_downsampled = np.zeros(64)
-                idx = 0
-                for i in range(2):
-                    for j in range(2):
-                        for k in range(2):
-                            val = downsampled_2x2x2[i, j, k]
-                            for di in range(2):
-                                for dj in range(2):
-                                    for dk in range(2):
-                                        expanded_downsampled[idx] = val
-                                        idx += 1
-                                        
-                block_flat = v_64 + expanded_downsampled
-                block = block_flat.reshape(4, 4, 4)
+                block = [v_64[i] + expanded[i] for i in range(64)]
                 
-                volume[d*block_size:(d+1)*block_size, 
-                       h*block_size:(h+1)*block_size, 
-                       w*block_size:(w+1)*block_size] = block
-                       
+                # Place back into volume
+                for i in range(bs):
+                    for j in range(bs):
+                        for k in range(bs):
+                            volume[d*bs + i][h*bs + j][w*bs + k] = block[i * bs * bs + j * bs + k]
+                            
     return volume
 ```
 
-**Parameters and Typical Values**
--   Block size: $4^3$ voxels.
--   Codebook sizes: $256 \times 64$ and $256 \times 8$ entries.
--   Typical compression ratios: Memory reduced from 1.4 GB to 70 MB, and from 200 MB to 11.1 MB [S1, unofficial].
-
-**Edge Cases and Pitfalls**
--   **Boundary Conditions:** The method assumes the volume dimensions are divisible by 4. Padding or truncation is required if not [G].
--   **Precision:** Floating-point errors in mean and difference calculations may affect quantization accuracy [G].
--   **Codebook Training:** The quality of compression depends heavily on the training of the codebooks. Poorly trained codebooks lead to high reconstruction error [G].
-
 ## Operating characteristics
--   **Time Complexity:** Encoding is $O(N)$ where $N$ is the number of voxels, dominated by the distance calculations against the codebooks. Decoding is $O(N)$, dominated by texture lookups and arithmetic.
--   **Memory Complexity:** The compressed size is proportional to the number of blocks times the size of the indices plus the codebook size. The codebooks are fixed size ($256 \times 64$ and $256 \times 8$ floats).
--   **Performance:** Achieves significant memory reduction (e.g., 1.4 GB to 70 MB) [S1, unofficial].
--   **Strengths:** Fast decoding using fragment shaders; good compression ratios for medical images.
--   **Limitations:** Lossy compression; quality depends on codebook training; block artifacts may be visible at low bitrates.
+- **Time Complexity:** Encoding is $O(N)$ where $N$ is the number of voxels, dominated by distance calculations against the codebooks [G]. Decoding is $O(N)$, dominated by texture lookups and arithmetic [G].
+- **Memory Complexity:** Compressed size scales with the number of blocks times the index size, plus fixed codebook memory [G].
+- **Performance:** Achieves significant memory reduction, dropping 1.4 GB to 70 MB and 200 MB to 11.1 MB in tested sequences [S1, unofficial].
+- **Strengths:** Fast hardware decoding via fragment shaders; effective compression for medical volumetric data [S1, unofficial].
+- **Limitations:** Lossy reconstruction; visual quality depends on codebook training; block boundaries may introduce artifacts at high compression ratios [G].
 
 ## Background
-Triadic Vector Quantization was proposed by Schneider and Rüdiger [S1, unofficial]. It is based on the general concept of Vector Quantization, a lossy data compression technique that maps multidimensional vectors to a discrete subspace using a codebook [S1, unofficial]. The technique is particularly useful for visualizing volumetric medical images on mobile devices where memory is constrained [S1, unofficial].
+Triadic Vector Quantization was proposed by Schneider and Rüdiger [S1, unofficial]. It extends the general vector quantization concept, which maps multidimensional vectors to a discrete subspace using a codebook, to volumetric data by integrating triadic frequency band decomposition [S1, unofficial].
 
 ## Sources
 [S1] Volumetric Medical Images Visualization on Mobile Devices, http://hdl.handle.net/2099.1/11308, fetched 2026-10-26 (unofficial)

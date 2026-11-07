@@ -3,42 +3,39 @@
 Also called: Octree Path Encoding, Octree Path Generation
 
 ## Overview
-Octree Path Computation is the method of encoding the spatial location of a node within an octree hierarchy into a compact bit-vector (path) based on the ray's traversal coordinates. It solves the problem of efficiently identifying which child node a ray enters at each depth level without performing repeated geometric intersection tests against child bounding boxes. It sets itself apart from [Hermite Data Computation via Bisection](822-hermite-data-computation-via-bisection.md) by using direct coordinate comparison rather than iterative refinement, and from [Rational Ray Parameterization for Octree Traversal](3875-rational-ray-parameterization-for-octree-traversal.md) by operating in grid-space rather than ray-parameter space.
+Octree Path Computation encodes a node's spatial location within an octree hierarchy into a compact bit-vector (path) based on traversal coordinates [S1, unofficial][S2, unofficial]. It identifies the child node a ray enters at each depth level without repeated geometric intersection tests against child bounding boxes [S1, unofficial][S2, unofficial]. It differs from [Hermite Data Computation via Bisection](822-hermite-data-computation-via-bisection.md) by using direct coordinate comparison rather than iterative refinement, and from [Rational Ray Parameterization for Octree Traversal](3875-rational-ray-parameterization-for-octree-traversal.md) by operating in grid-space rather than ray-parameter space [G].
 
 ## How it works
 **Inputs:**
-*   Ray origin and direction in grid coordinates (or transformed to grid space).
-*   Current node's bounding box (AABB) defined by $bbox_{min}$ and $bbox_{max}$.
-*   Maximum tree depth $D$.
-*   Current depth level $d$ (starting at 0).
+*   Ray grid coordinates $(r_x, r_y, r_z)$ relative to the root bounding box [S1, unofficial].
+*   Maximum tree depth $D$ [S1, unofficial].
 
 **Outputs:**
-*   A path vector (bitmask) representing the sequence of octant choices from the root to the current leaf.
-*   The child index $c$ at the current level.
+*   Path vector $P$ representing the sequence of octant choices from root to leaf [S1, unofficial].
+*   Child index $c$ at each level [S1, unofficial].
 
 **Data Structures:**
-*   **Path Vector:** An integer or array of bits where each level $d$ consumes 3 bits (for x, y, z octant selection). Total size is $3 \times D$ bits.
-*   **Scale Variable:** An integer representing the half-extent of the current node in grid units, initialized to $2^{D-1}$ and halved at each step.
+*   **Path Vector:** An integer or bit array where each depth level $d$ consumes 3 bits (x, y, z octant selection), totaling $3 \times D$ bits [S1, unofficial].
+*   **Scale Variable:** An integer representing the half-extent of the current node in grid units, initialized to $2^{D-1}$ [S1, unofficial].
 
 **Steps:**
-1.  **Initialization:** Initialize an empty path vector $P$ and a scale variable $s = 2^{D-1}$.
+1.  **Initialization:** Initialize an empty path vector $P = 0$ and a scale variable $s = 2^{D-1}$ [S1, unofficial].
 2.  **Iterate Depth:** For each depth level $d$ from $0$ to $D-1$:
-    a.  Determine the ray's position $P_{ray}$ at the current node's center or entry point.
-    b.  Compare the ray's grid coordinates $(r_x, r_y, r_z)$ against the scale $s$ to determine the octant bits.
-    c.  The octant index $c$ is computed as:
-        $$ c = 4 \cdot \mathbb{I}(r_x \ge C_x) + 2 \cdot \mathbb{I}(r_y \ge C_y) + 1 \cdot \mathbb{I}(r_z \ge C_z) $$
-        where $C$ is the center of the current node.
-    d.  Update the path vector by appending the 3 bits of $c$.
-    e.  If the bit for a dimension is set (i.e., the ray is in the positive half), subtract $s$ from the corresponding coordinate component to normalize it for the next level.
-    f.  Right-shift the scale: $s = s / 2$.
-3.  **Result:** The final path vector uniquely identifies the leaf node.
+    a.  Compare the ray's grid coordinates $(r_x, r_y, r_z)$ against the scale $s$ to determine the octant bits [S1, unofficial].
+    b.  Compute the child index $c$ using the parent's selection formula:
+        $$ c = 4 \cdot \mathbb{I}(r_x \ge c_x) + 2 \cdot \mathbb{I}(r_y \ge c_y) + 1 \cdot \mathbb{I}(r_z \ge c_z) $$
+        where $C$ is the center of the current node [S1, S2, unofficial].
+    c.  Update the path vector by appending the 3 bits of $c$ [S1, unofficial].
+    d.  If a dimension's bit is set (ray is in the positive half), subtract $s$ from the corresponding coordinate component to normalize it for the next level [S1, unofficial].
+    e.  Right-shift the scale: $s = s / 2$ [S1, unofficial].
+3.  **Result:** The final path vector uniquely identifies the leaf node [S1, unofficial].
 
 **Parameters:**
-*   $D$: Maximum depth. Typical values depend on resolution (e.g., 8-10 for moderate resolution).
+*   $D$: Maximum depth [S1, unofficial]. Typical values depend on resolution (e.g., 8-10 for moderate resolution) [G].
 
 **Edge Cases:**
 *   **Non-cubic Bounding Boxes:** If the bounding box is not cubic, the scale must be adjusted per dimension or the box expanded to a cube, potentially wasting space [S1, unofficial].
-*   **Precision:** Floating-point errors in coordinate comparison can lead to incorrect child selection. Fixed-point arithmetic or careful epsilon handling is recommended.
+*   **Precision:** Floating-point errors in coordinate comparison can lead to incorrect child selection; fixed-point arithmetic or careful epsilon handling is recommended [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -53,33 +50,27 @@ def compute_octree_path(ray_pos, max_depth):
     """
     path = 0
     scale = 1 << (max_depth - 1)  # 2^(max_depth - 1)
+    rx, ry, rz = ray_pos[0], ray_pos[1], ray_pos[2]
     
-    # Normalize ray_pos to be within [0, 1] range if necessary, 
-    # assuming ray_pos is relative to root bbox [0, 1]^3.
-    # If ray_pos is absolute grid coordinates, adjust accordingly.
-    
-    for d in range(max_depth):
+    for _ in range(max_depth):
         # Determine octant bits based on current scale
-        # Bit 2 (x), Bit 1 (y), Bit 0 (z)
-        bit_x = 1 if ray_pos[0] >= 0.5 else 0
-        bit_y = 1 if ray_pos[1] >= 0.5 else 0
-        bit_z = 1 if ray_pos[2] >= 0.5 else 0
+        bit_x = 1 if rx >= scale else 0
+        bit_y = 1 if ry >= scale else 0
+        bit_z = 1 if rz >= scale else 0
         
         octant = (bit_x << 2) | (bit_y << 1) | bit_z
-        
-        # Append to path
         path = (path << 3) | octant
         
-        # Update position for next level
+        # Normalize coordinates for next level
         if bit_x:
-            ray_pos[0] -= 0.5
+            rx -= scale
         if bit_y:
-            ray_pos[1] -= 0.5
+            ry -= scale
         if bit_z:
-            ray_pos[2] -= 0.5
+            rz -= scale
             
-        # Halve the scale for next iteration (implicitly handled by coordinate normalization)
-        # In a fixed-point implementation, scale would be right-shifted.
+        # Halve the scale for next iteration
+        scale >>= 1
         
     return path
 ```
@@ -90,15 +81,14 @@ def compute_octree_path(ray_pos, max_depth):
 A method to map implicit macrocell coordinates to the deepest corresponding octree child node to perform isovalue culling using the parent's min/max pair [S2, unofficial]. It stores the path from the octree root to the current node along the u,v-minimal ray of the frustum to avoid costly lookups [S2, unofficial]. It uses neighbor-finding to traverse inexpensively from one node to the next [S2, unofficial]. Hierarchically recursing from a parent node to a child requires a single lookup step in the octree [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(D)$ per ray, where $D$ is the tree depth. Each level requires constant-time bit operations.
-*   **Memory Complexity:** $O(1)$ auxiliary space for path computation, excluding the storage of the path itself ($O(D)$ bits).
-*   **Strengths:** Extremely fast, no geometric intersection tests required during traversal. Ideal for regular grids.
-*   **Limitations:** Requires the ray to be transformed into the grid space of the octree. Less effective for highly irregular or non-axis-aligned structures.
-*   **When to use:** When the volume data is structured in an octree and ray direction is known in grid coordinates.
-*   **When not to use:** When the octree is highly unbalanced or the ray traversal is dominated by other factors (e.g., complex shading).
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths and Limitations:** Not given in the sources.
+*   **When to use/not use:** Not given in the sources.
 
 ## Background
-Originated in the context of ray tracing implicit surfaces and interactive volume rendering. The method is detailed in [S2, unofficial] for mapping macrocells to octree nodes and in [S1, unofficial] for isosurface extraction. It is a fundamental component of stackless and stack-based octree traversal algorithms.
+Originated in the context of ray tracing implicit surfaces and interactive volume rendering [S2, unofficial]. The method is detailed for mapping macrocells to octree nodes [S2, unofficial] and for isosurface extraction [S1, unofficial]. It serves as a fundamental component of stackless and stack-based octree traversal algorithms [G].
 
 ## Sources
 [S1] narnia-ai-mason/isomesh, https://github.com/narnia-ai-mason/isomesh, fetched 2026-10-27 (unofficial)

@@ -45,7 +45,7 @@ $$
 **2. Ray Definition:**
 Rays are defined as cell diagonals connecting vertex $V$ to vertex $W$:
 $$ \mathbf{r}(t) = \mathbf{V} + t(\mathbf{W} - \mathbf{V}), \quad 0 \leq t \leq 1 $$
-Let $\Delta u_r = u_{r1} - u_{r0}$, $\Delta v_r = v_{r1} - v_{r0}$, $\Delta w_r = w_{r1} - w_{r0}$. The intersection point is $(u^*, v^*, w^*) = (u_{r0} + t\Delta u_r, v_{r0} + t\Delta v_r, w_{r0} + t\Delta w_r)$ [S1, S2][S3].
+Let $\Delta u_r = u_{r1} - u_{r0}$, $\Delta v_r = v_{r1} - v_{r0}$, $\Delta w_r = w_{r1} - w_{r0}$ [S1, S2][S3]. The intersection point is $(u^*, v^*, w^*) = (u_{r0} + t\Delta u_r, v_{r0} + t\Delta v_r, w_{r0} + t\Delta w_r)$ [S1, S2][S3].
 
 **3. Cubic Equation:**
 Substituting the ray into the trilinear model yields a cubic equation in $t$:
@@ -68,45 +68,47 @@ $$
     $$ D_3 = y_N^2 - 4G_3^2\delta^3 $$
     [S1, S2].
     *   If $D_3 > 0$: 1 real root.
-    *   If $D_3 = 0$: 3 equal real roots (if $y_N=0$) or 1 distinct + 2 equal real roots (if $y_N \neq 0$).
+    *   If $D_3 = 0$: 3 equal real roots (if $y_N=0$) or 1 distinct + 2 equal real roots (if $y_N \neq 0$) [S1].
     *   If $D_3 < 0$: 3 distinct real roots.
     [S1]. Use Cardan's method for analytical solution or Newton-Raphson numerically [S1, S2].
 
 **5. Ambiguity Detection:**
 *   **Ambiguous Face:** A face with four same-sign ended diagonals and four (+/-) edges [S2].
-*   **Asymptotic Decider:** Determines the sign of an ambiguous face. Compute $V = T_{00}T_{11} - T_{01}T_{10} - I(T_{00} + T_{11} - T_{01} - T_{10})$ using bilinear interpolation on the face vertices.
+*   **Asymptotic Decider:** Determines the sign of an ambiguous face [S1]. Compute $V = T_{00}T_{11} - T_{01}T_{10} - I(T_{00} + T_{11} - T_{01} - T_{10})$ using bilinear interpolation on the face vertices [S1, S2][S3].
     *   $V < 0$: Hyperbola in 1st/3rd quadrants (Positive sign).
     *   $V > 0$: Hyperbola in 2nd/4th quadrants (Negative sign).
     [S1, S2][S3].
-*   **DeVella's Necklace Test:** Detects tunnels. Compute:
+*   **DeVella's Necklace Test:** Detects tunnels [S3]. Compute:
     $$ K[F_i] = (AE - BD)(AF - BC)(AG - CD) $$
     $$ Disc[F_i] = (AH)^2 + (BG)^2 + (CE)^2 + (DF)^2 - 2ABGH - 2ACEH - 2ADFH - 2BCEG - 2BDFG - 2CDEF + 4AEFG + 4BCDH $$
     If $K[F_i] < 0$ and $Disc[F_i] > 0$, a tunnel exists [S1, S2][S3].
 
 ### Algorithm Steps
 1.  **Generate LUT:** Pre-compute the required diagonals for all 31 topological configurations based on the number of ambiguous faces and their signs [S1].
-2.  **Identify Heterogeneous Cells:** Iterate through all cells. Classify vertices as Positive ($T_{ijk} \geq I$) or Negative ($T_{ijk} < I$) [S1, S2].
+2.  **Identify Heterogeneous Cells:** Iterate through all cells [S1]. Classify vertices as Positive ($T_{ijk} \geq I$) or Negative ($T_{ijk} < I$) [S1, S2].
 3.  **Determine Configuration:**
-    *   Count ambiguous faces using the Asymptotic Decider.
-    *   Categorize into one of the 31 configurations (0-13, with sub-configurations for tunnels/disjoint surfaces).
+    *   Count ambiguous faces using the Asymptotic Decider [S1].
+    *   Categorize into one of the 31 configurations (0-13, with sub-configurations for tunnels/disjoint surfaces) [S1].
     *   Use DeVella's test where necessary (e.g., Config 4, 6.1, 7.4, 10.1.2, 12.1.2) to distinguish tunnels from disjoint surfaces [S1].
-4.  **Select Diagonals:** Retrieve the list of diagonals from the LUT for the current configuration.
+4.  **Select Diagonals:** Retrieve the list of diagonals from the LUT for the current configuration [S3].
     *   *Rule of Thumb:* Use one-point-per-disjoint-component, except for tunnels which require multiple points [S1].
 5.  **Compute Intersection Points:**
-    *   For each selected diagonal, form the ray equation.
+    *   For each selected diagonal, form the ray equation [S2].
     *   Compute coefficients $G_0..G_3$.
     *   Solve for real roots $t \in [0,1]$.
-    *   Compute intersection points $p = \mathbf{V} + t(\mathbf{W} - \mathbf{V})$.
+    *   Compute intersection points $p = \mathbf{V} + t(\mathbf{W} - \mathbf{V})$ [S1, S2].
 6.  **Associate Points with Edges:**
     *   Associate each point $p$ with the edge containing the diagonal endpoint ($V$ or $W$) closest to $p$ [S1, S2].
     *   For specific configurations (e.g., tunnels), make additional associations with vertices to ensure connectivity [S1].
-    *   Associate the point with all edges containing its associated vertices.
+    *   Associate the point with all edges containing its associated vertices [S2].
 7.  **Polygonization:**
-    *   For each edge, collect all associated isosurface points from neighboring cells.
-    *   Connect these points to form one or two non-overlapping triangles.
-    *   **Tunnel Handling:** Treat tunnel cells as isolated. Polygonize their points independently without sharing edges with neighbors [S1, S2][S3].
+    *   For each edge, collect all associated isosurface points from neighboring cells [S3].
+    *   Connect these points to form one or two non-overlapping triangles [S1, S2].
+    *   **Tunnel Handling:** Treat tunnel cells as isolated [S3]. Polygonize their points independently without sharing edges with neighbors [S1, S2][S3].
 
 ### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
 ```python
 def topologically_accurate_dual_isosurfacing(grid, isovalue):
     """
@@ -117,10 +119,10 @@ def topologically_accurate_dual_isosurfacing(grid, isovalue):
     # Step 1: Pre-computed LUT (simplified representation)
     # Key: (num_ambiguous_faces, signs_of_ambiguous_faces, has_tunnel)
     # Value: list of diagonal indices (0-3) to test
+    # Sources do not provide the full LUT mapping.
     LUT = {
         (0, (), False): [(0, 1)], 
         (0, (), True): [(0, 2), (1, 3)], 
-        # ... other 31 configurations mapped to diagonal pairs ...
     }
 
     # Step 2: Iterate cells and collect points
@@ -193,4 +195,48 @@ def asymptotic_decider(cell, face_idx, isovalue):
     # Return +1 if V < 0, -1 if V > 0
     pass
 
-def devellas_neck
+def devellas_necklace_test(cell, isovalue):
+    # Compute K and Disc as per formulas
+    # Return True if K < 0 and Disc > 0
+    pass
+
+def compute_cubic_coefficients(V, du, dv, dw, vertices, isovalue):
+    # Compute A, B, C, D, E, F, G, H
+    # Compute G0, G1, G2, G3
+    pass
+
+def solve_cubic(coeffs):
+    # Solve G3*t^3 + G2*t^2 + G1*t + G0 = 0
+    pass
+
+def find_associated_edge(p, V, W):
+    # Return edge index containing endpoint closest to p
+    pass
+
+def is_tunnel_cell(edge):
+    # Check if edge belongs to a tunnel configuration
+    pass
+
+def polygonize_tunnel(points):
+    # Polygonize tunnel points independently
+    pass
+
+def polygonize_edge(points):
+    # Connect points to form one or two triangles
+    pass
+```
+
+## Operating characteristics
+*   **Time Complexity:** The polygonization step has $O(n)$ time complexity for a grid size $n$ [S1, S2].
+*   **Memory Limitations:** Memory limitations in the polygonization phase require downsampling datasets larger than $64 \times 64 \times 64$ by a ratio (e.g., 1:4) [S1, S2][S3].
+*   **Performance:** Computation times depend on the number of tunnel cases. For example, on Neghip ($32 \times 32 \times 32$, 1:1 ratio, 0 tunnels) it takes 0.96s, on Buckyball ($32 \times 32 \times 32$, 1:1 ratio, 0 tunnels) 1.67s, on Bonsai ($256 \times 256 \times 256$, 1:4 ratio, 42 tunnels) 2.36s, and on Skull ($256 \times 256 \times 256$, 1:4 ratio, 67 tunnels) 4.08s [S1, S2][S3].
+*   **Strengths:** Generates topologically correct isosurfaces including tunnel cases and multiple isosurface components per cell, computing exact points on the isosurface with respect to trilinear interpolation [S3]. Does not require normal information such as Hermite data [S3].
+*   **Limitations:** The current polygonization method is not favorable for grid sizes greater than $64 \times 64 \times 64$ due to memory constraints [S1, S2]. The polygonization step needs optimization; using efficient data structures like kd-trees would improve performance [S3].
+
+## Background
+The method was introduced in a paper by Lopes et al. [S1, S2][S3]. It builds on the exhaustive analysis of the 31 topological configurations of the MC case table [LB03] and uses the asymptotic decider [NH91] and DeVella's necklace test [Nie03] to resolve ambiguities. It is applied on synthetic $2 \times 2 \times 2$ datasets for tunnel cases and standard datasets (Neghip, Buckyball, Bonsai, Skull) [S1][S3].
+
+## Sources
+[S1] Topologically Accurate Dual Isosurfacing Using Ray Intersection, https://doi.org/10.20385/1860-2037/4.2007.4, fetched 2026-10-26
+[S2] Topologically Accurate Dual Isosurfacing Using Ray Intersection, https://www.jvrb.org/jvrb/article/download/4.2007.4/html?inline=1, fetched 2026-10-29
+[S3] Using Ray Intersection for Dual Isosurfacing, http://www.scitepress.net/api/PaperFile/Download?id=kJgq94qrpaA=&t=1&type=nHg6mGyw+oQ=&t=1&year=hwU2oyWbE78=&t=1, fetched 2026-10-29

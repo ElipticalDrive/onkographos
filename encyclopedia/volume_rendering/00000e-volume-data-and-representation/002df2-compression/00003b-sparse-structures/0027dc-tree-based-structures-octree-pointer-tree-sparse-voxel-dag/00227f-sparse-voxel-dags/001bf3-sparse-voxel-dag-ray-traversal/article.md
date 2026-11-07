@@ -3,102 +3,45 @@
 Also called: Ray tracing a sparse voxel DAG, SVO DAG Ray Tracer
 
 ## Overview
-Sparse Voxel DAG Ray Traversal is a GPU-based ray tracing method that traverses a Sparse Voxel Directed Acyclic Graph (SVDAG) to perform visibility queries, including primary ray intersection, hard shadows, soft shadows, and ambient occlusion. It differs from standard Sparse Voxel Octree (SVO) traversal by eliminating the need for contour intersection tests and distance maintenance along the ray, leveraging the DAG's structure to traverse voxels in strict ray order [S1]. While it shares the compression benefits of SVDAGs, it requires a separate traditional SVO structure for material information, as the DAG primarily stores geometric topology [S1].
+Sparse Voxel DAG (SVDAG) ray traversal is a GPU-based method for efficiently traversing a compressed sparse voxel representation to perform visibility queries (shadows, ambient occlusion) and primary ray intersection [S1]. It builds on [Sparse Voxel DAGs](2791-sparse-voxel-dags.md) by exploiting node sharing to reduce memory footprint while maintaining traversal performance comparable to standard Sparse Voxel Octrees (SVOs) [S1][S2, unofficial]. Unlike standard SVO traversal, it must handle potential cycles in the graph structure by tracking visited nodes, but avoids complex intersection tests with contours [S1].
 
 ## How it works
-**Inputs and Outputs:**
-- Input: A Sparse Voxel DAG (SVDAG) representing geometry, a ray origin, and a ray direction.
-- Output: Hit points, intersection distances, and visibility flags.
-- Auxiliary Input: A traditional SVO structure containing material properties, queried at hit points obtained from the DAG traversal [S1].
+**Inputs:** A Sparse Voxel DAG structure (typically stored in linear memory with child masks and pointers) and a set of rays (primary, shadow, or ambient occlusion rays).
+**Outputs:** Intersection distances, hit points, or binary visibility flags.
 
 **Data Structures:**
-The SVDAG node layout is defined by the parent article [2791-sparse-voxel-dags.md]. Nodes store a `childmask` (8-bit integer) followed by an array of pointers to non-empty children. Node size varies between 8 and 36 bytes depending on the number of children (1 to 8) [898-bottom-up-svo-to-dag-reduction.md]. In the specific implementation cited, both the mask and pointers are stored as 4-byte integers in memory, with pointers to non-empty children stored consecutively after the childmask [S1].
+*   **Node Layout:** Each node consists of a child mask (4 bytes) and a list of pointers to non-empty children. The pointers are stored consecutively after the mask. The size of a node depends on the number of active children [S1].
+*   **Visited Set:** A stack or bitset to track nodes currently in the traversal path to detect cycles and prevent infinite loops [G].
 
 **Algorithm Steps:**
-1.  **Initialization:** Start traversal at the root node. Initialize ray parameters (origin, direction, t_min, t_max).
-2.  **Traversal Loop:** Iterate through the DAG using a stack-based approach similar to Laine and Karras [2010a] [S1].
-    -   For each node, check the `childmask` to determine which octants are occupied.
-    -   Compute the intersection of the ray with the current node's bounding box. If no intersection, terminate traversal for this branch.
-    -   Push children onto the stack in reverse order of traversal (to ensure front-to-back processing if required, though DAG order simplifies this).
-    -   **Simplification:** Unlike SVOs, do not perform intersection tests with voxel contours. Do not maintain the distance traveled along the ray for traversal logic, as voxels are traversed in ray order [S1].
-3.  **Leaf Processing:** When a leaf node (voxel) is reached, record the hit point.
-4.  **Material Query:** Use the hit point from the DAG traversal to query the auxiliary traditional SVO structure for material properties [S1].
-5.  **Beam Optimization (Primary Rays):** For primary rays, use beam optimization with a beam size corresponding to 8x8 pixels to improve performance [S1].
-6.  **Soft Shadow Optimization:**
-    -   For each pixel, shoot a beam of four rays from the view-sample position to the area light [S1].
-    -   Find the conservative furthest distance along these rays where no geometry is intersected.
-    -   Shorten all shadow rays for that pixel accordingly [S1].
-    -   Trace the same beam rays in reverse (from light source) to find a conservative interval where geometry may be intersected, further improving traversal speed [S1].
-    -   If the entire beam has no intersection, no additional shadow rays are required for that pixel [S1].
-7.  **Ambient Occlusion:** Approximate by casting rays over the hemisphere and averaging occlusion, mapping the first-hit distance to a falloff function [S1].
+1.  **Initialization:** For each ray, start at the root of the DAG. Initialize the traversal stack with the root node.
+2.  **Traversal Loop:** While the stack is not empty:
+    a.  Pop the current node from the stack.
+    b.  **Cycle Check:** If the current node is already in the visited set, skip processing this node (it is an ancestor in the current path) [G].
+    c.  **Mark Visited:** Add the current node to the visited set.
+    d.  **Child Selection:** Determine which children of the current node are intersected by the ray. This is typically done using a multi-resolution Digital Differential Analyzer (DDA) or axis-aligned bounding box (AABB) tests [S2, unofficial].
+    e.  **Push Children:** For each intersected child, push its pointer onto the stack.
+    f.  **Termination:** If a leaf node is reached, record the intersection distance or hit point.
+3.  **Cleanup:** Remove the current node from the visited set upon backtracking (if using a recursive or explicit stack-based approach that supports backtracking) [G].
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+**Simplifications for SVDAG vs. SVO:**
+*   No intersection tests with contours are needed [S1].
+*   Voxels can be traversed in ray order, so distance travelled along the ray does not need to be maintained during the traversal loop itself [S1].
+*   The DAG structure requires only minor changes to standard SVO traversal code, primarily the cycle detection mechanism [S1].
 
-```python
-def trace_svdag_ray(ray_origin, ray_direction, svdag_root, material_svo):
-    stack = [svdag_root]
-    closest_hit = None
-    
-    while stack:
-        node = stack.pop()
-        
-        # Check intersection with node bounding box
-        if not ray_intersects_node(ray_origin, ray_direction, node):
-            continue
-            
-        # Check children based on childmask
-        for child_index in get_occupied_children(node.childmask):
-            child_ptr = node.children[child_index]
-            
-            # If leaf, record hit
-            if is_leaf(child_ptr):
-                hit_point = compute_voxel_intersection(ray_origin, ray_direction, child_ptr)
-                if closest_hit is None or hit_point.distance < closest_hit.distance:
-                    closest_hit = hit_point
-            else:
-                # Push non-leaf children to stack
-                stack.append(child_ptr)
-                
-    # Query material from auxiliary SVO
-    if closest_hit:
-        material = material_svo.query(closest_hit.point)
-        return closest_hit, material
-    return None, None
+**Beam Optimization (Primary Rays):**
+*   Use beam optimization with a size corresponding to 8x8 pixels to improve performance [S1].
+*   For primary ray intersection evaluation, query a traditional SVO structure containing material information with the hit points obtained from tracing in the DAG structure [S1].
 
-def trace_soft_shadow_svdag(ray_origin, ray_direction, light_position, svdag_root):
-    # Beam optimization: 4 rays per pixel
-    beam_rays = generate_beam_rays(ray_origin, ray_direction, light_position, count=4)
-    
-    # Forward pass: find furthest safe distance
-    max_safe_dist = infinity
-    for ray in beam_rays:
-        hit = trace_svdag_ray(ray.origin, ray.direction, svdag_root, None)
-        if hit:
-            max_safe_dist = min(max_safe_dist, hit.distance)
-            
-    # Reverse pass: find interval where geometry may exist
-    min_intersect_dist = 0
-    for ray in beam_rays:
-        # Trace from light to view
-        reverse_ray = Ray(light_position, normalize(ray.origin - light_position))
-        hit = trace_svdag_ray(reverse_ray.origin, reverse_ray.direction, svdag_root, None)
-        if hit:
-            # Distance from light
-            dist_from_light = hit.distance
-            # Convert to distance from view sample (approximate or exact depending on coordinate system)
-            dist_from_view = length(ray.origin - light_position) - dist_from_light
-            min_intersect_dist = max(min_intersect_dist, dist_from_view)
-            
-    # Shorten shadow rays based on conservative bounds
-    shadow_ray_length = max_safe_dist - min_intersect_dist
-    return shadow_ray_length
-```
+**Soft Shadow Optimization:**
+*   Shoot a beam (four rays) per pixel from the view-sample position to the area light [S1].
+*   Find the conservative furthest distance along these rays where no geometry is intersected, and shorten all shadow rays accordingly [S1].
+*   Trace the same beam rays in reverse direction (from the light source) to find a conservative interval of the beam where geometry may be intersected, further improving traversal speed [S1].
+*   This optimization frequently allows finding pixels whose entire beams have no intersection with geometry, requiring no additional shadow rays [S1].
 
-**Edge Cases and Pitfalls:**
--   **Material Separation:** The DAG traversal only provides geometric hits. Material information must be stored in a separate structure (e.g., traditional SVO) and queried post-traversal [S1].
--   **Beam Optimization Bounds:** The conservative bounds for soft shadows must be calculated carefully to avoid self-shadowing artifacts or incorrect occlusion [S1].
--   **Precision:** Standard floating-point precision is assumed for ray-node intersections [S1].
+**Ambient Occlusion:**
+*   Approximated by casting a number of rays over the hemisphere and averaging the occlusion of each ray [S1].
+*   Occlusion is evaluated by mapping the first-hit distance to a falloff function [S1].
 
 ## Subtopics
 
@@ -106,13 +49,14 @@ def trace_soft_shadow_svdag(ray_origin, ray_direction, light_position, svdag_roo
 A GPU-based ray traversal method for Sparse Voxel Symmetry-aware Voxel DAGs (SSVDAG) that adapts standard octree traversal to handle variable-rate encoded child pointers and apply symmetry transformations upon entering subtrees. It differs from standard SVDAG traversal by explicitly managing the coordinate system transformations associated with symmetry nodes, enabling efficient visibility queries and primary ray intersection on compressed data. The tracing routine is essentially unchanged from SVO/SVDAG tracing, with small overhead (<15%) to handle the reflective transformations encoded in the tagged pointers. It is used for primary ray tracing and hard shadow ray tracing directly in the SSVDAG structure.
 
 ## Operating characteristics
--   **Performance:** The tracing overhead for SSVDAG compared to standard SVO/SVDAG tracing is less than 15% [S2, unofficial].
--   **Memory Efficiency:** SVDAGs significantly reduce memory usage compared to SVOs. For example, a scene with nearly 100 billion voxels can be stored in less than 575 MB in SSVDAG format (0.048 bits/voxel), whereas an SVO would require 31.1 GB and a standard SVDAG 1.0 GB [S2, unofficial].
--   **Strengths:** Eliminates contour intersection tests; allows traversal in ray order; high compression ratio via DAG reduction and symmetry awareness.
--   **Limitations:** Requires auxiliary structure for material data; complex construction algorithm for SSVDAG involving bottom-up external-memory reduction.
+*   **Time Complexity:** Traversal time is proportional to the number of nodes visited. The DAG compression reduces the number of nodes, potentially improving cache efficiency and reducing memory bandwidth usage [S1][S2, unofficial].
+*   **Memory Complexity:** Significantly lower than SVO due to node sharing. For example, a scene with nearly 100 billion voxels can be stored in less than 575 MB at 0.048 bits/voxel, compared to 31.1 GB for an SVO [S2, unofficial].
+*   **Performance:** Tracing overhead for SSVDAG compared to standard SVO/SVDAG tracing is less than 15% [S2, unofficial].
+*   **Strengths:** High compression ratio, efficient visibility queries, suitable for large scenes with repetitive geometry.
+*   **Limitations:** Cycle detection adds some complexity. Material information is not stored in the DAG itself and requires a separate structure (e.g., SVO) for shading [S1].
 
 ## Background
-Sparse Voxel DAGs were introduced to compress sparse voxel octrees by merging identical subtrees [S2, unofficial]. The ray traversal method described here was implemented in CUDA for visibility queries in deferred rendering [S1]. The SSVDAG variant extends this by incorporating symmetry-aware compression, allowing for lossless compression of geometry with similarity transforms [S2, unofficial]. The work is an extended version of the I3D 2016 paper by Jaspe Villanueva et al. [S2, unofficial].
+Sparse Voxel DAGs were introduced to compress sparse voxel octrees by sharing identical subtrees [S1][S2, unofficial]. The ray traversal method described here was implemented in CUDA for efficient GPU rendering [S1]. It builds on the work of Laine and Karras [2010a, 2010b] for SVO traversal and beam optimization [S1]. The SSVDAG variant extends this to handle symmetry transformations [S2, unofficial].
 
 ## Sources
 [S1] High resolution sparse voxel DAGs, https://www.researchgate.net/publication/262367808_High_resolution_sparse_voxel_DAGs, fetched 2026-10-27

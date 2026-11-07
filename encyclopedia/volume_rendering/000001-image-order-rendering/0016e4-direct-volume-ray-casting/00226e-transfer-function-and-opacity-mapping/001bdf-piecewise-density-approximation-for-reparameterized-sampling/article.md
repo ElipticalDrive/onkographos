@@ -3,16 +3,14 @@
 Also called: PWC approximation, PWL approximation, Piecewise Constant Approximation
 
 ## Overview
-This method enables reparameterized sampling in volume rendering by approximating the density field $\sigma_r(t)$ along a ray as either piecewise constant or piecewise linear on a predefined grid [S1, unofficial][S2, unofficial]. This approximation allows the cumulative opacity integral to be computed analytically, permitting the inversion of the opacity function to generate samples according to a target distribution [S1, unofficial][S2, unofficial]. It differs from standard fixed-step ray casting by providing differentiable, distribution-aware sample locations, and from SDF-based methods by relying on explicit density grid approximations rather than implicit surface distance functions [S1, unofficial][S2, unofficial].
+This method enables reparameterized sampling in volume rendering by approximating the density field $\sigma_r(t)$ along a ray as either piecewise constant or piecewise linear on a predefined grid [S1, unofficial][S2, unofficial]. This approximation allows the cumulative opacity integral to be computed analytically, permitting the inversion of the opacity function to generate samples according to a target distribution [S1, unofficial][S2, unofficial]. It differs from standard fixed-step ray casting by providing differentiable, distribution-aware sample locations [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- Ray origin $o$ and direction $d$ (normalized).
-- Near and far clipping distances $t_n$ and $t_f$.
-- A grid of $m+1$ points $t_0, t_1, \dots, t_m$ such that $t_n = t_0 < t_1 < \dots < t_m = t_f$ [S1, unofficial][S2, unofficial].
+- Grid of $m+1$ points $t_0, t_1, \dots, t_m$ such that $t_n = t_0 < t_1 < \dots < t_m = t_f$ [S1, unofficial][S2, unofficial].
 - A density query function $\sigma_r(t)$ that returns the scalar density at distance $t$ along the ray [S1, unofficial][S2, unofficial].
-- A target uniform random sample $u \in [0, 1]$ [S1, unofficial][S2, unofficial].
-- A scaling factor $y_f$ (often $y_f=1$ for standard opacity inversion) [S1, unofficial][S2, unofficial].
+- A target uniform random sample $u \in [0, 1)$ [S1, unofficial][S2, unofficial].
+- A scaling factor $y_f$ [S1, unofficial][S2, unofficial].
 
 **Outputs:**
 - A sample location $t \in [t_n, t_f]$ on the ray such that the cumulative opacity up to $t$ matches the target value derived from $u$ [S1, unofficial][S2, unofficial].
@@ -29,7 +27,7 @@ This method enables reparameterized sampling in volume rendering by approximatin
    Choose between Piecewise Constant (PWC) or Piecewise Linear (PWL) approximation [S1, unofficial][S2, unofficial].
 
    *For PWC:*
-   1.1. For each bin $j \in \{0, \dots, m-1\}$, select a point $\hat{t}_j \in [t_j, t_{j+1}]$. Sources suggest picking a random point within the bin [S2, unofficial], though the midpoint is a common deterministic choice [G].
+   1.1. For each bin $j \in \{0, \dots, m-1\}$, select a point $\hat{t}_j \in [t_j, t_{j+1}]$ [S2, unofficial].
    1.2. Query the density at this point: $\hat{\sigma}_j = \sigma_r(\hat{t}_j)$ [S1, unofficial][S2, unofficial].
 
    *For PWL:*
@@ -38,7 +36,7 @@ This method enables reparameterized sampling in volume rendering by approximatin
 2. **Compute the Target Integral Value:**
    Calculate the target cumulative optical depth $Y$ corresponding to the random sample $u$ [S1, unofficial][S2, unofficial]:
    $$ Y = -\log(1 - y_f u) $$
-   If $y_f=1$ and $u=1$, handle the edge case where $Y \to \infty$ by clamping $t$ to $t_f$ [G].
+   If $u=1$, handle the edge case where $Y \to \infty$ by clamping $t$ to $t_f$ [G].
 
 3. **Find the Containing Bin:**
    Compute the cumulative integral values at the grid boundaries to determine which bin contains the solution $t$.
@@ -61,35 +59,32 @@ This method enables reparameterized sampling in volume rendering by approximatin
    *For PWC (Linear Equation):*
    The integral in bin $k$ is linear: $I_0(t) = C_k + \hat{\sigma}_k (t - t_k)$ [S1, unofficial][S2, unofficial].
    $$ t = t_k + \frac{Y - C_k}{\hat{\sigma}_k} $$
-   If $\hat{\sigma}_k = 0$, set $t = t_{k+1}$ if $Y \ge C_k$, or handle as an error/edge case [G].
+   If $\hat{\sigma}_k = 0$, set $t = t_{k+1}$ if $Y \ge C_k$, or handle as an edge case [G].
 
    *For PWL (Quadratic Equation):*
    The density in bin $k$ is interpolated: $\bar{\sigma}_r(t) = \sigma_k \frac{t_{k+1}-t}{t_{k+1}-t_k} + \sigma_{k+1} \frac{t-t_k}{t_{k+1}-t_k}$ [S2, unofficial].
-   Let $\Delta t_k = t_{k+1} - t_k$.
+   Let $\Delta t_k = t_{k+1} - t_k$ and $\tau = t - t_k$.
    The integral from $t_k$ to $t$ is:
-   $$ I_{bin}(t) = \int_{t_k}^t \bar{\sigma}_r(s) ds = \frac{\sigma_k + \sigma_{k+1}}{2} (t - t_k) - \frac{\sigma_{k+1} - \sigma_k}{2 \Delta t_k} (t - t_k)^2 $$
-   We need to solve $C_k + I_{bin}(t) = Y$, or $I_{bin}(t) = Y - C_k$. Let $R = Y - C_k$.
-   $$ \frac{\sigma_k + \sigma_{k+1}}{2} (t - t_k) - \frac{\sigma_{k+1} - \sigma_k}{2 \Delta t_k} (t - t_k)^2 = R $$
-   Let $\tau = t - t_k$. This is a quadratic equation $A \tau^2 + B \tau + C = 0$:
-   $$ A = -\frac{\sigma_{k+1} - \sigma_k}{2 \Delta t_k} $$
-   $$ B = \frac{\sigma_k + \sigma_{k+1}}{2} $$
-   $$ C = -R $$
+   $$ I_{bin}(\tau) = \int_{t_k}^t \bar{\sigma}_r(s) ds = \sigma_k \tau + \frac{\sigma_{k+1} - \sigma_k}{2 \Delta t_k} \tau^2 $$
+   We need to solve $C_k + I_{bin}(\tau) = Y$, or $I_{bin}(\tau) = Y - C_k$. Let $R = Y - C_k$.
+   $$ \frac{\sigma_{k+1} - \sigma_k}{2 \Delta t_k} \tau^2 + \sigma_k \tau - R = 0 $$
+   This is a quadratic equation $A \tau^2 + B \tau + C = 0$ with:
+   $$ A = \frac{\sigma_{k+1} - \sigma_k}{2 \Delta t_k}, \quad B = \sigma_k, \quad C = -R $$
    Solve for $\tau$:
-   If $A \approx 0$ (i.e., $\sigma_k \approx \sigma_{k+1}$), use linear solution: $\tau = R / B$.
+   If $|A| < \epsilon$ (i.e., $\sigma_k \approx \sigma_{k+1}$), use linear solution: $\tau = R / B$ [G].
    Otherwise, use quadratic formula:
    $$ \tau = \frac{-B + \sqrt{B^2 - 4AC}}{2A} $$
-   (Select the root that lies in $[0, \Delta t_k]$; since the function is monotonic and concave/convex depending on sign of $A$, the correct root is the one within bounds) [S1, unofficial][S2, unofficial].
+   (Select the root that lies in $[0, \Delta t_k]$; since the integral is monotonic for non-negative density, exactly one root will satisfy the bounds) [S1, unofficial][S2, unofficial].
    $$ t = t_k + \tau $$
 
 **Parameters:**
 - Grid resolution $m$: Not given in the sources. Typical values depend on the scene complexity and desired accuracy [G].
-- $y_f$: Typically 1.0 for standard opacity inversion [S1, unofficial][S2, unofficial].
+- $y_f$: Scaling factor for the opacity function [S1, unofficial][S2, unofficial].
 
 **Edge Cases and Pitfalls:**
 - **Zero Density:** If $\hat{\sigma}_k = 0$ in PWC, division by zero occurs. The sample should be pushed to the end of the bin or the next non-zero bin [G].
 - **$u=1$:** Results in $Y \to \infty$. Clamp $t$ to $t_f$ [G].
 - **Negative Density:** The method assumes non-negative density fields. If $\sigma_r(t)$ can be negative, the monotonicity of $I(t)$ is not guaranteed, and the bin search may fail [S1, unofficial][S2, unofficial].
-- **Precision:** Solving the quadratic equation for PWL requires care with numerical stability if $\sigma_k \approx \sigma_{k+1}$ [S1, unofficial][S2, unofficial].
 
 **Pseudocode:**
 
@@ -101,7 +96,7 @@ import math
 def piecewise_density_approximation_sample(
     t_grid,       # List of m+1 floats: t_0, ..., t_m
     density_func, # Function sigma_r(t) -> float
-    u,            # Random sample in [0, 1]
+    u,            # Random sample in [0, 1)
     y_f=1.0,      # Scaling factor
     approx_type="PWC" # "PWC" or "PWL"
 ):
@@ -121,11 +116,6 @@ def piecewise_density_approximation_sample(
     
     if approx_type == "PWC":
         # PWC: Precompute representative densities and cumulative sums
-        # Note: In a real implementation, representative points might be cached
-        # or computed on the fly. Here we assume density_func is expensive,
-        # so we might want to cache sigma values.
-        
-        # Compute C_i for all i
         current_C = 0.0
         for i in range(1, m + 1):
             t_prev = t_grid[i-1]
@@ -187,12 +177,12 @@ def piecewise_density_approximation_sample(
         return max(t_k, min(t_k1, t))
         
     elif approx_type == "PWL":
-        # Quadratic equation
+        # Quadratic equation: A*tau^2 + B*tau + C = 0
         sigma_k = density_func(t_k)
         sigma_k1 = density_func(t_k1)
         
-        A = -(sigma_k1 - sigma_k) / (2.0 * delta_t_k)
-        B = (sigma_k + sigma_k1) / 2.0
+        A = (sigma_k1 - sigma_k) / (2.0 * delta_t_k)
+        B = sigma_k
         C_const = -R
         
         if abs(A) < 1e-9:
@@ -238,17 +228,16 @@ Uses SDFs and logistic CDF. Choose for surface-based rendering.
 Standard raycasting output. Choose for baseline comparison.
 
 ## Operating characteristics
-- **Time Complexity:** $O(m)$ to precompute cumulative integrals, where $m$ is the number of grid bins. Finding the bin is $O(m)$ or $O(\log m)$ with binary search. Solving for $t$ is $O(1)$. Total per sample: $O(m)$ or $O(\log m)$ [S1, unofficial][S2, unofficial].
-- **Memory Complexity:** $O(m)$ to store grid points and cumulative integrals [S1, unofficial][S2, unofficial].
+- **Time Complexity:** $O(m)$ to precompute cumulative integrals, where $m$ is the number of grid bins. Finding the bin is $O(m)$ with linear scan or $O(\log m)$ with binary search. Solving for $t$ is $O(1)$.
+- **Memory Complexity:** $O(m)$ to store grid points and cumulative integrals.
 - **Measured Performance:** Not given in the sources.
-- **Scaling:** Scales linearly with grid resolution $m$ [S1, unofficial][S2, unofficial].
 - **Strengths:** Differentiable with respect to density field $\sigma_r$ [S1, unofficial]. Allows analytical computation of integrals [S1, unofficial][S2, unofficial].
-- **Limitations:** Requires precomputation of grid densities [S1, unofficial][S2, unofficial]. Approximation error depends on grid resolution [S1, unofficial][S2, unofficial].
+- **Limitations:** Requires precomputation of grid densities. Approximation error depends on grid resolution [S1, unofficial][S2, unofficial].
 - **When to use:** When differentiable sampling is required, or when analytical inversion of opacity is beneficial [S1, unofficial][S2, unofficial].
 - **When not to use:** When high accuracy is needed without fine grids, or when density field is not available analytically [G].
 
 ## Background
-The method was proposed in "Differentiable Rendering with Reparameterized Volume Sampling" by [S1, unofficial][S2, unofficial]. It builds on the idea of approximating the density field to enable analytical integration and inversion [S1, unofficial][S2, unofficial].
+The method was proposed in "Differentiable Rendering with Reparameterized Volume Sampling" [S1, unofficial][S2, unofficial]. It builds on the idea of approximating the density field to enable analytical integration and inversion [S1, unofficial][S2, unofficial].
 
 ## Sources
 [S1] Differentiable Rendering with Reparameterized Volume Sampling, https://doi.org/10.48550/arxiv.2302.10970, fetched 2026-10-26 (unofficial)

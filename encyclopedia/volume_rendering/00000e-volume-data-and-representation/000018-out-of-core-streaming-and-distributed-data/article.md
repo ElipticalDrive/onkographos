@@ -1,16 +1,10 @@
 # Out-of-core, streaming and distributed data
 
-Also called: Out-of-core rendering, Volume streaming, Distributed volume rendering
 
 ## Overview
-This family addresses the rendering of volumetric datasets that exceed the memory capacity of a single processing unit or the bandwidth limits of the system bus [S1, S2, S4, unofficial]. It solves the scalability bottleneck inherent in single-node rendering by partitioning data or computation across multiple nodes, or by streaming data from disk to GPU in chunks [S1, S2, S4, unofficial]. What sets this family apart from [Dense grids and memory layout](3-dense-grids-and-memory-layout.md) is the explicit handling of data movement and partitioning strategies, whereas dense grids focus on in-memory organization. It differs from [Compression](4-compression.md) by focusing on temporal/spatial streaming rather than static storage reduction, and from [Multiresolution and level of detail](7-multiresolution-and-level-of-detail.md) by prioritizing data delivery over visual approximation, though they often combine.
+This family addresses the rendering of volumetric datasets that exceed the memory capacity of a single processing unit or the bandwidth limits of the system bus [S1, S2, S4, unofficial]. It solves the scalability bottleneck inherent in single-node rendering by partitioning data or computation across multiple nodes, or by streaming data from disk to GPU in chunks [G]. What sets this family apart from [Dense grids and memory layout](3-dense-grids-and-memory-layout.md) is the explicit handling of data movement and partitioning strategies, whereas dense grids focus on in-memory organization [G]. It differs from [Compression](4-compression.md) by focusing on temporal/spatial streaming rather than static storage reduction, and from [Multiresolution and level of detail](7-multiresolution-and-level-of-detail.md) by prioritizing data delivery over visual approximation, though they often combine [G].
 
 ## Shared principles
-All methods in this family share the following core mechanisms:
-1.  **Decomposition:** The input volume or mesh is partitioned into subsets. This can be spatial (sub-volumes) or topological (mesh cells) [S1, S2, S4, unofficial].
-2.  **Distribution:** Subsets are assigned to distinct processing units (MPI ranks, cluster nodes) [S1, S2, S4, unofficial].
-3.  **Local Rendering:** Each unit renders its assigned subset independently, typically using ray casting or projection [S1, S2, S4, unofficial].
-4.  **Compositing/Assembly:** Results from all units are combined to form the final image. This occurs either via pixel-based accumulation over the network (e.g., SDVR) or image-based assembly by a root process (e.g., MPI 1D/2D) [S1, S2, S4, unofficial].
 
 ## Subtopics
 
@@ -58,7 +52,7 @@ A system streaming multi-GB datasets over HTTP with a fixed VRAM budget by decou
 - **Parameter:** Scene Coordinates: Position and size are defined between 0.0 and 1.0 on each axis. Output Memory Zone: Can be a standard memory zone or an OpenGL buffer object for direct GPU transfer [S4, unofficial].
 
 ## Background
-The need for out-of-core and streaming techniques arises from the exponential growth of volumetric datasets in medical imaging and scientific visualization, which often exceed the memory capacity of available hardware [S2, S4, unofficial]. Early systems like VolumePro introduced hardware-assisted streaming and subvolume updates to handle large datasets on limited hardware (e.g., 128 MB Voxel Memory) by transferring subvolumes between host and device memory [S2, unofficial]. Subsequent research expanded these concepts to distributed computing environments, utilizing MPI and MapReduce models to scale rendering across clusters [S1, S4, unofficial]. The Generic Data Producer Model further abstracted data access, allowing for flexible integration with various rendering pipelines and GPU memory management [S4, unofficial].
+Early systems like VolumePro introduced hardware-assisted streaming and subvolume updates to handle large datasets on limited hardware (e.g., 128 MB Voxel Memory) by transferring subvolumes between host and device memory [S2, unofficial]. The Generic Data Producer Model further abstracted data access, allowing for flexible integration with various rendering pipelines and GPU memory management [S4, unofficial]. Out-of-core array implementations page data to temporary files to support datasets exceeding RAM [S1, unofficial].
 
 ## Sources
 [S1] mkazhdan/IsoSurfaceExtraction, https://github.com/mkazhdan/IsoSurfaceExtraction, fetched 2026-10-27 (unofficial)

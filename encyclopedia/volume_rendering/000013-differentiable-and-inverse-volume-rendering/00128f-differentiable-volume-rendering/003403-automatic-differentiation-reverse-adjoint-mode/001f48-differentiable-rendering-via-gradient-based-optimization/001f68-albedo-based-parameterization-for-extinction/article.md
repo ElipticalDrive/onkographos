@@ -3,150 +3,110 @@
 Also called: Albedo/Sigma_t Decoupling
 
 ## Overview
-This parameterization strategy decouples the scattering coefficient from the extinction coefficient by representing the medium as an albedo volume paired with the extinction coefficient ($\sigma_t$). It solves the numerical instability inherent in optimizing $\sigma_s$ directly, where the derivative $\partial \sigma_s / \partial \sigma_t$ becomes undefined or unstable as extinction approaches zero. Unlike [Single-Scattering Differentiable Volume Rendering](4143-single-scattering-differentiable-volume-rendering.md), which typically treats coefficients as independent or coupled variables, this method ensures stable gradient flow during differentiable volume rendering optimization by keeping the albedo fixed while optimizing $\sigma_t$.
+This method provides a stable parameterization for differentiable volume rendering by decoupling the scattering coefficient from the extinction coefficient. Instead of optimizing the scattering coefficient ($\sigma_s$) directly, it optimizes the albedo ($\alpha$) and the total extinction coefficient ($\sigma_t$). This approach avoids the numerical instability inherent in computing gradients of $\sigma_s / \sigma_t$ when extinction approaches zero, ensuring robust convergence during gradient-based optimization [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A heterogeneous medium definition specifying either an albedo volume ($\alpha$) or the scattering coefficient ($\sigma_s$) directly. These two are mutually exclusive.
-*   **Output:** A differentiable scene representation where the integrator queries $\sigma_s$ for shading, but gradients are computed with respect to the albedo and $\sigma_t$ parameters.
+The method replaces the standard representation of scattering properties with a pair of volumes: one for the albedo and one for the extinction. This decoupling ensures that the derivative of the radiance with respect to the parameters remains well-conditioned even in regions of low density.
 
-**Data Structures:**
-The medium stores parameters marked with `ParamFlags`.
-*   `sigma_t`: Marked as `ParamFlags::Differentiable`.
-*   `albedo` (or `sigma_s` depending on parameterization): Marked as `ParamFlags::Differentiable`.
-*   `scale`: Marked as `ParamFlags::NonDifferentiable`.
+**Inputs and Outputs**
+*   **Input:** A scene definition specifying either an albedo volume or a scattering coefficient volume ($\sigma_s$), but not both. The scene also specifies the extinction coefficient volume ($\sigma_t$).
+*   **Output:** A differentiable rendering pipeline where gradients flow through the albedo and $\sigma_t$ parameters.
 
-**Steps:**
-1.  **Scene Construction:** The scene author chooses one of two parameterizations for the heterogeneous medium:
-    *   **Albedo-based:** Provide an albedo volume $\alpha(\mathbf{x})$ and extinction $\sigma_t(\mathbf{x})$.
-    *   **Direct Sigma_s:** Provide $\sigma_s(\mathbf{x})$ directly.
-    *   *Constraint:* The two cannot be provided simultaneously.
-2.  **Traversal Setup:** The ray traversal function (e.g., `traverse`) exposes the chosen parameters alongside $\sigma_t$. It marks the exposed parameters as differentiable.
-3.  **Querying:** The integrator always queries the scattering coefficient $\sigma_s$ for shading calculations.
-    *   If the **Albedo-based** parameterization is used, $\sigma_s$ is derived from $\alpha$ and $\sigma_t$ during shading, but gradients are propagated through $\alpha$ and $\sigma_t$.
-    *   If the **Direct Sigma_s** parameterization is used, $\sigma_s$ is queried directly.
-4.  **Gradient Handling:** Differentiability is handled via `ParamFlags`. The query surface is fixed; the parameterization choice is a scene-authoring decision. The caller enables gradients only on the marked parameters.
+**Data Structures**
+The medium representation must support two mutually exclusive parameterizations:
+1.  **Albedo-based:** Stores albedo ($\alpha$) and extinction ($\sigma_t$).
+2.  **Direct Scattering:** Stores scattering coefficient ($\sigma_s$) and extinction ($\sigma_t$).
 
-**Formulas:**
-The relationship between albedo, scattering, and extinction is:
-$$ \sigma_s(\mathbf{x}) = \alpha(\mathbf{x}) \cdot \sigma_t(\mathbf{x}) $$
-$$ \sigma_a(\mathbf{x}) = \sigma_t(\mathbf{x}) - \sigma_s(\mathbf{x}) $$
+The integrator always queries $\sigma_s$ for shading calculations, but the differentiability metadata is attached to the underlying parameterization flags.
 
-Where:
-*   $\alpha(\mathbf{x})$ is the single-scattering albedo (dimensionless, range $[0, 1]$).
-*   $\sigma_t(\mathbf{x})$ is the extinction coefficient.
-*   $\sigma_s(\mathbf{x})$ is the scattering coefficient.
-*   $\sigma_a(\mathbf{x})$ is the absorption coefficient.
+**Parameters**
+*   $\alpha(\mathbf{x})$: Albedo at position $\mathbf{x}$, typically in $[0, 1]$.
+*   $\sigma_t(\mathbf{x})$: Total extinction coefficient at position $\mathbf{x}$, typically $> 0$.
+*   $\sigma_s(\mathbf{x})$: Scattering coefficient, derived as $\sigma_s = \alpha \cdot \sigma_t$.
 
-**Pitfalls:**
-*   **0/0 Instability:** Rebuilding $\sigma_s$ and $\sigma_t$ from albedo and extinction at runtime can result in $0/0$ divisions where extinction vanishes ($\sigma_t \to 0$). This leads to numerical instability in gradients.
-*   **Solution:** Use a direct albedo lookup (e.g., `Medium::get_albedo`) which is cheaper and better-conditioned than reconstructing coefficients from ratios.
+**Steps**
+1.  **Scene Setup:** The user defines the medium using either the albedo volume or the $\sigma_s$ volume. The system enforces mutual exclusivity.
+2.  **Parameter Flagging:** The traversal function exposes the chosen parameterization alongside $\sigma_t$.
+    *   If albedo is used: Mark albedo as `ParamFlags::Differentiable` and $\sigma_t$ as `ParamFlags::Differentiable`.
+    *   If $\sigma_s$ is used: Mark $\sigma_s$ as `ParamFlags::Differentiable` and $\sigma_t$ as `ParamFlags::Differentiable`.
+    *   Mark any global scale factors as `NonDifferentiable`.
+3.  **Querying:** During rendering, the integrator queries $\sigma_s$.
+    *   If albedo parameterization is active, $\sigma_s$ is computed on-the-fly or looked up via a dedicated function that avoids division by zero.
+    *   If $\sigma_s$ parameterization is active, $\sigma_s$ is retrieved directly.
+4.  **Gradient Computation:** Automatic differentiation computes gradients with respect to the differentiable flags. Because $\sigma_s$ is not a direct parameter in the albedo case, the chain rule applies to $\alpha$ and $\sigma_t$, avoiding the singular derivative of the ratio $\sigma_s / \sigma_t$.
 
-**Pseudocode:**
+**Pseudocode**
+The following pseudocode illustrates the logic for handling the parameterization and querying scattering coefficients. It assumes a `Medium` class that stores either `albedo_vol` or `sigma_s_vol`.
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pseudocode for differentiable medium parameterization logic
-# Note: This is a conceptual representation of the parameter flagging and query logic.
-
-class ParamFlags:
-    Differentiable = 1
-    NonDifferentiable = 0
-
 class Medium:
-    def __init__(self, parameterization_type, albedo_volume=None, sigma_s_volume=None, sigma_t_volume=None):
-        self.parameterization_type = parameterization_type # 'albedo' or 'sigma_s'
-        self.albedo_volume = albedo_volume
-        self.sigma_s_volume = sigma_s_volume
-        self.sigma_t_volume = sigma_t_volume
-        
-        # Validate mutual exclusivity
-        if parameterization_type == 'albedo':
-            assert albedo_volume is not None and sigma_t_volume is not None
-            assert sigma_s_volume is None
-        elif parameterization_type == 'sigma_s':
-            assert sigma_s_volume is not None
-            assert albedo_volume is None and sigma_t_volume is None
+    def __init__(self, param_type, sigma_t_vol, albedo_vol=None, sigma_s_vol=None):
+        """
+        param_type: 'albedo' or 'sigma_s'
+        sigma_t_vol: Volume of extinction coefficients
+        albedo_vol: Volume of albedo values (if param_type is 'albedo')
+        sigma_s_vol: Volume of scattering coefficients (if param_type is 'sigma_s')
+        """
+        self.param_type = param_type
+        self.sigma_t_vol = sigma_t_vol
+        if param_type == 'albedo':
+            self.albedo_vol = albedo_vol
+            self.sigma_s_vol = None
         else:
-            raise ValueError("Unknown parameterization type")
+            self.albedo_vol = None
+            self.sigma_s_vol = sigma_s_vol
 
     def get_sigma_s(self, position):
-        """Query scattering coefficient for shading."""
-        if self.parameterization_type == 'albedo':
-            alpha = self.albedo_volume.query(position)
-            sigma_t = self.sigma_t_volume.query(position)
-            return alpha * sigma_t
-        elif self.parameterization_type == 'sigma_s':
-            return self.sigma_s_volume.query(position)
+        """
+        Returns the scattering coefficient sigma_s at the given position.
+        Uses the appropriate parameterization without causing 0/0 errors.
+        """
+        sigma_t = self.sigma_t_vol.query(position)
+        
+        if self.param_type == 'albedo':
+            # Albedo-based parameterization
+            # Direct lookup is safer and cheaper than computing sigma_t * albedo 
+            # if albedo is stored as the primary differentiable parameter.
+            # However, sigma_s is needed for shading.
+            # We compute sigma_s = sigma_t * albedo.
+            # Note: If sigma_t is 0, sigma_s is 0 regardless of albedo.
+            albedo = self.albedo_vol.query(position)
+            sigma_s = sigma_t * albedo
+        else:
+            # Direct sigma_s parameterization
+            sigma_s = self.sigma_s_vol.query(position)
+            
+        return sigma_s
 
     def get_differentiable_params(self):
-        """Return parameters marked as differentiable for optimization."""
-        params = []
-        if self.parameterization_type == 'albedo':
-            params.append({
-                'name': 'albedo',
-                'volume': self.albedo_volume,
-                'flags': ParamFlags.Differentiable
-            })
-            params.append({
-                'name': 'sigma_t',
-                'volume': self.sigma_t_volume,
-                'flags': ParamFlags.Differentiable
-            })
-        elif self.parameterization_type == 'sigma_s':
-            params.append({
-                'name': 'sigma_s',
-                'volume': self.sigma_s_volume,
-                'flags': ParamFlags.Differentiable
-            })
-        # Scale is always non-differentiable
-        params.append({
-            'name': 'scale',
-            'value': 1.0, # Example constant
-            'flags': ParamFlags.NonDifferentiable
-        })
-        return params
-
-    def get_albedo(self, position):
-        """Direct albedo lookup for better conditioning."""
-        if self.parameterization_type == 'albedo':
-            return self.albedo_volume.query(position)
+        """
+        Returns the list of parameters that should carry gradients.
+        """
+        if self.param_type == 'albedo':
+            return ['albedo_vol', 'sigma_t_vol']
         else:
-            # If sigma_s was provided directly, albedo must be derived or unavailable
-            # This path should ideally not be taken if sigma_s was the input
-            sigma_s = self.sigma_s_volume.query(position)
-            sigma_t = self.sigma_t_volume.query(position) if self.sigma_t_volume else None
-            if sigma_t is not None and sigma_t > 0:
-                return sigma_s / sigma_t
-            else:
-                return 0.0 # Or handle as undefined
+            return ['sigma_s_vol', 'sigma_t_vol']
 ```
+
+**Edge Cases and Pitfalls**
+*   **Zero Extinction:** Rebuilding $\sigma_s$ from $\sigma_t$ and $\alpha$ via division (e.g., if one were to invert the relationship) results in $0/0$ where extinction vanishes. Using direct albedo lookup or multiplication ($\sigma_s = \alpha \sigma_t$) is better-conditioned [S1, unofficial].
+*   **Mutual Exclusivity:** The system must strictly enforce that only one parameterization type is active per medium to avoid ambiguity in gradient flow.
 
 ## Subtopics
 
-### Subsurface Scattering Parameter Conversion
-Converts artistic subsurface scattering parameters (medium color $A$ and scattering distance $d$) into physical extinction ($\sigma_t$) and scattering ($\sigma_s$) coefficients for a homogeneous medium [S2, unofficial].
-
-**Formulas:**
-1.  Calculate $\alpha$ (single-scattering albedo) from medium color $A$ (Vec3f):
-    $$ \alpha = 1 - \exp(-5.09406 \cdot A + 2.61188 \cdot A^2 - 4.31805 \cdot A^3) $$
-2.  Calculate scaling factor $s$ from medium color $A$:
-    $$ s = 1.9 - A + 3.5 \cdot (A - 0.8)^2 $$
-3.  Calculate extinction $\sigma_t$ from scattering distance $d$:
-    $$ \sigma_t = \frac{1}{d \cdot s} $$
-4.  Calculate scattering $\sigma_s$ and absorption $\sigma_a$:
-    $$ \sigma_s = \alpha \cdot \sigma_t $$
-    $$ \sigma_a = \sigma_t - \sigma_s $$
+### [Subsurface Scattering Parameter Conversion](2660-subsurface-scattering-parameter-conversion.md)
+Converts artistic subsurface scattering parameters (medium color A and scattering distance d) into physical extinction ($\sigma_t$) and scattering ($\sigma_s$) coefficients for a homogeneous medium.
 
 ## Operating characteristics
-*   **Stability:** Significantly more stable than optimizing $\sigma_s$ directly when $\sigma_t$ is small or zero, as it avoids division by zero in gradient calculations.
-*   **Performance:** Direct albedo lookup (`Medium::get_albedo`) is cheaper than reconstructing $\sigma_s/\sigma_t$ ratios.
-*   **Use Case:** Ideal for differentiable volume rendering where the goal is to optimize medium properties (like density or color) from image data, particularly in heterogeneous media.
-*   **Limitations:** Requires the scene to be defined with the specific parameterization. Not suitable if direct $\sigma_s$ optimization is required without albedo coupling.
+*   **Stability:** The primary advantage is numerical stability in gradient-based optimization. By decoupling $\sigma_s$ and $\sigma_t$, the method avoids the instability of $\sigma_s / \sigma_t$ derivatives as extinction approaches zero [S1, unofficial].
+*   **Performance:** Querying albedo directly is described as cheaper and better-conditioned than rebuilding $\sigma_s / \sigma_t$ [S1, unofficial].
+*   **Complexity:** The computational complexity of the rendering pass remains similar to standard volume rendering, with the overhead of managing two parameter volumes instead of one scattering volume.
+*   **Use Cases:** Ideal for differentiable inverse rendering where the goal is to optimize material properties (albedo and density) from images. Not suitable if the physical model strictly requires independent optimization of $\sigma_s$ without coupling to $\sigma_t$.
 
 ## Background
-This method is part of the differentiable rendering pipeline, specifically addressing the challenges of gradient-based optimization in volume rendering. It builds on the Differential Delta Tracking (DRT) implementation, which pairs albedo with $\sigma_t$ to decouple the two and keep optimization gradients stable. The approach is implemented in research branches of rendering engines like Mitsuba 3, where it is used to test gradient mean and variance against DRT implementations.
+This parameterization strategy is implemented in the Mitsuba 3 renderer, specifically within a review branch focusing on sample matching for extinction gradients. It builds upon the Differential Ratio Tracing (DRT) implementation, which pairs albedo with $\sigma_t$ to maintain stable optimization gradients [S1, unofficial]. The approach addresses a specific limitation in differentiable volume rendering where standard parameterizations fail to provide stable gradients in sparse volumes.
 
 ## Sources
 [S1] Sample matching for extinction gradients (review branch), https://github.com/AuroraRyan0301/mitsuba3/pull/1, fetched 2026-10-26 (unofficial)
-[S2] GitHub - yumcyaWiz/volpt: Volumetric path tracer written in C++, https://github.com/yumcyaWiz/volpt, fetched 2026-10-27 (unofficial)

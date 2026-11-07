@@ -3,139 +3,151 @@
 Also called: Solid Voxel CSG
 
 ## Overview
-CSG and Inter-object Intersection performs general Constructive Solid Geometry (CSG) operations on voxelized objects by rendering individual object slicemaps over one another using GPU blending [S1, unofficial]. It differs from its parent method, [CSG Model Voxelization](2497-csg-model-voxelization.md), by explicitly leveraging the density computation inherent in solid voxelization to recover intersection volumes rapidly, making it particularly suitable for collision detection and haptic feedback [S1, unofficial]. Unlike [SDF-based Voxelization](6595-sdf-based-voxelization.md), which relies on signed distance fields for smooth boundaries, this method operates directly on discrete voxel grids to achieve real-time performance with low dependence on input geometry complexity [S1, unofficial].
+CSG and Inter-object Intersection performs general Constructive Solid Geometry (CSG) operations by voxelizing each object into a separate slicemap and rendering them sequentially with blending to compute the desired boolean operation [S1, unofficial]. It differs from its parent [CSG Model Voxelization](2497-csg-model-voxelization.md) by explicitly leveraging the density computation capabilities of solid voxelization to rapidly recover intersection volumes for applications like collision detection and haptic feedback, while maintaining real-time performance on billions of voxels with low dependence on input geometry complexity [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Inputs:** A set of $N$ 3D meshes or implicit surfaces to be combined.
-*   **Outputs:** A resulting voxel grid representing the boolean combination (e.g., union, intersection, difference) of the input objects, and optionally the volume of the intersection.
+**Inputs:**
+- A set of geometric primitives (meshes or volume data) to be combined.
+- A target voxel grid resolution (slicemap dimensions).
+- A boolean operation (e.g., Union, Intersection, Difference, XOR).
+
+**Outputs:**
+- A voxelized volume representing the result of the CSG operation.
+- Density information for the resulting volume (optional, for volume recovery).
 
 **Data Structures:**
-*   **Slicemap:** A 2D texture or buffer representing a slice of the voxel grid. Each object is voxelized into a separate slicemap.
-*   **Intermediate Results:** For CSG trees, intermediate voxel states are stored. The storage requirement is approximately $\log^* n$ where $n$ is the height of the CSG tree [S1, unofficial].
+- **Slicemap:** A 2D buffer (frame buffer) representing a single slice of the voxel grid. Each pixel corresponds to a voxel column. The buffer stores color/depth information used to track primitive coverage and parity.
+- **3D Texture Memory:** Used to store intermediate voxelized volumes when extending to CSG trees or multi-pass approaches [S2].
 
 **Steps:**
-1.  **Voxelization:** Voxelize each input object into a separate slicemap. This step discretizes the geometry into a grid of voxels [S1, unofficial].
-2.  **Blending:** Render the first object's slicemap over the second object's slicemap. Use GPU blending operations corresponding to the desired boolean operation (e.g., addition for union, minimum for intersection) [S1, unofficial].
-3.  **Density Computation:** Apply the density computation method (described in the parent article's section 6) to the resulting blended slicemap. This recovers the intersection's volume rapidly [S1, unofficial].
-4.  **Iteration:** For more than two objects or complex CSG trees, store intermediate results and repeat the blending process. Rearranging the CSG tree can optimize the number of intermediate states required [S1, unofficial].
 
-**Formulas:**
-*   **Storage Complexity:** $\log^* n$, where $n$ is the height of the CSG tree [S1, unofficial].
-*   **Precision:** The method works at a precision of several billion ($10^9$) voxels [S1, unofficial].
-
-**Parameters:**
-*   **Voxel Resolution:** Must be sufficient to represent the smallest features of the input geometry. The method supports resolutions up to $10^9$ voxels [S1, unofficial].
-*   **CSG Tree Structure:** The arrangement of the CSG tree affects performance. Rearranging the tree can optimize storage and computation [S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Artifacts:** The solution can be more complex than simple rasterization and may contain artifacts if not handled carefully [S1, unofficial].
-*   **Memory Constraints:** While compact, storing intermediate results for deep CSG trees requires careful management of GPU memory [S1, unofficial].
+1. **Voxelize Each Object:** Render each geometric primitive into a separate slicemap. This establishes the initial coverage of each object in the voxel space [S1, unofficial].
+2. **Sequential Blending:** Render the slicemap of the first object over the second, using the graphics hardware's blending logic to perform the desired boolean operation. For example, to compute an intersection, the blending function would retain only pixels covered by both objects [S1, unofficial].
+3. **Density Computation (Optional):** If volume recovery is required (e.g., for collision detection), use the density computation method described in the parent article to calculate the intersection's volume rapidly from the voxelized result [S1, unofficial].
+4. **CSG Tree Extension (Optional):** For complex CSG trees, store intermediate results. The storage requirement is intuitively $O(\log^* n)$ where $n$ is the height of the tree. Rearranging the tree can optimize this number [S1, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def perform_csg_intersection(meshes, boolean_op):
+def csg_intersection(primitives, resolution, boolean_op):
     """
-    Perform CSG operation on a list of meshes using solid voxelization.
+    Perform CSG operation on a list of primitives using solid voxelization.
     
     Args:
-        meshes: List of 3D mesh objects.
-        boolean_op: String specifying the boolean operation ('union', 'intersection', 'difference').
-        
+        primitives: List of geometric primitives (meshes/volumes).
+        resolution: Tuple (width, height, depth) for the voxel grid.
+        boolean_op: String specifying the boolean operation ('union', 'intersection', etc.).
+    
     Returns:
-        Resulting voxel grid and intersection volume.
+        voxel_grid: 3D array representing the resulting CSG volume.
     """
-    # Step 1: Voxelize each object into a separate slicemap
+    # Step 1: Initialize slicemaps for each primitive
+    # Each slicemap is a 2D buffer of size (width, height)
     slicemaps = []
-    for mesh in meshes:
-        slicemap = voxelize_mesh(mesh)
+    for prim in primitives:
+        slicemap = render_primitive_to_slicemap(prim, resolution)
         slicemaps.append(slicemap)
     
-    # Step 2: Render the first object's slicemap over the second, blending with the desired boolean operation
-    # Note: The specific blending function depends on the boolean_op
+    # Step 2: Perform boolean operations sequentially
+    # Start with the first object's slicemap
     result_slicemap = slicemaps[0]
+    
     for i in range(1, len(slicemaps)):
-        result_slicemap = blend_slices(result_slicemap, slicemaps[i], boolean_op)
+        # Render the next object's slicemap over the current result
+        # The blending function is determined by boolean_op
+        result_slicemap = blend_slicemaps(result_slicemap, slicemaps[i], boolean_op)
     
-    # Step 3: Use the density computation to recover the intersection's volume rapidly
-    intersection_volume = compute_density_volume(result_slicemap)
+    # Step 3: (Optional) Compute density for volume recovery
+    # This step relies on the density computation method from the parent article
+    # volume_density = compute_density(result_slicemap)
     
-    return result_slicemap, intersection_volume
+    # Return the final voxelized result
+    return result_slicemap
 
-def voxelize_mesh(mesh):
+def blend_slicemaps(slicemap_a, slicemap_b, operation):
     """
-    Voxelize a 3D mesh into a slicemap.
+    Blend two slicemaps using a specified boolean operation.
     
     Args:
-        mesh: 3D mesh object.
-        
-    Returns:
-        Slicemap (2D texture/buffer).
-    """
-    # Implementation details for voxelization are in the parent article
-    # [G] Assuming a standard GPU-based solid voxelization technique
-    slicemap = create_empty_slicemap()
-    render_mesh_to_slicemap(mesh, slicemap)
-    return slicemap
-
-def blend_slices(slice_a, slice_b, boolean_op):
-    """
-    Blend two slicemaps using a boolean operation.
+        slicemap_a: The current accumulated slicemap.
+        slicemap_b: The next primitive's slicemap.
+        operation: The boolean operation to perform.
     
-    Args:
-        slice_a: First slicemap.
-        slice_b: Second slicemap.
-        boolean_op: String specifying the boolean operation.
-        
     Returns:
-        Blended slicemap.
+        blended_slicemap: The result of the boolean operation.
     """
-    # [G] Mapping boolean operations to GPU blending functions
-    if boolean_op == 'union':
-        return slice_a + slice_b
-    elif boolean_op == 'intersection':
-        return min(slice_a, slice_b)
-    elif boolean_op == 'difference':
-        return slice_a - slice_b
-    else:
-        raise ValueError(f"Unsupported boolean operation: {boolean_op}")
-
-def compute_density_volume(slicemap):
-    """
-    Compute the volume of the intersection from the slicemap.
+    blended = empty_slicemap_like(slicemap_a)
     
-    Args:
-        slicemap: Resulting slicemap after blending.
-        
-    Returns:
-        Intersection volume.
-    """
-    # Implementation details for density computation are in the parent article's section 6
-    # [G] Summing voxel contributions weighted by voxel size
-    volume = 0.0
-    for voxel in slicemap:
-        volume += voxel.density * voxel.volume
-    return volume
+    for y in range(slicemap_a.height):
+        for x in range(slicemap_a.width):
+            pixel_a = slicemap_a.get_pixel(x, y)
+            pixel_b = slicemap_b.get_pixel(x, y)
+            
+            # Determine coverage based on the boolean operation
+            if operation == 'union':
+                # Keep if covered by either
+                if pixel_a.covered or pixel_b.covered:
+                    blended.set_pixel(x, y, covered=True)
+                else:
+                    blended.set_pixel(x, y, covered=False)
+            elif operation == 'intersection':
+                # Keep if covered by both
+                if pixel_a.covered and pixel_b.covered:
+                    blended.set_pixel(x, y, covered=True)
+                else:
+                    blended.set_pixel(x, y, covered=False)
+            elif operation == 'difference':
+                # Keep if covered by A but not B
+                if pixel_a.covered and not pixel_b.covered:
+                    blended.set_pixel(x, y, covered=True)
+                else:
+                    blended.set_pixel(x, y, covered=False)
+            elif operation == 'xor':
+                # Keep if covered by exactly one
+                if (pixel_a.covered and not pixel_b.covered) or (not pixel_a.covered and pixel_b.covered):
+                    blended.set_pixel(x, y, covered=True)
+                else:
+                    blended.set_pixel(x, y, covered=False)
+            else:
+                raise ValueError(f"Unsupported boolean operation: {operation}")
+    
+    return blended
 ```
+
+**Parameters:**
+- **Resolution:** The dimensions of the voxel grid. The method works at a precision of several billion ($10^9$) voxels in real-time [S1, unofficial].
+- **Boolean Operation:** The type of CSG operation to perform (Union, Intersection, Difference, XOR) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **CSG Tree Complexity:** For large CSG trees, the number of intermediate results can grow. The method suggests storing intermediate results with a storage requirement of $O(\log^* n)$, but rearranging the tree may be necessary to optimize this [S1, unofficial].
+- **Precision:** While the method is efficient, artifacts may arise from the discretization process, especially with complex geometries [S1, unofficial].
 
 ## Subtopics
 
-### [CSG and Inter-object Intersection — Solid Voxel CSG](7222-csg-and-inter-object-intersection-solid-voxel-csg.md)
-Performs a boolean Exclusive OR (XOR) operation on multiple voxel grids, removing overlapping parts and retaining only the voxels unique to each input grid. It differs from its parent method by operating directly on voxel data structures rather than rendering slices with blending, allowing for efficient in-place modification of the grid state.
+### Multi-Pass Voxelization for Large CSG Trees
+An iterative approach to voxelize CSG trees larger than the frame buffer bit-depth limit (e.g., >8 primitives) by repeatedly voxelizing subtrees of at most 8 primitives and replacing the subtree with the resulting volume primitive [S2]. It differs from the basic single-pass method by handling larger trees through iterative reduction, trading off some memory pressure for scalability. Choose this when the CSG tree exceeds the hardware's single-pass bit-depth limit. [S2]
+
+### Region-Based Dynamic Voxelization
+A technique to apply voxelization on-the-fly to only a region of interest (e.g., viewing region) to avoid low resolution caused by large volume spaces, enabling multi-resolution rendering [S2]. It differs from the basic method by restricting the voxelization domain to a subregion, requiring special handling of parity for XOR operations. Choose this when dealing with large spatial domains where full-volume voxelization would be too low-resolution or memory-intensive. [S2]
+
+### Blended CSG Volume Rendering
+A method to generate blended images for CSG models involving volume data sets by using the binary voxelization result as a 3D mask to extract the volumetric portion of the model [S2]. It differs from the basic binary CSG method by combining binary masking with volumetric intensity rendering. Choose this when visualizing CSG models that include volume data sets (e.g., CT scans) and require smooth blending of intensities. [S2]
 
 ## Operating characteristics
-*   **Time Complexity:** Real-time performance is achieved, with low dependence on input geometry complexity [S1, unofficial].
-*   **Memory Complexity:** $\log^* n$ storage for intermediate results in CSG trees, where $n$ is the height of the tree [S1, unofficial].
-*   **Precision:** Supports resolutions of several billion ($10^9$) voxels [S1, unofficial].
-*   **Strengths:** Simple implementation, real-time performance, low dependence on geometry complexity, rapid volume recovery for collision detection and haptic feedback [S1, unofficial].
-*   **Limitations:** Potential for artifacts, memory constraints for deep CSG trees [S1, unofficial].
-*   **When to Use:** Collision detection, haptic feedback, real-time visualization of large voxel datasets (e.g., CT scans) [S1, unofficial].
-*   **When Not to Use:** When high-precision smooth boundaries are required (consider SDF-based methods) [S1, unofficial].
+- **Time Complexity:** Real-time performance is achieved, with complexity directly linked to the voxelization cost rather than the input geometry's complexity [S1, unofficial].
+- **Memory Complexity:** Depends on the resolution of the voxel grid. For CSG trees, intermediate results require storage, intuitively $O(\log^* n)$ where $n$ is the tree height [S1, unofficial]. Multi-pass approaches may incur texture memory pressure [S2].
+- **Measured Performance:** Works at a precision of several billion ($10^9$) voxels in real-time [S1, unofficial].
+- **Scaling:** Scales well with resolution due to the fixed cost per voxel. Multi-pass approaches scale with tree depth but may suffer from texture memory swapping [S2].
+- **Strengths:** Simple implementation, real-time performance, low dependence on geometry complexity, rapid volume recovery for collision detection/haptic feedback [S1, unofficial].
+- **Limitations:** Limited by frame buffer bit-depth for single-pass operations (typically 8 primitives) [S2]. Potential artifacts from discretization [S1, unofficial]. Texture memory pressure in multi-pass approaches [S2].
+- **When to Use:** Real-time CSG operations, collision detection, haptic feedback, visualization of large CSG models.
+- **When Not to Use:** When high-precision geometric accuracy is required without discretization artifacts, or when the CSG tree is too large for available texture memory in multi-pass scenarios.
 
 ## Background
-The method was introduced in the paper "Single-pass GPU Solid Voxelization and Applications" [S1, unofficial]. It leverages the compactness of slicemaps to estimate normals and reflect surface appearance in real-time, which is useful for visualizing level sets of large CT scans (e.g., $1024^3$) where traditional methods like marching cubes or texture transfers would stall the pipeline [S1, unofficial].
+The method originates from the work on single-pass GPU solid voxelization and its applications, particularly in the context of real-time CSG modeling and volume graphics [S1, unofficial][S2]. It was developed to provide an effective tool for interactive CSG modeling and volume graphics environments, leveraging graphics hardware features for fast voxelization [S2]. The approach has been tested on relatively small CSG trees, with plans to investigate full use of frame buffer bits for better performance with larger trees [S2].
 
 ## Sources
 [S1] Single-pass GPU Solid Voxelization and Applications, https://inria.hal.science/inria-00345291, fetched 2026-10-26 (unofficial)
+[S2] Fast CSG voxelization by frame buffer pixel mapping, https://doi.org/10.1145/353888.353896, fetched 2026-11-04

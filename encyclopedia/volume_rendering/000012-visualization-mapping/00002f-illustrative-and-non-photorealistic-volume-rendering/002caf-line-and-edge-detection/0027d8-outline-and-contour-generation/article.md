@@ -1,112 +1,57 @@
 # Outline and Contour Generation
 
-Also called: Contour Rendering, Silhouette Rendering, Edge Highlighting
+Also called: Line and Edge Detection for Outlines, Contour Rendering
 
 ## Overview
-Outline and Contour Generation is a non-photorealistic volume rendering technique that enhances the perception of form and spatial relationships by rendering explicit lines or edges rather than relying solely on shading and color [S1, unofficial]. It solves the problem of visual ambiguity in complex volumetric datasets, such as medical imagery, where occlusion or similar intensities make it difficult to distinguish between overlapping structures or identify critical internal features [S1, unofficial]. Unlike standard photorealistic volume rendering, which integrates opacity along rays, this method selectively suppresses surface rendering in favor of line-based representations to emphasize boundaries, silhouettes, and context [S3, book]. It is distinguished from sibling methods like [Line Illustration Detection](772-line-illustration-detection.md) by its focus on global object boundaries and occlusion handling rather than local surface texture or fine structural lines, and from [LOG-based Silhouette Detection](6322-log-based-silhouette-detection.md) by its broader application to both external silhouettes and internal context reduction [S1, unofficial].
+Outline and Contour Generation is a family of Illustrative and Non-Photorealistic Volume Rendering (NPR) techniques that generate view-dependent lines to demarcate object boundaries, emphasize form, and enhance the perception of structure [S1, unofficial]. Unlike sibling methods that may rely on curvature alone or specific silhouette extraction pipelines, this family unifies analytical and pixel-based paradigms to produce lines that highlight where surfaces turn away from the viewer or where topological features exist [S1, unofficial]. It sets itself apart by offering a spectrum of implementations ranging from particle-based gradient analysis to curvature-thresholded fragment shaders and object-space stroke pipelines [S1, unofficial].
 
-## How it works
-The method operates by identifying regions where visual clarity is compromised by occlusion or where specific features require emphasis, and replacing or augmenting the standard volume rendering with contour lines. The implementation generally follows a pixel-based approach, leveraging G-buffers (storing depth and normal information) to detect discontinuities [S2, unofficial].
+## Shared principles
+The family is unified by the categorization of detection methods into two primary paradigms: analytical and pixel-based [S1, unofficial].
 
-### Inputs and Outputs
-*   **Inputs**: Volumetric scalar field data; camera position and orientation; segmentation masks or classification functions identifying "interesting" internal structures and "context" objects [S1, unofficial]; G-buffer data (depth map, normal map) [S2, unofficial].
-*   **Outputs**: A 2D image containing photorealistic or semi-transparent volume rendering for non-occluded regions, overlaid with black or colored contour lines at object boundaries and occlusion interfaces [S1, unofficial][S3, book].
+1.  **Analytical Approaches**: These are vector-oriented and resolution-independent [S1, unofficial]. They rely on explicit analytical representations of the model or volume data. Because they are vector-based, they can be transformed (rotated, scaled) without introducing aliasing artifacts [S1, unofficial]. They are considered more general and flexible but require the availability of explicit analytical forms [S1, unofficial].
+2.  **Pixel-Based Approaches**: These are image-space methods, often utilizing G-buffers (storing geometric properties like depth, normal, or color) [S1, unofficial]. They are generally faster and simpler to implement than analytical methods [S1, unofficial]. They are employed when explicit analytical representations are not available or practical [S1, unofficial]. A key advantage is that G-buffers can be reused without recalculation, and 2D image processing operators are fast [S1, unofficial].
 
-### Data Structures
-*   **G-Buffer**: A 2D texture array storing per-pixel geometric properties.
-    *   `depth`: Floating-point value representing the distance from the camera to the surface.
-    *   `normal`: 3D vector $(n_x, n_y, n_z)$ representing the surface normal at the pixel.
-*   **Edge Map**: A 2D binary or grayscale mask indicating detected edges.
-*   **Segmentation Mask**: A 2D or 3D mask identifying regions of interest (e.g., internal organs) versus context (e.g., body surface) [S1, unofficial].
-
-### Steps
-1.  **Pre-segmentation**: Identify the most interesting internal structures (e.g., small organs) and the context information that obscures them (e.g., the body surface) [S1, unofficial].
-2.  **G-Buffer Generation**: Render the volume or its isosurfaces to generate a depth map and a normal map [S2, unofficial].
-3.  **Edge Detection**:
-    *   Extract depth edges by detecting C0 discontinuities (sudden changes in depth) using an edge detection filter, such as the Sobel filter [S2, unofficial].
-    *   Extract normal edges by detecting C1 discontinuities (sudden changes in surface orientation) using the same or a similar filter [S2, unofficial].
-    *   Combine depth and normal edges to form a comprehensive silhouette map [S2, unofficial].
-4.  **Occlusion Analysis**: Determine areas where context objects occlude interesting internal structures [S1, unofficial].
-5.  **Contour Generation**:
-    *   In areas of occlusion, reduce the visual representation of the context object to contours [S1, unofficial].
-    *   For objects exhibiting specific features or being "interesting" (e.g., lymph nodes touching critical structures), render with silhouettes enabled [S3, book].
-    *   For remaining objects or non-occluded regions, render using standard volume rendering or surface rendering without silhouettes [S3, book].
-6.  **Post-processing (Optional)**: Calculate analytical curves from the detected pixel-based edge map to modify line qualities (width, brightness) if higher-quality vector lines are required [S2, unofficial].
-
-### Pseudocode
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def render_outline_contour(volume_data, camera, segmentation):
-    # Step 1: Identify interesting structures and context
-    interesting_structures = segmentation.get_interesting_regions()
-    context_objects = segmentation.get_context_regions()
-
-    # Step 2: Generate G-buffers
-    depth_map = render_depth(volume_data, camera)
-    normal_map = render_normals(volume_data, camera)
-
-    # Step 3: Detect edges
-    # Depth edges reflect C0 discontinuities
-    depth_edges = sobel_filter(depth_map)
-    # Normal edges reflect C1 discontinuities
-    normal_edges = sobel_filter(normal_map)
-    
-    # Combine edges for perceptually significant silhouettes
-    edge_map = logical_or(depth_edges, normal_edges)
-
-    # Step 4 & 5: Render with contour logic
-    output_image = empty_image_like(depth_map)
-    
-    for each pixel (x, y):
-        if edge_map[x, y] is active:
-            # Check if this edge is part of an occlusion or a feature silhouette
-            is_occlusion = check_occlusion(interesting_structures, context_objects, camera, (x, y))
-            is_feature = check_feature(interesting_structures, (x, y))
-            
-            if is_occlusion or is_feature:
-                # Render contour line
-                output_image[x, y] = render_contour_line(color=BLACK, width=2)
-            else:
-                # Render standard volume/surface
-                output_image[x, y] = render_volume_pixel(volume_data, camera, (x, y))
-        else:
-            # Render standard volume/surface
-            output_image[x, y] = render_volume_pixel(volume_data, camera, (x, y))
-
-    return output_image
-```
-
-### Parameters
-*   **Edge Detection Threshold**: Not given in the sources.
-*   **Line Width**: Typically 1-2 pixels, adjustable via post-processing [S2, unofficial].
-*   **Occlusion Threshold**: Not given in the sources.
-
-### Edge Cases and Pitfalls
-*   **Pixel-based Limitations**: Detected edges exist only as lists of pixels, which may result in jagged lines or inconsistent thickness unless analytical curves are calculated [S2, unofficial].
-*   **Noise Sensitivity**: Edge detection filters (e.g., Sobel) may detect noise as edges if the volume data is not smoothed [S2, unofficial].
-*   **Occlusion Ambiguity**: Determining which structures are "interesting" requires accurate segmentation; incorrect segmentation leads to inappropriate contour placement [S1, unofficial].
+Both approaches aim to generate lines that enhance the perception of form, with the choice between them dictated by the availability of analytical data and performance constraints [S1, unofficial].
 
 ## Subtopics
 
+### [Object Contour NPR](787-object-contour-npr.md)
+Object Contour NPR generates view-dependent lines that demarcate areas where an object's surface turns away from the viewer, emphasizing physical boundaries without relying on predefined classification functions or voxel intensity values. Unlike sibling methods such as Lasso Contour Rendering or Curvature-Controlled Style Contours, this technique relies exclusively on gradient magnitude and the angle between the viewing direction and the gradient vector to determine color and opacity, making parameter tuning significantly faster.
+
+### [Lasso Contour Rendering](1855-lasso-contour-rendering.md)
+Not given in the sources.
+
+### [Curvature-Controlled Style Contours](5350-curvature-controlled-style-contours.md)
+Curvature-Controlled Style Contours is a line and edge detection method that regulates contour thickness based on the normal curvature along the view direction to avoid uncontrolled variation in thickness caused by flat vs. fine structures. Unlike standard dot-product contours which produce uncontrolled thickness (too thick on flat surfaces and too thin on fine structures), this method uses a curvature-dependent threshold to maintain consistent visual weight across varying surface geometries. It builds on [Outline and Contour Generation](4137-outline-and-contour-generation.md) by integrating curvature estimates into the contour detection logic and lit sphere map lookups.
+
+### [Silhouette Rendering](7959-silhouette-rendering.md)
+Silhouette rendering is an object-space line rendering technique used to indicate context objects or discriminate object classes based on specific features, such as lymph nodes touching critical structures in medical visualization. It sets itself apart from sibling methods by explicitly separating the geometric extraction of edges from the rasterization process, allowing for independent stylization and hidden line removal via a dedicated stroke pipeline.
+
 ### Image Space Outline Generation
-A pixel-based method that generates simple outlines by extracting edges from depth or normal maps [S2, unofficial]. It observes that depth differences are minimal between adjacent pixels of a single object but large between objects, and normals vary smoothly across a single surface but show discontinuity between surfaces [S2, unofficial]. It uses edge detection mechanisms like the Sobel filter to extract depth edges (C0 discontinuities) and normal edges (C1 discontinuities), combining them to yield all perceptually significant silhouettes [S2, unofficial]. For further processing, such as modifying line qualities, analytical curves must be calculated from the detected edge map, as the initial detection only yields pixel lists [S2, unofficial].
+**Definition**: A pixel-based method to generate simple outlines by extracting edges from depth or normal maps, observing that depth differences are minimal between adjacent pixels of a single object and large between objects, and normals vary smoothly across a single surface but show discontinuity between surfaces [S1, unofficial].
 
-### Silhouette Rendering
-A technique used to indicate context objects (such as bones) or to discriminate object classes based on specific features (e.g., lymph nodes touching critical structures) [S3, book]. Objects that exhibit a certain feature or are deemed "interesting" are rendered with silhouettes enabled, while remaining objects are drawn without silhouettes [S3, book]. This approach helps users recognize critical spatial relationships, such as whether a lymph node is merely close to or actually touching a critical structure [S3, book].
+**Steps**:
+1.  Extract edges from a depth map or normal map using an edge detection mechanism, such as the Sobel filter [S1, unofficial].
+2.  Combine detected depth and normal edges to yield perceptually significant silhouettes [S1, unofficial].
+3.  For further processing (e.g., modifying line qualities), calculate analytical curves from the detected edge map, as detected edges only exist as lists of pixels [S1, unofficial].
 
-## Operating characteristics
-*   **Time Complexity**: Generally faster than analytical methods because it utilizes 2D image processing operators on G-buffers [S1, unofficial][S2, unofficial].
-*   **Memory Complexity**: Requires storage for G-buffers (depth and normal maps) and edge maps [S2, unofficial].
-*   **Strengths**: Simple to implement; fast execution; effective at highlighting boundaries and occlusions; G-buffers can be reused without recalculation [S1, unofficial][S2, unofficial].
-*   **Limitations**: Resolution-dependent (pixel-based); may produce jagged lines without post-processing; requires segmentation or feature detection for optimal results [S1, unofficial][S2, unofficial].
-*   **When to Use**: When explicit analytical representations are not available; when performance is a constraint; when emphasizing object boundaries or occlusion relationships is critical [S1, unofficial][S3, book].
-*   **When Not to Use**: When resolution-independent, vector-quality lines are required without post-processing; when the dataset lacks clear depth or normal discontinuities [S2, unofficial].
+**Comparison**: Depth edges reflect C0 discontinuities, while normal edges reflect C1 discontinuities; combining both yields all perceptually significant silhouettes [S1, unofficial].
+
+### Ghosted Views with Contours
+**Steps**:
+1.  Pre-segment the most interesting internal structures (e.g., small internal organs) [S2, unofficial].
+2.  Identify context information (e.g., the body) that obscures the interesting structures [S2, unofficial].
+3.  In areas of occlusion, reduce the visual representation of the context object to contours [S2, unofficial].
+
+### Topological Landscape
+**Definition**: An approach of viewing contour information that uses the contour tree to build a 3D terrain model. Valleys illustrate events where a contour splits into two or more parts, and peaks represent where two or more contours merge [S3, unofficial].
+
+**Usage**: Proposed by Weber et al. [45]. Further expanded using different methods for laying out the data, primarily from established 2D visualization techniques [S3, unofficial].
 
 ## Background
-Outline and Contour Generation is rooted in non-photorealistic rendering (NPR) techniques for volume visualization. Hertzmann presented a survey of image space outline generation algorithms, recommending the use of depth and normal maps with Sobel filters for edge detection [S2, unofficial]. Schlechtweg and Raab described flexible line models and scan conversion algorithms for mapping parametric curves to visual properties [S2, unofficial]. The technique has been applied in medical visualization, such as in neck surgery planning, where silhouette rendering helps discriminate between lymph nodes and critical structures [S3, book]. It is also used in scientific visualization, such as in the cut-away visualization of volumetric data for hurricane Isabel and the Leopard gecko dataset, where contours are used to reveal internal structures obscured by context [S1, unofficial].
+The distinction between analytical and pixel-based outline generation has been a central theme in NPR volume rendering since the late 1990s. Hertzmann provided a survey of image space outline generation algorithms in [Her99], while Schlechtweg and Raab described flexible line models in [Str98]. The concept of using topological structures, such as contour trees, to visualize data topology was expanded by Weber et al. [45], who introduced topological landscapes to harness human understanding of terrain structure [S3, unofficial]. In medical and scientific visualization, expressive techniques like ghosted views with contours have been applied to clarify spatial arrangements of internal structures obscured by context objects [S2, unofficial].
 
 ## Sources
-[S1] Illustrative Visualization for Medicine and Science, https://doi.org/10.2312/egt.20061068, fetched 2026-10-26 (unofficial)
-[S2] Volume Visualisation Via Variable-Detail Non-Photorealistic Illustration, https://uwspace.uwaterloo.ca/bitstream/10012/1104/1/jlmckinl2002.pdf, fetched 2026-10-26 (unofficial)
-[S3] Illustrative Focus+Context Approaches in Interactive Volume Visualization, https://doi.org/10.4230/dfu.sciviz.2010.136, fetched 2026-10-26 (book)
+[S1] Volume Visualisation Via Variable-Detail Non-Photorealistic Illustration, https://uwspace.uwaterloo.ca/bitstream/10012/1104/1/jlmckinl2002.pdf, fetched 2026-10-26 (unofficial)
+[S2] Illustrative Visualization for Medicine and Science, https://doi.org/10.2312/egt.20061068, fetched 2026-10-26 (unofficial)
+[S3] Chapter Topological Visualisation Techniques for Volume Multifield Data, https://archive.org/details/oapen-20.500.12657-49310, fetched 2026-10-27 (unofficial)

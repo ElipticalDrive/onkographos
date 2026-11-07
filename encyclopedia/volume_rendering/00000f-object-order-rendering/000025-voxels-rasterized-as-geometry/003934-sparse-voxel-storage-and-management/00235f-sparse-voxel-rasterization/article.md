@@ -3,26 +3,26 @@
 Also called: SVR, SVRasterization
 
 ## Overview
-Sparse Voxel Rasterization (SVR) is a real-time volumetric rendering technique that rasterizes explicit sparse voxels arranged in an octree layout, avoiding the overhead of neural MLPs or overlapped splatting [S1][S2, unofficial]. It solves the scalability and fidelity trade-off in neural radiance fields by using a sorting-based rasterizer that projects voxel corners to image space, assigns voxels to tiles, and performs alpha composition with early termination [S1]. Unlike [Plenoxels](1775-intensity-based-sparse-voxel-storage.md) which uses ray casting and dense pointer grids, SVR models the entire scene (including unbounded backgrounds) directly with sparse voxels, achieving high frame rates and state-of-the-art image fidelity [S1][S2, unofficial].
+Sparse Voxel Rasterization (SVR) is a real-time volumetric rendering technique that rasterizes explicit sparse voxels arranged in an octree layout, avoiding the overhead of neural MLPs or overlapped splatting [S1][S2]. It solves the scalability and fidelity trade-off in neural radiance fields by using a sorting-based rasterizer that projects voxel corners to image space, assigns voxels to tiles, and performs alpha composition with early termination [S1]. Unlike [Plenoxels](1775-intensity-based-sparse-voxel-storage.md) which uses ray casting and dense pointer grids, SVR models the entire scene (including unbounded backgrounds) directly with sparse voxels, achieving high frame rates and state-of-the-art image fidelity [S1][S2].
 
 ## How it works
 ### Inputs and Outputs
 **Inputs:**
-- Camera parameters: origin $\mathbf{r}_o$, direction $\mathbf{r}_d$, and projection matrix.
-- Scene representation: A set of active sparse voxels. Each voxel $v$ is defined by:
-  - Octree level $l \in [1, L]$ (max level $L=16$).
-  - Voxel index $\mathbf{v} = \{i, j, k\}$ relative to the octree root.
-  - Density parameters $\mathbf{V} \in \mathbb{R}^{2\times2\times2}$ at the eight corners.
-  - Spherical Harmonic (SH) coefficients $\mathbf{v}_{\text{sh}} \in \mathbb{R}^{(N_{\text{shd}}+1)^2 \times 3}$.
-- Scene bounds: Octree center $\mathbf{w}_c$ and size $\mathbf{w}_s$.
+- Camera parameters: origin $\mathbf{r}_o$, direction $\mathbf{r}_d$, and projection matrix [S1].
+- Scene representation: A set of active sparse voxels [S1]. Each voxel $v$ is defined by:
+  - Octree level $l \in [1, L]$ (max level $L=16$) [S1].
+  - Voxel index $\mathbf{v} = \{i, j, k\}$ relative to the octree root [S1].
+  - Density parameters $\mathbf{V} \in \mathbb{R}^{2\times2\times2}$ at the eight corners [S1].
+  - Spherical Harmonic (SH) coefficients $\mathbf{v}_{\text{sh}} \in \mathbb{R}^{(N_{\text{shd}}+1)^2 \times 3}$ [S1].
+- Scene bounds: Octree center $\mathbf{w}_c$ and size $\mathbf{w}_s$ [S1].
 
 **Outputs:**
-- Rendered image (color, depth, normals) for each pixel.
+- Rendered image (color, depth, normals) for each pixel [S1].
 
 ### Data Structures
-1. **Voxel List:** A flat array of active voxels. Voxels are stored in arbitrary order but are mapped to Morton codes for sorting.
-2. **Morton Code:** A 64-bit integer key used for sorting. The key consists of a 32-bit tile ID (most significant) and a 32-bit depth value derived from the Morton order [S1].
-3. **Tile Assignment:** Each voxel is assigned to all image tiles it overlaps.
+1. **Voxel List:** A flat array of active voxels [S1]. Voxels are stored in arbitrary order but are mapped to Morton codes for sorting [S1].
+2. **Morton Code:** A 64-bit integer key used for sorting [S1]. The key is composed of a 32-bit tile ID (most significant) and a 32-bit depth value [S1].
+3. **Tile Assignment:** Each voxel is assigned to all image tiles it overlaps [S1].
 
 ### Coordinate Transformation
 The world-space center $\mathbf{v}_c$ and side length $\mathbf{v}_s$ of a voxel at level $l$ with index $\mathbf{v}=\{i,j,k\}$ are calculated as [S1]:
@@ -32,7 +32,6 @@ $$
 $$
 \mathbf{v}_c = \mathbf{w}_c - 0.5 \cdot \mathbf{w}_s + \mathbf{v}_s \cdot \mathbf{v}
 $$
-For unit voxels in a dense grid, this simplifies to $\mathbf{v}_c = \mathbf{v} \times V_{\text{size}}$ [S2, unofficial].
 
 ### Morton Code Conversion
 Voxels are sorted using Morton codes. The conversion from voxel index $(i, j, k)$ at level $lv$ to a Morton code `octpath` is [S1]:
@@ -68,7 +67,7 @@ def to_voxel_index(octpath, lv):
 ### Rasterization Steps
 
 1. **Projection and Tile Assignment:**
-   Project the eight corner points of each voxel into screen space. Determine the axis-aligned bounding box (AABB) of these projected points. Assign the voxel to all tiles that overlap with this AABB [S1].
+   Project the eight corner points of each voxel into screen space [S1]. Determine the axis-aligned bounding box (AABB) of these projected points [S1]. Assign the voxel to all tiles that overlap with this AABB [S1].
 
 2. **Pre-processing:**
    For each active voxel assigned to tiles, compute shared properties:
@@ -86,20 +85,23 @@ def to_voxel_index(octpath, lv):
      $$
 
 3. **Sorting:**
-   Sort voxels within each tile to ensure correct front-to-back rendering order.
-   - Use direction-dependent Morton order. The permutation of the Morton code depends on the signs of the ray direction components (8 permutations for 3D space) [S1].
+   Sort voxels within each tile to ensure correct front-to-back rendering order [S1].
+   - Use direction-dependent Morton order [S1]. The permutation of the Morton code depends on the signs of the ray direction components (8 permutations for 3D space) [S1].
    - This ensures that voxels from different octree levels are sorted correctly relative to the camera [S1].
    - Incorrect sorting (e.g., by center distance) causes popping artifacts [S1].
 
 4. **Ray-Voxel Intersection:**
-   For each pixel in a tile, cast a ray. Intersect the ray with each assigned voxel to determine the entry $a$ and exit $b$ distances [S1]:
+   For each pixel in a tile, cast a ray [S1]. Intersect the ray with each assigned voxel to determine the entry $a$ and exit $b$ distances [S1]:
    ```python
    def ray_aabb(vox_c, vox_s, ro, rd):
-       c0 = (vox_c - 0.5 * vox_s - ro) / rd
-       c1 = (vox_c + 0.5 * vox_s - ro) / rd
-       a = torch.minimum(c0, c1).max()
-       b = torch.maximum(c0, c1).min()
-       valid = (a <= b) & (a > 0)
+       # Component-wise calculations
+       c0 = [(vox_c[i] - 0.5 * vox_s[i] - ro[i]) / rd[i] for i in range(3)]
+       c1 = [(vox_c[i] + 0.5 * vox_s[i] - ro[i]) / rd[i] for i in range(3)]
+       # a = max(min(c0_x, c1_x), min(c0_y, c1_y), min(c0_z, c1_z))
+       a = max(min(c0[0], c1[0]), min(c0[1], c1[1]), min(c0[2], c1[2]))
+       # b = min(max(c0_x, c1_x), max(c0_y, c1_y), max(c0_z, c1_z))
+       b = min(max(c0[0], c1[0]), max(c0[1], c1[1]), max(c0[2], c1[2]))
+       valid = a <= b and a > 0
        return a, b, valid
    ```
 
@@ -128,7 +130,7 @@ def to_voxel_index(octpath, lv):
      $$
      \alpha_k = 1 - \exp\left(-\frac{l}{K} \cdot \text{explin}(\text{interp}(\mathbf{V}, \mathbf{q}_k))\right)
      $$
-     where $l = (b - a) \cdot \|\mathbf{r}_d\|$ is the ray segment length.
+     where $l = (b - a) \cdot \|\mathbf{r}_d\|$ is the ray segment length [S1].
    - Voxel alpha (integrated over segment):
      $$
      \alpha = 1 - \exp\left(-\frac{l}{K} \sum_{k=1}^K \exp \ln(\text{interp}(\mathbf{V}, \mathbf{q}_k))\right)
@@ -140,32 +142,32 @@ def to_voxel_index(octpath, lv):
    $$
    d = \sum_{k=1}^K \left( \prod_{j=1}^{k-1} (1 - \alpha_j) \right) \cdot \alpha_k \cdot t_k
    $$
-   Pixel depth is composited from $N$ voxels as $D = \sum_{i=1}^N T_i d_i$.
+   Pixel depth is composited from $N$ voxels as $D = \sum_{i=1}^N T_i d_i$ [S1].
 
 7. **Anti-aliasing:**
    Render at a supersampled resolution (factor $h_{ss}$) and downsample to target resolution [S1].
 
 ### Parameters
-- $K$: Number of samples per voxel. $K=1$ for novel-view synthesis, $K=3$ for mesh reconstruction [S1].
-- $L$: Max octree level. $L=16$ (finest resolution $65536^3$) [S1].
-- $T_i$: Early termination threshold. Typically $10^{-4}$ [S1].
-- $h_{ss}$: Supersampling scale. Typically $1.5$ [S1].
-- $\tau_{\text{prune}}$: Pruning threshold for voxel importance [S2, unofficial].
+- $K$: Number of samples per voxel [S1]. $K=1$ for novel-view synthesis, $K=3$ for mesh reconstruction [S1].
+- $L$: Max octree level [S1]. $L=16$ (finest resolution $65536^3$) [S1].
+- $T_i$: Early termination threshold [S1]. Typically $10^{-4}$ [S1].
+- $h_{ss}$: Supersampling scale [S1]. Typically $1.5$ [S1].
+- $\tau_{\text{prune}}$: Pruning threshold for voxel importance [S2].
 
 ### Edge Cases and Pitfalls
-- **Sorting Order:** Using primitive centers or closest distance to camera causes incorrect ordering and popping artifacts. Direction-dependent Morton order is required [S1].
+- **Sorting Order:** Using primitive centers or closest distance to camera causes incorrect ordering and popping artifacts [S1]. Direction-dependent Morton order is required [S1].
 - **Exposure Variation:** Scenes with severe exposure variation in training views may produce clear boundaries and floaters [S1].
 - **Multiple Morton Orders:** If a tile contains rays with different direction signs, multiple Morton orders are required (handled in supplementary materials) [S1].
 
 ## Operating characteristics
-- **Time Complexity:** Sorting dominates preprocessing. Rasterization is $O(N_{\text{voxels}} \cdot N_{\text{pixels}})$ in worst case, but sparse nature and early termination reduce effective cost.
-- **Memory Complexity:** Scales with number of active voxels. On a 24GB GPU, it fails to reach $1024^3$ grid resolution despite pruning, but outperforms dense grid methods [S1].
-- **Performance:** Achieves over 10× speedup compared to uniform-grid ray casting [S2, unofficial]. On MipNeRF-360, achieves 121-258 FPS depending on training/optimization settings [S1]. Average 27 primitives per pixel vs 63 for 3DGS [S1].
-- **Strengths:** Real-time rendering, high fidelity, no neural MLPs, handles unbounded backgrounds [S1][S2, unofficial].
+- **Time Complexity:** Sorting dominates preprocessing [S1]. Rasterization is $O(N_{\text{voxels}} \cdot N_{\text{pixels}})$ in worst case, but sparse nature and early termination reduce effective cost [S1].
+- **Memory Complexity:** Scales with number of active voxels [S1]. On a 24GB GPU, it fails to reach $1024^3$ grid resolution despite pruning, but outperforms dense grid methods [S1].
+- **Performance:** Achieves over 10× speedup compared to uniform-grid ray casting [S2]. On MipNeRF-360, achieves 121-258 FPS depending on training/optimization settings [S1]. Average 27 primitives per pixel vs 63 for 3DGS [S1].
+- **Strengths:** Real-time rendering, high fidelity, no neural MLPs, handles unbounded backgrounds [S1][S2].
 - **Limitations:** Struggles with severe exposure variations; requires careful sorting to avoid artifacts [S1].
 
 ## Background
-Sparse Voxel Rasterization was introduced in "Sparse Voxels Rasterization: Real-time High-fidelity Radiance Field Rendering" (CVPR 2025) [S1]. It builds on the efficiency of 3DGS rasterization but replaces Gaussians with sparse voxels in an octree layout. It addresses limitations of Plenoxels (ray casting, dense grids) and 3DGS (dependence on SfM points, Gaussian approximations) [S1].
+Sparse Voxel Rasterization was introduced in "Sparse Voxels Rasterization: Real-time High-fidelity Radiance Field Rendering" (CVPR 2025) [S1]. It builds on the efficiency of 3DGS rasterization but replaces Gaussians with sparse voxels in an octree layout [S1]. It addresses limitations of Plenoxels (ray casting, dense grids) and 3DGS (dependence on SfM points, Gaussian approximations) [S1].
 
 ## Subtopics
 
@@ -222,4 +224,4 @@ Creates voxels from rasterization, inverse process.
 
 ## Sources
 [S1] Sparse Voxels Rasterization: Real-time High-fidelity Radiance Field Rendering, https://doi.org/10.1109/cvpr52734.2025.01509, fetched 2026-10-26
-[S2] Sparse Voxel Rasterization (SVRaster), https://www.emergentmind.com/topics/sparse-voxel-rasterization-svraster, fetched 2026-10-27 (unofficial)
+[S2] Sparse Voxel Rasterization (SVRaster), https://www.emergentmind.com/topics/sparse-voxel-rasterization-svraster, fetched 2026-10-27

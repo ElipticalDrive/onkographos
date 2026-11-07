@@ -1,0 +1,300 @@
+--- v002.md
++++ v003.md
+@@ -4,160 +4,157 @@
+ 
+ ## Overview
+-Projected Color-Guided Dynamic NeRF (OD-NeRF) is an on-the-fly training method for dynamic scenes that replaces temporal deformation fields with a NeRF model conditioned on multi-view projected color statistics [S1]. Unlike sibling methods such as [D-NeRF](8660-d-nerf.md) which rely on explicit temporal inputs or deformation fields that extrapolate poorly to unseen times, OD-NeRF leverages the relative invariance of projected colors to implicitly track point correspondence between consecutive frames [S1]. This allows the model to utilize radiance fields from previous frames effectively, requiring the minimum number of optimization iterations for each new frame while maintaining interactive training and rendering speeds [S1].
++Projected Color-Guided Dynamic NeRF (OD-NeRF) is an on-the-fly training method for dynamic scenes that replaces explicit temporal inputs or deformation fields with conditioning on multi-view projected colors [S1]. By leveraging the invariance of projected color for corresponding 3D points across frames, it implicitly tracks correspondence, allowing the model to utilize radiance fields from previous frames to render the current frame with minimal optimization iterations [S1]. Unlike siblings such as [D-NeRF](8660-d-nerf.md) which rely on deformation fields that extrapolate poorly to unseen times, or [Neural Transient Field (NeTF)](4692-neural-transient-field-netf.md) which models transient artifacts explicitly, OD-NeRF achieves interactive speeds (6 FPS) by avoiding the computational overhead of temporal modeling [S1].
+ 
+ ## How it works
+-The method operates in an on-the-fly setting where the radiance field is trained and rendered frame-by-frame [S1]. It builds on the architecture of [TiNeuVox](7582-on-the-fly-dynamic-nerf-training.md) for synthetic data or [InstantNGP](7582-on-the-fly-dynamic-nerf-training.md) via NerfAcc for real-world data, modifying the input conditioning and sampling strategy [S1].
++**Inputs and Outputs:**
++*   **Inputs:** A sequence of multi-view images (frames). For each frame, the method requires the camera parameters and the radiance field (density $\sigma$ and color $\mathbf{c}$) estimated from the previous frame.
++*   **Outputs:** A rendered image for the current frame and an updated radiance field representation optimized for the current frame.
+ 
+-### Inputs and Outputs
+-*   **Inputs:** Multi-view images of the current frame $t$ and the previous frame $t-1$; the occupancy grid from frame $t-1$; camera poses and intrinsics for both frames.
+-*   **Outputs:** A trained radiance field representation for frame $t$; rendered images for novel views at frame $t$.
++**Data Structures:**
++1.  **Occupancy Grid:** A sparse grid storing occupancy values $\sigma_{occ}$ for spatial regions. Used for efficient sampling via rejection sampling [S1].
++2.  **Hash Voxel Grid:** Replaces the multi-scale voxel grid used in the base TiNeuVox model. Implemented using `tiny-cuda-nn` [S1].
++3.  **NeRF MLP:** A Multi-Layer Perceptron that outputs density and color. Its input is the concatenation of spatial features and projected color statistics [S1].
+ 
+-### Data Structures
+-The core data structure is the **Hash Voxel Grid** (from InstantNGP), implemented using `tiny-cuda-nn` [S1]. This replaces the multi-scale voxel grid used in the base TiNeuVox model [S1]. The grid stores spatial features for 3D points. Additionally, an **Occupancy Grid** is maintained and updated between frames to guide efficient sampling [S1].
++**Numbered Steps:**
+ 
+-### Numbered Steps
++1.  **Initialization (Frame 1):**
++    *   For synthetic datasets, initialize the model by removing temporal components (temporal deformation model and temporal information enhancement) present in the base TiNeuVox architecture [S1].
++    *   Replace the multi-scale voxel grid with a hash voxel grid [S1].
++    *   Apply a warm-up duration of 2 seconds for the first frame to compensate for the slower convergence of hashed voxels compared to multi-scale voxels [S1].
++    *   For real-world datasets, initialize using the NerfAcc implementation of InstantNGP [S1].
+ 
+-1.  **Projected Color Computation:** For a sampled 3D point $\mathbf{x}$ along a ray in the current frame, compute its projected color from the training views. Calculate the mean $\mu_c$ and variance $\sigma_c^2$ of these projected colors [S1].
+-2.  **Feature Query:** Query the spatial feature vector $\mathbf{f}_{spatial}$ for point $\mathbf{x}$ from the hash voxel grid [S1].
+-3.  **Input Concatenation:** Concatenate the projected color statistics with the spatial feature to form the input to the NeRF MLP:
+-    $$ \mathbf{f}_{input} = [\mathbf{f}_{spatial}, \mu_c, \sigma_c^2] $$
+-    *Note: For synthetic datasets, the temporal deformation model and temporal information enhancement from the base TiNeuVox are removed [S1]. For real-world datasets, this concatenation is performed before inputting into the NeRF MLP [S1].*
+-4.  **NeRF Prediction:** Pass $\mathbf{f}_{input}$ through the NeRF Multi-Layer Perceptron (MLP) to predict density $\sigma$ and color $\mathbf{c}$ [S1].
+-5.  **Occupancy Grid Transition and Update:** Use the occupancy grid from the previous frame $t-1$ to guide sampling for frame $t$. The grid is updated to reflect the scene state at frame $t$ [S1].
+-6.  **Rejection Sampling:** To sample points efficiently based on the updated occupancy grid, use rejection sampling on uniform ray samples. A sample $x_i$ at index $i$ along the ray is rejected if:
+-    $$ \text{reject } x_i \text{ if } (\sigma_{occ}(x_i) < \sigma_{min}) \land \neg(i \mod R \equiv R // 2) $$
+-    where $\sigma_{occ}(x_i)$ is the occupancy value from the grid, $\sigma_{min}$ is a density threshold, and $R$ is a fixed interval [S1].
+-7.  **Optimization:** Optimize the radiance field parameters for the current frame using the rendered images and ground truth images. The number of optimization iterations is minimized compared to temporal-based methods [S1].
++2.  **Projected Color Computation:**
++    *   For a sampled 3D point $\mathbf{x}$, compute its projected color from the training views.
++    *   Calculate the mean ($\mu_c$) and variance ($\sigma_c^2$) of these projected colors [S1].
+ 
+-### Formulas and Parameters
++3.  **Feature Concatenation:**
++    *   Query the spatial feature $\mathbf{f}_{spatial}$ from the voxel grid (hash grid for real-world, or the modified grid for synthetic) at $\mathbf{x}$ [S1].
++    *   Concatenate $\mathbf{f}_{spatial}$ with $\mu_c$ and $\sigma_c^2$ to form the input vector for the NeRF MLP [S1].
+ 
+-**Rejection Sampling Condition:**
+-$$ \text{Reject } x_i \iff (\sigma_{occ}(x_i) < \sigma_{min}) \land \neg(i \mod R \equiv \lfloor R/2 \rfloor) $$
+-*   $\sigma_{occ}(x_i)$: Occupancy value at point $x_i$ from the occupancy grid [S1].
+-*   $\sigma_{min}$: Density threshold for rejection [S1].
+-*   $R$: Fixed interval for sampling [S1].
+-*   $i$: Index of the sample along the ray [S1].
++4.  **NeRF Evaluation:**
++    *   Pass the concatenated input through the NeRF MLP to predict density $\sigma$ and color $\mathbf{c}$ [S1].
+ 
+-**Depth Smoothness Regularization (Real-world datasets only):**
+-For real-world datasets, a depth smoothness regularization loss is applied to handle large planar backgrounds:
+-$$ L_{depth} = \frac{\text{std}(d_{far} / d_{3\times3})}{\text{std}(c_{3\times3})} $$
+-*   $d_{far}$: Depth of the farthest sample in the patch [S1].
+-*   $d_{3\times3}$: Mean depth of a $3 \times 3$ patch of rays [S1].
+-*   $c_{3\times3}$: Mean color of the $3 \times 3$ patch [S1].
+-*   $\text{std}(\cdot)$: Standard deviation operator [S1].
++5.  **Efficient Sampling (Transition and Update):**
++    *   Use the occupancy grid from the previous frame to guide sampling for the current frame.
++    *   Perform rejection sampling on uniform ray samples. A sample $x_i$ at index $i$ along the ray is rejected if:
++        $$ \text{reject } x_i \text{ if } (\sigma_{occ}(x_i) < \sigma_{min}) \land \neg(i \mod R \equiv R//2) $$
++        where $\sigma_{min}$ is a density threshold and $R$ is a fixed interval [S1].
++    *   Update the occupancy grid for the current frame based on the new samples [S1].
++
++6.  **Optimization:**
++    *   Optimize the NeRF parameters for the current frame using the rendered image and the ground truth image.
++    *   For real-world datasets, apply a depth smoothness regularization loss $L_{depth}$ to handle large planar backgrounds:
++        $$ L_{depth} = \frac{\text{std}(d_{far} / d_{3 \times 3})}{\text{std}(c_{3 \times 3})} $$
++        where $d_{far}$ is the depth of the farthest sample, $d_{3 \times 3}$ is the mean depth of a $3 \times 3$ patch of rays, and $c_{3 \times 3}$ is the mean color of that patch [S1].
++    *   Decay the optimization iterations or learning rate schedule from 1 (at frame 1) to 0.05 (at frame 10) to aid convergence [S1].
++
++**Pseudocode:**
++
++```python
++def train_od_nerf_frame(prev_occupancy_grid, current_images, cameras, prev_nerf_mlp):
++    """
++    Trains the OD-NeRF model for a single frame on-the-fly.
++    
++    Args:
++        prev_occupancy_grid: Occupancy grid from the previous frame.
++        current_images: List of images for the current frame.
++        cameras: Camera parameters for the current frame.
++        prev_nerf_mlp: NeRF MLP from the previous frame (or initialized).
++        
++    Returns:
++        current_nerf_mlp: Optimized NeRF MLP for the current frame.
++        current_occupancy_grid: Updated occupancy grid.
++    """
++    # Step 1: Initialize or Load Model
++    # For synthetic: Remove temporal components, use hash grid
++    # For real-world: Use InstantNGP via NerfAcc
++    nerf_mlp = prev_nerf_mlp.clone()
++    
++    # Step 2: Sampling Loop
++    for ray in sample_rays(cameras):
++        # Generate uniform samples along the ray
++        uniform_samples = generate_uniform_samples(ray, num_samples=256)
++        
++        # Step 5: Efficient Sampling via Rejection
++        valid_samples = []
++        for i, x_i in enumerate(uniform_samples):
++            # Query occupancy from previous frame's grid
++            sigma_occ = query_occupancy(prev_occupancy_grid, x_i)
++            
++            # Rejection condition
++            if sigma_occ < sigma_min and not (i % R == R // 2):
++                continue
++            
++            valid_samples.append(x_i)
++        
++        # Step 3: Feature Computation
++        features = []
++        for x in valid_samples:
++            # Query spatial feature from hash grid
++            f_spatial = query_hash_grid(nerf_mlp.voxel_grid, x)
++            
++            # Compute projected color statistics from training views
++            # Note: In practice, this might be pre-computed or approximated
++            projected_colors = get_projected_colors(x, cameras, training_views)
++            mu_c = mean(projected_colors)
++            sigma_c = variance(projected_colors)
++            
++            # Concatenate features
++            input_vector = concatenate([f_spatial, mu_c, sigma_c])
++            features.append((input_vector, x))
++        
++        # Step 4: NeRF Evaluation
++        densities = []
++        colors = []
++        for input_vector, x in features:
++            sigma, c = nerf_mlp(input_vector)
++            densities.append(sigma)
++            colors.append(c)
++        
++        # Step 6: Optimization
++        # Render image from densities and colors
++        rendered_image = volume_rendering(densities, colors, ray)
++        
++        # Compute loss against ground truth
++        loss = compute_loss(rendered_image, current_images[ray.camera_id])
++        
++        # Add depth regularization for real-world datasets
++        if is_real_world_dataset:
++            # Compute patch-based depth regularization
++            patch_depths = get_patch_depths(valid_samples)
++            patch_colors = get_patch_colors(valid_samples)
++            depth_loss = compute_depth_smoothness_loss(patch_depths, patch_colors)
++            loss += depth_loss_weight * depth_loss
++        
++        # Backpropagate and update MLP
++        update_parameters(nerf_mlp, loss)
++    
++    # Update occupancy grid for next frame
++    current_occupancy_grid = update_occupancy_grid(prev_occupancy_grid, valid_samples, densities)
++    
++    return nerf_mlp, current_occupancy_grid
++```
+ 
+ **Parameters:**
+-*   **Warm-up Duration:** A 2-second warm-up period is applied to the first frame for synthetic datasets to compensate for the slower convergence of hashed voxels compared to multi-scale voxels [S1].
+-*   **Optimization Schedule:** The optimization process starts with a higher learning rate or iteration count (e.g., 1 at frame 1) and decays (e.g., to 0.05 at frame 10) for better convergence [S1].
++*   **Warm-up duration:** 2 seconds for the first frame in synthetic datasets [S1].
++*   **Density threshold ($\sigma_{min}$):** Not given in the sources.
++*   **Fixed interval ($R$):** Not given in the sources.
++*   **Optimization decay:** From 1 (frame 1) to 0.05 (frame 10) [S1].
+ 
+-### Pseudocode
+-
+-```python
+-def train_od_nerf_frame(frame_idx, images_prev, images_curr, poses_prev, poses_curr, 
+-                        occupancy_grid_prev, camera_params):
+-    """
+-    Trains the OD-NeRF model for a single frame in an on-the-fly manner.
+-    
+-    Args:
+-        frame_idx: Current frame index.
+-        images_prev: List of images from the previous frame.
+-        images_curr: List of images from the current frame.
+-        poses_prev: Camera poses for the previous frame.
+-        poses_curr: Camera poses for the current frame.
+-        occupancy_grid_prev: Occupancy grid from the previous frame.
+-        camera_params: Intrinsics and other camera parameters.
+-        
+-    Returns:
+-        Trained radiance field model for the current frame.
+-    """
+-    # Initialize model based on dataset type
+-    if is_synthetic_dataset:
+-        model = TiNeuVox_Synthetic()
+-        # Remove temporal deformation and temporal information enhancement
+-        model.remove_temporal_components()
+-        # Replace multi-scale voxel with hash voxel
+-        model.replace_voxel_with_hash_grid()
+-        # Apply warm-up for first frame
+-        if frame_idx == 0:
+-            apply_warm_up(duration_seconds=2)
+-    else:
+-        model = InstantNGP_RealWorld()
+-        # Use NerfAcc implementation
+-        model.use_nerfacc()
+-        
+-    # Update occupancy grid for current frame
+-    occupancy_grid_curr = transition_and_update_occupancy_grid(
+-        occupancy_grid_prev, images_prev, poses_prev, images_curr, poses_curr
+-    )
+-    
+-    # Optimization loop for current frame
+-    # Number of iterations is minimized compared to temporal methods
+-    for iteration in range(num_iterations):
+-        # Sample rays for current frame
+-        rays = sample_rays(poses_curr, camera_params, num_rays)
+-        
+-        # Render rays using the model
+-        rendered_colors, rendered_depths = [], []
+-        for ray in rays:
+-            # Generate uniform samples along the ray
+-            uniform_samples = generate_uniform_samples(ray, num_samples)
+-            
+-            # Apply rejection sampling based on occupancy grid
+-            valid_samples = []
+-            for i, sample in enumerate(uniform_samples):
+-                sigma_occ = query_occupancy_grid(occupancy_grid_curr, sample)
+-                # Check rejection condition
+-                if not (sigma_occ < sigma_min and not (i % R == R // 2)):
+-                    valid_samples.append(sample)
+-            
+-            # Query features and predict
+-            predicted_outputs = []
+-            for sample in valid_samples:
+-                # Compute projected color statistics from previous frame views
+-                projected_colors = get_projected_colors(sample, images_prev, poses_prev)
+-                mu_c = mean(projected_colors)
+-                sigma_c = variance(projected_colors)
+-                
+-                # Query spatial feature from hash voxel grid
+-                f_spatial = query_hash_voxel_grid(model.hash_grid, sample)
+-                
+-                # Concatenate features
+-                f_input = concatenate([f_spatial, mu_c, sigma_c])
+-                
+-                # Predict density and color
+-                sigma, color = model.mlp(f_input)
+-                predicted_outputs.append((sigma, color))
+-            
+-            # Volume rendering
+-            color_rendered = volume_render(predicted_outputs)
+-            rendered_colors.append(color_rendered)
+-            
+-        # Compute loss
+-        loss = compute_rendering_loss(rendered_colors, images_curr)
+-        
+-        # Add depth smoothness regularization for real-world datasets
+-        if not is_synthetic_dataset:
+-            depth_loss = compute_depth_smoothness_loss(rendered_depths)
+-            loss += depth_smoothness_weight * depth_loss
+-            
+-        # Backpropagate and update model parameters
+-        model.optimize(loss)
+-        
+-    return model
+-```
+-
+-### Edge Cases and Pitfalls
+-*   **Specular Surfaces and Occlusion:** The implicit correspondence relies on the relative invariance of projected color. This assumption is violated by specular surfaces and occluded points, which can cause artifacts [S1]. Filtering these outliers or explicitly detecting occlusion is possible but incurs significant computational cost [S1].
+-*   **Convergence on Real-World Data:** The NerfAcc implementation of InstantNGP may not converge well on forward-facing dynamic datasets (e.g., MeetRoom, DyNeRF) even for the first static frame, potentially due to large planar backgrounds with constant colors [S1]. The depth smoothness regularization helps mitigate this [S1].
+-*   **Hashed Voxel Convergence:** Hashed voxels capture details better but converge slower than multi-scale voxels, necessitating the warm-up period for the first frame in synthetic datasets [S1].
++**Edge Cases and Pitfalls:**
++*   **Specular Surfaces:** Specular surfaces violate the relative invariance of projected color, leading to artifacts [S1].
++*   **Occluded Points:** Occluded points also violate the invariance assumption, causing artifacts [S1].
++*   **Convergence on Real-World Data:** The NerfAcc implementation of InstantNGP may not converge well on forward-facing dynamic datasets with large planar backgrounds (e.g., walls, tables) due to constant colors [S1]. This is mitigated by the depth smoothness regularization [S1].
+ 
+ ## Operating characteristics
+-*   **Speed:** Achieves an interactive speed of 6 FPS for both training and rendering on synthetic dynamic scenes in an on-the-fly setting [S1]. It provides a significant speed-up compared to state-of-the-art methods on real-world dynamic scenes [S1].
+-*   **Optimization Efficiency:** Requires the minimum number of optimization iterations for each new frame compared to models with temporal input dimensions or deformation fields [S1].
+-*   **Temporal Extrapolation:** Exhibits excellent temporal extrapolation capability due to the implicit correspondence mechanism [S1].
+-*   **Limitations:** Performance degrades on scenes with strong specularities or significant occlusions due to the violation of projected color invariance [S1].
++*   **Time Complexity:** The method achieves an interactive speed of 6 FPS for training and rendering on synthetic dynamic scenes on-the-fly [S1]. It requires the minimum number of optimization iterations for each new frame compared to models with temporal inputs or deformation fields [S1].
++*   **Memory Complexity:** Uses a hash voxel grid (via `tiny-cuda-nn`) which is more memory-efficient than dense voxel grids, but converges slower than multi-scale voxels [S1].
++*   **Strengths:** Excellent temporal extrapolation capability; does not require explicit deformation fields; efficient on-the-fly training [S1].
++*   **Limitations:** Performance degrades on specular surfaces and occluded points; requires careful tuning of depth regularization for real-world datasets with large planar backgrounds [S1].
++*   **When to Use:** When real-time or near-real-time training and rendering of dynamic scenes is required, and the scene does not contain significant specularities or complex occlusions [S1].
++*   **When Not to Use:** When the scene contains many specular surfaces or heavy occlusions, as the projected color invariance assumption will be violated [S1].
+ 
+ ## Background
+-OD-NeRF was introduced in the paper "OD-NeRF: Efficient Training of On-the-Fly Dynamic Neural Radiance Fields" [S1]. It addresses the challenge of efficient on-the-fly training, where the radiance field is trained and rendered frame-by-frame, by effectively utilizing the radiance field estimated from previous frames [S1]. The method was implemented on top of TiNeuVox for synthetic datasets and InstantNGP (via NerfAcc) for real-world datasets [S1].
++OD-NeRF was introduced in the paper "OD-NeRF: Efficient Training of On-the-Fly Dynamic Neural Radiance Fields" [S1]. It addresses the challenge of efficient on-the-fly training where the radiance field is trained and rendered frame-by-frame. Previous dynamic NeRFs focused on reconstructing scenes from full training videos using space-time 4D or explicit deformation representations, which often extrapolate poorly to unseen times and require many optimization iterations [S1]. OD-NeRF proposes conditioning the NeRF on multi-view projected colors to implicitly track correspondence, enabling effective utilization of radiance fields from previous frames [S1]. It is implemented on top of TiNeuVox for synthetic datasets and InstantNGP (via NerfAcc) for real-world datasets [S1].
+ 
+ ## Sources

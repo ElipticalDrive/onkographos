@@ -1,0 +1,366 @@
+--- v004.md
++++ v005.md
+@@ -1,217 +1,177 @@
+ # Marching Cubes with Hermite Data and Full Case Table
+ 
+-Also called: Accurate Isosurface Interpolation with Hermite Data, Full Case Marching Cubes
++Also called: Accurate Isosurface Interpolation with Hermite Data
+ 
+ ## Overview
+-This method implements Marching Cubes isosurface extraction that resolves the topological ambiguities of the original Lorensen and Cline algorithm using a full case table and improves geometric accuracy via Hermite interpolation [S1, unofficial]. It differs from standard Marching Cubes by using face corner averages to resolve ambiguous zero-crossings and by employing second-order interpolants for vertex positions, whereas siblings like the Asymptotic Decider rely on higher-order polynomial roots of the trilinear field [790-asymptotic-decider.md].
++This method extends the standard Marching Cubes algorithm by incorporating Hermite interpolation for higher-order surface positioning and a full case table to resolve topological ambiguities inherent in the original Lorensen and Cline lookup table [S1, unofficial]. It solves the problem of geometric inaccuracy in linear interpolation and topological errors in ambiguous cell configurations [S1, unofficial]. Unlike the [Asymptotic Decider](790-asymptotic-decider.md) which analyzes the trilinear field interior, or [Topologically Correct Marching Cubes](1368-topologically-correct-marching-cubes.md) which inserts cell-center vertices, this method relies on a pre-defined full case table and second-order Hermite interpolants derived from local gradients [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A regularly sampled voxel grid of scalar values. Values are stored in binary format as either unsigned chars (1 byte) or floats (4 bytes), linearized in row-major order: $V(x,y,z) = \text{index}(x + y \cdot \text{ResX} + z \cdot \text{ResX} \cdot \text{ResY})$ [S1, unofficial].
+-*   **Parameters:**
+-    *   `--res <x-resolution y-resolution z-resolution>`: Grid dimensions. If unspecified, assumes a cube grid and reads the first 4 bytes of the file as the resolution [S1, unofficial].
+-    *   `--dim <x-scale y-scale z-scale>`: Voxel physical scale. Default: $(1, 1, 1)$ [S1, unofficial].
+-    *   `--iso <isovalue>`: Extraction threshold. Default: $0$ [S1, unofficial].
+-    *   `--sIters <smoothing iterations>`: Number of 1-ring smoothing iterations applied to the voxel grid before extraction. Default: $0$ [S1, unofficial].
+-    *   `--quadratic`: Enables Hermite interpolation [S1, unofficial].
+-    *   `--full`: Enables the full case table [S1, unofficial].
+-    *   `--polygon`: Outputs raw iso-polygons instead of triangulated meshes [S1, unofficial].
+-    *   `--nonManifold`: Disables the insertion of a barycenter vertex to prevent non-manifold edges. Default: disabled (manifold guaranteed) [S1, unofficial].
+-*   **Output:** A triangle mesh in PLY format [S1, unofficial].
++**Inputs:**
++*   Regularly sampled voxel grid values $V$ of resolution $R_x \times R_y \times R_z$.
++*   Voxel scale (dimensions) $D_x, D_y, D_z$.
++*   Isovalue $I$.
++*   Flags: `--full` (enable full case table), `--quadratic` (enable Hermite interpolation), `--polygon` (output polygons instead of triangles), `--nonManifold` (disable barycenter insertion for non-manifold safety).
++
++**Outputs:**
++*   A triangle mesh (PLY format) or raw iso-polygons representing the isosurface $V(x,y,z) = I$.
+ 
+ **Data Structures:**
+-The voxel grid is stored as a 1D array of size $\text{ResX} \times \text{ResY} \times \text{ResZ}$. Each voxel cell is processed independently. For Hermite data, the gradient or difference vector at each vertex is derived from neighboring values [S1, unofficial].
++*   **Voxel Grid:** Linearized array of size $R_x R_y R_z$. Values are stored as unsigned chars (1 byte) or floats (4 bytes). Index for $(x,y,z)$ is $x + y R_x + z R_x R_y$ [S1, unofficial].
++*   **Hermite Data:** For each voxel, the gradient or difference between neighboring values is computed to form a second-order interpolant [S1, unofficial].
++*   **Full Case Table:** A lookup table containing all possible cell configurations, including those ambiguous in the standard 15-case table. Ambiguity is resolved using the average value of face corners [S1, unofficial].
+ 
+ **Steps:**
+ 
+-1.  **Preprocessing (Optional):** If `--sIters > 0`, apply 1-ring smoothing to the input voxel grid values [S1, unofficial].
+-2.  **Hermite Data Generation (Conditional):** If `--quadratic` is specified, generate Hermite data by considering the difference between neighboring values. This data defines a second-order interpolant [S1, unofficial].
+-3.  **Cell Processing:** For each voxel cell defined by 8 vertices:
+-    a. Determine the sign of each vertex relative to `--iso`.
+-    b. Identify the intersection points on the cell edges.
+-    c. **Vertex Position Calculation:**
+-        *   If `--quadratic` is **not** specified, use standard linear interpolation to find zero-crossing positions on the edges [S1, unofficial].
+-        *   If `--quadratic` is specified, use the second-order Hermite interpolant (derived from the generated Hermite data) to define the positions of zero-crossings [S1, unofficial].
+-    d. **Topology Resolution:**
+-        *   If `--full` is **not** specified, use the standard 15-case (or 215-case symmetric) lookup table.
+-        *   If `--full` is specified, use a full case table. Specifically, resolve the ambiguous case where a face has a zero-crossing and the values on the antipodal corners are the same by using the **average value of the face corners** [S1, unofficial].
+-4.  **Polygon Generation:** Generate the raw iso-polygons for the cell based on the resolved topology and intersection points [S1, unofficial].
+-5.  **Triangulation (Conditional):** If `--polygon` is **not** specified:
+-    a. Triangulate the raw iso-polygons using a minimal-area-triangulation algorithm [S1, unofficial].
+-    b. **Manifold Guarantee:** Check if the triangulation results in non-manifold edges (where two polygons share two vertices that are not on a polygon edge). If such a case arises and `--nonManifold` is not set, introduce an additional vertex at the plane's barycenter to ensure the output mesh is manifold [S1, unofficial].
+-6.  **Output:** Write the resulting triangle mesh to the specified PLY file [S1, unofficial].
++1.  **Preprocessing (Optional):** Apply 1-ring smoothing iterations to the voxel grid if `--sIters > 0` [S1, unofficial].
++2.  **Cell Iteration:** Iterate over every voxel cell in the grid. A cell is defined by 8 vertices.
++3.  **Case Identification:** Determine the binary index of the cell based on the sign of $(V_i - I)$ for each vertex $i$.
++4.  **Ambiguity Resolution (Full Case Table):**
++    *   If `--full` is specified, use the full case table.
++    *   For ambiguous cases (where a face has a zero-crossing and antipodal corners have the same value), resolve the topology by using the average value of the face corners [S1, unofficial].
++5.  **Zero-Crossing Calculation:**
++    *   If `--quadratic` is specified, compute Hermite data by considering the difference between neighboring values [S1, unofficial].
++    *   Use a second-order interpolant to define the positions of zero-crossings on the cell edges.
++    *   If `--quadratic` is not specified, use standard linear interpolation [S1, unofficial].
++6.  **Polygon Generation:** Generate the raw iso-polygons for the cell based on the resolved case and intersection points.
++7.  **Triangulation:**
++    *   If `--polygon` is NOT specified, triangulate the raw polygons.
++    *   Use minimal-area-triangulation to produce the triangle mesh [S1, unofficial].
++8.  **Manifold Enforcement:**
++    *   Check for non-manifold edges (where two polygons share two vertices not on a polygon edge).
++    *   If `--nonManifold` is NOT specified and a non-manifold configuration is detected, introduce an additional vertex at the plane's barycenter to ensure a manifold mesh [S1, unofficial].
++    *   If `--nonManifold` is specified, skip this step, potentially resulting in non-manifold edges [S1, unofficial].
++9.  **Orientation:** If `--flip` is specified, flip the triangle orientation [S1, unofficial].
++10. **Output:** Write the resulting mesh to the specified PLY file [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def extract_isosurface(volume, resolution, dim, iso, use_hermite, use_full_case, use_polygon, non_manifold_flag):
++def extract_isosurface(volume, resolution, dimensions, isovalue, flags):
+     """
+-    Extracts isosurface from a regular voxel grid.
++    Extract isosurface using Marching Cubes with Hermite Data and Full Case Table.
+     
+     Args:
+-        volume: 1D array of scalar values (uint8 or float32).
+-        resolution: Tuple (ResX, ResY, ResZ).
+-        dim: Tuple (dx, dy, dz) for voxel scaling.
+-        iso: Scalar isovalue.
+-        use_hermite: Boolean, if True use quadratic Hermite interpolation.
+-        use_full_case: Boolean, if True use full case table with face corner averages.
+-        use_polygon: Boolean, if True output raw polygons, else triangulate.
+-        non_manifold_flag: Boolean, if True allow non-manifold edges.
++        volume: 1D array of voxel values, linearized row-major.
++        resolution: Tuple (Rx, Ry, Rz).
++        dimensions: Tuple (Dx, Dy, Dz).
++        isovalue: Float isovalue.
++        flags: Dict with keys 'full', 'quadratic', 'polygon', 'nonManifold', 'flip', 'sIters'.
++    """
++    Rx, Ry, Rz = resolution
++    Dx, Dy, Dz = dimensions
++    
++    # Optional smoothing
++    if flags.get('sIters', 0) > 0:
++        volume = apply_1ring_smoothing(volume, resolution, flags['sIters'])
+         
+-    Returns:
+-        List of triangles (vertices and indices) or polygons.
++    vertices = []
++    triangles = []
++    
++    # Iterate over all cells
++    for z in range(Rz - 1):
++        for y in range(Ry - 1):
++            for x in range(Rx - 1):
++                # Get 8 vertices of the cell
++                cell_vertices = get_cell_vertices(volume, x, y, z, resolution)
++                
++                # Determine case index
++                case_index = compute_case_index(cell_vertices, isovalue)
++                
++                # Resolve ambiguity if full table is used
++                if flags.get('full', False):
++                    case_index = resolve_ambiguous_case_full_table(case_index, cell_vertices)
++                
++                # Compute intersection points
++                if flags.get('quadratic', False):
++                    # Hermite interpolation
++                    intersections = compute_hermite_intersections(cell_vertices, isovalue, resolution)
++                else:
++                    # Linear interpolation
++                    intersections = compute_linear_intersections(cell_vertices, isovalue)
++                
++                # Generate polygon
++                polygon = generate_polygon(case_index, intersections)
++                
++                if flags.get('polygon', False):
++                    vertices.extend(polygon)
++                else:
++                    # Triangulate
++                    tri_indices = minimal_area_triangulation(polygon)
++                    
++                    # Check for non-manifold edges
++                    if not flags.get('nonManifold', False):
++                        if is_non_manifold_potential(polygon):
++                            # Insert barycenter
++                            barycenter = compute_barycenter(polygon)
++                            vertices.append(barycenter)
++                            tri_indices = triangulate_with_barycenter(polygon, barycenter, tri_indices)
++                    
++                    # Add triangles
++                    for tri in tri_indices:
++                        triangles.append(tri)
++                        
++    if flags.get('flip', False):
++        flip_triangle_orientations(triangles)
++        
++    return vertices, triangles
++
++def compute_hermite_intersections(cell_vertices, isovalue, resolution):
+     """
+-    ResX, ResY, ResZ = resolution
+-    dx, dy, dz = dim
+-    
+-    # Step 1: Optional Smoothing
+-    # If smoothing iterations > 0, apply 1-ring smoothing to volume.
+-    # [G] Implementation of 1-ring smoothing involves averaging each voxel 
+-    # with its 6 immediate neighbors.
+-    
+-    triangles = []
+-    polygons = []
+-    
+-    # Step 2: Precompute Hermite Data if needed
+-    hermite_data = None
+-    if use_hermite:
+-        # Generate Hermite data by considering difference between neighboring values.
+-        # [G] This typically involves computing gradients or difference vectors 
+-        # at each vertex based on adjacent voxel values.
+-        hermite_data = compute_hermite_data(volume, ResX, ResY, ResZ)
++    Compute zero-crossing positions using second-order Hermite interpolation.
++    Hermite data is generated by considering the difference between neighboring values.
++    """
++    # Implementation detail: Compute gradients/differences from neighboring voxels
++    # Use these to form a quadratic interpolant along each edge
++    intersections = {}
++    for edge in cell_edges:
++        # Get values and differences for the edge
++        v_start, v_end = get_edge_vertices(edge, cell_vertices)
++        diff_start, diff_end = get_edge_differences(edge, cell_vertices, resolution)
+         
+-    # Step 3: Process each voxel cell
+-    for z in range(ResZ - 1):
+-        for y in range(ResY - 1):
+-            for x in range(ResX - 1):
+-                # Get 8 vertices of the current cell
+-                v0 = volume[x + y*ResX + z*ResX*ResY]
+-                v1 = volume[x+1 + y*ResX + z*ResX*ResY]
+-                v2 = volume[x+1 + (y+1)*ResX + z*ResX*ResY]
+-                v3 = volume[x + (y+1)*ResX + z*ResX*ResY]
+-                v4 = volume[x + y*ResX + (z+1)*ResX*ResY]
+-                v5 = volume[x+1 + y*ResX + (z+1)*ResX*ResY]
+-                v6 = volume[x+1 + (y+1)*ResX + (z+1)*ResX*ResY]
+-                v7 = volume[x + (y+1)*ResX + (z+1)*ResX*ResY]
+-                
+-                vertices = [v0, v1, v2, v3, v4, v5, v6, v7]
+-                
+-                # Determine signs relative to iso
+-                signs = [1 if v >= iso else -1 for v in vertices]
+-                case_index = compute_case_index(signs)
+-                
+-                # Step 3c: Determine intersection points
+-                intersections = []
+-                for edge in get_cell_edges():
+-                    i, j = edge
+-                    vi = vertices[i]
+-                    vj = vertices[j]
+-                    
+-                    # Check for zero crossing
+-                    if (vi - iso) * (vj - iso) <= 0:
+-                        # Calculate position
+-                        if use_hermite:
+-                            # Use second-order interpolant defined by Hermite data
+-                            # [G] The exact formula depends on the specific Hermite 
+-                            # basis functions used, typically involving vertex values 
+-                            # and derivatives/differences.
+-                            pos = hermite_interpolate(vi, vj, hermite_data[i], hermite_data[j], edge)
+-                        else:
+-                            # Standard linear interpolation
+-                            t = (iso - vi) / (vj - vi)
+-                            pos = lerp(vertex_coords[i], vertex_coords[j], t)
+-                        intersections.append((edge, pos))
+-                
+-                # Step 3d: Topology Resolution
+-                if use_full_case:
+-                    # Resolve ambiguous cases using average value of face corners
+-                    # [G] Specifically for cases where a face has a zero-crossing 
+-                    # and antipodal corners have same values, use face corner average.
+-                    topology = resolve_full_case(case_index, intersections, vertices)
+-                else:
+-                    topology = resolve_standard_case(case_index, intersections)
+-                
+-                # Step 4: Generate polygons
+-                raw_polygons = generate_polygons(topology, intersections)
+-                
+-                if use_polygon:
+-                    polygons.extend(raw_polygons)
+-                else:
+-                    # Step 5: Triangulate
+-                    for poly in raw_polygons:
+-                        # Minimal-area-triangulation
+-                        tri_list = minimal_area_triangulate(poly)
+-                        
+-                        # Check for non-manifold edges
+-                        if not non_manifold_flag:
+-                            # Check if two polygons share two vertices not on an edge
+-                            # If so, insert barycenter
+-                            tri_list = ensure_manifold(tri_list, poly)
+-                        
+-                        triangles.extend(tri_list)
+-                        
+-    if use_polygon:
+-        return polygons
+-    else:
+-        return triangles
++        # Solve for zero crossing in quadratic interpolant
++        # P(t) = v_start + t * (v_end - v_start) + ... (Hermite terms)
++        # Find t in [0, 1] such that P(t) = isovalue
++        t = solve_quadratic_zero_crossing(v_start, v_end, diff_start, diff_end, isovalue)
++        if t is not None:
++            intersections[edge] = lerp(cell_vertices[edge[0]], cell_vertices[edge[1]], t)
++    return intersections
+ 
+-def compute_hermite_data(volume, ResX, ResY, ResZ):
++def resolve_ambiguous_case_full_table(case_index, cell_vertices):
+     """
+-    Generates Hermite data by considering difference between neighboring values.
+-    Returns a list of difference vectors/derivatives for each vertex.
++    Resolve ambiguous cases using the average value of face corners.
+     """
+-    # [G] Implementation detail: Compute gradients or differences.
+-    # For example, derivative in x-direction: (v[x+1,y,z] - v[x-1,y,z]) / 2
+-    # This data is used for second-order interpolation.
+-    pass
+-
+-def hermite_interpolate(vi, vj, deriv_i, deriv_j, edge):
+-    """
+-    Second-order interpolation using Hermite data.
+-    """
+-    # [G] Specific formula not provided in source. Typically involves 
+-    # cubic Hermite basis functions.
+-    pass
+-
+-def resolve_full_case(case_index, intersections, vertices):
+-    """
+-    Resolves ambiguous cases using average value of face corners.
+-    """
+-    # [G] Logic to detect the specific ambiguous case (face zero-crossing, 
+-    # antipodal corners same) and apply face corner average.
+-    pass
+-
+-def minimal_area_triangulate(polygon):
+-    """
+-    Triangulates a polygon using minimal-area-triangulation.
+-    """
+-    # [G] Standard algorithm for triangulating a convex or simple polygon 
+-    # to minimize total area or maximize minimum angle.
+-    pass
+-
+-def ensure_manifold(triangles, polygon):
+-    """
+-    Introduces barycenter vertex if non-manifold edges are detected.
+-    """
+-    # [G] Check for shared vertices that are not on a polygon edge.
+-    # If found, add barycenter of the polygon plane and re-triangulate.
+-    pass
++    # Specific logic for ambiguous cases (e.g., Case 13, 14 in standard table)
++    # Check if face has zero-crossing and antipodal corners have same value
++    # Use average of face corners to determine topology
++    return resolved_case_index
+ ```
+ 
++**Parameters:**
++*   `--iso`: Isovalue. Default: 0 [S1, unofficial].
++*   `--dim`: Voxel scale $(D_x, D_y, D_z)$. Default: $(1, 1, 1)$ [S1, unofficial].
++*   `--res`: Resolution $(R_x, R_y, R_z)$. If unspecified, assumes cube grid and reads first 4 bytes as resolution [S1, unofficial].
++*   `--sIters`: Smoothing iterations. Default: 0 [S1, unofficial].
++*   `--full`: Enable full case table.
++*   `--quadratic`: Enable Hermite interpolation.
++*   `--polygon`: Output raw polygons.
++*   `--nonManifold`: Disable barycenter insertion.
++*   `--flip`: Flip triangle orientation.
++*   `--float`: Read input as floats.
++*   `--flipBytes`: Flip float byte order.
++
++**Edge Cases and Pitfalls:**
++*   **Non-manifold edges:** Two polygons may share two vertices that are not on a polygon edge. Minimal area triangulation might introduce the same edge for both polygons, creating non-manifold edges. By default, the code introduces an additional vertex (the plane's barycenter) to ensure a manifold mesh. The `--nonManifold` flag disables this, potentially resulting in non-manifold edges [S1, unofficial].
++*   **Input Format:** Values are linearized in row-major order. Incorrect resolution specification leads to misaligned data access [S1, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of voxels, $O(N)$, where $N = \text{ResX} \cdot \text{ResY} \cdot \text{ResZ}$, assuming constant-time lookup and interpolation per cell [S1, unofficial].
+-*   **Memory Complexity:** Linear with respect to the input volume size for storage, plus output mesh size [S1, unofficial].
+-*   **Strengths:**
+-    *   Resolves topological ambiguities present in the original Lorensen and Cline implementation using the full case table [S1, unofficial].
+-    *   Provides more accurate zero-crossing positions via Hermite interpolation compared to linear interpolation [S1, unofficial].
+-    *   Guarantees a manifold mesh by default through barycenter insertion [S1, unofficial].
+-*   **Limitations:**
+-    *   Hermite interpolation requires additional computation for data generation and evaluation [S1, unofficial].
+-    *   Minimal-area-triangulation can introduce non-manifold edges if the `--nonManifold` flag is enabled and specific polygon configurations arise [S1, unofficial].
+-*   **When to use:** When topological correctness is critical and the standard Marching Cubes ambiguous cases are likely to occur, or when higher geometric accuracy is needed than linear interpolation provides.
+-*   **When not to use:** When performance is paramount and the input data is smooth enough that linear interpolation and standard cases are sufficient.
++*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, assuming constant-time lookup and interpolation per cell. Hermite interpolation adds constant overhead per edge.
++*   **Memory Complexity:** $O(N)$ for the voxel grid and output mesh.
++*   **Accuracy:** Hermite interpolation provides second-order accuracy, improving geometric fidelity over linear interpolation [S1, unofficial].
++*   **Topology:** The full case table resolves ambiguities present in the original Lorensen and Cline implementation, ensuring topological correctness for the defined cases [S1, unofficial].
++*   **Manifoldness:** The default behavior ensures a manifold mesh by inserting barycenters when necessary. Disabling this with `--nonManifold` risks non-manifold outputs [S1, unofficial].
++*   **Hardware:** The source mentions improved parallelization in later versions, suggesting suitability for GPU or multi-core CPU implementation [S1, unofficial].
+ 
+ ## Background
+-This method originates from the "Accurate Isosurface Interpolation with Hermite Data" work, associated with the 3DV 2015 Paper and available via the Department of Computer Science at Johns Hopkins University [S1, unofficial]. It addresses the limitations of the original Lorensen and Cline Marching Cubes algorithm, specifically the ambiguous cases and the accuracy of linear interpolation. The code also notes that implementations of Hermite interpolation on adapted octrees can be found in Poisson Surface Reconstruction and Floating Scale Surface Reconstruction [S1, unofficial].
++This method is based on the work presented in the 3DV 2015 paper "Accurate Isosurface Interpolation with Hermite Data" [S1, unofficial]. It is an implementation of Marching Cubes that specifically addresses the limitations of linear interpolation and the original lookup table's ambiguity handling. The code is available from the Department of Computer Science at Johns Hopkins University [S1, unofficial].
+ 
+ ## Sources

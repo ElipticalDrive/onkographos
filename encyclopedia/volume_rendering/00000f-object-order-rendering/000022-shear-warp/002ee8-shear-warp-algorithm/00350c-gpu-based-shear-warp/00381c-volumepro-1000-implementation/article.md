@@ -1,0 +1,150 @@
+# VolumePro 1000 Implementation
+Also called: Shear-image order ray casting
+
+## Overview
+The VolumePro 1000 implementation is a hardware-accelerated volume rendering method that utilizes a novel "shear-image order" ray casting approach [S1, unofficial]. It solves the problem of maintaining high image quality and memory coherence in GPU-based shear-warp rendering by casting rays directly through pixel centers while keeping volume slices parallel to the base plane [S1, unofficial]. Unlike traditional shear-warp factorizations that require a final warping step, this method aligns samples along viewing rays from the image plane pixels in an intermediate "sample space," eliminating the need for post-rendering warping and reducing artifacts [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** 3D volume data (voxels), viewing transformation matrix, lighting parameters, transfer functions (lookup tables), and optional polygon depth buffers.
+*   **Output:** Final composited image with embedded polygons and shading.
+
+**Data Structures:**
+*   **Volume Data:** Stored in a format supporting up to four fields per voxel, each associated with its own lookup table [S1, unofficial].
+*   **Lookup Tables (LUTs):** Cascaded LUTs combined by a hierarchy of arithmetic-logic units (ALUs) for classification [S1, unofficial].
+*   **Depth Buffers:** Used for polygon embedding; supports dual depth buffers for translucent polygons [S1, unofficial].
+
+**Transformation Matrices:**
+The 3D viewing transformation is explicitly decomposed into two matrices [S1, unofficial]:
+1.  $M_{voxel \to sample}$: Transforms voxel coordinates to an intermediate coordinate system called "sample space."
+2.  $M_{depth}$: Adjusts the depth values of sample points to reflect their distance from the image plane.
+
+**Algorithm Steps:**
+
+1.  **Preprocessing (Shear-Image Transformation):**
+    *   Apply $M_{voxel \to sample}$ to the volume data. This keeps slices parallel to the base plane (similar to 2D texture mapping) but aligns them with the viewing rays originating from pixel centers [S1, unofficial].
+    *   Generate additional interpolated slices between original voxel slices. These slices are shifted with sub-pixel accuracy to maintain constant ray and sample spacing, avoiding popping artifacts, especially for anisotropic or sheared volumes [S1, unofficial].
+
+2.  **Ray Casting and Resampling:**
+    *   Cast rays directly through the centers of pixels in the image plane [S1, unofficial].
+    *   Traverse the volume in object-space to ensure memory coherence [S1, unofficial].
+    *   For each sample point along the ray:
+        *   Perform tri-linear interpolation of the volume data [S1, unofficial].
+        *   Compute gradient vectors in hardware [S1, unofficial].
+        *   Apply lighting space calculations to ensure correct gradient and Phong shading for sheared and anisotropic data [S1, unofficial].
+
+3.  **Classification and Compositing:**
+    *   **Classification:** Use cascaded LUTs. The classification and interpolation stages are cross-connected, allowing the application to choose pre- or post-classification [S1, unofficial].
+    *   **Opacity Modulation:** Support opacity correction and gradient magnitude modulation of opacity [S1, unofficial].
+    *   **Compositing:** Perform front-to-back alpha blending.
+    *   **Optimization:** Support early ray termination to increase performance during compositing [S1, unofficial].
+    *   **Space Leaping:** Implement geometry-based space leaping, volume clipping, and cropping [S1, unofficial].
+
+4.  **Polygon Embedding (Multi-Pass):**
+    *   **Pass 1:** Render polygons into the depth buffer. Cast rays from the image plane to the depth buffer and blend the color buffers of the polygon and volume rendering [S1, unofficial].
+    *   **Pass 2:** Initialize rays with the blending result from Pass 1. Start rays at the depth buffer and end at the background to render the portion of the volume behind the polygon [S1, unofficial].
+    *   For translucent polygons, use dual depth buffers [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def volume_pro_1000_render(volume_data, view_matrix, lighting_params, luts, polygons=None):
+    """
+    Renders volume using shear-image order ray casting.
+    """
+    # 1. Decompose View Transformation
+    # M_voxel_to_sample: Voxel coords -> Sample space (slices parallel to base plane)
+    # M_depth: Adjusts depth values relative to image plane
+    M_voxel_to_sample, M_depth = decompose_view_matrix(view_matrix)
+    
+    # 2. Preprocess Volume Data (Shear-Image Order)
+    # Generate interpolated slices between original slices for sub-pixel accuracy
+    volume_sheared = apply_transformation(volume_data, M_voxel_to_sample)
+    volume_interpolated = generate_interpolated_slices(volume_sheared)
+    
+    # 3. Initialize Output Image
+    final_image = zeros(image_width, image_height, 4) # RGBA
+    
+    # 4. Ray Casting Loop
+    for y in range(image_height):
+        for x in range(image_width):
+            # Cast ray through pixel center
+            ray = create_ray_through_pixel(x, y, M_depth)
+            
+            # Initialize compositing variables
+            accumulated_color = (0.0, 0.0, 0.0, 0.0)
+            accumulated_opacity = 0.0
+            ray_t = ray.origin
+            
+            # Traverse volume
+            while ray_t < ray.end and accumulated_opacity < 1.0: # Early ray termination
+                # Get sample point in sample space
+                sample_pos = ray_t
+                
+                # Tri-linear interpolation in hardware
+                voxel_value = tri_linear_interpolate(volume_interpolated, sample_pos)
+                
+                # Compute gradient in hardware
+                gradient = compute_gradient(volume_interpolated, sample_pos)
+                
+                # Classification (Pre- or Post-classification configurable)
+                # Use cascaded LUTs with ALU hierarchy
+                color, opacity = classify(voxel_value, gradient, luts)
+                
+                # Opacity modulation (gradient magnitude)
+                opacity = modulate_opacity(opacity, gradient)
+                
+                # Phong shading in lighting space
+                shaded_color = phong_shading(color, gradient, lighting_params)
+                
+                # Front-to-back compositing
+                alpha = opacity * (1.0 - accumulated_opacity)
+                accumulated_color += shaded_color * alpha
+                accumulated_opacity += alpha
+                
+                # Advance ray
+                ray_t = ray_t + ray.direction * sample_spacing
+                
+            final_image[x, y] = accumulated_color
+
+    # 5. Polygon Embedding (if polygons provided)
+    if polygons is not None:
+        # Pass 1: Render polygons to depth buffer, blend with volume
+        depth_buffer = render_polygons_to_depth(polygons)
+        blended_image = blend_volume_and_polygons(final_image, polygons, depth_buffer)
+        
+        # Pass 2: Render volume behind polygons
+        # Initialize rays at depth buffer, end at background
+        final_image = render_volume_behind_polygons(volume_interpolated, polygons, depth_buffer, blended_image)
+        
+    return final_image
+```
+
+**Parameters:**
+*   **Rendering Speed:** Capable of rendering $10^9$ samples per second [S1, unofficial].
+*   **Voxel Fields:** Up to four fields per voxel, each with its own lookup table [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Anisotropic Data:** Requires sub-pixel slice shifting to avoid popping artifacts and maintain constant sample spacing [S1, unofficial].
+*   **Sheared Data:** Requires careful lighting space calculations for correct Phong shading [S1, unofficial].
+*   **Translucent Polygons:** Requires dual depth buffers for correct embedding [S1, unofficial].
+
+## Operating characteristics
+*   **Performance:** Capable of rendering $10^9$ samples per second [S1, unofficial].
+*   **Strengths:**
+    *   Higher image quality than traditional shear-warp factorization due to no final warping step [S1, unofficial].
+    *   High memory coherence via object-space resampling [S1, unofficial].
+    *   Hardware-accelerated tri-linear interpolation and gradient computation [S1, unofficial].
+    *   Supports early ray termination and space leaping for performance [S1, unofficial].
+*   **Limitations:**
+    *   Complex implementation requiring multiple rendering passes for polygon embedding [S1, unofficial].
+    *   Requires specific hardware support for cascaded LUTs and ALU hierarchies [S1, unofficial].
+*   **When to Use:** Real-time volume rendering where high image quality and memory coherence are critical, and hardware supports the specific shear-image order transformations and classification units.
+
+## Background
+The VolumePro 1000 system was introduced by Wu et al. in 2003 [S1, unofficial]. It builds on the VolumePro 500, introducing a novel shear-image order ray casting approach [S1, unofficial]. The method was designed to address the limitations of traditional shear-warp factorization, such as warping artifacts and lower image quality, by aligning samples directly with viewing rays in an intermediate sample space [S1, unofficial]. It is used in high-end medical imaging and visualization systems requiring real-time performance and high fidelity [S1, unofficial].
+
+## Sources
+[S1] Hardware-Accelerated Volume Rendering, https://vcg.seas.harvard.edu/publications/20040101-hardware-accelerated-volume-rendering/paper, fetched 2026-10-27 (unofficial)

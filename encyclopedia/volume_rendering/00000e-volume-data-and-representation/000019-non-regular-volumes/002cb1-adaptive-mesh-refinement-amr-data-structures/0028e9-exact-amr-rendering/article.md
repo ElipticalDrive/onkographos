@@ -3,67 +3,55 @@
 Also called: AMRHealpixRenderer, AMRImageRenderer
 
 ## Overview
-Exact AMR Rendering treats Adaptive Mesh Refinement (AMR) gas cells as piecewise-constant geometric cubes rather than smoothing them as SPH particles [S1]. It solves the problem of geometric fidelity in synthetic observations by ensuring mass conservation to round-off and eliminating the bias and smoothing inherent in kernel-based SPH rendering [S1]. It differs from its sibling [Approximate perspective projection of AMR cells](4400-approximate-perspective-projection-of-amr-cells.md) by avoiding orthographic approximations for large or perspective-distorted cells, ensuring geometric fidelity where perspective effects are significant [S1]. It builds on [Exact AMR Rendering](4399-exact-amr-rendering.md) by treating cells as piecewise-constant cubic volumes rather than particles [S1].
+Exact AMR Rendering treats Adaptive Mesh Refinement (AMR) gas cells as piecewise-constant geometric cubes rather than smoothing them as SPH kernels [S1]. It solves the problem of biased, smoothed representations in standard SPH rendering by providing exact pixel-averaged cross-sections for slices, exact volume integrals for projections, and exact mass-conserving maps for HEALPix [S1]. It differs from its sibling [Approximate perspective projection of AMR cells](4400-approximate-perspective-projection-of-amr-cells.md) by avoiding orthographic approximations for perspective views, ensuring geometric fidelity where perspective distortion is significant [S1]. It builds on [Exact AMR Rendering](4399-exact-amr-rendering.md) by treating cells as piecewise-constant cubic volumes rather than particles [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A snapshot declaring AMR families via `SimSnap._amr_cell_families` (e.g., 'gas' for Ramses) [S1]. Each cell is defined by its position, side length `smooth`, density `rho`, and mass `mass` (where volume $V = \text{mass}/\rho$) [S1]. The renderer rejects any kernel setting [S1].
-*   **Output:** A 2D image (slice, projection, or perspective) or a HEALPix map [S1].
+*   **Input:** AMR cell data (positions, sizes `smooth`, densities `rho`, masses, and scalar quantities `q`), camera parameters (view direction, distance, field of view), and image geometry (resolution, pixel size).
+*   **Output:** A 2D array (image) or HEALPix map containing the integrated quantity per pixel.
 
 **Data Structures:**
-*   **Cell Geometry:** Each cell is a cube of side `smooth` with edges aligned to the original simulation axes [S1].
-*   **Corner Function Table:** For rotated projections, a tabulated function $F(X,Y)$ stores the volume of a cell with $x \le X, y \le Y$ [S1]. This table is rescaled and cached once per orientation [S1].
+*   **AMR Cell Definition:** Each cell is a cube of side length `smooth`, with volume $V = \text{mass}/\rho$, and edges aligned to the original simulation axes [S1].
+*   **Family Declaration:** Snapshots declare AMR families via `SimSnap._amr_cell_families` (e.g., set to `'gas'` for Ramses) [S1].
+*   **Renderer Selection:** The renderer is selected automatically for AMR gas if `amr=True` or if the snapshot consists only of AMR cells and no kernel is specified [S1]. It is a subclass of `ImageRenderer`, inheriting array handling, units, and periodic wrapping, but rejects any kernel setting [S1].
 
 **Parameters:**
-*   `approximate_fast`: Boolean. Default `True` (from config). Allows tabulated approximations for small rotated cells [S1].
-*   `perspective_tolerance`: Float. Default `0.1` px. Threshold for using orthographic tables in perspective projections [S1].
-*   `use_true_amr`: Boolean. Opt-in flag to enable AMR rendering [S1].
+*   `use_true_amr`: Boolean. Enables AMR rendering. Default is `False` (opt-in) [S1].
+*   `approximate_fast`: Boolean. If `True`, allows approximations for speed (e.g., tabulated orthographic projections for small rotated cells). Default is `True` [S1].
+*   `perspective_tolerance`: Float. Threshold (in pixels) for using orthographic tables in perspective projections. Default is `0.1` px [S1].
 
 **Steps:**
 
 1.  **Initialization:**
-    *   Check if `use_true_amr` is True or if the snapshot is AMR gas and no kernel is specified [S1].
-    *   Verify the snapshot format declares AMR cells and does not mix families [S1].
-    *   Load the net rotation matrix from `Transformable.net_rotation_matrix` [S1].
+    *   Verify snapshot format declares AMR cells. Raise `ValueError` if families are mixed, a kernel is given, or `target='volume'` is specified [S1].
+    *   Apply orientation via `Transformable.net_rotation_matrix` [S1].
 
-2.  **Culling and Guarding:**
+2.  **Filtering:**
     *   Skip cells with non-finite positions, non-finite sizes, or non-positive sizes [S1].
-    *   Perform bounding-box tests to exclude cells outside the image bounds [S1].
-    *   **Pitfall Handling:** If round-off causes a cell just beyond the right/top edge to compute a pixel index of $n_x$ or $n_y$, skip the cell to prevent out-of-bounds writes [S1].
+    *   Skip cells lying entirely outside the image bounding box. Handle round-off errors where a cell just beyond the right/top edge might compute an index of `nx` or `ny` by skipping such cells after bounding-box tests [S1].
 
-3.  **Orthographic Slices:**
-    *   For aligned cells, compute exact pixel-averaged cross-sections using separable overlaps [S1].
-    *   For rotated cells, use polygon clipping [S1].
-    *   If a slice lies exactly along cell faces, consistently include the $+z$ cells [S1].
-
-4.  **Orthographic Projections:**
+3.  **Orthographic Projections (Slices and Projections):**
     *   **Aligned Cells:** Use exact separable overlaps [S1].
-    *   **Rotated Cells (approximate_fast=True):**
-        *   For cells up to 16 pixels across, interpolate the tabulated corner function $F(X,Y)$ [S1].
-        *   The integral of a cell's column over a pixel is the difference of $F(X,Y)$ across the pixel corners [S1].
-        *   This method is mass-exact with pixel errors typically $10^{-5}$ and at most $10^{-3}$ [S1].
-    *   **Rotated Cells (approximate_fast=False or large cells):**
-        *   Use an exact row-difference method where cost scales with the cell's perimeter [S1].
-        *   Compute exact corner volumes using the divergence theorem [S1].
-        *   Accumulate second differences along each pixel row [S1].
+    *   **Rotated Cells (Small, $\le 16$ px):** Use the approximate fast path. Interpolate a tabulated corner function $F(X,Y)$, defined as the volume of the cell with $x \le X, y \le Y$ [S1].
+        *   The integral of a cell's column over a pixel is a difference of $F(X,Y)$ across the pixel corners [S1].
+        *   $F(X,Y)$ is tabulated exactly once per orientation and bilinearly interpolated [S1].
+        *   This method is mass-exact, with pixel errors typically $10^{-5}$ and at most $10^{-3}$ [S1].
+    *   **Rotated Cells (Large or Exact Path):** Use the exact row-difference method. Cost scales with the cell's perimeter. Exact corner volumes are derived from the divergence theorem [S1].
+    *   **Slices:** Provide exact pixel-averaged cross-sections. A slice lying exactly along cell faces consistently takes the $+z$ cells [S1].
 
-5.  **Perspective Projections:**
-    *   Compute $\int q \, dl$ along each ray from the camera [S1].
-    *   Under perspective mapping, faces remain planar. The depth where a ray crosses a face is $K/L(X,Y)$ with $L$ affine [S1].
-    *   A pixel's integral is a sum of $\int 1/L$ over convex polygons [S1].
-    *   Use series from polygon moments where they converge, otherwise use exact Hermite–Genocchi formulas on triangles [S1].
-    *   Integrate the $\sec\theta$ path-length factor to second order per pixel [S1].
-    *   Shared faces cancel, ensuring cells tile exactly [S1].
-    *   **Approximation:** If `approximate_fast=True` and the perspective image differs from the scaled orthographic image by less than `perspective_tolerance` (0.1 px) at every corner, use orthographic tables [S1]. This yields r.m.s. errors around $10^{-4}$ of the peak for small cells [S1].
+4.  **Perspective Projections:**
+    *   Compute the integral of quantity $q$ along the path length $dl$ for each ray from the camera: $\int q \, dl$ [S1].
+    *   **Geometry:** Under the perspective map, each face stays planar. The depth where a ray crosses a face is $K/L(X,Y)$ with $L$ affine [S1].
+    *   **Integration:** A pixel's integral is a sum of $\int 1/L$ over convex polygons. These integrals use series from polygon moments where they converge, otherwise exact Hermite–Genocchi formulas on triangles [S1].
+    *   **Path Length:** The $\sec\theta$ path-length factor is integrated to second order per pixel [S1].
+    *   **Approximation:** If `approximate_fast=True`, cells whose perspective image differs from their scaled orthographic image by less than `perspective_tolerance` (0.1 px) at every corner use the orthographic tables [S1]. This yields r.m.s. errors around $10^{-4}$ of the peak for small cells [S1].
+    *   **Conservation:** Shared faces cancel, so cells tile exactly [S1].
 
-6.  **HEALPix Projections:**
-    *   For each pixel, clip the cube's faces to the planes through the pixel's corners to find the volume $V(\text{cell} \cap \text{cone}_p)$ [S1].
-    *   Apply corrections for slivers between HEALPix pixel sides and great circles (areas correct to $3 \times 10^{-5}$) [S1].
-    *   Output value: $q V(\text{cell} \cap \text{cone}_p) / \Omega_p$ [S1].
-    *   **Thin Shells:** If `shell_distance` is set, sample sub-pixels. Accept sub-pixels wholly inside/outside a cell; compute edge fractions using the tangent plane of the shell [S1].
-
-7.  **Perspective Slices:**
-    *   Render as orthographic slices of the plane, rescaled [S1].
+5.  **HEALPix Projections:**
+    *   Each pixel receives $q V(\text{cell} \cap \text{cone}_p) / \Omega_p$, where $\Omega_p$ is the pixel solid angle [S1].
+    *   **Exact Clipping:** Clip each cube to the pixel's cone using planes through the pixel's corners [S1].
+    *   **Correction:** Apply corrections for slivers between HEALPix pixel sides and great circles (pixel areas correct to $3 \times 10^{-5}$) [S1].
+    *   **Thin Shells:** If `shell_distance` is set, sample sub-pixels. Accept sub-pixels wholly inside or outside a cell. Compute the fraction inside at edges using the tangent plane of the shell [S1].
 
 **Pseudocode:**
 
@@ -72,102 +60,110 @@ Exact AMR Rendering treats Adaptive Mesh Refinement (AMR) gas cells as piecewise
 ```python
 def render_amr_cells(cells, image_shape, camera, approximate_fast=True, perspective_tolerance=0.1):
     """
-    Renders AMR cells as exact geometric cubes.
-    cells: List of dicts with keys: pos (x,y,z), smooth, mass, rho, value.
-    image_shape: (nx, ny).
-    camera: Object with method get_ray_origin_direction(pixel).
+    Render AMR cells as exact geometric cubes.
+    
+    Args:
+        cells: List of AMR cell objects with attributes:
+            - pos: (x, y, z) position
+            - smooth: side length of the cube
+            - mass, rho: for volume calculation
+            - q: scalar quantity to render
+        image_shape: (height, width) in pixels
+        camera: Camera object with methods for ray projection
+        approximate_fast: Boolean, allow tabulated approximations
+        perspective_tolerance: Float, threshold for perspective approximation
+        
+    Returns:
+        image: 2D numpy array of rendered values
     """
     image = np.zeros(image_shape)
     
-    # Precompute rotation if needed
-    rot_matrix = get_net_rotation_matrix()
+    # Pre-compute orientation if needed
+    # Apply net_rotation_matrix to cell positions and sizes
     
     for cell in cells:
-        # Guard: skip malformed cells
-        if not np.isfinite(cell['pos']).all() or cell['smooth'] <= 0:
+        # Skip malformed cells
+        if not np.isfinite(cell.pos).all() or not np.isfinite(cell.smooth) or cell.smooth <= 0:
             continue
             
-        # Transform cell to camera space
-        cell_pos = rot_matrix @ cell['pos']
-        cell_smooth = cell['smooth']
-        
-        # Bounding box test
-        if not intersects_bounding_box(cell_pos, cell_smooth, image_shape):
+        # Bounding box check
+        if not cell_in_bounding_box(cell, image_shape):
             continue
             
-        # Determine projection type based on camera and cell size
+        # Determine projection type based on camera
         if camera.is_perspective:
-            # Perspective projection logic
-            if approximate_fast and is_approximate_valid(cell, camera, perspective_tolerance):
-                # Use orthographic tables
-                add_orthographic_contribution(cell, image, rot_matrix)
-            else:
-                # Exact perspective integration
-                add_perspective_contribution(cell, image, camera, rot_matrix)
+            render_perspective_cell(cell, image, camera, approximate_fast, perspective_tolerance)
         else:
-            # Orthographic projection logic
-            if approximate_fast and is_rotated_small(cell, image_shape):
-                # Use tabulated corner function F(X,Y)
-                add_rotated_approximate_contribution(cell, image, rot_matrix)
-            else:
-                # Exact row-difference or separable overlap
-                add_exact_orthographic_contribution(cell, image, rot_matrix)
-                
+            render_orthographic_cell(cell, image, camera, approximate_fast)
+            
     return image
 
-def add_perspective_contribution(cell, image, camera, rot_matrix):
+def render_perspective_cell(cell, image, camera, approximate_fast, perspective_tolerance):
     """
-    Computes integral of q*dl along rays for a single cell.
-    Uses Hermite-Genocchi formulas or polygon moments.
+    Render a single AMR cell in perspective view.
     """
-    # Define the 8 corners of the cube in world space
-    corners = get_cube_corners(cell['pos'], cell['smooth'])
-    # Transform corners to camera space
-    cam_corners = [rot_matrix @ c for c in corners]
-    
-    # For each pixel, determine the polygon formed by the intersection 
-    # of the cell's projection and the pixel's cone.
-    # Integrate 1/L(X,Y) over this polygon.
-    # Integrate sec(theta) to second order.
+    # Check if approximation is valid
+    if approximate_fast and is_approximation_valid(cell, camera, perspective_tolerance):
+        # Use orthographic tables
+        render_orthographic_cell_approx(cell, image, camera)
+    else:
+        # Exact perspective integration
+        # 1. Project cell faces to image plane
+        # 2. For each pixel intersecting the projected cell:
+        #    a. Determine the convex polygon of intersection
+        #    b. Compute integral of 1/L over the polygon
+        #    c. Integrate sec(theta) to second order
+        #    d. Add to image pixel
+        exact_perspective_integral(cell, image, camera)
+
+def render_orthographic_cell_approx(cell, image, camera):
+    """
+    Render using tabulated corner function F(X,Y).
+    """
+    # F(X,Y) = vol(cell with x <= X, y <= Y)
+    # Tabulate F once per orientation
+    # Bilinearly interpolate F for cell corners
+    # Compute pixel values as differences of F across pixel corners
     pass
 
-def add_rotated_approximate_contribution(cell, image, rot_matrix):
+def exact_perspective_integral(cell, image, camera):
     """
-    Uses tabulated F(X,Y) = vol(cell with x<=X, y<=Y).
-    Integral over pixel is difference of F at corners.
+    Compute exact perspective integral using Hermite-Genocchi formulas.
     """
-    # Retrieve cached table for current orientation
-    table = get_corner_function_table(rot_matrix)
-    
-    # Interpolate F at the 4 corners of the pixel in cell-local coordinates
-    # Sum the differences to get the volume contribution
+    # For each pixel:
+    #   - Clip cell faces to pixel cone
+    #   - Sum integrals over convex polygons
+    #   - Use polygon moments series or Hermite-Genocchi on triangles
+    pass
+
+def is_approximation_valid(cell, camera, tolerance):
+    """
+    Check if perspective image differs from scaled orthographic by < tolerance.
+    """
+    # Compare corner projections
     pass
 ```
 
 ## Subtopics
 
 ### [Exact perspective projection of AMR cells](4428-exact-perspective-projection-of-amr-cells.md)
-Renders perspective images by computing the pixel average of the integral of the quantity along each ray. It avoids orthographic approximations, ensuring geometric fidelity for cells where perspective distortion is significant. Choose this when high-fidelity perspective views are required for large or distorted cells.
-
-### [Approximate perspective projection of AMR cells](4400-approximate-perspective-projection-of-amr-cells.md)
-Uses orthographic approximations for speed. Choose this when performance is critical and cells are small enough that perspective distortion is negligible (within `perspective_tolerance`).
+A method to render perspective images of Adaptive Mesh Refinement (AMR) cells exactly by computing the pixel average of the integral of the quantity along each ray from the camera. It differs from its sibling [Approximate perspective projection of AMR cells](4400-approximate-perspective-projection-of-amr-cells.md) by avoiding orthographic approximations, ensuring geometric fidelity for cells where perspective distortion is significant. It builds on [Exact AMR Rendering](4399-exact-amr-rendering.md) by treating cells as piecewise-constant cubic volumes rather than particles.
 
 ## Operating characteristics
-*   **Time Complexity:** Scales with the number of cells and, for rotated cells, the perimeter of the cell's projection [S1]. Exact row-difference methods scale with perimeter [S1].
-*   **Memory Complexity:** Requires storage for the corner function table (cached per orientation) and temporary buffers for row-difference accumulation (reduced to 12 bytes per pixel in-place) [S1].
-*   **Measured Performance:** On a Ramses test dataset (1.75M cells, 60 kpc, 500² resolution):
+*   **Time Complexity:** Scales with the number of cells and their projected perimeter/area. For orthographic projections, small rotated cells are $O(1)$ per cell (table lookup), while large cells scale with perimeter [S1]. Perspective projections are more expensive, scaling with the number of pixels covered by the cell [S1].
+*   **Memory Complexity:** Low for orthographic approximations (tabulated function cached per orientation). Exact perspective and row-difference methods require temporary buffers, peaking at 12 bytes per pixel for large rotated cells [S1].
+*   **Measured Performance:** On Ramses test data (1.75M cells, 60 kpc, 500² resolution):
     *   Slice: 0.13s (AMR) vs 0.58s (SPH) [S1].
     *   Projection: 0.45s (AMR) vs 0.30s (SPH) [S1].
     *   Perspective Projection: 4.31s (AMR) vs 5.90s (SPH) [S1].
     *   HEALPix Projection: 4.55s (AMR) vs 3.59s (SPH) [S1].
-    *   Exact mode (`approximate_fast=False`) is slower than approximate mode (e.g., 0.63s vs 0.45s for projection) [S1].
-*   **Strengths:** Mass conservation to round-off ($2 \times 10^{-8}$ error vs $5 \times 10^{-3}$ for SPH) [S1]. No bias or smoothing; reproduces exact cell values [S1].
-*   **Limitations:** Slower than SPH for projections and HEALPix maps [S1]. Exact mode for large rotated cells can be significantly slower [S1].
-*   **When to Use:** When exact geometric representation and mass conservation are required, and the scene does not contain cells hundreds of pixels across (which are slow) [S1].
-*   **When Not to Use:** When SPH smoothing is desired, or when performance is critical and approximate methods are acceptable [S1].
+    *   Exact mode (`approximate_fast=False`) is slower: 0.63s for projection, 3.72s for perspective [S1].
+*   **Strengths:** Exact mass conservation (error $2 \times 10^{-8}$ for HEALPix vs $5 \times 10^{-3}$ for SPH) [S1]. No bias or smoothing. Exact tiling of subdivided cells [S1].
+*   **Limitations:** Slower than SPH for projections and HEALPix maps [S1]. Approximations may introduce small errors ($10^{-4}$ r.m.s. for perspective) [S1].
+*   **When to Use:** When exact geometric representation is required, mass conservation is critical, or when comparing against analytical solutions. Avoid when performance is paramount and SPH smoothing is acceptable.
 
 ## Background
-Exact AMR Rendering was introduced in pynbody version 2.9.0 as part of the `pynbody.imaging` package [S1]. It was developed to address the limitations of SPH rendering for AMR data, specifically the bias and smoothing introduced by kernel interpolation [S1]. The implementation includes fixes for SPH perspective and slice bugs, such as the incorrect integration along the z-axis instead of the oblique ray [S1]. The method is implemented in Cython modules `_render_amr.pyx` and `_render_amr_healpix.pyx` [S1].
+Exact AMR Rendering was introduced in pynbody version 2.9.0 as part of a new `pynbody.imaging` package [S1]. It was developed to address the limitations of SPH rendering for AMR data, specifically the bias and smoothing introduced by kernel interpolation [S1]. The implementation includes fixes for SPH perspective rendering bugs (integration along z instead of oblique ray, incorrect slice depth placement) [S1]. The core logic is implemented in Cython modules `_render_amr.pyx` and `_render_amr_healpix.pyx` [S1].
 
 ## Sources
 [S1] Opt-in exact AMR rendering, new pynbody.imaging package, and SPH perspective fixes, https://github.com/pynbody/pynbody/pull/1048, fetched 2026-10-26

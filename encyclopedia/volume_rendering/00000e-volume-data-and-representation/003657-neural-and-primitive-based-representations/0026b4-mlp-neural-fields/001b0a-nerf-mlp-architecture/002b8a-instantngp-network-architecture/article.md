@@ -3,57 +3,51 @@
 Also called: Instant Neural Graphics Primitives Network, InstantNGP MLP, MonoSDF Network, Network Architecture and Implementation
 
 ## Overview
-This article describes the MLP configuration and feature encoding strategy used in the InstantNGP framework, as implemented in Point-NeuS [S1, unofficial] and adapted for texture storage in HybridNeRF [S2]. It replaces the parent [NeRF MLP Architecture](910-nerf-mlp-architecture.md)'s raw positional encoding with multi-resolution feature storage.
+The InstantNGP Network Architecture is a multi-layer perceptron (MLP) configuration optimized for real-time neural rendering by utilizing multi-resolution hash encoding to map spatial coordinates to feature vectors. It solves the computational bottleneck of evaluating dense neural fields by replacing large lookup tables with sparse, hash-based feature grids, enabling high-frequency detail reconstruction at interactive frame rates. It differs from standard NeRF MLPs by its reliance on hash encoding for position input and its specific lightweight MLP topology designed to process these encoded features efficiently.
 
 ## How it works
+The architecture consists of three distinct MLPs: a Base SDF Network, a Bias Network, and a Color Network. All three share the same input encoding strategy based on InstantNGP [S1, unofficial].
+
 **Inputs and Outputs:**
-The network takes 3D spatial coordinates $\mathbf{x}$ as input [S1, unofficial]. The outputs are latent features which are subsequently processed by specific head networks to produce signed distance values, density, or color [S1, unofficial].
+*   **Input:** 3D spatial coordinates $\mathbf{x} \in \mathbb{R}^3$.
+*   **Base SDF Network Output:** Signed distance value $s$.
+*   **Bias Network Output:** Bias term $b$ (added to $s$).
+*   **Color Network Output:** View-dependent color $\mathbf{c}$ and potentially other geometric features.
 
 **Data Structures:**
-Multi-resolution features are stored in hash tables [S2]. The exact hash function, grid sizes, and feature vector dimensions are not given in the sources.
+The input coordinates are encoded using InstantNGP hash encoding. This involves mapping $\mathbf{x}$ to multiple resolution levels $L$. At each level, the coordinate is hashed into a feature vector. The features from all levels are concatenated to form the final input feature vector for the MLPs [S1, unofficial].
 
 **Network Layout:**
-The architecture consists of three distinct MLPs, all sharing the same InstantNGP input encoder [S1, unofficial]:
-1. Base SDF Network: A 4-layer MLP with 256 hidden units [S1, unofficial].
-2. Bias Network: A 2-layer MLP with a similar structure [S1, unofficial].
-3. Color Network: A 2-layer MLP with 128 hidden units [S1, unofficial].
-
-**Steps for Feature Encoding:**
-InstantNGP encodes the input position information of the three networks using the same parameters as MonoSDF [S1, unofficial]. The specific encoding steps are not given in the sources.
+1.  **Base SDF Network:** A 4-layer MLP with 256 hidden units per layer [S1, unofficial].
+2.  **Bias Network:** A 2-layer MLP with a similar structure (implied 256 hidden units) [S1, unofficial].
+3.  **Color Network:** A 2-layer MLP with 128 hidden units [S1, unofficial].
 
 **Parameters:**
-* Hidden units are 256 for SDF and Bias networks, and 128 for the Color network [S1, unofficial].
-* Layer counts are 4 for SDF and 2 for Bias and Color networks [S1, unofficial].
-* The input point cloud is downsampled to 2 million points to demonstrate robustness to sparse data [S1, unofficial].
-* Preprocessing generates depth maps and point clouds using TransMVSNet, taking approximately 1 second per image [S1, unofficial].
+*   The InstantNGP encoding parameters (number of levels, hash table size, etc.) are identical to those used in MonoSDF [S1, unofficial].
+*   Point cloud data used for initialization or guidance is downsampled to 2 million points to demonstrate robustness to sparse data [S1, unofficial].
 
-**Edge Cases and Pitfalls:**
-Not given in the sources.
+**Pitfalls:**
+*   The architecture relies on the quality of the initial point cloud. Preprocessing via TransMVSNet generates depth maps and point clouds, taking approximately one second per image [S1, unofficial].
+*   While the point cloud may contain tens of millions of points, downsampling is critical for the specific experimental setup described [S1, unofficial].
 
 ## Subtopics
 
 ### iNGP Texture Storage
-A variant used in HybridNeRF [S2]. Instead of hash tables, it stores multi-resolution features as textures at render time to take advantage of memory locality and texture interpolation hardware [S2]. It stores presummed features $g'$ at resolution level $L$, where $g'(v) = \sum_{l=0}^{L} g(v, l)$ for each texel in $L$ [S2]. This allows fetching anti-aliased features by interpolating between two levels implied by pixel area $p(x)$ [S2]. The number of texture fetches per MLP evaluation is reduced to 8, from 24 (3+3×7) in the original approach, a 3× reduction [S2].
+This variant replaces the hash table storage of features with texture storage to leverage memory locality and hardware interpolation. Features are stored as presummed features $g'$ at resolution level $L$, where $g'(v) = \sum_{l=0}^{L} g(v, l)$ for each texel in $L$ [S2]. This allows fetching anti-aliased features by interpolating between two levels implied by the pixel area $p(x)$ [S2]. The number of texture fetches per MLP evaluation is reduced to 8, from 24 (calculated as $3 + 3 \times 7$ for three 3D grids and seven triplane levels) in the original hash-based approach, representing a 3× reduction [S2].
+
+### Tiny MLP for Density and Color Estimation
+A small MLP variant used in Rip-NeRF that nonlinearly maps the Ripmap-Encoding feature vector $\mathbf{f}$ and view direction $\mathbf{d}$ to density $\tau$ and color $\mathbf{c}$ [S3]. The feature vector $\mathbf{f}$ has a dimension of 160, derived from Ripmaps of shape $512 \times 512 \times 16$ and 10 unparalleled icosahedron faces [S3]. The first two MLP layers process $\mathbf{f}$ to yield density $\tau$ and a 15-dimensional geometric feature $\mathbf{f}_{geo}$ [S3]. The view direction $\mathbf{d}$, encoded via spherical harmonics, is combined with $\mathbf{f}_{geo}$ in the final three layers to estimate view-dependent color $\mathbf{c}$ [S3]. The MLP width is 128, using ReLU activations, except for the output layer of $\tau$, which uses a truncated exponential function [S3]. It is implemented with tiny-cuda-nn for fused and half-precision operations [S3].
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-Not given in the sources.
-
-**Measured Performance:**
-The implementation demonstrates robustness with downsampled point clouds of 2 million points [S1, unofficial]. The texture storage variant reduces texture fetches by 3× [S2].
-
-**Strengths and Limitations:**
-Not given in the sources.
-
-**When to Use:**
-Not given in the sources.
-
-**When Not to Use:**
-Not given in the sources.
+*   **Performance:** The architecture enables real-time rendering. The texture storage variant reduces texture fetches by 3× compared to the original hash-based approach [S2].
+*   **Memory:** Hash tables are replaced by textures in the texture storage variant, improving memory locality [S2].
+*   **Scalability:** The method is robust to sparse data, demonstrated by downsampling point clouds to 2 million points [S1, unofficial].
+*   **Limitations:** The specific MLP dimensions (256/128 units) and layer counts are fixed for the described implementation [S1, unofficial]. The texture storage variant assumes explicit 3D grids and triplanes [S2].
 
 ## Background
-The architecture is utilized in Point-NeuS for surface reconstruction [S1, unofficial] and adapted in HybridNeRF for hybrid rendering [S2]. The MonoSDF variant uses a 4-layer 256-unit SDF network, a 2-layer 256-unit bias network, and a 2-layer 128-unit color network, all using InstantNGP encoding [S1, unofficial].
+The architecture is based on NeuS with light MLPs [S1, unofficial]. It utilizes the popular InstantNGP encoding technique [S1, unofficial]. The parameters for the encoding are taken from MonoSDF [S1, unofficial]. The method is used in Point-NeuS for point-guided neural implicit surface reconstruction [S1, unofficial].
 
 ## Sources
 [S1] Point-NeuS: Point-Guided Neural Implicit Surface Reconstruction by Volume Rendering, https://doi.org/10.48550/arXiv.2310.07997, fetched 2026-10-30 (unofficial)
 [S2] HybridNeRF: Efficient Neural Rendering via Adaptive Volumetric Surfaces, https://doi.org/10.1109/cvpr52733.2024.01858, fetched 2026-10-26
+[S3] Rip-NeRF: Anti-aliasing Radiance Fields with Ripmap-Encoded Platonic Solids, https://arxiv.org/abs/2405.02386v1, fetched 2026-10-26

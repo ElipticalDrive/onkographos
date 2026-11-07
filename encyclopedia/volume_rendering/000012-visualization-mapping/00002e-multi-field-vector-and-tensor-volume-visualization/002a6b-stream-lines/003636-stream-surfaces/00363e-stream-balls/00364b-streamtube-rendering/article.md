@@ -1,0 +1,188 @@
+# Streamtube Rendering
+
+Also called: CUDA Streamtube Visualization, Stream tubes
+
+## Overview
+Streamtube Rendering visualizes 3D vector fields by integrating trajectories from seed points and generating tube geometry around the path, colored by vector magnitude [S1, unofficial]. It builds on [Stream-Balls](7700-stream-balls.md) by replacing the scalar potential field extraction with explicit geometric tube primitives, offering direct visual control over the tube radius and cross-sectional shape [S1, unofficial]. Unlike stream surfaces which connect multiple streamlines, streamtubes isolate individual flow paths, making them suitable for analyzing specific trajectories without occlusion from neighboring flows [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A 3D vector field stored as a 3D texture (enabling hardware-accelerated trilinear interpolation) [S1, unofficial]. A set of seed points (`seeds`).
+- **Output:** A vertex buffer containing pentagonal cross-sections and an index buffer defining the triangular faces connecting them [S1, unofficial].
+
+**Data Structures:**
+- **Vector Field:** 3D texture (format not specified, assumed `float3` or similar for CUDA texture objects) [S1, unofficial].
+- **Seeds:** Array of 3D positions (`float3`) [S1, unofficial].
+- **Output Buffer:** Linear array of vertices. Each pentagonal cross-section consists of 5 vertices. The stride between cross-sections is `maxSteps / geometrySampling + 1` sections [S1, unofficial].
+- **Index Buffer:** Linear array of indices. Each segment between two cross-sections generates 10 indices (2 triangles per side of the pentagon, plus caps if needed, though the source specifies 10 indices for connecting 5 previous to 5 current vertices) [S1, unofficial].
+
+**Parameters:**
+- `radius`: The radius of the streamtube cross-section [S1, unofficial].
+- `maxSteps`: Maximum number of integration steps per streamline [S1, unofficial].
+- `geometrySampling`: Frequency of geometry generation (e.g., generate a cross-section every N integration steps) [S1, unofficial].
+- `seedsCount`: Number of seed points [S1, unofficial].
+
+**Steps:**
+1. **Initialization:** For each thread `id`:
+   - If `id >= seedsCount`, terminate.
+   - Calculate `outputPos = id * (maxSteps / geometrySampling + 1) * 5` [S1, unofficial].
+   - Initialize `position` from `seeds[id]` [S1, unofficial].
+   - Lookup vector `v` and color `c` at `position` using trilinear interpolation [S1, unofficial].
+   - Call `createTubeBaseVertices(position, v, radius, outputPos)` to generate 5 vertices for the first pentagonal cross-section [S1, unofficial].
+   - Increment `outputPos` by 5 [S1, unofficial].
+   - Initialize `geometryStep = geometrySampling` [S1, unofficial].
+
+2. **Integration Loop:** Iterate `step` from 1 to `maxSteps`:
+   - Check boundary conditions. If `position` is out of bounds, terminate the streamline [S1, unofficial].
+   - Integrate `position` using Euler or RK4 method with the current vector `v` [S1, unofficial].
+   - Update `position` [S1, unofficial].
+   - Decrement `geometryStep`.
+   - If `geometryStep == 0`:
+     - Reset `geometryStep = geometrySampling` [S1, unofficial].
+     - Lookup vector `v` and color `c` at new `position` [S1, unofficial].
+     - Call `createTubeBaseVertices(position, v, radius, outputPos)` to generate 5 vertices for the current cross-section [S1, unofficial].
+     - Call `createTubeIndices(previousStartIndex, outputPos)` to generate 10 triangle indices connecting the previous 5 vertices to the current 5 vertices [S1, unofficial].
+     - Increment `outputPos` by 5 [S1, unofficial].
+
+**Formulas:**
+- **Tube Base Vertices:** Given position $P$, vector $V$, and radius $r$.
+  - Calculate perpendicular vector $U = \text{findPerpendicular}(V)$ [S1, unofficial].
+  - Calculate binormal vector $W = V \times U$ (normalized) [G].
+  - Vertices $V_i$ for $i=0..4$:
+    $$ V_i = P + r \cdot (\cos(\theta_i) U + \sin(\theta_i) W) $$
+    where $\theta_i = \frac{2\pi i}{5}$ [G].
+- **Find Perpendicular:**
+  $$ \text{findPerpendicular}(V) = (-V.y, V.x, 0.0f) $$
+  [S1, unofficial]. Note: This assumes $V$ is not parallel to the Z-axis in a degenerate way [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def streamtube_render(seeds, vector_field_texture, radius, max_steps, geometry_sampling):
+    seeds_count = len(seeds)
+    # Output buffers
+    vertices = []
+    indices = []
+    
+    # Helper: Find perpendicular vector
+    def find_perpendicular(v):
+        # Assumes v is not parallel to Z-axis in a degenerate way
+        return (-v.y, v.x, 0.0)
+    
+    # Helper: Create tube base vertices
+    def create_tube_base_vertices(position, vector, radius, output_pos):
+        # Normalize vector for direction
+        v_norm = normalize(vector)
+        # Get perpendicular basis
+        u = find_perpendicular(v_norm)
+        u = normalize(u)
+        # Get binormal
+        w = cross(v_norm, u)
+        w = normalize(w)
+        
+        section_vertices = []
+        for i in range(5):
+            theta = 2.0 * 3.14159265 * i / 5.0
+            # Vertex calculation
+            vx = position.x + radius * (cos(theta) * u.x + sin(theta) * w.x)
+            vy = position.y + radius * (cos(theta) * u.y + sin(theta) * w.y)
+            vz = position.z + radius * (cos(theta) * u.z + sin(theta) * w.z)
+            section_vertices.append((vx, vy, vz))
+        
+        # Store vertices at output_pos offset
+        # In a real implementation, this would append to a global buffer
+        # Here we return for clarity
+        return section_vertices, output_pos + 5
+
+    # Helper: Create tube indices
+    def create_tube_indices(prev_start, curr_start):
+        # Connect 5 previous vertices to 5 current vertices
+        # 10 indices for 2 triangles per side of pentagon
+        # Side i connects prev[i], prev[i+1], curr[i], curr[i+1]
+        # Triangles: (prev[i], curr[i], prev[i+1]) and (prev[i+1], curr[i], curr[i+1])
+        # Indices are relative to start positions
+        idx = []
+        for i in range(5):
+            p_curr = prev_start + i
+            p_next = prev_start + (i + 1) % 5
+            c_curr = curr_start + i
+            c_next = curr_start + (i + 1) % 5
+            idx.append(p_curr)
+            idx.append(c_curr)
+            idx.append(p_next)
+            idx.append(p_next)
+            idx.append(c_curr)
+            idx.append(c_next)
+        return idx
+
+    # Main loop
+    for id in range(seeds_count):
+        position = seeds[id]
+        output_pos = id * (max_steps // geometry_sampling + 1) * 5
+        geometry_step = geometry_sampling
+        
+        # Initial lookup
+        vector = trilinear_sample(vector_field_texture, position)
+        color = map_vector_magnitude_to_color(vector)
+        
+        # Create first cross-section
+        section_verts, output_pos = create_tube_base_vertices(position, vector, radius, output_pos)
+        vertices.extend(section_verts)
+        
+        # Integration loop
+        for step in range(1, max_steps + 1):
+            # Boundary check
+            if not is_inside_volume(position):
+                break
+            
+            # Integrate
+            vector = trilinear_sample(vector_field_texture, position)
+            # Euler integration
+            position = position + vector
+            
+            geometry_step -= 1
+            if geometry_step == 0:
+                geometry_step = geometry_sampling
+                
+                # Lookup new vector and color
+                vector = trilinear_sample(vector_field_texture, position)
+                color = map_vector_magnitude_to_color(vector)
+                
+                # Create new cross-section
+                prev_start = output_pos - 5
+                section_verts, output_pos = create_tube_base_vertices(position, vector, radius, output_pos)
+                vertices.extend(section_verts)
+                
+                # Create indices connecting previous and current
+                idx = create_tube_indices(prev_start, prev_start + 5)
+                indices.extend(idx)
+    
+    return vertices, indices
+```
+
+## Subtopics
+
+### Streamlines
+A simpler technique that only draws lines along the trajectory, without tube geometry. Choose when performance is critical and occlusion is not a concern. [Streamlines](7700-streamlines.md)
+
+### Stream Surfaces
+Connects multiple streamlines to form a surface. Choose when visualizing flow bands or vortices. [Stream Surfaces](7700-stream-surfaces.md)
+
+### Stream-Balls
+Uses blobby functions to create a scalar field from particles, then extracts iso-contours. Choose for smooth, organic-looking flow visualization. [Stream-Balls](7700-stream-balls.md)
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot M)$ where $N$ is the number of seeds and $M$ is the number of integration steps [S1, unofficial].
+- **Memory Complexity:** $O(N \cdot \frac{M}{\text{geometrySampling}} \cdot 5)$ for vertices and $O(N \cdot \frac{M}{\text{geometrySampling}} \cdot 10)$ for indices [S1, unofficial].
+- **Performance:** Real-time visualization is achievable on CUDA-enabled GPUs due to hardware-accelerated texture lookups and parallel thread execution per seed [S1, unofficial].
+- **Strengths:** Direct geometric representation, easy to color by magnitude, real-time capable [S1, unofficial].
+- **Limitations:** Pentagonal cross-sections may appear faceted if radius is large or sampling is low. Perpendicular vector calculation is not robust for all vector orientations [S1, unofficial].
+- **When to use:** When individual flow paths need to be highlighted with a consistent radius.
+- **When not to use:** When flow bands or surfaces are more appropriate, or when robustness to vector orientation is critical.
+
+## Background
+Streamtube Rendering was implemented as part of a CUDA-based 3D vector field visualization project by Marek Fiser [S1, unofficial]. The project demonstrates real-time visualization using RK4 integration and 3D texture lookups [S1, unofficial]. It is part of a suite of techniques including glyphs, stream lines, and stream surfaces [S1, unofficial].
+
+## Sources
+[S1] NightElfik/Vector-field-visualization-using-cuda NightElfik/Vector-field-visualization-using-cuda on GitHub, https://github.com/NightElfik/Vector-field-visualization-using-cuda, fetched 2026-10-29 (unofficial)

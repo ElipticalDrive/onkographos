@@ -1,0 +1,111 @@
+# Volumetric Soft Shadowing
+
+Also called: Soft Shadows (Volumetric), Volumetric Shadowing
+
+## Overview
+Volumetric Soft Shadowing estimates soft shadows in participating media by sampling along random directions towards the light source, weighting samples by local density and distance [S1, unofficial]. It differs from hard shadow techniques (like [Shadow Ray Casting](2796-shadow-ray-casting.md)) by accumulating stochastic samples to approximate the penumbra, and from [Two-Pass Shadow Casting](2196-two-pass-shadow-casting-kajiya-and-von-herzen.md) by operating directly on the volume data without requiring a separate geometry pass or light volume generation [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Volume density field $V(\mathbf{x})$.
+- Light direction $\mathbf{l}$ and radius $R$ (or angular spread).
+- Current sample position $\mathbf{p}$ within the volume.
+- Number of shadow samples $N$ (parameter `uNumShadowSamples`).
+
+**Outputs:**
+- Soft shadow contribution factor $S \in [0, 1]$.
+
+**Data Structures:**
+- Accumulator: A scalar or vector value initialized to zero to store the weighted sum of shadow samples.
+
+**Parameters:**
+- `uNumShadowSamples` ($N$): Number of shadow samples per pixel. Default: 10 [S1, unofficial].
+- `uShadowsWeight`: Weight applied when mixing into final color (used in post-processing step). Default: 0.54 [S1, unofficial].
+- `uLightRadious` ($R$): Radius or spread of the light source influence [S1, unofficial].
+
+**Algorithm:**
+1.  **Initialize Accumulator:** Set `accumulatedShadowContribution` to 0.0.
+2.  **Sample Loop:** Repeat $N$ times:
+    a.  **Generate Random Direction:** Create a random direction vector $\mathbf{d}$ biased towards the light. The source code suggests a specific construction involving random values and light parameters:
+        $$ \mathbf{d} = \text{normalize}\left( \begin{bmatrix} -1.0 + v_{light}.x \cdot r_1 \\ v_{light}.y + r_2 \cdot v_{light}.z \\ -1.0 + 2.0 \cdot r_3 \end{bmatrix} \right) \cdot r_4 $$
+        Where $r_1, r_2, r_3, r_4$ are random numbers (e.g., from a PRNG seeded by position or sample index) [S1, unofficial]. Note: The exact vector construction in the source is syntactically specific to a GLSL-like environment; the general intent is sampling a cone or hemisphere around the light direction.
+    b.  **Sample Volume:** Evaluate the volume density at $\mathbf{p}' = \mathbf{p} + \mathbf{d} \cdot R$. Let this density be $D = V(\mathbf{p}')$ [S1, unofficial].
+    c.  **Weight Sample:** Calculate the shadow sample weight. The source applies a factor of 0.2 to the density and multiplies by the length of the direction vector (normalized, so length is 1, but the source code includes `pow(length(randomDirection), 1.0)` which is 1.0 for normalized vectors, or potentially implies unnormalized steps) [S1, unofficial]:
+        $$ w = D \cdot 0.2 \cdot \|\mathbf{d}\| $$
+    d.  **Accumulate:** Add $w$ to `accumulatedShadowContribution`.
+3.  **Normalize and Scale:**
+    a.  Divide the accumulator by $N$.
+    b.  Multiply by a scaling factor (source uses 20.0) [S1, unofficial].
+    c.  Clamp the result to $[0, 1]$.
+4.  **Final Contribution:** Mix the normalized accumulator with the inverse of the current shadow state (or a base value) using a mixing factor (source uses 1.2) and normalize again by dividing by 1.3, clamping to $[0, 1]$ [S1, unofficial]:
+    $$ S = \text{clamp}\left( \frac{\text{mix}(1.0 - S_{current}, S_{accumulated}, 1.2)}{1.3}, 0.0, 1.0 \right) $$
+    *Note: The source code `mix(1.0 - uSoftShadowsContribution, accumulatedShadowContribution, 1.2)` suggests a specific blending logic where higher accumulation reduces shadow (increases light), but the exact semantic meaning of `1.0 - uSoftShadowsContribution` depends on whether `uSoftShadowsContribution` represents shadow darkness or light transmission. Given the context of "shadow contribution," it likely represents occlusion.*
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_volumetric_soft_shadow(p, volume, light_dir, light_radius, num_samples=10):
+    """
+    Computes soft shadow contribution at point p in volume.
+    Based on [S1, unofficial].
+    """
+    accumulator = 0.0
+    
+    for i in range(num_samples):
+        # Generate random direction biased towards light
+        # Note: Exact random generation logic from source is GLSL-specific.
+        # General approach: sample a direction within a cone around light_dir.
+        r1 = random_float()
+        r2 = random_float()
+        r3 = random_float()
+        r4 = random_float()
+        
+        # Simplified random direction generation (conceptual)
+        # Source: normalize(vec3(-1.0 + vLight.x * rand(...), vLight.y + rand(...) * vLight.z, -1.0 + 2.0 * rand(seed).x)) * rand(...)
+        # We approximate this as a random direction in a hemisphere/cone around light_dir
+        random_dir = generate_random_direction_biased(light_dir, r1, r2, r3, r4)
+        
+        # Sample volume at offset position
+        sample_pos = p + random_dir * light_radius
+        density = volume.sample(sample_pos)
+        
+        # Weight calculation
+        # Source: sample * 0.2 * pow(length(randomDirection), 1.0)
+        # Assuming random_dir is normalized, length is 1.0
+        weight = density * 0.2 * length(random_dir)
+        
+        accumulator += weight
+        
+    # Normalize
+    accumulator /= num_samples
+    
+    # Scale and clamp
+    accumulator = clamp(accumulator * 20.0, 0.0, 1.0)
+    
+    # Final mix and normalize
+    # Source: mix(1.0 - uSoftShadowsContribution, accumulatedShadowContribution, 1.2)
+    # Assuming uSoftShadowsContribution is the previous shadow value (0=full light, 1=full shadow)
+    # This step is complex and specific to the source's state management.
+    # For a standalone function, we return the raw accumulated shadow factor.
+    
+    return accumulator
+```
+
+## Subtopics
+
+### [Improved Global Illumination for Volume Rendering](8468-improved-global-illumination-for-volume-rendering.md)
+A global illumination technique that modifies the base method to generate soft shadows instead of hard shadows, preserving local details by operating in volume space using a light volume generated slice-by-slice.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ per sample, where $N$ is the number of shadow samples. Linear scaling with sample count.
+- **Memory Complexity:** $O(1)$ auxiliary memory per pixel (accumulator). Requires access to the volume texture.
+- **Performance:** Dependent on $N$. Default $N=10$ provides a balance between noise and performance [S1, unofficial].
+- **Strengths:** Simple to implement; provides soft shadows without complex precomputation; works directly with volume data.
+- **Limitations:** Stochastic noise at low sample counts; direction sampling strategy in the source is non-standard and may not generalize well to all light types; lacks rigorous physical basis compared to path tracing.
+
+## Background
+The method originates from the `terier/vpt` project, an unofficial implementation of volumetric rendering techniques [S1, unofficial]. It represents a practical, shader-based approach to soft shadows in real-time or interactive volume rendering, prioritizing simplicity and direct volume sampling over physically accurate light transport simulation.
+
+## Sources
+[S1] terier/vpt, https://github.com/terier/vpt, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,128 @@
+# Silhouette Rendering
+
+Also called: Object-space line rendering, Silhouette Rendering Pipeline, Stroke Pipeline
+
+## Overview
+Silhouette rendering is an object-space line rendering technique that extracts significant edges (silhouettes and feature lines) from geometry, assembles them into strokes, and applies hidden line removal and stylization to enhance the perception of form and context [S2]. It is primarily used in medical visualization to indicate context objects (e.g., bones) or to discriminate object classes based on specific features, such as lymph nodes touching critical structures [S1, book]. Unlike pixel-based contour methods, this approach is resolution-independent and vector-oriented, allowing for explicit analytical representation and transformation without aliasing [S1, book]. It builds on the principles of [Outline and Contour Generation](4137-outline-and-contour-generation.md).
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Segmented mesh geometry data with adjacency information; a set of criteria defining "interesting" or significant features (e.g., proximity to critical structures) [S1, book][S2].
+*   **Output:** A final image containing stylized strokes (silhouettes and feature lines) overlaid on surface or volume rendered objects [S2].
+
+**Data Structures:**
+*   **Geometry Structure:** A structure providing adjacency information for the mesh to facilitate edge extraction [S2].
+*   **Stroke Data:** Extracted edges assembled into strokes, retaining properties for width, saturation, color, and texture [S2].
+*   **Z-Buffer:** A depth buffer generated from the surface rendering pass, used for hidden line removal [S2].
+
+**Steps:**
+1.  **Geometry Data Preparation:** Create a geometry structure that provides adjacency information for the mesh [S2].
+2.  **Line Extraction:** Extract significant edges from the mesh. These include silhouettes (discontinuities in the z-buffer of surface objects) and feature lines [S2].
+3.  **Stroke Generation:** Assemble the extracted edges into strokes [S2].
+4.  **Hidden Line Removal (HLR):**
+    *   Render the surface objects into the z-buffer. The frame buffer remains unchanged during this step [S2].
+    *   For each stroke:
+        *   Scan-convert the line individually [S2].
+        *   Classify each segment of the line as hidden or visible by locally comparing the line's z-depths against the pre-generated z-buffer data [S2].
+5.  **Stroke Stylization:** Apply stylization to the visible strokes. This includes changing the stroke’s width, saturation, color, and texture [S2]. Additional stylization methods such as cut-away views or lighted regions may also be applied [S2].
+6.  **Final Composition:** Render the surface objects into the final image prior to the lines. Then, render the stylized strokes [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def silhouette_rendering(mesh, feature_criteria, z_buffer):
+    # Step 1: Geometry Data Preparation
+    # Create adjacency structure for the mesh
+    adjacency = build_adjacency_structure(mesh)
+
+    # Step 2: Line Extraction
+    # Extract significant edges (silhouettes and feature lines)
+    edges = extract_significant_edges(mesh, adjacency, feature_criteria)
+
+    # Step 3: Stroke Generation
+    # Assemble extracted edges into strokes
+    strokes = assemble_strokes(edges)
+
+    # Step 4: Hidden Line Removal (HLR)
+    # Render objects to z-buffer (frame buffer unchanged)
+    # Note: z_buffer is assumed to be pre-generated or passed in
+    visible_strokes = []
+    for stroke in strokes:
+        is_visible = True
+        for segment in stroke.segments:
+            # Scan-convert line segment
+            line_z_depths = get_line_z_depths(segment)
+            
+            # Compare line z-depths with z-buffer z-depths
+            # Locally compare z-depths to classify as hidden or visible
+            hidden = False
+            for i, point in enumerate(segment.points):
+                buffer_z = z_buffer.get_depth(point.x, point.y)
+                if line_z_depths[i] > buffer_z:
+                    hidden = True
+                    break
+            
+            if hidden:
+                is_visible = False
+                break
+        
+        if is_visible:
+            visible_strokes.append(stroke)
+
+    # Step 5: Stroke Stylization
+    stylized_strokes = []
+    for stroke in visible_strokes:
+        # Apply stylization: width, saturation, color, texture
+        stylized = apply_stylization(stroke, width=stroke.width, 
+                                     saturation=stroke.saturation, 
+                                     color=stroke.color, 
+                                     texture=stroke.texture)
+        stylized_strokes.append(stylized)
+
+    # Step 6: Final Composition
+    # Render surface objects into final image
+    final_image = render_surface_objects(mesh)
+    
+    # Render stylized strokes on top
+    for stroke in stylized_strokes:
+        draw_stroke(final_image, stroke)
+
+    return final_image
+```
+
+**Parameters and Typical Values:**
+*   **Stroke Width:** Not given in the sources.
+*   **Color/Saturation/Texture:** Not given in the sources.
+*   **Feature Criteria:** Defined by application context (e.g., lymph nodes touching critical structures) [S1, book].
+
+**Edge Cases and Pitfalls:**
+*   **Silhouette Location:** Silhouettes are located exactly at discontinuities of the z-buffer of the surface objects [S2].
+*   **Order of Rendering:** Surface objects must be rendered into the final image prior to the lines to ensure correct occlusion [S2].
+
+## Subtopics
+
+### Object Contour NPR
+Focuses on non-photorealistic rendering of object contours, often using different stylization techniques. [Object Contour NPR](787-object-contour-npr.md)
+
+### Lasso Contour Rendering
+Uses lasso-like strokes to highlight specific regions or features. [Lasso Contour Rendering](1855-lasso-contour-rendering.md)
+
+### Curvature-Controlled Style Contours
+Adjusts contour style based on surface curvature. [Curvature-Controlled Style Contours](5350-curvature-controlled-style-contours.md)
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** The method is described as fast and simple for hidden line removal [S2]. The edge extraction and stroke generation are independent from the final stroke rendering, allowing for efficient pipeline processing [S2].
+*   **Strengths:** Resolution-independent, vector-oriented, allows for explicit analytical representation, fast HLR implementation [S1, book][S2].
+*   **Limitations:** Requires explicit analytical representations (meshes) and segmentation [S1, book][S2].
+*   **When to Use:** When explicit analytical data is available and performance is a constraint, particularly in medical visualization for highlighting specific features [S1, book][S2].
+*   **When Not to Use:** When only volume data without explicit mesh segmentation is available, or when pixel-based methods are preferred for simplicity [S1, book].
+
+## Background
+Silhouette rendering was developed as part of a combined silhouette, surface, and volume rendering approach for surgery education and planning [S2]. It is used in medical visualization to help users explore complex anatomical structures, such as identifying lymph nodes that touch critical structures in neck surgery planning [S1, book]. The method was presented by Tietjen et al. in 2005 [S2].
+
+## Sources
+[S1] Illustrative Focus+Context Approaches in Interactive Volume Visualization, https://doi.org/10.4230/dfu.sciviz.2010.136, fetched 2026-10-26 (book)
+[S2] Combining Silhouettes, Surface, and Volume Rendering for Surgery Education and Planning, https://doi.org/10.2312/vissym/eurovis05/303-310, fetched 2026-10-26

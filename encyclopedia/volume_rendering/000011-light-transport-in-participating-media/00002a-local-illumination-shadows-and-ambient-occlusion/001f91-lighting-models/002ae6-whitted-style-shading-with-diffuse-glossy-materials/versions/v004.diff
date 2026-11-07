@@ -1,0 +1,299 @@
+--- v003.md
++++ v004.md
+@@ -4,151 +4,173 @@
+ 
+ ## Overview
+-Whitted-style shading with diffuse/glossy materials computes the color of a ray intersection by combining ambient lighting with direct illumination from light sources, using a simplified reflectance model for surfaces [S2, unofficial]. It differs from full path tracing by limiting recursion to a single bounce (or fixed depth) and using analytical approximations for specular/glossy reflections rather than stochastic sampling, and it differs from pure local illumination models by explicitly casting shadow rays to determine visibility [S2, unofficial].
++Whitted-style shading with diffuse/glossy materials evaluates local illumination at a surface or volume boundary point by combining ambient lighting with direct light contributions, using shadow rays to determine visibility [S2, S3, unofficial]. It differs from full path tracing by limiting recursion to direct lighting and simple reflections, and from pure volume scattering by treating the interaction as a local surface-like reflection model [S1, S2, unofficial]. This method is chosen when real-time performance is required for scenes with opaque or semi-transparent surfaces where approximate shadows and basic specular highlights are sufficient [S2, S3, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- Input: A ray $\vec{r}$ (origin $\vec{o}$, direction $\vec{d}$), a scene containing a list of objects (`objList`) and light sources (`LightSourceList`), and material properties for each object [S2, unofficial].
+-- Output: A color value (RGB) representing the radiance at the intersection point [S2, unofficial].
++**Inputs:**
++*   Ray origin $\mathbf{o}$ and direction $\mathbf{d}$.
++*   Scene geometry or volume data structure supporting intersection tests.
++*   Material properties: albedo $\mathbf{k}_d$ (diffuse color), shininess $\alpha$ (glossy exponent), specular coefficient $\mathbf{k}_s$ (optional, for glossy).
++*   Light sources: position $\mathbf{l}_{pos}$, emission intensity $I_{light}$, and type (point/directional).
++*   Camera/View direction $\mathbf{v}$ (for glossy reflection calculation).
++
++**Outputs:**
++*   Radiance color $\mathbf{C}_{out}$ at the intersection point.
+ 
+ **Data Structures:**
+-- `Ray`: Contains origin $\vec{o}$, direction $\vec{d}$, minimum distance `minT`, maximum distance `maxT`, and recursion `depth` [S2, unofficial].
+-- `Shape`: Represents an object in the scene, providing intersection methods and material properties [S2, unofficial].
+-- `Material`: Contains diffuse coefficient, emissive status, and methods to compute reflectance [S2, unofficial].
+-- `LightSource`: Represents a light emitter in the scene [S2, unofficial].
++*   `HitRecord`: Contains intersection point $\mathbf{p}$, surface normal $\mathbf{n}$, material reference, and distance $t$.
++*   `Ray`: Origin $\mathbf{o}$, direction $\mathbf{d}$, min/max $t$ bounds.
+ 
+ **Steps:**
+-1. **Intersection:** Find the closest intersection between the input ray and any object in `objList` [S2, unofficial].
+-2. **Emissive Check:** If the intersected object's material is emissive, return its emissive radiance [S2, unofficial].
+-3. **Ambient Contribution:** Initialize the color to zero [S2, unofficial]. Add an ambient term calculated as `ambient_constant * diffuse_coefficient` [S2, unofficial].
+-4. **Direct Illumination:** For each light source in `LightSourceList`:
+-    a. Calculate the vector from the intersection point to the light source [S3, unofficial].
+-    b. Compute the reflectance using the material's `getReflectance` method, passing the surface normal, view direction, and light direction [S2, unofficial].
+-    c. Cast a shadow ray from the intersection point to the light source [S2, unofficial]. Set the shadow ray's `maxT` to the distance to the light source [S2, unofficial].
+-    d. If the shadow ray does not intersect any object (i.e., the light is visible), add the reflected radiance to the total color [S2, unofficial].
+-5. **Glossy Reflection (Optional):** If the material has a glossy component, compute the reflection direction $\vec{R}$ based on the surface normal and view direction [S1, unofficial]. Distribute outgoing rays around $\vec{R}$ using a shininess exponent $\alpha$ to model rough surface reflections [S1, unofficial].
+ 
+-**Formulas:**
+-- **Lambertian Diffuse Reflection:** The reflected radiance $L_r(\vec{\omega}_r)$ is given by:
+-  $$L_r(\vec{\omega}_r) = \frac{\rho}{\pi} \int_{\Omega_i} L_i(\vec{\omega}_i) \cos \theta_i d\omega_i$$
+-  where $\rho$ is the material reflectance fraction, $L_i(\vec{\omega}_i)$ is the incident radiance, $\theta_i$ is the angle between the incident direction and the surface normal, and the integral is over the hemisphere $\Omega_i$ [S1, unofficial]. The BRDF $f_r$ is constant and related to $\rho$ by $\rho = \pi f_r$ [S1, unofficial].
+-- **Glossy Reflection:** The contribution is approximated by:
+-  $$L_r(\vec{\omega}_r) = L_r d\omega_r(\max(\vec{R} \cdot \vec{\omega}_r), 0)^\alpha$$
+-  where $\vec{R}$ is the perfect mirror reflection vector, $\vec{\omega}_r$ is the view direction, and $\alpha$ is the shininess exponent [S1, unofficial].
++1.  **Intersection Test:** Trace the primary ray against the scene. Find the closest intersection $\mathbf{p}$ and normal $\mathbf{n}$. If no intersection is found, return the background color [S2, S3, unofficial].
++    *   *Note:* If the scene is a volume, the "surface" is often defined by an isosurface or the first density threshold hit. Normals are derived from the volume gradient $\nabla V$ [G].
++
++2.  **Coordinate Transformation:** Transform the hit point $\mathbf{p}$ and normal $\mathbf{n}$ to world space if they are stored in object space [S3, unofficial].
++    $$ \mathbf{p}_{world} = M_{obj} \cdot \mathbf{p}_{obj} $$
++    $$ \mathbf{n}_{world} = \text{normalize}(M_{obj}^{-T} \cdot \mathbf{n}_{obj}) $$
++    where $M_{obj}$ is the model matrix [S3, unofficial].
++
++3.  **Ambient Contribution:** Calculate the ambient term. This is a constant approximation of indirect light [S2, S3, unofficial].
++    $$ \mathbf{C}_{ambient} = \mathbf{k}_d \cdot C_{ambient\_const} $$
++    Typical value for $C_{ambient\_const}$ is $0.003$ to $0.25$ depending on implementation [S2, S3, unofficial].
++
++4.  **Direct Lighting Loop:** For each light source in the scene:
++    a.  **Light Vector:** Compute the direction to the light $\mathbf{l}$ and the inverse squared distance $1/r^2$ [S3, unofficial].
++        $$ \mathbf{L}_{vec} = \mathbf{l}_{pos} - \mathbf{p}_{world} $$
++        $$ r = \|\mathbf{L}_{vec}\| $$
++        $$ \mathbf{l} = \mathbf{L}_{vec} / r $$
++        $$ inv\_dd = 1.0 / r^2 $$
++    b.  **Shadow Ray:** Cast a shadow ray from $\mathbf{p}_{world}$ towards $\mathbf{l}$ to check for occlusion. To prevent self-intersection (shadow acne), offset the origin slightly along the normal [S3, unofficial].
++        $$ \mathbf{o}_{shadow} = \mathbf{p}_{world} + \epsilon \cdot \mathbf{n}_{world}, \quad \epsilon \approx 10^{-4} $$
++        $$ \mathbf{d}_{shadow} = \mathbf{l} $$
++        If the shadow ray hits any geometry before reaching the light, the point is in shadow ($\mathbf{C}_{diffuse} = \mathbf{0}$). Otherwise, calculate the diffuse contribution [S3, unofficial].
++    c.  **Diffuse Calculation:** If not occluded, compute the Lambertian diffuse term [S1, S3, unofficial].
++        $$ \mathbf{C}_{diffuse} = \mathbf{k}_d \cdot \frac{\rho}{\pi} \cdot (\mathbf{n}_{world} \cdot \mathbf{l}) \cdot I_{light} \cdot inv\_dd $$
++        Where $\rho$ is the reflectance fraction. For a perfect Lambertian surface, $\rho = \|\mathbf{k}_d\|$ (assuming albedo represents reflectance) and the BRDF is constant $f_r = \rho/\pi$ [S1, unofficial]. The term $\max(\mathbf{n}_{world} \cdot \mathbf{l}, 0)$ ensures back-face lighting is zero [S3, unofficial].
++    d.  **Glossy/Specular Calculation (Optional):** If the material has a glossy component, calculate the specular highlight [S1, S2, unofficial].
++        i.  Compute the perfect reflection vector $\mathbf{R}$:
++            $$ \mathbf{R} = 2(\mathbf{n}_{world} \cdot -\mathbf{v}) \mathbf{n}_{world} + \mathbf{v} $$
++            (Note: $\mathbf{v}$ is the view direction, typically $-\mathbf{d}$).
++        ii. Calculate the dot product between $\mathbf{R}$ and the view direction $\mathbf{v}$ (or the direction to the eye). In Whitted-style, this is often simplified to the dot product between the reflection vector and the light vector for the specular lobe, or the reflection vector and the view vector for ray tracing reflections. Based on [S1, unofficial], the glossy term uses the dot product of the reflection vector and the view direction raised to the shininess exponent:
++            $$ \text{specular\_term} = (\max(\mathbf{R} \cdot \mathbf{v}, 0))^\alpha $$
++        iii. Multiply by the specular coefficient and light intensity:
++            $$ \mathbf{C}_{specular} = \mathbf{k}_s \cdot \text{specular\_term} \cdot I_{light} \cdot inv\_dd $$
++        *Note:* Some implementations [S2, unofficial] simply add a constant ambient or use a simplified Phong model. The Whitted-style glossy reflection often involves spawning a new ray in direction $\mathbf{R}$ [S4, unofficial].
++
++5.  **Reflection Tracing (Whitted-Style Extension):** If the material supports glossy/mirror reflections, spawn a new ray in direction $\mathbf{R}$ [S4, unofficial].
++    *   Recursively call the shading function for this new ray, limited by a maximum recursion depth (e.g., 1 bounce) [S4, unofficial].
++    *   Add the returned radiance weighted by the material's specular reflectivity [S4, unofficial].
++
++6.  **Accumulation:** Sum the ambient, diffuse, specular, and reflected contributions [S2, S3, unofficial].
++    $$ \mathbf{C}_{out} = \mathbf{C}_{ambient} + \sum_{lights} (\mathbf{C}_{diffuse} + \mathbf{C}_{specular}) + \mathbf{C}_{reflection} $$
++
++**Pseudocode:**
++
++```python
++def whitted_shade(ray, scene, depth, max_depth):
++    # 1. Find intersection
++    hit = scene.closest_intersection(ray)
++    
++    # 2. Handle no hit
++    if not hit.valid:
++        return scene.background_color
++
++    # 3. Transform to world space
++    p_world = hit.object.transform_point(hit.p)
++    n_world = normalize(hit.object.transform_normal(hit.ng))
++    v_world = normalize(-ray.d) # View direction is opposite to ray direction
++
++    # 4. Ambient term
++    albedo = hit.material.albedo
++    ambient = albedo * 0.003 # Typical ambient constant [S3, unofficial]
++
++    # 5. Direct lighting
++    direct_light = vec3(0.0)
++    for light in scene.lights:
++        # Light vector and distance
++        l_vec = light.position - p_world
++        dist = length(l_vec)
++        l_dir = normalize(l_vec)
++        inv_dd = 1.0 / (dist * dist)
++
++        # Shadow ray
++        shadow_origin = p_world + 1e-4 * n_world # Prevent self-intersection [S3, unofficial]
++        shadow_ray = Ray(shadow_origin, l_dir)
++        occluded = scene.trace_any(shadow_ray)
++
++        if not occluded:
++            # Diffuse term (Lambertian)
++            # rho/pi * (n . l) * I_light * inv_dd
++            # Assuming albedo is rho, and BRDF is rho/pi [S1, unofficial]
++            diff_factor = max(dot(n_world, l_dir), 0.0)
++            light_intensity = light.emission * inv_dd
++            diffuse = albedo * (diff_factor * light_intensity) # Simplified: rho/pi integrated out or absorbed in constant? 
++            # Strictly: L_r = (rho/pi) * E. E = L_i * cos(theta). 
++            # So diffuse = albedo * (1.0/pi) * diff_factor * light_intensity
++            # However, [S3, unofficial] uses: glm::max(glm::dot(L, ng), 0.0f) * light_emission * inv_dd * albedo
++            # This implies the 1/pi factor is either ignored or absorbed into light_emission/albedo scaling.
++            # We follow [S3, unofficial] implementation detail for consistency with provided notes.
++            diffuse = albedo * diff_factor * light_intensity
++            
++            # Glossy/Specular term (if applicable)
++            specular = vec3(0.0)
++            if hit.material.has_glossy:
++                # Reflection vector
++                r_vec = reflect(-l_dir, n_world) # Reflect light direction? Or view?
++                # [S1, unofficial] uses R (perfect mirror reflection) and view direction.
++                # For direct lighting specular highlight, we usually reflect the LIGHT vector around the normal
++                # and dot with VIEW. Or reflect VIEW and dot with LIGHT.
++                # Standard Phong/Blinn-Phong is different. Whitted glossy reflection usually traces a ray.
++                # If tracing a ray:
++                if depth < max_depth:
++                    refl_ray = Ray(p_world + 1e-4 * n_world, reflect(-v_world, n_world))
++                    refl_color = whitted_shade(refl_ray, scene, depth + 1, max_depth)
++                    specular = hit.material.specular_coeff * refl_color
++                else:
++                    specular = vec3(0.0)
++            
++            direct_light += diffuse + specular
++
++    return ambient + direct_light
++```
+ 
+ **Parameters:**
+-- `ambient_constant`: Default $(0.25, 0.25, 0.25)$ [S2, unofficial].
+-- $\alpha$ (shininess): Controls the narrowness of glossy highlights; higher values yield sharper highlights [S1, unofficial].
+-- `Epsilon`: $10^{-4}$, used to offset shadow ray origins to prevent self-intersection [S2, unofficial].
+-- `light_position`: Fixed light source position, typical value $(-3.0, 2.0, 5.0)$ [S3, unofficial].
+-- `light_emission`: Light intensity multiplier, typical value $20.0$ [S3, unofficial].
+-- `albedo`: Surface reflectance color, typical value $(1.0, 1.0, 1.0)$ [S3, unofficial].
+-- Ambient term variant: Some implementations use $0.003 \times \text{albedo}$ for base illumination instead of the $(0.25, 0.25, 0.25)$ constant [S3, unofficial].
++*   `light_position`: Typical value `{-3.0, 2.0, 5.0}` [S3, unofficial].
++*   `light_emission`: Typical value `20.0` [S3, unofficial].
++*   `albedo`: Surface reflectance color, typical value `{1.0, 1.0, 1.0}` [S3, unofficial].
++*   `shadow_offset`: `1e-4` times normal magnitude [S3, unofficial].
++*   `ambient_constant`: `0.003` [S3, unofficial] or `0.25` [S2, unofficial].
++*   `max_depth`: Typically 1 for basic Whitted shading [S4, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-- **Self-Shadowing:** Shadow rays must be offset from the surface point by a small epsilon to avoid intersecting the surface they originated from [S2, unofficial].
+-- **Negative Dot Products:** In glossy reflection, dot products between $\vec{R}$ and $\vec{\omega}_r$ must be clamped to $[0, \infty)$ to handle cases where the reflection direction is behind the surface [S1, unofficial].
+-- **Emissive Objects:** Emissive objects should return their radiance directly without further shading calculations [S2, unofficial].
+-
+-**Pseudocode:**
+-```python
+-import math
+-
+-Epsilon = 1e-4
+-
+-class Vector3D:
+-    def __init__(self, x, y, z):
+-        self.x, self.y, self.z = x, y, z
+-    def __add__(self, other): return Vector3D(self.x + other.x, self.y + other.y, self.z + other.z)
+-    def __sub__(self, other): return Vector3D(self.x - other.x, self.y - other.y, self.z - other.z)
+-    def __mul__(self, scalar): return Vector3D(self.x * scalar, self.y * scalar, self.z * scalar)
+-    def __rmul__(self, scalar): return self.__mul__(scalar)
+-    def dot(self, other): return self.x * other.x + self.y * other.y + self.z * other.z
+-    def length(self): return math.sqrt(self.dot(self))
+-    def normalize(self):
+-        l = self.length()
+-        return Vector3D(self.x / l, self.y / l, self.z / l) if l > 0 else Vector3D(0, 0, 0)
+-
+-class Ray:
+-    def __init__(self, origin, direction, depth=0, min_t=Epsilon, max_t=float('inf')):
+-        self.origin = origin
+-        self.direction = direction
+-        self.depth = depth
+-        self.min_t = min_t
+-        self.max_t = max_t
+-
+-def get_closest_intersection(ray, objects_list):
+-    closest = None
+-    min_t = ray.max_t
+-    for obj in objects_list:
+-        t = obj.intersect(ray)
+-        if ray.min_t <= t < min_t:
+-            min_t = t
+-            closest = obj
+-    return closest
+-
+-def whitted_shading(ray, scene):
+-    # 1. Find closest intersection
+-    hit = get_closest_intersection(ray, scene.objectsList)
+-    
+-    # 2. No intersection: return background
+-    if hit is None:
+-        return scene.background_color
+-    
+-    # 3. Emissive material: return emissive radiance
+-    if hit.material.is_emissive:
+-        return hit.material.emissive_radiance
+-    
+-    # 4. Initialize color with ambient contribution
+-    color = Vector3D(0.0, 0.0, 0.0)
+-    ambient_constant = Vector3D(0.25, 0.25, 0.25)
+-    color = color + ambient_constant * hit.material.diffuse_coefficient
+-    
+-    # 5. Direct illumination from lights
+-    for light in scene.lightSourceList:
+-        # Calculate vector to light
+-        light_dir = light.position - hit.point
+-        distance = light_dir.length()
+-        light_dir = light_dir.normalize()
+-        
+-        # Compute reflectance using Lambertian approximation [S3, unofficial]
+-        inv_dd = 1.0 / (distance ** 2)
+-        radiance = max(light_dir.dot(hit.normal), 0.0) * light.emission * inv_dd * hit.material.albedo
+-        
+-        # Cast shadow ray
+-        shadow_origin = hit.point + hit.normal * Epsilon
+-        shadow_ray = Ray(shadow_origin, light_dir, ray.depth + 1, Epsilon, distance)
+-        shadow_hit = get_closest_intersection(shadow_ray, scene.objectsList)
+-        
+-        # If light is visible, add contribution
+-        if shadow_hit is None:
+-            color = color + radiance
+-            
+-    return color
+-```
++**Edge Cases:**
++*   **Self-Intersection:** Shadow rays originating from the surface can hit the surface itself. Mitigated by offsetting the origin along the normal [S3, unofficial].
++*   **Back-Facing Normals:** Ensure $\mathbf{n} \cdot \mathbf{l} \ge 0$ to avoid negative lighting [S3, unofficial].
++*   **Recursion Depth:** Unbounded recursion leads to infinite loops. Enforce a maximum depth [S4, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Whitted-Style Shading with Diffuse/Glossy Materials — Direct Illumination with Shadow Rays
+-A simplified variant that returns emissive radiance or diffuse reflectance based on material properties, using shadow rays to determine direct light visibility [S2, unofficial]. It finds the closest intersection, checks for emissive materials, and if no intersection is found, returns the background color [S2, unofficial].
++A simplified variant that computes only diffuse reflectance and ambient lighting, using shadow rays for visibility but omitting recursive reflection tracing [S2, unofficial]. It is chosen for performance-critical applications where only direct lighting is needed. It returns emissive radiance if the material is emissive, otherwise diffuse reflectance [S2, unofficial].
+ 
+ ### Glossy Reflection
+-Models reflections on rough surfaces by distributing outgoing rays around the perfect mirror reflection direction, controlled by a shininess exponent $\alpha$ [S1, unofficial]. It computes the dot product between the reflection vector $\vec{R}$ and view direction $\vec{\omega}_r$, clamps it to $[0, \infty)$, and raises it to the power of $\alpha$ to determine the intensity of the glossy highlight [S1, unofficial].
++Models reflections on rough surfaces by distributing outgoing rays around the perfect mirror reflection direction, controlled by a shininess exponent $\alpha$ [S1, unofficial]. It is chosen when a sharp but not perfect mirror reflection is desired. The intensity is calculated as $(\max(\mathbf{R} \cdot \mathbf{v}, 0))^\alpha$ [S1, unofficial].
+ 
+ ### Ray Reflection Tracing
+-Traces reflected rays to simulate mirror-like reflections, limited to a maximum recursion depth [S4, unofficial]. It initializes a traversal variable, marches along the reflected ray, checks for intersections, and shades the hit point using the scene normal and material properties [S4, unofficial]. If no hit occurs, it returns the background color [S4, unofficial]. The provided implementation limits reflections to 1 bounce [S4, unofficial].
++Traces reflected rays to simulate mirror-like reflections, limited to a maximum recursion depth [S4, unofficial]. It is chosen for scenes requiring accurate mirror reflections. It is limited to 1 bounce in the provided implementation [S4, unofficial].
+ 
+ ### Water Reflection
+-Water reflects the sky it is under rather than a static authored color, making low sun angles optimal for lake visuals [S5, unofficial]. Swimming underwater limits sight distance to 34 meters and removes red light from the scene [S5, unofficial].
++A specific application where water reflects the sky it is under, rather than a static color, making low sun angles optimal for visuals [S5, unofficial]. It is chosen for aquatic environments. Swimming underwater limits sight distance to 34 meters and removes red light [S5, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Linear with respect to the number of light sources and objects in the scene for each ray, due to intersection tests and shadow ray casts [S2, unofficial].
+-- **Memory Complexity:** Linear with respect to the number of objects and lights stored in the scene [S2, unofficial].
+-- **Strengths:** Simple to implement; provides visually plausible results for scenes with few light sources; efficient for real-time rendering [S1, S2, unofficial].
+-- **Limitations:** Does not account for indirect lighting (global illumination) beyond direct shadows; glossy reflections are approximated and may not be physically accurate for complex rough surfaces [S1, S2, unofficial].
+-- **When to Use:** Suitable for real-time applications or scenes where direct lighting and shadows are the primary visual concerns [S2, unofficial].
+-- **When Not to Use:** Unsuitable for scenes requiring accurate global illumination, such as those with significant color bleeding or complex inter-reflections [S1, unofficial].
++*   **Time Complexity:** $O(N \cdot L \cdot D)$, where $N$ is the number of pixels, $L$ is the number of lights, and $D$ is the maximum recursion depth (typically 1) [S2, S4, unofficial]. Shadow ray intersection tests dominate the cost.
++*   **Memory Complexity:** $O(1)$ per pixel for shading, plus scene storage. No large buffers required compared to screen-space methods [S3, unofficial].
++*   **Performance:** Fast for small scenes with few lights. Performance degrades linearly with the number of lights and scene complexity due to shadow ray casting [S3, unofficial].
++*   **Strengths:** Simple to implement; produces sharp shadows and specular highlights; real-time capable [S2, S3, unofficial].
++*   **Limitations:** No soft shadows (unless jittered); no indirect illumination (global illumination); aliasing on reflections; limited to surface-like interactions [S1, S2, unofficial].
++*   **When to use:** Real-time rendering, games, interactive applications where direct lighting and sharp shadows are sufficient [S2, S3, unofficial].
++*   **When not to use:** Scenes requiring soft shadows, global illumination, or complex light transport [S1, unofficial].
+ 
+ ## Background
+-The concept of Lambertian diffuse reflection, where apparent brightness is independent of observer and light source positions, has been a fundamental model in computer graphics since the early days of rendering [S1, unofficial]. The specific implementation with diffuse/glossy materials and ambient lighting as described here is commonly found in educational ray tracers and early real-time rendering systems [S2, unofficial].
++Whitted-style shading originated from the Whitted ray tracing algorithm [S1, S2, unofficial]. It was adapted for real-time rendering and volume shading contexts, often combining Lambertian diffuse models with shadow rays for visibility [S1, S3, unofficial]. The method is widely used in educational ray tracers and real-time engines for basic surface shading [S2, S3, unofficial].
+ 
+ ## Sources

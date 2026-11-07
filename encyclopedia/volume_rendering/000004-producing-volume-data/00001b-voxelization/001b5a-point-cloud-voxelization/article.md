@@ -3,199 +3,179 @@
 Also called: Pointcloud to Dense Voxel Grid Conversion, Voxelization from Point Cloud
 
 ## Overview
-Point Cloud Voxelization converts a discrete set of 3D points into a structured voxel grid, mapping continuous world-space coordinates to discrete integer grid indices. It solves the problem of organizing unstructured point data into a regular grid suitable for downstream volume rendering, sparse voxel octree construction, or neural network processing. Unlike [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) which projects geometry to screen space, this method operates directly in world space. It differs from [Hard Voxelization](5345-hard-voxelization.md) by explicitly handling feature aggregation and sparse data structures, and from [Point Cloud to Gaussian Converter](1788-point-cloud-to-gaussian-converter.md) by producing discrete grid cells rather than continuous density fields.
+Point Cloud Voxelization converts a discrete set of 3D points into a structured voxel grid, mapping continuous world-space coordinates to discrete integer grid indices $(i, j, k)$ [G]. It solves the problem of organizing unstructured point data into a regular grid suitable for volume rendering, convolution, or spatial queries. Unlike [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) which projects geometry to screen space, or [Voxel Carving](1213-voxel-carving.md) which infers volume from silhouettes, this method directly bins points into cells based on their spatial coordinates [S2][S4, unofficial]. It differs from [Hard Voxelization](5345-hard-voxelization.md) primarily in its handling of feature aggregation and sparse data structures, often storing averaged attributes rather than simple occupancy flags [S2][S3, unofficial].
 
 ## How it works
-The method maps each point in the input cloud to a voxel cell based on a defined bounding box and voxel size. It supports both dense grids (where all cells exist) and sparse grids (where only occupied cells are stored).
+**Inputs and Outputs:**
+*   **Input:** A point cloud array `points` of shape $(N, D)$, where $N$ is the number of points and $D \ge 3$ (first 3 columns are $x, y, z$ coordinates). Optional features may follow.
+*   **Parameters:**
+    *   `voxel_size`: Physical size of a voxel, shape $(3,)$ or scalar [S3, S4, unofficial].
+    *   `grid_range` or `bounding_box`: Defines the spatial extent. `grid_range` is typically $(min_x, min_y, min_z, max_x, max_y, max_z)$ [S3, unofficial]. Alternatively, `start_location` and `end_location` tensors [S5, unofficial].
+    *   `max_num_voxels`: Maximum number of occupied voxels to allocate [S3, unofficial].
+    *   `max_points_in_voxel`: Maximum points stored per voxel for sparse representations [S3, unofficial].
+    *   `segment_func`: Aggregation function for features (e.g., mean, sum) [S5, unofficial].
+*   **Output:**
+    *   **Dense Grid:** A 4D tensor/array of shape $(G_x, G_y, G_z, F)$ containing aggregated features [S5, unofficial].
+    *   **Sparse Grid:** Tuples of `(voxels, coordinates, num_points_per_voxel)` where `voxels` stores point data for active voxels, `coordinates` stores their grid indices, and `num_points_per_voxel` stores counts [S3, unofficial].
 
-### Inputs and Outputs
-**Inputs:**
-*   `points`: Array of shape $(N, D)$, where $N$ is the number of points and $D \ge 3$. The first three columns are coordinates $(x, y, z)$. Subsequent columns are features (e.g., color, intensity) [S3, S5, unofficial].
-*   `voxel_size`: Physical size of a voxel. Can be a scalar or a vector $(s_x, s_y, s_z)$ [S3, S5, unofficial].
-*   `grid_range` or `bounds`: Defines the spatial extent.
-    *   Format A: `grid_range` as $[min_x, min_y, min_z, max_x, max_y, max_z]$ [S3, unofficial].
-    *   Format B: `start_location` $[x_{min}, y_{min}, z_{min}]$ and `end_location` $[x_{max}, y_{max}, z_{max}]$ [S5, unofficial].
-    *   Format C: Implicit bounds derived from point min/max coordinates [S4, unofficial].
-*   `segment_func` (Optional): Aggregation function for features within a voxel (e.g., mean, sum, min, max) [S5, unofficial].
+**Data Structures:**
+1.  **Coordinate Map (`coor_to_voxelidx`):** A 3D array of shape $(G_z, G_y, G_x)$ initialized to $-1$. Maps grid indices to a sparse linear index [S3, unofficial].
+2.  **Voxel Buffer (`voxels`):** A 3D array of shape $(max\_num\_voxels, max\_points\_in\_voxel, D)$ storing point data [S3, unofficial].
+3.  **Coordinate List (`coordinates`):** A 2D array of shape $(max\_num\_voxels, 3)$ storing the $(i, j, k)$ index of each active voxel [S3, unofficial].
+4.  **Point Count (`num_points_per_voxel`):** A 1D array of shape $(max\_num\_voxels)$ storing the number of points currently in each voxel [S3, unofficial].
 
-**Outputs:**
-*   **Dense Output:** A 4D tensor/array of shape $(G_x, G_y, G_z, F)$ containing aggregated features, where $G$ is grid size and $F$ is feature dimension [S5, unofficial].
-*   **Sparse Output:**
-    *   `voxels`: Array of shape $(V, M, D)$, where $V$ is the number of occupied voxels, $M$ is max points per voxel, and $D$ is feature dimension [S3, unofficial].
-    *   `coordinates`: Array of shape $(V, 3)$ storing the integer grid indices of occupied voxels [S3, unofficial].
-    *   `num_points_per_voxel`: Array of shape $(V)$ storing the count of points in each voxel [S3, unofficial].
+**Steps:**
 
-### Data Structures
-1.  **Coordinate-to-Index Map (`coor_to_voxelidx`):** A 3D array of shape $(G_z, G_y, G_x)$ (note axis order may vary) with dtype `int32`, initialized to $-1$. It maps grid coordinates $(i, j, k)$ to a sparse linear index in the output arrays [S3, unofficial].
-2.  **Voxel Buffer (`voxels`):** A pre-allocated buffer of shape $(MaxVoxels, MaxPointsPerVoxel, D)$ [S3, unofficial].
-3.  **Coordinate Buffer (`coordinates`):** A buffer of shape $(MaxVoxels, 3)$ storing the $(i, j, k)$ of each active voxel [S3, unofficial].
+1.  **Grid Size Calculation:**
+    Compute the number of voxels per axis.
+    $$ G = \lfloor \frac{grid\_range[3:6] - grid\_range[0:3]}{voxel\_size} \rfloor $$
+    Cast $G$ to integer [S3, unofficial]. If using `start_location` and `end_location`, use ceiling division:
+    $$ G = \lceil \frac{end\_location - start\_location}{grid\_cell\_size} \rceil $$
+    [S5, unofficial].
 
-### Algorithm Steps
-The following pseudocode implements the sparse voxelization approach described in [S3, unofficial], which is efficient for large scenes with limited occupied volume.
+2.  **Coordinate Discretization:**
+    Map each point $p$ to grid indices.
+    $$ idx = \lfloor \frac{p_{xyz} - grid\_range[0:3]}{voxel\_size} \rfloor $$
+    Cast to integer [S3, unofficial]. If using TensorFlow, this is:
+    $$ point\_indices = \lfloor \frac{points - start\_location}{grid\_cell\_size} \rfloor $$
+    [S5, unofficial].
+
+3.  **Boundary Handling:**
+    *   **Discard:** Points with $idx < 0$ or $idx \ge G$ are discarded via a boolean mask [S3, unofficial].
+    *   **Clamp:** Alternatively, points outside bounds are clamped to the nearest edge voxel ($idx = \max(0, \min(idx, G-1))$) [S5, unofficial].
+    *   **Julia Variant:** Computes `MinBound` and `MaxBound` using floor/ceiling division of min/max coordinates by `voxel_size`, then uses 1-based indexing ($idx + 1$) [S4, unofficial].
+
+4.  **Feature Aggregation (Dense Path):**
+    Compute a 1D segment ID for each point to flatten the 3D grid:
+    $$ segment\_id = idx_x \cdot (G_y G_z) + idx_y \cdot G_z + idx_z $$
+    [S5, unofficial].
+    Apply `segment_func` (e.g., `tf.math.unsorted_segment_mean`) to aggregate point features into the dense grid [S5, unofficial].
+
+5.  **Sparse Assignment (Sparse Path):**
+    Initialize `voxel_num = 0` [S3, unofficial]. Iterate through valid points:
+    a.  Look up `voxel_idx = coor_to_voxelidx[idx]`.
+    b.  If `voxel_idx == -1`:
+        i.  Assign `voxel_idx = voxel_num`.
+        ii. Increment `voxel_num`.
+        iii. If `voxel_num > max_num_voxels`, break loop [S3, unofficial].
+        iv. Set `coor_to_voxelidx[idx] = voxel_idx`.
+        v.  Set `coordinates[voxel_idx] = idx`.
+    c.  Get `point_count = num_points_per_voxel[voxel_idx]`.
+    d.  If `point_count < max_points_in_voxel`:
+        i.  Store point data: `voxels[voxel_idx, point_count] = point`.
+        ii. Increment `num_points_per_voxel[voxel_idx]`.
+    e.  Else, discard point [S3, unofficial].
+
+6.  **Output Slicing:**
+    Return only the active portion of the arrays: `voxels[:voxel_num]`, `coordinates[:voxel_num]`, `num_points_per_voxel[:voxel_num]` [S3, unofficial].
+
+**Pseudocode (Sparse, Numba-style):**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import numpy as np
 
-def point_cloud_voxelization_sparse(points, voxel_size, grid_range, 
-                                    max_points_in_voxel=60, max_num_voxels=20000):
+def point_cloud_voxelization(points, voxel_size, grid_range, max_points_in_voxel=60, max_num_voxels=20000):
     """
-    Converts a point cloud to a sparse voxel grid.
-    
-    Args:
-        points: (N, D) array. First 3 cols are x, y, z.
-        voxel_size: (3,) array [sx, sy, sz].
-        grid_range: (6,) array [min_x, min_y, min_z, max_x, max_y, max_z].
-        max_points_in_voxel: Max points stored per voxel.
-        max_num_voxels: Max voxels allocated.
-        
-    Returns:
-        voxels: (V, max_points_in_voxel, D)
-        coordinates: (V, 3)
-        num_points_per_voxel: (V,)
+    points: (N, D) array, first 3 cols are x,y,z
+    voxel_size: (3,) array
+    grid_range: (6,) array [min_x, min_y, min_z, max_x, max_y, max_z]
     """
-    # 1. Compute Grid Size
-    # grid_size = floor((max - min) / voxel_size)
+    # 1. Grid Size
     grid_size = np.floor((grid_range[3:] - grid_range[:3]) / voxel_size).astype(np.int32)
     
-    # 2. Initialize Data Structures
-    # Map from (i,j,k) to sparse voxel index. Initialized to -1.
-    # Note: Shape is (Gz, Gy, Gx) based on source implementation details [S3, unofficial]
+    # 2. Initialize Structures
+    # Shape: (Z, Y, X) for coordinate lookup
     coor_to_voxelidx = np.full((grid_size[2], grid_size[1], grid_size[0]), -1, dtype=np.int32)
-    
-    # Pre-allocated buffers
     voxels = np.zeros((max_num_voxels, max_points_in_voxel, points.shape[1]), dtype=points.dtype)
     coordinates = np.zeros((max_num_voxels, 3), dtype=np.int32)
     num_points_per_voxel = np.zeros(max_num_voxels, dtype=np.int32)
     
-    # 3. Compute Initial Coordinates
-    # idx = floor((point - min) / voxel_size)
+    # 3. Discretize Coordinates
     points_copy = points.copy()
     coor = np.floor((points_copy[:, :3] - grid_range[:3]) / voxel_size).astype(np.int32)
     
-    # 4. Boundary Masking
-    # Keep points where 0 <= coord < grid_size for all axes
-    mask = (
-        (coor[:, 0] >= 0) & (coor[:, 0] < grid_size[0]) &
-        (coor[:, 1] >= 0) & (coor[:, 1] < grid_size[1]) &
-        (coor[:, 2] >= 0) & (coor[:, 2] < grid_size[2])
-    )
-    
-    # Filter points and coordinates
+    # 4. Mask Out-of-Bounds
+    mask = ((coor[:, 0] >= 0) & (coor[:, 0] < grid_size[0]) &
+            (coor[:, 1] >= 0) & (coor[:, 1] < grid_size[1]) &
+            (coor[:, 2] >= 0) & (coor[:, 2] < grid_size[2]))
+            
     coor = coor[mask]
     points_copy = points_copy[mask]
     
-    # 5. Iterate and Assign
     voxel_num = 0
-    for i in range(coor.shape[0]):
-        c = coor[i]
-        
-        # Map coordinate order if necessary (e.g., reverse for specific memory layouts) [S3, unofficial]
-        # Source uses c[0], c[1], c[2] directly for indexing coor_to_voxelidx
-        # but stores c in coordinates. 
-        # Note: Some implementations reverse axis order for storage [S3, unofficial]
-        coord_stored = c[::-1] 
-        
-        voxel_id = coor_to_voxelidx[c[0], c[1], c[2]]
+    for i, c in enumerate(coor):
+        # c is (x, y, z)
+        voxel_id = coor_to_voxelidx[c[2], c[1], c[0]] # Note: NumPy is (Z, Y, X)
         
         if voxel_id == -1:
-            # New voxel
-            if voxel_num >= max_num_voxels:
-                break # Capacity limit reached
-            
             voxel_id = voxel_num
             voxel_num += 1
+            if voxel_num > max_num_voxels:
+                break
+            coor_to_voxelidx[c[2], c[1], c[0]] = voxel_id
+            coordinates[voxel_id] = c
             
-            # Update map
-            coor_to_voxelidx[c[0], c[1], c[2]] = voxel_id
-            
-            # Store coordinate
-            coordinates[voxel_id] = coord_stored
-            
-        # Add point to voxel
         n_pts = num_points_per_voxel[voxel_id]
         if n_pts < max_points_in_voxel:
             voxels[voxel_id, n_pts] = points_copy[i]
             num_points_per_voxel[voxel_id] += 1
-        else:
-            # Point discarded due to capacity limit [S3, unofficial]
-            pass
             
-    # 6. Return Sliced Results
     return voxels[:voxel_num], coordinates[:voxel_num], num_points_per_voxel[:voxel_num]
 ```
-
-**Alternative Dense Aggregation (TensorFlow):**
-For dense grids with feature aggregation, use the segment-based approach [S5, unofficial]:
-1.  Compute `point_indices` = `floor((points - start_location) / grid_cell_size)`.
-2.  Clamp indices to $[0, grid\_size - 1]$ to handle out-of-bounds points by snapping to the nearest edge [S5, unofficial].
-3.  Flatten 3D indices to 1D `segment_ids`:
-    $$ segment\_ids = \sum_{d=0}^{2} (point\_indices[:, d] \times \prod_{k=d+1}^{2} grid\_size[k]) $$
-    Specifically: $segment\_ids = i \cdot (G_y G_z) + j \cdot G_z + k$.
-4.  Apply `segment_func` (e.g., `tf.math.unsorted_segment_mean`) to aggregate features into the grid.
-
-### Parameters and Typical Values
-*   `voxel_size`: Typically 0.05 to 0.2 meters for LiDAR data [S2][S3, unofficial].
-*   `max_points_in_voxel`: Default 60 [S3, unofficial].
-*   `max_num_voxels`: Default 20,000 to 50,000 depending on scene scale [S3, unofficial].
-
-### Edge Cases and Pitfalls
-*   **Out-of-Bounds Points:**
-    *   Sparse methods (e.g., [S3, unofficial]) discard points outside `grid_range` via masking.
-    *   Dense methods (e.g., [S5, unofficial]) clamp points to the nearest edge voxel.
-*   **Capacity Limits:** If the number of occupied voxels exceeds `max_num_voxels`, the loop breaks, leaving subsequent points unprocessed [S3, unofficial]. Similarly, if a voxel exceeds `max_points_in_voxel`, additional points are discarded [S3, unofficial].
-*   **Axis Ordering:** Coordinate axis order (e.g., $x,y,z$ vs $z,y,x$) must be consistent between the index calculation and the storage layout [S3, unofficial].
 
 ## Subtopics
 
 ### [Octree Construction for Point Clouds](1070-octree-construction-for-point-clouds.md)
-Constructs a hierarchical spatial data structure (octree) to organize point cloud objects for rendering, recursively subdividing space into eight octants until a leaf condition is met. It sets itself apart from flat voxel grids by enabling efficient CPU-based frustum culling and view-dependent sampling through aggregated node data, reducing the rendering load for large point clouds.
-
-### [Point Cloud to Gaussian Converter](1788-point-cloud-to-gaussian-converter.md)
-Transforms a discrete set of 3D points into a volume representation composed of isotropic Gaussian ellipsoids, enabling differentiable volume rendering of point-based data. It solves the problem of converting unstructured point clouds into a continuous density field suitable for ray marching, distinguishing itself from hard voxelization by using soft, probabilistic kernels defined by local point proximity. Unlike the Mesh to Isotropic Gaussian Converter, which relies on mesh topology (edges), this method determines kernel scale based on the spatial distribution of neighboring points.
+Constructs a hierarchical spatial data structure (octree) to organize point cloud objects, recursively subdividing space into eight octants until a leaf condition is met. It differs from flat voxel grids by maintaining a list of points at each node and aggregating their average position and color for spatial queries.
 
 ### [Point Resampling with Neighbor Masking](2710-point-resampling-with-neighbor-masking.md)
-Point Resampling with Neighbor Masking resamples a point cloud based on active and neighbor status to support partial, percentage, and full resampling strategies. It controls point density by selectively activating points tied to tetrahedral connectivity.
+Resamples a point cloud based on active and neighbor status to support partial, percentage, and full resampling strategies. It controls point density by selectively activating points tied to tetrahedral connectivity.
 
 ### [Voxels to Points Projection](3172-voxels-to-points-projection.md)
 Projects features from a dense voxel grid back to specific points using pre-computed segment IDs.
 
 ### [Pointcloud to Sparse Voxel Grid Conversion](3416-pointcloud-to-sparse-voxel-grid-conversion.md)
-Pointcloud to Sparse Voxel Grid Conversion maps a set of 3D points into a sparse grid of voxel centers and associated features, retaining only occupied cells. It differs from dense voxelization by using hash maps or sparse arrays to store only occupied cells, and from simple occupancy voxelization by optionally storing averaged geometric and color data per voxel. This method serves as the core voxelization step in pipelines converting point clouds to sparse voxel representations for downstream rendering or USD export.
+Maps a set of 3D points into a sparse grid of voxel centers and associated features, retaining only occupied cells. It differs from dense voxelization by using hash maps or sparse arrays to store only occupied cells, and from simple occupancy voxelization by optionally storing averaged geometric and color data per voxel. This method serves as the core voxelization step in pipelines converting point clouds to sparse voxel representations for downstream rendering or USD export.
 
 ### [Point Sampling from Mesh](3786-point-sampling-from-mesh.md)
-Point Sampling from Mesh generates a discrete set of 3D coordinates uniformly distributed on the surface of a polygon mesh. It serves as a bridge between continuous mesh representations and discrete point-based volume data structures, often acting as an intermediate step for voxelization or neural implicit field training. Unlike rasterization-based methods that project geometry to screen space, this method operates directly in world space by sampling the mesh surface geometry. It is distinct from Point Cloud Voxelization because it generates the points from a mesh source rather than consuming an existing point cloud, and from Interior Voxelize because it targets the surface boundary rather than the volume interior.
+Generates a discrete set of 3D coordinates uniformly distributed on the surface of a polygon mesh. It serves as a bridge between continuous mesh representations and discrete point-based volume data structures, often acting as an intermediate step for voxelization or neural implicit field training. Unlike rasterization-based methods that project geometry to screen space, this method operates directly in world space by sampling the mesh surface geometry. It is distinct from Point Cloud Voxelization because it generates the points from a mesh source rather than consuming an existing point cloud, and from [Interior Voxelize](995-interior-voxelize.md) because it targets the surface boundary rather than the volume interior.
 
 ### [Ray Model Voxelization](4688-ray-model-voxelization.md)
-Ray Model Voxelization converts sparse LiDAR point clouds into dense 3D occupancy grids by tracing rays from sensor origins to detected points, classifying voxels as free, occupied, or unobserved. It differs from Hard Voxelization by explicitly modeling the empty space between the sensor and the target points, rather than only marking voxels containing points, and from Point Cloud to Gaussian Converter by producing discrete grid states rather than continuous density fields.
+Converts sparse LiDAR point clouds into dense 3D occupancy grids by tracing rays from sensor origins to detected points, classifying voxels as free, occupied, or unobserved. It differs from [Hard Voxelization](5345-hard-voxelization.md) by explicitly modeling the empty space between the sensor and the target points, rather than only marking voxels containing points, and from [Point Cloud to Gaussian Converter](1788-point-cloud-to-gaussian-converter.md) by producing discrete grid states rather than continuous density fields.
 
 ### [Hard Voxelization](5345-hard-voxelization.md)
-Hard Voxelization converts a continuous 3D point cloud into a discrete voxel grid by assigning each point to a specific voxel cell based on its spatial coordinates and a fixed voxel size [G]. This method serves as the foundational step for producing volume data from raw point clouds, building on Point Cloud Voxelization.
+Converts a continuous 3D point cloud into a discrete voxel grid by assigning each point to a specific voxel cell based on its spatial coordinates and a fixed voxel size [G]. This method serves as the foundational step for producing volume data from raw point clouds, building on Point Cloud Voxelization.
 
 ### [Voxel-based Void Ratio Computation](6679-voxel-based-void-ratio-computation.md)
-This method computes a void ratio field from a legacy ASCII VTK particle point cloud by binning particle centers into cubic voxels, calculating the solid volume via sphere-box intersection integration, and assigning the resulting void ratio to all particles in the voxel. It differs from Hard Voxelization by accounting for partial sphere volumes at voxel boundaries using numerical integration, and from Point Cloud to Gaussian Converter by focusing on precise geometric volume accounting rather than visual approximation.
+Computes a void ratio field from a legacy ASCII VTK particle point cloud by binning particle centers into cubic voxels, calculating the solid volume via sphere-box intersection integration, and assigning the resulting void ratio to all particles in the voxel. It differs from [Hard Voxelization](5345-hard-voxelization.md) by accounting for partial sphere volumes at voxel boundaries using numerical integration, and from [Point Cloud to Gaussian Converter](1788-point-cloud-to-gaussian-converter.md) by focusing on precise geometric volume accounting rather than visual approximation.
 
 ### [Point Cloud Cropping and Downsampling](7057-point-cloud-cropping-and-downsampling.md)
-This method prepares point clouds for voxelization or registration by removing points outside a specified volume and reducing point density to a manageable size. It solves the problem of excessive memory usage and computational cost in downstream tasks like ICP registration or sparse voxel grid construction by ensuring the input point cloud fits within hardware limits and spatial resolution constraints. It is distinguished from sibling methods like Hard Voxelization by operating on the raw point set prior to voxel assignment, rather than during the voxelization process itself.
+Prepares point clouds for voxelization or registration by removing points outside a specified volume and reducing point density to a manageable size. It solves the problem of excessive memory usage and computational cost in downstream tasks like ICP registration or sparse voxel grid construction by ensuring the input point cloud fits within hardware limits and spatial resolution constraints. It is distinguished from sibling methods like [Hard Voxelization](5345-hard-voxelization.md) by operating on the raw point set prior to voxel assignment, rather than during the voxelization process itself.
+
+### [Gaussian Voxelization](8884-gaussian-voxelization.md)
+Not given in the sources.
 
 ### Nearest Neighbor Splatting
-A splatting method where a value at a continuous position is written to the single nearest voxel by rounding coordinates to integers [S6, unofficial]. Implementation involves mapping continuous coordinates $(x,y,z)$ to discrete indices $(i,j,k)$ via `contToDisc` and accumulating values if within bounds [S6, unofficial]. This method suffers from obvious aliasing problems [S6, unofficial].
+A splatting method where a value at a continuous position is written to the single nearest voxel by rounding coordinates to integers [S6, unofficial]. Implementation uses `contToDisc` to round coordinates $(x,y,z)$ to integers $(i,j,k)$ and adds the value to the buffer if in bounds [S6, unofficial]. This method suffers from obvious aliasing problems [S6, unofficial].
 
 ### Two-stage training with adaptive point cloud generation
-Splits training into two stages. After stage 1, generates additional point clouds using noise and UDF gradient descent, filters by UDF threshold, and rebuilds a KD-tree for denser sampling in stage 2 [S7, unofficial]. In `gen_extra_pointcloud`, it samples points, computes offsets and standard deviation, generates noise scaled by `low_range`, adds noise to points, computes UDF and gradient, projects samples to surface, and filters by `udf_sample < df_filter` until `num_points` is reached [S7, unofficial]. Parameters include `low_range` (noise scaling) and `outlier` (distance truncation) [S7, unofficial].
+Splits training into two stages. After stage 1, generates additional point clouds using noise and UDF gradient descent, filters by UDF threshold, and rebuilds a KD-tree for denser sampling in stage 2 [S7, unofficial]. In `gen_extra_pointcloud`, it samples points, computes offsets and standard deviation, generates noise scaled by `low_range`, adds noise to points, computes UDF and gradient, projects samples to surface, and filters by `udf_sample < df_filter` until `num_points` is reached, then concatenates and removes outliers [S7, unofficial]. After stage 1, it concatenates ground truth points with generated points, builds a cKDTree, and updates the dataset for stage 2 training [S7, unofficial]. Parameters include `low_range` (noise scaling factor) and `outlier` (distance truncation threshold) [S7, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ for computing coordinates and $O(V \cdot M)$ for buffer management, where $N$ is points, $V$ is occupied voxels, and $M$ is max points per voxel. The sparse method avoids iterating over empty space [S3, unofficial].
+*   **Time Complexity:** $O(N)$ for coordinate mapping and masking. Sparse assignment is $O(N)$ amortized if hash maps are used, or $O(N)$ with direct indexing into a dense coordinate map (which is $O(G_x G_y G_z)$ to initialize) [S3, S5, unofficial].
 *   **Memory Complexity:**
-    *   Dense: $O(G_x G_y G_z \cdot F)$, which can be prohibitive for large volumes [S5, unofficial].
-    *   Sparse: $O(V \cdot (M \cdot D + 3))$, significantly more efficient for sparse data [S3, unofficial].
-*   **Performance:** JIT-compiled versions (e.g., Numba) offer significant speedups over pure Python by avoiding interpreter overhead [S3, unofficial].
-*   **Strengths:** Simple implementation, efficient for sparse data, supports feature aggregation.
-*   **Limitations:** Fixed resolution limits detail; out-of-bounds handling varies by implementation; capacity limits require careful tuning [S3, S5, unofficial].
+    *   Dense: $O(G_x G_y G_z \cdot F)$ [S5, unofficial].
+    *   Sparse: $O(V \cdot P \cdot D)$ where $V$ is active voxels, $P$ is max points per voxel, $D$ is features [S3, unofficial].
+*   **Performance:** JIT-compiled versions (e.g., Numba) significantly reduce Python overhead [S3, unofficial]. TensorFlow implementations leverage `unsorted_segment_mean` for GPU acceleration [S5, unofficial].
+*   **Strengths:** Simple implementation; supports arbitrary feature aggregation; efficient for sparse data [S3, S5, unofficial].
+*   **Limitations:** Fixed resolution requires careful tuning of `voxel_size`; points outside bounds are lost or clamped; dense grids consume excessive memory for large volumes [S3, S5, unofficial].
+*   **When to use:** When input is already a point cloud and a regular grid is needed for convolution or rendering.
+*   **When not to use:** When the input is a mesh (use [Mesh Voxelization](6514-mesh-voxelization.md)) or when hierarchical structures are preferred (use [Octree Construction](1070-octree-construction-for-point-clouds.md)).
 
 ## Background
-Point cloud voxelization is a fundamental preprocessing step in 3D computer vision and graphics. It is widely used in autonomous driving (LiDAR processing), 3D reconstruction, and neural rendering. Libraries like Open3D provide high-level APIs for this operation [S2]. Research into differentiable volume rendering has further popularized point cloud voxelization as a bridge between discrete point data and continuous volume representations [S1, unofficial].
+Point cloud voxelization is a fundamental technique in 3D computer vision and graphics. Open3D provides a standard implementation `create_from_point_cloud` where occupancy is determined by point presence and color is averaged [S2]. Julia implementations like `Voxelize.jl` handle LAS/LAZ file formats and use 1-based indexing [S4, unofficial]. TensorFlow-based pipelines use `pointcloud_to_voxel_grid` for differentiable rendering and feature aggregation [S5, unofficial]. JIT-compiled variants optimize performance for large-scale point clouds [S3, unofficial]. The method is widely used in LiDAR processing, 3D reconstruction, and neural rendering pipelines [S1, S3, S4, S5, unofficial].
 
 ## Sources
 [S1] autonomousvision/differentiable_volumetric_rendering, https://github.com/autonomousvision/differentiable_volumetric_rendering, fetched 2026-10-26 (unofficial)

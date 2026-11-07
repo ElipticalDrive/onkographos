@@ -28,34 +28,24 @@ A method to compute intersection points and texture coordinates for axis-aligned
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def update_intersections(active_list, delta_pos, delta_tex_coords, connection_list):
+def update_intersections(active_list, delta_pos, delta_tex_coords, connection_list, plane):
     for intersection in active_list:
         if not intersection.bUpdated:
-            # Compute new position incrementally
             new_pos = intersection.position[intersection.edge_orientation] + delta_pos[intersection.edge_orientation]
             intersection.bUpdated = True
-
-            # Check if new position is still within the edge bounds
             if is_inside_edge(new_pos, intersection.edge):
                 intersection.position[intersection.edge_orientation] = new_pos
                 intersection.texCoords[intersection.edge_orientation] += delta_tex_coords[intersection.edge_orientation]
             else:
-                # Remove intersection from active list
                 active_list.remove(intersection)
-                # Find new intersections on neighbor edges
-                new_intersections = intersect_neighbor_edges(intersection.edge, connection_list)
-                # Insert new intersections at the removed position
-                for new_int in new_intersections:
-                    if not new_int.bUpdated:
-                        new_int.bUpdated = True
-                        active_list.append(new_int)
+                intersect_neighbor_edges(intersection.edge, connection_list, plane, active_list)
 
 def is_inside_edge(new_pos, edge):
     # Check if new_pos lies between the edge's start and end points along its axis [G]
     axis = edge.orientation
     return edge.start[axis] <= new_pos[axis] <= edge.end[axis]
 
-def intersect_neighbor_edges(edge, connection_list):
+def intersect_neighbor_edges(edge, connection_list, plane, active_list):
     # BFS from edge using connection_list until two new intersections are found [S1]
     queue = [edge]
     found = []
@@ -66,11 +56,14 @@ def intersect_neighbor_edges(edge, connection_list):
         for neighbor in neighbors:
             if not neighbor.bUpdated:
                 # Compute intersection of neighbor with current plane using traditional method [G]
-                new_int = compute_traditional_intersection(neighbor, current_plane)
+                # (Standard plane-edge intersection calculation)
+                new_int = compute_traditional_intersection(neighbor, plane)
                 new_int.bUpdated = False
                 found.append(new_int)
                 queue.append(neighbor)
-    return found
+    # Insert new intersections at the position of the removed intersection [S1]
+    for new_int in found:
+        active_list.append(new_int)
 ```
 
 **Edge Cases and Pitfalls:**
@@ -91,7 +84,7 @@ An acceleration technique that caches the indices of spline segments used in pre
 *   **When to Use:** Texture-based volume rendering with occlusion clipping where empty space skipping is employed, and slicing planes are parallel and uniform [S1].
 
 ## Background
-Originated in the context of "Empty Space Skipping and Occlusion Clipping for Texture-based Volume Rendering" [S1]. The method addresses the performance degradation caused by recomputing intersections for each sub-volume, which can negate the benefits of skipping empty spaces [S1]. It is used in GPU-based cut-off slice generation to offload CPU calculation [Parent].
+Originated in the context of "Empty Space Skipping and Occlusion Clipping for Texture-based Volume Rendering" [S1]. The method addresses the performance degradation caused by recomputing intersections for each sub-volume, which can negate the benefits of skipping empty spaces [S1]. It is used in [GPU-based Cut-off Slice Generation](948-gpu-based-cut-off-slice-generation.md) to offload CPU calculation.
 
 ## Sources
 [S1] Empty Space Skipping and Occlusion Clipping for Texture-based Volume ..., https://www3.cs.stonybrook.edu/~mueller/papers/OcclusionClipping.pdf, fetched 2026-10-26

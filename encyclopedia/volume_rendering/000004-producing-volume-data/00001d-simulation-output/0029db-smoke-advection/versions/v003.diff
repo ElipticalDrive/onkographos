@@ -1,0 +1,182 @@
+--- v002.md
++++ v003.md
+@@ -1,78 +1,110 @@
+ # Smoke Advection
+-
+ Also called: MacCormack routine for smoke, Tracking additional quantities like density and temperature
+ 
+ ## Overview
+-Smoke advection transports scalar quantities, such as density and temperature, through a fluid velocity field to visualize smoke effects in real-time simulations [S1, unofficial]. It distinguishes itself from pure velocity advection by introducing source terms (e.g., Gaussian splats) and coupling scalar fields (like temperature) back into the dynamics via buoyant forces, rather than treating them as passive tracers alone [S1, unofficial].
++Smoke advection tracks scalar quantities (such as density, temperature, or color) that are transported by a fluid velocity field to visualize smoke, fire, or other volumetric effects. It solves the advection equation for these scalars using the same numerical scheme employed for the velocity field, typically the MacCormack method. Unlike velocity, which drives the dynamics, these quantities are primarily visual; however, temperature can influence dynamics via buoyancy forces. It is distinguished from pure velocity advection by the need to allocate separate storage for each scalar and potentially inject source terms (e.g., Gaussian splats) to define the smoke's appearance.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Velocity field $\mathbf{u}$, current scalar field $\phi$ (density or temperature), time step $\Delta t$, and source injection parameters.
+-*   **Outputs:** Updated scalar field $\phi$ for the next time step.
++- **Input:** Velocity field $\mathbf{u}$ (vector field), current scalar field $\phi$ (scalar field, e.g., density, temperature, color), time step $\Delta t$, spatial grid dimensions $(N_x, N_y, N_z)$.
++- **Output:** Updated scalar field $\phi^{n+1}$.
+ 
+ **Data Structures:**
+-*   For each additional quantity $\phi$ (e.g., density, temperature, color), allocate a texture or grid with the same dimensions as the velocity grid [S1, unofficial].
+-*   The scalar field $\phi$ is stored as a 3D array or volume texture.
++- For each additional quantity $\phi$ (density, temperature, color), allocate a texture or grid with the same dimensions as the velocity grid.
++- The velocity field $\mathbf{u}$ is typically stored on a staggered grid or as a vector texture.
+ 
+ **Method:**
+-The evolution of the scalar quantity $\phi$ is governed by the advection equation [S1, unofficial]:
++The evolution of the scalar quantity $\phi$ is governed by the advection equation:
++$$ \frac{\partial \phi}{\partial t} = -(\mathbf{u} \cdot \nabla) \phi $$
++This equation is solved numerically using the MacCormack advection routine, which is a two-step predictor-corrector scheme.
+ 
+-$$
+-\frac{\partial \phi}{\partial t} = -(\mathbf{u} \cdot \nabla) \phi
+-$$
++1. **Predictor Step:** Calculate a temporary predicted value $\phi^*$ using forward differencing.
++   $$ \phi^* = \phi^n - \Delta t (\mathbf{u}^n \cdot \nabla) \phi^n $$
++   In discrete form, this involves computing the divergence of the flux using forward differences.
+ 
+-This equation is solved using the same MacCormack advection routine used for the velocity field [S1, unofficial]. The MacCormack method is an explicit, two-step, three-time level scheme that is second-order accurate in both time and space [S2, unofficial].
++2. **Corrector Step:** Calculate the final corrected value $\phi^{n+1}$ using backward differencing on the predicted values.
++   $$ \phi^{n+1} = \frac{1}{2} \left[ \phi^n + \phi^* - \Delta t (\mathbf{u}^* \cdot \nabla) \phi^* \right] $$
++   Here, $\mathbf{u}^*$ is the velocity at the predicted time step (or interpolated), and the gradient is computed using backward differences.
+ 
+-1.  **Predictor Step:** Calculate a temporary "predicted" value $\phi^*$ using forward differencing.
+-2.  **Corrector Step:** Determine the final "corrected" value $\phi^{n+1}$ using backward differencing based on the predicted value [S2, unofficial].
+-3.  **Alternation:** Forward and backward differencing are alternated between predictor and corrector steps to avoid bias due to one-sided differencing and achieve second-order accuracy [S2, unofficial].
++3. **Source Injection:** To visualize smoke, a source term is often added. Each frame, a 3D Gaussian "splat" is injected into the color or density texture. This provides a localized source of smoke that is then advected by the velocity field. The values injected have no physical significance for density/temperature unless coupled with buoyancy, but create visual patterns.
+ 
+-**Source Injection:**
+-To generate smoke, a 3D Gaussian "splat" is injected into a color texture (or density field) each frame [S1, unofficial]. These values serve as a source term for the advection equation. While color values may lack physical significance, they create swirling patterns as they are advected [S1, unofficial].
+-
+-**Coupling with Dynamics (Buoyancy):**
+-For physically plausible smoke, temperature $T$ is tracked and advected by $\mathbf{u}$ [S1, unofficial]. Unlike passive color, temperature influences fluid dynamics through a buoyant force. The source notes indicate this influence is described by a buoyant force term involving pressure $P$, though the specific formula for the force vector is not fully detailed in the provided text [S1, unofficial].
++4. **Buoyancy (Optional):** If temperature $T$ is tracked, it influences the velocity field via a buoyant force. This requires coupling the scalar advection with the momentum equation. The buoyant force is typically proportional to the temperature difference from a reference value.
+ 
+ **Pseudocode:**
+ ```python
+-def advect_scalar(phi, u, dt):
++def advect_scalar(phi, u, dt, grid_dims):
+     """
+     Advect scalar field phi using MacCormack scheme with velocity u.
+-    phi: 3D array of current scalar values
+-    u: 3D vector field (velocity)
++    phi: 3D array (Nx, Ny, Nz)
++    u: 3D vector field (Nx, Ny, Nz, 3)
+     dt: time step
++    grid_dims: (Nx, Ny, Nz)
+     """
++    Nx, Ny, Nz = grid_dims
++    
+     # Predictor step: forward differencing
+-    # Calculate gradient of phi
+-    grad_phi = compute_gradient(phi)
+-    # Compute flux: u . grad_phi
+-    flux = dot_product(u, grad_phi)
+-    # Update phi using forward Euler-like step for predictor
+-    phi_pred = phi - dt * flux
++    # Compute gradient of phi using forward differences
++    dphi_dx = np.zeros_like(phi)
++    dphi_dy = np.zeros_like(phi)
++    dphi_dz = np.zeros_like(phi)
++    
++    # Forward differences with boundary handling
++    dphi_dx[0:Nx-1, :, :] = (phi[1:, :, :] - phi[0:Nx-1, :, :]) / dx
++    dphi_dx[Nx-1, :, :] = dphi_dx[Nx-2, :, :] # Backward fill for boundary
++    
++    dphi_dy[:, 0:Ny-1, :] = (phi[:, 1:, :] - phi[:, 0:Ny-1, :]) / dy
++    dphi_dy[:, Ny-1, :] = dphi_dy[:, Ny-2, :]
++    
++    dphi_dz[:, :, 0:Nz-1] = (phi[:, :, 1:] - phi[:, :, 0:Nz-1]) / dz
++    dphi_dz[:, :, Nz-1] = dphi_dz[:, :, Nz-2]
++    
++    # Flux divergence: u . grad(phi)
++    flux = u[:,:,0,0] * dphi_dx + u[:,:,0,1] * dphi_dy + u[:,:,0,2] * dphi_dz
++    
++    phi_star = phi - dt * flux
+     
+     # Corrector step: backward differencing
+-    # Calculate gradient of predicted phi
+-    grad_phi_pred = compute_gradient(phi_pred)
+-    # Compute flux using predicted phi
+-    flux_pred = dot_product(u, grad_phi_pred)
+-    # Average the predictor and corrector steps
+-    # Note: Standard MacCormack averages the fluxes or the results.
+-    # Based on [S2, unofficial], it determines the final corrected value using backward differencing.
+-    # A common implementation averages the forward and backward updates.
+-    phi_new = 0.5 * (phi - dt * flux + phi_pred - dt * flux_pred)
++    # Compute gradient of phi_star using backward differences
++    dphi_star_dx = np.zeros_like(phi_star)
++    dphi_star_dy = np.zeros_like(phi_star)
++    dphi_star_dz = np.zeros_like(phi_star)
++    
++    # Backward differences
++    dphi_star_dx[1:Nx, :, :] = (phi_star[1:Nx, :, :] - phi_star[0:Nx-1, :, :]) / dx
++    dphi_star_dx[0, :, :] = dphi_star_dx[1, :, :] # Forward fill for boundary
++    
++    dphi_star_dy[:, 1:Ny, :] = (phi_star[:, 1:Ny, :] - phi_star[:, 0:Ny-1, :]) / dy
++    dphi_star_dy[:, 0, :] = dphi_star_dy[:, 1, :]
++    
++    dphi_star_dz[:, :, 1:Nz] = (phi_star[:, :, 1:Nz] - phi_star[:, :, 0:Nz-1]) / dz
++    dphi_star_dz[:, :, 0] = dphi_star_dz[:, :, 1]
++    
++    # Flux divergence for predicted state
++    # Note: u_star might be u^n or interpolated. Using u^n for simplicity if not specified.
++    flux_star = u[:,:,0,0] * dphi_star_dx + u[:,:,0,1] * dphi_star_dy + u[:,:,0,2] * dphi_star_dz
++    
++    phi_new = 0.5 * (phi + phi_star - dt * flux_star)
+     
+     return phi_new
+ 
+-def inject_smoke_source(phi, source_position, source_strength, gaussian_width):
++def inject_smoke_source(color_texture, position, intensity, sigma):
+     """
+-    Inject a 3D Gaussian splat into the scalar field.
++    Inject a 3D Gaussian splat into the color texture.
+     """
+-    # Apply Gaussian function centered at source_position
+-    # to the relevant region of phi
+-    for each voxel in domain:
+-        distance = length(voxel_pos - source_position)
+-        contribution = source_strength * exp(-distance**2 / (2 * gaussian_width**2))
+-        phi[voxel_pos] += contribution
++    # Define Gaussian kernel
++    # This is a simplified representation; actual implementation requires
++    # iterating over the grid or using a splatting algorithm.
++    pass
+ ```
++
++**Parameters:**
++- $\Delta t$: Time step. Must satisfy CFL condition for stability if using explicit schemes like MacCormack.
++- Grid resolution: $(N_x, N_y, N_z)$.
++- Gaussian parameters for source injection: position, intensity, spread ($\sigma$).
++
++**Edge Cases and Pitfalls:**
++- **Stability:** The MacCormack scheme is conditionally stable. If the CFL condition is violated, numerical blow-up can occur. A limiter may be required [S1, unofficial].
++- **Boundary Conditions:** Proper handling of boundaries is crucial for both the predictor and corrector steps.
++- **Precision:** Floating-point precision can affect the accumulation of errors over many time steps.
+ 
+ ## Subtopics
+@@ -81,15 +113,15 @@
+ The MacCormack advection scheme is a higher-order numerical method used to advect scalar fields (such as smoke density or temperature) and vector fields (velocity) in fluid simulations, designed to reduce the numerical smoothing inherent in standard semi-Lagrangian advection. It achieves this by combining a forward semi-Lagrangian step with a backward correction step, allowing low-resolution grids to retain visual detail comparable to significantly higher-resolution grids using standard first-order methods. Unlike the unconditionally stable semi-Lagrangian scheme, the MacCormack scheme is conditionally stable and requires a limiter to prevent numerical blow-up.
+ 
+-### Parallel Navier-Stokes Solver (MacCormack Method)
+-An explicit, two-step, three-time level scheme used to solve unsteady compressible Navier-Stokes equations, second-order accurate in both time and space, chosen for ease of parallelization [S2, unofficial]. It subdivides the data domain into blocks, exchanging solution values at the outermost boundary layers of each block between nearest neighbors after each predictor and corrector step [S2, unofficial]. A "Prepare Data" routine is used to calculate flow properties for visualization [S2, unofficial].
+-
+ ## Operating characteristics
+-*   **Stability:** The MacCormack scheme is conditionally stable, unlike unconditionally stable semi-Lagrangian schemes, requiring careful selection of $\Delta t$ and potentially limiters to prevent numerical blow-up [S1, unofficial].
+-*   **Accuracy:** It is second-order accurate in both time and space, reducing numerical diffusion compared to first-order methods [S2, unofficial].
+-*   **Parallelization:** The method is noted for being easier to parallelize and implement in distributed memory systems (e.g., Intel Paragon) by exchanging boundary layers between block neighbors [S2, unofficial].
+-*   **Performance:** Allows low-resolution grids to retain visual detail comparable to higher-resolution grids using standard first-order methods, improving efficiency [S1, unofficial].
++- **Time Complexity:** $O(N)$ per time step, where $N$ is the number of grid cells. The two-step nature (predictor and corrector) doubles the computational cost compared to a single-step explicit scheme, but it is still linear in grid size.
++- **Memory Complexity:** $O(N)$ for the scalar field. Additional memory is required for each tracked quantity (density, temperature, color).
++- **Performance:** The method is efficient for real-time applications due to its simplicity and parallelizability. However, the conditional stability requires careful selection of the time step.
++- **Strengths:** Second-order accuracy in space and time, reduces numerical diffusion compared to first-order methods, easy to parallelize.
++- **Limitations:** Conditionally stable, requires careful boundary handling, may produce oscillations near sharp gradients without limiters.
++- **When to use:** Suitable for real-time fluid simulations where visual quality is important and computational resources are limited. Ideal for smoke, fire, and other scalar fields that need to be advected by a velocity field.
++- **When not to use:** Not suitable for highly compressible flows with strong shocks without modifications (e.g., limiters). Not ideal for long-term stability without careful time step control.
+ 
+ ## Background
+-Smoke advection using the MacCormack scheme was described in the context of real-time simulation and rendering of 3D fluids, citing Fedkiw et al. (2001) [S1, unofficial]. The parallel implementation of the MacCormack method for unsteady compressible Navier-Stokes equations was detailed in a report on runtime volume visualization for parallel CFD, targeting the Intel Paragon architecture [S2, unofficial].
++The concept of tracking additional quantities like density and temperature to visualize smoke was introduced by Fedkiw et al. (2001) [S1, unofficial]. The MacCormack method, originally developed for solving hyperbolic partial differential equations, has been adapted for fluid simulation due to its ease of implementation and parallelization [S2, unofficial]. It is widely used in computer graphics for real-time fluid simulation.
+ 
+ ## Sources

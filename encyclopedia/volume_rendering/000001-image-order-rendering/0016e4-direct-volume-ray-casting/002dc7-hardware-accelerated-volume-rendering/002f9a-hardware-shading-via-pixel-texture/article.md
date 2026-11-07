@@ -3,107 +3,63 @@
 Also called: Quantized Normal Shading
 
 ## Overview
-Hardware Shading via Pixel Texture is a method for adding surface shading to texture-memory based volume rendering to improve the perception of shape and structure without significant performance cost [S1]. It solves the problem of hardware interpolation redundancy and truncation when encoding surface normals for lighting by quantizing normals and storing them in a 2D pixel texture, which is then sampled using nearest-neighbor interpolation [S1, S2]. Unlike standard volume rendering which may lack clear directional cues, this method allows for the visualization of velocity magnitude and directionality in flow fields when combined with Line Bundles [S3, unofficial].
+Hardware Shading via Pixel Texture is a method for adding surface shading to texture-memory based volume rendering to increase visual quality with negligible performance cost [S1]. It solves the problem of missing shading in previous hardware-accelerated volume rendering techniques by encoding surface normals into a 2D pixel texture, allowing the GPU's lighting hardware to compute illumination [S1, S2]. It sets itself apart from siblings like [Hardware-Accelerated Volume Rendering via 3D Texturing](2799-hardware-accelerated-volume-rendering-via-3d-texturing.md) by explicitly handling normal encoding and lighting as a separate, per-view texture generation step rather than relying solely on scalar volume texturing [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Volume data (V, G, H components), camera parameters, and a 2D shading pixel texture containing quantized normals.
-*   **Output:** A composited image with shading applied, rendered to the framebuffer.
+*   **Input:** Scalar volume data $V(\mathbf{x})$, gradient-based normals $\mathbf{n}(\mathbf{x})$, view direction, and light direction.
+*   **Output:** Shaded color image.
 
 **Data Structures:**
-*   **Shading Pixel Texture:** A 2D texture where each texel stores a quantized surface normal.
-    *   **Layout:** The first 8 bits of the quantized normal are encoded in the Red channel, and the second 8 bits are encoded in the Green channel [S1, S2].
-    *   **Interpolation:** Nearest-neighbor interpolation is used for texture lookups to avoid redundancy and truncation errors associated with linear interpolation of quantized values [S1, S2].
+*   **Shading Pixel Texture:** A 2D texture where each texel stores a quantized normal.
+    *   **Layout:** 16-bit quantized normal.
+    *   **Channel Packing:** The first 8 bits of the quantized normal are stored in the Red channel, and the second 8 bits are stored in the Green channel. Blue and Alpha channels are unused or set to 0 [S1, S2].
+*   **Volume Texture:** Standard 3D texture for scalar values (shared with parent [Hardware-Accelerated Volume Rendering](5616-hardware-accelerated-volume-rendering.md)) [S1, S2].
 
 **Steps:**
-1.  **Normal Quantization:** Compute surface normals for the volume data. Encode these normals using a 16-bit quantization scheme [S1, S2].
-2.  **Texture Encoding:** Map the 16-bit quantized normal to a 2D pixel texture. Assign the upper 8 bits to the Red channel and the lower 8 bits to the Green channel [S1, S2].
-3.  **Shading Texture Generation:** Generate the shading pixel texture on a per-view basis in software [S1, S2].
-    *   *Alternative Hardware Method:* Render quantized normals as points with hardware lighting and copy the result from the framebuffer to the pixel texture [S2]. Note: Some hardware implementations do not support this operation [S2].
-4.  **Slice Rendering (Software/OpenGL Pipeline):**
-    *   Render the current volume slice to a scratch/auxiliary buffer [S2].
+1.  **Normal Quantization:** Compute surface normals $\mathbf{n}$ from the volume gradients. Encode these normals using a 16-bit quantization scheme [S1, S2].
+2.  **Texture Generation:** Generate the shading pixel texture on a per-view basis in software [S1, S2].
+    *   *Alternative Hardware Method:* Render quantized normals as points with hardware lighting and copy the result from the frame buffer to the pixel texture [S2].
+3.  **Lookup Interpolation:** Use **nearest-neighbor** interpolation for the pixel texture lookup to avoid redundancy and truncation errors associated with hardware interpolation of quantized values [S1, S2].
+4.  **Lighting:** Light the quantized normals using the 2D pixel texture. This is equivalent to a 16-bit 1D nearest-neighbor lookup [S1].
+5.  **Rendering Pipeline (Software-Generated Texture):**
+    *   Render the volume slice to a scratch/auxiliary buffer [S2].
     *   If shading is enabled, render the matching slice from the shading volume and modulate (multiply) it with the current slice [S2].
-    *   Use a `glCopyPixels()` operation to pixel texture the slice from the scratch buffer, as pixel texture operations do not occur directly on a per-fragment basis during rasterization on the target hardware (e.g., SGI Octane2) [S2].
-5.  **Compositing:** Copy the slice from the scratch buffer and blend it with previously rendered slices in the framebuffer using the standard front-to-back over operator [S2].
-6.  **Lighting Application:** Light the quantized normals using the 2D pixel texture. This is equivalent to a 16-bit 1D nearest-neighbor pixel texture lookup [S1].
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-# Pseudocode for the rendering pipeline on hardware supporting glCopyPixels
-# Assumes VGH volume data and pre-computed shading volume
-
-def render_volume_slice(vgh_slice, shading_slice, framebuffer, scratch_buffer):
-    """
-    Renders a single slice with shading using pixel texture operations.
-    """
-    # 1. Render raw data to scratch buffer
-    render_to_buffer(vgh_slice, scratch_buffer)
-    
-    # 2. Apply shading if enabled
-    if shading_enabled:
-        # Modulate the scratch buffer content with the shading slice
-        # This step assumes the hardware supports texture modulation during copy
-        apply_shading_modulation(scratch_buffer, shading_slice)
-        
-    # 3. Pixel Texture Operation
-    # Copy from scratch buffer to framebuffer using pixel texture
-    # This step handles the nearest-neighbor lookup of quantized normals
-    gl_copy_pixels_with_pixel_texture(scratch_buffer, framebuffer)
-    
-    # 4. Composite with existing framebuffer content
-    # Blend the new slice with previously rendered slices
-    composite_front_to_back(framebuffer)
-
-def generate_shading_texture(volume_data, view_direction):
-    """
-    Generates the 2D pixel texture for quantized normals.
-    """
-    # 1. Compute normals for the volume
-    normals = compute_normals(volume_data)
-    
-    # 2. Quantize normals to 16-bit
-    quantized_normals = quantize_16bit(normals)
-    
-    # 3. Encode into 2D texture (Red: upper 8 bits, Green: lower 8 bits)
-    shading_texture = create_2d_texture()
-    for each voxel in volume_data:
-        r_channel = quantized_normals[voxel] >> 8
-        g_channel = quantized_normals[voxel] & 0xFF
-        shading_texture.set_pixel(voxel.x, voxel.y, r_channel, g_channel)
-        
-    return shading_texture
-```
+    *   Copy the slice from the scratch buffer to the pixel texture using `glCopyPixels()` (or equivalent) [S2].
+    *   Blend the slice with previously rendered slices in the frame buffer [S2].
+6.  **Rendering Pipeline (Hardware-Generated Texture - if supported):**
+    *   Render quantized normals as points with hardware lighting [S2].
+    *   Copy from frame buffer to pixel texture [S2].
+    *   Proceed with standard volume rendering using the generated texture [S2].
 
 **Parameters:**
-*   **Quantization Scheme:** 16-bit encoding for normals [S2].
-*   **Interpolation Mode:** Nearest-neighbor [S1, S2].
+*   **Quantization:** 16-bit encoding for normals [S1, S2].
+*   **Interpolation:** Nearest-neighbor for normal texture [S1, S2].
 
 **Edge Cases and Pitfalls:**
-*   **Hardware Flexibility:** Some hardware implementations are not flexible enough to support rendering quantized normals as points with hardware lighting and copying to a pixel texture [S2].
-*   **Interpolation Errors:** Using linear interpolation for quantized normals causes redundancy and truncation, leading to incorrect shading [S1, S2].
-*   **Performance Cost:** Generating the shading pixel texture on a per-view basis in software has minimal performance cost, but hardware generation is preferred if supported [S1, S2].
+*   **Hardware Flexibility:** Some hardware implementations (e.g., SGI Octane2 V-series) do not support rendering quantized normals as points with hardware lighting and copying to a pixel texture directly during rasterization [S2]. In such cases, the software generation or scratch buffer approach is required [S2].
+*   **Performance Cost:** The cost of generating the shading texture is minimal [S1].
+*   **Update Frequency:** The shading texture only needs to be regenerated when the viewpoint changes, not when the transfer function is manipulated [S2].
 
 ## Subtopics
 
 ### Quantized Normal Shading via Pixel Texture
-A shading method that encodes surface normals into a 2D pixel texture to avoid hardware interpolation redundancy and truncation, using nearest-neighbor interpolation [S2]. It is chosen when high-quality shading is needed for texture-memory based volume rendering on hardware that supports pixel texture operations (e.g., SGI Octane2) but lacks efficient hardware normal interpolation [S1, S2]. The method involves encoding the first eight bits of the quantized normal into the red channel and the second eight into the green channel [S2]. It can be implemented by generating the shading pixel texture in software or by rendering quantized normals as points with hardware lighting and copying to the pixel texture [S2]. A key pitfall is that some hardware implementations do not support the point-rendering and copy operation [S2].
+A shading method that encodes surface normals into a 2D pixel texture to avoid hardware interpolation redundancy and truncation, using nearest-neighbor interpolation [S2]. It is chosen when high-quality shading is needed in hardware-accelerated volume rendering where standard normal interpolation fails [S2]. It differs from standard shading by explicitly managing the quantization and texture mapping of normals [S2]. Link: [Hardware Shading via Pixel Texture](7443-hardware-shading-via-pixel-texture.md).
 
 ### Line Bundles
-A technique that relies on graphics hardware to create texture by rendering and compositing many semitransparent line segments to produce an anisotropic volume rendering result [S3, unofficial]. It is chosen for flow field visualization where both velocity magnitude and directionality need to be clearly evident [S3, unofficial]. The method involves rendering each data point with pre-computed sets of rendered line segments (splatting analogy), slightly perturbing the colors to provide a pattern, and compositing the line bundles in back-to-front order [S3, unofficial]. Unlike standard volume rendering, it clearly evidences directionality [S3, unofficial].
+A technique relying on graphics hardware to create texture by rendering and compositing many semitransparent line segments to produce an anisotropic volume rendering result [S3, unofficial]. It is chosen for flow field visualization to clearly evidence directionality while viewing velocity magnitude [S3, unofficial]. It differs from scalar volume rendering by using pre-computed sets of rendered line segments per data point, slightly perturbing colors to provide a pattern [S3, unofficial]. Link: [Line Bundles](line-bundles.md).
 
 ## Operating characteristics
-*   **Time Complexity:** The shading texture generation is performed on a per-view basis in software, but the cost is minimal [S1, S2]. The rendering pipeline involves additional buffer copies and modulations, which may add overhead compared to unshaded rendering [S2].
-*   **Memory Complexity:** Requires an additional scratch/auxiliary buffer for slice rendering and a 2D pixel texture for shading [S2].
-*   **Measured Performance:** The performance cost of generating the shading pixel texture is minimal [S1]. The method dramatically increases rendering quality with negligible increase in rendering cost [S1].
-*   **Strengths:** Adds shading to texture-memory based volume rendering, which previously often lacked it, increasing quality with negligible cost [S1]. Allows clear visualization of directionality in flow fields when combined with Line Bundles [S3, unofficial].
-*   **Limitations:** Hardware-dependent; some implementations do not support the necessary pixel texture operations or point-rendering copying [S2]. Requires per-view texture generation if hardware lighting copy is not supported [S1, S2].
-*   **When to Use:** When using texture-memory based volume rendering on hardware that supports pixel texture operations (e.g., SGI Octane2, nVidia GeForce3) and shading is desired for shape perception [S1, S2].
-*   **When Not to Use:** When hardware does not support pixel texture operations or the point-rendering copy method [S2]. When real-time performance is critical and the overhead of per-view texture generation is unacceptable [S1].
+*   **Time Complexity:** Minimal additional cost for shading texture generation [S1]. The texture is generated per-view, so it is not required for every frame if the view is static [S2].
+*   **Memory Complexity:** Requires an additional 2D pixel texture for normals, sized according to the view resolution [S2].
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Dramatically increases rendering quality with negligible cost [S1]. Allows for efficient shading in hardware-accelerated pipelines [S1].
+*   **Limitations:** Dependent on hardware support for pixel texture operations (e.g., `glCopyPixels`) [S2]. Some hardware cannot support the point-rendering lighting method [S2].
+*   **When to use:** When texture-memory based volume rendering lacks shading and visual quality is prioritized over minimal implementation complexity [S1].
+*   **When not to use:** When hardware does not support the required pixel texture operations or when the view is changing rapidly and per-view texture generation becomes a bottleneck [S2].
 
 ## Background
-The method was developed as part of the Interactive Volume Rendering Using Multi-Dimensional Transfer Functions project, primarily implemented on the SGI Octane 2 with V series graphics cards and the nVidia GeForce3 series [S1, S2]. It addresses the lack of shading in previous texture-memory based volume rendering work [S1]. The Line Bundles variant was developed by Crawfis, Shen, and Max for flow visualization [S3, unofficial].
+The method was developed by researchers at the Scientific Computing and Imaging Institute, University of Utah, and published in 2001 [S1, S2]. It was implemented on SGI Octane 2 with V-series graphics cards and nVidia GeForce3 series graphics adaptors [S2]. The technique addresses the lack of shading in previous texture-memory based volume rendering work [S1].
 
 ## Sources
 [S1] PDF Interactive Volume Rendering Using Multi-Dimensional Transfer Functions ..., https://publications.sci.utah.edu/publications/jmk01/simian-paper.pdf, fetched 2026-10-27

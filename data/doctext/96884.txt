@@ -1,0 +1,250 @@
+# DDNeRF: Depth Distribution Neural Radiance Fields
+
+David Dadon, Ohad Fried, Yacov Hel-Or
+
+School of Computer Science, Reichman University, Herzliya, Israel david.dadon@post.idc.ac.il , ofried@idc.ac.il, toky@idc.ac.il
+
+Abstract. In recent years, the field of implicit neural representation has progressed significantly. Models such as neural radiance fields (NeRF) [11], which uses relatively small neural networks, can represent highquality scenes and achieve state-of-the-art results for novel view synthesis. Training these types of networks, however, is still computationally very expensive. We present depth distribution neural radiance field (DDNeRF), a new method that significantly increases sampling efficiency along rays during training while achieving superior results for a given sampling budget. DDNeRF achieves this by learning a more accurate representation of the density distribution along rays. More specifically, we train a coarse model to predict the internal distribution of the transparency of an input volume in addition to the volume's total density. This finer distribution then guides the sampling procedure of the fine model. This method allows us to use fewer samples during training while reducing computational resources.
+
+Keywords: NeRF, view synthesis, implicit scene representation, volume rendering
+
+# 1 Introduction
+
+The field of implicit representation for 3D objects and scenes has been growing rapidly in the last several years. Methods such as Occupancy Networks [9] and DeepSDF [13] (Signed Distance Function) have achieved state-of-the-art results in 3D reconstruction, which led to increased interest in this field. The two main advantages of implicit representation are compactness and continuity (compared to explicit representation methods such as meshes or voxels that are discrete and less compact). It also enables us the 3D shape of the represented object for every level of detail (LOD) to be extracted by increasing/decreasing the number of samples in space. Due to their performance and accuracy, implicit methods became very popular, adopted by many papers and various domains.
+
+Neural Radiance Fields (NeRF) [11] use the same architecture as DeepSDF to represent a scene as a radiance field by answering the following query: given an (x, y, z) location and a viewing direction (φ, θ), what is the RGB color and the density σ in this location? When rendering an image, a pixel color is evaluated by sampling points along the ray from the center of projection (COP) that passes through the pixel and applying a ray marching rendering technique for volume
+
+rendering [14].
+
+At the time this method was published it achieved cutting-edge results for novel view synthesis. This led to what is called the "NeRF explosion". In the past two years, numerous follow-up works improved the NeRF model and extended it to new domains. We review a few of those works briefly in the Section 2. Nevertheless, NeRF has one major drawback: its training time and space requirements. Because the quality of the model depends on the number of samples drawn along each ray (more samples produce better models), the training process has a trade-off between efficiency (number of samples) and output quality. Most NeRF models use two-stage hierarchical sampling techniques. The first stage (coarse model) samples uniformly with respect to the depth axis along the ray and divides the ray into intervals according to these samples. The opacity (α) and the total transparency of each interval i are used to determine the amount of influence wi of each interval on the pixel color (see eq. \(2\)). The wi 's values are normalized and interpreted as a piecewise-constant PDF (or discrete PDF) between the intervals. The second stage (fine model) samples points according to this PDF function. Figure 1 (a) illustrates this method.
+
+In this paper we propose to represent the PDF of the first hierarchical sampling stage as a combination of Gaussian distributions and we will show its advantages over the piecewise-constant PDF. The input of the model is a specific sub-section of the ray (interval), and the output is the Gaussian distribution parameters (µ, σ) of the density influence in that interval – in addition to the color and the total density. By using this technique, we achieve a more accurate density representation along the rays, which will allow us to receive more accurate samples in the second stage of the hierarchical sampling. Figure 1 (b) illustrates our method. We will demonstrate and analyze its superiority over the piecewise-constant PDF representation for a variety of domains and sampling budgets. Our model and PDF representation are versatile and can be applied to almost each of the existing NeRF Models. Our main contributions can be described as follow:
+
+- 1. A finer and more continuous representation of the density distribution along the ray in NeRF based models, which leads to better results for a given number of samples. This allows us to train the model with less computational resources.
+- 2. A novel distribution estimation (DE) loss, which provides an additional path for information to flow from the fine to the coarse model and improve the overall model performance.
+
+# 2 Related Works
+
+Implicit 3D representation: Two of the first methods to achieve very good results for implicit representation of 3D objects were Occupancy Networks [9], which, for a 3D point input, was trained to answer the query: "is this point inside or outside the 3D object?" and DeepSDF [13], which was trained to answer the
+
+
+
+Fig. 1. Hierarchical sampling: The horizontal axis represents the depth axis of the ray for a scene with max depth of 5. First, the coarse samples (blue dots) are taken; then the density values are transformed into a PDF function (blue line). The fine model samples (purple dots) are taken with respect to the coarse model PDF. The orange rectangle represents points that have an influence on the pixel color (similar in both plots). The left plot illustrates the sampling procedure in the regular model, The right plot illustrates our scheme. Notice how when using our representation, the finer samples are concentrated around the informative areas.
+
+query: given an (x, y, z) location in space, what is the distance to the zero-level surface?, where positive and negative distances represent whether the point is located outside or inside the shape. By answering the above queries for enough 3D points in a space, combined with a variant of the marching cube algorithm, the 3D shape of an object can be extracted. These methods became very popular due to their good results, compactness and continuity characteristics. Additional papers, such as Pifu [17] followed and these too tried to answer similar queries to extract 3D shapes. More advanced implicit models, e.g., SAL [2] and SALD [3], were developed to train directly from the row 3D data without using ground truth (GT).
+
+NeRF models: As described above, the NeRF [11] method uses a neural network to imply implicit representation of radiance field for volumetric rendering. It gets an (x, y, z) location and a view direction (φ, θ), and predicts the RGB color and the density α in this location. When this method was published, it achieved state-of-the-art results in the task of novel view synthesis. In the past two years, many works extended the NeRF model to additional tasks and domains. NeRF++ [20] extends the model to unbounded-real world scenes using additional neural network for background modeling and new background parametrization. [8] extend the model for unconstrained image collection and [15] extend it for dynamic scenes. MipNeRF [4] addresses the model aliasing problem with different resolution images. Many works also tried to decrease the computational resources required during training and, especially, the amount of inference time demanded [12] [5] [16] [7].
+
+The connection between sampling around informative depth locations and computational complexity appeared in some of the above-mentioned works. DSNeRF [5] uses some prior depth information to improve training time and output quality when training with a small number of images. NSVF [7] uses sparse voxel fields to achieve better sampling locations. DONeRF [12] improves inference time by using a depth oracle for sampling in informative locations. The depth oracle is trained with GT Depth (or a trained NeRF model) to predict an accurate location for the second stage sampling. DONeRF [12] also uses log-sampling and space warping techniques to increase model quality on areas far from the camera.
+
+# 3 Problem Definition
+
+When looking deeper into the NeRF hierarchical sampling strategy we observed two inherent disadvantages. The first one is that for n samples, the second pass sampling resolution cannot be better than 1 n2 of the scene depth. In other words, even if the first pass predicts that 100 percent of the samples of the second pass should be placed in a single interval, because the PDF along the ray is discrete, the finer sampling will sample this interval uniformly.
+
+To overcome this problem we are forced to use a large number of samples during training (a small number of samples will lead to a non-accurate depth estimation). Another derivative of this problem is that for a deep or unbounded scene, even when using a large number of samples, the model still struggles to achieve good results and there is a trade-off between background to foreground quality (as shown in Nerf++[20]) as a function of the sample's depth range.
+
+The second disadvantage we observed in the traditional NeRF sampling strategy is that most of the samples in the first pass contribute almost nothing to the training process because they predict zero influence from a very early stage in the training until its end. Despite this we still need to use them because of the first problem we mentioned. Figure 2 illustrates the inherent trade-off between the two problems.
+
+
+
+Fig. 2. Left plot: Limited depth resolution when using a small number of samples (inside the green rectangle). Right plot: Many samples with zero contribution (inside the red rectangles).
+
+#### 4.1 Preliminaries
+
+Our model is a direct extension of NeRF [11] and MipNeRF [4]. For this reason we will start by describing those models in more detail.
+
+NeRF As mentioned above, NeRF receives a 5D input: (x, y, z, θ, φ), and produces a 4D output: (R, G, B, σ), where σ is the density of the input point that translates later into opacity α (value between 0 and 1) by considering the distance δ along the ray that is affected by that σ. So, for sample i:
+
+| $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ | (1) |
+|-------------------------------------------|-----|
+|-------------------------------------------|-----|
+
+To avoid confusion with the σ in our model that represents standard deviation, we will omit σ in the notation from now on and refer directly to α. The influence of each sample i on the final color prediction wi , is a combination of the total transparency from sample i to the pixel and sample i opacity value (αi):
+
+
+
+| $w_i = \alpha_i \cdot \prod_{j=0}^{i-1} (1 - \alpha_j) \quad (2)$ |
+|-------------------------------------------------------------------|
+|-------------------------------------------------------------------|
+
+The NeRF architecture is composed of two identical networks (coarse and fine) with eight fully connected (FC) layers. The input is first encoded using positional encoding (PE) and then inserted into the network. As described in section 1 (Introduction), the model use two-stage hierarchical sampling where the wi 's values of the coarse model are normalized and can be interpreted as a discrete PDF h c :
+
+
+$$h^c[i] = \frac{w_i}{\sum_{j=0}^n w_j} \quad (3)$$
+
+The fine model samples the second stage of the hierarchical sampling with respect to h c . Figure 1 (a) illustrates this process. Color rendering is performed using ray marching [14] for volumetric rendering and calculated as follow:
+
+$$\hat{C}(\mathbf{r}) = \sum_{i=1}^n w_i c_i \quad (4)$$
+
+where Cˆ(r) is the predicted pixel color for ray r, ci is the RGB prediction for sample i and wi is the influence that sample i has on the final RGB image. Cˆ c(r) and Cˆ f (r) are the coarse and fine model color predictions. The calculations of wi and ci are made separately for the coarse and the fine models. The loss function is defined as:
+
+
+$$L_{nerf} = \sum_{r \in R} [\|C(\mathbf{r}) - \hat{C}_f(\mathbf{r})\|^2 + \|C(\mathbf{r}) - \hat{C}_c(\mathbf{r})\|^2] \quad (5)$$
+
+MipNeRF MipNeRF [4] is an extension of the regular NeRF model that was suggested to handle aliasing caused when rendering images at different resolutions or in different distances than the images used in the training process. Instead of a line, MipNeRF refers to a ray as a cone [1] with a vertex in the COP that passes through the relevant pixel with a radius related to the pixel size. The cone is divided into intervals (parts of the cone) along the depth axis and the network receives the encoding of an interval as input. Each ray is divided into n intervals bounded by n + 1 partitions {ti} where interval i is the cone volume bounded between partitions ti and ti+1; see Figure 3 (1). The bounded volumes are encoded using the novel integrated positional encoding (IPE) method for volume encoding before being passed through the network. With this new ray representation the model can understand the entire volume that will affect the pixel value. MipNeRF uses a single neural network for both the coarse and the fine passes. The rest of the process is similar to the original NeRF.
+
+In our model we also use the idea that the model predicts information regarding the interval of a cone and not for a point on a ray.
+
+### 4.2 General Description
+
+As mentioned above, we are trying to extract additional information about the distribution of the density along the ray from our coarse model. We will show that a more accurate estimation of the influence distribution of the density along the ray predicted by the coarse network will lead to better fine samples and improved results.
+
+To distinguish between the coarse and fine samples, we denote T c = {t c i } n i=0 as the coarse model samples and T f = {t f i } n i=0 as the fine model samples. Similar to MipNeRF, our coarse model gets, as an input, an interval of a cone, but in addition to the regular RGBα output, it also predicts an estimation of the density influence distribution inside this section. More specifically, it predicts the mean µ and s.t.d. σ of the distribution inside that interval. We assume the distribution inside each interval is Gaussian and it does not affect or is affected by adjacent intervals. The importance of this assumption will be explained later in this section.
+
+The coarse network learns to predict the distribution by trying to mimic the fine network distribution. We assume that the fine network has a better estimation of the density along the ray. This process will be described in more detail in Section 4.3. The entire pipeline of our model is shown in Figure 3.
+
+Architecture: We use the MipNeRF[4] architecture with two modifications: (1) We use two different networks for the coarse and fine models - similar to what was done in the original NeRF paper. (2) We change the final FC layer of the coarse model, adding µ and σ to the predictions.
+
+Similar to MipNeRF, we use IPE to encode the input sections before inserting them into the network. Although we chose to use the MipNeRF model, our model can be integrated with any variant of NeRF that uses hierarchical sampling by changing the coarse model.
+
+
+
+Fig. 3. DDNeRF full pipeline: (1) Drawing a cone in space and splitting it into relatively uniform intervals along the depth axis. (2) Pass these intervals through an IPE and then through the coarse network to get predictions. (3) Render the coarse RGB image. (4) Approximate the density distribution and include the interval's internal distribution inside the coarse sections boundaries (red dots); then sample the fine samples (green dots). (5) Pass these samples through an IPE and thereafter through the fine network to get predictions. (6) Render the final RGB image and depth map.
+
+#### 4.3 Estimation of Density Distribution
+
+The predicted µ and σ are limited to be in the range between 0 and 1. Those constraint are implemented by passing the predicted values through the sigmoid activation function. Those values are interpreted relatively to length of the interval. the notation µ r i , σ r i stands for the relative mean and s.t.d. of interval i. The transformation from the relative interpretation to the absolute location and scale along the ray (µi , σi) is calculated as follows:
+
+$$\mu_i = t_i^c + \mu_i^r \cdot (t_{i+1}^c - t_i^c) \quad (6)$$
+
+$$\sigma_i = \sigma_i^r \cdot (t_{i+1}^c - t_i^c) \quad (7)$$
+
+These additional outputs allow us to achieve a finer distribution estimation along the ray. That means that, in addition to the discrete PDF estimation h c between the intervals, we also estimate the distribution inside each interval. The total distribution along the ray is approximated as a combination of Gaussian distributions (one Gaussian for each interval) that allows us to focus the fine samples in a smaller area along the ray. The PDF inside interval i is denoted as fi(t) = N (t|µi , σi) and its CDF denoted as Fi(t) = R t −∞ fi(τ )dτ . Because we want fi to be bounded inside the interval, we need to truncate the Gaussian to be inside the interval boundaries, normalize it and define a truncated Gaussian distribution f 0 . The truncated Gaussian distribution f 0 i inside interval i is defined as follows:
+
+$$f_i'(t) = \frac{1}{k_i} \cdot f_i(t) \quad ; \quad k_i = F_i(t_{i+1}) - F_i(t_i) \quad (8)$$
+
+The truncation procedure is illustrated in Figure 4 (a). The discrete function h c between the intervals is calculated as is done in the regular NeRF model (eq. \(3\)). The total density distribution estimated by the coarse model is a mixture of the truncated Gaussian models when h c is used as the Gaussian weights. This distribution is denoted as fdd. The calculation of fdd is defined in eq. \(9\). The entire procedure illustrated in Figure 4.
+
+
+
+| $f_{dd}(t) = h^c[i] \cdot f_i'(t)$ | when | $t \in [t_i, t_{i+1}]$ | (9) |
+|------------------------------------|------|------------------------|-----|
+|                                    |      |                        |     |
+
+
+
+Fig. 4. (a) The PDF truncation process. The tails that exceed the section boundaries are gray. The blue and orange curves are the PDF before (fi) and after (f 0 i ), i.e., before and after the truncation. (b) Different interval truncated PDF distributions and weights. Each color represents an interval. The vertical dashed lines are the interval bounds and the horizontal lines are the intervals weights (h c ). (c) The union of all distributions into one finer distribution fdd.
+
+The main reason we prefer the mixture of truncated Gaussians over the regular mixture of Gaussians is that we want each Gaussian to affect only a single interval. This property is necessary for two reasons. First, because the model calculates each interval independently; we do not want the results of one interval to affect others. Second, assigning each Gaussian to one specific interval allows us to calculate the second pass samples and the additional loss component (described below) efficiently and without requiring significant extra time or memory.
+
+Distribution Estimation (DE) Loss: To help the coarse network learn to approximate the density distribution, we assume that the density distribution of the fine network is always closer to the real density distribution. Hence we are forcing the predicted coarse distribution to be close to the fine one. The fine PDF function h f is a discrete function computed similarly to eq. \(3\) with respect to density output α of the fine samples T f . We want to estimate h f by using the coarse model PDF function fdd. We use hˆf to denote the estimated h f . Because fdd is defined for every location on the ray, we can estimate hˆf using fdd and its CDF function Fdd as follows:
+
+$$\hat{h}^f[i] = Pr(t'_i \leq t \leq t'_{i+1}) = \int_{t'_i}^{t'_{i+1}} f_{dd}(t) dt = F_{dd}(t'_{i+1}) - F_{dd}(t'_i) \quad (10)$$
+
+We use KL divergence to measure the divergence between the two discrete probabilities h f and hˆf . Using the KL loss naively tends to push µ and σ toward values close to 0 or 1 and impairs the model convergence (by over-shrinking the Gaussians or leading the model predictions to the vanishing gradient area of the sigmoid function). To avoid these issues, we add two regularization terms encouraging the Gaussian (before truncation) to remain in the center of the interval, with s.t.d. large enough to avoid over-shrinking. This regularization also keeps the model inside the effective range of the sigmoid function. The regularization components of the loss function are X µ 2 raw and X σ 2 raw where
+
+i i µraw and σraw are the model outputs values before passing through the sigmoid function to limit the range to be between 0 to 1. The overall DE loss is defined as:
+
+---
+
+$$DE_{Loss} = KL(\hat{h}^f, h^f) + \frac{1}{n} \cdot (\lambda_\mu \sum_i \mu_{raw}^2 + \lambda_\sigma \sum_i \sigma_{raw}^2) \quad (11)$$
+
+where n is the number of coarse samples and λµ and λσ are the regularization coefficients. We set the coefficient values to be in the range 0.01 to 0.1. The specific value depends on the number of samples along the rays (the specific value for n samples is approximately 0.8 n ).
+
+The DELoss is added to the regular NeRF loss (eq. \(5\)) so the overall loss is:
+
+$$L = L_{nerf} + \lambda_{DE} \cdot DE_{Loss} \quad (12)$$
+
+where λDE is the DELoss coefficient, set to be 0.1 in our experiments.
+
+#### 4.4 Sampling and Smoothing
+
+Except for the unbounded scene case, the first sampling stage in our model is always sampled uniformly along the ray. As in MipNerf, we use a 2-tap max filter followed by a 2-tap blur filter for smoothing h c before sampling the second stage. For a small number of samples (up to 16), the smoothness method became a simple 1D blur filter with [0.1, 0.8, 0.1] values during training, which helps us to achieve better accuracy in space (we found that this method works better for a small samples number in most scenes). For internal interval smoothing we defined an uncertainty factor u ≥ 1 that smooths the truncated f 0 Gaussians inside the intervals by increasing σ: σˆ = u · σ. This uncertainty factor is decreased during training toward 1 and it corresponds to our increased certainty in the fine network depth estimation. Using this strategy also helps our model refine the second stage sample locations throughout the entire training process, while MipNeRF retains similar location from early stage in the training process. Figure 5 visualizes the differences between the two sampling methods.
+
+
+
+Fig. 5. Density distribution during training. Training with eight intervals: 50k iterations (left), 200k iterations (middle), RGB image after 200k iterations (right). The blue line is h c and the green line is fdd. The red line is the smoothed fdd; note how the divergence between the red and green curves has closed during training as u decreased toward 1. The blue dots are the coarse samples. The purple dots are the fine samples and the purple line is h f . Our model (second row) keeps refining its fine sample's locations, while the MipNeRF sample's locations remain relatively similar from 50K to 200K iterations. Our model also achieves more accurate samples and a better RGB image than the regular model (first row).
+
+For an unbounded scene first pass, we also tried a different sampling strategy, of two methods. Similar to NeRF++[20], we dedicated half of the samples to uniformly sample the volume below radius 1 from the origin (the scene center). Outside the sphere we use the DONeRF log-sampling method [12]. The second sampling stage remained the same. This method performed better for these scenes. Detailed results are described in Section 5.
+
+# 5 Experiments
+
+We tested our model in three main domains: real-life forward facing scenes, synthetic 360◦ scenes and real life 360◦ scenes. We compare the model's performance for different sampling budgets. We used the same number of samples for the coarse and fine networks. Thus, the number of samples listed in the results refers to one network. We used three different metrics when evaluating our results: structural similarity (SSIM), perceptual (LPIPS) and PSNR. We divide our experiments into two parts. In part one, we focus on domains in which NeRF achieved excellent results: real-life forward facing and synthetic 360◦ , part two contains domains that NeRF is struggling with: real life 360◦ bounded and unbounded. All our training used a single GeForce GTX 1080.
+
+Part 1: For the forward facing scene we chose the fern scene from the LLFF paper [10]. We used the NDC transformation as in NeRF and MipNeRF. For
+
+the synthetic 360◦ scene we chose the LEGO scene from the NeRF [11] example datasets. We trained each model with 200K iterations using 2048 rays per iteration. To challenge the model we reduced the number of samples and repeated the training routine several times. Each time we used different numbers of samples along the rays – 4, 8, 16, 32. Validation was performed using the same number of samples as in the training. We compare our results with those of MipNeRF, which trained and validated the model results under the same conditions. Results are presented in Table 1 and in Figure 6. Our model achieved better results in each one of the evaluation metrics for every number of samples.
+
+Table 1. Experiment results on the LLFF fern dataset (real-world forward facing) and synthetic 360 deg LEGO scene. We trained each model for 200k iterations. Our model achieved better results than the regular models for every number of samples.
+
+| Samples | Model   | PSNR  | FERN ↑ SSIM | ↑ LPIPS | ↓ PSNR | LEGO ↑ SSIM | ↑ LPIPS ↓ |
+|---------|---------|-------|-------------|---------|--------|-------------|-----------|
+| 4       | MipNeRF | 20.20 | 0.521       | 0.606   | 21.64  | 0.733       | 0.281     |
+|         | DDNeRF  | 20.81 | 0.577       | 0.507   | 21.79  | 0.741       | 0.274     |
+| 8       | MipNeRF | 21.6  | 0.614       | 0.477   | 24.64  | 0.813       | 0.184     |
+|         | DDNeRF  | 22.23 | 0.659       | 0.384   | 24.92  | 0.836       | 0.160     |
+| 16      | MipNeRF | 23.37 | 0.707       | 0.327   | 27.83  | 0.888       | 0.092     |
+|         | DDNeRF  | 23.51 | 0.727       | 0.285   | 28.67  | 0.917       | 0.062     |
+| 32      | MipNeRF | 23.85 | 0.740       | 0.279   | 30.38  | 0.932       | 0.045     |
+|         | DDNeRF  | 23.87 | 0.748       | 0.264   | 31.53  | 0.948       | 0.031     |
+
+
+
+Fig. 6. Lego results: First row – MipNeRF model. Second row – our model. The number of samples is marked at the top of each column. Our model achieves better results for any number of samples.
+
+Another indication of the additional information our model gathers relative to the other models is its depth estimation. We extract the depth as the mean of the PDF along the ray, for the regular coarse model – E[h c (t)] and for our coarse model – E[fdd(t)]. For the fine models the depth calculated as E[h f (t)]. Our coarse model produces a much better depth estimation than MipNeRF coarse model. Figure 7 shows the qualitative results.
+
+
+
+Fig. 7. Disparity comparisons: Comparison between MipNeRF ans DDNeRF estimated disparity on the fern scene. Both models were trained and evaluated using eight samples and without NDC warping. Notice how the depth estimation of our coarse model is closer to the fine model's estimation than to the MipNeRF coarse model.
+
+Part 2: In the 360◦ domains we did not perform any space warping, excluding scale normalization of the world coordinate such that the main part of the scene is at a maximum distance of 1 from the origins.
+
+For the bounded scene we created our own scene of a motorcycle inside a warehouse. We acquired 200 snapshots from 360◦ views, where 10% of the images were saved for validation purposes. Although its depth is bounded, restoring this scene is not straightforward because it includes a big complex object and many small objects with fine details. We used the COLMAP structure from motion model [19] [18] to extract the relative orientation of the cameras. We trained each model with 300K iterations using 2048 rays per iteration. As in the first part of our experiment, we used a different number of samples. In this case – 32, 64, 96. Results are shown in Table 2 and Figure 8. As can seen from Table 2, our model achieved better results in all metrics for any number of samples. More than that, our 32 sample model achieved better results than the 96 sample Mip-NeRF model. We can also see that our model produced more accurate depth estimation and better RGB prediction, especially around complex shapes (see Figure 8\).
+
+For an unbounded scene we chose the playground scene from the Tanks and Temples dataset [6]. We compare our model with both the MipNeRF and NeRF++ models. We trained and tested each model using 64 and 96 samples. For NeRF++, we split the sample budget equally between the foreground and the background models. For the 96 samples we also compared the unbounded
+
+
+
+Fig. 8. Motorcycle scene results: First row– RGB predictions. Second row– disparity estimation from the fine model results. Our model achieves better depth estimation and better RGB prediction. Notice the crop for how our model is able to catch complex shapes such as the motorcycle's off road tires and the frame and small wheel of the tool cart.
+
+Table 2. Experiments results for real world 360 deg scenes. "Smpl" column stands for the number of samples in each of the networks (coarse and fine). All models were trained for 300K iterations. The left part of the table compares DDNeRF with MipNeRF for different numbers of samples. The right part compare alse to NeRF++ model.
+
+| Smpl | Bounded Model | scene – PSNR ↑ | Motorcycle SSIM ↑ | LPIPS ↓ | Smpl | Unbounded Model | scene – PSNR ↑ | Playground SSIM ↑ | LPIPS ↓ |
+|------|---------------|----------------|-------------------|---------|------|-----------------|----------------|-------------------|---------|
+| 32   | MipNeRF       | 20.36          | 0.533             | 0.532   |      | MipNeRF         | 21.47          | 0.547             | 0.540   |
+|      | DDNeRF        | 20.84          | 0.577             | 0.453   | 64   | DDNeRF          | 21.71          | 0.568             | 0.498   |
+| 64   | MipNeRF       | 20.7           | 0.554             | 0.502   |      | NeRF++          | 21.73          | 0.575             | 0.524   |
+|      | DDNeRF        | 21.07          | 0.592             | 0.422   |      | MipNeRF         | 21.67          | 0.551             | 0.550   |
+| 96   | MipNeRF       | 20.8           | 0.563             | 0.488   | 96   | DDNeRF          | 21.69          | 0.569             | 0.498   |
+|      | DDNeRF        | 21.12          | 0.593             | 0.418   |      | NeRF++          | 21.74          | 0.589             | 0.511   |
+|      |               |                |                   |         |      | DDNeRF*         | 21.43          | 0.596             | 0.451   |
+
+scene sampling method that we described in Section 4.4. The model is notate as DDNeRF\* in Table 2. Our model achieved the best LPIPS and SSIM scores from the models we tested. NeRF++ achieved a better PSNR score (see Table 2\). When looking at the output images we can see that our model achieved better quality in the foreground and in the close background parts but struggles with far background parts; see Figure 9
+
+
+
+Fig. 9. DDNeRF vs NeRF++: Left image rendered using the DDNeRF\* model, the right image using NeRF++. Notice that DDNeRF works better for the large foreground object. Two left crops: Far background – NeRF++ works better. Two middle crops: Small foreground objects – DDNeRF works better. Two right crops: Combination of foreground and close background – DDNeRF works better.
+
+## 6 Conclusions
+
+In this paper we introduced DDNeRF. An extension of the MipNeRF model that produces more accurate representation of the density along the rays while improving the sampling procedure and the overall results. We showed that our model provides superior results on various domains and sample numbers. Our model uses fewer computational resources and produces better results.
+
+Our new representation of the density distribution along the ray and our novel DE loss are general and can be adjusted to more NeRF variations.
+
+For unbounded scenes, despite the good results we got, we believe that combining our model for foreground and close background together with the NeRF++ [20] background model will lead to better results. We leave this for future work.
+
+Acknowledgements This work was supported by the Israeli Ministry of Science and Technology under The National Foundation for Applied Science (MIA), and was partially supported by the Israel Science Foundation (grant No. 1574/21).
+
+- 1. Amanatides, J.: Ray tracing with cones. SIGGRAPH Comput. Graph. 18(3), 129–135 (jan 1984). [https://doi.org/10.1145/964965.808589,](https://doi.org/10.1145/964965.808589) [https://doi.org/](https://doi.org/10.1145/964965.808589) [10.1145/964965.808589](https://doi.org/10.1145/964965.808589)
+- 2. Atzmon, M., Lipman, Y.: Sal: Sign agnostic learning of shapes from raw data. In: IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) (June 2020)
+- 3. Atzmon, M., Lipman, Y.: SALD: sign agnostic learning with derivatives. In: 9th International Conference on Learning Representations, ICLR 2021 (2021)
+- 4. Barron, J.T., Mildenhall, B., Tancik, M., Hedman, P., Martin-Brualla, R., Srinivasan, P.P.: Mip-nerf: A multiscale representation for anti-aliasing neural radiance fields. ICCV (2021)
+- 5. Deng, K., Liu, A., Zhu, J.Y., Ramanan, D.: Depth-supervised nerf: Fewer views and faster training for free (2021)
+- 6. Knapitsch, A., Park, J., Zhou, Q.Y., Koltun, V.: Tanks and temples: Benchmarking large-scale scene reconstruction. ACM Transactions on Graphics 36(4) (2017)
+- 7. Liu, L., Gu, J., Lin, K.Z., Chua, T.S., Theobalt, C.: Neural sparse voxel fields. NeurIPS (2020)
+- 8. Martin-Brualla, R., Radwan, N., Sajjadi, M.S.M., Barron, J.T., Dosovitskiy, A., Duckworth, D.: NeRF in the Wild: Neural Radiance Fields for Unconstrained Photo Collections. In: CVPR (2021)
+- 9. Mescheder, L., Oechsle, M., Niemeyer, M., Nowozin, S., Geiger, A.: Occupancy networks: Learning 3d reconstruction in function space. In: Proceedings IEEE Conf. on Computer Vision and Pattern Recognition (CVPR) (2019)
+- 10. Mildenhall, B., Srinivasan, P.P., Ortiz-Cayon, R., Kalantari, N.K., Ramamoorthi, R., Ng, R., Kar, A.: Local light field fusion: Practical view synthesis with prescriptive sampling guidelines. ACM Transactions on Graphics (TOG) (2019)
+- 11. Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R., Ng, R.: Nerf: Representing scenes as neural radiance fields for view synthesis. In: ECCV (2020)
+- 12. Neff, T., Stadlbauer, P., Parger, M., Kurz, A., Mueller, J.H., Chaitanya, C.R.A., Kaplanyan, A.S., Steinberger, M.: DONeRF: Towards Real-Time Rendering of Compact Neural Radiance Fields using Depth Oracle Networks. Computer Graphics Forum 40(4) (2021). [https://doi.org/10.1111/cgf.14340,](https://doi.org/10.1111/cgf.14340) [https://doi.org/10.](https://doi.org/10.1111/cgf.14340) [1111/cgf.14340](https://doi.org/10.1111/cgf.14340)
+- 13. Park, J.J., Florence, P., Straub, J., Newcombe, R., Lovegrove, S.: Deepsdf: Learning continuous signed distance functions for shape representation (2019)
+- 14. Perlin, K., Hoffert, E.M.: Hypertexture. In: Proceedings of the 16th Annual Conference on Computer Graphics and Interactive Techniques. p. 253–262. SIG-GRAPH '89, Association for Computing Machinery, New York, NY, USA (1989). [https://doi.org/10.1145/74333.74359,](https://doi.org/10.1145/74333.74359) 
+- 15. Pumarola, A., Corona, E., Pons-Moll, G., Moreno-Noguer, F.: D-nerf: Neural radiance fields for dynamic scenes. CoRR abs/2011.13961 (2020), [https://arxiv.](https://arxiv.org/abs/2011.13961) [org/abs/2011.13961](https://arxiv.org/abs/2011.13961)
+- 16. Reiser, C., Peng, S., Liao, Y., Geiger, A.: Kilonerf: Speeding up neural radiance fields with thousands of tiny mlps. CoRR abs/2103.13744 (2021), [https:](https://arxiv.org/abs/2103.13744) [//arxiv.org/abs/2103.13744](https://arxiv.org/abs/2103.13744)
+- 17. Saito, S., Huang, Z., Natsume, R., Morishima, S., Kanazawa, A., Li, H.: PIFu: Pixel-Aligned Implicit Function for High-Resolution Clothed Human Digitization.
+
+- arXiv:1905.05172 [cs] (May 2015), , arXiv: 1905.05172
+- 18. Schönberger, J.L., Frahm, J.M.: Structure-from-Motion Revisited. In: Conference on Computer Vision and Pattern Recognition (CVPR) (2016)
+- 19. Schönberger, J.L., Zheng, E., Pollefeys, M., Frahm, J.M.: Pixelwise View Selection for Unstructured Multi-View Stereo. In: European Conference on Computer Vision (ECCV) (2016)
+- 20. Zhang, K., Riegler, G., Snavely, N., Koltun, V.: Nerf++: Analyzing and improving neural radiance fields. arXiv:2010.07492 (2020)

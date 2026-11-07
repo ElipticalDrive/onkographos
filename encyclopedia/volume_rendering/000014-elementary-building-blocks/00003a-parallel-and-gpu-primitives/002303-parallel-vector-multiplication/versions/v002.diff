@@ -1,0 +1,107 @@
+--- v001.md
++++ v002.md
+@@ -4,72 +4,67 @@
+ 
+ ## Overview
+-Parallel Vector Multiplication is a fundamental GPU primitive where each thread independently multiplies corresponding elements from two input arrays to produce an output array. It solves the problem of element-wise vector scaling or Hadamard product computation at massive scale by mapping one thread per data element. It is distinct from sibling primitives like [Parallel Prefix Sum](2593-parallel-prefix-sum-scan-orchestration.md) (which requires inter-thread dependency) or [Atomic Fragment List Insertion](2465-atomic-fragment-list-insertion.md) (which requires synchronization), as it involves no communication between threads.
++Parallel Vector Multiplication is a fundamental GPU primitive where each thread independently multiplies corresponding elements from two input arrays to produce an output array [S1, unofficial]. It solves the problem of element-wise vector scaling or Hadamard product computation at massive scale by mapping one thread per data element [G]. It is distinct from sibling primitives like [Parallel Prefix Sum](2593-parallel-prefix-sum-scan-orchestration.md) (which requires inter-thread dependency) or [Atomic Fragment List Insertion](2465-atomic-fragment-list-insertion.md) (which requires synchronization), as it involves no communication between threads [G].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Two arrays of floating-point values, $A$ and $B$, of size $N$.
+-- Output: One array $C$ of size $N$, where $C[i] = A[i] \times B[i]$.
++- Input: Two arrays of floating-point values, $A$ and $B$, of size $N$ [S2, unofficial].
++- Output: One array $C$ of size $N$, where $C[i] = A[i] \times B[i]$ [S2, unofficial].
+ 
+ **Data Structures:**
+-- Arrays are stored in global memory.
+-- Data types: `float` (32-bit) is standard. Vector types `float2`, `float3`, `float4`, `float8`, and `float16` are supported to increase arithmetic throughput per instruction [S2, unofficial].
+-- In specific applications like compressive rendering, the vectors may represent sampling matrices where $S^T S x$ operations involve inserting zeros for missing pixels [S1, unofficial].
++- Arrays are stored in global memory [S2, unofficial].
++- Data types: `global const float *` for inputs and `global float *` for output [S2, unofficial].
++- Vector types `float2`, `float3`, `float4`, `float8`, and `float16` are supported to increase arithmetic throughput per instruction [S2, unofficial].
++- In compressive rendering contexts, vectors may represent sampling matrices where $S^T S x$ operations insert 0 in the location of missing pixels [S1, unofficial].
+ 
+ **Steps:**
+-1. The GPU kernel is launched with a grid of threads sized to cover the entire vector length $N$.
+-2. Each thread calculates its unique global index $id$.
+-3. The thread reads $A[id]$ and $B[id]$ from global memory.
+-4. The thread computes the product $P = A[id] \times B[id]$.
+-5. The thread writes $P$ to $C[id]$ in global memory.
++1. The GPU kernel is launched with a grid of threads sized to cover the entire vector length $N$ [G].
++2. Each thread calculates its unique global index $id$ using `get_global_id(0)` [S2, unofficial].
++3. The thread reads $A[id]$ and $B[id]$ from global memory [S2, unofficial].
++4. The thread computes the product $P = A[id] \times B[id]$ [S2, unofficial].
++5. The thread writes $P$ to $C[id]$ in global memory [S2, unofficial].
+ 
+-**Pseudocode (OpenCL/CUDA style):**
++**Pseudocode:**
+ ```python
+-# Kernel entry point
+-def vector_multiply_kernel(global_id, a, b, c):
++def vector_multiply_kernel(global_id, a, b, c, n):
+     # 1. Retrieve global unique ID
+     id = global_id
+-    
+-    # 2. Bounds check (G: Standard guard to prevent out-of-bounds access)
+-    if id < length_of_arrays:
+-        # 3. Load inputs
++    # 2. Bounds check to prevent out-of-bounds access
++    if id < n:
++        # 3. Load inputs from global memory
+         val_a = a[id]
+         val_b = b[id]
+-        
+         # 4. Multiply
+         result = val_a * val_b
+-        
+-        # 5. Store output
++        # 5. Store output to global memory
+         c[id] = result
+ ```
+ 
+ **Parameters:**
+-- **Vector Width:** Using `float4` or `float8` can improve performance by coalescing memory accesses and utilizing SIMD units effectively [S2, unofficial].
+-- **Memory Coalescing:** Threads in a warp (32 threads in CUDA) should access contiguous memory locations to maximize bandwidth [S1, unofficial].
++- **Vector Width:** Vector types `float2`, `float3`, `float4`, `float8`, and `float16` are supported, with arithmetic operations on these types being as fast or faster than scalar floats [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision:** Floating-point multiplication is associative but not distributive over addition in finite precision; however, for element-wise multiplication, this is rarely an issue unless combined with other ops.
+ - **Boundaries:** If $N$ is not a multiple of the grid size, a bounds check is required [G].
+ - **Missing Pixels:** In compressive rendering contexts, "multiplication" may involve sparse matrices where missing pixels are treated as zero [S1, unofficial].
++
++## Operating characteristics
++- **Time Complexity:** $O(N)$, where $N$ is the number of elements [G].
++- **Memory Complexity:** $O(N)$ for input and output arrays [G].
++- **Performance:** Massive calculations (e.g., $S^T S x$ in compressive rendering) complete in a few milliseconds using CUDA [S1, unofficial]. Modern GPUs feature between 16 and 480 stream processors, with adding processors halving calculation time [S2, unofficial].
++- **Strengths:** Extremely high throughput for independent element-wise operations with minimal synchronization overhead [G].
++- **Limitations:** Does not handle dependencies between elements, and memory bandwidth becomes the primary bottleneck due to low arithmetic intensity [G].
++
++## Background
++The method originates from early GPU computing frameworks like CUDA and OpenCL, leveraging the SIMT (Single Instruction, Multiple Threads) architecture [G]. It is used in compressive rendering for applying large sampling matrices [S1, unofficial]. It also accelerates raycasting and raytracing by distributing independent pixel calculations across multiprocessors [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Tiled Parallel Compositing
+-Uses vector multiplication for opacity/color blending within tiles.
++Groups pixels into tiles to reduce memory latency and enable shared memory usage [G]. It differs from global compositing by optimizing cache locality and is chosen for high-resolution volumes [G]. [Tiled Parallel Compositing](1192-tiled-parallel-compositing.md)
+ 
+ ### Parallel Direct Compositing
+-Relies on element-wise multiplication for ray-marching contributions.
++Computes final pixel colors directly without intermediate buffers [G]. It avoids the overhead of fragment lists and is chosen for simple transparency models [G]. [Parallel Direct Compositing](3201-parallel-direct-compositing.md)
+ 
+ ### Subgroup Operations
+-Can optimize vector multiplication within a warp using shuffle instructions if further reduction is needed.
+-
+-## Operating characteristics
+-- **Time Complexity:** $O(N)$, where $N$ is the number of elements. The operation is memory-bound rather than compute-bound for simple multiplication, as the arithmetic intensity is low (1 mul, 2 loads, 1 store).
+-- **Memory Complexity:** $O(N)$ for input and output arrays.
+-- **Performance:** Massive calculations (e.g., $S^T S x$ in compressive rendering) can be done in milliseconds [S1, unofficial]. Modern GPUs with 16 to 480+ stream processors scale linearly with hardware capability [S2, unofficial].
+-- **Strengths:** Extremely high throughput for independent element-wise operations; minimal synchronization overhead.
+-- **Limitations:** Does not handle dependencies between elements; memory bandwidth can become a bottleneck if vector width is not optimized.
+-
+-## Background
+-The method originates from early GPU computing frameworks like CUDA and OpenCL, leveraging the SIMT (Single Instruction, Multiple Threads) architecture. It is widely used in volume rendering for tasks such as compressive rendering, where large sampling matrices are applied [S1, unofficial], and in standard raycasting for independent pixel processing [S2, unofficial].
++Executes instructions across hardware subgroups to share data without global memory [G]. It differs from thread-level primitives by enabling fast intra-group communication and is chosen for reductions or shuffles [G]. [Subgroup Operations](3683-subgroup-operations.md)
+ 
+ ## Sources

@@ -1,0 +1,349 @@
+--- v003.md
++++ v004.md
+@@ -4,293 +4,74 @@
+ 
+ ## Overview
+-SfMNeRF is a method for novel view synthesis and 3D-scene geometry reconstruction that improves Neural Radiance Fields (NeRF) under sparse input conditions by integrating Structure-from-Motion (SfM) constraints into the training loop [S1]. It addresses the geometric inaccuracies and local minima common in sparse NeRF optimization by explicitly enforcing epipolar geometry, multi-view photometric consistency, depth smoothness, and feature position consistency [S1]. Unlike standard NeRF which relies solely on implicit volume rendering losses, SfMNeRF leverages sparse SIFT features and cross-view warping to constrain the 3D structure, combined with a pyramidal training strategy to handle large pixel motions [S1].
++SfMNeRF is a neural radiance field optimization method designed to improve novel view synthesis and 3D-scene geometry reconstruction under sparse input conditions [S1]. It addresses the geometric ambiguity and local minima issues inherent in standard NeRF by integrating explicit Structure-from-Motion (SfM) constraints—specifically matched feature positions, epipolar geometry, and multi-view photometric consistency—into the training loop [S1]. Unlike implicit NeRF methods that rely solely on photometric loss, SfMNeRF enforces geometric priors via SIFT feature matching and depth smoothness, utilizing a pyramidal training strategy to handle large pixel motions [S1].
+ 
+ ## How it works
+-### Inputs and Outputs
+ **Inputs:**
+-*   A set of $N$ images $\{I_i\}$ with known camera intrinsics $K$ and global poses $[\mathbf{r}_i, \mathbf{t}_i]$ [S1].
++*   A set of input images with known camera intrinsics $K$ and global poses $[\mathbf{r}_t, \mathbf{t}_t]$ [S1].
+ *   Matched Scale-Invariant Feature Transform (SIFT) correspondences between image pairs [S1].
+-*   A Neural Radiance Field model $f_\Theta$ (MLP) mapping $(\mathbf{x}, \mathbf{d}) \rightarrow (\sigma, \mathbf{c})$ [S1].
++*   A Neural Radiance Field (MLP) parameterized by $\theta$, mapping 3D coordinates $\mathbf{x}$ and viewing directions $\mathbf{d}$ to volume density $\sigma$ and color $\mathbf{c}$ [S1].
+ 
+ **Outputs:**
+-*   Optimized NeRF parameters $\Theta$ [S1].
++*   Optimized NeRF parameters $\theta$ [S1].
+ *   Synthesized novel views and depth maps [S1].
+ 
+-### Data Structures
+-*   **Camera Intrinsic Matrix ($K$):** $3 \times 3$ matrix [S1].
+-*   **Global Pose:** $[\mathbf{r}_i, \mathbf{t}_i]$ where $\mathbf{r}_i \in SO(3)$ and $\mathbf{t}_i \in \mathbb{R}^3$ [S1].
+-*   **Relative Pose ($T_{r \to t}$):** $4 \times 4$ transformation matrix derived from global poses: $\mathbf{r} = \mathbf{r}_t^{-1}$, $\mathbf{t} = -\mathbf{r}_t^{-1}\mathbf{t}_t$ [S1].
+-*   **SIFT Features:** Set of matched 2D pixel coordinates $\{p^k\}$ between reference and target images [S1].
+-*   **Mask Map ($M$):** Binary mask where $M(p(k))=1$ if point $p(k)$ is within the minimum bounding rectangle of all matched SIFT features in the reference image, else $0$ [S1].
+-*   **Depth Map ($D$):** Estimated depth for each pixel [S1].
++**Data Structures:**
++*   **Camera Intrinsic Matrix:** $K$ [S1].
++*   **Relative Pose:** $T_{r \to t} = [\mathbf{r}, \mathbf{t}]$, derived from global poses [S1].
++*   **Mask Map:** $M(p(k))$, a binary map where $M=1$ if point $p(k)$ is within the minimum bounding rectangle of matched SIFT features in the reference image, else $0$ [S1].
++*   **Depth Map:** $D$, estimated per pixel via volume rendering integration [S1].
+ *   **Pyramid Levels:** $L$ levels of image representations $I^0, \dots, I^{L-1}$, where $I^n$ is half the resolution of $I^{n-1}$ [S1].
+ 
+-### Numbered Steps
++**Numbered Steps:**
+ 
+-1.  **Pyramidal Setup:** Construct an $L$-level image pyramid for the reference image $I_r$ and target image $I_t$. Start optimization at the lowest resolution level $L-1$ [S1].
+-2.  **Feature Extraction:** Extract SIFT features from $I_r$ and $I_t$. Match features to obtain correspondences [S1].
+-3.  **Sub-pixel Sampling:** For a random patch $\Omega_p$ in the reference image, generate sub-pixel coordinates $p = (x + x_{off}, y + y_{off})$ where $x_{off}, y_{off} \in (0, 1)$ [S1].
+-4.  **Ground Truth Interpolation:** Compute ground-truth color $\hat{I}(p)$ for sub-pixels via bilinear interpolation of the four nearest integer pixels in the reference image [S1].
+-5.  **NeRF Rendering:** Input sub-pixel coordinates and viewing directions into the NeRF MLP to obtain volume density $\sigma$ and color $\mathbf{c}$. Compute rendered color $\tilde{I}(p)$ and depth $D(p)$ using standard volume rendering integration [S1].
+-6.  **3D Coordinate Estimation:** Calculate the 3D coordinate $\mathbf{x}_s$ for each SIFT feature $k$ using the weighted sum of samples along the ray:
+-    $$ \mathbf{x}_s = \sum_{j=1}^{N_c} w_j (\mathbf{o} + t_j \mathbf{d}), \quad w_j = T_j (1 - \exp(-\sigma_j \delta_j)) $$
+-    where $\delta_j = t_{j-1} - t_j$ and $N_c$ is the number of samples [S1].
+-7.  **Loss Computation:** Calculate the following loss components:
+-    *   **Rendering Loss ($L_{ren}$):** Mean squared error between interpolated ground truth $\hat{I}(p)$ and rendered color $\tilde{I}(p)$ [S1].
+-    *   **Position-of-Matches Loss ($L_{3D}$):** Distance between 3D coordinates of matched SIFT features in reference and target views [S1].
+-    *   **Epipolar Loss ($L_{epi}$):** Minimum distance between the 3D coordinate of a reference point and points on the epipolar line in the target view, filtered by color similarity [S1].
+-    *   **Photometric Consistency Loss ($L_{pr}$):** L1 difference between reference patch colors and warped target patch colors, masked by $M$ [S1].
+-    *   **SSIM Loss ($L_{SSIM}$):** Structural Similarity index between reference and warped target patches, masked by $M$ [S1].
+-    *   **Depth Smoothness Loss ($L_{ds}$):** Weighted L1 norm of depth gradients, weighted by image gradient magnitude [S1].
+-    *   **Depth Prior Loss ($L_{depth}$):** (Only at levels $n < L-1$) L1 difference between current depth and bilinearly interpolated depth from the previous lower-resolution level [S1].
+-8.  **Optimization:** Minimize total loss $L_{total}$ using Adam optimizer [S1].
+-9.  **Pyramidal Progression:** Recursively move to level $n-2$, using the depth map from level $n-1$ as a prior via $L_{depth}$, until reaching level 0 [S1].
++1.  **Pyramid Construction:** Construct an $L$-level image pyramid for the reference image $I_r$ and target image $I_t$. $I^0$ is the original image; $I^n$ is downsampled from $I^{n-1}$ with half the resolution [S1].
++2.  **Initialization:** Start optimization at the lowest pyramid level $L-1$ using images $I^{L-1}_r$ and $I^{L-1}_t$ [S1].
++3.  **Sub-pixel Sampling:** For a randomly selected patch $\Omega_p$ in the reference image, generate sub-pixel coordinates $p = (x + x_{off}, y + y_{off})$ where $x_{off}, y_{off} \in (0, 1)$ [S1].
++4.  **Ground Truth Interpolation:** Compute the ground-truth color $\hat{I}(p)$ for each sub-pixel via bilinear interpolation of the four nearest integer-pixel neighbors in the reference image [S1].
++5.  **NeRF Rendering:** Input sub-pixel coordinates and viewing directions into the NeRF to obtain volume density $\sigma$ and color $\mathbf{c}$ along the ray [S1].
++6.  **3D Coordinate Estimation:** Calculate the 3D coordinate $\mathbf{x}_s$ of SIFT features and rendered pixels using the weighted sum of samples:
++    $$ \mathbf{x}_s = \sum_{j=1}^{N_c} w_j (\mathbf{o} + t_j \mathbf{d}) $$
++    where $w_j = T_j (1 - \exp(-\sigma_j \delta_j))$, $\delta_j = t_{j-1} - t_j$, $N_c$ is the number of samples, $\mathbf{o}$ is the camera origin, and $\mathbf{d}$ is the viewing direction [S1].
++7.  **Loss Computation:** Compute the following loss components:
++    *   **Rendering Loss ($L_{ren}$):** Mean squared error between interpolated ground-truth sub-pixel colors $\hat{I}(p_i)$ and synthesized colors $\tilde{I}(p_i)$ [S1]:
++        $$ L_{ren} = \frac{1}{m} \sum_{p_i \in \Omega_p} \left\| \hat{I}(p_i) - \tilde{I}(p_i) \right\|_2^2 $$
++    *   **Positions-of-Matched Features Loss ($L_{3D}$):** Minimizes the distance between 3D coordinates of matched SIFT features in reference ($\mathbf{x}_s^k$) and target ($\mathbf{x}_{s'}^k$) images [S1]:
++        $$ L_{3D} = \frac{1}{n} \sum_{k=1}^n \|\mathbf{x}_s^k - \mathbf{x}_{s'}^k\|_2^2 $$
++    *   **Epipolar Constraint Loss ($L_{epi}$):** Minimizes the distance between the 3D coordinate of a reference point $d_{p_r}$ and points $d_{p_t}$ on the epipolar line in the target image. Implausible points are filtered by color similarity threshold [S1]:
++        $$ L_{epi} = \min_t \left\{ \left\| d_{p_r} - d_{p_t} \right\|_2^2 \right\} $$
++    *   **Photometric Reconstruction Loss ($L_{pr}$):** Warps pixels from the reference patch to the target view using relative pose $T_{r \to t}$ and compares colors. The relative pose is defined as $\mathbf{r} = \mathbf{r}_t^{-1}$ and $\mathbf{t} = -\mathbf{r}_t^{-1}\mathbf{t}_t$ [S1]:
++        $$ L_{pr} = \sum_{p(k) \in \Omega_p} M(p(k)) \left| \hat{I}_r(p(k)) - \hat{I}_t(\hat{p}_t(k)) \right| $$
++        where $\hat{p}_t = K T_{r \to t} \mathbf{x}_p$ [S1].
++    *   **SSIM Loss ($L_{SSIM}$):** Structural Similarity index between reference and warped target patches, masked by $M$ [S1]:
++        $$ L_{SSIM} = M \left( \frac{1 - SSIM_{r \to t}}{2} \right) $$
++    *   **Depth Smooth Loss ($L_{ds}$):** Enforces smoothness on the estimated depth map $D$, weighted by image gradient to preserve edges [S1]:
++        $$ L_{ds} = \sum_{p(k) \in \Omega_p} \left| \nabla D ( p(k) ) \cdot \left( e^{-|\hat{I}(p(k))|} \right) \right| $$
++8.  **Total Loss:** Combine losses with weights $\lambda$ [S1]:
++    $$ L_{total} = \lambda_{ren} L_{ren} + \lambda_{3D} L_{3D} + \lambda_{pr} L_{pr} + \lambda_{epi} L_{epi} + \lambda_{SSIM} L_{SSIM} + \lambda_{ds} L_{ds} $$
++9.  **Optimization:** Update NeRF parameters using the Adam optimizer [S1].
++10. **Pyramidal Progression:** If not at level 0, add a depth loss $L_{depth}$ to guide the next higher resolution level $n-1$ using the depth map $D^{L-1}_r$ from level $n$ [S1]:
++    $$ L_{depth} = \sum_{p(k) \in \Omega_p} |D(p(k)) - D_r^{L-1}(p(k)/2)| $$
++    where $D_r^{L-1}(p(k)/2)$ is sampled via bilinear interpolation from the lower-resolution depth map [S1]. Recursively repeat steps 1-9 for levels $L-2$ down to $0$ [S1].
+ 
+-### Formulas
++**Parameters:**
++*   Loss weights: $\lambda_{ren} = 1.0$, $\lambda_{3D} = 1.0$, $\lambda_{pr} = 0.001$, $\lambda_{epi} = 0.0001$, $\lambda_{SSIM} = 0.008$, $\lambda_{ds} = 0.01$ [S1].
++*   Patch size: $32 \times 32$ pixels [S1].
++*   Sampling: Hierarchical sampling with 64 coarse and 64 importance samples [S1].
++*   Optimizer: Adam with $\beta_1 = 0.9, \beta_2 = 0.999$, learning rate $1e-3$ [S1].
+ 
+-**Rendering Loss:**
+-$$ L_{ren} = \frac{1}{m} \sum_{p_i \in \Omega_p} \left\| \hat{I}(p_i) - \tilde{I}(p_i) \right\|_2^2 $$
+-where $\hat{I}(p_i)$ is the ground-truth color from bilinear interpolation and $\tilde{I}(p_i)$ is the synthesized pixel [S1].
+-
+-**Sub-pixel Ground Truth:**
+-$$ \hat{I}(p) = \sum_{i \in \{top, bottom\}, j \in \{left, right\}} w^{ij} I(p^{ij}) $$
+-where $w^{ij}$ is proportional to the inverse Euclidean distance between $p$ and neighbor $p^{ij}$ [S1].
+-
+-**3D Coordinate of SIFT Feature:**
+-$$ \mathbf{x}_s = \sum_{j=1}^{N_c} w_j (\mathbf{o} + t_j \mathbf{d}), \quad w_j = T_j (1 - \exp(-\sigma_j \delta_j)) $$
+-where $\mathbf{o}$ is ray origin, $\mathbf{d}$ is direction, $T_j$ is transmittance, and $\delta_j$ is sample spacing [S1].
+-
+-**Position-of-Matched Features Loss:**
+-$$ L_{3D} = \frac{1}{n} \sum_{k=1}^n \|\mathbf{x}_s^k - \mathbf{x}_{s'}^k\|_2^2 $$
+-where $\mathbf{x}_s^k$ and $\mathbf{x}_{s'}^k$ are 3D coordinates of matched feature $k$ in reference and target images [S1].
+-
+-**Epipolar Constraint Loss:**
+-$$ L_{epi} = \min_t \left\{ \left\| \mathbf{d}_{p_r} - \mathbf{d}_{p_t} \right\|_2^2 \right\} $$
+-where $\mathbf{d}_{p_r}$ is the 3D coordinate of the reference point and $\mathbf{d}_{p_t}$ are points on the epipolar line in the target view. Implausible points (large color difference or occlusion) are filtered out [S1].
+-
+-**Warped Pixel Coordinate:**
+-$$ \hat{p}_t = K T_{r \to t} \mathbf{x}_p $$
+-where $\mathbf{x}_p$ is the 3D coordinate of pixel $p$ in the reference image, $K$ is the intrinsic matrix, and $T_{r \to t} = [\mathbf{r}, \mathbf{t}]$ is the relative pose with $\mathbf{r} = \mathbf{r}_t^{-1}$ and $\mathbf{t} = -\mathbf{r}_t^{-1}\mathbf{t}_t$ [S1].
+-
+-**Photometric Reconstruction Loss:**
+-$$ L_{pr} = \sum_{p(k) \in \Omega_p} M(p(k)) \left| \hat{I}_r(p(k)) - \hat{I}_t(\hat{p}_t(k)) \right| $$
+-where $\hat{I}_r$ is reference color, $\hat{I}_t$ is interpolated target color at warped coordinate, and $M$ is the SIFT bounding box mask [S1].
+-
+-**SSIM Loss:**
+-$$ L_{SSIM} = M \left( \frac{1 - SSIM_{r \to t}}{2} \right) $$
+-where $SSIM_{r \to t}$ is the structural similarity between the reference patch and the warped target patch [S1].
+-
+-**Depth Smoothness Loss:**
+-$$ L_{ds} = \sum_{p(k) \in \Omega_p} \left| \nabla D ( p(k) ) \cdot \left( e^{-|\hat{I}(p(k))|} \right) \right| $$
+-where $\nabla$ is the 2D differential operator and the weight $e^{-|\hat{I}|}$ preserves edges [S1].
+-
+-**Depth Prior Loss (Pyramidal):**
+-$$ L_{depth} = \sum_{p(k) \in \Omega_p} |D(p(k)) - D_r^{L-1}(p(k)/2)| $$
+-where $D_r^{L-1}(p(k)/2)$ is the depth from the previous lower-resolution level, sampled via bilinear interpolation at half coordinates [S1].
+-
+-**Total Loss:**
+-$$ L_{total} = \lambda_{ren} L_{ren} + \lambda_{3D} L_{3D} + \lambda_{pr} L_{pr} + \lambda_{epi} L_{epi} + \lambda_{SSIM} L_{SSIM} + \lambda_{ds} L_{ds} + \lambda_{depth} L_{depth} $$
+-Note: $L_{depth}$ is added only in recursive steps. The base total loss (without depth prior) is:
+-$$ L_{total} = \lambda_{ren} L_{ren} + \lambda_{3D} L_{3D} + \lambda_{pr} L_{pr} + \lambda_{epi} L_{epi} + \lambda_{SSIM} L_{SSIM} + \lambda_{ds} L_{ds} $$ [S1].
+-
+-### Parameters
+-*   **Loss Weights:** $\lambda_{ren} = 1.0$, $\lambda_{3D} = 1.0$, $\lambda_{pr} = 0.001$, $\lambda_{epi} = 0.0001$, $\lambda_{SSIM} = 0.008$, $\lambda_{ds} = 0.01$ [S1].
+-*   **Patch Size:** $32 \times 32$ pixels [S1].
+-*   **Samples:** 64 coarse samples, 64 importance samples (hierarchical sampling) [S1].
+-*   **Optimizer:** Adam with $\beta_1 = 0.9$, $\beta_2 = 0.999$, learning rate $1e-3$ [S1].
+-
+-### Edge Cases and Pitfalls
+-*   **Epipolar Points:** A large number of epipolar points causes computational inefficiency. Occluded points may not have corresponding points on the epipolar line. Mitigation: Filter epipolar points using color similarity; only keep points where the color difference between the reference point and the epipolar point is below a threshold [S1].
+-*   **Local Minima:** Large pixel motions can cause the photometric consistency loss to get stuck in local minima. Mitigation: Use the pyramidal strategy, starting from low resolution and refining [S1].
+-*   **Masking:** Pixels outside the minimum bounding rectangle of matched SIFT features are excluded from photometric losses to avoid unreliable correspondences [S1].
+-
+-### Pseudocode
+-
+-```python
+-import torch
+-import torch.nn as nn
+-import numpy as np
+-
+-def bilinear_interpolate(image, coords):
+-    """
+-    Interpolate color at float coordinates (x, y) from image.
+-    coords: (H, W, 2) tensor of float coordinates [x, y]
+-    image: (H, W, C) tensor
+-    """
+-    x = coords[:, :, 0]
+-    y = coords[:, :, 1]
+-    
+-    x0 = torch.floor(x).long()
+-    x1 = x0 + 1
+-    y0 = torch.floor(y).long()
+-    y1 = y0 + 1
+-    
+-    # Clip to image bounds
+-    x0 = torch.clamp(x0, 0, image.shape[1] - 1)
+-    x1 = torch.clamp(x1, 0, image.shape[1] - 1)
+-    y0 = torch.clamp(y0, 0, image.shape[0] - 1)
+-    y1 = torch.clamp(y1, 0, image.shape[0] - 1)
+-    
+-    Ia = image[y0, x0]
+-    Ib = image[y1, x0]
+-    Ic = image[y0, x1]
+-    Id = image[y1, x1]
+-    
+-    wa = (x1.float() - x) * (y1.float() - y)
+-    wb = (x1.float() - x) * (y - y0.float())
+-    wc = (x - x0.float()) * (y1.float() - y)
+-    wd = (x - x0.float()) * (y - y0.float())
+-    
+-    return wa.unsqueeze(-1) * Ia + wb.unsqueeze(-1) * Ib + wc.unsqueeze(-1) * Ic + wd.unsqueeze(-1) * Id
+-
+-def compute_3d_coords(samples_o, samples_d, samples_sigma, samples_t):
+-    """
+-    Compute 3D coordinates of SIFT features using volume rendering weights.
+-    samples_o: (N_samples, 3) ray origins
+-    samples_d: (N_samples, 3) ray directions
+-    samples_sigma: (N_samples,) volume densities
+-    samples_t: (N_samples,) t values (distances along ray)
+-    """
+-    N = samples_sigma.shape[0]
+-    dt = samples_t[1:] - samples_t[:-1]
+-    dt = torch.cat([dt, torch.zeros(1, device=samples_sigma.device)], dim=0)
+-    
+-    alpha = 1.0 - torch.exp(-samples_sigma * dt)
+-    T = torch.cumprod(torch.exp(-samples_sigma * dt), dim=0)
+-    T = torch.cat([torch.ones(1, device=samples_sigma.device), T[:-1]], dim=0)
+-    
+-    weights = T * alpha
+-    
+-    # 3D point for each sample
+-    points = samples_o + samples_d * samples_t.unsqueeze(1)
+-    
+-    # Weighted sum
+-    x_s = torch.sum(weights.unsqueeze(1) * points, dim=0)
+-    return x_s
+-
+-def compute_epipolar_loss(x_ref, K, T_rel, img_ref, img_tgt, color_thresh=0.1):
+-    """
+-    Compute epipolar loss.
+-    x_ref: (N, 3) 3D coordinates of reference points
+-    K: (3, 3) intrinsic matrix
+-    T_rel: (4, 4) relative pose matrix [R|t]
+-    img_ref: (H, W, 3) reference image
+-    img_tgt: (H, W, 3) target image
+-    """
+-    # Project 3D ref points to target image plane
+-    # x_tgt_hom = K @ T_rel[:3, :3] @ x_ref.T + K @ T_rel[:3, 3]
+-    # This is simplified; actual implementation requires projecting each point
+-    # and finding points on the epipolar line.
+-    
+-    # For implementation, we assume a function that returns candidate points on epipolar line
+-    # and filters by color similarity.
+-    # Placeholder for complex geometric projection logic not fully detailed in source
+-    # but implied by "min distance to epipolar line filtered by color"
+-    pass
+-
+-def train_sfmnerf(images, poses, K, sift_matches, num_levels=3):
+-    """
+-    Main training loop with pyramidal strategy.
+-    """
+-    # Initialize NeRF MLP
+-    nerf = NeRFMLP()
+-    optimizer = torch.optim.Adam(nerf.parameters(), lr=1e-3, betas=(0.9, 0.999))
+-    
+-    # Build Pyramids
+-    pyramids = []
+-    for i in range(num_levels):
+-        # Downsample images
+-        level_imgs = [torch.nn.functional.interpolate(img.unsqueeze(0), scale_factor=0.5**i).squeeze(0) for img in images]
+-        pyramids.append(level_imgs)
+-        
+-    # Start from lowest level
+-    for level in range(num_levels - 1, -1, -1):
+-        ref_img = pyramids[level][0]
+-        tgt_img = pyramids[level][1]
+-        
+-        # Load depth prior from previous level if not lowest
+-        depth_prior = None
+-        if level < num_levels - 1:
+-            # Depth from previous level (higher resolution) needs to be downsampled
+-            # Actually, source says: "DL-1r served as depth prior for IL-2r"
+-            # So we use the depth map computed in the previous (lower res) step
+-            # and interpolate it to current resolution? 
+-            # Source: "DL-1r(p(k)/2) depicts that dividing the 2D coordinates... and sample... from DL-1r"
+-            # This implies we have a depth map D_prev from the previous iteration (lower res)
+-            # and we sample from it.
+-            pass 
+-            
+-        for epoch in range(num_epochs):
+-            optimizer.zero_grad()
+-            
+-            # 1. Sub-pixel Sampling
+-            patch_coords = sample_random_patch(ref_img, size=32)
+-            sub_pixel_coords = patch_coords + torch.rand_like(patch_coords) # offset in (0,1)
+-            
+-            # 2. Ground Truth
+-            gt_color = bilinear_interpolate(ref_img, sub_pixel_coords)
+-            
+-            # 3. NeRF Forward
+-            rays_o, rays_d = generate_rays(sub_pixel_coords, K, poses[0])
+-            sigma, color = nerf(rays_o, rays_d)
+-            
+-            # 4. Volume Rendering
+-            rendered_color, rendered_depth = volume_render(rays_o, rays_d, sigma, color)
+-            
+-            # 5. Losses
+-            L_ren = torch.mean((gt_color - rendered_color)**2)
+-            
+-            # SIFT Loss
+-            # Compute 3D coords for SIFT matches
+-            x_s_ref = compute_3d_coords_for_sift(nerf, sift_matches['ref'], K, poses[0])
+-            x_s_tgt = compute_3d_coords_for_sift(nerf, sift_matches['tgt'], K, poses[1])
+-            L_3d = torch.mean((x_s_ref - x_s_tgt)**2)
+-            
+-            # Epipolar Loss
+-            L_epi = compute_epipolar_loss(x_s_ref, K, poses[1] @ poses[0].inverse(), ref_img, tgt_img)
+-            
+-            # Photometric Consistency
+-            # Warp ref patch to tgt
+-            x_p = compute_3d_coords_for_patch(nerf, patch_coords, K, poses[0])
+-            p_t = warp_to_target(x_p, K, poses[1] @ poses[0].inverse())
+-            warped_color = bilinear_interpolate(tgt_img, p_t)
+-            
+-            mask = compute_sift_mask(sift_matches, ref_img.shape)
+-            L_pr = torch.mean(mask * torch.abs(ref_img[patch_coords] - warped_color))
+-            
+-            # SSIM Loss
+-            L_ssim = compute_ssim_loss(ref_img[patch_coords], warped_color, mask)
+-            
+-            # Depth Smoothness
+-            L_ds = compute_depth_smoothness(rendered_depth, ref_img, mask)
+-            
+-            # Depth Prior (if not lowest level)
+-            L_depth = 0
+-            if level < num_levels - 1:
+-                # Sample from previous depth map
+-                prev_depth = get_depth_from_prev_level(level + 1)
+-                L_depth = torch.mean(torch.abs(rendered_depth - bilinear_interpolate(prev_depth, patch_coords/2)))
+-                
+-            L_total = (1.0 * L_ren + 
+-                       1.0 * L_3d + 
+-                       0.001 * L_pr + 
+-                       0.0001 * L_epi + 
+-                       0.008 * L_ssim + 
+-                       0.01 * L_ds + 
+-                       L_depth)
+-            
+-            L_total.backward()
+-            optimizer.step()
+-```
++**Edge Cases and Pitfalls:**
++*   **Epipolar Points:** A large number of epipolar points causes computational inefficiency. Occluded points may not have corresponding points on the epipolar line [S1].
++*   **Filtering:** Implausible epipolar points must be filtered using color similarity to maintain efficiency and accuracy [S1].
++*   **Local Minima:** Large pixel motions can cause the photometric consistency loss to get stuck in local minima; the pyramidal strategy mitigates this [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Higher than standard NeRF due to additional loss computations (SIFT 3D coordinate estimation, epipolar geometry calculations, patch warping, and SSIM). The pyramidal strategy adds overhead but reduces the number of iterations needed for convergence at high resolutions [S1].
+-*   **Memory Complexity:** Requires storing depth maps for each pyramid level and intermediate 3D coordinates for SIFT features. The use of sub-pixel rendering increases the number of samples per pixel, slightly increasing memory usage during the forward pass [S1].
+-*   **Performance:** Evaluated on LLFF-NeRF, ScanNet, and DTU MVS datasets. It surpasses state-of-the-art approaches given sparse inputs (2, 5, and 8 input views) [S1].
+-*   **Strengths:** Explicitly constrains 3D geometry, reducing ambiguity in sparse scenes. Sub-pixel rendering improves generalization. Pyramidal strategy prevents local minima [S1].
+-*   **Limitations:** Computational inefficiency due to large number of epipolar points if not filtered. Relies on accurate SIFT matches and camera poses [S1].
++*   **Complexity:** The method adds computational overhead to standard NeRF due to SIFT extraction, epipolar line sampling, and multi-view warping. The epipolar constraint requires searching along epipolar lines, which is mitigated by color-based filtering [S1].
++*   **Performance:** Evaluated on LLFF-NeRF, ScanNet, and DTU MVS datasets [S1]. It outperforms state-of-the-art approaches under sparse input conditions [S1].
++*   **Hardware:** Experiments conducted on NVIDIA RTX 3090 [S1].
++*   **Strengths:** Explicitly constrains 3D geometry, reducing shape-radiance ambiguity and improving novel view synthesis quality with sparse inputs [S1].
++*   **Limitations:** Relies on the availability of matched SIFT features and accurate camera poses; performance degrades if feature matching fails or poses are inaccurate [S1].
+ 
+ ## Background
+-SfMNeRF was proposed to address the failure of existing NeRF-based methods to obtain moderate 3D structures under sparse input conditions [S1]. It leverages knowledge from self-supervised depth estimation and Structure-from-Motion (SfM) to constrain the 3D-scene geometry during view synthesis training [S1]. The method was evaluated on LLFF-NeRF, ScanNet, and DTU MVS datasets [S1].
++SfMNeRF was proposed to address the failure of existing NeRF-based methods to obtain moderate 3D structures under sparse input conditions, where novel view synthesis quality drops dramatically due to implicitly reconstructed inaccurate geometry [S1]. It leverages knowledge from self-supervised depth estimation methods to constrain 3D-scene geometry during view synthesis training [S1]. The method integrates epipolar geometry, photometric consistency, depth smoothness, and position-of-matches constraints to explicitly reconstruct the 3D-scene structure [S1]. Code is available at https://github.com/XTU-PR-LAB/SfMNeRF [S1].
+ 
+ ## Sources

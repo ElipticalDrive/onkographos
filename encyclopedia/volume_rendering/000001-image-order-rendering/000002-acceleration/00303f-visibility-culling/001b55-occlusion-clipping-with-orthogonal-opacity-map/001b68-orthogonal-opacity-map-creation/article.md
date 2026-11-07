@@ -6,28 +6,28 @@ This method creates a 2D opacity map on a plane orthogonal to a major axis by pr
 
 ## How it works
 **Inputs:**
-- Current frame buffer $FB$ containing color/opacity data.
+- Current frame buffer $FB$ containing color/opacity data [S1].
 - Desired low-resolution map dimensions $n \times n$ (typical value: $64 \times 64$) [S1].
-- Camera projection/view matrices used for the current frame.
+- Camera projection and view matrices defining the current frame's geometry [S1].
 - High-resolution map side length $N$ (derived from projection geometry so each $FB$ pixel maps to at least one pixel in the high-resolution buffer) [S1].
 
 **Outputs:**
 - A low-resolution opacity map of size $n \times n$ in main memory [S1].
 
 **Data Structures:**
-- $T_{FB}$: Texture copy of the frame buffer $FB$.
-- $PB_{hm}$: High-resolution pixel buffer (optional intermediate; see Optimization).
-- $T_{hm}$: Texture bound to $PB_{hm}$, holding the high-resolution opacity map.
-- $PB_m$: Low-resolution pixel buffer of size $n \times n$.
+- $T_{FB}$: Texture copy of the frame buffer $FB$ [S1].
+- $PB_{hm}$: High-resolution pixel buffer (optional intermediate; see Optimization) [S1].
+- $T_{hm}$: Texture bound to $PB_{hm}$, holding the high-resolution opacity map [S1].
+- $PB_m$: Low-resolution pixel buffer of size $n \times n$ [S1].
 
 **Steps:**
 1. **Frame Buffer Copy:** Copy the current frame buffer $FB$ into a texture $T_{FB}$ [S1].
-2. **Projective Texturing:** Imagine a rectangle $R$ parallel to the object-aligned orthogonal plane, oriented orthogonal to the camera. Apply projective texturing: treat $T_{FB}$ as a slide projected from the camera position onto $R$ [S1].
-3. **High-Resolution Projection:** Orthogonally project the textured rectangle $R$ onto a high-resolution pixel buffer $PB_{hm}$. The resolution of $PB_{hm}$ must be sufficient so that each pixel in $FB$ maps to at least one pixel in $PB_{hm}$ [S1]. Bind $PB_{hm}$ to texture $T_{hm}$ [S1].
+2. **Projective Texturing:** Imagine a rectangle $R$ parallel to the object-aligned orthogonal plane, oriented orthogonal to the camera [S1]. Apply projective texturing: treat $T_{FB}$ as a slide projected from the camera position onto $R$ [S1].
+3. **High-Resolution Projection:** Orthogonally project the textured rectangle $R$ onto a high-resolution pixel buffer $PB_{hm}$ [S1]. The resolution of $PB_{hm}$ must be sufficient so that each pixel in $FB$ maps to at least one pixel in $PB_{hm}$ [S1]. Bind $PB_{hm}$ to texture $T_{hm}$ [S1].
 4. **Multi-Pass Downsampling:**
    - Initialize $PB_m$ (size $n \times n$) [S1].
    - Calculate the number of passes required:
-     $$ P = \left\lceil \frac{N/2}{n^2} \right\rceil $$
+     $$ P = \left\lceil \frac{(N/n)^2}{4} \right\rceil $$
      where $N$ is the side length of the high-resolution map ($N \times N$) and $n$ is the side length of the low-resolution map ($n \times n$) [S1].
    - For pass $k$ from $0$ to $P-1$:
      - Set the blending function to `MIN` [S1].
@@ -50,28 +50,25 @@ import math
 def create_orthogonal_opacity_map(FB_texture, N, n=64):
     """
     Creates a low-resolution orthogonal opacity map from the frame buffer.
-    FB_texture: 2D list/array of shape (W, H) containing frame buffer data.
+    FB_texture: 2D list/array of shape (N, N) containing the projected frame buffer data.
     N: Side length of the high-resolution projected map (N x N).
     n: Side length of the low-resolution output map (n x n).
     Returns: 2D list of shape (n, n) containing opacity values.
     """
     # Calculate number of multi-pass rendering steps
-    P = math.ceil((N / 2) / (n * n))
+    P = math.ceil((N / n) ** 2 / 4)
     
     # Initialize low-resolution pixel buffer
     PBm = [[0.0] * n for _ in range(n)]
     
     for k in range(P):
         # Calculate grid offset for this pass.
-        # The translation shifts the sampling window by half a pixel in x and y
-        # to cover the next set of 4 uncontributed texels per output pixel.
+        # Shifts the 2x2 sampling window by 0.5 units in x/y to cover 
+        # the next set of uncontributed texels per output pixel.
         dx = (k % 2) * 0.5
         dy = (k // 2) * 0.5
         
         # Simulate GPU projective texturing and downsampling:
-        # For each pixel (i, j) in PBm, sample 4 neighboring texels from the 
-        # projected image (shifted by dx, dy) and average them.
-        # Apply MIN blending with existing PBm values.
         for i in range(n):
             for j in range(n):
                 # Map PBm pixel center to projected texture coordinates
@@ -87,12 +84,11 @@ def create_orthogonal_opacity_map(FB_texture, N, n=64):
                 x1, y1 = x0 + 1, y0 + 1
                 fx, fy = tex_u - x0, tex_v - y0
                 
-                # Fetch texels (clamp to boundaries as standard for opacity)
-                W, H = len(FB_texture[0]), len(FB_texture)
-                t00 = FB_texture[min(y0, H-1)][min(x0, W-1)]
-                t01 = FB_texture[min(y0, H-1)][min(x1, W-1)]
-                t10 = FB_texture[min(y1, H-1)][min(x0, W-1)]
-                t11 = FB_texture[min(y1, H-1)][min(x1, W-1)]
+                # Fetch texels (clamp to boundaries as standard for opacity) [G]
+                t00 = FB_texture[min(y0, N-1)][min(x0, N-1)]
+                t01 = FB_texture[min(y0, N-1)][min(x1, N-1)]
+                t10 = FB_texture[min(y1, N-1)][min(x0, N-1)]
+                t11 = FB_texture[min(y1, N-1)][min(x1, N-1)]
                 
                 avg = (t00 * (1-fx)*(1-fy) + t01 * fx*(1-fy) + 
                        t10 * (1-fx)*fy + t11 * fx*fy)

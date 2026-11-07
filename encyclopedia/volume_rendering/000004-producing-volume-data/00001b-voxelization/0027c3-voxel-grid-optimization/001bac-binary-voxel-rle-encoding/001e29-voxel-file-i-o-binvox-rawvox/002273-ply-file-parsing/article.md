@@ -3,41 +3,35 @@
 Also called: PLY Header Parsing
 
 ## Overview
-PLY File Parsing extracts vertex attributes and topology from Polygon File Format (PLY) files, serving as the bridge between raw file storage and in-memory voxel or mesh data structures. It solves the problem of heterogeneous PLY headers (ASCII vs. binary, varying property types) by normalizing the input into a consistent vertex buffer and face index array. Unlike [Voxel File I/O (binvox/rawvox)](1698-voxel-file-i-o-binvox-rawvox.md) which handles volumetric grids, this method processes surface representations; it differs from [MagicaVoxel File Parsing](2405-magicavoxel-file-parsing.md) by supporting arbitrary vertex properties and standard triangle/quad topology rather than a proprietary voxel color format.
+PLY File Parsing extracts vertex attributes and topology from Polygon File Format (PLY) files to bridge raw file storage and in-memory data structures [S1, S2, unofficial]. It solves the problem of heterogeneous PLY headers by locating binary data sections and normalizing ASCII inputs into consistent vertex and face arrays [S1, S2, unofficial]. Unlike [Voxel File I/O (binvox/rawvox)](1698-voxel-file-i-o-binvox-rawvox.md) which handles volumetric grids, this method processes surface representations [S1, S2, unofficial].
 
 ## How it works
-The method consists of two distinct phases: header parsing for binary data location and data extraction for ASCII mesh loading.
+The method consists of two phases: header parsing to locate binary data and ASCII mesh loading to extract geometry and compute normals [S1, S2, unofficial].
 
 ### Phase 1: Binary Header Parsing
-This phase locates the binary data section within a PLY file to enable efficient `DataView` access.
+This phase locates the binary data section within a PLY file to enable efficient `DataView` access [S1, unofficial].
 
 **Inputs:**
-- `plyBuffer`: A `Uint8Array` or `ArrayBuffer` containing the raw PLY file bytes.
+- `plyBuffer`: A byte array or buffer containing the raw PLY file.
 
 **Outputs:**
 - `vertexCount`: Integer count of vertices.
-- `propertyTypes`: Object mapping property names to their data types (e.g., `'float'`, `'uchar'`).
+- `propertyTypes`: Object mapping property names to data types.
 - `vertexData`: A `DataView` positioned at the start of the binary vertex data.
 - `headerOffset`: The byte offset where the header ends.
 
 **Data Structures:**
 - `headerText`: String accumulating the header content.
-- `propertyTypes`: Dictionary `{ string: string }`.
+- `propertyTypes`: Dictionary mapping property names to types.
 
 **Steps:**
-1. Initialize `headerOffset = 0` and `headerText = ""`.
-2. Loop:
-   a. Read 50 bytes from `plyBuffer` starting at `headerOffset` into `headerChunk`.
-   b. Decode `headerChunk` using UTF-8 (e.g., `TextDecoder`) and append to `headerText`.
-   c. Increment `headerOffset` by 50.
-   d. If `headerText` contains the string `'end_header'`, break the loop.
-3. Split `headerText` by newline characters into `headerLines`.
-4. Iterate through `headerLines`:
-   a. If a line starts with `'element vertex'`, extract the integer count using regex `\d+`. Store as `vertexCount`.
-   b. If a line starts with `'property'`, extract type and name using regex `(\w+)\s+(\w+)\s+(\w+)`. Store the mapping `name -> type` in `propertyTypes`.
-5. Calculate `vertexByteOffset` as the index of the start of `'end_header'` plus the length of `'end_header'` plus 1 (for the newline).
-6. Create a `DataView` `vertexData` starting at `vertexByteOffset` over the remainder of `plyBuffer`.
-7. Return `{ vertexCount, propertyTypes, vertexData, headerOffset }`.
+1. Initialize `headerOffset` to 0 and `headerText` to an empty string [S1, unofficial].
+2. Loop: Read 50 bytes from `plyBuffer` at `headerOffset` into `headerChunk` [S1, unofficial]. Decode `headerChunk` using UTF-8 (e.g., `TextDecoder`) and append to `headerText` [S1, unofficial]. Increment `headerOffset` by 50 [S1, unofficial]. If `headerText` includes `'end_header'`, break the loop [S1, unofficial].
+3. Split `headerText` by newline characters into `headerLines` [S1, unofficial].
+4. Iterate through `headerLines` [S1, unofficial]. If a line starts with `'element vertex'`, extract the integer count using regex `\d+` [S1, unofficial]. If a line starts with `'property'`, extract type and name using regex `(\w+)\s+(\w+)\s+(\w+)` [S1, unofficial]. Store the property name to type mapping in `propertyTypes` [S1, unofficial].
+5. Calculate `vertexByteOffset` as the index of `'end_header'` plus the length of `'end_header'` plus 1 [S1, unofficial].
+6. Create a `DataView` `vertexData` starting at `vertexByteOffset` over the remainder of `plyBuffer` [S1, unofficial].
+7. Return an object containing `vertexCount`, `propertyTypes`, `vertexData`, and `headerOffset` [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -47,7 +41,7 @@ def parse_ply_header(ply_buffer: bytes) -> dict:
     header_offset = 0
     header_text = ""
     
-    # Read header in chunks until end_header is found
+    # Read header in 50-byte chunks until end_header is found
     while True:
         chunk = ply_buffer[header_offset : header_offset + 50]
         header_text += chunk.decode('utf-8')
@@ -61,13 +55,12 @@ def parse_ply_header(ply_buffer: bytes) -> dict:
     
     for line in header_lines:
         if line.startswith('element vertex'):
-            # Extract integer count
             import re
             match = re.search(r'\d+', line)
             if match:
                 vertex_count = int(match.group())
         elif line.startswith('property'):
-            # Extract type and name: property <type> <name>
+            import re
             match = re.match(r'property\s+(\w+)\s+(\w+)', line)
             if match:
                 p_type = match.group(1)
@@ -78,48 +71,42 @@ def parse_ply_header(ply_buffer: bytes) -> dict:
     end_header_index = header_text.find('end_header')
     vertex_byte_offset = end_header_index + len('end_header') + 1
     
-    # Create DataView for binary access
-    # Note: In a real implementation, ply_buffer might be an ArrayBuffer
-    # vertex_data = DataView(ply_buffer, vertex_byte_offset)
+    # In JavaScript this would be new DataView(ply_buffer, vertex_byte_offset)
+    # Here we return the slice as a stand-in for the DataView
+    vertex_data = ply_buffer[vertex_byte_offset:]
     
     return {
         'vertexCount': vertex_count,
         'propertyTypes': property_types,
-        'vertexByteOffset': vertex_byte_offset
+        'vertexData': vertex_data,
+        'headerOffset': header_offset
     }
 ```
 
 ### Phase 2: ASCII Mesh Loading & Normal Calculation
-This phase parses ASCII PLY files to extract vertices and faces, computing normals for rendering.
+This phase parses ASCII PLY files to extract vertices and faces, computing normals for rendering [S2, unofficial].
 
 **Inputs:**
 - `ply_text`: String content of an ASCII PLY file.
 
 **Outputs:**
-- `Vertex_Buffer`: Flat float array `[x1, y1, z1, x2, y2, z2, ...]`.
+- `Vertex_Buffer`: Flat float array of vertex coordinates.
 - `Faces_Triangles`: Flat integer array of vertex indices.
 - `Normals`: Computed face normals.
 
+**Data Structures:**
+- `Vertex_Buffer`: List of floats.
+- `Faces_Triangles`: List of integers.
+
 **Steps:**
-1. Initialize `Vertex_Buffer` as an empty list.
-2. Parse vertices:
-   a. Identify lines containing vertex data (typically following `element vertex <N>`).
-   b. Loop `TotalConnectedPoints` times.
-   c. For each line, read 3 floats. Append them to `Vertex_Buffer`.
-3. Parse faces:
-   a. Identify lines containing face data (typically following `element face <N>`).
-   b. Loop `TotalFaces` times.
-   c. Read the line. If the first token is `'3'`, it is a triangle.
-   d. Parse the next 3 tokens as vertex indices.
-   e. Map these indices to `Vertex_Buffer` (index `i` corresponds to `Vertex_Buffer[i*3 : i*3+3]`).
-   f. Store indices in `Faces_Triangles`.
-   g. [G] If the first token is `'4'`, it is a quad. The provided source snippet does not handle quads, leaving them unprocessed.
-4. Calculate Normals:
-   a. For each triangle with vertices $v_1, v_2, v_3$:
-   b. Compute vectors $v_a = v_1 - v_2$ and $v_b = v_1 - v_3$.
-   c. Compute cross product $v_r = v_a \times v_b$.
-   d. Compute magnitude $val = \sqrt{v_r.x^2 + v_r.y^2 + v_r.z^2}$.
-   e. Normalize: $n = v_r / val$.
+1. Initialize `Vertex_Buffer` as an empty list [S2, unofficial].
+2. Parse vertices: Loop `TotalConnectedPoints` times [S2, unofficial]. Read 3 floats per line into `Vertex_Buffer[i]`, incrementing `i` by 3 [S2, unofficial].
+3. Parse faces: Loop `TotalFaces` times [S2, unofficial]. Read the line [S2, unofficial]. If the first token is `'3'`, parse the next 3 tokens as vertex indices [S2, unofficial]. Map these indices to `Vertex_Buffer` (index `i` corresponds to `Vertex_Buffer[i*3 : i*3+3]`) and store in `Faces_Triangles` [S2, unofficial].
+4. Calculate Normals: For each triangle with vertices $v_1, v_2, v_3$ [S2, unofficial]:
+   a. Compute vectors $v_a = v_1 - v_2$ and $v_b = v_1 - v_3$ [S2, unofficial].
+   b. Compute cross product $v_r = v_a \times v_b$ [S2, unofficial].
+   c. Compute magnitude $val = \sqrt{v_r.x^2 + v_r.y^2 + v_r.z^2}$ [S2, unofficial].
+   d. Normalize: $n = v_r / val$ [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -130,11 +117,10 @@ def parse_ascii_ply(ply_text: str) -> dict:
     vertex_buffer = []
     faces_triangles = []
     
-    # Simple state machine for parsing
-    in_vertices = False
-    in_faces = False
     vertex_count = 0
     face_count = 0
+    in_vertices = False
+    in_faces = False
     
     for line in lines:
         line = line.strip()
@@ -162,7 +148,6 @@ def parse_ascii_ply(ply_text: str) -> dict:
         elif in_faces:
             parts = line.split()
             if len(parts) >= 4 and parts[0] == '3':
-                # Triangle
                 idx1 = int(parts[1])
                 idx2 = int(parts[2])
                 idx3 = int(parts[3])
@@ -176,28 +161,23 @@ def parse_ascii_ply(ply_text: str) -> dict:
         idx2 = faces_triangles[i+1]
         idx3 = faces_triangles[i+2]
         
-        # Get coordinates
         x1, y1, z1 = vertex_buffer[idx1*3 : idx1*3+3]
         x2, y2, z2 = vertex_buffer[idx2*3 : idx2*3+3]
         x3, y3, z3 = vertex_buffer[idx3*3 : idx3*3+3]
         
-        # Vectors
         va_x, va_y, va_z = x1 - x2, y1 - y2, z1 - z2
         vb_x, vb_y, vb_z = x1 - x3, y1 - y3, z1 - z3
         
-        # Cross product
         vr_x = va_y * vb_z - va_z * vb_y
         vr_y = va_z * vb_x - va_x * vb_z
         vr_z = va_x * vb_y - va_y * vb_x
         
-        # Magnitude
         val = (vr_x**2 + vr_y**2 + vr_z**2)**0.5
         
-        # Normalize
         if val > 0:
             normals.extend([vr_x/val, vr_y/val, vr_z/val])
         else:
-            normals.extend([0.0, 0.0, 1.0]) # Default normal for degenerate faces
+            normals.extend([0.0, 0.0, 1.0])
             
     return {
         'vertexBuffer': vertex_buffer,
@@ -207,10 +187,10 @@ def parse_ascii_ply(ply_text: str) -> dict:
 ```
 
 **Edge Cases and Pitfalls:**
-- **Quad Faces:** The ASCII parser assumes triangles. Quad faces (indicated by `4` in the face line) are skipped, leading to missing geometry [S2, unofficial].
-- **Index Basis:** Vertex indices are treated as 0-based directly from the file. If the file uses 1-based indexing, offsets must be applied [S2, unofficial].
+- **Quad Faces:** The ASCII parser assumes triangles. Quad faces (indicated by `4` in the face line) are skipped, leaving them unprocessed [S2, unofficial].
+- **Index Basis:** Vertex indices are treated as 0-based directly from the file [S2, unofficial].
 - **Precision:** Floating point parsing may lose precision if the file uses high-precision decimals and the parser truncates.
-- **Binary vs ASCII:** The header parser is designed for locating binary data but the mesh loader is ASCII-specific. A unified parser must detect the format from the header (`format ascii` vs `format binary`).
+- **Binary vs ASCII:** The header parser is designed for locating binary data, but the mesh loader is ASCII-specific. A unified parser must detect the format from the header (`format ascii` vs `format binary`).
 
 ## Subtopics
 
@@ -225,7 +205,7 @@ A variant focused on surface mesh extraction rather than raw header parsing. It 
 - **When to use:** When converting Gaussian Splatting outputs or standard mesh PLYs to WebGL-friendly formats [S1, unofficial].
 
 ## Background
-The PLY format was developed by the Visualization Group at the University of Washington. The parsing method described here is derived from implementations used in WebGL-based 3D Gaussian Splatting viewers, specifically tools converting `.ply` files created by the 3D Gaussian Splatting tutorial for real-time radiance field rendering [S1, unofficial]. The ASCII mesh loader logic originates from the SVO Workbench project, which uses PLY for loading test meshes for ray tracing [S2, unofficial].
+The PLY format was developed by the Visualization Group at the University of Washington. The parsing method described here is derived from implementations used in WebGL-based 3D Gaussian Splatting viewers, specifically tools converting `.ply` files created by the 3D Gaussian Splatting tutorial for real-time radiance field rendering [S1, unofficial]. The ASCII mesh loader logic is adapted from the SVO Workbench project [S2, unofficial].
 
 ## Sources
 [S1] akbartus/Gaussian-Splatting-WebViewers, https://github.com/akbartus/Gaussian-Splatting-WebViewers, fetched 2026-10-27 (unofficial)

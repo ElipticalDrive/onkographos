@@ -1,0 +1,102 @@
+# 3D Gaussian Voxelization
+Also called: Voxelization of 3D Gaussians
+## Overview
+3D Gaussian Voxelization converts a continuous set of 3D Gaussians into a discrete set of unique voxels with associated features, enabling efficient processing by 3D neural networks [S1, unofficial]. Unlike sibling methods that may focus on direct point cloud conversion or generic voxel format generation, this method specifically handles the redistribution of Gaussian-level features into a voxel grid while maintaining an inverse mapping for de-voxelization [S1, unofficial]. It addresses the problem of embedding high-dimensional features onto 3D Gaussian Splatting representations by leveraging the spatial locality of voxel-based convolutions [S1, unofficial].
+## How it works
+**Inputs:**
+- `gaussians`: A list of 3D Gaussian parameters. Each Gaussian is typically a dictionary containing at least a "scale" key, and potentially position or other attributes [S1, unofficial].
+- `grid_size`: A float hyperparameter defining the physical size of each voxel cell [S1, unofficial].
+- `SAMPLE_SHAPE`: A literal string controlling the geometric shape used for sampling voxels around each Gaussian. Options are `"volume"`, `"tri-plane"`, `"tri-line"`, or `"center"`. Default is `"center"` [S1, unofficial].
+
+**Outputs:**
+- `uni_voxels_xyz`: A list of tuples `(float, float, float)` representing the coordinates of unique voxels [S1, unofficial].
+- `uni_voxel_feats`: A list of feature vectors corresponding to each unique voxel [S1, unofficial].
+- `inverse_indices`: A list of integers mapping each original generated voxel back to its index in the unique voxel list [S1, unofficial].
+- `num_voxels_per_g`: A list of integers indicating the number of voxels sampled from each 3D Gaussian [S1, unofficial].
+
+**Data Structures:**
+The method relies on three internal helper functions:
+1. `count_voxels_per_g(gaussians, grid_size)`: Determines the number of voxels for each Gaussian based on `SAMPLE_SHAPE` [S1, unofficial].
+2. `compose_voxel_features(gaussians, num_voxels_per_g)`: Produces voxel coordinates and features for all Gaussians [S1, unofficial].
+3. `return_unique_voxels(voxels_xyz, voxel_feats)`: Removes duplicates to obtain unique coordinates, aggregated features, and the inverse index mapping [S1, unofficial].
+
+**Steps:**
+1. **Count Voxels:** Calculate the number of voxels required for each Gaussian using `count_voxels_per_g(gaussians, grid_size)`. This step determines the sampling density based on the Gaussian's scale and the chosen `SAMPLE_SHAPE` [S1, unofficial].
+2. **Compose Features:** Generate voxel coordinates and associated features for all Gaussians using `compose_voxels_per_g(gaussians, num_voxels_per_g)`. This distributes the Gaussian parameters into discrete grid cells [S1, unofficial].
+3. **Deduplicate:** Remove duplicate voxels using `return_unique_voxels(voxels_xyz, voxel_feats)`. This aggregates features for overlapping voxels and produces the final unique set along with the inverse mapping [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+from typing import List, Tuple
+from typing_extensions import Literal
+
+# Global configuration
+SAMPLE_SHAPE: Literal["volume", "tri-plane", "tri-line", "center"] = "center"
+
+def count_voxels_per_g(gaussians: List[dict], grid_size: float) -> List[int]:
+    """
+    Determines the number of voxels for each Gaussian given the sampling shape.
+    Implementation details not provided in source.
+    """
+    # [G] Placeholder for specific logic based on SAMPLE_SHAPE and Gaussian scale
+    return [0] * len(gaussians)
+
+def compose_voxel_features(gaussians: List[dict], num_voxels_per_g: List[int]) -> Tuple[List[Tuple[float, float, float]], List]:
+    """
+    Produces voxel coordinates and features for all Gaussians.
+    Implementation details not provided in source.
+    """
+    # [G] Placeholder for generating xyz and features
+    return [], []
+
+def return_unique_voxels(voxels_xyz: List[Tuple[float, float, float]], voxel_feats: List) -> Tuple[List[Tuple[float, float, float]], List, List[int]]:
+    """
+    Removes duplicates, resulting in unique coordinates, aggregated features,
+    and an index map.
+    Implementation details not provided in source.
+    """
+    # [G] Placeholder for deduplication logic
+    return [], [], []
+
+def voxelization(gaussians: List[dict], grid_size: float) -> Tuple[List[Tuple[float, float, float]], List, List[int], List[int]]:
+    """
+    Convert a set of 3D Gaussians into a set of unique voxels and their associated features.
+    """
+    # Step 1: Count voxels per Gaussian
+    num_voxels_per_g = count_voxels_per_g(gaussians, grid_size)
+    
+    # Step 2: Compose voxel features
+    voxels_xyz, voxel_feats = compose_voxel_features(gaussians, num_voxels_per_g)
+    
+    # Step 3: Deduplicate
+    uni_voxels_xyz, uni_voxel_feats, inverse_indices = return_unique_voxels(voxels_xyz, voxel_feats)
+    
+    return uni_voxels_xyz, uni_voxel_feats, inverse_indices, num_voxels_per_g
+```
+
+**Edge Cases and Pitfalls:**
+- The behavior depends heavily on `SAMPLE_SHAPE`. If `"center"` is used, only the Gaussian center might be voxelized, potentially losing spatial extent information compared to `"volume"` [S1, unofficial].
+- Precision issues may arise if `grid_size` is not aligned with the Gaussian scales, leading to empty voxels or excessive overlap [S1, unofficial].
+- The inverse index mapping is critical for de-voxelization; incorrect mapping will break the feature redistribution process [S1, unofficial].
+
+## Subtopics
+
+### [De-voxelization](8432-de-voxelization.md)
+Aggregates network predictions from unique voxels back to the original dense voxel grid and reduces them to per-Gaussian predictions. It is the inverse operation, enabling efficient 3D network processing while preserving Gaussian structure. Choose this when you need to apply voxel-based convolutions to Gaussian data and map results back to the continuous domain.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** The method enables efficient processing by 3D networks by reducing high-dimensional feature embedding to a voxel grid [S1, unofficial].
+- **Strengths:** Leverages spatial locality and computational efficiency of voxel-based convolutions [S1, unofficial].
+- **Limitations:** Relies on helper functions whose implementation details are not specified, making optimization strategies unclear [S1, unofficial].
+- **When to use:** When embedding high-dimensional features onto 3D Gaussian Splatting representations for neural network processing [S1, unofficial].
+- **When not to use:** When direct Gaussian processing is required without voxelization overhead [S1, unofficial].
+
+## Background
+The method originates from the paper "Quantile Rendering: Efficiently Embedding High-dimensional Feature on 3D Gaussian Splatting" [S1, unofficial]. It is used in the context of 3D Gaussian Splatting to facilitate efficient feature embedding and processing by 3D networks [S1, unofficial].
+
+## Sources
+[S1] Quantile Rendering: Efficiently Embedding High-dimensional Feature on 3D Gaussian Splatting, https://doi.org/10.48550/arxiv.2512.20927, fetched 2026-10-26 (unofficial)

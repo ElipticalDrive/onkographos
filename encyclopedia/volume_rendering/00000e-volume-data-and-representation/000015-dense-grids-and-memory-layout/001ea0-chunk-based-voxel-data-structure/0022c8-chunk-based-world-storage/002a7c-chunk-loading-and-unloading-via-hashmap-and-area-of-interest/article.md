@@ -6,8 +6,8 @@ Also called: AoI-based Chunk Management, Hashmap Chunk Culling
 This method manages the lifecycle of voxel chunks by maintaining a hash map of active chunks and culling those outside a defined Area of Interest (AoI) centered on the camera [S1, unofficial]. It solves the problem of memory exhaustion and rendering overhead in large voxel worlds by ensuring only visible or nearby geometry is resident in memory [S1, unofficial]. It differs from static world storage by dynamically allocating and deallocating chunk objects based on camera position [S1, unofficial].
 
 ## How it works
-**Inputs:** Camera position $(C_x, C_y, C_z)$, render distance $R$, and a hash map $H$ mapping chunk coordinates to chunk objects.
-**Outputs:** A set of chunks to render and an updated hash map $H$.
+**Inputs:** Camera position $(C_x, C_y, C_z)$, render distance $R$, and a hash map $H$ mapping chunk coordinates to chunk objects [S1, unofficial].
+**Outputs:** A set of chunks to render and an updated hash map $H$ [S1, unofficial].
 
 **Data Structures:**
 *   **Chunk Class:** Must disable copy and move constructors and assignment operators to prevent accidental copying and aid in debugging memory management [S1, unofficial].
@@ -17,10 +17,10 @@ This method manages the lifecycle of voxel chunks by maintaining a hash map of a
 1.  **Define AoI:** Calculate the bounding cube of the Area of Interest as:
     $$ [C_x - R, C_x + R] \times [C_y - R, C_y + R] \times [C_z - R, C_z + R] $$
     where $R$ is the render distance [S1, unofficial].
-2.  **Iterate and Load:** Iterate through all integer chunk coordinates $(cx, cy, cz)$ within the AoI bounds.
-    *   If $(cx, cy, cz)$ exists in $H$, fetch the chunk object.
-    *   If $(cx, cy, cz)$ does not exist in $H$, create a new chunk object, insert it into $H$, and fetch it.
-3.  **Render:** Render all fetched chunks.
+2.  **Iterate and Load:** Iterate through all integer chunk coordinates $(cx, cy, cz)$ within the AoI bounds [S1, unofficial].
+    *   If $(cx, cy, cz)$ exists in $H$, fetch the chunk object [S1, unofficial].
+    *   If $(cx, cy, cz)$ does not exist in $H$, create a new chunk object, insert it into $H$, and fetch it [S1, unofficial].
+3.  **Render:** Render all fetched chunks [S1, unofficial].
 4.  **Unload:** Identify all chunks in $H$ whose coordinates lie outside the AoI. Delete these chunk objects and remove them from $H$ [S1, unofficial].
 
 **Pseudocode:**
@@ -28,28 +28,28 @@ This method manages the lifecycle of voxel chunks by maintaining a hash map of a
 
 ```python
 def update_chunks(camera_pos, render_distance, chunk_hashmap):
-    # 1. Define AoI bounds
-    min_x = camera_pos.x - render_distance
-    max_x = camera_pos.x + render_distance
-    min_y = camera_pos.y - render_distance
-    max_y = camera_pos.y + render_distance
-    min_z = camera_pos.z - render_distance
-    max_z = camera_pos.z + render_distance
+    # 1. Define AoI bounds (floored/ceiled to chunk coordinates)
+    min_cx = int(floor(camera_pos.x - render_distance))
+    max_cx = int(ceil(camera_pos.x + render_distance))
+    min_cy = int(floor(camera_pos.y - render_distance))
+    max_cy = int(ceil(camera_pos.y + render_distance))
+    min_cz = int(floor(camera_pos.z - render_distance))
+    max_cz = int(ceil(camera_pos.z + render_distance))
 
     # 2. Load chunks inside AoI
     chunks_to_render = []
-    cx = min_x
-    while cx <= max_x:
-        cy = min_y
-        while cy <= max_y:
-            cz = min_z
-            while cz <= max_z:
+    cx = min_cx
+    while cx <= max_cx:
+        cy = min_cy
+        while cy <= max_cy:
+            cz = min_cz
+            while cz <= max_cz:
                 key = (cx, cy, cz)
                 if key in chunk_hashmap:
                     chunks_to_render.append(chunk_hashmap[key])
                 else:
-                    # Create new chunk [G]
-                    new_chunk = create_chunk(key)
+                    # Allocate new chunk object [G]
+                    new_chunk = Chunk(key)
                     chunk_hashmap[key] = new_chunk
                     chunks_to_render.append(new_chunk)
                 cz += 1
@@ -59,9 +59,9 @@ def update_chunks(camera_pos, render_distance, chunk_hashmap):
     # 3. Unload chunks outside AoI
     keys_to_remove = []
     for key, chunk in chunk_hashmap.items():
-        if not (min_x <= key[0] <= max_x and 
-                min_y <= key[1] <= max_y and 
-                min_z <= key[2] <= max_z):
+        if not (min_cx <= key[0] <= max_cx and 
+                min_cy <= key[1] <= max_cy and 
+                min_cz <= key[2] <= max_cz):
             keys_to_remove.append(key)
     
     for key in keys_to_remove:
@@ -84,14 +84,12 @@ def update_chunks(camera_pos, render_distance, chunk_hashmap):
 An optimization where sub-chunks (smaller subdivisions within a chunk) are culled when the camera is underground. This results in up to 70x fewer sub-chunks being drawn and loaded compared to non-underground scenarios [S2, unofficial].
 
 ## Operating characteristics
-**Time Complexity:** $O(V)$ where $V$ is the number of voxels in the AoI, assuming constant-time hash map lookups and chunk creation. Unloading is $O(C)$ where $C$ is the number of active chunks.
-**Memory Complexity:** Proportional to the number of chunks within the AoI.
+**Time Complexity:** $O(V)$ where $V$ is the number of voxels in the AoI, assuming constant-time hash map lookups and chunk creation [G]. Unloading is $O(C)$ where $C$ is the number of active chunks [G].
+**Memory Complexity:** Proportional to the number of chunks within the AoI [G].
 **Performance:** On an Apple M4, rendering 277 million voxels (4,225 chunks) at radius 32 took 8.2 ms [S2, unofficial]. Underground optimization can reduce loaded sub-chunks by up to 70x [S2, unofficial].
-**Strengths:** Simple implementation; effective memory management for large worlds.
-**Limitations:** Requires custom hash map handling for 3D coordinates; potential for frequent allocation/deallocation if camera moves erratically.
 
 ## Background
-This method is part of the "Mutiny" voxel engine implementation, focusing on chunk lifecycle management via hash maps and AoI culling [S1, unofficial]. It builds on the chunk-based world storage model [2858-chunk-based-world-storage.md].
+This method is part of the "Mutiny" voxel engine implementation, focusing on chunk lifecycle management via hash maps and AoI culling [S1, unofficial]. It builds on the chunk-based world storage model [2858-chunk-based-world-storage.md] [S1, unofficial].
 
 ## Sources
 [S1] kotychok/mutiny, https://github.com/kotychok/mutiny, fetched 2026-10-27 (unofficial)

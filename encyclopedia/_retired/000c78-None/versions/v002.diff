@@ -1,0 +1,163 @@
+--- v001.md
++++ v002.md
+@@ -4,19 +4,19 @@
+ 
+ ## Overview
+-Ray-Guided Grid Leaping is an out-of-core volume rendering technique that couples the rendering process with the identification of which sub-volumes ('bricks') must be loaded, using ray-sampling characteristics to determine future data requirements in concert with standard ray traversal and accumulation [S1]. It differs from its sibling [Greedy Brick Request Strategy](2843-greedy-brick-request-strategy.md) by performing brick lookup once per brick rather than every sample, maintaining a simple ray-marching core, and utilizing an out-of-core, progressive rendering methodology that breaks the GPU-memory-size barrier [S1].
++Ray-Guided Grid Leaping is an out-of-core volume rendering technique that couples the rendering process with the identification of which sub-volumes ('bricks') must be loaded, using ray-sampling characteristics to determine future data requirements in concert with standard ray traversal and accumulation [S1]. It differs from Hadwiger et al. by performing brick lookup once per brick rather than every sample, maintaining a simple ray-marching core, and utilizing an out-of-core, progressive rendering methodology that breaks the GPU-memory-size barrier [S1].
+ 
+ ## How it works
+ **Inputs:**
+-*   Input volume data existing at a single resolution.
+-*   Transfer function.
+-*   Camera parameters.
++*   Input volume data existing at a single resolution [S1].
++*   Transfer function [S1].
++*   Camera parameters [S1].
+ 
+ **Outputs:**
+-*   Rendered image.
+-*   Updated GPU texture pool with paged-in bricks.
++*   Rendered image [S1].
++*   Updated GPU texture pool with paged-in bricks [S1].
+ 
+ **Data Structures:**
+ 1.  **Multiresolution Hierarchy:** A preprocess built from the single-resolution input data, consisting of simple multiresolution Cartesian grids (bricks) [S1].
+-2.  **Lookup Table:** Stores the status for each brick index. It has three states:
++2.  **Lookup Table:** Stores the status for each brick index [S1]. It has three states:
+     *   Empty
+     *   Non-empty and present on the GPU
+@@ -45,59 +45,58 @@
+ 
+ ```python
+-# Preprocessing step (CPU)
+-def build_multiresolution_hierarchy(single_resolution_data):
+-    """
+-    Builds a multiresolution hierarchy of bricks from single-resolution input.
+-    Returns a structure allowing lookup of brick data at various LODs.
+-    """
+-    # Implementation details for bricking and LOD generation are not provided in sources.
+-    pass
++# Constants for brick states
++EMPTY = 0
++NON_EMPTY_PRESENT = 1
++NON_EMPTY_ABSENT = 2
+ 
+-# Per-frame rendering step (GPU Kernel)
+-def ray_guided_grid_leaping_ray_kernel(ray, lookup_table, brick_pool, missing_bricks_hash_table):
++def ray_guided_grid_leaping_ray_kernel(ray_origin, ray_direction, volume_max_t, lookup_table, brick_pool, missing_bricks_hash_table):
+     """
+     Processes a single ray using Ray-Guided Grid Leaping.
++    ray_origin: vec3, start of the ray
++    ray_direction: vec3, normalized direction of the ray
++    volume_max_t: float, maximum distance along the ray within the volume bounds
++    lookup_table: dict, maps brick_idx to status (EMPTY, NON_EMPTY_PRESENT, NON_EMPTY_ABSENT)
++    brick_pool: dict, maps brick_idx to brick data
++    missing_bricks_hash_table: lock-free hash table, records missing bricks
+     """
+-    # Initialize ray marching state
+-    t = ray.origin
+-    color = vec4(0.0)
++    t = 0.0
++    color = [0.0, 0.0, 0.0, 0.0]
+     alpha = 0.0
+-    
+-    # Ray marching loop
+-    while t is within volume bounds:
+-        # 1. Compute Level of Detail (LOD)
+-        # The LOD is computed to maintain a pixel error of less than one.
+-        lod = compute_lod_for_pixel_error_threshold(ray, t, threshold=1.0)
+-        
+-        # 2. Compute Brick Index
+-        # Derived from LOD and current position in volume.
+-        brick_idx = compute_brick_index(lod, t)
+-        
++
++    while t < volume_max_t:
++        # 1. Compute Level of Detail (LOD) to maintain pixel error < 1
++        # Sources do not provide the exact LOD computation formula.
++        lod = compute_lod_for_pixel_error_threshold(t, threshold=1.0)
++
++        # 2. Compute Brick Index from LOD and position
++        position = ray_origin + ray_direction * t
++        brick_idx = compute_brick_index(lod, position)
++
+         # 3. Lookup Brick Status
+         status = lookup_table.get(brick_idx)
+-        
++
+         if status == EMPTY:
+             # Skip empty brick and jump to exit point
+-            t = get_brick_exit_point(brick_idx, t)
++            # Sources do not provide the exact exit point calculation.
++            t = get_brick_exit_point(brick_idx, position, ray_direction)
+             continue
+-            
++
+         elif status == NON_EMPTY_PRESENT:
+             # Ray-cast the present brick
+             brick_data = brick_pool.get(brick_idx)
+-            color, alpha, t = ray_cast_brick(ray, t, brick_data, color, alpha)
+-            
++            color, alpha, t = ray_cast_brick(ray_origin, ray_direction, t, brick_data, color, alpha)
++
+         elif status == NON_EMPTY_ABSENT:
+             # Return finest coarser level available
+             # Add missing entry to GPU hash table for I/O feedback
+             missing_bricks_hash_table.insert(brick_idx)
+-            
++
+             # Use coarser level for sampling
+             coarser_brick_idx = get_coarser_brick(brick_idx)
+             coarser_data = brick_pool.get(coarser_brick_idx)
+-            color, alpha, t = ray_cast_brick(ray, t, coarser_data, color, alpha)
+-            
++            color, alpha, t = ray_cast_brick(ray_origin, ray_direction, t, coarser_data, color, alpha)
++
+     return color
+ 
+-# End-of-frame processing (CPU/GPU Sync)
+ def end_of_frame_processing(missing_bricks_hash_table, brick_pool, disk_cache):
+     """
+@@ -106,5 +105,5 @@
+     # 1. Read back GPU hash table to host memory
+     missing_bricks = missing_bricks_hash_table.read_back_to_host()
+-    
++
+     # 2. Page in bricks from disk or cache
+     paged_bricks = []
+@@ -112,9 +111,9 @@
+         data = disk_cache.load(brick_idx)
+         paged_bricks.append((brick_idx, data))
+-        
++
+     # 3. Upload paged-in bricks to GPU texture pool
+     for brick_idx, data in paged_bricks:
+         brick_pool.upload(brick_idx, data)
+-        
++
+     # 4. Clear hash table for next frame
+     missing_bricks_hash_table.clear()
+@@ -129,9 +128,9 @@
+ 
+ ### Greedy Brick Request Strategy
+-A strategy where a ray requests intermediate levels of detail (bricks) along its path when a resolution is missing, flooding the hash table with requests. This produces more responsive, iteratively-refined images and converges in fewer frames. [Link](2843-greedy-brick-request-strategy.md)
++A strategy where a ray requests intermediate levels of detail (bricks) along its path when a resolution is missing, flooding the hash table with requests. This produces more responsive, iteratively-refined images and converges in fewer frames. [S1] [Link](2843-greedy-brick-request-strategy.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1].
++*   **Memory Complexity:** Not given in the sources [S1].
+ *   **Measured Performance:** The renderer is designed to render massive datasets extremely fast on commodity GPU hardware [S1]. It breaks the GPU-memory-size barrier that limits data sizes in prior work [S1].
+ *   **Scaling:** The methodology allows graceful scaling down to consumer-level graphics cards [S1].
+@@ -140,7 +139,7 @@
+     *   Utilizes modern GPU features to implement a lock-free feedback data structure, enabling the implementation to spend more time computing on the GPU and less time pushing data around [S1].
+     *   Out-of-core, progressive rendering methodology breaks the GPU-memory-size barrier [S1].
+-*   **Limitations:** Not given in the sources.
++*   **Limitations:** Not given in the sources [S1].
+ *   **When to use:** When rendering massive datasets on commodity GPU hardware where GPU memory is insufficient to hold the entire volume [S1].
+-*   **When not to use:** Not given in the sources.
++*   **When not to use:** Not given in the sources [S1].
+ 
+ ## Background

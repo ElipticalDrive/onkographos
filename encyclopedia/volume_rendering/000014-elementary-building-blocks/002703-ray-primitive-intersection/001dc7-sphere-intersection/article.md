@@ -3,52 +3,47 @@
 Also called: Ray-Marching: Sphere Intersection and Path Calculation, Ray-Sphere Intersection for Volume Rendering, Volumetric Sphere Rendering
 
 ## Overview
-A method to render a volumetric sphere by intersecting camera rays with the sphere geometry to determine entry and exit points, then applying Beer's Law along the chord length [S1, unofficial]. It calculates the parametric distances ($t$) where a ray enters and exits the sphere to compute the optical path length, which is used to determine transmittance and scattered light contribution [S1, unofficial][S2, unofficial]. Unlike [Ray-box intersection](776-ray-box-intersection.md) which handles axis-aligned bounding volumes, this method provides an exact analytical solution for spherical primitives, serving as the foundational building block for simple volumetric scenes before advancing to complex density fields or [Ray-Marching](52-ray-marching.md) techniques [S1, unofficial].
+A method to render a volumetric sphere by intersecting camera rays with the sphere geometry to determine entry and exit points, then applying Beer's Law along the chord length [S1, unofficial]. It calculates the parametric distances ($t$) where a ray enters and exits the sphere to compute the optical path length, which is used to determine transmittance and scattered light contribution [S1, unofficial][S2, unofficial]. Unlike [Ray-box intersection](776-ray-box-intersection.md) which handles axis-aligned bounding volumes, this method provides an exact analytical solution for spherical primitives, serving as a foundational building block for simple volumetric scenes before advancing to complex density fields or [Ray-Marching](52-ray-marching.md) techniques [S1, unofficial].
 
 ## How it works
-**Inputs:** Ray origin $O$, ray direction $D$ (normalized), sphere center $C$, sphere radius $R$.
-**Outputs:** Entry $t_{entry}$ and exit $t_{exit}$ parametric distances along the ray. If no intersection, returns values indicating failure (e.g., large positive/negative pairs or `null`).
+**Inputs:** Ray origin $O$, ray direction $D$ (normalized), sphere center $C$, sphere radius $R$ [S5, unofficial].
+**Outputs:** Entry $t_{entry}$ and exit $t_{exit}$ parametric distances along the ray. If no intersection, returns `None` or a sentinel pair [S2, unofficial][S3, unofficial].
 
 **Data Structures:**
-*   `Ray`: Struct containing `origin` (vec3) and `direction` (vec3).
-*   `Sphere`: Struct containing `center` (vec3) and `radius` (float).
-*   `IntersectionResult`: Struct or pair containing `t_min` (float) and `t_max` (float).
+*   `Ray`: Struct containing `origin` (vec3) and `direction` (vec3) [S5, unofficial].
+*   `Sphere`: Struct containing `center` (vec3) and `radius` (float) [S5, unofficial].
+*   `IntersectionResult`: Struct or pair containing `t_min` (float) and `t_max` (float) [S3, unofficial].
 
-**Steps:**
-1.  **Translate Ray:** Compute the vector from the ray origin to the sphere center: $L = C - O$.
-2.  **Project:** Compute the projection of $L$ onto the ray direction $D$: $adj = \text{dot}(L, D)$.
-3.  **Closest Approach:** Compute the squared distance from the sphere center to the ray line: $d_2 = \text{dot}(L, L) - adj^2$.
+**Steps (Geometric Projection Method):**
+1.  **Translate Ray:** Compute the vector from the ray origin to the sphere center: $L = C - O$ [S3, unofficial].
+2.  **Project:** Compute the projection of $L$ onto the ray direction $D$: $adj = \text{dot}(L, D)$ [S3, unofficial].
+3.  **Closest Approach:** Compute the squared distance from the sphere center to the ray line: $d_2 = \text{dot}(L, L) - adj^2$ [S3, unofficial].
 4.  **Check Miss:** If $d_2 > R^2$, the ray misses the sphere. Return no intersection [S3, unofficial].
-5.  **Compute Chord Half-Length:** Calculate $thc = \sqrt{R^2 - d_2}$.
-6.  **Compute Intersections:**
-    *   $t_0 = adj - thc$
-    *   $t_1 = adj + thc$
+5.  **Compute Chord Half-Length:** Calculate $thc = \sqrt{R^2 - d_2}$ [S3, unofficial].
+6.  **Compute Intersections:** $t_0 = adj - thc$, $t_1 = adj + thc$ [S3, unofficial].
 7.  **Validate:** If both $t_0$ and $t_1$ are negative, the sphere is behind the ray origin. Return no intersection [S3, unofficial].
 8.  **Return:** Return $t_{entry} = \min(t_0, t_1)$ and $t_{exit} = \max(t_0, t_1)$ [S3, unofficial].
 
 **Alternative Quadratic Formulation:**
 Some implementations solve the quadratic equation derived from the sphere implicit function $|P - C|^2 = R^2$ [S5, unofficial].
-1.  Compute $dist = O - C$.
-2.  Coefficients:
-    *   $A = \text{dot}(D, D)$
-    *   $B = 2.0 \times \text{dot}(dist, D)$
-    *   $C_{coeff} = \text{dot}(dist, dist) - R^2$
-3.  Discriminant: $\Delta = B^2 - 4AC_{coeff}$.
+1.  Compute $dist = O - C$ [S5, unofficial].
+2.  Coefficients: $A = \text{dot}(D, D)$, $B = 2.0 \times \text{dot}(dist, D)$, $C_{coeff} = \text{dot}(dist, dist) - R^2$ [S5, unofficial].
+3.  Discriminant: $\Delta = B^2 - 4AC_{coeff}$ [S4, unofficial].
 4.  If $\Delta < 0$, return no intersection [S4, unofficial].
-5.  $t_1 = \frac{-B - \sqrt{\Delta}}{2A}$, $t_2 = \frac{-B + \sqrt{\Delta}}{2A}$.
+5.  $t_1 = \frac{-B - \sqrt{\Delta}}{2A}$, $t_2 = \frac{-B + \sqrt{\Delta}}{2A}$ [S2, unofficial].
 6.  Return smallest positive $t$ if valid [S3, unofficial][S5, unofficial].
 
 **Rendering Application (Beer's Law):**
 Once $t_{entry}$ and $t_{exit}$ are known:
 1.  **Chord Length:** $L_{chord} = t_{exit} - t_{entry}$ [S1, unofficial].
 2.  **Transmittance:** $T = e^{-\sigma_t L_{chord}}$, where $\sigma_t$ is the extinction coefficient [S1, unofficial].
-3.  **Scattering:** Assume uniform scattered light contribution $L_{scatter}$ from the sphere volume.
+3.  **Scattering:** Assume uniform scattered light contribution $L_{scatter}$ from the sphere volume [S1, unofficial].
 4.  **Composite:** $Color = L_{scatter} (1 - T) + Background \times T$ [S1, unofficial].
 
 **Pitfalls:**
 *   **Precision:** When the ray is tangent to the sphere, $\Delta \approx 0$. Floating-point errors may cause $\Delta$ to be slightly negative, resulting in a false miss. Use a small epsilon tolerance if necessary [G].
-*   **Back-face vs Front-face:** For opaque spheres, only the front intersection matters. For transparent volumes, both entry and exit are required.
 *   **Shadowing:** This basic implementation ignores shadows cast by objects outside or inside the volume and does not handle varying densities [S1, unofficial].
+*   **Non-normalized direction:** The geometric projection method assumes $D$ is normalized; if not, scale $adj$ and $d_2$ by $1/|D|^2$ [G].
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
@@ -57,7 +52,7 @@ import math
 
 def ray_sphere_intersect(ray_origin, ray_dir, sphere_center, sphere_radius):
     """
-    Intersects a ray with a sphere.
+    Intersects a ray with a sphere using the geometric projection method.
     
     Args:
         ray_origin (tuple): (ox, oy, oz)
@@ -68,32 +63,40 @@ def ray_sphere_intersect(ray_origin, ray_dir, sphere_center, sphere_radius):
     Returns:
         tuple: (t_entry, t_exit) or None if no intersection.
     """
-    # Vector from ray origin to sphere center
-    l_x = sphere_center[0] - ray_origin[0]
-    l_y = sphere_center[1] - ray_origin[1]
-    l_z = sphere_center[2] - ray_origin[2]
+    # Normalize direction if not already normalized [G]
+    dir_len = math.sqrt(ray_dir[0]**2 + ray_dir[1]**2 + ray_dir[2]**2)
+    if dir_len == 0:
+        return None
+    dx, dy, dz = ray_dir[0]/dir_len, ray_dir[1]/dir_len, ray_dir[2]/dir_len
     
-    # Projection of l onto ray direction
-    adj = l_x * ray_dir[0] + l_y * ray_dir[1] + l_z * ray_dir[2]
+    # 1. Translate Ray: L = C - O
+    lx = sphere_center[0] - ray_origin[0]
+    ly = sphere_center[1] - ray_origin[1]
+    lz = sphere_center[2] - ray_origin[2]
     
-    # Squared distance from sphere center to ray line
-    d2 = (l_x * l_x + l_y * l_y + l_z * l_z) - (adj * adj)
+    # 2. Project: adj = dot(L, D)
+    adj = lx * dx + ly * dy + lz * dz
     
-    # Check if ray misses sphere
+    # 3. Closest Approach: d2 = dot(L, L) - adj^2
+    d2 = (lx*lx + ly*ly + lz*lz) - (adj * adj)
+    
+    # 4. Check Miss: if d2 > R^2
     r2 = sphere_radius * sphere_radius
     if d2 > r2:
         return None
         
-    # Compute intersection distances
+    # 5. Compute Chord Half-Length: thc = sqrt(R^2 - d2)
     thc = math.sqrt(r2 - d2)
+    
+    # 6. Compute Intersections: t0 = adj - thc, t1 = adj + thc
     t0 = adj - thc
     t1 = adj + thc
     
-    # If both t values are negative, sphere is behind the ray
+    # 7. Validate: if both t0 and t1 are negative
     if t0 < 0 and t1 < 0:
         return None
         
-    # Return entry and exit times
+    # 8. Return entry and exit
     if t0 < t1:
         return (t0, t1)
     else:
@@ -133,14 +136,14 @@ def apply_beers_law(t_entry, t_exit, extinction_coeff, background_color, scatter
 A technique to render a 3D sphere as a 2D billboard by calculating a spherical contribution factor based on the fragment's distance from the center [S6, unofficial]. It computes `sphereContrib = sqrt(max(0, 1 - (distance(center, fragPos)/radius)^2))` to simulate depth or opacity on a 2D quad [S6, unofficial]. If `showQuad` is true, it sets the color to `vec4(sphereContrib)` and discards fragments near the edges (`< 0.01` or `> 0.99`) to avoid aliasing artifacts [S6, unofficial]. This is distinct from true ray-sphere intersection as it does not compute 3D chord lengths or apply Beer's Law along a ray path, but rather approximates the sphere's visual presence in screen space [S6, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per sphere. The quadratic formula or geometric projection involves a constant number of arithmetic operations (dot products, square root).
-*   **Memory Complexity:** $O(1)$. No auxiliary data structures are required beyond the ray and sphere parameters.
+*   **Time Complexity:** $O(1)$ per sphere. The quadratic formula or geometric projection involves a constant number of arithmetic operations (dot products, square root) [S3, unofficial].
+*   **Memory Complexity:** $O(1)$. No auxiliary data structures are required beyond the ray and sphere parameters [S5, unofficial].
 *   **Performance:** Extremely fast compared to ray-marching through a voxel grid or BVH traversal, making it suitable for simple volumetric scenes or as a primitive in larger intersection hierarchies [S1, unofficial][S2, unofficial].
-*   **Strengths:** Exact analytical solution; no discretization error; handles transparency and absorption naturally via Beer's Law [S1, unofficial].
-*   **Limitations:** Only applies to spherical primitives. Does not handle complex shapes or non-uniform density distributions without extension [S1, unofficial]. Ignores inter-object shadowing in its basic form [S1, unofficial].
+*   **Strengths:** Exact analytical solution for entry/exit points; handles transparency and absorption naturally via Beer's Law [S1, unofficial].
+*   **Limitations:** Assumes uniform scattered light and ignores shadows; does not handle non-uniform density distributions without extension [S1, unofficial].
 
 ## Background
-The method originates from fundamental computer graphics literature on volume rendering and ray tracing. It is detailed in "An Introduction to Volume Rendering" which introduces ray-marching algorithms for uniform density volumes using Beer's Law [S1, unofficial]. The specific `raysi` function signature and GLSL implementation appear in community codebases like "Minecraft Voxel DDA Raycast" on Shadertoy, demonstrating its use in voxel-based rendering contexts [S2, unofficial]. Variations of the quadratic solution are standard in ray tracers such as "TakTikFR/Volumetric-Path-Tracing" and "WebGL-RayMarch" [S4, unofficial][S5, unofficial]. The billboard variant is found in cloud rendering tutorials like "Cloud-Renderer" [S6, unofficial].
+The method originates from fundamental computer graphics literature on volume rendering and ray tracing. It is detailed in "An Introduction to Volume Rendering" which introduces ray-marching algorithms for uniform density volumes using Beer's Law [S1, unofficial]. The specific `raysi` function signature and GLSL implementation appear in community codebases like "Minecraft Voxel DDA Raycast" on Shadertoy, demonstrating its use in voxel-based rendering contexts [S2, unofficial]. Variations of the quadratic solution are standard in ray tracing implementations [S4, unofficial][S5, unofficial]. The billboard variant is found in cloud rendering tutorials like "Cloud-Renderer" [S6, unofficial].
 
 ## Sources
 [S1] An Introduction to Volume Rendering, https://scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/intro-volume-rendering.html, fetched 2026-10-25 (unofficial)

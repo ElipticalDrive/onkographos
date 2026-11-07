@@ -3,87 +3,97 @@
 Also called: Binary Half-Volume, Level Set Domain Definition, Level Set Masking, Step Function Field
 
 ## Overview
-Half-Space Field Generation creates a binary scalar field that defines a simulation domain (typically a fluid) by partitioning space into "inside" and "outside" regions based on a threshold. It solves the problem of restricting physical simulation and rendering computations to a specific sub-volume, ignoring empty space or background media. Unlike smooth implicit primitives (e.g., SDFs or metaballs) that define continuous geometry, this method produces a discontinuous step function, effectively acting as a mask for the simulation grid.
+Half-Space Field Generation defines a volumetric domain by partitioning space into two disjoint regions (typically "inside" and "outside") using a binary scalar field or a level set threshold. It solves the problem of restricting simulation or rendering computations to a specific geometric subset, effectively ignoring empty space or non-fluid regions. Unlike smooth implicit primitives that blend continuously, this method produces a sharp discontinuity, making it distinct from [Metaball Field Evaluation](1017-metaball-field-evaluation.md) and [Soft Metablobby SDF](2753-soft-metablobby-sdf.md). It is primarily used to mask out irrelevant voxels in fluid simulations or ray marching to save bandwidth and compute time.
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A 3D grid of dimensions $X \times Y \times Z$ (denoted as `xSize`, `ySize`, `zSize`).
-- Input: A threshold value $\phi_{thresh}$ (typically 0).
-- Output: A 3D float array `field` of size $(X, Y, Z)$ where each voxel contains either 0 or 1.
+- Input: A 3D grid of dimensions $(X, Y, Z)$ and a scalar field $\phi(\mathbf{x})$ (the level set) or a binary condition.
+- Output: A binary mask field $M(\mathbf{x}) \in \{0, 1\}$ or a modified physical field where values outside the domain are zeroed.
 
 **Data Structures:**
-- `field`: A 3D array of 32-bit floating-point numbers.
-- Layout: Indexed as `field[x, y, z]` where $0 \le x < X$, $0 \le y < Y$, $0 \le z < Z$.
+- A 3D array `float3d[X][Y][Z]` or `int3d[X][Y][Z]` storing the field values.
+- In GPU implementations, this is often stored as a 3D texture or a flattened 1D texture array.
 
-**Algorithm:**
-The method partitions the grid along the Y-axis (vertical) into two half-spaces. This specific implementation assumes a coordinate system where $Y=0$ is the bottom and $Y=YSize$ is the top, with the fluid occupying the upper half.
-
-1.  Initialize the 3D array `field` with zeros.
-2.  Iterate through all voxels $(x, y, z)$.
-3.  If $y \ge \lfloor YSize / 2 \rfloor$, set `field[x, y, z] = 1`.
-4.  If $y < \lfloor YSize / 2 \rfloor$, set `field[x, y, z] = 0`.
+**Steps:**
+1. **Initialize** the field array with default values (e.g., 0 or background noise).
+2. **Evaluate** the level set function $\phi(\mathbf{x})$ for each voxel center $\mathbf{x}$.
+3. **Apply Threshold:** Determine the binary state based on the sign of $\phi(\mathbf{x})$.
+   - If $\phi(\mathbf{x}) < 0$, the point is inside the domain (fluid/solid).
+   - If $\phi(\mathbf{x}) \ge 0$, the point is outside (air/empty).
+4. **Mask/Zero Out:**
+   - For simulation: Set pressure, velocity, or density to 0 for all $\mathbf{x}$ where $\phi(\mathbf{x}) \ge 0$.
+   - For binary generation: Set $M(\mathbf{x}) = 1$ if $\phi(\mathbf{x}) < 0$, else $M(\mathbf{x}) = 0$.
+5. **Compute Forces:** Apply external forces (e.g., gravity) only to voxels where $M(\mathbf{x}) = 1$.
 
 **Formulas:**
-The value $v$ of a voxel at $(x, y, z)$ is defined as:
+The binary mask $M(\mathbf{x})$ is defined as:
 $$
-v(x, y, z) = \begin{cases} 
-1 & \text{if } y \ge \frac{YSize}{2} \\
-0 & \text{if } y < \frac{YSize}{2}
+M(\mathbf{x}) = \begin{cases} 
+1 & \text{if } \phi(\mathbf{x}) < \theta \\
+0 & \text{if } \phi(\mathbf{x}) \ge \theta 
 \end{cases}
 $$
-
-**Parameters:**
-- `ySize`: The vertical resolution of the grid.
-- Threshold: Implicitly 0.5 of the grid height in this binary step implementation.
-
-**Edge Cases and Pitfalls:**
-- **Boundary Precision:** The division `ySize / 2` must be handled consistently with integer arithmetic. If `ySize` is odd, the split occurs between the two central slices.
-- **Simulation Masking:** In fluid simulation contexts, this field is used to mask pressure solves and external forces (like gravity). Forces are only applied where `field == 1` [S2, unofficial].
-- **GPU Optimization:** On GPUs lacking dynamic flow control, branching on this field can be inefficient. Alternatives include using Z-culling to eliminate cells or sparse data structures [S2, unofficial].
+Where $\theta$ is the threshold, typically $0$ for signed distance fields or level sets [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def generate_half_space_field(x_size, y_size, z_size):
+def generate_half_space_field(phi_grid, threshold=0.0):
     """
-    Generates a binary 3D field where the upper half (y >= y_size/2) is 1,
-    and the lower half is 0.
+    Generates a binary mask from a level set grid.
+    phi_grid: 3D array of floats, shape (X, Y, Z)
+    threshold: float, typically 0.0
+    Returns: 3D array of ints (0 or 1)
     """
-    # Initialize 3D array with zeros
-    field = [[[0.0 for _ in range(z_size)] for _ in range(y_size)] for _ in range(x_size)]
+    X, Y, Z = phi_grid.shape
+    mask = np.zeros((X, Y, Z), dtype=np.int32)
     
-    # Calculate split point
-    split_y = y_size // 2
-    
-    # Set upper half to 1
-    for y in range(split_y, y_size):
-        for z in range(z_size):
-            for x in range(x_size):
-                field[x][y][z] = 1.0
+    for z in range(Z):
+        for y in range(Y):
+            for x in range(X):
+                # Evaluate level set at voxel center
+                val = phi_grid[x, y, z]
                 
-    # Lower half remains 0 (initialized above)
-    
-    return field
+                # Apply binary threshold
+                if val < threshold:
+                    mask[x, y, z] = 1
+                else:
+                    mask[x, y, z] = 0
+                    
+    return mask
+
+def apply_domain_masking(field_grid, mask):
+    """
+    Zeros out values in a physical field based on the binary mask.
+    Used to ignore air cells in fluid simulation.
+    """
+    for z in range(field_grid.shape[2]):
+        for y in range(field_grid.shape[1]):
+            for x in range(field_grid.shape[0]):
+                if mask[x, y, z] == 0:
+                    field_grid[x, y, z] = 0.0
+    return field_grid
 ```
 
-## Subtopics
+**Edge Cases and Pitfalls:**
+- **Precision:** Floating-point comparisons near the threshold $\theta=0$ can cause jitter if the level set is not reinitialized or smoothed [S2, unofficial].
+- **Boundaries:** Ensure the grid extends sufficiently beyond the implicit surface to avoid clipping the domain.
+- **Performance:** Iterating over all voxels to check the mask is expensive if the domain is sparse.
 
-### [Implicit Surface Definition](2798-implicit-surface-definition.md)
-Defines the general mathematical framework for scalar fields. Half-Space Field is a specific, discontinuous instance of this.
-
-### [Implicit Geometry Sampling](6685-implicit-geometry-sampling.md)
-Discusses how to sample these fields. Half-Space fields are trivial to sample but require careful handling of the discontinuity for marching cubes or ray marching.
+**Subtopics:**
+- [Level Set Masking](2798-implicit-surface-definition.md): Using the sign of the level set directly in shaders to cull fragments.
+- [Sparse Domain Definition](13-procedural-and-implicit-volumes.md): Using sparse structures (like OpenVDB) to store only the non-zero mask regions, avoiding the memory cost of dense binary grids.
 
 ## Operating characteristics
-- **Time Complexity:** $O(X \cdot Y \cdot Z)$ to initialize the grid. Subsequent queries are $O(1)$.
-- **Memory Complexity:** $O(X \cdot Y \cdot Z)$ for the full grid. Can be reduced to $O(X \cdot Z \cdot Y_{active})$ if using sparse structures [S2, unofficial].
-- **Strengths:** Extremely fast to generate; computationally cheap to evaluate; ideal for masking simulations to ignore empty space (e.g., air in water simulations) [S2, unofficial].
-- **Limitations:** Produces a sharp, discontinuous boundary which may alias poorly in ray marching without supersampling or specific anti-aliasing techniques; does not represent curved surfaces natively.
-- **When to use:** When the domain is a simple geometric partition (like a half-space) and the primary goal is simulation masking rather than visual surface representation.
+- **Time Complexity:** $O(X \cdot Y \cdot Z)$ for generating the mask or applying it to a dense grid.
+- **Memory Complexity:** $O(X \cdot Y \cdot Z)$ for the dense mask. Can be reduced to $O(N_{active})$ using sparse structures [S2, unofficial].
+- **Performance:** On GPUs, branching on the mask value (`if phi >= 0`) can cause warp divergence if dynamic flow control is not supported. Alternatives include using z-cull to eliminate cells or using sparse data structures [S2, unofficial].
+- **Strengths:** Simple to implement; effectively reduces simulation domain size; computationally cheap per voxel.
+- **Limitations:** Sharp discontinuities can cause aliasing in rendering; dense storage is memory-intensive for large domains with small objects.
 
 ## Background
-This technique is primarily documented in the context of real-time 3D fluid simulation. It is used to define the fluid domain, ensuring that simulation steps (pressure solve, gravity) are only performed on liquid cells ($\phi < 0$ or in this binary case, the "active" half) and not on the surrounding air [S2, unofficial]. The approach leverages the level set function's sign to control computational load.
+The method originates from fluid simulation techniques where the air is assumed to have negligible effect on the liquid. By defining the fluid domain via a level set $\phi$, simulations can ignore cells where $\phi \ge 0$. This approach was detailed in *GPU Gems 3* for real-time 3D fluid simulation [S2, unofficial]. It is also used in procedural voxel generation to define binary volumes [S1, unofficial].
 
 ## Sources
 [S1] millerc3/Marching-Cubes, https://github.com/millerc3/Marching-Cubes, fetched 2026-10-26 (unofficial)

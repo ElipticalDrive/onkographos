@@ -6,7 +6,7 @@ Also called: Volume illustration, NPR volume rendering
 Illustrative and non-photorealistic volume rendering (NPR) augments physics-based illumination pipelines with artistic techniques to enhance the perception of structure, shape, orientation, and depth in volumetric data [S2, S3, S4, unofficial]. It solves the problem of ambiguous internal structure in traditional physics-based or classification-based renderings by applying feature enhancement and depth cues derived from local volumetric properties rather than sample values alone [S3, unofficial]. Unlike surface-based NPR where features are well-defined boundaries, volume illustration determines feature areas through continuous analysis of local gradients and properties, requiring less manual tuning of transfer functions than traditional direct volume rendering [S3, unofficial].
 
 ## Shared principles
-The family shares the goal of enhancing volume visualization through stylized lighting and feature abstraction. All methods operate on fragment-level data, typically utilizing the volume sample gradient as a proxy for surface normal orientation. They decouple illumination from the physical light transport equation, instead using mathematical functions of the view direction, light direction, and scalar field properties to modulate color [S3857]. Common inputs include the normalized gradient $\nabla f_n$, light vectors $L$, and base colors derived from transfer functions. The output is a final color $c$ that combines ambient/gaseous components with directed illumination effects [S3857].
+The family shares the goal of enhancing volume visualization through stylized lighting and feature abstraction [G]. All methods operate on fragment-level data, typically utilizing the volume sample gradient as a proxy for surface normal orientation [G]. They decouple illumination from the physical light transport equation, instead using mathematical functions of the view direction, light direction, and scalar field properties to modulate color [S4, unofficial]. Common inputs include the normalized gradient $\nabla f_n$, light vectors $L$, and base colors derived from transfer functions [G]. The output is a final color $c$ that combines ambient/gaseous components with directed illumination effects [G].
 
 The framework utilizes four types of properties for enhancement:
 1. Volume sample location and value [S4, unofficial].
@@ -14,7 +14,7 @@ The framework utilizes four types of properties for enhancement:
 3. View direction [S4, unofficial].
 4. Light information [S4, unofficial].
 
-Volumetric illustration differs from surface-based NPR in several important ways. In surface NPR, surfaces (features) are well-defined, whereas with volumes, feature areas within the volume must be determined through analysis of local volumetric properties because volumetric features vary continuously throughout three-dimensional space [S2, S4, unofficial].
+Volumetric illustration differs from surface-based NPR in several important ways [S2, S4, unofficial]. In surface NPR, surfaces (features) are well-defined, whereas with volumes, feature areas within the volume must be determined through analysis of local volumetric properties because volumetric features vary continuously throughout three-dimensional space [S2, S4, unofficial].
 
 ## Subtopics
 
@@ -75,8 +75,8 @@ A visualization mode to reveal structural differences between a reference volume
 ### Level Set Visualization
 Visualizes level sets of large CT scans (e.g., $1024^3$) using slicemaps, which are small enough to fit in GPU memory and can be created by one slicing pass on the GPU [S7, unofficial]. It estimates normals to compensate for the lack of binary information and reflect surface appearance, keeping several level sets at the same time and blending them together for interactive display [S7, unofficial]. This avoids texture transfer stalls associated with slicing and the infeasibility of Marching Cubes at $1024^3$ resolution [S7, unofficial].
 
-### Cutaways and Ghosting
-Cutaways remove occluding objects to reveal structures of interest, using a simplified three-object setup (Background, Ghost, Selection) with static importance functions to skip costly importance compositing [S8]. Ghosting selectively reduces opacity of occluding regions to preserve edges and spatial location impression, controllable from no ghosting to full cutaway [S8]. The degree of ghosting is smoothly controllable from no ghosting (opacity not reduced) to full cutaway view (occluding structures completely suppressed) [S8].
+### [Ghosting and Cutaway Techniques](8497-ghosting-and-cutaway-techniques.md)
+Cutaways remove occluding objects to reveal structures of interest, using a simplified three-object setup (Background, Ghost, Selection) with static importance functions to skip costly importance compositing. Ghosting selectively reduces opacity of occluding regions to preserve edges and spatial location impression, controllable from no ghosting to full cutaway. The degree of ghosting is smoothly controllable from no ghosting (opacity not reduced) to full cutaway view (occluding structures completely suppressed).
 
 ## Background
 The term "illustration" in the context of volume rendering was introduced by Ebert in 2000 [S3, unofficial]. The field is primarily motivated by the attempt to create renditions that consider the perceptual capabilities of humans [S3, unofficial]. Visualization primarily motivated by this attempt includes boundary enhancement based on gradient approximation [S3, unofficial] and curvature-based transfer functions [S3, unofficial].
@@ -92,7 +92,7 @@ In 2003, GPU raycasting was introduced by Krüger, making it feasible from a com
 [S2] Non-Photorealistic Rendering of Volume Models, https://www.cs.umbc.edu/~rheingan/pubs/volillus00.pdf, fetched 2026-10-27 (unofficial)
 [S3] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
 [S4] Non-Photorealistic Rendering of Volume Models, https://userpages.cs.umbc.edu/ebert/npr/volillus.pdf, fetched 2026-10-27 (unofficial)
-[S5] Transfer Function Optimization for Comparative Volume Rendering, https://doi.org/10.48550/arxiv.2306.05885, fetched 2026-10-26 (unofficial)
+[S5] volume-rendering.patch, https://github.com/user-attachments/files/28030354/volume-rendering.patch, fetched 2026-10-28 (unofficial)
 [S6] el-bakkali/manim-glsl-butterflies, https://github.com/el-bakkali/manim-glsl-butterflies, fetched 2026-10-26 (unofficial)
 [S7] Single-pass GPU Solid Voxelization and Applications, https://inria.hal.science/inria-00345291, fetched 2026-10-26 (unofficial)
-[S8] VolumeShop: An Interactive System for Direct Volume Illustration, https://doi.org/10.1109/vis.2005.135, fetched 2026-10-26
+[S8] Illustrative Focus+Context Approaches in Interactive Volume Visualization, https://doi.org/10.4230/dfu.sciviz.2010.136, fetched 2026-10-26 (book)

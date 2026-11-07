@@ -1,0 +1,118 @@
+# Transparent Voxel Rendering with Refraction
+
+Also called: Transparent Voxel Refraction, Refractive Transparent Voxel Rendering
+
+## Overview
+This method extends ray traversal in sparse voxel grids by accumulating color and opacity for transparent voxels while applying Snell's law to refract the ray direction at material boundaries. It solves the problem of rendering semi-transparent refractive media (e.g., glass, water) within a hierarchical voxel structure, distinguishing itself from opaque traversal by continuing the ray after interaction and from non-refractive transparency by modifying the ray vector. It builds on [Voxel Refraction & Total Internal Reflection Handling](8624-voxel-refraction-total-internal-reflection-handling.md) by adding opacity accumulation logic.
+
+## How it works
+**Inputs:** Ray origin $\mathbf{O}$, ray direction $\mathbf{D}$, current traversal state (DDA counters, chunk bounds), voxel data (material properties, opacity, albedo, refractive index), scene constants (sun strength, max depth).
+**Outputs:** Accumulated color $\mathbf{C}_{out}$, final ray state.
+
+**Data Structures:**
+*   **Voxel Material:** Contains `opacity` (float, 0.0–1.0), `albedo` (vec3), `refractIndex` (float), and `normal` (vec3, stored or computed).
+*   **Traversal State:** `rayPos` (vec3), `rayDir` (vec3), `invRayDir` (vec3), `lastVoxID` (uint8, 255 for empty/unknown), `lastVoxRefract` (float, default 1.0), `colorAdd` (vec3), `colorMult` (float, initialized to 1.0).
+
+**Parameters:**
+*   `EPSILON`: Small constant (e.g., $10^{-6}$) to prevent self-intersection [S1, unofficial].
+*   `enableRefraction`: Boolean flag, default `false` [S1, unofficial].
+*   `maxDepth`: Integer limit on refraction bounces to prevent infinite loops [S1, unofficial].
+*   `sunStrength`: Scalar multiplier for lighting [S1, unofficial].
+
+**Steps:**
+1.  **Initialize:** Set `colorAdd = (0,0,0)`, `colorMult = 1.0`, `lastVoxID = 255`, `lastVoxRefract = 1.0`.
+2.  **Traverse Chunk:** Loop while inside current chunk bounds.
+3.  **Voxel Check:** If voxel exists and not ignoring first:
+    *   Decompress voxel data.
+    *   Get material properties.
+    *   **Opaque Case:** If `material.opacity == 1.0`:
+        *   Update `rayPos` by adding `rayDir * (min(lastSideDist) + EPSILON)` [S1, unofficial].
+        *   Return `true` (ray terminated).
+    *   **Transparent Case:** If `material.opacity < 1.0` and `lastVoxID != thisVoxID`:
+        *   Calculate current position.
+        *   If current depth $\le$ `maxDepth`:
+            *   Add to color: `colorAdd += colorMult * material.opacity * voxel.albedo * sunStrength` [S1, unofficial].
+            *   Update multiplier: `colorMult *= (1.0 - material.opacity)` [S1, unofficial].
+        *   **Refraction Handling:** If `enableRefraction` and `rayDist > 0.0`:
+            *   Set `refracted = true`.
+            *   Update `rayPos` to the boundary.
+            *   Calculate surface normal (using dot product check against voxel normal) [S1, unofficial].
+            *   Refract `rayDir` using Snell's law: `rayDir = refract(rayDir, normal, lastVoxRefract / material.refractIndex)` [S1, unofficial].
+            *   Update `invRayDir` based on new `rayDir`.
+            *   Re-initialize DDA counters and reset `lastSideDist` [S1, unofficial].
+            *   Update `lastVoxID = thisVoxID` and `lastVoxRefract = material.refractIndex` [S1, unofficial].
+4.  **Empty/Transition Case:** If voxel does not exist and `lastVoxID != 255`:
+    *   If `enableRefraction`:
+        *   Set `refracted = true`.
+        *   Update `rayPos` to the boundary.
+        *   Calculate normal using `-voxel.normal` (assuming outward normal from previous voxel) [S1, unofficial].
+        *   Refract `rayDir` using `refract(rayDir, normal, lastVoxRefract)` (assuming exit to air/empty with index 1.0) [S1, unofficial].
+        *   Handle Total Internal Reflection (TIR): If TIR occurs, fallback to original direction or reflect (as per parent method) [S1, unofficial].
+        *   Update `invRayDir`, re-init DDA, reset `lastSideDist` [S1, unofficial].
+        *   Set `lastVoxID = 255` and `lastVoxRefract = 1.0` [S1, unofficial].
+5.  **Accumulate:** Return `colorAdd` modulated by `colorMult` (or further processed by compositing).
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def step_chunk(ray_pos, ray_dir, inv_ray_dir, last_side_dist, last_vox_id, last_vox_refract, 
+               color_add, color_mult, max_depth, sun_strength, enable_refraction, epsilon):
+    while in_chunk_bounds():
+        voxel = decompress_current_voxel()
+        if voxel.exists and not ignore_first:
+            material = voxel.material
+            if material.opacity == 1.0:
+                ray_pos += ray_dir * (min(last_side_dist) + epsilon)
+                return True, ray_pos, ray_dir, color_add, color_mult
+            
+            if material.opacity < 1.0 and last_vox_id != voxel.id:
+                if current_depth <= max_depth:
+                    color_add += color_mult * material.opacity * voxel.albedo * sun_strength
+                    color_mult *= (1.0 - material.opacity)
+                
+                if enable_refraction and ray_dist > 0.0:
+                    ray_pos = update_position_to_boundary()
+                    normal = calculate_normal(voxel.normal)
+                    ratio = last_vox_refract / material.refract_index
+                    ray_dir = refract(ray_dir, normal, ratio)
+                    inv_ray_dir = 1.0 / ray_dir
+                    reinit_dda()
+                    last_side_dist = reset()
+                    last_vox_id = voxel.id
+                    last_vox_refract = material.refract_index
+        else:
+            if last_vox_id != 255:
+                if enable_refraction:
+                    ray_pos = update_position_to_boundary()
+                    normal = -voxel.normal # Assuming outward normal from previous
+                    # Exit to empty/air (index 1.0)
+                    ray_dir = refract(ray_dir, normal, last_vox_refract / 1.0)
+                    if total_internal_reflection(ray_dir, normal, last_vox_refract / 1.0):
+                        ray_dir = reflect(ray_dir, normal) # Fallback as per parent
+                    inv_ray_dir = 1.0 / ray_dir
+                    reinit_dda()
+                    last_side_dist = reset()
+                    last_vox_id = 255
+                    last_vox_refract = 1.0
+    return False, ray_pos, ray_dir, color_add, color_mult
+```
+
+**Edge Cases:**
+*   **Total Internal Reflection (TIR):** If the angle of incidence exceeds the critical angle, refraction fails. The parent method handles this by falling back to the original direction or reflection to prevent infinite bouncing [S1, unofficial].
+*   **Precision Errors:** `EPSILON` prevents self-intersection when updating `rayPos` [S1, unofficial].
+*   **Boundary Transitions:** Refraction is only applied when transitioning between different voxel types (solid to transparent, transparent to solid, or transparent to empty) to avoid redundant calculations [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels traversed, with additional cost for refraction calculations (dot products, trigonometric functions for `refract`) at boundaries.
+*   **Memory Complexity:** $O(1)$ per ray, storing only traversal state and accumulated color.
+*   **Strengths:** Accurately renders semi-transparent refractive objects; handles TIR to prevent artifacts.
+*   **Limitations:** Refraction increases computational cost per step; TIR handling may require fallback strategies that reduce visual accuracy; performance degrades with high refraction counts.
+*   **When to Use:** Scenes with glass, water, or other transparent refractive materials.
+*   **When Not to Use:** Opaque-only scenes, or when performance is critical and refraction is not required.
+
+## Background
+This method is derived from the `DoonEngine` implementation by frozein, which integrates transparent voxel rendering with hierarchical DDA and refraction handling [S1, unofficial]. It extends standard sparse voxel traversal by adding opacity accumulation and Snell's law application.
+
+## Sources
+[S1] frozein/DoonEngine, https://github.com/frozein/DoonEngine, fetched 2026-10-26 (unofficial)

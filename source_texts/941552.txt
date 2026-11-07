@@ -1,0 +1,729 @@
+:sparkles:  An advanced 3D Gaussian Splatting renderer for THREE.js - Request a render when a SplatMesh finishes loading (#457) · sparkjsdev/spark@f2f9895
+
+Request a render when a SplatMesh finishes loading (#457) · sparkjsdev/spark@f2f9895 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+File tree
+Expand file treeCollapse file tree
+Open diff view settings
+Filter options
+.github/workflows
+ci-browser.yml
+src
+SparkRenderer.ts
+SplatGenerator.ts
+SplatMesh.ts
+test/browser
+basic.test.ts
+harness.ts
+lod.test.ts
+paged-lod.test.ts
+Expand file treeCollapse file tree
+Open diff view settings
+Collapse file
+‎.github/workflows/ci-browser.yml‎
+Copy file name to clipboardExpand all lines: .github/workflows/ci-browser.yml
++2Lines changed: 2 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -10,6 +10,8 @@ on:
+1010
+- fix-paged-lod-browser-test
+1111
+- fix-paged-root-eviction
+1212
+- fix-paged-late-chunks-add-spark-hooks
+13+
+- fix-lod-dirty-stall
+14+
+- fix-on-demand-mesh-init
+1315
+permissions:
+1416
+contents: read
+1517
+jobs:
+Collapse file
+‎src/SparkRenderer.ts‎
+Copy file name to clipboardExpand all lines: src/SparkRenderer.ts
++158-92Lines changed: 158 additions & 92 deletions
+Original file line numberDiff line numberDiff line change
+@@ -383,6 +383,9 @@ export class SparkRenderer extends THREE.Mesh {
+383383
+sortedDir = new THREE.Vector3().setScalar(0);
+384384
+readback32 = new Uint32Array(0);
+385385
+386+
+// Meshes still loading; a render is requested when they finish.
+387+
+private readonly initWatched = new WeakSet<SplatMesh>();
+388+
+386389
+enableLod: boolean;
+387390
+enableDriveLod: boolean;
+388391
+enableLodFetching: boolean;
+@@ -966,6 +969,26 @@ export class SparkRenderer extends THREE.Mesh {
+966969
+lodInstances: this.enableLod ? this.lodInstances : undefined,
+967970
+});
+968971
+972+
+// Meshes still loading contribute nothing this frame; request a render
+973+
+// when they finish so on-demand apps show them without other input.
+974+
+// Listen for the event rather than mesh.initialized: attaching to that
+975+
+// promise would mark a load failure as handled and silence its report.
+976+
+for (const generator of visibleGenerators) {
+977+
+if (
+978+
+generator instanceof SplatMesh &&
+979+
+!generator.isInitialized &&
+980+
+!this.initWatched.has(generator)
+981+
+) {
+982+
+this.initWatched.add(generator);
+983+
+const onInitialized = () => {
+984+
+generator.removeEventListener("initialized", onInitialized);
+985+
+this.initWatched.delete(generator);
+986+
+this.setDirty();
+987+
+};
+988+
+generator.addEventListener("initialized", onInitialized);
+989+
+}
+990+
+}
+991+
+969992
+let doUpdate = true;
+970993
+const needsUpdate = viewChanged || version !== this.current.version;
+971994
+const mappingUpdated = mappingVersion !== this.display.mappingVersion;
+@@ -1265,114 +1288,157 @@ export class SparkRenderer extends THREE.Mesh {
+12651288
+}
+12661289
+12671290
+this.ensureLodWorker().tryExclusive(async (worker) => {
+1268-
+if (hasPaged && !this.pager) {
+1269-
+this.pager = new SplatPager({
+1270-
+renderer: this.renderer,
+1271-
+extSplats: this.pagedExtSplats,
+1272-
+maxSplats: this.maxPagedSplats,
+1273-
+numFetchers: this.numLodFetchers,
+1274-
+onUpdate: () => this.setDirty(),
+1275-
+});
+1276-
+1277-
+const { lodId } = await worker.call("newLodTree", {
+1278-
+capacity: this.pager.maxSplats,
+1291+
+try {
+1292+
+await this.driveLodExclusive(worker, {
+1293+
+hasPaged,
+1294+
+lodMeshes,
+1295+
+viewPos,
+1296+
+viewQuat,
+1297+
+pixelScaleLimit,
+1298+
+maxSplats,
+12791299
+});
+1280-
+this.pagerId = lodId;
+1300+
+} finally {
+1301+
+// driveLod() skips tryExclusive while this runs, so work it flagged
+1302+
+// (lodDirty, lodInitQueue) would otherwise wait for an unrelated render.
+1303+
+// Likewise chunk data that landed after consumeLodTreeUpdates: its
+1304+
+// onUpdate render already happened and found the worker busy.
+1305+
+if (
+1306+
+this.lodDirty ||
+1307+
+this.lodInitQueue.length > 0 ||
+1308+
+this.pager?.hasQueued()
+1309+
+) {
+1310+
+this.setDirty();
+1311+
+}
+12811312
+}
+1313+
+});
+1314+
+}
+12821315
+1283-
+// Assign pager to any new meshes that don't have one yet
+1284-
+// (must run every frame, not just when pager is first created)
+1285-
+if (this.pager) {
+1286-
+for (const { mesh } of this.lodMeshes) {
+1287-
+if (mesh.paged && !mesh.paged.pager) {
+1288-
+mesh.paged.pager = this.pager;
+1289-
+}
+1316+
+/** Body of the LoD update, run with exclusive access to the LoD worker. */
+1317+
+private async driveLodExclusive(
+1318+
+worker: SplatWorker,
+1319+
+{
+1320+
+hasPaged,
+1321+
+lodMeshes,
+1322+
+viewPos,
+1323+
+viewQuat,
+1324+
+pixelScaleLimit,
+1325+
+maxSplats,
+1326+
+}: {
+1327+
+hasPaged: boolean;
+1328+
+lodMeshes: SplatMesh[];
+1329+
+viewPos: THREE.Vector3;
+1330+
+viewQuat: THREE.Quaternion;
+1331+
+pixelScaleLimit: number;
+1332+
+maxSplats: number;
+1333+
+},
+1334+
+) {
+1335+
+if (hasPaged && !this.pager) {
+1336+
+this.pager = new SplatPager({
+1337+
+renderer: this.renderer,
+1338+
+extSplats: this.pagedExtSplats,
+1339+
+maxSplats: this.maxPagedSplats,
+1340+
+numFetchers: this.numLodFetchers,
+1341+
+onUpdate: () => this.setDirty(),
+1342+
+});
+1343+
+1344+
+const { lodId } = await worker.call("newLodTree", {
+1345+
+capacity: this.pager.maxSplats,
+1346+
+});
+1347+
+this.pagerId = lodId;
+1348+
+}
+1349+
+1350+
+// Assign pager to any new meshes that don't have one yet
+1351+
+// (must run every frame, not just when pager is first created)
+1352+
+if (this.pager) {
+1353+
+for (const { mesh } of this.lodMeshes) {
+1354+
+if (mesh.paged && !mesh.paged.pager) {
+1355+
+mesh.paged.pager = this.pager;
+12901356
+}
+12911357
+}
+1358+
+}
+12921359
+1293-
+if (this.lodInitQueue.length > 0) {
+1294-
+const lodInitQueue = this.lodInitQueue;
+1295-
+this.lodInitQueue = [];
+1296-
+while (lodInitQueue.length > 0) {
+1297-
+const splats = lodInitQueue.shift();
+1298-
+if (splats) {
+1299-
+await this.initLodTree(worker, splats);
+1300-
+this.lodDirty = true;
+1301-
+}
+1360+
+if (this.lodInitQueue.length > 0) {
+1361+
+const lodInitQueue = this.lodInitQueue;
+1362+
+this.lodInitQueue = [];
+1363+
+while (lodInitQueue.length > 0) {
+1364+
+const splats = lodInitQueue.shift();
+1365+
+if (splats) {
+1366+
+await this.initLodTree(worker, splats);
+1367+
+this.lodDirty = true;
+13021368
+}
+13031369
+}
+1370+
+}
+13041371
+1305-
+if (this.pager) {
+1306-
+const updates = this.pager.consumeLodTreeUpdates();
+1307-
+1308-
+for (const { splats, page, chunk, numSplats, lodTree } of updates) {
+1309-
+const record = this.lodIds.get(splats);
+1310-
+if (record) {
+1311-
+if (lodTree && chunk === 0) {
+1312-
+record.rootPage = page;
+1313-
+} else if (!lodTree && chunk === 0 && record.rootPage === page) {
+1314-
+// Root chunk evicted: forget the page (traversal skips this mesh
+1315-
+// until the root is refetched) and stop drawing indices into
+1316-
+// pages that no longer hold this mesh's data.
+1317-
+record.rootPage = undefined;
+1318-
+splats.clear();
+1319-
+}
+1320-
+this.lodUpdates.push({
+1321-
+lodId: record.lodId,
+1322-
+pageBase: page * this.pager.pageSplats,
+1323-
+chunkBase: chunk * this.pager.pageSplats,
+1324-
+count: numSplats,
+1325-
+lodTreeData: lodTree,
+1326-
+});
+1372+
+if (this.pager) {
+1373+
+const updates = this.pager.consumeLodTreeUpdates();
+1374+
+1375+
+for (const { splats, page, chunk, numSplats, lodTree } of updates) {
+1376+
+const record = this.lodIds.get(splats);
+1377+
+if (record) {
+1378+
+if (lodTree && chunk === 0) {
+1379+
+record.rootPage = page;
+1380+
+} else if (!lodTree && chunk === 0 && record.rootPage === page) {
+1381+
+// Root chunk evicted: forget the page (traversal skips this mesh
+1382+
+// until the root is refetched) and stop drawing indices into
+1383+
+// pages that no longer hold this mesh's data.
+1384+
+record.rootPage = undefined;
+1385+
+splats.clear();
+13271386
+}
+1387+
+this.lodUpdates.push({
+1388+
+lodId: record.lodId,
+1389+
+pageBase: page * this.pager.pageSplats,
+1390+
+chunkBase: chunk * this.pager.pageSplats,
+1391+
+count: numSplats,
+1392+
+lodTreeData: lodTree,
+1393+
+});
+13281394
+}
+13291395
+}
+1396+
+}
+13301397
+1331-
+if (this.lodUpdates.length > 0) {
+1332-
+const lodUpdates = this.lodUpdates;
+1333-
+this.lodUpdates = [];
+1334-
+await worker.call("updateLodTrees", { ranges: lodUpdates });
+1335-
+this.lodDirty = true;
+1336-
+}
+1337-
+1338-
+if (this.lodDirty) {
+1339-
+const now = performance.now();
+1340-
+const deltaPred = new THREE.Vector3();
+1341-
+if (this.lastLod) {
+1342-
+const deltaTime = Math.max(1, now - this.lastLod.timestamp);
+1343-
+deltaPred
+1344-
+.copy(viewPos)
+1345-
+.sub(this.lastLod.pos)
+1346-
+.multiplyScalar(this.lastTraverseTime / deltaTime);
+1347-
+}
+1348-
+this.lastLod = {
+1349-
+pos: viewPos,
+1350-
+quat: viewQuat,
+1351-
+pixelScaleLimit,
+1352-
+maxSplats,
+1353-
+timestamp: now,
+1354-
+};
+1355-
+this.lodDirty = false;
+1398+
+if (this.lodUpdates.length > 0) {
+1399+
+const lodUpdates = this.lodUpdates;
+1400+
+this.lodUpdates = [];
+1401+
+await worker.call("updateLodTrees", { ranges: lodUpdates });
+1402+
+this.lodDirty = true;
+1403+
+}
+13561404
+1357-
+await this.updateLodInstances(
+1358-
+worker,
+1359-
+deltaPred,
+1360-
+lodMeshes,
+1361-
+maxSplats,
+1362-
+viewPos,
+1363-
+viewQuat,
+1364-
+pixelScaleLimit,
+1365-
+);
+1366-
+this.currentLod = this.lastLod;
+1367-
+this.setDirty();
+1405+
+if (this.lodDirty) {
+1406+
+const now = performance.now();
+1407+
+const deltaPred = new THREE.Vector3();
+1408+
+if (this.lastLod) {
+1409+
+const deltaTime = Math.max(1, now - this.lastLod.timestamp);
+1410+
+deltaPred
+1411+
+.copy(viewPos)
+1412+
+.sub(this.lastLod.pos)
+1413+
+.multiplyScalar(this.lastTraverseTime / deltaTime);
+13681414
+}
+1415+
+this.lastLod = {
+1416+
+pos: viewPos,
+1417+
+quat: viewQuat,
+1418+
+pixelScaleLimit,
+1419+
+maxSplats,
+1420+
+timestamp: now,
+1421+
+};
+1422+
+this.lodDirty = false;
+1423+
+1424+
+await this.updateLodInstances(
+1425+
+worker,
+1426+
+deltaPred,
+1427+
+lodMeshes,
+1428+
+maxSplats,
+1429+
+viewPos,
+1430+
+viewQuat,
+1431+
+pixelScaleLimit,
+1432+
+);
+1433+
+this.currentLod = this.lastLod;
+1434+
+this.setDirty();
+1435+
+}
+13691436
+1370-
+if (SPARK_ENABLE_HOOKS) {
+1371-
+const p = sparkHook("lod.beforeCleanup", { spark: this });
+1372-
+if (p) await p;
+1373-
+}
+1374-
+await this.cleanupLodTrees(worker);
+1375-
+});
+1437+
+if (SPARK_ENABLE_HOOKS) {
+1438+
+const p = sparkHook("lod.beforeCleanup", { spark: this });
+1439+
+if (p) await p;
+1440+
+}
+1441+
+await this.cleanupLodTrees(worker);
+13761442
+}
+13771443
+13781444
+private async initLodTree(
+Collapse file
+‎src/SplatGenerator.ts‎
+Copy file name to clipboardExpand all lines: src/SplatGenerator.ts
++10-1Lines changed: 10 additions & 1 deletion
+Original file line numberDiff line numberDiff line change
+@@ -262,7 +262,16 @@ export interface FrameUpdateContext {
+262262
+lodIndices?: { numSplats: number; texture: THREE.DataTexture };
+263263
+}
+264264
+265-
+export class SplatGenerator extends THREE.Object3D {
+265+
+export interface SplatGeneratorEventMap extends THREE.Object3DEventMap {
+266+
+/**
+267+
+* Dispatched when asynchronous initialization completes and the splats are
+268+
+* ready to render. Not dispatched for splats that are initialized on
+269+
+* construction
+270+
+*/
+271+
+initialized: object;
+272+
+}
+273+
+274+
+export class SplatGenerator extends THREE.Object3D<SplatGeneratorEventMap> {
+266275
+numSplats: number;
+267276
+generator?: GsplatGenerator;
+268277
+covGenerator?: CovSplatGenerator;
+Collapse file
+‎src/SplatMesh.ts‎
+Copy file name to clipboardExpand all lines: src/SplatMesh.ts
++1Lines changed: 1 addition & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -439,6 +439,7 @@ export class SplatMesh extends SplatGenerator {
+439439
+this.updateGenerator();
+440440
+441441
+this.isInitialized = true;
+442+
+this.dispatchEvent({ type: "initialized" });
+442443
+if (options.onLoad) {
+443444
+const maybePromise = options.onLoad(this);
+444445
+if (maybePromise instanceof Promise) {
+Collapse file
+‎test/browser/basic.test.ts‎
+Copy file name to clipboardExpand all lines: test/browser/basic.test.ts
++29Lines changed: 29 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -69,3 +69,32 @@ test("renders three overlapping instances of shared splats", async ({
+6969
+7070
+expect(pngBuffer(png)).toMatchSnapshot("basic-instances.png");
+7171
+});
+72+
+73+
+// A mesh that finishes loading after the last render has nothing to prompt
+74+
+// one: the file lands, the mesh is initialized, and it stays invisible until
+75+
+// something else triggers a render. Spark must request one itself.
+76+
+test("shows a mesh that finished loading after the last render", async ({
+77+
+harnessPage,
+78+
+}) => {
+79+
+const png = await harnessPage.evaluate(async () => {
+80+
+const h = window.harness;
+81+
+h.createSpark();
+82+
+h.createCamera({ fov: 60, position: [0, 0, 7] });
+83+
+84+
+const file = await h.holdRequest("**/furry-logo-pedestal.spz");
+85+
+h.addSplatMesh({
+86+
+url: "/test/browser/fixtures/furry-logo-pedestal.spz",
+87+
+quaternion: [1, 0, 0, 0],
+88+
+});
+89+
+90+
+// Render once with the file still held back, and go quiet.
+91+
+await h.settle({ waitForLoads: false });
+92+
+93+
+// The file lands; Spark must request the render that shows the mesh.
+94+
+await file.release();
+95+
+await h.settle({ requestRender: false });
+96+
+return h.getPixels();
+97+
+});
+98+
+99+
+expect(pngBuffer(png)).toMatchSnapshot("basic.png");
+100+
+});
+0 commit comments
+Comments
+0 (0)
+You can’t perform that action at this time.

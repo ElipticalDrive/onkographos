@@ -1,0 +1,361 @@
+--- v012.md
++++ v013.md
+@@ -4,203 +4,187 @@
+ 
+ ## Overview
+-Back-face rasterized volume rendering is a GPU-accelerated technique that determines ray entry and exit points for volume ray casting by rasterizing the back faces of the volume's bounding box geometry [S1, S2, S3, S4, unofficial]. It solves the problem of efficiently culling pixels outside the volume and correctly handling camera zooming, which can cause front-face clipping issues [S2, unofficial]. It differs from [Bounding Box Raymarching](2071-bounding-box-raymarching.md) by explicitly utilizing a two-pass approach where the first pass captures back-face coordinates into a texture, and the second pass uses these coordinates to define ray endpoints for front-to-back compositing [S1, S2, S3, unofficial]. Unlike [Volume Ray Casting with RayData Texture](3077-volume-ray-casting-with-raydata-texture.md), which stores ray data in a dedicated texture, this method often computes ray directions from geometry attributes or camera matrices directly in the fragment shader [S5, unofficial].
++Back-face rasterized volume rendering is a hardware-accelerated technique that determines ray entry and exit points for volume ray casting by rasterizing the back faces of the volume's bounding box into a texture [S1, S4, unofficial]. It solves the problem of efficiently culling pixels outside the volume and avoiding expensive ray-box intersection calculations in the final rendering pass [S2, S3, unofficial]. Unlike [Bounding Box Raymarching](2071-bounding-box-raymarching.md), which explicitly uses a two-pass approach to capture back-face coordinates, this method is the foundational implementation of that concept, often distinguishing itself by how it handles the transition between passes and the specific storage of boundary data [S1, S2, S3, unofficial]. It differs from [Volume Ray Casting with RayData Texture](3077-volume-ray-casting-with-raydata-texture.md) by deriving ray bounds from geometry colors rather than storing ray data in a dedicated texture [S5, unofficial].
+ 
+ ## How it works
+-The method uses a two-pass rendering pipeline. The first pass renders the back faces of the volume's bounding box to a 2D texture to store the ray entry (or exit, depending on culling direction) points. The second pass renders the front faces, retrieves the stored points, and performs the ray marching integration [S1, S2, S3, S4, unofficial].
++**Inputs and Outputs:**
++*   **Input:** 3D volume texture ($V$), transfer function texture ($TF$), camera parameters (eye position, projection/view matrices), bounding box geometry (unit cube or scaled cube).
++*   **Output:** 2D color buffer with the rendered volume image.
+ 
+-### Inputs and Outputs
+-*   **Inputs:**
+-    *   Volume data $V(\mathbf{x})$ stored as a 3D texture (`sampler3D`) or 2D texture array [S1, S4, unofficial].
+-    *   Transfer function mapping scalar values to color/opacity, stored as a 1D or 2D texture (`sampler1D`/`sampler2D`) [S1, S2, S4, unofficial].
+-    *   Camera parameters: View matrix, Projection matrix, Eye position [S2, S4, unofficial].
+-    *   Bounding box geometry: A unit cube $[0,1]^3$ or scaled to volume dimensions [S2, S4, unofficial].
+-*   **Outputs:**
+-    *   Final image color buffer (default framebuffer) [S1, S4, unofficial].
++**Data Structures:**
++1.  **Bounding Box Geometry:** Defined by 8 vertices in object coordinates $[0,1]^3$ and 36 indices forming 12 triangles [S4, unofficial].
++    *   Vertices: $\{(0,0,0), (0,0,1), (0,1,0), (0,1,1), (1,0,0), (1,0,1), (1,1,0), (1,1,1)\}$ [S4, unofficial].
++2.  **Back-Face Texture ($g\_bfTexObj$):** A 2D texture (e.g., `GL_RGBA16F`) with resolution equal to the viewport ($W \times H$) [S4, unofficial]. Stores the 3D entry/exit coordinates as RGB color values [S1, S4, unofficial].
++3.  **Frame Buffer Object (FBO):** Attached to $g\_bfTexObj$ for the first pass [S4, unofficial].
+ 
+-### Data Structures
+-1.  **Bounding Box Geometry:**
+-    *   Vertices: 8 vertices in object coordinates, typically $\{0.0, 0.0, 0.0\}$ to $\{1.0, 1.0, 1.0\}$ [S4, unofficial].
+-    *   Indices: 36 indices defining 12 triangles (2 per face) [S4, unofficial].
+-2.  **Back-Face Texture (`g_bfTexObj` / `u_ExitPoints`):**
+-    *   Type: 2D texture (`sampler2D`) [S1, S4, unofficial].
+-    *   Format: `GL_RGBA16F` (half-precision float) or `GL_RGBA32F` [S4, unofficial].
+-    *   Dimensions: Matches viewport resolution ($g\_winWidth \times g\_winHeight$) [S4, unofficial].
+-    *   Content: Stores the 3D vertex position (entry/exit point) as RGB color values [S1, S4, unofficial].
+-3.  **Frame Buffer Object (FBO):**
+-    *   Attachments: Color attachment bound to `g_bfTexObj`, Depth attachment (optional but recommended for correct back-face rasterization) [S3, S4, unofficial].
++**Numbered Steps:**
+ 
+-### Steps
++1.  **Pass 1: Capture Back-Face Coordinates**
++    *   Bind the FBO attached to $g\_bfTexObj$.
++    *   Set viewport to $(0, 0, W, H)$ [S1, unofficial].
++    *   Enable face culling and set `glCullFace` to `GL_FRONT` (culling front faces, rendering only back faces) [S1, S4, unofficial].
++    *   Render the bounding box using the back-face shader program.
++    *   The back-face vertex shader outputs the vertex position (object coordinates) as `fragPos` [S4, unofficial].
++    *   The back-face fragment shader writes `vec4(fragPos, 1.0)` to the output color attachment [S4, unofficial]. This stores the 3D entry point (or exit point, depending on camera orientation and culling definition) for each pixel covered by the back face [S1, S4, unofficial].
++    *   Unbind the FBO [S1, unofficial].
+ 
+-1.  **Initialization:**
+-    *   Create FBO and attach `g_bfTexObj` [S4, unofficial].
+-    *   Define bounding box VBO/VAO [S4, unofficial].
+-    *   Load volume and transfer function textures [S1, S4, unofficial].
++2.  **Pass 2: Ray Casting and Compositing**
++    *   Bind the default framebuffer.
++    *   Enable face culling and set `glCullFace` to `GL_BACK` (culling back faces, rendering only front faces) [S1, S4, unofficial].
++    *   Render the bounding box using the ray-casting shader program.
++    *   The front-face vertex shader outputs its position as `EntryPoint` [S4, unofficial].
++    *   The ray-casting fragment shader performs the following:
++        a.  **Retrieve Exit Point:** Sample $g\_bfTexObj$ using normalized fragment coordinates (`gl_FragCoord.st / u_Resolution`) to retrieve the 3D exit point (`ExitPoint`) [S4, unofficial].
++        b.  **Compute Ray:** Calculate ray direction $\vec{d} = \text{ExitPoint} - \text{EntryPoint}$ and length $L = \|\vec{d}\|$ [S4, unofficial].
++        c.  **Edge Case:** If $\text{EntryPoint} == \text{ExitPoint}$ (ray misses or is tangent), discard the fragment to avoid division by zero [S4, unofficial].
++        d.  **Initialize:** Set step vector $\vec{s} = \vec{d} / N$ (where $N$ is the number of steps) or $\vec{s} = \text{normalize}(\vec{d}) \times \text{stepSize}$ [S1, S4, unofficial]. Initialize accumulated color $C_{acc} = (0,0,0,0)$ and opacity $\alpha_{acc} = 0$ [S4, unofficial]. Set current position $\mathbf{p} = \text{EntryPoint}$ [S4, unofficial].
++        e.  **Ray Marching Loop:** For $i = 0$ to $N-1$:
++            i.  Sample volume value $v = V(\mathbf{p})$ [S4, unofficial].
++            ii. Map $v$ to color $C_i$ and opacity $\alpha_i$ using the transfer function [S4, unofficial].
++            iii. Apply compositing:
++            $$
++            C_{acc} = C_{acc} + (1 - \alpha_{acc}) \alpha_i C_i
++            $$
++            $$
++            \alpha_{acc} = \alpha_{acc} + (1 - \alpha_{acc}) \alpha_i
++            $$
++            iv. Advance position: $\mathbf{p} = \mathbf{p} + \vec{s}$ [S4, unofficial].
++            v.  **Termination:** Break if $\alpha_{acc} \ge 1.0$ (early ray termination) or if $\mathbf{p}$ exceeds the volume bounds [S1, S4, unofficial].
++        f.  **Final Compositing:** If the loop completes without $\alpha_{acc}=1$, composite with background color $C_{bg}$:
++        $$
++        C_{final} = C_{acc} + (1 - \alpha_{acc}) C_{bg}
++        $$
++        g.  Output $C_{final}$ [S4, unofficial].
+ 
+-2.  **Pass 1: Capture Back-Face Points**
+-    *   Bind FBO (`g_frameBuffer`) [S1, S4, unofficial].
+-    *   Set viewport to $(0, 0, g\_winWidth, g\_winHeight)$ [S1, S4, unofficial].
+-    *   Enable depth test and face culling [S4, unofficial].
+-    *   Set `glCullFace(GL_FRONT)` to render only back faces [S1, S4, unofficial].
+-    *   Use back-face vertex/fragment shaders [S1, S4, unofficial].
+-        *   **Vertex Shader:** Transform vertex position to clip space. Output vertex position in object/local space as `fragPos` [S4, unofficial].
+-        *   **Fragment Shader:** Write `fragPos` (as `vec4`) to output color `gExisPoints` [S4, unofficial].
+-    *   Draw bounding box (`glDrawElements`) [S1, S4, unofficial].
+-    *   Unbind FBO [S1, S4, unofficial].
++**Pseudocode (GLSL-like):**
+ 
+-3.  **Pass 2: Ray Casting and Compositing**
+-    *   Bind default framebuffer [S1, S4, unofficial].
+-    *   Set viewport [S1, S4, unofficial].
+-    *   Enable face culling. Set `glCullFace(GL_BACK)` to render only front faces [S1, S4, unofficial].
+-    *   Use ray-casting vertex/fragment shaders [S1, S4, unofficial].
+-    *   **Vertex Shader:**
+-        *   Transform vertex to clip space.
+-        *   Output vertex position in object/local space as `EntryPoint` (front face position) [S4, unofficial].
+-        *   (Alternative: Compute ray direction in eye space using camera matrices [S2, S5, unofficial]).
+-    *   **Fragment Shader:**
+-        *   Sample `u_ExitPoints` texture using `gl_FragCoord.st / u_Resolution` to retrieve the back-face position (`exitPoint`) [S4, unofficial].
+-        *   Compute ray direction: $\mathbf{d} = \text{exitPoint} - \text{EntryPoint}$ [S1, S4, unofficial].
+-        *   Compute ray length: $L = \|\mathbf{d}\|$ [S4, unofficial].
+-        *   If $L \approx 0$ (entry equals exit), discard fragment [S4, unofficial].
+-        *   Compute step vector: $\mathbf{s} = \frac{\mathbf{d}}{N}$ or $\mathbf{s} = \text{normalize}(\mathbf{d}) \cdot \Delta t$ [S1, S4, unofficial].
+-        *   Initialize accumulated color $C' = (0,0,0,0)$ and opacity $\alpha' = 0$ [S1, S4, unofficial].
+-        *   Initialize current position $\mathbf{p} = \text{EntryPoint}$ [S1, S4, unofficial].
+-        *   **Ray Marching Loop:** For $i = 0$ to $N-1$:
+-            1.  Sample volume value $v = V(\mathbf{p})$ [S1, S4, unofficial].
+-            2.  Map $v$ to color $C_i$ and opacity $\alpha_i$ using transfer function [S1, S4, unofficial].
+-            3.  If $\alpha_i > 0$:
+-                $$ C' = C' + (1 - \alpha') \alpha_i C_i $$
+-                $$ \alpha' = \alpha' + (1 - \alpha') \alpha_i $$
+-            4.  Advance position: $\mathbf{p} = \mathbf{p} + \mathbf{s}$ [S1, S4, unofficial].
+-            5.  **Early Termination:** If $\alpha' \ge 1.0$ (or threshold 0.95), break loop [S1, S2, S3, unofficial].
+-            6.  **Boundary Check:** If $\mathbf{p}$ is outside $[0,1]^3$, break loop [S1, unofficial].
+-        *   Output final $C'$ to framebuffer [S1, S4, unofficial].
++```glsl
++// Pass 1: Backface Shader
++// Vertex Shader
++in vec3 VerPos;
++uniform mat4 MVP;
++out vec3 fragPos;
+ 
+-### Pseudocode
++void main() {
++    fragPos = VerPos;
++    gl_Position = MVP * vec4(VerPos, 1.0);
++}
+ 
+-```python
+-# Pass 1: Back-Face Capture
+-def pass1_capture_backface():
+-    bind_framebuffer(g_frameBuffer)
+-    set_viewport(0, 0, g_winWidth, g_winHeight)
+-    enable_depth_test()
+-    enable_cull_face()
+-    set_cull_face(GL_FRONT) # Render back faces
++// Fragment Shader
++in vec3 fragPos;
++layout (location = 0) out vec4 gExisPoints;
++
++void main() {
++    gExisPoints = vec4(fragPos, 1.0);
++}
++
++// Pass 2: Raycasting Shader
++// Vertex Shader
++in vec3 VerPos;
++uniform mat4 MVP;
++out vec3 EntryPoint;
++
++void main() {
++    EntryPoint = VerPos;
++    gl_Position = MVP * vec4(VerPos, 1.0);
++}
++
++// Fragment Shader
++in vec3 EntryPoint;
++uniform sampler2D u_ExitPoints;
++uniform sampler3D u_VolumeTex;
++uniform sampler1D u_TransferFunc;
++uniform vec2 u_Resolution;
++uniform float u_StepSize; // Or number of steps
++
++layout (location = 0) out vec4 FragColor;
++
++void main() {
++    // Retrieve exit point from Pass 1 texture
++    vec3 exitPoint = texture(u_ExitPoints, gl_FragCoord.st / u_Resolution).xyz;
+     
+-    use_shader(backface_program)
+-    set_uniform("MVP", projection * view * model)
++    // Discard if entry equals exit (no intersection)
++    if (EntryPoint == exitPoint) {
++        discard;
++    }
+     
+-    # Vertex shader outputs fragPos (object space position)
+-    # Fragment shader outputs fragPos as color
+-    draw_elements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, indices)
++    // Compute ray direction and length
++    vec3 dir = exitPoint - EntryPoint;
++    float len = length(dir);
+     
+-    unbind_framebuffer()
+-
+-# Pass 2: Ray Casting
+-def pass2_ray_casting():
+-    bind_framebuffer(0) # Default framebuffer
+-    set_viewport(0, 0, g_winWidth, g_winHeight)
+-    enable_cull_face()
+-    set_cull_face(GL_BACK) # Render front faces
++    // Compute step vector
++    // Note: u_StepSize can be interpreted as fixed step size or normalized step
++    // Here we assume u_StepSize is the physical step size along the ray
++    vec3 deltaDir = normalize(dir) * u_StepSize;
+     
+-    use_shader(raycast_program)
+-    set_uniform("u_ExitPoints", g_bfTexObj)
+-    set_uniform("u_VolumeTex", volume_texture)
+-    set_uniform("u_TransferFunc", transfer_function)
+-    set_uniform("u_Resolution", (g_winWidth, g_winHeight))
+-    set_uniform("u_StepSize", step_size) # Or uSteps
++    vec3 voxelCoord = EntryPoint;
++    vec4 colorAcum = vec4(0.0);
++    float alphaAcum = 0.0;
+     
+-    # Vertex shader outputs EntryPoint (object space position)
+-    # Fragment shader computes ray and marches
++    // Fixed loop limit for demonstration; typically determined by len / u_StepSize
++    for(int i = 0; i < 1600; i++) {
++        // Sample volume
++        float intensity = texture(u_VolumeTex, voxelCoord).x;
++        
++        // Map to color/opacity
++        vec4 colorSample = texture(u_TransferFunc, intensity);
++        
++        if (colorSample.a > 0.0) {
++            // Apply transfer function alpha adjustment if needed
++            // colorSample.a = 1.0 - pow(1.0 - colorSample.a, .1);
++            
++            // Front-to-back compositing
++            colorAcum.rgb += (1.0 - colorAcum.a) * colorSample.rgb * colorSample.a;
++            colorAcum.a += (1.0 - colorAcum.a) * colorSample.a;
++        }
++        
++        // Advance
++        voxelCoord += deltaDir;
++        
++        // Termination conditions
++        if (colorAcum.a >= 1.0) {
++            break;
++        }
++        
++        // Check bounds (optional if step size is small enough or loop limit is sufficient)
++        // if (any(voxelCoord < 0.0) || any(voxelCoord > 1.0)) break;
++    }
+     
+-    draw_elements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, indices)
+-
+-# Fragment Shader Logic (Pass 2)
+-def fragment_shader_ray_casting(entry_point: vec3):
+-    # Retrieve exit point from texture sampled at current fragment coordinates
+-    exit_point = texture(u_ExitPoints, gl_FragCoord.xy / u_Resolution).xyz
+-    
+-    # Check for degenerate ray
+-    if length(exit_point - entry_point) < 1e-6:
+-        discard()
+-        
+-    # Compute ray parameters
+-    ray_dir = exit_point - entry_point
+-    ray_len = length(ray_dir)
+-    step_vec = ray_dir / u_StepSize # Assuming u_StepSize is total steps or normalized step
+-    
+-    # Initialize accumulation
+-    accum_color = vec4(0.0)
+-    accum_alpha = 0.0
+-    
+-    # Current position
+-    pos = entry_point
+-    
+-    # Marching loop
+-    # Note: Loop count depends on implementation (fixed N or length-based)
+-    for i in range(1600): # Typical max steps
+-        # Sample volume
+-        vol_val = texture(u_VolumeTex, pos).r
+-        
+-        # Transfer function
+-        tf_sample = texture(u_TransferFunc, vec2(vol_val, 0.5)) # 2D TF or 1D mapped
+-        color_sample = tf_sample.rgb
+-        alpha_sample = tf_sample.a
+-        
+-        # Compositing
+-        if alpha_sample > 0.0:
+-            # Adjust alpha based on step size if necessary
+-            # alpha_sample = 1.0 - pow(1.0 - alpha_sample, step_factor)
+-            
+-            accum_color.rgb += (1.0 - accum_alpha) * alpha_sample * color_sample
+-            accum_alpha += (1.0 - accum_alpha) * alpha_sample
+-            
+-        # Advance
+-        pos += step_vec
+-        
+-        # Early termination
+-        if accum_alpha >= 1.0:
+-            break
+-            
+-        # Boundary check (if pos goes outside [0,1])
+-        if any(pos < 0.0) or any(pos > 1.0):
+-            break
+-            
+-    # Background composition (if needed)
+-    # accum_color.rgb = accum_color.rgb + (1.0 - accum_alpha) * background_color
+-    
+-    return accum_color
++    // Composite with background
++    vec4 bgColor = vec4(1.0, 1.0, 1.0, 1.0);
++    FragColor = colorAcum + (1.0 - colorAcum.a) * bgColor;
++}
+ ```
+ 
+-### Parameters
+-*   **uSteps / u_StepSize:** Number of sampling steps or step size. Typical value: 256 steps [S1, unofficial].
+-*   **uOpacityVal:** Opacity scaling factor. Typical value: 4.0 [S1, unofficial].
+-*   **uMinGrayVal / uMaxGrayVal:** Volume value thresholds. Typical: 0.001 to 1.0 [S1, unofficial].
+-*   **uAbsorptionModeIndex:** Rendering mode switch (0: Simple accumulation, 1: Alpha blending, 2: Max projection) [S1, unofficial].
+-*   **DELTA:** Constant step size. Value: 0.005 [S3, unofficial].
++**Parameters:**
++*   `uSteps` / `u_StepSize`: Number of sampling steps or step size. Typical `uSteps`: 256 [S1, unofficial]. Typical `DELTA` (step size): 0.005 [S3, unofficial].
++*   `uOpacityVal`: Opacity scaling factor. Typical value: 4.0 [S1, unofficial].
++*   `uMinGrayVal` / `uMaxGrayVal`: Volume value thresholds. Typical: 0.001 to 1.0 [S1, unofficial].
++*   `uAbsorptionModeIndex`: Rendering mode switch (0: Simple accumulation, 1: Alpha blending, 2: Max projection) [S1, unofficial].
+ 
+-### Edge Cases and Pitfalls
+-*   **Zooming:** Rendering front faces causes clipping when the camera zooms inside the volume. Rendering back faces avoids this [S2, unofficial].
+-*   **Degenerate Rays:** If entry point equals exit point (ray misses or is tangent), the shader must discard the fragment to avoid division by zero [S4, unofficial].
+-*   **Loop Termination:** GLSL loop limits may require a large constant (e.g., 4095) with an explicit break condition based on `uSteps` [S1, unofficial].
+-*   **Boundary Access:** Ensure position checks prevent out-of-bounds texture sampling [S1, unofficial].
+-*   **Mida Mode:** Some compositing modes (e.g., 'mida') may not work correctly [S3, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Zooming:** Rendering only front faces causes clipping when the camera zooms in, as front faces project behind the camera. Rendering back faces avoids this [S2, unofficial].
++*   **Tangent/Missed Rays:** If the ray is tangent to the box or misses it, the entry and exit points may be identical or invalid. The shader must discard such fragments to prevent division by zero or infinite loops [S4, unofficial].
++*   **Precision:** Using `GL_RGBA16F` for the back-face texture helps maintain precision for coordinate storage [S4, unofficial].
++*   **Loop Limits:** GLSL may require large constant loop limits (e.g., 4095) with explicit break conditions based on uniforms [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Bounding Box Raymarching](2071-bounding-box-raymarching.md)
+-A variant that explicitly uses a two-pass approach to derive ray bounds from geometry colors, avoiding manual ray-box intersection math in the fragment shader.
++A variant that explicitly utilizes a two-pass approach where the first pass captures back-face coordinates into a texture, and the second pass uses these coordinates to define ray endpoints. It differs by often computing ray directions from geometry attributes or camera matrices directly in the fragment shader.
+ 
+-### [Volume Ray Casting with RayData Texture](3077-volume-ray-casting-with-raydata-texture.md)
+-Stores ray data in a dedicated texture, differing from back-face rasterization which derives endpoints from geometry attributes.
++### [Entry Point Adjustment](7406-entry-point-adjustment.md)
++A technique to refine the entry points determined by back-face rasterization, often to handle non-convex volumes or improve sampling accuracy at boundaries.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot W \cdot H)$, where $N$ is the number of samples per ray, and $W \times H$ is the resolution. The two-pass approach adds a constant overhead.
+-*   **Memory Complexity:** $O(W \cdot H)$ for the back-face texture storage [S4, unofficial].
+-*   **Performance:** Efficiently culls pixels outside the volume, reducing fragment shader invocations [S2, unofficial]. Performance scales with resolution and step count.
+-*   **Strengths:** Handles zooming correctly; avoids complex ray-box intersection calculations in the fragment shader for boundary determination [S2, S4, unofficial].
+-*   **Limitations:** Requires two render passes; extra memory for the intermediate texture [S4, unofficial].
++*   **Time Complexity:** $O(W \times H \times N)$, where $W, H$ are viewport dimensions and $N$ is the number of steps per ray. The two-pass approach adds a constant overhead for the back-face rendering pass.
++*   **Memory Complexity:** $O(W \times H)$ for the back-face texture storage [S4, unofficial].
++*   **Performance:** Efficiently culls pixels outside the volume, reducing fragment shader invocations [S2, unofficial]. Early ray termination further reduces average computation time [S1, S2, S3, S4, unofficial].
++*   **Strengths:** Simple implementation using standard rasterization hardware; avoids complex ray-box intersection math in the fragment shader for boundary determination [S3, S4, unofficial]; handles zooming correctly by rendering back faces [S2, unofficial].
++*   **Limitations:** Requires two render passes; limited to convex bounding boxes (typically axis-aligned); precision of entry/exit points depends on texture format and rasterization accuracy [S4, unofficial].
++*   **When to Use:** Suitable for real-time volume rendering of convex volumes on GPUs with limited ray-tracing hardware.
++*   **When Not to Use:** For non-convex volumes or when single-pass performance is critical and intersection math is acceptable [S5, unofficial].
+ 
+ ## Background
+-The method is a standard technique in GPU-accelerated volume rendering, leveraging the graphics pipeline's rasterization capabilities to determine ray boundaries. It is commonly implemented in WebGL and OpenGL contexts [S1, S2, S4, unofficial].
++The method originated as a solution to the inefficiency of full-screen ray casting, where fragment shaders are invoked for pixels outside the volume [S2, unofficial]. It leverages the GPU's rasterization pipeline to determine ray bounds, a technique popularized in early GPU-based volume rendering implementations [S1, S4, unofficial]. It is widely used in educational examples and early WebGL volume renderers [S2, S3, unofficial].
+ 
+ ## Sources

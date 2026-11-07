@@ -1,46 +1,38 @@
 # Adaptive Mesh Refinement (AMR) Data Structures
 
-Also called: AMR Data Structures, AMR Hierarchies
 
 ## Overview
-Adaptive Mesh Refinement (AMR) data structures organize volumetric data with non-uniform resolution to efficiently store and render sparse or high-gradient fields. This family solves the problem of managing hierarchical grids where refinement levels vary spatially, enabling efficient traversal and rendering without processing uniform high-resolution data everywhere. It sets itself apart from sibling methods like [Tetrahedral Regularization](834-tetrahedral-regularization.md) and [Bezier Tetrahedra Evaluation](1422-bezier-tetrahedra-evaluation.md) by focusing on the hierarchical organization of the data (typically box-based or tetrahedral forests) rather than the specific geometric interpolation or basis function evaluation techniques used during the rendering pass.
+Adaptive Mesh Refinement (AMR) data structures organize volumetric data with non-uniform resolution to efficiently store and render sparse or high-gradient fields [S1][S2, unofficial]. This family solves the problem of managing hierarchical grids where refinement levels vary spatially, enabling efficient traversal and rendering without processing uniform high-resolution data everywhere [S1][S2, unofficial]. It sets itself apart from sibling methods like [Tetrahedral Regularization](834-tetrahedral-regularization.md) and [Bezier Tetrahedra Evaluation](1422-bezier-tetrahedra-evaluation.md) by focusing on the hierarchical organization of the data (typically box-based or tetrahedral forests) rather than the specific geometric interpolation or basis function evaluation techniques used during the rendering pass [S1][S2, unofficial].
 
 ## Shared principles
-All AMR data structures in this family share the principle of hierarchical decomposition. The domain is partitioned into a coarse base mesh (or root level), which is recursively subdivided into finer elements (children) based on error metrics or feature density. Key shared mechanisms include:
-
-1.  **Hierarchical Indexing:** Elements are organized in trees (e.g., octrees, quadtree-like structures for tetrahedra) where parent nodes represent coarser volumes and children represent refined sub-volumes.
-2.  **Level-of-Detail (LOD) Management:** The structure maintains explicit relationships between parent and child elements, allowing traversal algorithms to skip empty or low-detail regions (empty space skipping) and focus on high-detail areas.
-3.  **Boundary Handling:** A critical challenge is maintaining continuity and correct neighbor relationships across level boundaries. Structures must define how data is interpolated or sampled when a ray crosses from a coarse element into a refined child or a neighboring block at a different level.
-4.  **Scalar Aggregation:** To support efficient culling and shading, parent elements often store aggregated scalar statistics (min/max values) of their children, enabling early-out tests during rendering.
+This family shares the mechanisms and mathematical foundations defined in [Non-regular volumes](9-non-regular-volumes.md).
 
 ## Subtopics
 
 ### [TET-AMR Data Structure](1094-tet-amr-data-structure.md)
-A forest of tetrahedral refinement trees designed to store volumetric data for elements across all refinement levels. It explicitly stores direct face neighbors and child counts within the element data to facilitate fast traversal and neighbor lookups without runtime index resolution. It differs from general AMR structures by using a tetrahedral basis and storing neighbor information directly, enabling the construction of a Bounding Volume Hierarchy (BVH) over the coarse elements to efficiently identify which refinement trees to sample. Choose this when rendering unstructured tetrahedral AMR data where neighbor connectivity is critical for traversal.
+A forest of tetrahedral refinement trees designed to store volumetric data for elements across all refinement levels, including child counts, direct face neighbors, and associated scalars. It solves the problem of efficiently identifying which refinement trees to sample during volume rendering by storing a coarse mesh alongside the refined data, enabling the construction of a bounding volume hierarchy (BVH) over the coarse elements. It sets itself apart from general AMR structures by explicitly storing direct face neighbors and child counts within the element data to facilitate fast traversal and neighbor lookups without runtime index resolution.
 
 ### [Scene Geometry and Scalar Range Initialization](1679-scene-geometry-and-scalar-range-initialization.md)
-Constructs the scene geometry and scalar ranges for volume rendering by aggregating AMR box data, computing global bounding boxes via MPI, applying normalization scaling, and determining scalar value ranges including optional logarithmic scaling. It differs from sibling methods by explicitly handling the aggregation of distributed AMR level data into a unified scene representation with normalized coordinates and robust scalar range detection. Choose this for the initialization phase of distributed AMR rendering pipelines to ensure consistent coordinate systems and scalar mappings.
+Constructs the scene geometry and scalar ranges for volume rendering by aggregating AMR box data, computing global bounding boxes via MPI, applying normalization scaling, and determining scalar value ranges including optional logarithmic scaling. It differs from sibling methods by explicitly handling the aggregation of distributed AMR level data into a unified scene representation with normalized coordinates and robust scalar range detection, whereas [Exact AMR Rendering](4399-exact-amr-rendering.md) focuses on the ray-casting traversal and [TET-AMR Data Structure](1094-tet-amr-data-structure.md) focuses on tetrahedral mesh construction.
 
 ### [Exact AMR Rendering](4399-exact-amr-rendering.md)
-Renders AMR gas cells as piecewise-constant cubic cells rather than SPH particles. Each cell is a cube of side 'smooth', volume mass/rho, with edges aligned to the original simulation axes. It sets itself apart by treating AMR data as a set of discrete, axis-aligned cubes, simplifying the intersection logic compared to complex tetrahedral or irregular meshes. Choose this for gas dynamics simulations where the underlying data is naturally structured as cubic cells.
+Exact AMR Rendering treats AMR gas cells as piecewise-constant geometric cubes rather than smoothing them as SPH particles. It solves the problem of geometric fidelity in synthetic observations by ensuring mass conservation to round-off and eliminating the bias and smoothing inherent in kernel-based SPH rendering. It differs from its sibling [Approximate perspective projection of AMR cells](4400-approximate-perspective-projection-of-amr-cells.md) by avoiding orthographic approximations for large or perspective-distorted cells, ensuring geometric fidelity where perspective effects are significant. It treats cells as piecewise-constant cubic volumes rather than particles.
 
-### AMR Basis Reconstruction Filter
-#### definition
-A method to provide a continuous interpolant across AMR level boundaries using basis functions, allowing smooth sample reconstruction without costly cell location kernels [S1].
-#### pitfall
-The non-truncated support of the basis function results in larger support overlap between cells from neighboring blocks [S1].
-#### comparison
-Compared to Leaf et al. [21] and Ljung et al. [24], the basis function's support is not truncated at the first sample on the neighboring side, leading to a smoother interpolant but larger support overlap between cells from neighboring blocks [S1].
+### [AMR Basis Reconstruction Filter](5581-amr-basis-reconstruction-filter.md)
+A method to provide a continuous interpolant across AMR level boundaries using basis functions, allowing smooth sample reconstruction without costly cell location kernels. The non-truncated support of the basis function results in larger support overlap between cells from neighboring blocks. Compared to Leaf et al. [21] and Ljung et al. [24], the basis function's support is not truncated at the first sample on the neighboring side, leading to a smoother interpolant but larger support overlap between cells from neighboring blocks.
 
 ### AMR with 3DTM
-#### definition
-A technique rendering Adaptive Mesh Refinement (AMR) data using 3DTM, partitioning the volume into axis-aligned bricks of the same level of resolution [S2].
-#### step
-Render AMR data using 3DTM. Partition the volume into axis-aligned bricks of the same level of resolution. Extend the AMR tree-based 3DTM to render large and sparse data sets [S2].
+A technique rendering AMR data using 3DTM, partitioning the volume into axis-aligned bricks of the same level of resolution. It extends the AMR tree-based 3DTM to render large and sparse data sets.
+
+### Subdivision for Cell-Centered AMR Boundaries
+A challenge in cell-centered AMR where stitching across boundaries requires unstructured mesh geometry because dual grids do not align across levels. This approach (subdividing into tets/hexes) is contrasted with the paper's basis function method which avoids subdivision.
+
+### Nearest-Neighbor Lookup
+The simplest reconstruction strategy for AMR data, returning the scalar value of the leaf cell containing the query point. It is fast and simple but not continuous, even within same-level regions.
 
 ## Background
-The concept of Adaptive Mesh Refinement (AMR) originated in computational fluid dynamics and other scientific computing fields to efficiently resolve multi-scale phenomena. In visualization, early approaches relied on uniform grids or simple hierarchical box structures. The integration of AMR with ray tracing and volume rendering has evolved to handle the complexity of hierarchical data traversal. Key developments include the use of sparse octrees for traversal [S1] and the extension of tree-based techniques like 3DTM to handle large, sparse AMR datasets [S2]. The challenge of maintaining continuity across level boundaries has led to various interpolation strategies, including basis function reconstruction and unstructured element stitching [S1].
+The concept of Adaptive Mesh Refinement (AMR) originated in computational fluid dynamics and other scientific computing fields to efficiently resolve multi-scale phenomena [S2, unofficial]. In visualization, early approaches relied on uniform grids or simple hierarchical box structures [G]. The integration of AMR with ray tracing and volume rendering has evolved to handle the complexity of hierarchical data traversal [G]. Key developments include the use of sparse octrees for traversal [S1] and the extension of tree-based techniques like 3DTM to handle large, sparse AMR datasets [S1]. The challenge of maintaining continuity across level boundaries has led to various interpolation strategies, including basis function reconstruction and unstructured element stitching [S2, unofficial].
 
 ## Sources
-[S1] PDF Ray Tracing Structured AMR Data Using ExaBricks, https://www.sci.utah.edu/~wald/Publications/2020/exabrick/exabrick.pdf, fetched 2026-10-30
-[S2] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
+[S1] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
+[S2] CPU volume rendering of adaptive mesh refinement data, https://www.researchgate.net/publication/321321949_CPU_volume_rendering_of_adaptive_mesh_refinement_data, fetched 2026-10-26 (unofficial)

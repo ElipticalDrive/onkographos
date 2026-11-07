@@ -1,0 +1,210 @@
+# Multi-object volume rendering with ghosting
+
+Also called: Direct multi-object volume visualization, Ghosting, Multi-Pass Rendering Implementation, VolumeShop multi-object rendering
+
+## Overview
+Multi-object volume rendering with ghosting is a technique for visualizing inter-penetrating volumetric objects by decomposing a scalar field into three distinct logical objects: selection, ghost, and background, allowing independent control of appearance and spatial transformation [S1]. It solves the problem of occlusion in complex scenes by selectively reducing opacity in occluding regions to preserve features such as edges, aiding mental reconstruction of structures and spatial location [S1]. Unlike [Cutaways and Ghosting](6479-cutaways-and-ghosting.md) which may remove occluding regions completely, this method allows smooth control from no ghosting (opacity not reduced) to full cutaway (occluding structures completely suppressed) [S1]. It sets itself apart from single-pass multi-object compositing by using three separate rendering passes to avoid computational overhead and dynamic branching penalties [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A scalar-valued volumetric function $f_V$ defined for every point $p$ in space [S1]. A selection function $f_S$ defined for every point $p$ in space, with values in the range $[0, 1]$, where 0 means 'not selected' and 1 means 'fully selected' [S1]. A transformation $T$ applied to the selection object [S1]. Color and opacity transfer functions for selection ($c_S, \alpha_S$), ghost ($c_G, \alpha_G$), and background ($c_B, \alpha_B$) [S1]. A user-defined ghosting factor controlling the degree of ghosting [S1].
+*   **Output:** A rendered image with three logical objects composited, handling intersections and ghosting effects [S1].
+
+**Data Structures:**
+*   Data volumes and selection volumes are stored in a bricked memory layout using reference counting [S1].
+*   Volumes are subdivided into small cubes accessed via an index data structure [S1].
+*   Redundant bricks are stored only once; if two bricks contain the same data, they are stored in memory only once [S1].
+*   Selection volumes use the copy-on-write idiom for modifications due to their sparse nature [S1].
+*   Meta information (min-max octrees, bounding boxes, transformations) is stored for both volumes and updated on modification [S1].
+*   Two depth textures are used to store depth maps for the ghost and selection bounding volumes [S1].
+*   An optional depth texture is used for opaque geometry intersections [S1].
+
+**Formulas:**
+The membership functions for the fuzzy selection sets $SS$ (selection), $SG$ (ghost), and $SB$ (background) are defined as [S1]:
+$$
+\begin{aligned}
+\mu_{SS}(p) &= f_S(T(p)) \\
+\mu_{SG}(p) &= f_S(p) \\
+\mu_{SB}(p) &= 1 - f_S(p)
+\end{aligned}
+$$
+The membership functions for the volume sets $VS$ (selection), $VG$ (ghost), and $VB$ (background) are defined as [S1]:
+$$
+\begin{aligned}
+\mu_{VS}(p) &= \alpha_S(f_V(T(p))) \\
+\mu_{VG}(p) &= \alpha_G(f_V(p)) \\
+\mu_{VB}(p) &= \alpha_B(f_V(p))
+\end{aligned}
+$$
+The object sets $S, G, B$ are the intersections of the corresponding selection and volume sets [S1]:
+$$
+\begin{aligned}
+S &= SS \cap VS \\
+G &= SG \cap VG \\
+B &= SB \cap VB
+\end{aligned}
+$$
+The final opacity $\alpha(p)$ at point $p$ is defined as the grade of membership in the union of all object sets [S1]:
+$$
+\alpha(p) = \mu_{S \cup G \cup B}(p)
+$$
+Note: The source text contains a typo in Equation 5 referencing $X_1 \cup X_1 \dots$, but the context clarifies it refers to the union of $S, G, B$ [S1].
+
+**Parameters:**
+*   $f_V$: Scalar-valued volumetric function [S1].
+*   $f_S$: Selection function, range $[0, 1]$ [S1].
+*   $T$: Transformation applied to the selection object (move, rotate, scale) [S1].
+*   $c_S, \alpha_S$: Color and opacity transfer functions for selection, based on $f_V(T(p))$ [S1].
+*   $c_G, \alpha_G$: Color and opacity transfer functions for ghost, based on $f_V(p)$ [S1].
+*   $c_B, \alpha_B$: Color and opacity transfer functions for background, based on $f_V(p)$ [S1].
+*   Ghosting factor: User-defined value, ranges from no ghosting to full cutaway view [S1].
+
+**Steps:**
+1.  **Preprocessing:** Extract tight bounding volumes for background, ghost, and selection by traversing hierarchical data structures (min-max octrees/bounding boxes) [S1].
+2.  **Depth Map Generation:**
+    *   Render the bounding volume of the ghost object into a depth texture with depth test `LESS` [S1].
+    *   Render the bounding volume of the selection object into a separate depth texture with depth test `LESS` [S1].
+    *   Filter these depth maps with a large kernel to enable smooth cutaways [S1].
+    *   If opaque geometry intersections are handled, generate an additional depth map for the geometry before the background pass and blend geometry color contributions into the frame buffer [S1].
+3.  **Background Pass:**
+    *   Set depth test to `LESS` and render the bounds of the background object into the depth buffer [S1].
+    *   Disable depth buffer writes [S1].
+    *   Set depth test to `GREATER` [S1].
+    *   Render view-aligned slices in back-to-front order [S1].
+    *   In the fragment program, shade the background object [S1].
+    *   Discard fragments whose depth is greater or equal than the corresponding value in the selection depth texture [S1].
+    *   If cutaways are enabled, modulate background opacity by the ghosting factor for fragments whose depth is greater or equal than the corresponding value in the ghost depth texture [S1].
+4.  **Ghost Pass:**
+    *   Clear the depth buffer [S1].
+    *   Render the bounding volume of the ghost object with depth test `GREATER` [S1].
+    *   Disable depth buffer writes [S1].
+    *   Set depth test to `LESS` [S1].
+    *   In the fragment program, shade both background and ghost objects [S1].
+    *   Discard fragments whose depth value is greater or equal than the corresponding value of the selection depth map [S1].
+    *   If cutaways are enabled, modulate the opacity of the background by the user-defined ghosting factor for fragments whose depth value is greater or equal than the corresponding value of the ghost depth map [S1].
+5.  **Selection Pass:**
+    *   Render the selection bounds into the cleared depth buffer with depth test `GREATER` [S1].
+    *   Disable depth buffer writes [S1].
+    *   Set depth test to `LESS` [S1].
+    *   Pass two sets of texture coordinates: unmodified for background and ghost, and transformed (using $T$) for the selection [S1].
+    *   In the fragment program, shade background, selection, and ghost objects [S1].
+    *   Handle intersections between background/selection and ghost/selection using intersection transfer functions [S1].
+    *   For cutaways, modulate the background's opacity for fragments whose depth value is greater or equal than the corresponding values in one or both of the depth maps (ghost and selection) [S1].
+6.  **Visual Enhancements:** Display visual enhancements as 3D objects with correct intersection handling (e.g., boxes) or overlays (e.g., fans) [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Preprocessing
+ghost_bounds = extract_bounding_volume(ghost_data)
+selection_bounds = extract_bounding_volume(selection_data)
+background_bounds = extract_bounding_volume(background_data)
+
+# Generate Depth Maps
+# Render ghost bounds to ghost_depth_texture with depth_test=LESS
+render_depth(ghost_bounds, ghost_depth_texture, depth_test=LESS)
+# Render selection bounds to selection_depth_texture with depth_test=LESS
+render_depth(selection_bounds, selection_depth_texture, depth_test=LESS)
+# Filter depth maps for smooth cutaways
+ghost_depth_texture = filter_large_kernel(ghost_depth_texture)
+selection_depth_texture = filter_large_kernel(selection_depth_texture)
+
+# Optional: Handle Opaque Geometry
+if opaque_geometry_exists:
+    render_geometry_depth(geometry_bounds, geometry_depth_texture, depth_test=LESS)
+    render_geometry_color(geometry_bounds, frame_buffer, blend=True)
+
+# Background Pass
+set_depth_test(LESS)
+render_depth(background_bounds, depth_buffer, depth_test=LESS)
+set_depth_buffer_writes(False)
+set_depth_test(GREATER)
+for slice in view_aligned_slices_back_to_front:
+    if slice_intersects(background_bounds):
+        color, alpha = shade_background(slice, f_V, c_B, alpha_B)
+        # Discard if occluded by selection
+        if depth >= sample(selection_depth_texture, depth):
+            discard_fragment()
+        # Apply ghosting cutaway if enabled
+        if cutaways_enabled and depth >= sample(ghost_depth_texture, depth):
+            alpha = alpha * ghosting_factor
+        composite_to_frame_buffer(color, alpha)
+
+# Ghost Pass
+clear_depth_buffer()
+set_depth_test(GREATER)
+render_depth(ghost_bounds, depth_buffer, depth_test=GREATER)
+set_depth_buffer_writes(False)
+set_depth_test(LESS)
+for slice in view_aligned_slices_back_to_front:
+    if slice_intersects(ghost_bounds):
+        # Shade both background and ghost
+        bg_color, bg_alpha = shade_background(slice, f_V, c_B, alpha_B)
+        ghost_color, ghost_alpha = shade_ghost(slice, f_V, c_G, alpha_G)
+        
+        # Discard if occluded by selection
+        if depth >= sample(selection_depth_texture, depth):
+            discard_fragment()
+            
+        # Apply ghosting cutaway to background if enabled
+        if cutaways_enabled and depth >= sample(ghost_depth_texture, depth):
+            bg_alpha = bg_alpha * ghosting_factor
+            
+        composite_to_frame_buffer(bg_color, bg_alpha)
+        composite_to_frame_buffer(ghost_color, ghost_alpha)
+
+# Selection Pass
+clear_depth_buffer()
+set_depth_test(GREATER)
+render_depth(selection_bounds, depth_buffer, depth_test=GREATER)
+set_depth_buffer_writes(False)
+set_depth_test(LESS)
+for slice in view_aligned_slices_back_to_front:
+    if slice_intersects(selection_bounds):
+        # Pass two texture coordinate sets: unmodified (uv) and transformed (uv_T)
+        # Shade background
+        bg_color, bg_alpha = shade_background(slice, f_V, c_B, alpha_B, uv=uv)
+        # Shade ghost
+        ghost_color, ghost_alpha = shade_ghost(slice, f_V, c_G, alpha_G, uv=uv)
+        # Shade selection
+        sel_color, sel_alpha = shade_selection(slice, f_V, c_S, alpha_S, uv=uv_T)
+        
+        # Handle intersections using intersection transfer functions
+        # This logic is implicit in the shading functions based on membership
+        # Discard if occluded by geometry (if applicable)
+        if opaque_geometry_exists and depth >= sample(geometry_depth_texture, depth):
+            discard_fragment()
+            
+        # Apply ghosting cutaway to background if enabled
+        if cutaways_enabled:
+            if depth >= sample(ghost_depth_texture, depth):
+                bg_alpha = bg_alpha * ghosting_factor
+            if depth >= sample(selection_depth_texture, depth):
+                bg_alpha = bg_alpha * ghosting_factor
+                
+        composite_to_frame_buffer(bg_color, bg_alpha)
+        composite_to_frame_buffer(ghost_color, ghost_alpha)
+        composite_to_frame_buffer(sel_color, sel_alpha)
+```
+
+**Edge Cases and Pitfalls:**
+*   Handling modifications to shared bricks requires copy-on-write to avoid corrupting other references to the same data [S1].
+*   Performance depends on selection size. If no selection is defined, frame rates match conventional slice-based rendering due to early-z culling [S1].
+*   If the selection does not intersect background/ghost (checked via bounding box test), a simplified fragment program can be executed in the selection pass [S1].
+*   $B \cap G = \emptyset$, i.e., background and ghost never intersect [S1]. The selection can intersect either the background or the ghost [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Performance mainly depends on the size of the selection [S1]. If no selection is defined, performance matches conventional slice-based volume rendering due to early-z culling [S1].
+*   **Memory Complexity:** Uses bricked memory layout with reference counting. Redundant bricks are stored only once [S1]. Selection volumes use copy-on-write, which is efficient for sparse data [S1].
+*   **Measured Performance:** On a standard UNC CT head dataset ($256^3$), rendering $3 \cdot 256 \approx 444$ slices took approximately 2 seconds on the hardware used in the source study [S1].
+*   **Strengths:** Allows independent control of appearance and spatial transformation for inter-penetrating objects. Smooth control from no ghosting to full cutaway. Efficient implementation using three passes avoids dynamic branching penalties of single-pass multi-object compositing [S1].
+*   **Limitations:** Performance degrades with larger selection sizes as more fragments are processed in the more complex rendering passes [S1].
+*   **When to use:** When visualizing inter-penetrating volumetric objects where occlusion needs to be managed via ghosting or cutaways, and when the user needs to transform a region of interest while keeping its original location visible as a ghost [S1].
+*   **When not to use:** When high performance is required for scenes with very large selections, or when simple single-object visualization is sufficient [S1].
+
+## Background
+The method originates from the VolumeShop system, an interactive system for direct volume illustration [S1]. It was presented in the paper "VolumeShop: An Interactive System for Direct Volume Illustration" published in 2005 [S1]. The approach is designed to correspond closely to traditional illustration techniques, treating ghosting as a special level-of-sparseness [S1]. It builds on the concept of importance-driven volume rendering but focuses on illustrative enhancements and selective illustration techniques [S1].
+
+## Sources
+[S1] VolumeShop: An Interactive System for Direct Volume Illustration, https://doi.org/10.1109/vis.2005.135, fetched 2026-10-26

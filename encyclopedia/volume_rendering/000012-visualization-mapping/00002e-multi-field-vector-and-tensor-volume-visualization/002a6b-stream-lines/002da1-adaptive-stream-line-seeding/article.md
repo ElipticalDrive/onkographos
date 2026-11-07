@@ -1,161 +1,175 @@
 # Adaptive Stream Line Seeding
 
-Also called: Adaptive seeding of stream lines
+Also called: Adaptive Line Extension, Adaptive seeding of stream lines, Streamline Subdivision
 
 ## Overview
-Adaptive Stream Line Seeding is a GPU-based algorithm that dynamically increases the density of stream lines in regions of a vector field where flow diverges (such as turbulent areas or vortices) while keeping the density sparse in laminar regions [S1, unofficial]. It distinguishes itself from regular seeding by using an iterative subdivision process driven by a divergence test between neighboring lines, implemented via alternating CUDA kernels for control and evaluation [S1, unofficial].
+Adaptive Stream Line Seeding is a dynamic method for visualizing vector fields that refines the density of stream lines in regions of high flow divergence (such as turbulence or vortices) while maintaining sparse sampling in laminar areas [S1, unofficial]. Unlike static seeding strategies that distribute points uniformly or based on pre-computed criteria, this method iteratively subdivides pairs of neighboring stream lines when the distance between them exceeds a defined threshold, effectively creating denser surface representations where flow complexity is highest [S2, unofficial]. It sets itself apart from siblings like [Stream Surfaces](7696-stream-surfaces.md) by focusing on the adaptive generation of individual trajectories rather than constructing continuous surfaces, and from static [Stream Lines](4796-stream-lines.md) by reacting to the geometric spread of the field during rendering [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** An initial set of stream lines defined by their vertex positions (`lineVertices`), their starting seeds (`seeds`), and a list of neighboring line pairs (`linePairs`) to be tested for divergence. Parameters include `maxAllowedLineDist` (the threshold for subdivision) and `linesMaxCount` (the maximum capacity of the output buffer).
-*   **Output:** Updated lists of line pairs (`outLinePairs`) and a list of new seed positions (`seeds`) for newly generated lines. The algorithm uses static arrays allocated to maximum capacity, managed as dynamic arrays via atomic counters.
+The algorithm operates on the GPU using an iterative approach where a "control" kernel identifies diverging line pairs and a separate "evaluation" kernel (not detailed here, assumed to be the standard stream line integrator) generates the actual geometry. The control kernel uses atomic operations to manage a pre-allocated static array as a dynamic buffer, allowing it to grow the number of stream lines up to a hardware-defined limit [S1, unofficial].
 
-**Data Structures:**
-*   `linePairs`: Array of `uint2` structures, where each element stores the indices of two neighboring stream lines.
-*   `lineVertices`: Array of `float3` structures storing the 3D coordinates of vertices for all lines.
-*   `seeds`: Array of `float3` structures storing the starting positions of stream lines.
-*   `lineLengths`: Array of `uint` storing the number of vertices per line.
-*   `outLinePairs`: Array of `uint2` for the output neighbor list.
-*   `outPairsIndex`: Atomic counter tracking the number of valid entries in `outLinePairs`.
-*   `outLinesIndex`: Atomic counter tracking the number of valid entries in `seeds`.
+### Inputs and Outputs
+**Inputs:**
+*   `linePairs`: `uint2*` array of pairs of line indices representing neighboring stream lines to be tested.
+*   `lineVertices`: `float3*` array containing the vertex positions for all current stream lines.
+*   `lineLengths`: `uint*` array storing the number of vertices (or segments) for each line.
+*   `seeds`: `float3*` array storing the initial seed position for each line.
+*   `maxAllowedLineDist`: `float` threshold for divergence.
+*   `verticesPerLine`: `uint` stride (number of vertices) per line in the `lineVertices` buffer.
+*   `verticesPerSample`: `uint` stride between sampled points within a line for the divergence test.
+*   `linePairsCount`: `uint` number of pairs to process.
+*   `linesMaxCount`: `uint` maximum capacity of the output line buffer.
 
-**Algorithm Steps:**
-The algorithm operates in iterations. In each iteration, a CUDA kernel (`computeLineAdaptiveExtensionKernel`) processes the current set of line pairs to determine if subdivision is required.
+**Outputs:**
+*   `outLinePairs`: `uint2*` array of updated neighboring line pairs (including new subdivisions).
+*   `outPairsIndex`: `uint*` atomic counter for the number of pairs written to `outLinePairs`.
+*   `outLinesIndex`: `uint*` atomic counter for the number of lines written to the output buffer.
+*   `seeds`: Updated `float3*` array with new seed positions inserted.
 
-1.  **Thread Initialization:** Each thread processes one line pair from the input `linePairs` array. The thread ID is calculated as `id = blockIdx.x * blockDim.x + threadIdx.x`. If `id >= linePairsCount`, the thread exits [S1, unofficial].
-2.  **Pair Retrieval:** The thread retrieves the current pair indices `currPair = linePairs[id]` [S1, unofficial].
-3.  **Output Pair Reservation:** The thread atomically increments `outPairsIndex` to reserve space in the output pair list. The original pair indices are copied to `outLinePairs[outPairIndex]` to preserve the topology [S1, unofficial].
-4.  **Divergence Test:**
-    *   Determine the minimum length between the two lines: `count = min(lineLengths[currPair.x], lineLengths[currPair.y])`. If `count < 2`, the thread exits (lines are too short to test) [S1, unofficial].
-    *   Sample 32 points along the lines to check for divergence. The step between samples is `count / 32`.
-    *   For each sample index `i` (incrementing by `count / 32`), retrieve the vertex positions `v1` and `v2` from `lineVertices`.
-    *   Calculate the Euclidean distance `length(v1 - v2)` and track the maximum distance `maxDist` across all 32 samples [S1, unofficial].
-5.  **Subdivision Decision:**
-    *   If `maxDist < maxAllowedLineDist`, the lines are considered sufficiently close. The thread exits without creating new lines [S1, unofficial].
-    *   If `maxDist >= maxAllowedLineDist`, subdivision is triggered. Calculate the number of new lines to insert using the formula:
-        $$ newLines = \lfloor \sqrt{\frac{maxDist}{maxAllowedLineDist}} \rfloor $$
-        [S1, unofficial]
-6.  **Seed Allocation:**
-    *   Atomically reserve space for the new seeds by adding `newLines` to `outLinesIndex`. Let `outLineIndex` be the returned value.
-    *   Check if `outLineIndex + newLines >= linesMaxCount`. If true, the buffer is full. Atomically decrement `outLinesIndex` by `newLines` and exit [S1, unofficial].
-7.  **Seed Generation and Pair Linking:**
-    *   Calculate the step vector for new seeds: `seedStep = (seeds[currPair.y] - seeds[currPair.x]) / (newLines + 1)` [S1, unofficial].
-    *   Initialize `lastOutPairIndex` to the current `outPairIndex` [S1, unofficial].
-    *   Loop `i` from `0` to `newLines - 1`:
-        *   Calculate the new seed position: `seeds[outLineIndex + i] = seeds[currPair.x] + (i + 1) * seedStep` [S1, unofficial].
-        *   Atomically increment `outPairsIndex` to reserve space for the new neighbor links. Let this new index be `outPairIndex` [S1, unofficial].
-        *   Update the neighbor links to connect the new line to its neighbors:
-            *   Set `outLinePairs[lastOutPairIndex].y = outLineIndex + i` (link previous left neighbor to new line).
-            *   Set `outLinePairs[outPairIndex].x = outLineIndex + i` (set new line as left neighbor).
-            *   Set `outLinePairs[outPairIndex].y = currPair.y` (link new line to right neighbor) [S1, unofficial].
-        *   Update `lastOutPairIndex = outPairIndex` [S1, unofficial].
+### Data Structures
+The method relies on flat arrays managed via atomic counters to simulate dynamic lists.
+*   **Line Pairs:** Stored as `uint2` where `.x` and `.y` are indices into the `lineVertices` and `seeds` arrays.
+*   **Seeds:** A flat `float3` array. New seeds are inserted linearly between existing seeds of a diverging pair.
+*   **Vertices:** A flat `float3` array. Lines are contiguous blocks of `verticesPerLine` elements.
 
-**Pseudocode:**
+### Steps
+1.  **Thread Identification:** Each thread processes one pair from `linePairs`. Calculate global thread ID `id`. If `id >= linePairsCount`, terminate.
+2.  **Pair Retrieval:** Get the current pair indices: `currPair = linePairs[id]`.
+3.  **Length Check:** Calculate the minimum length of the two lines: `count = min(lineLengths[currPair.x], lineLengths[currPair.y])`. If `count < 2`, the lines are too short to sample; terminate.
+4.  **Divergence Test:** Sample 32 points along the two lines to find the maximum distance between them.
+    *   Initialize `maxDist = 0`.
+    *   Iterate `i` from `0` to `count` with step `count / 32`.
+    *   Get vertices: `v1 = lineVertices[currPair.x * verticesPerLine + i * verticesPerSample]` and `v2 = lineVertices[currPair.y * verticesPerLine + i * verticesPerSample]`.
+    *   Update `maxDist = max(maxDist, length(v1 - v2))`.
+5.  **Threshold Check:** If `maxDist < maxAllowedLineDist`, the lines are sufficiently close; terminate.
+6.  **Calculate New Lines:** Determine the number of new seeds to insert using the formula:
+    $$ newLines = \lfloor \sqrt{\frac{maxDist}{maxAllowedLineDist}} \rfloor $$
+    [S1, unofficial]
+7.  **Allocate Output Space:** Atomically allocate space for the new lines in the output buffer:
+    *   `outLineIndex = atomicAdd(outLinesIndex, newLines)`
+    *   If `outLineIndex + newLines >= linesMaxCount`, rollback the allocation: `atomicAdd(outLinesIndex, -newLines)` and terminate.
+8.  **Generate Seeds:** Calculate the step vector between the parent seeds:
+    $$ seedStep = \frac{seeds[currPair.y] - seeds[currPair.x]}{newLines + 1} $$
+    [S1, unofficial]
+    Loop `i` from `0` to `newLines - 1`:
+    *   Set new seed: `seeds[outLineIndex + i] = seeds[currPair.x] + (i + 1) * seedStep`.
+9.  **Update Pair Links:** The algorithm maintains a linked-list-like structure of pairs to ensure all new lines are tested in subsequent iterations.
+    *   Initialize `lastOutPairIndex` with the index allocated for the original pair (see step 10).
+    *   For each new line `i`:
+        *   Atomically allocate a pair index: `outPairIndex = atomicAdd(outPairsIndex, 1)`.
+        *   Link the previous pair's end to the new line: `outLinePairs[lastOutPairIndex].y = outLineIndex + i`.
+        *   Link the new line to the next pair: `outLinePairs[outPairIndex].x = outLineIndex + i`.
+        *   Link the new line to the second parent line: `outLinePairs[outPairIndex].y = currPair.y`.
+        *   Update `lastOutPairIndex = outPairIndex`.
+10. **Preserve Original Pair:** Before subdivision, the original pair must be preserved in the output list to maintain connectivity.
+    *   `outPairIndex = atomicAdd(outPairsIndex, 1)`
+    *   `outLinePairs[outPairIndex].x = currPair.x`
+    *   `outLinePairs[outPairIndex].y = currPair.y`
+    *   Set `lastOutPairIndex = outPairIndex` (used in step 9).
+
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pseudocode for computeLineAdaptiveExtensionKernel
-# Note: This is a conceptual translation of the CUDA kernel logic.
-# In practice, this runs on GPU with atomic operations.
+__global__ void computeLineAdaptiveExtensionKernel(
+    float maxAllowedLineDist, 
+    uint2* linePairs, 
+    uint linePairsCount,
+    float3* lineVertices, 
+    uint verticesPerLine, 
+    uint verticesPerSample,
+    uint* lineLengths, 
+    float3* seeds, 
+    uint2* outLinePairs,
+    uint* outPairsIndex, 
+    uint* outLinesIndex, 
+    uint linesMaxCount) {
 
-def compute_line_adaptive_extension(
-    max_allowed_line_dist,
-    line_pairs,
-    line_pairs_count,
-    line_vertices,
-    vertices_per_line,
-    vertices_per_sample,
-    line_lengths,
-    seeds,
-    out_line_pairs,
-    out_pairs_index,
-    out_lines_index,
-    lines_max_count
-):
-    # Thread ID calculation (conceptual)
-    thread_id = get_thread_id()
-    
-    if thread_id >= line_pairs_count:
-        return
+    uint id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id >= linePairsCount) {
+        return;
+    }
 
-    curr_pair = line_pairs[thread_id]
+    uint2 currPair = linePairs[id];
     
-    # Reserve space in output pair list
-    out_pair_index = atomic_add(out_pairs_index, 1)
-    
-    # Preserve original pair
-    out_line_pairs[out_pair_index].x = curr_pair.x
-    out_line_pairs[out_pair_index].y = curr_pair.y
-    
-    # Determine minimum line length
-    count = min(line_lengths[curr_pair.x], line_lengths[curr_pair.y])
-    
-    if count < 2:
-        return
+    // Preserve original pair in output list
+    uint outPairIndex = atomicAdd(outPairsIndex, 1);
+    outLinePairs[outPairIndex].x = currPair.x;
+    outLinePairs[outPairIndex].y = currPair.y;
+    uint lastOutPairIndex = outPairIndex;
 
-    # Divergence test with 32 samples
-    max_dist = 0.0
-    step = count // 32
-    
-    for i in range(0, count, step):
-        v1 = line_vertices[curr_pair.x * vertices_per_line + i * vertices_per_sample]
-        v2 = line_vertices[curr_pair.y * vertices_per_line + i * vertices_per_sample]
-        dist = length(v1 - v2)
-        if dist > max_dist:
-            max_dist = dist
+    uint count = min(lineLengths[currPair.x], lineLengths[currPair.y]);
+    if (count < 2) {
+        return;  // One of lines too short.
+    }
 
-    if max_dist < max_allowed_line_dist:
-        return
-
-    # Calculate number of new lines
-    new_lines = floor(sqrt(max_dist / max_allowed_line_dist))
-
-    # Reserve space for new seeds
-    out_line_index = atomic_add(out_lines_index, new_lines)
+    // Test 32 samples for divergence.
+    float maxDist = 0;
+    uint step = count / 32;
+    if (step == 0) step = 1; // Guard against division by zero if count < 32
     
-    if out_line_index + new_lines >= lines_max_count:
-        atomic_add(out_lines_index, -new_lines)
-        return
+    for (uint i = 0; i < count; i += step) {
+        float3 v1 = lineVertices[currPair.x * verticesPerLine + i * verticesPerSample];
+        float3 v2 = lineVertices[currPair.y * verticesPerLine + i * verticesPerSample];
+        float dist = length(v1 - v2);
+        if (dist > maxDist) {
+            maxDist = dist;
+        }
+    }
 
-    # Calculate seed step
-    seed_step = (seeds[curr_pair.y] - seeds[curr_pair.x]) / (new_lines + 1)
-    
-    last_out_pair_index = out_pair_index
-    
-    for i in range(new_lines):
-        # Generate new seed
-        seeds[out_line_index + i] = seeds[curr_pair.x] + (i + 1) * seed_step
+    if (maxDist < maxAllowedLineDist) {
+        return;  // Lines do not diverge.
+    }
+
+    uint newLines = (uint)sqrt(maxDist / maxAllowedLineDist);
+
+    uint outLineIndex = atomicAdd(outLinesIndex, newLines);
+    if ((outLineIndex + newLines) >= linesMaxCount) {
+        atomicAdd(outLinesIndex, -newLines);
+        return;  // Not enough space for new seeds.
+    }
+
+    float3 seedStep = (seeds[currPair.y] - seeds[currPair.x]) / (newLines + 1);
+
+    for (uint i = 0; i < newLines; ++i) {
+        seeds[outLineIndex + i] = seeds[currPair.x] + (i + 1) * seedStep;
         
-        # Reserve space for new pair links
-        out_pair_index = atomic_add(out_pairs_index, 1)
-        
-        # Link new line to neighbors
-        out_line_pairs[last_out_pair_index].y = out_line_index + i
-        out_line_pairs[out_pair_index].x = out_line_index + i
-        out_line_pairs[out_pair_index].y = curr_pair.y
-        
-        last_out_pair_index = out_pair_index
+        // Insert new pair (like in linked-list).
+        uint outPairIndex = atomicAdd(outPairsIndex, 1);
+        outLinePairs[lastOutPairIndex].y = outLineIndex + i;
+        outLinePairs[outPairIndex].x = outLineIndex + i;
+        outLinePairs[outPairIndex].y = currPair.y;
+
+        lastOutPairIndex = outPairIndex;
+    }
+}
 ```
 
-**Parameters:**
-*   `maxAllowedLineDist`: The maximum Euclidean distance between corresponding points on two neighboring stream lines before subdivision is triggered. [S1, unofficial]
-*   `linesMaxCount`: The maximum number of stream lines that can be stored in the output buffer. [S1, unofficial]
+### Parameters
+*   `maxAllowedLineDist`: The maximum Euclidean distance between corresponding points on two neighboring stream lines before subdivision is triggered. Typical values depend on the scale of the vector field. [S1, unofficial]
+*   `verticesPerSample`: Stride between sampled points in the `lineVertices` buffer for the divergence test. [S2, unofficial]
 
-**Edge Cases and Pitfalls:**
-*   **Buffer Overflow:** If the pre-allocated buffer for lines (`linesMaxCount`) is insufficient, the algorithm atomically rolls back the seed index and skips the subdivision for that pair [S1, unofficial].
-*   **Short Lines:** Lines with fewer than 2 vertices are skipped to prevent division by zero or invalid sampling [S1, unofficial].
-*   **Performance:** The algorithm can be slow at the beginning of iterations because the number of new lines grows exponentially ($2^n$) in highly divergent regions. The square-root formula helps mitigate this by limiting the number of inserted lines relative to the distance [S1, unofficial].
-*   **CPU-GPU Synchronization:** The algorithm requires alternating invocation of the control kernel (this one) and the evaluation kernel (stream line integration) by the CPU, which adds overhead compared to fully GPU-resident non-adaptive methods [S1, unofficial].
+### Edge Cases and Pitfalls
+*   **Buffer Overflow:** The algorithm uses a pre-allocated static array. If `linesMaxCount` is reached, new lines are dropped. The rollback mechanism (`atomicAdd` negative) ensures consistency but may lead to lost refinement opportunities in highly turbulent regions. [S1, unofficial]
+*   **Short Lines:** Lines with fewer than 2 vertices are skipped to prevent invalid sampling. [S1, unofficial]
+*   **Atomic Contention:** High divergence rates cause heavy contention on `outLinesIndex` and `outPairsIndex`, potentially reducing throughput. [S1, unofficial]
+*   **Precision:** The use of `sqrt` and floating-point arithmetic for `seedStep` may introduce minor positional inaccuracies in seed placement, though this is generally negligible for visualization. [G]
+
+## Subtopics
+
+### [Adaptive Streamline Generation](7692-adaptive-streamline-generation.md)
+An iterative CUDA-based algorithm that generates streamlines by starting with a fixed number of seeds, extending them via GPU kernels, and recursively adding new seeds based on the endpoints of previously generated lines until a maximum number of adaptive steps is reached or no new lines are generated. It sets itself apart from static seeding methods by dynamically refining the streamline density in areas where flow diverges, building on the principles of [Adaptive Stream Line Seeding](5604-adaptive-stream-line-seeding.md).
 
 ## Operating characteristics
-*   **Time Complexity:** The divergence test is $O(N)$ per pair where $N$ is the number of samples (fixed at 32). The subdivision step is $O(K)$ where $K$ is the number of new lines. The overall complexity depends on the number of iterations and the growth rate of lines in turbulent regions.
-*   **Memory Complexity:** Requires pre-allocation of static arrays for the maximum possible number of lines and pairs. This can lead to significant memory usage if the scene has large turbulent regions, as the buffer must be sized for the worst-case scenario [S1, unofficial].
-*   **Performance:** The use of atomic operations for dynamic array management on GPU is performance-costly due to contention. The alternating CPU-GPU kernel invocation further reduces efficiency compared to non-adaptive versions, though the visual quality improvement is significant [S1, unofficial].
-*   **Strengths:** Effectively reveals flow features in turbulent/vortical regions without wasting resources on laminar areas.
-*   **Limitations:** High memory overhead due to pre-allocation; slower performance due to atomic operations and CPU synchronization; complexity in implementation [S1, unofficial].
+*   **Time Complexity:** The divergence test is $O(N)$ per pair where $N$ is the number of samples (fixed at 32). The number of iterations depends on the flow complexity; in turbulent regions, the number of lines can grow exponentially ($2^n$) in early iterations, slowing down the start of the process. [S1, unofficial]
+*   **Memory Complexity:** Requires pre-allocation of buffers for the maximum possible number of lines. This can lead to memory overcommitment in simple flows or underutilization in complex flows. [S1, unofficial]
+*   **Performance:** The alternation between control and evaluation kernels on the CPU introduces overhead, making the overall algorithm slower than non-adaptive versions. However, the visual quality improvement is significant. [S1, unofficial]
+*   **Strengths:** Automatically highlights complex flow features (vortices, turbulence) without manual tuning of seed density. [S1, unofficial]
+*   **Limitations:** Performance degrades in highly turbulent fields due to exponential growth of lines and atomic contention. Memory management is complex due to the need for static pre-allocation. [S1, unofficial]
 
 ## Background
-The method was described by Marek Fiser in a blog post detailing the implementation of realtime 3D vector field visualization using CUDA [S1, unofficial]. The approach addresses the challenge of implementing adaptive algorithms on GPUs, where thread communication and dynamic memory management are difficult. It was designed to improve visual quality over regular seeding by focusing computational effort on areas of high flow divergence [S1, unofficial].
+The method was developed for real-time visualization of 3D vector fields using CUDA. It addresses the challenge of implementing adaptive algorithms on GPUs, where thread communication is difficult and performance costly. The approach uses two distinct CUDA kernels (control and evaluation) alternately invoked by the CPU to manage the adaptive subdivision process. [S1, unofficial]
 
 ## Sources
-[S1] Realtime visualization of 3D vector fields using CUDA, https://marekfiser.com/projects/realtime-visualization-of-3D-vector-fields-using-CUDA/, fetched 2026-10-28 (unofficial)
+[S1] Realtime visualization of 3D vector fields using CUDA | Marek's blog, https://marekfiser.com/projects/realtime-visualization-of-3D-vector-fields-using-CUDA/, fetched 2026-10-28 (unofficial)
+[S2] NightElfik/Vector-field-visualization-using-cuda NightElfik/Vector-field-visualization-using-cuda on GitHub, https://github.com/NightElfik/Vector-field-visualization-using-cuda, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,2601 @@
+<h1 align="center">NeRF Experiments</h1>
+
+<h2 align="center">Experiment Visualizations</h2>
+
+<div align="center">
+  <div style="display: inline-block; width: 30%; text-align: center; margin: 0 10px;">
+    <h3>NeRF-Base</h3>
+    <img src="./media/rgb_video_nerf_base.gif" alt="NeRF Base GIF" width="100%">
+  </div>
+  <div style="display: inline-block; width: 30%; text-align: center; margin: 0 10px;">
+    <h3>BitNeRF-Base</h3>
+    <img src="./media/rgb_video_bitnerf_base.gif" alt="BitNeRF Base GIF" width="100%">
+  </div>
+  <!-- <div style="display: inline-block; width: 30%; text-align: center; margin: 0 10px;">
+    <h3>BitNeRF-2xT4s-DDP</h3>
+    <img src="./media/rgb_video_bitnerf_2xt4_ddp.gif" alt="BitNeRF DDP GIF" width="100%">
+  </div> -->
+</div>
+
+## Overview
+
+This repository contains several implementations and optimizations of Neural Radiance Fields (NeRF) using PyTorch. The experiments explore different training configurations, optimization techniques, and quantization approaches for NeRF models.
+
+## Experiments
+
+The experiments are broken into 6 parts, as detailed below. Largely, the idea has been to start from a base-implementation of NeRF in PyTorch and then extend it within the constraints of our compute to add in optimizations such as quantization and DDP in its training regime.
+
+### Experimental Setup
+
+- All code is written with PyTorch, and trained on an **NVIDIA A100 40GB GPU** from [Google Colab](https://colab.research.google.com). The 2 experiments that run with DDP are performed on the **2 x NVIDIA T4 16GB GPUs** available for free on [Kaggle](https://www.kaggle.com), made accessible on Google Colab. 
+
+- The [selected dataset](https://cseweb.ucsd.edu/~viscomp/projects/LF/papers/ECCV20/nerf) is a slice of the original NeRF dataset which includes 106 images of size 100x100x3, along with the camera pose and focal length parameters. Image projection from the 2D to 3D World-point representation is done using the formula below.
+
+```math
+\begin{bmatrix} X \\\ Y \\\ Z \end{bmatrix}
+=
+\begin{bmatrix}
+p_1 & p_2 & p_3 & p_4 \\\
+p_5 & p_6 & p_7 & p_8 \\\
+p_9 & p_{10} & p_{11} & p_{12}
+\end{bmatrix}
+\begin{bmatrix} X \\\ Y \\\ Z \\\ 1 \end{bmatrix}
+```
+
+- The NeRF MLP itself comprises of 8 layers, with residual connections at every 4th layer. 
+- All the models have [`torch.compile`](https://docs.pytorch.org/tutorials/intermediate/torch_compile_tutorial.html) enabled, with `fullgraph=True`. 
+- The data pipeline has also been reasonably-optimized with `num_workers` set dynamically with CPU core count and memory-pinning.
+
+## Project Structure
+
+- [`nerf.py`](nerf.py) - Simple NeRF implementation
+- [`bitnerf.py`](bitnerf.py) - Quantization-friendly NeRF implementation with RMSNorm injected between layers, as recommended for BitNet training
+- [`bitnerf_ddp.py`](bitnerf_ddp.py) - DDP-compatible BitNeRF implementation
+- [`dataset.py`](dataset.py) - Dataset utilities for NeRF training
+- [`utils.py`](utils.py) - Utility functions for ray-manipulation, transforms, logging, etc.
+- [`configs.py`](configs.py) - Configuration parameters for different experiments
+- [`exp1.py`](exp1.py) through [`exp6.py`](exp6.py) - Different experiment scripts
+
+## Setup & Requirements
+
+### Google Colab
+
+If you have a Colab Pro account, you can simply change your Runtime to an A100 by clicking **Runtime** > **Change Runtime Type** > **A100 GPU** > **Save**. If you do not, then feel free to use any other cloud provider such as [Google Cloud Platform](https://cloud.google.com/), [Amazon Web Services](https://aws.amazon.com/), [Microsoft Azure](https://azure.microsoft.com/), [JarvisLabs](https://www.jarvislabs.com/), [Lambda Labs](https://www.lambdalabs.com/), [SF Compute](https://sfcompute.com/), etc.
+
+To write a file from within a cell in Colab, use the `%%writeline {filename}.{ext}` Colab Magic command.
+To execute a shell command, use the `!{shell_command}` Colab Magic command.
+To execute a bash script, use the `!bash {script}.sh` Colab Magic command.
+
+### 2 x NVIDIA T4 GPUs on Kaggle on Colab
+
+1. Navigate to [Kaggle](https://www.kaggle.com/) and open a [new Code notebook](https://www.kaggle.com/code)
+2. Go to Settings > Accelerator Preferences > GPU T4 x2
+3. Go to Run > Kaggle Jupyter Server and on the right-side pane, copy the "Colab-Compatible URL"
+4. Navigate into [Colab](https://colab.new) now, and click on the drop-down button next to Connect (near the top-right side of the screen)
+5. Choose "Connect to a local runtime" and enter the copied URL from Kaggle into it. Click "Connect".
+6. You should now have the GPUs connected to your Colab system!
+
+### Model Architecture
+
+#### NeRF
+```mermaid
+graph LR
+
+n_input["Input: Positional Encoding"] --> n_linear["Linear: inp_emb → emb_dim"]
+n_linear --> n_layer0["Layer 0: Linear"]
+n_layer0 --> n_layer1["Layer 1: Linear"]
+n_layer1 --> n_layer2["Layer 2: Linear"]
+n_layer2 --> n_layer3["Layer 3: Linear"]
+n_layer3 --> n_layer4["Layer 4: Linear (with skip)"]
+n_layer4 --> n_layer5["Layer 5: Linear"]
+n_layer5 --> n_layer6["Layer 6: Linear"]
+n_layer6 --> n_layer7["Layer 7: Linear"]
+n_layer7 --> n_output["Output: Linear → 4 (RGB + Sigma)"]
+n_input -. "skip connection" .-> n_layer4
+
+%% Yellow background styling
+style n_input fill:#fff3b0,stroke:#000,stroke-width:1px
+style n_linear fill:#fff3b0
+style n_layer0 fill:#fff3b0
+style n_layer1 fill:#fff3b0
+style n_layer2 fill:#fff3b0
+style n_layer3 fill:#fff3b0
+style n_layer4 fill:#fff3b0
+style n_layer5 fill:#fff3b0
+style n_layer6 fill:#fff3b0
+style n_layer7 fill:#fff3b0
+style n_output fill:#fff3b0
+```
+
+#### BitNeRF
+```mermaid
+graph LR
+
+%% Main BitNeRF model path (horizontal)
+b_input["Input: Positional Encoding"] --> b_linear["Linear: inp_emb → emb_dim"]
+b_linear --> b_layer0["Layer 0: RMSNormLinear"]
+b_layer0 --> b_layer1["Layer 1: RMSNormLinear"]
+b_layer1 --> b_layer2["Layer 2: RMSNormLinear"]
+b_layer2 --> b_layer3["Layer 3: RMSNormLinear"]
+b_layer3 --> b_layer4["Layer 4: RMSNormLinear (with skip)"]
+b_layer4 --> b_layer5["Layer 5: RMSNormLinear"]
+b_layer5 --> b_layer6["Layer 6: RMSNormLinear"]
+b_layer6 --> b_layer7["Layer 7: RMSNormLinear"]
+b_layer7 --> b_output["Output: Linear → 4 (RGB + Sigma)"]
+
+%% Skip/residual connection
+b_input -. "skip connection" .-> b_layer4
+
+%% Boxed Zoom-in (above main path)
+subgraph zoom ["Zoom: RMSNormLinear"]
+    zoom_input["Input"] --> zoom_rms["RMSNorm"]
+    zoom_rms --> zoom_linear["Linear"]
+    zoom_linear --> zoom_output["Output"]
+end
+
+%% Link to zoom
+b_layer0 -. "zoom in" .-> zoom
+
+%% Style: main architecture in yellow
+style b_input fill:#fff3b0,stroke:#000,stroke-width:1px
+style b_linear fill:#fff3b0
+style b_layer0 fill:#fff3b0
+style b_layer1 fill:#fff3b0
+style b_layer2 fill:#fff3b0
+style b_layer3 fill:#fff3b0
+style b_layer4 fill:#fff3b0
+style b_layer5 fill:#fff3b0
+style b_layer6 fill:#fff3b0
+style b_layer7 fill:#fff3b0
+style b_output fill:#fff3b0
+
+%% Style: zoomed RMSNorm block in light yellow
+style zoom_input fill:#ffe69c
+style zoom_rms fill:#ffe69c
+style zoom_linear fill:#ffe69c
+style zoom_output fill:#ffe69c
+```
+
+## Findings
+
+### Stochasticity in Loss Curves
+
+![image](media/plots/train-loss-mse.png)
+
+The loss curves we see across the board are originally quite **erratic**. This can generally be attributed to the use of a lower batch-size and ray-sampling rate (keeping compute constraints in mind), as well as the use of Quantization in the case of BitNeRF. This can be rectified with an increase in the `POS_ENCODE_DIMS` or `NUM_SAMPLES` parameter, and/or an increase in the batch-size. These steps would effectively increase the expressivity of the points being samples, or increase the number of points being sampled from each ray altogether.
+
+### Gradient Scaling in AMP-enabled Training
+
+![image](media/plots/train-gradnorm.png)
+
+As recommended by the [official PyTorch documentation](https://docs.pytorch.org/docs/stable/amp.html#gradient-scaling), we perform **Gradient Scaling** upon performing AMP-enabled training. This leads to our GradNorm graph being off-scale. We do gradient scaling because gradients in `fp16` can generally be quite small and thus **become negligible (underflow)** quite soon. Performing such positive-scaling allows for the gradients to be propagated across a deep network reliably.
+
+### GPU Power-Consumption Patterns
+
+![image](media/plots/system-gpu-power-usage.png)
+
+We can theorize that the distribution of workloads between both GPUs in the DDP-enabled nerf-base as well as bitnerf-base was not the best. As an example, the power consumption for GPU 0 v/s GPU 1 towards the end of the run was ~59 v/s ~9, **a 6.5x difference!** While considering this, also keep in mind that both DDP runs were made on a T4 instead of a A100 GPU.
+On the other hand, we see that the BitNeRF run used considerably higher GPU power compared to the base NeRF run. This is attributed to the use of a **STE (Straight-Through Estimator)** during the BitNet-scale training. Since gradients cannot be well-represented in such low-bit values, we basically let the gradients flow through in full precision and apply the gradient as received, akin to using an identity function in the forward pass.
+
+### Training Breakdown of Distributed Quantization-Aware NeRF
+
+<div align="center">
+  <div style="display: inline-block; width: 45%; margin: 0 10px;">
+    <h3>Depth Map (BitNeRF-DDP-2xT4)</h3>
+    <img src="./media/plots/dmap-bitnerf-ddp.png" alt="Depth Map (BitNeRF-DDP)" width="100%">
+  </div>
+  <div style="display: inline-block; width: 45%; margin: 0 10px;">
+    <h3>Depth Map (BitNeRF-A100)</h3>
+    <img src="./media/plots/dmap-bitnerf-a100.png" alt="Depth Map (BitNeRF-A100)" width="100%">
+  </div>
+</div>
+
+The BitNeRF model shows great promise when trained on an A100. But upon running the same experiment with DDP on 2 x T4s, the training suffers catastrophic breakdown. The reason for such a breakdown is not known, although I hypothesize that it could have something to do with **divergent mean statistics** for the mini-batches that each of the GPUs receive upon performing DDP, which leads the `FakeQuantize` modules to then diverge in their training leading to the model learning from inconsistent signals and performing worse. Another fact is, based on the advice given in [#930](https://github.com/pytorch/ao/pull/930), we inject a `RMSNorm` layer before every `nn.Linear` layer. I have not done an investigation as to what happens if I do not do that, but I'd hazard a guess that it would lead to training instabilities.
+
+### Quality of Depth-maps
+
+<div align="center">
+  <table>
+    <tr>
+      <td align="center">
+        <img src="./media/plots/dmap-nerf-base.png" alt="Depth Map (NeRF-A100)" width="180px"><br>
+        <sub>Depth Map (NeRF-A100)</sub>
+      </td>
+      <td align="center">
+        <img src="./media/plots/dmap-nerf-amp.png" alt="Depth Map (NeRF-A100-AMP)" width="180px"><br>
+        <sub>Depth Map (NeRF-A100-AMP)</sub>
+      </td>
+      <td align="center">
+        <img src="./media/plots/dmap-nerf-a100-highbatchsize.png" alt="Depth Map (NeRF-A100-AMP-HighBatchSize)" width="180px"><br>
+        <sub>Depth Map (NeRF-AMP-HighBatchSize)</sub>
+      </td>
+    </tr>
+    <tr>
+      <td align="center">
+        <img src="./media/plots/dmap-bitnerf-a100.png" alt="Depth Map (BitNeRF-A100)" width="180px"><br>
+        <sub>Depth Map (BitNeRF-A100)</sub>
+      </td>
+      <td align="center">
+        <img src="./media/plots/dmap-nerf-ddp.png" alt="Depth Map (NeRF-DDP-2xT4)" width="180px"><br>
+        <sub>Depth Map (NeRF-DDP-2xT4)</sub>
+      </td>
+      <td align="center">
+        <img src="./media/plots/dmap-bitnerf-ddp.png" alt="Depth Map (BitNeRF-DDP-2xT4)" width="180px"><br>
+        <sub>Depth Map (BitNeRF-DDP-2xT4)</sub>
+      </td>
+    </tr>
+  </table>
+</div>
+
+Upon first-pass of the depth maps, we see that they are quite noisy. One possible reason for this can be a low ray-sampling rate leading to less depth information being propagated to the network. Also to note is the absolute breakdown of the depth-map in distributed low-bit training, as hypothesized in the section above.
+
+### Effect of Batch Size on Overall Generation Quality and Training Dynamics
+
+<div align="center">
+  <div style="display: inline-block; width: 45%; margin: 0 10px;">
+    <h3>Batch Size: 4</h3>
+    <img src="./media/plots/nerf-base.gif" alt="Batch Size: 4" width="100%">
+  </div>
+  <div style="display: inline-block; width: 45%; margin: 0 10px;">
+    <h3>Batch Size: 8</h3>
+    <img src="./media/plots/nerf-highbatchsize.gif" alt="Batch Size: 8" width="100%">
+  </div>
+</div>
+
+The difference between the generated output and training dynamics with a change in batch-size is near-negligible. We see that the loss curves for the higher-batch-size run seems to converge quicker and the PSNR scores also grow faster with the same run, as expected. No surprises here!
+
+For more information, feel free to [refer to the Weights & Biases dashboard here](https://wandb.ai/suvadityamuk/nerf/workspace)!
+
+## Usage
+
+First, execute `python data_setup.py` to set up the dataset on your machine. This should take a few seconds at best with a decent internet connection.
+
+Then, you can try running each experiment as a separate Python script itself by executing `python exp_{num}.py`. The experiments are as follows:
+- [`exp1.py`](exp1.py): A base run with a simple NeRF model on a single NVIDIA A100 40 GB GPU.
+- [`exp2.py`](exp2.py): A run with the NeRF model undergoing naive automatic mixed-precision and gradient scaling.
+- [`exp3.py`](exp3.py): An automatic mixed-precision NeRF model trained with data on a higher batch size.
+- [`exp4.py`](exp4.py): A BitNeRF model undergoing low-bit-scale training on a single NVIDIA A100 40 GB GPU.
+- [`exp5.py`](exp5.py): A simple NeRF model undergoing distributed training with Distributed DataParallel APIs on 2 x T4 GPUs.
+- [`exp6.py`](exp6.py): A BitNeRF model undergoing distributed low-bit-scale training with Distributed DataParallel APIs on 2 x T4 GPUs.
+
+### Example
+
+```bash
+python exp1.py  # For base NeRF
+python exp6.py  # For BitNeRF with DDP
+```
+
+The training process will:
+1. Load the dataset
+2. Initialize the model
+3. Train for the specified number of epochs
+4. Save model checkpoints
+5. Generate 360° videos periodically
+
+Make changes to the WandB configuration to set up your own WandB workspace and account as per your requirement.
+
+## Contributing
+
+Contributions are welcome! Feel free to extend these results or scripts! I would particularly appreciate more ablations to be done in these experiments.
+
+## License
+
+[MIT](https://choosealicense.com/licenses/mit/)
+
+## References
+
+1. [Aritra Roy Gosthipaty and Ritwik Raha, Keras documentation: 3D Volumetric Rendering with NeRF, 2021](http://keras.io/examples/vision/nerf)
+2. [Thien Tran, TorchAO, GitHub Pull Request (#930): BitNet b1.58 training](https://github.com/pytorch/ao/pull/930)
+3. [Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. Nerf: Representing scenes as neural radiance fields for view synthesis, 2020](https://arxiv.org/abs/2003.08934)
+4. [Shuming Ma, Hongyu Wang, Lingxiao Ma, Lei Wang, Wenhui Wang, Shaohan Huang, Li Dong, Ruiping Wang, Jilong Xue, and Furu Wei. The era of 1-bit llms: All large language models are in 1.58 bits, 2024](https://arxiv.org/abs/2402.17764)
+
+## Citation
+
+If you use this code or find this work helpful in your research, please consider citing:
+
+```bibtex
+@misc{mukherjee2025nerfexperiments,
+  author = {Mukherjee, Suvaditya},
+  title = {NeRF Experiments: Implementations and Optimizations of Neural Radiance Fields},
+  year = {2025},
+  publisher = {GitHub},
+  journal = {GitHub repository},
+  howpublished = {\url{https://github.com/suvadityamuk/nerf-experiments}}
+}
+```
+
+APA format:
+```
+Mukherjee, S. (2025). NeRF Experiments: Implementations and Optimizations of Neural Radiance Fields. GitHub. https://github.com/suvadityamuk/nerf-experiments
+```
+
+### bitnerf.py
+```
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from configs import POS_ENCODE_DIMS, NUM_SAMPLES
+
+
+class RMSNormLinear(nn.Module):
+    def __init__(self, in_features, out_features, device):
+        super(RMSNormLinear, self).__init__()
+        self.norm = nn.RMSNorm(in_features, device=device)
+        self.linear = nn.Linear(in_features, out_features, bias=True, device=device)
+
+    def forward(self, x):
+        x = self.norm(x)
+        x = self.linear(x)
+        return x
+
+
+class BitNeRF(torch.nn.Module):
+    def __init__(self, device, config, emb_dim=64, num_layers=8):
+        super(BitNeRF, self).__init__()
+        self.inp_emb = (2 * 3 * POS_ENCODE_DIMS) + 3
+
+        self.input_layer = nn.Linear(
+            in_features=self.inp_emb,
+            out_features=emb_dim,
+            bias=True,
+            device=device,
+        )
+        input_dim_size = emb_dim
+        self.layers = []
+        self.config = config
+        self.device = device
+
+        for idx in range(num_layers):
+            if idx % 4 == 0 and idx > 0:
+                in_features = input_dim_size + self.inp_emb
+            else:
+                in_features = input_dim_size
+            layer = RMSNormLinear(
+                in_features=in_features, out_features=emb_dim, device=device
+            )
+            self.layers.append(layer)
+
+        self.layers = nn.ModuleList(self.layers)
+
+        self.output_layer = nn.Linear(
+            in_features=input_dim_size, out_features=4, bias=True, device=device
+        )
+
+    def forward(self, x):
+        inputs = x
+        x = self.input_layer(x)
+        for idx, layer in enumerate(self.layers):
+            if idx % 4 == 0 and idx > 0:
+                x = torch.cat([x, inputs], dim=-1)
+            x = F.relu(layer(x))
+        outputs = self.output_layer(x)
+        return outputs
+
+    def render_rgb_depth(self, rays_flat, t, rand=True, train=True):
+        predictions = self.forward(rays_flat)
+        predictions = torch.reshape(
+            predictions, (-1, self.config["H"], self.config["W"], NUM_SAMPLES, 4)
+        )
+
+        rgb = torch.sigmoid(predictions[..., :-1])
+        sigma = F.relu(predictions[..., -1])
+
+        delta = t[..., 1:] - t[..., :-1]
+        delta = torch.cat(
+            [
+                delta,
+                torch.broadcast_to(
+                    torch.tensor(1e10, device=self.device), delta[..., :1].shape
+                ),
+            ],
+            dim=-1,
+        )
+        if rand:
+            alpha = 1.0 - torch.exp(-sigma * delta)
+        else:
+            alpha = 1.0 - torch.exp(-sigma * delta[:, None, None, :])
+
+        transmittance = torch.cumprod(1.0 - alpha + 1e-10, dim=-1)
+        weights = alpha * transmittance
+
+        rendered_rgb = torch.sum(weights[..., None] * rgb, dim=-2)
+        if rand:
+            depth_map = torch.sum(weights * t, dim=-1)
+        else:
+            depth_map = torch.sum(weights * t[:, None, None], dim=-1)
+
+        return (rendered_rgb, depth_map)
+```
+
+### bitnerf_ddp.py
+```
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from configs import POS_ENCODE_DIMS, NUM_SAMPLES
+
+
+class BitNeRFDDP(torch.nn.Module):
+    def __init__(self, device, config, emb_dim=64, num_layers=8):
+        super(BitNeRFDDP, self).__init__()
+        self.inp_emb = (2 * 3 * POS_ENCODE_DIMS) + 3
+        self.out_dim = 4
+        self.padded_input_dim = ((self.inp_emb + 7) // 8) * 8
+        self.padded_output_dim = ((self.out_dim + 7) // 8) * 8
+
+        self.input_layer = nn.Linear(
+            in_features=self.padded_input_dim,
+            out_features=emb_dim,
+            bias=True,
+            device=device,
+        )
+        input_dim_size = emb_dim
+        self.layers = []
+        self.config = config
+        self.device = device
+
+        for idx in range(num_layers):
+            if idx % 4 == 0 and idx > 0:
+                layer = nn.Linear(
+                    in_features=input_dim_size + self.padded_input_dim,
+                    out_features=emb_dim,
+                    bias=True,
+                    device=device,
+                )
+            else:
+                layer = nn.Linear(
+                    in_features=input_dim_size,
+                    out_features=emb_dim,
+                    bias=True,
+                    device=device,
+                )
+
+            self.layers.append(layer)
+
+        self.layers = nn.ModuleList(self.layers)
+
+        self.output_layer = nn.Linear(
+            in_features=input_dim_size,
+            out_features=self.padded_output_dim,
+            bias=True,
+            device=device,
+        )
+
+    def forward(self, x):
+        inputs = F.pad(x, (0, self.padded_input_dim - self.inp_emb))
+        x = inputs
+        x = self.input_layer(x)
+        for idx, layer in enumerate(self.layers):
+            if idx % 4 == 0 and idx > 0:
+                x = torch.cat([x, inputs], dim=-1)
+            x = F.relu(layer(x))
+        outputs = self.output_layer(x)
+        outputs = outputs[:, :, : self.out_dim]
+        return outputs
+
+    def render_rgb_depth(self, rays_flat, t, rand=True, train=True):
+        predictions = self.forward(rays_flat)
+        predictions = torch.reshape(
+            predictions, (-1, self.config["H"], self.config["W"], NUM_SAMPLES, 4)
+        )
+
+        rgb = torch.sigmoid(predictions[..., :-1])
+        sigma = F.relu(predictions[..., -1])
+
+        delta = t[..., 1:] - t[..., :-1]
+        delta = torch.cat(
+            [
+                delta,
+                torch.broadcast_to(
+                    torch.tensor(1e10, device=self.device), delta[..., :1].shape
+                ),
+            ],
+            dim=-1,
+        )
+        if rand:
+            alpha = 1.0 - torch.exp(-sigma * delta)
+        else:
+            alpha = 1.0 - torch.exp(-sigma * delta[:, None, None, :])
+
+        transmittance = torch.cumprod(1.0 - alpha + 1e-10, dim=-1)
+        weights = alpha * transmittance
+
+        rendered_rgb = torch.sum(weights[..., None] * rgb, dim=-2)
+        if rand:
+            depth_map = torch.sum(weights * t, dim=-1)
+        else:
+            depth_map = torch.sum(weights * t[:, None, None], dim=-1)
+
+        return (rendered_rgb, depth_map)
+```
+
+### configs.py
+```
+NUM_SAMPLES = 32
+POS_ENCODE_DIMS = 16
+
+exp1_config = {
+    "NUM_GPUS": 1,
+    "POS_ENCODE_DIMS": 16,
+    "NUM_SAMPLES": NUM_SAMPLES,
+    "BATCH_SIZE": 4,
+    "H": 100,
+    "W": 100,
+    "LEARNING_RATE": 1e-3,
+    "WEIGHT_DECAY": 0.00,
+    "EPOCHS": 50,
+    "AMSGRAD": False,
+    "FUSED_OPTIM": False,
+    "EMB_DIM": 256,
+}
+
+exp2_config = {
+    "NUM_GPUS": 1,
+    "POS_ENCODE_DIMS": 16,
+    "NUM_SAMPLES": NUM_SAMPLES,
+    "BATCH_SIZE": 4,
+    "H": 100,
+    "W": 100,
+    "LEARNING_RATE": 1e-3,
+    "WEIGHT_DECAY": 0.00,
+    "EPOCHS": 50,
+    "AMSGRAD": True,
+    "FUSED_OPTIM": True,
+    "EMB_DIM": 256,
+}
+
+exp3_config = {
+    "NUM_GPUS": 1,
+    "POS_ENCODE_DIMS": 16,
+    "NUM_SAMPLES": NUM_SAMPLES,
+    "BATCH_SIZE": 8,
+    "H": 100,
+    "W": 100,
+    "LEARNING_RATE": 1e-3,
+    "WEIGHT_DECAY": 0.05,
+    "EPOCHS": 50,
+    "AMSGRAD": True,
+    "FUSED_OPTIM": True,
+    "EMB_DIM": 256,
+}
+
+exp4_config = {
+    "NUM_GPUS": 1,
+    "POS_ENCODE_DIMS": 16,
+    "NUM_SAMPLES": NUM_SAMPLES,
+    "BATCH_SIZE": 4,
+    "H": 100,
+    "W": 100,
+    "LEARNING_RATE": 5e-5,
+    "WEIGHT_DECAY": 0.05,
+    "EPOCHS": 50,
+    "AMSGRAD": True,
+    "FUSED_OPTIM": True,
+    "EMB_DIM": 256,
+}
+
+exp5_config = {
+    "NUM_GPUS": 2,
+    "NUM_SAMPLES": 32,
+    "BATCH_SIZE": 3,
+    "H": 100,
+    "W": 100,
+    "POS_ENCODE_DIMS": 16,
+    "LEARNING_RATE": 1e-3,
+    "WEIGHT_DECAY": 0.00,
+    "EPOCHS": 50,
+    "AMSGRAD": False,
+    "FUSED_OPTIM": False,
+    "EMB_DIM": 256,
+}
+
+exp6_config = {
+    "NUM_GPUS": 2,
+    "NUM_SAMPLES": 32,
+    "BATCH_SIZE": 2,
+    "H": 100,
+    "W": 100,
+    "POS_ENCODE_DIMS": 16,
+    "LEARNING_RATE": 1e-3,
+    "WEIGHT_DECAY": 0.00,
+    "EPOCHS": 50,
+    "AMSGRAD": False,
+    "FUSED_OPTIM": False,
+    "EMB_DIM": 256,
+}
+```
+
+### data_setup.py
+```
+import numpy as np
+import os
+
+
+def install_dataset():
+    """Installs the tiny NeRF dataset and required packages."""
+    os.system(
+        'wget "http://cseweb.ucsd.edu/~viscomp/projects/LF/papers/ECCV20/nerf/tiny_nerf_data.npz"'
+    )
+    os.system("pip install wandb[media] torchao -qq")
+    print("Dataset and packages installed.")
+
+
+raw_npz = np.load("tiny_nerf_data.npz")
+
+images = raw_npz["images"]
+poses = raw_npz["poses"]
+focal = raw_npz["focal"]
+
+valid_split = int(0.9 * len(images))
+
+train_images = images[:valid_split]
+train_poses = poses[:valid_split]
+train_focal = focal
+
+valid_images = images[valid_split:]
+valid_poses = poses[valid_split:]
+valid_focal = focal
+
+POS_ENCODE_DIMS = 16
+NUM_SAMPLES = 32
+
+# save train and valid in separate npz files
+np.savez("train.npz", images=train_images, poses=train_poses, focal=train_focal)
+np.savez("valid.npz", images=valid_images, poses=valid_poses, focal=valid_focal)
+```
+
+### dataset.py
+```
+import torch
+from utils import get_rays, render_flat_rays
+import numpy as np
+from configs import NUM_SAMPLES
+import torch.nn.functional as F
+
+
+class NerfDataset(torch.utils.data.Dataset):
+    def __init__(self, root_path, transform, target_transform):
+        super(NerfDataset, self).__init__()
+        self.root_path = root_path
+        self.transform = transform
+        self.target_transform = target_transform
+
+        raw_npz = np.load(root_path)
+
+        self._raw_images = raw_npz["images"].copy()
+        self._raw_poses = raw_npz["poses"].copy()
+
+        self.images = torch.from_numpy(self._raw_images)
+        self.poses = torch.from_numpy(self._raw_poses)
+
+        self.height = self.images.shape[1]  # assuming (B, H, W, C)
+        self.width = self.images.shape[2]
+        self.focal_length = torch.from_numpy(raw_npz["focal"])
+
+        self.images = list(torch.tensor_split(self.images, self.images.shape[0], dim=0))
+        self.poses = list(torch.tensor_split(self.poses, self.poses.shape[0], dim=0))
+
+        self.images = [image.squeeze(0) for image in self.images]
+        self.poses = [pose.squeeze(0) for pose in self.poses]
+
+    def map_fn(self, pose):
+        (ray_origins, ray_dirs) = get_rays(
+            height=self.height,
+            width=self.width,
+            focal_length=self.focal_length,
+            pose=pose,
+        )
+        (rays_flat, t) = render_flat_rays(
+            ray_origins=ray_origins,
+            ray_dirs=ray_dirs,
+            near_bound=2.0,
+            far_bound=6.0,
+            num_samples=NUM_SAMPLES,
+            rand=True,
+        )
+        return (rays_flat, t)
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        image = self.images[idx]
+        pose = self.poses[idx]
+        ray = self.map_fn(pose)
+        focal = self.focal_length
+
+        if self.transform:
+            image = self.transform(image)
+        if self.target_transform:
+            pose = self.target_transform(pose)
+
+        return image, ray, focal
+```
+
+### exp1.py
+```
+import wandb
+from utils import (
+    get_rays,
+    render_flat_rays,
+    pose_spherical,
+    grad_norm,
+    PSNRLoss,
+    set_seed,
+    setup_wandb,
+    cleanup_wandb,
+)
+import imageio
+import torch
+import torch.nn as nn
+from tqdm.auto import tqdm
+import numpy as np
+from nerf import NeRF
+import os
+from dataset import NerfDataset
+from configs import exp1_config
+
+
+def train(
+    model,
+    train_loader,
+    valid_loader,
+    optimizer,
+    device,
+    config,
+    epochs=100,
+    loss_fn=nn.MSELoss(),
+):
+    psnr_loss = PSNRLoss()
+
+    wandb.watch(model, log="all")
+
+    def log_video(model, epoch_val, focal):
+        rgb_frames = []
+        batch_flat = []
+        batch_t = []
+
+        for idx, theta in tqdm(
+            enumerate(np.linspace(0.0, 360.0, 120, endpoint=False)), total=120
+        ):
+            c2w = pose_spherical(theta, -30.0, 4.0)
+            ray_origins, ray_dirs = get_rays(config["H"], config["W"], focal, c2w)
+            rays_flat, t_vals = render_flat_rays(
+                ray_origins,
+                ray_dirs,
+                near_bound=2.0,
+                far_bound=6.0,
+                num_samples=config["NUM_SAMPLES"],
+                rand=False,
+            )
+            rays_flat = rays_flat.float().to(device)
+            t_vals = t_vals.float().to(device)
+
+            if idx % config["BATCH_SIZE"] == 0 and idx > 0:
+                batched_flat = torch.stack(batch_flat, axis=0)
+                batch_flat = [rays_flat]
+
+                batched_t = torch.stack(batch_t, axis=0)
+                batch_t = [t_vals]
+
+                rgb, _ = model.render_rgb_depth(
+                    batched_flat, batched_t, rand=False, train=False
+                )
+
+                temp_rgb = [torch.clip(255 * img, 0.0, 255.0).int() for img in rgb]
+
+                rgb_frames = rgb_frames + temp_rgb
+
+            else:
+                batch_flat.append(rays_flat)
+                batch_t.append(t_vals)
+
+        rgb_frames = [frame.to("cpu").numpy().astype(np.uint8) for frame in rgb_frames]
+        rgb_video = f"rgb_video_{epoch_val}.mp4"
+        imageio.mimwrite(
+            rgb_video, rgb_frames, fps=30, quality=7, macro_block_size=None
+        )
+        wandb.log({"rgb_video": wandb.Video(rgb_video, format="mp4")})
+
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0.0
+        total_psnr = 0.0
+        total_valid_loss = 0.0
+        total_valid_psnr = 0.0
+
+        progress_bar = tqdm(enumerate(train_loader), total=len(train_loader))
+
+        for idx, (images, rays, focal) in progress_bar:
+            main_focal = focal[0]
+            rays_flat, t = rays
+            images, rays_flat, t = images.to(device), rays_flat.to(device), t.to(device)
+
+            optimizer.zero_grad()
+
+            rgb, depth_map = model.render_rgb_depth(rays_flat, t)
+            loss = loss_fn(images, rgb)
+
+            loss.backward()
+            gradnorm = grad_norm(model)
+            optimizer.step()
+
+            psnr = psnr_loss(rgb, images)
+            total_loss += loss.item()
+            total_psnr += psnr.item()
+
+            if idx % 4 == 0:
+                wandb.log(
+                    {
+                        "train/loss/mse": loss.item(),
+                        "train/loss/psnr": psnr.item(),
+                        "train/grad_norm": gradnorm,
+                    }
+                )
+            elif idx == 1 and epoch % 5 == 0:
+                pred_img = (rgb[0].detach().cpu().numpy() * 255).astype(np.uint8)
+                target_img = (images[0].detach().cpu().numpy() * 255).astype(np.uint8)
+                depth_map_img = (depth_map[0].detach().cpu().numpy() * 255).astype(
+                    np.uint8
+                )
+
+                wandb.log(
+                    {
+                        "train/sample_pred_image": wandb.Image(pred_img),
+                        "train/sample_target_image": wandb.Image(target_img),
+                        "train/sample_depth_map": wandb.Image(depth_map_img),
+                    }
+                )
+
+        avg_loss = total_loss / len(train_loader)
+        avg_psnr = total_psnr / len(train_loader)
+
+        print(f"Epoch {epoch+1}: Avg Loss = {avg_loss:.4f}, Avg PSNR = {avg_psnr:.2f}")
+
+        if epoch % 5 == 0:
+            model.eval()
+            with torch.no_grad():
+                for idx, (images, rays, focal) in enumerate(valid_loader):
+                    rays_flat, t = rays
+                    images, rays_flat, t = (
+                        images.to(device),
+                        rays_flat.to(device),
+                        t.to(device),
+                    )
+                    rgb, depth_map = model.render_rgb_depth(rays_flat, t)
+                    valid_loss = loss_fn(images, rgb)
+                    valid_psnr = psnr_loss(rgb, images)
+
+                    total_valid_loss += loss.item()
+                    total_valid_psnr += psnr.item()
+
+                    pred_img = (rgb[0].detach().cpu().numpy() * 255).astype(np.uint8)
+                    target_img = (images[0].detach().cpu().numpy() * 255).astype(
+                        np.uint8
+                    )
+                    depth_map_img = (depth_map[0].detach().cpu().numpy() * 255).astype(
+                        np.uint8
+                    )
+
+                    wandb.log(
+                        {
+                            "valid/loss/mse": valid_loss.item(),
+                            "valid/loss/psnr": valid_psnr.item(),
+                            "valid/sample_pred_image": wandb.Image(pred_img),
+                            "valid/sample_target_image": wandb.Image(target_img),
+                            "valid/sample_depth_map": wandb.Image(depth_map_img),
+                        }
+                    )
+
+                    valid_avg_loss = total_valid_loss / len(valid_loader)
+                    valid_avg_psnr = total_valid_psnr / len(valid_loader)
+
+                    print(
+                        f"Validation on Epoch {epoch+1}:\nValid Avg Loss = {valid_avg_loss:.4f}, Valid Avg PSNR = {valid_avg_psnr:.2f}"
+                    )
+
+                    # Save checkpoint every 5 epochs (rank 0 only)
+                    checkpoint_path = f"checkpoint_epoch_{epoch}.pt"
+                    torch.save(model.state_dict(), checkpoint_path)
+                    wandb.save(checkpoint_path)
+
+                    break
+
+                log_video(model, epoch, main_focal)
+
+
+def execute(config):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    set_seed(42)
+    setup_wandb(rank=0, config=config, exp_name="nerf-a100-base")
+
+    train_dataset = NerfDataset(
+        root_path="train.npz", transform=None, target_transform=None
+    )
+
+    valid_dataset = NerfDataset(
+        root_path="valid.npz", transform=None, target_transform=None
+    )
+
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=config["BATCH_SIZE"],
+        num_workers=os.cpu_count(),
+        drop_last=False,
+        pin_memory=True,
+    )
+    val_loader = torch.utils.data.DataLoader(
+        valid_dataset,
+        batch_size=config["BATCH_SIZE"],
+        num_workers=os.cpu_count(),
+        drop_last=False,
+        pin_memory=True,
+    )
+
+    model = NeRF(device=device, emb_dim=config["EMB_DIM"], config=config)
+    model = torch.compile(model, fullgraph=True)
+
+    for _ in range(3):  # Warm-up
+        _, rays, _ = next(iter(train_loader))
+        rays_flat, t = rays
+        rays_flat, t = rays_flat.to(device), t.to(device)
+        model.render_rgb_depth(rays_flat, t)
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=config["LEARNING_RATE"],
+        weight_decay=config["WEIGHT_DECAY"],
+        amsgrad=config["AMSGRAD"],
+        fused=config["FUSED_OPTIM"],
+        eps=1e-7,
+    )
+
+    train(
+        model,
+        train_loader,
+        val_loader,
+        optimizer,
+        device=device,
+        epochs=config["EPOCHS"],
+        config=config,
+    )
+
+    cleanup_wandb()
+
+
+if __name__ == "__main__":
+    execute(config=exp1_config)
+```
+
+### exp2.py
+```
+import wandb
+from utils import (
+    get_rays,
+    render_flat_rays,
+    pose_spherical,
+    grad_norm,
+    PSNRLoss,
+    set_seed,
+    setup_wandb,
+    cleanup_wandb,
+)
+import imageio
+import torch
+import torch.nn as nn
+from tqdm.auto import tqdm
+import numpy as np
+from nerf import NeRF
+import os
+from dataset import NerfDataset
+from configs import exp2_config
+
+
+def train(
+    model,
+    train_loader,
+    valid_loader,
+    optimizer,
+    device,
+    config,
+    epochs=100,
+    loss_fn=nn.MSELoss(),
+):
+    psnr_loss = PSNRLoss()
+    scaler = torch.amp.GradScaler("cuda")
+
+    wandb.watch(model, log="all")
+
+    def log_video(model, epoch_val, focal):
+        rgb_frames = []
+        batch_flat = []
+        batch_t = []
+
+        for idx, theta in tqdm(
+            enumerate(np.linspace(0.0, 360.0, 90, endpoint=False)), total=90
+        ):
+            c2w = pose_spherical(theta, -30.0, 4.0)
+            ray_origins, ray_dirs = get_rays(config["H"], config["W"], focal, c2w)
+            rays_flat, t_vals = render_flat_rays(
+                ray_origins,
+                ray_dirs,
+                near_bound=2.0,
+                far_bound=6.0,
+                num_samples=config["NUM_SAMPLES"],
+                rand=False,
+            )
+            rays_flat = rays_flat.float().to(device)
+            t_vals = t_vals.float().to(device)
+
+            if idx % config["BATCH_SIZE"] == 0 and idx > 0:
+                batched_flat = torch.stack(batch_flat, axis=0)
+                batch_flat = [rays_flat]
+
+                batched_t = torch.stack(batch_t, axis=0)
+                batch_t = [t_vals]
+
+                rgb, _ = model.render_rgb_depth(
+                    batched_flat, batched_t, rand=False, train=False
+                )
+
+                temp_rgb = [torch.clip(255 * img, 0.0, 255.0).int() for img in rgb]
+
+                rgb_frames = rgb_frames + temp_rgb
+
+            else:
+                batch_flat.append(rays_flat)
+                batch_t.append(t_vals)
+
+        rgb_frames = [frame.to("cpu").numpy().astype(np.uint8) for frame in rgb_frames]
+        rgb_video = f"rgb_video_{epoch_val}.mp4"
+        imageio.mimwrite(
+            rgb_video, rgb_frames, fps=30, quality=7, macro_block_size=None
+        )
+        wandb.log({"rgb_video": wandb.Video(rgb_video, format="mp4")})
+
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0.0
+        total_psnr = 0.0
+
+        total_valid_loss = 0.0
+        total_valid_psnr = 0.0
+
+        progress_bar = tqdm(enumerate(train_loader), total=len(train_loader))
+
+        for idx, (images, rays, focal) in progress_bar:
+            main_focal = focal[0]
+            rays_flat, t = rays
+            images, rays_flat, t = images.to(device), rays_flat.to(device), t.to(device)
+
+            optimizer.zero_grad()
+
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                rgb, depth_map = model.render_rgb_depth(rays_flat, t)
+                loss = loss_fn(images, rgb)
+
+            scaler.scale(loss).backward()
+            gradnorm = grad_norm(model)
+            optimizer.step()
+
+            psnr = psnr_loss(rgb, images)
+            total_loss += loss.item()
+            total_psnr += psnr.item()
+
+            if idx % 4 == 0:
+                wandb.log(
+                    {
+                        "train/loss/mse": loss.item(),
+                        "train/loss/psnr": psnr.item(),
+                        "train/grad_norm": gradnorm,
+                    }
+                )
+            elif idx == 1 and epoch % 5 == 0:
+                pred_img = (rgb[0].detach().cpu().numpy() * 255).astype(np.uint8)
+                target_img = (images[0].detach().cpu().numpy() * 255).astype(np.uint8)
+                depth_map_img = (depth_map[0].detach().cpu().numpy() * 255).astype(
+                    np.uint8
+                )
+
+                wandb.log(
+                    {
+                        "train/sample_pred_image": wandb.Image(pred_img),
+                        "train/sample_target_image": wandb.Image(target_img),
+                        "train/sample_depth_map": wandb.Image(depth_map_img),
+                    }
+                )
+
+        avg_loss = total_loss / len(train_loader)
+        avg_psnr = total_psnr / len(train_loader)
+
+        print(
+            f"Epoch {epoch + 1}: Avg Loss = {avg_loss:.4f}, Avg PSNR = {avg_psnr:.2f}"
+        )
+
+        if epoch % 5 == 0:
+            model.eval()
+            with torch.no_grad():
+                for idx, (images, rays, focal) in enumerate(valid_loader):
+                    rays_flat, t = rays
+                    images, rays_flat, t = (
+                        images.to(device),
+                        rays_flat.to(device),
+                        t.to(device),
+                    )
+                    rgb, depth_map = model.render_rgb_depth(rays_flat, t)
+                    valid_loss = loss_fn(images, rgb)
+                    valid_psnr = psnr_loss(rgb, images)
+
+                    total_valid_loss += loss.item()
+                    total_valid_psnr += psnr.item()
+
+                    pred_img = (rgb[0].detach().cpu().numpy() * 255).astype(np.uint8)
+                    target_img = (images[0].detach().cpu().numpy() * 255).astype(
+                        np.uint8
+                    )
+                    depth_map_img = (depth_map[0].detach().cpu().numpy() * 255).astype(
+                        np.uint8
+                    )
+
+                    wandb.log(
+                        {
+                            "valid/loss/mse": valid_loss.item(),
+                            "valid/loss/psnr": valid_psnr.item(),
+                            "valid/sample_pred_image": wandb.Image(pred_img),
+                            "valid/sample_target_image": wandb.Image(target_img),
+                            "valid/sample_depth_map": wandb.Image(depth_map_img),
+                        }
+                    )
+
+                    valid_avg_loss = total_valid_loss / len(valid_loader)
+                    valid_avg_psnr = total_valid_psnr / len(valid_loader)
+
+                    print(
+                        f"Validation on Epoch {epoch+1}:\nValid Avg Loss = {valid_avg_loss:.4f}, Valid Avg PSNR = {valid_avg_psnr:.2f}"
+                    )
+
+                    # Save checkpoint every 5 epochs (rank 0 only)
+                    checkpoint_path = f"checkpoint_epoch_{epoch}.pt"
+                    torch.save(model.state_dict(), checkpoint_path)
+                    wandb.save(checkpoint_path)
+
+                    break
+
+                log_video(model, epoch, main_focal)
+
+
+def execute(config):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    set_seed(42)
+    setup_wandb(rank=0, config=config, exp_name="nerf-a100-amp")
+
+    train_dataset = NerfDataset(
+        root_path="train.npz", transform=None, target_transform=None
+    )
+
+    valid_dataset = NerfDataset(
+        root_path="valid.npz", transform=None, target_transform=None
+    )
+
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=config["BATCH_SIZE"],
+        num_workers=os.cpu_count(),
+        drop_last=False,
+        pin_memory=True,
+    )
+    val_loader = torch.utils.data.DataLoader(
+        valid_dataset,
+        batch_size=config["BATCH_SIZE"],
+        num_workers=os.cpu_count(),
+        drop_last=False,
+        pin_memory=True,
+    )
+
+    model = NeRF(device=device, emb_dim=config["EMB_DIM"], config=config)
+    model = torch.compile(model, fullgraph=True)
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=config["LEARNING_RATE"],
+        weight_decay=config["WEIGHT_DECAY"],
+        amsgrad=config["AMSGRAD"],
+        fused=config["FUSED_OPTIM"],
+    )
+
+    train(
+        model,
+        train_loader,
+        val_loader,
+        optimizer,
+        device=device,
+        config=config,
+        epochs=config["EPOCHS"],
+    )
+
+    cleanup_wandb()
+
+
+if __name__ == "__main__":
+    execute(config=exp2_config)
+```
+
+### exp3.py
+```
+import wandb
+from utils import (
+    get_rays,
+    render_flat_rays,
+    pose_spherical,
+    grad_norm,
+    PSNRLoss,
+    set_seed,
+    setup_wandb,
+    cleanup_wandb,
+)
+import imageio
+import torch
+import torch.nn as nn
+from tqdm.auto import tqdm
+import numpy as np
+from nerf import NeRF
+import os
+from dataset import NerfDataset
+from configs import exp3_config
+
+
+def train(
+    model,
+    train_loader,
+    valid_loader,
+    optimizer,
+    device,
+    config,
+    epochs=100,
+    loss_fn=nn.MSELoss(),
+):
+    psnr_loss = PSNRLoss()
+    scaler = torch.amp.GradScaler("cuda")
+
+    wandb.watch(model, log="all")
+
+    def log_video(model, epoch_val, focal):
+        rgb_frames = []
+        batch_flat = []
+        batch_t = []
+
+        for idx, theta in tqdm(
+            enumerate(np.linspace(0.0, 360.0, 90, endpoint=False)), total=90
+        ):
+            c2w = pose_spherical(theta, -30.0, 4.0)
+            ray_origins, ray_dirs = get_rays(config["H"], config["W"], focal, c2w)
+            rays_flat, t_vals = render_flat_rays(
+                ray_origins,
+                ray_dirs,
+                near_bound=2.0,
+                far_bound=6.0,
+                num_samples=config["NUM_SAMPLES"],
+                rand=False,
+            )
+            rays_flat = rays_flat.float().to(device)
+            t_vals = t_vals.float().to(device)
+
+            if idx % config["BATCH_SIZE"] == 0 and idx > 0:
+                batched_flat = torch.stack(batch_flat, axis=0)
+                batch_flat = [rays_flat]
+
+                batched_t = torch.stack(batch_t, axis=0)
+                batch_t = [t_vals]
+
+                rgb, _ = model.render_rgb_depth(
+                    batched_flat, batched_t, rand=False, train=False
+                )
+
+                temp_rgb = [torch.clip(255 * img, 0.0, 255.0).int() for img in rgb]
+
+                rgb_frames = rgb_frames + temp_rgb
+
+            else:
+                batch_flat.append(rays_flat)
+                batch_t.append(t_vals)
+
+        rgb_frames = [frame.to("cpu").numpy().astype(np.uint8) for frame in rgb_frames]
+        rgb_video = f"rgb_video_{epoch_val}.mp4"
+        imageio.mimwrite(
+            rgb_video, rgb_frames, fps=30, quality=7, macro_block_size=None
+        )
+        wandb.log({"rgb_video": wandb.Video(rgb_video, format="mp4")})
+
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0.0
+        total_psnr = 0.0
+
+        total_valid_loss = 0.0
+        total_valid_psnr = 0.0
+
+        progress_bar = tqdm(enumerate(train_loader), total=len(train_loader))
+
+        for idx, (images, rays, focal) in progress_bar:
+            main_focal = focal[0]
+            rays_flat, t = rays
+            images, rays_flat, t = images.to(device), rays_flat.to(device), t.to(device)
+
+            optimizer.zero_grad()
+
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                rgb, depth_map = model.render_rgb_depth(rays_flat, t)
+                loss = loss_fn(images, rgb)
+
+            scaler.scale(loss).backward()
+            gradnorm = grad_norm(model)
+            optimizer.step()
+
+            psnr = psnr_loss(rgb, images)
+            total_loss += loss.item()
+            total_psnr += psnr.item()
+
+            if idx % 4 == 0:
+                wandb.log(
+                    {
+                        "train/loss/mse": loss.item(),
+                        "train/loss/psnr": psnr.item(),
+                        "train/grad_norm": gradnorm,
+                    }
+                )
+            elif idx == 1 and epoch % 5 == 0:
+                pred_img = (rgb[0].detach().cpu().numpy() * 255).astype(np.uint8)
+                target_img = (images[0].detach().cpu().numpy() * 255).astype(np.uint8)
+                depth_map_img = (depth_map[0].detach().cpu().numpy() * 255).astype(
+                    np.uint8
+                )
+
+                wandb.log(
+                    {
+                        "train/sample_pred_image": wandb.Image(pred_img),
+                        "train/sample_target_image": wandb.Image(target_img),
+                        "train/sample_depth_map": wandb.Image(depth_map_img),
+                    }
+                )
+
+        avg_loss = total_loss / len(train_loader)
+        avg_psnr = total_psnr / len(train_loader)
+
+        print(
+            f"Epoch {epoch + 1}: Avg Loss = {avg_loss:.4f}, Avg PSNR = {avg_psnr:.2f}"
+        )
+
+        if epoch % 5 == 0:
+            model.eval()
+            with torch.no_grad():
+                for idx, (images, rays, focal) in enumerate(valid_loader):
+                    rays_flat, t = rays
+                    images, rays_flat, t = (
+                        images.to(device),
+                        rays_flat.to(device),
+                        t.to(device),
+                    )
+                    rgb, depth_map = model.render_rgb_depth(rays_flat, t)
+                    valid_loss = loss_fn(images, rgb)
+                    valid_psnr = psnr_loss(rgb, images)
+
+                    total_valid_loss += loss.item()
+                    total_valid_psnr += psnr.item()
+
+                    pred_img = (rgb[0].detach().cpu().numpy() * 255).astype(np.uint8)
+                    target_img = (images[0].detach().cpu().numpy() * 255).astype(
+                        np.uint8
+                    )
+                    depth_map_img = (depth_map[0].detach().cpu().numpy() * 255).astype(
+                        np.uint8
+                    )
+
+                    wandb.log(
+                        {
+                            "valid/loss/mse": valid_loss.item(),
+                            "valid/loss/psnr": valid_psnr.item(),
+                            "valid/sample_pred_image": wandb.Image(pred_img),
+                            "valid/sample_target_image": wandb.Image(target_img),
+                            "valid/sample_depth_map": wandb.Image(depth_map_img),
+                        }
+                    )
+
+                    valid_avg_loss = total_valid_loss / len(valid_loader)
+                    valid_avg_psnr = total_valid_psnr / len(valid_loader)
+
+                    print(
+                        f"Validation on Epoch {epoch+1}:\nValid Avg Loss = {valid_avg_loss:.4f}, Valid Avg PSNR = {valid_avg_psnr:.2f}"
+                    )
+
+                    # Save checkpoint every 5 epochs (rank 0 only)
+                    checkpoint_path = f"checkpoint_epoch_{epoch}.pt"
+                    torch.save(model.state_dict(), checkpoint_path)
+                    wandb.save(checkpoint_path)
+
+                    break
+
+                log_video(model, epoch, main_focal)
+
+
+def execute(config):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    set_seed(42)
+    setup_wandb(rank=0, config=config, exp_name="nerf-a100-amp-highbatchsize")
+
+    train_dataset = NerfDataset(
+        root_path="train.npz", transform=None, target_transform=None
+    )
+
+    valid_dataset = NerfDataset(
+        root_path="valid.npz", transform=None, target_transform=None
+    )
+
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=config["BATCH_SIZE"],
+        num_workers=os.cpu_count(),
+        drop_last=False,
+        pin_memory=True,
+    )
+    val_loader = torch.utils.data.DataLoader(
+        valid_dataset,
+        batch_size=config["BATCH_SIZE"],
+        num_workers=os.cpu_count(),
+        drop_last=False,
+        pin_memory=True,
+    )
+
+    model = NeRF(device=device, emb_dim=config["EMB_DIM"], config=config)
+    model = torch.compile(model, fullgraph=True)
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=config["LEARNING_RATE"],
+        weight_decay=config["WEIGHT_DECAY"],
+        amsgrad=config["AMSGRAD"],
+        fused=config["FUSED_OPTIM"],
+    )
+
+    train(
+        model,
+        train_loader,
+        val_loader,
+        optimizer,
+        device=device,
+        epochs=config["EPOCHS"],
+        config=config,
+    )
+
+    cleanup_wandb()
+
+
+if __name__ == "__main__":
+    execute(config=exp3_config)
+```
+
+### exp4.py
+```
+import wandb
+from utils import (
+    get_rays,
+    render_flat_rays,
+    pose_spherical,
+    grad_norm,
+    PSNRLoss,
+    set_seed,
+    setup_wandb,
+    cleanup_wandb,
+)
+import imageio
+import torch
+import torch.nn as nn
+from tqdm.auto import tqdm
+import numpy as np
+from bitnerf import BitNeRF
+import os
+from dataset import NerfDataset
+from torchao.quantization import (
+    quantize_,
+    Int8DynamicActivationInt4WeightConfig,
+)
+from torchao.prototype.quantized_training import bitnet_training
+from torchao import quantize_
+from configs import exp4_config
+
+
+def train(
+    model,
+    train_loader,
+    valid_loader,
+    optimizer,
+    device,
+    config,
+    epochs=100,
+    loss_fn=nn.MSELoss(),
+):
+    psnr_loss = PSNRLoss()
+
+    wandb.watch(model, log="all")
+
+    def log_video(model, epoch_val, focal):
+        rgb_frames = []
+        batch_flat = []
+        batch_t = []
+
+        for idx, theta in tqdm(
+            enumerate(np.linspace(0.0, 360.0, 90, endpoint=False)), total=90
+        ):
+            c2w = pose_spherical(theta, -30.0, 4.0)
+            ray_origins, ray_dirs = get_rays(config["H"], config["W"], focal, c2w)
+            rays_flat, t_vals = render_flat_rays(
+                ray_origins,
+                ray_dirs,
+                near_bound=2.0,
+                far_bound=6.0,
+                num_samples=config["NUM_SAMPLES"],
+                rand=False,
+            )
+            rays_flat = rays_flat.float().to(device)
+            t_vals = t_vals.float().to(device)
+
+            if idx % config["BATCH_SIZE"] == 0 and idx > 0:
+                batched_flat = torch.stack(batch_flat, axis=0)
+                batch_flat = [rays_flat]
+
+                batched_t = torch.stack(batch_t, axis=0)
+                batch_t = [t_vals]
+
+                rgb, _ = model.render_rgb_depth(
+                    batched_flat, batched_t, rand=False, train=False
+                )
+
+                temp_rgb = [torch.clip(255 * img, 0.0, 255.0).int() for img in rgb]
+
+                rgb_frames = rgb_frames + temp_rgb
+
+            else:
+                batch_flat.append(rays_flat)
+                batch_t.append(t_vals)
+
+        rgb_frames = [frame.to("cpu").numpy().astype(np.uint8) for frame in rgb_frames]
+        rgb_video = f"rgb_video_{epoch_val}.mp4"
+        imageio.mimwrite(
+            rgb_video, rgb_frames, fps=30, quality=7, macro_block_size=None
+        )
+        wandb.log({"rgb_video": wandb.Video(rgb_video, format="mp4")})
+
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0.0
+        total_psnr = 0.0
+
+        total_valid_loss = 0.0
+        total_valid_psnr = 0.0
+
+        progress_bar = tqdm(enumerate(train_loader), total=len(train_loader))
+
+        for idx, (images, rays, focal) in progress_bar:
+            main_focal = focal[0]
+            rays_flat, t = rays
+            images, rays_flat, t = images.to(device), rays_flat.to(device), t.to(device)
+
+            optimizer.zero_grad()
+
+            rgb, depth_map = model.render_rgb_depth(rays_flat, t)
+            loss = loss_fn(images, rgb)
+
+            loss.backward()
+            gradnorm = grad_norm(model)
+            optimizer.step()
+
+            psnr = psnr_loss(rgb, images)
+            total_loss += loss.item()
+            total_psnr += psnr.item()
+
+            if idx % 4 == 0:
+                pass
+                wandb.log(
+                    {
+                        "train/loss/mse": loss.item(),
+                        "train/loss/psnr": psnr.item(),
+                        "train/grad_norm": gradnorm,
+                    }
+                )
+            elif idx == 1 and epoch % 5 == 0:
+                pred_img = (rgb[0].detach().cpu().numpy() * 255).astype(np.uint8)
+                target_img = (images[0].detach().cpu().numpy() * 255).astype(np.uint8)
+                depth_map_img = (depth_map[0].detach().cpu().numpy() * 255).astype(
+                    np.uint8
+                )
+
+                wandb.log(
+                    {
+                        "train/sample_pred_image": wandb.Image(pred_img),
+                        "train/sample_target_image": wandb.Image(target_img),
+                        "train/sample_depth_map": wandb.Image(depth_map_img),
+                    }
+                )
+
+        avg_loss = total_loss / len(train_loader)
+        avg_psnr = total_psnr / len(train_loader)
+
+        print(
+            f"Epoch {epoch + 1}: Avg Loss = {avg_loss:.4f}, Avg PSNR = {avg_psnr:.2f}"
+        )
+
+        if epoch % 5 == 0:
+            model.eval()
+            with torch.no_grad():
+                for idx, (images, rays, focal) in enumerate(valid_loader):
+                    rays_flat, t = rays
+                    images, rays_flat, t = (
+                        images.to(device),
+                        rays_flat.to(device),
+                        t.to(device),
+                    )
+                    rgb, depth_map = model.render_rgb_depth(rays_flat, t)
+                    valid_loss = loss_fn(images, rgb)
+                    valid_psnr = psnr_loss(rgb, images)
+
+                    total_valid_loss += loss.item()
+                    total_valid_psnr += psnr.item()
+
+                    pred_img = (rgb[0].detach().cpu().numpy() * 255).astype(np.uint8)
+                    target_img = (images[0].detach().cpu().numpy() * 255).astype(
+                        np.uint8
+                    )
+                    depth_map_img = (depth_map[0].detach().cpu().numpy() * 255).astype(
+                        np.uint8
+                    )
+
+                    wandb.log(
+                        {
+                            "valid/loss/mse": valid_loss.item(),
+                            "valid/loss/psnr": valid_psnr.item(),
+                            "valid/sample_pred_image": wandb.Image(pred_img),
+                            "valid/sample_target_image": wandb.Image(target_img),
+                            "valid/sample_depth_map": wandb.Image(depth_map_img),
+                        }
+                    )
+
+                    valid_avg_loss = total_valid_loss / len(valid_loader)
+                    valid_avg_psnr = total_valid_psnr / len(valid_loader)
+
+                    print(
+                        f"Validation on Epoch {epoch+1}:\nValid Avg Loss = {valid_avg_loss:.4f}, Valid Avg PSNR = {valid_avg_psnr:.2f}"
+                    )
+
+                    # Save checkpoint every 5 epochs (rank 0 only)
+
+                    checkpoint_path = f"checkpoint_epoch_{epoch}.pt"
+                    torch.save(model.state_dict(), checkpoint_path)
+                    wandb.save(checkpoint_path)
+
+                    break
+
+                log_video(model, epoch, main_focal)
+
+    checkpoint_path = f"checkpoint_epoch_{epoch}_quantized_final.pt"
+    quantize_(model, Int8DynamicActivationInt4WeightConfig())
+    # We train at bitnet-level, but we save in int4
+    torch.save(model.state_dict(), checkpoint_path)
+    wandb.save(checkpoint_path)
+
+
+def execute(config):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    set_seed(42)
+    setup_wandb(rank=0, config=config, exp_name="bitnerf-100")
+
+    train_dataset = NerfDataset(
+        root_path="train.npz", transform=None, target_transform=None
+    )
+
+    valid_dataset = NerfDataset(
+        root_path="valid.npz", transform=None, target_transform=None
+    )
+
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=config["BATCH_SIZE"],
+        num_workers=os.cpu_count(),
+        drop_last=False,
+        pin_memory=True,
+    )
+    val_loader = torch.utils.data.DataLoader(
+        valid_dataset,
+        batch_size=config["BATCH_SIZE"],
+        num_workers=os.cpu_count(),
+        drop_last=False,
+        pin_memory=True,
+    )
+
+    model = BitNeRF(device=device, emb_dim=config["EMB_DIM"], config=config)
+    quantize_(model, bitnet_training())
+    model = torch.compile(model, fullgraph=True)
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=config["LEARNING_RATE"],
+        weight_decay=config["WEIGHT_DECAY"],
+        amsgrad=config["AMSGRAD"],
+        fused=config["FUSED_OPTIM"],
+    )
+
+    train(
+        model,
+        train_loader,
+        val_loader,
+        optimizer,
+        device=device,
+        epochs=config["EPOCHS"],
+        config=config,
+    )
+
+    cleanup_wandb()
+
+
+if __name__ == "__main__":
+    execute(config=exp4_config)
+```
+
+### exp5.py
+```
+import wandb
+from utils import (
+    get_rays,
+    render_flat_rays,
+    pose_spherical,
+    grad_norm,
+    PSNRLoss,
+    set_seed,
+    setup_wandb,
+    cleanup_wandb,
+)
+import imageio
+import torch
+import torch.nn as nn
+from tqdm.auto import tqdm
+import numpy as np
+from nerf import NeRF
+import os
+from dataset import NerfDataset
+from torch.utils.data.distributed import DistributedSampler
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.multiprocessing as mp
+from configs import exp5_config
+
+
+def train(
+    model,
+    train_loader,
+    valid_loader,
+    optimizer,
+    device,
+    config,
+    epochs=100,
+    loss_fn=nn.MSELoss(),
+    rank=0,
+):
+    psnr_loss = PSNRLoss()
+
+    def log_video(model, epoch_val, focal):
+        rgb_frames = []
+        batch_flat = []
+        batch_t = []
+
+        for idx, theta in tqdm(
+            enumerate(np.linspace(0.0, 360.0, 120, endpoint=False)), total=120
+        ):
+            c2w = pose_spherical(theta, -30.0, 4.0)
+            ray_origins, ray_dirs = get_rays(config["H"], config["W"], focal, c2w)
+            rays_flat, t_vals = render_flat_rays(
+                ray_origins,
+                ray_dirs,
+                near_bound=2.0,
+                far_bound=6.0,
+                num_samples=config["NUM_SAMPLES"],
+                rand=False,
+            )
+            rays_flat = rays_flat.float().to(device)
+            t_vals = t_vals.float().to(device)
+
+            if idx % config["BATCH_SIZE"] == 0 and idx > 0:
+                batched_flat = torch.stack(batch_flat, axis=0)
+                batch_flat = [rays_flat]
+                batched_t = torch.stack(batch_t, axis=0)
+                batch_t = [t_vals]
+
+                rgb, _ = model.module.render_rgb_depth(
+                    batched_flat, batched_t, rand=False, train=False
+                )
+
+                temp_rgb = [torch.clip(255 * img, 0.0, 255.0).int() for img in rgb]
+                rgb_frames = rgb_frames + temp_rgb
+            else:
+                batch_flat.append(rays_flat)
+                batch_t.append(t_vals)
+
+        rgb_frames = [frame.to("cpu").numpy().astype(np.uint8) for frame in rgb_frames]
+        rgb_video = f"rgb_video_{epoch_val}.mp4"
+        imageio.mimwrite(
+            rgb_video, rgb_frames, fps=30, quality=7, macro_block_size=None
+        )
+        wandb.log({"rgb_video": wandb.Video(rgb_video, format="mp4")})
+
+    if rank == 0:
+        wandb.watch(model, log="all")
+
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0.0
+        total_psnr = 0.0
+
+        if isinstance(train_loader.sampler, DistributedSampler):
+            train_loader.sampler.set_epoch(epoch)
+
+        progress_bar = tqdm(
+            enumerate(train_loader), total=len(train_loader), disable=rank != 0
+        )
+
+        for idx, (images, rays, focal) in progress_bar:
+            main_focal = focal[0]
+            rays_flat, t = rays
+            images, rays_flat, t = images.to(device), rays_flat.to(device), t.to(device)
+
+            optimizer.zero_grad()
+
+            rgb, depth_map = model.module.render_rgb_depth(rays_flat, t)
+            loss = loss_fn(images, rgb)
+
+            loss.backward()
+            gradnorm = grad_norm(model)
+            optimizer.step()
+
+            psnr = psnr_loss(rgb, images)
+            total_loss += loss.item()
+            total_psnr += psnr.item()
+
+            if rank == 0 and idx % 4 == 0:
+                wandb.log(
+                    {
+                        "train/loss/mse": loss.item(),
+                        "train/loss/psnr": psnr.item(),
+                        "train/grad_norm": gradnorm,
+                    }
+                )
+            elif rank == 0 and idx == 1 and epoch % 5 == 0:
+                pred_img = (rgb[0].detach().cpu().numpy() * 255).astype(np.uint8)
+                target_img = (images[0].detach().cpu().numpy() * 255).astype(np.uint8)
+                depth_map_img = (depth_map[0].detach().cpu().numpy() * 255).astype(
+                    np.uint8
+                )
+
+                wandb.log(
+                    {
+                        "train/sample_pred_image": wandb.Image(pred_img),
+                        "train/sample_target_image": wandb.Image(target_img),
+                        "train/sample_depth_map": wandb.Image(depth_map_img),
+                    }
+                )
+
+        avg_loss = total_loss / len(train_loader)
+        avg_psnr = total_psnr / len(train_loader)
+
+        if rank == 0:
+            print(
+                f"Epoch {epoch + 1}: Avg Loss = {avg_loss:.4f}, Avg PSNR = {avg_psnr:.2f}"
+            )
+
+        if epoch % 5 == 0:
+            model.eval()
+            with torch.no_grad():
+
+                total_valid_loss = 0.0
+                total_valid_psnr = 0.0
+
+                for idx, (images, rays, focal) in enumerate(valid_loader):
+                    rays_flat, t = rays
+                    images, rays_flat, t = (
+                        images.to(device),
+                        rays_flat.to(device),
+                        t.to(device),
+                    )
+                    rgb, depth_map = model.module.render_rgb_depth(rays_flat, t)
+
+                    valid_loss = loss_fn(images, rgb)
+                    valid_psnr = psnr_loss(rgb, images)
+                    total_valid_loss += loss.item()
+                    total_valid_psnr += psnr.item()
+
+                    if rank == 0:
+                        pred_img = (rgb[0].detach().cpu().numpy() * 255).astype(
+                            np.uint8
+                        )
+                        target_img = (images[0].detach().cpu().numpy() * 255).astype(
+                            np.uint8
+                        )
+                        depth_map_img = (
+                            depth_map[0].detach().cpu().numpy() * 255
+                        ).astype(np.uint8)
+
+                        wandb.log(
+                            {
+                                "valid/loss/mse": valid_loss.item(),
+                                "valid/loss/psnr": valid_psnr.item(),
+                                "valid/sample_pred_image": wandb.Image(pred_img),
+                                "valid/sample_target_image": wandb.Image(target_img),
+                                "valid/sample_depth_map": wandb.Image(depth_map_img),
+                            }
+                        )
+
+                        valid_avg_loss = total_valid_loss / len(valid_loader)
+                        valid_avg_psnr = total_valid_psnr / len(valid_loader)
+                        print(
+                            f"Validation on Epoch {epoch+1}:\nValid Avg Loss = {valid_avg_loss:.4f}, Valid Avg PSNR = {valid_avg_psnr:.2f}"
+                        )
+
+                        # Save checkpoint every 5 epochs (rank 0 only)
+                        checkpoint_path = f"checkpoint_epoch_{epoch}.pt"
+                        torch.save(model.state_dict(), checkpoint_path)
+                        wandb.save(checkpoint_path)
+
+                    break
+
+                if rank == 0:
+                    log_video(model, epoch, main_focal)
+
+
+def setup(rank, world_size):
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12355"
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+
+
+def cleanup():
+    dist.destroy_process_group()
+
+
+def execute(rank, world_size, config):
+    setup(rank, world_size)
+    set_seed(42)
+    setup_wandb(rank, config=config, exp_name="nerf-t4x2-ddp-base")
+
+    train_dataset = NerfDataset(
+        root_path="train.npz", transform=None, target_transform=None
+    )
+
+    valid_dataset = NerfDataset(
+        root_path="valid.npz", transform=None, target_transform=None
+    )
+
+    train_sampler = DistributedSampler(
+        train_dataset, num_replicas=world_size, rank=rank
+    )
+    val_sampler = DistributedSampler(valid_dataset, num_replicas=world_size, rank=rank)
+
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=config["BATCH_SIZE"],
+        sampler=train_sampler,
+        num_workers=os.cpu_count() // world_size,
+        drop_last=True,
+        pin_memory=True,
+    )
+    val_loader = torch.utils.data.DataLoader(
+        valid_dataset,
+        batch_size=config["BATCH_SIZE"],
+        sampler=val_sampler,
+        num_workers=os.cpu_count() // world_size,
+        drop_last=True,
+        pin_memory=True,
+    )
+
+    model = NeRF(device=rank, emb_dim=config["EMB_DIM"], config=config)
+    model = torch.compile(model, fullgraph=True)
+    model = DDP(model.to(rank), device_ids=[rank])
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=config["LEARNING_RATE"],
+        weight_decay=config["WEIGHT_DECAY"],
+        amsgrad=config["AMSGRAD"],
+        fused=config["FUSED_OPTIM"],
+    )
+
+    train(
+        model,
+        train_loader,
+        val_loader,
+        optimizer,
+        rank=rank,
+        device=rank,
+        epochs=config["EPOCHS"],
+        config=config,
+    )
+
+    cleanup_wandb()
+    cleanup()
+
+
+def run_ddp_training():
+    world_size = torch.cuda.device_count()
+    assert world_size >= 2, "Requires at least 2 GPUs to run"
+
+    mp.spawn(execute, args=(world_size, exp5_config), nprocs=world_size, join=True)
+
+
+if __name__ == "__main__":
+    run_ddp_training()
+```
+
+### exp6.py
+```
+import wandb
+from utils import (
+    get_rays,
+    render_flat_rays,
+    pose_spherical,
+    grad_norm,
+    PSNRLoss,
+    set_seed,
+    setup_wandb,
+    cleanup_wandb,
+)
+import imageio
+import torch
+import torch.nn as nn
+from tqdm.auto import tqdm
+import numpy as np
+from bitnerf_ddp import BitNeRFDDP
+import os
+from dataset import NerfDataset
+from torch.utils.data.distributed import DistributedSampler
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.multiprocessing as mp
+from torchao.quantization import (
+    quantize_,
+    Int8DynamicActivationInt4WeightConfig,
+)
+from torchao.prototype.quantized_training import bitnet_training
+from torchao import quantize_
+from configs import exp6_config
+
+
+def train(
+    model,
+    train_loader,
+    valid_loader,
+    optimizer,
+    device,
+    config,
+    epochs=100,
+    loss_fn=nn.MSELoss(),
+    rank=0,
+):
+    psnr_loss = PSNRLoss()
+
+    def log_video(model, epoch_val, focal):
+        rgb_frames = []
+        batch_flat = []
+        batch_t = []
+
+        for idx, theta in tqdm(
+            enumerate(np.linspace(0.0, 360.0, 120, endpoint=False)), total=120
+        ):
+            c2w = pose_spherical(theta, -30.0, 4.0)
+            ray_origins, ray_dirs = get_rays(config["H"], config["W"], focal, c2w)
+            rays_flat, t_vals = render_flat_rays(
+                ray_origins,
+                ray_dirs,
+                near_bound=2.0,
+                far_bound=6.0,
+                num_samples=config["NUM_SAMPLES"],
+                rand=False,
+            )
+            rays_flat = rays_flat.float().to(device)
+            t_vals = t_vals.float().to(device)
+
+            if idx % config["BATCH_SIZE"] == 0 and idx > 0:
+                batched_flat = torch.stack(batch_flat, axis=0)
+                batch_flat = [rays_flat]
+                batched_t = torch.stack(batch_t, axis=0)
+                batch_t = [t_vals]
+
+                rgb, _ = model.module.render_rgb_depth(
+                    batched_flat, batched_t, rand=False, train=False
+                )
+
+                temp_rgb = [torch.clip(255 * img, 0.0, 255.0).int() for img in rgb]
+                rgb_frames = rgb_frames + temp_rgb
+            else:
+                batch_flat.append(rays_flat)
+                batch_t.append(t_vals)
+
+        rgb_frames = [frame.to("cpu").numpy().astype(np.uint8) for frame in rgb_frames]
+        rgb_video = f"rgb_video_{epoch_val}.mp4"
+        imageio.mimwrite(
+            rgb_video, rgb_frames, fps=30, quality=7, macro_block_size=None
+        )
+        wandb.log({"rgb_video": wandb.Video(rgb_video, format="mp4")})
+
+    if rank == 0:
+        wandb.watch(model, log="all")
+
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0.0
+        total_psnr = 0.0
+
+        if isinstance(train_loader.sampler, DistributedSampler):
+            train_loader.sampler.set_epoch(epoch)
+
+        progress_bar = tqdm(
+            enumerate(train_loader), total=len(train_loader), disable=rank != 0
+        )
+
+        for idx, (images, rays, focal) in progress_bar:
+            main_focal = focal[0]
+            rays_flat, t = rays
+            images, rays_flat, t = images.to(device), rays_flat.to(device), t.to(device)
+
+            optimizer.zero_grad()
+
+            rgb, depth_map = model.module.render_rgb_depth(rays_flat, t)
+            loss = loss_fn(images, rgb)
+
+            loss.backward()
+            gradnorm = grad_norm(model)
+            optimizer.step()
+
+            psnr = psnr_loss(rgb, images)
+            total_loss += loss.item()
+            total_psnr += psnr.item()
+
+            if rank == 0 and idx % 4 == 0:
+                wandb.log(
+                    {
+                        "train/loss/mse": loss.item(),
+                        "train/loss/psnr": psnr.item(),
+                        "train/grad_norm": gradnorm,
+                    }
+                )
+            elif rank == 0 and idx == 1 and epoch % 5 == 0:
+                pred_img = (rgb[0].detach().cpu().numpy() * 255).astype(np.uint8)
+                target_img = (images[0].detach().cpu().numpy() * 255).astype(np.uint8)
+                depth_map_img = (depth_map[0].detach().cpu().numpy() * 255).astype(
+                    np.uint8
+                )
+
+                wandb.log(
+                    {
+                        "train/sample_pred_image": wandb.Image(pred_img),
+                        "train/sample_target_image": wandb.Image(target_img),
+                        "train/sample_depth_map": wandb.Image(depth_map_img),
+                    }
+                )
+
+        avg_loss = total_loss / len(train_loader)
+        avg_psnr = total_psnr / len(train_loader)
+
+        if rank == 0:
+            print(
+                f"Epoch {epoch + 1}: Avg Loss = {avg_loss:.4f}, Avg PSNR = {avg_psnr:.2f}"
+            )
+
+        if epoch % 5 == 0:
+            model.eval()
+            with torch.no_grad():
+
+                total_valid_loss = 0.0
+                total_valid_psnr = 0.0
+
+                for idx, (images, rays, focal) in enumerate(valid_loader):
+                    rays_flat, t = rays
+                    images, rays_flat, t = (
+                        images.to(device),
+                        rays_flat.to(device),
+                        t.to(device),
+                    )
+                    rgb, depth_map = model.module.render_rgb_depth(rays_flat, t)
+
+                    valid_loss = loss_fn(images, rgb)
+                    valid_psnr = psnr_loss(rgb, images)
+                    total_valid_loss += loss.item()
+                    total_valid_psnr += psnr.item()
+
+                    if rank == 0:
+                        pred_img = (rgb[0].detach().cpu().numpy() * 255).astype(
+                            np.uint8
+                        )
+                        target_img = (images[0].detach().cpu().numpy() * 255).astype(
+                            np.uint8
+                        )
+                        depth_map_img = (
+                            depth_map[0].detach().cpu().numpy() * 255
+                        ).astype(np.uint8)
+
+                        wandb.log(
+                            {
+                                "valid/loss/mse": valid_loss.item(),
+                                "valid/loss/psnr": valid_psnr.item(),
+                                "valid/sample_pred_image": wandb.Image(pred_img),
+                                "valid/sample_target_image": wandb.Image(target_img),
+                                "valid/sample_depth_map": wandb.Image(depth_map_img),
+                            }
+                        )
+
+                        valid_avg_loss = total_valid_loss / len(valid_loader)
+                        valid_avg_psnr = total_valid_psnr / len(valid_loader)
+                        print(
+                            f"Validation on Epoch {epoch+1}:\nValid Avg Loss = {valid_avg_loss:.4f}, Valid Avg PSNR = {valid_avg_psnr:.2f}"
+                        )
+
+                        # Save checkpoint every 5 epochs (rank 0 only)
+                        checkpoint_path = f"checkpoint_epoch_{epoch}.pt"
+                        torch.save(model.state_dict(), checkpoint_path)
+                        wandb.save(checkpoint_path)
+
+                    break
+
+                if rank == 0:
+                    log_video(model, epoch, main_focal)
+                    checkpoint_path = f"checkpoint_epoch_{epoch}_quantized_final.pt"
+                    quantize_(model, Int8DynamicActivationInt4WeightConfig())
+                    # We train at bitnet-level, but we save in int4
+                    torch.save(model.state_dict(), checkpoint_path)
+                    wandb.save(checkpoint_path)
+
+
+def setup(rank, world_size):
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12355"
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+
+
+def cleanup():
+    dist.destroy_process_group()
+
+
+def execute(rank, world_size, config):
+    setup(rank, world_size)
+    set_seed(42)
+    setup_wandb(rank, config=config, exp_name="bitnerf-t4x2-ddp")
+
+    train_dataset = NerfDataset(
+        root_path="train.npz", transform=None, target_transform=None
+    )
+
+    valid_dataset = NerfDataset(
+        root_path="valid.npz", transform=None, target_transform=None
+    )
+
+    train_sampler = DistributedSampler(
+        train_dataset, num_replicas=world_size, rank=rank
+    )
+    val_sampler = DistributedSampler(valid_dataset, num_replicas=world_size, rank=rank)
+
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=config["BATCH_SIZE"],
+        sampler=train_sampler,
+        num_workers=os.cpu_count() // world_size,
+        drop_last=True,
+        pin_memory=True,
+    )
+    val_loader = torch.utils.data.DataLoader(
+        valid_dataset,
+        batch_size=config["BATCH_SIZE"],
+        sampler=val_sampler,
+        num_workers=os.cpu_count() // world_size,
+        drop_last=True,
+        pin_memory=True,
+    )
+
+    model = BitNeRFDDP(device=rank, emb_dim=config["EMB_DIM"], config=config)
+    quantize_(model, bitnet_training())
+    model = torch.compile(model, fullgraph=True)
+    model = DDP(model.to(rank), device_ids=[rank])
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=config["LEARNING_RATE"],
+        weight_decay=config["WEIGHT_DECAY"],
+        amsgrad=config["AMSGRAD"],
+        fused=config["FUSED_OPTIM"],
+    )
+
+    train(
+        model,
+        train_loader,
+        val_loader,
+        optimizer,
+        rank=rank,
+        device=rank,
+        epochs=config["EPOCHS"],
+        config=config,
+    )
+
+    cleanup_wandb()
+    cleanup()
+
+
+def run_ddp_training():
+    world_size = torch.cuda.device_count()
+    assert world_size >= 2, "Requires at least 2 GPUs to run"
+
+    mp.spawn(execute, args=(world_size, exp6_config), nprocs=world_size, join=True)
+
+
+if __name__ == "__main__":
+    run_ddp_training()
+```
+
+### nerf.py
+```
+import torch
+from torch import nn
+import torch.nn.functional as F
+from configs import POS_ENCODE_DIMS, NUM_SAMPLES
+
+
+class NeRF(torch.nn.Module):
+    def __init__(self, device, config, emb_dim=64, num_layers=8):
+        super(NeRF, self).__init__()
+        self.inp_emb = (2 * 3 * POS_ENCODE_DIMS) + 3
+
+        self.input_layer = nn.Linear(
+            in_features=self.inp_emb,
+            out_features=emb_dim,
+            bias=True,
+            device=device,
+        )
+        input_dim_size = emb_dim
+        self.layers = []
+        self.config = config
+        self.device = device
+
+        for idx in range(num_layers):
+            if idx % 4 == 0 and idx > 0:
+                layer = nn.Linear(
+                    in_features=input_dim_size + self.inp_emb,
+                    out_features=emb_dim,
+                    bias=True,
+                    device=device,
+                )
+            else:
+                layer = nn.Linear(
+                    in_features=input_dim_size,
+                    out_features=emb_dim,
+                    bias=True,
+                    device=device,
+                )
+
+            self.layers.append(layer)
+
+        self.layers = nn.ModuleList(self.layers)
+
+        self.output_layer = nn.Linear(
+            in_features=input_dim_size, out_features=4, bias=True, device=device
+        )
+
+    def forward(self, x):
+        inputs = x
+        x = self.input_layer(x)
+        for idx, layer in enumerate(self.layers):
+            if idx % 4 == 0 and idx > 0:
+                x = torch.cat([x, inputs], dim=-1)
+            x = F.relu(layer(x))
+        outputs = self.output_layer(x)
+        return outputs
+
+    def render_rgb_depth(self, rays_flat, t, rand=True, train=True):
+        predictions = self.forward(rays_flat)
+        predictions = torch.reshape(
+            predictions, (-1, self.config["H"], self.config["W"], NUM_SAMPLES, 4)
+        )
+
+        rgb = torch.sigmoid(predictions[..., :-1])
+        sigma = F.relu(predictions[..., -1])
+
+        delta = t[..., 1:] - t[..., :-1]
+        delta = torch.cat(
+            [
+                delta,
+                torch.broadcast_to(
+                    torch.tensor(1e10, device=self.device), delta[..., :1].shape
+                ),
+            ],
+            dim=-1,
+        )
+        if rand:
+            alpha = 1.0 - torch.exp(-sigma * delta)
+        else:
+            alpha = 1.0 - torch.exp(-sigma * delta[:, None, None, :])
+
+        transmittance = torch.cumprod(1.0 - alpha + 1e-10, dim=-1)
+        weights = alpha * transmittance
+
+        rendered_rgb = torch.sum(weights[..., None] * rgb, dim=-2)
+        if rand:
+            depth_map = torch.sum(weights * t, dim=-1)
+        else:
+            depth_map = torch.sum(weights * t[:, None, None], dim=-1)
+
+        return (rendered_rgb, depth_map)
+```
+
+### utils.py
+```
+import torch
+import numpy as np
+import torch.nn as nn
+import random
+import os
+import wandb
+import torch.nn.functional as F
+
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def setup_wandb(rank, config, exp_name):
+    if rank == 0:
+        os.environ["WANDB_API_KEY"] = "8c7b9f8fcc6e76dc62c9ce2fe755802ee90d6de4"
+        wandb.init(
+            project="nerf",
+            entity="suvadityamuk",
+            save_code=True,
+            name=exp_name,
+            config=config,
+        )
+
+
+def cleanup_wandb():
+    if wandb.run:
+        wandb.finish()
+
+
+def get_translation(t):
+    return torch.from_numpy(
+        np.array(
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, t],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=float,
+        )
+    )
+
+
+def get_rotation_phi(phi):
+    return torch.from_numpy(
+        np.array(
+            [
+                [1, 0, 0, 0],
+                [0, np.cos(phi), -np.sin(phi), 0],
+                [0, np.sin(phi), np.cos(phi), 0],
+                [0, 0, 0, 1],
+            ]
+        )
+    )
+
+
+def get_rotation_theta(theta):
+    return torch.from_numpy(
+        np.array(
+            [
+                [np.cos(theta), 0, -np.sin(theta), 0],
+                [0, 1, 0, 0],
+                [np.sin(theta), 0, np.cos(theta), 0],
+                [0, 0, 0, 1],
+            ]
+        )
+    )
+
+
+def pose_spherical(theta, phi, t):
+    c2w = get_translation(t)
+    c2w = get_rotation_phi(phi / 180.0 * np.pi) @ c2w
+    c2w = get_rotation_theta(theta / 180.0 * np.pi) @ c2w
+    c2w = (
+        torch.from_numpy(
+            np.array(
+                [[-1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 1]], dtype=float
+            )
+        )
+        @ c2w
+    )
+    return c2w
+
+
+def encode_pos(x: torch.Tensor, pos_encode_dims=16):
+    pos = [x]
+    for i in range(pos_encode_dims):
+        for func in [torch.sin, torch.cos]:
+            pos.append(func(2.0**i * x))
+    return torch.cat(pos, dim=-1)
+
+
+def get_rays(height, width, focal_length, pose):
+    h, w = torch.meshgrid(torch.arange(width), torch.arange(height), indexing="xy")
+
+    normalized_h = (h - height * 0.5) / focal_length
+    normalized_w = (w - width * 0.5) / focal_length
+
+    directions = torch.stack(
+        [normalized_h, -normalized_w, -torch.ones_like(normalized_h)], dim=-1
+    )
+
+    cam_matrix = pose[:3, :3]
+    env_params = pose[:3, -1]
+
+    transformed_dirs = directions.unsqueeze(-2)
+    camera_dirs = transformed_dirs * cam_matrix
+    ray_dirs = torch.sum(camera_dirs, dim=-1)
+    ray_origins = torch.broadcast_to(env_params, ray_dirs.shape)
+
+    return (ray_origins, ray_dirs)
+
+
+def render_flat_rays(
+    ray_origins, ray_dirs, near_bound, far_bound, num_samples, rand=False
+):
+    t = torch.linspace(near_bound, far_bound, num_samples)
+    if rand:
+        noise_shape = list(ray_origins.shape[:-1])
+        noise_shape.append(num_samples)
+        t_noise = torch.rand(noise_shape)
+        t_noise_normalized = t_noise * ((far_bound - near_bound) / num_samples)
+        t = t + t_noise_normalized
+
+    rays = ray_origins.unsqueeze(-2) + (t.unsqueeze(-1) * ray_dirs.unsqueeze(-2))
+    rays_flat = rays.reshape(-1, 3)
+    rays_flat = encode_pos(rays_flat)
+
+    return (rays_flat, t)
+
+
+class PSNRLoss(nn.Module):
+    def __init__(self, max_val=1.0):
+        super(PSNRLoss, self).__init__()
+        self.max_val = max_val
+
+    def forward(self, predicted_image, target_image):
+        mse = torch.mean((predicted_image - target_image) ** 2)
+        psnr = 20 * torch.log10(self.max_val / torch.sqrt(mse))
+        return psnr
+
+
+def grad_norm(model):
+    total_norm = 0
+    for p in model.parameters():
+        if p.grad is not None:
+            param_norm = p.grad.data.norm(2)
+            total_norm += param_norm.item() ** 2
+
+    return total_norm**0.5
+
+
+def l2_norm(model):
+    total_norm = 0
+    for p in model.parameters():
+        total_norm += torch.pow(p, 2).sum()
+
+    return total_norm**0.5
+```

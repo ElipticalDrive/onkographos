@@ -1,0 +1,131 @@
+# Macrocell Grid Traversal
+
+Also called: Downscaled Grid Traversal
+
+## Overview
+Macrocell Grid Traversal is a hierarchical acceleration technique for ray-grid traversal that superimposes a coarse grid over a base uniform fine grid to skip empty regions of the scene [S1, S2]. It solves the problem of excessive traversal overhead in sparse or animated volume scenes by allowing the ray to jump over blocks of empty fine cells in a single step [S1, S2]. Unlike [Two-Level Grids for Ray Tracing on GPUs](4245-two-level-grids-for-ray-tracing-on-gpus.md), which may involve more complex data structures or specific GPU optimizations, Macrocell Grid Traversal uses a simple boolean flag per macrocell, making it a lightweight, trivial-to-build optimization suitable for medium-size animated scenes [S1, S2].
+
+## How it works
+**Inputs:**
+- A base uniform fine grid representing the volume data.
+- A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
+- A downsampling factor $M$ (typically $M=6$) [S1, S2].
+
+**Outputs:**
+- Traversal state indicating whether the ray intersects occupied regions of the fine grid.
+
+**Data Structures:**
+The macrocell grid is a 3D array of boolean flags.
+- Layout: A 3D grid of size $N_x/M \times N_y/M \times N_z/M$, where $N_x, N_y, N_z$ are the dimensions of the fine grid.
+- Field: Each element is a single boolean value.
+- Value: `true` if any cell in the corresponding $M \times M \times M$ block of the fine grid is occupied; `false` otherwise.
+
+**Steps:**
+
+1.  **Build Macrocell Grid:**
+    Iterate over the fine grid. For each block of $M \times M \times M$ cells, set the corresponding macrocell flag to `true` if at least one cell in the block is occupied. This step is described as "trivial and cheap" [S1, S2].
+
+2.  **Frustum Setup (Coarse):**
+    Compute the traversal parameters for the macrocell grid. Since the macrocell grid is an $M \times M \times M$ downscaled version of the fine grid, the frustum setup values (such as $t_{max}$, step directions, and initial cell indices) can be reused from the fine grid setup or computed by dividing the fine grid parameters by $M$ [S1, S2].
+
+3.  **Macrocell Traversal:**
+    Traverse the macrocell grid along the ray. Determine the slice of macrocells overlapped by the ray frustum. In practice, this usually involves only one macrocell per slice [S1, S2].
+
+4.  **Skip or Traverse Fine Grid:**
+    -   **Case 1 (Empty Slice):** If all macrocells in the current slice are empty (all flags are `false`), skip $M$ traversal steps on the original fine grid. This allows the ray to advance by $M$ cells in the fine grid without checking individual cells [S1, S2].
+    -   **Case 2 (Occupied Slice):** If any macrocell in the slice is occupied (at least one flag is `true`), perform the standard fine grid traversal steps for that slice. The ray continues to traverse the fine grid normally within the occupied region [S1, S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def macrocell_grid_traversal(ray_origin, ray_direction, fine_grid, M):
+    """
+    ray_origin: (x, y, z)
+    ray_direction: (dx, dy, dz)
+    fine_grid: 3D array of booleans, dimensions (Nx, Ny, Nz)
+    M: downsampling factor (integer)
+    """
+    # 1. Build Macrocell Grid
+    # Dimensions of macrocell grid
+    Mx = fine_grid.shape[0] // M
+    My = fine_grid.shape[1] // M
+    Mz = fine_grid.shape[2] // M
+    
+    macrocell_grid = [[False] * Mz for _ in range(My)]
+    for _ in range(Mx):
+        macrocell_grid.append([[False] * Mz for _ in range(My)])
+        
+    for i in range(0, fine_grid.shape[0], M):
+        for j in range(0, fine_grid.shape[1], M):
+            for k in range(0, fine_grid.shape[2], M):
+                # Check if any cell in the MxMxM block is occupied
+                occupied = False
+                for di in range(M):
+                    for dj in range(M):
+                        for dk in range(M):
+                            if fine_grid[i + di][j + dj][k + dk]:
+                                occupied = True
+                                break
+                        if occupied: break
+                    if occupied: break
+                macrocell_grid[i // M][j // M][k // M] = occupied
+
+    # 2. Frustum Setup for Macrocell Grid
+    # Reuse fine grid setup values divided by M, or compute new ones
+    # Assuming standard grid traversal setup function exists
+    macrocell_setup = compute_grid_setup(ray_origin, ray_direction, 
+                                         (Mx, My, Mz), M)
+    
+    # 3. Traverse Macrocell Grid
+    # Initialize macrocell traversal state
+    macrocell_state = init_traversal_state(macrocell_setup)
+    
+    while not macrocell_state.done:
+        # Determine current macrocell slice
+        # Usually only one macrocell is overlapped by the frustum in practice
+        current_macrocell = get_current_macrocell(macrocell_state)
+        
+        # 4. Check if slice is empty
+        if not macrocell_grid[current_macrocell.x][current_macrocell.y][current_macrocell.z]:
+            # Skip M steps on fine grid
+            # Advance macrocell traversal by M steps
+            for _ in range(M):
+                macrocell_state = step_traversal(macrocell_state)
+        else:
+            # Perform standard fine grid traversal for this slice
+            # Note: In a full implementation, this would involve 
+            # traversing the fine grid cells within the occupied macrocell
+            # For the purpose of this high-level description, we assume
+            # the fine grid traversal handles the detail.
+            # Here we simply advance the macrocell traversal to the next slice
+            # and let the fine grid traversal logic (not shown in detail here)
+            # handle the actual ray-march within the occupied region.
+            macrocell_state = step_traversal(macrocell_state)
+            
+    return macrocell_state.hit
+```
+
+**Parameters:**
+-   $M$: The downsampling factor for macrocells ($M \times M \times M$). Typical value is 6 [S1, S2].
+
+**Edge Cases and Pitfalls:**
+-   **Small $M$:** If $M$ is too small, the savings for each macrocell step become too small to justify the additional computations [S1, S2].
+-   **Large $M$:** If $M$ is too large, the probability of finding empty regions decreases, reducing the benefit of skipping [S1, S2].
+-   **Small Resolutions:** For smaller overall grid resolutions, the savings for each macrocell step become too small to justify the additional computations [S1, S2].
+-   **Animated Scenes:** The acceleration structure is typically recreated every frame for animated scenes, which adds overhead [S1, S2].
+
+## Operating characteristics
+-   **Time Complexity:** The build time is linear with respect to the number of fine grid cells, as each cell is checked once. The traversal time is reduced by skipping empty regions.
+-   **Memory Complexity:** The macrocell grid requires $1/ M^3$ the memory of the fine grid's occupancy structure (assuming boolean flags).
+-   **Performance:** Yields a performance improvement of around 30% compared to single ray grids, consistent with improvements seen for single ray grids [S1, S2].
+-   **Strengths:** Simple to implement, cheap to build, effective for sparse scenes.
+-   **Limitations:** Less effective for dense scenes or very small/large $M$. Not suitable for scenes with varying geometric density without more robust hierarchical variants [S1, S2].
+
+## Background
+Macrocells were introduced as a simple hierarchical optimization to a base uniform grid, often used to apply grids to scalar volume fields [S1, S2]. The technique is attributed to Parker et al. 1999a [S1, S2]. It was further discussed in the context of ray tracing animated scenes using coherent grid traversal [S1, S2]. The method is particularly relevant for medium-size animated scenes where the acceleration structure is rebuilt every frame [S1, S2].
+
+## Sources
+[S1] Ray Tracing Animated Scenes using Coherent Grid Traversal, https://www.sci.utah.edu/~thiago/papers/grid.pdf, fetched 2026-10-25
+[S2] Ray Tracing Animated Scenes using Coherent Grid Traversal, https://www.sci.utah.edu/~wald/Publications/2006/CGT/grid.pdf, fetched 2026-10-25

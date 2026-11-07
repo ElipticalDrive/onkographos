@@ -1,34 +1,43 @@
 # Sparse Voxel DAGs
-
-Also called: SVDAG, Sparse Voxel Directed Acyclic Graph
-
+Also called: Sparse Voxel Directed Acyclic Graphs, SVDAGs
 ## Overview
-Sparse Voxel DAGs (SVDAGs) are a memory-efficient 3D data structure that extends the Sparse Voxel Octree (SVO) by merging identical subtrees into shared nodes, forming a Directed Acyclic Graph [898-bottom-up-svo-to-dag-reduction.md]. While SVOs efficiently encode spatial sparsity, they store redundant copies of identical non-empty geometry, leading to high memory consumption at high resolutions [898-bottom-up-svo-to-dag-reduction.md]. SVDAGs solve this by allowing multiple parent nodes to share pointers to the same child instance, achieving lossless compression of topological redundancy without decompression overhead during traversal [898-bottom-up-svo-to-dag-reduction.md]. This sets them apart from siblings like [Compact pointer tree](844-compact-pointer-tree.md) or [OpenVDB (VDB)](1508-openvdb-vdb.md), which focus on spatial sparsity or pointer compression rather than structural isomorphism [G].
-
+Sparse Voxel DAGs (SVDAGs) are hierarchical data structures that represent 3D voxel grids as directed acyclic graphs by merging identical subtrees into shared nodes, thereby transforming a standard tree into a graph with shared instances [S1][S2]. This method solves the redundancy problem in Sparse Voxel Octrees (SVOs), where identical geometric structures are stored multiple times, by encoding identical regions of space with a single instance [S2]. What sets SVDAGs apart from sibling tree-based structures is the explicit sharing of node instances via pointers or labels, allowing for significant compression of irregular data without altering the underlying voxel content [S1].
 ## Shared principles
-The core mechanism of the SVDAG family is the conversion of a tree structure into a DAG to eliminate duplicate subtrees [G].
+All structures in this family share the following mechanism:
 
-1.  **Node Identity:** Two nodes are considered identical if they have the same `childmask` (encoding the existence of 8 children) and identical pointers to their respective children [898-bottom-up-svo-to-dag-reduction.md].
-2.  **Bottom-Up Reduction:** The reduction process iterates from the leaves up to the root. At each level, nodes are sorted by their identity key (childmask + child pointers) to group identical nodes together [898-bottom-up-svo-to-dag-reduction.md].
-3.  **Compaction and Indirection:** Identical nodes are compacted into a single unique instance. An indirection table maps original node positions to their unique counterparts, and parent pointers are updated to reference these unique instances [898-bottom-up-svo-to-dag-reduction.md].
-4.  **Memory Layout:** Nodes store a `childmask` (8-bit integer) followed by an array of pointers to non-empty children [898-bottom-up-svo-to-dag-reduction.md]. Node size varies between 8 and 36 bytes depending on the number of children (1 to 8) [898-bottom-up-svo-to-dag-reduction.md].
-5.  **Traversal:** Ray traversal leverages the DAG structure to traverse voxels in ray order, eliminating the need for contour intersection tests and distance maintenance required in standard SVOs [1147-sparse-voxel-dag-ray-traversal.md].
+1.  **Recursive Subdivision:** The 3D domain is recursively divided into sub-volumes. In standard octrees, each node has 8 children. In pointer trees, the branching factor $N$ varies ($N^3$ children).
+2.  **Sparsity Encoding:** Empty regions are represented by null pointers or absence of children, rather than storing zero-valued voxels. This provides compression proportional to the sparsity of the data.
+3.  **Hierarchical Traversal:** Rendering or access requires traversing from the root to the leaf. This allows skipping large empty volumes (culling) and adapting resolution to view distance or detail requirements.
+4.  **Spatial Locality:** Children of a node are spatially contiguous. This locality is often exploited via Morton ordering (Z-order curve) to map 3D coordinates to 1D keys, enabling efficient neighbor lookups and linear array representations in implicit variants [G].
 
 ## Subtopics
 
 ### [Bottom-up SVO to DAG Reduction](898-bottom-up-svo-to-dag-reduction.md)
-A method for compressing an SVO into a minimal DAG by merging identical subtrees. It handles memory constraints by processing sub-DAGs for large resolutions and guarantees the smallest possible DAG within $L$ iterations. Choose this when geometry has high topological redundancy.
+This method reduces the memory footprint of a Sparse Voxel Octree (SVO) by merging identical subtrees into shared nodes, thereby transforming the tree structure into a Directed Acyclic Graph (DAG). While an SVO efficiently encodes empty regions of space, it stores redundant copies of identical geometric structures. This method solves that inefficiency by allowing nodes to share pointers to identical subtrees, encoding identical regions of space with a single instance. It sets itself apart from top-down recursive merging approaches by using an iterative bottom-up strategy that guarantees the minimal DAG within $L$ iterations, where $L$ is the maximum octree level. Unlike methods that compress material properties, this technique focuses on geometry, decoupling voxel content from topology to enable compression of irregular data.
 
 ### [Pointerless Sparse Voxel Directed Acyclic Graph (PSVDAG)](949-pointerless-sparse-voxel-directed-acyclic-graph-psvdag.md)
-A variant defined by BNF where nodes are either Inner or Leaf nodes, removing explicit pointer storage. Choose this for cache-friendly, pointer-free traversal at the cost of indirection logic.
+The Pointerless Sparse Voxel Directed Acyclic Graph (PSVDAG) is a hierarchical data structure that represents a 3D voxel grid as a directed acyclic graph without using explicit pointers to child nodes. It combines the space-saving benefits of Pointerless Sparse Voxel Octrees (PSVOs) with the Common Subtree Merging (CSM) capabilities of Sparse Voxel DAGs (SVDAGs). By replacing fixed-width pointers with variable-length binary labels and callers, PSVDAG achieves higher compression ratios than both SVOs and SVDAGs, making it suitable for archiving and streaming. However, the absence of direct pointers makes immediate traversal more complex compared to pointer-based structures.
 
 ### [Sparse Voxel DAG Ray Traversal](1147-sparse-voxel-dag-ray-traversal.md)
-A GPU-based traversal method for visibility queries and primary ray intersection. It simplifies the SVO loop by removing contour tests and extends beam optimization to soft shadows via reverse beam tracing. Choose this for real-time rendering on GPUs.
+A GPU-based ray traversal method for Sparse Voxel DAGs (SVDAG) that efficiently computes visibility queries (shadows, ambient occlusion) and primary ray intersections by exploiting the shared structure of the DAG. It differs from standard Sparse Voxel Octree (SVO) traversal by handling node indirection, where multiple parent nodes may point to the same child instance, requiring careful stack management or pointer dereferencing. Unlike [Pointerless Sparse Voxel Directed Acyclic Graph (PSVDAG)](949-pointerless-sparse-voxel-directed-acyclic-graph-psvdag.md) which eliminates pointers entirely, this method retains explicit pointers but optimizes traversal for the DAG topology.
 
 ### [Isomorphic Node Recycling (DAOG)](3422-isomorphic-node-recycling-daog.md)
-A compression method that reuses structurally identical nodes by converting the Octree into a Directed Acyclic Octal Graph. Choose this as an alternative implementation of the DAG reduction principle.
+Isomorphic Node Recycling is a compression method that converts a Sparse Voxel Octree into a Directed Acyclic Octal Graph (DAOG) by reusing structurally identical (isomorphic) nodes. It differs from bottom-up reduction [Bottom-up SVO to DAG Reduction](898-bottom-up-svo-to-dag-reduction.md) by employing a top-down traversal with a hash table to detect and merge identical subtrees during insertion, rather than sorting and compacting nodes after the tree is fully built.
+
+### [BasicDAG](6740-basicdag.md)
+A directed acyclic graph structure for volume geometry, storing node indices in a flat array to enable fast traversal and leaf extraction.
+
+### Aokana
+#### definition
+- [S1] Streaming/LOD variant of DAG that splits the world into many shallow DAGs of 256³ Voxels each, with octree-style LOD levels (LOD n is 8 children merged at the same 256³ resolution) and distance-based streaming.
+#### pitfall
+- [S1] Game attributes cannot utilize complex lossy compression.
+#### number
+- [S1] On an RTX 3060 Ti it renders a 64K scene of about 10 billion Voxels in about 6 ms. Only about 2–17% of the data is resident: 424 MB VRAM against 23 GB on disk for San Miguel at 64K.
+- [S1] In Aokana's numbers, colour dominates storage: 21 GB of colour against 2.2 GB of geometry.
 
 ## Background
-The Sparse Voxel DAG was introduced by Laine and Karras in 2010 as an extension of the Sparse Voxel Octree [G]. It addresses the memory bottleneck of SVOs at high resolutions (e.g., $128K^3$ grids) by exploiting the fact that complex 3D scenes often contain repeated geometric patterns [898-bottom-up-svo-to-dag-reduction.md].
+The concept of using Directed Acyclic Graphs (DAGs) to compress voxel data originated from the need to reduce the memory overhead of Sparse Voxel Octrees (SVOs) in real-time rendering and visualization. The foundational work on bottom-up SVO to DAG reduction was introduced by Laine and Karras, who demonstrated that identical subtrees could be merged to form a DAG, significantly reducing memory usage for complex scenes [S1][S2]. This approach was later extended to pointerless representations (PSVDAG) to further optimize storage for streaming and archival purposes [S1]. The family has seen recent adaptations for real-time game engines, such as Aokana, which integrates DAG structures with Level of Detail (LOD) and streaming techniques to handle massive voxel datasets on consumer hardware [S1].
 
 ## Sources
+[S1] https://github.com/theHimanshuShekhar/bhayanakvoxel/blob/research/voxel-data-structures/docs/research/voxel-data-structures.md, https://github.com/theHimanshuShekhar/bhayanakvoxel/blob/research/voxel-data-structures/docs/research/voxel-data-structures.md, fetched 2026-10-28

@@ -1,12 +1,10 @@
 # Cone Marching
-
-
 ## Overview
 Cone Marching is an optimization for distance-field ray marching that groups bundles of rays into a cone to skip repeated Signed Distance Function (SDF) calculations [S1, unofficial]. It differs from standard ray marching by performing a coarse, vertex-shader-based march of these cones to advance the ray origin and step count before the fragment shader resumes fine-grained marching [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-*   **Inputs:** Camera position ($ro$), camera ray direction ($rd$), camera field of view tangent ($u\_camTanFov$), plane subdivision count ($u\_camPlaneSubdivisions$), maximum distance ($u\_maxDis$), and maximum steps ($u\_maxSteps$) [S1, unofficial].
+*   **Inputs:** Camera position ($ro$), camera ray direction ($rd$), camera field-of-view tangent ($u\_camTanFov$), plane subdivision count ($u\_camPlaneSubdivisions$), maximum distance ($u\_maxDis$), and maximum steps ($u\_maxSteps$) [S1, unofficial].
 *   **Outputs:** A `March` struct containing the total distance travelled ($dis$) and the number of steps taken ($steps$), passed from the vertex shader to the fragment shader [S1, unofficial].
 
 **Data Structures**
@@ -16,24 +14,9 @@ Cone Marching is an optimization for distance-field ray marching that groups bun
 
 **Algorithm Steps**
 
-1.  **Geometry Setup:** Create a marching plane geometry with subdivisions. The width segments are calculated as $\lfloor camera.aspect \times 32 \rfloor$ and height segments as 32 to ensure square/evenly spaced vertices and avoid artifacts [S1, unofficial].
-2.  **Vertex Shader Cone March:**
-    *   Compute the cone ray origin ($cro$) and direction ($crd$) in world space [S1, unofficial].
-    *   Initialize total distance $d = 0$ and step counter $i = 0$ [S1, unofficial].
-    *   Loop while $i < u\_maxSteps$:
-        *   Calculate current position: $p = cro + d \cdot crd$ [S1, unofficial].
-        *   Calculate scene distance: $cd = scene(p)$ [S1, unofficial].
-        *   Calculate current cone radius: $ccr = \frac{d \cdot u\_camTanFov \cdot 2.0}{u\_camPlaneSubdivisions}$ [S1, unofficial].
-        *   Check break condition: If $cd < ccr \cdot 1.25$ OR $d \ge u\_maxDis$, break the loop. The padding factor 1.25 is used to avoid artifacts at SDF edges [S1, unofficial].
-        *   Advance distance: $d += cd$ [S1, unofficial].
-        *   Increment steps: $i += 1$ [S1, unofficial].
-    *   Return `March(d, i)` [S1, unofficial].
-3.  **Fragment Shader Fine March:**
-    *   Receive $vDisTravelled$ and $vSteps$ from the vertex shader [S1, unofficial].
-    *   If $vDisTravelled \ge u\_maxDis$, return clear color [S1, unofficial].
-    *   Compute ray origin $ro$ and direction $rd$ for the specific pixel [S1, unofficial].
-    *   Call `rayMarch(vDisTravelled, vSteps, ro, rd)` [S1, unofficial].
-    *   The `rayMarch` function initializes its loop counter at $vSteps$ and starting distance at $vDisTravelled$, continuing until hit or max distance [S1, unofficial].
+1.  **Geometry Setup:** Create a marching plane geometry with subdivisions [S1, unofficial]. The width segments are calculated as $\lfloor camera.aspect \times 32 \rfloor$ and height segments as 32 to ensure square/evenly spaced vertices and avoid artifacts [S1, unofficial].
+2.  **Vertex Shader Cone March:** Compute the cone ray origin ($cro$) and direction ($crd$) in world space [S1, unofficial]. Initialize total distance $d = 0$ and step counter $i = 0$ [S1, unofficial]. Loop while $i < u\_maxSteps$: calculate current position $p = cro + d \cdot crd$ [S1, unofficial]; calculate scene distance $cd = scene(p)$ [S1, unofficial]; calculate current cone radius $ccr = \frac{d \cdot u\_camTanFov \cdot 2.0}{u\_camPlaneSubdivisions}$ [S1, unofficial]; check break condition: If $cd < ccr \cdot 1.25$ OR $d \ge u\_maxDis$, break the loop [S1, unofficial]; advance distance $d += cd$ [S1, unofficial]; increment steps $i += 1$ [S1, unofficial]. Return `March(d, i)` [S1, unofficial].
+3.  **Fragment Shader Fine March:** Receive $vDisTravelled$ and $vSteps$ from the vertex shader [S1, unofficial]. If $vDisTravelled \ge u\_maxDis$, return clear color [S1, unofficial]. Compute ray origin $ro$ and direction $rd$ for the specific pixel [S1, unofficial]. Call `rayMarch(vDisTravelled, vSteps, ro, rd)` [S1, unofficial]. The `rayMarch` function initializes its loop counter at $vSteps$ and starting distance at $vDisTravelled$, continuing until hit or max distance [S1, unofficial].
 
 **Pseudocode**
 
@@ -56,8 +39,6 @@ def cone_march(cro, crd):
             break
         d += cd
         i += 1
-    if d >= u_maxDis:
-        return March(dis=float('inf'), steps=i)
     return March(dis=d, steps=i)
 
 def ray_march(start_dis, steps_taken, ro, rd):
@@ -70,8 +51,6 @@ def ray_march(start_dis, steps_taken, ro, rd):
             break
         d += cd
         i += 1
-    if d >= u_maxDis:
-        return float('inf')
     return d
 
 def fragment_shader(uv):
@@ -86,13 +65,10 @@ def fragment_shader(uv):
     return shade(dis)
 
 def unproject(clip, inv_proj):
-    # Standard inverse projection: multiply clip by inverse projection matrix
-    # and perform perspective divide
     vec = multiply_matrix_vector(inv_proj, clip)
     return (vec[0]/vec[3], vec[1]/vec[3], vec[2]/vec[3])
 
 def transform_to_world(rd, world_mat):
-    # Transform direction vector (w=0) by world matrix
     vec = multiply_matrix_vector(world_mat, (rd[0], rd[1], rd[2], 0.0))
     return (vec[0], vec[1], vec[2])
 
@@ -107,7 +83,7 @@ def normalize(v):
 *   Padding Factor: 1.25 (used in break condition) [S1, unofficial].
 
 **Edge Cases and Pitfalls**
-*   **Aspect Ratio Artifacts:** Using rectangular screen vertices without accounting for aspect ratio causes artifacts. Vertices must be evenly spaced/square [S1, unofficial].
+*   **Aspect Ratio Artifacts:** Using rectangular screen vertices without accounting for aspect ratio causes artifacts [S1, unofficial]. Vertices must be evenly spaced/square [S1, unofficial].
 *   **Padding Selection:** The break condition uses a padding factor (1.25) on the cone radius to avoid artifacts at the edges of the SDF, unlike standard ray marching which uses a small epsilon [S1, unofficial].
 
 ## Operating characteristics

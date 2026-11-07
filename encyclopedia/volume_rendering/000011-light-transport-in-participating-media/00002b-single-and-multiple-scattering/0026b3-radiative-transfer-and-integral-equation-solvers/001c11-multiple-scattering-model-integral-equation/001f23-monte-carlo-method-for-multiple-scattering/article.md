@@ -17,7 +17,8 @@ The Monte Carlo method solves the integral equation for directional scattering i
 2. **Interaction Sampling:** As the ray traverses the volume, determine interaction points. At each point, decide between absorption or scattering based on the albedo $a$, extinction coefficient $\tau$, and phase function $p$ [S1, unofficial][S2].
 3. **Direction Selection:** If scattering occurs, select the new direction $\omega'$ using the phase function $p$ [S1, unofficial][S2].
 4. **Contribution Check:** If the ray reaches a light source or volume emitter, accumulate its flux to the pixel intensity [S1, unofficial][S2].
-5. **Termination:** If the ray is absorbed or leaves the volume without hitting a source, terminate the path [G].
+5. **Hybrid/Caustic Pass (Optional):** Propagate rays from light sources to a texture map capturing directional interreflection, then use this map in a final rendering pass with rays from the eye [S1, unofficial][S2].
+6. **Termination:** If the ray is absorbed or leaves the volume without hitting a source, terminate the path [G].
 
 **Formulas:**
 * Distance to next interaction: $d = -\frac{\ln(1-r)}{\tau}$, where $r \in [0,1)$ is a uniform random number [G].
@@ -28,7 +29,7 @@ The Monte Carlo method solves the integral equation for directional scattering i
 * $\tau$ (extinction coefficient): Controls mean free path [S1, unofficial][S2].
 * $a$ (albedo): Probability of scattering vs. absorption [S1, unofficial][S2].
 * $p$ (phase function): Angular distribution of scattered light [S1, unofficial][S2].
-* Typical values: Not given in the sources.
+* Typical values: Not given in the sources. [G]
 
 **Edge Cases:**
 * **Low Probability Paths:** Contributing rays are a small fraction of all considered rays, leading to high variance [S1, unofficial][S2].
@@ -42,7 +43,7 @@ The Monte Carlo method solves the integral equation for directional scattering i
 import math
 import random
 
-def monte_carlo_volume_rendering(camera, volume, lights):
+def monte_carlo_volume_rendering(camera, volume, lights, use_caustic_map=False, caustic_map=None):
     pixel_intensity = 0.0
     ray_origin = camera.position
     ray_direction = camera.generate_pixel_direction()
@@ -50,7 +51,7 @@ def monte_carlo_volume_rendering(camera, volume, lights):
     max_depth = 10  # Standard guard against infinite paths [G]
     
     for _ in range(max_depth):
-        # Find intersection with volume boundary or next voxel
+        # Find distance to next voxel boundary or scene object
         hit_distance = volume.ray_intersect(ray_origin, ray_direction)
         if hit_distance is None or hit_distance < 0:
             break
@@ -83,7 +84,7 @@ def monte_carlo_volume_rendering(camera, volume, lights):
             ray_origin = interaction_pos
             ray_direction = new_direction
             
-            # Update weight by albedo and phase function normalization
+            # Update weight by albedo and phase function
             p_val = volume.phase_function(ray_direction, new_direction)
             if p_val <= 0:
                 break
@@ -114,11 +115,11 @@ def ray_hits_light(origin, direction, lights):
 ```
 
 ## Subtopics
-[Multiple Scattering Albedo Estimation](6357-multiple-scattering-albedo-estimation.md): Estimates the multiple scattering albedo $\sigma_{ms}$ (RGB) such that the effective albedo $\alpha_e$ of the low-res voxel matches the effective albedo $\alpha_e^{\text{input}}$ of the input block.
+[Multiple Scattering Albedo Estimation](6357-multiple-scattering-albedo-estimation.md): Estimates the multiple scattering albedo $\sigma_{ms}$ (RGB) such that the effective albedo $\alpha_e$ of the low-res voxel matches the effective albedo $\alpha_e^{\text{input}}$ of the input block. [G]
 
 ## Operating characteristics
 * **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the number of samples per pixel [G].
-* **Memory Complexity:** Not given in the sources.
+* **Memory Complexity:** Not given in the sources. [G]
 * **Performance:** Images tend to appear noisy and computation takes a long time because many samples are required to decrease the variance of the mean of contributions [S1, unofficial][S2].
 * **Strengths:** Unbiased solution; handles complex geometries and anisotropic scattering naturally [G].
 * **Limitations:** High noise levels; inefficient for scenes where eye-to-light paths are rare [S1, unofficial][S2].

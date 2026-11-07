@@ -1,0 +1,148 @@
+--- v001.md
++++ v002.md
+@@ -4,29 +4,25 @@
+ 
+ ## Overview
+-A method by Sarton et al. [SCRL20] that generalizes page-table hierarchies for non-rendering purposes and processes cache misses on the GPU itself using CUDA shared memory to minimize memory transfers between CPU and GPU [S1, unofficial]. It decouples cache residency management from the spatial subdivision, using a global usage buffer and an LRU buffer to keep frequently used bricks in the cache [S1, unofficial].
++A method by Sarton et al. [SCRL20] that generalizes page-table hierarchies for non-rendering purposes and processes cache misses on the GPU itself using CUDA shared memory to minimize memory transfers between CPU and GPU [S1, unofficial]. It uses a global usage buffer and an LRU buffer to keep frequently used bricks in the cache [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A brick cache with $N$ entries, a multi-channel page-table hierarchy, and a current timestamp $t$ (e.g., frame number).
+-*   **Output:** Updated LRU buffer order, and a list of missing brick IDs for the current timestamp.
++*   **Input:** A brick cache with $N$ entries, a multi-channel page-table hierarchy, and a current timestamp $t$ (e.g., frame number) [S1, unofficial].
++*   **Output:** Updated LRU buffer order, and a list of missing brick IDs for the current timestamp [S1, unofficial].
+ 
+ **Data Structures:**
+-1.  **Global Brick-Usage Buffer:** An array of size $N$ (number of cache entries). Each element stores the last timestamp at which the corresponding cache entry was accessed [S1, unofficial].
+-2.  **LRU Buffer:** An array of size $N$ storing linear indices into the brick cache. The indices are sorted such that the most recently used entries are at the front (index 0) and the least recently used are at the back [S1, unofficial].
+-3.  **Global Request Buffer:** A 3D buffer (or equivalent mapping) with one entry per page/brick in the dataset. Stores the timestamp of the last request for that specific page [S1, unofficial].
+-4.  **Request List:** A dynamic list of brick IDs requested at a specific timestamp [S1, unofficial].
++1.  **Global Brick-Usage Buffer:** An array comprising one timestamp per cache entry, storing the last timestamp at which the corresponding cache entry was accessed [S1, unofficial].
++2.  **LRU Buffer:** An array storing linear indices into the brick cache, sorted by their most recent usage times [S1, unofficial].
++3.  **Global Request Buffer:** A 3D buffer with one entry per page in the multi-channel page-table hierarchy, storing the last request timestamp for that page [S1, unofficial].
++4.  **Request List:** A dynamic list of brick IDs for pages requested at a specific timestamp $t$, compiled from the request buffer [S1, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+ 1.  **Record Usage:** When a brick-cache entry is accessed, write the current timestamp $t$ to the corresponding location in the Global Brick-Usage Buffer [S1, unofficial].
+-2.  **Update LRU Buffer:**
+-    a.  Generate a boolean mask $M$ of size $N$, where $M[i] = 1$ if `UsageBuffer[i] == t`, else $0$ [S1, unofficial].
+-    b.  Use mask $M$ to rearrange the previous LRU buffer. Entries where $M[i] == 1$ are moved to the front of the new LRU buffer, preserving their relative order from the previous buffer. Entries where $M[i] == 0$ are moved to the back, also preserving relative order [S1, unofficial].
+-3.  **Handle Cache Misses (Brick Request Processing):**
+-    a.  If a GPU thread accesses a page representing a brick that is not resident in the brick cache and is not known to be empty, write the current timestamp $t$ to the page's location in the Global Request Buffer [S1, unofficial].
+-    b.  To retrieve misses for timestamp $t$, read all pages from the Request Buffer with value $t$ [S1, unofficial].
+-    c.  Use a single stream compaction operation to compile a list of all brick IDs (from the Request List) that have been reported missing at timestamp $t$ [S1, unofficial].
+-    d.  Read back the Request List to the CPU [S1, unofficial].
+-    e.  The CPU streams the missing bricks from the server [S1, unofficial].
++2.  **Update LRU Buffer:** Generate a boolean mask of brick-cache entries used at the current timestamp from the timestamps in the usage buffer [S1, unofficial]. Use this mask to rearrange the previous LRU buffer such that the most recently used entries are moved to the front, preserving their relative order [S1, unofficial].
++3.  **Handle Cache Misses:** On GPU access to a non-resident, non-empty brick page, write the current timestamp to the page's location in the Global Request Buffer [S1, unofficial].
++4.  **Retrieve Misses:** To retrieve misses for timestamp $t$, read all pages from the Request Buffer with value $t$ [S1, unofficial].
++5.  **Compile Requests:** Use a single stream compaction operation to compile a list of all brick IDs reported missing at timestamp $t$ [S1, unofficial].
++6.  **Stream Bricks:** Read back the Request List to the CPU, which streams the missing bricks from the server [S1, unofficial].
+ 
+ **Parameters:**
+@@ -34,5 +30,5 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Traffic Control:** If the limit on requested bricks is not enforced, excessive traffic may occur during temporally incoherent working sets [S1, unofficial].
++*   **Traffic Control:** Excessive traffic may occur during temporally incoherent working sets if the limit is not enforced [S1, unofficial].
+ *   **Empty Bricks:** The method distinguishes between non-resident bricks and those known to be empty; only non-empty non-resident bricks trigger requests [S1, unofficial].
+ 
+@@ -42,15 +38,14 @@
+ # Global state
+ usage_buffer = [0] * N  # Stores last access timestamp for each cache entry
+-lru_buffer = [0, 1, ..., N-1]  # Indices into cache, sorted by recency
+-request_buffer = {}  # Maps page_id -> last_request_timestamp
++lru_buffer = list(range(N))  # Indices into cache, sorted by recency
++request_buffer = [0] * P  # Stores last request timestamp for each page
+ request_limit = 100  # Max bricks per timestamp
++cache_resident = [True] * N  # Tracks residency of each cache entry
++cache_empty = [False] * N     # Tracks emptiness of each cache entry
++page_to_brick_id = [0] * P    # Maps page ID to brick ID
+ 
+ def update_lru(timestamp):
+-    """
+-    Updates the LRU buffer based on accesses at the current timestamp.
+-    """
+     # Step 1: Generate mask for entries used at current timestamp
+     mask = [usage_buffer[i] == timestamp for i in range(N)]
+-    
+     # Step 2: Rearrange LRU buffer
+     # Most recently used (mask is True) go to front, preserving relative order
+@@ -58,50 +53,26 @@
+     # Least recently used (mask is False) go to back, preserving relative order
+     new_lru_back = [idx for idx in lru_buffer if not mask[idx]]
+-    
+-    lru_buffer = new_lru_front + new_lru_back
++    lru_buffer[:] = new_lru_front + new_lru_back
+ 
+-def handle_access(page_id, brick_id, timestamp):
+-    """
+-    Called when a brick is accessed.
+-    """
++def handle_access(cache_entry_index, page_id, brick_id, timestamp):
+     # Record usage in global buffer
+-    cache_entry_index = get_cache_entry_index(page_id)
+     usage_buffer[cache_entry_index] = timestamp
+-    
+-    # Check residency
+-    if not is_resident(cache_entry_index) and not is_empty(brick_id):
+-        handle_miss(page_id, brick_id, timestamp)
+-
+-def handle_miss(page_id, brick_id, timestamp):
+-    """
+-    Processes a cache miss.
+-    """
+-    # Record request timestamp
+-    request_buffer[page_id] = timestamp
+-    
+-    # Note: The actual stream compaction and list generation happens
+-    # at the end of the frame/timestamp processing, not per-access.
+-    # This function just marks the miss.
++    # Check residency and emptiness using standard cache state arrays
++    if not cache_resident[cache_entry_index] and not cache_empty[brick_id]:
++        request_buffer[page_id] = timestamp
+ 
+ def process_misses(timestamp):
+-    """
+-    Compiles and sends brick requests for the given timestamp.
+-    """
+     # Find all pages requested at this timestamp
+-    requested_pages = [pid for pid, ts in request_buffer.items() if ts == timestamp]
+-    
++    requested_pages = [pid for pid, ts in enumerate(request_buffer) if ts == timestamp]
+     # Limit traffic
+     if len(requested_pages) > request_limit:
+         requested_pages = requested_pages[:request_limit]
+-        
+-    # Compile brick IDs
+-    brick_ids = [get_brick_id(pid) for pid in requested_pages]
+-    
+-    # Send to CPU
+-    send_to_cpu(brick_ids)
+-    
+-    # Clear request buffer for this timestamp (or manage lifecycle)
++    # Compile brick IDs (stream compaction)
++    brick_ids = [page_to_brick_id[pid] for pid in requested_pages]
++    # Transfer list to CPU for streaming
++    host_transfer(brick_ids)
++    # Clear request buffer for this timestamp
+     for pid in requested_pages:
+-        del request_buffer[pid]
++        request_buffer[pid] = 0
+ ```
+ 
+@@ -112,10 +83,9 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** LRU update requires scanning the usage buffer and rearranging the LRU buffer ($O(N)$). Miss compilation requires stream compaction on the request buffer ($O(P)$ where $P$ is number of pages).
++*   **Time Complexity:** Not given in the sources.
+ *   **Memory Complexity:** Requires additional global buffers: Usage Buffer ($N$ integers), LRU Buffer ($N$ integers), and Request Buffer ($P$ integers) [S1, unofficial].
+ *   **Performance:** Minimizes CPU-GPU memory transfers by processing misses on the GPU using CUDA shared memory [S1, unofficial].
+-*   **Strengths:** Decouples cache residency from spatial subdivision; efficient GPU-side miss processing; scalable to exascale volumes [S1, unofficial].
++*   **Strengths:** Efficient GPU-side miss processing; scalable to exascale volumes [S1, unofficial].
+ *   **Limitations:** Requires synchronization between GPU and CPU for brick streaming; traffic control is necessary to prevent overload [S1, unofficial].
+-*   **When to use:** Large volumetric datasets where cache residency management is critical and CPU-GPU bandwidth is a bottleneck [S1, unofficial].
+ 
+ ## Background

@@ -3,215 +3,217 @@
 Also called: Direct Volume Rendering on Light Field Display, Interactive Light Field Volume Rendering, MCOP Ray Casting with Adaptive Mipmap Level Selection, MCOP projection, Multi-viewer 3D Volume Rendering
 
 ## Overview
-This method performs direct volume rendering on an interactive light field display by computing rays from projector positions through screen pixels into the volume using Multi-Camera Optical Projection (MCOP). It solves the problem of incorrect per-pixel ray parameter values caused by standard vertex attribute interpolation in non-linear light field projections. It sets itself apart from standard GPU ray casting by explicitly handling the geometric distortion of light field displays via a proxy geometry and MCOP projection, and from other light field methods by using depth-dependent mipmap selection to maintain spatial resolution consistency across the continuous viewing zone.
+This method performs interactive direct volume rendering on a multi-projector light field display by computing per-pixel rays from projector positions through screen pixels into the volume using Multi-Camera Optical Projection (MCOP) [S1]. It differs from standard GPU ray casting by replacing fixed-function vertex interpolation with a coarse proxy geometry and vertex-shader-based MCOP projection to prevent ray parameter distortion, and by employing depth-dependent mipmap level selection to match sampling rates to the display's spatial resolution [S1].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Inputs:** 3D volume data stored in a 4-component texture (RGB: precomputed gradient, A: voxel value); a 1D RGBA lookup table; camera parameters (projector position $E_w$, virtual observer distance $V_d$, virtual observer height $V_h$); display parameters (screen pixel size $S_0$, angular spread $\tan \Phi$); rendering parameters (step size $DL$, max opacity $a_{max}$, max mipmap level $L_{max}$, log2 voxel size $\log_2 V$).
-*   **Outputs:** A 2D image where each pixel corresponds to a projector view, composited with color $C'$ and opacity $\alpha'$.
+**Inputs and Outputs**
+*   **Inputs:**
+    *   Volume data $V$ stored in a 4-component 3D texture (`sampler3D`). The RGB channels contain precomputed unscaled gradients; the A channel contains the scalar voxel value [S1].
+    *   A 1D RGBA lookup table (`sampler1D`) for the transfer function [S1].
+    *   Uniforms: Projector position $E_w$ (`float3`), virtual observer distance $V_d$ (`float`), virtual observer height $V_h$ (`float`), log2 voxel size $\log_2 V$ (`float`), step size $DL$ (`float`), screen pixel size $S_0$ (`float`), angular spread factor $\tan \Phi$ (`float`), and the inverse model-view matrix `mv_inv` (`float4x4`) [S1].
+    *   Fragment coordinates $(x, y)$ representing the screen pixel position in the display reference frame [S1].
+*   **Outputs:**
+    *   Accumulated color $I$ and opacity $a$ passed to the frame buffer [S1].
 
-**Data Structures:**
-*   `ray_t`: Struct containing `org` (float3, ray origin in texture space), `dir` (float3, normalized direction), `len` (float, integration length).
-*   `fragment_out`: Struct containing `color` (float4, RGBA output).
-*   **Volume Texture:** Single 4-component texture. RGB channels store unscaled precomputed gradients; Alpha channel stores voxel values.
-*   **Lookup Table:** 1D RGBA texture for interactive transfer function modulation.
-*   **Proxy Geometry:** Coarsely tessellated bounding volume (8x8 quads), slightly enlarged to cover the display frustum.
+**Data Structures**
+The method uses two structures defined in the source code [S1]:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-**Steps:**
+```c
+struct ray_t {
+    float3 org; // Ray origin in texture coordinates
+    float3 dir; // Normalized ray direction in texture coordinates
+    float len;  // Integration length within the volume
+};
 
-1.  **Proxy Geometry Setup:** Render a proxy geometry consisting of 8x8 quads representing a slightly enlarged bounding volume of the scene. This geometry is used to compute correct ray parameters, avoiding interpolation errors inherent in standard fixed-function pipelines for MCOP projections [S1].
+struct fragment_out {
+    float4 color; // Output color (RGB) and accumulated opacity (A)
+};
+```
 
-2.  **Vertex Shader (MCOP Projection):** For each vertex of the proxy geometry, compute the projected screen position $S$ using MCOP projection equations. Pass both normalized and unnormalized projected coordinates to the fragment shader [S1].
-    *   The direction $d$ of the ray passing through screen point $S$ is computed using emitter $E$ and virtual viewer parameters $V$:
+**Algorithm Steps**
+1.  **Proxy Geometry Setup:** A coarsely tessellated proxy geometry (8x8 quads) of a slightly enlarged bounding volume is used [S1]. This avoids the incorrect per-pixel ray parameter values caused by linear interpolation of vertex attributes in the fixed-function pipeline, which fails because MCOP cannot be recast into a traditional homogeneous matrix and produces curved lines [S1].
+2.  **Ray Origin and Direction Computation:** In the vertex shader, the MCOP projection is performed. The fragment shader receives the unnormalized projected position $S$ (screen pixel position in the display reference frame) [S1]. The ray direction $d$ in world coordinates is computed using the emitter position $E$ and virtual viewer parameters $V$ [S1]:
+    $$
+    d = \left[ \frac{S_x - E_x}{E_z}, \frac{S_y - V_y}{V_z}, -1 \right]
+    $$
+    Note: The source code implementation uses specific uniform names $E_w, V_d, V_h$ to compute the direction vector components [S1].
+3.  **Coordinate Transformation:** The infinite ray defined by origin $S$ and direction $d$ is transformed into local volume coordinates (coincident with texture coordinates) by applying the inverse model-view homogeneous transform matrix `mv_inv` [S1].
+4.  **Ray Clipping and Validation:** The ray is clipped against the unit box (the volume domain in texture space) to compute the entry point and integration length [S1]. If the resulting ray length is null (or less than a small epsilon), the fragment is discarded as invalid [S1].
+5.  **Mipmap Level Selection:** The volume is stored in a mipmap pyramid. At each sampling step, the depth $z$ of the current sample is computed by transforming its texture-space position to world space using a dot product with the model-view matrix [S1]:
+    $$
+    z = | \mathbf{m}_{0,2} \cdot \mathbf{p}_{tex} |
+    $$
+    where $\mathbf{m}_{0,2}$ is the third column of the model-view matrix and $\mathbf{p}_{tex}$ is the homogeneous position of the sample [S1]. The mipmap level $l$ is chosen as the coarsest level with a sufficiently small voxel size, calculated as [S1]:
+    $$
+    l = \text{median}(0, L_{max}, \lfloor \log_2 \frac{s(z)}{v_0} \rfloor)
+    $$
+    where $s(z)$ is the variable step-size, $L_{max}$ is the maximum mipmap level, and $v_0$ is the finest voxel size [S1]. The source code approximates this with:
+    $$
+    l = \log_2(S_0 + 2 \tan \Phi \cdot z) - \log_2 V
+    $$
+6.  **Ray Marching Loop:** The ray is stepped through the volume. At each step:
+    *   The texture is sampled at the current position `uvw` using the computed mipmap level $l$ via `tex3Dlod` (or `mipmap_value`) [S1].
+    *   The scalar value is mapped to color $C_i$ and opacity $\alpha_i$ using the transfer function and shading model (implementation details omitted in source, marked as placeholder) [S1].
+    *   Front-to-back compositing updates the accumulated color $I$ and opacity $a$:
         $$
-        d = \left[ \frac{S_x - E_x}{E_z}, \frac{S_y - V_y}{V_z}, -1 \right]
+        I = I + (1.0 - a) C_i
         $$
-        where $E = (E_x, E_y, E_z)$ is the projector position and $V$ defines the virtual viewer parameters [S1].
+        $$
+        a = a + (1.0 - a) \alpha_i
+        $$
+    *   The position is stepped along the ray direction by $DL$ [S1].
+    *   The loop terminates if full opacity is reached or the volume is exited [S1].
 
-3.  **Fragment Shader (Ray Initialization):**
-    *   Receive the unnormalized projected position $S$ from the vertex stage. $S$ represents the screen pixel’s position in the display reference frame [S1].
-    *   Compute the ray origin and direction in world coordinates. Assuming the screen is at $z=0$ and the projector is at $E_w$:
-        $$
-        \text{ray\_o} = (x, y, 0, 0)
-        $$
-        $$
-        \text{ray\_d} = \left( -\frac{E_{w,x} - x}{E_{w,z}}, \frac{V_h - y}{V_d}, -1, 0 \right)
-        $$
-        where $x, y$ are screen coordinates, $E_w$ is the projector position, $V_d$ is virtual observer distance, and $V_h$ is virtual observer height [S1].
-    *   Transform the ray origin and end point from world to texture coordinates using the inverse model-view matrix ($mv_{inv}$):
-        $$
-        \text{tex\_o} = mv_{inv} \cdot \text{ray\_o}.xyz
-        $$
-        $$
-        \text{tex\_e} = mv_{inv} \cdot (\text{ray\_o} + \text{ray\_d}).xyz
-        $$
-    *   Normalize the direction and clip the ray against the unit box (texture space bounds $[0,1]^3$) to find entry ($t_{min}$) and exit ($t_{max}$) distances:
-        $$
-        \text{result.dir} = \text{normalize}(\text{tex\_e} - \text{tex\_o})
-        $$
-        $$
-        [t_{min}, t_{max}] = \text{clip\_to\_unit\_box}(\text{tex\_o}, \text{result.dir})
-        $$
-    *   Compute final ray parameters:
-        $$
-        \text{result.org} = \text{tex\_o} + \text{result.dir} \cdot t_{min}
-        $$
-        $$
-        \text{result.len} = t_{max} - t_{min}
-        $$
-    *   If $\text{result.len} < \epsilon$ (epsilon), discard the fragment as it is out of bounds [S1].
-
-4.  **Ray Marching Loop:**
-    *   Initialize compositing variables: accumulated color $I = (0,0,0)$, accumulated opacity $a = 0.0$, current texture coordinate $uvw = \text{result.org}$, step vector $\text{delta\_dir} = \text{result.dir} \cdot DL$, and total steps $N = \lfloor \text{result.len} / DL \rfloor$ [S1].
-    *   Iterate for $i$ from 0 to $N-1$:
-        *   **Mipmap Level Selection:** Compute the depth $z$ of the current sample in world space (screen-aligned) using a dot product with the model-view matrix's third row (z-axis):
-            $$
-            z = | \text{dot}(\text{glstate.matrix.modelview}[0][2], (\text{uvw.xyz}, 1.0)) |
-            $$
-        *   Calculate the mipmap level $l$ based on depth $z$, screen pixel size $S_0$, angular spread $\tan \Phi$, and voxel size $\log_2 V$:
-            $$
-            l = \log_2(S_0 + 2 \cdot \tan \Phi \cdot z) - \log_2 V
-            $$
-            *Note: The source provides this specific implementation formula. The theoretical description mentions $l = \text{median}(0, L_{max}, \lfloor \log_2(s(z)/v_0) \rfloor)$, where $s(z)$ is a variable step size. The code implementation uses the log2 formula directly [S1].*
-        *   **Sampling:** Sample the volume texture at $uvw$ using the computed mipmap level $l$ via `tex3Dlod` (or equivalent intrinsic). Let the result be $gggv$.
-        *   **Transfer Function & Shading:** Apply the transfer function (using the 1D LUT) and shading model to extract color $C_i$ and opacity $\alpha_i$ from $gggv$. (Implementation details omitted in source code, marked as `...` [S1]).
-        *   **Compositing:** Update accumulated color and opacity using front-to-back compositing:
-            $$
-            I = I + (1.0 - a) \cdot C_i
-            $$
-            $$
-            a = a + (1.0 - a) \cdot \alpha_i
-            $$
-        *   **Step:** Advance along the ray:
-            $$
-            uvw = uvw + \text{delta\_dir}
-            $$
-        *   **Termination:** If $a \ge a_{max}$, break the loop (Early Ray Termination) [S1].
-
-5.  **Output:** Write the final accumulated color $I$ and opacity $a$ to the framebuffer [S1].
-
-**Pseudocode:**
+**Pseudocode**
+The following is a self-contained fragment shader implementation based on the source [S1]. Helper functions for geometric clipping and transfer functions are assumed or implemented as standard operations.
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 # Uniforms
-Ew: float3          # Projector position
-Vd: float           # Virtual observer distance
-Vh: float           # Virtual observer height
-log2V: float        # Log2 of voxel size
-DL: float           # Step size
-S0: float           # Screen pixel size
-tanPhi: float       # Angular spread factor
-a_max: float        # Max opacity threshold
-mv_inv: float4x4    # Inverse model-view matrix
-mv_matrix: float4x4 # Model-view matrix (for z-depth calculation)
-volume_tex: sampler3D # Volume texture (RGB: gradient, A: value)
-lut_tex: sampler1D  # Lookup table texture
+# Ew: Projector position (float3)
+# Vd: Virtual observer distance (float)
+# Vh: Virtual observer height (float)
+# log2V: Log2 of voxel size (float)
+# DL: Step size (float)
+# S0: Screen pixel size (float)
+# tanPhi: Angular spread factor (float)
+# mv_inv: Inverse model-view matrix (float4x4)
+# mv_modelview: Model-view matrix (float4x4)
+# volume_tex: 3D texture sampler
+# lut_tex: 1D texture sampler
 
-struct Ray:
-    org: float3
-    dir: float3
-    len: float
+struct Ray {
+    float3 org;
+    float3 dir;
+    float len;
+};
 
-def clip_to_unit_box(origin: float3, direction: float3) -> tuple[float, float]:
-    """
-    Clips a ray against the unit box [0,1]^3.
-    Returns (t_min, t_max) of intersection.
-    If no intersection, returns (inf, -inf) or similar invalid range.
-    Implementation details omitted for brevity; standard slab method.
-    """
-    pass
+// Helper: Clip ray against unit box [0,1]^3
+// Returns {tmin, tmax} intersection distances
+function clip_to_unit_box(origin, direction):
+    tmin = 0.0
+    tmax = 1.0
+    for axis in [0, 1, 2]:
+        if direction[axis] == 0:
+            if origin[axis] < 0 or origin[axis] > 1:
+                return {0, 0} // Parallel and outside
+        else:
+            t1 = (0 - origin[axis]) / direction[axis]
+            t2 = (1 - origin[axis]) / direction[axis]
+            t_enter = min(t1, t2)
+            t_exit = max(t1, t2)
+            tmin = max(tmin, t_enter)
+            tmax = min(tmax, t_exit)
+    if tmin > tmax:
+        return {0, 0}
+    return {tmin, tmax}
 
-def ray_at_xy(x: float, y: float) -> Ray:
-    # Compute ray passing through pixel in world coords
-    ray_o = float4(x, y, 0, 0)
-    ray_d = float4(-(Ew.x - x) / Ew.z, (Vh - y) / Vd, -1, 0)
-    
-    # Transform from world to texture coordinates
-    tex_o = mul(mv_inv, ray_o).xyz
-    tex_e = mul(mv_inv, ray_o + ray_d).xyz
-    
-    # Clip ray to volume box
+// Helper: Compute mipmap level
+function compute_mipmap_level(uvw, mv_modelview):
+    // Compute depth z from screen
+    // glstate.matrix.modelview[0][2] corresponds to the z-row of the modelview matrix
+    // Using the third column (index 2) of the model-view matrix for the z-component transformation
+    z = abs(dot(mv_modelview[2], float4(uvw, 1.0)))
+    // Equation from source: l = log2(S0 + 2*tanPhi*z) - log2V
+    l = log2(S0 + 2 * tanPhi * z) - log2V
+    return l
+
+// Helper: Apply transfer function and shading
+// Returns {color, alpha}
+function apply_transfer_function_and_shading(value, gradient):
+    // Implementation details omitted in source [S1]
+    // Typically involves looking up value in lut_tex and using gradient for Phong shading
+    color = texture(lut_tex, value).rgb
+    alpha = texture(lut_tex, value).a
+    return {color, alpha}
+
+function fragment_shader(x, y):
+    // 1. Compute ray in world coordinates
+    ray_o_world = float4(x, y, 0, 0)
+    // Direction calculation based on MCOP projection parameters
+    // Source: d = [-(Ew.x-x)/Ew.z, (Vh-y)/Vd, -1]
+    ray_d_world = float4(-(Ew.x - x) / Ew.z, (Vh - y) / Vd, -1, 0)
+
+    // 2. Transform to texture coordinates
+    tex_o = mul(mv_inv, ray_o_world).xyz
+    tex_e = mul(mv_inv, ray_o_world + ray_d_world).xyz
+
+    // 3. Clip to unit box
     dir = normalize(tex_e - tex_o)
     tmin_tmax = clip_to_unit_box(tex_o, dir)
     
-    # Check validity
-    if tmin_tmax.y <= tmin_tmax.x:
-        return Ray(float3(0,0,0), float3(0,0,0), 0)
-        
-    org = tex_o + dir * tmin_tmax.x
-    length = tmin_tmax.y - tmin_tmax.x
-    return Ray(org, dir, length)
+    // 4. Validate ray length
+    if tmin_tmax.y - tmin_tmax.x < 1e-6:
+        discard // Out of bounds
 
-def fragment_shader(screen_x: float, screen_y: float) -> float4:
-    # Compute ray in tex coords
-    ray = ray_at_xy(screen_x, screen_y)
-    
-    # If ray length is less than epsilon, discard fragment
-    if ray.len < 1e-6:
-        return float4(0, 0, 0, 0)
-        
-    # Initialize compositing variables
-    delta_dir = ray.dir * DL
-    N = int(ray.len / DL)
-    uvw = ray.org
+    ray_org = tex_o + dir * tmin_tmax.x
+    ray_len = tmin_tmax.y - tmin_tmax.x
+    ray_dir = dir
+
+    // 5. Initialize compositing
+    delta_dir = ray_dir * DL
+    N = int(ray_len / DL)
+    uvw = ray_org
     I = float3(0, 0, 0)
     a = 0.0
-    
-    for i in range(N):
-        # Find distance from screen (z coordinate in world space)
-        # Using the third row of the model-view matrix
-        z = abs(dot(mv_matrix[2], float4(uvw.xyz, 1.0)))
-        
-        # Compute mipmap level
-        # Note: Source uses log2(S0 + 2*tanPhi*z) - log2V
-        mipmap_l = log2(S0 + 2 * tanPhi * z) - log2V
-        
-        # Clamp mipmap level to valid range [0, L_max]
-        # L_max is not explicitly passed as uniform in code snippet but implied by texture setup
-        # Assuming L_max is available or texture handles clamping
-        mipmap_l = clamp(mipmap_l, 0.0, float(L_max))
-        
-        # Sample texture at current position with computed mipmap level
-        # gggv contains gradient (RGB) and value (A)
-        gggv = sample_3d_lod(volume_tex, uvw, mipmap_l)
-        
-        # Apply transfer function and shading to get C_i and a_i
-        # Implementation details omitted in source
-        C_i = apply_transfer_function_and_shading(gggv)
-        alpha_i = C_i.a # Or extracted from gggv.a depending on TF implementation
-        
-        # Accumulate color and opacity using front-to-back compositing
-        I = I + (1.0 - a) * C_i.rgb
-        a = a + (1.0 - a) * alpha_i
-        
-        # Step along ray
-        uvw += delta_dir
-        
-        # Early Ray Termination
+    a_max = 0.95 // Typical early termination threshold [G]
+
+    // 6. Ray marching loop
+    for i from 0 to N-1:
         if a >= a_max:
             break
-            
-    return float4(I, a)
+        
+        // Compute mipmap level based on depth
+        l = compute_mipmap_level(uvw, mv_modelview)
+        
+        // Sample volume texture
+        // Source uses tex3Dlod or mipmap_value(uvw, l)
+        // Volume layout: RGB=gradient, A=voxel value
+        tex_sample = texture(volume_tex, uvw, l)
+        voxel_value = tex_sample.a
+        gradient = tex_sample.rgb
+        
+        // Apply transfer function and shading
+        // Note: Source code leaves C_i and a_i undefined
+        C_i, alpha_i = apply_transfer_function_and_shading(voxel_value, gradient)
+        
+        // Front-to-back compositing
+        I = I + (1.0 - a) * C_i
+        a = a + (1.0 - a) * alpha_i
+        
+        // Step along ray
+        uvw += delta_dir
+
+    return {color: float4(I, a)}
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Vertex Interpolation Error:** Standard vertex attribute interpolation fails for MCOP projections because the projection cannot be recast into a traditional homogeneous matrix, and long straight lines appear curved. Using a coarse proxy geometry (8x8 quads) and computing projections in the vertex shader mitigates this [S1].
-*   **Tile Misalignment:** The display projectors are updated in batches of 16. If objects move with a slow refresh rate, misalignment between tiles becomes visible [S1].
-*   **Out of Bounds:** If the clipped ray length is null or less than epsilon, the fragment is discarded [S1].
-*   **Precision:** Mipmap level calculation relies on accurate depth estimation. The use of a single dot product for z-coordinate transformation is an optimization but assumes specific matrix layouts [S1].
+**Edge Cases and Pitfalls**
+*   **Vertex Interpolation Error:** Standard fixed-function pipeline interpolation produces incorrect per-pixel ray parameters for MCOP. This is mitigated by the 8x8 proxy geometry and vertex-shader projection [S1].
+*   **Tile Misalignment:** If the object moves too slowly relative to the display refresh rate, misalignment artifacts appear between tiles because the 96 projectors are updated in batches of 16 [S1].
+*   **Ray Length Validation:** If the clipped ray length is less than epsilon, the fragment is discarded to avoid processing out-of-bounds rays [S1].
+*   **Sampling Rate:** To maintain interactive frame rates, the sampling rate is often lowered (reduced pixel count, doubled step size) during interaction, which may reduce visual fidelity [S1].
+
+## Subtopics
+
+### MCOP Projection
+A projection model for light field displays that provides a fully continuous perceived image, unlike discrete multiview technologies that cause abrupt view changes [S1].
+
+### Adaptive Mipmap Sampling
+A technique where the mipmap level is selected based on the depth $z$ from the screen and the angular spread $\tan \Phi$, ensuring the voxel size matches the spatial resolution at that depth [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of samples per ray and $P$ is the number of pixels (projectors). $N$ depends on ray length and step size $DL$.
-*   **Memory Complexity:** $O(V)$ for the volume texture, where $V$ is the number of voxels, plus $O(L)$ for the mipmap pyramid.
-*   **Performance:** The method requires millions of rays to be propagated for hundreds of steps at full resolution (1 ray/pixel, 1 sample/voxel), which limits interactive frame rates. Performance is improved by lowering the sampling rate (reducing pixel count to 2.5mm precision and doubling step size) during interaction [S1].
-*   **Strengths:** Provides a fully continuous perceived image for multiple viewers, unlike discrete multiview technologies. Correctly handles parallax and accommodation cues.
-*   **Limitations:** Single GPU performance bottleneck at full resolution. Tile misalignment artifacts can occur with slow refresh rates and moving objects.
+*   **Time Complexity:** The cost is proportional to the number of rays (pixels) times the number of samples per ray. The number of samples is determined by the ray length divided by the step size $DL$ [S1].
+*   **Memory Complexity:** Requires storage for the 3D volume texture (4 components) and the 1D lookup table [S1].
+*   **Performance:** The main limiting factor is the single GPU volume renderer performance, as millions of rays may need to be propagated for hundreds of steps at full resolution [S1]. Interactive frame rates are achieved by lowering the sampling rate (reducing pixel count and increasing step size) [S1].
+*   **Strengths:** Provides continuous parallax and multi-user capability; correct specular highlights follow the viewer's viewpoint; good registration between object space and physical space [S1].
+*   **Limitations:** Performance is constrained by GPU throughput; tile misalignment artifacts can occur with slow refresh rates; requires careful tuning of sampling rates for interactivity [S1].
+*   **When to use:** Interactive visualization on multi-projector light field displays where continuous viewing zones and multi-user interaction are required [S1].
+*   **When not to use:** When high-resolution static rendering is required without interactivity, or when hardware does not support the required texture sampling operations (e.g., `tex3Dlod`) [S1].
 
 ## Background
-This method was introduced by Agus et al. in 2008 for rendering on an interactive light field display. It addresses the limitations of traditional multiview technologies that force users into fixed positions due to abrupt view-image changes. The MCOP approach allows for continuous viewing zones. The implementation uses a single GPU to accelerate the ray casting, leveraging mipmap-based sampling for adaptive resolution.
+The method was introduced by Agus et al. in 2008 [S1]. It builds upon the principles of direct volume ray casting and GPU acceleration, specifically addressing the challenges of rendering on interactive light field displays. The work demonstrates the rendering of datasets such as the Chameleon, Visible Human head, and rotational angiography using shaded volume rendering and maximum intensity projection [S1]. The approach contrasts with earlier multiview technologies that restricted users to fixed positions due to discrete viewing zones [S1].
 
 ## Sources
-
 [S1] GPU Accelerated Direct Volume Rendering on an Interactive Light Field Display, https://doi.org/10.1111/j.1467-8659.2008.01120.x, fetched 2026-10-29

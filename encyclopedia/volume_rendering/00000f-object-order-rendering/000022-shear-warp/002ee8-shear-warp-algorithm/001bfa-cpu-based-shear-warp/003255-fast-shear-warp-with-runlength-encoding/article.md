@@ -1,151 +1,188 @@
 # Fast Shear-Warp with Runlength Encoding
 
-Also called: CompositeIntermediateLinearRLE, CompositeIntermediateNearestRLE, Fast shear-warp with RLE, Lacroute and Levoy method, Shear-Warp, Volpack
+Also called: CompositeIntermediateLinearRLE, CompositeIntermediateNearestRLE, Fast shear-warp with RLE, Lacroute and Levoy method, Parallel Projection Shear-Warp Rendering, Shear-warp factorization for parallel projection, Volpack
 
 ## Overview
-Fast Shear-Warp with Runlength Encoding is a high-performance volume rendering method that achieves sub-second rendering times for moderately-sized datasets by skipping transparent voxels using runlength-encoded (RLE) data structures [S1, S2]. It rivals the image quality of raycasting and splatting at unity magnification but is distinguished by its reliance on pre-classified opacity runs and a fixed view-dependent sampling interval that precludes adaptive supersampling [S1].
+Fast Shear-Warp with Runlength Encoding is a scanline-based volume rendering algorithm optimized for parallel projections that uses run-length encoding (RLE) of voxel scanlines and intermediate image pixels to skip transparent voxels and occluded pixels, assuming a fixed opacity transfer function [S1]. It builds on [CPU-based Shear-Warp](1161-cpu-based-shear-warp.md) by explicitly leveraging the coherence of both the volume data and the resulting image to achieve high performance, rivaling raycasting and splatting at unity magnification while maintaining sub-second rendering times for moderately-sized datasets [S2]. Unlike general ray-casting, it achieves early ray termination via opaque pixel links with low overhead, as offsets are updated only when a pixel first becomes opaque [S1].
 
 ## How it works
-The method renders a volume by shearing the data such that rays are perpendicular to volume slices, traversing RLE-encoded runs to skip empty space, and warping the result to screen space [S1].
+The algorithm relies on the shear-warp factorization, which decomposes the viewing transformation into three steps: shearing the volume, projecting the sheared volume, and warping the resulting image [S1]. This method assumes parallel projection and a fixed opacity transfer function [S1].
 
-**Inputs and Outputs**
-*   **Input:** A 3D volume dataset $V$ of dimensions $D_x \times D_y \times D_z$, a view matrix defining the camera orientation, and a scalar opacity transfer function $T(s)$ mapping scalar values $s$ to opacity $\alpha \in [0, 1]$ [S1, S2].
-*   **Output:** A 2D screen image (framebuffer) with color and opacity values [S1].
+### Inputs and Outputs
+*   **Input:** A 3D volume dataset $V$ with dimensions $N_x \times N_y \times N_z$. A fixed opacity transfer function $T(v)$ that maps voxel values to opacity $\alpha \in [0, 1]$. A viewing direction defined by the shear-warp factorization parameters.
+*   **Output:** A 2D intermediate image $I_{int}$ (composited in volume-parallel space) and a final screen image $I_{screen}$ (warped to screen space).
 
-**Data Structures**
-The core acceleration structure is the RLE-encoded volume. For each of the three principal axes (X, Y, Z), a separate encoded volume is constructed [S1].
-*   **RLE Volume Layout:** The volume is traversed along the viewing direction. Voxels are classified using $T(s)$. Consecutive voxels with the same classification (transparent or opaque) are grouped into runs.
-*   **Run Entry:** Each run is stored as a tuple $(start\_index, length, opacity\_class)$, where $start\_index$ is the linear index in the volume array, $length$ is the number of voxels, and $opacity\_class$ indicates if the run is transparent (skip) or opaque (process) [S1, S2].
-*   **Note:** The RLE structure must be recomputed whenever the voxel classification function (transfer function) changes [S2].
+### Data Structures
 
-**Parameters**
-*   **Magnification:** Rendering quality is optimal when object magnification is approximately unity [S1].
-*   **Interpolation:** Bilinear interpolation is used to obtain sample values within traversed volume slices [S1].
+#### Voxel RLE
+To skip transparent voxels, the volume is preprocessed into a Run-Length Encoded (RLE) structure. This structure is view-independent and must be constructed for each of the three principal viewing directions (X, Y, Z axes) to avoid transposing the volume during rendering [S1, S2].
 
-**Algorithm Steps**
-1.  **Pre-processing:** Construct three separate RLE-encoded volumes, one for each principal axis (X, Y, Z). This involves classifying every voxel using the current transfer function and grouping consecutive voxels with identical opacity status into runs [S1].
-2.  **Shear:** Select the encoded volume corresponding to the principal axis most aligned with the view direction. Apply a shear transformation to the volume data such that the viewing rays become perpendicular to the volume slices [S1].
-3.  **Cast Rays:** Traverse the sheared volume along the viewing rays.
-    *   Use the RLE structure to skip transparent runs.
-    *   For opaque runs, perform bilinear interpolation within the sheared volume slices to obtain sample values [S1].
-    *   The distance between samples (DVRI, $\Delta s$) is view-dependent:
-        *   $\Delta s = 1.0$ for axis-aligned views.
-        *   $\Delta s = \sqrt{2} \approx 1.41$ for edge-on views.
-        *   $\Delta s = \sqrt{3} \approx 1.73$ for corner-on views [S1].
-    *   Note: $\Delta s$ cannot be varied to allow for supersampling along the ray [S1].
-4.  **Warp:** Transform the volume-parallel baseplane image (the image formed by the sheared slices) into the final screen image using a warping transformation [S1].
+*   **Layout:** The RLE consists of a list of runs. Each run is defined by:
+    *   `start_index`: The starting index of the run in the scanline.
+    *   `length`: The number of voxels in the run.
+    *   `type`: Enum indicating whether the run is `TRANSPARENT` or `NON_TRANSPARENT`.
+*   **Definition:** A voxel is classified as `TRANSPARENT` if its opacity $\alpha < \alpha_{thresh}$, where $\alpha_{thresh}$ is a user-specified threshold [S1]. Otherwise, it is `NON_TRANSPARENT` [S1].
+*   **Storage:** Transparent runs are stored to allow skipping, but the actual voxel values are not stored for these runs to save space [S1].
 
-**Pseudocode**
+#### Image RLE
+To skip occluded pixels, an RLE is maintained for the intermediate image $I_{int}$ during rendering.
+
+*   **Layout:** For each pixel in the intermediate image scanline, if the pixel is opaque, an offset is stored pointing to the next non-opaque pixel in the same scanline [S1].
+*   **Definition:** An intermediate image pixel is defined as `OPAQUE` if its accumulated opacity exceeds a user-specified threshold [S1].
+*   **Computation:** This structure is computed on-the-fly during rendering [S1]. The cost is low because a pixel's offset is updated only when the pixel *first* becomes opaque [S1].
+
+### Parameters
+*   **Opacity Threshold ($\alpha_{thresh}$):** A user-specified threshold defining transparent vs. non-transparent voxel runs in the volume RLE and opaque vs. non-opaque pixel runs in the image RLE [S1].
+*   **Magnification:** Rendering quality is optimal when object magnification is about unity [S2].
+
+### Steps
+
+1.  **Preprocessing (View-Independent):**
+    *   Construct three separate RLE-encoded volumes, one for each principal viewing direction (X, Y, Z) [S1, S2].
+    *   Classification is based on the fixed opacity transfer function [S2].
+    *   *Note:* If the classification function changes, the RLE must be recomputed [S3].
+
+2.  **Select Encoding:**
+    *   During rendering, determine the permutation matrix $P$ from the shear-warp factorization of the current view [S1].
+    *   Select the corresponding precomputed RLE encoding based on $P$ [S1].
+
+3.  **Shear:**
+    *   Shear the selected encoded volume such that the viewing rays are perpendicular to the volume slices [S2].
+    *   This transformation aligns voxel scanlines with pixel scanlines in the intermediate image (Property 1 of shear-warp factorization) [S1].
+    *   Since the transformation applied to each slice is only a translation (no scaling or rotation), the resampling weights are identical for every voxel in a slice [S1].
+
+4.  **Traverse and Composit (Scanline Loop):**
+    *   Traverse the volume and the intermediate image simultaneously in scanline order [S1].
+    *   Use the Voxel RLE to skip runs of transparent voxels [S1].
+    *   Use the Image RLE to skip runs of opaque (occluded) pixels [S1].
+    *   For non-skipped voxel runs, execute a tightly-coded loop performing shading, resampling, and compositing [S1].
+
+    **Resampling and Shading Details:**
+    *   Use bilinear interpolation with a gather-type convolution (backward projection) [S1].
+    *   Two voxel scanlines are traversed simultaneously to compute a single intermediate image scanline [S1].
+    *   Sample values are obtained via bilinear interpolation within the traversed volume slices [S2].
+    *   Shading is applied using a lookup-table (LUT) based system [S1].
+    *   Voxel opacity is corrected for the current viewing angle using a LUT, as the apparent thickness of a slice depends on the viewing angle [S1].
+
+5.  **Warp:**
+    *   After compositing, warp the intermediate image $I_{int}$ into the final screen image $I_{screen}$ [S1].
+    *   Use a general-purpose affine image warper with a bilinear filter [S1].
+
+### Pseudocode
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_fast_shear_warp_rle(volume, view_matrix, transfer_function):
+def fast_shear_warp_rle(volume, view_matrix, alpha_thresh):
     """
     Renders a volume using Fast Shear-Warp with RLE.
-    volume: 3D array of scalar values.
-    view_matrix: 4x4 matrix defining camera orientation.
-    transfer_function: function mapping scalar -> (color, opacity).
+    Assumes preprocessing has been done for the relevant principal axis.
     """
-    # 1. Pre-processing: Build RLE structures for all 3 axes
-    # This step is expensive and must be repeated if transfer_function changes.
-    rle_x = build_rle(volume, axis='x', transfer_function)
-    rle_y = build_rle(volume, axis='y', transfer_function)
-    rle_z = build_rle(volume, axis='z', transfer_function)
-
-    # 2. Shear: Determine best axis and shear the volume
-    # Select axis with normal closest to view direction
-    best_axis = select_best_axis(view_matrix, [rle_x, rle_y, rle_z])
-    sheared_volume = shear_volume(volume, best_axis)
-    rle = get_rle_for_axis(best_axis, [rle_x, rle_y, rle_z])
-
-    # 3. Cast Rays: Traverse sheared volume and composite
-    # Initialize framebuffer
-    framebuffer = initialize_framebuffer()
-
-    # Determine sample spacing based on view angle
-    # DVRI varies from 1.0 (axis-aligned) to 1.73 (corner-on)
-    dvri = calculate_dvri(view_matrix, best_axis)
-
-    for screen_pixel in framebuffer:
-        # Map screen pixel to ray in sheared volume space
-        ray_origin, ray_direction = screen_to_ray(screen_pixel, view_matrix, best_axis)
-        
-        # Traverse RLE runs along the ray
-        current_depth = 0
-        accumulated_color = (0, 0, 0)
-        accumulated_opacity = 0
-        
-        # Iterate through RLE runs
-        for run in rle:
-            if run.is_transparent:
-                continue # Skip transparent runs
+    # 1. Select Precomputed RLE based on view matrix permutation P
+    # P determines which principal axis (X, Y, or Z) the volume is aligned with.
+    # For this example, assume we are rendering along the Z-axis (standard case).
+    # The volume is already sheared such that rays are perpendicular to XY slices.
+    
+    # Get the RLE structure for the current view direction
+    # This structure contains runs of (start, length, type) for each scanline
+    voxel_rle = get_precomputed_rle(view_matrix)
+    
+    # Initialize intermediate image and its RLE (offsets)
+    # I_int is a 2D array of (color, opacity)
+    width, height = get_screen_dimensions()
+    I_int = create_empty_image(width, height)
+    
+    # Image RLE stores the offset to the next non-opaque pixel for opaque pixels
+    # Initialize offsets to None or 0 (indicating no skip needed yet)
+    image_offsets = create_empty_offsets(width, height)
+    
+    # 2. Traverse volume and image simultaneously
+    # Iterate through each scanline of the intermediate image
+    for y in range(height):
+        for x in range(width):
+            # Determine the corresponding voxel scanline in the sheared volume
+            # Due to shearing, the voxel scanline for (x, y) might start at a different Z
+            # or require interpolation from two Z-slices.
             
-            # Calculate intersection of ray with this run
-            run_start, run_length = run.start_index, run.length
+            # Get the voxel run for this (x, y) position from Voxel RLE
+            run = voxel_rle.get_run(x, y)
             
-            # Sample the volume within the run using bilinear interpolation
-            # Note: Interpolation occurs in sheared slices
-            sample_value = interpolate_bilinear(sheared_volume, ray_origin, ray_direction, dvri)
+            if run.type == TRANSPARENT:
+                # Skip this run entirely
+                continue
             
-            # Apply transfer function
-            color, opacity = transfer_function(sample_value)
+            # If the current image pixel is already opaque, check the offset
+            if is_pixel_opaque(I_int[x, y], alpha_thresh):
+                offset = image_offsets[x, y]
+                if offset is not None:
+                    # Skip to the next non-opaque pixel in this scanline
+                    # Note: This optimization skips pixels that are fully occluded
+                    # by previous voxels. The loop structure needs to handle
+                    # jumping x indices.
+                    x += offset
+                    continue
             
-            # Alpha compositing (front-to-back)
-            # C_out = C_in + C_obj * alpha_obj * (1 - alpha_in)
-            # alpha_out = alpha_in + alpha_obj * (1 - alpha_in)
-            accumulated_color = accumulated_color + color * opacity * (1 - accumulated_opacity)
-            accumulated_opacity = accumulated_opacity + opacity * (1 - accumulated_opacity)
+            # 3. Resampling and Compositing
+            # Since rays are perpendicular to slices, we sample from the current slice
+            # and potentially the adjacent slice for bilinear interpolation in Z.
             
-            if accumulated_opacity >= 1.0:
-                break # Fully opaque, stop processing
+            # Get sample values via bilinear interpolation
+            # Properties 2 and 3 allow simplified resampling: weights are constant per slice
+            # Gather-type convolution: traverse two voxel scanlines to compute one image scanline
+            sample_value = bilinear_interpolate_volume(volume, x, y, view_matrix)
+            
+            # Apply shading using LUT
+            shaded_color = lookup_table_shading(sample_value, view_matrix)
+            
+            # Get voxel opacity (corrected for viewing angle via LUT)
+            voxel_opacity = lookup_table_opacity_correction(sample_value, view_matrix)
+            
+            # Composite into intermediate image
+            # Standard front-to-back alpha compositing
+            c_new, a_new = composite_pixel(I_int[x, y], shaded_color, voxel_opacity)
+            I_int[x, y] = (c_new, a_new)
+            
+            # Update Image RLE if pixel just became opaque
+            if is_pixel_opaque(I_int[x, y], alpha_thresh) and not was_pixel_opaque(I_int[x, y], alpha_thresh):
+                # Compute offset to next non-opaque pixel
+                # This is a forward scan to find the next non-opaque pixel
+                next_x = find_next_non_opaque_pixel(I_int, x, y, width)
+                image_offsets[x, y] = next_x - x if next_x else 0
 
-        framebuffer[screen_pixel] = accumulated_color
-
-    # 4. Warp: Transform baseplane image to screen image
-    # The warping step maps the sheared coordinate system to the screen
-    final_image = warp_image(framebuffer, view_matrix, best_axis)
+    # 4. Warp to Screen
+    # Transform the intermediate image to the final screen coordinates
+    final_image = affine_warp(I_int, view_matrix, filter='bilinear')
+    
     return final_image
 
-def build_rle(volume, axis, transfer_function):
+def find_next_non_opaque_pixel(I_int, start_x, y, width):
     """
-    Constructs RLE structure for a specific axis.
+    Helper to find the next non-opaque pixel in the same scanline.
+    Used to populate Image RLE offsets.
     """
-    runs = []
-    # Traverse volume along the specified axis
-    # Group consecutive voxels with same opacity classification
-    current_run_start = 0
-    current_opacity_class = None
-    
-    for voxel in volume_traversed_along_axis(volume, axis):
-        _, opacity = transfer_function(voxel)
-        opacity_class = 'opaque' if opacity > 0 else 'transparent'
-        
-        if opacity_class != current_opacity_class:
-            if current_opacity_class is not None:
-                runs.append(Run(current_run_start, current_index - current_run_start, current_opacity_class))
-            current_run_start = current_index
-            current_opacity_class = opacity_class
-            
-    # Append final run
-    runs.append(Run(current_run_start, current_index - current_run_start, current_opacity_class))
-    return runs
+    for x in range(start_x + 1, width):
+        if not is_pixel_opaque(I_int[x, y], alpha_thresh):
+            return x
+    return None # Or width, indicating end of scanline
 ```
 
+### Edge Cases and Pitfalls
+*   **Opaque Region Coherence:** The effectiveness of opaque pixel skipping depends on the coherence of opaque regions. If opaque regions are not coherent (e.g., scattered small objects), skipping is less effective [S1].
+*   **Off-Axis View Quality:** Image quality degrades at off-axis views because the DVRI (Digital Volume Ray Interval) distance varies from 1.0 (axis-aligned) to 1.73 (corner-on), potentially violating the Nyquist theorem [S2]. This can be mitigated by using a volume with extra interpolated slices (Volpack's standard solution) [S2].
+*   **Transfer Function Changes:** The algorithm requires an opacity-encoded volume, making interactive transfer function variation challenging because the RLE must be recomputed whenever the voxel classification function changes [S2, S3].
+*   **Supersampling:** The DVRI distance cannot be varied to allow for supersampling along the ray [S2].
+
 ## Operating characteristics
-*   **Time Complexity:** Rendering time is sub-second for moderately-sized datasets [S1]. The cost is dominated by the pre-processing step (RLE construction) which is view-independent but transfer-function-dependent, and the ray traversal which skips transparent regions [S1, S2].
-*   **Memory Complexity:** Requires storing three RLE structures (one per axis) plus the original volume [S1]. The RLE structures have a low memory footprint compared to octrees but require recomputation on classification changes [S2].
-*   **Performance:** Quality rivals raycasting and splatting at unity magnification [S1].
-*   **Strengths:** High performance for static transfer functions; effective skipping of empty space [S1, S2].
-*   **Limitations:**
-    *   Image quality degrades at off-axis views due to the fixed DVRI potentially violating the Nyquist theorem (DVRI ranges from 1.0 to 1.73) [S1].
-    *   Supersampling along the ray is not supported because DVRI is view-dependent and fixed per view [S1].
-    *   Interactive transfer function variation is challenging because the RLE structure must be fully recomputed when the classification function changes [S1, S2].
-    *   Requires a framebuffer color/RGBA resolution of at least 16 bits for good quality [S1].
-*   **Mitigation:** Image quality at off-axis views can be improved by using a volume with extra interpolated slices (Volpack's standard solution) [S1].
+*   **Time Complexity:** The algorithm is efficient due to skipping transparent voxels and occluded pixels. The cost of computing pixel offsets is low because an offset is updated only when a pixel first becomes opaque [S1].
+*   **Memory Complexity:** Requires storage for three RLE-encoded volumes (one per principal axis) and the intermediate image RLE. Transparent voxels are not stored, so the encoded volume is typically much smaller than the original volume [S1].
+*   **Performance:** Achieves sub-second rendering times for moderately-sized datasets [S2]. Quality rivals raycasting and splatting at unity magnification [S2].
+*   **Strengths:** High performance for parallel projections; low overhead for early ray termination via image coherence; simple, high-quality resampling due to shear-warp factorization properties [S1].
+*   **Limitations:** Fixed opacity transfer function required; quality degradation at off-axis views; challenging to support interactive transfer function changes [S2, S3].
 
 ## Background
-The method is based on the Shear-Warp algorithm, originally proposed by Lacroute and Levoy [S1, S2]. It is implemented in the Volpack distribution from Stanford [S1]. The RLE acceleration variant is implemented in VTK as `CompositeIntermediateNearestRLE` and `CompositeIntermediateLinearRLE` [S2].
+The method was developed by Lacroute and Levoy [S1]. It is part of the "Volpack" distribution from Stanford [S2]. The algorithm is implemented in VTK as `CompositeIntermediateNearestRLE` and `CompositeIntermediateLinearRLE` [S3].
 
 ## Sources
-[S1] A Practical Evaluation of Popular Volume Rendering ..., https://courses.cs.duke.edu/spring03/cps296.8/papers/PracticalEvaluationofVolumeRenderingAlgorithms.pdf, fetched 2026-10-29
-[S2] Shear Warp, https://www.cg.tuwien.ac.at/courses/Visualisierung/2002-2003/Beispiel2/2-BrucknerSt-SeemannR/index2.htm, fetched 2026-10-29
+[S1] Fast Volume Rendering Using a Shear-warp Factorization of The Viewing Transformation, http://i.stanford.edu/pub/cstr/reports/csl/tr/95/678/CSL-TR-95-678.pdf, fetched 2026-11-04
+[S2] A Practical Evaluation of Popular Volume Rendering Algorithms, https://courses.cs.duke.edu/spring03/cps296.8/papers/PracticalEvaluationofVolumeRenderingAlgorithms.pdf, fetched 2026-10-29
+[S3] Shear Warp, https://www.cg.tuwien.ac.at/courses/Visualisierung/2002-2003/Beispiel2/2-BrucknerSt-SeemannR/index2.htm, fetched 2026-10-29

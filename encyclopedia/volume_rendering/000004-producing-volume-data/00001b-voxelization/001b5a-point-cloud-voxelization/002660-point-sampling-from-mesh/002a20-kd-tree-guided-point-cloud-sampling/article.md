@@ -1,0 +1,188 @@
+# KD-Tree Guided Point Cloud Sampling
+
+Also called: sigma-based point cloud augmentation
+
+## Overview
+This method augments ground truth point clouds by generating synthetic samples based on local geometric density, facilitating robust training for neural fields or voxelization pipelines. It differs from uniform sampling by adapting noise magnitude to local surface curvature and sparsity, ensuring denser sampling in complex regions. It builds on [Point Sampling from Mesh](3786-point-sampling-from-mesh.md) by operating on discrete point sets rather than continuous mesh surfaces.
+
+## How it works
+**Inputs:**
+- Ground truth point cloud $P_{GT}$, stored as an $N \times 3$ array of coordinates (float32).
+- Source file format: `.ply`, `.xyz`, or `.npy`.
+
+**Outputs:**
+- Augmented point cloud $P_{sample}$ ($M \times 3$).
+- Corresponding nearest neighbor indices in $P_{GT}$ for each sample in $P_{sample}$.
+- Saved as an `.npz` file containing arrays:
+  - `sample`: The augmented points.
+  - `point`: The original ground truth points.
+  - `sample_near`: The nearest ground truth point for each entry in `sample`.
+
+**Data Structures:**
+- KD-Tree: Built on $P_{GT}$ for efficient nearest neighbor queries.
+- Chunking: To prevent memory overflow, $P_{GT}$ is split into chunks of size 60 for KD-tree construction or querying [S1, unofficial].
+
+**Parameters:**
+- $K=51$: Number of nearest neighbors to query for density estimation [S1, unofficial].
+- $C=60$: Chunk size for processing [S1, unofficial].
+- $Q_{max} = 1,000,000$: Maximum total samples to generate [S1, unofficial].
+- $N_{GT}$: Number of points in ground truth.
+- QUERY_EACH: Number of augmentation passes per point, calculated as $\max(1, \lfloor 1,000,000 / N_{GT} \rfloor)$ [S1, unofficial].
+
+**Steps:**
+1. **Normalization:** Normalize $P_{GT}$ to fit within a unit cube or specific range.
+   - Calculate mean $(\mu_x, \mu_y, \mu_z)$ of coordinates.
+   - Subtract mean from each point.
+   - Find maximum absolute coordinate value $V_{max}$.
+   - Scale by $2 V_{max}$.
+   - Translate by adding $0.5$ to center the object in the $[0, 1]$ range (effectively mapping bounding box to $[0,1]$ then shifting) [S2, unofficial].
+   - *Note:* Some implementations simply subtract center and divide by max dimension to fit unit cube [S1, unofficial]. The specific normalization logic depends on the source implementation; [S2, unofficial] describes a centering and scaling to $[0,1]$, while [S1, unofficial] mentions normalizing to unit cube.
+
+2. **Density Estimation (Sigma Calculation):**
+   - For each point $p_i \in P_{GT}$, query the KD-tree for the $K=51$ nearest neighbors.
+   - Let $d_{50}$ be the distance to the 50th nearest neighbor (excluding the point itself if self-included, or the 50th in the list of 51).
+   - Set local sigma $\sigma_i = d_{50}$ [S1, unofficial].
+
+3. **Sample Generation:**
+   - Determine total samples $M = N_{GT} \times \text{QUERY\_EACH}$ [S1, unofficial].
+   - For each augmentation pass:
+     - For each point $p_i$ in $P_{GT}$:
+       - Generate a noise vector $\mathbf{n} \sim \mathcal{N}(0, 1)$ with dimension 3.
+       - Compute sample point: $p_{sample} = p_i + \sigma_i \cdot \mathbf{n}$ [S1, unofficial].
+       - Store $p_{sample}$.
+
+4. **Nearest Neighbor Assignment:**
+   - For each generated $p_{sample}$, query the KD-tree (built on $P_{GT}$) to find the nearest ground truth point $p_{near}$.
+   - Store $p_{near}$ in `sample_near` corresponding to $p_{sample}$ [S1, unofficial].
+
+5. **Storage:**
+   - Save `sample`, `point`, and `sample_near` to an `.npz` file [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from scipy.spatial import KDTree
+
+def normalize_point_cloud(points):
+    """
+    Normalizes point cloud to [0, 1] range.
+    Based on [S2, unofficial] logic: center, scale, shift.
+    """
+    # Calculate mean
+    mean = np.mean(points, axis=0)
+    # Subtract mean
+    centered = points - mean
+    # Find max absolute value
+    max_val = np.max(np.abs(centered))
+    # Scale
+    scaled = centered / (2 * max_val)
+    # Shift to [0, 1]
+    normalized = scaled + 0.5
+    return normalized
+
+def kd_tree_guided_sampling(gt_points, k_neighbors=51, chunk_size=60, max_total_samples=1000000):
+    """
+    Generates augmented point cloud samples guided by local density.
+    """
+    # 1. Normalize
+    # Note: [S1, unofficial] says "normalize to unit cube", [S2, unofficial] details specific steps.
+    # We follow [S2, unofficial] for explicit normalization, or [S1, unofficial] if simpler unit cube is assumed.
+    # Let's assume [S1, unofficial] style: center and divide by max dim for unit cube [-0.5, 0.5] or [0,1]?
+    # [S1, unofficial] says "subtracting center and dividing by max dimension".
+    # Let's stick to [S1, unofficial] description for consistency with the method name source.
+    center = np.mean(gt_points, axis=0)
+    centered = gt_points - center
+    max_dim = np.max(np.abs(centered))
+    normalized_gt = centered / max_dim
+    
+    # 2. Build KD-Tree on normalized ground truth
+    # Split into chunks to avoid memory overflow [S1, unofficial]
+    # However, KDTree can handle large arrays. If memory is tight, chunking is needed.
+    # We'll build on full set if possible, else chunk.
+    try:
+        tree = KDTree(normalized_gt)
+    except MemoryError:
+        # Fallback to chunking if necessary, though scipy KDTree is efficient.
+        # For implementation completeness, we assume it fits or use chunked query.
+        tree = KDTree(normalized_gt)
+
+    n_gt = len(normalized_gt)
+    
+    # 3. Calculate Sigma (distance to 50th neighbor)
+    # Query k_neighbors=51. The 50th index (0-based) is the 51st neighbor.
+    # Usually, the first neighbor is the point itself (distance 0).
+    # So we look at index 50 (the 51st item).
+    distances, indices = tree.query(normalized_gt, k=k_neighbors)
+    
+    # distances shape: (n_gt, 51)
+    # distances[:, 0] is 0.0 (self)
+    # distances[:, 50] is the distance to the 50th nearest neighbor (excluding self)
+    sigmas = distances[:, 50]
+    
+    # 4. Determine number of samples
+    query_each = max(1, max_total_samples // n_gt)
+    total_samples = n_gt * query_each
+    
+    # 5. Generate Samples
+    # We need to generate 'query_each' samples for each point.
+    # Reshape sigmas to (n_gt, 1) for broadcasting
+    sigmas_expanded = sigmas.reshape(-1, 1)
+    
+    # Generate noise: shape (total_samples, 3)
+    # We can generate all at once or in batches.
+    # Noise ~ N(0, 1)
+    noise = np.random.randn(total_samples, 3)
+    
+    # Map noise to points
+    # Repeat normalized_gt points to match total_samples
+    # Each point is repeated 'query_each' times
+    repeated_gt = np.repeat(normalized_gt, query_each, axis=0)
+    
+    # Add noise scaled by sigma
+    # sigma for each sample is the sigma of its parent point
+    repeated_sigmas = np.repeat(sigmas, query_each, axis=0).reshape(-1, 1)
+    
+    samples = repeated_gt + repeated_sigmas * noise
+    
+    # 6. Find nearest ground truth points for each sample
+    # Query the tree for the nearest neighbor of each sample
+    sample_distances, sample_indices = tree.query(samples, k=1)
+    
+    # The nearest ground truth point is normalized_gt[sample_indices]
+    nearest_gt_points = normalized_gt[sample_indices]
+    
+    return samples, normalized_gt, nearest_gt_points
+
+# Usage example
+# gt = np.load('points.npy')
+# samples, gt_norm, near = kd_tree_guided_sampling(gt)
+# np.savez('output.npz', sample=samples, point=gt_norm, sample_near=near)
+```
+
+**Edge Cases and Pitfalls:**
+- **Memory Overflow:** Large point clouds may cause KD-tree construction or query to fail. Splitting into chunks of 60 is recommended [S1, unofficial].
+- **Precision:** Use float32 for storage to save space, but float64 for intermediate calculations if precision is critical [S1, unofficial].
+- **Boundary Conditions:** Normalization ensures points are within a known range, preventing extreme coordinate values.
+- **Degenerate Input:** If $N_{GT} < 51$, the query for 51 neighbors will fail or return fewer neighbors. Handle by adjusting $K$ or raising an error.
+
+## Subtopics
+
+### Point Cloud Normalization
+A preprocessing step that centers the point cloud at the origin, scales it by the maximum absolute coordinate value, and shifts it to the $[0, 1]$ range. This ensures consistent scale across different models. It involves calculating the mean, subtracting it, finding the max absolute value, dividing by $2 \times \text{max\_value}$, and adding $0.5$ [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N \log N)$ for KD-tree construction and $O(M \log N)$ for sampling queries, where $N$ is the number of ground truth points and $M$ is the number of samples.
+- **Memory Complexity:** $O(N)$ for the KD-tree and $O(M)$ for storing samples. Chunking reduces peak memory usage during KD-tree operations [S1, unofficial].
+- **Performance:** Efficient for moderate-sized point clouds. For very large clouds, chunking is essential.
+- **Strengths:** Adapts to local geometry, providing denser sampling in complex areas. Simple to implement.
+- **Limitations:** Depends on the quality of the ground truth point cloud. Noisy ground truth may lead to noisy samples.
+
+## Background
+This method is used in neural field training and voxelization pipelines to augment data. It originates from implementations in repositories like `jjjkkyz/DCx` and `MasonAndrewHarrison/Point-Cloud-Voxelizer` [S1, S2, unofficial]. It is particularly useful for training neural implicit representations where uniform sampling may not capture fine geometric details.
+
+## Sources
+[S1] jjjkkyz/DCx, https://github.com/jjjkkyz/DCx, fetched 2026-10-26 (unofficial)
+[S2] MasonAndrewHarrison/Point-Cloud-Voxelizer, https://github.com/MasonAndrewHarrison/Point-Cloud-Voxelizer, fetched 2026-10-27 (unofficial)

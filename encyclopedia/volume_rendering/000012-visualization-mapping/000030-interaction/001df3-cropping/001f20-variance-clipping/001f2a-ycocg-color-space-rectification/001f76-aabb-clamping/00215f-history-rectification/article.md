@@ -15,7 +15,7 @@ History rectification is a class of Temporal Anti-Aliasing (TAA) techniques that
 *   **Bounds:** A minimum vector $min$ and a maximum vector $max$ defining the rectification region. For AABB-based methods, these are component-wise min/max [S1, unofficial]. For Variance Clipping, these are derived from statistical moments [S1, unofficial].
 
 **Steps:**
-1.  **Sample Neighborhood:** Gather the color values of the neighboring pixels in the current frame. The standard evaluation uses a 3x3 neighborhood to avoid averaging across depth slices, which would act as a spatial stabilizer and hide flicker artifacts [S1, unofficial]. Alternatives like 3x3x3 or 6-tap neighborhoods smooth across depth but are not used in the primary evaluation context [S1, unofficial].
+1.  **Sample Neighborhood:** Gather the color values of the neighboring pixels in the current frame [S1, unofficial]. The standard evaluation uses a 3x3 neighborhood to avoid averaging across depth slices, which would act as a spatial stabilizer and hide flicker artifacts [S1, unofficial]. Alternatives like 3x3x3 or 6-tap neighborhoods smooth across depth but are not used in the primary evaluation context [S1, unofficial].
 2.  **Define Bounds:** Calculate the bounding region based on the chosen variant (see Subtopics) [S1, unofficial].
     *   For AABB variants: $min = \min(c_i)$, $max = \max(c_i)$ for each color channel independently [S1, unofficial].
     *   For Variance Clipping: Bounds are expanded beyond min/max using the standard deviation of the neighborhood values to account for statistical distribution [S1, unofficial].
@@ -39,9 +39,9 @@ Where $\mu$ is the mean of the neighborhood, $\sigma$ is the standard deviation,
 *   **Blend Factor ($\alpha$):** 0.05 is used in the cited evaluations to match baseline EMA conditions [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Static Extent:** When the light turns off, the neighborhood extent becomes 0 (a single point). The history is clamped to this point, eliminating temporal lag instantly [S1, unofficial].
-*   **Gradual Color Change:** AABB clamping struggles with gradual color transitions (e.g., red to blue fade). It exhibits an especially big RMSE spike at frame 500 and takes around 50 frames for the error to converge back down to the level of AABB clipping [S1, unofficial].
-*   **Temporal Instability (TI):** Tighter bounds allow faster adaptation but increase TI, perceived as visual flicker. The distance between highest error peaks is exactly 16 frames, corresponding to the jitter sequence length [S1, unofficial].
+*   **Static Extent:** When the light turns off, the neighborhood extent becomes 0 (a single point) [S1, unofficial]. The history is clamped to this point, eliminating temporal lag instantly [S1, unofficial].
+*   **Gradual Color Change:** AABB clamping struggles with gradual color transitions (e.g., red to blue fade) [S1, unofficial]. It exhibits an especially big RMSE spike at frame 500 and takes around 50 frames for the error to converge back down to the level of AABB clipping [S1, unofficial].
+*   **Temporal Instability (TI):** Tighter bounds allow faster adaptation but increase TI, perceived as visual flicker [S1, unofficial]. The distance between highest error peaks is exactly 16 frames, corresponding to the jitter sequence length [S1, unofficial].
 *   **Grayscale Scenes:** AABB clipping and clamping produce identical results in grayscale scenes because color rectification is irrelevant [S1, unofficial].
 
 **Pseudocode:**
@@ -68,24 +68,33 @@ def history_rectification(history_value, current_frame_color, neighborhood_color
         max_val = [max(c[i] for c in neighborhood_colors) for i in range(3)]
         
         if method == 'aabb_clamp':
-            # Clamp history to AABB bounds
+            # Clamp history to AABB bounds per channel
             rectified = [max(min_val[i], min(history_value[i], max_val[i])) for i in range(3)]
         else: # aabb_clip
-            # Project history onto AABB towards current frame sample or center
-            # Since the current frame sample is guaranteed to be inside the AABB,
-            # projection towards it is mathematically equivalent to clamping for an axis-aligned box
-            rectified = [max(min_val[i], min(history_value[i], max_val[i])) for i in range(3)]
+            # Project history onto AABB towards the current frame sample
+            # The current frame sample is guaranteed to be inside the AABB
+            dir_vec = [current_frame_color[i] - history_value[i] for i in range(3)]
+            t_min = 1.0
+            for i in range(3):
+                if abs(dir_vec[i]) > 1e-6:
+                    t1 = (min_val[i] - history_value[i]) / dir_vec[i]
+                    t2 = (max_val[i] - history_value[i]) / dir_vec[i]
+                    t_lo = min(t1, t2)
+                    t_hi = max(t1, t2)
+                    t_min = max(t_min, t_lo)
+            # Clamp t to [0, 1] to stay within the segment between history and target
+            t = max(0.0, min(1.0, t_min))
+            rectified = [history_value[i] + t * dir_vec[i] for i in range(3)]
             
     elif method == 'variance_clip':
-        # Calculate mean and standard deviation per channel
+        # Calculate first and second sample moments per channel
         n = len(neighborhood_colors)
-        mean_val = [sum(c[i] for c in neighborhood_colors) / n for i in range(3)]
-        variance = [sum((c[i] - mean_val[i])**2 for c in neighborhood_colors) / n for i in range(3)]
-        std_dev = [v**0.5 for v in variance]
-        
-        # Define bounds using variance
-        # [G] Scaling factor k is not specified in sources; using 1.0 as a standard implementation default
-        k = 1.0 
+        m1 = [sum(c[i] for c in neighborhood_colors) for i in range(3)]
+        m2 = [sum(c[i]**2 for c in neighborhood_colors) for i in range(3)]
+        mean_val = [m1[i] / n for i in range(3)]
+        variance = [m2[i] / n - mean_val[i]**2 for i in range(3)]
+        std_dev = [max(0.0, v)**0.5 for v in variance] # Guard against negative variance due to precision
+        k = 1.0 # [G] Scaling factor not specified in sources
         min_val = [mean_val[i] - k * std_dev[i] for i in range(3)]
         max_val = [mean_val[i] + k * std_dev[i] for i in range(3)]
         
@@ -122,7 +131,7 @@ Clipping the historical value against the convex hull formed by neighboring colo
     *   **Variance Clip:** RMSE 0.002977, TI P 0.004217 (+190.23% TI) [S1, unofficial].
 
 **Scaling:**
-*   Performance scales with neighborhood size. Larger neighborhoods (3x3x3, 6-tap) smooth the signal across depth, reducing visible flicker but potentially blurring details [S1, unofficial].
+*   Performance scales with neighborhood size [S1, unofficial]. Larger neighborhoods (3x3x3, 6-tap) smooth the signal across depth, reducing visible flicker but potentially blurring details [S1, unofficial].
 
 **Strengths and Limitations:**
 *   **Strengths:** Superior to EMA in abrupt change scenarios; immediately drops error to zero when intensity drops, eliminating temporal lag [S1, unofficial]. Variance clipping produces the lowest error spike when reconstructing the signal during quick illumination introduction [S1, unofficial].

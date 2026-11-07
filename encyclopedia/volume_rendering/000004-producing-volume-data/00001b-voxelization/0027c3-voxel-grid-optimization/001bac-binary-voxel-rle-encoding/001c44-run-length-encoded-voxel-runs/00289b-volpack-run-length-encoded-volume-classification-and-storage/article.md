@@ -90,12 +90,11 @@ def volpack_classify_volume(vpc, xlen, ylen, zlen, min_opacity=0.0, skip_rle_x=F
             vpc.rle_z.scan_offsets[z].first_len = z_length_offset
 
     for y in range(ylen):
-        rundata_y = vpc.cbuf.rundata_y[z]
+        rundata = vpc.cbuf.rundata_y[z]
 
         for x in range(xlen):
             while x_run_length == 0:
                 if vpc.cbuf.lengths_bytes_left <= 0:
-                    # Advance to next buffer [G]
                     lengths_buf = vpc.cbuf.next_lengths_chunk
                     vpc.cbuf.lengths_bytes_left = len(lengths_buf)
                 if not skip_rle_z:
@@ -110,7 +109,6 @@ def volpack_classify_volume(vpc, xlen, ylen, zlen, min_opacity=0.0, skip_rle_x=F
 
             if is_non_zero:
                 if vpc.cbuf.data_bytes_left <= 0:
-                    # Advance to next buffer [G]
                     data_buf = vpc.cbuf.next_data_chunk
                     vpc.cbuf.data_bytes_left = len(data_buf)
                 voxel_data = data_buf[0]
@@ -118,25 +116,26 @@ def volpack_classify_volume(vpc, xlen, ylen, zlen, min_opacity=0.0, skip_rle_x=F
                 vpc.cbuf.data_bytes_left -= 1
 
                 if not skip_rle_x:
-                    # Append run to X RLE [G]
+                    # StoreNonZeroVoxel for X-axis RLE [S1, unofficial]
                     vpc.rle_x.lengths.append(x_run_length)
                     vpc.rle_x.data.extend([voxel_data] * x_run_length)
                 if not skip_rle_y:
-                    # Append run to Y RLE [G]
+                    # StoreNonZeroVoxel for Y-axis RLE [S1, unofficial]
                     vpc.rle_y.lengths.append(x_run_length)
                     vpc.rle_y.data.extend([voxel_data] * x_run_length)
 
                 data_buf = data_buf[rle_bytes_per_voxel:]
                 z_data_offset += 1
             else:
-                if rundata_y.next_index != x:
-                    # Write out previous non-zero run and intervening zero run [S1, unofficial]
+                if rundata.next_index != x:
+                    # CountNonZeroVoxel: write out previous non-zero run and intervening zero run [S1, unofficial]
                     # Runs > 255 are split into 255, 0, remainder [S1, unofficial]
+                    # Sources do not detail the exact buffer write logic for run splitting [G]
                     pass
 
         # Finalize X-axis statistics [S1, unofficial]
-        vpc.cbuf.non_zero_count += rundata_y.p.p1.non_zero_count
-        vpc.cbuf.x_run_count += rundata_y.p.p1.run_count
+        vpc.cbuf.non_zero_count += rundata.p.p1.non_zero_count
+        vpc.cbuf.x_run_count += rundata.p.p1.run_count
 
     if vpc.cbuf.next_z == zlen:
         repack_classified_volume(vpc, xlen, ylen, zlen, skip_rle_x, skip_rle_y, skip_rle_z)
@@ -144,7 +143,7 @@ def volpack_classify_volume(vpc, xlen, ylen, zlen, min_opacity=0.0, skip_rle_x=F
 ```
 
 **Parameters:**
-*   `min_opacity`: Float threshold [0.0, 1.0]. Voxels with opacity below this are treated as transparent. Typical value not specified in code, but example uses 0.05 [S1, unofficial][S2].
+*   `min_opacity`: Float threshold [0.0, 1.0]. Voxels with opacity below this are treated as transparent [S1, unofficial]. Typical value not specified in code, but example uses 0.05 [S2].
 *   `skip_rle_x`, `skip_rle_y`, `skip_rle_z`: Boolean flags. If true, the respective RLE structure is not computed [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
@@ -160,17 +159,15 @@ def volpack_classify_volume(vpc, xlen, ylen, zlen, min_opacity=0.0, skip_rle_x=F
 Generates the lookup table mapping 2D scanline coordinates $(j, k)$ to starting positions in the 1D RLE stream. It solves the problem of efficiently locating the beginning of a ray's traversal without scanning the entire RLE array. Unlike [ComputeIndex](52-compute-index.md), which maps every voxel coordinate to a specific run position, this method only stores starting offsets for each scanline $(j, k)$, requiring the renderer to traverse the RLE runs sequentially along the $i$-axis to find specific voxels.
 
 ## Operating characteristics
-*   **Time Complexity:** Pre-processing is $O(N)$ where $N$ is the number of voxels, as each voxel is visited once. Finalization is $O(M)$ where $M$ is the number of runs [G].
-*   **Memory Complexity:** $O(N)$ for the input volume, plus $O(M)$ for the RLE structures. Not given in the sources.
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
 *   **Measured Performance:** The RLE structure is described as the "fastest rendering algorithm" provided by VolPack because it skips transparent regions entirely during ray casting [S2].
 *   **Scaling:** Performance gains increase with volume sparsity. Dense volumes see less benefit from skipping but still benefit from the compact storage and cache-friendly sequential access [G].
 *   **Strengths:** Fast rendering due to run skipping; compact storage for sparse volumes; supports three viewing axes for optimal ray traversal [S2].
 *   **Limitations:** High pre-processing time and memory overhead; out-of-order scanline loading is not supported; only one classified volume per context [S2].
-*   **When to Use:** When rendering sparse volumes with significant transparent regions and when pre-processing time is acceptable.
-*   **When Not to Use:** For dense volumes with little transparency, or when dynamic updates require frequent re-classification.
 
 ## Background
-Volpack was developed by William M. Newman's group at Stanford University. The method is described in the VolPack User's Guide and associated source code [S2]. It was designed to provide efficient volume rendering for medical imaging and scientific visualization, leveraging the sparsity of volumetric data [S1, unofficial][S2]. The RLE classification technique is described as the fastest rendering algorithm provided by VolPack [S2].
+The method is described in the VolPack User's Guide and associated source code [S2]. It was designed to provide efficient volume rendering for medical imaging and scientific visualization, leveraging the sparsity of volumetric data [S1, unofficial][S2]. The RLE classification technique is described as the fastest rendering algorithm provided by VolPack [S2].
 
 ## Sources
 [S1] ferdymercury/volpack, https://github.com/ferdymercury/volpack, fetched 2026-10-27 (unofficial)

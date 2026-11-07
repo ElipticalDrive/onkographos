@@ -1,0 +1,166 @@
+# Footprint Function Mechanism
+
+Also called: 2D reconstruction kernel, Footprint Function, Splatting Dimension Reduction (Footprint), footprint table
+
+## Overview
+The Footprint Function Mechanism is a method for implementing 3D spherically symmetric splatting kernels in volume rendering by reducing the computational dimensionality from 3D to 2D. It solves the problem of efficiently projecting volumetric data onto a 2D image plane by pre-computing the integration of the 3D kernel along one axis, storing the result as a 2D lookup table. This approach sets itself apart from naive 3D splatting by avoiding per-pixel 3D kernel evaluations, instead relying on 2D table lookups and interpolation, as detailed in [Footprint Evaluation](1180-footprint-evaluation.md).
+
+## How it works
+**Inputs:**
+*   A 3D spherically symmetric splat kernel function $h(x, y, z)$.
+*   A regular volumetric grid with spacing parameters.
+*   Camera projection parameters (orthographic or perspective).
+
+**Outputs:**
+*   A 2D lookup table (LUT) representing the footprint function.
+*   A rendered image where each pixel contains the accumulated contribution of all splats.
+
+**Data Structures:**
+*   **Footprint Table:** A 2D array of floating-point values. The dimensions correspond to the spatial extent of the kernel in the image plane. The table is indexed by integer offsets $(i, j)$ from the center, representing discrete samples of the continuous function.
+*   **Voxel Data:** Standard volumetric grid values (density/scalar) and positions.
+
+**Formulas:**
+The footprint function $F(x, y)$ is defined as the integral of the 3D kernel $h$ along one dimension (typically $w$ or $z$), assuming spherical symmetry:
+
+$$
+F(x, y) = \int_{-\infty}^{\infty} h(x, y, w) \, dw
+$$
+
+where $(x, y)$ is the displacement from the projected sample point on the image plane [S2, unofficial].
+
+The contribution to a pixel at projected coordinates $(x_D, y_D)$ with density $\rho$ is:
+
+$$
+\text{Contribution}(x, y) = \rho \cdot F(x - x_D, y - y_D)
+$$
+
+**Steps:**
+1.  **Pre-compute the Footprint Table:**
+    *   Determine the spatial extent of the 3D kernel $h$.
+    *   Numerically integrate $h(x, y, w)$ along the $w$ axis for a grid of $(x, y)$ values covering the 2D extent.
+    *   Store the results in a finely sampled 2D lookup table [S1, unofficial].
+    *   *Note:* If the volume grid spacing is regular, the view projection is orthographic, and the splat kernel is radially symmetric, this table is computed once and reused [S1, unofficial]. Otherwise, it must be recomputed per view (for non-symmetric kernels) or per voxel (for perspective projections) [S1, unofficial].
+
+2.  **Project Voxels:**
+    *   For each voxel in the volume, calculate its projected center $(x_D, y_D)$ on the image plane using the current camera projection matrix [S2, unofficial].
+
+3.  **Determine Extent:**
+    *   Identify the bounding box of the footprint table that overlaps with the image plane region influenced by the voxel. This is determined by the kernel's support radius [S2, unofficial].
+
+4.  **Sample and Composite:**
+    *   For each pixel $(x_p, y_p)$ within the footprint's extent:
+        *   Calculate the displacement vector $(dx, dy) = (x_p - x_D, y_p - y_D)$.
+        *   Map $(dx, dy)$ to the indices of the pre-computed 2D footprint table.
+        *   Interpolate the value from the footprint table to handle sub-pixel alignment [S1, unofficial].
+        *   Retrieve the voxel's density $\rho$.
+        *   Compute the weighted contribution: $\rho \cdot \text{interpolated\_footprint}(dx, dy)$.
+        *   Composite this value into the pixel's existing buffer (e.g., using alpha blending or accumulation) [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def precompute_footprint(kernel_func, extent, resolution):
+    """
+    Pre-compute the 2D footprint table by integrating the 3D kernel along the z-axis.
+    kernel_func: function h(x, y, z) returning kernel value
+    extent: float, radius of the kernel support
+    resolution: int, number of samples along one axis of the 2D table
+    """
+    table_size = 2 * extent + 1
+    footprint_table = zeros((table_size, table_size))
+    
+    # Center of the table
+    center = extent
+    
+    # Iterate over 2D grid
+    for i in range(table_size):
+        for j in range(table_size):
+            x = i - center
+            y = j - center
+            
+            # Integrate kernel along w (z) axis
+            # Using a simple Riemann sum for demonstration; 
+            # in practice, use adaptive quadrature or analytical integration if available.
+            integral = 0.0
+            num_w_samples = 100
+            dw = 2 * extent / num_w_samples
+            
+            for k in range(num_w_samples):
+                w = -extent + k * dw
+                integral += kernel_func(x, y, w) * dw
+                
+            footprint_table[i, j] = integral
+            
+    return footprint_table
+
+def render_with_footprint(volume, camera, footprint_table, image_width, image_height):
+    """
+    Render volume using pre-computed footprint table.
+    """
+    image = zeros((image_height, image_width))
+    
+    # Determine table bounds for fast lookup
+    table_h, table_w = footprint_table.shape
+    half_h, half_w = table_h // 2, table_w // 2
+    
+    for voxel in volume:
+        # 1. Project voxel center to image plane
+        px, py = camera.project(voxel.position)
+        
+        # 2. Determine pixel range to update
+        # Only pixels within the footprint extent need processing
+        min_x = max(0, int(px - half_w))
+        max_x = min(image_width, int(px + half_w))
+        min_y = max(0, int(py - half_h))
+        max_y = min(image_height, int(py + half_h))
+        
+        for y in range(min_y, max_y):
+            for x in range(min_x, max_x):
+                # 3. Calculate displacement from projected center
+                dx = x - px
+                dy = y - py
+                
+                # 4. Map to table indices
+                # Clamp to table bounds to handle edge cases
+                idx_x = int(dx + half_w)
+                idx_y = int(dy + half_h)
+                
+                # Check if within valid table range
+                if 0 <= idx_x < table_w and 0 <= idx_y < table_h:
+                    # 5. Interpolate from footprint table
+                    # For simplicity, using nearest neighbor; 
+                    # bilinear interpolation is preferred for quality [S1, unofficial]
+                    foot_val = footprint_table[idx_y, idx_x]
+                    
+                    # 6. Composite
+                    contribution = voxel.density * foot_val
+                    image[y, x] += contribution
+                    
+    return image
+```
+
+**Parameters:**
+*   **Footprint Table Resolution:** Not given in the sources. Typically high enough to avoid aliasing artifacts during interpolation.
+*   **Integration Steps:** Not given in the sources. Depends on the complexity of the kernel $h$.
+
+**Edge Cases and Pitfalls:**
+*   **Perspective Projection:** The footprint shape changes with depth. The table cannot be reused across the entire volume; it must be recomputed per voxel or approximated [S1, unofficial].
+*   **Non-Symmetric Kernels:** If the kernel is not radially symmetric, the integration axis matters, and the table must be recomputed for each view orientation [S1, unofficial].
+*   **Precision:** Numerical integration errors in pre-computation can lead to bias. Interpolation errors in the 2D table can cause blurring or artifacts.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot R^2)$, where $N$ is the number of voxels and $R$ is the radius of the footprint in pixels. The per-pixel cost is reduced to a table lookup and interpolation, which is $O(1)$ after pre-computation.
+*   **Memory Complexity:** $O(R^2)$ for the footprint table, plus $O(N)$ for the volume data.
+*   **Strengths:** Significant speedup over direct 3D kernel evaluation per pixel. Simple to implement with standard 2D interpolation routines.
+*   **Limitations:** Requires pre-computation. Less flexible for non-symmetric or anisotropic kernels without significant overhead. Perspective projections require per-voxel table generation or approximation, which can negate performance gains.
+*   **When to use:** Orthographic projections, regular grids, and symmetric kernels.
+*   **When not to use:** Perspective projections with high accuracy requirements, or non-symmetric kernels, unless the per-voxel recomputation cost is acceptable.
+
+## Background
+The concept was introduced by Westover in the context of volume rendering, specifically to improve the efficiency of splatting algorithms. The original splatting algorithm considered the splat as a 3D spherically symmetric reconstruction kernel. Westover observed that since the splat is reconstructed into a 2D image raster, it can be implemented as a 2D reconstruction kernel by integrating the 3D kernel along one dimension [S1, unofficial]. This technique is often referred to as "footprint function" or "2D reconstruction kernel" [S1, unofficial]. Later work by Westover also introduced accumulating splats onto a 2D sheet aligned with the volume axis most parallel to the view plane to further improve quality [S1, unofficial].
+
+## Sources
+[S1] DTIC ADA363073: Perspective Splatting, https://archive.org/details/DTIC_ADA363073, fetched 2026-10-26 (unofficial)
+[S2] PDF Direct Volume Rendering, https://www.cs.unh.edu/~cs880/lectureNotes/DVR.pdf, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,82 @@
+--- v002.md
++++ v003.md
+@@ -6,14 +6,9 @@
+ 
+ ## Shared principles
+-All methods in this family map 3D spatial coordinates $(u, v, w)$ to a linear memory address or buffer index to improve spatial locality [G]. The core mechanism involves decomposing the volume into small, fixed-size blocks (miniblocks, chunks, or tiles) and applying a transformation to the coordinate bits or block indices [G]. Common mathematical operations include:
+-1.  **Integer Division:** Mapping voxel coordinates to block/miniblock coordinates using floor division (e.g., $u_m = \lfloor u / 2 \rfloor$) [Voxel Memory Bank Allocation and Miniblock Organization](1638-voxel-memory-bank-allocation-and-miniblock-organization.md).
+-2.  **Modulo Arithmetic:** Distributing blocks across memory modules or banks using modulo operations (e.g., $M = (u_m + v_m + w_m) \bmod 4$) to ensure adjacent blocks map to distinct hardware resources [Voxel Memory Bank Allocation and Miniblock Organization](1638-voxel-memory-bank-allocation-and-miniblock-organization.md).
+-3.  **Bit Interleaving:** Rearranging the bits of coordinate components to group spatially adjacent voxels in memory, often separating most significant bits (MSBs) from least significant bits (LSBs) [Volume Interleaving](2174-volume-interleaving.md).
+-4.  **Padding/Alignment:** Padding volume dimensions to multiples of specific block sizes (e.g., 32) to ensure uniform access patterns and simplify hardware logic [Voxel Memory Bank Allocation and Miniblock Organization](1638-voxel-memory-bank-allocation-and-miniblock-organization.md).
+ 
+ ## Subtopics
+ 
+ ### [Voxel Buffer Memory Layout and Loop Optimization](1598-voxel-buffer-memory-layout-and-loop-optimization.md)
+-A dense voxel buffer implemented as a contiguous 1D array (e.g., `std::vector`) where 3D coordinates map to a 1D index using row-major ordering (x is innermost). Choose this for simple CPU-based ray casting where cache line efficiency for sequential access is the primary concern.
++A dense voxel buffer implemented as a contiguous 1D array where 3D coordinates map to a 1D index using row-major ordering (x is innermost). Choose this for simple CPU-based ray casting where cache line efficiency for sequential access is the primary concern. It differs from [Voxel Memory Bank Allocation and Miniblock Organization](1638-voxel-memory-bank-allocation-and-miniblock-organization.md) by relying on simple row-major sequential access rather than complex bank-avoidance schemes, and from [Volume Interleaving](2174-volume-interleaving.md) by keeping attributes contiguous per voxel rather than interleaved by attribute type. It serves as the foundational implementation strategy for [Voxel Data Structure Layout](3584-voxel-data-structure-layout.md), which defines the atomic unit stored within this optimized buffer.
+ 
+ ### [Voxel Memory Bank Allocation and Miniblock Organization](1638-voxel-memory-bank-allocation-and-miniblock-organization.md)
+@@ -21,5 +16,5 @@
+ 
+ ### [Volume Interleaving](2174-volume-interleaving.md)
+-A memory layout optimization that decomposes the volume into $32^3$ blocks and interleaves the bits of voxel coordinates to map spatially adjacent voxels to contiguous memory addresses. Unlike standard row-major layouts, it ensures consecutive samples along a ray are closer in memory, reducing cache misses. Choose this for software rendering on CPUs with hierarchical caches where arbitrary ray directions are common.
++A memory layout optimization that decomposes the volume into 32x32x32 blocks and interleaves the bits of voxel coordinates to map spatially adjacent voxels to contiguous memory addresses. Unlike standard row-major layouts, it ensures consecutive samples along a ray are closer in memory, reducing cache misses. Choose this for software rendering on CPUs with hierarchical caches where arbitrary ray directions are common.
+ 
+ ### [Memory-Insensitive Rendering](2774-memory-insensitive-rendering.md)
+@@ -63,4 +58,27 @@
+ **Step:** If `skip <= 1`, return immediately (no interleaving needed) [S1, unofficial]. Allocate temporary buffer `data2` [S1, unofficial]. For deinterleave (`restore=false`), scatter bytes: `for (ptr = data2, i = 0; i < skip; i++) for (j = i; j < bytes; j += skip) *ptr++ = data[j]` [S1, unofficial]. For interleave (`restore=true`), gather bytes: `for (ptr = data, i = 0; i < skip; i++) for (j = i; j < bytes; j += skip) data2[j] = *ptr++` [S1, unofficial]. If `block > 0`, process data in chunks of `skip * block` bytes to limit peak memory usage [S1, unofficial].
+ **Parameter:** `skip`: Number of channels (stride) [S1, unofficial]. `block`: Chunk size for block-wise processing. 0 means full array [S1, unofficial].
++**Pseudocode:**
++```python
++def dds_interleave(data, bytes, skip, restore, block):
++    if skip <= 1:
++        return data
++    data2 = [0] * bytes
++    if not restore:  # deinterleave
++        ptr = 0
++        for i in range(skip):
++            for j in range(i, bytes, skip):
++                data2[ptr] = data[j]
++                ptr += 1
++    else:  # interleave
++        ptr = 0
++        for i in range(skip):
++            for j in range(i, bytes, skip):
++                data2[j] = data[ptr]
++                ptr += 1
++    if block > 0:
++        # process in chunks of skip * block bytes
++        pass
++    return data2
++```
+ 
+ #### Canonical terms optimization
+@@ -74,9 +92,26 @@
+ **Parameter:** `span_len`: length of the span to allocate in words [S3, unofficial]. `next_alloc_start`: tracks the next search position to avoid scanning from zero repeatedly; resets to 0 on wrap-around or after allocation [S3, unofficial].
+ **Layout:** `self.used`: boolean array tracking allocated spans. `self.data`: underlying buffer for span data [S3, unofficial].
+-**Code:** `let candidate_start = { let mut pos = sample_pos; 'slide: loop { if pos == 0 || self.used[pos - 1] { break 'slide; } pos -= 1; } pos };` [S3, unofficial].
++**Pseudocode:**
++```python
++def alloc(self, span_len, span_data):
++    pos = self.sample_pos
++    while pos > 0 and not self.used[pos - 1]:
++        pos -= 1
++    candidate_start = pos
++    candidate_end = candidate_start + span_len
++    if candidate_end > len(self.data):
++        self.next_alloc_start = 0
++        return
++    for k in range(candidate_start, candidate_end):
++        if self.used[k]:
++            return
++    self.used[candidate_start:candidate_end] = [True] * span_len
++    self.data[candidate_start:candidate_end] = span_data
++    self.next_alloc_start = candidate_end
++```
+ **Pitfall:** `populate_raw` rejects partial word data by panicking if `raw_data.len()` is not a multiple of `std::mem::size_of::<VxlData>()` [S3, unofficial].
+ 
+ ## Background
+-The concept of memory layout optimization for volume rendering originated with the need to overcome the limitations of standard 3D array storage when accessed along arbitrary ray directions [G]. Early work focused on bit-interleaved address generation to improve cache performance in software renderers [Volume Interleaving](2174-volume-interleaving.md). Subsequent developments introduced hardware-specific optimizations, such as miniblock organization and bank skewing, to eliminate memory bank conflicts in SDRAM-based rendering systems [Voxel Memory Bank Allocation and Miniblock Organization](1638-voxel-memory-bank-allocation-and-miniblock-organization.md). More recent approaches have adapted these principles for GPU architectures, including canonical term optimizations for efficient weight application and linear span arenas for dynamic memory management in voxel-based formats [S2, S3, unofficial]. These methods are widely used in high-performance volume rendering systems, particularly in scientific visualization and medical imaging, where large datasets and real-time performance are critical [G].
++The concept of memory layout optimization for volume rendering originated with the need to overcome the limitations of standard 3D array storage when accessed along arbitrary ray directions [G]. Early work focused on bit-interleaved address generation to improve cache performance in software renderers [S1, unofficial]. Subsequent developments introduced hardware-specific optimizations, such as miniblock organization and bank skewing, to eliminate memory bank conflicts in SDRAM-based rendering systems [S1, unofficial]. More recent approaches have adapted these principles for GPU architectures, including canonical term optimizations for efficient weight application and linear span arenas for dynamic memory management in voxel-based formats [S2, S3, unofficial]. These methods are widely used in high-performance volume rendering systems, particularly in scientific visualization and medical imaging, where large datasets and real-time performance are critical [G].
+ 
+ ## Sources

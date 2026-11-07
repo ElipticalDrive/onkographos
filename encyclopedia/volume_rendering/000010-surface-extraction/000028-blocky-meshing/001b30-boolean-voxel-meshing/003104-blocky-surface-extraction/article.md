@@ -1,0 +1,155 @@
+# Blocky Surface Extraction
+Also called: Blocky
+## Overview
+Blocky Surface Extraction generates a voxel-aligned triangle mesh by iterating over voxels inside an isosurface and adding faces to the exterior boundary where adjacent voxels are outside the shape [S1, unofficial]. It differs from [Boolean Voxel Meshing](971-boolean-voxel-meshing.md) by explicitly constructing quad faces from voxel corners rather than detecting boundary edges, resulting in a "blocky" aesthetic where faces are strictly axis-aligned [S1, unofficial].
+## How it works
+### Inputs and Outputs
+**Input:** A `VoxelGrid` providing scalar values per voxel, dimensions (`getWidth`, `getHeight`, `getDepth`), and corner position lookups (`getVoxelCornerPos`).
+**Output:** A `TriangleMesh` containing points (float x,y,z), faces (indices), and smoothing groups.
+**Parameters:**
+*   `isoLevel`: Scalar threshold separating inside from outside. Typical value: 0.0 [S1, unofficial].
+*   `smoothShading`: Boolean flag. If true, `smoothGroup` is 1; if false, 0 [S1, unofficial].
+
+### Data Structures
+*   `VoxelGrid`: Accessor interface.
+*   `HashMap<Float3, Integer> deDupMap`: Maps 3D vertex coordinates to unique mesh indices for deduplication.
+*   `TriangleMesh`: Output container.
+
+### Algorithm Steps
+1.  Initialize `deDupMap` as empty.
+2.  Iterate $z$ from $0$ to `getDepth()`, $y$ from $0$ to `getHeight()`, $x$ from $0$ to `getWidth()`.
+3.  Let $v = \text{getVoxel}(x, y, z)$. If $v > \text{isoLevel}$, continue to next voxel.
+4.  Get corner positions:
+    *   $P_{min} = \text{getVoxelCornerPos}(x, y, z)$
+    *   $P_{max} = \text{getVoxelCornerPos}(x+1, y+1, z+1)$
+    *   Extract coordinates: $minX, minY, minZ$ from $P_{min}$ and $maxX, maxY, maxZ$ from $P_{max}$.
+5.  Define 8 corner points:
+    *   $p_0 = (minX, minY, minZ)$
+    *   $p_1 = (maxX, minY, minZ)$
+    *   $p_2 = (minX, maxY, minZ)$
+    *   $p_3 = (maxX, maxY, minZ)$
+    *   $p_4 = (minX, minY, maxZ)$
+    *   $p_5 = (maxX, minY, maxZ)$
+    *   $p_6 = (minX, maxY, maxZ)$
+    *   $p_7 = (maxX, maxY, maxZ)$
+6.  Get distances of 6 adjacent voxels:
+    *   $d_0 = \text{getVoxel}(x+1, y, z)$ [Left/Right neighbor depending on axis convention, source calls x+1 "left"]
+    *   $d_1 = \text{getVoxel}(x-1, y, z)$ [Right/Left neighbor, source calls x-1 "right"]
+    *   $d_2 = \text{getVoxel}(x, y+1, z)$ [Top]
+    *   $d_3 = \text{getVoxel}(x, y-1, z)$ [Bottom]
+    *   $d_4 = \text{getVoxel}(x, y, z+1)$ [Front]
+    *   $d_5 = \text{getVoxel}(x, y, z-1)$ [Back]
+7.  Add faces if adjacent voxel is outside ($d \ge \text{isoLevel}$):
+    *   **Left Face** ($d_0 \ge \text{isoLevel}$): Add quad $(p_5, p_1, p_3, p_7)$.
+    *   **Right Face** ($d_1 \ge \text{isoLevel}$): Add quad $(p_4, p_6, p_2, p_0)$.
+    *   **Top Face** ($d_2 \ge \text{isoLevel}$): Add quad $(p_2, p_6, p_7, p_3)$.
+    *   **Bottom Face** ($d_3 \ge \text{isoLevel}$): Add quad $(p_0, p_1, p_5, p_4)$.
+    *   **Front Face** ($d_4 \ge \text{isoLevel}$): Add quad $(p_5, p_7, p_6, p_4)$.
+    *   **Back Face**: Not explicitly defined in source steps, but implied by symmetry or handled by neighbor iteration. The source lists 5 specific checks.
+8.  Each quad is converted to triangles and added to the mesh with `smoothGroup`. Vertices are deduplicated using `deDupMap`.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def blocky_surface_extraction(voxel_grid, iso_level, smooth_shading):
+    de_dup_map = {}
+    mesh_points = []
+    mesh_faces = []
+    smooth_group = 1 if smooth_shading else 0
+
+    width = voxel_grid.get_width()
+    height = voxel_grid.get_height()
+    depth = voxel_grid.get_depth()
+
+    for z in range(depth):
+        for y in range(height):
+            for x in range(width):
+                voxel_val = voxel_grid.get_voxel(x, y, z)
+                
+                # Skip if inside the shape
+                if voxel_val > iso_level:
+                    continue
+
+                # Get corner positions
+                min_pos = voxel_grid.get_voxel_corner_pos(x, y, z)
+                max_pos = voxel_grid.get_voxel_corner_pos(x + 1, y + 1, z + 1)
+                
+                min_x, min_y, min_z = min_pos
+                max_x, max_y, max_z = max_pos
+
+                # Define 8 corners
+                p0 = (min_x, min_y, min_z)
+                p1 = (max_x, min_y, min_z)
+                p2 = (min_x, max_y, min_z)
+                p3 = (max_x, max_y, min_z)
+                p4 = (min_x, min_y, max_z)
+                p5 = (max_x, min_y, max_z)
+                p6 = (min_x, max_y, max_z)
+                p7 = (max_x, max_y, max_z)
+
+                # Get adjacent voxel values
+                # Note: Source defines directions specifically; x+1 is "left", x-1 is "right"
+                d0 = voxel_grid.get_voxel(x + 1, y, z)  # Left
+                d1 = voxel_grid.get_voxel(x - 1, y, z)  # Right
+                d2 = voxel_grid.get_voxel(x, y + 1, z)  # Top
+                d3 = voxel_grid.get_voxel(x, y - 1, z)  # Bottom
+                d4 = voxel_grid.get_voxel(x, y, z + 1)  # Front
+                # d5 = voxel_grid.get_voxel(x, y, z - 1) # Back (not used in source steps)
+
+                # Helper to add quad face
+                def add_quad_face(v0, v1, v2, v3):
+                    # Convert quad to two triangles
+                    quad = [v0, v1, v2, v3]
+                    # Triangle 1: v0, v1, v2
+                    add_triangle(quad[0], quad[1], quad[2])
+                    # Triangle 2: v0, v2, v3
+                    add_triangle(quad[0], quad[2], quad[3])
+
+                def add_triangle(v0, v1, v2):
+                    idx0 = get_or_add_vertex(v0)
+                    idx1 = get_or_add_vertex(v1)
+                    idx2 = get_or_add_vertex(v2)
+                    mesh_faces.append((idx0, idx1, idx2, smooth_group, smooth_group, smooth_group))
+
+                def get_or_add_vertex(point):
+                    if point not in de_dup_map:
+                        idx = len(mesh_points)
+                        mesh_points.append(point)
+                        de_dup_map[point] = idx
+                    return de_dup_map[point]
+
+                # Add faces based on adjacent voxels being outside (>= iso_level)
+                if d0 >= iso_level:
+                    add_quad_face(p5, p1, p3, p7)
+                if d1 >= iso_level:
+                    add_quad_face(p4, p6, p2, p0)
+                if d2 >= iso_level:
+                    add_quad_face(p2, p6, p7, p3)
+                if d3 >= iso_level:
+                    add_quad_face(p0, p1, p5, p4)
+                if d4 >= iso_level:
+                    add_quad_face(p5, p7, p6, p4)
+                # Back face logic not provided in source steps [G]
+
+    return mesh_points, mesh_faces
+
+```
+
+### Edge Cases and Pitfalls
+*   **Floating Point Precision:** Explicitly calculating min and max positions ensures identical cells match for deduplication. Failure may occur if `max_pos == min_pos + voxelSize` due to precision limits [S1, unofficial].
+*   **Boundary Conditions:** Accessing `x-1`, `y-1`, etc., requires boundary checks or padding to avoid out-of-bounds errors. The source does not explicitly detail boundary handling [G].
+*   **Back Face:** The source lists 5 face checks but omits the "Back" face ($z-1$) check. Implementation should likely include it for completeness [G].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as each voxel is visited once.
+*   **Memory Complexity:** $O(V)$ where $V$ is the number of unique vertices on the surface.
+*   **Strengths:** Simple implementation; produces strictly axis-aligned geometry; fast for boolean occupancy grids.
+*   **Limitations:** "Blocky" appearance; no smoothing unless `smoothShading` is enabled (which only affects normals/grouping, not geometry); sensitive to floating point precision in vertex deduplication.
+*   **When to use:** When a voxel-aligned aesthetic is desired or when performance is critical and smooth geometry is not required.
+
+## Background
+Originating from the `Chickenkeeper/IsosurfaceExtraction` project, this method is an unofficial implementation of blocky surface extraction [S1, unofficial]. It is part of a JavaFX-based isosurface visualization tool.
+
+## Sources
+[S1] Chickenkeeper/IsosurfaceExtraction, https://github.com/Chickenkeeper/IsosurfaceExtraction, fetched 2026-10-27 (unofficial)

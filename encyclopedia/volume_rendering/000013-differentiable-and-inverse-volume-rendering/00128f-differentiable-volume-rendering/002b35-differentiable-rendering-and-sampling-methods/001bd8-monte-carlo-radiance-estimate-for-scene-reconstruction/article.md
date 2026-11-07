@@ -3,7 +3,7 @@
 Also called: MC + RVS
 
 ## Overview
-Monte Carlo Radiance Estimate (MC + RVS) is an unbiased color estimation method for differentiable volume rendering, designed to accelerate training in voxel-based scene representations like DVGO by evaluating fewer samples per ray [S1, unofficial]. It replaces deterministic ray marching with stochastic sampling, allowing for significant speedups (e.g., ×6 faster than DVGO's sparsity thresholding with $k=8$) at the cost of increased estimate variance [S1, unofficial]. Unlike deterministic approximations, it provides an unbiased estimate of radiance for any sample count $k$, making it suitable for architectures where density field evaluation is faster than radiance field evaluation [S1, unofficial].
+Monte Carlo Radiance Estimate (MC + RVS) is an unbiased color estimation method for differentiable volume rendering that accelerates training in voxel-based scene representations like DVGO by evaluating fewer samples per ray [S1, unofficial]. It replaces deterministic ray marching with stochastic sampling, yielding a ×6 speedup over DVGO's sparsity thresholding with $k=8$ at the cost of increased estimate variance [S1, unofficial]. It provides an unbiased radiance estimate for any sample count $k$, making it suitable for architectures where density field evaluation is faster than radiance field evaluation [S1, unofficial].
 
 ## How it works
 
@@ -17,7 +17,7 @@ The method operates on voxel grid representations for density and radiance, cons
 ### Algorithm Steps
 1.  **Ray Sampling**: For a given ray, select $k$ sample points $\mathbf{x}_i$ along the ray segment within the bounding volume [S1, unofficial].
 2.  **Field Evaluation**: Evaluate the density $\sigma_i = \sigma(\mathbf{x}_i)$ and radiance $\mathbf{c}_i = \mathbf{c}(\mathbf{x}_i, \mathbf{d})$ at each sample point [S1, unofficial].
-3.  **Transmittance Calculation**: Compute the accumulated transmittance $T_i = \exp\left(-\int_0^{t_i} \sigma(\tau) d\tau\right)$ for each sample, representing the probability of light traveling from the camera to the sample point without absorption or scattering [G: Standard volume rendering transmittance definition].
+3.  **Transmittance Calculation**: Compute the accumulated transmittance $T_i = \exp\left(-\int_0^{t_i} \sigma(\tau) d\tau\right)$ for each sample [G: Standard volume rendering transmittance definition].
 4.  **Monte Carlo Estimation**: The final color $\hat{C}$ is estimated as the unbiased average of the radiance contributions weighted by transmittance and density, scaled by the ray segment length $L$:
     $$ \hat{C} = \frac{L}{k} \sum_{i=1}^{k} T_i \sigma_i \mathbf{c}_i $$
     This estimator is unbiased for any given number of samples $k$ [S1, unofficial].
@@ -58,10 +58,8 @@ def monte_carlo_radiance_estimate(ray_origin, ray_direction, density_func, radia
     """
     # Adaptive k selection based on high-density grid points
     if adaptive:
-        preliminary_samples = 16
-        t_values = [t_min + i * (t_max - t_min) / (preliminary_samples - 1) for i in range(preliminary_samples)]
-        densities = [density_func(ray_origin[0] + t * ray_direction[0], ray_origin[1] + t * ray_direction[1], ray_origin[2] + t * ray_direction[2]) for t in t_values]
-        high_density_count = sum(1 for d in densities if d > 0.0)
+        aux_t = [t_min + i * (t_max - t_min) / 15 for i in range(16)]
+        high_density_count = sum(1 for t in aux_t if density_func(ray_origin[0] + t * ray_direction[0], ray_origin[1] + t * ray_direction[1], ray_origin[2] + t * ray_direction[2]) > 0.0)
         k = max(4, min(48, 4 + high_density_count * 4))
 
     L = t_max - t_min
@@ -69,20 +67,22 @@ def monte_carlo_radiance_estimate(ray_origin, ray_direction, density_func, radia
     t_samples = sorted([t_min + random.random() * L for _ in range(k)])
 
     color = [0.0, 0.0, 0.0]
+    T = 1.0
+    prev_t = t_min
     for t in t_samples:
-        x = [ray_origin[0] + t * ray_direction[0], ray_origin[1] + t * ray_direction[1], ray_origin[2] + t * ray_direction[2]]
+        x = (ray_origin[0] + t * ray_direction[0], ray_origin[1] + t * ray_direction[1], ray_origin[2] + t * ray_direction[2])
         sigma = density_func(x[0], x[1], x[2])
         c = radiance_func(x[0], x[1], x[2], ray_direction)
 
-        # Compute transmittance T(t) = exp(-integral_0^t sigma(tau) dtau)
-        # Approximate integral using 8 auxiliary samples for self-containment
-        aux_t = sorted([t_min + random.random() * t for _ in range(8)])
-        cum_density = sum(density_func(ray_origin[0] + tau * ray_direction[0], ray_origin[1] + tau * ray_direction[1], ray_origin[2] + tau * ray_direction[2]) * (t / 8) for tau in aux_t)
-        T = math.exp(-cum_density)
+        # Standard cumulative transmittance [G]
+        dt = t - prev_t
+        T *= math.exp(-sigma * dt)
 
         color[0] += T * sigma * c[0]
         color[1] += T * sigma * c[1]
         color[2] += T * sigma * c[2]
+
+        prev_t = t
 
     # Monte Carlo estimator: average over k samples, scaled by segment length
     return tuple(val * L / k for val in color)
@@ -112,14 +112,14 @@ def monte_carlo_radiance_estimate(ray_origin, ray_direction, density_func, radia
 *   **Limitations**: Fails to outperform the base algorithm in reconstruction quality; increased variance requires more training steps or adaptive sampling to mitigate [S1, unofficial].
 
 ### When to Use
-*   Use when training speed is a priority and a slight drop in reconstruction quality is acceptable.
-*   Use in voxel-based architectures where density evaluation is faster than radiance evaluation.
+*   Use when training speed is a priority and a slight drop in reconstruction quality is acceptable [S1, unofficial].
+*   Use in voxel-based architectures where density evaluation is faster than radiance evaluation [S1, unofficial].
 
 ### When Not to Use
 *   Use when maximum reconstruction quality is required, as MC + RVS does not outperform the baseline in quality [S1, unofficial].
 
 ## Background
-The method is introduced in "Differentiable Rendering with Reparameterized Volume Sampling" [S1, unofficial]. It is part of the effort to make differentiable volume rendering more efficient, specifically targeting the bottleneck of evaluating radiance fields for every sample point along a ray. By reducing the number of samples and using a Monte Carlo estimate, the method aims to accelerate the training process of 3D scene representations like DVGO [S1, unofficial].
+The method is introduced in "Differentiable Rendering with Reparameterized Volume Sampling" [S1, unofficial]. It is part of the effort to make differentiable volume rendering more efficient, specifically targeting the bottleneck of evaluating radiance fields for every sample point along the ray [S1, unofficial]. By reducing the number of samples and using a Monte Carlo estimate, the method aims to accelerate the training process of 3D scene representations like DVGO [S1, unofficial].
 
 ## Sources
 [S1] Differentiable Rendering with Reparameterized Volume Sampling, https://doi.org/10.48550/arxiv.2302.10970, fetched 2026-10-26 (unofficial)

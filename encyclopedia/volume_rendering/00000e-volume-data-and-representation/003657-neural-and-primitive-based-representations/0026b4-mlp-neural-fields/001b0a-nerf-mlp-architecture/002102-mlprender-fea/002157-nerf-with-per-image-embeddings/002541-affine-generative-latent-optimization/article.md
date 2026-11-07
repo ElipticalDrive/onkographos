@@ -1,0 +1,113 @@
+# Affine Generative Latent Optimization
+
+Also called: Affine GLO, Affine transformation of bottleneck vector
+
+## Overview
+Affine Generative Latent Optimization (Affine GLO) is a technique for modulating the internal representations of a neural radiance field to capture per-image appearance variations, particularly for video sequences. It solves the problem of static NeRF models failing to represent dynamic lighting or texture changes across frames by applying an affine transformation to the bottleneck vector before view-dependent color prediction. It sets itself apart from standard [NeRF with Per-Image Embeddings](2484-nerf-with-per-image-embeddings.md) by learning a parametric mapping (an MLP) from a latent code to the affine parameters, rather than optimizing the embedding vectors directly, which allows for faster training and smoother interpolation [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A set of training images. For each image $i$, a latent vector $z_i$ is allocated.
+*   **Output:** Modified bottleneck vectors $b'_i$ that are passed to the view-dependent MLP.
+
+**Data Structures**
+*   **Latent Vector ($z$):** A 128-dimensional vector allocated for each image in the training set [S1].
+*   **Affine MLP:** A two-layer Multi-Layer Perceptron.
+    *   Input dimension: 128 (size of $z$).
+    *   Hidden layer size: 128 units.
+    *   Output dimension: 256 (two vectors of size 128: scale $s$ and shift $t$).
+    *   Internal activation: ReLU [S1].
+    *   Final activation for scale output: $\exp$ [S1].
+
+**Algorithm Steps**
+1.  **Initialization:** Allocate a 128-length latent vector $z_i$ for each image $i$ in the training dataset [S1].
+2.  **Affine Parameter Prediction:** Pass the latent vector $z_i$ through the affine MLP to predict scale and shift parameters:
+    $$ [s_i, t_i] = \text{AffineMLP}(z_i) $$
+    Where $s_i$ and $t_i$ are 128-dimensional vectors. The scale vector $s_i$ is computed as $\exp(\text{MLP}_{\text{scale}}(z_i))$ to ensure positivity, while the shift vector $t_i$ is computed linearly [S1].
+3.  **Bottleneck Modulation:** Retrieve the original bottleneck vector $b$ (the output of the view-independent MLP or the shared feature representation) for the current ray sample. Apply the affine transformation:
+    $$ b' = s_i \odot b + t_i $$
+    Where $\odot$ denotes element-wise multiplication [S1].
+4.  **View-Dependent Rendering:** Pass the modified bottleneck vector $b'$ to the view-dependent MLP to predict color and density [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+class AffineGLONet:
+    def __init__(self, latent_dim=128, hidden_dim=128):
+        """
+        Initializes the Affine GLO module.
+        latent_dim: Length of the per-image latent vector z.
+        hidden_dim: Number of hidden units in the affine MLP.
+        """
+        self.latent_dim = latent_dim
+        self.hidden_dim = hidden_dim
+        
+        # Initialize affine MLP weights
+        # Layer 1: latent_dim -> hidden_dim
+        self.W1 = np.random.randn(hidden_dim, latent_dim) * 0.01
+        self.b1 = np.zeros(hidden_dim)
+        
+        # Layer 2: hidden_dim -> 2 * latent_dim (scale and shift)
+        self.W2 = np.random.randn(2 * latent_dim, hidden_dim) * 0.01
+        self.b2 = np.zeros(2 * latent_dim)
+
+    def forward(self, z, bottleneck_vector):
+        """
+        Applies affine transformation to the bottleneck vector.
+        
+        Args:
+            z: Latent vector for the current image, shape (latent_dim,)
+            bottleneck_vector: Output from view-independent MLP, shape (latent_dim,)
+            
+        Returns:
+            Modified bottleneck vector, shape (latent_dim,)
+        """
+        # Step 1: Predict scale and shift via MLP
+        # Hidden layer with ReLU
+        h = np.maximum(0, np.dot(self.W1, z) + self.b1)
+        
+        # Output layer
+        raw_output = np.dot(self.W2, h) + self.b2
+        
+        # Split into scale and shift
+        # First half is scale, second half is shift
+        scale_raw = raw_output[:self.latent_dim]
+        shift = raw_output[self.latent_dim:]
+        
+        # Final activation for scale is exp
+        scale = np.exp(scale_raw)
+        
+        # Step 2: Affine transformation
+        # b' = scale * b + shift
+        modified_bottleneck = scale * bottleneck_vector + shift
+        
+        return modified_bottleneck
+```
+
+**Parameters**
+*   Latent vector length: 128 [S1].
+*   MLP hidden units: 128 [S1].
+
+**Edge Cases and Pitfalls**
+*   **Quantitative Metrics:** This technique is specifically noted to not improve quantitative performance on standard metrics compared to other methods [S1].
+*   **Usage Scope:** It is primarily used to produce video results where temporal consistency and appearance variation are critical, rather than for static scene reconstruction benchmarks [S1].
+*   **Precision:** The use of $\exp$ for scaling ensures positive scale factors, preventing inversion of features, but may lead to numerical instability if gradients are large [S1].
+
+## Subtopics
+
+### [AG-NeRF Training Objective](8502-ag-nerf-training-objective.md)
+A differentiable loss function for optimizing volume rendering in large-scale outdoor scenes using multi-height source images. It uses an attention-based feature fusion module to handle varying camera altitudes without manual data splitting.
+
+## Operating characteristics
+*   **Training Speed:** Faster training than the baseline GLO method because optimizing an affine function of an internal activation allows the model to more easily explain per-image appearance variation without placing floaters in front of training cameras [S1].
+*   **Performance:** Does not improve quantitative performance on standard metrics [S1].
+*   **Use Case:** Suitable for video generation and scenarios requiring smooth interpolation of appearance across frames [S1]. Not recommended for static scene reconstruction where metric improvement is the primary goal [S1].
+
+## Background
+Affine Generative Latent Optimization builds on the concept of modulating neural network activations to control style and appearance, a technique found in prior literature [13, 23, 24] [S1]. It was introduced in the context of Zip-NeRF to handle per-image appearance variation more efficiently than direct optimization of embeddings [S1].
+
+## Sources
+[S1] Zip-NeRF: Anti-Aliased Grid-Based Neural Radiance Fields, https://doi.org/10.1109/iccv51070.2023.01804, fetched 2026-10-26

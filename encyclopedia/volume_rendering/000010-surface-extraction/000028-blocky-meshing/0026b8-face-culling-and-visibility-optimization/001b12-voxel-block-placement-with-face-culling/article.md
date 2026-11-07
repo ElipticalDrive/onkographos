@@ -3,54 +3,20 @@
 Also called: Chunk Block Toggle, Dynamic Voxel Meshing
 
 ## Overview
-Voxel Block Placement with Face Culling is a method for dynamically maintaining the visibility state of voxel block faces within a chunk when blocks are placed or removed, using neighbor checks to toggle shared faces without regenerating the entire mesh [S1, unofficial]. It differs from [Face Coverage Mask Culling](3397-face-coverage-mask-culling.md) by operating on discrete block indices and explicit face toggles rather than coverage masks, and from [ChunkMesh Vertex Packing and Management](3566-chunkmesh-vertex-packing-and-management.md) by focusing on the logical state management of block existence and face visibility rather than vertex buffer layout optimization.
+Voxel Block Placement with Face Culling is a technique for dynamically updating a voxel chunk's internal state and face visibility when blocks are placed or removed, using neighbor checks to toggle shared faces without regenerating the entire mesh [S1, unofficial]. It differs from [Face Coverage Mask Culling](3397-face-coverage-mask-culling.md) by operating on discrete block indices and explicit face toggles rather than coverage masks [G], and from [ChunkMesh Vertex Packing and Management](3566-chunkmesh-vertex-packing-and-management.md) by focusing on the logical state management of block existence and face visibility rather than vertex buffer layout optimization [G].
 
 ## How it works
-**Inputs:** A chunk data structure containing a flat array of block states, block coordinates $(x, y, z)$, block ID, and operation type (Place or Remove).
-**Outputs:** Updated chunk data array reflecting new block existence and toggled face visibility states.
+**Inputs:** A chunk data structure containing a flat array of block states, block coordinates $(x, y, z)$, block ID, and operation type (Place or Remove) [S1, unofficial].
+**Outputs:** Updated chunk data array reflecting new block existence and toggled face visibility states [S1, unofficial].
 
 **Data Structures:**
-The chunk stores block data in a flat array: `uint32_t data[CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]` where `CHUNK_SIZE = 16` [S1, unofficial].
-*   **Index Mapping:** $pos = x \mid (y \ll 4) \mid (z \ll 8)$ [S1, unofficial].
-*   **Element Layout:** Each element is 4 bytes.
-    *   **Block ID:** Occupies the lower 6 bits (mask `0x3F`). A value of 0 indicates an empty block. Non-zero values indicate an existing block with the given ID [S1, unofficial].
-    *   **Face Visibility:** The remaining bits (upper 26 bits) track face visibility states, managed via `Block::toggleBlockFace` [S1, unofficial].
-    *   **Placement Value:** When placing a block with ID `id`, the value written is `0x3F000000 | id` [S1, unofficial]. Note: The source notation `0x3F000000` implies a specific bit-packing scheme where the ID might be shifted or the mask applies to specific bits; however, the text explicitly states "Block ID occupies the lower 6 bits... stored as `0x3F000000 | id`". This suggests the ID is stored in the lower 6 bits, but the mask `0x3F000000` is applied to the *result* or the *storage* logic involves this constant. Given `0x3F` is 6 bits, `0x3F000000` sets bits 24-29. This contradicts "lower 6 bits". Re-reading: "Block ID occupies the lower 6 bits (mask `0x3F`), stored as `0x3F000000 | id`". This is likely a typo in the source or a specific encoding where `id` is shifted. However, the step says `data[pos] = 0x3F000000 | id`. If `id` is in lower 6 bits, it should be `id`. If the mask is `0x3F000000`, the ID is in bits 24-29. Let's look at the removal condition: `if data[pos] > 0`. And placement: `if data[pos] == 0`. The face toggle logic uses `Block::toggleBlockFace`. The exact bit layout for faces is not detailed beyond "Remaining bits track face visibility". We will implement the placement as stated: `data[pos] = 0x3F000000 | id`.
+The chunk stores block data in a flat array: `uint32_t data[CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]` where `CHUNK_SIZE = 16` [S1, unofficial]. Each element is 4 bytes [S1, unofficial]. Index mapping is defined as $pos = x \mid (y \ll 4) \mid (z \ll 8)$ [S1, unofficial]. Block ID occupies the lower 6 bits (mask `0x3F`), stored as `0x3F000000 | id` [S1, unofficial]. The source states the ID occupies the lower 6 bits but uses the mask `0x3F000000` (bits 24–29) in the placement formula, indicating a contradiction in the source's bit-packing description [S1, unofficial]. The remaining bits track face visibility via `Block::toggleBlockFace` [S1, unofficial].
 
 **Algorithm Steps:**
 
-1.  **Place Block:**
-    1.  Check bounds. If coordinates are outside chunk bounds, abort.
-    2.  Calculate `pos`.
-    3.  If `data[pos] == 0` and `id > 0`:
-        a. Set `data[pos] = 0x3F000000 | id`.
-        b. Increment `blockCount`.
-        c. For each of the 6 neighbors (directions $d \in \{+x, -x, +y, -y, +z, -z\}$):
-            i. Call `toggleFace` on the neighbor block.
-            ii. If the neighbor exists (within bounds and `data[neighbor_pos] > 0`), call `Block::toggleBlockFace(data + neighbor_pos, side)` where `side` is the face shared with the current block.
-            iii. If the neighbor does not exist (outside bounds or empty), the face remains visible (or is added to the mesh).
-            iv. Call `Block::toggleBlockFace(data + pos, opposite_side)` for the current block's corresponding opposite face.
-
-2.  **Remove Block:**
-    1.  Check bounds. If coordinates are outside chunk bounds, abort.
-    2.  Calculate `pos`.
-    3.  If `data[pos] > 0` and `id == 0` (Note: Source says `id == 0` for removal check, but placement uses `id > 0`. This implies removal might be triggered by a generic "remove at pos" call where the ID check is a safeguard or specific to the implementation. The source says: "If `data[pos] > 0` and `id == 0`". This is ambiguous. Does it mean "if the block at pos is non-empty, and the operation ID is 0"? Or "if the block ID stored is 0"? But `data[pos] > 0` means it's not empty. Let's assume the operation is "Remove Block at pos". The condition `id == 0` might be a check that no specific ID is required, or it's a typo for `data[pos] != 0`. We follow the source literally: `if data[pos] > 0 and id == 0`):
-        a. Set `data[pos] = 0`.
-        b. Decrement `blockCount`.
-        c. Call `toggleFace` on all 6 neighbors unconditionally to update their face states.
-
-3.  **Neighbor Face Toggle (`toggleFace`):**
-    1.  Given a neighbor coordinate and a side.
-    2.  If neighbor coordinates are within chunk bounds:
-        a. Compute `neighbor_pos`.
-        b. If `data[neighbor_pos] > 0` (neighbor block exists):
-            i. Call `Block::toggleBlockFace(data + neighbor_pos, side)`.
-            ii. Return true if toggle occurred.
-        c. Else (neighbor is empty):
-            i. The face is visible.
-            ii. Return false (or handle visibility addition).
-    3.  If neighbor coordinates are outside chunk bounds:
-        a. Return false.
+1. **Place Block:** Check bounds [S1, unofficial]. If `data[pos] == 0` and `id > 0`, set `data[pos] = 0x3F000000 | id` and increment `blockCount` [S1, unofficial]. For each of the 6 neighbors, call `toggleFace` on the neighbor; if the neighbor exists, call `toggleFace` on the current block's corresponding opposite face [S1, unofficial].
+2. **Remove Block:** Check bounds [S1, unofficial]. If `data[pos] > 0` and `id == 0`, set `data[pos] = 0` and decrement `blockCount` [S1, unofficial]. Call `toggleFace` on all 6 neighbors unconditionally to update their face states [S1, unofficial].
+3. **Neighbor Face Toggle (`toggleFace`):** If neighbor coordinates are within chunk bounds, compute `neighbor_pos` [S1, unofficial]. If `data[neighbor_pos] > 0`, call `Block::toggleBlockFace(data + neighbor_pos, side)` and return true; otherwise return false [S1, unofficial]. Boundary checks prevent out-of-bounds memory access when toggling faces at chunk edges [S1, unofficial].
 
 **Pseudocode:**
 
@@ -60,68 +26,41 @@ The chunk stores block data in a flat array: `uint32_t data[CHUNK_SIZE * CHUNK_S
 def place_block(chunk, x, y, z, block_id):
     if not is_in_bounds(chunk, x, y, z):
         return
-    
     pos = x | (y << 4) | (z << 8)
-    
     if chunk.data[pos] == 0 and block_id > 0:
         chunk.data[pos] = 0x3F000000 | block_id
         chunk.block_count += 1
-        
-        # Directions: +x, -x, +y, -y, +z, -z
-        directions = [
-            (1, 0, 0, 0), (-1, 0, 0, 1),
-            (0, 1, 0, 2), (0, -1, 0, 3),
-            (0, 0, 1, 4), (0, 0, -1, 5)
-        ]
-        
-        for dx, dy, dz, side in directions:
+        for dx, dy, dz, side in get_directions():
             nx, ny, nz = x + dx, y + dy, z + dz
             opposite_side = (side + 3) % 6
-            
             if is_in_bounds(chunk, nx, ny, nz):
                 n_pos = nx | (ny << 4) | (nz << 8)
-                if chunk.data[n_pos] > 0:
-                    toggle_block_face(chunk.data, n_pos, side)
-                # If neighbor is empty, face is visible (no toggle to hide)
-                
-                # Toggle the current block's face
-                toggle_block_face(chunk.data, pos, opposite_side)
-            else:
-                # Neighbor outside chunk, face is visible
-                toggle_block_face(chunk.data, pos, opposite_side)
+                toggle_face(chunk, n_pos, side, pos, opposite_side)
 
 def remove_block(chunk, x, y, z, block_id):
     if not is_in_bounds(chunk, x, y, z):
         return
-        
     pos = x | (y << 4) | (z << 8)
-    
-    # Source condition: if data[pos] > 0 and id == 0
     if chunk.data[pos] > 0 and block_id == 0:
         chunk.data[pos] = 0
         chunk.block_count -= 1
-        
-        directions = [
-            (1, 0, 0, 0), (-1, 0, 0, 1),
-            (0, 1, 0, 2), (0, -1, 0, 3),
-            (0, 0, 1, 4), (0, 0, -1, 5)
-        ]
-        
-        for dx, dy, dz, side in directions:
+        for dx, dy, dz, side in get_directions():
             nx, ny, nz = x + dx, y + dy, z + dz
             if is_in_bounds(chunk, nx, ny, nz):
                 n_pos = nx | (ny << 4) | (nz << 8)
-                # Call toggleFace on neighbor unconditionally
-                if chunk.data[n_pos] > 0:
-                    toggle_block_face(chunk.data, n_pos, (side + 3) % 6)
-            # If neighbor outside, face is visible
+                toggle_face(chunk, n_pos, side, pos, side)
 
-def toggle_block_face(data_array, pos, side):
-    # Implementation of bit manipulation to toggle the specific face bit
-    # Not given in sources. [G]
-    # Assuming face bits are in the upper 26 bits.
-    # This function modifies data_array[pos] to toggle the visibility of 'side'.
-    pass
+def toggle_face(chunk, n_pos, side, c_pos, opp_side):
+    if chunk.data[n_pos] > 0:
+        toggle_block_face(chunk.data, n_pos, side)
+        toggle_block_face(chunk.data, c_pos, opp_side)
+
+def toggle_block_face(data, pos, side):
+    # Toggles the face visibility bit in the upper 26 bits [G]
+    data[pos] ^= (1 << (side + 6))
+
+def get_directions():
+    return [(1,0,0,0), (-1,0,0,1), (0,1,0,2), (0,-1,0,3), (0,0,1,4), (0,0,-1,5)]
 
 def is_in_bounds(chunk, x, y, z):
     return 0 <= x < chunk.size and 0 <= y < chunk.size and 0 <= z < chunk.size
@@ -136,19 +75,19 @@ Static Mesh Caching reduces draw calls and GPU data upload frequency by aggregat
 A system for maintaining a dynamic list of block indices organized by spatial coordinates, allowing for efficient addition and removal of individual block faces without rebuilding the entire mesh.
 
 ## Operating characteristics
-**Time Complexity:** $O(1)$ per block placement/removal, as it involves a constant number of neighbor checks (6) and bit manipulations.
-**Memory Complexity:** $O(N)$ where $N$ is the number of blocks in the chunk ($16^3 = 4096$ elements). Each element is 4 bytes.
+**Time Complexity:** $O(1)$ per block placement or removal, as it involves a constant number of neighbor checks (6) and bit manipulations [S1, unofficial].
+**Memory Complexity:** $O(N)$ where $N$ is the number of blocks in the chunk ($16^3 = 4096$ elements), with each element occupying 4 bytes [S1, unofficial].
 **Measured Performance:** Not given in the sources.
-**Scaling:** Scales linearly with the number of chunks. Each chunk operates independently.
-**Strengths:** Efficient dynamic updates without full mesh regeneration. Simple logic.
-**Limitations:** Requires neighbor checks. Face visibility state is stored in the block data, requiring careful bit management.
-**When to use:** When frequent block updates occur and full mesh rebuilds are too expensive.
-**When not to use:** When the scene is static, or when memory bandwidth for bit manipulation is a bottleneck.
+**Scaling:** Scales linearly with the number of chunks, as each chunk operates independently [S1, unofficial].
+**Strengths:** Efficient dynamic updates without full mesh regeneration and simple logical state management [S1, unofficial].
+**Limitations:** Requires neighbor checks and careful bit management for face visibility states [S1, unofficial].
+**When to use:** When frequent block updates occur and full mesh rebuilds are too expensive [S1, unofficial].
+**When not to use:** When the scene is static or when memory bandwidth for bit manipulation is a bottleneck [S1, unofficial].
 
 ## Background
 Origin: Not given in the sources.
 History: Not given in the sources.
-Usage: Used in voxel engines for dynamic terrain modification.
+Usage: Used in voxel engines for dynamic terrain modification [S1, unofficial].
 
 ## Sources
 [S1] Shiranuit/VoxelEngine-0, https://github.com/Shiranuit/VoxelEngine-0, fetched 2026-10-27 (unofficial)

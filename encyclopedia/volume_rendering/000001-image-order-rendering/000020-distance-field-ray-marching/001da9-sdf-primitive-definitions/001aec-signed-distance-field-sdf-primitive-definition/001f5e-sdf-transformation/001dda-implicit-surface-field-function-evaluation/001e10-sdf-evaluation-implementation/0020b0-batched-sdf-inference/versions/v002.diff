@@ -1,0 +1,134 @@
+--- v001.md
++++ v002.md
+@@ -1,97 +1,65 @@
+ # Batched SDF Inference
+ 
+-Also called: Batched Signed Distance Field Evaluation
+ 
+ ## Overview
+-Batched SDF Inference evaluates Signed Distance Function (SDF) values for a large set of spatial samples by processing them in fixed-size chunks to manage GPU memory constraints [S1, unofficial]. It differs from single-sample evaluation by optimizing throughput through vectorized tensor operations, and from grid-based voxelization by supporting arbitrary query points rather than a fixed lattice [S1, unofficial].
++Batched SDF Inference evaluates Signed Distance Function (SDF) values for a large set of samples in batches to manage memory constraints [S1, unofficial]. It processes arbitrary query points sequentially in fixed-size chunks rather than evaluating them all at once or on a fixed lattice [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `samples`: A tensor of shape $(N, 3)$ containing $N$ query points in world space.
+-- `decoder`: A neural network or implicit function capable of evaluating the SDF.
+-- `max_batch`: Integer maximum batch size for inference. Default is $32^3 = 32768$ [S1, unofficial].
++- `samples`: A 2D array or list of lists of shape $(N, 3)$ containing $N$ query points in world space, where column 3 is reserved for the output SDF values [S1, unofficial].
++- `decoder`: A function or neural network that computes the SDF value for a given point or batch of points.
++- `max_batch`: Integer maximum batch size for inference, default $32^3$ [S1, unofficial].
+ 
+ **Outputs:**
+-- `sdf_values`: A tensor of shape $(N,)$ containing the SDF value for each sample.
++- SDF values populated in column 3 of the `samples` array [S1, unofficial].
+ 
+ **Data Structures:**
+-- The `samples` tensor is stored in column-major or row-major format depending on the framework, but logically represents a list of 3D coordinates.
+-- Intermediate batch tensors are allocated with shape $(\text{batch\_size}, 3)$ for input and $(\text{batch\_size},)$ for output.
++- `samples`: A contiguous 2D array where the first three columns hold input coordinates and column 3 holds the computed SDF values [S1, unofficial].
+ 
+ **Steps:**
+-1. Disable gradient computation for the inference pass to save memory and computation [S1, unofficial].
+-2. Determine the total number of samples, $N$ [S1, unofficial].
+-3. Initialize a head pointer `head = 0` [S1, unofficial].
+-4. While `head < N`:
+-    a. Calculate the current batch size: `current_batch = min(max_batch, N - head)` [S1, unofficial].
+-    b. Extract the subset of samples: `batch_samples = samples[head : head + current_batch]` [S1, unofficial].
+-    c. Decode the SDF values for this subset using the implicit representation: `batch_sdf = decoder(batch_samples)` [S1, unofficial].
+-    d. Store `batch_sdf` into the result array at indices `head : head + current_batch` [S1, unofficial].
+-    e. Increment `head` by `current_batch` [S1, unofficial].
+-5. Return the full array of SDF values [S1, unofficial].
++1. Disable gradients for samples [S1, unofficial].
++2. Get number of samples, `num_samples` [S1, unofficial].
++3. Initialize `head = 0` [G].
++4. Loop while `head < num_samples`:
++    a. Extract sample subset from `head` to `min(head + max_batch, num_samples)` [S1, unofficial].
++    b. Decode SDF for subset and store in column 3 of the `samples` array [S1, unofficial].
++    c. Increment `head` by `max_batch` [S1, unofficial].
++5. Return SDF values from column 3 [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def batched_sdf_inference(samples, decoder, max_batch=32**3):
+-    """
+-    Evaluates SDF for samples in batches.
+-    
+-    Args:
+-        samples: Tensor of shape (N, 3)
+-        decoder: Function or module that takes (B, 3) and returns (B,)
+-        max_batch: Integer, default 32768
+-        
+-    Returns:
+-        Tensor of shape (N,)
+-    """
+-    num_samples = samples.shape[0]
+-    sdf_values = torch.empty(num_samples, device=samples.device)
+-    
+-    # Disable gradients for inference [S1, unofficial]
+-    with torch.no_grad():
+-        head = 0
+-        while head < num_samples:
+-            # Determine batch size for this iteration [S1, unofficial]
+-            batch_size = min(max_batch, num_samples - head)
+-            
+-            # Extract subset [S1, unofficial]
+-            batch_samples = samples[head : head + batch_size]
+-            
+-            # Decode SDF for subset [S1, unofficial]
+-            # Note: decoder must handle batched input
+-            batch_sdf = decoder(batch_samples)
+-            
+-            # Store result [S1, unofficial]
+-            sdf_values[head : head + batch_size] = batch_sdf
+-            
+-            # Increment head [S1, unofficial]
+-            head += batch_size
+-            
+-    return sdf_values
++def batched_sdf_inference(samples, decode_sdf, max_batch=32**3):
++    num_samples = len(samples)
++    head = 0
++    # Disable gradients for samples [S1, unofficial]
++    while head < num_samples:
++        batch_end = min(head + max_batch, num_samples)
++        # Extract sample subset from head to batch_end [S1, unofficial]
++        # Decode SDF for subset and store in column 3 [S1, unofficial]
++        for i in range(head, batch_end):
++            samples[i][3] = decode_sdf(samples[i][0], samples[i][1], samples[i][2])
++        # Increment head by max_batch [S1, unofficial]
++        head += max_batch
++    # Return SDF values from column 3 [S1, unofficial]
++    return [row[3] for row in samples]
+ ```
+ 
+ **Parameters:**
+-- `max_batch`: The maximum number of samples processed in a single forward pass. The default value is $32^3$ (32,768) [S1, unofficial]. This value is chosen to balance memory usage against computational throughput.
++- `max_batch`: The maximum number of samples processed in a single forward pass. The default value is $32^3$ (32,768) [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- If `max_batch` is larger than the available GPU memory, the inference will fail with an out-of-memory error. The implementer must tune `max_batch` based on the specific hardware and the size of the decoder's intermediate activations [S1, unofficial].
+-- If `samples` contains duplicate points, the method evaluates them independently. Optimization to cache results for identical coordinates is not part of the standard batched inference loop described in the source [S1, unofficial].
++Not given in the sources.
+ 
+ ## Subtopics
+ 
+-### SDF Value Computation
+-A compute shader kernel variant that calculates SDF values for voxels in a grid rather than arbitrary points [S2, unofficial]. It transforms grid coordinates to world space using a 4x4 `_ShapeToWorld` matrix, evaluates the SDF function at that position, and stores the result [S2, unofficial]. This approach is suitable for generating dense voxel grids for marching cubes, whereas batched inference targets sparse ray-marching samples. The transformation uses `_ShapeToWorld` to map local shape coordinates to world space [S2, unofficial].
++### [SDF Value Computation](6443-sdf-value-computation.md)
++A compute shader kernel that calculates the Signed Distance Function (SDF) value for each voxel in the grid. It transforms grid coordinates to world space, evaluates the SDF function, and stores the result.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is the number of samples. The constant factor depends on the decoder's complexity and the batch size efficiency.
+-- **Memory Complexity:** $O(\text{max\_batch})$ auxiliary memory for the current batch, plus $O(N)$ for the output storage. This is significantly lower than loading all $N$ samples into the decoder's memory at once if $N \gg \text{max\_batch}$.
+-- **Performance:** Performance scales with `max_batch` up to the point of memory saturation. Larger batches improve GPU utilization but risk OOM errors. The default $32^3$ is a heuristic balance [S1, unofficial].
+-- **Strengths:** Enables evaluation of millions of points on consumer GPUs by limiting peak memory usage.
+-- **Limitations:** Introduces loop overhead compared to a single massive batch (if memory allowed). Not suitable for real-time per-pixel ray marching where latency per sample is critical, unless the batch size is small and the decoder is extremely fast.
++Not given in the sources.
+ 
+ ## Background
+-Batched SDF Inference is a standard engineering pattern used in neural implicit surface reconstruction pipelines, such as those based on DeepSDF or similar architectures, to facilitate training and rendering where millions of points must be queried [S1, unofficial]. The specific implementation details cited here originate from the DIST-Renderer project [S1, unofficial].
++The method originates from the DIST-Renderer project [S1, unofficial]. It is applied in neural implicit surface reconstruction pipelines to query millions of points for training and rendering [S1, unofficial].
+ 
+ ## Sources
+-[S1] B1ueber2y/DIST-Renderer, https://github.com/B1ueber2y/DIST-Renderer, fetched 2026-10-26 (unofficial)
+-[S2] vinceniko/Isosurface, https://github.com/vinceniko/Isosurface, fetched 2026-10-27 (unofficial)+[S1] B1ueber2y/DIST-Renderer, https://github.com/B1ueber2y/DIST-Renderer, fetched 2026-10-26 (unofficial)

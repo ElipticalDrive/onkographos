@@ -2,30 +2,27 @@
 Also called: Adaptive Prefiltering, Anisotropy Prefiltering
 
 ## Overview
-Prefiltering is a technique used in volume rendering and participating media simulation to remove singularity-like artifacts and avoid discretization artifacts by replacing them with a smooth approximation [S1]. It is particularly critical for media with insufficient optical thickness to naturally blur sampled illumination, where naive prefiltering would obscure background features [S1]. Unlike naive prefiltering of source illumination, this method is adaptive, allowing the perception of background illumination features while maintaining smoothness [S1].
+Prefiltering is a technique to remove singularity-like artifacts and avoid discretization artifacts by replacing them with a smooth approximation [S1]. It is particularly critical for media with insufficient optical thickness to naturally blur sampled illumination [S1]. Unlike naive prefiltering of source illumination, it is adaptive, allowing the perception of background illumination features while maintaining smoothness [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A set of discrete ordinates (directions) $\Omega_n$ with associated importance weights $w_n$, and a scalar factor $\beta$.
-*   **Output:** An initial anisotropy value $a_{n,i}$ for each ordinate $i$ in the set, used to initialize the scattering propagation or splatting process.
+*   **Input:** A set of discrete ordinates (directions) $\Omega_n$ with associated importance weights $w_n$, and a scalar factor $\beta$ [S1].
+*   **Output:** An initial anisotropy value $a_{n,i}$ for each ordinate $i$ in the set, used to initialize the scattering propagation or splatting process [S1].
 
 **Data Structures:**
-*   **Ordinates:** A list of directional vectors. Each ordinate $n$ has an associated importance $w_n \in (0, 1)$.
+*   **Ordinates:** A list of directional vectors. Each ordinate $n$ has an associated importance $w_n \in (0, 1)$ [S1].
 *   **Importance Mapping:** The importance $w_n$ is proportional to the solid angle $\Omega_n$ of the ordinate [S1].
 
 **Parameters:**
 *   **$\beta$**: A scalar factor defining the proportionality in the anisotropy mapping heuristic. Value: Tuned empirically once for each environment map [S1].
 
 **Steps:**
-1.  **Calculate Importance:** Determine the importance $w_n$ for each ordinate $n$. This is mapped from the solid angle proportion, where important ordinates (those contributing significantly to the image) have higher importance and smaller solid angles [S1].
+1.  **Calculate Importance:** Determine the importance $w_n$ for each ordinate $n$ by mapping from the solid angle proportion, where important ordinates (those contributing significantly to the image) have higher importance and smaller solid angles [S1].
 2.  **Compute Anisotropy:** For each ordinate $i$, calculate the initial anisotropy $a_{n,i}$ using the following formula:
     $$ a_{n,i} = \left(1 - \frac{w_n}{N}\right)^\beta $$
-    where:
-    *   $N$ is the total number of ordinates.
-    *   $w_n$ is the importance of ordinate $n$.
-    *   $\beta > 0$ is the scalar factor [S1].
-3.  **Interpretation:** Important ordinates (high $w_n$) result in lower anisotropy values (denser in the directional domain), while less important ordinates (low $w_n$) result in higher anisotropy values (sparser, larger solid angles) [S1].
-4.  **Clamping (Optional):** Apply clamping to reduce any remaining singularities after the initial calculation [S1].
+    where $N$ is the total number of ordinates, $w_n$ is the importance of ordinate $n$, and $\beta > 0$ is the scalar factor [S1].
+3.  **Interpretation:** Important ordinates (high $w_n$) result in lower anisotropy values, making them denser in the directional domain, while less important ordinates (low $w_n$) result in higher anisotropy values, making them sparser with larger solid angles [S1].
+4.  **Clamping:** Apply clamping to reduce any remaining singularities after the initial calculation [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -48,7 +45,6 @@ def compute_prefilter_anisotropy(ordinates, beta):
     for ord in ordinates:
         w_n = ord.importance
         # Formula: a_n,i = (1 - w_n / N) ^ beta
-        # Note: w_n is in (0, 1). N is total count.
         base = 1.0 - (w_n / N)
         a_n_i = base ** beta
         anisotropies.append(a_n_i)
@@ -57,14 +53,14 @@ def compute_prefilter_anisotropy(ordinates, beta):
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Singularity Artifacts:** Without prefiltering, thin media with strong scattering anisotropy (e.g., $g=0.98$) and low ordinate counts exhibit singularity-like artifacts [S1].
+*   **Singularity Artifacts:** Without prefiltering, thin media with strong scattering anisotropy (e.g., $g=0.98$) and low ordinate counts (e.g., 27) exhibit singularity-like artifacts [S1].
 *   **Empirical Tuning:** The parameter $\beta$ must be tuned empirically for each environment map; it is not a universal constant [S1].
 *   **Discretization:** The method addresses artifacts arising from insufficient optical thickness to blur sampled illumination [S1].
 
 ## Subtopics
 
 ### Quasi-Interpolation Prefilter
-A prefilter applied to reduce aliasing artifacts, specifically preventing 'valleys' of rims from becoming shallower due to oversmoothing [S2]. This variant is used in the context of PDF GPU Isosurface Raycasting of FCC Datasets to maintain reconstruction quality [S2].
+A prefilter applied to reduce aliasing artifacts, specifically preventing 'valleys' of rims from becoming shallower due to oversmoothing [S2].
 
 ## Operating characteristics
 *   **Performance:** The sources do not provide specific time or memory complexity metrics for the core anisotropy calculation [S1, S2].

@@ -5,80 +5,49 @@ Exponential Depth Cueing is a shading technique that simulates atmospheric fog t
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** `front_factor` (fog transparency at the front plane), `density` (fog density parameter), and `depth` (normalized distance of the voxel from the viewer).
-*   **Outputs:** A transparency factor $T$ used to modulate the voxel's color components.
+*   **Inputs:** `front_factor` (fog transparency at the front plane), `density` (fog density parameter), and `depth` (normalized distance of the voxel from the viewer) [S1].
+*   **Outputs:** A transparency factor $T$ used to modulate the voxel's color components [S1].
 
 **Data Structures:**
-The method relies on scalar parameters and a single computed transparency value. No complex data structures are required beyond the standard volume rendering context.
+The method relies on scalar parameters and a single computed transparency value [G]. No complex data structures are required beyond the standard volume rendering context [G].
+
+**Steps:**
+1.  Enable depth cueing in the rendering context [S1].
+2.  Set the depth cueing parameters (`front_factor` and `density`) [S1].
+3.  For each voxel or sample point along the ray:
+    a. Determine the normalized depth value (0 at front, 1 at back) [S1].
+    b. Calculate $T$ using the formula below [S1].
+    c. Multiply the voxel's color components by $T$ [S1].
+
+**Formula:**
+The fog transparency $T$ is calculated as:
+$$ T = \text{front\_factor} \times \exp(-\text{density} \times \text{depth}) $$
+where $T$ is fog transparency, `depth` is 0 at the front plane and 1 at the back plane, and each voxel color component is multiplied by $T$ during rendering [S1].
 
 **Parameters:**
 *   `front_factor`: Transparency of the fog at the front plane. Must be positive. Usually $< 1.0$ [S1]. Larger values brighten the foreground [S1].
 *   `density`: Controls the fog density, determining how rapidly objects recede into darkness [S1].
 *   `depth`: Normalized depth value, where $0$ is at the front plane of the viewing volume and $1$ is at the back plane [S1].
 
-**Formula:**
-The fog transparency $T$ is calculated as:
-$$ T = \text{front\_factor} \times \exp(-\text{density} \times \text{depth}) $$
-Each voxel color component is multiplied by $T$ during rendering [S1].
-
-**Steps:**
-1.  Enable depth cueing in the rendering context.
-2.  Set the depth cueing parameters (`front_factor` and `density`).
-3.  For each voxel or sample point along the ray:
-    a. Determine the normalized depth value (0 at front, 1 at back).
-    b. Calculate $T$ using the formula above.
-    c. Multiply the voxel's color components by $T$.
+**Edge Cases and Pitfalls:**
+*   **Parameter Constraints:** `front_factor` must be positive [S1].
+*   **Boundaries:** `depth` must be strictly normalized between 0 and 1 as defined by the viewing volume planes [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def exponential_depth_cueing(front_factor, density, depth):
-    """
-    Calculate fog transparency for exponential depth cueing.
-    
-    Args:
-        front_factor (float): Transparency at the front plane (positive, usually < 1.0).
-        density (float): Fog density controlling recession rate.
-        depth (float): Normalized depth [0.0, 1.0].
-        
-    Returns:
-        float: Transparency factor T.
-    """
-    # Guard against invalid inputs
-    if front_factor <= 0:
-        raise ValueError("front_factor must be positive")
-    if density < 0:
-        raise ValueError("density should be non-negative for standard fog")
-    if depth < 0 or depth > 1:
-        raise ValueError("depth must be normalized between 0 and 1")
-        
-    # Calculate transparency using exponential falloff
-    T = front_factor * math.exp(-density * depth)
-    return T
+import math
 
-def apply_cueing_to_voxel(color, front_factor, density, depth):
-    """
-    Apply exponential depth cueing to a voxel's color.
-    
-    Args:
-        color (tuple): RGB color of the voxel.
-        front_factor (float): Transparency at the front plane.
-        density (float): Fog density.
-        depth (float): Normalized depth [0.0, 1.0].
-        
-    Returns:
-        tuple: Cueing-applied RGB color.
-    """
+def exponential_depth_cueing(front_factor: float, density: float, depth: float) -> float:
+    """Calculate fog transparency for exponential depth cueing [S1]."""
+    return front_factor * math.exp(-density * depth)
+
+def apply_cueing_to_voxel(color: tuple, front_factor: float, density: float, depth: float) -> tuple:
+    """Multiply each voxel color component by the fog transparency [S1]."""
     T = exponential_depth_cueing(front_factor, density, depth)
-    cueing_color = (color[0] * T, color[1] * T, color[2] * T)
-    return cueing_color
+    return (color[0] * T, color[1] * T, color[2] * T)
 ```
-
-**Edge Cases and Pitfalls:**
-*   **Precision:** Ensure `density` and `depth` are handled with sufficient precision to avoid numerical instability when `depth` is large and `density` is high, which could result in underflow to zero [S1].
-*   **Boundaries:** `depth` must be strictly normalized between 0 and 1 as defined by the viewing volume planes [S1].
-*   **Parameter Constraints:** `front_factor` must be positive [S1].
 
 ## Subtopics
 
@@ -86,12 +55,12 @@ def apply_cueing_to_voxel(color, front_factor, density, depth):
 An efficient ray marching algorithm designed to accurately generate spatial-temporal points for deformable tissue reconstruction, balancing rendering speed and reconstruction quality [S2]. It outperforms the Depth-Cueing method in PSNR (33.374 vs 31.325) and SSIM (0.907 vs 0.897) on the EndoNeRF dataset, while maintaining competitive inference speed (1.73 fps vs 1.95 fps) [S2]. The Depth-Cueing method suffers from suboptimal performance due to reliance on noisy and incomplete stereo depth data and is inapplicable for temporal interpolation due to the absence of stereo depth in certain contexts [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per voxel/sample for the transparency calculation [S1].
-*   **Memory Complexity:** $O(1)$ additional memory for parameters [S1].
-*   **Measured Performance:** Specific performance metrics for Exponential Depth Cueing alone are not provided in the sources. However, comparative data for the "Depth-Cueing" method (which uses this exponential model) on the EndoNeRF dataset shows a test speed of 1.95 fps, PSNR of 31.325, SSIM of 0.897, and LPIPS of 0.132 [S2].
-*   **Strengths:** Simple to implement; effectively distinguishes foreground from background; computationally inexpensive [S1].
-*   **Limitations:** Relies on accurate depth information; performance degrades with noisy or incomplete stereo depth data; not suitable for temporal interpolation in dynamic scenes [S2].
-*   **When to Use:** When enhancing depth perception in static or quasi-static volume data with reliable depth information is required [S1].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Comparative data for the "Depth-Cueing" method on the EndoNeRF dataset shows a test speed of 1.95 fps, PSNR of 31.325, SSIM of 0.897, and LPIPS of 0.132 [S2].
+*   **Strengths:** Introduces black "fog" to make distant voxels appear darker than close ones, aiding foreground/background distinction [S1].
+*   **Limitations:** Relies on noisy and incomplete stereo depth data, and is inapplicable for temporal interpolation due to the absence of stereo depth in certain contexts [S2].
+*   **When to Use:** When distinguishing foreground objects from background objects in volumetric data [S1].
 *   **When Not to Use:** In dynamic scenes requiring temporal interpolation or when stereo depth data is noisy/incomplete [S2].
 
 ## Background

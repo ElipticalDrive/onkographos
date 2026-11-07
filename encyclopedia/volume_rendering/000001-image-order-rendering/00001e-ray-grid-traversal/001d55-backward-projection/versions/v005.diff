@@ -1,0 +1,220 @@
+--- v004.md
++++ v005.md
+@@ -3,129 +3,113 @@
+ 
+ ## Overview
+-Backward Projection is a rendering technique that maps volumetric data or feature fields (such as scale-space extrema) onto a 2D image plane by projecting contributions from 3D space back to 2D pixels [S2][S3, unofficial]. Unlike forward ray casting which samples the volume along rays, backward projection accumulates values from the volume into the image buffer, often used for visualizing specific features like vessels or blobs while suppressing others [S2]. It builds on [Ray-grid traversal](17-ray-grid-traversal.md) to determine which voxels contribute to which pixels.
++Backward Projection is a volume rendering technique that maps 3D volumetric data to a 2D image plane by traversing rays from the image pixels into the volume, accumulating contributions along the ray path. It solves the problem of synthesizing a 2D projection or composite image from a 3D dataset by inverting the forward projection process. It is distinguished from its siblings in the Ray-grid traversal family by its explicit focus on the image-order accumulation loop and its application in both standard ray casting and specialized scale-space visualization, where it operates on sparse feature abstractions rather than the full voxel grid [S2, S3, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- A 3D volume or feature field (e.g., scale field, intensity, opacity) defined on a grid.
+-- Camera parameters (extrinsics, intrinsics) defining the projection geometry.
+-- Ray origins and directions, typically one per pixel or per detected feature (blob).
+-- Optional visibility thresholds or classification masks.
+-
+-**Outputs:**
+-- A 2D image buffer (color and/or opacity) where each pixel accumulates contributions from the 3D data.
++**Inputs and Outputs:**
++*   **Input:** A 3D volume grid (uniform or non-uniform), a ray origin $\mathbf{o}$ and direction $\mathbf{d}$ for each pixel, and a transfer function mapping voxel values to color/opacity.
++*   **Output:** A 2D image buffer where each pixel accumulates the integrated contribution of the ray.
+ 
+ **Data Structures:**
+-- **Image Buffer:** A 2D array of size $H \times W \times C$ (height, width, channels). For a batch of rays, this may be flattened or structured as a tensor.
+-- **Ray Structure:** Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$. In some implementations, rays are pre-computed for specific features (e.g., LoG extrema) [S2].
+-- **Visibility Mask (Optional):** A boolean or scalar field indicating which voxels are visible based on thresholds [S2].
++*   **Ray Structure:** Defined by origin $\mathbf{o} = (o_x, o_y, o_z)$ and direction $\mathbf{d} = (d_x, d_y, d_z)$. The direction may be normalized or unnormalized [S2, S3, unofficial][S5].
++*   **Grid:** Defined by dimensions $N_x, N_y, N_z$ and voxel sizes $v_x, v_y, v_z$. For non-uniform grids, 1D edge arrays (walls) $W_i$ define boundaries [S1, unofficial].
++*   **Traversal State:** Per-axis variables: `step_i` (direction), `delta_t_i` (distance per voxel), `t_max_i` (distance to next boundary), and `index_i` (current voxel index) [S2, S3, unofficial][S5].
+ 
+-**Steps:**
+-1. **Ray Generation:** For each pixel or feature, generate a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$. If projecting from detected blobs, rays originate from the blob centers (LoG extrema) [S2].
+-2. **Traversal:** Use [Ray-grid traversal](17-ray-grid-traversal.md) to iterate through voxels intersected by the ray. For each voxel $(i, j, k)$, compute the intersection interval $[t_{entry}, t_{exit}]$ and the path length $L$ within the voxel.
+-3. **Visibility Test (Optional):** If visibility thresholding is enabled, check if the voxel is visible from the ray origin. A voxel is invisible if the intensity or gradient magnitude along the ray segment connecting the origin to the voxel falls below a threshold $\tau$ [S2].
+-4. **Sampling:** Sample the volume data at the voxel center or using interpolation (e.g., trilinear) [S1, S3, unofficial]. Let the sampled value be $v$.
+-5. **Accumulation:** Add the contribution to the image buffer. For a voxel contributing to pixel $(img_i, img_j)$, the update is:
+-   $$
+-   \text{buffer}[batch\_index][channel\_index][img_i][img_j] \leftarrow \text{buffer}[...][...] + L \cdot v
+-   $$
+-   where $L$ is the path length through the voxel and $v$ is the sampled value (e.g., color, opacity, scale) [S1, unofficial].
+-6. **Normalization:** After all rays are processed, normalize the image buffer if necessary (e.g., divide by the number of contributions per pixel) [S2].
++**Algorithm Steps:**
++
++1.  **Initialization:**
++    For each axis $i \in \{x, y, z\}$:
++    *   Compute step direction:
++        $$
++        \text{step}_i = \begin{cases} 
++        +1 & \text{if } d_i > 0 \\
++        -1 & \text{if } d_i < 0 \\
++        0 & \text{if } d_i = 0 
++        \end{cases}
++        $$
++        If $d_i = 0$, set $\text{step}_i = 0$ and treat the distance to the next boundary as infinity [S5].
++    *   Compute distance delta (time to traverse one voxel):
++        $$
++        \Delta t_i = \frac{v_i}{|d_i|} \cdot \text{step}_i
++        $$
++        If $d_i = 0$, $\Delta t_i = 0$ [S2][S5].
++    *   Compute initial distance to the first boundary $t_{max, i}$:
++        $$
++        t_{max, i} = \frac{\text{boundary}_i - o_i}{d_i}
++        $$
++        The initial boundary is determined by the starting voxel index. If the ray starts inside the grid, the boundary is the next one in the direction of travel [S2, S3, unofficial][S5].
++
++2.  **Traversal Loop:**
++    Iterate while the ray remains within the grid bounds:
++    1.  Identify the axis $k$ with the minimum boundary distance:
++        $$
++        t_{min} = \min(t_{max, x}, t_{max, y}, t_{max, z})
++        $$
++    2.  Record the current cell and the interval $[t_{entry}, t_{min}]$.
++    3.  Sample the volume at the current voxel using the transfer function to get color $C$ and opacity $\alpha$.
++    4.  Accumulate the contribution to the image buffer. For a uniform grid, the contribution is added to the pixel corresponding to the ray's image coordinates. In batched implementations, the index is calculated as:
++        ```python
++        buffer_index = batch_index * channels * height * width + channel_index * height * width + img_i * width + img_j
++        buffer[buffer_index] += length * val
++        ```
++        where `length` is the segment length ($t_{min} - t_{entry}$) and `val` is the sampled value [S1, unofficial].
++    5.  Advance the index in axis $k$:
++        $$
++        \text{index}_k \leftarrow \text{index}_k + \text{step}_k
++        $$
++    6.  Update the boundary distance for axis $k$:
++        $$
++        t_{max, k} \leftarrow t_{max, k} + \Delta t_k
++        $$
++    7.  Update entry time:
++        $$
++        t_{entry} \leftarrow t_{min}
++        $$
++
++3.  **Edge and Corner Handling:**
++    When the ray crosses an edge or corner (i.e., two or three $t_{max}$ values are equal), the traversal must advance all corresponding axes to maintain connectivity and avoid zero-length segments [S5, S3436]. The implementation uses independent `if` checks for ties rather than `if/elif` chains [S5]. A tie tolerance $\varepsilon_{\mathrm{DDA}}$ is used to handle floating-point drift, typically defined as:
++    $$
++    \varepsilon_{\mathrm{DDA}} = 64 \varepsilon_{\mathrm{machine}} \max(1 \text{ cm}, L_{\mathrm{grid}})
++    $$
++    where $L_{\mathrm{grid}}$ is the grid size [S5].
++
++4.  **Non-Uniform Grids:**
++    For non-uniform grids defined by arbitrary 1D edge arrays (walls) $W_i$, the traversal time to the next wall is computed using the inverse velocity [S1, unofficial]:
++    $$
++    t_{hit} = (W_{next} - o) \cdot \frac{1}{d}
++    $$
++    The traversal state maintains `hittimes` for each dimension, updated by precomputed `voxel_traversal_times` which depend on the wall spacing and ray velocity [S1, unofficial].
+ 
+ **Parameters:**
+-- $\tau$: Visibility threshold for scalar value or gradient magnitude [S2].
+-- Interpolation method: Trilinear or nearest neighbor [S1, S3, unofficial].
++*   $\varepsilon_{\mathrm{DDA}}$: Tie tolerance for boundary crossing. Typical value: $64 \varepsilon_{\mathrm{machine}} \max(1 \text{ cm}, L_{\mathrm{grid}})$ [S5].
++*   $\tau$ (Tau): Visibility threshold for scale backprojection. Controls sensitivity of the visibility test. Value depends on data scale [S2].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Zero-Length Segments:** When rays pass exactly through voxel edges or corners, ensure connectivity is maintained to avoid gaps. Use tie-breaking logic in traversal [S5, S3436].
+-- **Floating-Point Drift:** Use a tolerance $\varepsilon_{\mathrm{DDA}}$ for boundary comparisons to handle precision issues [S5].
+-- **Visibility Approximation:** Visibility thresholding is a fast approximation; for higher accuracy, consider post-processing with region growing [S2].
+-
+-**Pseudocode:**
+-```python
+-def backward_projection(volume, rays, image_buffer, tau=None):
+-    """
+-    volume: 3D array of voxel values
+-    rays: list of Ray objects with origin o and direction d
+-    image_buffer: 2D array (H x W) or 3D (H x W x C)
+-    tau: optional visibility threshold
+-    """
+-    for ray in rays:
+-        # Transform ray to grid space if necessary
+-        o_grid, d_grid = transform_to_grid_space(ray.o, ray.d)
+-        
+-        # Initialize traversal state
+-        t_max_x, t_max_y, t_max_z = compute_initial_t_max(o_grid, d_grid)
+-        delta_t_x, delta_t_y, delta_t_z = compute_delta_t(d_grid)
+-        step_x, step_y, step_z = compute_step(d_grid)
+-        
+-        x, y, z = compute_initial_indices(o_grid)
+-        
+-        t_entry = 0.0
+-        
+-        while is_within_grid(x, y, z):
+-            # Find minimum t_max
+-            t_min, axis = find_min_t_max(t_max_x, t_max_y, t_max_z)
+-            
+-            # Compute path length in current voxel
+-            length = t_min - t_entry
+-            
+-            # Sample volume value
+-            val = sample_volume(volume, x, y, z)
+-            
+-            # Visibility test
+-            if tau is not None:
+-                if not is_visible(ray.o, get_voxel_center(x, y, z), tau):
+-                    val = 0.0
+-            
+-            # Accumulate to image buffer
+-            img_i, img_j = project_to_pixel(ray, t_min)
+-            image_buffer[img_i, img_j] += length * val
+-            
+-            # Advance traversal
+-            t_entry = t_min
+-            if axis == 'x':
+-                x += step_x
+-                t_max_x += delta_t_x
+-            elif axis == 'y':
+-                y += step_y
+-                t_max_y += delta_t_y
+-            else:
+-                z += step_z
+-                t_max_z += delta_t_z
+-                
+-    return image_buffer
+-
+-def is_visible(origin, voxel_center, tau):
+-    # Check if intensity/gradient along segment is above tau
+-    # Simplified: check midpoint
+-    midpoint = (origin + voxel_center) / 2
+-    intensity = sample_volume(volume, *grid_indices(midpoint))
+-    return intensity >= tau
+-```
++*   **Zero Direction Component:** If $d_i = 0$, the ray never crosses a boundary in that dimension. The step is 0, and the distance to the next boundary is treated as infinity [S5].
++*   **Floating Point Drift:** Without tie tolerance, rays may skip voxels or process them multiple times at grid boundaries. The tolerance $\varepsilon_{\mathrm{DDA}}$ mitigates this [S5].
++*   **Visibility Thresholding:** In scale-space backprojection, a voxel is determined to be not visible from a Laplacian of Gaussian (LoG) extrema if, at some point along the ray connecting the two positions, the intensity is below the threshold $\tau$. Alternatively, thresholding can be based on gradient magnitude [S2]. This is a fast approximation; more accurate results can be obtained with a region growing approach added as a post-process [S2].
+ 
+ ## Subtopics
+ 
+ ### [GPU Backprojection](5843-gpu-backprojection.md)
+-GPU Backprojection is a rendering pass that visualizes detected scale-space blobs by generating small slices for each blob, computing weighted contributions, and blending them to form the final image, followed by normalization. It decouples the expensive scale-space computation from the frequent backprojection, allowing interactive adjustment of smoothness and visibility parameters.
++GPU Backprojection is a rendering pass that visualizes detected scale-space blobs by generating small slices for each blob, computing weighted contributions, and blending them to form the final image, followed by normalization. It is distinct from standard ray-casting as it operates on a sparse abstraction of the volume (scale maxima) rather than the full voxel grid, decoupling the expensive scale-space computation from the frequent backprojection step. It builds on [Backward Projection](1491-backward-projection.md).
++
++### [Ray Segment Projection to Image](7631-ray-segment-projection-to-image.md)
++This method computes the bounding box of a ray segment within the normalized image plane $[0, 1] \times [0, 1]$ for backward projection. It determines the valid range of ray parameters ($t_{min}, t_{max}$) and the corresponding 2D image coordinates ($xy_{min}, xy_{max}$) where the ray intersects the image frame. It sets itself apart from sibling methods by explicitly handling near/far clipping boundaries and validity masking to ensure only rays overlapping the image frame contribute to the projection, avoiding unnecessary computation for rays missing the frame entirely.
+ 
+ ### Visibility Thresholding for Scale Backprojection
+-Visibility Thresholding for Scale Backprojection is a method to prevent scale information from being backprojected to voxels that do not correspond to the target feature (e.g., vessels), improving classification accuracy by using a visibility parameter [S2]. A voxel is determined to be not visible from the Laplacian of Gaussian (LoG) extrema if, at some point along the ray connecting the two positions, the intensity is below the threshold $\tau$. Alternatively, thresholding can be based on gradient magnitude. The parameter $\tau$ controls the sensitivity of the test. This is a fast approximation; more accurate results can be obtained with a region growing approach as a post-process [S2].
+-
+-### Ray Segment Projection to Image
+-Ray Segment Projection to Image transforms ray origins and directions from world space to camera space using the inverse extrinsics matrix, then computes intersections with the four image frame boundaries (x=0, x=1, y=0, y=1) to determine the bounding box and overlap status [S3, unofficial]. It handles validity masking by finding minimum and maximum $t$ values among frame intersections and near/far projections. The output is a `RaySegmentProjection` structure with fields `t_min`, `t_max`, `xy_min`, `xy_max`, and `overlaps_image` [S3, unofficial].
++A method to prevent scale information from being backprojected to voxels that do not correspond to the target feature (e.g., vessels), improving classification accuracy by using a visibility parameter [S2]. A voxel is determined to be not visible from the Laplacian of Gaussian (LoG) extrema if, at some point along the ray connecting the two positions, the intensity is below the threshold $\tau$. Alternatively, thresholding can be based on gradient magnitude [S2]. The parameter $\tau$ is a visibility parameter used to control the sensitivity of the visibility test. It is a thresholding value based on scalar value or gradient magnitude [S2]. This is a fast approximation. More accurate results can be obtained with a region growing approach added as a post-process based on the initial size-based classification [S2].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot V)$, where $N$ is the number of rays and $V$ is the average number of voxels intersected per ray.
+-- **Memory Complexity:** $O(H \cdot W \cdot C)$ for the image buffer, plus $O(V_{total})$ for the volume data.
+-- **Strengths:** Efficient for visualizing specific features (e.g., vessels) by suppressing background noise. Decouples feature detection from rendering [S2].
+-- **Limitations:** Visibility thresholding is an approximation. Performance depends on ray count and grid resolution.
+-- **When to Use:** When highlighting specific volumetric features (blobs, vessels) is more important than full volume rendering.
+-- **When Not to Use:** For full volume visualization or when high-accuracy visibility is required (use region growing instead) [S2].
++*   **Time Complexity:** Linear with respect to the number of voxels intersected by the ray. For a grid of size $N$, the worst-case complexity is $O(N)$ per ray, but typically much less due to early termination or sparse traversal.
++*   **Memory Complexity:** $O(1)$ per ray for traversal state, plus $O(V)$ for the volume storage, where $V$ is the total number of voxels.
++*   **Strengths:** Efficient for uniform grids; allows for early termination in alpha blending; supports non-uniform grids with minor modifications.
++*   **Limitations:** Performance degrades with high-resolution uniform grids if the entire volume must be traversed; floating-point precision issues at grid boundaries require careful handling.
++*   **When to Use:** Standard volume rendering, scale-space visualization, and any scenario requiring image-order accumulation.
++*   **When Not to Use:** When the volume is extremely sparse and hierarchical methods (like [Octree and Tree Traversal](4134-octree-and-tree-traversal.md)) offer significant speedups by skipping empty space.
+ 
+ ## Background
+-Backward projection is used in volume exploration techniques, particularly in conjunction with scale-space analysis for visualizing structures like blood vessels [S2]. It allows for interactive adjustment of visibility parameters to highlight or hide specific tissue types. The method is often implemented on GPUs for real-time performance [S2][S3, unofficial].
++Backward Projection is a fundamental technique in volume rendering, originating from the need to efficiently map 3D data to 2D displays. It is closely related to the Digital Differential Analyzer (DDA) traversal method [3061-digital-differential-analyzer-dda-traversal.md]. The method has been extended to handle scale-space data, where it is used to visualize features like vessels by backprojecting scale information [S2]. The use of diffusion-based scale-space provides robustness to noise, making the backprojection results stable even in noisy volumetric domains [S2].
+ 
+ ## Sources
+ [S1] ApaarRaina/DiffTomo, https://github.com/ApaarRaina/DiffTomo, fetched 2026-10-27 (unofficial)
+-[S2] PDF Size-based Transfer Functions: A New Volume Exploration Technique, http://carloscorrea.com/docs/vis08.pdf, fetched 2026-10-29
+-[S3] ziplab/VolSplat, https://github.com/ziplab/VolSplat, fetched 2026-10-27 (unofficial)+[S2] PDF Size-based Transfer Functions: A New Volume Exploration Technique, http://carloscorrea.com/docs/vis08.pdf, fetched 2026-10-29

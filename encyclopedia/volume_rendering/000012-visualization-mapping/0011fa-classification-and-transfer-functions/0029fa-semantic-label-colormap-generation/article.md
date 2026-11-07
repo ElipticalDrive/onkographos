@@ -1,0 +1,152 @@
+# Semantic Label Colormap Generation
+
+Also called: Deterministic HSV Colormap for Labels, Label-based Colormap Generation
+
+## Overview
+This method maps a 2D semantic label image to an RGB color image by assigning predefined colors to known classes and generating deterministic, high-contrast colors for unknown or unseen classes using a fixed HSV-to-RGB conversion. It ensures visual consistency and distinctness for arbitrary label IDs without requiring user-defined palettes for every possible class. It differs from [Categorical Color Maps](7160-categorical-color-maps.md) by using a deterministic hash-based hue generation for unknown labels rather than a fixed or random palette, and from [Style Transfer Function (1D)](777-style-transfer-function-1d.md) by operating on discrete integer labels rather than continuous scalar values.
+
+## How it works
+**Inputs:**
+*   `label_img`: A 2D array of shape $(H, W)$ containing integer class IDs.
+*   `_LABEL_COLORS`: A dictionary mapping known class IDs (0-9) to RGB tuples.
+
+**Outputs:**
+*   `color_img`: A 2D array of shape $(H, W, 3)$ with dtype `uint8`, containing the mapped RGB values.
+
+**Data Structures:**
+*   `_LABEL_COLORS`: A static mapping. The source specifies the following layout for IDs 0-9:
+    *   0: $(0, 0, 0)$
+    *   1: $(128, 128, 128)$
+    *   2: $(179, 41, 41)$
+    *   3: $(50, 142, 50)$
+    *   4: $(40, 90, 190)$
+    *   5: $(220, 160, 30)$
+    *   6: $(130, 60, 180)$
+    *   7: $(60, 180, 180)$
+    *   8: $(220, 80, 160)$
+    *   9: $(180, 180, 40)$
+
+**Parameters:**
+*   `s` (Saturation): Fixed at $0.7$ for unknown classes [S1, unofficial].
+*   `v` (Value): Fixed at $0.9$ for unknown classes [S1, unofficial].
+
+**Steps:**
+1.  Initialize `color_img` as an array of shape $(H, W, 3)$ with dtype `uint8`, typically zero-initialized.
+2.  For each known class ID $k$ in `_LABEL_COLORS`:
+    a.  Create a boolean mask $M_k$ where $M_k[i, j] = (\text{label\_img}[i, j] == k)$.
+    b.  Assign the RGB tuple $\mathbf{c}_k = \text{_LABEL_COLORS}[k]$ to all pixels where $M_k$ is true.
+3.  Identify unknown class IDs:
+    a.  Compute the set of unique IDs present in `label_img`: $U = \{\text{unique}(\text{label\_img})\}$.
+    b.  Compute the set of known IDs: $K = \{\text{keys}(\text{_LABEL_COLORS})\}$.
+    c.  Identify unseen IDs: $U_{unknown} = U \setminus K$.
+4.  For each unique unseen ID $uid \in U_{unknown}$:
+    a.  Compute the deterministic hue $h_{deg}$ in degrees:
+        $$ h_{deg} = (uid \times 47 + 13) \pmod{360} $$
+    b.  Convert HSV $(h_{deg}, s, v)$ to RGB $(r, g, b)$ using the following algorithm:
+        i.  Normalize hue to range $[0, 6)$: $h = h_{deg} / 60.0$.
+        ii. Compute chroma: $c = v \times s$.
+        iii. Compute intermediate value: $x = c \times (1 - |h \pmod 2 - 1|)$.
+        iv. Compute match value: $m = v - c$.
+        v.  Determine $(r', g', b')$ based on the integer part of $h$:
+            *   If $0 \le h < 1$: $(r', g', b') = (c, x, 0)$
+            *   If $1 \le h < 2$: $(r', g', b') = (x, c, 0)$
+            *   If $2 \le h < 3$: $(r', g', b') = (0, c, x)$
+            *   If $3 \le h < 4$: $(r', g', b') = (0, x, c)$
+            *   If $4 \le h < 5$: $(r', g', b') = (x, 0, c)$
+            *   If $5 \le h < 6$: $(r', g', b') = (c, 0, x)$
+        vi. Scale to $[0, 255]$ and convert to `uint8`:
+            $$ r = \lfloor (r' + m) \times 255 \rfloor $$
+            $$ g = \lfloor (g' + m) \times 255 \rfloor $$
+            $$ b = \lfloor (b' + m) \times 255 \rfloor $$
+    c.  Assign $(r, g, b)$ to all pixels where $\text{label\_img}[i, j] == uid$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def semantic_label_colormap(label_img: np.ndarray, label_colors: dict, s: float = 0.7, v: float = 0.9) -> np.ndarray:
+    """
+    Maps a 2D label image to an RGB color image.
+    
+    Args:
+        label_img: 2D array of integer class IDs.
+        label_colors: Dict mapping known class IDs to RGB tuples (0-255).
+        s: Saturation for unknown classes.
+        v: Value for unknown classes.
+        
+    Returns:
+        color_img: 2D array of shape (H, W, 3) with dtype uint8.
+    """
+    H, W = label_img.shape
+    color_img = np.zeros((H, W, 3), dtype=np.uint8)
+    
+    known_ids = set(label_colors.keys())
+    unique_ids = np.unique(label_img)
+    unknown_ids = [uid for uid in unique_ids if uid not in known_ids]
+    
+    # Assign known colors
+    for uid, rgb in label_colors.items():
+        mask = (label_img == uid)
+        color_img[mask] = rgb
+        
+    # Assign deterministic colors to unknown classes
+    for uid in unknown_ids:
+        # Deterministic hue calculation
+        h_deg = (int(uid) * 47 + 13) % 360
+        
+        # HSV to RGB conversion
+        h = h_deg / 60.0
+        c = v * s
+        x = c * (1 - abs(h % 2 - 1))
+        m = v - c
+        
+        if 0 <= h < 1:
+            r_prime, g_prime, b_prime = c, x, 0
+        elif 1 <= h < 2:
+            r_prime, g_prime, b_prime = x, c, 0
+        elif 2 <= h < 3:
+            r_prime, g_prime, b_prime = 0, c, x
+        elif 3 <= h < 4:
+            r_prime, g_prime, b_prime = 0, x, c
+        elif 4 <= h < 5:
+            r_prime, g_prime, b_prime = x, 0, c
+        elif 5 <= h < 6:
+            r_prime, g_prime, b_prime = c, 0, x
+        else:
+            # h=6 is equivalent to h=0 due to modulo 360, but handle for completeness
+            r_prime, g_prime, b_prime = c, x, 0
+            
+        r = int((r_prime + m) * 255)
+        g = int((g_prime + m) * 255)
+        b = int((b_prime + m) * 255)
+        
+        # Clamp to 0-255 just in case of floating point errors
+        r = max(0, min(255, r))
+        g = max(0, min(255, g))
+        b = max(0, min(255, b))
+        
+        mask = (label_img == uid)
+        color_img[mask] = [r, g, b]
+        
+    return color_img
+```
+
+## Subtopics
+
+### [SN-SVM Color and Opacity Assignment](7427-sn-svm-color-and-opacity-assignment.md)
+A method for assigning color (Hue, Saturation, Value) and opacity to voxel groups identified by SN-SVM classification, designed to enhance visual aesthetics, contrast, and boundary details without ad-hoc user input.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N = H \times W$, as each pixel is visited a constant number of times (once for known, once for unknown).
+*   **Memory Complexity:** $O(N)$ for the output image. The input label image is read-only.
+*   **Strengths:** Deterministic output for any input label ID; no need to pre-define colors for all possible classes; high contrast between unknown classes due to HSV distribution.
+*   **Limitations:** Unknown classes may have similar hues if IDs are close and the hash function does not spread them well (though 47 is a prime, aiding distribution); fixed saturation/value may not suit all visualization contexts.
+*   **When to use:** When rendering semantic segmentations with a dynamic or unknown set of classes, or when a consistent, non-random mapping is required for reproducibility.
+
+## Background
+This method is derived from implementation details in point-splatting and multi-view 2D rendering pipelines, specifically the `Luhao03/Point-Splatting-Multi-View-2D-Rendering-Pipeline` repository [S1, unofficial]. It addresses the need for robust visualization of semantic labels where the set of classes is not fixed or known in advance.
+
+## Sources
+[S1] Luhao03/Point-Splatting-Multi-View-2D-Rendering-Pipeline, https://github.com/Luhao03/Point-Splatting-Multi-View-2D-Rendering-Pipeline, fetched 2026-10-28 (unofficial)

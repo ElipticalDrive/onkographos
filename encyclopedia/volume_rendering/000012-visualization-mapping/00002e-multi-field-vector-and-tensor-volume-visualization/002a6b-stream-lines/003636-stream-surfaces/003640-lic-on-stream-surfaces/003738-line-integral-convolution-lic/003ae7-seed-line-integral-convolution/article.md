@@ -1,0 +1,171 @@
+# Seed Line Integral Convolution
+
+Also called: Seed LIC
+
+## Overview
+Seed Line Integral Convolution (Seed LIC) is a volume rendering technique for visualizing 3D vector fields that computes Line Integral Convolution textures only along field lines originating from a sparse set of seed points, rather than covering every voxel in the output volume [S1]. It solves the problem of excessive computational cost in standard Fast LIC when applied to sparse or ROI-masked input textures by avoiding unnecessary calculations in regions where field lines do not coincide with cells containing seed points [S1]. Unlike Fast LIC, which assigns values to neighboring voxels causing smearing, Seed LIC produces sparser textures with higher computational efficiency for sparse inputs, though it is more susceptible to aliasing [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D vector field $\mathbf{V}$, a scalar quantity defining a Region of Interest (ROI) (e.g., vorticity magnitude), and a density factor controlling seed point distribution [S1].
+*   **Output:** A 3D scalar texture representing the LIC result, with voxel intensities normalized to the range $[0, 255]$ [S1].
+
+**Data Structures:**
+*   **Input Texture ($T$):** A 3D grid of the same resolution as the vector field (or a specified multiple). Voxels are initialized to 0. Selected seed voxels are set to 255.
+*   **Output Texture:** A 3D grid of the same resolution as the input texture. Initialized to 0.
+*   **Seed Points:** A list of 3D coordinates $(x, y, z)$ representing the centers of voxels set to 255 in the input texture.
+
+**Parameters:**
+*   **Filter Kernel Length ($2L$):** The length of the convolution kernel. In reported experiments, set to 21 times the grid cell size [S1].
+*   **Field Line Length:** The integration length for tracing field lines. In reported experiments, set to 51 times the grid cell size [S1].
+*   **Minimum Seed Distance:** Points within three voxels of an existing seed are discarded to prevent line merging [S1].
+*   **Integration Method:** Fifth-order adaptive Runge-Kutta with a fixed sample interval [S1].
+
+**Algorithm Steps:**
+1.  **Generate Input Texture:**
+    *   Define the ROI based on the scalar quantity.
+    *   Determine the number of seed points using the density factor.
+    *   Distribute points randomly within the ROI.
+    *   Discard any point that falls within three voxels of a previously accepted seed point.
+    *   Set the voxels corresponding to the accepted seed points to 255; set all other voxels to 0 [S1].
+2.  **Initialize Output:**
+    *   Set all voxels in the output texture to 0 [S1].
+3.  **Trace Field Lines and Compute Convolution:**
+    *   For each seed point $x_0$ in the input texture:
+        *   Trace a field line $\alpha(s)$ starting at $x_0$ using the fifth-order adaptive Runge-Kutta method.
+        *   The curve $\alpha(s)$ is parameterized by arc-length $s$.
+        *   Compute the convolution integral for the voxel at $x_0$:
+            $$ I(x_0) = \int_{s_0-L}^{s_0+L} k(s-s_0) T(\alpha(s)) ds $$
+            where $k$ is the filter kernel of length $2L$, $T$ is the input texture, and $s_0$ is the arc-length parameter corresponding to $x_0$ [S1].
+        *   Assign the result $I(x_0)$ to the corresponding voxel in the output texture.
+4.  **Normalize:**
+    *   Normalize the intensity of the voxels in the output texture so that values vary from 0 to 255 [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def seed_lic(vector_field, scalar_roi, density_factor, cell_size):
+    """
+    Computes Seed LIC for a 3D vector field.
+    
+    Args:
+        vector_field: 3D array of vectors (Vx, Vy, Vz).
+        scalar_roi: 3D array of scalar values defining the ROI.
+        density_factor: Float controlling the density of seed points.
+        cell_size: Size of a single grid cell in world units.
+        
+    Returns:
+        output_texture: 3D array of normalized LIC values (0-255).
+    """
+    # 1. Generate Input Texture
+    input_texture = zeros_like(scalar_roi)
+    seed_points = []
+    
+    # Determine ROI mask (e.g., where scalar_roi > threshold)
+    roi_mask = scalar_roi > threshold # Threshold definition not given in sources [G]
+    
+    # Generate random points within ROI
+    # Note: Exact random generation logic depends on implementation, 
+    # but sources describe distributing points randomly based on density factor [S1]
+    candidate_points = generate_random_points_in_roi(roi_mask, density_factor)
+    
+    # Filter points by minimum distance (3 voxels)
+    min_dist = 3 * cell_size
+    for point in candidate_points:
+        if is_not_too_close(point, seed_points, min_dist):
+            seed_points.append(point)
+            # Set voxel to 255
+            voxel_idx = world_to_voxel(point)
+            input_texture[voxel_idx] = 255
+            
+    # 2. Initialize Output Texture
+    output_texture = zeros_like(input_texture)
+    
+    # 3. Trace Field Lines and Compute Convolution
+    # Parameters from sources [S1]
+    kernel_length = 21 * cell_size
+    field_line_length = 51 * cell_size
+    half_kernel = kernel_length / 2.0
+    
+    for seed in seed_points:
+        # Trace field line using 5th order adaptive Runge-Kutta
+        # Returns array of points along the curve alpha(s)
+        field_line = trace_field_line(vector_field, seed, field_line_length)
+        
+        # Compute convolution integral
+        # I(x0) = integral_{s0-L}^{s0+L} k(s-s0) * T(alpha(s)) ds
+        # Note: T(alpha(s)) requires interpolation of input_texture
+        intensity = compute_convolution(field_line, input_texture, kernel_length)
+        
+        # Assign to output
+        voxel_idx = world_to_voxel(seed)
+        output_texture[voxel_idx] = intensity
+        
+    # 4. Normalize
+    max_val = max(output_texture)
+    if max_val > 0:
+        output_texture = (output_texture / max_val) * 255
+        
+    return output_texture
+
+def is_not_too_close(new_point, existing_points, min_dist):
+    """Check if new_point is at least min_dist away from all existing_points."""
+    for existing in existing_points:
+        if distance(new_point, existing) < min_dist:
+            return False
+    return True
+
+def compute_convolution(field_line, input_texture, kernel_length):
+    """
+    Computes the LIC integral along the field line.
+    Simplified numerical integration.
+    """
+    # Discretize the field line into samples
+    # The sources do not specify the exact sampling rate, only the total length [G]
+    samples = sample_field_line(field_line, num_samples=100) # Placeholder for sampling strategy [G]
+    
+    integral = 0.0
+    for i, point in enumerate(samples):
+        # Get texture value at point (trilinear interpolation)
+        t_val = interpolate_texture(input_texture, point)
+        
+        # Apply kernel weight k(s - s0)
+        # Assuming uniform sampling for simplicity as exact kernel function k is not defined [G]
+        # In practice, k is a filter kernel of length 2L
+        weight = apply_kernel(i, len(samples), kernel_length)
+        
+        integral += weight * t_val
+        
+    return integral
+
+def apply_kernel(index, total_samples, kernel_length):
+    """
+    Applies a filter kernel. Exact kernel function k is not specified in sources [G].
+    Assumes a simple box or Gaussian-like weighting centered on the current sample.
+    """
+    # This is a placeholder for the specific kernel k(s-s0) mentioned in the formula [S1]
+    # The sources state k is a filter kernel of length 2L [S1]
+    return 1.0 # Placeholder [G]
+```
+
+**Edge Cases and Pitfalls:**
+*   **Aliasing:** Seed LIC is more affected by aliasing than Fast LIC due to the fewer number of calculated voxels, resulting in a less smooth appearance [S1].
+*   **Line Merging:** If seed points are too close, convolution can cause field lines to merge into bundles. This is mitigated by enforcing a minimum distance between seeds (3 voxels in experiments) [S1].
+*   **Resolution:** To preserve the thinness of individual field lines and avoid merging, the resolution of the input texture can be increased by a factor of three prior to computation [S1].
+*   **Smearing:** Unlike Fast LIC, Seed LIC does not assign values to neighboring voxels, which avoids smearing but results in sparser textures [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Significantly reduced compared to Fast LIC for sparse input textures. In experiments on a synthetic 64x64x64 field, Seed LIC took 26.86 seconds compared to 25 hours for Fast LIC on a sparse texture [S1].
+*   **Memory Complexity:** Requires storage for the input texture (sparse), output texture, and seed points. The input texture is sparse, but stored as a full grid with 0s and 255s [S1].
+*   **Performance:** On an SGI ONYX 3800 (500 MHz R14000 processor), Seed LIC on a 398x298x798 texture took 26.86 seconds, while Fast LIC took 25 hours [S1].
+*   **Strengths:** Drastically reduces computational cost for sparse or ROI-masked vector fields. Avoids unnecessary computations in areas where field lines do not coincide with seed points [S1].
+*   **Limitations:** More susceptible to aliasing than Fast LIC. Produces sparser textures which may require additional post-processing (e.g., isotropic 3x3x3 convolution) to improve 3D perception and reduce aliasing [S1]. Higher computational cost for dense fields compared to Fast LIC if the ROI is large [S1].
+*   **When to Use:** When visualizing vector fields with sparse features or when a Region of Interest (ROI) is defined, and computational efficiency is critical.
+*   **When Not to Use:** When a smooth, dense texture is required without post-processing, or when the vector field is dense and uniform, making Fast LIC more efficient [S1].
+
+## Background
+Seed LIC was proposed by Helgeland and Andreassen in 2004 as a method for effective volume visualization of three-dimensional vector fields [S1]. It addresses the limitations of traditional LIC, which is commonly used for 2D or surface-based visualization, by extending it to 3D volumes while managing the perceptual difficulties of dense 3D displays [S1]. The method exploits the sparsity of input textures masked by a Region of Interest (ROI) function, such as vorticity magnitude or temperature, to highlight important features [S1]. It was implemented and tested on synthetic vector fields and real-world data, such as shock wave simulations and solar vorticity fields, using volume rendering techniques like VoluViz [S1]. The technique is often combined with limb darkening shading to reveal depth relations among field lines [S1].
+
+## Sources
+[S1] Visualization of Vector Fields Using Seed LIC and Volume Rendering, https://www.cs.unc.edu/~taylorr/Comp715/papers/01333665.pdf, fetched 2026-10-27

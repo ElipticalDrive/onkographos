@@ -1,0 +1,238 @@
+--- v002.md
++++ v003.md
+@@ -4,51 +4,36 @@
+ 
+ ## Overview
+-Isomorphic Node Recycling is a compression method that converts a Sparse Voxel Octree into a Directed Acyclic Octal Graph (DAOG) by reusing structurally identical (isomorphic) nodes [S1, unofficial]. It differs from bottom-up reduction [Bottom-up SVO to DAG Reduction](898-bottom-up-svo-to-dag-reduction.md) by employing a top-down traversal with a hash table to detect and merge identical subtrees during insertion, rather than sorting and compacting nodes after the tree is fully built.
++Isomorphic Node Recycling is a compression method that converts a standard Sparse Voxel Octree into a Directed Acyclic Octal Graph (DAOG) by reusing structurally identical (isomorphic) nodes [S1, unofficial]. Unlike standard octrees where every node is a distinct memory object, this method identifies nodes with identical child structures or leaf values and merges them into a single shared instance, reducing memory footprint [S1, unofficial]. It is distinguished from [Bottom-up SVO to DAG Reduction](898-bottom-up-svo-to-dag-reduction.md) by its top-down, hash-based insertion strategy during construction, and from [Pointerless Sparse Voxel Directed Acyclic Graph (PSVDAG)](949-pointerless-sparse-voxel-directed-acyclic-graph-psvdag.md) by its reliance on a hash table for structural equality checks rather than implicit indexing [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A voxel $v$, a current node $n$, a bitstream $b$ encoding the path, a depth counter $d$, and a hash table $ht$ mapping node identities to unique instances.
+-**Outputs:** The resulting node (or reference to an existing isomorphic node) and the updated hash table.
++**Inputs:** A voxel $v$, a current node $n$, a bitstream $b$ encoding the spatial position, the current depth $d$, and a hash table $ht$ mapping structural hashes to node references.
++**Outputs:** The resulting node reference and the updated hash table.
+ 
+ **Data Structures:**
+-*   **Node:** Contains pointers to 8 children and a 64-bit integer for leaf data.
++1.  **Node:** Contains an array of 8 child pointers (or indices in serialized form) and a 64-bit integer `leafs` for leaf data [S1, unofficial].
+     ```cpp
+     struct Node {
+-        Node* children[8];
+-        int64_t leafs;
++        Node* children[8]; // Pointers to child nodes
++        int64_t leafs;     // Packed leaf data (e.g., 64 voxels of 1-bit existence or color)
+     };
+     ```
+-*   **Hash Table:** Maps a computed hash value (based on structure and content) to a unique node instance.
++2.  **Hash Table:** Maps a computed structural hash to a unique node instance. Used to detect isomorphism [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Traversal:** Recursively traverse the octree. The bitstream $b$ is processed in groups of 3 bits to determine the child index (0-7) at each level [S1, unofficial].
+-2.  **Internal Node Processing ($d > 0$):**
+-    *   Determine the child index $g$ from the bitstream group at depth $d$.
+-    *   Retrieve the existing child $c$ from node $n$ at index $g$.
+-    *   If $c$ exists:
+-        *   Check if $c$ is already in the hash table.
+-        *   If yes, replace $c$ with the unique instance found in the hash table.
+-        *   If no, recursively process $c$ with depth $d+1$ (note: source text specifies $d+1$, though logically depth usually decreases; this is implemented as stated) [S1, unofficial].
+-    *   If $c$ does not exist:
+-        *   Create a new empty node $c$.
+-        *   Recursively process $c$ with depth $d+1$ [S1, unofficial].
+-    *   Update node $n$'s child at index $g$ to the returned node.
+-3.  **Leaf Node Processing ($d = 0$):**
+-    *   Create a new node $n'$ containing the voxel $v$.
+-    *   Check if $n'$ is in the hash table.
+-    *   If yes, replace $n'$ with the found instance.
+-    *   If no, insert $n'$ into the hash table.
+-    *   Return $n'$ and the updated hash table.
++The method traverses the tree recursively. For each voxel insertion at depth $d$:
+ 
+-**Hash Function (Structure-Dependent):**
+-To ensure isomorphic nodes map to the same bucket, a recursive hash function is used [S1, unofficial].
+-*   **Input:** Node $n$.
+-*   **Logic:**
+-    *   If $n$ is not a voxel (internal node):
+-        *   Initialize hash $h = 0$.
+-        *   For each child $c$ in $n$'s children:
+-            *   $h \leftarrow h \oplus \text{recursive\_hash}(c)$
+-        *   Return $h$.
+-    *   If $n$ is a voxel:
+-        *   Return the voxel's information (e.g., color, density) as the hash value.
++1.  **Check Depth:** If $d > 0$ (internal node):
++    a.  Extract the child index from the bitstream. The source specifies `group(b, d, 3)`, implying 3 bits per level to select one of 8 children [S1, unofficial].
++    b.  Retrieve the child $c$ from the current node $n$.
++    c.  **Reuse Check:** If $c$ exists and is already in the hash table, replace $c$ with the canonical node found in the hash table [S1, unofficial].
++    d.  **Create New:** If $c$ does not exist, create a new empty node [S1, unofficial].
++    e.  **Recurse:** Call the algorithm recursively on child $c$ with depth $d+1$ (Note: The source text explicitly states $d+1$, though standard octree traversal typically decreases depth; this is implemented as cited) [S1, unofficial].
++    f.  Update the parent node's child pointer to the returned node [S1, unofficial].
++
++2.  **Leaf Level:** If $d = 0$ (leaf node):
++    a.  Create a new node $n'$ containing the voxel data $v$ [S1, unofficial].
++    b.  **Reuse Check:** If $n'$ is in the hash table, replace $n'$ with the found node [S1, unofficial].
++    c.  **Insert:** Otherwise, insert $n'$ into the hash table [S1, unofficial].
++    d.  Return $n'$ and the updated hash table [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -56,71 +41,84 @@
+ def insert_voxel(v, n, b, d, ht):
+     """
+-    Insert voxel v into node n using bitstream b at depth d.
+-    Reuses isomorphic nodes via hash table ht.
++    Insert a voxel into the DAOG, reusing isomorphic nodes.
++    :param v: Voxel data
++    :param n: Current node
++    :param b: Bitstream representing spatial position
++    :param d: Current depth
++    :param ht: Hash table {hash_value: node_reference}
++    :return: (node, updated_hash_table)
+     """
+     if d > 0:
+-        # Get child index from bitstream group (3 bits)
+-        g = get_bitstream_group(b, d, 3)
++        # Extract child index from bitstream (3 bits)
++        child_idx = get_bits(b, d, 3)
+         
+         # Get existing child or create new
+-        c = n.children[g]
++        c = n.children[child_idx]
+         if c is not None:
+-            # Check hash table for existing isomorphic node
+-            if c in ht:
+-                c = ht[c]
+-            else:
+-                # Recursively process existing child
+-                # Note: Source specifies d+1, though typically depth decreases
+-                c, ht = insert_voxel(v, c, b, d + 1, ht)
++            # Check if this child structure is already in the hash table
++            # Note: In a real implementation, one would hash 'c' to look it up.
++            # The source implies a direct lookup or a pre-computed hash association.
++            # We assume 'c' has a hash attribute or we compute it.
++            h = compute_hash(c)
++            if h in ht:
++                c = ht[h]
+         else:
+-            c = Node()
+-            c, ht = insert_voxel(v, c, b, d + 1, ht)
++            c = create_node()
++            
++        # Recurse. Source specifies d+1.
++        c, ht = insert_voxel(v, c, b, d + 1, ht)
+         
+-        n.children[g] = c
++        # Update parent pointer
++        n.children[child_idx] = c
+         return n, ht
+     else:
+         # Leaf level
+-        n_prime = Node()
+-        n_prime.leafs = v.data
+-        n_prime.children = [None] * 8
++        n_prime = create_leaf_node(v)
+         
+-        if n_prime in ht:
+-            n_prime = ht[n_prime]
++        # Check for isomorphism (identical leaf data)
++        h = compute_hash(n_prime)
++        if h in ht:
++            n_prime = ht[h]
+         else:
+-            ht[n_prime] = n_prime
++            ht[h] = n_prime
+             
+         return n_prime, ht
+ 
+-def recursive_hash(n):
++def compute_hash(n):
+     """
+-    Compute hash based on node structure and content.
++    Structure-dependent hash function.
++    :param n: Node
++    :return: Hash value
+     """
+-    if not n.is_voxel:
++    if not is_voxel(n):
+         h = 0
+         for c in n.children:
+             if c is not None:
+-                h = h ^ recursive_hash(c)
++                # Recursive hash of child
++                child_hash = compute_hash(c)
++                h = h ^ child_hash
+         return h
+     else:
+-        return n.leafs
++        return n.info # Hash of leaf data
+ ```
+ 
+ **Parameters:**
+-*   **Hash Table:** Stores references to unique node structures. Optimizations include memoization to avoid recursive searches and uniform distribution of nodes in buckets [S1, unofficial].
++*   **Hash Table:** Essential for $O(1)$ average-time lookup of isomorphic nodes [S1, unofficial].
++*   **Bitstream Grouping:** 3 bits are used to index the 8 children at each level [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Depth Counter:** The source algorithm specifies incrementing depth ($d+1$) during recursion for internal nodes, which is atypical for standard octree traversal where depth usually decrements. This must be implemented exactly as stated in the source [S1, unofficial].
+-*   **Hash Collisions:** The structure-dependent hash uses XOR. While efficient, it may produce collisions for different structures (e.g., $A \oplus B = B \oplus A$). The source does not specify collision resolution beyond the hash table lookup, implying the hash is used as a primary key for identity [S1, unofficial].
++*   **Hash Collisions:** The XOR-based hash may produce collisions for different structures. The source mentions optimizations to distribute nodes uniformly in buckets, but does not specify the full collision resolution strategy beyond the hash function itself [S1, unofficial].
++*   **Depth Direction:** The source explicitly uses $d+1$ in the recursive call for internal nodes, which is non-standard for depth-counting (usually $d-1$). Implementers should verify if $d$ represents "distance from leaf" or "distance from root" [S1, unofficial].
++*   **Memory Management:** Reusing nodes means multiple parents point to the same child. Reference counting or garbage collection is required if nodes are modified, though the source implies a static construction phase [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Octree Serialization for GPU
+-A method to convert the sparse Octree/DAOG into a contiguous memory buffer for GPU transmission [S1, unofficial].
+-*   **Definition:** Reaggregates nodes into a contiguous vector, replacing memory pointers with indices to allow relocation and efficient GPU access.
++A method to convert the DAOG into a contiguous memory buffer for GPU transmission, replacing pointers with indices [S1, unofficial].
++*   **Definition:** Reaggregating nodes into a contiguous vector to eliminate memory gaps and replacing memory pointers with indices into the vector [S1, unofficial].
+ *   **Steps:**
+-    1.  Reaggregate nodes into a contiguous vector to eliminate gaps.
+-    2.  The first entry is always the root node.
+-    3.  Replace memory pointers with `int32_t` indices into the vector.
+-    4.  Serialize using a Depth-First traversal [S1, unofficial].
++    1.  Reaggregate nodes into a contiguous vector. The first entry is always the root node [S1, unofficial].
++    2.  Replace memory pointers with `int32_t` indices pointing to child nodes in the vector [S1, unofficial].
++    3.  Serialize using a Depth First traversal [S1, unofficial].
+ *   **Layout:**
+     ```cpp
+@@ -130,24 +128,28 @@
+     };
+     ```
+-*   **When to choose:** When the DAOG needs to be transferred from CPU to GPU or stored in a flat buffer.
++*   **Characteristics:** The serialization order is Depth First, chosen arbitrarily due to time constraints [S1, unofficial].
+ 
+ ### Structure-Dependent Hash Function
+-A specific hash function implementation for identifying isomorphic nodes [S1, unofficial].
+-*   **Definition:** Computes a hash value based on the recursive structure of the node's children.
+-*   **Logic:**
+-    *   Internal Node: $h = 0$; for each child $c$, $h \leftarrow h \oplus \text{recursive\_hash}(c)$.
+-    *   Voxel Node: Returns the voxel's info (e.g., `info(n)`).
+-*   **Optimization:** The source mentions a second optimization involving a linear congruential generator-like step: $k \leftarrow (a \cdot k + b) \pmod p$ applied after the XOR accumulation to distribute nodes uniformly in buckets [S1, unofficial].
++A specific hash function used to identify isomorphic nodes based on their recursive structure [S1, unofficial].
++*   **Definition:** Computes a hash value by recursively hashing children and combining them [S1, unofficial].
++*   **Algorithm:**
++    1.  If the node is not a voxel (internal node):
++        a.  Initialize hash $h = 0$.
++        b.  For all children $c$ in the node: $h \leftarrow h \oplus \text{recursive}(c)$ [S1, unofficial].
++        c.  Return $h$.
++    2.  If the node is a voxel:
++        a.  Return `info(n)` (the leaf data) [S1, unofficial].
++*   **Optimization:** The source mentions a second optimization involving a linear congruential generator ($k \leftarrow (a \cdot k + b) \mod p$) to distribute nodes uniformly in buckets, but the primary definition provided is the XOR-based recursive hash [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the hash table operations. Insertion and lookup are $O(1)$ on average, but hash computation is recursive, proportional to the subtree size.
+-*   **Memory Complexity:** Reduces memory usage by sharing identical subtrees. The hash table adds overhead.
+-*   **Strengths:** Effective for scenes with repetitive structures. Simple to implement with a hash table.
+-*   **Limitations:** The hash function using XOR may have collisions. The source notes that the hash table reduces algorithm efficiency, requiring optimizations like memoization [S1, unofficial].
+-*   **When to use:** When memory bandwidth is a bottleneck and the scene has high redundancy.
+-*   **When not to use:** When the scene has low redundancy, as the hash table overhead may outweigh compression benefits.
++*   **Time Complexity:** Insertion is $O(D)$ per voxel, where $D$ is the tree depth, plus the cost of hash table operations. Hash computation requires traversing the subtree, potentially $O(N)$ where $N$ is the number of nodes in the subtree, unless memoization is used [S1, unofficial].
++*   **Memory Complexity:** Reduced compared to a standard octree by sharing isomorphic nodes. The hash table adds overhead proportional to the number of unique node structures [S1, unofficial].
++*   **Strengths:** Significant compression for scenes with repetitive structures (e.g., natural landscapes, man-made objects with repeated geometry) [S1, unofficial].
++*   **Limitations:** Hash table lookup overhead can reduce efficiency. The XOR hash may suffer from collisions. The source notes that the hash table reduces algorithm efficiency and required optimizations (memoization, uniform distribution) [S1, unofficial].
++*   **When to use:** When memory bandwidth is a bottleneck and the scene contains significant structural redundancy.
++*   **When not to use:** When the scene is highly unique (low isomorphism) or when dynamic updates are frequent (requiring hash table invalidation) [S1, unofficial].
+ 
+ ## Background
+-Originated in a thesis by an unspecified author (unofficial source) focusing on compression and efficiency of Sparse Voxel Octrees for global illumination [S1, unofficial]. The method was developed to leverage the implicit position deduction of octrees and the similarity between nodes to compress the structure by reusing isomorphic nodes.
++Originated in the thesis "Estudio de la compresión y la eficiencia del Sparse Voxel Octree en el cálculo de la Iluminación Global" (Study of the compression and efficiency of the Sparse Voxel Octree in Global Illumination calculation) [S1, unofficial]. The method was developed to improve memory efficiency for global illumination calculations by exploiting the spatial redundancy in octree structures [S1, unofficial]. It transforms the octree into a Directed Acyclic Octal Graph (DAOG) [S1, unofficial].
+ 
+ ## Sources

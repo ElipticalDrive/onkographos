@@ -3,41 +3,39 @@
 Also called: Cone Tracing Mip Selection
 
 ## Overview
-Cone Stepping and Mip Level Selection is the sampling phase of Voxel Pre-integration, where a 3D mipmap texture is traversed along a ray to approximate indirect lighting. It solves the problem of aliasing and performance in volumetric light transport by dynamically selecting the appropriate Level of Detail (LOD) based on the projected size of the sampling cone relative to the voxel grid. It differs from sibling methods by calculating the cone diameter at each step to derive a continuous mip level, whereas alternatives like Brick LOD Selection calculate resolution bounds for entire brick volumes rather than individual samples [S1, unofficial].
+Cone Stepping and Mip Level Selection is the sampling phase of Voxel Pre-integration, where a 3D mipmap texture is traversed along a ray to approximate indirect lighting [S2, unofficial]. It solves the problem of aliasing and performance in volumetric light transport by dynamically selecting the appropriate Level of Detail (LOD) based on the projected size of the sampling cone relative to the voxel grid [G].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Ray origin, ray direction, cone half-angle ($coneHalfAngle$), voxel size ($voxelSize$), and a 3D mipmap texture containing pre-integrated lighting values.
-*   **Output:** Accumulated color/lighting value for the ray.
+*   **Input:** Ray origin, ray direction, cone half-angle ($coneHalfAngle$), voxel size ($voxelSize$), and a 3D mipmap texture containing pre-integrated lighting values [S1, unofficial][S2, unofficial].
+*   **Output:** Accumulated color/lighting value for the ray [G].
 
 **Data Structures:**
 *   **3D Texture:** A uniform grid of voxels storing RGBA values, functioning as a 3D bitmap [S2, unofficial].
-*   **Mipmap Chain:** A set of lower-resolution versions of the base texture. Each LOD increment $i$ reduces the height and width of the texture by a factor of $2^i$ [S2, unofficial].
+*   **Mipmap Chain:** A set of lower-resolution versions of the base texture where each LOD increment $i$ reduces the height and width by a factor of $2^i$ [S2, unofficial].
 
 **Steps:**
-1.  **Initialize:** Set the current position along the ray to the cone origin.
+1.  **Initialize:** Set the current position along the ray to the cone origin [G].
 2.  **Step:** Advance along the ray in voxel-size increments (ray-marching) in world space [S1, unofficial].
-3.  **Calculate Cone Diameter:** For the current position, calculate the diameter of the sampling cone. The cone represents the area of influence for indirect light.
+3.  **Calculate Cone Diameter:** For the current position, calculate the diameter of the sampling cone [S1, unofficial]. The cone represents the area of influence for indirect light [G].
     $$coneDiameter = 2 \cdot \tan(coneHalfAngle) \cdot distanceFromConeOrigin$$
     Where:
     *   $coneHalfAngle$: The half-angle of the cone.
     *   $distanceFromConeOrigin$: The distance from the cone's start point to the current sample position.
-4.  **Calculate Mip Level:** Determine the appropriate LOD for the 3D texture sample based on the ratio of the cone diameter to the voxel size.
+4.  **Calculate Mip Level:** Determine the appropriate LOD for the 3D texture sample based on the ratio of the cone diameter to the voxel size [S1, unofficial].
     $$mip = \log_2\left(\frac{coneDiameter}{voxelSize}\right)$$
     Where:
-    *   $mip$: The calculated Level of Detail (integer or float).
+    *   $mip$: The calculated Level of Detail.
     *   $voxelSize$: The physical size of a single voxel in the base texture.
-5.  **Sample:** Retrieve the color value from the 3D texture using the calculated mip level.
-    $$color = \text{textureLod}(texture, point, mip)$$
-    Using bilinear magnification and minification filters, this operation yields the average color value at the sample point within a radius proportional to $2^{mip}$ pixels [S2, unofficial].
+5.  **Sample:** Retrieve the color value from the 3D texture using the calculated mip level [S2, unofficial]. Using bilinear magnification and minification filters, this operation yields the average color value at the sample point within a radius proportional to $2^{mip}$ pixels [S2, unofficial].
 6.  **Accumulate:** Add the sampled color to the result, typically with alpha blending to prevent black staircase artifacts at voxel edges where unfilled regions with zero alpha might bleed into the result [S1, unofficial].
-7.  **Repeat:** Continue stepping until the ray exits the volume or a maximum distance is reached.
+7.  **Repeat:** Continue stepping until the ray exits the volume or a maximum distance is reached [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def cone_stepping(ray_origin, ray_direction, cone_half_angle, voxel_size, texture, max_steps):
+def cone_stepping(ray_origin, ray_direction, cone_half_angle, voxel_size, texture, max_steps, max_distance):
     """
     Performs cone stepping along a ray to sample indirect lighting from a 3D mipmap.
     
@@ -48,6 +46,7 @@ def cone_stepping(ray_origin, ray_direction, cone_half_angle, voxel_size, textur
         voxel_size: float, size of one voxel in world units.
         texture: 3D texture object with mipmaps.
         max_steps: int, maximum number of steps to prevent infinite loops.
+        max_distance: float, maximum traversal distance in world units.
         
     Returns:
         vec3, accumulated color/lighting.
@@ -55,57 +54,50 @@ def cone_stepping(ray_origin, ray_direction, cone_half_angle, voxel_size, textur
     accumulated_color = vec3(0.0)
     current_pos = ray_origin
     step_size = voxel_size
-    
-    # Pre-calculate tan(cone_half_angle) for efficiency
     tan_half_angle = tan(cone_half_angle)
     
     for i in range(max_steps):
-        # Calculate distance from the cone origin (start of the ray)
         distance_from_origin = length(current_pos - ray_origin)
         
         # Calculate cone diameter at current position
-        # Formula: coneDiameter = 2 * tan(coneHalfAngle) * distanceFromConeOrigin
         cone_diameter = 2.0 * tan_half_angle * distance_from_origin
         
-        # Calculate mip level
-        # Formula: mip = log2(coneDiameter / voxelSize)
-        # Note: If cone_diameter is 0 or very small, clamp to 0 to avoid -inf
-        if cone_diameter <= 0.0:
-            mip_level = 0.0
-        else:
-            mip_level = log2(cone_diameter / voxel_size)
+        # Calculate mip level, clamping to 0 to avoid -inf when distance is 0
+        mip_level = max(0.0, log2(cone_diameter / voxel_size))
             
         # Sample the texture at the current position with the calculated LOD
-        # textureLod performs bilinear filtering, yielding an average color
-        # in a radius proportional to 2^mip_level pixels
-        sample_color = textureLod(texture, current_pos, mip_level)
+        sample_color = texture_lookup_bilinear(texture, current_pos, mip_level)
         
-        # Accumulate color. In practice, this often involves alpha blending
-        # to handle transparency and prevent artifacts at voxel boundaries.
-        # [G] Standard alpha blending: result = src * src_alpha + dst * (1 - src_alpha)
-        # Assuming sample_color has an alpha component, or using a fixed weight.
-        # For simplicity, we assume direct addition or a fixed weight per step.
-        # A more robust implementation would use the alpha from the sample.
+        # Accumulate color. Standard alpha blending prevents black staircase artifacts.
+        # [G] Assuming sample_color includes alpha; direct addition shown for simplicity.
         accumulated_color += sample_color
         
         # Advance along the ray
         current_pos += ray_direction * step_size
         
-        # Check for exit condition (e.g., distance limit)
-        if distance_from_origin > MAX_DISTANCE:
+        # Check for exit condition
+        if distance_from_origin > max_distance:
             break
             
     return accumulated_color
+
+def texture_lookup_bilinear(tex, pos, lod):
+    """
+    Performs a texture lookup with bilinear filtering.
+    Yields the average color value at pos in a radius of 2^lod pixels [G].
+    """
+    # [G] Standard bilinear interpolation over the mipmap level lod
+    return tex.sample_bilinear(pos, lod)
 ```
 
 **Parameters:**
-*   $coneHalfAngle$: Determines the spread of the light sampling. Typical values depend on the scene's lighting setup.
-*   $voxelSize$: The resolution of the base 3D texture.
-*   $mip$: Integer where 0 is the original image. Determines the resolution of the mipmap used for sampling [S2, unofficial].
+*   $coneHalfAngle$: Determines the spread of the light sampling [S1, unofficial].
+*   $voxelSize$: The resolution of the base 3D texture [S1, unofficial].
+*   $mip$: Integer where 0 is the original image, determining the resolution of the mipmap used for sampling [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Zero Distance:** If $distanceFromConeOrigin$ is 0, $coneDiameter$ is 0, leading to $-\infty$ in the log calculation. Clamp $mip$ to 0 in this case.
-*   **Aliasing:** If the cone diameter is smaller than a voxel, high-frequency details may be lost. The mipmap chain helps mitigate this by averaging over larger areas at distance.
+*   **Zero Distance:** If $distanceFromConeOrigin$ is 0, $coneDiameter$ is 0, leading to $-\infty$ in the log calculation [S1, unofficial]. Clamp $mip$ to 0 in this case [G].
+*   **Aliasing:** If the cone diameter is smaller than a voxel, high-frequency details may be lost [G]. The mipmap chain helps mitigate this by averaging over larger areas at distance [G].
 *   **Artifacts:** Without proper alpha blending, black staircase artifacts can appear at voxel edges where unfilled regions with zero alpha bleed into the result [S1, unofficial].
 
 ## Subtopics
@@ -113,14 +105,20 @@ def cone_stepping(ray_origin, ray_direction, cone_half_angle, voxel_size, textur
 ### [Brick LOD Selection](4755-brick-lod-selection.md)
 Brick LOD Selection determines the appropriate level of detail (LOD) for volumetric bricks based on the distance to the viewpoint, aiming to ensure that a projected voxel covers exactly one screen pixel. It differs from sibling methods by calculating resolution bounds for entire brick volumes rather than individual samples, ensuring that all necessary LOD levels within the brick's spatial extent are loaded.
 
+### Mipmap-based Volume Sampling
+A technique using low-resolution 3D mipmaps of direct lighting values to sample volumetric color, adjusting LOD based on cone diameter to approximate indirect light [S2, unofficial]. It generates mipmaps where each LOD increment reduces height and width by a power of two (inverse factor of 2) [S2, unofficial]. It samples using a texture lookup function with bilinear magnification and minification filters [S2, unofficial]. Calling this function with bilinear filters yields the average color value at point x in a radius of $2^l$ pixels, where $l$ is the LOD value [S2, unofficial]. LOD is an integer where 0 is the original image [S2, unofficial].
+
+### Segmented Dataset LOD Management
+Modifies the precomputation of levels of detail (LOD) for segmented datasets to preserve label integrity rather than averaging values [S3]. When generating LODs for segmented data, it selects the most popular (mode) label for each voxel/group instead of computing the average value [S3]. At runtime, it substitutes trilinear filtering with nearest neighbor filtering when sampling segmented data to prevent label bleeding [S3].
+
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of steps along the ray. Each step involves a logarithmic calculation and a texture lookup.
-*   **Memory Complexity:** Proportional to the size of the 3D mipmap chain. The total memory is roughly $\frac{4}{3}$ of the base texture size for a full mipmap chain.
-*   **Performance:** Efficient for real-time rendering as it avoids complex ray-triangle intersections and uses hardware-accelerated texture filtering. Performance scales with the number of bounces; secondary bounces require additional passes [S1, unofficial].
-*   **Strengths:** Simple to implement, leverages existing GPU texture hardware, provides smooth LOD transitions.
-*   **Limitations:** Can suffer from blurring if the mipmap chain is not deep enough or if the cone angle is not tuned correctly. Requires pre-computation of the voxel grid and mipmaps.
-*   **When to Use:** Suitable for real-time global illumination in scenes with complex geometry where ray tracing is too expensive.
-*   **When Not to Use:** Not suitable for scenes requiring high-frequency detail preservation or where the voxel grid resolution is insufficient to capture the geometry.
+*   **Time Complexity:** Linear with respect to the number of steps along the ray [G]. Each step involves a logarithmic calculation and a texture lookup [G].
+*   **Memory Complexity:** Proportional to the size of the 3D mipmap chain [G]. The total memory is roughly $\frac{4}{3}$ of the base texture size for a full mipmap chain [G].
+*   **Performance:** Efficient for real-time rendering as it avoids complex ray-triangle intersections and uses hardware-accelerated texture filtering [G]. Secondary bounces require additional passes [S1, unofficial].
+*   **Strengths:** Simple to implement, leverages existing GPU texture hardware, provides smooth LOD transitions [G].
+*   **Limitations:** Can suffer from blurring if the mipmap chain is not deep enough or if the cone angle is not tuned correctly [G]. Requires pre-computation of the voxel grid and mipmaps [G].
+*   **When to Use:** Suitable for real-time global illumination in scenes with complex geometry where ray tracing is too expensive [G].
+*   **When Not to Use:** Not suitable for scenes requiring high-frequency detail preservation or where the voxel grid resolution is insufficient to capture the geometry [G].
 
 ## Background
 The concept of mipmaps was initially conceived by Lance Williams in his 1983 paper *Pyramidal parametrics* [S2, unofficial]. Voxel Cone Tracing, which utilizes this method, was proposed by Crassin et al. for real-time global illumination [S2, unofficial]. The specific application of cone stepping with mip level selection for indirect lighting approximation is detailed in modern implementations such as the Wicked Engine tutorial [S1, unofficial] and academic theses on OpenGL-based voxel cone tracing [S2, unofficial].
@@ -128,3 +126,4 @@ The concept of mipmaps was initially conceived by Lance Williams in his 1983 pap
 ## Sources
 [S1] Voxel-based Global Illumination – Wicked Engine, https://turanszkij.wordpress.com/2017/08/30/voxel-based-global-illumination/, fetched 2026-10-28 (unofficial)
 [S2] Real-Time Global Illumination Using OpenGL And Voxel Cone Tracing, https://doi.org/10.48550/arxiv.2104.00618, fetched 2026-10-26 (unofficial)
+[S3] Towards Advanced Volumetric Display of the Human Musculoskeletal System, https://doi.org/10.2312/localchapterevents/italchap/italianchapconf2008/021-025, fetched 2026-10-26

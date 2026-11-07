@@ -1,0 +1,96 @@
+# Bézier Curve Signed Distance Function
+
+Also called: Distance to Generalized Cylinder (Bézier Curve), Offset surface distance, Skeletal model distance
+
+## Overview
+This method computes the exact signed distance from a query point to the global offset surface of a cubic Bézier space curve, effectively defining a generalized cylinder with a constant radius around the curve. It differs from polynomial approximations by treating the offset surface geometrically, thereby avoiding the precision loss associated with low-degree algebraic approximations and the complexity of high-degree implicit representations [S1].
+
+## How it works
+**Inputs:**
+- Query point $x \in \mathbb{R}^3$.
+- Cubic Bézier curve defined by control points $P_0, P_1, P_2, P_3 \in \mathbb{R}^3$.
+- Radius $R$ of the generalized cylinder.
+
+**Outputs:**
+- Signed distance $d(x)$ from $x$ to the surface of the cylinder.
+
+**Data Structures:**
+- The curve is represented parametrically as $p(u)$ for $u \in [0, 1]$.
+- The derivative $p'(u)$ is required for the orthogonality condition.
+
+**Steps:**
+1.  **Coordinate Transformation:** Without loss of generality, shift the coordinate system so that the query point $x$ is at the origin. Let the relative position be $x' = x_{original} - x$. The distance calculation is performed relative to this origin [S1].
+2.  **Formulate Orthogonality Condition:** The closest point $p(u)$ on the curve to the query point (now at the origin) satisfies the condition that the vector from the curve to the query point is orthogonal to the curve's tangent. This yields the scalar equation:
+    $$ (x' - p(u)) \cdot p'(u) = 0 $$
+    where $p(u)$ is the cubic Bézier function and $p'(u)$ is its derivative [S1].
+3.  **Convert to 1D Bézier Form:** Expand the dot product equation from Step 2. Since $p(u)$ is cubic and $p'(u)$ is quadratic, the resulting polynomial in $u$ is of degree 5. Convert this degree-5 polynomial into a degree-5 1D Bézier curve representation. This conversion utilizes standard basis transformation techniques (e.g., Schneider 1990) [S1].
+4.  **Solve for Roots:** Solve the degree-5 1D Bézier curve for roots within the domain $u \in [0, 1]$. Use an efficient root-finding algorithm for Bézier curves, such as the subdivision-based method described by Rockwood et al. (1989) [S1].
+5.  **Select Closest Point:** Among the valid roots found in $[0, 1]$, identify the parameter $u^*$ that minimizes the distance $\|x' - p(u)\|$. If no roots exist in $(0, 1)$, the closest point is one of the endpoints ($u=0$ or $u=1$).
+6.  **Compute Distance:** Calculate the Euclidean distance from the query point to the closest point on the curve:
+    $$ d_{curve} = \| x' - p(u^*) \| $$
+7.  **Apply Radius:** The signed distance to the offset surface is:
+    $$ d(x) = d_{curve} - R $$
+    The sign is positive outside the cylinder and negative inside [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def bezier_sdf(x_query, P0, P1, P2, P3, R):
+    # Shift query point to origin relative to calculation
+    x = x_query # In the source, x is assumed origin; if not, x = x_query - origin
+    
+    # Define cubic Bezier curve p(u) and its derivative p'(u)
+    # p(u) = (1-u)^3*P0 + 3*(1-u)^2*u*P1 + 3*(1-u)*u^2*P2 + u^3*P3
+    # p'(u) = 3*(1-u)^2*(P1-P0) + 6*(1-u)*u*(P2-P1) + 3*u^2*(P3-P2)
+    
+    # Construct the polynomial f(u) = (x - p(u)) . p'(u)
+    # This results in a degree-5 polynomial.
+    # Convert this polynomial to degree-5 Bezier control points.
+    # Let these control points be B_0 ... B_5.
+    
+    # Find roots of the Bezier curve in [0, 1]
+    # Using Rockwood et al. (1989) subdivision method
+    roots = find_bezier_roots(B_0, ..., B_5, t_min=0.0, t_max=1.0)
+    
+    # Add endpoints if no interior roots found or to ensure boundary check
+    candidates = roots + [0.0, 1.0]
+    
+    min_dist_sq = infinity
+    closest_u = 0.0
+    
+    for u in candidates:
+        if 0.0 <= u <= 1.0:
+            p_u = evaluate_bezier(P0, P1, P2, P3, u)
+            dist_sq = dot(x - p_u, x - p_u)
+            if dist_sq < min_dist_sq:
+                min_dist_sq = dist_sq
+                closest_u = u
+                
+    dist_curve = sqrt(min_dist_sq)
+    
+    return dist_curve - R
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** High-degree polynomials (degree 5) can suffer from numerical instability. Using the Bézier control point representation for root finding is preferred over direct polynomial coefficient solving to maintain precision [S1].
+- **Boundary Conditions:** The closest point may lie at the endpoints of the Bézier segment. The root-finding step must be combined with endpoint checks [S1].
+- **Degenerate Input:** If control points are collinear or coincident, the curve degenerates. The orthogonality condition may become ill-defined or trivial.
+
+## Subtopics
+
+### [Footvector Representation](8501-footvector-representation.md)
+A foot mapping-based representation of curves and surfaces that serves as a geometric generalization of signed distance functions.
+
+## Operating characteristics
+- **Time Complexity:** Solving a degree-5 polynomial is constant time but involves iterative subdivision or root-finding steps, making it more expensive than simple quadratic or cubic primitives.
+- **Memory Complexity:** Low; requires storing only the control points and temporary polynomial coefficients.
+- **Strengths:** Provides exact distance to the offset surface of a smooth curve, avoiding the approximation errors of piecewise linear or low-degree polynomial skeletons.
+- **Limitations:** More computationally intensive than linear or circular arc SDFs. The degree-5 nature requires robust root-finding.
+- **When to use:** When rendering smooth, organic shapes defined by skeletal curves where exact distance is required for accurate ray marching.
+
+## Background
+The method originates from the work on implicit modeling and ray tracing of generalized cylinders. It is detailed in "Sphere tracing: a geometric method for the antialiased ray tracing of implicit surfaces" by Zeno [S1]. The approach leverages the geometric properties of offset surfaces to overcome the limitations of algebraic approximations. The root-finding technique for Bézier curves references Rockwood et al. (1989) and the basis conversion references Schneider (1990) [S1].
+
+## Sources
+[S1] Sphere tracing: a geometric method for the antialiased ray tracing of implicit surfaces, http://graphics.cs.illinois.edu/sites/default/files/zeno.pdf, fetched 2026-10-29

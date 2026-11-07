@@ -3,229 +3,121 @@
 Also called: Active Cut Management with Merge/Split Queues, Adaptive voxelization via cut adaptation, View-dependent hierarchical LOD for volume rendering
 
 ## Overview
-Active Cut Management is a view-dependent level-of-detail technique for volume rendering that dynamically maintains a set of octree nodes, called the **active cut**, which exactly covers the model space without overlap [S1]. It solves the problem of balancing visual fidelity against rendering time and memory bandwidth by performing frame-by-frame merges and splits of octree nodes based on screen-space error metrics [S1]. Unlike static multiresolution approaches, it adapts the granularity of the volume representation in real-time to the viewer's position and the available hardware budget, ensuring texel sizes remain close to one pixel [S1].
+Active Cut Management is a view-dependent level-of-detail technique for volume rendering that maintains an "active cut"—a set of octree nodes that partition the model space exactly once—by dynamically merging and splitting nodes each frame [S1]. It solves the problem of balancing visual fidelity against strict hardware constraints (fill rate, texture memory, and I/O bandwidth) by prioritizing nodes based on screen-space error [S1]. Unlike static mipmaps or fixed-bricking schemes, it adapts the resolution hierarchy in real-time, ensuring texels approximate a single pixel size while respecting frame time budgets [S1].
 
 ## How it works
-**Inputs:**
-*   Current camera position and orientation.
-*   Target frame rate (or frame time budget).
-*   Available texture memory size.
-*   Current active cut (set of nodes from the previous frame).
-*   Octree structure with associated texture data (residing in RAM, disk, or texture memory).
-
-**Outputs:**
-*   Updated active cut for the current frame.
-*   List of nodes to be rendered.
-*   Texture load/unload commands for RAM/disk/texture memory.
+**Inputs and Outputs:**
+*   **Input:** The current octree structure of the volume data; the current camera view (frustum); the transfer function; the target frame rate; the available texture memory size; and the I/O bandwidth limits (disk-to-RAM, RAM-to-texture) [S1].
+*   **Output:** The updated active cut (set of leaf nodes to render) and the state of texture memory (which nodes are resident) [S1].
 
 **Data Structures:**
-1.  **Active Cut:** A set of octree nodes $\{N_i\}$ such that their spatial extents partition the model space exactly once. Each node $N_i$ has a status: Leaf (Red), Non-Leaf with projected texel size $< 1$ pixel (Green), or Non-Leaf with projected texel size $> 1$ pixel (Yellow) [S1].
-2.  **Merge Queue:** A priority queue containing the **parents** of all nodes currently on the active cut. Priority is determined by the error metric (see Formulas).
-3.  **Split Queue:** A priority queue containing all nodes currently on the active cut. Priority is determined by the error metric.
-4.  **Texture Cache:** An LRU cache in main memory and texture memory tracking the residency status of texture nodes [S1].
+1.  **Octree:** Hierarchical decomposition of the volume. Nodes can be leaf (sufficient resolution) or non-leaf [S1].
+2.  **Active Cut:** A set of nodes whose cells cover the model space exactly once. Nodes on the cut are either rendered or are candidates for modification [S1].
+3.  **Priority Queues:** Two queues are constructed each frame:
+    *   **Split Queue:** Contains nodes on the active cut that are candidates for splitting (refinement). Priority is determined by screen-space error [S1].
+    *   **Merge Queue:** Contains the parents of all nodes currently on the active cut. Priority is determined by the error reduction potential of merging [S1].
+4.  **Texture Memory State:** Tracks which octree nodes are currently loaded in GPU texture memory. Accesses are managed via an LRU cache policy in both main memory and texture memory [S1].
 
-**Formulas:**
-*   **Projected Texel Size ($E$):** The maximum screen-space size of a node's texels in pixel units. This serves as the error metric [S1].
-    $$ E(N) = \max(\text{screen space size of texels in } N) $$
-    Ideally, $E(N) \approx 1$ pixel [S1].
-*   **Merge/Split Validity Condition:** A merge followed by a split is permitted only if it reduces the overall error:
-    $$ E(\text{merge\_node}) < E(\text{split\_node}) $$
-    This ensures that forcing a merge to enable a split is beneficial [S1].
-
-**Parameters:**
-*   **Frame Time Budget:** The total time allowed for rendering and cut adaptation. Limits the number of nodes rendered (fill rate) and the number of merges/splits (texture loads) [S1].
-*   **Texture Memory Limit:** Maximum size of texture memory, restricting the total number of leaf nodes that can be resident [S1].
+**Error Metric:**
+The priority for splitting or merging is determined by the maximum screen-space size of a node’s texels in pixel units [S1].
+$$ E_{node} = \max(\text{screen space size of texels}) $$
+Ideally, $E_{node} \approx 1$ pixel [S1]. Non-leaf nodes with $E_{node} < 1$ are considered "green" (over-resolved or sufficient), while those with $E_{node} > 1$ are "yellow" (under-resolved, candidates for split) [S1]. Leaf nodes are "red" (sufficient resolution) [S1].
 
 **Algorithm Steps:**
-
-1.  **Initialize Queues:** Construct the Merge Queue and Split Queue based on the active cut from the previous frame. Sort both queues by error metric $E(N)$ [S1].
-2.  **Adapt/Load Phase:**
-    a.  **Check Constraints:** Determine the maximum number of splits and merges allowed in this frame based on:
-        *   Frame time budget.
-        *   Disk-to-RAM and RAM-to-Texture memory bandwidths.
-        *   Texture memory capacity [S1].
-    b.  **Process Split Queue:**
-        i.  Select the node $N_{split}$ with the highest error from the Split Queue.
-        ii. If $N_{split}$ is already in the process of being split (partial load), check if another node has higher error. If so, stall progress on $N_{split}$ and select the new highest-error node [S1].
-        iii. If $N_{split}$ is not currently splitting:
-            *   Check if texture memory limit is reached. If yes, check if a merge can be forced. A merge is forced only if $E(\text{merge\_node}) < E(N_{split})$ [S1].
-            *   If limits are not reached or a merge is forced, begin loading $N_{split}$'s children from RAM/disk into texture memory. This operation may span multiple frames [S1].
-            *   Update texture cache (LRU) [S1].
-    c.  **Process Merge Queue:**
-        i.  Select the parent node $N_{parent}$ with the highest priority from the Merge Queue.
-        ii. If texture memory is full and a split is pending, a merge may be forced to free space, subject to the error reduction condition [S1].
-        iii. If allowed, merge $N_{parent}$'s children into $N_{parent}$ (unload children from texture memory, load parent if necessary) [S1].
-    d.  **Iterate:** Repeat steps (b) and (c) until the frame time budget is exhausted or no further beneficial merges/splits can be performed [S1].
-3.  **Cull/Render Phase:**
-    a.  Traverse the octree hierarchically starting from the root.
-    b.  For each node, cull if:
-        *   It is entirely outside the viewing frustum.
-        *   Its scalar field value range lies entirely in a transfer function range with zero opacity [S1].
-    c.  Render the nodes remaining on the active cut that were not culled [S1].
+1.  **Initialize Queues:** Construct the merge queue (parents of active cut nodes) and the split queue (active cut nodes) [S1].
+2.  **Bound Operations:** Limit the number of splits and merges per frame based on:
+    *   I/O bandwidth (disk/RAM/texture memory transfers) [S1].
+    *   Texture memory capacity [S1].
+    *   Fill rate constraints (determined by target frame rate) [S1].
+3.  **Iterate Frame Adaptation:**
+    *   While frame time budget allows and limits are not exceeded:
+        *   Select the highest priority candidate from the Split Queue or Merge Queue.
+        *   **Split Candidate:** If selected, check if texture memory allows the split. If yes, initiate the split. Note: A split may span multiple frames if it requires loading child nodes from disk/RAM [S1].
+        *   **Merge Candidate:** If selected, check if the merge reduces overall error. A merge is only valid if it enables a subsequent split that reduces error further (i.e., `merge_node_error < split_node_error`) [S1].
+        *   **Preemption:** If a node is currently being split but another node in the queue has a higher error, stall the current split and begin splitting the higher-priority node immediately [S1].
+4.  **Cull/Render:** Traverse the octree hierarchically. Cull nodes outside the viewing frustum or with zero opacity in the transfer function. Render the remaining nodes on the active cut [S1].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def active_cut_management(previous_cut, camera, frame_budget, texture_memory_limit, octree):
-    """
-    Manages the active cut for a single frame.
-    """
-    # 1. Initialize Queues
-    merge_queue = PriorityQueue()
-    split_queue = PriorityQueue()
+def active_cut_management_step(octree, camera, transfer_function, 
+                               frame_time_budget, texture_memory_limit, 
+                               bandwidth_limits):
+    # 1. Identify current active cut nodes
+    active_cut_nodes = get_active_cut()
     
-    for node in previous_cut:
-        # Calculate error metric: max screen space size of texels in pixels
+    # 2. Build priority queues
+    # Split Queue: Nodes on active cut, sorted by screen-space error (descending)
+    split_queue = []
+    for node in active_cut_nodes:
         error = calculate_screen_space_error(node, camera)
-        
-        if node.is_leaf():
-            split_queue.push(node, priority=error)
-        else:
-            # Non-leaf nodes on cut are candidates for split if error is high
-            split_queue.push(node, priority=error)
-            
-        # Parents of cut nodes are candidates for merge
-        if node.parent is not None:
-            merge_queue.push(node.parent, priority=error) # Priority based on parent's potential error reduction
-
-    current_cut = set(previous_cut)
-    texture_memory_usage = calculate_texture_memory_usage(current_cut)
-    time_elapsed = 0
+        split_queue.append((error, node))
+    sort_descending(split_queue)
     
-    # 2. Adapt/Load Phase
-    while time_elapsed < frame_budget:
-        # Determine best candidate for split
-        best_split_node = split_queue.peek()
-        if best_split_node is None:
-            break
-            
-        # Check if we can perform a split
-        can_split = True
+    # Merge Queue: Parents of active cut nodes, sorted by potential error reduction
+    merge_queue = []
+    for node in active_cut_nodes:
+        parent = get_parent(node)
+        if parent is not None:
+            # Priority based on merge cost vs error reduction
+            merge_priority = calculate_merge_priority(parent, node)
+            merge_queue.append((merge_priority, parent))
+    sort_descending(merge_queue)
+    
+    # 3. Adapt Cut within Frame Budget
+    frame_time_elapsed = 0
+    texture_memory_usage = get_current_texture_memory_usage()
+    
+    while frame_time_elapsed < frame_time_budget:
+        # Determine best candidate
+        split_candidate = split_queue[0] if split_queue else None
+        merge_candidate = merge_queue[0] if merge_queue else None
         
-        # Check texture memory limit
-        if texture_memory_usage >= texture_memory_limit:
-            # Must force a merge to free space
-            best_merge_node = merge_queue.peek()
-            if best_merge_node is None:
-                can_split = False
-            else:
-                # Condition: merge error < split error
-                if best_merge_node.error < best_split_node.error:
-                    perform_merge(best_merge_node, current_cut, texture_memory_usage)
-                    merge_queue.pop()
-                    # After merge, re-evaluate split queue priorities and memory
-                    update_queues(current_cut, merge_queue, split_queue)
-                    texture_memory_usage = calculate_texture_memory_usage(current_cut)
-                else:
-                    can_split = False
+        # Simple heuristic: prioritize split if error is high and memory allows
+        # In practice, complex scheduling based on bandwidth and memory is used [S1]
         
-        if can_split:
-            # Check if node is already being split (partial load)
-            if best_split_node.is_being_split():
-                # Check if another node has higher error
-                next_best = split_queue.peek_after(best_split_node)
-                if next_best and next_best.error > best_split_node.error:
-                    # Stall current split, start new one
-                    best_split_node = next_best
-                else:
-                    # Continue current split
-                    pass
-            else:
-                # Start new split
-                if not best_split_node.is_resident_in_texture_memory():
-                    load_node_from_ram_or_disk(best_split_node)
-                    texture_memory_usage += best_split_node.child_texture_size
-                
-            # Perform split operation (may be partial)
-            split_node(best_split_node, current_cut)
-            update_queues(current_cut, merge_queue, split_queue)
-            texture_memory_usage = calculate_texture_memory_usage(current_cut)
+        if split_candidate and can_split(split_candidate, texture_memory_usage, bandwidth_limits):
+            error, node = split_candidate
+            # Initiate split (may be partial if I/O bound)
+            split_node(node, octree)
+            texture_memory_usage += get_child_memory_cost(node)
+            remove_from_queue(split_queue, node)
+            add_children_to_split_queue(node.children, split_queue)
             
-        # Check if we can perform a merge (if not already done above for split enablement)
-        if not can_split:
-            best_merge_node = merge_queue.peek()
-            if best_merge_node is not None:
-                # Merge reduces memory and potentially error
-                perform_merge(best_merge_node, current_cut, texture_memory_usage)
-                merge_queue.pop()
-                update_queues(current_cut, merge_queue, split_queue)
-                texture_memory_usage = calculate_texture_memory_usage(current_cut)
-                
-        time_elapsed += estimate_operation_time()
-
-    # 3. Cull/Render Phase
-    render_nodes = []
-    for node in current_cut:
-        if not is_outside_frustum(node, camera) and not is_zero_opacity(node):
-            render_nodes.append(node)
-            
-    return render_nodes
-
-def calculate_screen_space_error(node, camera):
-    """
-    Returns the maximum screen space size of a node's texels in pixel units.
-    """
-    # Implementation depends on camera projection and node bounding box
-    # Not given in the sources. [G]
-    pass
-
-def perform_merge(node, current_cut, texture_memory_usage):
-    """
-    Merges a node's children into the node itself.
-    Removes children from current_cut, adds node to current_cut.
-    Unloads children textures, loads parent if needed.
-    """
-    # Remove children from cut
-    for child in node.children:
-        if child in current_cut:
-            current_cut.remove(child)
-            unload_texture(child)
-            texture_memory_usage -= child.texture_size
-            
-    # Add parent to cut
-    current_cut.add(node)
-    if not node.is_resident_in_texture_memory():
-        load_texture(node)
-        texture_memory_usage += node.texture_size
-
-def split_node(node, current_cut):
-    """
-    Splits a node into its children.
-    Removes node from current_cut, adds children to current_cut.
-    Loads children textures.
-    """
-    # Remove node from cut
-    if node in current_cut:
-        current_cut.remove(node)
-        unload_texture(node)
+        elif merge_candidate and can_merge(merge_candidate, split_queue, texture_memory_usage):
+            priority, parent = merge_candidate
+            # Check if merge + subsequent split reduces error
+            if merge_candidate_error(parent) < best_split_candidate_error(split_queue):
+                merge_node(parent, octree)
+                texture_memory_usage -= get_parent_memory_cost(parent)
+                remove_from_queue(merge_queue, parent)
+                # Re-evaluate siblings/children for queues
+                update_queues_from_merge(parent, split_queue, merge_queue)
         
-    # Add children to cut
-    for child in node.children:
-        current_cut.add(child)
-        if not child.is_resident_in_texture_memory():
-            load_texture(child)
-            texture_memory_usage += child.texture_size
+        else:
+            break # No valid operations within budget/limits
+            
+        frame_time_elapsed += estimate_operation_time()
+        
+    # 4. Render Phase
+    render_active_cut(active_cut_nodes, camera, transfer_function)
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Texture Cache Misses:** Splits and merges that cause cache misses in main memory or texture memory are more expensive. The LRU policy affects the cost of operations [S1].
-*   **Interrupted Splits:** If a node is being split but another node has a higher error, the current split is stalled, and the new node begins splitting immediately [S1].
-*   **Multi-frame Splits:** A single split operation may span multiple frames if it involves loading several texture nodes from RAM or disk. The system must track the state of partially loaded nodes [S1].
-*   **Memory Limits:** If texture memory is full, a split can only proceed if a merge is forced, and only if the merge reduces overall error [S1].
+*   **Cache Misses:** Texture cache misses significantly increase the cost of splits/merges. The LRU policy applies to both main memory and texture memory caches [S1].
+*   **Preemption:** If a split is interrupted by a higher-priority node, the system must handle the partial state correctly, stalling the current node and switching context [S1].
+*   **Memory Limits:** Splits are strictly bounded by texture memory size. If memory is full, a split can only occur if a merge frees up space, and only if the net operation reduces error [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** The adaptation phase is bounded by the frame time budget. Each frame, a limited number of merges and splits are performed. The cost of each operation depends on texture cache hit/miss status [S1].
-*   **Memory Complexity:** The number of nodes on the active cut is limited by texture memory size. The system dynamically adjusts the resolution to fit within the available texture memory [S1].
-*   **Performance:** The method maintains texel sizes close to one pixel, optimizing visual quality and fill rate. It adapts to the viewer's position, providing higher resolution closer to the viewpoint [S1].
-*   **Strengths:** View-dependent refinement, efficient use of texture memory, handles large datasets by streaming textures from disk/RAM [S1].
-*   **Limitations:** Requires complex queue management and state tracking for partial splits. Performance is sensitive to texture cache misses and bandwidth limitations [S1].
-*   **When to use:** When rendering large volumetric datasets with limited texture memory and variable frame rates, where view-dependent detail is critical [S1].
-*   **When not to use:** When hardware lacks sufficient texture memory or bandwidth to support dynamic loading, or when a fixed resolution is acceptable [S1].
+*   **Time Complexity:** Frame time is bounded by the target frame rate. The adaptation phase is limited by I/O bandwidth and CPU/GPU scheduling overhead [S1].
+*   **Memory Complexity:** Depends on the active cut size. The method explicitly manages texture memory usage to prevent overflow, swapping nodes between disk/RAM and GPU memory [S1].
+*   **Performance:** Demonstrated on the Oxygen Post model (513,375 tetrahedra) [S1]. Performance scales with view-dependent refinement, providing higher detail near the viewpoint and coarser detail elsewhere [S1].
+*   **Strengths:** Dynamic adaptation to view changes; efficient use of texture memory; handles unstructured grids via octree decomposition [S1].
+*   **Limitations:** Complex scheduling logic; sensitive to I/O latency; requires careful tuning of frame time budgets and error metrics [S1].
 
 ## Background
-Active Cut Management was introduced by Leven et al. in the context of interactive visualization of unstructured grids using hierarchical 3D representations [S1]. The concept of the "active cut" is similar to view-dependent continuous level of detail techniques used for polygonal models, such as those by Xia and Varshney, Duchandeau et al., Hoppe, and Luebke and Erikson [S1]. The method was demonstrated on datasets like the Oxygen Post model (513,375 tetrahedra) and Cylinder data set (615,000 tetrahedra) [S1].
+Active Cut Management was introduced by Leven et al. in the context of interactive visualization of unstructured grids using hierarchical 3D representations [S1]. It draws conceptual parallels to view-dependent continuous level-of-detail techniques used in polygonal modeling, such as those by Xia and Varshney, Duchandeau et al., Hoppe, and Luebke and Erikson [S1]. The method was designed to handle the specific challenges of volume rendering, including texture memory constraints and the need for real-time frame rates [S1].
 
 ## Sources
 [S1] PDF Interactive Visualization of Unstructured Grids Using Hierarchical 3D ..., https://web.eecs.umich.edu/~jjcorso/pubs/leven02unstructgrid.pdf, fetched 2026-10-27

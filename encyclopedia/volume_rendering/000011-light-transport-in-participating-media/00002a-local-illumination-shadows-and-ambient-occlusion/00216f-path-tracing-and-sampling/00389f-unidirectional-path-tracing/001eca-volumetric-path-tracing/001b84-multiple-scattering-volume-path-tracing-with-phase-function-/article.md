@@ -3,46 +3,46 @@
 Also called: Improved Volumetric Integrator, Multiple Scattering without Next Event Estimation, Vol Path Tracing 2, VolPathIntegrator, Volume Scattering Integrator (Majorant-based Path Tracing), Volumetric Path Integrator
 
 ## Overview
-This method is a path tracing algorithm for multiple homogeneous volumes that handles multiple scattering events by sampling the phase function, supporting index-matched surfaces and Russian roulette termination [S1, S2]. It solves the problem of computing radiance in participating media where light scatters multiple times, extending basic volumetric path tracing by explicitly sampling the scattering direction via the phase function rather than relying solely on delta tracking for direction selection [S1]. Unlike its sibling [Volumetric Path Tracing](1863-volumetric-path-tracing.md), which uses simple sampling and lacks explicit light sampling, this integrator robustly handles both surface and volume transport, including volumetric emission, chromatic media, and multiple scattering [S2]. It differs from [Next Event Estimation for Volumetric Path Tracing](1125-next-event-estimation-for-volumetric-path-tracing.md) by not explicitly sampling light sources for direct illumination in the volume, instead relying on the recursive phase function sampling to capture indirect lighting, which makes it inefficient for small light sources but simpler to implement for pure volume scattering [S1, S1].
+This method is a path tracing algorithm for multiple homogeneous volumes that handles multiple scattering events by sampling the phase function, supporting index-matched surfaces and Russian roulette termination [S1, S2]. It solves the problem of computing radiance in participating media where light scatters multiple times, extending basic volumetric path tracing by explicitly sampling the scattering direction via the phase function rather than relying solely on delta tracking for direction selection [S1]. Unlike its sibling [Volumetric Path Tracing](1863-volumetric-path-tracing.md), which uses simple sampling and lacks explicit light sampling, this integrator robustly handles both surface and volume transport, including volumetric emission, chromatic media, and multiple scattering [S2]. It differs from [Next Event Estimation for Volumetric Path Tracing](1125-next-event-estimation-for-volumetric-path-tracing.md) by not explicitly sampling light sources for direct illumination in the volume, instead relying on the recursive phase function sampling to capture indirect lighting, which makes it inefficient for small light sources but simpler to implement for pure volume scattering [S1].
 
 ## How it works
-The integrator traces paths through participating media and surfaces, maintaining a throughput weight $\beta$ and rescaled path probabilities $r_u$ (for unidirectional sampling) and $r_l$ (for light sampling) to handle Multiple Importance Sampling (MIS) and avoid floating-point overflow/underflow [S2].
+The integrator traces paths through participating media and surfaces, maintaining a throughput weight $\beta$ and rescaled path probabilities $r_u$ (for unidirectional sampling) and $r_l$ (for light sampling) to handle Multiple Importance Sampling (MIS) [S2].
 
 ### Inputs and Outputs
-*   **Inputs**: Camera ray `ray`, wavelength samples `lambda`, sampler `sampler`, scene geometry `aggregate`, list of lights `lights`, maximum depth `maxDepth`, Russian roulette depth `rr_depth`, light sampling strategy `lightSampleStrategy`, regularization flag `regularize`.
-*   **Outputs**: Radiance `L` (SampledSpectrum).
+*   **Inputs**: Camera ray `ray`, wavelength samples `lambda`, sampler `sampler`, scene geometry `aggregate`, list of lights `lights`, maximum depth `maxDepth`, Russian roulette depth `rr_depth`, light sampling strategy `lightSampleStrategy`, regularization flag `regularize` [S2].
+*   **Outputs**: Radiance `L` (SampledSpectrum) [S2].
 
 ### Data Structures
 *   **State Variables**:
-    *   `L`: Accumulated radiance, initialized to `0.f`.
-    *   `beta`: Path throughput weight, initialized to `1.f`.
-    *   `r_u`: Rescaled unidirectional path probability, initialized to `1.f`.
-    *   `r_l`: Rescaled light path probability, initialized to `1.f`.
-    *   `specularBounce`: Boolean, initialized to `false`.
-    *   `anyNonSpecularBounces`: Boolean, initialized to `false`.
-    *   `depth`: Integer bounce counter, initialized to `0`.
-    *   `etaScale`: Scalar multiplier for transmission, initialized to `1`.
-    *   `prevIntrContext`: LightSampleContext for MIS, initialized empty.
-*   **Medium Properties (`mp`)**: Contains $\sigma_a$ (absorption), $\sigma_s$ (scattering), $\sigma_t = \sigma_a + \sigma_s$, phase function, and emission $L_e$.
-*   **Majorant**: $\sigma_{maj}$, the upper bound of $\sigma_t$ across all media, used for null scattering.
+    *   `L`: Accumulated radiance, initialized to `0.0` [S2].
+    *   `beta`: Path throughput weight, initialized to `1.0` [S2].
+    *   `r_u`: Rescaled unidirectional path probability, initialized to `1.0` [S2].
+    *   `r_l`: Rescaled light path probability, initialized to `1.0` [S2].
+    *   `specularBounce`: Boolean, initialized to `False` [S2].
+    *   `anyNonSpecularBounces`: Boolean, initialized to `False` [S2].
+    *   `depth`: Integer bounce counter, initialized to `0` [S2].
+    *   `etaScale`: Scalar multiplier for transmission, initialized to `1.0` [S2].
+    *   `prevIntrContext`: LightSampleContext for MIS, initialized empty [S2].
+*   **Medium Properties (`mp`)**: Contains $\sigma_a$ (absorption), $\sigma_s$ (scattering), $\sigma_t = \sigma_a + \sigma_s$, phase function, and emission $L_e$ [S2].
+*   **Majorant**: $\sigma_{maj}$, the upper bound of $\sigma_t$ across all media, used for null scattering [S2].
 
 ### Formulas
 The radiance equation for a homogeneous volume with absorption and multiple scattering, sampled via phase function, is:
 $$L_3(\mathbf{p}(0), \omega) = \int_0^{t_{\text{hit}}} \exp(-\sigma_t t) \sigma_s L_{\text{scatter}}(\mathbf{p}, \omega) dt + \exp(-\sigma_t t_{\text{hit}}) L_e(\mathbf{p}(t_{\text{hit}}))$$
 where the scattered radiance is recursive:
-$$L_{\text{scatter}}(\mathbf{p}, \omega) = \int_{S^2} \rho(\mathbf{p}(t), \omega, \omega') L_3(\mathbf{p}(t), \omega') \mathrm{d}\omega'$$
+$$L_{\text{scatter}}(\mathbf{p}, \omega) = \int_{S^2} \rho(\mathbf{p}(t), \omega, \omega') L_3(\mathbf{p}(t), \omega') \mathrm{d}\omega'$$ [S1].
 
 Rescaled path probabilities are defined as:
 $$r_{u, \lambda, i}(\bar{p}_n) = \frac{p_{u, \lambda, i}(\bar{p}_n)}{p_{path}(\bar{p}_n)} \quad \text{and} \quad r_{l, \lambda, i}(\bar{p}_n) = \frac{p_{l, \lambda, i}(\bar{p}_n)}{p_{path}(\bar{p}_n)}$$
-where $p_{path}$ is the probability of sampling the current path [S2].
+where $p_{path}$ is the probability for sampling the current path [S2].
 
 MIS weights for unidirectional sampling when $p_{path} = p_{u, \lambda, 1}$ are:
-$$w_u(\bar{p}_n) = \frac{1}{\frac{1}{m} \sum_{i=1}^m r_{u, \lambda, i}(\bar{p}_n) + \sum_{i=1}^m r_{l, \lambda, i}(\bar{p}_n)}$$
+$$w_u(\bar{p}_n) = \frac{1}{\frac{1}{m} \sum_{i=1}^m r_{u, \lambda, i}(\bar{p}_n) + \sum_{i=1}^m r_{l, \lambda, i}(\bar{p}_n)}$$ [S2].
 
 Russian roulette termination probability:
-$$P_{rr} = \min \left( \frac{\text{contrib}(\text{path})}{p(\text{path})}, 0.95 \right)$$
+$$P_{rr} = \min \left( \frac{\text{contrib}(\text{path})}{p(\text{path})}, 0.95 \right)$$ [S1].
 In implementation, this is approximated using the rescaled probabilities:
-$$q = \max(0, 1 - \beta \cdot \eta_{scale} / r_u.\text{Average}())$$
+$$q = \max(0, 1 - \beta \cdot \eta_{scale} / r_u.\text{Average}())$$ [S2].
 
 ### Parameters
 *   `maxDepth`: Integer limiting maximum bounces. If -1, infinite bounces. `maxDepth=2` corresponds to single scattering [S1, S2].
@@ -51,112 +51,112 @@ $$q = \max(0, 1 - \beta \cdot \eta_{scale} / r_u.\text{Average}())$$
 *   `lightSampleStrategy`: String (default "bvh") [S2].
 
 ### Steps
-1.  **Initialization**: Initialize `L=0`, `beta=1`, `r_u=1`, `r_l=1`, `specularBounce=false`, `anyNonSpecularBounces=false`, `depth=0`, `etaScale=1`.
+1.  **Initialization**: Initialize `L=0`, `beta=1`, `r_u=1`, `r_l=1`, `specularBounce=false`, `anyNonSpecularBounces=false`, `depth=0`, `etaScale=1` [S2].
 2.  **Loop**: While true:
-    3.  **Intersect**: Trace ray `ray` to find closest intersection `si`. If no intersection, `si` is null.
+    3.  **Intersect**: Trace ray `ray` to find closest intersection `si` [S2]. If no intersection, `si` is null.
     4.  **Medium Sampling**: If `ray.medium` exists:
-        *   Initialize RNG from two sampler samples.
-        *   Sample majorant transmittance `T_maj` using `SampleT_maj`. This invokes a callback for each potential scattering event.
+        *   Initialize RNG from two sampler samples [S2].
+        *   Sample majorant transmittance `T_maj` using `SampleT_maj` [S2]. This invokes a callback for each potential scattering event [S2].
         *   **Inside Callback**:
-            *   Compute $\sigma_{maj}$ (majorant cross section).
-            *   Compute PDF for majorant event: $pdf = \sigma_{maj}[0] \cdot T_{maj}[0]$.
+            *   Compute $\sigma_{maj}$ (majorant cross section) [S2].
+            *   Compute PDF for majorant event: $pdf = \sigma_{maj}[0] \cdot T_{maj}[0]$ [S2].
             *   **Emission**: If `depth < maxDepth` and medium emits ($L_e$):
-                *   Compute $\beta' = \beta \cdot T_{maj} / pdf$.
-                *   Compute $r_e = r_u \cdot \sigma_{maj} \cdot T_{maj} / pdf$.
-                *   If $r_e$ is non-zero, add to radiance: $L += \beta' \cdot \sigma_a \cdot L_e / r_e.\text{Average}()$.
+                *   Compute $\beta' = \beta \cdot T_{maj} / pdf$ [S2].
+                *   Compute $r_e = r_u \cdot \sigma_{maj} \cdot T_{maj} / pdf$ [S2].
+                *   If $r_e$ is non-zero, add to radiance: $L += \beta' \cdot \sigma_a \cdot L_e / r_e.\text{Average}()$ [S2].
             *   **Event Probabilities**:
-                *   $p_{absorb} = \sigma_a[0] / \sigma_{maj}[0]$.
-                *   $p_{scatter} = \sigma_s[0] / \sigma_{maj}[0]$.
-                *   $p_{null} = \max(0, 1 - p_{absorb} - p_{scatter})$.
-            *   **Sample Event Type**: Draw uniform $u_m$.
-                *   **Absorption (mode 0)**: Set `terminated=true`, return false.
+                *   $p_{absorb} = \sigma_a[0] / \sigma_{maj}[0]$ [S2].
+                *   $p_{scatter} = \sigma_s[0] / \sigma_{maj}[0]$ [S2].
+                *   $p_{null} = \max(0, 1 - p_{absorb} - p_{scatter})$ [S2].
+            *   **Sample Event Type**: Draw uniform $u_m$ [S2].
+                *   **Absorption (mode 0)**: Set `terminated=true`, return false [S2].
                 *   **Scattering (mode 1)**:
-                    *   If `depth >= maxDepth`, set `terminated=true`, return false.
-                    *   Increment `depth`.
+                    *   If `depth >= maxDepth`, set `terminated=true`, return false [S2].
+                    *   Increment `depth` [S2].
                     *   Update throughput and rescaled probability:
-                        *   $pdf = T_{maj}[0] \cdot \sigma_s[0]$.
-                        *   $\beta *= T_{maj} \cdot \sigma_s / pdf$.
-                        *   $r_u *= T_{maj} \cdot \sigma_s / pdf$.
-                    *   **Direct Lighting**: If $\beta$ and $r_u$ are non-zero, call `SampleLd` (light sampling) and add to `L`.
+                        *   $pdf = T_{maj}[0] \cdot \sigma_s[0]$ [S2].
+                        *   $\beta *= T_{maj} \cdot \sigma_s / pdf$ [S2].
+                        *   $r_u *= T_{maj} \cdot \sigma_s / pdf$ [S2].
+                    *   **Direct Lighting**: If $\beta$ and $r_u$ are non-zero, call `SampleLd` (light sampling) and add to `L` [S2].
                     *   **Phase Function Sampling**:
-                        *   Generate 2D sample $u$.
-                        *   Sample phase function: $ps = \text{phase.Sample\_p}(-\text{ray.d}, u)$.
-                        *   If $ps$ is null or $ps.pdf == 0$, set `terminated=true`.
+                        *   Generate 2D sample $u$ [S2].
+                        *   Sample phase function: $ps = \text{phase.Sample\_p}(-\text{ray.d}, u)$ [S2].
+                        *   If $ps$ is null or $ps.pdf == 0$, set `terminated=true` [S2].
                         *   Else:
-                            *   $\beta *= ps.p / ps.pdf$.
-                            *   $r_l = r_u / ps.pdf$.
-                            *   Store `prevIntrContext`.
-                            *   Set `scattered=true`.
-                            *   Update ray: `ray.o = p`, `ray.d = ps.wi`.
-                            *   `specularBounce = false`, `anyNonSpecularBounces = true`.
-                    *   Return false.
+                            *   $\beta *= ps.p / ps.pdf$ [S2].
+                            *   $r_l = r_u / ps.pdf$ [S2].
+                            *   Store `prevIntrContext` [S2].
+                            *   Set `scattered=true` [S2].
+                            *   Update ray: `ray.o = p`, `ray.d = ps.wi` [S2].
+                            *   `specularBounce = false`, `anyNonSpecularBounces = true` [S2].
+                    *   Return false [S2].
                 *   **Null Scattering (mode 2)**:
-                    *   $\sigma_n = \text{ClampZero}(\sigma_{maj} - \sigma_a - \sigma_s)$.
-                    *   $pdf = T_{maj}[0] \cdot \sigma_n[0]$.
-                    *   $\beta *= T_{maj} \cdot \sigma_n / pdf$. If $pdf==0$, $\beta=0$.
-                    *   $r_u *= T_{maj} \cdot \sigma_n / pdf$.
-                    *   $r_l *= T_{maj} \cdot \sigma_{maj} / pdf$.
-                    *   Return $\beta \neq 0$ and $r_u \neq 0$.
+                    *   $\sigma_n = \text{ClampZero}(\sigma_{maj} - \sigma_a - \sigma_s)$ [S2].
+                    *   $pdf = T_{maj}[0] \cdot \sigma_n[0]$ [S2].
+                    *   $\beta *= T_{maj} \cdot \sigma_n / pdf$. If $pdf==0$, $\beta=0$ [S2].
+                    *   $r_u *= T_{maj} \cdot \sigma_n / pdf$ [S2].
+                    *   $r_l *= T_{maj} \cdot \sigma_{maj} / pdf$ [S2].
+                    *   Return $\beta \neq 0$ and $r_u \neq 0$ [S2].
         *   **Post-Callback**:
-            *   If `terminated` or $\beta=0$ or $r_u=0$, return `L`.
-            *   If `scattered`, `continue` loop (new ray direction).
+            *   If `terminated` or $\beta=0$ or $r_u=0$, return `L` [S2].
+            *   If `scattered`, `continue` loop (new ray direction) [S2].
             *   If unscattered (ray passed through medium without interaction):
-                *   $\beta *= T_{maj} / T_{maj}[0]$.
-                *   $r_u *= T_{maj} / T_{maj}[0]$.
-                *   $r_l *= T_{maj} / T_{maj}[0]$.
+                *   $\beta *= T_{maj} / T_{maj}[0]$ [S2].
+                *   $r_u *= T_{maj} / T_{maj}[0]$ [S2].
+                *   $r_l *= T_{maj} / T_{maj}[0]$ [S2].
     5.  **Surface Interaction**:
         *   If `si` is null (ray escapes to infinity):
             *   For each infinite light, if $L_e$ exists:
-                *   If `depth==0` or `specularBounce`, $L += \beta \cdot L_e / r_u.\text{Average}()$.
-                *   Else, compute light PDF, update $r_l$, add MIS contribution.
-            *   Break loop.
+                *   If `depth==0` or `specularBounce`, $L += \beta \cdot L_e / r_u.\text{Average}()$ [S2].
+                *   Else, compute light PDF, update $r_l$, add MIS contribution [S2].
+            *   Break loop [S2].
         *   If `si` exists:
-            *   Get BSDF. If null, skip intersection and continue.
-            *   **Visible Surface**: If `depth==0` and `visibleSurf` requested, estimate albedo using 16 pre-defined samples and store.
+            *   Get BSDF. If null, skip intersection and continue [S2].
+            *   **Visible Surface**: If `depth==0` and `visibleSurf` requested, estimate albedo using 16 pre-defined samples and store [S2].
             *   **Emission**: If surface emits $L_e$:
-                *   If `depth==0` or `specularBounce`, $L += \beta \cdot L_e / r_u.\text{Average}()$.
-                *   Else, compute light PDF, update $r_l$, add MIS contribution.
-            *   **Depth Check**: If `depth >= maxDepth`, return `L`. Increment `depth`.
-            *   **Regularization**: If `regularize` and `anyNonSpecularBounces`, regularize BSDF.
-            *   **Direct Lighting**: If BSDF is non-specular, call `SampleLd` and add to `L`. Store `prevIntrContext`.
+                *   If `depth==0` or `specularBounce`, $L += \beta \cdot L_e / r_u.\text{Average}()$ [S2].
+                *   Else, compute light PDF, update $r_l$, add MIS contribution [S2].
+            *   **Depth Check**: If `depth >= maxDepth`, return `L`. Increment `depth` [S2].
+            *   **Regularization**: If `regularize` and `anyNonSpecularBounces`, regularize BSDF [S2].
+            *   **Direct Lighting**: If BSDF is non-specular, call `SampleLd` and add to `L`. Store `prevIntrContext` [S2].
             *   **BSDF Sampling**:
-                *   Sample BSDF direction $bs$. If null, break.
-                *   $\beta *= bs.f \cdot |\cos \theta| / bs.pdf$.
-                *   If $bs.pdfIsProportional$, $r_l = r_u / bsdf.PDF()$, else $r_l = r_u / bs.pdf$.
+                *   Sample BSDF direction $bs$. If null, break [S2].
+                *   $\beta *= bs.f \cdot |\cos \theta| / bs.pdf$ [S2].
+                *   If $bs.pdfIsProportional$, $r_l = r_u / bsdf.PDF()$, else $r_l = r_u / bs.pdf$ [S2].
             *   **State Update**:
-                *   `specularBounce = bs.IsSpecular()`.
-                *   `anyNonSpecularBounces |= !bs.IsSpecular()`.
-                *   If transmission, $etaScale *= bs.eta^2$.
-                *   Spawn new ray.
+                *   `specularBounce = bs.IsSpecular()` [S2].
+                *   `anyNonSpecularBounces |= !bs.IsSpecular()` [S2].
+                *   If transmission, $etaScale *= bs.eta^2$ [S2].
+                *   Spawn new ray [S2].
             *   **BSSRDF**: If BSSRDF present and transmission:
-                *   Sample probe segment. If null, break.
-                *   Sample intersection along segment. If null, break.
-                *   Update $\beta$, $r_u$, $r_l$.
-                *   Sample BSDF at exit point. If null, break.
-                *   Update $\beta$, $r_l$.
-                *   Spawn new ray.
+                *   Sample probe segment. If null, break [S2].
+                *   Sample intersection along segment. If null, break [S2].
+                *   Update $\beta$, $r_u$, $r_l$ [S2].
+                *   Sample BSDF at exit point. If null, break [S2].
+                *   Update $\beta$, $r_l$ [S2].
+                *   Spawn new ray [S2].
     6.  **Russian Roulette**:
-        *   Compute $rrBeta = \beta \cdot etaScale / r_u.\text{Average}()$.
-        *   Draw $u_{RR}$.
+        *   Compute $rrBeta = \beta \cdot etaScale / r_u.\text{Average}()$ [S2].
+        *   Draw $u_{RR}$ [S2].
         *   If $rrBeta.\text{MaxComponentValue}() < 1$ and `depth > 1`:
-            *   $q = \max(0, 1 - rrBeta.\text{MaxComponentValue}())$.
-            *   If $u_{RR} < q$, break.
-            *   Else, $\beta /= 1 - q$.
+            *   $q = \max(0, 1 - rrBeta.\text{MaxComponentValue}())$ [S2].
+            *   If $u_{RR} < q$, break [S2].
+            *   Else, $\beta /= 1 - q$ [S2].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def Li(ray, lambda, sampler, scratchBuffer, visibleSurf):
-    L = SampledSpectrum(0.f)
-    beta = SampledSpectrum(1.f)
-    r_u = SampledSpectrum(1.f)
-    r_l = SampledSpectrum(1.f)
+    L = 0.0
+    beta = 1.0
+    r_u = 1.0
+    r_l = 1.0
     specularBounce = False
     anyNonSpecularBounces = False
     depth = 0
     etaScale = 1.0
-    prevIntrContext = LightSampleContext()
+    prevIntrContext = None
 
     while True:
         si = Intersect(ray)
@@ -164,7 +164,7 @@ def Li(ray, lambda, sampler, scratchBuffer, visibleSurf):
         terminated = False
 
         if ray.medium:
-            tMax = si.tHit if si else Infinity
+            tMax = si.tHit if si else float('inf')
             hash0 = Hash(sampler.Get1D())
             hash1 = Hash(sampler.Get1D())
             rng = RNG(hash0, hash1)
@@ -211,13 +211,13 @@ def Li(ray, lambda, sampler, scratchBuffer, visibleSurf):
 
         bsdf = isect.GetBSDF(ray, lambda, camera, scratchBuffer, sampler)
         if not bsdf:
-            isect.SkipIntersection(&ray, si.tHit)
+            isect.SkipIntersection(ray, si.tHit)
             continue
 
         if depth == 0 and visibleSurf:
             nRhoSamples = 16
             ucRho = [0.75741637, 0.37870818, 0.7083487, 0.18935409, 0.9149363, 0.35417435, 0.5990858, 0.09467703, 0.8578725, 0.45746812, 0.686759, 0.17708716, 0.9674518, 0.2995429, 0.5083201, 0.047338516]
-            uRho = [Point2f(0.855985, 0.570367), Point2f(0.381823, 0.851844), Point2f(0.285328, 0.764262), Point2f(0.733380, 0.114073), Point2f(0.542663, 0.344465), Point2f(0.127274, 0.414848), Point2f(0.964700, 0.947162), Point2f(0.594089, 0.643463), Point2f(0.095109, 0.170369), Point2f(0.825444, 0.263359), Point2f(0.429467, 0.454469), Point2f(0.244460, 0.816459), Point2f(0.756135, 0.731258), Point2f(0.516165, 0.152852), Point2f(0.180888, 0.214174), Point2f(0.898579, 0.503897)]
+            uRho = [(0.855985, 0.570367), (0.381823, 0.851844), (0.285328, 0.764262), (0.733380, 0.114073), (0.542663, 0.344465), (0.127274, 0.414848), (0.964700, 0.947162), (0.594089, 0.643463), (0.095109, 0.170369), (0.825444, 0.263359), (0.429467, 0.454469), (0.244460, 0.816459), (0.756135, 0.731258), (0.516165, 0.152852), (0.180888, 0.214174), (0.898579, 0.503897)]
             albedo = bsdf.rho(isect.wo, ucRho, uRho)
             visibleSurf = VisibleSurface(isect, albedo, lambda)
 
@@ -229,7 +229,7 @@ def Li(ray, lambda, sampler, scratchBuffer, visibleSurf):
             bsdf.Regularize()
 
         if IsNonSpecular(bsdf.Flags()):
-            L += SampleLd(isect, &bsdf, lambda, sampler, beta, r_u)
+            L += SampleLd(isect, bsdf, lambda, sampler, beta, r_u)
         prevIntrContext = LightSampleContext(isect)
 
         wo = isect.wo
@@ -247,7 +247,7 @@ def Li(ray, lambda, sampler, scratchBuffer, visibleSurf):
         specularBounce = bs.IsSpecular()
         anyNonSpecularBounces |= not bs.IsSpecular()
         if bs.IsTransmission():
-            etaScale *= Sqr(bs.eta)
+            etaScale *= bs.eta ** 2
 
         ray = isect.SpawnRay(ray, bsdf, bs.wi, bs.flags, bs.eta)
 
@@ -268,7 +268,7 @@ def Li(ray, lambda, sampler, scratchBuffer, visibleSurf):
                     break
                 base = si2.intr
                 if si2.intr.material == isect.material:
-                    interactionSampler.Add(SubsurfaceInteraction(si2.intr), 1.f)
+                    interactionSampler.Add(SubsurfaceInteraction(si2.intr), 1.0)
             if not interactionSampler.HasSample():
                 break
             ssi = interactionSampler.GetSample()
@@ -281,7 +281,7 @@ def Li(ray, lambda, sampler, scratchBuffer, visibleSurf):
             pi = ssi
             pi.wo = bssrdfSample.wo
             prevIntrContext = LightSampleContext(pi)
-            L += SampleLd(pi, &Sw, lambda, sampler, beta, r_u)
+            L += SampleLd(pi, Sw, lambda, sampler, beta, r_u)
             u = sampler.Get1D()
             bs2 = Sw.Sample_f(pi.wo, u, sampler.Get2D())
             if not bs2:
@@ -349,7 +349,7 @@ def HandleMediumEvent(p, mp, sigma_maj, T_maj, beta, r_u, r_l, depth, maxDepth, 
         pdf = T_maj[0] * sigma_n[0]
         beta *= T_maj * sigma_n / pdf
         if pdf == 0:
-            beta = SampledSpectrum(0.f)
+            beta = 0.0
         r_u *= T_maj * sigma_n / pdf
         r_l *= T_maj * sigma_maj / pdf
         return beta and r_u
@@ -359,7 +359,6 @@ def HandleMediumEvent(p, mp, sigma_maj, T_maj, beta, r_u, r_l, depth, maxDepth, 
 *   **Zero PDF**: If phase function sampling returns null or zero PDF, the path must be terminated [S2]. If null scattering PDF is zero, $\beta$ must be explicitly set to zero to prevent division by zero [S2].
 *   **BSDF Sampling Failure**: If BSDF sampling returns null, the path loop breaks [S2].
 *   **BSSRDF Failure**: If BSSRDF probe segment sampling fails, the path loop breaks [S2].
-*   **Overflow/Underflow**: Tracking raw probabilities can overflow; using rescaled probabilities $r_u$ and $r_l$ prevents this [S2].
 
 ## Subtopics
 
@@ -377,7 +376,7 @@ Extends the integrator to handle subsurface scattering (BSSRDF) in conjunction w
 *   **Limitations**: Does not explicitly sample lights in the volume, leading to high variance for small lights. Requires homogeneous volumes for the standard formulation [S1].
 
 ## Background
-The method originates from the VolPathIntegrator described in "Physically Based Rendering: From Theory to Implementation" (4th Edition), specifically Section 14.2 on Volume Scattering Integrators [S2]. It builds upon earlier volumetric path tracing techniques that used delta tracking for distance sampling but lacked robust handling of multiple scattering and surface interactions [S1, S2]. The use of rescaled path probabilities for MIS was introduced to handle the numerical instability of tracking raw probabilities in long paths [S2].
+The method originates from the VolPathIntegrator described in "Physically Based Rendering: From Theory to Implementation" (4th Edition), specifically Section 14.2 on Volume Scattering Integrators [S2].
 
 ## Sources
 [S1] PDF Volumetric Path Tracing - University of California, San Diego, https://cseweb.ucsd.edu/~tzli/cse272/wi2023/homework2.pdf, fetched 2026-10-30

@@ -6,12 +6,12 @@ Differences-based Compression (Mensmann) is a hybrid compression scheme that res
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Compressed volume data (bricks) stored with variable bit depths; pre-computed shift patterns for data shuffling.
-*   **Output:** Reconstructed 16-bit voxel values in the volume buffer.
+*   **Input:** Compressed volume data (bricks) stored with variable bit depths [S1][S2].
+*   **Output:** Reconstructed 16-bit voxel values in the volume buffer [S1][S2].
 
 **Data Structures:**
 *   **Shift Patterns Table:** A pre-computed table storing data shuffle patterns used to expand compressed data into 16-bit values [S1][S2].
-*   **Volume Buffer:** The target memory location where reconstructed values are accumulated [S1][S2].
+*   **Volume Buffer:** The target memory location where reconstructed values are accumulated [G].
 
 **Steps:**
 1.  **Resolve Variable-Length Coding:** The decompression kernel selects an addressing mode based on the specific bit length of the current brick [S1][S2]. Individual kernels are implemented for each supported bit length to handle these different addressing modes [S1][S2].
@@ -35,48 +35,27 @@ def decompress_mensmann(compressed_brick, bit_length, shift_table, volume_buffer
         brick_offset: The starting index in volume_buffer for this brick.
     """
     # Step 1 & 2: Resolve variable-length coding and expand to 16-bit
-    # Individual kernels are used for different bit lengths.
-    # Here we simulate the kernel selection and shift pattern lookup.
-    
-    if bit_length == 8:
-        # Kernel for 8-bit bricks
-        expanded_values = apply_shift_patterns(compressed_brick, shift_table['8bit'])
-    elif bit_length == 16:
-        # Kernel for 16-bit bricks
-        expanded_values = apply_shift_patterns(compressed_brick, shift_table['16bit'])
-    else:
-        # Kernel for other supported bit lengths
-        expanded_values = apply_shift_patterns(compressed_brick, shift_table[str(bit_length) + 'bit'])
+    # Individual kernels are used for different bit lengths based on addressing modes [S1][S2].
+    # The sources state that lookups from the shift_table are used to shuffle data [S1][S2].
+    # [G] Standard bit-shifting and masking logic applies here based on the selected kernel.
+    pattern = shift_table[str(bit_length) + 'bit']
+    expanded_values = []
+    for chunk in compressed_brick:
+        expanded_values.append((chunk << pattern['shift_amount']) & 0xFFFF)
         
     # Step 3: Delta Encoding
-    # Add calculated value to existing value in the volume instead of overwriting
+    # Add calculated value to existing value in the volume instead of overwriting [S1][S2].
     for i, value in enumerate(expanded_values):
         volume_buffer[brick_offset + i] += value
         
     # Step 4: Brick Assembly
-    # The values are now in the volume buffer, ready for rendering
+    # The values are now in the volume buffer, ready for rendering [S1][S2].
     pass
-
-def apply_shift_patterns(data, pattern):
-    """
-    Apply pre-computed shift patterns to expand compressed data to 16-bit values.
-    This function represents the "data shuffle" operation described in the sources.
-    """
-    # Implementation details depend on the specific bit-length kernel.
-    # The sources state that lookups from the shift_table are used.
-    # [G] Assuming a simple expansion for demonstration:
-    # In reality, this involves specific bit-shifting and masking based on the pattern.
-    expanded = []
-    for chunk in data:
-        # Simulate expansion using the pattern
-        # e.g., if pattern specifies shifting chunk by N bits
-        expanded.append(chunk << pattern['shift_amount'])
-    return expanded
 ```
 
 **Parameters:**
-*   **Bit Lengths:** The specific bit depths supported by the scheme (e.g., 8-bit, 16-bit). The exact set of supported bit lengths is not given in the sources.
-*   **Shift Patterns:** Pre-computed tables used for data shuffling.
+*   **Bit Lengths:** The specific bit depths supported by the scheme are not given in the sources [S1][S2].
+*   **Shift Patterns:** Pre-computed tables used for data shuffling [S1][S2].
 
 **Edge Cases and Pitfalls:**
 *   **Bit Length Mismatch:** The kernel must match the bit length of the brick; using the wrong addressing mode will result in incorrect data expansion [S1][S2].
@@ -85,25 +64,25 @@ def apply_shift_patterns(data, pattern):
 ## Subtopics
 
 ### Variable-Length Coding Kernels
-Individual kernels for each supported bit length to handle different addressing modes. Choose when variable bit depths are required. [Link](5723-differences-based-compression.md)
+Individual kernels for each supported bit length to handle different addressing modes [S1][S2]. Not given in the sources. [Link](5723-differences-based-compression.md)
 
 ### Delta Encoding
-Adding calculated values to existing volume data. Choose when spatial coherence allows for delta representation. [Link](5723-differences-based-compression.md)
+Adding calculated values to existing volume data [S1][S2]. Not given in the sources. [Link](5723-differences-based-compression.md)
 
 ### Brick Assembly
-Reconstructing the final brick structure. Choose when block-based processing is needed. [Link](5723-differences-based-compression.md)
+Reconstructing the final brick structure [S1][S2]. Not given in the sources. [Link](5723-differences-based-compression.md)
 
 ## Operating characteristics
-*   **Time Complexity:** Decompression involves kernel selection, shift pattern lookups, and addition operations. The overhead of lookups is negligible [S1][S2].
+*   **Time Complexity:** Decompression involves kernel selection, shift pattern lookups, and addition operations [S1][S2]. The overhead of lookups is negligible [S1][S2].
 *   **Memory Complexity:** Requires storage for the compressed bricks and the pre-computed shift patterns table [S1][S2].
-*   **Performance:** The scheme is designed for GPU-based direct volume rendering, leveraging hardware-supported block-coding techniques [S1][S2].
+*   **Performance:** The scheme is designed for GPU-based direct volume rendering [S1][S2].
 *   **Strengths:** Efficient handling of variable bit depths through specialized kernels; low overhead for data expansion [S1][S2].
 *   **Limitations:** Requires multiple kernels for different bit lengths, increasing implementation complexity [S1][S2].
-*   **When to Use:** When variable bit depths are necessary and GPU acceleration is available.
-*   **When Not to Use:** When fixed-rate block-coding is sufficient or when implementation simplicity is prioritized over compression flexibility [S1][S2].
+*   **When to Use:** Not given in the sources.
+*   **When Not to Use:** Not given in the sources.
 
 ## Background
-The scheme was proposed by Mensmann et al. in [MRH10] [S1][S2]. It is part of the broader field of compressed GPU-based direct volume rendering, building on fixed-rate block-coding techniques like VTC and S3TC [S1][S2].
+The scheme was proposed by Mensmann et al. in [MRH10] [S1][S2]. The sources discuss it within the context of compressed GPU-based direct volume rendering and contrast it with hardware-supported fixed-rate block-coding techniques like VTC and S3TC [S1][S2].
 
 ## Sources
 [S1] State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27

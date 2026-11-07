@@ -1,0 +1,163 @@
+Context The existing render cull (visibleIsoViewport → buildChunkVisibilityMask in engine/prefabs/irreden/render/systems/system_voxel_to_trixel.hpp, and the per-shape iso-bounds check in system_shapes_to_trixel.hpp) is a strict camera-fr...
+
+Lighting: culling invariants — off-screen blockers, shadow-ring, light-seed expansion · Issue #196 · jakildev/IrredenEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Lighting: culling invariants — off-screen blockers, shadow-ring, light-seed expansion #196
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#234
+Closed
+Lighting: culling invariants — off-screen blockers, shadow-ring, light-seed expansion#196
+#234
+Copy link
+Labels
+fleet:queuedIngested into the fleet queue; ready for a worker to claimIngested into the fleet queue; ready for a worker to claimfleet:taskTask filed by a fleet agent; ready for human triageTask filed by a fleet agent; ready for human triagehuman:approvedHuman approved — ready to mergeHuman approved — ready to merge
+Description
+jakildev
+opened on Apr 19, 2026
+Issue body actions
+Context
+The existing render cull (visibleIsoViewport → buildChunkVisibilityMask
+in engine/prefabs/irreden/render/systems/system_voxel_to_trixel.hpp, and the
+per-shape iso-bounds check in system_shapes_to_trixel.hpp) is a strict
+camera-frustum cull on the rendering path. It affects which voxels/shapes get
+written into canvas textures — nothing else.
+Lighting (T-010 occupancy grid, T-012 AO, T-013 directional shadows,
+T-014 flood-fill, T-016 fog-of-war) is designed against a
+camera-independent world-space occupancy grid. Shadow sweeps march
+along the world-space sun axis; flood-fill BFS propagates through
+world-space voxels; fog-of-war DDA rays trace through the same grid.
+None of them read the render cull viewport.
+So the common case — an off-screen building casts a shadow onto
+on-screen geometry — works by construction. The caster's voxels are in
+the grid, the shadow sweep touches them, the shadow lands on the
+on-screen grid cells.
+This issue exists to lock down the four places that are easy to get
+wrong, before downstream lighting PRs bake in camera-scoped
+assumptions. File this as an invariant checklist every lighting PR
+reviewer should run.
+Invariants
+1. Grid build iterates the full voxel pool, not the render-culled subset
+buildChunkVisibilityMask is a render-pipeline-local mask living inside
+system_voxel_to_trixel. T-010's grid-build system needs its own
+iteration path that does not consult it. Easy failure mode: sharing
+a helper and silently cull-by-camera.
+Check: the occupancy-grid-build system does not include
+cull_viewport_state.hpp and does not call visibleIsoViewport.
+2. Shadow-ring extent when chunks start streaming
+T-010 mentions "chunked bitfields matching VOXEL_CHUNK_SIZE = 256".
+Today the grid is full-world, so this is fine. The moment chunks become
+load/unloadable based on camera position, the "loaded chunks" set must
+extend beyond the view frustum by at least:
+```
+shadowRingDistance = maxCasterHeight * cot(sunAltitude)
+```
+…in the sun-projection direction. For a 256-tall world at a 45° sun,
+that's one chunk. For a shallow 20° sun, it's 3+ chunks.
+Check: whenever per-chunk streaming is introduced, the
+"resident chunk set" calculation includes this extent. Document the
+formula next to the streaming code.
+3. Light-seed set — off-screen light sources must still seed flood-fill
+A torch 10 tiles off-screen with radius 15 should still glow the
+on-screen tiles nearest it. T-014 seeds BFS from all entities with
+C_LightSource, which is correct as-specced.
+The failure mode is a well-meaning optimizer adding "only seed lights
+within the view frustum". That silently drops the overflow case.
+Invariant: seed from all C_LightSource entities within
+view frustum + max(radius) expansion, not view frustum alone.
+Check: the flood-fill seed-gather tick does not filter by
+visibleIsoViewport without expanding by C_LightSource::radius_.
+4. AO / shadow neighbor-lookup guard band
+T-012 AO reads 3-diagonal neighbors per visible face. Under grid
+chunking (once T-010's chunk streaming activates), the chunk containing
+each neighbor must be resident.
+Invariant: a 1-voxel (effectively 1-chunk) guard band around the
+view-chunk set is required for AO and shadow sampling to produce
+correct values at the view edge. Without the guard band, on-screen
+faces near the view edge get wrong AO or miss shadow neighbors.
+Check: resident chunk set = view-chunk set ∪ 1-chunk guard band (in
+addition to the shadow-ring of invariant #2).
+Acceptance criteria
+Rather than code deliverables, this task produces a canonical
+reference document. Acceptance is:
+A new section "Lighting culling invariants" is added to
+engine/render/CLAUDE.md containing the four invariants above with
+the same wording (code/prose may be lightly polished).
+The four downstream lighting issues
+(Lighting: per-face voxel ambient occlusion (Phase 1) #166 AO, Lighting: directional sun shadows via shadow height map (Phase 2) #167 shadows, Lighting: flood-fill light propagation with colored light (Phase 3) #168 flood-fill, Lighting: fog of war render pass (Phase 5 engine side) #170 fog-of-war) are
+cross-linked to this issue so their author / reviewer agents see it
+during planning.
+If T-010 (Lighting: 3D occupancy grid infrastructure #164) has not yet merged, its occupancy-grid-build system
+is code-reviewed against invariant Use CMake's FetchContent for dependencies before uploading #1 before merge. If it has
+merged, file a follow-up task if invariant Use CMake's FetchContent for dependencies before uploading #1 is violated in the
+merged form.
+Model tag
+[sonnet] — documentation pass plus cross-linking existing issues.
+Content is already specified above; this is a write-up, not a design
+decision. Escalate to [opus] only if invariant #1 check on T-010 (#164)
+uncovers an actual violation requiring structural fixes.
+Dependencies
+None — this is a documentation / process task. Can land independently of
+the lighting PRs it protects.
+Notes
+The invariants come from an opus-architect design review while
+reviewing C_LightBlocker / C_LightSource component shape (PR prefabs: add C_LightSource, C_LightBlocker, LightType enum with Lua bindings (T-017) #187).
+The goal is that T-012 / T-013 / T-014 / T-016 reviewers have a
+concrete checklist to confirm their implementation respects the
+off-screen-casts-on-screen-visible cases.
+Order of operations matters: file this before T-010 (Lighting: 3D occupancy grid infrastructure #164) ships so
+the occupancy-grid-build system is reviewed against invariant Use CMake's FetchContent for dependencies before uploading #1.
+Activity
+jakildev
+added
+fleet:taskTask filed by a fleet agent; ready for human triageTask filed by a fleet agent; ready for human triage
+human:approvedHuman approved — ready to mergeHuman approved — ready to merge
+fleet:queuedIngested into the fleet queue; ready for a worker to claimIngested into the fleet queue; ready for a worker to claim
+on Apr 19, 2026
+jakildev
+added a commit that references this issue on Apr 19, 2026
+queue: ingest issue #196 as T-024 (lighting culling invariants doc)
+06e4bc7
+jakildev
+added
+fleet:in-progressFleet agent has opened a PR for this issueFleet agent has opened a PR for this issue
+on Apr 19, 2026
+jakildev
+added 2 commits that reference this issue on Apr 20, 2026
+T-024: lighting culling invariants in engine/render/CLAUDE.md
+...
+c1ac26c
+docs: lighting culling invariants in engine/render/CLAUDE.md (T-024) (#…
+...
+39b55fd
+jakildev
+closed this as completedin #234on Apr 20, 2026
+jakildev
+removed
+fleet:in-progressFleet agent has opened a PR for this issueFleet agent has opened a PR for this issue
+on Apr 20, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+fleet:queuedIngested into the fleet queue; ready for a worker to claimIngested into the fleet queue; ready for a worker to claimfleet:taskTask filed by a fleet agent; ready for human triageTask filed by a fleet agent; ready for human triagehuman:approvedHuman approved — ready to mergeHuman approved — ready to merge
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -14,7 +14,6 @@ Front-to-Back Alpha Compositing is a rendering technique that blends multiple se
   - Color vector $\mathbf{c}_i$ (typically RGB) [S1, unofficial].
   - Depth $Z_c$ (used for sorting) [S1, unofficial].
 - Image dimensions (width, height) [S1, unofficial].
-- Early termination threshold $\epsilon$ (typically $10^{-4}$) [S1, unofficial].
 
 **Outputs:**
 - Final image $\mathbf{C}$ with dimensions matching the input image [S1, unofficial].
@@ -25,6 +24,9 @@ Front-to-Back Alpha Compositing is a rendering technique that blends multiple se
   - $\mathbf{C}$: Accumulated color, initialized to $\mathbf{0}$ [S1, unofficial].
   - $T$: Running transmittance, initialized to $1$ [S1, unofficial].
 
+**Parameters:**
+- Early termination threshold $\epsilon$: The threshold for early termination. If the running transmittance $T$ drops below this value, the pixel is considered fully opaque and the loop breaks. Typical value: $10^{-4}$ [S1, unofficial].
+
 **Steps:**
 1. **Sort Splats:** Sort all splats by their center depth $Z_c$ in ascending order (nearest to farthest) [S1, unofficial].
 2. **Initialize:** For each pixel $\mathbf{x}$, set $\mathbf{C} \leftarrow \mathbf{0}$ and $T \leftarrow 1$ [S1, unofficial].
@@ -33,7 +35,7 @@ Front-to-Back Alpha Compositing is a rendering technique that blends multiple se
       $$
       \alpha_i(\mathbf{x}) = \alpha_i \cdot \exp\left(-\tfrac{1}{2}(\mathbf{x} - \mathbf{x}_i)^\top \Sigma'^{-1}_i (\mathbf{x} - \mathbf{x}_i)\right)
       $$
-      where $\alpha_i$ is the intrinsic opacity, $\mathbf{x}_i$ is the splat center, and $\Sigma'^{-1}_i$ is the inverse covariance [S1, unofficial].
+      where $\alpha_i$ is the splat's intrinsic opacity, $\mathbf{x}_i$ is the splat center, $\Sigma'^{-1}_i$ is the inverse 2D covariance, and $\mathbf{x}$ is the pixel coordinate [S1, unofficial].
    b. **Update Color:** Add the splat's contribution to the accumulated color:
       $$
       \mathbf{C} \leftarrow \mathbf{C} + T \cdot \alpha_i(\mathbf{x}) \cdot \mathbf{c}_i
@@ -77,9 +79,8 @@ def composite_pixel(splats_sorted, pixel_coords, epsilon=1e-4):
         dx = pixel_coords[0] - cx
         dy = pixel_coords[1] - cy
         # Quadratic form: (x - x_i)^T Sigma'^-1 (x - x_i)
-        quad = (cov_inv[0, 0] * dx**2 + 
-                cov_inv[1, 1] * dy**2 + 
-                2 * cov_inv[0, 1] * dx * dy)
+        quad = dx * (cov_inv[0, 0] * dx + cov_inv[0, 1] * dy) + \
+               dy * (cov_inv[1, 0] * dx + cov_inv[1, 1] * dy)
         alpha_eff = alpha_intrinsic * np.exp(-0.5 * quad)
         
         # Update accumulated color and transmittance
@@ -97,7 +98,7 @@ def composite_pixel(splats_sorted, pixel_coords, epsilon=1e-4):
 - **Sort Order:** Splats must be processed from nearest to farthest. If processed far-to-near without adjusting the compositing math, occlusion inverts, causing far splats to wrongly paint over near ones [S1, unofficial].
 - **Sort-Order Flips (Popping Artifacts):** 3DGS sorts splats by their center depth $Z_c$. Since splats are 3D blobs with extent, overlapping splats can swap order as the camera moves, causing flickering. This is a speed/quality trade-off [S1, unofficial].
 - **Precision:** The transmittance $T$ decays exponentially. If $T$ becomes very small, floating-point precision issues may arise, though early termination mitigates this [G].
-- **Tiling Optimization:** For large images, split the image (e.g., 128×128) into tiles (e.g., 16×16) and compute which splats' ellipses overlap each tile using a cheap bounding-box test on center ± a few standard deviations. Most tiles touch only 2–4 splats, which makes tiling fast [S1, unofficial].
+- **Tiling Optimization:** For large images, split the image (e.g., 128×128) into tiles (e.g., 16×16) and compute which splats' ellipses overlap each tile using a cheap bounding-box test on center ± a few standard deviations [S1, unofficial].
 - **Worked Example:** Compositing three splats (red $\alpha=0.5$, green $\alpha=0.6$, blue $\alpha=0.8$) at a single pixel yields $\mathbf{C} \approx (0.5, 0.30, 0.16)$ with leftover transmittance $T = 0.04$ [S1, unofficial].
 
 ## Subtopics

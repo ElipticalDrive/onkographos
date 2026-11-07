@@ -1,5 +1,4 @@
 # Background Point Sampling
-
 ## Overview
 Background Point Sampling generates sample points along rays for background regions, defined as the space outside the scene's bounding box [S1, unofficial]. It employs a specific non-uniform sampling distribution controlled by a `bg_preserve` parameter to balance between uniform angular sampling and uniform radial sampling [S1, unofficial]. This method is distinct from sibling methods like Random Point Sampling in Bounds, which typically samples uniformly within a defined volume, by specifically targeting the infinite or large-distance background region with a distribution that adapts based on the ray's geometry relative to the bounding box [S1, unofficial].
 
@@ -22,8 +21,8 @@ The implementation flattens the ray-sample grid into a 1D array for efficient GP
 
 **Steps:**
 1. For each sample index `idx` from $0$ to $N_{rays} \times N_{samples} - 1$:
-2. Calculate the ray index `i_ray` and step index `i_step` as defined above.
-3. Retrieve the maximum t-value for the current ray: $t_{inner} = t_{max}[i_{ray}]$.
+2. Calculate the ray index `i_ray` and step index `i_step` as defined above [S1, unofficial].
+3. Retrieve the maximum t-value for the current ray: $t_{inner} = t_{max}[i_{ray}]$ [S1, unofficial].
 4. Calculate the original outer t-coordinate $t_{outer}^{orig}$ using the preservation parameter:
    $$ t_{outer}^{orig} = t_{inner} - 1.0 + \frac{1.0}{1.0 - \frac{i_{step}}{N_{samples}}} $$
    [S1, unofficial]
@@ -46,117 +45,84 @@ The implementation flattens the ray-sample grid into a 1D array for efficient GP
 10. Scale the original point coordinates to get the final background point:
     $$ \mathbf{p}_{final} = \mathbf{p}_{orig} \times o2i_p $$
     [S1, unofficial]
-11. Store $\mathbf{p}_{final}$ and $t_{outer}$ (or the scaled distance if required by downstream logic, though the source implies $t_{outer}$ is the distance metric used for the factor calculation) for the current `idx`.
+11. Store $\mathbf{p}_{final}$ and $t_{outer}$ for the current `idx` [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def background_point_sampling(rays_o, rays_d, t_max, N_samples, bg_preserve):
-    """
-    Generate background sample points using non-uniform distribution.
-    
-    Args:
-        rays_o: (N_rays, 3) ray origins
-        rays_d: (N_rays, 3) ray directions
-        t_max: (N_rays,) maximum t values for each ray
-        N_samples: int, number of samples per ray
-        bg_preserve: float, preservation parameter [0, 1]
-        
-    Returns:
-        bg_pts: (N_rays * N_samples, 3) final background points
-        bg_t: (N_rays * N_samples,) distances from origin
-    """
-    N_rays = rays_o.shape[0]
+    N_rays = len(rays_o)
     total_samples = N_rays * N_samples
-    
-    # Initialize output arrays
-    bg_pts = np.zeros((total_samples, 3))
-    bg_t = np.zeros(total_samples)
-    
-    # Precompute ray origins and directions for vectorization if possible,
-    # but following the step-by-step logic for clarity:
-    
+    bg_pts = [None] * total_samples
+    bg_t = [0.0] * total_samples
+
     for idx in range(total_samples):
         i_ray = idx // N_samples
         i_step = idx % N_samples
-        
-        # 1. Get max t for this ray
+
         t_inner = t_max[i_ray]
-        
-        # 2. Calculate original outer t-coordinate
-        # Note: The formula uses 1.0 - (i_step / N_samples) in denominator.
-        # If i_step == N_samples, this is undefined, but i_step < N_samples.
-        # If i_step == 0, term is 1.0.
         denom = 1.0 - (i_step / N_samples)
-        if denom == 0:
-            # Edge case: should not happen if i_step < N_samples
-            t_outer_orig = np.inf 
+        if denom == 0.0:
+            t_outer_orig = float('inf')
         else:
             t_outer_orig = t_inner - 1.0 + 1.0 / denom
-            
-        # 3. Calculate original 3D point
+
         ray_o = rays_o[i_ray]
         ray_d = rays_d[i_ray]
-        ori_ray_pts = ray_o + ray_d * t_outer_orig
-        
-        # 4. Calculate distance from origin
-        t_outer = np.linalg.norm(ori_ray_pts)
-        
-        # 5. Calculate max absolute coordinate component
-        ori_ray_pts_m = np.max(np.abs(ori_ray_pts))
-        
-        # Avoid division by zero if point is at origin (unlikely for background)
-        if ori_ray_pts_m == 0:
+        ori_ray_pts_x = ray_o[0] + ray_d[0] * t_outer_orig
+        ori_ray_pts_y = ray_o[1] + ray_d[1] * t_outer_orig
+        ori_ray_pts_z = ray_o[2] + ray_d[2] * t_outer_orig
+
+        t_outer = (ori_ray_pts_x**2 + ori_ray_pts_y**2 + ori_ray_pts_z**2)**0.5
+        ori_ray_pts_m = max(abs(ori_ray_pts_x), abs(ori_ray_pts_y), abs(ori_ray_pts_z))
+
+        if ori_ray_pts_m == 0.0:
             R_outer = 0.0
         else:
             R_outer = t_outer / ori_ray_pts_m
-            
-        # 6. Calculate scaling factor
-        # Handle case where t_outer is 0
-        if t_outer == 0:
+
+        if t_outer == 0.0:
             o2i_p = 0.0
         else:
-            term1 = (R_outer ** 2) / (t_outer ** 2)
-            term2 = R_outer / t_outer
-            o2i_p = term1 * (1.0 - bg_preserve) + term2 * bg_preserve
-            
-        # 7. Scale original point to get final point
-        final_point = ori_ray_pts * o2i_p
-        
-        bg_pts[idx] = final_point
+            o2i_p = (R_outer**2 / t_outer**2) * (1.0 - bg_preserve) + (R_outer / t_outer) * bg_preserve
+
+        final_x = ori_ray_pts_x * o2i_p
+        final_y = ori_ray_pts_y * o2i_p
+        final_z = ori_ray_pts_z * o2i_p
+
+        bg_pts[idx] = (final_x, final_y, final_z)
         bg_t[idx] = t_outer
-        
+
     return bg_pts, bg_t
 ```
 
 **Parameters:**
-- `bg_preserve`: Float, typically between 0 and 1. Controls the blend between two sampling distributions [S1, unofficial].
+- `bg_preserve`: Float, typically between 0 and 1. Controls the blend between sampling distributions [S1, unofficial].
 - `N_samples`: Integer, number of samples per ray [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Division by Zero:** If `ori_ray_pts_m` is 0 (point at origin), `R_outer` is undefined. In practice, background rays should not originate from the origin or pass through it in a way that results in a zero vector for the background sample. A guard is needed [G].
-- **Denominator Zero:** In the calculation of `t_outer_orig`, if `i_step == N_samples`, the denominator `1.0 - (i_step / N_samples)` becomes zero. Since `i_step` ranges from $0$ to $N_{samples}-1$, this case is avoided. However, if `N_samples` is 0, the loop does not execute.
+- **Division by Zero:** If `ori_ray_pts_m` is 0 (point at origin), `R_outer` is undefined. A guard returning 0.0 is required [G].
+- **Denominator Zero:** In the calculation of `t_outer_orig`, if `i_step == N_samples`, the denominator `1.0 - (i_step / N_samples)` becomes zero. Since `i_step` ranges from $0$ to $N_{samples}-1$, this case is avoided. If `N_samples` is 0, the loop does not execute [G].
 - **Precision:** Floating point precision issues may arise when `t_outer` is very large or very small. The scaling factor `o2i_p` can become unstable if `t_outer` is close to zero [G].
 
 ## Operating characteristics
-**Time Complexity:** $O(N_{rays} \times N_{samples})$. Each sample requires a constant number of arithmetic operations.
-**Memory Complexity:** $O(N_{rays} \times N_{samples})$ to store the output points and distances.
+**Time Complexity:** $O(N_{rays} \times N_{samples})$. Each sample requires a constant number of arithmetic operations [G].
+**Memory Complexity:** $O(N_{rays} \times N_{samples})$ to store the output points and distances [G].
 **Strengths:**
-- Provides a structured way to sample the background, which is crucial for NeRF-based methods that need to account for background color and depth.
-- The `bg_preserve` parameter allows tuning the sampling density, potentially improving reconstruction quality for distant objects or sky [S1, unofficial].
+- Provides a structured way to sample the background, which is crucial for NeRF-based methods that need to account for background color and depth [G].
+- The `bg_preserve` parameter allows tuning the sampling density [S1, unofficial].
 **Limitations:**
-- The non-uniform distribution may require more samples to achieve the same variance reduction as uniform sampling in certain scenarios.
-- Computationally more expensive than simple uniform sampling due to the per-sample geometric calculations.
+- The non-uniform distribution may require more samples to achieve the same variance reduction as uniform sampling in certain scenarios [G].
+- Computationally more expensive than simple uniform sampling due to the per-sample geometric calculations [G].
 **When to Use:**
-- When rendering scenes with significant background content that needs to be modeled explicitly.
-- When using methods like DirectVoxGO that rely on this specific sampling strategy for background regions [S1, unofficial].
+- When rendering scenes with significant background content that needs to be modeled explicitly [G].
 **When Not to Use:**
-- If the background is simple (e.g., constant color) and does not require detailed sampling.
-- If computational resources are extremely limited and a simpler background approximation suffices.
+- If the background is simple (e.g., constant color) and does not require detailed sampling [G].
+- If computational resources are extremely limited and a simpler background approximation suffices [G].
 
 ## Background
-Background Point Sampling is used in the context of 3D Gaussian Splatting and NeRF-based rendering methods, specifically in implementations like DirectVoxGO [S1, unofficial]. The method was introduced to handle the background region in volume rendering by generating samples outside the bounding box of the scene. The specific formula and implementation are found in the DirectVoxGO repository [S1, unofficial].
+Background Point Sampling is used in volume rendering to handle the background region by generating samples outside the bounding box of the scene [G].
 
 ## Sources
 [S1] sunset1995/DirectVoxGO, https://github.com/sunset1995/DirectVoxGO, fetched 2026-10-26 (unofficial)

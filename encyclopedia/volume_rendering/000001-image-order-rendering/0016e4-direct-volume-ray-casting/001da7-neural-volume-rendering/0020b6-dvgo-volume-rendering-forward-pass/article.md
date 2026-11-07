@@ -3,267 +3,249 @@
 Also called: DVGO forward, Direct Voxel Grid Optimization rendering
 
 ## Overview
-The DVGO forward pass renders a scene by querying a learnable 3D voxel grid of density values and aggregating them along rays using volume rendering principles [S1, unofficial]. It differs from NeRF-based methods by replacing the neural network density query with direct lookup and interpolation from a sparse or dense voxel grid, enabling faster training and inference by leveraging GPU texture hardware [S1, unofficial]. It builds on [Neural volume rendering](1576-neural-volume-rendering.md) by discretizing the volume integral over a structured grid rather than a continuous implicit field.
+The DVGO forward pass renders a 3D scene represented by a sparse voxel grid of neural features into a 2D image by querying a multi-layer perceptron (MLP) for density and color at sample points along camera rays [S1, unofficial]. It differs from standard NeRF by replacing the continuous coordinate query with a discrete voxel grid lookup, which allows for efficient caching and sparse rendering, while maintaining the differentiable volume rendering integral for gradient-based optimization [S1, unofficial].
 
 ## How it works
+### Inputs and Outputs
 **Inputs:**
-- Ray origins $O$ and directions $D$ for each pixel.
-- Near and far clipping distances ($t_{near}, t_{far}$) for the volume bounds.
-- Sampling step size or number of samples.
-- Voxel grid parameters: world bounds ($xyz_{min}, xyz_{max}$), resolution ($N_x, N_y, N_z$), and the density tensor $\mathbf{D} \in \mathbb{R}^{N_x \times N_y \times N_z}$.
-- Optional: Mask cache for free-space culling, background color $C_{bg}$, and view direction for view-dependent shading.
+- `rays_o`: Origin coordinates of rays, shape $(N, 3)$, where $N$ is the number of pixels.
+- `rays_d`: Direction vectors of rays, shape $(N, 3)$.
+- `near`: Near plane distance for each ray, shape $(N,)$.
+- `far`: Far plane distance for each ray, shape $(N,)$.
+- `stepsize`: Base sampling interval, scalar.
+- `render_kwargs`: Dictionary containing optional flags (`render_features`, `render_diffuse`, `render_depth`), background color `bg`, and `stepsize`.
+- `model`: The `DirectVoxGO` or `DirectRefVoxGO` instance containing:
+    - `density`: MLP predicting raw density.
+    - `diffuse`: MLP predicting diffuse color (if `use_diffuse_color`).
+    - `rgbnet`: Optional MLP for view-dependent color.
+    - `voxel_size_ratio`: Ratio for interval calculation.
+    - `act_shift`: Shift parameter for density activation.
+    - `fast_color_thres`: Threshold for early ray termination.
+    - `mask_cache`: Optional cache for free space masking.
+    - `rgbnet_full_implicit`: Boolean flag for RGB network input.
+    - `rgbnet_direct`: Boolean flag for direct RGB addition.
 
 **Outputs:**
-- Rendered RGB color $C_{rendered}$ per pixel.
-- Accumulated transmittance/alpha $\alpha_{last}$ (or $1 - \alpha_{last}$ as background weight).
-- Optional: Depth map, diffuse color, or feature maps.
+- `rgb_marched`: Final rendered RGB image, shape $(N, 3)$.
+- `alphainv_last`: Transmittance at the end of the ray, shape $(N,)$.
+- `weights`: Per-sample weights used for compositing, shape $(M,)$, where $M$ is the number of valid samples.
+- `raw_alpha`: Raw alpha values per sample, shape $(M,)$.
+- `raw_rgb`: Raw RGB values per sample, shape $(M, 3)$.
+- `ray_id`: Mapping from sample index to ray index, shape $(M,)$.
+- `depth`: (Optional) Weighted average depth, shape $(N,)$.
+- `diffuse_marched`: (Optional) Weighted average diffuse color, shape $(N, 3)$.
+- `features_marched`: (Optional) Weighted average features, shape $(N, D)$.
 
-**Data Structures:**
-- **Density Grid:** A 3D tensor storing raw density values $\sigma$ at voxel centers. Accessed via trilinear interpolation in normalized texture coordinates $[0,1]^3$.
-- **Mask Cache:** A binary 3D grid indicating occupied vs. free space, used to skip sampling in empty regions [S1, unofficial].
+### Data Structures
+- **Voxel Grid**: A 3D grid of size $V_x \times V_y \times V_z$ storing feature vectors. Each voxel contains a feature vector of dimension $k_0$ (used for density and diffuse color).
+- **Mask Cache**: A boolean grid or hash map indicating free space voxels to skip sampling.
+- **Segment COU**: A utility function that groups elements by an index array and applies a reduction (sum).
 
-**Steps:**
+### Parameters
+- `interval`: The effective sampling interval for alpha conversion.
+  $$ \text{interval} = \text{stepsize} \times \text{voxel\_size\_ratio} $$
+- `fast_color_thres`: Threshold for early ray termination. Points with $\alpha < \text{fast\_color\_thres}$ or $\text{weight} < \text{fast\_color\_thres}$ are discarded. If $0$, no filtering is applied [S1, unofficial].
+- `act_shift`: Shift value added to raw density before activation [S1, unofficial].
 
-1.  **Ray Sampling:**
-    Generate sample points $P_m$ along each ray $r(t) = O + tD$ for $t \in [t_{near}, t_{far}]$ with a fixed step size $s$ or adaptive spacing. The number of samples $M$ is determined by the ray length and step size [S1, unofficial].
-    $$ P_m = O + t_m D, \quad t_m = t_{near} + m \cdot s, \quad m = 0, \dots, M-1 $$
+### Steps
+1.  **Ray Sampling**: Generate sample points $\mathbf{p}_i$ along each ray $r(t) = \mathbf{o} + t\mathbf{d}$ within $[t_{start}, t_{end}]$ using the `stepsize`. This returns:
+    - `ray_pts`: Sample coordinates, shape $(M, 3)$.
+    - `ray_id`: Ray indices for each sample, shape $(M,)$.
+    - `step_id`: Step indices for each sample, shape $(M,)$.
+2.  **Free Space Masking**: If `mask_cache` is present, filter `ray_pts`, `ray_id`, and `step_id` to keep only points where `mask_cache(ray_pts)` is true (i.e., inside the object volume) [S1, unofficial].
+3.  **Density Query**: Query the density network for each sample point:
+    $$ \sigma_i = \text{density}(\mathbf{p}_i) $$
+4.  **Alpha Conversion**: Convert raw density $\sigma_i$ to opacity $\alpha_i$:
+    $$ \alpha_i = 1 - \exp(-(\sigma_i + \text{act\_shift}) \cdot \text{interval}) $$
+    This is implemented via `activate_density(density, interval)` [S1, unofficial].
+5.  **Early Termination (Alpha)**: If `fast_color_thres > 0`, filter points where $\alpha_i < \text{fast\_color\_thres}$. Update `ray_pts`, `ray_id`, `step_id`, `density`, and `alpha` [S1, unofficial].
+6.  **Weight Computation**: Compute accumulated transmittance weights $w_i$ for each sample:
+    $$ w_i = \alpha_i \prod_{j < i, j \in \text{same ray}} (1 - \alpha_j) $$
+    This is implemented via `Alphas2Weights.apply(alpha, ray_id, N)` which also returns `alphainv_last` (the final transmittance $T_N = \prod (1-\alpha_j)$) [S1, unofficial].
+7.  **Early Termination (Weight)**: If `fast_color_thres > 0`, filter points where $w_i < \text{fast\_color\_thres}$. Update `weights`, `alpha`, `ray_pts`, `ray_id`, and `step_id` [S1, unofficial].
+8.  **Color Query**:
+    - If `use_diffuse_color` is true, query the diffuse network: $\mathbf{d}_i = \text{diffuse}(\mathbf{p}_i)$.
+    - Compute raw RGB $\mathbf{c}_i$:
+        - If `rgbnet` is None: $\mathbf{c}_i = \text{sigmoid}(\mathbf{d}_i)$.
+        - If `rgbnet` exists:
+            - Compute positional encoding of view direction $\mathbf{v}_i$.
+            - Concatenate with feature $k_0$ (if `not rgbnet_full_implicit`).
+            - Pass through `rgbnet`.
+            - Apply sigmoid.
+            - If `rgbnet_direct` is true, add $\mathbf{d}_i$ before sigmoid or after? The source says "with or without diffuse addition based on self.rgbnet_direct". Typically, direct means $\mathbf{c}_i = \text{sigmoid}(\text{rgbnet}(\dots) + \mathbf{d}_i)$ or similar. The source implies the final RGB is computed via this path [S1, unofficial].
+9.  **Feature Compositing (Optional)**: If `render_features` is true, compute `features_marched` by summing $w_i \cdot k_0$ grouped by `ray_id` using `segment_coo` [S1, unofficial].
+10. **RGB Compositing**: Compute the final RGB color for each ray by summing weighted colors:
+    $$ \mathbf{C}_{\text{ray}} = \sum_{i \in \text{ray}} w_i \mathbf{c}_i $$
+    Implemented via `segment_coo(src=(weights.unsqueeze(-1) * rgb), index=ray_id, out=torch.zeros([N, 3]), reduce='sum')` [S1, unofficial].
+11. **Background Addition**: Add the background color scaled by the final transmittance:
+    $$ \mathbf{C}_{\text{final}} = \mathbf{C}_{\text{ray}} + \text{alphainv\_last} \cdot \mathbf{bg} $$
+12. **Optional Outputs**:
+    - If `render_diffuse` is true, compute `diffuse_marched` by summing $w_i \cdot \text{sigmoid}(\mathbf{d}_i)$ grouped by `ray_id` [S1, unofficial].
+    - If `render_depth` is true, compute `depth` by summing $w_i \cdot \text{step\_id}$ grouped by `ray_id` [S1, unofficial].
 
-2.  **Free-Space Culling (Optional):**
-    If a `mask_cache` is provided, query the cache at each $P_m$. Discard points where the cache indicates free space (value 0) [S1, unofficial]. This reduces the number of active samples significantly in sparse scenes.
-
-3.  **Density Query:**
-    Convert world coordinates $P_m$ to normalized texture coordinates $u_m \in [0,1]^3$. Sample the density grid $\mathbf{D}$ using trilinear interpolation to obtain raw density $\sigma_m$ [S1, unofficial].
-    $$ \sigma_m = \text{TrilinearInterpolate}(\mathbf{D}, u_m) $$
-
-4.  **Alpha Conversion:**
-    Convert raw density $\sigma_m$ to opacity $\alpha_m$ using the `Raw2Alpha` function. This involves an exponential decay model based on the sampling interval $I$ (typically $I = s \cdot \text{voxel\_size\_ratio}$) and a shift parameter $a$ (often 0 or learned) [S1, unofficial].
-    $$ \alpha_m = 1 - \exp(-\sigma_m \cdot I) $$
-    *Note: Some implementations use a simpler linear approximation or sigmoid if $\sigma$ is pre-activated, but the standard DVGO formulation uses the exponential form derived from the volume rendering integral discretization.*
-
-5.  **Fast Color Thresholding (Optional):**
-    If `fast_color_thres` is enabled, filter out samples where $\alpha_m < \text{threshold}$. This removes negligible contributions early [S1, unofficial].
-
-6.  **Weight Computation:**
-    Compute the rendering weight $w_m$ for each sample, representing the probability that the ray terminates at sample $m$. This requires the accumulated transmittance $T_m$ from previous samples [S1, unofficial].
-    $$ T_m = \exp\left(-\sum_{j=0}^{m-1} \sigma_j \cdot I\right) = \prod_{j=0}^{m-1} (1 - \alpha_j) $$
-    $$ w_m = T_m \cdot \alpha_m $$
-    Efficiently, this is computed using cumulative sums of $\sigma \cdot I$ or cumulative products of $(1-\alpha)$ [S1, unofficial].
-
-7.  **Color Query:**
-    - **Diffuse Color:** If `use_diffuse_color` is true, query a separate color grid (or the same grid if shared) to get diffuse color $C_{diffuse, m}$ [S1, unofficial].
-    - **View-Dependent Color:** If an `rgbnet` is used, compute view-dependent color. Flatten view directions $D$, apply positional encoding, concatenate with the diffuse color (or raw features), pass through the small MLP `rgbnet`, and apply sigmoid [S1, unofficial].
-    - **Final Color:** If `rgbnet_direct` is true, the network output is the final color. Otherwise, it modulates the diffuse color. Let $C_m$ be the final color at sample $m$.
-
-8.  **Aggregation:**
-    Compute the final color for each ray by summing the weighted colors [S1, unofficial].
-    $$ C_{rendered} = \sum_{m=0}^{M-1} w_m C_m $$
-    The accumulated opacity (transmittance to background) is:
-    $$ \alpha_{last} = 1 - \sum_{m=0}^{M-1} w_m = T_M $$
-    Add the background color:
-    $$ C_{final} = C_{rendered} + \alpha_{last} C_{bg} $$
-
-9.  **Optional Outputs:**
-    - **Depth:** Sum $w_m \cdot t_m$ [S1, unofficial].
-    - **Diffuse:** Sum $w_m \cdot C_{diffuse, m}$ [S1, unofficial].
-    - **Features:** Sum $w_m \cdot \text{features}_m$ [S1, unofficial].
-
-**Parameters:**
-- `interval` (or `stepsize`): The distance between samples. In DVGO, this is often scaled by `voxel_size_ratio` to match the physical size of voxels [S1, unofficial].
-- `act_shift`: The shift parameter $a$ in the density activation. Default is often 0 [S1, unofficial].
-- `fast_color_thres`: Threshold for early culling of low-alpha samples. Default 0 [S1, unofficial].
-
-**Pseudocode:**
+### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import torch
-import math
-
-def dvgo_forward_pass(rays_o, rays_d, near, far, voxel_grid_density, 
-                      xyz_min, xyz_max, num_voxels, step_size, 
-                      act_shift=0.0, mask_cache=None, bg_color=1.0, 
-                      use_diffuse=False, rgbnet=None, fast_color_thres=0.0):
+def dvgo_forward_pass(rays_o, rays_d, near, far, stepsize, render_kwargs, model):
     """
-    Forward pass for Direct Voxel Grid Optimization (DVGO).
+    Performs the forward pass for Direct Voxel Grid Optimization.
     
     Args:
-        rays_o: (N, 3) Ray origins.
-        rays_d: (N, 3) Ray directions (normalized).
-        near: (N,) Near plane distances.
-        far: (N,) Far plane distances.
-        voxel_grid_density: (Nx, Ny, Nz) Raw density tensor.
-        xyz_min: (3,) Minimum world coordinates of the voxel grid.
-        xyz_max: (3,) Maximum world coordinates of the voxel grid.
-        num_voxels: (3,) Number of voxels in x, y, z.
-        step_size: Float. Sampling step size in world units.
-        act_shift: Float. Shift for density activation.
-        mask_cache: Optional (Nx, Ny, Nz) boolean tensor for free-space culling.
-        bg_color: Float or (3,) Background color.
-        use_diffuse: Bool. Whether to use a separate diffuse color grid.
-        rgbnet: Optional MLP for view-dependent color.
-        fast_color_thres: Float. Threshold for alpha culling.
+        rays_o: (N, 3) ray origins
+        rays_d: (N, 3) ray directions
+        near: (N,) near plane distances
+        far: (N,) far plane distances
+        stepsize: float, base sampling interval
+        render_kwargs: dict with keys 'bg', 'render_features', 'render_diffuse', 'render_depth'
+        model: DirectVoxGO instance
         
     Returns:
-        rgb: (N, 3) Rendered colors.
-        alpha: (N,) Accumulated alpha (1 - transmittance).
+        dict with keys 'rgb_marched', 'alphainv_last', 'weights', 'raw_alpha', 'raw_rgb', 'ray_id', 
+        and optionally 'depth', 'diffuse_marched', 'features_marched'
     """
-    device = rays_o.device
     N = rays_o.shape[0]
     
-    # 1. Calculate sampling points
-    # Determine number of samples per ray based on step_size and ray length
-    # For simplicity, assume fixed number of samples M or compute dynamically
-    # M = ceil((far - near) / step_size)
-    # However, DVGO often uses a fixed M or adaptive based on voxel size.
-    # Here we assume a fixed M for clarity, or compute max M.
-    max_samples = int(math.ceil((far.max() - near.min()) / step_size)) + 10 # Buffer
+    # 1. Ray Sampling
+    ray_pts, ray_id, step_id = sample_ray(rays_o, rays_d, near, far, stepsize)
+    M = ray_pts.shape[0]
     
-    # Generate t values for all rays
-    # t_m = near + m * step_size
-    # We need to handle variable ray lengths. 
-    # A common approach is to generate a large tensor of samples and mask out-of-bounds.
-    
-    # Create grid of sample indices
-    m = torch.arange(max_samples, device=device).unsqueeze(0) # (1, M)
-    # Expand to (N, M)
-    m = m.expand(N, -1)
-    
-    # Calculate t for each ray and sample
-    # t = near[:, None] + m * step_size
-    t = near.unsqueeze(1) + m * step_size
-    
-    # Calculate positions P = O + t * D
-    # rays_o: (N, 3), rays_d: (N, 3), t: (N, M)
-    # P: (N, M, 3)
-    P = rays_o.unsqueeze(1) + t.unsqueeze(2) * rays_d.unsqueeze(1)
-    
-    # 2. Free-space culling
-    if mask_cache is not None:
-        # Convert P to voxel indices
-        # u = (P - xyz_min) / (xyz_max - xyz_min)
-        # idx = floor(u * num_voxels)
-        # Check if idx is within bounds and mask_cache[idx] is True
-        # This step is complex in pure Python/pseudocode without grid sampling libraries.
-        # We assume a helper function `query_mask_cache` exists.
-        # valid_mask = query_mask_cache(P, mask_cache, xyz_min, xyz_max, num_voxels)
-        # P = P[valid_mask]
-        # t = t[valid_mask]
-        # rays_o_idx = rays_o_idx[valid_mask] # Need to track ray IDs
-        pass # Simplified for brevity; in practice, this filters (N, M) tensor
-    
+    # 2. Free Space Masking
+    if model.mask_cache is not None:
+        mask = model.mask_cache(ray_pts)
+        ray_pts = ray_pts[mask]
+        ray_id = ray_id[mask]
+        step_id = step_id[mask]
+        M = ray_pts.shape[0]
+        
     # 3. Density Query
-    # Convert world coordinates P to normalized texture coordinates [0, 1]
-    # u = (P - xyz_min) / (xyz_max - xyz_min)
-    # Clamp to [0, 1] to handle out-of-bounds rays
-    u = (P - xyz_min) / (xyz_max - xyz_min)
-    u = torch.clamp(u, 0.0, 1.0)
-    
-    # Sample density grid using trilinear interpolation
-    # voxel_grid_density shape: (Nx, Ny, Nz)
-    # u shape: (N, M, 3)
-    # We need to reshape for grid_sample or custom interpolation
-    # Assuming a helper `trilinear_sample` that takes (N, M, 3) coords and grid
-    density = trilinear_sample(voxel_grid_density, u) # (N, M)
+    density = model.density(ray_pts)
     
     # 4. Alpha Conversion
-    # interval = step_size * voxel_size_ratio
-    # In DVGO, voxel_size_ratio is often 1.0 if step_size matches voxel size,
-    # or it's a hyperparameter. Let's assume interval = step_size for simplicity
-    # unless specified otherwise.
-    interval = step_size 
-    alpha = 1.0 - torch.exp(-(density + act_shift) * interval)
+    interval = stepsize * model.voxel_size_ratio
+    alpha = activate_density(density, interval, model.act_shift)
     
-    # 5. Fast Color Thresholding
-    if fast_color_thres > 0:
-        keep = alpha > fast_color_thres
-        # Filter tensors
-        # This requires careful indexing to maintain (N, M) structure or switching to sparse
-        # For dense implementation, we might just zero out or mask later
-        pass
-
+    # 5. Early Termination (Alpha)
+    if model.fast_color_thres > 0:
+        mask = alpha > model.fast_color_thres
+        ray_pts = ray_pts[mask]
+        ray_id = ray_id[mask]
+        step_id = step_id[mask]
+        density = density[mask]
+        alpha = alpha[mask]
+        M = ray_pts.shape[0]
+        
     # 6. Weight Computation
-    # Compute transmittance T_m = exp(-sum(sigma_j * interval) for j < m)
-    # sigma_interval = density * interval
-    sigma_interval = density * interval
-    # Cumulative sum
-    cum_sigma = torch.cumsum(sigma_interval, dim=1) # (N, M)
-    # Transmittance T_m = exp(-cum_sigma[:, m-1]) for m > 0, T_0 = 1
-    # T: (N, M)
-    # T_m = exp(-sum_{j=0}^{m-1} sigma_j * interval)
-    # We can compute this as:
-    # T = exp(-torch.cat([zeros, cum_sigma[:, :-1]], dim=1))
-    zeros = torch.zeros_like(cum_sigma[:, 0:1])
-    T = torch.exp(-torch.cat([zeros, cum_sigma[:, :-1]], dim=1))
+    weights, alphainv_last = Alphas2Weights.apply(alpha, ray_id, N)
     
-    # Weights w_m = T_m * alpha_m
-    weights = T * alpha # (N, M)
-    
-    # 7. Color Query
-    # If use_diffuse, query diffuse color grid
-    if use_diffuse:
-        # Assume diffuse_grid is available
-        # diffuse_color = trilinear_sample(diffuse_grid, u)
-        # For this example, we'll assume a constant diffuse color or skip
-        diffuse_color = torch.ones_like(P) # Placeholder
-    else:
-        diffuse_color = torch.ones_like(P)
+    # 7. Early Termination (Weight)
+    if model.fast_color_thres > 0:
+        mask = weights > model.fast_color_thres
+        weights = weights[mask]
+        alpha = alpha[mask]
+        ray_pts = ray_pts[mask]
+        ray_id = ray_id[mask]
+        step_id = step_id[mask]
+        # density is not used after alpha, but kept for consistency if needed
+        # M is updated implicitly by mask
         
-    # View-dependent color
-    if rgbnet is not None:
-        # Flatten viewdirs and diffuse color
-        # This part requires specific MLP implementation
-        # For simplicity, assume rgbnet returns view-dependent color
-        # viewdirs = rays_d.unsqueeze(1).expand(-1, M, -1)
-        # color = rgbnet(viewdirs, diffuse_color)
-        color = diffuse_color # Placeholder
-    else:
-        color = diffuse_color
+    # 8. Color Query
+    if model.use_diffuse_color:
+        diffuse = model.diffuse(ray_pts)
         
-    # 8. Aggregation
-    # rgb_marched = sum(weights * color)
-    # weights: (N, M), color: (N, M, 3)
-    rgb_marched = torch.sum(weights.unsqueeze(2) * color, dim=1) # (N, 3)
+    if model.rgbnet is None:
+        rgb = torch.sigmoid(diffuse)
+    else:
+        # View-dependent color computation
+        viewdirs = rays_d[ray_id] # Get view direction for each sample
+        # Positional encoding of viewdirs is assumed to be handled internally or via helper
+        # Concatenate with k0 if not full implicit
+        if not model.rgbnet_full_implicit:
+            k0 = model.get_feature(ray_pts) # Assuming k0 is retrieved from voxel grid
+            # Concatenate k0 with viewdir PE
+            input_tensor = concatenate(k0, positional_encoding(viewdirs))
+        else:
+            input_tensor = positional_encoding(viewdirs)
+            
+        rgbnet_out = model.rgbnet(input_tensor)
+        
+        if model.rgbnet_direct:
+            # Add diffuse color directly
+            rgb = torch.sigmoid(rgbnet_out + diffuse)
+        else:
+            rgb = torch.sigmoid(rgbnet_out)
+            
+    # 9. Feature Compositing (Optional)
+    features_marched = None
+    if render_kwargs.get('render_features', False):
+        k0 = model.get_feature(ray_pts) # Retrieve k0 for all samples
+        features_marched = segment_coo(
+            src=weights.unsqueeze(-1) * k0,
+            index=ray_id,
+            out=torch.zeros([N, k0.shape[1]]),
+            reduce='sum'
+        )
+        
+    # 10. RGB Compositing
+    rgb_marched = segment_coo(
+        src=weights.unsqueeze(-1) * rgb,
+        index=ray_id,
+        out=torch.zeros([N, 3]),
+        reduce='sum'
+    )
     
-    # Alpha last (transmittance to background)
-    # alpha_last = 1 - sum(weights)
-    alpha_last = 1.0 - torch.sum(weights, dim=1) # (N,)
+    # 11. Background Addition
+    bg = render_kwargs['bg']
+    rgb_marched = rgb_marched + (alphainv_last.unsqueeze(-1) * bg)
     
-    # Add background
-    if isinstance(bg_color, float):
-        bg_color = torch.tensor([bg_color, bg_color, bg_color], device=device)
-    rgb_final = rgb_marched + alpha_last.unsqueeze(1) * bg_color
-    
-    return rgb_final, alpha_last
-
-def trilinear_sample(grid, coords):
-    """
-    Trilinear interpolation of grid at coords.
-    grid: (Nx, Ny, Nz)
-    coords: (..., 3) in [0, 1]
-    Returns: (...)
-    """
-    # This is a placeholder for the actual interpolation logic
-    # In PyTorch, this is often done with torch.nn.functional.grid_sample
-    # which expects coordinates in [-1, 1]
-    coords_norm = 2.0 * coords - 1.0
-    # grid_sample expects (N, C, H, W) or (N, C, D, H, W)
-    # Reshape grid to (1, 1, Nx, Ny, Nz)
-    # Reshape coords to (N*M, 1, 1, 1, 3)
-    # This is complex to write out fully in pseudocode without library calls.
-    # We assume this function correctly returns the interpolated values.
-    return torch.zeros_like(coords[..., 0]) # Placeholder
+    # 12. Optional Outputs
+    diffuse_marched = None
+    if model.use_diffuse_color and render_kwargs.get('render_diffuse', False):
+        diffuse_marched = segment_coo(
+            src=weights.unsqueeze(-1) * torch.sigmoid(diffuse),
+            index=ray_id,
+            out=torch.zeros([N, 3]),
+            reduce='sum'
+        )
+        
+    depth = None
+    if render_kwargs.get('render_depth', False):
+        depth = segment_coo(
+            src=weights.unsqueeze(-1) * step_id.unsqueeze(-1),
+            index=ray_id,
+            out=torch.zeros([N, 1]),
+            reduce='sum'
+        ).squeeze(-1)
+        
+    return {
+        'alphainv_last': alphainv_last,
+        'weights': weights,
+        'rgb_marched': rgb_marched,
+        'raw_alpha': alpha,
+        'raw_rgb': rgb,
+        'ray_id': ray_id,
+        'depth': depth,
+        'diffuse_marched': diffuse_marched,
+        'features_marched': features_marched
+    }
 ```
 
+### Edge Cases and Pitfalls
+- **Precision**: The exponential function in alpha conversion and transmittance calculation can suffer from underflow if $\sigma_i \cdot \text{interval}$ is very small, leading to $\alpha_i \approx 0$. Conversely, large values can lead to $\alpha_i \approx 1$. The `act_shift` parameter helps stabilize this [S1, unofficial].
+- **Boundaries**: Ray endpoints $t_{start}$ and $t_{end}$ must be correctly computed based on the bounding box of the voxel grid. Rays that do not intersect the bounding box should be handled or filtered out [S1, unofficial].
+- **Degenerate Input**: If `fast_color_thres` is set too high, all samples may be filtered out, resulting in a black image (or only background). If `mask_cache` filters all points, the same occurs [S1, unofficial].
+- **Memory**: The `segment_coo` operation requires allocating output tensors of size $N \times 3$ (or $N \times D$). For very large $N$, this can be memory-intensive [S1, unofficial].
+
 ## Operating characteristics
-- **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of rays (pixels) and $M$ is the number of samples per ray. The dominant cost is the trilinear interpolation and weight accumulation.
-- **Memory Complexity:** $O(N_x \cdot N_y \cdot N_z)$ for the voxel grid. The forward pass requires $O(N \cdot M)$ temporary memory for samples and weights, which can be optimized using sparse representations or early termination.
-- **Performance:** Significantly faster than NeRF during training because it avoids repeated MLP evaluations for density. Inference speed depends on the voxel resolution and the efficiency of the texture sampling hardware.
-- **Strengths:** Fast training, easy to integrate with existing graphics pipelines (texture sampling), supports view-dependent effects via small MLPs.
-- **Limitations:** Resolution is limited by the voxel grid size. High-resolution grids consume significant memory. Artifacts can appear at low resolutions (blockiness).
+- **Time Complexity**: $O(M)$ for sampling and querying, where $M$ is the number of sample points. The `segment_coo` operation is also $O(M)$. Early termination reduces $M$ effectively.
+- **Memory Complexity**: $O(M)$ for storing intermediate tensors (ray_pts, alpha, weights, etc.). The voxel grid itself is $O(V_x V_y V_z \cdot k_0)$.
+- **Performance**: DVGO is generally faster than NeRF for training due to the sparse voxel grid and efficient caching, but rendering speed depends on the density of the scene and the effectiveness of early termination [S1, unofficial].
+- **Strengths**: Efficient training, sparse representation, easy integration with existing voxel-based pipelines.
+- **Limitations**: Resolution is limited by the voxel grid size. High-frequency details may be lost if the voxel grid is too coarse. View-dependent effects require additional MLPs [S1, unofficial].
 
 ## Background
-DVGO (Direct Voxel Grid Optimization) was introduced by Liu et al. in 2021 [S1, unofficial]. It was developed to address the slow training speed of NeRF by replacing the implicit MLP density field with an explicit, learnable voxel grid. This allows for direct hardware-accelerated interpolation and faster gradient computation. It is widely used in real-time and near-real-time neural rendering applications.
+DVGO (Direct Voxel Grid Optimization) was introduced as an efficient alternative to NeRF for 3D scene representation and rendering. It leverages the efficiency of voxel grids for spatial indexing and caching, while using neural networks to predict density and color. The method was developed to address the computational bottlenecks of continuous NeRF representations, particularly for large-scale scenes [S1, unofficial].
 
 ## Sources
 [S1] gkouros/ref-dvgo, https://github.com/gkouros/ref-dvgo, fetched 2026-10-28 (unofficial)

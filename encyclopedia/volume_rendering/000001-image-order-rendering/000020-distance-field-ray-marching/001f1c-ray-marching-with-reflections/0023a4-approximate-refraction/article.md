@@ -1,6 +1,4 @@
 # Approximate Refraction
-
-
 ## Overview
 Approximate refraction is a technique to make a fluid surface appear to refract objects behind it, which is faster and simpler to implement than ray tracing [S1, unofficial]. Convex regions of the surface magnify the image behind them, concave regions shrink it, and flat regions allow rays to pass straight through [S1, unofficial].
 
@@ -22,8 +20,8 @@ Approximate refraction is a technique to make a fluid surface appear to refract 
 **Steps:**
 1. **Render Background**: Render all scene geometry located behind the fluid volume into a background texture [S1, unofficial].
 2. **Ray Marching**: For each pixel, march through the volume to find the nearest intersection with the fluid surface [S1, unofficial].
-   - Store the screen-space hit location $p$ in the Hit Location Texture.
-   - Store the shading normal $N$ at the hit point in the Shading Normal Texture.
+   - Store the screen-space hit location $p$ in the Hit Location Texture [S1, unofficial].
+   - Store the shading normal $N$ at the hit point in the Shading Normal Texture [S1, unofficial].
    - Set the alpha of the Hit Location Texture to $0$ if no intersection is found, $1$ otherwise [S1, unofficial].
 3. **Compute Basis Vectors**: Calculate the orthonormal basis vectors $P_h$ and $P_v$ for the image plane based on the view direction $V$ and up vector $z$ [S1, unofficial].
 4. **Calculate Texture Offset**: For each pixel with a valid hit (alpha $= 1$), compute the texture coordinate offset using the surface normal $N$ and parameter $\beta$ [S1, unofficial].
@@ -56,7 +54,7 @@ $$P_h = P_v \times V$$
 
 ```python
 def compute_approximate_refraction(background_texture, hit_location_texture, normal_texture, view_direction, up_vector, beta):
-    # Precompute basis vectors for the entire frame
+    # Precompute basis vectors for the image plane [G]
     z_proj = up_vector - (dot(up_vector, view_direction) * view_direction)
     norm_z_proj = length(z_proj)
     
@@ -68,7 +66,7 @@ def compute_approximate_refraction(background_texture, hit_location_texture, nor
         
     P_h = cross(P_v, view_direction)
     
-    final_image = create_empty_texture_like(hit_location_texture)  # Not given in the sources.
+    final_image = create_empty_texture_like(hit_location_texture)
     
     for y in range(hit_location_texture.height):
         for x in range(hit_location_texture.width):
@@ -86,7 +84,8 @@ def compute_approximate_refraction(background_texture, hit_location_texture, nor
             t_x = p_xy.x - beta * offset_x
             t_y = p_xy.y - beta * offset_y
             
-            refracted_color = background_texture.sample(t_x, t_y)  # Not given in the sources.
+            # Standard texture sampling [G]
+            refracted_color = background_texture.sample(t_x, t_y)
             final_image[x, y] = refracted_color
             
     return final_image
@@ -109,8 +108,8 @@ Handles reflections. Choose when mirror-like surfaces are needed.
 Uses cone intersections for better volume accuracy. Choose when high-quality volume rendering is needed and performance allows.
 
 ## Operating characteristics
-- **Time Complexity**: $O(1)$ per pixel for the refraction offset calculation, assuming constant-time texture lookups. The dominant cost is the ray marching step to find the surface intersection [S1, unofficial].
-- **Memory Complexity**: Requires storage for the background texture, hit location texture, and normal texture [S1, unofficial].
+- **Time Complexity**: $O(1)$ per pixel for the refraction offset calculation, assuming constant-time texture lookups [G]. The dominant cost is the ray marching step to find the surface intersection [S1, unofficial].
+- **Memory Complexity**: Requires storage for the background texture, hit location texture, and normal texture [G].
 - **Performance**: Significantly faster than ray tracing for refraction, as it avoids casting secondary rays into the scene [S1, unofficial].
 - **Strengths**: Simple to implement, fast, suitable for real-time applications [S1, unofficial].
 - **Limitations**: Does not account for the actual path of light through the volume; can produce artifacts if the background scene is complex or if the surface curvature is extreme [S1, unofficial]. Ray tracing is an alternative but is expensive and may fail to find intersections with other scene geometry [S1, unofficial].

@@ -1,671 +1,243 @@
-Chapter 9: Real-Time Isosurface Extraction Using the GPU Programmable Geometry Pipeline
-Chapter 9
-Real-Time Isosurface Extraction
-Using the GPU Programmable
-Geometry Pipeline
-Natalya Tatarchuk 14 Jeremy Shopf15 Christopher DeCoro16
-Game Computing Applications Group
-AMD GPG (O-CTO)
-Princeton University
-Figure 1. We show the result of extracting a series of highly detailed isosurfaces at
-interactive rates. Our system implements a hybrid cubes-tetrahedra method, which
-leverages the strengths of each as applicable to the unique architecture of the GPU. The
-left pair of images (wireframe and shaded, using a base cube grid of 643) show only an
-extracted isosurface, while the right pair displays an alternate isosurface overlayed with
-a volume rendering.
-9.1
-Introduction
-In this chapter we present a set of approaches that allow interactive exploration of scalar
-in real-time. We implement our methods using massively parallel architectures available
-to average consumers - the latest commodity Graphics Processing Units (GPUs).
-Recent generations of consumer GPU architectures are designed for high efficiency and
-high computational load, along with effective use of coherency and extensive memory
-bandwidth requirements. Furthermore, with the advent of programmable GPU pipelines,
-14
-natalya.tatarchuk@amd.com
-jeremy.shopf@amd.com
-16
-cdecoro@cs.princeton.edu
-15
-122
-Advanced Real-Time Rendering in 3D Graphics and Games Course – SIGGRAPH 2007
-we can take advantage of the massive parallelism of the GPUs, rather than relying on
-significantly slower scaling CPU multi-core architecture. In this work, we take advantage
-of huge memory bandwidth available on the most recent generation of consumer GPU to
-be able to process extensive datasets, such as the Virtual Human Project dataset (taking
-up more than 576MB of video memory) at extremely fast frame rates. We utilize efficient
-pixel and geometry processing taking advantage of dynamic load balancing of the latest
-GPU architectures (such as ATI Radeon HD 2000 and 3000 series), and build our
-system to fully utilize Shader Model 4.0 capabilities available with DirectX® 10 GPU
-pipeline.
-Our system combines direct volume rendering via ray-casting with isosurface extraction
-directly on GPU. The volume rendering approach is reformulated to take advantage of
-parallel pixel processing of the GPU pipelines. The isosurface extraction sub-system
-takes advantage of the novel DirectX 10 GPU pipeline for dynamic surface extraction in
-real-time. This framework is able to process individual voxel portions of the input dataset
-in parallel using geometry shaders. Our approach will scale with the number of parallel
-SIMD and texture units in a GPU generation.
-We have developed a technique for real-time volume data analysis by providing an
-interactive user interface for designing material properties for organs in the scanned
-volume. We provide an interactive user-driven material design system for quick and
-intuitive organ classification based on material properties of the dataset. Intelligently
-combining isosurface extraction with direct volume rendering in a single system allows
-for surface properties as well as for the context of tissues surrounding the region and
-gives better context for navigation. Our application can be used with CT and MRI scan
-data, or with variety of other medical applications.
+# Chapter 9
+
+# Real-Time Isosurface Extraction Using the GPU Programmable Geometry Pipeline
+
+Natalya Tatarchuk 14 Jeremy Shopf15 Christopher DeCoro16 Game Computing Applications Group AMD GPG (O-CTO) Princeton University
+
+
+
+Figure 1. We show the result of extracting a series of highly detailed isosurfaces at interactive rates. Our system implements a hybrid cubes-tetrahedra method, which leverages the strengths of each as applicable to the unique architecture of the GPU. The left pair of images (wireframe and shaded, using a base cube grid of 643 ) show only an extracted isosurface, while the right pair displays an alternate isosurface overlayed with a volume rendering. 
+
+# 9.1 Introduction
+
+In this chapter we present a set of approaches that allow interactive exploration of scalar in real-time. We implement our methods using massively parallel architectures available to average consumers - the latest commodity Graphics Processing Units (GPUs). Recent generations of consumer GPU architectures are designed for high efficiency and high computational load, along with effective use of coherency and extensive memory bandwidth requirements. Furthermore, with the advent of programmable GPU pipelines,
+
+14 natalya.tatarchuk@amd.com 15 jeremy.shopf@amd.com 16 cdecoro@cs.princeton.edu
+
+we can take advantage of the massive parallelism of the GPUs, rather than relying on significantly slower scaling CPU multi-core architecture. In this work, we take advantage of huge memory bandwidth available on the most recent generation of consumer GPU to be able to process extensive datasets, such as the Virtual Human Project dataset (taking up more than 576MB of video memory) at extremely fast frame rates. We utilize efficient pixel and geometry processing taking advantage of dynamic load balancing of the latest GPU architectures (such as ATI Radeon HD 2000 and 3000 series), and build our system to fully utilize Shader Model 4.0 capabilities available with DirectX® 10 GPU pipeline.
+
+Our system combines direct volume rendering via ray-casting with isosurface extraction directly on GPU. The volume rendering approach is reformulated to take advantage of parallel pixel processing of the GPU pipelines. The isosurface extraction sub-system takes advantage of the novel DirectX 10 GPU pipeline for dynamic surface extraction in real-time. This framework is able to process individual voxel portions of the input dataset in parallel using geometry shaders. Our approach will scale with the number of parallel SIMD and texture units in a GPU generation.
+
+We have developed a technique for real-time volume data analysis by providing an interactive user interface for designing material properties for organs in the scanned volume. We provide an interactive user-driven material design system for quick and intuitive organ classification based on material properties of the dataset. Intelligently combining isosurface extraction with direct volume rendering in a single system allows for surface properties as well as for the context of tissues surrounding the region and gives better context for navigation. Our application can be used with CT and MRI scan data, or with variety of other medical applications.
+
 The pipeline for our visualization system presented in this chapter is as follows:
-- We start by collecting the scalar data. In our case, we simply used an existing
-data set from the Visible Human Project, collected by the National Institute of
-Medicine.
-- We then proceed to preprocess the data to compute gradients which are used for
-rendering correct lighting information at run-time. This is done in an offline
-process.
-- Once we have extracted and preprocessed the data, we can proceed to render it,
-using our on-demand isosurface extraction on GPU and interactive volume
-rendering via ray-casting
-- At any point we can also interactively classify features by using our material user
-interface, designed to interactively specify, edit and save custom 2D transfer
-functions for each dataset.
-9.2
-Efficient Isosurface Extraction and Rendering on GPU
-An implicit surface representation, as opposed to explicit representation with a polygon
-mesh or parametric surface, is frequently the most convenient form for many modeling
-tasks. The high computational expense of extracting explicit isosurfaces from implicit
-functions, however, has made such operations a frequent candidate for GPU
-acceleration. Now with recent advancements in GPU architectures, we will demonstrate
-how an intuitive extraction algorithm can be implemented efficiently using a hybrid
-123
-Chapter 9: Real-Time Isosurface Extraction Using the GPU Programmable Geometry Pipeline
-marching cubes/marching tetrahedra approach. We are able to leverage the strengths of
-each method as applied to the unique computational environment of the GPU, and in
-doing so, achieve real-time extraction of detailed isosurfaces from high-resolution
-volume datasets. We are also able to perform adaptive surface refinement directly on
-the GPU without lowering the parallelism of our algorithm. In addition, we show that the
-complementary technique of inverse quadratic interpolation significantly improves
-surface quality.
-Implicit functions are a powerful mechanism for modeling and editing geometry. Rather
-than the geometry of a surface given explicitly by a triangle mesh, parametric surface, or
-other boundary representation, it is defined implicitly by an arbitrary continuous
-function f ( x ), x ∈ ℜ 3 . By defining an arbitrary constant c , (referred to as an isovalue,
-and frequently 0), we can define as our surface as the set of all points (isosurface) for
-which f ( x ) = c . For simplicity, we will frequently make the substitution F ( x ) = f ( x ) − c ,
-without loss of generality.
-Aside from the area of medical visualization, deformable isosurfaces, implemented with
-level-set methods, have demonstrated a great potential in visualization for applications
-such as segmentation, surface processing, and surface reconstruction. Specifically,
-these hold immense importance in the area of fluid dynamics and rendering applications
-ranging to simulating complex fluid flows around objects to detailed fluid dynamics for
-liquids interacting with objects. Isosurfaces are normally displayed using computer
-graphics, and are used as data visualization methods in computational fluid dynamics
-(CFD), allowing engineers to study features of a fluid flow (gas or liquid) around objects,
-such as aircraft wings. An isosurface may represent an individual shockwave in
-supersonic flight, or several isosurfaces may be generated showing a sequence of
-pressure values in the air flowing around a wing. Isosurfaces tend to be a popular form
-of visualization for volume datasets since they can be rendered by a simple polygonal
-model, which can be drawn on the screen very quickly. Numerous other disciplines that
-are interested in three dimensional data often use isosurfaces to obtain information
-about pharmacology, chemistry, geophysics and meteorology.
-The advantage to the above representation is to allow arbitrary definition of the
-underlying function – and thus the implied surface – in a simple and direct manner. Such
-a representation can easily have arbitrary and dynamic topology, modified using
-Boolean and arithmetic operators, analyzed using traditional signal processing
-techniques, and used with simulations of natural phenomena. To perform these
-operations using traditional, explicit modeling would be impractically complex. The
-disadvantage, however, is that such representations pose a challenge to render
-isosurfaces directly at real-time rates – especially given the rasterization pipelines used
-in GPUs, which are designed for triangle input data. Several classes of rendering
-techniques exist, such as direct volume rendering (volumes and implicit functions are
-synonymous in this context), which renders the volume without an intermediate
-boundary representation. Among such techniques, Westerman and Ertl [1] demonstrated
-a method for texture-based rendering of volume datasets defined on a uniform regular
-grid; later work proposed a generalized method for rendering volumes defined over
-tetrahedral grids [2].
-While such techniques are limited to rendering applications, an alternate class of
-methods extracts an intermediate explicit isosurface (usually a triangle mesh) which can
-124
-Advanced Real-Time Rendering in 3D Graphics and Games Course – SIGGRAPH 2007
-be used for further processing and analysis in addition to rendering. Examples include
-later use for collision detection, shadow casting, and animation. The most commonly
-used algorithms for isosurface extraction are derivatives of the marching cubes (MC)
-algorithm [3] and the closely related marching tetrahedra (MT) algorithm [4]. The
-algorithm we present is a hybrid of these two methods, such that we leverage the
-strengths of each method as applicable to the unique constraints and benefits of the
-GPU architecture.
-Isosurface extraction is typically a compute-intensive method. Isosurface extraction on
-GPU has been a topic of extensive research for the last several years. Much work has
-been done to generate highly efficient renderings at high frame rates. Prior to the
-DirectX10 generation of GPUs, the programming model lacked support for
-programmable primitive processing and the ability to output geometric quantities for later
-re-use. Thus previous work lacked the ability to generate polygonal surface directly on
-the GPU and re-use it for subsequent computation, such as collision detection or
-optimization of volumetric rendering for surrounding organs. Much of the extraction work
-was redundantly performed regardless of whether the isovalue was dynamically
-changing or not, resulting in wasted computation. Nonetheless, a number of researchers
-succeeded at fast, interactive isosurface rendering.
-Pascucci [5] rendered tetrahedra to the GPU, using the MT algorithm in the vertex
-shader to re-map vertices to surface positions. Subsequently, Klein et al. [6]
-demonstrated a similar tetrahedral method using pixel shaders, which at the time
-provided greater throughput. Other researchers instead implemented the marching
-cubes algorithm [7,8]. For an broad overview of both direct rendering and extraction
-methods, see the survey by Silva et al. [9].
-All of these methods, however, were forced to use contrived programming techniques to
-escape the limitations of the previously restrictive GPU architecture. Using the geometry
-shader stage, executing on primitives post vertex shader and prior to rasterizer
-processing, we are able to generate and to cull geometry directly on the GPU. This
-provides a more natural implementation of marching methods. With our approach the
-isosurface is dynamically extracted directly on GPU and constructed in polygonal form
-and can be directly used post-extraction for collision detection or rendering and
-optimization. The resulting polygonal surface can also be analyzed for geometric
-properties, such as feature area, volume and size deviation, which is crucial for semiautomatic tumor analysis, for example, as used in colonoscopy. Using our pipeline
-provides a direct method to reuse the result of geometry processing, in the form of a
-stream out option, which stores output triangles in a GPU buffer after the geometry
-shader stage. This buffer may be reused arbitrarily in later rendering stages, or even
-read back to the host CPU.
-In our work we present a hybrid method that leverages the strengths of both marching
-cubes and marching tetrahedra, relative to the unique abilities and constraints of the
-latest GPU architecture. In addition, we provide several complementary techniques that
-enhance the quality of the extracted surface:
--
-Adaptive isosurface extraction optimized for the GPU programmable geometry
-pipeline
-Improved resulting surface quality through quadratic root-finding while
-maintaining lower extraction grids for memory saving
-125
-Chapter 9: Real-Time Isosurface Extraction Using the GPU Programmable Geometry Pipeline
--
-Strict on-demand extraction of isosurface
-Figure 2. Isosurface extraction pipeline. We start by voxelizing an implicit grid (left)
-into discrete cube cells. We then convert that to tetrahedral representation (center) and
-perform marching tetrahedra to extract polygonal surface for a given isovalue (right).
-Our isosurface extraction pipeline (Figure 2) proceeds as follows: we start by
-dynamically generating the voxel grid to cover our entire volume or a section of it. Using
-geometry shader and stream out feature, we tessellate the volume into tetrahedra onthe-fly. This allows us to adaptively generate and sample the grid, based on the
-demands of the application. Each input voxel position is dynamically computed in the
-vertex shader. Geometry shader then computes 6 tetrahedra spanning the voxel cube.
-As an optimization, we only generate tetrahedra for voxels containing the isosurface
-providing memory savings. Once we have the tetrahedra, we then use the marching
-tetrahedra algorithm to dynamically extract polygonal surface from our scalar volume
-consisting of material densities. In both passes for tetrahedral mesh generation and
-isosurface extraction we use geometry amplification feature of the geometry shader
-stage directly on GPU.
-We utilize the efficiency of parallel processing units on the GPU more effectively by
-separating isosurface extraction into two passes. Given a set of input vertices, a
-geometry shader program will execute in parallel on each vertex. Given that each
-individual instance of this program is, in fact, serial on a given SIMD unit, we maximize
-each effective SIMD utilization by separating extraction into two phases - fast cube
-tetrahedralization and a marching tetrahedra pass, reducing serialization of each
-individual geometry shader instance. Thus, we first execute on all vertices in our grid in
-parallel, generating tetrahedra, and then execute on each tetrahedra in parallel,
-generating polygons. This also allows us the optimal balance between parallelization of
-polygonal surface extraction with efficient memory bandwidth utilization (the tetrahedra,
-exported by the first pass, consist of just 3 4-component floating point values).
-9.3
-Isosurface Extraction using Marching Methods
-Our method is based on both the marching cubes and the marching tetrahedra
-algorithms for isosurface extraction. The domain in ℜ 3 over which F is defined is
-tessellated into a grid at an arbitrary sampling density. In both methods, for each edge
-e = (x0 , x1 ) in the tessellation, we will evaluate F (x0 ) and F ( x1 ) ; by the intermediate
-value theorem, if the signs of F ( x0 ) and F ( x1 ) differ, a isosurface vertex must intersect
-e . Considering all edges, we can connect vertices to form triangles.
-126
-Advanced Real-Time Rendering in 3D Graphics and Games Course – SIGGRAPH 2007
-Each possible assignment of signs to grid cells can be assigned a unique number. This
-is subsequently used to index into a lookup table, which will indicate the number and
-connectivity of isosurface triangles contained in the cell. In the marching cubes method,
-each cell has 8 vertices, and therefore there exist 28 possible assignments of the sign of
-F(x). Each cube typically produces up to 6 triangles (as described in [3]). Therefore a
-straightforward lookup table holds 28 · 6 · 3 = 4608 entries. The size of this table
-presents an important consideration for parallel implementations on the GPU. The edge
-lookup tables are typically stored in SIMD-specific memory for efficient and coherent
-access by each shader program instance.
-However, constructing large tables may result in additional register pressure. This would
-significantly lower the amount of parallel threads simultaneously running on the GPU.
-Smaller lookup tables ensure higher order of parallelization as the GPUs are able to
-schedule more threads due to a larger number of available registers. Furthermore, Ning
-and Bloomenthal [10] have demonstrated that MC can generate incorrect connectivity
-(even if the inherent ambiguities are avoided by careful table construction). Therefore,
-straight marching cubes polygonization would need to handle the undesirable topology
-in a special-case manner for each geometry shader invocation, increasing serialization
-for each instance of the program and thus significantly impairing performance of the
-resulting algorithm.
-The marching tetrahedra method, by its use of a simpler cell primitive, avoids these
-problems. There exist only 16 possible combinations, emitting at most 2 triangles, and
-no ambiguous cases exist. This tiny lookup table allows effective use of the fast access
-SIMD registers and therefore results in much higher utilization of the parallel units on the
-GPU. One additional consideration for the related class of applications is that the cube is
-more intuitive for grid representation and adaptive sampling, with stronger
-correspondence to the original sampling. We note that the tetrahedron is an irregular
-shape and does not share these advantages. Straightforward tetrahedralization of a
-cube requires between 4 and 6 tetrahedra per cube, thereby requiring a corresponding
-factor of increase in the number of function evaluations required for the resulting mesh, if
-no sharing is done between primitives. In order to deal with this consideration, we
-introduce our hybrid method.
-9.3.1 Hybrid Cubes-Tetrahedra Extraction
-The GPU architecture excels at large-scale parallelism; however, we must remember
-that the programmable units perform in lock-step and therefore we must carefully
-parallelize our computations for maximum performance. The general strategy is to use
-marching cubes to exploit the additional information present in cubes as opposed to
-tetrahedra. As we mentioned earlier, straightforward tetrahedralization is a relatively
-complex program in GPU terms, thus would reduce thread parallelization. Rather than
-perform triangulation directly, it is preferable to adaptively tetrahedralize the input cubes.
-We perform final triangulation of the output surface using the simpler extraction
-operation on the tetrahedral grid.
-127
-Chapter 9: Real-Time Isosurface Extraction Using the GPU Programmable Geometry Pipeline
+
+- We start by collecting the scalar data. In our case, we simply used an existing data set from the Visible Human Project, collected by the National Institute of Medicine.
+- We then proceed to preprocess the data to compute gradients which are used for rendering correct lighting information at run-time. This is done in an offline process.
+- Once we have extracted and preprocessed the data, we can proceed to render it, using our on-demand isosurface extraction on GPU and interactive volume rendering via ray-casting
+- At any point we can also interactively classify features by using our material user interface, designed to interactively specify, edit and save custom 2D transfer functions for each dataset.
+
+# 9.2 Efficient Isosurface Extraction and Rendering on GPU
+
+An implicit surface representation, as opposed to explicit representation with a polygon mesh or parametric surface, is frequently the most convenient form for many modeling tasks. The high computational expense of extracting explicit isosurfaces from implicit functions, however, has made such operations a frequent candidate for GPU acceleration. Now with recent advancements in GPU architectures, we will demonstrate how an intuitive extraction algorithm can be implemented efficiently using a hybrid marching cubes/marching tetrahedra approach. We are able to leverage the strengths of each method as applied to the unique computational environment of the GPU, and in doing so, achieve real-time extraction of detailed isosurfaces from high-resolution volume datasets. We are also able to perform adaptive surface refinement directly on the GPU without lowering the parallelism of our algorithm. In addition, we show that the complementary technique of inverse quadratic interpolation significantly improves surface quality.
+
+Implicit functions are a powerful mechanism for modeling and editing geometry. Rather than the geometry of a surface given explicitly by a triangle mesh, parametric surface, or other boundary representation, it is defined implicitly by an arbitrary continuous function 3 f (x), x ∈ℜ . By defining an arbitrary constant c , (referred to as an isovalue, and frequently 0), we can define as our surface as the set of all points (isosurface) for which f (x) = c . For simplicity, we will frequently make the substitution F(x) = f () x − c , without loss of generality.
+
+Aside from the area of medical visualization, deformable isosurfaces, implemented with level-set methods, have demonstrated a great potential in visualization for applications such as segmentation, surface processing, and surface reconstruction. Specifically, these hold immense importance in the area of fluid dynamics and rendering applications ranging to simulating complex fluid flows around objects to detailed fluid dynamics for liquids interacting with objects. Isosurfaces are normally displayed using computer graphics, and are used as data visualization methods in computational fluid dynamics (CFD), allowing engineers to study features of a fluid flow (gas or liquid) around objects, such as aircraft wings. An isosurface may represent an individual shockwave in supersonic flight, or several isosurfaces may be generated showing a sequence of pressure values in the air flowing around a wing. Isosurfaces tend to be a popular form of visualization for volume datasets since they can be rendered by a simple polygonal model, which can be drawn on the screen very quickly. Numerous other disciplines that are interested in three dimensional data often use isosurfaces to obtain information about pharmacology, chemistry, geophysics and meteorology.
+
+The advantage to the above representation is to allow arbitrary definition of the underlying function – and thus the implied surface – in a simple and direct manner. Such a representation can easily have arbitrary and dynamic topology, modified using Boolean and arithmetic operators, analyzed using traditional signal processing techniques, and used with simulations of natural phenomena. To perform these operations using traditional, explicit modeling would be impractically complex. The disadvantage, however, is that such representations pose a challenge to render isosurfaces directly at real-time rates – especially given the rasterization pipelines used in GPUs, which are designed for triangle input data. Several classes of rendering techniques exist, such as direct volume rendering (volumes and implicit functions are synonymous in this context), which renders the volume without an intermediate boundary representation. Among such techniques, Westerman and Ertl [1] demonstrated a method for texture-based rendering of volume datasets defined on a uniform regular grid; later work proposed a generalized method for rendering volumes defined over tetrahedral grids [2].
+
+While such techniques are limited to rendering applications, an alternate class of methods extracts an intermediate explicit isosurface (usually a triangle mesh) which can
+
+be used for further processing and analysis in addition to rendering. Examples include later use for collision detection, shadow casting, and animation. The most commonly used algorithms for isosurface extraction are derivatives of the marching cubes (MC) algorithm [3] and the closely related marching tetrahedra (MT) algorithm [4]. The algorithm we present is a hybrid of these two methods, such that we leverage the strengths of each method as applicable to the unique constraints and benefits of the GPU architecture.
+
+Isosurface extraction is typically a compute-intensive method. Isosurface extraction on GPU has been a topic of extensive research for the last several years. Much work has been done to generate highly efficient renderings at high frame rates. Prior to the DirectX10 generation of GPUs, the programming model lacked support for programmable primitive processing and the ability to output geometric quantities for later re-use. Thus previous work lacked the ability to generate polygonal surface directly on the GPU and re-use it for subsequent computation, such as collision detection or optimization of volumetric rendering for surrounding organs. Much of the extraction work was redundantly performed regardless of whether the isovalue was dynamically changing or not, resulting in wasted computation. Nonetheless, a number of researchers succeeded at fast, interactive isosurface rendering.
+
+Pascucci [5] rendered tetrahedra to the GPU, using the MT algorithm in the vertex shader to re-map vertices to surface positions. Subsequently, Klein et al. [6] demonstrated a similar tetrahedral method using pixel shaders, which at the time provided greater throughput. Other researchers instead implemented the marching cubes algorithm [7,8]. For an broad overview of both direct rendering and extraction methods, see the survey by Silva et al. [9].
+
+All of these methods, however, were forced to use contrived programming techniques to escape the limitations of the previously restrictive GPU architecture. Using the geometry shader stage, executing on primitives post vertex shader and prior to rasterizer processing, we are able to generate and to cull geometry directly on the GPU. This provides a more natural implementation of marching methods. With our approach the isosurface is dynamically extracted directly on GPU and constructed in polygonal form and can be directly used post-extraction for collision detection or rendering and optimization. The resulting polygonal surface can also be analyzed for geometric properties, such as feature area, volume and size deviation, which is crucial for semiautomatic tumor analysis, for example, as used in colonoscopy. Using our pipeline provides a direct method to reuse the result of geometry processing, in the form of a stream out option, which stores output triangles in a GPU buffer after the geometry shader stage. This buffer may be reused arbitrarily in later rendering stages, or even read back to the host CPU.
+
+In our work we present a hybrid method that leverages the strengths of both marching cubes and marching tetrahedra, relative to the unique abilities and constraints of the latest GPU architecture. In addition, we provide several complementary techniques that enhance the quality of the extracted surface:
+
+- Adaptive isosurface extraction optimized for the GPU programmable geometry pipeline
+- Improved resulting surface quality through quadratic root-finding while maintaining lower extraction grids for memory saving
+
+- Strict on-demand extraction of isosurface
+
+
+
+Figure 2. Isosurface extraction pipeline. We start by voxelizing an implicit grid (left) into discrete cube cells. We then convert that to tetrahedral representation (center) and perform marching tetrahedra to extract polygonal surface for a given isovalue (right). 
+
+Our isosurface extraction pipeline (Figure 2) proceeds as follows: we start by dynamically generating the voxel grid to cover our entire volume or a section of it. Using geometry shader and stream out feature, we tessellate the volume into tetrahedra onthe-fly. This allows us to adaptively generate and sample the grid, based on the demands of the application. Each input voxel position is dynamically computed in the vertex shader. Geometry shader then computes 6 tetrahedra spanning the voxel cube. As an optimization, we only generate tetrahedra for voxels containing the isosurface providing memory savings. Once we have the tetrahedra, we then use the marching tetrahedra algorithm to dynamically extract polygonal surface from our scalar volume consisting of material densities. In both passes for tetrahedral mesh generation and isosurface extraction we use geometry amplification feature of the geometry shader stage directly on GPU.
+
+We utilize the efficiency of parallel processing units on the GPU more effectively by separating isosurface extraction into two passes. Given a set of input vertices, a geometry shader program will execute in parallel on each vertex. Given that each individual instance of this program is, in fact, serial on a given SIMD unit, we maximize each effective SIMD utilization by separating extraction into two phases - fast cube tetrahedralization and a marching tetrahedra pass, reducing serialization of each individual geometry shader instance. Thus, we first execute on all vertices in our grid in parallel, generating tetrahedra, and then execute on each tetrahedra in parallel, generating polygons. This also allows us the optimal balance between parallelization of polygonal surface extraction with efficient memory bandwidth utilization (the tetrahedra, exported by the first pass, consist of just 3 4-component floating point values).
+
+# 9.3 Isosurface Extraction using Marching Methods
+
+Our method is based on both the marching cubes and the marching tetrahedra algorithms for isosurface extraction. The domain in 3 ℜ over which F is defined is tessellated into a grid at an arbitrary sampling density. In both methods, for each edge () 0 1 e = x , x in the tessellation, we will evaluate ( ) 0 F x and ( )1 F x ; by the intermediate value theorem, if the signs of ( ) 0 F x and ( )1 F x differ, a isosurface vertex must intersect e . Considering all edges, we can connect vertices to form triangles.
+
+Each possible assignment of signs to grid cells can be assigned a unique number. This is subsequently used to index into a lookup table, which will indicate the number and connectivity of isosurface triangles contained in the cell. In the marching cubes method, each cell has 8 vertices, and therefore there exist 28 possible assignments of the sign of F(x). Each cube typically produces up to 6 triangles (as described in [3]). Therefore a straightforward lookup table holds 28 · 6 · 3 = 4608 entries. The size of this table presents an important consideration for parallel implementations on the GPU. The edge lookup tables are typically stored in SIMD-specific memory for efficient and coherent access by each shader program instance.
+
+However, constructing large tables may result in additional register pressure. This would significantly lower the amount of parallel threads simultaneously running on the GPU. Smaller lookup tables ensure higher order of parallelization as the GPUs are able to schedule more threads due to a larger number of available registers. Furthermore, Ning and Bloomenthal [10] have demonstrated that MC can generate incorrect connectivity (even if the inherent ambiguities are avoided by careful table construction). Therefore, straight marching cubes polygonization would need to handle the undesirable topology in a special-case manner for each geometry shader invocation, increasing serialization for each instance of the program and thus significantly impairing performance of the resulting algorithm.
+
+The marching tetrahedra method, by its use of a simpler cell primitive, avoids these problems. There exist only 16 possible combinations, emitting at most 2 triangles, and no ambiguous cases exist. This tiny lookup table allows effective use of the fast access SIMD registers and therefore results in much higher utilization of the parallel units on the GPU. One additional consideration for the related class of applications is that the cube is more intuitive for grid representation and adaptive sampling, with stronger correspondence to the original sampling. We note that the tetrahedron is an irregular shape and does not share these advantages. Straightforward tetrahedralization of a cube requires between 4 and 6 tetrahedra per cube, thereby requiring a corresponding factor of increase in the number of function evaluations required for the resulting mesh, if no sharing is done between primitives. In order to deal with this consideration, we introduce our hybrid method.
+
+# 9.3.1 Hybrid Cubes-Tetrahedra Extraction
+
+The GPU architecture excels at large-scale parallelism; however, we must remember that the programmable units perform in lock-step and therefore we must carefully parallelize our computations for maximum performance. The general strategy is to use marching cubes to exploit the additional information present in cubes as opposed to tetrahedra. As we mentioned earlier, straightforward tetrahedralization is a relatively complex program in GPU terms, thus would reduce thread parallelization. Rather than perform triangulation directly, it is preferable to adaptively tetrahedralize the input cubes. We perform final triangulation of the output surface using the simpler extraction operation on the tetrahedral grid.
+
 Our method uses the following steps:
-Pass 1: Domain voxelization
-(1) Dynamically voxelize the domain
-(2) Tessellate cubes into tetrahedra near the surface
-(3) Output tetrahedra as points to stream out buffer
-Pass 2: Marching tetrahedra
-(1) Perform marching tetrahedra on generated tetrahedra
-(2) Identify edges intersecting surface
-(3) Fit a parabola on the edge and find root, by either:
-(a) Perform third function evaluation along edge
-(b) Use function gradients to estimate a parabola
-(4) Output each isosurface triangle to a stream-out buffer for later re-use and
-rendering or straight to rasterization for immediate results
-Voxelize Input Domain. In many cases (for example with volumetric data generated
-with medical imaging tools or physical simulations) the input data itself is specified on a
-regular (cubic) grid. Therefore, from the perspective of reducing function evaluations
-(corresponding to texture reads on the GPU) it is most practical to evaluate the function
-exactly at those points, and generate output triangles accordingly.
-Although tetrahedral meshes provide a straightforward and efficient method for
-generating watertight isosurfaces, most preprocessing pipelines do not include support
-for generating tetrahedral meshes directly. Furthermore, we would like to support
-isosurface extraction on dynamic meshes and thus wish to generate tetrahedra directly
-on the GPU (for example, for particle or fluid simulations).
-We start by rendering a vertex buffer containing n 3 vertices, where n is the grid size.
-Using automatically provided primitive ID, we generate voxel corner locations directly in
-the vertex shader. Subsequent geometry shader computes the locations of the voxel
-cube corners. We can then evaluate isosurface at each voxel corner.
-Cube Tetrahedralization. In the first pass’ geometry shader we tessellate each cube
-voxel containing the surface into at most 6 tetrahedra. We can either re-use already
-computed isosurface values, or, in order to reduce stream out memory footprint, simply
-repeat evaluation of tetrahedra corners in the next pass. Prior to tetrahedralization we
-compare the signs of the voxel corners to determine whether a given voxel contains the
-isosurface. Using the geometry shader’s amplification feature, we dynamically generate
-tetrahedra for only those voxels which contain the isosurface. We output tetrahedra as
-point primitives into stream out buffers, typically storing only the ( x, y , z ) components of
-tetrahedra corner vertices for efficient use of stream-out functionality.
-Adaptive Isosurface Refinement. We have a number of options for adaptive
-polygonization of the input domain. We can perform an adaptive subdivision of the input
-grid, during the first pass of domain voxelization. While sampling the isosurface, we can
-select to further subdivide the voxel refining the sampling grid in order to detect new
-isosurface parts that were missed by the original sampling grid. This uses
-straightforward octree subdivision of the input 3D grid and will generate smaller-scale
-128
-Advanced Real-Time Rendering in 3D Graphics and Games Course – SIGGRAPH 2007
-tetrahedra for the new grid cells on the finer scale, if the original voxel missed the
-isosurface.
-We can additionally add adaptive tetrahedra refinement in the subsequent pass during
-cube tetrahedralization at very little cost. This allows us to generate new sampling points
-inside the existing grid cells where the isosurface has already been detected by the
-previous pass. In the 6-tetrahedra tessellation used, each tetrahedron shares a common
-longest edge along the diagonal of the cube. At the cost of one function evaluation at the
-edge midpoint, we can perform a longest-edge subdivision for each of the 6 tetrahedra.
-We emit only those of the resulting 12 tetrahedra that contain the surface, which are a
-subset of those previous discarded whose signs differ from the sign of the center point.
-By performing one additional evaluation and at most 6 comparisons, we can perform a
-two-level adaptive simplification. Note also that as the subdivision is always to the center
-shared edge, the tetrahedra of this cell will be consistent with those of neighboring cells
-and avoid cracks in the output surface.
-Marching Tetrahedra. Using the DrawAuto functionality of DirectX10 we render the
-stream out buffer as point primitives in the next pass, performing the marching
-tetrahedra algorithm in the geometry shader stage. We identify the edges of the current
-tetrahedron which contain the output surface. As stated, MT is preferable for GPU
-implementation due to the significantly reduced lookup table sizes and output
-complexity. However, by the use of our hybrid method that reuses function evaluations
-from the initial cube grid, we can avoid redundancy, and by our adaptive subdivision
-step, we significantly reduce the number of primitives generated. Thus, our hybrid
-method is able to utilize the strengths of both methods as adapted to the GPU pipeline.
-Fit a parabola along edges. While the Marching Tetrahedra rules identify which edges
-will result in an output vertex, they do not specify where along that edge the vertex will
-lie.
-For
-an
-edge e = ( x1 , x 2 ) ,
-the
-vertex
-ve
-will
-fall
-along
-the
-line
-segment x1 + ( x 2 − x1 )t , t ∈ [0,1] , and ideally, the choice of t is such that F (v (t )) ≈ 0 , so
-as to best approximate the isosurface. We can therefore consider finding the optimal
-vertex as a root-finding problem over t . The traditional approach uses the (linear) secant
-method:
-t=
-− F (x1 )
-F ( x2 ) − F (x )
-(1)
-We have found, however, that significantly better visual quality results from using the
-inverse quadratic interpolation method (more familiar as a step of Brent’s method [11]).
-This method fits a parabola to the function, and estimates the root by solving a quadratic
-equation. We illustrate the difference between the two methods in Figure 3. Our
-quadratic root-finding method performs faster than applying an additional level of
-subdivision, and in fact frequently produces better results than a corresponding increase
-in the sampling density. We provide two methods to fit such a parabola, according to the
-demands of the particular application.
-129
-Chapter 9: Real-Time Isosurface Extraction Using the GPU Programmable Geometry Pipeline
-Option 1: Perform a third evaluation per edge. The simplest way to fit a parabola
-along the edge is to perform a third function evaluation F (x3 ) . The three points will then
-uniquely define the parabola. For a first approximation, we use the result of the secant
-method for x3 . Solving the quadratic defined by the points, we have:
-v=
-F ( x2 )F (x3 )
-F ( x1 )F (x3 )
-x1 +
-x
-(F (x1 ) − F (x2 ))(F (x1 ) − F (x3 ))
-(F (x2 ) − F (x1 ))(F (x2 ) − F (x3 )) 2
-F ( x1 )F ( x2 )
-+
-x
-(F (x3 ) − F (x1 ))(F (x3 ) − F (x2 )) 3
-Because this additional evaluation is only performed along edges which are known to
-output a vertex, we are able to selectively restrict these additional evaluations to
-locations in which they are useful, as opposed to increasing the function grid size, which
-would lead to superfluous evaluations.
-As we optimize the grid tessellation in previous phases, an additional evaluation is not a
-bottleneck in our implementation, and thus provides additional quality with no
-performance penalty. Should this be a limitation for certain applications, we propose an
-alternate method that avoids additional evaluations.
-Figure 3. Linear vs. Quadratic Root-finding. The traditional approach to finding the
-intersection point of the isosurface is to linearize the implicit function, and solve for the
-root (left). By taking an additional sample so as to fit a parabola, and finding a root of
-that parabola (right), we can make a better approximation of the actual zero-crossing.
-Option 2: Estimate parabola with gradients. Frequently, the function gradient ∇F ( x )
-is either known, or can be computed easily along with F ( x ) . With static volume textures,
-∇F is often computed beforehand, and stored with F ( x ) in a single RGBA texture.
-Similarly, with common implicit functions, such as metaballs, the additional work required
-to compute the gradient is minimal. Finally, many applications will already be required to
-evaluate the gradient for use as a shading normal. In all such cases, we can use the
-gradients to estimate a parabola, obviating the need for the additional function
-evaluation.
-130
-Advanced Real-Time Rendering in 3D Graphics and Games Course – SIGGRAPH 2007
-We seek a parabola that interpolates both endpoints, and makes the best least-squares
-approximation to the gradients at each endpoint. We can restrict the problem the to line
-v (t ) = x1 + ( x2 − x1 )t , defining F ′( x ) as the directional derivative:
-D x2 − x1 F ( x ) = ∇F ( x ⋅ ( x2 − x1 ))
+
+### Pass 1: Domain voxelization
+
+- (1) Dynamically voxelize the domain
+- (2) Tessellate cubes into tetrahedra near the surface
+- (3) Output tetrahedra as points to stream out buffer
+
+#### Pass 2: Marching tetrahedra
+
+- (1) Perform marching tetrahedra on generated tetrahedra
+- (2) Identify edges intersecting surface
+- (3) Fit a parabola on the edge and find root, by either:
+  - (a) Perform third function evaluation along edge
+  - (b) Use function gradients to estimate a parabola
+- (4) Output each isosurface triangle to a stream-out buffer for later re-use and rendering or straight to rasterization for immediate results
+
+Voxelize Input Domain. In many cases (for example with volumetric data generated with medical imaging tools or physical simulations) the input data itself is specified on a regular (cubic) grid. Therefore, from the perspective of reducing function evaluations (corresponding to texture reads on the GPU) it is most practical to evaluate the function exactly at those points, and generate output triangles accordingly.
+
+Although tetrahedral meshes provide a straightforward and efficient method for generating watertight isosurfaces, most preprocessing pipelines do not include support for generating tetrahedral meshes directly. Furthermore, we would like to support isosurface extraction on dynamic meshes and thus wish to generate tetrahedra directly on the GPU (for example, for particle or fluid simulations).
+
+We start by rendering a vertex buffer containing 3 n vertices, where n is the grid size. Using automatically provided primitive ID, we generate voxel corner locations directly in the vertex shader. Subsequent geometry shader computes the locations of the voxel cube corners. We can then evaluate isosurface at each voxel corner.
+
+Cube Tetrahedralization. In the first pass' geometry shader we tessellate each cube voxel containing the surface into at most 6 tetrahedra. We can either re-use already computed isosurface values, or, in order to reduce stream out memory footprint, simply repeat evaluation of tetrahedra corners in the next pass. Prior to tetrahedralization we compare the signs of the voxel corners to determine whether a given voxel contains the isosurface. Using the geometry shader's amplification feature, we dynamically generate tetrahedra for only those voxels which contain the isosurface. We output tetrahedra as point primitives into stream out buffers, typically storing only the (x, y,z) components of tetrahedra corner vertices for efficient use of stream-out functionality.
+
+Adaptive Isosurface Refinement. We have a number of options for adaptive polygonization of the input domain. We can perform an adaptive subdivision of the input grid, during the first pass of domain voxelization. While sampling the isosurface, we can select to further subdivide the voxel refining the sampling grid in order to detect new isosurface parts that were missed by the original sampling grid. This uses straightforward octree subdivision of the input 3D grid and will generate smaller-scale
+
+tetrahedra for the new grid cells on the finer scale, if the original voxel missed the isosurface.
+
+We can additionally add adaptive tetrahedra refinement in the subsequent pass during cube tetrahedralization at very little cost. This allows us to generate new sampling points inside the existing grid cells where the isosurface has already been detected by the previous pass. In the 6-tetrahedra tessellation used, each tetrahedron shares a common longest edge along the diagonal of the cube. At the cost of one function evaluation at the edge midpoint, we can perform a longest-edge subdivision for each of the 6 tetrahedra. We emit only those of the resulting 12 tetrahedra that contain the surface, which are a subset of those previous discarded whose signs differ from the sign of the center point. By performing one additional evaluation and at most 6 comparisons, we can perform a two-level adaptive simplification. Note also that as the subdivision is always to the center shared edge, the tetrahedra of this cell will be consistent with those of neighboring cells and avoid cracks in the output surface.
+
+Marching Tetrahedra. Using the DrawAuto functionality of DirectX10 we render the stream out buffer as point primitives in the next pass, performing the marching tetrahedra algorithm in the geometry shader stage. We identify the edges of the current tetrahedron which contain the output surface. As stated, MT is preferable for GPU implementation due to the significantly reduced lookup table sizes and output complexity. However, by the use of our hybrid method that reuses function evaluations from the initial cube grid, we can avoid redundancy, and by our adaptive subdivision step, we significantly reduce the number of primitives generated. Thus, our hybrid method is able to utilize the strengths of both methods as adapted to the GPU pipeline.
+
+Fit a parabola along edges. While the Marching Tetrahedra rules identify which edges will result in an output vertex, they do not specify where along that edge the vertex will lie.
+
+For an edge () 1 2 e = x , x , the vertex e v will fall along the line segment () , [] 0,1 x*1 + *x*2 − *x*1 *t t ∈ , and ideally, the choice of t is such that F() v()t ≈ 0 , so as to best approximate the isosurface. We can therefore consider finding the optimal vertex as a root-finding problem over*t* . The traditional approach uses the (linear) secant method:
+
+$$t = \frac{-F(x_1)}{F(x_2) - F(x)} \quad (1)$$
+
+We have found, however, that significantly better visual quality results from using the inverse quadratic interpolation method (more familiar as a step of Brent's method [11]). This method fits a parabola to the function, and estimates the root by solving a quadratic equation. We illustrate the difference between the two methods in Figure 3. Our quadratic root-finding method performs faster than applying an additional level of subdivision, and in fact frequently produces better results than a corresponding increase in the sampling density. We provide two methods to fit such a parabola, according to the demands of the particular application.
+
+Option 1: Perform a third evaluation per edge. The simplest way to fit a parabola along the edge is to perform a third function evaluation ( ) 3 F x . The three points will then uniquely define the parabola. For a first approximation, we use the result of the secant method for 3 x . Solving the quadratic defined by the points, we have:
+
+$$v = \frac{F(x_2)F(x_3)}{(F(x_1) - F(x_2))(F(x_1) - F(x_3))}x_1 + \frac{F(x_1)F(x_3)}{(F(x_2) - F(x_1))(F(x_2) - F(x_3))}x_2 + \frac{F(x_1)F(x_2)}{(F(x_3) - F(x_1))(F(x_3) - F(x_2))}x_3$$
+
+Because this additional evaluation is only performed along edges which are known to output a vertex, we are able to selectively restrict these additional evaluations to locations in which they are useful, as opposed to increasing the function grid size, which would lead to superfluous evaluations.
+
+As we optimize the grid tessellation in previous phases, an additional evaluation is not a bottleneck in our implementation, and thus provides additional quality with no performance penalty. Should this be a limitation for certain applications, we propose an alternate method that avoids additional evaluations.
+
+
+
+Figure 3. Linear vs. Quadratic Root-finding. The traditional approach to finding the intersection point of the isosurface is to linearize the implicit function, and solve for the root (left). By taking an additional sample so as to fit a parabola, and finding a root of that parabola (right), we can make a better approximation of the actual zero-crossing. 
+
+Option 2: Estimate parabola with gradients. Frequently, the function gradient ∇F(x) is either known, or can be computed easily along with F(x). With static volume textures, ∇F is often computed beforehand, and stored with F(x) in a single RGBA texture. Similarly, with common implicit functions, such as metaballs, the additional work required to compute the gradient is minimal. Finally, many applications will already be required to evaluate the gradient for use as a shading normal. In all such cases, we can use the gradients to estimate a parabola, obviating the need for the additional function evaluation.
+
+We seek a parabola that interpolates both endpoints, and makes the best least-squares approximation to the gradients at each endpoint. We can restrict the problem the to line v()t x () x x t = 1 + 2 − 1 , defining F′(x) as the directional derivative:
+
+$$D_{x_2-x_1} F(x) = \nabla F(x \cdot (x_2 - x_1))$$
+
 The class of parabola interpolating the endpoints, and its derivative, is:
-F (t ) = F ( x1 ) + (F ( x2 ) − F ( x1 ) − b)t + bt 2
-F ′(t ) = F ( x2 ) − F ( x1 ) − b + 2bt
-(2)
-(3)
-We seek a choice of b that minimizes the least-squares error between the function
-derivatives relative to the actual derivatives, where the relationship is given by the
-following system of equations:
-F ′( x1 ) ≈ F (x2 ) − F ( x1 ) − b
-F ′( x2 ) ≈ F ( x1 ) − F ( x12 ) + b
-(4)
-(5)
-The least squares solution is the average of both solutions, or b =
-1
-(F ′(x2 ) − F ′(x1 )) .We
-2
-can now solve Equation 2 directly using the quadratic equation, which is guaranteed to
-have exactly one root in the interval. Note that if F ′( x2 ) = F ′( x1 ) , this is equivalent to
-performing the linear secant method.
-Storing Extraction Results for Subsequent Re-Use. We can intelligently generate
-isosurface on-demand (either as a function of the implicit domain changes or when the
-user modifies isovalue, using our material editor interface). After computing marching
-tetrahedra, we can output isosurface triangles into a GPU stream-out buffer for re-use in
-the later passes or even storage on-disk. This capability is a critical feature of our
-method that is allowed by the latest GPU pipeline. While the extraction already runs at
-real-time rates, the actual frame rate perceived by the user will be dramatically faster, as
-most frames are able to reuse the geometry from the stream out buffer. This frees up
-GPU resources for additional computation, such as, for example, combining high quality
-direct volume rendering with isosurface rendering for better context guidance during
-medical training simulations (as seen in Figure 1). Furthermore, we utilize the extracted
-polygonal surface to improve the rendering speed of our volumetric renderer. We render
-the isosurface faces as the starting positions for ray casting in the direct volume
-rendering algorithm (as an optimization for ray casting). The isosurface can also be
-rendered directly into a shadow buffer for shadow generation on the surrounding organs.
-9.4
-Direct Volume Rendering
-To provide context to our isosurface visualization, we render the surrounding data
-directly. This is achieved by casting rays from the viewer, through each pixel of the
-screen, and sampling the volume data at a constant rate. We refer the reader to the
-seminal direct volume rendering papers by Drebin et al. [12] and Levoy [13] for more indepth discussion.
-131
-Chapter 9: Real-Time Isosurface Extraction Using the GPU Programmable Geometry Pipeline
-Our implementation of direct volume rendering is a GPU ray casting method based on
-the work of Krueger and Westermann [14]. The algorithm begins by calculating ray
-directions in normalized texture coordinate space. This is performed by rendering the
-bounding box with a per-vertex color equal to the texture coordinate at that corner. First,
-the back faces of the bounding box are rendered to a screen sized texture to determine
-the exit point Coord back of the ray for each pixel. Subsequently, the front faces of the
-bounding box are rendered to texture to determine the entry point Coord front . The ray
-direction in texture coordinate space for each pixel can then be calculated as
-Coord back − Coord front . Ray marching is then performed in a pixel shader by marching a
-ray from Coord front , advancing by a fixed step size, for n steps. n is the number of
-(
-)
-steps required to advance to the exit point ( length Coord back − Coord front / step _ size ).
-At each ray marching step, the absorption of color by the material at the current volume
-location of the ray must be accounted for. The color of the current location in the volume
-is modulated by the accumulated opacity of the ray and the opacity of the location. The
-result is added to the accumulated color. The following equations model describe this
-operation:
-Ca = Ca + (1.0 − α a )α ( x )C ( x )
-α a = α1 + (1.0 − a a )α ( x )
-(6)
-(7)
-r
-where C ( x ) and α ( x ) are the color and opacity at volume location x , and Ca and α a
-are the accumulated color and opacity for the ray.
-Figure 4. Ray directions are calculated in texture coordinate space from the texture
-coordinates of front and back faces of bounding geometry.
-9.4.1 Incorporating Isosurface for Ray-casting Optimization
-The purpose of volume rendering the data surrounding the extracted isosurface is to
-provide context. In our application, we treat the extracted surfaces as opaque. Thus, we
-can safely terminate our rays at the isosurface. This is achieved by rendering the
-132
-Advanced Real-Time Rendering in 3D Graphics and Games Course – SIGGRAPH 2007
-extracted isosurface’s 3D texture coordinates into the exit point texture Coord back . An
-example exit point texture is provided in Figure 5.
-Figure 5. Incorporating the isosurface into the volume rendering is achieved by
-rendering the isosurface into the exit point texture..
-This straight-forward integration of the extracted polygonal surface as the ray exit points
-results in unpleasant aliasing artifacts for the volume rendering. This is caused by the
-fact that during the ray casting computation, while computing each ray intersection for a
-given marching step, the new exit point may be simply missed. The isosurface
-coordinates may not lie exactly on the sample point of a marching ray. This will cause
-banding artifacts along the interface between volume rendering and isosurface
-rendering. To counteract the last incorrect sample which will be inside the surface, we
-weight it by the fraction of the step that is outside of the surface (Figure 6).
-Figure 6. Using a fixed sampling rate requires the last sample to be weighted by the
-fraction of the last step that is outside of the isosurface.
-9.5
-Results and Conclusions
-We collected results for continuous isosurface extraction and volume rendering for all
-seven sections of the visible human dataset. Each section contains 2563 samples on a
-regular grid. This results in 576 MB 3D textures memory footprint, storing the density
-and gradient information for each dataset portion. This dataset can be rendered in its
-entirety on the GPU. However, due to input data resolution discrepancy we chose to
-render the subsets as separate datasets. We use several high resolution off-screen
-buffers for rendering ray marching front and exit points as well as some intermediate
-information, taking up 120 MB of V-RAM. The stream-out buffer used for storing the
-polygonal surface for the extracted isosurface is 85 MB.
-133
-Chapter 9: Real-Time Isosurface Extraction Using the GPU Programmable Geometry Pipeline
-Isosurface Extraction Results and Analysis. Previous methods for GPU-based
-isosurface extraction have been forced to use contrived implementations to escape the
-limitations of the earlier programmable graphics pipelines. Such methods, while often
-performant, are complex to re-implement and modify, and typically do not support re-use
-without significant effort. We have shown that with the availability of latest generation
-GPU architectures, flexible and reasonable implementations of marching methods are
-possible to implement taking advantage of the massive parallelism available on the
-GPU, while maintaining optimal performance characteristics. We found that our hybrid
-method of dynamic domain voxelization following by a tetrahedralization pass results in
-high-performance and high-quality results. In our development of this system, we have
-explored various types of methods, including using standard marching cubes or
-marching tetrahedra directly. We settled on the final hybrid algorithm presented here
-after extensive testing and analysis of performance bottlenecks. The direct
-implementation of marching tetrahedra requires large amounts of redundant isofunction
-computations, reducing parallelization. The marching cubes performance was strongly
-reduced by the large look-up table sizes, as well as extraneous computations for
-incorrect topology fix-up. Therefore, this hybrid approach proved to be an excellent
-tradeoff between the two.
-An earlier implementation performed the tetrahedral tessellation and surface extraction
-in a single pass. However, this severely limited parallelism. The difference in running
-time between a cube that is culled, and one that is both tetrahedralized and used for
-isosurface extraction in a single pass, creates a significant bottleneck for GPU
-resources. Instead, by moving the marching tetrahedra computation into another pass,
-we are able to fully utilize GPU SIMD programmable units parallelization for voxelizing
-the domain and generating tetrahedra near the surface. Similarly, the marching
-tetrahedra pass exhibits the same advantages.
-All timing results include rendering cost and were collected on a Windows Vista PC with
-AMD Athlon 64 X2 Dual Core 2.4GHz, 2GB RAM and ATI Radeon HD 2900 XT graphics
-card.
-Dataset
-Grid
-Time
-Extracted
-Faces
-Head
-643
-323
-163
-643
-323
-163
-643
-323
-163
-112 ms
-21 ms
-4.9 ms
-129 ms
-23 ms
-5 ms
-143 ms
-25 ms
-5.5 ms
-114 K
-24 K
-5.5 K
-177 K
-38 K
-7.8 K
-186 K
-40 K
-8.2 K
-Thorax
-Abdomen
-Continuous
-Extraction
-FPS
-8.93 fps
-46 fps
-203 fps
-7.71 fps
-43 fps
-200 fps
-9.98 fps
-39 fps
-180 fps
-Face/sec
-1M
-1.2 M
-1.1 M
-1.3 M
-1.6 M
-1.6 M
-1.3 M
-1.6 M
-1.5 M
-Table 1. Timing results for continuous isosurface extraction. See also the supplementary
-video for more results.
-134
-Advanced Real-Time Rendering in 3D Graphics and Games Course – SIGGRAPH 2007
-While a common approach to smoothing extracted isosurfaces is to use linear rootfinding; our quadratic root-finding approach produces significantly higher visual quality
-results (Figure 7). In our example surface detail quality is measured by surface
-smoothness. However, for different datasets, using this approach results in higher
-amount of surface details recovered (thus not necessarily a smoother surface). This
-additional computation has very minimal overhead by requiring less than 30 additional
-scalar ALU operations in the marching tetrahedra extraction shader, and an additional
-texture fetch, and as such having very slight impact on performance. Note that the
-quality of quadratic root-finding for recursion depth d = 8 exceeds that for linear rootfinding for several additional levels of subdivision (d = 10) .
-Figure 7. Results comparison of Root-finding Methods. Linear secant method (left)
-results in surface missing important fine-grain detail (shown by the rough silhouettes of
-the smooth input metaballs). Quadratic root finding (right) results in significantly higher
-detail surface (and thus, smoother in this case) as compared to the linear secant method.
-Volumetric Rendering via Ray-Casting Results. Our ray caster is implemented
-utilizing Shader Model 3.0 functionality. We dynamically compute per-step lighting
-results integrating the resulting illumination using on the order of 600 ray marching steps
-for each ray. We found that the limiting factor for the ray caster performance is both the
-application resolution (resulting in higher fill rates for higher resolution) and the amount
-of steps taken for each ray computation. Integrating isosurface mesh as our ray exit
-points allows us significantly speed up the resulting rendering, often on the order of
-magnitude in speed for given viewpoints.
-Conclusions and Future Work. We have presented a set of approaches that allow
-interactive exploration of medical datasets in real-time. Our technique is based on
-combining direct volume rendering via ray-casting with isosurface extraction on GPU.
-The latter takes advantage of the programmable DirectX 10 pipeline for dynamic surface
-extraction in real-time using geometry shaders. We have optimized our algorithm to take
-advantage of the massively parallel GPU architecture, while attuning it to the strengths
-and the constraints of this model. Combining isosurface with direct volume rendering
-allow for surface properties as well as for the context of tissues surrounding the region
-and gives better context for navigation. Our resulting application is both easy to use and
-results in high frame rates.
-135
-Chapter 9: Real-Time Isosurface Extraction Using the GPU Programmable Geometry Pipeline
-9.6
-Acknowledgements
-We would like to thank Daniel Szecket for his work on the user interface used for our
-system. We also extend special thanks to Dan Abrahams-Gessel and the Game
-Computing Applications group, as well as the anonymous reviewers for their help,
-suggestions and review of this work.
-9.7
-References
-[1] WESTERMANN, R. AND ERTL, T. 1998. Efficiently using graphics hardware in volume
-rendering applications, in: SIGGRAPH ’98: Proceedings of the 25th annual
-conference on Computer graphics and interactive techniques, ACM Press, New
-York, NY, USA, 1998, pp. 169–177.
-[2] ROTTGER, S., KRAUS, M. AND ERTL, T. 2000. Hardware-accelerated volume and
-isosurface rendering based on cell-projection, in: VIS ’00: Proceedings of the
-conference on Visualization ’00, IEEE Computer Society Press, Los Alamitos, CA,
-USA, 2000, pp. 109–116.
-[3] LORENSEN, W. E., AND CLINE, H. E. 1987. Marching cubes: A high resolution 3D surface
-construction algorithm, in: Computer Graphics (Proceedings of SIGGRAPH 87), Vol.
-21, Anaheim, California, 1987, pp. 163–169.
-[4] SHIRLEY, P. AND TUCHMAN, A. 1990. A polygonal approximation to direct scalar volume
-rendering, SIGGRAPH Comput. Graph. 24 (5) (1990) 63–70.
-[5] PASCUCCI, V. 2004. Isosurface computation made simple: Hardware acceleration,
-adaptive refinement and tetrahedral stripping, in: Proceedings of VisSym 2004.
-[6] KLEIN, T., STEGMAIER, S. AND ERTL, T. 2004. Hardware-accelerated reconstruction of
-polygonal isosurface representations on unstructured grids, pg 00 (2004) 186–195.
-[7] GOETZ, F., JUNKLEWITZ, T. AND DOMIK, G. 2005. Real-time marching cubes on the vertex
-shader, in: Proceedings of Eurographics 2005.
-[8] JOHANSSON, G. AND CARR, H. 2006. Accelerating marching cubes with graphics
-hardware, in: CASCON ’06: Proceedings of the 2006 conference of the Center for
-Advanced Studies on Collaborative research, ACM Press, New York, NY, USA,
-2006, p. 39.
-[9] SILVA, C., COMBA, J., CALLAHAN, S., AND BERNARDON, F. 2005. A survey of GPU-based
-volume rendering of unstructured grids, 17th Brazilian Symposium on Computer
-Graphics and Image Processing.
-136
-Advanced Real-Time Rendering in 3D Graphics and Games Course – SIGGRAPH 2007
-[10] NING, P. AND BLOOMENTHAL, J. 1993. An evaluation of implicit surface tilers, IEEE
-Comput. Graph. Appl. 13 (6) (1993) 33–41.
-[11] PRESS, W. H., TEUKOLSKY, S. A., VETTERLING, W. A. AND FLANNERY, B. P. 2002.
-Numerical Recipies in C++, Cambridge University Press.
-[12] DREBIN, R. A., CARPENTER, L. AND HANRAHAN, P. 1988. Volume rendering, Computer
-Graphics 22 (4) (1988) 65–74.
-[13] LEVOY, M. 1988. Display of surfaces from volume data, IEEE Computer Graphics
-and Applications 8 (3) (1988) 29–37.
-[14] KRUEGER, J. AND WESTERNMANN, R. 2003. Acceleration techniques for GPU-based
-volume rendering, IEEE Visualization (2003) 287–292.
-[15] KNISS, J., PREMOZE, S., HANSEN, C., SHIRLEY, P. AND MCPHERSON, A. 2003. A model for
-volume lighting and modeling, IEEE Transactions on Visualization and Computer
-Graphics 9 (2) (2003) 150–162.
-[16] ENGEL, K., KRAUS, M. AND ERTL, T. 2001. High-quality pre-integrated volume
-rendering using hardware accelerated pixel shading, Workshop on Graphics
-Hardware.
-137
+
+| $F(t) = F(x_1) + (F(x_2) - F(x_1) - b)t + bt^2$ | (2) |
+|-------------------------------------------------|-----|
+|-------------------------------------------------|-----|
+
+| $F'(t) = F(x_2) - F(x_1) - b + 2bt$ | (3) |
+|-------------------------------------|-----|
+|-------------------------------------|-----|
+
+We seek a choice of b that minimizes the least-squares error between the function derivatives relative to the actual derivatives, where the relationship is given by the following system of equations:
+
+| $F'(x_1) \approx F(x_2) - F(x_1) - b$ | (4) |
+|---------------------------------------|-----|
+|---------------------------------------|-----|
+
+$$F'(x_2) \approx F(x_1) - F(x_{12}) + b \quad (5)$$
+
+The least squares solution is the average of both solutions, or () ( ) () 2 1 2 1 b = F′ x − F′ x .We can now solve Equation 2 directly using the quadratic equation, which is guaranteed to have exactly one root in the interval. Note that if ( ) ( ) 2 1 F′ x = F′ x , this is equivalent to performing the linear secant method.
+
+Storing Extraction Results for Subsequent Re-Use. We can intelligently generate isosurface on-demand (either as a function of the implicit domain changes or when the user modifies isovalue, using our material editor interface). After computing marching tetrahedra, we can output isosurface triangles into a GPU stream-out buffer for re-use in the later passes or even storage on-disk. This capability is a critical feature of our method that is allowed by the latest GPU pipeline. While the extraction already runs at real-time rates, the actual frame rate perceived by the user will be dramatically faster, as most frames are able to reuse the geometry from the stream out buffer. This frees up GPU resources for additional computation, such as, for example, combining high quality direct volume rendering with isosurface rendering for better context guidance during medical training simulations (as seen in Figure 1). Furthermore, we utilize the extracted polygonal surface to improve the rendering speed of our volumetric renderer. We render the isosurface faces as the starting positions for ray casting in the direct volume rendering algorithm (as an optimization for ray casting). The isosurface can also be rendered directly into a shadow buffer for shadow generation on the surrounding organs.
+
+# 9.4 Direct Volume Rendering
+
+To provide context to our isosurface visualization, we render the surrounding data directly. This is achieved by casting rays from the viewer, through each pixel of the screen, and sampling the volume data at a constant rate. We refer the reader to the seminal direct volume rendering papers by Drebin et al. [12] and Levoy [13] for more indepth discussion.
+
+Our implementation of direct volume rendering is a GPU ray casting method based on the work of Krueger and Westermann [14]. The algorithm begins by calculating ray directions in normalized texture coordinate space. This is performed by rendering the bounding box with a per-vertex color equal to the texture coordinate at that corner. First, the back faces of the bounding box are rendered to a screen sized texture to determine the exit point Coordback of the ray for each pixel. Subsequently, the front faces of the bounding box are rendered to texture to determine the entry point Coord front . The ray direction in texture coordinate space for each pixel can then be calculated as Coordback − Coord front . Ray marching is then performed in a pixel shader by marching a ray from Coord front , advancing by a fixed step size, for n steps. n is the number of steps required to advance to the exit point (length(Coord Coord ) step size back − front / \_ ).
+
+At each ray marching step, the absorption of color by the material at the current volume location of the ray must be accounted for. The color of the current location in the volume is modulated by the accumulated opacity of the ray and the opacity of the location. The result is added to the accumulated color. The following equations model describe this operation:
+
+| $C_a = C_a + (1.0 - \alpha_a)\alpha(x)C(x)$ | (6) |
+|---------------------------------------------|-----|
+|---------------------------------------------|-----|
+
+| $\alpha_a = \alpha_1 + (1.0 - a_a)a(x)$ | (7) |
+|-----------------------------------------|-----|
+|-----------------------------------------|-----|
+
+where C() x and α() x are the color and opacity at volume location x r , and Ca and α a are the accumulated color and opacity for the ray.
+
+
+
+Figure 4. Ray directions are calculated in texture coordinate space from the texture coordinates of front and back faces of bounding geometry. 
+
+# 9.4.1 Incorporating Isosurface for Ray-casting Optimization
+
+The purpose of volume rendering the data surrounding the extracted isosurface is to provide context. In our application, we treat the extracted surfaces as opaque. Thus, we can safely terminate our rays at the isosurface. This is achieved by rendering the extracted isosurface's 3D texture coordinates into the exit point texture Coordback . An example exit point texture is provided in Figure 5.
+
+
+
+Figure 5. Incorporating the isosurface into the volume rendering is achieved by rendering the isosurface into the exit point texture.. 
+
+This straight-forward integration of the extracted polygonal surface as the ray exit points results in unpleasant aliasing artifacts for the volume rendering. This is caused by the fact that during the ray casting computation, while computing each ray intersection for a given marching step, the new exit point may be simply missed. The isosurface coordinates may not lie exactly on the sample point of a marching ray. This will cause banding artifacts along the interface between volume rendering and isosurface rendering. To counteract the last incorrect sample which will be inside the surface, we weight it by the fraction of the step that is outside of the surface (Figure 6).
+
+
+
+Figure 6. Using a fixed sampling rate requires the last sample to be weighted by the fraction of the last step that is outside of the isosurface. 
+
+# 9.5 Results and Conclusions
+
+We collected results for continuous isosurface extraction and volume rendering for all seven sections of the visible human dataset. Each section contains 2563 samples on a regular grid. This results in 576 MB 3D textures memory footprint, storing the density and gradient information for each dataset portion. This dataset can be rendered in its entirety on the GPU. However, due to input data resolution discrepancy we chose to render the subsets as separate datasets. We use several high resolution off-screen buffers for rendering ray marching front and exit points as well as some intermediate information, taking up 120 MB of V-RAM. The stream-out buffer used for storing the polygonal surface for the extracted isosurface is 85 MB.
+
+Isosurface Extraction Results and Analysis. Previous methods for GPU-based isosurface extraction have been forced to use contrived implementations to escape the limitations of the earlier programmable graphics pipelines. Such methods, while often performant, are complex to re-implement and modify, and typically do not support re-use without significant effort. We have shown that with the availability of latest generation GPU architectures, flexible and reasonable implementations of marching methods are possible to implement taking advantage of the massive parallelism available on the GPU, while maintaining optimal performance characteristics. We found that our hybrid method of dynamic domain voxelization following by a tetrahedralization pass results in high-performance and high-quality results. In our development of this system, we have explored various types of methods, including using standard marching cubes or marching tetrahedra directly. We settled on the final hybrid algorithm presented here after extensive testing and analysis of performance bottlenecks. The direct implementation of marching tetrahedra requires large amounts of redundant isofunction computations, reducing parallelization. The marching cubes performance was strongly reduced by the large look-up table sizes, as well as extraneous computations for incorrect topology fix-up. Therefore, this hybrid approach proved to be an excellent tradeoff between the two.
+
+An earlier implementation performed the tetrahedral tessellation and surface extraction in a single pass. However, this severely limited parallelism. The difference in running time between a cube that is culled, and one that is both tetrahedralized and used for isosurface extraction in a single pass, creates a significant bottleneck for GPU resources. Instead, by moving the marching tetrahedra computation into another pass, we are able to fully utilize GPU SIMD programmable units parallelization for voxelizing the domain and generating tetrahedra near the surface. Similarly, the marching tetrahedra pass exhibits the same advantages.
+
+All timing results include rendering cost and were collected on a Windows Vista PC with AMD Athlon 64 X2 Dual Core 2.4GHz, 2GB RAM and ATI Radeon HD 2900 XT graphics card.
+
+| Dataset Grid Time Head 64 3 112 ms 32 3 21 ms 16 3 4.9 ms | Extracted Faces 114 K 24 K 5.5 K | Continuous Extraction FPS 8.93 fps 46 fps 203 fps | Face/sec 1 M 1.2 M 1.1 M |
+|-----------------------------------------------------------|----------------------------------|---------------------------------------------------|--------------------------|
+| Thorax 64 3                                               |                                  |                                                   |                          |
+| 129 ms                                                    | 177 K                            | 7.71 fps                                          | 1.3 M                    |
+| 32 3                                                      |                                  |                                                   |                          |
+| 23 ms                                                     | 38 K                             | 43 fps                                            | 1.6 M                    |
+| 16 3                                                      |                                  |                                                   |                          |
+| 5 ms                                                      | 7.8 K                            | 200 fps                                           | 1.6 M                    |
+| Abdomen 64 3                                              |                                  |                                                   |                          |
+| 143 ms                                                    | 186 K                            | 9.98 fps                                          | 1.3 M                    |
+| 32 3                                                      |                                  |                                                   |                          |
+| 25 ms                                                     | 40 K                             | 39 fps                                            | 1.6 M                    |
+| 16 3                                                      |                                  |                                                   |                          |
+| 5.5 ms                                                    | 8.2 K                            | 180 fps                                           | 1.5 M                    |
+
+Table 1. Timing results for continuous isosurface extraction. See also the supplementary video for more results.
+
+While a common approach to smoothing extracted isosurfaces is to use linear rootfinding; our quadratic root-finding approach produces significantly higher visual quality results (Figure 7). In our example surface detail quality is measured by surface smoothness. However, for different datasets, using this approach results in higher amount of surface details recovered (thus not necessarily a smoother surface). This additional computation has very minimal overhead by requiring less than 30 additional scalar ALU operations in the marching tetrahedra extraction shader, and an additional texture fetch, and as such having very slight impact on performance. Note that the quality of quadratic root-finding for recursion depth d = 8 exceeds that for linear rootfinding for several additional levels of subdivision (d = 10).
+
+
+
+
+
+Figure 7. Results comparison of Root-finding Methods. Linear secant method (left) results in surface missing important fine-grain detail (shown by the rough silhouettes of the smooth input metaballs). Quadratic root finding (right) results in significantly higher detail surface (and thus, smoother in this case) as compared to the linear secant method. 
+
+Volumetric Rendering via Ray-Casting Results. Our ray caster is implemented utilizing Shader Model 3.0 functionality. We dynamically compute per-step lighting results integrating the resulting illumination using on the order of 600 ray marching steps for each ray. We found that the limiting factor for the ray caster performance is both the application resolution (resulting in higher fill rates for higher resolution) and the amount of steps taken for each ray computation. Integrating isosurface mesh as our ray exit points allows us significantly speed up the resulting rendering, often on the order of magnitude in speed for given viewpoints.
+
+Conclusions and Future Work. We have presented a set of approaches that allow interactive exploration of medical datasets in real-time. Our technique is based on combining direct volume rendering via ray-casting with isosurface extraction on GPU. The latter takes advantage of the programmable DirectX 10 pipeline for dynamic surface extraction in real-time using geometry shaders. We have optimized our algorithm to take advantage of the massively parallel GPU architecture, while attuning it to the strengths and the constraints of this model. Combining isosurface with direct volume rendering allow for surface properties as well as for the context of tissues surrounding the region and gives better context for navigation. Our resulting application is both easy to use and results in high frame rates.
+
+# 9.6 Acknowledgements
+
+We would like to thank Daniel Szecket for his work on the user interface used for our system. We also extend special thanks to Dan Abrahams-Gessel and the Game Computing Applications group, as well as the anonymous reviewers for their help, suggestions and review of this work.
+
+# 9.7 References
+
+[1] WESTERMANN, R. AND ERTL, T. 1998. Efficiently using graphics hardware in volume rendering applications, in: SIGGRAPH '98: Proceedings of the 25th annual conference on Computer graphics and interactive techniques, ACM Press, New York, NY, USA, 1998, pp. 169–177. [2] ROTTGER, S., KRAUS, M. AND ERTL, T. 2000. Hardware-accelerated volume and isosurface rendering based on cell-projection, in: VIS '00: Proceedings of the conference on Visualization '00, IEEE Computer Society Press, Los Alamitos, CA, USA, 2000, pp. 109–116. [3] LORENSEN, W. E., AND CLINE, H. E. 1987. Marching cubes: A high resolution 3D surface construction algorithm, in: Computer Graphics (Proceedings of SIGGRAPH 87), Vol. 21, Anaheim, California, 1987, pp. 163–169. [4] SHIRLEY, P. AND TUCHMAN, A. 1990. A polygonal approximation to direct scalar volume rendering, SIGGRAPH Comput. Graph. 24 (5) (1990) 63–70. [5] PASCUCCI, V. 2004. Isosurface computation made simple: Hardware acceleration, adaptive refinement and tetrahedral stripping, in: Proceedings of VisSym 2004. [6] KLEIN, T., STEGMAIER, S. AND ERTL, T. 2004. Hardware-accelerated reconstruction of polygonal isosurface representations on unstructured grids, pg 00 (2004) 186–195. [7] GOETZ, F., JUNKLEWITZ, T. AND DOMIK, G. 2005. Real-time marching cubes on the vertex shader, in: Proceedings of Eurographics 2005. [8] JOHANSSON, G. AND CARR, H. 2006. Accelerating marching cubes with graphics hardware, in: CASCON '06: Proceedings of the 2006 conference of the Center for Advanced Studies on Collaborative research, ACM Press, New York, NY, USA, 2006, p. 39. [9] SILVA, C., COMBA, J., CALLAHAN, S., AND BERNARDON, F. 2005. A survey of GPU-based volume rendering of unstructured grids, 17th Brazilian Symposium on Computer Graphics and Image Processing.
+
+[10] NING, P. AND BLOOMENTHAL, J. 1993. An evaluation of implicit surface tilers, IEEE Comput. Graph. Appl. 13 (6) (1993) 33–41. [11] PRESS, W. H., TEUKOLSKY, S. A., VETTERLING, W. A. AND FLANNERY, B. P. 2002. Numerical Recipies in C++, Cambridge University Press. [12] DREBIN, R. A., CARPENTER, L. AND HANRAHAN, P. 1988. Volume rendering, Computer Graphics 22 (4) (1988) 65–74. [13] LEVOY, M. 1988. Display of surfaces from volume data, IEEE Computer Graphics and Applications 8 (3) (1988) 29–37. [14] KRUEGER, J. AND WESTERNMANN, R. 2003. Acceleration techniques for GPU-based volume rendering, IEEE Visualization (2003) 287–292. [15] KNISS, J., PREMOZE, S., HANSEN, C., SHIRLEY, P. AND MCPHERSON, A. 2003. A model for volume lighting and modeling, IEEE Transactions on Visualization and Computer Graphics 9 (2) (2003) 150–162. [16] ENGEL, K., KRAUS, M. AND ERTL, T. 2001. High-quality pre-integrated volume rendering using hardware accelerated pixel shading, Workshop on Graphics Hardware.

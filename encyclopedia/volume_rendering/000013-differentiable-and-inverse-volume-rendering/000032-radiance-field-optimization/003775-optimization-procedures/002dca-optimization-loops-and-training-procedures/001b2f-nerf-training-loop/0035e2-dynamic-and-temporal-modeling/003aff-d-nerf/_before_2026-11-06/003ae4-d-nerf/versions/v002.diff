@@ -1,0 +1,407 @@
+--- v001.md
++++ v002.md
+@@ -1,61 +1,65 @@
+ # D-NeRF
++
+ Also called: Dynamic-NeRF, Neural Radiance Fields for Dynamic Scenes
+ 
+ ## Overview
+-D-NeRF is a method for synthesizing novel views at an arbitrary point in time of dynamic scenes with complex non-rigid geometries [S1]. It optimizes an underlying deformable volumetric function from a sparse set of input monocular views without requiring ground-truth geometry or multi-view images at the same time instant [S1]. Unlike naive extensions of NeRF that map $(x, y, z, t)$ directly to density and radiance, D-NeRF decomposes learning into two modules: a deformation network mapping scene points to a common canonical configuration, and a canonical network regressing density and color from that configuration [S1]. This decomposition effectively exploits temporal redundancy, enabling the handling of rigid, articulated, and non-rigid motions [S1].
++D-NeRF is a method for synthesizing novel views at an arbitrary point in time of dynamic scenes with complex non-rigid geometries, optimizing an underlying deformable volumetric function from a sparse set of input monocular views without ground-truth geometry or multi-view images [S1]. It sets itself apart from naive extensions of NeRF (which map $(x, y, z, t)$ directly to density and radiance) by decomposing learning into two modules: a spatial mapping that encodes the scene into a canonical space, and a mapping that transforms this canonical representation into the deformed scene at a particular time, thereby effectively exploiting temporal redundancy [S1].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Inputs:** A sparse set of $T$ RGB images $\{I_t\}_{t=1}^T$ and their corresponding camera pose matrices $\{T_t\}_{t=1}^T$, where $I_t \in \mathbb{R}^{H \times W \times 3}$ and $T_t \in \mathbb{R}^{4 \times 4}$ is an SE(3) matrix [S1, S2]. Each time instant $t$ is captured by a single camera (monocular) [S1].
+-*   **Outputs:** Rendered pixel color $C'(p, t)$ for a pixel $p$ at time $t$ and camera view $(\theta, \phi)$ [S1].
+-
+-**Data Structures**
++**Inputs and Outputs:**
++*   **Inputs:** A sparse set of $T$ RGB images $\{I_t\}_{t=1}^T$ and their corresponding camera pose matrices $\{T_t\}_{t=1}^T$, where $I_t \in \mathbb{R}^{H \times W \times 3}$ and $T_t \in \mathbb{R}^{4 \times 4}$ is an SE(3) matrix [S1, S2]. The method assumes a single view per time instant [S1].
++*   **Outputs:** Rendered pixel color $C'(p, t)$ for a pixel $p$ at time $t$, given a camera ray defined by origin $o$ and direction $d$ [S1].
++
++**Data Structures:**
+ The model consists of two deep fully connected networks (MLPs) without convolutional layers [S1]:
+-1.  **Deformation Network $\Psi_t$:**
+-    *   **Architecture:** 8-layer MLP with ReLU activations [S1].
+-    *   **Input:** Encoded 3D position $\mathbf{x}$ and time $t$.
+-    *   **Output:** Displacement vector $\Delta \mathbf{x} \in \mathbb{R}^3$. No non-linearity is applied to the output [S1].
+-2.  **Canonical Network $\Psi_x$:**
+-    *   **Architecture:** 8-layer MLP with ReLU activations [S1].
+-    *   **Input:** Encoded transformed position $\mathbf{x} + \Delta \mathbf{x}$ and viewing direction $\mathbf{d}$.
+-    *   **Output:** Volume density $\sigma \in \mathbb{R}$ and emitted color $\mathbf{c} \in \mathbb{R}^3$. A final sigmoid non-linearity is applied to both $\sigma$ and $\mathbf{c}$ [S1].
+-
+-**Positional Encoding**
+-Raw coordinates are encoded into a higher-dimensional space using positional encoding $\gamma(\mathbf{p})$ [S1, S2]:
+-$$ \gamma(\mathbf{p}) = \left\langle (\sin(2^l \pi \mathbf{p}), \cos(2^l \pi \mathbf{p})) \right\rangle_{l=0}^{L-1} $$
+-The encoder is applied independently to each coordinate and camera view component [S1].
+-*   For spatial coordinates $\mathbf{x}$: $L = 10$ [S1, S2].
+-*   For viewing direction $\mathbf{d}$ and time $t$: $L = 4$ [S1, S2].
+-
+-**Canonical Configuration**
+-The canonical scene is defined as the scene state at time $t=0$ [S1, S2]. The deformation network is constrained such that:
+-$$ \Psi_t(\mathbf{x}, 0) = \mathbf{0} \quad \text{and} \quad \Psi_t(\mathbf{x}, t) = \Delta \mathbf{x} \text{ for } t \neq 0 \quad \text{[S1]} $$
+-This interconnects all time instances through a common anchor [S1].
+-
+-**Rendering Process**
+-Given a camera ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, and near/far bounds $h_n, h_f$:
+-1.  Sample $N$ points $\{h_n\}_{n=1}^N$ along the ray using stratified sampling from evenly-spaced bins in $[h_n, h_f]$ [S1].
+-2.  For each sample $h$, compute the 3D point on the ray in world space: $\mathbf{x}(h) = \mathbf{o} + h\mathbf{d}$ [S1, S2].
+-3.  Transform $\mathbf{x}(h)$ to canonical space using the deformation network:
+-    $$ \Delta \mathbf{x} = \Psi_t(\mathbf{x}(h), t) $$
+-    $$ \mathbf{p}(h, t) = \mathbf{x}(h) + \Delta \mathbf{x} \quad \text{[S1, S2]} $$
+-4.  Query the canonical network with the transformed point and viewing direction:
+-    $$ [\mathbf{c}(\mathbf{p}(h, t), \mathbf{d}), \sigma(\mathbf{p}(h, t))] = \Psi_x(\mathbf{p}(h, t), \mathbf{d}) \quad \text{[S1, S2]} $$
+-5.  Compute opacity $\alpha$ and transmittance $T$ for the samples:
+-    $$ \delta_n = h_{n+1} - h_n $$
+-    $$ \alpha(h, t, \delta_n) = 1 - \exp(-\sigma(\mathbf{p}(h, t)) \delta_n) $$
+-    $$ T'(h_n, t) = \exp\left(-\sum_{m=1}^{n-1} \sigma(\mathbf{p}(h_m, t)) \delta_m\right) \quad \text{[S1]} $$
+-6.  Approximate the pixel color $C'(p, t)$:
+-    $$ C'(p, t) = \sum_{n=1}^{N} T'(h_n, t) \alpha(h_n, t, \delta_n) \mathbf{c}(\mathbf{p}(h_n, t), \mathbf{d}) \quad \text{[S1]} $$
+-
+-**Training**
+-*   **Loss:** Mean Squared Error (MSE) between rendered pixels $C'$ and ground truth pixels $\hat{C}$ [S1, S2]:
+-    $$ \text{Loss} = \frac{1}{N_s} \sum_{i=1}^{N_s} \|\hat{C}(p_i, t) - C'(p_i, t)\|^2 $$
+-*   **Optimization:** Parameters of $\Psi_x$ and $\Psi_t$ are learned simultaneously [S1, S2].
+-*   **Optimizer:** Adam with learning rate $5 \times 10^{-4}$, $\beta_1=0.9$, $\beta_2=0.999$, decaying exponentially to $5 \times 10^{-5}$ [S1].
+-*   **Curriculum Learning:** Input images are sorted by timestamp. Images with higher timestamps are incrementally added to the training set to improve convergence [S1].
+-*   **Batch Sampling:** At each batch, a random set of $N_s$ pixels is sampled from the current time instant's image [S1, S2].
+-
+-**Pseudocode**
++1.  **Deformation Network ($\Psi_t$):** Maps scene deformations to a common canonical configuration.
++    *   **Input:** Encoded 3D position $x$ and time $t$.
++    *   **Output:** Displacement vector $\Delta x \in \mathbb{R}^3$.
++    *   **Architecture:** 8-layer MLP with ReLU activations. No non-linearity applied to the output $\Delta x$ [S1].
++2.  **Canonical Network ($\Psi_x$):** Regresses volume density and view-dependent RGB color from the canonical configuration.
++    *   **Input:** Encoded canonical position $(x + \Delta x)$ and viewing direction $d$.
++    *   **Output:** Emitted color $\mathbf{c} \in \mathbb{R}^3$ and volume density $\sigma \in \mathbb{R}$.
++    *   **Architecture:** 8-layer MLP with ReLU activations. A final sigmoid non-linearity is applied to $\mathbf{c}$ and $\sigma$ [S1].
++
++**Positional Encoding:**
++Raw coordinates are encoded into a higher-dimensional space using $\gamma(\mathbf{p}) = \langle (\sin(2^l \pi \mathbf{p}), \cos(2^l \pi \mathbf{p})) \rangle_{l=0}^{L-1}$, applied independently to each coordinate and camera view component [S1, S2].
++*   For spatial coordinates $x$: $L = 10$ [S1, S2].
++*   For viewing direction $d$ and time $t$: $L = 4$ [S1, S2].
++
++**Canonical Configuration:**
++The canonical scene is defined as the scene at time $t=0$. This enforces that the deformation displacement is zero at $t=0$:
++$$ \Psi_t(x, 0) = 0 $$
++This anchors all time instances to a common space, interconnecting them [S1].
++
++**Rendering Process:**
++For a point $x$ on a camera ray at time $t$ and viewing direction $d$:
++1.  Transform the point to canonical space using the deformation network:
++    $$ \Delta x = \Psi_t(x, t) $$
++    $$ x_{\text{canonical}} = x + \Delta x $$
++2.  Query the canonical network with the transformed point and direction:
++    $$ [\mathbf{c}, \sigma] = \Psi_x(x_{\text{canonical}}, d) $$
++
++**Volume Rendering:**
++The expected color $C(p, t)$ of a pixel $p$ at time $t$ is the integral along the ray segment $[h_n, h_f]$:
++$$ C(p, t) = \int_{h_n}^{h_f} T(h, t) \sigma(p(h, t)) \mathbf{c}(p(h, t), d) \, dh $$
++where:
++*   $p(h, t) = x(h) + \Psi_t(x(h), t)$ is the point on the ray $x(h)$ transformed to canonical space [S1, S2].
++*   $T(h, t) = \exp \left( - \int_{h_n}^{h} \sigma(p(s, t)) \, ds \right)$ is the accumulated transmittance [S1, S2].
++
++**Numerical Approximation:**
++The integral is approximated via stratified sampling. $N$ samples $\{h_n\}_{n=1}^N$ are drawn from evenly-spaced ray bins in $[h_n, h_f]$ [S1]. The rendered pixel color $C'(p, t)$ is:
++$$ C'(p, t) = \sum_{n=1}^{N} T'(h_n, t) \alpha(h_n, t, \delta_n) \mathbf{c}(p(h_n, t), d) $$
++where:
++*   $\delta_n = h_{n+1} - h_n$ is the distance between quadrature points [S1].
++*   $\alpha(h, t, \delta) = 1 - \exp(-\sigma(p(h, t)) \delta)$ is the opacity [S1].
++*   $T'(h_n, t) = \exp \left( - \sum_{m=1}^{n-1} \sigma(p(h_m, t)) \delta_m \right)$ is the discrete transmittance [S1].
++
++**Training:**
++Parameters of $\Psi_x$ and $\Psi_t$ are optimized simultaneously by minimizing the mean squared error (MSE) between rendered pixels $C'$ and ground-truth pixels $\hat{C}$:
++$$ \text{Loss} = \frac{1}{N_s} \sum_{i=1}^{N_s} \| \hat{C}(p_i, t) - C'(p_i, t) \|^2 $$
++where $N_s$ is the batch size in rays [S1].
++
++**Pseudocode:**
++
+ ```python
+ import numpy as np
+@@ -68,21 +72,22 @@
+     Returns: array of shape (..., D * 2 * L)
+     """
+-    freq_bands = 2.0 ** np.arange(L) * np.pi
+-    # sin(2^l * pi * p), cos(2^l * pi * p)
+-    sines = np.sin(np.outer(p.reshape(-1, p.shape[-1]), freq_bands).reshape(p.shape[:-1] + (-1,)))
+-    cosines = np.cos(np.outer(p.reshape(-1, p.shape[-1]), freq_bands).reshape(p.shape[:-1] + (-1,)))
+-    return np.concatenate([sines, cosines], axis=-1)
++    scales = np.array([2**l for l in range(L)])
++    scaled_p = np.einsum('...d,l->...dl', p, scales)
++    encoded = np.concatenate([np.sin(scaled_p), np.cos(scaled_p)], axis=-1)
++    return encoded
+ 
+ def deformation_network(x_encoded, t_encoded):
+     """
+     8-layer MLP with ReLU activations.
+-    Input: encoded x, encoded t.
++    Input: encoded x and t.
+     Output: displacement delta_x (no non-linearity).
+     """
+-    # Placeholder for actual MLP weights and forward pass
+-    # x_encoded: (..., 60) for L=10, 3 coords
+-    # t_encoded: (..., 8) for L=4, 1 coord
+-    # Concatenate and pass through 8 linear layers with ReLU
+-    # Return delta_x: (..., 3)
++    # Placeholder for actual MLP weights W1...W8 and biases b1...b8
++    # x_t = np.concatenate([x_encoded, t_encoded], axis=-1)
++    # h = x_t
++    # for i in range(1, 8):
++    #     h = np.maximum(0, h @ W[i] + b[i]) # ReLU
++    # delta_x = h @ W[8] + b[8]
++    # return delta_x
+     pass
+ 
+@@ -90,125 +95,154 @@
+     """
+     8-layer MLP with ReLU activations.
+-    Input: encoded x_canonical, encoded d.
+-    Output: sigma, c (sigmoid applied).
+-    """
+-    # x_canonical_encoded: (..., 60)
+-    # d_encoded: (..., 24) for L=4, 3 coords
+-    # Concatenate and pass through 8 linear layers with ReLU
+-    # Apply sigmoid to output
+-    # Return sigma: (..., 1), c: (..., 3)
++    Input: encoded canonical position and viewing direction.
++    Output: color c and density sigma (sigmoid applied).
++    """
++    # Placeholder for actual MLP weights
++    # x_d = np.concatenate([x_canonical_encoded, d_encoded], axis=-1)
++    # h = x_d
++    # for i in range(1, 8):
++    #     h = np.maximum(0, h @ W[i] + b[i]) # ReLU
++    # raw_out = h @ W[8] + b[8]
++    # c = np.sigmoid(raw_out[:, :3])
++    # sigma = np.sigmoid(raw_out[:, 3:])
++    # return c, sigma
+     pass
+ 
+-def render_ray(o, d, h_n, h_f, t, N_samples=64):
++def render_ray(ray_origin, ray_direction, t, h_near, h_far, N_samples):
+     """
+     Renders a single ray at time t.
+     """
+-    # 1. Stratified sampling
+-    bins = np.linspace(h_n, h_f, N_samples + 1)
+-    bin_centers = (bins[:-1] + bins[1:]) / 2.0
+-    # Add uniform noise to each bin center
+-    noise = np.random.uniform(0, 1, size=N_samples)
+-    h_samples = bin_centers + (noise - 0.5) * (bins[1] - bins[0])
+-    
+-    # 2. World space points
+-    x_world = o + h_samples[:, None] * d  # Shape (N_samples, 3)
+-    
+-    # 3. Deformation
+-    # Encode x_world and t
+-    x_enc = positional_encoding(x_world, L=10)
+-    t_enc = positional_encoding(np.full((N_samples, 1), t), L=4)
+-    
+-    delta_x = deformation_network(x_enc, t_enc) # Shape (N_samples, 3)
+-    
+-    # 4. Canonical space points
+-    x_canonical = x_world + delta_x
+-    
+-    # 5. Canonical Network Query
+-    x_can_enc = positional_encoding(x_canonical, L=10)
+-    d_enc = positional_encoding(np.tile(d, (N_samples, 1)), L=4)
+-    
+-    sigma_raw, c_raw = canonical_network(x_can_enc, d_enc)
+-    
+-    # Apply sigmoid to sigma and c
+-    sigma = 1.0 / (1.0 + np.exp(-sigma_raw))
+-    c = 1.0 / (1.0 + np.exp(-c_raw))
+-    
+-    # 6. Volume Rendering
+-    deltas = h_samples[1:] - h_samples[:-1]
+-    deltas = np.append(deltas, 1e-10) # Handle last delta
+-    
+-    alpha = 1.0 - np.exp(-sigma * deltas)
+-    T = np.exp(-np.cumsum(sigma * deltas, axis=0))
+-    # T should be transmittance BEFORE the sample, so shift right
+-    T_shifted = np.concatenate([np.ones((1, 1)), T[:-1]], axis=0)
+-    
++    # 1. Sample points along the ray
++    # Stratified sampling from evenly-spaced bins
++    bins = np.linspace(h_near, h_far, N_samples + 1)
++    samples_h = np.random.uniform(bins[:-1], bins[1:])
++    
++    # 2. Get 3D positions x on the ray
++    x = ray_origin + samples_h[:, np.newaxis] * ray_direction
++    
++    # 3. Encode inputs
++    x_enc = positional_encoding(x, L=10)
++    t_enc = positional_encoding(np.full_like(x[:, 0:1], t), L=4)
++    d_enc = positional_encoding(np.tile(ray_direction, (N_samples, 1)), L=4)
++    
++    # 4. Deformation Network: Get displacement
++    delta_x = deformation_network(x_enc, t_enc)
++    
++    # 5. Transform to canonical space
++    x_canonical = x + delta_x
++    x_canonical_enc = positional_encoding(x_canonical, L=10)
++    
++    # 6. Canonical Network: Get density and color
++    c, sigma = canonical_network(x_canonical_enc, d_enc)
++    
++    # 7. Compute opacities and transmittances
++    deltas = np.diff(np.concatenate([[h_near], samples_h, [h_far]])) # Not quite, need correct delta_n
++    # delta_n is distance between quadrature points. 
++    # In stratified sampling, we sample within bins. 
++    # Approximation: delta_n = (h_far - h_near) / N_samples if uniform, 
++    # but strictly delta_n = h_{n+1} - h_n where h are the sample centers? 
++    # Source says delta_n = h_{n+1} - h_n. 
++    # Let's assume h_n are the sample centers. 
++    # Standard NeRF implementation uses bin edges for delta.
++    # Let's stick to source definition: delta_n = h_{n+1} - h_n.
++    # If we sample centers, we need edges.
++    # Let's assume uniform spacing for simplicity in this generic pseudocode 
++    # or use the bin edges derived from sampling.
++    # Actually, source [S1] says "draw N samples ... from evenly-spaced ray bins".
++    # And delta_n = h_{n+1} - h_n. This implies h_n are the boundaries? 
++    # No, usually h_n are sample points. 
++    # Let's use the standard NeRF delta calculation:
++    # dists = samples_h[1:] - samples_h[:-1]
++    # dists = np.concatenate([dists, np.array([h_far - samples_h[-1]])])
++    # But source formula uses delta_n in alpha.
++    # alpha = 1 - exp(-sigma * delta).
++    # Let's use the distance between adjacent sample points.
++    dists = np.zeros(N_samples)
++    if N_samples > 1:
++        dists[:-1] = samples_h[1:] - samples_h[:-1]
++    dists[-1] = h_far - samples_h[-1]
++    
++    alphas = 1.0 - np.exp(-sigma * dists)
++    
++    # Transmittance T_i = exp(-sum_{j=1}^{i-1} sigma_j delta_j)
++    # T_1 = 1
++    # T_i = T_{i-1} * (1 - alpha_{i-1})
++    Ts = np.ones(N_samples)
++    for i in range(1, N_samples):
++        Ts[i] = Ts[i-1] * (1.0 - alphas[i-1])
++        
+     # Color contribution
+-    contribution = T_shifted * alpha * c
+-    color = np.sum(contribution, axis=0)
++    weights = Ts * alphas
++    color = np.sum(weights[:, np.newaxis] * c, axis=0)
+     
+     return color
+ 
+-def train_step(images, poses, current_time_indices, N_s=4096):
++def train_step(images, poses, t_values, N_samples=64, batch_size=4096):
+     """
+     One training step.
+     """
+-    # Select a random time instant t from current_time_indices
+-    t_idx = np.random.choice(current_time_indices)
+-    t = t_idx # Assuming integer timestamps or mapped to float
+-    I_t = images[t_idx]
+-    T_t = poses[t_idx]
+-    
+-    # Sample N_s pixels from I_t
+-    H, W, _ = I_t.shape
+-    pixel_indices = np.random.randint(0, H * W, size=N_s)
++    # 1. Sample random pixels/rays
++    # Select a random time t from the dataset
++    t_idx = np.random.randint(len(images))
++    t = t_values[t_idx]
++    image = images[t_idx]
++    pose = poses[t_idx]
++    
++    H, W, _ = image.shape
++    # Sample batch_size pixels
++    pixel_indices = np.random.randint(0, H * W, batch_size)
+     rows = pixel_indices // W
+     cols = pixel_indices % W
+     
+-    # Get ground truth colors
+-    gt_colors = I_t[rows, cols]
+-    
+-    # Get camera ray origins and directions from T_t
+-    # Assuming T_t is 4x4 pose matrix (world to camera or camera to world)
+-    # Standard NeRF assumes camera origin o and direction d in world space
+-    # Extract o and d from T_t and pixel coordinates
+-    # ... (Camera projection logic) ...
+-    
+-    # Render
+-    rendered_colors = []
+-    for i in range(N_s):
+-        # Construct ray for pixel i
+-        # o_i, d_i = ...
+-        color = render_ray(o_i, d_i, h_n, h_f, t)
+-        rendered_colors.append(color)
+-    
+-    rendered_colors = np.array(rendered_colors)
+-    
+-    # Compute Loss
++    # Construct rays from camera pose
++    # This requires inverse projection matrix from pose
++    # For simplicity, assume we have ray origins and directions
++    ray_origins = ... # Computed from pose and pixel coords
++    ray_directions = ... # Computed from pose and pixel coords
++    
++    # 2. Render
++    rendered_colors = np.zeros((batch_size, 3))
++    for i in range(batch_size):
++        rendered_colors[i] = render_ray(
++            ray_origins[i], ray_directions[i], t, 
++            h_near=0.0, h_far=5.0, N_samples=N_samples
++        )
++        
++    # 3. Compute Loss
++    gt_colors = image[rows, cols]
+     loss = np.mean((gt_colors - rendered_colors) ** 2)
+     
+-    # Backpropagate and update weights of Psi_t and Psi_x
+-    return loss
++    # 4. Backpropagate and update weights of Psi_t and Psi_x
++    # Use Adam optimizer
++    pass
+ ```
+ 
+-## Subtopics
+-
+-### T-NeRF
+-A variant that represents the scene with a 6D input $(x, y, z, \theta, \phi, t)$ directly without considering an intermediate canonical configuration [S1]. It generally produces less satisfying results than D-NeRF because it does not effectively exploit temporal redundancy [S1].
+-
+-### Neural Volumes (NV)
+-A method for generating 3D images and videos using deep learning based on representing 3D scenes as a set of volumetric data (e.g., voxels) [S2]. D-NeRF is compared against NV [S2].
+-
+-### Scene Representation Networks (SRN)
+-A type of deep learning model used to generate 3D images and videos of scenes, aiming for high-quality consistency with input data [S2]. D-NeRF is compared against SRN [S2].
++**Parameters:**
++*   **Canonical Time:** $t=0$ [S1].
++*   **Positional Encoding Depth:** $L=10$ for $x$, $L=4$ for $d$ and $t$ [S1, S2].
++*   **Network Depth:** 8 layers for both $\Psi_x$ and $\Psi_t$ [S1].
++*   **Training Images:** $400 \times 400$ resolution [S1].
++*   **Iterations:** 800,000 [S1].
++*   **Batch Size:** $N_s = 4096$ rays [S1].
++*   **Samples per Ray:** 64 [S1].
++*   **Optimizer:** Adam, learning rate $5 \times 10^{-4}$, $\beta_1=0.9$, $\beta_2=0.999$, exponential decay to $5 \times 10^{-5}$ [S1].
++*   **Curriculum Learning:** Input images are sorted by timestamp, and images with higher timestamps are incrementally added to improve convergence [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Naive Extension Failure:** Directly mapping $(x, y, z, t)$ to density/radiance does not produce satisfying results because it fails to exploit temporal redundancy [S1].
++*   **Single View Per Time:** The method is designed for sparse monocular views (one view per time instant). It does not assume multiple views per time instance [S1].
++*   **Canonical Anchor:** The choice of $t=0$ as the canonical configuration is arbitrary but necessary to enforce $\Psi_t(x, 0) = 0$ [S1].
+ 
+ ## Operating characteristics
+-*   **Complexity:** The method uses two 8-layer MLPs. The computational cost is dominated by the forward pass of these networks for each sample along each ray.
+-*   **Performance:** On the 'Hell Warrior' scene, D-NeRF achieves MSE $31 \times 10^{-4}$, PSNR 23.19, SSIM 0.93, LPIPS 0.08, compared to NeRF's MSE $44 \times 10^{-3}$, PSNR 13.52, SSIM 0.81, LPIPS 0.25 [S1]. On the 'T-Rex' scene, D-NeRF achieves MSE $5 \times 10^{-4}$, PSNR 32.80, SSIM 0.98, LPIPS 0.03, compared to NeRF's MSE $21 \times 10^{-3}$, PSNR 18.19, SSIM 0.89, LPIPS 0.14 [S1].
+-*   **Training Time:** Trained for 800k iterations on 400x400 images, batch size 4096 rays, 64 samples per ray, on a single Nvidia GTX 1080 for 2 days [S1].
+-*   **Strengths:** Can handle non-rigid deformations, articulated motion, and rigid motion from a single view per time instant [S1]. Produces complete 3D meshes as a side product [S1].
+-*   **Limitations:** Requires a sparse set of images; performance may degrade if the canonical configuration ($t=0$) is not representative or if deformations are extreme relative to the canonical state [G]. Naive extension (T-NeRF) fails to capture temporal redundancy effectively [S1].
++*   **Time Complexity:** Training requires 800k iterations. On a single Nvidia GTX 1080, training takes approximately 2 days [S1].
++*   **Memory Complexity:** Not given in the sources.
++*   **Performance:**
++    *   **Hell Warrior Scene:** MSE $31 \times 10^{-4}$, PSNR 23.19, SSIM 0.93, LPIPS 0.08. (Comparison: NeRF MSE $44 \times 10^{-3}$, PSNR 13.52) [S1].
++    *   **T-Rex Scene:** MSE $5 \times 10^{-4}$, PSNR 32.80, SSIM 0.98, LPIPS 0.03. (Comparison: NeRF MSE $21 \times 10^{-3}$, PSNR 18.19) [S1].
++*   **Strengths:** Handles rigid, articulated, and non-rigid motions. Can synthesize novel views at arbitrary times from sparse monocular inputs without ground-truth geometry [S1].
++*   **Limitations:** Relies on a single view per time instant, which may limit geometric consistency compared to multi-view methods. Performance depends heavily on the quality of the canonical space alignment [S1].
+ 
+ ## Background
+-D-NeRF was proposed by Albert Pumarola, Enric Corona, Gerard Pons-Moll, and Francesc Moreno-Noguer [S1]. The method was presented at CVPR 2021 (arXiv:2011.13961v1, Nov 2020) [S1]. It builds upon the Neural Radiance Fields (NeRF) framework [26] and generalizes it to handle dynamic, non-rigid scenes [S1]. The approach is inspired by classical 3D scene flow [44] and aims to exploit temporal redundancy by mapping deformed scenes to a canonical space [S1].
++D-NeRF was proposed by Albert Pumarola, Enric Corona, Gerard Pons-Moll, and Francesc Moreno-Noguer from the Institut de Robòtica i Informàtica Industrial (CSIC-UPC) and the Max Planck Institute for Informatics [S1]. It was published in CVPR 2021 (arXiv:2011.13961v1, Nov 27, 2020) [S1]. The method builds on NeRF [26] and generalizes it to handle non-rigid scenes. It differs from T-NeRF, which uses a 6D input $(x, y, z, \theta, \phi, t)$ directly without a canonical mapping [S1]. It is compared against Neural Volumes (NV), Scene Representation Networks (SRN), and Layered Light Field Fusion (LLFF) [S2].
+ 
+ ## Sources

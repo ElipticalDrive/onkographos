@@ -1,0 +1,114 @@
+# Block Render Data Structure & Instance Generation
+
+Also called: BlockRenderData, Face Tint Mixing
+
+## Overview
+The Block Render Data Structure & Instance Generation method defines the data layout for a single voxel block and the procedure for converting that data into GPU-drawable instances. It solves the problem of efficiently batching individual voxel faces into a single draw call by aggregating per-face texture IDs and color tints. It differs from sibling methods like [Chunk Mesh Assembly](4100-chunk-mesh-assembly.md) by focusing on instance-based rendering of discrete block faces rather than generating a contiguous mesh geometry, and from [Mesh Plugin Architecture](4921-mesh-plugin-architecture.md) by providing a concrete data schema rather than an interface contract.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of face texture names (strings), optional per-face color tints (vectors), and a reference to the geometric shape (`IShape`) defining the block's geometry. A mapping from texture names to integer IDs is required.
+*   **Output:** A `BlockRenderData` struct instance containing resolved texture IDs, tints, and the shape reference.
+
+**Data Structures:**
+The core data structure is `BlockRenderData`. It contains 13 fields:
+1.  `faceBack`: `int` (Texture ID)
+2.  `faceFront`: `int` (Texture ID)
+3.  `faceTop`: `int` (Texture ID)
+4.  `faceBottom`: `int` (Texture ID)
+5.  `faceLeft`: `int` (Texture ID)
+6.  `faceRight`: `int` (Texture ID)
+7.  `tintBack`: `Vector3` (Color tint)
+8.  `tintFront`: `Vector3` (Color tint)
+9.  `tintTop`: `Vector3` (Color tint)
+10. `tintBottom`: `Vector3` (Color tint)
+11. `tintLeft`: `Vector3` (Color tint)
+12. `tintRight`: `Vector3` (Color tint)
+13. `shape`: `IShape` reference
+
+**Steps:**
+1.  **Texture ID Resolution:** For each of the six faces (Back, Front, Top, Bottom, Left, Right), fetch the integer texture ID corresponding to the provided face name. This is typically done via a lookup table or switch statement on the face direction [S1, unofficial].
+2.  **Tint Application:** Retrieve the color tint for each face. If no specific tint is provided for a face, it defaults to white (`Vector3(1, 1, 1)`) [S1, unofficial].
+3.  **Mixing (Optional):** If the system supports mixing, multiply the provided face tints element-wise with base block tints. Alternatively, the provided face tints may entirely replace the base block tints [S1, unofficial].
+4.  **Instance Generation:** Pass the resolved texture IDs, tints, and shape reference to the shape's `Instance` method to generate the renderable instance data [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Assuming textureIDByName is a map from string name to int ID
+# White tint is Vector3(1.0, 1.0, 1.0)
+
+def create_block_render_data(
+    face_back_name: str,
+    face_front_name: str,
+    face_top_name: str,
+    face_bottom_name: str,
+    face_left_name: str,
+    face_right_name: str,
+    tint_back: Vector3 = Vector3(1, 1, 1),
+    tint_front: Vector3 = Vector3(1, 1, 1),
+    tint_top: Vector3 = Vector3(1, 1, 1),
+    tint_bottom: Vector3 = Vector3(1, 1, 1),
+    tint_left: Vector3 = Vector3(1, 1, 1),
+    tint_right: Vector3 = Vector3(1, 1, 1),
+    shape: IShape
+) -> BlockRenderData:
+    # Step 1: Resolve texture IDs
+    id_back = textureIDByName[face_back_name]
+    id_front = textureIDByName[face_front_name]
+    id_top = textureIDByName[face_top_name]
+    id_bottom = textureIDByName[face_bottom_name]
+    id_left = textureIDByName[face_left_name]
+    id_right = textureIDByName[face_right_name]
+
+    # Step 2 & 3: Tints are used as provided or mixed (implementation detail of mixing not fully specified in source)
+    # Source indicates tints default to white if not provided in helper methods
+    
+    # Step 4: Construct and return
+    return BlockRenderData(
+        faceBack=id_back,
+        faceFront=id_front,
+        faceTop=id_top,
+        faceBottom=id_bottom,
+        faceLeft=id_left,
+        faceRight=id_right,
+        tintBack=tint_back,
+        tintFront=tint_front,
+        tintTop=tint_top,
+        tintBottom=tint_bottom,
+        tintLeft=tint_left,
+        tintRight=tint_right,
+        shape=shape
+    )
+```
+
+**Parameters:**
+*   `textureIDByName`: A dictionary mapping texture names to integer IDs.
+*   `IShape`: The geometric primitive representing the block face(s).
+
+**Edge Cases:**
+*   **Missing Texture Names:** If a texture name is not found in `textureIDByName`, the behavior is undefined in the sources. An implementer should handle this as an error or default to a placeholder texture [G].
+*   **Default Tints:** Helper methods like `CreateWithNames` and `CreateWithName` explicitly default all tints to white `Vector3(1, 1, 1)` [S1, unofficial].
+
+## Subtopics
+
+### Chunk Mesh Assembly
+Generates contiguous mesh geometry for chunks of voxels. Choose when draw call reduction via index buffers is preferred over instance overhead. See [Chunk Mesh Assembly](4100-chunk-mesh-assembly.md).
+
+### Mesh Plugin Architecture
+Defines interfaces for custom mesh generation strategies. Choose when extending rendering behavior beyond standard block/instance models. See [Mesh Plugin Architecture](4921-mesh-plugin-architecture.md).
+
+## Operating characteristics
+*   **Time Complexity:** O(1) per block for data structure creation, assuming constant-time texture ID lookup.
+*   **Memory Complexity:** O(1) per block, storing 6 ints, 6 vectors, and 1 reference.
+*   **Strengths:** Simple data layout; efficient batching for GPU instancing; flexible per-face texturing.
+*   **Limitations:** Higher CPU overhead per block compared to mesh assembly if not batched efficiently; requires GPU instancing support.
+*   **When to use:** When rendering large numbers of discrete voxel faces with varied textures/tints and GPU instancing is available.
+*   **When not to use:** When memory bandwidth is a critical bottleneck and contiguous mesh geometry is more efficient, or when GPU instancing is not supported.
+
+## Background
+This method originates from the `Cubic-Grid_Voxel_Renderer` project by rarefushion [S1, unofficial]. It is part of a blocky meshing approach where voxels are rendered as individual instances rather than merged meshes.
+
+## Sources
+[S1] rarefushion/Cubic-Grid_Voxel_Renderer, https://github.com/rarefushion/Cubic-Grid_Voxel_Renderer, fetched 2026-10-27 (unofficial)

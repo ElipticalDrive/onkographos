@@ -1,0 +1,117 @@
+# Ambiguous Face Handling with Connected Components
+
+Also called: White vs Blue component selection
+
+## Overview
+This method resolves topological ambiguities in isosurface extraction by selecting specific connected components of surface patches based on the configuration of ambiguous faces within a cell. It prevents the generation of non-manifold edges that arise when standard lookup tables fail to distinguish between multiple valid surface interpretations. It differs from general disjoint patch decomposition by explicitly enforcing a selection rule (white vs. blue) tied to the count of ambiguous faces, ensuring manifold connectivity in complex saddle-point scenarios.
+
+## How it works
+**Inputs and Outputs:**
+- Input: A voxel grid where each vertex is labeled as inside ($\in \partial V$) or outside ($\notin \partial V$) the isosurface boundary.
+- Output: A set of disjoint surface patches (triangles or polygons) forming a manifold mesh.
+
+**Data Structures:**
+- **Cell State:** Defined by the 8 corner vertices of a voxel. Each vertex $v_i$ has a boolean state $s_i \in \{0, 1\}$, where $1$ indicates inside the boundary.
+- **Face Ambiguity:** A face is identified as ambiguous if it contains two inside vertices interleaved with two outside vertices.
+- **Connected Components:** Surface patches within a cell are grouped into connected components. These are categorized as "white" or "blue" based on the graph coloring of the edge connectivity within the cell.
+
+**Definitions:**
+An ambiguous face exists when the face contains two vertices inside $\partial V$ interleaved with two vertices outside $\partial V$ [S1].
+
+**Algorithm Steps:**
+1. **Identify Ambiguous Faces:** For each cell, examine all 12 faces. A face is ambiguous if its four vertices alternate between inside and outside states (e.g., Inside-Outside-Inside-Outside around the perimeter).
+2. **Classify Cell Configuration:** Count the number of ambiguous faces per cell and determine the number of connected components for each color (white/blue).
+3. **Select Components:** Apply the following selection rules to extract surface patches [S1]:
+   - **Case 1: One ambiguous face per cell.** If a cell has exactly one ambiguous face, use **white** connected components to extract surface patches. Using blue components in this scenario produces non-manifold edges.
+   - **Case 2: One cell with three ambiguous faces.** If a single cell contains three ambiguous faces and has more than one blue connected component, use the **blue** components to produce patches.
+   - **Case 3: Two cells with three ambiguous faces.** If two adjacent cells each have three ambiguous faces and contain more than one blue component, use these components to produce dual nodes and extract surface patches.
+4. **Extract Patches:** Generate the geometry for the selected components. Dual nodes are located inside cells rather than on edges to reduce waving and reconstruction artifacts [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def extract_patches(cell_vertices, inside_mask):
+    """
+    cell_vertices: List of 8 vertex positions.
+    inside_mask: List of 8 booleans (True if inside boundary).
+    Returns: List of surface patches.
+    """
+    # Step 1: Identify ambiguous faces
+    ambiguous_faces = []
+    for face in get_cell_faces():
+        face_vertices = [cell_vertices[v] for v in face.indices]
+        face_states = [inside_mask[v] for v in face.indices]
+        # Check for interleaved inside/outside vertices
+        if is_interleaved(face_states):
+            ambiguous_faces.append(face)
+
+    # Step 2: Determine connected components
+    # Components are colored white or blue based on edge connectivity graph
+    white_components = get_connected_components(color='white')
+    blue_components = get_connected_components(color='blue')
+
+    num_ambiguous = len(ambiguous_faces)
+    num_blue_components = len(blue_components)
+
+    # Step 3: Select components based on rules
+    patches = []
+
+    if num_ambiguous == 1:
+        # Case 1: One ambiguous face per cell -> Use white
+        patches.extend(white_components)
+    elif num_ambiguous == 3 and num_blue_components > 1:
+        # Case 2: One cell with three ambiguous faces and >1 blue component -> Use blue
+        patches.extend(blue_components)
+    else:
+        # Case 3: Two cells with three ambiguous faces
+        # This requires checking neighbor cells. 
+        # If two adjacent cells both have 3 ambiguous faces and >1 blue component:
+        # Use them to produce dual nodes and extract patches.
+        # Implementation note: This is handled at the mesh level by pairing cells.
+        pass
+
+    return patches
+
+def is_interleaved(states):
+    """
+    Returns True if two True values are interleaved with two False values
+    in the cyclic order of the face vertices.
+    """
+    # States are ordered around the face perimeter
+    # Check pattern: T, F, T, F or F, T, F, T
+    count = sum(states)
+    if count != 2:
+        return False
+    # Check adjacency in cycle
+    for i in range(4):
+        if states[i] == states[(i + 1) % 4]:
+            return False
+    return True
+```
+
+**Parameters:**
+- Curvature parameter $\lambda$: Typically 0.9 [S1].
+- Maximal octree depth: Typically 7 [S1].
+
+**Edge Cases and Pitfalls:**
+- **Non-manifold edges:** Using blue components when only one ambiguous face exists creates non-manifold edges [S1].
+- **Sharp edges:** Standard dual-node placement on edges can produce degenerated triangles and fail to capture sharp edges. Locating dual nodes inside cells provides more freedom and smoother surfaces [S1].
+
+## Subtopics
+
+### Ambiguous Face Definition
+An ambiguous face is defined as a face containing two vertices inside the boundary $\partial V$ interleaved with two vertices outside $\partial V$ [S1]. This specific geometric configuration creates topological ambiguity because multiple surface interpretations are possible within the cell.
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of cells, as each cell is processed independently or in small neighbor groups.
+- **Memory Complexity:** Depends on the octree depth and the number of connected components per cell. The method supports anisotropic subdivision, allowing efficient storage of complex geometries.
+- **Performance:** Produces smoother surfaces with fewer reconstruction artifacts compared to DMC2, especially on sharp edges [S1].
+- **Strengths:** Ensures manifold topology by explicitly handling ambiguous cases; reduces waving artifacts by placing dual nodes inside cells.
+- **Limitations:** Requires careful implementation of connected component analysis; may produce degenerated triangles if curvature parameters are not tuned (e.g., $\lambda=0.9$) [S1].
+
+## Background
+This method originates from adaptive surface extraction techniques using generalized octrees for anisotropic volumetric data [S1]. It addresses the limitations of standard Marching Cubes lookup tables, which can produce non-manifold edges in ambiguous configurations. The approach was developed to improve the quality of reconstructed surfaces, particularly for mechanical objects with sharp edges, by leveraging connected component analysis and internal dual node placement.
+
+## Sources
+[S1] Adaptive surface extraction from anisotropic volumetric data: contouring on generalized octrees, https://doi.org/10.1007/s12243-013-0369-4, fetched 2026-10-29

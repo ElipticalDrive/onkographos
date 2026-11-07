@@ -1,26 +1,25 @@
 # Locally Controlled Spot Noise
 
-
 ## Overview
 Locally Controlled Spot Noise (LCSN) is a procedural noise method that generates structured patterns by convolving a non-uniform distribution of impulses with a kernel composed of multiple ellipsoidal Gaussian functions [S1, unofficial]. It extends standard Spot Noise by allowing spatial control over impulse density and kernel orientation/scale via underlying data fields, enabling the synthesis of fuzzy surface details [S1, unofficial]. Unlike standard Spot Noise which uses a uniform impulse distribution, LCSN rejects impulses based on a local density factor, making it suitable for authoring textures where feature density varies across the domain [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- Evaluation point $\mathbf{p}$ in $N$-dimensional space.
-- Local density field $d(\mathbf{p})$, a scalar field representing probability/density.
-- Orientation field $R_s(\mathbf{p})$ and Scale field $S_s(\mathbf{p})$ related to underlying data.
-- Kernel parameters: Gaussian magnitude $A$, and a set of matrices $\mathbf{V}_i$ defining ellipsoidal shapes.
-- Random number generator for jittering and density testing.
+- Evaluation point $\mathbf{p}$ in $N$-dimensional space [S1, unofficial].
+- Local density field $d(\mathbf{p})$, a scalar field representing probability/density [S1, unofficial].
+- Orientation field $R_s(\mathbf{p})$ and Scale field $S_s(\mathbf{p})$ related to underlying data [S1, unofficial].
+- Kernel parameters: Gaussian magnitude $A$, and a set of matrices $\mathbf{V}_i$ defining ellipsoidal shapes [S1, unofficial].
+- Random number generator for jittering and density testing [S1, unofficial].
 
 **Outputs:**
-- Noise value $n_s(\mathbf{p})$.
+- Noise value $n_s(\mathbf{p})$ [S1, unofficial].
 
 **Data Structures:**
-- Impulse $\mathbf{p}_j$: Position in texture space.
-- Weight $w_j(\mathbf{p}_j)$: Associated with the impulse.
-- Kernel $K_j(\mathbf{p})$: Defined as $k_s(\mathbf{p}-\mathbf{p}^*_j)R_s(\mathbf{p}^*_j)S_s(\mathbf{p}^*_j)$, where $\mathbf{p}^*_j$ is the impulse position.
-- Matrix $\mathbf{V}$: $(N+1) \times (N+1)$ semipositive definite square matrix describing the ellipsoid iso-contour.
-- Point $\mathbf{p}$: Extended to dimension $N+1$ with the last coordinate set to 1 for matrix multiplication.
+- Impulse $\mathbf{p}_j$: Position in texture space [S1, unofficial].
+- Weight $w_j(\mathbf{p}_j)$: Associated with the impulse [S1, unofficial].
+- Kernel $K_j(\mathbf{p})$: Defined as $k_s(\mathbf{p}-\mathbf{p}^*_j)R_s(\mathbf{p}^*_j)S_s(\mathbf{p}^*_j)$, where $\mathbf{p}^*_j$ is the impulse position [S1, unofficial].
+- Matrix $\mathbf{V}$: $(N+1) \times (N+1)$ semipositive definite square matrix describing the ellipsoid iso-contour [S1, unofficial].
+- Point $\mathbf{p}$: Extended to dimension $N+1$ with the last coordinate set to 1 for matrix multiplication [S1, unofficial].
 
 **Formulas:**
 The kernel function $k(\mathbf{p})$ is a sum of Gaussian functions:
@@ -32,17 +31,17 @@ Here, $\mathbf{p}$ is the point in $N+1$ dimensions (last coord = 1), $\mathbf{V
 The noise value at $\mathbf{p}$ is:
 $$ n_s(\mathbf{p}) = \sum_j \delta(\xi(\mathbf{p}_j) < d(\mathbf{p}_j)) |w_j(\mathbf{p}_j)| K_j(\mathbf{p}) $$
 where:
-- $\delta(\cdot)$ is the Kronecker delta (1 if condition true, 0 otherwise).
-- $\xi(\mathbf{p}_j)$ is a random variable selected independently of $w_j$.
-- $d(\mathbf{p}_j)$ is the local density factor at the impulse location.
-- $||$ denotes absolute value.
+- $\delta(\cdot)$ is the Kronecker delta (1 if condition true, 0 otherwise) [S1, unofficial].
+- $\xi(\mathbf{p}_j)$ is a random variable selected independently of $w_j$ [S1, unofficial].
+- $d(\mathbf{p}_j)$ is the local density factor at the impulse location [S1, unofficial].
+- $||$ denotes absolute value [S1, unofficial].
 - $K_j(\mathbf{p})$ incorporates orientation $R_s$ and scale $S_s$ transformations [S1, unofficial].
 
 **Steps:**
 1. **Impulse Generation:** Generate impulses $\mathbf{p}_j$ on the fly using jittering and pseudorandom number generation in texture space [S1, unofficial].
-2. **Density Test:** For each impulse $\mathbf{p}_j$, generate a random density value $\xi(\mathbf{p}_j)$. Compare it against the local density factor $d(\mathbf{p}_j)$ from the scalar field.
-3. **Rejection:** If $\xi(\mathbf{p}_j) \ge d(\mathbf{p}_j)$, reject the impulse (contribution is 0). If $\xi(\mathbf{p}_j) < d(\mathbf{p}_j)$, keep the impulse.
-4. **Kernel Evaluation:** For kept impulses, compute the kernel $K_j(\mathbf{p})$ centered at $\mathbf{p}_j$, applying orientation $R_s(\mathbf{p}_j)$ and scale $S_s(\mathbf{p}_j)$ transformations.
+2. **Density Test:** For each impulse $\mathbf{p}_j$, generate a random density value $\xi(\mathbf{p}_j)$ [S1, unofficial]. Compare it against the local density factor $d(\mathbf{p}_j)$ from the scalar field [S1, unofficial].
+3. **Rejection:** If $\xi(\mathbf{p}_j) \ge d(\mathbf{p}_j)$, reject the impulse (contribution is 0) [S1, unofficial]. If $\xi(\mathbf{p}_j) < d(\mathbf{p}_j)$, keep the impulse [S1, unofficial].
+4. **Kernel Evaluation:** For kept impulses, compute the kernel $K_j(\mathbf{p})$ centered at $\mathbf{p}_j$, applying orientation $R_s(\mathbf{p}_j)$ and scale $S_s(\mathbf{p}_j)$ transformations [S1, unofficial].
 5. **Summation:** Sum the weighted kernel contributions $|w_j(\mathbf{p}_j)| K_j(\mathbf{p})$ for all accepted impulses to produce $n_s(\mathbf{p})$ [S1, unofficial].
 
 **Pseudocode:**
@@ -51,97 +50,70 @@ where:
 ```python
 def locally_controlled_spot_noise(p, density_field, orientation_field, scale_field, 
                                   kernel_matrices, gaussian_magnitude, random_gen):
-    """
-    Computes Locally Controlled Spot Noise at point p.
-    
-    Args:
-        p: Point in N-dimensional space.
-        density_field: Function d(p) returning local density scalar.
-        orientation_field: Function R_s(p) returning orientation transform.
-        scale_field: Function S_s(p) returning scale transform.
-        kernel_matrices: List of (N+1)x(N+1) semipositive matrices V_i.
-        gaussian_magnitude: Scalar A.
-        random_gen: Random number generator instance.
-        
-    Returns:
-        Noise value n_s(p).
-    """
-    # Extend p to N+1 dimensions with last coordinate 1
-    p_ext = extend_to_n_plus_1(p)
-    
+    # Extend evaluation point p to N+1 dimensions with last coordinate 1
+    p_ext = list(p) + [1.0]
     total_noise = 0.0
-    
-    # Note: In a real implementation, impulses are generated on the fly.
-    # This pseudocode assumes a finite set of impulses p_j is available 
-    # or generated via a Poisson disk or jittered grid strategy.
-    # The source describes generating impulses on the fly [S1, unofficial].
-    # We iterate over generated impulses.
-    
-    for impulse in generate_impulses_on_the_fly():
+
+    # Generate impulses on the fly using jittering and PRNG [S1, unofficial]
+    for impulse in generate_jittered_impulses(random_gen):
         p_j = impulse.position
         w_j = impulse.weight
-        
-        # Density test
+
+        # Density test: generate random variable xi independently of w_j [S1, unofficial]
+        xi_val = random_gen.uniform(0.0, 1.0)
         d_val = density_field(p_j)
-        xi_val = random_gen.uniform(0.0, 1.0) # Random variable xi
-        
+
+        # Kronecker delta delta(xi < d)
         if xi_val < d_val:
             # Impulse accepted
-            
-            # Compute kernel K_j(p)
-            # K_j(p) = k_s(p - p*_j) * R_s(p*_j) * S_s(p*_j)
-            # k_s is the base kernel function (sum of Gaussians)
-            
-            # Translate point relative to impulse
-            p_rel = p - p_j
-            
-            # Apply orientation and scale transforms
-            # R_s and S_s are functions of p_j
+            # Compute relative position for kernel: p - p*_j
+            p_rel = [p[i] - p_j[i] for i in range(len(p))]
+            p_rel_ext = p_rel + [1.0]
+
+            # Apply orientation R_s and scale S_s transforms [S1, unofficial]
             R = orientation_field(p_j)
             S = scale_field(p_j)
-            
-            # Transformed point for kernel evaluation
-            # Assuming R and S are linear transforms applied to p_rel
-            p_transformed = apply_transforms(p_rel, R, S)
-            
-            # Evaluate kernel k(p_transformed)
+            p_transformed = mat_vec_mul(S, mat_vec_mul(R, p_rel))
+            p_transformed_ext = p_transformed + [1.0]
+
+            # Evaluate kernel k(p_transformed) = sum of Gaussians [S1, unofficial]
             kernel_val = 0.0
             for V in kernel_matrices:
-                # g_V(p) = A * exp(-0.5 * p^T V^-1 p)
-                # Note: p in formula is in N+1 dims. 
-                # We must extend p_transformed if it's not already.
-                p_ext_transformed = extend_to_n_plus_1(p_transformed)
-                
-                # Compute quadratic form
                 inv_V = invert_matrix(V)
-                exponent = -0.5 * dot_product(p_ext_transformed, multiply_matrix_vector(inv_V, p_ext_transformed))
-                
-                gaussian_val = gaussian_magnitude * exp(exponent)
+                prod = mat_vec_mul(inv_V, p_transformed_ext)
+                exponent = -0.5 * dot_product(p_transformed_ext, prod)
+                gaussian_val = gaussian_magnitude * math.exp(exponent)
                 kernel_val += gaussian_val
-            
-            # Add weighted contribution
+
+            # Add weighted contribution: |w_j| * K_j(p)
             total_noise += abs(w_j) * kernel_val
-            
+
     return total_noise
 
-def extend_to_n_plus_1(p):
-    """Extends point p to N+1 dimensions by appending 1."""
-    return p + [1.0]
+def generate_jittered_impulses(random_gen):
+    # Standard jittered grid generation strategy [G]
+    # The sources do not specify the exact grid or jittering parameters [G].
+    # Conceptually yields impulse objects with position and weight.
+    pass
 
-def apply_transforms(p_rel, R, S):
-    """Applies orientation R and scale S to relative point."""
-    # Implementation depends on specific representation of R and S
-    # Typically: p_transformed = S * R * p_rel
-    return multiply_matrix_vector(S, multiply_matrix_vector(R, p_rel))
+def mat_vec_mul(M, v):
+    return [sum(M[i][j] * v[j] for j in range(len(v))) for i in range(len(M))]
+
+def dot_product(u, v):
+    return sum(u[i] * v[i] for i in range(len(u)))
+
+def invert_matrix(M):
+    # Standard matrix inversion algorithm (e.g., Gauss-Jordan or LU decomposition) [G]
+    pass
 ```
 
 **Edge Cases and Pitfalls:**
 - **Parameterization Dependence:** LCSN is parameterization dependent because impulses are generated in texture space. Changes in texture mapping can alter the noise pattern [S1, unofficial].
-- **Precision:** Matrix inversion $\mathbf{V}^{-1}$ must be handled carefully to ensure numerical stability, especially if $\mathbf{V}$ is near-singular.
-- **Boundary Conditions:** The density field $d(\mathbf{p})$ must be defined at boundaries; otherwise, impulse rejection behavior is undefined.
+- **Precision:** Matrix inversion $\mathbf{V}^{-1}$ must be handled carefully to ensure numerical stability, especially if $\mathbf{V}$ is near-singular [G].
+- **Boundary Conditions:** The density field $d(\mathbf{p})$ must be defined at boundaries; otherwise, impulse rejection behavior is undefined [G].
 
 ## Operating characteristics
-- **Time Complexity:** Depends on the number of impulses evaluated per pixel/voxel. Since impulses are generated on the fly and filtered by density, the effective number of impulses contributing to the sum varies spatially. Evaluating the kernel involves matrix operations for each impulse.
+- **Time Complexity:** Depends on the number of impulses evaluated per evaluation point. Since impulses are generated on the fly and filtered by density, the effective number of impulses contributing to the sum varies spatially. Evaluating the kernel involves matrix operations for each impulse.
 - **Memory Complexity:** Low, as impulses are generated on the fly and not stored in a large grid. Only the fields $d, R_s, S_s$ and kernel parameters need to be stored.
 - **Strengths:** Allows spatial control over noise density and structure. Suitable for authoring fuzzy surface details.
 - **Limitations:** Parameterization dependent. Computationally demanding for direct volume rendering due to hundreds of evaluations per pixel along a ray [S1, unofficial].

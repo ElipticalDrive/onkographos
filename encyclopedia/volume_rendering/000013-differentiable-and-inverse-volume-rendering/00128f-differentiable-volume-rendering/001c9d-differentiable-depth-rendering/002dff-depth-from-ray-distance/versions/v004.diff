@@ -1,0 +1,221 @@
+--- v003.md
++++ v004.md
+@@ -1,155 +1,109 @@
+ # Depth from Ray Distance
+ 
+-Also called: Weighted Median Depth Rendering
++Also called: Camera-space Depth Rendering, Ray Distance to Depth Conversion
+ 
+ ## Overview
+-Depth from Ray Distance computes the depth of a ray by calculating the median of sample depths weighted by their opacity contributions along the ray [S2, unofficial]. It differs from standard depth rendering methods that simply pick the first opaque surface or the mean of all samples by providing a robust estimator that is less sensitive to outliers in the volume density distribution [S2, unofficial]. This method builds on [Differentiable Depth Rendering](1332-differentiable-depth-rendering.md) by providing the specific accumulation logic for depth estimation.
++Depth from Ray Distance computes the camera-space depth $z_c$ for a pixel by converting the accumulated ray distance $d$ (the Euclidean distance from the camera origin to the integration endpoint) into the coordinate along the camera's optical axis. It solves the problem of mapping the scalar ray length, typically obtained from differentiable volume rendering or sphere tracing, into a standard depth map format compatible with camera intrinsics. It differs from [Expected Depth Rendering](1332-differentiable-depth-rendering.md) and [Median Depth Rendering](8815-median-depth-rendering.md) by treating the ray distance as a single geometric scalar rather than a distribution of sample depths, providing a direct projection of the ray endpoint onto the camera plane [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:**
+-    *   Ray origins and directions (or pixel coordinates and camera intrinsics).
+-    *   Volume density ($\sigma$) and color ($c$) samples along the ray.
+-    *   Weights ($w_i$) derived from transmittance and absorption, representing the opacity contribution of each sample.
+-    *   Sample depths ($d_i$) relative to the camera.
+-    *   Camera intrinsics matrix $K$ [S1].
+-*   **Outputs:**
+-    *   A depth map where each pixel contains the weighted median depth value [S2, unofficial].
++- Input: Ray distance $d$ (scalar, Euclidean distance from camera origin to the surface/volume boundary along the ray), pixel coordinates $(x, y)$, and camera intrinsic matrix $K$ ($3 \times 3$).
++- Output: Camera-space depth $z_c$ (scalar, distance along the principal axis).
+ 
+ **Data Structures:**
+-*   **Ray Samples:** A list or tensor of tuples/structs containing $(d_i, \sigma_i, c_i)$ for $i=0 \dots N-1$, where $N$ is the number of samples per ray.
+-*   **Weights Tensor:** A tensor of shape $(N)$ containing the computed weights $w_i$.
+-*   **Depths Tensor:** A tensor of shape $(N)$ containing the distances $d_i$.
++- $K$: $3 \times 3$ matrix containing focal lengths and principal point offsets.
++- $(x, y)$: Integer or float pixel coordinates.
++- $d$: Float representing the ray length.
+ 
+ **Steps:**
+-1.  **Ray Generation:** For each pixel $(x, y)$, compute the normalized homogeneous coordinate $(\tilde{x}, \tilde{y})$ using the inverse camera intrinsics $K^{-1}$ [S1]:
++1.  **Normalize Pixel Coordinates:** Compute the normalized homogeneous coordinate vector $(\tilde{x}, \tilde{y}, 1)^T$ by applying the inverse of the camera intrinsic matrix $K^{-1}$ to the homogeneous pixel coordinate $(x, y, 1)^T$ [S1].
+     $$
+     \begin{bmatrix} \tilde{x} \\ \tilde{y} \\ 1 \end{bmatrix} = K^{-1} \begin{bmatrix} x \\ y \\ 1 \end{bmatrix}
+     $$
+-2.  **Sample Traversal:** Trace the ray through the volume to obtain $N$ samples. For each sample $i$, compute the weight $w_i$ based on the volume rendering equation components (transmittance $T_i$ and density $\sigma_i$) [S2, unofficial]. The weight represents the probability that the ray terminates at sample $i$.
+-3.  **Depth Calculation:** Compute the depth $z_c$ for the ray. If using the weighted median strategy:
+-    *   Sort the samples based on their depths $d_i$.
+-    *   Accumulate the weights $w_i$ in sorted order.
+-    *   Find the sample index $k$ where the cumulative weight first exceeds 0.5 (the median).
+-    *   The depth is $d_k$.
+-    *   Alternatively, if the source implies a direct conversion from ray distance $d$ (total length) to camera-space depth $z_c$:
+-        $$
+-        z_c = \frac{d}{\sqrt{\tilde{x}^2 + \tilde{y}^2 + 1}}
+-        $$
+-        where $d$ is the ray distance [S1]. Note: [S2, unofficial] specifies the output is the *median* of sample depths weighted by opacity, while [S1] provides a formula for converting a scalar ray distance $d$ to camera depth $z_c$. The weighted median approach is the primary definition for this method's alias [S2, unofficial].
+-4.  **Execution:** The depth output is computed by calling the renderer with the weights and ray samples. This execution is performed without gradient tracking during the forward pass if used for debugging or visualization, but gradients are handled by the parent Differentiable Depth Rendering framework [S2, unofficial].
+-5.  **Iteration:** In multi-stage rendering (e.g., proposal networks), iterate over each proposal network iteration. Apply a depth colormap to the depth output from the $i$-th proposal network, using the accumulation for normalization [S2, unofficial].
++2.  **Compute Direction Norm:** Calculate the Euclidean norm of the normalized direction vector $(\tilde{x}, \tilde{y}, 1)^T$ [S1].
++    $$
++    \text{norm} = \sqrt{\tilde{x}^2 + \tilde{y}^2 + 1}
++    $$
++3.  **Convert to Depth:** Divide the ray distance $d$ by the computed norm to obtain the camera-space depth $z_c$ [S1].
++    $$
++    z_c = \frac{d}{\sqrt{\tilde{x}^2 + \tilde{y}^2 + 1}}
++    $$
+ 
+ **Parameters:**
+-*   `method`: The strategy for computing depth. Value `'median'` uses the weighted median depth [S2, unofficial].
+-*   `sigma_thresh`: Not used in the standard weighted median method, but relevant for variants like Sigma-Threshold Depth Rendering [S3, unofficial].
++- $K$: Camera intrinsic matrix. Typical values depend on the camera calibration. Not given in the sources for specific standard values, but required for $K^{-1}$.
++
++**Edge Cases and Pitfalls:**
++- **Division by Zero:** The denominator $\sqrt{\tilde{x}^2 + \tilde{y}^2 + 1}$ is always $\ge 1$ because the third component is 1. Thus, division by zero is impossible [S1].
++- **Precision:** Ensure $K^{-1}$ is computed with sufficient precision. If $K$ is ill-conditioned, the normalized coordinates may be inaccurate [G].
++- **Ray Distance Definition:** This method assumes $d$ is the Euclidean distance from the camera origin. If $d$ is defined differently (e.g., parameter $t$ in a ray equation $O + tD$ where $D$ is not normalized), the formula must be adjusted [G].
+ 
+ **Pseudocode:**
+ ```python
+ import torch
++import numpy as np
+ 
+-def compute_weighted_median_depth(weights: torch.Tensor, depths: torch.Tensor) -> torch.Tensor:
++def depth_from_ray_distance(d: torch.Tensor, x: torch.Tensor, y: torch.Tensor, K: torch.Tensor) -> torch.Tensor:
+     """
+-    Computes the weighted median depth.
++    Compute camera-space depth z_c from ray distance d and pixel coordinates.
+     
+     Args:
+-        weights: Tensor of shape (N,) containing opacity weights for each sample.
+-        depths: Tensor of shape (N,) containing distances of each sample from the camera.
++        d: Tensor of ray distances (Euclidean length from camera origin). Shape: (N,)
++        x: Tensor of x pixel coordinates. Shape: (N,)
++        y: Tensor of y pixel coordinates. Shape: (N,)
++        K: Camera intrinsic matrix. Shape: (3, 3)
+         
+     Returns:
+-        Tensor of shape () containing the weighted median depth.
++        z_c: Tensor of camera-space depths. Shape: (N,)
+     """
+-    # Sort samples by depth
+-    sorted_indices = torch.argsort(depths)
+-    sorted_weights = weights[sorted_indices]
+-    sorted_depths = depths[sorted_indices]
++    # Step 1: Normalize pixel coordinates
++    # Convert pixel coordinates to homogeneous vector [x, y, 1]
++    # Shape: (N, 3)
++    pixel_hom = torch.stack([x, y, torch.ones_like(x)], dim=-1)
+     
+-    # Compute cumulative sum of weights
+-    cumulative_weights = torch.cumsum(sorted_weights, dim=0)
++    # Apply inverse intrinsics
++    # K_inv @ pixel_hom.T -> (3, N) -> transpose to (N, 3)
++    K_inv = torch.inverse(K)
++    norm_coords = (K_inv @ pixel_hom.T).T
+     
+-    # Find the index where cumulative weight exceeds 0.5
+-    # The median is the depth at this index
+-    median_index = torch.searchsorted(cumulative_weights, 0.5)
++    # Extract tilde_x and tilde_y
++    # The third component should be 1, but we use the computed values for robustness if needed,
++    # though the formula explicitly uses 1 in the norm calculation as per [S1].
++    # [S1] specifies: (x_tilde, y_tilde, 1)^T = K^{-1}(x, y, 1)^T
++    # So we take the first two components.
++    x_tilde = norm_coords[:, 0]
++    y_tilde = norm_coords[:, 1]
+     
+-    return sorted_depths[median_index]
+-
+-def render_depth_from_ray_distance(rays, volume_model, num_samples, K):
+-    """
+-    Renders depth using the weighted median strategy.
++    # Step 2: Compute the norm of the normalized direction vector
++    # Formula: sqrt(x_tilde^2 + y_tilde^2 + 1)
++    # Note: The source [S1] explicitly uses 1 in the sqrt, corresponding to the z-component of the normalized homogeneous coord.
++    denom = torch.sqrt(x_tilde**2 + y_tilde**2 + 1.0)
+     
+-    Args:
+-        rays: Ray bundle with origins and directions.
+-        volume_model: Neural network to query density and color.
+-        num_samples: Number of samples per ray.
+-        K: Camera intrinsics matrix.
+-        
+-    Returns:
+-        Depth map tensor.
+-    """
+-    # 1. Generate rays and compute normalized coordinates
+-    # Assuming rays object has 'origins' and 'directions'
+-    # Compute normalized homogeneous coordinates for each pixel
+-    # This step depends on the specific ray generation implementation
+-    # For a single ray, we assume we have the direction vector v
+-    # and pixel coordinates (x, y)
++    # Step 3: Compute depth
++    z_c = d / denom
+     
+-    # 2. Sample the volume
+-    # t_vals = linear spacing along the ray
+-    # points = origins + t_vals * directions
+-    # densities, colors = volume_model(points)
+-    
+-    # 3. Compute weights (standard volume rendering weights)
+-    # deltas = t_vals[i+1] - t_vals[i]
+-    # transmittance = exp(-sum(deltas * densities[:-1]))
+-    # weights = transmittance * (1 - exp(-deltas * densities))
+-    
+-    # 4. Compute weighted median depth
+-    # depth = compute_weighted_median_depth(weights, t_vals)
+-    
+-    # 5. Convert to camera-space depth if necessary
+-    # z_c = d / sqrt(x_tilde^2 + y_tilde^2 + 1)
+-    # where d is the depth value and (x_tilde, y_tilde) from K^-1
+-    
+-    # Note: The exact implementation of ray sampling and weight computation
+-    # is handled by the underlying Differentiable Volume Rendering framework.
+-    # This function focuses on the depth aggregation strategy.
+-    
+-    pass
++    return z_c
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Zero Weights:** If all weights are zero (empty volume), the median is undefined. Handle by returning a default value or NaN [G].
+-*   **Precision:** Sorting operations for the median can be computationally expensive for large $N$. Use efficient sorting algorithms or approximations if performance is critical [G].
+-*   **Boundary Conditions:** Ensure ray bounds are correctly defined to avoid sampling outside the volume of interest [S3, unofficial].
+ 
+ ## Subtopics
+ 
+-### [Expected Term Rendering](5952-expected-term-rendering.md)
+-Expected Term Rendering computes the expected termination distance (depth) for each ray traversing a volume, providing a differentiable depth map output. It differs from standard depth rendering by calculating the weighted mean of sample depths along the ray, where weights are derived from the volume's transmittance and absorption properties, rather than simply picking the first opaque surface or the mean of all samples. This method builds on [Depth from Ray Distance](5665-depth-from-ray-distance.md) by specifically implementing the "expected" strategy for depth estimation.
++### Expected Term Rendering
++Renders the expected termination distance (depth) along each ray by tracing through the volume [S2, unofficial]. It computes the weighted mean of sample depths, typically used for depth map rendering [S2, unofficial]. Implementation involves creating a `SingleRaySpec`, finding bounds, and calling `trace_ray_expected_term` within a CUDA kernel `device::render_ray_expected_term_kernel` [S2, unofficial]. The result tensor is initialized with `requires_grad=false` [S2, unofficial].
+ 
+ ### Sigma-Threshold Depth Rendering
+-Sigma-Threshold Depth Rendering renders a binary or thresholded output based on whether the volume density ($\sigma$) exceeds a given threshold along the ray [S3, unofficial]. It computes depth based on a sigma threshold, referencing the method used in Dex-NeRF [S3, unofficial].
+-
+-**Steps:**
+-1.  Get `ray_id`, create `SingleRaySpec`, and find bounds [S3, unofficial].
+-2.  Call `trace_ray_sigma_thresh` with `sigma_thresh` [S3, unofficial].
+-3.  Create a result tensor of dtype and device matching `rays.origins`, size `{rays.origins.size(0)}`, with `requires_grad=false` [S3, unofficial].
+-4.  Launch `device::render_ray_sigma_thresh_kernel` with blocks calculated by `CUDA_N_BLOCKS_NEEDED(Q, TRACE_RAY_CUDA_THREADS)`. Pass `grid`, `rays`, `opt`, `sigma_thresh`, and `results.data_ptr<float>()` [S3, unofficial].
+-
+-**Parameters:**
+-*   `sigma_thresh`: A float threshold value for density comparison [S3, unofficial].
++Renders a binary or thresholded output based on whether the volume density ($\sigma$) exceeds a given threshold along the ray [S2, unofficial]. It computes depth based on a sigma threshold, referencing the method used in Dex-NeRF [S2, unofficial]. Implementation involves calling `trace_ray_sigma_thresh` with a `sigma_thresh` parameter within a CUDA kernel `device::render_ray_sigma_thresh_kernel` [S2, unofficial]. The parameter `sigma_thresh` is a float threshold for sigma values [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The weighted median calculation requires sorting the samples, which is $O(N \log N)$ per ray, where $N$ is the number of samples [G]. The sigma-threshold method is $O(N)$ as it involves a simple comparison [G].
+-*   **Memory Complexity:** $O(N)$ per ray to store samples and weights [G].
+-*   **Strengths:** The weighted median is robust to outliers in the volume density, providing cleaner depth maps in noisy or sparse volumes [S2, unofficial]. The sigma-threshold method is simple and fast, suitable for binary segmentation tasks [S3, unofficial].
+-*   **Limitations:** The weighted median is less smooth than the expected value (mean) method, potentially leading to discontinuities in the depth map [G]. The sigma-threshold method is sensitive to the choice of threshold and may produce noisy results if the threshold is not well-calibrated [S3, unofficial].
+-*   **When to Use:** Use weighted median when robustness to outliers is required. Use sigma-threshold for binary depth estimation or when a clear density boundary exists.
++- **Time Complexity:** $O(1)$ per pixel for the conversion step, assuming ray distance $d$ is already computed. The overall cost depends on the upstream depth computation method (e.g., sphere tracing or volume rendering).
++- **Memory Complexity:** $O(1)$ additional memory per pixel for storing intermediate normalized coordinates.
++- **Strengths:** Simple, differentiable, and directly compatible with standard camera models. It provides a geometrically consistent depth map from ray lengths [S1].
++- **Limitations:** It does not account for multi-modal depth distributions or transparency effects within the volume, unlike Expected or Median Depth Rendering. It assumes a single intersection point or a well-defined endpoint for the ray distance [S1].
++- **When to use:** When the ray distance represents a clear surface intersection or integration endpoint and a standard depth map is required for downstream tasks like RGB-D mapping [S3].
++- **When not to use:** When the scene has significant transparency or multiple surfaces along the ray, and a representative depth (mean/median) is preferred over the endpoint depth [S1].
+ 
+ ## Background
+-The concept of differentiable depth rendering has been explored in various forms, including sphere tracing for signed distance fields [S1]. The weighted median approach is specifically highlighted in the context of generative neural radiance fields (GANeRF) for debugging and analysis [S2, unofficial]. The sigma-threshold method is associated with Dex-NeRF and implemented in frameworks like Svox2 [S3, unofficial].
++The method originates from the need to render depth maps from implicit signed distance fields (SDFs) using differentiable sphere tracing [S1]. It was introduced in the context of rendering deep implicit SDFs, where direct application of sphere tracing is computationally expensive, and efficient forward propagation is required [S1]. The conversion from ray distance to camera-space depth is a standard geometric operation in computer vision, adapted here for differentiable rendering pipelines [S1]. It is used in RGB-D mapping and tracking applications, where geometric depth loss is combined with photometric loss for optimization [S3].
+ 
+ ## Sources
+ [S1] DIST: Rendering Deep Implicit Signed Distance Function With Differentiable Sphere Tracing, https://doi.org/10.1109/cvpr42600.2020.00209, fetched 2026-10-26
+-[S2] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)
+-[S3] sxyu/svox2, https://github.com/sxyu/svox2, fetched 2026-10-27 (unofficial)+[S2] sxyu/svox2, https://github.com/sxyu/svox2, fetched 2026-10-27 (unofficial)
++[S3] RGB-D Mapping and Tracking in a Plenoxel Radiance Field, https://doi.org/10.1109/wacv57701.2024.00331, fetched 2026-10-26

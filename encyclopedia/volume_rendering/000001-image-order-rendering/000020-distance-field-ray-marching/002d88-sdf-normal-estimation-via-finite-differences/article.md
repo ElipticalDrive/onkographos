@@ -1,9 +1,9 @@
 # SDF Normal Estimation via Finite Differences
 
-Also called: SDF Gradient Normal, SDF Gradient Normal Estimation via Finite Differences, SDF Normal Estimation, Finite Difference Normal Estimation, Normal Estimation via Finite Differences, SDF Gradient, finite difference normal
+Also called: SDF Gradient Normal Estimation via Finite Differences, Normal Estimation via Finite Differences, Finite Difference Normal Estimation, SDF Gradient, SDF Gradient Normal, Inigo Quilez's Normal Method
 
 ## Overview
-This method estimates the surface normal at a point $p$ on a Signed Distance Field (SDF) by numerically computing the gradient of the distance function $\nabla f(p)$ using finite differences, then normalizing the result [S2, S4, unofficial][S6][S14, S29, S31, S33, S37, S42, S43, S49, S50, unofficial]. It solves the problem of shading implicit surfaces that lack explicit mesh normals, allowing for realistic lighting without polygonization artifacts [S4, S5, S16, S32, S40, S50, unofficial]. Unlike sibling methods that may use analytic normals, tetrahedral interpolation, or regularization, this method relies exclusively on central finite-difference gradient estimation of the scalar field $f$ at the hit point [S1][S3, S4, S16, S32, S40, S50, unofficial]. It is distinguished from [Face Normal Computation](2042-face-normal-computation.md) by relying on continuous distance field derivatives rather than discrete vertex positions, and from [Tetrahedral Normal Estimation](1986-tetrahedral-normal-estimation.md) by using axis-aligned offsets rather than a tetrahedral stencil [S1][S2, S3, S19, unofficial][S41].
+This method estimates the surface normal at a point $p$ on a Signed Distance Field (SDF) by numerically computing the gradient of the distance function $\nabla f(p)$ using finite differences, then normalizing the result [S2, S4, unofficial][S6][S14, S29, S31, S33, S37, S42, S43, S49, S50, unofficial]. It solves the problem of shading implicit surfaces that lack explicit mesh normals, allowing for realistic lighting without polygonization artifacts [S4, S5, S16, S32, S40, S50, unofficial]. It is distinguished from [Face Normal Computation](2042-face-normal-computation.md) by relying on continuous distance field derivatives rather than discrete vertex positions, and from [Tetrahedral Normal Estimation](1986-tetrahedral-normal-estimation.md) by using axis-aligned offsets rather than a tetrahedral stencil [S1][S2, S3, S19, unofficial][S41, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
@@ -14,7 +14,7 @@ This method estimates the surface normal at a point $p$ on a Signed Distance Fie
 No specific data structures are required beyond the SDF function itself. The SDF is typically a function or shader that returns a scalar distance [S1][S4, S14, S25, S31, S33, S37, S42, S43, S49, S50, unofficial].
 
 **Parameters:**
-- $\epsilon$: The step size for finite differences. Typical values range from $10^{-4}$ to $10^{-3}$ (e.g., 0.0001, 0.0005, 0.001) [S4, S12, S14, S22, S26, S30, S33, S34, S37, S39, S44, S46, S48, S50, S52, unofficial]. The value must balance approximation accuracy (larger $\epsilon$) against numerical noise from floating-point cancellation (smaller $\epsilon$) [S31, S50, S53, unofficial].
+- $\epsilon$: The step size for finite differences. Typical values range from $10^{-4}$ to $10^{-3}$ (e.g., 0.0001, 0.0005, 0.001) [S4, S12, S14, S22, S26, S30, S33, S34, S37, S39, unofficial][S44][S46, S48, S50, S52, unofficial]. The value must balance approximation accuracy (larger $\epsilon$) against numerical noise from floating-point cancellation (smaller $\epsilon$) [S31, S50, S53, unofficial].
 
 **Steps:**
 1. Evaluate the SDF at the query point $p$ to get $d = f(p)$ [S12, S21, S28, S48, S53, unofficial].
@@ -36,39 +36,34 @@ def estimate_normal(p, sdf, epsilon=0.001):
     Estimates the surface normal at point p using central finite differences.
     
     Args:
-        p: vec3, the query point on the SDF surface.
-        sdf: function, the Signed Distance Function f(x, y, z).
+        p: tuple of 3 floats, the query point (x, y, z).
+        sdf: callable, the Signed Distance Function f(x, y, z).
         epsilon: float, the step size for finite differences.
         
     Returns:
-        vec3, the normalized surface normal.
+        tuple of 3 floats, the normalized surface normal.
     """
-    # Define offset vectors for each axis
-    offset_x = vec3(epsilon, 0.0, 0.0)
-    offset_y = vec3(0.0, epsilon, 0.0)
-    offset_z = vec3(0.0, 0.0, epsilon)
-    
-    # Evaluate SDF at perturbed points
+    # Evaluate SDF at perturbed points along each axis
     # Note: Division by 2*epsilon is omitted as it cancels during normalization
-    gx = sdf(p + offset_x) - sdf(p - offset_x)
-    gy = sdf(p + offset_y) - sdf(p - offset_y)
-    gz = sdf(p + offset_z) - sdf(p - offset_z)
+    gx = sdf(p[0] + epsilon, p[1], p[2]) - sdf(p[0] - epsilon, p[1], p[2])
+    gy = sdf(p[0], p[1] + epsilon, p[2]) - sdf(p[0], p[1] - epsilon, p[2])
+    gz = sdf(p[0], p[1], p[2] + epsilon) - sdf(p[0], p[1], p[2] - epsilon)
     
     # Construct gradient vector
-    gradient = vec3(gx, gy, gz)
+    gradient = (gx, gy, gz)
     
     # Normalize
-    length = sqrt(gradient.x**2 + gradient.y**2 + gradient.z**2)
+    length = (gradient[0]**2 + gradient[1]**2 + gradient[2]**2)**0.5
     if length < 1e-6:
         # Fallback for degenerate cases (e.g., flat regions or noise)
-        return vec3(0.0, 0.0, 1.0) [G]
+        return (0.0, 0.0, 1.0) [G]
         
-    return gradient / length
+    return (gradient[0] / length, gradient[1] / length, gradient[2] / length)
 ```
 
 **Edge Cases and Pitfalls:**
 - **Numerical Noise:** If $\epsilon$ is too small, floating-point cancellation errors can dominate, leading to jittery normals [S50, S53, unofficial].
-- **Sharp Intersections:** At sharp intersections of multiple SDF primitives, the gradient may be inaccurate or undefined [S41].
+- **Sharp Intersections:** At sharp intersections of multiple SDF primitives, the gradient may be inaccurate or undefined [S41, unofficial].
 - **Loosely Spaced Voxels:** In voxel-based SDFs with large grid spacing, the 6-sample central difference method may fail to produce accurate normals; larger stencils (18 or 26 samples) are required [S42, S49, unofficial].
 - **Bevel Effect:** Using a large $\epsilon$ can produce a "bevel" look, as the gradient is averaged over a larger volume [S50, unofficial].
 
@@ -92,18 +87,30 @@ Computes a localized density field resembling a distance field, and derives surf
 ### [SDF Bevel Generation](4312-sdf-bevel-generation.md)
 Estimates 3D surface normals for lighting by sampling the SDF height field at four cardinal offsets, computing finite differences, and applying bevel shaping parameters.
 
+### [Principal Curvature Direction Estimation](6492-principal-curvature-direction-estimation.md)
+A method to compute principal curvature directions in 3D scalar fields faster than extremal value quadratic forms, by computing an orthonormal basis for the gradient and solving for the angle theta.
+
+### SDF Normal Estimation via Backpropagation
+Estimates mesh vertex normals by computing the negative gradient of the occupancy output with respect to the vertex positions [S59, unofficial]. It converts vertices to a PyTorch tensor and enables gradients, passes them through the model to get occupancy logits, computes the gradient by summing the output and calling backward, and extracts the normal as the negative gradient normalized [S59, unofficial].
+
+### Normal Estimation based on 4D Linear Regression
+A normal estimation scheme that integrates filtering and normal computation into one process to provide a smooth approximated gradient function, compensating for staircase artifacts caused by low sampling rates in shear-warp projection [S60, unofficial]. It estimates surface inclination by investigating a close neighborhood of a given voxel, as exact surface normals are not available after discretization of continuous objects [S60, unofficial].
+
+### Specular Highlight via Gradient Normal
+Computes specular highlights by finding the volume surface intersection, estimating the surface normal via finite differences of the volume texture, and applying a Blinn-Phong shading model [S61, unofficial]. It ray marches to find the surface intersection, computes the normal $N$ using central finite differences, calculates the light direction $L$, view direction $V$, halfway vector $H = \text{normalize}(L+V)$, and returns specular intensity as $\text{pow}(\text{dot}(\text{normalize}(H), N), 2.0)$ [S61, unofficial].
+
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per hit point, requiring exactly 6 SDF evaluations (plus the initial hit query if not cached) [S4, S12, S14, S25, S29, S31, S33, S37, S42, S43, S49, S50, unofficial].
-- **Memory Complexity:** $O(1)$, no additional memory required beyond the SDF function [S4, S12, S14, S25, S29, S31, S33, S37, S42, S43, S49, S50, unofficial].
+- **Time Complexity:** $O(1)$ per hit point, typically requiring 6 SDF evaluations, though variants like tetrahedral estimation use 4 [S4, S12, S14, S25, S29, S31, S33, S37, S42, S43, S49, S50, unofficial].
+- **Memory Complexity:** Not given in the sources.
 - **Measured Performance:** The method is computationally inexpensive and widely used in real-time ray marching due to its simplicity and lack of dependency on external mesh data [S4, S5, S16, S32, S40, S50, unofficial].
 - **Scaling:** Performance scales linearly with the number of hit points (pixels) [S4, S12, S14, S25, S29, S31, S33, S37, S42, S43, S49, S50, unofficial].
 - **Strengths:** Simple to implement, works with any SDF (including procedural and CSG-combined primitives), no preprocessing required [S4, S5, S16, S32, S40, S50, unofficial].
-- **Limitations:** Prone to numerical noise if $\epsilon$ is poorly chosen, inaccurate at sharp intersections or in loosely spaced voxel grids, and requires 6 SDF evaluations per normal [S41][S42, S49, S50, S53, unofficial].
+- **Limitations:** Prone to numerical noise if $\epsilon$ is poorly chosen, inaccurate at sharp intersections or in loosely spaced voxel grids, and requires multiple SDF evaluations per normal [S41, unofficial][S42, S49, S50, S53, unofficial].
 - **When to Use:** When shading implicit surfaces defined by SDFs, especially when analytic normals are unavailable or too complex to compute [S4, S5, S16, S32, S40, S50, unofficial].
-- **When Not to Use:** When high precision is required at sharp features, or when the SDF is defined on a coarse voxel grid [S41][S42, S49, unofficial].
+- **When Not to Use:** Not given in the sources.
 
 ## Background
-The method originates from the fundamental property of Signed Distance Fields that the gradient of the distance function at a point on the surface is perpendicular to the surface [S1][S4, S5, unofficial][S6][S14, S16, S29, S32, S37, S38, S40, unofficial][S41][S42, S43, S46, S48, S49, S50, unofficial]. This technique was popularized in the context of real-time ray marching and procedural geometry in shaders, notably by artists and developers such as Inigo Quilez and Jamie Wong [S5, S16, S50, unofficial]. It is a standard technique in GPU-based ray marching for rendering implicit surfaces without explicit mesh data [S4, S5, S16, S32, S40, S50, unofficial].
+The method originates from the fundamental property of Signed Distance Fields that the gradient of the distance function at a point on the surface is perpendicular to the surface [S1][S4, S5, unofficial][S6][S14, S16, S29, S32, S37, S38, S40, unofficial][S41, unofficial][S42, S43, S46, S48, S49, S50, unofficial]. This technique was popularized in the context of real-time ray marching and procedural geometry in shaders, notably by artists and developers such as Inigo Quilez and Jamie Wong [S5, S16, S50, unofficial]. It is a standard technique in GPU-based ray marching for rendering implicit surfaces without explicit mesh data [S4, S5, S16, S32, S40, S50, unofficial].
 
 ## Sources
 [S1] DIST: Rendering Deep Implicit Signed Distance Function With Differentiable Sphere Tracing, https://doi.org/10.1109/cvpr42600.2020.00209, fetched 2026-10-26
@@ -146,10 +153,10 @@ The method originates from the fundamental property of Signed Distance Fields th
 [S38] PDF Further Graphics - University of Cambridge, https://www.cl.cam.ac.uk/teaching/1920/FGraphics/1.%20Ray%20Marching%20and%20Signed%20Distance%20Fields.pdf, fetched 2026-10-27 (unofficial)
 [S39] samuelbigos/signed_distance_fields_in_unity, https://github.com/samuelbigos/signed_distance_fields_in_unity, fetched 2026-10-27 (unofficial)
 [S40] Raymarching Distance Fields: Concepts and Implementation ..., https://adrianb.io/2016/10/01/raymarching.html, fetched 2026-10-27 (unofficial)
-[S41] Raymarching Distance Fields with CUDA, https://www.mdpi.com/2079-9292/10/22/2730, fetched 2026-10-27
+[S41] Raymarching Distance Fields with CUDA, https://www.mdpi.com/2079-9292/10/22/2730, fetched 2026-10-27 (unofficial)
 [S42] GPU Ray Marching of Distance Fields, https://www2.compute.dtu.dk/pubdb/edoc/imm6392.pdf, fetched 2026-10-27 (unofficial)
 [S43] trimesh33/sdf, https://github.com/trimesh33/sdf, fetched 2026-10-27 (unofficial)
-[S44] 2JacT/Marching-Cubes-Terrain, https://github.com/2JacT/Marching-Cubes-Terrain, fetched 2026-10-27 (unofficial)
+[S44] 2JacT/Marching-Cubes-Terrain, https://github.com/2JacT/Marching-Cubes-Terrain, fetched 2026-10-27
 [S45] GitHub - m-pilia/volume-raycasting: Simple visualiser based on GPU ..., https://github.com/m-pilia/volume-raycasting, fetched 2026-10-27 (unofficial)
 [S46] Ray Marching with Signed Distance Fields - Scribd, https://www.scribd.com/document/831412915/1-Ray-Marching-and-Signed-Distance-Fields, fetched 2026-10-27 (unofficial)
 [S47] Sphere Tracing and Ray Marching, https://deepwiki.com/ronja-tutorials/ShaderTutorials/5-sphere-tracing-and-ray-marching, fetched 2026-10-27 (unofficial)

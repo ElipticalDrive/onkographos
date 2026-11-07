@@ -1,0 +1,240 @@
+--- v001.md
++++ v002.md
+@@ -4,154 +4,109 @@
+ 
+ ## Overview
+-Splat Texture Layout & Mapping is a method for storing and accessing 3D Gaussian splat data within GPU 3D textures. It solves the problem of efficiently mapping a large, unstructured set of splats (each with position, covariance, color, opacity, etc.) into a fixed-size, hardware-sampled 3D texture volume. It differs from proxy geometry approaches by keeping data in texture memory for direct sampling, and from sparse volume textures by using a dense, pre-allocated texture structure with specific bit-packing for coordinates and layer indices.
++Splat Texture Layout & Mapping organizes per-primitive splat data into 3D texture structures to enable efficient GPU-based rendering of Gaussian splats. It solves the problem of mapping arbitrary numbers of splats into a fixed-size hardware texture format by calculating specific texture coordinates and managing memory alignment. It sets itself apart from proxy geometry methods by keeping data in texture memory for hardware filtering, and from sparse volume textures by using a dense, pre-allocated 3D texture layout for the splat attributes themselves.
+ 
+ ## How it works
+-The method maps splat data to two 3D textures backed by `Uint32Array` buffers. Each splat corresponds to two 16-byte texture records. The layout is determined by calculating a maximum splat capacity and deriving bit-masks for coordinate indexing.
+-
+-**Inputs and Outputs:**
+-- Input: A list of splats with attributes (position, scale, rotation, color, opacity, SH coefficients).
+-- Output: Two 3D textures (or their underlying `Uint32Array` buffers) containing the mapped splat data.
++**Inputs:** A list of splats with attributes (position, covariance, color, opacity) and an input capacity (number of splats).
++**Outputs:** Two 3D textures (backed by `Uint32Array` buffers) containing the mapped splat data, and the calculated texture coordinates for sampling.
+ 
+ **Data Structures:**
+-1.  **Splat Buffer:** A `Uint32Array` of size `maxSplats * 4`. This likely stores packed 32-bit words representing splat attributes.
+-2.  **Texture Records:** Each splat occupies two 16-byte (4-word) records in the 3D texture.
+-3.  **3D Texture:** A 3D texture object backed by the `Uint32Array`. The dimensions are derived from `maxSplats`.
++1.  **Splat Buffer:** A flat array of `Uint32` values. Each splat occupies 4 `Uint32` slots (16 bytes).
++2.  **3D Textures:** Two 3D textures. Each splat corresponds to two 16-byte texture records within these textures. The textures are backed by `Uint32Array` objects.
+ 
+-**Parameters:**
+-- `inputCapacity`: The number of splats provided by the user.
+-- `maxSplats`: The maximum number of splats the texture can hold, calculated via `getTextureSize(inputCapacity).maxSplats`.
+-- `SPLAT_TEX_WIDTH_BITS`: A constant defining the width bits of the texture.
++**Algorithm:**
+ 
+-**Steps:**
+-1.  **Calculate Capacity:** Determine `maxSplats` using `getTextureSize(inputCapacity).maxSplats`.
+-2.  **Allocate Memory:** If `inputCapacity` differs from `maxSplats`, allocate new `Uint32Array`s of size `maxSplats * 4`. Copy the original data into these new arrays.
+-3.  **Calculate Layer Bits:** Compute the number of bits required for the layer index:
+-    $$ \text{layerBits} = \text{SPLAT\_TEX\_WIDTH\_BITS} + \lceil \log_2(\text{height}) \rceil $$
+-    Where `height` is likely the depth or height dimension of the texture volume relevant to the splat distribution.
+-4.  **Create Mask:** Compute the source layer mask:
+-    $$ \text{sourceLayerMask} = 2^{\text{layerBits}} - 1 $$
+-5.  **Map Splat Coordinates:** For each splat index $i$, calculate its 3D texture coordinate $(x, y, z)$ using a function `splatTexCoord(i)`. This function handles paging or tiling for large splat counts to map the linear splat index to the 3D texture coordinates.
+-6.  **Write Data:** Write the splat's 16-byte data (packed into 4 `Uint32` words) into the texture record at the calculated coordinate. Since each splat uses two records, write to both `(x, y, z)` and `(x, y, z+1)` or similar adjacent locations, depending on the specific packing scheme.
++1.  **Calculate Capacity:** Determine the maximum splat capacity supported by the texture dimensions using `getTextureSize(inputCapacity).maxSplats`.
++2.  **Allocate Memory:** If `inputCapacity` differs from `maxSplats`, allocate new `Uint32Array` buffers of size `maxSplats * 4`. Copy the original splat data into these new buffers.
++3.  **Calculate Layer Bits:** Determine the number of bits required for the texture layer index based on the splat height and width.
++    *   Formula: `layerBits = SPLAT_TEX_WIDTH_BITS + Math.ceil(Math.log2(height))`
++    *   Where `SPLAT_TEX_WIDTH_BITS` is a constant defining the width of the splat texture in bits, and `height` is the height of the splat in texels.
++4.  **Create Mask:** Generate a source layer mask to isolate the relevant bits for layer indexing.
++    *   Formula: `sourceLayerMask = 2 ** layerBits - 1`
++5.  **Map to Textures:** Distribute the splat data into the two 3D textures. Each splat's 16-byte record is split or mapped across the two textures according to the implementation's specific packing scheme.
++6.  **Calculate Coordinates:** For each splat index, compute the 3D texture coordinate (`ivec3`) required to sample its data. This function handles paging or tiling for large splat counts to ensure coordinates remain within the allocated texture bounds [S2, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+-def splat_texture_layout_and_mapping(splats, splat_tex_width_bits):
++def splat_texture_layout_and_mapping(splats, input_capacity):
++    # Step 1: Calculate max capacity
++    texture_size_info = get_texture_size(input_capacity)
++    max_splats = texture_size_info.max_splats
++    
++    # Step 2: Allocate and copy data
++    # Each splat is 4 uint32s (16 bytes)
++    buffer_size = max_splats * 4
++    data_buffer = Uint32Array(buffer_size)
++    
++    if input_capacity != max_splats:
++        # Copy original data to new buffer
++        for i in range(input_capacity):
++            # Assuming splats is an array of 4 uint32s per splat
++            for j in range(4):
++                data_buffer[i * 4 + j] = splats[i][j]
++    else:
++        data_buffer = splats # Reference or copy as needed
++    
++    # Step 3 & 4: Calculate layer bits and mask
++    # SPLAT_TEX_WIDTH_BITS and height must be defined by the texture format
++    layer_bits = SPLAT_TEX_WIDTH_BITS + ceil(log2(height))
++    source_layer_mask = (2 ** layer_bits) - 1
++    
++    # Step 5: Map to two 3D textures
++    # Texture 1 and Texture 2 are created with dimensions derived from max_splats
++    texture_1 = create_3d_texture(max_splats, ...)
++    texture_2 = create_3d_texture(max_splats, ...)
++    
++    for i in range(max_splats):
++        # Extract 16-byte record
++        record = data_buffer[i*4 : i*4+4]
++        
++        # Map record to texture coordinates
++        # This step depends on the specific packing scheme not fully detailed in sources
++        # [G] Assuming a simple interleaved or split layout
++        coord1 = calculate_splat_tex_coord(i, source_layer_mask)
++        coord2 = calculate_splat_tex_coord(i + max_splats, source_layer_mask) # Example offset
++        
++        write_to_texture(texture_1, coord1, record[:2]) # Example split
++        write_to_texture(texture_2, coord2, record[2:]) # Example split
++        
++    return texture_1, texture_2, data_buffer
++
++def calculate_splat_tex_coord(splat_index, layer_mask):
+     """
+-    Maps splats to two 3D textures backed by Uint32Arrays.
+-    splats: List of splat objects with attributes.
+-    splat_tex_width_bits: Integer constant for texture width bits.
++    Calculate 3D texture coordinate for a given splat index.
++    Handles paging/tiling for large splat counts [S2, unofficial].
+     """
+-    # Step 1: Calculate max capacity
+-    # Note: getTextureSize is a helper function not defined here.
+-    # Assume it returns an object with 'maxSplats' field.
+-    max_splats = get_texture_size(len(splats)).max_splats
+-    
+-    # Step 2: Allocate buffers
+-    # Each splat maps to 4 uint32 words (16 bytes) per record, 2 records per splat.
+-    # Total words = max_splats * 4 words per splat * 2 records? 
+-    # The note says "allocate new Uint32Arrays of size maxSplats * 4".
+-    # This implies the buffer size is max_splats * 4 words, which might be per record or total.
+-    # Given "Each splat corresponds to two 16-byte texture records", 
+-    # and 16 bytes = 4 uint32s. 
+-    # If buffer size is max_splats * 4, it might be storing one record per splat 
+-    # in a flattened array, or the 4 refers to words per splat total?
+-    # Let's assume the buffer holds the data for one texture record per splat,
+-    # and the second record is handled similarly or interleaved.
+-    # The note says "allocate new Uint32Arrays of size maxSplats * 4".
+-    # Let's create two such arrays for the two textures/records.
+-    buffer1 = Uint32Array(max_splats * 4)
+-    buffer2 = Uint32Array(max_splats * 4)
+-    
+-    # Copy original data if capacity differs
+-    if len(splats) != max_splats:
+-        for i in range(len(splats)):
+-            # Pack splat i data into 4 uint32 words
+-            words = pack_splat_to_words(splats[i])
+-            buffer1[i * 4 : i * 4 + 4] = words
+-            buffer2[i * 4 : i * 4 + 4] = words # Assuming identical or related second record
+-    
+-    # Step 3: Calculate layer bits
+-    # Height is needed. Assume it's derived from max_splats or texture dimensions.
+-    # For now, assume height is a known parameter or derived from texture size.
+-    # Let's assume height is the depth of the texture.
+-    height = get_texture_height(max_splats) # Placeholder for actual height calculation
+-    layer_bits = splat_tex_width_bits + math.ceil(math.log2(height))
+-    
+-    # Step 4: Create mask
+-    source_layer_mask = (1 << layer_bits) - 1
+-    
+-    # Step 5 & 6: Map and write
+-    for i in range(len(splats)):
+-        # Calculate 3D texture coordinate
+-        coord = splat_tex_coord(i) # Returns ivec3 (x, y, z)
+-        
+-        # Write to texture 1
+-        write_to_texture_3d(buffer1, coord, splat_tex_width_bits, source_layer_mask)
+-        
+-        # Write to texture 2 (adjacent or specific second record location)
+-        # The note says "two 16-byte texture records". 
+-        # This might mean two separate textures or two records in the same texture.
+-        # Assuming two separate textures for simplicity based on "two 3D textures".
+-        write_to_texture_3d(buffer2, coord, splat_tex_width_bits, source_layer_mask)
+-
+-def pack_splat_to_words(splat):
+-    """
+-    Packs a splat's attributes into 4 uint32 words.
+-    Implementation details depend on the specific attribute packing scheme.
+-    [G] This is a placeholder for the actual packing logic.
+-    """
+-    # Example: Position (3 floats -> 3 uint32s?), Scale, Rotation, Color, Opacity
+-    # This needs to be defined by the specific implementation.
+-    # Since the source doesn't provide the packing format, we leave it as a comment.
+-    # TODO: Define exact bit-packing for splat attributes into 4 uint32 words.
+-    return [0, 0, 0, 0]
+-
+-def splat_tex_coord(splat_index):
+-    """
+-    Calculates the 3D texture coordinate for a given splat index.
+-    Handles paging or tiling for large splat counts.
+-    """
+-    # [G] This function is described in [S2, unofficial] as handling paged storage.
+-    # The exact algorithm is not provided in the notes.
+-    # It likely maps the linear index to (x, y, z) coordinates in the 3D texture.
+-    # Example logic (placeholder):
+-    # x = splat_index % width
+-    # y = (splat_index // width) % height
+-    # z = splat_index // (width * height)
+-    # This is a guess. The actual implementation may involve more complex paging.
+-    return ivec3(0, 0, 0)
+-
+-def write_to_texture_3d(buffer, coord, width_bits, layer_mask):
+-    """
+-    Writes data from buffer to the 3D texture at the given coordinate.
+-    """
+-    # [G] This function maps the buffer data to the texture memory.
+-    # The exact mapping depends on the texture format and layout.
+-    pass
++    # [G] Implementation details for paging/tiling are not provided in sources.
++    # This is a placeholder for the logic described in [S2, unofficial].
++    # Typically involves dividing index by texture depth/width to get x,y,z.
++    x = splat_index % width
++    y = (splat_index // width) % height
++    z = (splat_index // (width * height)) & layer_mask
++    return ivec3(x, y, z)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision:** Floating-point attributes must be carefully packed into `Uint32` words to avoid precision loss.
+-- **Boundaries:** Ensure splat coordinates fit within the 3D texture dimensions. Paging/tiling must handle splats that exceed the initial texture bounds.
+-- **Degenerate Input:** Empty splat lists or splats with zero scale should be handled gracefully.
++*   **Capacity Mismatch:** If `inputCapacity` does not match `maxSplats`, memory must be reallocated and data copied. Failure to do so results in out-of-bounds access or wasted memory [S1, unofficial].
++*   **Precision:** Use of `Math.ceil(Math.log2(height))` requires careful handling of non-power-of-two heights to ensure `layerBits` is sufficient [S1, unofficial].
++*   **Large Splat Counts:** For very large scenes, the coordinate calculation must handle paging or tiling to avoid exceeding texture dimensions [S2, unofficial].
+ 
+ ## Subtopics
+ 
+-### Splat Coordinate Calculation
+-A function to calculate the 3D texture coordinate (ivec3) for a given splat index. It handles paging or tiling for large splat counts, ensuring that splats are distributed across the 3D texture volume efficiently. A variant explicitly handles paged storage, allowing for dynamic expansion of the texture as more splats are added. [S2, unofficial]
++### [Hardware Accelerated Texture Atlases](8597-hardware-accelerated-texture-atlases.md)
++This method organizes per-primitive texture data into large 2D atlas textures to leverage GPU hardware filtering and caching, thereby avoiding multiple texture bindings and software-based sampling overhead. It sets itself apart from software-based interpolation by utilizing dedicated texture units for bilinear filtering, which is significantly faster than manual interpolation from global memory arrays.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** O(N) for mapping N splats, where N is the number of splats.
+-- **Memory Complexity:** O(N) for storing the splat data in the 3D textures.
+-- **Performance:** Efficient for GPU rendering as data is directly accessible in texture memory. Sampling is fast using hardware texture sampling.
+-- **Strengths:** Simple mapping, efficient GPU access, supports large scenes with paging.
+-- **Limitations:** Fixed texture size may require reallocation and copying if capacity is exceeded. Packing/unpacking of attributes may be complex.
+-- **When to Use:** When rendering large numbers of Gaussian splats on the GPU with efficient texture sampling.
+-- **When Not to Use:** When memory is extremely constrained and sparse representations are more suitable, or when dynamic resizing is frequent and costly.
++**Time Complexity:** O(N) for allocation and mapping, where N is the number of splats. Coordinate calculation is O(1) per splat.
++**Memory Complexity:** O(N) for the `Uint32Array` buffers and 3D textures. The size is determined by `maxSplats * 4 * sizeof(uint32)`.
++**Performance:** Hardware filtering provides significant speedup over software interpolation [S1, unofficial].
++**Scaling:** Scales with the number of splats, limited by texture size constraints.
++**Strengths:** Efficient GPU sampling, reduced driver overhead from texture binding.
++**Limitations:** Fixed texture size limits the maximum number of splats without complex paging [S2, unofficial].
+ 
+ ## Background
+-This method is part of the Gaussian Splatting rendering pipeline, specifically for efficient data storage and access on the GPU. It is used in implementations like `gaussian-splat-lite` [S1, unofficial] and `spark` [S2, unofficial]. The approach leverages 3D textures for their hardware-accelerated sampling capabilities, mapping the 3D Gaussian splats into a structured volume for efficient rendering.
++This method is part of the Gaussian Splatting rendering pipeline, specifically for efficient data transfer and sampling on the GPU. It is implemented in libraries such as `gaussian-splat-lite` [S1, unofficial].
+ 
+ ## Sources
+-[S1] Gaussian-Splat-Lite, https://github.com/WilliamLiu-1997/Gaussian-Splat-Lite, fetched 2026-10-27 (unofficial)
+-[S2] spark, https://github.com/sparkjsdev/spark, fetched 2026-10-27 (unofficial)+[S1] WilliamLiu-1997/Gaussian-Splat-Lite, https://github.com/WilliamLiu-1997/Gaussian-Splat-Lite, fetched 2026-10-27 (unofficial)
++[S2] sparkjsdev/spark, https://github.com/sparkjsdev/spark, fetched 2026-10-27 (unofficial)

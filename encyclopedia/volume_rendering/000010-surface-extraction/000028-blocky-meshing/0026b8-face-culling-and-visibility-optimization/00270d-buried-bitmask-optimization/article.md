@@ -1,0 +1,122 @@
+# Buried Bitmask Optimization
+
+Also called: Hidden-face Culling, Binary Hidden-Face Culling
+
+## Overview
+Buried Bitmask Optimization is a technique for reducing the number of faces in a voxel mesh by removing those completely hidden (adjacent to another voxel) using bitwise operations on a bitmask representation of voxels to determine visible faces in bulk [S2, unofficial]. It sets itself apart from sibling methods like [Face Coverage Mask Culling](3397-face-coverage-mask-culling.md) by operating on linear bitmasks with shift operations rather than spatial masks or projections, allowing for immediate determination of visibility without looping through neighbors [S2, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- Input: A 3D grid of voxels $V$, where each voxel is either solid (opaque) or transparent (air). The grid is processed in chunks of size $C \times C \times C$.
+- Output: A set of exposed faces for each chunk, or a flag indicating the chunk is empty/buried.
+
+**Data Structures**
+- **Bitmask**: A linear array of bits representing the occupancy state of voxels within a chunk. For a chunk of size $C^3$, the bitmask has $C^3$ bits.
+  - Bit value `1`: Solid voxel.
+  - Bit value `0`: Transparent/Air voxel.
+- **MappedAdjacentChunks**: A data structure or lookup mechanism to access neighboring chunks for boundary checks [S1, unofficial].
+
+**Steps**
+1.  **Initialize Bitmask**: Create a bitmask for the current chunk. Represent each voxel as a bit in the bitmask, where `1` indicates a solid voxel and `0` indicates a transparent or air voxel [S2, unofficial].
+2.  **Determine Buried Status**: Iterate through all blocks in the chunk (from index $0$ to $C^3-1$). For each block, determine if it is buried (fully surrounded by opaque blocks) and set the corresponding flag in a `buriedBitmask` [S1, unofficial].
+    - *Note*: The specific algorithm for determining "buried" status via neighbor checks is described as leading to poor performance if done naively [S2, unofficial]. The bitmask optimization primarily targets face culling, but the concept of a "buried" flag is used to skip mesh generation entirely if all blocks are buried [S1, unofficial].
+3.  **Check for Empty Chunk**: If all blocks in the chunk are buried (checked via `buriedBitmask->AreAllBlocksSet()`), mark the mesh as empty and skip mesh generation for this chunk [S1, unofficial].
+4.  **Calculate Visible Faces using Bitwise Operations**:
+    - The core optimization uses bitwise shifts to determine visibility for faces along a specific axis (e.g., X-axis) in bulk [S2, unofficial].
+    - **Left Faces (Negative X)**:
+        - Shift the bitmask right by 1 position ($m \gg 1$). This represents the neighbor to the left.
+        - Invert the result to find air positions: $\sim(m \gg 1)$.
+        - Perform a bitwise AND with the original mask: $m \ \& \ \sim(m \gg 1)$.
+        - The result is a mask where bits are `1` if the voxel is solid AND its left neighbor is air (visible left face).
+    - **Right Faces (Positive X)**:
+        - Shift the bitmask left by 1 position ($m \ll 1$). This represents the neighbor to the right.
+        - Invert the result: $\sim(m \ll 1)$.
+        - Perform a bitwise AND with the original mask: $m \ \& \ \sim(m \ll 1)$.
+        - The result is a mask where bits are `1` if the voxel is solid AND its right neighbor is air (visible right face).
+    - **Y and Z Axes**: Similar shift and invert operations are applied along the respective axes, requiring appropriate stride adjustments in the bitmask indexing [S2, unofficial].
+5.  **Generate Mesh**: Use the resulting masks to choose which faces to draw. Skip any block that is air or has its buried flag set in the bitmask [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_chunk_mesh(chunk_voxels, chunk_size):
+    """
+    chunk_voxels: 1D array of bits (1=solid, 0=air) of length chunk_size^3
+    chunk_size: integer, dimension of the cubic chunk
+    """
+    n = chunk_size ** 3
+    mask = chunk_voxels
+    
+    # Step 1 & 2: Determine buried status (simplified check for all buried)
+    # In a full implementation, this would check 6 neighbors for each voxel.
+    # Here we assume a helper function exists that returns True if all voxels are buried.
+    if are_all_voxels_buried(chunk_voxels, chunk_size):
+        return [] # Skip mesh generation
+
+    visible_faces = []
+
+    # Step 4: Calculate visible faces using bitwise operations
+    # Note: This example assumes a 1D linearization where neighbors are adjacent.
+    # For 3D chunks, strides must be applied for Y and Z neighbors.
+    
+    # Left/Right Faces (X-axis neighbors)
+    # Shift right for left neighbor, shift left for right neighbor
+    # We assume the bitmask is aligned such that index i and i+1 are X-neighbors
+    
+    # Visible Left Faces: Solid voxel (1) AND Left Neighbor is Air (~0)
+    # Mask for left neighbor air: ~(mask >> 1)
+    # Visible Left: mask & ~(mask >> 1)
+    left_face_mask = mask & ~(mask >> 1)
+    
+    # Visible Right Faces: Solid voxel (1) AND Right Neighbor is Air (~0)
+    # Mask for right neighbor air: ~(mask << 1)
+    # Visible Right: mask & ~(mask << 1)
+    right_face_mask = mask & ~(mask << 1)
+    
+    # Add faces for bits set in left_face_mask and right_face_mask
+    for i in range(n):
+        if (left_face_mask >> i) & 1:
+            visible_faces.append((i, 'left'))
+        if (right_face_mask >> i) & 1:
+            visible_faces.append((i, 'right'))
+            
+    # Y and Z faces would require shifting by chunk_size and chunk_size^2 respectively
+    # and handling boundary conditions where neighbors belong to adjacent chunks.
+    
+    return visible_faces
+
+def are_all_voxels_buried(voxels, size):
+    """
+    Placeholder for the buried check logic.
+    Naive implementation loops through neighbors, which is slow [S2, unofficial].
+    """
+    # Not given in the sources. [G]
+    # Typically involves checking all 6 neighbors for each voxel.
+    return False
+```
+
+**Parameters**
+- `chunk_size`: The dimension of the cubic chunk. Typical values are not given in the sources.
+- Bitmask width: Determined by `chunk_size^3`.
+
+**Edge Cases and Pitfalls**
+- **Boundary Conditions**: The bitwise shift method assumes neighbors are within the same bitmask. For voxels on the edge of a chunk, neighbors belong to adjacent chunks. The method requires access to `MappedAdjacentChunks` to handle these boundary cases correctly [S1, unofficial].
+- **Naive Neighbor Checking**: The original approach of checking each of the six faces by looping through neighbors and performing random memory access leads to very poor performance [S2, unofficial]. The bitmask optimization avoids this by processing in bulk.
+- **Buried Definition**: The definition of "buried" (fully surrounded) must be consistent with the face culling logic. If a voxel is buried, it has no visible faces, and the chunk can be skipped if all are buried [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: The bitwise operations allow face culling to be performed in $O(N)$ time for $N$ voxels in a chunk, with a very small constant factor due to bitwise parallelism. This is significantly faster than the naive $O(N)$ approach with high constant overhead due to random memory access [S2, unofficial].
+- **Memory Complexity**: Requires storing a bitmask of size $N$ bits per chunk.
+- **Measured Performance**: Specific benchmarks are not given in the sources. However, the method is described as solving the performance issues of the original approach [S2, unofficial].
+- **Strengths**: Bulk processing of visibility; avoids random memory access; simple bitwise logic.
+- **Limitations**: Requires handling boundary conditions between chunks; assumes a linearizable voxel grid for the bitmask shifts.
+
+## Background
+- **Origin**: The technique is described in a devlog for the project "YNL - Vozel" by Yunasawa [S2, unofficial]. It is also referenced in the repository "gabkhanfig/Cube" [S1, unofficial].
+- **History**: The method was developed as an optimization for voxel mesh generation in a Minecraft-inspired project [S2, unofficial].
+- **Usage**: Used in voxel-based games and simulations where performance of mesh generation is critical [S2, unofficial].
+
+## Sources
+[S1] gabkhanfig/Cube, https://github.com/gabkhanfig/Cube, fetched 2026-10-27 (unofficial)
+[S2] Devlog #1.3: Hidden-face Culling - YNL, https://yunasawa.itch.io/ynl-vozel/devlog/1028290/devlog-13-hidden-face-culling, fetched 2026-10-27 (unofficial)

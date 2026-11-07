@@ -1,0 +1,97 @@
+# Scalar Intensity Increase Measure
+
+Also called: Scalar Increase
+## Overview
+A method using scalar intensity as the importance measure, considering only the difference between two adjacent samples, increasing accumulated transparency whenever there is an increase of scalar intensity [S1]. It sets itself apart from its sibling [Adjacent Gradient Difference](5787-adjacent-gradient-difference.md) by operating on raw scalar values rather than gradient magnitudes, making it sensitive to absolute intensity changes rather than rate-of-change changes [S1].
+## How it works
+**Inputs and outputs:**
+*   Input: Scalar intensity of the current sample $s_i$ and the previous sample $s_{i-1}$ along the viewing ray.
+*   Output: Modulation factor $\beta \in [0, 1]$ applied to the accumulated transparency.
+
+**Data structures:**
+No specific data structures are required beyond the scalar values $s_i$ and $s_{i-1}$ available during ray marching.
+
+**Steps:**
+1.  Retrieve the scalar intensity of the current sample, $s_i$.
+2.  Retrieve the scalar intensity of the previous sample, $s_{i-1}$.
+3.  Calculate the difference $\Delta = s_i - s_{i-1}$.
+4.  Compute the modulation factor $\beta$ using the piecewise function defined below.
+
+**Formula:**
+The modulation factor $\beta$ is calculated as [S1]:
+
+$$
+\beta = B(\Delta_{imp}(s_i, s_{i-1})) = 
+\begin{cases} 
+1 - (s_i - s_{i-1}) & \text{if } s_i > s_{i-1} \\
+1 & \text{otherwise}
+\end{cases}
+$$
+
+Where:
+*   $s_i$ is the scalar intensity of the incoming sample.
+*   $s_{i-1}$ is the scalar intensity of the previous sample along the viewing ray.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def scalar_intensity_increase_measure(s_i, s_prev):
+    """
+    Calculate the modulation factor beta for Scalar Intensity Increase Measure.
+    
+    Args:
+        s_i (float): Scalar intensity of the current sample.
+        s_prev (float): Scalar intensity of the previous sample.
+        
+    Returns:
+        float: Modulation factor beta.
+    """
+    if s_i > s_prev:
+        # Decrease beta based on the magnitude of the increase
+        # Note: Source does not specify clamping, but beta is a modulation factor
+        # typically in [0,1]. If s_i - s_prev > 1, beta becomes negative.
+        # [G] Clamp to 0 to prevent negative transparency modulation.
+        beta = 1.0 - (s_i - s_prev)
+        if beta < 0.0:
+            beta = 0.0
+        return beta
+    else:
+        # No increase in scalar intensity; do not modulate transparency
+        return 1.0
+```
+
+**Parameters:**
+Not given in the sources.
+
+**Edge cases and pitfalls:**
+*   **Precision:** If the scalar intensity range is large (e.g., 0-255 or 0-65535), the difference $s_i - s_{i-1}$ may exceed 1, causing $\beta$ to become negative. The implementation must clamp $\beta$ to $[0, 1]$ or normalize the scalar intensities to $[0, 1]$ before calculation [G].
+*   **Boundaries:** At the start of a ray, $s_{i-1}$ is undefined. [G] Initialize $s_{i-1}$ to $s_i$ or 0, or skip modulation for the first sample.
+*   **Degenerate input:** If $s_i = s_{i-1}$, $\beta = 1$, meaning no modulation occurs.
+
+## Subtopics
+
+### Scalar Intensity Difference Measure
+A method that increases accumulated transparency whenever a change (increase or decrease) of scalar intensity is detected between adjacent samples [S1]. It differs from the Scalar Intensity Increase Measure by reacting to both increases and decreases in intensity, producing a more transparent look [S1]. The modulation factor is calculated as $\beta = 1 - |s_i - s_{i-1}|$ [S1].
+
+## Operating characteristics
+**Time and memory complexity:**
+$O(1)$ time and memory per sample, as it requires only two scalar values and a simple comparison/subtraction [S1].
+
+**Measured performance:**
+Not given in the sources.
+
+**Scaling:**
+Not given in the sources.
+
+**Strengths and limitations:**
+Structures such as enamel and pulp of the tooth can be clearly seen, which are obscured if only maximum intensity or gradient measures are used [S1]. It is effective for visualizing boundaries between different structures with different scalar intensities [S1].
+
+**When to use it and when not:**
+Use when scalar intensity differences are more relevant than gradient changes for identifying features. Not given when not to use.
+
+## Background
+Originated in the paper "Fast Volumetric Data Exploration with Importance-Based Accumulated Transparency Modulation" [S1]. It is used in volume rendering to enhance the visibility of internal structures by modulating accumulated transparency based on scalar intensity changes.
+
+## Sources
+[S1] Fast Volumetric Data Exploration with Importance-Based Accumulated Transparency Modulation, https://doi.org/10.2312/vg/vg10/061-068, fetched 2026-10-26

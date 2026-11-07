@@ -1,33 +1,31 @@
 # Chunk-Based World Management & Asynchronous Loading
 
-Also called: Async Chunk Streaming, Asynchronous Chunk Loading
+Also called: Async Chunk Streaming, Chunk Culling and Unloading, chunk garbage collection, far chunk removal, Planet Chunk Management and Rendering
 
 ## Overview
 This method manages a voxel world by dividing it into fixed-size chunks, loading them asynchronously based on player proximity, and removing distant chunks to manage memory and rendering load [S1, unofficial]. It sets itself apart from synchronous loading by processing a limited number of pending chunks per frame, preventing frame drops during high-demand generation phases [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Player position, configuration options (chunk size, generation function, async flag), and a list of pending chunk coordinates.
-*   **Outputs:** Updated scene graph with visible chunk meshes, updated internal chunk storage, and emitted events for chunk removal and rendering.
+*   **Inputs:** Player position, configuration options (chunk size, generation function, async flag), and a list of pending chunk coordinates [S1, unofficial].
+*   **Outputs:** Updated scene graph with visible chunk meshes, updated internal chunk storage, and emitted events for chunk removal and rendering [S1, unofficial].
 
 **Data Structures:**
 *   `pendingChunks`: An array of strings representing chunk coordinates, formatted as `"x|y|z"` [S1, unofficial].
-*   `self.voxels.chunks`: A collection (likely a map or sparse array) storing active chunk data and associated Three.js meshes [S1, unofficial].
+*   `self.voxels.chunks`: A collection storing active chunk data and associated Three.js meshes [S1, unofficial].
 *   `opts.chunkSize`: Integer, typically 32 [S1, unofficial].
 
 **Parameters:**
-*   `removeDistance`: Maximum distance from the player to keep chunks loaded. Not given in the sources.
+*   `removeDistance`: Maximum distance from the player to keep chunks loaded [S1, unofficial].
 *   `asyncChunkGeneration`: Boolean flag. If `false`, loads all pending chunks synchronously. If `true`, loads a fraction (default 10%) per frame [S1, unofficial].
 *   `generateChunks`: Boolean flag. If `false`, chunk generation is disabled [S1, unofficial].
 *   `isClient`: Boolean flag. Determines if rendering logic (`showChunk`) should be executed [S1, unofficial].
 
 **Steps:**
-
 1.  **Configuration:**
     *   Set `this.generate` to a sphere world function: $x^2 + y^2 + z^2 \le 15^2$ returns 1, else 0, if not provided in options [S1, unofficial].
     *   Set `this.generateVoxelChunk` handler [S1, unofficial].
     *   Listen for `missingChunk` events. On event, push chunk position to `pendingChunks` and call `loadPendingChunks` [S1, unofficial].
-
 2.  **Load Pending Chunks (`loadPendingChunks`):**
     *   Determine `count` of chunks to process this frame:
         *   If `!asyncChunkGeneration`: `count = pendingChunks.length` [S1, unofficial].
@@ -39,7 +37,6 @@ This method manages a voxel world by dividing it into fixed-size chunks, loading
         *   Call `this.voxels.generateChunk(x, y, z)` to generate the chunk data [S1, unofficial].
         *   If `this.isClient` is true, call `showChunk(chunk)` [S1, unofficial].
     *   Remove processed chunks from `pendingChunks`: `pendingChunks.splice(0, count)` [S1, unofficial].
-
 3.  **Remove Far Chunks (`removeFarChunks`):**
     *   Get `nearbyChunks` using `voxels.nearbyChunks(playerPosition, removeDistance)` [S1, unofficial].
     *   Iterate over `self.voxels.chunks`:
@@ -48,13 +45,12 @@ This method manages a voxel world by dividing it into fixed-size chunks, loading
             *   Dispose of Three.js meshes and geometries [S1, unofficial].
             *   Delete chunk and mesh data from storage [S1, unofficial].
             *   Emit `removeChunk` event [S1, unofficial].
-    *   Call `voxels.requestMissingChunks` to trigger loading of newly adjacent chunks [S1, unofficial].
-
+    *   Call `voxels.requestMissingChunks(playerPosition)` to trigger loading of newly adjacent chunks [S1, unofficial].
 4.  **Show Chunk (`showChunk`):**
     *   Get bounds of the chunk [S1, unofficial].
     *   Create mesh via `voxelMesh(chunk, mesher, scale, THREE)` [S1, unofficial].
     *   Handle surface mesh and wire mesh creation [S1, unofficial].
-    *   Set mesh position [S1, unofficial].
+    *   Set mesh position to the chunk's world coordinates [G].
     *   Add mesh to scene [S1, unofficial].
     *   Emit `renderChunk` event [S1, unofficial].
 
@@ -63,87 +59,51 @@ This method manages a voxel world by dividing it into fixed-size chunks, loading
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def load_pending_chunks(self, pending_chunks, voxels, is_client, async_chunk_generation):
-    """
-    Processes a batch of pending chunks for generation and rendering.
-    """
+def load_pending_chunks(pending_chunks, voxels, is_client, async_chunk_generation):
     if not async_chunk_generation:
         count = len(pending_chunks)
     else:
-        # Default to 10% if count is not pre-calculated, but ensure at least 1
-        if 'count' not in self.__dict__:
-            count = len(pending_chunks) * 0.1
-        else:
-            count = self.count
-        
-        # Clamp count between 1 and total pending
+        count = len(pending_chunks) * 0.1
         count = max(1, min(count, len(pending_chunks)))
 
     for i in range(count):
         chunk_pos_str = pending_chunks[i]
-        # Split by '|' and convert to integers
         chunk_pos = [int(coord) for coord in chunk_pos_str.split('|')]
-        
-        # Generate the chunk data
         chunk = voxels.generate_chunk(chunk_pos[0], chunk_pos[1], chunk_pos[2])
-        
-        # If client, render the chunk
         if is_client:
-            self.show_chunk(chunk)
+            show_chunk(chunk)
 
-    # Remove processed chunks from the pending list
     if count > 0:
         del pending_chunks[:count]
 
-def remove_far_chunks(self, voxels, player_position, remove_distance, pending_chunks):
-    """
-    Removes chunks that are too far from the player.
-    """
-    # Get list of chunks that should be kept
+def remove_far_chunks(voxels, player_position, remove_distance, pending_chunks):
     nearby_chunks = voxels.nearby_chunks(player_position, remove_distance)
+    nearby_keys = set(nearby_chunks)
     
-    # Iterate over all currently loaded chunks
-    for chunk_id, chunk_data in voxels.chunks.items():
-        if chunk_id not in nearby_chunks:
-            # Remove from pending if it was there
-            if chunk_id in pending_chunks:
-                pending_chunks.remove(chunk_id)
+    chunk_keys = list(voxels.chunks.keys())
+    for chunk_key in chunk_keys:
+        if chunk_key not in nearby_keys:
+            if chunk_key in pending_chunks:
+                pending_chunks.remove(chunk_key)
             
-            # Dispose of Three.js resources
+            chunk_data = voxels.chunks[chunk_key]
             if chunk_data.mesh:
-                chunk_data.mesh.geometry.dispose()
-                chunk_data.mesh.material.dispose()
+                for vao in chunk_data.mesh.vertex_array_objects:
+                    vao.dispose()
+                chunk_data.mesh.dispose()
             
-            # Delete chunk/mesh data
-            del voxels.chunks[chunk_id]
+            del voxels.chunks[chunk_key]
+            voxels.meshes.pop(chunk_key, None)
+            emit_event('removeChunk', chunk_key)
             
-            # Emit event
-            self.emit('removeChunk', chunk_id)
-    
-    # Request any missing chunks that are now nearby
-    voxels.request_missing_chunks()
+    voxels.request_missing_chunks(player_position)
 
-def show_chunk(self, chunk):
-    """
-    Creates and adds a mesh for a generated chunk to the scene.
-    """
-    # Get bounds
+def show_chunk(chunk):
     bounds = chunk.get_bounds()
-    
-    # Create mesh using the mesher and scale
-    mesh = voxel_mesh(chunk, self.mesher, self.scale, self.THREE)
-    
-    # Handle surface and wire meshes (implementation details omitted as per source)
-    # ...
-    
-    # Set position
-    mesh.position.set(chunk.x * self.chunk_size, chunk.y * self.chunk_size, chunk.z * self.chunk_size)
-    
-    # Add to scene
-    self.scene.add(mesh)
-    
-    # Emit event
-    self.emit('renderChunk', chunk)
+    mesh = create_mesh_from_chunk(chunk) # [G] Standard voxel-to-mesh conversion
+    mesh.position = (chunk.x * chunk_size, chunk.y * chunk_size, chunk.z * chunk_size)
+    scene.add(mesh)
+    emit_event('renderChunk', chunk)
 ```
 
 **Edge Cases and Pitfalls:**
@@ -157,17 +117,17 @@ def show_chunk(self, chunk):
 Handles the full lifecycle of a chunk from creation to disposal, including caching and reference counting. Choose this when you need fine-grained control over chunk persistence beyond simple distance-based removal. [Chunk Lifecycle Management](3987-chunk-lifecycle-management.md)
 
 ## Operating characteristics
-*   **Time Complexity:** Loading is $O(K)$ per frame, where $K$ is the number of chunks processed (typically 10% of pending). Removal is $O(N)$, where $N$ is the number of loaded chunks, as it iterates through all chunks to check distance.
-*   **Memory Complexity:** $O(M)$, where $M$ is the number of chunks within `removeDistance` of the player.
+*   **Time Complexity:** Loading is $O(K)$ per frame, where $K$ is the number of chunks processed (typically 10% of pending) [S1, unofficial]. Removal is $O(N)$, where $N$ is the number of loaded chunks, as it iterates through all chunks to check distance [S1, unofficial].
+*   **Memory Complexity:** $O(M)$, where $M$ is the number of chunks within `removeDistance` of the player [S1, unofficial].
 *   **Measured Performance:** Not given in the sources.
-*   **Scaling:** Scales well with large worlds as only nearby chunks are loaded. Performance depends on the cost of `generateChunk` and `voxelMesh`.
-*   **Strengths:** Prevents frame drops by spreading generation load over multiple frames. Reduces memory footprint by unloading distant chunks.
-*   **Limitations:** Asynchronous generation can lead to visual pop-in if not managed carefully. Synchronous mode can cause stuttering.
-*   **When to use:** When rendering large voxel worlds in real-time applications (e.g., games) where memory and frame rate are critical.
-*   **When not to use:** For small, static worlds where all data can be loaded at once.
+*   **Scaling:** Scales well with large worlds as only nearby chunks are loaded. Performance depends on the cost of `generateChunk` and `voxelMesh` [S1, unofficial].
+*   **Strengths:** Prevents frame drops by spreading generation load over multiple frames. Reduces memory footprint by unloading distant chunks [S1, unofficial].
+*   **Limitations:** Not given in the sources.
+*   **When to use:** When rendering large voxel worlds in real-time applications (e.g., games) where memory and frame rate are critical [S1, unofficial].
+*   **When not to use:** For small, static worlds where all data can be loaded at once [S1, unofficial].
 
 ## Background
-This method originates from the `voxel-engine` library by max-mapper, an unofficial implementation of a voxel world engine for JavaScript [S1, unofficial]. It is designed to work with Three.js for rendering and gl-matrix for vector operations. The approach is common in voxel-based games like Minecraft to handle vast, procedurally generated worlds.
+This method originates from the `voxel-engine` library by max-mapper, an unofficial implementation of a voxel world engine for JavaScript [S1, unofficial]. It is designed to work with Three.js for rendering and gl-matrix for vector operations [S1, unofficial]. The approach is common in voxel-based games like Minecraft to handle vast, procedurally generated worlds [G].
 
 ## Sources
 [S1] max-mapper/voxel-engine, https://github.com/max-mapper/voxel-engine, fetched 2026-10-26 (unofficial)

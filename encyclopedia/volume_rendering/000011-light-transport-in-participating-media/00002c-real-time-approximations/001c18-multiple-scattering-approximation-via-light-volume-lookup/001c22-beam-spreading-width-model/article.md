@@ -16,7 +16,7 @@ The Beam Spreading Width Model provides a closed-form expression for the spatial
 - $w(S)$: The spatial width (radius) of the beam at distance $S$.
 
 **Data Structures:**
-No complex data structures are required; the model is a direct mathematical evaluation.
+No complex data structures are required; the model is a direct mathematical evaluation [S1].
 
 **Parameters:**
 - $\langle \theta^2 \rangle$: Typical value in simulation is 0.24 (corresponding to Henyey-Greenstein asymmetry factor $g=0.9$) [S1].
@@ -26,30 +26,24 @@ No complex data structures are required; the model is a direct mathematical eval
 **Formulas:**
 The core equation for the squared beam width is:
 
-$$ w^2(S) = \frac{1}{2} \left( \frac{2a}{3S} + \frac{16\alpha}{bS^2} \right)^{-1} $$
+$$ w^2(S) = \frac{1}{2} \left( \frac{2a}{3S} + \frac{16\alpha}{bS^2} \right)^{-1} = \frac{\langle \theta^2 \rangle b S^3}{16(1 + S^2/12l^2)} $$
 
 Where $\alpha$ is defined as:
 
 $$ \alpha = \frac{1}{2\langle \theta^2 \rangle} $$
 
-Alternatively, using the diffusive path length $l$, the formula is:
-
-$$ w^2(S) = \frac{\langle \theta^2 \rangle b S^3}{16(1 + S^2/12l^2)} $$
-
-Where the diffusive path length $l$ is defined as:
+And the diffusive path length $l$ is defined as:
 
 $$ l^2 = \frac{1}{ab\langle \theta^2 \rangle} $$
 
 **Limiting Cases:**
-1.  **Long paths ($S \gg l$):** The width grows linearly with distance:
-    $$ w^2 = \frac{3}{4} \langle \theta^2 \rangle b S l^2 $$
-2.  **No absorption ($l = \infty$):**
-    $$ w^2 = \frac{b \langle \theta^2 \rangle S^3}{16} $$
+1. **Long paths ($S \gg l$):** The width grows linearly with distance: $w^2 = \frac{3}{4} \langle \theta^2 \rangle b S l^2$ [S1].
+2. **No absorption ($l = \infty$):** $w^2 = \frac{b \langle \theta^2 \rangle S^3}{16}$ [S1].
 
 **Pitfalls:**
 - The beam spread width expression has no upper bound [S1]. This is mitigated because attenuation increases at an even faster rate than the spread [S1].
 - The model assumes a Gaussian profile for the beam core; a wider non-Gaussian component exists in reality but is not captured by this model [S1].
-- The formula differs from Tessendorf [Tes87] by a constant factor of 3/2. To align with Tessendorf's rigorous derivation for specific limiting cases, multiply the result by 2/3 [S1].
+- The formula differs from Tessendorf [Tes87] by a constant factor of 3/2 [S1]. To align with Tessendorf's rigorous derivation for specific limiting cases, multiply the result by 2/3 [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -94,14 +88,14 @@ def beam_spreading_width(S, a, b, theta_sq_mean):
 ```
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per evaluation. The model is a closed-form expression requiring only basic arithmetic operations.
-- **Memory Complexity:** $O(1)$. No precomputed tables or volumes are required.
+- **Time Complexity:** $O(1)$ per evaluation [S1]. The model is a closed-form expression requiring only basic arithmetic operations [S1].
+- **Memory Complexity:** $O(1)$ [S1]. No precomputed tables or volumes are required [S1].
 - **Strengths:** Easy to evaluate; provides a general closed-form solution unlike rigorous methods; explicitly includes absorption effects which narrow the beam compared to scattering-only models [S1].
 - **Limitations:** Lacks an upper bound on width (though mitigated by attenuation); does not capture the wider non-Gaussian component of the beam profile [S1]; differs from rigorous derivations (e.g., Tessendorf) by a constant factor [S1].
 - **When to use:** When an efficient, approximate spatial blurring model is needed for real-time or interactive applications where rigorous solutions are too slow or unavailable [S1].
 
 ## Background
-The model was derived using a path integration framework and presented in the paper "Practical Rendering of Multiple Scattering Effects in Participating Media" [S1]. It builds upon earlier work on beam spread in scattering media, such as McLean et al. [MFW98] and Tessendorf [Tes87], adapting them for computer graphics applications where computational efficiency is critical [S1]. The derivation is detailed in a companion document [APRN04].
+The model was derived using a path integration framework and presented in the paper "Practical Rendering of Multiple Scattering Effects in Participating Media" [S1]. It builds upon earlier work on beam spread in scattering media, such as McLean et al. [MFW98] and Tessendorf [Tes87], adapting them for computer graphics applications where computational efficiency is critical [S1]. The derivation is detailed in a companion document [APRN04] [S1].
 
 ## Sources
 [S1] Practical Rendering of Multiple Scattering Effects in Participating Media, https://cseweb.ucsd.edu/~ravir/HRPIEG.pdf, fetched 2026-10-28

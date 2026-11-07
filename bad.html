@@ -133,20 +133,20 @@ const get=(u,txt)=>cache[u]||(cache[u]=real(u).then(r=>{if(!r.ok)throw new Error
 const resp=(o,code)=>new Response(typeof o=="string"?o:JSON.stringify(o),{status:code||200,headers:{"Content-Type":"application/json"}});
 const NF=()=>resp({error:"not found"},404);
 // ---- search: the same query syntax and ranking as src/viewer.py Store.search
-const whole=t=>t.length<=3&&!t.includes(" ")&&!t.startsWith("re:"), esc=s=>s.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
-function parseQuery(q){
+const whole=(t,x)=>(x||t.length<=3)&&!t.startsWith("re:")&&(x||!t.includes(" ")), esc=s=>s.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+function parseQuery(q,cs){
   const regs=[...q.matchAll(/(?:^|\s)\/(.+?)\/(?=\s|$)/g)].map(m=>"re:"+m[1]);
-  q=q.replace(/(?:^|\s)\/(.+?)\/(?=\s|$)/g," ").toLowerCase();
+  q=q.replace(/(?:^|\s)\/(.+?)\/(?=\s|$)/g," ");if(!cs)q=q.toLowerCase();
   const W=/[\p{L}\p{N}_]+/gu, phrases=[...q.matchAll(/"([^"]*)"/g)].map(m=>(m[1].match(W)||[]).join(" "));
   let rest=q.replace(/"[^"]*"?/g," ");
   const excl=[...rest.matchAll(/(?:^|\s)-([\p{L}\p{N}_]+)/gu)].map(m=>m[1]);
   rest=rest.replace(/(?:^|\s)-[\p{L}\p{N}_]+/gu," ");
   return [[...new Set([...regs,...phrases.filter(Boolean),...(rest.match(W)||[])])],[...new Set(excl)]];
 }
-function termRx(t){
-  if(t.startsWith("re:")){try{return new RegExp(t.slice(3),"gi")}catch(e){return new RegExp(esc(t.slice(3)),"gi")}}
+function termRx(t,x,cs){
+  if(t.startsWith("re:")){const f=cs?"g":"gi";try{return new RegExp(t.slice(3),f)}catch(e){return new RegExp(esc(t.slice(3)),f)}}
   const body=t.split(/\s+/).map(esc).join("[^\\p{L}\\p{N}_]+");
-  return new RegExp(whole(t)?`(?<![\\p{L}\\p{N}_])${body}(?![\\p{L}\\p{N}_])`:body,"gu");
+  return new RegExp(whole(t,x)?`(?<![\\p{L}\\p{N}_])${body}(?![\\p{L}\\p{N}_])`:body,"gu");
 }
 const count=(rx,s)=>{rx.lastIndex=0;let n=0;while(rx.exec(s)){n++;if(rx.lastIndex==0)break}return n};
 const has=(rx,s)=>{rx.lastIndex=0;return rx.test(s)};
@@ -166,17 +166,29 @@ function snippets(body,low,terms,rx,n=3,before=90,after=150){
   spans.sort((x,y)=>x[0]-y[0]);
   return spans.map(([a,b])=>(a?"…":"")+body.slice(a,b)+(b<body.length?"…":""));
 }
+// search v2 options (PLAN 55; src/viewer.py opts_of, order, source_ok)
+const OPTS=["dir","exact","case","kind","mark","y0","y1","site"];
+function order(out,cmp,fieldDesc,want,missing){out.sort(cmp);if((want=="asc"||want=="desc")&&(want=="desc")!=fieldDesc)out.reverse();
+  if(missing){const a=out.filter(x=>!missing(x)),b=out.filter(missing);out.length=0;out.push(...a,...b)}}
+function sourceOk(d,o){
+  if(o.kind&&d.kind!=o.kind)return false;const m=o.mark;
+  if(m=="official"&&(d.marks.includes("unofficial")||d.marks.includes("book")))return false;
+  if((m=="unofficial"||m=="book")&&!d.marks.includes(m)||m=="abstract"&&!d.marks.includes("abstract only"))return false;
+  if(/^\d+$/.test(o.y0||"")&&!(d.year&&d.year>=+o.y0))return false;if(/^\d+$/.test(o.y1||"")&&!(d.year&&d.year<=+o.y1))return false;
+  return !o.site||(d.host||"").toLowerCase().includes(o.site.toLowerCase());
+}
+const tjson=(terms,rx,o)=>terms.map(t=>t.startsWith("re:")?{t,whole:false,re:rx[t].source}:{t,whole:whole(t,o.exact=="1")});
 const ranked=new Map();
-async function search(q,offset,limit,within,sort){
-  const S=await get(D+"search.json"),[terms,excl]=parseQuery(q);
+async function search(q,offset,limit,within,sort,o){
+  const cs=o.case=="1",ex=o.exact=="1",S=await get(D+"search.json"),[terms,excl]=parseQuery(q,cs);
   const words=terms.filter(t=>!t.includes(" ")&&!t.startsWith("re:")),phrase=words.length>1?words.join(" "):null,rx={};
-  for(const t of [...terms,...excl,...(phrase?[phrase]:[])])rx[t]=termRx(t);
-  const key=[q.trim().toLowerCase(),within,sort].join("\n");let r=ranked.get(key);
+  for(const t of [...terms,...excl,...(phrase?[phrase]:[])])rx[t]=termRx(t,ex,cs);
+  const key=[cs?q.trim():q.trim().toLowerCase(),within,sort,o.dir,cs,ex].join("\n");let r=ranked.get(key);
   if(!r){
     const out=[],hits={};
     for(const e of S){
       if(within&&e.p!=within&&!e.trail.some(t=>t.path==within))continue;
-      const name=e.name.toLowerCase(),head=e.head.toLowerCase(),low=e.low||(e.low=e.body.toLowerCase());
+      const name=cs?e.name:e.name.toLowerCase(),head=cs?e.head:e.head.toLowerCase(),low=cs?e.body:e.low||(e.low=e.body.toLowerCase());
       const h=(t,s)=>has(rx[t],s);
       if(!terms.every(t=>h(t,name)||h(t,head)||h(t,low)))continue;
       if(excl.some(t=>h(t,name)||h(t,head)||h(t,low)))continue;
@@ -191,13 +203,128 @@ async function search(q,offset,limit,within,sort){
       length:(a,b)=>b[3].body.length-a[3].body.length||cmp(nm(a),nm(b)),depth:(a,b)=>a[3].trail.length-b[3].trail.length||cmp(nm(a),nm(b)),
       updated:(a,b)=>b[3].mt-a[3].mt||cmp(nm(a),nm(b)),score:(a,b)=>(a[3].sc==null?9:-a[3].sc)-(b[3].sc==null?9:-b[3].sc)||cmp(nm(a),nm(b)),
       revisions:(a,b)=>b[3].rev-a[3].rev||cmp(nm(a),nm(b)),sources:(a,b)=>b[3].src-a[3].src||cmp(nm(a),nm(b)),name:(a,b)=>cmp(nm(a),nm(b))};
-    out.sort(by[(terms.length||sort)?sort:"name"]||((a,b)=>b[0]-a[0]||b[1]-a[1]||cmp(nm(a),nm(b))));
+    const f=by[sort]?sort:terms.length?"":"name";
+    order(out,by[f]||((a,b)=>b[0]-a[0]||b[1]-a[1]||cmp(nm(a),nm(b))),f!="name"&&f!="depth",o.dir,f=="score"?(x=>x[3].sc==null):null);
     const below={};for(const [,,,e] of out)if(hits[e.p]!==undefined)for(const t of e.trail)below[t.path]=(below[t.path]||0)+1;
     r=[out,hits,below];ranked.size>30&&ranked.clear();ranked.set(key,r);
   }
   const [out,hits,below]=r,res=out.slice(offset,offset+limit).map(([tier,,name,e])=>({path:e.p,name,title_hit:tier==2,hits:hits[e.p],below:below[e.p]||0,
-    trail:e.trail.map(t=>({...t,hits:hits[t.path]||0})),snippets:terms.length?snippets(e.body,e.low,(phrase?[phrase]:[]).concat(terms),rx):[cut(e.body,240)]}));
-  return {total:out.length,results:res,terms:terms.map(t=>t.startsWith("re:")?{t,whole:false,re:rx[t].source}:{t,whole:whole(t)})};
+    trail:e.trail.map(t=>({...t,hits:hits[t.path]||0})),snippets:terms.length?snippets(e.body,cs?e.body:e.low||(e.low=e.body.toLowerCase()),(phrase?[phrase]:[]).concat(terms),rx):[cut(e.body,240)]}));
+  return {total:out.length,results:res,terms:tjson(terms,rx,o)};
+}
+// ---- full-text word index of the cited sources' texts (data/ft, format in the src/ftindex.py docstring; PLAN 55 (c)).
+// One shard fetch per query word, all in parallel. Whole words only (the index holds tokens). Counts come from the doc
+// sets (exact); a phrase is checked through the byte offsets where the doc's postings are loaded (rare words, page 1 of
+// a common word), else kept on the words alone. Case-sensitive = the candidates' texts are fetched and checked.
+const FT=D+"ft/",bin=u=>cache[u]||(cache[u]=real(u).then(r=>{if(!r.ok)throw new Error(u);return r.arrayBuffer()}).then(b=>new Uint8Array(b)));
+const ftTok=s=>(s.match(/[A-Za-z0-9\u0080-￿]+/g)||[]).map(w=>w.replace(/[A-Z]/g,c=>c.toLowerCase())).map(w=>new TextEncoder().encode(w)).filter(b=>b.length<=40);
+const fnv=b=>{let h=0x811c9dc5;for(const x of b)h=Math.imul(h^x,0x01000193)>>>0;return h};
+const eqb=(a,i,b)=>{for(let k=0;k<b.length;k++)if(a[i+k]!=b[k])return false;return true};
+// postings block -> Map slot -> offsets (absolute, ascending); rare = slot deltas, common page = absolute slots
+function ftPost(a,i,end,rare,m){let s=0;const v=()=>{let n=0,sh=0,c;do{c=a[i++];n+=(c&127)*2**sh;sh+=7}while(c&128);return n};
+  while(i<end){s=rare?s+v():v();const tf=v(),o=new Array(tf);let p=0;for(let k=0;k<tf;k++)o[k]=p+=v();m.set(s,o)}return m}
+async function ftWord(w,meta){
+  const a=await bin(FT+"s/"+(fnv(w)%meta.n).toString(16).padStart(3,"0")+".bin");let i=0;
+  const v=()=>{let n=0,sh=0,c;do{c=a[i++];n+=(c&127)*2**sh;sh+=7}while(c&128);return n};
+  while(i<a.length){const wl=v(),hit=wl==w.length&&eqb(a,i,w);i+=wl;const df=v(),total=v(),kind=a[i++];
+    if(kind==0){const nb=v();if(hit){const post=ftPost(a,i,i+nb,true,new Map()),bits=new Uint8Array((meta.docs.length+7)>>3);
+        for(const s of post.keys())bits[s>>3]|=1<<(s&7);return {df,total,bits,post}}i+=nb}
+    else{const nb=v(),bits=a.subarray(i,i+nb);i+=nb;const pages=v(),pb=v();if(hit)return {df,total,bits,post:ftPost(a,i,i+pb,false,new Map()),pages,w};i+=pb}}
+  return null;
+}
+const band=(x,y)=>{const r=new Uint8Array(x.length);for(let k=0;k<x.length;k++)r[k]=x[k]&(y[k]||0);return r};
+const bget=(b,s)=>b[s>>3]>>(s&7)&1;
+// one term (a word or a phrase = several tokens) -> {bits, tf(slot)}; null = some token is in no text
+async function ftTerm(toks,meta){
+  const ws=await Promise.all(toks.map(t=>ftWord(t,meta)));if(!toks.length||ws.some(w=>!w))return null;
+  let bits=ws[0].bits;for(const w of ws.slice(1))bits=band(bits,w.bits);
+  if(toks.length==1)return {bits,tf:s=>(ws[0].post.get(s)||[1]).length};
+  // a phrase needs every word's offsets: load the later pages of its common words, fewest pages first, <= 64 pages
+  // (~1 MB; 'the' has ~55 at 1.9K docs); docs whose offsets stay unloaded keep the phrase on the words alone
+  let budget=64;for(const w of ws.filter(w=>w.pages>1).sort((x,y)=>x.pages-y.pages)){if(w.pages-1>budget)break;budget-=w.pages-1;
+    const hex=Array.from(w.w,b=>b.toString(16).padStart(2,"0")).join("");
+    const pgs=await Promise.all(Array.from({length:w.pages-1},(_,k)=>bin(FT+"p/"+hex+"."+(k+2)+".bin")));
+    w.post=new Map(w.post);for(const a of pgs)ftPost(a,0,a.length,false,w.post)}
+  const ph=s=>{const os=ws.map(w=>w.post.get(s));if(os.some(o=>!o))return -1;   // offsets not loaded: unknown
+    const sets=os.map(o=>new Set(o));let n=0;
+    for(const x of os[0]){let p=x,ok=true;for(let k=1;k<toks.length&&ok;k++){ok=false;
+        for(let g=1;g<=3;g++)if(sets[k].has(p+toks[k-1].length+g)){p+=toks[k-1].length+g;ok=true;break}}n+=ok}
+    return n};
+  const tfs=new Map();for(let s=0;s<meta.docs.length;s++)if(bget(bits,s)){const n=ph(s);if(n==0)bits[s>>3]&=~(1<<(s&7));else tfs.set(s,Math.max(n,1))}
+  return {bits,tf:s=>tfs.get(s)||1};
+}
+// FT window regexes: token boundaries as the index sees them, phrase words split by 1-3 non-token chars
+function ftRx(t,cs){const N="A-Za-z0-9\\u0080-\\uffff",b=(t.match(new RegExp(`[${N}]+`,"g"))||[]).map(esc).join(`[^${N}]{1,3}`);
+  return new RegExp(`(?<![${N}])${b}(?![${N}])`,cs?"g":"gi")}
+async function ftSnip(id,q,cs){
+  const body=await get(D+"doctext/"+id+".txt",true),[terms]=parseQuery(q,cs),ts=terms.filter(t=>!t.startsWith("re:")),rx={};
+  for(const t of ts)rx[t]=ftRx(t,cs);
+  let sn=snippets(body,body,ts,rx,2);
+  if(!sn.length){const ws=[...new Set(ts.flatMap(t=>t.split(" ")))];for(const w of ws)rx[w]=ftRx(w,cs);sn=snippets(body,body,ws,rx,2)}   // phrase seen through a 1-char word
+  return sn.map(s=>cut(s,400));
+}
+// -> [[slot doc id, hits, score]] of the docs whose full text has every term and no excluded one
+async function ftSearch(terms,excl,cs){
+  if(!terms.length||terms.some(t=>t.startsWith("re:")))return [];
+  let meta;try{meta=await get(FT+"docs.json")}catch(e){return []}
+  const tt=await Promise.all(terms.map(t=>ftTerm(ftTok(t),meta)));if(tt.some(x=>!x))return [];
+  const ex=(await Promise.all(excl.map(t=>ftTerm(ftTok(t),meta)))).filter(Boolean);
+  let bits=tt[0].bits;for(const x of tt.slice(1))bits=band(bits,x.bits);
+  const out=[];
+  for(let s=0;s<meta.docs.length;s++)if(bget(bits,s)&&meta.docs[s]!=null&&!ex.some(x=>bget(x.bits,s))){
+    const tf=tt.map(x=>x.tf(s));out.push([meta.docs[s],tf.reduce((a,b)=>a+b,0),tf.reduce((a,b)=>a+Math.min(b,10),0)])}
+  if(cs&&out.length){   // case-sensitive: check each candidate's text (capped at 1000; beyond the cap they stay unchecked)
+    const rx=terms.map(t=>ftRx(t,true)),keep=await Promise.all(out.slice(0,1000).map(([id])=>get(D+"doctext/"+id+".txt",true).then(b=>rx.every(r=>has(r,b))).catch(()=>false)));
+    return out.filter((x,k)=>k>=1000||keep[k]);
+  }
+  return out;
+}
+// ---- cited-sources search: the same ranking as src/viewer.py search_sources, over data/sources.json
+const sranked=new Map();
+async function searchSources(q,offset,limit,within,sort,o){
+  const cs=o.case=="1",ex=o.exact=="1",L=s=>cs?s:s.toLowerCase(),S=await get(D+"sources.json"),[terms,excl]=parseQuery(q,cs),idx=await get(D+"search.json");
+  const words=terms.filter(t=>!t.includes(" ")&&!t.startsWith("re:")),phrase=words.length>1?words.join(" "):null,rx={};
+  for(const t of [...terms,...excl,...(phrase?[phrase]:[])])rx[t]=termRx(t,ex,cs);
+  let want=o.dir;if(sort=="newest"||sort=="oldest"){want=want||(sort=="newest"?"desc":"asc");sort="year"}
+  const key=[cs?q.trim():q.trim().toLowerCase(),within,sort,...OPTS.map(k=>o[k])].join("\n");let out=sranked.get(key);
+  if(!out){
+    out=[];let inScope=null;
+    if(within){inScope=new Set([within]);for(const e of idx)if(e.trail.some(t=>t.path==within))inScope.add(e.p)}
+    for(const d of S){
+      if(inScope&&!d.cited.some(c=>inScope.has(c.path))||!sourceOk(d,o))continue;
+      if(d._name==null){d._name=[d.title,d.doi,d.arxiv,d.host].filter(Boolean).join(" ").toLowerCase();d._head=(d.abstract||"").toLowerCase();
+        d._ctx=d.cited.flatMap(c=>c.ctx).join("\n").toLowerCase()}
+      const name=cs?[d.title,d.doi,d.arxiv,d.host].filter(Boolean).join(" "):d._name,head=cs?d.abstract||"":d._head,low=cs?d.cited.flatMap(c=>c.ctx).join("\n"):d._ctx,h=(t,s)=>has(rx[t],s);
+      if(!terms.every(t=>h(t,name)||h(t,head)||h(t,low)))continue;
+      if(excl.some(t=>h(t,name)||h(t,head)||h(t,low)))continue;
+      const tier=!terms.length?0:terms.every(t=>h(t,name))?2:terms.every(t=>h(t,name)||h(t,head))?1:0;
+      let score=terms.reduce((s,t)=>s+10*h(t,name)+3*Math.min(count(rx[t],head),5)+Math.min(count(rx[t],low),10),0);
+      if(phrase)score+=30*h(phrase,name)+5*h(phrase,head);
+      out.push([tier,score,d,terms.reduce((n,t)=>n+count(rx[t],name)+count(rx[t],head)+count(rx[t],low),0)]);
+    }
+    // full-text matches not found above = the lowest tier (tier -1); excluded words count in the metadata too
+    const seen=new Set(out.map(x=>x[2].id)),byId=S._byId||(S._byId=new Map(S.map(d=>[d.id,d])));
+    for(const [id,n,score] of await ftSearch(terms,excl,cs)){const d=byId.get(id);
+      if(!d||seen.has(id)||inScope&&!d.cited.some(c=>inScope.has(c.path))||!sourceOk(d,o))continue;
+      const all=L([d.title,d.doi,d.arxiv,d.host,d.abstract||"",...d.cited.flatMap(c=>c.ctx)].filter(Boolean).join("\n"));
+      if(excl.some(t=>has(rx[t],all)))continue;
+      out.push([-1,score,d,n,true])}
+    const cmp=(a,b)=>a<b?-1:a>b?1:0,ti=x=>x[2].title.toLowerCase(),by={
+      year:(a,b)=>(b[2].year||0)-(a[2].year||0)||cmp(ti(a),ti(b)),
+      cited:(a,b)=>b[2].cited.length-a[2].cited.length||cmp(ti(a),ti(b)),title:(a,b)=>cmp(ti(a),ti(b))};
+    const f=by[sort]?sort:terms.length?"":"cited";
+    order(out,by[f]||((a,b)=>b[0]-a[0]||b[1]-a[1]||b[2].cited.length-a[2].cited.length||cmp(ti(a),ti(b))),f!="title",want,f=="year"?(x=>!x[2].year):null);
+    sranked.size>30&&sranked.clear();sranked.set(key,out);
+  }
+  const res=out.slice(offset,offset+limit).map(([tier,,d,n,ft])=>{
+    let sn=[];
+    if(ft);else if(terms.length){sn=snippets(d.abstract||"",L(d.abstract||""),(phrase?[phrase]:[]).concat(terms),rx,2).map(s=>({s}));
+      for(const c of d.cited)for(const s of c.ctx)if(sn.length<4&&terms.some(t=>has(rx[t],L(s))))sn.push({s,path:c.path,name:c.name,k:c.k})}
+    if(!sn.length&&d.abstract&&!ft)sn=[{s:cut(d.abstract,240)}];
+    if(!sn.length&&!ft&&d.cited.length&&d.cited[0].ctx.length){const c=d.cited[0];sn=[{s:c.ctx[0],path:c.path,name:c.name,k:c.k}]}
+    return {id:d.id,title:d.title,year:d.year,kind:d.kind,host:d.host,marks:d.marks,doi:d.doi,arxiv:d.arxiv,
+      cited:d.cited.map(c=>({path:c.path,name:c.name,k:c.k})),hits:n,title_hit:tier==2,snippets:sn,...(ft?{ft:true}:{})}});
+  return {total:out.length,results:res,terms:tjson(terms,rx,o)};
 }
 // ---- word-level diff of two versions: [[op,text],...] with op "=", "-", "+"
 function diff(ta,tb){
@@ -220,7 +347,7 @@ function diff(ta,tb){
 }
 window.fetch=async(url,opt)=>{
   if(typeof url!="string"||!url.startsWith("/api/"))return real(url,opt);
-  const u=new URL(url,location.href),q=u.searchParams,p=u.pathname,n=k=>parseInt(q.get(k)||0);
+  const u=new URL(url,location.href),q=u.searchParams,p=u.pathname,n=k=>parseInt(q.get(k)||0),o=Object.fromEntries(OPTS.map(k=>[k,(q.get(k)||"").trim()]));
   if(opt&&opt.method=="POST")return resp({error:"read-only"},403);
   try{
     switch(p){
@@ -235,13 +362,15 @@ window.fetch=async(url,opt)=>{
       case "/api/diff":{const [A,B]=await Promise.all([get(D+"vtext/"+n("node")+"-"+n("a")+".json"),get(D+"vtext/"+n("node")+"-"+n("b")+".json")]);
         return resp({a:A.model,b:B.model,ops:diff(A.text,B.text)})}
       case "/api/source":return resp(await get(D+"source/"+n("doc")+".json"));
+      case "/api/sources":return resp(await searchSources(q.get("q")||"",n("offset"),Math.min(n("limit")||50,500),q.get("in")||"",q.get("sort")||"",o));
+      case "/api/ftsnip":return resp({snippets:await ftSnip(n("doc"),q.get("q")||"",(q.get("case")||"")=="1")});
       case "/api/doctext":return new Response(await get(D+"doctext/"+n("doc")+".txt",true));
-      case "/api/search":return resp(await search(q.get("q")||"",n("offset"),Math.min(n("limit")||50,500),q.get("in")||"",q.get("sort")||""));
+      case "/api/search":return resp(await search(q.get("q")||"",n("offset"),Math.min(n("limit")||50,500),q.get("in")||"",q.get("sort")||"",o));
     }
   }catch(e){return NF()}
   return NF();
 };
-window.STATIC_SEARCH=()=>/[?&](q|in|sort)=/.test(location.search);
+window.STATIC_SEARCH=()=>/[?&](q|in|sort|what|dir|exact|case|kind|mark|y0|y1|site)=/.test(location.search);
 })();
 </script>
 <script>

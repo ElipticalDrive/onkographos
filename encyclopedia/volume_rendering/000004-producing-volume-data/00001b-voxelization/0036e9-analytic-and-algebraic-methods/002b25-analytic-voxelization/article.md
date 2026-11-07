@@ -2,45 +2,42 @@
 
 
 ## Overview
-Analytic Voxelization refers to a class of methods that determine voxel occupancy or attribute values by evaluating exact geometric intersections or integrals of the input primitives (meshes, points, or parametric surfaces) against the voxel grid, rather than relying on discrete rasterization or stochastic sampling. It solves the problem of converting continuous geometry into a discrete volumetric representation with high fidelity, often preserving sub-voxel accuracy or providing differentiable gradients. It sets itself apart from [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) by avoiding aliasing artifacts inherent in screen-space projection, and from [Monte Carlo 2D Voxelization](1734-monte-carlo-voxelization.md) by using deterministic geometric evaluation rather than stochastic sampling [S1, unofficial].
+Analytic Voxelization is a family of methods that map continuous world-space coordinates to discrete integer grid indices and evaluate the relationship between input primitives and voxel volumes using exact geometric or algebraic operations rather than rasterization or stochastic sampling [S1, S3, unofficial]. It sets itself apart from [Monte Carlo 2D Voxelization](1734-monte-carlo-2d-voxelization.md) by providing deterministic, noise-free results through exact intersection tests, and from [Differentiable Voxelization (MC/CF)](1742-differentiable-voxelization-mc-cf.md) by focusing on conservative moment integration and binary occupancy via clipping rather than closed-form gradients of rasterization coverage.
 
 ## Shared principles
-All methods in this family share the fundamental mechanism of mapping continuous geometric primitives to a discrete Cartesian grid through exact or semi-analytic evaluation.
+All methods in this family map continuous world-space coordinates to discrete integer grid indices $(i, j, k)$ and evaluate the primitive's relationship to the voxel volume analytically. The core mechanism involves:
 
-1.  **Coordinate Mapping**: The world space is mapped to grid indices. For a grid covering $[-1, 1]^D$ with dimensions $N_i$, the step size is $\text{step}_i = 2.0 / N_i$. A world coordinate $x$ maps to grid index $idx = \lfloor (x + 1) / \text{step} \rfloor$ [S1, unofficial].
-2.  **Geometric Evaluation**: Instead of projecting primitives to screen space, the method evaluates the primitive's relationship to voxel cells. This often involves:
-    *   **Bounding Volume Pruning**: Computing the axis-aligned bounding box (AABB) of the primitive in grid coordinates to limit the search space. For a triangle with vertices $v_0, v_1, v_2$, the bounding box is:
-        $$ \text{bbox\_min}_i = \max(0, \lfloor \frac{\min(v_{0,i}, v_{1,i}, v_{2,i}) + 1}{\text{step}_i} \rfloor) $$
-        $$ \text{bbox\_max}_i = \min(\text{dim\_size}_i - 1, \lfloor \frac{\max(v_{0,i}, v_{1,i}, v_{2,i}) + 1}{\text{step}_i} \rfloor) $$
-        [S1, unofficial].
-    *   **Exact Intersection/Integration**: Determining if a voxel is inside, outside, or intersected by the primitive. This can be done via winding numbers, signed distance fields, or analytic integration of density fields over the voxel volume.
-3.  **Attribute Accumulation**: If the primitive carries attributes (color, velocity, density), these are accumulated into the voxel. In analytic methods, this is often done by computing the exact volume of intersection between the primitive and the voxel, or by integrating the attribute field over that intersection [S1, unofficial].
+1.  **Coordinate Mapping**: Defining a grid resolution (number of cells per axis) and a bounding box (origin and extent). A world coordinate $x$ is mapped to a grid index $idx$ via:
+    $$ idx = \lfloor \frac{x - origin}{voxel\_size} \rfloor $$
+    where $voxel\_size$ is the physical dimension of a voxel [S1, unofficial][S3, unofficial].
+
+2.  **Occupancy Determination**: Evaluating whether a specific voxel cell intersects with, contains, or is influenced by the input primitive. This evaluation varies by method (e.g., rasterization coverage, ray intersection, point projection) [S1, unofficial][S2, S3, unofficial].
+
+3.  **Attribute Assignment**: Storing data in the voxel. This may be binary occupancy, continuous density, signed distance, or color/normal attributes [S1, S12].
 
 ## Subtopics
 
 ### [Monte Carlo 2D Voxelization](1734-monte-carlo-2d-voxelization.md)
-[Monte Carlo 2D Voxelization](1734-monte-carlo-voxelization.md) is a differentiable method for converting a 2D triangle mesh into a volumetric occupancy grid using Monte Carlo integration of the generalized winding number. It sets itself apart from Analytic Voxelization by using stochastic sampling rather than exact geometric intersection, allowing for adaptive sampling strategies and gradient propagation through the sampling process. It differs from [Differentiable Voxelization (MC/CF)](1742-differentiable-voxelization-mc-cf.md) by specifically implementing the 2D case with a focus on the generalized winding number boundary term.
+Uses stochastic sampling of the generalized winding number for 2D meshes, allowing adaptive sampling and gradient propagation, unlike the deterministic nature of this family.
 
 ### [Differentiable Voxelization (MC/CF)](1742-differentiable-voxelization-mc-cf.md)
-[Differentiable Voxelization (MC/CF)](1742-differentiable-voxelization-mc-cf.md) is a PyTorch autograd function that rasterizes 2D polygons or 3D triangle meshes into a grid of winding numbers, supporting both Marching Cubes (MC) and Convolution Filter (CF) methods. It sets itself apart from Analytic Voxelization by providing closed-form analytic gradients for both 2D and 3D primitives. It differs from [Monte Carlo 2D Voxelization](1734-monte-carlo-voxelization.md) by providing closed-form analytic gradients for both 2D and 3D primitives, and from [Analytic Moment Voxelization](3307-analytic-moment-voxelization.md) by focusing on binary/signed occupancy grids rather than higher-order polynomial moments.
+Provides closed-form analytic gradients for rasterization (MC) or convolution filtering (CF) of 2D/3D primitives, focusing on differentiability rather than conservative physical conservation.
 
 ### [Analytic Moment Voxelization](3307-analytic-moment-voxelization.md)
-[Analytic Moment Voxelization](3307-analytic-moment-voxelization.md) is a GPU-based technique to voxelize a 3D polyhedron by computing analytic moments of a polynomial density field over its volume, using geometric clipping and simplicial decomposition. It is chosen when higher-order statistical moments (beyond simple occupancy) are required for the volume data.
+Computes analytic moments of a polynomial density field over polyhedra using simplicial decomposition and geometric clipping, storing higher-order data than simple occupancy.
 
 ### [Analytic Tetrahedron Voxelization](3724-analytic-tetrahedron-voxelization.md)
-[Analytic Tetrahedron Voxelization](3724-analytic-tetrahedron-voxelization.md) is a function that voxelizes a single tetrahedron onto a destination Cartesian grid, computing physically conservative moments (volume, linear, quadratic) for a specified polynomial order. It is chosen when exact conservation of physical quantities is critical for a single tetrahedral element.
+Maps tetrahedral meshes to Cartesian grids via exact point-in-tetrahedron tests or conservative clipping, preserving physical conservation properties (mass, moments) for unstructured volumetric data.
 
 ### Precomputed Obstacle Voxelization
-#### definition
-Precomputing voxelization for obstacles with simple analytic transformations and applying the inverse transformation during texture access [S1, unofficial].
-#### step
-- Precompute the voxelization of the obstacle mesh [S1, unofficial].
-- When accessing inside-outside and obstacle velocity textures, multiply the texture coordinates by the inverse of the transformation matrix [S1, unofficial].
-#### pitfall
-This method only applies to simple analytic transformations (e.g., rigid translation and rotation), not complex skinning operations [S1, unofficial].
+- **Definition**: A technique where voxelization for obstacles with simple analytic transformations is precomputed, and the inverse transformation is applied during texture access [S1, unofficial].
+- **Steps**:
+    1. Precompute the voxelization of the obstacle mesh [S1, unofficial].
+    2. When accessing inside-outside and obstacle velocity textures, multiply the texture coordinates by the inverse of the transformation matrix [S1, unofficial].
+- **Pitfall**: This method only applies to simple analytic transformations (e.g., rigid translation and rotation), not complex skinning operations [S1, unofficial].
 
 ## Background
-The concept of precomputing voxelization for obstacles undergoing simple analytic transformations is described in the context of real-time fluid simulation. It is noted that using simplified models allows for voxelizing obstacles at every frame with little performance cost. The technique involves precomputing the voxelization of the obstacle mesh and then applying the inverse transformation during texture access for inside-outside and obstacle velocity textures [S1, unofficial]. This approach is particularly useful in fluid simulations where obstacles move rigidly, allowing the static voxel grid to be reused with coordinate transformation.
+The concept of precomputing voxelization for obstacles undergoing simple analytic transformations (like rigid body motion) was introduced in the context of real-time fluid simulation to reduce per-frame computational cost [S1, unofficial]. By simplifying obstacle models and leveraging inverse transformations during texture lookup, the method allows for efficient voxelization at every frame without significant performance penalties [S1, unofficial].
 
 ## Sources
 [S1] PDF Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)

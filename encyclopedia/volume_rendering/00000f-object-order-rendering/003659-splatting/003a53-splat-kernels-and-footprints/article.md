@@ -1,0 +1,63 @@
+# Splat Kernels and Footprints
+
+Also called: Splat Kernels, Footprint Functions, Reconstruction Kernels
+
+## Overview
+Splat Kernels and Footprints define the geometric shape, spatial extent, and attenuation profile of the primitives used in splatting-based volume rendering. They solve the problem of how to map discrete volumetric samples (voxels or particles) to continuous screen-space pixels while managing aliasing, transparency, and visual continuity. This family is distinguished from sibling methods like [Splatting Without the Blur](1157-splatting-without-the-blur.md) by its focus on the mathematical function $F(x,y)$ that determines the weight of a splat at a given screen coordinate, rather than the sorting or compositing pipeline itself. It sets itself apart from [Anti-Aliasing and Filtering](1574-anti-aliasing-and-filtering.md) by providing the specific kernel shapes (e.g., Gaussian, Beta, Dirichlet) that are subsequently filtered or projected.
+
+## Shared principles
+The splatting family shares the fundamental mechanism of treating volumetric data as a set of geometric or parametric primitives that are transformed and rasterized [S1, S3, S4, unofficial].
+
+1.  **Primitive Representation:** The volume is decomposed into primitives. These may be explicit geometric shapes (cubes, cells, splats) or implicit functions sampled via texture hardware [S1, S3, S4, unofficial]. Each primitive $k$ is defined by its position $\mathbf{p}_k$, density/extinction coefficient $g_k$ or $\rho_k$, and a reconstruction kernel $h$ (typically a Gaussian) [S1, unofficial][S6][S10, unofficial].
+2.  **Transformation:** Primitives are transformed from volume space to screen space using the Model-View-Projection (MVP) matrix or specific factorizations (e.g., shear-warp) [S2, S3, S4, unofficial]. For perspective projections, the kernel shape may be distorted (e.g., EWA splatting) to account for foreshortening [S6][S10, unofficial].
+3.  **Rasterization:** The transformed primitives are projected onto the 2D image plane. This step leverages hardware-accelerated scan-conversion, depth testing, and blending [S1, S2, S3, S4, unofficial]. The contribution of a voxel $D$ to a screen point $(x,y)$ is determined by the footprint function $F(x,y)$, which is the integral of the 3D kernel along the view direction [S2, unofficial][S6][S10, unofficial]:
+    $$ F(x,y) = \int h(x-x_D, y-y_D, z) \, dz $$
+    The intensity written to the pixel is modulated by the voxel density:
+    $$ P(x,y) = \text{weight}(x,y) \cdot \rho(D) $$
+    where $\text{weight}(x,y) = F(x-x_D, y-y_D)$ [S10, unofficial].
+4.  **Compositing:** Contributions are accumulated to form the final image. This is typically done using alpha blending in back-to-front or front-to-back order to handle transparency correctly [S1, S2, S3, unofficial][S7, book]. Splatting compositing is performed along sheets (all pixels at once for a set of voxels), whereas ray-casting composites along rays (one sample at a time) [S10, unofficial].
+5.  **Hardware Acceleration:** Most methods in this family rely on GPU rasterization pipelines for performance, enabling real-time interactivity [S1, S2, S3, unofficial].
+
+## Subtopics
+
+### [EWA Splatting](1069-ewa-splatting.md)
+[See EWA Splatting](1069-ewa-splatting.md)
+
+### [Splat Radius Adjustment Based on Normal Angle](1264-splat-radius-adjustment-based-on-normal-angle.md)
+[See Splat Radius Adjustment Based on Normal Angle](1264-splat-radius-adjustment-based-on-normal-angle.md)
+
+### [EWA Splatting with kNN Covariance Estimation](4690-ewa-splatting-with-knn-covariance-estimation.md)
+[See EWA Splatting with kNN Covariance Estimation](4690-ewa-splatting-with-knn-covariance-estimation.md)
+
+### 3D Point Splatting with Dirichlet Kernel
+**Definition:** A method that splats a collection of weighted 3D points onto a volumetric grid using a Dirichlet kernel (described in the text as Lanczos/sinc filtering) [S1, unofficial].
+**Step:**
+1. Initialize the computation context with the output grid dimensions ($n_x, n_y, n_z$) and the integer radius ($ir = \lceil \text{radius} \rceil$) [S1, unofficial].
+2. For each point $(x, y, z)$ with weight $w$, compute the integer floor coordinates $ix, iy, iz$ [S1, unofficial].
+3. Compute the bounding box $[x_0, x_1), [y_0, y_1), [z_0, z_1)$ for the splat by clamping $[ix-ir, ix+ir]$ to the grid boundaries $[0, n_x], [0, n_y], [0, n_z]$ [S1, unofficial].
+4. Iterate over the bounding box indices $i, j, k$ [S1, unofficial].
+5. Add the computed weight $w_z$ to the grid cell at $(i, j, k)$ [S1, unofficial].
+**Parameter:**
+*   `out`: a 3D ndarray representing the target volumetric grid [S1, unofficial].
+*   `points`: a $[n, 3]$ shape ndarray encoding the x/y/z grid coordinates of the points to splat [S1, unofficial].
+*   `weights`: a $[n]$ shape ndarray containing the weight for each point [S1, unofficial].
+*   `radius`: the radius of the point splat to draw, used to determine the bounding box of the kernel support [S1, unofficial].
+**Comparison:** The text notes that if a different kernel is desired after splatting, a convolution via FFT can be applied [S1, unofficial].
+
+### Beta Function Splatting Kernel
+**Definition:** A 2D kernel function used for splatting that replaces the Normal distribution. It uses a Beta function to control footprint shape, offering smaller footprints and easier tuning for visual parameters like opacity and zoom [S2, unofficial].
+**Formula:**
+$$ \text{Beta}(x, a, b) = k_{\text{scale}} \cdot x^a \cdot (1 - x)^b $$
+where $x$ is in range $[0, 1]$, $a$ and $b$ control the curve shape, and $k_{\text{scale}}$ is a scaling factor [S2, unofficial].
+**Parameter:**
+*   $a, b$: Shape parameters for the Beta function. Identical values produce symmetric curves. Lower values produce more 'opened' (wider/flatter) curves [S2, unofficial].
+*   $k_{\text{scale}}$: Scaling factor applied to the Beta function to adjust the range/height [S2, unofficial].
+**Pitfall:** Holes may appear when voxel opacity decreases, requiring changes in footprint size to maintain continuity between neighbor voxels. This is especially noticeable at feature boundaries in tagged volumes [S2, unofficial].
+**Comparison:** Beta footprints are smaller than Normal distribution footprints while providing equivalent visual quality, resulting in faster execution (twice as fast in the tested example) [S2, unofficial].
+
+## Background
+The concept of splatting kernels originated with Levoy's volume splatting in 1989, which introduced the Gaussian kernel as a means to handle transparency and anti-aliasing in direct volume rendering [S1, S3, S4, unofficial]. The family has evolved to include Elliptical Weighted Average (EWA) splatting to handle perspective distortion [S2, S6, S15, unofficial], and specialized kernels like the Dirichlet kernel for grid-based point splatting [S1, unofficial] and Beta functions for optimized feature-graph rendering [S2, unofficial]. These methods are widely used in real-time volume visualization, medical imaging, and point cloud rendering.
+
+## Sources
+[S1] mikolalysenko/splat-points-3d, https://github.com/mikolalysenko/splat-points-3d, fetched 2026-10-26 (unofficial)
+[S2] Splatting multiresolution volume data using the feature graph, http://hdl.handle.net/2117/86461, fetched 2026-10-26 (unofficial)

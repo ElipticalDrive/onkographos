@@ -1,0 +1,1084 @@
+V4D: Voxel for 4D Novel View Synthesis
+arXiv:2205.14332v4 [cs.CV] 13 Aug 2024
+Wanshui Gan
+The University of Tokyo, RIKEN AIP
+wanshuigan@gmail.com
+Hongbin Xu
+South China University of Technology, Alibaba Group
+xuhongbin.xhb@alibaba-inc.com
+Yi Huang
+Shenzhen Institute of Advanced Technology,
+Chinese Academy of Sciences
+yi.huang@siat.ac.cn
+Shifeng Chen
+Shenzhen Institute of Advanced Technology,
+Chinese Academy of Sciences
+shifeng.chen@siat.ac.cn
+Naoto Yokoya
+The University of Tokyo, RIKEN AIP
+yokoya@k.u-tokyo.ac.jp
+Abstract
+Neural radiance fields have made a remarkable breakthrough in the novel view
+synthesis task at the 3D static scene. However, for the 4D circumstance (e.g.,
+dynamic scene), the performance of the existing method is still limited by the
+capacity of the neural network, typically in a multilayer perceptron network (MLP).
+In this paper, we utilize 3D Voxel to model the 4D neural radiance field, short as
+V4D, where the 3D voxel has two formats. The first one is to regularly model
+the 3D space and then use the sampled local 3D feature with the time index
+to model the density field and the texture field by a tiny MLP. The second one
+is in look-up tables (LUTs) format that is for the pixel-level refinement, where
+the pseudo-surface produced by the volume rendering is utilized as the guidance
+information to learn a 2D pixel-level refinement mapping. The proposed LUTsbased refinement module achieves the performance gain with little computational
+cost and could serve as the plug-and-play module in the novel view synthesis task.
+Moreover, we propose a more effective conditional positional encoding toward the
+4D data that achieves performance gain with negligible computational burdens.
+Extensive experiments demonstrate that the proposed method achieves state-of-theart performance at a low computational cost. The relevant code will be available in
+https://github.com/GANWANSHUI/V4D.
+1
+Introduction
+The novel view synthesis task could offer an immersive experience in applications such as augmented
+reality, virtual reality, games, and the movie industry, which has been attracting more and more
+attention in recent years. The differentiable volume rendering technique has significantly boosted the
+performance in novel synthesis tasks, where the representative one in these two years should be the
+Neural Radiance Fields (NeRF) proposed in [17]. In NeRF, the relative soft geometry representation
+via volume rendering could make the geometry learn more efficiently, especially under multi-view
+constraints, which is a key distinguishing characteristic compared with the geometry representation
+with decision boundaries such as the occupancy field [16] and signed distance field [36]. The novel
+view synthesis in static scenes has been well studied, such as for large scenes [34, 28, 24], low
+computational cost [14, 27, 37, 7], relaxing the camera pose or the number of posed images [38, 4],
+Preprint. Under review.
+and better geometry representation [31, 19, 36]. In this paper, we focus on the novel view synthesis
+in dynamic scenes, particularly under a single-view video setting, which is much more challenging
+due to the lack of efficient multi-view constraints.
+For the novel view synthesis in the dynamic scenes, one of the problem settings is under multi-view
+video and this setting could usually produce better results thanks to the existed multi-view constraints
+at the same moment. However, capturing the multi-view video relies on the support from professional
+equipment, which asks for the multi-view camera rigs. These laborious and expensive setting makes
+people tend to explore the single-view video in a dynamic scene, even though this is an ill-posed
+problem lacking the multi-view constraints. To alleviate the ill-posed problem, previous works
+introduce the constraint information from the third part module, such as the optical flow between the
+adjacent video frames and the monocular depth information for the geometry consistency constraints
+[33, 13, 8]. Another research line is to predict the canonical space of the dynamic scene and then
+to model the neural radiance field at the canonical space [20, 23, 29]. However, the mentioned
+methods only used the MLPs to model the neural radiance field, and we argue that the representation
+ability would be limited due to the neural network’s capacity, especially under the lack of multi-view
+constraints. To handle this problem, we propose the 3D voxel-based architecture (V4D) to model the
+4D dynamic neural radiance field. The overview of the proposed architecture is illustrated in Figure
+1.
+Specifically, we model the neural density field and the texture field separately under the hybrid
+network structure, where the sampled feature in the voxel grid is combined with the time index and
+then pass to an MLP for the density and the RGB texture information. However, the hybrid network
+structure is easy to over-fit to the training view due to the lack of multi-view constraints. We find
+that the total variation loss on the voxel grid could effectively prevent this problem and maintain
+proper geometry learning. Although we can achieve significant performance gain with the total
+variation constraints on the voxel grids, the high-frequency detail is still not well delineated and tend
+to be over smooth on the surface. Therefore, we introduce a conditional positional encoding module
+to recap the high-frequency details. Moreover, after the volume rendering, we further design the
+pixel-level refinement module for a better color representation. Note that the proposed two modules
+only consume little computational cost and achieve performance improvement. At last, the proposed
+V4D is compared with the single view video datasets proposed in [23] and [21]. The extensive
+experiments demonstrate the superiority of the proposed method.
+In summary, the main contributions of this work are as follows:
+• We propose the method V4D, a simple yet effective and efficient framework, for 4D novel
+view synthesis with the 3D voxel, which directly models the 4D neural radiance field without
+the need for canonical space.
+• To address the over-smooth problem caused by the total variation loss, we propose the
+conditional positional encoding module and pixel-level refinement module, which are
+verified to be effective in improving the performance, whereas the pixel-level refinement
+module implemented by the look-up tables could be regarded as the plug-and-play module
+in the novel view synthesis task.
+• The proposed V4D achieves state-of-the-art performance in synthesis dataset [23] and
+competitive performance in real scenes dataset [21].
+2
+Related works
+2.1
+Neural radiance field representation
+Multilayer perceptrons (MLPs) are widely used to construct the neural radiance field in a compact network, but researchers also recognize the shortcoming that the global optimization of the whole MLPs
+is time-consuming. Therefore, for a fast rendering speed, [37] proposes NeRF-SH by pre-tabulating
+the NeRF into a PlenOctree and factorizing the appearance spherical harmonic representation. [30]
+further proposes plenoptic voxels to represent the 4D dynamic scene with spherical harmonics under
+the multi-view video setting. [14, 27, 10, 22] are more related to this work that uses the hybrid
+representation that learns a voxel and MLPs to model the radiance field and the view-dependent effect
+simultaneously, achieving fast training and rendering speed. Some very recent methods also share a
+similar concept of the dual radiance field. [25] and [35] propose Doublefield and double diffusion
+2
+based neural radiance field for high-fidelity human reconstruction and rendering, which is towards
+static multi-view reconstruction. Different from the above methods, the proposed V4D is for the 4D
+scene representation in a single-view video setting, which is more challenging.
+2.2
+4D representation
+Apart from the 3D scene representation, it is natural to consider the neural radiance field for the 4D
+situation and it could be a single 3D scene with a time dimension, a dynamic scene, or just multiple
+independent 3D scenes. For multiple independent 3D scenes, there has been a limited number of
+methods explored in this field. [14] has revealed the ability to memorize multiple independent
+3D scenes with its proposed method, but it needs to learn an independent voxel embedding for
+each scene and only share the same MLPs to predict density and color. For the dynamic scenes,
+[18] proposes occupancy flow, a spatio-temporal representation of time-varying 3D geometry with
+implicit correspondences, which could be built from the images or point clouds. More recently,
+researchers modeled the dynamic scene with the neural radiance field, which could offer a more
+immersive visual experience. There are two main methods. The first is to learn the 4D radiance field,
+which conditions the radiance field with 4D vector such as the 3D position plus with time stamp
+[33, 13, 8]. The second is by learning an intermediate time-invariant 3D representation or canonical
+space [20, 23, 29]. However, the mentioned methods require the third part supervision signal (e.g.,
+optical flow, depth information) to learn the 4D radiance field or achieve unsatisfying performance
+and high computational cost. In contrast, the proposed V4D does not need the additional supervision
+signal apart from the collected sequence of posed images, and it achieves the superior 4D scene
+representation ability with a much lower computational resource requirement.
+2.3
+Look-up tables and concurrent work
+The proposed pixel-level refinement module is related to the works in the image enhancement task
+[39, 32]. [39] proposes image-adaptive 3D LUTs for real-time image enhancement and [32] considers
+the adaptive 3D LUTs with the global scenario and local spatial information, which could get better
+results. Different from them, we treat the 3D LUTs as the refinement module in our 4D novel view
+synthesis task with dedicated design. To the best of our knowledge, this work is the first work to
+explore the LUTs refinement in novel synthesis tasks. Besides, as this work is finished, we find two
+concurrent works [6, 9] also share the idea model the neural radiance field by the voxel. For details,
+TiNeuVox [6] proposes a tiny coordinate deformation network to model coarse motion trajectories.
+NVDG [9] uses a deformation grid to store 3D dynamic features, and a light-weight MLP maps a
+3D point in observation space to the canonical space using the interpolated features. Both of them
+use the canonical space to model the neural radiance field. Different from them, we directly do the
+4D attributes mapping to the density and color without canonical space and achieves better result as
+introduced as follows.
+3
+Method
+3.1
+Preliminaries
+In this paper, we discuss the voxel-based architecture for 4D novel view synthesis. By extending
+the 3D situation to 4D, we need to learn a proper mapping function to map the 6D attributes
+(x, y, z, t, θ, ϕ) into the volume density σ and the RGB color c, where (x, y, z) is the 3D spatial
+location of the each sample point, t is the time index at that moment, and (θ, ϕ) is the 2D view direction
+for modeling the view dependent effect. We define the mapping function as M : (x, y, z, t, θ, ϕ) →
+(σ, c). Following the approximate volume rendering in NeRF [17], we can learn the mapping function
+by supervising the estimated RGB color ĉ. The estimated RGB color of each pixel in image plane
+could be obtained by the equation (1) :
+ĉ =
+N
+X
+Ti (1 − exp(σi δi )ci ),
+(1)
+i=1
+ P
+
+i−1
+where Ti = exp − j=1 σj δj , δi = ti+1 − ti , i is the sampled point along the ray, and N is the
+number of the sampled points.
+3
+Frame
+Time
+Density Volume
+Density Field
+T
+X
+Ray
+Sampling
+X
+Queried
+Point
+T
+Y
+Z
+T
+*
+Ray distance
+LUT Refine
+Coarse RGB
+Refined RGB
+T
+X
+Y
+Z
+Texture Volume
+T
+Time
+X
+Y
+Z
+Queried Point
+V
+V
+Texture Field
+View Direction
+CPE
+MLPs
+Volume Rendering
+MLPs
+CPE
+T
+X
+Y
+Z
+MLPs
+Y
+Z
+T
+Pseudo Surface
+Conditional Positional Encoding
+Concatenate
+Figure 1: Overview of the voxel for 4D novel view synthesis (V4D). Given a single-view video
+clip, we present a voxel-based method for 4D novel view synthesis. The detailed introduction of the
+conditional positional encoding (CPE) and the look-up tables refinement module (LUT refine) are
+placed in Section 3.2.
+The key component is to design the effective neural network as the mapping function, and we present
+our method as follows.
+3.2
+Voxel for 4D novel view synthesis
+Network design The previous work has revealed the advantage of using the voxel as the backbone
+for the 3D novel view synthesis, which could be computationally efficient and have higher accuracy
+compared with the MLP-based methods. We propose V4D, as illustrated in Figure 1, for 4D novel
+view synthesis. Since it would cost huge memory storage if we adopt the 4D voxel format, we
+initialize two 3D voxels with dimensions 160 × 160 × 160 × 12, the density volume and the texture
+volume, where density volume is mainly for modeling the density field and the texture volume is only
+for the texture field. For modeling the time dimension, we concatenate the time index t with the 3D
+location (x, y, z), view direction (θ, ϕ), and the sampled feature (Fden , Ftex ), and then feed them
+into the density field and texture field, respectively. We use the 5-layer MLPs to model the density
+field and the texture field. With the volume rendering in equation (1), we can obtain the coarse RGB
+pixels in the image plane. As stated before, the total variation loss on the voxel grids is a key factor to
+prevent the neural work from over-fitting the training set, especially in the dynamic scenes. However,
+it is observed that the novel view result would be a bit blurred due to the over-smooth characteristics
+of the total variation loss, which means that the high-frequency detail is missing. Therefore, we
+propose the conditional positional encoding and a look-up tables refinement module to alleviate this
+problem as follows.
+Conditional positional encoding The positional encoding is critical to recover the high-frequency
+details in the novel view synthesis task [17]. In our proposed method, we not only do the positional
+encoding in the 6D attributes (x, y, z, t, θ, ϕ) but also apply it to the sampled feature (Fden , Ftex ).
+Besides, in the 4D situation, we further explicitly assign the phase shift to different frequencies,
+which is inspired by the previous work that the phase information retains the main information of the
+image after the Fourier transformation [26]. Therefore, shifting the phase with the time index should
+help the neural network to learn effective feature embedding at different moments. We introduce the
+conditional positional encoding (CPE) defined as,
+
+
+2π
+2π
+L−1
+L−1
+γ(pv ) = sin(2
+πpv + L−1 t), cos(2
+πpv + L−1 t) ,
+(2)
+2
+π
+2
+π
+where pv is the sampled feature vector at position (x, y, z), L = 5 is the frequency order, and t is the
+time index. Note that we do not use the conditional positional encoding in the sampled feature (Fden )
+for the density field and only apply the CPE to the texture field, (Fden , Ftex ) −→ (F̂den , F̂tex ). The
+reason is that the voxel for the density field should be initialized with zero for the correct volume
+rendering at the beginning of the training phase, and doing the conditional positional encoding for
+the density feature would break this rule that would make the learning collapse.
+4
+Predicted Spatial-aware
+Weight
+Learnable Basic LUTs
+3D LUT
+Trilinear
+Interpolation
+Value on RGB Space
+Coarse RGB
+Iter. Z times
+Refined RGB
+Figure 2: LUTs refinement module. Given the coarse RGB value as input, we learn M = 5 basic
+LUTs to model a 2D pixel-level refinement mapping with guidance from the pseudo-surface. We do
+the recurrent iteration with Z = 3 times for the best result. The detailed introduction is in 3.2.
+LUTs refinement The existing neural rendering methods directly do the 2D RGB supervision after
+the volume rendering and rarely consider any refinement operation. We propose voxel-based look-up
+tables for the pixel-level RGB refinement as shown in Figure 2. Following the previous work [39],
+we also used the downsampled voxel grids with resolution 33 × 33 × 33 to construct the RGB color
+space. We use 5 basic LUTs as the refinement units and, at the beginning of the training, one basic
+LUT is initialized as the identity LUT for a more stable training, and the rest is initialized as zero
+for a more expressive color space representation. Given the coarse RGB pixel value, we treat it as
+the spatial location and do the trilinear interpolation on the basic LUTs to obtain the interpolated
+RGB value. An important step is to combine the interpolated RGB value from the basic LUT as the
+final output. In the image enhancement task [39, 32], the low-resolution image is used to predict the
+weight to combine the interpolated RGB value. However, it is unpractical in the novel view synthesis
+task, where such an operation loses the 3D spatial awareness. To make sure the weight of the basic
+LUTs is 3D spatial aware, we propose to use the pseudo-surface as input and use 10-layer MLPs to
+predict the weight for composing the basic LUTs. Specifically, the 3D point on the pseudo-surface
+could be obtained by depth information from the rendering equation, where we can slightly modify
+ˆ
+the equation (1) into equation (3) for the depth information d,
+dˆ =
+N
+X
+Ti (1 − exp(σi δi )ti ).
+(3)
+i=1
+Since the LUTs refinement module is designed after the volume rendering and is for the 2D pixel-level
+refinement, we only need a little computational cost and achieve the performance gain.
+3.3
+Loss function
+For training the proposed network, we define the loss function in equation 4:
+Loss = w1 Lrgb + w2 Lpt_rgb + w3 Lbg + w4 LT V ,
+(4)
+2
+P
+where Lrgb = R1 r∈R Ĉ(r) − C(r) , R is the training rays in a batch size, the Ĉ(r) and C(r)
+2
+is the ground truth color and rendered color, respectively.
+2
+P
+PK
+Lpt_rgb = R1 r∈R i=1 (Ti ai Ĉ(r) − C(r) ), K is number queried point in texture volume. Ti
+2
+is the accumulated transmittance at the pointi, ai is the probability of the termination at the point i.
+Lbg = −TK+1 log(TK+1 ) − (1 − TK+1 )log(1 − TK+1 ), which is to encourage the model to separate
+the foreground and the background [27]. LT V is the total variation loss works on the voxel grids,
+directly. We did not apply the total variation loss on the voxel of the LUTs refinement module and
+only apply it to the density volume and texture volume. w1 , w2 , w3 , w4 are the weights of the loss
+function, which is set as 1.0, 0.01, 0.001, 0.1, respectively. Note that, in w4 , we apply the exponential
+weight decay strategy during the training with 0.005, which could alleviate the over smooth problem
+caused by the total variation regularization.
+5
+(a) SV (Single voxel that combines the density field and texture field)
+Density Field
+X Y Z
+T
+X
+Y
+T
+Time
+Z
+T
+Y
+Z
+Density / Texture
+Volume
+T
+Queried Point
+Radiance Field
+Texture Field
+CPE
+Density / Texture
+Volume
+X
+(b) SF (Single voxel and single radiance field in the
+NVSF-like structure)
+X
+Y
+Z
+T
+V
+V
+V
+View Direction
+Concatenate
+MLPs
+Unified Feature
+CPE
+Conditional Position Encoding
+Figure 3: The variant architecture in V4D for ablation study. For the SV, we unify the density
+volume and texture volume with volume size 160 × 160 × 160 × 24. For the SF, it is an NVSF-like
+structure [14] but not in the sparse voxel format. For a fair comparison, we have kept the same
+setting during the implementation (e.g., the width and depth of the MLPs) apart from the architecture
+difference illustrated above.
+Table 1: Quantitative comparison of the synthesis dynamic scenes under the single view setting. Our
+method outperforms the other methods. The training and inference time is tested on NVIDIA A100.
+The number with bold typeface means the best result.
+Method
+W / Time W / Voxel W / Canonical space Training (h) Inference (s) PSNR ↑ SSIM ↑ LPIPS ↓
+NeRF [17]
+×
+×
+×
+–
+–
+19.00
+0.87
+0.18
+T-NeRF [23]
+✓
+×
+×
+–
+–
+29.51
+0.95
+0.08
+D-NeRF [23]
+✓
+×
+✓
+15.9
+15.24
+30.50
+0.95
+0.07
+NDVG [9]
+✓
+✓
+✓
+–
+–
+31.32
+0.97
+0.05
+TiNeuVox [6]
+✓
+✓
+✓
+0.35
+1.42
+32.67
+0.97
+0.04
+Ours
+✓
+✓
+×
+6.9
+0.48
+33.72
+0.98
+0.02
+4
+Experiment
+4.1
+Experiment setting
+Dataset The proposed V4D is verified on the 8 synthesis datasets [23] and 4 real scene datasets [21].
+Besides, the proposed LUTs refinement model is also evaluated on the 3D static novel view synthesis
+dataset, Synthetic-NeRF [17] and TanksTemples [11], where we choose DVGO [27] and NeRF [17]
+as the baseline method. Note that the hyperparameters of the LUTs refinement module are selected
+from the experiment on 3D scenes since the computational cost is much lower based on [27], which
+could help our verification in a short time. Besides, since the geometry in the static scene is generally
+better than in single-view dynamic scenes, we could avoid this bias for a more justice evaluation.
+Implementation details We train the neural network with 250k iterations in [23] and 100k iterations
+in [21]. About the learning rate, the voxel in density and texture volume is 0.1 and the MLPs in the
+density and texture fields are 1e-3. In the LUTs refinement module, the learning rate of MLPs and
+voxel are both 1e-4. To optimize the neural network, we use the Adam optimizer [5] with a batch size
+of 8,196 rays in the first stage and with a batch size of 4,196 rays in the second stage. Apart from the
+LUTs refinement module, the exponential learning rate decay is applied to the neural network with
+0.1.
+Metrics For quantitative evaluation, we use the following metrics to evaluate the novel view image in
+the testing set: (1) Peak signal-to-noise ratio (PSNR); (2) Structural similarity index measure (SSIM);
+(3) Perceptual quality measure LPIPS [40]. ↑ means the value higher is better and ↓ means lower
+is better. For qualitative evaluation, apart from the RGB novel view image, we also show the FLIP
+[1, 12] error maps to highlight the result of the ablation study.
+6
+Table 2: Quantitative comparison of the real dynamic scenes under the single view setting. Our
+method achieves competitive performance. The number with bold typeface means the best result and
+the underline is the second best.
+Method
+PSNR ↑ MS-SSIM ↑
+NeRF [17]
+20.1
+0.745
+NV [15]
+16.9
+0.571
+NSFF [13]
+26.3
+0.916
+Nerfies [20]
+22.2
+0.803
+HyperNeRF [21] 22.4
+0.814
+TiNeuVox [6]
+24.3
+0.837
+Ours
+24.8
+0.832
+Table 3: Ablation study of the V4D architecture. The definition of each abbreviation is SV (single
+voxel that combines the density volume and texture volume ), SF (single radiance field that combines
+the density field and texture field), BL (our proposed baseline model), D (using the decay total
+variation loss), P (using the positional encoding in the sampled voxel feature), C (using the conditional
+positional encoding in the sampled voxel feature), L (using the LUTs refinement module). The partial
+visualization result is in Figure 6. The number with bold typeface means the best result.
+Method
+SV
+SF
+BL
++D
++ (D,P)
++ (D,C)
++ (D,C,L)
+Method
+SV
+SF
+BL
++D
++ (D,P)
++ (D,C)
++ (D,C,L)
+4.2
+Hell Warrior
+SSIM ↑ LPIPS ↓
+0.95
+0.06
+0.95
+0.07
+0.93
+0.09
+0.95
+0.06
+0.96
+0.06
+0.96
+0.06
+0.96
+0.05
+Lego
+PSNR ↑ SSIM ↑ LPIPS ↓
+25.63
+0.95
+0.04
+25.17
+0.94
+0.04
+25.17
+0.94
+0.05
+25.57
+0.95
+0.04
+25.62
+0.95
+0.04
+25.61
+0.95
+0.04
+25.62
+0.95
+0.04
+PSNR ↑
+25.81
+25.93
+23.12
+26.04
+26.57
+26.79
+27.03
+PSNR ↑
+35.82
+36.08
+34.64
+36.03
+36.18
+36.12
+36.27
+PSNR ↑
+34.18
+32.60
+32.74
+33.91
+34.56
+34.48
+34.53
+Mutant
+SSIM ↑
+0.99
+0.99
+0.98
+0.99
+0.99
+0.99
+0.99
+T-Rex
+SSIM ↑
+0.98
+0.98
+0.98
+0.98
+0.99
+0.99
+0.99
+LPIPS ↓
+0.01
+0.01
+0.02
+0.02
+0.02
+0.01
+0.01
+LPIPS ↓
+0.02
+0.02
+0.03
+0.02
+0.02
+0.02
+0.02
+Hook
+SSIM ↑ LPIPS ↓
+0.96
+0.04
+0.97
+0.04
+0.95
+0.06
+0.96
+0.04
+0.96
+0.04
+0.97
+0.04
+0.97
+0.03
+Stand Up
+PSNR ↑ SSIM ↑ LPIPS ↓
+36.96
+0.99
+0.01
+37.15
+0.99
+0.01
+33.26
+0.98
+0.02
+36.66
+0.99
+0.01
+36.91
+0.99
+0.01
+37.11
+0.99
+0.01
+37.20
+0.99
+0.01
+PSNR ↑
+29.93
+30.14
+27.85
+30.27
+30.43
+30.85
+31.04
+Bouncing Balls
+PSNR ↑ SSIM ↑ LPIPS ↓
+41.90
+0.99
+0.02
+30.10
+0.97
+0.07
+37.60
+0.99
+0.03
+40.28
+0.99
+0.03
+40.96
+0.99
+0.02
+41.62
+0.99
+0.02
+42.67
+0.99
+0.02
+Jumping Jacks
+PSNR ↑ SSIM ↑ LPIPS ↓
+35.31
+0.99
+0.02
+35.44
+0.99
+0.02
+30.77
+0.97
+0.04
+34.81
+0.98
+0.02
+34.97
+0.98
+0.02
+35.18
+0.99
+0.02
+35.36
+0.99
+0.02
+Results
+4D novel view synthesis The main motivation of our approach is to address the problems in the
+exited method D-NeRF [23]. One problem is the unsatisfied performance due to the limited capacity
+in MLP-based networks, and the other problem is the high computational cost for both training and
+inference. Therefore, we strictly aligned the experiment setting with D-NeRF and compared the
+result with it. For the synthesis scenes [23], our proposed method is much better than the D-NeRF
+both quantitatively (Table 1) and qualitatively (Figure 4). Besides, comparing the concurrent works,
+NDVG [9] and TiNeuVox [6], our method is also better than theirs. For the real dynamic scenes [21],
+we also achieves competitive results as recorded in Table 2 and Figure 5. The disadvantage of our
+method is that we need a longer training time, which is because we do not adapt the canonical manner
+and rely on the TV loss to pass through the temporal information between different frames, so we
+need more iterations to train the network. Though we have a longer training time, our inference time
+is lesser than TiNeuVox [6] since we do not need to use an MLP-based sub-network to predict the
+position offset of each moment. The detailed numerical results are presented in the supplemental
+material.
+Ablation study on neural network architecture Table 3 shows the ablation study on the design of
+V4D. First, we evaluate the design of the voxel and MLPs arrangement before the volume rendering.
+At first, we do the study on the two network variants which include the single voxel (SV) and single
+voxel-single radiance field (SF) formats as illustrated in Figure 3. Comparing our full model (BL +
+(D, C, L)) with SV and SF, we can see that the proposed V4D in dual voxel setting and modeling the
+density and texture fields separately could achieve a better result. We can learn that the performance
+in the SF setting is worse in some subsets such as in Bouncing Balls and T-Rex. The potential
+7
+Table 4: The hyperparameters ablation study of the LUTs refinement module. We select the DVGO
+[27] as the baseline method and evaluate 8 models in Synthetic-NeRF dataset [17]. The definition
+of each abbreviation is w/o weight (without using the weight estimated by the pseudo-surface),
+iter/iters (the times of the recurrent iteration), basic/basics (the number of the basic LUT). Based
+on the overall evaluation of the three metrics, the number with bold typeface means the best and the
+number with the underline is the second.
+Chair
+Drums
+Ficus
+Hotdogs
+PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓
+DVGO [27] 34.455 0.979
+0.022 25.514 0.930
+0.074 32.914 0.978
+0.024 36.997 0.981
+0.031
++ LUT
+(w/o weight) 34.581 0.980
+0.024 25.367 0.930
+0.078 33.640 0.981
+0.023 37.052 0.981
+0.032
++ LUT
+(1 iter)
+34.692 0.981
+0.024 25.545 0.933
+0.075 33.977 0.982
+0.022 37.237 0.982
+0.031
++ LUT
+(3 iters)
+34.568 0.981
+0.022 25.522 0.932
+0.076 34.050 0.983
+0.021 37.263 0.981
+0.031
++ LUT
+(5 iters)
+34.544 0.981
+0.024 25.574 0.933
+0.077 34.051 0.983
+0.021 37.241 0.982
+0.032
++ LUT
+(1 basic)
+34.587 0.980
+0.026 25.623 0.933
+0.075 33.794 0.982
+0.023 37.006 0.981
+0.033
++ LUT
+(5 basics)
+34.568 0.981
+0.022 25.522 0.932
+0.076 34.050 0.983
+0.021 37.263 0.981
+0.031
++ LUT
+(10 basics)
+34.487 0.981
+0.023 25.610 0.933
+0.076 33.853 0.983
+0.022 37.350 0.982
+0.030
+Lego
+Materials
+Mics
+Ship
+Method
+PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓
+DVGO [27] 34.797 0.977
+0.024 29.552 0.949
+0.058 33.497 0.984
+0.015 29.350 0.881
+0.152
++ LUT
+(w/o weight) 35.093 0.978
+0.024 29.736 0.952
+0.060 33.612 0.984
+0.017 29.512 0.881
+0.152
++ LUT
+0.015 29.726 0.883
+0.151
+(1 iter)
+35.435 0.979
+0.023 29.952 0.954
+0.056 33.918 0.985
++ LUT
+(3 iters)
+35.383 0.979
+0.023 30.025 0.955
+0.055 33.931 0.985
+0.015 29.545 0.880
+0.152
++ LUT
+(5 iters)
+35.257 0.978
+0.024 29.984 0.954
+0.055 33.861 0.986 0.0154 29.534 0.881
+0.152
++ LUT
+(1 basic)
+35.131 0.978
+0.024 29.898 0.953
+0.056 33.733 0.985
+0.016 29.465 0.882
+0.150
++ LUT
+0.152
+(5 basics)
+35.383 0.979
+0.023 30.025 0.955
+0.055 33.931 0.985
+0.015 29.545 0.880
++ LUT
+0.023 29.943 0.954
+0.056 33.846 0.985
+0.016 29.571 0.881
+0.153
+(10 basics)
+35.370 0.979
+Method
+Table 5: Ablation study of the LUTs refinement module in static scenes. We select the DVGO [27]
+and NeRF [17] as the baseline method and evaluate 8 models in Synthetic-NeRF dataset [17] and 4
+models in TanksTemples dataset [11]. The number with bold typeface means the best.
+Synthetic-NeRF
+TanksTemples
+Time
+PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓ train (h) ↓ test (s) ↓
+DVGO [27] 32.135 0.957
+0.050 28.739 0.908
+0.162
+0.31
+0.366
++ LUT
+32.536 0.959
+0.049 29.347 0.912
+0.156
+0.45
+0.438
+NeRF [17] 31.185 0.951
+0.058 26.224 0.871
+0.214
+4.53
+1.777
++ LUT
+31.464 0.953
+0.056 26.512 0.872
+0.210
+4.54
+1.811
+Method
+explanation behind this phenomenon is that sharing the same MLPs network for the density and
+RGB value would cause some contradiction when optimizing the voxel grid. As stated before, at the
+beginning of the training, the density should be initialized into zero for the correct volume rendering,
+and sharing too many features with RGB values may make the training unstable. Second, we evaluate
+the contributions of different components in our network. We can see that the decay total variation
+loss working on the voxel grid is necessary for the training, which could prevent the model from
+overfitting to the training set. However, the total variation loss tends to cause over smooth visual
+performance. From Figure 6, we can see that the appearance is a bit blurred even though we decrease
+8
+the weight of the total variation loss with the exponential decay strategy during the training phase.
+To handle this problem, the proposed conditional positional encoding (CPE) and LUTs refinement
+module could alleviate the problem of over-smoothness and the full setting of our method achieves
+generally better results, which verified the effectiveness. For a better visual analysis, we select several
+results in the format of the FLIP error map [1] in Figure 6.
+Hyperparameters on the LUTs refinement module The hyperparameters ablation study of the
+LUTs refinement module is summarized in Table 4. For the experiment, we train 100k iterations for
+all the settings. The LUT refinement module works at the beginning of the training. The iter/iters
+setting means the times of the recurrent iteration and the basic/basics setting defines the number
+of the basic LUT in the refinement module. We can learn that the experiment LUT refinement
+module setting with 3 iterations and 5 basic LUTs achieves the best result. The 3 iterations setting is
+slightly better than the 1 iteration, but with more iterations in 5, it could degrade the performance.
+About the number of basic LUT, 1 basic LUT can achieve performance improvement compared
+with the baseline, and using 5 basic LUTs could achieve a better result with more expressive color
+representation ability composed of different basic LUTs. We did not observe further improvement by
+increasing the basic LUT to 10. Therefore, we choose the LUTs refinement module with 3 recurrent
+iterations and 5 basic LUTs units. Note that the experiment without the spatial awareness weight from
+the pseudo-surface is generally worse than the proposed setting, which shows that the pseudo-surface
+could guide the refinement of learning with the local 3D information.
+LUTs refinement module in 3D novel view synthesis The proposed LUTs refinement module is
+also suitable for the 3D novel view synthesis, which is a plug-and-play module in the novel view
+synthesis task. We choose the DVGO [27] and NeRF [17] as the baseline. For DVGO [27], we
+train 100k iterations for all the 3D datasets for a fair comparison. For NeRF [17], we only train
+50k iterations and discard the coarse sampling deal to the limitation of the computational resource.
+From Table 5, we can see that the improvement is obvious compared with the baseline. Besides, the
+computational cost with LUTs refinement is acceptable thanks to the refinement in the pixel level.
+Note that the overall performance improvement is better than the result in Table 3 and the reason is
+that the geometry of the pseudo-surface in the static dataset is better than in the dynamic dataset,
+which could offer more precise guidance in the LUTs’ weight prediction. For a better visual analysis,
+we select several results of this ablation study in the format of the FLIP error map [1] in Figure 7. A
+more detailed study of the LUTs refinement module and the full numerical result are presented in the
+supplemental material.
+4.3
+Limitation and future work
+We achieve excellent performance with the voxel-based architecture for the 4D novel view synthesis
+task, but one obvious limitation is that the voxel format requires larger memory storage compared
+with the pure MLPs-based method (e.g., V4D (377 MB) versus D-NeRF (13 MB)), which means
+that it is limited to the resolution and not very suitable for the large scale 4D scene representation.
+However, the recent work in [3] proposes to factorize the 4D voxel into multiple compact low-rank
+tensor components that could close the gap between the voxel-based method and pure MLPs-based
+method in the memory storage aspect. At last, we believe the proposed framework should be also
+suitable for the dynamic reconstruction task [2] with the feature without the need for the canonical
+space, which would be considered as future work.
+5
+Conclusion
+In this paper, we present a new framework, V4D, for 4D novel view synthesis. The voxel-based
+framework could effectively overcome the limited capacity and the high computational cost problems
+in pure MLPs-based methods, which shows significant improvement and achieves state-of-the-art
+performance. The proposed conditional positional encoding and the LUTs refinement module also
+benefit further improvement, especially for alleviating the problem of over-smoothness caused by
+the total variation loss. The voxel-based LUTs refinement module could be regarded as the plugand-play module in the novel view synthesis task, which could achieve the performance gain at little
+computational cost. We hope the LUTs refinement module gives some inspiration for the follower on
+the refinement angle in the novel view synthesis task.
+9
+TiNeuVox [6]
+D-NeRF[23]
+Ours
+GT
+TiNeuVox [6]
+D-NeRF[23]
+Ours
+GT
+Figure 4: Visual comparisons on the dynamic dataset. Please zoom in for better observation.
+10
+BL+D+C+L
+BL+D+C
+BL+D+P
+BL+D
+BL
+Figure 5: Visual comparisons for ours and TiNeuVox [6] on the dynamic real scenes [21]. Please
+zoom in for better observation.
+Hook
+Hell Warrior
+Jumping Jacks
+Figure 6: FLIP error map [1] visualization on the ablation studies about neural network architecture.
+The brighter color means the larger error. Please zoom in for better observation.
+11
+DVGO
+DVGO+L
+Lego
+Truck
+Caterpillar
+Figure 7: FLIP error map [1] visualization on the ablation studies about the LUTs refinement module
+in 3D novel view synthesis. Brighter means a larger error. Please zoom in for better observation.
+12
+References
+[1] Pontus Andersson, Jim Nilsson, Tomas Akenine-Möller, Magnus Oskarsson, Kalle Åström, and
+Mark D Fairchild. Flip: A difference evaluator for alternating images. Proc. ACM Comput.
+Graph. Interact. Tech., 3(2):15–1, 2020.
+[2] Hongrui Cai, Wanquan Feng, Xuetao Feng, Yan Wang, and Juyong Zhang. Neural surface reconstruction of dynamic scenes with monocular rgb-d camera. arXiv preprint arXiv:2206.15258,
+2022.
+[3] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and Hao Su. Tensorf: Tensorial radiance
+fields. arXiv preprint arXiv:2203.09517, 2022.
+[4] Anpei Chen, Zexiang Xu, Fuqiang Zhao, Xiaoshuai Zhang, Fanbo Xiang, Jingyi Yu, and Hao
+Su. Mvsnerf: Fast generalizable radiance field reconstruction from multi-view stereo. In
+Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 14124–
+14133, 2021.
+[5] Kingma Diederik, Ba Jimmy, et al. Adam: A method for stochastic optimization. arXiv preprint
+arXiv:1412.6980, pages 273–297, 2014.
+[6] Jiemin Fang, Taoran Yi, Xinggang Wang, Lingxi Xie, Xiaopeng Zhang, Wenyu Liu, Matthias
+Nießner, and Qi Tian. Fast dynamic radiance fields with time-aware neural voxels. arXiv
+preprint arXiv:2205.15285, 2022.
+[7] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht, and Angjoo
+Kanazawa. Plenoxels: Radiance fields without neural networks. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, pages 5501–5510, 2022.
+[8] Chen Gao, Ayush Saraf, Johannes Kopf, and Jia-Bin Huang. Dynamic view synthesis from
+dynamic monocular video. In Proceedings of the IEEE/CVF International Conference on
+Computer Vision, pages 5712–5721, 2021.
+[9] Xiang Guo, Guanying Chen, Yuchao Dai, Xiaoqing Ye, Jiadai Sun, Xiao Tan, and Errui Ding.
+Neural deformable voxel grid for fast optimization of dynamic view synthesis. arXiv preprint
+arXiv:2206.07698, 2022.
+[10] Peter Hedman, Pratul P Srinivasan, Ben Mildenhall, Jonathan T Barron, and Paul Debevec.
+Baking neural radiance fields for real-time view synthesis. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision, pages 5875–5884, 2021.
+[11] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and temples: Benchmarking large-scale scene reconstruction. ACM Transactions on Graphics (ToG), 36(4):1–13,
+2017.
+[12] Tianye Li, Mira Slavcheva, Michael Zollhoefer, Simon Green, Christoph Lassner, Changil
+Kim, Tanner Schmidt, Steven Lovegrove, Michael Goesele, and Zhaoyang Lv. Neural 3d video
+synthesis. arXiv preprint arXiv:2103.02597, 2021.
+[13] Zhengqi Li, Simon Niklaus, Noah Snavely, and Oliver Wang. Neural scene flow fields for
+space-time view synthesis of dynamic scenes. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages 6498–6508, 2021.
+[14] Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and Christian Theobalt. Neural sparse
+voxel fields. Advances in Neural Information Processing Systems, 33:15651–15663, 2020.
+[15] Stephen Lombardi, Tomas Simon, Jason Saragih, Gabriel Schwartz, Andreas Lehrmann, and
+Yaser Sheikh. Neural volumes: Learning dynamic renderable volumes from images. arXiv
+preprint arXiv:1906.07751, 2019.
+[16] Lars Mescheder, Michael Oechsle, Michael Niemeyer, Sebastian Nowozin, and Andreas Geiger.
+Occupancy networks: Learning 3d reconstruction in function space. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 4460–4470, 2019.
+[17] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi,
+and Ren Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. In European
+conference on computer vision, pages 405–421. Springer, 2020.
+[18] Michael Niemeyer, Lars Mescheder, Michael Oechsle, and Andreas Geiger. Occupancy flow:
+4d reconstruction by learning particle dynamics. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision (ICCV), October 2019.
+13
+[19] Michael Oechsle, Songyou Peng, and Andreas Geiger. Unisurf: Unifying neural implicit
+surfaces and radiance fields for multi-view reconstruction. arXiv preprint arXiv:2104.10078,
+2021.
+[20] Keunhong Park, Utkarsh Sinha, Jonathan T Barron, Sofien Bouaziz, Dan B Goldman, Steven M
+Seitz, and Ricardo Martin-Brualla. Nerfies: Deformable neural radiance fields. In Proceedings
+of the IEEE/CVF International Conference on Computer Vision, pages 5865–5874, 2021.
+[21] Keunhong Park, Utkarsh Sinha, Peter Hedman, Jonathan T. Barron, Sofien Bouaziz, Dan B
+Goldman, Ricardo Martin-Brualla, and Steven M. Seitz. Hypernerf: A higher-dimensional
+representation for topologically varying neural radiance fields. ACM Trans. Graph., 40(6), dec
+2021.
+[22] Songyou Peng, Michael Niemeyer, Lars Mescheder, Marc Pollefeys, and Andreas Geiger. Convolutional occupancy networks. In Computer Vision–ECCV 2020: 16th European Conference,
+Glasgow, UK, August 23–28, 2020, Proceedings, Part III 16, pages 523–540. Springer, 2020.
+[23] Albert Pumarola, Enric Corona, Gerard Pons-Moll, and Francesc Moreno-Noguer. D-nerf:
+Neural radiance fields for dynamic scenes. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages 10318–10327, 2021.
+[24] Konstantinos Rematas, Andrew Liu, Pratul P Srinivasan, Jonathan T Barron, Andrea Tagliasacchi, Thomas Funkhouser, and Vittorio Ferrari. Urban radiance fields. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 12932–12942, 2022.
+[25] Ruizhi Shao, Hongwen Zhang, He Zhang, Yanpei Cao, Tao Yu, and Yebin Liu. Doublefield:
+Bridging the neural surface and radiance fields for high-fidelity human rendering. arXiv preprint
+arXiv:2106.03798, 2021.
+[26] Yoav Shechtman, Yonina C Eldar, Oren Cohen, Henry Nicholas Chapman, Jianwei Miao, and
+Mordechai Segev. Phase retrieval with application to optical imaging: a contemporary overview.
+IEEE signal processing magazine, 32(3):87–109, 2015.
+[27] Cheng Sun, Min Sun, and Hwann-Tzong Chen. Direct voxel grid optimization: Super-fast
+convergence for radiance fields reconstruction. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages 5459–5469, 2022.
+[28] Matthew Tancik, Vincent Casser, Xinchen Yan, Sabeek Pradhan, Ben Mildenhall, Pratul P
+Srinivasan, Jonathan T Barron, and Henrik Kretzschmar. Block-nerf: Scalable large scene
+neural view synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pages 8248–8258, 2022.
+[29] Edgar Tretschk, Ayush Tewari, Vladislav Golyanik, Michael Zollhöfer, Christoph Lassner, and
+Christian Theobalt. Non-rigid neural radiance fields: Reconstruction and novel view synthesis
+of a dynamic scene from monocular video. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, pages 12959–12970, 2021.
+[30] Liao Wang, Jiakai Zhang, Xinhang Liu, Fuqiang Zhao, Yanshun Zhang, Yingliang Zhang,
+Minye Wu, Jingyi Yu, and Lan Xu. Fourier plenoctrees for dynamic radiance field rendering
+in real-time. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 13524–13534, 2022.
+[31] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku Komura, and Wenping Wang.
+Neus: Learning neural implicit surfaces by volume rendering for multi-view reconstruction.
+arXiv preprint arXiv:2106.10689, 2021.
+[32] Tao Wang, Yong Li, Jingyang Peng, Yipeng Ma, Xian Wang, Fenglong Song, and Youliang Yan.
+Real-time image enhancer via learnable spatial-aware 3d lookup tables. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision, pages 2471–2480, 2021.
+[33] Wenqi Xian, Jia-Bin Huang, Johannes Kopf, and Changil Kim. Space-time neural irradiance
+fields for free-viewpoint video. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 9421–9431, 2021.
+[34] Yuanbo Xiangli, Linning Xu, Xingang Pan, Nanxuan Zhao, Anyi Rao, Christian Theobalt,
+Bo Dai, and Dahua Lin. Citynerf: Building nerf at city scale. arXiv preprint arXiv:2112.05504,
+2021.
+14
+[35] Guangming Yao, Hongzhi Wu, Yi Yuan, and Kun Zhou. Dd-nerf: Double-diffusion neural
+radiance field as a generalizable implicit body representation. arXiv preprint arXiv:2112.12390,
+2021.
+[36] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. Volume rendering of neural implicit
+surfaces. Advances in Neural Information Processing Systems, 34, 2021.
+[37] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng, and Angjoo Kanazawa. Plenoctrees for
+real-time rendering of neural radiance fields. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, pages 5752–5761, 2021.
+[38] Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa. pixelnerf: Neural radiance fields
+from one or few images. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pages 4578–4587, 2021.
+[39] Hui Zeng, Jianrui Cai, Lida Li, Zisheng Cao, and Lei Zhang. Learning image-adaptive 3d
+lookup tables for high performance photo enhancement in real-time. IEEE Transactions on
+Pattern Analysis and Machine Intelligence, 2020.
+[40] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of deep features as a perceptual metric. In Proceedings of the IEEE
+conference on computer vision and pattern recognition, pages 586–595, 2018.
+15

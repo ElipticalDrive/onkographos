@@ -2,45 +2,48 @@
 Also called: Piecewise Linear Channelwise Transfer Function, RGBA classification functions
 
 ## Overview
-Piecewise-Linear Classification converts volume intensity levels into RGBA format for 3D texture display by applying independent piecewise-linear functions to each color channel [S1, unofficial][S2, unofficial]. It differs from [Binary Classification](931-binary-classification.md) by allowing continuous, multi-segment opacity and color gradients rather than a single hard threshold, enabling nuanced segmentation where high-intensity objects appear white and nearly opaque by default [S1, unofficial].
+Piecewise-Linear Classification converts volume intensity levels into RGBA format for 3D texture display by applying independent piecewise-linear functions to each color channel [S1, unofficial]. It differs from [Binary Classification](931-binary-classification.md) by allowing continuous opacity and color gradients rather than hard thresholds, and from [Multiple Material Classification](6343-multiple-material-classification.md) by operating on scalar intensity values per channel rather than multi-dimensional feature vectors [S1, unofficial][S2, unofficial].
 
 ## How it works
-**Inputs and Outputs**
-- Input: A tensor $x$ of shape $(B, C, H, W)$ or $(B, C, D, H, W)$, where $B$ is batch size, $C$ is channels (typically 4 for RGBA), and spatial dimensions are $H, W$ or $D, H, W$ [S2, unofficial].
-- Parameters: Two tensors $x_p$ and $y_p$ of shape $(C, K)$, containing sorted x-keypoints and corresponding y-values for each channel [S2, unofficial].
-- Output: A tensor of the same shape as $x$, with values transformed per channel [S2, unofficial].
+**Inputs and Outputs:**
+- Input: A tensor $x$ of shape $(B, C, H, W)$ or $(B, C, D, H, W)$, where $B$ is batch size, $C$ is the number of channels (typically 4 for RGBA), and spatial dimensions are $H, W$ or $D, H, W$ [S2, unofficial].
+- Keypoints: Two tensors $x_p$ and $y_p$, both of shape $(C, K)$, containing sorted x-coordinates and corresponding y-values for $K$ keypoints per channel [S2, unofficial].
+- Output: A tensor of the same shape as $x$, where each value is mapped through its respective channel's piecewise-linear function [S2, unofficial].
 
-**Data Structures**
-- $x_p$: Sorted x-coordinates of the piecewise linear segments. Shape $(C, K)$.
-- $y_p$: Y-coordinates (output values) at the keypoints. Shape $(C, K)$.
-- $K$: Number of keypoints per channel.
+**Data Structures:**
+- $x_p$: Sorted array of domain breakpoints.
+- $y_p$: Array of range values at breakpoints.
+- $K$: Number of keypoints. Must be $\ge 2$.
 
-**Steps**
+**Steps:**
 1. Reshape input $x$ to $(B, C, N)$ where $N$ is the product of spatial dimensions [S2, unofficial].
 2. Expand $x_p$ and $y_p$ to $(B, C, K)$ to match batch dimensions [S2, unofficial].
 3. Reshape the flattened input $x_{flat}$ to $(B, C, N, 1)$ [S2, unofficial].
-4. Construct segment boundaries:
-   - $x_{p\_left}$: $x_p$ unsqueezed and sliced to exclude the last element, shape $(B, C, 1, K-1)$ [S2, unofficial].
-   - $x_{p\_right}$: $x_p$ unsqueezed and sliced to exclude the first element, shape $(B, C, 1, K-1)$ [S2, unofficial].
-5. Create a mask where $x_{unsq} \ge x_{p\_left}$ and $x_{unsq} < x_{p\_right}$ [S2, unofficial].
-6. Identify cases where no segment is selected (i.e., $x \ge x_p[-1]$) [S2, unofficial].
-7. Find the segment index $idx$ using argmax on the mask. If no segment is selected, assign $idx = K-2$ (the last interval) [S2, unofficial].
-8. Gather the left x-keypoint $x_l$ using $idx$ [S2, unofficial].
-9. Calculate the slope $m$ for the selected segment: $m = \frac{y_{p\_right} - y_{p\_left}}{x_{p\_right} - x_{p\_left}}$ [S2, unofficial].
-10. Compute the output $y$ for each element: $y = y_{p\_left} + m \cdot (x - x_l)$ [S2, unofficial].
-11. Handle extrapolation: values below $x_p[0]$ use the extension of the first segment; values above $x_p[-1]$ use the extension of the last segment [S2, unofficial].
+4. Construct left and right boundaries for each segment:
+   - $x_{p\_left}$ of shape $(B, C, 1, K-1)$ from $x_p[:, :, :-1]$ [S2, unofficial].
+   - $x_{p\_right}$ of shape $(B, C, 1, K-1)$ from $x_p[:, :, 1:]$ [S2, unofficial].
+5. Create a mask identifying which segment each input value falls into:
+   $$ \text{mask} = (x_{unsq} \ge x_{p\_left}) \land (x_{unsq} < x_{p\_right}) $$
+   where $x_{unsq}$ is the reshaped input [S2, unofficial].
+6. Handle edge cases where no segment is selected (i.e., $x \ge x_p[-1]$):
+   - Identify `none_selected` where `mask.any(dim=-1)` is false [S2, unofficial].
+   - Set segment index `idx` to $K-2$ for these cases, assigning them to the last interval [S2, unofficial].
+7. Gather the left boundary $x_{p\_l}$ for the selected segment using `idx` [S2, unofficial].
+8. Compute the slope $m$ and intercept $b$ for the selected segment:
+   $$ m = \frac{y_{p\_right} - y_{p\_left}}{x_{p\_right} - x_{p\_left}} $$
+   $$ b = y_{p\_left} - m \cdot x_{p\_l} $$
+   where $y_{p\_left}$ and $y_{p\_right}$ are gathered from $y_p$ using `idx` [S2, unofficial].
+9. Calculate output:
+   $$ y = m \cdot x_{unsq} + b $$
+10. Reshape $y$ back to original spatial dimensions [S2, unofficial].
 
-**Formulas**
-For a value $v$ in channel $c$ falling in segment $i$:
-$$ y = y_{i} + \frac{y_{i+1} - y_{i}}{x_{i+1} - x_{i}} (v - x_{i}) $$
-Where $x_i, y_i$ are the keypoints defining the segment [S2, unofficial].
+**Parameters:**
+- Default classification: Linear ramps representing 1:1 mappings ($y=x$), where high intensity objects appear white and nearly opaque [S1, unofficial].
+- $K$: Number of keypoints. Not given in the sources.
 
-**Parameters**
-- Default Classification: Linear ramps representing 1:1 mappings ($x_p = [0, 1], y_p = [0, 1]$), making high intensity objects appear white and nearly opaque [S1, unofficial].
-
-**Edge Cases and Pitfalls**
+**Pitfalls:**
 - If $x_p$ and $y_p$ do not have shape $(C, K)$, a ValueError is raised [S2, unofficial].
-- Extrapolation beyond the first or last keypoint extends the first or last segment linearly [S2, unofficial].
+- Extrapolation beyond keypoints is handled by extending the first/last segment [S2, unofficial].
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
@@ -57,97 +60,78 @@ def piecewise_linear_channelwise(x: torch.Tensor, xp: torch.Tensor, yp: torch.Te
         yp: Tensor of shape (C, K) containing y values per channel at keypoints.
         
     Returns:
-        Transformed tensor of the same shape as x.
+        Output tensor of same shape as x.
     """
-    # 1. Reshape x to (B, C, N)
-    B, C, *spatial = x.shape
+    B, C, *spatial_dims = x.shape
     N = 1
-    for dim in spatial:
+    for dim in spatial_dims:
         N *= dim
+        
+    # Reshape x to (B, C, N)
     x_flat = x.view(B, C, N)
     
-    # 2. Expand xp and yp to (B, C, K)
-    K = xp.shape[1]
+    # Expand xp and yp to (B, C, K)
     xp = xp.unsqueeze(0).expand(B, -1, -1)
     yp = yp.unsqueeze(0).expand(B, -1, -1)
     
-    # 3. Reshape x_flat to (B, C, N, 1)
+    # Reshape x_flat to (B, C, N, 1)
     x_unsq = x_flat.unsqueeze(-1)
     
-    # 4. Create segment boundaries
-    # xp_left: (B, C, 1, K-1)
-    xp_left = xp.unsqueeze(2)[:, :, :, :-1]
-    # xp_right: (B, C, 1, K-1)
-    xp_right = xp.unsqueeze(2)[:, :, :, 1:]
-    # yp_left and yp_right for slope calculation
-    yp_left = yp.unsqueeze(2)[:, :, :, :-1]
-    yp_right = yp.unsqueeze(2)[:, :, :, 1:]
+    # Create xp_left and xp_right
+    xp_left = xp.unsqueeze(2)[:, :, :, :-1]  # (B, C, 1, K-1)
+    xp_right = xp.unsqueeze(2)[:, :, :, 1:]  # (B, C, 1, K-1)
     
-    # 5. Create mask
-    mask = (x_unsq >= xp_left) & (x_unsq < xp_right)
+    # Create mask
+    mask = (x_unsq >= xp_left) & (x_unsq < xp_right)  # (B, C, N, K-1)
     
-    # 6. Identify cases where no segment is selected
-    none_selected = ~mask.any(dim=-1)
+    # Identify cases where no segment is selected
+    none_selected = ~mask.any(dim=-1)  # (B, C, N)
     
-    # 7. Find segment index
-    idx = mask.float().argmax(dim=-1)
-    # If none selected, assign to last interval (K-2)
-    idx[none_selected] = K - 2
+    # Find segment index
+    idx = mask.float().argmax(dim=-1)  # (B, C, N)
+    idx[none_selected] = xp.shape[1] - 2  # Assign to last interval
     
-    # 8. Gather xp_l
+    # Gather xp_l
     gather_idx = idx.unsqueeze(-1)
-    xp_l = torch.gather(xp, 2, gather_idx).squeeze(-1) # Shape (B, C, N)
+    xp_l = torch.gather(xp, 2, gather_idx)  # (B, C, N, 1)
     
-    # Gather corresponding yp_l and slopes
-    yp_l = torch.gather(yp_left, 2, gather_idx).squeeze(-1)
-    yp_r = torch.gather(yp_right, 2, gather_idx).squeeze(-1)
-    xp_r = torch.gather(xp_right, 2, gather_idx).squeeze(-1)
+    # Gather yp_l and yp_r
+    yp_l = torch.gather(yp, 2, gather_idx)  # (B, C, N, 1)
+    yp_r = torch.gather(yp, 2, gather_idx + 1)  # (B, C, N, 1)
     
-    # 9. Calculate slope
-    # Avoid division by zero if xp_left == xp_right (though sorted, distinct keys assumed)
-    denom = xp_r - xp_l
-    slope = torch.where(denom != 0, (yp_r - yp_l) / denom, 0.0)
+    # Compute slope and intercept
+    denom = xp_right.squeeze(-1) - xp_left.squeeze(-1)
+    # Handle division by zero if needed, though sorted keypoints should prevent this
+    slope = (yp_r - yp_l) / denom
+    intercept = yp_l - slope * xp_l
     
-    # 10. Compute output
-    # x_unsq is (B, C, N, 1), xp_l is (B, C, N)
-    # Need to unsqueeze xp_l for broadcasting
-    y = yp_l + slope * (x_unsq.squeeze(-1) - xp_l)
+    # Calculate output
+    y = slope * x_unsq + intercept
     
-    # 11. Handle extrapolation for values outside [xp[0], xp[-1]]
-    # Values < xp[0]: extend first segment
-    first_seg_slope = (yp[:, 1] - yp[:, 0]) / (xp[:, 1] - xp[:, 0])
-    first_seg_y0 = yp[:, 0]
-    first_seg_x0 = xp[:, 0]
+    # Reshape back to original shape
+    y = y.view(B, C, *spatial_dims)
     
-    # Values >= xp[-1]: extend last segment
-    last_seg_slope = (yp[:, -1] - yp[:, -2]) / (xp[:, -1] - xp[:, -2])
-    last_seg_y_last = yp[:, -1]
-    last_seg_x_last = xp[:, -1]
-    
-    # Mask for extrapolation
-    below_min = x_unsq.squeeze(-1) < xp[:, 0, None]
-    above_max = x_unsq.squeeze(-1) >= xp[:, -1, None]
-    
-    # Apply extrapolation
-    y_below = first_seg_y0 + first_seg_slope * (x_unsq.squeeze(-1) - first_seg_x0)
-    y_above = last_seg_y_last + last_seg_slope * (x_unsq.squeeze(-1) - last_seg_x_last)
-    
-    y = torch.where(below_min, y_below, y)
-    y = torch.where(above_max, y_above, y)
-    
-    # Reshape back to original spatial dimensions
-    return y.view(B, C, *spatial)
+    return y
 ```
 
+## Subtopics
+
+### [Binary Classification](931-binary-classification.md)
+Hard thresholding; use when discrete segmentation is required.
+
+### [Multiple Material Classification](6343-multiple-material-classification.md)
+Multi-dimensional feature mapping; use when classifying based on multiple data attributes.
+
 ## Operating characteristics
-- **Time Complexity**: $O(N \cdot C)$, where $N$ is the number of voxels and $C$ is the number of channels. The operation is element-wise after segment identification.
-- **Memory Complexity**: $O(N \cdot C)$ for the output tensor, plus $O(K \cdot C)$ for the transfer function parameters.
-- **Strengths**: Simple to implement and interpret; allows fine-grained control over color and opacity per channel; hardware-friendly for 3D texture mapping [S1, unofficial].
-- **Limitations**: Requires manual tuning of keypoints; sharp transitions can introduce high-frequency artifacts in the rendered image [S1, unofficial].
-- **When to use**: When intuitive, direct manipulation of intensity-to-color mapping is needed, especially for segmentation tasks where uniform intensity objects must be clearly perceived [S1, unofficial].
+- Time complexity: $O(N \cdot C \cdot K)$, where $N$ is the number of voxels/pixels, $C$ is channels, and $K$ is keypoints [S2, unofficial].
+- Memory complexity: $O(N \cdot C)$ for input/output, plus $O(B \cdot C \cdot K)$ for intermediate tensors [S2, unofficial].
+- Strengths: Intuitive for segmentation; uniform intensity objects are easily perceived with default 1:1 mappings [S1, unofficial].
+- Limitations: Requires manual tuning of keypoints for complex datasets; linear segments may not capture complex transfer function shapes [S1, unofficial].
+- When to use: Real-time volume slicing via 3D textures where interactivity is critical [S1, unofficial].
+- When not to use: When non-linear or multi-dimensional classification is needed [S1, unofficial].
 
 ## Background
-Originating from early volume visualization techniques, this method was popularized by the use of 3D texture mapping in consumer-grade graphics hardware, which enabled interactive volume slicing [S1, unofficial]. It generalizes the concept of binary segmentation by allowing continuous classification functions for RGBA channels, providing flexibility in segmentation applications [S1, unofficial].
+Originated in early volume visualization systems using 3D texture mapping on consumer-grade graphics accelerators [S1, unofficial]. The method allows users to modify four piecewise-linear functions associated with RGBA display channels, providing flexibility in segmentation applications [S1, unofficial]. It generalizes binary classification by allowing continuous interest regions [S1, unofficial].
 
 ## Sources
 [S1] Volume Visualisation Via Variable-Detail Non-Photorealistic Illustration, https://uwspace.uwaterloo.ca/bitstream/10012/1104/1/jlmckinl2002.pdf, fetched 2026-10-26 (unofficial)

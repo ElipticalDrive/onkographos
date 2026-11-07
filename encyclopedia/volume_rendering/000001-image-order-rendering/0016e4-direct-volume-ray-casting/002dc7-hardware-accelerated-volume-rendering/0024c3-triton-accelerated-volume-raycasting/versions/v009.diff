@@ -1,0 +1,278 @@
+--- v008.md
++++ v009.md
+@@ -4,53 +4,49 @@
+ 
+ ## Overview
+-Triton-accelerated Volume Raycasting is a fused GPU rendering technique that uses the Triton compiler to perform volume raycasting, avoiding the materialization of intermediate ray-sample tensors in High Bandwidth Memory (HBM) to reduce memory footprint and increase speed [S1, unofficial]. It sets itself apart from standard PyTorch-based volume raycasting implementations by fusing the ray-marching loop into a single CUDA kernel, thereby eliminating the memory bandwidth bottlenecks and cache thrashing that cause super-linear performance degradation in non-fused approaches at high resolutions [S1, unofficial]. It builds on [Hardware-Accelerated Volume Rendering](5616-hardware-accelerated-volume-rendering.md) by optimizing the compositing step specifically for differentiable rendering workflows where memory efficiency is critical.
++Triton-accelerated Volume Raycasting is a fused GPU rendering technique that uses the Triton compiler to execute volume raycasting kernels, avoiding the materialization of intermediate ray-sample tensors in High Bandwidth Memory (HBM) to reduce memory footprint and increase speed [S1, unofficial]. It builds on [Hardware-Accelerated Volume Rendering](5616-hardware-accelerated-volume-rendering.md) by replacing standard PyTorch execution with fused CUDA/Triton kernels, which significantly reduces iteration time and memory overhead, particularly at high resolutions [S1, unofficial]. Unlike standard implementations that suffer from super-linear degradation due to memory bandwidth limits, this method maintains predictable linear scaling proportional to the total number of rays rendered [S1, unofficial].
+ 
+ ## How it works
+-The method implements the standard direct volume rendering pipeline but fuses the per-ray sampling, classification, and compositing steps into a single Triton kernel execution. This avoids allocating large intermediate tensors for every sample along every ray, which is the primary memory bottleneck in naive PyTorch implementations.
++The method implements the emission-absorption optical model defined in [Direct volume ray casting](19-direct-volume-ray-casting.md). It fuses the ray-marching loop into a single Triton kernel, eliminating the need for intermediate tensor allocations in global memory.
+ 
+-### Inputs and Outputs
+-**Inputs:**
+-*   `grid`: A 5D tensor of shape `(B, C, D, H, W)` containing the scalar volume data, where $B$ is batch size, $C$ is channels (e.g., density), $D$ is depth, $H$ is height, and $W$ is width [S1, unofficial].
+-*   `view_mat`: A $(4, 4)$ transformation matrix mapping world coordinates to camera coordinates [S1, unofficial].
+-*   `ras2ijk`: A $(4, 4)$ transformation matrix mapping world coordinates to voxel grid indices [S1, unofficial].
+-*   `ray_samples`: Integer specifying the number of samples per ray (e.g., 384 or 512) [S1, unofficial].
+-*   `triton`: Boolean flag. If `True`, executes the fused Triton kernel; if `False`, falls back to standard PyTorch implementation [S1, unofficial].
++**Inputs and Outputs:**
++*   **Input:** Volumetric data grid (scalar values), view matrix, ray-to-voxel mapping (`ras2ijk`), and a boolean flag `triton` to switch between standard PyTorch and Triton kernels [S1, unofficial].
++*   **Output:** Rendered image tensor (RGB/opacity), depth, and optionally gradients for training [S1, unofficial].
+ 
+-**Outputs:**
+-*   `out`: A tensor of shape `(B, C, H, W)` containing the rendered image, where $C$ is the number of output channels (typically RGB or RGBA) [S1, unofficial].
++**Data Structures:**
++*   **Triton Kernel State:** Accumulators for color, opacity, and depth are stored in per-thread registers (stack-allocated) rather than global memory [S2, unofficial].
++*   **Output Tensors:** Final accumulated values are written exactly once per ray to output tensors (`outRGB`, `outDepth`, `outOpacity`) [S2, unofficial].
+ 
+-### Data Structures
+-The method does not allocate intermediate global memory buffers for ray samples. Instead, it relies on:
+-1.  **Per-thread registers:** Accumulators for color ($C'$), opacity ($\alpha'$), and transmittance ($T$) are stored in thread-local registers [S1, unofficial].
+-2.  **Output tensors:** A single output tensor `out` is allocated to store the final result for each pixel [S1, unofficial].
++**Parameters:**
++*   `triton`: Boolean flag. If `True`, uses the Triton kernel; if `False`, uses the standard PyTorch implementation [S1, unofficial].
++*   `ray_samples`: Number of samples per ray. Typical value is 384, configurable in the `VolumeRaycaster` [S1, unofficial].
++*   `resolution`: Output image resolution (e.g., 1024x1024, 2048x2048) [S1, unofficial].
++*   `MAX_VOLUME_RENDER_CHANNELS`: Compile-time constant for the maximum number of RGB channels supported in the accumulation register array [S2, unofficial].
+ 
+-### Algorithm Steps
+-The Triton kernel is launched with one thread block per pixel (or tile, depending on implementation details not fully specified in sources, but typically one thread handles one pixel's ray).
++**Algorithm Steps:**
++1.  **Tile Generation:** The image is tiled into blocks (e.g., `tile_h`, `tile_w`) to manage memory usage and parallelism [S1, unofficial].
++2.  **Ray Setup:** For each pixel in the tile, compute the ray origin and direction using the view matrix and `ras2ijk` mapping [S1, unofficial].
++3.  **Ray Marching Loop:**
++    *   Initialize accumulators: $C' = 0$, $\alpha' = 0$, $D' = 0$ [S1, S4, unofficial].
++    *   Iterate $N$ times (where $N$ is `ray_samples`):
++        *   Compute sample position $\mathbf{x}$ along the ray.
++        *   Sample volume value $V(\mathbf{x})$ using trilinear interpolation from the 3D texture/grid [S1, S4, unofficial].
++        *   Map $V(\mathbf{x})$ to color $C_i$ and opacity $\alpha_i$ using a transfer function [S1, S2, S4, unofficial].
++        *   Update accumulators using front-to-back compositing:
++            $$
++            C' = C' + (1 - \alpha') \alpha_i C_i
++            $$
++            $$
++            \alpha' = \alpha' + (1 - \alpha') \alpha_i
++            $$
++            $$
++            D' = D' + (1 - \alpha') \alpha_i \cdot t_i
++            $$
++            where $t_i$ is the depth contribution of the sample [S2, unofficial].
++        *   **Early Termination:** If $\alpha'$ exceeds a threshold (e.g., 0.95 or 1.0), break the loop [S1, S2, unofficial].
++4.  **Register Accumulation Optimization:** RGB, depth, and opacity are accumulated in per-thread registers (`accRgb[MAX_VOLUME_RENDER_CHANNELS]`, scalars for depth/opacity) with `#pragma unroll` to minimize global memory traffic [S2, unofficial].
++5.  **Final Write:** After the loop, write the final accumulated values from registers to the output tensors exactly once per ray [S2, unofficial].
++6.  **Inference Fast Path (Optional):** If `training=False`, skip the storage of per-sample weights (`outWs`) and early-termination tail data, returning size-0 placeholder tensors to reduce global memory traffic further [S2, unofficial].
+ 
+-1.  **Ray Initialization:** For each pixel $(h, w)$, compute the ray origin $\mathbf{o}$ and direction $\mathbf{d}$ using the camera projection defined by `view_mat` and `ras2ijk` [S1, unofficial].
+-2.  **Ray-Volume Intersection:** Determine the entry parameter $t_{start}$ and exit parameter $t_{end}$ by intersecting the ray with the volume's axis-aligned bounding box (AABB) [S1, unofficial].
+-3.  **Discretization:** Calculate the step size $\Delta t = (t_{end} - t_{start}) / N$, where $N$ is `ray_samples` [S1, unofficial].
+-4.  **Initialization:** Initialize accumulated color $C' = 0$, accumulated opacity $\alpha' = 0$, and transmittance $T = 1.0$ in thread-local registers [S1, unofficial].
+-5.  **Ray Marching Loop:** For $i$ from $0$ to $N-1$:
+-    a. Compute sample position: $t_i = t_{start} + i \cdot \Delta t$.
+-    b. Compute world position: $\mathbf{p}_{world} = \mathbf{o} + t_i \mathbf{d}$.
+-    c. Compute voxel coordinates: $\mathbf{p}_{ijk} = \text{ras2ijk} \cdot \mathbf{p}_{world}$ [S1, unofficial].
+-    d. **Trilinear Interpolation:** Sample the scalar value $V(\mathbf{p}_{ijk})$ from the `grid` using trilinear interpolation [S1, unofficial].
+-    e. **Classification:** Map $V(\mathbf{p}_{ijk})$ to color $C_i$ and opacity $\alpha_i$ using the transfer function [S1, unofficial].
+-    f. **Compositing:** Update accumulators using the front-to-back over operator:
+-       $$
+-       C'_{new} = C'_{old} + (1 - \alpha'_{old}) \alpha_i C_i
+-       $$
+-       $$
+-       \alpha'_{new} = \alpha'_{old} + (1 - \alpha'_{old}) \alpha_i
+-       $$
+-       $$
+-       T_{new} = T_{old} \cdot (1 - \alpha_i)
+-       $$
+-       [S1, unofficial]
+-    g. **Early Termination Check:** If $\alpha'_{new} \ge 1.0$ (or a threshold close to it), break the loop [S1, unofficial].
+-6.  **Final Output:** Write $C'$ and $\alpha'$ (if required) to the output tensor `out` at index $(h, w)$ [S1, unofficial].
+-
+-### Pseudocode
++**Pseudocode:**
+ ```python
+ import triton
+@@ -58,118 +54,93 @@
+ 
+ @triton.jit
+-def volume_ray_cast_kernel(
+-    grid_ptr,       # Pointer to volume grid (B, C, D, H, W)
+-    out_ptr,        # Pointer to output tensor (B, C, H, W)
+-    view_mat_ptr,   # Pointer to view matrix (4, 4)
+-    ras2ijk_ptr,    # Pointer to ras2ijk matrix (4, 4)
+-    ray_samples,    # Number of samples per ray
+-    H, W,           # Image dimensions
+-    D, H_vol, W_vol,# Volume dimensions
+-    C,              # Number of channels
+-    stride_b, stride_c, stride_d, stride_h, stride_w # Strides for grid
++def volume_render_kernel(
++    grid_ptr,      # Pointer to volumetric data
++    view_mat_ptr,  # Pointer to view matrix
++    ras2ijk_ptr,   # Pointer to ray-to-voxel mapping
++    out_rgb_ptr,   # Output RGB tensor
++    out_depth_ptr, # Output depth tensor
++    out_opacity_ptr, # Output opacity tensor
++    H, W, D,      # Dimensions
++    ray_samples,   # Number of samples per ray
++    MAX_CHANNELS,  # Max RGB channels
++    stride_h, stride_w, stride_d, # Strides for grid access
++    TILE_H, TILE_W # Tile dimensions
+ ):
+-    # Pixel coordinates
+-    pid = tl.program_id(0)
+-    h = pid // W
+-    w = pid % W
++    # Block indices
++    ty = tl.program_id(0)
++    tx = tl.program_id(1)
+     
+-    # Ray generation (simplified, assumes standard pinhole camera setup)
+-    # In practice, this involves matrix multiplication with view_mat
+-    # and inverse projection to get ray origin and direction in world space
+-    o_x, o_y, o_z, o_w = ... # Compute ray origin
+-    d_x, d_y, d_z, d_w = ... # Compute ray direction
++    # Tile coordinates
++    h_start = ty * TILE_H
++    w_start = tx * TILE_W
+     
+-    # Ray-AABB intersection to find t_start and t_end
+-    # Assuming volume is centered at origin with known extent
+-    t_start, t_end = ... # Compute intersection parameters
++    # Thread indices within tile
++    y_idx = tl.arange(0, TILE_H)
++    x_idx = tl.arange(0, TILE_W)
+     
+-    # Step size
+-    dt = (t_end - t_start) / ray_samples
++    # Mask for valid pixels
++    valid_mask = (h_start + y_idx < H) & (w_start + x_idx < W)
+     
+-    # Accumulators in registers
+-    acc_r = 0.0
+-    acc_g = 0.0
+-    acc_b = 0.0
+-    acc_a = 0.0
++    # Load view matrix and ras2ijk for this tile (coalesced access)
++    # ... (implementation details for matrix loading omitted for brevity, assumed standard Triton load) ...
+     
+-    # Transmittance
+-    T = 1.0
++    # Per-thread registers for accumulation
++    acc_rgb = tl.zeros((MAX_CHANNELS,), dtype=tl.float32)
++    acc_opacity = tl.float32(0.0)
++    acc_depth = tl.float32(0.0)
+     
+-    # Ray marching
+-    for i in tl.range(ray_samples):
+-        t = t_start + i * dt
++    # Ray parameters (computed per pixel)
++    # ... (compute ray origin and direction for each pixel in tile) ...
++    
++    for i in range(ray_samples):
++        # Compute sample position
++        t = i * step_size
++        x = ray_origin + t * ray_direction
+         
+-        # World position
+-        px = o_x + t * d_x
+-        py = o_y + t * d_y
+-        pz = o_z + t * d_z
++        # Sample volume
++        # ... (trilinear interpolation logic) ...
++        v = sample_volume(grid_ptr, x, D, stride_h, stride_w, stride_d)
+         
+-        # Transform to voxel coordinates
+-        # p_ijk = ras2ijk * [px, py, pz, 1]
+-        vx = ... # Compute voxel x
+-        vy = ... # Compute voxel y
+-        vz = ... # Compute voxel z
++        # Map to color and opacity
++        c_i, alpha_i = transfer_function(v)
+         
+-        # Trilinear interpolation
+-        # Sample grid at (vx, vy, vz)
+-        # This involves fetching 8 voxels and interpolating
+-        scalar_val = trilinear_sample(grid_ptr, vx, vy, vz, D, H_vol, W_vol, C, stride_b, stride_c, stride_d, stride_h, stride_w)
+-        
+-        # Classification (Transfer Function)
+-        # Map scalar_val to color (R, G, B) and opacity (A)
+-        r, g, b, a = transfer_function(scalar_val)
+-        
+-        # Compositing
+-        # C' = C' + (1 - alpha') * alpha * C
+-        # alpha' = alpha' + (1 - alpha') * alpha
+-        acc_r = acc_r + (1.0 - acc_a) * a * r
+-        acc_g = acc_g + (1.0 - acc_a) * a * g
+-        acc_b = acc_b + (1.0 - acc_a) * a * b
+-        acc_a = acc_a + (1.0 - acc_a) * a
+-        
+-        # Early termination
+-        if acc_a >= 1.0:
++        # Early termination check
++        if acc_opacity >= 0.95:
+             break
+             
+-        # Update transmittance (optional if not needed for output)
+-        T = T * (1.0 - a)
++        # Update accumulators
++        weight = (1.0 - acc_opacity) * alpha_i
++        acc_rgb = acc_rgb + weight * c_i
++        acc_opacity = acc_opacity + weight
++        acc_depth = acc_depth + weight * t
+         
+-    # Write output
+-    out_idx = pid * C
+-    tl.store(out_ptr + out_idx, acc_r)
+-    tl.store(out_ptr + out_idx + 1, acc_g)
+-    tl.store(out_ptr + out_idx + 2, acc_b)
+-    # Alpha might be stored separately or in a 4th channel depending on config
++    # Write results to global memory
++    # ... (store acc_rgb, acc_opacity, acc_depth to out_rgb_ptr, etc., masked by valid_mask) ...
+ ```
+ 
+-### Parameters and Typical Values
+-*   `ray_samples`: Typically 384 or 512 [S1, unofficial].
+-*   `resolution`: Commonly 1024x1024 or 2048x2048 [S1, unofficial].
+-*   `triton`: Boolean flag, default `False` in some implementations, must be set to `True` to use the fused kernel [S1, unofficial].
+-
+-### Edge Cases and Pitfalls
+-*   **Non-determinism:** The Triton kernel uses `tl.atomic_add` for accumulation in some variants, which is order-nondeterministic. Gradient checks require looser tolerances (`atol=1e-4`, `rtol=1e-3`) and `nondet_tol=1e-6` [S1, unofficial].
+-*   **Precision:** Performance and memory benefits are significant, but precision differences between FP32 and FP16/BF16 should be verified. The implementation supports mixed precision (e.g., BF16) [S1, unofficial].
+-*   **Boundary Conditions:** Ray intersection with the volume AABB must handle cases where the ray does not intersect the volume (empty pixels) [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Nondeterminism:** The Triton kernel uses `tl.atomic_add` for accumulation, which is order-nondeterministic. Gradient checks require a looser tolerance (`atol=1e-4`, `rtol=1e-3`) and `nondet_tol=1e-6` to account for this noise [S1, unofficial].
++*   **Precision:** Performance and accuracy may vary with data types (fp16 vs fp32). Matching between Triton and standard PyTorch implementations should be verified with `torch.allclose` [S1, unofficial].
++*   **Memory Limits:** Standard PyTorch execution degrades super-linearly beyond 1024x1024 resolution due to memory bandwidth limits and cache thrashing [S1, unofficial]. Triton mitigates this by keeping intermediate states in registers [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Per-ray register accumulation for volume rendering
+-A forward pass optimization where RGB, depth, and opacity are accumulated in per-thread registers (stack-allocated) rather than global memory, writing each per-ray output exactly once to eliminate per-sample global-memory read-modify-write operations [S2, unofficial]. It differs from the baseline by eliminating per-sample global-memory read-modify-write on `outRGB`/`outDepth`/`outOpacity`, reducing global memory traffic [S2, unofficial]. It is chosen when global memory bandwidth is the bottleneck for the compositing step. It reduces `volume_render` stage time by 29.7% and end-to-end walltime by 17.8% in a fire renderer at 256 spp [S2, unofficial].
++A forward pass optimization where RGB, depth, and opacity are accumulated in per-thread registers (stack-allocated) rather than global memory, writing each per-ray output exactly once to eliminate per-sample global-memory read-modify-write operations [S2, unofficial]. It differs from the baseline by eliminating per-sample global-memory read-modify-write on `outRGB`/`outDepth`/`outOpacity`, reducing global memory traffic [S2, unofficial]. Performance: Reduced `volume_render` stage time from 8772.5 ms to 6171.4 ms (-29.7%) and end-to-end walltime by 17.8% (2.57 s saved) in a fire renderer at 256 spp [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear scaling proportional to total rays rendered ($O(H \times W \times N)$) [S1, unofficial].
+-*   **Memory Complexity:** Near-constant memory footprint below 430 MiB, regardless of resolution or number of samples, compared to linear scaling with total samples in standard PyTorch [S1, unofficial].
++*   **Time Complexity:** Predictable linear scaling proportional to total rays rendered [S1, unofficial]. Standard PyTorch execution time degrades super-linearly beyond 1024x1024 resolution [S1, unofficial].
++*   **Memory Complexity:** Near-constant footprint below 430 MiB, achieving a 99.5% memory reduction at high workloads compared to standard PyTorch [S1, unofficial].
+ *   **Measured Performance:**
+-    *   At 2048x2048 resolution with 256 samples, Triton iteration time is 9.16 ms compared to 1,804.32 ms for standard PyTorch, a 197x speedup [S1, unofficial].
+-    *   At 1024x1024 resolution with 512 samples, Triton evaluation memory is 110.7 MiB, while standard PyTorch evaluation memory is ~12.4 GB [S1, unofficial].
+-    *   At 1024x1024 resolution with 512 samples, Triton training step time is 15.4 ms, while non-Triton evaluation time is 82.0 ms [S1, unofficial].
+-*   **Strengths:** Dramatic reduction in VRAM usage (99.5% reduction at high workloads) and significant speedup at high resolutions where standard PyTorch suffers from memory bandwidth limits and cache thrashing [S1, unofficial].
+-*   **Limitations:** Requires Triton compiler support; non-deterministic gradients due to atomic operations may require adjusted tolerance settings for training [S1, unofficial].
+-*   **When to use:** High-resolution volume rendering, differentiable rendering pipelines with memory constraints, or when standard PyTorch implementations are too slow or memory-intensive.
+-*   **When not to use:** Low-resolution rendering where overhead of kernel launch and compilation dominates, or when strict deterministic gradients are required without tolerance adjustments.
++    *   At 2048x2048 resolution with 256 ray samples: Triton kernel reduces iteration time from 1,804.32 ms to 9.16 ms, a 197x speedup [S1, unofficial].
++    *   At 1024x1024 resolution with 512 samples: Standard PyTorch evaluation memory is ~12.4 GB, while Triton evaluation memory is 110.7 MiB [S1, unofficial].
++    *   At 1024x1024 resolution with 512 samples: Triton training memory is 121.6 MiB, training step time is 15.4 ms, while non-Triton evaluation time is 82.0 ms [S1, unofficial].
++*   **Strengths:** Significant speedup (up to 197x) and memory reduction (99.5%) at high resolutions; linear scaling; reduced global memory traffic via register accumulation [S1, S2, unofficial].
++*   **Limitations:** Nondeterministic gradients due to `tl.atomic_add`; requires Triton compiler support; potential precision differences between fp16 and fp32 modes [S1, unofficial].
++*   **When to use:** High-resolution volume rendering where memory bandwidth is a bottleneck; training scenarios requiring large batch sizes or high resolutions [S1, unofficial].
++*   **When not to use:** Low-resolution rendering where overhead may not be justified; environments without Triton support; applications requiring strict deterministic gradients [S1, unofficial].
+ 
+ ## Background
+-Triton-accelerated Volume Raycasting was introduced as part of the FlashDRR project, leveraging the Triton compiler to optimize volume rendering for differentiable applications [S1, unofficial]. It addresses the limitations of standard PyTorch-based volume rendering, which degrades super-linearly beyond 1024x1024 resolution due to memory bandwidth limits [S1, unofficial]. The technique is used in medical imaging and scientific visualization where high-resolution, differentiable volume rendering is required [S1, unofficial].
++Triton-accelerated Volume Raycasting originates from the FlashDRR project, which aims to provide fast differentiable volume rendering for medical imaging [S1, unofficial]. It leverages the Triton compiler to fuse CUDA kernels, reducing iteration time and memory overhead compared to standard PyTorch execution [S1, unofficial]. The technique has been further optimized with per-ray register accumulation and inference fast paths in projects like fvdb-core [S2, unofficial].
+ 
+ ## Sources

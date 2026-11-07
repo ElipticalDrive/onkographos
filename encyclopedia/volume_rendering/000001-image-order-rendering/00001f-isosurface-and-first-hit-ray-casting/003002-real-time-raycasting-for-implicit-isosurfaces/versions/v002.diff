@@ -1,0 +1,309 @@
+--- v001.md
++++ v002.md
+@@ -10,9 +10,9 @@
+ 
+ ### Inputs and Outputs
+-*   **Input:** A regularly sampled scalar volume $\rho(x,y,z)$, an isovalue $\rho_{iso}$, and camera parameters.
++*   **Input:** A regularly sampled scalar volume $\rho(x,y,z)$, an isovalue $\rho_{iso}$, and camera parameters [S1].
+ *   **Output:** A color image of the isosurface, potentially augmented with curvature-based transfer functions, ridge/valley lines, or flow advection [S1].
+ 
+ ### Data Structures
+-1.  **Volume Data:** Regular 3D grid of scalar samples.
++1.  **Volume Data:** Regular 3D grid of scalar samples [S1].
+ 2.  **Two-Level Hierarchy:**
+     *   **Fine Level (Blocks):** Subdivisions of the volume used for empty space skipping. Each block stores min/max values of its constituent voxels [S1].
+@@ -20,10 +20,5 @@
+ 3.  **Macrocells:** A trilevel spatial hierarchy (one top-level cell, two intermediate macrocell levels, and data cells) used to accelerate traversal of empty cells. Each macrocell stores the min/max data values of its child cells [S3, book].
+ 4.  **Dynamic Cache:** A texture storing active bricks. An additional low-resolution texture references the positions of bricks in the cache [S1].
+-5.  **Render Targets:** Floating-point textures for:
+-    *   Intersection positions (volume coordinates).
+-    *   Gradient components (normal).
+-    *   Hessian matrix components.
+-    *   Curvature measures.
+-    *   Final color image [S1].
++5.  **Render Targets:** Floating-point textures for intersection positions (volume coordinates), gradient components, Hessian matrix components, curvature measures, and the final color image [S1].
+ 
+ ### Parameters
+@@ -37,17 +32,17 @@
+ For each pixel (or tile of pixels):
+ 
+-1.  **Ray Initialization:** Define the ray origin $P_a$ and direction $P_b$ in volume coordinates.
++1.  **Ray Initialization:** Define the ray origin $P_a$ and direction $P_b$ in volume coordinates [G].
+ 2.  **Traversal:** Use the incremental traversal method by Amanatides and Woo to traverse cells [S3, book].
+-    *   Check macrocells using min/max values. If the isovalue $\rho_{iso}$ is not within $[min, max]$, skip the macrocell.
++    *   Check macrocells using min/max values. If the isovalue $\rho_{iso}$ is not within $[min, max]$, skip the macrocell [S3, book].
+     *   Recurse deeper or proceed to the next cell if the isovalue is within bounds [S3, book].
+     *   If the volume does not fit in memory, check the dynamic cache texture. If the brick is not in the cache, update it on-the-fly [S1].
+ 3.  **Intersection Search:** When a cell containing the isosurface is found:
+-    *   The ray is parameterized as $R(t) = P_a + t P_b$.
+-    *   The scalar field is approximated using trilinear interpolation within the cell.
++    *   The ray is parameterized as $R(t) = P_a + t P_b$ [G].
++    *   The scalar field is approximated using trilinear interpolation within the cell [S3, book].
+     *   Solve for $t$ where the interpolated field equals the isovalue:
+         $$ \rho(x_a + t x_b, y_a + t y_b, z_a + t z_b) - \rho_{iso} = 0 $$
+     *   This expands to a cubic polynomial in $t$ [S3, book].
+-    *   Solve the cubic polynomial in closed form.
+-    *   Examine only roots contained in the cell $[0, 1]$ (relative to cell bounds).
++    *   Solve the cubic polynomial in closed form [S3, book].
++    *   Examine only roots contained in the cell $[0, 1]$ (relative to cell bounds) [S3, book].
+     *   If multiple roots exist, select the smallest $t$ (closest to the eye). If no roots, the ray misses the isosurface in that cell [S3, book].
+ 4.  **Adaptive Sampling & Refinement:**
+@@ -73,7 +68,8 @@
+ # Constants
+ ISOVALUE = 0.5
+-HIERARCHY_LEVELS = 3 # Top, 2 Macro, Data
++REFINEMENT_STEPS = 3
+ TILE_WIDTH = 32
+ TILE_HEIGHT = 4
++SHININESS = 32.0
+ 
+ # Data Structures
+@@ -81,90 +77,123 @@
+     min_val: float
+     max_val: float
+-    children: list # List of Macrocells or Blocks
++    children: list  # List of Macrocells or Blocks
+ 
+ class Block:
+     min_val: float
+     max_val: float
+-    voxels: list # Scalar values
++    voxels: list  # Scalar values
+ 
+ class Brick:
+-    blocks: list # List of Blocks
++    blocks: list  # List of Blocks
++
++class VolumeBounds:
++    min: list  # [x, y, z]
++    max: list  # [x, y, z]
++
++class Cell:
++    min_val: float
++    max_val: float
++    voxels: list
++    size: float  # Uniform cell size
+ 
+ # Global State
+-volume_hierarchy: Macrocell # Root of hierarchy
+-brick_cache: Texture # Dynamic cache of active bricks
+-brick_positions: Texture # Low-res texture referencing brick positions
+-volume_data: Texture # Full volume data (if fits in memory)
++volume_hierarchy: Macrocell  # Root of hierarchy
++brick_cache: list  # Dynamic cache of active bricks
++brick_positions: list  # Low-res texture referencing brick positions
++volume_data: list  # Full volume data (if fits in memory)
++cell_size: float = 1.0
+ 
+ def render_frame(camera):
+     # Stage 1: Ray Casting
+-    intersection_image = create_floating_point_texture()
++    intersection_image = allocate_texture()
+     
+     # Process tiles for dynamic load balancing
+-    for tile in get_tiles(TILE_WIDTH, TILE_HEIGHT):
+-        for pixel in tile:
+-            ray_origin, ray_dir = camera.get_ray(pixel)
+-            hit_t = trace_ray(ray_origin, ray_dir)
+-            if hit_t is not None:
+-                intersection_image.set(pixel, ray_origin + hit_t * ray_dir)
++    for tile_y in range(0, camera.height, TILE_HEIGHT):
++        for tile_x in range(0, camera.width, TILE_WIDTH):
++            for dy in range(TILE_HEIGHT):
++                for dx in range(TILE_WIDTH):
++                    pixel_x = tile_x + dx
++                    pixel_y = tile_y + dy
++                    ray_origin, ray_dir = camera.get_ray(pixel_x, pixel_y)
++                    hit_t = trace_ray(ray_origin, ray_dir)
++                    if hit_t is not None:
++                        intersection_image.set(pixel_x, pixel_y, ray_origin + hit_t * ray_dir)
++                    else:
++                        intersection_image.set(pixel_x, pixel_y, None)
++
++    # Stage 2: Image Space Derivatives
++    gradient_image = allocate_texture()
++    hessian_image = allocate_texture()
++    curvature_image = allocate_texture()
++    
++    for pixel_y in range(camera.height):
++        for pixel_x in range(camera.width):
++            hit_pos = intersection_image.get(pixel_x, pixel_y)
++            if hit_pos is not None:
++                grad = compute_gradient_tricubic(hit_pos)
++                hess = compute_hessian_tricubic(hit_pos)
++                grad_image.set(pixel_x, pixel_y, grad)
++                hess_image.set(pixel_x, pixel_y, hess)
++                curvature_image.set(pixel_x, pixel_y, compute_curvature(grad, hess))
++
++    # Stage 3: Image Space Shading
++    final_image = allocate_texture()
++    for pixel_y in range(camera.height):
++        for pixel_x in range(camera.width):
++            hit_pos = intersection_image.get(pixel_x, pixel_y)
++            if hit_pos is not None:
++                normal = gradient_image.get(pixel_x, pixel_y)
++                curvature = curvature_image.get(pixel_x, pixel_y)
++                color = shade(hit_pos, normal, curvature)
++                final_image.set(pixel_x, pixel_y, color)
++    return final_image
++
++def trace_ray(origin, direction):
++    # Amanatides & Woo traversal initialization
++    inv_dir = [1.0 / d if d != 0.0 else float('inf') for d in direction]
++    start_cell = [int((volume_bounds.min[i] - origin[i]) * inv_dir[i]) for i in range(3)]
++    step = [1 if direction[i] > 0 else -1 for i in range(3)]
++    t_delta = [abs(inv_dir[i]) for i in range(3)]
++    t_max = [0.0, 0.0, 0.0]
++    for i in range(3):
++        if direction[i] > 0:
++            t_max[i] = (start_cell[i] + 1.0 - origin[i]) * inv_dir[i]
++        else:
++            t_max[i] = (start_cell[i] - origin[i]) * inv_dir[i]
++            
++    current_cell = start_cell
++    t = 0.0
++    
++    while not is_outside_volume(current_cell, volume_bounds):
++        cell = hierarchy.get_cell(current_cell)
++        if cell.min_val <= ISOVALUE <= cell.max_val:
++            # Analytic intersection with trilinear interpolation
++            local_t = solve_cubic_trilinear(cell, origin, direction, ISOVALUE)
++            if local_t is not None:
++                global_t = t + local_t * cell_size
++                # Iterative refinement
++                for _ in range(REFINEMENT_STEPS):
++                    global_t = newton_refine(global_t, origin, direction, ISOVALUE)
++                return global_t
++                
++        # Advance to next cell
++        if t_max[0] < t_max[1]:
++            if t_max[0] < t_max[2]:
++                current_cell[0] += step[0]
++                t = t_max[0]
++                t_max[0] += t_delta[0]
+             else:
+-                intersection_image.set(pixel, NEGATIVE_INF)
+-
+-    # Stage 2: Image Space Derivatives
+-    gradient_image = create_floating_point_texture()
+-    hessian_image = create_floating_point_texture()
+-    curvature_image = create_floating_point_texture()
+-    
+-    for pixel in screen:
+-        hit_pos = intersection_image.get(pixel)
+-        if hit_pos is not NEGATIVE_INF:
+-            # Tri-cubic filtering for smooth derivatives
+-            grad = compute_gradient_tricubic(hit_pos)
+-            hess = compute_hessian_tricubic(hit_pos)
+-            grad_image.set(pixel, grad)
+-            hess_image.set(pixel, hess)
+-            curvature_image.set(pixel, compute_curvature(grad, hess))
+-
+-    # Stage 3: Image Space Shading
+-    final_image = create_color_texture()
+-    for pixel in screen:
+-        hit_pos = intersection_image.get(pixel)
+-        if hit_pos is not NEGATIVE_INF:
+-            normal = gradient_image.get(pixel)
+-            curvature = curvature_image.get(pixel)
+-            color = shade(hit_pos, normal, curvature)
+-            final_image.set(pixel, color)
+-    return final_image
+-
+-def trace_ray(origin, direction):
+-    # Incremental traversal using Amanatides and Woo
+-    current_cell = find_initial_cell(origin, direction)
+-    
+-    while current_cell is not None:
+-        # Check macrocell bounds
+-        if not isovalue_in_range(current_cell.min_val, current_cell.max_val, ISOVALUE):
+-            current_cell = get_next_cell(current_cell, direction)
+-            continue
+-            
+-        # If leaf cell (data cell)
+-        if is_leaf(current_cell):
+-            # Analytic intersection with trilinear interpolation
+-            roots = solve_cubic_trilinear(current_cell, origin, direction, ISOVALUE)
+-            valid_roots = [t for t in roots if 0 <= t <= 1]
+-            if valid_roots:
+-                t_min = min(valid_roots)
+-                # Iterative refinement
+-                refined_t = refine_intersection(current_cell, origin, direction, t_min)
+-                return refined_t
++                current_cell[2] += step[2]
++                t = t_max[2]
++                t_max[2] += t_delta[2]
++        else:
++            if t_max[1] < t_max[2]:
++                current_cell[1] += step[1]
++                t = t_max[1]
++                t_max[1] += t_delta[1]
+             else:
+-                current_cell = get_next_cell(current_cell, direction)
+-                continue
+-        else:
+-            # Recurse into children
+-            child = get_child_containing_ray(current_cell, origin, direction)
+-            if child:
+-                current_cell = child
+-            else:
+-                current_cell = get_next_cell(current_cell, direction)
++                current_cell[2] += step[2]
++                t = t_max[2]
++                t_max[2] += t_delta[2]
+                 
+     return None
+@@ -177,22 +206,43 @@
+     return solve_cubic(coeffs.a, coeffs.b, coeffs.c, coeffs.d)
+ 
+-def refine_intersection(cell, origin, direction, t):
+-    # Constant number of steps (e.g., Newton-Raphson or bisection)
+-    # to refine hit point to high precision
+-    for i in range(REFINEMENT_STEPS):
+-        t = newton_step(cell, origin, direction, t, ISOVALUE)
++def newton_refine(t, origin, direction, iso):
++    # Constant number of steps to refine hit point to high precision
++    p = origin + t * direction
++    f = evaluate_trilinear(p, cell.voxels) - iso
++    df = dot(compute_gradient_trilinear(p, cell.voxels), direction)
++    if df != 0.0:
++        t -= f / df
+     return t
+ 
+-def isovalue_in_range(min_val, max_val, iso):
+-    return min_val <= iso <= max_val
++def is_outside_volume(cell, bounds):
++    return any(cell[i] < bounds.min[i] or cell[i] > bounds.max[i] for i in range(3))
++
++def compute_trilinear_coeffs(voxels, origin, direction):
++    # Standard trilinear interpolation coefficient extraction
++    # Returns polynomial coefficients for rho(t) - iso = 0
++    pass  # Standard algebraic expansion
++
++def solve_cubic(a, b, c, d):
++    # Closed-form cubic solver returning real roots in [0, 1]
++    pass  # Standard Cardano's method or numerical root finder
++
++def compute_gradient_tricubic(pos):
++    # Evaluate tri-cubic filter derivatives at pos
++    pass  # Standard tri-cubic derivative evaluation
++
++def compute_hessian_tricubic(pos):
++    # Evaluate tri-cubic filter second derivatives at pos
++    pass  # Standard tri-cubic Hessian evaluation
++
++def compute_curvature(grad, hess):
++    # Derive curvature measures from gradient and Hessian
++    pass  # Standard shape descriptor computation
+ 
+ def shade(hit_pos, normal, curvature):
+     # Blinn-Phong lighting
+     diffuse = max(dot(normal, light_dir), 0)
+-    specular = pow(max(dot(reflect(-view_dir, normal), light_dir), 0), shininess)
+-    
++    specular = pow(max(dot(reflect(-view_dir, normal), light_dir), 0), SHININESS)
+     # Curvature-based transfer function
+     color_map = curvature_transfer_function(curvature)
+-    
+     return diffuse * color_map + specular
+ ```

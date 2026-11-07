@@ -1,0 +1,236 @@
+# PDF Light Weight Space Leaping
+
+Also called: LWSL, Light Weight Space Leaping, Light Weight Space Leaping using Ray Coherence, Ray Coherence Space Leaping, Space Leaping using Ray Coherence
+
+## Overview
+PDF Light Weight Space Leaping (LWSL) is a space-leaping acceleration technique for volume rendering that exploits ray coherence to skip empty space without requiring pre-processing or 3D data structures [S1, S2]. It divides image-plane rays into two groups: detector rays, which perform full ray casting to determine the distance to the first non-empty cell, and space leap rays, which are accelerated by skipping empty space based on information propagated from detector rays [S1, S2]. Unlike data-structure-based methods (e.g., DFB) or temporal coherence techniques, LWSL is an image-space method with memory and run-time complexity proportional only to the image size, making it independent of dataset complexity and transfer function changes [S1, S2].
+
+## How it works
+**Inputs:**
+*   Volume dataset (voxel grid) [S1, S2].
+*   Camera parameters (eye position, image plane resolution, projection type: parallel or perspective) [S1, S2].
+*   Sampling distance $\delta$ [S1, S2].
+*   Detector pixel configuration (e.g., 1:4 zig-zag pattern) [S1, S2].
+
+**Outputs:**
+*   Rendered image buffer [S1, S2].
+
+**Data Structures:**
+*   **Leap Buffer:** A 2D array with resolution equal to the image plane. Each element is an 8-bit or 16-bit integer storing the number of samples the ray traverses in empty space before hitting a non-empty cell [S1, S2].
+    *   For detector pixels: Stores the sample count returned by the detector ray [S1, S2].
+    *   For space leap pixels: Stores the minimum sample count from neighboring detector rays in their influence area [S1, S2].
+    *   Initialization: All entries are zero (empty) before Phase 1 [S1, S2].
+*   **Detector Mask:** A boolean array indicating which pixels are detector pixels [S1, S2].
+
+**Definitions:**
+*   **Cell:** A cubical region with voxels at all eight corners and no voxels inside [S1, S2].
+*   **Empty Cell:** A cell where the opacity of all eight corner voxels is zero (for tri-linear interpolation). For higher-order interpolation, all contributing neighboring voxels must have zero opacity [S1, S2].
+*   **Cell Group:** The set of 8 cells surrounding a single voxel [S1, S2].
+*   **Influence Area:** The set of neighboring non-detector pixels to which a detector pixel spreads its leap information. It includes all pixels that could potentially project onto the same cell group without intersecting another detector ray [S1, S2].
+
+**Parameters:**
+*   **Detector Density:** 1 detector ray for every 4 pixels (1:4 ratio) using a zig-zag scheme [S1, S2].
+*   **Leap Buffer Type:** 8-bit or 16-bit integer [S1, S2].
+
+**Algorithm Steps:**
+
+1.  **Phase 1: Detector Ray Casting**
+    1.  Initialize the Leap Buffer to zero and the Detector Mask to false [S1, S2].
+    2.  Identify detector pixels using the zig-zag pattern [S1, S2].
+    3.  For each detector pixel:
+        a.  Cast a ray from the pixel into the volume [S1, S2].
+        b.  Traverse the ray, checking for empty cells. To check if a cell is empty, perform a bitwise OR operation on the opacity values of all voxels in the cell (or all contributing voxels for higher-order interpolation). If the result is non-zero, the cell is non-empty; otherwise, it is empty [S1, S2].
+        c.  Skip interpolation, shading, and compositing for empty cells to save time [S1, S2].
+        d.  Count the number of samples ($N_{det}$) taken until the first non-empty cell is encountered [S1, S2].
+        e.  Store $N_{det}$ in the Leap Buffer at the detector pixel's location [S1, S2].
+        f.  Mark the location in the Detector Mask as true [S1, S2].
+        g.  Perform full ray casting (sampling, compositing, shading) for the detector ray and store the result in the image buffer [S1, S2].
+
+2.  **Phase 2: Leap Buffer Filling (Spreading)**
+    1.  For each detector pixel:
+        a.  Identify its influence area (neighboring non-detector pixels) [S1, S2].
+        b.  For each pixel in the influence area:
+            i.  If the neighbor's Leap Buffer value is zero (unset), store the detector pixel's $N_{det}$ value [S1, S2].
+            ii. If the neighbor's value is already set, compare it with $N_{det}$ and store the minimum of the two. This ensures a conservative estimate, preventing the ray from overshooting a non-empty cell [S1, S2].
+    2.  After spreading, the Leap Buffer is fully populated with the minimum empty-space traversal counts for all pixels [S1, S2].
+
+3.  **Phase 3: Space Leap Ray Casting**
+    1.  Sweep the Leap Buffer from top to bottom (or any order) to find non-detector pixels [S1, S2].
+    2.  For each non-detector pixel:
+        a.  Retrieve the leap count $N_{leap}$ from the Leap Buffer [S1, S2].
+        b.  **Boundary Check:** If $N_{leap} == 0$, do not leap. Start ray casting from the image plane [S1, S2].
+        c.  **Perspective Clamp (if applicable):** If the projected distance exceeds the maximum accuracy distance $x_1x_n$ (see Formulas), clamp $N_{leap}$ to the corresponding sample count for $x_1x_n$ [S1, S2].
+        d.  **Leap:** Move the ray start point forward by $N_{leap} \times \delta$ along the ray direction [S1, S2].
+        e.  **Backtracking Check:** Sample the first point after leaping. If this point is inside a non-empty cell, backtrack the ray origin backwards by sample steps until an empty cell is found. The maximum backtracking distance is bounded by the longest edge of a cell group divided by $\delta$ [S1, S2].
+        f.  Perform standard ray casting (sampling, compositing, shading) from the new start point. Early ray termination can be applied [S1, S2].
+
+**Formulas:**
+
+*   **Minimum Projection Width ($w_{min}$):**
+    $$w_{min} = \sqrt{p^2 + (2p)^2} = p\sqrt{5}$$
+    where $p$ is the inter-pixel distance on the image plane in world coordinates [S1, S2].
+
+*   **Maximum Inter-pixel Distance for Parallel Projection ($p_{max}$):**
+    $$p_{max} = \frac{2}{\sqrt{5}} \mu_{min}$$
+    where $\mu_{min}$ is the length of the smallest edge of the voxel unit size. To guarantee detection of single voxels, $p \le p_{max}$ [S1, S2].
+
+*   **Maximum Ray Traversal Distance for Perspective Projection ($x_1x_n$):**
+    $$x_1x_n = \left( \frac{\sqrt{2} \times \mu_{min}}{\sqrt{5} \times p} - 1 \right) \times ex_1$$
+    where $ex_1$ is the distance from the eye to the image plane. Rays should not leap beyond this distance to maintain accuracy [S1, S2].
+
+*   **Backtracking Limit ($M_{max}$):**
+    $$M_{max} = \frac{\max(\mu_x, \mu_y, \mu_z)}{\delta}$$
+    where $\mu_x, \mu_y, \mu_z$ are the cell group edge lengths (or voxel dimensions along the axes) and $\delta$ is the sampling distance [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def light_weight_space_leaping(volume, camera, image_width, image_height, delta, bounds):
+    # 1. Initialize Data Structures
+    leap_buffer = [[0] * image_width for _ in range(image_height)]
+    is_detector = [[False] * image_width for _ in range(image_height)]
+    image_buffer = [[0.0, 0.0, 0.0] for _ in range(image_height * image_width)]
+
+    # 2. Identify Detector Pixels (1:4 Zig-Zag)
+    detector_pixels = []
+    for y in range(image_height):
+        for x in range(image_width):
+            if (x % 2 == 0 and y % 2 == 0) or (x % 2 == 1 and y % 2 == 1):
+                detector_pixels.append((x, y))
+                is_detector[x][y] = True
+
+    # 3. Phase 1: Cast Detector Rays
+    for (dx, dy) in detector_pixels:
+        ray_origin, ray_dir = camera.get_ray(dx, dy)
+        samples_count = 0
+        current_pos = list(ray_origin)
+        
+        # Traverse until non-empty cell or end of volume
+        while volume.contains(current_pos):
+            cell = volume.get_cell_at(current_pos)
+            if volume.is_cell_empty(cell):
+                samples_count += 1
+                current_pos[0] += ray_dir[0] * delta
+                current_pos[1] += ray_dir[1] * delta
+                current_pos[2] += ray_dir[2] * delta
+            else:
+                break
+        
+        # Store leap info
+        leap_buffer[dx][dy] = samples_count
+        is_detector[dx][dy] = True
+        
+        # Full ray casting for detector pixel
+        color = cast_ray(ray_origin, ray_dir, volume, delta, samples_count)
+        image_buffer[dy * image_width + dx] = color
+
+    # 4. Phase 2: Fill Leap Buffer (Spreading)
+    # Influence area covers neighbors that could share a cell group projection.
+    # We spread to a local window that satisfies the geometric bounds [S1].
+    spread_radius = 2  # Covers immediate and diagonal neighbors for 1:4 grid
+    for (dx, dy) in detector_pixels:
+        leap_val = leap_buffer[dx][dy]
+        for ny in range(dy - spread_radius, dy + spread_radius + 1):
+            for nx in range(dx - spread_radius, dx + spread_radius + 1):
+                if 0 <= nx < image_width and 0 <= ny < image_height:
+                    if not is_detector[nx][ny]:
+                        current_val = leap_buffer[nx][ny]
+                        if current_val == 0:  # Unset
+                            leap_buffer[nx][ny] = leap_val
+                        else:
+                            leap_buffer[nx][ny] = min(current_val, leap_val)
+
+    # 5. Phase 3: Cast Space Leap Rays
+    for y in range(image_height):
+        for x in range(image_width):
+            if not is_detector[x][y]:
+                leap_val = leap_buffer[x][y]
+                
+                # Boundary check
+                if leap_val == 0:
+                    ray_origin, ray_dir = camera.get_ray(x, y)
+                    color = cast_ray(ray_origin, ray_dir, volume, delta, 0)
+                    image_buffer[y * image_width + x] = color
+                    continue
+                
+                # Perspective clamp
+                max_samples = calculate_max_samples_for_accuracy(camera, delta)
+                effective_leap = min(leap_val, max_samples)
+                
+                ray_origin, ray_dir = camera.get_ray(x, y)
+                ray_origin = [ray_origin[i] + ray_dir[i] * effective_leap * delta for i in range(3)]
+                
+                # Backtracking check
+                if volume.is_cell_non_empty_at(ray_origin):
+                    while volume.is_cell_non_empty_at(ray_origin):
+                        ray_origin = [ray_origin[i] - ray_dir[i] * delta for i in range(3)]
+                        if not volume.contains(ray_origin):
+                            break
+                
+                # Full ray casting from new start
+                color = cast_ray(ray_origin, ray_dir, volume, delta, 0)
+                image_buffer[y * image_width + x] = color
+
+    return image_buffer
+
+def cast_ray(origin, direction, volume, delta, start_samples):
+    # Inline standard ray casting: sampling, compositing, shading [S1, S2]
+    pos = list(origin)
+    for _ in range(start_samples):
+        pos[0] += direction[0] * delta
+        pos[1] += direction[1] * delta
+        pos[2] += direction[2] * delta
+    color = [0.0, 0.0, 0.0]
+    while volume.contains(pos):
+        sample = volume.sample(pos)
+        # Standard front-to-back compositing
+        alpha = sample.opacity
+        color = [color[i] + sample.color[i] * alpha * (1.0 - sum(color)) for i in range(3)]
+        if sum(color) > 0.99:  # Early ray termination
+            break
+        pos[0] += direction[0] * delta
+        pos[1] += direction[1] * delta
+        pos[2] += direction[2] * delta
+    return color
+
+def calculate_max_samples_for_accuracy(camera, delta):
+    # x1_xn = ((sqrt(2) * mu_min / (sqrt(5) * p)) - 1) * ex1
+    # N = x1_xn / delta
+    # mu_min, p, ex1 derived from camera and volume geometry [S1]
+    import math
+    mu_min = camera.mu_min
+    p = camera.pixel_distance
+    ex1 = camera.eye_to_plane_distance
+    x1_xn = ((math.sqrt(2) * mu_min) / (math.sqrt(5) * p) - 1) * ex1
+    return int(x1_xn / delta)
+```
+
+## Subtopics
+
+### [Backtracking Space Leap Rays](5861-backtracking-space-leap-rays.md)
+A correction mechanism applied to space leap rays to ensure that no non-transparent sample points are missed during the leap phase. It is distinguished from standard space leaping by the explicit verification of the first sample's location relative to empty space and the subsequent backward movement of the ray origin if it lands inside a non-empty cell.
+
+## Operating characteristics
+*   **Time Complexity:** Proportional to the image size. The number of detector rays is fixed (e.g., 1/4 of total pixels), and the spreading step is also proportional to the number of detector pixels times the influence area size [S1, S2].
+*   **Memory Complexity:** Proportional to the image size. The Leap Buffer requires 8-bit or 16-bit integers per pixel, independent of the volume dataset size [S1, S2].
+*   **Performance:** Provides significant acceleration for scenes with large empty regions. Performance scales with the amount of empty space; more empty space leads to larger leaps and fewer samples [S1, S2].
+*   **Strengths:**
+    *   No pre-processing or 3D data structures required [S1, S2].
+    *   Independent of transfer function (can be changed interactively) [S1, S2].
+    *   Works with both parallel and perspective projection [S1, S2].
+    *   No temporal coherence required; suitable for out-of-order rendering and mosaics [S1, S2].
+    *   Easy to implement [S1, S2].
+*   **Limitations:**
+    *   Accuracy depends on the detector pixel density and the geometric bounds ($p_{max}$). If the pixel distance is too large, small objects may be missed [S1, S2].
+    *   In perspective projection, accuracy degrades beyond distance $x_1x_n$, requiring clamping [S1, S2].
+    *   Requires backtracking in some cases, adding overhead [S1, S2].
+    *   Not suitable for scenes with very small, sparse objects if the detector density is too low [S1, S2].
+
+## Background
+PDF Light Weight Space Leaping was introduced by Sarang Lakare and Arie Kaufman at the Center for Visual Computing, Stony Brook University, in 2004 [S1, S2]. It was presented at the IEEE Visualization 2004 conference [S1, S2]. The method was developed to address the limitations of previous space-leaping techniques, which either required complex data structures (like DFB) or depended on temporal coherence [S1, S2]. It builds on the concept of ray coherence, where neighboring rays often traverse similar distances in empty space [S1, S2].
+
+## Sources
+[S1] PDF Light Weight Space Leaping using Ray Coherence, http://vis.computer.org/vis2004/dvd/vis/papers/lakare.pdf, fetched 2026-10-28
+[S2] PDF Light Weight Space Leaping using Ray Coherence, https://sci-hub.red/storage/moscow/3086/b1c8d8b37aeadf6b2ca729a1a7a2ae54/light-weight-space-leaping-using-ray-coherence.pdf, fetched 2026-10-28

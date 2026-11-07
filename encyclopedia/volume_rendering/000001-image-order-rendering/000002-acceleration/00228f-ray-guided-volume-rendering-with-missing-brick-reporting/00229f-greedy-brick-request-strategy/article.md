@@ -1,18 +1,16 @@
 # Greedy Brick Request Strategy
 Also called: Greedy algorithm
 ## Overview
-The Greedy Brick Request Strategy is a data-loading heuristic used in ray-guided volume rendering to manage out-of-core brick requests. It addresses the problem of missing volume data by requesting all intermediate levels of detail (LoD) along a ray's path when a higher-resolution brick is unavailable, rather than waiting for the final required resolution. Unlike the [Global strategy](2843-global-brick-request-strategy.md), which only requests the final necessary brick, the Greedy strategy floods the request hash table with intermediate bricks. This approach is distinct because it prioritizes iterative visual refinement and faster convergence of the image quality over minimizing the total number of unique brick requests per frame.
+The Greedy Brick Request Strategy is a data-loading heuristic in ray-guided volume rendering that requests all intermediate levels of detail (LoD) along a ray's path when a higher-resolution brick is unavailable, rather than waiting for the final required resolution [S1]. Unlike the [Global strategy](2843-global-brick-request-strategy.md), which only requests the final necessary brick, the Greedy strategy floods the request hash table with intermediate bricks [S1]. This prioritizes iterative visual refinement and faster convergence of image quality over minimizing the total number of unique brick requests per frame [S1].
 
 ## How it works
-The strategy operates within the ray-guided rendering loop, specifically during the brick lookup phase when a required brick is not resident in GPU memory.
-
 **Inputs and Outputs:**
-- **Input:** The current ray state, the current Level of Detail (LoD) index, and a missing brick report function.
-- **Output:** A sequence of missing brick reports for all intermediate resolutions up to the first available brick.
+- **Input:** The current ray state, the current Level of Detail (LoD) index, and a missing brick report function [S1].
+- **Output:** A sequence of missing brick reports for all intermediate resolutions up to the first available brick [S1].
 
 **Data Structures:**
-- **Hash Table:** A lock-free hash table used to accumulate brick requests from all active rays. Each entry maps a brick identifier (e.g., grid coordinates and LoD) to a request status.
-- **Level of Detail (LoD):** An integer index representing the resolution of the brick, where higher indices indicate finer resolution.
+- **Hash Table:** A table used to accumulate brick requests from all active rays, which is read back from the GPU at the end of a frame to fill the volume pool [S1].
+- **Level of Detail (LoD):** An integer index representing the resolution of the brick, where higher indices indicate finer resolution [S1].
 
 **Algorithm Steps:**
 1. Initialize the current LoD to the base resolution required for the current sample or the last known available resolution.
@@ -34,41 +32,26 @@ The strategy operates within the ray-guided rendering loop, specifically during 
 def greedy_brick_request(ray, current_lod, lookup_brick, is_missing, report_missing):
     """
     Requests all intermediate bricks from current_lod up to the first available brick.
-    
-    Args:
-        ray: The current ray object containing position and direction.
-        current_lod: The starting level of detail index.
-        lookup_brick(ray, lod): Function that returns the brick identifier for a ray at a specific lod.
-        is_missing(brick): Function that returns True if the brick is not in GPU memory.
-        report_missing(brick): Function that adds the brick to the global request hash table.
-        
-    Returns:
-        The first available brick identifier, or None if the ray terminates before finding a brick.
     """
     lod = current_lod
     while True:
         lod += 1
         brick = lookup_brick(ray, lod)
-        
-        # If the ray has passed the end of the volume or no more bricks exist
-        if brick is None:
-            return None
-            
         if is_missing(brick):
             report_missing(brick)
         else:
-            # Found the first available brick at this or higher resolution
             return brick
 ```
 
 **Parameters:**
-- **LoD Increment:** Typically increments by 1 at each step, moving from coarser to finer resolutions.
-- **Boundary Conditions:** If the ray exits the volume bounds before finding a resident brick, the loop terminates.
+- **LoD Increment:** Increments by 1 at each step, moving from coarser to finer resolutions [S1].
+- **Hash Table Saturation:** Because the Greedy strategy requests all intermediate bricks, it can flood the request hash table with many requests per ray [S1].
+- **Convergence Behavior:** The strategy allows a ray to sample at its final resolution quickly, which can cause earlier ray termination and faster convergence in fewer frames [S1].
 
 **Edge Cases and Pitfalls:**
-- **Hash Table Saturation:** Because the Greedy strategy requests *all* intermediate bricks, it can flood the request hash table with many requests per ray. This may lead to contention or overflow if the table size is not sufficiently large [S1].
-- **Redundant Requests:** Rays may request the same intermediate brick multiple times if they traverse overlapping regions, though the hash table deduplicates these.
-- **Precision:** The lookup function must correctly map ray positions to brick indices at each LoD. Errors here can cause infinite loops or missed bricks.
+- **Ray Termination:** If the ray exits the volume bounds before finding a resident brick, the loop must terminate to prevent infinite execution.
+- **Hash Table Contention:** Flooding the hash table with intermediate requests per ray may cause contention or overflow if the table size is not sufficiently large.
+- **Lookup Precision:** The lookup function must correctly map ray positions to brick indices at each LoD to avoid missing bricks or requesting invalid resolutions.
 
 ## Subtopics
 
@@ -76,16 +59,16 @@ def greedy_brick_request(ray, current_lod, lookup_brick, is_missing, report_miss
 An alternative strategy that performs brick lookup once per brick rather than every sample, maintaining a simple ray-marching core. It differs from the Greedy strategy by using an out-of-core, progressive rendering methodology that breaks the GPU-memory-size barrier, whereas Greedy focuses on iterative refinement via intermediate requests.
 
 ## Operating characteristics
-- **Time Complexity:** The number of lookups and potential hash table writes per ray is proportional to the number of missing intermediate levels of detail. In the worst case, this is $O(L)$, where $L$ is the total number of LoD levels.
-- **Memory Complexity:** The memory footprint is dominated by the request hash table. The Greedy strategy requires a larger hash table than the Global strategy because it accumulates more requests per frame [S1].
-- **Performance:** The Greedy strategy converges in fewer frames to a visually pleasing result compared to the Global strategy. This is because it allows rays to sample at their final resolution more quickly, which can cause earlier ray termination and faster accumulation of high-frequency details [S1].
-- **Strengths:** Produces more responsive, iteratively-refined images. Better for interactive applications where immediate visual feedback is prioritized over absolute minimum data transfer.
-- **Limitations:** Higher memory usage for the request table. May transfer more total data over time if the scene changes frequently, as it loads intermediate bricks that might not be strictly necessary for the final pixel color.
-- **When to use:** When visual responsiveness and smooth convergence are critical, and sufficient hash table memory is available.
-- **When not to use:** When memory is extremely constrained, or when the goal is to minimize the total number of disk I/O operations regardless of visual convergence speed.
+- **Time Complexity:** The number of lookups and potential hash table writes per ray is proportional to the number of missing intermediate levels of detail [S1].
+- **Memory Complexity:** The memory footprint is dominated by the request hash table, which accumulates more requests per frame than the Global strategy [S1].
+- **Performance:** The Greedy strategy converges in fewer frames to a visually pleasing result compared to the Global strategy [S1]. This is because it allows rays to sample at their final resolution more quickly, which can cause earlier ray termination and faster accumulation of high-frequency details [S1].
+- **Strengths:** Produces more responsive, iteratively-refined images with more densely-packed intermediate progress [S1].
+- **Limitations:** Higher memory usage for the request table due to flooding the hash table with intermediate requests [S1].
+- **When to use:** When visual responsiveness and smooth convergence are critical [S1].
+- **When not to use:** When the goal is to minimize the total number of disk I/O operations regardless of visual convergence speed, as the Global strategy generates the final correct image quickest [S1].
 
 ## Background
-The Greedy Brick Request Strategy was introduced in the context of scalable GPU-based ray-guided volume rendering. It was analyzed as part of a broader study on out-of-core rendering techniques that handle extremely large volume datasets [S1]. The strategy was compared against the "Global" strategy, which only requests the final required brick. The authors found that the Greedy approach, despite its higher request volume, converged faster and produced more pleasing progress information, surprising initial expectations that the Global strategy would be more efficient [S1].
+The Greedy Brick Request Strategy was introduced in the context of scalable GPU-based ray-guided volume rendering [S1]. It was compared against the "Global" strategy, which only requests the final required brick [S1]. The authors found that the Greedy approach, despite its higher request volume, converged faster and produced more pleasing progress information, surprising initial expectations that the Global strategy would be more efficient [S1].
 
 ## Sources
 [S1] An Analysis of Scalable GPU-Based Ray-Guided Volume Rendering, https://pmc.ncbi.nlm.nih.gov/articles/PMC4260263/, fetched 2026-10-26

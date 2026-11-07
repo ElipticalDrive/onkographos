@@ -3,105 +3,113 @@
 Also called: Discrete Photon Beam Generation
 
 ## Overview
-Photon Marching is a method for generating "discrete photon beams" by depositing photons at uniform intervals along a ray originating from a light source, rather than propagating a single photon via a Markov random walk [S1]. It differs from standard photon tracing by distributing the power of a single photon among multiple deposited photons at fixed steps, analogous to how ray marching solves 1D integrals via Riemann sums compared to random-walk path tracing [S1]. It serves as the foundational geometric definition for photon beams in the Photon Beam Methods family, though in practice, beams are often still generated via random-walk sampling [S1].
+Photon Marching is a photon shooting method that generates "discrete photon beams" by depositing photons at uniform intervals along rays originating from light sources [S1]. It solves the problem of estimating in-scattered radiance by replacing the stochastic sampling of scattering events with a deterministic Riemann sum integration along the ray path [S1]. Unlike standard photon tracing, which uses a Markov random-walk to determine a single propagation distance per photon, Photon Marching distributes the power of a single photon among multiple deposited photons at fixed steps [S1]. This approach is analogous to ray marching from the camera, but applied to light transport from the source [S1].
 
 ## How it works
 **Inputs:**
-*   Light source position $\mathbf{x}_b$ and direction $\tilde{\omega}_b$.
-*   Photon beam power $\Phi_b$ entering the medium.
-*   Medium scattering coefficient $\sigma_s$ and extinction coefficient $\sigma_t$.
-*   Uniform step size $\Delta t$.
-*   Random offset $\xi$ for the beam.
+*   Light source power $\Phi_b$ (power of the photon beam entering the medium) [S1].
+*   Medium extinction coefficient $\sigma_t$ and scattering coefficient $\sigma_s$ [S1].
+*   Uniform step size $\Delta t$ [S1].
+*   Ray origin $\mathbf{x}_b$ and direction $\tilde{\boldsymbol{\omega}}_b$ [S1].
+*   Random offset $\xi$ for aliasing avoidance [S1].
 
 **Outputs:**
-*   A list of deposited photons, each defined by position $\mathbf{x}_t$ and power $\Phi_{p_b}$.
+*   A set of deposited photons forming a "discrete photon beam" [S1].
+*   Each photon has position $\mathbf{x}_t$ and power $\Phi_{p_b}$ [S1].
 
 **Data Structures:**
-*   **Discrete Photon Beam:** A sequence of photon deposits. Each deposit stores:
-    *   Position $\mathbf{x}_t$ (3D vector).
-    *   Power $\Phi_{p_b}$ (scalar).
-    *   Step index $k$ (integer, implicit in position calculation).
+*   **Discrete Photon Beam:** A list of photon deposits. Each deposit contains:
+    *   Position $\mathbf{x}_t \in \mathbb{R}^3$
+    *   Power $\Phi_{p_b} \in \mathbb{R}$
+    *   No explicit bit-packing is defined in the sources; standard floating-point representations are implied [S1].
 
 **Steps:**
-1.  **Initialize:** Set current position $\mathbf{x}_{curr} = \mathbf{x}_b$. Set step counter $k = 0$.
-2.  **Calculate Offset:** Compute the initial step parameter $t_0 = \xi$. [S1]
-3.  **Iterate Steps:** While the ray is within the medium extent:
-    a.  Compute current step parameter $t_k = t_0 + k \cdot \Delta t$. [S1]
-    b.  Compute position $\mathbf{x}_t = \mathbf{x}_b + t_k \tilde{\omega}_b$. [S1]
-    c.  Compute transmittance from ray origin to $\mathbf{x}_t$: $T = e^{-\sigma_t t_k}$. [S1]
-    d.  Compute distance from origin: $d = \|\mathbf{x}_b - \mathbf{x}_t\| = t_k$ (assuming unit direction). [S1]
-    e.  Calculate deposited photon power:
-        $$ \Phi_{p_b} = \sigma_s e^{-\sigma_t t_k} t_k \Phi_b \Delta t $$ [S1]
-    f.  Store photon $(\mathbf{x}_t, \Phi_{p_b})$.
-    g.  Increment $k$.
-4.  **Terminate:** Stop when $t_k$ exceeds the medium boundary or maximum length.
-
-**Parameters:**
-*   $\Delta t$: Uniform step size. Not given in the sources.
-*   $\xi$: Random offset to avoid aliasing. Specific value inconsequential for derivations [S1].
-
-**Edge Cases:**
-*   **Medium Extent:** The method assumes the medium has finite extent to determine the number of steps $N$ [S1].
-*   **Precision:** Transmittance $e^{-\sigma_t t_k}$ may underflow for large $t_k$ or high $\sigma_t$.
+1.  **Initialize:** Set the current ray origin $\mathbf{x}_b$ and direction $\tilde{\boldsymbol{\omega}}_b$ from the light source. Select a random offset $\xi$ for the current beam to avoid aliasing [S1].
+2.  **Iterate Steps:** For each step index $k \in \{0, 1, \dots, N-1\}$:
+    a. Calculate the path length $t_k = (\xi + k)\Delta t$ [S1].
+    b. Calculate the position $\mathbf{x}_t = \mathbf{x}_b + t_k \tilde{\boldsymbol{\omega}}_b$ [S1].
+    c. Calculate the transmittance from the ray origin to $\mathbf{x}_t$: $T(t_k) = e^{-\sigma_t t_k}$ [S1].
+    d. Calculate the power of the deposited photon $\Phi_{p_b}$ using Equation 15 [S1]:
+       $$ \Phi_{p_b} = \sigma_s e^{-\sigma_t t_k} \|\mathbf{x}_b - \mathbf{x}_t\| \Phi_b \Delta t $$
+       Note: $\|\mathbf{x}_b - \mathbf{x}_t\|$ is equivalent to $t_k$ if $\tilde{\boldsymbol{\omega}}_b$ is a unit vector, simplifying the term to $\sigma_s e^{-\sigma_t t_k} t_k \Phi_b \Delta t$ [S1].
+    e. Store the photon at $\mathbf{x}_t$ with power $\Phi_{p_b}$ [S1].
+3.  **Terminate:** Stop when the ray exits the medium or reaches the maximum extent [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def photon_march(x_b, omega_b, Phi_b, sigma_s, sigma_t, delta_t, xi, max_length):
+def photon_march(light_power, sigma_s, sigma_t, origin, direction, step_size, max_steps):
     """
-    Generates a discrete photon beam via photon marching.
+    Generates a discrete photon beam using Photon Marching.
     
     Args:
-        x_b: Origin vector (3D)
-        omega_b: Direction vector (3D, assumed unit length)
-        Phi_b: Input beam power (scalar)
-        sigma_s: Scattering coefficient (scalar)
-        sigma_t: Extinction coefficient (scalar)
-        delta_t: Uniform step size (scalar)
-        xi: Random offset (scalar)
-        max_length: Maximum ray length in medium (scalar)
+        light_power (float): Phi_b, power of the photon beam entering the medium.
+        sigma_s (float): Scattering coefficient.
+        sigma_t (float): Total extinction coefficient.
+        origin (Vector3): x_b, ray origin.
+        direction (Vector3): omega_b, unit ray direction.
+        step_size (float): Delta t, uniform step size.
+        max_steps (int): N, maximum number of steps.
         
     Returns:
-        List of tuples (position, power)
+        list of dict: List of deposited photons with 'position' and 'power'.
     """
-    photons = []
-    k = 0
+    # [G] Generate a random offset to avoid aliasing, as per source description.
+    # The specific value is inconsequential for derivations but required for implementation.
+    random_offset = random.uniform(0, step_size)
     
-    # Initial step parameter
-    t_current = xi
+    deposited_photons = []
     
-    while t_current <= max_length:
-        # Position calculation
-        x_t = x_b + t_current * omega_b
+    for k in range(max_steps):
+        # Calculate path length t
+        t = (random_offset + k) * step_size
         
-        # Transmittance from origin
-        transmittance = exp(-sigma_t * t_current)
+        # Calculate position x_t
+        position = origin + direction * t
         
-        # Distance from origin (assuming unit direction)
-        dist = t_current
+        # Calculate transmittance T = exp(-sigma_t * t)
+        transmittance = math.exp(-sigma_t * t)
         
-        # Power calculation (Equation 15)
-        # Phi_pb = sigma_s * exp(-sigma_t * t) * ||x_b - x_t|| * Phi_b * delta_t
-        phi_pb = sigma_s * transmittance * dist * Phi_b * delta_t
+        # Calculate distance from origin (norm of vector)
+        # Since direction is unit vector, this is simply t.
+        distance = t 
         
-        photons.append((x_t, phi_pb))
+        # Calculate photon power Phi_pb
+        # Formula: Phi_pb = sigma_s * exp(-sigma_t * t) * ||x_b - x_t|| * Phi_b * Delta t
+        photon_power = sigma_s * transmittance * distance * light_power * step_size
         
-        # Next step
-        k += 1
-        t_current = xi + k * delta_t
+        # Store photon
+        deposited_photons.append({
+            'position': position,
+            'power': photon_power
+        })
         
-    return photons
+        # [G] In practice, one would check if position is outside the medium volume.
+        # If so, break loop. Not explicitly detailed in source steps, but implied by "extent of the beam".
+        
+    return deposited_photons
 ```
 
+**Parameters:**
+*   $\Delta t$: Uniform step size. Not given in the sources.
+*   $\xi$: Random offset. Not given in the sources.
+*   $N$: Total number of photons deposited. Depends on step-size and extent of the beam through the medium [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Aliasing:** Using a fixed offset for all beams can cause aliasing. A random offset $\xi$ per beam is required [S1].
+*   **Medium Extent:** The method assumes the medium has finite extent. If the medium is infinite, the number of steps $N$ is undefined [S1].
+*   **Homogeneous vs Heterogeneous:** The derivation assumes uniform step size, implying a homogeneous medium or a piecewise approximation. For heterogeneous media, the step size or coefficients may need adjustment, though the source primarily describes the homogeneous case for the basic definition [S1].
+
 ## Operating characteristics
-*   **Complexity:** Time complexity is linear with respect to the number of steps $N$, where $N \approx \text{Length} / \Delta t$. Memory complexity is linear with respect to $N$ to store the discrete photons.
-*   **Performance:** Not given in the sources.
-*   **Strengths:** Provides a mathematically rigorous definition of discrete photon beams as a Riemann sum approximation [S1].
-*   **Limitations:** The method is primarily used for derivation; in practice, photon beams are still created using a random-walk process [S1]. Uniform step size may be inefficient for heterogeneous media.
+*   **Time Complexity:** Linear with respect to the number of steps $N$ and the length of the ray through the medium [S1].
+*   **Memory Complexity:** Linear with respect to the number of deposited photons, which is proportional to $N$ [S1].
+*   **Strengths:** Provides a deterministic integration of in-scattered light along the ray, analogous to ray marching. It avoids the variance associated with random-walk sampling for the initial beam generation [S1].
+*   **Limitations:** It is a single-scattering approximation for the beam generation itself. Multiple scattering requires combining this with random-walk sampling (scattering a new discrete beam off the current beam) [S1].
+*   **When to use:** When a deterministic integration of light transport from a light source is preferred over stochastic sampling for the initial beam, or when deriving mathematical definitions of photon beams [S1].
 
 ## Background
-Photon Marching was introduced in the context of a comprehensive theory of volumetric radiance estimation using photon points and beams [S1]. It is analogous to the difference between synthesizing an image using random-walk volumetric path tracing and ray marching from the camera [S1]. The method distributes the power of a single photon among multiple photons deposited at uniform intervals, creating a "discrete photon beam" [S1].
+Photon Marching was introduced in the context of a comprehensive theory of volumetric radiance estimation using photon points and beams [S1]. It is described as a method to derive a mathematical definition of photon beams, although in practice, photon beams are still often created using a random-walk process [S1]. The method distinguishes itself from standard photon tracing by distributing photon power among multiple deposits rather than a single random-walk step [S1].
 
 ## Sources
 [S1] A comprehensive theory of volumetric radiance estimation using photon points and beams, https://doi.org/10.1145/1899404.1899409, fetched 2026-10-26

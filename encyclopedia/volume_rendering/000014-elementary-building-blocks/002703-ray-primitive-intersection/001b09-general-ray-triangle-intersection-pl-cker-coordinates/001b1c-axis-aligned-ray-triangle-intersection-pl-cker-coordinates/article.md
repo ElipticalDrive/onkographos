@@ -22,59 +22,57 @@ An algorithm to determine if a ray intersects a triangle, optimized for axis-ali
 1. Calculate the dot product of the triangle normal and ray direction: $\text{cosND} = \mathbf{n} \cdot \mathbf{dir}$ [S1, unofficial].
 2. Calculate the intersection distance $t$ along the ray: $t = -\mathbf{n} \cdot (\text{org} - \mathbf{a}) / \text{cosND}$ [S1, unofficial].
 3. Transform the triangle vertices into the coordinate space centered at the ray origin: $\mathbf{a} = \mathbf{a} - \text{org}$, $\mathbf{b} = \mathbf{b} - \text{org}$, $\mathbf{c} = \mathbf{c} - \text{org}$ [S1, unofficial].
-4. Compute Plücker coordinates for the three triangle edges relative to the ray direction using the helper function $\text{pluecker}(\mathbf{a}_0, \mathbf{a}_1, \mathbf{b}_0, \mathbf{b}_1) = \mathbf{a}_1 \cdot (\mathbf{b}_1 \times \mathbf{b}_0) + \mathbf{b}_1 \cdot (\mathbf{a}_1 \times \mathbf{a}_0)$ [S1, unofficial]. The calls are $\text{sx} = \text{pluecker}(\mathbf{0}, \mathbf{dir}, \mathbf{a}, \mathbf{b})$, $\text{sy} = \text{pluecker}(\mathbf{0}, \mathbf{dir}, \mathbf{b}, \mathbf{c})$, and $\text{sz} = \text{pluecker}(\mathbf{0}, \mathbf{dir}, \mathbf{c}, \mathbf{a})$ [S1, unofficial].
+4. Compute Plücker coordinates for the three triangle edges relative to the ray direction using the helper function $\text{pluecker}(\mathbf{a}_0, \mathbf{a}_1, \mathbf{b}_0, \mathbf{b}_1) = (\mathbf{a}_1 - \mathbf{a}_0) \cdot (\mathbf{b}_1 \times \mathbf{b}_0) + (\mathbf{b}_1 - \mathbf{b}_0) \cdot (\mathbf{a}_1 \times \mathbf{a}_0)$ [S1, unofficial]. The calls are $\text{sx} = \text{pluecker}(\mathbf{0}, \mathbf{dir}, \mathbf{a}, \mathbf{b})$, $\text{sy} = \text{pluecker}(\mathbf{0}, \mathbf{dir}, \mathbf{b}, \mathbf{c})$, and $\text{sz} = \text{pluecker}(\mathbf{0}, \mathbf{dir}, \mathbf{c}, \mathbf{a})$ [S1, unofficial].
 5. Determine if the ray is inside the triangle by checking if all Plücker coordinates have the same sign: if $\min(\text{sx}, \text{sy}, \text{sz}) \ge 0$ or $\max(\text{sx}, \text{sy}, \text{sz}) \le 0$, return true [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+def dot(u, v):
+    return u[0]*v[0] + u[1]*v[1] + u[2]*v[2]
+
+def cross(u, v):
+    return (u[1]*v[2] - u[2]*v[1], u[2]*v[0] - u[0]*v[2], u[0]*v[1] - u[1]*v[0])
+
+def pluecker(a0, a1, b0, b1):
+    return dot((a1[0]-a0[0], a1[1]-a0[1], a1[2]-a0[2]), cross(b1, b0)) + \
+           dot((b1[0]-b0[0], b1[1]-b0[1], b1[2]-b0[2]), cross(a1, a0))
+
 def axis_aligned_ray_triangle_intersection(org, dir, a, b, c, n):
-    # Step 1: Dot product of normal and ray direction
     cosND = dot(n, dir)
-    
-    # Step 2: Calculate intersection distance t
-    t = -dot(n, org - a) / cosND
-    
-    # Step 3: Transform vertices to ray origin space
-    a = a - org
-    b = b - org
-    c = c - org
-    
-    # Step 4: Compute Plücker coordinates
-    sx = pluecker_helper(vec3(0, 0, 0), dir, a, b)
-    sy = pluecker_helper(vec3(0, 0, 0), dir, b, c)
-    sz = pluecker_helper(vec3(0, 0, 0), dir, c, a)
-    
-    # Step 5: Check signs
+    t = -dot(n, (org[0]-a[0], org[1]-a[1], org[2]-a[2])) / cosND
+    a = (a[0]-org[0], a[1]-org[1], a[2]-org[2])
+    b = (b[0]-org[0], b[1]-org[1], b[2]-org[2])
+    c = (c[0]-org[0], c[1]-org[1], c[2]-org[2])
+    sx = pluecker((0, 0, 0), dir, a, b)
+    sy = pluecker((0, 0, 0), dir, b, c)
+    sz = pluecker((0, 0, 0), dir, c, a)
     if min(sx, sy, sz) >= 0.0 or max(sx, sy, sz) <= 0.0:
         return True
     return False
-
-def pluecker_helper(a0, a1, b0, b1):
-    return dot(a1 - a0, cross(b1, b0)) + dot(b1 - b0, cross(a1, a0))
 ```
 
 **Parameters:**
-- Not given in the sources.
+- Not given in the sources [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
 - If the ray is perfectly parallel to the triangle plane ($\text{cosND} == 0$), the function returns false, ignoring the edge case where the ray might lie in the same 2D plane [S1, unofficial].
 
 ## Operating characteristics
-- Time complexity: Not given in the sources.
-- Memory complexity: Not given in the sources.
-- Measured performance: Not given in the sources.
-- Scaling: Not given in the sources.
+- Time complexity: Not given in the sources [S1, unofficial].
+- Memory complexity: Not given in the sources [S1, unofficial].
+- Measured performance: Not given in the sources [S1, unofficial].
+- Scaling: Not given in the sources [S1, unofficial].
 - Strengths: Optimized for axis-aligned rays using Plücker coordinates [S1, unofficial].
 - Limitations: Only works for axis-aligned rays; returns false for coplanar rays [S1, unofficial].
-- When to use: Not given in the sources.
-- When not: Not given in the sources.
+- When to use: Not given in the sources [S1, unofficial].
+- When not: Not given in the sources [S1, unofficial].
 
 ## Background
 - Origin: Described in the `isoext` repository by Guangyan Cai [S1, unofficial].
-- History: Not given in the sources.
-- Usage: Not given in the sources.
+- History: Not given in the sources [S1, unofficial].
+- Usage: Not given in the sources [S1, unofficial].
 
 ## Sources
 [S1] GuangyanCai/isoext, https://github.com/GuangyanCai/isoext, fetched 2026-10-27 (unofficial)

@@ -3,100 +3,190 @@
 Also called: Mitsuba radiance field optimization, TLIR training loop
 
 ## Overview
-A stage-based optimization loop for differentiable volume or radiance field reconstruction that alternates between image-based and ray-based sampling modes, applies stochastic preconditioning with exponential alpha decay, and optionally upsamples parameters between stages [S1, unofficial]. It distinguishes itself from standard NeRF training loops by explicitly managing memory via ray batching and progressively refining the field resolution through staged upsampling [S1, unofficial].
+A stage-based optimization loop for differentiable volume or radiance field reconstruction that alternates between image-based and ray-based sampling modes, applies stochastic preconditioning with exponential alpha decay, and optionally upsamples parameters between stages [S1, unofficial]. It differs from standard NeRF training loops by explicitly managing memory via ray batching and using progressive upsampling to handle high-resolution scenes, while employing stochastic preconditioning to stabilize gradient updates [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Training dataset (images, masks, depths, normals), camera parameters, scene geometry, integrator configuration, and hyperparameters (learning rate, stages, batch sizes).
-*   **Outputs:** Optimized radiance field parameters, rendered test images, and loss metrics.
+*   **Inputs:** Scene parameters $\theta$ (integrator state), training dataset (sensors/images), configuration object `config` containing hyperparameters, and an optimizer.
+*   **Outputs:** Optimized scene parameters $\theta^*$, and optionally rendered test images and metrics (PSNR) at stage boundaries.
 
 **Data Structures:**
-*   `spn_state`: A dictionary managing Stochastic Preconditioning (SPN).
+*   `spn_state`: Dictionary storing stochastic preconditioning state.
     *   `alpha` (float): Current preconditioning scale factor.
-    *   `step` (int): Iteration counter for SPN decay.
+    *   `step` (int): Iteration counter for the current stage.
     *   `gamma` (float): Exponential decay factor for alpha.
-*   `ray_batch`: A pre-extracted batch of rays (used in ray-based mode).
-*   `losses`: A list accumulating scalar loss values per iteration.
+*   `rays_mi`: Mitsuba tensor array of rays.
+*   `target_colors`: Tensor of ground-truth RGB colors.
+*   `masks`: Optional binary tensor for valid pixel regions.
 
 **Parameters:**
-*   `use_ray_batching` (bool): Selects between image-based and ray-based sampling.
-*   `rays_per_batch` (int): Number of rays sampled per iteration in ray-based mode.
-*   `spp` (int): Samples per pixel for test image rendering.
-*   `num_iterations_per_stage` (int): Iterations per training stage.
-*   `num_stages` (int): Total number of training stages.
-*   `enable_upsampling` (bool): Whether to upsample parameters between stages.
-*   `learning_rate` (float): Base learning rate.
-*   `stochastic_preconditioning_starting_alpha` (float): Initial alpha for SPN.
-*   `stochastic_preconditioning_iterations` (int): Iterations for alpha decay.
-*   `stochastic_preconditioning_update_interval` (int): Frequency of SPN state updates.
+*   `use_ray_batching` (bool): Selects sampling mode. `True` for ray-based, `False` for image-based [S1, unofficial].
+*   `rays_per_batch` (int): Number of rays sampled per iteration in ray-based mode [S1, unofficial].
+*   `spp` (int): Samples per pixel for test image rendering [S1, unofficial].
+*   `num_iterations_per_stage` (int): Iterations per stage [S1, unofficial].
+*   `num_stages` (int): Total training stages [S1, unofficial].
+*   `enable_upsampling` (bool): Whether to upsample parameters between stages [S1, unofficial].
+*   `learning_rate` (float): Base learning rate [S1, unofficial].
+*   `stochastic_preconditioning_starting_alpha` (float): Initial alpha value [S1, unofficial].
+*   `stochastic_preconditioning_iterations` (int): Iterations over which alpha decays [S1, unofficial].
+*   `stochastic_preconditioning_update_interval` (int): Frequency of SPN state updates [S1, unofficial].
 
 **Algorithm Steps:**
 
 1.  **Initialization:**
     *   Set integrator loss type.
-    *   Initialize RNG with seed `stage_idx * 1000`.
     *   Initialize `spn_state`:
-        *   If `stochastic_preconditioning_iterations` == 0, set `alpha = 0.0` and `gamma = 0.0` to prevent division by zero [S1, unofficial].
-        *   Otherwise, set `alpha = stochastic_preconditioning_starting_alpha`.
-        *   Calculate `gamma = 1e-4 ** (1.0 / stochastic_preconditioning_iterations)` [S1, unofficial].
-        *   Set `step = 0`.
+        *   `alpha` = `stochastic_preconditioning_starting_alpha`.
+        *   `step` = 0.
+        *   If `stochastic_preconditioning_iterations` == 0, set `gamma` = 0.0 and `alpha` = 0.0 to prevent division by zero [S1, unofficial].
+        *   Else, calculate `gamma` = $10^{-4}^{(1.0 / \text{stochastic\_preconditioning\_iterations})}$ [S1, unofficial].
+    *   Initialize random number generator (RNG) with seed `stage_idx * 1000` [S1, unofficial].
+    *   Initialize `losses` list.
 
-2.  **Ray Sampling:**
-    *   If `use_ray_batching` is true:
-        *   Shuffle the pre-extracted `ray_batch` using the current RNG.
-        *   Select `rays_per_batch` rays from the shuffled batch.
-        *   Convert rays to Mitsuba tensors.
-    *   If `use_ray_batching` is false:
-        *   Select a random sensor index.
-        *   Sample all rays from that image using `sample_rays_from_image`.
-        *   Retrieve rays, target colors, and masks.
+2.  **Stage Loop:** For `stage_idx` from 0 to `num_stages - 1`:
+    *   **Iteration Loop:** For `iteration` from 0 to `num_iterations_per_stage - 1`:
+        *   **Sampling Mode Selection:**
+            *   If `use_ray_batching` is `True`:
+                *   Shuffle the pre-extracted ray batch using the current RNG state [S1, unofficial].
+                *   Select `rays_per_batch` rays from the shuffled batch.
+                *   Convert selected rays to Mitsuba tensors (`rays_mi`) [S1, unofficial].
+                *   Retrieve corresponding `target_colors` and `masks` for these rays.
+            *   Else (Image-based mode):
+                *   Select a random sensor index.
+                *   Call `sample_rays_from_image(sensor)` to get all rays, `target_colors`, and `masks` for that image [S1, unofficial].
+        *   **Preparation:**
+            *   Retrieve current `spn_alpha` from `spn_state['alpha']`.
+            *   Set AOV loss masks if available.
+            *   Create an independent sampler seeded with `iteration` index and ray count [S1, unofficial].
+        *   **Forward Pass & Gradient:**
+            *   Call `integrator.render_rays_with_gradient` with `rays_mi`, `target_colors`, `sampler`, `scene`, `spp`, and `spn_alpha`.
+            *   Returns `rendered_colors`, `loss` (scalar), and `aovs` [S1, unofficial].
+        *   **Update:**
+            *   Append `loss` to `losses` [S1, unofficial].
+            *   Perform backpropagation to compute gradients.
+            *   Step the optimizer: `optimizer.update(theta, gradient)` [S1, unofficial].
+            *   Perform post-step updates on the integrator [S1, unofficial].
+            *   Update `spn_state['step']` by 1.
+            *   If `spn_state['step']` % `stochastic_preconditioning_update_interval` == 0:
+                *   Update `spn_state['alpha']` using exponential decay: `alpha = alpha * gamma` [S1, unofficial].
+    *   **Stage End Evaluation:**
+        *   Render `num_test_images` test images using current scene state and `spp` [S1, unofficial].
+        *   Compute PSNR against reference images [S1, unofficial].
+    *   **Upsampling (Optional):**
+        *   If `enable_upsampling` is `True` and `stage_idx` < `num_stages - 1`:
+            *   Upsample integrator parameters (e.g., grid resolution or feature dimensions) [S1, unofficial].
+            *   Update scene state with new parameters [S1, unofficial].
 
-3.  **Rendering and Loss:**
-    *   Create an independent sampler seeded with the iteration index and ray count.
-    *   Render rays using the integrator:
-        ```python
-        rendered_colors, loss, aovs = integrator.render_rays_with_gradient(
-            rays=rays_mi,
-            target_colors=target_colors,
-            sampler=sampler,
-            scene=scene,
-            spp=config.spp,
-            spn_alpha=spn_alpha
-        )
-        ```
-    *   Append `loss` to `losses`.
+**Pseudocode:**
 
-4.  **Optimization Step:**
-    *   Step the optimizer using the computed gradients.
-    *   Perform post-step updates on the integrator.
-    *   Update `spn_state['step']`.
-    *   If `spn_state['step'] % stochastic_preconditioning_update_interval == 0`:
-        *   Update `spn_state['alpha']` by multiplying with `gamma`.
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-5.  **Stage Completion:**
-    *   After `num_iterations_per_stage` iterations:
-        *   Render `num_test_images` test images using current scene state.
-        *   Compute PSNR against reference images.
-        *   If `enable_upsampling` is true and not the final stage:
-            *   Upsample integrator parameters.
-            *   Update scene state.
-        *   Proceed to next stage (increment `stage_idx`, re-seed RNG).
+```python
+def stage_based_training_loop(scene, sensors, config, optimizer):
+    """
+    Stage-based differentiable volume/radiance field training loop.
+    """
+    # 1. Initialization
+    spn_state = {
+        'alpha': config.stochastic_preconditioning_starting_alpha,
+        'step': 0,
+        'gamma': 0.0
+    }
+    
+    # Calculate gamma, handling zero iterations case
+    if config.stochastic_preconditioning_iterations == 0:
+        spn_state['gamma'] = 0.0
+        spn_state['alpha'] = 0.0
+    else:
+        spn_state['gamma'] = 1e-4 ** (1.0 / config.stochastic_preconditioning_iterations)
+        
+    losses = []
+    
+    # Pre-extract ray batch if ray batching is enabled
+    ray_batch = None
+    if config.use_ray_batching:
+        ray_batch = extract_all_rays(sensors) # Implementation detail: extract rays for all sensors
+        
+    for stage_idx in range(config.num_stages):
+        # Initialize RNG for this stage
+        rng = Random(stage_idx * 1000)
+        
+        for iteration in range(config.num_iterations_per_stage):
+            # 2. Sampling
+            if config.use_ray_batching:
+                # Shuffle and select rays
+                rng.shuffle(ray_batch)
+                rays_mi, target_colors, masks = select_rays_from_batch(ray_batch, config.rays_per_batch)
+            else:
+                # Image-based mode
+                sensor_idx = rng.randint(0, len(sensors) - 1)
+                sensor = sensors[sensor_idx]
+                rays_mi, target_colors, masks = sample_rays_from_image(sensor)
+                
+            # 3. Forward Pass with Gradient
+            spn_alpha = spn_state['alpha']
+            
+            # Create independent sampler
+            sampler = IndependentSampler(seed=iteration + len(rays_mi))
+            
+            # Render with automatic differentiation
+            rendered_colors, loss, aovs = integrator.render_rays_with_gradient(
+                rays=rays_mi,
+                target_colors=target_colors,
+                sampler=sampler,
+                scene=scene,
+                spp=config.spp,
+                spn_alpha=spn_alpha
+            )
+            
+            # 4. Update
+            losses.append(loss)
+            
+            # Backpropagation and Optimizer Step
+            gradient = backward(loss, scene.parameters())
+            optimizer.update(scene.parameters(), gradient)
+            
+            # Post-step integrator updates
+            integrator.post_step_update()
+            
+            # 5. Stochastic Preconditioning Update
+            spn_state['step'] += 1
+            if spn_state['step'] % config.stochastic_preconditioning_update_interval == 0:
+                spn_state['alpha'] = spn_state['alpha'] * spn_state['gamma']
+                
+        # 6. Stage End Evaluation
+        test_images = render_test_images(scene, sensors, config.spp)
+        psnr = compute_psnr(test_images, reference_images)
+        
+        # 7. Upsampling
+        if config.enable_upsampling and stage_idx < config.num_stages - 1:
+            upsample_parameters(scene)
+            update_scene_state(scene)
+            
+    return scene.parameters(), losses
+```
 
-**Pitfalls:**
-*   **Division by Zero:** If `stochastic_preconditioning_iterations` is 0, `gamma` and `alpha` must be explicitly set to 0.0 [S1, unofficial].
-*   **Memory Overhead:** Ray-based mode requires pre-extracting and storing a large ray batch, which may exceed memory for high-resolution datasets if `rays_per_batch` is not managed carefully.
+## Subtopics
+
+### NeRF Training Loop
+Standard training loop for NeRFs, typically using uniform and importance sampling without explicit stage-based upsampling or stochastic preconditioning [970-nerf-training-loop.md].
+
+### Staggered Optimization Scheme
+Optimizes different parts of the scene (e.g., geometry vs. appearance) in a staggered manner, distinct from the stage-based upsampling approach [5832-staggered-optimization-scheme.md].
+
+### Two-Stage Inverse Rendering Optimization
+Uses two distinct stages (e.g., geometry then appearance), whereas stage-based training may involve multiple progressive upsampling stages [7387-two-stage-inverse-rendering-optimization.md].
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of rays and iterations per stage. Upsampling adds a one-time cost per stage.
-*   **Memory Complexity:**
-    *   Image-based mode: O(1) extra memory per iteration (rays generated on the fly).
-    *   Ray-based mode: O(N) where N is the total number of rays in the pre-extracted batch [S1, unofficial].
-*   **Performance:** Ray-based mode reduces memory overhead and enables better data shuffling for large datasets compared to image-based mode [S1, unofficial].
-*   **Strengths:** Progressive upsampling improves convergence and detail; SPN stabilizes training; flexible sampling modes.
-*   **Limitations:** Requires careful tuning of SPN parameters; upsampling may introduce artifacts if not smoothed.
+*   **Time Complexity:** Linear with respect to the number of iterations per stage and the number of stages. Ray-based mode reduces memory overhead compared to image-based mode, potentially allowing larger batches and faster shuffling [S1, unofficial].
+*   **Memory Complexity:** Ray-based mode requires storing a pre-extracted batch of rays, which scales with the number of training views and resolution. Image-based mode processes one image at a time, reducing peak memory usage but potentially increasing I/O overhead [S1, unofficial].
+*   **Strengths:** Progressive upsampling allows training on high-resolution scenes that would otherwise be infeasible. Stochastic preconditioning helps stabilize training. Ray batching enables efficient data shuffling for large datasets [S1, unofficial].
+*   **Limitations:** Requires careful tuning of stage parameters (iterations, upsampling schedule). Stochastic preconditioning decay rate must be chosen appropriately. Ray batching requires significant initial memory for ray extraction [S1, unofficial].
+*   **When to Use:** High-resolution radiance field reconstruction, large datasets where memory is a constraint, and when progressive refinement is beneficial.
+*   **When Not to Use:** Low-resolution scenes where upsampling is unnecessary, or when real-time training is required and the overhead of stage management is prohibitive.
 
 ## Background
-Originated in the TLIR (Three-dimensional Light Field Inverse Rendering) project, implemented in Mitsuba 3 [S1, unofficial]. It addresses the need for stable training of high-resolution radiance fields by combining stochastic preconditioning with progressive resolution refinement.
+This method originates from the TLIR (Two-Level Inverse Rendering) framework, implemented in the Mitsuba 2 renderer [S1, unofficial]. It was developed to address the challenges of training high-resolution differentiable volume and radiance fields, providing a robust training loop that combines progressive upsampling with stochastic preconditioning [S1, unofficial].
 
 ## Sources
 [S1] JackZhouSz/tlir, https://github.com/JackZhouSz/tlir, fetched 2026-10-27 (unofficial)

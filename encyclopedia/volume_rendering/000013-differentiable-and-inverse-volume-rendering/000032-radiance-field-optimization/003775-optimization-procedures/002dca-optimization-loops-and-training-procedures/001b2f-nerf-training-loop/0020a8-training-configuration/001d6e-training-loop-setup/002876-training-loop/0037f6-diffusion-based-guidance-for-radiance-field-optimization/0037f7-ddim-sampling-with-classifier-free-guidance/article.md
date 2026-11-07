@@ -1,0 +1,139 @@
+# DDIM Sampling with Classifier-Free Guidance
+
+Also called: DDIMSampler, refine
+
+## Overview
+Iteratively denoises latent variables using the Denoising Diffusion Implicit Models (DDIM) scheduler and classifier-free guidance (CFG) to generate images or refine existing ones [S1, unofficial]. It differs from standard diffusion sampling by allowing a "strength" parameter to inject noise at a specific timestep during refinement, preserving structural content while adding detail [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** `latents` (optional, initial latent tensor), `embeddings` (dictionary containing `pos` and `neg` condition embeddings), `num_inference_steps` (integer), `guidance_scale` (float), `strength` (float, used in refinement), `height` and `width` (integers).
+- **Outputs:** Refined or generated `latents`.
+
+**Data Structures:**
+- `latents`: Tensor of shape `(batch_size, channels, height // 8, width // 8)`.
+- `embeddings`: Dictionary mapping keys `'pos'` and `'neg'` to tensors of shape `(batch_size, sequence_length, embedding_dim)`.
+- `scheduler`: A DDIM scheduler instance managing timesteps and noise addition/removal.
+- `unet`: A U-Net model taking `latent_model_input` and `t` as input, returning predicted noise.
+
+**Parameters:**
+- `num_inference_steps`: Number of DDIM sampling steps. Default: 50 [S1, unofficial].
+- `guidance_scale`: CFG scale multiplier. Default: 7.5 for sampling, 100 for refinement/training [S1, unofficial].
+- `strength`: Controls the noise injection level during refinement. Determines the starting timestep `init_step = int(num_inference_steps * strength)` [S1, unofficial].
+
+**Algorithm:**
+1. **Initialization:** If `latents` are not provided, initialize them with random noise:
+   $$ \text{latents} = \mathcal{N}(0, 1) \in \mathbb{R}^{1 \times C \times \frac{H}{8} \times \frac{W}{8}} $$
+   where $C$ is `self.unet.in_channels`, $H$ is `height`, and $W$ is `width` [S1, unofficial].
+
+2. **Timestep Setup:** Configure the scheduler with the desired number of inference steps:
+   $$ \text{timesteps} = \text{scheduler.set\_timesteps}(N) $$
+   where $N$ is `num_inference_steps` [S1, unofficial].
+
+3. **Embedding Preparation:** Concatenate positive and negative embeddings along the batch dimension to enable parallel prediction:
+   $$ E_{\text{concat}} = \text{concat}(E_{\text{pos}}, E_{\text{neg}}) $$
+   where $E_{\text{pos}}$ and $E_{\text{neg}}$ are expanded to match `batch_size` [S1, unofficial].
+
+4. **Iteration Loop:** For each timestep $t$ in `timesteps`:
+   a. **Duplicate Latents:** Create a batch of 2 by concatenating the current latents:
+      $$ L_{\text{input}} = \text{concat}(L_t, L_t) $$
+   b. **Noise Prediction:** Pass $L_{\text{input}}$ and $t$ through the UNet with $E_{\text{concat}}$ to get two noise predictions:
+      $$ \hat{\epsilon}_{\text{cond}}, \hat{\epsilon}_{\text{uncond}} = \text{UNet}(L_{\text{input}}, t, E_{\text{concat}}) $$
+   c. **Classifier-Free Guidance:** Combine predictions using the guidance scale $s$:
+      $$ \hat{\epsilon} = \hat{\epsilon}_{\text{uncond}} + s \cdot (\hat{\epsilon}_{\text{cond}} - \hat{\epsilon}_{\text{uncond}}) $$
+   d. **Scheduler Step:** Update latents using the DDIM scheduler:
+      $$ L_{t-1} = \text{scheduler.step}(\hat{\epsilon}, t, L_t).\text{prev\_sample} $$
+
+5. **Refinement Specifics:** If refining, noise is added at a specific step determined by `strength`. The loop starts from `init_step = int(N * strength)` to skip early timesteps, preserving structure while adding detail [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import math
+
+def ddim_sample_with_cfg(
+    unet, 
+    scheduler, 
+    embeddings, 
+    num_inference_steps=50, 
+    guidance_scale=7.5, 
+    height=512, 
+    width=512, 
+    latents=None, 
+    strength=1.0
+):
+    device = unet.device
+    batch_size = embeddings['pos'].shape[0]
+    
+    # 1. Initialize latents if not provided
+    if latents is None:
+        latents = torch.randn(
+            (batch_size, unet.in_channels, height // 8, width // 8), 
+            device=device
+        )
+    
+    # 2. Set scheduler timesteps
+    timesteps = scheduler.set_timesteps(num_inference_steps)
+    
+    # Handle refinement strength: determine start step
+    # If strength < 1.0, we skip initial steps to preserve structure
+    if strength < 1.0:
+        init_step = int(num_inference_steps * strength)
+        # Filter timesteps to start from the calculated index
+        timesteps = timesteps[init_step:]
+    
+    # 3. Concatenate embeddings for CFG
+    # Expand embeddings to batch size if needed
+    pos_emb = embeddings['pos'].expand(batch_size, -1, -1)
+    neg_emb = embeddings['neg'].expand(batch_size, -1, -1)
+    embeddings_concat = torch.cat([pos_emb, neg_emb], dim=0)
+    
+    # 4. Loop over timesteps
+    for t in timesteps:
+        # Duplicate latents for CFG
+        latent_model_input = torch.cat([latents, latents], dim=0)
+        
+        # Predict noise via UNet
+        noise_pred = unet(latent_model_input, t, embeddings_concat).sample
+        
+        # Split predictions
+        noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2)
+        
+        # Apply Classifier-Free Guidance
+        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+        
+        # Step scheduler
+        latents = scheduler.step(noise_pred, t, latents).prev_sample
+        
+    return latents
+```
+
+**Edge Cases and Pitfalls:**
+- **Refinement Noise Injection:** When refining, simply starting the loop at a later timestep is insufficient if the scheduler expects a specific noise level. The `strength` parameter determines `init_step`, effectively skipping early denoising steps to preserve the input structure [S1, unofficial].
+- **Precision:** Ensure `latents` and embeddings are on the same device as the UNet [S1, unofficial].
+- **Boundary Conditions:** The spatial dimensions of latents are derived from `height // 8` and `width // 8`, assuming an 8x downsampling factor typical of VAEs [S1, unofficial].
+
+## Subtopics
+
+### Standard DDIM Sampling
+Uses `guidance_scale=1.0` (no CFG) for unconditional or conditional generation without the amplification effect. Choose when guidance artifacts are undesirable. [Link](8117-diffusion-based-guidance-for-radiance-field-optimization.md)
+
+### Refinement Mode
+Uses high `guidance_scale` (e.g., 100) and `strength < 1.0` to add detail to existing latents. Choose when enhancing existing structures rather than generating from noise. [Link](8117-diffusion-based-guidance-for-radiance-field-optimization.md)
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to `num_inference_steps` and the cost of one UNet forward pass per step.
+- **Memory Complexity:** Proportional to the latent tensor size and UNet activations. The doubling of latents and embeddings for CFG increases memory usage by roughly 2x during the loop.
+- **Performance:** Default settings use 50 steps and a guidance scale of 7.5 for sampling, or 100 for refinement [S1, unofficial].
+- **Strengths:** Allows fine-grained control over the trade-off between structure preservation and detail addition via `strength`. CFG improves sample quality and adherence to conditions.
+- **Limitations:** High guidance scales can lead to oversaturation or artifacts. Refinement requires careful tuning of `strength` to avoid destroying the input structure.
+- **When to Use:** For generating high-quality images from text prompts or refining latent representations in diffusion-based optimization loops.
+- **When Not to Use:** When real-time performance is critical and fewer steps are required, or when unconditional generation is sufficient (set `guidance_scale=1`).
+
+## Background
+Originated from the DreamGaussian project, which integrates diffusion models into 3D Gaussian Splatting optimization pipelines [S1, unofficial]. The method leverages the DDIM sampler and classifier-free guidance to provide gradient signals from a frozen Stable Diffusion model for optimizing radiance fields or latent representations [S1, unofficial].
+
+## Sources
+[S1] dreamgaussian/dreamgaussian, https://github.com/dreamgaussian/dreamgaussian, fetched 2026-10-27 (unofficial)

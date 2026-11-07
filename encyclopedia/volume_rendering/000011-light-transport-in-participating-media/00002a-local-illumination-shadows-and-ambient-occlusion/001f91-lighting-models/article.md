@@ -6,21 +6,21 @@ Also called: Lighting Calculation
 Lighting Models in volume rendering apply local illumination heuristics to scalar field data to enhance the perception of 3D structure and surface orientation [S1, unofficial]. Unlike physically based light transport methods that solve the radiative transfer equation, these models modulate existing volume samples or pixel colors using diffuse and specular terms derived from the data gradient [S1, unofficial].
 
 ## Shared principles
-All methods in this family share the core mechanism of evaluating visibility or illumination at a specific point $\mathbf{p}$ within or on the boundary of a volume, based on a light source direction $\mathbf{l}$ or environment.
+All methods in this family share the core mechanism of evaluating visibility or illumination at a specific point $\mathbf{p}$ within or on the boundary of a volume, based on a light source direction $\mathbf{l}$ or environment [G].
 
-1.  **Visibility/Transmittance Evaluation:** The fundamental operation is determining how much light reaches $\mathbf{p}$ from a source. This involves integrating the extinction coefficient $\sigma_t(\mathbf{x})$ along a path from the source to $\mathbf{p}$ (or vice versa). The transmittance $T$ is calculated as:
+1.  **Visibility/Transmittance Evaluation:** The fundamental operation is determining how much light reaches $\mathbf{p}$ from a source [G]. This involves integrating the extinction coefficient $\sigma_t(\mathbf{x})$ along a path from the source to $\mathbf{p}$ (or vice versa) [G]. The transmittance $T$ is calculated as:
     $$ T = \exp\left(-\int_{\mathbf{p}_{source}}^{\mathbf{p}} \sigma_t(\mathbf{x}) \, d\mathbf{x}\right) $$
-    In discrete implementations, this integral is approximated by summing $\sigma_t \cdot \Delta s$ over samples along the ray [S1, unofficial][S6, unofficial].
+    [G]. In discrete implementations, this integral is approximated by summing $\sigma_t \cdot \Delta s$ over samples along the ray [G].
 
-2.  **Local Shading Models:** For surface-like appearance in volumes, normals are approximated from the volume gradient $\mathbf{g} = \nabla V$. The shading contribution $C_{shade}$ is computed using standard local illumination models (e.g., Lambertian, Phong) [S1, unofficial]:
+2.  **Local Shading Models:** For surface-like appearance in volumes, normals are approximated from the volume gradient $\mathbf{g} = \nabla V$ [S1, unofficial]. The shading contribution $C_{shade}$ is computed using standard local illumination models (e.g., Lambertian, Phong) [S1, unofficial]:
     $$ C_{shade} = k_d (\mathbf{n} \cdot \mathbf{l}) C_{diffuse} + k_s (\mathbf{n} \cdot \mathbf{h})^\alpha C_{specular} $$
     where $\mathbf{n} = \mathbf{g}/\|\mathbf{g}\|$ [S1, unofficial].
 
-3.  **Shadowing Approximation:** Shadows are computed by testing occlusion along the direction to the light source. This can be done via ray casting (checking for density/geometry along the path) or via precomputed buffers (shadow maps, illumination buffers) [S1, unofficial][S2, unofficial].
+3.  **Shadowing Approximation:** Shadows are computed by testing occlusion along the direction to the light source [G]. This can be done via ray casting (checking for density/geometry along the path) or via precomputed buffers (shadow maps, illumination buffers) [G].
 
-4.  **Ambient Occlusion:** Indirect illumination is approximated by integrating over the hemisphere or using simplified models (e.g., upward ray for sky light). The ambient contribution $L_{ambient}$ is often modulated by a shadowing factor based on local density:
+4.  **Ambient Occlusion:** Indirect illumination is approximated by integrating over the hemisphere or using simplified models (e.g., upward ray for sky light) [G]. The ambient contribution $L_{ambient}$ is often modulated by a shadowing factor based on local density:
     $$ L_{ambient} = L_{sky} \cdot \exp(-D_{up}) \cdot AO_{factor} $$
-    where $D_{up}$ is the integrated density along an upward ray [S1, unofficial][S2, unofficial].
+    where $D_{up}$ is the integrated density along an upward ray [G].
 
 ## Subtopics
 
@@ -43,7 +43,7 @@ Whitted-style shading with diffuse/glossy materials computes the color of a ray 
 Under two-sided lighting, each directional light shines in two directions: both the specified direction and the opposite direction [S3]. This is enabled via the `VP_LIGHT_BOTH_SIDES` option in the VolPack API [S3]. The light color is set using `vpSetLight` with `VP_COLOR` (RGB components 0.0-1.0) and the direction using `VP_DIRECTION` (transformed by the current modeling matrix) [S3]. Light 0 is enabled by default; others require explicit `vpEnable` calls [S3].
 
 ### Atmospheric Lighting Model
-A lighting model that attenuates light through the volume, providing simple but robust lighting without relying on a surface normal. It is used for multi-field gradients because the gradient orientation may not correspond to the surface of the classified region and can flip direction [S4, unofficial].
+A lighting model that attenuates light through the volume, providing simple but robust lighting without relying on a surface normal [S4, unofficial]. It is used for multi-field gradients because the gradient orientation may not correspond to the surface of the classified region and can flip direction [S4, unofficial].
 
 ## Background
 The VolPack library (Stanford) provided early API support for directional lighting and two-sided shading [S3]. The integration of Phong and Blinn-Phong models into volume ray casting became standard for interactive applications [S1, unofficial].

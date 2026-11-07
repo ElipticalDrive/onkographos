@@ -3,155 +3,141 @@
 Also called: SVO to DAG reduction, SVO to DAG transformation, SVO to Directed Acyclic Graph (DAG) Reduction, Sparse Voxel Octree (SVO) to Directed Acyclic Graph (DAG) Reduction, Sparse Voxel DAG Reduction, Reducing a Sparse Voxel Tree to a DAG, SVO reduction
 
 ## Overview
-This method reduces the memory footprint of a Sparse Voxel Octree (SVO) by identifying and merging identical subtrees into shared nodes, transforming the tree structure into a Directed Acyclic Graph (DAG) [S1, unofficial][S2]. While an SVO efficiently encodes empty regions of space, it stores redundant copies of identical non-empty geometry; this method solves that by allowing multiple parent nodes to reference the same child node instance, thereby encoding identical regions of space efficiently [S2]. Unlike top-down recursive comparison, which is computationally expensive, this bottom-up approach guarantees finding the minimal DAG within $L$ iterations, where $L$ is the maximum depth of the octree [S1, unofficial][S2]. It enables the construction of extremely high-resolution DAGs (e.g., $128K^3$) even when the intermediate SVO exceeds available memory [S2].
+This method reduces the memory footprint of a Sparse Voxel Octree (SVO) by identifying and merging identical subtrees into shared nodes, thereby transforming the tree structure into a Directed Acyclic Graph (DAG) [S1, unofficial][S2]. While an SVO efficiently encodes empty regions of space, it stores redundant copies of identical non-empty geometry [S2]. This method solves that inefficiency by allowing nodes to share pointers to identical subtrees, achieving compression ratios of 1 to 3 orders of magnitude in node count [S2]. It sets itself apart from top-down recursive merging by using an iterative bottom-up approach, which is computationally efficient and guarantees finding the minimal DAG within $L$ iterations, where $L$ is the maximum tree level [S1, unofficial][S2].
 
 ## How it works
-### Inputs and Outputs
-- **Input:** A Sparse Voxel Octree (SVO) representing a 3D voxel grid. The SVO may be too large to fit in memory entirely.
-- **Output:** A Sparse Voxel DAG where identical subtrees are merged into single unique instances.
+**Inputs and Outputs**
+*   **Input:** A Sparse Voxel Octree (SVO) representing a 3D voxel grid. The SVO may be too large to fit in memory, so the method supports streaming construction of sub-DAGs [S2].
+*   **Output:** A minimal Sparse Voxel DAG where identical subtrees are merged into single instances [S1, unofficial][S2].
 
-### Data Structures
-**Node Layout:**
-Each node in the DAG consists of:
-1.  **Childmask:** An 8-bit integer encoding the existence of child pointers. Bit $i$ is set if the $i$-th child (in Morton/Z-order or standard octree order) is non-empty.
-2.  **Pointers:** An array of pointers to non-empty children, stored consecutively in memory immediately after the childmask.
--   **Size:** The node size varies between 8 and 36 bytes, depending on the number of set bits in the childmask (1 to 8 children) [S1, unofficial][S2].
--   **Optimization for Lowest Levels:** For the two lowest levels of the SVO (resolution $4^3$ subtrees), nodes are stored as a 64-bit integer without pointers to improve sorting performance [S1, unofficial][S2].
+**Data Structures**
+The SVO and resulting DAG nodes are stored in memory with the following layout [S1, unofficial][S2]:
+1.  **Childmask:** An 8-bit integer where each bit indicates the existence of a child pointer for the corresponding octant (0-7).
+2.  **Pointers:** An array of pointers stored consecutively in memory immediately after the childmask. Only pointers to non-empty children are stored.
+3.  **Node Size:** The total memory consumption per node is between 8 and 36 bytes, depending on the number of active children (1 to 8 pointers) [S1, unofficial][S2].
 
-**Indirection Table:**
-A table mapping each original node's position in a level to its position in the compacted list of unique nodes. This allows parent pointers to be updated to reference the unique instances [S1, unofficial][S2].
+For the two lowest levels of the tree (where the majority of nodes reside), an optimization is applied: subtrees of resolution $4^3$ are stored without pointers in a 64-bit integer to improve sorting performance [S1, unofficial][S2].
 
-### Algorithm Steps
-The reduction proceeds iteratively from the leaves up to the root.
+**Algorithm Steps**
+The reduction is performed iteratively from the leaves up to the root [S1, unofficial][S2].
 
-1.  **Handle Large Scenes (Streaming/Chunking):**
-    If the SVO is too large to fit in memory (e.g., resolution $> 1K^3$):
-    a. Construct the top $L-10$ levels of the tree using triangle/cube intersection tests in a top-down fashion [S1, unofficial][S2].
-    b. For each leaf node in this top tree, construct a subtree to the maximum depth $L$ using a CPU-assisted algorithm (e.g., depth-peeling) [S1, unofficial][S2].
-    c. Reduce each subtree to a DAG independently.
-    d. Insert the reduced sub-DAGs into the top tree. This results in a "top-SVO" containing partially reduced DAGs in its leaves [S1, unofficial][S2].
+1.  **Leaf Reduction:**
+    *   Leaf nodes are uniquely defined by their childmasks (describing 8 voxels). There are at most $2^8 = 256$ unique leaf configurations [S1, unofficial][S2].
+    *   Sort all leaf nodes using their childmasks as keys.
+    *   Compact the sorted list to keep only unique leaf nodes.
+    *   Maintain a **Table of Indirections**: For each original leaf node, store its new index in the compacted unique list [S1, unofficial][S2].
+    *   Update the child pointers in the level above the leaves to reference these unique leaf nodes using the indirection table [S1, unofficial][S2].
 
-2.  **Iterative Bottom-Up Reduction:**
-    For each level $l$ from the lowest level (leaves) up to the root:
-    a. **Sort:** Sort all nodes at level $l$ using their identity as a key. The identity key consists of the `childmask` followed by the sequence of child pointers. For the lowest levels, use the 64-bit integer representation [S1, unofficial][S2].
-    b. **Compact:** Iterate through the sorted list. Identify unique nodes (adjacent nodes with identical keys). Create a new list containing only unique nodes.
-    c. **Indirection:** Maintain an indirection table. For each original node, store its index in the new unique list.
-    d. **Update Pointers:** For every node at level $l-1$ (the level above), update its child pointers to point to the unique instances identified in the indirection table. This effectively merges identical subtrees rooted at level $l$ [S1, unofficial][S2].
+2.  **Iterative Level Reduction:**
+    *   Proceed to the next level up.
+    *   Identify nodes that have **identical childmasks** AND **identical pointers** to their children. These nodes are roots of identical subtrees [S1, unofficial][S2].
+    *   Sort all nodes at the current level using their child pointers as a 256-bit key (8 pointers $\times$ 32 bits) and the node's original address as a value [S1, unofficial][S2].
+    *   Compact the sorted list to contain only unique nodes.
+    *   Update the indirection table for the current level.
+    *   Update the child pointers in the level above to reference the unique nodes from the current level [S1, unofficial][S2].
+    *   Repeat this process for each level up to the root. The algorithm is guaranteed to find the smallest possible DAG within $L$ iterations [S1, unofficial][S2].
 
-3.  **Final Reduction:**
-    After processing all levels, if a top-down construction was used, apply the reduction one last time to the top-SVO to generate the final minimal DAG [S1, unofficial][S2].
+3.  **Handling Large Scenes (Streaming):**
+    *   If the SVO does not fit in memory, construct the top $L-10$ levels (for max level $L > 10$) using a top-down approach (e.g., triangle/cube intersection tests) [S1, unofficial][S2].
+    *   For each leaf node in this top tree, construct a subtree to the maximum depth using a CPU-assisted algorithm (e.g., depth-peeling) [S1, unofficial].
+    *   Reduce each subtree to a DAG independently before inserting it into the top tree [S1, unofficial].
+    *   After all sub-DAGs are constructed, apply the reduction algorithm one final time to the top-SVO to generate the final global DAG [S1, unofficial].
 
-### Pseudocode
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def reduce_svo_to_dag(svo, max_level):
-    # Step 1: Handle memory constraints by chunking if necessary
-    if max_level > 10:
-        top_levels = build_top_levels_top_down(svo, max_level - 10)
-        sub_dags = []
-        for leaf_node in top_levels.leaves:
-            subtree = build_subtree_from_leaf(leaf_node, max_level)
-            reduced_subtree = reduce_level_by_level(subtree, max_level)
-            sub_dags.append(reduced_subtree)
-        top_svo = merge_sub_dags_into_top(top_levels, sub_dags)
-        svo = top_svo
-        max_level = 10 # Only need to reduce the top part now
-
-    # Step 2: Bottom-up reduction
-    # Iterate from the lowest level (leaves) up to the root
-    for level in range(0, max_level + 1):
-        nodes_at_level = get_nodes_at_level(svo, level)
+def reduce_svo_to_dag(svo_levels):
+    """
+    svo_levels: List of lists, where svo_levels[i] contains all nodes at level i.
+                Level 0 is the root, Level N is the leaves.
+    Returns: The root node of the reduced DAG.
+    """
+    # Process from leaves (highest index) up to the root (index 0)
+    for level in reversed(range(len(svo_levels))):
+        nodes_at_level = svo_levels[level]
         
-        # Optimization: Use 64-bit integer key for lowest two levels
-        if level < 2:
-            keys = [node.to_64bit_int() for node in nodes_at_level]
-        else:
-            keys = [node.get_identity_key() for node in nodes_at_level]
+        # Optimization for lowest levels: if level is near leaves, 
+        # handle 4^3 subtrees as 64-bit integers if applicable.
+        # For general case, sort by child pointers.
         
-        # Sort nodes by identity key
-        # Pair each key with the original node and its original index
-        indexed_nodes = list(zip(keys, nodes_at_level, range(len(nodes_at_level))))
-        indexed_nodes.sort(key=lambda x: x[0])
+        # 1. Sort nodes to bring identical subtrees together
+        # Key: Tuple of child pointers (and childmask if pointers are null/empty)
+        # Value: Original index or pointer to the node object
+        sorted_nodes = sort_by_pointers(nodes_at_level)
         
+        # 2. Compact unique nodes and build indirection map
         unique_nodes = []
-        indirection_map = {} # Maps original index to new unique index
+        indirection_map = {} # Maps original node ID to index in unique_nodes
         
-        current_key = None
-        unique_index = 0
-        
-        for key, node, original_index in indexed_nodes:
-            if key != current_key:
+        prev_key = None
+        for node in sorted_nodes:
+            # Create a hashable key from the node's structure
+            # Key includes childmask and the tuple of child pointers
+            current_key = (node.childmask, tuple(node.pointers))
+            
+            if current_key != prev_key:
                 # New unique node found
-                current_key = key
                 unique_nodes.append(node)
-                indirection_map[original_index] = unique_index
-                unique_index += 1
+                indirection_map[node.id] = len(unique_nodes) - 1
+                prev_key = current_key
             else:
-                # Duplicate node, map to the same unique index
-                indirection_map[original_index] = unique_index - 1
+                # Duplicate node, map to existing unique node
+                indirection_map[node.id] = len(unique_nodes) - 1
         
-        # Update parent pointers (level above)
+        # 3. Update parent pointers
+        # The nodes in unique_nodes now represent the compressed level.
+        # We need to update the pointers in the level above (level + 1)
+        # to point to these unique nodes.
+        
         if level > 0:
-            parent_level = level - 1
-            parent_nodes = get_nodes_at_level(svo, parent_level)
-            for parent in parent_nodes:
-                for child_idx in range(8):
-                    if parent.childmask & (1 << child_idx):
-                        # Find the unique instance for this child
-                        # Note: In a real implementation, we need to map the 
-                        # specific child node instance to its new unique index.
-                        # The indirection map must be built from the sorted list 
-                        # of children at 'level'.
-                        original_child_ptr = parent.children[child_idx]
-                        # Assuming we have a way to find the original index of 
-                        # original_child_ptr in the sorted list of level nodes.
-                        # Let's assume a hash map from node_ptr to original_index 
-                        # was built before sorting.
-                        orig_idx = node_ptr_to_original_index[original_child_ptr]
-                        new_unique_idx = indirection_map[orig_idx]
-                        # Update parent's pointer to the unique node
-                        # The unique nodes are stored in unique_nodes list
-                        # We need to update the parent's internal pointer array
-                        parent.update_child_pointer(child_idx, unique_nodes[new_unique_idx])
+            parent_level_nodes = svo_levels[level - 1]
+            for parent_node in parent_level_nodes:
+                # Update parent's child pointers based on indirection map
+                for i in range(8):
+                    if parent_node.childmask & (1 << i):
+                        child_node_id = parent_node.pointers[i].id
+                        new_index = indirection_map[child_node_id]
+                        # Replace pointer with reference to unique node
+                        parent_node.pointers[i] = unique_nodes[new_index]
         
-        # Replace the level in the SVO with the unique nodes
-        replace_level(svo, level, unique_nodes)
+        # Replace the current level with the unique nodes for the next iteration
+        svo_levels[level] = unique_nodes
 
-    return svo
+    return svo_levels[0]
 ```
 
-### Parameters and Edge Cases
--   **Max Level ($L$):** The maximum depth of the octree. The algorithm is guaranteed to find the minimal DAG within $L$ iterations [S1, unofficial][S2].
--   **Resolution:** Demonstrated at $128K^3$ (131,072$^3$) voxels [S2].
--   **Edge Case - Irregular Data:** The method works on irregular data because it decouples voxel content (geometry) from spatial position, unlike earlier methods that only worked on axis-aligned regular datasets [S1, unofficial].
--   **Edge Case - Memory:** If the SVO does not fit in memory, the chunking strategy (Step 1) must be used. The algorithm handles partially reduced DAGs as input [S1, unofficial][S2].
--   **Pitfall - Attributes:** The method focuses on geometry. It does not compress material or reflectance properties (color, normals). If attributes are present, they must be handled separately (e.g., via Voxel Attribute Decoupling) [S2].
+**Parameters and Edge Cases**
+*   **Resolution:** The method is demonstrated at resolutions up to $128K^3$ (131,072$^3$) [S2].
+*   **Memory Constraints:** The method is designed to work even if the complete SVO does not fit in memory by using the streaming/sub-DAG approach [S2].
+*   **Precision:** Pointer indirection relies on exact equality of child pointers. Floating-point inaccuracies in spatial coordinates should be resolved before tree construction (e.g., via voxelization) [S1, unofficial].
+*   **Attributes:** The method focuses on geometry. It does not compress material or reflectance properties (color, normal) by default, which may limit utility for fully shaded rendering without additional handling [S2].
 
 ## Subtopics
 
 ### [Sparse Voxel Directed Acyclic Graph (SVDAG)](962-sparse-voxel-directed-acyclic-graph-svdag.md)
-The resulting data structure. It shares identical subtrees, allowing lossless compression without decompression overhead during traversal.
+A Sparse Voxel Directed Acyclic Graph (SVDAG) is a hierarchical data structure that transforms a Sparse Voxel Octree (SVO) into a Directed Acyclic Graph (DAG) by identifying identical subtrees and representing them as a single fully expanded instance, which is multi-referenced from parent nodes. This reduces the number of nodes, particularly at leaf layers, achieving significant compression while enabling quick traversal during visualization. Unlike an SVO, which only encodes empty regions efficiently, the DAG additionally encodes identical regions of space by sharing pointers to identical subtrees. It builds on [Bottom-up SVO to DAG Reduction](898-bottom-up-svo-to-dag-reduction.md) by explicitly storing pointers to enable this merging, distinguishing it from pointerless variants like PSVDAG.
 
 ### [Voxel Attribute Decoupling](1761-voxel-attribute-decoupling.md)
-A technique to separate attributes from geometry, enabling independent compression and allowing the DAG reduction to focus solely on geometric topology.
+Voxel Attribute Decoupling is a technique that separates voxel attributes (such as color or normals) from the geometric topology of a Sparse Voxel Octree (SVO) to enable independent, specialized compression of each component. Unlike standard SVOs or naive colored DAGs that store attributes redundantly with every node, this method achieves significant memory reduction by storing attributes in a dense array and encoding geometric offsets within child pointers, allowing subtrees with identical topology to be merged into a Directed Acyclic Graph (DAG).
 
 ## Operating characteristics
--   **Time Complexity:** The reduction is performed level-by-level. Sorting dominates the complexity. On a multi-core CPU (Intel Core i7 3930K), reduction times scale with resolution: 8.4ms for $512^3$, 33ms for $1K^3$, 0.30s for $2K^3$, 1.0s for $4K^3$, and 4.5s for $8K^3$ [S2].
--   **Memory Complexity:** The DAG requires significantly less memory than the SVO. In the EPICTTADEL scene ($128K^3$, 19 billion voxels), the DAG requires 945MB of GPU memory, whereas the SVO would require 5.1GB (excluding pointers) [S2]. Node count reduction ranges from $28\times$ to $576\times$ depending on scene regularity [S2].
--   **Strengths:**
-    -   Guarantees minimal DAG size [S1, unofficial][S2].
-    -   Enables construction of extremely high-resolution scenes that exceed RAM limits [S2].
-    -   No decompression overhead during traversal [S2].
--   **Limitations:**
-    -   Does not compress material/reflectance properties [S2].
-    -   Requires significant memory for the intermediate SVO if chunking is not used [S2].
-    -   Sorting large numbers of nodes can be a bottleneck, though parallelization is suggested [S1, unofficial][S2].
--   **When to Use:** Ideal for ray tracing hard/soft shadows, ambient occlusion, and primary rays in extremely high-resolution scenes where memory bandwidth and capacity are critical [S2].
+*   **Time Complexity:** The reduction is performed in $O(L \cdot N \log N)$ time, where $L$ is the max level and $N$ is the number of nodes, dominated by the sorting step at each level [S1, unofficial][S2]. The algorithm is guaranteed to find the minimal DAG within $L$ iterations [S1, unofficial].
+*   **Memory Complexity:** The memory consumption of a node is between 8 and 36 bytes [S1, unofficial]. The total memory usage is significantly lower than an SVO, often by 1 to 3 orders of magnitude in node count [S2].
+*   **Measured Performance:** On an Intel Core i7 3930K, reducing an SVO for the *EpicCitadel* scene ($128K^3$) took negligible time compared to the construction phase, with sorting being the dominant cost [S2]. For a $512^3$ scene, reduction took 8.4ms; for $8K^3$, it took 4.5s [S2].
+*   **Scaling:** The method scales well to extremely high resolutions. For resolutions over $1K^3$, generating sub-DAGs first and connecting them with a top tree allows handling scenes that exceed available RAM [S2].
+*   **Strengths:**
+    *   Achieves significant compression for both regular and irregular data [S2].
+    *   No decompression needed for traversal [S2].
+    *   Efficient traversal speeds on GPU (e.g., 170 MRays/sec for AO, 240 MRays/sec for shadows on NVIDIA GTX680 for *EpicCitadel*) [S2].
+*   **Limitations:**
+    *   Does not compress voxel attributes (color/normal) by default [S2].
+    *   Requires a sorting step which can be memory-intensive for very large levels if not streamed [S2].
+    *   Static structure; dynamic scenes would require real-time recompression, which is not the primary focus [S1, unofficial].
 
 ## Background
-The method was introduced by Viktor Kampe, Erik Sintorn, and Ulf Assarsson from Chalmers University of Technology [S1, unofficial][S2]. It extends previous work by Parker et al. [2003] on 3D voxel data compression and Webber and Dillencourt [1989] on quadtree compression, but uniquely decouples voxel content from geometry, allowing successful compression of irregular data [S1, unofficial]. The approach generalizes the Sparse Voxel Octree (SVO) by allowing nodes to share pointers to identical subtrees, forming a Directed Acyclic Graph (DAG) [S2].
+The concept of merging common subtrees in quadtrees for binary images was introduced by Webber and Dillencourt [1989] and extended to 3D voxel data by Parker et al. [2003] [S1, unofficial]. However, Parker's approach did not decouple voxel content from geometry, limiting it to axis-aligned regular datasets [S1, unofficial]. The bottom-up SVO to DAG reduction method was introduced by Kampé, Sintorn, and Assarsson from Chalmers University of Technology [S2]. It decouples voxel content from geometry, allowing successful compression of irregular data [S1, unofficial]. The method was presented in the paper "High Resolution Sparse Voxel DAGs" [S1, unofficial][S2].
 
 ## Sources
-[S1] High Resolution Sparse Voxel DAGs - Chalmers, https://www.cse.chalmers.se/~uffe/HighResolutionSparseVoxelDAGs.pdf, fetched 2026-10-27 (unofficial)
-[S2] (PDF) High resolution sparse voxel DAGs - ResearchGate, https://www.researchgate.net/publication/262367808_High_resolution_sparse_voxel_DAGs, fetched 2026-10-27
+[S1] High Resolution Sparse Voxel DAGs, https://www.cse.chalmers.se/~uffe/HighResolutionSparseVoxelDAGs.pdf, fetched 2026-10-27 (unofficial)
+[S2] High resolution sparse voxel DAGs, https://www.researchgate.net/publication/262367808_High_resolution_sparse_voxel_DAGs, fetched 2026-10-27

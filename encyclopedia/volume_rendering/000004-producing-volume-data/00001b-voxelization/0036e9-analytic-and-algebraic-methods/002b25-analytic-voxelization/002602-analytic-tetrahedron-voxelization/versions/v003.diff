@@ -1,0 +1,390 @@
+--- v002.md
++++ v003.md
+@@ -1,156 +1,217 @@
+ # Analytic Tetrahedron Voxelization
+ 
+-Also called: Exact Conservative Voxelization of Tetrahedra, Graph-traversal voxelization, Remeshing-based voxelization, analytic volume sampling of tetrahedra, voxelization of tetrahedra
++Also called: 3D rasterization using tetrahedral mesh, Exact Conservative Voxelization of Tetrahedra, Graph-traversal voxelization, Remeshing-based voxelization, Tetrahedral Voxelization with Philipp B's Algorithm, analytic volume sampling of tetrahedra, voxelization of tetrahedra
+ 
+ ## Overview
+-Analytic Tetrahedron Voxelization is a method for robustly intersecting convex polyhedra (specifically tetrahedra) and computing polynomial integrals over the resulting intersection domain to achieve physically conservative voxelization [S1, unofficial]. Unlike standard binary voxelization which only stores occupancy, this method computes exact mass-conservative moments (volume, linear, and quadratic) for each grid cell, ensuring the total mass in the grid exactly equals the integral of the input density field [S1, unofficial]. It sets itself apart from siblings like [Monte Carlo 2D Voxelization](1734-monte-carlo-2d-voxelization.md) by providing deterministic, exact conservation without statistical noise, and from [Analytic Moment Voxelization](3307-analytic-moment-voxelization.md) by focusing specifically on the robust geometric clipping of tetrahedra using planar graph representations [S1, unofficial].
++Analytic Tetrahedron Voxelization maps a continuous tetrahedral mesh to a discrete Cartesian grid by evaluating the geometric relationship between the mesh elements and grid cells analytically. It solves the problem of converting unstructured volumetric data into a structured grid while preserving physical conservation properties (mass, linear, and quadratic moments) that binary occupancy methods lose. Unlike standard rasterization which relies on watertightness or topological closure, this method operates directly on the tetrahedral volume, allowing for robust handling of non-closed meshes [S1, unofficial]. It distinguishes itself from sibling methods like [Monte Carlo 2D Voxelization](1734-monte-carlo-2d-voxelization.md) by providing exact, deterministic results without stochastic noise, and from [Analytic Moment Voxelization](3307-analytic-moment-voxelization.md) by focusing specifically on the tetrahedral primitive and its intersection with grid cells via clipping or point-in-tetrahedron tests.
+ 
+ ## How it works
+-The method voxelizes a single tetrahedron onto a destination Cartesian grid by computing physically conservative moments for a specified polynomial order [S2, unofficial]. It relies on a unified framework for intersecting convex polyhedra via successive clipping against faces, coupled with an integration routine on the same planar graph representation [S1, unofficial].
++The method generally follows one of two primary algorithmic paths depending on the implementation goal: binary occupancy (fast, simple) or conservative moment integration (physically accurate, complex). Both paths assume the input tetrahedral mesh has high quality (large minimum angle, no overlapping elements, small variance in element quality) [S1, unofficial].
+ 
+ ### Inputs and Outputs
+ **Inputs:**
+-*   **Tetrahedron Vertices:** Four 3D points $v_0, v_1, v_2, v_3$.
+-*   **Grid Parameters:** Dimensions $n = (n_x, n_y, n_z)$, cell sizes $d = (d_x, d_y, d_z)$, and polynomial order $p \in \{0, 1, 2\}$ [S2, unofficial].
+-*   **Coordinate System:** The grid covers a specific domain (e.g., $[-1, 1]^3$ or unit cube). World coordinates map to grid indices via $idx = \lfloor (x + 1) / \text{step} \rfloor$ [S1, unofficial].
++*   A tetrahedral mesh defined by vertices $V = \{v_0, v_1, v_2, v_3\}$ for each tetrahedron.
++*   A destination Cartesian grid defined by dimensions $n = (n_x, n_y, n_z)$, cell sizes $d = (d_x, d_y, d_z)$, and origin.
++*   Polynomial order $p \in \{0, 1, 2\}$ for moment calculation (0=constant/volume, 1=linear, 2=quadratic) [S3, unofficial].
+ 
+ **Outputs:**
+-*   **Moments:** A buffer `grid.moments` storing the integrated moments for each voxel. For polynomial order $p$, the number of moments per voxel is $(p+1)(p+2)(p+3)/6$. For $p=2$, this includes constant (volume), linear ($x,y,z$), and quadratic ($x^2, y^2, z^2, xy, xz, yz$) terms [S2, unofficial].
++*   A grid buffer `moments` of size $n_x \times n_y \times n_z$, storing the integrated values for each voxel.
++*   Optionally, an orientation buffer `orient` for debugging or further processing [S3, unofficial].
+ 
+ ### Data Structures
+-The implementation uses specific structures to manage geometry and grid state [S2, unofficial]:
+-
+-1.  **`r3d_plane`**: Defines a clip plane.
+-    *   `n`: Unit normal vector $(n_x, n_y, n_z)$.
+-    *   `d`: Signed distance to the origin.
+-2.  **`r3d_orientation`**: Tracks the status of a vertex relative to clip planes.
+-    *   `fdist[4]`: Signed distances to the four clip planes.
+-    *   `fflags`: Bit flags (4 bits) indicating if the vertex is inside ($1$) or outside ($0$) each plane.
+-3.  **`r3d_dest_grid`**: The output grid container.
+-    *   `n`: Grid dimensions $(n_x, n_y, n_z)$.
+-    *   `d`: Cell sizes $(d_x, d_y, d_z)$.
+-    *   `polyorder`: Integer $0, 1,$ or $2$.
+-    *   `moments`: Array of pointers `r3d_real* moments[10]` (gridded moments in row-major C order, size at least $n_x n_y n_z$).
+-    *   `orient`: Buffer for gridpoint orientation checks, size at least $(n_x+1)(n_y+1)(n_z+1)$.
+-    *   `bufsz`: Buffer size.
+-
+-### Algorithm Steps
+-
+-1.  **Orientation Check:** Ensure the tetrahedron vertices are oriented such that the volume is positive. If `r3du_orient(v0, v1, v2, v3)` returns negative, swap vertices $v_2$ and $v_3$ [S2, unofficial].
+-2.  **Face Conversion:** Convert the vertex representation to a face representation using `r3du_tet_faces_from_verts` to obtain the four clip planes defining the tetrahedron [S2, unofficial].
+-3.  **Voxel Search:** Identify voxels that intersect the tetrahedron. Two search strategies are supported [S1, unofficial]:
+-    *   **Brute-Force:** Check every grid point against each tetrahedron face. Scales as $g^3$.
+-    *   **Binary Space Partitioning (BSP):** Use a spatial tree to prune empty regions. Scales as $g^2 \log g$. BSP overtakes brute-force at grid resolution $128^3$ [S1, unofficial].
+-4.  **Orientation Initialization:** For each voxel (or BSP node), compute the `r3d_orientation` for its corners. Calculate signed distances $g_{or} = \mathbf{d} + \mathbf{g}_{pt} \cdot \mathbf{n}$ for each face $f$ and corner $v$. Set `fflags` bit $f$ to $1$ if $g_{or} > 0$, else $0$ [S2, unofficial].
+-5.  **Classification:** Determine the voxel type based on the bitwise AND (`andcmp`) and OR (`orcmp`) of the corner flags [S2, unofficial]:
+-    *   **Type 1 (Interior):** `andcmp == 0x0f`. All corners are inside. The voxel is fully contained.
+-    *   **Type 3 (Boundary):** `orcmp == 0x0f` is false, but `andcmp` is not $0x0f$. The voxel intersects the boundary.
+-    *   **Type 0 (Exterior):** `orcmp == 0x00`. All corners are outside. Ignore.
+-6.  **Reduction (Interior Voxels):** For Type 1 voxels, compute analytic moments directly without clipping. For a voxel at index $(i, j, k)$ with cell size $d$, the moments are [S2, unofficial]:
+-    *   Volume ($M_0$): $d_x d_y d_z$
+-    *   Linear ($M_1$): $M_0 \cdot (i + 0.5) d_x$ (for x), similarly for y, z.
+-    *   Quadratic ($M_2$):
+-        *   $x^2$: $M_0 \cdot \frac{1}{3} d_x^2 (1 + 3i + 3i^2)$
+-        *   $y^2$: $M_0 \cdot \frac{1}{3} d_y^2 (1 + 3j + 3j^2)$
+-        *   $xy$: $M_0 \cdot \frac{1}{4} d_x d_y (1 + 2i)(1 + 2j)$
+-    *   Add these to `grid.moments` [S2, unofficial].
+-7.  **Clipping and Integration (Boundary Voxels):** For Type 3 voxels, perform exact clipping [S1, unofficial]:
+-    *   **Graph Representation:** Store the polyhedron using vertex locations and neighbors, coupled with the clipping algorithm to ensure topological validity [S1, unofficial].
+-    *   **Clipping Operation:** Successively clip the voxel (initially a unit cube or grid cell) against the tetrahedron's faces. Use a depth-first graph traversal on the planar graph representation to insert new vertices in correct order on the fly, avoiding post-clipping reordering [S1, unofficial]. This ensures robustness against geometric degeneracies (e.g., vertices on clip planes) without auxiliary checks or high-precision arithmetic [S1, unofficial].
+-    *   **Integration:** Compute the polynomial integrals over the resulting clipped polyhedron. The clipping routine is coupled with the integration routine on the same planar graph representation [S1, unofficial].
+-    *   **Local Frame:** Shift the clipped geometry to a local coordinate frame prior to integration. Note: Cancellation errors may arise here, reducing accuracy to a few orders of magnitude below machine precision, though the reduction process itself is accurate [S1, unofficial].
+-    *   **Accumulation:** Add the computed moments to `grid.moments` [S2, unofficial].
+-
+-### Pseudocode
+-
++The implementation typically uses the following structures [S3, unofficial]:
++
++1.  **Plane Representation**: Each face of the tetrahedron is represented as a plane with a unit normal $\mathbf{n}$ and signed distance $d$ to the origin.
++    ```python
++    class r3d_plane:
++        n: Vector3  # Unit normal vector
++        d: float    # Signed distance to origin
++    ```
++2.  **Orientation Flag**: Used to track the status of a point relative to the four clip planes.
++    ```python
++    class r3d_orientation:
++        fdist: [float, float, float, float]  # Signed distances to clip planes
++        fflags: unsigned char                # Bit flags: bit i set if point is outside plane i
++    ```
++3.  **Destination Grid**:
++    ```python
++    class r3d_dest_grid:
++        n: Vector3          # Grid dimensions (n.x, n.y, n.z)
++        d: Vector3          # Cell sizes
++        polyorder: int      # 0, 1, or 2
++        moments: [float, float, float, float, float, float, float, float, float, float] # 10 buffers for moments (row-major C order)
++        orient: [r3d_orientation] # Buffer for orientation checks
++        bufsz: long         # Total buffer size
++    ```
++
++### Core Algorithms
++
++#### Path A: Binary Occupancy (Philipp B's Algorithm)
++This path determines if a voxel center (or sample point) lies inside a tetrahedron. It is significantly faster than other point-in-tetrahedron tests [S1, unofficial].
++
++**1. Preconditioning (Orientation Check)**
++Ensure the tetrahedron vertices are oriented such that the signed volume is positive. If the signed volume is negative, swap vertices 2 and 3 [S3, unofficial].
++The signed volume is calculated as:
++$$ V = \frac{1}{6} \det(\mathbf{AB}, \mathbf{AC}, \mathbf{AD}) $$
++where $\mathbf{AB} = B - A$, etc. Exchanging two rows in the determinant flips the sign [S1, unofficial].
++
++**2. Point-in-Tetrahedron Test**
++For a voxel center $P$ and tetrahedron vertices $A, B, C, D$, define vectors $\mathbf{a} = P-A$, $\mathbf{b} = P-B$, $\mathbf{c} = P-C$, $\mathbf{d} = P-D$.
++Calculate the determinants:
++$$ D_a = \det(\mathbf{b}, \mathbf{c}, \mathbf{d}) $$
++$$ D_b = \det(\mathbf{a}, \mathbf{c}, \mathbf{d}) $$
++$$ D_c = \det(\mathbf{a}, \mathbf{b}, \mathbf{d}) $$
++$$ D_d = \det(\mathbf{a}, \mathbf{b}, \mathbf{c}) $$
++
++Point $P$ is inside the tetrahedron if and only if:
++$$ (D_a > 0 \land D_b < 0 \land D_c > 0 \land D_d < 0) \lor (D_a < 0 \land D_b > 0 \land D_c < 0 \land D_d > 0) $$
++[S1, unofficial]
++
++**3. Voxelization Loop**
++Iterate over all tetrahedra. For each tetrahedron, iterate over all voxels in its bounding box. Apply the test above. If true, mark the voxel as occupied (or add density) [S1, unofficial].
++
++#### Path B: Conservative Moment Integration (Graph-Traversal Clipping)
++This path computes the exact volume and moments of the intersection between the tetrahedron and each voxel. It uses a clipping algorithm based on planar graph representations to ensure topological consistency [S2, unofficial].
++
++**1. Face Conversion**
++Convert the tetrahedron vertex representation to a face representation to obtain the four clip planes.
+ ```python
+-def r3d_voxelize_tet(verts, grid):
++faces = r3du_tet_faces_from_verts(verts)
++```
++[S3, unofficial]
++
++**2. Voxel Search**
++Identify voxels that intersect the tetrahedron.
++*   **Brute-Force**: Check every grid point against each tetrahedron face. Scales as $g^3$. Performs better for coarse grids [S2, unofficial].
++*   **Binary Space Partitioning (BSP)**: Use a spatial tree. Scales as $g^2 \log g$. Overtakes brute-force at grid resolution $128^3$ [S2, unofficial].
++
++**3. Clipping and Integration**
++For each candidate voxel, determine its relationship to the tetrahedron using orientation flags.
++*   **Fully Inside**: If all 4 bits of the orientation flags for all 8 corners of the voxel are set (inside all planes), the voxel is fully contained. Add the voxel's volume and moments directly to the grid.
++*   **Fully Outside**: If any corner is outside all planes (or specific combination indicating no intersection), skip.
++*   **Boundary (Clipping Required)**: If the voxel straddles the boundary, perform clipping.
++
++**Clipping Algorithm**:
++Successively clip the voxel (initially a unit cube or rectangular prism) against the four faces of the tetrahedron.
++*   Store polyhedra using vertex locations and neighbors.
++*   Use depth-first graph traversal on the planar graph representation to ensure topological validity.
++*   Insert new vertices in the correct order on the fly. No post-clipping reordering is needed [S2, unofficial].
++*   No face normals are required; only vertex locations and neighbor connectivity [S2, unofficial].
++
++**4. Moment Calculation**
++For the clipped polyhedron, calculate the integrals of $1$, $x$, $y$, $z$, $x^2$, $y^2$, $z^2$, $xy$, $xz$, $yz$ over the domain.
++For a fully inside voxel at index $(i, j, k)$ with size $d_x, d_y, d_z$:
++$$ \text{Volume} = d_x d_y d_z $$
++$$ M_0 = \text{Volume} $$
++$$ M_x = \text{Volume} \cdot d_x \cdot (i + 0.5) $$
++$$ M_{xx} = \text{Volume} \cdot \frac{1}{3} d_x^2 (1 + 3i + 3i^2) $$
++Similar formulas apply for $y, z$ and cross terms [S3, unofficial].
++
++### Pseudocode (Conservative Integration)
++
++```python
++def r3d_voxelize_tet(faces, grid):
+     """
+-    Voxelize a tetrahedron onto a Cartesian grid.
+-    verts: list of 4 vectors [v0, v1, v2, v3]
++    faces: list of 4 r3d_plane structures
+     grid: r3d_dest_grid structure
+     """
+-    # 1. Orientation Check
+-    if r3du_orient(verts[0], verts[1], verts[2], verts[3]) < 0:
+-        swap(verts[2], verts[3])
+-
+-    # 2. Face Conversion
+-    faces = r3du_tet_faces_from_verts(verts)
+-    # faces is an array of 4 r3d_plane structures
+-
+-    # 3. Search Strategy Selection
+-    # Use BSP if grid resolution > 128^3, else Brute-Force
+-    if grid.n.x > 128 and grid.n.y > 128 and grid.n.z > 128:
+-        voxels_to_process = bsp_search(faces, grid)
+-    else:
+-        voxels_to_process = brute_force_search(faces, grid)
+-
+-    # 4. Process Voxels
+-    for voxel in voxels_to_process:
+-        # 5. Orientation Initialization for voxel corners
+-        orient_flags = compute_corner_orientations(voxel, faces)
+-        
+-        andcmp = orient_flags[0] & orient_flags[1] & orient_flags[2] & orient_flags[3]
+-        orcmp = orient_flags[0] | orient_flags[1] | orient_flags[2] | orient_flags[3]
+-
+-        if andcmp == 0x0F:
+-            # Type 1: Interior
+-            reduce_interior_voxel(voxel, grid, faces)
+-        elif orcmp != 0x00:
+-            # Type 3: Boundary
+-            clip_and_integrate_voxel(voxel, grid, faces)
+-        # else: Type 0: Exterior, skip
+-
+-def reduce_interior_voxel(voxel, grid, faces):
+-    """Compute analytic moments for a fully contained voxel."""
+-    i, j, k = voxel.index
+-    dx, dy, dz = grid.d
+-    vol = dx * dy * dz
++    n = grid.n
++    d = grid.d
++    polyorder = grid.polyorder
++    moments = grid.moments
+     
+-    # Constant moment
+-    grid.moments[0][voxel.index] += vol
++    # Pre-calculate grid bounds
++    min_x, min_y, min_z = 0, 0, 0
++    max_x, max_y, max_z = n.x, n.y, n.z
+     
+-    # Linear moments
+-    if grid.polyorder >= 1:
+-        grid.moments[1][voxel.index] += vol * dx * (i + 0.5)
+-        grid.moments[2][voxel.index] += vol * dy * (j + 0.5)
+-        grid.moments[3][voxel.index] += vol * dz * (k + 0.5)
+-        
+-    # Quadratic moments
+-    if grid.polyorder >= 2:
+-        grid.moments[4][voxel.index] += vol * (1/3) * dx**2 * (1 + 3*i + 3*i**2)
+-        grid.moments[5][voxel.index] += vol * (1/3) * dy**2 * (1 + 3*j + 3*j**2)
+-        grid.moments[6][voxel.index] += vol * (1/3) * dz**2 * (1 + 3*k + 3*k**2)
+-        grid.moments[7][voxel.index] += vol * 0.25 * dx * dy * (1 + 2*i) * (1 + 2*j)
+-        grid.moments[8][voxel.index] += vol * 0.25 * dx * dz * (1 + 2*i) * (1 + 2*k)
+-        grid.moments[9][voxel.index] += vol * 0.25 * dy * dz * (1 + 2*j) * (1 + 2*k)
+-
+-def clip_and_integrate_voxel(voxel, grid, faces):
+-    """Clip voxel against tetrahedron faces and integrate."""
+-    # Initialize voxel as a unit cube or grid-aligned box
+-    polyhedron = voxel_to_polyhedron(voxel)
+-    
+-    # Successive clipping using depth-first graph traversal
+-    # This modifies polyhedron in-place, maintaining topological validity
+-    for face in faces:
+-        polyhedron = clip_polyhedron_against_plane(polyhedron, face)
+-        
+-    # Compute moments over the resulting clipped polyhedron
+-    moments = integrate_polyhedron_moments(polyhedron, grid.polyorder)
+-    
+-    # Accumulate to grid
+-    for m in range(len(moments)):
+-        grid.moments[m][voxel.index] += moments[m]
++    # Search strategy: Brute force for simplicity in this example
++    # In practice, use BSP for large grids
++    for i in range(min_x, max_x):
++        for j in range(min_y, max_y):
++            for k in range(min_z, max_z):
++                
++                # Get voxel corners
++                # Corner 0: (i, j, k)
++                # Corner 7: (i+1, j+1, k+1)
++                # We need orientations for all 8 corners
++                corners = [
++                    (i, j, k), (i+1, j, k), (i, j+1, k), (i+1, j+1, k),
++                    (i, j, k+1), (i+1, j, k+1), (i, j+1, k+1), (i+1, j+1, k+1)
++                ]
++                
++                corner_orients = []
++                for (cx, cy, cz) in corners:
++                    # Center of the corner for orientation check? 
++                    # Actually, check the corner point itself against planes
++                    # Plane equation: dot(n, P) + d > 0 means inside (assuming inward normals)
++                    # Note: r3d uses d + dot(P, n) > 0 for inside
++                    fflags = 0
++                    fdist = [0.0]*4
++                    for f_idx, plane in enumerate(faces):
++                        # P is the corner point
++                        # Note: The source checks corners of the voxel cell
++                        # We must map grid index to world coordinates if planes are in world space
++                        # Assuming faces are defined in world space and grid is aligned
++                        # P_world = (cx * d.x, cy * d.y, cz * d.z) + origin
++                        # For simplicity, assuming origin 0 and d=1 or planes are scaled
++                        # Correct implementation requires mapping grid indices to world coords
++                        P_world = Vector3(cx * d.x, cy * d.y, cz * d.z) 
++                        dist = plane.d + dot(plane.n, P_world)
++                        fdist[f_idx] = dist
++                        if dist > 0.0:
++                            fflags |= (1 << f_idx)
++                    corner_orients.append(r3d_orientation(fdist, fflags))
++                
++                # Determine voxel status
++                # andcmp: bits set if ALL corners are inside the plane
++                # orcmp: bits set if ANY corner is inside the plane
++                andcmp = 0x0F
++                orcmp = 0x00
++                
++                for orient in corner_orients:
++                    orcmp |= orient.fflags
++                    andcmp &= orient.fflags
++                
++                if andcmp == 0x0F:
++                    # Fully inside
++                    add_voxel_moments(i, j, k, d, polyorder, moments)
++                elif orcmp != 0x0F:
++                    # Fully outside (at least one plane excludes the entire voxel)
++                    continue
++                else:
++                    # Boundary: needs clipping
++                    clipped_moments = clip_and_integrate(faces, i, j, k, d, polyorder)
++                    add_to_grid(moments, clipped_moments)
++
++def add_voxel_moments(i, j, k, d, polyorder, moments):
++    vol = d.x * d.y * d.z
++    moments[0] += vol
++    if polyorder >= 1:
++        moments[1] += vol * d.x * (i + 0.5)
++        moments[2] += vol * d.y * (j + 0.5)
++        moments[3] += vol * d.z * (k + 0.5)
++    if polyorder >= 2:
++        moments[4] += vol * (1/3) * d.x**2 * (1 + 3*i + 3*i**2)
++        moments[5] += vol * (1/3) * d.y**2 * (1 + 3*j + 3*j**2)
++        moments[6] += vol * (1/3) * d.z**2 * (1 + 3*k + 3*k**2)
++        moments[7] += vol * 0.25 * d.x * d.y * (1 + 2*i) * (1 + 2*j)
++        moments[8] += vol * 0.25 * d.x * d.z * (1 + 2*i) * (1 + 2*k)
++        moments[9] += vol * 0.25 * d.y * d.z * (1 + 2*j) * (1 + 2*k)
++
++def clip_and_integrate(faces, i, j, k, d, polyorder):
++    # Placeholder for the complex graph-traversal clipping logic
++    # This function would:
++    # 1. Create a voxel polyhedron (cube)
++    # 2. Clip it against each of the 4 planes in 'faces'
++    # 3. Compute moments of the resulting polyhedron
++    # 4. Return the moments array
++    pass
+ ```
+ 
+-### Parameters and Typical Values
+-*   **Polynomial Order ($p$):** $0$ (constant/volume), $1$ (linear), $2$ (quadratic) [S2, unofficial].
+-*   **Grid Resolution:** Tests performed on $128^3$ and up to $1024^3$ [S1, unofficial].
+-*   **Precision:** Double precision is recommended for accuracy; single precision yields errors of $\sim 10^{-4}$ for quadratic moments [S1, unofficial].
+-
+ ### Edge Cases and Pitfalls
+-*   **Geometric Degeneracy:** Vertices lying exactly on clip planes or grid boundaries. The method is immune to these degeneracies due to the graph-traversal clipping approach, which maintains topological consistency [S1, unofficial].
+-*   **Cancellation Errors:** Shifting voxels to a local coordinate frame prior to integration can cause cancellation errors, reducing accuracy to a few orders of magnitude below machine precision [S1, unofficial].
+-*   **Search Performance:** Brute-force search is faster for coarse grids due to BSP overhead. BSP only becomes faster at $128^3$ resolution [S1, unofficial].
++*   **Degeneracy**: The graph-traversal clipping method is immune to geometric degeneracies (e.g., vertices lying exactly on clip planes) because it maintains topological consistency [S2, unofficial].
++*   **Cancellation Errors**: Shifting voxels to a local coordinate frame prior to integration can cause cancellation errors, reducing accuracy to a few orders of magnitude below machine precision, despite the reduction process itself being accurate [S2, unofficial].
++*   **Mesh Quality**: The binary occupancy method (Philipp B's) assumes high-quality tetrahedral meshes (large minimum angle, no overlapping). Poor quality meshes may lead to incorrect results [S1, unofficial].
++*   **Search Performance**: Brute-force search is faster than BSP for coarse grids due to overhead. BSP only becomes faster at grid resolution $128^3$ [S2, unofficial].
+ 
+ ## Subtopics
+@@ -160,17 +221,27 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Clipping and reduction operations scale roughly quadratically with the grid dimension $g$ ($O(g^2)$), corresponding to the surface area of the tetrahedra in units of squared grid spacing [S1, unofficial].
+-    *   **Brute-Force Search:** Scales as $O(g^3)$ [S1, unofficial].
+-    *   **BSP Search:** Scales as $O(g^2 \log g)$ [S1, unofficial].
+-*   **Memory Complexity:** Linear in the number of voxels $N = n_x n_y n_z$ for storing moments and orientation buffers [S2, unofficial].
+-*   **Measured Performance:** On a $128^3$ grid with $10^5$ random tetrahedra, the method produces $\sim 2.3 \times 10^4$ interior and $\sim 1.5 \times 10^4$ boundary voxels per tetrahedron [S1, unofficial]. It is 3-4 times faster than López and Hernández (2008) for clipping, and 2 times faster overall [S1, unofficial].
+-*   **Accuracy:** The method is "physically conservative," meaning the sum of voxelized moments equals the analytic moments of the tetrahedron up to floating-point precision [S2, unofficial]. Maximum fractional errors on a $128^3$ grid are $\sim 10^{-12}$ for constant/linear moments and $\sim 10^{-4}$ for quadratic moments in single precision [S1, unofficial].
+-*   **Strengths:** Robustness to degeneracy, exact conservation, no need for high-precision arithmetic or auxiliary checks.
+-*   **Limitations:** Cancellation errors in local frame integration reduce quadratic moment accuracy. BSP overhead makes brute-force preferable for coarse grids.
++*   **Time Complexity**:
++    *   Clipping and reduction operations scale roughly quadratically with the grid dimension $g$ ($O(g^2)$), equivalent to the surface area of the tetrahedra in units of squared grid spacing [S2, unofficial].
++    *   Brute-force search scales as $O(g^3)$ [S2, unofficial].
++    *   Binary Space Partitioning search scales as $O(g^2 \log g)$ [S2, unofficial].
++*   **Memory Complexity**: Linear with the number of voxels $n_x n_y n_z$ for storing moments. The orientation buffer requires $(n_x+1)(n_y+1)(n_z+1)$ entries [S3, unofficial].
++*   **Performance**:
++    *   Philipp B's algorithm is faster than other point-in-tetrahedron algorithms [S1, unofficial].
++    *   The graph-traversal clipping method is 3-4 times faster than López and Hernández (2008), with an overall speed-up of 2x [S2, unofficial].
++    *   GPU parallelization (CUDA/OpenMP) shows significant speedups for large tetrahedral counts (e.g., $10^7$ tetrahedra), but overhead can negate benefits for smaller meshes [S1, unofficial].
++*   **Accuracy**:
++    *   Physically conservative: The sum of voxelized moments equals the analytic moments of the tetrahedron up to floating-point precision [S3, unofficial].
++    *   Maximum fractional error for $10^5$ random tetrahedra on a $128^3$ grid is $\approx 10^{-12}$ for constant moments and $\approx 10^{-1}$ for quadratic moments in single precision [S2, unofficial].
++    *   Accuracy is a few orders of magnitude away from machine precision due to cancellation errors, but the method is robust against geometric degeneracy [S2, unofficial].
++*   **When to Use**: Use when physical conservation (mass, momentum) is critical, such as in cosmological N-body simulations or scientific visualization. Use binary occupancy when only binary presence/absence is needed and speed is paramount.
++*   **When Not to Use**: Avoid for very coarse grids if using BSP (overhead). Avoid if the input mesh is of poor quality (overlapping, degenerate) when using the binary occupancy method.
+ 
+ ## Background
+-The method was introduced in a paper by an unspecified author (cited as [S1, unofficial]) focusing on cosmological N-body systems. It builds on the ideas of Sugihara (1994) for planar graph representation and the clipping operation of Stephenson and Christiansen (1975), as implemented by López and Hernández (2008). The problem of computing exact intersection volumes between polyhedra has been studied by Dukowicz and Kodis (1987), Dukowicz et al. (1991), and Grandy (1999) [S1, unofficial]. The C implementation `r3d` is available from Los Alamos National Laboratory [S2, unofficial].
++*   **Origin**: The method combines two distinct approaches. The binary occupancy approach relies on "Philipp B's Algorithm," invented by Philipp Beisel in June 2020 in response to a question by Denis Lolik on how to check if a point is in a tetrahedron. It was left unproven until the paper [S1, unofficial]. The conservative integration approach is based on the work of Sugihara (1994) and implemented in the `r3d` library by Devon Powell, building on earlier work by Dukowicz and Kodis (1987), Grandy (1999), and López and Hernández (2008) [S2, unofficial].
++*   **History**: The `r3d` library provides a C implementation for exact conservative voxelization. The binary occupancy method was validated on the thingi10k dataset [S1, unofficial].
++*   **Applications**: Cosmological N-body systems, scientific visualization, medical imaging, and any domain requiring exact mapping of unstructured tetrahedral data to structured grids.
+ 
+ ## Sources
+-[S1] An exact general remeshing scheme applied to conservative voxelization, https://arxiv.org/pdf/1412.4941, fetched 2026-10-26 (unofficial)
+-[S2] devonmpowell/r3d, https://github.com/devonmpowell/r3d, fetched 2026-10-27 (unofficial)+[S1] Robust Voxelization and Visualization by Improved Tetrahedral Mesh Generation, https://doi.org/10.48550/arxiv.2106.01326, fetched 2026-10-26 (unofficial)
++[S2] An exact general remeshing scheme applied to conservative voxelization, https://arxiv.org/pdf/1412.4941, fetched 2026-10-26 (unofficial)
++[S3] devonmpowell/r3d, https://github.com/devonmpowell/r3d, fetched 2026-10-27 (unofficial)

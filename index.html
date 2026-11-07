@@ -15,20 +15,20 @@ const get=(u,txt)=>cache[u]||(cache[u]=real(u).then(r=>{if(!r.ok)throw new Error
 const resp=(o,code)=>new Response(typeof o=="string"?o:JSON.stringify(o),{status:code||200,headers:{"Content-Type":"application/json"}});
 const NF=()=>resp({error:"not found"},404);
 // ---- search: the same query syntax and ranking as src/viewer.py Store.search
-const whole=t=>t.length<=3&&!t.includes(" ")&&!t.startsWith("re:"), esc=s=>s.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
-function parseQuery(q){
+const whole=(t,x)=>(x||t.length<=3)&&!t.startsWith("re:")&&(x||!t.includes(" ")), esc=s=>s.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+function parseQuery(q,cs){
   const regs=[...q.matchAll(/(?:^|\s)\/(.+?)\/(?=\s|$)/g)].map(m=>"re:"+m[1]);
-  q=q.replace(/(?:^|\s)\/(.+?)\/(?=\s|$)/g," ").toLowerCase();
+  q=q.replace(/(?:^|\s)\/(.+?)\/(?=\s|$)/g," ");if(!cs)q=q.toLowerCase();
   const W=/[\p{L}\p{N}_]+/gu, phrases=[...q.matchAll(/"([^"]*)"/g)].map(m=>(m[1].match(W)||[]).join(" "));
   let rest=q.replace(/"[^"]*"?/g," ");
   const excl=[...rest.matchAll(/(?:^|\s)-([\p{L}\p{N}_]+)/gu)].map(m=>m[1]);
   rest=rest.replace(/(?:^|\s)-[\p{L}\p{N}_]+/gu," ");
   return [[...new Set([...regs,...phrases.filter(Boolean),...(rest.match(W)||[])])],[...new Set(excl)]];
 }
-function termRx(t){
-  if(t.startsWith("re:")){try{return new RegExp(t.slice(3),"gi")}catch(e){return new RegExp(esc(t.slice(3)),"gi")}}
+function termRx(t,x,cs){
+  if(t.startsWith("re:")){const f=cs?"g":"gi";try{return new RegExp(t.slice(3),f)}catch(e){return new RegExp(esc(t.slice(3)),f)}}
   const body=t.split(/\s+/).map(esc).join("[^\\p{L}\\p{N}_]+");
-  return new RegExp(whole(t)?`(?<![\\p{L}\\p{N}_])${body}(?![\\p{L}\\p{N}_])`:body,"gu");
+  return new RegExp(whole(t,x)?`(?<![\\p{L}\\p{N}_])${body}(?![\\p{L}\\p{N}_])`:body,"gu");
 }
 const count=(rx,s)=>{rx.lastIndex=0;let n=0;while(rx.exec(s)){n++;if(rx.lastIndex==0)break}return n};
 const has=(rx,s)=>{rx.lastIndex=0;return rx.test(s)};
@@ -48,17 +48,29 @@ function snippets(body,low,terms,rx,n=3,before=90,after=150){
   spans.sort((x,y)=>x[0]-y[0]);
   return spans.map(([a,b])=>(a?"…":"")+body.slice(a,b)+(b<body.length?"…":""));
 }
+// search v2 options (PLAN 55; src/viewer.py opts_of, order, source_ok)
+const OPTS=["dir","exact","case","kind","mark","y0","y1","site"];
+function order(out,cmp,fieldDesc,want,missing){out.sort(cmp);if((want=="asc"||want=="desc")&&(want=="desc")!=fieldDesc)out.reverse();
+  if(missing){const a=out.filter(x=>!missing(x)),b=out.filter(missing);out.length=0;out.push(...a,...b)}}
+function sourceOk(d,o){
+  if(o.kind&&d.kind!=o.kind)return false;const m=o.mark;
+  if(m=="official"&&(d.marks.includes("unofficial")||d.marks.includes("book")))return false;
+  if((m=="unofficial"||m=="book")&&!d.marks.includes(m)||m=="abstract"&&!d.marks.includes("abstract only"))return false;
+  if(/^\d+$/.test(o.y0||"")&&!(d.year&&d.year>=+o.y0))return false;if(/^\d+$/.test(o.y1||"")&&!(d.year&&d.year<=+o.y1))return false;
+  return !o.site||(d.host||"").toLowerCase().includes(o.site.toLowerCase());
+}
+const tjson=(terms,rx,o)=>terms.map(t=>t.startsWith("re:")?{t,whole:false,re:rx[t].source}:{t,whole:whole(t,o.exact=="1")});
 const ranked=new Map();
-async function search(q,offset,limit,within,sort){
-  const S=await get(D+"search.json"),[terms,excl]=parseQuery(q);
+async function search(q,offset,limit,within,sort,o){
+  const cs=o.case=="1",ex=o.exact=="1",S=await get(D+"search.json"),[terms,excl]=parseQuery(q,cs);
   const words=terms.filter(t=>!t.includes(" ")&&!t.startsWith("re:")),phrase=words.length>1?words.join(" "):null,rx={};
-  for(const t of [...terms,...excl,...(phrase?[phrase]:[])])rx[t]=termRx(t);
-  const key=[q.trim().toLowerCase(),within,sort].join("\n");let r=ranked.get(key);
+  for(const t of [...terms,...excl,...(phrase?[phrase]:[])])rx[t]=termRx(t,ex,cs);
+  const key=[cs?q.trim():q.trim().toLowerCase(),within,sort,o.dir,cs,ex].join("\n");let r=ranked.get(key);
   if(!r){
     const out=[],hits={};
     for(const e of S){
       if(within&&e.p!=within&&!e.trail.some(t=>t.path==within))continue;
-      const name=e.name.toLowerCase(),head=e.head.toLowerCase(),low=e.low||(e.low=e.body.toLowerCase());
+      const name=cs?e.name:e.name.toLowerCase(),head=cs?e.head:e.head.toLowerCase(),low=cs?e.body:e.low||(e.low=e.body.toLowerCase());
       const h=(t,s)=>has(rx[t],s);
       if(!terms.every(t=>h(t,name)||h(t,head)||h(t,low)))continue;
       if(excl.some(t=>h(t,name)||h(t,head)||h(t,low)))continue;
@@ -73,13 +85,128 @@ async function search(q,offset,limit,within,sort){
       length:(a,b)=>b[3].body.length-a[3].body.length||cmp(nm(a),nm(b)),depth:(a,b)=>a[3].trail.length-b[3].trail.length||cmp(nm(a),nm(b)),
       updated:(a,b)=>b[3].mt-a[3].mt||cmp(nm(a),nm(b)),score:(a,b)=>(a[3].sc==null?9:-a[3].sc)-(b[3].sc==null?9:-b[3].sc)||cmp(nm(a),nm(b)),
       revisions:(a,b)=>b[3].rev-a[3].rev||cmp(nm(a),nm(b)),sources:(a,b)=>b[3].src-a[3].src||cmp(nm(a),nm(b)),name:(a,b)=>cmp(nm(a),nm(b))};
-    out.sort(by[(terms.length||sort)?sort:"name"]||((a,b)=>b[0]-a[0]||b[1]-a[1]||cmp(nm(a),nm(b))));
+    const f=by[sort]?sort:terms.length?"":"name";
+    order(out,by[f]||((a,b)=>b[0]-a[0]||b[1]-a[1]||cmp(nm(a),nm(b))),f!="name"&&f!="depth",o.dir,f=="score"?(x=>x[3].sc==null):null);
     const below={};for(const [,,,e] of out)if(hits[e.p]!==undefined)for(const t of e.trail)below[t.path]=(below[t.path]||0)+1;
     r=[out,hits,below];ranked.size>30&&ranked.clear();ranked.set(key,r);
   }
   const [out,hits,below]=r,res=out.slice(offset,offset+limit).map(([tier,,name,e])=>({path:e.p,name,title_hit:tier==2,hits:hits[e.p],below:below[e.p]||0,
-    trail:e.trail.map(t=>({...t,hits:hits[t.path]||0})),snippets:terms.length?snippets(e.body,e.low,(phrase?[phrase]:[]).concat(terms),rx):[cut(e.body,240)]}));
-  return {total:out.length,results:res,terms:terms.map(t=>t.startsWith("re:")?{t,whole:false,re:rx[t].source}:{t,whole:whole(t)})};
+    trail:e.trail.map(t=>({...t,hits:hits[t.path]||0})),snippets:terms.length?snippets(e.body,cs?e.body:e.low||(e.low=e.body.toLowerCase()),(phrase?[phrase]:[]).concat(terms),rx):[cut(e.body,240)]}));
+  return {total:out.length,results:res,terms:tjson(terms,rx,o)};
+}
+// ---- full-text word index of the cited sources' texts (data/ft, format in the src/ftindex.py docstring; PLAN 55 (c)).
+// One shard fetch per query word, all in parallel. Whole words only (the index holds tokens). Counts come from the doc
+// sets (exact); a phrase is checked through the byte offsets where the doc's postings are loaded (rare words, page 1 of
+// a common word), else kept on the words alone. Case-sensitive = the candidates' texts are fetched and checked.
+const FT=D+"ft/",bin=u=>cache[u]||(cache[u]=real(u).then(r=>{if(!r.ok)throw new Error(u);return r.arrayBuffer()}).then(b=>new Uint8Array(b)));
+const ftTok=s=>(s.match(/[A-Za-z0-9\u0080-￿]+/g)||[]).map(w=>w.replace(/[A-Z]/g,c=>c.toLowerCase())).map(w=>new TextEncoder().encode(w)).filter(b=>b.length<=40);
+const fnv=b=>{let h=0x811c9dc5;for(const x of b)h=Math.imul(h^x,0x01000193)>>>0;return h};
+const eqb=(a,i,b)=>{for(let k=0;k<b.length;k++)if(a[i+k]!=b[k])return false;return true};
+// postings block -> Map slot -> offsets (absolute, ascending); rare = slot deltas, common page = absolute slots
+function ftPost(a,i,end,rare,m){let s=0;const v=()=>{let n=0,sh=0,c;do{c=a[i++];n+=(c&127)*2**sh;sh+=7}while(c&128);return n};
+  while(i<end){s=rare?s+v():v();const tf=v(),o=new Array(tf);let p=0;for(let k=0;k<tf;k++)o[k]=p+=v();m.set(s,o)}return m}
+async function ftWord(w,meta){
+  const a=await bin(FT+"s/"+(fnv(w)%meta.n).toString(16).padStart(3,"0")+".bin");let i=0;
+  const v=()=>{let n=0,sh=0,c;do{c=a[i++];n+=(c&127)*2**sh;sh+=7}while(c&128);return n};
+  while(i<a.length){const wl=v(),hit=wl==w.length&&eqb(a,i,w);i+=wl;const df=v(),total=v(),kind=a[i++];
+    if(kind==0){const nb=v();if(hit){const post=ftPost(a,i,i+nb,true,new Map()),bits=new Uint8Array((meta.docs.length+7)>>3);
+        for(const s of post.keys())bits[s>>3]|=1<<(s&7);return {df,total,bits,post}}i+=nb}
+    else{const nb=v(),bits=a.subarray(i,i+nb);i+=nb;const pages=v(),pb=v();if(hit)return {df,total,bits,post:ftPost(a,i,i+pb,false,new Map()),pages,w};i+=pb}}
+  return null;
+}
+const band=(x,y)=>{const r=new Uint8Array(x.length);for(let k=0;k<x.length;k++)r[k]=x[k]&(y[k]||0);return r};
+const bget=(b,s)=>b[s>>3]>>(s&7)&1;
+// one term (a word or a phrase = several tokens) -> {bits, tf(slot)}; null = some token is in no text
+async function ftTerm(toks,meta){
+  const ws=await Promise.all(toks.map(t=>ftWord(t,meta)));if(!toks.length||ws.some(w=>!w))return null;
+  let bits=ws[0].bits;for(const w of ws.slice(1))bits=band(bits,w.bits);
+  if(toks.length==1)return {bits,tf:s=>(ws[0].post.get(s)||[1]).length};
+  // a phrase needs every word's offsets: load the later pages of its common words, fewest pages first, <= 64 pages
+  // (~1 MB; 'the' has ~55 at 1.9K docs); docs whose offsets stay unloaded keep the phrase on the words alone
+  let budget=64;for(const w of ws.filter(w=>w.pages>1).sort((x,y)=>x.pages-y.pages)){if(w.pages-1>budget)break;budget-=w.pages-1;
+    const hex=Array.from(w.w,b=>b.toString(16).padStart(2,"0")).join("");
+    const pgs=await Promise.all(Array.from({length:w.pages-1},(_,k)=>bin(FT+"p/"+hex+"."+(k+2)+".bin")));
+    w.post=new Map(w.post);for(const a of pgs)ftPost(a,0,a.length,false,w.post)}
+  const ph=s=>{const os=ws.map(w=>w.post.get(s));if(os.some(o=>!o))return -1;   // offsets not loaded: unknown
+    const sets=os.map(o=>new Set(o));let n=0;
+    for(const x of os[0]){let p=x,ok=true;for(let k=1;k<toks.length&&ok;k++){ok=false;
+        for(let g=1;g<=3;g++)if(sets[k].has(p+toks[k-1].length+g)){p+=toks[k-1].length+g;ok=true;break}}n+=ok}
+    return n};
+  const tfs=new Map();for(let s=0;s<meta.docs.length;s++)if(bget(bits,s)){const n=ph(s);if(n==0)bits[s>>3]&=~(1<<(s&7));else tfs.set(s,Math.max(n,1))}
+  return {bits,tf:s=>tfs.get(s)||1};
+}
+// FT window regexes: token boundaries as the index sees them, phrase words split by 1-3 non-token chars
+function ftRx(t,cs){const N="A-Za-z0-9\\u0080-\\uffff",b=(t.match(new RegExp(`[${N}]+`,"g"))||[]).map(esc).join(`[^${N}]{1,3}`);
+  return new RegExp(`(?<![${N}])${b}(?![${N}])`,cs?"g":"gi")}
+async function ftSnip(id,q,cs){
+  const body=await get(D+"doctext/"+id+".txt",true),[terms]=parseQuery(q,cs),ts=terms.filter(t=>!t.startsWith("re:")),rx={};
+  for(const t of ts)rx[t]=ftRx(t,cs);
+  let sn=snippets(body,body,ts,rx,2);
+  if(!sn.length){const ws=[...new Set(ts.flatMap(t=>t.split(" ")))];for(const w of ws)rx[w]=ftRx(w,cs);sn=snippets(body,body,ws,rx,2)}   // phrase seen through a 1-char word
+  return sn.map(s=>cut(s,400));
+}
+// -> [[slot doc id, hits, score]] of the docs whose full text has every term and no excluded one
+async function ftSearch(terms,excl,cs){
+  if(!terms.length||terms.some(t=>t.startsWith("re:")))return [];
+  let meta;try{meta=await get(FT+"docs.json")}catch(e){return []}
+  const tt=await Promise.all(terms.map(t=>ftTerm(ftTok(t),meta)));if(tt.some(x=>!x))return [];
+  const ex=(await Promise.all(excl.map(t=>ftTerm(ftTok(t),meta)))).filter(Boolean);
+  let bits=tt[0].bits;for(const x of tt.slice(1))bits=band(bits,x.bits);
+  const out=[];
+  for(let s=0;s<meta.docs.length;s++)if(bget(bits,s)&&meta.docs[s]!=null&&!ex.some(x=>bget(x.bits,s))){
+    const tf=tt.map(x=>x.tf(s));out.push([meta.docs[s],tf.reduce((a,b)=>a+b,0),tf.reduce((a,b)=>a+Math.min(b,10),0)])}
+  if(cs&&out.length){   // case-sensitive: check each candidate's text (capped at 1000; beyond the cap they stay unchecked)
+    const rx=terms.map(t=>ftRx(t,true)),keep=await Promise.all(out.slice(0,1000).map(([id])=>get(D+"doctext/"+id+".txt",true).then(b=>rx.every(r=>has(r,b))).catch(()=>false)));
+    return out.filter((x,k)=>k>=1000||keep[k]);
+  }
+  return out;
+}
+// ---- cited-sources search: the same ranking as src/viewer.py search_sources, over data/sources.json
+const sranked=new Map();
+async function searchSources(q,offset,limit,within,sort,o){
+  const cs=o.case=="1",ex=o.exact=="1",L=s=>cs?s:s.toLowerCase(),S=await get(D+"sources.json"),[terms,excl]=parseQuery(q,cs),idx=await get(D+"search.json");
+  const words=terms.filter(t=>!t.includes(" ")&&!t.startsWith("re:")),phrase=words.length>1?words.join(" "):null,rx={};
+  for(const t of [...terms,...excl,...(phrase?[phrase]:[])])rx[t]=termRx(t,ex,cs);
+  let want=o.dir;if(sort=="newest"||sort=="oldest"){want=want||(sort=="newest"?"desc":"asc");sort="year"}
+  const key=[cs?q.trim():q.trim().toLowerCase(),within,sort,...OPTS.map(k=>o[k])].join("\n");let out=sranked.get(key);
+  if(!out){
+    out=[];let inScope=null;
+    if(within){inScope=new Set([within]);for(const e of idx)if(e.trail.some(t=>t.path==within))inScope.add(e.p)}
+    for(const d of S){
+      if(inScope&&!d.cited.some(c=>inScope.has(c.path))||!sourceOk(d,o))continue;
+      if(d._name==null){d._name=[d.title,d.doi,d.arxiv,d.host].filter(Boolean).join(" ").toLowerCase();d._head=(d.abstract||"").toLowerCase();
+        d._ctx=d.cited.flatMap(c=>c.ctx).join("\n").toLowerCase()}
+      const name=cs?[d.title,d.doi,d.arxiv,d.host].filter(Boolean).join(" "):d._name,head=cs?d.abstract||"":d._head,low=cs?d.cited.flatMap(c=>c.ctx).join("\n"):d._ctx,h=(t,s)=>has(rx[t],s);
+      if(!terms.every(t=>h(t,name)||h(t,head)||h(t,low)))continue;
+      if(excl.some(t=>h(t,name)||h(t,head)||h(t,low)))continue;
+      const tier=!terms.length?0:terms.every(t=>h(t,name))?2:terms.every(t=>h(t,name)||h(t,head))?1:0;
+      let score=terms.reduce((s,t)=>s+10*h(t,name)+3*Math.min(count(rx[t],head),5)+Math.min(count(rx[t],low),10),0);
+      if(phrase)score+=30*h(phrase,name)+5*h(phrase,head);
+      out.push([tier,score,d,terms.reduce((n,t)=>n+count(rx[t],name)+count(rx[t],head)+count(rx[t],low),0)]);
+    }
+    // full-text matches not found above = the lowest tier (tier -1); excluded words count in the metadata too
+    const seen=new Set(out.map(x=>x[2].id)),byId=S._byId||(S._byId=new Map(S.map(d=>[d.id,d])));
+    for(const [id,n,score] of await ftSearch(terms,excl,cs)){const d=byId.get(id);
+      if(!d||seen.has(id)||inScope&&!d.cited.some(c=>inScope.has(c.path))||!sourceOk(d,o))continue;
+      const all=L([d.title,d.doi,d.arxiv,d.host,d.abstract||"",...d.cited.flatMap(c=>c.ctx)].filter(Boolean).join("\n"));
+      if(excl.some(t=>has(rx[t],all)))continue;
+      out.push([-1,score,d,n,true])}
+    const cmp=(a,b)=>a<b?-1:a>b?1:0,ti=x=>x[2].title.toLowerCase(),by={
+      year:(a,b)=>(b[2].year||0)-(a[2].year||0)||cmp(ti(a),ti(b)),
+      cited:(a,b)=>b[2].cited.length-a[2].cited.length||cmp(ti(a),ti(b)),title:(a,b)=>cmp(ti(a),ti(b))};
+    const f=by[sort]?sort:terms.length?"":"cited";
+    order(out,by[f]||((a,b)=>b[0]-a[0]||b[1]-a[1]||b[2].cited.length-a[2].cited.length||cmp(ti(a),ti(b))),f!="title",want,f=="year"?(x=>!x[2].year):null);
+    sranked.size>30&&sranked.clear();sranked.set(key,out);
+  }
+  const res=out.slice(offset,offset+limit).map(([tier,,d,n,ft])=>{
+    let sn=[];
+    if(ft);else if(terms.length){sn=snippets(d.abstract||"",L(d.abstract||""),(phrase?[phrase]:[]).concat(terms),rx,2).map(s=>({s}));
+      for(const c of d.cited)for(const s of c.ctx)if(sn.length<4&&terms.some(t=>has(rx[t],L(s))))sn.push({s,path:c.path,name:c.name,k:c.k})}
+    if(!sn.length&&d.abstract&&!ft)sn=[{s:cut(d.abstract,240)}];
+    if(!sn.length&&!ft&&d.cited.length&&d.cited[0].ctx.length){const c=d.cited[0];sn=[{s:c.ctx[0],path:c.path,name:c.name,k:c.k}]}
+    return {id:d.id,title:d.title,year:d.year,kind:d.kind,host:d.host,marks:d.marks,doi:d.doi,arxiv:d.arxiv,
+      cited:d.cited.map(c=>({path:c.path,name:c.name,k:c.k})),hits:n,title_hit:tier==2,snippets:sn,...(ft?{ft:true}:{})}});
+  return {total:out.length,results:res,terms:tjson(terms,rx,o)};
 }
 // ---- word-level diff of two versions: [[op,text],...] with op "=", "-", "+"
 function diff(ta,tb){
@@ -102,7 +229,7 @@ function diff(ta,tb){
 }
 window.fetch=async(url,opt)=>{
   if(typeof url!="string"||!url.startsWith("/api/"))return real(url,opt);
-  const u=new URL(url,location.href),q=u.searchParams,p=u.pathname,n=k=>parseInt(q.get(k)||0);
+  const u=new URL(url,location.href),q=u.searchParams,p=u.pathname,n=k=>parseInt(q.get(k)||0),o=Object.fromEntries(OPTS.map(k=>[k,(q.get(k)||"").trim()]));
   if(opt&&opt.method=="POST")return resp({error:"read-only"},403);
   try{
     switch(p){
@@ -117,13 +244,15 @@ window.fetch=async(url,opt)=>{
       case "/api/diff":{const [A,B]=await Promise.all([get(D+"vtext/"+n("node")+"-"+n("a")+".json"),get(D+"vtext/"+n("node")+"-"+n("b")+".json")]);
         return resp({a:A.model,b:B.model,ops:diff(A.text,B.text)})}
       case "/api/source":return resp(await get(D+"source/"+n("doc")+".json"));
+      case "/api/sources":return resp(await searchSources(q.get("q")||"",n("offset"),Math.min(n("limit")||50,500),q.get("in")||"",q.get("sort")||"",o));
+      case "/api/ftsnip":return resp({snippets:await ftSnip(n("doc"),q.get("q")||"",(q.get("case")||"")=="1")});
       case "/api/doctext":return new Response(await get(D+"doctext/"+n("doc")+".txt",true));
-      case "/api/search":return resp(await search(q.get("q")||"",n("offset"),Math.min(n("limit")||50,500),q.get("in")||"",q.get("sort")||""));
+      case "/api/search":return resp(await search(q.get("q")||"",n("offset"),Math.min(n("limit")||50,500),q.get("in")||"",q.get("sort")||"",o));
     }
   }catch(e){return NF()}
   return NF();
 };
-window.STATIC_SEARCH=()=>/[?&](q|in|sort)=/.test(location.search);
+window.STATIC_SEARCH=()=>/[?&](q|in|sort|what|dir|exact|case|kind|mark|y0|y1|site)=/.test(location.search);
 })();
 </script>
 <script>
@@ -254,6 +383,7 @@ article ul{padding-left:22px}mark{background:var(--hl);color:inherit}
 .home .revs{font-size:.8em;max-width:40em;text-align:center;margin-top:.2em}
 .home .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(7.2em,1fr));gap:10px;margin:18px auto 10px;width:min(40em,100%)}
 .home .tile{padding:10px 8px 9px;border:1px solid color-mix(in srgb,var(--muted) 30%,transparent);border-radius:10px;text-align:center}
+.home a.tile{color:inherit;text-decoration:none}.home a.tile:hover{border-color:var(--accent)}
 .home .tile b{display:block;font-size:1.55rem;font-weight:600;line-height:1.15;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
 .home .tile span{display:block;color:var(--muted);font-size:.78em;margin-top:2px}
 .home .asof{color:var(--muted);font-size:.75em;margin-bottom:.4em}
@@ -265,7 +395,8 @@ p.aliases{color:var(--muted);font-size:14px;max-height:4.8em;overflow:hidden;mar
 p.aliases.clamped{-webkit-mask-image:linear-gradient(#000 55%,transparent);mask-image:linear-gradient(#000 55%,transparent)}
 p.aliases.open{max-height:none;-webkit-mask-image:none;mask-image:none}
 button.more{border:0;background:none;color:var(--accent);font:inherit;font-size:13px;padding:0;cursor:pointer;margin-bottom:10px}
-.results form.search{margin:4px 0 6px}.results .count{color:var(--muted);font-size:13px;margin-bottom:6px}
+.results form.search{margin:4px 0 6px;flex-wrap:wrap}.qopts{flex-basis:100%;display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;font-size:13px;color:var(--muted)}
+.qopts select,.qopts input[type=number],.qopts input[type=text]{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:3px 6px;font:inherit;font-size:13px}.qopts input[type=number]{width:5.2em}.qopts label{display:inline-flex;align-items:center;gap:4px;white-space:nowrap}.results .count{color:var(--muted);font-size:13px;margin-bottom:6px}
 .res{padding:12px 0;border-bottom:1px solid var(--line);display:grid;grid-template-columns:52px 1fr;column-gap:12px}
 .res .hn{text-align:right;font-variant-numeric:tabular-nums;line-height:1.15;padding-top:4px}.res .hn b{display:block;font-size:17px}
 .res .hn small{color:var(--muted);font-size:11.5px}.res .rb{min-width:0}
@@ -275,6 +406,11 @@ button.more{border:0;background:none;color:var(--accent);font:inherit;font-size:
 .res.ph{display:block}.res .trail{font-size:12.5px;color:var(--muted);margin:1px 0 4px}
 .res .trail a{color:var(--muted);text-decoration:none}.res .trail a:hover{text-decoration:underline}
 .res p{margin:3px 0;font-size:14px;line-height:1.5}
+.srcp ul.cby blockquote{margin:3px 0 6px;padding-left:10px;border-left:2px solid var(--line);color:var(--muted);font-size:14px}
+.qtabs{display:flex;gap:4px;margin:0 0 6px;border-bottom:1px solid var(--line)}.qtabs a{padding:4px 12px;color:var(--muted);text-decoration:none;border-bottom:2px solid transparent;margin-bottom:-1px;font-size:14px}
+.qtabs a.on{color:var(--text);border-bottom-color:var(--accent);font-weight:600}.qtabs a span{font-size:12px;color:var(--muted);font-weight:400;margin-left:3px}
+.srcres p.cx{border-left:2px solid var(--line);padding-left:8px}.srcres p.cx a{color:var(--muted);font-size:12.5px}.srcres p.cx small{color:var(--muted)}
+.srcres .cby{font-size:12.5px;color:var(--muted);margin-top:3px}.srcres .cby a{color:var(--muted)}
 .ixbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 10px;font-size:13px;color:var(--muted)}.ixbar .count{flex:1 1 100%}
 .ixbar button{border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:6px;padding:3px 10px;font:inherit;font-size:13px;cursor:pointer}
 .ixbar label{display:flex;align-items:center;gap:5px;margin-left:6px;cursor:pointer}
@@ -1269,41 +1405,80 @@ function scopePicker(within){
   let html=`<span class="lab">Search in</span>`+sel(roots,chain[0],{v:"",t:"Everywhere"});
   chain.forEach((i,k)=>{const ks=kidsOf(i).filter(j=>nodes[j].path);if(ks.length)html+=`<span class="sep">›</span>`+sel(ks,chain[k+1],{v:nodes[i].path,t:"All of "+nodes[i].name})});
   $("#scope").innerHTML=html+hsSel();
-  $("#scope").onchange=ev=>{if(ev.target.matches(".hsel"))return;$("#qin").value=ev.target.value;$("#qin").form.submit()};
+  $("#scope").onchange=ev=>{if(ev.target.matches(".hsel"))return;$("#qin").value=ev.target.value;$("#qin").form.requestSubmit()};
 }
 // ---- search results page (/search?q=): pages of 50 are fetched as the reader scrolls. The hit count stands in
 // a column before each entry; ancestors that also match are marked in the path, and "+N below" counts matching
 // entries under this one.
+// one row of the cited-sources search: the hit count (empty search: the number of citing entries), title -> the source page,
+// year · kind · site and its marks, matching abstract windows, the citing sentences that match (with their entry), cited by
+function srcRow(h,i,hl,q){
+  const meta=[h.year,h.kind,h.host].filter(Boolean).map(x=>hl(String(x))).join(" · ")+h.marks.map(m=>` <span class="chip mid">${esc(m)}</span>`).join("")+(h.doi?` · <span class="mut">doi:${hl(h.doi)}</span>`:"");
+  const by=h.cited.slice(0,6).map(c=>`<a href="${link(c.path)}">${esc(c.name)}</a>`).join(", ")+(h.cited.length>6?` and ${h.cited.length-6} more`:"");
+  return `<div class="res srcres" data-r="${i}"><div class="hn"><b>${(q?h.hits:h.cited.length).toLocaleString()}</b><small>${q?"hit"+(h.hits==1?"":"s"):"citing"}</small></div><div class="rb">`+
+    `<a class="rt" href="#~source:${h.id}">${hl(h.title)}</a><div class="trail">${meta}</div>`+
+    h.snippets.map(s=>s.path?`<p class="cx"><a href="${link(s.path)}">${esc(s.name)}</a> <small>[S${s.k}]</small> ${hl(s.s)}</p>`:`<p>${hl(s.s)}</p>`).join("")+
+    (h.ft?`<p class="ftl" data-ft="${h.id}"><span class="chip mid" data-tip="Found only in the source's full text (static site: whole words)">full text</span> ${h.ftsn?(h.ftsn.length?h.ftsn.map(hl).join(" "):'<span class="mut">matches in full text</span>'):'<span class="mut">matches in full text …</span>'}</p>`:"")+
+    `<div class="cby">Cited by ${by}</div></div></div>`}
 async function showResults(keepScroll){
   leavePage();root.classList.add("searchpage");cur=null;if(tree)tree.draw(true);
-  const y=$("main").scrollTop, within=new URLSearchParams(location.search).get("in")||"", sort=new URLSearchParams(location.search).get("sort")||"", inq="&in="+encodeURIComponent(within)+"&sort="+encodeURIComponent(sort);
+  const U=new URLSearchParams(location.search), y=$("main").scrollTop, within=U.get("in")||"";
+  // search v2 (PLAN 55): sort = a field chooser, then a direction chooser (empty = the field's own); filters, all in the URL
+  let sort=U.get("sort")||"", dir=U.get("dir")||"";if(sort=="newest"||sort=="oldest"){dir=dir||(sort=="newest"?"desc":"asc");sort="year"}
+  const O={};for(const k of ["exact","case","kind","mark","y0","y1","site"])O[k]=U.get(k)||"";
+  const opq=k=>k.filter(x=>O[x]).map(x=>`&${x}=${encodeURIComponent(O[x])}`).join("");
+  const inq="&in="+encodeURIComponent(within)+"&sort="+encodeURIComponent(sort)+"&dir="+dir+opq(["exact","case","kind","mark","y0","y1","site"]);
+  // what=sources: the same page searches the sources the articles cite (title, abstract, site, DOI and the sentences citing them)
+  const srcs=new URLSearchParams(location.search).get("what")=="sources", API=srcs?"/api/sources":"/api/search", other=srcs?"/api/search":"/api/sources";
   const PAGE=50, pages={}, loading={};
-  const first=await J(`/api/search?q=${encodeURIComponent(query)}&offset=0&limit=${PAGE}${inq}`);
+  const first=await J(`${API}?q=${encodeURIComponent(query)}&offset=0&limit=${PAGE}${inq}`);
   pages[0]=first.results;const total=first.total;
   // highlight exactly what the server matched: short words as whole words, phrases across spaces/hyphens
   const rx=first.terms.sort((a,b)=>b.t.length-a.t.length).map(({t,whole,re})=>{if(re)return re;const b=t.split(" ").map(w=>w.replace(/[^\w]/g,"")).join("\\W+");return whole?`(?<!\\w)${b}(?!\\w)`:b});
   let re=null;try{re=rx.length?new RegExp("("+rx.join("|")+")","gi"):null}catch(e){}   // a Python-only /regexp/ just loses its highlight
   const hl=s=>re?esc(s).replace(re,"<mark>$1</mark>"):esc(s);
   const inName=within&&entryName(within);
-  $("#art").innerHTML=`<div class="results"><h1>Search</h1><form class="search" action="./" method="get"><input id="q2" name="q" type="search" value="${esc(query)}" autocomplete="off"><button>Search</button>`+
-    `<select name="sort" id="qsort" data-tip="Order of the results" onchange="this.form.submit()">${[["","Best match"],["name","Name"],["length","Longest first"],["depth","Shallowest first"],["updated","Recently updated"],["sources","Most sources cited"],["score","Best check score"],["revisions","Most revisions"]].map(([v,t])=>`<option value="${v}"${v==sort?" selected":""}>${t}</option>`).join("")}</select><input type="hidden" name="in" id="qin" value="${esc(within)}"></form><div class="scope" id="scope"></div>`+
-    `<div class="tips">"exact phrase" · -exclude · /regexp/ · words of up to 3 letters match whole words only</div>`+
-    `<div class="count">${`${total.toLocaleString()} result${total==1?"":"s"}${query?` for “${esc(query)}”`:" (empty search lists every entry)"}${inName?` in ${esc(inName)}`:""}${query&&total>1?" · <mark class=\"hc\">highlighted</mark> entries in a path match too":""}`}</div><div id="reslist"></div>`+
+  const tabq=`q=${encodeURIComponent(query)}&in=${encodeURIComponent(within)}${opq(["exact","case"])}`;
+  const fields=srcs?[["","Best match","desc","Descending","Ascending"],["cited","Times cited","desc","Most first","Fewest first"],["year","Year","desc","Newest first","Oldest first"],["title","Title","asc","A to Z","Z to A"]]
+    :[["","Best match","desc","Descending","Ascending"],["name","Name","asc","A to Z","Z to A"],["length","Length","desc","Longest first","Shortest first"],["depth","Depth","asc","Shallowest first","Deepest first"],["updated","Updated","desc","Newest first","Oldest first"],["sources","Sources cited","desc","Most first","Fewest first"],["score","Check score","desc","Descending","Ascending"],["revisions","Revisions","desc","Most first","Fewest first"]];
+  const fd=fields.find(f=>f[0]==sort)||fields[0], dsel=dir||fd[2], opt=(v,t,on)=>`<option value="${v}"${on?" selected":""}>${t}</option>`;
+  const chk=(k,t,tip)=>`<label data-tip="${tip}"><input type="checkbox" name="${k}" value="1"${O[k]?" checked":""}> ${t}</label>`;
+  const sfilt=srcs&&(O.kind||O.mark||O.y0||O.y1||O.site);
+  const qopts=`<div class="qopts"><select name="sort" id="qsort" data-tip="Sort by">${fields.map(f=>opt(f[0],f[1],f[0]==fd[0])).join("")}</select>`+
+    `<select name="dir" id="qdir" data-tip="Sort direction">${opt("desc",fd[2]=="desc"?fd[3]:fd[4],dsel=="desc")}${opt("asc",fd[2]=="asc"?fd[3]:fd[4],dsel=="asc")}</select>`+
+    chk("exact","Whole words","Every word matches whole words only (\u201cray\u201d does not find \u201craytracing\u201d)")+chk("case","Case sensitive","Upper and lower case must match")+
+    (srcs?`<select name="kind" data-tip="Kind of source">${[["","All kinds"],["paper","Papers"],["repo","Code repositories"],["web","Web pages"],["link","Links"],["qa","Q&A"],["book","Books"],["video","Videos"],["pdf","PDFs"]].map(([v,t])=>opt(v,t,v==O.kind)).join("")}</select>`+
+      `<select name="mark" data-tip="Source marks">${[["","Any marks"],["official","Official (peer-reviewed or project docs)"],["unofficial","Unofficial"],["book","Book"],["abstract","Abstract only"]].map(([v,t])=>opt(v,t,v==O.mark)).join("")}</select>`+
+      `<label data-tip="Publication year range; sources without a year drop out">Years <input name="y0" type="number" min="1900" max="2100" placeholder="from" value="${esc(O.y0)}"> to <input name="y1" type="number" min="1900" max="2100" placeholder="to" value="${esc(O.y1)}"></label>`+
+      `<label data-tip="Part of the site's host name, e.g. arxiv or github">Site <input name="site" type="text" size="10" value="${esc(O.site)}"></label>`:"")+
+    (sfilt||O.exact||O.case||dir?` <a href="./?q=${encodeURIComponent(query)}&in=${encodeURIComponent(within)}${srcs?"&what=sources":""}" data-tip="Clear the sort and filters">reset</a>`:"")+`</div>`;
+  $("#art").innerHTML=`<div class="results"><h1>Search</h1><div class="qtabs"><a href="./?${tabq}"${srcs?"":' class="on"'} data-tip="Search the articles">Entries <span id="qn0">${srcs?"":total.toLocaleString()}</span></a>`+
+    `<a href="./?${tabq}&what=sources"${srcs?' class="on"':""} data-tip="Search the sources the articles cite: titles, abstracts, sites, DOIs and the sentences that cite them">Cited sources <span id="qn1">${srcs?total.toLocaleString():""}</span></a></div><form class="search" action="./" method="get"><input id="q2" name="q" type="search" value="${esc(query)}" autocomplete="off"><button>Search</button>${qopts}<input type="hidden" name="in" id="qin" value="${esc(within)}">${srcs?'<input type="hidden" name="what" value="sources">':""}</form><div class="scope" id="scope"></div>`+
+    `<div class="tips">"exact phrase" · -exclude · /regexp/ · words of up to 3 letters match whole words only${srcs?" · matches titles, abstracts, sites, DOIs and the sentences citing a source"+(window.STATIC?", then the sources' full text (whole words)":"")+"; Search in = sources cited there":""}</div>`+
+    `<div class="count">${`${total.toLocaleString()} ${srcs?"cited source":"result"}${total==1?"":"s"}${query?` for “${esc(query)}”`:srcs?" (empty search lists every cited source, most cited first)":" (empty search lists every entry)"}${inName?` ${srcs?"cited in":"in"} ${esc(inName)}`:""}${sfilt?" · filtered":""}${!srcs&&query&&total>1?" · <mark class=\"hc\">highlighted</mark> entries in a path match too":""}`}</div><div id="reslist"></div>`+
     (!total?'<div class="empty">No matches.</div>':"")+"</div>";
   const get=i=>{const p=pages[Math.floor(i/PAGE)];return p&&p[i%PAGE]};
   const estRes=(r,w)=>{const cpl=Math.max(20,(w-64)/7.3),ln=s=>Math.ceil(s.length/cpl);
-    return 24+1+27+5+20+r.snippets.reduce((a,s)=>a+3+21*ln(s),3)};
+    return srcs?24+1+ln(r.title)*25+5+20+20+(r.ft?3+21*(r.ftsn?r.ftsn.reduce((a,s)=>a+ln(s+"          "),0):1):0)+r.snippets.reduce((a,s)=>a+3+21*ln(s.s+(s.name||"")+"      "),3):24+1+27+5+20+r.snippets.reduce((a,s)=>a+3+21*ln(s),3)};
   const load=pg=>{if(loading[pg])return;loading[pg]=1;
-    J(`/api/search?q=${encodeURIComponent(query)}&offset=${pg*PAGE}&limit=${PAGE}${inq}`).then(d=>{pages[pg]=d.results;if(pageV)pageV.reestimate(pg*PAGE,Math.min(total,(pg+1)*PAGE))})};
+    J(`${API}?q=${encodeURIComponent(query)}&offset=${pg*PAGE}&limit=${PAGE}${inq}`).then(d=>{pages[pg]=d.results;if(pageV)pageV.reestimate(pg*PAGE,Math.min(total,(pg+1)*PAGE))})};
   const crumb=t=>t.hits?`<a class="hc" href="${link(t.path)}" data-tip="Also a match: ${t.hits} hit${t.hits==1?"":"s"}">${esc(t.name)}<span>${t.hits}</span></a>`:`<a href="${link(t.path)}">${esc(t.name)}</a>`;
-  const v=pageV=VList($("main"),$("#reslist"),{over:800,
+  // full-text rows (static site, PLAN 55): the row's text is fetched as it is drawn and the matching windows filled in
+  const ftFill=()=>{if(!srcs)return;for(const el of $("#reslist").querySelectorAll("[data-ft]")){const h=get(+el.closest("[data-r]").dataset.r);
+    if(!h||h.ftsn||h.ftq)continue;h.ftq=1;J(`/api/ftsnip?doc=${h.id}&q=${encodeURIComponent(query)}${opq(["case"])}`).then(d=>{h.ftsn=d.snippets||[];v.draw(true)}).catch(()=>{h.ftsn=[]})}};
+  const v=pageV=VList($("main"),$("#reslist"),{over:800,after:()=>ftFill(),
     est:(i,w)=>{const r=get(i);return r?estRes(r,w):130},
     html:i=>{const h=get(i);if(!h){load(Math.floor(i/PAGE));return `<div class="res ph" style="height:${v.h[i]}px"></div>`}
+      if(srcs)return srcRow(h,i,hl,!!query);
       return `<div class="res" data-r="${i}"><div class="hn"><b>${h.hits.toLocaleString()}</b><small>hit${h.hits==1?"":"s"}</small></div><div class="rb">`+
         `<a class="rt" href="${link(h.path)}">${hl(h.name)}</a>${h.below?`<span class="below" data-tip="${h.below} entr${h.below==1?"y":"ies"} under this one also match">+${h.below} below</span>`:""}`+
         `<div class="trail">${h.trail.map(t=>crumb(t)+" › ").join("")}${esc(h.name)}</div>`+
         h.snippets.map(s=>`<p>${hl(s)}</p>`).join("")+"</div></div>"}});
-  v.reset(total);scopePicker(within);{const q=$("#q2");q.focus();if(query)q.setSelectionRange(q.value.length,q.value.length)}   // after Enter the field keeps focus, not editing
+  v.reset(total);scopePicker(within);
+  {const f=$("#qsort").form;f.addEventListener("change",ev=>{const t=ev.target;if(t.id=="qsort")$("#qdir").value="";if(t.matches("select,[type=checkbox]"))f.requestSubmit()});
+   f.addEventListener("submit",()=>{const fs=fields.find(x=>x[0]==$("#qsort").value)||fields[0];if($("#qdir").value==fs[2])$("#qdir").value="";
+     for(const e of f.elements)if(e.name&&e.name!="q"&&!e.value||e.type=="checkbox"&&!e.checked)e.disabled=true})}
+  J(`${other}?q=${encodeURIComponent(query)}&offset=0&limit=1&in=${encodeURIComponent(within)}${opq(["exact","case"])}`).then(d=>{const e=$(srcs?"#qn0":"#qn1");if(e)e.textContent=d.total.toLocaleString()}).catch(()=>{});{const q=$("#q2");q.focus();if(query)q.setSelectionRange(q.value.length,q.value.length)}   // after Enter the field keeps focus, not editing
   // keys: ↓ from the search box goes to the first result, ↑/↓ move between result titles, Home/End jump (user 2026-10-28);
   // ↓ leaves the box only when not editing: typing starts editing, Enter (the submitted search) ends it (user 2026-11-04)
   const goRes=r=>{if(r<0||r>=total)return;v.reveal(r);requestAnimationFrame(()=>$(`#reslist [data-r="${r}"] a.rt`)?.focus({preventScroll:true}))};
@@ -1322,10 +1497,33 @@ const CTAG={"unofficial":'<sup class="ctag" data-tip="Unofficial source: not pee
   "abstract only":'<sup class="ctag" data-tip="Only the abstract was seen">a</sup>'};
 // ---- Markdown → HTML. Math ($…$, $$…$$) and the Sources list are pulled out before marked runs, so
 // Markdown can't eat _ and * inside formulas, and put back afterwards. Code blocks are left alone.
+// Pseudocode comments are hidden on the site (user 2026-11-06: the writer's reasoning leaks into them); article.md and
+// the DB keep them, and the codemark note sits outside the fence. Strings stay intact (triple quotes may span lines,
+// ' and " end at the line end, so a stray x' cannot swallow code). Python-like fences (python, none): '#' to the line
+// end, and a line starting with '//' ('//' mid-line is floor division). C-like fences: '//' and '/* */' ('#' = preprocessor).
+// A line left blank by a removed comment goes; a block that was only comments stays as written.
+const CLIKE=/^(c|cpp|c\+\+|cuda|glsl|hlsl|wgsl|metal|rust|go|java|javascript|js|typescript|ts|cs|csharp|swift)$/i;
+function stripComments(code,lang){
+  const py=!lang||/^(python|py)$/i.test(lang);if(!py&&!CLIKE.test(lang))return code;
+  const lines=[[]],cut=new Set();let q=null,i=0;const n=code.length,emit=c=>lines[lines.length-1].push(c);
+  while(i<n){const c=code[i];
+    if(c=="\n"){if(q&&q.length==1)q=null;lines.push([]);i++;continue}
+    if(q){if(c=="\\"&&i+1<n&&code[i+1]!="\n"){emit(c+code[i+1]);i+=2;continue}
+      if(code.startsWith(q,i)){emit(q);i+=q.length;q=null;continue}emit(c);i++;continue}
+    const atStart=!lines[lines.length-1].join("").trim();
+    if(py&&(c=="#"||(atStart&&code.startsWith("//",i)))||!py&&code.startsWith("//",i)){cut.add(lines.length-1);while(i<n&&code[i]!="\n")i++;continue}
+    if(!py&&code.startsWith("/*",i)){const e=code.indexOf("*/",i+2),end=e<0?n:e+2;
+      for(let j=i;j<end;j++)if(code[j]=="\n"){cut.add(lines.length-1);lines.push([])}cut.add(lines.length-1);i=end;continue}
+    if(c=='"'||c=="'"||(!py&&c=="`")){q=py&&code.startsWith(c.repeat(3),i)?c.repeat(3):c;emit(q);i+=q.length;continue}
+    emit(c);i++}
+  const out=[];lines.forEach((l,k)=>{const s=l.join("");if(!cut.has(k))out.push(s);else if(s.trim())out.push(s.trimEnd())});
+  const res=out.join("\n").replace(/\n[ \t]*\n(?:[ \t]*\n)+/g,"\n\n").replace(/^\n+/,"");
+  return res.trim()?res:code;
+}
 function renderMd(text){
   const math=[], keep=(src,disp)=>(math.push([src,disp]),`@@M${math.length-1}@@`);
   let src=null;
-  let md=text.split(/(^```[\s\S]*?^```)/m).map((part,k)=>{if(k%2)return part;
+  let md=text.split(/(^```[\s\S]*?^```)/m).map((part,k)=>{if(k%2)return part.replace(/^(```([^\n`]*)\n)([\s\S]*?)(^```)/m,(m,h,l,b,e)=>h+stripComments(b,l.trim())+e);
     part=part.split(/(`[^`\n]+`)/).map((q,j)=>j%2?q:q
       .replace(/\$\$([\s\S]+?)\$\$/g,(m,x)=>keep(x,true))
       .replace(/\$(?![\s$])([^$\n]+?)(?<!\s)\$(?!\d)/g,(m,x)=>keep(x,false))).join("");
@@ -1403,7 +1601,7 @@ function showHome(){
     const t=(v,l,tip)=>`<div class="tile" data-tip="${tip}"><b>${v}</b><span>${l}</span></div>`;
     a.innerHTML=[t(f(h.written),"articles",`${f(h.written)} of ${f(h.nodes)} tree nodes have an article`),
       t(c(h.words),"words",`${f(h.words)} words, ${f(h.chars)} characters`),t(f(h.avg_words),"words per article","average article length"),
-      ...(h.sources!=null?[t(f(h.sources),"sources cited",`${f(h.sources)} distinct sources cited by the current articles`)]:[]),
+      ...(h.sources!=null?[t(f(h.sources),"sources cited",`${f(h.sources)} distinct sources cited by the current articles; click to search them`).replace('<div class="tile"','<a class="tile" href="./?what=sources"').replace(/<\/div>$/,"</a>")]:[]),
       ...(h.versions!=null?[t(c(h.versions),"versions",`${f(h.versions)} stored article versions, all kept with their diffs`)]:[])].join("");
     const hn=$("#hn");if(hn)hn.remove();   // the tiles replace the plain entry count
     const s=$("#hasof");if(s&&h.asof)s.textContent="Snapshot of "+new Date(h.asof).toLocaleDateString("en-US",{year:"numeric",month:"long",day:"numeric"});
@@ -1670,7 +1868,7 @@ async function showSource(id){
     `<tr><th>Archived original</th><td>${d.file?`<a href="/archive/${d.sha256}" target="_blank">${esc(d.file.name.split(".").slice(1).join(".")||"file")}, ${kb(d.file.bytes)}</a> <small>(stored on this machine; opens sandboxed)</small>`:"none (only extracted text was kept)"}</td></tr>`+
     `<tr><th>Text read</th><td>${d.text_chars?`${d.text_chars.toLocaleString()} characters${d.text_src?` via ${esc(d.text_src)}`:""}${d.fetched_at?`, ${day(d.fetched_at)}`:""} <button id="showtext">Show the text</button>`:"none"}</td></tr></table>`+
     (d.abstract?`<h2>Abstract</h2><p>${esc(d.abstract)}</p>`:"")+
-    `<h2>Cited by</h2>`+(d.cited_by.length?`<ul>${d.cited_by.map(c=>`<li><a href="${link(c.path)}">${esc(c.name)}</a> <small>as [S${c.k}]</small></li>`).join("")}</ul>`:"<p>No shown article cites it.</p>")+
+    `<h2>Cited by</h2>`+(d.cited_by.length?`<ul class="cby">${d.cited_by.map(c=>`<li><a href="${link(c.path)}">${esc(c.name)}</a> <small>as [S${c.k}]</small>${(c.ctx||[]).map(s=>`<blockquote>${esc(s)}</blockquote>`).join("")}</li>`).join("")}</ul>`:"<p>No shown article cites it.</p>")+
     `<div id="doctext"></div></div>`;
   const b=$("#showtext");if(b)b.onclick=async()=>{b.disabled=true;const t=await fetch("/api/doctext?doc="+id).then(r=>r.text());
     $("#doctext").innerHTML=`<h2>The text the pipeline read</h2><pre class="doctext"></pre>`;$("#doctext pre").textContent=t;b.remove();$("#doctext").scrollIntoView({behavior:"smooth"})};

@@ -3,209 +3,174 @@
 Also called: Tiled View-Adaptive Voxelization, on-the-fly voxelization, tiled-based voxelization
 
 ## Overview
-View-Adaptive Voxelization is a GPU-friendly, real-time technique for rendering homogeneous media defined by particles (e.g., SPH fluids) by computing view-adaptive binary voxelizations with on-the-fly compression [S1]. It solves the problem of high-resolution volumetric data exceeding available GPU memory by adapting the voxel grid to the viewport and using a span-based surface representation [S1]. Unlike sibling methods that may require preprocessing (such as scalar field conversion or mesh generation) or target out-of-core rendering with significant setup times, this method directly processes unsorted particle data to achieve interactive speeds [S1]. It sets itself apart by constructing a perspective voxel grid at full render resolution, typically using ~16,000 depth layers, and compressing it into surface spans for efficient translucency and refraction rendering [S1].
+View-Adaptive Voxelization is a GPU-friendly, real-time technique for rendering homogeneous media defined by particles (e.g., SPH fluids) by computing view-adaptive binary voxelizations with on-the-fly compression [S1]. It solves the problem of rendering high-resolution volumetric data that exceeds available GPU memory by splitting the screen into tiles, voxelizing each tile into a perspective grid, and immediately compressing the result into surface spans [S1]. Unlike [FAW10] or [RTW13], it requires no preprocessing such as scalar field conversion or mesh generation, allowing direct rendering of unsorted particle data [S1]. It sets itself apart from siblings like [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) by prioritizing memory efficiency through immediate compression and view-adaptivity rather than storing a full static grid, and from [Point Cloud Voxelization](1000-point-cloud-voxelization.md) by explicitly handling depth layers for translucency and refraction [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A list of particles (e.g., SPH simulation data) defined by world-space positions (12-byte floating-point triplets) and radii [S1]. Optionally, simulation grid information to identify fully populated cells for acceleration [S1].
-*   **Output:** A compressed surface representation consisting of entry and exit depths and normals for each pixel, stored at full screen resolution [S1]. This data is used for subsequent rendering (translucency or refraction).
+*   **Input:** Unsorted list of particles (position, radius). Optionally, simulation grid information to identify fully populated cells [S1].
+*   **Output:** Compressed surface span data (depths and normals) per pixel, suitable for translucency or refraction rendering [S1].
 
 **Data Structures:**
-1.  **Bit-Packed Perspective Voxel Grid:** A temporary structure used during splatting.
-    *   Layout: $W_{tile} \times H_{tile} \times L$ bits, where $W_{tile}, H_{tile}$ are tile dimensions and $L$ is the number of depth layers.
-    *   Typical Size: $1024 \times 512 \times 16384$ bits, consuming ~1024 MB [S1].
-    *   Content: 1 bit per voxel indicating empty (0) or occupied (1) [S1].
-2.  **Surface Span Storage:** The compressed output.
-    *   Layout: Stored at full screen resolution. Each pixel stores up to 7 spans.
-    *   Content: Each span contains depth and normal information. Surface links are replaced by normals [S1].
-    *   Typical Size: 126 MB for depths and normals, totaling 252 MB at 1920×1080 [S1].
+1.  **Bit-packed Perspective Voxel Grid:**
+    *   Layout: 3D array of bits.
+    *   Dimensions: $W_{tile} \times H_{tile} \times L$, where $L=16384$ layers.
+    *   Storage: 1 bit per voxel (0=empty, 1=occupied) [S1].
+    *   Typical Tile Size: $1024 \times 512$ pixels, consuming ~1024 MB [S1].
+2.  **Surface Span Storage:**
+    *   Layout: Array of spans per pixel at full screen resolution.
+    *   Content: Entry and exit depths, and surface normals (replacing surface links) [S1].
+    *   Capacity: Up to 7 spans per pixel [S1].
+    *   Size: ~126 MB for depths/normals, totaling 252 MB at 1920×1080 [S1].
 
 **Parameters:**
-*   **Depth Layers ($L$):** Typically ~16,000 layers are allocated (specifically 16,384) to cover the near-to-far plane range [S1].
-*   **Angle Resolution:** $14^\circ$, which corresponds to the ~16,000 layers between near and far planes [S1].
-*   **Tile Size:** Adjustable to fit video memory. Optimal size on GTX 970 is $1024 \times 512$ [S1].
-*   **Max Spans per Pixel:** 7 (default storage limit) [S1].
-*   **Filtering Iterations:** Up to 20 iterations, dependent on viewer distance [S1].
+*   **Angle Resolution:** $14^\circ$. This determines the number of depth layers $L$. $L \approx 16384$ covers the near-to-far plane range [S1].
+*   **Max Iterations for Filtering:** 20 [S1].
+*   **Max Spans per Pixel:** 7 (stored explicitly) [S1].
 
-**Algorithm Steps:**
+**Steps:**
 
-1.  **Tile Partitioning:** Split the screen into tiles such that the voxel subgrid for each tile fits into GPU memory. For a standard 1080p resolution, a tile size of $1024 \times 512$ is used [S1].
-
-2.  **Splatting (Voxelization):**
-    *   For each tile, initialize the bit-packed voxel grid to empty.
-    *   Iterate through the input particle list.
+1.  **Tile Partitioning:** Split the screen into tiles of size $W_{tile} \times H_{tile}$ such that the voxel grid for each tile fits in GPU memory [S1].
+2.  **Voxel Grid Initialization:** For each tile, allocate a bit-packed 3D grid of size $W_{tile} \times H_{tile} \times 16384$ [S1].
+3.  **Splatting:**
     *   For each particle, project its sphere onto the screen tile.
-    *   Identify all voxels in the voxel columns (depth dimension) of the overlapped pixels.
-    *   Set the corresponding bits in the voxel grid to 1 (occupied) [S1].
-    *   *Optimization:* If simulation grid data is available, skip particles in fully populated inner cells to reduce input count [S1].
-
-3.  **Surface Extraction (Compression):**
-    *   For each pixel in the current tile, iterate over all $L$ layers in the voxel column in parallel.
-    *   Detect transitions from 0 to 1 (entry) and 1 to 0 (exit) to determine surface depths.
-    *   Store the resulting list of surface depths and associated normals for every pixel.
-    *   *Handling Overflow:* If the number of layers exceeds the allocated memory or span limit (e.g., >7 spans):
-        *   Track the actual number of layers.
-        *   Keep track of the amount of empty space inside the extended last span.
-        *   Continuously update the last exit depth. This allows correct volumetric absorption for the first $k$ layers while preserving the total empty space for subsequent layers [S1].
-    *   Discard the voxel subgrid to free memory.
-
-4.  **Normal Generation:**
-    *   Compute normals for the extracted surface spans. An angle resolution of $14^\circ$ is used to minimize discontinuities without explicit smoothing [S1].
-
-5.  **Filtering:**
-    *   Apply iterative filtering to the surface spans. The number of iterations depends on the viewer distance (projected filter radius scales with distance), with a maximum of 20 iterations [S1].
-
+    *   Identify all pixels (columns) overlapped by the particle.
+    *   For each overlapped pixel, mark the voxels in the column corresponding to the particle's depth range as occupied (1) [S1].
+    *   *Optimization:* If simulation grid data is available, skip particles in fully populated inner cells [S1].
+4.  **Surface Extraction (Compression):**
+    *   Iterate over all columns in the voxel grid in parallel.
+    *   For each column, scan the bits to find entry and exit depths of occupied regions (spans) [S1].
+    *   Store these spans (depths and normals) in the Surface Span Storage [S1].
+    *   Handle overflow: If the number of layers exceeds the allocated span capacity (e.g., >7 spans), track the actual number of layers and the empty space in the last extended span to preserve volumetric absorption for translucency rendering [S1].
+5.  **Discard and Repeat:** Discard the voxel subgrid for the current tile. Repeat steps 2-4 for all tiles [S1].
 6.  **Rendering:**
-    *   **Translucency-Only:** Iterate sequentially over all surfaces extracted from a single voxel column. This is efficient as it does not require complex ray traversal [S1].
-    *   **Refraction:** Cast perturbed refraction rays that potentially traverse multiple voxel columns. This increases computational cost but enables effects like total internal reflection [S1].
-    *   *Acceleration:* Ray casting can be accelerated by building a hierarchical span representation (mipmapping-like), where boundary surfaces of four neighboring columns are conservatively bounded in one column of a coarser grid [S1].
+    *   **Translucency:** Iterate sequentially over all surfaces extracted from each voxel column [S1].
+    *   **Refraction:** Cast perturbed refraction rays that traverse multiple voxel columns [S1].
+    *   **Acceleration:** Optionally build a hierarchical span structure (mipmapping-like) where boundary surfaces of four neighboring columns are conservatively bounded in a coarser grid column [S1].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def view_adaptive_voxelization(particles, screen_width, screen_height, 
-                               tile_width, tile_height, num_layers=16384):
+def view_adaptive_voxelization(particles, screen_width, screen_height, tile_width=1024, tile_height=512, num_layers=16384):
     """
     Performs view-adaptive voxelization on a tiled basis.
-    
-    Args:
-        particles: List of particle objects with position (x,y,z) and radius r.
-        screen_width, screen_height: Resolution of the full screen.
-        tile_width, tile_height: Dimensions of the processing tile.
-        num_layers: Number of depth layers in the perspective grid.
-        
-    Returns:
-        surface_data: Dictionary mapping pixel coordinates (x,y) to lists of spans.
     """
-    surface_data = {} # Stores spans for all pixels
-    
     # Calculate number of tiles
-    num_tiles_x = ceil(screen_width / tile_width)
-    num_tiles_y = ceil(screen_height / tile_height)
+    num_tiles_x = (screen_width + tile_width - 1) // tile_width
+    num_tiles_y = (screen_height + tile_height - 1) // tile_height
+    
+    # Initialize global surface storage (e.g., 7 spans per pixel)
+    # Span structure: (entry_depth, exit_depth, normal_x, normal_y, normal_z)
+    surface_spans = [[[] for _ in range(screen_width)] for _ in range(screen_height)]
     
     for ty in range(num_tiles_y):
         for tx in range(num_tiles_x):
-            # 1. Initialize Tile Voxel Grid
-            # Grid dimensions: tile_width x tile_height x num_layers
-            # Stored as bit-packed array
-            tile_grid = initialize_bit_grid(tile_width, tile_height, num_layers)
+            # 1. Initialize tile voxel grid (bit-packed)
+            # Dimensions: tile_width x tile_height x num_layers
+            # Using a flat list for bit packing: 1 bit per voxel
+            tile_grid_size = tile_width * tile_height * num_layers
+            voxel_grid = [0] * (tile_grid_size // 8 + 1) # Byte array for bits
             
             # 2. Splatting
             for particle in particles:
-                # Project particle sphere to screen space
-                # Determine bounding box of the sphere in tile coordinates
-                tile_bounds = get_particle_tile_bounds(particle, tx, ty, tile_width, tile_height)
+                # Project particle sphere to screen tile coordinates
+                # Determine bounding box in tile pixel space and depth range
+                tile_pixels = get_overlapping_pixels(particle, tx * tile_width, ty * tile_height, tile_width, tile_height)
                 
-                if tile_bounds is None:
-                    continue
-                
-                # Iterate over pixels in the tile covered by the particle
-                for py in range(tile_bounds.y_min, tile_bounds.y_max):
-                    for px in range(tile_bounds.x_min, tile_bounds.x_max):
-                        # Get global pixel coordinates
-                        gx = tx * tile_width + px
-                        gy = ty * tile_height + py
-                        
-                        # Determine which layers (z) are occupied by the sphere at this pixel
-                        # This involves solving for intersection of ray (gx, gy, z) with sphere
-                        occupied_layers = get_occupied_layers(particle, gx, gy, num_layers)
-                        
-                        # Mark voxels in the column
-                        for layer in occupied_layers:
-                            set_bit(tile_grid, px, py, layer, 1)
+                for (px, py) in tile_pixels:
+                    # Determine depth range [z_min, z_max] for this particle in this column
+                    z_min, z_max = get_particle_depth_range(particle, px, py)
+                    
+                    # Mark voxels in the column
+                    for z in range(z_min, z_max + 1):
+                        set_bit(voxel_grid, px, py, z, 1)
             
             # 3. Surface Extraction
-            for py in range(tile_height):
-                for px in range(tile_width):
-                    gx = tx * tile_width + px
-                    gy = ty * tile_height + py
+            for px in range(tile_width):
+                for py in range(tile_height):
+                    # Extract spans from the column
+                    spans = extract_spans_from_column(voxel_grid, px, py, num_layers)
                     
-                    spans = []
-                    current_depth = 0
-                    in_volume = False
-                    layer_count = 0
+                    # Map to global screen coordinates
+                    global_px = tx * tile_width + px
+                    global_py = ty * tile_height + py
                     
-                    # Iterate through all layers to find entry/exit points
-                    for layer in range(num_layers):
-                        is_occupied = get_bit(tile_grid, px, py, layer)
-                        
-                        if is_occupied and not in_volume:
-                            # Entry point
-                            entry_depth = get_layer_depth(layer)
-                            spans.append({'entry': entry_depth, 'exit': None, 'normal': None})
-                            in_volume = True
-                            layer_count += 1
-                            
-                        elif not is_occupied and in_volume:
-                            # Exit point
-                            exit_depth = get_layer_depth(layer)
-                            if spans:
-                                spans[-1]['exit'] = exit_depth
-                            in_volume = False
-                    
-                    # Handle case where volume extends to the last layer
-                    if in_volume and spans:
-                        spans[-1]['exit'] = get_layer_depth(num_layers - 1)
-                    
-                    # 4. Handle Overflow (>7 spans)
-                    # If len(spans) > 7, merge or track empty space in the last span
-                    if len(spans) > 7:
-                        spans = compress_spans(spans, max_spans=7)
-                        # Note: The method tracks actual layer count and empty space 
-                        # in the extended last span for correct absorption [S1]
-                    
-                    # 5. Normal Generation
+                    # Store spans, handling overflow if necessary
                     for span in spans:
-                        span['normal'] = compute_normal(span['entry'], span['exit'])
-                    
-                    # 6. Filtering
-                    spans = iterative_filter(spans, viewer_distance)
-                    
-                    surface_data[(gx, gy)] = spans
+                        add_span(surface_spans[global_py][global_px], span)
             
-            # Discard tile_grid to free memory
-            del tile_grid
-            
-    return surface_data
+            # 4. Discard voxel grid for next tile
+            voxel_grid = None
 
-def compress_spans(spans, max_spans):
+    return surface_spans
+
+def extract_spans_from_column(voxel_grid, px, py, num_layers):
     """
-    Compresses spans if they exceed the maximum limit.
-    Keeps track of empty space in the last span.
+    Scans a voxel column to find entry/exit depths.
+    Returns list of (entry, exit, normal) tuples.
     """
-    if len(spans) <= max_spans:
-        return spans
+    spans = []
+    current_entry = None
     
-    # Keep first max_spans - 1 spans intact
-    kept_spans = spans[:max_spans-1]
-    
-    # The last span represents the remaining volume
-    # It extends to the end of the tracked layers
-    last_span = spans[-1]
-    
-    # Calculate total empty space between the last kept span and the end
-    # This ensures volumetric absorption is correct even if intermediate layers are skipped
-    # Implementation detail: [G] Specific compression logic for "empty space tracking" 
-    # is described conceptually in [S1] but exact bit-level packing is not provided.
-    # We assume the last span's exit depth is adjusted or metadata is stored.
-    
-    kept_spans.append(last_span)
-    return kept_spans
+    for z in range(num_layers):
+        is_occupied = get_bit(voxel_grid, px, py, z)
+        
+        if is_occupied and current_entry is None:
+            current_entry = z
+        elif not is_occupied and current_entry is not None:
+            # Exit found
+            exit_z = z - 1
+            normal = compute_normal(current_entry, exit_z) # Placeholder for normal computation
+            spans.append((current_entry, exit_z, normal))
+            current_entry = None
+            
+    # Handle case where column ends while occupied
+    if current_entry is not None:
+        exit_z = num_layers - 1
+        normal = compute_normal(current_entry, exit_z)
+        spans.append((current_entry, exit_z, normal))
+        
+    return spans
+
+def add_span(pixel_spans, new_span):
+    """
+    Adds a span to the pixel's list, handling the 7-span limit.
+    If limit exceeded, merges or extends the last span to preserve absorption.
+    """
+    if len(pixel_spans) < 7:
+        pixel_spans.append(new_span)
+    else:
+        # Overflow handling: extend the last span to cover remaining depth
+        # and track empty space if needed for translucency
+        last_span = pixel_spans[-1]
+        # Extend exit depth to include new span's exit
+        last_span.exit_depth = max(last_span.exit_depth, new_span.exit_depth)
+        # Note: Normal might need averaging or conservative update [G]
 ```
 
+## Subtopics
+
+### Hierarchical Span Acceleration
+A method to accelerate ray casting by building a mipmapping-like hierarchy where boundary surfaces of four neighboring columns are conservatively bounded in one column of a coarser grid [S1].
+
+### Translucency-Only Rendering
+A rendering mode that iterates sequentially over all extracted surfaces from a single voxel column, avoiding the cost of refraction ray casting [S1].
+
+### Refraction Rendering
+A rendering mode that casts perturbed refraction rays, potentially traversing multiple voxel columns, increasing computational cost but enabling complex light effects [S1].
+
 ## Operating characteristics
-*   **Time Complexity:** Dominated by splatting and surface extraction (RLE compression). Performance scales with the number of particles and the number of layers scanned. On a GTX Titan, voxelization of ~7.1 million particles takes ~187 ms for translucency rendering [S1].
-*   **Memory Complexity:** Temporary memory is proportional to tile size and number of layers ($W_{tile} \times H_{tile} \times L$ bits). For $1024 \times 512 \times 16384$, this is ~1024 MB. Output memory is proportional to screen resolution and max spans per pixel (up to 7). For 1080p, this is ~252 MB [S1].
-*   **Measured Performance:** 187 ms for translucency rendering of 7.1M particles on a GTX Titan [S1]. ~10x faster than [FAW10] and ~2x faster than [RTW13] for comparable particle counts, without preprocessing [S1].
-*   **Strengths:** High resolution (up to 16,000 layers), real-time performance, no preprocessing required, memory-efficient via tiling and compression.
-*   **Limitations:** Limited to homogeneous media (only detects entry/exit points, not internal scalar variations). Refraction rendering is more expensive due to ray traversal across columns. View-dependent, so secondary views (e.g., shadows) require recomputation [S1].
-*   **When to Use:** Real-time rendering of particle-based homogeneous media (SPH fluids) where high resolution and visual quality (refraction, translucency) are required, and GPU memory is limited.
-*   **When Not to Use:** Heterogeneous media with varying scalar attributes (unless extended with explicit/compressed scalar storage), or when secondary views are needed frequently without recomputation.
+*   **Time Complexity:** Dominated by splatting and surface extraction (RLE compression). Performance scales with particle count and tile size [S1].
+*   **Memory Complexity:** $O(W_{tile} \times H_{tile} \times L)$ for the voxel grid, where $L=16384$. For a $1024 \times 512$ tile, this is ~1024 MB. Surface storage is $O(W \times H \times S)$, where $S=7$ spans [S1].
+*   **Measured Performance:** On an NVIDIA GTX Titan, voxelization and translucency rendering of 7.1 million particles took 187 ms [S1]. This is ~10x faster than [FAW10] (2514 ms for 8.7M particles) and ~2x faster than [RTW13] [S1].
+*   **Strengths:** High resolution (up to 3840×2160×16000), no preprocessing, view-adaptive memory usage, supports complex illumination (refraction, reflection) [S1].
+*   **Limitations:** Limited to homogeneous media (only entry/exit points detected, no scalar attributes per layer) [S1]. Refraction rendering is expensive. View-adaptivity makes non-view-dependent tasks (e.g., shadow mapping) require a second voxelization [S1].
+*   **When to Use:** Real-time rendering of particle-based homogeneous media (SPH fluids) where high resolution and visual quality are prioritized over heterogeneous attribute storage [S1].
+*   **When Not to Use:** Heterogeneous media requiring per-layer scalar attributes, or scenes requiring frequent non-view-dependent volumetric queries [S1].
 
 ## Background
-View-Adaptive Voxelization was introduced in the paper "Memory-Efficient On-The-Fly Voxelization of Particle Data" [S1]. It addresses the limitations of previous methods like [FAW10] (which requires preprocessing) and [RTW13] (which requires significant preprocessing time) by providing a direct, real-time voxelization technique for particle data [S1]. It is particularly suited for interactive preview rendering of SPH simulations [S1].
+View-Adaptive Voxelization was introduced in "Memory-Efficient On-The-Fly Voxelization of Particle Data" (2015) [S1]. It addresses the limitations of previous methods like [FAW10] (which requires preprocessing) and [RTW13] (which requires extensive preprocessing and targets out-of-core rendering) by providing a real-time, on-the-fly solution [S1]. It is particularly suited for SPH fluid simulation visualization [S1].
 
 ## Sources
 [S1] Memory-Efficient On-The-Fly Voxelization of Particle Data, https://doi.org/10.2312/pgv.20151150, fetched 2026-10-26

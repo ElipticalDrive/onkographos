@@ -3,227 +3,188 @@
 Also called: DirectX9 volume ray-casting, GPU-based volume ray-casting, Pixel Shader 2.0 volume ray-casting, Stream model for volume ray-casting on DirectX9-level graphics hardware, Stream programming model for volume ray-casting
 
 ## Overview
-This method implements direct volume ray casting on DirectX 9-level programmable graphics hardware (specifically Pixel Shader 2.0) by decoupling the ray traversal into multiple rendering passes [S1, unofficial]. It solves the problem of efficiently applying acceleration techniques—specifically early ray termination and empty-space skipping—on hardware where fragment shaders cannot conditionally discard execution [S1, unofficial]. Unlike single-pass approaches that process all samples regardless of opacity, this method splits the ray into segments of $M$ steps, using intermediate buffers to track ray state and z-buffer tests to skip redundant computations for rays that have already saturated opacity or exited the volume [S1, unofficial].
+This method implements direct volume ray casting on DirectX 9-level graphics hardware (specifically Pixel Shader 2.0) by decomposing the ray traversal into multiple rendering passes. It solves the limitation of early fragment shaders, which could not conditionally discard execution, by using an intermediate "stopping criterion" pass to update the depth buffer and skip terminated rays in subsequent segments. It sets itself apart from single-pass ray casting by decoupling the integration steps into segments of $M$ steps, allowing for efficient early ray termination and empty-space skipping via hardware depth testing [S1, unofficial].
 
 ## How it works
-The algorithm uses a stream programming model where ray data is stored in 2D textures and processed in sequential passes. The core innovation is the use of an intermediate "stopping criterion" pass to manage early termination, as early z-testing is disabled when the fragment shader replaces the depth value [S1, unofficial].
+The algorithm relies on the **state persistence** principle of the parent family [6224-two-pass-and-multi-pass-techniques.md]. It uses three primary 2D textures to store intermediate state across passes: `TMP`, `DIR`, and `RES`.
 
 ### Inputs and Outputs
-*   **Input:** A 3D volume texture (scalar field), a 3D gradient texture (optional, for shading), and camera parameters (view matrix, projection matrix).
-*   **Output:** A 2D color buffer containing the final rendered image.
+*   **Input:** A 3D volume texture (scalar field), a 3D gradient texture (optional, for shading), a view matrix, and a projection matrix.
+*   **Output:** A 2D color buffer containing the final composited image.
 
 ### Data Structures
-The method relies on three primary 2D render targets, all with the same resolution as the viewport:
-
-1.  **TMP (Texture Memory Position):**
-    *   **Format:** 2D RGB texture (8-bit or floating-point, source specifies RGB).
-    *   **Content:** Stores the 3D texture coordinates of the entry point (first intersection with the volume front face) for each pixel.
-    *   **Resolution:** Viewport width $\times$ height.
-
-2.  **DIR (Direction):**
-    *   **Format:** 2D RGBA floating-point texture.
-    *   **Content:**
-        *   RGB components: Normalized ray direction vector in local texture coordinates.
-        *   A component: Length of the non-normalized direction vector (total ray length through the volume).
-    *   **Resolution:** Viewport width $\times$ height.
-
-3.  **RES (Result):**
-    *   **Format:** 2D texture render target (typically RGBA floating-point or fixed-point).
-    *   **Content:** Accumulates the ray-casting result (color and opacity) across main passes.
-    *   **Resolution:** Viewport width $\times$ height.
+1.  **TMP:** A 2D RGB texture, same resolution as the viewport. Stores the 3D texture coordinates of the entry point (first intersection with the volume front face).
+2.  **DIR:** A 2D RGBA floating-point texture.
+    *   RGB components: Normalized ray direction in local texture coordinates.
+    *   A component: Length of the non-normalized direction (ray length within the volume).
+3.  **RES:** A 2D texture render target. Accumulates the ray-casting result (color and opacity) across the main traversal passes.
 
 ### Parameters
-*   **$M$:** Number of steps along the rays performed in each main pass.
-    *   **Typical Value:** 8 [S1, unofficial].
-    *   **Constraint:** Restricted by hardware shader instruction limits (Pixel Shader 2.0) [S1, unofficial].
-*   **$T$:** Constant opacity threshold for early ray termination.
-    *   **Typical Value:** Not explicitly given, but standard threshold (e.g., 0.95 or 1.0) [S1, unofficial].
-*   **$\Delta$:** Step size along the ray in texture coordinates.
-*   **$N$:** Total number of rendering passes.
+*   $M$: Number of marching steps performed per main pass. Typical value: 8 [S1, unofficial].
+*   $T$: Opacity threshold for early ray termination.
+*   $\Delta$: Step size along the ray in texture coordinates.
+*   $N$: Total number of rendering passes (Pass 1, Pass 2, and $N-2$ main/intermediate pairs).
 
-### Numbered Steps
+### Algorithm Steps
 
-1.  **Pass 1: Entry Point Determination**
-    *   Render the **front faces** of the volume bounding box.
-    *   **Depth Test:** Set to `GREATER`.
-    *   **Vertex Shader:** Issue 3D texture coordinates of each vertex as per-vertex color `COL`.
-    *   **Fragment Shader:** Pass `COL` through to the output.
-    *   **Target:** Write to **TMP**.
-    *   **Result:** `TMP[x][y]` contains the 3D texture coordinates of the first intersection between the ray of sight and the volume.
+**Pass 1: Entry Point Determination**
+1.  Set depth test to `GREATER`.
+2.  Render the front faces of the volume bounding box.
+3.  Issue 3D texture coordinates of each vertex as per-vertex color `COL`.
+4.  Render to texture `TMP`.
+5.  Result: `TMP[x][y]` contains the 3D texture coordinates of the first intersection point between the ray of sight and the volume.
 
-2.  **Pass 2: Ray Direction Determination**
-    *   Render the **back faces** of the volume bounding box.
-    *   **Depth Test:** Set to `GREATER`.
-    *   **Vertex Shader:** Issue 3D texture coordinates of each vertex as per-vertex color `COL`.
-    *   **Fragment Shader:**
-        1.  Fetch `entry = TMP[x][y]`.
-        2.  Compute normalized direction: `dir = normalize(COL - entry)`.
-        3.  Compute length: `len = length(COL - entry)`.
-        4.  Output RGB = `dir`, Alpha = `len`.
-    *   **Target:** Write to **DIR**.
-    *   **Result:** `DIR[x][y]` holds the normalized ray direction and the total ray length.
+**Pass 2: Ray Direction Determination**
+1.  Set depth test to `GREATER`.
+2.  Render the back faces of the volume bounding box.
+3.  For each fragment, fetch the entry point from `TMP` (let's call it $P_{entry}$).
+4.  Let $P_{exit}$ be the current vertex color (3D texture coordinates of the back face intersection).
+5.  Compute the normalized ray direction: $\vec{d} = \text{normalize}(P_{exit} - P_{entry})$.
+6.  Compute the ray length: $L = \| P_{exit} - P_{entry} \|$.
+7.  Render to texture `DIR`:
+    *   RGB: $\vec{d}$
+    *   A: $L$
 
-3.  **Main Passes 3 to N: Ray Traversal**
-    *   For each pass $k$ from 3 to $N$:
-    *   Render the **front faces** of the volume bounding box.
-    *   **Vertex Attributes:**
-        *   Texture Coordinate 1: Normalized device coordinates $(x, y)$ of the vertex (used to index `DIR` and `RES`).
-        *   Per-vertex Color `C`: 3D texture coordinates of the vertex (entry point).
-    *   **Constants:**
-        *   `C1`: Step size $\Delta$.
-        *   `C2`: Offset $\Delta \cdot M \cdot (k - 3)$. This advances the starting parameter $t$ for each subsequent pass.
-    *   **Fragment Shader:**
-        1.  Lookup `dir_vec = DIR[x][y]`.
-        2.  Lookup `accum = RES[x][y]`.
-        3.  Initialize parametric ray equation: $r(t) = C + t \cdot dir\_vec$, where $t = C2$.
-        4.  Loop $i$ from 0 to $M-1$:
-            *   Increment $t \leftarrow t + \Delta$.
-            *   Compute sample position: $p = C + t \cdot dir\_vec$.
-            *   Fetch volume value: $v = \text{Texture3D}(p)$.
-            *   Compute contribution (color $c$, opacity $\alpha$) based on transfer function.
-            *   Composite into `accum` using front-to-back blending.
-            *   If $\alpha_{accum} > T$ (threshold), break loop and set `accum.opacity = 1`.
-        5.  Write `accum` to `RES[x][y]`.
+**Main Passes 3 to N: Ray Traversal**
+These passes perform the actual volume integration in segments of $M$ steps.
+1.  Set depth test to `GREATER`.
+2.  Render the front faces of the volume bounding box.
+3.  Vertex attributes:
+    *   Texture Coordinate 1: Normalized device coordinates $(x, y)$ of the vertex. Used to index `DIR` and `RES`.
+    *   Per-vertex color $C$: 3D texture coordinates of the entry point (same as Pass 1).
+4.  Constants:
+    *   $C_1 = \Delta$ (step size).
+    *   $C_2 = \Delta \cdot M \cdot (i - 2)$ where $i$ is the current pass index ($3 \le i \le N$). This represents the parametric offset $t$ for the start of the current segment.
+5.  Fragment Shader Logic:
+    *   Lookup ray direction and length: $\vec{d} = \text{DIR}[x][y].\text{rgb}$, $L = \text{DIR}[x][y].a$.
+    *   Initialize parametric ray equation: $r(t) = C + t \cdot \vec{d}$.
+    *   Set initial $t = C_2$.
+    *   Loop $k$ from 0 to $M-1$:
+        *   Increment $t \leftarrow t + C_1$.
+        *   If $t > L$, break loop (ray has exited volume).
+        *   Fetch volume value $v = \text{VolumeTexture}(r(t))$.
+        *   Compute color $c$ and opacity $\alpha$ using transfer function.
+        *   Composite with accumulated result from `RES[x][y]`.
+        *   Write updated color and opacity back to `RES[x][y]`.
+    *   **Early Termination Check:** If the accumulated opacity in `RES[x][y]` exceeds threshold $T$ (or if the ray has left the volume, indicated by $t > L$ in the previous iteration), write opacity 1 to `RES[x][y]` to signal termination for subsequent passes.
 
-4.  **Intermediate Passes 3 to N: Stopping Criterion**
-    *   *Note: This pass is required because early z-test is disabled when the shader replaces the z-value [S1, unofficial].*
-    *   Render the **front faces** of the volume bounding box.
-    *   **Fragment Shader:**
-        1.  Lookup `accum = RES[x][y]`.
-        2.  Conditional Check:
-            *   IF `accum.opacity > T`:
-                *   Set Depth Buffer ($z$) to `MAX`.
-                *   Output Color = 0, Output Opacity = 0.
-            *   ELSE:
-                *   Set Depth Buffer ($z$) to 0 (or current depth).
-                *   Output Color = 0, Output Opacity = 0.
-    *   **Effect:** If the ray has terminated (opacity saturated), the depth is set to MAX, causing subsequent passes to skip this pixel via the `GREATER` depth test. If not terminated, the depth is reset to allow further processing.
+**Intermediate Passes 3 to N: Stopping Criterion**
+Because the early Z-test is disabled when the fragment shader replaces the Z-value, an explicit pass is required to skip terminated rays.
+1.  Set depth test to `GREATER`.
+2.  Render the front faces of the volume bounding box.
+3.  Fragment Shader Logic:
+    *   Fetch current opacity from `RES[x][y]`.
+    *   Conditional statement:
+        ```python
+        if RES[x][y].opacity > T:
+            z_buffer = MAX
+            output_color = 0
+            output_opacity = 0
+        else:
+            z_buffer = 0
+            output_color = 0
+            output_opacity = 0
+        ```
+    *   If the ray is terminated, the Z-buffer is set to MAX, causing the depth test to fail for all subsequent passes for this pixel, effectively skipping the ray. Otherwise, the shader outputs zero, having no effect on the color buffer but allowing the ray to continue in the next main pass.
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Initialization
-viewport_width = 512
-viewport_height = 512
-M = 8  # Steps per pass
-Delta = 1.0 / max_ray_length  # Normalized step size
-Threshold = 0.95  # Opacity threshold for early termination
-
-# Buffers
-TMP = Texture2D(width=viewport_width, height=viewport_height, format=RGB)
-DIR = Texture2D(width=viewport_width, height=viewport_height, format=RGBA_FLOAT)
-RES = Texture2D(width=viewport_width, height=viewport_height, format=RGBA)
-
 # Pass 1: Entry Point
-SetDepthTest(GREATER)
-RenderFrontFaces(
-    VertexShader: output_color = vertex_3d_texture_coords
-    FragmentShader: output = input_color
-    Target: TMP
-)
-
-# Pass 2: Ray Direction
-SetDepthTest(GREATER)
-RenderBackFaces(
-    VertexShader: output_color = vertex_3d_texture_coords
-    FragmentShader:
-        entry = TMP[gl_FragCoord.xy]
-        dir_vec = normalize(output_color - entry)
-        ray_len = length(output_color - entry)
-        output = vec4(dir_vec, ray_len)
-    Target: DIR
-)
-
-# Main Passes and Intermediate Stopping Passes
-for k in range(3, N + 1):
-    # Main Traversal Pass
-    SetDepthTest(GREATER)
-    RenderFrontFaces(
-        VertexShader:
-            uv = gl_Vertex.xy  # Normalized device coords
-            entry = gl_Vertex.color  # 3D texture coords
-            output_uv = uv
-            output_entry = entry
-        
-        FragmentShader:
-            dir_vec = DIR[uv].rgb
-            ray_len = DIR[uv].a
-            accum = RES[uv]
-            
-            # Calculate starting t for this pass
-            t = Delta * M * (k - 3)
-            
-            for i in range(M):
-                t += Delta
-                pos = entry + t * dir_vec
-                val = Sample3DTexture(pos)
-                
-                # Simple volume rendering step
-                c, a = TransferFunction(val)
-                accum = accum + c * (1.0 - accum.a)
-                accum.a = min(accum.a + a, 1.0)
-                
-                if accum.a > Threshold:
-                    break
-            
-            RES[uv] = accum
-
-    # Intermediate Stopping Criterion Pass
-    # This pass must happen after the main pass of the same iteration
-    # to update the Z-buffer for the NEXT main pass.
-    SetDepthTest(GREATER)
-    RenderFrontFaces(
-        VertexShader:
-            uv = gl_Vertex.xy
-            output_uv = uv
-        
-        FragmentShader:
-            accum = RES[uv]
-            if accum.a > Threshold:
-                gl_FragDepth = 1.0  # MAX depth
-                gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0)
-            else:
-                gl_FragDepth = 0.0  # Reset depth to allow future passes
-                gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0)
+def pass_1_entry_point():
+    set_depth_test(GREATER)
+    render_front_faces(
+        vertex_color = vertex_3d_texture_coords,
+        render_target = TMP
     )
 
-# Final Output
-Copy RES to Screen Buffer
+# Pass 2: Ray Direction
+def pass_2_ray_direction():
+    set_depth_test(GREATER)
+    render_back_faces(
+        fragment_shader = lambda frag:
+            entry_point = TMP[frag.ndc].rgb,
+            exit_point = frag.vertex_color,
+            direction = normalize(exit_point - entry_point),
+            length = length(exit_point - entry_point),
+            render_target = DIR with rgb=direction, a=length
+    )
+
+# Main Passes 3 to N: Ray Traversal
+def pass_n_ray_traversal(pass_index):
+    set_depth_test(GREATER)
+    step_size = DELTA
+    segment_offset = DELTA * M * (pass_index - 2)
+    
+    render_front_faces(
+        vertex_color = TMP[frag.ndc].rgb, # Re-fetch entry point or pass as constant
+        texture_coord_1 = frag.ndc,
+        constants = {
+            'C1': step_size,
+            'C2': segment_offset
+        },
+        render_target = RES,
+        fragment_shader = lambda frag:
+            dir_vec = DIR[frag.ndc].rgb,
+            ray_len = DIR[frag.ndc].a,
+            entry_pt = frag.vertex_color,
+            t = frag.constants['C2'],
+            accumulated_color = RES[frag.ndc].rgb,
+            accumulated_alpha = RES[frag.ndc].a,
+            
+            for k in range(M):
+                t += frag.constants['C1']
+                if t > ray_len:
+                    break
+                pos = entry_pt + t * dir_vec
+                val = volume_texture_sample(pos)
+                color, alpha = transfer_function(val)
+                accumulated_color, accumulated_alpha = composite(accumulated_color, accumulated_alpha, color, alpha)
+            
+            # Check if terminated or exited
+            if accumulated_alpha > THRESHOLD or t > ray_len:
+                RES[frag.ndc].a = 1.0
+            else:
+                RES[frag.ndc].rgb = accumulated_color
+                RES[frag.ndc].a = accumulated_alpha
+    )
+
+# Intermediate Passes 3 to N: Stopping Criterion
+def pass_n_stopping_criterion(pass_index):
+    set_depth_test(GREATER)
+    render_front_faces(
+        fragment_shader = lambda frag:
+            current_alpha = RES[frag.ndc].a,
+            if current_alpha > THRESHOLD:
+                z_buffer = MAX
+                output = (0, 0, 0, 0)
+            else:
+                z_buffer = 0
+                output = (0, 0, 0, 0)
+    )
 ```
 
 ### Edge Cases and Pitfalls
-*   **Shader Discard Limitation:** Fragment shaders on Pixel Shader 2.0 hardware cannot discard execution conditionally. Therefore, all $M$ steps are computed even if the ray terminates early in the segment, leading to wasted arithmetic operations [S1, unofficial].
-*   **Early Z-Test Disabling:** The early z-test is disabled whenever the fragment shader replaces the depth value. This necessitates the separate intermediate stopping criterion pass to manually update the Z-buffer, adding overhead [S1, unofficial].
-*   **Choice of M:**
-    *   If $M$ is small, many fragments outside the volume or void samples are processed unnecessarily (up to $M-1$ void samples per ray segment) [S1, unofficial].
-    *   If $M$ is large, all rays compute the same number of samples even if shorter, due to the lack of shader discard [S1, unofficial].
-    *   The optimal $M$ balances the overhead of rendering passes against the waste of redundant samples. The source restricts $M$ to 8 due to hardware limitations [S1, unofficial].
+*   **Shader Discard Limitation:** Pixel Shader 2.0 does not support conditional execution of expressions or discarding fragments. Therefore, gradient reconstruction and shading computations are always performed even if no surface is hit, unless optimized by the stopping criterion pass [S1, unofficial].
+*   **Early Z-Test Disablement:** The hardware early Z-test is disabled as long as the fragment's Z-value is replaced in the shader program. This necessitates the additional intermediate pass to check the stopping criterion [S1, unofficial].
+*   **Step Size $M$:** If $M$ is small, many fragments outside the volume or in void samples may be processed unnecessarily (up to $M-1$ void samples per ray). If $M$ is large, all rays compute the same number of samples even if shorter, due to the lack of shader discard. The optimal $M$ balances the number of passes against the overhead of redundant samples. In the reference implementation, $M$ was restricted to 8 due to hardware shader limitations [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(P \cdot M \cdot S)$, where $P$ is the number of pixels, $M$ is steps per pass, and $S$ is the number of passes ($S \approx K/M$, where $K$ is total steps for the longest ray). The method reduces the number of texture fetches and arithmetic operations for opaque structures or empty space compared to unaccelerated ray casting [S1, unofficial].
-*   **Memory Complexity:** Requires three 2D textures (TMP, DIR, RES) of viewport resolution. For a 512x512 viewport, this is manageable on DirectX 9 hardware [S1, unofficial].
-*   **Measured Performance (ATI 9700, 512x512 viewport):**
-    *   MRI Head (256^3):
-        *   Slice-Based Volume Rendering (SBVR): 7.1 fps
-        *   Ray Casting (RC, no acceleration): 4.8 fps
-        *   RC with Early Termination (RC-$\alpha$): 14.4 fps
-        *   RC with Early Termination + Empty-Space Skipping (RC-$\beta$): 23.4 fps [S1, unofficial]
-    *   Philips Aneurism: RC-$\beta$ 19.6 fps.
-    *   Philips Foot: RC-$\beta$ 17.7 fps.
-    *   GE Engine: RC-$\beta$ 13.6 fps [S1, unofficial].
-*   **Strengths:**
-    *   Provides equal sampling density along rays of sight [S1, unofficial].
-    *   Significantly faster than previous texture-based approaches for real-world data sets with opaque structures or empty regions [S1, unofficial].
-    *   Minimizes gradient reconstruction and shading operations for iso-surfaces (computed once every $M$ steps) [S1, unofficial].
-*   **Limitations:**
-    *   Requires multiple passes and texture lookups, introducing overhead [S1, unofficial].
-    *   Inefficient for highly transparent and dense data where early termination rarely triggers [S1, unofficial].
-    *   Fixed $M$ leads to redundant computations for short rays [S1, unofficial].
+*   **Time Complexity:** The number of passes required is $\lceil K/M \rceil$, where $K$ is the maximum number of steps for the longest ray through the volume. Each pass involves rendering front faces and texture lookups.
+*   **Memory Complexity:** Requires three 2D textures (`TMP`, `DIR`, `RES`) of viewport resolution.
+*   **Measured Performance:** On an ATI 9700 GPU with a 512x512 viewport and a 256^3 MRI Head dataset:
+    *   Slice-Based Volume Rendering (SBVR): 7.1 fps [S1, unofficial].
+    *   Ray Casting (RC) without acceleration: 4.8 fps [S1, unofficial].
+    *   Ray Casting with Early Termination (RC-$\alpha$): 14.4 fps [S1, unofficial].
+    *   Ray Casting with Early Termination and Empty-Space Skipping (RC-$\beta$): 23.4 fps [S1, unofficial].
+    *   Other datasets (Philips aneurism, GE engine, Philips foot) showed similar improvements, with RC-$\beta$ achieving up to 19.6 fps for the aneurism dataset [S1, unofficial].
+*   **Strengths:** Reduces fragment operations for opaque structures or empty space. Provides equal sampling density along rays compared to object-order projection. Significantly faster than previous texture-based approaches for many real-world datasets [S1, unofficial].
+*   **Limitations:** Requires multiple passes and texture lookups. Overhead from rendering front faces and accessing textures in each pass. The fixed step size $M$ leads to inefficiency for rays shorter than the maximum length [S1, unofficial].
 
 ## Background
-The method was described in a paper by Meissner, Hoffmann, and Strasser (2003), titled "Acceleration Techniques for GPU-based Volume Rendering" [S1, unofficial]. It was implemented using the DirectX 9 SDK (Microsoft, 2002) and targets Pixel Shader 2.0 hardware [S1, unofficial]. The work builds upon prior concepts such as object-order projection (Cullip and Neumann, 1993), direct volume rendering (Levoy, 1990), and ray tracing on programmable hardware (Purcell et al., 2002) [S1, unofficial]. It addresses the limitations of earlier GPU volume rendering techniques by effectively integrating acceleration schemes like early ray termination and empty-space skipping into the stream programming model of DirectX 9 hardware [S1, unofficial].
+The method was described in a paper detailing a framework using the DirectX 9 SDK (Microsoft, 2002) and programmable via the Pixel Shader 2.0 API [S1, unofficial]. It builds upon prior work such as Cullip and Neumann (1993), Levoy (1990), and Purcell et al. (2002) [S1, unofficial]. The approach was designed to leverage commodity graphics hardware for volume rendering, specifically addressing the limitations of early programmable shaders by using a stream programming model [S1, unofficial].
 
 ## Sources
 [S1] Acceleration Techniques for GPU-based Volume Rendering, https://www.cs.cit.tum.de/fileadmin/w00cfj/cg/Research/Publications/2003/Acceleration_Techniques_for_GPU-based_Volume_Rendering/vis03-rc.pdf, fetched 2026-10-26 (unofficial)

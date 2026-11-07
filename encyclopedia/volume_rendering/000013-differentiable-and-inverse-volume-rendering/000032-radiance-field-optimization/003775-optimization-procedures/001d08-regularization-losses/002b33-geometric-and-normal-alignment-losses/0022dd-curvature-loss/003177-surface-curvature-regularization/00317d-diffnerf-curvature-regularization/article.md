@@ -7,27 +7,27 @@ DiffNeRF Curvature Regularization is a technique for regularizing neural implici
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A neural network $F$ representing an implicit signed distance function (SDF), where the surface $S$ is defined as $\{x \in \mathbb{R}^3 \mid F(x) = 0\}$. Sample points $x$ drawn from the surface $S$ and the volume $\mathbb{R}^3$.
-*   **Output:** A curvature regularization loss term $L_{curv}$ added to the total training loss.
+*   **Input:** A neural network $F$ representing an implicit signed distance function (SDF), where the surface $S$ is defined as $\{x \in \mathbb{R}^3 \mid F(x) = 0\}$ [S1, unofficial]. Sample points $x$ are drawn from the surface $S$ and the volume $\mathbb{R}^3$ [S1, unofficial].
+*   **Output:** A curvature regularization loss term $L_{curv}$ added to the total training loss [S1, unofficial].
 
 **Data Structures:**
-*   **Implicit Function $F$:** A neural network taking 3D coordinates $x$ and outputting a scalar value $F(x)$.
-*   **Gradient $\nabla F$:** A 3D vector field computed via automatic differentiation of $F$ with respect to $x$.
-*   **Hessian $H(F)$:** A $3 \times 3$ matrix of second-order partial derivatives of $F$ with respect to $x$.
-*   **Adjoint Hessian $H^*(F)$:** The transpose of the Hessian matrix $H(F)^T$. For real-valued functions with continuous second derivatives, $H(F)$ is symmetric, so $H^*(F) = H(F)$.
+*   **Implicit Function $F$:** A neural network taking 3D coordinates $x$ and outputting a scalar value $F(x)$ [S1, unofficial].
+*   **Gradient $\nabla F$:** A 3D vector field computed via automatic differentiation of $F$ with respect to $x$ [S1, unofficial].
+*   **Hessian $H(F)$:** A $3 \times 3$ matrix of second-order partial derivatives of $F$ with respect to $x$ [S1, unofficial].
+*   **Adjoint Hessian $H^*(F)$:** The transpose of the Hessian matrix $H(F)^T$ [S1, unofficial]. For real-valued functions with continuous second derivatives, $H(F)$ is symmetric, so $H^*(F) = H(F)$ [G].
 
 **Parameters:**
 *   $\lambda_{curv}$: Regularization weight. Typical values: 0.0001, 0.0005, 0.001 [S1, unofficial].
 *   $\kappa_{curv}$: Clipping value for curvature magnitude. Typical values: 1, 5, 10 [S1, unofficial].
 
 **Steps:**
-1.  **Compute Differential Quantities:** For each sample point $x$, compute the gradient $\nabla F(x)$ and the Hessian $H(F)(x)$ using automatic differentiation.
+1.  **Compute Differential Quantities:** For each sample point $x$, compute the gradient $\nabla F(x)$ and the Hessian $H(F)(x)$ using automatic differentiation [S1, unofficial].
 2.  **Calculate Gaussian Curvature ($\gamma_{gauss}$):**
     $$ \gamma_{gauss} = \frac{\nabla F \times H^*(F) \times \nabla F^t}{\|\nabla F\|^4} $$
     where $\times$ denotes matrix/vector multiplication operations as defined in differential geometry for implicit surfaces [S1, unofficial]. This is equivalent to the product of principal curvatures $\gamma_{min} \gamma_{max}$ [S1, unofficial].
 3.  **Calculate Mean Curvature ($\gamma_{mean}$):**
     $$ \gamma_{mean} = \frac{\gamma_{min} + \gamma_{max}}{2} $$
-    Note: While $\gamma_{mean}$ is defined via principal curvatures, the source notes that $\gamma_{gauss}$ has a direct analytical expression via the gradient and Hessian (Eq. 14/15 in source). Implementation of $\gamma_{mean}$ directly from $\nabla F$ and $H(F)$ without eigen-decomposition is not explicitly detailed in the provided text, but $\gamma_{gauss}$ is explicitly given [S1, unofficial].
+    Note: While $\gamma_{mean}$ is defined via principal curvatures, the source notes that $\gamma_{gauss}$ has a direct analytical expression via the gradient and Hessian [S1, unofficial]. Implementation of $\gamma_{mean}$ directly from $\nabla F$ and $H(F)$ without eigen-decomposition is not explicitly detailed in the provided text, but $\gamma_{gauss}$ is explicitly given [S1, unofficial].
 4.  **Compute Curvature Loss ($L_{curv}$):**
     $$ L_{curv}(\kappa_{curv}) = \mathbb{E}_{x \in S} [\min(|\gamma(x)|, \kappa_{curv})] $$
     where $\gamma$ is either $\gamma_{gauss}$ or $\gamma_{mean}$ [S1, unofficial].
@@ -40,139 +40,71 @@ DiffNeRF Curvature Regularization is a technique for regularizing neural implici
 
 ```python
 def compute_curvature_regularization_loss(F, samples, lambda_curv, kappa_curv, curvature_type='gauss'):
-    """
-    Computes the curvature regularization loss for an implicit surface F.
-    
-    Args:
-        F: Neural network function returning scalar SDF value.
-        samples: Tensor of shape (N, 3) containing sample points x on the surface S.
-        lambda_curv: Weight for the curvature loss.
-        kappa_curv: Clipping threshold for curvature magnitude.
-        curvature_type: 'gauss' for Gaussian curvature, 'mean' for Mean curvature.
-        
-    Returns:
-        curvature_loss: Scalar tensor representing the regularization loss.
-    """
-    # 1. Compute Gradient and Hessian using automatic differentiation
-    # x requires grad to compute gradients
+    # 1. Compute Gradient and Hessian via automatic differentiation
     x = samples.clone().detach().requires_grad_(True)
-    
-    # Forward pass to get F(x)
     f_val = F(x)
     
-    # Compute Gradient (3,)
-    grad_f = torch.autograd.grad(
-        f_val.sum(), x, create_graph=True, only_inputs=True
-    )[0]
+    # Gradient: shape (N, 3)
+    grad_f = compute_gradient(f_val, x)
     
-    # Compute Hessian (3, 3)
-    # Hessian is computed by taking gradient of each component of grad_f
-    hess_f = []
-    for i in range(3):
-        grad_i = grad_f[:, i]
-        hess_row = torch.autograd.grad(
-            grad_i.sum(), x, create_graph=True, only_inputs=True
-        )[0]
-        hess_f.append(hess_row)
-    hess_f = torch.stack(hess_f, dim=1) # Shape (N, 3, 3)
+    # Hessian: shape (N, 3, 3)
+    hess_f = compute_hessian(grad_f, x)
     
     # 2. Calculate Curvature
     if curvature_type == 'gauss':
-        # gamma_gauss = (grad_f x H* x grad_f^T) / ||grad_f||^4
-        # H* is adjoint (transpose) of Hessian. For real functions, H is symmetric.
-        # Vector-matrix-vector multiplication: grad_f @ H * grad_f^T
-        # grad_f shape: (N, 3), H shape: (N, 3, 3)
-        
-        # Compute numerator: grad_f @ H * grad_f^T
-        # Result shape: (N, 1) or (N,) depending on implementation
-        # Using einsum for clarity: sum_j sum_k grad_i * H_ijk * grad_k
-        numerator = torch.einsum('ni,nij,nk->nk', grad_f, hess_f, grad_f)
-        numerator = numerator.squeeze(-1) # Shape (N,)
-        
-        # Compute denominator: ||grad_f||^4
-        grad_norm_sq = torch.sum(grad_f**2, dim=1) # Shape (N,)
-        denominator = grad_norm_sq**2 # Shape (N,)
-        
-        # Avoid division by zero
-        denominator = torch.clamp(denominator, min=1e-8)
-        
+        # gamma_gauss = (grad_f @ H * grad_f^T) / ||grad_f||^4
+        # Numerator: quadratic form grad_f^T H grad_f
+        numerator = einsum('ni,nij,nj->n', grad_f, hess_f, grad_f)
+        # Denominator: ||grad_f||^4
+        grad_norm_sq = sum(grad_f**2, dim=1)
+        denominator = grad_norm_sq**2
+        # Guard against division by zero
+        denominator = clamp(denominator, min=1e-8)
         gamma = numerator / denominator
-        
     elif curvature_type == 'mean':
-        # Mean curvature is (gamma_min + gamma_max) / 2
-        # Direct formula from gradient and Hessian for mean curvature is not explicitly 
-        # provided in the source text as a simple closed form like Gaussian.
-        # The source defines mean curvature via principal curvatures.
-        # Computing principal curvatures requires eigen-decomposition of the shape operator.
-        # Shape operator S = - (I - n n^T) H (I - n n^T) / ||grad_f||
-        # This is complex and not explicitly detailed in the source notes.
-        # [G] Assuming the source implies using the Gaussian curvature formula 
-        # or that Mean Curvature is computed via eigen-decomposition of the Hessian 
-        # projected onto the tangent plane. Since the source only gives explicit 
-        # formula for Gaussian, we note this limitation.
-        # However, standard differential geometry defines Mean Curvature H_mean as:
-        # H_mean = div(n) / 2 where n = grad_f / ||grad_f||
-        # This requires second derivatives again, which we have in H.
-        # A common implementation for implicit surfaces is:
-        # H_mean = ( (1 - n_i n_i) H_ii ) / (2 ||grad_f||)  (sum over i, no sum over n)
-        # Let's implement the standard divergence of normal form.
-        
-        grad_norm = torch.sqrt(torch.clamp(grad_norm_sq, min=1e-8))
-        n = grad_f / grad_norm.unsqueeze(1) # Normalized gradient (N, 3)
-        
-        # Divergence of normal: sum_i d(n_i)/dx_i
-        # n_i = grad_f_i / ||grad_f||
-        # d(n_i)/dx_i involves H and grad_f.
-        # Formula: H_mean = ( (I - n n^T) : H ) / (2 ||grad_f||)
-        # Where : is double contraction.
-        
-        # Project Hessian onto tangent plane: P = I - n n^T
-        # P_ij = delta_ij - n_i n_j
-        # Trace(P H) = sum_ij (delta_ij - n_i n_j) H_ij = sum_i H_ii - sum_ij n_i n_j H_ij
-        
-        trace_H = torch.sum(hess_f, dim=2) # Sum over j for each i: H_ii (N,)
-        n_outer_n = torch.einsum('ni,nj->nij', n, n) # (N, 3, 3)
-        n_H_n = torch.einsum('nij,nij->n', n_outer_n, hess_f) # (N,)
-        
+        # Mean curvature via divergence of normalized gradient
+        grad_norm = sqrt(clamp(grad_norm_sq, min=1e-8))
+        n = grad_f / grad_norm.unsqueeze(1)
+        # Trace of Hessian projected onto tangent plane
+        trace_H = sum(hess_f, dim=2)
+        n_outer_n = einsum('ni,nj->nij', n, n)
+        n_H_n = einsum('nij,nij->n', n_outer_n, hess_f)
         numerator_mean = trace_H - n_H_n
         denominator_mean = 2.0 * grad_norm
-        
         gamma = numerator_mean / denominator_mean
-        
     else:
         raise ValueError("curvature_type must be 'gauss' or 'mean'")
-
+        
     # 3. Compute Loss
-    abs_gamma = torch.abs(gamma)
-    clipped_gamma = torch.min(abs_gamma, torch.tensor(kappa_curv))
-    curvature_loss = torch.mean(clipped_gamma)
-    
+    abs_gamma = abs(gamma)
+    clipped_gamma = min(abs_gamma, kappa_curv)
+    curvature_loss = mean(clipped_gamma)
     return lambda_curv * curvature_loss
 ```
+*Note: `compute_gradient`, `compute_hessian`, `einsum`, `sum`, `clamp`, `sqrt`, `min`, `mean` are standard array/math operations.*
 
 **Edge Cases and Pitfalls:**
 *   **Precision:** Division by $\|\nabla F\|^4$ can lead to numerical instability if the gradient norm is near zero (off-surface points or flat regions). Clamping the denominator is required [G].
-*   **Boundaries:** The method assumes $F$ is differentiable. Discontinuities in the neural network output can break automatic differentiation.
-*   **Degenerate Input:** If the surface is flat, Gaussian curvature is zero. If the surface is a sphere, both curvatures are constant.
+*   **Boundaries:** The method assumes $F$ is differentiable. Discontinuities in the neural network output can break automatic differentiation [G].
+*   **Degenerate Input:** If the surface is flat, Gaussian curvature is zero. If the surface is a sphere, both curvatures are constant [G].
 *   **Over-regularization:** High $\lambda_{curv}$ with low $\kappa_{curv}$ leads to "Cubist-style" surfaces with exaggerated edges and loss of detail [S1, unofficial].
 *   **Hole Filling:** Regularization tends to fill small gaps (e.g., mouth of a bunny model), so clipping is important to preserve small details [S1, unofficial].
 
-## Subtopics
+### Subtopics
+#### Gaussian Curvature Regularization
+Penalizes the product of principal curvatures. Forces surfaces to be developable (flat with sharp edges). Tends to fill holes. Choose when a piece-wise developable surface is desired [S1, unofficial]. Link: [Gaussian Curvature Regularization](6510-surface-curvature-regularization.md#gaussian-curvature-regularization).
 
-### Gaussian Curvature Regularization
-Penalizes the product of principal curvatures. Forces surfaces to be developable (flat with sharp edges). Tends to fill holes. Choose when a piece-wise developable surface is desired [S1, unofficial].
-
-### Mean Curvature Regularization
-Penalizes the average of principal curvatures. Leads to surface smoothing. Choose when smoothing is the primary goal [S1, unofficial].
+#### Mean Curvature Regularization
+Penalizes the average of principal curvatures. Leads to surface smoothing. Choose when smoothing is the primary goal [S1, unofficial]. Link: [Gaussian Curvature Regularization](6510-surface-curvature-regularization.md#mean-curvature-regularization).
 
 ## Operating characteristics
-*   **Time Complexity:** Computing the Hessian via automatic differentiation is $O(N \cdot D^2)$ where $N$ is the number of samples and $D=3$ is the dimensionality. This is more expensive than gradient-only methods but feasible with modern frameworks.
-*   **Memory Complexity:** Requires storing the Hessian matrix for each sample point during the backward pass, increasing memory usage compared to gradient-only regularization.
+*   **Time Complexity:** Computing the Hessian via automatic differentiation is $O(N \cdot D^2)$ where $N$ is the number of samples and $D=3$ is the dimensionality [G]. This is more expensive than gradient-only methods but feasible with modern frameworks [G].
+*   **Memory Complexity:** Requires storing the Hessian matrix for each sample point during the backward pass, increasing memory usage compared to gradient-only regularization [G].
 *   **Measured Performance:** Tested on DTU dataset scenes using VolSDF. Parameters $\lambda_{curv}=0.0005, \kappa_{curv}=5$ produced strong regularization while keeping details [S1, unofficial].
 *   **Strengths:** Direct surface regularization; state-of-the-art novel view synthesis and depth estimation in few-shot neural rendering [S1, unofficial].
 *   **Limitations:** Can fill small details; "Cubist" artifacts with poor parameter tuning; requires differentiable SDF (VolSDF) [S1, unofficial].
-*   **When to use:** When direct geometric regularization of the implicit surface is preferred over depth/normal regularization, and the scene benefits from smooth or developable surfaces.
-*   **When not to use:** When preserving fine small-scale details is critical and clipping cannot mitigate hole-filling; when computational resources are limited due to Hessian computation.
+*   **When to use:** When direct geometric regularization of the implicit surface is preferred over depth/normal regularization, and the scene benefits from smooth or developable surfaces [S1, unofficial].
+*   **When not to use:** When preserving fine small-scale details is critical and clipping cannot mitigate hole-filling; when computational resources are limited due to Hessian computation [S1, unofficial].
 
 ## Background
 *   **Origin:** Proposed in "Regularization of NeRFs using differential geometry" (DiffNeRF) [S1, unofficial].

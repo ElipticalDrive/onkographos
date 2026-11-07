@@ -1,0 +1,258 @@
+--- v001.md
++++ v002.md
+@@ -9,9 +9,9 @@
+ 
+ ### Inputs and Outputs
+-- **Input**: Discrete 3D volume $V$ on a regular grid.
++- **Input**: Discrete 3D volume $V$ on a regular grid [S1].
+ - **Output**: Scalar field $S(x)$ mapping every voxel $x$ to a local scale $t$ [S1].
+ 
+ ### Data Structures
+-- **Scale Space Grid $L$**: 3D array of floats, same dimensions as input volume. $L(x; t)$ stores the diffused intensity at position $x$ and scale $t$.
++- **Scale Space Grid $L$**: 3D array of floats, same dimensions as input volume. $L(x; t)$ stores the diffused intensity at position $x$ and scale $t$ [S1].
+ - **Scale Abstraction $\mathcal{N}$**: List of tuples $(x_i, t_i)$, where $x_i$ is the 3D index of a Laplacian of Gaussian (LoG) extremum and $t_i$ is the detected scale [S1].
+ 
+@@ -40,7 +40,7 @@
+ 
+ **Algorithm**:
+-1. Initialize $L(x; 0) = V(x)$ for all $x$.
++1. Initialize $L(x; 0) = V(x)$ for all $x$ [S1].
+ 2. For $k = 1$ to $n$:
+-    a. Create temporary grid $L_{new}$.
++    a. Create temporary grid $L_{new}$ [G].
+     b. For each voxel $x$:
+         i. Compute sum over neighbors $x_{ijk} \in \mathcal{N}$:
+@@ -50,6 +50,6 @@
+         ii. Update:
+            $$ L_{new}(x) = L(x; t) + \Delta t \sum_{ijk \in \mathcal{N}} \alpha_{ijk} \cdot \text{flux} $$
+-    c. Set $L(x; t + \Delta t) = L_{new}(x)$.
+-    d. Increment $t$ by $\Delta t$.
++    c. Set $L(x; t + \Delta t) = L_{new}(x)$ [S1].
++    d. Increment $t$ by $\Delta t$ [S1].
+ 
+ ### Step 2: Scale Detection
+@@ -62,8 +62,8 @@
+ **Algorithm**:
+ 1. For each scale $t$ in the computed scale-space:
+-    a. Compute the normalized Laplacian $N(x) = t \cdot \nabla^2 L(x; t)$ for all voxels.
+-    b. Identify voxels $x$ that are local maxima in the 3D spatial neighborhood (e.g., 26-connected) at scale $t$.
+-    c. Check if the scale $t$ is a local maximum along the scale axis (compare with $t-\Delta t$ and $t+\Delta t$).
+-    d. If both conditions are met, add $(x, t)$ to the Scale Abstraction $\mathcal{N}$.
++    a. Compute the normalized Laplacian $N(x) = t \cdot \nabla^2 L(x; t)$ for all voxels [S1].
++    b. Identify voxels $x$ that are local maxima in the 3D spatial neighborhood (e.g., 26-connected) at scale $t$ [G].
++    c. Check if the scale $t$ is a local maximum along the scale axis (compare with $t-\Delta t$ and $t+\Delta t$) [G].
++    d. If both conditions are met, add $(x, t)$ to the Scale Abstraction $\mathcal{N}$ [S1].
+ 
+ ### Step 3: Backprojection
+@@ -84,7 +84,7 @@
+ **Visibility Test**:
+ To prevent "bleeding" of scale from large features into small embedded features, modulate the weight $\Theta$ based on visibility [S1].
+-- For a sample point $x$ and a LoG extremum $x_i$, cast a ray from $x_i$ to $x$.
+-- If any voxel along the ray has a scalar value or gradient magnitude below threshold $\tau$, the point $x$ is not "visible" from $x_i$.
+-- If not visible, set the contribution of $x_i$ to $S(x)$ to 0 [S1].
++- For a sample point $x$ and a LoG extremum $x_i$, cast a ray from $x_i$ to $x$ [G].
++- If any voxel along the ray has a scalar value or gradient magnitude below threshold $\tau$, the point $x$ is not "visible" from $x_i$ [S1].
++- If not visible, set the weight $\Theta$ for $x_i$ to 0 [S1].
+ 
+ ### Pseudocode
+@@ -94,70 +94,27 @@
+     """
+     Computes the scale field for a 3D volume.
+-    
+-    Args:
+-        volume: 3D numpy array of input data.
+-        n_iterations: Number of diffusion steps.
+-        delta_t: Scale sampling distance.
+-        lambda_param: Sensitivity parameter for conductivity.
+-        h: Local support for basis function.
+-        tau: Visibility threshold.
+-        use_max_blend: If True, use max operator; else use sum.
+-        
+-    Returns:
+-        scale_field: 3D numpy array of scale values.
+-        scale_abstraction: List of (index, scale) tuples.
+     """
+     import numpy as np
+-    from scipy.ndimage import laplace
+     
+     # Step 1: Scale-space Computation
+-    # Initialize L with the original volume
+-    L = np.copy(volume)
+-    scale_space = [] # List of (t, L_t)
+-    
++    L = np.copy(volume).astype(np.float64)
++    scale_space = []
+     current_t = 0.0
+-    for k in range(n_iterations):
+-        # Compute diffusion step
++    
++    # 6-connected stencil shifts and normalized coefficients alpha_ijk = 1/6
++    shifts = [(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)]
++    
++    for _ in range(n_iterations):
+         L_new = np.copy(L)
+-        
+-        # Compute signed differences for neighbors
+-        # Using simple forward differences for neighbors in 6-connected stencil
+-        # dx, dy, dz shifts
+-        shifts = [
+-            (1, 0, 0), (-1, 0, 0),
+-            (0, 1, 0), (0, -1, 0),
+-            (0, 0, 1), (0, 0, -1)
+-        ]
+-        
+         diff_sum = np.zeros_like(L)
+         
+         for dx, dy, dz in shifts:
+-            # Shifted neighbor
+             neighbor = np.roll(np.roll(np.roll(L, dx, axis=0), dy, axis=1), dz, axis=2)
+-            
+-            # Signed difference
+             diff = neighbor - L
+-            
+-            # Conductivity function
+-            # C(diff) = lambda^2 / (lambda^2 + diff^2) if diff > 0 else 1
+-            cond = np.where(diff > 0, 
+-                            (lambda_param**2) / (lambda_param**2 + diff**2), 
+-                            1.0)
+-            
+-            # Flux
++            cond = np.where(diff > 0, (lambda_param**2) / (lambda_param**2 + diff**2), 1.0)
+             flux = diff * cond
+-            
+-            # Accumulate (assuming alpha_ijk = 1/6 for 6-connected, normalized later or absorbed in delta_t)
+-            # The formula uses alpha_ijk. For 6-connected, sum of alphas should normalize.
+-            # Assuming standard isotropic diffusion where sum of alphas = 1/2 or similar depending on discretization.
+-            # Here we assume the provided formula implies the sum is over neighbors with specific alphas.
+-            # For simplicity in implementation, we sum fluxes and divide by number of neighbors if alpha is uniform.
+             diff_sum += flux
+             
+-        # Update L
+-        # Note: The formula is L(x;t+dt) = L(x;t) + dt * sum(alpha * Phi)
+-        # If alpha is 1/6 for 6 neighbors, then:
+         L_new = L + delta_t * (diff_sum / 6.0)
+-        
+         L = L_new
+         current_t += delta_t
+@@ -168,32 +125,42 @@
+     
+     for t, L_t in scale_space:
+-        # Compute normalized Laplacian: t * Laplacian(L)
+-        # Laplacian approximation using scipy.ndimage.laplace
+-        laplacian_L = laplace(L_t)
++        # Compute normalized Laplacian: t * Laplacian(L) [S1]
++        # Standard 3D Laplacian stencil (6-connected)
++        laplacian_L = np.zeros_like(L_t)
++        for dx, dy, dz in shifts:
++            neighbor = np.roll(np.roll(np.roll(L_t, dx, axis=0), dy, axis=1), dz, axis=2)
++            laplacian_L += neighbor - L_t
+         normalized_laplacian = t * laplacian_L
+         
+-        # Find local maxima in space and scale
+-        # This is a simplified detection; robust implementation requires checking 3D neighborhood and scale axis
+-        # For pseudocode, we assume a helper function finds 3D local maxima
+-        maxima_indices = find_3d_local_maxima(normalized_laplacian)
+-        
+-        for idx in maxima_indices:
+-            # Check scale axis maximum
+-            # Compare with previous and next scale steps
+-            # This requires accessing scale_space neighbors
+-            # Omitted for brevity, assuming find_3d_local_maxima handles scale axis if passed scale_space
+-            scale_abstraction.append((idx, t))
+-            
++        # Find local maxima in space [G]
++        maxima_mask = np.zeros_like(normalized_laplacian, dtype=bool)
++        for dx, dy, dz in shifts:
++            neighbor = np.roll(np.roll(np.roll(normalized_laplacian, dx, axis=0), dy, axis=1), dz, axis=2)
++            maxima_mask |= (neighbor < normalized_laplacian)
++        maxima_mask &= (normalized_laplacian > 0) # Blobs correspond to positive Laplacian maxima [G]
++        
++        # Check scale axis maximum [G]
++        for idx in np.argwhere(maxima_mask):
++            idx = tuple(idx)
++            is_scale_max = True
++            if t > 0:
++                prev_t, prev_L = scale_space[-2] if len(scale_space) > 1 else (0, volume)
++                if prev_L[idx] > normalized_laplacian[idx]:
++                    is_scale_max = False
++            if t < scale_space[-1][0]:
++                next_t, next_L = scale_space[scale_space.index((t, L_t)) + 1]
++                if next_L[idx] > normalized_laplacian[idx]:
++                    is_scale_max = False
++                    
++            if is_scale_max:
++                scale_abstraction.append((idx, t))
++                
+     # Step 3: Backprojection
+     scale_field = np.zeros_like(volume, dtype=float)
+     
+-    # Precompute distances or iterate
+-    # For efficiency, this is often done on GPU or with spatial indexing
+-    # Here is a naive CPU implementation
+-    
+     for x_idx in np.ndindex(volume.shape):
+         x = np.array(x_idx)
+-        weights_sum = 0.0
+         max_val = -np.inf
++        sum_val = 0.0
+         
+         for (xi, ti) in scale_abstraction:
+@@ -202,5 +169,4 @@
+             
+             # Basis function
+-            # Theta(d) = [1 - d/h]_0^1 * (4*d/h + 1)
+             if dist <= h:
+                 theta = (1.0 - dist / h) * (4.0 * dist / h + 1.0)
+@@ -209,6 +175,4 @@
+             
+             # Visibility test
+-            # Ray from xi to x
+-            # Check if any voxel along ray has value < tau
+             if not is_visible(xi, x, volume, tau):
+                 theta = 0.0
+@@ -220,27 +184,35 @@
+                     max_val = contribution
+             else:
+-                weights_sum += contribution
++                sum_val += contribution
+                 
+         if use_max_blend:
+             scale_field[x_idx] = max_val
+         else:
+-            scale_field[x_idx] = weights_sum
++            scale_field[x_idx] = sum_val
+             
+     return scale_field, scale_abstraction
+-
+-def find_3d_local_maxima(data):
+-    """Placeholder for 3D local maxima detection."""
+-    # Implementation depends on library, e.g., scipy.ndimage.maximum_filter
+-    return []
+ 
+ def is_visible(start, end, volume, tau):
+     """Check if end is visible from start along ray."""
+-    # Cast ray, sample voxels, check intensity/gradient
++    # Cast ray, sample voxels, check intensity/gradient [G]
++    steps = int(np.linalg.norm(end - start) * 10) + 1
++    for i in range(steps + 1):
++        t = i / steps
++        point = start + t * (end - start)
++        idx = np.round(point).astype(int)
++        if 0 <= idx[0] < volume.shape[0] and 0 <= idx[1] < volume.shape[1] and 0 <= idx[2] < volume.shape[2]:
++            if volume[idx] < tau:
++                return False
+     return True
+ ```
+ 
++## Subtopics
++
++### Progressive Scale-Space Construction
++A property where the scale-space is constructed progressively, allowing intermediate results to be valid approximations [S1]. The scale field at a given scale is the same whether obtained from the original volume or an already smoothed version of the data set [S1]. This implies that large data sets ($> 512^3$) do not need to be analyzed at their full resolution; the scale field can be of a lower resolution, yielding the same scales except for granularity limits [S1].
++
+ ## Operating characteristics
+-- **Time Complexity**: Scale-space computation is $O(n \cdot V \cdot |\mathcal{N}|)$ where $V$ is number of voxels and $|\mathcal{N}|$ is stencil size. Backprojection is $O(V \cdot |\mathcal{N}_{abstraction}|)$, which can be expensive if many extrema are detected.
+-- **Memory Complexity**: Requires storing the scale space $L$ for all iterations if backprojection is done offline, or just the current layer if streaming. The abstraction list size depends on feature complexity.
++- **Time Complexity**: Scale-space computation is $O(n \cdot V \cdot |\mathcal{N}|)$ where $V$ is number of voxels and $|\mathcal{N}|$ is stencil size. Backprojection is $O(V \cdot |\mathcal{N}_{abstraction}|)$, which can be expensive if many extrema are detected [G].
++- **Memory Complexity**: Requires storing the scale space $L$ for all iterations if backprojection is done offline, or just the current layer if streaming. The abstraction list size depends on feature complexity [G].
+ - **Strengths**: Continuous scale representation; sub-voxel detection; non-linear diffusion preserves edges and prevents merging of nearby objects better than linear diffusion [S1].
+ - **Limitations**: Sensitive to parameter $\lambda$; visibility test adds computational overhead; bleeding can occur if visibility test is not used [S1].

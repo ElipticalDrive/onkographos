@@ -1,0 +1,145 @@
+# 3D Fast Bilateral Solver
+
+Also called: 3D FBS, 3D Bilateral Solver
+
+## Overview
+The 3D Fast Bilateral Solver (3D FBS) is a post-processing refinement technique used to upsample low-resolution similarity volumes to high resolution while adapting them to the edges of the underlying raw intensity volume [S1]. It solves the problem of visual artifacts in volume rendering caused by the lack of voxel-precise details in coarse feature maps, specifically by restoring fine structures and aligning segmentation borders with intensity gradients [S1]. Unlike 2D propagation methods that require complex topology solving and multi-second inference times, the 3D FBS merges features in 3D directly, offering a fast, interactive refinement step (typically < 1 second) that enhances visual fidelity without re-running the feature extraction network [S1].
+
+## How it works
+The method takes a low-resolution similarity map $S_L$ and the raw intensity volume $V$ as inputs, and produces a high-resolution, edge-aware similarity map $S_H$ [S1]. The core mechanism extends the Fast Bilateral Solver [12] to 3D by incorporating a z-component into the bilateral grid, allowing the solver to use the 3D intensity volume as a reference for edge-aware smoothing [S1].
+
+### Data Structures
+1.  **Low-Resolution Similarity Map ($S_L$):** A 3D grid of similarity values, typically at a resolution $N_{low}^3$ (e.g., $64^3$ to $96^3$) [S1]. Values represent the likelihood of a voxel belonging to a segmented structure.
+2.  **Raw Intensity Volume ($V$):** The original 3D volume data (e.g., CT scan) at high resolution $N_{high}^3$ (e.g., $256^3$ to $512^3$) [S1].
+3.  **Bilateral Grid:** An intermediate data structure used by the Fast Bilateral Solver. In the 3D extension, this grid includes spatial dimensions $(x, y, z)$ and an intensity dimension derived from $V$ [S1]. The exact bit-packing or memory layout of the bilateral grid is not specified in the sources [S1].
+
+### Parameters
+*   **Threshold $\tau$:** A scalar value used to crop low-similarity regions. The default value is $\tau = 0.25$ [S1].
+*   **Output Resolution:** The target resolution of $S_H$. Typical values are $256^3$ or $512^3$, chosen based on the class and actual size of the structure to balance quality and speed [S1].
+*   **$\sigma$ (Sigma):** Parameters of the bilateral solver that control the window size used for blurring. These values influence the occurrence of block artifacts if the initial detection in $S_L$ is insufficient [S1]. The exact numerical values for $\sigma$ are not provided in the sources [S1].
+
+### Algorithm Steps
+1.  **Tri-linear Upsampling:** Upsample the low-resolution similarity map $S_L$ tri-linearly to match the resolution of the raw volume $V$ [S1]. Let the upsampled map be $S_{upsampled}$ [S1].
+2.  **Cropping:** Crop the regions where the similarity value $S > \tau$ to discard low-similarity areas. This reduces the computational load for the solver by focusing only on relevant structures [S1].
+3.  **3D Bilateral Solver Execution:** Solve for the smoothed high-resolution similarity $S_H$ using the cropped region from $V$ as the reference for edge-awareness [S1]. The solver minimizes an energy function that balances fidelity to the upsampled similarity and smoothness guided by the intensity gradients in $V$ [S1]. The specific energy function formula is not explicitly written in the text, but it is described as an edge-aware smoothing technique similar to a bilateral filter [S1].
+4.  **Output:** The result is $S_H$, which has the resolution of $V$ and refined borders aligned with intensity edges [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def refine_similarity(S_L, V, tau=0.25, target_resolution=None):
+    """
+    Refines a low-resolution similarity map using the 3D Fast Bilateral Solver.
+    
+    Args:
+        S_L: 3D numpy array, low-resolution similarity map.
+        V: 3D numpy array, raw intensity volume.
+        tau: float, threshold for cropping low-similarity regions.
+        target_resolution: tuple (x, y, z), optional. If None, uses V's resolution.
+        
+    Returns:
+        S_H: 3D numpy array, high-resolution refined similarity map.
+    """
+    # Step 1: Determine target resolution
+    if target_resolution is None:
+        target_resolution = V.shape
+    
+    # Step 2: Tri-linear Upsampling
+    # Note: Standard tri-linear interpolation is assumed.
+    S_upsampled = tri_linear_interpolate(S_L, target_resolution)
+    
+    # Step 3: Crop regions where S > tau
+    # Create a mask for valid regions
+    mask = S_upsampled > tau
+    
+    # Crop the volume to the bounding box of the mask
+    # This step reduces the size of the problem for the solver
+    cropped_S, cropped_V, crop_bounds = crop_to_mask(S_upsampled, V, mask)
+    
+    # Step 4: Solve for smoothed high-resolution similarity
+    # The 3D Fast Bilateral Solver is applied.
+    # It uses cropped_V as the reference for edge-awareness.
+    # The solver minimizes an energy function balancing fidelity and smoothness.
+    # The exact implementation details of the solver (e.g., grid construction,
+    # optimization steps) are not provided in the source text [S1].
+    # We assume a function solve_3d_bilateral_solver exists that implements
+    # the method from [12] extended to 3D.
+    cropped_S_H = solve_3d_bilateral_solver(cropped_S, cropped_V)
+    
+    # Step 5: Place the result back into the full volume
+    # Initialize S_H with zeros or background values
+    S_H = np.zeros(target_resolution)
+    
+    # Place the cropped result back into the original coordinates
+    S_H[crop_bounds] = cropped_S_H
+    
+    return S_H
+
+def tri_linear_interpolate(volume, new_shape):
+    """
+    Performs tri-linear interpolation to upsample a 3D volume.
+    """
+    # Implementation of tri-linear interpolation
+    # This is a standard graphics operation [S1]
+    pass
+
+def crop_to_mask(volume, reference, mask):
+    """
+    Crops a volume to the bounding box of a boolean mask.
+    """
+    # Find indices where mask is True
+    coords = np.where(mask)
+    min_coords = np.min(coords, axis=1)
+    max_coords = np.max(coords, axis=1)
+    
+    # Extract the cropped volumes
+    cropped_vol = volume[min_coords[0]:max_coords[0]+1, 
+                         min_coords[1]:max_coords[1]+1, 
+                         min_coords[2]:max_coords[2]+1]
+    cropped_ref = reference[min_coords[0]:max_coords[0]+1, 
+                            min_coords[1]:max_coords[1]+1, 
+                            min_coords[2]:max_coords[2]+1]
+    
+    return cropped_vol, cropped_ref, (min_coords, max_coords)
+
+def solve_3d_bilateral_solver(similarity, reference):
+    """
+    Solves the 3D Fast Bilateral Solver.
+    This function implements the 3D extension of the Fast Bilateral Solver [12].
+    It uses the reference volume to guide the smoothing of the similarity map.
+    The specific algorithmic steps (bilateral grid construction, optimization)
+    are not detailed in the source text [S1].
+    """
+    # Placeholder for the actual solver implementation
+    # The solver balances fidelity to 'similarity' and smoothness guided by 'reference'
+    pass
+```
+
+### Edge Cases and Pitfalls
+*   **Insufficient Detection:** If the structure is not sufficiently detected in the low-resolution similarity map $S_L$, the bilateral solver cannot complete structures far beyond what is detected [S1]. This results in block artifacts when rendered as an iso-surface [S1]. The refined similarity falls off smoothly towards the surface, causing artifacts due to the $\sigma$ parameters controlling the blurring window [S1].
+*   **Block Artifacts:** Block artifacts arise specifically when the structure is not sufficiently detected in $S_L$ [S1]. The solver requires sufficient detection of the full structure in $S_L$ to produce surfaces without artifacts [S1].
+*   **Connected Components Filter:** A connected components filter can be used to discard falsely detected disconnected components, but it fails when target structures are too close together [S1].
+*   **Resolution Dependency:** The post-processing time varies with resolution, unlike the initial inference time [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The post-processing time is resolution-dependent. On an Intel i7-8700K CPU, processing takes approximately 0.4 seconds for a $256^3$ volume and 5.3 seconds for a $512^3$ volume [S1]. The total workflow including pre-processing is interactive, with the refinement step taking approximately 0.5 seconds [S1].
+*   **Memory Complexity:** Not given in the sources. However, the method allows for a trade-off between resolution and speed by choosing the output resolution $S_H$ [S1].
+*   **Strengths:**
+    *   Fast and interactive (sub-second refinement) [S1].
+    *   Effectively aligns low-resolution feature maps to the raw input, especially at borders [S1].
+    *   Restores fine details lost due to low resolution in $S_L$ [S1].
+    *   Avoids complex topology solving and multi-second inference times associated with 2D propagation methods [S1].
+    *   Detects fine structures (e.g., fish bones) well and avoids noise present in 1D transfer function segmentation [S1].
+*   **Limitations:**
+    *   Requires sufficient detection of the full structure in $S_L$ to avoid artifacts [S1].
+    *   Cannot complete structures far beyond what is detected in $S_L$ [S1].
+    *   Connected components filter fails for closely spaced structures [S1].
+*   **When to Use:** Use when high visual quality is required for volume rendering and the initial similarity map $S_L$ has sufficient detection of the structure of interest but lacks voxel-precise details [S1].
+*   **When Not to Use:** Do not use if the initial similarity map $S_L$ lacks sufficient detection of the structure, as this will result in block artifacts [S1].
+
+## Background
+The 3D Fast Bilateral Solver is a 3D extension of the Fast Bilateral Solver [12], proposed in the paper "Leveraging Self-Supervised Vision Transformers for Segmentation-Based Transfer Function Design" [S1]. The method was introduced to address the low resolution of similarity maps generated by neural network features, which lack the voxel-precise details required for high visual fidelity in volume rendering [S1]. It is used in the context of annotation-guided transfer function design, where users annotate structures in a volume, and the system generates similarity maps that are then refined using the 3D FBS [S1]. The approach is implemented in the Inviwo framework [S1].
+
+## Sources
+[S1] Leveraging Self-Supervised Vision Transformers for Segmentation-Based Transfer Function Design., https://doi.org/10.1109/tvcg.2024.3401755, fetched 2026-10-26

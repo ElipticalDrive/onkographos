@@ -1,0 +1,154 @@
+# Parallel Projected Tetrahedra with KD-Tree Partitioning
+
+Also called: Parallel Unstructured Volume Rendering in ParaView, Parallel Volume Rendering in ParaView, kd-tree based parallel volume rendering
+
+## Overview
+This method enables parallel rendering of large unstructured tetrahedral grids by partitioning the data using a kd-tree and applying a sort-last compositing algorithm [S1]. It renders unstructured grids natively without sampling into a regular grid, avoiding the oversampling and undersampling issues inherent in grid-based approaches [S1]. Unlike other parallel rendering approaches that require continuous cell transfer, this method requires no further cell transfer once distributed; only image data is communicated between processes [S1].
+
+## How it works
+The method combines spatial partitioning of the unstructured grid with the [Projected Tetrahedra](877-projected-tetrahedra.md) rendering technique.
+
+**Inputs and Outputs:**
+*   **Input:** An unstructured tetrahedral grid (vertices and connectivity).
+*   **Output:** A composite 2D image.
+
+**Data Structures:**
+*   **KD-Tree:** A binary tree where each node represents a spatial region. The root contains the entire dataset. Internal nodes split the region along an axis (typically the axis of maximum extent) to create two child regions. Leaves represent the final partitions assigned to processes [S1].
+*   **Partitioned Tetrahedra:** For each leaf node (process), a list of tetrahedra. This list includes:
+    *   Tetrahedra fully contained within the partition.
+    *   Tetrahedra intersecting the partition boundary, which are clipped to fit within the partition [S1].
+
+**Steps:**
+
+1.  **KD-Tree Construction and Partitioning:**
+    *   Build a kd-tree over the bounding box of the unstructured grid [S1].
+    *   The number of leaves in the kd-tree corresponds to the number of available processes (or rendering nodes) [S1].
+    *   Traverse the kd-tree to assign tetrahedra to leaves.
+    *   **Clipping:** If a tetrahedron intersects a kd-tree region boundary, it is split/clipped so that only the portion inside the region is assigned to that process [S1]. This causes the total number of tetrahedra to grow.
+
+2.  **Data Distribution:**
+    *   Distribute the clipped tetrahedra to the respective processes [S1].
+    *   This step is performed when the data changes, not every frame [S1].
+
+3.  **Parallel Rendering (Per Process):**
+    *   Each process renders its assigned tetrahedra using the [Projected Tetrahedra](877-projected-tetrahedra.md) method [S1].
+    *   This generates a local 2D image (framebuffer) for that process [S1].
+
+4.  **Sort-Last Compositing:**
+    *   Transfer only the rendered image data (not the geometry) from all processes to a compositing node (or use a parallel image compositing algorithm) [S1].
+    *   Composite the images to form the final result [S1].
+
+**Parameters:**
+*   **Image Resolution:** Experiments used 800x800 pixels [S1].
+*   **KD-Tree Depth:** Determined by the number of processes. Adding one level doubles the partitions [S1].
+
+**Pitfalls and Edge Cases:**
+*   **Data Growth:** Splitting cells increases the dataset size. On average, data size grows by ~15% per kd-tree level, with variance between 5% and 30% [S1].
+*   **Memory Usage:** Redistribution requires holding at least two copies of the data simultaneously (original and partitioned), which can drop rendering rates if hardware memory is insufficient [S1].
+*   **Geometry Changes:** Changes in viewable geometry require lengthy redistribution of the data [S1].
+*   **Diminishing Returns:** Adding more processors than necessary for a given dataset yields diminishing returns due to fixed costs like image readback and compositing [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for Parallel Projected Tetrahedra with KD-Tree Partitioning
+# Assumes a distributed memory environment with N processes.
+# Process i is responsible for leaf i of the KD-Tree.
+
+def main():
+    # 1. KD-Tree Construction and Partitioning (Performed on Master or Distributed)
+    # This step is not done every frame, only when data changes.
+    kd_tree = build_kd_tree(unstructured_grid)
+    
+    # Determine partitions based on number of processes
+    partitions = get_partitions(kd_tree, num_processes)
+    
+    # Clip tetrahedra to partitions
+    # This increases the total number of tetrahedra
+    clipped_tetrahedra = []
+    for partition in partitions:
+        clipped_tetrahedra.append(clip_tetrahedra_to_region(unstructured_grid, partition.region))
+    
+    # 2. Data Distribution
+    # Each process receives its assigned tetrahedra
+    my_tetrahedra = clipped_tetrahedra[my_process_id]
+    
+    # 3. Parallel Rendering
+    # Render using Projected Tetrahedra method
+    local_image = render_projected_tetrahedra(my_tetrahedra, camera, resolution)
+    
+    # 4. Sort-Last Compositing
+    # Transfer only image data
+    composite_image = parallel_composite_images(local_image, all_processes)
+    
+    return composite_image
+
+def clip_tetrahedra_to_region(tetrahedra, region):
+    """
+    Clips tetrahedra that intersect the region boundary.
+    Returns a list of tetrahedra (or fragments) fully contained in the region.
+    """
+    clipped = []
+    for tet in tetrahedra:
+        if tet.is_inside(region):
+            clipped.append(tet)
+        elif tet.intersects(region):
+            # Split the tetrahedron and keep the part inside the region
+            # This is the source of data growth
+            fragments = split_tetrahedron(tet, region)
+            for frag in fragments:
+                if frag.is_inside(region):
+                    clipped.append(frag)
+    return clipped
+
+def render_projected_tetrahedra(tetrahedra, camera, resolution):
+    """
+    Renders tetrahedra using the Projected Tetrahedra method.
+    Returns a 2D image (framebuffer).
+    """
+    # Implementation details from [Projected Tetrahedra](877-projected-tetrahedra.md)
+    # Transform vertices to screen space
+    # Rasterize and composite
+    pass
+
+def parallel_composite_images(local_image, all_processes):
+    """
+    Composites images from all processes.
+    """
+    # Implementation of sort-last compositing
+    pass
+```
+
+## Subtopics
+
+### Projected Tetrahedra
+The core rendering technique used by this method. It projects tetrahedra to screen space and rasterizes them. [Projected Tetrahedra](877-projected-tetrahedra.md)
+
+### Tetrahedral Volume Rendering
+A broader category of methods that use tetrahedra as primitives. [Tetrahedral Volume Rendering](820-tetrahedral-volume-rendering.md)
+
+## Operating characteristics
+*   **Time Complexity:** Partitioning time reduces with larger jobs [S1]. Rendering speed increases with the number of processors, but with diminishing returns [S1].
+*   **Memory Complexity:** Requires holding at least two copies of the data during redistribution [S1].
+*   **Performance:**
+    *   Hardware: Dell Precision 530 workstation (Dual 2.0 GHz Pentium-4 Xeon, 1 GB RDRAM, GeForce FX 5900 Ultra, Myrinet 2000) [S1].
+    *   Image Resolution: 800x800 pixels [S1].
+    *   Data Sets: Heated Disk (44,832 tetrahedra), Blunt Fin (187,395), Oxygen Post (513,375), Delta Wing (1,005,675), Synthetic (5,000,000), Shuttle (5,315,388), Fire (14,094,684) [S1].
+    *   Data Growth: Average 15% growth per kd-tree level, variance 5-30% [S1].
+    *   The system shows bigger speedup for larger data sets, even if overall frame rate is lower [S1].
+*   **Strengths:**
+    *   Renders unstructured grids natively without sampling [S1].
+    *   No further cell transfer after initial distribution; only image data is communicated [S1].
+    *   Code reuse with existing volume rendering and compositing codes [S1].
+*   **Limitations:**
+    *   Data redistribution requires significant memory (two copies) [S1].
+    *   Changes in viewable geometry require lengthy redistribution [S1].
+    *   Rendering rates may be too low for user interaction without level-of-detail techniques [S1].
+
+## Background
+The method was developed for ParaView and deployed at Sandia National Laboratories for visualizing simulations from supercomputers like Red Storm [S1]. It was presented in the paper "Parallel Unstructured Volume Rendering in ParaView" [S1].
+
+## Sources
+[S1] Parallel Unstructured Volume Rendering in ParaView, https://www.kennethmoreland.com/documents/ParallelVolRen.pdf, fetched 2026-10-27

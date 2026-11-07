@@ -1,0 +1,53 @@
+# Stream-Balls
+
+Also called: Blobby Stream Surfaces, Meta-ball Stream Surfaces
+
+## Overview
+Stream-Balls is a technique for visualizing steady-state vector fields that constructs a scalar potential field from advected particles or streamlines using blobby functions, then extracts iso-contours to mimic stream surfaces [S1, unofficial]. It sets itself apart from its parent [Stream Surfaces](7696-stream-surfaces.md) by replacing explicit geometric stitching with an implicit scalar field, which allows the resulting surface to gracefully split apart in areas of high divergence and break apart in areas of high velocity to indicate magnitude [S1, unofficial].
+
+## How it works
+**Inputs:** A set of seed points, a steady-state vector field $\mathbf{v}(\mathbf{x})$, a time step size $\Delta t$, and a blobby radius parameter $\sigma$.
+**Outputs:** A 3D scalar grid $V$ representing the potential field, from which an iso-surface is extracted.
+
+**Data Structures:**
+-   **Grid:** A regular 3D grid with resolution $N_x \times N_y \times N_z$. Each cell stores a single floating-point value representing the summed potential.
+-   **Particle State:** Position $\mathbf{p}_i(t)$ for each particle $i$ at time step $t$.
+
+**Steps:**
+1.  **Initialize Grid:** Create a 3D grid $V$ of zeros with dimensions sufficient to cover the domain of interest.
+2.  **Advect Particles:** For each seed point, integrate the trajectory through the vector field $\mathbf{v}$ using a numerical integrator (e.g., Runge-Kutta) to generate a sequence of positions $\mathbf{p}_{i,t}$ for $t = 0, \dots, T$.
+3.  **Define Gaussian Kernel:** For a particle at position $\mathbf{p}$, the contribution to the scalar field is a Gaussian function:
+    $$
+    G(\mathbf{x}; \mathbf{p}, \sigma) = \exp\left(-\frac{\|\mathbf{x} - \mathbf{p}\|^2}{2\sigma^2}\right)
+    $$
+    where $\mathbf{x}$ is a point in space, $\mathbf{p}$ is the particle position, and $\sigma$ controls the blobby radius [S1, unofficial].
+4.  **Sum Contributions:** For every grid cell center $\mathbf{x}_j$, compute the total potential $V(\mathbf{x}_j)$ by summing the Gaussian contributions from all particles at all time steps:
+    $$
+    V(\mathbf{x}_j) = \sum_{i} \sum_{t=0}^{T} G(\mathbf{x}_j; \mathbf{p}_{i,t}, \sigma)
+    $$
+    This creates an analytical potential field from the advected particles [S1, unofficial].
+5.  **Extract Iso-surface:** Apply an iso-surface extraction algorithm (e.g., Marching Cubes) to the grid $V$ using a threshold value $\tau$ to produce the final visualization surface [S1, unofficial].
+
+**Parameters:**
+-   $\sigma$: Blobby radius. Not given in the sources.
+-   $\tau$: Iso-surface threshold. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+-   **High Divergence:** The surface gracefully splits apart, losing the strict separation property of explicit stream surfaces [S1, unofficial].
+-   **High Velocity:** The surface breaks apart, which helps indicate velocity magnitude but may fragment the visualization [S1, unofficial].
+-   **Precision:** Summing many Gaussians can lead to floating-point precision issues if the grid resolution is low or the number of particles is very large [G].
+
+## Subtopics
+## Operating characteristics
+**Time Complexity:** $O(N_p \cdot N_t \cdot N_g)$, where $N_p$ is the number of particles, $N_t$ is the number of time steps per particle, and $N_g$ is the number of grid cells. Each particle position contributes to the grid evaluation.
+**Memory Complexity:** $O(N_g)$ for the scalar grid.
+**Strengths:** Indicates velocity magnitude through surface fragmentation; handles divergence gracefully [S1, unofficial].
+**Limitations:** Loses the nice property of separation inherent in stream surfaces; surface breaks in high-velocity areas [S1, unofficial].
+**When to use:** When visualizing flow divergence and velocity magnitude is more important than strict topological separation of streamlines.
+**When not to use:** When precise separation of flow paths is required.
+
+## Background
+Stream-Balls were proposed by Brill [S1, unofficial]. The concept is similar to van Wijk’s implicit stream surfaces but uses blobby functions (meta-balls) to build the scalar potential field [S1, unofficial]. It is an alternative to stream surfaces and flow volumes for visualizing steady-state flows.
+
+## Sources
+[S1] Flow Visualization Techniques for CDF using Volume Rendering, https://www.osti.gov/servlets/purl/790542, fetched 2026-10-26 (unofficial)

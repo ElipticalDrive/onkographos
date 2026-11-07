@@ -1,0 +1,127 @@
+--- v002.md
++++ v003.md
+@@ -55,8 +55,8 @@
+         *   If `rgbnet_direct`: `rgb_feat = k0`.
+         *   Else: `k0_view = k0[:, 3:]`, `k0_diffuse = k0[:, :3]`.
+-        *   Compute view direction embeddings: `viewdirs_emb = (viewdirs.unsqueeze(-1) * viewfreq).flatten(-2)`, then concatenate with sin/cos of viewdirs.
+-        *   `rgb_feat = cat([k0_view, viewdirs_emb], -1)`.
++        *   Compute view direction embeddings: `viewdirs_emb = (viewdirs.unsqueeze(-1) * viewfreq).flatten(-2)`, then concatenate with sin/cos of viewdirs [S1, unofficial].
++        *   `rgb_feat = cat([k0_view, viewdirs_emb], -1)` [S1, unofficial].
+         *   `rgb_logit = rgbnet(rgb_feat)`.
+-        *   If `rgbnet_direct`: `rgb = sigmoid(rgb_logit)`.
++        *   If `rgbnet_direct`: `rgb = sigmoid(rgb_logit)` [S1, unofficial].
+         *   Else: `rgb = sigmoid(rgb_logit + k0_diffuse)` [S1, unofficial].
+ 
+@@ -72,8 +72,6 @@
+ def sample_pts_on_rays(rays_o, rays_d, xyz_min, xyz_max, near, far, stepdist):
+     N = rays_o.shape[0]
+-    max_steps = int((far - near) / stepdist) + 1
+-    ray_pts, ray_id, step_id, mask_outbbox = [], [], [], []
+-    t_min = torch.full((N,), far)
+-    t_max = torch.full((N,), near)
++    ray_pts_list, ray_id_list, step_id_list, mask_outbbox_list = [], [], [], []
++    max_steps = 0
+ 
+     for i in range(N):
+@@ -84,38 +82,35 @@
+         t_near = torch.max(torch.min(t1, t2))
+         t_far = torch.min(torch.max(t1, t2))
+-        t_near = torch.max(t_near, torch.tensor(near))
+-        t_far = torch.min(t_far, torch.tensor(far))
++        t_near = torch.max(t_near, torch.tensor(near, device=o.device))
++        t_far = torch.min(t_far, torch.tensor(far, device=o.device))
+ 
+         if t_near >= t_far:
+-            mask_outbbox.append(torch.ones(max_steps, dtype=bool))
++            mask_outbbox_list.append(torch.ones(max_steps, dtype=torch.bool, device=o.device))
+             continue
+ 
+-        t_min[i] = t_near
+-        t_max[i] = t_far
+         num_steps = int((t_far - t_near) / stepdist) + 1
+-        ts = torch.arange(num_steps) * stepdist + t_near
++        if num_steps > max_steps:
++            max_steps = num_steps
++        ts = torch.arange(num_steps, device=o.device) * stepdist + t_near
+         pts = o.unsqueeze(0) + ts.unsqueeze(1) * d.unsqueeze(0)
+ 
+-        ray_pts.append(pts)
+-        ray_id.append(torch.full((num_steps,), i))
+-        step_id.append(torch.arange(num_steps))
+-        mask_outbbox.append(torch.zeros(num_steps, dtype=bool))
+-
+-    ray_pts = torch.cat(ray_pts, dim=0) if ray_pts else torch.empty(0, 3)
+-    ray_id = torch.cat(ray_id, dim=0) if ray_id else torch.empty(0, dtype=torch.long)
+-    step_id = torch.cat(step_id, dim=0) if step_id else torch.empty(0, dtype=torch.long)
+-    mask_outbbox = torch.cat(mask_outbbox, dim=0) if mask_outbbox else torch.empty(0, dtype=bool)
+-    N_steps = max_steps
+-    return ray_pts, mask_outbbox, ray_id, step_id, N_steps, t_min, t_max
++        ray_pts_list.append(pts)
++        ray_id_list.append(torch.full((num_steps,), i, dtype=torch.long, device=o.device))
++        step_id_list.append(torch.arange(num_steps, dtype=torch.long, device=o.device))
++        mask_outbbox_list.append(torch.zeros(num_steps, dtype=torch.bool, device=o.device))
++
++    ray_pts = torch.cat(ray_pts_list, dim=0) if ray_pts_list else torch.empty(0, 3, device=rays_o.device)
++    ray_id = torch.cat(ray_id_list, dim=0) if ray_id_list else torch.empty(0, dtype=torch.long, device=rays_o.device)
++    step_id = torch.cat(step_id_list, dim=0) if step_id_list else torch.empty(0, dtype=torch.long, device=rays_o.device)
++    mask_outbbox = torch.cat(mask_outbbox_list, dim=0) if mask_outbbox_list else torch.empty(0, dtype=torch.bool, device=rays_o.device)
++    return ray_pts, mask_outbbox, ray_id, step_id, max_steps
+ 
+ def alphas2weights(alpha, ray_id, N):
+     M = alpha.shape[0]
+-    weights = torch.zeros(M, dtype=alpha.dtype)
+-    alphainv_last = torch.zeros(N, dtype=alpha.dtype)
++    weights = torch.zeros(M, dtype=alpha.dtype, device=alpha.device)
++    alphainv_last = torch.zeros(N, dtype=alpha.dtype, device=alpha.device)
+     ray_indices = [[] for _ in range(N)]
+     for i, rid in enumerate(ray_id):
+-        if rid < N:
+-            ray_indices[rid].append(i)
+-
++        ray_indices[rid].append(i)
+     for r in range(N):
+         if not ray_indices[r]:
+@@ -129,17 +124,10 @@
+     return weights, alphainv_last
+ 
+-def segment_coo(src, index, out, reduce='sum'):
+-    for i in range(src.shape[0]):
+-        r = index[i].item()
+-        if r < out.shape[0]:
+-            if reduce == 'sum':
+-                out[r] += src[i]
+-    return out
+-
+ def render_directvoxgo(rays_o, rays_d, viewdirs, model, render_kwargs):
++    far = 1e9  # Prevent premature ray termination [S1, unofficial]
+     stepdist = render_kwargs['stepsize'] * model.voxel_size
+-    ray_pts, mask_outbbox, ray_id, step_id, N_steps, t_min, t_max = sample_pts_on_rays(
++    ray_pts, mask_outbbox, ray_id, step_id, N_steps = sample_pts_on_rays(
+         rays_o, rays_d, model.xyz_min, model.xyz_max,
+-        render_kwargs['near'], render_kwargs['far'], stepdist
++        render_kwargs['near'], far, stepdist
+     )
+ 
+@@ -188,6 +176,7 @@
+             k0_diffuse = k0[:, :3]
+ 
+-        viewdirs_emb = (viewdirs.unsqueeze(-1) * model.viewfreq).flatten(-2)
+-        viewdirs_emb = torch.cat([viewdirs, viewdirs_emb.sin(), viewdirs_emb.cos()], -1)
++        viewdirs_norm = viewdirs / viewdirs.norm(dim=-1, keepdim=True)  # Normalize view directions [G]
++        viewdirs_emb = (viewdirs_norm.unsqueeze(-1) * model.viewfreq).flatten(-2)
++        viewdirs_emb = torch.cat([viewdirs_norm, viewdirs_emb.sin(), viewdirs_emb.cos()], -1)
+         viewdirs_emb = viewdirs_emb.flatten(0, -2)[ray_id]
+ 
+@@ -200,10 +189,6 @@
+             rgb = torch.sigmoid(rgb_logit + k0_diffuse)
+ 
+-    rgb_marched = segment_coo(
+-        src=(weights.unsqueeze(-1) * rgb),
+-        index=ray_id,
+-        out=torch.zeros((len(rays_o), 3), dtype=rgb.dtype),
+-        reduce='sum'
+-    )
++    rgb_marched = torch.zeros((len(rays_o), 3), dtype=rgb.dtype, device=rgb.device)
++    rgb_marched.scatter_add_(0, ray_id.unsqueeze(1).expand(-1, 3), weights.unsqueeze(1) * rgb)
+ 
+     rgb_marched += (alphainv_last.unsqueeze(-1) * render_kwargs['bg'])

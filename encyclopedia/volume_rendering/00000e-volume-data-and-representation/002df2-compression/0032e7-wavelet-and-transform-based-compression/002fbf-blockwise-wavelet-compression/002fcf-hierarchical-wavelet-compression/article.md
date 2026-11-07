@@ -1,0 +1,155 @@
+# Hierarchical Wavelet Compression
+
+Also called: Hierarchical Wavelet Representation
+
+## Overview
+Hierarchical Wavelet Compression is a lossy compression technique that extends blockwise wavelet decomposition by organizing data into an octree structure, enabling multi-resolution access and high compression ratios without noticeable artifacts [S1, unofficial][S2]. It differs from standard blockwise approaches by recursively grouping low-frequency components into larger blocks, whereas alternatives like [8] apply wavelet equations only twice in a fixed 2x2x2 subregion [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume data set represented as a three-dimensional array of integers with fixed precision [S1, unofficial].
+*   **Output:** A compressed octree representation where insignificant coefficients are discarded [S1, unofficial].
+
+**Data Structures:**
+*   **Octree:** Each node describes a volume of $k^3$ voxels [S1, unofficial].
+*   **Node Content:** The node stores the low-pass filtered coefficients (the $k^3$ volume) and high-frequency coefficients [S1, unofficial]. The high-frequency coefficients allow the reconstruction of child nodes from the current node [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Block Division:** Divide the input volume data set into cubic blocks of size $(2k)^3$ voxels [S1, unofficial].
+2.  **Wavelet Transform:** Apply wavelet filters to each $(2k)^3$ block to obtain:
+    *   A low-pass filtered component of size $k^3$ voxels [S1, unofficial].
+    *   High-frequency components of size $(2k)^3 - k^3$ voxels [S1, unofficial].
+3.  **Grouping:** Group the low-pass filtered blocks by groups of 8 to form a new block of size $(2k)^3$ voxels [S1, unofficial].
+4.  **Recursion:** Repeat steps 2 and 3 on the newly formed low-pass blocks until only a single block remains [S1, unofficial]. This process results in an octree structure [S1, unofficial].
+5.  **Thresholding:** Define a threshold below which all wavelet coefficients are mapped to zero to reduce storage space [S1, unofficial]. This step makes the compression lossy [S1, unofficial].
+
+**Formulas:**
+*   Low-pass filtered size: $k^3$ voxels [S1, unofficial].
+*   High-pass filtered size: $(2k)^3 - k^3$ voxels [S1, unofficial].
+
+**Parameters:**
+*   **Threshold:** A value below which coefficients are zeroed out. The specific value is not given in the sources [S1, unofficial].
+*   **Block Size:** The base block size $k$ is not explicitly defined in the sources, though the block dimension is $(2k)^3$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hierarchical_wavelet_compress(volume_data, k, threshold):
+    """
+    Compress volume data using hierarchical wavelet representation.
+    
+    Args:
+        volume_data: 3D array of integers.
+        k: Base block dimension parameter. Block size is (2k)^3.
+        threshold: Coefficients with absolute value < threshold are set to 0.
+        
+    Returns:
+        An octree structure representing the compressed data.
+    """
+    # Step 1: Divide into initial blocks of size (2k)^3
+    # Note: The source assumes the volume dimensions are compatible with (2k)^3 blocks.
+    initial_blocks = divide_into_cubic_blocks(volume_data, 2 * k)
+    
+    # Initialize the root of the octree
+    # The root will eventually hold the final low-pass block and accumulated high-pass coefficients
+    octree_root = None
+    
+    current_level_blocks = initial_blocks
+    level = 0
+    
+    while len(current_level_blocks) > 1:
+        # Step 2 & 3: Apply wavelet transform and group low-pass components
+        next_level_blocks = []
+        
+        # Group blocks by 8 for the next level of recursion
+        # The source states: "group the low pass filtered blocks by groups of 8"
+        # This implies 8 blocks of size k^3 are combined to form a (2k)^3 block for the next level
+        for i in range(0, len(current_level_blocks), 8):
+            group = current_level_blocks[i : i + 8]
+            
+            if len(group) != 8:
+                # Handle edge case where blocks do not divide evenly by 8
+                # Not specified in sources [G]
+                continue
+                
+            # Apply wavelet filters to the group to get low-pass and high-pass
+            # The input to this step is a group of 8 blocks of size k^3
+            # The output is a low-pass block of size k^3 and high-pass coefficients
+            low_pass_block, high_pass_coeffs = apply_wavelet_transform(group, k)
+            
+            # Create a node for the octree
+            # Each node describes a volume of k^3 (the low-pass block)
+            # and stores high-frequency coefficients
+            node = {
+                'volume': low_pass_block, # Size k^3
+                'high_freq': high_pass_coeffs, # Size (2k)^3 - k^3 relative to the parent context
+                'children': [] # Will be populated in the next iteration or at leaf
+            }
+            
+            # Store the high-pass coefficients in the parent node (or current level structure)
+            # The source says "high frequency coefficients allow the reconstruction of the child nodes from the current node"
+            # This implies the high-pass data is stored at the level *above* the low-pass data it helps reconstruct
+            # However, the recursive structure suggests we build the tree from bottom up or top down.
+            # Given the description "result in an octree", we likely store the high-pass coeffs in the node 
+            # that represents the parent of the low-pass blocks being processed.
+            
+            next_level_blocks.append(node)
+            
+        # Step 4: Continue process
+        current_level_blocks = next_level_blocks
+        level += 1
+        
+    # After loop, current_level_blocks should contain 1 block (the root low-pass)
+    if len(current_level_blocks) == 1:
+        octree_root = current_level_blocks[0]
+        
+    # Step 5: Thresholding
+    # Apply threshold to all high-frequency coefficients in the octree
+    apply_threshold(octree_root, threshold)
+    
+    return octree_root
+
+def apply_wavelet_transform(blocks, k):
+    """
+    Applies wavelet transform to a group of 8 blocks of size k^3.
+    Returns low-pass block of size k^3 and high-pass coefficients.
+    Implementation details of the specific wavelet filter are not given in sources [G].
+    """
+    # Combine 8 blocks of size k^3 into a (2k)^3 volume
+    combined_volume = combine_blocks(blocks, k)
+    
+    # Apply 3D wavelet transform
+    low_pass, high_pass = perform_3d_wavelet_transform(combined_volume)
+    
+    return low_pass, high_pass
+
+def apply_threshold(node, threshold):
+    """
+    Sets high-frequency coefficients to zero if their absolute value is below threshold.
+    """
+    for coeff in node['high_freq']:
+        if abs(coeff) < threshold:
+            coeff = 0
+```
+
+## Subtopics
+
+### [3D Haar Wavelet Compression with Hierarchical Subblocks](6519-3d-haar-wavelet-compression-with-hierarchical-subblocks.md)
+A compression scheme for 3D volumetric datasets that applies the Haar Wavelet Transform hierarchically to 16x16x16 unit blocks, dividing data into low-frequency averages and high-frequency error matrices across four levels. It differs from standard blockwise approaches by organizing four distinct levels of compression within the block structure, whereas alternatives like [8] apply equations only twice in a 2x2x2 subregion. The method prioritizes computational simplicity and fast reconstruction speed over the high-quality smoothing provided by bases like Daubechies.
+
+## Operating characteristics
+*   **Compression Ratio:** Up to 4:1 for typical data sets (lossy) [S1, unofficial]. The source also mentions that Guthe et al.'s scheme allows compression ratios of 30:1 without noticeable artifacts [S1, unofficial].
+*   **Memory:** Large data sets can be stored in main memory due to the high compression ratio [S1, unofficial].
+*   **Hardware:** Tested on a 2Ghz Pentium 4 PC with 1GB of RAM and an nVidia GeForce 4 Ti4600 graphics board with 128MB of local video memory [S1, unofficial].
+*   **Strengths:** Allows compression of large data sets into main memory; enables access to parts of the volume without decompressing the whole data set (unlike [6]) [S1, unofficial].
+*   **Limitations:** Lossy compression; requires preprocessing to convert integer arrays to compressed representation [S1, unofficial].
+
+## Background
+*   **Origin:** Proposed by Stefan Guthe et al. [7] [S1, unofficial].
+*   **History:** This work solved problems presented in Guthe et al. [6], which proposed a wavelet compression scheme with extensions for encoding animated data sets but did not allow access to part of the volume without decompressing the whole data set [S1, unofficial].
+*   **Usage:** Used for interactive visualization of very large volume data sets [S1, unofficial][S2].
+
+## Sources
+[S1] Volumetric Medical Images Visualization on Mobile Devices, http://hdl.handle.net/2099.1/11308, fetched 2026-10-26 (unofficial)
+[S2] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27

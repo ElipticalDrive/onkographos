@@ -1,0 +1,180 @@
+# Adaptive Streamline Generation
+
+Also called: Adaptive Line Extension, Streamline Subdivision
+
+## Overview
+An iterative CUDA-based algorithm that generates streamlines by starting with a fixed number of seeds, extending them via GPU kernels, and recursively adding new seeds based on the endpoints of previously generated lines until a maximum number of adaptive steps is reached or no new lines are generated [S1, unofficial]. It sets itself apart from static seeding methods by dynamically refining the streamline density in areas where flow diverges, building on the principles of [Adaptive Stream Line Seeding](5604-adaptive-stream-line-seeding.md).
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A vector field (accessed via device memory), initial seed points (`m_startPt`, `m_endPt`), maximum number of adaptive steps (`m_maxAdaptiveSteps`), maximum adaptive distance (`m_maxAdaptiveDistance`), and configuration parameters for line storage (`m_linesCount`, `verticesPerLine`, `verticesPerSample`).
+*   **Outputs:** A set of streamlines represented as line strips, stored in device memory for rendering.
+
+**Data Structures:**
+*   `m_h_seeds`: Host array of seed points. Initialized with `m_startPt` and `m_endPt`.
+*   `m_d_seeds`: Device array of seed points, copied from `m_h_seeds`.
+*   `m_h_ptCounts`: Host array tracking the number of vertices per line. Initialized to zero.
+*   `m_d_ptCounts`: Device array corresponding to `m_h_ptCounts`.
+*   `d_inLinePairs`: Device array of `uint2` storing pairs of line indices to extend. Size: `m_linesCount`.
+*   `d_outLinePairs`: Device array of `uint2` storing new line pairs generated in the current step. Size: `m_linesCount`.
+*   `d_vertices`: Device array storing the vertex data for all lines.
+*   `d_outLinesIndex`: Device integer tracking the current index in the output line array.
+*   `d_outLinePairsIndex`: Device integer tracking the current index in the output line pairs array.
+
+**Parameters:**
+*   `m_maxAdaptiveSteps`: Maximum number of adaptive iterations allowed.
+*   `m_maxAdaptiveDistance`: Maximum distance parameter passed to the adaptive extension kernel.
+*   `m_linesCount`: Total capacity of line storage arrays.
+*   `verticesPerLine`: Number of vertices allocated per streamline.
+*   `verticesPerSample`: Number of vertices per sample point in the streamline.
+
+**Algorithm Steps:**
+1.  **Initialization:**
+    *   Set `m_h_ptCounts` to zero for all lines.
+    *   Set `linesToGenerate` to 2.
+    *   Set `m_h_seeds[0]` to `m_startPt` and `m_h_seeds[1]` to `m_endPt`.
+    *   Copy `m_h_seeds` to device memory `m_d_seeds`.
+    *   Set `m_linePairsCount` to 1.
+    *   Create a `uint2` line pair `{0, 1}` and copy to `d_inLinePairs`.
+    *   Set `totalLinesCount` to 0.
+
+2.  **Initial Extension:**
+    *   Call `runKernel` with `nullptr` seeds and `linesToGenerate` (2) at `totalLinesCount` (0).
+    *   Increment `totalLinesCount` by `linesToGenerate`.
+
+3.  **Adaptive Loop:**
+    *   Loop for `adaptiveSteps` from 0 to `m_maxAdaptiveSteps - 1`:
+        *   Copy `totalLinesCount` to `d_outLinesIndex` and 0 to `d_outLinePairsIndex`.
+        *   Call `runLineAdaptiveExtensionKernel` with the following arguments:
+            *   `maxAdaptiveDistance`
+            *   `d_inLinePairs`
+            *   `m_linePairsCount`
+            *   `d_vertices`
+            *   `verticesPerLine`
+            *   `verticesPerSample`
+            *   `m_d_ptCounts`
+            *   `m_d_seeds`
+            *   `d_outLinePairs`
+            *   `d_outLinePairsIndex`
+            *   `d_outLinesIndex`
+            *   `m_linesCount`
+        *   Call `runKernel` with `nullptr` seeds and `linesToGenerate` at `totalLinesCount`.
+        *   Increment `totalLinesCount` by `linesToGenerate`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adaptive_streamline_generation(
+    m_startPt, m_endPt, 
+    m_maxAdaptiveSteps, m_maxAdaptiveDistance,
+    m_linesCount, verticesPerLine, verticesPerSample,
+    runKernel, runLineAdaptiveExtensionKernel
+):
+    # Initialization
+    m_h_ptCounts = [0] * m_linesCount
+    linesToGenerate = 2
+    m_h_seeds = [m_startPt, m_endPt]
+    
+    # Copy to device
+    m_d_seeds = copy_to_device(m_h_seeds)
+    m_d_ptCounts = copy_to_device(m_h_ptCounts)
+    
+    m_linePairsCount = 1
+    d_inLinePairs = copy_to_device([uint2(0, 1)])
+    
+    totalLinesCount = 0
+    
+    # Initial extension
+    runKernel(nullptr, linesToGenerate, totalLinesCount)
+    totalLinesCount += linesToGenerate
+    
+    # Adaptive loop
+    for adaptiveSteps in range(m_maxAdaptiveSteps):
+        # Reset indices for this step
+        d_outLinesIndex = copy_to_device(totalLinesCount)
+        d_outLinePairsIndex = copy_to_device(0)
+        
+        # Adaptive extension
+        runLineAdaptiveExtensionKernel(
+            maxAdaptiveDistance=m_maxAdaptiveDistance,
+            d_inLinePairs=d_inLinePairs,
+            m_linePairsCount=m_linePairsCount,
+            d_vertices=None, # Assumed pre-allocated device memory
+            verticesPerLine=verticesPerLine,
+            verticesPerSample=verticesPerSample,
+            m_d_ptCounts=m_d_ptCounts,
+            m_d_seeds=m_d_seeds,
+            d_outLinePairs=None, # Assumed pre-allocated device memory
+            d_outLinePairsIndex=d_outLinePairsIndex,
+            d_outLinesIndex=d_outLinesIndex,
+            m_linesCount=m_linesCount
+        )
+        
+        # Generate new lines based on adaptive results
+        # Note: linesToGenerate is updated by the kernel or subsequent logic not fully detailed in sources
+        # Assuming linesToGenerate is determined by the number of new pairs generated
+        # For the sake of completeness, we assume linesToGenerate is updated here
+        # [G] In the source, linesToGenerate is not explicitly updated in the loop body shown, 
+        # but runKernel is called with it. It is likely that m_linePairsCount or a similar variable 
+        # determines the number of new lines to generate in the next runKernel call.
+        # However, the source code snippet shows:
+        # runKernel(nullptr, linesToGenerate, totalLinesCount);
+        # totalLinesCount += linesToGenerate;
+        # This implies linesToGenerate might be fixed or updated externally. 
+        # Given the "Adaptive" nature, it's highly probable that the number of new lines 
+        # corresponds to the number of new pairs generated.
+        # Let's assume linesToGenerate is updated based on d_outLinePairsIndex or similar.
+        # Since the source doesn't explicitly show the update of linesToGenerate, 
+        # we will leave it as a comment or assume it's handled by the kernel's output.
+        # Actually, looking at the source:
+        # runLineAdaptiveExtensionKernel(...)
+        # runKernel(nullptr, linesToGenerate, totalLinesCount);
+        # It seems linesToGenerate is not updated in the loop in the provided snippet.
+        # This might be a simplification or an error in the notes. 
+        # However, to be implementable, we must assume linesToGenerate is updated.
+        # Let's assume linesToGenerate is the number of new pairs generated.
+        # [G] linesToGenerate = read_from_device(d_outLinePairsIndex) # Approximation
+        
+        # To strictly follow the source which doesn't show the update:
+        # We will assume linesToGenerate is a parameter that might change or is fixed.
+        # But "Adaptive" implies change. 
+        # Let's look at the source again.
+        # The source says: "Call runKernel with nullptr seeds and linesToGenerate at totalLinesCount."
+        # It does not show linesToGenerate being updated.
+        # This is a gap. [G] Assuming linesToGenerate is updated to the number of new line pairs generated.
+        linesToGenerate = read_from_device(d_outLinePairsIndex) # [G] Inferred from adaptive nature
+        
+        totalLinesCount += linesToGenerate
+        
+        # Update input line pairs for next iteration
+        d_inLinePairs = d_outLinePairs # Swap buffers
+        m_linePairsCount = linesToGenerate # Update count
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Floating-point precision in CUDA kernels may affect the accuracy of streamline tracing, especially over long distances.
+*   **Boundaries:** Streamlines may exit the domain or hit boundaries. The source does not specify how this is handled. [G] Typically, streamlines are terminated or wrapped.
+*   **Degenerate Input:** If `m_maxAdaptiveSteps` is 0, only the initial two lines are generated. If `m_linesCount` is too small, new lines may be dropped.
+
+## Subtopics
+
+### Curvature Field Line Tracing for Strokes
+Generating hatching strokes by tracing paths from seed points along maximal curvature directions in object space, using RK4(3) integration with adaptive step size [S2, unofficial]. It sets itself apart by focusing on curvature fields for hatching rather than vector fields for flow visualization [S2, unofficial]. Choose it when visualizing surface curvature with hatching strokes. It terminates a stroke if the current hatch direction deviates from the original by a constant angle [S2, unofficial]. Each point stores vertex coordinates, gray-scale gradient, and texture coordinates (distance to seed / total length) [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of adaptive steps and the number of lines generated per step. Each step involves kernel calls for extension and generation.
+*   **Memory Complexity:** Proportional to `m_linesCount` and `verticesPerLine`.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales with the number of adaptive steps and the complexity of the vector field.
+*   **Strengths:** Dynamically adapts to flow divergence, providing higher detail in turbulent areas.
+*   **Limitations:** Requires multiple kernel launches and data transfers. Performance depends on the adaptive logic.
+*   **When to use:** When detailed visualization of flow divergence is required.
+*   **When not to use:** When real-time performance is critical and adaptive steps are too expensive.
+
+## Background
+Originated from the work on CUDA-based vector field visualization [S1, unofficial]. It is used in interactive visualization applications to provide detailed streamline representations.
+
+## Sources
+[S1] NightElfik/Vector-field-visualization-using-cuda, https://github.com/NightElfik/Vector-field-visualization-using-cuda, fetched 2026-10-29 (unofficial)
+[S2] Interactive volume illustration, https://openalex.org/W2147354080, fetched 2026-10-27 (unofficial)

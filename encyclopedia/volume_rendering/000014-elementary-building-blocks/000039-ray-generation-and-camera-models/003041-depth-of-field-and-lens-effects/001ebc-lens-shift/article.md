@@ -1,25 +1,25 @@
 # Lens Shift
 Also called: Aperture Transformation, Lens Shift Sampling
 ## Overview
-Lens shift is a path construction technique in volumetric multi-view rendering that adapts a ray sampled for one camera's lens aperture to match a different camera's aperture geometry. It solves the problem of reusing random numbers across cameras with different optical parameters, specifically aperture radii, without generating new samples. It sets itself apart from [Thin Lens Depth of Field](4922-thin-lens-depth-of-field.md) by focusing on the geometric transformation of the sampling point itself rather than the depth-of-field blur integration, and from [Depth of Field and Lens Effects](6232-depth-of-field-and-lens-effects.md) by providing the specific mechanism for aperture adaptation.
+Lens shift is a path construction technique in volumetric multi-view rendering that transforms a point sampled on one camera's lens aperture to match a different camera's aperture geometry [S1]. It reuses the random numbers that sampled the base lens interaction to adapt to different aperture radii [S1]. It sets itself apart from [Thin Lens Depth of Field](4922-thin-lens-depth-of-field.md) by focusing on the geometric transformation of the sampling point itself rather than depth-of-field blur integration, and from [Depth of Field and Lens Effects](6232-depth-of-field-and-lens-effects.md) by providing the specific mechanism for aperture adaptation [G].
 
 ## How it works
 **Inputs and outputs:**
-- Input: Base lens interaction point $x_{\text{lens}}$ (2D coordinates on the base aperture), base aperture radius $r$, target aperture radius $r'$.
-- Output: Shifted lens interaction point $x'_{\text{lens}}$ and the Jacobian determinant of the transformation.
+- Input: Base lens interaction point $x_{\text{lens}}$ (2D coordinates on the base aperture), base aperture radius $r$, target aperture radius $r'$ [S1].
+- Output: Shifted lens interaction point $x'_{\text{lens}}$ and the Jacobian determinant of the transformation [S1].
 
 **Data structures:**
-- $x_{\text{lens}}$: A 2D vector $(u, v)$ representing the offset from the optical axis on the base lens disk.
-- $r, r'$: Scalar floating-point values representing the radii of the base and target apertures, respectively.
+- $x_{\text{lens}}$: A 2D vector $(u, v)$ representing the offset from the optical axis on the base lens disk [S1].
+- $r, r'$: Scalar floating-point values representing the radii of the base and target apertures, respectively [S1].
 
 **Steps:**
-1. Retrieve the base lens sample point $x_{\text{lens}}$ and the radii $r$ (base) and $r'$ (target).
-2. Compute the scaling factor $s = \frac{r'}{r}$.
+1. Retrieve the base lens sample point $x_{\text{lens}}$ and the radii $r$ (base) and $r'$ (target) [S1].
+2. Compute the scaling factor $s = \frac{r'}{r}$ [S1].
 3. Apply the linear scaling to the lens coordinates:
-   $$x'_{\text{lens}} = s \cdot x_{\text{lens}} = \frac{r'}{r} \cdot x_{\text{lens}}$$
+   $$x'_{\text{lens}} = s \cdot x_{\text{lens}} = \frac{r'}{r} \cdot x_{\text{lens}}$$ [S1].
 4. Compute the Jacobian determinant of the transformation:
-   $$\left| S'_{i \rightarrow j}(x_{\text{lens}}) \right| = \frac{r^2}{r'^2}$$
-5. Use $x'_{\text{lens}}$ as the new intersection point on the target camera's lens aperture for subsequent ray tracing steps.
+   $$\left| S'_{i \rightarrow j}(x_{\text{lens}}) \right| = \frac{r^2}{r'^2}$$ [S1].
+5. Use $x'_{\text{lens}}$ as the new intersection point on the target camera's lens aperture for subsequent ray tracing steps [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -38,57 +38,31 @@ def lens_shift(x_lens, r_base, r_target):
         x_prime: 2D vector on the target lens aperture.
         jacobian: Scalar Jacobian determinant.
     """
-    # Handle degenerate case where base radius is zero
-    if r_base == 0:
-        raise ValueError("Base aperture radius cannot be zero for lens shift.")
-        
-    # Calculate scaling factor
     scale = r_target / r_base
-    
-    # Transform the lens point
     x_prime = x_lens * scale
-    
-    # Calculate Jacobian determinant
-    # The transformation is a uniform scaling by scale in 2D.
-    # The Jacobian determinant is scale^2.
-    # Note: The source formula is r^2 / r'^2, which is (1/scale)^2.
-    # This represents the change in probability density area.
     jacobian = (r_base / r_target) ** 2
-    
     return x_prime, jacobian
 ```
 
 **Edge cases and pitfalls:**
-- If $r = 0$, the transformation is undefined. This should be handled as a degenerate case, likely by skipping the shift or using a default sample [G].
-- Precision issues may arise if $r$ and $r'$ differ by several orders of magnitude.
-- The transformation assumes both apertures are centered and disk-shaped. If the target aperture is offset or elliptical, additional transformations are required (not covered in the primary source).
+- The transformation assumes both apertures are centered and disk-shaped [S1].
+- If the target aperture is offset or elliptical, additional transformations are required [G].
+- If $r = 0$, the transformation is undefined [G].
 
 ## Subtopics
 
 ### Shutter Time Shift
-Shutter time shift reuses the base shutter time sampled within the camera shutter interval for the target camera. It assumes fixed time since dealing with object motion would require re-evaluating occlusions and shading on the complete path due to moving geometry, which would make the cost of the time shift equivalent to constructing a full path. The transformation is $x'_{\text{time}} = x_{\text{time}}$. The Jacobian of the shift is 1: $\left| S'_{i \rightarrow j}(x_{\text{time}}) \right| = 1$. This method is chosen when temporal coherence is assumed and motion blur is not being explicitly simulated across cameras with different shutter timings [S1].
+Shutter time shift reuses the base shutter time sampled within the camera shutter interval for the target camera [S1]. The transformation is $x'_{\text{time}} = x_{\text{time}}$ [S1]. The Jacobian of the shift is 1: $\left| S'_{i \rightarrow j}(x_{\text{time}}) \right| = 1$ [S1]. Paths are constructed at fixed time because dealing with object motion would require re-evaluating occlusions and shading on the complete path due to moving geometry, making the cost of the time shift equivalent to constructing a full path [S1].
 
 ## Operating characteristics
-**Time and memory complexity:**
-- Time complexity: $O(1)$ per shift operation.
-- Memory complexity: $O(1)$ additional memory.
-
-**Measured performance:**
-- Not given in the sources.
-
-**Scaling:**
-- The method scales linearly with the number of cameras, as each shift is an independent constant-time operation.
-
-**Strengths and limitations:**
-- Strengths: Efficient reuse of random numbers; no need for additional sampling.
-- Limitations: Assumes static geometry (no motion blur); assumes disk-shaped apertures.
-
-**When to use it and when not:**
-- Use when rendering multi-view volumetric scenes with static geometry and different camera apertures.
-- Do not use when object motion is significant, as the assumption of fixed time breaks down [S1].
+**Time and memory complexity:** Not given in the sources.
+**Measured performance:** Not given in the sources.
+**Scaling:** Not given in the sources.
+**Strengths and limitations:** Not given in the sources.
+**When to use it and when not:** Not given in the sources.
 
 ## Background
-Lens shift was introduced in the context of volumetric multi-view rendering. The method was proposed by [S1] (Volumetric Multi‐View Rendering, 2026) and builds upon earlier work by [KSKAC02, HGP∗ 19], used similarly in the work of Schwarzhaupt [Sch19] and Fraboni et al. [FINB19]. It is used in rendering pipelines that require consistent sampling across multiple camera views with different optical parameters.
+Lens shift was introduced in the context of volumetric multi-view rendering [S1]. The method reuses random numbers that sampled the base lens interaction, a technique used similarly in earlier work [KSKAC02, HGP∗ 19], and applied by Schwarzhaupt [Sch19] and Fraboni et al. [FINB19] [S1].
 
 ## Sources
 [S1] Volumetric Multi‐View Rendering, https://doi.org/10.1111/cgf.14481, fetched 2026-10-26

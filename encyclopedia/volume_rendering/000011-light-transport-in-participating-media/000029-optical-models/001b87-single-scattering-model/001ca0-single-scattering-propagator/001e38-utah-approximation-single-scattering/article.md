@@ -100,9 +100,9 @@ def compute_utah_approximation(f, x, h, omega_prime, omega, a, tau, c, E, i):
     # Step 2: Compute BRDF r(X, omega, omega') using Henyey-Greenstein [S1, unofficial][S2]
     x_dot = sum(o * op for o, op in zip(omega, omega_prime))
     denom = 1 + c * c - 2 * c * x_dot
-    # Guard against numerical underflow; c in (-1, 1) keeps denom > 0
-    if denom <= 0:
-        denom = 1e-9
+    # Numerical safeguard; mathematically denom > 0 for c in (-1, 1) and x_dot in [-1, 1]
+    if denom <= 1e-12:
+        denom = 1e-12
     p_hg = (1.0 / (4.0 * math.pi)) * (1 - c) / (denom ** 1.5)
     r = a * tau * p_hg
 
@@ -116,12 +116,12 @@ def compute_utah_approximation(f, x, h, omega_prime, omega, a, tau, c, E, i):
 ```
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources. [S2]
+*   **Memory Complexity:** Not given in the sources. [S2]
 *   **Strengths:** Provides surface-like shading without explicit surface extraction [S2].
 *   **Limitations:** Ignores shadows and volume absorption between the light source and the voxel [S2].
 *   **When to use:** As a baseline shading model before adding shadow and absorption effects [S2].
-*   **When not to use:** Not given in the sources.
+*   **When not to use:** Not given in the sources. [S2]
 
 ## Background
 The Utah approximation is named after early shaded images from the University of Utah [S1, unofficial][S2]. It is described in the paper "Optical Models for Direct Volume Rendering" by Marc Levoy [S1, unofficial][S2]. The model is a simplification of single scattering that assumes external illumination reaches the voxel unimpeded [S1, unofficial][S2].

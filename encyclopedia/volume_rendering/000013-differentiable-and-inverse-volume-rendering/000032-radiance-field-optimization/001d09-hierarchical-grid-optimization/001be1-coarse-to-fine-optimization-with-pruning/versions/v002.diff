@@ -1,0 +1,119 @@
+--- v001.md
++++ v002.md
+@@ -4,14 +4,14 @@
+ 
+ ## Overview
+-Coarse-to-Fine Optimization with Pruning is a hierarchical training strategy for 3D radiance fields represented as sparse voxel grids. It solves the problem of efficiently initializing and refining high-resolution scene representations by starting with a coarse dense grid, pruning unoccupied regions, and iteratively subdividing the remaining voxels to higher resolutions. It sets itself apart from static grid methods by dynamically adapting the voxel structure to scene complexity during training, preventing overfitting in unobserved regions while refining detail where needed, building on the general framework of [Hierarchical Grid Optimization](1414-hierarchical-grid-optimization.md).
++Coarse-to-Fine Optimization with Pruning is a hierarchical training strategy for 3D radiance fields represented as voxel grids [S1]. It solves the problem of efficiently initializing and refining high-resolution scene representations by starting with a coarse dense grid, pruning unoccupied regions, and iteratively subdividing the remaining voxels to higher resolutions [S1]. It sets itself apart from static grid methods by dynamically adapting the voxel structure to scene complexity during training, building on the general framework of [Hierarchical Grid Optimization](1414-hierarchical-grid-optimization.md) [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A set of training images with known camera poses.
+-- Output: An optimized voxel grid representation (density and color features) at the target resolution.
++- Input: A set of training images with known camera poses [S1].
++- Output: An optimized voxel grid representation (density and color features) at the target resolution [S1].
+ 
+ **Data Structures:**
+-- **Voxel Grid:** A 3D array storing density ($\sigma$) and color features (e.g., spherical harmonic coefficients or MLP inputs).
+-- **Pruning Mask:** A boolean or weight-based indicator for each voxel to determine if it is occupied.
++- **Voxel Grid:** A 3D array storing density ($\sigma$) and color features (e.g., spherical harmonic coefficients) [S1].
++- **Pruning Mask:** A boolean indicator for each voxel to determine if it is occupied, derived from weight or density thresholds [S1].
+ 
+ **Steps:**
+@@ -30,42 +30,35 @@
+ **Pseudocode:**
+ ```python
+-def coarse_to_fine_optimization(training_images, initial_res=256, target_res=512, prune_threshold=0.01, dilation_kernel_size=1):
+-    # Initialize coarse grid
+-    grid = VoxelGrid(resolution=initial_res)
+-    grid.initialize_random()
+-    
++def coarse_to_fine_optimization(training_rays, initial_res=256, target_res=512, prune_threshold=0.01):
++    grid = create_voxel_grid(resolution=initial_res)
+     current_res = initial_res
+-    
++
+     while current_res < target_res:
+-        # Optimize current resolution
++        # Optimize grid parameters (opacities, spherical harmonic coefficients) using MSE + TV regularization [S1]
++        # Note: Optimization loop details are not specified in sources [G]
+         for step in range(num_optimization_steps):
+-            loss = compute_loss(grid, training_images)
+-            optimize_parameters(grid, loss)
+-        
+-        # Prune unoccupied voxels
+-        # Calculate max weight for each voxel over all rays
+-        voxel_weights = compute_voxel_weights(grid, training_images)
+-        
+-        # Determine voxels to prune based on threshold
+-        voxels_to_prune = voxel_weights < prune_threshold
+-        
+-        # Apply dilation to prevent surface artifacts
+-        if dilation_kernel_size > 0:
+-            voxels_to_prune = dilate_mask(voxels_to_prune, dilation_kernel_size)
+-        
++            loss = compute_loss(grid, training_rays)
++            update_parameters(grid, loss)
++
++        # Prune unoccupied voxels using max weight threshold or density threshold [S1]
++        # Calculate max weight for each voxel over all training rays: w_i = T_i * (1 - exp(-sigma_i * delta_i))
++        voxel_weights = compute_max_weight_over_rays(grid, training_rays)
++        voxels_to_prune = [w < prune_threshold for w in voxel_weights]
++
++        # Dilation: voxel only pruned if itself and neighbors are unoccupied [S1]
++        # Note: Dilation kernel size is not specified in sources [G]
++        voxels_to_prune = apply_dilation(voxels_to_prune)
++
+         grid.prune(voxels_to_prune)
+-        
+-        # Refine resolution
+-        new_res = current_res * 2
+-        if new_res > target_res:
+-            new_res = target_res
+-            
+-        grid.refine(new_res)
+-        
+-        # Initialize new values using trilinear interpolation
++
++        # Refine: Subdivide each remaining voxel in half in each dimension [S1]
++        new_res = min(current_res * 2, target_res)
++        grid.subdivide(new_res)
++
++        # Initialize new values using trilinear interpolation from coarser grid [S1]
+         grid.interpolate_from_coarser()
+-        
++
+         current_res = new_res
+-        
++
+     return grid
+ ```
+@@ -75,9 +68,8 @@
+ - `target_res`: Final resolution, e.g., $512^3$ [S1].
+ - `prune_threshold`: Threshold for voxel pruning, based on $T_i(1-\exp(-\bar{\sigma}_i \bar{\delta}_i))$ or density [S1].
+-- `dilation_kernel_size`: Size of the dilation kernel to ensure neighbors are also unoccupied before pruning [S1].
+ 
+ **Edge Cases and Pitfalls:**
+ - **Surface Artifacts:** Naive pruning without dilation causes artifacts near surfaces due to trilinear interpolation pulling values from empty exterior voxels [S1].
+-- **Precision:** Ensure that the weight calculation $T_i(1-\exp(-\bar{\sigma}_i \bar{\delta}_i))$ is numerically stable for small densities [S1].
++- **Interpolation Quality:** Trilinear interpolation at lower resolutions can outperform nearest neighbor at higher resolutions, improving visual quality [S1].
+ 
+ ## Subtopics
+@@ -112,11 +104,11 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The coarse-to-fine approach reduces training time compared to optimizing a high-resolution grid from scratch, as the initial coarse grid converges faster. However, the iterative refinement and pruning steps add overhead. The fine detail reconstruction stage adds additional computational cost due to the hybrid explicit-implicit representation and progressive scaling [S2].
+-- **Memory Complexity:** Pruning reduces memory usage by removing unoccupied voxels. The fine stage uses a higher-resolution grid but only in the unknown space, balancing memory and detail [S2].
++- **Time Complexity:** The coarse-to-fine approach reduces training time compared to optimizing a high-resolution grid from scratch, as the initial coarse grid converges faster [S1]. However, the iterative refinement and pruning steps add overhead [S1]. The fine detail reconstruction stage adds additional computational cost due to the hybrid explicit-implicit representation and progressive scaling [S2].
++- **Memory Complexity:** Pruning reduces memory usage by removing unoccupied voxels [S1]. The fine stage uses a higher-resolution grid but only in the unknown space, balancing memory and detail [S2].
+ - **Performance:** Trilinear interpolation at lower resolutions can outperform nearest neighbor at higher resolutions, improving visual quality [S1]. The method achieves super-fast convergence for radiance field reconstruction [S2].
+-- **Strengths:** Efficiently handles high-resolution scenes by focusing computation on relevant areas. Prevents overfitting in unobserved regions.
+-- **Limitations:** Requires careful tuning of pruning thresholds and dilation to avoid artifacts. The fine detail reconstruction stage is more complex to implement [S2].
+-- **When to Use:** Suitable for high-quality novel view synthesis where computational resources are limited but high resolution is required.
+-- **When Not to Use:** Not ideal for real-time applications requiring immediate high-resolution output without iterative refinement.
++- **Strengths:** Efficiently handles high-resolution scenes by focusing computation on relevant areas [S1]. Prevents overfitting in unobserved regions [S1].
++- **Limitations:** Requires careful tuning of pruning thresholds and dilation to avoid artifacts [S1].
++- **When to Use:** Suitable for high-quality novel view synthesis where computational resources are limited but high resolution is required [G].
++- **When Not to Use:** Not ideal for real-time applications requiring immediate high-resolution output without iterative refinement [G].
+ 
+ ## Background

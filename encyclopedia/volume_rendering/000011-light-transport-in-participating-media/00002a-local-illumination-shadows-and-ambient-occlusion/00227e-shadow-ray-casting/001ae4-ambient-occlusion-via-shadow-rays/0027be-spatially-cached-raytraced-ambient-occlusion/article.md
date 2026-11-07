@@ -50,6 +50,13 @@ Spatially Cached Raytraced Ambient Occlusion (SC-RTAO) is an optimization for ra
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+# Constants assumed global
+VX_AO_HASH_MASK = 0xFFFFFF
+VX_AO_MAX_CELL_AGE = 20
+VX_AO_SAMPLE_LIMIT = 1000
+VX_AO_RAYS_PER_PIXEL = 8
+VX_AO_HASH_PROBE_COUNT = 16
+
 # Helper functions (make_spatial_hash_key, offset_ray, pcg, pcg2d, as_normalized_float,
 # frac, r2_sequence, sample_cosine_weighted_hemisphere, orient_sample_direction, dda)
 # are assumed to be provided by the shader environment or standard math libraries.
@@ -97,14 +104,14 @@ def spatial_hash_find_or_insert(key, uniforms, hash_checksums, hash_frames, hash
     index = key.hash & VX_AO_HASH_MASK
     
     for probe in range(VX_AO_HASH_PROBE_COUNT):
-        old_checksum = hash_checksums[index]
-        if old_checksum == 0:
+        # Simulate InterlockedCompareExchange: if slot is empty (0), claim it with key.checksum
+        ex_checksum = hash_checksums[index]
+        if ex_checksum == 0:
             hash_checksums[index] = key.checksum
             ex_checksum = 0
-        else:
-            ex_checksum = old_checksum
             
         if ex_checksum == 0 or ex_checksum == key.checksum:
+            # Simulate InterlockedExchange for frame
             hash_frames[index] = frame
             return index
             
@@ -112,6 +119,7 @@ def spatial_hash_find_or_insert(key, uniforms, hash_checksums, hash_frames, hash
         
         # Check age
         if frame - ex_frame > VX_AO_MAX_CELL_AGE:
+            # Simulate InterlockedExchange for checksum, payload, and frame
             hash_checksums[index] = key.checksum
             hash_payloads[index] = 0
             hash_frames[index] = frame

@@ -3,7 +3,7 @@
 Also called: Wilhelms et al. Per-Pixel Sort, Wilhelms et al. Sorting
 
 ## Overview
-Per-Pixel Sorting (General Variant) is an image-space visibility ordering method that sorts all cell faces projecting onto a specific pixel at render time, just prior to compositing [S2, S3, unofficial]. Unlike [Exact Visibility Ordering for Cell Projection Volume Rendering (SXMPVO)](944-exact-visibility-ordering-for-cell-projection-volume-renderi.md), which sorts only exterior faces, this variant processes the entire set of projected faces [S2, unofficial]. It handles visibility cycles gracefully because a local visibility sort always exists for each pixel center, even if no global cell sort exists [S2, unofficial]. It differs from [Power Distance Sort](1060-power-distance-sort.md) and [Newell-based Visibility Sorting](1123-newell-based-visibility-sorting.md) by relying on explicit per-pixel sorting structures (buckets and lists) rather than distance metrics or normal-based approximations [S1][S3, unofficial].
+Per-Pixel Sorting (General Variant) is an image-space visibility ordering method that sorts all cell faces projecting onto a specific pixel at render time, just prior to compositing [S2, S3, unofficial]. Unlike [Exact Visibility Ordering for Cell Projection Volume Rendering (SXMPVO)](944-exact-visibility-ordering-for-cell-projection-volume-renderi.md), which sorts only exterior faces, this variant processes the entire set of projected faces [S2, unofficial]. It handles visibility cycles gracefully because a local visibility sort always exists for each pixel center, even if no global cell sort exists [S2, unofficial]. It adapts scan-line visible surface algorithm techniques using buckets and lists to manage face overlaps [S1][S3, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
@@ -12,20 +12,21 @@ Per-Pixel Sorting (General Variant) is an image-space visibility ordering method
 
 **Data Structures:**
 The method adapts scan-line visible surface algorithm techniques using the following structures [S1][S3, unofficial]:
-1. **Y-Buckets:** A list of lists indexed by scan line $y$. Each bucket stores faces that first cross that scan line.
-2. **Active List:** A list of faces currently intersecting the current scan line $y$.
-3. **X-Buckets:** A list of lists indexed by pixel column $x$ within the current scan line. Each bucket stores faces covering that pixel.
-4. **Z-Sorted List:** A list of fragments (or face segments) at the current pixel $(x, y)$, sorted by depth $z$.
+1. **Y-Buckets:** A list of lists indexed by scan line $y$. Each bucket stores faces that first cross that scan line [S1][S3, unofficial].
+2. **Active List:** A list of faces currently intersecting the current scan line $y$ [S1][S3, unofficial].
+3. **X-Buckets:** A list of lists indexed by pixel column $x$ within the current scan line. Each bucket stores faces covering that pixel [S1][S3, unofficial].
+4. **Z-Sorted List:** A list of fragments (or face segments) at the current pixel $(x, y)$, sorted by depth $z$ [S1][S3, unofficial].
 
 **Steps:**
 1. **Initialization:** Create empty Y-Buckets for all scan lines $y$ in the image height [S1][S3, unofficial].
 2. **Scan Line Processing:** Iterate through each scan line $y$ from top to bottom:
-   a. **Update Active List:** Add faces from the Y-Bucket at $y$ to the Active List. Remove faces from the Active List that no longer intersect $y$ (i.e., their $y$-range has ended) [S1][S3, unofficial].
+   a. **Update Active List:** Add faces from the Y-Bucket at $y$ to the Active List [S1][S3, unofficial].
    b. **Pixel Processing:** Iterate through each pixel $x$ in the scan line:
-      i. **Update X-Buckets:** For each face in the Active List, determine if it covers pixel $x$. If so, add the face segment to the X-Bucket at $x$ [S1][S3, unofficial].
-      ii. **Sort Z-List:** Collect all face segments in the X-Bucket at $x$. Sort these segments by their depth $z$ at the pixel center in back-to-front order. Because multiple overlapping meshes are handled, $z$-values must be updated and resorted (or at least the sort must be rechecked for correctness) at each new pixel [S2, unofficial][S3, unofficial].
-      iii. **Composite:** Perform alpha compositing on the sorted Z-List to produce the final pixel color [G].
-      iv. **Cleanup:** Clear the X-Bucket at $x$ for the next pixel [S1][S3, unofficial].
+      i. **Update X-Buckets:** For each face in the Active List, determine if it covers pixel $x$ [S1][S3, unofficial].
+      ii. **Sort Z-List:** Collect all face segments in the X-Bucket at $x$ [S1][S3, unofficial].
+      iii. **Resort by Depth:** Sort these segments by their depth $z$ at the pixel center in back-to-front order [S2, unofficial][S3, unofficial]. Because multiple overlapping meshes are handled, $z$-values must be updated and resorted (or at least the sort must be rechecked for correctness) at each new pixel [S2, unofficial][S3, unofficial].
+      iv. **Composite:** Perform alpha compositing on the sorted Z-List to produce the final pixel color [G].
+      v. **Cleanup:** Clear the X-Bucket at $x$ for the next pixel [S1][S3, unofficial].
 3. **Termination:** After all scan lines and pixels are processed, the image is complete [S1][S3, unofficial].
 
 **Formulas:**
@@ -58,11 +59,7 @@ def per_pixel_sort_general_variant(faces, width, height):
     image = [[None] * width for _ in range(height)]
 
     for y in range(height):
-        active_list = []
-        # Add faces that start at this scan line
-        active_list.extend(y_buckets[y])
-
-        # X-Buckets: map pixel x to list of face segments covering (x, y)
+        active_list = list(y_buckets[y])
         x_buckets = [[] for _ in range(width)]
 
         for x in range(width):
@@ -97,13 +94,13 @@ def per_pixel_sort_general_variant(faces, width, height):
 ## Subtopics
 
 ### [Mammen's Technique](1279-mammen-s-technique.md)
-Mammen's Technique is a software algorithm designed to sort transparent fragments per pixel, specifically positioning them in front of the front-most opaque fragment. It addresses the visibility ordering problem in object-order rendering where transparent surfaces must be composited from back to front. Unlike incremental methods that exploit spatial coherence between adjacent pixels, Mammen's Technique performs independent, complete sorts for each pixel, which distinguishes it from its sibling [Per-Pixel Sorting (General Variant)](1061-per-pixel-sorting-general-variant.md) by prioritizing simplicity of logic over computational efficiency.
+Mammen's Technique is a software algorithm designed to sort transparent fragments per pixel, specifically positioning them in front of the front-most opaque fragment. It addresses the visibility ordering problem in object-order rendering where transparent surfaces must be composited from back to front [G]. Unlike incremental methods that exploit spatial coherence between adjacent pixels, Mammen's Technique performs independent, complete sorts for each pixel, which distinguishes it from its sibling [Per-Pixel Sorting (General Variant)](1061-per-pixel-sorting-general-variant.md) by prioritizing simplicity of logic over computational efficiency.
 
 ### Nearly-Sorted Object-Space Visibility Ordering
 A relaxation of exact sorting where fragments are allowed to be up to $k$ positions out of order in object-space, allowing for faster sorting algorithms while requiring exact sorting during fragment processing [S4, unofficial]. It generates nearly-sorted sequences using hierarchical spatial data structures like BSP-trees or simple centroid sorting [S4, unofficial]. The $k$-buffer can sort a $k$-nearly sorted sequence of $n$ fragments in $O(n)$ time [S4, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** The method spends significant effort on per-pixel sorting. Since it sorts all faces (not just exterior), the complexity is higher than exterior-face-only methods. The source notes that software versions repeat sorts from scratch independently at each pixel, which is less efficient than incremental updates [S3, unofficial].
+- **Time Complexity:** The method spends significant effort on per-pixel sorting [S2, unofficial]. Since it sorts all faces (not just exterior), the complexity is higher than exterior-face-only methods [S2, unofficial]. The source notes that software versions repeat sorts from scratch independently at each pixel, which is less efficient than incremental updates [S3, unofficial].
 - **Memory Complexity:** Requires substantial amounts of memory proportional to the projected area of all faces in pixels [S3, unofficial]. This contrasts with methods that only handle boundary faces, which require memory proportional to the projected area of the mesh boundary [S3, unofficial].
 - **Strengths:** Handles visibility cycles gracefully [S2, unofficial]. Simple logic [S1].
 - **Limitations:** High memory usage [S3, unofficial]. No hardware implementation exists [S3, unofficial]. Does not take advantage of coherence in $y$ [S1][S3, unofficial].

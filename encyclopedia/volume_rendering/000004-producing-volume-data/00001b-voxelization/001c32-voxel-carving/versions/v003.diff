@@ -1,0 +1,265 @@
+--- v002.md
++++ v003.md
+@@ -1,169 +1,132 @@
+ # Voxel Carving
+ 
++Also called: space carving
+ 
+ ## Overview
+-Voxel carving is a technique to reconstruct a dense, filled 3D voxel grid from a set of 2D depth maps or silhouettes captured from multiple camera viewpoints [S1]. Unlike surface-only voxelization methods that mark only boundary voxels, carving creates a volumetric representation of the object's interior [S1]. It differs from [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) by explicitly enforcing consistency across multiple views to fill the volume, rather than projecting mesh geometry directly into a grid.
++Voxel Carving is a technique to reconstruct a dense, filled 3D voxel grid from multiple 2D depth maps or silhouettes [S1]. Unlike surface-only voxelization methods that occupy only the boundary voxels, Voxel Carving fills the interior volume consistent with the input views [S1]. It differs from [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) by explicitly enforcing visibility constraints from multiple camera viewpoints to determine occupancy, rather than projecting geometry directly into a grid.
+ 
+ ## How it works
+ **Inputs:**
+-*   A 3D mesh or point cloud to be reconstructed.
+-*   A set of camera poses (extrinsics) and intrinsic parameters.
+-*   Depth maps or silhouette images rendered from these poses.
+-*   Grid parameters: `cubic_size` (bounding box dimension), `voxel_resolution` (number of cells per axis), and `origin` (typically center of the bounding box).
++- A 3D mesh or point cloud representing the target object.
++- A set of camera poses (extrinsics) and intrinsic parameters.
++- Depth maps or silhouette images rendered from these poses.
++- Grid parameters: `cubic_size` (bounding box dimension), `voxel_resolution` (number of voxels per axis), and `origin` (typically center of the bounding box).
+ 
+ **Outputs:**
+-*   A dense voxel grid (e.g., `VoxelGrid`) where each voxel is marked as occupied or free.
++- A dense `VoxelGrid` data structure where each voxel is marked as occupied or empty.
+ 
+ **Data Structures:**
+-*   **Voxel Grid:** A 3D array of boolean or float values. The grid dimensions are $N \times N \times N$, where $N = \text{voxel\_resolution}$. The physical size is $\text{cubic\_size} \times \text{cubic\_size} \times \text{cubic\_size}$. The voxel size is $s = \text{cubic\_size} / N$ [S1].
+-*   **Camera Pose:** Defined by an extrinsic matrix $T$ (4x4) and intrinsic parameters.
++- **Voxel Grid**: A 3D array of boolean values (or occupancy flags). The grid dimensions are $(N, N, N)$ where $N = \text{voxel\_resolution}$. The physical bounds are defined by `origin` and `voxel_size`.
++- **Camera Pose**: Defined by an extrinsic matrix $T \in \mathbb{R}^{4 \times 4}$ and intrinsic parameters (focal length, principal point).
+ 
+-**Algorithm Steps:**
++**Steps:**
+ 
+-1.  **Initialize Grid:** Create a dense voxel grid with dimensions defined by `cubic_size` and `voxel_resolution`. The origin is set to $[-\text{cubic\_size}/2, -\text{cubic\_size}/2, -\text{cubic\_size}/2]$ [S1].
+-2.  **Preprocess Geometry:** Center the input mesh at the origin and scale it such that its bounding box fits within the defined `cubic_size` [S1].
+-3.  **Iterate Cameras:** For each camera position in the capture sphere:
+-    a. Compute the extrinsic transformation matrix $T$ from spherical coordinates $(r, r_x, r_y)$ and translation [S1].
+-    b. Render a depth image from the current camera pose using the mesh geometry [S1].
+-    c. **Carve:** Update the voxel grid using the depth map or silhouette.
+-        *   **Silhouette Method:** Project the voxel grid onto the 2D image plane. If a voxel projects to a pixel inside the silhouette, mark it as occupied. If it projects outside, mark it as free (or keep previous state depending on implementation) [S1].
+-        *   **Depth Map Method:** For each pixel in the depth map, compute the 3D ray. Mark all voxels along the ray up to the depth value as occupied. Voxels beyond the depth value are marked as free [S1].
+-4.  **Aggregate:** The final grid represents the intersection of all view-consistent volumes (for silhouette) or the union of visible volumes (for depth, depending on specific implementation logic, though Open3D's `carve_depth_map` typically implies a consistency check or filling) [S1].
++1.  **Initialize Grid**: Create a dense voxel grid with width, height, and depth equal to `cubic_size`. Set `voxel_size` as:
++    $$ \text{voxel\_size} = \frac{\text{cubic\_size}}{\text{voxel\_resolution}} $$
++    Set the origin to $[-\text{cubic\_size}/2, -\text{cubic\_size}/2, -\text{cubic\_size}/2]$ [S1]. Initialize all voxels as potentially occupied (or empty, depending on the specific variant: silhouette carving typically starts with all occupied and carves out empty space, while depth carving may start empty and fill, or vice versa; Open3D's `carve_depth_map` implies a consistency check) [S1].
++
++2.  **Preprocess Geometry**: Center the input mesh at the origin and scale it such that its bounding box fits within the `cubic_size` bounds [S1].
++    $$ \text{center} = \frac{\text{min\_bound} + \text{max\_bound}}{2} $$
++    $$ \text{scale} = \frac{\|\text{max\_bound} - \text{min\_bound}\|}{2} $$
++    $$ v' = \frac{v - \text{center}}{\text{scale}} $$
++
++3.  **Iterate Cameras**: For each camera pose $i$ defined by a position $xyz_i$ and extrinsic matrix $T_i$:
++    a. **Render Depth**: Render a depth image $D_i$ from the current camera pose. The depth value $d(u,v)$ represents the distance from the camera center to the surface along the ray through pixel $(u,v)$ [S1].
++    b. **Carve**: Update the voxel grid based on $D_i$ and $T_i$.
++
++    **Carving Logic (Depth Map Variant):**
++    For each pixel $(u,v)$ in the depth image $D_i$ with depth $d$:
++    1.  Construct the ray from the camera center $C_i$ through the pixel.
++    2.  Identify all voxels intersected by this ray from the camera up to distance $d$. Mark these voxels as **occupied** (or consistent with the view) [S1].
++    3.  Identify all voxels intersected by this ray from distance $d$ to the maximum range. Mark these voxels as **empty** (carved out) [S1].
++
++    **Carving Logic (Silhouette Variant):**
++    1.  Project the voxel grid onto the image plane.
++    2.  If a voxel projects to a pixel outside the silhouette mask, mark the voxel as **empty** [S1].
++    3.  Voxels projecting inside the silhouette remain potentially occupied.
++
++4.  **Finalize**: The resulting grid contains voxels that are consistent with all input depth maps or silhouettes [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import numpy as np
+-
+-def voxel_carving(mesh, camera_positions, intrinsics, extrinsics, 
+-                  cubic_size, voxel_resolution):
+-    """
+-    Carve a voxel grid from depth maps or silhouettes.
++def voxel_carving(mesh, camera_poses, depth_images, cubic_size, voxel_resolution):
++    # 1. Initialize Grid
++    voxel_size = cubic_size / voxel_resolution
++    origin = [-cubic_size / 2.0, -cubic_size / 2.0, -cubic_size / 2.0]
++    # Create dense voxel grid, initialized to all occupied (for silhouette) 
++    # or all empty (for depth fill), depending on implementation. 
++    # Open3D's carve_depth_map typically fills consistent regions.
++    grid = create_dense_voxel_grid(width=cubic_size, height=cubic_size, depth=cubic_size, 
++                                   voxel_size=voxel_size, origin=origin)
+     
+-    Args:
+-        mesh: Input 3D geometry.
+-        camera_positions: List of camera center coordinates.
+-        intrinsics: Camera intrinsic matrix.
+-        extrinsics: List of camera extrinsic matrices.
+-        cubic_size: Physical dimension of the bounding box.
+-        voxel_resolution: Number of voxels per axis.
++    # 2. Preprocess Mesh to fit grid bounds
++    mesh = preprocess_geometry(mesh, cubic_size)
++    
++    # 3. Iterate over cameras
++    for pose, depth_image in zip(camera_poses, depth_images):
++        extrinsic = pose.extrinsic
++        intrinsic = pose.intrinsic
+         
+-    Returns:
+-        voxel_grid: A 3D numpy array of shape (N, N, N) with occupancy values.
+-    """
+-    N = voxel_resolution
+-    voxel_size = cubic_size / N
+-    origin = np.array([-cubic_size / 2.0, -cubic_size / 2.0, -cubic_size / 2.0])
+-    
+-    # Initialize grid: 1 for occupied, 0 for free
+-    # Start with all occupied (for silhouette carving intersection) 
+-    # or all free (for depth carving union), depending on method.
+-    # Open3D's carve_depth_map typically fills the volume visible to cameras.
+-    voxel_grid = np.ones((N, N, N), dtype=np.float32) 
+-    
+-    # Precompute voxel centers for efficient projection
+-    # This step is often optimized in C++ backends, but shown here for clarity
+-    x = np.linspace(origin[0] + voxel_size/2, origin[0] + cubic_size - voxel_size/2, N)
+-    y = np.linspace(origin[1] + voxel_size/2, origin[1] + cubic_size - voxel_size/2, N)
+-    z = np.linspace(origin[2] + voxel_size/2, origin[2] + cubic_size - voxel_size/2, N)
+-    X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
+-    voxel_centers = np.stack([X, Y, Z], axis=-1).reshape(-1, 3)
+-    
+-    for i, (cam_pos, T) in enumerate(zip(camera_positions, extrinsics)):
+-        # 1. Render Depth Map from current camera pose
+-        # In a real implementation, this calls a renderer.
+-        # Here we assume we have a depth map 'depth_map' of size (H, W)
+-        # and a silhouette 'silhouette' of size (H, W)
+-        depth_map = render_depth(mesh, T, intrinsics)
+-        silhouette = render_silhouette(mesh, T, intrinsics)
+-        
+-        # 2. Carve using Depth Map
+-        # For each pixel, mark voxels along the ray up to depth as occupied
+-        # Voxels beyond depth are marked as free
+-        for y_pix in range(H):
+-            for x_pix in range(W):
+-                d = depth_map[y_pix, x_pix]
+-                if d > 0: # Valid depth
+-                    # Compute ray direction
+-                    u = (x_pix - intrinsics[0, 2]) / intrinsics[0, 0]
+-                    v = (y_pix - intrinsics[1, 2]) / intrinsics[1, 1]
+-                    ray_dir_cam = np.array([u, v, 1.0])
+-                    ray_dir_cam /= np.linalg.norm(ray_dir_cam)
++        # 4. Carve using depth map
++        # For each pixel in the depth image
++        for u, v in pixels(depth_image):
++            depth_val = depth_image[u, v]
++            
++            # Calculate 3D point at depth
++            # Ray direction in camera space
++            ray_cam = unproject_pixel(u, v, depth_val, intrinsic)
++            # Transform to world space
++            ray_world = extrinsic[:3, :3] * ray_cam + extrinsic[:3, 3]
++            camera_center = extrinsic[:3, 3]
++            
++            # Cast ray from camera center to depth_val
++            # Mark voxels along this segment as occupied
++            voxels_near = get_voxels_intersected(camera_center, ray_world, depth_val)
++            for v_near in voxels_near:
++                grid.set_occupied(v_near, True)
++                
++            # Mark voxels beyond depth_val as empty (carved out)
++            voxels_far = get_voxels_intersected(camera_center, ray_world, max_range)
++            for v_far in voxels_far:
++                if not is_in(voxels_near, v_far):
++                    grid.set_occupied(v_far, False)
+                     
+-                    # Transform ray to world space
+-                    # T is extrinsic: world = T * cam_local
+-                    # Inverse T transforms world to camera
+-                    # We need ray in world space: R_world * ray_dir_cam + T_world
+-                    R = T[:3, :3]
+-                    t = T[:3, 3]
+-                    ray_dir_world = R @ ray_dir_cam
+-                    ray_origin_world = t
+-                    
+-                    # Intersect ray with voxel grid
+-                    # Mark voxels from ray_origin to ray_origin + d * ray_dir_world
+-                    # This is a simplified ray-marching step
+-                    mark_voxels_along_ray(voxel_grid, ray_origin_world, ray_dir_world, d, origin, voxel_size)
+-                else:
+-                    # No depth: mark voxels in this pixel's cone as free?
+-                    # Implementation dependent. Often ignored or treated as background.
+-                    pass
+-        
+-        # 3. Carve using Silhouette (Optional/Alternative)
+-        # If using silhouette, project voxel centers to image plane.
+-        # If inside silhouette, mark occupied. If outside, mark free.
+-        # This is computationally expensive for dense grids.
+-        pass
+-
+-    return voxel_grid
+-
+-def mark_voxels_along_ray(grid, origin, direction, max_dist, voxel_origin, voxel_size):
+-    """
+-    Marks voxels along a ray up to max_dist as occupied.
+-    """
+-    # Ray-box intersection to find start and end voxel indices
+-    # Simplified: iterate along ray
+-    t = 0.0
+-    step = voxel_size * 0.5 # Sub-voxel steps for accuracy
+-    while t < max_dist:
+-        point = origin + t * direction
+-        # Map point to voxel index
+-        idx = np.floor((point - voxel_origin) / voxel_size).astype(int)
+-        # Check bounds
+-        if np.all(idx >= 0) and np.all(idx < grid.shape[0]):
+-            grid[idx[0], idx[1], idx[2]] = 1.0
+-        t += step
++    return grid
+ ```
+ 
+ **Parameters:**
+-*   `voxel_resolution`: Controls grid density. Typical values range from 64 to 512 depending on scene complexity and memory [S1].
+-*   `cubic_size`: Defines the bounding box. Must encompass the entire object [S1].
++- `voxel_resolution`: Controls grid density. Typical values depend on scene scale [S1].
++- `cubic_size`: Defines the bounding box dimension. The grid is centered at the origin with bounds $[-\text{cubic\_size}/2, \text{cubic\_size}/2]$ [S1].
+ 
+ **Edge Cases:**
+-*   **Precision:** Floating point errors in ray-voxel intersection can cause gaps or holes. Sub-voxel stepping or analytical ray-box intersection is recommended [G].
+-*   **Boundaries:** Voxels on the edge of the bounding box may be partially outside the scene. Ensure the bounding box is large enough to contain all geometry [S1].
+-*   **Degenerate Input:** Empty depth maps or invalid camera poses should be skipped [S1].
++- **Calibration Errors**: Standard space carving requires accurate camera calibration. Approximate Space Carving handles errors by relaxing constraints [S2, unofficial].
++- **Concavities**: Standard silhouette carving may fail to reconstruct deep concavities. Cell Carving addresses this using correspondence between arbitrary image regions [S2, unofficial].
++- **Precision**: Floating point depth maps should be used to avoid quantization errors during ray casting [S1].
+ 
+ ## Subtopics
+ 
+ ### Streaming GPU-based Voxel Carving
+-A method that creates an explicit volume using only surface voxels in a GPU-optimal 2D data representation, avoiding 3D texture drawbacks and minimizing GPU-CPU data transfer through load balancing [S2, unofficial]. It is chosen when interactive modification of the volume is required and bandwidth is a bottleneck [S2, unofficial].
++A method that creates an explicit volume using only surface voxels in a GPU-optimal 2D data representation, avoiding 3D texture drawbacks and minimizing GPU-CPU data transfer through load balancing [S2, unofficial]. It does not sacrifice interactivity for speed [S2, unofficial].
+ 
+ ### Interactive Multi-resolution Voxel Carving
+-A CPU-based method using GVC-IB as its core, allowing user-driven interactive refinement to create models with varying resolution and level of detail across the voxel structure [S2, unofficial]. It is chosen when perceptual significance of features is more important than uniform geometric accuracy [S2, unofficial].
++A CPU-based method using GVC-IB as its core, adding user-driven interactive refinement. Users assign perceptual significance to features via 2D image editing operations to manipulate complexity and level of detail across the voxel structure [S2, unofficial].
+ 
+ ### Cell Carving
+-An algorithm that uses correspondence between arbitrary image regions to enable reconstruction of concavities that are difficult or impossible to reconstruct with other methods [S2, unofficial]. It is chosen for scenes with complex internal structures or deep concavities [S2, unofficial].
++An algorithm using correspondence between arbitrary image regions to enable reconstruction of concavities that are difficult or impossible to reconstruct with standard silhouette or depth carving methods [S2, unofficial].
++
++### Voxel Space Warping
++A method that warps the voxel space to model large-scale scenes (e.g., outdoors) without requiring an excessive number of voxels [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N^3 \cdot V)$, where $N$ is the voxel resolution and $V$ is the number of voxels. In practice, it is often optimized to $O(P \cdot D)$, where $P$ is the number of pixels and $D$ is the average depth range [S1].
+-*   **Memory Complexity:** $O(N^3)$ for the dense grid. Sparse representations can reduce this, but standard carving uses dense grids [S1].
+-*   **Performance:** Open3D's implementation is efficient for moderate resolutions (e.g., 256x256x256) but can be slow for high resolutions due to CPU-based iteration [S1]. GPU-based variants offer interactive framerates for similar resolutions [S2, unofficial].
+-*   **Strengths:** Produces dense, filled volumes; robust to noise in individual views; simple to implement.
+-*   **Limitations:** Computationally expensive for high resolutions; sensitive to camera calibration errors; requires multiple views [S1].
+-*   **When to use:** When a dense volumetric representation is needed for simulation or rendering, and multiple calibrated views are available [S1].
+-*   **When not to use:** When memory is constrained (use sparse methods); when only surface geometry is needed (use mesh extraction); when views are sparse or uncalibrated (use other methods) [S1].
++- **Time Complexity**: $O(N^3 \cdot V)$ where $N$ is the resolution and $V$ is the number of voxels, or more accurately $O(P \cdot R)$ where $P$ is the number of pixels in all depth maps and $R$ is the average ray length in voxels. It is computationally expensive, taking seconds to minutes [S2, unofficial].
++- **Memory Complexity**: $O(N^3)$ for a dense grid. Sparse variants or explicit surface representations (like the GPU streaming method) reduce this to $O(S)$ where $S$ is the number of surface voxels [S2, unofficial].
++- **Strengths**: Produces dense, filled volumes; robust to noise if multiple views are available; handles complex geometry.
++- **Limitations**: Requires accurate camera calibration; high memory usage for high resolutions; struggles with concavities without extensions; sensitive to calibration errors [S2, unofficial].
++- **When to use**: When a dense volumetric representation is needed for rendering or simulation, and multiple calibrated views are available.
++- **When not to use**: For real-time applications with limited hardware (unless using GPU streaming variants); when only surface geometry is required (use mesh extraction instead).
+ 
+ ## Background
+-Voxel carving was introduced as a method to reconstruct 3D shapes from 2D images by intersecting visual hulls [S1]. It is widely used in computer vision for 3D reconstruction from multi-view stereo data [S1]. Open3D provides built-in support for this technique via `carve_depth_map` and `carve_silhouette` [S1].
++Voxel Carving, also known as Space Carving, was introduced by Seitz and Dyer [SeiDye97] as a method to reconstruct 3D structure from multiple views. It is based on the principle of volume intersection: a voxel is occupied if it is consistent with all input views. The method has been extended to handle uncalibrated views [S2, unofficial], GPU acceleration [S2, unofficial], and multi-resolution representations [S2, unofficial]. It is widely used in 3D reconstruction, virtual reality, and computer graphics for generating volumetric data from 2D images.
+ 
+ ## Sources

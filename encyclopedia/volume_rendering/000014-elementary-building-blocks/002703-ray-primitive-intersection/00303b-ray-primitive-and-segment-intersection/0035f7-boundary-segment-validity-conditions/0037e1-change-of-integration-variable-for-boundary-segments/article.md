@@ -1,0 +1,109 @@
+# Change of Integration Variable for Boundary Segments
+
+Also called: Jacobian determinant for boundary segment sampling, Material-Form Parameterization
+
+## Overview
+This method performs a change of variables in the boundary segment integral to replace integration over surface endpoints $(\mathbf{p}_S, \mathbf{p}_D)$ with integration over a boundary point $\mathbf{x}_B$ on a mesh edge and a tangent direction $\boldsymbol{\omega}_B$ [S1]. This transformation avoids the need for explicit silhouette detection for non-camera endpoints by parameterizing the segment via its intersection with the geometry [S1]. It is distinct from standard ray-sampling methods by explicitly accounting for the geometric distortion between the visibility boundary and the surface parameterization [S2, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input**: A boundary segment defined by its start point $\mathbf{x}_0^S$ and end point $\mathbf{x}_0^D$ in space, or equivalently the surface points $\mathbf{p}_S$ and $\mathbf{p}_D$ projected onto the visibility boundary.
+*   **Output**: The Jacobian determinant $J_B(\mathbf{x}_B, \boldsymbol{\omega}_B)$ required to convert the differential area/length measures $dA(\mathbf{p}_S) d\ell(\mathbf{p}_D)$ to $d\ell(\mathbf{x}_B) d\sigma(\boldsymbol{\omega}_B)$ [S2, unofficial].
+
+**Data Structures**
+*   $\mathbf{x}_B$: A 3D vector representing the point on the mesh edge where the boundary segment is tangent or intersects.
+*   $\boldsymbol{\omega}_B$: A 3D unit vector representing the direction of the boundary segment at $\mathbf{x}_B$.
+*   $\mathbf{x}_0^S, \mathbf{x}_0^D$: 3D vectors representing the start and end points of the boundary segment in space.
+*   $\mathbf{n}$: Surface normal at $\mathbf{x}_0^S$.
+*   $\mathbf{e}$: Edge direction vector at $\mathbf{x}_B$.
+
+**Numbered Steps**
+1.  Identify the boundary point $\mathbf{x}_B$ on the mesh edge and the tangent direction $\boldsymbol{\omega}_B$ that defines the segment.
+2.  Trace rays from $\mathbf{x}_B$ in directions $\boldsymbol{\omega}_B$ and $-\boldsymbol{\omega}_B$ to find the segment endpoints $\mathbf{x}_0^D$ and $\mathbf{x}_0^S$ respectively [S2, unofficial].
+3.  Compute the angles $\theta_B$, $\theta_D$, and $\theta_S$:
+    *   $\theta_B$: The angle between $\boldsymbol{\omega}_B$ and the face edge direction at $\mathbf{x}_B$.
+    *   $\theta_D$: The angle between $\boldsymbol{\omega}_B$ and the visibility boundary direction at $\mathbf{x}_0^D$.
+    *   $\theta_S$: The angle between $\boldsymbol{\omega}_B$ and the surface normal $\mathbf{n}$ at $\mathbf{x}_0^S$.
+4.  Calculate the Jacobian determinant using the formula below.
+
+**Formulas**
+The Jacobian determinant $J_B$ is given by [S2, unofficial]:
+
+$$
+J_B(\mathbf{x}_B, \boldsymbol{\omega}_B) = \frac{\|\mathbf{x}_0^D - \mathbf{x}_0^S\|}{\|\mathbf{x}_B - \mathbf{x}_0^S\|} \frac{\sin \theta_B}{\sin \theta_D |\cos \theta_S|}
+$$
+
+Where:
+*   $\|\mathbf{x}_0^D - \mathbf{x}_0^S\|$ is the Euclidean length of the boundary segment.
+*   $\|\mathbf{x}_B - \mathbf{x}_0^S\|$ is the distance from the boundary point to the start endpoint.
+*   $\theta_B$ is the angle between $\boldsymbol{\omega}_B$ and the face edge at $\mathbf{x}_B$.
+*   $\theta_D$ is the angle between $\boldsymbol{\omega}_B$ and the visibility boundary at $\mathbf{x}_0^D$.
+*   $\theta_S$ is the angle between $\boldsymbol{\omega}_B$ and the surface normal at $\mathbf{x}_0^S$.
+
+**Parameters**
+*   When using global parameterization from motion $\hat{X}$ with fixed $\pi_0$, if $\hat{X}$ and $\hat{P}$ reduce to identity maps, $J_B$ equals the standard Eq. (48) [S2, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_boundary_jacobian(x_B, omega_B, x_0S, x_0D, edge_dir, vis_boundary_dir, surface_normal):
+    """
+    Computes the Jacobian determinant J_B for a boundary segment.
+    
+    Args:
+        x_B: 3D vector, point on mesh edge.
+        omega_B: 3D vector, tangent direction of segment.
+        x_0S: 3D vector, start endpoint of segment.
+        x_0D: 3D vector, end endpoint of segment.
+        edge_dir: 3D vector, direction of the face edge at x_B.
+        vis_boundary_dir: 3D vector, direction of visibility boundary at x_0D.
+        surface_normal: 3D vector, normal at x_0S.
+        
+    Returns:
+        float: The Jacobian determinant J_B.
+    """
+    # Compute distances
+    seg_length = norm(x_0D - x_0S)
+    dist_BS = norm(x_B - x_0S)
+    
+    # Compute angles
+    # theta_B: angle between omega_B and edge_dir
+    cos_theta_B = dot(omega_B, edge_dir) / (norm(omega_B) * norm(edge_dir))
+    sin_theta_B = sqrt(1 - cos_theta_B**2)
+    
+    # theta_D: angle between omega_B and vis_boundary_dir
+    cos_theta_D = dot(omega_B, vis_boundary_dir) / (norm(omega_B) * norm(vis_boundary_dir))
+    sin_theta_D = sqrt(1 - cos_theta_D**2)
+    
+    # theta_S: angle between omega_B and surface_normal
+    cos_theta_S = dot(omega_B, surface_normal) / (norm(omega_B) * norm(surface_normal))
+    # Note: Formula uses |cos(theta_S)|, so we take absolute value directly
+    
+    # Handle edge cases for division by zero
+    if sin_theta_D == 0 or dist_BS == 0:
+        return 0.0 # Or handle as undefined/singular
+        
+    # Compute Jacobian
+    J_B = (seg_length / dist_BS) * (sin_theta_B / (sin_theta_D * abs(cos_theta_S)))
+    
+    return J_B
+```
+
+**Edge Cases and Pitfalls**
+*   **Singularities**: If $\sin \theta_D = 0$ (tangent parallel to visibility boundary) or $\|\mathbf{x}_B - \mathbf{x}_0^S\| = 0$, the Jacobian is undefined. [S2, unofficial]
+*   **Precision**: Ensure $\theta_S$ calculation uses the absolute value of the cosine as specified in Eq. (48) [S2, unofficial].
+*   **Validity**: The direction $\boldsymbol{\omega}_B$ must satisfy $(\boldsymbol{\omega}_B \cdot \mathbf{n})(\boldsymbol{\omega}_B \cdot \mathbf{n}') < 0$ for the segment to be a valid spatial boundary segment between two faces with normals $\mathbf{n}$ and $\mathbf{n}'$ [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: $O(1)$ per segment evaluation, assuming ray tracing for $\mathbf{x}_0^S$ and $\mathbf{x}_0^D$ is handled by the parent method.
+*   **Memory Complexity**: $O(1)$ additional memory for intermediate vectors.
+*   **Strengths**: Eliminates the need for explicit silhouette detection for non-camera endpoints by mapping directly to surface intersections [S1].
+*   **Limitations**: Requires accurate computation of visibility boundary directions and edge directions, which can be complex for non-polygonal meshes [S2, unofficial].
+
+## Background
+This method originates from Path-Space Differentiable Rendering, specifically in the context of sampling boundary segments for differentiable rendering of implicit surfaces and polygonal meshes [S1][S2, unofficial]. It is derived to facilitate efficient importance sampling of boundary paths by changing the integration domain from surface points to boundary parameters [S1]. The specific Jacobian form (Eq. 48) is detailed in the appendix of the main paper [S2, unofficial].
+
+## Sources
+[S1] Path-Space Differentiable Rendering of Implicit Surfaces, https://doi.org/10.1145/3641519.3657473, fetched 2026-10-30
+[S2] Path-Space Differentiable Rendering, https://core.ac.uk/download/541724175.pdf, fetched 2026-10-29 (unofficial)

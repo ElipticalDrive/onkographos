@@ -1,0 +1,141 @@
+--- v001.md
++++ v002.md
+@@ -7,9 +7,9 @@
+ 
+ ## How it works
+-The method operates on a hybrid scene containing both polygonal meshes and splats. It requires preprocessing to identify transition edges and uses a four-pass rendering pipeline to ensure correct occlusion and smooth color blending.
++The method operates on a hybrid scene containing both polygonal meshes and splats [S1]. It requires preprocessing to identify transition edges and uses a four-pass rendering pipeline to ensure correct occlusion and smooth color blending [S1].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** A set of splats (defined by position, orientation, scale, and attributes) and a set of polygons (vertices, indices, and attributes). A small depth bias value $\varepsilon$.
+-*   **Outputs:** A final image with smooth transitions between splat-only, polygon-only, and blended regions.
++*   **Inputs:** A set of splats (defined by position, orientation, scale, and attributes) and a set of polygons (vertices, indices, and attributes) [S1]. A small depth bias value $\varepsilon$ [S1].
++*   **Outputs:** A final image with smooth transitions between splat-only, polygon-only, and blended regions [S1].
+ 
+ ### Data Structures
+@@ -18,5 +18,5 @@
+ *   **Octree Leaf (Multiresolution variant):** Stores a list of polygon indices [S1].
+ *   **Render Targets:**
+-    *   Depth Buffer: For visibility testing.
++    *   Depth Buffer: For visibility testing [G].
+     *   Polygon Texture: Stores the rasterized polygonal result (color and alpha) [S1].
+     *   Attribute Buffers: Accumulate splat attributes (color, normal, etc.) [S1].
+@@ -27,25 +27,26 @@
+ 
+ ### Rendering Pipeline
+-The rendering consists of four passes. Let $W_{splat}(x,y)$ be the sum of weights of all splats covering pixel $(x,y)$. Let $C_{splat}(x,y)$ be the accumulated color from splats. Let $C_{poly}(x,y)$ and $\alpha_{poly}(x,y)$ be the color and alpha from the polygon rasterization.
++The rendering consists of four passes. Let $W_{splat}(x,y)$ be the sum of weights of all splats covering pixel $(x,y)$ [S1]. Let $C_{splat}(x,y)$ be the accumulated color from splats [S1]. Let $C_{poly}(x,y)$ and $\alpha_{poly}(x,y)$ be the color and alpha from the polygon rasterization [S1].
+ 
+ **Pass 1: Visibility Splatting**
+-*   Draw all splats as opaque ellipses into the depth buffer.
++*   Draw all splats as opaque ellipses into the depth buffer [S1].
+ *   Shift the depth values of splats by $\varepsilon$ along the view direction [S1].
+ 
+ **Pass 2: Polygon Rasterization**
+-*   Render polygons onto the depth buffer established in Pass 1.
+-*   Polygonal regions hidden by splats are removed.
+-*   Update the depth buffer so that splat parts hidden by polygons are removed in subsequent passes.
++*   Render polygons onto the depth buffer established in Pass 1 [S1].
++*   Polygonal regions hidden by splats are removed [S1].
++*   Update the depth buffer so that splat parts hidden by polygons are removed in subsequent passes [S1].
+ *   Render polygons into a texture to store the result for later blending [S1].
+ 
+ **Pass 3: Attribute Accumulation**
+-*   Accumulate splat attributes (color, normals, etc.) into attribute buffers.
+-*   Compare the depth of splats and polygons with a tolerance to allow overlapping.
++*   Accumulate splat attributes (color, normals, etc.) into attribute buffers [S1].
++*   Compare the depth of splats and polygons with a tolerance to allow overlapping [S1].
+ *   Shift the depth values of splats by $\varepsilon$ toward the viewer [S1].
+ 
+ **Pass 4: Finalization (Blending and Shading)**
+-*   Normalize the accumulated splat attributes.
++*   Normalize the accumulated splat attributes [S1].
+ *   Clamp the sum of splat weights $W_{splat}(x,y)$ to the range $[0, 1]$ [S1].
+-*   Check if the pixel is covered by a polygon by inspecting the alpha component $\alpha_{poly}(x,y)$ of the polygon texture.
++*   Because it is difficult to ensure that the sum of weights saturates for pixels only covered by splats, blending must be done if and only if the pixel is covered by a polygon [S1].
++*   Check the alpha component $\alpha_{poly}(x,y)$ of the polygon rendered image to verify polygon coverage [S1].
+ *   If $\alpha_{poly}(x,y) > 0$, linearly blend the splat color $C_{splat}(x,y)$ and polygon color $C_{poly}(x,y)$ using $W_{splat}(x,y)$ as the factor:
+     $$ C_{final}(x,y) = W_{splat}(x,y) \cdot C_{splat}(x,y) + (1 - W_{splat}(x,y)) \cdot C_{poly}(x,y) $$
+@@ -55,43 +56,52 @@
+ ```python
+ def render_hybrid(splats, polygons, epsilon):
++    # Initialize buffers [G]
++    depth_buffer = [[float('inf')] for _ in range(height)]
++    polygon_texture = [[None for _ in range(width)] for _ in range(height)]
++    attr_color = [[0.0, 0.0, 0.0] for _ in range(height)]
++    attr_weight = [[0.0] for _ in range(height)]
++
+     # Pass 1: Visibility Splatting
+-    depth_buffer = initialize_depth_buffer()
+     for splat in splats:
+-        # Shift depth by epsilon along view direction
+-        shifted_depth = splat.depth + epsilon
+-        draw_splat_ellipse(splat, depth_buffer, shifted_depth)
++        # Project splat to screen footprint [G]
++        for y, x in splat.screen_footprint():
++            w = splat.weight_at(x, y)
++            if w > 0:
++                shifted_depth = splat.depth + epsilon
++                if shifted_depth < depth_buffer[y][x]:
++                    depth_buffer[y][x] = shifted_depth
+ 
+     # Pass 2: Polygon Rasterization
+-    # Polygons are rendered on top of the existing depth buffer
+-    # Hidden regions are removed. Depth buffer is updated.
+-    polygon_texture = render_polygons_to_texture(polygons, depth_buffer)
++    for poly in polygons:
++        # Rasterize polygon, respecting depth buffer [G]
++        for y, x in poly.screen_projection():
++            if poly.depth >= depth_buffer[y][x]:
++                continue
++            polygon_texture[y][x] = (poly.color, 1.0)
++            depth_buffer[y][x] = poly.depth
+ 
+     # Pass 3: Attribute Accumulation
+-    attribute_buffers = initialize_attribute_buffers()
+     for splat in splats:
+-        # Shift depth by epsilon toward viewer for overlap tolerance
+-        shifted_depth = splat.depth - epsilon
+-        accumulate_splat_attributes(splat, attribute_buffers, shifted_depth)
++        # Project splat to screen footprint [G]
++        for y, x in splat.screen_footprint():
++            w = splat.weight_at(x, y)
++            if w > 0:
++                shifted_depth = splat.depth - epsilon
++                # Allow overlapping by checking depth difference [G]
++                if abs(shifted_depth - depth_buffer[y][x]) <= epsilon:
++                    attr_color[y][x] += splat.color * w
++                    attr_weight[y][x] += w
+ 
+     # Pass 4: Finalization
+-    final_image = empty_image()
+-    
+-    # Calculate weight sum per pixel
+-    weight_sum = calculate_splat_weight_sum(splats)
+-    
+-    for pixel in image_pixels:
+-        c_splat = normalize(attribute_buffers[pixel])
+-        w = clamp(weight_sum[pixel], 0.0, 1.0)
+-        
+-        # Check if pixel is covered by polygon
+-        if polygon_texture[pixel].alpha > 0:
+-            c_poly = polygon_texture[pixel].color
+-            # Linear blend using weight sum
+-            final_color = w * c_splat + (1.0 - w) * c_poly
+-        else:
+-            final_color = c_splat
+-            
+-        final_image[pixel] = final_color
+-        
++    final_image = [[None for _ in range(width)] for _ in range(height)]
++    for y in range(height):
++        for x in range(width):
++            if polygon_texture[y][x] is None:
++                final_image[y][x] = attr_color[y][x]
++                continue
++            w = min(max(attr_weight[y][x], 0.0), 1.0)
++            c_splat = attr_color[y][x] / max(attr_weight[y][x], 1e-6)
++            c_poly = polygon_texture[y][x][0]
++            final_image[y][x] = w * c_splat + (1.0 - w) * c_poly
+     return final_image
+ ```

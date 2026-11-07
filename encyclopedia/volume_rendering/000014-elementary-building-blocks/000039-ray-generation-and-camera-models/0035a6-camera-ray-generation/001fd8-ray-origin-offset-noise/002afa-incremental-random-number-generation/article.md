@@ -3,86 +3,92 @@
 Also called: Golden Ratio Random, Quasi-Monte Carlo Random
 
 ## Overview
-Incremental Random Number Generation is a method for producing low-discrepancy pseudo-random sequences by iteratively adding an irrational constant to a state variable and taking the fractional part. It solves the problem of generating uniformly distributed samples with minimal correlation between consecutive iterations, which is critical for avoiding banding artifacts in ray marching [S1, unofficial]. It differs from hash-based generators by maintaining a continuous state that evolves deterministically, ensuring that the sequence covers the sampling space more evenly (quasi-Monte Carlo properties) than standard linear congruential generators, while being computationally cheaper than complex hash functions [S1, unofficial].
+Incremental Random Number Generation is a method for producing pseudo-random numbers with low discrepancy properties, suitable for sampling in ray tracing and volume rendering [S1, unofficial]. It differs from its parent [Ray Origin Offset Noise](2118-ray-origin-offset-noise.md) by using a deterministic additive sequence based on irrational constants rather than a hash function, and from its sibling [Hash-based Pseudo-Random Number Generator](2896-hash-based-pseudo-random-number-generator.md) by avoiding bitwise operations in favor of floating-point arithmetic [S1, unofficial]. This approach ensures uniform distribution over iterations while maintaining statelessness across samples if the initial seed is managed externally.
 
 ## How it works
-**Inputs and Outputs:**
-- Input: A scalar or vector state variable $r$ (the previous random value).
-- Output: A new scalar or vector random value $r'$ in the range $[0, 1)$.
+**Inputs:** A current random value $r_i$ (scalar for 1D, vector for 2D).
+**Outputs:** The next random value $r_{i+1}$.
+**Constants:**
+- $\phi$ (Golden Ratio): $0.6180339887$ [S1, unofficial].
+- $\pi$ (Pi): $3.1415926538$ [S1, unofficial].
+- Multiplier: $4$ [S1, unofficial].
 
-**Data Structures:**
-- No external data structures are required. The method relies solely on the current state variable.
-
-**Parameters:**
-- Golden Ratio ($\phi$): $0.6180339887$ [S1, unofficial].
-- Pi ($\pi$): $3.1415926538$ [S1, unofficial].
-
-**Formulas:**
-The core operation is the fractional part function $\{ x \} = x - \lfloor x \rfloor$.
-
-1. **1D Incremental Random:**
-   $$ r_{i+1} = \{ r_i + 4 \phi \} $$
-   Where $r_i$ is the previous scalar random value [S1, unofficial].
-
-2. **2D Incremental Random:**
-   $$ r_{i+1} = \{ r_i + (\phi, \pi) \} $$
-   Where $r_i$ is the previous 2D vector random value. The addition is component-wise, and the fractional part is taken component-wise [S1, unofficial].
+**Data Structures:** None required; state is held in the input variable.
 
 **Steps:**
-1. Retrieve the current state $r$ (initially set to a small non-zero value or derived from pixel coordinates).
-2. Add the precomputed constant(s) to $r$.
-   - For 1D: Add $4 \times 0.6180339887$.
-   - For 2D: Add $(0.6180339887, 3.1415926538)$.
-3. Compute the fractional part of the result.
-4. Return the result as the new random value and update the state.
+1. For 1D generation, add the product of the golden ratio and 4 to the current value, then take the fractional part.
+2. For 2D generation, add a vector containing the golden ratio and pi to the current vector, then take the fractional part of each component.
+
+**Formulas:**
+The 1D sequence is defined as:
+$$ r_{i+1} = \{ r_i + 4 \phi \} $$
+where $\{ \cdot \}$ denotes the fractional part operation ($x - \lfloor x \rfloor$) [S1, unofficial].
+
+The 2D sequence is defined as:
+$$ r_{i+1} = \{ r_i + (\phi, \pi) \} $$
+where the addition and fractional part are applied component-wise [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Constants
-GOLDEN_RATIO = 0.6180339887
-PI = 3.1415926538
+def incremental_rand_1d(rand: float) -> float:
+    """
+    Generates the next 1D incremental random number.
+    :param rand: Current random value.
+    :return: Next random value in the sequence.
+    """
+    GOLDEN_RATIO = 0.6180339887
+    return (rand + GOLDEN_RATIO * 4) % 1.0
 
-def fract(x):
-    """Returns the fractional part of x."""
-    return x - math.floor(x)
-
-def incremental_rand_1d(rand_state: float) -> float:
+def incremental_rand_2d(rand: tuple) -> tuple:
     """
-    Generates the next 1D random number.
-    :param rand_state: The previous random value.
-    :return: The new random value in [0, 1).
+    Generates the next 2D incremental random number.
+    :param rand: Current random value as (x, y).
+    :return: Next random value as (x, y).
     """
-    return fract(rand_state + 4.0 * GOLDEN_RATIO)
-
-def incremental_rand_2d(rand_state: vec2) -> vec2:
-    """
-    Generates the next 2D random number.
-    :param rand_state: The previous 2D random vector.
-    :return: The new 2D random vector in [0, 1)^2.
-    """
-    return fract(rand_state + vec2(GOLDEN_RATIO, PI))
+    GOLDEN_RATIO = 0.6180339887
+    PI = 3.1415926538
+    new_x = (rand[0] + GOLDEN_RATIO) % 1.0
+    new_y = (rand[1] + PI) % 1.0
+    return (new_x, new_y)
 ```
 
 **Edge Cases and Pitfalls:**
-- **Precision:** Floating-point precision limits the period of the sequence. If the state accumulates significant error or if the step size is not irrational enough relative to the precision, the sequence may repeat or cluster. Using `fract` ensures the value stays in $[0, 1)$, mitigating overflow but potentially introducing correlation if the initial state is poorly chosen [S1, unofficial].
-- **Initialization:** The initial state should not be zero, as adding an irrational constant to zero repeatedly might exhibit patterns if the constant's binary representation has regularities. A small random offset or coordinate-based seed is recommended [G].
+- Precision: Floating-point precision limits may cause periodicity in very long sequences. For standard ray tracing depths, this is negligible [S1, unofficial].
+- Initialization: The initial value $r_0$ should be chosen to avoid degenerate patterns; a random seed or a fixed offset like 0.5 is common [G].
 
 ## Subtopics
 
 ### Blue Noise Jitter Generator
-A variant that uses the golden ratio to precompute a low-discrepancy lookup table for spatial jitter, combined with temporal shifting for animation [S2, unofficial]. It initializes a table of size $N \times N$ (default 64) where `table[i] = (i * phi) % 1.0`. To get jitter for pixel $(x, y)$ at `frameIndex`, it calculates `baseOffset = table[abs(floor(y)) % size * size + abs(floor(x)) % size]` and `temporalShift = ((frameIndex % 16) * phi) % 1.0`, returning `(baseOffset + temporalShift) % 1.0`. It further refines subpixel jitter using a Halton sequence with bases 2 and 3, where `halton(index, base)` is computed by iteratively dividing the index by the base and summing `f * (i % base)` with `f` starting at `1/base` and halving each step [S2, unofficial]. This approach provides blue-noise-like distribution properties for anti-aliasing [S2, unofficial].
+A variant that uses the golden ratio low-discrepancy sequence to initialize a lookup table for blue noise jitter [S2, unofficial]. It differs from standard incremental generation by precomputing a grid of values and adding temporal shifts for animation [S2, unofficial].
+- **Initialization:** Create a table of size $N \times N$ (default 64). For each index $i$, compute `table[i] = (i * phi) % 1.0`, where $\phi = 0.618033988749895$ [S2, unofficial].
+- **Pixel Jitter:** For pixel $(x, y)$ and frame index, calculate `px = abs(floor(x)) % size`, `py = abs(floor(y)) % size`. Get `baseOffset = table[py * size + px]`. Calculate `temporalShift = ((frameIndex % 16) * phi) % 1.0`. Return `(baseOffset + temporalShift) % 1.0` [S2, unofficial].
+- **Subpixel Jitter:** Use a Halton sequence with bases 2 and 3. Compute `h2 = halton(frameIndex + 1, 2) - 0.5` and `h3 = halton(frameIndex + 1, 3) - 0.5` [S2, unofficial].
+- **Halton Implementation:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def halton(index: int, base: int) -> float:
+    result = 0.0
+    f = 1.0 / base
+    i = index
+    while i > 0:
+        result += f * (i % base)
+        i = i // base
+        f = f / base
+    return result
+```
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per sample. It involves only a few floating-point additions and a fractional part operation.
-- **Memory Complexity:** $O(1)$ for the basic method. The Blue Noise variant requires $O(N^2)$ memory for the lookup table.
-- **Performance:** Extremely fast, suitable for real-time ray marching where per-sample overhead must be minimized [S1, unofficial].
-- **Strengths:** Low discrepancy (good coverage), simple implementation, no branching, stateful nature allows for smooth temporal evolution if desired [S1, unofficial].
-- **Limitations:** The sequence is deterministic and periodic (though the period is very long for double precision). It is not suitable for cryptographic purposes or applications requiring statistical independence between non-consecutive samples without careful spacing [S1, unofficial].
+- **Time Complexity:** $O(1)$ per sample. No loops or complex math beyond basic arithmetic [S1, unofficial].
+- **Memory Complexity:** $O(1)$ for standard incremental generation. $O(N^2)$ for the Blue Noise Jitter variant due to the lookup table [S2, unofficial].
+- **Strengths:** Extremely fast; low discrepancy ensures good coverage with few samples; easy to parallelize [S1, unofficial].
+- **Limitations:** Not truly random; patterns may emerge in high-dimensional spaces if not carefully constructed [S1, unofficial].
+- **When to use:** Ray origin offsetting, simple stratified sampling, or when performance is critical and true randomness is not required [S1, unofficial].
 
 ## Background
-The method originates from the use of irrational constants, particularly the golden ratio, in quasi-Monte Carlo integration to ensure low-discrepancy sequences [S1, unofficial]. It has been adopted in real-time ray tracing and voxel rendering to offset ray origins and directions, reducing banding artifacts caused by regular sampling patterns [S1, unofficial]. The specific implementation using `fract(rand + GOLDEN_RATIO * 4)` is documented in voxel ray demo repositories [S1, unofficial]. The Blue Noise variant extends this concept to spatial-temporal jittering for cloud rendering [S2, unofficial].
+The method originates from the use of the golden ratio in quasi-Monte Carlo methods for low-discrepancy sequence generation [S1, unofficial]. It is implemented in various open-source voxel ray tracing demos and volumetric rendering shaders [S1, unofficial][S2, unofficial].
 
 ## Sources
 [S1] newDINO/voxel_ray_demo, https://github.com/newDINO/voxel_ray_demo, fetched 2026-10-24 (unofficial)

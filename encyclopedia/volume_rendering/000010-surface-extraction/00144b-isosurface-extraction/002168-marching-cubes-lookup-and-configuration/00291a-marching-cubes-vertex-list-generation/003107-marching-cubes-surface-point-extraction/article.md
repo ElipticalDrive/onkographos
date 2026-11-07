@@ -1,49 +1,36 @@
 # Marching Cubes Surface Point Extraction
 
-Also called: Blocky Surface Point, Centroid Surface Point, Isosurface Point Extraction via Edge Intersection, Marching Cubes Point Generation, QEF Surface Point, Surface Point Computation, SurfacePointsKernel
+Also called: Blocky Surface Point, Centroid Surface Point, QEF Surface Point
 
 ## Overview
-This method computes the precise 3D position of a point on an isosurface (typically value 0) within a voxel grid by identifying grid edges that cross the isosurface and calculating their intersection points [S1, unofficial]. It serves as the geometric refinement step following [Marching Cubes Vertex List Generation](4447-marching-cubes-vertex-list-generation.md), which determines *which* edges are intersected but does not compute the exact surface location [S1, unofficial]. Unlike [Surface Nets](6419-surface-nets.md), which approximates the surface point using the grid vertex with the highest gradient, this method offers three distinct strategies for point placement: Quadratic Error Function (QEF) minimization, simple centroid averaging, or a blocky (cube center) fallback [S1, unofficial].
+This method computes the precise 3D position of points on an isosurface (typically value 0) within a voxel grid by identifying grid edges that cross the isosurface and calculating their intersection points [S1, unofficial]. It serves as the geometric refinement step following [Marching Cubes Vertex List Generation](4447-marching-cubes-vertex-list-generation.md), which determines which edges are intersected but does not compute the exact surface location [S1, unofficial]. Unlike [Surface Nets](6419-surface-nets.md), which approximates the surface point using the grid vertex with the highest gradient, this method offers three distinct strategies for point placement: Quadratic Error Function (QEF) minimization, simple centroid averaging, or a blocky (cube center) fallback [S1, unofficial].
 
 ## How it works
 ### Inputs and Outputs
 **Inputs:**
 *   `_IsoVals`: A structured buffer containing scalar field values for each voxel in the grid, accessed via 1D indexing [S1, unofficial].
 *   `_Resolution`: The dimension of the voxel grid (assumed cubic, $N \times N \times N$) [S1, unofficial].
-*   `id`: The thread ID representing the current cube (voxel) position in 3D space [S1, unofficial].
+*   `id`: The 3D thread ID representing the current cube (voxel) position in grid space [S1, unofficial].
 *   `strides`: An array of 3 floats representing the step size (voxel width) for each axis [S1, unofficial].
 
 **Outputs:**
 *   `_SurfacePoints`: A `StructuredBuffer<float4>` storing the extracted surface points. The output is `float4(val, 1.0)` if a valid surface point is found, or `float4(transformToCenter(id), 0.0)` if no intersection occurs [S1, unofficial].
 
 ### Data Structures
-*   **Edge**: A struct containing `start` and `end` fields, representing the 3D coordinates of the edge endpoints [S1, unofficial].
-*   **Cube Edges**: An array `cube_edges[12]` storing the 12 edges of the unit cube rooted at `pos` [S1, unofficial].
+*   **Edge**: A tuple or struct containing `start` and `end` fields, representing the 3D coordinates of the edge endpoints [S1, unofficial].
 *   **Edges on Surface**: A list `edges_on_surface` containing only those edges where the isosurface intersects [S1, unofficial].
 
 ### Coordinate Mapping
-The grid uses a specific 3D-to-1D indexing scheme [S1, unofficial]:
-$$
-\text{threeDToOneD}(x, y, z) = x + \text{Resolution} \times (y + \text{Resolution} \times z)
-$$
-Conversely, to convert 1D index `i` to 3D coordinates [S1, unofficial]:
-$$
-\begin{aligned}
-z &= i \pmod{\text{Resolution}} \\
-y &= (i / \text{Resolution}) \pmod{\text{Resolution}} \\
-x &= i / (\text{Resolution} \times \text{Resolution})
-\end{aligned}
-$$
+The kernel receives a 3D thread ID `id` directly as the cube position `pos` [S1, unofficial]. Buffer indexing uses the mapping `threeDToOneD(x, y, z) = x + \text{Resolution} \times (y + \text{Resolution} \times z)` [S1, unofficial].
 
 ### Algorithm Steps
-1.  **Initialization**: The kernel `SurfacePoints` is dispatched with thread ID `id`. Initialize `pos = id` (converted to 3D coordinates) and an empty list `edges_on_surface` [S1, unofficial].
-2.  **Edge Definition**: Define the 12 edges of the unit cube rooted at `pos`. For each axis $i \in \{0,1,2\}$ (x, y, z), there are 4 parallel edges. The start of an edge is determined by the cube corner `pos` and the strides of the other two axes. The end of each edge is `start + stride[i]` [S1, unofficial].
-3.  **Intersection Detection**: Iterate through all 12 cube edges. For each edge, retrieve the scalar field values at the start vertex ($v_{start}$) and end vertex ($v_{end}$) from `_IsoVals` [S1, unofficial].
-    *   Check if the edge intersects the isosurface by verifying if the values have opposite signs: $v_{start} \times v_{end} < 0$ [S1, unofficial].
-    *   If true, add the edge to `edges_on_surface` [S1, unofficial].
+1.  **Initialization**: Initialize `pos = id` and an empty list `edges_on_surface` [S1, unofficial].
+2.  **Edge Definition**: Define the 12 edges of the unit cube rooted at `pos` [S1, unofficial]. For each axis $i \in \{0,1,2\}$ (x, y, z), define 4 parallel edges [S1, unofficial]. The start of each edge is determined by the cube corner `pos` and the strides of the other two axes [S1, unofficial]. The end of each edge is `start + stride[i]` [S1, unofficial].
+3.  **Intersection Detection**: Iterate through all 12 cube edges [S1, unofficial]. For each edge, retrieve the scalar field values at the start vertex ($v_{start}$) and end vertex ($v_{end}$) from `_IsoVals` [S1, unofficial]. Check if the edge intersects the isosurface by verifying if the values have opposite signs: $v_{start} \times v_{end} < 0$ [S1, unofficial]. If true, add the edge to `edges_on_surface` [S1, unofficial].
 4.  **Point Computation**:
-    *   **Case A: No Intersections**: If `edges_on_surface` is empty, the voxel is fully inside or outside the isosurface. Set the output to the transformed center of the voxel: `transformToCenter(pos).zyx` (with w=0) [S1, unofficial].
+    *   **Case A: No Intersections**: If `edges_on_surface` is empty, the voxel is fully inside or outside the isosurface [S1, unofficial]. Set the output to the transformed center of the voxel: `transformToCenter(pos).zyx` (with w=0) and return [S1, unofficial].
     *   **Case B: Intersections Exist**: Compute the surface point using one of three strategies selected by preprocessor defines: `SURFACE_POINT_QEF`, `SURFACE_POINT_CENTROID`, or `SURFACE_POINT_BLOCKY` [S1, unofficial].
+5.  **Output**: Store the resulting `val` in `_SurfacePoints` at index `threeDToOneD(id)` as `float4(val, 1.0)` if valid, otherwise `float4(transformToCenter(id), 0.0)` [S1, unofficial].
 
 #### Strategy 1: QEF (Quadratic Error Function)
 If `SURFACE_POINT_QEF` is active, call `GetSurfacePointQEF` [S1, unofficial]:
@@ -56,159 +43,126 @@ If `SURFACE_POINT_QEF` is active, call `GetSurfacePointQEF` [S1, unofficial]:
         Where $\text{linInterpolate}(p1, p2, d1, d2) = (1 - \frac{d1}{d1-d2})p1 + \frac{d1}{d1-d2}p2$ [S1, unofficial].
     *   Estimate the normal $N$ at the crossing point: $N = \text{EstimateNormal}(\text{transformPoint}(P_{cross}.xyz))$ [S1, unofficial].
     *   Add contribution to the QEF system using `qef_add(float4(N, 0.0), float4(P_{cross}, 1.0), ATA, Atb, pointaccum, btb)` [S1, unofficial].
-3.  Solve the QEF system to get `surface_point_`.
+3.  Solve the QEF system to get `surface_point_` [S1, unofficial].
 4.  Calculate the center of mass:
     $$
     \text{com} = \frac{\text{pointaccum}.xyz}{\text{pointaccum}.w}
     $$
-5.  **Clamp Check**: If `surface_point_` is outside the cube bounds defined by $\text{Min} = \text{pos}$ and $\text{Max} = \text{pos} + (\text{strides}[0] + \text{strides}[1] + \text{strides}[2])$, fallback to `com` [S1, unofficial].
+5.  **Clamp Check**: If `surface_point_` is outside the cube bounds defined by $\text{Min} = \text{pos}$ and $\text{Max} = \text{pos} + (\text{strides}[0]+\text{strides}[1]+\text{strides}[2])$, fallback to `com` [S1, unofficial].
 
 #### Strategy 2: Centroid
 If `SURFACE_POINT_CENTROID` is active, call `GetSurfacePointCentroid` [S1, unofficial]:
-1.  Initialize `surface_point = 0` and `count = 0`.
-2.  Loop over `num_edges_intersected`:
-    *   Sum the edge intersection points into `surface_point`.
-    *   Increment `count`.
-3.  Return `surface_point / count` [S1, unofficial].
+1.  Initialize `surface_point = 0` and `count = 0` [S1, unofficial].
+2.  Loop over `num_edges_intersected` [S1, unofficial].
+3.  Sum the edge intersection points into `surface_point` and increment `count` [S1, unofficial].
+4.  Divide the accumulated `surface_point` by `count` (broadcasted as a float3) to get the average position [S1, unofficial].
 
 #### Strategy 3: Blocky
 If `SURFACE_POINT_BLOCKY` is active, call `GetSurfacePointBlocky` [S1, unofficial]:
-1.  Return the cube center:
+1.  Compute the surface point as the voxel root position `pos` plus half the sum of the three unit strides:
     $$
-    \text{pos} + \frac{\text{strides}[0] + \text{strides}[1] + \text{strides}[2]}{2}
+    \text{pos} + \frac{\text{strides}[0]+\text{strides}[1]+\text{strides}[2]}{2}
     $$
     [S1, unofficial].
-
-5.  **Output**: Store the resulting `val` in `_SurfacePoints` at index `threeDToOneD(id)` as `float4(val, 1.0)` if valid, otherwise `float4(transformToCenter(id), 0.0)` [S1, unofficial].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Helper functions assumed available or defined in the shader environment
-# linInterpolate, EstimateNormal, transformPoint, transformToCenter, qef_add
+def linInterpolate(p1, p2, d1, d2):
+    t = d1 / (d1 - d2)
+    return (1.0 - t) * p1 + t * p2
 
-def SurfacePoints(id):
-    # Convert 1D ID to 3D position
-    pos = oneDToThreeD(id)
-    
-    # Define strides (step size per axis)
-    strides = [step, step, step] # Assumed uniform step size from _Step
-    
-    # List to store intersected edges
+def transformPoint(p):
+    # Not given in the sources. Assumes a world-space transformation.
+    return p
+
+def transformToCenter(id_pos):
+    # Not given in the sources. Assumes mapping from grid ID to center coordinates.
+    return [id_pos[0] + 0.5, id_pos[1] + 0.5, id_pos[2] + 0.5]
+
+def EstimateNormal(p):
+    # Not given in the sources. Assumes gradient computation or lookup.
+    return [0.0, 1.0, 0.0]
+
+def qef_add(normal, point, ATA, Atb, pointaccum, btb):
+    # Not given in the sources. Standard QEF accumulation step.
+    pass
+
+def solve_qef(ATA, Atb, pointaccum):
+    # Not given in the sources. Solves ATA * x = Atb or returns center of mass.
+    return [pointaccum[0]/pointaccum[3], pointaccum[1]/pointaccum[3], pointaccum[2]/pointaccum[3]]
+
+def threeDToOneD(x, y, z, resolution):
+    return x + resolution * (y + resolution * z)
+
+def SurfacePoints(id, _IsoVals, _Resolution, strides):
+    pos = id
     edges_on_surface = []
-    
-    # Iterate through 12 edges of the cube
-    for axis in [0, 1, 2]:
-        # Define the 4 edges parallel to this axis
-        # Start points are determined by pos and strides of other axes
-        # This loop structure is implied by "For each axis i... define 4 edges"
-        for offset_x in [0, strides[0]]:
-            for offset_y in [0, strides[1]]:
-                for offset_z in [0, strides[2]]:
-                    # Skip if offset is on the current axis (handled by loop structure)
-                    # Actually, simpler: iterate all 12 edges explicitly or via combinatorics
-                    # Let's assume a helper get_edge(axis, start_offset)
-                    pass 
+
+    # Define 12 edges of the unit cube rooted at pos
+    for axis in range(3):
+        for offset_x in (0, strides[0]):
+            for offset_y in (0, strides[1]):
+                for offset_z in (0, strides[2]):
+                    # Skip the offset on the current axis to get exactly 4 edges per axis
+                    if axis == 0 and offset_x != 0: continue
+                    if axis == 1 and offset_y != 0: continue
+                    if axis == 2 and offset_z != 0: continue
+
+                    start = [pos[0] + offset_x, pos[1] + offset_y, pos[2] + offset_z]
+                    end = [start[0] + strides[0], start[1] + strides[1], start[2] + strides[2]]
                     
-    # Simplified edge iteration based on notes:
-    # "For each axis i in {0,1,2}, define 4 edges parallel to that axis"
-    # Start of edge = pos + offsets of other axes
-    # End of edge = Start + stride[i]
-    
-    for axis in [0, 1, 2]:
-        for i in [0, 1]: # 2 choices for axis 0
-            for j in [0, 1]: # 2 choices for axis 1
-                # Determine start position
-                start = pos.copy()
-                start[axis] = pos[axis] # Start at min for this axis? 
-                # Note: "The start of these edges are determined by the cube corner pos and the two other axes' strides"
-                # Let's assume standard cube corners for the other 2 dims
-                # This part requires careful reconstruction of the 12 edges.
-                # Standard Marching Cubes edges:
-                # Axis 0 (X): (0,0,0)-(1,0,0), (0,1,0)-(1,1,0), (0,0,1)-(1,0,1), (0,1,1)-(1,1,1)
-                # etc.
-                
-                # Reconstructing edge definition from notes:
-                # "start + stride_i" is end.
-                # We need to generate the 12 specific edges.
-                pass
+                    idx_start = threeDToOneD(start[0], start[1], start[2], _Resolution)
+                    idx_end = threeDToOneD(end[0], end[1], end[2], _Resolution)
+                    val_start = _IsoVals[idx_start]
+                    val_end = _IsoVals[idx_end]
+                    
+                    if val_start * val_end < 0:
+                        edges_on_surface.append((start, end))
 
-    # Since exact edge generation logic is not fully detailed in pseudocode form in sources,
-    # we rely on the intersection check logic provided.
-    
-    # Check intersections
-    for edge in cube_edges:
-        val_start = _IsoVals[threeDToOneD(edge.start)]
-        val_end = _IsoVals[threeDToOneD(edge.end)]
-        
-        if val_start * val_end < 0:
-            edges_on_surface.append(edge)
-            
     if len(edges_on_surface) == 0:
-        # No intersection
         center = transformToCenter(pos)
-        return float4(center.zyx, 0.0)
-        
+        return [center[2], center[1], center[0], 0.0]
+
     # Compute point based on strategy
-    if SURFACE_POINT_QEF:
-        surface_point = GetSurfacePointQEF(edges_on_surface, pos, strides)
-    elif SURFACE_POINT_CENTROID:
-        surface_point = GetSurfacePointCentroid(edges_on_surface)
-    elif SURFACE_POINT_BLOCKY:
-        surface_point = GetSurfacePointBlocky(pos, strides)
+    if True: # Simulating SURFACE_POINT_QEF preprocessor define
+        pointaccum = [0.0, 0.0, 0.0, 0.0]
+        ATA = [[0.0]*3 for _ in range(3)]
+        Atb = [0.0, 0.0, 0.0, 0.0]
+        btb = 0.0
         
-    # Store result
-    _SurfacePoints[threeDToOneD(id)] = float4(surface_point, 1.0)
+        for start, end in edges_on_surface:
+            d_start = _IsoVals[threeDToOneD(start[0], start[1], start[2], _Resolution)]
+            d_end = _IsoVals[threeDToOneD(end[0], end[1], end[2], _Resolution)]
+            
+            edge_crossing = linInterpolate(end, start, d_end, d_start)
+            normal = EstimateNormal(transformPoint(edge_crossing))
+            qef_add([normal[0], normal[1], normal[2], 0.0], [edge_crossing[0], edge_crossing[1], edge_crossing[2], 1.0], ATA, Atb, pointaccum, btb)
+            
+        surface_point = solve_qef(ATA, Atb, pointaccum)
+        com = [pointaccum[0]/pointaccum[3], pointaccum[1]/pointaccum[3], pointaccum[2]/pointaccum[3]]
+        
+        Min = pos
+        Max = [pos[0] + (strides[0]+strides[1]+strides[2]), pos[1] + (strides[0]+strides[1]+strides[2]), pos[2] + (strides[0]+strides[1]+strides[2])]
+        if not (Min[0] <= surface_point[0] <= Max[0] and Min[1] <= surface_point[1] <= Max[1] and Min[2] <= surface_point[2] <= Max[2]):
+            surface_point = com
+    elif True: # Simulating SURFACE_POINT_CENTROID
+        surface_point = [0.0, 0.0, 0.0]
+        count = 0
+        for start, end in edges_on_surface:
+            d_start = _IsoVals[threeDToOneD(start[0], start[1], start[2], _Resolution)]
+            d_end = _IsoVals[threeDToOneD(end[0], end[1], end[2], _Resolution)]
+            intersection = linInterpolate(end, start, d_end, d_start)
+            surface_point[0] += intersection[0]
+            surface_point[1] += intersection[1]
+            surface_point[2] += intersection[2]
+            count += 1
+        surface_point = [surface_point[0]/count, surface_point[1]/count, surface_point[2]/count]
+    elif True: # Simulating SURFACE_POINT_BLOCKY
+        surface_point = [pos[0] + (strides[0]+strides[1]+strides[2])/2.0, pos[1] + (strides[0]+strides[1]+strides[2])/2.0, pos[2] + (strides[0]+strides[1]+strides[2])/2.0]
 
-def GetSurfacePointQEF(edges, pos, strides):
-    pointaccum = float4(0, 0, 0, 0)
-    ATA = zeros(3, 3)
-    Atb = float4(0, 0, 0, 0)
-    btb = 0
-    
-    for edge in edges:
-        # Linear interpolation
-        d_start = _IsoVals[threeDToOneD(edge.start)]
-        d_end = _IsoVals[threeDToOneD(edge.end)]
-        
-        edge_crossing = linInterpolate(edge.end, edge.start, d_end, d_start)
-        
-        # Estimate normal
-        normal = EstimateNormal(transformPoint(edge_crossing.xyz))
-        
-        # Add to QEF
-        qef_add(float4(normal, 0.0), float4(edge_crossing, 1.0), ATA, Atb, pointaccum, btb)
-        
-    # Solve QEF (simplified)
-    # In practice, solve ATA * x = Atb
-    # Here we use the center of mass fallback logic described
-    com = float3(pointaccum.x, pointaccum.y, pointaccum.z) / pointaccum.w
-    
-    # Clamp check
-    Min = pos
-    Max = pos + (strides[0] + strides[1] + strides[2]) # Note: sum of strides is not standard bounding box, likely a typo in source or specific to this implementation's "Max" definition
-    # Assuming Max is pos + strides (vector addition)
-    Max = pos + strides
-    
-    if surface_point is outside(Min, Max):
-        return com
-    else:
-        return surface_point
-
-def GetSurfacePointCentroid(edges):
-    surface_point = float3(0, 0, 0)
-    count = 0
-    for edge in edges:
-        d_start = _IsoVals[threeDToOneD(edge.start)]
-        d_end = _IsoVals[threeDToOneD(edge.end)]
-        intersection = linInterpolate(edge.end, edge.start, d_end, d_start)
-        surface_point += intersection
-        count += 1
-    return surface_point / count
-
-def GetSurfacePointBlocky(pos, strides):
-    return pos + (strides[0] + strides[1] + strides[2]) / 2.0
+    return [surface_point[0], surface_point[1], surface_point[2], 1.0]
 ```
 
 ### Parameters
@@ -221,15 +175,21 @@ def GetSurfacePointBlocky(pos, strides):
 *   **QEF Fallback**: If the computed QEF surface point is outside the cube bounds, the algorithm falls back to the center of mass of the intersection points [S1, unofficial].
 *   **Precision**: Linear interpolation relies on the difference between field values. If values are very close to zero or equal, precision issues may arise [S1, unofficial].
 
+## Subtopics
+
+### Point Engine for Scalar Fields
+A method to estimate foot points on an isosurface of a scalar field using a simplified version of Marching Cubes that finds only vertices without computing triangles, avoiding the expense of iterative refinement [S2, unofficial]. For each voxel in the volume at position $p$, look up voxels at positions $q = p + (1, 0, 0)$, $r = p + (0, 1, 0)$, and $s = p + (0, 0, 1)$ [S2, unofficial]. Check if edge $pq$ is inside the volume. If $p$ and $q$ are on different sides of the iso-surface, find the intersection point using the MC scheme and interpolate the gradient to that point [S2, unofficial]. Add the point and interpolated gradient to the list of points. Repeat the procedure for edges $pr$ and $ps$ [S2, unofficial]. For each cell, only three edges are visited, no table lookup is required, and no bookkeeping is needed for shared vertices [S2, unofficial]. All points are stored in a single list because the underlying `rgridb` structure is not composed of cells [S2, unofficial].
+
 ## Operating characteristics
-*   **Time Complexity**: $O(1)$ per voxel, as it processes a fixed number of edges (12) and performs a constant number of operations regardless of grid size.
+*   **Time Complexity**: $O(1)$ per voxel, as it processes a fixed number of edges (12) and performs a constant number of operations regardless of grid size [S1, unofficial].
 *   **Memory Complexity**: $O(N^3)$ for the output buffer `_SurfacePoints`, where $N$ is the resolution [S1, unofficial].
 *   **Performance**: The method is designed for GPU execution via compute shaders, allowing parallel processing of all voxels [S1, unofficial].
 *   **Strengths**: QEF provides a more accurate surface point than centroid or blocky methods by minimizing error across all intersecting edges [S1, unofficial].
 *   **Limitations**: QEF requires solving a linear system (or approximating it), which is more computationally expensive than centroid or blocky methods [S1, unofficial].
 
 ## Background
-This method is part of a GPU-based isosurface extraction pipeline, specifically focusing on the geometric refinement of surface points after topology determination. It is implemented in the `vinceniko/Isosurface` repository [S1, unofficial]. The use of QEF for surface point extraction is a known technique in implicit surface reconstruction, offering higher fidelity than simple interpolation [S1, unofficial].
+This method is part of a GPU-based isosurface extraction pipeline, specifically focusing on the geometric refinement of surface points after topology determination [S1, unofficial]. It is implemented in the `vinceniko/Isosurface` repository [S1, unofficial]. The use of QEF for surface point extraction is a known technique in implicit surface reconstruction, offering higher fidelity than simple interpolation [S1, unofficial].
 
 ## Sources
 [S1] vinceniko/Isosurface, https://github.com/vinceniko/Isosurface, fetched 2026-10-27 (unofficial)
+[S2] Hardware Accelerated Point Rendering of Isosurfaces, http://wscg.zcu.cz/wscg2003/Papers_2003/J61.pdf, fetched 2026-10-26 (unofficial)

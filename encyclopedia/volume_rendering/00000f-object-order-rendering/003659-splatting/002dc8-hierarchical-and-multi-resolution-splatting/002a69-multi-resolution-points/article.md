@@ -3,57 +3,93 @@
 Also called: Error-controlled Point Splatting, Reduced Point Cloud Rendering
 
 ## Overview
-Multi-Resolution Points is a hierarchical splatting technique that renders a single large point in place of many small points to reduce rasterization cost and storage requirements [S1, unofficial]. It differs from standard splatting by dynamically controlling point size based on local volume content and error metrics, rather than using a fixed resolution. This builds on [Hierarchical and Multi-Resolution Splatting](5618-hierarchical-and-multi-resolution-splatting.md).
+Multi-Resolution Points is a technique to render one large point in place of many small points to reduce rasterization cost and storage [S1, unofficial]. It addresses the high computational cost of rendering large point clouds by adaptively merging nearby points into larger splats based on a local error metric [S1, unofficial]. Unlike [Hierarchical Splatting](1168-hierarchical-splatting.md) which often relies on fixed hierarchical levels, this method explicitly controls point size via a user-defined error threshold to balance visual fidelity and performance [S1, unofficial].
 
 ## How it works
-**Inputs:** A set of 3D points with attributes (position, color, opacity, normal).
-**Outputs:** A rendered image.
+**Inputs:** A set of points $\{P_i\}$ where each point $i$ has position $\mathbf{p}_i$, density $\rho_i$, and a reconstruction kernel $h$ (typically Gaussian). A user-defined error threshold $\epsilon$.
+**Outputs:** A reduced set of splatted points mapped to the screen.
 
 **Data Structures:**
-1.  **Point Tree:** Points are organized into a hierarchical tree structure (e.g., octree or quadtree). Each node represents a cluster of points.
-2.  **Visibility Map:** A quadtree used to track occlusion and cull nodes [S1, unofficial].
+1.  **Octree:** Points are organized into an octree structure. Each node represents a spatial region containing a subset of points.
+2.  **Visibility Map:** A quadtree used to track occlusion status of octree nodes [S1, unofficial].
 
-**Algorithm:**
-1.  **Tree Construction:** Organize the input points into a tree structure. The leaves contain individual points or small clusters [S1, unofficial].
-2.  **Error Metric Calculation:** For each node, calculate a local error metric to determine if the node can be represented by a single larger point. The sources cite the Root Mean Square (RMS) error metric from Laur and Hanrahan [S1, unofficial].
-    *   Let $P_i$ be the original points in a node.
-    *   Let $P_{avg}$ be the representative point (e.g., centroid) for the node.
-    *   The error $E$ is calculated as the RMS deviation of the original points from the representative point, potentially weighted by opacity or other attributes.
-    *   *Note:* Welsh [S1, unofficial] also mentions using a frequency-space metric to control error.
-3.  **Threshold Comparison:** Compare the calculated error $E$ against a user-defined error threshold $T$.
-    *   If $E \le T$, the node is collapsed into a single large point (the representative point).
-    *   If $E > T$, the node is subdivided, and the process recurses to its children.
-4.  **Occlusion Culling:** Use the visibility map to cull occluded nodes.
-    *   Check if a node is occluded by previously rendered opaque geometry.
-    *   If occluded, skip rasterization for this node and its children.
-    *   If not occluded, proceed to rasterization.
-5.  **Rasterization:** Rasterize the points that pass the error threshold and occlusion tests. Each point is splatted as a 2D primitive (e.g., a disk or Gaussian blob) onto the screen.
-6.  **Visibility Update:** Update the visibility map with the newly rendered points to assist in culling subsequent nodes [S1, unofficial].
+**Steps:**
+1.  **Tree Construction:** Organize the input points into an octree. Each leaf node contains a cluster of points.
+2.  **Error Calculation:** For each octree node, calculate a local error metric. Laur and Hanrahan use Root Mean Square (RMS) error [S1, unofficial]. Let $E_{node}$ be the error of a node. If $E_{node} \le \epsilon$, the node can be represented by a single larger point.
+3.  **Tree Traversal & Culling:**
+    *   Traverse the octree.
+    *   Check the visibility map. If a node is occluded, cull it.
+    *   If not occluded, check if the node meets the error threshold.
+    *   If the node is too large (error $> \epsilon$), subdivide it and process children.
+    *   If the node meets the error threshold, mark it as a leaf for rendering.
+4.  **Rasterization:** Rasterize the points corresponding to the leaf nodes that failed the occlusion test. Each leaf node is rendered as a single large splat.
+5.  **Update Visibility:** Update the visibility map based on the rendered splats to assist in culling subsequent frames or nodes [S1, unofficial].
 
 **Parameters:**
-*   **Error Threshold ($T$):** User-set value to control the trade-off between accuracy and performance. Lower values result in more points (higher accuracy, slower); higher values result in fewer points (lower accuracy, faster) [S1, unofficial].
+*   $\epsilon$: Error threshold. Controls the trade-off between detail and performance. Typical values are not specified in the sources.
 
-**Edge Cases and Pitfalls:**
-*   **Precision:** Floating-point precision errors in error metric calculation may lead to incorrect culling or subdivision.
-*   **Boundaries:** Points near the edge of the tree structure or scene bounds require careful handling to avoid artifacts.
-*   **Degenerate Input:** Clusters of points with identical positions or attributes may cause division by zero or undefined behavior in error metrics if not handled.
+**Edge Cases:**
+*   **Precision:** RMS error calculation must be robust to floating-point inaccuracies in small clusters.
+*   **Boundaries:** Nodes at the boundary of the volume must be handled correctly during subdivision.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_multi_resolution_points(points, error_threshold):
+    # Build octree from points
+    octree = build_octree(points)
+    
+    # Initialize visibility map (quadtree)
+    visibility_map = initialize_visibility_map()
+    
+    # List of splats to render
+    splats = []
+    
+    def traverse_and_render(node):
+        # Check occlusion using visibility map
+        if is_occluded(node, visibility_map):
+            return
+        
+        # Calculate local error for this node
+        error = calculate_rms_error(node.points)
+        
+        if error > error_threshold:
+            # Node is too detailed, subdivide
+            if node.has_children:
+                for child in node.children:
+                    traverse_and_render(child)
+            else:
+                # Leaf node but error too high? 
+                # Render as is or handle as degenerate case [G]
+                splats.append(node.to_splat())
+        else:
+            # Node meets error threshold, render as single large point
+            splats.append(node.to_splat())
+            # Update visibility map for this region
+            update_visibility_map(node, visibility_map)
+            
+    traverse_and_render(octree.root)
+    
+    # Rasterize all collected splats
+    for splat in splats:
+        rasterize(splat)
+```
 
 ## Subtopics
 
 ### [Cloud Impostor Rendering](5125-cloud-impostor-rendering.md)
-A technique to accelerate cloud rendering by replacing geometric particle models with 2D texture impostors, exploiting the lack of high-frequency edges in clouds to tolerate lower resolution textures and frequent updates.
+Cloud Impostor Rendering is a technique to accelerate cloud rendering by replacing geometric particle models with 2D texture impostors, exploiting the lack of high-frequency edges in clouds to tolerate lower resolution textures and frequent updates. Unlike geometric models which require high-resolution impostors only at a distance, this method allows impostors to be used for clouds even when the viewer is inside or very close to them, significantly reducing overdraw and fill-rate requirements. It builds on [Multi-Resolution Points](4784-multi-resolution-points.md) by using pre-shaded textures to represent volumetric density.
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the tree depth and the error threshold. In the worst case, all points are rendered ($O(N)$). In the best case, large clusters are collapsed ($O(1)$ per cluster). The visibility map update adds overhead.
-*   **Memory Complexity:** $O(N)$ for storing the point tree and visibility map. The tree structure adds overhead compared to a flat list.
-*   **Performance:** Welsh [S1, unofficial] reported reducing 240k points to 90k points using a frequency-space metric, demonstrating significant reduction in rasterization cost.
-*   **Strengths:** Reduces rasterization overhead by merging overlapping points; reduces storage by retaining only relevant points.
-*   **Limitations:** Requires preprocessing to build the tree; error metric calculation can be expensive; occlusion culling adds complexity.
-*   **When to Use:** Large point clouds where many points overlap or are occluded; scenes with varying density.
-*   **When Not to Use:** Small point clouds where overhead dominates; scenes requiring high-frequency detail that cannot be captured by large splats.
+*   **Time Complexity:** Depends on the tree traversal and occlusion culling. In the worst case, all points are rendered. With effective culling, it scales sub-linearly with the number of input points.
+*   **Memory Complexity:** Requires storage for the octree and visibility map. The reduced point set requires less storage than the original point cloud.
+*   **Performance:** Welsh '02 reduced 240k points to 90k points using a frequency-space metric [S1, unofficial]. This results in less rasterization cost due to overlap areas and less storage required [S1, unofficial].
+*   **Strengths:** Reduces rasterization cost and storage. Provides lossless data compression by retaining only relevant points [S1, unofficial].
+*   **Limitations:** Requires building and maintaining a tree structure. Error metric selection is critical.
 
 ## Background
-The concept of organizing points into a tree and using error metrics to control resolution was introduced by Laur and Hanrahan [S1, unofficial]. Welsh [S1, unofficial] extended this with frequency-space metrics. The technique is part of the broader field of volumetric point rendering, aiming to balance visual fidelity with rendering performance. The sources also mention alternative grids (BCC, hexagonal) for more efficient point sampling, citing Conway [S1, unofficial], but these are related to compression rather than the core multi-resolution algorithm.
+The method was introduced in the context of volumetric point rendering. Laur and Hanrahan used RMS error to control point size [S1, unofficial]. Welsh '02 applied a frequency-space metric to reduce point counts [S1, unofficial]. The technique is part of the broader field of hierarchical and multi-resolution splatting.
 
 ## Sources
 [S1] Volumetric Points - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/teaching/cse616/volPts.pdf, fetched 2026-10-29 (unofficial)
