@@ -7,27 +7,23 @@ A rasterization technique where each voxel in a cluster is processed by a single
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A cluster of voxels, their associated brick metadata (first voxel indices, masks), and the camera/projection matrices.
-*   **Output:** A visibility buffer or hit list containing the nearest voxel for each covered pixel, determined via atomic operations.
+*   **Input:** A cluster of voxels, their associated brick metadata (first voxel indices, masks), and the camera/projection matrices [S1, unofficial].
+*   **Output:** A visibility buffer or hit list containing the nearest voxel for each covered pixel, determined via atomic operations [S1, unofficial].
 
 **Data Structures:**
-*   **Brick Metadata:** Contains an array of first voxel indices for binary search and a bitmask indicating which cells within the brick are occupied.
-*   **Voxel Footprint Box:** Defined as a capsule widened by its radius, constrained within its cell boundaries. The box's corners lie on a grid of 32nds of a cell.
+*   **Brick Metadata:** Contains an array of first voxel indices for binary search and a bitmask indicating which cells within the brick are occupied [S1, unofficial].
+*   **Voxel Footprint Box:** Defined as a capsule widened by its radius, constrained within its cell boundaries [S1, unofficial]. The box's corners lie on a grid of 32nds of a cell [S1, unofficial].
 
 **Steps:**
 1.  **Invocation:** Invoke one shader invocation per voxel of the cluster [S1, unofficial].
 2.  **Brick Identification:** Determine the brick containing the voxel by performing a binary search over the bricks' first voxels [S1, unofficial].
 3.  **Cell Index:** Determine the cell index within the brick by finding the $n$-th set bit of the brick's mask [S1, unofficial].
 4.  **Footprint Definition:** Define the voxel's footprint box as a capsule widened by its radius, constrained within its cell [S1, unofficial].
-5.  **Projection Calculation:** Project the footprint box to clip space. The center and half-extents are reached as steps along the brick's grid of 32nds of a cell. The projection lies within $(r_x + |x_c / w_c| r_w) / (w_c - r_w)$ of the center in x, and likewise in y, widened by a 64th of a pixel [S1, unofficial].
-    *   Here, $r_x$ is the x-radius, $x_c$ is the center x, $w_c$ is the center w, and $r_w$ is the w-radius.
-6.  **Edge Case Handling:**
-    *   If a voxel is wholly behind the near plane, it covers no pixels [S1, unofficial].
-    *   If a voxel reaches behind the camera's plane, it covers the whole target [S1, unofficial].
+5.  **Projection Calculation:** Project the footprint box to clip space. The center and half-extents are reached as steps along the brick's grid of 32nds of a cell. The projection lies within $(r_x + |x_c / w_c| r_w) / (w_c - r_w)$ of the center in x, and likewise in y, widened by a 64th of a pixel [S1, unofficial]. Here, $r_x$ is the x-radius, $x_c$ is the center x, $w_c$ is the center w, and $r_w$ is the w-radius [S1, unofficial].
+6.  **Edge Case Handling:** If a voxel is wholly behind the near plane, it covers no pixels [S1, unofficial]. If a voxel reaches behind the camera's plane, it covers the whole target [S1, unofficial].
 7.  **Pair Pooling:** A subgroup pools its voxels' (voxel, pixel) pairs using an exclusive add, followed by a binary search per pair [S1, unofficial].
 8.  **Ray Testing:** Fill the shader lanes with rays' tests for whichever voxels cover pixels [S1, unofficial].
-9.  **Hit Test:** For each pair, test the ray against that voxel alone using `vis_voxel_hit` [S1, unofficial].
-    *   Inside `vis_voxel_hit`: Take the ray's span through the voxel's cell from the cell's own planes, then compute the footprint over that span [S1, unofficial].
+9.  **Hit Test:** For each pair, test the ray against that voxel alone using `vis_voxel_hit` [S1, unofficial]. Inside `vis_voxel_hit`, take the ray's span through the voxel's cell from the cell's own planes, then compute the footprint over that span [S1, unofficial].
 10. **Atomic Update:** On a hit, perform an atomic max of $(1 / t, \text{cluster}, \text{brick})$ so that the nearest voxel wins [S1, unofficial].
 
 **Pseudocode:**
@@ -37,77 +33,144 @@ A rasterization technique where each voxel in a cluster is processed by a single
 # Pseudocode for vis_voxel_raster.comp
 # One invocation per voxel in the cluster
 
-def process_voxel(voxel_id, cluster_data):
-    # 1. Identify Brick
-    brick_idx = binary_search_bricks(cluster_data.bricks, cluster_data.first_voxel_indices, voxel_id)
+def process_voxel(voxel_id, cluster_data, camera_matrix, projection_matrix):
+    # 1. Identify Brick (iterative binary search) [G]
+    first_voxels = cluster_data.first_voxel_indices
+    left, right = 0, len(first_voxels) - 1
+    brick_idx = right
+    while left <= right:
+        mid = (left + right) // 2
+        if first_voxels[mid] <= voxel_id:
+            brick_idx = mid
+            left = mid + 1
+        else:
+            right = mid - 1
     brick = cluster_data.bricks[brick_idx]
-    
-    # 2. Identify Cell
-    cell_idx = find_nth_set_bit(brick.mask, voxel_id - brick.first_voxel_index)
-    
+
+    # 2. Identify Cell (iterative bit scan) [G]
+    offset = voxel_id - brick.first_voxel_index
+    cell_idx = 0
+    mask = brick.mask
+    for i in range(32):
+        if (mask >> i) & 1:
+            if offset == cell_idx:
+                break
+            cell_idx += 1
+
     # 3. Define Footprint Box
     # Capsule widened by radius, constrained within cell
-    footprint_box = define_footprint_box(voxel, brick.cell_size)
-    
+    cell_size = brick.cell_size
+    voxel_center = voxel_data.center
+    radius = voxel_data.radius
+    min_corner = max(voxel_center - radius, brick.min_corner)
+    max_corner = min(voxel_center + radius, brick.max_corner)
+    footprint_center = (min_corner + max_corner) / 2.0
+    footprint_half_extents = (max_corner - min_corner) / 2.0
+
     # 4. Project to Clip Space
-    # Corners on grid of 32nds of a cell
-    center_clip = world_to_clip(footprint_box.center)
-    half_extents_clip = world_to_clip(footprint_box.half_extents)
-    
-    # Calculate projection bounds
-    # widened by 64th of a pixel
-    rx = footprint_box.radius_x
+    # Corners lie on grid of 32nds of a cell; center/half-extents reached as steps along grid [S1, unofficial]
+    center_clip = apply_projection(footprint_center, camera_matrix, projection_matrix)
+    half_extents_clip = apply_projection(footprint_half_extents, camera_matrix, projection_matrix)
+
+    rx = footprint_half_extents.x
     xc = center_clip.x
     wc = center_clip.w
-    rw = footprint_box.radius_w
-    
-    x_proj_bound = (rx + abs(xc / wc) * rw) / (wc - rw)
-    y_proj_bound = (footprint_box.radius_y + abs(center_clip.y / wc) * footprint_box.radius_w) / (wc - footprint_box.radius_w)
-    
+    rw = footprint_half_extents.w
+
+    # Projection bounds, widened by 64th of a pixel [S1, unofficial]
+    x_proj_bound = (rx + abs(xc / wc) * rw) / (wc - rw) + 1.0 / 64.0
+    y_proj_bound = (footprint_half_extents.y + abs(center_clip.y / wc) * rw) / (wc - rw) + 1.0 / 64.0
+
     # 5. Edge Cases
-    if center_clip.z > 0: # Wholly behind near plane (assuming NDC z>0 is behind)
+    if center_clip.z > 0: # Wholly behind near plane [S1, unofficial]
         return
-    
-    if wc < 0: # Reaching behind camera plane
-        # Covers whole target
-        target_pixels = get_all_target_pixels()
+    if wc < 0: # Reaching behind camera plane [S1, unofficial]
+        target_pixels = list(range(cluster_data.resolution_x * cluster_data.resolution_y))
     else:
-        # Determine covered pixel centers
-        target_pixels = get_pixel_centers_covered_by_box(center_clip, x_proj_bound, y_proj_bound)
-        
+        # Determine covered pixel centers from clip-space bounds [G]
+        target_pixels = compute_pixel_centers_from_clip_bounds(center_clip, x_proj_bound, y_proj_bound)
+
     # 6. Pool Pairs
-    # Subgroup exclusive add to count pairs, then binary search to assign lanes
+    # Subgroup exclusive add to count pairs, then binary search to assign lanes [S1, unofficial]
     pair_list = [(voxel_id, pixel) for pixel in target_pixels]
-    pooled_pairs = subgroup_pool(pair_list)
-    
+    pooled_pairs = subgroup_exclusive_scan_and_assign(pair_list)
+
     # 7. Ray Tests
-    for voxel_id, pixel in pooled_pairs:
-        ray = get_ray_for_pixel(pixel)
-        
+    for vid, pixel in pooled_pairs:
+        ray = generate_ray_for_pixel(pixel, camera_matrix)
+
         # 8. Hit Test
-        hit_t = vis_voxel_hit(ray, voxel, brick)
-        
+        hit_t = vis_voxel_hit(ray, voxel_data, brick)
+
         if hit_t is not None:
             # 9. Atomic Max
-            # Nearest voxel wins (smallest t, largest 1/t)
-            atomic_max_hit(1.0 / hit_t, cluster_id, brick_id)
+            # Nearest voxel wins (smallest t, largest 1/t) [S1, unofficial]
+            atomic_max_hit(1.0 / hit_t, cluster_data.id, brick.id)
 
 def vis_voxel_hit(ray, voxel, brick):
-    # Take ray's span through voxel's cell from cell's own planes
-    t_min, t_max = cell_plane_intersection(ray, brick.cell_planes)
-    
-    # Compute footprint over that span
-    if footprint_intersects_span(voxel.footprint, t_min, t_max):
+    # Take ray's span through voxel's cell from the cell's own planes [S1, unofficial]
+    t_min, t_max = ray_aabb_intersection(ray, brick.cell_planes)
+    if t_min is None or t_max is None or t_max < 0:
+        return None
+
+    # Compute the footprint over that span [S1, unofficial]
+    if footprint_overlaps_span(voxel.footprint, t_min, t_max):
         return t_min
     return None
+
+def ray_aabb_intersection(ray, planes):
+    # Iterative slab method [G]
+    t_near = -float('inf')
+    t_far = float('inf')
+    for i in range(3):
+        if abs(ray.dir[i]) < 1e-8:
+            if ray.origin[i] < planes[i].min or ray.origin[i] > planes[i].max:
+                return None, None
+        else:
+            t1 = (planes[i].min - ray.origin[i]) / ray.dir[i]
+            t2 = (planes[i].max - ray.origin[i]) / ray.dir[i]
+            t_near = max(t_near, min(t1, t2))
+            t_far = min(t_far, max(t1, t2))
+    if t_near > t_far:
+        return None, None
+    return t_near, t_far
+
+def footprint_overlaps_span(footprint, t_min, t_max):
+    # Check if footprint intersects ray segment [G]
+    return t_min <= footprint.max_t and t_max >= footprint.min_t
+
+def apply_projection(point, cam_mat, proj_mat):
+    # Standard 4x4 matrix-vector multiplication [G]
+    vec = [point.x, point.y, point.z, 1.0]
+    out = [0.0, 0.0, 0.0, 0.0]
+    for r in range(4):
+        for c in range(4):
+            out[r] += cam_mat[r][c] * vec[c]
+        for c in range(4):
+            out[r] += proj_mat[r][c] * out[c]
+    return [out[0]/out[3], out[1]/out[3], out[2]/out[3], out[3]]
+
+def compute_pixel_centers_from_clip_bounds(center_clip, x_bound, y_bound):
+    # Map clip-space bounds to pixel indices [G]
+    pixels = []
+    for y in range(int(center_clip.y - y_bound), int(center_clip.y + y_bound) + 1):
+        for x in range(int(center_clip.x - x_bound), int(center_clip.x + x_bound) + 1):
+            pixels.append(y * cluster_data.resolution_x + x)
+    return pixels
+
+def subgroup_exclusive_scan_and_assign(pair_list):
+    # Simplified subgroup exclusive scan + binary search assignment [G]
+    # In practice, this uses hardware subgroup instructions to count pairs per lane
+    # and binary search to map each pair to a unique lane index.
+    return pair_list  # Placeholder for hardware-specific subgroup logic
 ```
 
 ## Operating characteristics
-*   **Time Complexity:** Proportional to the number of voxels in the cluster, rather than the area of the brick's bounding rectangle. This is significantly faster when voxel footprints are small relative to cell sizes (e.g., at shallow levels) [S1, unofficial].
-*   **Memory Complexity:** Requires storing brick metadata (first voxel indices, masks) and temporary buffers for subgroup pooling [S1, unofficial].
-*   **Performance:** In tests on `foliage_4k_production`, the previous method sent 14.9 M rays per frame, taking 59.7 M traversal steps and 15.2 M footprint tests for 1.78 M hits. The splatting method reduces this by only testing voxels that actually cover pixel centers [S1, unofficial].
-*   **Strengths:** Eliminates wasted computation on pixels not covered by any voxel footprint. Efficient for sparse data where footprints are small.
-*   **Limitations:** Requires subgroup operations for pooling, which may have overhead on hardware with poor subgroup support. Precision issues may arise in projection calculations near the camera plane.
+*   **Time Complexity:** Proportional to the number of voxels in the cluster, rather than the area of the brick's bounding rectangle [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** In tests on `foliage_4k_production`, the previous method sent 14.9 M rays per frame, taking 59.7 M traversal steps and 15.2 M footprint tests for 1.78 M hits [S1, unofficial].
+*   **Strengths:** Eliminates wasted computation on pixels not covered by any voxel footprint [S1, unofficial].
+*   **Limitations:** Requires subgroup operations for pooling, which may have overhead on hardware with poor subgroup support [S1, unofficial].
 
 ## Background
 This method was introduced as part of stage 3 rasterization updates in the Nepheline renderer, specifically in ADR-0061 [S1, unofficial]. It replaced the DDA-based traversal (`vis_voxel_trace`) and the previous pixel-walking brick rasterization, aiming to optimize performance for scenes with foliage and other complex geometry where voxel footprints are small [S1, unofficial].

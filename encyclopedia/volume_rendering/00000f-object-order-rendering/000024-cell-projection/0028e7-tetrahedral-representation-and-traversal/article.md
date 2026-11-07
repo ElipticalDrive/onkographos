@@ -1,8 +1,8 @@
 # Tetrahedral representation and traversal
-Also called: Projected Tetrahedra, Cell Projection, Tetrahedral Volume Rendering
+Also called: Projected Tetrahedra family, Cell Projection via Tetrahedra
 
 ## Overview
-This family solves the problem of rendering unstructured volumetric data by decomposing the volume into tetrahedral primitives, projecting them onto the 2D image plane, and rasterizing them to leverage hardware-accelerated compositing [S1, S2][S3, unofficial][S4, S6, S7][S8, S9, S10, unofficial][S11][S12, unofficial][S14, S16][S17, S18, unofficial]. It is distinguished from ray-marching methods by its explicit geometric projection and from surface extraction methods by its direct volume rendering approach, though it shares the tetrahedral decomposition with [Marching Tetrahedrons Algorithm](940-marching-tetrahedrons-algorithm.md).
+This family renders volumetric data by decomposing the volume into tetrahedral primitives, projecting them onto the 2D image plane, and rasterizing them to accumulate color and opacity [S1, S2][S3, unofficial][S4, S6, S7][S8, S9, S10, unofficial][S11][S12, unofficial][S14, S16][S17, S18, unofficial]. It solves the problem of rendering unstructured tetrahedral grids with high accuracy and interactivity, avoiding the approximations of ray-marching on regular grids. It is distinguished from [Tetrahedral Volume Rendering](820-tetrahedral-volume-rendering.md) by its specific use of Basis Tensor (BT) volumes for isosurface selection and its two-pass GPU pipeline architecture, and from [Marching Tetrahedrons Algorithm](940-marching-tetrahedrons-algorithm.md) by computing isosurfaces per fragment rather than generating explicit polygonal cuts.
 
 ## Shared principles
 The family shares the fundamental mechanism of treating volumetric data as a set of geometric primitives that are transformed and rasterized [S1][S3, unofficial][S4, book].
@@ -25,7 +25,7 @@ Projected Tetrahedra (PT) is an object-order volume rendering technique that pro
 The Marching Tetrahedrons Algorithm (MTA) is an iso-surface extraction method that converts a scalar field defined on a regular grid into a triangular mesh by subdividing each cubic voxel into tetrahedra and processing each tetrahedron independently [G]. It solves the problem of extracting explicit polygonal surfaces from volumetric data [G]. Unlike its sibling [Tetrahedral Volume Rendering](820-tetrahedral-volume-rendering.md), which focuses on direct volume rendering via ray casting, MTA generates an explicit mesh [G]. It differs from [Projected Tetrahedra](877-projected-tetrahedra.md) by constructing a connected triangle mesh rather than projecting volumetric primitives to the screen [G]. The algorithm unfortunately has directional ambiguities because it subdivides a cube with tetrahedrons, which cannot be done symmetrically.
 
 ### [Adaptive Delaunay Update](4923-adaptive-delaunay-update.md)
-Adaptive Delaunay Update is a technique used in differentiable volumetric reconstruction to maintain a valid Delaunay tetrahedralization of a radiance field during optimization. It addresses the problem of computational cost by decoupling the expensive topological recomputation from the frequent attribute updates. Unlike methods that recompute the Delaunay triangulation from scratch at every iteration, this method updates vertex positions and topology at a fixed, lower frequency, balancing the speed of GPU-accelerated rendering with the accuracy of the geometric representation.
+Adaptive Delaunay Update is a strategy for maintaining the topological validity of a tetrahedral mesh during optimization-based volumetric reconstruction, specifically within frameworks like Radiance Meshes. It addresses the problem of computational cost versus geometric accuracy when vertex positions change dynamically. Unlike methods that recompute the Delaunay triangulation from scratch at every iteration, this method updates the topology only periodically, balancing GPU acceleration speed with rendering accuracy.
 
 ### [GPU-based Projected Tetrahedra](7484-gpu-based-projected-tetrahedra.md)
 GPU-based Projected Tetrahedra is a direct volume rendering method for unstructured tetrahedral data that achieves interactive rates by treating each tetrahedron as a distinct geometric primitive and rasterizing it using hardware operations. It differs from traditional ray casting by leveraging hardware rasterization and blending to compute pixel color, avoiding explicit per-pixel ray-tetrahedron intersection tests. It builds on [Projected Tetrahedra](877-projected-tetrahedra.md) by mapping the classification and decomposition logic into programmable vertex shaders, allowing tetrahedral elements to be volume scan-converted within the GPU without pre-processing or additional data structures.
@@ -37,25 +37,25 @@ Texture-Encoded Isosurfacing is a GPU-based method for extracting isosurfaces fr
 This method enables parallel rendering of large unstructured tetrahedral grids by partitioning the data using a kd-tree and applying a sort-last compositing algorithm. It renders unstructured grids natively without sampling into a regular grid, avoiding the oversampling and undersampling issues inherent in grid-based approaches. Unlike other parallel rendering approaches that require continuous cell transfer, this method requires no further cell transfer once distributed; only image data is communicated between processes.
 
 ### [Tetrahedral Mesh Connectivity Encoding](8957-tetrahedral-mesh-connectivity-encoding.md)
-A method to encode the connectivity of a tetrahedral mesh segment using opcodes that describe the position of new vertices relative to a growing region bounded by a cut-border, ensuring unique identification of vertices across multi-resolution segments.
+The Basic Cut-Border Machine (CBM) is a region-growing compression scheme that encodes the connectivity of a tetrahedral mesh by growing a region bounded by a cut-border. It solves the problem of efficiently storing and transmitting tetrahedral mesh topology by generating a stream of opcodes that describe the position of new vertices relative to the current boundary. Unlike sibling methods that may rely on global indexing or explicit adjacency lists, CBM determines connectivity locally during traversal, ensuring unique identification of vertices across multi-resolution segments through shared vertex indices.
 
-#### Point Representation via Tetrahedra
+### Point Representation via Tetrahedra
 - **Definition:** Representing data points as small tetrahedra to fit them into the triangular mesh framework for rendering [S1].
 - **Parameter:** `size`: specifies the size of the point tetrahedra relative to the data ranges [S1].
 
-#### LinPrim Tetrahedron Representation
+### LinPrim Tetrahedron Representation
 - **Definition:** A scene representation using transparent tetrahedra bounded by triangular faces with homogeneous density [S2].
 - **Step:** Define four basis vectors describing directions from the center on which corners are located, equally spaced to represent regular tetrahedra [S2]. Optimize the distance between the center and each corner independently [S2].
 - **Parameter:** Tetrahedra memory requirement: 12 floats per primitive (omitting color), due to absence of symmetry in the formulation [S2].
 - **Pitfall:** Unlike octahedra, the optimized position (center) can differ from the geometric center of the primitive due to lack of symmetry [S2].
 
-#### Grid-based Traversal
+### Grid-based Traversal
 - **Definition:** A method using a hierarchical data structure for rectilinear grids to quickly determine tetrahedra possibly hit by traversed grid cells, enabling interactive rendering of irregular volume data [S3, unofficial].
 - **Step:** Attach all tetrahedra intersecting a given grid cell to that cell [S3, unofficial]. Use minimum and maximum values to cull regions outside of the current iso-value [S3, unofficial].
 - **Number:** Rendered a bioelectric field of over one million tetrahedra at interactive rates (512x512 viewport) with 16 processors or more [S3, unofficial].
 
 ## Background
-Projected Tetrahedra was introduced by Parker et al. in 1999 as one of the first methods capable of rendering irregular volume data at interactive rates on a supercomputer [S3, unofficial]. The method decomposes hexahedral cells into five tetrahedra to support curvilinear volumes [S3, unofficial]. It was later adapted for GPU acceleration, leveraging the graphics pipeline for real-time performance [S4, S7][S12, unofficial][S14, S16]. The approach has been extended to parallel rendering using spatial partitioning [S1] and differentiable rendering frameworks [S1][S2].
+Projected Tetrahedra was introduced by Parker et al. in 1999 as one of the first methods capable of rendering irregular volume data at interactive rates on a supercomputer [S3, unofficial]. The method decomposes the volume into tetrahedra and projects them onto the screen, leveraging hardware rasterization [S3, unofficial]. Early implementations used grid-based traversal to accelerate the identification of tetrahedra intersecting grid cells [S3, unofficial]. Later developments moved the projection and classification logic to the GPU, enabling real-time interactivity [S4, S7][S12, unofficial][S14, S16]. The method has been extended to parallel rendering using kd-tree partitioning [S1] and differentiable rendering [S1].
 
 ## Sources
 [S1] Computing and Displaying Isosurfaces inR, https://doi.org/10.18637/jss.v028.i01, fetched 2026-10-27

@@ -1,0 +1,196 @@
+--- v001.md
++++ v002.md
+@@ -4,59 +4,56 @@
+ 
+ ## Overview
+-This method computes the final color of a terrain surface point by combining albedo, direct sunlight (modulated by shadow and cloud shadow), and hemispheric ambient light (sky and ground bounce modulated by ambient occlusion). It is designed for heightfield-based terrain rendering where normals are baked rather than derived from finite differences to avoid facet artifacts. It differs from general volume shading by treating the terrain as a boundary surface with local illumination, relying on precomputed or efficiently sampled ambient occlusion factors rather than full volumetric light transport.
++This method computes the final color of a terrain surface point by combining surface albedo, direct sunlight (modulated by shadow and cloud shadow), and hemispheric ambient light (sky and ground bounce modulated by ambient occlusion). It is designed for heightfield-based terrain rendering where normals are baked rather than derived from finite differences to avoid facet artifacts. It differs from general volumetric lighting by operating on a 2.5D surface geometry, using a hemispheric approximation for ambient light instead of full spherical integration, and relying on precomputed or trace-based occlusion factors rather than participating media scattering.
+ 
+ ## How it works
+ **Inputs:**
+-- Surface position $\mathbf{p} = (px, py, pz)$.
+-- Surface normal $\mathbf{n} = (nx, ny, nz)$, assumed unit length.
+-- Albedo color $\mathbf{c}_{albedo}$.
+-- Sun direction $\mathbf{l}_{sun}$ (normalized).
+-- Sun radiance $\mathbf{c}_{sun}$.
+-- Sky ambient color $\mathbf{c}_{sky}$.
+-- Ground ambient color $\mathbf{c}_{ground}$.
+-- Shadow factor $S \in [0, 1]$ (from shadow casting).
+-- Cloud shadow factor $C \in [0, 1]$.
+-- Ambient occlusion factor $AO \in [0, 1]$.
++*   Surface position $\mathbf{p} = (p_x, p_y, p_z)$, where $p_y$ is typically height.
++*   Surface normal $\mathbf{n} = (n_x, n_y, n_z)$, unit length.
++*   Surface albedo $\mathbf{c}_{albedo}$ (RGB).
++*   Sun direction $\mathbf{s}$ (unit vector).
++*   Sun radiance $\mathbf{c}_{sun}$ (RGB).
++*   Sky ambient color $\mathbf{c}_{sky}$ (RGB).
++*   Ground ambient color $\mathbf{c}_{ground}$ (RGB).
++*   Shadow factor $S \in [0, 1]$ (from shadow ray casting).
++*   Cloud shadow factor $C \in [0, 1]$.
++*   Ambient occlusion factor $AO \in [0, 1]$.
++*   Cell size `field.cell` (for bias calculation).
+ 
+ **Outputs:**
+-- Final color $\mathbf{c}_{out}$.
++*   Final pixel color $\mathbf{c}_{out}$ (RGB).
+ 
+ **Data Structures:**
+-- Vectors are 3-component floats.
+-- Colors are 3-component floats (RGB).
++*   No complex volumetric data structures are required. The method operates on scalar and vector attributes associated with the terrain mesh vertices or fragments.
+ 
+ **Steps:**
+ 
+-1.  **Normal Dot Light:** Calculate the dot product between the normal and the sun direction.
+-    $$ N \cdot L = n_x l_x + n_y l_y + n_z l_z $$
++1.  **Calculate Direct Lighting Scale:**
++    Compute the dot product between the normal and sun direction:
++    $$ NdotL = n_x s_x + n_y s_y + n_z s_z $$
++    Calculate a bias value to offset the shadow ray origin to prevent self-shadowing artifacts on coarse heightfields:
++    $$ \text{bias} = \text{field.cell} \times 0.5 + 0.5 $$
++    The shadow ray origin is $\mathbf{p} + \mathbf{n} \times \text{bias}$ with jitter. The shadow factor $S$ is determined by tracing this ray. The cloud shadow factor $C$ is determined by querying cloud density at $(p_x, p_z, p_y)$.
++    Compute the direct light scale:
++    $$ \text{lightScale} = \max(0, NdotL) \times S \times C $$
+ 
+-2.  **Shadow Bias:** To prevent self-shadowing artifacts on coarse heightfields, calculate a bias offset. The bias is defined as:
+-    $$ \text{bias} = \text{field.cell} \times 0.5 + 0.5 $$
+-    [S1, unofficial]
++2.  **Calculate Ambient Occlusion:**
++    Compute the ambient occlusion factor $AO$ by tracing ambient occlusion from $\mathbf{p}$ in the hemisphere defined by $\mathbf{n}$. This value represents the fraction of the hemisphere occluded by geometry.
+ 
+-3.  **Shadow Tracing:** If $N \cdot L > 0$, trace a shadow ray from a biased starting position to determine if the point is in shadow. The start position is:
+-    $$ \mathbf{p}_{start} = \mathbf{p} + \mathbf{n} \times \text{bias} $$
+-    Jitter is applied to the trace to reduce aliasing. [S1, unofficial]
+-    *Note: The shadow factor $S$ is the result of this trace (1 if visible, 0 if occluded, or intermediate if soft shadows).*
++3.  **Calculate Hemispheric Ambient Factor:**
++    Determine the sky visibility factor based on the normal's Y component (assuming Y is up):
++    $$ \text{sky} = 0.5 + 0.5 \times n_y $$
++    Consequently, the ground visibility factor is:
++    $$ \text{ground} = 1 - \text{sky} = 0.5 - 0.5 \times n_y $$
+ 
+-4.  **Cloud Shadow:** Retrieve the cloud shadow factor $C$ at the surface position $(px, pz)$ and height $py$. [S1, unofficial]
++4.  **Compute Ambient Color:**
++    Interpolate between sky and ground ambient colors based on the sky factor, then modulate by occlusion:
++    $$ \mathbf{c}_{ambient} = (\mathbf{c}_{sky} \times \text{sky} + \mathbf{c}_{ground} \times \text{ground}) \times AO $$
+ 
+-5.  **Direct Light Scale:** Calculate the intensity scale for direct sunlight.
+-    $$ \text{lightScale} = \max(0, N \cdot L) \times S \times C $$
+-
+-6.  **Ambient Occlusion:** Calculate the ambient occlusion factor $AO$ at $\mathbf{p}$. This typically involves tracing rays into the hemisphere or using a precomputed field. [S1, unofficial]
+-
+-7.  **Hemispheric Ambient Factor:** Calculate the sky visibility factor based on the normal's Y component.
+-    $$ \text{sky} = 0.5 + 0.5 \times n_y $$
+-    This linearly interpolates between full ground visibility ($n_y = -1 \implies \text{sky}=0$) and full sky visibility ($n_y = 1 \implies \text{sky}=1$). [S1, unofficial]
+-
+-8.  **Ambient Color:** Compute the ambient color by interpolating between sky and ground ambient colors, then modulating by AO.
+-    $$ \mathbf{c}_{ambient} = \left( \mathbf{c}_{sky} \times \text{sky} + \mathbf{c}_{ground} \times (1 - \text{sky}) \right) \times AO $$
+-    [S1, unofficial]
+-
+-9.  **Direct Color:** Compute the direct sunlight contribution.
++5.  **Compute Direct Color:**
++    Scale the sun radiance by the direct light scale:
+     $$ \mathbf{c}_{direct} = \mathbf{c}_{sun} \times \text{lightScale} $$
+ 
+-10. **Final Color:** Combine direct and ambient contributions, modulated by albedo.
++6.  **Output Final Color:**
++    Multiply the albedo by the sum of direct and ambient components:
+     $$ \mathbf{c}_{out} = \mathbf{c}_{albedo} \times (\mathbf{c}_{direct} + \mathbf{c}_{ambient}) $$
+ 
+@@ -64,45 +61,31 @@
+ 
+ ```python
+-def shade_terrain(p, n, albedo, sun_dir, sun_radiance, sky_ambient, ground_ambient, shadow_factor, cloud_shadow_factor, ao_factor):
+-    # 1. Normal Dot Light
+-    ndotl = n.x * sun_dir.x + n.y * sun_dir.y + n.z * sun_dir.z
++def terrain_shading(p, n, albedo, sun_dir, sun_radiance, sky_ambient, ground_ambient, shadow_factor, cloud_shadow_factor, ao_factor, cell_size):
++    # 1. Direct Lighting
++    ndotl = dot(n, sun_dir)
+     
+-    # 2. Shadow Bias
+-    # field.cell is the grid cell size; 0.5 is an arbitrary constant for bias
+-    bias = field.cell * 0.5 + 0.5
++    # Bias to prevent self-shadowing on coarse heightfields
++    bias = cell_size * 0.5 + 0.5
+     
+-    # 3. Shadow Tracing (if sun is above horizon)
+-    shadow = 1.0
+-    if ndotl > 0:
+-        # Start position biased along normal
+-        start_pos = p + n * bias
+-        # Trace shadow ray with jitter
+-        # shadow_factor is the result of this trace
+-        shadow = shadow_factor 
+-        
+-    # 4. Cloud Shadow
+-    # cloud_shadow_at takes x, z, y coordinates
+-    cloud_shade = cloud_shadow_at(p.x, p.z, p.y)
++    # Shadow ray origin: p + n * bias + jitter
++    # shadow_factor is result of trace_shadow(p + n * bias + jitter, sun_dir)
++    # cloud_shadow_factor is result of cloud_shadow_at(p.x, p.z, p.y)
+     
+-    # 5. Direct Light Scale
+-    light_scale = max(0.0, ndotl) * shadow * cloud_shade
++    light_scale = max(0.0, ndotl) * shadow_factor * cloud_shadow_factor
+     
+-    # 6. Ambient Occlusion
+-    # ao_factor is the result of traceAmbientOcclusion
+-    ao = ao_factor
++    # 2. Ambient Occlusion
++    # ao_factor is result of trace_ambient_occlusion(p, n)
+     
+-    # 7. Hemispheric Ambient Factor
++    # 3. Hemispheric Ambient Factor
+     sky_factor = 0.5 + 0.5 * n.y
++    ground_factor = 0.5 - 0.5 * n.y
+     
+-    # 8. Ambient Color
+-    # Interpolate between sky and ground ambient
+-    sky_contrib = sky_ambient * sky_factor
+-    ground_contrib = ground_ambient * (1.0 - sky_factor)
+-    ambient_color = (sky_contrib + ground_contrib) * ao
++    # 4. Ambient Color
++    ambient_color = (sky_ambient * sky_factor + ground_ambient * ground_factor) * ao_factor
+     
+-    # 9. Direct Color
++    # 5. Direct Color
+     direct_color = sun_radiance * light_scale
+     
+-    # 10. Final Color
++    # 6. Final Output
+     out_color = albedo * (direct_color + ambient_color)
+     
+@@ -111,22 +94,22 @@
+ 
+ **Parameters:**
+-- `field.cell`: Grid cell size. Typical values depend on the terrain resolution and world scale.
+-- `bias` constant: `0.5` is used in the source implementation. [S1, unofficial]
++*   `field.cell`: The grid cell size of the heightfield. Typical values depend on the world scale, e.g., 1.0 to 10.0 units.
++*   `bias`: Calculated as `field.cell * 0.5 + 0.5`. This specific value is critical to prevent self-shadowing artifacts on coarse heightfields [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Self-Shadowing:** If the shadow ray origin is not biased sufficiently, self-shadowing artifacts (acne) will appear on coarse heightfields. The bias must be at least half a cell plus a small constant. [S1, unofficial]
+-- **Normal Accuracy:** Using finite differences on a bilinear heightfield results in piecewise constant normals, causing facet artifacts. Normals should be baked or interpolated smoothly. [S1, unofficial]
+-- **Boundary Reads:** Sampling at tile boundaries can cause out-of-bounds reads if not handled. Ensure sampling logic clamps or wraps coordinates to avoid NaN values. [S1, unofficial]
++*   **Self-Shadowing:** If the shadow ray origin is not biased sufficiently, self-shadowing artifacts will appear on the terrain surface, especially on coarse heightfields. The bias must be at least half a cell plus a small constant [S1, unofficial].
++*   **Normal Interpolation:** Normals should be baked and interpolated smoothly across cells. Using finite differences on a bilinear heightfield results in piecewise constant normals, causing visible facet artifacts at cell edges [S1, unofficial].
++*   **Material Masks:** Slope and moisture fields used for material masking must be smoothed or expanded to avoid thin contour stripes and single-cell artifacts [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per pixel for the shading calculation itself, assuming shadow, cloud, and AO factors are precomputed or efficiently sampled. If shadow rays are traced per pixel, complexity depends on the number of shadow samples.
+-- **Memory Complexity:** $O(1)$ additional memory per pixel for shading. Requires storage for terrain heightfield, normal map, shadow maps, and cloud fields.
+-- **Strengths:** Fast, visually plausible results for terrain. Handles sky/ground bounce simply. Avoids facet artifacts with baked normals.
+-- **Limitations:** Approximate shadows and AO. Does not handle complex volumetric lighting or global illumination beyond hemispheric ambient. Single-tile limitation causes edge artifacts. [S1, unofficial]
+-- **When to use:** Real-time terrain rendering where performance is critical and high-fidelity global illumination is not required.
+-- **When not to use:** Scenes requiring accurate soft shadows, complex indirect lighting, or multi-tile seamless terrain.
++*   **Time Complexity:** $O(1)$ per pixel for the shading calculation itself, assuming shadow, cloud shadow, and AO factors are precomputed or available. The cost depends on the complexity of the shadow and AO tracing methods used to generate the input factors.
++*   **Memory Complexity:** $O(1)$ additional memory per pixel for the shading calculation.
++*   **Strengths:** Simple to implement, computationally inexpensive for the shading step, provides visually plausible results for terrain with baked normals.
++*   **Limitations:** Does not account for indirect lighting beyond the hemispheric approximation. Shadow and AO quality depend on the underlying tracing methods. Not suitable for complex volumetric scenes or dynamic global illumination.
++*   **When to use:** Real-time terrain rendering where performance is critical and high-fidelity global illumination is not required. Suitable for heightfield-based worlds.
++*   **When not to use:** Scenes requiring accurate indirect lighting, complex participating media, or dynamic global illumination.
+ 
+ ## Background
+-This method is derived from the shading pipeline of the `theme1` project by mingderwang, which implements a procedural terrain renderer. It emphasizes baked normals and smooth material masks to avoid artifacts common in simple heightfield shading. The approach combines direct sunlight with a simplified hemispheric ambient model modulated by ambient occlusion. [S1, unofficial]
++This method is derived from the terrain shading implementation in the `theme1` project by mingderwang [S1, unofficial]. It addresses the specific challenges of rendering heightfield-based terrain, such as the need for smooth normals and effective biasing for shadow rays. The hemispheric ambient occlusion approach is a common simplification in real-time graphics for approximating ambient light on surfaces.
+ 
+ ## Sources

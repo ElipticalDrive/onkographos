@@ -3,116 +3,92 @@
 Also called: Front/back face culling traversal, Two-ray coarse mesh traversal
 
 ## Overview
-A traversal algorithm for a coarse tetrahedral mesh that uses two rays (one with front-face culling, one with back-face culling) to determine the ray's position relative to the coarse mesh elements, handling non-convex shapes and holes [S1, unofficial]. It builds on [Coarse Mesh Traversal](3062-coarse-mesh-traversal.md) by explicitly resolving the entry and exit boundaries of the current coarse element using dual-ray intersection tests, enabling robust nested traversal into the fine structure [S1, unofficial]. Unlike single-pass methods that compute intersections in the fragment shader, this approach uses two distinct ray traces per coarse element to establish precise $t$-bounds for the inner loop [S1, unofficial].
+This method determines the entry and exit distances ($t_{entry}, t_{exit}$) for a ray traversing a non-convex coarse tetrahedral mesh by tracing two auxiliary rays with opposite face culling settings. It solves the problem of identifying the current coarse element and the boundary to the next element in complex, potentially hollow or non-convex geometries where single-ray intersection tests are ambiguous. It sets itself apart from standard BVH traversal by explicitly using the topological distinction between front-facing and back-facing hits to resolve the ray's state (outside, inside, or exiting) without requiring explicit convexity checks [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, and a BVH constructed from the coarse tetrahedral mesh faces [S1, unofficial].
-*   **Output:** A tuple `(coarseID, tBack, tNextFace)` where `coarseID` is the identifier of the current coarse tetrahedron, `tBack` is the exit distance of the ray from the current coarse element, and `tNextFace` is the entry distance for the next coarse element [S1, unofficial]. If the ray is outside the mesh, it returns `(-1, 0, 0)` [S1, unofficial].
+**Inputs:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; a Bounding Volume Hierarchy (BVH) containing the coarse tetrahedral mesh.
+**Outputs:** A tuple $(\text{coarseID}, t_{back}, t_{next})$, where $\text{coarseID}$ is the identifier of the current coarse tetrahedron, $t_{back}$ is the exit distance from the current element, and $t_{next}$ is the entry distance for the subsequent element.
 
 **Data Structures:**
-*   **BVH:** Built from the coarse mesh elements. Each leaf node represents a face of a coarse tetrahedron. The BVH stores the coarse tetrahedron ID associated with each face [S1, unofficial].
-*   **Ray Record:** Contains the hit distance $t$, the hit point, and the `coarseTetID` of the intersected element [S1, unofficial].
+*   **BVH:** Nodes contain bounding volumes and child pointers. Leaves contain coarse tetrahedra.
+*   **Ray Record:** Stores intersection distance $t$, hit primitive ID, and miss status.
 
-**Formulas:**
-*   $t_{Back}$: Hit distance from the front-face cull ray, representing the exit boundary of the current coarse element [S1, unofficial].
-*   $t_{Front}$: Hit distance from the back-face cull ray, representing the entry boundary of the next coarse element or the exit of the current one [S1, unofficial].
-*   $t_{NextFace} = \text{nextafterf}(t, \infty)$: Advances $t$ to the next representable floating-point number to prevent re-intersection with the same geometry [S1, unofficial].
+**Parameters:**
+*   `nextafterf(t, direction)`: A function that returns the next representable floating-point number after $t$ in the direction of infinity or negative infinity. Used to perturb $t$ values to avoid re-intersection artifacts [S1, unofficial].
 
-**Algorithm Steps:**
-1.  **Front-Face Trace:** Trace a ray with front-face culling enabled (ignoring back-facing triangles) [S1, unofficial].
-    *   If the ray misses, return `(-1, 0, 0)` [S1, unofficial].
-    *   If it hits, store the hit distance as $t_{Back}$ and the associated tetrahedron ID as `coarseID` [S1, unofficial].
-2.  **Back-Face Trace:** Trace the same ray with back-face culling enabled (ignoring front-facing triangles) [S1, unofficial].
-    *   If the ray misses, the ray is inside the last element of the mesh. Set $t_{NextFace} = \text{nextafterf}(t_{Back}, \infty)$ [S1, unofficial].
-    *   If the ray hits, let the hit distance be $t_{Front}$ and the tetrahedron ID be `hitID` [S1, unofficial].
-3.  **Boundary Resolution:**
-    *   If `hitID` equals `coarseID` (the ray enters and exits the same coarse element):
-        *   Set $t_{Front} = \text{nextafterf}(t_{Front}, \infty)$ [S1, unofficial].
-        *   Set $t_{NextFace} = \text{nextafterf}(t_{Back}, \infty)$ [S1, unofficial].
-    *   If `hitID` differs from `coarseID` (the ray enters a new coarse element):
-        *   Set $t_{NextFace} = \text{nextafterf}(t_{Front}, \infty)$ [S1, unofficial].
-4.  **Return:** Return `(coarseID, tBack, tNextFace)` [S1, unofficial].
+**Steps:**
+1.  **Front-Face Trace:** Trace the ray against the BVH with front-face culling enabled (ignore back-facing triangles).
+    *   If the ray misses, the ray is outside the coarse mesh. Return $(-1, 0, 0)$ [S1, unofficial].
+    *   If it hits, store the intersection distance as $t_{back}$ and the tetrahedron ID as $\text{coarseID}$ [S1, unofficial].
+2.  **Back-Face Trace:** Trace the same ray against the BVH with back-face culling enabled (ignore front-facing triangles).
+    *   Let the result be $t_{front}$ and $\text{coarseID}_{front}$ [S1, unofficial].
+3.  **Determine Next Face ($t_{next}$):**
+    *   If the back-face ray misses: The ray is inside the last element of the mesh. Set $t_{next} = \text{nextafterf}(t_{back}, \infty)$ [S1, unofficial].
+    *   If the back-face ray hits:
+        *   If $\text{coarseID}_{front} == \text{coarseID}$: The ray is inside a single element (Case 2 in source). Set $t_{next} = \text{nextafterf}(t_{back}, \infty)$ and perturb the front hit $t_{front} = \text{nextafterf}(t_{front}, \infty)$ [S1, unofficial].
+        *   If $\text{coarseID}_{front} \neq \text{coarseID}$: The ray has exited the current element and entered a new one (Case 1 in source). Set $t_{next} = \text{nextafterf}(t_{front}, \infty)$ [S1, unofficial].
+4.  **Return:** Return $(\text{coarseID}, t_{back}, t_{next})$ [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def nextafterf(t, direction):
-    """Return the next representable floating-point number after t."""
-    if direction == float('inf'):
-        return math.nextafter(t, float('inf'))
-    return math.nextafter(t, float('-inf'))
-
-def trace_ray(ray, cull_mode):
-    """Perform BVH traversal for the given ray, respecting face culling mode.
-    Returns a record with attributes: t (hit distance), coarse_tet_id, missed (bool)."""
-    # Standard BVH traversal logic would go here.
-    pass
-
 def traverse_coarse_mesh(ray):
     # Step 1: Trace with front-face culling
-    ray_record = trace_ray(ray, cull_mode='CULL_FRONT_FACING_TRIANGLES')
-
-    if ray_record.missed:
+    ray_record_front = trace_ray(ray, cull_mode=CULL_BACK_FACING)
+    
+    if ray_record_front.missed:
         return -1, 0, 0
-
-    t_back = ray_record.t
-    coarse_id = ray_record.coarse_tet_id
-
+    
+    t_back = ray_record_front.t
+    coarse_id = ray_record_front.coarse_tet_id
+    
     # Step 2: Trace with back-face culling
-    ray_record = trace_ray(ray, cull_mode='CULL_BACK_FACING_TRIANGLES')
-
-    if not ray_record.missed:
-        t_front = ray_record.t
-        hit_id = ray_record.coarse_tet_id
-
-        if coarse_id == hit_id:
-            # Ray enters and exits the same coarse element
-            t_front = nextafterf(t_front, float('inf'))
-            t_next_face = nextafterf(t_back, float('inf'))
-        else:
-            # Ray exits current element and enters a new one
-            t_next_face = nextafterf(t_front, float('inf'))
+    ray_record_back = trace_ray(ray, cull_mode=CULL_FRONT_FACING)
+    
+    if ray_record_back.missed:
+        # Case 3: Inside the last element
+        t_next_face = nextafterf(t_back, INFINITY)
+        return coarse_id, t_back, t_next_face
+    
+    t_front = ray_record_back.t
+    coarse_id_front = ray_record_back.coarse_tet_id
+    
+    if coarse_id_front == coarse_id:
+        # Case 2: Inside a single element, hit same tet
+        t_next_face = nextafterf(t_back, INFINITY)
+        # Perturb front t to avoid re-intersection if needed later
+        t_front = nextafterf(t_front, INFINITY)
     else:
-        # Ray is inside the last element of the mesh
-        t_next_face = nextafterf(t_back, float('inf'))
-
+        # Case 1: Entered a new element
+        t_next_face = nextafterf(t_front, INFINITY)
+        
     return coarse_id, t_back, t_next_face
 ```
 
-**Parameters:**
-*   `nextafterf(t, direction)`: A function that returns the next representable floating-point number after `t` in the specified direction (usually `INFINITY` for advancing forward) [S1, unofficial]. This prevents re-intersection with the same geometry in subsequent iterations [S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Precision Issues:** When exiting faces, standard floating-point arithmetic may cause the ray to re-intersect the same geometry in the next step. Using `nextafterf` advances $t$ slightly to avoid this [S1, unofficial].
-*   **Non-Convex Shapes:** The dual-ray approach correctly handles non-convex shapes and holes by distinguishing between entry and exit faces based on face normal orientation relative to the ray [S1, unofficial].
-
 ## Subtopics
 
+### [Back-Face Culling for Ray Casting](1236-back-face-culling-for-ray-casting.md)
+An optimization that renders the back faces of the volume's bounding box to a texture to determine entry/exit points, avoiding analytical ray-cube intersections in the shader. It offloads geometry processing to the GPU rasterizer using a two-pass pipeline: first pass captures back-face depth/position, second pass initializes the ray march. It builds on the dual-ray principle by applying front/back distinction to a simple bounding box primitive.
+
+### [Bunyk et al. Ray Casting](6729-bunyk-et-al-ray-casting.md)
+A technique for handling non-convexities in ray casting by exploiting the discrete nature of the image to determine boundary fragment intersections, avoiding hierarchical spatial structures.
+
 ### Coarse Mesh Macrocell Optimization
-A technique where coarse mesh elements are treated as macrocells storing pre-computed minimum and maximum density values of their child elements [S1, unofficial]. This enables empty space skipping and tighter majorant estimation for Woodcock tracking [S1, unofficial].
-*   **Steps:** Calculate macrocell densities by applying the transfer function to scalar values of child elements. Recalculate these values using a CUDA kernel whenever the transfer function changes [S1, unofficial]. Before processing a coarse element, check if its maximum macrocell density is zero. If so, skip the element and move to the next [S1, unofficial].
-*   **Comparison:** Macrocells allow for empty space skipping and tighter majorant extinction, reducing sample rejection rates compared to not using macrocells [S1, unofficial].
+Treats coarse mesh elements as macrocells storing pre-computed min/max density values of child elements. Before processing, if max density is zero, the element is skipped. This enables empty space skipping and tighter majorant estimation for Woodcock tracking, reducing sample rejection rates [S1, unofficial]. Densities are recalculated via CUDA kernel when the transfer function changes [S1, unofficial].
 
 ### View-dependent Early Tree Traversal Return
-A technique to early-return from refinement tree traversal based on the normalized screen space area of the tetrahedron [S1, unofficial].
-*   **Steps:** Calculate the total normalized screen space area of a tetrahedron by summing the areas of the four triangles created by its four vertices [S1, unofficial].
-*   **Parameters:** Refinement criteria: A threshold for normalized screen space size. It can be converted to true screen space area by multiplying by total screen space [S1, unofficial].
+Early-returns from refinement tree traversal based on the normalized screen space area of the tetrahedron. The area is calculated by summing the areas of the four triangles formed by the tetrahedron's vertices. A user-defined threshold controls the cutoff, convertible to true screen space area by multiplying by total screen space [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Requires two BVH traversals per coarse element [S1, unofficial]. Not given in the sources.
-*   **Memory Complexity:** Requires storing the BVH and macrocell statistics (min/max density) for each coarse element [S1, unofficial].
-*   **Measured Performance:** Not given in the sources.
-*   **Scaling:** Not given in the sources.
-*   **Strengths:** Robustly handles non-convex geometries and holes. Macrocell optimization significantly reduces sample rejection rates in Woodcock tracking [S1, unofficial].
-*   **Limitations:** Requires two ray traces per coarse element, doubling the traversal overhead compared to single-ray methods. Macrocell values must be recomputed if the transfer function changes [S1, unofficial].
-*   **When to use:** When rendering non-convex volumes or volumes with holes where simple bounding box culling is insufficient [S1, unofficial].
+*   **Time Complexity:** Two BVH traversals per coarse element transition. The cost is proportional to the depth of the BVH.
+*   **Memory Complexity:** Requires storing the BVH and the coarse mesh topology. Macrocell variants require additional storage for min/max density values per coarse element [S1, unofficial].
+*   **Strengths:** Robustly handles non-convex shapes and holes in the coarse mesh without explicit geometric decomposition. The macrocell optimization significantly improves performance in sparse volumes by skipping empty regions [S1, unofficial].
+*   **Limitations:** Requires two ray traces per step, doubling the traversal overhead compared to a single-hit approach. Precision issues at boundaries are mitigated by `nextafterf` but require careful implementation [S1, unofficial].
+*   **When to use:** Ideal for adaptive mesh refinement (AMR) data with tetrahedral coarse meshes where the geometry is non-convex or contains holes.
 
 ## Background
-Originated in the context of direct volume rendering of tree-based tetrahedral adaptive mesh refinement (AMR) data [S1, unofficial]. The method was developed to efficiently traverse coarse tetrahedral meshes while supporting nested refinement trees [S1, unofficial].
+Originated in the context of direct volume rendering of tree-based tetrahedral adaptive mesh refinement (AMR) data. The method was developed to efficiently traverse hierarchical tetrahedral structures where standard convex traversal assumptions fail. It leverages GPU ray tracing capabilities (BVH traversal) to resolve topological state [S1, unofficial].
 
 ## Sources
 [S1] Direct volume rendering of tree-based tetrahedral adaptive mesh refinement data, https://repository.bilkent.edu.tr/items/fcbc592a-2646-49af-8b84-67308b6fd3e9, fetched 2026-10-27 (unofficial)

@@ -30,38 +30,45 @@
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def IndexGridBuilder_build(domain_tree, grids, m_leafOffsets, m_numLeaves, m_outData):
-    # Step 1: Initialize LeafManager for domain tree
+def IndexGridBuilder_build(domain_tree, sdf_grids, float_grids, vector_grids, m_leafOffsets, m_numLeaves, m_outData):
+    # Step 1: Create LeafManager for the domain grid tree
     domain_leaf_manager = LeafManager(domain_tree)
 
-    # Helper to process a grid type
-    def process_grid(tree, grid_type, fill_value):
-        leaf_manager = LeafManager(tree)
-        out_ptr = m_outData.pValues(grid_type, tree.name)
-        # Parallelized over leaves
-        for i in range(m_numLeaves):
-            leaf = leaf_manager.get_leaf(i)
-            leaf_base_offset = m_leafOffsets[i]
-            leaf_pos = leaf.origin()
-            source_leaf = tree.probe_const_leaf(leaf_pos)
-            if source_leaf is not None:
-                for j in range(LeafNodeType.SIZE):
-                    out_ptr[leaf_base_offset + j] = source_leaf.get_voxel(j)
-            else:
-                for j in range(LeafNodeType.SIZE):
-                    out_ptr[leaf_base_offset + j] = fill_value
+    # Helper to process a single grid type
+    def process_grid_type(grids, fill_value, is_vector):
+        for grid in grids:
+            tree = grid.tree
+            leaf_manager = LeafManager(tree)
+            out_ptr = m_outData.pValues(grid.name, float if not is_vector else Vec3f)
+            # Parallelized over leaf indices
+            for i in range(m_numLeaves):
+                leaf = leaf_manager.get_leaf(i)
+                leaf_base_offset = m_leafOffsets[i]
+                leaf_pos = leaf.origin()
+                source_leaf = tree.probe_const_leaf(leaf_pos)
+                if source_leaf is not None:
+                    if is_vector:
+                        for j in range(3):
+                            out_ptr[leaf_base_offset + j] = source_leaf.get_voxel(j)
+                    else:
+                        for j in range(LeafNodeType.SIZE):
+                            out_ptr[leaf_base_offset + j] = source_leaf.get_voxel(j)
+                else:
+                    if is_vector:
+                        for j in range(3):
+                            out_ptr[leaf_base_offset + j] = fill_value
+                    else:
+                        for j in range(LeafNodeType.SIZE):
+                            out_ptr[leaf_base_offset + j] = fill_value
 
-    # Step 2: Process SDF grids (fill missing with 1.0)
-    for grid in grids:
-        if grid.type == 'SDF':
-            process_grid(grid.tree, float, 1.0)
-        elif grid.type == 'FLOAT':
-            process_grid(grid.tree, float, 0.0)
-        elif grid.type == 'VECTOR':
-            process_grid(grid.tree, tuple, (0.0, 0.0, 0.0))
+    # Step 2: Process SDF grids (fill missing with 1.0f)
+    process_grid_type(sdf_grids, 1.0, False)
+    # Step 3: Process float grids (fill missing with 0.0f)
+    process_grid_type(float_grids, 0.0, False)
+    # Step 4: Process vector grids (fill missing with 0.0f)
+    process_grid_type(vector_grids, 0.0, True)
 
     # Step 5: Compute global coordinates
-    # Parallelized over leaves
     for i in range(m_numLeaves):
         leaf = domain_leaf_manager.get_leaf(i)
         leaf_base_offset = m_leafOffsets[i]
@@ -91,18 +98,18 @@ Creates an OpenVDB grid from the flat output buffer by cloning the domain grid's
 4. Call `leafManager.foreach` with lambda: for each leaf and `leafIdx`, get `leafBaseOffset` from `m_leafOffsets[leafIdx]`, get `leafData` pointer, copy `LeafT::SIZE` values from `data + leafBaseOffset` to `leafData` [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Measured Performance:** Not given in the sources.
-- **Scaling:** Not given in the sources.
-- **Strengths:** Not given in the sources.
-- **Limitations:** Not given in the sources.
-- **When to use:** Not given in the sources.
-- **When not to use:** Not given in the sources.
+- **Time Complexity:** Not given in the sources. [S1, unofficial].
+- **Memory Complexity:** Not given in the sources. [S1, unofficial].
+- **Measured Performance:** Not given in the sources. [S1, unofficial].
+- **Scaling:** Not given in the sources. [S1, unofficial].
+- **Strengths:** Not given in the sources. [S1, unofficial].
+- **Limitations:** Not given in the sources. [S1, unofficial].
+- **When to use:** Not given in the sources. [S1, unofficial].
+- **When not to use:** Not given in the sources. [S1, unofficial].
 
 ## Background
-Originated in: Not given in the sources.
-Used in: Not given in the sources.
+Originated in: Not given in the sources. [S1, unofficial].
+Used in: Not given in the sources. [S1, unofficial].
 
 ## Sources
 [S1] ZephirFXEC/HNanoSolver, https://github.com/ZephirFXEC/HNanoSolver, fetched 2026-10-27 (unofficial)

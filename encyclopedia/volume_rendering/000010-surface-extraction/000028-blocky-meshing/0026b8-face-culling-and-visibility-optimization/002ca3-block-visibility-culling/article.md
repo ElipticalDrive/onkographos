@@ -3,164 +3,77 @@
 Also called: Block Coordinate Change Detection, Block Rendering & Surface Orientation Culling, Camera-relative Block Culling, renderBlock
 
 ## Overview
-Block Visibility Culling determines which discrete voxel blocks require mesh updates or rendering by comparing the camera's current position and orientation against the previous frame's state, thereby avoiding unnecessary computation when the view has not changed significantly [S1, S2, unofficial]. It operates by calculating screen-space projections relative to the player's position and culling invisible faces based on surface orientation and visibility flags [S2, unofficial]. It is distinguished from sibling methods by its reliance on camera-relative coordinate transformation and explicit orientation flags rather than purely geometric occlusion or coverage masks.
+Block Visibility Culling is a camera-relative optimization method that determines which voxel blocks require mesh updates or rendering by comparing the current camera position and orientation against the previous frame's state [S1, unofficial]. It avoids unnecessary computation by skipping index updates when the camera has not moved significantly or changed its primary viewing direction [S1, unofficial]. Unlike static face culling which only removes interior faces, this method operates at the block level, leveraging screen-space orientation to cull invisible faces (top, bottom, front, back) based on the player's position relative to the block [S2, unofficial].
 
 ## How it works
-**Inputs and Outputs**
-- Input: Camera world position $(P_x, P_y, P_z)$, camera rotation angle $\theta$ (in degrees), block grid coordinates $(chunkX, chunkY, chunkZ)$, block size $BLOCK\_SIZE$, and block visibility flags.
-- Output: A set of indices or vertices for visible faces; or a boolean skip flag if the view is unchanged.
+The method operates in two phases: a coarse-grained block-level skip check and a fine-grained face-level culling during rendering.
 
-**Data Structures**
-- `BlockFace` enum or flags: `YNeg`, `XPos`, `YPos`, `XNeg`, `ZNeg`, `ZPos` [S2, unofficial].
-- `visibleFaces`: Array or bitmask storing the visibility state of each face for a given block [S2, unofficial].
-- Previous frame state: `prevBlockX`, `prevBlockY`, `prevBlockZ`, `prevGreatestDir` [S1, unofficial].
+### Inputs and Outputs
+- **Inputs**: Camera world position $(P_x, P_y, P_z)$, camera rotation angles (yaw $\theta$, pitch $\phi$), previous frame's camera block coordinates $(B_x^{prev}, B_y^{prev}, B_z^{prev})$ and greatest view direction `greatestDir`, block geometry data (position, size, visible face flags).
+- **Outputs**: A boolean flag indicating whether the block's mesh indices need updating, and a set of visible faces for rendering.
 
-**Steps**
-1.  **Camera Block Coordinate Calculation**: Compute the integer block coordinates of the camera by flooring its world position [S1, unofficial].
-    $$
-    camBlockX = \lfloor P_x / BLOCK\_SIZE \rfloor, \quad camBlockY = \lfloor P_y / BLOCK\_SIZE \rfloor, \quad camBlockZ = \lfloor P_z / BLOCK\_SIZE \rfloor
-    $$
-2.  **Change Detection**: Compare the current camera block coordinates and the greatest direction of view (`greatestDir`) with the previous frame's values [S1, unofficial]. If both match, skip the index update process [S1, unofficial].
-3.  **Orientation Determination**: For each block, calculate its world-space bounds:
-    $$
-    blockX = chunkX \times BLOCK\_SIZE, \quad blockY = chunkY \times BLOCK\_SIZE
-    $$
-    $$
-    blockZ_{bottom} = chunkZ \times BLOCK\_SIZE, \quad blockZ_{top} = blockZ_{bottom} + BLOCK\_SIZE
-    $$
-    Determine `surfaceOrientation` relative to the camera's Z position:
-    - If $P_z < blockZ_{bottom}$, `surfaceOrientation` = 1 (Top/Ceiling) [S2, unofficial].
-    - If $P_z > blockZ_{top}$, `surfaceOrientation` = 2 (Bottom/Floor) [S2, unofficial].
-    - Otherwise, `surfaceOrientation` = 0 (Side/Wall) [S2, unofficial].
-4.  **Cycle Calculation**: Set `cycles` = 2 if `surfaceOrientation` $\neq 0$, else `cycles` = 1 [S2, unofficial].
-5.  **Corner Transformation**: Loop $w$ from 0 to 3 to compute bottom corners [S2, unofficial]. Transform to camera space:
-    $$
-    x_1 = x_{bottom1}[w] - P_x, \quad y_1 = y_{bottom1}[w] - P_y
-    $$
-    Swap $x_1/x_2$ and $y_1/y_2$ if `surfaceOrientation` == 1 [S2, unofficial].
-6.  **Projection**: Compute camera-space rotation components:
-    $$
-    cs = \cos(\theta \times \pi / 180), \quad sn = \sin(\theta \times \pi / 180)
-    $$
-    Project to screen coordinates:
-    $$
-    wallX[w][0] = x_1 \times cs - y_1 \times sn
-    $$
-    [S2, unofficial]
-7.  **Face Culling**: Before rendering, check `block->visibleFaces[BlockFace::...]` for the specific face being processed [S2, unofficial]. If the flag is false, skip rendering that face [S2, unofficial].
+### Data Structures
+- **Camera State**: Stores current and previous integer block coordinates.
+- **Block Face Flags**: An enumeration or bitmask array `BlockFace` with flags: `YNeg`, `XPos`, `YPos`, `XNeg`, `ZNeg`, `ZPos` [S2, unofficial]. The visibility of each face is stored in `block->visibleFaces[BlockFace::...]` [S2, unofficial].
 
-**Pseudocode**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+### Steps
 
-```python
-def block_visibility_culling(camera_pos, camera_angle_deg, block_chunk, block_size, prev_state):
-    """
-    Determine if a block needs rendering and which faces are visible.
-    """
-    # 1. Camera Block Coordinates
-    cam_block_x = floor(camera_pos.x / block_size)
-    cam_block_y = floor(camera_pos.y / block_size)
-    cam_block_z = floor(camera_pos.z / block_size)
-    
-    # 2. Change Detection
-    if (cam_block_x == prev_state.cam_block_x and 
-        cam_block_y == prev_state.cam_block_y and 
-        cam_block_z == prev_state.cam_block_z and 
-        camera_angle_deg == prev_state.angle):
-        return None  # Skip update
+1. **Block Coordinate Check (Skip Optimization)**
+   Compute the integer block coordinates of the camera by flooring its world position:
+   $$ B_x = \lfloor P_x / \text{BLOCK\_SIZE} \rfloor, \quad B_y = \lfloor P_y / \text{BLOCK\_SIZE} \rfloor, \quad B_z = \lfloor P_z / \text{BLOCK\_SIZE} \rfloor $$
+   Determine the greatest view direction `greatestDir` from the camera's rotation angles (rx, ry) [S1, unofficial].
+   Compare $(B_x, B_y, B_z)$ and `greatestDir` with the previous frame's values. If both match, skip the index update process entirely [S1, unofficial].
 
-    # 3. Block World Bounds
-    block_x = block_chunk.x * block_size
-    block_y = block_chunk.y * block_size
-    block_z_bottom = block_chunk.z * block_size
-    block_z_top = block_z_bottom + block_size
-    
-    # 4. Orientation
-    if camera_pos.z < block_z_bottom:
-        surface_orientation = 1  # Top
-    elif camera_pos.z > block_z_top:
-        surface_orientation = 2  # Bottom
-    else:
-        surface_orientation = 0  # Side
-        
-    cycles = 2 if surface_orientation != 0 else 1
-    
-    # 5 & 6. Transformation and Projection
-    cs = cos(radians(camera_angle_deg))
-    sn = sin(radians(camera_angle_deg))
-    
-    # Assuming bottom corners are pre-calculated in x_bottom1, y_bottom1 arrays
-    wall_x = []
-    for w in range(4):
-        x1 = x_bottom1[w] - camera_pos.x
-        y1 = y_bottom1[w] - camera_pos.y
-        
-        if surface_orientation == 1:
-            # Swap logic as per source
-            x1, x2 = x2, x1
-            y1, y2 = y2, y1
-            
-        # Project
-        wx = x1 * cs - y1 * sn
-        wall_x.append(wx)
-        
-    return {
-        "wall_x": wall_x,
-        "orientation": surface_orientation,
-        "cycles": cycles,
-        "visible_faces": get_visible_faces(block_chunk, camera_pos)
-    }
+2. **Surface Orientation Determination**
+   For each block at chunk-relative coordinates $(x, y, z)$:
+   - Calculate world coordinates:
+     $$ \text{blockX} = \text{chunkX} + x \cdot \text{BLOCK\_SIZE} $$
+     $$ \text{blockY} = \text{chunkY} + y \cdot \text{BLOCK\_SIZE} $$
+     $$ \text{blockZBottom} = \text{chunkZ} + z \cdot \text{BLOCK\_SIZE} $$
+     $$ \text{blockZTop} = \text{blockZBottom} + \text{BLOCK\_SIZE} $$
+   - Determine `surfaceOrientation`:
+     - If $P_z < \text{blockZBottom}$, `surfaceOrientation` = 1 (Floor/Ceiling view from below/above).
+     - If $P_z > \text{blockZTop}$, `surfaceOrientation` = 2.
+     - Otherwise, `surfaceOrientation` = 0 (Side view) [S2, unofficial].
+   - Set rendering cycles: `cycles` = 2 if `surfaceOrientation` != 0, else 1 [S2, unofficial].
 
-def get_visible_faces(block_chunk, camera_pos):
-    """
-    Helper to determine visible faces based on camera position relative to block.
-    Note: Source [S3, unofficial] describes a dot product method but notes it uses world origin incorrectly.
-    Here we implement the camera-relative check implied by [S2, unofficial] and [S1, unofficial].
-    """
-    faces = {
-        "YNeg": False, "XPos": False, "YPos": False, 
-        "XNeg": False, "ZNeg": False, "ZPos": False
-    }
-    
-    # Simplified logic: A face is visible if the camera is on the outside of that face's plane
-    # This is a standard implementation detail [G] inferred from the culling checks in [S2, unofficial]
-    # which check specific flags before drawing.
-    
-    # Example for Top Face (YPos): Visible if camera Y > block top
-    if camera_pos.y > block_chunk.y * block_size + block_size:
-        faces["YPos"] = True
-        
-    # Example for Bottom Face (YNeg): Visible if camera Y < block bottom
-    if camera_pos.y < block_chunk.y * block_size:
-        faces["YNeg"] = True
-        
-    # Similar checks for X and Z axes...
-    # [G] Full implementation requires checking all 6 planes against camera position.
-    
-    return faces
-```
+3. **Face Visibility Culling**
+   During the rendering loop for each face $w$ (0 to 3 for sides):
+   - Transform block corners to camera space:
+     $$ x_1 = x_{\text{Bottom1}}[w] - P_x, \quad y_1 = y_{\text{Bottom1}}[w] - P_y $$
+   - Swap $x_1/x_2$ and $y_1/y_2$ if `surfaceOrientation` == 1 [S2, unofficial].
+   - Project to screen space using camera rotation:
+     $$ \text{cs} = \cos(\theta \cdot \pi/180), \quad \text{sn} = \sin(\theta \cdot \pi/180) $$
+     $$ \text{wallX}[w][0] = x_1 \cdot \text{cs} - y_1 \cdot \text{sn} $$
+   - Check visibility flags before rendering:
+     - If $w=0$ and `!block->visibleFaces[BlockFace::YNeg]`, skip.
+     - If $w=1$ and `!block->visibleFaces[BlockFace::XPos]`, skip.
+     - If $w=2$ and `!block->visibleFaces[BlockFace::YPos]`, skip.
+     - If $w=3$ and `!block->visibleFaces[BlockFace::XNeg]`, skip [S2, unofficial].
 
-**Parameters**
-- `surfaceScale`: Multiplier for floor/ceiling projection, typically 120 [S2, unofficial].
+### Parameters
+- **Surface Scale Multiplier**: 120, used as `surfaceScale * 120` for tile calculation [S2, unofficial].
+- **BLOCK_SIZE**: Standard voxel dimension (e.g., 16 units in some implementations) [S2, unofficial].
 
-**Edge Cases and Pitfalls**
-- **Precision**: Floating point comparisons for camera position relative to block boundaries must handle epsilon errors to avoid flickering [G].
-- **World Origin Bias**: A common pitfall in naive implementations is using the world origin $(0,0,0)$ as the reference for dot-product visibility tests, which fails for arbitrary camera positions [S3, unofficial]. The method must use the actual camera position [S2, unofficial].
+### Edge Cases and Pitfalls
+- **Precision**: Floating-point comparisons for camera position should use epsilon tolerances if exact integer matches are not guaranteed due to sub-block movement [G].
+- **Boundary Conditions**: When $P_z$ is exactly on a block boundary, `surfaceOrientation` logic must handle equality consistently to avoid flickering [G].
+- **Degenerate Input**: If `xPos2 - xPos1` is 0, division by zero in horizontal step calculation must be guarded (e.g., set to 1) [S2, unofficial].
 
 ## Subtopics
 
 ### Voxel Face Visibility Check
-A variant that determines visibility by computing the dot product between each face's center and its outward normal, marking it visible if the dot product is positive [S3, unofficial]. It computes face centers as `cube_center + offset` and normals for the six axes [S3, unofficial]. The formula is $v_i = \mathbf{c}_i \cdot \mathbf{n}_i > 0$ [S3, unofficial]. **Pitfall**: This specific variant uses the world origin $(0,0,0)$ as the reference point for the dot product, not the camera position, making it incorrect for arbitrary camera positions [S3, unofficial].
+A variant that determines visibility by computing the dot product between each face's center and its outward normal, marking it visible if the dot product is positive [S3, unofficial]. It defines normals for Front(0,0,1), Back(0,0,-1), Right(-1,0,0), Left(1,0,0), Top(0,1,0), Bottom(0,-1,0) and computes face centers as `cube_center + offset` [S3, unofficial]. The formula is $v_i = \mathbf{c}_i \cdot \mathbf{n}_i > 0$ where $\mathbf{c}_i$ is the face center and $\mathbf{n}_i$ is the outward normal [S3, unofficial]. A key pitfall is that this test uses the world origin (0,0,0) as the reference point, not the camera position, making it incorrect for arbitrary camera positions [S3, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: $O(1)$ per block for the culling decision if change detection passes; $O(N)$ for $N$ blocks if full recalculation is required.
-- **Memory Complexity**: $O(1)$ additional memory per block for storing visibility flags [S2, unofficial].
-- **Strengths**: Significantly reduces rendering load by skipping blocks that have not changed relative to the camera [S1, unofficial]. Simple to implement using basic trigonometry and integer arithmetic [S2, unofficial].
-- **Limitations**: Relies on the assumption that the camera moves discretely or slowly enough that block coordinates don't change frequently [S1, unofficial]. The dot-product variant is incorrect for general camera positions [S3, unofficial].
-- **When to use**: Ideal for voxel-based engines with discrete block structures where the camera moves in a grid-aligned manner [S1, S2, unofficial].
+- **Time Complexity**: $O(1)$ per block for the skip check; $O(F)$ for face culling where $F$ is the number of faces (typically 6). The skip check reduces average case complexity significantly in static scenes.
+- **Memory Complexity**: $O(1)$ additional memory per block for storing previous camera coordinates and face flags.
+- **Performance**: Reduces primitive count by avoiding mesh regeneration for unchanged blocks. In dynamic scenes, it minimizes CPU overhead by skipping index buffer updates [S1, unofficial].
+- **Strengths**: Effective for static or slowly moving cameras; reduces draw calls and index buffer updates.
+- **Limitations**: Ineffective for fast-moving cameras or dynamic scenes where the camera changes position every frame; does not handle occlusion by other geometry, only camera-relative visibility.
 
 ## Background
-Originating from early voxel rendering implementations in game development, this method is documented in unofficial repositories such as `kvxy/exolands` [S1, unofficial] and `VidFurlan/Voxel1993` [S2, unofficial]. It addresses the performance bottleneck of rendering large voxel worlds by optimizing the mesh update phase rather than just the rasterization phase.
+Originating from early voxel rendering engines and indie game development, this method is documented in repositories such as `kvxy/exolands` and `VidFurlan/Voxel1993` [S1, unofficial][S2, unofficial]. It is commonly used in real-time voxel engines where performance is critical and camera movement is often constrained or predictable.
 
 ## Sources
 [S1] kvxy/exolands, https://github.com/kvxy/exolands, fetched 2026-10-27 (unofficial)

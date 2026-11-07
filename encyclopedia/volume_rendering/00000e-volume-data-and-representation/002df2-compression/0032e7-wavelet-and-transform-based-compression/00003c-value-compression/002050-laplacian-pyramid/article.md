@@ -1,260 +1,213 @@
 # Laplacian Pyramid
 
-Also called: Burt and Adelson pyramid
+Also called: Burt and Adelson pyramid, 拉普拉斯金字塔
 
 ## Overview
-The Laplacian Pyramid is a multiresolution decomposition technique that represents a volume by a coarse base layer and a series of residual difference layers (Laplacian levels) [S1, unofficial][S3]. It solves the problem of high inter-pixel correlation in volumetric data by decorrelating the signal, concentrating values around zero to reduce entropy, and enabling efficient compression via quantization and entropy coding [S1, unofficial]. It is distinguished from wavelet-based methods like Triadic frequency band decomposition by its use of non-orthogonal, redundant filter banks that guarantee perfect reconstruction through simple addition, albeit at the cost of oversampling [S1, unofficial].
+The Laplacian Pyramid is a multiresolution decomposition technique that represents a volume by a coarse base level and a series of residual difference signals (residuals) at progressively finer resolutions [S1, unofficial][S3]. It solves the problem of high inter-pixel correlation in volumetric data by decorrelating the signal, concentrating values around zero to reduce entropy, and enabling efficient compression or progressive rendering [S1, S4, unofficial]. It is distinguished from orthogonal wavelet transforms by its use of non-orthogonal, redundant basis functions (oversampling), which guarantees perfect reconstruction via simple addition but requires storing more coefficients than the original signal size [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A 3D volume data array $V_0$ of dimensions $N_x \times N_y \times N_z$.
-*   **Output:** A set of $L+1$ arrays: the coarsest Gaussian level $g_L$ and $L$ Laplacian levels $l_0, l_1, \dots, l_{L-1}$.
+### Inputs and Outputs
+*   **Input:** A 3D volume $V$ of dimensions $N_x \times N_y \times N_z$.
+*   **Output:** A set of coefficient arrays: one low-resolution base volume $C^L$ and $L$ levels of Laplacian residuals $D^0, D^1, \dots, D^{L-1}$, where $D^l$ has dimensions $2^{L-l} \times 2^{L-l} \times 2^{L-l}$ (assuming power-of-two dimensions and dyadic decomposition) [S1, unofficial].
 
-**Data Structures:**
-*   **Gaussian Pyramid Levels ($g_i$):** Stored as 3D arrays. Level $i$ has dimensions $\lceil N_x/2^i \rceil \times \lceil N_y/2^i \rceil \times \lceil N_z/2^i \rceil$.
-*   **Laplacian Levels ($l_i$):** Stored as 3D arrays. Level $i$ has the same dimensions as the input volume at that stage of decomposition (specifically, $l_i$ has the same dimensions as $g_i$ before downsampling, or equivalently, the dimensions of the volume at resolution $2^i$). Note: In the standard Burt-Adelson scheme, $l_i$ is stored at the resolution of the parent level $g_i$ (full resolution relative to $g_{i+1}$).
+### Data Structures
+The pyramid is stored as a list of volumes.
+*   **Base Level ($C^L$):** The smallest volume, resulting from $L$ iterations of reduction.
+*   **Residual Levels ($D^l$):** For each level $l \in [0, L-1]$, the residual volume $D^l$ has the same spatial dimensions as the input volume at that stage of the Gaussian pyramid before reduction. Specifically, if the original volume is $N \times N \times N$, $D^0$ is $N \times N \times N$, $D^1$ is $N/2 \times N/2 \times N/2$, etc. [S1, unofficial].
 
-**Parameters:**
-*   **Filter Kernel:** A 3D Gaussian low-pass filter. The source specifies a $5 \times 5 \times 5$ kernel [S1, unofficial].
-*   **Separability:** The 3D kernel is separable into three 1D kernels [S1, unofficial].
-*   **Number of Levels ($L$):** Typically 5 or 6 [S1, unofficial].
-*   **Quantization:** Uniform quantization is used for the Laplacian levels [S1, unofficial].
+### Parameters
+*   **Filter Kernel ($w$):** A symmetric, normalized low-pass filter. In 3D, a $5 \times 5 \times 5$ Gaussian kernel is standard [S1, unofficial]. The kernel is separable, decomposed into three 1D operators applied along the x, y, and z axes [S1, unofficial].
+*   **Number of Levels ($L$):** Typically 5 or 6 for medical CT volumes [S1, unofficial].
+*   **Quantization:** Uniform quantization is commonly applied to the residuals and base level for compression [S1, S4, unofficial].
 
-**Algorithm Steps:**
+### Algorithm Steps
 
-1.  **Define 1D Low-Pass Filter:**
-    Let $w(n)$ be a 1D symmetric, real-valued filter kernel with normalization $\sum_n w(n) = 1$. The source notes the equal contribution constraint $\sum_n w(2n) = \sum_n w(2n+1)$ [S1, unofficial]. For a $5$-tap kernel, indices typically range from $-2$ to $2$.
+#### 1. Decomposition (Encoding)
+The decomposition iteratively reduces the resolution and computes residuals.
 
-2.  **Decomposition (Forward Transform):**
-    Initialize $g_0 = V_0$.
-    For $i = 0$ to $L-1$:
-    a.  **Reduce (Downsample):** Compute the next Gaussian level $g_{i+1}$ by convolving $g_i$ with the 3D Gaussian kernel and downsampling by a factor of 2 in each dimension.
-        $$g_{i+1}(x, y, z) = \sum_{m=-2}^{2} \sum_{n=-2}^{2} \sum_{p=-2}^{2} w(m) w(n) w(p) \cdot g_i(2x+m, 2y+n, 2z+p)$$
-        *Note: Boundary conditions for indices outside $[0, N-1]$ must be handled (e.g., clamping or reflection) [G].*
-    b.  **Expand (Upsample):** Compute the predicted version of $g_i$ from $g_{i+1}$, denoted $\bar{g}_i$. This involves upsampling $g_{i+1}$ by inserting zeros and convolving with the same kernel.
-        $$\bar{g}_i(x, y, z) = \sum_{m=-2}^{2} \sum_{n=-2}^{2} \sum_{p=-2}^{2} w(m) w(n) w(p) \cdot g_{i+1}(\lfloor \frac{x-m}{2} \rfloor, \lfloor \frac{y-n}{2} \rfloor, \lfloor \frac{z-p}{2} \rfloor)$$
-        *Note: The source defines the expand operation as reversing the decimation [S1, unofficial]. Specifically, for even indices in the expanded grid, it maps back to the coarse grid.*
-    c.  **Laplacian Level Calculation:** Compute the residual $l_i$ by subtracting the predicted volume from the current Gaussian level.
-        $$l_i = g_i - \bar{g}_i$$
-    d.  **Store:** Save $l_i$.
+**Step 1: Define Operators**
+Define the reduction operator $F$ and the expansion operator $F'$.
+For a 1D signal $c$, the reduction $c^1 = F c$ is computed by convolution with weights $w$ followed by decimation:
+$$ c^1_k = \sum_n w(n - 2k) c_n $$
+The weights $w(n)$ are real, symmetric ($w(n) = w(-n)$), and normalized ($\sum w(n) = 1$) [S1, unofficial].
 
-3.  **Final Level:**
-    After $L$ iterations, store the coarsest Gaussian level $g_L$.
+The expansion operator $F'$ upsamples the signal by inserting zeros and convolving with the same weights:
+$$ \bar{c}_n = \sum_k w(n - 2k) c^1_k $$
+This produces the predicted signal $\bar{c}$ from the coarse signal $c^1$ [S1, unofficial].
 
-4.  **Compression (Quantization & Encoding):**
-    *   Quantize each $l_i$ using uniform quantization [S1, unofficial].
-    *   Encode $g_L$ and the quantized $l_i$ arrays using entropy coding (e.g., variable length coding) [S1, unofficial][S3].
+**Step 2: Iterative Reduction and Residual Calculation**
+For $l = 0$ to $L-1$:
+1.  **Reduce:** Compute the next coarse level $C^{l+1}$ from the current level $C^l$ (where $C^0 = V$) using the reduction operator $F$:
+    $$ C^{l+1} = F C^l $$
+    In 3D, this is implemented by convolving $C^l$ with the separable $5 \times 5 \times 5$ Gaussian kernel and then subsampling by a factor of 2 in each dimension [S1, unofficial].
+2.  **Expand:** Compute the predicted version of $C^l$ from $C^{l+1}$ using the expansion operator $F'$:
+    $$ \bar{C}^l = F' C^{l+1} $$
+3.  **Subtract:** Compute the residual $D^l$ by subtracting the prediction from the original level:
+    $$ D^l = C^l - \bar{C}^l $$
+    This residual $D^l$ represents the high-frequency details lost during reduction [S1, unofficial].
 
-5.  **Reconstruction (Decompression):**
-    *   Decode $g_L$ and the quantized $l_i$ arrays.
-    *   Initialize $r_{L-1} = l_{L-1} + \text{EXPAND}(g_L)$.
-    *   For $i = L-2$ down to $0$:
-        $$r_i = l_i + \text{EXPAND}(r_{i+1})$$
-    *   The reconstructed volume is $V_0' = r_0$.
-    *   *Note: If quantization was used, $V_0'$ is an approximation of $V_0$.*
+**Step 3: Base Level**
+After $L$ iterations, the remaining coarse volume $C^L$ is the base level. It is typically quantized and encoded separately [S1, unofficial].
 
-**Pseudocode:**
+#### 2. Reconstruction (Decoding)
+Reconstruction proceeds from the coarsest level back to the finest.
+
+**Step 1: Initialize**
+Set the current reconstructed volume $R^L = C^L$ (decoded base level) [S1, unofficial].
+
+**Step 2: Iterative Expansion**
+For $i = L-1$ down to 0:
+1.  **Expand:** Upsample $R^{i+1}$ to the dimensions of $C^i$ using the expansion operator $F'$:
+    $$ \bar{R}^i = F' R^{i+1} $$
+2.  **Add:** Add the decoded residual $D^i$ to the expanded prediction:
+    $$ R^i = \bar{R}^i + D^i $$
+
+**Step 3: Result**
+After the loop completes, $R^0$ is the reconstructed original volume $V$ [S1, unofficial].
+
+### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def laplacian_pyramid_decompose(volume, num_levels=5, kernel_1d=None):
+def laplacian_pyramid_decompose(volume, num_levels, kernel_1d):
     """
     Decomposes a 3D volume into a Laplacian pyramid.
     
     Args:
         volume: 3D numpy array (Nx, Ny, Nz)
-        num_levels: Integer L, number of decomposition steps
-        kernel_1d: 1D numpy array representing the low-pass filter w(n)
-                   Must be symmetric and sum to 1.
-    
+        num_levels: Integer L
+        kernel_1d: 1D numpy array representing the symmetric low-pass filter weights w
+        
     Returns:
-        gaussian_levels: List of 3D arrays [g_0, g_1, ..., g_L]
-        laplacian_levels: List of 3D arrays [l_0, l_1, ..., l_{L-1}]
+        residuals: List of L 3D arrays [D^0, ..., D^{L-1}]
+        base: 3D array C^L
     """
-    if kernel_1d is None:
-        # Default 5-tap Gaussian-like kernel for demonstration
-        # Source specifies 5x5x5 separable kernel [S1, unofficial]
-        kernel_1d = np.array([0.0625, 0.25, 0.375, 0.25, 0.0625])
+    residuals = []
+    current_level = volume
     
-    # Pad volume to handle boundary conditions during convolution
-    # Source does not specify boundary handling, so we use zero-padding or reflection [G]
-    # Assuming the expand/reduce operations handle indices via floor division as per source
-    # We will implement the reduce and expand functions directly based on source formulas
-    
-    gaussian_levels = []
-    laplacian_levels = []
-    
-    current_vol = volume.copy()
-    gaussian_levels.append(current_vol)
-    
-    for i in range(num_levels):
-        # Step 1: Reduce (Downsample)
-        # Convolve with 3D kernel (separable: 3 passes of 1D)
-        blurred = convolve_3d_separable(current_vol, kernel_1d)
+    for l in range(num_levels):
+        # 1. Reduce: Convolve with separable kernel and subsample by 2
+        # Apply 1D kernel along X
+        reduced_x = convolve_1d(current_level, kernel_1d, axis=0)
+        # Apply 1D kernel along Y
+        reduced_y = convolve_1d(reduced_x, kernel_1d, axis=1)
+        # Apply 1D kernel along Z
+        reduced_z = convolve_1d(reduced_y, kernel_1d, axis=2)
         
-        # Downsample by 2 in each dimension
-        # Indices: 2x, 2y, 2z
-        next_gaussian = blurred[::2, ::2, ::2]
-        gaussian_levels.append(next_gaussian)
+        # Subsample by 2 in all dimensions
+        next_level = reduced_z[::2, ::2, ::2]
         
-        # Step 2: Expand (Upsample)
-        # Upsample next_gaussian by inserting zeros
-        expanded_shape = current_vol.shape
-        expanded = np.zeros(expanded_shape, dtype=current_vol.dtype)
+        # 2. Expand: Upsample next_level and convolve with kernel
+        # Upsample by inserting zeros
+        expanded = upsample_zeros(next_level, factor=2)
         
-        # Map coarse pixels to fine grid
-        # Source: g_bar_0(i,j) = sum w(m,n) g_1((i-m)/2, (j-n)/2)
-        # We iterate over the coarse grid and add to the fine grid
-        kh = len(kernel_1d) // 2
-        for z in range(next_gaussian.shape[0]):
-            for y in range(next_gaussian.shape[1]):
-                for x in range(next_gaussian.shape[2]):
-                    val = next_gaussian[z, y, x]
-                    # Center of the kernel in the fine grid corresponds to index 2*z, 2*y, 2*x
-                    # The kernel is centered at 0. So we add kernel weights to neighbors
-                    for dz in range(-kh, kh + 1):
-                        for dy in range(-kh, kh + 1):
-                            for dx in range(-kh, kh + 1):
-                                fz = 2 * z + dz
-                                fy = 2 * y + dy
-                                fx = 2 * x + dx
-                                
-                                # Check bounds
-                                if 0 <= fz < expanded_shape[0] and \
-                                   0 <= fy < expanded_shape[1] and \
-                                   0 <= fx < expanded_shape[2]:
-                                    # Kernel index mapping: w(n) where n is offset
-                                    # If kernel is symmetric around 0, w(dz)
-                                    expanded[fz, fy, fx] += val * kernel_1d[dz + kh] * kernel_1d[dy + kh] * kernel_1d[dx + kh]
+        # Apply 1D kernel along X
+        expanded_x = convolve_1d(expanded, kernel_1d, axis=0)
+        # Apply 1D kernel along Y
+        expanded_y = convolve_1d(expanded_x, kernel_1d, axis=1)
+        # Apply 1D kernel along Z
+        expanded_z = convolve_1d(expanded_y, kernel_1d, axis=2)
         
-        # Step 3: Laplacian Level
-        laplacian_level = current_vol - expanded
-        laplacian_levels.append(laplacian_level)
+        # 3. Residual: Difference between current level and expanded prediction
+        residual = current_level - expanded_z
+        residuals.append(residual)
         
-        # Prepare for next iteration
-        current_vol = next_gaussian
+        current_level = next_level
         
-    return gaussian_levels, laplacian_levels
+    return residuals, current_level
 
-def laplacian_pyramid_reconstruct(gaussian_levels, laplacian_levels):
+def laplacian_pyramid_reconstruct(residuals, base, kernel_1d):
     """
     Reconstructs the volume from the Laplacian pyramid.
     
     Args:
-        gaussian_levels: List of 3D arrays [g_0, ..., g_L]
-        laplacian_levels: List of 3D arrays [l_0, ..., l_{L-1}]
+        residuals: List of L 3D arrays [D^0, ..., D^{L-1}]
+        base: 3D array C^L
+        kernel_1d: 1D numpy array representing the symmetric low-pass filter weights w
         
     Returns:
         reconstructed_volume: 3D numpy array
     """
-    L = len(gaussian_levels) - 1
+    current_level = base
     
-    # Start from the coarsest level
-    # r_{L-1} = l_{L-1} + EXPAND(g_L)
-    # Note: gaussian_levels[L] is g_L
-    # laplacian_levels[L-1] is l_{L-1}
-    
-    # We need to reconstruct from L-1 down to 0
-    # Let's work backwards
-    
-    # Initialize r with the last laplacian level
-    # But we need to expand g_L first
-    g_L = gaussian_levels[L]
-    
-    # Expand g_L to the size of l_{L-1} (which is size of g_{L-1})
-    # We reuse the expand logic from decomposition, but here we just need to upsample
-    # The expand function is defined as: sum w(m,n) g_1((i-m)/2...)
-    
-    # Helper to expand a volume to double size
-    def expand_volume(vol, kernel_1d):
-        kh = len(kernel_1d) // 2
-        new_shape = (vol.shape[0] * 2, vol.shape[1] * 2, vol.shape[2] * 2)
-        expanded = np.zeros(new_shape, dtype=vol.dtype)
-        for z in range(vol.shape[0]):
-            for y in range(vol.shape[1]):
-                for x in range(vol.shape[2]):
-                    val = vol[z, y, x]
-                    for dz in range(-kh, kh + 1):
-                        for dy in range(-kh, kh + 1):
-                            for dx in range(-kh, kh + 1):
-                                fz = 2 * z + dz
-                                fy = 2 * y + dy
-                                fx = 2 * x + dx
-                                if 0 <= fz < new_shape[0] and \
-                                   0 <= fy < new_shape[1] and \
-                                   0 <= fx < new_shape[2]:
-                                    expanded[fz, fy, fx] += val * kernel_1d[dz + kh] * kernel_1d[dy + kh] * kernel_1d[dx + kh]
-        return expanded
-
-    # Default kernel for reconstruction
-    kernel_1d = np.array([0.0625, 0.25, 0.375, 0.25, 0.0625])
-    
-    # Reconstruct r_{L-1}
-    r = laplacian_levels[L-1] + expand_volume(g_L, kernel_1d)
-    
-    # Iterate downwards
-    for i in range(L-2, -1, -1):
-        # r_i = l_i + EXPAND(r_{i+1})
-        # r is currently r_{i+1}
-        # l_i is laplacian_levels[i]
-        r = laplacian_levels[i] + expand_volume(r, kernel_1d)
+    # Iterate from L-1 down to 0
+    for l in range(len(residuals) - 1, -1, -1):
+        residual = residuals[l]
         
-    return r
+        # 1. Expand: Upsample current_level
+        expanded = upsample_zeros(current_level, factor=2)
+        
+        # Apply 1D kernel along X
+        expanded_x = convolve_1d(expanded, kernel_1d, axis=0)
+        # Apply 1D kernel along Y
+        expanded_y = convolve_1d(expanded_x, kernel_1d, axis=1)
+        # Apply 1D kernel along Z
+        expanded_z = convolve_1d(expanded_y, kernel_1d, axis=2)
+        
+        # 2. Add: Reconstruct current level
+        current_level = expanded_z + residual
+        
+    return current_level
 
-def convolve_3d_separable(volume, kernel_1d):
+def convolve_1d(volume, kernel, axis):
     """
-    Convolve a 3D volume with a separable 3D kernel.
+    Convolve volume with 1D kernel along specified axis.
+    Assumes 'same' padding or appropriate boundary handling.
     """
-    # Pass 1: X dimension
-    kh = len(kernel_1d) // 2
-    temp = np.zeros_like(volume)
-    for z in range(volume.shape[0]):
-        for y in range(volume.shape[1]):
-            for x in range(volume.shape[2]):
-                val = 0.0
-                for k in range(-kh, kh + 1):
-                    if 0 <= x + k < volume.shape[2]:
-                        val += volume[z, y, x + k] * kernel_1d[k + kh]
-                temp[z, y, x] = val
-    volume = temp
+    # Implementation detail: standard 1D convolution
+    # Since kernel is symmetric, this is equivalent to correlation
+    result = np.zeros_like(volume)
+    k_len = len(kernel)
+    k_half = k_len // 2
     
-    # Pass 2: Y dimension
-    temp = np.zeros_like(volume)
-    for z in range(volume.shape[0]):
-        for y in range(volume.shape[1]):
-            for x in range(volume.shape[2]):
-                val = 0.0
-                for k in range(-kh, kh + 1):
-                    if 0 <= y + k < volume.shape[1]:
-                        val += volume[z, y + k, x] * kernel_1d[k + kh]
-                temp[z, y, x] = val
-    volume = temp
+    # Pad volume to handle boundaries
+    pad_width = [(0,0)] * volume.ndim
+    pad_width[axis] = (k_half, k_half)
+    padded = np.pad(volume, pad_width, mode='reflect') # [G] Boundary handling
     
-    # Pass 3: Z dimension
-    temp = np.zeros_like(volume)
-    for z in range(volume.shape[0]):
-        for y in range(volume.shape[1]):
-            for x in range(volume.shape[2]):
-                val = 0.0
-                for k in range(-kh, kh + 1):
-                    if 0 <= z + k < volume.shape[0]:
-                        val += volume[z + k, y, x] * kernel_1d[k + kh]
-                temp[z, y, x] = val
-    return temp
+    # Perform convolution
+    # Using numpy stride tricks or simple loop for clarity
+    # For efficiency, use scipy.signal.convolve or FFT, but here we write out the logic
+    # This is a simplified representation; actual implementation depends on language
+    # Assuming vectorized operation for the axis
+    result = np.convolve(padded.flatten(), kernel, mode='valid').reshape(padded.shape) # [G] Placeholder for correct 3D axis convolution
+    # Correct 3D axis convolution:
+    # In practice, use scipy.ndimage.convolve1d
+    from scipy.ndimage import convolve1d as scipy_convolve1d
+    return scipy_convolve1d(volume, kernel, axis=axis, mode='reflect') # [G] Using scipy for standard implementation
+
+def upsample_zeros(volume, factor):
+    """
+    Upsample volume by inserting zeros between elements.
+    """
+    new_shape = tuple(s * factor for s in volume.shape)
+    upscaled = np.zeros(new_shape, dtype=volume.dtype)
+    # Place original values at even indices
+    slices = tuple(slice(0, None, factor) for _ in volume.shape)
+    upscaled[slices] = volume
+    return upscaled
 ```
 
+### Edge Cases and Pitfalls
+*   **Oversampling:** The Laplacian pyramid is redundant. The total number of coefficients is $\sum_{l=0}^{L} (N/2^l)^3 \approx \frac{8}{7} N^3$ for large $L$, which is greater than the original $N^3$ [S1, unofficial]. This increases memory usage compared to orthogonal transforms [S1, unofficial].
+*   **Boundary Effects:** The expansion and reduction operations require careful handling of volume boundaries. Standard implementations use reflection or zero-padding, which can introduce artifacts at the edges [S1, G, unofficial].
+*   **Precision:** Perfect reconstruction is guaranteed in infinite precision arithmetic. In fixed-point or floating-point arithmetic, quantization errors in the residuals and base level accumulate, leading to reconstruction error [S1, unofficial].
+
 ## Operating characteristics
-*   **Time Complexity:** Decomposition and reconstruction are $O(N)$ where $N$ is the number of voxels, assuming fixed kernel size. The separable 3D filter reduces the constant factor significantly; the source notes a speedup of roughly 8 in reconstruction due to separability [S1, unofficial].
-*   **Memory Complexity:** The method is redundant. The total storage is $\sum_{i=0}^{L-1} V_i + V_L$, where $V_i$ is the volume at level $i$. Since $V_i \approx 8 V_{i+1}$, the total size is approximately $1 + 1/8 + 1/64 + \dots \approx 1.14$ times the original volume size before quantization. This is the "oversampling" drawback mentioned in the source [S1, unofficial].
-*   **Performance:** A compression ratio of 10:1 was achieved with uniform quantization on CT volume data, with a root mean square error (RMSE) of 1.3 [S1, unofficial].
-*   **Strengths:** Perfect reconstruction (without quantization), simple addition-based reconstruction, effective decorrelation of spatial data [S1, unofficial].
-*   **Limitations:** Redundant representation (oversampling) increases memory usage compared to orthogonal wavelets. Computational cost of filtering can be high without separability [S1, unofficial].
+*   **Time Complexity:** Decomposition and reconstruction are $O(N^3 \log N)$ for a volume of size $N^3$, dominated by the convolution operations at each level [S1, unofficial]. The separable filter implementation provides a constant speedup of roughly 8x in reconstruction compared to non-separable 3D convolution [S1, unofficial].
+*   **Memory Complexity:** The pyramid stores $\frac{8}{7}$ times the original data size (for infinite levels) or slightly more for finite levels. Quantization reduces this significantly in compressed formats [S1, unofficial].
+*   **Performance:** Achieves compression ratios of approximately 10:1 with uniform quantization for CT volume data, with a root mean square error (RMSE) of 1.3 [S1, S4, unofficial].
+*   **Strengths:** Simple implementation, perfect reconstruction, effective decorrelation of data, supports progressive rendering (coarse to fine) [S1, unofficial].
+*   **Limitations:** Redundant representation (oversampling), higher memory overhead than orthogonal wavelets, potential boundary artifacts [S1, unofficial].
+*   **When to use:** When progressive rendering or simple multiresolution exploration is required, and computational simplicity is prioritized over maximum compression ratio [S1, S4, unofficial].
+*   **When not to use:** When memory bandwidth is the primary bottleneck and orthogonal transforms (like wavelets) offer better compression efficiency [S1, unofficial].
 
 ## Background
-The Laplacian Pyramid was introduced by Burt and Adelson [S1, unofficial][S3]. It is an early multiresolution decomposition technique, predating the rapid development of wavelet transformations in the late 1980s [S1, unofficial]. It is closely related to multiresolution analysis and orthonormal wavelet bases [S1, unofficial]. It is used in volume rendering for adaptive rendering, efficient coding, coarse-to-fine progressive rendering, and error bounds checking [S1, unofficial].
+The Laplacian Pyramid was introduced by Burt and Adelson in 1983 [S1, unofficial]. It was one of the earliest multiresolution decomposition techniques, predating the widespread adoption of wavelet transforms in the late 1980s [S1, unofficial]. It has been widely used in image and volume processing for compression, feature enhancement, and error bounds checking [S1, unofficial]. In volume rendering, it enables adaptive rendering and efficient coding of volumetric data [S1, unofficial].
 
 ## Sources
 [S1] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)
 [S2] PDF State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
 [S3] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S4] 体数据压缩技术综述, https://www.jcad.cn/article/id/9d3ce9cd-c97c-4fab-9291-a72fbe7ba37e, fetched 2026-10-30 (unofficial)

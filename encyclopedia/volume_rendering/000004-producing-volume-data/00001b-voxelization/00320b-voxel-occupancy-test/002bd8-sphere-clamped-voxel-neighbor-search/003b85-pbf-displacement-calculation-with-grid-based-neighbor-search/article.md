@@ -1,0 +1,133 @@
+# PBF Displacement Calculation with Grid-Based Neighbor Search
+
+
+## Overview
+PBF Displacement Calculation with Grid-Based Neighbor Search is a Particle-Based Fluid (PBF) simulation step that calculates particle displacements to enforce incompressibility via density constraints [S1, unofficial]. It differs from standard SPH methods by using a hard separation constraint rather than pressure forces, and it relies on a spatial hash grid (provided by the parent method) to efficiently locate neighbors within a search radius [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** `positionBufferIN` (array of `vec4<f32>`), where `.rgb` is position and `.a` encodes particle radius/identifier.
+*   **Output:** `positionBufferOUT` (array of `vec4<f32>`, read-write), storing updated positions.
+*   **Auxiliary Input:** `indicesBuffer` (array of `u32`), storing particle indices for the current voxel.
+*   **Uniforms:** `uResolution` (grid resolution), `maxParticlesPerVoxel` (max particles per voxel), `separation` (target separation distance, though the source logic derives separation from particle radii).
+
+**Data Structures:**
+*   **Particle Position:** `vec4<f32>`. The radius $r_i$ is extracted from the alpha channel: $r_i = \lfloor \text{position}.a \rfloor / 4$.
+*   **Grid Indexing:** Particles are mapped to a 3D grid. The grid position is `gridPosition = vec3<i32>(floor(particlePosition.rgb))`.
+*   **Neighbor Search:** A 3x3x3 offset array of 27 `vec3<i32>` values covers the current voxel and all adjacent voxels (faces, edges, corners). Offsets range from $(-1,-1,-1)$ to $(1,1,1)$.
+
+**Algorithm Steps:**
+1.  Initialize a global displacement vector `deltaPosition` to `vec3<f32>(0.)` for the current particle.
+2.  For the current particle index, read its position `p` from `positionBufferIN`.
+3.  Extract the particle's radius $r_1$ from `p.a`: $r_1 = \lfloor p.a \rfloor / 4$.
+4.  Compute the grid coordinate `gridPosition` using `floor(p.rgb)`.
+5.  Iterate over all 27 neighbor voxels defined by the 3x3x3 offset array.
+    a.  Calculate `neighborsVoxel` = `gridPosition` + `offsets[i]`.
+    b.  Calculate the linear `voxelIndex` in the hash grid: `voxelIndex` = `neighborsVoxel.x` + `neighborsVoxel.y` * `uResolution` + `neighborsVoxel.z` * `uResolution` * `uResolution`.
+    c.  Retrieve the list of particle indices stored in `indicesBuffer` for this `voxelIndex`.
+    d.  Iterate through each neighbor particle index `j` in the voxel (up to `maxParticlesPerVoxel`).
+    e.  Retrieve the neighbor's position `p_j` from `positionBufferIN`.
+    f.  Extract the neighbor's radius $r_2$: $r_2 = \lfloor p_j.a \rfloor / 4$.
+    g.  Calculate the distance vector $\vec{d} = p.rgb - p_j.rgb$.
+    h.  Calculate the distance $r = \|\vec{d}\|$.
+    i.  Calculate the target separation distance $s = 0.5 \times (r_1 + r_2)$.
+    j.  If $r > 0$ and $r < s$, apply the separation force:
+        $$ \text{deltaPosition} \ -= \ (r - s) \times \frac{\vec{d}}{r} \times \frac{r_2}{r_1 + r_2} $$
+6.  After checking all neighbors, update the particle's position in `positionBufferOUT` by adding `deltaPosition` to the original position.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+EPSILON = 1e-10
+
+def calculate_displacements(position_buffer_in, position_buffer_out, indices_buffer, u_resolution, max_particles_per_voxel):
+    # Note: This function represents the logic for a single particle invocation in a compute shader or parallel loop.
+    # In a real implementation, this runs in parallel for all particles.
+    
+    # 1. Initialize delta position
+    delta_position = vec3(0.0, 0.0, 0.0)
+    
+    # 2. Read current particle data
+    # Assuming 'particle_idx' is the unique identifier for the current particle
+    p_vec4 = position_buffer_in[particle_idx]
+    p_pos = p_vec4.rgb
+    p_radius_alpha = p_vec4.a
+    
+    # Extract radius r1
+    r1 = floor(p_radius_alpha) / 4.0
+    
+    # 3. Compute grid position
+    grid_pos = vec3(floor(p_pos.x), floor(p_pos.y), floor(p_pos.z))
+    
+    # 4. Define 3x3x3 offsets
+    offsets = []
+    for x in [-1, 0, 1]:
+        for y in [-1, 0, 1]:
+            for z in [-1, 0, 1]:
+                offsets.append(vec3(x, y, z))
+                
+    # 5. Iterate over neighbor voxels
+    for offset in offsets:
+        neighbors_voxel = grid_pos + offset
+        
+        # Calculate linear voxel index
+        voxel_index = neighbors_voxel.x + neighbors_voxel.y * u_resolution + neighbors_voxel.z * u_resolution * u_resolution
+        
+        # 6. Iterate over particles in the voxel
+        # Note: indices_buffer stores particle indices for the voxel at 'voxel_index'.
+        # The number of valid particles is determined by the buffer structure or a count variable not explicitly detailed in the snippet.
+        # We assume indices_buffer[voxel_index * max_particles_per_voxel + k] gives the k-th particle index.
+        
+        base_idx = voxel_index * max_particles_per_voxel
+        for k in range(max_particles_per_voxel):
+            neighbor_particle_idx = indices_buffer[base_idx + k]
+            
+            # Skip if index is invalid (implementation detail: check for sentinel value if used)
+            # Assuming valid indices are always stored sequentially or checked by a count
+            
+            p_j_vec4 = position_buffer_in[neighbor_particle_idx]
+            p_j_pos = p_j_vec4.rgb
+            p_j_radius_alpha = p_j_vec4.a
+            
+            # Extract radius r2
+            r2 = floor(p_j_radius_alpha) / 4.0
+            
+            # Calculate distance vector and magnitude
+            dist_vec = p_pos - p_j_pos
+            r = length(dist_vec)
+            
+            # Calculate target separation
+            separation = 0.5 * (r1 + r2)
+            
+            # Apply separation force if within range
+            if r > EPSILON and r < separation:
+                normalized_dist = dist_vec / r
+                weight = r2 / (r1 + r2)
+                delta_position -= (r - separation) * normalized_dist * weight
+                
+    # 7. Apply displacement
+    new_pos = p_pos + delta_position
+    position_buffer_out[particle_idx] = vec4(new_pos, p_radius_alpha)
+```
+
+**Parameters and Edge Cases:**
+*   **Radius Extraction:** The radius is derived from the alpha channel using `floor(alpha) / 4`. This implies the alpha channel stores an integer value representing $4 \times$ radius.
+*   **Singularity:** The distance $r$ is checked against `EPSILON` ($10^{-10}$) to avoid division by zero when normalizing the distance vector.
+*   **Boundary Conditions:** The grid search is limited to the 3x3x3 neighborhood. Particles near the domain boundary may have fewer neighbors, which is handled naturally by the grid lookup.
+*   **Precision:** Floating-point precision in `floor` operations and radius extraction may cause slight jitter if particle positions are not stable.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot K)$, where $N$ is the number of particles and $K$ is the average number of neighbors found within the 3x3x3 voxel neighborhood. The constant factor is small (27 voxels).
+*   **Memory Complexity:** $O(N)$ for position buffers and $O(V)$ for the voxel index buffers, where $V$ is the number of voxels.
+*   **Strengths:** Efficient neighbor search using spatial hashing; simple separation force logic; suitable for real-time simulation on GPU.
+*   **Limitations:** The separation force is a heuristic and may not perfectly conserve mass or momentum compared to more rigorous PBF formulations. The radius extraction method is specific to the implementation and may not generalize to other PBF variants.
+*   **When to use:** Real-time fluid simulation where performance is critical and visual plausibility is acceptable.
+*   **When not to use:** High-fidelity scientific simulation requiring strict incompressibility constraints.
+
+## Background
+The method is derived from the WebGPU Voxel Cone Tracing repository by Hector Arellano [S1, unofficial]. It implements a simplified PBF displacement calculation using a grid-based neighbor search. The specific formula for separation force and radius extraction is unique to this implementation.
+
+## Sources
+[S1] HectorArellanoDev/WebGPUVoxelConeTracing, https://github.com/HectorArellanoDev/WebGPUVoxelConeTracing, fetched 2026-10-26 (unofficial)

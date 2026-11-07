@@ -2,102 +2,94 @@
 
 
 ## Overview
-Estimates the global Lipschitz constant $\lambda$ for an implicit function $f: \mathbb{R}^d \rightarrow \mathbb{R}$ to enable conservative interval pruning in ray casting. It solves the problem of determining a safe upper bound on the function's rate of change, which is required by inclusion strategies like [SamplingInclusion](1410-interval-arithmetic-inclusion-strategies.md) to guarantee that the zero-level set does not exist within a bounding box if $0 \notin [f_-, f_+]$. It differs from [Forward Linear Inclusion Function](1714-forward-linear-inclusion-function.md) by providing a scalar bound for the entire domain rather than a linear approximation over a specific interval.
+Lipschitz Constant Estimation computes the maximum rate of change (gradient magnitude) of an implicit function $f$ over a domain, providing the constant $\lambda$ required for safe stepping in ray-casting algorithms like sphere tracing [S1]. It distinguishes itself from sibling methods by serving as the foundational estimator for the bounds used in [Interval Arithmetic Inclusion Strategies](1410-interval-arithmetic-inclusion-strategies.md), specifically enabling the pruning of intervals where $0 \notin [f_-, f_+]$ [S2, unofficial].
 
 ## How it works
-**Inputs:**
-- Implicit function $f: \mathbb{R}^d \rightarrow \mathbb{R}$.
-- Bounding box $\mathcal{B}$ (defined by min/max corners).
-- Lipschitz mode: a float value or the string `"auto"`.
-
-**Outputs:**
-- Scalar Lipschitz constant $\lambda$.
+**Inputs and Outputs:**
+- Input: An implicit function $f: \mathbb{R}^d \rightarrow \mathbb{R}$ and a bounding box $\mathcal{B}$ (or hierarchical segment $\mathbf{e}$).
+- Output: A scalar Lipschitz constant $\lambda$ such that $\forall \mathbf{x}, \mathbf{y} \in \mathcal{B}, \frac{|f(\mathbf{x}) - f(\mathbf{y})|}{\|\mathbf{x} - \mathbf{y}\|} \leq \lambda$ [S1].
 
 **Data Structures:**
-- Gradient samples: Array of vectors $\nabla f(\mathbf{x}_i)$ computed at sample points $\mathbf{x}_i \in \mathcal{B}$.
+- The constant $\lambda$ is stored as a floating-point value. In implementation contexts, it may be specified as the string `"auto"` to trigger automatic estimation [S2, unofficial].
 
 **Steps:**
-1. If the input mode is a float, return it as $\lambda$ [S2, unofficial].
-2. If the mode is `"auto"`, estimate $\lambda$ by sampling the gradient norm over $\mathcal{B}$ [S2, unofficial]:
-   a. Select a set of sample points $\{\mathbf{x}_i\}$ within $\mathcal{B}$.
-   b. Compute the gradient $\nabla f(\mathbf{x}_i)$ at each point.
-   c. Calculate the norm $\|\nabla f(\mathbf{x}_i)\|$ for each sample.
-   d. Set $\lambda = \max_i \|\nabla f(\mathbf{x}_i)\|$ [S2, unofficial].
-3. Return $\lambda$.
+1. **Define Lipschitz Condition:** The constant $\lambda$ is defined as the supremum of the difference quotient:
+   $$ Lip(f) = \max_{\mathbf{x}, \mathbf{y}} \frac{|f(\mathbf{x}) - f(\mathbf{y})|}{\|\mathbf{x} - \mathbf{y}\|} $$
+   This represents the maximum magnitude of the function's derivative [S1].
 
-**Formula:**
-The Lipschitz constant is defined as the maximum magnitude of the function's derivative [S1]:
-$$
-Lip(f) = \max_{\mathbf{x}, \mathbf{y} \in \mathbb{R}^d, \mathbf{x} \neq \mathbf{y}} \frac{|f(\mathbf{x}) - f(\mathbf{y})|}{\|\mathbf{x} - \mathbf{y}\|}
-$$
-For differentiable functions, this is equivalent to the maximum gradient norm [S1]:
-$$
-\lambda = \max_{\mathbf{x} \in \mathcal{B}} \|\nabla f(\mathbf{x})\|
-$$
+2. **Estimate via Gradient Sampling:** For practical implementation, $\lambda$ is estimated by sampling the gradient norms $\|\nabla f(\mathbf{x})\|$ over the domain $\mathcal{B}$ [S2, unofficial]. The maximum observed gradient norm serves as the estimate for $\lambda$.
 
-**Parameters:**
-- `lipschitz`: Can be a float value or the string `"auto"`. If `"auto"`, the constant is estimated automatically [S2, unofficial].
-
-**Edge Cases:**
-- Non-differentiable functions: The gradient norm approach assumes differentiability. For non-smooth primitives, the constant must be derived analytically or via conservative bounds [S1].
-- Precision: Numerical gradient estimation may introduce error; central differences are preferred over forward differences for stability [S2, unofficial].
+3. **Apply Constant:** The estimated $\lambda$ is used by the interval inclusion function to determine safe stepping distances or to prune intervals that cannot contain the zero-level set [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def estimate_lipschitz(f, box, mode="auto"):
+def estimate_lipschitz(f, bounding_box, num_samples=1000):
     """
-    Estimate the Lipschitz constant for implicit function f over box.
-    
-    Args:
-        f: Implicit function f(x: np.ndarray) -> float
-        box: Bounding box defined as (min_corner, max_corner)
-        mode: float or "auto"
-        
-    Returns:
-        float: Lipschitz constant lambda
+    Estimates the Lipschitz constant lambda for function f over bounding_box.
+    Uses gradient sampling.
     """
-    if mode != "auto":
-        return float(mode)
+    import numpy as np
     
-    # Sample points within the bounding box
-    # [G] Implementation detail: Use a grid or random sampling within box bounds
-    samples = generate_samples_in_box(box, num_samples=100)
+    # Generate random points within the bounding box
+    # [G] Implementation detail: bounding_box is assumed to be defined by min/max vectors
+    points = np.random.uniform(bounding_box.min, bounding_box.max, size=(num_samples, 3))
     
     max_grad_norm = 0.0
     
-    for x in samples:
-        # Compute gradient using central differences [G]
-        # h is a small step size, e.g., 1e-5
-        h = 1e-5
-        grad = np.zeros(3)
-        for i in range(3):
-            x_plus = x.copy()
-            x_minus = x.copy()
-            x_plus[i] += h
-            x_minus[i] -= h
-            grad[i] = (f(x_plus) - f(x_minus)) / (2 * h)
-            
-        norm = np.linalg.norm(grad)
-        if norm > max_grad_norm:
-            max_grad_norm = norm
+    for point in points:
+        # Compute gradient at point
+        # [G] Assuming f provides a gradient method or we use centered differences
+        grad = compute_gradient(f, point)
+        grad_norm = np.linalg.norm(grad)
+        
+        if grad_norm > max_grad_norm:
+            max_grad_norm = grad_norm
             
     return max_grad_norm
+
+def compute_gradient(f, point, epsilon=1e-5):
+    """
+    Computes gradient using centered differences.
+    """
+    grad = np.zeros(3)
+    for i in range(3):
+        point_plus = point.copy()
+        point_minus = point.copy()
+        point_plus[i] += epsilon
+        point_minus[i] -= epsilon
+        
+        f_plus = f(point_plus)
+        f_minus = f(point_minus)
+        
+        grad[i] = (f_plus - f_minus) / (2 * epsilon)
+        
+    return grad
 ```
+
+**Parameters:**
+- `lipschitz`: Can be a float value or the string "auto". If "auto", the constant is estimated automatically using the method described above [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Non-Lipschitz Functions:** If $f$ is not Lipschitz (e.g., infinite derivative), the constant is undefined. Sphere tracing requires $f$ to be Lipschitz [S1].
+- **Sampling Density:** Insufficient sampling may underestimate $\lambda$, leading to steps that cross the surface and cause artifacts.
+- **Hierarchical Models:** For hierarchical implicit models, global estimation may be too conservative. Local bounds per segment $\mathbf{e}$ are preferred for tightness [S3894].
 
 ## Subtopics
 
+### [Local Lipschitz Bound Computation for Hierarchical Implicit Models](3894-local-lipschitz-bound-computation-for-hierarchical-implicit-.md)
+Computes local Lipschitz bounds $\lambda(\mathbf{e})$ for segments in a hierarchical construction tree, enabling larger safe steps in segment tracing by leveraging the specific geometric structure of primitives and operators.
+
 ## Operating characteristics
-- **Time Complexity:** $O(N \cdot d)$, where $N$ is the number of sample points and $d$ is the dimensionality (typically 3). Each sample requires $2d$ function evaluations for central differences [G].
-- **Memory Complexity:** $O(d)$ for storing the current gradient and maximum norm.
-- **Strengths:** Simple to implement; provides a data-driven bound for complex procedural functions where analytical derivatives are unavailable [S2, unofficial].
-- **Limitations:** Sampling may miss local maxima of the gradient, leading to an underestimation of $\lambda$ and potential ray tunneling [G]. Computationally expensive if high accuracy is required via dense sampling.
-- **When to use:** When the implicit function is a black box or procedural noise where analytical gradients are difficult to derive [S2, unofficial].
-- **When not to use:** When analytical bounds are available or when performance is critical and sampling overhead is prohibitive.
+- **Time Complexity:** Depends on the number of gradient samples and the cost of evaluating $f$ and $\nabla f$. Sampling-based estimation is $O(N \cdot C_f)$ where $N$ is samples and $C_f$ is evaluation cost [S2, unofficial].
+- **Memory Complexity:** $O(1)$ auxiliary space if streaming samples, or $O(N)$ if storing all points [S2, unofficial].
+- **Strengths:** Provides a necessary bound for safe ray marching; black-box compatible if gradients are available [S2, unofficial].
+- **Limitations:** Global estimation can be overly conservative for complex scenes; sampling may miss local maxima of the gradient [S1].
+- **When to Use:** When using sphere tracing or interval-based pruning with implicit functions where the Lipschitz constant is not analytically known [S1][S2, unofficial].
 
 ## Background
-The concept of Lipschitz continuity is fundamental in sphere tracing, where the constant $\lambda$ guarantees that a step size of $f(\mathbf{x})/\lambda$ will not cross the isosurface [S1]. The definition $Lip(f) = \max \frac{|f(\mathbf{x}) - f(\mathbf{y})|}{\|\mathbf{x} - \mathbf{y}\|}$ is standard in analysis [S1]. Automatic estimation via gradient sampling is a practical adaptation for modern implicit rendering pipelines [S2, unofficial].
+The concept of Lipschitz functions is fundamental to sphere tracing, introduced by Hart [Har96], which relies on the Lipschitz constant to guarantee safe stepping distances [S1]. The formal definition and operator $Lip(f)$ are detailed in recent work on fast sphere tracing of procedural volumetric noise [S1]. Implementation examples using automatic estimation are found in the iso-surface rendering library [S2, unofficial].
 
 ## Sources
 [S1] Fast sphere tracing of procedural volumetric noise for very large and detailed scenes, https://doi.org/10.1111/cgf.70072, fetched 2026-10-26

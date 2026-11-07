@@ -1,226 +1,212 @@
 # Wide DDA Cell Traversal
 
-Also called: Wide Node DDA Traversal, 4x4x4 DDA Cell Traversal
+Also called: Wide Node DDA Traversal, 4x4x4 DDA Traversal
 
 ## Overview
-Wide DDA Cell Traversal is a method for traversing a fixed-size $4 \times 4 \times 4$ block of child cells (a "wide node") within a larger hierarchical grid or octree structure [S1, unofficial]. It generates bounding boxes and ray-interval ($t$-intervals) for each occupied child cell in strict ray order, optimizing the subsequent lookup or shading step [S1, unofficial]. It differs from standard DDA by operating on a coarse-grained node level rather than individual voxels, and from hierarchical DDA (HDDA) by using a fixed-width block rather than a variable-depth tree descent [S1, unofficial]. It builds on [Ray-grid traversal](17-ray-grid-traversal.md).
+Wide DDA Cell Traversal is a specialized ray-grid traversal algorithm designed to efficiently visit a fixed 4x4x4 grid of "wide cells" (subdivisions) within an Axis-Aligned Bounding Box (AABB) [S1, unofficial]. It builds on [Digital Differential Analyzer (DDA) Traversal](3061-digital-differential-analyzer-dda-traversal.md) by operating on a coarse-grained block structure, generating bounding boxes and t-intervals for each wide cell to optimize higher-level structures like octrees [S1, unofficial]. It sets itself apart from standard DDA by processing cells in 4x4x4 blocks and using a visitor callback pattern, which allows for early termination and mask-based filtering of occupied child cells [S1, unofficial].
 
 ## How it works
-**Inputs:**
-- Parent AABB bounds: $\mathbf{b}_{min}, \mathbf{b}_{max}$ (vec3).
-- Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ (vec3).
-- Maximum traversal distance $t_{max}$ (float).
-- Base $t$-entry $t_{base}$ (float), typically the entry point into the parent node.
-- Visitor callback function.
+The algorithm traverses a 4x4x4 grid of wide cells. It assumes the parent AABB is subdivided into 4 cells along each axis, resulting in 64 wide cells total. The traversal uses a DDA approach to step through these cells in ray order.
 
-**Outputs:**
-- A sequence of `WideDdaCell` structures passed to the visitor.
-- `WideDdaCell` layout:
-  - `child_index`: int, packed as $x | (y \ll 2) | (z \ll 4)$, where $x,y,z \in [0,3]$.
-  - `bounds`: AABB with `min` (vec3) and `max` (vec3).
-  - `t_near`: float, entry $t$ into the child cell.
-  - `t_far`: float, exit $t$ from the child cell.
+### Inputs and Outputs
+*   **Inputs:**
+    *   `ray_origin`: 3D vector $\mathbf{o}$ [S1, unofficial].
+    *   `ray_direction`: 3D vector $\mathbf{d}$ [S1, unofficial].
+    *   `bounds`: AABB defining the 4x4x4 grid region, with `min` and `max` vectors [S1, unofficial].
+    *   `max_s`: Maximum traversal distance parameter [S1, unofficial].
+    *   `base_t`: Base t-value for the ray segment [S1, unofficial].
+    *   `reverse`: Boolean flag indicating traversal direction (forward or backward) [S1, unofficial].
+    *   `visitor`: A callback function `visitor(cell)` that receives a `WideDdaCell` structure. Returns `true` to continue, `false` to terminate [S1, unofficial].
+*   **Outputs:**
+    *   Calls `visitor` for each visited wide cell in traversal order.
+    *   `WideDdaCell` structure contains:
+        *   `child_index`: Integer index of the cell (0-63) [S1, unofficial].
+        *   `bounds`: AABB for the wide cell [S1, unofficial].
+        *   `t_near`: Entry t-value for the cell [S1, unofficial].
+        *   `t_far`: Exit t-value for the cell [S1, unofficial].
 
-**Data Structures & Constants:**
-- `kEpsilon`: Floating-point tolerance, typically $8.0 \times \epsilon_{\mathrm{machine}}$ for boundary checks [S1, unofficial].
-- `cell_size`: vec3, calculated as $(\mathbf{b}_{max} - \mathbf{b}_{min}) \times 0.25$ [S1, unofficial].
-- `grid_size`: int, fixed at 4 for all axes [S1, unofficial].
+### Data Structures
+*   **WideDdaCell:**
+    *   `child_index`: `int` [S1, unofficial].
+    *   `bounds`: `Aabb` (contains `min`: `vec3`, `max`: `vec3`) [S1, unofficial].
+    *   `t_near`: `float` [S1, unofficial].
+    *   `t_far`: `float` [S1, unofficial].
 
-**Algorithm Steps:**
+### Parameters
+*   `cell_size`: Dimensions of each wide cell. Calculated as `(bounds.max - bounds.min) * 0.25f` [S1, unofficial]. This implies a 4x4x4 subdivision of the parent AABB.
+*   `kEpsilon`: Floating-point tolerance for comparisons. Used for boundary handling and near-zero direction checks [S1, unofficial].
 
-1.  **Initialization:**
-    - Determine the starting cell indices $(c_x, c_y, c_z)$ by mapping the ray origin $\mathbf{o}$ to local coordinates within the parent AABB.
-    - Compute local coordinate: $\mathbf{l} = (\mathbf{o} - \mathbf{b}_{min}) / \mathbf{cell\_size}$.
-    - Determine integer indices using `local_cell_for_position` (see Edge Cases).
-    - Initialize current traversal distance $t_{curr} = t_{base}$.
-    - For each axis $i \in \{x, y, z\}$:
-        - Determine step direction $\text{step}_i$: $+1$ if $d_i > \text{kEpsilon}$, $-1$ if $d_i < -\text{kEpsilon}$, else $0$.
-        - If $\text{step}_i \neq 0$:
-            - Compute delta distance $\Delta t_i = \frac{\text{cell\_size}_i}{|d_i|}$.
-            - Compute distance to next boundary $t_{next, i}$. This is the distance from $\mathbf{o}$ to the first cell boundary in direction $\text{step}_i$.
-        - If $\text{step}_i = 0$:
-            - Set $\Delta t_i = \infty$ and $t_{next, i} = \infty$.
+### Steps
+1.  **Initialize Cell Indices:**
+    *   Compute local coordinates: `local = (ray_origin - bounds.min) / cell_size` [S1, unofficial].
+    *   Determine starting cell indices `(cell_x, cell_y, cell_z)` using `local_cell_for_position`. This function maps continuous positions to discrete indices (0-3) with boundary handling [S1, unofficial].
+    *   Clamp indices to `[0, 3]` [S1, unofficial].
 
-2.  **Traversal Loop:**
-    - Iterate up to 96 times (total cells in $4 \times 4 \times 4$ block).
-    - **Boundary Check:** If any index $c_i \notin [0, 3)$ or $t_{curr} > t_{max} + \text{kEpsilon}$, break loop.
-    - **Select Axis:** Identify axis $k$ with minimum $t_{next, k}$. Use tie-breaking with tolerance: if $t_{next, x} \le t_{next, y} + \text{kEpsilon}$ and $t_{next, x} \le t_{next, z} + \text{kEpsilon}$, pick $x$; else if $t_{next, y} \le t_{next, z} + \text{kEpsilon}$, pick $y$; else pick $z$.
-    - **Calculate Interval:**
-        - $t_{min\_next} = \min(t_{next, x}, t_{next, y}, t_{next, z}, t_{max})$.
-        - Compute child bounds:
-            - $\mathbf{c}_{min} = \mathbf{b}_{min} + \mathbf{cell\_size} \times (c_x, c_y, c_z)$.
-            - $\mathbf{c}_{max} = \mathbf{c}_{min} + \mathbf{cell\_size}$.
-        - Compute $t$-intervals relative to $t_{base}$:
-            - If traversing forward: $t_{near} = t_{base} + t_{curr}$, $t_{far} = t_{base} + t_{min\_next}$.
-            - If traversing backward (reverse flag): $t_{near} = t_{base} - t_{min\_next}$, $t_{far} = t_{base} - t_{curr}$.
-        - Pack `child_index` = $c_x | (c_y \ll 2) | (c_z \ll 4)$.
-    - **Visit:** Call `visitor(child_index, bounds, t_near, t_far)`. If visitor returns false, terminate immediately.
-    - **Advance:**
-        - If $t_{min\_next} \ge t_{max} - \text{kEpsilon}$, break.
-        - Update $t_{curr} = t_{min\_next}$.
-        - Advance index in axis $k$: $c_k \leftarrow c_k + \text{step}_k$.
-        - Update boundary distance for axis $k$: $t_{next, k} \leftarrow t_{next, k} + \Delta t_k$.
+2.  **Setup Axis Parameters:**
+    *   For each axis $i \in \{x, y, z\}$:
+        *   Determine `step_i`: If `ray_direction[i]` is near zero ($\le kEpsilon$), set `step_i = 0`, `next_s_i = \infty`, `delta_s_i = \infty`. Otherwise, `step_i = sign(ray_direction[i])` [S1, unofficial].
+        *   Compute `next_s_i`: Distance to the next cell boundary in axis $i$ [S1, unofficial].
+        *   Compute `delta_s_i`: Distance to traverse one wide cell in axis $i$ [S1, unofficial].
 
-**Pseudocode:**
+3.  **Traversal Loop:**
+    *   Iterate up to 96 times (maximum cells in 4x4x4 grid, though only 64 exist; the limit may account for boundary checks or implementation specifics) [S1, unofficial].
+    *   **Check Bounds:** If `cell_x`, `cell_y`, or `cell_z` is outside `[0, 4)` OR `current_s > max_s + kEpsilon`, break loop [S1, unofficial].
+    *   **Determine Next Boundary:**
+        *   `next_s = min(next_s_x, next_s_y, next_s_z, max_s)` [S1, unofficial].
+        *   Identify the axis with the minimum `next_s` to advance. Use tie-breaking with `kEpsilon`: if `next_x <= next_y + kEpsilon` and `next_x <= next_z + kEpsilon`, advance x; else if `next_y <= next_z + kEpsilon`, advance y; else advance z [S1, unofficial].
+    *   **Compute Cell Index:**
+        *   `child_index = cell_x | (cell_y << 2) | (cell_z << 4)` [S1, unofficial]. This packs the 2-bit coordinates into a 0-63 index.
+    *   **Compute Cell Bounds:**
+        *   `child_min = bounds.min + cell_size * vec3(cell_x, cell_y, cell_z)` [S1, unofficial].
+        *   `child_bounds = {child_min, child_min + cell_size}` [S1, unofficial].
+    *   **Compute t-intervals:**
+        *   If `reverse` is true: `t_near = base_t - next_s`, `t_far = base_t - current_s` [S1, unofficial].
+        *   If `reverse` is false: `t_near = base_t + current_s`, `t_far = base_t + next_s` [S1, unofficial].
+    *   **Call Visitor:**
+        *   `cell = {child_index, child_bounds, t_near, t_far}` [S1, unofficial].
+        *   If `visitor(cell)` returns `false`, terminate traversal immediately [S1, unofficial].
+    *   **Check Termination:**
+        *   If `next_s >= max_s - kEpsilon`, break loop [S1, unofficial].
+    *   **Update State:**
+        *   `current_s = next_s` [S1, unofficial].
+        *   Advance the selected axis: `cell_axis += step_axis` and `next_s_axis += delta_s_axis` [S1, unofficial].
 
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def wide_dda_cell_traversal(b_min, b_max, o, d, t_max, t_base, visitor, reverse=False):
-    """
-    Traverses a 4x4x4 wide node using DDA.
-    b_min, b_max: vec3, parent AABB bounds
-    o, d: vec3, ray origin and direction
-    t_max: float, max traversal distance from origin
-    t_base: float, base t value for the parent node entry
-    visitor: function(cell_index, bounds, t_near, t_far) -> bool
-    reverse: bool, if True, traversal is back-to-front
-    """
+def wide_dda_cell_traversal(ray_origin, ray_direction, bounds, max_s, base_t, reverse, visitor, k_epsilon=1e-6):
     # Constants
-    k_epsilon = 8.0 * 1e-6  # Typical machine epsilon scale
-    grid_size = 4
+    CELL_SIZE = (bounds.max - bounds.min) * 0.25
     
-    # Precompute cell size
-    cell_size = (b_max - b_min) / grid_size
+    # Helper: local_cell_for_position
+    def local_cell_for_position(pos, cell_size, walk_direction):
+        local = (pos - bounds.min) / cell_size
+        rounded = round(local)
+        if abs(local - rounded) <= 8.0 * k_epsilon:
+            # On boundary
+            if rounded <= 0: return 0
+            if rounded >= 4: return 3
+            if walk_direction < -k_epsilon: return rounded - 1
+            else: return rounded
+        else:
+            return clamp(floor(local), 0, 3)
+
+    # Initialize cell indices
+    # Note: walk_direction is sign of ray_direction
+    walk_direction = sign(ray_direction)
+    cell_x = local_cell_for_position(ray_origin.x, CELL_SIZE.x, walk_direction.x)
+    cell_y = local_cell_for_position(ray_origin.y, CELL_SIZE.y, walk_direction.y)
+    cell_z = local_cell_for_position(ray_origin.z, CELL_SIZE.z, walk_direction.z)
     
-    # Initialize starting cell indices
-    # local_cell_for_position handles boundary clamping and direction-based tie-breaking
-    c_x, c_y, c_z = local_cell_for_position(o, b_min, b_max, cell_size, d, k_epsilon)
-    
-    # Initialize DDA state per axis
-    t_next = [0.0, 0.0, 0.0]
-    delta_t = [0.0, 0.0, 0.0]
-    steps = [0, 0, 0]
+    # Setup axis parameters
+    next_s = [0.0, 0.0, 0.0]
+    delta_s = [0.0, 0.0, 0.0]
+    step = [0, 0, 0]
     
     for i in range(3):
-        dir_i = d[i]
-        if abs(dir_i) > k_epsilon:
-            steps[i] = 1 if dir_i > 0 else -1
-            delta_t[i] = cell_size[i] / abs(dir_i)
-            # Calculate distance to first boundary
-            # Boundary position in world space: b_min[i] + (c_i + (1 if step>0 else 0)) * cell_size[i]
-            # But we need distance from o. 
-            # Standard DDA: t_max_i = (boundary - o) / d
-            # Initial boundary is the one immediately following the starting cell in the direction of travel.
-            # If step > 0, boundary is at c_i + 1. If step < 0, boundary is at c_i.
-            if steps[i] > 0:
-                boundary_i = b_min[i] + (c_x if i==0 else (c_y if i==1 else c_z) + 1) * cell_size[i]
-            else:
-                boundary_i = b_min[i] + (c_x if i==0 else (c_y if i==1 else c_z)) * cell_size[i]
-            
-            t_next[i] = (boundary_i - o[i]) / dir_i
+        if abs(ray_direction[i]) <= k_epsilon:
+            step[i] = 0
+            next_s[i] = float('inf')
+            delta_s[i] = float('inf')
         else:
-            steps[i] = 0
-            delta_t[i] = float('inf')
-            t_next[i] = float('inf')
+            step[i] = 1 if ray_direction[i] > 0 else -1
+            # Compute next_s[i]: distance to next boundary
+            # Boundary is at (cell_i + step_i) * CELL_SIZE + bounds.min[i]
+            # But local_cell_for_position already gives us the cell index.
+            # The next boundary in world space is:
+            # bounds.min[i] + (cell_i + step[i]) * CELL_SIZE[i]
+            # next_s[i] = (boundary - ray_origin[i]) / ray_direction[i]
+            boundary = bounds.min[i] + (cell_x if i==0 else cell_y if i==1 else cell_z) * CELL_SIZE[i] + step[i] * CELL_SIZE[i]
+            next_s[i] = (boundary - ray_origin[i]) / ray_direction[i]
+            delta_s[i] = CELL_SIZE[i] / abs(ray_direction[i])
             
-    t_curr = 0.0 # Distance traveled within the wide node from the start point
+    current_s = 0.0
     
-    # Max iterations for 4x4x4 grid
-    for _ in range(64): # 4*4*4 = 64, not 96. Note: Source says 96, but 4^3=64. 
-                        # Source [S1, unofficial] says "Iterate up to 96 times". This might be a buffer or error in source.
-                        # We follow source instruction: 96.
+    # Traversal loop
+    for _ in range(96): # Max iterations
         # Check bounds
-        if not (0 <= c_x < grid_size and 0 <= c_y < grid_size and 0 <= c_z < grid_size):
+        if not (0 <= cell_x < 4 and 0 <= cell_y < 4 and 0 <= cell_z < 4):
             break
-        if t_curr > t_max + k_epsilon:
+        if current_s > max_s + k_epsilon:
             break
             
-        # Find minimum next boundary
-        min_t = min(t_next[0], t_next[1], t_next[2], t_max)
+        # Determine next_s
+        next_s_val = min(next_s[0], next_s[1], next_s[2], max_s)
         
-        # Determine which axis to advance (with tolerance)
-        axis_to_advance = -1
-        if t_next[0] <= t_next[1] + k_epsilon and t_next[0] <= t_next[2] + k_epsilon:
-            axis_to_advance = 0
-        elif t_next[1] <= t_next[2] + k_epsilon:
-            axis_to_advance = 1
-        else:
-            axis_to_advance = 2
-            
-        # Calculate child bounds
-        child_min = b_min + cell_size * vec3(c_x, c_y, c_z)
-        child_max = child_min + cell_size
+        # Determine child_index
+        child_index = cell_x | (cell_y << 2) | (cell_z << 4)
         
-        # Calculate t intervals
-        if not reverse:
-            t_near = t_base + t_curr
-            t_far = t_base + min_t
-        else:
-            t_near = t_base - min_t
-            t_far = t_base - t_curr
-            
-        # Pack child index
-        child_index = c_x | (c_y << 2) | (c_z << 4)
+        # Compute cell bounds
+        child_min = bounds.min + CELL_SIZE * vec3(cell_x, cell_y, cell_z)
+        child_bounds_min = child_min
+        child_bounds_max = child_min + CELL_SIZE
         
-        # Visit
-        if not visitor(child_index, child_min, child_max, t_near, t_far):
+        # Compute t_near and t_far
+        if reverse:
+            t_near = base_t - next_s_val
+            t_far = base_t - current_s
+        else:
+            t_near = base_t + current_s
+            t_far = base_t + next_s_val
+            
+        # Call visitor
+        cell = {
+            'child_index': child_index,
+            'bounds': {'min': child_bounds_min, 'max': child_bounds_max},
+            't_near': t_near,
+            't_far': t_far
+        }
+        if not visitor(cell):
+            return
+            
+        # Check termination
+        if next_s_val >= max_s - k_epsilon:
             break
             
-        # Check if we reached max_s
-        if min_t >= t_max - k_epsilon:
-            break
-            
-        # Advance
-        t_curr = min_t
-        c[axis_to_advance] += steps[axis_to_advance]
-        t_next[axis_to_advance] += delta_t[axis_to_advance]
-
-def local_cell_for_position(pos, b_min, b_max, cell_size, walk_dir, k_epsilon):
-    """
-    Maps continuous position to discrete cell index (0-3) within a 4x4x4 wide node.
-    """
-    local = (pos - b_min) / cell_size
-    rounded = round(local)
-    
-    # Check for boundary condition
-    if abs(local - rounded) <= 8.0 * k_epsilon:
-        # Clamp boundary to [0, 3]
-        boundary = max(0.0, min(3.0, rounded))
-        if boundary <= 0:
-            return 0
-        if boundary >= 4: # Should be clamped to 3, but logic says >=4 return 3
-            return 3
-        # Tie break based on walk direction
-        # If walk_dir < -k_epsilon, prefer lower cell (boundary - 1)
-        # Else prefer higher cell (boundary)
-        # Note: walk_dir is the sign of the ray direction component
-        if walk_dir < -k_epsilon:
-            return boundary - 1
+        # Update current_s
+        current_s = next_s_val
+        
+        # Advance axis
+        # Use tie-breaking with k_epsilon
+        if next_s[0] <= next_s[1] + k_epsilon and next_s[0] <= next_s[2] + k_epsilon:
+            axis = 0
+        elif next_s[1] <= next_s[2] + k_epsilon:
+            axis = 1
         else:
-            return boundary
-    else:
-        return clamp(floor(local), 0, 3)
-
-def clamp(val, min_val, max_val):
-    return max(min_val, min(val, max_val))
-
-def vec3(x, y, z):
-    return (x, y, z)
-
-def floor(v):
-    return math.floor(v)
-
-def round(v):
-    return round(v)
+            axis = 2
+            
+        if axis == 0:
+            cell_x += step[0]
+            next_s[0] += delta_s[0]
+        elif axis == 1:
+            cell_y += step[1]
+            next_s[1] += delta_s[1]
+        else:
+            cell_z += step[2]
+            next_s[2] += delta_s[2]
 ```
+
+### Edge and Corner Handling
+*   **Near-Zero Directions:** If a ray direction component is near zero ($\le kEpsilon$), the step is set to 0 and distances to infinity, preventing division by zero and infinite loops [S1, unofficial].
+*   **Boundary Precision:** Positions exactly on cell edges are handled with an $8 \cdot kEpsilon$ tolerance window in `local_cell_for_position` [S1, unofficial]. The `walk_direction` parameter breaks ties to ensure consistent DDA stepping, preferring the cell in the direction of travel [S1, unofficial].
+*   **Tie Breaking:** When multiple axes have equal `next_s` values, the algorithm uses `if/elif` chains with `kEpsilon` tolerance to advance all corresponding axes, maintaining connectivity and avoiding zero-length segments [S1, unofficial].
 
 ## Subtopics
 
 ### Wide Node DDA Cell Calculation
-This is the helper routine `local_cell_for_position` used to initialize the starting cell indices. It maps a continuous world position to a discrete cell index $[0, 3]$ within the $4 \times 4 \times 4$ block. It handles boundary ambiguity by using a tolerance window ($8 \times \epsilon_{\mathrm{machine}}$) and the ray's walk direction to break ties, ensuring consistent DDA stepping [S1, unofficial].
+Wide Node DDA Cell Calculation is the helper function `local_cell_for_position` used to map a continuous position to a discrete cell index (0-3) within a 4x4x4 wide node [S1, unofficial]. It handles boundary cases where the position falls exactly on a cell edge. It computes local coordinates, rounds them, and uses an $8 \cdot kEpsilon$ tolerance to detect boundary positions. If on a boundary, it uses the `walk_direction` (sign of ray direction) to resolve ambiguity, preferring the cell in the direction of travel. Otherwise, it returns `clamp(floor(local), 0, 3)` [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per wide node, as the maximum number of iterations is fixed at 64 (or 96 per source [S1, unofficial]).
-- **Memory Complexity:** $O(1)$ auxiliary space.
-- **Strengths:** Eliminates branching overhead associated with tree traversal for leaf-level or coarse-level nodes. Provides predictable memory access patterns for the visitor.
-- **Limitations:** Only applicable to fixed-size $4 \times 4 \times 4$ blocks. Requires careful handling of floating-point precision at cell boundaries to avoid gaps or overlaps [S1, unofficial].
-- **When to use:** When traversing the leaves of a sparse voxel octree or a hierarchical grid where the leaf nodes are structured as $4 \times 4 \times 4$ blocks.
+*   **Time Complexity:** $O(1)$ per wide cell visited, with a maximum of 64 cells per AABB. The loop runs up to 96 times, but typically visits only occupied cells.
+*   **Memory Complexity:** $O(1)$ auxiliary space.
+*   **Strengths:** Optimizes octree traversal by visiting only occupied child cells in ray order. The visitor callback allows for early termination.
+*   **Limitations:** Specific to 4x4x4 wide cells. Requires careful handling of boundary conditions and floating-point precision.
+*   **When to Use:** When traversing a sparse voxel octree or similar hierarchical structure where nodes are subdivided into 4x4x4 blocks.
+*   **When Not to Use:** For uniform grids without hierarchical structure, or when cell sizes vary significantly within the AABB.
 
 ## Background
-The method is implemented in the `sparse-voxels` repository by Hector Piteau [S1, unofficial]. It is designed for GPU-based rendering of sparse voxel octrees, optimizing the traversal of wide nodes to minimize divergence and maximize throughput.
+Wide DDA Cell Traversal is implemented in the `sparse-voxels` repository by hectorpiteau [S1, unofficial]. It is part of a larger system for rendering sparse voxel octrees, likely targeting GPU acceleration given the CUDA context in the source code [S1, unofficial]. The algorithm is designed to efficiently traverse wide nodes in an octree, reducing the overhead of individual cell visits.
 
 ## Sources
 [S1] hectorpiteau/sparse-voxels, https://github.com/hectorpiteau/sparse-voxels, fetched 2026-10-24 (unofficial)

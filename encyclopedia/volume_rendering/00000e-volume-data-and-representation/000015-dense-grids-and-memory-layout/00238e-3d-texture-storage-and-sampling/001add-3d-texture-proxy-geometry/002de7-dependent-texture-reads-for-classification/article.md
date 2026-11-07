@@ -1,0 +1,76 @@
+# Dependent Texture Reads for Classification
+
+Also called: Dependent Texture Reads, Pixel Texture, Texture-Based Classification
+
+## Overview
+Dependent Texture Reads (DTR) is a hardware extension that uses the color components of a fragment to generate texture coordinates, replacing the original color with values looked up from a texture [S1, book][S2]. In volume rendering, it serves as an efficient mechanism for multidimensional transfer function evaluation (classification) and shading by treating fragment colors as inputs to a lookup table [S1, book][S2]. Unlike standard texture sampling where coordinates are explicit attributes, DTR derives coordinates dynamically from the fragment's RGB values, enabling arbitrary function evaluation with up to three variables [S1, book][S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A fragment with RGB color values representing data properties (e.g., scalar values, gradients, or derived features) and a 3D texture containing the transfer function (color and alpha values).
+*   **Output:** A new fragment color and alpha value determined by the 3D texture lookup.
+
+**Data Structures:**
+*   **3D Transfer Function Texture:** A 3D texture where each texel stores the output color (RGB) and opacity (A). The dimensions of this texture do not need to match the dynamic range of the input data channels, allowing for memory-efficient discretization [S1, book][S2].
+*   **Proxy Geometry:** Typically a plane or view-aligned slice across which data values are interpolated [S1, book][S2].
+
+**Steps:**
+1.  **Data Interpolation:** Data values are stored in the color components of a 3D texture (or derived from volume data) and interpolated across proxy geometry (e.g., a plane) [S1, book][S2].
+2.  **Coordinate Generation:** The RGB channel values of the resulting fragment are scaled to the range $[0, 1]$ [S1, book][S2]. These scaled values serve as the $(u, v, w)$ texture coordinates for the 3D transfer function texture [S1, book][S2].
+3.  **Texture Lookup:** A 3D texture lookup is performed using the generated coordinates [S1, book][S2].
+4.  **Interpolation:** The lookup uses either nearest-neighbor or linear interpolation to determine the replacement color values [S1, book][S2].
+5.  **Replacement:** The original RGB fragment values are replaced by the color and alpha values acquired from the 3D texture lookup [S1, book][S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for Dependent Texture Read Classification
+# Assumes fragment color 'frag_rgb' contains scaled data values in [0, 1]
+# Assumes 'transfer_function_texture' is a 3D texture with filtering enabled
+
+def classify_fragment(frag_rgb, transfer_function_texture):
+    # Step 1: Use fragment RGB as texture coordinates
+    # The hardware automatically scales these if they are outside [0,1] or clamps them,
+    # but the core concept is using R, G, B as u, v, w.
+    u = frag_rgb.r
+    v = frag_rgb.g
+    w = frag_rgb.b
+    
+    # Step 2: Perform 3D texture lookup
+    # Interpolation method (nearest or linear) is set by texture state
+    new_color = texture_3d_lookup(transfer_function_texture, u, v, w)
+    
+    # Step 3: Replace original color
+    return new_color
+```
+
+**Parameters:**
+*   **Texture Dimensions:** The number of elements along an axis of the 3D transfer function texture can differ from the dynamic range of the input component [S1, book][S2]. This flexibility prevents prohibitively large textures [S1, book][S2]. For example, for 8-bit data, an ideal texture might have 256 values per axis, but this is often reduced for performance [S1, book].
+*   **Interpolation Mode:** Nearest-neighbor or linear interpolation [S1, book][S2].
+
+**Edge Cases and Pitfalls:**
+*   **Memory Size:** Without the ability to scale coordinates, a 3D dependent texture would require dimensions matching the full dynamic range of the input data, leading to prohibitively large memory requirements [S1, book][S2].
+*   **Data Range:** Input values must be appropriately scaled to $[0, 1]$ to map correctly to texture coordinates [S1, book][S2].
+
+## Subtopics
+
+### Classification
+The primary use case, where DTR evaluates multidimensional transfer functions per-pixel in screen space [S1, book][S2]. It allows for interactive updates of transfer functions by rasterizing classification widgets [S1, book].
+
+### Shading
+DTR can also be used for volumetric shading and shadow calculations, extending its utility beyond simple color mapping [S2].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per fragment for the lookup, assuming constant-time texture access. The cost is dominated by the texture fetch and interpolation [S1, book][S2].
+*   **Memory Complexity:** Depends on the dimensions of the 3D transfer function texture. For an 8-bit scalar, a full 3D TF would be $256^3 \times 4$ bytes, which is enormous [S1, book]. Practical implementations limit dimensions based on importance to maintain interactivity [S1, book].
+*   **Performance:** Hardware-accelerated, making it significantly more efficient than software-based lookup tables [S1, book][S2].
+*   **Strengths:** Enables real-time interaction with multidimensional transfer functions; leverages existing GPU texture hardware [S1, book][S2].
+*   **Limitations:** Limited to up to three variables (RGB channels); texture size constraints limit the resolution of the transfer function [S1, book][S2].
+
+## Background
+Dependent texture reads are hardware extensions similar to but more efficient than the earlier "pixel texture" extension [S1, book][S2]. They were introduced to support multidimensional transfer functions in volume rendering, allowing for interactive exploration and classification [S1, book][S2]. The technique is heavily utilized in OpenGL-based volume rendering pipelines [S2].
+
+## Sources
+[S1] PDF 9 Multi-Dimensional Transfer Functions for Volume Rendering, https://people.cs.uchicago.edu/~glk/pubs/pdf/Kniss-MultidimensionalTransferFunctions-VH-2005.pdf, fetched 2026-10-27 (book)
+[S2] Multidimensional Transfer Functions for Interactive Volume ..., https://www.academia.edu/5403340/Multidimensional_Transfer_Functions_for_Interactive_Volume_Rendering, fetched 2026-11-01

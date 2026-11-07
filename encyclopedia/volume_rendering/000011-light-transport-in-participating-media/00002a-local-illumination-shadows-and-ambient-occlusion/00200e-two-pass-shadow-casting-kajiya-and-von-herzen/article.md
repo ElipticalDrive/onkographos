@@ -3,233 +3,218 @@
 Also called: Kajiya and Von Herzen Method, Shadow Calculation via Illumination Pass, Shadow Casting via Two-Pass Method, Two-Pass Numerical Algorithm for Shadows, Two-Pass Numerical Shadow Algorithm
 
 ## Overview
-This method computes shadows in participating media by decoupling the calculation of light transport from the light source into a separate pass from the accumulation of radiance at the viewpoint [S1, unofficial][S2]. It solves the problem of realistic shadowing in volume rendering, which standard direct volume rendering ignores by assuming uniform illumination or simple surface shading [S1, unofficial]. Unlike recursive ray tracing, which casts a shadow ray from every sample point to the light source, this method integrates the shadowing effect along the viewing ray by pre-computing the illumination field [S2]. It is distinguished from its sibling [Shadow Ray Casting](2796-shadow-ray-casting.md) by its global pre-computation of illumination rather than per-sample visibility tests, and from [Shadow Mapping](2934-shadow-mapping.md) by its direct integration through the volume density rather than depth-buffer projection.
+Two-Pass Shadow Casting is a numerical algorithm for computing shadows in volume rendering by separating the calculation of incoming illumination from the accumulation of radiance along viewing rays [S1, unofficial][S2]. It solves the problem of realistic shadowing in participating media by propagating light flux through the volume layer-by-layer to determine local illumination, then scattering that illumination toward the viewer [S1, unofficial][S2]. Unlike recursive ray tracing, which sends a shadow feeler to the light source at each point along the primary ray, this method integrates the shadowing effect along the ray, taking only twice as long as a gathering pass without shadows [S2].
 
 ## How it works
-The method consists of two sequential passes: an illumination pass to compute the light reaching each point in the volume, and a gathering pass to render the final image using that illumination.
+**Inputs and Outputs**
+*   **Input:** A volumetric dataset defining the extinction coefficient $\sigma_t(\mathbf{x})$ (or optical depth density $\tau$), an infinite light source with intensity $L$ in direction $-\boldsymbol{\omega}'$, a viewpoint position $\mathbf{X}$, and a viewing direction $\boldsymbol{\omega}$.
+*   **Output:** The final radiance $I(\mathbf{X})$ for each pixel.
 
-**Inputs and Outputs:**
-*   **Inputs:**
-    *   Volume density field $\tau(\mathbf{x})$ (extinction coefficient).
-    *   Light source intensity $L$ and direction $-\boldsymbol{\omega}'$ (for an infinite directional light).
-    *   Viewpoint position $\mathbf{X}$ and viewing direction $\boldsymbol{\omega}$.
-    *   Shading rule $r(\mathbf{x}, \boldsymbol{\omega}, \boldsymbol{\omega}')$ (e.g., Henyey-Greenstein phase function).
-    *   Background intensity $I_0$.
-    *   Volume bounds (start and end points of the ray traversal).
-*   **Outputs:**
-    *   Final pixel intensity $I(\mathbf{X})$.
+**Data Structures**
+*   **Volumetric Grid:** A 3D array storing the extinction coefficient $\sigma_t$ or optical depth density.
+*   **Illumination Buffer:** A 3D array storing the computed illumination $i(\mathbf{X}, \boldsymbol{\omega}')$ for every voxel in the volume.
 
-**Data Structures:**
-*   **Volume Grid:** A 3D array storing $\tau(\mathbf{x})$ for each voxel.
-*   **Illumination Buffer (Optional):** A 3D array storing the computed illumination $i(\mathbf{x}, \boldsymbol{\omega}')$ for reuse across frames if the viewpoint moves but the light remains static [S2].
+**Notation**
+*   $\mathbf{X}$: Position of interaction.
+*   $\boldsymbol{\omega}$: View ray direction (unit vector).
+*   $\boldsymbol{\omega}'$: Light direction (unit vector).
+*   $L$: Intensity of the infinite light source.
+*   $\tau(\mathbf{x})$: Optical depth density (extinction coefficient) at position $\mathbf{x}$.
+*   $r(\mathbf{x}, \boldsymbol{\omega}, \boldsymbol{\omega}')$: Shading rule (phase function/scattering coefficient) at $\mathbf{x}$ for scattering from $\boldsymbol{\omega}'$ to $\boldsymbol{\omega}$.
+*   $D$: Total length of the view ray through the volume.
+*   $s$: Distance along the view ray from the viewpoint.
+*   $t$: Distance along the illumination ray from the point of interest.
 
-**Numbered Steps:**
+**Steps**
 
-1.  **Pass 1: Illumination Calculation**
-    Compute the illumination $i(\mathbf{X}, \boldsymbol{\omega}')$ reaching each point $\mathbf{X}$ in the volume from the light source. This is done by propagating flux from the light source through the volume, one voxel layer at a time, accounting for the transparency of each layer before propagating to the next [S1, unofficial][S2].
-    
-    For an infinite light source with intensity $L$ in direction $-\boldsymbol{\omega}'$, the illumination at point $\mathbf{X}$ is:
-    $$ i(\mathbf{X}, \boldsymbol{\omega}') = L \exp\left(-\int_0^\infty \tau(\mathbf{X} - t\boldsymbol{\omega}') \, dt\right) $$
+1.  **Pass 1: Compute Illumination**
+    Calculate the illumination $i(\mathbf{X}, \boldsymbol{\omega}')$ reaching each point $\mathbf{X}$ in the volume from the light source. This is done by propagating flux from the light source through the volume, one voxel layer at a time, accounting for the transparency of each layer before propagating to the next [S1, unofficial][S2].
+
+    The illumination at point $\mathbf{X}$ from an infinite light source in direction $-\boldsymbol{\omega}'$ is given by:
+    $$ i(\mathbf{X}, \boldsymbol{\omega}') = L \exp\left(-\int_0^\infty \tau(\mathbf{X} - t\boldsymbol{\omega}') dt\right) $$
     In practice, the integral runs only to the edge of the data volume [S1, unofficial][S2].
-    
-    *Implementation Detail:* The integral is approximated numerically. If the volume is traversed along the light direction, the transmittance is accumulated. Let $\Delta s$ be the step size. The transmittance $T_{light}$ from the light entry point to $\mathbf{X}$ is:
-    $$ T_{light} = \prod_{k=1}^{N} \exp(-\tau(\mathbf{x}_k) \Delta s) $$
-    Then $i(\mathbf{X}, \boldsymbol{\omega}') = L \cdot T_{light}$.
 
-2.  **Pass 2: Image Gathering with Shadows**
-    Render the image by gathering light along viewing rays. The final intensity $I(\mathbf{X})$ is the sum of the background light attenuated by the volume and the scattered light from the computed illumination.
-    
-    The rendering equation is rewritten with reversed ray parametrization to facilitate the integration. Let the viewing ray start at $\mathbf{X}$ and go in direction $-\boldsymbol{\omega}$. Let $s$ be the distance along this ray. The intensity is:
-    $$ I(\mathbf{X}) = I_0 \exp\left(-\int_0^D \tau(\mathbf{X} - t\boldsymbol{\omega}) \, dt\right) + \int_0^D r(\mathbf{X} - s\boldsymbol{\omega}, \boldsymbol{\omega}, \boldsymbol{\omega}') \, i(\mathbf{X} - s\boldsymbol{\omega}, \boldsymbol{\omega}') \, \exp\left(-\int_0^s \tau(\mathbf{X} - t\boldsymbol{\omega}) \, dt\right) \, ds $$
-    where:
-    *   $D$ is the total length of the ray through the volume.
-    *   The first term is the background light $I_0$ attenuated by the total transmittance along the viewing ray.
-    *   The second term integrates the scattered light. $r(\cdot)$ is the scattering phase function. $i(\cdot)$ is the illumination computed in Pass 1. The exponential term is the transmittance from the scattering point back to the viewpoint.
+2.  **Pass 2: Gather Radiance**
+    Scatter the computed illumination to the viewpoint using a shading rule $g(\mathbf{X}, \boldsymbol{\omega}) = r(\mathbf{X}, \boldsymbol{\omega}, \boldsymbol{\omega}') i(\mathbf{X}, \boldsymbol{\omega}')$. Gather the reflected intensity $g(\mathbf{X}, \boldsymbol{\omega})$ along viewing rays [S1, unofficial][S2].
 
-**Pseudocode:**
+    To simplify the integration, reverse the ray parameterization so that $s$ starts at the viewpoint $\mathbf{X}$ and goes out in direction $-\boldsymbol{\omega}$, reaching $\mathbf{X} - s\boldsymbol{\omega}$ at distance $s$ [S2]. The final intensity $I(\mathbf{X})$ is:
+    $$ I(\mathbf{X}) = I_0 \exp\left(-\int_0^D \tau(\mathbf{X} - t\boldsymbol{\omega}) dt\right) + \int_0^D r(\mathbf{X} - s\boldsymbol{\omega}, \boldsymbol{\omega}, \boldsymbol{\omega}') L \exp\left(-\int_0^\infty \tau(\mathbf{X} - s\boldsymbol{\omega} - t\boldsymbol{\omega}') dt\right) \exp\left(-\int_0^s \tau(\mathbf{X} - t\boldsymbol{\omega}) dt\right) ds $$
+    where $I_0$ is the background radiance [S1, unofficial][S2].
+
+**Pseudocode**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def two_pass_shadow_casting(volume, light_direction, light_intensity, viewpoint, view_direction, phase_function, background_intensity):
+def two_pass_shadow_casting(volume, light_direction, light_intensity, view_direction, viewpoint, bounds):
     """
-    volume: 3D array of extinction coefficients tau(x)
-    light_direction: unit vector -omega' (direction light is coming FROM)
-    light_intensity: scalar L
-    viewpoint: 3D point X
-    view_direction: unit vector omega (direction camera is looking)
-    phase_function: function r(x, omega, omega_prime)
-    background_intensity: scalar I0
+    Computes volumetric shadows using the Kajiya and Von Herzen two-pass method.
+    
+    Args:
+        volume: 3D array of extinction coefficients (sigma_t).
+        light_direction: Unit vector pointing FROM light TO scene (-omega').
+        light_intensity: Scalar intensity L of the infinite light source.
+        view_direction: Unit vector of the view ray (omega).
+        viewpoint: 3D position of the camera.
+        bounds: Bounding box of the volume.
+        
+    Returns:
+        radiance: Final radiance value for the ray.
     """
     
-    # Pass 1: Compute Illumination Field
-    # We need i(X, omega') for all X in the volume.
-    # This requires traversing the volume along the light direction.
+    # Pass 1: Compute Illumination Buffer
+    # Propagate flux from light source through the volume layer by layer.
+    # This creates a 3D buffer of illumination i(X, omega') for all voxels.
+    illumination_buffer = compute_illumination_pass(volume, light_direction, light_intensity, bounds)
     
-    # Define light ray traversal parameters
-    light_entry_point, light_exit_point = get_volume_bounds_along_direction(volume, light_direction)
+    # Pass 2: Gather Radiance along the view ray
+    # Ray parameterization: X(s) = viewpoint - s * view_direction
+    # Note: The standard formulation uses X - s*omega where s goes from 0 to D.
+    # We assume the ray starts at the viewpoint and travels in direction -view_direction
+    # to match the integral limits in the source equations.
     
-    # Pre-compute illumination for every voxel
-    # Note: In a naive implementation, this is O(Volume_Size * Light_Rays)
-    # A more efficient implementation propagates layer-by-layer as described in sources.
+    # Calculate total path length D through the volume for the view ray
+    D = calculate_ray_length(viewpoint, view_direction, bounds)
     
-    illumination_field = zeros_like(volume)
+    # Discretize the view ray into segments for numerical integration
+    # Using Riemann sum approximation as per source [S2]
+    num_segments = 100  # Implementation detail: resolution of integration
+    delta_s = D / num_segments
     
-    # Traverse volume along light direction
-    # For each point X in the volume, calculate transmittance from light source to X
-    # This can be done by iterating along rays parallel to light_direction
+    accumulated_radiance = 0.0
+    current_transmittance = 1.0  # Accumulates exp(-int_0^s tau dt)
     
-    for each voxel X in volume:
-        # Calculate integral of tau from light source edge to X
-        # Integral limit is effectively from light_entry_point to X
-        # Approximated by summing tau * delta_s along the path
+    # Background term: Light from behind the volume
+    # I_0 * exp(-int_0^D tau dt)
+    # We calculate the total transmittance of the view ray at the end
+    total_view_transmittance = 1.0
+    
+    for i in range(1, num_segments + 1):
+        s = i * delta_s
+        pos = viewpoint - s * view_direction
         
-        transmittance_light = 1.0
-        current_pos = light_entry_point
-        while current_pos is before X along light_direction:
-            tau_val = volume[current_pos]
-            transmittance_light *= exp(-tau_val * step_size)
-            current_pos += light_direction * step_size
-            
-        illumination_field[X] = light_intensity * transmittance_light
-
-    # Pass 2: Gather Radiance along viewing rays
-    final_image = zeros(width, height)
-    
-    for each pixel (u, v):
-        # Construct viewing ray from viewpoint
-        ray_origin = viewpoint
-        ray_direction = view_direction
-        
-        # Get bounds of the ray through the volume
-        ray_start, ray_end = get_volume_bounds_along_ray(volume, ray_origin, ray_direction)
-        D = distance(ray_start, ray_end)
-        
-        if D <= 0:
-            final_image[u, v] = background_intensity
+        # Check if position is within volume bounds
+        if not is_inside_bounds(pos, bounds):
             continue
             
-        # Accumulate radiance
-        accumulated_radiance = 0.0
-        transmittance_view = 1.0
+        # Get extinction at current position
+        sigma_t = volume.get_extinction(pos)
         
-        # Numerical integration along the viewing ray
-        # Discretize the interval [0, D] into N segments
-        N = 100 # Number of samples
-        delta_s = D / N
+        # Update transmittance for the segment from s-delta_s to s
+        # exp(-int_{s-delta_s}^s tau dt) approx exp(-sigma_t * delta_s)
+        segment_transmittance = exp(-sigma_t * delta_s)
+        current_transmittance *= segment_transmittance
+        total_view_transmittance = current_transmittance
         
-        for i from 1 to N:
-            s = i * delta_s
-            t = i * delta_s
-            
-            # Position of scattering point
-            scatter_point = ray_origin - ray_direction * s # Note: source uses X - s*omega
-            
-            # 1. Attenuation from scatter point to viewpoint
-            # This is the transmittance along the segment [0, s]
-            # We can update this incrementally or re-calculate
-            # Using incremental update for efficiency:
-            # transmittance_view corresponds to exp(-int_0^s tau dt)
-            # However, the formula requires the transmittance FROM the scatter point TO the viewer.
-            # Let T_view(s) = exp(-int_0^s tau(X - t*omega) dt)
-            
-            # Calculate transmittance from scatter point to viewer
-            # This is equivalent to the transmittance accumulated from 0 to s
-            # But we need to be careful with the direction. 
-            # The term is exp(-int_0^s tau(X - t*omega) dt).
-            
-            # Let's compute T_view_s = exp(-integral from 0 to s)
-            # We can maintain a running product
-            tau_val = volume[scatter_point]
-            transmittance_view *= exp(-tau_val * delta_s)
-            
-            # 2. Illumination at scatter point (from Pass 1)
-            i_scatter = illumination_field[scatter_point]
-            
-            # 3. Scattering phase function
-            # r(X - s*omega, omega, omega')
-            # Note: omega' is the direction TO the light. 
-            # If light comes from -omega', then direction TO light is omega'.
-            # The source defines light in direction -omega'.
-            # So the phase function argument for light direction is omega'.
-            scattering = phase_function(scatter_point, ray_direction, -light_direction) # omega is view dir, omega' is light dir
-            
-            # 4. Contribution
-            # dI = r * i * exp(-int_0^s tau) * ds
-            # Note: The formula in source has exp(-int_0^s tau) which is transmittance FROM viewer TO scatter point?
-            # Let's re-read carefully:
-            # I(X) = I0 exp(-int_0^D tau) + int_0^D r(...) i(...) exp(-int_0^s tau) ds
-            # The term exp(-int_0^s tau(X - t*omega) dt) is the transmittance from the viewpoint X to the point X - s*omega.
-            # Yes, this matches transmittance_view calculated above.
-            
-            contribution = scattering * i_scatter * transmittance_view * delta_s
-            accumulated_radiance += contribution
-            
-        # Background term
-        # I0 * exp(-int_0^D tau)
-        # transmittance_view now holds exp(-int_0^D tau) after the loop
-        background_term = background_intensity * transmittance_view
+        # Get illumination at this position from the pre-computed buffer
+        # i(X, omega') is the light reaching point X from the light source
+        illumination = illumination_buffer.get_illumination(pos)
         
-        final_image[u, v] = background_term + accumulated_radiance
+        # Shading rule: r(X, omega, omega') * i(X, omega')
+        # For simplicity, assume a constant phase function or retrieve from volume
+        # r is often modeled as a Henyey-Greenstein phase function
+        scattering_coeff = get_scattering_coefficient(pos, view_direction, light_direction)
+        
+        # Contribution of in-scattered light at this segment
+        # g(X, omega) * exp(-int_0^s tau dt) * ds
+        # Note: The integral in the source is ds, so we multiply by delta_s
+        contribution = scattering_coeff * illumination * current_transmittance * delta_s
+        
+        accumulated_radiance += contribution
+        
+    # Add background term
+    # I_0 is typically 0 or the sky color
+    background_radiance = 0.0 
+    final_radiance = background_radiance * total_view_transmittance + accumulated_radiance
+    
+    return final_radiance
 
-    return final_image
+def compute_illumination_pass(volume, light_direction, light_intensity, bounds):
+    """
+    Pass 1: Propagate light from the source through the volume.
+    """
+    # Initialize illumination buffer with zero
+    illumination_buffer = create_3d_buffer(bounds)
+    
+    # Propagate flux one voxel layer at a time
+    # This requires iterating through the volume in the direction of the light
+    # For each voxel, calculate the accumulated optical depth from the light source edge
+    # to the voxel, then apply the exponential attenuation.
+    
+    # Simplified implementation:
+    # For each voxel X in the volume:
+    #   Calculate optical depth tau = integral from light edge to X along -light_direction
+    #   i(X) = L * exp(-tau)
+    
+    # Note: The source states this is done "one voxel layer at a time"
+    # implying a sweep-line or ray-casting approach from the light's perspective.
+    
+    for voxel in volume.iterate_voxels():
+        pos = voxel.position
+        # Integral from 0 to infinity (or volume edge) of tau(X - t*omega') dt
+        # In practice, integrate from the light source direction until entering the volume
+        optical_depth = compute_optical_depth_from_light(pos, light_direction, volume, bounds)
+        illumination = light_intensity * exp(-optical_depth)
+        illumination_buffer.set_illumination(pos, illumination)
+        
+    return illumination_buffer
+
+def compute_optical_depth_from_light(point, light_direction, volume, bounds):
+    """
+    Computes the optical depth from the light source to the point.
+    Light travels in direction -light_direction.
+    Ray: R(t) = point + t * (-light_direction) = point - t * light_direction
+    We integrate from t=0 to t=infinity (or until leaving volume).
+    """
+    # Start ray at point and go opposite to light direction
+    ray_origin = point
+    ray_dir = -light_direction
+    
+    # Find intersection with volume bounds
+    t_min, t_max = intersect_ray_with_bounds(ray_origin, ray_dir, bounds)
+    
+    # Integrate extinction along the ray from t_min to t_max
+    # Since we are going from the point towards the light, we are integrating
+    # the path the light took to reach the point.
+    # The source formula is int_0^infinity tau(X - t*omega') dt.
+    # Here X is the point, omega' is the light direction vector (pointing from light to scene).
+    # So X - t*omega' traces back towards the light.
+    
+    optical_depth = 0.0
+    num_samples = 50
+    delta_t = (t_max - t_min) / num_samples
+    
+    for i in range(num_samples):
+        t = t_min + i * delta_t
+        sample_pos = ray_origin + t * ray_dir
+        sigma_t = volume.get_extinction(sample_pos)
+        optical_depth += sigma_t * delta_t
+        
+    return optical_depth
 ```
 
-**Parameters:**
-*   **Number of samples ($N$):** Determines the accuracy of the numerical integration. Higher $N$ reduces noise but increases cost. Not given in the sources.
-*   **Step size ($\Delta s$):** Typically determined by the voxel size or a fraction thereof. Not given in the sources.
-
-**Edge Cases and Pitfalls:**
-*   **Multiple Scattering:** The method is a single-scattering model. It is only valid if the albedo or density is low. It fails for high-density media like atmospheric clouds where multiple scattering is significant, causing the side of the cloud away from the light to look unnaturally dark [S1, unofficial][S2].
-*   **Performance:** The method takes only twice as long as the gathering pass without shadows [S1, unofficial][S2]. However, the illumination pass can be expensive if computed for every frame. It can be amortized over several animated frames if only the viewpoint moves [S2].
-*   **Integral Limits:** The illumination integral technically runs to infinity, but in practice, it is limited to the edge of the data volume [S1, unofficial][S2].
+**Edge Cases and Pitfalls**
+*   **Precision:** The exponential terms can lead to underflow if optical depth is large. Use log-domain arithmetic if necessary [S2].
+*   **Boundaries:** The integral for illumination runs to the edge of the data volume, not infinity [S1, unofficial][S2].
+*   **Multiple Scattering:** This method is a single-scattering model. It is only valid if the albedo or density is low, so that multiple scattering is unlikely. It is not suitable for atmospheric clouds where multiple scattering is significant [S1, unofficial].
+*   **Amortization:** The illumination pass can be amortized over several animated frames if only the viewpoint moves [S2].
 
 ## Subtopics
 
 ### [Two-pass Spectral Rendering Integral](5266-two-pass-spectral-rendering-integral.md)
-Adapts the two-pass algorithm to spectral representation, handling wavelength-dependent opacity and emission spectra for effects like fluorescence.
-
-### [Lighting Models](2056-lighting-models.md)
-General shading models used within the scattering term $r(\mathbf{x}, \boldsymbol{\omega}, \boldsymbol{\omega}')$.
-
-### [Ambient Light Approximation](2244-ambient-light-approximation.md)
-Simplified methods for indirect illumination, often used when the two-pass method is too expensive or inappropriate.
-
-### [Ray-marched Volumetric Lighting with Density Thresholding](2456-ray-marched-volumetric-lighting-with-density-thresholding.md)
-A simpler approach that may skip shadow computation for performance.
-
-### [Path Tracing and Sampling](2526-path-tracing-and-sampling.md)
-A more general Monte Carlo approach that can handle multiple scattering but is slower.
-
-### [Light Sampling for NEE](2616-light-sampling-for-nee.md)
-Next Event Estimation techniques for light transport.
-
-### [Shadow Ray Casting](2796-shadow-ray-casting.md)
-The recursive alternative that casts shadow rays per sample.
-
-### [Shadow Mapping](2934-shadow-mapping.md)
-Depth-buffer based shadowing, typically for opaque geometry.
-
-### [Direct Light Sampling](3337-direct-light-sampling.md)
-Sampling light sources directly in path tracing.
-
-### [Terrain Shading with Direct and Ambient Light](4424-terrain-shading-with-direct-and-ambient-light.md)
-Application of similar principles to terrain.
-
-### [Ambient Occlusion via Geometry/Neighbors](5936-ambient-occlusion-via-geometry-neighbors.md)
-Approximation of ambient occlusion.
+The Two-pass Spectral Rendering Integral is a method for computing volumetric shadows in participating media by adapting the Kajiya and von Herzen two-pass algorithm to spectral representation. It separates shadow computation (illumination phase) from radiance accumulation (radiation phase), allowing for the simulation of complex spectral effects such as fluorescence and phosphorescence. It is distinguished from its parent [Two-Pass Shadow Casting (Kajiya and Von Herzen)](2196-two-pass-shadow-casting-kajiya-and-von-herzen.md) by its explicit handling of wavelength-dependent opacity and emission spectra.
 
 ## Operating characteristics
-*   **Time Complexity:** The method takes approximately twice the time of a standard gathering pass without shadows [S1, unofficial][S2]. The illumination pass is $O(V \cdot L)$ where $V$ is the number of voxels and $L$ is the number of light rays (or layers), and the gathering pass is $O(P \cdot N)$ where $P$ is the number of pixels and $N$ is the number of samples per ray.
-*   **Memory Complexity:** Requires storage for the volume data and potentially an illumination buffer of size $O(V)$ if the illumination pass is amortized across frames [S2].
-*   **Strengths:** Provides realistic shadows for participating media; more efficient than recursive shadow ray casting for dense volumes; illumination pass can be reused for camera motion [S2].
-*   **Limitations:** Single-scattering only; inaccurate for high-density media; illumination pass can be costly if the light moves or the volume changes [S1, unofficial][S2].
-*   **When to use:** Suitable for low-density participating media (smoke, fog) where single scattering dominates and shadows are important for shape perception [S1, unofficial].
-*   **When not to use:** Unsuitable for high-density media like clouds where multiple scattering is significant [S1, unofficial][S2].
+*   **Time Complexity:** The two-pass method takes only twice as long as the gathering pass without shadows [S1, unofficial][S2].
+*   **Memory Complexity:** Requires storage for the illumination buffer (3D array) in addition to the volume data.
+*   **Strengths:** Provides realistic shadows in participating media; illumination pass can be amortized over frames if the viewpoint moves [S2].
+*   **Limitations:** Single-scattering model; not valid for high albedo or high density media where multiple scattering is significant (e.g., atmospheric clouds) [S1, unofficial].
+*   **When to Use:** When realistic shadows are needed for opaque objects in smoke, fog, clouds, or turbid water, and multiple scattering is negligible [S1, unofficial][S2].
+*   **When Not to Use:** For scenes with high density or high albedo where multiple scattering dominates, or when computational resources are extremely limited and shadows are not critical.
 
 ## Background
-The two-pass numerical algorithm for shadows in volume rendering was suggested by Kajiya and Von Herzen [S1, unofficial][S2]. It was introduced in the context of optical models for direct volume rendering [S1, unofficial][S2]. The method was notably applied in the "Heidelberg ray tracing model" by Meinzer et al. for medical images [S1, unofficial][S2]. It addresses the limitation of earlier volume rendering techniques that ignored shadows, providing crucial cues for the shape of opaque objects within participating media [S1, unofficial][S2].
+The two-pass numerical algorithm was suggested by Kajiya and Von Herzen [S1, unofficial][S2]. It was used in the "Heidelberg ray tracing model" of Meinzer et al. for medical images [S1, unofficial]. The method is based on the conservation of energy for a differential cylinder of light passing through a medium [S1, unofficial].
 
 ## Sources
-[S1] Optical Models for Direct Volume Rendering - Duke Computer Science, https://courses.cs.duke.edu/spring03/cps296.8/papers/max95opticalModelsForDirectVolumeRendering.pdf, fetched 2026-10-26 (unofficial)
+[S1] [PDF] Optical Models for Direct Volume Rendering - Duke Computer Science, https://courses.cs.duke.edu/spring03/cps296.8/papers/max95opticalModelsForDirectVolumeRendering.pdf, fetched 2026-10-26 (unofficial)
 [S2] Optical models for direct volume rendering (PDF) - Academia.edu, https://www.academia.edu/49467168/Optical_models_for_direct_volume_rendering, fetched 2026-10-27

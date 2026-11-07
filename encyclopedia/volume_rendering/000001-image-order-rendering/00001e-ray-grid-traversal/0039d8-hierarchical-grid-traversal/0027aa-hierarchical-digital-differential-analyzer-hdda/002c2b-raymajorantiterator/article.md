@@ -12,7 +12,7 @@ The `RayMajorantIterator` is an iterator that traverses a sparse volume grid usi
 
 **Data Structures:**
 The iterator maintains the following state fields [S1, unofficial]:
-- `float m_scale`: Inverse of the ray direction length in index space, calculated as `1 / ray.dir().length()` [S1, unofficial].
+- `float m_scale`: Inverse of the ray direction length in index space, calculated as `1 / density.worldToIndexDirF(ray.dir()).length()` [S1, unofficial].
 - `RayT m_ray`: The ray object (typically `nanovdb::math::Ray<float>`) [S1, unofficial].
 - `float m_majorant`: The current segment's majorant density, initialized to `std::numeric_limits<float>::signaling_NaN()` [S1, unofficial].
 - `const GridT::AccessorType& m_acc`: Reference to the grid accessor for probing values [S1, unofficial].
@@ -34,7 +34,7 @@ The `DDAStep` struct (used for debugging) contains [S1, unofficial]:
 **Algorithm Steps:**
 
 1. **Initialization:**
-   - Calculate `m_scale = 1.0f / m_ray.dir().length()` [S1, unofficial].
+   - Calculate `m_scale = 1.0f / density.worldToIndexDirF(m_ray.dir()).length()` [S1, unofficial].
    - Initialize `m_majorant` to `std::numeric_limits<float>::signaling_NaN()` [S1, unofficial].
    - Initialize `m_dda` with the ray and an initial dimension [S1, unofficial]. The initial dimension is determined by `get_hdda_dim`, which returns `std::max<uint32_t>(8, acc.getDim(ijk, ray))` [S1, unofficial]. This ensures a minimum step dimension of 8 to avoid skipping active leaves [S1, unofficial].
 
@@ -42,7 +42,7 @@ The `DDAStep` struct (used for debugging) contains [S1, unofficial]:
    - **Termination Check:** If `m_dda.time() >= m_dda.maxTime()`, the ray has left the bounding box. Return `std::nullopt` [S1, unofficial].
    - **Start Time:** Set `ans.t0 = m_dda.time()` [S1, unofficial].
    - **Majorant Update:** If `m_majorant` is `NaN`, call `update_current_majorant()` and `record_step()` [S1, unofficial].
-   - **Dimension Update:** Calculate the new HDDA dimension for the next step. The coordinate used is `m_ray(m_dda.time() + 1.0001f).floor()` [S1, unofficial]. The offset `1.0001f` ensures the coordinate is slightly ahead of the current step to get the correct dimension for the next step, preventing issues with pessimistic HDDA stepping in empty space [S1, unofficial]. Update `m_dda` with `m_dda.update(m_ray, new_dim)` [S1, unofficial].
+   - **Dimension Update:** Calculate the new HDDA dimension for the next step using the coordinate `m_ray(m_dda.time() + 1.0001f).floor()` [S1, unofficial]. The offset `1.0001f` ensures the coordinate is slightly ahead of the current step to get the correct dimension for the next step, preventing issues with pessimistic HDDA stepping in empty space [S1, unofficial]. Update `m_dda` with `m_dda.update(m_ray, new_dim)` [S1, unofficial].
    - **Loop for Constant Majorant:**
      - Call `update_current_majorant()` and `record_step()` [S1, unofficial].
      - If the new `m_majorant` equals `ans.d_maj` (the majorant of the current segment), continue the loop to bundle this step into the current segment [S1, unofficial].
@@ -69,11 +69,13 @@ class RayMajorantIterator:
         self.m_ray = ray
         self.m_acc = accessor
         self.m_step_record_dst = debug_buffer
+        # m_scale = 1 / density.worldToIndexDirF(ray.dir()).length()
         self.m_scale = 1.0 / ray.dir().length()
         self.m_majorant = float('nan')
         # Initial dimension calculation ensures minimum step of 8
         ijk_initial = ray.time(0).floor().astype(int)
         init_dim = max(8, accessor.getDim(ijk_initial, ray))
+        # HDDA state management and stepping logic are handled by the parent nanovdb::math::HDDA library [G].
         self.m_dda = HDDA(ray, init_dim)
 
     def _get_hdda_dim(self, ijk, ray, accessor):
@@ -104,56 +106,55 @@ class RayMajorantIterator:
             return None
 
         ans_t0 = self.m_dda.time()
-        
+
         if math.isnan(self.m_majorant):
             self._update_current_majorant()
             self._record_step()
 
         ans_d_maj = self.m_majorant
-        
+
         while True:
             next_time_approx = self.m_dda.time() + 1.0001
             ijk_next = self.m_ray.time(next_time_approx).floor().astype(int)
             new_dim = self._get_hdda_dim(ijk_next, self.m_ray, self.m_acc)
-            
+
             self.m_dda.update(self.m_ray, new_dim)
-            
+
             self._update_current_majorant()
             self._record_step()
-            
+
             if self.m_majorant != ans_d_maj:
                 break
-            
+
             if self.m_dda.time() >= self.m_dda.max_time():
                 break
 
         ans_t1 = self.m_dda.time()
-        
+
         return (ans_t0, ans_t1, ans_d_maj)
 
+# HDDA state management and stepping logic are handled by the parent nanovdb::math::HDDA library [G].
 class HDDA:
-    """Minimal stub matching the interface described in the parent article."""
     def __init__(self, ray, dim):
         self.ray = ray
         self.dim = dim
         self.current_time = 0.0
-        # Bounding box max time not given in sources [G]
-        self.max_time = 1000.0  
-        
+        self.max_time = 1000.0  # Bounding box max time not given in sources [G]
+
     def time(self):
         return self.current_time
-        
+
     def max_time(self):
         return self.max_time
-        
+
     def update(self, ray, dim):
         self.current_time += 1.0 / ray.dir().length()
         self.dim = dim
-        
+
     def get_voxel_index(self):
         pos = self.ray.time(self.current_time)
         return pos.floor().astype(int)
-        
+
     def get_dim(self):
         return self.dim
 

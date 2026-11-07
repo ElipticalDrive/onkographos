@@ -8,11 +8,11 @@ This method determines sampling density along a ray using a monotonically decrea
 ## How it works
 **Inputs:**
 - Ray origin and direction.
-- Volumetric data dimensions and bounds in unnormalized space.
+- Volumetric data dimensions and bounds in unnormalized space [S1].
 - Parameters: $k$ (slope scaler, typical ~4), $x_0$ (initial step length, typical 0.01), `Maxsteps` (max samples, typical 100), `MaxAlpha` (termination threshold, typically 1.0) [S1].
 
 **Outputs:**
-- Accumulated color $C$ for the pixel.
+- Accumulated color $C$ for the pixel [S1].
 
 **Data Structures:**
 - **Unnormalized Coordinate System:** The volumetric data is treated as a box where the longest edge is scaled to 1.0, and other dimensions are scaled proportionally (e.g., a $128 \times 128 \times 64$ volume becomes a $1 \times 1 \times 0.5$ box) [S1]. This prevents out-of-bound buffer reading issues common with normalized coordinates when dimensions are dissimilar [S1].
@@ -39,7 +39,7 @@ where $C_i$ is the accumulated color, $c(x_{i-1})$ is the color at the previous 
 ```python
 def render_adaptive_density(ray_origin, ray_direction, volume_bounds, k=4.0, b=5.0, initial_step=0.01, max_steps=100, max_alpha=1.0):
     # volume_bounds: (min_x, max_x, min_y, max_y, min_z, max_z) in unnormalized space
-    # Ray-box intersection (slab method) to find entry and exit distances
+    # Ray-box intersection (slab method) to find entry and exit distances [G]
     t_enter = -float('inf')
     t_exit = float('inf')
     for axis in range(3):
@@ -63,7 +63,7 @@ def render_adaptive_density(ray_origin, ray_direction, volume_bounds, k=4.0, b=5
     delta_f = f_prev - f_curr
 
     for i in range(max_steps):
-        # Sample volume at current position (standard trilinear interpolation)
+        # Sample volume at current position (standard trilinear interpolation) [G]
         c, alpha = sample_volume(current_pos, volume_bounds)
 
         # Front-to-back compositing
@@ -99,9 +99,8 @@ def render_adaptive_density(ray_origin, ray_direction, volume_bounds, k=4.0, b=5
     return accumulated_color
 
 def sample_volume(pos, bounds):
-    # Performs standard trilinear interpolation on the volume texture at pos
-    # Returns (color, opacity)
-    pass # Standard texture fetch implementation
+    # Standard trilinear interpolation on volume texture at pos [G]
+    pass
 ```
 
 **Edge Cases and Pitfalls:**
@@ -111,10 +110,10 @@ def sample_volume(pos, bounds):
 - **Parameter Sensitivity:** The $k$ value influences sampling quality by interfering with differences between consecutive step values. Typical optimal value is ~4 [S1]. The $b$ value does not affect the relative step differences [S1].
 
 ## Operating characteristics
-- **Time Complexity:** The method reduces total sampling points compared to linear sampling. Execution time is typically < 1ms for the tested configurations, compared to > 1.6ms for linear sampling [S1].
-- **Memory Complexity:** Standard volume rendering memory requirements. The unnormalized coordinate system does not add significant overhead [S1].
+- **Time Complexity:** Not given in the sources. Measured performance shows the method reduces total sampling points compared to linear sampling, achieving execution times typically < 1ms versus > 1.6ms for linear sampling [S1].
+- **Memory Complexity:** Not given in the sources. Standard volume rendering memory requirements apply, with the unnormalized coordinate system adding negligible overhead [S1].
 - **Measured Performance:** On an Intel quad-core 3.2GHz and NVIDIA GTX 1070, with $k=4$, the method achieved SSIM 0.9523, MSE 285.3498, and Time 0.908ms [S1].
-- **Strengths:** High quality (SSIM > 0.95) with fewer samples than linear methods. Stable step calculation compared to $1/x$ approaches.
+- **Strengths:** High quality (SSIM > 0.95) with fewer samples than linear methods. Stable step calculation compared to $1/x$ approaches [S1].
 - **Limitations:** Requires tuning of $k$. The unnormalized coordinate system is optional but recommended for dissimilar dimensions [S1].
 
 ## Background

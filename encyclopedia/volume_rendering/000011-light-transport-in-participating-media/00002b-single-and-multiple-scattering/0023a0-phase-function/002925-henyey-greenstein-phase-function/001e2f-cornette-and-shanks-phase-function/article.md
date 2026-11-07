@@ -1,0 +1,140 @@
+# Cornette and Shanks Phase Function
+Also called: Phase Function Evaluation
+
+## Overview
+The Cornette and Shanks phase function is an anisotropic scattering model used to approximate Mie scattering in participating media, specifically designed to produce a realistic forward-scattering halo [S1, unofficial]. It is distinguished from the Henyey-Greenstein phase function by its specific algebraic form which includes a $(1 + \mu^2)$ term, providing a different angular distribution profile for the same asymmetry parameter $g$ [S1, unofficial]. It is commonly used in real-time volumetric rendering of clouds and fog [S1, unofficial].
+
+## How it works
+**Inputs:**
+- $g$: The anisotropy factor, a scalar in the range $[-1, 1]$. Typical value for Mie scattering approximation is $0.76$ [S1, unofficial].
+- $\mu$: The cosine of the scattering angle, computed as the dot product of the incoming light direction ($\mathbf{l}$) and the outgoing view direction ($\mathbf{v}$): $\mu = \mathbf{l} \cdot \mathbf{v}$ [S1, unofficial].
+
+**Outputs:**
+- $p(g, \mu)$: The phase function value, representing the probability density of scattering from direction $\mathbf{l}$ to $\mathbf{v}$ [S1, unofficial].
+
+**Data Structures:**
+No complex data structures are required. The function is stateless and evaluates directly from scalar inputs.
+
+**Formula:**
+The phase function is defined as [S1, unofficial]:
+
+$$
+p(g, \mu) = \frac{3 (1 - g^2) (1 + \mu^2)}{8 \pi (2 + g^2) (1 + g^2 - 2 g \mu)^{1.5}}
+$$
+
+**Parameters:**
+- $\pi$: The mathematical constant pi.
+- $g$: Anisotropy. $g=0$ yields isotropic scattering (though the formula diverges or requires limit handling if not mixed, see below). $g > 0$ yields forward scattering. $g < 0$ yields backward scattering [S1, unofficial].
+
+**Algorithm:**
+1. Compute $\mu = \text{dot}(\mathbf{l}, \mathbf{v})$.
+2. Compute the numerator: $N = 3 \cdot (1 - g^2) \cdot (1 + \mu^2)$.
+3. Compute the denominator base: $D_{base} = 1 + g^2 - 2 \cdot g \cdot \mu$.
+4. Compute the denominator: $D = 8 \cdot \pi \cdot (2 + g^2) \cdot D_{base}^{1.5}$.
+5. Return $N / D$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def cornette_shanks_phase(g: float, mu: float) -> float:
+    """
+    Evaluates the Cornette and Shanks phase function.
+    
+    Args:
+        g: Anisotropy factor (e.g., 0.76).
+        mu: Cosine of the scattering angle (dot product of light and view directions).
+        
+    Returns:
+        The phase function value.
+    """
+    # Constants
+    PI = 3.141592653589793
+    
+    # Numerator: 3 * (1 - g^2) * (1 + mu^2)
+    numerator = 3.0 * (1.0 - g * g) * (1.0 + mu * mu)
+    
+    # Denominator components
+    # Base term: (1 + g^2 - 2*g*mu)
+    base_term = 1.0 + g * g - 2.0 * g * mu
+    
+    # Power term: base_term^1.5
+    # Note: base_term should be positive for valid physical scattering angles.
+    # If base_term is <= 0, clamp to a small epsilon to avoid NaN/Inf.
+    if base_term <= 0.0:
+        base_term = 1e-6
+        
+    power_term = math.pow(base_term, 1.5)
+    
+    # Full denominator: 8 * pi * (2 + g^2) * power_term
+    denominator = 8.0 * PI * (2.0 + g * g) * power_term
+    
+    # Avoid division by zero
+    if denominator == 0.0:
+        return 0.0
+        
+    return numerator / denominator
+
+def evaluate_scatter(anisotropic: float, g: float, light_dir: tuple, view_dir: tuple) -> float:
+    """
+    Computes the final scattered light contribution by mixing isotropic and anisotropic scattering.
+    
+    Args:
+        anisotropic: Weight of the anisotropic phase function (0 to 1).
+        g: Anisotropy factor.
+        light_dir: Normalized light direction vector.
+        view_dir: Normalized view direction vector.
+        
+    Returns:
+        The total scatter amount.
+    """
+    # Compute cosine of scattering angle
+    mu = light_dir[0]*view_dir[0] + light_dir[1]*view_dir[1] + light_dir[2]*view_dir[2]
+    
+    # Evaluate phase function
+    p = cornette_shanks_phase(g, mu)
+    
+    # Mix with isotropic scattering (constant 1/(4*pi) is implicit in the '1 - anisotropic' term 
+    # if the phase function is normalized to 1, but the source formula uses '1' as the isotropic base.
+    # Source [S1, unofficial] formula: scatter_amount = anisotropic * phase(...) + 1 - anisotropic
+    # This implies the '1' represents the normalized isotropic contribution in the specific context 
+    # of the shader implementation, or assumes the phase function is normalized to 1.
+    # Note: Standard isotropic phase function is 1/(4*pi). The source formula [S1, unofficial] suggests a 
+    # specific implementation detail where the isotropic term is treated as a constant '1' 
+    # relative to the phase function's scale, or the phase function is pre-scaled.
+    # We follow the source [S1, unofficial] exactly.
+    
+    scatter_amount = anisotropic * p + (1.0 - anisotropic)
+    
+    return scatter_amount
+```
+
+**Edge Cases and Pitfalls:**
+- **Singularity:** If $1 + g^2 - 2g\mu = 0$, the denominator becomes zero. This occurs when $\mu = 1$ and $g=1$ (perfect forward scattering with $g=1$). In practice, $g < 1$ and $\mu \le 1$, so the term is strictly positive unless $g=1, \mu=1$. Guard against this by clamping the base term [G].
+- **Normalization:** The Cornette and Shanks function is normalized to 1 over the sphere [S1, unofficial]. However, when mixing with isotropic scattering, ensure the isotropic term matches the normalization convention of the renderer. The source [S1, unofficial] uses `1 - anisotropic` as the isotropic weight, implying the phase function output is treated as a relative weight or the isotropic term is scaled accordingly in the broader lighting equation.
+- **Forward Peak:** Like other Mie approximations, the function has a strong forward peak. Importance sampling is recommended for accurate Monte Carlo integration, especially when $g$ is high [S2, unofficial].
+
+## Subtopics
+
+### [Multiple Octaves Phase Function](4939-multiple-octaves-phase-function.md)
+A phase function that combines multiple octaves of noise to create complex scattering patterns. Choose when you need spatially varying anisotropy rather than a uniform angular distribution.
+
+### [Henyey-Greenstein Phase Function](1010-henyey-greenstein-phase-function.md)
+The standard anisotropic phase function. Choose when you need a simpler, more widely supported model, though it lacks the $(1+\mu^2)$ term of Cornette-Shanks.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per evaluation. Requires a few multiplications, additions, and a power function.
+- **Memory Complexity:** $O(1)$. No auxiliary data structures.
+- **Strengths:** Simple to implement; produces a realistic forward-scattering halo for clouds [S1, unofficial]; computationally cheap.
+- **Limitations:** Not a true physical Mie solution but an approximation [S1, unofficial]; requires importance sampling for accurate path tracing due to the forward peak [S2, unofficial]; the mixing formula in [S1, unofficial] is specific to the implementation context and may not directly translate to all radiometric frameworks without adjustment.
+- **When to use:** Real-time volumetric rendering of clouds, fog, or smoke where a forward-scattering halo is desired and performance is critical [S1, unofficial].
+- **When not to use:** When strict physical accuracy of Mie scattering is required (use a lookup table or numerical integration of the true Mie phase function) [S2, unofficial].
+
+## Background
+The Cornette and Shanks phase function was introduced by J.L. Cornette and J.P. Shanks in their 1992 paper "Physical characterization of cloud properties" [S1, implied by reference to Bruneton's paper formula (4), unofficial]. It is widely used in computer graphics for approximating Mie scattering in volumetric clouds [S1, unofficial]. The function is cited in Eric Bruneton's work on precomputed radiance transfer for participating media [S1, unofficial].
+
+## Sources
+[S1] Procedural Volumetric Clouds, https://www.wedesoft.de/software/2023/05/03/volumetric-clouds/, fetched 2026-10-28 (unofficial)
+[S2] Volume Rendering (Path Tracing & Real-Time), https://computergraphics.stackexchange.com/questions/4412, fetched 2026-10-30 (unofficial)
