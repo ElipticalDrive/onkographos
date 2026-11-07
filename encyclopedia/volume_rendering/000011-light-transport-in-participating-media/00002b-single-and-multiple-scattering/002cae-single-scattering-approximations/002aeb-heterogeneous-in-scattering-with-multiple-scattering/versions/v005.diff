@@ -1,0 +1,332 @@
+--- v004.md
++++ v005.md
+@@ -3,223 +3,142 @@
+ 
+ ## Overview
+-This method computes the radiance contribution from light scattering within a heterogeneous participating medium, handling both direct lighting from light sources and recursively computing indirect lighting (multiple scattering) up to a maximum depth [S1, unofficial]. It extends the single-scattering approximation by adding a recursive term for indirect illumination, allowing for more realistic lighting in dense or high-albedo volumes [S1, unofficial]. Unlike its siblings which truncate the scattering series after the first term [S2, unofficial][S3], this approach approximates the second and higher-order scattering events through a limited-depth recursion, addressing the "abnormally dark" shadowing defects seen in single-scattering models for high-albedo media like clouds [S2, unofficial].
++This method computes the radiance contribution from light scattering within a heterogeneous volume, handling direct lighting from light sources and recursively computing indirect lighting (multiple scattering) up to a maximum depth [S1, unofficial]. It sets itself apart from its siblings, such as [Single-scattering homogeneous volume rendering](1135-single-scattering-homogeneous-volume-rendering.md) and [Single Scattering Approximation](5264-single-scattering-approximation.md), by extending the single-scattering approximation to include multiple bounces of light within the participating medium, thereby capturing global illumination effects in heterogeneous media [S1, unofficial].
+ 
+ ## How it works
+-The method operates in two main phases: computing the total radiance for a ray segment (including surface interactions) and recursively computing the in-scattered radiance for a specific point in the volume.
++**Inputs and Outputs:**
++*   **Input:** A ray origin $\mathbf{o}$ and direction $\boldsymbol{\omega}$, scene geometry, light sources, and volume density fields.
++*   **Output:** The outgoing radiance $L_o$ along the ray.
+ 
+-### Data Structures
+-*   **Ray**: Origin $\mathbf{o}$, direction $\boldsymbol{\omega}$, length $t_{max}$.
+-*   **Volume Density Field**: Heterogeneous density $\rho(\mathbf{x})$ or optical coefficients $\sigma_t(\mathbf{x}), \sigma_s(\mathbf{x}), \sigma_a(\mathbf{x})$ sampled at any point $\mathbf{x}$.
+-*   **Scene Geometry**: A bounding volume hierarchy or similar structure to determine intersections for shadow rays and surface reflections.
+-*   **Light Sources**: List of lights with position $\mathbf{l}_i$, intensity $I_i$, and area $A_i$.
++**Data Structures:**
++*   **Volume Coefficients:** $\mu_a$ (absorption coefficient) and $\mu_s$ (scattering coefficient) are sampled from the heterogeneous volume at the current position.
++*   **Recursion State:** A `depth` integer tracks the current multiple scattering order.
+ 
+-### Parameters
+-*   $\mu_a$: Base absorption coefficient. Typical value: $0.05$ [S1, unofficial].
+-*   $\mu_s$: Base scattering coefficient. Typical value: $0.1$ [S1, unofficial].
+-*   $MaxDepth$: Maximum recursion depth for multiple scattering. Typical value: $5$ [S1, unofficial].
+-*   $N_{steps}$: Number of steps for transmittance integration to light. Typical value: $16$ [S1, unofficial].
++**Steps:**
++1.  **Termination Check:** Sample the local extinction coefficient $\mu_t = \mu_a + \mu_s$. If $\mu_t < 0.0001$, return 0, indicating no interaction [S1, unofficial].
++2.  **Single Scattering Albedo:** Calculate the probability of scattering versus extinction:
++    $$ p_{scatter} = \frac{\mu_s}{\mu_t} $$
++3.  **Direct In-scattering:** For each light source:
++    *   Sample the light position.
++    *   Cast a shadow ray from the current volume point to the light.
++    *   If the path is not occluded, compute the transmittance $T_{to\_light}$ using 16-step integration through the heterogeneous volume [S1, unofficial].
++    *   Accumulate the direct contribution:
++        $$ L_{direct} += L_{emitted} \cdot p(\boldsymbol{\omega}_i, \boldsymbol{\omega}_o) \cdot G \cdot T_{to\_light} \cdot A_{light} $$
++        where $G$ is the geometric term and $A_{light}$ is the light area.
++4.  **Indirect In-scattering (Multiple Scattering):** If `depth` < 5:
++    *   Sample a hemisphere direction using a `HemisphericalSampler`.
++    *   Cast a ray from the scatter position in the sampled direction.
++    *   If the ray hits an object, recursively call `computeInscattering` for the segment up to the surface intersection.
++    *   Add the indirect contribution to the total in-scattering:
++        $$ L_{indirect} += L_{indirect\_hit} \cdot \rho \cdot T_{to\_scatter} \cdot \frac{1}{4\pi} $$
++        where $\rho$ is the surface albedo and the phase function is approximated as isotropic $\frac{1}{4\pi}$ [S1, unofficial].
++5.  **Total Radiance:** Sum the direct and indirect contributions, attenuated by the transmittance from the eye to the current point.
+ 
+-### Step 1: Compute Total Radiance for a Ray Segment
+-This function computes the final color for a ray segment from origin $\mathbf{o}$ to intersection $\mathbf{p}_{hit}$ (or far plane if no hit).
+-
+-1.  **Find Intersection**: Cast a ray from $\mathbf{o}$ in direction $\boldsymbol{\omega}$. Let $\mathbf{p}_{hit}$ be the closest intersection point. If no intersection, return background radiance:
+-    $$ L_{bg} = L_{ambient} + L_{bgColor} \cdot \exp\left(-(\mu_a + \mu_s) \cdot \bar{\rho} \cdot 10.0\right) $$
+-    where $\bar{\rho}$ is the average density, clamped to a minimum of $0.2$ [S1, unofficial].
+-2.  **Compute In-scattering**: Calculate the volumetric in-scattering contribution $L_{inscatter}$ for the segment $[\mathbf{o}, \mathbf{p}_{hit}]$ using the recursive `computeInscattering` function (see Step 2).
+-3.  **Add Surface Emission**: If $\mathbf{p}_{hit}$ is on a surface, add the surface emission:
+-    $$ L_{emission} = L_{emissive} \cdot T(\mathbf{o}, \mathbf{p}_{hit}) $$
+-    where $T(\mathbf{o}, \mathbf{p}_{hit})$ is the transmittance from eye to hit point [S1, unofficial].
+-4.  **Add Surface Reflection**: If current recursion depth $< MaxDepth$, compute the reflected radiance from the surface at $\mathbf{p}_{hit}$ (including direct and indirect components) and add to the total:
+-    $$ L_{reflected} = L_{refl} \cdot T(\mathbf{o}, \mathbf{p}_{hit}) $$
+-5.  **Return**: Sum of $L_{inscatter}$, $L_{emission}$, and $L_{reflected}$ [S1, unofficial].
+-
+-### Step 2: Compute In-scattering at a Point
+-This recursive function computes the in-scattered radiance at a point $\mathbf{x}$ in the volume.
+-
+-1.  **Check Interaction**: Sample the extinction coefficient $\sigma_t(\mathbf{x})$ and scattering coefficient $\sigma_s(\mathbf{x})$ at $\mathbf{x}$. If $\sigma_t(\mathbf{x}) < 0.0001$, return $0$ (no interaction) [S1, unofficial].
+-2.  **Calculate Single Scattering Albedo**:
+-    $$ p_{scatter} = \frac{\sigma_s(\mathbf{x})}{\sigma_t(\mathbf{x})} $$
+-3.  **Initialize Radiance**: $L_{inscatter} = 0$.
+-4.  **Direct Lighting**: For each light source $i$:
+-    a.  Sample the light position $\mathbf{l}_i$.
+-    b.  Cast a shadow ray from $\mathbf{x}$ to $\mathbf{l}_i$. If occluded, skip.
+-    c.  Compute transmittance $T_{to\_light}$ from $\mathbf{x}$ to $\mathbf{l}_i$ using $N_{steps}$ integration [S1, unofficial].
+-    d.  Accumulate contribution:
+-        $$ L_{direct} += I_i \cdot p(\boldsymbol{\omega}_i, \boldsymbol{\omega}_o) \cdot \frac{A_i}{\|\mathbf{l}_i - \mathbf{x}\|^2} \cdot T_{to\_light} $$
+-        Note: The source code uses a hardcoded isotropic phase function $1/(4\pi)$ for both direct and indirect contributions, ignoring the material's specific phase function [S1, unofficial].
+-5.  **Indirect Lighting (Multiple Scattering)**: If current depth $< MaxDepth$:
+-    a.  Sample a hemisphere direction $\boldsymbol{\omega}_s$ using a HemisphericalSampler.
+-    b.  Cast a ray from $\mathbf{x}$ in direction $\boldsymbol{\omega}_s$.
+-    c.  If the ray hits an object at $\mathbf{p}_{surf}$:
+-        i.  Recursively call `computeInscattering` for the segment from $\mathbf{x}$ to $\mathbf{p}_{surf}$ to get $L_{indirect}$.
+-        ii. Add to $L_{inscatter}$:
+-            $$ L_{indirect\_contrib} = L_{indirect} \cdot \rho_{albedo} \cdot T(\mathbf{x}, \mathbf{p}_{surf}) \cdot \frac{1}{4\pi} $$
+-            where $\rho_{albedo}$ is the surface albedo [S1, unofficial].
+-6.  **Return**: $L_{inscatter}$ [S1, unofficial].
+-
+-### Pseudocode
+-
++**Pseudocode:**
+ ```python
+-def compute_total_radiance(ray, depth=0):
+-    """
+-    Computes total radiance for a ray segment.
+-    """
+-    # 1. Find intersection
+-    hit = scene.intersect(ray)
+-    if not hit:
+-        # Background with attenuation
+-        avg_density = 1.0 # Placeholder for actual average density calculation
+-        attenuation = exp(-(mu_a + mu_s) * avg_density * 10.0)
+-        return ambient + bg_color * max(attenuation, 0.2)
+-
+-    # 2. Compute in-scattering for the segment
+-    # Note: The source code calls computeInscattering for the segment, 
+-    # but the recursive function is defined for a point. 
+-    # We assume a helper that integrates over the segment or calls the point function at sample points.
+-    # Based on [S1, unofficial], it seems to compute L_inscatter for the segment.
+-    # For implementation clarity, we will assume a segment integration wrapper.
+-    L_inscatter = integrate_inscattering_segment(ray.origin, hit.point, depth)
+-
+-    # 3. Add surface emission
+-    L_emission = hit.material.get_emissive_radiance() * transmittance(ray.origin, hit.point)
+-
+-    # 4. Add surface reflection
+-    L_reflected = 0.0
+-    if depth < MaxDepth:
+-        # Compute reflected radiance (direct + indirect)
+-        # This is a simplified representation of the source's logic
+-        L_reflected = compute_surface_reflection(hit, depth) * transmittance(ray.origin, hit.point)
+-
+-    return L_inscatter + L_emission + L_reflected
+-
+-def integrate_inscattering_segment(o, p_far, depth):
+-    """
+-    Integrates in-scattering along a ray segment.
+-    """
+-    # This is a placeholder for the actual integration logic.
+-    # The source code [S1, unofficial] implies a recursive call for indirect,
+-    # but direct is computed per light.
+-    # A standard approach is to sample points along the segment.
+-    # However, the source notes suggest a specific recursive structure.
+-    # We will follow the note: "compute in-scattering contribution L_inscatter for the segment."
+-    # And "If depth < 5, compute indirect inscattering... recursively call computeInscattering for the segment up to the surface."
++def compute_inscattering(ray_origin, ray_direction, depth, max_depth=5):
++    # 1. Sample volume properties
++    mu_a = sample_absorption(ray_origin)
++    mu_s = sample_scattering(ray_origin)
++    mu_t = mu_a + mu_s
+     
+-    # Given the ambiguity in the source's exact integration loop, 
+-    # we implement a simplified version that computes direct and indirect at the far point 
+-    # or along the segment. The source code snippet is incomplete regarding the loop.
+-    # We will assume the method computes the contribution at the hit point for the segment's end,
+-    # or integrates. Let's assume it computes the radiance at p_far due to scattering along the segment.
+-    
+-    # Re-reading [S1, unofficial]: "compute in-scattering contribution L_inscatter for the segment."
+-    # And "If it hits an object, recursively call computeInscattering for the segment up to the surface."
+-    # This suggests the recursion is on segments.
+-    
+-    # Let's implement the point-based recursion as described in Step 2, 
+-    # but applied to the segment's endpoints or sampled points.
+-    # For simplicity and adherence to the "point" definition in Step 2, 
+-    # we will compute the in-scattering at p_far.
+-    
+-    return compute_inscattering_at_point(p_far, depth)
+-
+-def compute_inscattering_at_point(x, depth):
+-    """
+-    Computes in-scattered radiance at a point x.
+-    """
+-    # 1. Check interaction
+-    sigma_t = get_extinction(x)
+-    sigma_s = get_scattering(x)
+-    
+-    if sigma_t < 0.0001:
++    # 2. Termination check
++    if mu_t < 0.0001:
+         return 0.0
+     
+-    # 2. Single scattering albedo
+-    p_scatter = sigma_s / sigma_t
++    # 3. Single scattering albedo
++    p_scatter = mu_s / mu_t
+     
+-    L_inscatter = 0.0
++    total_radiance = 0.0
+     
+-    # 3. Direct Lighting
+-    for light in lights:
+-        # Sample light position
+-        l_pos = light.position
+-        l_dir = normalize(l_pos - x)
+-        dist = length(l_pos - x)
++    # 4. Direct in-scattering
++    for light in scene.lights:
++        light_pos = sample_light_position(light)
++        shadow_ray = Ray(ray_origin, light_pos - ray_origin)
+         
+-        # Shadow ray
+-        if not scene.is_occluded(x, l_pos):
+-            # Transmittance to light
+-            T_to_light = integrate_transmittance(x, l_pos, steps=16)
++        if not is_occluded(shadow_ray):
++            # 16-step integration for transmittance
++            t_to_light = integrate_transmittance_16_steps(ray_origin, light_pos)
+             
+-            # Phase function (hardcoded isotropic)
+-            phase = 1.0 / (4.0 * pi)
++            # Geometric attenuation and emitted radiance
++            geometric_term = compute_geometric_term(ray_origin, light_pos)
++            emitted = light.get_emitted_radiance()
+             
+-            # Geometric attenuation
+-            geo_atten = light.area / (dist * dist)
++            # Isotropic phase function approximation
++            phase = 1.0 / (4.0 * math.pi)
+             
+-            # Accumulate
+-            L_inscatter += light.intensity * phase * geo_atten * T_to_light
++            contribution = emitted * phase * geometric_term * t_to_light * light.area
++            total_radiance += contribution
+             
+-    # 4. Indirect Lighting
+-    if depth < MaxDepth:
++    # 5. Indirect in-scattering (Multiple Scattering)
++    if depth < max_depth:
+         # Sample hemisphere direction
+-        omega_s = sample_hemisphere()
++        sample_dir = sample_hemisphere(ray_origin.normal)
++        indirect_ray = Ray(ray_origin, sample_dir)
+         
+-        # Cast ray
+-        indirect_ray = Ray(x, omega_s)
+-        indirect_hit = scene.intersect(indirect_ray)
+-        
+-        if indirect_hit:
+-            # Recursively call for segment up to surface
+-            # Note: The source says "recursively call computeInscattering for the segment"
+-            # We assume this means computing the in-scattering contribution from that segment
+-            L_indirect = integrate_inscattering_segment(x, indirect_hit.point, depth + 1)
++        hit = scene.intersect(indirect_ray)
++        if hit is not None:
++            # Recursive call for the segment up to the surface
++            # Note: The source implies recursion on the volume segment
++            # leading to the surface, then surface reflection.
++            indirect_radiance = compute_inscattering(
++                indirect_ray.origin, 
++                indirect_ray.direction, 
++                depth + 1, 
++                max_depth
++            )
+             
+-            # Add to L_inscatter
+-            # T_to_scatter is transmittance from x to indirect_hit.point
+-            T_to_scatter = integrate_transmittance(x, indirect_hit.point, steps=16)
++            # Surface albedo and transmittance back to scatter point
++            albedo = hit.material.get_albedo()
++            t_to_scatter = compute_transmittance(ray_origin, hit.point)
+             
+-            # Albedo
+-            albedo = indirect_hit.material.albedo
++            # Isotropic phase function for the bounce
++            bounce_phase = 1.0 / (4.0 * math.pi)
+             
+-            # Isotropic phase function for indirect
+-            phase_indirect = 1.0 / (4.0 * pi)
++            indirect_contribution = indirect_radiance * albedo * t_to_scatter * bounce_phase
++            total_radiance += indirect_contribution
+             
+-            L_inscatter += L_indirect * albedo * T_to_scatter * phase_indirect
+-            
+-    return L_inscatter
+-
+-def integrate_transmittance(o, p, steps=16):
+-    """
+-    Computes transmittance from o to p using numerical integration.
+-    """
+-    total_extinction = 0.0
+-    for i in range(steps):
+-        t = (i + 0.5) / steps
+-        x = o + t * (p - o)
+-        sigma_t = get_extinction(x)
+-        total_extinction += sigma_t * length(p - o) / steps
+-        
+-    return exp(-total_extinction)
++    return total_radiance
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Hardcoded Phase Function**: The implementation uses a hardcoded isotropic phase function ($1/(4\pi)$) for both direct and indirect scattering, ignoring the material's specific phase function [S1, unofficial]. This is a significant simplification and may lead to inaccurate lighting for anisotropic materials.
+-*   **Recursion Depth**: The recursion stops if depth $\ge 5$ [S1, unofficial]. This limits the accuracy of multiple scattering in very dense volumes.
+-*   **Transmittance Integration**: The transmittance to light is computed using a fixed 16-step integration [S1, unofficial]. This may not be sufficient for highly heterogeneous volumes, leading to artifacts.
+-*   **Density Sampling**: The method assumes access to a density field $\sigma_t(\mathbf{x})$ and $\sigma_s(\mathbf{x})$. If the density is zero or near-zero, the interaction check returns 0 [S1, unofficial].
++**Parameters:**
++*   $\mu_a$ (Base absorption coefficient): 0.05 [S1, unofficial].
++*   $\mu_s$ (Base scattering coefficient): 0.1 [S1, unofficial].
++*   `max_depth`: 5 [S1, unofficial].
++
++**Pitfalls:**
++*   The implementation uses a hardcoded isotropic phase function ($1/(4\pi)$) for both direct and indirect scattering contributions, ignoring the actual phase function of the material [S1, unofficial]. This can lead to inaccurate lighting in anisotropic media.
+ 
+ ## Subtopics
+ 
+ ### [Correction Texture for Surface Albedo](9421-correction-texture-for-surface-albedo.md)
+-This method corrects the main scattering texture for light reflected off the ground, which is precomputed assuming a homogeneous mean surface albedo $\bar{a}$. It allows the renderer to remove these homogeneous contributions from the main texture and evaluate surface albedos and reflection characteristics separately at runtime for surfaces with varying properties. This is useful for optimizing real-time rendering where surface albedo varies across the scene.
++This method corrects the main scattering texture for light reflected off the ground, which is precomputed assuming a homogeneous mean surface albedo $\bar{a}$. It allows the renderer to remove these homogeneous contributions from the main texture and evaluate surface albedos and reflection characteristics separately at runtime for surfaces with varying properties.
++
++### [Bias Compensation for Instant Radiosity](9586-bias-compensation-for-instant-radiosity.md)
++Bias Compensation for Instant Radiosity is an unbiased method to handle weak singularities (infinite variance) in Instant Radiosity when volume points are close to light sources, by bounding the geometric term and recursively compensating for the introduced bias. It sets apart from standard Instant Radiosity by eliminating the bias introduced by clamping the geometric term, while distinguishing from [Correction Texture for Surface Albedo](9421-correction-texture-for-surface-albedo.md) by operating directly on the volumetric light transport integral rather than surface albedo corrections.
++
++### Heterogeneous Radiance Computation
++This variant computes the total radiance for a ray by combining volumetric in-scattering, surface emission, and surface reflection, accounting for transmittance through the heterogeneous medium [S1, unofficial].
++1.  Find the closest intersection with scene geometry. If no intersection, return background radiance: $ambient + bgColor \cdot \exp(-( \mu_a + \mu_s ) \cdot avg\_density \cdot 10.0)$, clamped to min 0.2 [S1, unofficial].
++2.  Compute in-scattering contribution $L_{inscatter}$ for the segment [S1, unofficial].
++3.  Add surface emission: $shape.getMaterial().getEmissiveRadiance() \cdot T$ [S1, unofficial].
++4.  If `depth` < `MaxDepth`, compute reflected radiance (direct + indirect) and add to $L_o$ multiplied by $T$ [S1, unofficial].
++
++### Perturbation Solution for High Albedo
++This method addresses defects in single-scattering approximations for media with very high albedo (e.g., clouds), where shadowing appears abnormally dark [S2, unofficial]. It uses a perturbation solution expanding the radiance $Z$ into a power series in the single-scattering albedo $fl$:
++$$ Z = \sum fl^k Z_k $$
++The equations for the $k$-th order are derived by substituting into the original equation and equating like powers of $fl$:
++$$ LI_k + MI_k = -MI_{k-1} $$
++This presents a series of forced conservative ($w_0 = 1$) scattering equations [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: The method is computationally expensive due to the recursive nature of multiple scattering. Each in-scattering computation involves shadow rays and recursive calls, leading to $O(N \cdot L \cdot R)$ complexity, where $N$ is the number of samples, $L$ is the number of lights, and $R$ is the recursion depth [S1, unofficial].
+-*   **Memory Complexity**: Requires storing the volume density field and scene geometry. The recursion depth is limited, so stack memory is bounded [S1, unofficial].
+-*   **Performance**: The method is suitable for offline rendering or real-time rendering with limited recursion depth and light counts [S1, unofficial]. The hardcoded isotropic phase function and fixed integration steps may allow for some optimization, but the recursive nature remains a bottleneck.
+-*   **Strengths**: Handles heterogeneous volumes and multiple scattering, providing more realistic lighting than single-scattering approximations [S1, unofficial].
+-*   **Limitations**: Computationally expensive, sensitive to density field resolution, and uses simplified phase functions [S1, unofficial].
++*   **Time Complexity:** The method is computationally expensive due to the recursive nature of multiple scattering. Each bounce requires additional ray casts and volume integrations. The complexity grows exponentially with the maximum depth, though it is capped at 5 [S1, unofficial].
++*   **Memory Complexity:** Depends on the storage of the heterogeneous volume density fields and the recursion stack. No additional large textures are required beyond the volume data [S1, unofficial].
++*   **Strengths:** Captures global illumination effects in participating media, providing more realistic lighting than single-scattering approximations, especially in dense or highly scattering volumes [S1, unofficial].
++*   **Limitations:** High computational cost makes it unsuitable for real-time applications without significant optimization or approximation. The use of an isotropic phase function can reduce accuracy [S1, unofficial].
++*   **When to use:** Offline rendering or precomputed lighting where visual fidelity is prioritized over performance.
++*   **When not to use:** Real-time rendering with strict performance constraints, or when anisotropic scattering effects are critical and the isotropic approximation is insufficient.
+ 
+ ## Background
+-The method is based on a volumetric path tracing approach [S1, unofficial]. The perturbation solution for high albedo media, which addresses the defects of single-scattering approximations in clouds, is discussed in [S2, unofficial]. The specific implementation details, including the hardcoded isotropic phase function and recursion depth, are from an unofficial GitHub repository [S1, unofficial].
++The method originates from implementations of volumetric path tracing, specifically as seen in the unofficial repository [ainagutierrez01/Volumetric-Path-Tracing-](https://github.com/ainagutierrez01/Volumetric-Path-Tracing-) [S1, unofficial]. It builds upon the principles of single-scattering approximations [S2, unofficial][S3] by extending them to handle multiple bounces. The perturbation solution for high albedo is discussed in the context of ray tracing for volume densities, addressing the limitations of single-scattering models for clouds [S2, unofficial].
+ 
+ ## Sources

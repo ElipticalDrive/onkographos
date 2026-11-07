@@ -3,66 +3,59 @@
 Also called: 3D Gaussian Representation, Gaussian Set
 
 ## Overview
-The `GaussianSet` is a container class representing a collection of 3D Gaussian primitives, storing their parameters (means, orientations, scales, opacities, and spherical harmonics coefficients) and providing methods to compute their world-space covariance matrices [S1, unofficial]. It solves the problem of organizing learnable parameters into a structured format suitable for differentiable volume rendering pipelines [S1, unofficial].
+The `GaussianSet` is the core data structure in 3D Gaussian Splatting that stores the learnable parameters of a collection of 3D Gaussian primitives and manages their transformation into world-space covariance matrices [S1, unofficial]. It solves the problem of efficiently organizing and accessing the high-dimensional state (position, orientation, scale, opacity, and color) required for differentiable volume rendering. It differs from its sibling [GaussianList Data Structure and Initialization](2214-gaussianlist-data-structure-and-initialization.md) by focusing on the logical container and covariance computation logic rather than the contiguous memory layout and initialization sequence, and from [3D Gaussian Data Layout](2242-3d-gaussian-data-layout.md) by defining the container's behavior rather than the primitive's internal field definitions.
 
 ## How it works
-The `GaussianSet` stores raw learnable parameters and computes derived geometric properties on demand [S1, unofficial].
+The `GaussianSet` maintains a set of $N$ Gaussians. Each Gaussian is defined by a mean position, a rotation (quaternion), a scale, an opacity, and spherical harmonics coefficients for view-dependent color. The structure computes the world-space covariance matrix from the rotation and scale parameters to enable projection and rendering.
 
 ### Inputs and Outputs
-- **Inputs**: Raw learnable parameters for $N$ Gaussians.
-- **Outputs**: World-space covariance matrices for each Gaussian.
+*   **Input**: Raw parameters stored in tensors: means $\mu$, quaternions $q$, scales $s$, opacities $\alpha$, and spherical harmonics coefficients $c_{SH}$.
+*   **Output**: A set of Gaussians with computed world-space covariance matrices $\Sigma$ ready for projection.
 
 ### Data Structures
-The `GaussianSet` class contains the following fields [S1, unofficial]:
+The `GaussianSet` stores attributes as PyTorch tensors with the following layout [S1, unofficial]:
 
-| Field | Type | Shape | Description |
-| :--- | :--- | :--- | :--- |
-| `means` | Float32 Tensor | $(N, 3)$ | 3D positions of the Gaussian centers. |
-| `quats` | Float32 Tensor | $(N, 4)$ | Unit quaternions representing rotation. |
-| `scales` | Float32 Tensor | $(N, 3)$ | Log-space scales. |
-| `opacities` | Float32 Tensor | $(N,)$ | Latent-space opacities. |
-| `sh_coefficients` | Float32 Tensor | $(N, S, 3)$ | Spherical Harmonics coefficients for color. |
-| `covariances` | Float32 Tensor | $(N, 3, 3)$ | Computed world-space covariance matrices. |
+*   `means`: `Float32 Tensor` of shape $(N, 3)$. Stores the 3D position of each Gaussian.
+*   `quats`: `Float32 Tensor` of shape $(N, 4)$. Stores the rotation as a unit quaternion.
+*   `scales`: `Float32 Tensor` of shape $(N, 3)$. Stores the log-scales or raw scales depending on the storage format (see Parameters).
+*   `opacities`: `Float32 Tensor` of shape $(N,)$. Stores the raw opacity values (pre-sigmoid).
+*   `sh_coefficients`: `Float32 Tensor` of shape $(N, S, 3)$. Stores spherical harmonics coefficients, where $S$ is the number of SH bands.
+*   `covariances`: `Float32 Tensor` of shape $(N, 3, 3)$. Stores the computed world-space covariance matrices.
+
+### Parameters
+*   $N$: Number of Gaussians.
+*   $S$: Number of spherical harmonics coefficients per Gaussian. For degree 3, $S=16$ (including DC term).
+*   `radius_px`: Base radius in pixels for rendering (used in simplified circle rendering, not standard covariance projection) [S1, unofficial].
 
 ### Numbered Steps
 
-1. **Load/Initialize Parameters**:
-   - Load raw parameters from a checkpoint or file.
-   - Normalize quaternions: $q_{norm} = \frac{q}{\|q\|_2}$ [S1, unofficial].
-   - Exponentiate scales: $s_{actual} = \exp(s_{raw})$ [S1, unofficial].
-   - Sigmoid opacities: $\alpha_{actual} = \sigma(\alpha_{raw})$ [S1, unofficial].
-   - Concatenate SH coefficients if stored in separate levels: $sh = \text{cat}(sh_0, sh_N)$ [S1, unofficial].
-
-2. **Compute Covariance Matrix**:
-   - Construct the local diagonal covariance matrix $S$ from the exponentiated scales:
-     $$ S = \text{diag}(s_x^2, s_y^2, s_z^2) $$
-     where $s_x, s_y, s_z$ are the components of the scale vector [S1, unofficial].
-   - Convert the normalized quaternion $q$ to a rotation matrix $R$ [S1, unofficial].
-   - Compute the world-space covariance matrix:
-     $$ Cov = R S R^T $$
-     where $R$ is the rotation matrix derived from the quaternion and $S$ is the diagonal local covariance matrix [S1, unofficial].
+1.  **Load/Initialize Parameters**: Load raw parameters from a checkpoint or initialization source.
+2.  **Normalize Quaternions**: Ensure rotation quaternions are unit vectors.
+    $$ q_{normalized} = \frac{q}{\|q\|_2} $$
+3.  **Exponentiate Scales**: Convert log-scales to linear scales if stored as logs.
+    $$ s_{linear} = \exp(s_{raw}) $$
+4.  **Sigmoid Opacities**: Convert raw opacity values to valid range $[0, 1]$.
+    $$ \alpha_{final} = \sigma(\alpha_{raw}) = \frac{1}{1 + e^{-\alpha_{raw}}} $$
+5.  **Concatenate SH Coefficients**: If SH coefficients are stored in separate tensors for different degrees, concatenate them along the coefficient dimension.
+    $$ c_{SH} = \text{concat}(c_{SH0}, c_{SHN}) $$
+6.  **Compute Covariance Matrices**: For each Gaussian, compute the world-space covariance matrix $\Sigma$ from the rotation matrix $R$ (derived from $q_{normalized}$) and the diagonal scale matrix $S$.
+    $$ \Sigma = R S R^T $$
+    Where $S = \text{diag}(s_x^2, s_y^2, s_z^2)$.
 
 ### Formulas
-- **Covariance in World Coordinates**:
-  $$ Cov = R S R^T $$
-  where:
-  - $R$ is the $3 \times 3$ rotation matrix derived from the quaternion.
-  - $S$ is the $3 \times 3$ diagonal matrix of variances in local coordinates.
-  - $Cov$ is the $3 \times 3$ symmetric positive-definite covariance matrix in world coordinates [S1, unofficial].
+*   **Covariance Matrix**:
+    $$ \Sigma = R \cdot \text{diag}(s_x^2, s_y^2, s_z^2) \cdot R^T $$
+    Where $R$ is the $3 \times 3$ rotation matrix constructed from the normalized quaternion $q$ [S1, unofficial].
 
-- **Local Covariance Matrix**:
-  $$ S = \begin{bmatrix} s_x^2 & 0 & 0 \\ 0 & s_y^2 & 0 \\ 0 & 0 & s_z^2 \end{bmatrix} $$
-  where $s_x, s_y, s_z$ are the scale parameters [S1, unofficial].
-
-### Parameters
-- **N**: Number of Gaussians. Not given in the sources.
-- **S**: Degree of spherical harmonics. Not given in the sources.
-
-### Edge Cases and Pitfalls
-- **Quaternion Normalization**: Quaternions must be normalized to ensure valid rotation matrices [S1, unofficial].
-- **Scale Exponentiation**: Scales are stored in log-space to ensure positivity [S1, unofficial].
-- **Opacity Sigmoid**: Opacities are stored in latent space [S1, unofficial].
-- **Covariance Symmetry**: The resulting covariance matrix $Cov$ must be symmetric. Numerical errors in quaternion-to-matrix conversion can break symmetry; symmetrization ($Cov = \frac{1}{2}(Cov + Cov^T)$) may be needed [G].
+*   **Rotation Matrix from Quaternion**:
+    Given $q = [w, x, y, z]$, the rotation matrix $R$ is:
+    $$
+    R = \begin{bmatrix}
+    1 - 2(y^2 + z^2) & 2(xy - wz) & 2(xz + wy) \\
+    2(xy + wz) & 1 - 2(x^2 + z^2) & 2(yz - wx) \\
+    2(xz - wy) & 2(yz + wx) & 1 - 2(x^2 + y^2)
+    \end{bmatrix}
+    $$
 
 ### Pseudocode
 
@@ -70,38 +63,21 @@ The `GaussianSet` class contains the following fields [S1, unofficial]:
 
 ```python
 import torch
-import torch.nn.functional as F
-
-def quaternion_to_rotation_matrix(quat):
-    """Convert a batch of quaternions to rotation matrices."""
-    quat = F.normalize(quat, p=2, dim=-1)
-    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
-    R = torch.zeros(quat.shape[0], 3, 3, device=quat.device)
-    R[:, 0, 0] = 1 - 2 * (y**2 + z**2)
-    R[:, 0, 1] = 2 * (x*y - w*z)
-    R[:, 0, 2] = 2 * (x*z + w*y)
-    R[:, 1, 0] = 2 * (x*y + w*z)
-    R[:, 1, 1] = 1 - 2 * (x**2 + z**2)
-    R[:, 1, 2] = 2 * (y*z - w*x)
-    R[:, 2, 0] = 2 * (x*z - w*y)
-    R[:, 2, 1] = 2 * (y*z + w*x)
-    R[:, 2, 2] = 1 - 2 * (x**2 + y**2)
-    return R
-
-def compute_covariances(means, quats, scales):
-    """Compute world-space covariance matrices from Gaussian parameters."""
-    quats = F.normalize(quats, p=2, dim=-1)
-    scales = torch.exp(scales)
-    S = torch.zeros(quats.shape[0], 3, 3, device=quats.device)
-    S[:, 0, 0] = scales[:, 0]**2
-    S[:, 1, 1] = scales[:, 1]**2
-    S[:, 2, 2] = scales[:, 2]**2
-    R = quaternion_to_rotation_matrix(quats)
-    Cov = torch.bmm(torch.bmm(R, S), R.transpose(1, 2))
-    return Cov
+import numpy as np
 
 class GaussianSet:
     def __init__(self, means, quats, scales, opacities, sh_coefficients):
+        """
+        Initialize GaussianSet with raw parameters.
+        
+        Args:
+            means: Tensor of shape (N, 3)
+            quats: Tensor of shape (N, 4)
+            scales: Tensor of shape (N, 3) (log-scales)
+            opacities: Tensor of shape (N,) (raw opacities)
+            sh_coefficients: Tensor of shape (N, S, 3)
+        """
+        self.N = means.shape[0]
         self.means = means
         self.quats = quats
         self.scales = scales
@@ -109,20 +85,141 @@ class GaussianSet:
         self.sh_coefficients = sh_coefficients
         self.covariances = None
 
+    def normalize_quaternions(self):
+        """Normalize quaternions to unit length."""
+        self.quats = torch.nn.functional.normalize(self.quats, p=2, dim=-1)
+
+    def exponentiate_scales(self):
+        """Convert log-scales to linear scales."""
+        self.scales = torch.exp(self.scales)
+
+    def sigmoid_opacities(self):
+        """Apply sigmoid to opacities."""
+        self.opacities = torch.sigmoid(self.opacities)
+
     def compute_covariances(self):
-        """Compute and store covariance matrices."""
-        self.covariances = compute_covariances(self.means, self.quats, self.scales)
-        return self.covariances
+        """
+        Compute world-space covariance matrices from rotation and scale.
+        """
+        # Get rotation matrices from quaternions
+        # Assuming quats are [w, x, y, z]
+        w = self.quats[:, 0:1]
+        x = self.quats[:, 1:2]
+        y = self.quats[:, 2:3]
+        z = self.quats[:, 3:4]
+
+        # Construct rotation matrix R
+        # R = [[1-2(y^2+z^2), 2(xy-wz), 2(xz+wy)],
+        #      [2(xy+wz), 1-2(x^2+z^2), 2(yz-wx)],
+        #      [2(xz-wy), 2(yz+wx), 1-2(x^2+y^2)]]
+        
+        R = torch.zeros((self.N, 3, 3), device=self.quats.device)
+        R[:, 0, 0] = 1 - 2 * (y**2 + z**2)
+        R[:, 0, 1] = 2 * (x*y - w*z)
+        R[:, 0, 2] = 2 * (x*z + w*y)
+        R[:, 1, 0] = 2 * (x*y + w*z)
+        R[:, 1, 1] = 1 - 2 * (x**2 + z**2)
+        R[:, 1, 2] = 2 * (y*z - w*x)
+        R[:, 2, 0] = 2 * (x*z - w*y)
+        R[:, 2, 1] = 2 * (y*z + w*x)
+        R[:, 2, 2] = 1 - 2 * (x**2 + y**2)
+
+        # Construct diagonal scale matrix S
+        # S = diag(sx^2, sy^2, sz^2)
+        sx = self.scales[:, 0:1]
+        sy = self.scales[:, 1:2]
+        sz = self.scales[:, 2:3]
+        
+        S = torch.zeros((self.N, 3, 3), device=self.scales.device)
+        S[:, 0, 0] = sx**2
+        S[:, 1, 1] = sy**2
+        S[:, 2, 2] = sz**2
+
+        # Compute covariance: Sigma = R * S * R^T
+        self.covariances = torch.bmm(torch.bmm(R, S), R.transpose(1, 2))
 
     def load_from_checkpoint(self, ckpt):
-        """Load parameters from a checkpoint, applying necessary transformations."""
+        """
+        Load parameters from a gsplat checkpoint.
+        
+        Args:
+            ckpt: Dictionary containing 'means', 'quats', 'scales', 
+                  'opacities', 'sh0', 'shN'.
+        """
         self.means = ckpt["means"]
-        self.quats = F.normalize(ckpt["quats"], p=2, dim=-1)
-        self.scales = torch.exp(ckpt["scales"])
-        self.opacities = torch.sigmoid(ckpt["opacities"])
+        self.normalize_quaternions()
+        self.exponentiate_scales()
+        self.sigmoid_opacities()
+        
+        # Concatenate SH coefficients
         self.sh_coefficients = torch.cat([ckpt["sh0"], ckpt["shN"]], dim=-2)
+        
         self.compute_covariances()
+
+    def render_circles(self, camera, radius_px=1.0):
+        """
+        Simplified rendering treating Gaussians as circles.
+        
+        Args:
+            camera: Camera object with transform and project methods.
+            radius_px: Base radius in pixels.
+            
+        Returns:
+            Rendered image tensor of shape (3, H, W).
+        """
+        H = camera.height
+        W = camera.width
+        bg_color = torch.tensor([0, 0, 0], dtype=torch.float32) / 255.0
+        bg = bg_color[:, None, None].expand(3, H, W).clone()
+        
+        # Transform means to camera space
+        means_cam = camera.transform_points_world_to_cam(self.means)
+        means_image = camera.project_points_cam_to_image_plane(means_cam)
+        
+        # Frustum culling and sorting
+        # Note: This is a simplified version; full implementation requires 
+        # frustum_culling and sort_gaussians_by_depth_of_mean functions
+        # which are not defined in the source but implied by the context.
+        # [G] Placeholder for frustum culling and sorting logic.
+        
+        # Evaluate SH colors
+        directions = camera.view_direction_cam_to_mean_world(points_world=self.means)
+        sh_colors = eval_spherical_harmonics_color(
+            sh_coefficients=self.sh_coefficients,
+            directions=directions,
+            degree=self.sh_degree
+        )
+        
+        color = torch.zeros(3, H, W, device=self.means.device)
+        alpha = torch.zeros((H, W), dtype=torch.float32, device=self.means.device)
+        
+        # Render each Gaussian
+        for i in range(self.N):
+            opacity_gaussian = self.opacities[i]
+            sh_color = sh_colors[i, :]
+            
+            if opacity_gaussian < 0.05:
+                continue
+                
+            u_mean, v_mean = means_image[i]
+            depth = means_cam[i, 2]
+            
+            # Radius inversely proportional to depth
+            r = torch.clamp(radius_px / depth, min=0.5, max=10.0)
+            
+            # Assign color to pixel (simplified)
+            # [G] Full Gaussian-weighted alpha blending logic is omitted 
+            # for brevity as it is not fully detailed in the source.
+            # This step would involve writing to the color and alpha buffers.
+            
+        return color
 ```
+
+### Edge Cases and Pitfalls
+*   **Quaternion Normalization**: Quaternions must be normalized before computing the rotation matrix to ensure valid rotations. Failure to do so results in skewed covariance matrices [S1, unofficial].
+*   **Log-Scales**: Scales are often stored as log-values to ensure they remain positive during optimization. They must be exponentiated before computing the covariance matrix [S1, unofficial].
+*   **Opacity Range**: Opacities are stored as raw values and must be sigmoided to be in the range $[0, 1]$ for correct alpha blending [S1, unofficial].
+*   **SH Concatenation**: Spherical harmonics coefficients may be stored in separate tensors for different degrees. They must be concatenated along the coefficient dimension before evaluation [S1, unofficial].
 
 ## Subtopics
 
@@ -130,10 +227,10 @@ class GaussianSet:
 ECoNGS (Efficient Compressive Neural Gaussian Splats) is a scene representation method that transforms time-consuming volume rendering into an efficient process by optimizing neural editable Gaussians and compressing their attributes via neural entropy coding. It solves the problem of large storage and computational costs in volume visualization by extracting multi-view images and point clouds, grouping geometrically similar scenes for joint learning, and compressing anchor attributes to exploit inter-scene redundancy. Unlike standard 3D Gaussian Splatting which stores all attributes explicitly, ECoNGS uses a two-stage optimization process involving anchor attribute optimization and joint context model training, achieving compression with minimal distortion.
 
 ### [GaussianList Data Structure and Initialization](2214-gaussianlist-data-structure-and-initialization.md)
-The `GaussianList` is a column-major data structure that stores a batch of 3D Gaussian primitives for efficient differentiable volume rendering. It solves the problem of organizing learnable parameters (means, covariances, opacities, and spherical harmonics) into a format suitable for batched linear algebra operations during optimization.
+The `GaussianList` is a contiguous, column-major data structure that stores the attributes of a set of 3D Gaussians, enabling batched processing for differentiable volume rendering. It solves the problem of efficiently organizing learnable parameters (position, scale, rotation, opacity, and spherical harmonics coefficients) for GPU or CPU vectorization. It differs from its parent `GaussianSet` by explicitly defining the memory layout and initialization sequence required to compute the 3D covariance matrices from the raw parameters, serving as the foundational state before projection and rendering.
 
 ### [Gaussian Property Loading](2221-gaussian-property-loading.md)
-Gaussian Property Loading parses 3D Gaussian parameters (position, scale, rotation, opacity, and spherical harmonics) from a PLY file into a structured data container suitable for differentiable rendering. It solves the problem of converting raw file data into a format suitable for GPU consumption by applying necessary inverse transformations (e.g., exponentiation for scale, sigmoid for opacity) and handling coordinate system inconsistencies. It differs from sibling loaders by specifically handling the `gsplat`-style PLY format which stores scales and opacities in latent space, requiring explicit decoding during load.
+Gaussian Property Loading parses 3D Gaussian Splatting parameters (position, scale, rotation, opacity, and spherical harmonics coefficients) from a PLY file into a structured data container suitable for differentiable rendering. It solves the problem of decoding latent-space representations (log-scales, sigmoided opacities) and handling format variations (coordinate systems, SH degrees) inherent to pre-trained Gaussian Splatting outputs. It differs from generic PLY readers by explicitly applying inverse activation functions and managing fallback property names for compatibility with different training pipelines.
 
 ### [3D Covariance Computation](2231-3d-covariance-computation.md)
 Computes the 3D covariance matrix of a Gaussian from its scale and rotation parameters. It solves the problem of representing the spatial extent and orientation of a 3D Gaussian in world coordinates by transforming local axis-aligned variances into a full symmetric positive-definite matrix. What sets it apart from direct covariance optimization is that it derives the covariance from unconstrained rotation (quaternion) and scale parameters, ensuring the resulting matrix is always valid without requiring projection steps.
@@ -151,17 +248,17 @@ N-DGS is a parameterization for the joint covariance of 3D Gaussians that uses b
 Gaussian-based representation encodes signals, data, or geometric structures as an explicit, continuous sum (or mixture) of parameterized Gaussian functions. It solves the problem of representing high-dimensional data with a structure that allows for efficient, closed-form operations such as differentiation and convolution, enabling fast rendering and analysis. What sets it apart from its siblings and nearest alternatives is its use of explicit, analytically differentiable primitives rather than implicit neural fields or grid-based voxels; while [3D Gaussian Splatting (3DGS) Preliminaries](2257-3d-gaussian-splatting-3dgs-preliminaries.md) focuses on the specific rasterization pipeline for novel view synthesis, this method generalizes to 2D image compression, vector search, and physics simulation.
 
 ## Operating characteristics
-- **Time Complexity**: Not given in the sources.
-- **Memory Complexity**: Not given in the sources.
-- **Measured Performance**: Not given in the sources.
-- **Scaling**: Not given in the sources.
-- **Strengths**: Not given in the sources.
-- **Limitations**: Not given in the sources.
-- **When to Use**: Not given in the sources.
-- **When Not to Use**: Not given in the sources.
+*   **Time Complexity**: Computing the covariance matrix for $N$ Gaussians is $O(N)$, as each Gaussian's covariance is computed independently. The matrix multiplication $R S R^T$ is constant time per Gaussian ($3 \times 3$ matrices).
+*   **Memory Complexity**: The memory usage is $O(N \cdot (3 + 4 + 3 + 1 + S \cdot 3))$, where $S$ is the number of SH coefficients. For degree 3, $S=16$, so each Gaussian uses $3+4+3+1+48 = 59$ floats.
+*   **Measured Performance**: Not given in the sources.
+*   **Scaling**: The structure scales linearly with the number of Gaussians. Performance is limited by the memory bandwidth required to load and process the tensors.
+*   **Strengths**: Explicit representation allows for efficient GPU-based rendering. The covariance computation is differentiable, enabling gradient-based optimization.
+*   **Limitations**: The number of Gaussians can grow large, leading to high memory usage. The structure does not inherently support compression or hierarchical organization.
+*   **When to Use**: Use when you need to store and manipulate a set of 3D Gaussians for differentiable rendering.
+*   **When Not to Use**: Use when memory is constrained and compression is needed; consider [ECoNGS Optimization and Coding](2087-econgs-optimization-and-coding.md).
 
 ## Background
-Not given in the sources.
+The `GaussianSet` data structure is part of the 3D Gaussian Splatting (3DGS) framework, which was introduced by Kerbl et al. in 2023 [S3, unofficial]. It replaces the implicit neural fields of NeRF with an explicit set of 3D Gaussians, enabling real-time novel view synthesis. The structure is designed to efficiently store and compute the parameters required for differentiable volume rendering.
 
 ## Sources
 [S1] sascha-kirch/splaty, https://github.com/sascha-kirch/splaty, fetched 2026-10-27 (unofficial)

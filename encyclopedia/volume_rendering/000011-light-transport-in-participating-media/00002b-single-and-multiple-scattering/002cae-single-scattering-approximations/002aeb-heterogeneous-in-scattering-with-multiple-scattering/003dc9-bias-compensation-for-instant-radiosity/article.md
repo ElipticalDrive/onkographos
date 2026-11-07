@@ -1,0 +1,152 @@
+# Bias Compensation for Instant Radiosity
+
+Also called: Singularity handling via geometric term bounding
+
+## Overview
+Bias Compensation for Instant Radiosity is an unbiased method to handle weak singularities (infinite variance) in Instant Radiosity when volume points are close to light sources, by bounding the geometric term and recursively compensating for the introduced bias [S1]. It sets apart from standard Instant Radiosity by eliminating the bias introduced by clamping the geometric term, while distinguishing from [Correction Texture for Surface Albedo](9421-correction-texture-for-surface-albedo.md) by operating directly on the volumetric light transport integral rather than surface albedo corrections.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Scene geometry, participating media properties (phase function, extinction coefficient), light source definitions, and a bound parameter $b$.
+*   **Output:** Unbiased radiance estimate $L(y \rightarrow z)$ at a point $y$ in the direction $z$, correcting for the singularity when $y$ is near a light source.
+
+**Data Structures:**
+No specific complex data structures are required beyond standard scene representation. The method relies on the geometric term $G(x \leftrightarrow y)$ and transmittance $\tau$.
+
+**Definitions:**
+*   $G(x \leftrightarrow y)$: The standard geometric term between points $x$ and $y$.
+*   $b$: An arbitrary positive bound ($b \in \mathbb{R}^+$) used to cap the geometric term [S1].
+*   $L(x \rightarrow y)$: Radiance arriving at $y$ from $x$.
+*   $f(x \rightarrow y \rightarrow z)$: The phase function or BSDF.
+*   $V(x \leftrightarrow y)$: Visibility term (1 if visible, 0 otherwise).
+*   $\tau(y - t\omega \leftrightarrow y)$: Transmittance from $y$ to $y - t\omega$.
+*   $d\sigma^*(\omega)$: The modified differential solid angle, defined as:
+    $$
+    d\sigma^*(\omega) = \begin{cases} |\cos \theta_y| d\sigma(\omega) & \text{if } y \in \partial \mathcal{V} \text{ (surface)} \\ d\sigma(\omega) & \text{if } y \in \mathcal{V} \text{ (volume)} \end{cases}
+    $$
+    where $\theta_y$ is the angle between the surface normal at $y$ and the direction $\omega$ [S1].
+
+**Numbered Steps:**
+
+1.  **Define Modified Geometric Term:**
+    Replace the standard geometric term $G(x \leftrightarrow y)$ with a bounded version $G'(x \leftrightarrow y)$:
+    $$
+    G'(x \leftrightarrow y) := \begin{cases} G(x \leftrightarrow y) & \text{if } G(x \leftrightarrow y) < b \\ b & \text{otherwise} \end{cases} \quad (14)
+    $$
+    [S1]
+
+2.  **Formulate Bias Integral:**
+    The bias introduced by using $G'$ instead of $G$ in the evaluation of $L(y \rightarrow z)$ is given by:
+    $$
+    L(y \rightarrow z) - L'(y \rightarrow z) = \int_{\mathbb{R}^3} L(x \rightarrow y) f(x \rightarrow y \rightarrow z) \cdot \frac{\max\{G(x \leftrightarrow y) - b, 0\}}{G(x \leftrightarrow y)} \cdot G(x \leftrightarrow y) V(x \leftrightarrow y) d\lambda(x) \quad (15)
+    $$
+    [S1]
+
+3.  **Reformulate to Spherical Coordinates:**
+    Change the integration domain from $\mathbb{R}^3$ to spherical coordinates centered at $y$. The integral becomes:
+    $$
+    \int_{S^2} \int_0^{\|h(y, -\omega) - y\|} \tau(y - t\omega \leftrightarrow y) L(y - t\omega \rightarrow y) f(y - t\omega \rightarrow y \rightarrow z) \cdot \frac{\max\{G(y - t\omega \leftrightarrow y) - b, 0\}}{G(y - t\omega \leftrightarrow y)} dt d\sigma^*(\omega)
+    $$
+    [S1]
+
+4.  **Recursive Estimation:**
+    To estimate the bias term:
+    a. Sample a direction $\omega$ from the projected BSDF or phase function.
+    b. Sample a distance $t$ from the transmittance $\tau$.
+    c. Compute the next vertex $x = y - t\omega$.
+    d. Recursively estimate $L(x \rightarrow y)$.
+    e. Weight the result by the factor:
+    $$
+    w = \frac{\max\{G(x \leftrightarrow y) - b, 0\}}{G(x \leftrightarrow y)}
+    $$
+    [S1]
+
+5.  **Termination:**
+    If $G(x \leftrightarrow y) \le b$, the weight $w$ is 0. The path from the camera can be terminated at this point because the contribution is nullified [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def bias_compensation(y, z, b, scene):
+    """
+    Estimates the bias compensation term for Instant Radiosity at point y
+    in direction z, using bound b.
+    
+    Args:
+        y: Current point in space (vector)
+        z: View direction (vector)
+        b: Geometric term bound (float)
+        scene: Scene object with methods for sampling and evaluation
+        
+    Returns:
+        float: Estimated bias contribution
+    """
+    # 1. Sample direction omega from projected BSDF or phase function at y
+    omega = scene.sample_phase_function_or_bsdf(y)
+    
+    # 2. Sample distance t from transmittance tau
+    # Note: Transmittance depends on the medium properties along the ray
+    t = scene.sample_transmittance(y, -omega)
+    
+    # 3. Compute next vertex x
+    x = y - t * omega
+    
+    # 4. Compute geometric term G(x <-> y)
+    # This typically involves distance and visibility
+    G_xy = scene.compute_geometric_term(x, y)
+    
+    # 5. Calculate weight
+    # If G_xy <= b, weight is 0, terminate recursion
+    if G_xy <= b:
+        return 0.0
+    
+    weight = (G_xy - b) / G_xy
+    
+    # 6. Recursively estimate L(x -> y)
+    # This involves evaluating the radiance arriving at x from y
+    # In the context of Instant Radiosity, this might involve querying light sources
+    # or recursively calling this function if x is also a scattering point
+    L_x_to_y = scene.evaluate_radiance_arriving_at_x_from_y(x, y)
+    
+    # 7. Evaluate phase function f(x -> y -> z)
+    # Note: The formula uses f(x -> y -> z), but in the recursive step
+    # we are estimating L(x->y). The final combination with f(y->z) happens
+    # at the caller level or in the main IR loop.
+    # However, the bias integral formula (15) includes f(x->y->z).
+    # The recursive step estimates the integral part.
+    # We assume L_x_to_y here represents the integral of L(x->y) * f(...) * ...
+    # But strictly, the recursion estimates L(x->y).
+    # The weight is applied to the recursive estimate of L(x->y).
+    # The phase function f(y-tw -> y -> z) is part of the integrand in (15).
+    # The pseudocode structure follows the "recursive algorithm" description:
+    # "recursively estimate L(x -> y) and weight the result"
+    
+    # To be precise with formula (15), the term f(y-tw -> y -> z) is constant
+    # for the inner integral over x. The recursion estimates the integral over x.
+    # So we return the weighted recursive estimate.
+    
+    bias_contribution = weight * L_x_to_y
+    
+    return bias_contribution
+```
+
+**Edge Cases and Pitfalls:**
+*   **Choice of $b$:** The efficiency depends heavily on $b$. If $b$ is not chosen carefully, bright spots can appear in weakly illuminated areas caused by close-by point lights [S1].
+*   **Point Lights:** Special care is needed for point lights. Options include bounding point light contributions and bias compensation to the same maximum value [S1].
+*   **Singularity:** The method handles the weak singularity (infinite variance) by bounding $G$, but the bias compensation ensures the result remains unbiased [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The method introduces a recursive component. The depth of recursion depends on the scene geometry and the choice of $b$. In the worst case, it can increase rendering time significantly if many samples require deep recursion. However, the termination condition ($G \le b$) helps prune paths.
+*   **Memory Complexity:** Minimal additional memory compared to standard Instant Radiosity, as it relies on recursive function calls rather than storing large bias maps.
+*   **Strengths:** Unbiased result; handles weak singularities effectively; interpretable as a special case of Bidirectional Path Tracing [S1].
+*   **Limitations:** Efficiency is highly sensitive to the bound $b$; can be slow if $b$ is set too low, causing excessive recursion; bright spots may still occur if $b$ is not optimized for the scene's lighting [S1].
+*   **When to use:** When using Instant Radiosity in participating media and encountering noise or bias due to points being very close to light sources.
+*   **When not to use:** If performance is critical and some bias is acceptable, standard Instant Radiosity with clamping may be faster. If the scene has no strong point lights close to volume points, the overhead may not be justified.
+
+## Background
+The method extends the bias compensation technique from [KK04] to participating media [S1]. It is based on the observation that bounding the geometric term $G$ in Instant Radiosity avoids the weak singularity but introduces bias. By reformulating the bias integral and estimating it recursively, the method achieves unbiased results. The approach is interpreted as a special case of Bidirectional Path Tracing where weighting functions are constructed with respect to the value of the geometric term [S1].
+
+## Sources
+[S1] Unbiased Global Illumination with Participating Media, http://www.uni-ulm.de/fileadmin/website_uni_ulm/iui.inst.100/institut/Papers/ugiwpm.pdf, fetched 2026-10-30

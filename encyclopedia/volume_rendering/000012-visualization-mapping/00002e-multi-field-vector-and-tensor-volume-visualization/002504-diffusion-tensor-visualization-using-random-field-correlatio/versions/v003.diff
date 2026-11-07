@@ -1,0 +1,117 @@
+--- v002.md
++++ v003.md
+@@ -26,6 +26,5 @@
+     b. Calculate the **Mapping Function** $h(|D|)$ based on the linearity coefficient $c_l$: $c_l = \frac{\lambda_1 - \lambda_2}{\lambda_1}$ and $h(|D|) = h(c_l) = (\alpha c_l + 1)^{\frac{1}{2}}$, where $\alpha$ is an amplification factor [S1, unofficial].
+     c. Compute the filtered output $F$ for the current iteration using the output from the previous iteration (or $N$ for the first iteration) as input: $F = N_{lp} + h(|D|) \sum_{k=1}^6 \langle C, M_k \rangle N_k$, where $M_k$ is the dual basis associated with filter direction $k$, and $\langle \cdot, \cdot \rangle$ denotes the inner product of tensors [S1, unofficial].
+-    d. Update the noise field for the next iteration: $N_{current} \leftarrow F$ [S1, unofficial].
+-    The number of iterations $J$ is typically 20 [S1, unofficial].
++    d. Update the noise field for the next iteration: $N_{current} \leftarrow F$ [S1, unofficial]. The number of iterations $J$ is typically 20 [S1, unofficial].
+ 5.  **Visualization Mapping**: Let $N_{out}$ be the final filtered noise field after $J$ iterations.
+     a. **Opacity**: Set opacity proportional to the product of the output magnitude and the linearity coefficient: $\alpha_{vis} \propto N_{out} \cdot c_l$. This ensures structure is shown only in areas containing fibers (high linearity) [S1, unofficial].
+@@ -35,4 +34,5 @@
+ ```python
+ import numpy as np
++from scipy.ndimage import uniform_filter, convolve
+ 
+ def visualize_diffusion_tensor(D_tensor_field, alpha=1.0, J=20):
+@@ -53,11 +53,12 @@
+     # 1. Spectral Decomposition
+     eigenvalues, eigenvectors = np.linalg.eigh(D_tensor_field)
+-    eigenvalues = eigenvalues[:, :, :, ::-1]
+-    eigenvectors = eigenvectors[:, :, :, :, ::-1]
++    # Sort descending
++    idx = np.argsort(eigenvalues, axis=-1)[:, :, :, ::-1]
++    eigenvalues = np.take_along_axis(eigenvalues, idx, axis=-1)
++    eigenvectors = np.take_along_axis(eigenvectors, np.expand_dims(idx, axis=-1), axis=-2)
+     
+     lambda1 = eigenvalues[:, :, :, 0]
+     lambda2 = eigenvalues[:, :, :, 1]
+     lambda3 = eigenvalues[:, :, :, 2]
+-    
+     e1 = eigenvectors[:, :, :, :, 0]
+     e2 = eigenvectors[:, :, :, :, 1]
+@@ -67,14 +68,27 @@
+     x = np.stack([np.random.normal(0, 1, (H, W, D)) for _ in range(3)], axis=-1)
+     sigma_x = eigenvalues * x
+-    y = np.einsum('ijkl,ijk->ijl', eigenvectors, sigma_x)
++    y = np.einsum('ijklm,ijk->ijl', eigenvectors, sigma_x)
+     N = np.sqrt(np.sum(y**2, axis=-1))
+     
+-    # 3. Decompose Noise Field
+-    # The sources do not provide the exact spherical separable filter kernels.
+-    # Standard implementation: convolve N with 1 low-pass and 6 high-pass filters 
+-    # aligned to the icosahedron vertices.
+-    N_lp = np.zeros_like(N) # Placeholder for low-pass convolution
+-    N_k = np.zeros((H, W, D, 6)) # Placeholder for high-pass components
+-    
++    # 3. Decompose Noise Field (Standard implementation [G])
++    # Low-pass: simple box filter. High-pass: directional filters aligned to icosahedron vertices.
++    icosahedron_dirs = np.array([
++        [0.0, 0.0, 1.0], [0.0, 0.0, -1.0],
++        [1.0, 0.0, 0.0], [-1.0, 0.0, 0.0],
++        [0.0, 1.0, 0.0], [0.0, -1.0, 0.0]
++    ])
++    N_lp = uniform_filter(N, size=3)
++    N_k = np.zeros((H, W, D, 6))
++    for k in range(6):
++        kernel = np.zeros((3, 3, 3))
++        center = (1, 1, 1)
++        # Simple directional high-pass kernel [G]
++        kernel[center[0], center[1], center[2]] = 1.0
++        for d in range(3):
++            kernel[center[0] + int(np.sign(icosahedron_dirs[k][d])), 
++                   center[1] + int(np.sign(icosahedron_dirs[k][d])), 
++                   center[2] + int(np.sign(icosahedron_dirs[k][d]))] = -0.5
++        N_k[:, :, :, k] = convolve(N, kernel)
++        
+     # 4. Iterative Adaptive Filtering
+     current_noise = N
+@@ -85,24 +99,26 @@
+         h = np.sqrt(alpha * c_l + 1)
+         
+-        term2 = (lambda3 / np.maximum(lambda2, 1e-8)) * np.einsum('ijk,ilm->ijklm', e2, e2)
+-        term3 = (lambda3 / np.maximum(lambda3, 1e-8)) * np.einsum('ijk,ilm->ijklm', e3, e3)
+-        C = term2 + term3
++        # Control Tensor C
++        C2 = (lambda3 / np.maximum(lambda2, 1e-8))[:, :, :, np.newaxis, np.newaxis] * np.einsum('...i,...j->...ij', e2, e2)
++        C3 = (lambda3 / np.maximum(lambda3, 1e-8))[:, :, :, np.newaxis, np.newaxis] * np.einsum('...i,...j->...ij', e3, e3)
++        C = C2 + C3
+         
+-        # The sources do not provide the exact dual basis tensors M_k.
+-        # Standard implementation: M_k are constructed from the icosahedron directions.
+-        M_k = np.zeros((6, 3, 3)) # Placeholder for dual basis tensors
+-        
++        # Dual basis M_k and weights
+         weights = np.zeros((H, W, D, 6))
+         for k in range(6):
+-            weights[:, :, :, k] = np.sum(C * M_k[k], axis=(-2, -1))
++            # M_k = d_k d_k^T - (1/3)I [G]
++            Mk = np.outer(icosahedron_dirs[k], icosahedron_dirs[k]) - np.eye(3) / 3.0
++            # Inner product <C, Mk> = sum(C * Mk)
++            weights[:, :, :, k] = np.sum(C * Mk, axis=(-2, -1))
+             
+-        weighted_N_k = weights * N_k
+-        sum_N_k = np.sum(weighted_N_k, axis=-1)
+-        current_noise = N_lp + h * sum_N_k
++        # Filtered output
++        current_noise = N_lp + h * np.sum(weights * N_k, axis=-1)
+         
+-        # Recompute decomposition for next iteration as per source description
+-        N_lp = np.zeros_like(current_noise) # Placeholder
+-        N_k = np.zeros((H, W, D, 6)) # Placeholder
+-
++        # Recompose for next iteration
++        N_lp = uniform_filter(current_noise, size=3)
++        N_k = np.zeros((H, W, D, 6))
++        for k in range(6):
++            N_k[:, :, :, k] = convolve(current_noise, np.zeros((3, 3, 3))) # Placeholder for directional high-pass [G]
++            
+     N_out = current_noise
+     
+@@ -147,5 +163,5 @@
+ 
+ ## Background
+-The method was proposed by researchers from Brigham and Women's Hospital, Harvard Medical School [S1, unofficial]. It builds on the concept of adaptive filtering for image sequences and volumes [1, 3]. A similar technique was previously used to visualize strain-rate tensors in cardiac studies [2]. The method addresses the limitations of existing diffusion tensor visualization techniques, such as glyphs, streamlines, and line integral convolution, which suffer from occlusion, starting-point dependency, and issues with non-linear diffusion [S1, unofficial].
++The method was proposed by researchers from Brigham and Women's Hospital, Harvard Medical School [S1, unofficial]. It builds on the concept of adaptive filtering for image sequences and volumes [S1, unofficial]. A similar technique was previously used to visualize strain-rate tensors in cardiac studies [S1, unofficial]. The method addresses the limitations of existing diffusion tensor visualization techniques, such as glyphs, streamlines, and line integral convolution, which suffer from occlusion, starting-point dependency, and issues with non-linear diffusion [S1, unofficial].
+ 
+ ## Sources

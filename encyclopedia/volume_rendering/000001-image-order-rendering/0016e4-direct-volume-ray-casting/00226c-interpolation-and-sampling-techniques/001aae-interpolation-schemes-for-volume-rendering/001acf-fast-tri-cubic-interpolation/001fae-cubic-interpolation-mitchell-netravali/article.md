@@ -2,17 +2,17 @@
 Also called: Mitchell-Netravali, Mitchell-Netravali Cubic Filter
 
 ## Overview
-Mitchell-Netravali cubic interpolation is a parameterized family of reconstruction filters used in volume rendering to approximate scalar values at arbitrary positions within a 3D grid [S1, unofficial]. It solves the problem of high-frequency leakage artifacts (ringing, aliasing) caused by discontinuities in lower-order methods, while offering a tunable trade-off between blurring and ringing [S1, unofficial]. It sets itself apart from its parent [Fast tri-cubic interpolation](848-fast-tri-cubic-interpolation.md) by defining the specific mathematical kernel and parameter space ($B, C$) rather than the hardware-accelerated fetch reduction technique, and from its sibling [Adaptive Filter Size for Rendering Time Reduction](861-adaptive-filter-size-for-rendering-time-reduction.md) by using a fixed spatial extent [S1, unofficial].
+Mitchell-Netravali cubic interpolation is a parameterized family of reconstruction filters used in volume rendering to approximate scalar values at arbitrary positions within a 3D grid [S1, unofficial]. It solves the problem of high-frequency leakage artifacts (ringing, aliasing) caused by discontinuities in lower-order methods, while offering a tunable trade-off between blurring and ringing [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-- Input: A 3D scalar field (volume texture), a query point $\mathbf{p} = (x, y, z)$ in continuous texture coordinates, and two tuning parameters $B$ and $C$.
-- Output: A single interpolated scalar value $V(\mathbf{p})$.
+- Input: A 3D scalar field (volume texture), a query point $\mathbf{p} = (x, y, z)$ in continuous texture coordinates, and two tuning parameters $B$ and $C$ [S1, unofficial].
+- Output: A single interpolated scalar value $V(\mathbf{p})$ [S1, unofficial].
 
 **Data Structures**
-- The volume is stored as a 3D array of voxels.
-- The query point $\mathbf{p}$ is decomposed into integer indices $(i, j, k)$ and fractional offsets $(\delta_x, \delta_y, \delta_z)$ where $\delta \in [0, 1)$.
-- The kernel requires a $4 \times 4 \times 4$ neighborhood of 64 voxels centered around the query point.
+- The volume is stored as a 3D array of voxels [G].
+- The query point $\mathbf{p}$ is decomposed into integer indices $(i, j, k)$ and fractional offsets $(\delta_x, \delta_y, \delta_z)$ where $\delta \in [0, 1)$ [G].
+- The kernel requires a $4 \times 4 \times 4$ neighborhood of 64 voxels centered around the query point [S1, unofficial].
 
 **Kernel Definition**
 The 1D reconstruction kernel $k(x)$ is defined piecewise based on the absolute distance $|x|$ from the sample center [S1, unofficial]:
@@ -34,40 +34,40 @@ The filter satisfies the partition of unity constraint $\sum_{n=-\infty}^{\infty
   - Catmull-Rom splines: $B=0.0, C=0.5$ [S1, unofficial].
 
 **Algorithm Steps**
-1.  **Decomposition**: For each dimension $d \in \{x, y, z\}$, compute the integer base index $idx_d = \lfloor p_d \rfloor$ and the fractional offset $\delta_d = p_d - idx_d$.
-2.  **Neighborhood Selection**: Identify the 4 indices along each dimension: $idx_d - 1, idx_d, idx_d + 1, idx_d + 2$. This defines a $4 \times 4 \times 4$ grid of 64 voxel coordinates.
-3.  **Weight Calculation**: For each dimension, compute the 1D kernel weights for the 4 offsets relative to the query point. The distance $|x|$ for the offset $\delta_d$ is $\delta_d$ for the first two indices and $1-\delta_d$ or $2-\delta_d$ for the outer indices. Specifically, for a query at $p$, the distances to the samples at $idx-1, idx, idx+1, idx+2$ are $1+\delta, \delta, 1-\delta, 2-\delta$ respectively.
-4.  **Trilinear Convolution**: Compute the interpolated value by convolving the voxel values with the tensor product of the 1D weights. For each of the 64 voxels $V_{ijk}$, multiply by the product of its three 1D weights $w_x \cdot w_y \cdot w_z$.
-5.  **Clamping**: Sum the weighted values. If the result lies outside the valid range of the input data (e.g., $[0, 1]$ for normalized floats), clamp it to that range [S1, unofficial].
+1. **Decomposition**: For each dimension $d \in \{x, y, z\}$, compute the integer base index $idx_d = \lfloor p_d \rfloor$ and the fractional offset $\delta_d = p_d - idx_d$ [G].
+2. **Neighborhood Selection**: Identify the 4 indices along each dimension: $idx_d - 1, idx_d, idx_d + 1, idx_d + 2$. This defines a $4 \times 4 \times 4$ grid of 64 voxel coordinates [S1, unofficial].
+3. **Weight Calculation**: For each dimension, compute the 1D kernel weights for the 4 offsets relative to the query point. The distance $|x|$ for the offset $\delta_d$ is $\delta_d$ for the first two indices and $1-\delta_d$ or $2-\delta_d$ for the outer indices. Specifically, for a query at $p$, the distances to the samples at $idx-1, idx, idx+1, idx+2$ are $1+\delta, \delta, 1-\delta, 2-\delta$ respectively [G].
+4. **Trilinear Convolution**: Compute the interpolated value by convolving the voxel values with the tensor product of the 1D weights. For each of the 64 voxels $V_{ijk}$, multiply by the product of its three 1D weights $w_x \cdot w_y \cdot w_z$ [G].
+5. **Clamping**: Sum the weighted values. If the result lies outside the valid range of the input data (e.g., $[0, 1]$ for normalized floats), clamp it to that range [S1, unofficial].
 
 **Pseudocode**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def mitchell_netravali(volume, p, B, C):
+def mitchell_netravali(volume, p, B, C, data_min, data_max):
     """
     volume: 3D array of voxel values
     p: tuple (x, y, z) of continuous coordinates
     B, C: filter parameters
+    data_min, data_max: minimum and maximum valid values in the input data
     """
     result = 0.0
+    floor_p = (floor(p[0]), floor(p[1]), floor(p[2]))
     
     # Iterate over the 4x4x4 neighborhood
     for dx in range(-1, 3):
         for dy in range(-1, 3):
             for dz in range(-1, 3):
                 # Calculate distance from query point for each dimension
-                dist_x = abs(p[0] - (floor(p[0]) + dx))
-                dist_y = abs(p[1] - (floor(p[1]) + dy))
-                dist_z = abs(p[2] - (floor(p[2]) + dz))
+                dist_x = abs(p[0] - (floor_p[0] + dx))
+                dist_y = abs(p[1] - (floor_p[1] + dy))
+                dist_z = abs(p[2] - (floor_p[2] + dz))
                 
-                # Get voxel value, handling boundaries with clamping or zero-padding
-                # Note: Boundary handling is implementation-specific; 
-                # standard practice is clamping coordinates to valid range [G]
-                ix = clamp(floor(p[0]) + dx, 0, volume.width - 1)
-                iy = clamp(floor(p[1]) + dy, 0, volume.height - 1)
-                iz = clamp(floor(p[2]) + dz, 0, volume.depth - 1)
+                # Get voxel value, handling boundaries with clamping to valid range [G]
+                ix = clamp(floor_p[0] + dx, 0, volume.width - 1)
+                iy = clamp(floor_p[1] + dy, 0, volume.height - 1)
+                iz = clamp(floor_p[2] + dz, 0, volume.depth - 1)
                 val = volume[ix, iy, iz]
                 
                 # Calculate 1D kernel weights
@@ -78,7 +78,7 @@ def mitchell_netravali(volume, p, B, C):
                 result += val * wx * wy * wz
                 
     # Clamp output to input range
-    return clamp(result, min_value, max_value)
+    return clamp(result, data_min, data_max)
 
 def kernel_1d(x, B, C):
     abs_x = abs(x)
@@ -109,7 +109,7 @@ Refers to the general class of tri-cubic schemes utilizing a $4 \times 4 \times 
 - **Limitations**: Can produce values outside the input range, requiring clamping [S1, unofficial].
 
 ## Background
-The Mitchell-Netravali filter was defined by Mitchell and Netravali in 1988 [S1, unofficial]. It is widely used in volume rendering and image processing for reconstruction-quality imagery [S1, unofficial].
+The filter family was defined by Mitchell in 1988 [S1, unofficial]. It is used for reconstruction-quality imagery [S1, unofficial].
 
 ## Sources
 [S1] A Parallel, Feed-Forward Volume Rendering Algorithm, https://www.cs.unc.edu/techreports/91-029.pdf, fetched 2026-10-27 (unofficial)

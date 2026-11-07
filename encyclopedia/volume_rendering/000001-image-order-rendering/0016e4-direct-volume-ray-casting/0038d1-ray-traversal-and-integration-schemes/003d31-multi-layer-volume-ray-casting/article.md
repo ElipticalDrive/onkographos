@@ -3,262 +3,211 @@
 Also called: raycast1Layer, segment-by-segment ray casting
 
 ## Overview
-Multi-layer Volume Ray Casting is a GPU-based rendering method that handles complex volume-of-interest (VOI) interactions, including clipping, embedding, and CSG operations, by encoding spatial overlaps into a pre-generated ray-layer buffer [S1]. Unlike standard direct volume ray casting which processes a single continuous ray or requires multiple passes for different objects, this method casts rays segment-by-segment using material-specific transfer functions and priorities within a single rendering pass [S1]. It distinguishes itself by storing only the Z-coordinate of layer starts rather than full 3D texture coordinates, reducing memory usage and ensuring bricking compatibility [S1].
+Multi-layer volume ray casting is a unified rendering framework that treats volume datasets and geometric objects (clipping geometry, embedded opaque/semi-transparent objects, editing masks, MPRs, non-empty-space boundaries) as Volume-of-Interests (VOIs) [S1]. It solves the problem of rendering complex, overlapping spatial regions with different material properties and priorities by encoding all VOI information into a pre-generated **ray-layer buffer** [S1]. Unlike standard ray marching which processes a single continuous ray or polygon-assisted methods that store full 3D coordinates, this method iterates through non-overlapping ray segments stored in the buffer, allowing material-specific transfer functions and shading per segment while maintaining bricking compatibility [S1].
 
 ## How it works
-The method operates in two distinct phases: the generation of a ray-layer buffer that encodes VOI priorities and boundaries, and the segment-by-segment ray casting that renders these layers using specific viewing parameters [S1].
+The method consists of two main phases: generating the ray-layer buffer via depth peeling, and performing segment-by-segment ray casting using that buffer [S1].
 
 ### Inputs and Outputs
 **Inputs:**
-*   Volume dataset (scalar field).
-*   Set of Volume-of-Interests (VOIs), each defined by a boundary (e.g., clipping geometry, embedded objects, MPR planes) and a priority number [S1].
-*   Transfer functions and material properties associated with each VOI [S1].
-*   Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$) [S1].
+*   Volume dataset (potentially bricked).
+*   Set of VOIs, each defined by geometry or volume properties, a **Material ID**, and a **Priority Number** [S1].
+*   Transfer functions, one per Material ID [S1].
+*   `renderMpr` flag: Boolean indicating whether Multi-Planar Reformation (MPR) layers should be rendered [S1].
 
 **Outputs:**
-*   Final 2D image (frame buffer) [S1].
+*   Final image.
 *   Ray-layer buffer (intermediate data structure) [S1].
 
 ### Data Structures
 
 **Ray-Layer Buffer**
-A per-pixel array storing a set of non-overlapping ray segments [S1].
-*   **Layout:** Each segment in the buffer stores:
-    *   `rayStart`: The starting Z-coordinate (depth) of the segment relative to the camera or volume space [S1].
-    *   `materialID`: An integer identifier linking the segment to a specific VOI's transfer function and properties [S1].
-*   **Note:** Unlike polygon-assisted ray casting which stores full 3D texture coordinates, this buffer stores only the Z value [S1]. This reduces memory usage and ensures sampling locations align across bricks for bricking compatibility [S1].
+*   **Layout:** A 2D texture (one entry per pixel).
+*   **Content:** An array of ray segments.
+*   **Segment Fields:**
+    *   `rayStart`: The starting Z-coordinate (depth) of the segment within the current brick. Note: Only the Z value is stored, not full 3D texture coordinates [S1].
+    *   `rayEnd`: The ending Z-coordinate of the segment [S1].
+    *   `materialID`: An integer identifying the material properties (transfer function, shading parameters) for this segment [S1].
+*   **Properties:** Segments are non-overlapping and ordered [S1].
 
-**Transfer Function Texture**
-To support multiple transfer functions in a single pass, they are stacked into a single 2D texture [S1].
-*   **Layout:** A 2D texture where each transfer function occupies a horizontal strip of height $D$ [S1].
-*   **Access:** To sample the transfer function for a specific `materialID`, the texture coordinate offset is calculated as `materialID * D` [S1].
+**Transfer Function Storage**
+*   Transfer functions for all material IDs are stacked into a single 2D texture [S1].
+*   To sample the transfer function for a specific `materialID`, the texture coordinate offset is calculated as `materialID * D`, where `D` is the size (width or height, depending on layout) of a single transfer function in the texture [S1].
 
 ### Algorithm Steps
 
 #### Phase 1: Ray-Layer Buffer Generation
-This phase converts VOI information into the ray-layer buffer using depth peeling [S1].
-
-1.  **VOI Definition:** Define all VOIs (volume data, clipping geometry, embedded objects, MPRs, non-empty-space boundaries) [S1].
-2.  **Priority Assignment:** Assign an integer priority number to each VOI [S1].
-    *   Higher priority overwrites lower priority in overlapped regions [S1].
-    *   Multiple VOIs with identical priorities are blended [S1].
-    *   The default VOI (implicit bounding box of the volume) has the lowest priority [S1].
-3.  **Depth Peeling:** Perform depth peeling on all VOI boundaries [S1].
-    *   This is done via a custom GPU program performing stencil-like containment tests, preserving priority and ID information [S1].
-4.  **Layer Simplification & Encoding:** Organize peeled fragments into layers [S1].
-    *   For each pixel, encode a set of non-overlapping ray segments [S1].
-    *   Record the starting Z-coordinate (`rayStart`) and the `materialID` for each segment [S1].
-    *   The resulting buffer contains the complete set of ray segments for the entire volume, shared by all bricks if bricking is used [S1].
+1.  **VOI Definition:** Define all VOIs. Assign each a priority number (integer). Higher priority overwrites lower priority in overlaps. If priorities are identical, contributions are blended [S1].
+2.  **Default VOI:** Assign the bounding box of the volume dataset as the default VOI with the lowest priority. Voxels excluded by all other VOIs are rendered according to this default [S1].
+3.  **Depth Peeling:** Perform depth peeling on the boundaries of all VOIs [S1]. This is done via stencil-like tests inside a GPU program to preserve priority and ID information, rather than using hardware stencil buffers [S1].
+4.  **Layer Simplification & Encoding:** Organize the peeled fragments into layers. For each pixel, encode a set of non-overlapping ray segments. Record the starting Z-coordinate (`rayStart`) and the `materialID` for each segment [S1].
+5.  **Buffer Creation:** Store these segments in the ray-layer buffer. A single shared buffer is used for the whole volume (across all bricks) to ensure efficiency and debuggability [S1].
 
 #### Phase 2: Multi-Layer Ray Casting
-This phase iterates through the ray-layer buffer to render the image [S1].
+For each pixel, the ray caster iterates through the segments in the ray-layer buffer.
 
-1.  **Ray Generation:** For each pixel, define the ray $r(t) = \mathbf{o} + t\mathbf{d}$ [S1].
-2.  **Segment Iteration:** Initialize an index to the first segment in the ray-layer buffer for the current pixel [S1].
-3.  **Loop:** While the current segment is valid and ray casting is not terminated:
-    a.  **Fetch Segment:** Decode the current layer information from the ray-layer buffer: `rayStart`, `rayEnd`, and `materialID` [S1].
-    b.  **Brick Boundary Check:** Check if `rayStart` is behind the far end of the current brick [S1].
-        *   If yes, return `false` (terminate ray for this brick) [S1].
-    c.  **MPR Rendering (Optional):** If the `renderMpr` flag is set, render the MPR layer in the intersection of $[rayStart, rayEnd]$ with the current brick before standard ray casting [S1].
-    d.  **Segment Rendering:** Call `raycast1Layer` to render the segment defined by `rayStart` and `rayEnd` using the viewing parameters associated with `materialID` [S1].
-        *   Inside `raycast1Layer`:
-            1.  Perform standard direct volume ray casting for the segment (sampling, classification, compositing) [S1].
-            2.  Use the ray-layer buffer to estimate gradients on layer surfaces to improve shading effects [S1].
-            3.  Inspect accumulated opacity $\alpha'$ [S1].
-            4.  Check if `rayEnd` is behind the far end of the brick [S1].
-                *   If yes, return `false` (termination) [S1].
-                *   Otherwise, return `true` (continue to next layer) [S1].
-    e.  **Termination Check:** If `raycast1Layer` returns `false`, terminate the loop [S1].
-    f.  **Next Segment:** Increment the segment index to process the next layer in the buffer [S1].
+1.  **Fetch Segment:** Retrieve the current segment's `rayStart`, `rayEnd`, and `materialID` from the ray-layer buffer [S1].
+2.  **Loop Condition:** If there are no more segments, terminate the ray for this pixel [S1].
+3.  **Invoke Segment Renderer:** Call `raycast1Layer(rayStart, rayEnd, materialID, brickBounds)` [S1].
+    *   *See Pseudocode below for `raycast1Layer` logic.*
+4.  **Check Return Value:**
+    *   If `raycast1Layer` returns `true`: Continue to the next segment in the buffer.
+    *   If `raycast1Layer` returns `false`: Terminate the ray for this pixel (accumulated opacity is sufficient or ray is out of bounds) [S1].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def multi_layer_volume_ray_casting(camera, volume, voi_list, ray_layer_buffer):
+def multi_layer_volume_casting(pixel_coords, ray_layer_buffer, bricks, renderMpr_flag):
     """
-    Main entry point for multi-layer volume ray casting.
-    camera: Object containing origin o and direction d.
-    volume: The scalar volume dataset.
-    voi_list: List of VOIs with priorities and material IDs.
-    ray_layer_buffer: 2D array where each pixel contains a list of segments.
-                      Each segment is a tuple (ray_start_z, ray_end_z, material_id).
+    Main loop for a single pixel.
+    pixel_coords: (x, y)
+    ray_layer_buffer: 2D texture containing arrays of segments per pixel
+    bricks: List of brick objects, each with bounds and volume data
+    renderMpr_flag: Boolean
     """
-    # Pre-process transfer functions into a stacked texture
-    transfer_texture = stack_transfer_functions(voi_list)
+    # 1. Fetch the array of segments for this pixel from the buffer
+    segments = ray_layer_buffer[pixel_coords]
     
-    # Initialize frame buffer
-    frame_buffer = zeros_like(screen_resolution)
+    # 2. Initialize accumulation variables
+    accumulated_color = (0.0, 0.0, 0.0, 0.0)
+    accumulated_opacity = 0.0
     
-    # Iterate over all pixels
-    for y, x in screen_resolution:
-        # Get segments for this pixel from the ray-layer buffer
-        segments = ray_layer_buffer[y, x]
+    # 3. Iterate through segments
+    for segment in segments:
+        ray_start_z = segment.rayStart
+        ray_end_z = segment.rayEnd
+        material_id = segment.materialID
         
-        # Initial accumulated color and opacity
-        acc_color = vec3(0.0)
-        acc_opacity = 0.0
+        # 4. Find the brick containing this segment
+        # Note: In a bricked implementation, the ray-layer buffer is global,
+        # but casting happens per brick. The segment's Z is relative to the brick.
+        brick = get_brick_containing_z(ray_start_z)
         
-        # Iterate through segments
-        for segment in segments:
-            ray_start_z, ray_end_z, material_id = segment
-            
-            # Check if segment is valid (basic validity check)
-            if ray_start_z >= ray_end_z:
-                continue
-                
-            # Call the single-layer renderer
-            # Returns (new_acc_color, new_acc_opacity, should_continue)
-            result = raycast1_layer(
-                camera, 
-                volume, 
-                transfer_texture, 
-                material_id, 
-                ray_start_z, 
-                ray_end_z,
-                acc_opacity # Pass current opacity to check for early termination if needed
-            )
-            
-            new_acc_color, new_acc_opacity, should_continue = result
-            
-            # Update accumulation
-            acc_color = new_acc_color
-            acc_opacity = new_acc_opacity
-            
-            # If the layer renderer indicates termination (e.g., fully opaque or end of brick)
-            if not should_continue:
-                break
+        # 5. Call the segment renderer
+        continue_casting = raycast1_layer(
+            ray_start_z, 
+            ray_end_z, 
+            material_id, 
+            brick, 
+            renderMpr_flag
+        )
         
-        # Write final color to frame buffer
-        frame_buffer[y, x] = acc_color
-
-    return frame_buffer
-
-
-def raycast1_layer(camera, volume, transfer_texture, material_id, ray_start_z, ray_end_z, current_opacity):
-    """
-    Renders a single ray segment defined by ray_start_z and ray_end_z.
-    Implements the standard direct volume ray casting loop for this segment.
-    """
-    # Determine step size and sample points within [ray_start_z, ray_end_z]
-    # Note: The sources imply standard discretization within the segment
-    samples = generate_samples(camera, ray_start_z, ray_end_z)
-    
-    local_acc_color = vec3(0.0)
-    local_acc_opacity = 0.0
-    
-    # Standard front-to-back compositing for this segment
-    for sample in samples:
-        # 1. Sampling and Interpolation
-        # Get scalar value from volume at sample position
-        scalar_val = trilinear_interpolate(volume, sample.position)
+        # 6. Update accumulation and check termination
+        # Note: The specific accumulation logic (front-to-back) is assumed 
+        # to be handled inside raycast1_layer or the caller. 
+        # Based on [S1], raycast1_layer returns a boolean indicating if 
+        # we should continue to the NEXT layer.
         
-        # 2. Classification (Transfer Function)
-        # Access stacked transfer function texture
-        # Offset is material_id * D, where D is height of one transfer function
-        tf_offset = material_id * TRANSFER_FUNCTION_HEIGHT
-        color, opacity = sample_transfer_function(transfer_texture, scalar_val, tf_offset)
-        
-        # 3. Shading (Gradient Estimation)
-        # Use ray-layer buffer to estimate gradients on layer surfaces
-        normal = estimate_gradient_from_buffer(sample.position, ray_layer_buffer)
-        shaded_color = apply_phong_shading(color, normal, light_positions)
-        
-        # 4. Compositing
-        # Transmittance of previous samples
-        transmittance = 1.0 - local_acc_opacity
-        
-        # Update accumulated color and opacity
-        local_acc_color += transmittance * opacity * shaded_color
-        local_acc_opacity += transmittance * opacity
-        
-        # Early termination if fully opaque
-        if local_acc_opacity >= 1.0:
+        if not continue_casting:
             break
             
-    # Determine if we should continue to the next layer
-    # The source mentions checking if rayEnd is behind the far end of the brick
-    # and inspecting accumulated opacity.
-    # For simplicity, we assume the caller handles brick boundary checks 
-    # by passing ray_start/end relative to the brick or global space.
-    # Here, we return true to continue unless fully opaque.
-    should_continue = local_acc_opacity < 1.0
-    
-    return local_acc_color, local_acc_opacity, should_continue
+    return accumulated_color
 
+def raycast1_layer(ray_start_z, ray_end_z, material_id, brick, renderMpr_flag):
+    """
+    Renders a single ray segment.
+    Returns True if the ray should continue to the next segment, False if terminated.
+    """
+    
+    # Check if rayStart is behind the far end of the current brick
+    if ray_start_z > brick.far_end_z:
+        return False  # Terminate ray for this brick
+    
+    # If renderMpr flag is set, render MPR layer in the intersection
+    if renderMpr_flag:
+        mpr_intersection_start = max(ray_start_z, brick.near_end_z)
+        mpr_intersection_end = min(ray_end_z, brick.far_end_z)
+        if mpr_intersection_start < mpr_intersection_end:
+            render_mpr_layer(mpr_intersection_start, mpr_intersection_end, material_id)
+            # Note: [S1] implies MPR rendering happens before standard ray casting
+            # for the segment. Accumulation logic for MPR is not detailed, 
+            # but it contributes to the frame buffer.
+    
+    # Perform standard volume ray casting for the segment [rayStart, rayEnd]
+    # within the brick, using the transfer function for material_id.
+    # This step updates accumulated_color and accumulated_opacity.
+    cast_volume_segment(ray_start_z, ray_end_z, material_id, brick)
+    
+    # Inspect accumulated opacity to determine possible termination
+    if accumulated_opacity >= 1.0:
+        return False  # Opaque, no need to process further layers
+    
+    # Check if rayEnd is behind the far end of the brick
+    if ray_end_z > brick.far_end_z:
+        return False  # All following layers are outside this brick
+    
+    return True  # Continue to next ray segment
 
-def stack_transfer_functions(voi_list):
+def cast_volume_segment(ray_start_z, ray_end_z, material_id, brick):
     """
-    Stacks multiple transfer functions into a single 2D texture.
+    Standard front-to-back ray casting for a segment.
     """
-    # Determine height D of a single transfer function
-    D = get_transfer_function_height()
+    step_size = get_step_size()
+    current_z = ray_start_z
     
-    # Create a texture of height D * num_vois
-    texture_height = D * len(voi_list)
-    texture = create_2d_texture(width=256, height=texture_height)
-    
-    for i, voi in enumerate(voi_list):
-        # Copy voi's transfer function into the texture at offset i * D
-        start_y = i * D
-        texture[start_y : start_y + D] = voi.transfer_function
+    while current_z < ray_end_z:
+        # Sample volume data
+        voxel_value = sample_volume(brick, current_z)
         
-    return texture
+        # Get transfer function for material_id
+        # Offset texture coordinate by material_id * D
+        tf_offset = material_id * D
+        color, opacity = sample_transfer_function(voxel_value, tf_offset)
+        
+        # Front-to-back compositing
+        # C_out = C_in + C_seg * (1 - A_in)
+        # A_out = A_in + A_seg * (1 - A_in)
+        alpha_contribution = opacity * (1.0 - accumulated_opacity)
+        accumulated_color += color * alpha_contribution
+        accumulated_opacity += alpha_contribution
+        
+        current_z += step_size
 
-
-def estimate_gradient_from_buffer(position, ray_layer_buffer):
+def render_mpr_layer(start_z, end_z, material_id):
     """
-    Estimates gradients on layer surfaces using the ray-layer buffer.
-    [G] Implementation detail: This typically involves comparing the Z-depth 
-    of the current sample against the stored rayStart/rayEnd values in the 
-    buffer to detect layer boundaries, then computing finite differences 
-    between adjacent samples or using the buffer's structural information 
-    to infer surface normals.
+    Renders an MPR layer.
     """
-    # Placeholder for specific gradient estimation logic based on buffer structure
-    # The source states: "The ray-layer buffer is also used to estimate gradients 
-    # on layer surfaces to improve shading effects."
+    # Implementation details for MPR rendering are not specified in [S1]
+    # beyond the fact that it occurs in the intersection range.
     pass
 ```
 
 ### Parameters
-*   **`renderMpr`**: A boolean flag indicating whether Multi-Planar Reformation (MPR) layers should be rendered before the volume ray casting for the current segment [S1].
-*   **`VOI priority number`**: An integer assigned to each VOI to determine rendering order in overlapped regions [S1].
-    *   Higher priority overwrites lower priority [S1].
-    *   Multiple VOIs may share identical priorities, in which case their contributions are blended [S1].
-*   **`Default VOI`**: The implicit bounding box of the volume dataset, assigned the lowest priority [S1]. Voxels excluded by all other VOIs are rendered according to this default [S1].
-*   **`D`**: The size (height) of a single transfer function in the stacked texture [S1].
+*   **`renderMpr`**: Boolean flag. If true, MPR layers are rendered before standard ray casting for the current segment [S1].
+*   **VOI Priority Number**: Integer assigned to each VOI. Higher priority overwrites lower priority. Identical priorities result in blending [S1].
+*   **Default VOI**: Implicit bounding box of the volume dataset, lowest priority [S1].
+*   **D**: Size of a single transfer function in the stacked 2D texture [S1].
 
 ### Edge Cases and Pitfalls
-*   **Empty Space Skipping:** Single-layer ray casting cannot skip empty spaces between the first and last visible samples [S1]. The multi-layer encoding explicitly stores non-overlapping segments, solving this [S1].
-*   **Embedded Objects:** Single-layer representation cannot cope with embedded objects that produce multiple layers [S1]. The ray-layer buffer handles this by storing multiple segments per pixel [S1].
-*   **Bricking Compatibility:** Storing only the Z value (not full 3D texture coordinates) ensures sampling locations align across bricks, which is critical for bricking [S1].
-*   **Priority Conflicts:** If multiple VOIs with different viewing parameters overlap, the priority number determines the outcome. Identical priorities result in blending [S1].
+*   **Empty Space Skipping:** Single-layer ray casting cannot skip empty spaces between the first and last visible samples. The multi-layer buffer explicitly stores non-overlapping segments, solving this [S1].
+*   **Embedded Objects:** Single-layer representations cannot cope with embedded objects producing multiple layers. The ray-layer buffer handles this by storing multiple segments per pixel [S1].
+*   **Bricking Compatibility:** Storing only the Z value (not full 3D coordinates) ensures sampling locations align across bricks, which is critical for bricking [S1].
+*   **Priority Conflicts:** If multiple VOIs overlap with different priorities, the higher priority VOI's material ID is used for the segment. If priorities are identical, blending occurs [S1].
 
 ## Subtopics
 
 ### [Ray-Layer Buffer Generation via Depth Peeling](9474-ray-layer-buffer-generation-via-depth-peeling.md)
-This method generates the ray-layer buffer required by Multi-layer Volume Ray Casting by depth-peeling Volume of Interest (VOI) definitions and grouping the resulting fragments into ordered layers based on VOI priority and material ID. It differs from standard GPU Constructive Solid Geometry (CSG) techniques by performing stencil-like containment tests inside a custom GPU program rather than using hardware stencil buffers, thereby preserving critical priority and ID information needed for correct layer placement and optimization.
+Generates the ray-layer buffer by depth-peeling VOI definitions and grouping fragments into ordered layers based on VOI priority and material ID. It differs from standard GPU-based CSG by performing stencil-like tests inside a GPU program, preserving priority/ID info. Choose this when you need to handle complex VOI overlaps with priorities and material-specific rendering in a unified framework.
 
 ## Operating characteristics
-*   **Time Complexity:** The multi-pass depth peeling cost is nearly ignorable compared to the ray casting cost [S1]. The algorithm shifts computational workload to layer sorting to keep the ray-casting loop as simple as possible [S1].
-*   **Memory Complexity:** The ray-layer buffer stores only the Z-coordinate and material ID per segment, which requires less memory than storing full 3D texture coordinates [S1].
-*   **Performance:** Using a single shared ray-layer buffer for the whole volume (with bricking) is more efficient and easier to debug than using a different ray-layer buffer for each brick [S1].
+*   **Time Complexity:** The multi-pass depth peeling cost is nearly ignorable compared to the ray casting cost [S1]. The algorithm shifts computational workload to layer sorting to keep the ray-casting loop simple [S1].
+*   **Memory Complexity:** The ray-layer buffer stores only Z coordinates and material IDs per segment, reducing memory usage compared to methods storing full 3D texture coordinates [S1].
+*   **Performance:** Using a single shared ray-layer buffer for the whole volume (with bricking) is more efficient and easier to debug than using a different buffer per brick [S1].
 *   **Strengths:**
-    *   Supports interactive volume editing, cutaway views, and prioritized overlay of geometric masks, MPRs, and embedded objects [S1].
-    *   Handles complex VOI interactions (clipping, CSG, embedding) in a single rendering pass [S1].
-    *   Compatible with bricking [S1].
+    *   Unified framework for VOIs, clipping, embedding, and CSG [S1].
+    *   Supports interactive editing and cutaway views [S1].
+    *   GPU-efficient due to simple ray-casting loop [S1].
+    *   Enables gradient estimation on layer surfaces for improved shading [S1].
 *   **Limitations:**
-    *   Requires pre-generation of the ray-layer buffer via depth peeling [S1].
-    *   Relies on GPU hardware capabilities for depth peeling and fragment processing [S1].
-*   **When to Use:** Medical imaging and scientific visualization software requiring interactive editing and complex VOI management [S1].
-*   **When Not to Use:** Simple volume rendering without complex VOI interactions, where standard direct volume ray casting is sufficient and simpler to implement.
+    *   Requires pre-generation of the ray-layer buffer (depth peeling) [S1].
+    *   Relies on the assumption that depth peeling cost is negligible (valid for most scenes, but may vary) [S1].
+*   **When to Use:** Medical imaging and scientific visualization software requiring interactive volume editing, cutaway views, and prioritized overlay of geometric masks, MPRs, and embedded objects [S1].
+*   **When Not to Use:** Simple volume rendering without complex VOI interactions or embedded objects may not benefit from the overhead of buffer generation [S1].
 
 ## Background
-*   **Origin:** The method was presented by Wei Li from Siemens Corporate Research in 2010 [S1].
-*   **History:** It was developed to integrate various volume rendering enhancements (empty-space skipping, clipping, embedding, CSG) into a unified framework on GPU [S1]. It builds upon previous work in polygon-assisted ray casting and depth peeling but distinguishes itself by focusing on VOI priorities and material IDs rather than complex CSG trees [S1].
-*   **Usage:** It is used in medical imaging and scientific visualization software for interactive volume editing, cutaway views, and prioritized overlay of geometric masks, MPRs, and embedded objects [S1].
+Multi-layer volume ray casting was presented by Wei Li from Siemens Corporate Research [S1]. The paper was published in the proceedings of *Volume Graphics 2010* (VG10) [S1]. The method integrates various volume rendering enhancements (empty-space skipping, clipping, embedding, CSG) into a unified framework by treating them as VOIs [S1]. It builds on concepts from polygon-assisted ray casting and depth peeling but distinguishes itself by storing only Z coordinates and handling VOI priorities [S1].
 
 ## Sources
 [S1] Multi-layer Volume Ray Casting on GPU, https://doi.org/10.2312/vg/vg10/005-012, fetched 2026-10-26

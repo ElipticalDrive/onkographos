@@ -3,119 +3,128 @@
 Also called: Direct Lighting in Participating Media
 
 ## Overview
-Single Scattering is an approximation of light transport in participating media where in-scattered radiance is assumed to originate directly from light sources, ignoring light that has scattered more than once [S1, unofficial]. It solves the problem of rendering volumetric effects like fog or smoke with direct illumination by integrating the single-scattering term of the volume rendering integral over the spherical domain of incoming light directions [S1, unofficial]. Unlike [Single Scattering Approximation](5264-single-scattering-approximation.md) which may use broader approximations for the integral, this method explicitly handles the spherical integration via Next Event Estimation (NEE) to compute direct lighting contributions [S1, unofficial].
+Single scattering computes the in-scattered radiance from participating media by assuming that light undergoes at most one scattering event before reaching the camera. It solves the problem of rendering volumetric effects like fog, smoke, or underwater caustics where multiple bounces are negligible or computationally prohibitive. Unlike multiple scattering methods, it truncates the radiative transfer equation after the first term, relying on direct illumination from light sources rather than indirect bounces [S2][S3].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Ray origin $\mathbf{o}$, direction $\boldsymbol{\omega}$, scene geometry, light sources (positions, intensities), volume density field $\sigma_t(\mathbf{x})$, scattering coefficient $\sigma_s(\mathbf{x})$, phase function $p(\cdot)$, and background radiance $L_{bg}$.
-*   **Output:** Outgoing radiance $L_o(\mathbf{o}, \boldsymbol{\omega})$ at the ray origin.
+*   **Inputs:** Camera ray origin $\mathbf{o}$ and direction $\boldsymbol{\omega}$; scene geometry; light positions and intensities; volume density field $\sigma_t(\mathbf{x})$ (extinction coefficient); volume scattering coefficient $\sigma_s(\mathbf{x})$; phase function $p(\boldsymbol{\omega}_i, \boldsymbol{\omega}_o)$; background radiance $L_{bg}$.
+*   **Output:** Outgoing radiance $L_o(\mathbf{o}, \boldsymbol{\omega})$.
 
 **Data Structures:**
-*   **Light List:** A list of light sources, each containing position $\mathbf{l}_i$, intensity $I_{l_i}$, and geometric properties (e.g., area for area lights).
-*   **Volume Grid:** A 3D texture or grid storing $\sigma_t(\mathbf{x})$ and $\sigma_s(\mathbf{x})$ for trilinear interpolation.
-*   **Phase Function:** A function evaluating $p(\boldsymbol{\omega}_i, \boldsymbol{\omega}_o)$, typically Henyey-Greenstein or Mie.
+*   **Volume Grid:** A 3D texture or voxel grid storing $\sigma_t$ and $\sigma_s$. Layout is typically a dense array or sparse structure (e.g., Octree) depending on the implementation. For homogeneous volumes, these are scalar constants.
+*   **Light List:** A list of light sources, each containing position, direction (for directional/spot), intensity, and type.
 
-**Steps:**
-1.  **Compute Transmittance:** Calculate the transmittance $T(\mathbf{o}, \mathbf{p}_{far})$ from the eye origin $\mathbf{o}$ to the far plane $\mathbf{p}_{far}$ along the ray. This involves integrating $\sigma_t$ along the ray segment [S3].
-    $$ T(\mathbf{o}, \mathbf{x}) = \exp\left(-\int_{\mathbf{o}}^{\mathbf{x}} \sigma_t(\mathbf{u}) d\mathbf{u}\right) $$
-2.  **Initialize Radiance:** Set $L_o = T(\mathbf{o}, \mathbf{p}_{far}) L_{bg}$.
-3.  **Iterate Lights:** For each light source $i$ in the scene:
-    a.  **Sample Direction:** Determine the direction $\boldsymbol{\omega}_l$ from the current ray intersection point $\mathbf{x}$ (or a sampled point along the ray) to the light source $\mathbf{l}_i$.
-    b.  **Compute Incident Radiance:** Calculate the incident radiance $L_{in}(\mathbf{x}, \boldsymbol{\omega}_l)$ from the light, attenuated by the path from the light to $\mathbf{x}$ [S1, unofficial].
-        $$ L_{in}(\mathbf{x}, \boldsymbol{\omega}_l) = \frac{I_{l_i}}{\|\mathbf{x} - \mathbf{l}_i\|^2} p(\boldsymbol{\omega}_l, \boldsymbol{\omega}) T(\mathbf{l}_i, \mathbf{x}) V(\mathbf{l}_i, \mathbf{x}) $$
-        where $V(\mathbf{l}_i, \mathbf{x})$ is the visibility (0 or 1) between the light and the point, and $T(\mathbf{l}_i, \mathbf{x})$ is the transmittance from the light to the point.
-    c.  **Integrate In-Scattering:** Compute the in-scattered radiance contribution $L_s$ at point $\mathbf{x}$:
-        $$ L_s(\mathbf{x}, \boldsymbol{\omega}) = \sigma_s(\mathbf{x}) L_{in}(\mathbf{x}, \boldsymbol{\omega}_l) $$
-        Note: The full spherical integral $\int_{S^2} phase(\cdot) L_i(\cdot) d\vec{w}'$ is approximated by summing contributions from discrete lights (NEE) [S1, unofficial].
-    d.  **Attenuate to Eye:** Multiply $L_s$ by the transmittance from $\mathbf{x}$ to the eye $T(\mathbf{o}, \mathbf{x})$ and add to $L_o$.
-4.  **Return:** Return $L_o$.
+**Numbered Steps:**
+1.  **Ray Marching:** Cast a ray from $\mathbf{o}$ in direction $\boldsymbol{\omega}$ through the volume. Sample the extinction coefficient $\sigma_t(\mathbf{x})$ along the ray to compute transmittance $T(\mathbf{o}, \mathbf{x})$.
+2.  **Background Attenuation:** Compute the transmittance to the far plane $T(\mathbf{o}, \mathbf{p}_{far})$ and multiply by background radiance $L_{bg}$.
+3.  **Light Sampling (Next Event Estimation):** For each light source $L_k$:
+    a.  Compute the vector $\mathbf{l}$ from the current sample point $\mathbf{x}$ to the light.
+    b.  Compute the distance $d = \|\mathbf{l}\|$.
+    c.  Compute the transmittance from $\mathbf{x}$ to the light $T(\mathbf{x}, \mathbf{light})$. This requires ray casting or volume traversal from $\mathbf{x}$ to the light source.
+    d.  Compute the incident radiance $L_{in}(\mathbf{x}, \boldsymbol{\omega}_i)$ from the light, attenuated by the path from the light to $\mathbf{x}$.
+4.  **Phase Function Evaluation:** Evaluate the phase function $p(\boldsymbol{\omega}_i, \boldsymbol{\omega}_o)$ for the direction from the light $\boldsymbol{\omega}_i$ to the camera $\boldsymbol{\omega}_o$.
+5.  **Integration:** Accumulate the contribution of each light. The in-scattered radiance is the integral of the scattering coefficient, phase function, and incident radiance, weighted by transmittance.
+
+**Formulas:**
+The outgoing radiance is given by:
+$$ L_o(\mathbf{o}, \boldsymbol{\omega}) = T(\mathbf{o}, \mathbf{p}_{far}) L_{bg} + \int_{\mathbf{o}}^{\mathbf{p}_{far}} T(\mathbf{o}, \mathbf{x}) \sigma_s(\mathbf{x}) L_{in}(\mathbf{x}, \boldsymbol{\omega}) d\mathbf{x} $$
+
+Where:
+*   $T(\mathbf{o}, \mathbf{x}) = \exp\left(-\int_{\mathbf{o}}^{\mathbf{x}} \sigma_t(\mathbf{u}) d\mathbf{u}\right)$ is the transmittance from the eye to point $\mathbf{x}$ [S3].
+*   $\sigma_s(\mathbf{x})$ is the scattering coefficient [G].
+*   $L_{in}(\mathbf{x}, \boldsymbol{\omega})$ is the incident radiance at $\mathbf{x}$ from the light source(s), attenuated by the path from the light to $\mathbf{x}$ [S1, unofficial].
+*   $L_{bg}$ is the background radiance [S1, unofficial].
+
+The incident radiance $L_{in}$ for a point light of intensity $I$ at distance $d$ is:
+$$ L_{in}(\mathbf{x}, \boldsymbol{\omega}_i) = \frac{I}{d^2} T(\mathbf{light}, \mathbf{x}) p(\boldsymbol{\omega}_i, \boldsymbol{\omega}_o) $$
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def single_scattering(ray_origin, ray_direction, scene, lights):
+def single_scattering(ray_origin, ray_direction, volume, lights, background):
     # 1. Compute transmittance to far plane
-    t_far = compute_transmittance(ray_origin, ray_direction, scene.far_plane, scene.volume)
-    background_radiance = scene.background_radiance
-    L_o = t_far * background_radiance
-
-    # 2. Iterate over all lights
-    for light in lights:
-        # 3. Sample point on ray (or use intersection point)
-        # For simplicity, assume we evaluate at a specific point x_t along the ray
-        # In a path tracer, this is done via NEE sampling
-        x_t = sample_point_along_ray(ray_origin, ray_direction, light)
+    transmittance_eye = compute_transmittance(ray_origin, ray_direction, volume, far_distance)
+    
+    # 2. Background contribution
+    radiance = transmittance_eye * background
+    
+    # 3. Sample points along the ray for in-scattering
+    num_samples = 64 # Typical value for low-res approximation
+    step_size = far_distance / num_samples
+    
+    for i in range(num_samples):
+        # Current sample point
+        t = (i + 0.5) * step_size
+        point = ray_origin + ray_direction * t
         
-        if x_t is None:
-            continue
-
-        # 4. Compute transmittance from eye to x_t
-        t_eye_to_x = compute_transmittance(ray_origin, x_t, scene.volume)
+        # Compute transmittance from eye to point
+        transmittance_to_point = compute_transmittance(ray_origin, point, volume)
         
-        # 5. Compute transmittance from light to x_t
-        t_light_to_x = compute_transmittance(light.position, x_t, scene.volume)
+        # Get volume properties at point
+        sigma_s = volume.get_scattering_coefficient(point)
         
-        # 6. Compute visibility (shadow ray)
-        visible = trace_shadow_ray(light.position, x_t, scene)
-        
-        if visible:
-            # 7. Compute incident radiance from light
+        # 4. Sum contributions from all lights
+        light_contribution = 0.0
+        for light in lights:
+            # Vector to light
+            to_light = light.position - point
+            dist = length(to_light)
+            if dist < epsilon: continue
+            
+            direction_to_light = normalize(to_light)
+            
+            # Compute transmittance from point to light
+            transmittance_to_light = compute_transmittance(point, light.position, volume)
+            
+            # Incident radiance from light (attenuated)
             # Assuming point light for simplicity
-            distance_sq = dot(x_t - light.position, x_t - light.position)
-            if distance_sq > 0:
-                incident_radiance = (light.intensity / distance_sq) * \
-                                    phase_function(ray_direction, light.direction) * \
-                                    t_light_to_x
-            else:
-                incident_radiance = 0.0
+            incident_radiance = light.intensity / (dist * dist)
+            incident_radiance *= transmittance_to_light
             
-            # 8. Compute in-scattering contribution
-            sigma_s = scene.volume.get_scattering_coefficient(x_t)
-            in_scattered = sigma_s * incident_radiance
+            # Phase function
+            phase = evaluate_phase_function(direction_to_light, ray_direction)
             
-            # 9. Attenuate to eye and accumulate
-            L_o += t_eye_to_x * in_scattered
+            # Add contribution
+            light_contribution += incident_radiance * phase
+        
+        # Accumulate in-scattered radiance
+        radiance += transmittance_to_point * sigma_s * light_contribution * step_size
+        
+    return radiance
 
-    return L_o
-
-def compute_transmittance(start, end, volume):
-    # Simplified: assume homogeneous volume for this example
-    # In reality, integrate sigma_t along the segment
-    direction = end - start
-    distance = length(direction)
-    if distance == 0:
-        return 1.0
-    sigma_t = volume.get_total_coefficient(start) # Assume homogeneous
+def compute_transmittance(origin, target, volume):
+    # Simplified: assume homogeneous or precomputed
+    # In practice, this involves ray marching or texture lookup
+    distance = length(target - origin)
+    sigma_t = volume.get_extinction_coefficient(origin) # Homogeneous assumption
     return exp(-sigma_t * distance)
 ```
 
 **Parameters:**
-*   **Anisotropy ($g$):** Parameter for Henyey-Greenstein phase function, range $[-1, 1]$ [S1, unofficial].
-*   **Volume Absorption ($\sigma_a$):** Range $[0, 1]$ [S1, unofficial].
-*   **Volume Scattering ($\sigma_s$):** Range $[0, 1]$ [S1, unofficial].
+*   `num_samples`: Number of samples along the eye ray. Typical values range from 16 to 128 depending on desired quality and performance.
+*   `far_distance`: The maximum distance to render.
 
 **Edge Cases:**
-*   **Zero Distance:** If the light is at the same position as the sample point, handle division by zero in the inverse square law [G].
-*   **High Density:** If $\sigma_t$ is very high, transmittance approaches zero, leading to numerical underflow. Use log-transmittance if necessary [G].
-*   **Degenerate Geometry:** If the volume is empty or the ray does not intersect the volume, return background radiance [G].
+*   **High Density:** If $\sigma_t$ is very high, transmittance drops to zero quickly, leading to dark results. Ensure numerical stability in exponential calculations.
+*   **Light Occlusion:** If a light is occluded by geometry, the transmittance to the light will be zero. Correctly handling shadow rays is critical.
+*   **Degenerate Input:** If the volume is empty ($\sigma_t = 0$), transmittance is 1, and no scattering occurs.
 
 ## Subtopics
 
 ### Monochromatic Mie Scattering Shading
-This variant treats Mie scattering intensity $I_{SM}$ as monochromatic, occupying only one channel in the scattering texture, and shades it during rendering by multiplying with the attenuated direct illumination $I_0^I$ [S2]. Alternatively, the proportionality rule from [Bruneton and Neyret 2008] can be used instead of multiplying by attenuated direct illumination [S2].
+A variant where Mie scattering intensity $I_{SM}$ is treated as monochromatic, occupying only one channel in the scattering texture. During rendering, this intensity is multiplied by the attenuated direct illumination $I_0^I$ [S2]. Alternatively, the proportionality rule from [Bruneton and Neyret 2008] can be used instead of multiplying by attenuated direct illumination [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot L)$, where $N$ is the number of samples per pixel and $L$ is the number of lights. Each light requires a shadow ray and transmittance calculation [S1, unofficial].
-*   **Memory Complexity:** $O(V)$, where $V$ is the size of the volume grid, plus $O(L)$ for light data [S1, unofficial].
-*   **Performance:** With equi-angular sampling, each image can be rendered in less than 10 minutes with $spp < 100$ and $spr = 4$ using Embree acceleration [S1, unofficial].
-*   **Strengths:** Physically plausible direct lighting in volumes; efficient for scenes with few lights [S1, unofficial].
-*   **Limitations:** Ignores multiple scattering, leading to dark shadows and lack of light bleeding in dense volumes [S1, unofficial].
-*   **When to Use:** Real-time or offline rendering where direct lighting is dominant and multiple scattering is negligible or can be approximated by ambient terms [S1, unofficial].
-*   **When Not to Use:** Dense fog or smoke where multiple scattering significantly contributes to visibility [S1, unofficial].
+*   **Time Complexity:** $O(N \cdot L)$, where $N$ is the number of samples along the eye ray and $L$ is the number of light sources. Each sample requires a shadow ray to each light.
+*   **Memory Complexity:** $O(V)$, where $V$ is the size of the volume grid.
+*   **Strengths:** Physically plausible for thin media; computationally cheaper than multiple scattering; easy to implement.
+*   **Limitations:** Fails for dense media where multiple scattering is significant; performance degrades linearly with the number of lights; requires shadow rays for each light, which can be expensive.
+*   **When to Use:** Thin fog, smoke, underwater scenes with few light sources; real-time applications where multiple scattering is not critical.
+*   **When Not to Use:** Dense clouds, thick smoke, or scenes with many lights where multiple bounces are visually important.
 
 ## Background
-Single Scattering is a fundamental technique in volumetric rendering, derived from the volume rendering equation [S1, unofficial]. It is widely used in path tracing for participating media, often implemented with Next Event Estimation (NEE) to efficiently sample direct light contributions [S1, unofficial]. The method relies on acceleration structures like Embree for efficient ray-volume intersection and transmittance calculation [S1, unofficial].
+Single scattering is a fundamental approximation in volume rendering, derived from the Radiative Transfer Equation (RTE). It has been widely used in computer graphics since the early days of volumetric rendering. The method is detailed in standard graphics textbooks and papers on participating media [S2][S3].
 
 ## Sources
 [S1] l0exy1h/VolumetricPathTracing-public, https://github.com/l0exy1h/VolumetricPathTracing-public, fetched 2026-10-26 (unofficial)

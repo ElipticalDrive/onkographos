@@ -1,0 +1,340 @@
+--- v001.md
++++ v002.md
+@@ -4,231 +4,139 @@
+ 
+ ## Overview
+-The Training Loop Setup defines the execution of a single training iteration for differentiable volume rendering, specifically focusing on the procedural steps of data loading, forward pass, loss computation, and optimizer update [S1, S2, S3, unofficial]. It serves as the atomic unit of the optimization process, bridging the gap between high-level configuration and low-level gradient computation. Unlike [Training Configuration](2332-training-configuration.md), which defines static hyperparameters, this method details the dynamic runtime sequence. It differs from [Training Ray Batching](2252-training-ray-batching.md) in that it assumes rays are already prepared or generated, focusing instead on the computational graph execution and parameter updates [S1, S2, unofficial].
++The Training Loop Setup defines the execution of a single optimization iteration for a radiance field, encompassing data loading, forward rendering, loss computation, and parameter updates [S1, unofficial][S2, unofficial]. It differs from [Training Ray Batching](2252-training-ray-batching.md) by managing the specific tensor layouts and optimizer state interactions for a batch of rays, whereas batching focuses on the selection and shuffling of those rays [S2, unofficial]. It serves as the foundational atomic unit for higher-level procedures like [Training Loop](4290-training-loop.md) and [Training Loop with Adaptive Regularization & LR Decay](2408-training-loop-with-adaptive-regularization-lr-decay.md).
+ 
+ ## How it works
+-The method executes a single step of the training loop. The specific implementation varies slightly between Gaussian Splatting variants (e.g., Msplat) and SDF-based methods (e.g., Plenoxels/Relaxed Boundary), but the core logic remains consistent: load data, compute loss, and update weights.
++**Inputs and Outputs:**
++The method takes a batch of rays defined by pixel coordinates and camera parameters, along with the current state of the radiance field representation (e.g., 3D Gaussian splatting attributes or voxel features) and optimizer states. It outputs the updated model parameters and optimizer states after one gradient step.
+ 
+-### Inputs and Outputs
+-**Inputs:**
+-1.  **Training Data:**
+-    *   For Gaussian Splatting ([S1, unofficial]): A batch of rays, each associated with a target RGB color (`gt`), camera parameters (`viewMat`, `projViewMat`, `fx`, `fy`, `cx`, `cy`), and scene geometry (`numPoints`, `means`, `scales`, `quats`, `opacities`, `featuresDc`, `featuresRest`).
+-    *   For SDF Methods ([S3, unofficial]): Scene XML file, configuration JSON, and sensor definitions.
+-2.  **Optimizer State:**
+-    *   Adam optimizer state: `exp_avg`, `exp_avg_sq`, `scaled_lr`, `sqrt(bc2)` [S1, unofficial].
+-3.  **Hyperparameters:**
+-    *   Loss normalization factor `lossInvN` [S1, unofficial].
+-    *   Scaling factor `invMaxDim` [S1, unofficial].
+-    *   SSIM weight `ssimWeight` [S1, unofficial].
+-    *   Adam parameters: `beta1`, `beta2`, `eps` [S1, unofficial].
++**Data Structures:**
++For the `msplat_train_step` variant, the input tensor layout is dense and explicit [S1, unofficial]:
++- `numPoints`: Integer count of points/gaussians.
++- `means`: Float32 array of shape `(numPoints, 3)`.
++- `scales`: Float32 array of shape `(numPoints, 3)`.
++- `glob_scale`: Float32 scalar (default 1.0f).
++- `quats`: Float32 array of shape `(numPoints, 4)` (quaternions).
++- `viewMat`, `projViewMat`: Float32 matrices for camera projection.
++- `fx`, `fy`, `cx`, `cy`: Float32 camera intrinsics.
++- `height`, `width`: Integer image dimensions.
++- `tileBounds`: Integer array defining tile boundaries for rasterization.
++- `near plane`: Float32 (default 0.01f).
++- `degree`, `degreesToUse`: Integers for spherical harmonic degrees.
++- `cam_pos`: Float32 array `(3,)`.
++- `featuresDc`: Float32 array of DC color features.
++- `featuresRest`: Float32 array of SH rest coefficients.
++- `opacities`: Float32 array of per-point opacities.
++- `backgroundColor`: Float32 array `(3,)`.
++- `gt`: Float32 array `(batch_size, height, width, 3)` ground truth images.
++- `SSIM window`: Float32 array for structural similarity calculation.
++- `ssimWeight`: Float32 scalar.
++- `lossInvN`: Float32 scalar, normalized as $1.0f / (height \times width \times 3)$ [S1, unofficial].
++- `featuresRest stride`: Integer stride for feature memory layout.
++- `N_ADAM_GROUPS`: Integer for optimizer partitioning.
++- `Adam params`: Float32 arrays for `exp_avg`, `exp_avg_sq`, `scaled lr`, `sqrt(bc2)`.
++- `Adam beta1`, `beta2`, `eps`: Float32 scalars.
++- `visCounts`, `xysGradNorm`, `max2DSize`, `invMaxDim`: Float32/Integer auxiliary buffers for gradient normalization and visibility tracking. `invMaxDim` is calculated as $1.0f / \max(height, width)$ [S1, unofficial].
+ 
+-**Outputs:**
+-1.  **Updated Model Parameters:** `means`, `scales`, `quats`, `features`, etc., modified in-place or via optimizer step.
+-2.  **Loss Metrics:** Scalar loss value for logging.
+-3.  **Optimizer State:** Updated `exp_avg` and `exp_avg_sq`.
++**Steps:**
++1. **Data Loading:** Load image data and transformation matrices from file paths, moving tensors to the specified device (e.g., GPU) [S2, unofficial].
++2. **Grid Initialization:** If using a grid-based representation, generate the initial grid using `generate_grid` with parameters `gridsize`, `points_distance`, `info_size=4`, and the target device [S2, unofficial].
++3. **Forward Pass:** Render the batch of rays using the current model parameters (`means`, `scales`, `quats`, `features`, etc.) and camera matrices (`viewMat`, `projViewMat`) to produce predicted pixel colors.
++4. **Loss Computation:** Calculate the loss between the rendered output and the ground truth (`gt`). The loss is typically normalized by `lossInvN` [S1, unofficial]. Structural Similarity (SSIM) may be included using `ssimWeight` and the `SSIM window` [S1, unofficial].
++5. **Backward Pass:** Compute gradients with respect to the trainable parameters.
++6. **Optimizer Update:** Update the model parameters and optimizer states (e.g., Adam moments) using the computed gradients and learning rate [S1, unofficial].
+ 
+-### Data Structures
+-**Msplat Training Step Inputs ([S1, unofficial]):**
+-The function `msplat_train_step` accepts a flat list of arguments. Key fields include:
+-*   `numPoints`: Integer, number of Gaussians.
+-*   `means`: Float32 array, shape `(numPoints, 3)`.
+-*   `scales`: Float32 array, shape `(numPoints, 3)`.
+-*   `quats`: Float32 array, shape `(numPoints, 4)`.
+-*   `featuresDc`: Float32 array, shape `(numPoints, 3)` (DC color).
+-*   `featuresRest`: Float32 array, shape `(numPoints, 3 * SH_degree^2)` (Spherical Harmonics).
+-*   `opacities`: Float32 array, shape `(numPoints, 1)`.
+-*   `gt`: Float32 array, shape `(H, W, 3)` (Ground Truth Image).
+-*   `Adam exp_avg`, `Adam exp_avg_sq`: Arrays matching the shape of respective parameters.
+-
+-**SDF Grid ([S3, unofficial]):**
+-*   `grid`: `mi.Texture3f`, initialized as a `SphereSDF` with resolution `res` and radius `radius`. The tensor is marked as differentiable.
+-
+-### Numbered Steps
+-1.  **Data Loading and Device Placement:**
+-    *   Load image data and transformation matrices from disk or pre-computed buffers [S2, unofficial].
+-    *   Move tensors to the specified device (e.g., GPU) [S2, unofficial].
+-    *   For SDF methods, load the scene XML and initialize sensors based on scene name (e.g., 'hotdog', 'lego') [S3, unofficial].
+-
+-2.  **Initialization (One-time or Per-Step):**
+-    *   Generate initial grid using `generate_grid` with `gridsize`, `points_distance`, `info_size=4`, and device [S2, unofficial].
+-    *   For SDF, initialize `SphereSDF` with specified resolution and radius [S3, unofficial].
+-
+-3.  **Forward Pass:**
+-    *   Render the scene using the current parameters and camera matrices.
+-    *   For Gaussian Splatting, this involves projecting Gaussians to 2D, rasterizing, and accumulating color [S1, unofficial].
+-    *   For SDF, this involves ray marching through the SDF grid to compute color and density [S3, unofficial].
+-
+-4.  **Loss Computation:**
+-    *   Compute the difference between rendered output and ground truth (`gt`).
+-    *   Apply normalization factor `lossInvN = 1.0f / (height * width * 3)` [S1, unofficial].
+-    *   Apply scaling factor `invMaxDim = 1.0f / max(height, width)` [S1, unofficial].
+-    *   Combine L1 loss and SSIM loss using `ssimWeight` [S1, unofficial].
+-
+-5.  **Backward Pass:**
+-    *   Compute gradients of the loss with respect to all trainable parameters.
+-
+-6.  **Optimizer Update:**
+-    *   Update Adam state variables `exp_avg` and `exp_avg_sq` using `beta1`, `beta2`, and `eps` [S1, unofficial].
+-    *   Update model parameters using the scaled learning rate and gradients [S1, unofficial].
+-
+-### Formulas
+-*   **Loss Normalization:**
+-    $$ lossInvN = \frac{1.0}{height \times width \times 3} $$
+-    [S1, unofficial]
+-
+-*   **Dimension Scaling:**
+-    $$ invMaxDim = \frac{1.0}{\max(height, width)} $$
+-    [S1, unofficial]
+-
+-*   **Adam Update (Implicit in [S1, unofficial]):**
+-    $$ m_t = \beta_1 m_{t-1} + (1 - \beta_1) g_t $$
+-    $$ v_t = \beta_2 v_{t-1} + (1 - \beta_2) g_t^2 $$
+-    $$ \theta_t = \theta_{t-1} - \frac{\eta \cdot m_t}{\sqrt{v_t} + \epsilon} $$
+-    Where $g_t$ is the gradient, $\eta$ is the scaled learning rate, and $m_t, v_t$ are `exp_avg` and `exp_avg_sq`.
+-
+-### Pseudocode
++**Pseudocode:**
+ ```python
+-def training_step_setup(
++def msplat_train_step(
+     numPoints, means, scales, glob_scale, quats, viewMat, projViewMat,
+     fx, fy, cx, cy, height, width, tileBounds, near_plane, degree,
+     degreesToUse, cam_pos, featuresDc, featuresRest, opacities,
+-    backgroundColor, gt, SSIM_window, ssimWeight, lossInvN,
+-    featuresRest_stride, N_ADAM_GROUPS, Adam_params, Adam_exp_avg,
+-    Adam_exp_avg_sq, Adam_scaled_lr, Adam_sqrt_bc2, Adam_beta1,
+-    Adam_beta2, Adam_eps, visCounts, xysGradNorm, max2DSize, invMaxDim
++    backgroundColor, gt, ssim_window, ssimWeight, lossInvN,
++    featuresRest_stride, N_ADAM_GROUPS, adam_exp_avg, adam_exp_avg_sq,
++    adam_scaled_lr, adam_sqrt_bc2, adam_beta1, adam_beta2, adam_eps,
++    visCounts, xysGradNorm, max2DSize, invMaxDim
+ ):
+-    """
+-    Executes a single training iteration for Msplat-style Gaussian Splatting.
+-    Based on [S1, unofficial].
+-    """
++    # 1. Forward Rendering
++    # Render rays defined by camera matrices and Gaussian parameters
++    # This step involves projecting 3D Gaussians to 2D, sorting, and alpha-compositing
++    rendered_image = render_gaussians(
++        means=means, scales=scales, glob_scale=glob_scale, quats=quats,
++        viewMat=viewMat, projViewMat=projViewMat, fx=fx, fy=fy,
++        cx=cx, cy=cy, height=height, width=width, tileBounds=tileBounds,
++        near_plane=near_plane, degree=degree, degreesToUse=degreesToUse,
++        cam_pos=cam_pos, featuresDc=featuresDc, featuresRest=featuresRest,
++        opacities=opacities, backgroundColor=backgroundColor,
++        featuresRest_stride=featuresRest_stride
++    )
++
++    # 2. Loss Computation
++    # MSE Loss normalized by lossInvN
++    mse_loss = torch.mean((rendered_image - gt) ** 2) * lossInvN
+     
+-    # 1. Forward Pass: Render the scene
+-    # The actual rasterization and accumulation is handled by the native backend (Metal/CUDA)
+-    # This pseudocode represents the logical flow.
+-    rendered_image = render_gaussians(
+-        numPoints=numPoints,
+-        means=means,
+-        scales=scales,
+-        glob_scale=glob_scale,
+-        quats=quats,
+-        viewMat=viewMat,
+-        projViewMat=projViewMat,
+-        fx=fx, fy=fy, cx=cx, cy=cy,
+-        height=height, width=width,
+-        tileBounds=tileBounds,
+-        near_plane=near_plane,
+-        degree=degree,
+-        degreesToUse=degreesToUse,
+-        cam_pos=cam_pos,
+-        featuresDc=featuresDc,
+-        featuresRest=featuresRest,
+-        opacities=opacities,
+-        backgroundColor=backgroundColor
++    # SSIM Loss (if applicable)
++    # ssim_val = compute_ssim(rendered_image, gt, ssim_window)
++    # ssim_loss = 1.0 - ssim_val
++    # total_loss = mse_loss + ssimWeight * ssim_loss
++    total_loss = mse_loss  # Simplified for core definition
++
++    # 3. Backward Pass
++    total_loss.backward()
++
++    # 4. Optimizer Update (Adam)
++    # Update moments and parameters
++    # This step handles the specific Adam state updates for the msplat structure
++    update_adam(
++        params=[means, scales, quats, featuresDc, featuresRest, opacities],
++        grads=[p.grad for p in [means, scales, quats, featuresDc, featuresRest, opacities]],
++        exp_avg=adam_exp_avg,
++        exp_avg_sq=adam_exp_avg_sq,
++        scaled_lr=adam_scaled_lr,
++        sqrt_bc2=adam_sqrt_bc2,
++        beta1=adam_beta1,
++        beta2=adam_beta2,
++        eps=adam_eps,
++        visCounts=visCounts,
++        xysGradNorm=xysGradNorm,
++        max2DSize=max2DSize,
++        invMaxDim=invMaxDim,
++        N_ADAM_GROUPS=N_ADAM_GROUPS
+     )
+-    
+-    # 2. Loss Computation
+-    # Compute L1 loss between rendered image and ground truth
+-    l1_loss = torch.abs(rendered_image - gt).sum()
+-    
+-    # Compute SSIM loss
+-    ssim_loss = compute_ssim_loss(rendered_image, gt, SSIM_window)
+-    
+-    # Combine losses
+-    total_loss = l1_loss + ssimWeight * ssim_loss
+-    
+-    # Apply normalization
+-    total_loss = total_loss * lossInvN
+-    
+-    # 3. Backward Pass
+-    # Compute gradients for all parameters
+-    total_loss.backward()
+-    
+-    # 4. Optimizer Update (Adam)
+-    # Update Adam state and parameters
+-    # This step is typically handled by the native optimizer implementation
+-    # to avoid Python overhead.
+-    
+-    # Pseudocode for Adam update logic:
+-    for param_group in Adam_params:
+-        for p in param_group['params']:
+-            if p.grad is None:
+-                continue
+-            
+-            grad = p.grad.data
+-            state = param_group['state'][p]
+-            
+-            # State initialization
+-            if 'step' not in state:
+-                state['step'] = 0
+-                state['exp_avg'] = torch.zeros_like(p.data)
+-                state['exp_avg_sq'] = torch.zeros_like(p.data)
+-            
+-            exp_avg = state['exp_avg']
+-            exp_avg_sq = state['exp_avg_sq']
+-            
+-            # Bias correction
+-            bias_correction1 = 1 - Adam_beta1 ** state['step']
+-            bias_correction2 = 1 - Adam_beta2 ** state['step']
+-            
+-            # Update state
+-            exp_avg.mul_(Adam_beta1).add_(grad, alpha=1 - Adam_beta1)
+-            exp_avg_sq.mul_(Adam_beta2).addcmul_(grad, grad, value=1 - Adam_beta2)
+-            
+-            # Compute bias-corrected estimates
+-            denom = (exp_avg_sq.sqrt() / (bias_correction2 ** 0.5)).add_(Adam_eps)
+-            
+-            # Update parameters
+-            p.data.addcdiv_(exp_avg / bias_correction1, denom, value=-Adam_scaled_lr)
+-            
+-            state['step'] += 1
+-            
+-    return total_loss.item()
++
++    return rendered_image, total_loss
+ ```
+ 
+-### Parameters with Typical Values
+-*   `lossInvN`: $1.0 / (H \times W \times 3)$ [S1, unofficial].
+-*   `invMaxDim`: $1.0 / \max(H, W)$ [S1, unofficial].
+-*   `near_plane`: $0.01$ [S1, unofficial].
+-*   `glob_scale`: $1.0$ [S1, unofficial].
+-*   `ssimWeight`: Not specified in sources [S1, unofficial].
+-*   `Adam_beta1`: Not specified in sources [S1, unofficial].
+-*   `Adam_beta2`: Not specified in sources [S1, unofficial].
+-*   `Adam_eps`: Not specified in sources [S1, unofficial].
+-
+-### Edge Cases and Pitfalls
+-*   **Precision:** The use of `float32` for loss normalization and scaling factors is critical to avoid overflow/underflow in high-resolution images [S1, unofficial].
+-*   **Boundaries:** The `near_plane` is fixed at $0.01$ to prevent division by zero or extreme depth values [S1, unofficial].
+-*   **Degenerate Input:** If `numPoints` is zero, the forward pass should return a black image or handle gracefully [G].
+-*   **Device Mismatch:** Ensure all tensors are on the same device (CPU/GPU) before computation [S2, unofficial].
++**Edge Cases and Pitfalls:**
++- **Precision:** Use float32 for standard operations; mixed precision may be used in variants like [Mixed Precision Training](2766-mixed-precision-training.md).
++- **Boundaries:** Ensure `tileBounds` and `near_plane` are correctly set to avoid rendering artifacts or division by zero in normalization.
++- **Degenerate Input:** Handle cases where `numPoints` is zero or camera matrices are invalid.
+ 
+ ## Subtopics
+ 
+ ### [Training Ray Batching](2252-training-ray-batching.md)
+-Training Ray Batching is a data loading strategy for NeRF optimization that pre-computes rays for all training images, concatenates them with target RGB colors, and samples random subsets per iteration. It differs from Single Image Sampling by drawing rays globally across the entire training dataset rather than restricting them to one image per step, ensuring uniform exposure to all views.
++Training Ray Batching is a data loading strategy for Neural Radiance Fields (NeRF) that selects a random subset of pixel coordinates (and their corresponding rays) from the full training image grid per optimization iteration, rather than rendering complete images. It solves the memory bottleneck of full-image rendering by processing only $N_{rand}$ rays at a time, enabling efficient gradient updates and better GPU memory utilization. It differs from [Training Loop for Refractive Index Field](4178-training-loop-for-refractive-index-field.md) and [Training Loop](4290-training-loop.md) by explicitly managing the pre-computation, shuffling, and batch-slicing of ray tensors across multiple training images, whereas those siblings focus on the network forward/backward passes or specific physical models.
+ 
+ ### [Training Loop for Refractive Index Field](4178-training-loop-for-refractive-index-field.md)
+-A training procedure for an MLP representing a refractive index field, using JAX, Optax, and TensorBoard logging, with specific loss functions and checkpointing.
++This method defines the optimization loop for training a Multi-Layer Perceptron (MLP) to represent a 3D refractive index (IOR) field and associated emission field, using differentiable ray tracing. It distinguishes itself by combining Eikonal ray tracing with luminance integration, optimizing the IOR field via boundary regularization and luminance reconstruction loss, specifically implemented in JAX for multi-device sharding. It builds on [Training Loop Setup](1522-training-loop-setup.md) and [Training Ray Batching](2252-training-ray-batching.md).
+ 
+ ### [Training Loop](4290-training-loop.md)
+-[Link to Training Loop article]
++The Training Loop is the iterative optimization procedure that updates a radiance field representation (such as a NeRF or 3D Gaussian Splatting model) by minimizing the difference between rendered images and ground-truth observations. It differs from its sibling [Training Ray Batching](2252-training-ray-batching.md) by managing the high-level control flow, data loading, and optimizer state, whereas batching focuses specifically on the memory-efficient assembly of ray samples.
+ 
+ ### Training Pipeline Configuration
+ The main entry point for the training experiment, which loads configuration, sets up global parameters, loads the scene and sensors, renders reference images, and initializes the SDF for optimization [S3, unofficial].
+-*   **Steps:**
+-    1.  Load configuration from JSON file `config_file` [S3, unofficial].
+-    2.  Update experiment parameters (name, scene, epochs, lr, sensor counts, batch size) and rendering parameters (integrator, resolution, spp, SDF mode) using command-line args or config defaults [S3, unofficial].
+-    3.  Load the scene using `mi.load_file` with the specified scene XML and hide environment flag [S3, unofficial].
+-    4.  Set sensor parameters (radius, height) based on scene name: 'hotdog' (h=0.5), 'lego' (h=0.35), 'chair' (h=0.6, r=1.5), else (h=0.4, r=1.3) [S3, unofficial]. Load sensors using `get_h2_sensors` [S3, unofficial].
+-    5.  Initialize the SDF for optimization as a `SphereSDF` with specified resolution and radius. Enable gradients on the SDF grid tensor [S3, unofficial].
+-    6.  Check if albedo, roughness, and metallic volumes are present in the scene parameters to determine optimization targets [S3, unofficial].
++- Load configuration from JSON file `config_file`. Update experiment parameters (name, scene, epochs, lr, sensor counts, batch size) and rendering parameters (integrator, resolution, spp, SDF mode) using command-line args or config defaults [S3, unofficial].
++- Load the scene using `mi.load_file` with the specified scene XML and hide environment flag [S3, unofficial].
++- Set sensor parameters (radius, height) based on scene name: 'hotdog' (h=0.5), 'lego' (h=0.35), 'chair' (h=0.6, r=1.5), else (h=0.4, r=1.3). Load sensors using `get_h2_sensors` [S3, unofficial].
++- Initialize the SDF for optimization as a `SphereSDF` with specified resolution and radius. Enable gradients on the SDF grid tensor [S3, unofficial].
++- Check if albedo, roughness, and metallic volumes are present in the scene parameters to determine optimization targets [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of rays and Gaussians/SDF resolution. For Gaussian Splatting, it is roughly $O(N \cdot R)$ where $N$ is the number of Gaussians and $R$ is the number of rays [S1, unofficial]. For SDF, it is $O(R \cdot D)$ where $D$ is the number of samples per ray [S3, unofficial].
+-*   **Memory Complexity:** Proportional to the number of parameters and optimizer state. For Adam, this is $2 \times$ the size of the model parameters [S1, unofficial].
+-*   **Performance:** Msplat claims ~90s training on M4 Max [S1, unofficial].
+-*   **Strengths:** Modular design allows for easy integration of different loss functions and optimizers.
+-*   **Limitations:** Requires careful tuning of hyperparameters like `lossInvN` and `invMaxDim` [S1, unofficial].
++- **Time Complexity:** Linear with respect to the number of rays in the batch and the number of samples per ray.
++- **Memory Complexity:** Proportional to the batch size and the size of the radiance field representation.
++- **Performance:** Highly dependent on GPU memory bandwidth and compute capabilities. Variants like [Mixed Precision Training](2766-mixed-precision-training.md) can improve throughput.
++- **Strengths:** Modular design allows for easy integration of different loss functions and optimizers.
++- **Limitations:** Memory usage can still be high for large scenes or high-resolution images if batching is not efficient.
+ 
+ ## Background
+-The concept of a training loop setup is fundamental to differentiable rendering. The specific implementation details provided here are derived from open-source projects like Msplat [S1, unofficial], Plenoxels [S2, unofficial], and relaxed-boundary [S3, unofficial]. These projects represent the state-of-the-art in efficient NeRF and Gaussian Splatting training.
++The concept of a training loop setup is fundamental to differentiable rendering and neural radiance fields. Early implementations focused on simple gradient descent, while modern approaches incorporate advanced optimizers like Adam [S1, unofficial][S2, unofficial]. The specific `msplat_train_step` implementation is associated with the Msplat project, which aims for fast training on Apple Silicon [S1, unofficial]. The `Plenoxels` project also utilizes similar training loop structures for voxel-based radiance fields [S2, unofficial]. The `relaxed-boundary` project demonstrates a configuration-based approach for SDF optimization [S3, unofficial].
+ 
+ ## Sources

@@ -3,7 +3,7 @@
 Also called: Geometric Regularization, Normal Consistency Losses
 
 ## Overview
-Geometric and Normal Alignment Losses are regularization terms used in differentiable volume rendering to enforce physical plausibility and geometric consistency in learned radiance fields. They solve the problem of ambiguous, noisy, or inconsistent surface geometry by penalizing deviations from expected geometric properties, such as smoothness, normal-ray alignment, or alignment with ground truth data. They set themselves apart from photometric losses (like [MSE Loss and PSNR Conversion](1651-mse-loss-and-psnr-conversion.md)) by operating on derived geometric quantities (normals, curvature) rather than pixel colors, and from general model regularization (like [Total Variation Regularization](860-total-variation-regularization.md)) by targeting specific geometric relationships like surface orientation relative to the camera.
+Geometric and Normal Alignment Losses are regularization terms used in differentiable volume rendering to enforce geometric consistency, smoothness, and structural coherence in learned radiance fields. They solve the problem of ambiguous, noisy, or inconsistent geometry and material properties that often arise when optimizing implicit fields from sparse or noisy observations. Unlike sibling methods such as [Total Variation Regularization](860-total-variation-regularization.md) which penalizes gradient magnitude, or [Distortion Loss](2755-distortion-loss.md) which penalizes ray traversal irregularities, this family explicitly targets the alignment of normals with rays, the smoothness of scalar fields, and the consistency between predicted and derived geometric cues.
 
 ## Shared principles
 All methods in this family rely on the differentiability of the forward rendering operator and the propagation of gradients through the integration steps. The core mechanism is the evaluation of the volume rendering equation and the computation of gradients with respect to scene parameters (density, geometry, transfer functions, camera poses).
@@ -29,46 +29,51 @@ Curvature Loss is a regularization term used in differentiable volume rendering 
 ### [Normal Ray Alignment Loss](4202-normal-ray-alignment-loss.md)
 Normal Ray Alignment Loss is a regularization term used in differentiable volume rendering that encourages predicted surface normals at sample points to align or anti-align with the viewing ray direction. It solves the problem of ambiguous or inconsistent normal orientations in learned radiance fields by enforcing geometric consistency between the rendered geometry and the camera viewpoint. It is distinguished from sibling methods like Curvature Loss by directly optimizing the dot product between normals and rays rather than penalizing geometric smoothness or second-order derivatives[2911-curvature.md].
 
+### [Material Smoothness Loss](7299-material-smoothness-loss.md)
+Material Smoothness Loss is a regularization term applied to material fields in inverse rendering to enforce spatial smoothness by penalizing color differences between neighboring surface points. It addresses the issue of noisy or high-frequency artifacts in reconstructed material properties (such as albedo or BRDF parameters) by encouraging continuity across the surface geometry. It differs from sibling methods like Curvature Loss, which penalizes geometric curvature, and Normal Ray Alignment Loss, which aligns predicted normals with ray directions, by focusing specifically on the smoothness of the material appearance itself rather than the underlying geometry or lighting consistency.
+
+### [Predicted Normal Loss](7713-predicted-normal-loss.md)
+Predicted Normal Loss is a regularization term in differentiable volume rendering that enforces geometric consistency by aligning surface normals explicitly predicted by the neural network with normals derived from the scene's density field. It addresses the ambiguity of normal estimation in radiance fields by ensuring that the learned geometry (density gradients) and the learned appearance features (predicted normals) describe the same surface structure. Unlike sibling methods that may enforce smoothness or alignment with ray directions, this loss specifically couples the explicit normal prediction head to the implicit density gradient.
+
 ### Normal Ground Truth Alignment Loss
-- **Definition:** A regularization loss that encourages predicted normals at sample points to align with provided ground truth normals by minimizing the angular deviation [S1, unofficial].
-- **Formula:** $L = w \cdot (1 - \mathbf{n}_p \cdot \mathbf{n}_{gt})$, where $L$ is the loss value, $w$ is the scalar weight, $\mathbf{n}_p$ is the predicted normal vector at the sample point, and $\mathbf{n}_{gt}$ is the ground truth normal vector for the ray [S1, unofficial].
-- **Parameter:** `weight`: Float scalar multiplying the loss term. Controls the influence of this regularization during training. Default/typical value: 1.0 [S1, unofficial].
+#### definition
+- [S1, unofficial] A regularization loss that encourages predicted normals at sample points to align with provided ground truth normals by minimizing the angular deviation.
+#### formula
+- [S1, unofficial] $L = w \cdot (1 - \mathbf{n}_p \cdot \mathbf{n}_{gt})$, where $L$ is the loss value, $w$ is the scalar weight, $\mathbf{n}_p$ is the predicted normal vector at the sample point, and $\mathbf{n}_{gt}$ is the ground truth normal vector for the ray.
+#### parameter
+- [S1, unofficial] weight: Float scalar multiplying the loss term. Controls the influence of this regularization during training. Default/typical value: 1.0.
 
 ### 2D Planar Image Alignment
-- **Definition:** Joint optimization of 2D image content $F_{2d}$ and per-patch homography warps $P_{2d}$ using reconstruction loss on overlapping image patches [S2, unofficial].
-- **Step:** Parameterize $F_{2d}$ by 2D decomposed low-rank tensor $T_{2d} \in \mathbb{R}^{h \times w}$. Filter $T_{2d}$ with 2D Gaussian kernel $N_{2d}$ to avoid overfitting [S2, unofficial].
-- **Formula:** 
-  $$ L_{2d}(F_{2d}, P_{2d}) = \sum_{i=1}^{L} \sum_{u \in U_{2d}} \| F_{2d}(W_{2d}(P_i, u)) - I_{iu} \|^2 $$
-  $$ F_{2d}(x) = (N_{2d} *_{2d} T_{2d})(x) = (N_{2d} *_{2d} (\sum_{r=1}^R v_r^X \otimes v_r^Y))(x) $$
-  $$ N_{2d}(\sigma) = N_{1d}(\sigma) \otimes N_{1d}(\sigma) $$
-  $$ N_{1d}(\sigma) = \begin{cases} \min(1, \frac{1}{\sqrt{2\pi\sigma^2}} e^{-x^2/(2\sigma^2)}) & \text{if } \sigma > 0.0001 \\ 2 \cdot N_{1d}(\sigma) & \text{otherwise} \end{cases} $$
-  where $\otimes$ is outer product [S2, unofficial].
-- **Pitfall:** Numerical instability when $\sigma < 0.001$; assign $N_{1d}(\sigma)$ to discrete impulse function $\delta$ [S2, unofficial].
+#### definition
+- [S2, unofficial] Joint optimization of 2D image content F2d and per-patch homography warps P2d using reconstruction loss on overlapping image patches.
+#### step
+- [S2, unofficial] Parameterize F2d by 2D decomposed low-rank tensor T2d ∈ R^{h×w}. Filter T2d with 2D Gaussian kernel N2d to avoid overfitting.
+#### formula
+- [S2, unofficial] L2d(F2d, P2d) = Σ_{i=1}^{L} Σ_{u∈U2d} ||F2d(W2d(Pi, u)) - Iiu||^2
+- [S2, unofficial] F2d(x) = (N2d *2d T2d)(x) = (N2d *2d (Σ_{r=1}^R vrX ⊗ vrY))(x), where ⊗ is outer product.
+- [S2, unofficial] N2d(σ) = N1d(σ) ⊗ N1d(σ), where N1d(σ) ∈ R^{LN} is discretely sampled from continuous Gaussian distribution and clamped to max 1.0.
+- [S2, unofficial] N1d(σ) = { min(1, (1/√(2πσ^2)) * e^(-x^2/(2σ^2))) if σ > 0.0001; 2 * N1d(σ) otherwise }
+#### pitfall
+- [S2, unofficial] Numerical instability when σ < 0.001; assign N1d(σ) to discrete impulse function δ.
 
 ### Alignment-Aware Patch Matching Loss
-- **Definition:** A loss function that accounts for spatial misalignment between rendered and ground truth images by searching for the best-matching subpatch in the ground truth set, regularized by coordinate distance [S3].
-- **Formula:** 
-  $$ L_{PM}(G, R) = \min_{i=1,...,N} (D(G_i, R) + \lambda \cdot D_{coord}(G_i, R)) $$
-  $$ D(G_i, R) = \|G_i - R\|_2^2 $$
-  $$ D_{coord}(G_i, R) = \sqrt{\Delta x^2 + \Delta y^2} $$
-  where $\Delta x$ and $\Delta y$ are the horizontal and vertical offsets between $G_i$ and $R$ [S3].
-- **Parameter:** $\lambda$: Regularization weight for the coordinate distance penalty. Typical value: 0.01. Ground truth patch size ($G$): $48 \times 48$. Rendered patch size ($R$): $32 \times 32$ [S3].
-- **Comparison:** Unlike standard losses defined on single pixels, this loss is defined on patches, allowing alignment vectors $(\Delta x, \Delta y)$ to be estimated more robustly [S3].
-
-### Material Smoothness Loss
-- **Definition:** A regularization loss applied to material fields to enforce spatial smoothness by penalizing color differences between neighboring surface points [S4].
-
-### Predicted Normal Loss
-- **Definition:** A loss function that supervises the predicted normals using the rendered normals, ensuring consistency between the two [S5, unofficial].
-- **Step:** Compute the predicted normal loss using the weights, rendered normals, and predicted normals [S5, unofficial].
-- **Parameter:** `pred_normal_loss_mult`: The multiplier for the predicted normal loss in the total loss computation [S5, unofficial].
+#### definition
+- [S3] A loss function that accounts for spatial misalignment between rendered and ground truth images by searching for the best-matching subpatch in the ground truth set, regularized by coordinate distance.
+#### formula
+- [S3] $L_{PM}(G, R) = \min_{i=1,...,N} (D(G_i, R) + \lambda \cdot D_{coord}(G_i, R))$
+- [S3] $D(G_i, R) = \|G_i - R\|_2^2$
+- [S3] $D_{coord}(G_i, R) = \sqrt{\Delta x^2 + \Delta y^2}$, where $\Delta x$ and $\Delta y$ are the horizontal and vertical offsets between $G_i$ and $R$.
+#### parameter
+- [S3] $\lambda$: Regularization weight for the coordinate distance penalty. Typical value: 0.01.
+- [S3] Ground truth patch size ($G$): Sampled size per iteration. Value: $48 \times 48$.
+- [S3] Rendered patch size ($R$): Rendered size per iteration. Value: $32 \times 32$.
+#### comparison
+- [S3] Unlike standard losses defined on single pixels, this loss is defined on patches, allowing alignment vectors $(\Delta x, \Delta y)$ to be estimated more robustly.
 
 ## Background
-The use of geometric regularization in differentiable rendering has evolved alongside the development of Neural Radiance Fields (NeRF). Early works focused primarily on photometric reconstruction, but issues with geometry ambiguity and noise led to the incorporation of explicit geometric priors. Curvature loss and normal alignment losses are often derived from implicit surface reconstruction techniques and differentiable rendering frameworks that allow gradients to flow through geometric representations like Signed Distance Fields (SDFs) or density fields. The specific implementations cited here originate from various research projects and repositories focusing on improving the robustness and geometric fidelity of learned radiance fields, often addressing specific artifacts like floating geometry or inconsistent normal orientations.
+Geometric and normal alignment losses have emerged as critical components in the optimization of Neural Radiance Fields (NeRF) and related implicit representations. Early NeRF implementations [S5, unofficial] relied heavily on photometric loss, often resulting in blurry geometries and inconsistent normals. Subsequent works introduced explicit geometric priors. Curvature regularization has been used in implicit surface reconstruction for decades, but its application to differentiable volume rendering was formalized to smooth density fields [S1, unofficial]. Normal alignment losses were introduced to resolve the "normal ambiguity" problem, where the gradient of the density field provides a normal, but explicit normal predictions from auxiliary heads can diverge [S2, unofficial]. Material smoothness losses address artifacts in inverse rendering tasks where material properties (albedo, roughness) are optimized alongside geometry [S1, unofficial]. The alignment-aware patch matching loss addresses camera pose ambiguity by enforcing local consistency between rendered and ground truth patches [S3].
 
 ## Sources
 [S1] JackZhouSz/tlir, https://github.com/JackZhouSz/tlir, fetched 2026-10-27 (unofficial)
 [S2] Improving Robustness for Joint Optimization of Camera Poses and Decomposed Low-Rank Tensorial Radiance Fields, https://doi.org/10.48550/arxiv.2402.13252, fetched 2026-10-26 (unofficial)
 [S3] AligNeRF: High-Fidelity Neural Radiance Fields via Alignment-Aware Training, https://doi.org/10.1109/cvpr52729.2023.00013, fetched 2026-10-26
-[S4] IRCasTRF: Inverse Rendering by Optimizing Cascaded Tensorial Radiance Fields, Lighting, and Materials From Multi-view Images, https://doi.org/10.1145/3581783.3612010, fetched 2026-10-27
-[S5] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)

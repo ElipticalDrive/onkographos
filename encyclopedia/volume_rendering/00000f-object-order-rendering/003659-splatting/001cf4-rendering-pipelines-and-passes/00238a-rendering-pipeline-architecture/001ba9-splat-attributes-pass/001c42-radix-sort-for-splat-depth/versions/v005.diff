@@ -1,0 +1,217 @@
+--- v004.md
++++ v005.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-Radix Sort for Splat Depth sorts projected 3D Gaussian splats by their depth in camera space to enable correct front-to-back alpha compositing during rasterization [S1, unofficial]. It differs from comparison-based sorts by leveraging the monotonic property of IEEE 754 float bit patterns when reinterpreted as unsigned integers, achieving $O(n)$ time complexity with small constants [S1, unofficial]. This method serves as the global depth ordering prerequisite for tile-based sorting variants like [Tile Binning for Splatting](1214-tile-binning-for-splatting.md) and [Gaussian Sorting](2845-gaussian-sorting.md) [S1, unofficial].
++Radix Sort for Splat Depth sorts projected 3D Gaussian splats by their depth to establish a front-to-back rendering order, which is critical for correct alpha blending in object-order splatting pipelines. It sets itself apart from [Splat Depth Pass](1078-splat-depth-pass.md) by focusing on the sorting algorithm itself rather than depth calculation, and from [Tile Binning for Splatting](1214-tile-binning-for-splatting.md) by performing a global sort rather than spatial binning. It leverages the monotonic property of IEEE 754 float bit patterns to enable efficient O(n) sorting without comparison-based overhead.
+ 
+ ## How it works
+ **Inputs:**
+-- `projected`: Array of $N$ splat structures, each containing at least a `depth` field (f32).
+-- `scratch`: Buffer for intermediate storage and histogram counts.
++- `projected`: An array of $N$ projected splat structures. Each structure contains at least a `depth` field (f32) and an index or ID.
++- `scratch`: A buffer for intermediate storage during the sort.
+ 
+ **Outputs:**
+@@ -18,121 +18,119 @@
+ - `counts_hi`: Array of 65,536 `u32` integers, initialized to zero.
+ - `offsets`: Array of 65,536 `u32` integers, used for prefix sums.
+-- `aux`: Temporary array of $N$ splat structures, same layout as `projected`.
++- `aux`: Temporary array of $N$ splat structures, same size as `projected`.
+ 
+ **Steps:**
+-1. **Base Case:** If $N \le 1$, return immediately.
+-2. **Histogram Initialization:** Zero out `counts_lo` and `counts_hi`.
+-3. **Bit Extraction and Counting:** For each splat $i$ in `projected`:
+-   - Let $k$ be the bit pattern of `projected[i].depth` interpreted as a `u32`.
+-   - Increment `counts_lo[k & 0xFFFF]`.
+-   - Increment `counts_hi[(k >> 16) & 0xFFFF]`.
+-4. **Pass 1 (Low 16 bits):**
+-   - Compute prefix sums of `counts_lo` into `offsets`. `offsets[x]` stores the starting index for bucket $x$.
+-   - Scatter splats from `projected` to `aux` based on the low 16 bits of their depth. For splat $i$:
+-     - Let $k$ be the bit pattern of `projected[i].depth` as `u32`.
+-     - Let $idx = offsets[k \& 0xFFFF]$.
+-     - Set `aux[idx] = projected[i]`.
+-     - Increment `offsets[k & 0xFFFF]`.
+-5. **Pass 2 (High 16 bits):**
+-   - Reset `counts_hi` to zero (or use fresh offsets if counts are preserved, but standard radix sort re-histograms or uses the previous distribution if stable; here we re-scan for clarity or reuse counts if stable sort is required. The source implies a standard 2-pass radix sort. Since we need stability for subsequent operations or just correct ordering, we must be careful. However, the source [S1, unofficial] describes a simple scatter. To maintain stability or correct relative order of equal keys, one typically uses the offsets from the previous pass or re-histograms. The source [S1, unofficial] says "Scatter splats from `aux` to `projected` based on high 16 bits". It does not explicitly state re-histogramming. Standard radix sort requires re-histogramming the high bits of the *already sorted* low-bit array. Let's assume standard radix sort logic:
+-     - Zero out `counts_hi` (if not already zeroed from step 2, but step 2 zeroed them. We need to count the high bits of the items in `aux`).
+-     - For each splat $j$ in `aux`:
+-       - Let $k$ be the bit pattern of `aux[j].depth` as `u32`.
+-       - Increment `counts_hi[(k >> 16) & 0xFFFF]`.
+-     - Compute prefix sums of `counts_hi` into `offsets`.
+-     - Scatter splats from `aux` to `projected` based on the high 16 bits. For splat $j$:
+-       - Let $k$ be the bit pattern of `aux[j].depth` as `u32`.
+-       - Let $idx = offsets[(k >> 16) & 0xFFFF]$.
+-       - Set `projected[idx] = aux[j]`.
+-       - Increment `offsets[(k >> 16) & 0xFFFF]`.
++
++1. **Edge Case Check:** If the number of splats $N \le 1$, return immediately. [S1, unofficial]
++2. **Bit Pattern Extraction:** For each splat $i$ in `projected`:
++   - Let $d = \text{projected}[i].\text{depth}$.
++   - Convert $d$ to its IEEE 754 bit pattern as an unsigned 32-bit integer $k$. This preserves the ordering of positive floats. [S1, unofficial]
++   - Extract low 16 bits: $k_{lo} = k \ \& \ 0xFFFF$.
++   - Extract high 16 bits: $k_{hi} = k \gg 16$.
++   - Increment `counts_lo[k_lo]` and `counts_hi[k_hi]`. [S1, unofficial]
++3. **Pass 1 (Low 16 bits):**
++   - Compute prefix sums of `counts_lo` into `offsets`. `offsets[x]` represents the starting index for bucket $x$. [S1, unofficial]
++   - Scatter splats from `projected` to `aux` based on $k_{lo}$. For each splat $i$:
++     - $idx = \text{offsets}[k_{lo}]$.
++     - `aux[idx] = projected[i]`.
++     - `offsets[k_lo]++`. [S1, unofficial]
++4. **Pass 2 (High 16 bits):**
++   - Reset `offsets` or recompute prefix sums for `counts_hi`. [S1, unofficial]
++   - Scatter splats from `aux` back to `projected` based on $k_{hi}$. For each splat $i$ (iterating through `aux`):
++     - $idx = \text{offsets}[k_{hi}]$.
++     - `projected[idx] = aux[i]`.
++     - `offsets[k_hi]++`. [S1, unofficial]
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def sort_splat_depth(projected: list[Splat], scratch: ScratchBuffers) -> None:
+-    N = len(projected)
+-    if N <= 1:
++def radix_sort_splat_depth(projected: list[Splat], scratch: ScratchBuffers) -> None:
++    n = len(projected)
++    if n <= 1:
+         return
+ 
++    # Initialize histograms
+     counts_lo = [0] * 65536
+     counts_hi = [0] * 65536
+-    offsets = [0] * 65536
+-    aux = [None] * N
+ 
+-    # Step 1: Histogram low 16 bits
+-    for i in range(N):
++    # Pass 0: Count frequencies
++    for i in range(n):
++        # Reinterpret f32 bits as u32. 
++        # Note: In a real implementation, this requires bit-casting.
++        # Assumes positive depth values where bit pattern order matches float order.
+         k = float_to_bits(projected[i].depth)
+-        counts_lo[k & 0xFFFF] += 1
++        k_lo = k & 0xFFFF
++        k_hi = k >> 16
++        counts_lo[k_lo] += 1
++        counts_hi[k_hi] += 1
+ 
+-    # Step 2: Prefix sum for low bits
+-    offsets[0] = 0
+-    for i in range(1, 65536):
+-        offsets[i] = offsets[i-1] + counts_lo[i-1]
++    # Pass 1: Low 16 bits
++    offsets = prefix_sum(counts_lo)
++    aux = [None] * n
++    
++    for i in range(n):
++        k = float_to_bits(projected[i].depth)
++        k_lo = k & 0xFFFF
++        idx = offsets[k_lo]
++        aux[idx] = projected[i]
++        offsets[k_lo] += 1
+ 
+-    # Step 3: Scatter by low bits to aux
+-    for i in range(N):
+-        k = float_to_bits(projected[i].depth)
+-        idx = offsets[k & 0xFFFF]
+-        aux[idx] = projected[i]
+-        offsets[k & 0xFFFF] += 1
+-
+-    # Step 4: Histogram high 16 bits from aux
+-    # Reset counts_hi if not already zeroed (source [S1, unofficial] initializes them at start)
+-    # We must recount because the order in aux is different
+-    for i in range(65536):
+-        counts_hi[i] = 0
++    # Pass 2: High 16 bits
++    offsets = prefix_sum(counts_hi)
+     
+-    for i in range(N):
++    for i in range(n):
+         k = float_to_bits(aux[i].depth)
+-        counts_hi[(k >> 16) & 0xFFFF] += 1
+-
+-    # Step 5: Prefix sum for high bits
+-    offsets[0] = 0
+-    for i in range(1, 65536):
+-        offsets[i] = offsets[i-1] + counts_hi[i-1]
+-
+-    # Step 6: Scatter by high bits back to projected
+-    for i in range(N):
+-        k = float_to_bits(aux[i].depth)
+-        idx = offsets[(k >> 16) & 0xFFFF]
++        k_hi = k >> 16
++        idx = offsets[k_hi]
+         projected[idx] = aux[i]
+-        offsets[(k >> 16) & 0xFFFF] += 1
++        offsets[k_hi] += 1
+ 
+ def float_to_bits(f: float) -> int:
+-    # Reinterpret f32 bits as u32
+-    # In Python, struct module or numpy can do this. 
+-    # For pseudocode clarity:
+-    import struct
+-    return struct.unpack('I', struct.pack('f', f))[0]
++    """Converts a positive f32 to its u32 bit representation."""
++    # Implementation detail: pack float into 4 bytes, interpret as little-endian u32
++    # [G] Standard bit-casting operation.
++    pass
++
++def prefix_sum(arr: list[int]) -> list[int]:
++    """Computes exclusive prefix sum."""
++    n = len(arr)
++    result = [0] * n
++    current_sum = 0
++    for i in range(n):
++        result[i] = current_sum
++        current_sum += arr[i]
++    return result
+ ```
+ 
+ **Parameters:**
+-- **Parallel Threshold:** If $N < 50,000$ or no thread pool is available, use the sequential radix sort described above. Otherwise, use a parallel unstable sort (e.g., `par_sort_unstable_by_key`) on the depth bits [S1, unofficial].
++- **Parallel Sort Threshold:** If the number of splats is less than 50,000 or no thread pool is available, use the sequential radix sort described above. Otherwise, use a parallel unstable sort by key (e.g., `par_sort_unstable_by_key`) on the depth bits. [S1, unofficial]
+ 
+ **Edge Cases and Pitfalls:**
+-- **Negative Depths:** The method relies on positive float bit patterns preserving order. If splats have negative depths (behind the camera in some projections), the bit pattern interpretation as `u32` will not preserve numerical order. Ensure depths are positive or handled via a bias/offset before bit extraction [S1, unofficial].
+-- **Precision:** Reinterpreting `f32` bits to `u32` is exact. No precision loss occurs in the bit extraction.
+-- **Stability:** The sequential radix sort described is stable if the scatter uses the offsets correctly (incrementing after placement). This is crucial if splats with identical depths need to maintain their original relative order for subsequent attribute interpolation [S1, unofficial].
++- **Negative Depths:** The method relies on positive float bit patterns preserving order. If depths are negative, the bit pattern order is reversed or inverted. Ensure depths are transformed to positive values (e.g., using absolute value or a monotonic mapping) before bit extraction. [S1, unofficial]
++- **Precision:** Using 16-bit radix sort on 32-bit floats discards the lower 16 bits of the mantissa/exponent in the sorting key. This is acceptable for depth sorting as long as the precision loss does not cause incorrect ordering of splats that are visually distinct. [S1, unofficial]
+ 
+ ## Subtopics
+ 
+ ### [Gaussian Sorting](2845-gaussian-sorting.md)
+-Gaussian Sorting is the process of ordering 3D Gaussian primitives by their depth in camera space to enable correct front-to-back alpha compositing during splatting. It transforms the spatial positions of Gaussians into the view frustum and sorts them based on their z-coordinate. Unlike general-purpose sorting, this method is tightly coupled with the rasterization pipeline, often serving as a prerequisite for tile-based sorting. It differs from [Fast Splat Sorting](2953-fast-splat-sorting.md) by focusing on the initial global depth sort rather than optimized tile-local reordering.
++Gaussian Sorting is the process of ordering 3D Gaussians by their distance from the camera to ensure correct alpha blending during rasterization. It solves the problem of rendering transparency correctly by establishing a front-to-back draw order, which is critical because Gaussians with non-zero opacity accumulate color based on their depth relative to the viewer. It sets itself apart from its parent [Radix Sort for Splat Depth](1207-radix-sort-for-splat-depth.md) by focusing on the specific application of 3D Gaussian Splatting, where the sorting is performed on a global index buffer of Gaussian attributes rather than just projected splat depths, and it differs from [Fast Splat Sorting](2953-fast-splat-sorting.md) by relying on explicit compute-shader-based radix sorting of indices rather than optimized spatial partitioning heuristics.
+ 
+ ### [Fast Splat Sorting](2953-fast-splat-sorting.md)
+-Fast Splat Sorting is an optimization for the rendering pipeline of 3D Gaussian Splatting (3DGS) that replaces the original combined 48-bit radix sort of tile IDs and depth with two sequential, smaller sorts: a 32-bit depth sort of visible splats followed by a 16-bit tile ID sort of generated fragments. It solves the performance bottleneck of sorting large numbers of duplicate splat fragments by leveraging the fact that the majority of splats contribute to the rendered image across multiple tiles, allowing the expensive depth sorting to be performed on the smaller set of unique visible splats rather than the larger set of tile-wise duplicates. This approach is significantly faster than the original 3DGS method, which sorts all fragments together in a single 48-bit pass.
++Fast Splat Sorting is an optimization for volume rendering pipelines that replaces the single 48-bit combined tileID+depth radix sort with two sequential, smaller-key sorts: a 32-bit depth sort of visible splats followed by a 16-bit tileID sort of generated fragments. It sets itself apart from its parent [Radix Sort for Splat Depth](1207-radix-sort-for-splat-depth.md) by decoupling depth ordering from tile assignment, and from [Gaussian Sorting](2845-gaussian-sorting.md) by relying on explicit fragment duplication rather than implicit spatial partitioning. This separation reduces VRAM usage and computational complexity by leveraging the fact that the number of visible splats ($n$) is typically smaller than the number of fragments ($m$).
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(n)$ for the radix sort, where $n$ is the number of splats. The constant factor is small due to the fixed 2-pass structure [S1, unofficial].
+-- **Memory Complexity:** $O(n)$ for the auxiliary array `aux` and $O(1)$ for the histogram arrays (fixed size 65,536) [S1, unofficial].
+-- **Performance:** Consistently 2 times faster than comparison-based sorts for ~100k–200k elements [S1, unofficial].
+-- **Scalability:** Scales linearly with the number of splats. Parallelization is recommended for $N \ge 50,000$ [S1, unofficial].
+-- **Strengths:** Deterministic performance, no worst-case degradation like quicksort, hardware-friendly memory access patterns.
+-- **Limitations:** Requires positive depths for correct bit-pattern ordering. Not suitable for negative depth values without preprocessing.
++- **Time Complexity:** O(n) for the radix sort, where n is the number of splats. The constant factor is small due to the fixed 16-bit passes. [S1, unofficial]
++- **Memory Complexity:** O(n) for the auxiliary array `aux` and O(1) for the histogram arrays (fixed size 65,536 each). [S1, unofficial]
++- **Performance:** Radix sort is consistently 2 times faster than comparison-based sorts for ~100k–200k elements. [S1, unofficial]
++- **Strengths:** Efficient for large numbers of splats; leverages hardware-friendly memory access patterns in parallel implementations. [S1, unofficial]
++- **Limitations:** Requires additional memory for the auxiliary array; sensitive to the distribution of depth values if not properly normalized. [S1, unofficial]
++- **When to Use:** When rendering scenes with a large number of splats (e.g., >50,000) where sorting overhead becomes significant. [S1, unofficial]
++- **When Not to Use:** For very small numbers of splats (<50,000) where the overhead of radix sort setup may outweigh benefits, or when parallel processing is not available. [S1, unofficial]
+ 
+ ## Background
+-Radix Sort for Splat Depth is used in terminal-based Gaussian Splatting renderers like Tsplat to efficiently sort splats for compositing [S1, unofficial]. It was developed to address the performance bottleneck of sorting large numbers of splats in real-time rendering pipelines. The method leverages the properties of IEEE 754 floating-point representation to avoid expensive comparison operations.
++The method originates from the Tsplat project, which implements Gaussian splatting in a terminal environment. It was designed to provide efficient sorting for real-time rendering of large-scale Gaussian splat scenes. The approach leverages the properties of IEEE 754 floating-point numbers to avoid expensive comparison operations. [S1, unofficial]
+ 
+ ## Sources
+ [S1] Tsplat – Run Gaussian splatting in your terminal, https://github.com/darshanmakwana412/tsplat, fetched 2026-10-26 (unofficial)
+-[S2] ReconWorldLab/godot-gaussian-splatting, https://github.com/ReconWorldLab/godot-gaussian-splatting, fetched 2026-10-27 (unofficial)+[S2] ReconWorldLab/godot-gaussian-splatting, https://github.com/ReconWorldLab/godot-gaussian-splatting, fetched 2026-10-27 (unofficial)
++[S3] Explore: Gaussian splatting, OpenUSD, AI world generation, volumetric video — study, https://github.com/sceneview/sceneview/issues/4023, fetched 2026-10-27 (unofficial)
++[S4] VkSplat: High-Performance 3DGS Training in Vulkan Compute, https://doi.org/10.2312/egs.20261024, fetched 2026-10-09 (unofficial)

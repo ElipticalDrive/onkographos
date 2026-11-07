@@ -1,0 +1,192 @@
+# Novel View Synthesis Rendering
+
+Also called: Video Rendering Pipeline
+
+## Overview
+Novel View Synthesis Rendering generates a continuous video sequence of a 3D scene from a trained implicit representation (typically a Neural Radiance Field, or NeRF) by traversing a predefined camera trajectory. It solves the problem of visualizing a static 3D reconstruction as a dynamic 360° experience. Unlike static rendering methods that produce a single image, this method outputs a time-ordered sequence of frames. It is distinct from trajectory generation methods (which only compute poses) by including the actual ray casting, volume rendering, and video encoding steps [S1, unofficial].
+
+## How it works
+**Inputs:**
+1.  A trained NeRF model (MLP mapping $(\mathbf{x}, \mathbf{d}) \to (\sigma, \mathbf{c})$) [S1, unofficial].
+2.  Camera metadata: focal length, near/far clipping planes, and initial training poses [S1, unofficial].
+3.  Rendering parameters: number of coarse samples $N_c$, fine samples $N_f$, and background color preference [S1, unofficial].
+
+**Outputs:**
+A video file (e.g., MP4) containing frames rendered along a spiral path [S1, unofficial].
+
+**Data Structures:**
+*   **Rays:** Defined by origin $\mathbf{o} \in \mathbb{R}^3$ and direction $\mathbf{d} \in \mathbb{R}^3$. For a resolution $W \times H$, there are $W \times H$ rays per frame.
+*   **Samples:** Points $\mathbf{x}_i$ along each ray, sampled between near and far distances.
+*   **Features:** Positional encoding of $\mathbf{x}_i$ and $\mathbf{d}$ using Fourier features [S1, unofficial].
+
+**Steps:**
+
+1.  **Initialization:** Load the trained NeRF checkpoint and set the model to evaluation mode [S1, unofficial]. Load scene metadata (focal length, near/far bounds) from a JSON configuration [S1, unofficial].
+2.  **Trajectory Generation:** Generate a spiral camera path. For a Blender-style dataset, this typically involves rotating around the scene centroid while varying radius and height to create a 360° orbit [S1, unofficial]. Let the path contain $K$ poses $\{\mathbf{P}_k\}_{k=1}^K$.
+3.  **Ray Casting:** For each pose $\mathbf{P}_k$:
+    *   Construct the camera-to-world matrix.
+    *   For each pixel $(u, v)$, compute the ray origin $\mathbf{o}_{uv}$ and direction $\mathbf{d}_{uv}$ using the focal length and principal point [S1, unofficial].
+    *   Store all rays for the frame in a batch.
+4.  **Volume Rendering (Coarse):**
+    *   Sample $N_c$ points along each ray.
+    *   Encode positions and directions using positional encoding $\gamma(\cdot)$ [S1, unofficial].
+    *   Query the NeRF MLP to obtain density $\sigma$ and color $\mathbf{c}$.
+    *   Compute transmittance $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ and accumulated color $\mathbf{C}_{coarse} = \sum_{i=1}^{N_c} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i$ [S1, unofficial].
+5.  **Volume Rendering (Fine):**
+    *   Sample $N_f$ points along each ray, typically denser near high-density regions or uniformly if not specified [S1, unofficial].
+    *   Repeat the query and accumulation process to compute $\mathbf{C}_{fine}$ [S1, unofficial].
+6.  **Post-Processing:**
+    *   Concatenate rendered RGB chunks.
+    *   Clamp values to $[0, 1]$.
+    *   Convert to 8-bit unsigned integers (uint8) [S1, unofficial].
+    *   If `white_bg` is True and the scene has transparency, composite against a white background [S1, unofficial].
+7.  **Video Encoding:** Append the uint8 frames to a list and write them to an MP4 file using a library such as `imageio` [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import numpy as np
+import imageio
+
+def render_nerf_video(model, poses, focal, near, far, N_c=64, N_f=128, white_bg=True):
+    """
+    Renders a video from a trained NeRF model along a spiral path.
+    
+    Args:
+        model: Trained NeRF MLP in eval mode.
+        poses: List of 4x4 camera-to-world matrices.
+        focal: Focal length in pixels.
+        near:  Near clipping plane distance.
+        far:   Far clipping plane distance.
+        N_c:   Number of coarse samples.
+        N_f:   Number of fine samples.
+        white_bg: Whether to composite on white background.
+        
+    Returns:
+        frames: List of uint8 images (H, W, 3).
+    """
+    frames = []
+    H, W = 512, 512  # Typical resolution for Blender datasets [S1, unofficial]
+    
+    # Precompute pixel coordinates
+    u, v = torch.meshgrid(torch.arange(W), torch.arange(H), indexing='ij')
+    u = u.float().cuda()
+    v = v.float().cuda()
+    
+    # Camera intrinsics
+    cx, cy = W / 2, H / 2
+    
+    for pose in poses:
+        # 1. Generate rays for this pose
+        # Ray direction in camera space: (u-cx)/f, (v-cy)/f, 1
+        # Normalize and transform to world space using pose
+        d_cam = torch.stack([
+            (u - cx) / focal,
+            (v - cy) / focal,
+            torch.ones_like(u)
+        ], dim=-1)
+        d_cam = d_cam / torch.norm(d_cam, dim=-1, keepdim=True)
+        
+        # Transform direction to world space
+        R_world = pose[:3, :3]
+        d_world = torch.matmul(d_cam, R_world.t())
+        
+        # Origin is the camera center
+        o_world = pose[:3, 3]
+        
+        # Flatten rays
+        o_batch = o_world.expand(H, W, 3).reshape(-1, 3)
+        d_batch = d_world.reshape(-1, 3)
+        
+        # 2. Sample points along rays
+        # Uniform sampling between near and far
+        t_vals = torch.linspace(0., 1., N_f + N_c).cuda()
+        z_vals = near * (1. - t_vals) + far * t_vals
+        
+        # Reshape for broadcasting
+        z_vals = z_vals.expand(H * W, N_f + N_c)
+        
+        # Compute points: p = o + t * d
+        pts = o_batch.unsqueeze(1) + z_vals.unsqueeze(2) * d_batch.unsqueeze(1)
+        
+        # 3. Encode and Query
+        # Positional encoding is applied to pts and d_batch
+        # Note: In practice, d_batch is constant for all samples on a ray
+        pts_enc = model.positional_encoding(pts) # (H*W, N, 63)
+        d_enc = model.positional_encoding(d_batch.repeat_interleave(N_f + N_c, dim=0)) # (H*W*N, 27)
+        
+        # Concatenate and query MLP
+        # Input to MLP: [pos_enc, dir_enc]
+        inputs = torch.cat([pts_enc.reshape(-1, 63), d_enc], dim=-1)
+        raw = model.mlp(inputs) # (H*W*N, 4) -> rgb, sigma
+        
+        # Reshape
+        raw = raw.reshape(H * W, N_f + N_c, 4)
+        sigma = raw[..., 3]
+        rgb = torch.sigmoid(raw[..., :3])
+        
+        # 4. Volume Rendering
+        # Compute deltas
+        deltas = z_vals[:, 1:] - z_vals[:, :-1]
+        delta_inf = torch.tensor(1e10).cuda()
+        deltas = torch.cat([deltas, delta_inf.unsqueeze(0)], dim=1)
+        
+        # Transmittance
+        alpha = 1.0 - torch.exp(-torch.relu(sigma) * deltas)
+        T = torch.cumprod(1.0 - alpha + 1e-10, dim=1)
+        T = torch.cat([torch.ones_like(T[:, :1]), T[:, :-1]], dim=1)
+        
+        # Accumulate color
+        weights = alpha * T
+        rgb_final = torch.sum(weights.unsqueeze(-1) * rgb, dim=1)
+        
+        # 5. Background handling
+        if white_bg:
+            # Assume black background if not specified, or composite against white
+            # Standard NeRF often assumes black, but Blender dataset uses white [S1, unofficial]
+            rgb_final = rgb_final + (1.0 - torch.sum(weights, dim=1, keepdim=True))
+        
+        # 6. Post-process
+        rgb_clamped = torch.clamp(rgb_final, 0.0, 1.0)
+        rgb_uint8 = (rgb_clamped * 255).to(torch.uint8)
+        frame = rgb_uint8.reshape(H, W, 3).cpu().numpy()
+        frames.append(frame)
+        
+    # 7. Write video
+    imageio.mimwrite('output.mp4', frames, fps=30, quality=8)
+    return frames
+```
+
+**Parameters:**
+*   $N_c$: Number of coarse samples. Default: 64 [S1, unofficial].
+*   $N_f$: Number of fine samples. Default: 128 [S1, unofficial].
+*   `white_bg`: Boolean flag for background color. Default: True for Blender datasets [S1, unofficial].
+
+**Edge Cases:**
+*   **Precision:** Floating point errors in cumulative product for transmittance can cause NaNs if not clamped [G].
+*   **Boundaries:** Rays hitting near/far planes must be handled to avoid sampling outside the scene volume [G].
+*   **Degenerate Input:** If the camera path passes through the scene geometry, occlusion handling via volume rendering naturally manages this, but extreme proximity may cause aliasing if sampling density is insufficient [G].
+
+## Subtopics
+
+### iNVS
+iNVS (Implicit Novel View Synthesis) differs from NeRF-based rendering by not using a volumetric MLP. Instead, it warps a source view to the target novel view using depth estimation and then uses a Diffusion model to inpaint/completion the missing regions in the novel view image [S2, unofficial]. It is chosen when high-fidelity texture completion is prioritized over geometric consistency, or when training a NeRF is computationally prohibitive [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(K \cdot W \cdot H \cdot (N_c + N_f))$ where $K$ is the number of frames, $W,H$ are resolution, and $N$ are samples. The MLP query is the bottleneck.
+*   **Memory Complexity:** $O(W \cdot H \cdot (N_c + N_f))$ for storing ray batches and intermediate tensors.
+*   **Performance:** Rendering a single 512x512 frame with 192 samples can take seconds on a GPU. Video generation is significantly slower than rasterization.
+*   **Strengths:** High-quality anti-aliased images, natural handling of transparency and lighting.
+*   **Limitations:** Slow rendering speed, requires a pre-trained model, sensitive to input pose accuracy [S2, unofficial].
+*   **When to use:** When high-quality 360° videos from a static reconstruction are needed.
+*   **When not to use:** For real-time applications or when input poses are inaccurate (NeRF is not robust to pose errors) [S2, unofficial].
+
+## Background
+The method originates from the NeRF (Neural Radiance Fields) paper by Mildenhall et al. (ECCV 2020) [S1, unofficial]. The specific implementation described here follows the "nerf-from-scratch" repository structure, which provides a complete pipeline for training and rendering NeRFs on Blender datasets [S1, unofficial]. Variants like iNVS leverage diffusion models for view synthesis, repurposing inpainting techniques [S2, unofficial].
+
+## Sources
+[S1] emmanueladutwum123/nerf-from-scratch, https://github.com/emmanueladutwum123/nerf-from-scratch, fetched 2026-10-26 (unofficial)
+[S2] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)

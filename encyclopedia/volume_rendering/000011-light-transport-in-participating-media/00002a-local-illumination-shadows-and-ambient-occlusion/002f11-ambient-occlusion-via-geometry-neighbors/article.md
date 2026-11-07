@@ -1,72 +1,57 @@
 # Ambient Occlusion via Geometry/Neighbors
 
-Also called: Voxel-based Ambient Occlusion, Neighbor-based AO, SDF-based Ambient Occlusion
+Also called: Local Ambient Occlusion, Voxel AO, SDF-based AO
 
 ## Overview
-This family of methods estimates local ambient occlusion (AO) by querying geometric representations—such as Signed Distance Fields (SDFs) or structured voxel grids—rather than performing explicit ray tracing against triangle meshes or screen-space depth buffers. By evaluating the distance to the nearest surface or analyzing the occupancy of local neighbors, these techniques approximate the visibility of the hemisphere around a point. What sets this family apart from [JAOCC Shading](3634-jaocc-shading.md) (which uses precomputed spherical harmonics) and [Local Ambient Occlusion](4977-local-ambient-occlusion.md) (which often relies on screen-space or texture-based approximations) is the direct analytical or semi-analytical evaluation of geometric distance or neighbor occupancy to determine occlusion factors.
+This family of methods estimates local ambient occlusion (AO) by querying geometric representations—such as Signed Distance Fields (SDFs), structured voxel grids, or local density distributions—to approximate visibility without explicit ray tracing against triangle meshes or screen-space depth buffers [S1, S2, S3, S4, unofficial]. It sets itself apart from [Direct Illumination with Shadow Rays](2011-direct-illumination-with-shadow-rays.md) and [Shadow Ray Casting](2796-shadow-ray-casting.md) by replacing expensive global visibility tests with lightweight, local geometric queries that simulate the dimming of indirect light based on immediate neighborhood density or distance [G].
 
 ## Shared principles
-All methods in this family share the core mechanism of evaluating visibility or illumination at a specific point $\mathbf{p}$ within or on the boundary of a volume, based on a light source direction $\mathbf{l}$ or environment.
+All methods in this family share the core mechanism of evaluating visibility or illumination at a specific point $\mathbf{p}$ within or on the boundary of a volume, based on a light source direction $\mathbf{l}$ or environment [G].
 
-1.  **Visibility/Transmittance Evaluation:** The fundamental operation is determining how much light reaches $\mathbf{p}$ from a source. This involves integrating the extinction coefficient $\sigma_t(\mathbf{x})$ along a path from the source to $\mathbf{p}$ (or vice versa). The transmittance $T$ is calculated as:
+1.  **Visibility/Transmittance Evaluation:** The fundamental operation is determining how much light reaches $\mathbf{p}$ from a source [G]. This involves integrating the extinction coefficient $\sigma_t(\mathbf{x})$ along a path from the source to $\mathbf{p}$ (or vice versa) [G]. The transmittance $T$ is calculated as:
     $$ T = \exp\left(-\int_{\mathbf{p}_{source}}^{\mathbf{p}} \sigma_t(\mathbf{x}) \, d\mathbf{x}\right) $$
-    In discrete implementations, this integral is approximated by summing $\sigma_t \cdot \Delta s$ over samples along the ray [S1][S6, unofficial].
+    In discrete implementations, this integral is approximated by summing $\sigma_t \cdot \Delta s$ over samples along the ray [G].
 
-2.  **Local Shading Models:** For surface-like appearance in volumes, normals are approximated from the volume gradient $\mathbf{g} = \nabla V$. The shading contribution $C_{shade}$ is computed using standard local illumination models (e.g., Lambertian, Phong) [S1]:
-    $$ C_{shade} = k_d (\mathbf{n} \cdot \mathbf{l}) C_{diffuse} + k_s (\mathbf{n} \cdot \mathbf{h})^\alpha C_{specular} $$
-    where $\mathbf{n} = \mathbf{g}/\|\mathbf{g}\|$ [S1].
+2.  **Local Shading Models:** For surface-like appearance in volumes, normals are approximated from the volume gradient $\mathbf{g} = \nabla V$ [G]. Usually, a simple absorption and emission model is used because it is relatively cheap to evaluate and gives good enough results [S1].
 
-3.  **Shadowing Approximation:** Shadows are computed by testing occlusion along the direction to the light source. This can be done via ray casting (checking for density/geometry along the path) or via precomputed buffers (shadow maps, illumination buffers) [S1][S2, unofficial].
+3.  **Shadowing Approximation:** Shadows are computed by testing occlusion along the direction to the light source [G].
 
-4.  **Ambient Occlusion:** Indirect illumination is approximated by integrating over the hemisphere or using simplified models (e.g., upward ray for sky light). The ambient contribution $L_{ambient}$ is often modulated by a shadowing factor based on local density:
+4.  **Ambient Occlusion:** Indirect illumination is approximated by integrating over the hemisphere or using simplified models (e.g., upward ray for sky light) [G]. The ambient contribution $L_{ambient}$ is often modulated by a shadowing factor based on local density:
     $$ L_{ambient} = L_{sky} \cdot \exp(-D_{up}) \cdot AO_{factor} $$
-    where $D_{up}$ is the integrated density along an upward ray [S1][S2, unofficial].
+    where $D_{up}$ is the integrated density along an upward ray [G].
 
 ## Subtopics
 
 ### [Ambient Occlusion via SDF/Geometry](2527-ambient-occlusion-via-sdf-geometry.md)
-This technique estimates local ambient occlusion by querying a geometric representation—typically a Signed Distance Field (SDF) or a structured voxel grid—rather than performing explicit ray tracing against a triangle mesh or screen-space depth buffer. By evaluating the distance to the nearest surface along specific directions, these methods approximate the visibility of the hemisphere around a point. What sets this family apart from [JAOCC Shading](3634-jaocc-shading.md) (which uses precomputed spherical harmonics) and [Local Ambient Occlusion](4977-local-ambient-occlusion.md) (which often relies on screen-space or texture-based approximations) is the direct analytical or semi-analytical evaluation of geometric distance to determine occlusion factors.
+This method estimates local ambient occlusion by querying a geometric representation, typically a Signed Distance Field (SDF) or structured voxel grid, to approximate visibility without explicit ray tracing against triangle meshes or screen-space depth buffers. It sets itself apart from [JAOCC Shading](3634-jaocc-shading.md) and [Local Ambient Occlusion](4977-local-ambient-occlusion.md) by directly evaluating geometric distance to determine occlusion factors [G].
 
 ### [JAOCC Shading](3634-jaocc-shading.md)
-JAOCC Shading is a voxel-based ambient occlusion technique that computes local illumination by analyzing the occupancy of a cubic neighborhood around each voxel. It addresses the visual artifacts inherent in standard axis-aligned bounding box (AABB) voxel rendering, where fixed face normals cause hard, physically implausible lighting transitions (e.g., rays hitting a face perpendicularly appearing dark while grazing rays appear bright). By dynamically estimating surface orientation from neighbor occupancy and applying a depth-weighted dimming factor, it produces smoother shading results, particularly for higher neighbor counts.
+JAOCC Shading is a voxel-based ambient occlusion technique that computes a depth-weighted dimming factor by counting non-empty neighbors in a cubic neighborhood. It addresses the problem of hard, physically implausible lighting transitions at voxel boundaries (AABB edges) by replacing fixed geometric normals with a dynamic occlusion factor derived from local density. Unlike methods that rely on signed distance fields or explicit surface normals, JAOCC operates directly on the occupancy grid, making it suitable for volumetric data where surface extraction is not performed.
 
 ### [Local Ambient Occlusion](4977-local-ambient-occlusion.md)
+Local Ambient Occlusion (LAO) methods estimate the blocking of indirect light in volume rendering by analyzing the local density distribution or sampling stochastic rays around a point, rather than relying on global geometry or hard shadow maps. Unlike siblings that use Signed Distance Fields (SDF) [2527-ambient-occlusion-via-sdf-geometry.md] or precomputed voxel buffers [6646-voxel-ambient-occlusion.md], LAO methods typically compute occlusion on-the-fly or via lightweight precomputation tailored to the volume's statistical properties or stochastic sampling, providing softer, more volumetric shadow appearances [4502-local-ambient-occlusion-lao.md].
+
+### [Vertex Ambient Occlusion Approximation](6623-vertex-ambient-occlusion-approximation.md)
 Not given in the sources.
 
+### [Voxel Ambient Occlusion](6646-voxel-ambient-occlusion.md)
+Not given in the sources.
+
+### [Gradient-based Occlusion Information Computation](9554-gradient-based-occlusion-information-computation.md)
+A method to compute occlusion information $m_x$ for a voxel $x$ that preserves boundaries by modulating a spherical neighborhood mean with a gradient-based weight $g_x$, avoiding the isotropic blurring of simple ambient occlusion.
+
 ### Standard Deviation of Ambient Occlusion
-A metric that quantifies the variation of ambient occlusion values along all directions for a voxel, allowing distinction between objects with identical scalar field values but different local structures [S1].
-
-The formula for the standard deviation of ambient occlusion at voxel $p$ in direction $\vec{d}$ is:
-$$ O_{std}(p, \vec{d}) = \sqrt{\frac{1}{H} \sum_{i=1}^{H} (A(p, \hat{\omega}_i, \vec{d}))^2 - \left(\frac{1}{H} \sum_{i=1}^{H} A(p, \hat{\omega}_i, \vec{d})\right)^2} $$
-where $H$ is the number of different directions sampled, $A$ is the directional occlusion function, and $\hat{\omega}_i$ are the sampled directions [S1].
-
-In simple cases with few objects (e.g., two objects with same intensity/size), using the second derivative field $f''(x)$ as input to $O_{std}$ fails because boundaries are highlighted while interiors become near-zero, causing identical $O_{std}$ values for distinct objects. In these cases, use the original scalar field $f(x)$ as input instead [S1].
-
-### Vertex Ambient Occlusion Approximation
-An approximation method for computing ambient occlusion at voxel vertices using neighbor occupancy values [S2, unofficial].
-
-The formula is:
-$$ ao = \frac{side.x + side.y + \max(corner, side.x \times side.y)}{10.0} $$
-where `side` and `corner` are scalar voxel occupancy values (0.0 or 1.0) [S2, unofficial].
-
-### Voxel Ambient Occlusion
-A method that computes ambient occlusion for voxel faces by sampling side and corner neighbors [S2, unofficial].
-
-The steps are:
-1.  Sample 4 side neighbors: `side.x = get_voxel(pos + d1)`, `side.y = get_voxel(pos + d2)`, `side.z = get_voxel(pos - d1)`, `side.w = get_voxel(pos - d2)` [S2, unofficial].
-2.  Sample 4 corner neighbors: `corner.x = get_voxel(pos + d1 + d2)`, `corner.y = get_voxel(pos - d1 + d2)`, `corner.z = get_voxel(pos - d1 - d2)`, `corner.w = get_voxel(pos + d1 - d2)` [S2, unofficial].
-3.  Compute AO for each of the 4 faces using `vertex_ao`. `ao.x = vertex_ao(side.xy, corner.x)`, `ao.y = vertex_ao(side.yz, corner.y)`, `ao.z = vertex_ao(side.zw, corner.z)`, `ao.w = vertex_ao(side.wx, corner.w)` [S2, unofficial].
-4.  Return inverted AO: `1.0 - ao` [S2, unofficial].
+#### definition
+- [S1] A metric that quantifies the variation of ambient occlusion values along all directions for a voxel, allowing distinction between objects with identical scalar field values but different local structures.
+#### formula
+- [S1] $O_{std}(p, \vec{d}) = \sqrt{\frac{1}{H} \sum_{i=1}^{H} (A(p, \hat{\omega}_i, \vec{d}))^2 - (\frac{1}{H} \sum_{i=1}^{H} A(p, \hat{\omega}_i, \vec{d}))^2}$ where $H$ is the number of different directions, $A$ is the directional occlusion function, $p$ is the voxel, and $\vec{d}$ is the direction vector.
+#### parameter
+- [S1] H: The number of different directions sampled for the ambient occlusion calculation.
+#### pitfall
+- [S1] In simple cases with few objects (e.g., two objects with same intensity/size), using the second derivative field $f''(x)$ as input to $O_{std}$ fails because boundaries are highlighted while interiors become near-zero, causing identical $O_{std}$ values for distinct objects. In these cases, use the original scalar field $f(x)$ as input instead.
 
 ## Background
-The concept of using local geometric information to approximate ambient occlusion in voxel-based rendering has been explored to mitigate the harsh lighting artifacts associated with axis-aligned bounding box (AABB) representations. JAOCC shading, for instance, was developed to address the issue where fixed face normals cause hard, physically implausible lighting transitions [S1]. By analyzing the occupancy of a cubic neighborhood, it provides a smoother shading result [S3, unofficial].
-
-The use of Signed Distance Fields (SDFs) for ambient occlusion estimation leverages the property that the distance to the nearest surface can be used to approximate visibility. This approach is often used in real-time rendering and voxel engines to provide depth cues and contact shadows without the computational cost of full ray tracing [S1].
-
-The standard deviation of ambient occlusion was introduced as a transfer function component to distinguish between objects with identical scalar field values but different local structures, enhancing volume classification and visualization [S1].
-
-Voxel-based ambient occlusion techniques, such as those implemented in voxel engines like `bevy-voxel-engine`, often rely on simple neighbor sampling to approximate lighting, providing a balance between visual quality and performance for real-time applications [S2, unofficial].
+Origin: The concept of using local geometric queries for ambient occlusion in volumes has evolved alongside voxel-based rendering techniques. JAOCC shading was introduced to address artifacts in voxel-based lighting [S3, unofficial]. The use of standard deviation of ambient occlusion for volume classification was proposed to distinguish objects with similar scalar values but different local structures [S1].
 
 ## Sources
 [S1] Boundary-structure-aware transfer functions for volume classification, https://doi.org/10.1145/3139295.3139306, fetched 2026-10-31
-[S2] ria8651/bevy-voxel-engine, https://github.com/ria8651/bevy-voxel-engine, fetched 2026-10-27 (unofficial)

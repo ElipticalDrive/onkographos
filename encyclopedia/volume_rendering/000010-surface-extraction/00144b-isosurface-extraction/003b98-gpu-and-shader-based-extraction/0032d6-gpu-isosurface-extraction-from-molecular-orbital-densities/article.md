@@ -1,0 +1,128 @@
+# GPU Isosurface Extraction from Molecular Orbital Densities
+
+Also called: GPU isosurface extraction, gridless isosurface extraction
+
+## Overview
+This method extracts isosurfaces from molecular orbital densities using Gaussian Type Orbitals (GTOs) on the GPU without blocking the host thread, utilizing an octree for spatial culling, shared corner computation, and Newton projection [S1, unofficial]. It differs from standard grid-based methods by operating on a "gridless" brick structure derived from an octree, and from other GPU extraction methods by its specific optimization for the cancellation properties of atomic orbitals and its non-blocking job API [S1, unofficial].
+
+## How it works
+**Inputs:** Molecular orbital coefficients, GTO primitives, iso-value, and evaluation grid resolution ($h$).
+**Outputs:** A mesh (vertices and quads) regrouped per field and sheet.
+
+**Data Structures:**
+*   **Octree:** Nodes tested from level 2. Kept nodes are emitted in Morton order.
+*   **Brick Hash:** Built on-device to map bricks to slots.
+*   **Point List:** Used to compute corner values, with high-face corners shared between adjacent bricks to reduce redundant GTO evaluations.
+*   **Job State:** Managed via `md_gto_iso_gpu_job_begin`, `poll`, `progress`, and `end` for non-blocking execution [S1, unofficial].
+
+**Parameters:**
+*   `GTO_ISO_EVAL_EPS`: AO cutoff for evaluation and culling. Default: $10^{-6}$ [S1, unofficial].
+*   `GTO_ISO_DFORM`: Enable D form (densities as $\phi^T D \phi$). Default: Off [S1, unofficial].
+*   `GTO_ISO_FLOOD`: Enable flood approximation. Default: 1 (On) [S1, unofficial].
+
+**Steps:**
+1.  **Octree Construction:** Build an octree tested from level 2. Emit kept nodes in Morton order through a prefix sum [S1, unofficial].
+2.  **Brick Setup:** Build brick slots and the brick hash on the device [S1, unofficial].
+3.  **Corner Computation:** Compute corner values from a point list. High-face corners are shared between adjacent bricks. The kernel depends on the function set size:
+    *   `iso_corners_list_f1v4`: One function.
+    *   `iso_gcorners_f16/32/64`: Tiled GEMM for canonical sets.
+    *   `iso_gcorners_w128/w192/y256`: Wide GEMM for sets > 64 functions.
+    *   `iso_dcorners`: For D form [S1, unofficial].
+4.  **Flood Approximation (Optional):** If `GTO_ISO_FLOOD` is enabled and maxima are at atoms with non-negative weights, seeds are bricks whose corners straddle the iso value plus bricks holding an atom. This approximates the surface extent [S1, unofficial].
+5.  **Mesh Generation:** Generate Surface Nets cells and quads from the active bricks [S1, unofficial].
+6.  **Relaxation and Projection:** Relax vertices on the lattice surface, then apply Newton projection to converge to the isosurface. One orbital runs the whole projection in one launch (`iso_project_list_f1`). A step ends when the remaining error is predicted far below the tolerance [S1, unofficial].
+7.  **Regrouping:** Regroup output per field and sheet [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gpu_isosurface_extraction(molecular_data, iso_value, h):
+    # 1. Initialize Job
+    job = md_gto_iso_gpu_job_begin(molecular_data, iso_value, h)
+    
+    # 2. Build Octree and Emit Nodes
+    # Test octree from level 2. Emit kept nodes in Morton order via prefix sum.
+    kept_nodes = build_octree_and_emit_morton(molecular_data, level=2)
+    
+    # 3. Build Brick Hash on Device
+    brick_slots, brick_hash = build_brick_hash_on_device(kept_nodes)
+    
+    # 4. Compute Corners
+    # Share high-face corners between adjacent bricks.
+    # Select kernel based on function count:
+    # f1: iso_corners_list_f1v4
+    # 16/32/64: iso_gcorners_f16/32/64 (Tiled GEMM)
+    # >64: iso_gcorners_w128/w192/y256 (Wide GEMM)
+    # D-form: iso_dcorners
+    corners = compute_corners_with_sharing(brick_slots, molecular_data)
+    
+    # 5. Flood Approximation (if enabled and conditions met)
+    if GTO_ISO_FLOOD and maxima_at_atoms(molecular_data) and all_weights_non_negative(molecular_data):
+        seeds = find_straddling_bricks(corners, iso_value)
+        seeds += find_atom_bricks(molecular_data)
+        active_bricks = flood_fill(seeds, corners)
+    else:
+        active_bricks = kept_nodes # Or exact culling logic if flood disabled
+        
+    # 6. Generate Surface Nets
+    cells, quads = generate_surface_nets(active_bricks, corners)
+    
+    # 7. Relax and Project
+    # Relax vertices on lattice surface
+    vertices = relax_lattice_surface(cells, quads)
+    
+    # Newton projection per orbital
+    for orbital in molecular_data.orbitals:
+        vertices = newton_project(vertices, orbital, iso_value)
+        
+    # 8. Regroup Output
+    output = regroup_per_field_and_sheet(vertices, quads)
+    
+    # 9. Finalize Job
+    md_gto_iso_gpu_job_end(job)
+    return output
+```
+
+**Edge Cases and Pitfalls:**
+*   **Orbital Cancellation:** At $h=0.2$, orbitals are slower than dense evaluation because octree bounds are loose due to AO cancellation [S1, unofficial].
+*   **Flooding Safety:** Flooding is not safe for orbitals because octree bounds are loose. For mm HOMO, 704 of 6,592 kept bricks have surface, but flooding loses small lobes [S1, unofficial].
+*   **Shutdown:** `md_gto_iso_gpu_shutdown` must be called before device destruction. Re-initializing with a new device without shutdown reuses old kernels [S1, unofficial].
+
+## Operating characteristics
+**Time Complexity:** Depends on the number of kept octree nodes and the cost of GTO evaluation. The method is optimized to beat dense evaluation for densities.
+**Memory Complexity:** Proportional to the number of kept bricks and the size of the brick hash.
+
+**Measured Performance (Median Extraction, h = 0.2 bohr):**
+*   **RTX 3080:**
+    *   mm density (156 functions): 8.4–8.6 ms (vs. 14.4–16.1 ms dense) [S1, unofficial].
+    *   tq density (221 functions): 14.1 ms (vs. 15.9–16.5 ms dense) [S1, unofficial].
+    *   mm HOMO: 2.25–2.3 ms (vs. 0.48 ms dense) [S1, unofficial].
+*   **M4 Pro:**
+    *   mm density (156 functions): 19.3–19.7 ms (vs. 33–35 ms dense) [S1, unofficial].
+    *   mm HOMO: 2.42–2.49 ms (vs. 1.07–1.16 ms dense) [S1, unofficial].
+
+**Strengths:**
+*   Non-blocking job API allows asynchronous execution [S1, unofficial].
+*   Optimized for molecular densities, beating dense evaluation in most cases [S1, unofficial].
+*   Shared corner computation reduces redundant GTO evaluations [S1, unofficial].
+
+**Limitations:**
+*   Slower than dense evaluation for orbitals at $h=0.2$ due to loose octree bounds [S1, unofficial].
+*   Flooding approximation loses small lobes in orbitals [S1, unofficial].
+*   Requires careful shutdown to avoid kernel reuse issues [S1, unofficial].
+
+**When to Use:**
+*   When extracting isosurfaces from molecular densities on the GPU.
+*   When non-blocking execution is required.
+*   When performance on densities is critical.
+
+**When Not to Use:**
+*   When extracting orbitals at $h=0.2$ where dense evaluation is faster.
+*   When small lobes in orbitals must be preserved and flooding is used.
+
+## Background
+This method is part of the `mdlib` project, specifically the `md_gto_iso_gpu` component, optimized over rounds r1–r34 [S1, unofficial]. It was developed by scanberg and merged into the master branch [S1, unofficial]. The implementation uses Vulkan on RTX 3080 and Metal on M4 Pro for profiling and execution [S1, unofficial].
+
+## Sources
+[S1] md_gto_iso_gpu: optimized GPU isosurface extraction (non-blocking jobs, flood, one measured path), https://github.com/scanberg/mdlib/pull/15, fetched 2026-10-28 (unofficial)

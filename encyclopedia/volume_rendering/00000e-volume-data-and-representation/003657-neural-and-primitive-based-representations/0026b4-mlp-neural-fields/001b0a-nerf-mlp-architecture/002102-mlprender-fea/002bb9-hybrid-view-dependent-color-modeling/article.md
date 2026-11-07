@@ -3,82 +3,85 @@
 Also called: Feature Voxel Grid + Shallow MLP
 
 ## Overview
-This method models view-dependent color emissions by combining a sparse feature voxel grid with a shallow Multi-Layer Perceptron (MLP) [S1]. It solves the trade-off between the slow convergence of pure neural fields and the limited expressivity of static voxel grids [S1]. Unlike its sibling [NeRF with Per-Image Embeddings](2484-nerf-with-per-image-embeddings.md) which uses global image vectors, or [Linear Feature Decoder with Learned Color Basis](3352-linear-feature-decoder-with-learned-color-basis.md) which uses linear projections, this hybrid approach uses a local spatial lookup followed by a non-linear shallow MLP to capture complex specularities and shading [S1].
+Hybrid View-dependent Color Modeling predicts RGB color by combining a sparse feature voxel grid with a shallow Multi-Layer Perceptron (MLP) [S1]. It solves the trade-off between the slow convergence of pure neural fields and the limited quality of explicit voxel grids by storing view-independent diffuse color and view-dependent features in the grid, while using the MLP to decode view-dependent residuals [S1, S3]. It sets itself apart from [MLPRender_Fea](2414-mlprender-fea.md) by explicitly separating the view-independent component (stored in the grid) from the view-dependent component (decoded by the MLP), whereas [MLPRender_Fea](2414-mlprender-fea.md) applies positional encoding to features and view direction but not position [2414-mlprender-fea.md].
 
 ## How it works
 **Inputs:**
-- Query position $\mathbf{x} \in \mathbb{R}^3$.
-- View direction $\mathbf{v} \in \mathbb{R}^3$ (normalized).
-- Feature grid resolution parameter $D$ (typically 12 or 24) [S1].
+*   3D position $\mathbf{x}$.
+*   View direction $\mathbf{v}$.
+*   Feature grid $G$ with dimension $D$ (typically 12 or 24) [S1].
+*   Shallow MLP with 2 layers and 128 channels per layer [S1].
 
 **Outputs:**
-- RGB color vector $\mathbf{c} \in \mathbb{R}^3$.
+*   RGB color $\mathbf{C}$.
 
 **Data Structures:**
-1.  **Feature Voxel Grid:** A 3D grid of dimensions $D \times D \times D$. Each cell stores a feature vector $\mathbf{f} \in \mathbb{R}^{C_f}$. The source specifies the grid stores "view-invariant diffused colors" or features, but does not explicitly define the channel count $C_f$ of the grid entries in the provided notes, only the MLP dimensions [S1]. [G] Standard implementations typically use $C_f=3$ or higher; however, based strictly on the provided text, the grid dimension is $D$ and the MLP takes features as input. We assume the grid stores features $\mathbf{f}$ that are concatenated with the view direction.
-2.  **Shallow MLP:** A 2-layer MLP.
-    -   Input dimension: $C_f + 3$ (features + view direction). Note: Positional encoding is applied to features and view direction, but NOT position, as per the parent [MLPRender_Fea](2414-mlprender-fea.md).
-    -   Hidden layers: 2 layers, each with 128 channels.
-    -   Activation: ReLU (implied by "shallow MLP" context and standard practice, though not explicitly named in S1 notes, S2 confirms ReLU usage in variants).
-    -   Output layer: 1 layer, 3 channels (RGB).
+*   **Feature Voxel Grid:** A sparse 3D grid storing feature vectors. Each voxel contains a feature vector of dimension $D$ [S1]. The grid stores view-independent diffuse color and view-dependent feature vectors [S3].
+*   **Shallow MLP:** A 2-layer MLP. Input dimension is $D + 3$ (features + view direction). Hidden layer size is 128. Output dimension is 3 (RGB residual) [S1].
 
-**Numbered Steps:**
-1.  **Grid Lookup:** Given query position $\mathbf{x}$, trilinearly interpolate the feature vector $\mathbf{f}$ from the voxel grid at resolution $D$.
-2.  **View Direction Encoding:** Apply positional encoding to the view direction $\mathbf{v}$ [S1]. [G] The parent article specifies positional encoding is applied to view direction.
-3.  **Feature Encoding:** Apply positional encoding to the interpolated feature vector $\mathbf{f}$ [S1].
-4.  **Concatenation:** Concatenate the encoded features and encoded view direction: $\mathbf{z} = [\text{PE}(\mathbf{f}), \text{PE}(\mathbf{v})]$.
-5.  **MLP Forward Pass:**
-    -   $\mathbf{h}_1 = \text{ReLU}(\mathbf{W}_1 \mathbf{z} + \mathbf{b}_1)$
-    -   $\mathbf{h}_2 = \text{ReLU}(\mathbf{W}_2 \mathbf{h}_1 + \mathbf{b}_2)$
-    -   $\mathbf{c} = \mathbf{W}_3 \mathbf{h}_2 + \mathbf{b}_3$
-    -   Where $\mathbf{W}_1, \mathbf{W}_2 \in \mathbb{R}^{128 \times \text{input\_dim}}$ and $\mathbf{W}_3 \in \mathbb{R}^{3 \times 128}$.
-6.  **Output:** Return $\mathbf{c}$.
+**Steps:**
+1.  Query the feature voxel grid at position $\mathbf{x}$ to retrieve the feature vector $\mathbf{f}$ [S1, S3].
+2.  Retrieve the view-independent diffuse color $\mathbf{C}_{diff}$ from the grid at $\mathbf{x}$ [S3].
+3.  Concatenate $\mathbf{f}$ and the view direction $\mathbf{v}$ to form the input vector $\mathbf{z} = [\mathbf{f}; \mathbf{v}]$ [S3].
+4.  Pass $\mathbf{z}$ through the shallow MLP to compute the view-dependent residual $\mathbf{r}$ [S1, S3].
+5.  Compute the final color $\mathbf{C} = \mathbf{C}_{diff} + \mathbf{r}$ [S3].
 
 **Parameters:**
--   $D$: Feature grid dimension. Typical values: 12 (baseline), 24 (high-res) [S1].
--   MLP Layers: 2 [S1].
--   MLP Channels: 128 [S1].
+*   Feature grid dimension $D$: 12 or 24 [S1].
+*   MLP layers: 2 [S1].
+*   MLP channels: 128 [S1].
 
 **Edge Cases and Pitfalls:**
--   **Memory:** Using only the shallow MLP results in worse quality due to shallow depth compared to deeper NeRF MLPs [S1]. Using only the voxel grid converges faster but degrades quality [S1].
--   **Free Space Skipping:** To prevent Out-Of-Memory (OOM) errors during training, a free space skipping strategy is used. If the density at a coarse stage is below threshold $\tau^{(c)}$ or fine stage below $\tau^{(f)}$, the point is skipped [S1]. Typical thresholds: $\tau^{(c)} = 10^{-3}$, $\tau^{(f)} = 10^{-4}$ [S1]. Without skipping ($\tau=0$), the system runs out of memory at the fine stage [S1].
+*   **Free Space Skipping:** To avoid out-of-memory (OOM) errors and improve convergence, a free space skipping strategy is used. Points are queried only if they pass density thresholds in coarse and fine stages [S1].
+*   **MLP Depth:** Using only the shallow MLP yields worse quality because it is shallower than the full NeRF MLP (2 layers vs 8 layers) [S1].
+*   **Voxel Grid Only:** Using only the voxel grid converges faster but degrades rendering quality [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hybrid_view_dependent_color(x, v, feature_grid, mlp):
+    # Step 1: Query feature grid for view-dependent features
+    f = feature_grid.query(x)
+    
+    # Step 2: Query feature grid for view-independent diffuse color
+    C_diff = feature_grid.query_color(x)
+    
+    # Step 3: Concatenate features and view direction
+    z = concatenate(f, v)
+    
+    # Step 4: Pass through shallow MLP to get residual
+    r = mlp.forward(z)
+    
+    # Step 5: Add residual to diffuse color
+    C = C_diff + r
+    
+    return C
+```
 
 ## Subtopics
 
 ### Signed Residual Activation
-A variant used in texture atlas baking pipelines where a signed residual is added to a per-primitive base color inside the outer ReLU of the color equation [S2, unofficial].
--   **Formula:** $\text{ReLU}(\text{base} + b_{SV})$ [S2, unofficial].
--   **Positive-Only Variant:** $\text{ReLU}(\text{base} + b_{SV}) + \text{ReLU}(\rho)$ [S2, unofficial].
--   **Comparison:** The signed model allows both darkening and brightening, reproducing all non-negative corrections and handling darkening textures. The positive-only variant restricts correction to addition only, yielding a strictly smaller function class that fails where texture must darken the base [S2, unofficial].
--   **Performance:** Signed residual improves LPIPS on 10/11 scenes and PSNR on 10/11 by 0.31 dB (Mip-NeRF 360) and 0.19 dB (Deep Blending) [S2, unofficial]. Positive-only loses ~0.5 dB PSNR and 0.01 LPIPS on indoor scenes [S2, unofficial].
--   **Pitfall:** Positive-only optimization is unreliable; seed spread across runs is an order of magnitude larger than signed (e.g., stump spread 0.0773 vs 0.0042) [S2, unofficial].
--   **Usage:** Used in the texture atlas baking pipeline for view-dependent color representation [S2, unofficial].
+Applies a signed residual to a per-primitive base color, entering inside the outer ReLU of the color equation to allow both darkening and brightening [S2, unofficial]. The formula is $\text{ReLU}(\text{base} + b_{SV})$ [S2, unofficial]. A positive-only restriction $\text{ReLU}(\text{base} + b_{SV}) + \text{ReLU}(\rho)$ yields a strictly smaller function class that fails where texture must darken the base [S2, unofficial]. Signed residual improves LPIPS on 10/11 scenes and PSNR on 10/11 by 0.31 dB (Mip-NeRF 360) and 0.19 dB (Deep Blending) [S2, unofficial]. Positive-only makes optimization unreliable; seed spread across runs is an order of magnitude larger (e.g., stump spread 0.0773 vs 0.0042) [S2, unofficial]. Used in the texture atlas baking pipeline [S2, unofficial].
+
+### Baking Neural Fields
+Precomputes view-independent diffuse RGB color and view-dependent 4D feature vectors, storing them in a sparse voxel grid and texture atlas [S3]. Steps: accumulate diffuse colors and feature vectors along a ray; concatenate with view direction; pass to shallow MLP for view-dependent residual; add residual to diffuse color [S3]. Averages less than 90 MB per scene and renders in real-time (>30 fps on laptop GPU for 800x800) [S3]. Image compression leads to relatively low-quality metrics [S3].
+
+### View-Independent SH Color (Degree 0)
+Omits view-dependent spherical harmonics (SH) coefficients by setting SH degree to 0, using only view-independent color [S4, unofficial]. On Mip-NeRF360 outdoor scenes (RTX 4090), reduces training time from 5m31s to 2m24s, VRAM from 6.0GiB to 3.2GiB, and PSNR drops from 24.72 to 24.38 [S4, unofficial]. Speeds up training and reduces VRAM but slightly degrades quality [S4, unofficial].
 
 ## Operating characteristics
-**Time and Memory Complexity:**
--   **Memory:** Scales with $D^3$ for the voxel grid. Higher $D$ increases memory usage significantly. The shallow MLP (2 layers, 128 channels) has negligible memory footprint compared to the grid [S1].
--   **Time:** Training time increases with $D$ and MLP channels. Baseline ($D=12$) takes 7.3 minutes; High-res ($D=24$) takes 8.8 minutes on the tested hardware/scene [S1]. Free space skipping reduces training time from OOM/long to ~7.3-7.8 minutes [S1].
-
-**Measured Performance:**
--   **Baseline ($D=12$, 2 layers, 128 ch):** PSNR 35.54, Training 7.3 min [S1].
--   **High-res ($D=24$, 2 layers, 128 ch):** PSNR 35.90, Training 8.8 min [S1].
--   **Free Space Skipping Impact:** Skipping with $\tau^{(c)}=10^{-3}, \tau^{(f)}=10^{-4}$ yields PSNR 35.54 in 7.3 min, compared to 34.89 PSNR in 7.8 min with only $\tau^{(f)}$ applied, and OOM with no skipping [S1].
-
-**Strengths and Limitations:**
--   **Strengths:** Super-fast convergence compared to pure neural fields [S1]. Better quality than voxel-grid-only methods [S1]. Efficient memory usage via free space skipping [S1].
--   **Limitations:** Shallower MLP yields worse quality than deeper NeRF MLPs if used alone [S1]. Larger $D$ and channels improve quality at higher computational cost [S1].
-
-**When to Use:**
--   Use when fast convergence is required and view-dependent effects are moderate.
--   Use when memory is constrained but pure voxel grids are insufficient for quality [S1].
-
-**When Not to Use:**
--   Do not use if high-fidelity complex view-dependent effects (e.g., strong specularities) are required and training time is not a constraint (use deeper MLPs or spherical harmonics) [S1].
--   Do not use without free space skipping if the scene has large empty volumes, as it may lead to OOM [S1].
+*   **Time Complexity:** Faster than full NeRF MLP due to shallow MLP (2 layers) [S1].
+*   **Memory Complexity:** Compact, averaging less than 90 MB per scene when baked [S3].
+*   **Performance:** Baseline ($D=12$, 2 layers, 128 ch): PSNR 35.54, 7.3 min training. High-res ($D=24$, 2 layers, 128 ch): PSNR 35.90, 8.8 min training [S1].
+*   **Strengths:** Fast convergence, compact storage, real-time rendering capability when baked [S1, S3].
+*   **Limitations:** Lower quality than full NeRF MLP if MLP is too shallow or voxel grid is used alone [S1]. Image compression for storage reduces quality [S3].
 
 ## Background
-Originated in the context of Direct Voxel Grid Optimization for radiance fields reconstruction [S1]. The method addresses the limitation of shallow MLPs in NeRF-like architectures by offloading spatial invariance to a voxel grid while retaining the MLP for view-dependent details [S1]. It is part of the MLPRender_Fea module family [S1].
+Originated from the need to accelerate NeRF rendering by precomputing view-independent components and deferring view-dependent computations [S3]. Hedman et al. [HSM* 21] reformulated NeRF to output diffuse color and view-dependent features [S3]. FastNeRF [GKJ* 21] cached view-independent radiance in sparse voxel grids [S3]. Yu et al. [YLT* 21] introduced NeRF-SH for view-dependent appearance [S3]. The hybrid approach combines these ideas with a shallow MLP for efficient view-dependent decoding [S1].
 
 ## Sources
 [S1] Direct Voxel Grid Optimization: Super-fast Convergence for Radiance Fields Reconstruction, https://doi.org/10.1109/cvpr52688.2022.00538, fetched 2026-10-26
 [S2] Bake It Till You Make It: Ultrafast Spatial Texture-Atlas Splatting, https://doi.org/10.48550/arXiv.2607.13808, fetched 2026-10-29 (unofficial)
+[S3] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
+[S4] Faster-GS: Analyzing and Improving Gaussian Splatting Optimization, https://arxiv.org/abs/2602.09999v1, fetched 2026-10-26 (unofficial)

@@ -3,69 +3,93 @@
 Also called: Initialization Policy, OTS Initialization
 
 ## Overview
-The 3DGS Initialization Policy defines the standard procedure for seeding 3D Gaussian primitives in 3D Gaussian Splatting (3DGS) and Order-Independent Splatting (OTS) [S1]. It establishes a uniform initial scene representation by distributing Gaussians with random positions and a single computed opacity value derived from a power-law function of the total Gaussian count, differing from sibling methods like [CoR-GS](1486-cor-gs.md) or [Gaussian Splatting Volume Rendering](2063-gaussian-splatting-volume-rendering.md) that use geometric or learned initialization strategies [S1].
+The 3DGS Initialization Policy defines the deterministic strategy for populating the initial set of 3D Gaussians before optimization begins. It solves the problem of establishing a valid, non-degenerate starting configuration for the radiance field by distributing primitives uniformly in space with uniform opacity. It sets apart from adaptive initialization methods by using a fixed, pre-computed opacity value derived from the total Gaussian count $N$, rather than learning initial opacities from data or using random initialization with learned values [S1].
 
 ## How it works
-**Inputs:**
-*   $N$: Total number of Gaussians to initialize (e.g., 4k, 12k, 36k, 100k, 500k, 1m, 5m) [S1].
-*   Scene bounding volume: Unit cube centered at the origin for synthetic scenes [S1].
-
-**Outputs:**
-*   Set of $N$ Gaussians with positions $\mathbf{x}_i$, scales $\mathbf{s}_i$, rotations $\mathbf{q}_i$, opacities $\alpha_i$, and spherical harmonics coefficients $\mathbf{c}_i$ [G].
+**Inputs and Outputs:**
+*   **Input:** Scene bounding box (typically a unit cube centered at the origin), total number of Gaussians $N$.
+*   **Output:** A set of $N$ Gaussians, each defined by position $\mathbf{x}$, covariance $\Sigma$, opacity $\alpha$, and spherical harmonics coefficients.
 
 **Data Structures:**
-*   Gaussian array of size $N$. Each element stores $\mathbf{x} \in \mathbb{R}^3$, $\mathbf{s} \in \mathbb{R}^3$, $\mathbf{q} \in \mathbb{R}^4$, $\alpha \in \mathbb{R}$, $\mathbf{c} \in \mathbb{R}^k$ [G].
+Each Gaussian $i$ stores:
+*   $\mathbf{x}_i \in \mathbb{R}^3$: Position.
+*   $\Sigma_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix (or rotation $\mathbf{q}$ and scale $\mathbf{s}$).
+*   $\alpha_i \in [0, 1]$: Opacity.
+*   $\mathbf{c}_i$: Color coefficients (SH).
 
 **Steps:**
-1.  **Position Sampling:** Sample $N$ positions uniformly at random within the unit cube centered at the scene origin [S1].
-2.  **Opacity/Weight Computation:** Compute a single scalar value $V$ using the power function $V = 2 \cdot N^{\beta}$ [S1]. The exponent $\beta$ is $0.35$ for standard 3DGS and $0.55$ for OTS-based methods [S1].
-3.  **Uniform Assignment:** Assign $V$ as the initial opacity $\alpha_i$ for all $i \in \{1, \dots, N\}$ [S1].
-4.  **Scale and Rotation:** Initialize scales and rotations to standard defaults (e.g., small random scales, identity rotations) as the sources do not specify alternative initialization rules for these parameters [G].
-5.  **Color:** Initialize spherical harmonics coefficients to standard defaults (e.g., zero or white) as the sources do not specify color initialization [G].
+1.  **Position Sampling:** Generate $N$ positions $\mathbf{x}_i$ uniformly at random within the scene's bounding volume (e.g., the unit cube $[-0.5, 0.5]^3$) [S1].
+2.  **Opacity Calculation:** Compute a single scalar opacity value $\alpha_{init}$ for all Gaussians using a power function of $N$. The exponent depends on the specific rendering formulation:
+    *   For standard 3DGS: $\alpha_{init} = 2 N^{-0.35}$ [S1].
+    *   For OTS-based methods: $\alpha_{init} = 2 N^{-0.55}$ [S1].
+3.  **Assignment:** Assign $\alpha_i = \alpha_{init}$ for all $i \in \{1, \dots, N\}$ [S1].
+4.  **Initialization of Other Parameters:** Initialize rotations and scales to identity/default values (e.g., isotropic scale) and color coefficients to zero or mean scene color [G].
+
+**Parameters:**
+*   $N$: Total number of initial Gaussians. Typical values include 4k, 12k, 36k, 100k, 500k, 1m, or 5m depending on scene complexity and experiment [S1].
+*   Bounding Box: Usually a unit cube around the scene origin [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Opacity Clipping:** If $N$ is very small, $2 N^{-0.35}$ may exceed 1.0. In practice, $N$ is large enough that this value is $<1$, but clamping to $[0, 1]$ is a safe guard [G].
+*   **Uniform Opacity Limitation:** All Gaussians start with identical opacity, which may lead to slow convergence for sparse regions if not handled by densification [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def initialize_gaussians(N, beta):
-    # 1. Position initialization: uniform random in unit cube [-0.5, 0.5]^3
-    positions = np.random.uniform(-0.5, 0.5, size=(N, 3))
-    # 2. Compute single opacity value
-    V = 2.0 * (N ** beta)
-    # 3. Assign uniform opacity
-    opacities = np.full(N, V)
-    # 4. Scale and rotation initialization (not specified in sources)
-    scales = np.random.uniform(0.01, 0.1, size=(N, 3)) # [G]
-    rotations = np.tile([1.0, 0.0, 0.0, 0.0], (N, 1)) # [G]
-    # 5. Color initialization (not specified in sources)
-    colors = np.ones((N, 3)) # [G]
-    return positions, scales, rotations, opacities, colors
+import numpy as np
+
+def initialize_gaussians(N, bbox_min=np.array([-0.5, -0.5, -0.5]), bbox_max=np.array([0.5, 0.5, 0.5]), method="3dgs"):
+    """
+    Initialize N Gaussians with random positions and uniform opacity.
+    
+    Args:
+        N: Total number of Gaussians.
+        bbox_min: Lower bound of the bounding box.
+        bbox_max: Upper bound of the bounding box.
+        method: '3dgs' or 'ots'.
+        
+    Returns:
+        positions: (N, 3) array of random positions.
+        opacity: Scalar initial opacity value.
+    """
+    # Step 1: Sample positions uniformly in the bounding box
+    positions = np.random.uniform(bbox_min, bbox_max, size=(N, 3))
+    
+    # Step 2: Calculate initial opacity based on method
+    if method == "3dgs":
+        # Formula: 2 * N^(-0.35)
+        opacity = 2.0 * (N ** -0.35)
+    elif method == "ots":
+        # Formula: 2 * N^(-0.55)
+        opacity = 2.0 * (N ** -0.55)
+    else:
+        raise ValueError("Method must be '3dgs' or 'ots'")
+        
+    # Clamp opacity to [0, 1] to prevent invalid values for small N
+    opacity = np.clip(opacity, 0.0, 1.0)
+    
+    return positions, opacity
 ```
-
-**Parameters:**
-*   $N$: Total Gaussian count. Typical experimental values are 4k, 12k, 36k, 100k, 500k, 1m, and 5m [S1].
-*   $\beta$: Exponent for opacity scaling. $0.35$ for 3DGS, $0.55$ for OTS [S1].
-
-**Edge Cases and Pitfalls:**
-*   The computed opacity $V$ may exceed $1.0$ for large $N$; implementations typically clamp $\alpha$ to $[0, 1]$ or apply a sigmoid during rendering [G].
-*   The policy assumes a unit cube bounding volume for synthetic scenes; adapting to real-world scenes requires mapping the random samples to the scene's bounding box or using an SfM point cloud, though the exact real-world strategy is not detailed in the primary source [S1].
 
 ## Subtopics
 
 ### Geometric Correction via Neural Gaussians
-A strategy to maximize overlap between cells and emitted neural Gaussians by dynamically aligning cell geometry with Gaussian properties [S2]. It involves: 1. Dynamically defining the cell's quaternion as a weighted average of the quaternions associated with its emitted Gaussians [S2]. 2. Periodically updating cell centers using $\mathbf{x}_n = \frac{\sum_{k=1}^K \boldsymbol{\mu}_{n,k}}{K}$, where $\mathbf{x}_n$ is the cell center, $K$ is the number of Gaussians in the cell, and $\boldsymbol{\mu}_{n,k}$ is the mean of the k-th Gaussian in cell n [S2]. 3. Learning the three-dimensional covariances and positions of first-layer cells in accordance with the updates to the second-layer Gaussians, leveraging the differentiability of cell scales [S2].
+A strategy to maximize overlap between cells and emitted neural Gaussians by dynamically aligning cell geometry with Gaussian properties. It involves: 1. Defining the cell's quaternion as a weighted average of the quaternions associated with its emitted Gaussians (Eq. 12 in [S2]). 2. Periodically updating cell centers using $\mathbf{x}_n = \frac{\sum_{k=1}^K \boldsymbol{\mu}_{n,k}}{K}$, where $\mathbf{x}_n$ is the cell center, $K$ is the number of Gaussians in the cell, and $\boldsymbol{\mu}_{n,k}$ is the mean of the $k$-th Gaussian in cell $n$ (Eq. 17 in [S2]). 3. Learning the three-dimensional covariances and positions of first-layer cells in accordance with the updates to the second-layer Gaussians, leveraging the differentiability of cell scales (Eq. 11 in [S2]) [S2].
 
 ### Cell Position Reset
 Following adaptive density control, new cells are grown at Gaussians with high view-space positional gradients. To decouple existing cells from newly introduced ones, the offsets of the significant Gaussians are reset to zero after cell growth, i.e., their positions are reinitialized to the centers of the corresponding cells [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ for position sampling and opacity assignment [G].
-*   **Memory Complexity:** $O(N)$ to store initial parameters [G].
-*   **Strengths:** Provides a consistent, parameter-light baseline for comparing 3DGS and OTS by controlling initial opacity scaling via a single power-law exponent [S1].
-*   **Limitations:** Does not incorporate scene geometry during seeding; relies entirely on subsequent densification and pruning to refine spatial coverage [S1].
+*   **Time Complexity:** $O(N)$ for position sampling and opacity assignment.
+*   **Memory Complexity:** $O(N)$ to store the initial Gaussian parameters.
+*   **Strengths:** Simple, deterministic, and reproducible. Provides a uniform coverage of the scene space, which is robust for synthetic scenes [S1].
+*   **Limitations:** Uniform opacity may not reflect the underlying scene density, potentially requiring more densification steps to converge [S1]. The fixed exponent values (0.35, 0.55) are empirical and may not be optimal for all scene types [S1].
+*   **When to Use:** Standard 3DGS training, especially on synthetic datasets like Nerf-Synthetic where scene bounds are known and uniform [S1].
+*   **When Not to Use:** Scenes with highly non-uniform density where adaptive initialization might be more efficient [G].
 
 ## Background
-The policy was introduced to evaluate whether 3D Gaussian Splatting requires accurate volumetric rendering, specifically comparing standard 3DGS with Order-Independent Splatting (OTS) [S1]. It was adapted from the original 3DGS codebase's training procedure for Nerf-Synthetic scenes [S1]. The authors applied it to real-world scene experiments with varying Gaussian counts (100k to 5m) to assess densification behavior while eliminating discrepancies in primitive counts [S1].
+The initialization policy originates from the original 3D Gaussian Splatting paper and its subsequent analysis in "Does 3D Gaussian Splatting Need Accurate Volumetric Rendering?" [S1]. It was adopted from the original 3DGS codebase for training on Nerf-Synthetic datasets [S1]. The specific power-law scaling for opacity was derived to balance the contribution of each Gaussian during the early stages of optimization, with different exponents for standard 3DGS and OTS-based methods due to their different image formation solutions [S1].
 
 ## Sources
 [S1] Does 3D Gaussian Splatting Need Accurate Volumetric Rendering?, https://doi.org/10.1111/cgf.70032, fetched 2026-10-26

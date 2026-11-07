@@ -1,0 +1,217 @@
+# Temporal Densification
+
+Also called: Temporal Splitting
+
+## Overview
+Temporal densification is a strategy for 3D Gaussian Splatting that detects and resolves reconstruction errors caused by object or camera motion by splitting Gaussians based on the variance of their normalized image error across time segments [S1]. It addresses the limitation of static spatial densification, which assumes Gaussians are stationary, by identifying Gaussians whose error fluctuates significantly between keyframes, indicating they fail to track motion [S1]. It differs from sibling methods like Fixed-Pool Relocation by actively increasing the Gaussian count through splitting rather than moving existing entities, and from Blind-Spot Cross-Validation by using explicit temporal segments defined by keyframes rather than spatial occlusion checks.
+
+## How it works
+**Inputs:**
+- A set of 3D Gaussians $\mathcal{G}$.
+- A sequence of training images (frames) indexed by time $t$.
+- A set of keyframes $\mathcal{K}$ associated with each Gaussian $g$, denoted $t_i^g$.
+- Hyperparameters: temporal threshold $\tau_{time}$, KNN count $K=10$, minimum segment length $l_{seg}$ [S1].
+
+**Outputs:**
+- An updated set of Gaussians $\mathcal{G}'$ with new Gaussians added via splitting for those exhibiting high temporal error variation [S1].
+
+**Data Structures:**
+- **Keyframe List:** For each Gaussian $g$, a sorted list of keyframe indices $[t_0^g, t_1^g, \dots, t_m^g]$ that partition the frame sequence into segments $[t_i^g, t_{i+1}^g)$ [S1].
+- **Error Buffer:** For each Gaussian $g$ and image $I$, the scalar image error $e_{g,I}$ and the number of projected pixels $N_{g,I}^p$ [S1].
+- **Weights:** Precomputed weights $w_{g,I}$ for each Gaussian-image pair, derived from the optimization loss weighting scheme (Eq. 13 in [S1]) [S1].
+
+**Steps:**
+
+1.  **Segment Definition:** For each Gaussian $g$, define temporal segments using its associated keyframes. If $g$ has keyframes $t_0^g, \dots, t_m^g$, the segments are $[t_i^g, t_{i+1}^g)$ for $i=0 \dots m-1$. If $g$ has only one keyframe $t_0^g$, the segment is $[t_0^g, \infty)$ or the remainder of the sequence [S1].
+
+2.  **Normalized Error Calculation:** For each Gaussian $g$ and each image $I$ in the training set, compute the normalized image error $\bar{e}_{g,I}$ by dividing the raw error $e_{g,I}$ by the number of pixels $N_{g,I}^p$ projected by the Gaussian onto image $I$. This normalizes for the projected area, isolating error variation due to motion rather than scale [S1]:
+    $$
+    \bar{e}_{g,I} = \frac{e_{g,I}}{N_{g,I}^p} \quad (24)
+    $$
+
+3.  **Weighted Mean and Variance:** Compute the weighted mean normalized error $\bar{e}_g$ and the standard deviation $\sigma_{\bar{e}_g}$ for each segment. The weights $w_{g,I}$ are used to aggregate errors across images [S1]:
+    $$
+    \bar{e}_g = \frac{\sum_{I \in \mathcal{I}} \bar{e}_{g,I} w_{g,I}}{\sum_{I \in \mathcal{I}} w_{g,I}} \quad (25)
+    $$
+    $$
+    \sigma_{\bar{e}_g} = \sqrt{\frac{\sum_{I \in \mathcal{I}} \bar{e}_{g,I}^2 w_{g,I}}{\sum_{I \in \mathcal{I}} w_{g,I}} - \bar{e}_g^2} \quad (26)
+    $$
+    Note: These statistics are computed per segment between adjacent keyframes [S1].
+
+4.  **Variation Ratio:** Calculate the coefficient of variation (variation ratio) $\rho_g$ for each segment:
+    $$
+    \rho_g = \frac{\sigma_{\bar{e}_g}}{\bar{e}_g} \quad (27)
+    $$
+    A high $\rho_g$ indicates that the Gaussian's error varies significantly across the temporal segment, suggesting it does not adequately model the motion in that region [S1].
+
+5.  **Splitting Criterion:**
+    -   **Direct Split:** If $\rho_g$ exceeds the threshold $\tau_{time}$ for *any* segment of Gaussian $g$, mark $g$ for splitting across all its segments [S1].
+    -   **KNN Propagation:** To handle uniformly colored areas where error variation is naturally low, check the $K=10$ nearest neighbors of $g$. If any neighbor satisfies the threshold criterion ($\rho_{neighbor} > \tau_{time}$), mark $g$ for splitting as well [S1].
+
+6.  **Keyframe Management:** For Gaussians marked for splitting, add a new keyframe to improve temporal resolution:
+    -   Identify the image $I_{max}$ with the maximum error $e_{g,I}$ within the relevant segment.
+    -   If the index of $I_{max}$ is not the left boundary keyframe $t_i^g$, insert $I_{max}$ as a new keyframe.
+    -   If $I_{max}$ coincides with the left keyframe $t_i^g$, insert the midpoint of the segment $[t_i^g, t_{i+1}^g)$ as the new keyframe.
+    -   Do not add a keyframe if the resulting segment length would be less than $l_{seg}$ [S1].
+
+7.  **Execution:** Perform the split operation on all marked Gaussians. The split direction is determined by the error moments (as described in the parent article's spatial splitting logic, specifically using the first moment of the error distribution [S1]).
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def temporal_densification(gaussians, frames, keyframes, weights, threshold_tau, k_nn=10, min_seg_len=10):
+    """
+    gaussians: List of Gaussian objects, each with attributes:
+        - id
+        - keyframes: List of frame indices [t0, t1, ...]
+        - errors: Dict mapping frame_index -> error_value e_g,I
+        - projected_pixels: Dict mapping frame_index -> N_g,I^p
+    frames: List of frame objects or indices
+    weights: Dict mapping (gaussian_id, frame_index) -> weight w_g,I
+    threshold_tau: Float, the temporal threshold tau_time
+    k_nn: Integer, number of neighbors for propagation
+    min_seg_len: Integer, minimum segment length l_seg
+    """
+    to_split = set()
+    new_keyframes = []
+
+    # Precompute normalized errors and stats per segment
+    # Note: In practice, this is done per iteration/epoch
+    
+    for g in gaussians:
+        kf_list = g.keyframes
+        if not kf_list:
+            continue
+            
+        # Define segments
+        segments = []
+        for i in range(len(kf_list) - 1):
+            segments.append((kf_list[i], kf_list[i+1]))
+        
+        # If only one keyframe, handle as single segment covering remaining frames
+        # (Implementation detail: assume frames are sorted and we iterate over visible frames)
+        
+        split_candidate = False
+        
+        for (t_start, t_end) in segments:
+            # Collect errors for frames in this segment
+            segment_errors = []
+            segment_weights = []
+            
+            for frame_idx in frames:
+                if t_start <= frame_idx < t_end:
+                    e_g_I = g.errors.get(frame_idx, 0.0)
+                    n_p = g.projected_pixels.get(frame_idx, 1) # Avoid div by zero [G]
+                    
+                    # Eq 24
+                    norm_err = e_g_I / n_p
+                    w = weights.get((g.id, frame_idx), 1.0)
+                    
+                    segment_errors.append((norm_err, w))
+            
+            if not segment_errors:
+                continue
+                
+            # Eq 25 and 26
+            sum_w = sum(w for _, w in segment_errors)
+            if sum_w == 0:
+                continue
+                
+            mean_err = sum(e * w for e, w in segment_errors) / sum_w
+            
+            var_err = sum(e**2 * w for e, w in segment_errors) / sum_w - mean_err**2
+            std_err = (var_err ** 0.5) if var_err > 0 else 0.0
+            
+            # Eq 27
+            if mean_err == 0:
+                rho = 0.0
+            else:
+                rho = std_err / mean_err
+            
+            # Check threshold
+            if rho > threshold_tau:
+                split_candidate = True
+                break # At least one segment exceeds threshold
+        
+        # KNN Propagation
+        if not split_candidate:
+            neighbors = get_k_nearest_neighbors(g, k_nn) # Helper to find spatial neighbors
+            for neighbor in neighbors:
+                # Check if neighbor has high temporal variation
+                # (Simplified: assume neighbor's rho is precomputed or computed similarly)
+                if neighbor.rho > threshold_tau:
+                    split_candidate = True
+                    break
+
+        if split_candidate:
+            to_split.add(g.id)
+            
+            # Keyframe addition logic
+            # Find argmax error in the segment(s) that triggered split
+            # For simplicity, assume we add to the segment with max error
+            max_e = -1
+            max_frame = None
+            
+            for (t_start, t_end) in segments:
+                for frame_idx in frames:
+                    if t_start <= frame_idx < t_end:
+                        e = g.errors.get(frame_idx, 0.0)
+                        if e > max_e:
+                            max_e = e
+                            max_frame = frame_idx
+            
+            if max_frame is not None:
+                # Determine insertion point
+                # Find which segment max_frame belongs to
+                seg_idx = -1
+                for i, (t_start, t_end) in enumerate(segments):
+                    if t_start <= max_frame < t_end:
+                        seg_idx = i
+                        break
+                
+                if seg_idx != -1:
+                    t_left = segments[seg_idx][0]
+                    t_right = segments[seg_idx][1]
+                    
+                    new_kf = None
+                    if max_frame != t_left:
+                        new_kf = max_frame
+                    else:
+                        new_kf = (t_left + t_right) // 2
+                    
+                    # Check min segment length
+                    # Check if inserting new_kf creates segments < min_seg_len
+                    # Left segment: [t_left, new_kf)
+                    # Right segment: [new_kf, t_right)
+                    len_left = new_kf - t_left
+                    len_right = t_right - new_kf
+                    
+                    if len_left >= min_seg_len and len_right >= min_seg_len:
+                        new_keyframes.append((g.id, new_kf))
+                    else:
+                        pass # Do not add keyframe [S1]
+
+    # Execute splits and keyframe updates
+    for g in gaussians:
+        if g.id in to_split:
+            split_gaussian(g) # Uses spatial splitting logic from parent article
+            
+    for g_id, kf in new_keyframes:
+        g = get_gaussian_by_id(g_id)
+        insert_keyframe(g, kf)
+```
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot M)$ per iteration, where $N$ is the number of Gaussians and $M$ is the number of frames/keyframes. Computing normalized errors and statistics requires iterating over all visible frames for each Gaussian [S1].
+- **Memory Complexity:** Requires storing error statistics and weights per Gaussian per frame, increasing memory usage compared to static splatting [S1].
+- **Strengths:** Effectively reconstructs scenes with oscillatory or complex motion where static Gaussians fail [S1]. Interleaved with spatial densification every 2 epochs to balance spatial detail and temporal tracking [S1].
+- **Limitations:** Computationally expensive due to per-frame error aggregation. Sensitive to the choice of $\tau_{time}$ and $l_{seg}$ [S1].
+- **When to use:** Scenes with significant camera or object motion. Not suitable for static scenes where spatial densification suffices [S1].
+
+## Background
+Temporal densification was introduced in "Adaptive Spatio-Temporal 3D Gaussian Splatting for Scenes with Oscillatory Motion" (2024/2025) to address the inability of standard 3D Gaussian Splatting to handle non-rigid or oscillatory motion [S1]. It extends the adaptive densification framework by incorporating temporal variance analysis, allowing Gaussians to split not just based on spatial gradient but also on temporal error fluctuation [S1].
+
+## Sources
+[S1] Adaptive Spatio‐Temporal 3D Gaussian Splatting for Scenes with Oscillatory Motion, https://doi.org/10.1111/cgf.70410, fetched 2026-10-26

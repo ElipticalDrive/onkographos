@@ -1,98 +1,126 @@
 # Splat Data Buffer Layout
 Also called: SplatData Layout, Structure-of-Arrays Splat Storage
+
 ## Overview
-This method defines the memory layout for storing 3D Gaussian splats in a Structure-of-Arrays (SoA) format, optimizing for batched access during rendering and optimization passes. It separates parameters into contiguous buffers to maximize memory bandwidth utilization and simplify SIMD vectorization, distinguishing it from Structure-of-Arrays (SoA) or Structure-of-Arrays (SoA) alternatives that might interleave data or use different packing schemes [S1, unofficial].
+This method defines the memory layout for 3D Gaussian splats in a Structure-of-Arrays (SoA) format, where each geometric and photometric attribute occupies a separate contiguous linear buffer. It solves the problem of efficient batched rendering and optimization by minimizing cache misses during shader execution, as kernels iterate over single attributes without skipping irrelevant data. It differs from sibling methods by focusing on the raw storage layout rather than coefficient indexing ([Spherical Harmonics Coefficient Layout](5570-spherical-harmonics-coefficient-layout.md)) or runtime covariance computation ([Covariance Splat Reading](6840-covariance-splat-reading.md)).
+
 ## How it works
-**Inputs:** A collection of $N$ splat objects, each containing position, scale, rotation, opacity, and spherical harmonics coefficients.
-**Outputs:** A set of contiguous `FloatBuffer` instances, one for each parameter type.
+**Inputs:** A collection of $N$ Gaussian splats, each containing position, scale, rotation, opacity, and spherical harmonics (SH) coefficients.
+**Outputs:** A set of contiguous `FloatBuffer` objects, one per attribute type.
 
 **Data Structures:**
-The layout consists of separate contiguous buffers for each attribute:
-1.  **Positions:** `FloatBuffer` of size $N \times 3$. Stores $(x, y, z)$ for each splat.
-2.  **Scales:** `FloatBuffer` of size $N \times 3$. Stores $(s_x, s_y, s_z)$ for each splat.
-3.  **Rotations:** `FloatBuffer` of size $N \times 4$. Stores quaternion components $(q_x, q_y, q_z, q_w)$ in scalar-last order.
-4.  **Opacities:** `FloatBuffer` of size $N$. Stores a single opacity value per splat.
-5.  **Spherical Harmonics:** `FloatBuffer` of size $N \times D \times 3$, where $D$ is the number of SH coefficients per channel.
+The layout consists of five distinct buffers, all storing 32-bit floating-point values:
+1.  **Positions:** Size $N \times 3$. Stores $(x, y, z)$ coordinates.
+2.  **Scales:** Size $N \times 3$. Stores $(s_x, s_y, s_z)$ linear scale values.
+3.  **Rotations:** Size $N \times 4$. Stores quaternion components $(q_x, q_y, q_z, q_w)$ in scalar-last order.
+4.  **Opacities:** Size $N$. Stores a single scalar opacity value per splat.
+5.  **Spherical Harmonics (SH):** Size $N \times D \times 3$. Stores SH coefficients, where $D$ is the number of coefficients per channel and 3 represents the RGB channels.
+
+**Indexing Formula:**
+For the SH buffer, the index for the $c$-th component (channel) of the $d$-th coefficient of the $i$-th splat is:
+$$ idx = ((i \times D) + d) \times 3 + c $$
+For non-SH attributes, the stride is fixed by the dimensionality (3 for position/scale, 4 for rotation, 1 for opacity).
 
 **Algorithm:**
-For each parameter type, iterate through the splat collection and write values into the corresponding buffer at index $i \times \text{stride} + \text{component}$, where $i$ is the splat index.
+The data is populated by iterating over the input splat collection. For each splat $i$, the attributes are extracted and written to the corresponding buffer at the calculated offset.
 
-**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def read_splat_buffers(splats: List[Splat]) -> Dict[str, List[float]]:
+def build_splat_buffers(splats):
     """
-    Extracts splat parameters into contiguous arrays (SoA layout).
+    Converts a list of Splat objects into SoA FloatBuffers.
     """
     n = len(splats)
-    if n == 0:
-        return {}
-
-    # Pre-allocate buffers
+    
+    # Allocate buffers
+    # Positions: N * 3
     positions = [0.0] * (n * 3)
+    # Scales: N * 3
     scales = [0.0] * (n * 3)
+    # Rotations: N * 4 (scalar-last: x, y, z, w)
     rotations = [0.0] * (n * 4)
+    # Opacities: N
     opacities = [0.0] * n
-    # SH dimensions depend on the specific SH degree used; 
-    # assuming D coefficients per channel, 3 channels (RGB)
-    sh_dimensions = splats[0].sh_coefficients.shape[0] if splats[0].sh_coefficients else 0
-    sh_buffer = [0.0] * (n * sh_dimensions * 3)
-
+    # SH: N * D * 3 (D is determined by the max SH degree in splats)
+    # Note: D must be known or inferred from the first splat or a global constant.
+    # Assuming D is provided or derived from the first splat's SH dimension.
+    if n > 0:
+        d = splats[0].sh_dimensions
+    else:
+        d = 0
+    sh_buffer = [0.0] * (n * d * 3)
+    
     for i, s in enumerate(splats):
-        stride_pos = i * 3
-        positions[stride_pos + 0] = s.get_position_x()
-        positions[stride_pos + 1] = s.get_position_y()
-        positions[stride_pos + 2] = s.get_position_z()
-
-        stride_scale = i * 3
-        scales[stride_scale + 0] = s.get_scale_x()
-        scales[stride_scale + 1] = s.get_scale_y()
-        scales[stride_scale + 2] = s.get_scale_z()
-
-        stride_rot = i * 4
-        rotations[stride_rot + 0] = s.get_rotation_x()
-        rotations[stride_rot + 1] = s.get_rotation_y()
-        rotations[stride_rot + 2] = s.get_rotation_z()
-        rotations[stride_rot + 3] = s.get_rotation_w() # Scalar-last order
-
+        # Write Position
+        positions[i * 3 + 0] = s.get_x()
+        positions[i * 3 + 1] = s.get_y()
+        positions[i * 3 + 2] = s.get_z()
+        
+        # Write Scales (linear values)
+        scales[i * 3 + 0] = s.get_scale_x()
+        scales[i * 3 + 1] = s.get_scale_y()
+        scales[i * 3 + 2] = s.get_scale_z()
+        
+        # Write Rotations (quaternion, scalar-last)
+        rotations[i * 4 + 0] = s.get_rotation_x()
+        rotations[i * 4 + 1] = s.get_rotation_y()
+        rotations[i * 4 + 2] = s.get_rotation_z()
+        rotations[i * 4 + 3] = s.get_rotation_w()
+        
+        # Write Opacity
         opacities[i] = s.get_opacity()
-
-        # Spherical Harmonics
-        if sh_dimensions > 0:
-            sh_coeffs = s.get_sh_coefficients() # Shape: (D, 3)
-            for d in range(sh_dimensions):
-                for c in range(3):
-                    idx = (i * sh_dimensions + d) * 3 + c
-                    sh_buffer[idx] = sh_coeffs[d][c]
-
+        
+        # Write SH Coefficients
+        # SH data is typically stored as D coefficients per channel (R, G, B)
+        # The layout is interleaved by channel for the last dimension:
+        # idx = ((i * D) + d_coeff) * 3 + channel
+        for d_coeff in range(d):
+            for c in range(3):
+                sh_buffer[((i * d) + d_coeff) * 3 + c] = s.get_sh_coeff(d_coeff, c)
+                
     return {
         "positions": positions,
         "scales": scales,
         "rotations": rotations,
         "opacities": opacities,
-        "spherical_harmonics": sh_buffer
+        "sh": sh_buffer,
+        "sh_dimensions": d
     }
 ```
 
-**Parameters:**
--   $N$: Number of splats.
--   $D$: Number of spherical harmonics coefficients per channel.
-
-**Edge Cases:**
--   Empty splat collection: Returns empty buffers.
--   Null buffer input: In the reference implementation, a new direct buffer with native byte order is created if the result buffer is null [S1, unofficial].
--   Precision: Values are stored as 32-bit floats.
+**Edge Cases and Pitfalls:**
+*   **Buffer Allocation:** If the result buffer is `null` or not provided, a new buffer of size $N \times \text{stride}$ must be allocated [S1, unofficial].
+*   **Rotation Order:** Rotations must be stored in scalar-last order $(x, y, z, w)$ to match the expected shader layout [S1, unofficial].
+*   **SH Dimensionality:** The number of SH coefficients $D$ must be consistent across all splats or handled via padding. The sources do not specify how variable $D$ is handled if splats have different degrees [G].
+*   **Scale Representation:** The source code extracts linear scale values, but notes mention "logarithmic scales" in comments. Implementers must ensure the input splats provide linear scales or convert them if the source stores logarithmic values [S1, unofficial].
 
 ## Subtopics
+
+### [Splat Data Encoding & Disabled Splat Detection](7028-splat-data-encoding-disabled-splat-detection.md)
+Defines binary encoding and detection of disabled splats by embedding status in the data payload.
+
+### [Spherical Harmonics Coefficient Layout](5570-spherical-harmonics-coefficient-layout.md)
+Details the specific indexing and storage of SH coefficients within the SH buffer.
+
+### [Covariance Splat Reading](6840-covariance-splat-reading.md)
+Describes how to read and compute covariance matrices from the position, scale, and rotation buffers.
+
+### [Dynamic Gaussian Splatting Scene Management](6907-dynamic-gaussian-splatting-scene-management.md)
+Manages the addition and removal of splats, requiring buffer resizing or compaction.
+
+### [WASM Data Packing](7761-wasm-data-packing.md)
+Optimizes the buffer layout for WebAssembly transmission and parsing.
+
 ## Operating characteristics
-**Time Complexity:** $O(N)$ for extraction, where $N$ is the number of splats. The loop iterates once per splat, performing constant-time writes per attribute.
-**Memory Complexity:** $O(N \times (3 + 3 + 4 + 1 + 3D))$ floats. The SoA layout ensures contiguous memory access, which is cache-friendly for rendering kernels that process all splats of a specific attribute type simultaneously.
-**Strengths:** High throughput for batched operations; simplifies SIMD vectorization; avoids strided access patterns common in AoS (Array of Structures).
-**Limitations:** Higher memory overhead if only a subset of attributes is needed for a specific pass, as all buffers are allocated.
+*   **Time Complexity:** $O(N)$ to build the buffers, where $N$ is the number of splats.
+*   **Memory Complexity:** $O(N \times (3 + 3 + 4 + 1 + 3D))$ floats.
+*   **Performance:** The SoA layout minimizes cache misses during rendering passes because shaders access contiguous memory for a single attribute [S1, unofficial].
+*   **Strengths:** Efficient batched processing, simple indexing, cache-friendly.
+*   **Limitations:** Requires contiguous memory allocation; resizing buffers for dynamic scenes can be costly.
 
 ## Background
-This layout is implemented in the JSplat library, an unofficial Java implementation of 3D Gaussian Splatting techniques [S1, unofficial]. It follows the standard SoA pattern used in graphics programming to optimize memory access patterns for parallel processing.
+This layout is used in the JSplat library for efficient storage and rendering of 3D Gaussian splats [S1, unofficial]. It is a foundational component for differentiable volume rendering and inverse graphics applications.
 
 ## Sources
 [S1] JSplat, https://github.com/javagl/JSplat, fetched 2026-10-30 (unofficial)

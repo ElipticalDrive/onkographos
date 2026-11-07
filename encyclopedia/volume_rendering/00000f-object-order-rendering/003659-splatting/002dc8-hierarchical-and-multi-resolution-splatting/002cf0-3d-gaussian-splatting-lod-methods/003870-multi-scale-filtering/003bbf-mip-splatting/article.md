@@ -3,40 +3,44 @@
 Also called: Alias-free 3D Gaussian Splatting
 
 ## Overview
-MIP-Splatting is an extension of 3D Gaussian Splatting (3DGS) that eliminates spatial aliasing and dilation/erosion artifacts caused by resolution changes, focal length variations, or camera distance changes [S1][S5, S6, unofficial]. It achieves this by introducing a 3D Gaussian smoothing filter and a 2D Mip filter, ensuring the representation's frequency remains below the Nyquist limit of the training data while approximating the physical box filter of a camera sensor during rendering [S2, S3][S5, unofficial]. Unlike standard 3DGS, which uses a fixed 2D dilation filter that fails under varying sampling rates, MIP-Splatting constrains the maximal frequency of the 3D representation based on the training views and replaces screen-space dilation with a 2D Mip filter [S5, unofficial].
+MIP-Splatting is an extension of 3D Gaussian Splatting (3DGS) that eliminates spatial aliasing and dilation/erosion artifacts caused by rendering scenes at sampling rates (resolutions, focal lengths, or camera distances) different from those encountered during training [S1][S5, unofficial]. It achieves this by introducing a 3D smoothing filter to constrain the representation's frequency below the Nyquist limit of the training data, and a 2D Mip filter in screen space to approximate the physical camera sensor's box filter [S2][S5, unofficial]. Unlike standard 3DGS, which uses a fixed 2D dilation filter that fails under zooming, MIP-Splatting ensures alias-free novel view synthesis across arbitrary scales [S5, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A set of $K$ 3D Gaussian primitives $\{G_k\}_{k=1}^K$, each defined by opacity $\alpha_k \in [0, 1]$, center $p_k \in \mathbb{R}^3$, and covariance matrix $\Sigma_k \in \mathbb{R}^{3 \times 3}$ [S5, unofficial]. The training dataset consists of $N$ images with known camera poses (rotation $R$, translation $t$) and intrinsics (focal length $f$) [S5, unofficial].
-*   **Output:** A rendered image at any target resolution or sampling rate, free of aliasing and dilation artifacts [S5, unofficial].
+**Inputs:** A set of $K$ 3D Gaussian primitives $\{G_k\}$ optimized via 3DGS, where each primitive $G_k$ is defined by opacity $\alpha_k \in [0, 1]$, center $p_k \in \mathbb{R}^3$, and covariance matrix $\Sigma_k \in \mathbb{R}^{3 \times 3}$ [S5, unofficial].
+**Outputs:** An alias-free rendered image at any target resolution or camera pose.
 
 **Data Structures:**
-The 3D Gaussian primitive $G_k$ is parameterized as:
-$$ G_k(x) = e^{-\frac{1}{2} (x-p_k)^T \Sigma_k^{-1} (x-p_k)} $$
-The covariance matrix $\Sigma_k$ is decomposed into a scaling vector $s \in \mathbb{R}^3$ and a rotation matrix $O \in \mathbb{R}^{3 \times 3}$ (parameterized by a quaternion) such that $\Sigma_k = O s s^T O^T$ [S5, unofficial].
+The 3D Gaussian covariance $\Sigma_k$ is parameterized to ensure positive semi-definiteness:
+$$ \Sigma_k = O_k S_k S_k^T O_k^T $$
+where $S_k = \text{diag}(s_{k,x}, s_{k,y}, s_{k,z})$ is a scaling vector and $O_k \in \mathbb{R}^{3 \times 3}$ is a rotation matrix derived from a quaternion [S5, unofficial].
 
 **Algorithm Steps:**
 
-1.  **Compute Maximal Sampling Frequency (Training Phase):**
-    For each Gaussian primitive $k$, determine the maximal sampling frequency $\hat{\nu}_k$ induced by the training views. According to the Nyquist-Shannon Sampling Theorem, the world space sampling interval $\hat{T}$ at depth $d$ for focal length $f$ is $\hat{T} = \frac{d}{f}$, so the sampling frequency is $\hat{\nu} = \frac{1}{\hat{T}} = \frac{f}{d}$ [S5, unofficial]. The maximal sampling frequency $\hat{\nu}_k$ for a primitive is determined by the training view that provides the finest sampling (smallest $\hat{T}$) where the primitive is visible [S5, unofficial]. This is recomputed every $m$ iterations (typical $m=100$) as Gaussian centers remain relatively stable [S5, unofficial].
+1.  **Compute Maximal Sampling Rate (Training Phase):**
+    For each Gaussian primitive $k$, determine the maximal sampling frequency $\hat{\nu}_k$ induced by the training views. The world-space sampling interval $\hat{T}$ at depth $d$ for focal length $f$ (in pixels) is:
+    $$ \hat{T} = \frac{d}{f} $$
+    The sampling frequency is its inverse:
+    $$ \hat{\nu} = \frac{1}{\hat{T}} = \frac{f}{d} $$
+    The maximal sampling rate $\hat{\nu}_k$ for a primitive is determined by the training view that provides the finest sampling (smallest $\hat{T}$) where the primitive is visible [S5, unofficial]. This is recomputed every $m$ iterations (typically $m=100$) as Gaussian centers remain relatively stable [S5, unofficial].
 
 2.  **Apply 3D Smoothing Filter (Training Phase):**
-    To constrain the maximal frequency of the 3D representation to meet the Nyquist limit, apply a 3D Gaussian low-pass filter $G_{low}$ to each primitive $G_k$ during optimization. The regularized 3D Gaussian $G_k(x)_{reg}$ is the convolution of $G_k$ and $G_{low}$, resulting in a Gaussian with covariance $\Sigma_k + \hat{\nu}_k^s \cdot I$:
-    $$ G_k(x)_{reg} = \frac{\sqrt{|\Sigma_k|}}{\sqrt{|\Sigma_k + \hat{\nu}_k^s \cdot I|}} e^{-\frac{1}{2}(x-p_k)^T (\Sigma_k + \hat{\nu}_k^s \cdot I)^{-1} (x-p_k)} $$
-    Here, $\hat{\nu}_k^s$ is a scalar hyperparameter controlling the filter size, typically set to $0.2$ (variance) [S5, unofficial]. This filter is applied *before* projection and becomes an intrinsic part of the scene representation, remaining constant regardless of viewpoint changes [S5, unofficial].
+    To prevent high-frequency artifacts when zooming in (where projected Gaussians expand), apply a 3D Gaussian low-pass filter $G_{low}$ to each primitive $G_k$ during optimization. This restricts the maximal frequency of the 3D representation to meet the Nyquist limit [S5, unofficial]. The regularized Gaussian $G_{k, \text{reg}}$ is the convolution of $G_k$ and $G_{low}$, resulting in a new covariance:
+    $$ \Sigma_{k, \text{reg}} = \Sigma_k + \hat{\nu}_k^s \cdot I $$
+    where $s$ is a scalar hyperparameter controlling the filter size (typical value: 0.2 variance) [S5, unofficial]. The regularized Gaussian is:
+    $$ G_{k, \text{reg}}(x) = \frac{\sqrt{|\Sigma_k|}}{\sqrt{|\Sigma_k + \hat{\nu}_k^s \cdot I|}} e^{-\frac{1}{2}(x-p_k)^T (\Sigma_k + \hat{\nu}_k^s \cdot I)^{-1} (x-p_k)} $$
+    This filter is intrinsic to the scene representation post-training [S5, unofficial].
 
 3.  **Project to Screen Space:**
-    Transform the regularized 3D Gaussians into camera coordinates:
+    Transform the regularized Gaussian into camera coordinates using rotation $R$ and translation $t$:
     $$ p'_k = R p_k + t $$
-    $$ \Sigma'_k = R \Sigma_k R^T $$
-    Project to ray space via a local affine transformation using the Jacobian $J_k$:
+    $$ \Sigma'_k = R \Sigma_{k, \text{reg}} R^T $$
+    Project to ray space via the local affine transformation Jacobian $J_k$:
     $$ \Sigma''_k = J_k \Sigma'_k J_k^T $$
-    [S5, unofficial].
 
 4.  **Apply 2D Mip Filter (Rendering Phase):**
-    Replace the standard 2D dilation operation with a 2D Mip filter that approximates the physical box filter of a single pixel. The 2D Mip-filtered Gaussian $G_{k2D}(x)_{mip}$ uses a covariance of $\Sigma_{k2D} + sI$:
-    $$ G_{k2D}(x)_{mip} = \frac{\sqrt{|\Sigma_{k2D}|}}{\sqrt{|\Sigma_{k2D} + sI|}} e^{-\frac{1}{2}(x-p_k)^T (\Sigma_{k2D} + sI)^{-1} (x-p_k)} $$
-    The variance $s$ is chosen to cover a single pixel in screen space, typically $0.1$ [S5, unofficial]. This mitigates aliasing when zooming out and dilation artifacts when zooming in, which occur in standard 3DGS because the fixed dilation amount does not scale with the projected Gaussian size [S5, unofficial].
+    Replace the standard 3DGS 2D dilation operation with a 2D Mip filter to approximate the physical box filter of a camera sensor, mitigating aliasing when zooming out [S2][S5, unofficial]. The 2D Mip-filtered Gaussian $G_{k, 2D, \text{mip}}$ uses a covariance $\Sigma_{k, 2D} + sI$:
+    $$ G_{k, 2D, \text{mip}}(x) = \frac{\sqrt{|\Sigma_{k, 2D}|}}{\sqrt{|\Sigma_{k, 2D} + sI|}} e^{-\frac{1}{2}(x-p_k)^T (\Sigma_{k, 2D} + sI)^{-1} (x-p_k)} $$
+    where $\Sigma_{k, 2D}$ is the projected 2D covariance, and $s$ is the variance chosen to cover a single pixel in screen space (typical value: 0.1) [S5, unofficial].
 
 **Pseudocode:**
 
@@ -45,155 +49,129 @@ The covariance matrix $\Sigma_k$ is decomposed into a scaling vector $s \in \mat
 ```python
 import numpy as np
 
-def compute_sampling_frequency(depth, focal_length):
+def compute_sampling_rate(depth, focal_length_pixels):
     """
     Computes the world-space sampling frequency.
-    depth: float, distance from camera to point.
-    focal_length: float, focal length in pixels.
+    depth: float, distance from camera to primitive.
+    focal_length_pixels: float, focal length in pixels.
     Returns: float, sampling frequency nu_hat.
     """
-    # Sampling interval T_hat = d / f
-    # Sampling frequency nu_hat = 1 / T_hat = f / d
-    return focal_length / depth
+    if depth == 0:
+        return float('inf')
+    T_hat = depth / focal_length_pixels
+    return 1.0 / T_hat
 
-def apply_3d_smoothing(cov_3d, nu_hat_s):
+def apply_3d_smoothing(sigma_k, nu_hat_max, s_3d):
     """
-    Applies the 3D smoothing filter by adding variance to the covariance matrix.
-    cov_3d: numpy array (3, 3), original covariance matrix Sigma_k.
-    nu_hat_s: float, scalar hyperparameter for filter size (e.g., 0.2).
-    Returns: numpy array (3, 3), regularized covariance matrix.
+    Applies the 3D smoothing filter to the covariance matrix.
+    sigma_k: (3, 3) numpy array, original covariance.
+    nu_hat_max: float, maximal sampling frequency from training views.
+    s_3d: float, hyperparameter for 3D filter size (e.g., 0.2).
+    Returns: (3, 3) numpy array, regularized covariance.
     """
-    # Convolution of two Gaussians results in sum of covariances.
-    # Identity matrix I scaled by nu_hat_s.
-    return cov_3d + nu_hat_s * np.eye(3)
+    # The filter adds variance proportional to the inverse of the sampling rate limit
+    # Note: The source formula uses nu_hat^s * I. In practice, this term
+    # represents the variance added to band-limit the signal.
+    # We use the hyperparameter s_3d directly as the added variance scalar
+    # as per the source's typical value assignment.
+    sigma_reg = sigma_k + s_3d * np.eye(3)
+    return sigma_reg
 
-def apply_2d_mip_filter(cov_2d, pixel_variance):
+def apply_2d_mip_filter(sigma_2d, s_2d):
     """
-    Applies the 2D Mip filter to approximate the pixel box filter.
-    cov_2d: numpy array (2, 2), projected covariance matrix Sigma_k2D.
-    pixel_variance: float, variance covering a single pixel (e.g., 0.1).
-    Returns: numpy array (2, 2), filtered covariance matrix.
+    Applies the 2D Mip filter to the projected covariance.
+    sigma_2d: (2, 2) numpy array, projected 2D covariance.
+    s_2d: float, hyperparameter for 2D filter size (e.g., 0.1).
+    Returns: (2, 2) numpy array, mip-filtered covariance.
     """
-    # Add identity matrix scaled by pixel variance.
-    return cov_2d + pixel_variance * np.eye(2)
+    sigma_mip = sigma_2d + s_2d * np.eye(2)
+    return sigma_mip
 
-def render_mip_splatting(gaussians, camera_params, target_resolution):
+def render_gaussian_mip(p_k, sigma_k, alpha_k, R, t, J_k, s_3d, s_2d):
     """
-    Renders a scene using MIP-Splatting.
-    gaussians: list of dicts, each containing 'alpha', 'center', 'cov_3d'.
-    camera_params: dict with 'R', 't', 'focal_length'.
-    target_resolution: tuple (width, height).
-    Returns: numpy array (height, width, 3), rendered image.
+    Renders a single Gaussian primitive using MIP-Splatting filters.
+    p_k: (3,) numpy array, center.
+    sigma_k: (3, 3) numpy array, world-space covariance.
+    alpha_k: float, opacity.
+    R: (3, 3) numpy array, camera rotation.
+    t: (3,) numpy array, camera translation.
+    J_k: (2, 3) numpy array, Jacobian of projection.
+    s_3d: float, 3D smoothing variance.
+    s_2d: float, 2D Mip variance.
+    Returns: (2, 2) numpy array, final covariance; float, adjusted opacity.
     """
-    R = camera_params['R']
-    t = camera_params['t']
-    f = camera_params['focal_length']
-    
-    # Pre-compute pixel size in world space for 2D filter
-    # Assuming depth d is approximated or known per gaussian for pixel coverage
-    # In practice, s is chosen to cover a single pixel in screen space.
-    # For a point at depth d, 1 pixel corresponds to d/f in world units.
-    # The variance s in screen space is typically fixed to 0.1 [S5, unofficial].
-    pixel_variance = 0.1 
-    
-    # 1. Transform and Project
-    projected_gaussians = []
-    for g in gaussians:
-        # Transform center
-        p_prime = R @ g['center'] + t
-        
-        # Transform covariance
-        cov_prime = R @ g['cov_3d'] @ R.T
-        
-        # Project to ray space (simplified: assume J is identity for local affine approx or compute J)
-        # In full 3DGS, J is the Jacobian of the perspective projection.
-        # Here we assume cov_2d is the result of J @ cov_prime @ J.T
-        # For the sake of this self-contained pseudocode, we assume cov_2d is provided
-        # or computed via standard 3DGS projection logic.
-        cov_2d = compute_projection_covariance(cov_prime, p_prime, f) 
-        
-        projected_gaussians.append({
-            'center': p_prime[:2], # xy in camera space
-            'cov_2d': cov_2d,
-            'alpha': g['alpha']
-        })
-        
-    # 2. Render with 2D Mip Filter
-    # Sort gaussians by depth for alpha blending
-    projected_gaussians.sort(key=lambda x: x['center'][2])
-    
-    image = np.zeros((target_resolution[1], target_resolution[0], 3))
-    
-    for g in projected_gaussians:
-        # Apply 2D Mip Filter
-        cov_mip = apply_2d_mip_filter(g['cov_2d'], pixel_variance)
-        
-        # Splat the gaussian with cov_mip
-        # Standard volume splatting loop would go here
-        # For brevity, we assume a splat function that handles the Gaussian evaluation
-        # with the modified covariance.
-        splat_image = splat_gaussian_2d(g['center'], cov_mip, g['alpha'], target_resolution)
-        
-        # Alpha blending
-        # C_out = C_in * (1 - alpha) + C_splat * alpha
-        # Assuming color is baked in alpha or handled separately
-        # This is a simplified blending step
-        image = blend_images(image, splat_image, g['alpha'])
-        
-    return image
+    # 1. 3D Smoothing (Pre-computed during training, but applied here conceptually)
+    # In practice, sigma_k is already regularized if training was done with Mip-Splatting.
+    # If applying on-the-fly for inference with stored raw sigma_k:
+    # sigma_reg = apply_3d_smoothing(sigma_k, nu_hat_max, s_3d)
+    # For this function, we assume sigma_k is the optimized (regularized) covariance.
+    sigma_reg = sigma_k
 
-def compute_projection_covariance(cov_3d, p_camera, focal_length):
-    """
-    Simplified projection of 3D covariance to 2D screen space.
-    In reality, this involves the Jacobian J of the perspective projection.
-    """
-    # Standard 3DGS projection:
-    # x' = f * X / Z, y' = f * Y / Z
-    # Jacobian J depends on p_camera and f.
-    # cov_2d = J @ cov_3d @ J.T
-    # For this pseudocode, we return a placeholder or simplified version.
-    # A real implementation would compute J explicitly.
-    return cov_3d[:2, :2] # Placeholder: assumes no perspective distortion for simplicity
+    # 2. Transform to Camera Space
+    p_prime = R @ p_k + t
+    sigma_prime = R @ sigma_reg @ R.T
+
+    # 3. Project to Ray Space
+    sigma_double_prime = J_k @ sigma_prime @ J_k.T
+
+    # 4. 2D Mip Filter
+    sigma_mip = apply_2d_mip_filter(sigma_double_prime, s_2d)
+
+    # 5. Opacity Adjustment
+    # The normalization factor accounts for the change in determinant due to filtering
+    det_orig = np.linalg.det(sigma_double_prime)
+    det_mip = np.linalg.det(sigma_mip)
+    
+    # Avoid division by zero
+    if det_mip < 1e-8:
+        det_mip = 1e-8
+        
+    opacity_factor = np.sqrt(det_orig / det_mip)
+    alpha_final = alpha_k * opacity_factor
+    
+    return sigma_mip, alpha_final
 ```
 
 **Parameters:**
-*   $m$: Iteration interval for recomputing maximal sampling rate. Typical value: 100 [S5, unofficial].
-*   $s_{3D}$: Variance of the 3D smoothing filter. Typical value: 0.2 [S5, unofficial].
-*   $s_{2D}$: Variance of the 2D Mip filter. Typical value: 0.1 [S5, unofficial].
+*   $s$ (3D smoothing variance): Controls the size of the 3D low-pass filter. Typical value: 0.2 [S5, unofficial].
+*   $s$ (2D Mip variance): Controls the size of the 2D filter, chosen to cover a single pixel. Typical value: 0.1 [S5, unofficial].
+*   $m$ (Recompute interval): Iterations between recomputing the maximal sampling rate. Typical value: 100 [S5, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Erosion Artifacts:** Standard 3DGS systematically underestimates scale parameters, causing erosion (thin structures) when zooming in because the fixed dilation becomes insufficient as Gaussians expand [S5, unofficial].
-*   **Dilation Artifacts:** When zooming out, projected Gaussians shrink, but the fixed dilation causes excessive overlap and dilation artifacts [S5, unofficial].
-*   **Aliasing:** Occurs because 3DGS samples at pixel centers, ignoring the pixel footprint, leading to aliasing when resolution changes [S3].
-*   **Filter Size Determination:** The 3D smoothing filter size is determined by the *training* data's maximal sampling rate, not the rendering resolution [S5, unofficial].
+*   **Zooming In (Erosion):** Standard 3DGS underestimates scale, causing erosion artifacts when zooming in. The 3D smoothing filter prevents this by constraining the 3D representation's frequency [S5, unofficial].
+*   **Zooming Out (Dilation/Aliasing):** Standard 3DGS dilation causes artifacts when zooming out. The 2D Mip filter replaces dilation with a box-filter approximation, preventing aliasing [S5, unofficial].
+*   **Precision:** Determinant calculations in the opacity adjustment factor must handle near-singular matrices to avoid numerical instability [G].
 
 ## Subtopics
 
+### [2D Mip Filter](9593-2d-mip-filter.md)
+The 2D Mip Filter mitigates aliasing artifacts in 3D Gaussian Splatting when rendering from camera distances or focal lengths larger than those encountered during training. It extends the standard 2D Gaussian filter by introducing a view-dependent opacity compensation factor that prevents excessive blurring as Gaussians become smaller relative to the pixel grid. Unlike the basic 2D Gaussian filter which dilates the covariance matrix uniformly, this method dynamically adjusts opacity based on the ratio of the original to the dilated covariance determinant. See [2D Mip Filter](9593-2d-mip-filter.md).
+
 ### LinPrim Anti-Aliasing
-An anti-aliasing strategy that combines a 3D smoothing filter with a bounding box expansion technique to limit high frequencies and prevent aliasing/dilation artifacts [S7]. It applies the 3D smoothing strategy to ensure each primitive is visible from at least one pixel of a training view [S7]. It identifies vertices on the bounding box used for tiling and shifts them outward, parallel to the screen, enlarging the footprint and increasing the minimum appearance size [S7]. This raises opacity along the primitive's extent, acting as a coarse band-limiting approximation [S7]. It cannot use MIP-Splatting's 2D Mip filter because LinPrim primitives do not rely on modifying the screen space Gaussian distribution [S7].
+An anti-aliasing strategy combining a 3D smoothing filter and a bounding box expansion technique to limit high frequencies and prevent aliasing/dilation artifacts [S7]. It applies the 3D smoothing strategy to limit primitive size based on visibility from training views, ensuring each primitive is visible from at least one pixel [S7]. It uses Bounding Box Expansion: identifying vertices on the tiling bounding box and shifting them outward parallel to the screen, enlarging the footprint and increasing the minimum appearance size [S7]. This raises opacity along the primitive's extent, acting as a coarse band-limiting approximation [S7]. It cannot use Mip-Splatting's 2D Mip filter because LinPrim primitives do not rely on modifying the screen space Gaussian distribution [S7].
 
 ### Anti-Aliasing via Kernel Adaptation
-Adapts the kernel bandwidth to prevent aliasing when the volume is undersampled relative to the screen (low magnification or perspective) [S8, unofficial]. It calculates the Jacobian $J$ of the local perspective distortion for each point and computes the ray-space ellipsoid $G_{JMV}$ using $J$ to stretch the kernel appropriately [S8, unofficial]. Swan '97 and Mueller '98 suggest linearly increasing splat kernel size and linearly decreasing splat amplitude [S8, unofficial].
+Adapts the kernel bandwidth to prevent aliasing when the volume is undersampled relative to the screen (low magnification or perspective) [S8, unofficial]. It calculates the Jacobian $J$ of the local perspective distortion for each point and computes the ray-space ellipsoid $G_{JMV}$ using $J$ to stretch the kernel appropriately [S8, unofficial]. This is based on Swan '97 and Mueller '98, which suggest linearly increasing splat kernel size and linearly decreasing splat amplitude [S8, unofficial].
 
 ### Integration with Mip-Splatting and Scaffold-GS
-Mip-Splatting and Scaffold-GS employ conventional projection of 3D-GS, resulting in larger approximation error compared to methods with optimal projection strategies [S9]. The proposed optimal projection method can be seamlessly integrated with Mip-Splatting to reduce this projection error [S9].
+Mip-Splatting and Scaffold-GS employ conventional projection of 3D-GS, resulting in larger approximation error compared to optimal projection strategies [S9]. However, these methods can be seamlessly integrated with optimal projection techniques to reduce their projection error [S9].
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-MIP-Splatting adds minimal overhead to standard 3DGS. The 3D smoothing filter is applied during training (once per primitive per $m$ iterations) and becomes part of the static representation [S5, unofficial]. The 2D Mip filter is applied during rendering, adding a simple covariance matrix addition ($\Sigma_{k2D} + sI$) and a normalization factor, which is computationally inexpensive [S5, unofficial]. Memory usage is identical to 3DGS as no additional primitives or data structures are required [S5, unofficial].
+MIP-Splatting adds negligible overhead to standard 3DGS rendering. The 3D smoothing filter is applied during training (offline) and becomes part of the stored covariance, incurring no runtime cost. The 2D Mip filter adds a simple matrix addition and determinant calculation per Gaussian during rendering, which is computationally cheap compared to the splatting and compositing steps [S5, unofficial].
 
 **Measured Performance:**
-On the Blender dataset, MIP-Splatting achieves a PSNR of 32.81 at Full Res, 34.49 at 1/2 Res, 35.45 at 1/4 Res, and 35.50 at 1/8 Res, outperforming 3DGS and 3DGS+EWA [S5, unofficial]. It significantly outperforms baselines in multi-scale testing scenarios [S5, unofficial].
+On the Blender dataset, MIP-Splatting achieves a PSNR of 32.81 at Full Res, 34.49 at 1/2 Res, 35.45 at 1/4 Res, and 35.50 at 1/8 Res, outperforming standard 3DGS and 3DGS+EWA [S5, unofficial]. It significantly outperforms baselines in multi-scale testing scenarios [S5, unofficial].
 
 **Strengths and Limitations:**
-*   **Strengths:** Eliminates aliasing and dilation/erosion artifacts across various sampling rates (zoom in/out) [S5, unofficial]. Does not require multi-scale images for supervision, unlike Mip-NeRF [S5, unofficial]. Tackles the reconstruction problem via inverse rendering, unlike EWA splatting which only considers rendering [S5, unofficial].
-*   **Limitations:** The 3D filter size is fixed based on training data, so it may not adapt to out-of-distribution scenes with significantly different sampling characteristics [S5, unofficial]. The 2D Mip filter approximates a box filter but is still a Gaussian, which may cause slight oversmoothing compared to exact box filtering [S5, unofficial].
+*   **Strengths:** Eliminates aliasing and dilation/erosion artifacts across arbitrary zoom levels and focal lengths. Does not require multi-scale images for supervision, unlike Mip-NeRF [S5, unofficial].
+*   **Limitations:** The 3D filter size is determined by training data, not the rendered image, which may limit adaptability to out-of-distribution scenes with vastly different sampling characteristics compared to training [S5, unofficial]. The 2D Mip filter approximates a box filter but may still oversmooth compared to exact integration methods [S5, unofficial].
 
 **When to Use:**
-Use MIP-Splatting for Novel View Synthesis (NVS) in virtual reality, cinematography, and robotics, specifically when training and testing occur at different sampling rates or when zooming is expected [S5, unofficial].
+Use MIP-Splatting for Novel View Synthesis (NVS) in virtual reality, cinematography, and robotics, specifically when training and testing occur at different sampling rates or when zooming in/out is required [S5, unofficial].
 
 ## Background
-MIP-Splatting was introduced by Yu et al. in CVPR 2024 [S4, S5, unofficial]. It addresses the limitations of 3D Gaussian Splatting (3DGS) [S5, unofficial], which suffers from aliasing and dilation artifacts when the sampling rate changes (e.g., focal length or camera distance variations) [S2][S5, unofficial]. The method builds on the Nyquist-Shannon Sampling Theorem [S5, unofficial] and the concept of pre-filtering in volume rendering [S1]. It replaces the empirical 2D dilation filter of 3DGS with a 2D Mip filter that mimics the physical box filter of a camera sensor [S3][S5, unofficial].
+MIP-Splatting was introduced by Yu et al. in 2024 (CVPR 2024) [S4, unofficial]. It addresses the limitations of 3DGS, which suffers from aliasing when changing resolution, focal length, or camera distance [S1][S5, unofficial]. The method builds on the Nyquist-Shannon Sampling Theorem, deriving multi-view frequency bounds for each Gaussian primitive based on training views [S5, unofficial]. It replaces the 2D dilation filter of 3DGS with a 2D Mip filter that mimics the physical box filter of a camera sensor, and introduces a 3D smoothing filter to constrain the 3D representation's frequency [S2][S5, unofficial].
 
 ## Sources
 [S1] From Volume Rendering to 3D Gaussian Splatting: Theory and Applications, https://doi.org/10.1109/sibgrapi67909.2025.11223276, fetched 2026-10-26
