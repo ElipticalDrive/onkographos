@@ -1,8 +1,9 @@
 # Ray-Splat/Gaussian Intersection
-Also called: Ray-Gaussian Intersection, Splat Raycasting
+
+Also called: Ray-Gaussian Intersection, Ray-Ellipsoid Intersection
 
 ## Overview
-This family defines methods for determining the intersection between a camera ray and 3D Gaussian splats, which are ellipsoidal primitives defined by position, covariance (or scale/rotation), and opacity. It solves the problem of efficiently identifying which splats contribute to a pixel or picking ray, enabling correct depth sorting and alpha blending in splat-based rendering. It differs from sibling geometric intersection methods (e.g., [Ray-box intersection](776-ray-box-intersection.md)) by handling non-convex, soft-edged volumetric primitives rather than hard-surface boundaries, and from [Ray-Sphere Intersection](3539-ray-sphere-intersection.md) by supporting arbitrary ellipsoidal shapes and opacity falloff.
+This family defines the geometric primitives and intersection algorithms required to determine the interaction between a viewing ray and 3D Gaussian splats, which are the fundamental primitives in Gaussian Splatting rendering. It solves the problem of efficiently identifying which splats contribute to a pixel and computing their depth and opacity for alpha blending. It is distinguished from sibling methods by its focus on ellipsoidal (Gaussian) volumes rather than polyhedral or spherical primitives, often leveraging hierarchical structures like BVHs or specific plane-intersection techniques for numerical stability.
 
 ## Shared principles
 The shared principles of this family are the geometric definition of rays and the parallel execution model.
@@ -15,18 +16,20 @@ Computations are mapped to parallel threads. Each thread typically processes one
 
 ## Subtopics
 
-### [Spherical Panoramic Gaussian Splatting (SPaGS)](3042-spherical-panoramic-gaussian-splatting-spags.md)
-SPaGS is a real-time rendering method for 3D Gaussian Splatting (3DGS) that supports arbitrary spherical camera models, specifically equirectangular panoramas, by replacing the standard local affine approximation with a numerically stable ray-splat intersection approach. It solves the problem of rendering artifacts and numerical instability inherent in standard 3DGS when applied to wide-field-of-view or distorted panoramic views, where first-order affine projections fail to accurately represent the Gaussian distribution. Unlike ODGS, which uses suboptimal tangent plane approximations, or 3DGUT, which relies on the Unscented Transform, SPaGS achieves higher quality and speed by representing each viewing ray as the intersection of two perpendicular planes in camera space, thereby avoiding matrix inversion of the covariance.
-
 ### [Ray-Splat Intersection](6816-ray-splat-intersection.md)
-Ray-Splat Intersection is a method for determining which 3D Gaussian splats in a scene intersect a given camera ray, supporting both true ellipsoid geometry and approximate spherical bounds. It solves the problem of efficient spatial querying for splat-based rendering and interaction (picking) by organizing splats into a Bounding Volume Hierarchy (BVH). Unlike sibling methods that may rely on screen-space projection or specific rendering dispatches, this method explicitly computes geometric intersections in world or local space, allowing for precise depth sorting and visibility testing.
+Defines the core geometric traversal and intersection logic using a BVH, supporting both approximate spherical and true ellipsoid intersection tests.
+
+### [Spherical Panoramic Gaussian Splatting (SPaGS)](3042-spherical-panoramic-gaussian-splatting-spags.md)
+Specializes in equirectangular panoramas by using a numerically stable plane-intersection approach to avoid covariance matrix inversion.
 
 ### [Splat Raycasting Dispatch](6924-splat-raycasting-dispatch.md)
-Splat Raycasting Dispatch is the core computational kernel that performs ray-splat intersection tests for Gaussian primitives, returning hit distances and primitive indices. It solves the problem of efficiently determining which splats intersect a given ray within a specified depth range, serving as the bridge between high-level scene management and low-level geometric intersection logic. It is distinguished from its siblings by its specific implementation as a batched, buffer-oriented dispatch function (often compiled to WebAssembly) that operates on pre-extracted subbuffers, whereas [Ray-Splat Intersection](6816-ray-splat-intersection.md) describes the general geometric algorithm and [Spherical Panoramic Gaussian Splatting (SPaGS)](3042-spherical-panoramic-gaussian-splatting-spags.md) adapts the coordinate space for spherical projections.
+Focuses on the computational kernel and buffer management for batched ray-splat intersection tests, optimized for specific hardware backends.
+
+### Ray Marching with RBF Intersection
+This variant intersects Radial Basis Function (RBF) density representations with slices perpendicular to the view direction. The slices are rendered from far to near using alpha blending (`GL_ONE` and `GL_SRC_ALPHA`). For each pixel, density $D(x)$ and source radiance $L_x$ are retrieved from 3D textures. The RGB output is set to $D(x)L_x$, and the alpha channel is set to the differential transmittance of the slice, computed as $\exp(-\sigma_t D(x) \Delta x)$ [S1].
 
 ## Background
-The methods in this family originate from the rise of 3D Gaussian Splatting (3DGS) for real-time novel view synthesis [S1]. Standard 3DGS relies on screen-space projection and affine approximation, which fails for large FOV or panoramic cameras. SPaGS [S1] introduced plane-based intersection for spherical panoramas. Concurrently, general-purpose ray-splat intersection algorithms [S1, S2, unofficial] were developed for picking and hybrid rendering, utilizing BVHs and ellipsoid approximations. The dispatch model [S1, unofficial] emerged from the need to optimize these calculations in constrained environments like WebAssembly, using fixed-size buffers and lookup tables.
+The concept of intersecting rays with Gaussian volumes in the context of rendering inhomogeneous media was explored in early real-time rendering research. Specifically, Gradient-based Interpolation and Sampling for Real-time Rendering of Inhomogeneous, Single-scattering Media introduced ray marching techniques using RBFs for density fields [S1]. While modern 3D Gaussian Splatting (3DGS) popularized the use of 3D Gaussians as explicit scene primitives, the underlying intersection logic for these ellipsoidal volumes has evolved to support real-time rasterization and raycasting variants.
 
 ## Sources
-[S1] Hahlbohm et al., "Spherical Panoramic Gaussian Splatting," 2025.
-[S2] Unofficial documentation for Ray-Splat Intersection implementation.
+[S1] Gradient‐based Interpolation and Sampling for Real‐time Rendering of Inhomogeneous, Single‐scattering Media, https://doi.org/10.1111/j.1467-8659.2008.01343.x, fetched 2026-10-27

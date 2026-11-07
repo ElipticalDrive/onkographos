@@ -1,0 +1,101 @@
+# GPU-Driven Architecture
+
+Also called: GPU-Driven Rendering
+
+## Overview
+GPU-Driven Architecture is a rendering paradigm where the residency octree and the mixed-resolution multi-volume renderer are fully implemented on the GPU, while the CPU handles high-level orchestration [S1, unofficial]. It solves the problem of CPU-GPU communication bottlenecks and API overhead by keeping data residency and rendering logic on the device [S1, unofficial]. Unlike general GPU raycasting methods that may rely on CPU-side traversal or fixed pipelines, this architecture is explicitly ray-guided, with the CPU acting as a dispatcher for rendering commands and memory management [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** High-level rendering commands from the CPU; brick data streamed from a server; global cache miss limit parameter.
+*   **Output:** Rendered image on the GPU; brick requests sent to the server.
+
+**Data Structures:**
+*   **Residency Octree:** Stored entirely on the GPU. Nodes missing data generate requests for streaming [S1, unofficial].
+*   **Cache Miss Counter:** A global limit on the number of recorded cache misses per frame to control buffer copy sizes [S1, unofficial].
+
+**Steps:**
+1.  **Orchestration:** The CPU dispatches rendering and memory management commands to the GPU [S1, unofficial].
+2.  **Request Handling:** During ray traversal, if a node in the residency octree is missing data, a request is generated to stream the missing data from the server [S1, unofficial].
+3.  **Data Upload:** The CPU forwards brick requests to the server and uploads the received bricks to the GPU [S1, unofficial].
+4.  **Rendering:** The GPU executes the renderer using the resident octree and uploaded bricks [S1, unofficial].
+
+**Parameters:**
+*   **Global Cache Miss Limit:** A specified limit on the number of recorded cache misses per frame. This is used to keep buffer copies from the GPU to the CPU small [S1, unofficial]. Typical values are not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Buffer Copy Overhead:** If the cache miss limit is not enforced, excessive buffer copies from GPU to CPU can occur, degrading performance [S1, unofficial].
+*   **Missing Data:** The architecture assumes a server-based streaming model; network latency or server unavailability will stall ray traversal [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# CPU Side
+def cpu_orchestrate():
+    # Dispatch rendering commands to GPU
+    gpu.dispatch_rendering_commands()
+    
+    # Handle brick requests from GPU
+    while gpu.has_brick_requests():
+        request = gpu.get_brick_request()
+        brick_data = server.fetch_brick(request)
+        gpu.upload_brick(brick_data)
+
+# GPU Side
+def gpu_renderer():
+    # Initialize residency octree and renderer on GPU
+    octree = ResidencyOctree()
+    renderer = MixedResolutionRenderer()
+    
+    # Global limit to control cache misses
+    cache_miss_limit = get_global_cache_miss_limit()
+    cache_miss_count = 0
+    
+    while cache_miss_count < cache_miss_limit:
+        # Ray traversal generates requests if data is missing
+        rays = generate_rays()
+        for ray in rays:
+            result = traverse_octree(ray, octree)
+            if result == MISSING_DATA:
+                # Generate request to CPU/Server
+                cpu.generate_brick_request(result.node_id)
+                cache_miss_count += 1
+            else:
+                renderer.render_ray(ray, result)
+```
+
+## Subtopics
+
+### [CUDA Raymarching Pipeline](6713-cuda-raymarching-pipeline.md)
+A rendering pipeline architecture where the majority of the processing resides on the GPU (device), eliminating data transfer and API call bottlenecks from the host CPU to the device GPU. It is chosen when minimizing CPU-GPU synchronization and data transfer overhead is critical. See [CUDA Raymarching Pipeline](6713-cuda-raymarching-pipeline.md).
+
+### Custom GPU Architecture for Sphere Tracing
+A GPU architecture designed for Sphere Tracing that uses independent cores rather than multi-ALU SIMD with lockstepping, handling threading natively via a storage manager. It is chosen for hardware designs requiring fine-grained control over thread execution priority and lightweight thread management. See [Custom GPU Architecture for Sphere Tracing](6713-cuda-raymarching-pipeline.md) (Note: No separate article exists, so this variant is described here).
+
+**Definition:** A GPU architecture designed for Sphere Tracing that uses independent cores rather than multi-ALU SIMD with lockstepping, handling threading natively via a storage manager.
+
+**Steps:**
+1.  Store non-running threads in a storage manager implemented as a double-ended queue, allowing coarse-grained execution priority control.
+2.  Dispatch threads from the storage manager to available cores. If multiple cores are ready, one is chosen arbitrarily.
+3.  Threads are light-weight, storing only an instruction pointer and mutable registers. New threads are spawned by sending data to the storage manager or terminating to the frame buffer.
+
+**Layout:**
+*   Each core has immutable instruction memory (controlling logic and DFU) and immutable data memory, mirrored across all cores. The DFU contains a stack for arithmetic, an ALU, and thread register tracking.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Eliminates CPU-GPU communication bottlenecks; keeps buffer copies small via cache miss limits; supports mixed-resolution rendering [S1, unofficial].
+*   **Limitations:** Requires a server for brick streaming; CPU still involved in orchestration and data upload [S1, unofficial].
+*   **When to use:** When rendering large, multi-channel biomedicinal datasets with high memory requirements and low-latency streaming is feasible [S1, unofficial].
+*   **When not to use:** When offline rendering without a server is required or when CPU-GPU synchronization is not a bottleneck [S1, unofficial].
+
+## Background
+The GPU-Driven Architecture was introduced in the context of scalable web-based volume rendering of large biomedicinal datasets [S1, unofficial]. It builds on the multi-channel page-table hierarchy and residency octree concepts [S1, unofficial]. The approach is similar to previous methods that limit cache misses to manage data transfer [S1, unofficial].
+
+## Sources
+[S1] Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze, https://doi.org/10.34726/hss.2023.106203, fetched 2026-10-26 (unofficial)
+[S2] Sphere Tracing GPU An evaluation of the Sphere Tracing algorithm and a GPU designed to run it, https://odr.chalmers.se/items/37b0e53f-fc76-4b0e-96d8-8e864573ada9/full, fetched 2026-10-29 (unofficial)

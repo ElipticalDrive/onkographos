@@ -1,101 +1,61 @@
 # AdaNeRF
+
 Also called: AdaNeRF: Adaptive Sampling for Real-time Rendering of Neural Radiance Fields
+
 ## Overview
-AdaNeRF is a method that employs fixed sample positions along each ray and incrementally introduces sparsity during training to achieve real-time rendering [S1]. It reduces the number of sample points by training a sampling network to predict all weights for points on a line in one go, thereby reducing the number of sample points required for shading [S2, unofficial]. It sets itself apart from siblings like TermiNeRF by using fixed positions and incremental sparsity rather than depth-conditioned adaptive sampling, and from ENeRF by not requiring multi-view geometry depth prediction [S1][S2, unofficial].
+AdaNeRF is a method that employs fixed sample positions along each ray and incrementally introduces sparsity during training to achieve real-time rendering [S1]. It replaces the standard uniform sampling of vanilla NeRF with a lightweight Sampling Network that evaluates once per ray to predict sample importance weights, allowing a heavier Shading Network to process only the most significant points [S1]. This approach reduces the number of sample points required, thereby lowering rendering cost while maintaining image quality [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A set of training images with known camera poses.
-- Output: A compact neural representation consisting of a Sampling Network and a Shading Network, capable of real-time rendering.
+*   **Input:** Camera ray parameters (origin $\mathbf{o}$, direction $\mathbf{d}$), number of total samples $N$, and sparsity schedule parameters.
+*   **Output:** Pixel color $\mathbf{C}(\mathbf{r})$.
 
 **Data Structures:**
-- **Sampling Network:** A lightweight MLP that takes a ray parameter $t$ (normalized distance along the ray) as input and outputs a scalar importance weight $w_i$ for each fixed sample position $i$ along the ray.
-- **Shading Network:** A heavier MLP that takes the 3D position $\mathbf{x}_i$ and viewing direction $\mathbf{d}$ as input and outputs volume density $\sigma_i$ and view-dependent color $\mathbf{c}_i$ only for the most significant samples.
-- **Fixed Sample Positions:** A predefined set of $N$ points uniformly or non-uniformly distributed along the ray interval $[t_{near}, t_{far}]$.
+1.  **Sampling Network ($f_{\text{sample}}$):** A lightweight MLP.
+    *   Input: Ray direction $\mathbf{d}$ (and potentially origin $\mathbf{o}$).
+    *   Output: A vector of weights $\mathbf{w} \in \mathbb{R}^N$ corresponding to $N$ fixed positions along the ray.
+2.  **Shading Network ($f_{\text{shade}}$):** A standard NeRF MLP.
+    *   Input: 3D coordinates $\mathbf{x}$ and viewing direction $\mathbf{d}$.
+    *   Output: Volume density $\sigma$ and color $\mathbf{c}$.
+3.  **Fixed Sample Positions:** A set of $N$ pre-defined distances $\{\delta_1, \dots, \delta_N\}$ along the ray, typically distributed uniformly or according to a depth prior.
 
-**Numbered Steps:**
-1. **Initialization:** Initialize a standard NeRF model (Sampling and Shading networks) or a pre-trained NeRF.
-2. **Incremental Sparsity Training:**
-   - Start with a large number of sample points $N_{start}$.
-   - Train the Sampling Network to predict importance weights for all $N_{start}$ points.
-   - Gradually reduce the number of active sample points $N$ during training epochs. This is achieved by masking out samples with low predicted weights or explicitly pruning them, forcing the network to concentrate representational capacity on fewer points.
-3. **Fine-tuning:** Once the target number of samples $N_{target}$ is reached, fine-tune the combined network to optimize the final compact representation.
-4. **Rendering:**
-   - For each ray, evaluate the Sampling Network once to get weights $w_i$ for all $N_{target}$ fixed positions.
-   - Select the top-$k$ samples with the highest weights (or use all if $k=N_{target}$).
-   - Evaluate the Shading Network only for these selected samples to get $\sigma_i$ and $\mathbf{c}_i$.
-   - Perform standard volume rendering integration using the selected samples.
+**Steps:**
+1.  **Initialization:** Train a standard NeRF model to convergence to initialize the Shading Network and establish a baseline for scene representation [S1].
+2.  **Architecture Split:** Decompose the model into the Sampling Network and the Shading Network [S1].
+3.  **Weight Prediction:** For each ray, pass $\mathbf{d}$ through $f_{\text{sample}}$ to obtain importance weights $\mathbf{w}$ [S1].
+4.  **Sparsity Introduction:** During training, incrementally reduce the number of active samples. This is achieved by masking or zeroing out weights $\mathbf{w}_i$ that fall below a threshold or by selecting only the top-$K$ indices based on $\mathbf{w}$ [S1].
+5.  **Shading:** Evaluate $f_{\text{shade}}$ only at the selected sample positions $\mathbf{x}_i = \mathbf{o} + \delta_i \mathbf{d}$ for the active indices [S1].
+6.  **Rendering:** Compute the final color using the standard volume rendering integral with the predicted $\sigma$ and $\mathbf{c}$ from the Shading Network [S1].
+7.  **Fine-tuning:** Fine-tune the entire system (Sampling and Shading Networks) jointly to the desired number of samples to create a compact neural representation [S1].
 
 **Formulas:**
-- Ray parameterization: $\mathbf{x}(t) = \mathbf{o} + t\mathbf{d}$, where $t \in [t_{near}, t_{far}]$.
-- Fixed sample positions: $t_i$ for $i=1 \dots N$.
-- Sampling Network output: $w_i = \text{SamplingNet}(t_i)$.
-- Shading Network output: $(\sigma_i, \mathbf{c}_i) = \text{ShadingNet}(\mathbf{x}(t_i), \mathbf{d})$.
-- Volume Rendering: $\mathbf{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i \alpha_i \mathbf{c}_i$, where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$, $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$, and $\delta_i = t_{i+1} - t_i$.
+The importance weight for the $i$-th sample is predicted by:
+$$
+\mathbf{w} = f_{\text{sample}}(\mathbf{d})
+$$
+The final color is computed as:
+$$
+\mathbf{C}(\mathbf{r}) = \sum_{i \in \text{Active}} T_i \alpha_i \mathbf{c}_i
+$$
+where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ and $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$, and $\text{Active}$ is the subset of indices determined by the sparsity mask derived from $\mathbf{w}$ [S1].
 
 **Parameters:**
-- $N_{start}$: Initial number of samples. Not given in the sources.
-- $N_{target}$: Final number of samples for real-time rendering. Not given in the sources.
-- Sparsity reduction schedule: How $N$ decreases over training epochs. Not given in the sources.
+*   $N$: Total number of fixed sample positions. Typical values are not explicitly given in the sources, but the method aims for "real-time" performance, implying significantly lower $N$ than standard NeRF (e.g., 64-128 vs 192-256) [S1].
+*   Sparsity Schedule: Controls the rate at which samples are pruned during training [S1].
 
 **Edge Cases and Pitfalls:**
-- **Precision:** Fixed positions may not align well with thin structures if $N$ is too small.
-- **Boundaries:** $t_{near}$ and $t_{far}$ must be chosen to cover the scene.
-- **Degenerate Input:** If the scene is empty, weights should be near zero.
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def render_ray_adanef(ray_o, ray_d, sampling_net, shading_net, t_near, t_far, num_samples):
-    # 1. Define fixed sample positions
-    t_vals = torch.linspace(t_near, t_far, num_samples)
-    x_vals = ray_o + t_vals.unsqueeze(1) * ray_d.unsqueeze(0) # Shape: [num_samples, 3]
-    
-    # 2. Evaluate Sampling Network to get importance weights
-    # sampling_net takes t_vals as input
-    weights = sampling_net(t_vals) # Shape: [num_samples]
-    
-    # 3. Select significant samples (e.g., top-k or all if num_samples is small)
-    # For simplicity, assume we use all samples if num_samples is small enough for real-time
-    # In practice, one might select top-k based on weights
-    selected_indices = torch.arange(num_samples)
-    t_selected = t_vals[selected_indices]
-    x_selected = x_vals[selected_indices]
-    
-    # 4. Evaluate Shading Network only for selected samples
-    # shading_net takes (x, d) as input
-    sigma, color = shading_net(x_selected, ray_d)
-    
-    # 5. Volume Rendering
-    deltas = torch.diff(torch.cat([t_selected, torch.tensor([t_far])]))
-    alpha = 1.0 - torch.exp(-sigma * deltas)
-    transmittance = torch.cumprod(torch.cat([torch.ones_like(alpha[:1]), 1.0 - alpha]), dim=0)[:-1]
-    radiance = transmittance * alpha * color
-    final_color = torch.sum(radiance, dim=0)
-    
-    return final_color
-```
-
-## Subtopics
-
-### TermiNeRF
-Uses a sampling network conditioned on depth maps to localize surfaces. Choose when depth information is available and accurate. [S1]
-
-### ENeRF
-Uses multi-view geometry algorithms to predict scene surface depth for sampling. Choose when multi-view consistency is high and depth can be reliably estimated. [S2, unofficial]
+*   **Initialization:** The method requires a pre-trained NeRF to initialize the color network to achieve the best results, as training end-to-from scratch may lead to suboptimal convergence [S1].
+*   **Geometric Ambiguity:** By avoiding the need for a depth map to guide sampling, the method improves quality in geometrically ambiguous regions compared to depth-guided approaches [S1].
 
 ## Operating characteristics
-- **Time Complexity:** Rendering time is dominated by the Sampling Network evaluation (once per ray) and the Shading Network evaluation (only for selected samples). This is significantly faster than standard NeRF which evaluates Shading Network for all samples.
-- **Memory Complexity:** Lower memory usage due to fewer shading evaluations and potentially smaller Shading Network if sparsity is high.
-- **Measured Performance:** Achieves real-time rendering speeds after fine-tuning to the desired number of samples [S1].
-- **Strengths:** Real-time rendering capability, reduced computational cost by focusing on significant samples.
-- **Limitations:** Quality may suffer in geometrically ambiguous regions if the sampling network fails to predict accurate weights. Requires a pre-trained NeRF for best results in some variants [S1].
-- **When to use:** When real-time rendering is required and the scene geometry is relatively well-defined.
-- **When not to use:** When high fidelity in complex, thin, or ambiguous structures is critical and real-time is not a constraint.
+*   **Time Complexity:** Reduced compared to vanilla NeRF due to fewer evaluations of the Shading Network. The Sampling Network is lightweight, adding minimal overhead [S1].
+*   **Memory Complexity:** Lower memory usage as fewer points are processed by the heavier Shading Network [S1].
+*   **Performance:** Capable of real-time rendering after fine-tuning to the desired number of samples [S1].
+*   **Strengths:** Adaptable to meet specific performance targets; improves quality in geometrically ambiguous regions by not relying on depth maps [S1].
+*   **Limitations:** Requires a pre-trained NeRF for initialization [S1].
 
 ## Background
-AdaNeRF was introduced by Kurz et al. [KNL* 22] in 2022. It is part of the broader effort to accelerate NeRF rendering by reducing the number of sample points [S2, unofficial]. The method builds on the idea of using a sampling network to predict sample importance, as seen in TermiNeRF [S1], but differs by using fixed positions and incremental sparsity.
+AdaNeRF was introduced by Kurz et al. [KNL* 22] in the paper "AdaNeRF: Adaptive Sampling for Real-time Rendering of Neural Radiance Fields" presented at ECCV 2022 [S2, unofficial]. It is part of the broader trend of accelerating NeRF by reducing the number of sample points, alongside methods like NSVF and ENeRF [S2, unofficial]. The approach builds on the concept of using a sampling network to localize surfaces or determine importance, similar to TermiNeRF [S1].
 
 ## Sources
 [S1] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26

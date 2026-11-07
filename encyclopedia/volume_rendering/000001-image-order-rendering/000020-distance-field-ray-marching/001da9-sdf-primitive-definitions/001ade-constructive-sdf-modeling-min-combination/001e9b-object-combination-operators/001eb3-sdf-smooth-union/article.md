@@ -3,45 +3,51 @@
 Also called: Smooth Union, Smooth Minimum, S-Union, LogSumExp SDF Union, Smooth Union SDF Operator
 
 ## Overview
-SDF Smooth Union is a constructive operator that blends two Signed Distance Function (SDF) values, $a$ and $b$, into a single smooth distance field, replacing the sharp edges of the boolean `min` operation with a rounded transition controlled by a smoothing parameter $k$ (or $r$) [S1, S2, S3, S4, S6, S8, unofficial]. It sets itself apart from its siblings by offering distinct mathematical formulations for this blend: the **Polynomial Smooth Minimum** (cubic interpolation) and the **LogSumExp Smooth Minimum** (exponential approximation), allowing artists to choose between organic curvature and computational cost [S9, S10, unofficial]. Unlike generic smooth blends, specific implementations preserve Lipschitz continuity (gradient magnitude $\le 1$) under orthogonality conditions, which is critical for stable ray marching [S1, unofficial][S2, unofficial].
+SDF Smooth Union is a constructive operator that blends two Signed Distance Function (SDF) values, $a$ and $b$, into a single smooth distance field $d_{out}$, replacing the sharp geometric intersection of a boolean union with a rounded transition region controlled by a radius parameter $k$ [S1, S2, S3, S4, S6, S8, unofficial]. It sets itself apart from its siblings by offering two primary mathematical implementations: a **polynomial** blend (often called `smin`) that uses cubic interpolation for a specific curvature profile, and an **exponential** blend (LogSumExp) that provides a different smoothness characteristic; unlike the standard `min` operator, it preserves visual continuity but requires careful handling of the Lipschitz condition to avoid ray marching artifacts [S1, S2, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-- Inputs: Two scalar SDF values $a$ and $b$ representing distances from a query point to two primitives, and a scalar smoothing parameter $k > 0$ (sometimes denoted $r$) [S1, S2, S6, unofficial].
-- Output: A single scalar distance value $d_{union}$ representing the smooth union [S1, S2, S6, unofficial].
+### Inputs and Outputs
+*   **Inputs:** Two scalar distance values $a$ and $b$ (the distances from the query point to the surfaces of two primitives), and a scalar smoothing radius $k > 0$ [S1, S2, S3, S6, S7, unofficial].
+*   **Output:** A single scalar distance $d_{out}$ representing the smooth union [S1, S2, S3, S6, S7, unofficial].
 
-**Data Structures:**
-The operation is element-wise on scalar distances. No complex data structures are required for the core distance calculation [G]. If material information is carried (as in [Multi-Material Distance Fields](1943-multi-material-distance-fields.md)), the operator may also blend or select material attributes, but the core distance calculation remains scalar [G].
+### Data Structures
+No complex data structures are required for the core operator itself. It operates on scalar floats. However, in multi-material contexts, it may operate on structs containing distance and material data [S7, unofficial].
 
-**Formulas:**
-There are two primary formulations found in the sources.
+### Formulas
+There are two dominant formulations found in the sources. They produce visually similar but mathematically distinct results.
 
-1.  **Polynomial Smooth Minimum (Cubic):**
-    This method uses cubic interpolation to blend the distances [S1, S2, S6, unofficial].
-    $$
-    h = \text{clamp}\left(0.5 + 0.5 \frac{b - a}{k}, 0.0, 1.0\right)
-    $$
-    $$
-    d_{union} = \text{mix}(b, a, h) - k \cdot h \cdot (1.0 - h)
-    $$
-    where $\text{mix}(x, y, t) = x(1-t) + yt$ [S1, S2, S6, unofficial].
+**1. Polynomial Smooth Minimum (Cubic Blend)**
+This method uses a cubic polynomial to blend the distances [S1, S2, S6, S7, unofficial].
 
-2.  **LogSumExp Smooth Minimum (Exponential):**
-    This method approximates the minimum using the soft-min function derived from the log-sum-exp operation [S4, unofficial].
-    $$
-    d_{union} = -\frac{1}{k} \ln \left( e^{-k \cdot a} + e^{-k \cdot b} \right)
-    $$
-    Or equivalently:
-    $$
-    d_{union} = \frac{1}{-k} \text{logsumexp}_{i \in \{a,b\}}(-k \cdot S_i)
-    $$
-    where $k$ is the blend factor [S4, unofficial].
+$$
+h = \text{clamp}\left(0.5 + 0.5 \frac{b - a}{k}, 0.0, 1.0\right)
+$$
 
-**Parameters:**
-- $k$ (or $r$): The smoothing radius or factor. It controls the width of the transition region between the two shapes. Larger values create a smoother, wider blend [S1, S2, S6, unofficial]. Typical values are small relative to object size, e.g., $0.5$ or $1.0$ depending on scene scale [S6, S7, unofficial]. It must be significantly smaller than the size of the objects to maintain validity and prevent geometric distortion [S1, unofficial][S2, unofficial].
+$$
+d_{out} = \text{mix}(b, a, h) - k \cdot h \cdot (1.0 - h)
+$$
 
-**Pseudocode (Polynomial Variant):**
-The polynomial variant is explicitly defined in [S1, S2, S6, unofficial]. The exponential variant is defined in [S4, unofficial].
+Where $\text{mix}(b, a, h) = b(1 - h) + a \cdot h$ [S1, S2, S6, unofficial].
+
+**2. Exponential Smooth Minimum (LogSumExp)**
+This method uses the soft-min approximation via exponentials [S4, unofficial].
+
+$$
+d_{out} = -\frac{1}{k} \ln \left( e^{-k \cdot a} + e^{-k \cdot b} \right)
+$$
+
+Or equivalently:
+$$
+d_{out} = \frac{1}{-k} \text{logsumexp}_{i \in \{a,b\}}(-k \cdot S_i)
+$$
+
+### Parameters
+*   **$k$ (Smoothing Radius):** Controls the width of the transition region. Larger values create a smoother, wider blend; smaller values create sharper transitions closer to the boolean `min` [S1, S2, S6, S7, unofficial].
+    *   *Typical Values:* $0.33$ to $1.0$ depending on scene scale [S6, S7, unofficial].
+    *   *Constraint:* $k$ must be significantly smaller than the scale of the objects to prevent geometric distortion [S1, S2, unofficial].
+
+### Pseudocode
+The following implementation combines the polynomial approach (most common in GLSL-based ray marching) and includes the edge case handling found in some sources [S3, S6, S7, unofficial].
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
@@ -53,43 +59,39 @@ def smooth_union_polynomial(a: float, b: float, k: float) -> float:
     Args:
         a: Distance to first primitive.
         b: Distance to second primitive.
-        k: Smoothing radius (must be > 0).
+        k: Smoothing radius. Must be > 0.
         
     Returns:
         Smoothed distance value.
     """
     if k <= 0:
-        # Fallback to standard min if k is invalid or zero
+        # Fallback to standard boolean min if k is invalid
         return min(a, b)
-    
+
     # Calculate interpolation weight h
-    # h approaches 1 when a << b (dominated by a)
-    # h approaches 0 when b << a (dominated by b)
+    # h is 0 when a << b, 1 when a >> b, 0.5 when a == b
     h = 0.5 + 0.5 * (b - a) / k
     
-    # Clamp h to [0, 1]
-    if h < 0.0:
-        h = 0.0
-    elif h > 1.0:
-        h = 1.0
-        
-    # Linear mix
+    # Clamp h to [0.0, 1.0] to ensure stability outside the blend region
+    h = max(0.0, min(1.0, h))
+    
+    # Linear interpolation between b and a
     mix_val = b * (1.0 - h) + a * h
     
-    # Subtract the smoothing term
-    # The term k * h * (1 - h) creates the rounded bridge
-    smooth_term = k * h * (1.0 - h)
+    # Subtract the cubic blend term
+    # This term is 0 when h=0 or h=1, and max at h=0.5
+    blend_term = k * h * (1.0 - h)
     
-    return mix_val - smooth_term
+    return mix_val - blend_term
 
-def smooth_union_logsumexp(a: float, b: float, k: float) -> float:
+def smooth_union_exponential(a: float, b: float, k: float) -> float:
     """
-    Computes the smooth union of two SDF values using LogSumExp approximation.
+    Computes the smooth union using the LogSumExp approximation.
     
     Args:
         a: Distance to first primitive.
         b: Distance to second primitive.
-        k: Smoothing factor (must be > 0).
+        k: Smoothing radius. Must be > 0.
         
     Returns:
         Smoothed distance value.
@@ -106,37 +108,54 @@ def smooth_union_logsumexp(a: float, b: float, k: float) -> float:
     
     # Compute logsumexp
     # log(exp(val_a) + exp(val_b)) = max_val + log(exp(val_a - max_val) + exp(val_b - max_val))
-    log_sum_exp = max_val + math.log(math.exp(val_a - max_val) + math.exp(val_b - max_val))
+    log_sum = max_val + math.log(math.exp(val_a - max_val) + math.exp(val_b - max_val))
     
-    # Return -1/k * logsumexp
-    return -log_sum_exp / k
+    # Final result: -1/k * logsumexp
+    return -log_sum / k
+
+def smooth_union(a: float, b: float, k: float, method: str = "polynomial") -> float:
+    """
+    Wrapper for smooth union operations.
+    
+    Args:
+        method: "polynomial" or "exponential".
+    """
+    if method == "exponential":
+        return smooth_union_exponential(a, b, k)
+    else:
+        return smooth_union_polynomial(a, b, k)
 ```
 
-**Edge Cases and Pitfalls:**
-- **Lipschitz Continuity Loss:** The operator preserves Lipschitz continuity (gradient magnitude $\le 1$) only when the gradients of the two SDFs are orthogonal [S1, unofficial][S2, unofficial]. Continuity is lost, causing ray marching artifacts, if the gradients deviate by more than $30^\circ$ or if the surfaces are parallel and close to each other [S1, unofficial][S2, unofficial].
-- **Parameter Scaling:** If $k$ is too large relative to the object size, the geometry becomes distorted [S1, unofficial][S2, unofficial].
-- **Numerical Stability:** The LogSumExp variant requires care with large negative values of $-k \cdot a$ to avoid underflow in `exp`. The "max trick" shown in the pseudocode handles this [S4, G, unofficial].
+### Edge Cases and Pitfalls
+1.  **Lipschitz Continuity Loss:** The resulting SDF preserves the Lipschitz continuity ($|\nabla d| \le 1$) only if the gradients of the two input SDFs are orthogonal [S1, S2, unofficial]. If the gradients deviate by more than $30^\circ$ or if surfaces are parallel and close, continuity is lost, leading to ray marching overshooting or jittering [S1, S2, unofficial].
+2.  **Parallel Surfaces:** The polynomial blend assumes the surfaces are approaching each other. If two large parallel planes are blended, the resulting geometry may be incorrect or distorted [S1, S2, unofficial].
+3.  **Precision:** In the exponential method, direct computation of $e^{-k \cdot a}$ can overflow or underflow for large $a$ or large $k$. The "logsumexp trick" (subtracting the max value before exponentiating) is required for numerical stability [S4, unofficial].
+4.  **Parameter Scaling:** If $k$ is too large relative to the object size, the shapes will merge too early, creating unnatural bulges [S1, S2, unofficial].
 
 ## Subtopics
 
 ### [Polynomial Smooth Minimum](1827-polynomial-smooth-minimum.md)
-Uses polynomial interpolation (cubic) to blend SDFs. Sets itself apart by offering specific curvature characteristics and lower computational cost compared to exponential methods. Choose when performance is critical or specific organic curvature is desired.
+Uses cubic polynomial interpolation for blending. Chosen when a specific, controllable curvature is desired without the computational cost of exponentials.
 
-### [LogSumExp SDF Union](1828-logsumexp-sdf-union.md)
-Uses the exponential/logarithmic soft-min function. Sets itself apart by providing a mathematically smooth approximation of the minimum with different curvature properties. Choose when a specific "soft" blend look is required or when differentiability is paramount.
+### [Smooth Intersection](1839-smooth-intersection.md)
+The dual operator for smooth boolean intersection, often implemented as `-smin(-a, -b, k)`.
+
+### [Multi-Material Distance Fields](1943-multi-material-distance-fields.md)
+Extends smooth union to blend not just distances but also material properties (color, roughness) across the transition region.
+
+### [Linear SDF Blend](3004-linear-sdf-blend.md)
+A simpler, linear interpolation between distances, which does not preserve the distance field property as well as smooth union but is cheaper.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per query point. The polynomial variant involves basic arithmetic operations (add, sub, mul, clamp). The LogSumExp variant involves `exp` and `log` operations, which are more expensive than basic arithmetic but still constant time [S4, S6, unofficial].
-- **Memory Complexity:** $O(1)$ auxiliary memory. No data structures are needed beyond the input scalars [G].
-- **Measured Performance:** Not given in the sources.
-- **Scaling:** Scales linearly with the number of primitives when chaining operators (e.g., unioning $N$ spheres requires $N-1$ union operations) [S5, S7, unofficial].
-- **Strengths:** Eliminates sharp edges, allowing for organic merging of shapes (metaball-like effects) [S4, S7, unofficial]. Preserves distance field properties (Lipschitz continuity) under orthogonal gradient conditions, ensuring stable ray marching [S1, unofficial][S2, unofficial].
-- **Limitations:** Loses Lipschitz continuity if gradients are not orthogonal (deviation $> 30^\circ$ or parallel surfaces), leading to ray marching artifacts [S1, unofficial][S2, unofficial]. The smoothing parameter $k$ must be carefully tuned relative to object size [S1, unofficial][S2, unofficial].
-- **When to use:** When creating organic shapes, blending primitives, or avoiding sharp boolean edges in ray marching scenes [S4, S5, S6, unofficial].
-- **When not to use:** When sharp, precise boolean edges are required, or when primitives are parallel and close together (risking continuity loss) [S1, unofficial][S2, unofficial].
+*   **Time Complexity:** $O(1)$ per primitive pair. The polynomial method involves basic arithmetic operations (add, multiply, clamp). The exponential method involves `exp` and `log`, which are more expensive but still constant time [S4, S6, unofficial].
+*   **Memory Complexity:** $O(1)$ for the operator itself. No additional storage is needed beyond the input distances [S1, S2, unofficial].
+*   **Strengths:** Eliminates sharp edges, allowing for organic merging of shapes (e.g., metaballs, pipes, joints). Visually smooth results with minimal computational overhead compared to mesh-based smoothing [S1, S2, S5, S6, unofficial].
+*   **Limitations:** Does not produce a true distance field in the transition region (it is an approximation). Can cause ray marching artifacts if the Lipschitz condition is violated (gradients not orthogonal) [S1, S2, unofficial].
+*   **When to Use:** When creating organic shapes, joints, or rounded edges in ray marching scenes where performance is critical and exact distance precision in the blend zone is not required [S1, S2, S5, S6, unofficial].
+*   **When Not to Use:** When exact geometric precision is required at the intersection, or when blending parallel surfaces where the Lipschitz condition is likely to fail [S1, S2, unofficial].
 
 ## Background
-SDF Smooth Union operators originated in the context of ray marching and implicit surface rendering, popularized by demoscene artists and real-time graphics programmers. The polynomial smooth minimum (smin) was notably described by Inigo Quilez in his online articles on ray marching [S5, S6, S7, unofficial]. The LogSumExp variant leverages the mathematical property that the soft-min function is a differentiable approximation of the minimum, often used in machine learning (log-sum-exp trick) and applied to SDFs for smooth blending [S4, unofficial]. These operators are fundamental to Constructive SDF Modeling, allowing complex scenes to be built from simple primitives without the discontinuities of traditional CSG [S1, S2, S4, S6, S7, unofficial].
+The concept of smooth minimum operators in SDFs emerged from the need to create organic, continuous shapes in ray marching without relying on polygonal meshes. The polynomial smooth minimum (`smin`) was popularized by Inigo Quilez in his online tutorials on ray marching and SDFs [S5, S6, unofficial]. The exponential variant (LogSumExp) is derived from the mathematical property that the soft-min function is a differentiable approximation of the min function, widely used in machine learning and optimization [S4, unofficial]. These operators are now standard primitives in GLSL-based ray marching engines and differentiable rendering frameworks [S1, S2, S4, S7, unofficial].
 
 ## Sources
 [S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)

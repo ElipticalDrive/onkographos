@@ -3,37 +3,37 @@
 Also called: Transforming SDF Geometry, hierarchical transforms, inverse transform query
 
 ## Overview
-Spatial and nD transforms apply geometric transformations to Signed Distance Field (SDF) primitives by inverse-transforming the query point rather than the geometry itself. This approach allows for the rotation, translation, scaling, and permutation of SDF models within the distance function evaluation. It sets itself apart from direct geometry manipulation by maintaining the mathematical integrity of the distance field while enabling complex hierarchical or per-node transformations, particularly in multidimensional data structures.
+Spatial and nD transforms apply geometric transformations to Signed Distance Field (SDF) primitives by inverse-transforming the query point rather than the geometry itself [S2, unofficial]. This approach allows for the rotation, translation, scaling, and permutation of SDF models within the distance function evaluation [S1, unofficial][S2, unofficial]. It sets itself apart from direct geometry manipulation by maintaining the mathematical integrity of the distance field while enabling complex hierarchical or per-node transformations, particularly in multidimensional data structures [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Query point $P_{world}$ in world space, transformation parameters (scale, offset, permutation, or matrix), and the base SDF function $f_{base}$.
-- Output: Signed distance value at the transformed point.
+- Input: Query point $P_{world}$ in world space, transformation parameters (scale, offset, permutation, or matrix), and the base SDF function $f_{base}$ [S1, unofficial][S2, unofficial].
+- Output: Signed distance value at the transformed point [S2, unofficial].
 
 **Data Structures:**
-Transformations are defined per dimension or as a composite matrix.
-- **Affine Transform:** Defined by a scale factor $s$ and an offset $o$. For nD, these are vectors/matrices.
-- **Permutation Transform:** Defined by a permutation array `perm` where `perm[i]` maps the original index to the new position.
-- **Composite Transform:** For affine, composition is $s = s_p s_c$ and $o = s_p o_c + o_p$. For permutation, composition is $r[i] = perm_p[perm_c[i]]$.
+Transformations are defined per dimension or as a composite matrix [S1, unofficial].
+- **Affine Transform:** Defined by a scale factor $s$ and an offset $o$ [S1, unofficial]. For nD, these are vectors/matrices [S2, unofficial].
+- **Permutation Transform:** Defined by a permutation array `perm` where `perm[i]` maps the original index to the new position [S1, unofficial].
+- **Composite Transform:** For affine, composition is $s = s_p s_c$ and $o = s_p o_c + o_p$ [S1, unofficial]. For permutation, composition is $r[i] = perm_p[perm_c[i]]$ [S1, unofficial].
 
 **Steps:**
-1. **Inverse Transformation:** Apply the inverse of the desired transformation to the query point $P_{world}$ to obtain the raw point $P_{raw}$ in the base SDF's local space.
+1. **Inverse Transformation:** Apply the inverse of the desired transformation to the query point $P_{world}$ to obtain the raw point $P_{raw}$ in the base SDF's local space [S1, unofficial][S2, unofficial].
    - For **Affine** transforms (continuous or discrete):
      $$P_{raw} = \frac{P_{world} - o}{s}$$
      $$T_{raw} = \frac{T_{world}}{|s|}$$
-     where $T$ represents tolerance or step size if applicable.
+     where $T$ represents tolerance or step size if applicable [S1, unofficial].
    - For **Permutation** transforms:
-     $$P_{raw}[i] = P_{world}[perm^{-1}[i]]$$
-     where $inverse[perm[i]] = i$.
+     $$P_{raw}[i] = P_{world}[inverse[i]]$$
+     where $inverse[perm[i]] = i$ [S1, unofficial].
    - For **Matrix** transforms (rotation, translation, non-uniform scaling):
      $$P_{raw} = (P_{world} \cdot M^{-1}).xyz$$
-     where $M$ is the local-to-world transformation matrix.
+     where $M$ is the local-to-world transformation matrix [S2, unofficial].
 2. **Base SDF Evaluation:** Evaluate the base SDF function using the transformed point:
-   $$d = f_{base}(P_{raw})$$
+   $$d = f_{base}(P_{raw})$$ [S2, unofficial].
 3. **Edge Cases:**
-   - **Zero Scale:** If $s=0$, the query is left untransformed (validation warning required).
-   - **Discrete Axes:** If the axis is discrete, round the world value onto the declared grid. If a value has no local preimage, it selects nothing.
-   - **Non-Uniform Distortion:** Spatially varying distortion can be applied by making the transform a function of position, though this may affect local linearity.
+   - **Zero Scale:** If $s=0$, the query is left untransformed (validation warning required) [S1, unofficial].
+   - **Discrete Axes:** If the axis is discrete, round the world value onto the declared grid [S1, unofficial]. If a value has no local preimage, it selects nothing [S1, unofficial].
+   - **Non-Uniform Distortion:** Spatially varying distortion can be applied by making the transform a function of position, though this may affect local linearity [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -42,20 +42,9 @@ Transformations are defined per dimension or as a composite matrix.
 def transform_query(pt_world, transform_type, params, base_sdf):
     """
     Apply inverse transform to query point and evaluate base SDF.
-    
-    Args:
-        pt_world: vec3 or vec4 query point in world space.
-        transform_type: 'affine', 'permutation', 'matrix', or 'none'.
-        params: dict containing transform parameters.
-            For 'affine': {'scale': float, 'offset': float}
-            For 'permutation': {'perm': list of ints}
-            For 'matrix': {'matrix': mat4}
-        base_sdf: function that takes a point and returns distance.
-    
-    Returns:
-        float: Signed distance at the transformed point.
     """
     pt_raw = pt_world
+    tol_raw = None
     
     if transform_type == 'affine':
         scale = params['scale']
@@ -64,30 +53,29 @@ def transform_query(pt_world, transform_type, params, base_sdf):
             # Zero scale leaves query untransformed [S1, unofficial]
             pass
         else:
-            pt_raw = (pt_world - offset) / scale
+            pt_raw = [(pt_world[i] - offset[i]) / scale[i] for i in range(len(pt_world))]
+            # raw_tol = world_tol / |scale| [S1, unofficial]
+            tol_raw = [abs(t / scale[i]) for i, t in enumerate(params.get('tol_world', [0.0]*len(pt_world)))]
             
     elif transform_type == 'permutation':
         perm = params['perm']
-        # Inverse permutation: inverse[perm[i]] = i
-        # Construct inverse permutation array
+        # Inverse permutation: inverse[perm[i]] = i [S1, unofficial]
         inv_perm = [0] * len(perm)
         for i, p in enumerate(perm):
             inv_perm[p] = i
-        # Apply inverse permutation to point coordinates
-        pt_raw = vec3(pt_world[inv_perm[0]], pt_world[inv_perm[1]], pt_world[inv_perm[2]])
-        
+        pt_raw = [pt_world[inv_perm[i]] for i in range(len(pt_world))]
+            
     elif transform_type == 'matrix':
         matrix = params['matrix']
-        # Apply inverse matrix to point
-        # pt is treated as homogeneous (w=1)
-        pt_homogeneous = vec4(pt_world, 1.0)
-        inv_matrix = inverse(matrix)
-        pt_transformed = pt_homogeneous * inv_matrix
-        pt_raw = pt_transformed.xyz
-        
+        # Apply inverse matrix to point [S2, unofficial]
+        pt_homogeneous = pt_world + [1.0]
+        inv_matrix = inverse(matrix) # Standard matrix inversion operation
+        pt_transformed = [sum(pt_homogeneous[j] * inv_matrix[j][i] for j in range(4)) for i in range(4)]
+        pt_raw = pt_transformed[:3]
+            
     elif transform_type == 'none':
         pt_raw = pt_world
-        
+            
     else:
         raise ValueError("Unknown transform type")
         
@@ -95,32 +83,36 @@ def transform_query(pt_world, transform_type, params, base_sdf):
 ```
 
 **Parameters:**
-- **Scale:** Non-uniform scaling factors per dimension.
-- **Offset:** Translation offsets per dimension.
-- **Permutation:** Array defining axis reordering.
-- **Matrix:** 4x4 matrix for combined rotation, translation, and scaling.
+- **Scale:** Non-uniform scaling factors per dimension [S1, unofficial].
+- **Offset:** Translation offsets per dimension [S1, unofficial].
+- **Permutation:** Array defining axis reordering [S1, unofficial].
+- **Matrix:** 4x4 matrix for combined rotation, translation, and scaling [S2, unofficial].
 
 **Pitfalls:**
-- **Precision:** Division by small scale factors can amplify floating-point errors.
-- **Boundaries:** Discrete axes require careful rounding to avoid selecting invalid grid cells.
-- **Degenerate Input:** Zero scale must be handled explicitly to avoid division by zero.
+- **Precision:** Division by small scale factors can amplify floating-point errors [G].
+- **Boundaries:** Discrete axes require careful rounding to avoid selecting invalid grid cells [S1, unofficial].
+- **Degenerate Input:** Zero scale must be handled explicitly to avoid division by zero [S1, unofficial].
 
 ## Subtopics
 
 ### [SDF Rotation](5817-sdf-rotation.md)
 Rotates the query point by the inverse of a stored quaternion before querying the base SDF.
 
+### Geometric Transformation Application
+Applies a geometric transformation matrix $Trf$ to points $pts$ [S3, unofficial]. Supports 3x3 or 4x4 matrices, and 2D or 3D points [S3, unofficial]. Can project to z=norm plane [S3, unofficial]. If Trf is torch tensor, 3D, and pts is 4D with matching last dim: Use einsum 'bij, bhwj -> bhwi' for transformation [S3, unofficial]. If Trf is torch tensor, 3D, and pts is 4D with dim+1 last dim: Use einsum 'bij, bhwj -> bhwi' on Trf[:,:d,:d] and add Trf[:,:None,None,:d,d] [S3, unofficial]. If Trf ndim >= 3: Reshape Trf to (-1, d, d) and pts to match batch size [S3, unofficial]. If pts ndim > Trf ndim, reshape pts to (B, H*W, d) [S3, unofficial]. If pts ndim == 2, reshape to (B, 1, d) [S3, unofficial]. If pts.shape[-1] + 1 == Trf.shape[-1]: Transpose Trf, then compute pts @ Trf[..., :-1, :] + Trf[..., -1:, :] [S3, unofficial]. Otherwise: Compute Trf @ pts.T, then swap axes [S3, unofficial]. Parameters include Trf (3x3 or 4x4 projection matrix, e.g., Homography), pts (coordinates with shape (...,2) or (...,3)), ncol (number of columns in result, defaults to pts.shape[-1]), and norm (if != 0, projects result on z=norm plane) [S3, unofficial].
+
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per query for affine and permutation transforms. Matrix inversion is precomputed, so query time remains $O(1)$.
-- **Memory Complexity:** $O(1)$ additional memory for transform parameters.
-- **Strengths:** Efficient for hierarchical transforms; maintains local linearity for uniform transforms; supports complex nD data structures.
-- **Limitations:** Non-uniform spatial distortion can break local linearity; discrete axes require careful handling of grid alignment.
-- **When to Use:** Ideal for transforming SDF primitives in ray marching, especially in multidimensional scientific data visualization where per-node transforms are needed.
-- **When Not to Use:** Avoid for highly non-linear distortions that significantly alter the distance field's properties.
+- **Time Complexity:** $O(1)$ per query for affine and permutation transforms [S1, unofficial]. Matrix inversion is precomputed, so query time remains $O(1)$ [S2, unofficial].
+- **Memory Complexity:** $O(1)$ additional memory for transform parameters [S1, unofficial].
+- **Strengths:** Efficient for hierarchical transforms; maintains local linearity for uniform transforms; supports complex nD data structures [S1, unofficial][S2, unofficial].
+- **Limitations:** Non-uniform spatial distortion can break local linearity; discrete axes require careful handling of grid alignment [S1, unofficial][S2, unofficial].
+- **When to Use:** Ideal for transforming SDF primitives in ray marching, especially in multidimensional scientific data visualization where per-node transforms are needed [S1, unofficial].
+- **When Not to Use:** Avoid for highly non-linear distortions that significantly alter the distance field's properties [S2, unofficial].
 
 ## Background
-The concept of inverse-transforming query points for SDFs originates from the need to efficiently render transformed geometry without modifying the underlying distance field data. This technique is widely used in ray marching and implicit surface rendering. The specific application to nD transforms and hierarchical structures is detailed in recent work on scalable visualization of multidimensional scientific data [S1, unofficial]. The basic principle of applying inverse transforms to query points is a standard technique in SDF rendering [S2, unofficial].
+The concept of inverse-transforming query points for SDFs originates from the need to efficiently render transformed geometry without modifying the underlying distance field data [S2, unofficial]. This technique is widely used in ray marching and implicit surface rendering [S2, unofficial]. The specific application to nD transforms and hierarchical structures is detailed in recent work on scalable visualization of multidimensional scientific data [S1, unofficial]. The basic principle of applying inverse transforms to query points is a standard technique in SDF rendering [S2, unofficial].
 
 ## Sources
 [S1] Luxar: Gaussian splatting for microscopy and scalable interactive web visualisation of multidimensional scientific data, https://doi.org/10.64898/2026.09.22.753676, fetched 2026-10-26 (unofficial)
 [S2] Ray Marching with Signed Distance Fields - Scribd, https://www.scribd.com/document/831412915/1-Ray-Marching-and-Signed-Distance-Fields, fetched 2026-10-27 (unofficial)
+[S3] NVlabs/InstantSplat, https://github.com/NVlabs/InstantSplat, fetched 2026-10-27 (unofficial)

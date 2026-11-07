@@ -1,0 +1,95 @@
+# Sparse Voxelization into an Octree
+
+Also called: Sparse-voxel octree, SVO
+
+## Overview
+This method constructs a sparse-voxel octree by storing only voxels intersected by mesh triangles, avoiding the memory overhead of a full grid for large or complex scenes [S1, unofficial]. It differs from its parent, [Sparse Sampling / Sparse Voxel Grid Generation](4588-sparse-sampling-sparse-voxel-grid-generation.md), which uses a fixed sparse grid pattern, by dynamically allocating nodes only where geometry exists, enabling efficient traversal and mipmapped storage for global illumination [S1, unofficial].
+
+## How it works
+**Inputs:** Triangle mesh; maximum octree depth (resolution).
+**Outputs:** Octree pool (linear buffer of nodes); Voxel-fragment list (linear buffer of attributes); Brick texture (optional, for values).
+
+**Data Structures:**
+1.  **Octree Pool:** Linear buffer in video memory. Nodes are grouped into $2 \times 2 \times 2$ tiles. Each node stores a single 32-bit pointer (index into the pool) to its eight children. Interior nodes store mipmapped values; leaves store direct voxel values [S1, unofficial].
+2.  **Voxel-Fragment List:** Preallocated linear buffer. Each entry contains:
+    *   Coordinate: One 32-bit word, 10 bits per component ($x, y, z$), 2 unused bits.
+    *   Attributes: Arrays for data (e.g., one color per fragment) [S1, unofficial].
+3.  **Atomic Counter:** Single 32-bit value in a buffer object, tracking the next available index in the Voxel-Fragment List [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Voxelize at Max Resolution:** Voxelize the input triangle mesh once at the maximum octree level resolution. For each intersected voxel, append its coordinate and attributes to the Voxel-Fragment List using the Atomic Counter to manage concurrent writes from multiple threads [S1, unofficial].
+2.  **Build Octree Top-Down:** Initialize the root node (1-voxel volume). Iterate through octree levels from top to bottom.
+3.  **Detect Non-Empty Nodes:** For the current level, use the Voxel-Fragment List (not the mesh) to determine which nodes are non-empty (intersected by at least one fragment). This avoids re-voxelizing the mesh at lower resolutions [S1, unofficial].
+4.  **Subdivide:** For each non-empty node, create a new tile of $2^3 = 8$ child nodes in the Octree Pool. Update the parent's pointer to the new tile [S1, unofficial].
+5.  **Write Values:** Write voxel-fragment values into the leaf nodes. Mipmap values into interior nodes by aggregating child values [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialization
+max_depth = 10  # Example maximum depth
+octree_pool = allocate_buffer()
+fragment_list = allocate_buffer(size=estimated_fragments)
+atomic_counter = allocate_buffer(value=0)
+
+# Step 1: Voxelize at max resolution
+def voxelize_mesh(mesh, max_res):
+    for triangle in mesh:
+        # Rasterize triangle to voxels at max_res
+        for voxel in intersected_voxels:
+            # Encode coordinate: 10 bits per component
+            coord_word = (voxel.x << 20) | (voxel.y << 10) | voxel.z
+            # Append to fragment list atomically
+            index = atomic_add(atomic_counter, 1)
+            fragment_list[index].coord = coord_word
+            fragment_list[index].color = triangle.color_at(voxel)
+
+# Step 2-5: Build Octree
+def build_octree(fragment_list, max_depth):
+    root = allocate_node()
+    root.children = None
+    current_level_nodes = [root]
+    
+    for level in range(1, max_depth + 1):
+        next_level_nodes = []
+        for node in current_level_nodes:
+            # Check if node is non-empty using fragment_list
+            # This involves checking if any fragment in the list falls within the node's spatial bounds
+            if is_node_non_empty(node, fragment_list):
+                # Create tile of 8 children
+                tile_index = allocate_tile(octree_pool, 8)
+                node.children = tile_index
+                
+                for i in range(8):
+                    child = allocate_node()
+                    child.children = None
+                    octree_pool[tile_index + i] = child
+                    next_level_nodes.append(child)
+            else:
+                # Node is empty, no children allocated
+                pass
+        current_level_nodes = next_level_nodes
+
+    # Step 5: Write values (leaves and mipmapping)
+    write_values_to_leaves(fragment_list, current_level_nodes)
+    mipmap_interior_nodes(current_level_nodes)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The 10-bit coordinate encoding limits the maximum resolution to $1024^3$ voxels per axis. Higher resolutions require more bits or a different encoding [S1, unofficial].
+*   **Collisions:** Lower resolution voxelization during building can lead to increased collisions per voxel, potentially slowing down the process compared to higher resolutions [S1, unofficial].
+*   **Atomic Contention:** High fragment counts can cause contention on the atomic counter, impacting performance [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of triangles, plus overhead for octree construction proportional to the number of occupied nodes. Voxelization is done once at max resolution [S1, unofficial].
+*   **Memory Complexity:** Proportional to the number of occupied voxels and octree nodes. Significantly less than a full grid for sparse scenes [S1, unofficial].
+*   **Performance:** On the Stanford Dragon mesh, the algorithm's execution time varies with resolution. At 128 resolution, it takes 1.18 ms (without hardware atomicAdd) and 1.40 ms (with). At 512 resolution, it takes 1.47 ms (without) and 5.30 ms (with). Hardware atomicAdd can be slower due to contention [S1, unofficial].
+*   **Strengths:** Efficient storage for sparse scenes; supports mipmapped querying for global illumination [S1, unofficial].
+*   **Limitations:** Limited by 10-bit coordinate precision; atomic contention can degrade performance at high fragment counts [S1, unofficial].
+
+## Background
+The sparse-voxel octree structure is in the spirit of [Laine and Karras 10] and [Crassin et al. 09] [S1, unofficial]. It was implemented in OpenGL using compute-like kernels and atomic counters (OpenGL 4.2) for concurrent access [S1, unofficial]. The structure allows fast trilinear sampling of voxel values when combined with bricks [S1, unofficial].
+
+## Sources
+[S1] PDF K14190_text - Icare3D, https://icare3d.org/research/OpenGLInsights-SparseVoxelization.pdf, fetched 2026-10-29 (unofficial)

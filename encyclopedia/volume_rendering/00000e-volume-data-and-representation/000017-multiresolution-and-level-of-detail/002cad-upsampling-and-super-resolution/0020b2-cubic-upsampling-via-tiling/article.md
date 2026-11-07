@@ -1,0 +1,88 @@
+# Cubic Upsampling via Tiling
+
+
+## Overview
+Cubic Upsampling via Tiling is a method for increasing the spatial resolution of volumetric or image data by replicating existing voxel values into a finer grid without performing interpolation. It solves the problem of resizing low-resolution data to high-resolution targets where computational efficiency is prioritized over smoothness. It differs from interpolation-based siblings like [3D Image Resize and Crop](2703-3d-image-resize-and-crop.md) by avoiding weighted averaging, resulting in a blocky, nearest-neighbor-like appearance but with minimal computational overhead.
+
+## How it works
+**Inputs:**
+- A 1D array of values representing the low-resolution volume.
+- The previous resolution $N_{prev}$ (assumed cubic, i.e., $N_{prev} \times N_{prev} \times N_{prev}$).
+- The new resolution $N_{new}$.
+
+**Outputs:**
+- A 1D array of values representing the high-resolution volume of size $N_{new}^3$.
+
+**Data Structures:**
+- `input_values`: 1D array of length $N_{prev}^3$.
+- `temp_3d`: 3D array of shape $(N_{prev}, N_{prev}, N_{prev})$.
+- `tiled_3d`: 3D array of shape $(N_{new}, N_{new}, N_{new})$.
+
+**Steps:**
+1. Calculate the integer scale factor $s = N_{new} / N_{prev}$. Note: This method requires $N_{new}$ to be an integer multiple of $N_{prev}$ [S1, unofficial].
+2. Reshape `input_values` into a 3D cube `temp_3d` of shape $(N_{prev}, N_{prev}, N_{prev})$. The mapping from 1D index $i$ to 3D coordinates $(x, y, z)$ is typically row-major: $x = i \pmod{N_{prev}}$, $y = (i // N_{prev}) \pmod{N_{prev}}$, $z = i // (N_{prev}^2)$ [S1, unofficial].
+3. Tile `temp_3d` along the z-axis (dimension 2) by factor $s$. This creates an array of shape $(N_{prev}, N_{prev}, N_{prev} \times s)$.
+4. Tile the result along the y-axis (dimension 1) by factor $s$. This creates an array of shape $(N_{prev}, N_{prev} \times s, N_{prev} \times s)$.
+5. Tile the result along the x-axis (dimension 0) by factor $s$. This creates an array of shape $(N_{prev} \times s, N_{prev} \times s, N_{prev} \times s)$, which equals $(N_{new}, N_{new}, N_{new})$ [S1, unofficial].
+6. Reshape the final tiled 3D array back into a 1D array `output_values` of length $N_{new}^3$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cubic_upsample_via_tiling(input_values, N_prev, N_new):
+    # Step 1: Calculate scale factor
+    if N_new % N_prev != 0:
+        raise ValueError("N_new must be an integer multiple of N_prev")
+    s = N_new // N_prev
+    
+    # Step 2: Reshape to 3D
+    # Assuming input_values is flattened in row-major order (x, y, z)
+    # Dimensions: (N_prev, N_prev, N_prev)
+    temp_3d = reshape(input_values, (N_prev, N_prev, N_prev))
+    
+    # Step 3: Tile along Z (axis 2)
+    # np.tile repeats the array s times along the specified axis
+    tiled_z = tile(temp_3d, (1, 1, s))
+    
+    # Step 4: Tile along Y (axis 1)
+    tiled_y = tile(tiled_z, (1, s, 1))
+    
+    # Step 5: Tile along X (axis 0)
+    tiled_x = tile(tiled_y, (s, 1, 1))
+    
+    # Step 6: Reshape to 1D
+    output_values = flatten(tiled_x)
+    
+    return output_values
+```
+
+**Parameters:**
+- $N_{prev}$: Previous resolution. Typical values depend on the source data.
+- $N_{new}$: New resolution. Must satisfy $N_{new} = s \cdot N_{prev}$ for integer $s$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Non-integer scale factors are not supported by this specific tiling implementation [S1, unofficial].
+- The method preserves sharp discontinuities but introduces aliasing artifacts (blockiness) compared to interpolation.
+- Memory usage increases by a factor of $s^3$.
+
+## Subtopics
+
+### Ambient Occlusion UpSampler
+A specialized kernel for upsampling ambient occlusion (AO) data from a lower resolution ($AoResolution$) to a higher resolution ($Resolution$). It extracts BentNormal and SpecularOcclusion components. It calculates UV coordinates based on high resolution: $uv = \text{float2}((id.x + 0.5) / Resolution.x, (id.y + 0.5) / Resolution.y)$ and UV step size: $uvstep = \text{float2}(1.0 / AoResolution.x, 1.0 / AoResolution.y) \times direction$. It samples AO data using an `UpSampleAmbientOcclusion` function and writes BentNormal and SpecularOcclusion to the high-resolution target texture [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N_{new}^3)$ for the tiling and reshaping operations, but the constant factor is very small as it involves simple memory replication rather than arithmetic interpolation.
+- **Memory Complexity:** $O(N_{new}^3)$ to store the output volume.
+- **Performance:** Significantly faster than bicubic or bilinear interpolation methods.
+- **Strengths:** Extremely fast; preserves original data values exactly; suitable for real-time applications where interpolation cost is prohibitive.
+- **Limitations:** Produces blocky, low-quality results; not suitable for smooth surfaces or gradients; requires integer scale factors.
+- **When to use:** When speed is critical and visual quality (smoothness) is secondary, or for upsampling data that is inherently discrete/blocky.
+- **When not to use:** When smooth transitions are required, or when $N_{new}$ is not an integer multiple of $N_{prev}$.
+
+## Background
+This method is described in the context of the DIST-Renderer project, which utilizes this tiling approach for volume upsampling [S1, unofficial]. It is a simple, brute-force approach to resizing, contrasting with more sophisticated super-resolution techniques.
+
+## Sources
+[S1] B1ueber2y/DIST-Renderer, https://github.com/B1ueber2y/DIST-Renderer, fetched 2026-10-26 (unofficial)
+[S2] SphereTracing, https://github.com/nicoell/SphereTracing, fetched 2026-10-26 (unofficial)

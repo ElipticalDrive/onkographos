@@ -1,25 +1,25 @@
 # Woodcock Tracking with Variable Majorants
 
-Also called: Woodcock tracking
 
 ## Overview
-Woodcock tracking with variable majorants is a Monte Carlo method for simulating light transport in participating media that improves upon standard delta tracking by reducing the frequency of null collisions through spatially adaptive upper bounds on extinction [S1, S2, unofficial]. While standard delta tracking uses a single global majorant (an upper bound on the extinction coefficient) for the entire volume, this variant calculates tighter majorant extinctions for smaller regions of the volume, significantly accelerating rendering in sparse or heterogeneous media [S1, S2, unofficial]. It builds on [Delta tracking](985-delta-tracking.md) by optimizing the efficiency of the null-collision test.
+Woodcock tracking with variable majorants is a Monte Carlo method for simulating light transport in participating media that improves upon standard delta tracking by reducing the frequency of null collisions through spatially adaptive upper bounds on extinction [S1, S2, unofficial]. While standard delta tracking uses a single global majorant (an upper bound on the extinction coefficient) for the entire volume, this variant calculates tighter majorant extinctions for smaller regions of the volume, significantly accelerating rendering in sparse or heterogeneous media [S1, S2, unofficial]. It builds on [Delta tracking](985-delta-tracking.md) by using tighter local majorants to optimize the null-collision test [S1, S2, unofficial].
 
 ## How it works
 **Inputs:**
-- `volume`: A data structure supporting point sampling of scalar values (e.g., density) at arbitrary 3D positions.
-- `ray`: A ray defined by origin $\mathbf{o}$, direction $\mathbf{d}$, and current traversal distance $t$.
-- `majorant`: A spatially varying upper bound on the extinction coefficient $\sigma_t(\mathbf{x})$. In the base case, this is a scalar; with region subdivision, it is a function or grid lookup.
-- `transferFunction`: A function mapping sampled scalar values to color and density.
+- `volume`: A data structure supporting point sampling of scalar values (e.g., density) at arbitrary 3D positions [S1, unofficial].
+- `ray`: A ray defined by origin $\mathbf{o}$, direction $\mathbf{d}$, and current traversal distance $t$ [S1, unofficial].
+- `majorant`: A spatially varying upper bound on the extinction coefficient $\sigma_t(\mathbf{x})$. In the base case, this is a scalar; with region subdivision, it is a function or grid lookup [S1, S2, unofficial].
+- `transfer_function`: A function mapping sampled scalar values to color and density [S1, unofficial].
+- `background_color`: The color returned if the ray exits the volume without a real collision [S1, unofficial].
 
 **Outputs:**
-- A color sample (or `backgroundColor` if no interaction occurs within the volume bounds).
+- A color sample (or `background_color` if no interaction occurs within the volume bounds) [S1, unofficial].
 
 **Data Structures:**
-- **Region Grid (Optional):** A 3D grid (e.g., $32 \times 32 \times 32$) partitioning the volume bounding box. Each cell stores a precomputed local majorant extinction coefficient $\sigma_{t, \text{local}}$, derived from the maximum density value within that cell [S2, unofficial].
+- **Region Grid (Optional):** A 3D grid partitioning the volume bounding box. Each cell stores a precomputed local majorant extinction coefficient derived from the maximum density value within that cell [S2, unofficial].
 
 **Steps:**
-1. **Initialization:** Determine the initial majorant $\sigma_{t, \text{max}}$ based on the current region containing the ray origin. If using region subdivision, identify the grid cell containing $\mathbf{o}$ and retrieve its local majorant [S2, unofficial].
+1. **Initialization:** Determine the initial majorant based on the current region containing the ray origin. If using region subdivision, identify the grid cell containing $\mathbf{o}$ and retrieve its local majorant [S2, unofficial].
 2. **Loop:** While the ray position $\mathbf{p} = \mathbf{o} + t\mathbf{d}$ remains inside the volume bounds:
     a. **Sample Free Path:** Generate a random number $u \in [0, 1)$. Sample the distance to the next collision using the exponential distribution with the current majorant:
        $$ t_{\text{step}} = -\frac{\ln(1 - u)}{\sigma_{t, \text{max}}} $$
@@ -29,7 +29,7 @@ Woodcock tracking with variable majorants is a Monte Carlo method for simulating
        $$ s = \text{volume.sample}(\mathbf{p}) $$
        [S1, unofficial].
     d. **Map to Physical Properties:** Convert the scalar to physical density using the transfer function:
-       $$ \rho = \text{transferFunction.mapColor}(s).\text{density} $$
+       $$ \rho = \text{transfer_function.map_color}(s).\text{density} $$
        [S1, unofficial].
     e. **Null-Collision Test:** Generate a new random number $u' \in [0, 1)$. Compare the sampled density against the majorant:
        $$ \text{if } \rho \geq u' \times \sigma_{t, \text{max}} \text{ then} $$
@@ -37,7 +37,7 @@ Woodcock tracking with variable majorants is a Monte Carlo method for simulating
        $$ \text{else} $$
        $$ \quad \text{continue loop (null collision)} $$
        [S1, unofficial].
-3. **Termination:** If the loop exits without returning a sample (ray exits volume), return `backgroundColor` [S1, unofficial].
+3. **Termination:** If the loop exits without returning a sample (ray exits volume), return `background_color` [S1, unofficial].
 
 **Parameters:**
 - **Majorant ($\sigma_{t, \text{max}}$):** The upper bound on extinction. Using a single global majorant results in more null collisions; tighter local majorants reduce this [S1, unofficial].
@@ -52,44 +52,45 @@ Woodcock tracking with variable majorants is a Monte Carlo method for simulating
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def woodcock_tracking_variable_majorant(volume, ray, majorant_grid, transfer_function):
+import math
+import random
+
+def woodcock_tracking_variable_majorant(volume, ray, majorant, transfer_function, background_color):
     """
     Woodcock tracking with optional region subdivision for variable majorants.
     
     Args:
         volume: Object with method sample(point) returning scalar density.
         ray: Object with origin, direction, and t (current distance).
-        majorant_grid: 3D array or function returning local majorant for a point.
-                       If None, uses a single global majorant.
+        majorant: Function or grid lookup returning local majorant for a point.
+                  If None, uses a single global majorant passed as a scalar.
         transfer_function: Function mapping scalar to {density, color}.
+        background_color: Color to return if ray exits volume.
         
     Returns:
         Color sample or background color.
     """
     # Helper to get current majorant
     def get_majorant(point):
-        if majorant_grid is None:
-            return global_majorant # Assumed defined in context
+        if callable(majorant):
+            return majorant(point)
         else:
-            # Determine grid cell for point and return stored majorant
-            # Implementation depends on grid structure [S2, unofficial]
-            return majorant_grid.lookup(point)
-
+            return majorant
+            
     # Initial majorant
     sigma_max = get_majorant(ray.origin + ray.dir * ray.t)
     
     while volume.contains(ray.origin + ray.dir * ray.t):
         # Sample free path distance
-        u = random.uniform(0, 1)
-        t_step = -log(1 - u) / sigma_max
+        u = random.uniform(0.0, 1.0)
+        t_step = -math.log(1.0 - u) / sigma_max
         ray.t += t_step
         
         # Current position
         pos = ray.origin + ray.dir * ray.t
         
         # Update majorant if region changes (if using grid) [S2, unofficial]
-        if majorant_grid is not None:
-            sigma_max = get_majorant(pos)
+        sigma_max = get_majorant(pos)
             
         # Sample volume data
         scalar = volume.sample(pos)
@@ -98,10 +99,10 @@ def woodcock_tracking_variable_majorant(volume, ray, majorant_grid, transfer_fun
         density = transfer_function.map_color(scalar).density
         
         # Null-collision test
-        u2 = random.uniform(0, 1)
+        u2 = random.uniform(0.0, 1.0)
         if density >= u2 * sigma_max:
             # Real collision
-            return transfer_function.map_color(scalar).color
+            return transfer_function.map_color(scalar)
             
     # Ray exited volume
     return background_color
@@ -110,12 +111,12 @@ def woodcock_tracking_variable_majorant(volume, ray, majorant_grid, transfer_fun
 ## Subtopics
 
 ### Region Subdivision
-A technique to reduce null collisions in sparse volumes by subdividing the volume into smaller regions, each with its own majorant extinction coefficient [S2, unofficial]. It sets itself apart by dynamically adjusting the majorant as the ray traverses different density clusters, whereas siblings like [Delta Tracking (Uniform Majorant)](1539-delta-tracking-uniform-majorant.md) use a single bound for the entire volume. Choose this when the volume has large empty spaces or distinct density clusters, as it significantly reduces null collisions in empty regions while remaining unbiased [S2, unofficial]. The trade-off is additional VRAM for the grid structure [S2, unofficial].
+A technique to reduce null collisions in sparse volumes by subdividing the volume into smaller regions, each with its own majorant extinction coefficient [S2, unofficial]. It sets itself apart by dynamically adjusting the majorant as the ray traverses different density clusters, whereas siblings like [Delta Tracking (Uniform Majorant)](1539-delta-tracking-uniform-majorant.md) use a single bound for the entire volume [S2, unofficial]. Choose this when the volume has large empty spaces or distinct density clusters, as it significantly reduces null collisions in empty regions while remaining unbiased [S2, unofficial]. The trade-off is additional VRAM for the grid structure [S2, unofficial].
 
 ## Operating characteristics
 **Time and Memory Complexity:**
 - **Time:** The number of null collisions is proportional to the ratio of the majorant to the actual extinction. Variable majorants reduce this ratio locally, decreasing the average number of steps per ray [S1, S2, unofficial].
-- **Memory:** Region subdivision requires storing a grid of majorants. For a $32 \times 32 \times 32$ grid, this is $32,768$ floats, which is negligible compared to the volume data itself [S2, unofficial].
+- **Memory:** Region subdivision requires storing a grid of majorants. For a $32 \times 32 \times 32$ grid, this requires additional VRAM for the grid structure [S2, unofficial].
 
 **Measured Performance:**
 - On a "Bunny" volume, region subdivision reduced render time from 216s to 33s [S2, unofficial].
@@ -130,7 +131,7 @@ A technique to reduce null collisions in sparse volumes by subdividing the volum
 - Do not use if the volume is uniformly dense and small, as the overhead of region management may not be justified [S2, unofficial].
 
 ## Background
-Woodcock tracking, also known as the "collision counting" or "null-collision" method, was introduced by Woodcock et al. in 1965 for neutron transport [S1, unofficial]. It allows for the simulation of heterogeneous media by using a fictitious majorant extinction coefficient. The variant with variable majorants using coarse structured grid macrocells has been adopted in recent direct volume rendering research to handle adaptive mesh refinement and sparse volumes efficiently [S1, unofficial]. Region subdivision as a specific optimization for delta tracking has been demonstrated in practical path tracing implementations for clouds and other sparse media [S2, unofficial].
+Woodcock tracking is a Monte Carlo method for simulating light transport in participating media [S1, S2, unofficial]. The variant with variable majorants using coarse structured grid macrocells has been adopted in recent direct volume rendering research to handle heterogeneous volumes efficiently [S1, unofficial]. Region subdivision as a specific optimization for delta tracking has been demonstrated in practical path tracing implementations for clouds and other sparse media [S2, unofficial].
 
 ## Sources
 [S1] Direct volume rendering of tree-based tetrahedral adaptive mesh refinement data, https://repository.bilkent.edu.tr/items/fcbc592a-2646-49af-8b84-67308b6fd3e9, fetched 2026-10-27 (unofficial)

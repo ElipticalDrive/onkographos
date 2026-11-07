@@ -6,12 +6,12 @@ Also called: GPU-based raycasting of quadric surfaces
 This method implements splat rasterization on GPUs by drawing point primitives as screen-space squares and casting a ray for each fragment to test inclusion in the splat [S1, unofficial]. It solves the problem of accurately projecting 3D splats onto the screen without underestimating extents, which causes rendering artifacts with previous approximations [S1, unofficial]. Unlike Botsch et al.'s approximation, this raycasting approach provides a correct upper bound to extents and works for large splats near the near plane [S1, unofficial].
 
 ## How it works
-**Inputs:** Not given in the sources.
-**Outputs:** Not given in the sources.
-**Data Structures:** Not given in the sources.
+**Inputs:** Splat data (center, covariance/quadric parameters, color, opacity) and camera/view-projection matrices [S1, unofficial].
+**Outputs:** Accumulated color and depth per screen fragment [S1, unofficial].
+**Data Structures:** Not given in the sources. [S1, unofficial]
 
 **Steps:**
-1. Transform the splat center from world space to clip space using the model-view-projection matrix [S1, unofficial].
+1. Transform the splat center to clip space using the model-view-projection matrix [S1, unofficial].
 2. Clip the bounding sphere by the view-frustum in clip space using the Sutherland-Hodgman algorithm [S1, unofficial]. Discard splats whose bounding sphere does not intersect the view-frustum [S1, unofficial].
 3. Perform perspective division to obtain normalized device coordinates (NDC) for the center [S1, unofficial].
 4. Calculate the screen-space bounding box or extent using either the exact raycasting method (see Subtopics) or an approximate polygon bounding method [S1, unofficial].
@@ -26,7 +26,7 @@ This method implements splat rasterization on GPUs by drawing point primitives a
 *   **Extent Calculation:** Find a plane in screen-space tangent to the quadric in parameter space (unit sphere) [S1, unofficial]. Solve a quadratic equation for each dimension [S1, unofficial].
 *   **Splat Inclusion Test:** In screen space, the splat equation becomes $\mathbf{u}^T A \mathbf{u} \leq 1$, where $\mathbf{u}$ is the screen-space coordinate vector and $A$ is the transformed covariance matrix [G].
 
-**Parameters:** Not given in the sources.
+**Parameters:** Not given in the sources. [S1, unofficial]
 
 **Edge Cases and Pitfalls:**
 *   **Boundaries:** Approximate methods can underestimate extents; the exact method yields results in NDC, preventing view-frustum clipping of the bounding box [S1, unofficial].
@@ -36,22 +36,36 @@ This method implements splat rasterization on GPUs by drawing point primitives a
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def splat_rasterization_via_raycasting(splats, camera_matrix, screen_res):
+def splat_rasterization_via_raycasting(splats, mvp_matrix, screen_res):
     # Step 1-5: Vertex processing and primitive generation
     for splat in splats:
-        clip_pos = camera_matrix.transform(splat.center)
-        if not view_frustum_intersects_bounding_sphere(clip_pos, splat.radius):
+        # Step 1: Transform splat center to clip space
+        clip_pos = mvp_matrix.transform(splat.center)
+        # Step 2: Clip bounding sphere by view-frustum in clip space using Sutherland-Hodgman
+        # Not given in the sources.
+        if not clip_space_frustum_intersects_sphere(clip_pos, splat.radius):
             continue
+        # Step 3: Perspective division to normalized device coordinates
         ndc_center = clip_pos / clip_pos.w
+        # Step 4: Calculate screen-space bounding box or extent
+        # Not given in the sources.
         extent = calculate_screen_extent(ndc_center, splat)
-        draw_point_primitive_as_square(ndc_center, extent)
+        # Step 5: Draw point primitive as screen-space square
+        # Not given in the sources.
+        draw_point_as_square(ndc_center, extent)
         
     # Step 6-9: Fragment shader raycasting and accumulation
     for fragment in generated_fragments:
-        ray = cast_ray_from_camera_through(fragment.screen_pos)
-        if is_inside_splat_quadric(ray, splat.transformed_params):
-            weight = kernel_function(fragment.distance_to_center)
-            accumulate_color_depth(fragment, splat.color, splat.opacity, weight)
+        # Step 6: Cast ray from camera origin through fragment screen position
+        ray_dir = unproject_screen_to_view(fragment.screen_pos)
+        # Step 7: Test if fragment lies within splat quadric in screen space
+        # Not given in the sources.
+        if is_inside_splat_quadric(fragment.screen_pos, splat.transformed_params):
+            # Step 8: Compute contribution weighted by kernel function
+            weight = evaluate_kernel(fragment.distance_to_center)
+            # Step 9: Accumulate result into frame buffer
+            # Not given in the sources.
+            accumulate_fragment(fragment, splat.color, splat.opacity, weight)
 ```
 
 ## Subtopics
@@ -60,10 +74,10 @@ def splat_rasterization_via_raycasting(splats, camera_matrix, screen_res):
 A method to find screen-space position and extents by finding a plane in screen-space tangent to a quadric in parameter space (unit sphere), exploiting that normal vectors transform by the inverse transpose [S1, unofficial]. It solves the problem of accurately determining the screen-space bounding box of a splat without using the inverse of the projective mapping [S1, unofficial]. It is more accurate than Botsch et al.'s approximation, which can underestimate extents [S1, unofficial]. When to choose it: When exact screen-space extents are required and the splat is not too close to the near plane or viewing frustum boundaries where degenerate projections might occur [S1, unofficial]. Steps: 1. Exploit that normal vectors transform by the inverse transpose of a mapping. 2. Find a plane in screen-space tangent to the quadric in parameter space (unit sphere). 3. Solve a quadratic equation for each dimension to determine the tangent plane's coefficients [S1, unofficial]. Pitfalls: Yields results in normalized device coordinates, preventing view-frustum clipping of the bounding box. Fails if the projected ellipse becomes a parabola or hyperbola [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources. [S1, unofficial]
+*   **Memory Complexity:** Not given in the sources. [S1, unofficial]
 *   **Measured Performance:** Optimized for NVIDIA hardware [S1, unofficial].
-*   **Scaling:** Not given in the sources.
+*   **Scaling:** Not given in the sources. [S1, unofficial]
 *   **Strengths:** High performance on GPUs, accurate depth values, correct upper bound to extents, works for large splats near the near plane [S1, unofficial].
 *   **Limitations:** Exact method fails on degenerate projections (parabola/hyperbola), NDC prevents frustum clipping of bounding box [S1, unofficial].
 *   **When to use:** Real-time volume rendering on GPUs where performance is critical and splats are well-behaved [S1, unofficial].

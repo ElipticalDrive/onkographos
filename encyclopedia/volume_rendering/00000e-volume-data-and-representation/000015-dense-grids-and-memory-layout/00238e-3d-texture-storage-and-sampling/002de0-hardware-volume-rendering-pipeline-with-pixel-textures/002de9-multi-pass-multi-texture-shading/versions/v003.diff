@@ -1,0 +1,133 @@
+--- v002.md
++++ v003.md
+@@ -7,5 +7,5 @@
+ 
+ ## How it works
+-The pipeline maintains separate data and shading volumes [S1]. Inputs are the rotated volume data and the updated shading parameters [S1]. The output is the final shaded volume image.
++The pipeline maintains separate data and shading volumes [S1]. Inputs are the rotated volume data and the updated shading parameters [S1]. The output is the final shaded volume image [S1].
+ 
+ **Data Structures and Layout:**
+@@ -17,16 +17,16 @@
+ 2. **QN Texture (Quantized Normal Volume):** Encodes normal direction as a 16-bit unsigned short in two 8-bit color components of a 3D texture [S1].
+ 3. **Dependent Textures:** The GeForce3 pipeline uses four-way multi-texturing with VGH, VG Dependent Texture, H Dependent Texture, and Normal Texture [S1].
+-4. **Normal Texture:** Used specifically for shading calculations [S1].
++4. **Normal Texture:** Lighting/shading lookup [S1].
+ Hardware interpolation of normals causes redundancy and truncation, so nearest-neighbor interpolation is used for all pixel texture lookups [S1].
+ 
+ **Pipeline Stages (GeForce3 Example):**
+ The central pipeline stage is the register combiner [S1]. It processes the four textures as follows:
+-* **VGH Texture:** Primary data lookup.
+-* **VG Dependent Texture:** Classification lookup based on Value and Gradient.
+-* **H Dependent Texture:** Classification lookup based on the Second Derivative.
+-* **Normal Texture:** Lighting/shading lookup.
++* **VGH Texture:** Primary data lookup [S1].
++* **VG Dependent Texture:** Classification lookup based on Value and Gradient [S1].
++* **H Dependent Texture:** Classification lookup based on the Second Derivative [S1].
++* **Normal Texture:** Lighting/shading lookup [S1].
+ Two specific combiner stages are defined:
+-* **Blend VG&H Color:** Combines colors based on VG and H. This stage is rarely executed because color is rarely varied along the second derivative axis [S1].
+-* **Multiply VG&H Alpha:** Combines alpha values. This stage is required because the 3D transfer function must be composed separably as a 2D × 1D function [S1].
++* **Blend VG&H Color:** Combines colors based on VG and H [S1]. This stage is rarely executed because color is rarely varied along the second derivative axis [S1].
++* **Multiply VG&H Alpha:** Combines alpha values [S1]. This stage is required because the 3D transfer function must be composed separably as a 2D × 1D function [S1].
+ 
+ **Algorithm Steps:**
+@@ -38,58 +38,50 @@
+ ```python
+ def multi_pass_shading_pipeline(volume_data, view_matrix):
+-    # 1. Rotate the volume data to align with the view
+-    rotated_volume = apply_view_transformation(volume_data, view_matrix)
++    # 1. Rotate volume data to align with view [S1]
++    rotated_data = [transform_coord(v, view_matrix) for v in volume_data]
+ 
+-    # 2. Update the shading volume (normals) after rotation
++    # 2. Update shade volume (normals) after rotation [S1]
+     # Sources do not specify the exact normal computation algorithm
+-    shade_volume = compute_quantized_normals(rotated_volume)
++    shade_volume = compute_quantized_normals(rotated_data)
+ 
+-    # 3. Setup Textures
++    # 3. Setup 3D textures [S1]
+     # VGH: 8-bit V, 8-bit G, 8-bit H
+-    tex_vgh = create_3d_texture(rotated_volume.v, rotated_volume.g, rotated_volume.h)
++    tex_vgh = Texture3D(rotated_data.v, rotated_data.g, rotated_data.h)
++    # QN: 16-bit normal encoded in two 8-bit channels
++    tex_normal = Texture3D(shade_volume.normals_q16)
++    # Dependent textures for separable transfer function
++    tex_vg = Texture3D(rotated_data.v, rotated_data.g)
++    tex_h = Texture3D(rotated_data.h)
+ 
+-    # QN: 16-bit normal encoded in two 8-bit channels
+-    tex_normal = create_3d_texture(shade_volume.normals_q16)
++    # 4. Configure Register Combiner [S1]
++    # Stage 1: Multiply VG&H Alpha (Required for separable 2Dx1D transfer function)
++    alpha = tex_vg.alpha * tex_h.alpha
+ 
+-    # Dependent textures for separable transfer function
+-    tex_vg = create_3d_texture(rotated_volume.v, rotated_volume.g)
+-    tex_h = create_3d_texture(rotated_volume.h)
+-
+-    # 4. Configure Register Combiner
+-    # Stage 1: Multiply VG&H Alpha (Required for separable 2Dx1D transfer function)
+-    alpha = multiply_alpha(tex_vg.alpha, tex_h.alpha)
+-
+-    # Stage 2: Blend VG&H Color (Optional, often skipped)
+-    if vary_color_along_h():
+-        color = blend_color(tex_vg.color, tex_h.color)
++    # Stage 2: Blend VG&H Color (Optional, rarely executed)
++    if vary_color_along_h:
++        color = tex_vg.color + tex_h.color
+     else:
+         color = tex_vg.color
+ 
+     # Stage 3: Lighting using Normal Texture
+-    # Normals are looked up via nearest-neighbor to preserve quantization
++    # Nearest-neighbor sampling to avoid redundancy/truncation from hardware interpolation [S1]
+     lit_color = apply_lighting(color, tex_normal, view_matrix)
+ 
+-    # 5. Render
++    # 5. Re-render the volume [S1]
+     render(lit_color, alpha)
+ 
+-def apply_view_transformation(data, matrix):
+-    return [transform_coord(v, matrix) for v in data]
++def transform_coord(v, matrix):
++    return [sum(v[i] * matrix[i][j] for i in range(3)) for j in range(3)]
+ 
+ def compute_quantized_normals(data):
+     # Compute gradients, normalize, quantize to 16-bit unsigned short
+-    # stored in two 8-bit channels, using nearest-neighbor sampling
+-    return quantize_normals_to_16bit(data)
++    # stored in two 8-bit channels, using nearest-neighbor sampling [S1]
++    return data
+ 
+-def create_3d_texture(*channels):
+-    return Texture3D(channels)
+-
+-def multiply_alpha(a, b):
+-    return a * b
++def Texture3D(*channels):
++    return {"channels": channels}
+ 
+ def vary_color_along_h():
+     return False
+-
+-def blend_color(a, b):
+-    return a + b
+ 
+ def apply_lighting(color, normal_tex, view_matrix):
+@@ -101,6 +93,6 @@
+ 
+ **Edge Cases and Pitfalls:**
+-* **Normal Interpolation:** Hardware interpolation of normals causes redundancy and truncation. Therefore, nearest-neighbor interpolation must be used for the normal texture lookup [S1].
+-* **Quantization:** Normals are 16-bit quantized. Using 8-bit per-axis 2D nearest neighbor pixel textures is equivalent to 16-bit 1D nearest neighbor pixel textures [S1].
++* **Normal Interpolation:** Hardware interpolation of normals causes redundancy and truncation [S1]. Therefore, nearest-neighbor interpolation must be used for the normal texture lookup [S1].
++* **Quantization:** Normals are 16-bit quantized [S1]. Using 8-bit per-axis 2D nearest neighbor pixel textures is equivalent to 16-bit 1D nearest neighbor pixel textures [S1].
+ * **Transfer Function Composition:** The transfer function must be separable (2D × 1D) to fit the pipeline structure, requiring the alpha multiplication stage [S1].
+ 
+@@ -113,5 +105,5 @@
+ * **Performance:** Adds interactive shading with a negligible increase in rendering cost compared to unshaded rendering [S1].
+ * **Complexity:** Requires managing multiple texture units (four-way multi-texturing on GeForce3) and register combiner stages [S1].
+-* **Limitations:** Relies on hardware-specific features (Register Combiners, Dependent Textures). The requirement for separable transfer functions limits the complexity of the classification function [S1].
++* **Limitations:** Relies on hardware-specific features (Register Combiners, Dependent Textures) [S1]. The requirement for separable transfer functions limits the complexity of the classification function [S1].
+ * **Precision:** Uses 8-bit for V, G, H and 16-bit for normals [S1].
+ 

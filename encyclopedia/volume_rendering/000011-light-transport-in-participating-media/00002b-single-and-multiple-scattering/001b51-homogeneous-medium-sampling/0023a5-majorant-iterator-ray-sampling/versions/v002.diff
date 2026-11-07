@@ -1,0 +1,148 @@
+--- v001.md
++++ v002.md
+@@ -4,25 +4,22 @@
+ 
+ ## Overview
+-Majorant Iterator Ray Sampling is a concrete implementation of ray sampling in participating media that handles variable density and null scattering by using stack-allocated iterators. It avoids dynamic allocation and dynamic dispatch overhead by directly calling the medium's `SampleRay` method and iterating through `RayMajorantSegment` objects [S1]. It differs from generic free-path sampling by explicitly managing segment boundaries and transmittance accumulation across heterogeneous regions defined by the medium's majorant iterator [S1].
++Majorant Iterator Ray Sampling is a concrete implementation of ray sampling in participating media that handles variable density and null scattering by using stack-allocated iterators [S1]. It avoids dynamic allocation and dynamic dispatch overhead by directly calling the medium's `SampleRay` method and iterating through `RayMajorantSegment` objects [S1]. It differs from generic free-path sampling by explicitly managing segment boundaries and transmittance accumulation across heterogeneous regions defined by the medium's majorant iterator [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Inputs:** A `Ray` (with origin, direction, medium, and `tMax`), a random number generator `rng`, a wavelength index `lambda`, and a callback function `callback(ray, mp, sigma_maj, T_maj)` that returns `true` to continue sampling or `false` to terminate.
+-- **Outputs:** The accumulated majorant transmittance `T_maj` at the end of the ray (if sampling completes without termination) or the result of the callback chain.
++- **Inputs:** A `Ray` (with origin, direction, medium, and `tMax`), a random number generator `rng`, a wavelength index `lambda`, and a callback function `callback(ray, mp, sigma_maj, T_maj)` that returns `true` to continue sampling or `false` to terminate [S1].
++- **Outputs:** The accumulated majorant transmittance `T_maj` at the end of the ray (if sampling completes without termination) [S1].
+ 
+ **Data Structures:**
+-- `ConcreteMedium`: The specific medium type implementing the iterator.
+-- `MajorantIterator`: Stack-allocated iterator returned by `medium->SampleRay()`.
+-- `RayMajorantSegment`: Struct containing:
+-  - `tMin`: Start distance of the segment.
+-  - `tMax`: End distance of the segment.
+-  - `sigma_maj`: Spectrum of the majorant extinction coefficient.
++- `ConcreteMedium`: The specific medium type implementing the iterator [S1].
++- `MajorantIterator`: Stack-allocated iterator returned by `medium->SampleRay()` [S1].
++- `RayMajorantSegment`: Struct containing `tMin` (start distance), `tMax` (end distance), and `sigma_maj` (spectrum of the majorant extinction coefficient) [S1].
+ 
+ **Steps:**
+-1. **Cast and Initialize:** Cast the ray's medium to `ConcreteMedium`. Call `medium->SampleRay(ray, tMax, lambda)` to obtain a stack-allocated `MajorantIterator` [S1].
+-2. **Initialize State:** Set `T_maj = SampledSpectrum(1.f)` and `done = false` [S1].
+-3. **Iterate Segments:** Enter a loop to fetch segments via `iter.Next()`. If `iter.Next()` returns `null` (no more segments), return `T_maj` [S1].
++1. **Cast and Initialize:** Cast the ray's medium to `ConcreteMedium` and call `medium->SampleRay(ray, tMax, lambda)` to obtain a stack-allocated `MajorantIterator` [S1].
++2. **Initialize State:** Set `T_maj` to a spectrum of ones and `done` to `false` [S1].
++3. **Iterate Segments:** Enter a loop to fetch segments via `iter.Next()` [S1]. If `iter.Next()` returns `null` (no more segments), return `T_maj` [S1].
+ 4. **Handle Zero Majorant:** If `seg->sigma_maj[0] == 0`:
+-   - Calculate `dt = seg->tMax - seg->tMin`.
++   - Calculate `dt = seg->tMax - seg->tMin` [S1].
+    - If `dt` is infinite, clamp `dt` to `std::numeric_limits<Float>::max()` to prevent NaN in `FastExp` [S1].
+    - Update `T_maj *= FastExp(-dt * seg->sigma_maj)` [S1].
+@@ -45,58 +42,89 @@
+ **Pseudocode:**
+ ```python
++import math
++import sys
++
++# ConcreteMedium: specific medium type implementing the iterator [S1]
++class ConcreteMedium:
++    def cast(self): return self
++    def sample_ray(self, ray, t_max, lambda_idx): return MajorantIterator()
++    @property
++    def sigma_maj(self): return [1.0] # Placeholder spectrum
++
++class MajorantIterator:
++    def next(self): return None # Placeholder for segment iteration
++
++def sample_exponential(u, sigma_maj_0):
++    """Sample distance from exponential distribution with rate sigma_maj[0]."""
++    return -math.log(u) / sigma_maj_0
++
++def fast_exp(x_spectrum):
++    """Element-wise exponential of a spectrum (list of floats)."""
++    return [math.exp(v) for v in x_spectrum]
++
++def is_inf(x):
++    """Check if a scalar is infinite."""
++    return math.isinf(x)
++
++def float_max():
++    """Return the largest finite float."""
++    return sys.float_info.max
++
+ def majorant_iterator_ray_sampling(ray, rng, lambda_idx, callback):
+     # Cast medium and initialize iterator
+     medium = ray.medium.cast(ConcreteMedium)
+     iter = medium.sample_ray(ray, ray.t_max, lambda_idx)
+-    
+-    T_maj = SampledSpectrum(1.0)
++
++    # T_maj is a spectrum (list of floats), initialized to 1.0
++    T_maj = [1.0] * len(ray.medium.sigma_maj)
+     done = False
+-    
++    u = rng.uniform()  # Initialize u before first sample [G]
++
+     while not done:
+         seg = iter.next()
+         if seg is None:
+             return T_maj
+-            
+-        # Handle zero-valued majorant
++
++        # Handle zero-valued majorant for the first wavelength
+         if seg.sigma_maj[0] == 0:
+             dt = seg.t_max - seg.t_min
+             if is_inf(dt):
+                 dt = float_max()
+-            T_maj *= fast_exp(-dt * seg.sigma_maj)
++            T_maj = [t * math.exp(-dt * s) for t, s in zip(T_maj, seg.sigma_maj)]
+             continue
+-            
++
+         t_min = seg.t_min
+         while True:
+-            # Sample distance from t_min
+-            t = t_min + sample_exponential(rng.uniform(), seg.sigma_maj[0])
+-            # Refresh random number for next iteration
++            # Sample distance using the first wavelength's majorant
++            t = t_min + sample_exponential(u, seg.sigma_maj[0])
++            # Refresh random number to maintain independence [G]
+             u = rng.uniform()
+-            
++
+             if t < seg.t_max:
+                 # Sample is within segment
+-                T_maj *= fast_exp(-(t - t_min) * seg.sigma_maj)
++                T_maj = [t_val * math.exp(-(t - t_min) * s) for t_val, s in zip(T_maj, seg.sigma_maj)]
+                 mp = medium.sample_point(ray.at(t), lambda_idx)
+                 if not callback(ray.at(t), mp, seg.sigma_maj, T_maj):
+                     done = True
+                     break
+-                # Reset for next sample in same segment
+-                T_maj = SampledSpectrum(1.0)
++                # Reset transmittance and tMin for next sample
++                T_maj = [1.0] * len(T_maj)
+                 t_min = t
+             else:
+                 # Sample is past segment end
+                 dt = seg.t_max - t_min
+-                T_maj *= fast_exp(-dt * seg.sigma_maj)
++                T_maj = [t_val * math.exp(-dt * s) for t_val, s in zip(T_maj, seg.sigma_maj)]
+                 break
+-                
++
+     return T_maj
+ ```
+ 
+ **Parameters:**
+-- `lambda`: Wavelength index. Typical values depend on the spectral resolution of the renderer.
+-- `tMax`: Maximum ray length.
++- `lambda`: Wavelength index. Typical values: Not given in the sources.
++- `tMax`: Maximum ray length. Typical values: Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-- **Zero Majorant:** If `sigma_maj[0]` is zero, `SampleExponential` would return infinity. The code checks for this and skips exponential sampling, updating transmittance directly [S1].
+-- **Infinite `tMax`:** If `seg->tMax` is infinite, `dt` becomes infinite. Multiplying zero (from zero `sigma_maj`) by infinity yields NaN. The code clamps infinite `dt` to `std::numeric_limits<Float>::max()` to prevent NaN in `FastExp` [S1].
++- **Zero Majorant:** If `sigma_maj[0]` is zero, `SampleExponential` would return infinity [S1]. The code checks for this and skips exponential sampling, updating transmittance directly [S1].
++- **Infinite `tMax`:** If `seg->tMax` is infinite, `dt` becomes infinite [S1]. Multiplying zero (from zero `sigma_maj`) by infinity yields NaN [S1]. The code clamps infinite `dt` to `std::numeric_limits<Float>::max()` to prevent NaN in `FastExp` [S1].
+ 
+ ## Operating characteristics

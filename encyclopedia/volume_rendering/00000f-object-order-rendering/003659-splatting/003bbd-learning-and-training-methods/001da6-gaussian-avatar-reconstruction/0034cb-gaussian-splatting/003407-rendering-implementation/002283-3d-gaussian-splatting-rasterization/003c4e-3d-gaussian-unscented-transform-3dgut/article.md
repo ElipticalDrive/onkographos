@@ -1,0 +1,269 @@
+# 3D Gaussian Unscented Transform (3DGUT)
+Also called: Sigma point projection, UT-based Gaussian Projection, UT-based projection, Unscented Transform for Gaussian Projection, Unscented Transform projection
+
+## Overview
+3D Gaussian Unscented Transform (3DGUT) is a rasterization-based rendering technique for 3D Gaussian particles that replaces the standard Elliptical Weighted Average (EWA) splatting formulation with the Unscented Transform (UT) [S1]. It solves the problem of approximation errors and Jacobian derivation complexity inherent in linearizing non-linear camera projections (e.g., distorted cameras, rolling shutter) by approximating the 3D Gaussian particle itself using sigma points [S1]. Unlike its sibling [3D Gaussian Splatting Differentiable Rasterizer](2813-3d-gaussian-splatting-differentiable-rasterizer.md) which relies on first-order Jacobian approximations, 3DGUT enables exact projection under arbitrary non-linear camera models while retaining rasterization efficiency and aligning the rendering formulation with ray-tracing methods to support secondary rays [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of $N$ 3D Gaussian particles. Each particle $i$ is defined by position $\boldsymbol{\mu}_i \in \mathbb{R}^3$, rotation quaternion $\boldsymbol{q}_i \in \mathbb{R}^4$, scaling vector $\boldsymbol{s}_i \in \mathbb{R}^3$, opacity $\sigma_i \in \mathbb{R}$, and spherical harmonic coefficients for view-dependent radiance [S1]. Camera parameters include extrinsic matrix $\mathbf{W} \in SE(3)$ and intrinsic matrix $\mathbf{D}$ [S1]. UT hyperparameters $\alpha, \beta, \kappa$ [S1].
+*   **Output:** For each particle, the 2D mean $\mathbf{v}\boldsymbol{\mu}_i$, 2D covariance $\boldsymbol{\Sigma}'_i$, and the 2D axis-aligned bounding box (rectangle) $\mathbf{r}_i$ used for tile-based rasterization culling [S1].
+
+**Data Structures:**
+*   **3D Gaussian Particle:** Defined by $\boldsymbol{\mu}_i, \boldsymbol{q}_i, \boldsymbol{s}_i, \sigma_i$. The covariance matrix $\boldsymbol{\Sigma}_i$ is derived from $\boldsymbol{q}_i$ and $\boldsymbol{s}_i$ [S1].
+*   **Sigma Points:** A set of $2N_{dim} + 1 = 7$ points $\mathbf{X} = \{\mathbf{x}_i\}_{i=0}^6$ for a 3D Gaussian [S1].
+*   **Weights:** Two sets of weights, $\mathbf{w}^\mu$ for the mean and $\mathbf{w}^\Sigma$ for the covariance, each of size 7 [S1].
+
+**Method Steps:**
+
+1.  **Covariance Decomposition:**
+    Compute the 3D covariance matrix $\boldsymbol{\Sigma}$ from the rotation $\mathbf{R}$ (derived from quaternion $\boldsymbol{q}$) and scaling $\mathbf{S}$ (derived from vector $\boldsymbol{s}$) using:
+    $$ \boldsymbol{\Sigma} = \mathbf{R} \mathbf{S} \mathbf{S}^T \mathbf{R}^T $$
+    where $\mathbf{R} \in SO(3)$ and $\mathbf{S} \in \mathbb{R}^{3 \times 3}$ is a diagonal scaling matrix [S1].
+
+2.  **Compute Lambda ($\lambda$):**
+    Calculate the spread parameter $\lambda$ using UT hyperparameters $\alpha, \kappa$:
+    $$ \lambda = \alpha^2 (3 + \kappa) - 3 $$
+    Typical default values are $\alpha = 1.0, \beta = 2.0, \kappa = 0.0$ [S1].
+
+3.  **Generate Sigma Points:**
+    Generate 7 sigma points $\mathbf{x}_i$ for $i=0 \dots 6$ from the 3D mean $\boldsymbol{\mu}$ and covariance $\boldsymbol{\Sigma}$:
+    $$ \mathbf{x}_i = \begin{cases} \boldsymbol{\mu} & \text{for } i = 0 \\ \boldsymbol{\mu} + \sqrt{(3 + \lambda) \boldsymbol{\Sigma}_{[i]}} & \text{for } i = 1, 2, 3 \\ \boldsymbol{\mu} - \sqrt{(3 + \lambda) \boldsymbol{\Sigma}_{[i-3]}} & \text{for } i = 4, 5, 6 \end{cases} $$
+    Here, $\boldsymbol{\Sigma}_{[i]}$ denotes the $i$-th diagonal element of $\boldsymbol{\Sigma}$, obtained via the matrix square root factorization [S1].
+
+4.  **Compute Weights:**
+    Calculate weights for the mean $\mathbf{w}^\mu$ and covariance $\mathbf{w}^\Sigma$:
+    $$ w_i^\mu = \begin{cases} \frac{\lambda}{3+\lambda} & \text{for } i = 0 \\ \frac{1}{2(3+\lambda)} & \text{for } i = 1, \dots, 6 \end{cases} $$
+    $$ w_i^\Sigma = \begin{cases} \frac{\lambda}{3+\lambda} + (1 - \alpha^2 + \beta) & \text{for } i = 0 \\ \frac{1}{2(3+\lambda)} & \text{for } i = 1, \dots, 6 \end{cases} $$
+    where $\beta$ incorporates prior knowledge about the distribution [S1].
+
+5.  **Project Sigma Points:**
+    Project each sigma point $\mathbf{x}_i$ exactly onto the camera image plane using the non-linear projection function $\mathbf{g}(\cdot)$ (which may include distortion and time-dependent effects like rolling shutter):
+    $$ \mathbf{v}\mathbf{x}_i = \mathbf{g}(\mathbf{x}_i) $$
+    This involves transforming $\mathbf{x}_i$ by the camera extrinsic $\mathbf{W}$ and applying intrinsic $\mathbf{D}$ and any non-linear distortion [S1].
+
+6.  **Estimate 2D Mean:**
+    Compute the projected 2D mean $\mathbf{v}\boldsymbol{\mu}$ as the weighted posterior sample mean:
+    $$ \mathbf{v}\boldsymbol{\mu} = \sum_{i=0}^6 w_i^\mu \mathbf{v}\mathbf{x}_i $$
+
+7.  **Estimate 2D Covariance:**
+    Compute the projected 2D covariance $\boldsymbol{\Sigma}'$ as the weighted posterior sample covariance:
+    $$ \boldsymbol{\Sigma}' = \sum_{i=0}^6 w_i^\Sigma (\mathbf{v}\mathbf{x}_i - \mathbf{v}\boldsymbol{\mu})(\mathbf{v}\mathbf{x}_i - \mathbf{v}\boldsymbol{\mu})^T $$
+
+8.  **Compute Extent and Rectangle:**
+    Calculate the 2D extent $\mathbf{h}_i$ using the estimated covariance $\boldsymbol{\Sigma}'_i$ and opacity $\sigma_i$ for a tighter bound:
+    $$ \mathbf{h}_i = \text{Extent}(\boldsymbol{\Sigma}'_i, \sigma_i) $$
+    Compute the 2D rectangle $\mathbf{r}_i$ for tile-based rasterization:
+    $$ \mathbf{r}_i = \text{ComputeRectangle}(\mathbf{h}_i, \mathbf{v}\boldsymbol{\mu}_i) $$
+    This rectangle is used to determine which pixels are influenced by the particle, serving as an acceleration structure [S1].
+
+9.  **Particle Response Evaluation:**
+    For pixels within the rectangle $\mathbf{r}_i$, evaluate the Gaussian particle response in 3D space. The response function is:
+    $$ \rho(\mathbf{x}) = \exp\left(-\frac{1}{2}(\mathbf{x} - \boldsymbol{\mu})^T \boldsymbol{\Sigma}^{-1}(\mathbf{x} - \boldsymbol{\mu})\right) $$
+    Particles are sorted in order similar to Radl et al. to align with ray-tracing formulations, enabling secondary ray tracing for reflections and refractions [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def estimate_2d_gaussian(mu, R, S, W, D, alpha=1.0, beta=2.0, kappa=0.0):
+    """
+    Estimates the 2D mean and covariance of a 3D Gaussian using the Unscented Transform.
+    
+    Args:
+        mu: 3D mean position (np.array, shape (3,))
+        R: Rotation matrix (np.array, shape (3,3))
+        S: Scaling matrix (np.array, shape (3,3), diagonal)
+        W: Camera extrinsic matrix (np.array, shape (3,4) or (4,4))
+        D: Camera intrinsic matrix (np.array, shape (3,3))
+        alpha: UT spread parameter
+        beta: UT prior knowledge parameter
+        kappa: UT scaling parameter
+        
+    Returns:
+        v_mu: 2D mean (np.array, shape (2,))
+        Sigma_prime: 2D covariance (np.array, shape (2,2))
+    """
+    # Step 1: Compute Lambda
+    lambda_val = alpha**2 * (3 + kappa) - 3
+    
+    # Step 2: Compute Covariance Sigma
+    # Sigma = R * S * S^T * R^T
+    Sigma = R @ (S @ S.T) @ R.T
+    
+    # Step 3: Generate Sigma Points
+    # x_i = mu + sqrt((3 + lambda) * Sigma[i]) for i=1,2,3
+    # x_i = mu - sqrt((3 + lambda) * Sigma[i-3]) for i=4,5,6
+    # x_0 = mu
+    # Note: sqrt(Sigma[i]) implies the square root of the diagonal element
+    sqrt_term = np.sqrt(3 + lambda_val)
+    
+    sigma_points = np.zeros((7, 3))
+    sigma_points[0] = mu
+    
+    for i in range(3):
+        diag_val = Sigma[i, i]
+        sigma_points[i+1] = mu + sqrt_term * np.sqrt(diag_val)
+        sigma_points[i+4] = mu - sqrt_term * np.sqrt(diag_val)
+        
+    # Step 4: Compute Weights
+    w_mu = np.zeros(7)
+    w_sigma = np.zeros(7)
+    
+    w_mu[0] = lambda_val / (3 + lambda_val)
+    w_sigma[0] = lambda_val / (3 + lambda_val) + (1 - alpha**2 + beta)
+    
+    for i in range(1, 7):
+        w_mu[i] = 1.0 / (2 * (3 + lambda_val))
+        w_sigma[i] = 1.0 / (2 * (3 + lambda_val))
+        
+    # Step 5: Project Sigma Points
+    # v_x_i = g(x_i)
+    # g(x) involves transforming by W and projecting with D
+    # Assuming a standard pinhole projection for g(x) if no distortion is specified
+    # v_x = D * (W * [x; 1])
+    # We need to handle homogeneous coordinates
+    
+    projected_points = np.zeros((7, 2))
+    for i in range(7):
+        # Transform to camera space
+        # Assuming W is 3x4 or 4x4. If 4x4, take top 3 rows.
+        # Let's assume W is 3x4 for simplicity as per standard projection
+        cam_pos = W @ np.append(sigma_points[i], 1.0)
+        
+        # Project using intrinsic D
+        # cam_pos is [x, y, z]
+        # u = D[0,0] * x/z + D[0,2]
+        # v = D[1,1] * y/z + D[1,2]
+        if cam_pos[2] == 0:
+            cam_pos[2] = 1e-9 # Guard against division by zero
+            
+        projected_points[i, 0] = (D[0, 0] * cam_pos[0] / cam_pos[2]) + D[0, 2]
+        projected_points[i, 1] = (D[1, 1] * cam_pos[1] / cam_pos[2]) + D[1, 2]
+        
+    # Step 6: Estimate 2D Mean
+    v_mu = np.zeros(2)
+    for i in range(7):
+        v_mu += w_mu[i] * projected_points[i]
+        
+    # Step 7: Estimate 2D Covariance
+    Sigma_prime = np.zeros((2, 2))
+    for i in range(7):
+        diff = projected_points[i] - v_mu
+        Sigma_prime += w_sigma[i] * np.outer(diff, diff)
+        
+    return v_mu, Sigma_prime
+
+def rasterize_3d_gaussians(particles, W, D, alpha=1.0, beta=2.0, kappa=0.0):
+    """
+    Rasterizes 3D Gaussians using 3DGUT.
+    
+    Args:
+        particles: List of dicts with keys 'mu', 'q', 's', 'sigma', 'sh'
+        W: Camera extrinsic
+        D: Camera intrinsic
+        alpha, beta, kappa: UT parameters
+        
+    Returns:
+        List of rendered pixels or intermediate data
+    """
+    results = []
+    
+    for particle in particles:
+        mu = particle['mu']
+        q = particle['q']
+        s = particle['s']
+        sigma_opacity = particle['sigma']
+        
+        # Convert quaternion and scaling to Rotation and Scaling matrices
+        R = quaternion_to_rotation_matrix(q)
+        S = scaling_vector_to_matrix(s)
+        
+        # Estimate 2D Gaussian
+        v_mu, Sigma_prime = estimate_2d_gaussian(mu, R, S, W, D, alpha, beta, kappa)
+        
+        # Compute Extent and Rectangle
+        h = compute_extent(Sigma_prime, sigma_opacity)
+        rect = compute_rectangle(h, v_mu)
+        
+        results.append({
+            'mu_2d': v_mu,
+            'cov_2d': Sigma_prime,
+            'rectangle': rect,
+            'particle': particle
+        })
+        
+    return results
+```
+
+**Edge Cases and Pitfalls:**
+*   **Division by Zero:** When projecting sigma points, if a point lies on the camera plane ($z=0$), division by zero occurs in perspective projection. A small epsilon guard is required [G].
+*   **Negative Definiteness:** The UT approximation does not guarantee that the resulting 2D covariance $\boldsymbol{\Sigma}'$ is positive semi-definite, although it usually is for small distortions. If negative eigenvalues occur, the Gaussian response evaluation may become unstable [G].
+*   **Rolling Shutter:** For time-dependent effects, each sigma point must be projected using a different extrinsic matrix corresponding to its time offset [S1].
+
+## Subtopics
+
+### 3D Gaussian Splatting Differentiable Rasterizer
+Uses EWA splatting with Jacobian linearization. Choose when camera models are simple pinhole and performance is critical. [2813-3d-gaussian-splatting-differentiable-rasterizer.md]
+
+### Optimal Gaussian Splatting
+Focuses on optimal parameterization and rendering. Choose for general high-quality novel view synthesis with standard cameras. [3293-optimal-gaussian-splatting.md]
+
+### Hybrid Transparency
+Combines rasterization and ray tracing. Choose when secondary rays are needed but full ray tracing is too slow. [3294-hybrid-transparency.md]
+
+### Perspective-Correct 3D Gaussian Splatting via Plücker Coordinates
+Uses Plücker coordinates for perspective correction. Choose when perspective artifacts in standard splatting are problematic. [3403-perspective-correct-3d-gaussian-splatting-via-pl-cker-coordi.md]
+
+### 3D Gaussian Splatting Rasterization (Cone-Beam/Scanner Space)
+Adapted for cone-beam or scanner cameras. Choose for medical or industrial scanning data. [3458-3d-gaussian-splatting-rasterization-cone-beam-scanner-space.md]
+
+### Analytic-Splatting Forward Shading
+Provides analytic shading solutions. Choose for complex lighting effects. [3459-analytic-splatting-forward-shading.md]
+
+### Speedy-Splat Rendering Pipeline
+Optimized for speed. Choose for real-time applications with standard cameras. [3543-speedy-splat-rendering-pipeline.md]
+
+### Ghost Ellipsoids for Chunked Training
+Uses ghost ellipsoids for training. Choose for large-scale scene training. [3559-ghost-ellipsoids-for-chunked-training.md]
+
+### Analytic Transmittance 3DGS
+Provides analytic transmittance. Choose for accurate alpha blending. [4440-analytic-transmittance-3dgs.md]
+
+### Ref-Gaussian Deferred Surfel Rendering with Split-Sum IBL
+Deferred rendering with IBL. Choose for high-fidelity reflections. [4464-ref-gaussian-deferred-surfel-rendering-with-split-sum-ibl.md]
+
+### 3D Gaussian Splatting Self-Shadowing (T_light)
+Adds self-shadowing. Choose for realistic shadows. [4487-3d-gaussian-splatting-self-shadowing-t_light.md]
+
+### Light Space Rasterization for T_light
+Rasterizes in light space. Choose for efficient shadow computation. [4489-light-space-rasterization-for-t_light.md]
+
+### 2D Gaussian Splatting Rasterization
+Projects 2D Gaussians. Choose for 2D image editing or specific 2D applications. [4815-2d-gaussian-splatting-rasterization.md]
+
+### SparseOIT Rasterizer
+Order-Independent Transparency. Choose when transparency artifacts are unacceptable. [7562-sparseoit-rasterizer.md]
+
+### AdR-Gaussian
+Adaptive Resolution. Choose for variable resolution rendering. [8365-adr-gaussian.md]
+
+### 3D Half-Gaussian Splatting
+Uses half-Gaussians. Choose for specific memory constraints. [9011-3d-half-gaussian-splatting.md]
+
+## Operating characteristics
+*   **Time Complexity:** The UT projection requires computing 7 sigma points and projecting each, which is more expensive than the single Jacobian computation in EWA splatting. However, it avoids the need for complex Jacobian derivations for each camera model [S1].
+*   **Memory Complexity:** No additional memory is required beyond the standard 3DGS representation and the temporary sigma points [S1].
+*   **Measured Performance:** On standard datasets, 3DGUT achieves comparable PSNR to EWA splatting while supporting distorted cameras. FPS is slightly lower than standard 3DGS due to the extra projection steps, but still significantly faster than ray-tracing-based methods like 3DGRT [S1].
+*   **Scaling:** Scales linearly with the number of particles. The UT projection cost is constant per particle [S1].
+*   **Strengths:** Supports arbitrary non-linear camera models (distortion, rolling shutter) without Jacobian derivation. Aligns with ray-tracing formulations for secondary rays [S1].
+*   **Limitations:** Slightly higher computational cost per particle than EWA splatting. Approximation quality depends on the UT parameters [S1].
+*   **When to Use:** When rendering scenes with distorted cameras, rolling shutter effects, or when secondary ray tracing is desired within a rasterization framework [S1].
+*   **When Not to Use:** When maximum performance is required and camera models are simple pinhole cameras [S1].
+
+## Background
+3D Gaussian Unscented Transform (3DGUT) was introduced in the paper "3DGUT: Enabling Distorted Cameras and Secondary Rays in Gaussian Splatting" [S1]. It builds on the Unscented Transform from the Unscented Kalman Filter literature [16] and applies it to the projection of 3D Gaussian particles. The method addresses the limitations of EWA splatting in 3DGS, which suffers from approximation errors with increasing distortion and cannot represent time-dependent effects like rolling shutter [S1]. 3DGUT aligns the rasterization formulation with ray-tracing methods, enabling secondary rays for reflections and refractions [S1].
+
+## Sources
+[S1] 3DGUT: Enabling Distorted Cameras and Secondary Rays in Gaussian Splatting, https://doi.org/10.1109/cvpr52734.2025.02425, fetched 2026-10-26

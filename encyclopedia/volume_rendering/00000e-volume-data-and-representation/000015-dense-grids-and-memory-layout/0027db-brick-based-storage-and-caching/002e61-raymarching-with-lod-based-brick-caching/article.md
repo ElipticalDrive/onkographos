@@ -1,55 +1,58 @@
 # Raymarching with LOD-based Brick Caching
 
-Also called: Brick Caching and Decoding, Compressed Segmentation Volumes (CSV) Visualization
+Also called: Brick Caching and Decoding, Compressed Segmentation Volume (CSV) Visualization
 
 ## Overview
-This method renders Compressed Segmentation Volumes (CSVs) by raymarching with one ray per pixel, dynamically decompressing bricks at the required Level of Detail (LOD) on the GPU [S1]. It distinguishes itself from sibling methods by integrating empty-space skipping via palettes before cache allocation, using contiguous base elements instead of superblocks, and allowing a one-frame lag for decompression requests to exploit temporal coherency [S1]. It solves the problem of rendering massive segmentation datasets (e.g., >6 GB) interactively by streaming only necessary fine-detail data from CPU to GPU memory [S1].
+This method renders Compressed Segmentation Volumes (CSVs) by raymarching with one ray per pixel, decompressing bricks on-demand at the required Level of Detail (LOD) and storing them in a GPU cache [S1]. It differs from sibling methods by exploiting temporal coherency with a one-frame decompression lag, using palette-based empty-space skipping before cache allocation, and employing a contiguous base-element cache structure without superblocks [S1]. It builds on [Brick-based storage and caching](4138-brick-based-storage-and-caching.md) by adding LOD-specific decompression and a hierarchical cache pool.
 
 ## How it works
-**Inputs:** Compressed Segmentation Volume (CSV) data (palette and compressed voxel data), Transfer Function (TF), camera position and orientation, frame index.
+**Inputs:** Compressed CSV data (palette and compressed voxel data), Transfer Function (TF) mapping labels to opacity/color, camera position and orientation, screen resolution.
 **Outputs:** Rendered image.
 
 **Data Structures:**
-1.  **CSV Data:** Stored as compressed bricks. Each brick has a palette (histogram of labels) and compressed voxel data.
-2.  **Cache Structure:**
-    *   Pool of base elements, each holding $2^3 = 8$ voxels [S1].
-    *   Blocks of size $2^{3 \cdot l}$ (where $l=1..N$) are formed from contiguous base elements to store decompressed bricks of LOD $l$ [S1].
-    *   One stack $S_l$ per LOD level stores indices of free blocks [S1].
-    *   Shared cache top pointer (atomic) to allocate new base elements [S1].
-3.  **Request Buffer:** Stores brick indices and required detail levels for CPU-to-GPU transfer [S1].
+1.  **Compressed Brick:** Stored in CPU or GPU memory. Contains a palette (list of labels) and compressed voxel data.
+2.  **Cache Pool:** A linear array of base elements, each holding $2^3 = 8$ voxels.
+3.  **Free Block Stacks:** $N$ stacks $S_l$ (for $l=0 \dots N-1$), where $S_l$ stores indices of free blocks of size $2^{3l}$ base elements.
+4.  **Cache Top Pointer:** An atomic integer pointing to the next available base element in the pool.
+5.  **Request Buffer:** A list of brick indices requiring fine-detail data transfer.
 
 **Parameters:**
-*   **LOD Selection:** Target approximately one voxel per pixel on screen, based on the distance of the brick's center to the camera [S1].
-*   **Opacity Threshold:** User-defined threshold for sending shadow rays [S1].
-*   **Upload Buffer Size:** 8 MB for streaming detail data from CPU to GPU [S1].
+*   $B$: Brick dimensions (e.g., $32^3$).
+*   $L_{max}$: Maximum LOD level.
+*   Upload Buffer Size: 8 MB [S1].
+*   Opacity Threshold: User-defined threshold for shadow ray casting [S1].
 
 **Steps:**
 
 1.  **Raymarching and LOD Determination:**
-    For each pixel, cast a ray. For every intersected brick, calculate the required LOD $l$ based on the distance from the brick center to the camera, aiming for ~1 voxel/pixel [S1].
+    For each pixel, cast a ray. For each intersected brick, calculate the distance $d$ from the brick center to the camera. Determine the required LOD level $l$ such that one voxel maps to approximately one pixel on the screen [S1].
+    *   If the desired LOD is not in the cache, mark the brick as "requested" for the next frame.
+    *   If the brick is not yet decompressed to the requested LOD, fall back to the coarsest LOD (Level 0, stored as the first palette entry) for the current frame [S1].
 
 2.  **Empty-Space Skipping:**
-    Check the brick's palette. If no palette entry maps to an opacity $> 0$ according to the TF, skip the brick entirely (do not request cache or decompress) [S1].
+    Before requesting cache space, check the brick's palette. If no palette entry maps to an opacity $> 0$ according to the TF, skip the brick entirely (do not request decompression or cache space) [S1].
 
-3.  **Cache Request (One-Frame Lag):**
-    If the required LOD is not in the cache, request it for the *next* frame [S1].
-    *   If the brick is not yet decompressed in the next frame, fall back to the coarsest LOD (stored as the first palette entry, directly accessible) [S1].
-    *   For hit voxels with opacity above the threshold, send an additional shadow ray. Optionally accumulate shadow rays over time for ambient occlusion [S1].
+3.  **Shadow Rays:**
+    For hit voxels with opacity above the user-defined threshold, cast an additional shadow ray. Optionally, accumulate shadow rays over time to approximate ambient occlusion [S1].
 
 4.  **Cache Assignment (Post-Frame):**
-    After rendering the current frame, determine bricks/LODs needed for the next frame:
-    a.  Test visibility against TF. Mark visible bricks with ascending indices per block size [S1].
-    b.  Count bricks per LOD.
-    c.  Evict invisible bricks from the cache; push their blocks onto respective stacks $S_l$ [S1].
-    d.  Check if stacks $S_l$ have enough free blocks for all requests of level $l$.
-    e.  If not, allocate new blocks by atomically advancing the shared cache top pointer by $l$ [S1].
-    f.  If insufficient base elements exist, rebuild the cache (clear all blocks/stacks, re-decompress all visible bricks) [S1].
+    After rendering the frame, determine the set of bricks and LODs required for the *next* frame.
+    a.  **Visibility Test:** Test each requested brick against the TF. If invisible, evict it from the cache (if present) and push its block index onto the corresponding stack $S_l$ [S1].
+    b.  **Marking:** For visible bricks, assign an ascending index to mark them as needed. Count the number of bricks required per LOD level $l$ [S1].
+    c.  **Allocation:** For each LOD level $l$, check if stack $S_l$ has enough free blocks to satisfy the count.
+        *   If yes, pop blocks from $S_l$ and assign them to the requested bricks.
+        *   If no, atomically advance the cache top pointer by $l$ to allocate new base elements, forming new blocks of size $2^{3l}$.
+        *   If the cache pool is exhausted (no free base elements), trigger a **Cache Rebuild**: clear all blocks and stacks, and re-decompress all currently visible bricks from scratch [S1].
 
 5.  **Decompression and Streaming:**
-    a.  Decompress requested bricks in parallel on the GPU into assigned cache locations [S1].
-    b.  **Detail Separation:** If fine LOD data is not in GPU memory, add brick indices to a request buffer. Transfer this buffer to CPU memory [S1].
-    c.  Generate a buffer of requested detail levels in parallel to rendering the next frame and asynchronously upload to GPU memory [S1].
-    d.  If upload lags, decompress only up to the finest available GPU level, or predictively upload for close bricks [S1].
+    a.  **GPU Decompression:** Decompress the requested bricks in parallel on the GPU using the allocated cache blocks [S1].
+    b.  **Detail Separation (CPU-GPU Transfer):** If fine LOD data is not resident in GPU memory:
+        *   Identify bricks requiring fine-detail data.
+        *   Add their indices to the Request Buffer.
+        *   Transfer the buffer to CPU memory.
+        *   Generate a buffer of requested detail levels in parallel with rendering the next frame.
+        *   Asynchronously upload the detail data to GPU memory [S1].
+        *   *Note:* This introduces a one-frame lag. If data is not available, decompress only up to the finest available GPU level or use predictive uploads for bricks near the camera [S1].
 
 **Pseudocode:**
 
@@ -57,112 +60,96 @@ This method renders Compressed Segmentation Volumes (CSVs) by raymarching with o
 
 ```python
 # Global State
+cache_pool = [BaseElement] * MAX_BASE_ELEMENTS
 cache_top = 0
-stacks = {l: [] for l in range(MAX_LOD)} # Stacks of free block indices
-gpu_cache = {} # Maps block_index -> decompressed_voxel_data
-compressed_data = {} # Maps brick_index -> compressed_data (GPU or CPU)
-palettes = {} # Maps brick_index -> palette
+free_stacks = [Stack() for _ in range(MAX_LOD)]
+compressed_data = LoadCSVData() # On CPU or GPU
+tf = TransferFunction()
 
-def render_frame(camera, tf, frame_id):
-    image = empty_image()
-    
+def render_frame(camera, screen_res):
+    image = EmptyImage(screen_res)
+    requested_bricks = {} # Map (brick_idx, lod) -> True
+
     # 1. Raymarching
-    for pixel in pixels:
-        ray = cast_ray(pixel, camera)
+    for y, x in pixels(screen_res):
+        ray = cast_ray(camera, x, y)
         for brick in intersected_bricks(ray):
+            lod = determine_lod(brick.center, camera)
+            
             # 2. Empty-Space Skipping
-            if not is_visible(brick, tf):
+            if not is_visible(brick.palette, tf):
                 continue
-                
-            # 3. LOD Determination
-            lod = calculate_lod(brick.center, camera.pos)
-            
-            # 4. Cache Check
-            if lod in gpu_cache[brick.index]:
-                data = gpu_cache[brick.index][lod]
-            else:
-                # Fall back to coarsest LOD if not decompressed yet
-                data = get_coarsest_lod(brick)
-                request_decompression(brick.index, lod, frame_id + 1)
-            
-            # 5. Raymarch through brick data
-            sample = march_ray(ray, data, tf)
-            image[pixel] = composite(image[pixel], sample)
-            
-            # Shadow rays
-            if sample.opacity > OPACITY_THRESHOLD:
-                shadow = cast_shadow_ray(ray.origin + ray.dir * depth, camera)
-                image[pixel] = apply_shadow(image[pixel], shadow)
 
-    # 6. Post-Frame Cache Assignment
-    assign_cache_for_next_frame(frame_id + 1)
+            # Check cache
+            if not is_in_cache(brick.idx, lod):
+                requested_bricks[(brick.idx, lod)] = True
+                lod = 0 # Fallback to coarsest for current frame
+            
+            voxel = sample_brick(brick.idx, lod, ray)
+            if voxel.opacity > 0:
+                image[x, y] = apply_tf(voxel)
+                # 3. Shadow Rays
+                if voxel.opacity > OPACITY_THRESHOLD:
+                    shadow = cast_shadow_ray(ray, brick)
+                    accumulate_ambient_occlusion(shadow)
+
+    # 4. Cache Assignment for NEXT frame
+    assign_cache(requested_bricks)
     
+    # 5. Streaming
+    stream_detail_data(requested_bricks)
+
     return image
 
-def is_visible(brick, tf):
-    palette = palettes[brick.index]
-    for label in palette:
-        if tf.opacity(label) > 0:
-            return True
-    return False
+def assign_cache(requested_bricks):
+    # Evict invisible bricks from previous frame's cache
+    for brick_idx, lod in cache_contents():
+        if not is_visible(brick_idx, tf):
+            free_stacks[lod].push(brick_idx)
+            remove_from_cache(brick_idx, lod)
 
-def calculate_lod(brick_center, camera_pos):
-    dist = distance(brick_center, camera_pos)
-    # Target 1 voxel per pixel
-    return max(0, floor(log2(dist * scale_factor)))
+    # Count required bricks per LOD
+    required_counts = count_bricks_by_lod(requested_bricks)
 
-def request_decompression(brick_index, lod, next_frame_id):
-    # Mark brick as requested for next frame
-    requests[next_frame_id].append((brick_index, lod))
-
-def assign_cache_for_next_frame(next_frame_id):
-    current_requests = requests.pop(next_frame_id, [])
-    
-    # Evict invisible bricks
-    for brick_index in current_cache_bricks:
-        if not is_visible(brick_index, current_tf):
-            evict_from_cache(brick_index)
-            lod = get_lod_for_bricks(brick_index)
-            stacks[lod].append(get_block_index(brick_index))
-            
-    # Allocate new blocks if needed
-    for brick_index, lod in current_requests:
-        if not is_visible(brick_index, current_tf):
-            continue
-            
-        if stacks[lod] is empty:
-            # Allocate new base elements
-            num_base_elements = 2**(3*lod)
-            new_block_idx = cache_top
-            cache_top += num_base_elements
-            stacks[lod].append(new_block_idx)
-            
-        block_idx = stacks[lod].pop()
-        gpu_cache[brick_index][lod] = decompress(brick_index, lod, block_idx)
+    for lod, count in required_counts.items():
+        free_blocks = free_stacks[lod].size()
+        needed = count - free_blocks
         
-        # Detail Separation: Stream fine data if needed
-        if lod > COARSEST_GPU_LOD:
-            stream_detail_to_gpu(brick_index, lod)
+        if needed > 0:
+            # Try to allocate from pool
+            allocated = atomic_add(cache_top, needed * (2**lod))
+            if allocated + needed > len(cache_pool):
+                rebuild_cache()
+                return # Rebuild handles all allocations
+            
+            # Mark new blocks as assigned to requested bricks
+            assign_blocks_to_bricks(lod, allocated, count)
 
-def stream_detail_to_gpu(brick_index, lod):
-    # Add to upload buffer
-    upload_buffer.append((brick_index, lod))
-    if len(upload_buffer) > UPLOAD_BUFFER_SIZE:
-        async_upload_to_gpu(upload_buffer)
-        upload_buffer.clear()
+    # Decompress requested bricks
+    decompress_bricks_in_parallel(requested_bricks)
+
+def stream_detail_data(requested_bricks):
+    # Identify bricks needing fine detail not in GPU
+    fine_detail_requests = []
+    for (brick_idx, lod) in requested_bricks:
+        if lod > MAX_GPU_LOD:
+            fine_detail_requests.append(brick_idx)
+            
+    if fine_detail_requests:
+        upload_buffer = fine_detail_requests
+        transfer_to_cpu(upload_buffer)
+        # Async upload happens in background
 ```
 
 ## Operating characteristics
-*   **Time Complexity:** Raymarching is $O(P \cdot D)$ where $P$ is pixels and $D$ is depth. Decompression is parallelized on GPU. Cache assignment is $O(B)$ where $B$ is number of bricks.
-*   **Memory Complexity:** Cache size is a fraction of total bricks. For CORTEX (6144x9216x4096), L0 (finest) takes 9.2 GB, other levels take 4.3 GB [S1]. Upload buffer is 8 MB [S1].
-*   **Performance:** High interactivity due to LOD adaptation and temporal coherency. One-frame lag minimizes stalls [S1].
-*   **Strengths:** Handles very large datasets by streaming fine details. Efficient empty-space skipping.
-*   **Limitations:** One-frame lag can cause visual artifacts if camera moves rapidly. Cache rebuilds are expensive but rare [S1].
-*   **When to use:** Large segmentation volumes with temporal coherence.
-*   **When not to use:** Scenes with rapid, unpredictable camera motion or non-segmentation data without palettes.
+*   **Time Complexity:** Raymarching is $O(P)$ where $P$ is pixel count. Cache assignment is $O(B_{req})$ where $B_{req}$ is the number of unique bricks requested. Decompression is $O(B_{req} \cdot V_{brick})$.
+*   **Memory Complexity:** Cache size depends on the number of resident bricks. For the CORTEX dataset (6144x9216x4096), Level 0 (finest) consumes 9.2 GB, while all coarser levels consume 4.3 GB [S1].
+*   **Performance:** The one-frame lag for decompression and streaming is acceptable at high frame rates, minimizing artifacts [S1]. The 8 MB upload buffer is sufficient for most frames; larger requests are distributed across frames, trading LOD adaptation speed for responsiveness [S1].
+*   **Strengths:** Efficient memory usage via LOD and compression; fast access via cache; handles very large volumes by streaming only necessary fine details [S1].
+*   **Limitations:** Requires temporal coherence; frame rate drops if cache rebuilds are frequent; one-frame lag can cause visual popping if camera moves too fast [S1].
 
 ## Background
-Originated in the context of Compressed Segmentation Volumes (CSVs) for scientific visualization [S1]. The method builds on Shading Atlas Streaming (SAS) but simplifies it by omitting superblocks/columns and integrating palette-based empty-space skipping [S1]. It addresses the memory bottleneck of rendering multi-gigabyte segmentation datasets on GPUs [S1].
+This method was introduced in the context of Fast Compressed Segmentation Volumes for Scientific Visualization [S1]. It adapts techniques from Shading Atlas Streaming (SAS) but simplifies the cache structure by removing superblocks and columns, using contiguous base elements instead [S1]. It is designed for large-scale scientific visualization where memory bandwidth and capacity are bottlenecks.
 
 ## Sources
 [S1] Fast Compressed Segmentation Volumes for Scientific Visualization., https://doi.org/10.1109/tvcg.2023.3326573, fetched 2026-10-26

@@ -3,291 +3,257 @@
 Also called: Depth consistency optimization, adaptive sampling, and hierarchical structural fusion for sparse view neural radiance fields
 
 ## Overview
-DASNeRF is a Neural Radiance Field (NeRF) optimization method designed for sparse-view 3D reconstruction that improves detail fidelity by integrating monocular depth priors and dynamic sampling. It distinguishes itself from standard NeRF and other sparse-view methods by employing a DepthAnythingV2 model to extract depth priors, which guide the learning process through robust relative depth regularization (Depth Ordering Fidelity Loss and Depth Structural Consistency Regularization), while using a dynamic optimal sampling layer to mitigate lighting artifacts and enhance detail preservation [S1].
+DASNeRF is a Neural Radiance Field (NeRF) optimization method designed for sparse-view 3D reconstruction that integrates monocular depth priors and dynamic sampling to improve detail preservation [S1]. It differs from standard NeRF by fusing a five-dimensional coordinate/ray vector into every layer of the MLP and regularizing the rendered depth against estimates from the DepthAnythingV2 model using relative ordering and structural consistency losses [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A sparse set of $M$ input images $\{I_m\}_{m=1}^M$ with corresponding camera poses $\{p_m\}_{m=1}^M$.
-*   **Outputs:** A radiance field function $f$ mapping 3D positions $\mathbf{x}$ and viewing directions $\mathbf{d}$ to volumetric density $\sigma$ and view-dependent color $\mathbf{c}$, and rendered images/depth maps for validation.
+*   **Inputs:** A sparse set of $M$ calibrated RGB images $\{I_m\}_{m=1}^M$ with corresponding camera poses $\{p_m\}_{m=1}^M$.
+*   **Outputs:** A trained implicit radiance field function $f_\theta$ mapping 3D positions and viewing directions to density $\sigma$ and color $\mathbf{c}$, and rendered images/depth maps for novel views.
 
 **Data Structures:**
-*   **Radiance Field Model:** An MLP $f$ with per-layer input fusion.
-*   **Depth Prior Model:** DepthAnythingV2, a pre-trained monocular depth estimation network using a DPT architecture with a DINOv2 backbone [S1].
-*   **Sampling Points:** A set of $N$ points along each ray, including 3D coordinates and ray information, processed into a five-dimensional vector [S1].
+*   **MLP Network:** A Multi-Layer Perceptron with $L$ hidden layers. Unlike standard NeRF, each layer $l$ receives two inputs: the output features from the previous layer $\mathbf{h}_{l-1}$ and a processed five-dimensional input vector $\mathbf{v}_{5D}$.
+*   **Depth Prior Map:** A depth map $d_{V2}$ estimated by the external DepthAnythingV2 model for each input view.
+*   **Sampling Points:** A set of $N$ points $\{t_i\}_{i=1}^N$ along each ray, obtained via 3D cone frustum sampling (Mip-NeRF) and a three-layer dynamic sampling mechanism.
 
-**Method Steps:**
+**Numbered Steps:**
 
-1.  **Depth Prior Extraction:**
-    For each input image $I_m$, use the pre-trained DepthAnythingV2 model to estimate the depth map $D_{V2}^m$. The model processes the image to produce depth estimates that are more stable and detailed than alternatives like MiDaS, particularly for transparent, reflective, or complex geometric objects [S1].
+1.  **Depth Prior Estimation:** For each input image $I_m$, use the pre-trained DepthAnythingV2 model to estimate the depth map $d_{V2}^{(m)}$. The source notes that DepthAnythingV2 is preferred over MiDaS for its stability with transparent/reflective objects and 10x faster inference [S1]. The depth data is processed using relative inverse depth.
 
-2.  **Dynamic Optimal Sampling:**
-    For each ray $r$ originating from a camera pose $p_m$ with direction $\mathbf{d}$ and near/far bounds $[t_n, t_f]$:
-    *   Employ 3D cone frustum sampling (from Mip-NeRF) combined with a three-layer dynamic sampling mechanism [S1].
-    *   Generate $N$ sample points $t_i$ along the ray.
-    *   Extract five-dimensional information for each sample point, comprising its 3D coordinates and ray information [S1].
+2.  **Ray Sampling:** For a ray $r(t) = \mathbf{o} + t\mathbf{d}$ defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, with near and far bounds $[t_n, t_f]$:
+    *   Employ 3D cone frustum sampling from Mip-NeRF to determine the spatial extent of the ray segment.
+    *   Apply a three-layer dynamic sampling mechanism to select $N$ sample points $t_i$ along the ray. This mechanism is designed to reduce the impact of lighting variations on detail reconstruction [S1].
+    *   For each sample $t_i$, compute the 3D position $\mathbf{x}_i = r(t_i)$ and the viewing direction $\mathbf{d}$.
 
-3.  **Radiance Field Forward Pass (Per-Layer Input Fusion):**
-    *   Initialize the input to the MLP with the processed five-dimensional vector from Step 2 [S1].
-    *   For each layer $l$ in the MLP:
-        *   Take the features from the previous layer $h_{l-1}$ and the processed five-dimensional input vector $v_{5D}$.
-        *   Fuse these inputs: $h_l = \text{MLP}_l(h_{l-1}, v_{5D})$ [S1].
-    *   The final layer outputs the volumetric density $\sigma$ and color $\mathbf{c}$ for each sample point [S1].
+3.  **Feature Fusion (Per-Layer Input Fusion):**
+    *   Construct a five-dimensional vector $\mathbf{v}_{5D}$ for each sample point. This vector includes the 3D coordinates $(x, y, z)$ and ray information (likely direction components or positional encoding derivatives, though the source specifies "coordinates and ray information" resulting in 5D) [S1].
+    *   Process $\mathbf{v}_{5D}$ through a transformation (details of the transformation function are not explicitly defined in the source, but it is processed before fusion) [S1].
+    *   For each MLP layer $l=1 \dots L$:
+        *   Input 1: Features $\mathbf{h}_{l-1}$ from the previous layer (or raw input for $l=1$).
+        *   Input 2: The processed five-dimensional vector $\mathbf{v}_{5D}$.
+        *   Combine these inputs (e.g., concatenation or addition, standard practice implied by "fusion") and pass through the layer's weights and activation function to produce $\mathbf{h}_l$.
+        *   *Note:* The source states "Each MLP layer takes two inputs: the features from the previous layer and the processed five-dimensional input information" [S1].
 
-4.  **Volume Rendering:**
-    Render the pixel color $\hat{C}(r)$ and depth $d_r$ for ray $r$:
-    *   Calculate transmittance $T_i$ and alpha $\alpha_i$ for each sample $i$:
-        $$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) $$
+4.  **Density and Color Prediction:**
+    *   After the final MLP layer, output the volumetric density $\sigma_i$ and color $\mathbf{c}_i$ for each sample point $i$.
+    *   The mapping is formally $(\sigma, \mathbf{c}) = f(\gamma(\mathbf{x}), \gamma(\mathbf{d}))$, where $\gamma$ is position encoding [S1].
+
+5.  **Volume Rendering:**
+    *   Compute the transmittance $T_i$ and opacity $\alpha_i$ for each sample:
         $$ \alpha_i = 1 - \exp(-\sigma_i \delta_i) $$
-        where $\delta_i$ is the interval between samples [S1].
-    *   Compute pixel color:
+        $$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) $$
+        where $\delta_i$ is the distance between adjacent samples $t_i$ and $t_{i+1}$ (or $t_n$ for the first sample) [S1].
+    *   Render the pixel color $\hat{C}(r)$:
         $$ \hat{C}(r) = \sum_{i=1}^{N} \omega_i \mathbf{c}_i, \quad \omega_i = T_i \alpha_i $$
-    *   Compute rendered depth for a local region $P$:
+    *   Render the predicted depth $d_r$ for the ray:
         $$ d_r = \sum_{i=1}^{N} \omega_i t_i $$
-        where $t_i$ is the distance of the $i$-th sample from the camera origin [S1].
 
-5.  **Loss Calculation:**
-    The total loss $L$ is the sum of the NeRF color loss, Depth Ordering Fidelity Loss ($L_{DOF}$), and Depth Structural Consistency Regularization ($R_{DSC}$):
-    $$ L = L_{nerf} + \lambda L_{DOF} + \gamma R_{DSC} $$
-    Typical values: $\lambda = 0.2$, $\gamma = 0.02$ [S1].
-
-    *   **NeRF Color Loss ($L_{nerf}$):**
+6.  **Loss Calculation:**
+    *   **Color Loss ($L_{nerf}$):** Mean squared error between the ground truth pixel color $C(r)$ and the rendered color $\hat{C}(r)$:
         $$ L_{nerf} = \sum_{r \in R} \| C(r) - \hat{C}(r) \|_2^2 $$
-        where $C(r)$ is the ground truth pixel color and $R$ is the set of all rays [S1].
+        where $R$ is the set of all rays [S1].
+    *   **Depth Ordering Fidelity Loss ($L_{DOF}$):** Enforces relative depth ordering consistency between the rendered depth $d_r$ and the prior depth $d_{V2}$.
+        *   Select two pixel coordinates $k_1, k_2$ in the local region $P$ of the image.
+        *   Identify pairs where the prior depth satisfies $d_{V2}^{k_1} \leq d_{V2}^{k_2}$.
+        *   Calculate the dynamic boundary margin $m_{ar}$:
+            $$ m_{ar} = \alpha \cdot \frac{1}{N} \sum_{i=1}^{N} |d_r^{k_1}[i] - d_r^{k_2}[i]| $$
+            where $\alpha$ is a tunable hyperparameter, $N$ is the number of depth samples in the computation area, and $d_r^{k}[i]$ denotes the depth value of pixel $k$ at the $i$-th sampling layer [S1].
+        *   Compute the loss:
+            $$ L_{DOF} = \sum_{d_{V2}^{k_1} \leq d_{V2}^{k_2}} \max(d_r^{k_1} - d_r^{k_2} + m_{ar}, 0) $$
+            This penalizes cases where the predicted depth order contradicts the prior, adjusted by the dynamic margin [S1].
+    *   **Depth Structural Consistency Regularization ($R_{DSC}$):** Enforces local smoothness/continuity in depth.
+        *   For a pixel $k_1$, find its $k$-nearest neighbors $KNN(d_{V2}^{k_1})$ based on depth values in the prior map within a small region.
+        *   Compute:
+            $$ R_{DSC} = \sum_{k_1} \sum_{d_{V2}^{k_2} \in KNN(d_{V2}^{k_1})} \max(|d_r^{k_1} - d_r^{k_2}| - m_{ar}', 0) $$
+            where $m_{ar}'$ is a small boundary value accounting for minor depth variations [S1].
+    *   **Total Loss:**
+        $$ L = L_{nerf} + \lambda L_{DOF} + \gamma R_{DSC} $$
+        Typical values: $\lambda = 0.2$, $\gamma = 0.02$ [S1].
 
-    *   **Depth Ordering Fidelity Loss ($L_{DOF}$):**
-        This loss enforces that the relative depth ordering of the rendered depth $d_r$ matches the depth prior $D_{V2}$.
-        Let $k_1$ and $k_2$ be 2D pixel coordinates in the local region. If $D_{V2}^{k_1} \leq D_{V2}^{k_2}$, penalize the case where $d_r^{k_1} > d_r^{k_2}$:
-        $$ L_{DOF} = \sum_{D_{V2}^{k_1} \leq D_{V2}^{k_2}} \max(d_r^{k_1} - d_r^{k_2} + m_{ar}, 0) $$
-        Here, $d_r^{k_1}$ and $d_r^{k_2}$ are the rendered depths at pixels $k_1$ and $k_2$. $m_{ar}$ is a dynamic boundary adjustment [S1].
-
-    *   **Dynamic Boundary Adjustment ($m_{ar}$):**
-        $$ m_{ar} = \alpha \cdot \frac{1}{N} \sum_{i=1}^{N} |d_r^{k_1}[i] - d_r^{k_2}[i]| $$
-        where $\alpha$ is a tunable hyperparameter, $N$ is the number of depth samples in the computation area, and $d_r^{k}[i]$ denotes the depth value of pixel $k$ at the $i$-th sampling layer. This allows the margin to adapt to local depth variations [S1].
-
-    *   **Depth Structural Consistency Regularization ($R_{DSC}$):**
-        This loss ensures structural continuity between neighboring pixels in the rendered depth and the prior.
-        $$ R_{DSC} = \sum_{k_1} \sum_{D_{V2}^{k_2} \in \text{KNN}(D_{V2}^{k_1})} \max(|d_r^{k_1} - d_r^{k_2}| - m_{ar}', 0) $$
-        where $\text{KNN}(\cdot)$ returns the $k$-nearest neighbors based on depth values within a small region, and $m_{ar}'$ is a small boundary value for minor variations [S1].
-
-6.  **Optimization:**
-    Minimize $L$ with respect to the MLP parameters using gradient descent. The depth prior $D_{V2}$ is fixed and not updated [S1].
+7.  **Optimization:**
+    *   Minimize $L$ with respect to the MLP weights $\theta$ using gradient descent.
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import numpy as np
 
-class DASNeRF:
-    def __init__(self, num_samples=128, lambda_dof=0.2, gamma_dsc=0.02, alpha_margin=1.0):
-        self.num_samples = num_samples
-        self.lambda_dof = lambda_dof
-        self.gamma_dsc = gamma_dsc
-        self.alpha_margin = alpha_margin
-        # MLP with per-layer input fusion
-        # Input dim: 5 (3 coords + 2 ray/dir info processed)
-        # Hidden dims and output dims depend on specific implementation details not fully specified in source
-        # Assuming standard NeRF MLP structure adapted for 5D input fusion
-        self.mlp = self._build_mlp_with_fusion()
-        self.depth_estimator = DepthAnythingV2() # Pre-trained, frozen
-
-    def _build_mlp_with_fusion(self):
-        # Placeholder for MLP architecture with per-layer input fusion
-        # Each layer takes (prev_features, 5D_input)
-        pass
-
-    def forward(self, rays_o, rays_d, near, far, images, poses):
-        """
-        rays_o: (B, 3) ray origins
-        rays_d: (B, 3) ray directions
-        near: (B,) near plane distances
-        far: (B,) far plane distances
-        images: (B, H, W, 3) ground truth images
-        poses: (B, 4, 4) camera poses
-        """
-        B, H, W, _ = images.shape
-        rays_o = rays_o.unsqueeze(1).unsqueeze(1).expand(-1, H, W, -1) # (B, H, W, 3)
-        rays_d = rays_d.unsqueeze(1).unsqueeze(1).expand(-1, H, W, -1) # (B, H, W, 3)
+def dasnerf_forward(ray_origins, ray_directions, camera_poses, 
+                    depth_priors, num_samples=128, 
+                    lambda_dof=0.2, gamma_dsc=0.02, alpha_margin=1.0):
+    """
+    Forward pass for DASNeRF.
+    
+    Args:
+        ray_origins: (H, W, 3) array of ray origins.
+        ray_directions: (H, W, 3) array of ray directions.
+        camera_poses: (M, 4, 4) array of camera transformation matrices.
+        depth_priors: List of (H, W) arrays containing d_V2 for each input view.
+        num_samples: Number of samples per ray.
+        lambda_dof: Weight for Depth Ordering Fidelity Loss.
+        gamma_dsc: Weight for Depth Structural Consistency Regularization.
+        alpha_margin: Hyperparameter for dynamic boundary adjustment.
         
-        # Flatten for processing
-        rays_o_flat = rays_o.reshape(-1, 3)
-        rays_d_flat = rays_d.reshape(-1, 3)
-        near_flat = near.reshape(-1)
-        far_flat = far.reshape(-1)
-        images_flat = images.reshape(-1, 3)
-        
-        # 1. Dynamic Sampling
-        # Uniform sampling along ray [near, far]
-        t_vals = torch.linspace(0., 1., self.num_samples, device=rays_o.device)
-        t_vals = near_flat.unsqueeze(1) + t_vals * (far_flat.unsqueeze(1) - near_flat.unsqueeze(1))
-        # Add small epsilon to avoid sampling at exact endpoints if needed
-        # Mip-NeRF cone frustum sampling logic would be applied here to adjust t_vals
-        # For simplicity, using uniform samples as per basic description, 
-        # but source mentions 3D cone frustum sampling from Mip-NeRF.
-        # Implementing basic uniform for clarity, assuming Mip-NeRF adjustment is a pre-processing step on t_vals.
-        
-        # 2. Get Sample Points
-        # r(t) = o + t*d
-        pts = rays_o_flat.unsqueeze(1) + t_vals.unsqueeze(2) * rays_d_flat.unsqueeze(1) # (N_rays, N_samples, 3)
-        
-        # 3. Process 5D Input
-        # Source says "five-dimensional information... includes coordinates and ray information"
-        # Assuming this is [x, y, z, d_x, d_y] or similar. 
-        # Standard NeRF uses positional encoding. DASNeRF fuses this 5D vector at each layer.
-        # We assume a simple concatenation or projection to match MLP input dim.
-        # Let's assume the 5D vector is simply the 3D coord + 2D normalized direction components?
-        # Or 3D coord + 3D direction? Source says 5D. 
-        # Likely: [x, y, z, d_x, d_y] (since d_z is dependent) or [x, y, z, d_x, d_y, d_z] is 6D.
-        # Let's assume the source implies a specific 5D feature vector derived from coords and ray.
-        # For implementation, we will use the 3D coordinates and the viewing direction.
-        # To strictly follow "5-dimensional", we might drop one component or use a specific encoding.
-        # Given the ambiguity, we will use the 3D coordinates and the first two components of the direction.
-        ray_info = rays_d_flat.unsqueeze(1).expand(-1, self.num_samples, -1) # (N_rays, N_samples, 3)
-        # Concatenate pts (3) and ray_info (3) -> 6D. 
-        # Source explicitly says 5D. 
-        # Hypothesis: [x, y, z, d_x, d_y] is used.
-        five_d_input = torch.cat([pts, ray_info[..., :2]], dim=-1) # (N_rays, N_samples, 5)
-        
-        # 4. MLP Forward with Per-Layer Input Fusion
-        # Assuming a 2-layer MLP for demonstration. 
-        # Layer 1: Input = 5D. Output = H1.
-        # Layer 2: Input = H1 + 5D. Output = (sigma, color).
-        
-        # Layer 1
-        h1 = self.mlp.layer1(five_d_input) # (N_rays, N_samples, H1)
-        
-        # Layer 2: Fuse h1 and five_d_input
-        fused_input = torch.cat([h1, five_d_input], dim=-1) # (N_rays, N_samples, H1+5)
-        output = self.mlp.layer2(fused_input) # (N_rays, N_samples, 4) -> sigma, color
-        
-        sigma = output[..., 0] # (N_rays, N_samples)
-        color = output[..., 1:] # (N_rays, N_samples, 3)
-        
-        # 5. Volume Rendering
-        # Calculate deltas
-        deltas = t_vals[:, 1:] - t_vals[:, :-1]
-        # Add infinity for the last delta
-        deltas = torch.cat([deltas, torch.tensor([1e10], device=deltas.device).expand_as(deltas[..., :1])], dim=-1)
-        
-        # Alpha and Transmittance
-        alpha = 1.0 - torch.exp(-sigma * deltas)
-        T = torch.cumprod(torch.cat([torch.ones_like(alpha[..., :1]), 1. - alpha + 1e-10], dim=-1), dim=-1)[..., :-1]
-        weights = T * alpha
-        
-        # Rendered Color
-        rendered_color = torch.sum(weights.unsqueeze(-1) * color, dim=1) # (N_rays, 3)
-        
-        # Rendered Depth
-        rendered_depth = torch.sum(weights * t_vals, dim=1) # (N_rays,)
-        
-        # Reshape to image
-        rendered_color_img = rendered_color.reshape(B, H, W, 3)
-        rendered_depth_img = rendered_depth.reshape(B, H, W)
-        
-        # 6. Loss Calculation
-        # L_nerf
-        l_nerf = torch.mean((images_flat - rendered_color) ** 2)
-        
-        # L_dof and R_dsc require local regions. 
-        # We iterate over local regions P or use a sliding window.
-        # For simplicity, we compute loss over the whole image using neighbors.
-        
-        # Get Depth Prior
-        # DepthAnythingV2 expects image input.
-        # We need to process each image I_m to get D_V2.
-        # This is done outside the ray loop or batched.
-        # Assuming depth_prior_imgs is (B, H, W)
-        depth_prior_imgs = self.get_depth_prior(images) 
-        
-        l_dof = self.compute_depth_ordering_fidelity_loss(rendered_depth_img, depth_prior_imgs)
-        r_dsc = self.compute_depth_structural_consistency(rendered_depth_img, depth_prior_imgs)
-        
-        total_loss = l_nerf + self.lambda_dof * l_dof + self.gamma_dsc * r_dsc
-        
-        return rendered_color_img, rendered_depth_img, total_loss
-
-    def get_depth_prior(self, images):
-        # images: (B, H, W, 3)
-        # DepthAnythingV2 inference
-        # Convert to tensor format expected by DAV2
-        # DAV2 returns relative depth. Source mentions "relative inverse depth" processing.
-        # We assume DAV2 outputs a depth map D_V2.
-        # Note: DAV2 is pre-trained and frozen.
-        depth_maps = self.depth_estimator(images) 
-        # Process data using relative inverse depth as per source
-        # D_V2_inv = 1.0 / (D_V2 + epsilon)
-        # However, the loss formulas use D_V2 directly for ordering.
-        # We return the raw depth map for ordering checks.
-        return depth_maps
-
-    def compute_depth_ordering_fidelity_loss(self, d_r, d_v2):
-        # d_r: (B, H, W) rendered depth
-        # d_v2: (B, H, W) depth prior
-        # Iterate over pairs of pixels (k1, k2) in local regions
-        # This is computationally expensive. 
-        # Source formula: sum over k1, k2 where d_v2[k1] <= d_v2[k2]
-        # max(d_r[k1] - d_r[k2] + m_ar, 0)
-        
-        # Simplified implementation for a local patch
-        # In practice, this would be done using convolution or grouped operations
-        # Here we outline the logic
-        
-        loss = 0.0
-        # For each batch item
-        for b in range(d_r.shape[0]):
-            # Get local region P (e.g., 3x3 window)
-            # For demonstration, we use the whole image as one region or iterate patches
-            # Let's assume we process the whole image by comparing all pairs? No, too slow.
-            # Source says "local region P".
-            # We will approximate by comparing neighbors.
+    Returns:
+        rendered_colors: (H, W, 3)
+        rendered_depths: (H, W)
+        total_loss: float
+    """
+    
+    # 1. Initialize MLP weights theta (not shown in detail, assumed trained)
+    # 2. Prepare rays
+    rays = []
+    for h in range(H):
+        for w in range(W):
+            rays.append((ray_origins[h, w], ray_directions[h, w]))
             
-            # Get dynamic margin m_ar
-            # m_ar = alpha * mean(|d_r[k1] - d_r[k2]|) over samples?
-            # Source: N is number of depth samples in computation area.
-            # This implies m_ar is computed per pixel pair or per region.
-            # Let's compute m_ar based on the mean depth difference in the local neighborhood.
+    rendered_colors = np.zeros((H, W, 3))
+    rendered_depths = np.zeros((H, W))
+    
+    # Loss accumulators
+    l_nerf = 0.0
+    l_dof = 0.0
+    r_dsc = 0.0
+    
+    # Ground truth colors for L_nerf (assumed available for training)
+    # gt_colors = ... 
+    
+    for h in range(H):
+        for w in range(W):
+            origin, direction = rays[h * W + w]
             
-            # Calculate m_ar for the whole image as an approximation
-            # Or per pixel. Let's do per pixel using neighbors.
+            # 3. Sampling
+            # Use Mip-NeRF cone frustum + dynamic sampling
+            # Determine t_n, t_f based on scene bounds or depth prior
+            # For simplicity, assume uniform sampling in [t_n, t_f] 
+            # or use the dynamic mechanism described.
+            t_vals = np.linspace(t_n, t_f, num_samples)
+            delta = t_vals[1] - t_vals[0] # Assuming uniform for simplicity
             
-            # To implement strictly:
-            # 1. Identify pairs (k1, k2) in local region where d_v2[k1] <= d_v2[k2]
-            # 2. Compute m_ar for these pairs
-            # 3. Apply hinge loss
+            # 3D positions and directions
+            x_vals = origin + t_vals[:, np.newaxis] * direction
+            d_vals = np.tile(direction, (num_samples, 1))
             
-            # Since full implementation is complex, we note the formula.
-            # [G] In a real implementation, this would use torch.nn.functional.unfold to get patches
-            # and then compute pairwise losses within patches.
+            # 4. Feature Fusion and MLP Forward
+            # Construct 5D vector: [x, y, z, d_x, d_y] (assuming d_z is dependent or normalized)
+            # Or [x, y, z, theta, phi] of direction. Source says "coordinates and ray info".
+            # We assume a standard 5D vector construction.
+            v_5d = np.column_stack((x_vals, d_vals[:, :2])) # Placeholder for exact 5D construction
+            
+            # Process v_5d (transformation not specified, assume identity or simple proj)
+            v_5d_processed = v_5d 
+            
+            # MLP with per-layer fusion
+            # h_prev = v_5d_processed (for first layer) or output of previous layer
+            # This loop simulates the MLP layers
+            h_prev = v_5d_processed
+            sigma_list = []
+            c_list = []
+            
+            for layer in range(num_layers):
+                # Fusion: Concatenate or Add h_prev and v_5d_processed
+                # Source: "Each MLP layer takes two inputs: features from previous layer 
+                # and processed five-dimensional input information"
+                fused_input = np.concatenate([h_prev, v_5d_processed], axis=-1)
+                
+                # MLP Layer operation (weights W_l, bias b_l, activation act)
+                # h_curr = act(fused_input @ W_l + b_l)
+                # Note: Exact architecture dimensions are not given in source.
+                # [G] Assuming standard MLP layer implementation.
+                h_curr = apply_mlp_layer(fused_input, layer) 
+                h_prev = h_curr
+                
+                # Extract sigma and c from the final layer output
+                # Assuming the last layer outputs sigma and c channels
+                if layer == num_layers - 1:
+                    sigma = h_curr[..., 0] # Placeholder for sigma extraction
+                    c = h_curr[..., 1:4]   # Placeholder for color extraction
+                    sigma_list.append(sigma)
+                    c_list.append(c)
+            
+            # 5. Volume Rendering
+            sigmas = np.array(sigma_list)
+            colors = np.array(c_list)
+            
+            alphas = 1.0 - np.exp(-sigmas * delta)
+            transmittance = np.exp(-np.cumsum(sigmas * delta, axis=0))
+            # Handle first sample transmittance
+            transmittance = np.concatenate([np.ones((num_samples, 1)), transmittance[:-1]], axis=1)
+            
+            weights = transmittance * alphas
+            rendered_color = np.sum(weights[:, np.newaxis] * colors, axis=0)
+            rendered_depth = np.sum(weights * t_vals, axis=0)
+            
+            rendered_colors[h, w] = rendered_color
+            rendered_depths[h, w] = rendered_depth
+            
+            # 6. Loss Calculation
+            # L_nerf
+            # gt_c = gt_colors[h, w]
+            # l_nerf += np.sum((gt_c - rendered_color)**2)
+            
+            # L_DOF and R_DSC require pixel pairs and depth priors
+            # These are computed over the whole image or local patches
             pass
             
-        return loss # Placeholder for complex local operation
+    # Aggregate losses over the image/batch
+    # l_dof = compute_dof_loss(rendered_depths, depth_priors, alpha_margin)
+    # r_dsc = compute_dsc_loss(rendered_depths, depth_priors)
+    
+    # total_loss = l_nerf + lambda_dof * l_dof + gamma_dsc * r_dsc
+    
+    return rendered_colors, rendered_depths, total_loss
 
-    def compute_depth_structural_consistency(self, d_r, d_v2):
-        # R_DSC = sum_k1 sum_{k2 in KNN(d_v2[k1])} max(|d_r[k1] - d_r[k2]| - m_ar', 0)
-        # KNN based on depth values in small region.
-        pass
+def compute_dof_loss(rendered_depths, depth_priors, alpha_margin):
+    """
+    Computes Depth Ordering Fidelity Loss.
+    """
+    loss = 0.0
+    # Iterate over local regions P
+    # For each pair of pixels k1, k2 in P
+    # if d_V2[k1] <= d_V2[k2]:
+    #    m_ar = alpha * mean(|d_r[k1] - d_r[k2]| over samples)
+    #    loss += max(d_r[k1] - d_r[k2] + m_ar, 0)
+    # [G] Implementation details for KNN and local region iteration omitted for brevity
+    # as the source provides the formula but not the specific loop structure for 
+    # "local region P".
+    return loss
+
+def compute_dsc_loss(rendered_depths, depth_priors):
+    """
+    Computes Depth Structural Consistency Regularization.
+    """
+    loss = 0.0
+    # For each pixel k1
+    # Find k-nearest neighbors in d_V2
+    # loss += max(|d_r[k1] - d_r[k2]| - m_ar_prime, 0)
+    return loss
 ```
 
+**Parameters:**
+*   $\lambda$: Weight for Depth Ordering Fidelity Loss. Typical value: 0.2 [S1].
+*   $\gamma$: Weight for Depth Structural Consistency Regularization. Typical value: 0.02 [S1].
+*   $\alpha$: Hyperparameter for dynamic boundary adjustment $m_{ar}$. Value not explicitly given, described as "tunable" [S1].
+*   $N$: Number of samples per ray. Not explicitly given, but standard NeRF uses 64-128. Source mentions "three-layer dynamic sampling mechanism" [S1].
+*   $m_{ar}'$: Small boundary value for DSC. Not explicitly given [S1].
+
 **Edge Cases and Pitfalls:**
-*   **Depth Prior Quality:** The method relies heavily on the accuracy of DepthAnythingV2. If the prior is noisy or incorrect for complex geometries (though DAV2 is robust), the regularization may misguide the NeRF [S1].
-*   **Sparse Views:** With very few input images, the depth prior becomes critical. If the prior is missing or unreliable in certain regions, reconstruction quality may degrade [S1].
-*   **Dynamic Sampling Complexity:** The three-layer dynamic sampling mechanism adds computational overhead compared to uniform sampling [S1].
-*   **Hyperparameter Sensitivity:** The values of $\lambda$ (0.2) and $\gamma$ (0.02) are critical. Incorrect tuning may lead to over-regularization (blurring) or under-regularization (noise) [S1].
+*   **Sparse Inputs:** The method is specifically designed for sparse views. Performance may degrade if the number of input views is extremely low (e.g., < 3) or if the depth prior from DepthAnythingV2 is highly inaccurate for the specific scene geometry [S1].
+*   **Depth Prior Accuracy:** The method relies heavily on the quality of the monocular depth estimate. DepthAnythingV2 is chosen for its robustness, but errors in transparent/reflective surfaces or complex geometries can still propagate into the NeRF training [S1].
+*   **Dynamic Sampling:** The "three-layer dynamic sampling mechanism" is mentioned but not detailed. Implementation requires careful handling of the sampling distribution to ensure adequate coverage of the scene depth [S1].
+*   **Relative Depth Ordering:** The $L_{DOF}$ loss relies on relative ordering. If the depth prior has noise causing incorrect relative orders, the regularization may penalize correct NeRF predictions. The dynamic margin $m_{ar}$ helps mitigate this [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Training is slower than standard NeRF due to the additional depth prior extraction (DepthAnythingV2 inference) and the complex regularization losses ($L_{DOF}$ and $R_{DSC}$) which involve pairwise comparisons or KNN operations in local regions [S1].
-*   **Memory Complexity:** Higher memory usage due to the storage of depth priors for all input views and the additional computations for regularization terms [S1].
-*   **Performance:** Outperforms existing sparse-view methods in detail reconstruction. DepthAnythingV2 is 10 times faster in inference than MiDaS, making the depth prior extraction efficient [S1].
-*   **Strengths:** Improved detail preservation in sparse inputs; robust handling of transparent/reflective objects; reduced lighting impact via dynamic sampling [S1].
-*   **Limitations:** Requires a pre-trained depth model; sensitive to hyperparameters $\lambda$ and $\gamma$; complex implementation of regularization losses [S1].
-*   **When to Use:** Sparse-view 3D reconstruction where high-fidelity detail is required and standard NeRF fails due to insufficient input views [S1].
-*   **When Not to Use:** Dense-view scenarios where standard NeRF performs well; real-time applications requiring minimal training time [S1].
+*   **Time Complexity:** The per-ray computation involves an MLP forward pass with $N$ samples. The fusion of the 5D vector at each layer adds a constant overhead per layer. The depth regularization losses ($L_{DOF}$, $R_{DSC}$) require pairwise comparisons or KNN searches over pixels, which can be computationally expensive if not optimized (e.g., using local patches). The source does not provide specific FLOPs or training time metrics.
+*   **Memory Complexity:** Depends on the MLP size and the number of samples $N$. The depth priors must be stored for all input views.
+*   **Strengths:** Improves sparse reconstruction details by leveraging accurate monocular depth priors. The dynamic sampling and per-layer fusion help preserve high-frequency details and reduce lighting artifacts. DepthAnythingV2 provides stable and fast depth estimates compared to MiDaS [S1].
+*   **Limitations:** Relies on the quality of the external depth estimation model. The complexity of the regularization terms may increase training time. The exact architecture of the dynamic sampling layer and the 5D vector processing are not fully detailed, potentially making implementation ambiguous.
+*   **When to use:** Sparse-view 3D reconstruction where high-fidelity detail is required and standard NeRF fails due to insufficient input views.
+*   **When not to use:** Dense-view reconstruction where standard NeRF or other optimized variants (like Instant-NGP) might be more efficient. Scenes with extreme lighting variations that the dynamic sampling cannot handle.
 
 ## Background
-DASNeRF was proposed to address the limitations of standard NeRF, which typically requires hundreds of images for high-fidelity reconstruction, limiting its practical use in sparse-view scenarios [S1]. The method builds on the implicit function representation of NeRF and incorporates advances in monocular depth estimation (specifically DepthAnythingV2) and dynamic sampling techniques (from Mip-NeRF) [S1]. It was developed to improve sparse reconstruction details by using accurate depth priors and robust relative depth regularization [S1].
+DASNeRF was introduced in a paper published in PLOS ONE in 2026 (fetched date), titled "DASNeRF: depth consistency optimization, adaptive sampling, and hierarchical structural fusion for sparse view neural radiance fields" [S1]. It builds upon the original NeRF framework [8] and Mip-NeRF [S1]. The method addresses the limitation of NeRF requiring hundreds of images by incorporating monocular depth estimation (specifically DepthAnythingV2) to guide learning in sparse settings. It was developed to improve practical deployment in fields like autonomous driving and augmented reality where sparse inputs are common [S1].
 
 ## Sources
 [S1] DASNeRF: depth consistency optimization, adaptive sampling, and hierarchical structural fusion for sparse view neural radiance fields., https://doi.org/10.1371/journal.pone.0321878, fetched 2026-10-27

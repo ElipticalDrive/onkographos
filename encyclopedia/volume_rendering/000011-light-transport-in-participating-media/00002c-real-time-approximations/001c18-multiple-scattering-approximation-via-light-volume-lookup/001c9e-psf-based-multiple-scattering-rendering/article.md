@@ -3,179 +3,116 @@
 Also called: Elek et al. (2013) Screen-Space Multiple Scattering, Elek et al. method, PSF convolution method, Path integral and spatial spreading (Elek), Point Spread Function method, Screen-Space Multiple Scattering, Screen-space reference
 
 ## Overview
-PSF-based Multiple Scattering Rendering approximates volumetric light transport by treating the participating medium as a spatially varying Point Spread Function (PSF) that blurs incident radiance, avoiding the computational cost of solving the Radiative Transfer Equation directly [S1]. Unlike diffusion approximations which assume optically dense, homogeneous media with uniform angular distribution, this method handles spatially varying materials and highly directional lighting effects by convolving a pre-attenuated scattered radiance image with a Gaussian kernel derived from the medium's optical properties [S1].
+PSF-based Multiple Scattering Rendering approximates volumetric light transport by convolving a vacuum-rendered image with a spatially varying Gaussian Point Spread Function (PSF) derived from the medium's optical properties [S1][S2, unofficial]. It solves the problem of computationally expensive multiple scattering simulation by treating the medium as a blur filter, allowing for real-time performance on homogeneous media while handling directional lighting and visibility effects that simpler diffusion models miss [S1]. Unlike diffusion approximations which assume optically dense, homogeneous media with uniform angular distribution, this method explicitly models spatial spreading via path integrals, supporting spatially varying materials and anisotropic sources [S1].
 
 ## How it works
-The method operates in two phases: preprocessing the vacuum-rendered input image into attenuated and scattered components, and applying a spatially varying Gaussian blur to the scattered component based on pixel depth [S2, unofficial].
+The method operates in two phases: preprocessing the vacuum-rendered image into attenuated and scattered components, and applying a spatially varying Gaussian blur to the scattered component based on pixel depth [S2, unofficial].
 
-### Inputs and Outputs
-*   **Inputs:**
-    *   $L$: The input image (radiance) rendered in a vacuum (no scattering) [S2, unofficial].
-    *   $D$: A depth buffer where $D(\mathbf{x})$ is the distance from the camera to the surface at pixel $\mathbf{x}$ [S2, unofficial].
-    *   $\sigma_a$: Absorption coefficient [S2, unofficial].
-    *   $\sigma_s$: Scattering coefficient [S2, unofficial].
-    *   $g$: Anisotropy factor [S2, unofficial].
-*   **Outputs:**
-    *   $L'$: The final image with multiple scattering effects [S2, unofficial].
+**Inputs:**
+*   $L$: Input image rendered in a vacuum (radiance per pixel).
+*   $D$: Depth buffer (distance from camera to surface for each pixel).
+*   $\sigma_a$: Absorption coefficient.
+*   $\sigma_s$: Scattering coefficient.
+*   $g$: Anisotropy factor.
+*   $\sigma_t = \sigma_a + \sigma_s$: Extinction coefficient.
 
-### Data Structures
-1.  **Input Image $L$**: 2D array of radiance values.
-2.  **Depth Buffer $D$**: 2D array of float depths.
-3.  **Attenuated Image $L_{\text{at}}$**: 2D array, same resolution as $L$.
-4.  **Scattered Image $L_{\text{sc}}$**: 2D array, same resolution as $L$.
-5.  **Mipmap Pyramid**: A set of images $L_{\text{sc}}^{(k)}$ at resolutions $2^{-k}$ of the original, used for efficient filtering [S2, unofficial].
+**Outputs:**
+*   $L'$: Final image with multiple scattering effects.
 
-### Formulas
-The extinction coefficient is $\sigma_t = \sigma_a + \sigma_s$ [S2, unofficial].
+**Data Structures:**
+*   $L_{\text{at}}$: Image of attenuated radiance (same dimensions as $L$).
+*   $L_{\text{sc}}$: Image of scattered radiance (same dimensions as $L$).
+*   $W(s)$: Function returning the standard deviation of the Gaussian kernel for a given depth $s$.
+*   MIP map pyramid of $L_{\text{sc}}$: Precomputed levels of detail for efficient filtering [S2, unofficial].
 
-1.  **Preprocessing**: Split the input radiance $L$ into direct (attenuated) and scattered components using the Beer-Lambert law [S2, unofficial]:
-    $$L_{\text{at}}(\mathbf{x}) = \exp(-\sigma_t D(\mathbf{x})) \cdot L(\mathbf{x})$$
-    $$L_{\text{sc}}(\mathbf{x}) = \exp(-\sigma_a D(\mathbf{x})) \cdot (1 - \exp(-\sigma_s D(\mathbf{x}))) \cdot L(\mathbf{x})$$
-    Note: $L_{\text{at}} + L_{\text{sc}} \neq L$ because absorbed radiance is lost [S2, unofficial].
+**Steps:**
 
-2.  **PSF Width**: The standard deviation $W(s)$ of the Gaussian spatial-spreading distribution for a collimated beam over distance $s$ is derived from the path integral framework [S2, unofficial]:
+1.  **Preprocessing:** Compute the attenuated and scattered radiance images using the Beer-Lambert law.
+    *   Compute attenuated radiance $L_{\text{at}}$:
+        $$L_{\text{at}}(\mathbf{x}) = \exp(-\sigma_t D(\mathbf{x})) \cdot L(\mathbf{x})$$
+        where $D(\mathbf{x})$ is the depth at pixel $\mathbf{x}$ [S2, unofficial].
+    *   Compute scattered radiance $L_{\text{sc}}$:
+        $$L_{\text{sc}}(\mathbf{x}) = \exp(-\sigma_a D(\mathbf{x})) \cdot (1 - \exp(-\sigma_s D(\mathbf{x}))) \cdot L(\mathbf{x})$$
+        Note: $L_{\text{at}} + L_{\text{sc}} \neq L$ because absorbed radiance is lost [S2, unofficial].
+
+2.  **PSF Derivation:** Calculate the standard deviation $W(s)$ for the Gaussian kernel based on the distance $s$ between points. For a collimated beam, the width is derived from the path integral framework [S2, unofficial]:
     $$W(s) = \sqrt{\frac{1}{2} \left( \frac{2\sigma_a}{3s} + \frac{4}{s^3\sigma_s(1-g)} \right)^{-1}}$$
-    where $s$ is the distance between two points (depth $D$) [S2, unofficial].
+    where $s$ is the distance (depth) [S2, unofficial].
 
-3.  **Blurring**: The final image $L'$ is the sum of the attenuated radiance and the blurred scattered radiance [S2, unofficial]:
+3.  **Filtering:** Apply a spatially varying Gaussian blur to $L_{\text{sc}}$. The final image $L'$ is the sum of the direct attenuated light and the blurred scattered light:
     $$L'(\mathbf{x}) = L_{\text{at}}(\mathbf{x}) + \sum_{\mathbf{x}'} G_{\mathbf{x}'}(\|\mathbf{x}' - \mathbf{x}\|) L_{\text{sc}}(\mathbf{x}')$$
-    where $G_{\mathbf{x}'}$ is a 2D Gaussian kernel centered at $\mathbf{x}'$ with standard deviation $W(D(\mathbf{x}'))$ [S2, unofficial].
+    where $G_{\mathbf{x}'}$ is a 2D Gaussian distribution centered at $\mathbf{x}'$ with standard deviation $W(D(\mathbf{x}'))$ [S2, unofficial].
+    *   Implementation Note: To achieve real-time performance, this summation is typically implemented using MIP map filtering, where the kernel size determines the MIP level, avoiding $O(n^2)$ gathering costs [S2, unofficial].
 
-### Steps
-1.  **Render Vacuum Image**: Render the scene without participating media to obtain $L$ and the depth buffer $D$ [S2, unofficial].
-2.  **Compute Components**: Calculate $L_{\text{at}}$ and $L_{\text{sc}}$ for each pixel using the formulas above [S2, unofficial].
-3.  **Build Mipmaps**: Construct a mipmap pyramid from $L_{\text{sc}}$ to enable efficient multi-scale filtering [S2, unofficial].
-4.  **Filter Scattered Radiance**: Apply a spatially varying Gaussian blur to $L_{\text{sc}}$. For each pixel $\mathbf{x}$, the blur width depends on its depth $D(\mathbf{x})$. Efficient implementation uses the mipmap pyramid to approximate the convolution [S2, unofficial].
-5.  **Composite**: Add the blurred $L_{\text{sc}}$ to $L_{\text{at}}$ to produce $L'$ [S2, unofficial].
+**Pseudocode:**
 
-### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def psf_multiple_scattering(L, D, sigma_a, sigma_s, g):
     """
-    L: 2D array of radiance values (H, W, C)
-    D: 2D array of depths (H, W)
-    sigma_a: float, absorption coefficient
-    sigma_s: float, scattering coefficient
-    g: float, anisotropy factor
-    Returns: L_prime, the final image with scattering
+    L: Input vacuum image (H, W, 3)
+    D: Depth buffer (H, W)
+    sigma_a: Absorption coefficient (scalar)
+    sigma_s: Scattering coefficient (scalar)
+    g: Anisotropy factor (scalar)
+    Returns: L_prime (H, W, 3)
     """
     sigma_t = sigma_a + sigma_s
     
-    # Step 1: Preprocess into attenuated and scattered components
-    # L_at: radiance reaching camera directly (attenuated)
-    # L_sc: radiance scattered towards camera (not absorbed)
-    exp_at = exp(-sigma_t * D)
-    exp_sc = exp(-sigma_a * D) * (1 - exp(-sigma_s * D))
+    # Step 1: Preprocessing
+    # Attenuated radiance: light that reaches camera directly
+    exp_at = np.exp(-sigma_t * D)
+    L_at = L * exp_at[..., np.newaxis]
     
-    L_at = L * exp_at
-    L_sc = L * exp_sc
+    # Scattered radiance: light scattered towards camera but not absorbed
+    # Formula: exp(-sigma_a * D) * (1 - exp(-sigma_s * D)) * L
+    exp_scatter = np.exp(-sigma_a * D) * (1.0 - np.exp(-sigma_s * D))
+    L_sc = L * exp_scatter[..., np.newaxis]
     
-    # Step 2: Build Mipmap Pyramid for L_sc
-    # Mipmaps allow efficient approximation of spatially varying Gaussian blur
-    mipmaps = build_mipmap_pyramid(L_sc)
+    # Step 2 & 3: Filtering
+    # Calculate PSF width W(s) for each pixel depth s
+    # W(s) = sqrt( 0.5 * ( (2*sigma_a)/(3*s) + 4/(s^3 * sigma_s * (1-g)) )^-1 )
+    # Avoid division by zero for s=0
+    s = np.maximum(D, 1e-6)
     
-    # Step 3: Filter L_sc using spatially varying PSF
-    # The blur width W depends on depth D
-    L_sc_blurred = spatially_varying_gaussian_blur(L_sc, mipmaps, D, sigma_a, sigma_s, g)
+    term1 = (2.0 * sigma_a) / (3.0 * s)
+    term2 = 4.0 / (s**3 * sigma_s * (1.0 - g))
+    inv_var = term1 + term2
+    W = np.sqrt(0.5 / inv_var)
     
-    # Step 4: Composite
+    # Apply spatially varying Gaussian blur to L_sc using W
+    # In practice, this is done via MIP map filtering where kernel size ~ W
+    # Here we denote the operation as a spatially varying convolution
+    L_sc_blurred = spatially_varying_gaussian_blur(L_sc, W)
+    
+    # Composite
     L_prime = L_at + L_sc_blurred
     
     return L_prime
-
-def spatially_varying_gaussian_blur(L_sc, mipmaps, D, sigma_a, sigma_s, g):
-    """
-    Approximates the convolution sum using mipmap filtering.
-    For each pixel, determines the required blur width W(s) based on depth s.
-    Selects appropriate mipmap level and performs filtering.
-    """
-    H, W = L_sc.shape[:2]
-    L_sc_blurred = zeros_like(L_sc)
-    
-    for y in range(H):
-        for x in range(W):
-            s = D[y, x]
-            if s <= 0:
-                continue
-                
-            # Calculate PSF width (standard deviation)
-            # W(s) = sqrt( 0.5 * ( (2*sigma_a)/(3*s) + 4/(s^3 * sigma_s * (1-g)) )^-1 )
-            term1 = (2 * sigma_a) / (3 * s)
-            term2 = 4 / (s**3 * sigma_s * (1 - g))
-            W_s = sqrt(0.5 * (term1 + term2)**-1)
-            
-            # Map width W_s to a mipmap level
-            # Higher W_s requires lower resolution (higher mipmap level)
-            # Implementation detail: Select mipmap level k such that the kernel 
-            # covers the necessary neighborhood at that resolution.
-            k = select_mipmap_level(W_s, original_resolution)
-            
-            # Perform filtering using the selected mipmap
-            # This approximates the sum: sum_{x'} G_{x'}(||x' - x||) L_sc(x')
-            L_sc_blurred[y, x] = filter_mipmap(mipmaps[k], x, y, W_s)
-            
-    return L_sc_blurred
-
-def build_mipmap_pyramid(img):
-    """
-    Creates a pyramid of images at half resolution each level.
-    """
-    mipmaps = [img]
-    current = img
-    while current.shape[0] > 1 and current.shape[1] > 1:
-        current = downsample(current)
-        mipmaps.append(current)
-    return mipmaps
-
-def downsample(img):
-    """
-    Simple 2x2 box filter downsampling.
-    """
-    H, W = img.shape[:2]
-    new_H, new_W = H // 2, W // 2
-    result = zeros((new_H, new_W, img.shape[2]))
-    for y in range(new_H):
-        for x in range(new_W):
-            result[y, x] = (img[2*y, 2*x] + img[2*y, 2*x+1] + 
-                            img[2*y+1, 2*x] + img[2*y+1, 2*x+1]) / 4.0
-    return result
-
-def filter_mipmap(mipmap, x, y, W_s):
-    """
-    Filters the pixel at (x,y) using the mipmap.
-    The exact implementation depends on the specific mipmap filtering technique 
-    used by Elek et al. to reduce artifacts. A simple approximation is a box 
-    filter or Gaussian filter on the mipmap texture.
-    """
-    # Placeholder for the specific efficient filtering algorithm described 
-    # in Elek et al. [2013] which reduces artifacts compared to naive gathering.
-    # The core idea is to sample the mipmap at (x,y) with a kernel size 
-    # proportional to W_s.
-    return mipmap[y, x] # Simplified for structure; real impl uses kernel
 ```
 
-### Parameters
-*   $\sigma_a, \sigma_s, g$: Basic optical properties of the medium [S1].
-*   Typical values are not specified in the sources, but the method is designed for real-time performance, with reported execution times of 2 milliseconds for the filtering step on a sample image [S2, unofficial].
+**Edge Cases and Pitfalls:**
+*   **Homogeneous Media Only:** The method assumes homogeneous media. It does not natively support non-homogeneous analytically integrable media without modification [S2, unofficial].
+*   **Energy Conservation:** $L_{\text{at}} + L_{\text{sc}} \neq L$. Absorbed radiance is not present in either image and is effectively lost [S2, unofficial].
+*   **Depth Accuracy:** The PSF width $W(s)$ depends critically on depth $s$. Incorrect depth buffers (e.g., from occlusion culling errors) will result in incorrect blurring scales [S2, unofficial].
+*   **Performance:** Naive gathering is $O(n^2 m^2)$ or worse. MIP map filtering is required for real-time performance [S2, unofficial].
 
-### Edge Cases and Pitfalls
-*   **Homogeneous Media Only**: The method assumes homogeneous media. It does not support non-homogeneous analytically integrable media without modification [S2, unofficial].
-*   **Absorbed Radiance**: $L_{\text{at}} + L_{\text{sc}} \neq L$ because absorbed radiance is lost [S2, unofficial].
-*   **Precision**: The method avoids the high computational cost of Monte Carlo (hours to days) but may introduce artifacts if the mipmap filtering is not implemented carefully [S2, unofficial].
-*   **Depth Dependency**: The blur width $W(s)$ varies with depth $s$. Pixels with very small or very large depths may require careful handling of the PSF width calculation to avoid numerical instability [S2, unofficial].
+## Subtopics
+
+### [Narrow beam distribution method](9069-narrow-beam-distribution-method.md)
+A screen-space multiple-scattering approximation that filters vacuum-rendered images using a heuristic distribution function derived from the assumption that light remains concentrated in narrow beams. It differs from sibling methods by explicitly modeling the spatial variation of scattering moments for heterogeneous media, though it is generally too slow for real-time performance compared to simpler MIP-map based approaches.
 
 ## Operating characteristics
-*   **Time Complexity**: The naive gathering approach has complexity $O(n^2 m^2)$ or $O(n^2 m^4)$, where $n$ is image size and $m$ is neighborhood size. The enhanced MIP map filtering reduces this significantly, achieving 2 milliseconds for a sample image compared to 30 seconds for gathering and 15 hours for path-tracing reference [S2, unofficial].
-*   **Memory Complexity**: Requires storage for the input image, depth buffer, attenuated/scattered images, and the mipmap pyramid. The mipmap pyramid adds $O(N)$ memory overhead, where $N$ is the number of pixels in the original image.
-*   **Strengths**: Handles spatially varying materials and highly directional effects, unlike diffusion approximation [S1]. Much faster than direct simulation [S1].
-*   **Limitations**: Restricted to homogeneous media [S2, unofficial]. The approximation may not capture all complex scattering effects in optically thin or highly anisotropic media accurately.
-*   **When to Use**: Real-time rendering of homogeneous participating media where multiple scattering is important but direct simulation is too slow.
-*   **When Not to Use**: Non-homogeneous media, or when high accuracy is required for complex scattering scenarios.
+*   **Time Complexity:** Naive gathering is $O(n^2 m^2)$ or $O(n^2 m^4)$ depending on neighborhood size [S2, unofficial]. With MIP map filtering, performance improves significantly, achieving ~2 milliseconds for a sample image compared to 30 seconds for gathering and 15 hours for path-tracing reference [S2, unofficial].
+*   **Memory Complexity:** Requires storage for $L_{\text{at}}$, $L_{\text{sc}}$, and MIP map pyramids of $L_{\text{sc}}$ [S2, unofficial].
+*   **Strengths:** Handles spatially varying general materials and highly directional effects; accounts for anisotropic sources and visibility effects; much faster than Monte Carlo or finite element techniques [S1].
+*   **Limitations:** Restricted to homogeneous media; assumes spatial spreading can be modeled by a Gaussian PSF; not suitable for optically thin or highly heterogeneous media without extension [S1][S2, unofficial].
+*   **When to Use:** Real-time rendering of homogeneous participating media where multiple scattering is desired and performance is critical.
+*   **When Not to Use:** Heterogeneous media, optically dense media requiring diffusion approximation, or scenes requiring exact energy conservation without post-processing corrections.
 
 ## Background
-The method was introduced by Elek et al. in 2013 as a screen-space multiple-scattering technique [S2, unofficial]. It is based on the mathematical path integration framework introduced by Tesfa [Tes87] and Perez et al. [PAS03] [S1]. The approach was inspired by earlier work on subsurface scattering using point spread functions, such as the diffusion approximation by Jensen et al. [JMLH01], but extends it to general volumes [S1]. The method was designed to address the computational expense of volumetric Monte Carlo and finite element techniques, which can take hours to days to solve [S1].
+The method was introduced by Elek et al. in 2013 as a screen-space multiple-scattering approximation [S1][S2, unofficial]. It builds on the mathematical path integration framework introduced by Tesfa [Tes87] and Perez et al. [PAS03] to describe multiple scattering effects in terms of spatial and angular blurring [S1]. The specific formula for the standard deviation of the Gaussian spatial-spreading distribution for a collimated beam was derived by Premože et al. [2004] [S2, unofficial]. The method was developed to address the computational expense of volumetric Monte Carlo and finite element techniques, which can take hours to days to solve [S1].
 
 ## Sources
 [S1] Practical Rendering of Multiple Scattering Effects in Participating Media, https://cseweb.ucsd.edu/~ravir/HRPIEG.pdf, fetched 2026-10-28

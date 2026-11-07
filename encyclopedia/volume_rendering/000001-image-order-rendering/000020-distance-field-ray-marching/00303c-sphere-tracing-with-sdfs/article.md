@@ -1,77 +1,67 @@
 # Sphere Tracing with SDFs
 
-Also called: Raymarching with Signed Distance Functions, SDF Raymarching
+Also called: Sphere Marching, Ray Marching with SDFs
 
 ## Overview
-Sphere tracing with SDFs is a technique for rendering implicit surfaces by casting rays and stepping along them using the distance field as a guide [S1, unofficial][S2, unofficial]. It solves the problem of rendering complex, analytic geometry without explicit mesh data by replacing triangle intersection tests with distance queries [S1, unofficial]. It differs from standard triangle-based ray tracing by using the mathematical property of the SDF to guarantee no surface is missed, and from other volume rendering methods by focusing on surface intersection rather than volumetric integration [S2, unofficial].
+Sphere Tracing is an image-order rendering algorithm for implicit surfaces defined by Signed Distance Functions (SDFs). It solves the problem of finding the intersection between a camera ray and complex, continuous geometry without requiring explicit polygonal meshes or bounding volume hierarchies. It sets itself apart from its sibling [Ray-marching on 3D Gaussians](1036-ray-marching-on-3d-gaussians.md) by using exact geometric distance bounds rather than probabilistic density accumulation, and from [Terrain Raymarching](1357-terrain-raymarching.md) by supporting arbitrary 3D topology rather than height-field constraints. It builds on [Distance-field ray marching](21-distance-field-ray-marching.md).
 
 ## Shared principles
-The method renders geometry by shooting a ray through each pixel and repeatedly querying a Signed Distance Function (SDF) [S2, unofficial]. An SDF is a formula that, given any point $p$ in space, returns the distance from $p$ to the nearest surface [S1, unofficial][S10][S14, unofficial]. The sign indicates position: negative inside, positive outside, zero exactly on the surface [S1, unofficial][S14, unofficial][S20, unofficial].
+The method operates on the principle that a Signed Distance Function (SDF) $f(\mathbf{p})$ returns the shortest Euclidean distance from a query point $\mathbf{p} \in \mathbb{R}^3$ to the nearest surface of the scene geometry [S2, S5, S6, S12, unofficial]. The sign of the result indicates the point's position relative to the surface:
+- $f(\mathbf{p}) < 0$: The point is inside the primitive.
+- $f(\mathbf{p}) = 0$: The point lies exactly on the surface.
+- $f(\mathbf{p}) > 0$: The point is outside the primitive.
 
-The core loop initializes a ray with an origin point $ro$ and a normalized direction vector $v$ [S1, unofficial][S10][S12, unofficial]. It maintains a current position $p$ (initially $ro$) [S10]. In each iteration:
-1. The SDF is evaluated at $p$ to get the distance $d$ to the nearest surface [S1, unofficial][S10].
-2. If $d < 0$, the ray has penetrated the surface; the algorithm returns a hit [S6, unofficial].
-3. If $d \le \text{HIT\_THRESHOLD}$ (a small value such as 0.001), the ray has hit the surface [S1, unofficial][S3, unofficial]. The loop terminates.
-4. Otherwise, the position is advanced: $p \leftarrow p + d \cdot v$ [S10]. This step size is guaranteed not to overshoot the surface because $d$ is the distance to the nearest surface [S2, unofficial].
-5. The loop continues while the step count is less than $\text{MAX\_STEPS}$ [S1, unofficial][S7, unofficial].
+The core algorithm iteratively advances a ray $r(t) = \mathbf{o} + t\mathbf{d}$ along its direction $\mathbf{d}$ by querying the SDF at the current position $\mathbf{p}_i$. The step size $\Delta t$ is set to the distance value returned by the SDF: $\Delta t = f(\mathbf{p}_i)$ [S2, S7, S14, unofficial][S26][S33, S48, unofficial]. This step size is "safe" because, by the definition of the distance field, no geometry exists closer than $f(\mathbf{p}_i)$ to $\mathbf{p}_i$; thus, the ray cannot overshoot or penetrate a surface [S8, S27, S49, unofficial]. The position is updated as $\mathbf{p}_{i+1} = \mathbf{p}_i + f(\mathbf{p}_i)\mathbf{d}$ [S14, S33, unofficial].
 
-If the loop terminates without a hit (e.g., $t$ exceeds a maximum range or $\text{MAX\_STEPS}$ is reached), the ray misses [S1, unofficial].
+The loop terminates when one of the following conditions is met:
+1.  **Surface Hit:** The distance value $f(\mathbf{p}_i)$ falls below a small convergence threshold $\epsilon$ (e.g., $0.001$), indicating the ray is sufficiently close to the surface [S1, S2, S14, S34, S39, unofficial].
+2.  **Escape:** The accumulated distance $t$ exceeds a maximum travel distance $t_{max}$, indicating the ray has exited the scene or bounding volume without hitting geometry [S1, S2, S34, unofficial].
+3.  **Max Steps:** A predefined maximum number of iterations is reached, preventing infinite loops in case of non-convergence [S1, S2, S39, unofficial].
 
-The scene is defined by combining primitive SDFs. For a sphere of radius $r$ centered at $c$, the distance function is $d(p) = \|p - c\| - r$ [S1, unofficial][S19, unofficial][S20, unofficial]. Union of two objects with distance fields $d1$ and $d2$ is $iso(p) = \min(d1(p), d2(p))$ [S1, unofficial][S10][S19, unofficial][S20, unofficial]. Intersection is $iso(p) = \max(d1(p), d2(p))$ [S1, unofficial][S10][S19, unofficial][S20, unofficial]. Subtraction of object $d2$ from $d1$ is $iso(p) = \max(d1(p), -d2(p))$ [S1, unofficial][S10][S19, unofficial][S20, unofficial].
+Scene composition is achieved by combining primitive SDFs using Boolean operations. The union of two shapes with SDFs $f_1$ and $f_2$ is $\min(f_1(\mathbf{p}), f_2(\mathbf{p}))$ [S1, S38, unofficial]. The intersection is $\max(f_1(\mathbf{p}), f_2(\mathbf{p}))$ [S38, unofficial]. Subtraction (difference) is $\max(-f_1(\mathbf{p}), f_2(\mathbf{p}))$ [S38, unofficial]. Smooth blending between shapes can be achieved using smooth minimum functions, such as Inigo Quilez's `smoothMin(a, b, k)`: $h = \text{clamp}(k - |a-b|, 0, k) / k$; $\text{result} = \min(a,b) - h \cdot h \cdot k / 6$ [S9, S24, unofficial].
 
-Parameters include $\text{MAX\_STEPS}$ (a safety cap, typically 32 to 128 depending on implementation [S1, unofficial][S4, unofficial]) and $\text{HIT\_THRESHOLD}$ (epsilon) [S1, unofficial][S12, unofficial]. A maximum range or accumulated travel distance limit can also bound rays that miss [S1, unofficial].
+Transformations are applied to the query point before evaluation. Translation by vector $\mathbf{t}$ uses $f'(\mathbf{p}) = f(\mathbf{p} - \mathbf{t})$ [S35, unofficial]. Scaling by factor $s$ uses $f'(\mathbf{p}) = s \cdot f(\mathbf{p}/s)$ [S35, unofficial]. Domain repetition (tiling) is achieved by taking the modulo of the point coordinates: $f'(\mathbf{p}) = f(\mathbf{p} \pmod 1)$ [S35, unofficial].
 
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def ray_march(ro, v, scene, max_steps=40, hit_threshold=0.001, max_range=100.0):
-    p = ro
-    for i in range(max_steps):
-        d = scene(p)
-        if d < 0:
-            return p, True, dot(p - ro, v)
-        if d <= hit_threshold:
-            return p, True, dot(p - ro, v)
-        p += v * d
-        if dot(p - ro, v) > max_range:
-            break
-    return p, False, dot(p - ro, v)
-```
+Surface normals $\mathbf{n}$ at the hit point $\mathbf{p}$ are estimated via the gradient of the SDF: $\mathbf{n} = \frac{\nabla f(\mathbf{p})}{\|\nabla f(\mathbf{p})\|}$ [S1, S10, unofficial]. Since analytical gradients are often unavailable or expensive, they are typically approximated using central finite differences with a small offset $\epsilon$ (e.g., $0.001$):
+$$ \nabla f(\mathbf{p}) \approx \begin{bmatrix} f(\mathbf{p} + \epsilon \hat{x}) - f(\mathbf{p} - \epsilon \hat{x}) \\ f(\mathbf{p} + \epsilon \hat{y}) - f(\mathbf{p} - \epsilon \hat{y}) \\ f(\mathbf{p} + \epsilon \hat{z}) - f(\mathbf{p} - \epsilon \hat{z}) \end{bmatrix} $$
+[S1, S35, S39, S45, S46, unofficial].
 
 ## Subtopics
 
 ### [Zeno Implementation](1544-zeno-implementation.md)
-The Zeno implementation is a specific software architecture for sphere tracing that minimizes the coding effort required to add new implicit surfaces by relying on a numerical gradient approximation for shading. It solves the problem of boilerplate code in ray tracers by allowing primitives to be defined solely by a signed distance function (SDF), automatically deriving normals via finite differences. It differs from standard sphere tracing implementations by explicitly decoupling the intersection logic from the shading logic, using a fixed six-sample stencil for gradients rather than analytical derivatives.
+A software architecture for sphere tracing that minimizes the interface required to define new implicit surfaces, solving the problem of rapid prototyping for mathematical visualization by allowing users to define geometry solely through a signed distance bound, automatically deriving shading normals via numerical differentiation. It differs from general-purpose renderers by treating the distance bound as the primary geometric primitive and using a fixed six-sample gradient approximation to avoid explicit normal function definitions.
+
+### [Differentiable Sphere Tracing](2316-differentiable-sphere-tracing.md)
+A rendering algorithm for implicit SDFs represented by neural networks, enabling efficient forward and backward passes for inverse graphics optimization. It solves the computational prohibitive nature of naive sphere tracing in deep learning frameworks by optimizing the rendering pipeline for GPU efficiency, enabling inverse graphics optimization over scene parameters like latent codes and camera poses.
 
 ### [Raymarched SDF Volume Rendering](3663-raymarched-sdf-volume-rendering.md)
-Raymarched SDF Volume Rendering is a technique to display a 2D projection of a 3D object defined by a mathematical distance function (SDF) by casting rays from the camera and stepping along them until they intersect the surface. It creates an image from equations rather than rasterized geometry, allowing for complex, analytic shapes without explicit mesh data. Unlike traditional Unity Raycasting, which is not available in shaders, this method implements its own ray-intersection logic using distance queries.
+Renders 3D geometry defined by analytic SDFs by casting rays from the camera and stepping along them until they intersect the surface. Unlike traditional rasterization or mesh-based raycasting, this method constructs the image directly from equations, allowing for complex, continuous geometry without explicit polygonal meshes. It differs from its parent by often incorporating specific shading, lighting, and fog calculations within the raymarching loop to produce the final pixel color, rather than just returning a binary hit/miss or surface normal.
+
+### [Sphere Tracing with Composite SDF and Adaptive Sampling](3867-sphere-tracing-with-composite-sdf-and-adaptive-sampling.md)
+Renders scenes containing primitive shapes, character segments (letters), and arcs by combining their SDFs into a composite scene and tracing rays via sphere tracing. It extends standard sphere tracing by handling specific geometric primitives (line segments with thickness and arcs) alongside standard SDF shapes, and employs a path tracing loop with up to 3 bounces to compute lighting. The method distinguishes itself by using adaptive sampling with variance-based convergence to determine when a pixel has reached sufficient quality, rather than using a fixed sample count.
 
 ### [Uniform Sphere Tracing](4406-uniform-sphere-tracing.md)
+Renders participating media by computing the exact geometric intersection of a camera ray with a volume primitive (typically a sphere) and applying Beer's Law to determine transmission and scattering. Unlike adaptive methods that sample density fields at discrete intervals, this method calculates the precise entry and exit points to evaluate the optical depth in a single analytical step. It is distinguished from its sibling [Raymarched SDF Volume Rendering](3663-raymarched-sdf-volume-rendering.md) by its reliance on closed-form geometric intersections rather than iterative distance-field queries for volume boundaries.
 
 ### [Menger Sponge Raymarching](4875-menger-sponge-raymarching.md)
-A raymarching technique rendering a Menger sponge fractal using a signed distance function (SDF) combined with a floor plane, utilizing GLSL 120.
+A specific application of sphere tracing that renders the Menger sponge fractal by evaluating a recursive SDF. It differs from generic SDF rendering by using a specific iterative folding and scaling technique to define the fractal geometry, allowing for the rendering of complex, self-similar voids without explicit mesh data.
 
-### Mandelbulb Sphere Tracing
-#### definition
-- [S1, unofficial] A variation of sphere tracing that uses a Mandelbulb SDF (`distMandelBulb`) instead of primitive shapes, controlled by a `power` parameter.
-- [S1, unofficial] Sphere tracing applied to the Mandelbulb fractal. Uses a specific distance estimator function `distMandelBulb` instead of a generic shape distance function.
-#### step
-- [S1, unofficial] If mode `m` is 3, increment `power` and call `RenderMandelTraceWithMultiThreading`.
-- [S1, unofficial] Initialize step position to camera origin. Calculate minimum distance using `distMandelBulb(x, y, z)`.
-- [S1, unofficial] Loop while minimum distance is greater than 0.01 and less than 2000. Increment iteration counter. Update step position by adding `minDist * cos(angle)` to each coordinate.
-- [S1, unofficial] If final minimum distance is <= 0.01, the ray hit. Store distance and iteration count.
-- [S1, unofficial] If final minimum distance > 0.01, the ray missed. Store distance as 10000 and iteration count.
-#### parameter
-- [S1, unofficial] mult: Multiplier used in an alternate rendering mode (commented out) for mu calculation.
-- [S1, unofficial] threshhold: Threshold used in the alternate rendering mode.
-- [S1, unofficial] Hit threshold: 0.01. If `minDist <= 0.01`, the surface is considered hit.
-- [S1, unofficial] Max march distance: 2000.
-#### code
-- [S1, unofficial] Alternate rendering logic for Mandelbulb mu calculation (commented out in source).
-- [S1, unofficial] Core sphere tracing loop for Mandelbulb.
+### [Sphere Tracing with Represent Hit](6684-sphere-tracing-with-represent-hit.md)
+A deferred rendering technique that extends standard sphere tracing by tracking two distinct hit points per ray: a primary **surface hit** (the exact geometric intersection) and a **represent hit** (a proxy for the surface at the pixel's radius) to handle transparency and aliasing at object edges. It selects the ray with greater visual impact (higher alpha) to trace, writing results to two separate render targets. Unlike standard sphere tracing which terminates at the first surface contact, this method continues to evaluate proximity to the pixel radius to capture edge softness, distinguishing it from siblings like [Uniform Sphere Tracing](4406-uniform-sphere-tracing.md) which uses fixed step sizes, and [Differentiable Sphere Tracing](2316-differentiable-sphere-tracing.md) which focuses on gradient computation.
+
+### Chunked Sphere Tracing
+Processes rays in batches to manage memory or compute constraints. It splits the total number of rays $N$ into chunks of size `chunk_size`, processes each chunk using the parent sphere tracing forward method, and concatenates the resulting colors along the ray dimension [S2, unofficial].
+
+### Synchronized-tracing
+A tile-based rendering pipeline for implicit surfaces represented by blobtrees, designed for interactive modeling without preprocessing when primitive parameters are updated. It computes a tight volume of interest for all primitives using compact, smooth CSG operators, stores primitives of interest in a low-resolution A-buffer, and uses this buffer to synchronize threads within a subfrustum for coherent field evaluation. It prunes the blobtree on-the-fly using sparse bottom-up tree traversal to decorrelate field evaluation complexity from the full blobtree size, scaling well to surfaces with thousands of primitives [S3, abstract only, unofficial].
+
+### Acceleration Structures for SDF Evaluation
+Optimization nodes embedded directly in hierarchical construction trees to reduce the computational cost of field function evaluation while preserving Lipschitz or conservative properties. It avoids external data structures like octrees by using proxy and continuous level of detail nodes, and applies normal warping to enhance surface details. This approach speeds up SDF evaluation by up to three orders of magnitude and applies to both ray-surface intersection in sphere tracing and polygonization algorithms [S3, abstract only, unofficial].
 
 ## Background
-The technique is implemented in the `3D-Sphere-Tracing` repository by Hayden Parker, which provides examples of sphere tracing with various SDF primitives including spheres, boxes, and tori, as well as fractals like the Mandelbulb [S1, unofficial]. The implementation demonstrates the use of SDL for window management and rendering, and includes multi-threaded rendering support for complex fractals [S1, unofficial].
+Sphere tracing was introduced by John Hart in 1996 as an optimized variant of ray marching for objects with Signed Distance Functions [S1, unofficial]. It leverages the mathematical property of SDFs to guarantee safe step sizes, significantly accelerating the intersection search compared to fixed-step ray marching. The technique has become a foundational method for rendering implicit surfaces, fractals, and procedural geometry in real-time graphics and visual effects.
 
 ## Sources
-[S1] haydenparker3/3D-Sphere-Tracing, https://github.com/haydenparker3/3D-Sphere-Tracing, fetched 2026-10-26 (unofficial)
+[S1] Sculpting procedural noise: real-time rendering of interstellar dust clouds and solar flares, https://openalex.org/W4293584834, fetched 2026-10-26 (unofficial)
+[S2] Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, https://github.com/Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, fetched 2026-10-27 (unofficial)
+[S3] Enhanced Sphere Tracing | Request PDF - ResearchGate, https://www.researchgate.net/publication/265020476_Enhanced_Sphere_Tracing, fetched 2026-11-03 (abstract only, unofficial)
