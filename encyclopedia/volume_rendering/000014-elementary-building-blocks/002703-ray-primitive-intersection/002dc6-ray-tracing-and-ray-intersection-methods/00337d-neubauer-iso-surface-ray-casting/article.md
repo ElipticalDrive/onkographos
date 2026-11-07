@@ -1,50 +1,122 @@
 # Neubauer Iso-surface Ray Casting
+
 Also called: Kd-Jump, Neubauer method
 
 ## Overview
-Neubauer Iso-surface Ray Casting is a single-kernel rendering technique that accelerates iso-surface extraction by combining spatial subdivision with projection-based culling [S1, unofficial]. It differs from sibling methods like Binary Search IsoSurface Extraction by avoiding iterative root-finding in favor of geometric footprint culling, and from Trilinear Isosurface Intersection by using a coarse octree hierarchy to skip empty regions rather than sampling the volume directly [S1, unofficial].
+Neubauer Iso-surface Ray Casting is a single-kernel iso-surface ray casting method that accelerates traversal by projecting macro-cell boundaries onto the image plane to create hexagonal footprints, thereby reducing redundant octree traversal steps for pixels covered by the same spatial region [S1, unofficial]. It distinguishes itself from sibling methods like Binary Search IsoSurface Extraction by using a hierarchical spatial index (min/max octree) combined with rasterization-based culling rather than pure geometric root-finding or packetization [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-*   **Input:** A 3D scalar volume dataset, an iso-value threshold, and camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$, image plane resolution).
-*   **Output:** A 2D image where pixels are colored based on the intersection of rays with the iso-surface.
+*   **Input:** A volumetric dataset, an iso-value, and a camera configuration (origin $\mathbf{o}$, direction $\mathbf{d}$).
+*   **Output:** A rendered image where pixels intersecting the iso-surface are colored, and others are transparent or background-colored.
 
 **Data Structures**
-1.  **Macro-cells:** The volume is subdivided into cubic cells of size $m^3$.
-2.  **Min/Max Octree:** A hierarchical structure built from the macro-cells. Each node stores the minimum and maximum scalar values found within its spatial extent [S1, unofficial]. This allows for early termination during traversal if the iso-value lies outside the range $[min, max]$ of a node [S1, unofficial].
+1.  **Macro-cells:** The complete data set is subdivided into cubic macro-cells of size $m^3$.
+2.  **Min/Max Octree:** A hierarchical structure built from the macro-cells. Each node stores the minimum and maximum scalar values of the voxels contained within its bounding volume. This allows for early rejection if the iso-value lies outside the $[min, max]$ range of a node [S1, unofficial].
 
 **Parameters**
-*   $m$: The dimension of the macro-cell side length. Typical values are between 4 and 10 [S1, unofficial].
+*   $m$: Macro-cell size dimension. Typical values are between 4 and 10 [S1, unofficial].
 
-**Steps**
+**Algorithm Steps**
 1.  **Preprocessing:**
-    1.  Subdivide the complete dataset into macro-cells of size $m^3$ [S1, unofficial].
+    1.  Subdivide the input volume into macro-cells of size $m^3$.
     2.  Compute the min/max scalar values for each macro-cell.
     3.  Build the min/max octree from these macro-cells [S1, unofficial].
 
 2.  **Ray Traversal (Per Pixel):**
-    1.  Initialize the ray with origin $\mathbf{o}$ and direction $\mathbf{d}$ [Parent].
+    1.  For each pixel, define a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$.
     2.  Traverse the octree from the root.
-    3.  At each internal node, check if the iso-value lies within the node's $[min, max]$ range. If not, prune the subtree [S1, unofficial].
-    4.  If the node is a leaf (macro-cell):
-        1.  Project the boundaries of the macro-cell onto the image plane to determine the set of pixels covered by this cell. This projection yields a hexagonal footprint [S1, unofficial].
-        2.  For each pixel in this footprint, generate a local ray corresponding to that pixel's position within the macro-cell [S1, unofficial].
-        3.  Traverse the macro-cell grid (the $m^3$ subdivision) using these local rays to find the iso-surface intersection [S1, unofficial].
+    3.  At each node, check if the iso-value lies within the node's $[min, max]$ range. If not, prune the subtree [S1, unofficial].
+    4.  If the node is a leaf, project the boundaries of the macro-cell onto the image plane.
+    5.  This projection yields a hexagonal footprint on the image plane [S1, unofficial].
+    6.  Identify all pixels that fall within this hexagonal footprint.
+    7.  For these pixels, perform local ray traversal within the macro-cell grid. This avoids re-traversing the upper levels of the octree for pixels that share the same spatial path [S1, unofficial].
+    8.  Within the macro-cell, compute the ray-isosurface intersection. The specific intersection method (e.g., Newton-Raphson or binary search) is not detailed in the provided sources, but the traversal logic relies on the min/max octree to reach the leaf efficiently [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Preprocessing
+def build_octree(volume, m):
+    # Subdivide volume into macro-cells of size m^3
+    macro_cells = []
+    for z in range(0, volume.depth, m):
+        for y in range(0, volume.height, m):
+            for x in range(0, volume.width, m):
+                # Extract sub-volume
+                sub_vol = volume[x:x+m, y:y+m, z:z+m]
+                # Compute min/max
+                min_val = min(sub_vol.flatten())
+                max_val = max(sub_vol.flatten())
+                macro_cells.append({
+                    'bbox': (x, y, z, x+m, y+m, z+m),
+                    'min': min_val,
+                    'max': max_val
+                })
+    # Build octree structure from macro_cells
+    octree = build_min_max_octree(macro_cells)
+    return octree
+
+def render_neubauer(volume, octree, camera, iso_value, m):
+    image = create_empty_image(camera.resolution)
+    processed_pixels = set()
+    
+    # Traverse octree and project footprints
+    # Note: The source describes projecting leaf boundaries to form hexagons
+    # and then processing pixels in those hexagons.
+    
+    def traverse_and_project(node, camera):
+        if node.is_leaf:
+            # Project macro-cell boundaries to image plane
+            hexagon = project_macro_cell_to_image(node.bbox, camera)
+            # Get pixels inside hexagon
+            pixels_in_hex = get_pixels_in_hexagon(hexagon, camera.resolution)
+            
+            for px, py in pixels_in_hex:
+                if (px, py) not in processed_pixels:
+                    # Define ray for this pixel
+                    ray = camera.get_ray(px, py)
+                    
+                    # Traverse macro-cell grid for this ray
+                    # The source implies local traversal within the macro-cell
+                    # after the octree has been pruned.
+                    intersection = traverse_macro_cell_grid(ray, node, iso_value)
+                    
+                    if intersection is not None:
+                        image.set_pixel(px, py, intersection.color)
+                        processed_pixels.add((px, py))
+        else:
+            # Check min/max bounds
+            if not (node.min <= iso_value <= node.max):
+                return # Prune
+            
+            for child in node.children:
+                traverse_and_project(child, camera)
+
+    traverse_and_project(octree, camera)
+    return image
+```
 
 **Edge Cases and Pitfalls**
-*   **Precision:** The projection of 3D cell boundaries to 2D image space requires accurate perspective or orthographic projection matrices.
-*   **Boundaries:** The hexagonal footprint calculation must correctly handle cells at the volume boundaries to avoid out-of-bounds memory access [S1, unofficial].
+*   **Precision:** Floating-point precision in ray-macro-cell intersection tests may cause gaps or overlaps in the hexagonal footprint coverage.
+*   **Boundary Conditions:** The hexagonal footprint projection assumes a specific camera model (likely perspective). Orthographic projections may yield rectangular footprints, requiring adaptation of the "hexagonal" logic [S1, unofficial].
+*   **Degenerate Input:** If the iso-value is outside the global min/max of the volume, the entire octree is pruned, resulting in an empty image.
 
 ## Subtopics
 
+### Interactive Large Iso-Surface Ray Tracing
+This variant extends the Neubauer method to a cluster environment for interactive rendering of large datasets (e.g., Visible Female, 428 MB). It scales linearly with the number of render nodes, achieving up to 22 fps with 32 nodes [S1, unofficial]. It is significantly slower (approx. 5x) than Wald's kd-tree approach on a single PC for the same dataset, but offers scalability [S1, unofficial].
+
 ## Operating characteristics
-*   **Performance:** Reported average frame rate of 0.8 fps with an image resolution of $512 \times 512$ pixels on a single Pentium IV 1.9 GHz processor [S1, unofficial].
-*   **Complexity:** The octree traversal reduces the number of steps for pixels that do not intersect the volume or intersect empty regions. The hexagonal footprint culling ensures that only relevant pixels are processed for each macro-cell, reducing redundant ray generation [S1, unofficial].
-*   **Strengths:** Single-kernel implementation suitable for GPU execution; efficient culling of empty space via the min/max octree.
-*   **Limitations:** Performance is limited by the coarse nature of the macro-cells and the overhead of projecting boundaries to the image plane. The reported performance on older hardware suggests it may be less efficient than modern GPU-accelerated ray casters [S1, unofficial].
+*   **Time Complexity:** The octree traversal is logarithmic with respect to the number of macro-cells. The hexagonal footprint culling reduces redundant traversal steps for neighboring pixels, improving performance for coherent rays [S1, unofficial].
+*   **Memory Complexity:** The min/max octree requires additional memory proportional to the number of macro-cells. The source notes that this approach consumes much less additional memory than DeMarle's d-tree approach [S1, unofficial].
+*   **Performance:** On a single PIV 1.9 GHz processor, an average frame rate of 0.8 fps was achieved for a 512x512 image [S1, unofficial]. In a cluster setting, performance scales linearly with the number of nodes [S1, unofficial].
+*   **Strengths:** Low memory overhead for acceleration structures; effective culling via hexagonal footprints; suitable for cluster rendering [S1, unofficial].
+*   **Limitations:** Slower than kd-tree based methods (like Wald's) on single machines; dependent on macro-cell size $m$ for optimal performance [S1, unofficial].
 
 ## Background
-The method was introduced by Neubauer et al. [NMHW02] as an approach for interactive volume rendering. It is cited in later works as a baseline for comparison, specifically in the context of single-kernel rendering pipelines [S2, unofficial]. The technique relies on the concept of min/max octrees for spatial acceleration, similar to methods described by Westermann et al. [WV92] and [WFM*05] [S1, unofficial].
+The method was introduced by Neubauer et al. in 2002 [S1, unofficial]. It is used as a baseline for comparison in single-kernel iso-surface ray casting research [S2, unofficial]. The approach builds on earlier work in tetrahedral mesh ray tracing and min/max octrees [S1, unofficial].
 
 ## Sources
 [S1] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)

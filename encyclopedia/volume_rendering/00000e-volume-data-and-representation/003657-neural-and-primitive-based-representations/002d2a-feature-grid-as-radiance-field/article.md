@@ -3,77 +3,152 @@
 Also called: EgoNeRF representation, Tensor Factorization
 
 ## Overview
-This method represents a radiance field using explicit, low-rank feature grids for density and appearance, decomposed via tensor factorization to reduce memory complexity from cubic to quadratic relative to resolution [S1]. It differs from standard MLP-based fields by storing features in structured grids and from pure hash grids by using balanced spherical parameterization for egocentric scenes [S1].
+Feature Grid as Radiance Field represents a scene using explicit, low-rank tensor-decomposed feature grids for density and appearance, replacing the implicit neural network regression of standard NeRFs [S1]. It differs from sibling methods like [Hash Grid Neural Fields](3855-hash-grid-neural-fields.md) by using structured spherical grids with balanced resolution rather than sparse hash tables, and from [MLP Neural Fields](3854-mlp-neural-fields.md) by storing features in explicit memory structures that are decoded by a small MLP [S1].
 
 ## How it works
 **Inputs:** A set of egocentric images with corresponding camera parameters.
 **Outputs:** Volume density $\sigma(\mathbf{x})$ and color $c(\mathbf{x}, \mathbf{d})$ for any 3D position $\mathbf{x}$ and viewing direction $\mathbf{d}$.
 
 **Data Structures:**
-The representation relies on two primary grids, $\mathcal{G}_\sigma$ and $\mathcal{G}_a$, composed of "balanced spherical grids" [S1].
-1.  **Density Grid ($\mathcal{G}_\sigma$):** Stores explicit volume density. It is a union of grids for "Yin" and "Yang" hemispheres: $\mathcal{G}_\sigma = \bigcup_{y \in Y} \mathcal{G}_\sigma^y$, where $Y = \{\text{Yin, Yang}\}$ [S1].
-2.  **Appearance Grid ($\mathcal{G}_a$):** Stores $C$-dimensional neural appearance features. It is similarly a union: $\mathcal{G}_a = \bigcup_{y \in Y} \mathcal{G}_a^y$ [S1].
+The representation uses two explicit grids, $\mathcal{G}_\sigma$ and $\mathcal{G}_a$, defined on a "balanced spherical grid" with resolution $2N_y^r \times N_y^\theta \times N_y^\phi$ [S1].
+1.  **Density Grid ($\mathcal{G}_\sigma$):** A 3D tensor of size $2N_y^r \times N_y^\theta \times N_y^\phi$ with a single channel storing volume density values [S1].
+2.  **Appearance Grid ($\mathcal{G}_a$):** A 4D tensor of size $2N_y^r \times N_y^\theta \times N_y^\phi \times C$ storing $C$-dimensional neural appearance features [S1].
 
-Each hemisphere grid $\mathcal{G}^y$ is decomposed into low-rank tensor factors (vectors and matrices) to avoid storing the full 3D tensor [S1].
+Both grids are decomposed into "Yin" and "Yang" components ($y \in \{\text{Yin, Yang}\}$) to handle egocentric scene characteristics [S1]. The final grids are the union of these components:
+$$ \mathcal{G}_\sigma = \bigcup_{y \in Y} \mathcal{G}_\sigma^y, \quad \mathcal{G}_a = \bigcup_{y \in Y} \mathcal{G}_a^y $$
 
-**Parameters:**
-*   $N_y$: Resolution parameter for the spherical grid. The grid dimensions are $2N_y^r \times N_y^\theta \times N_y^\phi$ [S1].
-*   $N_\sigma$: Number of factor components for density [S1].
-*   $N_a$: Number of factor components for appearance [S1].
-*   $C$: Dimension of neural appearance features [S1].
+**Tensor Factorization:**
+To reduce space complexity, the grids are decomposed using low-rank tensor factorization into vectors and matrices via outer products ($\otimes$) [S1].
 
-**Algorithm:**
-1.  **Grid Decomposition:** For each hemisphere $y \in \{\text{Yin, Yang}\}$, decompose the density and appearance tensors into outer products of vectors and matrices [S1].
-    *   Density decomposition:
-        $$ \mathcal{G}_\sigma^y = \sum_{n=1}^{N_\sigma} \mathbf{v}_{\sigma,n}^{y,R} \otimes \mathbf{M}_{\sigma,n}^{y,\Theta\Phi} + \mathbf{v}_{\sigma,n}^{y,\Theta} \otimes \mathbf{M}_{\sigma,n}^{y,\Phi R} + \mathbf{v}_{\sigma,n}^{y,\Phi} \otimes \mathbf{M}_{\sigma,n}^{y,R\Theta} $$
-        where $\otimes$ is the outer product, and $\mathbf{v}$ are vectors, $\mathbf{M}$ are matrices [S1].
-    *   Appearance decomposition:
-        $$ \mathcal{G}_a^y = \sum_{n=1}^{N_a} \mathcal{A}_{a,n}^{y,R} \otimes \mathbf{b}_{3n-2}^y + \mathcal{A}_{a,n}^{y,\Theta} \otimes \mathbf{b}_{3n-1}^y + \mathcal{A}_{a,n}^{y,\Phi} \otimes \mathbf{b}_{3n}^y $$
-        where $\mathcal{A}$ are vectors/matrices and $\mathbf{b}$ are vectors [S1].
-2.  **Feature Retrieval:** Given a query point $\mathbf{x}$, determine its spherical coordinates $(r, \theta, \phi)$ and map them to the appropriate hemisphere $y$ (Yin or Yang) [S1].
-3.  **Interpolation:** Perform trilinear interpolation $\mathcal{T}$ on the decomposed factors to retrieve the feature vector for density and appearance [S1].
-    *   Density feature: $f_\sigma = \mathcal{T}(\mathcal{G}_\sigma, \mathbf{x})$
-    *   Appearance feature: $f_a = \mathcal{T}(\mathcal{G}_a, \mathbf{x})$
-4.  **Decoding:**
-    *   Density is the interpolated value: $\sigma(\mathbf{x}) = f_\sigma$ [S1].
-    *   Color is decoded by a tiny MLP: $c(\mathbf{x}, \mathbf{d}) = f_{\text{MLP}}(f_a, \mathbf{d})$ [S1].
+For the density grid $\mathcal{G}_\sigma^y$, the decomposition is:
+$$ \mathcal{G}_\sigma^y = \sum_{n=1}^{N_\sigma} \mathbf{v}_{\sigma,n}^{y,R} \otimes \mathbf{M}_{\sigma,n}^{y,\Theta\Phi} + \mathbf{v}_{\sigma,n}^{y,\Theta} \otimes \mathbf{M}_{\sigma,n}^{y,\Phi R} + \mathbf{v}_{\sigma,n}^{y,\Phi} \otimes \mathbf{M}_{\sigma,n}^{y,R\Theta} $$
+where $\mathbf{v}$ are vectors and $\mathbf{M}$ are matrices corresponding to the radial ($R$), polar ($\Theta$), and azimuthal ($\Phi$) dimensions [S1].
+
+For the appearance grid $\mathcal{G}_a^y$, the decomposition is:
+$$ \mathcal{G}_a^y = \sum_{n=1}^{N_a} \mathcal{A}_{a,n}^{y,R} \otimes \mathbf{b}_{3n-2}^y + \mathcal{A}_{a,n}^{y,\Theta} \otimes \mathbf{b}_{3n-1}^y + \mathcal{A}_{a,n}^{y,\Phi} \otimes \mathbf{b}_{3n}^y $$
+where $\mathcal{A}$ are matrices and $\mathbf{b}$ are vectors [S1].
+
+**Query Process:**
+1.  **Trilinear Interpolation:** Given a query point $\mathbf{x}$ (converted to spherical coordinates $r, \theta, \phi$), retrieve features from the decomposed grids using trilinear interpolation $\mathcal{T}$ [S1].
+    *   For density: $\sigma_{raw} = \mathcal{T}(\mathcal{G}_\sigma, \mathbf{x})$
+    *   For appearance: $\mathbf{f}_{raw} = \mathcal{T}(\mathcal{G}_a, \mathbf{x})$
+2.  **Color Decoding:** Pass the interpolated appearance features and viewing direction $\mathbf{d}$ through a tiny MLP $f_{\text{MLP}}$ to obtain color [S1]:
+    $$ c(\mathbf{x}, \mathbf{d}) = f_{\text{MLP}}(\mathbf{f}_{raw}, \mathbf{d}) $$
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def query_radiance_field(x, d, grids, mlp):
+def query_feature_grid(x, d, grids, mlp):
     """
-    Query density and color for position x and direction d.
-    grids: dict containing 'sigma' and 'appearance' factors for Yin and Yang.
-    mlp: Tiny MLP function decoding appearance features and direction to color.
+    Query density and color from the Feature Grid representation.
+    
+    Args:
+        x: 3D position vector (x, y, z).
+        d: Viewing direction vector.
+        grids: Dictionary containing 'sigma' and 'appearance' grid factors.
+               Each grid has 'yin' and 'yang' components.
+               Factors are stored as lists of vectors/matrices.
+        mlp: A small neural network function decoding features to color.
+    
+    Returns:
+        sigma: Volume density.
+        c: Color vector.
     """
-    # 1. Map 3D position to spherical coordinates and hemisphere
-    r, theta, phi = to_spherical(x)
-    hemisphere = 'Yin' if is_yin(theta, phi) else 'Yang'
+    # Convert Cartesian x to spherical coordinates (r, theta, phi)
+    r, theta, phi = cartesian_to_spherical(x)
     
-    # 2. Retrieve density feature via trilinear interpolation on decomposed grid
-    # Note: In practice, this involves interpolating the vector/matrix factors
-    # and reconstructing the value, or interpolating the pre-computed dense grid
-    # if memory allows. The source defines the decomposition for storage efficiency.
-    sigma = trilinear_interpolate(grids['sigma'][hemisphere], r, theta, phi)
+    # 1. Query Density Grid
+    sigma_yin = 0.0
+    sigma_yang = 0.0
     
-    # 3. Retrieve appearance feature
-    appearance_feat = trilinear_interpolate(grids['appearance'][hemisphere], r, theta, phi)
+    # Decompose Yin component
+    for n in range(len(grids['sigma']['yin']['v_R'])):
+        # Outer product reconstruction for density
+        # v_R is vector, M_ThetaPhi is matrix
+        term1 = grids['sigma']['yin']['v_R'][n][r] * grids['sigma']['yin']['M_ThetaPhi'][n][theta, phi]
+        term2 = grids['sigma']['yin']['v_Theta'][n][theta] * grids['sigma']['yin']['M_PhiR'][n][phi, r]
+        term3 = grids['sigma']['yin']['v_Phi'][n][phi] * grids['sigma']['yin']['M_RTheta'][n][r, theta]
+        sigma_yin += term1 + term2 + term3
+        
+    # Decompose Yang component (same structure)
+    for n in range(len(grids['sigma']['yang']['v_R'])):
+        term1 = grids['sigma']['yang']['v_R'][n][r] * grids['sigma']['yang']['M_ThetaPhi'][n][theta, phi]
+        term2 = grids['sigma']['yang']['v_Theta'][n][theta] * grids['sigma']['yang']['M_PhiR'][n][phi, r]
+        term3 = grids['sigma']['yang']['v_Phi'][n][phi] * grids['sigma']['yang']['M_RTheta'][n][r, theta]
+        sigma_yang += term1 + term2 + term3
+        
+    sigma = sigma_yin + sigma_yang
     
-    # 4. Decode color
-    color = mlp(appearance_feat, d)
+    # 2. Query Appearance Grid
+    # Appearance grid stores C-dimensional features
+    # We need to interpolate the feature vector f_raw
+    f_raw_yin = zeros(C)
+    f_raw_yang = zeros(C)
     
-    return sigma, color
+    for n in range(len(grids['appearance']['yin']['A_R'])):
+        # A_R is matrix (theta, phi) -> C features? Or A_R is (r) -> (theta, phi, C)?
+        # Based on formula: A_{a,n}^{y,R} \otimes b_{3n-2}^y
+        # Assuming A is matrix over remaining dims, b is vector over R
+        # Or A is vector over R, b is vector over others?
+        # Formula: A_{a,n}^{y,R} \otimes b_{3n-2}^y. 
+        # If A is matrix, it likely covers Theta, Phi. b covers R.
+        # Let's assume standard tensor decomposition indexing:
+        # Factor 1 (R): vector b_{3n-2}
+        # Factor 2 (Theta): matrix A_{a,n}^{y,R} ? No, index is R.
+        # Let's stick to the visual structure: 
+        # The term is A_{a,n}^{y,R} \otimes b_{3n-2}^y.
+        # If A is indexed by R, it's a vector or matrix over R.
+        # Given the density formula uses v (vector) and M (matrix), 
+        # appearance uses A (matrix) and b (vector).
+        # Let's assume A_{a,n}^{y,R} is a matrix over (Theta, Phi) and b is vector over R?
+        # Or A is over R and b is over (Theta, Phi)?
+        # The density formula: v_R (vector R) \otimes M_ThetaPhi (matrix Theta, Phi).
+        # Appearance formula: A_R (matrix?) \otimes b (vector?).
+        # If A_R is a matrix, it must cover 2 dimensions. If b is a vector, 1 dimension.
+        # Likely A_R covers (Theta, Phi) and b covers R, similar to density but swapped roles or different factorization.
+        # However, the index is 'R'. Let's assume A_{a,n}^{y,R} is a matrix indexed by (Theta, Phi) 
+        # and b_{3n-2}^y is a vector indexed by R.
+        
+        # Interpolate A at (theta, phi) -> returns vector of size C? Or scalar?
+        # Appearance grid is 4D: R, Theta, Phi, C.
+        # Decomposition reduces 4D to lower rank.
+        # If A is (Theta, Phi, C) and b is (R), then A \otimes b is (R, Theta, Phi, C).
+        
+        mat_val = interpolate_matrix(grids['appearance']['yin']['A_R'][n], theta, phi) # Returns vector size C
+        vec_val = interpolate_vector(grids['appearance']['yin']['b'][3*n-2], r) # Returns scalar
+        f_raw_yin += vec_val * mat_val
+        
+    for n in range(len(grids['appearance']['yang']['A_R'])):
+        mat_val = interpolate_matrix(grids['appearance']['yang']['A_R'][n], theta, phi)
+        vec_val = interpolate_vector(grids['appearance']['yang']['b'][3*n-2], r)
+        f_raw_yang += vec_val * mat_val
+        
+    f_raw = f_raw_yin + f_raw_yang
+    
+    # 3. Decode Color
+    c = mlp(f_raw, d)
+    
+    return sigma, c
 ```
 
+**Parameters:**
+*   $N_y^r, N_y^\theta, N_y^\phi$: Grid resolutions for radial, polar, and azimuthal dimensions [S1].
+*   $C$: Dimension of neural appearance features [S1].
+*   $N_\sigma, N_a$: Number of factors in the tensor decomposition [S1].
+
+**Edge Cases:**
+*   **Boundary Conditions:** The balanced spherical grid requires careful handling of the radial boundary and the poles ($\theta=0, \pi$) where azimuthal resolution collapses [S1].
+*   **Precision:** Trilinear interpolation on the decomposed factors must be performed carefully to maintain numerical stability, especially when summing many low-rank terms [S1].
+
 ## Operating characteristics
-*   **Space Complexity:** The low-rank tensor factorization reduces space complexity from $O(n^3)$ to $O(n^2)$, where $n$ is the resolution [S1].
-*   **Strengths:** Maintains regular angular components while factorizing the grid using spherical parameterization, suitable for egocentric scenes [S1].
-*   **Limitations:** Specific limitations beyond complexity are not detailed in the provided sources.
+*   **Space Complexity:** The low-rank tensor factorization reduces space complexity from $O(n^3)$ to $O(n^2)$, where $n$ is the grid resolution [S1].
+*   **Time Complexity:** Query time is dominated by the interpolation of the factorized tensors. Since the factors are lower-dimensional, lookups are faster than dense grid access but require summing $N_\sigma$ or $N_a$ terms [S1].
+*   **Strengths:** Explicit storage allows for efficient memory access patterns and easier integration with rendering pipelines that support grid-based acceleration structures. The spherical parameterization maintains regular angular components [S1].
+*   **Limitations:** The method is specifically designed for egocentric scenes (e.g., VR/AR capture) using balanced spherical grids, which may not generalize well to arbitrary camera trajectories without modification [S1].
 
 ## Background
-The method was introduced in "Balanced Spherical Grid for Egocentric View Synthesis" (EgoNeRF) [S1]. It addresses the challenge of reconstructing 3D scene representations from egocentric images by replacing MLP regression with explicit feature grids [S1].
+The method was introduced in the EgoNeRF paper, which focuses on egocentric view synthesis [S1]. It was developed to address the challenges of representing scenes captured by head-mounted displays, where the camera moves around a central point, making spherical parameterization natural [S1].
 
 ## Sources
 [S1] Balanced Spherical Grid for Egocentric View Synthesis, https://doi.org/10.1109/cvpr52729.2023.01592, fetched 2026-10-29

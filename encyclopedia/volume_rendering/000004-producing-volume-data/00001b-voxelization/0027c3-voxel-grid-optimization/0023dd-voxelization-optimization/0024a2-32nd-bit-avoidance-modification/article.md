@@ -1,107 +1,72 @@
 # 32nd Bit Avoidance Modification
 
-Also called: 32nd bit exclusion, 28-bit density packing
 
 ## Overview
-The 32nd Bit Avoidance Modification is a set of adjustments to GPU-based solid voxelization and density computation pipelines to prevent conflicts with the reserved 32nd bit of standard 32-bit integer or floating-point formats [S1, unofficial]. It ensures that the highest bit (bit 31) remains available for other purposes, such as flags or sign bits, by restricting voxel data to lower bits [S1, unofficial]. This method is distinct from general sparse voxelization techniques by focusing specifically on bit-packing constraints within dense or semi-dense voxel grids [S1, unofficial].
+The 32nd Bit Avoidance Modification adjusts the solid voxelization and density computation pipelines to exclude the highest bit of 32-bit storage formats, which is reserved for other purposes [S1, unofficial]. It restricts voxel and density data to the lower bits, distinguishing it from general sparse voxelization by targeting bit-packing constraints in dense grids [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Standard solid voxelization pipeline parameters (typically designed for 1024 slices or 32-bit channels).
-- Output: Voxel data structures and density functions that exclude the 32nd bit, using 992 or 960 slices/channels respectively.
+- Input: Standard solid voxelization pipeline parameters designed for 1024 slices or 32-bit channels [S1, unofficial].
+- Output: Voxel data structures and density functions that exclude the 32nd bit, using 992 slices for solid voxelization and 960 slices for density computation [S1, unofficial].
 
 **Data Structures:**
-1.  **1D Texture (Solid Voxelization):**
-    -   Size: 992 slices (instead of 1024).
-    -   Layout: Linear array of slice indices.
-    -   Constraint: Highest bit (bit 31) is excluded from indexing or storage [S1, unofficial].
-2.  **Density Function Storage:**
-    -   Size: 960 initial slices per color channel.
-    -   Bit Depth: 28 bits per color channel.
-    -   Layout: 28-bit packed values.
-    -   Constraint: 28 is the largest multiple of 4 below 32, ensuring compatibility with downsampling operations [S1, unofficial].
+1. **1D Texture (Solid Voxelization):** Size is 992 slices instead of 1024, with the highest bit excluded from indexing or storage [S1, unofficial].
+2. **Density Function Storage:** Size is 960 initial slices per color channel, using 28 bits per channel [S1, unofficial]. The 28-bit width is the largest multiple of four below 32, ensuring compatibility with downsampling [S1, unofficial].
 
 **Steps:**
-1.  **Modify 1D Texture for Solid Voxelization:**
-    -   Reduce the texture size from 1024 to 992 slices.
-    -   Ensure no data is written to or read from the 32nd bit position [S1, unofficial].
-2.  **Compute Density Function with 28-bit Packing:**
-    -   Allocate 28 bits per color channel for density storage.
-    -   Calculate the number of initial slices as $960$ (derived from $28 \times \text{channels} / \text{bits\_per\_slice}$, though the source specifies 960 directly as the result of using 28 bits per channel in a context compatible with downsampling) [S1, unofficial].
-    -   Pack density values into the lower 28 bits of the storage unit.
-3.  **Downsampling Compatibility:**
-    -   Verify that the 960-slice structure maintains alignment for subsequent downsampling passes [S1, unofficial].
+1. Modify the 1D texture for solid voxelization to 992 slices and ensure no data is written to or read from the 32nd bit position [S1, unofficial].
+2. Compute the density function using 28 bits per color channel, resulting in 960 initial slices [S1, unofficial].
+3. Pack density values into the lower 28 bits of the storage unit using a bitwise mask [S1, unofficial].
+4. Verify that the 960-slice structure maintains alignment for subsequent downsampling passes [S1, unofficial].
 
 **Pitfalls:**
--   **32nd Bit Conflict:** Using the 32nd bit can cause undefined behavior or data corruption as it is reserved for other purposes [S1, unofficial].
--   **Performance Comparison:** When comparing performance to previous work, the reduced slice count (992 or 960 vs. 1024) must be accounted for to avoid misleading benchmarks [S1, unofficial].
+- Using the 32nd bit causes conflicts because it is reserved for different purposes [S1, unofficial].
+- Performance comparisons with previous work must account for the smaller slice count (992 or 960 vs. 1024) [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Constants derived from source [S1, unofficial]
+# Constants derived from [S1, unofficial]
 SOLID_VOXEL_SLICES = 992
 DENSITY_BITS_PER_CHANNEL = 28
 DENSITY_SLICES = 960
 
-def modify_solid_voxelization_texture():
-    """
-    Creates a 1D texture for solid voxelization excluding the 32nd bit.
-    """
-    # Allocate texture with 992 slices instead of 1024
-    texture = allocate_1d_texture(size=SOLID_VOXEL_SLICES)
+def allocate_solid_voxelization_texture():
+    # Allocate a 1D texture with 992 slices instead of 1024
+    texture = [0] * SOLID_VOXEL_SLICES
     return texture
 
-def compute_density_function():
-    """
-    Computes density function using 28 bits per channel, resulting in 960 slices.
-    """
-    # Allocate density storage with 960 slices
-    # Each slice/channel uses 28 bits
-    density_storage = allocate_density_buffer(
-        slices=DENSITY_SLICES,
-        bits_per_channel=DENSITY_BITS_PER_CHANNEL
-    )
-    return density_storage
+def allocate_density_buffer():
+    # Allocate density storage for 960 slices
+    buffer = [0] * DENSITY_SLICES
+    return buffer
 
-def pack_density_value(value, channel):
-    """
-    Packs a density value into the lower 28 bits of a storage unit.
-    """
-    # Mask to ensure only lower 28 bits are used
+def pack_density_value(value):
+    # Mask to ensure only the lower 28 bits are used
     mask = (1 << DENSITY_BITS_PER_CHANNEL) - 1
-    packed = value & mask
-    return packed
+    return value & mask
 ```
 
 ## Subtopics
 
 ### Lookup Texture Optimization
-Uses 2D lookup textures to replace complex shader computations for bit manipulation and coordinate transformation during voxelization synthesis [S2, unofficial].
--   **Definition:** Replaces bit extraction and coordinate mapping logic with texture fetches [S2, unofficial].
--   **Steps:**
-    1.  **Fetch One Bit Texture:** Create a $256 \times 8$ texture where texel $(s, t)$ stores the $t$-th bit of $s$ (0 or 1) [S2, unofficial].
-    2.  **Store One Bit Texture:** Create an $8 \times 1$ texture where texel $s$ stores $2^s$. Use alpha blending (addition, source/dest factors 1/1) to set bits during rasterization [S2, unofficial].
-    3.  **Worksheet Composition:** Build 2D lookup textures mapping source coordinates (from X/Y sheet buffers) to destination coordinates (in Z sheet buffer/final worksheet). Only build lookup for the first voxel of each worksheet element; use shader offsets for subsequent voxels [S2, unofficial].
--   **Layout:**
-    -   Fetch Texture: $256 \times 8$, components 0 or 1 [S2, unofficial].
-    -   Store Texture: $8 \times 1$, components $2^s$ [S2, unofficial].
--   **When to Choose:** When shader-based bit manipulation is too slow or complex, and GPU memory allows for lookup textures [S2, unofficial].
+Lookup Texture Optimization replaces complex shader computations for bit manipulation and coordinate transformation during voxelization synthesis with 2D lookup textures [S3, unofficial]. It constructs a Fetch One Bit Texture of size $256 \times 8$, where texel $(s, t)$ stores the $t$-th bit of $s$ as 0 or 1 [S3, unofficial]. It also constructs a Store One Bit Texture of size $8 \times 1$, where texel $s$ stores $2^s$, utilizing alpha blending with addition and source/destination factors of 1/1 to set bits during rasterization [S3, unofficial]. For worksheet composition, it builds 2D lookup textures mapping source coordinates from X/Y sheet buffers to destination coordinates in the Z sheet buffer or final worksheet [S3, unofficial]. Only the first voxel of each worksheet element requires a lookup entry; subsequent voxels in the X/Y directional sheet buffers are obtained via shader offset operations, saving GPU memory [S3, unofficial].
 
 ## Operating characteristics
--   **Time Complexity:** Not given in the sources.
--   **Memory Complexity:** Reduced by excluding the 32nd bit. Solid voxelization uses 992 slices instead of 1024. Density function uses 960 slices with 28-bit packing [S1, unofficial].
--   **Measured Performance:** Not given in the sources.
--   **Scaling:** The 960-slice density structure is designed to be compatible with downsampling, suggesting good scaling for multi-resolution representations [S1, unofficial].
--   **Strengths:** Prevents conflicts with reserved 32nd bit; maintains downsampling compatibility [S1, unofficial].
--   **Limitations:** Reduced slice count may slightly alter performance characteristics compared to full 1024-slice implementations [S1, unofficial].
--   **When to Use:** When the 32nd bit is reserved for other purposes in the rendering pipeline [S1, unofficial].
--   **When Not to Use:** When full 32-bit precision or bit usage is required and no conflicts exist [S1, unofficial].
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Reduced by excluding the 32nd bit; solid voxelization uses 992 slices instead of 1024, and density function uses 960 slices with 28-bit packing [S1, unofficial].
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** The 960-slice density structure is designed to be compatible with downsampling, supporting multi-resolution representations [S1, unofficial].
+- **Strengths:** Prevents conflicts with the reserved 32nd bit and maintains downsampling compatibility [S1, unofficial].
+- **Limitations:** The reduced slice count may slightly alter performance characteristics compared to full 1024-slice implementations [S1, unofficial].
+- **When to Use:** When the 32nd bit is reserved for other purposes in the rendering pipeline [S1, unofficial].
+- **When Not to Use:** When full 32-bit precision or bit usage is required and no conflicts exist [S1, unofficial].
 
 ## Background
-The 32nd Bit Avoidance Modification was introduced in the context of single-pass GPU solid voxelization [S1, unofficial]. The modification was necessary because the 32nd bit is reserved for different purposes in the target hardware or pipeline [S1, unofficial]. The Lookup Texture Optimization variant was developed to further optimize the voxelization synthesis stage by replacing complex shader computations with texture lookups [S2, unofficial].
+The 32nd Bit Avoidance Modification was introduced in the context of single-pass GPU solid voxelization [S1, unofficial]. The modification was necessary because the 32nd bit is reserved for different purposes in the target hardware or pipeline [S1, unofficial]. The Lookup Texture Optimization variant was developed to further optimize the voxelization synthesis stage by replacing complex shader computations with texture lookups [S3, unofficial].
 
 ## Sources
 [S1] Single-pass GPU Solid Voxelization and Applications, https://inria.hal.science/inria-00345291, fetched 2026-10-26 (unofficial)
-[S2] Real-time Voxelization for Complex Models, https://www.researchgate.net/publication/252533918_Real-time_Voxelization_for_Complex_Models, fetched 2026-11-03 (unofficial)
+[S2] PDF Single-Pass GPU Solid Voxelization for Real-Time Applications, https://wo1fsea.github.io/files/About_NavMesh/P3_Single-Pass_GPU_Solid_Voxelization_for_Real-Time_Applications.pdf, fetched 2026-10-29 (unofficial)
+[S3] (PDF) Real-time Voxelization for Complex Models, https://www.researchgate.net/publication/252533918_Real-time_Voxelization_for_Complex_Models, fetched 2026-11-03 (unofficial)

@@ -3,18 +3,18 @@
 Also called: DisjointSetVisiblePlaneOptimizer
 
 ## Overview
-Disjoint Set Visible Plane Optimization is a greedy meshing algorithm that optimizes a 2D slice (VisiblePlane) of solid voxels by merging contiguous regions of identical voxel IDs into single rectangular mesh quads using a Disjoint Set Union (DSU) data structure [S1, unofficial]. It differs from its parent, Greedy Voxel Mesh Optimization, by operating on pre-culled 2D planes rather than the full 3D volume, and from Disjoint Set Mesh Optimization by focusing specifically on the plane-by-plane merging phase after occlusion culling [S1, unofficial].
+Disjoint Set Visible Plane Optimization is a greedy meshing algorithm that optimizes a 2D slice (VisiblePlane) of solid voxels by merging contiguous regions of identical voxel IDs into single rectangular mesh quads using a Disjoint Set Union (DSU) data structure [S1, unofficial]. It operates on pre-culled 2D planes rather than the full 3D volume, differing from its parent [Greedy Voxel Mesh Optimization](3979-greedy-voxel-mesh-optimization.md) [S1, unofficial]. It differs from [Disjoint Set Mesh Optimization](4495-disjoint-set-mesh-optimization.md) by focusing specifically on the plane-by-plane merging phase after occlusion culling [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A `VisiblePlane` object containing a 2D array of nullable `Voxel` references (`Voxel?[,]`), dimensions `width` and `height`, and axis configuration (`MajorAxis`, `MiddleAxis`, `MinorAxis`, `SliceIndex`).
-*   **Output:** A list of `MeshQuad` objects, each representing a merged rectangular face with vertices, normal, and voxel ID.
+*   **Input:** A `VisiblePlane` object containing a 2D array of nullable `Voxel` references (`Voxel?[,]`), dimensions `width` and `height`, and axis configuration (`MajorAxis`, `MajorAxisOrder`, `MiddleAxis`, `MiddleAxisOrder`, `MinorAxis`, `MinorAxisOrder`, `SliceIndex`) [S1, unofficial].
+*   **Output:** A list of `MeshQuad` objects, each representing a merged rectangular face with vertices, normal, and voxel ID [S1, unofficial].
 
 **Data Structures:**
-*   `DisjointSet`: A DSU structure initialized with size `width * height`. Each element represents a voxel coordinate in the plane.
-*   `Voxel`: An object containing at least an `ID` field (integer/ushort).
-*   `MeshQuad`: Contains `Vertex0..3` (Vector3), `Normal` (Vector3), and `VoxelId` (int).
-*   `VisiblePlane`: Contains `Voxels` (2D array), `MajorAxis`, `MajorAxisOrder`, `MiddleAxis`, `MiddleAxisOrder`, `MinorAxis`, `MinorAxisOrder`, and `SliceIndex`.
+*   `DisjointSet`: A DSU structure initialized with size `width * height` [S1, unofficial].
+*   `Voxel`: An object containing at least an `ID` field [S1, unofficial].
+*   `MeshQuad`: Contains `Vertex0..3` (`Vector3`), `Normal` (`Vector3`), and `VoxelId` (`int`) [S1, unofficial].
+*   `VisiblePlane`: Contains `Voxels` (2D array), `MajorAxis`, `MajorAxisOrder`, `MiddleAxis`, `MiddleAxisOrder`, `MinorAxis`, `MinorAxisOrder`, and `SliceIndex` [S1, unofficial].
 
 **Index Mapping:**
 The 2D coordinate $(x, y)$ is mapped to a 1D index for the DSU:
@@ -22,48 +22,48 @@ $$ \text{ToIndex}(x, y) = y \times \text{width} + x $$
 
 **Algorithm Steps:**
 
-1.  **Initialize DSU:** Create a `DisjointSet` with size `width * height`.
+1.  **Initialize DSU:** Create a `DisjointSet` with size `width * height` [S1, unofficial].
 2.  **Iterate and Merge:** Loop through each voxel $(x, y)$ in the plane:
-    *   If `voxels[x, y]` is null, skip.
-    *   If `IsNotAlone(x, y)` returns true, skip.
-    *   Otherwise, call `CreateOneSet(x, y)`.
+    *   If `voxels[x, y]` is null, skip [S1, unofficial].
+    *   If `IsNotAlone(x, y)` returns true, skip [S1, unofficial].
+    *   Otherwise, call `CreateOneSet(x, y)` [S1, unofficial].
 
     **`CreateOneSet(x, y)`:**
-    1.  Identify `rootVoxel` at `(x, y)`.
+    1.  Identify `rootVoxel` at `(x, y)` [S1, unofficial].
     2.  **Expand Right:** Initialize `currentWidth = 1`. While `x + currentWidth < width`:
-        *   Check if `voxels[x + currentWidth, y]` is not null.
-        *   Check if `voxels[x + currentWidth, y].ID == rootVoxel.ID`.
-        *   Check if `IsNotAlone(x + currentWidth, y)` is false.
-        *   If all true, increment `currentWidth`. Else, break.
+        *   Check if `voxels[x + currentWidth, y]` is not null [S1, unofficial].
+        *   Check if `voxels[x + currentWidth, y].ID == rootVoxel.ID` [S1, unofficial].
+        *   Check if `IsNotAlone(x + currentWidth, y)` is false [S1, unofficial].
+        *   If all true, increment `currentWidth`. Else, break [S1, unofficial].
     3.  **Expand Down:** Initialize `currentHeight = 1`. While `y + currentHeight < height`:
-        *   Set `canExpand = true`.
+        *   Set `canExpand = true` [S1, unofficial].
         *   For each `dx` from `0` to `currentWidth - 1`:
-            *   Let `cx = x + dx`, `cy = y + currentHeight`.
-            *   If `voxels[cx, cy]` is null, set `canExpand = false` and break.
-            *   If `voxels[cx, cy].ID != rootVoxel.ID`, set `canExpand = false` and break.
-            *   If `IsNotAlone(cx, cy)` is true, set `canExpand = false` and break.
-        *   If `canExpand` is true, increment `currentHeight`. Else, break.
+            *   Let `cx = x + dx`, `cy = y + currentHeight` [S1, unofficial].
+            *   If `voxels[cx, cy]` is null, set `canExpand = false` and break [S1, unofficial].
+            *   If `voxels[cx, cy].ID != rootVoxel.ID`, set `canExpand = false` and break [S1, unofficial].
+            *   If `IsNotAlone(cx, cy)` is true, set `canExpand = false` and break [S1, unofficial].
+        *   If `canExpand` is true, increment `currentHeight`. Else, break [S1, unofficial].
     4.  **Union:** For all `dx` from `0` to `currentWidth - 1` and `dy` from `0` to `currentHeight - 1`:
-        *   Call `disjointSet.Union(ToIndex(x, y), ToIndex(x + dx, y + dy))`.
+        *   Call `disjointSet.Union(ToIndex(x, y), ToIndex(x + dx, y + dy))` [S1, unofficial].
 
     **`IsNotAlone(x, y)`:**
     Returns true if:
-    *   `voxels[x, y]` is null.
-    *   `disjointSet.Find(ToIndex(x, y))` is not the root of its set (i.e., already merged into a larger block).
-    *   Any of the 4 orthogonal neighbors `(x-1,y), (x+1,y), (x,y-1), (x,y+1)` exist, are solid (non-null), have the same ID as `voxels[x, y]`, and are in the same disjoint set (checked via `AreSame`).
+    *   `voxels[x, y]` is null [S1, unofficial].
+    *   `disjointSet.Find(ToIndex(x, y))` is not the root of its set (i.e., already merged into a larger block) [S1, unofficial].
+    *   Any of the 4 orthogonal neighbors `(x-1,y), (x+1,y), (x,y-1), (x,y+1)` exist, are solid (non-null), have the same ID as `voxels[x, y]`, and are in the same disjoint set (checked via `AreSame`) [S1, unofficial].
 
     **`AreSame(x1, y1, x2, y2)`:**
     Returns true if:
-    *   `voxels[x1, y1]` and `voxels[x2, y2]` are non-null.
-    *   `voxels[x1, y1].ID == voxels[x2, y2].ID`.
-    *   `disjointSet.Find(ToIndex(x1, y1)) == disjointSet.Find(ToIndex(x2, y2))`.
+    *   `voxels[x1, y1]` and `voxels[x2, y2]` are non-null [S1, unofficial].
+    *   `voxels[x1, y1].ID == voxels[x2, y2].ID` [S1, unofficial].
+    *   `disjointSet.Find(ToIndex(x1, y1)) == disjointSet.Find(ToIndex(x2, y2))` [S1, unofficial].
 
 3.  **Generate Mesh Quads:**
-    *   Group all voxel coordinates by their DSU root ID.
+    *   Group all voxel coordinates by their DSU root ID [S1, unofficial].
     *   For each group:
-        *   Find `minX`, `maxX`, `minY`, `maxY` of the coordinates in the group.
-        *   Determine `voxelId` from `voxels[minX, minY]`.
-        *   Create a single `MeshQuad` using the plane's axis configuration and the bounding box `(minX, maxX, minY, maxY)`.
+        *   Find `minX`, `maxX`, `minY`, `maxY` of the coordinates in the group [S1, unofficial].
+        *   Determine `voxelId` from `voxels[minX, minY]` [S1, unofficial].
+        *   Create a single `MeshQuad` using the plane's axis configuration and the bounding box `(minX, maxX, minY, maxY)` [S1, unofficial].
 
 **Pseudocode:**
 
@@ -92,7 +92,7 @@ class DisjointSet:
                 self.parent[root_j] = root_i
                 self.rank[root_i] += 1
 
-def disjoint_set_visible_plane_optimization(plane):
+def disjoint_set_visible_plane_optimization(plane, chunk):
     width = plane.width
     height = plane.height
     voxels = plane.voxels
@@ -159,7 +159,6 @@ def disjoint_set_visible_plane_optimization(plane):
                 continue
             create_one_set(x, y)
 
-    # Group by root
     groups = {}
     for y in range(height):
         for x in range(width):
@@ -178,59 +177,115 @@ def disjoint_set_visible_plane_optimization(plane):
         max_y = max(c[1] for c in coords)
         
         voxel_id = voxels[min_x, min_y].id
-        quad = create_mesh_quad(plane, min_x, max_x, min_y, max_y, voxel_id)
+        quad = create_mesh_quad(plane, chunk, min_x, max_x, min_y, max_y, voxel_id)
         quads.append(quad)
     
     return quads
 
-def create_mesh_quad(plane, min_x, max_x, min_y, max_y, voxel_id):
-    # Implementation depends on plane axis configuration
-    # See coordinate transformation rules below
-    pass
+def create_mesh_quad(plane, chunk, min_x, max_x, min_y, max_y, voxel_id):
+    normal = (1.0, 0.0, 0.0)
+    axis = plane.MajorAxis
+    order = plane.MajorAxisOrder
+    
+    if axis == "X":
+        if order == "Ascending":
+            x = plane.SliceIndex
+            y1 = min_y
+            y2 = max_x + 1
+            z1 = min_y
+            z2 = max_y + 1
+            v0 = (x, y2, z1)
+            v1 = (x, y1, z1)
+            v2 = (x, y1, z2)
+            v3 = (x, y2, z2)
+        else: # Descending
+            x = chunk.XDepth - plane.SliceIndex
+            y1 = chunk.YDepth - min_x
+            y2 = chunk.YDepth - max_x - 1
+            z1 = chunk.ZDepth - min_y
+            z2 = chunk.ZDepth - max_y - 1
+            v0 = (x, y1, z1)
+            v1 = (x, y2, z1)
+            v2 = (x, y2, z2)
+            v3 = (x, y1, z2)
+    elif axis == "Y":
+        if order == "Ascending":
+            x1 = min_y
+            x2 = max_y + 1
+            y = plane.SliceIndex
+            z1 = min_x
+            z2 = max_x + 1
+            v0 = (x1, y, z2)
+            v1 = (x1, y, z1)
+            v2 = (x2, y, z1)
+            v3 = (x2, y, z2)
+        else: # Descending
+            x1 = chunk.XDepth - min_y
+            x2 = chunk.XDepth - max_y - 1
+            y = chunk.YDepth - plane.SliceIndex
+            z1 = chunk.ZDepth - min_x
+            z2 = chunk.ZDepth - max_x - 1
+            v0 = (x1, y, z1)
+            v1 = (x1, y, z2)
+            v2 = (x2, y, z2)
+            v3 = (x2, y, z1)
+    elif axis == "Z":
+        # Only Descending is given in sources
+        x1 = chunk.XDepth - min_y
+        x2 = chunk.XDepth - max_y - 1
+        y1 = chunk.YDepth - min_x
+        y2 = chunk.YDepth - max_x - 1
+        z = chunk.ZDepth - plane.SliceIndex
+        v0 = (x1, y2, z)
+        v1 = (x1, y1, z)
+        v2 = (x2, y1, z)
+        v3 = (x2, y2, z)
+        
+    return {"vertices": [v0, v1, v2, v3], "normal": normal, "voxel_id": voxel_id}
 ```
 
 **Coordinate Transformation:**
-The vertices of the `MeshQuad` are determined by the `VisiblePlane`'s axis configuration. Let `chunk` be the containing 3D chunk with dimensions `XDepth`, `YDepth`, `ZDepth`.
+The vertices of the `MeshQuad` are determined by the `VisiblePlane`'s axis configuration. Let `chunk` be the containing 3D chunk with dimensions `XDepth`, `YDepth`, `ZDepth` [S1, unofficial].
 
 *   **Axis X, Ascending:**
     *   $x = \text{plane.SliceIndex}$
     *   $y_1 = \text{minY}, y_2 = \text{maxX} + 1$
     *   $z_1 = \text{minY}, z_2 = \text{maxY} + 1$
     *   Vertices: $V_1(x, y_1, z_1)$, $V_0(x, y_2, z_1)$, $V_3(x, y_2, z_2)$, $V_2(x, y_1, z_2)$
-    *   Normal: $(1, 0, 0)$
+    *   Normal: $(1, 0, 0)$ [S1, unofficial]
 
 *   **Axis X, Descending:**
     *   $x = \text{chunk.XDepth} - \text{plane.SliceIndex}$
     *   $y_1 = \text{chunk.YDepth} - \text{minX}, y_2 = \text{chunk.YDepth} - \text{maxX} - 1$
     *   $z_1 = \text{chunk.ZDepth} - \text{minY}, z_2 = \text{chunk.ZDepth} - \text{maxY} - 1$
     *   Vertices: $V_0(x, y_1, z_1)$, $V_1(x, y_2, z_1)$, $V_2(x, y_2, z_2)$, $V_3(x, y_1, z_2)$
-    *   Normal: $(1, 0, 0)$
+    *   Normal: $(1, 0, 0)$ [S1, unofficial]
 
 *   **Axis Y, Ascending:**
     *   $x_1 = \text{minY}, x_2 = \text{maxY} + 1$
     *   $y = \text{plane.SliceIndex}$
     *   $z_1 = \text{minX}, z_2 = \text{maxX} + 1$
     *   Vertices: $V_1(x_1, y, z_1)$, $V_0(x_1, y, z_2)$, $V_3(x_2, y, z_2)$, $V_2(x_2, y, z_1)$
-    *   Normal: $(1, 0, 0)$ [Note: Source code snippet indicates this normal for Y-axis cases, which may be implementation-specific or an error in the source, but is cited as such]
+    *   Normal: $(1, 0, 0)$ [S1, unofficial]
 
 *   **Axis Y, Descending:**
     *   $x_1 = \text{chunk.XDepth} - \text{minY}, x_2 = \text{chunk.XDepth} - \text{maxY} - 1$
     *   $y = \text{chunk.YDepth} - \text{plane.SliceIndex}$
     *   $z_1 = \text{chunk.ZDepth} - \text{minX}, z_2 = \text{chunk.ZDepth} - \text{maxX} - 1$
     *   Vertices: $V_0(x_1, y, z_1)$, $V_1(x_1, y, z_2)$, $V_2(x_2, y, z_2)$, $V_3(x_2, y, z_1)$
-    *   Normal: $(1, 0, 0)$
+    *   Normal: $(1, 0, 0)$ [S1, unofficial]
 
 *   **Axis Z, Descending:**
     *   $x_1 = \text{chunk.XDepth} - \text{minY}, x_2 = \text{chunk.XDepth} - \text{maxY} - 1$
     *   $y_1 = \text{chunk.YDepth} - \text{minX}, y_2 = \text{chunk.YDepth} - \text{maxX} - 1$
     *   $z = \text{chunk.ZDepth} - \text{plane.SliceIndex}$
     *   Vertices: $V_1(x_1, y_1, z)$, $V_0(x_1, y_2, z)$, $V_3(x_2, y_2, z)$, $V_2(x_2, y_1, z)$
-    *   Normal: $(1, 0, 0)$
+    *   Normal: $(1, 0, 0)$ [S1, unofficial]
 
 **Edge Cases and Pitfalls:**
-*   **Boundary Checks:** Ensure all neighbor accesses in `IsNotAlone` and expansion loops are bounded by `width` and `height` to prevent out-of-bounds array access.
-*   **Null Voxels:** The algorithm explicitly skips null voxels. If the input plane contains holes, they are ignored, and merging stops at the hole boundary.
-*   **Precision:** The algorithm relies on integer coordinates and IDs. Floating-point precision issues do not apply to the merging logic, but vertex generation assumes unit-sized voxels.
+*   **Boundary Checks:** Ensure all neighbor accesses in `IsNotAlone` and expansion loops are bounded by `width` and `height` to prevent out-of-bounds array access [S1, unofficial].
+*   **Null Voxels:** The algorithm explicitly skips null voxels. If the input plane contains holes, they are ignored, and merging stops at the hole boundary [S1, unofficial].
+*   **Precision:** The algorithm relies on integer coordinates and IDs. Floating-point precision issues do not apply to the merging logic, but vertex generation assumes unit-sized voxels [S1, unofficial].
 
 ## Subtopics
 
@@ -238,19 +293,13 @@ The vertices of the `MeshQuad` are determined by the `VisiblePlane`'s axis confi
 An optimization pipeline that first culls occluded faces using a voxel occlusion algorithm, then processes the remaining visible faces plane-by-plane using a disjoint set data structure to merge adjacent quads. It is chosen when full 3D occlusion culling is required before meshing to reduce the number of planes processed. It differs from Disjoint Set Visible Plane Optimization by including the initial culling step.
 
 ### Visible Plane Representation
-A data structure representing a 2D slice of visible voxels, defined by a specific iteration order (Major, Middle, Minor axes) and a slice index along the minor axis [S1, unofficial]. It is used to decompose the 3D voxel space into 2D planes for efficient greedy meshing. It sets itself apart by encapsulating the axis configuration and voxel data for a single slice.
+A data structure representing a 2D slice of visible voxels, defined by a specific iteration order (Major, Middle, Minor axes) and a slice index along the minor axis [S1, unofficial]. It is used to decompose the 3D voxel space into 2D planes for efficient greedy meshing [S1, unofficial]. It sets itself apart by encapsulating the axis configuration and voxel data for a single slice [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(W \times H \times \alpha(W \times H))$ per plane, where $W$ and $H$ are the plane dimensions and $\alpha$ is the inverse Ackermann function (nearly constant) due to DSU operations. The expansion step is bounded by the plane size.
-*   **Memory Complexity:** $O(W \times H)$ for the DSU structure and the voxel array.
-*   **Performance:** Efficient for large contiguous regions of identical voxels, significantly reducing draw calls. Performance degrades if the plane is highly fragmented with many small unique regions.
-*   **Strengths:** Simple to implement, low memory overhead, effective for voxel games with large solid areas.
-*   **Limitations:** Only optimizes 2D planes; does not handle 3D occlusion or merging across planes. Requires pre-culled visible planes.
-*   **When to Use:** When generating meshes for 2D slices of voxel data, such as in Minecraft-like terrain generation.
-*   **When Not to Use:** When 3D occlusion culling is needed or when merging across multiple planes is required.
+Not given in the sources.
 
 ## Background
-The method is part of the Voxel Mesh Optimization Library by Nicolas Goyon [S1, unofficial]. It builds on the concept of greedy meshing, adapted for 2D visible planes in a 3D voxel context. The use of Disjoint Set Union allows for efficient merging of adjacent identical regions.
+Not given in the sources.
 
 ## Sources
 [S1] GitHub - nicolas-goyon/Voxel-Mesh-Optimization-Library, https://github.com/nicolas-goyon/Voxel-Mesh-Optimization-Library, fetched 2026-10-29 (unofficial)

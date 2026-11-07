@@ -1,110 +1,118 @@
 # Debug Voxel Visualization
 
-Also called: DisplayVolume, Voxel Sphere Debug
+Also called: Threshold-based Sphere Spawning, DisplayVolume, Voxel Sphere Debug
 
 ## Overview
-Debug Voxel Visualization renders auxiliary geometry (typically spheres) to provide visual feedback about the location and density of voxel data without contributing to the final volumetric appearance [S1, unofficial]. It solves the problem of inspecting sparse or dense voxel grids by converting discrete volume data into recognizable 3D primitives. It differs from [Axis-Aligned Bounding Box Geometry](1317-axis-aligned-bounding-box-geometry.md) and [Bounding Box Drawing](2733-bounding-box-drawing.md) by representing individual occupied voxels rather than just the volume's extent [S1, unofficial].
+Debug Voxel Visualization renders occupied voxels as geometric primitives (typically spheres or cubes) to inspect the spatial distribution and density of scalar field data. It solves the problem of visualizing sparse or dense voxel grids by converting discrete volume data into visible geometry, allowing developers to verify data loading, normalization, and occupancy. It differs from ray-marched volume rendering by using explicit geometry submission to the graphics pipeline, prioritizing immediate visual feedback over photorealistic integration [G].
 
 ## How it works
-**Inputs and Outputs:**
-*   Input: A 3D voxel grid (density/intensity values), metadata (dimensions, spacing), and visualization parameters.
-*   Output: A set of rendered sphere primitives positioned at voxel centers.
+The method converts a 3D scalar grid into a set of geometric primitives based on value thresholds and occupancy.
 
-**Data Structures:**
-*   `VolumeMetadata`: Parsed from a JSON file. Contains `dimensions` (array of 3 integers) and `spacing` (float). Validation requires `len(dimensions) == 3` [S1, unofficial].
-*   `VoxelGrid`: 3D array of floats (or normalized 0.0–1.0).
+**Inputs and Outputs**
+- **Input**: A 3D scalar volume grid (float32, normalized to [0, 1]), metadata (dimensions, bounds), and visualization parameters.
+- **Output**: A list of geometric primitives (spheres or cubes) submitted to the graphics pipeline.
 
-**Parameters:**
-*   `intensityThreshold`: Float in [0.0, 1.0]. Voxels with intensity below this value are skipped [S1, unofficial].
-*   `sphereRadius`: Float in mm units (before world-space scaling). Default: 0.5f [S1, unofficial].
-*   `maxSpheres`: Integer safety cap for spawned debug spheres. Default: 5000 [S1, unofficial].
+**Data Structures**
+- `VolumeMetadata`: Contains dimensions $N = (N_x, N_y, N_z)$, world bounds $P_{min}$ and $P_{max}$, and normalization parameters.
+- `VoxelPrimitive`: Represents a single debug object.
+  - `position`: World-space center $(x, y, z)$.
+  - `radius`: Sphere radius in world units.
+  - `color`: RGBA color derived from voxel intensity or channel data.
 
-**Steps:**
-1.  **Load Metadata:** Parse the JSON metadata file into a `VolumeMetadata` structure. Validate that the dimension array has length 3 [S1, unofficial].
-2.  **Normalize Intensity:** If the input grid is not normalized, apply percentile normalization [S1, unofficial]:
-    *   Calculate $p_1$ (1st percentile) and $p_{99}$ (99th percentile) of the voxel values.
-    *   If $p_{99} - p_1 < 10^{-12}$, set all values to 0.0.
-    *   Otherwise, compute $v_{norm} = \text{clip}(\frac{v - p_1}{p_{99} - p_1}, 0, 1)$.
-    *   For sparse channels, only consider non-zero values for percentile calculation [S1, unofficial].
-3.  **Iterate Voxels:** Loop through all voxel indices $(i, j, k)$ within the grid dimensions.
-4.  **Threshold Check:** If $v_{norm}[i, j, k] < \text{intensityThreshold}$, skip this voxel [S1, unofficial].
-5.  **Sphere Spawning:**
-    *   Check if the current number of spawned spheres $< \text{maxSpheres}$. If not, stop spawning [S1, unofficial].
-    *   Calculate world position: $P = (i \cdot \text{spacing}_x, j \cdot \text{spacing}_y, k \cdot \text{spacing}_z) + \text{offset}$ [G].
-    *   Generate a sphere primitive at $P$ with radius `sphereRadius` [S1, unofficial].
-6.  **Render:** Draw the generated spheres using standard OpenGL rasterization with depth testing and blending [G].
+**Steps**
+1. **Load and Validate Metadata**: Load volume metadata (e.g., from JSON) and validate that dimension length is 3 [S1, unofficial].
+2. **Normalize Intensity**: Normalize the voxel grid values to [0, 1] using percentile clipping (1st and 99th percentiles) to handle sparse data [S1, unofficial].
+   $$
+   v_{norm} = \text{clip}\left(\frac{v - p_1}{p_99 - p_1}, 0, 1\right)
+   $$
+   where $p_1$ and $p_99$ are the 1st and 99th percentiles of non-zero values.
+3. **Iterate and Filter**: Iterate through all voxel indices $(i, j, k)$.
+   - If $v_{norm}(i, j, k) < \text{intensityThreshold}$, skip the voxel [S1, unofficial].
+   - If the number of spawned primitives exceeds `maxSpheres`, stop [S1, unofficial].
+4. **Transform to World Space**: Calculate the world position of the voxel center. For unit voxels scaled by $V_{size}$:
+   $$
+   P_{world} = (i, j, k) \times V_{size}
+   $$
+   For non-unit grids with bounds $P_{min}$ and $P_{max}$:
+   $$
+   P_{world} = P_{min} + \frac{(i, j, k)}{N} \times (P_{max} - P_{min})
+   $$
+5. **Generate Primitive**: Create a sphere (or cube) at $P_{world}$ with radius $R = \text{sphereRadius} \times V_{size}$ [S1, unofficial].
+6. **Submit to Pipeline**: Transform primitives using the Model-View-Projection (MVP) matrix and rasterize [G].
 
-**Pseudocode:**
+**Parameters**
+- `intensityThreshold`: Float in [0.0, 1.0]. Voxels below this value are skipped. Default: 0.0 [S1, unofficial].
+- `sphereRadius`: Float in mm units before scaling. Default: 0.5f [S1, unofficial].
+- `maxSpheres`: Integer safety cap for spawned debug spheres. Default: 5000 [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+- **Precision**: Use float32 for voxel values to maintain memory efficiency, but ensure normalization does not underflow for sparse data [S1, unofficial].
+- **Boundaries**: Ensure $P_{min}$ and $P_{max}$ are correctly mapped to avoid voxel misalignment [G].
+- **Degenerate Input**: If $p_99 - p_1 < 1e-12$, set all normalized values to 0 or 1 depending on occupancy [S1, unofficial].
+
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def debug_voxel_visualization(grid, metadata, intensity_threshold=0.0, sphere_radius=0.5, max_spheres=5000):
-    # 1. Validate metadata
-    if len(metadata.dimensions) != 3:
-        raise ValueError("Metadata dimensions must be length 3")
+def debug_voxel_visualization(volume_grid, metadata, intensity_threshold=0.0, sphere_radius_mm=0.5, max_spheres=5000):
+    """
+    Generates debug spheres for occupied voxels.
+    volume_grid: 3D numpy array (float32)
+    metadata: dict with 'dims', 'p_min', 'p_max'
+    """
+    dims = metadata['dims']
+    p_min = metadata['p_min']
+    p_max = metadata['p_max']
     
-    # 2. Normalize grid if necessary (simplified for demo)
-    # In practice, use normalize_intensity_percentile or normalize_channel_sparse from [S1, unofficial]
-    normalized_grid = grid # Assume pre-normalized 0.0-1.0 for this snippet
-    
-    spawned_spheres = []
-    
-    # 3. Iterate
-    for i in range(metadata.dimensions[0]):
-        for j in range(metadata.dimensions[1]):
-            for k in range(metadata.dimensions[2]):
-                # 4. Threshold check
-                if normalized_grid[i, j, k] < intensity_threshold:
-                    continue
-                
-                # 5. Safety cap
-                if len(spawned_spheres) >= max_spheres:
-                    break
-                
-                # Calculate world position
-                # spacing is assumed to be in metadata or a uniform scalar
-                x = i * metadata.spacing[0]
-                y = j * metadata.spacing[1]
-                z = k * metadata.spacing[2]
-                
-                # Add sphere primitive
-                spawned_spheres.append({
-                    "position": (x, y, z),
-                    "radius": sphere_radius
-                })
+    # Normalize intensity
+    p1, p99 = np.percentile(volume_grid[volume_grid > 0], [1, 99]) if np.any(volume_grid > 0) else (0, 1)
+    if p99 - p1 < 1e-12:
+        norm_grid = np.zeros_like(volume_grid, dtype=np.float32)
+    else:
+        norm_grid = np.clip((volume_grid - p1) / (p99 - p1), 0, 1).astype(np.float32)
         
-        if len(spawned_spheres) >= max_spheres:
-            break
-        if len(spawned_spheres) >= max_spheres:
-            break
-            
-    return spawned_spheres
+    voxel_size = (p_max - p_min) / dims
+    primitives = []
+    count = 0
+    
+    for i in range(dims[0]):
+        for j in range(dims[1]):
+            for k in range(dims[2]):
+                if count >= max_spheres:
+                    break
+                if norm_grid[i, j, k] < intensity_threshold:
+                    continue
+                    
+                # World position
+                pos = p_min + np.array([i, j, k]) * voxel_size
+                radius = sphere_radius_mm * voxel_size[0] # Assume isotropic for simplicity
+                
+                primitives.append({
+                    'position': pos,
+                    'radius': radius,
+                    'color': [norm_grid[i, j, k], 0, 0, 1] # Red tinted by intensity
+                })
+                count += 1
+    return primitives
 ```
-
-**Edge Cases:**
-*   **Precision:** Use float32 for grid values to match typical voxel storage [S1, unofficial].
-*   **Boundaries:** Ensure sphere radius does not cause visual clipping if the camera is too close; debug views often use orthographic cameras [G].
-*   **Degenerate Input:** If all voxel values are identical, normalization results in zero intensity, hiding all voxels unless threshold is 0.0 [S1, unofficial].
 
 ## Subtopics
 
 ### Voxel Edges
-A visual effect that draws outlines of the voxel shapes on the grid with a specified width [S2, unofficial]. It sets apart from sphere spawning by rendering wireframe-like boundaries rather than solid volumes. Choose it when inspecting voxel connectivity or grid structure is required. Parameter: `width` (float) defining the edge thickness [S2, unofficial].
+A visual effect that draws outlines of the voxel shapes on the grid with a specified width. It is used to emphasize the grid structure rather than volume occupancy. The parameter `width` controls the line thickness of the edges [S2, unofficial].
 
 ### Central Slice Visualization
-Visualization technique for inspecting dense voxel grids by plotting central slices along X, Y, and Z axes, with optional hierarchy overlays [S3, unofficial]. It differs by providing 2D cross-sections instead of 3D geometry. Choose it for analyzing internal density distribution or octree hierarchy. Steps: Load voxel grid and build octree (`build_voxel_octree`), then plot central slices (`plot_central_slices`) which may overlay occupied voxels with red hierarchy overlays [S3, unofficial].
+A technique for inspecting dense voxel grids by plotting central slices along X, Y, and Z axes. It optionally overlays light occupied voxels with red hierarchy overlays from an octree structure. Steps include loading the voxel grid, building an octree (`build_voxel_octree`), and plotting central slices (`plot_central_slices`) with optional hierarchy depth limits [S3, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the total number of voxels, as each voxel is checked against the threshold.
-*   **Memory Complexity:** $O(M)$ where $M$ is the number of spawned spheres ($M \le \text{maxSpheres}$).
-*   **Performance:** Rendering thousands of spheres can be expensive if not instanced. Performance depends on the number of active voxels relative to `maxSpheres`.
-*   **Strengths:** Intuitive visual representation of sparse data; easy to implement with standard geometry shaders.
-*   **Limitations:** High draw call count if not instanced; `maxSpheres` cap may hide data in large volumes.
-*   **When to use:** Debugging voxel generation, inspecting sparse datasets, or visualizing thresholded regions.
-*   **When not to use:** Final rendering or dense volume inspection where occlusion makes individual spheres indistinguishable.
+- **Time Complexity**: $O(N)$ where $N$ is the total number of voxels, as each voxel is checked once.
+- **Memory Complexity**: $O(M)$ where $M$ is the number of spawned primitives (spheres/cubes), capped by `maxSpheres`.
+- **Performance**: Fast for sparse data; degrades rapidly for dense data due to the large number of primitives submitted to the GPU.
+- **Strengths**: Immediate visual feedback, easy to debug data loading and normalization.
+- **Limitations**: Not suitable for large dense volumes due to primitive count limits; does not show internal structure without slicing.
 
 ## Background
-Originated in voxel-based rendering SDKs and tools for debugging sparse volume data [S1, unofficial]. It is commonly used in medical imaging (MRI/CT) and 3D modeling tools (like MagicaVoxel) to inspect voxel grids [S1, S2, unofficial]. The method relies on standard graphics pipeline features for auxiliary geometry rendering [G].
+Debug Voxel Visualization is a standard technique in volume data inspection tools, often implemented in SDKs for voxel-based rendering and editing. It relies on basic graphics pipeline features (geometry instancing or individual primitive submission) and is commonly found in tools like MagicaVoxel for debugging voxel grids and in custom volume rendering SDKs for data validation [S1, unofficial][S2, unofficial][S3, unofficial].
 
 ## Sources
 [S1] guillaume-schneider/vrdf-sdk, https://github.com/guillaume-schneider/vrdf-sdk, fetched 2026-10-26 (unofficial)

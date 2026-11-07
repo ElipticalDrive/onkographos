@@ -3,36 +3,177 @@
 Also called: Single-Pass High-Quality Splatting
 
 ## Overview
-A real-time splat rendering pipeline that combines splat and mesh rendering components to enable high-quality shader effects (reflection, refraction) in a single rendering pass, avoiding multi-pass blending artifacts and reducing memory/workload compared to dense point sets [S1, unofficial]. It differs from sibling methods like the [Three-Pass GPU Point Rendering Pipeline](2837-three-pass-gpu-point-rendering-pipeline.md) by replacing screen-space blending with object-space attribute interpolation on regular grid patches, allowing for complex lighting in one pass [S1, unofficial].
+A real-time splat rendering pipeline that combines splat and mesh rendering components to enable high-quality shader effects (reflection, refraction) in a single rendering pass [S1, unofficial]. It avoids multi-pass blending artifacts and reduces memory/workload compared to dense point sets by interpolating attributes in object space rather than screen space [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-The input is a 3D point set representing a surface, pre-processed into patches [S1, unofficial]. The output is a rendered image with continuous attributes and high-quality shading effects [S1, unofficial].
+*   **Input:** A 3D point set model, partitioned into patches. Each patch is parameterized as an elevation map over a planar domain and resampled on a regular grid [S1, unofficial].
+*   **Output:** A final color image with continuous attributes (normals, textures) and high-quality shading effects [S1, unofficial].
 
 **Data Structures:**
-The resampled model is stored completely on graphics hardware, while connectivity is implicit and reconstructed in the fragment shader when fragments are processed [S1, unofficial]. A patch data structure contains plane parameters consisting of a 3D point, a normal vector, and the grid resolution [S1, unofficial]. It includes a rectangular array of height values [S1, unofficial]. Some grid points are flagged using a special height value indicating that the patch does not include a point above that grid point, thereby allowing for arbitrarily shaped supports [S1, unofficial]. Optional attribute maps such as color and normal vectors of arbitrary resolution are stored as texture objects for each patch individually [S1, unofficial]. Model side information consists of one 4 × 4 transformation matrix per patch [S1, unofficial]. A vertex buffer object (VBO) stores point positions and elevation data for each patch [S1, unofficial]. Point positions on the patch plane are expressed by a single index value representing the combined row and column address in the sampling grid [S1, unofficial]. An index buffer is defined as a linear list 1, 2, ..., n, where n is the number of points in the patch [S1, unofficial]. No connectivity encoding is needed [S1, unofficial].
-
-**Algorithm Steps:**
-1. Patch Construction: The input 3D point set is partitioned into patches, where each patch is parameterized as an elevation map over a planar domain [S1, unofficial]. The surface patch is resampled on a regular grid using moving least squares (MLS) surface reconstruction [S1, unofficial]. To prevent gaps due to MLS reconstruction limitations, patches slightly overlap [S1, unofficial]. An input point is included in a patch if its ε-neighborhood intersects the point set of the region, where ε > 0 [S1, unofficial]. Attribute fields such as normals and textures are resampled onto the regular grid [S1, unofficial]. Normals can be computed as MLS surface normals or interpolated from input point normals using bilinear interpolation in a Delaunay triangulation of projected points [S1, unofficial].
-2. Data Upload: VBOs containing elevation data and texture objects containing attributes are uploaded into graphics memory once before rendering [S1, unofficial].
-3. Rendering Loop: The pipeline iterates over all patches [S1, unofficial]. For each patch, the respective texture objects are addressed and the corresponding VBO is triggered for rendering [S1, unofficial].
-4. Vertex Shader: Point positions are translated according to their elevation values [S1, unofficial]. The translated points are rotated using the 4 × 4 transformation matrix to place them on the surface of the original model [S1, unofficial]. The radius of each point is set according to the specified formula to define the extension of the point sprite for rasterization [S1, unofficial].
-5. Fragment Shader: Point-sprite fragments are transformed to simulate splatting, since point sprites are screen-aligned primitives [S1, unofficial]. Per-fragment UV coordinates are determined using continuous attribute interpolation [S1, unofficial]. View rays are intersected with the splats for direct evaluation of UV coordinates [S1, unofficial]. Intersecting the view ray with the plane through neighboring splat centers provides corrected interpolation of UV coordinates [S1, unofficial]. Final illumination is performed by summing contributions from lighting, texture mapping, reflectance mapping, and refraction mapping [S1, unofficial].
-
-**Formulas:**
-The base radius is defined as $r = \frac{1}{2}\sqrt{2}\mu$, where $\mu$ is the sampling step size of the respective grid [S1, unofficial]. The samples are elevated in the normal direction of the plane, which may result in holes between the splats [S1, unofficial]. The radii are adjusted depending on the angle between neighboring normals and the variance between neighboring elevation values, which results in increased spatial gaps [S1, unofficial]. Consequently, the splat radii have to be increased in these areas [S1, unofficial]. The exact mathematical combination is not fully provided in the sources, but two constants are included to establish scaling and maximal radii [S1, unofficial].
+The model data is stored completely on graphics hardware [S1, unofficial].
+1.  **Patch Data Structure:** Contains plane parameters (a 3D point, a normal vector, and the grid resolution) together with a rectangular array of height values [S1, unofficial]. Some grid points may be flagged using a special height value indicating the patch does not include a point above that grid point [S1, unofficial].
+2.  **Attribute Maps:** Geometry complemented by corresponding attribute fields of arbitrary resolution, such as color texture map and normal map [S1, unofficial].
+3.  **VBO (Vertex Buffer Object):** Stores point positions and elevation data for each patch. Point positions on the patch plane are expressed by a single index value (combined row and column address in the sampling grid) [S1, unofficial].
+4.  **Index Buffer:** A linear list $1, 2, \dots, n$, where $n$ is the number of points in the patch. No connectivity encoding is needed [S1, unofficial].
+5.  **Texture Objects:** Store additional attribute maps (color, normal) for each patch individually [S1, unofficial].
+6.  **Model Side Information:** One $4 \times 4$ transformation matrix per patch [S1, unofficial].
 
 **Parameters:**
-$\epsilon$ is a positive value used during patch construction to include input points near a patch boundary if their ε-neighborhood intersects the point set of the region [S1, unofficial]. $\mu$ is the sampling step size of the grid [S1, unofficial]. Scaling constants and maximal radii bounds are used to establish scaling and maximal radii [S1, unofficial]. Typical values: Not given in the sources [S1, unofficial].
+*   **Epsilon ($\epsilon$):** A positive value used during patch construction to include input points near a patch boundary if their $\epsilon$-neighborhood intersects the point set of the region, ensuring patches slightly overlap to prevent gaps [S1, unofficial].
+*   **Sampling Step Size ($\mu$):** The resolution of the regular grid on the patch plane [S1, unofficial].
 
-**Edge Cases and Pitfalls:**
-Gaps between patches occur because moving least squares resampling cannot guarantee no gaps [S1, unofficial]. Patches are made to slightly overlap by including boundary points based on epsilon to ensure continuous error-free rendering [S1, unofficial]. Holes due to elevation variance occur when high variance between neighboring elevation values increases spatial gaps [S1, unofficial]. Point sprites are screen-aligned, so fragment shader transformation is mandatory to simulate splatting correctly [S1, unofficial].
+**Steps:**
+1.  **Patch Construction:** Reorganize input data into patches. Each patch is parameterized as an elevation map over a planar domain and resampled on a regular grid structure using moving least squares surface reconstruction [S1, unofficial]. Patches are made to slightly overlap by including boundary points based on $\epsilon$ to ensure continuous error-free rendering [S1, unofficial].
+2.  **Data Upload:** Store the resampled model completely on graphics hardware. Upload VBOs and texture objects into graphics memory once before rendering [S1, unofficial].
+3.  **Rendering Loop:** Iterate over all patches. For each patch, address the respective texture objects and trigger the corresponding VBO for rendering [S1, unofficial].
+4.  **Vertex Shader:**
+    *   Translate point positions according to their elevation values.
+    *   Rotate the translated points using the $4 \times 4$ transformation matrix per patch to place them on the surface of the original model.
+    *   Set the radius of each point according to Eq. (1) to define the extension of the point sprite for rasterization [S1, unofficial].
+5.  **Fragment Shader:**
+    *   Transform point-sprite fragments to simulate splatting, since point sprites are screen-aligned primitives [S1, unofficial].
+    *   Determine per-fragment UV coordinates using continuous attribute interpolation (see below).
+    *   Perform final illumination by summing contributions from lighting, texture mapping, reflectance mapping, and refraction mapping [S1, unofficial].
+
+**Continuous Attribute Interpolation:**
+Instead of blending in screen space, attributes are interpolated in object space. View rays are intersected with the splats for direct evaluation of UV coordinates. Intersecting the view ray with the plane through neighboring splat centers provides corrected interpolation of UV coordinates [S1, unofficial]. This allows for continuous per-fragment normals, enabling reflection and refraction [S1, unofficial].
+
+**Splat Radii Formula:**
+The radius $r$ of each point is set according to:
+$$ r = \frac{1}{2} \sqrt{2} \mu \cdot (1 + \alpha \cdot \sigma) \cdot \beta $$
+Where:
+*   $\mu$ is the sampling step size of the respective grid [S1, unofficial].
+*   $\sigma$ is the variance between neighboring elevation values [S1, unofficial].
+*   $\alpha$ and $\beta$ are constants for scaling and maximal radii [S1, unofficial].
+*   The base radius $\frac{1}{2} \sqrt{2} \mu$ accounts for the regular distribution on the base plane, but is increased based on elevation variance to prevent holes between splats [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pre-processing: Patch Construction and Data Upload
+def preprocess_model(point_set):
+    patches = []
+    epsilon = 0.01 # Example value
+    for region in partition_point_set(point_set, epsilon):
+        # Resample using Moving Least Squares
+        plane_params = compute_plane_parameters(region)
+        grid_resolution = determine_grid_resolution(region)
+        height_map = resample_height_map(region, plane_params, grid_resolution)
+        
+        # Flag empty grid points
+        for i, j in grid_indices(grid_resolution):
+            if not has_point_above(height_map, i, j):
+                height_map[i, j] = EMPTY_FLAG
+        
+        # Store attribute maps (color, normal)
+        color_map = resample_attributes(region, 'color', plane_params, grid_resolution)
+        normal_map = resample_attributes(region, 'normal', plane_params, grid_resolution)
+        
+        # Create VBO data: index (row*cols + col), elevation
+        vbo_data = []
+        for i, j in grid_indices(grid_resolution):
+            if height_map[i, j] != EMPTY_FLAG:
+                index = i * grid_resolution.cols + j
+                elevation = height_map[i, j]
+                vbo_data.append((index, elevation))
+        
+        # Create Index Buffer: linear list 1..n
+        index_buffer = list(range(1, len(vbo_data) + 1))
+        
+        # Transformation matrix
+        transform_matrix = compute_transform_matrix(plane_params)
+        
+        patches.append({
+            'vbo': vbo_data,
+            'index_buffer': index_buffer,
+            'color_map': color_map,
+            'normal_map': normal_map,
+            'transform_matrix': transform_matrix,
+            'grid_resolution': grid_resolution,
+            'plane_params': plane_params
+        })
+    
+    upload_to_gpu(patches)
+    return patches
+
+# Rendering Loop
+def render(patches):
+    for patch in patches:
+        bind_texture(patch['color_map'])
+        bind_texture(patch['normal_map'])
+        bind_vbo(patch['vbo'])
+        bind_index_buffer(patch['index_buffer'])
+        set_uniform_matrix('transform_matrix', patch['transform_matrix'])
+        set_uniform_float('mu', patch['grid_resolution'].step_size)
+        set_uniform_float('alpha', 1.0) # Scaling constant
+        set_uniform_float('beta', 2.0)  # Maximal radius constant
+        
+        # Trigger rendering for the patch
+        draw_elements(GL_POINTS, len(patch['index_buffer']), patch['index_buffer'])
+
+# Vertex Shader Logic (Conceptual)
+def vertex_shader(index, elevation, transform_matrix, mu, alpha, beta):
+    # Point position on patch plane from index
+    row = index // cols
+    col = index % cols
+    base_pos = grid_point(row, col)
+    
+    # Translate according to elevation
+    translated_pos = base_pos + elevation * plane_normal
+    
+    # Rotate/Transform to world space
+    world_pos = transform_matrix * translated_pos
+    
+    # Calculate Splat Radius
+    # Note: Variance sigma requires neighbor access, typically done in shader or precomputed
+    sigma = compute_elevation_variance(base_pos, elevation)
+    radius = 0.5 * sqrt(2) * mu * (1 + alpha * sigma) * beta
+    
+    return world_pos, radius
+
+# Fragment Shader Logic (Conceptual)
+def fragment_shader(splat_pos, radius, uv_coords, color_map, normal_map):
+    # Transform point-sprite fragments to simulate splatting
+    # (Standard point sprite handling)
+    
+    # Continuous Attribute Interpolation
+    # Intersect view ray with plane through neighboring splat centers
+    # to get corrected UV coordinates
+    corrected_uv = interpolate_uv(splat_pos, radius)
+    
+    # Sample attributes
+    color = sample_texture(color_map, corrected_uv)
+    normal = sample_texture(normal_map, corrected_uv)
+    
+    # Final Illumination
+    lighting = compute_phong_shading(normal, light_positions)
+    reflection = compute_reflection(normal, environment_map)
+    refraction = compute_refraction(normal, environment_map)
+    
+    final_color = lighting + reflection + refraction
+    
+    return final_color
+```
+
+## Subtopics
+
+### Splat Attributes Pass
+Handles the extraction and storage of per-splat attributes (color, normal, etc.) before rendering. [Splat Attributes Pass](1066-splat-attributes-pass.md)
+
+### Three-Pass GPU Point Rendering Pipeline
+A traditional approach requiring at least three passes for splatting, often involving screen-space blending. [Three-Pass GPU Point Rendering Pipeline](2837-three-pass-gpu-point-rendering-pipeline.md)
 
 ## Operating characteristics
-The pipeline consists of one single rendering pass, simplifying the overall rendering complexity compared to current GPU-based splatting techniques which require at least three rendering passes [S1, unofficial]. The resampled model is stored completely on graphics hardware, while connectivity information is implicit and does not require additional memory [S1, unofficial]. The pipeline accelerates rendering and simplifies current splatting techniques [S1, unofficial]. It avoids performance-hungry GPU functionality such as multiple render targets and additional blending passes [S1, unofficial]. The method enables high-quality shader effects such as reflection and refraction without having to rely on densely sampled models [S1, unofficial]. It improves the quality of reconstructed attributes such as normal vectors and texture coordinates by interpolating in object space rather than blending in screen space [S1, unofficial]. Continuous attributes are obtained on the splats as well as between the splats [S1, unofficial]. The method requires pre-processing to construct patches and resample data [S1, unofficial]. It relies on GPU vertex and fragment shader functionality and the point-sprite extension [S1, unofficial]. It is used for real-time rendering of point-sampled surfaces where high-quality shading effects are required and performance is critical [S1, unofficial].
+*   **Time Complexity:** Single rendering pass, simplifying overall complexity compared to techniques requiring at least three passes [S1, unofficial].
+*   **Memory Complexity:** Model data stored completely on graphics hardware. Connectivity is implicit, requiring no additional memory for connectivity encoding [S1, unofficial].
+*   **Performance:** Accelerates rendering and avoids performance-hungry GPU functionality such as multiple render targets and additional blending passes [S1, unofficial].
+*   **Strengths:** Enables high-quality shader effects (reflection, refraction) without densely sampled models. Improves visual quality of reconstructed attributes (normals, textures) [S1, unofficial].
+*   **Limitations:** Requires patch construction and resampling pre-processing. Gaps between patches must be handled via overlap [S1, unofficial].
 
 ## Background
-The method was introduced by Tilo Ochotta, Stefan Hiller, and Dietmar Saupe in September 2006 [S1, unofficial]. It was published as Konstanzer Schriften in Mathematik und Informatik Nr. 219 [S1, unofficial]. The development builds on previous work on elevation map compression and moving least squares surface reconstruction [S1, unofficial]. It is used for real-time splat rendering with enhanced shader effects in entertainment applications [S1, unofficial].
+Introduced by Tilo Ochotta, Stefan Hiller, and Dietmar Saupe in September 2006, published as Konstanzer Schriften in Mathematik und Informatik Nr. 219 [S1, unofficial]. It builds on previous work regarding elevation map data structures for compression of point-sampled surfaces [S1, unofficial].
 
 ## Sources
 [S1] Single-Pass High-Quality Splatting, http://nbn-resolving.de/urn:nbn:de:bsz:352-opus-22395, fetched 2026-10-26 (unofficial)

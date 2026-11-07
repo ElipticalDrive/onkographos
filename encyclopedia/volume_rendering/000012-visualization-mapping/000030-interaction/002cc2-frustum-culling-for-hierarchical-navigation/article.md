@@ -3,97 +3,99 @@
 Also called: Context-aware Frustum Culling, Focus and Context with Interactive Filtering, Frustum Culling in Navigation, Interactive Filtering
 
 ## Overview
-Frustum Culling for Hierarchical Navigation is an interaction technique that reduces visual clutter and aids data exploration by selectively rendering nodes based on their position relative to the 3D viewing frustum [S1]. It sets itself apart from standard geometric culling by simultaneously managing the visual state of coordinated 2D views (overview maps and treemaps), ensuring that culling in 3D triggers specific contextual updates in 2D rather than simple invisibility [S1].
+Frustum Culling for Hierarchical Navigation is a focus-and-context technique designed to reduce visual clutter during the exploration of large, hierarchical datasets by culling nodes outside the current viewing frustum from the primary rendering window [S1]. It distinguishes itself from standard geometric culling by synchronizing the culling state with interactive selection mechanisms in coordinated 2D views (overview maps and treemaps), ensuring that culled data remains visible as contextual cues rather than disappearing entirely [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** The current 3D viewing frustum (defined by camera position, orientation, and clipping planes), the current Level of Detail (LOD) hierarchy of nodes, and the current state of the 2D coordinated views (Overview Map and Treemap) [S1].
-*   **Output:** A rendered 3D volume with only visible nodes, and updated 2D views where culled nodes are visually distinguished but not selectable [S1].
+*   **Input:** The current Level of Detail (LOD) hierarchy of the dataset; the current camera viewing frustum parameters; the current state of the 2D overview map and treemap.
+*   **Output:** A rendered 3D volume window containing only visible nodes; updated 2D views where culled nodes are visually distinct (greyed out) and non-selectable.
 
 **Data Structures:**
-*   **Node Hierarchy:** A tree structure where each node at the current LOD has a spatial location (point) and a corresponding representation in the 2D views (point in Overview, rectangle in Treemap) [S1].
-*   **Viewing Frustum:** A set of six planes defining the visible volume in 3D space [S1].
-*   **Visual State Flags:** Per-node flags indicating visibility and selection eligibility [S1].
+*   **LOD Nodes:** Each node in the hierarchy contains geometric data for its representation (e.g., point locations for the overview map, bounding rectangles for the treemap) and a visibility/selection state flag.
+*   **Viewing Frustum:** Defined by the standard six clipping planes (left, right, bottom, top, near, far) derived from the camera's projection and view matrices.
 
-**Steps:**
-1.  **Frustum Intersection Test:** For each node in the current LOD, determine if its spatial location lies inside the 3D viewing frustum [S1].
-2.  **Culling Decision:** Identify nodes that are completely outside the viewing frustum [S1].
+**Algorithm Steps:**
+1.  **Frustum Intersection Test:** For every node $N_i$ in the current LOD, determine if its bounding volume intersects the current viewing frustum.
+2.  **Culling Decision:** If node $N_i$ is completely outside the viewing frustum, mark it as `culled`. Otherwise, mark it as `visible`.
 3.  **3D Rendering Update:**
-    *   For nodes inside the frustum: Render them normally in the 3D rendering window [S1].
-    *   For nodes outside the frustum: Do not draw their primary visual markers (e.g., squares) in the 3D rendering window [S1].
+    *   For `visible` nodes: Render the node's representation (e.g., squares at point locations) in the 3D rendering window.
+    *   For `culled` nodes: Do not render the node's primary representation in the 3D window.
 4.  **Selection State Update:**
-    *   For nodes inside the frustum: Keep them active for selection [S1].
-    *   For nodes outside the frustum: Deactivate them from selection [S1].
-5.  **Overview Map Update:**
-    *   For nodes inside the frustum: Draw their corresponding point markers [S1].
-    *   For nodes outside the frustum: Do not draw their point markers (squares) [S1]. However, draw line segments passing through their point locations to indicate the cut and provide context [S1].
-6.  **Treemap Update:**
-    *   For nodes inside the frustum: Render their rectangle regions normally [S1].
-    *   For nodes outside the frustum: Fill their corresponding rectangle regions with a specific context color (grey) [S1]. The rectangles are still drawn to provide structural context [S1].
-
-**Parameters:**
-*   **Context Color:** Grey is used to fill the rectangle regions of culled nodes in the treemap [S1].
+    *   For `visible` nodes: Enable selection interaction.
+    *   For `culled` nodes: Disable selection interaction. No selection squares are drawn at their point locations in the overview map.
+5.  **Contextual Visualization (Overview Map):**
+    *   For `culled` nodes: Draw line segments passing through their point locations in the overview map to indicate the "cut" or presence of the node, providing spatial context [S1].
+6.  **Contextual Visualization (Treemap):**
+    *   For `culled` nodes: Fill their corresponding rectangle regions with a specific context color (grey) in the treemap. The rectangles are still drawn to maintain the layout structure, but the fill color indicates they are outside the current focus [S1].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def update_hierarchical_navigation(nodes, frustum, overview_map, treemap):
+def update_hierarchical_navigation(lod_nodes, frustum, overview_map, treemap):
     """
-    Updates the 3D view, Overview Map, and Treemap based on frustum culling.
+    Updates the rendering and 2D views based on frustum culling.
     
     Args:
-        nodes: List of Node objects, each with:
-            - position: (x, y, z) tuple
-            - id: Unique identifier
-            - overview_point: (x, y) tuple for 2D overview
-            - treemap_rect: (x, y, w, h) tuple for 2D treemap
-        frustum: Frustum object with method is_inside(point)
-        overview_map: 2D canvas object with methods draw_square(point), draw_line_segment(point)
-        treemap: 2D canvas object with method fill_rectangle(rect, color)
+        lod_nodes: List of Node objects in the current Level of Detail.
+        frustum: Frustum object with method intersects(bounding_volume).
+        overview_map: 2D Canvas object for the overview map.
+        treemap: 2D Canvas object for the treemap.
     """
-    for node in nodes:
-        is_visible = frustum.is_inside(node.position)
+    for node in lod_nodes:
+        # Step 1: Check if node is inside the viewing frustum
+        is_visible = frustum.intersects(node.bounding_volume)
         
         if is_visible:
-            # 3D View: Render node normally
+            # Step 3: Render node in 3D window
             render_3d_node(node)
             
-            # Overview Map: Draw selection marker
-            overview_map.draw_square(node.overview_point)
+            # Step 4: Enable selection in overview map
+            draw_selection_square(overview_map, node.point_location)
             
-            # Treemap: Render normally (assumed default behavior for visible nodes)
-            # Note: Specific fill color for visible nodes is not detailed in sources,
-            # assuming default or previous state.
-            treemap.fill_rectangle(node.treemap_rect, color="default")
+            # Step 6: Draw treemap rectangle with normal color (implied default)
+            draw_treemap_rectangle(treemap, node.rectangle, color=node.color)
+            
         else:
-            # 3D View: Cull node (do not draw square)
-            # No action required for 3D rendering if default is "do not draw"
+            # Step 3: Do not render node in 3D window
+            pass
             
-            # Overview Map: Deactivate selection (no square), but draw context line
-            # overview_map.draw_square(node.overview_point) # Explicitly NOT called
-            overview_map.draw_line_segment(node.overview_point)
+            # Step 4: Disable selection in overview map
+            # No selection square drawn
             
-            # Treemap: Fill with context color (grey)
-            treemap.fill_rectangle(node.treemap_rect, color="grey")
+            # Step 5: Draw line segment through point for context in overview map
+            draw_context_line(overview_map, node.point_location)
+            
+            # Step 6: Draw treemap rectangle with grey context color
+            draw_treemap_rectangle(treemap, node.rectangle, color="grey")
 ```
 
+**Parameters:**
+*   **Context Color:** Grey is used for the fill color of rectangle regions corresponding to culled nodes in the treemap [S1].
+
 **Edge Cases and Pitfalls:**
-*   **Precision:** Frustum intersection tests must handle floating-point precision issues near frustum boundaries to avoid flickering or incorrect culling [S1].
-*   **Context Clarity:** The line segments in the overview map and grey rectangles in the treemap must be visually distinct from active nodes to avoid confusion, but not so dominant as to obscure the structure [S1].
-*   **LOD Consistency:** The culling decision is based on the current LOD. If the LOD changes, the culling state must be recalculated [S1].
+*   **Boundary Precision:** Nodes exactly on the frustum boundary should be treated as visible to prevent flickering during navigation [G].
+*   **Selection Consistency:** It is critical that the selection state in the 2D views strictly mirrors the frustum culling state to prevent users from selecting data that is not currently visible in the 3D view [S1].
+
+## Subtopics
+
+### Interactive Filtering
+The specific implementation of culling nodes based on the viewing frustum and updating 2D views accordingly. It sets itself apart by keeping contextual lines and greyed-out regions rather than hiding data completely. Choose this when maintaining orientation during hierarchical navigation is more important than maximizing the detail of the visible subset. [S1]
+
+### Direct Transformation
+A complementary technique allowing users to translate, scale, and rotate the 3D volume and 2D maps. It sets itself apart by providing the user input mechanism that drives the frustum changes. Choose this when fine-grained control over the view is required. [S1]
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of nodes in the current LOD, as each node requires a frustum intersection test and state updates [S1].
-*   **Memory Complexity:** Minimal additional memory, primarily for storing the visual state flags and the frustum definition [S1].
-*   **Performance:** Improves rendering performance by reducing the number of primitives drawn in the 3D view and coordinated 2D views [S1].
-*   **Strengths:** Reduces visual clutter, aids orientation by providing context for culled data, and prevents selection of irrelevant data [S1].
-*   **Limitations:** Relies on the accuracy of the frustum culling algorithm; context lines and grey rectangles may become cluttered in very dense hierarchies [S1].
-*   **When to Use:** When navigating large hierarchical datasets where visual clutter hinders exploration and context is needed for orientation [S1].
-*   **When Not to Use:** When the user requires full visibility of all nodes regardless of position, or when the overhead of maintaining coordinated view states is prohibitive [S1].
+*   **Time Complexity:** The culling test is $O(N)$ where $N$ is the number of nodes in the current LOD. The rendering update is proportional to the number of visible nodes.
+*   **Memory Complexity:** $O(N)$ to store the LOD hierarchy and node states.
+*   **Strengths:** Reduces visual clutter significantly during navigation; maintains user orientation by showing context in 2D views; prevents selection errors by deactivating culled nodes.
+*   **Limitations:** Does not reduce the computational cost of rendering the visible nodes; relies on the user understanding the contextual cues (grey regions, lines) to interpret the culling.
+*   **When to use:** When navigating large hierarchical datasets where visual clutter obscures the current focus.
+*   **When not to use:** When the user needs to see all data simultaneously or when the hierarchy is too small to benefit from culling.
 
 ## Background
-This technique was introduced in the "Hierarchical Navigation Interface" paper, which leverages multiple coordinated views to assist in the exploration of large and high-dimensional datasets [S1]. It is part of a broader family of focus and context techniques used in visualization to show portions of data in detail while keeping the rest at a lower resolution for orientation [S1]. The specific implementation described uses interactive filtering to manage the visual state of nodes across 3D and 2D views during navigation [S1].
+This technique originates from the "Hierarchical Navigation Interface" (HNI) presented by Wang et al. in 2005 [S1]. It was developed to address the challenges of visualizing large and high-dimensional datasets, where focus-and-context techniques are employed to assist users in data exploration and Level of Detail (LOD) selection [S1]. The method integrates interactive filtering with coordinated 2D views (overview map and treemap) to provide a seamless navigation experience [S1].
 
 ## Sources
 [S1] Hierarchical Navigation Interface: Leveraging Multiple Coordinated Views, https://academicweb.nd.edu/~cwang11/papers/iv05-hni.pdf, fetched 2026-10-30

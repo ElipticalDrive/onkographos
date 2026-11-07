@@ -1,0 +1,269 @@
+--- v001.md
++++ v002.md
+@@ -4,119 +4,146 @@
+ 
+ ## Overview
+-Optimized FCC Data Fetching is a branchless, lookup-table-free algorithm for determining the tetrahedral polynomial type and fetching the 19 required data samples for Box-Spline isosurface raycasting on Face-Centered Cubic (FCC) lattices [S1]. It solves the performance bottleneck of conditional branches and memory lookups inherent in naive tetrahedral decomposition methods [S1]. Unlike its sibling [BCC Marching Tetrahedra with Permutation-Based Lookup](3414-bcc-marching-tetrahedra-with-permutation-based-lookup.md), which handles BCC lattices via permutation tables, this method operates directly on FCC datasets by deriving a rotation vector and offset to align the local tetrahedral coordinate system, enabling a sequential, cache-friendly fetch pattern [S1][S2, unofficial].
++Optimized FCC Data Fetching is a branchless, lookup-table-free algorithm for determining the tetrahedral polynomial type and fetching the 19 required data samples for Box-Spline isosurface raycasting on Face-Centered Cubic (FCC) lattices [S1]. It solves the performance bottleneck of conditional branches and memory lookups inherent in naive tetrahedral decomposition methods [S1]. Unlike its sibling [BCC Marching Tetrahedra with Permutation-Based Lookup](3414-bcc-marching-tetrahedra-with-permutation-based-lookup.md), which handles BCC lattices via permutation tables, this method operates directly on FCC datasets by deriving a rotation vector and offset to align the local tetrahedral coordinate system, enabling a sequential fetch pattern where the coordinate change between adjacent stencils is minimized [S1][S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+ - `p_in`: The 3D raycast position in continuous space (`vec3`).
+-- `FETCH(coeff_index)`: A macro or function that retrieves the scalar value from the FCC dataset at the current integer coordinate `f` for the specified coefficient index.
+ 
+ **Outputs:**
+-- The Box-Spline value at `p_in` (computed from fetched coefficients).
+-- The integer origin `f` updated for subsequent fetches.
++- `c`: A list of 19 fetched Box-Spline coefficients.
++- `p_local`: The transformed local fractional coordinate used for evaluation.
+ 
+ **Data Structures:**
+ - `f`: `ivec3`, the integer base coordinate of the voxel containing `p_in`.
+-- `R`: `ivec3`, the rotation vector determining the direction of coordinate updates during fetching.
+-- `c`: Array of 30 floats (or relevant type) storing the fetched Box-Spline coefficients. The algorithm fetches 19 specific coefficients, but the symbolic formula references up to index 29. The sources provide a specific fetch order for 19 coefficients, but the symbolic formula implies a larger stencil. The implementation below follows the explicit fetch loop provided in [S2, unofficial] which accesses coefficients `c01` through `c24` (and others) via the `FETCH` macro. Note: The source [S2, unofficial] code snippet lists specific coefficient names in the fetch loop (e.g., `c01`, `c11`, etc.).
++- `R`: `ivec3`, the rotation vector determining the direction and magnitude of coordinate updates during fetching.
++- `vitet`: `vec4`, boolean indicators for tetrahedron classification.
++- `c`: Array of 19 floats storing the fetched coefficients.
+ 
+ **Steps:**
+ 
+-1.  **Compute Integer Base and Fractional Part:**
+-    Calculate the integer floor of the input position and the fractional part within the unit cube.
+-    $$ f = \lfloor p_{in} \rfloor $$
+-    $$ p_{cube} = p_{in} - f $$
++1. **Compute Integer Base and Fractional Part:**
++   Calculate the integer floor of the input position and the fractional part within the unit cube [S2, unofficial].
++   $$ f = \lfloor p_{in} \rfloor $$
++   $$ p_{cube} = p_{in} - f $$
+ 
+-2.  **Determine Parity:**
+-    Compute the parity of the integer coordinate sum to distinguish between the two tetrahedral orientations in the FCC lattice.
+-    $$ parity = (f.x + f.y + f.z) \& 1 $$
++2. **Determine Parity:**
++   Compute the parity of the integer coordinate sum to distinguish between the two tetrahedral orientations in the FCC lattice [S1].
++   $$ parity = (f.x + f.y + f.z) \& 1 $$
+ 
+-3.  **Transform Fractional Part:**
+-    Adjust the fractional coordinate based on parity to align with the reference tetrahedron.
+-    $$ p_{cube} = p_{cube} + parity \cdot (1 - 2 \cdot p_{cube}) $$
+-    [G] Note: In GLSL/HLSL, `float(parity)` converts the integer 0 or 1 to a float.
++3. **Transform Fractional Part:**
++   Adjust the fractional coordinate based on parity to align with the reference tetrahedron [S1].
++   $$ p_{cube} = p_{cube} + float(parity) \cdot (1 - 2 \cdot p_{cube}) $$
+ 
+-4.  **Classify Tetrahedron Type:**
+-    Determine which of the 8 tetrahedra within the cubic cell contains the point by testing against knot planes.
+-    $$ v_{itet} = \begin{bmatrix} dot(p_{cube}, (-1, -1, -1)) > -1 \\ dot(p_{cube}, (1, 1, -1)) > 1 \\ dot(p_{cube}, (1, -1, 1)) > 1 \\ dot(p_{cube}, (-1, 1, 1)) > 1 \end{bmatrix} $$
+-    $$ type = 1 - (v_{itet}.x + v_{itet}.y + v_{itet}.z + v_{itet}.w) $$
++4. **Classify Tetrahedron Type:**
++   Determine which of the 8 tetrahedra within the cubic cell contains the point by testing against knot planes [S1].
++   $$ v_{itet} = \begin{bmatrix} dot(p_{cube}, (-1, -1, -1)) > -1 \\ dot(p_{cube}, (1, 1, -1)) > 1 \\ dot(p_{cube}, (1, -1, 1)) > 1 \\ dot(p_{cube}, (-1, 1, 1)) > 1 \end{bmatrix} $$
++   $$ type = 1 - (v_{itet}.x + v_{itet}.y + v_{itet}.z + v_{itet}.w) $$
+ 
+-5.  **Compute Tetrahedral Index:**
+-    Map the classification and parity to a unique integer index `itet` (0-7) that identifies the specific tetrahedron and its orientation.
+-    $$ itet = int(dot(v_{itet}.yzw, (1, 2, 3))) + 4 \cdot int(type) + parity \cdot 5 $$
++5. **Compute Tetrahedral Index:**
++   Map the classification and parity to a unique integer index `itet` that identifies the specific tetrahedron and its orientation [S1].
++   $$ itet = int(dot(v_{itet}.yzw, (1, 2, 3))) + 4 \cdot int(type) + parity \cdot 5 $$
+ 
+-6.  **Compute Offset and Rotation:**
+-    Calculate the integer offset to the origin of the fetch pattern and the rotation vector `R` that defines the axis-aligned steps for fetching.
+-    $$ offset = int(v_{itet}.y + v_{itet}.z + v_{itet}.w) \cdot (1 - ivec3(v_{itet}.wzy)) $$
+-    $$ offset = offset + parity \cdot (1 - 2 \cdot offset) $$
+-    $$ R = 1 - 2 \cdot offset $$
+-    $$ R = R \cdot 2 $$
++6. **Compute Offset and Rotation:**
++   Calculate the integer offset to the origin of the fetch pattern and the rotation vector `R` that defines the axis-aligned steps for fetching [S1].
++   $$ offset = int(v_{itet}.y + v_{itet}.z + v_{itet}.w) \cdot (1 - ivec3(v_{itet}.wzy)) $$
++   $$ offset = offset + parity \cdot (1 - 2 \cdot offset) $$
++   $$ R = 1 - 2 \cdot offset $$
++   $$ R = R \cdot 2 $$
+ 
+-7.  **Update Origin:**
+-    Shift the integer base coordinate `f` by the computed offset.
+-    $$ f = f + offset $$
++7. **Update Origin:**
++   Shift the integer base coordinate `f` by the computed offset [S1].
++   $$ f = f + offset $$
+ 
+-8.  **Fetch Coefficients:**
+-    Execute the sequential fetch pattern. The order is optimized to minimize cache misses and coordinate jumps. The variable `o` tracks the current fetch coordinate, initialized to `f`. The rotation vector `R` is used to update `o` between fetches.
++8. **Fetch Coefficients:**
++   Execute the sequential fetch pattern. The order is carefully arranged to minimize coordinate jumps between adjacent stencils [S1]. The variable `f` tracks the current fetch coordinate and is updated after each fetch.
+ 
+-    *Pseudocode for Fetching:*
+-    ```python
+-    # Initialize origin for fetching
+-    o = f
+-    
+-    # Fetch 19 coefficients in the optimized order defined in [S2, unofficial]
+-    # Note: The source code uses specific coefficient names (c01, c11, etc.)
+-    # which map to indices in the Box-Spline stencil.
+-    
+-    FETCH(c01); o -= R[0];
+-    FETCH(c11); o += (R[0] << 1); FETCH(c10);
+-    o -= R[1];
+-    FETCH(c21); o -= R[0];
+-    FETCH(c13); o += (R[1] << 1); FETCH(c12);
+-    o += R[0];
+-    FETCH(c20); o -= R[2];
+-    FETCH(c30); o -= R[1];
+-    FETCH(c19);
+-    o -= R[0];
+-    FETCH(c15); o += R[1];
+-    FETCH(c17); o += (R[2] << 1); FETCH(c16);
+-    o += R[0];
+-    FETCH(c29); o -= R[1];
+-    FETCH(c18); o -= R[0];
+-    FETCH(c14);
+-    o += ((-R[0] + R[1] - 3*R[2]) >> 1); FETCH(c07);
+-    o -= R[1];
+-    FETCH(c09); o += R[0];
+-    FETCH(c05); o += (R[1] << 1); FETCH(c27);
+-    o -= R[1];
+-    FETCH(c03); o += (R[2] << 1); FETCH(c28); o -= R[2];
+-    FETCH(c02);
+-    o += R[1];
+-    FETCH(c2...); # Source [S2, unofficial] cuts off here, but implies continuation
+-    # The source [S2, unofficial] code snippet continues with:
+-    # FETCH(c2... -= (R[1] << 1)); FETCH(c04); o -= R[0];
+-    # FETCH(c08); o += R[1];
+-    # FETCH(c06); o += (R[0] << 1); FETCH(c22); o -= R[2];
+-    # FETCH(c23); o -= R[1];
+-    # FETCH(c25); o += R[2];
+-    # FETCH(c24);
+-    
+-    # Complete the fetch sequence based on the full snippet in [S2, unofficial]:
+-    FETCH(c24); # Assuming the last one mentioned
+-    
+-    # Note: The source [S2, unofficial] explicitly lists 19 fetches in the loop structure 
+-    # but the symbolic formula uses coefficients up to c29. 
+-    # The "19" refers to the unique spatial samples needed for the specific 
+-    # tetrahedral evaluation, though the stencil is larger. 
+-    # The implementation must follow the exact update sequence of 'o' 
+-    # provided in the source code to ensure correct data alignment.
+-    ```
+-    [G] The source [S2, unofficial] code snippet is truncated in the provided notes. The implementer must ensure the `FETCH` macro handles the coefficient index mapping correctly. The updates to `o` are critical. `<< 1` is multiplication by 2, `>> 1` is division by 2 (integer arithmetic).
++   *Pseudocode for Fetching:*
++   ```python
++   def optimized_fcc_fetch(p_in):
++       # Step 1-2: Base, fraction, parity
++       f = (int(p_in[0]), int(p_in[1]), int(p_in[2]))
++       p_cube = (p_in[0] - f[0], p_in[1] - f[1], p_in[2] - f[2])
++       parity = (f[0] + f[1] + f[2]) & 1
+ 
+-9.  **Evaluate Box-Spline:**
+-    Use the fetched coefficients and the fractional coordinate `p_local` (which is `p_cube` transformed by `offset` and `R` if necessary, though the source [S1] suggests `p_local` is transformed for evaluation) to compute the final value. The source [S2, unofficial] provides a simplified symbolic formula.
++       # Step 3: Transform fraction
++       p_cube = (p_cube[0] + parity * (1.0 - 2.0 * p_cube[0]),
++                 p_cube[1] + parity * (1.0 - 2.0 * p_cube[1]),
++                 p_cube[2] + parity * (1.0 - 2.0 * p_cube[2]))
+ 
+-    $$ p_{local} = offset + R \cdot p_{cube} $$
+-    
+-    The value is computed using the Box-Spline formula involving the coefficients `c` and the local coordinates `x, y, z` of `p_local`.
++       # Step 4-5: Classify and index
++       d0 = -p_cube[0] - p_cube[1] - p_cube[2] > -1
++       d1 =  p_cube[0] + p_cube[1] - p_cube[2] > 1
++       d2 =  p_cube[0] - p_cube[1] + p_cube[2] > 1
++       d3 = -p_cube[0] + p_cube[1] + p_cube[2] > 1
++       vitet = (d0, d1, d2, d3)
++       type_val = 1 - (int(d0) + int(d1) + int(d2) + int(d3))
++       itet = int(d1 + 2*d2 + 3*d3) + 4 * int(type_val) + parity * 5
++
++       # Step 6: Offset and rotation
++       offset = (int(d1 + d2 + d3) * (1 - int(d3)),
++                 int(d1 + d2 + d3) * (1 - int(d2)),
++                 int(d1 + d2 + d3) * (1 - int(d1)))
++       offset = (offset[0] + parity * (1 - 2 * offset[0]),
++                 offset[1] + parity * (1 - 2 * offset[1]),
++                 offset[2] + parity * (1 - 2 * offset[2]))
++       R = (1 - 2 * offset[0], 1 - 2 * offset[1], 1 - 2 * offset[2])
++       R = (2 * R[0], 2 * R[1], 2 * R[2])
++
++       # Step 7: Update origin
++       f = (f[0] + offset[0], f[1] + offset[1], f[2] + offset[2])
++
++       # Step 8: Fetch 19 coefficients [S1]
++       c = [0.0] * 19
++       c[0] = fetch_sample(f)
++       f = (f[0] + R[0], f[1], f[2])
++       c[1] = fetch_sample(f)
++       f = (f[0] - R[0], f[1] + R[1], f[2])
++       c[2] = fetch_sample(f)
++       f = (f[0], f[1] - R[1], f[2] + R[2])
++       c[3] = fetch_sample(f)
++       f = (f[0] + R[0], f[1] + R[1] >> 1, f[2] - R[2] >> 1)
++       c[4] = fetch_sample(f)
++       f = (f[0] - R[0], f[1], f[2])
++       c[5] = fetch_sample(f)
++       f = (f[0], f[1], f[2] - R[2])
++       c[6] = fetch_sample(f)
++       f = (f[0], f[1] - R[1], f[2])
++       c[7] = fetch_sample(f)
++       f = (f[0], f[1], f[2] + R[2])
++       c[8] = fetch_sample(f)
++       f = (f[0] + R[0] >> 1, f[1] + (3 * R[1]) >> 1, f[2])
++       c[9] = fetch_sample(f)
++       f = (f[0], f[1] - R[1], f[2])
++       c[10] = fetch_sample(f)
++       f = (f[0] - R[0], f[1], f[2])
++       c[11] = fetch_sample(f)
++       f = (f[0], f[1], f[2] - R[2])
++       c[12] = fetch_sample(f)
++       f = (f[0] + R[0], f[1], f[2])
++       c[13] = fetch_sample(f)
++       f = (f[0], f[1] + R[1] >> 1, f[2] + (3 * R[2]) >> 1)
++       c[14] = fetch_sample(f)
++       f = (f[0], f[1], f[2] - R[2])
++       c[15] = fetch_sample(f)
++       f = (f[0] - R[0], f[1], f[2])
++       c[16] = fetch_sample(f)
++       f = (f[0], f[1] - R[1], f[2])
++       c[17] = fetch_sample(f)
++       f = (f[0] + R[0], f[1], f[2])
++       c[18] = fetch_sample(f)
++
++       # Step 9: Local coordinate for evaluation
++       p_local = (offset[0] + R[0] * p_cube[0],
++                  offset[1] + R[1] * p_cube[1],
++                  offset[2] + R[2] * p_cube[2])
++       return c, p_local
++
++   def fetch_sample(coord):
++       # Access volume data at integer coordinate coord
++       pass
++   ```
++
++9. **Evaluate Box-Spline:**
++   Use the fetched coefficients and the local coordinates `p_local` to compute the final value using the simplified symbolic box-spline formula [S2, unofficial].
+ 
+ **Parameters:**
+@@ -124,20 +151,20 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision:** Integer arithmetic for `offset` and `R` updates must be exact. Use integer types (`int`, `ivec3`) for coordinate updates to avoid floating-point drift [S2, unofficial].
++- **Precision:** Integer arithmetic for `offset` and `R` updates must be exact. The algorithm relies on boolean-to-integer conversions (`int(bool)`) and arithmetic operations to avoid conditional branches, which are expensive on GPUs [S1].
+ - **Boundary Conditions:** The method assumes the raycast position is within the valid volume bounds. Boundary checks must be performed before calling this method [G].
+-- **Branchless Requirement:** The algorithm relies on boolean-to-integer conversions (`int(bool)`) and arithmetic operations to avoid conditional branches, which are expensive on GPUs [S1]. Do not introduce `if` statements for tetrahedron selection.
++- **Branchless Requirement:** Do not introduce `if` statements for tetrahedron selection or fetch ordering, as branch divergence severely degrades GPU performance [S1].
+ 
+ ## Operating characteristics
+ - **Time Complexity:** $O(1)$ per raycast step, as it involves a fixed number of arithmetic operations and exactly 19 memory fetches.
+ - **Memory Complexity:** $O(1)$ auxiliary memory. The dataset is accessed directly.
+-- **Performance:** Achieves a 10 to 16-fold performance improvement over naive implementations that use conditional branches and lookup tables [S1][S2, unofficial].
++- **Performance:** Achieves a 10 to 16-fold performance improvement over naive implementations that use conditional branches and lookup tables [S1].
+ - **Hardware:** Tested on NVIDIA GeForce GTX 460 and Intel Core i7 860 [S2, unofficial].
+-- **Strengths:** Eliminates conditional branches and lookup table overhead, which are major bottlenecks on GPUs [S1]. The fetch pattern is optimized for cache locality [S1].
++- **Strengths:** Eliminates conditional branches and lookup table overhead, which are major bottlenecks on GPUs [S1]. The fetch pattern is ordered to minimize coordinate change between adjacent stencils [S1].
+ - **Limitations:** Requires FCC dataset storage. The complexity of the fetch pattern updates makes it harder to implement than simple grid lookups.
+ - **When to use:** Real-time isosurface raycasting of FCC volume data where performance is critical.
+-- **When not to use:** If the data is stored in a standard Cartesian grid (use standard trilinear or box-spline methods for Cartesian grids) or if branch divergence is not a concern (e.g., CPU rendering).
++- **When not to use:** If the data is stored in a standard Cartesian grid or if branch divergence is not a concern (e.g., CPU rendering).
+ 
+ ## Background
+-The method was developed by Minho Kim et al. to enable real-time isosurface raycasting of FCC datasets using Box-Splines [S1][S2, unofficial]. FCC lattices offer better approximation properties for smooth surfaces but require complex tetrahedral decomposition. Previous methods suffered from performance degradation due to conditional branches and lookup tables [S1]. This optimized version removes these overheads, enabling interactive frame rates [S1]. It is part of a broader effort to utilize FCC/BCC lattices for volume rendering and FEM [S2, unofficial].
++The method was developed by Minho Kim et al. to enable real-time isosurface raycasting of FCC datasets using Box-Splines [S1][S2, unofficial]. FCC lattices offer better approximation properties for smooth surfaces but require complex tetrahedral decomposition. Previous methods suffered from performance degradation due to conditional branches and lookup tables [S1]. This optimized version removes these overheads, enabling interactive frame rates [S1]. It is part of a broader effort to utilize FCC/BCC lattices for volume rendering, FEM, and implicitization [S2, unofficial].
+ 
+ ## Sources

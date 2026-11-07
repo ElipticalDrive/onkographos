@@ -1,0 +1,176 @@
+# Bézier Clipping for Metaball Ray Casting
+
+Also called: Nishita et al. method, Ray-isosurface test using Bézier form
+
+## Overview
+This method computes the ray-isosurface intersection for metaballs by representing the scalar density field along a ray as a polynomial in Bézier form and applying Bézier clipping to find the root. It sets itself apart from standard Newton-Raphson approaches by providing robust root isolation and handling multiple intersections within a single interval without derivative evaluation, building on [Neubauer Iso-surface Ray Casting](7024-neubauer-iso-surface-ray-casting.md).
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A viewing ray defined by origin and direction; a set of $N$ metaballs (spheres) with centers $(x_i, y_i, z_i)$ and effective radii $R_i$ in the viewing coordinate system; a target isosurface value $\tau$; and a parameter interval $s \in [0, 1]$ representing the ray segment.
+*   **Output:** The intersection point(s) on the isosurface, or null if no intersection exists in the interval.
+
+**Data Structures:**
+*   **Bézier Coefficients:** For each metaball $i$, a set of coefficients $\{d_m^i\}$ representing the density function $f_i(s)$ of degree $M$.
+*   **Combined Density:** The sum of individual metaball densities, also represented in Bézier form.
+
+**Step-by-Step Method:**
+
+1.  **Ray-Sphere Intersection Test:**
+    For each metaball $i$, determine if the ray intersects the sphere. Calculate the determinant $D_i$ of the quadratic equation for the ray-sphere intersection. If no intersection, skip the metaball.
+    Define the parameter $a_i$ as:
+    $$ a_i = \frac{D_i}{R_i} $$
+    where $R_i$ is the effective radius of metaball $i$ [S1].
+
+2.  **Compute Bézier Coefficients for Single Metaball:**
+    Calculate the coefficients $\{d_m^i\}$ for the density function $f_i(s)$ of degree $M$ based on the polynomial degree used for the metaball definition [S1].
+    
+    *   **For Quartic Polynomial (Degree 4):**
+        $$ d_0^i = d_1^i = d_3^i = d_4^i = 0 $$
+        $$ d_2^i = \frac{8}{3} a_i^2 $$
+        
+    *   **For Degree-Six Polynomial (Degree 6):**
+        $$ d_0^i = d_1^i = d_5^i = d_6^i = 0 $$
+        $$ d_2^i = d_4^i = \frac{16}{27} a_i^2 $$
+        $$ d_3^i = \frac{8(8a_i + 5)a_i^2}{45} $$
+
+3.  **Clipping for Combined Density:**
+    For $N$ metaballs intersecting the ray in the given interval, compute the coefficients of the total density function. The total density is the sum of individual densities. To maintain the Bézier form and enable clipping, apply de Casteljau's algorithm to clip the Bézier curve defined by $\{d_m^i\}$ for each metaball to the current interval, then sum the resulting control points [S1]. Let the combined Bézier coefficients be $\{D_m\}$.
+
+4.  **Ray-Isosurface Test:**
+    Substitute the combined density function in Bézier form into the ray-isosurface test equation (Equation 1 in the source, typically $F(s) - \tau = 0$ where $F(s)$ is the density) [S1]. This yields a polynomial equation in Bézier form representing the distance from the isosurface.
+
+5.  **Bézier Clipping:**
+    Apply Bézier clipping to the resulting polynomial to isolate roots within $s \in [0, 1]$. This involves iteratively clipping the domain based on the convex hull property of the Bézier curve until the root is found or the interval is discarded.
+
+**Bounding Rectangle Calculation (Culling):**
+To efficiently cull metaballs that do not intersect the screen, calculate the bounding rectangle of the sphere's projection on the screen [S1].
+Let $(x_i, y_i, z_i)$ be the center of sphere $i$ in the viewing coordinate system, $R_i$ its radius, and $z_{\text{screen}}$ the distance from the viewpoint to the screen. The x and y coordinates of the bounding rectangle are:
+
+$$ x = \frac{z_{\text{screen}}(x_i z_i \pm R_i \sqrt{x_i^2 + z_i^2 - R_i^2})}{z_i^2 - R_i^2} $$
+$$ y = \frac{z_{\text{screen}}(y_i z_i \pm R_i \sqrt{y_i^2 + z_i^2 - R_i^2})}{z_i^2 - R_i^2} $$
+
+Render squares covering this region using point sprites for visualization or culling purposes [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def bezier_clipping_metaball_ray_cast(ray_origin, ray_direction, metaballs, isosurface_threshold, z_screen):
+    """
+    ray_origin: (ox, oy, oz)
+    ray_direction: (dx, dy, dz)
+    metaballs: list of dicts with 'center' (cx, cy, cz) and 'radius' R
+    isosurface_threshold: float
+    z_screen: float
+    """
+    # 1. Culling and Setup
+    candidates = []
+    for ball in metaballs:
+        cx, cy, cz = ball['center']
+        R = ball['radius']
+        
+        # Calculate bounding rectangle to check if sphere is on screen
+        # Note: This is for culling/visualization, not strictly required for ray cast logic
+        # but used in the source for determining visible regions.
+        denom_x = cz * cz - R * R
+        if abs(denom_x) < 1e-9: continue # Degenerate case
+        
+        rad_term_x = R * math.sqrt(cx*cx + cz*cz - R*R)
+        x_min = (z_screen * (cx * cz - rad_term_x)) / denom_x
+        x_max = (z_screen * (cx * cz + rad_term_term_x)) / denom_x
+        
+        denom_y = cz * cz - R * R
+        if abs(denom_y) < 1e-9: continue
+        
+        rad_term_y = R * math.sqrt(cy*cy + cz*cz - R*R)
+        y_min = (z_screen * (cy * cz - rad_term_y)) / denom_y
+        y_max = (z_screen * (cy * cz + rad_term_y)) / denom_y
+        
+        # Add to candidates if it intersects the view frustum (simplified check)
+        candidates.append(ball)
+
+    # 2. Ray-Sphere Intersection and Coefficient Calculation
+    combined_bezier_coeffs = [0.0] * 7 # Max degree 6 + 1
+    
+    for ball in candidates:
+        cx, cy, cz = ball['center']
+        R = ball['radius']
+        
+        # Standard ray-sphere intersection: |O + tD - C|^2 = R^2
+        # Let L = O - C
+        Lx = ray_origin[0] - cx
+        Ly = ray_origin[1] - cy
+        Lz = ray_origin[2] - cz
+        
+        # Quadratic coefficients: a*t^2 + b*t + c = 0
+        a = 1.0 # Assuming normalized direction
+        b = 2.0 * (ray_direction[0]*Lx + ray_direction[1]*Ly + ray_direction[2]*Lz)
+        c = Lx*Lx + Ly*Ly + Lz*Lz - R*R
+        
+        discriminant = b*b - 4*a*c
+        
+        if discriminant < 0:
+            continue
+            
+        # D_i is the determinant of the quadratic equation
+        D_i = discriminant
+        
+        # Calculate a_i
+        a_i = D_i / R
+        
+        # Determine coefficients based on degree (assuming degree 6 for generality)
+        # d0, d1, d5, d6 are 0
+        d = [0.0] * 7
+        d[2] = (16.0 / 27.0) * (a_i ** 2)
+        d[3] = (8.0 * (8.0 * a_i + 5.0) * (a_i ** 2)) / 45.0
+        d[4] = (16.0 / 27.0) * (a_i ** 2)
+        
+        # 3. Clipping and Summing
+        # The source states coefficients are computed by clipping using de Casteljau's algorithm.
+        # In practice, for a single interval [0,1], if the ray intersects the sphere,
+        # the density function is defined over the intersection segment.
+        # Here we assume the interval is normalized to [0,1] for the clipping step.
+        # We add these coefficients to the combined sum.
+        # Note: De Casteljau is typically used to evaluate or subdivide. 
+        # "Clipping" here refers to the root-finding process on the summed curve.
+        # We simply sum the control points for the initial curve.
+        for m in range(7):
+            combined_bezier_coeffs[m] += d[m]
+            
+    # 4. Ray-Isosurface Test
+    # The equation is F(s) - tau = 0.
+    # F(s) is the density. The Bézier form represents F(s).
+    # We need to find s where F(s) = tau.
+    # This is equivalent to finding roots of G(s) = F(s) - tau = 0.
+    # Adjust the last control point (or all, depending on formulation) to account for tau.
+    # In Bézier form, if F(s) = sum(B_m(s) * d_m), then G(s) = sum(B_m(s) * d_m) - tau.
+    # To keep it in Bézier form, we usually adjust the control points.
+    # However, the source implies putting the density functions into Equation 1.
+    # Assuming Equation 1 is the standard isosurface test.
+    
+    # 5. Bézier Clipping
+    # Implement Bézier clipping on the polynomial defined by combined_bezier_coeffs
+    # to find roots in [0, 1].
+    # This involves:
+    # a. Evaluating the convex hull bounds.
+    # b. If the interval [min, max] of the hull does not contain 0 (after subtracting tau), discard.
+    # c. If it does, subdivide or clip.
+    # (Detailed clipping algorithm is standard for Bézier curves, not explicitly numbered in source beyond "clipping... using de Casteljau's")
+    
+    return find_root_bezier_clipping(combined_bezier_coeffs, isosurface_threshold)
+```
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the degree of the polynomial and the number of clipping iterations. Bézier clipping converges quadratically near roots.
+*   **Memory Complexity:** Linear in the number of metaballs $N$ for storing coefficients.
+*   **Strengths:** Robust against multiple intersections; no derivative calculation required; handles high-degree density functions naturally.
+*   **Limitations:** Requires careful handling of the Bézier clipping implementation; potential numerical instability if coefficients are large or small.
+*   **When to use:** When rendering large numbers of metaballs with high-quality isosurfaces and robust intersection testing is required.
+
+## Background
+Originating from Nishita et al. [NN94], this method was adapted for GPU-based fast ray casting for metaballs. It leverages the properties of Bézier curves to perform robust root finding for the implicit surface defined by the metaball density field.
+
+## Sources
+[S1] GPU‐based Fast Ray Casting for a Large Number of Metaballs, https://doi.org/10.1111/j.1467-8659.2008.01132.x, fetched 2026-11-01

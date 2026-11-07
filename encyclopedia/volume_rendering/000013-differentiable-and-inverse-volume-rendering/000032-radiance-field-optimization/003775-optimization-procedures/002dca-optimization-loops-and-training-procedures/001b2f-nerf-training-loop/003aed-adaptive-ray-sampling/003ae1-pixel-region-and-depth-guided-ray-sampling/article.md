@@ -2,112 +2,111 @@
 
 
 ## Overview
-Pixel Region and Depth Guided Ray Sampling is a ray sampling strategy that increases sampling probability in pixel areas exhibiting significant color and depth variation, reducing redundant rays in flat regions to accelerate network convergence and improve geometry perception [S1]. It sets itself apart from uniform sampling and other adaptive methods by explicitly leveraging both image color variance and estimated geometric depth boundaries to determine ray density, rather than relying solely on network-predicted density or opacity weights [S1].
+Pixel Region and Depth Guided Ray Sampling is a ray sampling strategy that increases sampling probability in pixel areas exhibiting significant color and depth variation, reducing redundant rays in flat regions to accelerate network convergence and improve geometry perception [S1]. Unlike conventional NeRF which uses uniform distribution, this method samples varying ray densities based on depth boundaries and pixel regions to simultaneously accelerate convergence and improve geometry perception [S1]. It is distinct from sibling methods like [Coarse-to-Fine NeRF](3406-coarse-to-fine-nerf.md) which refines points along a single ray, and [Probability-based Ray Sampling with Quadtree Subdivision](7481-probability-based-ray-sampling-with-quadtree-subdivision.md) which uses spatial data structures for hierarchical sampling; instead, it relies on 2D image-space cues (color variance and estimated depth) to bias the selection of which rays are cast from the source views.
 
 ## How it works
-**Inputs:**
-*   A set of $N$ source view images $I_i$ with height $H_i$ and width $W_i$ [S1].
-*   A depth estimation module (specifically from the ENeRF framework) providing rough depth information and a cost volume for each pixel [S1].
-*   Network parameters $\Theta$ for the radiance field [S1].
-
-**Outputs:**
-*   A set of sampled rays $\mathbb{R}_i$ for each image $I_i$, where the number of rays $M$ is distributed non-uniformly based on the sampling probability [S1].
-*   Rendered colors $V_{\Theta}(r_i^k)$ for the sampled rays [S1].
+**Inputs and Outputs:**
+*   **Inputs:** A set of $N$ source training images $I_i$ with known camera poses; the ENeRF framework's cost volume and depth estimation module [S1]; the radiance field network parameters $\Theta$.
+*   **Outputs:** A set of sampled rays $\mathbb{R}_i$ per image, and the optimized network parameters $\Theta$ minimizing the rendering loss.
 
 **Data Structures:**
-*   **Image Grid:** Each image $I_i$ is treated as a grid of pixels $(u, v)$ where $u \in [0, H_i]$ and $v \in [0, W_i]$ [S1].
-*   **Depth Map:** A 2D array of depth values $d(u, v)$ estimated from the cost volume [S1].
-*   **Color Map:** A 2D array of RGB color values $C(u, v)$ from the source image [S1].
-*   **Sampling Probability Map:** A 2D array $P(u, v)$ storing the probability of selecting a ray for each pixel [S1].
-
-**Parameters:**
-*   $N$: The number of trained images (source views) [S1].
-*   $M$: The total number of sampled rays per image [S1].
-*   $\Theta$: The network parameters optimized by minimizing the color error [S1].
+*   **Cost Volume:** A 3D tensor $C(u, v, d)$ derived from multi-view stereo, where $u, v$ are pixel coordinates and $d$ is disparity/depth [S1].
+*   **Depth Map:** A 2D array $D(u, v)$ representing the estimated rough depth for each pixel, obtained from the cost volume [S1].
+*   **Color Image:** The source image $I_i$ with pixel values $C_{pixel}(u, v)$ [S1].
 
 **Steps:**
-1.  **Depth Estimation:** Obtain rough depth information $d(u, v)$ for each pixel $(u, v)$ in the source view images $I_i$ using the depth estimation module from the ENeRF framework [S1]. This involves leveraging the cost volume to compute depth for each pixel [S1].
-2.  **Probability Calculation:** Calculate the sampling probability $P(u, v)$ for each pixel based on its color value $C(u, v)$ and the estimated depth information $d(u, v)$ [S1]. The method increases sampling probability in areas with significant color variation and regions where geometric depth varies markedly [S1]. [G: The specific mathematical formula for combining color variance and depth gradient into $P(u, v)$ is not provided in the sources; it is described qualitatively as being guided by these two factors.]
-3.  **Ray Sampling:** During the ray sampling phase, select $M$ rays for each image $I_i$ such that the probability of selecting a ray from pixel $(u, v)$ is proportional to $P(u, v)$ [S1]. This results in sampling additional rays in pixel areas exhibiting substantial color variation and marked depth variation, while reducing rays in flat regions [S1].
-4.  **Volume Rendering:** Perform volume rendering using the network $F_{\Theta}$ to output colors and densities along the sampled rays $r_i^k \in \mathbb{R}_i$ [S1]. The volume rendering function $V_{\Theta}$ computes the predicted color $\hat{c}_i^k$ for each ray [S1].
-5.  **Optimization:** Optimize the network parameters $\Theta$ by minimizing the volume rendering loss [S1]:
+1.  **Depth Estimation:** Obtain rough depth information $D(u, v)$ for each pixel $(u, v)$ in the source view images using the depth estimation module from the ENeRF framework [S1]. This involves leveraging the cost volume to determine the most likely depth for each pixel [S1].
+2.  **Probability Calculation:** Calculate a sampling probability $P(u, v)$ for each pixel $(u, v)$ based on two factors:
+    *   **Color Variation:** Measure the local color variance or gradient magnitude in the source image $I_i$ at $(u, v)$. Pixels with substantial color variation receive higher probability [S1].
+    *   **Depth Variation:** Measure the local depth variance or gradient in the estimated depth map $D(u, v)$ at $(u, v)$. Pixels where geometric depth varies markedly receive higher probability [S1].
+    *   The combined probability $P(u, v)$ is proportional to the sum or product of these variation metrics. (Note: The exact normalization formula for $P(u, v)$ is not explicitly provided in the sources, but it must sum to 1 over all pixels in the image to serve as a probability distribution [S1]).
+3.  **Ray Selection:** Sample $M$ rays per image $I_i$ by drawing pixel coordinates $(u, v)$ from the probability distribution $P(u, v)$. This results in additional rays being sampled in pixel areas exhibiting substantial color variation and marked depth variation [S1].
+4.  **Volume Rendering:** For each selected ray $r_i^k$, sample points along the ray segment $[t_{near}, t_{far}]$ and evaluate the radiance field network $F_\Theta$ to obtain density $\sigma$ and color $c$. Perform volume rendering to compute the predicted pixel color $\hat{c}_i^k$ [S1].
+5.  **Optimization:** Update network parameters $\Theta$ by minimizing the volume rendering loss [S1]:
     $$ \min_{\Theta} \mathcal{L} = \frac{1}{NM} \sum_{r_i^k \in \mathbb{R}_i} \|V_{\Theta}(r_i^k) - c_i^k\|_2^2 $$
-    where $c_i^k$ is the true color of the pixel corresponding to ray $r_i^k$ [S1].
+    where $c_i^k$ is the true color of the pixel corresponding to ray $r_i^k$, $M$ is the number of sampled rays per image, $N$ is the number of trained images, and $V_{\Theta}$ is the volume rendering function [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def pixel_region_depth_guided_sampling(source_images, depth_estimator, num_rays_per_image):
+def pixel_region_depth_guided_sampling(source_images, depth_maps, num_rays_per_image):
     """
-    source_images: List of N images, each with height H and width W.
-    depth_estimator: Function/module that returns depth map and cost volume from source images.
-    num_rays_per_image: M, the total number of rays to sample per image.
+    source_images: List of N images, each of shape (H, W, 3)
+    depth_maps: List of N depth maps, each of shape (H, W)
+    num_rays_per_image: M, number of rays to sample per image
+    Returns: List of sampled ray origins and directions for each image
     """
-    sampled_rays = []
+    all_sampled_rays = []
     
-    for image in source_images:
-        # Step 1: Obtain depth information
-        depth_map = depth_estimator.get_depth_map(image)
-        color_map = image.get_colors()
+    for i in range(len(source_images)):
+        img = source_images[i]
+        depth = depth_maps[i]
+        H, W = img.shape[0], img.shape[1]
         
-        # Step 2: Calculate sampling probability
-        # Note: The exact combination of color variation and depth variation 
-        # is not specified in the source. [G] Placeholder for the specific 
-        # probability calculation logic.
-        probability_map = calculate_sampling_probability(color_map, depth_map)
+        # Step 1: Calculate Color Variation (Gradient Magnitude)
+        # Compute gradient magnitude in the image
+        # Using Sobel operators or similar for gradient estimation
+        gray_img = rgb_to_grayscale(img)
+        grad_x, grad_y = compute_gradients(gray_img)
+        color_variance = sqrt(grad_x**2 + grad_y**2)
         
-        # Normalize probabilities to sum to 1
-        total_prob = sum(probability_map.flatten())
-        normalized_prob = probability_map / total_prob
+        # Step 2: Calculate Depth Variation (Depth Gradient Magnitude)
+        # Compute gradient magnitude in the depth map
+        depth_grad_x, depth_grad_y = compute_gradients(depth)
+        depth_variance = sqrt(depth_grad_x**2 + depth_grad_y**2)
         
-        # Step 3: Sample M rays based on probability
-        # Flatten the probability map to create a 1D distribution
-        flat_probs = normalized_prob.flatten()
+        # Step 3: Combine Variations to form Sampling Probability
+        # The sources state probability is based on color value and estimated depth information.
+        # We combine the two variance maps. A simple sum is a standard approach for such heuristics.
+        # Normalize to sum to 1 to create a valid probability distribution.
+        combined_variance = color_variance + depth_variance
+        total_variance = sum(combined_variance.flatten())
         
-        # Sample M indices from the flattened grid
-        # Using inverse transform sampling or categorical sampling
-        selected_indices = sample_indices(flat_probs, num_rays_per_image)
-        
-        # Convert indices back to (u, v) coordinates
-        rays_for_image = []
-        for idx in selected_indices:
-            u, v = index_to_pixel_coords(idx, image.height, image.width)
-            ray = create_ray(u, v, image.camera_params)
-            rays_for_image.append(ray)
+        if total_variance == 0:
+            # Fallback to uniform sampling if no variation is detected
+            probabilities = ones(H * W) / (H * W)
+        else:
+            probabilities = combined_variance.flatten() / total_variance
             
-        sampled_rays.append(rays_for_image)
+        # Step 4: Sample M pixels based on probabilities
+        # Draw M indices from the range [0, H*W) using the probability distribution
+        sampled_indices = sample_without_replacement(probabilities, num_rays_per_image)
         
-    return sampled_rays
-
-def calculate_sampling_probability(color_map, depth_map):
-    """
-    Placeholder for the specific method of combining color and depth 
-    information to determine sampling probability.
-    """
-    # [G] Implementation detail missing from source. 
-    # Typically involves computing gradients or variance for color and depth.
-    pass
+        # Convert flat indices to (u, v) coordinates
+        sampled_u, sampled_v = indices_to_coordinates(sampled_indices, W)
+        
+        # Generate rays from these pixel coordinates
+        # Ray origin and direction are determined by camera pose of image i and pixel (u, v)
+        rays = generate_rays_from_pixels(sampled_u, sampled_v, camera_pose_i)
+        
+        all_sampled_rays.append(rays)
+        
+    return all_sampled_rays
 ```
 
+**Parameters:**
+*   $N$: The number of trained images (source views) [S1].
+*   $M$: The number of sampled rays per image [S1].
+*   $\Theta$: The network parameters optimized by minimizing the color error [S1].
+*   Typical values: Not given in the sources.
+
 **Edge Cases and Pitfalls:**
-*   **Depth Estimation Errors:** The method relies on the accuracy of the depth estimation module from ENeRF. Inaccurate depth estimates in textureless or reflective regions may lead to suboptimal ray sampling [S1].
-*   **Probability Calculation:** The specific formula for combining color and depth information into the sampling probability is not provided in the source [S1]. Implementers must define this combination, potentially using gradient magnitudes or variance metrics.
-*   **Uniform Sampling Baseline:** The method contrasts with uniform sampling where $r_i(u, v) \sim U(I_i)$ [S1]. Deviations from this uniform distribution must be carefully managed to ensure sufficient coverage of the scene.
+*   **Zero Variance:** If an image region is completely flat in both color and depth, the probability distribution may be undefined or uniform. A fallback to uniform sampling or a small epsilon addition to variance maps is recommended [G].
+*   **Depth Estimation Errors:** The method relies on the accuracy of the rough depth information from ENeRF. Incorrect depth estimates in occluded or textureless regions may lead to suboptimal sampling [S1].
+*   **Boundary Conditions:** The gradient calculations at image boundaries must handle edge pixels correctly (e.g., using padding or ignoring boundaries) [G].
 
 ## Operating characteristics
-*   **Time Complexity:** The method aims to accelerate network convergence by reducing redundant rays, potentially lowering the number of necessary network evaluations per iteration compared to uniform sampling [S1]. However, the overhead of depth estimation and probability calculation adds computational cost per iteration [S1].
-*   **Memory Complexity:** Requires storing depth maps and probability maps for each image, in addition to the standard radiance field parameters [S1].
-*   **Performance:** Applied to the ENeRF framework, this method achieves state-of-the-art performance on view synthesis and training time [S1]. It enables faster per-scene optimization, achieving the same convergence effect in minutes through fine-tuning [S1].
-*   **Strengths:** Improves geometry perception, especially for rich-texture regions, by focusing samples on areas with significant color and depth variations [S1].
-*   **Limitations:** Relies on the availability and accuracy of a depth estimation module (e.g., from ENeRF) [S1]. May not perform as well in scenes where depth estimation is unreliable.
-*   **When to Use:** Suitable for scenes with complex textures and geometry where accurate depth estimation is possible, and where accelerating training convergence is a priority [S1].
-*   **When Not to Use:** Not suitable for scenes where depth estimation is difficult or unreliable, or when computational resources for depth estimation are limited [S1].
+*   **Time Complexity:** The sampling step requires computing gradients for color and depth maps, which is $O(H \times W)$ per image. Sampling $M$ rays is $O(M \log(H \times W))$ or $O(M)$ with alias sampling. This is comparable to uniform sampling in terms of ray generation overhead, but reduces the number of network evaluations needed for convergence.
+*   **Memory Complexity:** Requires storing the cost volume and depth maps from ENeRF, which adds memory overhead compared to standard NeRF [S1].
+*   **Measured Performance:** Applied to the ENeRF framework, it achieves state-of-the-art performance on view synthesis and training time, enabling same convergence effect in minutes through fine-tuning reconstructions from given views [S1].
+*   **Strengths:** Accelerates network convergence by focusing computational resources on informative regions (high color/depth variation) [S1]. Improves geometry perception, especially for rich-texture regions [S1].
+*   **Limitations:** Relies on the quality of the initial depth estimation from ENeRF. May not be as effective in scenes with uniform color and depth (e.g., blank walls) where variation is low [S1].
+*   **When to use:** When training time is a constraint and the scene has significant texture and geometric detail. Suitable for static or dynamic scenes where ENeRF's depth estimation is reliable [S1].
+*   **When not to use:** In scenes with very low texture or uniform depth where the sampling probability distribution provides little guidance.
 
 ## Background
-*   **Origin:** The method was introduced in the paper "Efficient ray sampling for radiance fields reconstruction" [S1].
-*   **History:** It builds upon the ENeRF framework [S1] and addresses the inefficiency of uniform ray sampling in NeRF [S1]. The authors observed that uniform sampling fails to capture the non-uniform distribution of color differences and scene density [S1].
-*   **Usage:** Applied to the ENeRF framework for novel view synthesis and training acceleration [S1].
+The method was introduced in the paper "Efficient ray sampling for radiance fields reconstruction" [S1]. It builds on the ENeRF framework [15] and addresses the inefficiency of uniform ray sampling in NeRF, which fails to match the real-world surface density distribution [S1]. The key hypothesis is that redundant rays in flat regions can be reduced to accelerate fitting, while increasing sampling in areas with significant color and depth variations improves efficiency and geometry perception [S1].
 
 ## Sources
 [S1] Efficient ray sampling for radiance fields reconstruction, https://doi.org/10.1016/j.cag.2023.11.005, fetched 2026-10-27

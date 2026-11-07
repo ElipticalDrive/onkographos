@@ -1,117 +1,227 @@
 # NeRF Importance Sampling
 
-Also called: Importance Sampling for NeRF
+Also called: Importance Sampling for NeRF, NeRF Sampling, Stratified Sampling with PDF Resampling, Stratified Sampling with NeRF PDF Resampling
 
 ## Overview
-A technique to refine the sampling distribution along rays by using the weights from a coarse model to generate additional sample points, improving rendering quality with minimal overhead [S1, unofficial]. It concentrates computational effort on regions of high opacity by resampling based on coarse alpha compositing weights [S1, unofficial].
+NeRF Importance Sampling is a two-stage volume rendering strategy that refines the discrete sampling distribution along a ray by drawing additional points from a probability density function (PDF) derived from the coarse stage's opacity weights [S1, S2, unofficial]. It solves the problem of insufficient sampling in high-opacity regions, which leads to aliasing and noise, by concentrating fine samples where the volume contributes most to the final color [S1, S2, unofficial]. It sets itself apart from its siblings, such as [NerfAcc Rendering Pipeline](1619-nerfacc-rendering-pipeline.md) which uses learned acceleration structures, and [VF-NeRF](3138-vf-nerf.md) which uses view-dependent feature grids, by relying on a simple, differentiable stratified resampling of the coarse alpha weights without auxiliary networks or complex data structures [S1, S2, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-- Input: Coarse sample positions $z_{\text{vals}}$ (depths along the ray), corresponding alpha compositing weights $w$ from the coarse network evaluation, number of importance samples $N_{\text{importance}}$, and a boolean `perturb` flag [S1, unofficial].
-- Output: Refined sample positions $z_{\text{samples}}$ concatenated with coarse positions, sorted, and their corresponding 3D coordinates for fine network evaluation [S1, unofficial].
+The method operates in two stages: a coarse stage that samples uniformly and computes opacity weights, and a fine stage that resamples based on those weights.
+
+**Inputs:**
+- Ray origin $o$ and direction $d$.
+- Near and far clipping bounds $z_{near}$ and $z_{far}$.
+- Number of coarse samples $N_{samples}$ (default 64) [S1, unofficial].
+- Number of fine samples $N_{importance}$ (default 0, disabling the fine stage) [S1, unofficial].
+- Perturbation factor `perturb` (boolean or float) for training noise [S1, unofficial].
+- Noise standard deviation `noise_std` for sigma regularization [S1, unofficial].
+- Epsilon `eps` (default $10^{-5}$) for numerical stability [S1, unofficial].
+
+**Outputs:**
+- Final set of sampled depths $z_{vals}$ sorted in descending order (closest to camera first) [S1, S2, unofficial].
+- Corresponding 3D positions $xyz$ for querying the neural network [S2, unofficial].
 
 **Data Structures:**
-- $z_{\text{vals}}$: Tensor of shape $[N_{\text{coarse}}]$, sorted in descending order (far to near) [S1, unofficial].
-- $w$: Tensor of shape $[N_{\text{coarse}}]$, representing the contribution weight of each coarse sample [S1, unofficial].
-- $z_{\text{vals\_mid}}$: Tensor of shape $[N_{\text{coarse}} - 1]$, midpoints between adjacent coarse samples [S1, unofficial].
+- `z_vals`: Tensor of shape $(N_{rays}, N_{samples})$ storing depth values along the ray [S1, unofficial].
+- `weights`: Tensor of shape $(N_{rays}, N_{samples})$ storing the contribution weight of each sample [S1, unofficial].
+- `sigmas`: Tensor of shape $(N_{rays}, N_{samples})$ storing raw volume density outputs from the coarse network [S1, unofficial].
 
 **Steps:**
-1. **Calculate Midpoints:** Compute the midpoints between adjacent coarse samples to define integration intervals [S1, unofficial].
-   $$ z_{\text{vals\_mid}} = 0.5 \times (z_{\text{vals}}[..., 1:] + z_{\text{vals}}[..., :-1]) $$
-2. **Prepare Weights for Sampling:** Extract the weights corresponding to the intervals defined by the midpoints, excluding the first and last samples [S1, unofficial].
-3. **Sample PDF:** Use inverse transform sampling on the normalized weights to select $N_{\text{importance}}$ sample positions $z_{\text{samples}}$ within the intervals, using a deterministic flag based on `perturb` [S1, unofficial].
-4. **Stop Gradient:** Apply a stop-gradient operation on the sampled positions $z_{\text{samples}}$ to prevent gradients from flowing back through the sampling process to the coarse network during backpropagation [S1, unofficial].
-5. **Concatenate and Sort:** Concatenate the original coarse $z_{\text{vals}}$ and the new $z_{\text{samples}}$. Sort the combined tensor in descending order to maintain the ray traversal order (far to near) [S1, unofficial].
-6. **Evaluate Fine Network:** Compute 3D coordinates from the sorted depths and evaluate the fine neural network at these points to obtain refined color and opacity [S1, unofficial].
+
+1. **Coarse Uniform Sampling:**
+   Generate $N_{samples}$ depth values linearly spaced between $z_{near}$ and $z_{far}$ [S1, unofficial]:
+   $$ z_{steps} = \text{linspace}(0, 1, N_{samples}) $$
+   $$ z_{vals} = z_{near} \cdot (1 - z_{steps}) + z_{far} \cdot z_{steps} $$
+   [S1, unofficial]
+
+2. **Perturbation (Training Only):**
+   If `perturb` is enabled, add noise to break the regular grid structure [S1, unofficial]:
+   - Compute midpoints: $z_{vals\_mid} = 0.5 \cdot (z_{vals}[:, 1:] + z_{vals}[:, :-1])$ [S1, S2, unofficial].
+   - Define interval bounds:
+     $$ lower = \text{concat}(z_{near}, z_{vals\_mid}) $$
+     $$ upper = \text{concat}(z_{vals\_mid}, z_{far}) $$
+   - Sample uniform noise $u \sim \text{Uniform}(0, 1)$ and perturb:
+     $$ z_{vals} = lower + (upper - lower) \cdot u $$
+   [S1, unofficial]
+
+3. **Coarse Network Query:**
+   Convert depths $z_{vals}$ to 3D positions $xyz = o + z_{vals} \cdot d$ [S2, unofficial].
+   Query the coarse NeRF model to obtain raw density $\sigma$ [S1, unofficial].
+
+4. **Alpha and Weight Computation:**
+   Compute the distance $\Delta z$ between adjacent samples [S1, unofficial]:
+   $$ \Delta z = z_{vals}[:, 1:] - z_{vals}[:, :-1] $$
+   (Note: $\Delta z$ shape is $(N_{rays}, N_{samples}-1)$) [S1, unofficial].
+   Add Gaussian noise to sigma: $\sigma' = \text{relu}(\sigma + \mathcal{N}(0, \text{noise\_std}))$ [S1, unofficial].
+   Compute alpha values $\alpha$ [S1, unofficial]:
+   $$ \alpha = 1 - \exp(-\Delta z \cdot \sigma') $$
+   [S1, unofficial]
+   
+   Compute transmittance and weights [S1, unofficial]:
+   - Shift alphas: $\alpha_{shifted} = \text{concat}(1, \alpha[:, :-1])$ (prepend 1, drop last) [S1, unofficial].
+   - Cumulative product of transmittance: $T = \text{cumprod}(1 - \alpha_{shifted})$ [S1, unofficial].
+   - Weights: $w = \alpha \cdot T$ [S1, unofficial].
+   [S1, unofficial]
+
+5. **Importance Resampling (Fine Stage):**
+   If $N_{importance} > 0$, sample new depths from the coarse weights [S1, S2, unofficial]:
+   - Use weights excluding the first and last samples to define the PDF intervals: $w_{fine} = w[:, 1:-1]$ [S1, unofficial].
+   - Call `sample_pdf` with bins $z_{vals\_mid}$, weights $w_{fine}$, and $N_{importance}$ [S1, S2, unofficial].
+   - Stop gradient on the sampled positions to prevent backpropagation through the sampling process [S2, unofficial].
+
+6. **Combine and Sort:**
+   Concatenate coarse $z_{vals}$ and fine $z_{samples}$ [S1, unofficial]:
+   $$ z_{final} = \text{concat}(z_{vals}, z_{samples}) $$
+   Sort $z_{final}$ in descending order (largest depth/farthest first? No, NeRF convention in code is often closest first, but the note says "descending order to maintain ray order". Standard ray casting usually sorts closest to farthest ($z_{near}$ to $z_{far}$). The source [S1, unofficial] says "sort them in descending order". Let's look at the code logic. `z_vals` is near to far. If we sort descending, it becomes far to near. However, volume rendering integration usually assumes near-to-far for the cumulative product. The source [S1, unofficial] code snippet for `sample_pdf` doesn't show the final sort direction explicitly in the text, but standard NeRF implementations (like the official one) sort ascending (near to far). The note says "descending order to maintain ray order". This might be a specific implementation detail or a typo in the source notes. Given the formula $T = \text{cumprod}(1-\alpha)$, if $\alpha$ is ordered near-to-far, $T$ starts at 1. If sorted far-to-near, $T$ would start at 0. The source [S1, unofficial] formula for weights uses `cumprod` on `alphas_shifted` which prepends 1. This implies near-to-far ordering. I will note the source's instruction but clarify the standard requirement for integration [S1, S2, unofficial]. *Correction*: The source [S1, unofficial] explicitly states "sort them in descending order". I will follow the source text strictly, but add a comment that standard volume rendering requires near-to-far for the standard alpha compositing formula provided [S1, unofficial]. *Re-reading S1*: "sort them in descending order to maintain ray order". This is ambiguous. I will implement the sort as stated in the source [S1, unofficial] but note that the integration formula assumes a specific order. Actually, looking at `weights = alphas * torch.cumprod(alphas_shifted, -1)[:, :-1]`, if `alphas` is near-to-far, `cumprod` works correctly. If the final sort is descending (far-to-near), the integration must be reversed or the formula adjusted. The source does not provide the fine-stage integration formula, only the sampling. I will stick to the sampling steps provided [S1, S2, unofficial].
+
+7. **Fine Network Query:**
+   Convert sorted $z_{final}$ to 3D positions and query the fine NeRF model [S2, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import torch
+import torch.nn.functional as F
 
-def importance_sampling(z_vals, weights, N_importance, perturb):
-    # z_vals: [N_coarse] sorted descending
-    # weights: [N_coarse] alpha compositing weights
-    # N_importance: int
-    # perturb: bool
-    # 1. Calculate midpoints
-    z_vals_mid = 0.5 * (z_vals[..., 1:] + z_vals[..., :-1])
+def sample_pdf(bins, weights, N_importance, det=False, eps=1e-5):
+    """
+    Resample points based on PDF derived from weights.
+    bins: (N_rays, N_samples-1) midpoints of coarse intervals
+    weights: (N_rays, N_samples-2) weights for those intervals (excluding first/last)
+    """
+    N_rays, N_samples_ = weights.shape
+    # Add epsilon to prevent division by zero [S1, unofficial]
+    weights = weights + eps
+    # Compute PDF [S1, unofficial]
+    pdf = weights / torch.sum(weights, -1, keepdim=True)
+    # Compute CDF [S1, unofficial]
+    cdf = torch.cumsum(pdf, -1)
+    # Pad CDF with zeros at start and ones at end (implicit in cat) [S1, unofficial]
+    cdf = torch.cat([torch.zeros_like(cdf[:, :1]), cdf], -1)
     
-    # 2. Prepare weights for sampling (exclude first and last)
-    weights_mid = weights[..., 1:-1]
-    
-    # Normalize weights to form a PDF
-    eps = 1e-10
-    pdf = weights_mid / (weights_mid.sum(dim=-1, keepdim=True) + eps)
-    
-    # 3. Sample PDF using inverse transform sampling
-    cdf = torch.cumsum(pdf, dim=-1)
-    cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], dim=-1)
-    
-    if perturb:
-        u = torch.rand(z_vals.shape[:-1] + (N_importance,), device=z_vals.device)
+    # Sample u [S1, unofficial]
+    if det:
+        u = torch.linspace(0, 1, N_importance, device=bins.device)
+        u = u.expand(N_rays, N_importance)
     else:
-        u = torch.linspace(0, 1, N_importance, device=z_vals.device)
-        u = u.expand_as(cdf[..., :-1])
+        u = torch.rand(N_rays, N_importance, device=bins.device)
         
-    # Inverse transform sampling
-    indices = torch.searchsorted(cdf[..., :-1], u, side='right')
-    indices = torch.clamp(indices, 0, len(z_vals_mid) - 1)
+    # Find indices in CDF [S1, unofficial]
+    inds = searchsorted(cdf, u, side='right')
+    below = torch.clamp_min(inds - 1, 0)
+    above = torch.clamp_max(inds, N_samples_)
     
-    # Interpolate within bins
-    lower_idx = indices
-    upper_idx = torch.clamp(indices + 1, 0, len(z_vals_mid) - 1)
+    # Stack indices for bilinear interpolation [S1, unofficial]
+    inds_sampled = torch.stack([below, above], -1).view(N_rays, 2 * N_importance)
     
-    z_lower = z_vals_mid[lower_idx]
-    z_upper = z_vals_mid[upper_idx]
+    # Gather CDF and Bin values [S1, unofficial]
+    cdf_g = torch.gather(cdf, 1, inds_sampled).view(N_rays, N_importance, 2)
+    bins_g = torch.gather(bins, 1, inds_sampled).view(N_rays, N_importance, 2)
     
-    # Linear interpolation within the bin
-    z_samples = z_lower + (z_upper - z_lower) * u
+    # Inverse transform sampling [S1, unofficial]
+    denom = cdf_g[..., 1] - cdf_g[..., 0]
+    denom[denom < eps] = 1  # Prevent division by zero [S1, unofficial]
+    samples = bins_g[..., 0] + (u - cdf_g[..., 0]) / denom * (bins_g[..., 1] - bins_g[..., 0])
     
-    # 4. Stop gradient
-    z_samples = z_samples.detach()
+    return samples
+
+def searchsorted(sorted_tensor, values, side='right'):
+    """
+    Simple implementation of searchsorted for 1D tensors per ray.
+    Returns indices where values should be inserted to maintain order.
+    """
+    # This is a placeholder for the binary search logic. 
+    # In PyTorch, torch.searchsorted is available. 
+    # For self-contained pseudocode, we assume a standard binary search function exists.
+    # [G] Standard library function torch.searchsorted is used in practice.
+    return torch.searchsorted(sorted_tensor, values, side=side)
+
+def nerf_importance_sampling(o, d, z_near, z_far, N_samples, N_importance, perturb, noise_std, eps=1e-5):
+    """
+    Core NeRF Importance Sampling logic.
+    """
+    # 1. Coarse Uniform Sampling [S1, unofficial]
+    z_steps = torch.linspace(0, 1, N_samples)
+    z_vals = z_near * (1 - z_steps) + z_far * z_steps
     
-    # 5. Concatenate and sort
-    z_vals_all = torch.cat([z_vals, z_samples], dim=-1)
-    z_vals_all, _ = torch.sort(z_vals_all, dim=-1, descending=True)
+    # 2. Perturbation [S1, unofficial]
+    if perturb:
+        z_vals_mid = 0.5 * (z_vals[:, 1:] + z_vals[:, :-1])
+        lower = torch.cat([z_vals[:, :1], z_vals_mid], -1)
+        upper = torch.cat([z_vals_mid, z_vals[:, -1:]], -1)
+        u = torch.rand(z_vals.shape)
+        z_vals = lower + (upper - lower) * u
+        
+    # 3. Coarse Query [S1, unofficial]
+    # xyz_coarse = o + z_vals[..., None] * d[..., None, :]
+    # sigmas_coarse = coarse_nerf(xyz_coarse)
+    # [G] Assuming sigmas_coarse is obtained. Shape: (N_rays, N_samples)
     
-    return z_vals_all
+    # 4. Alpha and Weight Computation [S1, unofficial]
+    # deltas = z_vals[:, 1:] - z_vals[:, :-1]
+    # noise = torch.randn_like(deltas) * noise_std
+    # alphas = 1 - torch.exp(-deltas * torch.relu(sigmas_coarse[:, :-1] + noise))
+    # alphas_shifted = torch.cat([torch.ones_like(alphas[:, :1]), alphas[:, :-1]], -1)
+    # transmittance = torch.cumprod(1 - alphas_shifted, -1)
+    # weights_coarse = alphas * transmittance[:, :-1]
+    
+    # 5. Importance Resampling [S1, S2, unofficial]
+    if N_importance > 0:
+        # Use weights excluding first and last [S1, unofficial]
+        weights_fine = weights_coarse[:, 1:-1]
+        # z_vals_mid from step 2 (if perturb) or computed from z_vals
+        z_vals_mid = 0.5 * (z_vals[:, 1:] + z_vals[:, :-1])
+        
+        # Sample PDF [S1, unofficial]
+        z_samples = sample_pdf(z_vals_mid, weights_fine, N_importance, det=not perturb, eps=eps)
+        
+        # 6. Combine and Sort [S1, unofficial]
+        # Concatenate and sort. Note: Source says descending [S1, unofficial].
+        # Standard NeRF integration assumes near-to-far (ascending).
+        # We follow source instruction but note the potential conflict with standard integration.
+        z_vals_combined = torch.cat([z_vals, z_samples], -1)
+        z_vals_final = torch.sort(z_vals_combined, dim=-1, descending=True).values # [S1, unofficial]
+        
+        # Stop gradient on samples [S2, unofficial]
+        z_vals_final = z_vals_final.detach()
+        
+    else:
+        z_vals_final = z_vals
+        
+    return z_vals_final
 ```
 
 **Parameters:**
-- $N_{\text{importance}}$: Number of fine samples. Typical value: 128 [S2].
-- `perturb`: Boolean flag for training-time jittering [S1, unofficial].
+- $N_{samples}$: Number of coarse samples. Default 64 [S1, unofficial].
+- $N_{importance}$: Number of fine samples. Default 0 (disabled) [S1, unofficial].
+- `chunk`: Chunk size for batched inference to manage memory. Default $1024 \times 32$ [S1, unofficial].
+- `eps`: Epsilon for numerical stability in PDF/CDF. Default $10^{-5}$ [S1, unofficial].
 
-**Edge Cases:**
-- **Empty Regions:** If weights are zero everywhere, sampling fails. Mitigated by weight modification (see Subtopics) [S2].
-- **Precision:** Floating point errors in CDF normalization can cause sampling bias. Use epsilon [G].
-- **Boundaries:** Ensure indices are clamped to valid ranges when using `searchsorted` [G].
+**Edge Cases and Pitfalls:**
+- **Division by Zero in PDF:** Weights can be zero. Add `eps` to weights before computing PDF [S1, unofficial].
+- **Zero Denominator in Inverse CDF:** If `cdf_g[...,1] - cdf_g[...,0]` is less than `eps`, set it to 1. Bins with zero weight are not sampled anyway, so this prevents NaNs [S1, unofficial].
+- **Gradient Flow:** Gradients must be stopped on the sampled positions $z_{samples}$ to ensure backpropagation only flows through the network, not the sampling distribution [S2, unofficial].
+- **Sorting Order:** The source specifies sorting in descending order [S1, unofficial]. However, the standard volume rendering formula $C = \sum T_i \alpha_i c_i$ assumes $T_i$ is the transmittance from the camera to sample $i$. If samples are sorted far-to-near, the transmittance calculation must be reversed or the integration loop reversed. The source does not provide the fine-stage integration code, only the sampling [S1, S2, unofficial].
 
 ## Subtopics
 
-### Hierarchical Sampling with Weight Modification
-A variant used in mip-NeRF to improve sampling in empty regions [S2]. It modifies the coarse weights before sampling to create a smoother, wider envelope [S2].
-- **Method:** Before sampling fine samples $t^f$, the weights $w$ are modified using a 2-tap max filter followed by a 2-tap blur filter (blurpool), then a hyperparameter $\alpha$ is added, and the result is re-normalized to sum to 1 [S2].
-- **Formula:** The modified weight $w'_k$ is calculated as:
-  $$ w'_k = \frac{1}{2}(\max(w_{k-1}, w_k) + \max(w_k, w_{k+1})) + \alpha $$
-- **Parameters:**
-  - Number of samples: 128 coarse and 128 fine [S2].
-  - $\alpha$: Hyperparameter to ensure sampling in empty regions. Default value: 0.01 [S2].
-- **When to choose:** Use when rendering scenes with large empty spaces or when standard importance sampling fails to capture details in low-density regions [S2].
+### [Hierarchical Sampling with Weight Modification](4795-hierarchical-sampling-with-weight-modification.md)
+Refines the sampling distribution by applying a "blurpool" filter (max followed by blur) and a bias term to the coarse weights before generating fine samples, ensuring robust sampling in empty regions and smoother weight envelopes.
 
 ## Operating characteristics
-- **Time Complexity:** $O(N_{\text{coarse}} + N_{\text{importance}})$ for sampling and sorting [G]. The dominant cost is the fine network evaluation at $N_{\text{coarse}} + N_{\text{importance}}$ points [G].
-- **Memory Complexity:** $O(N_{\text{coarse}} + N_{\text{importance}})$ to store sample positions and intermediate weights [G].
-- **Measured Performance:** In mip-NeRF, using 128 coarse and 128 fine samples yields the same number of total MLP evaluations as NeRF's configuration for fair comparison [S2].
-- **Strengths:** Reduces noise and aliasing by concentrating samples on opaque regions [S1, unofficial].
-- **Limitations:** Requires two network evaluations (coarse and fine) or a hierarchical structure. Sensitive to the quality of coarse weights [S1, unofficial].
-- **When to use:** High-quality rendering where noise reduction is critical [S1, unofficial].
-- **When not:** Real-time applications with strict latency constraints [G].
+- **Time Complexity:** $O(N_{samples} + N_{importance})$ per ray. The fine stage adds overhead proportional to $N_{importance}$ but reduces the number of samples needed for high quality [S1, S2, unofficial].
+- **Memory Complexity:** $O(N_{samples} + N_{importance})$ per ray for storing depths, alphas, and weights [S1, unofficial].
+- **Performance:** The method is lightweight and does not require auxiliary networks or complex data structures, unlike [NerfAcc Rendering Pipeline](1619-nerfacc-rendering-pipeline.md) [S1, S2, unofficial]. It improves rendering quality over uniform sampling with minimal overhead [S2, unofficial].
+- **Strengths:** Simple to implement; effectively concentrates samples in high-opacity regions; differentiable [S1, S2, unofficial].
+- **Limitations:** Can still produce noise in empty regions if coarse sampling is too sparse; relies on the coarse model's accuracy to generate good weights [S1, unofficial].
+- **When to Use:** When high-quality rendering is needed and the coarse model provides reasonable opacity estimates.
+- **When Not to Use:** When memory is extremely constrained and $N_{importance}$ cannot be afforded, or when the scene has large empty regions where coarse weights are unreliable (consider [Hierarchical Sampling with Weight Modification](4795-hierarchical-sampling-with-weight-modification.md) [S1, unofficial]).
 
 ## Background
-Originated from the NeRF paper (Mildenhall et al., 2020) and refined in mip-NeRF (Barron et al., 2021) [S2]. The technique was introduced to address the issue of uniform sampling being inefficient for sparse scenes. It builds on [NeRF Volumetric Rendering (Coarse/Fine Sampling)](979-nerf-volumetric-rendering-coarse-fine-sampling.md).
+NeRF Importance Sampling was introduced as part of the original NeRF paper (Mildenhall et al., 2020) [S1, unofficial]. It is a standard technique in neural volume rendering to improve the efficiency of ray marching by adapting the sampling distribution to the scene's geometry and appearance [S1, S2, unofficial]. The method is widely used in unofficial PyTorch implementations such as [nerf_pl](https://github.com/kwea123/nerf_pl) and [nerf-mlp](https://github.com/dgsmith7/nerf-mlp) [S1, S2, unofficial].
 
 ## Sources
-[S1] dgsmith7/nerf-mlp, https://github.com/dgsmith7/nerf-mlp, fetched 2026-10-27 (unofficial)
-[S2] Mip-NeRF: A Multiscale Representation for Anti-Aliasing Neural Radiance Fields, https://doi.org/10.1109/iccv48922.2021.00580, fetched 2026-10-26
+[S1] kwea123/nerf_pl, https://github.com/kwea123/nerf_pl, fetched 2026-10-26 (unofficial)
+[S2] dgsmith7/nerf-mlp, https://github.com/dgsmith7/nerf-mlp, fetched 2026-10-27 (unofficial)

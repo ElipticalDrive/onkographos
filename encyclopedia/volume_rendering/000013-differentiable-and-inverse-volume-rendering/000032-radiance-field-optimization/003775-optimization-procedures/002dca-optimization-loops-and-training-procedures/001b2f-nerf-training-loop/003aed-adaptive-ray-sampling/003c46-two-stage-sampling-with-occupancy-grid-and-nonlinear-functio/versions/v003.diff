@@ -1,0 +1,326 @@
+--- v002.md
++++ v003.md
+@@ -4,254 +4,92 @@
+ 
+ ## Overview
+-This method accelerates neural implicit surface reconstruction by combining spatial pruning with importance biasing. It solves the inefficiency of uniform sampling in empty space and the randomness of inverse transform sampling near surfaces. Unlike [Coarse-to-Fine NeRF](3406-coarse-to-fine-nerf.md) which relies on a proposal network, and [Probability-based Ray Sampling with Quadtree Subdivision](7481-probability-based-ray-sampling-with-quadtree-subdivision.md) which uses image-space error, this method uses a binary Occupancy Grid to skip empty regions and a nonlinear piecewise exponential function to bias samples toward the surface within occupied regions [S1].
++This method is a sampling strategy for neural implicit surface reconstruction that combines an Occupancy Grid to skip empty regions (coarse stage) and a nonlinear piecewise exponential function to guide sampling points closer to the object surface within occupied regions (fine stage) [S1]. It reduces training time and sample count while maintaining reconstruction quality compared to uniform sampling in occupied cells or random scatter near surfaces [S1]. Unlike [Coarse-to-Fine NeRF](3406-coarse-to-fine-nerf.md) which relies on inverse transform sampling of accumulated weights, this method uses a nonlinear interpolation function to bias samples deterministically towards high-weight regions [S1]. Unlike [Probability-based Ray Sampling with Quadtree Subdivision](7481-probability-based-ray-sampling-with-quadtree-subdivision.md) which uses hierarchical spatial subdivision, this method uses a fixed-resolution hash-based occupancy grid [S1].
+ 
+ ## How it works
++**Inputs:**
++*   Ray segment $[t_{near}, t_{far}]$.
++*   Occupancy Grid: A binary array indicating whether an object surface intersects each spatial cell [S1].
++*   Geometry Network $F_\theta$: Predicts Signed Distance Field (SDF) $f_{sdf}(x)$ and geometry feature $enc$ [S1].
++*   Appearance Network $F_\beta$: Predicts color $c$ [S1].
++*   Hash Encoding $\gamma$: Multi-resolution hash encoding with 16 levels, ranging from $2^5$ to $2^{16}$, with a feature size of 2 per level [S1].
+ 
+-### Inputs and Outputs
+-*   **Inputs**: Camera parameters (position, direction), ground truth RGB images, optional binary masks.
+-*   **Outputs**: Rendered RGB images, reconstructed 3D mesh (via Marching Cubes).
++**Outputs:**
++*   Set of sample depths $t_i$ along the ray.
++*   Rendered color and accumulated opacity for the ray.
+ 
+-### Data Structures
++**Data Structures:**
++1.  **Occupancy Grid:** Binary array. Each cell indicates if an object surface intersects that spatial region [S1].
++2.  **Hash Encoding:** Interpolates features for position $x$ across 16 scales [S1].
++3.  **Geometry MLP:** 1 layer, hidden size 64 [S1].
++4.  **Appearance MLP:** 2 layers, hidden size 64 [S1].
+ 
+-**Occupancy Grid**
+-*   **Layout**: A binary array (or hash map) mapping spatial coordinates to a boolean value.
+-*   **Meaning**: `True` if an object surface intersects the spatial region (cell); `False` otherwise.
+-*   **Implementation**: Uses Multi-resolution Hash Encoding with 16 levels, ranging from $2^5$ to $2^{16}$, with a feature size of 2 per level [S1].
++**Step-by-Step Method:**
+ 
+-**Network Inputs**
+-For each sample point $x$, the appearance network $F_\beta$ takes:
+-1.  Position $x$.
+-2.  Normal vector $n$ (computed via finite differences).
+-3.  Geometry feature $enc$ (output from the SDF network).
+-4.  Direction $d$ (encoded via Spherical Harmonics) [S1].
++1.  **Coarse Stage (Occupancy Grid Filtering):**
++    *   Evaluate the ray against the Occupancy Grid.
++    *   Identify intervals $[t_i, t_{i+1}]$ where the ray passes through empty cells.
++    *   Skip sampling in these empty intervals to avoid invalid computations [S1].
++    *   For occupied intervals, perform initial uniform sampling to estimate weights $w(t_i)$ for the fine stage. The weight is defined as $w(t_i) = T_i \alpha_i$, where $T_i$ is the transmittance and $\alpha_i$ is the opacity at sample $t_i$ [S1].
+ 
+-### Algorithm Steps
+-
+-1.  **Coarse Stage (Spatial Pruning)**:
+-    *   Cast a ray through the Occupancy Grid.
+-    *   Identify the interval $[t_{near}, t_{far}]$ where the ray intersects occupied cells.
+-    *   Skip sampling in empty cells to avoid invalid computations [S1].
+-
+-2.  **Coarse Sampling**:
+-    *   Perform uniform sampling within the occupied interval $[t_{near}, t_{far}]$ to generate coarse points $\{t_i\}$.
+-    *   Query the SDF network $F_\theta$ at these points to get SDF values $f_{sdf}(t_i)$.
+-    *   Compute opacity weights $w_i$ for each point using the standard NeRF/NeuS formulation: $w_i = T_i \alpha_i$, where $T_i$ is the accumulated transmittance and $\alpha_i$ is the opacity derived from the SDF [S1].
+-
+-3.  **Fine Stage (Nonlinear Biasing)**:
+-    *   For each coarse interval $[t_i, t_{i+1}]$, define the weights at the endpoints: $a = w(t_i)$ and $b = w(t_{i+1})$.
+-    *   Define the nonlinear piecewise exponential function $\hat{w}(s)$ for $s \in [0, 1]$ (normalized interval):
++2.  **Fine Stage (Nonlinear Function Guided Sampling):**
++    *   For each occupied interval $[t_i, t_{i+1}]$ from the coarse stage, define the weights at the endpoints: $a = w(t_i)$ and $b = w(t_{i+1})$ [S1].
++    *   Define the nonlinear interpolation function $\hat{w}(s)$ for a normalized depth $s \in [0, 1]$ within the interval:
+         $$ \hat{w}(s) = a \left( \frac{b}{a} \right)^s $$
+         where $a \ge 0$ and $b \le 1$ [S1].
+-    *   Compute the cumulative distribution function (CDF) integral for this interval:
+-        $$ \int_{t_i}^{t_{i+1}} w(t) dt = \int_{0}^{1} \hat{w}(s) ds = \frac{b - a}{\ln b - \ln a} \quad (\text{if } a \neq b) $$
+-        *Note: If $a=b$, the integral is simply $a$.*
+-    *   Use Inverse Transform Sampling with the CDF derived from $\hat{w}(s)$ to draw fine sample points. This biases samples toward the endpoint with the higher weight (typically the surface intersection) [S1].
++    *   This function interpolates weights within the interval rather than using constant weights, pushing samples closer to the surface where weight is high [S1].
++    *   Compute the cumulative distribution function (CDF) for the interval by integrating $\hat{w}(s)$:
++        $$ \int_{t_i}^{t_{i+1}} w(t) dt = \int_{0}^{1} \hat{w}(s) ds = \frac{b - a}{\ln b - \ln a} \quad \text{(if } a \neq b \text{)} $$
++        Note: The source provides the integral result as $\ln b - \ln a$ in the context of normalization, but the explicit integral of the exponential form $a(b/a)^s$ from 0 to 1 is $\frac{b-a}{\ln(b/a)}$. The source states $\int_0^1 \hat{w}(s) ds = \ln b - \ln a$ is likely a normalization constant or specific derivation context; however, the sampling is performed via inverse transform sampling using the derived CDF from $\hat{w}(s)$ [S1].
++    *   Draw sample depths $t$ within $[t_i, t_{i+1}]$ using inverse transform sampling based on the probability distribution defined by $\hat{w}(s)$ [S1].
++    *   This biases samples towards the endpoint with the higher weight (typically the surface intersection) [S1].
+ 
+-4.  **Network Forward Pass**:
+-    *   Query the SDF network $F_\theta$ at fine sample points to get $f_{sdf}(x)$.
+-    *   Compute normals $n$ using finite differences:
+-        $$ \nabla f_{sdf}(x) \approx \frac{f_{sdf}(x + \epsilon) - f_{sdf}(x - \epsilon)}{2\epsilon} $$
+-        where $\epsilon$ is the hash grid size [S1].
+-    *   Query the Appearance network $F_\beta$ with $(x, n, enc, d)$ to get color $c$.
++3.  **Network Evaluation:**
++    *   For each sample point $x$:
++        *   Compute normal $n$ using finite differences to ensure smoothness:
++            $$ \nabla f_{sdf}(x) = \frac{f_{sdf}(x + \epsilon) - f_{sdf}(x - \epsilon)}{2\epsilon} $$
++            where $\epsilon$ is the hash grid size [S1].
++        *   Encode direction $d$ using Spherical Harmonics [S1].
++        *   Get geometry feature $enc = F_\theta(\gamma(x))$ [S1].
++        *   Predict color $c = F_\beta(x, n, enc, d)$ [S1].
+ 
+-5.  **Rendering and Loss**:
+-    *   Render color $\hat{C}(x)$ and accumulated opacity $\hat{O}_k$.
+-    *   Compute Loss $\mathcal{L} = \mathcal{L}_{color} + \lambda_1 \mathcal{L}_{eik} + \lambda_2 \mathcal{L}_{mask}$ [S1].
++4.  **Rendering:**
++    *   Compute accumulated opacity $O_k$ for ray $k$:
++        $$ O_k = \sum_{i=1}^{n} T_{k,i} \alpha_{k,i} $$
++    *   Render color $\hat{C}(x)$ [S1].
+ 
+-### Pseudocode
++5.  **Loss Calculation:**
++    *   Total Loss:
++        $$ \mathcal{L} = \mathcal{L}_{color} + \lambda_1 \mathcal{L}_{eik} + \lambda_2 \mathcal{L}_{mask} $$
++    *   $\mathcal{L}_{color}$: Sum of L2 loss between rendered color $\hat{C}(x)$ and ground truth $C(x)$ [S1].
++    *   $\mathcal{L}_{eik}$: Sum of squared difference between SDF gradient magnitude and 1:
++        $$ \mathcal{L}_{eik} = \sum_{x} (\|\nabla f_{sdf}(x)\| - 1)^2 $$
++    *   $\mathcal{L}_{mask}$: Binary Cross-Entropy (BCE) between mask $M_k$ and accumulated opacity $O_k$ [S1].
+ 
+-```python
+-import numpy as np
++**Parameters:**
++*   Hash Encoding Levels: 16 levels, $2^5$ to $2^{16}$ [S1].
++*   Hash Feature Size: 2 per level [S1].
++*   Geometry MLP: 1 layer, hidden size 64 [S1].
++*   Appearance MLP: 2 layers, hidden size 64 [S1].
++*   Learning Rate: 0.001 for both Geometry Network $F_\theta$ and Appearance Network $F_\beta$ [S1].
++*   Optimizer Betas: 0.9 and 0.99 [S1].
++*   Regularization Weights: $\lambda_1 = 0.1$, $\lambda_2 = 0.1$ [S1].
++*   Progressive Training Update Step: 1000 iterations (hash levels update every 1000 iterations) [S1].
+ 
+-def compute_nonlinear_cdf(a, b, num_samples):
+-    """
+-    Computes sample positions using Inverse Transform Sampling
+-    for the nonlinear function w_hat(s) = a * (b/a)^s.
+-    
+-    Args:
+-        a: Weight at start of interval w(t_i)
+-        b: Weight at end of interval w(t_{i+1})
+-        num_samples: Number of fine samples to draw in this interval
+-        
+-    Returns:
+-        normalized_positions: Array of s in [0, 1]
+-    """
+-    if a == 0 and b == 0:
+-        # No weight, uniform distribution
+-        return np.linspace(0, 1, num_samples)
+-    
+-    if a == 0:
+-        # Limit case: a -> 0. Integral is b. CDF is s.
+-        # However, mathematically if a=0, w_hat(s) = 0 for all s unless b>0?
+-        # Actually if a=0, w_hat(s) = 0 * (b/0)^s is undefined.
+-        # In practice, if a is very small, we treat it as uniform or handle carefully.
+-        # Based on formula: integral = (b-0)/(ln b - ln 0) -> 0.
+-        # If a=0, the weight is 0 at start. If b>0, it rises.
+-        # Let's assume a > 0 for stability, or use uniform if a is negligible.
+-        return np.linspace(0, 1, num_samples)
+-
+-    if a == b:
+-        # Constant weight, uniform distribution
+-        return np.linspace(0, 1, num_samples)
+-
+-    # CDF(s) = integral_0^s a * (b/a)^t dt
+-    # Let k = ln(b/a). Integral = a * [ (b/a)^t / k ]_0^s
+-    # CDF(s) = (a/k) * ( (b/a)^s - 1 )
+-    # Total Integral I = (a/k) * ( (b/a)^1 - 1 ) = (a/k) * (b/a - 1) = (b-a)/k
+-    
+-    k = np.log(b / a)
+-    total_integral = (b - a) / k
+-    
+-    # Generate random u in [0, 1]
+-    u = np.random.uniform(0, 1, num_samples)
+-    
+-    # Inverse CDF: u = CDF(s) => u * k / a = (b/a)^s - 1
+-    # (b/a)^s = 1 + u * k / a
+-    # s = ln(1 + u * k / a) / ln(b/a)
+-    
+-    # Guard against numerical issues
+-    val = 1 + u * k / a
+-    val = np.clip(val, 1e-8, None)
+-    
+-    s = np.log(val) / k
+-    
+-    return s
+-
+-def render_ray(ray_origin, ray_direction, occupancy_grid, sdf_net, color_net, 
+-               num_coarse, num_fine, epsilon):
+-    """
+-    Renders a single ray using Two-Stage Sampling.
+-    """
+-    # 1. Coarse Stage: Find occupied interval
+-    t_near, t_far = occupancy_grid.get_occupied_interval(ray_origin, ray_direction)
+-    
+-    if t_near is None:
+-        return 0.0, 0.0 # Empty ray
+-
+-    # 2. Coarse Sampling
+-    t_coarse = np.linspace(t_near, t_far, num_coarse)
+-    
+-    # Query SDF
+-    sdf_vals = sdf_net.query(t_coarse)
+-    
+-    # Compute weights (NeuS style)
+-    # alpha = sigmoid(-sdf / sigma) or similar, T = product(1-alpha)
+-    # w_i = T_i * alpha_i
+-    weights = compute_weights(sdf_vals)
+-    
+-    # 3. Fine Stage: Nonlinear Sampling
+-    t_fine = []
+-    for i in range(num_coarse - 1):
+-        t_i = t_coarse[i]
+-        t_next = t_coarse[i+1]
+-        w_i = weights[i]
+-        w_next = weights[i+1]
+-        
+-        # Determine number of fine samples per interval (e.g., proportional to weight or fixed)
+-        n_fine = 2 # Example constant
+-        
+-        # Get normalized positions using nonlinear CDF
+-        s_positions = compute_nonlinear_cdf(w_i, w_next, n_fine)
+-        
+-        # Map back to world space
+-        t_samples = t_i + s_positions * (t_next - t_i)
+-        t_fine.extend(t_samples)
+-        
+-    t_fine = np.array(t_fine)
+-    
+-    # 4. Network Forward Pass
+-    # Compute normals via finite differences
+-    normals = compute_normals(sdf_net, t_fine, epsilon)
+-    
+-    # Get geometry features
+-    enc = sdf_net.get_features(t_fine)
+-    
+-    # Get colors
+-    colors = color_net.query(t_fine, normals, enc, ray_direction)
+-    
+-    # 5. Volume Rendering
+-    # Re-compute alpha/T for fine points
+-    sdf_fine = sdf_net.query(t_fine)
+-    alphas = compute_alpha(sdf_fine)
+-    
+-    # Transmittance calculation
+-    T = np.ones_like(alphas)
+-    for i in range(len(alphas) - 2, -1, -1):
+-        T[i] = T[i+1] * (1 - alphas[i+1])
+-        
+-    # Color accumulation
+-    C = np.sum(T * alphas * colors, axis=0)
+-    O = np.sum(T * alphas, axis=0)
+-    
+-    return C, O
+-
+-def compute_normals(sdf_net, points, epsilon):
+-    """
+-    Computes normals using finite differences.
+-    """
+-    # Perturb points in x, y, z directions
+-    # This is a simplified representation; actual implementation requires
+-    # querying the network at perturbed coordinates.
+-    # n_x = (f(x+eps) - f(x-eps)) / 2eps
+-    # ... repeat for y, z
+-    # Normalize result
+-    pass
+-```
+-
+-### Parameters
+-*   **Hash Encoding Levels**: 16 levels, ranging from $2^5$ to $2^{16}$ [S1].
+-*   **Hash Feature Size**: 2 per level [S1].
+-*   **Geometry MLP**: 1 layer, hidden size 64 [S1].
+-*   **Appearance MLP**: 2 layers, hidden size 64 [S1].
+-*   **Learning Rate**: 0.001 for both Geometry Network $F_\theta$ and Appearance Network $F_\beta$ [S1].
+-*   **Optimizer**: AdamW, betas $(0.9, 0.99)$ [S1].
+-*   **Regularization Weights**: $\lambda_1$ (Eikonal) = 0.1, $\lambda_2$ (Mask) = 0.1 [S1].
+-*   **Progressive Training Update Step**: 1000 iterations (hash levels updated every 1000 steps) [S1].
+-
+-### Edge Cases and Pitfalls
+-*   **Normal Noise**: Using analytic gradients for normals in SDF networks can be noisy. This method uses finite differences for smoother normals [S1].
+-*   **Empty Regions**: The Occupancy Grid must be accurately updated. If the grid is too coarse, it may mark empty space as occupied or vice versa, leading to wasted samples or missing geometry.
+-*   **Weight Extremes**: If $a=0$ and $b=0$, the nonlinear function is undefined. The implementation should fall back to uniform sampling in this case. If $a=b$, it also falls back to uniform sampling [S1].
+-
+-## Subtopics
+-
+-### Coarse-to-Fine NeRF
+-Uses a proposal network to learn the sampling distribution. Choose when you have sufficient memory for a proposal network and want to learn complex distributions without explicit spatial structures. Link: [Coarse-to-Fine NeRF](3406-coarse-to-fine-nerf.md).
+-
+-### Probability-based Ray Sampling with Quadtree Subdivision
+-Uses image-space error to subdivide regions. Choose when error is spatially varying and not just depth-dependent. Link: [Probability-based Ray Sampling with Quadtree Subdivision](7481-probability-based-ray-sampling-with-quadtree-subdivision.md).
+-
+-### TermiNeRF
+-Focuses on termination criteria for ray marching. Choose when dealing with transparent scenes or specific termination logic. Link: [TermiNeRF](8828-terminerf.md).
+-
+-### Pixel Region and Depth Guided Ray Sampling
+-Uses depth estimation to guide sampling. Choose when depth priors are available or reliable. Link: [Pixel Region and Depth Guided Ray Sampling](8866-pixel-region-and-depth-guided-ray-sampling.md).
+-
+-### NeuSample
+-Uses a separate network to predict sampling positions. Choose when you want a learned, data-driven sampling distribution rather than a heuristic one. Link: [NeuSample](9472-neusample.md).
++**Edge Cases and Pitfalls:**
++*   **Normal Calculation:** Using analytic gradients for normals can be noisy; this method uses finite differences for smoother normals [S1].
++*   **Empty Regions:** Failing to skip empty regions in the coarse stage leads to wasted computation [S1].
++*   **Uniform Sampling in Occupied Cells:** Using uniform sampling within occupied cells (as in Instant-NGP) can introduce many useless samples if the grid resolution is low; the nonlinear function mitigates this [S1].
+ 
+ ## Operating characteristics
+-
+-*   **Time Complexity**: Reduced compared to uniform sampling due to skipping empty regions (Occupancy Grid) and concentrating samples near surfaces (Nonlinear Function). The hash encoding lookup is $O(1)$ on average.
+-*   **Memory Complexity**: Dominated by the Occupancy Grid (hash map) and the MLP weights. The hash grid size is determined by the number of levels and feature size (16 levels, 2 features) [S1].
+-*   **Measured Performance**: Tested on DTU and NeRF Synthetic datasets. Achieves better Chamfer Distance (CD) and PSNR than NeuS and Neus-acc with fewer iterations (20,000) [S1].
+-*   **Strengths**:
+-    *   Avoids sampling in empty space.
+-    *   Biases samples toward the surface, improving reconstruction quality.
+-    *   Faster than NeuS due to fewer useless samples.
+-*   **Limitations**:
+-    *   Requires an Occupancy Grid, which needs to be maintained/updated.
+-    *   Finite difference normal computation is slower than analytic gradients (though smoother).
+-    *   Performance depends on the resolution of the Occupancy Grid.
+-*   **When to Use**: Efficient neural implicit surface reconstruction from RGB images where training time and sample efficiency are critical.
+-*   **When Not to Use**: If analytic gradients are sufficient and speed of normal computation is more critical than smoothness, or if the scene has no clear empty/occupied distinction.
++*   **Time Complexity:** Reduced compared to uniform sampling in occupied regions due to the nonlinear biasing and occupancy grid skipping [S1].
++*   **Memory Complexity:** Depends on the Occupancy Grid size and Hash Encoding storage (16 levels, feature size 2) [S1].
++*   **Performance:** Achieves good surface reconstruction and novel view synthesis on DTU and NeRF Synthetic datasets with fewer samples and reasonable training time [S1].
++*   **Strengths:** Avoids invalid sampling in empty regions; biases samples towards surfaces more effectively than uniform sampling in occupied cells; smoother normals via finite differences [S1].
++*   **Limitations:** Requires tuning of hash encoding levels and grid resolution; finite difference normal calculation adds computational overhead per sample [S1].
++*   **When to use:** When efficient surface reconstruction is needed with RGB-only input, and computational resources are limited compared to methods requiring proposal networks or multi-stage training with analytic gradients [S1].
+ 
+ ## Background
+-
+-*   **Origin**: Proposed by Siyuan He and Xinglin Liu from Wuyi University, published in March 2024 [S1].
+-*   **History**: Builds on NeRF [1] and NeuS [2]. Addresses limitations of NeuS (random scatter near surface) and Instant-NGP (uniform sampling in occupied cells) [S1]. Inspired by DoNeRF [15] and NeuS2 [12]/Neuralangelo [14] regarding occupancy grids.
+-*   **Usage**: Used for neural implicit surface reconstruction, specifically for surface recovery and novel view synthesis on real and synthetic datasets (DTU, NeRF Synthetic) [S1].
++Originated from research by Siyuan He and Xinglin Liu at Wuyi University, published in March 2024 [S1]. It builds on [Coarse-to-Fine NeRF](3406-coarse-to-fine-nerf.md) and [NeuS](8828-terminerf.md) by incorporating ideas from [Instant-NGP](3406-coarse-to-fine-nerf.md) (Occupancy Grid) and [DoNeRF](3406-coarse-to-fine-nerf.md) (nonlinear sampling concepts) [S1]. It addresses the inefficiency of NeuS's inverse transform sampling (random scatter near surface) and Instant-NGP's uniform sampling in occupied cells [S1].
+ 
+ ## Sources
+-
+ [S1] Research on Efficient Sampling of Neural Implicit Surface Reconstruction, https://doi.org/10.12677/csa.2024.143065, fetched 2026-10-29

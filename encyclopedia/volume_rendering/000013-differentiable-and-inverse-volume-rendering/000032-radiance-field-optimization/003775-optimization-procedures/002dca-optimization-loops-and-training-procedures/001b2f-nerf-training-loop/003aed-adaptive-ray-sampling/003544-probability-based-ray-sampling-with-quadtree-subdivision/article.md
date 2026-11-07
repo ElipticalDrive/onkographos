@@ -3,223 +3,230 @@
 Also called: Adaptive Quadtree Subdivision, Fast Learning Radiance Fields by Shooting Much Fewer Rays method, Ours, Quadtree Subdivision
 
 ## Overview
-This method accelerates radiance field training by dynamically adjusting ray distribution using a context-based probability density function and an adaptive quadtree subdivision strategy [S1]. It differs from sibling methods like [Coarse-to-Fine NeRF](3406-coarse-to-fine-nerf.md) and [TermiNeRF](8828-terminerf.md) by explicitly marking leaf nodes as "converged" based on rendering error to permanently reduce ray counts in simple regions, rather than just adjusting sample weights [S1].
+This method accelerates radiance field training by dynamically adjusting ray distribution through context-based probability sampling and adaptive quadtree subdivision [S1]. It differs from sibling methods like [Coarse-to-Fine NeRF](3406-coarse-to-fine-nerf.md) by using rendering error on image blocks to trigger structural subdivision into four children, rather than just adjusting point counts within fixed blocks [S1]. Unlike [NeuSample](9472-neusample.md), which focuses on surface normal consistency, this approach explicitly reduces ray counts in converged regions to minimize network evaluations while maintaining or improving reconstruction accuracy [S1].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Inputs:** Input images $I_i$ with dimensions $H_i \times W_i$; ground truth colors $c_i$; a radiance field model $\Theta$ (e.g., NeRF, Plenoxels); a convergence threshold $\alpha$; a constant ray count for converged nodes $n_0$; and a random sampling ratio $\rho$ [S1].
-*   **Outputs:** A set of rays $r_i$ sampled per view for the current training iteration; updated radiance field model $\Theta$ [S1].
+The method operates as a general framework applicable to NeRF, NeRF++, Plenoxels, Instant-NGP, Mip-NeRF 360, and NeuS [S1]. It constructs a spatial hierarchy on each input view to identify regions requiring high sampling density versus those that have converged.
 
-**Data Structures:**
-*   **Quadtree:** Constructed independently for each input view. Each node represents a rectangular block of the image.
-    *   **Leaf Node State:** Contains a boolean flag `is_converged` (initially false) and references to four child nodes (initially null).
-    *   **Root Node:** Represents the entire image $H_i \times W_i$.
-*   **Probability Map:** A 2D array of size $H_i \times W_i$ storing the prior probability density for each pixel, calculated from image context [S1].
+### Inputs and Outputs
+*   **Inputs:** Input images $I_i$ with dimensions $H_i \times W_i$; ground truth colors $c_i$; a radiance field model $\Theta$ (e.g., NeRF); a convergence threshold $\alpha$; a constant ray count for marked nodes $n_0$; and a random sampling ratio $\rho$.
+*   **Outputs:** A set of sample depths $t_j$ along each ray $r_i$ for volume rendering; an updated radiance field $\Theta$.
 
-**Step-by-Step Procedure:**
+### Data Structures
+*   **Quadtree:** A hierarchical structure built on each input view. Each node represents a rectangular block of the image.
+    *   **Leaf Node:** Represents a block of pixels.
+    *   **State:** Each leaf node has a state: `unmarked` (active) or `marked` (converged).
+    *   **Subdivision:** An `unmarked` node splits into four equal-sized child nodes. A `marked` node does not subdivide.
+*   **Probability Map:** A 2D array of size $H_i \times W_i$ storing the probability density $g'(u, v)$ for each pixel $(u, v)$.
 
-1.  **Initialize Probability Map:**
-    For each pixel $(u, v)$ in image $I_i$, calculate the color variance using a $3 \times 3$ patch receptive field [S1]. Let $c(x, y)$ be the color of pixel $(x, y)$ and $\bar{c}$ be the mean color in the patch [S1]. The variance is:
-    $$
-    \text{variance}(c(u, v)) = \frac{1}{9} \sum_{x \in \{u-1, u, u+1\}} \sum_{y \in \{v-1, v, v+1\}} [c(x, y) - \bar{c}]^2
-    $$
-    Normalize these variances across the image to form a probability density function $g'(u, v)$ [S1].
+### Parameters
+*   $\alpha$: Convergence threshold for average rendering error. Not given in the sources.
+*   $n_0$: Constant number of rays sampled on `marked` leaf nodes. Typically $n_0 = 10$ [S1].
+*   $\rho$: Random sampling ratio added to the probability distribution to ensure trivial areas are learned. Not given in the sources.
+*   Patch Size: Size of the receptive field for variance calculation. Typically $3 \times 3$ [S1].
 
-2.  **Initialize Quadtree:**
-    Create a quadtree for each view where the root covers the full image. Initially, there is only one leaf node (the root) representing all pixels. The initial number of rays $M_i$ equals the total number of pixels $H_i \times W_i$ [S1].
+### Algorithm Steps
 
-3.  **Ray Sampling Loop (per iteration):**
+1.  **Initialization:**
+    For each input view $I_i$ with height $H_i$ and width $W_i$:
+    *   Construct a quadtree with a single root node representing the entire image.
+    *   Set the initial number of rays $M_i = H_i \times W_i$ [S1].
+    *   Calculate the initial probability density $g'(u, v)$ for all pixels $(u, v)$ using the standard deviation of color in a $3 \times 3$ patch [S1].
+
+2.  **Probability Calculation:**
+    For each pixel $(u, v)$ in the image:
+    *   Define the patch $P_{u,v}$ as the set of pixels $(x, y)$ where $x \in \{u-1, u, u+1\}$ and $y \in \{v-1, v, v+1\}$ [S1].
+    *   Calculate the mean color $\bar{c}$ of the patch:
+        $$ \bar{c} = \frac{1}{9} \sum_{(x,y) \in P_{u,v}} c(x, y) $$
+    *   Calculate the variance (probability density proxy) $g'(u, v)$:
+        $$ g'(u, v) = \frac{1}{9} \sum_{(x,y) \in P_{u,v}} [c(x, y) - \bar{c}]^2 $$
+    *   [G] Normalize $g'(u, v)$ to form a probability distribution $P(u, v)$ such that $\sum_{u,v} P(u, v) = 1$.
+    *   [G] Mix with uniform random sampling: $P_{final}(u, v) = (1 - \rho) P(u, v) + \rho \frac{1}{H_i W_i}$ [S1].
+
+3.  **Ray Sampling and Rendering:**
     For each leaf node $F$ in the quadtree:
-    *   If $F$ is marked as `is_converged`:
-        *   Sample $n_0$ rays uniformly or randomly within the spatial bounds of $F$. The sources specify $n_0 = 10$ as a typical value [S1].
-    *   If $F$ is not converged:
-        *   Calculate the number of pixels covered by $F$, denoted as $N_F$.
-        *   Sample $N_F$ rays from $F$. The position of each ray is determined by sampling from the prior probability distribution $g'(u, v)$ restricted to the bounds of $F$, combined with a random sampling component to ensure trivial areas are learned [S1]. Specifically, the method adds a random sampling ratio to the probability distribution to prevent ignoring smooth surfaces [S1].
+    *   If $F$ is `unmarked`:
+        *   Sample rays at pixel locations within $F$ according to $P_{final}(u, v)$. The number of rays equals the number of pixels in $F$ [S1].
+    *   If $F$ is `marked`:
+        *   Sample $n_0$ rays randomly within $F$ [S1].
+    *   For each sampled ray $r_i$:
+        *   Compute the rendered color $\hat{c}_i = V_\Theta(r_i)$ using volume rendering [S1].
+        *   Compute the rendering error for the ray: $e_i = V_\Theta(r_i) - c_i$, where $c_i$ is the ground truth color [S1].
 
-4.  **Render and Compute Error:**
-    For each sampled ray $r_i \in F$, render the color $\hat{c}_i$ using the current model $\Theta$ and volume rendering equation [S1]:
-    $$
-    \hat{c}_i = \sum_{j=1}^{N} T_j (1 - \exp(-\sigma_j \delta_j)) c_j
-    $$
-    where $\sigma_j$ is density, $c_j$ is color, $\delta_j$ is distance, and $T_j$ is transmittance [S1].
-    Compute the average rendering error $e_F$ for the leaf node $F$:
-    $$
-    e_F = \text{mean}_{r_i \in F} (\|\hat{c}_i - c_i\|)
-    $$
-    where $c_i$ is the ground truth color of the pixel corresponding to ray $r_i$ [S1]. Note: The source formula uses $V_\Theta(r_i) - c_i$, implying a difference metric, typically L1 or L2 norm in practice, though the source writes it as a direct subtraction. We assume a norm is taken for error magnitude [S1].
-
-5.  **Update Quadtree (Subdivision):**
-    Compare $e_F$ with the threshold $\alpha$:
+4.  **Error Aggregation and Subdivision:**
+    For each leaf node $F$:
+    *   Calculate the average rendering error $e_F$ over all rays $r_i$ emitted from $F$:
+        $$ e_F = \text{mean}_{r_i \in F} (V_\Theta(r_i) - c_i) $$
     *   If $e_F < \alpha$:
-        *   Mark leaf node $F$ as `is_converged = true`.
-        *   Do not subdivide $F$.
+        *   Mark node $F$ as `marked` (converged) [S1].
+        *   Do not subdivide $F$ in subsequent iterations [S1].
     *   If $e_F \ge \alpha$:
-        *   Subdivide $F$ into four equal-sized child leaf nodes.
-        *   Reset `is_converged` to false for the new children.
+        *   Subdivide $F$ into four smaller leaf nodes [S1].
+        *   Reset the state of the new children to `unmarked` [S1].
 
-6.  **Training Step:**
-    Use the collected rays and their ground truth colors to compute the loss and update the model parameters $\Theta$ via gradient descent [S1].
+5.  **Iteration:**
+    *   Repeat steps 2-4 for each training iteration or epoch.
+    *   The total number of rays $M_{il}$ after $l$ subdivisions is calculated as:
+        $$ M_{il} = Q_{l1} \times \frac{H_i \times W_i}{2^l} + Q_{l2} \times n_0 $$
+        where $Q_{l1}$ is the number of `unmarked` leaf nodes and $Q_{l2}$ is the number of `marked` leaf nodes [S1].
 
-**Pseudocode:**
+### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def initialize_quadtree(image_height, image_width):
-    """Creates a quadtree root covering the entire image."""
-    root = Node(x=0, y=0, w=image_width, h=image_height, is_converged=False)
-    return root
+    """
+    Creates a quadtree with a single root node covering the entire image.
+    Returns a list of leaf nodes.
+    """
+    root = Node(0, 0, image_height, image_width, state='unmarked')
+    return [root]
 
 def calculate_probability_map(image):
-    """Calculates variance-based probability density for each pixel."""
+    """
+    Calculates probability density based on color variance in 3x3 patches.
+    """
     h, w, _ = image.shape
     prob_map = np.zeros((h, w))
-    # Use 3x3 patch for variance calculation
-    # Pad image to handle boundaries
-    padded = np.pad(image, ((1,1), (1,1), (0,0)), mode='edge')
+    
     for u in range(h):
         for v in range(w):
-            patch = padded[u:u+2, v:v+2, :] # 3x3 patch centered at u,v
-            mean_c = np.mean(patch, axis=(0, 1))
-            variance = np.mean((patch - mean_c)**2)
+            # Define 3x3 patch boundaries
+            x_start = max(0, u - 1)
+            x_end = min(h, u + 2)
+            y_start = max(0, v - 1)
+            y_end = min(w, v + 2)
+            
+            patch = image[x_start:x_end, y_start:y_end]
+            mean_color = np.mean(patch)
+            variance = np.mean((patch - mean_color) ** 2)
             prob_map[u, v] = variance
-    # Normalize to sum to 1
-    prob_map /= np.sum(prob_map)
+            
+    # Normalize to probability distribution
+    prob_map = prob_map / np.sum(prob_map)
     return prob_map
 
 def sample_rays_from_node(node, prob_map, n0, random_ratio):
-    """Samples rays for a specific quadtree node."""
+    """
+    Samples rays from a leaf node based on its state.
+    """
     rays = []
-    if node.is_converged:
-        # Sample constant number of rays for converged nodes
-        count = n0
+    h, w = node.height, node.width
+    y_start, x_start = node.y, node.x
+    
+    if node.state == 'marked':
+        # Sample n0 random rays within the node
+        for _ in range(n0):
+            y = random.randint(y_start, y_start + h - 1)
+            x = random.randint(x_start, x_start + w - 1)
+            rays.append((y, x))
     else:
-        # Sample number of rays equal to pixel count in node
-        count = node.w * node.h
-    
-    # Define bounds of the node
-    y_min, y_max = node.y, node.y + node.h
-    x_min, x_max = node.x, node.x + node.w
-    
-    # Extract sub-probability map for this node
-    sub_prob = prob_map[y_min:y_max, x_min:x_max]
-    sub_prob /= np.sum(sub_prob) # Renormalize locally
-    
-    # Flatten indices
-    indices = np.arange(count)
-    # Sample indices based on probability
-    # Add random sampling component to ensure trivial areas are learned
-    # The source mentions adding a random sampling ratio. 
-    # Implementation: Mix uniform sampling with probability-based sampling
-    uniform_indices = np.random.randint(0, sub_prob.size, count)
-    prob_indices = np.random.choice(sub_prob.size, count, p=sub_prob.flatten())
-    
-    # Simple mix: use prob_indices with probability (1-random_ratio), else uniform
-    # Note: Exact mixing formula not specified, assuming weighted choice or fallback
-    final_indices = np.where(np.random.rand(count) < (1 - random_ratio), prob_indices, uniform_indices)
-    
-    for idx in final_indices:
-        y_idx = idx // sub_prob.shape[1]
-        x_idx = idx % sub_prob.shape[1]
-        # Map back to global coordinates
-        global_y = y_min + y_idx
-        global_x = x_min + x_idx
-        rays.append((global_y, global_x))
+        # Sample rays according to probability distribution
+        # Extract sub-probability map for the node
+        sub_prob = prob_map[y_start:y_start+h, x_start:x_start+w]
+        sub_prob = sub_prob / np.sum(sub_prob) # Re-normalize locally
         
+        # Flatten and sample
+        pixels = np.array([[y_start + i, x_start + j] for i in range(h) for j in range(w)])
+        # Add random sampling ratio to ensure trivial areas are learned
+        # [G] Implementation detail: Mix uniform and probability-based sampling
+        num_samples = h * w
+        indices = np.random.choice(num_samples, size=num_samples, p=sub_prob.flatten())
+        
+        for idx in indices:
+            y, x = pixels[idx]
+            rays.append((y, x))
+            
     return rays
 
-def update_quadtree(node, rays, model, ground_truth_images, threshold_alpha):
-    """Renders rays, computes error, and subdivides if necessary."""
-    if node.is_converged:
-        return
-
-    errors = []
-    for (y, x) in rays:
-        # Get ground truth color
-        gt_color = ground_truth_images[y, x]
-        
-        # Render ray (simplified call to volume rendering)
-        # ray_origin, ray_direction derived from (y, x) and camera params
-        rendered_color = model.render_ray(ray_origin, ray_direction)
-        
-        # Compute error (L1 or L2 norm implied by source context)
-        error = np.mean(np.abs(rendered_color - gt_color))
-        errors.append(error)
-        
-    if not errors:
-        return
-
-    avg_error = np.mean(errors)
+def update_quadtree(leaf_nodes, rendered_colors, ground_truth_colors, threshold_alpha):
+    """
+    Updates the quadtree structure based on rendering error.
+    """
+    new_leaf_nodes = []
     
-    if avg_error < threshold_alpha:
-        node.is_converged = True
-    else:
-        # Subdivide into 4 children
-        mid_y = node.y + node.h // 2
-        mid_x = node.x + node.w // 2
+    for node in leaf_nodes:
+        # Calculate average error for this node
+        # [G] Assume we have a list of errors for rays in this node
+        errors = [rendered_colors[i] - ground_truth_colors[i] for i in node.ray_indices]
+        avg_error = np.mean(errors)
         
-        # Top-Left
-        node.children.append(Node(node.x, node.y, node.w//2, node.h//2, False))
-        # Top-Right
-        node.children.append(Node(node.x + node.w//2, node.y, node.w//2, node.h//2, False))
-        # Bottom-Left
-        node.children.append(Node(node.x, node.y + node.h//2, node.w//2, node.h//2, False))
-        # Bottom-Right
-        node.children.append(Node(node.x + node.w//2, node.y + node.h//2, node.w//2, node.h//2, False))
-
-def train_step(model, quadtree, prob_map, ground_truth_images, n0=10, threshold_alpha=0.01, random_ratio=0.2):
-    """Main training loop step."""
-    all_rays = []
-    
-    # Traverse quadtree to collect rays
-    def traverse(node):
-        if node.is_converged:
-            # Still need to sample rays for converged nodes for training
-            # But source says "Only a few rays... sampled on F". 
-            # We assume we still train on them, just fewer.
-            rays = sample_rays_from_node(node, prob_map, n0, random_ratio)
-            all_rays.extend(rays)
+        if avg_error < threshold_alpha:
+            node.state = 'marked'
+            new_leaf_nodes.append(node)
         else:
-            rays = sample_rays_from_node(node, prob_map, n0, random_ratio)
-            all_rays.extend(rays)
-            # Update structure (subdivide)
-            update_quadtree(node, rays, model, ground_truth_images, threshold_alpha)
-            # Recurse if subdivided
-            if not node.is_converged:
-                for child in node.children:
-                    traverse(child)
-                    
-    # Assuming single view for simplicity, loop over views in practice
-    traverse(quadtree)
+            # Subdivide into 4 children
+            h, w = node.height, node.width
+            new_h, new_w = h // 2, w // 2
+            y, x = node.y, node.x
+            
+            children = [
+                Node(y, x, new_h, new_w, state='unmarked'),
+                Node(y, x + new_w, new_h, new_w, state='unmarked'),
+                Node(y + new_h, x, new_h, new_w, state='unmarked'),
+                Node(y + new_h, x + new_w, new_h, new_w, state='unmarked')
+            ]
+            new_leaf_nodes.extend(children)
+            
+    return new_leaf_nodes
+
+def train_step(image, prob_map, leaf_nodes, model, threshold_alpha, n0, random_ratio):
+    """
+    One step of the training loop with adaptive sampling.
+    """
+    all_rays = []
+    ray_node_map = {} # Map ray index to node for error calculation
     
-    # Compute loss and update model
-    # ... (standard gradient descent step using all_rays and ground_truth_images)
-    pass
+    for i, node in enumerate(leaf_nodes):
+        rays = sample_rays_from_node(node, prob_map, n0, random_ratio)
+        for j, (y, x) in enumerate(rays):
+            ray_index = len(all_rays)
+            all_rays.append((y, x))
+            ray_node_map[ray_index] = i
+            
+    # Render rays
+    rendered_colors = model.render(all_rays)
+    ground_truth_colors = get_ground_truth_colors(all_rays, image)
+    
+    # Update model weights
+    loss = compute_loss(rendered_colors, ground_truth_colors)
+    model.update(loss)
+    
+    # Update quadtree structure
+    leaf_nodes = update_quadtree(leaf_nodes, rendered_colors, ground_truth_colors, threshold_alpha)
+    
+    return leaf_nodes
 ```
 
-**Parameters:**
-*   $\alpha$ (threshold): Convergence threshold for rendering error. Not given in the sources.
-*   $n_0$: Constant number of rays sampled on marked (converged) leaf nodes. Typically $n_0 = 10$ [S1].
-*   Random sampling ratio: A ratio added to the probability distribution to ensure trivial areas are learned. The exact value is not specified, but ablation studies show performance peaks between 20% and 90% [S1].
-*   Patch size: $3 \times 3$ is used. Alternative sizes ($5 \times 5, 7 \times 7, 9 \times 9$) and metrics (variation, entropy) were tested but found insensitive [S1].
+### Edge Cases and Pitfalls
+*   **Threshold Selection:** The choice of threshold $\alpha$ is critical. If too high, nodes remain unmarked and subdivision continues unnecessarily, increasing computation. If too low, nodes are marked prematurely, leading to under-sampling in complex regions [S1].
+*   **Smooth Surfaces:** Context-based probability distributions may ignore trivial areas with small color changes. Adding a random sampling ratio $\rho$ is necessary to ensure these areas are learned [S1].
+*   **Patch Size Insensitivity:** The method is robust to patch size variations ($3 \times 3$ to $9 \times 9$) and metric choices (variance, entropy, variation), but $3 \times 3$ variance is the standard [S1].
 
-**Edge Cases and Pitfalls:**
-*   **Boundary Conditions:** The $3 \times 3$ patch calculation requires handling image boundaries. The source implies padding or edge handling is used [S1].
-*   **Precision:** The error calculation $e_F$ is an average over rays. If a node has very few rays (e.g., after subdivision), the error estimate may be noisy [G].
-*   **Convergence Threshold:** Choosing $\alpha$ is critical. Too high, and nodes converge too early, losing detail. Too low, and subdivision continues unnecessarily, increasing overhead [S1].
+## Subtopics
+
+### Adaptive Quadtree Subdivision
+The core mechanism of splitting leaf nodes based on rendering error. It differs from fixed-block methods by allowing the number of blocks to change dynamically [S1].
+
+### Context-Based Probability Sampling
+The use of local color variance to bias ray sampling towards complex regions. It differs from uniform sampling by focusing computational effort on high-detail areas [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Training time is reduced by 15-40% compared to baselines like NeRF, Plenoxels, and Instant-NGP [S1]. The reduction increases as training progresses because more nodes become marked and require fewer rays [S1].
-*   **Memory Complexity:** The quadtree structure adds minimal memory overhead compared to the image data itself [G].
-*   **Performance:**
-    *   On LLFF (Forward-Facing): Training time reduced from 66.6 min (Plenoxels) to 40.4 min (39% reduction), PSNR increased from 24.60 to 25.12 [S1].
-    *   On Tanks and Temples: Instant-NGP training time reduced from 354s to 285s (19% reduction), PSNR increased from 27.91 to 28.25 [S1].
-    *   On DTU: NeuS training time reduced from 9.2h to 7.3h (21% reduction), Chamfer Distance improved from 0.87 to 0.73 [S1].
-*   **Strengths:** General framework applicable to NeRF, NeRF++, Plenoxels, Instant-NGP, Mip-NeRF 360, and NeuS [S1]. Balances efficiency and effectiveness by reducing rays in simple regions while increasing them in complex ones [S1].
-*   **Limitations:** Initial training stage may have a tiny increase in time due to sampling and subdividing overhead [S1].
+*   **Time Complexity:** Training time is reduced by 15-40% compared to baseline methods [S1].
+    *   On LLFF dataset (Plenoxels): 66.6 min to 40.4 min (39% reduction) [S1].
+    *   On Tanks and Temples (Instant-NGP): 354s to 285s (19% reduction) [S1].
+    *   On DTU (NeuS): 9.2h to 7.3h (21% reduction) [S1].
+*   **Memory Complexity:** The quadtree structure adds minimal overhead. The number of rays $M_{il}$ decreases as training progresses because marked nodes sample fewer rays ($n_0$) compared to unmarked nodes [S1].
+*   **Performance:** Achieves comparable or better PSNR, SSIM, and LPIPS scores than baselines [S1].
+    *   LLFF (Plenoxels): PSNR 24.60 to 25.12 [S1].
+    *   Tanks and Temples (Instant-NGP): PSNR 27.91 to 28.25 [S1].
+    *   DTU (NeuS): Chamfer Distance 0.87 to 0.73 [S1].
+*   **Strengths:** General framework applicable to various radiance field methods; significant speedup in later training stages; maintains high accuracy [S1].
+*   **Limitations:** Initial training phase may have slightly increased time due to sampling and subdividing overhead [S1].
 
 ## Background
-The method was proposed in "Fast Learning Radiance Fields by Shooting Much Fewer Rays" [S1]. It is designed as a general framework to accelerate radiance field training. It differs from iMap by using error to decide subdivision into 4 children (rather than just point count per block), allowing the number of leaf nodes to change during training (unlike iMap's fixed-size blocks), and sampling points according to image context within blocks (unlike iMap's uniform sampling) [S1].
+The method was proposed in "Fast Learning Radiance Fields by Shooting Much Fewer Rays" [S1]. It addresses the high computational cost of training radiance fields by reducing the number of rays needed for convergence. It builds on the principles of adaptive ray sampling [8870-adaptive-ray-sampling.md] and differs from prior work like iMap by using error-driven subdivision rather than fixed block allocation [S1].
 
 ## Sources
 [S1] Fast Learning Radiance Fields by Shooting Much Fewer Rays, https://doi.org/10.1109/tip.2023.3267049, fetched 2026-10-26

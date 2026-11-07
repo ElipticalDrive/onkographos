@@ -1,39 +1,42 @@
 # Adaptive Ray Sampling
 
+Also called: Adaptive Sampling, Hierarchical Sampling, Importance Sampling in NeRF
+
 ## Overview
-Adaptive Ray Sampling refers to a family of strategies in neural radiance field (NeRF) training that dynamically adjust the distribution of sample points along viewing rays to improve reconstruction quality and training efficiency. Unlike uniform sampling, which treats all regions of a ray equally, these methods allocate computational resources to areas of high geometric or photometric complexity, such as object boundaries or high-frequency details [S1, S3, unofficial]. This family addresses the inefficiency of uniform sampling in sparse or complex scenes by clustering samples where they contribute most to the final rendered image [S1, S3, unofficial].
+Adaptive Ray Sampling refers to a family of strategies in neural radiance field (NeRF) training that dynamically adjust the distribution of sample points along viewing rays to improve reconstruction quality and training efficiency. Unlike uniform sampling, which treats all space along a ray equally, these methods concentrate computational resources in regions of high geometric or photometric complexity, such as object surfaces or high-frequency details [S1, S3, unofficial]. This family is distinct from sibling methods like [Training Ray Marching and Integration](2199-training-ray-marching-and-integration.md) by focusing specifically on *where* to sample rather than *how* to integrate, and from [Mip-NeRF 360](3306-mip-nerf-360.md) by typically operating in Euclidean space with point-wise samples rather than conical frustums.
 
 ## Shared principles
-All methods in this family share the goal of optimizing the placement of sample points $t_i$ along a ray segment $[t_{near}, t_{far}]$ to minimize rendering error or training time. The core mechanism involves replacing the uniform distribution of samples with a non-uniform distribution derived from scene statistics or network predictions.
+All methods in this family share the goal of reducing the number of unnecessary network evaluations in empty space or converged regions while increasing density in ambiguous or high-detail areas. They generally operate by:
+1.  **Estimating Importance:** Using a proxy metric (e.g., coarse network weights, rendering error, color/depth variance, or occupancy) to identify "important" regions along a ray or in image space.
+2.  **Resampling/Selection:** Generating new sample points or selecting rays based on this importance distribution, often using inverse transform sampling or stochastic selection.
+3.  **Integration:** Rendering the final color using the adaptively sampled points.
 
-1.  **Importance Metric**: Each method defines a metric to identify "important" regions. This metric may be based on:
-    *   **Network Output**: Volume density $\sigma$ or opacity weights $w_i$ from a coarse pass [S3, S4, unofficial].
-    *   **Image Statistics**: Color variance, gradient magnitude, or depth variation in the input images [S1].
-    *   **Rendering Error**: The difference between rendered and ground-truth colors, used to guide spatial subdivision [S1].
-2.  **Sampling Distribution**: The importance metric is converted into a probability density function (PDF) or a set of weights. Samples are then drawn from this distribution. Common techniques include:
-    *   **Inverse Transform Sampling**: Using the cumulative distribution function (CDF) of the weights to select sample depths [S3, S4, unofficial].
-    *   **Stratified Sampling**: Adding jitter to uniform bins to break symmetry, often used in the coarse pass [S3, S4, unofficial].
-    *   **Spatial Subdivision**: Dividing the image plane into regions (e.g., quadtrees) and adjusting ray counts per region based on local error [S1].
-3.  **Differentiability**: The sampling process itself is typically non-differentiable. Gradients are computed only with respect to the network parameters (MLP weights) and not the sample positions, requiring the sample generation step to be detached from the computation graph [S3, S4, unofficial].
+Common mathematical components include the volume rendering equation:
+$$ \mathbf{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i \alpha_i \mathbf{c}_i $$
+where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the transmittance, $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ is the opacity, and $\delta_i$ is the distance between samples [S4, unofficial]. The adaptation lies in the selection of $N$ points and their positions $t_i$.
 
 ## Subtopics
 
 ### [Coarse-to-Fine NeRF](3406-coarse-to-fine-nerf.md)
-Uses a two-stage hierarchical approach. A coarse network samples uniformly (with jitter) to identify opaque regions. A fine network then densely samples these regions using inverse transform sampling based on coarse weights. It improves high-frequency detail reconstruction without proportional coarse cost.
+A hierarchical strategy using two MLPs (coarse and fine). The coarse network uniformly samples the ray to identify opaque regions via accumulated weights. The fine network then densely samples these regions using inverse transform sampling on the coarse weights. It is chosen when high-frequency detail reconstruction is critical and uniform sampling is too sparse.
 
 ### [Probability-based Ray Sampling with Quadtree Subdivision](7481-probability-based-ray-sampling-with-quadtree-subdivision.md)
-Accelerates training by subdividing the image plane into a quadtree. Nodes are marked as converged if their rendering error is below a threshold, reducing ray counts in simple regions. Complex regions are subdivided and sampled more densely based on color variance.
+Uses a quadtree structure on image patches. It calculates rendering error per patch; if error is low, the patch is "marked" and sampled sparsely. If error is high, it subdivides into four children for denser sampling. It is chosen for accelerating training in large scenes by reducing ray counts in converged regions.
 
 ### [TermiNeRF](8828-terminerf.md)
-Trains a dedicated sampling network to predict importance weights directly from ray parameters. It uses centered-logarithmic sampling and distribution matching to learn where to place samples, allowing the color network to skip free space. It differs from hierarchical methods by using a single network evaluation per ray for sampling guidance.
+Trains a lightweight sampling network to predict a probability distribution $P(t)$ directly from ray parameters, bypassing the need for a coarse pass or spatial data structures. It uses centered-logarithmic sampling bins and matches predicted weights to ground-truth rendering weights derived from a pre-trained color network. It is chosen for robustness in geometrically ambiguous regions and reducing color network evaluations.
 
 ### [Pixel Region and Depth Guided Ray Sampling](8866-pixel-region-and-depth-guided-ray-sampling.md)
-Increases sampling probability in pixels with high color and depth variation. It uses depth estimation and gradient magnitude to guide ray allocation, reducing redundant rays in flat regions and improving geometry perception.
+Biases ray selection in 2D image space based on color and depth variance. Rays are cast more frequently from pixels with high gradient magnitude in color or estimated depth. It is chosen to accelerate convergence and improve geometry perception by focusing on complex pixel regions rather than refining along single rays.
+
+### [Two-Stage Sampling with Occupancy Grid and Nonlinear Function](9146-two-stage-sampling-with-occupancy-grid-and-nonlinear-functio.md)
+Combines an occupancy grid to skip empty space (coarse) with a nonlinear piecewise exponential function to bias samples toward surfaces within occupied cells (fine). It is chosen for implicit surface reconstruction (NeuS) where SDF gradients are used, offering deterministic biasing compared to stochastic inverse transform sampling.
 
 ## Background
-Adaptive sampling in volume rendering has roots in early ray tracing techniques that used stratified sampling to reduce noise [G]. In the context of NeRF, the seminal work by Mildenhall et al. introduced hierarchical sampling (Coarse-to-Fine) to handle the sparsity of samples in empty space [S3, unofficial]. Subsequent works like [S1] explored spatial adaptivity via quadtree subdivision to reduce training time, while [S2] and [S1] investigated learned sampling distributions to further optimize the trade-off between quality and computation.
+The concept of adaptive sampling in volume rendering predates NeRF, originally developed to handle sparse data or complex geometry efficiently [S1, S3, unofficial]. In the context of NeRF, the "Coarse-to-Fine" approach was introduced by Mildenhall et al. in the original NeRF paper (2020) to address the inefficiency of uniform sampling [S3, unofficial]. Subsequent works like TermiNeRF (2022) and various quadtree-based methods (2021-2022) expanded this to include learned sampling distributions and spatial hierarchies to further reduce computational cost [S1, S2].
 
 ## Sources
-[S1] Probability-based Ray Sampling with Quadtree Subdivision, https://example.com/quadtree-sampling, 2023-10-01
-[S2] TermiNeRF: Efficient Neural Rendering with Learned Sampling, https://example.com/terminerf, 2023-10-01
-[S3] NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis, https://example.com/nerf-paper, 2020-01-01
+[S1] Probability-based Ray Sampling with Quadtree Subdivision notes
+[S2] TermiNeRF notes
+[S3] Coarse-to-Fine NeRF notes
+[S4] Coarse-to-Fine NeRF Pseudocode and Formulas

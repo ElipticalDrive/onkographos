@@ -1,0 +1,41 @@
+# Specific Applications and Integrators
+
+Also called: Application-Specific Volume Integration, Domain-Specific Ray Casting Integrators
+
+## Overview
+This family encompasses integrators and rendering techniques tailored for specific domains (e.g., medical photorealism, additive manufacturing) or specialized interaction modes (e.g., layer-based compositing, interactive clipping) that deviate from standard direct volume ray casting. Unlike standard ray casting which integrates a single scalar field with a fixed transfer function, these methods modify the integration pipeline to handle multiple light paths, spatially varying parameters, or multi-pass layer compositing. They differ from siblings like [Neural volume rendering](1576-neural-volume-rendering.md) by relying on explicit physical or geometric models rather than learned representations, and from [Temporal Accumulation](2080-temporal-accumulation-closest-hit.md) by focusing on spatial or domain-specific variations rather than temporal consistency.
+
+## Shared principles
+The core mechanism of all methods in this family remains the evaluation of the radiative transfer equation along rays, but the definition of the integrand or the compositing order is altered.
+1.  **Modified Integrand:** The standard emission-absorption model is extended. In [Cinematic Rendering](9473-cinematic-rendering.md), the integrand includes multiple scattering events and global illumination via path tracing [S2]. In [Customization Volume Integration](5291-customization-volume-integration.md), the scalar value is modified by a position-dependent parameter before transfer function application [S1, unofficial].
+2.  **Domain-Specific Sampling:** In [TVAM Integrator](6814-tvam-integrator.md), rays are sampled from projector emitters rather than a camera, and weights are calculated based on manufacturing physics (polymerization thresholds) [S1, unofficial].
+3.  **Layered Compositing:** In [Two Level Volume Rendering with Layers](6225-slice-based-and-proxy-geometry-rendering.md) (minor variant), rendering is decoupled into separate passes for different material styles, which are then composited, differing from the single-pass segment-based compositing of standard two-level rendering [S2].
+
+## Subtopics
+
+### [Customization Volume Integration](5291-customization-volume-integration.md)
+A method that integrates a pre-computed customization volume into the ray casting pipeline to apply position-dependent modifications to visualization parameters, such as gamma correction. It differs from standard rendering by decoupling primary data intensity from classification parameters, allowing spatially varying adjustments without re-computing the transfer function for every sample. Unlike [TVAM Integrator](6814-tvam-integrator.md) or [Cinematic Rendering](9473-cinematic-rendering.md) which modify weights or light paths, this method directly alters the scalar intensity value before transfer function application. Choose this when spatially varying contrast or gamma is required without user interaction overhead.
+
+### [TVAM Integrator](6814-tvam-integrator.md)
+A base class for volumetric integrators in Tomographic Volumetric Additive Manufacturing (TVAM) that manages projector ray sampling, time sampling, and switching between regular and stochastic sampling modes. It serves as the foundation for specialized integrators like the [CornerIntegrator](7445-cornerintegrator.md) and [Radon Integrator](7470-radon-integrator.md) by providing infrastructure for sampling rays from projector emitters and handling the temporal sequence of light patterns. Unlike standard volume rendering integrators, it explicitly accounts for the discrete nature of Digital Micromirror Device (DMD) pixels and the temporal multiplexing of projection patterns. Choose this for simulating or visualizing light distribution in vat photopolymerization processes.
+
+### [Cinematic Rendering](9473-cinematic-rendering.md)
+A physiologically-based volume rendering method that simulates the interaction of visible photons with medical volume data (CT or MRI) to produce photorealistic 3D images. Unlike traditional Direct Volume Ray Casting, which traces a single straight ray per pixel, CR traces hundreds or thousands of photon paths per pixel using path tracing and Monte Carlo integration to account for scattering, absorption, and multiple bounces. It differs from sibling methods like TVAM by replacing synthetic lighting with high dynamic range (HDR) light maps and simulating global illumination effects such as soft shadows, ambient occlusion, and subsurface scattering. Choose this for high-fidelity medical visualization where photorealism is prioritized over performance.
+
+### Cutting Plane Integration
+An interactive clipping technique that renders a semi-transparent plane mesh and normal arrow, dynamically updating raycasting uniforms to slice the volume and reveal internal structures [S1, unofficial].
+*   **Step:** Map normalized height to world Z position: `planeMesh.position.z = 200 - 400 * planeHeight`. Convert degrees to radians and apply rotation: `rotY` includes `Math.PI` offset if `renderAbove` is true [S1, unofficial].
+*   **Parameter:** `planeHeight`: normalized float (0 to 1) mapping to Z-axis position. `planeRotX`/`planeRotY`: rotation angles in degrees around X and Y axes. `renderAbove`: boolean flag that flips the plane 180° around Y when true [S1, unofficial].
+
+### Two Level Volume Rendering with Layers
+A technique that achieves results similar to traditional two-level volume rendering by rendering different styles (e.g., different transfer functions or rendering modes like MIP vs DVR) into separate layers and compositing them, rather than selecting rendering types per ray segment during integration [S2].
+*   **Step:** Render each distinct material style or transfer function into a separate layer (e.g., DVR for soft tissue, DVR for bones). Composite the separate layers into a final image using a compositing function that maps the resulting layers to the view volume [S2].
+*   **Parameter:** Opacity: Layers can be assigned specific opacity values during rendering or compositing (e.g., layer 1 opacity 0.4, layer 3 opacity 0.1, layer 2 opacity 0.5) [S2].
+*   **Comparison:** Unlike original two-level volume rendering which composites segments in the order the ray encounters materials (e.g., $I = A_1 B_1 A_2 B_2$), this method composites all segments of the same material separately first, then composites the intermediate results (e.g., $I = A_1 A_2 A_3 B_1 B_2$). Because compositing is not commutative, results generally differ [S2].
+
+## Background
+The need for specific integrators arises from the limitations of generic direct volume ray casting in specialized fields. Cinematic Rendering was developed to address the lack of photorealism in medical imaging, leveraging advances in GPU path tracing [S2]. TVAM integrators are specific to the field of additive manufacturing, where the "volume" is the light field projected onto a resin vat, requiring integration of temporal patterns and physical polymerization models [S1, unofficial]. Layer-based techniques emerged from the need to composite complex multi-material datasets more flexibly than single-pass segment-based approaches allowed [S2]. Customization volumes provide a mechanism for non-linear, spatially adaptive visualization without the cost of dynamic transfer function evaluation [S1, unofficial].
+
+## Sources
+[S1] SubairProject1/Volume-Rendering-Visualization-Project, https://github.com/SubairProject1/Volume-Rendering-Visualization-Project, fetched 2026-10-26 (unofficial)
+[S2] Layers for Effective Volume Rendering, https://doi.org/10.2312/vg/vg-pbg08/081-088, fetched 2026-10-26

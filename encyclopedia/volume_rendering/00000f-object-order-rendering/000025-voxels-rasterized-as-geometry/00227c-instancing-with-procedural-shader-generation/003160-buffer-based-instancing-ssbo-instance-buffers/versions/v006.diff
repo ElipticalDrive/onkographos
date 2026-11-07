@@ -1,0 +1,52 @@
+--- v005.md
++++ v006.md
+@@ -1,33 +1,34 @@
+ # Buffer-Based Instancing (SSBO/Instance Buffers)
+ 
+-Also called: Shader Storage Buffer Object Instancing, GPU-Driven Voxel Instancing
++Also called: SSBO Instancing, Structured Buffer Instancing, GPU-Driven Voxel Instancing
+ 
+ ## Overview
+-Buffer-Based Instancing is a GPU-driven rendering technique that stores per-voxel or per-instance metadata (position, color, shape, rotation) in Shader Storage Buffer Objects (SSBOs) or structured buffers, allowing the vertex shader to fetch and transform geometry procedurally during rasterization [S1, S2, S3, unofficial]. It solves the problem of high vertex buffer overhead and CPU-GPU synchronization latency associated with generating individual meshes for thousands of voxels. It sets itself apart from sibling methods by decoupling geometry definition (static vertex/index buffers) from instance data (dynamic SSBOs), enabling complex, non-uniform shapes and dynamic updates without rebuilding the entire draw call structure [S1, S2, S3, unofficial].
++Buffer-Based Instancing is a GPU-driven rendering technique that stores per-instance attributes (such as position, orientation, and material ID) in large Shader Storage Buffer Objects (SSBOs) or Structured Buffers, allowing the vertex shader to fetch and transform geometry procedurally for each instance [S1, S2, S3, unofficial]. It solves the CPU bottleneck of preparing draw calls for massive numbers of objects (e.g., millions of voxels) by moving data management and culling logic to the GPU [S1, S2, unofficial]. It sets itself apart from hardware instancing by decoupling the instance count from the draw call's `instanceCount` parameter, enabling dynamic, variable-length instance lists and complex per-instance logic that standard vertex attributes cannot support [S2, S3, unofficial].
+ 
+ ## Shared principles
+-The core mechanism relies on a single static geometry primitive (e.g., a cube template or point sprite) and a large, GPU-accessible buffer containing instance attributes.
+-
+-1.  **Data Layout:** Instance data is packed into SSBOs (`std430` in GLSL, `StructuredBuffer` in HLSL) to minimize memory bandwidth. Common packing strategies include:
+-    *   **Flat Grid Index:** A single integer representing the voxel's position in a 1D array, often combined with a face mask or orbit byte for compactness [S1, unofficial].
+-    *   **Bit-Packed Coordinates:** Integer coordinates $(x, y, z)$ packed into `uint` or `uvec2` fields using bitmasks (e.g., 11 bits for X, 10 bits for Y, 11 bits for Z) to fit multiple voxels into fewer buffer slots [S2, unofficial].
+-    *   **Attribute Fields:** Separate fields for texture index, rotation (packed as two 16-bit integers), tint color, and material properties (metalness, roughness) [S3, S2, unofficial].
+-2.  **Vertex Shader Execution:** The vertex shader receives `gl_VertexID` (local vertex index) and `gl_InstanceID` (instance index). It fetches the corresponding instance record from the SSBO [S1, S2, S3, unofficial].
+-3.  **Transformation:** The shader computes the world position by combining the instance's base position (from the SSBO) with the local vertex offset. Transformations such as rotation and scaling are applied using matrices or lookup tables stored in uniform buffers or additional SSBOs [S3, S2, unofficial].
+-4.  **Culling:** Visibility is determined either by hardware clipping (moving hidden vertices outside the clip volume) or by procedural face culling in the vertex shader based on the camera vector [S1, S2, unofficial].
++The family relies on a single architectural pattern:
++1.  **Data Storage:** Per-instance data is stored in a large, contiguous GPU buffer (SSBO in GLSL, `StructuredBuffer` in HLSL) bound to a shader storage binding point [S1, S2, S3, unofficial].
++2.  **Procedural Geometry:** The vertex shader receives a generic primitive (e.g., a unit cube, a point, or a quad) and uses `gl_InstanceID` (or a derived index) to fetch the corresponding record from the SSBO [S1, S2, S3, unofficial].
++3.  **Transform in Shader:** The vertex shader applies transformations (translation, rotation, scaling) and visibility tests (clipping, frustum culling) using the fetched data, rather than relying on fixed-function pipeline attributes [S1, S2, S3, unofficial].
++4.  **Single Draw Call:** A single draw call (e.g., `glDrawArraysInstanced` or `glDrawElementsInstanced`) is issued with an instance count equal to the total number of potential instances, while the shader handles actual visibility [S1, S2, S3, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Procedural Instancing for Voxel Blocks](1637-procedural-instancing-for-voxel-blocks.md)
+-Uses a shared 24-vertex cube template and procedural rotation/translation in the vertex shader. Best for uniform blocks with varied textures.
++Replaces baked mesh geometry with a compact instance record per voxel, resolving position, color, and occlusion in the vertex shader using a shared cube template. It separates block data into an instance buffer and geometry data into a vertex buffer, applying transformations in the vertex shader. It uses procedural instancing to render voxel blocks as individual instances where position and clip distance are determined by a structured buffer. It builds on Buffer-Based Instancing by replacing per-voxel mesh generation with a single shared primitive and GPU-driven attribute resolution.
+ 
+ ### [Cube Rasterization via SSBO](2267-cube-rasterization-via-ssbo.md)
+-Renders explicit geometric cubes using a static index buffer (18 indices for 3 faces) and bit-packed SSBO data. Best for standard voxel lighting with exact geometric culling.
++Renders $N$ voxels as instances of a base unit cube geometry using a single `glDrawElementsInstanced` draw call, where each instance is transformed by an offset and colored via a palette texture lookup. It rasterizes exactly 3 faces of each cube per voxel to optimize for front-face visibility, using a single large index buffer and a large SSBO containing voxel data. It sets itself apart from sibling methods by using explicit triangle geometry per voxel rather than point sprites or ray-marched quads, providing exact cube geometry and explicit face culling logic in the vertex shader.
+ 
+ ### [Instanced Voxel Renderer](4102-instanced-voxel-renderer.md)
+-Packs complex, non-uniform shapes into SSBOs with a free-list memory manager and indirect draw calls. Best for large worlds with varied block types and texture atlasing.
++A GPU-driven technique that packs voxel shape instances into large SSBOs, groups them into spatial chunks, and renders them via instanced drawing with per-chunk frustum culling. It builds on Buffer-Based Instancing by introducing chunk-based spatial partitioning and indirect draw calls to minimize CPU-GPU synchronization overhead. Unlike Procedural Instancing for Voxel Blocks which generates geometry procedurally per-vertex, or Cube Rasterization via SSBO which may use simpler flat indexing, this method explicitly manages VRAM regions for chunks and uses a free-list allocator within the SSBO to handle variable face counts per chunk.
++
++### Render to Vertex Buffer (R2VB) with PBO
++- **Definition:** A technique using Vertex Buffer Objects (VBO) and the Render to Vertex Buffer (R2VB) extension, combined with Pixel Buffer Object (PBO) to load 2D texture values into VBOs, keeping data flow entirely on the GPU [S1, unofficial].
++- **Usage:** Used in Buckets Texture construction and for the rendering stage [S1, unofficial].
+ 
+ ## Background
+-This technique evolved from early hardware instancing (e.g., [WebGL 2 Hardware Instancing](3152-webgl-2-hardware-instancing.md)) by leveraging the high-bandwidth, low-latency access of SSBOs introduced in OpenGL 4.3 and Vulkan. It addresses the scalability limits of CPU-side mesh generation for dynamic voxel worlds, allowing the GPU to drive the rendering pipeline directly from compact data structures [S1, S2, S3, unofficial].
++The technique emerged from the need to render massive voxel datasets (e.g., in Minecraft-like games or scientific visualization) where traditional CPU-side instancing failed due to draw call overhead. Early implementations used SSBOs to store voxel coordinates and material IDs, allowing the vertex shader to construct cube geometry on-the-fly [S1, S2, S3, unofficial]. The approach evolved to include dynamic allocation strategies (free-lists) and indirect draw calls to handle variable visibility and chunk-based culling efficiently [S1, S2, unofficial]. It is widely used in voxel engines, terrain rendering, and particle systems where instance data is dynamic or voluminous [S1, S2, S3, unofficial].
+ 
+-## Sources+## Sources
++[S1] Image-space sheet-buffered splatting on the GPU, https://openalex.org/W2419486389, fetched 2026-10-27 (unofficial)
