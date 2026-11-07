@@ -1,0 +1,150 @@
+# Dynamic load balancing using kd-trees
+
+Also called: kd-tree based load balancing, hierarchical load balancing
+
+## Overview
+This method uses a kd-tree to dynamically redistribute computational work among processors in a distributed volume rendering system. It addresses the problem of load imbalance caused by non-uniform data density or view-dependent opacity by encoding the spatial decomposition of the volume data into a hierarchical structure. Unlike static decomposition methods, it allows for runtime adjustment of partition assignments based on load statistics stored in the tree's inner nodes, ensuring that processors with available capacity can take on more work from overloaded nodes.
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** The volume dataset (often partitioned into uniform texture bricks), the current load statistics of each processor, and the desired number of partitions or processors $P$.
+- **Output:** An assignment of work partitions (bricks or subvolumes) to specific processors, and potentially a restructured kd-tree reflecting the new distribution.
+
+**Data Structures:**
+The core data structure is a kd-tree [S1, unofficial].
+- **Inner Nodes:** Store load statistics (e.g., estimated computational cost, occlusion information, or voxel count) for the subtree rooted at that node. These statistics are used to guide the traversal and rebalancing decisions [S1, unofficial].
+- **Leaf Nodes:** Contain the effective partitions of work (e.g., specific bricks or chunks of the volume) assigned to a processor or a group of processors [S1, unofficial].
+- **Splitting:** At each level of the tree, the data space is split alternating along orthogonal axes (x, y, z) [S1, unofficial].
+
+**Algorithm Steps:**
+1. **Initialization:** Construct a kd-tree representing the initial decomposition of the volume data space. Assign initial work partitions to leaf nodes. Populate inner nodes with initial load statistics [S1, unofficial].
+2. **Load Estimation:** Calculate or update load statistics for each inner node. This may involve summing the costs of leaf nodes in the subtree or using pre-computed metrics like opacity or empty-space density [S1, unofficial].
+3. **Traversal for Balancing:** Traverse the kd-tree in a specific order to identify imbalances. Strategies may include:
+   - Identifying overloaded subtrees and underloaded subtrees.
+   - Determining which partitions (leaf nodes) should be moved to balance the load across processors [S1, unofficial].
+4. **Redistribution:** Move work partitions between leaf nodes (and thus between processors) based on the traversal results. This may involve reassigning bricks or adjusting the boundaries of partitions [S1, unofficial].
+5. **Update Statistics:** After redistribution, update the load statistics in the inner nodes to reflect the new distribution of work [S1, unofficial].
+6. **Rendering:** Processors render their assigned partitions. The kd-tree can also be used during rendering for empty-space skipping or to determine the compositing order of partial rays [S1, unofficial].
+
+**Formulas:**
+Not given in the sources.
+
+**Parameters:**
+- **Splitting Axis:** Alternates along orthogonal axes (x, y, z) [S1, unofficial].
+- **Load Statistic:** Can be estimated costs, occlusion information, or voxel count [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Boundary Data Replication:** When using the kd-tree to determine the compositing order of partial rays, replication of boundary data is necessary to ensure correct blending across partition boundaries [S1, unofficial].
+- **Race Conditions:** If using a shared queue of work, race conditions can occur when rendering to a shared frame buffer. This is typically mitigated by having each processor render to a private buffer and then moving to a complete work queue [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def kd_tree_load_balance(volume_data, processors, tree):
+    """
+    Perform dynamic load balancing using a kd-tree.
+    
+    Args:
+        volume_data: The volume dataset, partitioned into bricks.
+        processors: List of processors with current load status.
+        tree: The kd-tree structure with inner nodes storing load stats 
+              and leaf nodes storing work partitions.
+    
+    Returns:
+        Updated assignment of work partitions to processors.
+    """
+    # Step 1: Update load statistics in inner nodes
+    update_load_statistics(tree)
+    
+    # Step 2: Traverse tree to find imbalances
+    # This step depends on the specific balancing strategy
+    # e.g., find overloaded and underloaded subtrees
+    overloaded_subtrees = find_overloaded_subtrees(tree)
+    underloaded_subtrees = find_underloaded_subtrees(tree)
+    
+    # Step 3: Redistribute work
+    for overloaded in overloaded_subtrees:
+        for underloaded in underloaded_subtrees:
+            # Move partitions from overloaded to underloaded
+            # This may involve moving leaf nodes or adjusting boundaries
+            partitions_to_move = determine_partitions_to_move(overloaded, underloaded)
+            for partition in partitions_to_move:
+                move_partition(partition, underloaded)
+    
+    # Step 4: Update load statistics after redistribution
+    update_load_statistics(tree)
+    
+    # Step 5: Return the new assignment
+    # The assignment is implicitly stored in the leaf nodes of the tree
+    return get_leaf_assignments(tree)
+
+def update_load_statistics(node):
+    """
+    Recursively update load statistics in inner nodes.
+    """
+    if node.is_leaf():
+        node.load_stat = node.partition.cost
+    else:
+        node.load_stat = sum(child.load_stat for child in node.children)
+
+def find_overloaded_subtrees(tree):
+    """
+    Identify subtrees with load exceeding a threshold.
+    """
+    # Implementation depends on the specific balancing strategy
+    # e.g., compare node.load_stat to average load * number of leaves in subtree
+    pass
+
+def find_underloaded_subtrees(tree):
+    """
+    Identify subtrees with load below a threshold.
+    """
+    # Implementation depends on the specific balancing strategy
+    pass
+
+def determine_partitions_to_move(overloaded, underloaded):
+    """
+    Determine which partitions to move to balance the load.
+    """
+    # Implementation depends on the specific balancing strategy
+    # e.g., move partitions from the boundary of the overloaded subtree
+    # to the underloaded subtree
+    pass
+
+def move_partition(partition, target_node):
+    """
+    Move a partition to a target node.
+    """
+    # Update the tree structure and processor assignments
+    pass
+
+def get_leaf_assignments(tree):
+    """
+    Retrieve the assignment of work partitions to processors from leaf nodes.
+    """
+    # Traverse leaf nodes and return their assignments
+    pass
+```
+
+## Subtopics
+
+### [Incremental Load Balancing with Brick Caching](9862-incremental-load-balancing-with-brick-caching.md)
+A dynamic load balancing technique for distributed volume rendering that incrementally moves bricks between cluster nodes to correct imbalance, using a caching mechanism to reduce transfer costs when reversing moves.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Not given in the sources.
+- **Strengths and Limitations:**
+  - **Strengths:** Allows for dynamic adjustment of load based on runtime statistics; can be used for empty-space skipping and determining compositing order [S1, unofficial].
+  - **Limitations:** Requires replication of boundary data for correct compositing order; potential for race conditions if not implemented carefully with shared buffers [S1, unofficial].
+- **When to Use:** When the volume data has non-uniform density or opacity, leading to load imbalance in static decomposition methods.
+- **When Not to Use:** When the data is uniform and static, or when the overhead of maintaining and traversing the kd-tree outweighs the benefits of dynamic balancing.
+
+## Background
+The use of kd-trees for load balancing in volume rendering is discussed in the context of large-scale displays and handheld touchscreen interaction [S1, unofficial]. The general principle of using hierarchical data structures like kd-trees to manage load statistics and redistribute work is attributed to multiple sources [S1, unofficial].
+
+## Sources
+[S1] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)

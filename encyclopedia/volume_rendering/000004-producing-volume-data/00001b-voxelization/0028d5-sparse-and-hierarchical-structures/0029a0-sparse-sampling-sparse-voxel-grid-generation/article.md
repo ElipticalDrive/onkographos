@@ -1,78 +1,79 @@
 # Sparse Sampling / Sparse Voxel Grid Generation
 Also called: Sparse Voxel Grid Generation, Voxel Grid Generation (Sparse Sampling)
 ## Overview
-This method generates a sparse voxel grid by marking specific voxels as occupied based on a fixed periodic pattern, rather than performing geometric intersection tests. It serves as a lightweight placeholder for testing traversal algorithms and data structure layouts. Unlike [Solid Voxelization via Octree](6830-solid-voxelization-via-octree.md) which computes exact geometric occupancy, this approach ignores scene geometry entirely, relying on a deterministic stride to populate the grid.
+Sparse Sampling / Sparse Voxel Grid Generation is a placeholder method for testing volume rendering traversal algorithms by generating a sparse voxel grid. It differs from its parent method, [Sparse and Hierarchical Structures](4391-sparse-and-hierarchical-structures.md), which recursively subdivides space into octants, by using a fixed uniform grid with a regular sampling pattern. It also differs from [Voxelization into a Uniform Grid](4589-voxelization-into-a-uniform-grid.md) by not computing geometric intersections, instead marking voxels based on coordinate arithmetic.
 ## How it works
-**Inputs and Outputs:**
-- Input: A cubic grid dimension $CUBE\_DIM$ (integer).
-- Output: A 1D boolean array `grid` of size $CUBE\_DIM^3$, where `true` indicates an occupied voxel and `false` indicates empty space.
+**Inputs and outputs:**
+- Input: `CUBE_DIM` (integer, dimension of the cubic grid).
+- Output: A 1D boolean array `grid` of size `CUBE_DIM^3`, where `true` indicates an occupied voxel.
 
-**Data Structures:**
-- `grid`: A flat array of booleans. The voxel at 3D coordinates $(i, j, k)$ is accessed via the flattened index:
-  $$ \text{index} = i \cdot CUBE\_DIM^2 + j \cdot CUBE\_DIM + k $$
-  where $0 \le i, j, k < CUBE\_DIM$.
+**Data structures:**
+- `grid`: 1D array of booleans. Flattening function `flatten(i, j, k)` maps 3D indices to 1D index. The exact flattening formula is not specified in the sources, but standard row-major or Morton order is implied by the parent context. For implementation, assume `flatten(i, j, k) = i * CUBE_DIM^2 + j * CUBE_DIM + k` unless Morton order is required by the parent context. Given the parent mentions Morton order, but this method is a "placeholder for testing traversal", standard linear indexing is sufficient for the test. However, to be consistent with the parent's emphasis on Morton order for spatial locality, we note that the sources do not specify the flattening method for this specific placeholder. We will use standard linear indexing for simplicity as it is a test pattern, but note that [S1, unofficial] does not specify. [G] Standard linear indexing is assumed for the test pattern unless Morton order is explicitly required by the traversal algorithm being tested.
 
 **Steps:**
-1. Initialize `grid` with all `false`.
-2. Iterate through all voxel coordinates $i, j, k$ from $0$ to $CUBE\_DIM - 1$.
-3. Check if the coordinate is a multiple of 5 along all three axes:
-   $$ i \pmod 5 == 0 \quad \text{AND} \quad j \pmod 5 == 0 \quad \text{AND} \quad k \pmod 5 == 0 $$
-4. If the condition is met, set `grid[flatten(i, j, k)]` to `true`.
+1. Initialize `grid` of size `CUBE_DIM^3` to `false`.
+2. Loop over all voxel coordinates $i, j, k$ from $0$ to $CUBE_DIM-1$.
+3. If $i \pmod 5 == 0$ AND $j \pmod 5 == 0$ AND $k \pmod 5 == 0$, set `grid[flatten(i, j, k)]` to `true`.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def generate_sparse_grid(cube_dim: int) -> list[bool]:
-    """
-    Generates a sparse voxel grid by marking every 5th voxel as occupied.
+def generate_sparse_voxel_grid(CUBE_DIM):
+    # Initialize grid with False
+    grid = [False] * (CUBE_DIM ** 3)
     
-    Args:
-        cube_dim: The dimension of the cubic grid (N x N x N).
-        
-    Returns:
-        A flat list of booleans representing the voxel grid.
-    """
-    size = cube_dim * cube_dim * cube_dim
-    grid = [False] * size
-    
-    for i in range(cube_dim):
-        for j in range(cube_dim):
-            for k in range(cube_dim):
+    # Loop over all voxel coordinates
+    for i in range(CUBE_DIM):
+        for j in range(CUBE_DIM):
+            for k in range(CUBE_DIM):
                 # Check if coordinates are multiples of 5
                 if i % 5 == 0 and j % 5 == 0 and k % 5 == 0:
-                    # Flatten 3D index to 1D
-                    index = i * (cube_dim * cube_dim) + j * cube_dim + k
+                    # Flatten 3D index to 1D index
+                    # Assuming standard row-major ordering for this test pattern
+                    index = i * (CUBE_DIM ** 2) + j * CUBE_DIM + k
                     grid[index] = True
-                    
     return grid
 ```
 
 **Parameters:**
-- `cube_dim`: Typical values depend on the test scene, but must be large enough to contain the pattern.
-- Stride: Fixed at 5. This value is hardcoded in the source implementation [S1, unofficial].
+- `CUBE_DIM`: The dimension of the cubic grid. Typical values are not given in the sources.
+- Step size: 5. This is fixed in the sources.
 
-**Edge Cases and Pitfalls:**
-- **Grid Size:** If $CUBE\_DIM < 5$, no voxels will be marked as occupied, resulting in an entirely empty grid.
-- **Precision:** Integer arithmetic is used for modulo operations, avoiding floating-point precision issues.
-- **Boundaries:** The loop bounds are inclusive of 0 and exclusive of $CUBE\_DIM$.
+**Edge cases and pitfalls:**
+- If `CUBE_DIM` is less than 5, only the voxel at $(0,0,0)$ will be marked.
+- Precision issues are not applicable as this is integer arithmetic.
+- The method does not account for geometry, so it is only suitable for testing traversal logic.
 
 ## Subtopics
-
-### [Sparse Voxelization into an Octree](9155-sparse-voxelization-into-an-octree.md)
-Constructs a sparse-voxel octree by storing only voxels intersected by mesh triangles. Choose this when geometric accuracy is required for rendering or global illumination. It differs from this method by dynamically allocating nodes based on geometry rather than using a fixed periodic pattern.
-
 ## Operating characteristics
-- **Time Complexity:** $O(N^3)$ where $N = CUBE\_DIM$. The algorithm iterates through every voxel in the grid.
-- **Memory Complexity:** $O(N^3)$ for the boolean array.
-- **Performance:** Extremely fast for small grids due to the simplicity of the modulo check. However, it does not scale well for large scenes because it allocates memory for the entire bounding box, even if most voxels are empty (though only a fraction are marked true).
-- **Strengths:** Simple to implement; deterministic; useful for unit testing traversal logic.
-- **Limitations:** Does not represent actual scene geometry; memory usage is proportional to the bounding box volume, not the object volume.
-- **When to use:** Testing traversal algorithms, validating data structure layouts.
-- **When not to use:** Production rendering, scenes requiring geometric accuracy, or large scenes where memory efficiency is critical.
+**Time and memory complexity:**
+- Time: $O(CUBE\_DIM^3)$ to iterate over all voxels.
+- Memory: $O(CUBE\_DIM^3)$ for the grid array.
+
+**Measured performance:**
+- Not given in the sources.
+
+**Scaling:**
+- Scales linearly with the number of voxels in the grid.
+
+**Strengths and limitations:**
+- Strengths: Simple to implement, fast to generate, useful for testing traversal algorithms.
+- Limitations: Does not represent actual geometry, sparse only in a regular pattern, not suitable for realistic volume rendering.
+
+**When to use it and when not:**
+- Use: For testing and debugging volume rendering traversal algorithms.
+- Do not use: For rendering actual scenes or when geometric accuracy is required.
 
 ## Background
-This method originates from an unofficial GitHub repository `an1pse/voxel-traversal` [S1, unofficial]. It appears to be a minimal implementation intended for testing voxel traversal techniques rather than a production-grade voxelization method. The fixed stride of 5 suggests it was designed to create a predictable, sparse pattern for debugging or benchmarking purposes.
+**Origin:**
+- The method is described in [S1, unofficial], an unofficial GitHub repository `an1pse/voxel-traversal`. It is used as a placeholder for testing traversal.
+
+**History and development:**
+- Not given in the sources.
+
+**Where it is used:**
+- Used in voxel traversal testing code.
 
 ## Sources
 [S1] an1pse/voxel-traversal, https://github.com/an1pse/voxel-traversal, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,174 @@
+# Multivariate Transfer Function Combination Selection
+
+Also called: Attribute Scoring Method, Correlation-Entropy Scoring for TF Selection, Entropy evaluation for TF attributes, Entropy-based Attribute Selection, Salient attribute selection, Scoring vector method, TF attribute scoring
+
+## Overview
+Multivariate Transfer Function Combination Selection is a preprocessing method for multivariate volume rendering that automatically selects the most informative dataset properties to form a separable transfer function structure [S1, unofficial]. It solves the problem of dimensionality reduction by identifying which attributes should serve as the 2D transfer function domain and which should serve as 1D tertiary attributes, balancing the independence of properties against their information content [S1, unofficial]. It differs from sibling methods by providing a quantitative scoring mechanism based on correlation and entropy, rather than relying solely on user intuition or sequential heuristic selection [S1, unofficial].
+
+## How it works
+**Inputs:** A multivariate dataset with $l$ properties (attributes) $\{Y_1, Y_2, \dots, Y_l\}$.
+**Outputs:** A selection of one primary property $Y_p$, one secondary property $Y_q$, and a ranked list of remaining properties with scores $s_i$ to identify tertiary attributes.
+
+**Data Structures:**
+1.  **Correlation Matrix $R$**: An $l \times l$ matrix where $R_{ij}$ is the Pearson correlation coefficient between property $Y_i$ and $Y_j$.
+2.  **Entropy Vector $E$**: A vector of size $l$, where $E_i$ is the Shannon entropy of property $Y_i$.
+3.  **Scoring Vector $s$**: A vector of size $l-2$ (for the remaining properties) containing the calculated scores.
+
+**Parameters:**
+*   $a$: A dataset-dependent weight parameter balancing correlation and information. Range: $0 \leq a < 1$. Typical values cited are 0.4 and 0.6 [S1, unofficial].
+
+**Steps:**
+
+1.  **Compute Correlation Matrix:** Calculate the correlation coefficient matrix $R$ for all $l$ properties. The correlation between the primary property $Y_p$ and any other property $Y_i$ is given by:
+    $$ R_{pi} = \frac{\text{Cov}(p,i)}{\sqrt{\text{Cov}(p,p)\text{Cov}(i,i)}} $$
+    where $\text{Cov}(p,i)$ is the covariance between $Y_p$ and $Y_i$ [S1, unofficial].
+
+2.  **Compute Entropy Vector:** Calculate the entropy $E(Y_i)$ for each property $Y_i$ using its histogram. Let $n$ be the number of bins in the histogram, $b$ be the current bin index, and $p(y_b)$ be the probability of a data value falling into bin $b$:
+    $$ E(Y_i) = \sum_{b=1}^{n} p(y_b) \log_2(p(y_b)) $$
+    Note: The sources define entropy as negatively proportional to homogeneity (higher entropy = less homogeneity = more information) [S1, unofficial].
+
+3.  **Select Primary and Secondary Properties:**
+    *   Select the **primary property** $Y_p$ that represents the original information of the dataset (e.g., scalar value, mean volume) [S1, unofficial].
+    *   Select the **secondary property** $Y_q$ that is intrinsically associated with $Y_p$ (e.g., gradient magnitude $|\nabla x|$ for scalar $x$, or standard deviation $\sigma$ for mean $\mu$) [S1, unofficial].
+    *   $Y_p$ and $Y_q$ define the 2D transfer function space [S1, unofficial].
+
+4.  **Compute Scores for Remaining Properties:** For all remaining properties $Y_i$ (where $i \neq p, q$), compute the score $s_i$ using the linear interpolation of the absolute correlation with the primary property and the normalized entropy:
+    $$ s_i = -a|R_{pi}| + (1-a)\frac{E(Y_i)}{\max E} $$
+    where $\max E$ is the maximum entropy among all $l$ properties [S1, unofficial].
+    *   The term $-a|R_{pi}|$ favors properties with low correlation to the primary property (high independence).
+    *   The term $(1-a)\frac{E(Y_i)}{\max E}$ favors properties with high entropy (high information content/low homogeneity) [S1, unofficial].
+
+5.  **Rank and Select Tertiary Attributes:** Rank the remaining properties based on their scores $s_i$. Select one or two properties with the highest scores as **tertiary attributes** to define 1D transfer functions [S1, unofficial]. One of these is selected as the active tertiary attribute for each widget in the 2D transfer function space [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def compute_entropy(values, num_bins=256):
+    """
+    Computes Shannon entropy of a 1D array of values.
+    Returns entropy value.
+    """
+    # Create histogram
+    hist, bin_edges = np.histogram(values, bins=num_bins, density=False)
+    total = np.sum(hist)
+    if total == 0:
+        return 0.0
+    
+    # Calculate probabilities
+    probs = hist / total
+    
+    # Filter out zero probabilities to avoid log(0)
+    probs = probs[probs > 0]
+    
+    # Compute entropy: -sum(p * log2(p))
+    # Note: Source defines E(Yi) = sum(p(yb) * log2(p(yb)))
+    # However, standard Shannon entropy is negative sum. 
+    # The source text says "E(Yi) describes homogeneity... negatively proportional to homogeneity".
+    # And "higher entropy represents less homogeneity".
+    # Standard entropy is positive. The formula in source (3.5) lacks the negative sign 
+    # in the summation notation but implies standard entropy behavior via context.
+    # We implement standard Shannon entropy.
+    entropy = -np.sum(probs * np.log2(probs))
+    return entropy
+
+def compute_correlation(x, y):
+    """
+    Computes Pearson correlation coefficient between two arrays.
+    """
+    # Covariance
+    cov = np.cov(x, y)[0, 1]
+    # Standard deviations
+    std_x = np.std(x, ddof=1)
+    std_y = np.std(y, ddof=1)
+    
+    if std_x == 0 or std_y == 0:
+        return 0.0
+        
+    return cov / (std_x * std_y)
+
+def select_tf_combinations(properties, primary_idx, secondary_idx, a=0.6):
+    """
+    Selects tertiary attributes for transfer function combination.
+    
+    Args:
+        properties: List of numpy arrays, each representing a dataset attribute.
+        primary_idx: Index of the primary property Yp.
+        secondary_idx: Index of the secondary property Yq.
+        a: Weight parameter for correlation vs entropy.
+        
+    Returns:
+        ranked_tertiaries: List of tuples (index, score) for remaining properties, sorted by score descending.
+    """
+    l = len(properties)
+    
+    # Step 1 & 2: Compute Entropy for all properties
+    entropies = []
+    for i in range(l):
+        e = compute_entropy(properties[i])
+        entropies.append(e)
+        
+    max_e = max(entropies)
+    if max_e == 0:
+        max_e = 1.0 # Avoid division by zero
+        
+    # Step 3: Primary and Secondary are fixed by input indices
+    # Yp = properties[primary_idx]
+    # Yq = properties[secondary_idx]
+    
+    # Step 4: Compute scores for remaining properties
+    scores = []
+    for i in range(l):
+        if i == primary_idx or i == secondary_idx:
+            continue
+            
+        # Compute correlation between Primary (Yp) and Current (Yi)
+        r_pi = compute_correlation(properties[primary_idx], properties[i])
+        abs_r_pi = abs(r_pi)
+        
+        # Normalize entropy
+        norm_e = entropies[i] / max_e
+        
+        # Calculate score
+        # s_i = -a * |R_pi| + (1-a) * (E(Yi) / max E)
+        s_i = -a * abs_r_pi + (1 - a) * norm_e
+        
+        scores.append((i, s_i))
+        
+    # Step 5: Rank
+    # Sort by score descending
+    ranked_tertiaries = sorted(scores, key=lambda x: x[1], reverse=True)
+    
+    return ranked_tertiaries
+
+# Example usage based on source data:
+# properties = [scalar, gradient, mean, std, occlusion, size]
+# primary_idx = 0 (scalar)
+# secondary_idx = 1 (gradient)
+# a = 0.6
+# result = select_tf_combinations(properties, 0, 1, 0.6)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Correlation Alone:** Using only correlation coefficients may select properties that are independent but do not increase classification ability. The inclusion of entropy remedies this by favoring properties with more information [S1, unofficial].
+*   **Low Entropy Properties:** Properties with low entropy (high homogeneity) might still be useful if they highlight a small, unique feature not present in other attributes. These cases are hard to describe mathematically and require subjective determination [S1, unofficial].
+*   **Parameter $a$:** The value of $a$ is dataset-dependent. Incorrect selection may overemphasize independence at the cost of information, or vice versa [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(l^2 \cdot N)$ for computing the correlation matrix, where $l$ is the number of attributes and $N$ is the number of voxels (for covariance). Entropy computation is $O(N \cdot \log(\text{bins}))$ per attribute. Overall complexity is dominated by the pairwise correlations and histogramming.
+*   **Memory Complexity:** $O(l^2)$ for the correlation matrix and $O(l)$ for the entropy vector.
+*   **Strengths:** Provides a quantitative, reproducible method for selecting transfer function dimensions. Balances feature independence (correlation) with feature richness (entropy).
+*   **Limitations:** Relies on the user to manually select the primary and secondary properties, which requires domain knowledge. The scoring is heuristic and may not capture all semantic relationships. Low-entropy features with high semantic value may be overlooked [S1, unofficial].
+*   **When to use:** When dealing with multivariate datasets ($>3$ attributes) and a separable transfer function structure is desired to reduce complexity while maintaining expressivity.
+*   **When not to use:** When the user has strong prior knowledge of specific attribute relationships that the statistical measures might miss, or when real-time performance precludes the precomputation of correlations and histograms for many attributes.
+
+## Background
+The method was proposed by L. Zhou in the context of multivariate transfer function design for volume rendering [S1, unofficial]. It addresses the trade-off between dimensionality and usability in transfer function design. The method was demonstrated on datasets such as a CT scan of a backpack and a hurricane simulation (VisContest 2004) [S1, unofficial]. It is part of a broader effort to automate or semi-automate the selection of salient attributes for visualization [S1, unofficial].
+
+## Sources
+
+[S1] MULTIVARIATE TRANSFER FUNCTION DESIGN, https://www.sci.utah.edu/~lzhou/dissertation_final_zhoul.pdf, fetched 2026-10-27 (unofficial)

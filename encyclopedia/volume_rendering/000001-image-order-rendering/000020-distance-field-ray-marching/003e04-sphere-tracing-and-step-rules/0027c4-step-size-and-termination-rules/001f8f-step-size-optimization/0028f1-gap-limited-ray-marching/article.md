@@ -3,58 +3,120 @@
 Also called: Distance-Proportional Step with Gap Bound, Terrain Ray Marching with Gap Limiting
 
 ## Overview
-Gap-Limited Ray Marching is a step-size optimization technique for heightfield terrain rendering that prevents ray stalling and surface overshoot on non-distance fields. It combines a distance-proportional step term with a vertical gap bound, ensuring the ray never steps more than half the vertical clearance to the surface, thereby avoiding holes in ridgelines while covering ground efficiently.
+Gap-Limited Ray Marching is a step-size optimization for heightfield terrain rendering that prevents the ray from overshooting ridgelines and creating visual holes [S1, unofficial]. It differs from standard sphere tracing by using a step size proportional to the distance traveled, bounded by half the vertical gap to the surface, rather than the distance field value itself [S1, unofficial]. This approach avoids stalling on non-distance fields while ensuring robust intersection detection [S1, unofficial].
 
 ## How it works
-**Inputs:** Ray origin $\mathbf{o} = (o_x, o_y, o_z)$, ray direction $\mathbf{d} = (d_x, d_y, d_z)$ (normalized), heightfield function $H(x, z)$, maximum march distance $t_{max}$, maximum iterations $maxSteps$, minimum step size $minStep$, step scale multiplier $stepScale$, and refinement iterations $refineSteps$.
-**Outputs:** Intersection distance $t$ or $-1$ if no intersection.
+**Inputs:**
+- Ray origin $\mathbf{o} = (o_x, o_y, o_z)$ and direction $\mathbf{d} = (d_x, d_y, d_z)$, where $\mathbf{d}$ is normalized.
+- Heightfield function $H(x, z)$ returning terrain height at any $(x, z)$.
+- Parameters: `stepScale` (multiplier for distance-proportional term), `minStep` (minimum step size), `maxSteps` (iteration limit), `tMax` (maximum ray distance), `refineSteps` (bisection iterations).
+
+**Outputs:**
+- Intersection distance $t$ or $-1$ if no intersection is found.
 
 **Data Structures:**
-*   `heightAtExtended(field, x, z)`: Returns the height $H(x, z)$ from the heightfield, handling boundary conditions (e.g., clamping or wrapping) as defined by the terrain generator.
+- No complex data structures required; only scalar variables for ray state and heightfield lookups.
 
-**Parameters:**
-*   $stepScale$: Multiplier for the distance-proportional term. Typical value not specified in sources [S1, unofficial].
-*   $minStep$: Minimum step size to prevent infinite loops on flat surfaces or precision issues [S1, unofficial].
-*   $maxSteps$: Maximum number of march iterations [S1, unofficial].
-*   $refineSteps$: Number of bisection iterations for surface refinement [S1, unofficial].
-
-**Algorithm:**
-1.  Initialize $t = 0.0$, $t_{prev} = 0.0$.
-2.  Loop for $i$ from $0$ to $maxSteps - 1$:
-    a.  Calculate distance-proportional step: $t_{dist} = t \times stepScale$.
-    b.  Calculate current position: $x = o_x + d_x \times t$, $z = o_z + d_z \times t$.
-    c.  Calculate current height: $y_{ray} = o_y + d_y \times t$.
-    d.  Calculate heightfield height: $y_{surf} = H(x, z)$.
-    e.  Calculate vertical gap: $h = y_{ray} - y_{surf}$.
-    f.  Calculate gap-limited step: $t_{gap} = h \times 0.5$.
-    g.  Determine step size: $t_{step} = \min(t_{dist}, t_{gap})$.
-    h.  Enforce minimum step: If $t_{step} < minStep$, set $t_{step} = minStep$.
-    i.  Update previous distance: $t_{prev} = t$.
-    j.  Advance ray: $t = t + t_{step}$.
-    k.  Check termination: If $t \ge t_{max}$, return $-1$ [S1, unofficial].
-    l.  Check surface crossing: If $h \le 0$ (ray is at or below surface):
-        i.  Perform binary search between $t_{prev}$ and $t$ for $refineSteps$ iterations:
-            1.  $mid = (t_{prev} + t) \times 0.5$.
-            2.  Calculate $y_{mid} = o_y + d_y \times mid$, $x_{mid} = o_x + d_x \times mid$, $z_{mid} = o_z + d_z \times mid$.
-            3.  Calculate $h_{mid} = y_{mid} - H(x_{mid}, z_{mid})$.
-            4.  If $h_{mid} \le 0$, set $t = mid$ (surface is before mid).
-            5.  Else, set $t_{prev} = mid$ (surface is after mid).
-        ii. Return $t$ [S1, unofficial].
+**Algorithm Steps:**
+1. Initialize $t = 0$.
+2. Loop up to `maxSteps`:
+   a. Calculate distance-proportional step: $\Delta t_{dist} = t \times \text{stepScale}$.
+   b. Calculate current position: $x = o_x + d_x \times t$, $z = o_z + d_z \times t$.
+   c. Calculate current height: $y_{ray} = o_y + d_y \times t$.
+   d. Get terrain height: $y_{terr} = H(x, z)$.
+   e. Calculate vertical gap: $h = y_{ray} - y_{terr}$.
+   f. Calculate gap-limited step: $\Delta t_{gap} = h \times 0.5$.
+   g. Determine step size: $\Delta t = \min(\Delta t_{dist}, \Delta t_{gap})$.
+   h. If $\Delta t < \text{minStep}$, set $\Delta t = \text{minStep}$.
+   i. Store previous distance: $t_{prev} = t$.
+   j. Update distance: $t = t + \Delta t$.
+   k. If $t \ge t_{max}$, return $-1$ (miss).
+   l. If $h \le 0$ (surface crossed or hit):
+      i. Perform binary search between $t_{prev}$ and $t$ for `refineSteps` iterations:
+         - $mid = (t_{prev} + t) \times 0.5$.
+         - Calculate $y_{mid} = o_y + d_y \times mid$ and $y_{terr\_mid} = H(o_x + d_x \times mid, o_z + d_z \times mid)$.
+         - If $y_{mid} - y_{terr\_mid} \le 0$, set $t = mid$ (hit is in lower half).
+         - Else, set $t_{prev} = mid$ (hit is in upper half).
+      ii. Return $t$ (intersection distance).
 
 **Pitfalls:**
-*   Without the gap limiting term ($h \times 0.5$), the ray can step through the surface on ridgelines, causing holes [S1, unofficial].
-*   The gap step ensures the ray never steps more than half the vertical clearance, preventing overshoot [S1, unofficial].
+- Without the gap limiting term ($h \times 0.5$), the ray can step through the surface on ridgelines, causing holes [S1, unofficial]. The gap step ensures the ray never steps more than half the vertical clearance, preventing overshoot [S1, unofficial].
+- Precision issues on flat surfaces may require `minStep` to prevent infinite loops [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def trace_terrain(o, d, H, step_scale, min_step, max_steps, t_max, refine_steps):
+    t = 0.0
+    for _ in range(max_steps):
+        # Distance-proportional step
+        dist_step = t * step_scale
+        
+        # Current position
+        x = o[0] + d[0] * t
+        z = o[2] + d[2] * t
+        y_ray = o[1] + d[1] * t
+        
+        # Gap calculation
+        y_terr = H(x, z)
+        h = y_ray - y_terr
+        
+        # Gap-limited step
+        gap_step = h * 0.5
+        
+        # Determine step size
+        step = min(dist_step, gap_step)
+        if step < min_step:
+            step = min_step
+            
+        # Save previous t for refinement
+        t_prev = t
+        
+        # Update t
+        t += step
+        
+        # Check for miss
+        if t >= t_max:
+            return -1
+            
+        # Check for surface crossing
+        # Recalculate h at new t for accuracy in crossing detection
+        x_new = o[0] + d[0] * t
+        z_new = o[2] + d[2] * t
+        y_ray_new = o[1] + d[1] * t
+        y_terr_new = H(x_new, z_new)
+        h_new = y_ray_new - y_terr_new
+        
+        if h_new <= 0:
+            # Binary search for precise intersection
+            lo = t_prev
+            hi = t
+            for _ in range(refine_steps):
+                mid = (lo + hi) * 0.5
+                x_mid = o[0] + d[0] * mid
+                z_mid = o[2] + d[2] * mid
+                y_ray_mid = o[1] + d[1] * mid
+                y_terr_mid = H(x_mid, z_mid)
+                if y_ray_mid - y_terr_mid <= 0:
+                    hi = mid
+                else:
+                    lo = mid
+            return hi
+            
+    return -1
+```
 
 ## Operating characteristics
-*   **Time Complexity:** $O(maxSteps)$ per ray, with a constant factor for heightfield lookup. Refinement adds $O(refineSteps)$ only upon surface crossing.
-*   **Memory Complexity:** $O(1)$ auxiliary memory, assuming the heightfield is accessed via random lookup.
-*   **Strengths:** Efficiently covers large empty spaces due to the distance-proportional term. Prevents surface penetration on steep terrain (ridgelines) where standard distance-proportional stepping might fail.
-*   **Limitations:** Requires a heightfield representation. Performance degrades if $minStep$ is too small or $maxSteps$ is insufficient for complex terrain. The gap bound is specific to heightfields and not directly applicable to general volumetric or SDF data without adaptation.
-*   **When to use:** Heightfield terrain rendering where ridgeline accuracy is critical and empty space skipping is desired.
-*   **When not to use:** General volumetric rendering, SDF-based rendering, or scenes without a clear heightfield structure.
+- **Time Complexity:** $O(N)$ where $N$ is the number of steps until intersection or termination. Each step involves a heightfield lookup and basic arithmetic.
+- **Memory Complexity:** $O(1)$ auxiliary space.
+- **Strengths:** Prevents overshooting on ridgelines, covers more ground per step than fixed small steps, robust for heightfields.
+- **Limitations:** Specific to heightfields; requires a height function $H(x,z)$. Performance depends on `stepScale` and terrain complexity.
+- **When to use:** Terrain rendering with heightfields where ridgeline accuracy is critical.
+- **When not to use:** General volumetric data or non-heightfield geometry.
 
 ## Background
-This method is described in the context of a software renderer for procedural terrain generation, specifically within the `theme1` project. It is designed to work with baked heightfields and normals, avoiding the need for finite difference calculations which can cause facet artifacts. The technique is attributed to the implementation details of the `traceTerrain` function in the referenced repository.
+Originated in the context of software-based terrain rendering, specifically in the `theme1` project by mingderwang [S1, unofficial]. It addresses the limitation of standard distance-proportional stepping which can fail on non-distance fields like heightmaps by introducing a gap-based bound [S1, unofficial].
 
 ## Sources
 [S1] mingderwang/theme1, https://github.com/mingderwang/theme1, fetched 2026-10-27 (unofficial)

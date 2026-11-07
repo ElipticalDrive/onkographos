@@ -1,0 +1,162 @@
+# Spirula Renderer
+
+Also called: Spirula Bridge, Spirula Renderer API, Spirula Vulkan bridge
+
+## Overview
+The Spirula Renderer is a GPU-accelerated Gaussian Splatting renderer implemented as a native Vulkan bridge (`librosplat_spirula.so`) called via Python's `ctypes`. It handles tile sorting, Gaussian rasterization, and rendering to Vulkan textures, explicitly excluding CUDA, PyTorch, `gsplat`, or OpenGL renderer paths [S1, unofficial]. It builds on [Tiled 2D Gaussian Splatting Rasterization](2061-tiled-2d-gaussian-splatting-rasterization.md) by performing the tile sorting and rasterization internally during the render call.
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Contiguous numpy arrays for Gaussian properties (means, quaternions, log-scales, opacity logits, SH coefficients), camera parameters (view/projection matrices or intrinsics), and render options.
+*   **Outputs:** A caller-owned `uint8_t` buffer (RGBA8, Depth, or Opacity) populated by the renderer.
+
+**Data Structures:**
+The renderer manages a device-resident scene. The C API exposes the following structures for device enumeration:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```c
+typedef struct {
+    char name[256];
+    uint64_t vram_bytes;
+    int usable;
+} RosplatSpirulaDeviceInfo;
+```
+The output mode is defined by:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```c
+typedef enum {
+    ROSPLAT_SPIRULA_OUTPUT_COLOR = 0,
+    ROSPLAT_SPIRULA_OUTPUT_DEPTH = 1,
+    ROSPLAT_SPIRULA_OUTPUT_OPACITY = 2
+} RosplatSpirulaOutputMode;
+```
+
+**Numbered Steps:**
+
+1.  **Initialization:** Load the native library from candidate paths: environment variable `ROSPLAT_SPIRULA_LIBRARY`, build directories, or `/opt/rosplat-native/lib/rosplat/`. Count available Vulkan devices and select device 0, verifying it is usable.
+2.  **Scene Reset:** Call `rosplat_spirula_reset_scene(degree, reserve)`.
+    *   `degree`: Spherical Harmonics (SH) degree (0-4).
+    *   `reserve`: Number of Gaussians to pre-allocate.
+    *   *Constraint:* The SH dimension must be divisible by 3. The number of coefficients ($dim/3$) must be a perfect square. The resulting degree ($\sqrt{coefficients} - 1$) must be between 0 and 4 inclusive. Streaming scenes cannot change SH degree after initialization [S1, unofficial].
+3.  **Data Preparation:** Convert Gaussian data into contiguous numpy arrays.
+    *   `means`: `float32` array of shape `[count, 3]` (xyz positions).
+    *   `quats`: `float32` array of shape `[count, 4]` (rotations, wxyz).
+    *   `log_scales`: `float32` array of shape `[count, 3]`. Computed as $\log(\text{scale} \times \text{scale\_modifier})$. The `scale_modifier` is a float multiplier applied to Gaussian scales before conversion to log space (default 1.0, must be positive). Values are clipped to a minimum of $10^{-12}$ [S1, unofficial].
+    *   `opacity_logits`: `float32` array of shape `[count, 1]`. Computed as $\text{logit}(\text{opacity})$. Opacity values are clipped to $[10^{-6}, 1-10^{-6}]$ before computing logits to avoid singularities [S1, unofficial].
+    *   `dc`: `float32` array of shape `[count, 3]` (DC component of SH, first coefficient).
+    *   `higher`: `float32` array of shape `[count, coefficients-1, 3]` (higher-order SH coefficients), or `None` if only DC components are used [S1, unofficial].
+4.  **Appending Gaussians:** Call `rosplat_spirula_append(count, means_ptr, quats_ptr, log_scales_ptr, opacity_logits_ptr, dc_ptr, higher_ptr)` to add Gaussians to the scene. Pointers must reference contiguous memory [S1, unofficial].
+5.  **Camera Update:** Call `rosplat_spirula_set_camera(width, height, view_matrix_ptr, proj_matrix_ptr)` or equivalent intrinsics setter.
+    *   The renderer marks `_camera_dirty` when the model matrix or resolution changes.
+    *   **Camera Convention:** OpenCV (+Z forward, +Y down, row-major world-to-camera) [S1, unofficial].
+    *   **OpenGL Conversion:** If using OpenGL view matrices, convert to OpenCV convention using $gl\_to\_cv = \text{diag}([1.0, -1.0, -1.0, 1.0])$ and compute $view_{cv} = gl\_to\_cv \times view_{gl} \times model\_matrix$ [S1, unofficial].
+    *   **Intrinsics:** If using focal length and field of view, calculate focal length as $f = h / (2.0 \times \tan(fovy / 2.0))$. The intrinsics array is $[f, f, w/2.0, h/2.0]$ [S1, unofficial].
+6.  **Render Options:** Call `rosplat_spirula_set_render_options(mode, active_sh_degree)`.
+    *   `mode`: Output buffer mode (COLOR=0, DEPTH=1, OPACITY=2).
+    *   `active_sh_degree`: Active SH degree for rendering (-1 for scene maximum, or 0-4) [S1, unofficial].
+7.  **Rendering:** Call `rosplat_spirula_render_rgba8(output_buffer_ptr, buffer_size)`.
+    *   Renders top-to-bottom.
+    *   Tile sorting and radix sorting are performed internally every render [S1, unofficial].
+    *   `output_buffer_ptr`: Pointer to caller-owned `uint8_t` buffer.
+    *   `buffer_size`: Size of the buffer in bytes.
+8.  **Shutdown:** Call `rosplat_spirula_shutdown()` to release resources [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import ctypes
+import numpy as np
+
+class SpirulaRenderer:
+    def __init__(self, width, height, sh_degree=1, reserve=0):
+        # Load library
+        lib_path = os.environ.get('ROSPLAT_SPIRULA_LIBRARY', '/opt/rosplat-native/lib/rosplat/librosplat_spirula.so')
+        self.lib = ctypes.CDLL(lib_path)
+        
+        # Verify device 0
+        device_info = RosplatSpirulaDeviceInfo()
+        self.lib.rosplat_spirula_get_device_info(0, ctypes.byref(device_info))
+        if not device_info.usable:
+            raise RuntimeError("Device 0 not usable")
+
+        # Initialize scene
+        self.lib.rosplat_spirula_reset_scene(sh_degree, reserve)
+        self.width = width
+        self.height = height
+
+    def append_gaussians(self, means, quats, scales, opacity, sh_dc, sh_higher=None):
+        # Preprocess scales and opacity
+        scale_modifier = 1.0
+        log_scales = np.log(np.clip(scales * scale_modifier, 1e-12, np.inf))
+        
+        # Clip opacity to avoid log(0) or log(1)
+        opacity_clipped = np.clip(opacity, 1e-6, 1 - 1e-6)
+        opacity_logits = np.log(opacity_clipped / (1 - opacity_clipped))
+        
+        # Ensure contiguous float32 arrays
+        means = np.ascontiguousarray(means, dtype=np.float32)
+        quats = np.ascontiguousarray(quats, dtype=np.float32)
+        log_scales = np.ascontiguousarray(log_scales, dtype=np.float32)
+        opacity_logits = np.ascontiguousarray(opacity_logits, dtype=np.float32)
+        sh_dc = np.ascontiguousarray(sh_dc, dtype=np.float32)
+        
+        higher_ptr = None
+        if sh_higher is not None:
+            sh_higher = np.ascontiguousarray(sh_higher, dtype=np.float32)
+            higher_ptr = sh_higher.ctypes.data
+
+        count = len(means)
+        self.lib.rosplat_spirula_append(
+            count,
+            means.ctypes.data,
+            quats.ctypes.data,
+            log_scales.ctypes.data,
+            opacity_logits.ctypes.data,
+            sh_dc.ctypes.data,
+            higher_ptr
+        )
+
+    def set_camera(self, view_matrix, proj_matrix):
+        # Convert to OpenCV convention if necessary
+        # view_matrix and proj_matrix must be row-major float32 arrays of shape (4,4)
+        view_cv = np.ascontiguousarray(view_matrix, dtype=np.float32)
+        proj_cv = np.ascontiguousarray(proj_matrix, dtype=np.float32)
+        
+        self.lib.rosplat_spirula_set_camera(
+            self.width,
+            self.height,
+            view_cv.ctypes.data,
+            proj_cv.ctypes.data
+        )
+
+    def set_render_options(self, mode, sh_degree):
+        self.lib.rosplat_spirula_set_render_options(mode, sh_degree)
+
+    def render(self):
+        buffer_size = self.width * self.height * 4
+        output_buffer = (ctypes.c_uint8 * buffer_size)()
+        
+        self.lib.rosplat_spirula_render_rgba8(
+            output_buffer,
+            buffer_size
+        )
+        
+        return np.ctypeslib.as_array(output_buffer, shape=(self.height, self.width, 4))
+
+    def shutdown(self):
+        self.lib.rosplat_spirula_shutdown()
+```
+
+## Operating characteristics
+*   **Hardware Requirements:** Requires a Vulkan 1.2-capable GPU. Specifically requires Vulkan buffer device addresses and timeline semaphores [S1, unofficial].
+*   **Performance:** Tile sorting and radix sorting are performed internally every render call. The renderer is optimized for streaming Gaussian data via ROS2 messages, handling batched appends efficiently [S1, unofficial].
+*   **Limitations:** Explicitly excludes CUDA, PyTorch, `gsplat`, or OpenGL renderer paths. It relies on the `wgpu-py` Vulkan backend for UI rendering [S1, unofficial].
+*   **Memory:** Scene capacity is managed via `reserve` during reset. Subsequent appends may trigger internal reallocation if capacity is exceeded, though the exact growth strategy is not detailed in the sources [S1, unofficial].
+
+## Background
+The Spirula Renderer is part of the ROSplat project, which integrates Gaussian Splatting with ROS2. It was developed to provide a portable Vulkan rendering backend for Gaussian Splatting, avoiding dependencies on CUDA or PyTorch. The project acknowledges influence from the original Gaussian Splatting implementation by graphdeco-inria and the GaussianSplattingViewer repository by limacv [S1, unofficial]. It is designed to run on Ubuntu 26.04 LTS with ROS 2 Lyrical [S1, unofficial].
+
+## Sources
+[S1] Gaussian Splatting Meets ROS2, https://github.com/shadygm/ROSplat, fetched 2026-10-26 (unofficial)

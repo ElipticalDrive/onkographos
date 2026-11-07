@@ -1,0 +1,69 @@
+# NDC Warping
+Also called: Normalized Device Coordinate Warping
+## Overview
+NDC Warping is a space-warping technique for forward-facing scenes that maps an infinitely far view frustum to a bounded box by squashing the z-axis [S1]. It sets itself apart from its siblings by being specifically designed for forward-facing trajectories, whereas its parent [Space Warping (Log+Warp)](5815-space-warping-log-warp.md) and child [Perspective Warping](7499-perspective-warping.md) handle broader or specific trajectory types. It is unsuitable for 360-degree environments [S1].
+## How it works
+Inputs and outputs:
+- Input: 3D point $\mathbf{x} = (x, y, z)$ in camera space, where the camera looks down the positive z-axis.
+- Output: Warped 3D point $\mathbf{x}' = (x', y', z')$ in NDC space.
+
+Data structures:
+- Not specified in the sources.
+
+Numbered steps:
+1. The method maps the unbounded view frustum to a bounded box. This is achieved by squashing the z-axis [S1].
+2. The exact mathematical formula for the squashing operation is not given in the sources.
+
+Formulas:
+- Not given in the sources.
+
+Parameters:
+- Not given in the sources.
+
+Edge cases and pitfalls:
+- Unsuitable for 360-degree environments [S1].
+- Not given in the sources.
+
+Pseudocode:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ndc_warp(x, y, z):
+    # The exact formula for squashing the z-axis is not given in the sources.
+    # [G] Typical NDC warping for forward-facing scenes often involves:
+    # x' = x / z
+    # y' = y / z
+    # z' = 1 / z (or similar normalization to [-1, 1])
+    # However, this is external knowledge and not cited in the provided sources.
+    # Therefore, the implementation details are missing from the sources.
+    raise NotImplementedError("Formula not provided in sources.")
+```
+## Subtopics
+## Operating characteristics
+Time and memory complexity:
+- Not given in the sources.
+
+Measured performance:
+- Not given in the sources.
+
+Scaling:
+- Not given in the sources.
+
+Strengths and limitations:
+- Strengths: Effective for forward-facing scenes [S1].
+- Limitations: Unsuitable for 360-degree environments [S1].
+
+When to use it and when not:
+- Use for forward-facing scenes [S1].
+- Do not use for 360-degree environments [S1].
+## Background
+Origin:
+- The technique is attributed to [MST* 20] as cited in [S1]. The full citation details are not provided in the source text.
+
+History and development:
+- It is one of three major warping strategies for unbounded scenes, alongside inverse-sphere warping and others [S1].
+
+Where it is used:
+- Used for forward-facing scenes in learning-based 3D representations [S1].
+## Sources
+[S1] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26

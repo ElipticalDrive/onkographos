@@ -1,100 +1,70 @@
 # Multi-Resolution Points
+
 Also called: Error-controlled Point Splatting, Reduced Point Cloud Rendering
+
 ## Overview
-Multi-Resolution Points is a technique to render one large point in place of many small points to reduce rasterization cost and storage [S1, unofficial]. It builds on [Hierarchical and Multi-Resolution Splatting](5618-hierarchical-and-multi-resolution-splatting.md) by organizing points into a tree and using a local error metric to decide on point size, allowing the substitution of fine-grained primitives with coarser aggregates when they satisfy a user-defined error threshold [S1, unofficial].
+Multi-Resolution Points is a technique to render one large point in place of many small points to reduce rasterization cost and storage [S1, unofficial]. It solves the problem of high computational load when rendering dense point clouds by adaptively selecting point sizes based on a local error metric [S1, unofficial]. Unlike siblings that may rely solely on screen-space footprint, this method explicitly controls point size by volume content using an error threshold [S1, unofficial].
+
 ## How it works
-**Inputs:** A set of $N$ points, each with position $\mathbf{p}_i$, color $\mathbf{c}_i$, and size $s_i$. An error threshold $\epsilon$.
-**Outputs:** A subset of points (or aggregated nodes) for rendering.
+**Inputs:** A set of points $P$ with attributes (position, color, opacity, size).
+**Outputs:** A rasterized image.
+**Data Structures:** An octree (or similar hierarchical tree) where internal nodes store aggregate properties (mean position, color, size) of their children [S1, unofficial].
 
-**Data Structures:**
-*   **Octree:** Points are organized into an octree. Each node stores the aggregate properties of its children: mean position $\bar{\mathbf{p}}$, mean color $\bar{\mathbf{c}}$, and a representative size or radius.
-*   **Visibility Map:** A quadtree used to cull occluded nodes [S1, unofficial].
-
-**Steps:**
-1.  **Tree Construction:** Recursively subdivide space. Internal nodes aggregate child properties. The aggregation minimizes the local error metric.
-2.  **Error Calculation:** Compute the RMS error between the aggregated node and its children. Laur and Hanrahan use RMS error [S1, unofficial]:
-    $$ E = \sqrt{\frac{1}{N} \sum_{i=1}^{N} \| \mathbf{p}_i - \bar{\mathbf{p}} \|^2 + \| \mathbf{c}_i - \bar{\mathbf{c}} \|^2} $$
-    [G] In practice, color and position errors may be weighted differently.
-3.  **Traversal and Selection:** Traverse the tree. If the error $E$ of a node is less than $\epsilon$, the node is considered a valid representative and its children are pruned. If $E > \epsilon$, the node is subdivided and children are processed.
-4.  **Occlusion Culling:** Use a visibility map quadtree to cull occluded octree nodes. Subdivide octree nodes if not occluded. Rasterize points that fail the occlusion test [S1, unofficial].
-5.  **Update Visibility Map:** After rendering, update the visibility map for subsequent frames or passes [S1, unofficial].
+1.  **Tree Construction:** Organize points into a tree. Internal nodes store aggregate properties of their children [S1, unofficial].
+2.  **Error Calculation:** Compute a local error metric, typically Root Mean Square (RMS) error, between a node's aggregate and its children [S1, unofficial]. The RMS error $E$ for a node $N$ with children $C_i$ and aggregate value $A_N$ is:
+    $$ E = \sqrt{\frac{1}{N} \sum_{i=1}^{N} (A_{C_i} - A_N)^2} $$
+    where $N$ is the number of children [S1, unofficial].
+3.  **Traversal and Selection:** Traverse the tree. If the error $E$ is below a user-defined threshold, render the node as a single large point. Otherwise, subdivide and process children [S1, unofficial].
+4.  **Occlusion Culling (Optional):** Use a visibility map quadtree to cull occluded octree nodes [S1, unofficial].
+5.  **Rasterization:** Rasterize points that fail the occlusion test [S1, unofficial].
+6.  **Update:** Update the visibility map [S1, unofficial].
 
 **Parameters:**
-*   $\epsilon$: User sets an error threshold to control tree traversal [S1, unofficial].
+*   Error threshold: User-set value to control tree traversal [S1, unofficial].
 
 **Edge Cases:**
-*   **Precision:** Floating point errors in aggregation can accumulate.
-*   **Boundaries:** Nodes at the boundary of the point cloud may have fewer children, affecting error calculation.
+*   Precision: RMS error calculation must handle floating-point precision for large point sets [S1, unofficial].
+*   Boundaries: Nodes at the boundary of the point cloud may have fewer children, affecting error calculation [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_multi_resolution_points(points, epsilon):
-    # Build octree
+def render_multi_resolution_points(points, threshold):
     tree = build_octree(points)
-    
-    # Traverse and select nodes
-    selected_nodes = []
-    stack = [tree.root]
-    
-    while stack:
-        node = stack.pop()
-        
-        # Calculate RMS error for this node
-        error = calculate_rms_error(node)
-        
-        if error <= epsilon:
-            # Node is a valid representative
-            selected_nodes.append(node)
-        else:
-            # Subdivide
-            if node.has_children:
-                stack.extend(node.children)
-            else:
-                # Leaf node with high error, keep as is or handle error
-                selected_nodes.append(node)
-                
-    # Cull occluded nodes using visibility map
-    visible_nodes = cull_occluded(selected_nodes, visibility_map)
-    
-    # Rasterize
-    for node in visible_nodes:
-        rasterize_point(node)
-        
-    # Update visibility map
-    update_visibility_map(visible_nodes)
+    render_node(tree.root, threshold)
 
-def calculate_rms_error(node):
-    # Compute mean position and color
-    mean_p = mean([child.pos for child in node.children])
-    mean_c = mean([child.color for child in node.children])
+def render_node(node, threshold):
+    if node.is_leaf():
+        rasterize_point(node.point)
+        return
     
-    # Compute RMS error
-    sum_sq_err = 0
-    count = 0
-    for child in node.children:
-        pos_err = distance(child.pos, mean_p) ** 2
-        color_err = distance(child.color, mean_c) ** 2
-        sum_sq_err += pos_err + color_err
-        count += 1
-        
-    if count == 0:
-        return 0
-    return sqrt(sum_sq_err / count)
+    # Calculate RMS error between node aggregate and children
+    error = calculate_rms_error(node)
+    
+    if error < threshold:
+        # Render as single large point
+        rasterize_point(node.aggregate)
+    else:
+        # Subdivide
+        for child in node.children:
+            render_node(child, threshold)
 ```
+
 ## Subtopics
 
 ### [Cloud Impostor Rendering](5125-cloud-impostor-rendering.md)
 Cloud Impostor Rendering is a technique to accelerate cloud rendering by replacing geometric particle models with 2D texture impostors, exploiting the lack of high-frequency edges in clouds to tolerate lower resolution textures and frequent updates. Unlike geometric models which require high-resolution impostors only at a distance, this method allows impostors to be used for clouds even when the viewer is inside or very close to them, significantly reducing overdraw and fill-rate requirements. It builds on [Multi-Resolution Points](4784-multi-resolution-points.md) by using pre-shaded textures to represent volumetric density.
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on tree depth and error threshold. Traversal is $O(N)$ in worst case, but pruning reduces effective $N$.
-*   **Memory Complexity:** $O(N)$ for tree structure, but storage is reduced by pruning [S1, unofficial].
+*   **Time Complexity:** Depends on tree depth and error threshold. Lower threshold increases traversal cost but improves accuracy [S1, unofficial].
+*   **Memory Complexity:** Requires storage for the octree structure [S1, unofficial].
 *   **Performance:** Welsh '02 reduced 240k points to 90k points using a frequency-space metric [S1, unofficial].
-*   **Strengths:** Less rasterization cost due to overlap areas; less storage required [S1, unofficial].
-*   **Limitations:** Error metric may not always correlate with visual quality.
+*   **Strengths:** Reduces rasterization cost and storage [S1, unofficial].
+*   **Limitations:** Requires careful tuning of error threshold [S1, unofficial].
+
 ## Background
-Originated from work on volumetric points and point-based rendering. Laur and Hanrahan used RMS error for point aggregation [S1, unofficial]. Welsh '02 applied frequency-space metrics to reduce point counts [S1, unofficial].
+Originated from work on volumetric points rendering [S1, unofficial]. Laur and Hanrahan used RMS error for error-controlled point splatting [S1, unofficial]. Welsh '02 applied frequency-space metrics to reduce point counts [S1, unofficial].
+
 ## Sources
 [S1] Volumetric Points - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/teaching/cse616/volPts.pdf, fetched 2026-10-29 (unofficial)

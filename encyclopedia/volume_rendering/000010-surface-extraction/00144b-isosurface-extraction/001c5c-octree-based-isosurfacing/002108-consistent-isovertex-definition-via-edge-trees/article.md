@@ -22,21 +22,21 @@ This method defines the position of an isovertex on an octree edge consistently 
 
 **Algorithm:**
 
-1. **Identify Crossing Edges:** For every edge $e$ in the octree, determine if it crosses the isovalue. If the scalar values at the endpoints of $e$ have different signs relative to the isovalue, set the root of the corresponding edge-tree node to `value = 1` [G].
+1. **Identify Crossing Edges:** For every edge $e$ in the octree, determine if it crosses the isovalue by checking if the scalar values at the endpoints have different signs relative to the isovalue [G].
 2. **Compute Edge-Tree Values:** For every interior node in the edge-tree, compute its `value` based on its children. The binary value of an interior node is the sum modulo 2 of its children's values [S1, S2, unofficial]:
    $$
    \text{value}(\text{parent}) = (\text{value}(\text{child}_1) + \text{value}(\text{child}_2)) \pmod 2
    $$
    This property guarantees that if an edge $e$ has `value = 1`, it must have a unique child that also has `value = 1` [S1, S2, unofficial].
 3. **Traverse to Leaf:** For each edge $e$ with `value = 1`:
-   - Start at the root node of the edge-tree corresponding to $e$.
-   - Recursively traverse down the unique child that has `value = 1`.
-   - Continue until a leaf node $\tilde{e}$ is reached.
+   - Start at the root node of the edge-tree corresponding to $e$ [S1, S2, unofficial].
+   - Recursively traverse down the unique child that has `value = 1` [S1, S2, unofficial].
+   - Continue until a leaf node $\tilde{e}$ is reached [S1, S2, unofficial].
    - The path $e \supseteq \dots \supseteq \tilde{e}$ consists entirely of nodes with `value = 1` [S1, S2, unofficial].
 4. **Define Isovertex Position:** Assign the isovertex position $p$ to be the position defined by the leaf node $\tilde{e}$ [S1, S2, unofficial]. Denote this assignment as $p \in e$.
    - The position $p$ is interpolated within the segment represented by $\tilde{e}$ based on the scalar values at the endpoints of $\tilde{e}$ [G].
-   - Note: $p \in e$ and $e' \supseteq e$ does not imply $p \in e'$ [S1, S2, unofficial]. The isovertex is tied to the specific leaf $\tilde{e}$, not the coarse edge $e$.
-5. **Handle Multiple Crossings:** If an edge has multiple sign changes, the edge-tree structure ensures that the `value = 1` property propagates down to a unique leaf that represents one of the crossings. The isovertex is assigned to the finest leaf node in the edge-tree that still indicates a crossing [S2, unofficial]. This resolves ambiguity compared to standard methods [S2, unofficial].
+   - Note: $p \in e$ and $e' \supseteq e$ does not imply $p \in e'$ [S1, unofficial]. The isovertex is tied to the specific leaf $\tilde{e}$, not the coarse edge $e$ [S1, unofficial].
+5. **Handle Multiple Crossings:** If an edge has multiple sign changes, standard polygonization fails [S2, unofficial]. This method handles it by assigning the isovertex to the finest leaf node in the edge-tree that still indicates a crossing, effectively resolving ambiguity [S2, unofficial].
 
 **Pseudocode:**
 
@@ -44,7 +44,7 @@ This method defines the position of an isovertex on an octree edge consistently 
 
 ```python
 def compute_edge_tree_values(node):
-    """Recursively computes the binary value of an edge-tree node based on its children."""
+    """Recursively computes the binary value of an edge-tree node based on its children [S1, S2, unofficial]."""
     if node.is_leaf():
         return node.value
     child_values = [compute_edge_tree_values(child) for child in node.children]
@@ -52,7 +52,7 @@ def compute_edge_tree_values(node):
     return node.value
 
 def find_isovertex(edge_root):
-    """Traverses the edge-tree to find the leaf node defining the isovertex."""
+    """Traverses the edge-tree to find the leaf node defining the isovertex [S1, S2, unofficial]."""
     if edge_root.is_leaf():
         return edge_root
     for child in edge_root.children:
@@ -66,7 +66,7 @@ def interpolate_position(leaf_node, isovalue):
     return leaf_node.start_point + t * (leaf_node.end_point - leaf_node.start_point)
 
 def define_isovertices(octree_edges, isovalue):
-    """Defines isovertices for all edges in the octree."""
+    """Defines isovertices for all edges in the octree [G]."""
     isovertices = {}
     for edge in octree_edges:
         if edge.has_sign_change():
@@ -81,11 +81,11 @@ def define_isovertices(octree_edges, isovalue):
 ```
 
 **Parameters:**
-- **Isovalue:** The scalar threshold for extraction [G]. Typical values are not given in the sources.
+- **Isovalue:** The scalar threshold for extraction [G]. Typical values are not given in the sources [S1, S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Multiple Sign Changes:** Standard polygonization fails if an edge has multiple sign changes. This method handles it by assigning the isovertex to the finest leaf node in the edge-tree that still indicates a crossing [S2, unofficial].
-- **Notation Ambiguity:** The notation $p \in e$ does not imply $p \in e'$ for an ancestor edge $e' \supseteq e$ [S1, S2, unofficial]. The isovertex is tied to the specific leaf $\tilde{e}$ in the edge-tree, not the coarse edge $e$ itself [S1, S2, unofficial].
+- **Multiple Sign Changes:** Standard polygonization fails if an edge has multiple sign changes [S2, unofficial]. This method handles it by assigning the isovertex to the finest leaf node in the edge-tree that still indicates a crossing [S2, unofficial].
+- **Notation Ambiguity:** The notation $p \in e$ does not imply $p \in e'$ for an ancestor edge $e' \supseteq e$ [S1, unofficial]. The isovertex is tied to the specific leaf $\tilde{e}$ in the edge-tree, not the coarse edge $e$ itself [S1, unofficial].
 - **Precision:** Interpolation within the leaf segment may introduce precision errors if the leaf segment is very small or if the scalar field values are close to the isovalue [G].
 
 ## Subtopics
@@ -94,13 +94,13 @@ def define_isovertices(octree_edges, isovalue):
 Twin Isovertex Pairing is a post-processing step in octree-based isosurface extraction that closes open isopolylines into closed isopolygons by identifying and connecting "twin" isovertices. It solves the problem of watertightness in meshes extracted from arbitrary octrees where a single edge may contain multiple sign changes, resulting in isovertices with valence one that cannot be paired within the local leaf node. Unlike methods that refine the tree or modify vertex values, this method uses the existing edge-tree structure to pair vertices, ensuring the resulting mesh is watertight without altering the underlying scalar field representation.
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Strengths and Limitations:** Not given in the sources.
-- **When to Use / When Not to Use:** Not given in the sources.
+- **Time Complexity:** Not given in the sources [S1, S2, unofficial].
+- **Memory Complexity:** Not given in the sources [S1, S2, unofficial].
+- **Strengths and Limitations:** Not given in the sources [S1, S2, unofficial].
+- **When to Use / When Not to Use:** Not given in the sources [S1, S2, unofficial].
 
 ## Background
-This method was introduced in the paper "Unconstrained Isosurface Extraction on Arbitrary Octrees" [S1, S2, unofficial]. It addresses the challenges of isosurface extraction on arbitrary octrees, where traditional methods like Marching Cubes may produce cracks or non-watertight meshes due to inconsistent isovertex definitions. The method builds on the properties of edge-trees to ensure consistency.
+This method was introduced in the paper "Unconstrained Isosurface Extraction on Arbitrary Octrees" [S1, S2, unofficial]. It addresses the challenges of isosurface extraction on arbitrary octrees, where traditional methods like Marching Cubes may produce cracks or non-watertight meshes due to inconsistent isovertex definitions [S1, unofficial]. The method builds on the properties of edge-trees to ensure consistency [S1, S2, unofficial].
 
 ## Sources
 [S1] Unconstrained isosurface extraction on arbitrary octrees, https://doi.org/10.5555/1281991.1282009, fetched 2026-10-27 (unofficial)

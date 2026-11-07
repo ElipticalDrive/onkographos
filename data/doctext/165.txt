@@ -1,0 +1,754 @@
+# voxel-traversal
+Demonstrate the Amanatides &amp; Woo Voxel Traversal algorithm
+
+### Assets/Scripts/Controller/CameraController.cs
+```
+using TraversalDemo.Models;
+using UnityEngine;
+
+namespace TraversalDemo.Controller
+{
+    public class CameraController : MonoBehaviour
+    {
+        private const float CameraZPosition = -10f;
+
+        public void CenterCameraOnGrid(CellAddress gridSize)
+        {
+            var cam = Camera.main;
+            cam.transform.position = new Vector3(gridSize.x / 2f, gridSize.y / 2f, CameraZPosition);
+        }
+    }
+}
+```
+
+### Assets/Scripts/Controller/CollisionController.cs
+```
+﻿using TraversalDemo.Models;
+using TraversalDemo.Services;
+using UnityEngine;
+
+namespace TraversalDemo.Controller
+{
+    public class CollisionController
+    {
+        private readonly GameObject collisionMarker;
+
+        public CollisionController(GameObject collisionMarker)
+        {
+            this.collisionMarker = collisionMarker;
+        }
+
+        public void ResetCollision()
+        {
+            collisionMarker.SetActive(false);
+        }
+
+        public void UpdateCollision(Line line, VoxelTraversalData hitCellData)
+        {
+            var collision = RayIntersectionService.GetIntersection(
+                line,
+                hitCellData.Position,
+                hitCellData.HitDirection
+            );
+            
+            if (!collision.HasValue)
+            {
+                Debug.LogWarning($"Unable to find collision between line and cell {hitCellData.Position}");
+                return;
+            }
+
+            collisionMarker.transform.position = collision.Value;
+            collisionMarker.SetActive(true);
+        }
+    }
+}
+```
+
+### Assets/Scripts/Controller/GameController.cs
+```
+using System.Collections.Generic;
+using System.Linq;
+using TraversalDemo.Models;
+using TraversalDemo.Services;
+using TraversalDemo.UI.Grid;
+using TraversalDemo.UI.Line;
+using UnityEngine;
+
+namespace TraversalDemo.Controller
+{
+    public class GameController : MonoBehaviour
+    {
+        [Header("Grid")]
+        [SerializeField] private CellAddress gridSize;
+        [SerializeField] private List<CellAddress> walls;
+
+        [Header("Line")]
+        [SerializeField] private Line line;
+
+        [Header("Collision")]
+        [SerializeField] private GameObject collisionMarker;
+
+        private LineVisualiser lineVisualiser;
+        private CameraController cameraController;
+        private GridController gridController;
+        private CollisionController collisionController;
+
+        private IEnumerable<VoxelTraversalData> cachedHitCells;
+
+        private void Awake()
+        {
+            lineVisualiser = GetComponentInChildren<LineVisualiser>();
+            cameraController = gameObject.AddChildComponent<CameraController>();
+            
+            var gridVisualiser = GetComponentInChildren<GridVisualiser>();
+            gridController = new GridController(gridVisualiser);
+
+            collisionController = new CollisionController(collisionMarker);
+
+            lineVisualiser.LineHandlesUpdated += OnLineHandlesUpdated;
+            gridController.CellsUpdated += OnCellsUpdated;
+        }
+
+        private void Start()
+        {
+            var gridCells = GridGenerationService.GenerateGrid(gridSize, walls);
+            gridController.SetCells(gridCells);
+
+            lineVisualiser.UpdateLine(line);
+            
+            cameraController.CenterCameraOnGrid(gridSize);
+
+            SetHitCells();
+        }
+
+        private void OnLineHandlesUpdated(Vector3 lineStart, Vector3 lineEnd)
+        {
+            line.Start = lineStart;
+            line.End = lineEnd;
+
+            lineVisualiser.UpdateLine(line);
+
+            SetHitCells();
+        }
+
+        private void OnCellsUpdated() => SetHitCells(recalculateHitData: false);
+
+        private void SetHitCells(bool recalculateHitData = true)
+        {
+            collisionController.ResetCollision();
+
+            if (recalculateHitData)
+            {
+                var hitCells = VoxelTraversalService.TraverseRay(line);
+                var voxelTraversalDataList = hitCells.ToList();
+                cachedHitCells = voxelTraversalDataList;
+            }
+
+            gridController.SetHitCells(cachedHitCells.Select(cell => cell.Position));
+
+            foreach (var hitCellData in cachedHitCells)
+            {
+                if (!gridController.IsWall(hitCellData.Position))
+                    continue;
+
+                collisionController.UpdateCollision(line, hitCellData);
+                break;
+            }
+        }
+    }
+}
+```
+
+### Assets/Scripts/Controller/GridController.cs
+```
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using TraversalDemo.Models;
+using TraversalDemo.UI.Grid;
+using UnityEngine;
+
+namespace TraversalDemo.Controller
+{
+    public class GridController
+    {
+        public event Action CellsUpdated;
+
+        private readonly GridVisualiser gridVisualiser;
+
+        private readonly Dictionary<CellAddress, GridCell> cellData = new();
+        private List<CellAddress> hitCells = new();
+
+        public GridController(GridVisualiser gridVisualiser)
+        {
+            this.gridVisualiser = gridVisualiser;
+            this.gridVisualiser.CellClicked += OnCellClicked;
+        }
+
+        public void SetCells(List<GridCell> cells)
+        {
+            gridVisualiser.ClearCells();
+
+            foreach (var cell in cells)
+            {
+                cellData.Remove(cell.Address, out _);
+                cellData.Add(cell.Address, cell);
+
+                gridVisualiser.CreateGridCellUI(cell);
+            }
+        }
+
+        public void SetHitCells(IEnumerable<CellAddress> cells)
+        {
+            var cellAddresses = cells.ToList();
+
+            // Reset cells no longer hit
+            foreach (var hitCell in hitCells.Except(cellAddresses))
+            {
+                if (!cellData.TryGetValue(hitCell, out var cell)) continue;
+                cell.IsHit = false;
+                gridVisualiser.UpdateGridCellUI(cell);
+            }
+
+            // Mark newly hit cells
+            foreach (var cellAddress in cellAddresses.Except(hitCells))
+            {
+                if (!cellData.TryGetValue(cellAddress, out var cell)) continue;
+                cell.IsHit = true;
+                gridVisualiser.UpdateGridCellUI(cell);
+            }
+
+            hitCells = cellAddresses;
+        }
+
+        public bool IsWall(CellAddress address)
+        {
+            if (!cellData.TryGetValue(address, out var cell))
+            {
+                Debug.LogWarning($"Unable to get cell at address: {address.x}, {address.y}");
+                return false;
+            }
+
+            return cell.IsWall;
+        }
+
+        private void OnCellClicked(CellAddress cellAddress)
+        {
+            if (!cellData.TryGetValue(cellAddress, out var cell))
+                Debug.LogError($"Trying to click cell that doesn't exist: {cellAddress}");
+
+            cell.IsWall = !cell.IsWall;
+
+            gridVisualiser.UpdateGridCellUI(cell);
+
+            CellsUpdated?.Invoke();
+        }
+    }
+}
+```
+
+### Assets/Scripts/Models/CellAddress.cs
+```
+using System;
+using UnityEngine;
+
+namespace TraversalDemo.Models
+{
+    [Serializable]
+    public struct CellAddress : IEquatable<CellAddress>
+    {
+        [SerializeField] public int x;
+        [SerializeField] public int y;
+
+        public CellAddress(int x, int y)
+        {
+            this.x = x;
+            this.y = y;
+        }
+
+        public override string ToString() => $"x: {x}, y: {y}";
+
+        public bool Equals(CellAddress other)
+        {
+            return x == other.x && y == other.y;
+        }
+
+        public override bool Equals(object obj)
+        {
+            return obj is CellAddress other && Equals(other);
+        }
+
+        public override int GetHashCode()
+        {
+            return HashCode.Combine(x, y);
+        }
+        
+        public static implicit operator Vector2(CellAddress address) => new(address.x, address.y);
+    }
+}
+```
+
+### Assets/Scripts/Models/Direction.cs
+```
+namespace TraversalDemo.Models
+{
+    public enum Direction
+    {
+        NONE, NORTH, EAST, SOUTH, WEST
+    }
+}
+```
+
+### Assets/Scripts/Models/GameObject.cs
+```
+using UnityEngine;
+
+namespace TraversalDemo.Models
+{
+    public static class GameObjectExtensions
+    {
+        public static T AddChildComponent<T>(this GameObject gameObject) where T : Component
+        {
+            var childGameObject = new GameObject(typeof(T).Name);
+            childGameObject.transform.parent = gameObject.transform;
+
+            var component = childGameObject.AddComponent<T>();
+            return component;
+        }
+    }
+}
+```
+
+### Assets/Scripts/Models/GridCell.cs
+```
+namespace TraversalDemo.Models
+{
+    public class GridCell
+    {
+        public CellAddress Address { get; set; }
+        public bool IsWall { get; set; }
+        public bool IsHit { get; set; }
+    }
+}
+```
+
+### Assets/Scripts/Models/Line.cs
+```
+using System;
+using UnityEngine;
+
+namespace TraversalDemo.Models
+{
+    [Serializable]
+    public struct Line
+    {
+        [SerializeField] public Vector2 Start;
+        [SerializeField] public Vector2 End;
+
+        public Line(Vector2 start, Vector2 end)
+        {
+            Start = start;
+            End = end;
+        }
+
+        public Vector3[] GetPositions() => new Vector3[] { Start, End };
+    }
+}
+```
+
+### Assets/Scripts/Models/VoxelTraversalData.cs
+```
+namespace TraversalDemo.Models
+{
+    public struct VoxelTraversalData
+    {
+        public CellAddress Position;
+        public Direction HitDirection;
+
+        public VoxelTraversalData(CellAddress position, Direction hitDirection)
+        {
+            Position = position;
+            HitDirection = hitDirection;
+        }
+    }
+}
+```
+
+### Assets/Scripts/Services/GridGenerationService.cs
+```
+using System.Collections.Generic;
+using TraversalDemo.Models;
+
+namespace TraversalDemo.Services
+{
+    public static class GridGenerationService
+    {
+        public static List<GridCell> GenerateGrid(CellAddress gridSize, List<CellAddress> walls)
+        {
+            var result = new List<GridCell>();
+            var currentCell = new CellAddress(0, 0);
+
+            for (int x = 0; x < gridSize.x; x++)
+            {
+                currentCell.x = x;
+                for (int y = 0; y < gridSize.y; y++)
+                {
+                    currentCell.y = y;
+                    var cell = new GridCell { Address = currentCell, IsWall = walls.Contains(currentCell) };
+                    result.Add(cell);
+                }
+            }
+
+            return result;
+        }
+    }
+}
+```
+
+### Assets/Scripts/Services/RayIntersectionService.cs
+```
+using System;
+using TraversalDemo.Models;
+using UnityEngine;
+
+namespace TraversalDemo.Services
+{
+    public class RayIntersectionService
+    {
+        public static Vector2? GetIntersection(Line line, CellAddress gridCell, Direction hitDirection)
+        {
+            var cellWall = GetCellWall(gridCell, hitDirection);
+            return GetIntersection(line, cellWall);
+        }
+
+        private static Line GetCellWall(CellAddress gridCell, Direction wall)
+        {
+            return wall switch
+            {
+                Direction.NORTH => new Line(gridCell + Vector2.up, gridCell + Vector2.one),
+                Direction.EAST => new Line(gridCell + Vector2.right, gridCell + Vector2.one),
+                Direction.SOUTH => new Line(gridCell, gridCell + Vector2.right),
+                Direction.WEST => new Line(gridCell, gridCell + Vector2.up),
+                _ => throw new ArgumentOutOfRangeException(nameof(wall), wall, null)
+            };
+        }
+
+        private static Vector2? GetIntersection(Line line1, Line line2)
+        {
+            Vector2 p1 = line1.Start;
+            Vector2 p2 = line1.End;
+            Vector2 p3 = line2.Start;
+            Vector2 p4 = line2.End;
+        
+            Vector2 d1 = p2 - p1; // Direction vector of ray1
+            Vector2 d2 = p4 - p3; // Direction vector of ray2
+        
+            // Calculate the denominator for the parametric equation
+            float denominator = d1.x * d2.y - d1.y * d2.x;
+            if (Mathf.Approximately(denominator, 0f)) return null;
+            
+            // Calculate parameters for intersection point
+            Vector2 p1p3 = p3 - p1;
+            float t1 = (p1p3.x * d2.y - p1p3.y * d2.x) / denominator;
+            float t2 = (p1p3.x * d1.y - p1p3.y * d1.x) / denominator;
+        
+            // Check if intersection occurs within both line segments
+            if (t1 >= 0f && t1 <= 1f && t2 >= 0f && t2 <= 1f)
+            {
+                // Calculate intersection point
+                return p1 + d1 * t1;
+            }
+        
+            // Lines intersect, but not within the segments
+            return null;
+        }
+    }
+}
+```
+
+### Assets/Scripts/Services/VoxelTraversalService.cs
+```
+using System.Collections.Generic;
+using TraversalDemo.Models;
+using UnityEngine;
+
+namespace TraversalDemo.Services
+{
+    public class VoxelTraversalService
+    {
+        public static IEnumerable<VoxelTraversalData> TraverseRay(Line line)
+        {
+            var start = line.Start;
+            var end = line.End;
+
+            // Current position in grid coordinates
+            var currentGridX = (int)Mathf.Floor(start.x);
+            var currentGridY = (int)Mathf.Floor(start.y);
+
+            var endX = (int)Mathf.Floor(end.x);
+            var endY = (int)Mathf.Floor(end.y);
+
+            // Ray direction
+            var rayDir = end - start;
+
+            // Calculate delta distances
+            var deltaDistX = rayDir.x == 0 ? float.MaxValue : Mathf.Abs(1.0f / rayDir.x);
+            var deltaDistY = rayDir.y == 0 ? float.MaxValue : Mathf.Abs(1.0f / rayDir.y);
+
+            // Calculate step and initial sideDist
+            float sideDistX, sideDistY;
+            int stepX, stepY;
+
+            if (rayDir.x < 0)
+            {
+                stepX = -1;
+                sideDistX = (start.x - currentGridX) * deltaDistX;
+            }
+            else
+            {
+                stepX = 1;
+                sideDistX = (currentGridX + 1.0f - start.x) * deltaDistX;
+            }
+
+            if (rayDir.y < 0)
+            {
+                stepY = -1;
+                sideDistY = (start.y - currentGridY) * deltaDistY;
+            }
+            else
+            {
+                stepY = 1;
+                sideDistY = (currentGridY + 1.0f - start.y) * deltaDistY;
+            }
+
+            var cell = new CellAddress(currentGridX, currentGridY);
+            var direction = Direction.NONE;
+            yield return new VoxelTraversalData(cell, direction);
+
+            // Perform DDA traversal
+            while (currentGridX != endX || currentGridY != endY)
+            {
+                // Jump to next cell
+                if (sideDistX < sideDistY)
+                {
+                    sideDistX += deltaDistX;
+                    currentGridX += stepX;
+                    cell.x = currentGridX;
+                    direction = stepX > 0 ? Direction.WEST : Direction.EAST;
+                }
+                else
+                {
+                    sideDistY += deltaDistY;
+                    currentGridY += stepY;
+                    cell.y = currentGridY;
+                    direction = stepY > 0 ? Direction.SOUTH : Direction.NORTH;
+                }
+
+                yield return new VoxelTraversalData(cell, direction);
+            }
+        }
+    }
+}
+```
+
+### Assets/Scripts/UI/Grid/GridCellUI.cs
+```
+using System;
+using TraversalDemo.Models;
+using UnityEngine;
+
+namespace TraversalDemo.UI.Grid
+{
+    public class GridCellUI : MonoBehaviour
+    {
+        public event Action<CellAddress> Clicked;
+
+        private SpriteRenderer spriteRenderer;
+
+        private GridCell gridCell;
+
+        private readonly Color DEFAULT_CELL_COLOR = Color.white;
+        private readonly Color DEFAULT_WALL_COLOR = new(0.45f, 0.25f, 0f);
+        private readonly Color HIT_CELL_COLOR = new(0.85f, 0.3f, 0.3f);
+        private readonly Color HIT_WALL_COLOR = new(0.15f, 0.05f, 0.0f);
+
+        private void Awake()
+        {
+            spriteRenderer = GetComponentInChildren<SpriteRenderer>();
+        }
+
+        public void SetGridCell(GridCell cell) => gridCell = cell;
+
+        public void SetHitCell() => spriteRenderer.color = gridCell.IsWall ? HIT_WALL_COLOR : HIT_CELL_COLOR;
+
+        public void ResetCellColour() =>
+            spriteRenderer.color = gridCell.IsWall ? DEFAULT_WALL_COLOR : DEFAULT_CELL_COLOR;
+
+        private void OnMouseUp() => Clicked?.Invoke(gridCell.Address);
+    }
+}
+```
+
+### Assets/Scripts/UI/Grid/GridVisualiser.cs
+```
+using System;
+using System.Collections.Generic;
+using TraversalDemo.Models;
+using UnityEngine;
+
+namespace TraversalDemo.UI.Grid
+{
+    public class GridVisualiser : MonoBehaviour
+    {
+        public event Action<CellAddress> CellClicked;
+
+        [SerializeField] private GridCellUI gridCellPrefab;
+
+        private readonly Dictionary<CellAddress, GridCellUI> cellObjects = new();
+
+        public void CreateGridCellUI(GridCell cell)
+        {
+            if (cellObjects.TryGetValue(cell.Address, out _))
+                return;
+
+            var cellUI = Instantiate(gridCellPrefab, transform);
+            cellObjects.Add(cell.Address, cellUI);
+
+            cellUI.transform.position = new Vector2(cell.Address.x, cell.Address.y);
+            cellUI.SetGridCell(cell);
+            UpdateGridCellUI(cell);
+            cellUI.Clicked += OnCellClicked;
+        }
+
+        public void UpdateGridCellUI(GridCell cell)
+        {
+            if (!cellObjects.TryGetValue(cell.Address, out var cellUI))
+            {
+                Debug.LogError("Trying to update a cell that doesn't exist");
+                return;
+            }
+            
+            if (cell.IsHit)
+                cellUI.SetHitCell();
+            else
+                cellUI.ResetCellColour();
+        }
+
+        public void ClearCells()
+        {
+            foreach (var (_, cellUI) in cellObjects)
+            {
+                cellUI.Clicked -= OnCellClicked;
+                Destroy(cellUI.gameObject);
+            }
+            cellObjects.Clear();
+        }
+
+        private void OnCellClicked(CellAddress cellAddress) => CellClicked?.Invoke(cellAddress);
+    }
+}
+```
+
+### Assets/Scripts/UI/Line/LineHandleUI.cs
+```
+using System;
+using UnityEngine;
+
+namespace TraversalDemo.UI.Line
+{
+    public class LineHandleUI : MonoBehaviour
+    {
+        public event Action<Vector3> PositionUpdated;
+
+        private Camera cam;
+
+        private Vector2 offset;
+        private bool isDragging;
+
+        public void UpdatePosition(Vector3 newPosition)
+        {
+            if (isDragging) return;
+            transform.position = newPosition;
+        }
+
+        private void Start()
+        {
+            cam = Camera.main;
+        }
+
+        private void OnMouseDown()
+        {
+            var localMousePosition = GetLocalMousePosition();
+            offset = transform.position - localMousePosition;
+            isDragging = true;
+        }
+
+        private void OnMouseDrag()
+        {
+            if (!isDragging)
+                return;
+
+            var localMousePosition = GetLocalMousePosition();
+            transform.position = localMousePosition + (Vector3)offset;
+
+            PositionUpdated?.Invoke(transform.position);
+        }
+
+        private void OnMouseUp()
+        {
+            isDragging = false;
+        }
+
+        private Vector3 GetLocalMousePosition()
+        {
+            var localMousePosition = cam.ScreenToWorldPoint(Input.mousePosition);
+            localMousePosition.z = 0;
+            return localMousePosition;
+        }
+    }
+}
+```
+
+### Assets/Scripts/UI/Line/LineVisualiser.cs
+```
+using System;
+using UnityEngine;
+
+namespace TraversalDemo.UI.Line
+{
+    public class LineVisualiser : MonoBehaviour
+    {
+        public event Action<Vector3, Vector3> LineHandlesUpdated;
+
+        [SerializeField] private LineRenderer lineRenderer;
+        [SerializeField] private LineHandleUI lineHandlePrefab;
+
+        private LineHandleUI lineStart;
+        private LineHandleUI lineEnd;
+
+        private void Awake()
+        {
+            lineStart = Instantiate(lineHandlePrefab);
+            lineStart.PositionUpdated += OnLineStartPositionUpdated;
+
+            lineEnd = Instantiate(lineHandlePrefab);
+            lineEnd.PositionUpdated += OnLineEndPositionUpdated;
+        }
+
+        private void OnLineStartPositionUpdated(Vector3 lineStartPosition) =>
+            LineHandlesUpdated?.Invoke(lineStartPosition, lineEnd.transform.position);
+
+        private void OnLineEndPositionUpdated(Vector3 lineEndPosition) =>
+            LineHandlesUpdated?.Invoke(lineStart.transform.position, lineEndPosition);
+
+        public void UpdateLine(Models.Line line)
+        {
+            lineRenderer.positionCount = 2;
+            lineRenderer.SetPositions(line.GetPositions());
+
+            lineStart.UpdatePosition(line.Start);
+            lineEnd.UpdatePosition(line.End);
+        }
+    }
+}
+```

@@ -1,0 +1,185 @@
+# Adaptive Rank Selection via Binary Search
+
+Also called: Binary Search for Best Rank, Optimal Rank Selection
+
+## Overview
+Adaptive Rank Selection via Binary Search is a method to determine the optimal Tucker decomposition rank $(R_1, R_2, R_3)$ for individual data blocks in multi-resolution volume rendering [S1]. It solves the trade-off between compression ratio and reconstruction error (measured by Peak Signal-to-Noise Ratio, PSNR) by finding the smallest rank that satisfies a specific error threshold for each block [S1]. Unlike uniform rank decomposition, which applies the same rank to all blocks (leading to either quality loss or inefficient compression), this method assigns different ranks to different blocks based on their local complexity [S1]. It builds on [Truncated Tensor Decomposition](7540-truncated-tensor-decomposition.md) by using a pre-computed high-rank decomposition to efficiently search for the best truncation point without recomputing the full HOSVD for every trial rank [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume data block of size $I_1 \times I_2 \times I_3$. A pre-computed high-rank Tucker decomposition consisting of factor matrices $U^{(1)} \in \mathbb{R}^{I_1 \times R_{max,1}}$, $U^{(2)} \in \mathbb{R}^{I_2 \times R_{max,2}}$, $U^{(3)} \in \mathbb{R}^{I_3 \times R_{max,3}}$ and core tensor $\mathcal{B} \in \mathbb{R}^{R_{max,1} \times R_{max,2} \times R_{max,3}}$. An error threshold $T_e$ (and optionally $T_p$).
+*   **Output:** The optimal rank tuple $(R_1, R_2, R_3)$ for the block.
+
+**Data Structures:**
+The method operates on the factor matrices and core tensor stored in memory. The factor matrices $U^{(n)}$ are dense matrices where column $r$ represents the $r$-th basis vector in dimension $n$. The core tensor $\mathcal{B}$ is a 3D array. No special bit-packing is described for the search process itself; the search relies on the dense representation of the truncated components.
+
+**Parameters:**
+*   **Initial Search Range:** The binary search is performed between a lower bound $R_s$ and an upper bound $R_e$. For a block size of 32, typical values are $R_s = 4$ and $R_e = 16$ [S1].
+*   **Error Threshold ($T_e$):** The threshold used to determine if the rank is sufficient. In the cited experiments, $T_e = T_p = 0.25$ was used, with other tests ranging from 0.1 to 0.4 [S1]. The threshold is applied to the relative error or a normalized metric derived from the reconstruction [S1]. Note: The source defines PSNR in Eq (2)-(3) but uses $T_e$ as a threshold for the "error" in the binary search logic, implying a normalized error metric rather than raw PSNR dB value, as PSNR is maximized while error is minimized. The text states "find the optimal rank which will exactly meet the error threshold" [S1].
+
+**Algorithm Steps:**
+1.  **Pre-compute High-Rank Decomposition:** Perform a full Tucker decomposition (HOSVD) on the data block to obtain the high-rank factor matrices $U^{(1)}, U^{(2)}, U^{(3)}$ and core tensor $\mathcal{B}$ with ranks $(R_{max,1}, R_{max,2}, R_{max,3})$. This is done once per block [S1].
+2.  **Initialize Search Bounds:** Set the lower bound $R_s$ and upper bound $R_e$. Set the current rank $R = (R_s + R_e) / 2$ (integer division or floor) [S1].
+3.  **Perform Rank Truncation:** Truncate the pre-computed factor matrices and core tensor to the current rank $R$.
+    *   Let $U_k^{(n)}$ be the first $R$ columns of $U^{(n)}$ for $n=1,2,3$.
+    *   Let $\mathcal{B}_k$ be the sub-tensor of $\mathcal{B}$ with dimensions $R \times R \times R$.
+    *   This step avoids recomputing the SVD for every trial rank [S1].
+4.  **Evaluate Error:** Reconstruct the data approximation $\hat{\mathcal{X}}$ from the truncated components using the Tucker product:
+    $$ \hat{\mathcal{X}} = \mathcal{B}_k \times_1 U_k^{(1)} \times_2 U_k^{(2)} \times_3 U_k^{(3)} $$
+    Calculate the reconstruction error. The source uses PSNR to measure difference, defined as:
+    $$ \text{PSNR} = 10 \times \log_{10} \left( \frac{K^2}{\text{MSE}} \right) $$
+    where $N$ is the total number of points, $a_n, b_n$ are original and reconstructed values, $K$ is the data range, and $\text{MSE} = \frac{1}{N} \sum (a_n - b_n)^2$ [S1]. The binary search logic implies checking if the error is below a threshold $T_e$. If the error is acceptable (i.e., PSNR is high enough or normalized error is low enough), the rank is considered sufficient.
+5.  **Check Convergence (Lower Bound):** If the current rank $R$ is the lower bound of the search interval (or specifically, if $R - R_s < 2$), output $R$ as the optimal rank and terminate. Otherwise, update the upper bound $R_e = R$, update the current rank $R = \lfloor (R_s + R_e) / 2 \rfloor$, and return to Step 3 [S1].
+6.  **Check Convergence (Upper Bound):** If the current rank $R$ is the upper bound of the search interval (or specifically, if $R_e - R < 2$), output $R + 1$ as the optimal rank and terminate. Otherwise, update the lower bound $R_s = R$, update the current rank $R = \lfloor (R_s + R_e) / 2 \rfloor$, and return to Step 3 [S1].
+
+*Note on Logic:* The source describes a binary search where the condition determines whether to go left (lower rank) or right (higher rank). If the error at rank $R$ is *below* the threshold (acceptable), we try a lower rank to save space. If the error is *above* the threshold (unacceptable), we need a higher rank. The convergence checks in Steps 5 and 6 handle the termination when the interval is small.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adaptive_rank_selection(block_data, threshold_te):
+    """
+    Finds the optimal Tucker rank for a data block using binary search.
+    
+    Args:
+        block_data: 3D numpy array of the volume block.
+        threshold_te: Error threshold (normalized). 
+                      Note: The source uses Te=0.25. The exact formula for 
+                      normalized error is not explicitly given, but it is 
+                      derived from the reconstruction error. 
+                      We assume a function calculate_error(reconstructed, original) 
+                      returns a value where lower is better.
+    
+    Returns:
+        optimal_rank: Tuple (R1, R2, R3). Assuming isotropic search for simplicity 
+                      as per the source's example ranks (4,4,4) to (16,16,16).
+    """
+    
+    # Step 1: Pre-compute high-rank decomposition
+    # This is expensive but done once.
+    # U1, U2, U3 are factor matrices. B is the core tensor.
+    # R_max is the maximum rank (e.g., 16 for a 32x32x32 block).
+    U1, U2, U3, B = compute_hosvd(block_data, R_max=16)
+    
+    # Step 2: Initialize search bounds
+    Rs = 4  # Lower bound
+    Re = 16 # Upper bound
+    
+    while True:
+        # Calculate current rank for binary search
+        # Using integer division/floor as per standard binary search
+        R = (Rs + Re) // 2
+        
+        # Step 3: Perform Rank Truncation
+        # Truncate factor matrices to first R columns
+        U1_trunc = U1[:, :R]
+        U2_trunc = U2[:, :R]
+        U3_trunc = U3[:, :R]
+        
+        # Truncate core tensor to R x R x R sub-tensor
+        B_trunc = B[:R, :R, :R]
+        
+        # Reconstruct approximation
+        # Tensor-Tucker product: X_hat = B_trunc x1 U1_trunc x2 U2_trunc x3 U3_trunc
+        X_hat = reconstruct_tucker(B_trunc, U1_trunc, U2_trunc, U3_trunc)
+        
+        # Step 4: Evaluate Error
+        # Calculate error metric. Source uses PSNR, but binary search 
+        # typically compares against a threshold.
+        # Let's assume calculate_error returns a normalized error value.
+        # If the source uses Te=0.25, and lower error is better:
+        error = calculate_normalized_error(X_hat, block_data)
+        
+        # Determine if rank is sufficient
+        # If error <= threshold, the rank is sufficient (or too high, try lower)
+        # If error > threshold, the rank is insufficient (need higher)
+        
+        if error <= threshold_te:
+            # Rank R is sufficient. Try to find a smaller rank.
+            # Check convergence: if we are at the lower bound limit
+            if R - Rs < 2:
+                return R
+            # Update upper bound and search lower half
+            Re = R
+        else:
+            # Rank R is insufficient. Need a larger rank.
+            # Check convergence: if we are at the upper bound limit
+            if Re - R < 2:
+                return R + 1
+            # Update lower bound and search upper half
+            Rs = R
+
+def calculate_normalized_error(X_hat, X_original):
+    """
+    Calculates a normalized error metric.
+    Source defines PSNR. To use a threshold like 0.25, a normalized 
+    MSE or similar metric is likely used.
+    MSE = mean((X_hat - X_original)^2)
+    Normalized MSE = MSE / (max(X_original) - min(X_original))^2
+    """
+    mse = numpy.mean((X_hat - X_original) ** 2)
+    data_range = numpy.max(X_original) - numpy.min(X_original)
+    if data_range == 0:
+        return 0.0
+    normalized_mse = mse / (data_range ** 2)
+    return normalized_mse
+
+def reconstruct_tucker(B, U1, U2, U3):
+    """
+    Reconstructs the tensor from core B and factor matrices U1, U2, U3.
+    X = B x1 U1 x2 U2 x3 U3
+    """
+    # Mode-1 product
+    X_temp = numpy.tensordot(B, U1, axes=([0], [0])) # Result shape: (R, I2, I3, R1) -> transpose needed
+    # Standard tensor product implementation:
+    # X = B x1 U1 => X[i2, i3, r1] = sum_b1 B[b1, i2, i3] * U1[i1, b1] ... wait, standard definition:
+    # X = B x1 U1 x2 U2 x3 U3
+    # X[i1, i2, i3] = sum_{r1, r2, r3} B[r1, r2, r3] * U1[i1, r1] * U2[i2, r2] * U3[i3, r3]
+    
+    # Efficient implementation using matricization or tensordot
+    # Reshape B to matrix (R1*R2) x R3? Or just loop for clarity if R is small
+    # Using numpy tensordot:
+    # B is (R,R,R). U1 is (I1, R).
+    # X = B x1 U1 -> (I1, R, R)
+    X1 = numpy.tensordot(B, U1, axes=([0], [1])) # B[r1,r2,r3] * U1[i1, r1] -> X1[i1, r2, r3]
+    # X1 is (I1, R, R). U2 is (I2, R).
+    # X2 = X1 x2 U2 -> (I1, I2, R)
+    X2 = numpy.tensordot(X1, U2, axes=([1], [1])) # X1[i1, r2, r3] * U2[i2, r2] -> X2[i1, i2, r3]
+    # X2 is (I1, I2, R). U3 is (I3, R).
+    # X3 = X2 x3 U3 -> (I1, I2, I3)
+    X3 = numpy.tensordot(X2, U3, axes=([2], [1])) # X2[i1, i2, r3] * U3[i3, r3] -> X3[i1, i2, i3]
+    
+    return X3
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The reconstruction involves multiple matrix multiplications. Floating-point precision errors may accumulate, potentially affecting the error calculation near the threshold boundary [G].
+*   **Boundary Conditions:** The convergence checks ($R - R_s < 2$ and $R_e - R < 2$) ensure termination. If the optimal rank is exactly $R_s$ or $R_e$, the logic must handle it. The source specifies outputting $R$ or $R+1$ based on the bound check [S1].
+*   **Degenerate Input:** If the data block is constant or zero, the optimal rank might be 1 or 0. The search range starts at 4, which might be suboptimal for very simple blocks, but the method is designed for "massive data" blocks where complexity varies [S1].
+
+## Subtopics
+
+### Uniform Rank Decomposition
+Applies the same rank $(R, R, R)$ to all blocks. Simple to implement but inefficient for heterogeneous data. [Link](7540-truncated-tensor-decomposition.md) discusses the general concept of rank reduction.
+
+### Information Entropy Based Selection
+Uses information entropy to determine block resolution. Adaptive but may not directly optimize for PSNR [S1].
+
+### CIELUV Error Criterion
+Uses color space error for texture data. Specific to color volumes [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The preprocessing time is higher than uniform high-rank decomposition. For a threshold of 0.25, the adaptive method took 32.7 minutes compared to 21.5 minutes for uniform rank (16,16,16) [S1]. This is because it performs multiple reconstructions and error checks per block, although it avoids recomputing the HOSVD.
+*   **Memory Complexity:** The memory usage is dominated by the storage of the high-rank factor matrices and core tensor for all blocks. The adaptive method does not increase memory overhead compared to uniform high-rank decomposition, as it stores the same high-rank components initially.
+*   **Compression Ratio:** The adaptive method achieves a significantly better compression ratio than uniform high-rank decomposition. At threshold 0.25, it achieved 6.7% compression, compared to 17.19% for uniform rank (16,16,16) [S1]. It is less compressed than uniform low-rank (4,4,4) which is 1.37%, but maintains higher quality.
+*   **Quality:** The rendering quality (PSNR) is comparable to or better than uniform high-rank decomposition. For threshold 0.25, the adaptive method's PSNR is not explicitly given as a single number, but the text states the result is "not inferior" to uniform (16,16,16) and "significantly better" than uniform (8,8,8) and (4,4,4) [S1].
+*   **Strengths:** Adapts to local data complexity, optimizing the balance between compression and quality.
+*   **Limitations:** Higher preprocessing time than uniform high-rank decomposition. The search range and threshold must be tuned for the specific dataset.
+
+## Background
+The method was proposed by Xiaoyan Nie and Cai Lu in 2018 in the paper "An Algorithm for Choosing Optimal Rank in Tensor Approximation of Multi-Resolution Volume Rendering" [S1]. It addresses the bottleneck of GPU memory storage in multi-resolution volume rendering by optimizing the rank selection for each block. Previous methods included uniform rank decomposition and entropy-based selection [S1]. The paper highlights that uniform rank decomposition leads to either excessive error or insufficient compression, motivating the adaptive approach [S1].
+
+## Sources
+[S1] An Algorithm for Choosing Optimal Rank in Tensor Approximation of Multi-Resolution Volume Rendering, https://doi.org/10.12677/csa.2018.811183, fetched 2026-10-26

@@ -1,0 +1,202 @@
+--- v001.md
++++ v002.md
+@@ -4,115 +4,105 @@
+ 
+ ## Overview
+-Adaptive Volume Rendering Integration (VRI) is a method for computing the volume rendering integral using adaptive numerical integration with step size control. It separates the computation into an inner integral (handling density/opacity) and an outer integral (handling color/transparency variations) to handle high-frequency variations in the transfer function [S1]. Unlike uniform Riemann summation, which requires prohibitive computational costs to achieve similar accuracy, this method dynamically adjusts step sizes based on local error estimates, offering better accuracy for similar or lower computational costs [S1].
++Adaptive Volume Rendering Integration (VRI) is a method for computing the Volume Rendering Integral using adaptive numerical integration with step size control. It separates the integration into an inner integral (handling density/opacity variations) and an outer integral (handling color/transparency variations) to achieve high accuracy with fewer samples than uniform Riemann summation [S1]. It is distinguished from sibling methods like [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md) by its explicit coupling of error estimation to the volume rendering equation's specific structure (inner/outer integrals) rather than generic geometric or density field properties [S1].
+ 
+ ## How it works
+-The method computes the Volume Rendering Integral (VRI) for a ray segment $[t, t_{final}]$ by iteratively adjusting the step size $h$ based on an error estimate $E(t,h)$. It employs two nested integration procedures: the Inner Integral ($RI$) and the Outer Integral ($RO$).
++**Inputs:**
++- $t$: Current ray parameter (start of integration interval).
++- $h$: Initial step size guess ($h^*_0$).
++- $\epsilon$: Error tolerance.
++- $h_{min}$: Minimum step size limit.
++- $h_{max}$: Maximum step size limit.
+ 
+-### Inputs and Outputs
+-*   **Inputs:**
+-    *   $t$: Current ray parameter (start of segment).
+-    *   $t_{final}$: End ray parameter of the segment.
+-    *   $h^*_0$: Initial step size.
+-    *   $\epsilon$: Error tolerance.
+-    *   $h_{min}$: Minimum step size limit.
+-    *   $h_{max}$: Maximum step size limit.
+-*   **Outputs:**
+-    *   $I$: Accumulated VRI vector $[R, G, B, A]$.
++**Outputs:**
++- $I$: Accumulated Volume Rendering Integral (vector $[R, G, B, A]$).
+ 
+-### Data Structures
+-*   **VRI Vector ($I$):** A 4-component vector storing accumulated Red, Green, Blue, and Alpha values. Initialized to $[0, 0, 0, 0]$.
+-*   **Step Size ($h$):** Floating-point value representing the current integration step.
+-*   **Error Estimate ($E$):** Floating-point value representing the estimated error of the current step.
+-*   **Integral Value ($D$):** Floating-point value representing the computed integral for the current step.
++**Data Structures:**
++- The integral $I$ is a 4-component vector for RGBA channels.
++- Step sizes $h_{inner}$ and $h_{outer}$ are scalar floats.
+ 
+-### Parameters
+-*   $h^*_0$: Initial step size. Default experimental value: $0.5$ voxel units [S1].
+-*   $h_{min}$: Minimum step size. Default experimental value: $0.1$ voxel units [S1].
+-*   $h_{max}$: Maximum step size. Default experimental value: $2.0$ voxel units [S1].
+-*   $\epsilon$: Error tolerance. Tested values: $0.01, 0.005, 0.001$ [S1].
+-*   Precision: GPU implementations typically use single precision (GLSL); CPU implementations use double precision [S1].
++**Core Concepts:**
++The method computes the VRI by iteratively advancing along the ray. At each step, it evaluates an **Inner Integral** ($RI$) to determine a safe step size and check for medium transparency. If the medium contributes, it evaluates an **Outer Integral** ($RO$) to compute the color/opacity contribution for that segment. The step size is adjusted dynamically based on an error estimate $E(t, h)$ [S1].
+ 
+-### Algorithm Steps
++**Algorithms:**
+ 
+-#### 1. Base Adaptive Loop (Algorithm 2)
+-This loop controls the step size $h$ and tolerance $\epsilon$ based on error estimation.
++1.  **Inner Integral Procedure ($RI$):**
++    -   Computes the integral over a small interval to ensure accuracy within tolerance.
++    -   Returns the integral value and the valid step size $h_{inner}$.
++    -   Uses the adaptive loop (Algorithm 2) but terminates as soon as a valid step size is found.
++    -   Ensures $h_{inner} \in [h_{min}, h_{max}]$.
+ 
+-1.  Initialize $I = 0$, $t_{final} = t + h$, $h = \min(h^*_0, t_{final} - t)$, $lastsucceeded = true$.
+-2.  Loop while $t < t_{final}$:
+-    3.  Evaluate error $E(t,h)$.
+-    4.  If $E(t,h) \le \epsilon$ (Success):
+-        5.  Add integral $D(t,h) + E(t,h)$ to $I$. [G: Note: The source text says "Add integral D(t,h) + E(t,h) to I". In standard adaptive integration, one adds the integral estimate. The inclusion of E in the addition is likely a typo in the source or refers to adding the integral *and* tracking error, but the pseudocode explicitly writes `I = I + D(t,h) + E(t,h)`. We follow the source literally.]
+-        6.  Advance $t = t + h$.
+-        7.  If $lastsucceeded$ was true:
+-            8.  Double $h$ ($h = 2h$).
+-            9.  Double $\epsilon$ ($\epsilon = 2\epsilon$).
+-        10. Else:
+-            11. Set $lastsucceeded = true$.
+-        12. Cap $h$ at $t_{final} - t$ ($h = \min(h, t_{final} - t)$).
+-    13. If $E(t,h) > \epsilon$ (Failure):
+-        14. Halve $h$ ($h = h/2$).
+-        15. Halve $\epsilon$ ($\epsilon = \epsilon/2$).
+-        16. Set $lastsucceeded = false$.
+-    17. End If.
+-    18. End Loop.
+-    19. Return $I$.
++2.  **Outer Integral Procedure ($RO$):**
++    -   Computes the full VRI contribution (color/alpha) for the interval.
++    -   Uses regular (non-adaptive) Simpson's rule for the inner integral evaluation within this step, as the error is already bounded by $h_{inner}$ [S1].
++    -   Iterates until the whole ray segment is covered.
++    -   Ensures $h_{outer} \in [h_{min}, h_{max}]$.
+ 
+-#### 2. Inner Integral Procedure ($RI$)
+-This procedure evaluates the inner integral (density/opacity) to determine a valid step size.
++3.  **Adaptive Step Control (Algorithm 2):**
++    This is the core loop used by both $RI$ and $RO$ to determine step sizes.
++    -   Initialize: $I = 0$, $t_{final} = t + h$, $h = \min(h^*_0, t_{final} - t)$, $lastsucceeded = true$.
++    -   Loop while $t < t_{final}$:
++        -   Evaluate error $E(t, h)$.
++        -   **If $E(t, h) \le \epsilon$ (Success):**
++            -   Add integral $D(t, h) + E(t, h)$ to $I$. [Note: Source notation $D(t,h)+E(t,h)$ implies the integral value plus error term, or simply the accumulated integral value. Implementation should add the computed integral value for the step].
++            -   Advance $t = t + h$.
++            -   If $lastsucceeded$ was true:
++                -   Double step size: $h = 2 \cdot h$.
++                -   Double tolerance: $\epsilon = 2 \cdot \epsilon$.
++            -   Else:
++                -   Set $lastsucceeded = true$.
++            -   Cap step: $h = \min(h, t_{final} - t)$.
++        -   **If $E(t, h) > \epsilon$ (Failure):**
++            -   Halve step size: $h = h / 2$.
++            -   Halve tolerance: $\epsilon = \epsilon / 2$.
++            -   Set $lastsucceeded = false$.
++            -   Loop repeats with new $h$.
++    -   Return $I$.
+ 
+-1.  Input: $t$, $dt = t_{final} - t$, $h_{inner}$.
+-2.  Execute the Base Adaptive Loop (Algorithm 2) restricted to the interval $[t, t+dt]$.
+-3.  Ensure $h$ stays between $h_{min}$ and $h_{max}$.
+-4.  Terminate as soon as a valid step size is found (i.e., the first successful step in the adaptive loop).
+-5.  Return the last step size $h_{inner}$ and the integral value $I_{inner}$.
++4.  **Main Integration Loop (Algorithm 3):**
++    -   Initialize $I = [R=0, G=0, B=0, A=0]$.
++    -   Set $t_{final} = t + h$.
++    -   Set $h_{inner} = \min(h^*_0, t_{final} - t)$.
++    -   Set $h_{outer} = h_{inner}$ (for initialization).
++    -   Loop while $t < t_{final}$:
++        -   Call $RI(t, t_{final} - t, h_{inner})$ to get $I_{inner}$ and $h_{inner}$.
++        -   If $I_{inner} \neq 0$ (medium is not transparent):
++            -   **Coupled Strategy:** Set $h_{outer} = h_{inner}$.
++            -   **Decoupled Strategy:** $h_{outer}$ is controlled independently (initialized to $h_{inner}$ but evolves separately).
++            -   Call $RO(t, h_{inner}, h_{outer})$ to get $I_{outer}$ and $h_{outer}$.
++            -   Add $I_{outer}$ to $I$.
++            -   Update $t$ based on the progress of the outer integration (implied by $RO$ returning integral and step info; effectively $t$ advances by the step taken in $RO$).
++    -   Return $I$.
+ 
+-#### 3. Outer Integral Procedure ($RO$)
+-This procedure evaluates the outer integral (color/transparency) using the step size determined by the inner integral.
++**Coupling Strategies:**
++-   **Coupled:** The inner integral dictates the initial step size for the outer integral at each iteration. Assumes coherence between density and color variations. Reuses intermediate Simpson's values from the inner integral [S1].
++-   **Decoupled:** The outer step is controlled independently. The inner step only limits the integration interval. Theoretically better for high-frequency transfer function variations [S1].
+ 
+-1.  Input: $t$, $h_{inner}$, $h_{outer}$.
+-2.  Execute the Base Adaptive Loop (Algorithm 2) for the outer integral.
+-3.  Ensure $h$ stays between $h_{min}$ and $h_{max}$.
+-4.  Perform integration for all color channels (R, G, B, A).
+-5.  Iterate until the whole ray is covered.
+-6.  Inside $RO$, use regular (non-adaptive) Simpson's rule to evaluate the inner integral whenever necessary, as the error is already bounded by the inner step size selection [S1].
+-7.  Return the last step size $h_{outer}$ and the integral value $I_{outer}$.
++**Parameters:**
++-   $h^*_0$: Initial step size. Default: 0.5 voxel units [S1].
++-   $h_{min}$: Minimum step size. Default: 0.1 voxel units [S1]. Prevents infinite halving if error cannot be estimated precisely [S1].
++-   $h_{max}$: Maximum step size. Default: 2.0 voxel units [S1]. Prevents missing high-frequency details (e.g., thin leaves) [S1].
++-   $\epsilon$: Error tolerance. Tested values: 0.01, 0.005, 0.001 [S1].
+ 
+-#### 4. Coupling Strategies
+-The method defines how $h_{outer}$ is initialized relative to $h_{inner}$ in the main loop (Algorithm 3).
+-
+-*   **Coupled Strategy:** The inner integral dictates the initial step size for the outer integral at each evaluation ($h_{outer} = h_{inner}$). This assumes coherence between integrals and allows reuse of intermediate Simpson's values from the inner integral [S1].
+-*   **Decoupled Strategy:** The outer step is controlled independently. The inner step is only used to limit the integration interval. $h_{outer}$ is initialized separately (e.g., $h_{outer} = h_{inner}$ only for initialization, then controlled independently) [S1].
+-
+-#### 5. Main Loop (Algorithm 3)
+-1.  Initialize $I = [R=0, G=0, B=0, A=0]$.
+-2.  Set $t_{final} = t + h$.
+-3.  Set $h_{inner} = \min(h^*_0, t_{final} - t)$.
+-4.  Set $h_{outer} = h_{inner}$ (for decoupled strategy initialization).
+-5.  Loop while $t < t_{final}$:
+-    6.  Call $RI(t, t_{final} - t, h_{inner})$ to get $I_{inner}$ and $h_{inner}$.
+-    7.  If $I_{inner} \neq 0$:
+-        8.  If Coupled Strategy: Set $h_{outer} = h_{inner}$.
+-        9.  Call $RO(t, h_{inner}, h_{outer})$ to get $I_{outer}$ and $h_{outer}$.
+-        10. Add $I_{outer}$ to $I$.
+-        11. Update $t$ based on outer integration progress (implied by $RO$ returning integral and step info; specifically, $t$ advances by the step taken in $RO$).
+-    12. End If.
+-    13. End Loop.
+-    14. Return $I$.
+-
+-### Edge Cases and Pitfalls
+-*   **Missing High-Frequency Features:** Without $h_{max}$, the adaptive step size may become too large, skipping over high-frequency variations such as thin leaves in a Bonsai model [S1].
+-*   **Numerical Inaccuracies:** Error evaluation has inherent inaccuracies. Even with strict tolerance, some rays may exceed the tolerance limit due to these inaccuracies and the $h_{min}$ floor [S1].
+-*   **Wrongly Ignored Regions:** High-frequency regions may be wrongly ignored if the error evaluation sampling strategy fails to detect them, especially if the initial step size is too large [S1].
+-*   **Infinite Halving:** The $h_{min}$ limit prevents infinite halving when the error cannot be estimated precisely [S1].
++**Edge Cases and Pitfalls:**
++-   **Overshooting Features:** Without $h_{max}$, high-frequency variations (e.g., thin leaves) may be missed because the adaptive step size becomes too large [S1].
++-   **Numerical Inaccuracy:** Error evaluation has inherent inaccuracies. Even with strict tolerance, some rays may exceed the limit due to these inaccuracies and the $h_{min}$ floor [S1].
++-   **High-Frequency Ignorance:** High-frequency regions may be wrongly ignored if the error evaluation sampling strategy fails to detect them, especially if the initial step size is too large [S1].
++-   **GPU vs CPU:** GPU SIMD architecture favors Riemann summation because adaptive approaches require different step sizes per thread, reducing parallel efficiency. CPU architecture favors adaptive algorithms [S1].
+ 
+ ## Operating characteristics
+-*   **Accuracy:** Offers better accuracy than Riemann summation for similar or lower computational costs [S1]. For the Bonsai model with $\epsilon=0.001$, the number of rays exceeding tolerance was ~11-15 for Adaptive VRI, compared to thousands for Riemann summation with larger step sizes [S1].
+-*   **Performance (CPU):** CPU architecture favors adaptive algorithms due to variable step sizes per ray [S1].
+-*   **Performance (GPU):** GPU SIMD architecture favors Riemann summation because adaptive approaches require different step sizes per thread, reducing parallel efficiency [S1].
+-*   **Strategy Trade-off:** The Coupled strategy is slightly more efficient; the Decoupled strategy is slightly more accurate, particularly for high-frequency transfer function variations [S1].
+-*   **Scaling:** Performance depends on the dataset. Models with large transparent regions (e.g., BluntFin) benefit from larger step sizes, while models with fine details (e.g., Bonsai) require smaller steps [S1].
++-   **Accuracy:** Offers better accuracy for similar or lower computational cost compared to Riemann summation. Riemann summation requires prohibitive computational costs to reach similar accuracy with constant small step sizes [S1].
++-   **Performance:**
++    -   **CPU:** Favors adaptive algorithms. Average frame rendering times were lower than uniform sampling for equivalent or better accuracy [S1].
++    -   **GPU:** Favors Riemann summation. Adaptive approaches reduce parallel efficiency due to divergent step sizes per thread [S1].
++-   **Complexity:** Adaptive step size control reduces the number of samples needed in smooth regions while increasing them in complex regions. The exact complexity depends on the scene's frequency content and the chosen tolerance [S1].
++-   **Strengths:** High accuracy, efficient sampling in smooth regions, handles varying density and color transfer functions [S1].
++-   **Limitations:** Poor parallel efficiency on GPUs, potential for missing high-frequency details if $h_{max}$ is not set, numerical inaccuracies in error estimation [S1].
++-   **When to use:** CPU-based rendering, scenes with varying density/color frequencies where accuracy is critical, or when computational resources allow for per-ray adaptive control.
++-   **When not to use:** GPU-based rendering where parallel efficiency is paramount, or when uniform sampling is sufficient for the required quality.
+ 
+ ## Background
+-The method was proposed in a paper titled "Accurate Volume Rendering based on Adaptive Numerical Integration" [S1]. It was tested on datasets from volvis.org (Bonsai, BluntFin, Teapot, Engine) using a 2.66 GHz Quad Core CPU and a GeForce GTX 560 GPU [S1]. The approach builds upon iterative integration methods and introduces the separation of inner and outer integrals to handle the specific challenges of volume rendering, such as varying density and color transfer functions [S1].
++-   **Origin:** Proposed in "Accurate Volume Rendering based on Adaptive Numerical Integration" [S1].
++-   **Development:** The method builds on iterative integration techniques, adapting them for the specific structure of the Volume Rendering Integral. It introduces the concept of inner and outer integrals to decouple density and color evaluation, allowing for more efficient step size control [S1].
++-   **Usage:** Tested on datasets from volvis.org (Bonsai, BluntFin, Teapot, Engine) [S1].
+ 
+ ## Sources

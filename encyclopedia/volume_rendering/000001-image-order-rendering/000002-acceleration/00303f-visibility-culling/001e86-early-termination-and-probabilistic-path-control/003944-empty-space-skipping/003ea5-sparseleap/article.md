@@ -1,0 +1,233 @@
+# SparseLeap
+
+Also called: Empty Space Skipping via Rasterized Ray Segment Lists
+
+## Overview
+SparseLeap is a hybrid object-order (rasterization) and image-order (ray-casting) method for efficient empty space skipping in large, sparse volumes with fine structures [S1, unofficial]. It decouples empty space skipping data structures from the underlying volume representation, optimizing both the number of samples evaluated and the number of look-ups into the skipping data structure [S2, unofficial]. Unlike standard octree-based skipping which suffers from space fragmentation and high traversal costs around fine structures, SparseLeap rasterizes occupancy geometry to merge consecutive same-class segments, reducing fragmentation and enabling linear list traversal [S1, unofficial].
+
+## How it works
+SparseLeap operates in two main phases: preprocessing (building the occupancy histogram tree and generating geometry) and rendering (rasterizing geometry into ray segment lists and ray-casting).
+
+### Inputs and Outputs
+*   **Inputs:** Volume data (scalar field and segmentation labels), current transfer function, set of active (enabled) objects, camera view parameters.
+*   **Outputs:** Rendered image.
+*   **Implicit Inputs:** The underlying volume representation (grid, octree, etc.) is not directly used by the skipping logic; only its occupancy metadata is required [S1, unofficial].
+
+### Data Structures
+
+**1. Occupancy Histogram Tree (CPU-side)**
+*   **Node Layout:**
+    *   Child pointers (standard tree structure).
+    *   Histogram: Three integer counts representing the number of leaf nodes in the sub-tree for each occupancy class: `empty`, `non-empty`, `unknown` [S1, unofficial].
+*   **Leaf Nodes:** Store a single occupancy class determined by culling [S1, unofficial].
+
+**2. Occupancy Geometry (GPU-side)**
+*   A set of nested bounding boxes extracted from the occupancy histogram tree.
+*   Each box has an associated occupancy class (`empty`, `non-empty`, `unknown`) [S1, unofficial].
+*   Box sizes decrease from root to leaves. A smaller box's class overrides the larger containing box's class over its extent [S1, unofficial].
+
+**3. Ray Segment Lists (GPU-side)**
+*   Per-pixel linked lists of ray segments.
+*   **Buffer Layout:** Two arrays per pixel resolution [S1, unofficial]:
+    *   **List Elements:** Array of linked list nodes. Size: 12 bytes each. Contains segment start, end, and class [S1, unofficial].
+    *   **List Heads:** Array of pointers/indices to the first element of each pixel's list. Size: 16 bytes each [S1, unofficial].
+*   **Segment Merging:** Consecutive segments of the same class are merged into a single segment during rasterization [S1, unofficial].
+
+### Algorithm Steps
+
+**Step 1: Build Occupancy Histogram Tree**
+1.  Initialize the tree with leaf nodes.
+2.  Perform **Delayed Culling**: Initially set all leaf nodes to `unknown` [S1, unofficial].
+3.  **Histogram Propagation**: Traverse the tree recursively in depth-first order starting at the root. After child traversal returns, compute the node's histogram as the sum of its children's histograms [S1, unofficial].
+
+**Step 2: Generate Occupancy Geometry**
+1.  Perform a linear-time top-down traversal of the occupancy histogram tree [S1, unofficial].
+2.  **Emission Rule**: Emit a bounding box for a node only if its occupancy class differs from its parent's class [S1, unofficial].
+3.  Assign the node's occupancy class to the emitted box [S1, unofficial].
+4.  **Reuse**: Re-use the generated geometry across successive frames unless the active object set or transfer function changes [S1, unofficial].
+
+**Step 3: Rasterize Ray Segment Lists**
+1.  For each new view (or when geometry changes), rasterize the occupancy geometry on the GPU [S1, unofficial].
+2.  **Rasterization**: Intersect rays (one per pixel) with the occupancy boxes.
+3.  **Sorting**: The rasterization hardware naturally sorts intersections by depth, providing ray segment lists in already-sorted order (front-to-back), avoiding post-rasterization sorting required by standard Order-Independent Transparency (OIT) [S1, unofficial].
+4.  **Merging**: Merge consecutive segments of the same occupancy class into a single segment [S1, unofficial].
+5.  **Reuse**: If the view changes only in lighting (no rotation/translation) and geometry is unchanged, re-use existing ray segment lists without re-rasterization [S1, unofficial].
+
+**Step 4: Ray-Casting with Leap**
+1.  Add an outer loop to the standard ray-casting shader to traverse the ray segment list for the current pixel from front to back [S1, unofficial].
+2.  **Skip Empty**: If the current segment class is `empty`, skip the entire segment (advance ray origin to segment end) [S1, unofficial].
+3.  **Sample Non-Empty**: If the class is `non-empty`, perform volume sampling within the segment [S1, unofficial].
+4.  **Handle Unknown**: If the class is `unknown`, generate an **occupancy miss** [S1, unofficial].
+    *   **On Miss**:
+        *   If the node's metadata is missing, compute it asynchronously [S1, unofficial].
+        *   If the node does not exist in the tree, **grow** the tree to include it (initial class `unknown`) [S1, unofficial].
+        *   Once culling is complete, update the class to `empty` or `non-empty` and re-evaluate the segment [S1, unofficial].
+5.  **Pruning**: Retire unused (invisible/occluded) tree nodes using a least-recently used (LRU) strategy to keep the tree output-sensitive [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Occupancy Histogram Tree Node
+class OccupancyNode:
+    children: list[OccupancyNode]
+    histogram: dict[str, int] # keys: 'empty', 'non-empty', 'unknown'
+    metadata: dict # Optional, for culling
+    occupancy_class: str # 'empty', 'non-empty', 'unknown'
+
+def propagate_histograms(node: OccupancyNode):
+    """Depth-first traversal to compute histograms from leaves up."""
+    if node.children:
+        for child in node.children:
+            propagate_histograms(child)
+        # Sum children histograms
+        node.histogram = {'empty': 0, 'non-empty': 0, 'unknown': 0}
+        for child in node.children:
+            for cls in ['empty', 'non-empty', 'unknown']:
+                node.histogram[cls] += child.histogram[cls]
+
+def generate_occupancy_geometry(node: OccupancyNode, parent_class: str, geometry: list):
+    """Top-down traversal to emit bounding boxes only when class changes."""
+    current_class = node.occupancy_class
+    if current_class != parent_class:
+        # Emit bounding box for this node's spatial extent with current_class
+        geometry.append(BoundingBox(node.spatial_extent, current_class))
+    
+    for child in node.children:
+        generate_occupancy_geometry(child, current_class, geometry)
+
+def rasterize_to_ray_segment_lists(geometry: list, screen_width: int, screen_height: int) -> list:
+    """
+    Rasterize occupancy geometry into per-pixel linked lists.
+    Returns list of lists, where each inner list is a sequence of segments for a pixel.
+    """
+    # Initialize list heads
+    list_heads = [None] * (screen_width * screen_height)
+    list_elements = [] # Flat array of segment nodes
+    
+    # Rasterize boxes (order-independent transparency style, but depth-sorted by hardware)
+    # For each pixel, collect intersections, sort by depth, merge same-class segments
+    for y in range(screen_height):
+        for x in range(screen_width):
+            pixel_index = y * screen_width + x
+            intersections = []
+            
+            # Hardware rasterization step (conceptual)
+            for box in geometry:
+                if box.intersects_ray(x, y):
+                    intersections.append((box.start, box.end, box.class))
+            
+            # Sort by start depth
+            intersections.sort(key=lambda seg: seg[0])
+            
+            # Merge consecutive same-class segments
+            merged_segments = []
+            if intersections:
+                current_start, current_end, current_class = intersections[0]
+                for start, end, cls in intersections[1:]:
+                    if cls == current_class:
+                        # Merge: extend end
+                        current_end = end
+                    else:
+                        merged_segments.append((current_start, current_end, current_class))
+                        current_start, current_end, current_class = start, end, cls
+                merged_segments.append((current_start, current_end, current_class))
+            
+            # Build linked list
+            list_heads[pixel_index] = None
+            prev_elem = None
+            for start, end, cls in merged_segments:
+                elem = {'start': start, 'end': end, 'class': cls, 'next': None}
+                if prev_elem:
+                    prev_elem['next'] = elem
+                else:
+                    list_heads[pixel_index] = elem
+                prev_elem = elem
+                
+    return list_heads, list_elements
+
+def ray_cast_with_sparse_leap(list_heads: list, list_elements: list, volume_sampler: function, screen_width: int, screen_height: int):
+    """Ray-casting loop using ray segment lists."""
+    image = zeros((screen_height, screen_width, 3))
+    
+    for y in range(screen_height):
+        for x in range(screen_width):
+            pixel_index = y * screen_width + x
+            head = list_heads[pixel_index]
+            
+            ray_origin, ray_direction = get_ray(x, y)
+            color = [0.0, 0.0, 0.0]
+            alpha = 0.0
+            
+            # Traverse ray segment list
+            current_elem = head
+            while current_elem:
+                seg_start = current_elem['start']
+                seg_end = current_elem['end']
+                seg_class = current_elem['class']
+                
+                if seg_class == 'empty':
+                    # Skip empty segment
+                    ray_origin = ray_origin + ray_direction * seg_end
+                elif seg_class == 'non-empty':
+                    # Sample volume in this segment
+                    sample_color, sample_alpha = volume_sampler(ray_origin, ray_direction, seg_start, seg_end)
+                    color, alpha = composite(color, alpha, sample_color, sample_alpha)
+                    ray_origin = ray_origin + ray_direction * seg_end
+                elif seg_class == 'unknown':
+                    # Occupancy miss: trigger lazy culling
+                    node = find_or_grow_node_for_segment(seg_start, seg_end)
+                    if node.metadata_missing:
+                        node.metadata = compute_metadata(node)
+                    node.occupancy_class = cull_node(node) # Returns 'empty' or 'non-empty'
+                    
+                    # Re-evaluate this segment with new class
+                    # Note: In practice, this might require re-rasterization or dynamic list update
+                    # For simplicity, we assume the list is updated or re-evaluated
+                    if node.occupancy_class == 'non-empty':
+                        sample_color, sample_alpha = volume_sampler(ray_origin, ray_direction, seg_start, seg_end)
+                        color, alpha = composite(color, alpha, sample_color, sample_alpha)
+                    # If empty, skip (handled by next iteration if list updated, or here)
+                    ray_origin = ray_origin + ray_direction * seg_end
+                
+                current_elem = current_elem['next']
+                
+            image[y, x] = color
+    return image
+```
+
+### Parameters and Edge Cases
+*   **Occupancy Classes:** `empty`, `non-empty`, `unknown` [S1, unofficial].
+*   **List Element Size:** 12 bytes [S1, unofficial].
+*   **List Head Size:** 16 bytes [S1, unofficial].
+*   **Screen Resolution:** Examples use 1,200×1,200 [S1, unofficial].
+*   **Edge Case - Unknown Class:** If a ray encounters an `unknown` segment, it generates an occupancy miss. The system must handle dynamic tree growth and metadata computation [S1, unofficial].
+*   **Edge Case - Sparsity:** The technique is only efficient if the volume is sufficiently sparse; overhead of metadata storage and lookups must be amortized [S1, unofficial].
+*   **Precision:** Not given in the sources.
+
+## Operating characteristics
+*   **Time Complexity:**
+    *   Preprocessing: Linear in the number of tree nodes for histogram propagation and geometry generation [S1, unofficial].
+    *   Rasterization: Proportional to the number of occupancy boxes and screen resolution [S1, unofficial].
+    *   Ray-Casting: Linear in the number of segments in the ray segment list. Average depth complexity is low and stays roughly constant as granularity increases, unlike octrees where depth complexity increases with finer granularity due to spatial fragmentation [S1, unofficial].
+*   **Memory Complexity:**
+    *   CPU: Similar to standard octree, plus three integer counts per node for histograms [S1, unofficial].
+    *   GPU Geometry: Significantly fewer nodes than an equivalent octree (several dozen to a few hundred kilobytes vs. several megabytes) because non-emitting nodes are not stored [S1, unofficial].
+    *   GPU Ray Segment Lists: Depends on screen resolution and average depth complexity. For 1,200×1,200 resolution and average depth complexity of 4, buffer size is ~154 MB (up to depth complexity 8) [S1, unofficial].
+*   **Performance:** Tested on GeForce Titan X with 1,200×1,200 viewport. Datasets: SEM Mouse Cortex, Aneurysm, Stag Beetle, Xmas Tree. Measured without early ray termination (ERT) [S1, unofficial].
+*   **Strengths:**
+    *   Avoids space fragmentation and hierarchy traversal overhead [S1, unofficial].
+    *   Decouples empty space skipping from volume representation, compatible with grids, octrees, kd-trees, AMR, page tables [S1, unofficial].
+    *   Exploits frame coherence and ray coherence [S1, unofficial].
+    *   Efficient for drastically changing sparsity (transfer function/object changes) without re-computing space subdivision [S1, unofficial].
+*   **Limitations:**
+    *   Overhead of metadata storage and lookups requires sufficient sparsity [S1, unofficial].
+    *   Requires GPU rasterization hardware [S1, unofficial].
+
+## Background
+SparseLeap was proposed by Hadwiger et al. in 2018 [S1, unofficial]. It addresses the limitations of standard octree empty space skipping, which suffers from space fragmentation and high traversal costs for large, sparse volumes with fine structures [S1, unofficial]. The method combines object-order (rasterization) and image-order (ray-casting) stages to balance computational load [S1, unofficial].
+
+## Sources
+[S1] SparseLeap: Efficient Empty Space Skipping, https://vcg.seas.harvard.edu/publications/20180101-sparseleap-efficient-empty-space-skipping-for-large-scale-volume-rendering/paper, fetched 2026-10-24 (unofficial)
+[S2] Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze, https://doi.org/10.34726/hss.2023.106203, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,114 @@
+--- v001.md
++++ v002.md
+@@ -1,62 +1,78 @@
+ # Total Variation Gradient Addition
+ 
++
+ ## Overview
+-This method applies a total variation (TV) regularization gradient to specific scalar fields (density, k0, or diffuse) stored in a dense grid. It serves as a smoothing operator to enforce spatial coherence in the learned volume representation, preventing high-frequency noise or artifacts. It builds on [Per-Region Gradient Averaging](2715-per-region-gradient-averaging.md) by operating on the aggregated gradient magnitudes rather than raw directional differences.
++Total Variation Gradient Addition applies a total variation (TV) regularization term to the gradient update of specific scalar fields (such as density, volume density $\sigma$, or diffuse color) within a grid-based volume representation. It serves as the final optimization step for hash-based or tiled grid encoders, following gradient computation and per-region averaging. Unlike standard L2 regularization which penalizes large parameter values, TV regularization penalizes the magnitude of spatial gradients, thereby encouraging piecewise constant solutions that reduce noise while preserving sharp boundaries [S1, S2, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- `w`: The base weight scalar for the regularization term.
+-- `dense_mode`: A boolean flag indicating whether the grid is dense or sparse (typically `True` for dense grids).
+-- `self.world_size`: The spatial dimensions of the grid (e.g., `[X, Y, Z]`).
+-
+-**Outputs:**
+-- Gradient updates applied in-place to the target field's embedding tensor.
++**Inputs and Outputs:**
++- **Input:** The current gradient tensor for a specific field (e.g., density, $k_0$, or diffuse) and a scalar weight parameter.
++- **Output:** Modified gradient tensor with TV regularization applied.
+ 
+ **Data Structures:**
+-- The target field (density, k0, or diffuse) is stored as a dense 3D tensor or a flattened 1D tensor corresponding to the grid voxels. The layout is typically row-major or column-major depending on the underlying framework, but the operation is element-wise on the gradient magnitude.
++- The field is stored as a dense grid tensor. The implementation assumes a `dense_mode` flag is available to handle boundary conditions or padding.
+ 
+ **Steps:**
+-1. **Scale the Weight:** Calculate the effective regularization weight `w_eff` by scaling the input `w` with the maximum dimension of the world size, normalized by 128. This normalization ensures the regularization strength is consistent regardless of the grid resolution.
+-   $$ w_{eff} = w \times \frac{\max(\text{world\_size})}{128} $$
+-2. **Apply Gradient:** Invoke the core `total_variation_add_grad` function with the scaled weight `w_eff` applied to all three components (x, y, z gradients) and the `dense_mode` flag.
+-   $$ \text{total\_variation\_add\_grad}(w_{eff}, w_{eff}, w_{eff}, \text{dense\_mode}) $$
++1. **Calculate Effective Weight:** Compute a scaled weight $w$ based on the input weight and the maximum world size of the grid.
++   $$ w = \text{weight} \times \frac{\max(\text{world\_size})}{128} $$
++   Here, $\max(\text{world\_size})$ is the maximum dimension of the grid in world units or voxel counts, depending on the specific implementation's definition of "world size". The divisor 128 is a fixed normalization constant [S1, unofficial].
++
++2. **Apply TV Gradient:** Add the total variation gradient to the field's gradient tensor. This is typically implemented via a function `total_variation_add_grad(w, w, w, dense_mode)` which computes the divergence of the gradient or the subgradient of the $L_1$ norm of the gradient [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def total_variation_gradient_addition(w, world_size, dense_mode):
++def total_variation_gradient_add_grad(field_grad, weight, world_size, dense_mode):
+     """
+-    Applies total variation regularization gradient to the current field.
++    Applies total variation regularization to the gradient of a field.
+     
+     Args:
+-        w (float): Base regularization weight.
+-        world_size (list/tuple of int): [X, Y, Z] dimensions of the grid.
+-        dense_mode (bool): Whether to treat the grid as dense.
++        field_grad: Tensor of shape (N, ...) representing gradients for the field.
++        weight: Scalar weight for the regularization term.
++        world_size: Tensor or scalar representing the spatial extent of the grid.
++        dense_mode: Boolean flag indicating if dense boundary handling is used.
++    
++    Returns:
++        Modified field_grad tensor.
+     """
+-    # Step 1: Scale weight by max world dimension normalized to 128
+-    max_dim = max(world_size)
+-    w_eff = w * (max_dim / 128.0)
++    # Step 1: Calculate effective weight
++    # world_size.max() gets the maximum dimension size
++    max_world_size = world_size.max() if hasattr(world_size, 'max') else world_size
++    w = weight * (max_world_size / 128.0)
+     
+-    # Step 2: Apply TV gradient to the field
+-    # The function total_variation_add_grad is assumed to be defined in the 
+-    # optimization loop context, operating on the global field embeddings.
+-    # It adds the gradient of the L1 norm of the spatial gradients.
+-    total_variation_add_grad(w_eff, w_eff, w_eff, dense_mode)
++    # Step 2: Apply total variation gradient
++    # The function total_variation_add_grad is assumed to be defined elsewhere
++    # or implemented as a standard TV gradient operator.
++    # It modifies field_grad in-place or returns a new tensor.
++    # Implementation note: TV gradient usually involves computing differences
++    # between neighboring voxels and normalizing by the gradient magnitude.
++    field_grad = total_variation_add_grad(w, w, w, dense_mode, field_grad)
++    
++    return field_grad
+ ```
+ 
++**Parameters:**
++- **Weight:** The base regularization strength. Typical values are not specified in the sources [S1, unofficial].
++- **World Size:** The spatial dimensions of the grid. The maximum value is used for normalization [S1, unofficial].
++- **Dense Mode:** A boolean flag controlling boundary handling. Not given in the sources [S1, unofficial].
++
+ **Edge Cases and Pitfalls:**
+-- **Resolution Dependence:** Without the `world_size` normalization, the regularization strength would scale with grid resolution, leading to over-smoothing at high resolutions or under-smoothing at low resolutions.
+-- **Dense vs. Sparse:** The `dense_mode` flag affects how boundary conditions and neighbor lookups are handled. In sparse modes, out-of-bounds accesses must be handled carefully to avoid indexing errors.
++- **Zero Gradient:** If the gradient magnitude is zero, the TV subgradient is undefined. Standard implementations use a small epsilon or default to zero [G].
++- **Boundary Conditions:** The `dense_mode` flag suggests specific handling for grid boundaries, which may involve padding or clamping [S1, unofficial].
+ 
+ ## Subtopics
+ 
++### [Total Variation Regularization on Grid](6920-total-variation-regularization-on-grid.md)
++Adds a gradient term to the density or embedding grid to encourage piecewise constant solutions, reducing noise and enforcing smoothness. It is applied after gradient computation and per-region averaging, serving as the final step in the optimization update for hash-based or tiled grid encoders.
++
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$, where $N$ is the number of voxels in the grid. The operation involves a constant number of arithmetic operations per voxel.
+-- **Memory Complexity:** $O(1)$ auxiliary memory, as it operates in-place on the existing gradient buffers.
+-- **Strengths:** Simple to implement; effectively suppresses high-frequency noise; resolution-invariant when normalized.
+-- **Limitations:** Can oversmooth fine details if the weight `w` is too high; does not preserve sharp edges as well as anisotropic TV variants.
++- **Time Complexity:** Linear with respect to the number of voxels, as it involves computing differences between neighboring voxels [S1, unofficial].
++- **Memory Complexity:** Requires storage for the gradient tensor and potentially temporary buffers for neighbor differences [S1, unofficial].
++- **Strengths:** Preserves sharp boundaries while smoothing flat regions, which is beneficial for volume representations with distinct material interfaces [S2, unofficial].
++- **Limitations:** May introduce blocky artifacts if the regularization weight is too high [S2, unofficial].
+ 
+ ## Background
+-This method is part of the Differentiable Volume Gaussian Optimization (DVGO) framework and its reference implementations. It is used to regularize the density and color fields in neural volume rendering, ensuring that the learned representations are spatially smooth. The specific implementation cited here is from an unofficial reference repository [S1, unofficial].
++Total Variation Gradient Addition is part of the optimization pipeline for differentiable volume rendering, specifically in implementations like ref-dvgo. It builds on [Per-Region Gradient Averaging](2715-per-region-gradient-averaging.md) by applying regularization to the averaged gradients. The method is derived from the principles of total variation regularization in image processing and inverse problems [S1, S2, unofficial].
+ 
+ ## Sources
+-[S1] gkouros/ref-dvgo, https://github.com/gkouros/ref-dvgo, fetched 2026-10-28 (unofficial)+[S1] gkouros/ref-dvgo, https://github.com/gkouros/ref-dvgo, fetched 2026-10-28 (unofficial)
++[S2] Total Variation Regularization on Grid, https://github.com/gkouros/ref-dvgo, fetched 2026-10-28 [S2, unofficial]

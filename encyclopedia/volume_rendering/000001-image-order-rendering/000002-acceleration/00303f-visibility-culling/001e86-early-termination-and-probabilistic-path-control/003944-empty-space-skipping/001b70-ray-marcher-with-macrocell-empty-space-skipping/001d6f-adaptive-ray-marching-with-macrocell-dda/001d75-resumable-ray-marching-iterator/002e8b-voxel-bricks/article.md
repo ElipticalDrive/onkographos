@@ -1,0 +1,74 @@
+# Voxel Bricks
+
+Also called: Brickmap, Brickmap Traversal, Brickmap approach
+
+## Overview
+Voxel Bricks is a hierarchical culling method for volume rendering that optimizes ray marching by grouping voxels into fixed-size $8 \times 8 \times 8$ blocks called "bricks" [S1, S2, unofficial]. It solves the problem of excessive traversal steps in sparse voxel grids by maintaining a secondary "brickgrid" that references only non-empty bricks, allowing the renderer to skip entire regions of empty space [S1, S2, unofficial]. It differs from [Adaptive Ray Marching with Voxel Skipping](3870-adaptive-ray-marching-with-voxel-skipping.md) by using a fixed hierarchical depth (two levels) and from [Block Predicate Filtering](9106-block-predicate-filtering.md) by explicitly storing empty bricks as null references in the grid rather than using bit-packed predicates [S1, S2, unofficial].
+
+## How it works
+**Inputs:** A volumetric dataset represented as a set of occupied $8 \times 8 \times 8$ bricks; a ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
+**Outputs:** A color and transmittance value for the ray intersection.
+
+**Data Structures:**
+1.  **Brick:** A static array of $8 \times 8 \times 8 = 512$ voxels. The layout is not specified in the sources, but typically stored as a contiguous block of memory [S1, S2, unofficial].
+2.  **Brickgrid:** An infinite, sparse 3D grid that maps integer coordinates $(x, y, z)$ to pointers or references to Brick objects [S1, unofficial]. Empty entries in the brickgrid contain no reference (null) [S1, S2, unofficial].
+
+**Algorithm Steps:**
+1.  **Brickgrid Traversal:** Perform a 3D-DDA (Digital Differential Analyzer) traversal on the brickgrid using the ray parameters [S1, unofficial]. This determines the sequence of brick coordinates $(b_x, b_y, b_z)$ that the ray intersects [S1, unofficial].
+2.  **Empty Check:** For each brick coordinate visited by the DDA, check if the brickgrid entry is null [S2, unofficial].
+    *   If null, the brick is empty. Skip to the next brick coordinate [S1, S2, unofficial].
+    *   If non-null, retrieve the Brick reference [S1, unofficial].
+3.  **Brick Traversal:** If the brick is not empty, perform standard ray marching within the $8 \times 8 \times 8$ voxel volume of that brick [S2, unofficial]. This involves stepping through the 512 voxels using the basic ray marching algorithm [S2, unofficial].
+4.  **Termination:** Continue until the ray exits the volume or a termination condition (e.g., opacity threshold) is met [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_voxel_bricks(ray_origin, ray_direction, brickgrid, brick_marcher):
+    # 1. Traverse brickgrid using 3D-DDA
+    # Determine the sequence of brick coordinates intersected by the ray
+    brick_coords = dda_3d(ray_origin, ray_direction, brickgrid_bounds)
+    
+    for bx, by, bz in brick_coords:
+        # 2. Check if brick exists (is not empty)
+        brick = brickgrid.get(bx, by, bz)
+        
+        if brick is None:
+            # Brick is empty, skip it
+            continue
+        
+        # 3. Traverse the brick's voxels
+        # Convert brick coordinate to world space bounds for the brick
+        brick_origin = brick_to_world(bx, by, bz)
+        brick_size = 8.0 # Fixed brick dimension
+        
+        # Perform ray marching within this brick
+        color, transmittance = brick_marcher(ray_origin, ray_direction, brick_origin, brick_size, brick)
+        
+        if transmittance < epsilon:
+            return color # Ray fully opaque
+            
+    return background_color
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The brickgrid is described as "infinite," implying it must handle large coordinate ranges. Implementers must ensure the DDA handles large integer steps without overflow [S1, unofficial].
+*   **Boundary Conditions:** The brickgrid has "no particular size," meaning the renderer must handle rays that start or end outside the defined brickgrid bounds [S1, unofficial].
+*   **Degenerate Input:** If a brick contains only air voxels, it is marked empty in the brickgrid. If a brick contains only opaque voxels, it is stored and traversed fully [S2, unofficial].
+
+## Subtopics
+
+## Operating characteristics
+**Time Complexity:** Worst-case scenario for brickgrid traversal is $n\sqrt{2}$ iterations for an $n \times n$ grid area, though typical sparse scenes are much faster due to skipping [S1, unofficial].
+**Memory Complexity:** Memory usage is proportional to the number of occupied bricks. Empty bricks consume no memory for voxel data, only the brickgrid entry (which is null) [S1, S2, unofficial].
+**Performance:** Drastically improves render times by reducing the number of ray marching steps, primarily through the reduction of steps each ray has to take [S2, unofficial].
+**Strengths:** Minimal structure overhead, suitable for interactive simulations where voxels change frequently [S2, unofficial]. Simple to implement [S1, unofficial].
+**Limitations:** Fixed brick size ($8 \times 8 \times 8$) may not be optimal for all scene densities. The brickgrid itself can become large if the occupied bricks are sparse but spread out over a large volume [S1, S2, unofficial].
+
+## Background
+The method was proposed in the context of voxel simulation and rendering, prioritizing interactivity and minimal structure overhead for dynamic voxel changes [S2, unofficial]. It is described as a simpler alternative to distance fields and Sparse Voxel Octrees (SVOs) [S1, unofficial]. The author notes that the original paper stops short of discussing further hierarchical expansions (like fat-trees) [S1, unofficial].
+
+## Sources
+[S1] A Rundown on Brickmaps :: a cozy blog, https://uygarb.dev/posts/0003_brickmap_rundown/, fetched 2026-10-25 (unofficial)
+[S2] Ray-Marched Voxel Simulation, https://www.jorisar.nl/blog/VoxelPlayground/, fetched 2026-10-25 (unofficial)

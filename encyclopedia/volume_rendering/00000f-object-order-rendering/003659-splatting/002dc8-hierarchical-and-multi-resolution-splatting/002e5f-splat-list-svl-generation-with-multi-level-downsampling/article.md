@@ -3,188 +3,113 @@
 Also called: LOD Splatting, Sparse Voxel List
 
 ## Overview
-This method generates a Sparse Voxel List (SVL) of splat geometry across multiple levels of detail (LOD) by iteratively downsampling a voxel occupancy mask and extracting splat primitives for each level [S1, unofficial]. It solves the problem of efficiently representing high-resolution voxel data for rendering by creating a hierarchy of splats, allowing the renderer to select appropriate detail levels based on screen-space footprint or error metrics. It differs from standard hierarchical splatting by explicitly constructing a flat, contiguous buffer of splat indices (`uint16_t`) organized by LOD, rather than relying solely on tree traversal during rasterization [S1, unofficial].
+This method generates a Sparse Voxel List (SVL) of splat geometry across multiple levels of detail (LOD) by iteratively downsampling a voxel occupancy mask and extracting splat primitives for each level [S1, unofficial]. It solves the problem of efficiently representing high-resolution voxel data for rendering by creating a hierarchy of splats, allowing the renderer to select appropriate detail levels based on screen-space footprint or error thresholds [S1, unofficial]. It differs from standard hierarchical splatting by explicitly constructing a contiguous buffer of `uint16_t` indices referencing geometry items, rather than relying on tree traversal during rasterization [S1, unofficial].
 
 ## How it works
-The method operates on a per-chunk basis within a larger chunk set. It assumes the input voxel data is available in a compressed (RLE) or uncompressed format and produces a geometry list suitable for GPU upload.
+**Inputs:** A voxel chunk containing an occupancy mask (stored as `Voxel` type, aliased to `uint8_t`) [S1, unofficial].
+**Outputs:** A contiguous SVL buffer of size `geom_items * sizeof(uint16_t)` and metadata in `struct ChunkMD` [S1, unofficial].
 
-### Inputs and Outputs
-*   **Input:** A `ChunkMD` structure containing voxel data (`voxels` or `rle`), metadata (`count`, `offset`), and state flags (`dirty`, `remesh`).
-*   **Output:** A contiguous SVL buffer (`c->svl`) of type `uint16_t*`, where each element is an index into a geometry buffer. The buffer size is determined by `c->svl_items_total`. The chunk state is updated with `c->svl_dirty = 1` and `c->svl_items_total` is set.
+**Data Structures:**
+The core state is held in `struct ChunkMD` [S1, unofficial]:
+*   `svl`: pointer to `uint16_t*` (the SVL buffer) [S1, unofficial].
+*   `svl_items[MAX_LOD_LEVEL]`: array of `uint32_t` storing item counts per LOD level [S1, unofficial].
+*   `svl_items_total`: `uint32_t` total item count [S1, unofficial].
+*   `svl_dirty`: `volatile uint8_t` flag indicating the SVL needs regeneration [S1, unofficial].
+*   `no_geometry`: `volatile uint8_t` flag set if no geometry is generated [S1, unofficial].
 
-### Data Structures
-The implementation relies on specific structures defined in the source [S1, unofficial]:
+Geometry items are referenced via `struct GeometrySVL` [S1, unofficial]:
+*   `lod`: `uint8_t` (LOD level) [S1, unofficial].
+*   `vao`: `uint32_t` (Vertex Array Object ID) [S1, unofficial].
+*   `vbo`: `uint32_t` (Vertex Buffer Object ID) [S1, unofficial].
+*   `vbo_items`: `uint32_t` (Number of vertices in VBO) [S1, unofficial].
 
-**`struct GeometrySVL`**
-Represents a single splat primitive in the list.
-*   `lod`: `uint8_t` - The level of detail index.
-*   `vao`: `uint32_t` - Vertex Array Object identifier or index.
-*   `vbo`: `uint32_t` - Vertex Buffer Object identifier or index.
-*   `vbo_items`: `uint32_t` - Number of vertices/items in this VBO.
+**Parameters:**
+*   `MAX_LOD_LEVEL`: Constant defining the number of splat LOD levels, set to 5 [S1, unofficial].
+*   `Voxel`: Type alias for `uint8_t` [S1, unofficial].
 
-**`struct ChunkMD`**
-Contains the state and data for a single voxel chunk. Key fields for SVL generation:
-*   `voxels`: `Voxel*` (alias for `uint8_t*`) - Uncompressed voxel data.
-*   `rle`: `Voxel*` - Compressed voxel data.
-*   `count`: `uint32_t` - Number of voxels in the chunk.
-*   `svl`: `uint16_t*` - The output SVL buffer.
-*   `svl_items[MAX_LOD_LEVEL]`: `uint32_t` - Count of SVL items per LOD level.
-*   `svl_items_total`: `uint32_t` - Total number of SVL items across all LODs.
-*   `svl_dirty`: `volatile uint8_t` - Flag indicating SVL needs regeneration.
-*   `no_geometry`: `volatile uint8_t` - Flag indicating chunk has no geometry.
+**Algorithm:**
+1.  **Initialization:** For a given chunk `c`, check if `c->svl_dirty` is set. If not, skip regeneration [S1, unofficial].
+2.  **Mask Generation:** Generate the initial voxel occupancy mask for the chunk using `chunk_make_mask` [S1, unofficial].
+3.  **LOD Loop:** Iterate through LOD levels `i` from 0 to `MAX_LOD_LEVEL - 1`:
+    a.  Extract splat primitives for the current level `i` from the current mask. Accumulate the count of geometry items into a running total `geom_items` [S1, unofficial].
+    b.  Store the count for this level in `c->svl_items[i]` [S1, unofficial].
+    c.  If `i` is not the final LOD level (`i < MAX_LOD_LEVEL - 1`), downsample the current mask into a work buffer for level `i+1` using `chunk_mask_downsample` [S1, unofficial].
+4.  **Buffer Allocation:** Allocate a contiguous SVL buffer of size `geom_items * sizeof(uint16_t)` [S1, unofficial].
+5.  **Data Copy:** Copy the accumulated geometry data from the mesher buffer into the allocated SVL buffer [S1, unofficial].
+6.  **Edge Case (Empty Geometry):** If `geom_items` is zero:
+    a.  Free any existing SVL buffer [S1, unofficial].
+    b.  Zero out `c->svl_items` [S1, unofficial].
+    c.  Set `c->svl_items_total` to 0 [S1, unofficial].
+    d.  Set `c->no_geometry` to 1 [S1, unofficial].
+    e.  Mark `c->svl_dirty` to 1 [S1, unofficial].
+7.  **Finalization:** Update `c->svl_items_total` with the final `geom_items` count and clear `c->svl_dirty` [S1, unofficial].
 
-**`struct ChunkSet`**
-Manages the collection of chunks.
-*   `gsvl[MAX_LOD_LEVEL]`: `struct GeometrySVL*` - Array of geometry pointers per LOD level.
-*   `MAX_LOD_LEVEL`: Constant, set to 5 [S1, unofficial].
-
-### Algorithm Steps
-The generation process is triggered when a chunk is marked for remeshing (`c->remesh != 0`) and is not currently being processed by another thread [S1, unofficial].
-
-1.  **Initialization:**
-    *   Allocate temporary buffers for the current thread: `geom` (geometry data), `mask` (occupancy mask), and `work` (downsampling workspace) [S1, unofficial].
-    *   Initialize `geom_items = 0` and `temp_lo_vbo_segments[MAX_LOD_LEVEL] = {0}` [S1, unofficial].
-    *   Clear the `geom`, `mask`, and `work` buffers to zero [S1, unofficial].
-
-2.  **Iterative Downsampling and Extraction:**
-    *   Generate the initial voxel occupancy mask for the chunk using `chunk_make_mask` [S1, unofficial].
-    *   Loop through LOD levels $i$ from 0 to `MAX_LOD_LEVEL - 1`:
-        *   Extract splat primitives from the current mask for level $i$. The specific extraction logic (e.g., surface marching, point projection) is encapsulated in `chunk_make_mesh` or similar internal calls, populating the `geom` buffer [S1, unofficial].
-        *   Record the number of geometry items added for this LOD in `temp_lo_vbo_segments[i]` [S1, unofficial].
-        *   If $i$ is not the final LOD level:
-            *   Downsample the current mask into the `work` buffer for level $i+1$ using `chunk_mask_downsample` [S1, unofficial].
-            *   The `work` buffer becomes the input mask for the next iteration.
-
-3.  **Buffer Allocation and Copying:**
-    *   Accumulate the geometry item counts across all LOD levels into a running total `geom_items` [S1, unofficial].
-    *   Allocate a contiguous SVL buffer of size `geom_items * sizeof(uint16_t)` [S1, unofficial].
-    *   Copy the accumulated geometry data from the `mesher` buffer into the allocated SVL buffer [S1, unofficial].
-    *   Update `c->svl_items_total` with `geom_items` [S1, unofficial].
-
-4.  **Edge Case: Empty Geometry:**
-    *   If `geom_items` is zero:
-        *   Free any existing SVL buffer [S1, unofficial].
-        *   Set `c->svl_items` to zero.
-        *   Set `c->svl_items_total` to 0.
-        *   Set `c->no_geometry = 1` [S1, unofficial].
-        *   Mark `c->svl_dirty = 1` [S1, unofficial].
-
-5.  **Cleanup:**
-    *   Release the temporary buffers for the thread [S1, unofficial].
-    *   Update chunk state flags to indicate successful meshing [S1, unofficial].
-
-### Pseudocode
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Constants
-MAX_LOD_LEVEL = 5
-MESHER_THREAD_BUFFERS = 2
+def generate_svl(chunk: ChunkMD, set: ChunkSet):
+    # Check if regeneration is needed
+    if not chunk.svl_dirty:
+        return
 
-# Helper: Downsample mask
-def chunk_mask_downsample(source_mask, dest_mask, chunk_count):
-    # Implementation details for downsampling are not fully specified in sources.
-    # [G] Assumes a standard averaging or max-pooling operation on 2x2x2 blocks.
-    # dest_mask is resized or reused to hold the coarser representation.
-    pass
-
-# Helper: Make mask
-def chunk_make_mask(voxels, count, mask_buffer):
-    # Converts voxel occupancy data into a binary mask.
-    # [G] Assumes voxels are non-zero if occupied.
-    for i in range(count):
-        if voxels[i] != 0:
-            mask_buffer[i] = 1
-        else:
-            mask_buffer[i] = 0
-
-# Helper: Extract splats
-def chunk_extract_splats(mask, geom_buffer, lod_index):
-    # Extracts splat primitives from the mask for the given LOD.
-    # Returns the number of items added.
-    # [G] Specific splat extraction logic (e.g., marching cubes, point cloud) is abstracted.
-    # The source mentions chunk_make_mesh which handles meshing, but SVL generation
-    # specifically iterates LODs. We assume this function populates geom_buffer.
-    pass
-
-def generate_svl(set, chunk, thread_id, buffer_id):
-    # 1. Initialization
-    geom_buffer = mesher[thread_id].geom[buffer_id]
-    mask_buffer = mesher[thread_id].mask[buffer_id]
-    work_buffer = mesher[thread_id].work[buffer_id]
-    
-    # Clear buffers
-    memset(geom_buffer, 0, geom_size)
-    memset(mask_buffer, 0, mask_size)
-    memset(work_buffer, 0, work_size)
-    
+    # Initialize counters
     geom_items = 0
-    temp_lo_vbo_segments = [0] * MAX_LOD_LEVEL
+    svl_items_per_level = [0] * MAX_LOD_LEVEL
     
-    # 2. Generate Initial Mask
-    chunk_make_mask(chunk.voxels, chunk.count, mask_buffer)
+    # Create initial mask
+    current_mask = chunk_make_mask(chunk)
     
-    # 3. Iterative Downsampling and Extraction
+    # Iterate through LOD levels
     for i in range(MAX_LOD_LEVEL):
-        # Extract splats for current LOD
-        items_added = chunk_extract_splats(mask_buffer, geom_buffer, i)
-        temp_lo_vbo_segments[i] = items_added
-        geom_items += items_added
+        # Extract splats for current level
+        # This function populates a temporary geometry buffer and returns item count
+        level_items = extract_splats_for_level(current_mask, i)
+        svl_items_per_level[i] = level_items
+        geom_items += level_items
         
-        # Downsample for next LOD if not last level
+        # Downsample mask for next level if not the last level
         if i < MAX_LOD_LEVEL - 1:
-            chunk_mask_downsample(mask_buffer, work_buffer, chunk.count)
-            # Swap buffers: work becomes mask for next iteration
-            # [G] Implementation detail: pointers are swapped or data copied
-            mask_buffer, work_buffer = work_buffer, mask_buffer
-            
-    # 4. Allocation and Copying
-    if geom_items > 0:
-        chunk.svl = mem_alloc(geom_items * sizeof(uint16_t))
-        # Copy accumulated geometry data
-        # [G] The source says "copy the accumulated geometry data from the mesher buffer into it"
-        # This implies the geom_buffer contains the raw geometry, and SVL contains indices.
-        # However, the SVL buffer is uint16_t*, suggesting it stores indices.
-        # The exact mapping from geom_buffer to SVL indices is not detailed.
-        # [G] Assuming geom_buffer is flattened and SVL is a direct copy of indices/pointers.
-        memcpy(chunk.svl, geom_buffer, geom_items * sizeof(uint16_t))
-        chunk.svl_items_total = geom_items
-        chunk.svl_dirty = 1
-    else:
-        # 5. Edge Case: Empty Geometry
-        if chunk.svl:
-            mem_free(chunk.svl)
-            chunk.svl = None
+            current_mask = chunk_mask_downsample(current_mask)
+    
+    # Handle empty geometry case
+    if geom_items == 0:
+        if chunk.svl is not None:
+            free(chunk.svl)
+        chunk.svl_items = [0] * MAX_LOD_LEVEL
         chunk.svl_items_total = 0
         chunk.no_geometry = 1
         chunk.svl_dirty = 1
+        return
+
+    # Allocate SVL buffer
+    chunk.svl = allocate_buffer(geom_items * sizeof(uint16_t))
+    
+    # Copy geometry data from mesher buffer to SVL buffer
+    # The mesher buffer contains the actual geometry indices/points
+    copy_geometry_to_svl(chunk, geom_items)
+    
+    # Update metadata
+    chunk.svl_items = svl_items_per_level
+    chunk.svl_items_total = geom_items
+    chunk.svl_dirty = 0
 ```
 
-### Parameters
-*   `MAX_LOD_LEVEL`: Constant defining the number of splat LOD levels, set to 5 [S1, unofficial].
-*   `Voxel`: Type alias for `uint8_t` [S1, unofficial].
-*   `uint16_t`: Used for chunk/voxel locations and SVL indices [S1, unofficial].
-*   `uint32_t`: Used for worldspace vectors, iterators, and geometry counts [S1, unofficial].
-
-### Edge Cases and Pitfalls
-*   **No Geometry:** If the chunk contains no occupied voxels, `geom_items` will be zero. The algorithm must free any existing SVL buffer and set `no_geometry = 1` to prevent rendering errors [S1, unofficial].
-*   **Thread Safety:** The mesher uses a pool of buffers (`MESHER_THREAD_BUFFERS = 2`) per thread to avoid contention. If all buffers are busy, the thread skips the chunk [S1, unofficial].
-*   **Precision:** Voxel coordinates use `uint16_t`, which may limit the maximum chunk size or coordinate range. Worldspace vectors use `uint32_t` [S1, unofficial].
+**Edge Cases and Pitfalls:**
+*   **Precision:** Voxel coordinates use `uint16_t`, while worldspace vectors use `uint32_t` [S1, unofficial]. Ensure type conversions are handled correctly to avoid overflow or truncation.
+*   **Boundaries:** The `chunk_mask_downsample` function must correctly handle boundary conditions when reducing the resolution of the occupancy mask [S1, unofficial].
+*   **Degenerate Input:** If the input chunk is empty or contains no valid voxels, `geom_items` will be zero, triggering the empty geometry handling path [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The generation time is proportional to the number of voxels in the chunk and the number of LOD levels. Each LOD level involves a mask extraction and a downsampling step. The total work is $O(N \cdot L)$, where $N$ is the number of voxels and $L$ is `MAX_LOD_LEVEL` (5) [S1, unofficial].
-*   **Memory Complexity:** The SVL buffer size is proportional to the number of splats generated, which is typically much smaller than the number of voxels. The temporary buffers (`geom`, `mask`, `work`) are allocated per thread and scale with chunk size [S1, unofficial].
-*   **Strengths:**
-    *   **Efficiency:** By pre-computing the SVL, rendering can be faster as it avoids per-frame tree traversal or complex culling logic for LOD selection [S1, unofficial].
-    *   **Simplicity:** The flat buffer structure is easy to upload to the GPU [S1, unofficial].
-*   **Limitations:**
-    *   **Static LOD:** The LOD levels are pre-computed. If the camera moves significantly, the pre-computed LODs may not be optimal, potentially leading to over-rendering or aliasing [S1, unofficial].
-    *   **Memory Overhead:** Storing multiple LOD levels can increase memory usage compared to a single-resolution representation, although the sparse nature mitigates this [S1, unofficial].
-*   **When to Use:** Suitable for static or slowly changing scenes where pre-computation is acceptable and rendering speed is critical [S1, unofficial].
-*   **When Not to Use:** For highly dynamic scenes where the geometry changes frequently, the overhead of regenerating the SVL may outweigh the rendering benefits [S1, unofficial].
+**Time Complexity:** The generation time depends on the number of voxels and the downsampling operations. Each LOD level requires a pass over the current mask and a downsampling step. The total time is proportional to the sum of the number of voxels at each level [S1, unofficial].
+**Memory Complexity:** The SVL buffer size is proportional to the total number of splat primitives across all LOD levels, specifically `geom_items * sizeof(uint16_t)` [S1, unofficial]. Additional memory is required for temporary masks and work buffers during generation [S1, unofficial].
+**Measured Performance:** Not given in the sources.
+**Scaling:** The method scales with the number of LOD levels (`MAX_LOD_LEVEL = 5`) [S1, unofficial]. More levels allow for finer granularity in LOD selection but increase the complexity of the generation process and the size of the SVL buffer.
+**Strengths:** Provides a flat, contiguous buffer for efficient GPU upload and rendering. Supports multiple LOD levels for adaptive detail.
+**Limitations:** Requires regeneration when the chunk changes (`svl_dirty` flag) [S1, unofficial]. The fixed number of LOD levels (5) may not be optimal for all scenes.
 
 ## Background
-The method is part of the VoxelPlat project, an unofficial open-source voxel engine [S1, unofficial]. It implements a specific approach to hierarchical splatting by generating a Sparse Voxel List (SVL) with multi-level downsampling. The technique is designed to optimize rendering performance by reducing the number of primitives sent to the GPU while maintaining visual quality through LOD selection.
+This method is part of the VoxelPlat project, an unofficial implementation of voxel rendering techniques [S1, unofficial]. It is designed to integrate with a chunk-based voxel management system, handling the transition from voxel data to splat geometry for rendering.
 
 ## Sources
 [S1] kosshi-net/voxplat, https://github.com/kosshi-net/voxplat, fetched 2026-10-27 (unofficial)

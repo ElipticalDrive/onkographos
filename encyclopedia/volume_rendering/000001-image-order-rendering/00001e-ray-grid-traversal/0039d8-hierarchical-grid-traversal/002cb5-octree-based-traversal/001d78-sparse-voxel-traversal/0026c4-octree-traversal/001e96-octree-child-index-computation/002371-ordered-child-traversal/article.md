@@ -3,106 +3,78 @@
 Also called: Sparse Ray-Octree Intersection (SUBDIVIDE)
 
 ## Overview
-Ordered Child Traversal determines the traversal order of an octree's eight children relative to a specific ray, ensuring they are visited from front-to-back (closest to furthest). This is critical for volume rendering algorithms that require correct alpha blending or early ray termination. It differs from [Point Location](2076-point-location.md) (which finds a single node) and [Fast Projection for Octree Nodes](2178-fast-projection-for-octree-nodes.md) (which projects geometry) by specifically outputting a permutation of child indices based on ray intersection depth. It builds on [Octree Child Index Computation](1807-octree-child-index-computation.md) to map these ordered indices to actual memory locations.
+Ordered Child Traversal determines the visitation sequence of a node's eight children during ray traversal, ensuring they are processed in front-to-back order relative to the ray origin. This ordering is critical for correct alpha blending in volume rendering and for maintaining visibility order in rasterization-based approaches. It differs from [Point Location](2076-point-location.md) by focusing on traversal order rather than spatial indexing, and from [Fast Projection for Octree Nodes](2178-fast-projection-for-octree-nodes.md) by explicitly handling the depth-sorting logic required for correct compositing.
 
 ## How it works
-**Inputs:** Ray $R_i$ (origin $O$, direction $D$); current voxel/node $V$ (center $C$, half-extent $h$).
-**Outputs:** A sequence of child indices $c \in \{0, \dots, 7\}$ sorted by increasing distance from $O$ to the child's near plane.
+**Inputs:** Ray $R_i$ (origin $O$, direction $D$); Current voxel/node $V$ (center $C$, half-extent $h$); Parent node index (implicit in traversal context).
+**Outputs:** An ordered list of child indices (0-7) to be visited.
 
 **Data Structures:**
-- `ORDERED_CHILDREN`: A precomputed lookup table of size $8 \times 8$. The first index is the octant containing the ray origin (0-7), and the second index is the ray direction sign bits (or a simplified direction category). The value is an array of 8 integers representing the child visitation order.
+*   `ORDERED_CHILDREN`: A precomputed lookup table of size $8 \times 8$. The table maps the octant containing the ray origin (0-7) to a permutation of the 8 child indices (0-7) sorted by their distance from the ray origin along the ray direction.
 
 **Steps:**
-1. Determine the octant index $o$ of the ray origin $O$ relative to the current node center $C$. This is done by comparing $O_x, O_y, O_z$ with $C_x, C_y, C_z$.
-2. Determine the ray direction category. In [S1], this is simplified to the sign of the direction components to determine which "corner" the ray enters from.
-3. Look up the permutation table: `order = ORDERED_CHILDREN[o][direction_category]`.
-4. Iterate through `order`. For each child index $c$, compute the child's bounding box and check intersection with the ray.
-5. If the ray intersects the child's bounding box within the current node's $[t_{min}, t_{max}]$ range, add the child to the traversal list.
+1.  Determine which of the 8 octants the ray origin $O$ lies in relative to the current node center $C$. Let this octant index be $o \in \{0, \dots, 7\}$.
+2.  Retrieve the child visitation order from the precomputed table: `order = ORDERED_CHILDREN[o]`.
+3.  Iterate through `order`. For each child index $c$:
+    *   Compute the child's bounding box.
+    *   Perform ray-box intersection test.
+    *   If intersected, push child to the next traversal list.
 
 **Formulas:**
-The distance to the near plane of a child $c$ is calculated using slab intersection:
-$$ t_{near} = \max(t_{min}, \max_{i \in \{x,y,z\}} \frac{child\_min_i - O_i}{D_i}) $$
-$$ t_{far} = \min(t_{max}, \min_{i \in \{x,y,z\}} \frac{child\_max_i - O_i}{D_i}) $$
-A child is intersected if $t_{near} \le t_{far}$.
+The octant $o$ is determined by the signs of the vector $O - C$:
+$$ o = 4 \cdot \text{sign}(O_x - C_x) + 2 \cdot \text{sign}(O_y - C_y) + 1 \cdot \text{sign}(O_z - C_z) $$
+where $\text{sign}(v) = 1$ if $v \ge 0$ else $0$. (Note: Exact bit-packing may vary by implementation, but the mapping is consistent).
 
 **Parameters:**
-- `ORDERED_CHILDREN`: Precomputed table. [S1] uses a static table.
+*   `ORDERED_CHILDREN`: Static constant table. Typical values depend on the coordinate system (e.g., Y-up vs Z-up).
+
+**Edge Cases:**
+*   **Ray Origin Inside Node:** If the ray origin is exactly on a face or edge, the octant determination must be robust. Using a small epsilon or consistent half-open interval checks prevents ambiguity [S2, unofficial].
+*   **Precision:** Near axis planes, floating-point errors can cause incorrect octant classification. [S2, unofficial] suggests using a midpoint check or epsilon comparisons for robustness in intersection masks.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def get_ordered_children(ray_origin, ray_dir, node_center, node_half_extent):
-    # Determine octant of ray origin relative to node center
-    octant = 0
-    if ray_origin.x > node_center.x: octant |= 1
-    if ray_origin.y > node_center.y: octant |= 2
-    if ray_origin.z > node_center.z: octant |= 4
+def get_ordered_children(ray_origin, node_center, node_half_extent):
+    """
+    Returns a list of child indices (0-7) ordered front-to-back.
+    """
+    # 1. Determine octant of ray origin relative to node center
+    # Sign function: 1 if >= 0, else 0
+    sx = 1 if (ray_origin.x - node_center.x) >= 0 else 0
+    sy = 1 if (ray_origin.y - node_center.y) >= 0 else 0
+    sz = 1 if (ray_origin.z - node_center.z) >= 0 else 0
     
-    # Determine direction category (simplified for 8 octants)
-    # Map direction signs to an index 0-7
-    dir_cat = 0
-    if ray_dir.x < 0: dir_cat |= 1
-    if ray_dir.y < 0: dir_cat |= 2
-    if ray_dir.z < 0: dir_cat |= 4
+    # Octant index (example mapping: X is MSB, Z is LSB)
+    octant = (sx << 2) | (sy << 1) | sz
     
-    # Lookup precomputed table
-    # Note: The exact mapping of dir_cat to table index depends on implementation.
-    # [S1] implies a direct lookup based on origin octant and ray direction.
-    order = ORDERED_CHILDREN_TABLE[octant][dir_cat]
+    # 2. Lookup precomputed order table
+    # ORDERED_CHILD_TABLE[octant] returns a tuple/list of 8 integers
+    child_order = ORDERED_CHILD_TABLE[octant]
     
-    return order
-
-def traverse_ordered(ray_origin, ray_dir, node_center, node_half_extent, t_min, t_max):
-    children = []
-    order = get_ordered_children(ray_origin, ray_dir, node_center, node_half_extent)
-    
-    for child_idx in order:
-        # Compute child bounds
-        child_min, child_max = get_child_bounds(child_idx, node_center, node_half_extent)
-        
-        # Slab intersection
-        t1 = (child_min.x - ray_origin.x) / ray_dir.x
-        t2 = (child_max.x - ray_origin.x) / ray_dir.x
-        t_x_min = min(t1, t2)
-        t_x_max = max(t1, t2)
-        
-        t1 = (child_min.y - ray_origin.y) / ray_dir.y
-        t2 = (child_max.y - ray_origin.y) / ray_dir.y
-        t_y_min = min(t1, t2)
-        t_y_max = max(t1, t2)
-        
-        t1 = (child_min.z - ray_origin.z) / ray_dir.z
-        t2 = (child_max.z - ray_origin.z) / ray_dir.z
-        t_z_min = min(t1, t2)
-        t_z_max = max(t1, t2)
-        
-        t_enter = max(t_x_min, t_y_min, t_z_min)
-        t_exit = min(t_x_max, t_y_max, t_z_max)
-        
-        # Check intersection within current ray segment
-        if t_enter <= t_exit and t_enter < t_max and t_exit > t_min:
-            children.append(child_idx)
-            
-    return children
+    return child_order
 ```
 
 ## Subtopics
 
 ### Intersection Mask Computation
-A function that computes a bitmask of children intersected by a ray, handling edge cases near axis planes. It calculates slab radius and $t_{min}/t_{max}$ for the current node. It identifies the first child using the midpoint of $t_{min}/t_{max}$ to avoid precision issues. It checks intersections with X, Y, Z planes within the $t_{min}/t_{max}$ range. For each plane intersection, it sets bits in masks A-F based on epsilon comparison with center coordinates. Masks are combined using AND operations. Parameter: `epsilon` = $10^{-4}$ for robustness [S2, unofficial].
+A function that computes a bitmask of children intersected by a ray, handling edge cases near axis planes [S2, unofficial]. It calculates slab radius and $t_{min}/t_{max}$ for the current node, checks if the root hit is valid ($t_{min} < t_{max}$), and identifies the first child using the midpoint of $t_{min}/t_{max}$ to avoid precision issues [S2, unofficial]. It checks intersections with X, Y, Z planes within the $t$ range, setting bits in masks A-F based on epsilon comparisons with center coordinates, then combines masks using AND operations [S2, unofficial]. Parameter: `epsilon` (typically $10^{-4}$) for robustness [S2, unofficial].
+
+### Occupancy Visibility-Ordering
+A view-dependent step that computes a visibility-sorted index array referencing occupancy geometry in front-to-back order, required for correct rasterization [S3, unofficial]. It traverses the occupancy histogram tree in depth-first order, visiting children in front-to-back visibility order determined by the octant containing the viewpoint (perspective) or view direction (orthogonal) [S3, unofficial]. Each non-leaf node index is emitted twice: before visiting children (front face) and after (back face). Leaf node indices are emitted twice back-to-back (front then back) [S3, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ for lookup and $O(8)$ for intersection checks per node. Constant factor is very small due to table lookup.
-- **Memory Complexity:** $O(1)$ auxiliary space (lookup table is small, $8 \times 8$).
-- **Strengths:** Ensures correct front-to-back ordering for alpha blending; avoids sorting children at runtime.
-- **Limitations:** Requires precomputation; precision issues near axis planes require epsilon handling [S2, unofficial].
-- **When to use:** Volume rendering with alpha blending; ray marching on octrees.
-- **When not to use:** Binary space partitioning where order is implicit; non-hierarchical grids.
+*   **Time Complexity:** $O(1)$ per node, as it involves a constant-time octant lookup and a fixed-size table access.
+*   **Memory Complexity:** $O(1)$ auxiliary memory for the lookup table (64 integers).
+*   **Strengths:** Ensures correct alpha blending without post-sorting; efficient lookup.
+*   **Limitations:** Requires precomputation of the table; order depends on ray direction and node position.
+*   **When to use:** Always when front-to-back traversal is required for compositing or rasterization.
 
 ## Background
-Originated in the context of sparse voxel octree rendering. [S1] (NGD, 2021) uses it for real-time rendering with implicit 3D shapes, populating the next list of voxels in parallel. [S2, unofficial] (HashDAG) provides a bitmask-based variant for robust intersection testing.
+The concept of ordered child traversal is fundamental to hierarchical volume rendering. The term "SUBDIVIDE" and the specific iterator `ORDERED_CHILDREN` are used in the Neural Geometric Level of Detail (NGLOD) paper [S1]. The robust intersection mask computation is described in the HashDAG repository [S2, unofficial]. The visibility-ordering for rasterization is detailed in the SparseLeap paper [S3, unofficial].
 
 ## Sources
 [S1] Neural Geometric Level of Detail: Real-time Rendering with Implicit 3D Shapes, https://doi.org/10.1109/cvpr46437.2021.01120, fetched 2026-10-26
 [S2] Phyronnaz/HashDAG, https://github.com/Phyronnaz/HashDAG, fetched 2026-10-26 (unofficial)
+[S3] SparseLeap: Efficient Empty Space Skipping, https://vcg.seas.harvard.edu/publications/20180101-sparseleap-efficient-empty-space-skipping-for-large-scale-volume-rendering/paper, fetched 2026-10-24 (unofficial)
