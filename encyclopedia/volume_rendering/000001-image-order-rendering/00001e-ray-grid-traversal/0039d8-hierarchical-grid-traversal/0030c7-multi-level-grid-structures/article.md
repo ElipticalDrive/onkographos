@@ -1,37 +1,36 @@
 # Multi-level Grid Structures
 
-Also called: Hierarchical Grids, Hierarchy Grids, Multi-Level Grids
+Also called: Hierarchical Grids, Two-Level Grids, Macrocell Grids, Multi-Level Array Grids
 
 ## Overview
-Multi-level Grid Structures are hierarchical acceleration structures for ray-grid traversal that recursively refine a uniform grid based on item or voxel density [S1, S2, unofficial]. They solve the problem of inefficient traversal in sparse or highly non-uniform scenes by replacing empty coarse cells with null pointers or skipping them entirely, thereby avoiding the overhead of traversing empty space [S1, S2, unofficial]. Unlike fixed two-level grids [4245-two-level-grids-for-ray-tracing-on-gpus.md] or macrocell grids [5207-macrocell-grid-traversal.md] which use static depth or fixed block sizes, these methods allow for deeper recursion and local resolution adaptation [S1, S2, unofficial].
+Multi-level Grid Structures are a family of hierarchical acceleration techniques for ray-grid traversal that organize volumetric or geometric data into nested grid levels to efficiently skip empty space. They solve the problem of high traversal overhead in sparse or complex scenes by allowing rays to jump over large empty regions using coarse metadata, rather than stepping through every fine-grained voxel. What sets this family apart from flat uniform grids is the use of variable or fixed downsampling factors to create coarser representations, and from pure tree structures (like Octrees) is the reliance on regular grid indexing and array-based storage for cache coherence and constant-time access [S1, S2, unofficial].
 
 ## Shared principles
-All methods in this family share the core mechanism of hierarchical subdivision. A coarse grid is constructed over the scene or volume. Empty or low-density regions at a given level are marked as empty (via null pointers, boolean flags, or compacted arrays) and skipped during traversal. Non-empty regions are subdivided into finer sub-grids. This process repeats recursively until a depth limit is reached or a leaf threshold (e.g., minimum item count) is met. Traversal involves stepping through the coarse grid and, upon entering an occupied cell, descending into the corresponding sub-grid.
+All members of this family share the core mechanism of spatial hierarchy via grid subdivision. The fundamental principle is the decomposition of the scene bounding box into a coarse grid (Level 0) where each cell acts as a container for a finer grid (Level 1) or a leaf node.
+
+1.  **Hierarchical Decomposition**: The space is divided into a top-level grid of dimensions $N_x \times N_y \times N_z$. Each cell in this top-level grid can be:
+    *   **Empty**: Represented by a null pointer or a boolean flag, allowing the ray to skip the entire sub-volume.
+    *   **Occupied**: Pointing to a child structure, which may be another grid (recursive) or a leaf array of primitives/voxels.
+2.  **Traversal Logic**: Ray traversal begins at the root (top-level grid). The ray's entry and exit points are computed against the top-level grid. The algorithm iterates through the top-level cells intersected by the ray. If a cell is marked empty, the traversal skips directly to the next occupied cell or exits the volume. If occupied, the ray is tested against the child structure.
+3.  **Coordinate Mapping**: Child coordinates are derived from parent coordinates using integer division or bit-shifting (for power-of-two subdivisions) or by storing explicit offsets. For example, in a macrocell grid with factor $M$, the macrocell index $(i, j, k)$ corresponds to fine grid cells $[i \cdot M, (i+1) \cdot M) \times [j \cdot M, (j+1) \cdot M) \times [k \cdot M, (k+1) \cdot M)$ [S1, S2].
+4.  **Memory Layout**: Unlike tree structures that require pointer chasing, grid-based hierarchies often use contiguous arrays. This improves spatial locality and SIMD performance on GPUs [S1, unofficial].
 
 ## Subtopics
 
 ### [Multi-Level Array Grid](3329-multi-level-array-grid.md)
-A pointer-based tree of uniform sub-grids that recursively refines based on density. It differs from siblings by allowing deeper recursion (up to depth 2 in the source implementation) and using null pointers for empty cells rather than fixed macrocells. Choose this for scenes with highly non-uniform density where deep hierarchy is beneficial.
+A recursive, density-adaptive hierarchical grid where the resolution of child grids is determined by the number of primitives in the parent node. It differs from fixed-level grids by allowing arbitrary depth (up to a limit) and variable grid dimensions per node, optimizing for non-uniform primitive distribution. It uses a heuristic based on Woo (1992) to calculate dimensions $M_i = \frac{S_i}{\max\{S_i\}} \sqrt[3]{\rho N}$, where $\rho=4$ is a density factor and $N$ is the primitive count.
 
 ### [Two-Level Grids for Ray Tracing on GPUs](4245-two-level-grids-for-ray-tracing-on-gpus.md)
-A fixed-depth structure designed for GPU parallel construction via radix sort. It superimposes a sparse top-level grid over variable-resolution sub-grids. It differs from siblings by optimizing for GPU build costs and allowing arbitrary resolution for leaf grids, solving the "teapot in a stadium" problem. Choose this for dynamic scenes on GPUs where build time is critical.
+A fixed-depth (two-level) hierarchical structure optimized for GPU construction and traversal. It consists of a sparse top-level grid where each cell contains a sub-grid (leaf grid) of arbitrary resolution. It solves the 'teapot in a stadium' problem by leveraging coherence within top-level cells and uses a sort-based construction algorithm (Kalojanov and Slusallek) to build the leaf level efficiently. It differs from Multi-Level Array Grid by having a fixed depth and using a global sort for construction rather than recursive subdivision.
 
 ### [Macrocell Grid Traversal](5207-macrocell-grid-traversal.md)
-A technique that superimposes a coarse grid over a fine uniform grid using simple boolean occupancy flags. It differs from siblings by using a single level of hierarchy with fixed-size macrocells, making it computationally cheap to build and traverse. Choose this for animated scenes where the acceleration structure is rebuilt frequently.
+A technique that superimposes a coarse grid over a base uniform fine grid to skip empty regions. It uses a fixed downsampling factor $M$ (typically 6) to create macrocells. If a macrocell is empty, the ray skips $M$ steps in the fine grid. It differs from the other children by being a simple boolean occupancy check on a fixed downsampling of an existing uniform grid, rather than a dynamically built hierarchical structure. It offers ~30% performance improvement over single ray grids for sparse data.
 
 ### Hierarchical Grid (hgridf) Renderer
-#### definition
-- [S1, unofficial] A renderer for hierarchical grids (hgridf) that combines primitive generation and rendering in a single pass, updating only 'dirty' cells to support interactive editing.
-#### step
-- [S1, unofficial] Traverse the top-level grid and visit each grid-cell unless it is empty.
-- [S1, unofficial] Check if the current grid-cell is 'dirty' (voxels have changed since the last visit).
-- [S1, unofficial] If dirty, use the associated point or polygon engine to regenerate the local isosurface representation for that cell.
-- [S1, unofficial] Mark the cell as 'clean' after regeneration.
-#### parameter
-- [S1, unofficial] The hierarchical grid uses a top-level N×N×N grid and sub-grids of size M×M×M, where M=16.
+A specific rendering application of hierarchical grids that combines primitive generation and rendering in a single pass to support interactive editing. It traverses the top-level grid and visits each non-empty cell, checking if it is 'dirty' (changed since last visit). If dirty, it regenerates the local isosurface representation using a point or polygon engine and marks the cell as 'clean'. It uses a top-level $N \times N \times N$ grid and sub-grids of size $M \times M \times M$ where $M=16$ [S1, unofficial].
 
 ## Background
-The concept of hierarchical grids for volume rendering and ray tracing originated in the early 1990s. The "hgrid" structure was introduced to save space in synthetic volumes representing solids of homogeneous material, which contain large regions of uniformly inside or outside voxels [S1, unofficial]. The hgridf renderer, described in a 2003 paper by Krivánek et al., extended this by combining generation and rendering to support interactive editing of distance fields and acquired volumes [S1, unofficial]. The method relies on the simplicity and constant-time access of grid structures compared to the logarithmic time of octrees [S1, unofficial].
+The concept of hierarchical grids for volume rendering and ray tracing originated in the early 1990s as a solution to the memory and performance limitations of uniform grids for sparse data. The term "hgrid" was popularized by researchers working on hardware-accelerated point rendering of isosurfaces, where a two-level grid (top-level $N \times N \times N$ and sub-grid $M \times M \times M$) was used to save space and speed up access compared to octrees [S1, unofficial]. The specific heuristic for dynamic grid dimensioning (Woo's heuristic) is attributed to Woo (1992) [S1, S2, unofficial]. The GPU-optimized two-level grid construction using global sorts was developed later, notably by Kalojanov and Slusallek (2009) and Billeter et al. (2009), to leverage the parallel nature of GPUs [S1, unofficial].
 
 ## Sources
 [S1] Hardware Accelerated Point Rendering of Isosurfaces, http://wscg.zcu.cz/wscg2003/Papers_2003/J61.pdf, fetched 2026-10-26 (unofficial)

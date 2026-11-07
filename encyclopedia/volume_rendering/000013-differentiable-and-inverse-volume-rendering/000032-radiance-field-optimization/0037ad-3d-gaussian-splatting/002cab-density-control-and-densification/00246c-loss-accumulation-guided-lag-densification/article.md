@@ -7,20 +7,20 @@ Loss Accumulation Guided (LAG) densification is a density control strategy for 3
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** The current set of 3D Gaussians $\mathcal{G}$, the accumulated binary loss masks from the previous $K$ iterations, and the current iteration index $t$.
-*   **Output:** A boolean flag for each Gaussian indicating whether it is permitted to undergo splitting or cloning during the densification phase.
+*   **Input:** The current set of 3D Gaussians $\mathcal{G}$, the accumulated binary loss masks from the previous $K$ iterations, and the current iteration index $t$ [G].
+*   **Output:** A boolean flag for each Gaussian indicating whether it is permitted to undergo splitting or cloning during the densification phase [S1, unofficial].
 
 **Data Structures:**
-*   **Loss Mask History:** A buffer storing the binary mask $M_t(P)$ for the last $K$ iterations. The mask is a single-channel image (or tensor) of the same resolution as the rendered view, where each element corresponds to a pixel $P$.
-*   **Densification Score (DS):** A scalar value per Gaussian, updated incrementally or computed periodically.
+*   **Loss Mask History:** A buffer storing the binary mask $M_t(P)$ for the last $K$ iterations [G]. The mask is a single-channel image (or tensor) of the same resolution as the rendered view, where each element corresponds to a pixel $P$ [S1, unofficial].
+*   **Densification Score (DS):** A scalar value per Gaussian, updated incrementally or computed periodically [G].
 
 **Parameters:**
-*   $K$: The number of iterations over which the loss mask is accumulated and the DS is averaged. [S1, unofficial]
-*   $\tau$: The threshold value for the mean loss $L_m(P)$ to distinguish well-reconstructed pixels from under-reconstructed ones. [S1, unofficial]
+*   $K$: The number of iterations over which the loss mask is accumulated and the DS is averaged [S1, unofficial].
+*   $\tau$: The threshold value for the mean loss $L_m(P)$ to distinguish well-reconstructed pixels from under-reconstructed ones [S1, unofficial].
 
 **Steps:**
 
-1.  **Compute Loss Map:** During the backward pass of the current iteration $t$, compute the joint reconstruction loss. Average the three color channels to obtain a single-channel loss map $L_m(P)$ for each pixel $P$ in the image plane. [S1, unofficial]
+1.  **Compute Loss Map:** During the backward pass of the current iteration $t$, compute the joint reconstruction loss [S1, unofficial]. Average the three color channels to obtain a single-channel loss map $L_m(P)$ for each pixel $P$ in the image plane [S1, unofficial].
 2.  **Generate Binary Mask:** Apply thresholding to $L_m(P)$ to create a binary mask $M_t(P)$:
     $$
     M_t(P) = \begin{cases} 
@@ -28,103 +28,87 @@ Loss Accumulation Guided (LAG) densification is a density control strategy for 3
     0 & \text{otherwise}
     \end{cases}
     $$
-    Pixels with $M_t(P)=1$ are considered under-reconstructed; pixels with $M_t(P)=0$ are well-reconstructed. [S1, unofficial]
-3.  **Accumulate Mask:** Store $M_t(P)$ in the history buffer. If the buffer size exceeds $K$, discard the oldest entry. [S1, unofficial]
-4.  **Project Gaussian Coverage:** For each Gaussian $g_i$, project its 2D covariance onto the image plane to determine the set of covered pixels $\Omega_{i,t}$ for the current iteration $t$. [S1, unofficial]
-5.  **Compute Densification Score (DS):** Calculate the DS for Gaussian $g_i$ by summing the mask values over its covered pixels for the current iteration and averaging over the $K$ iterations. The formula is:
+    Pixels with $M_t(P)=1$ are considered under-reconstructed; pixels with $M_t(P)=0$ are well-reconstructed [S1, unofficial].
+3.  **Accumulate Mask:** Store $M_t(P)$ in the history buffer [G].
+4.  **Project Gaussian Coverage:** For each Gaussian $g_i$, project its 2D covariance onto the image plane to determine the set of covered pixels $\Omega_{i,t}$ for the current iteration $t$ [S1, unofficial].
+5.  **Compute Densification Score (DS):** Calculate the DS for Gaussian $g_i$ by summing the mask values over its covered pixels for the current iteration and averaging over the $K$ iterations [S1, unofficial]. The formula is:
     $$
     DS_i = \frac{1}{K} \sum_{t=1}^{K} \sum_{P \in \Omega_{i,t}} M_t(P)
     $$
-    where $\Omega_{i,t}$ is the set of pixels covered by Gaussian $i$ at iteration $t$, and $M_t(P)$ is the mask value for pixel $P$ at iteration $t$. [S1, unofficial]
-6.  **Evaluate Densification Constraint:** Compare $DS_i$ against a predefined threshold (or relative metric) to determine if the Gaussian is in a persistently under-reconstructed region. A low DS indicates the Gaussian covers well-reconstructed pixels, where further densification is unnecessary. A high DS indicates persistent high error, allowing densification. [S1, unofficial]
-7.  **Dual-Constraint Check:** A Gaussian $g_i$ is permitted to split or clone if and only if:
-    *   It satisfies the original 3DGS gradient criterion (e.g., gradient magnitude exceeds a threshold).
-    *   It satisfies the LAG constraint (DS is sufficiently high). [S1, unofficial]
+    where $\Omega_{i,t}$ is the set of pixels covered by Gaussian $i$ at iteration $t$, and $M_t(P)$ is the mask value for pixel $P$ at iteration $t$ [S1, unofficial].
+6.  **Evaluate Densification Constraint:** Compare $DS_i$ against a predefined threshold to determine if the Gaussian is in a persistently under-reconstructed region [S1, unofficial]. A low DS indicates the Gaussian covers well-reconstructed pixels, where further densification is unnecessary [S1, unofficial]. A high DS indicates persistent high error, allowing densification [S1, unofficial].
+7.  **Dual-Constraint Check:** A Gaussian $g_i$ is permitted to split or clone if and only if it satisfies the original 3DGS gradient criterion and satisfies the LAG constraint (DS is sufficiently high) [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def lag_densification_check(gaussian, loss_map, mask_history, K, tau):
+def lag_densification_check(gaussian, loss_map, mask_history, K, tau, ds_threshold, gradient_ok):
     """
     Determines if a Gaussian should be allowed to densify based on LAG.
     
     Args:
-        gaussian: Object with method get_covered_pixels() returning set of pixel indices.
+        gaussian: Object with method get_covered_pixels() returning list of (row, col) indices.
         loss_map: 2D array of mean reconstruction losses for the current view.
-        mask_history: List of 2D binary masks from previous K-1 iterations.
+        mask_history: List of 2D binary masks from previous iterations.
         K: Total number of iterations to average over.
         tau: Loss threshold for binary mask generation.
+        ds_threshold: Threshold for the Densification Score. Not specified in sources [G].
+        gradient_ok: Boolean indicating if the Gaussian meets the standard 3DGS gradient criterion [G].
         
     Returns:
         bool: True if densification is allowed, False otherwise.
     """
     # Step 1 & 2: Compute current binary mask
-    # M_t(P) = 1 if L_m(P) > tau else 0
     current_mask = (loss_map > tau).astype(int)
     
     # Step 3: Update mask history
     mask_history.append(current_mask)
     if len(mask_history) > K:
-        mask_history.pop(0)
+        mask_history = mask_history[-K:]
         
-    # Ensure we have K masks for averaging
-    if len(mask_history) < K:
-        # Not enough history yet; allow densification based on gradient alone [G]
-        return True 
-
     # Step 4 & 5: Compute Densification Score (DS)
     covered_pixels = gaussian.get_covered_pixels()
     ds_sum = 0.0
     
-    for t in range(K):
-        mask_t = mask_history[t]
-        for p in covered_pixels:
-            # Check if pixel p is within image bounds and covered
-            if is_valid_pixel(p) and mask_t[p] == 1:
-                ds_sum += 1
+    for mask_t in mask_history:
+        for r, c in covered_pixels:
+            # Step 4: Check bounds and coverage
+            if 0 <= r < mask_t.shape[0] and 0 <= c < mask_t.shape[1]:
+                ds_sum += mask_t[r, c]
                 
     ds = ds_sum / K
     
     # Step 6 & 7: Dual-Constraint Check
-    # Check original gradient criterion
-    gradient_ok = gaussian.check_gradient_threshold()
-    
-    # Check LAG constraint
-    # Note: The exact threshold for DS is not specified in sources. 
-    # A relative threshold or fixed count is typically used. 
-    # Here we assume a threshold 'ds_threshold' is defined externally.
-    lag_ok = ds > ds_threshold 
-    
+    lag_ok = ds >= ds_threshold
     return gradient_ok and lag_ok
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** The loss map computation must be stable. Averaging over $K$ iterations smooths out viewpoint-specific noise but may lag behind rapid scene changes if $K$ is too large. [S1, unofficial]
-*   **Boundaries:** Pixel coverage $\Omega_{t}$ must be computed accurately. Partial coverage (alpha blending) is not explicitly weighted in the DS formula in the source, which counts binary mask values for covered pixels. [S1, unofficial]
-*   **Degenerate Input:** If $K$ is not yet reached, the DS is undefined. The implementation must handle this, typically by defaulting to allowing densification or using a conservative estimate. [G]
+*   **Precision:** Averaging over $K$ iterations smooths out viewpoint-specific noise to provide a stable measure of reconstruction quality [S1, unofficial].
+*   **Boundaries:** The DS formula counts binary mask values for covered pixels without explicitly weighting partial coverage or alpha blending [S1, unofficial].
+*   **Degenerate Input:** If $K$ iterations have not yet elapsed, the DS is undefined [G]. The implementation must handle this, typically by defaulting to allowing densification or using a conservative estimate [G].
 
 ## Subtopics
 
 ### Comparison with Gradient-Only Densification
-Gradient-only densification relies solely on positional gradient magnitude. This can lead to excessive Gaussian generation in high-frequency texture regions where gradients are naturally large, even if the reconstruction error is low. LAG adds a loss-based constraint to suppress this unnecessary growth. [S1, unofficial]
+Gradient-only densification relies solely on positional gradient magnitude [S1, unofficial]. This can lead to excessive Gaussian generation in high-frequency texture regions where gradients are naturally large, even if the reconstruction error is low [S1, unofficial]. LAG adds a loss-based constraint to suppress this unnecessary growth [S1, unofficial].
 
 ### Comparison with Pruning
-Pruning removes Gaussians based on opacity and gradient metrics after densification. LAG prevents the creation of redundant Gaussians in the first place. They are complementary: LAG reduces the peak number of Gaussians during training, while pruning cleans up remaining low-contribution primitives. [S1, unofficial]
+Pruning removes Gaussians based on opacity and gradient metrics after densification [S1, unofficial]. LAG prevents the creation of redundant Gaussians in the first place [S1, unofficial]. They are complementary: LAG reduces the peak number of Gaussians during training, while pruning cleans up remaining low-contribution primitives [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The additional cost is the computation of the loss map and mask accumulation, which is $O(N_{pixels})$ per iteration for the mask generation and $O(N_{Gaussians} \times N_{covered\_pixels})$ for DS calculation. However, since the loss map is already computed during backpropagation, the overhead is minimal. [S1, unofficial]
-*   **Memory Complexity:** Requires storing $K$ binary masks of image resolution. For typical image sizes and small $K$, this is negligible compared to the Gaussian storage. [S1, unofficial]
-*   **Measured Performance:** On the Mip-NeRF 360 bicycle scene, LAG reduced the peak number of Gaussians from 947,136 (Base) to 547,083, and training time from unspecified (Base) to 190.0 seconds. SSIM dropped from 0.751 to 0.734, and PSNR from 25.153 to 24.939. [S1, unofficial]
-*   **Scaling:** LAG scales well with image resolution as the mask operations are parallelizable. The reduction in Gaussian count leads to faster per-iteration computation in subsequent steps. [S1, unofficial]
-*   **Strengths:** Reduces redundant Gaussian growth, shortens training time, and achieves more compact scene representations. [S1, unofficial]
-*   **Limitations:** Slight decrease in rendering metrics (SSIM/PSNR) due to suppressed densification in well-reconstructed but potentially complex areas. [S1, unofficial]
-*   **When to Use:** When training time and memory footprint are critical, and a small trade-off in peak reconstruction quality is acceptable. Particularly effective when combined with pruning. [S1, unofficial]
-*   **When Not to Use:** When maximum possible reconstruction fidelity is required, or when the scene has rapidly changing details that require frequent densification regardless of current loss. [S1, unofficial]
+*   **Time Complexity:** Not given in the sources. The method reuses the loss map generated during standard backpropagation, and maintaining a smaller set of Gaussians reduces per-iteration computation [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources. Requires storing $K$ binary masks of image resolution [G].
+*   **Measured Performance:** On the Mip-NeRF 360 bicycle scene, LAG reduced the peak number of Gaussians from 947,136 (Base) to 547,083, and training time from unspecified (Base) to 190.0 seconds [S1, unofficial]. SSIM dropped from 0.751 to 0.734, and PSNR from 25.153 to 24.939 [S1, unofficial]. On Mip-NeRF 360, LAG reduces NGS from 0.77M to 0.47M and training time from 245.7s to 215.4s compared to the Base configuration [S1, unofficial].
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Reduces redundant Gaussian growth, shortens training time, and achieves more compact scene representations [S1, unofficial].
+*   **Limitations:** Slight decrease in rendering metrics (SSIM/PSNR) due to suppressed densification in well-reconstructed but potentially complex areas [S1, unofficial].
+*   **When to Use:** When training time and memory footprint are critical, and a small trade-off in peak reconstruction quality is acceptable [S1, unofficial]. Particularly effective when combined with pruning [S1, unofficial].
 
 ## Background
-Loss Accumulation Guided (LAG) densification was proposed in the paper "Loss-Guided Density Control and Efficient Backward Optimisation for Compact Gaussian Splatting" [S1, unofficial]. It addresses the issue of redundant primitive generation in 3D Gaussian Splatting, which increases computational load and training time. The method leverages the existing loss computation pipeline to guide density control, avoiding the need for additional rendering passes or external estimations. [S1, unofficial]
+Loss Accumulation Guided (LAG) densification was proposed in the paper "Loss-Guided Density Control and Efficient Backward Optimisation for Compact Gaussian Splatting" [S1, unofficial]. It addresses the issue of redundant primitive generation in 3D Gaussian Splatting, which increases computational load and training time [S1, unofficial]. The method leverages the existing loss computation pipeline to guide density control, avoiding the need for additional rendering passes or external estimations [S1, unofficial].
 
 ## Sources
 [S1] Loss-Guided Density Control and Efficient Backward Optimisation for Compact Gaussian Splatting, https://doi.org/10.21203/rs.3.rs-10572680/v1, fetched 2026-10-26 (unofficial)

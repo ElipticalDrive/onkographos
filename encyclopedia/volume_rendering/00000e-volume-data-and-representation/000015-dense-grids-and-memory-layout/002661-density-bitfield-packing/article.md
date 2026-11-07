@@ -3,103 +3,90 @@
 Also called: packbits
 
 ## Overview
-Density Bitfield Packing compresses a floating-point density grid into a binary bitfield to accelerate ray marching by enabling efficient empty-space skipping [S1, S2, unofficial]. Unlike standard dense grids that store full precision values for every voxel, this method binarizes the data based on a threshold, reducing memory bandwidth requirements during traversal [S1, S2, unofficial]. It differs from [Spatial Indexing and Ordering](1797-spatial-indexing-and-ordering.md) by using a fixed-resolution bitmask rather than hierarchical structures, and from [Evaluation Cache](874-evaluation-cache.md) by operating on the raw density field rather than cached ray integrals.
+Density Bitfield Packing compresses a floating-point density grid into a binary bitfield to accelerate ray marching by enabling efficient empty-space skipping [S1, S2, unofficial]. It differs from standard dense grid storage by replacing per-voxel density values with single-bit occupancy flags, allowing traversal algorithms to skip large empty regions in constant time per bit [S1, S2, unofficial].
 
 ## How it works
 **Inputs:**
-*   `grid`: A 3D density field of shape $[C, H, H, H]$, where $C$ is the number of channels (or slices) and $H$ is the spatial dimension. $H$ must be even ($H \% 2 == 0$) [S1, S2, unofficial]. Values are typically 32-bit floats [S1, S2, unofficial].
-*   `thresh`: A scalar threshold value used for binarization [S1, S2, unofficial].
+- `grid`: A contiguous tensor of density values with shape $[C, H^3]$, where $C$ is the number of channels and $H$ is the spatial dimension. $H$ must be even ($H \% 2 == 0$) [S1, S2, unofficial]. Values are typically 32-bit floats [S1, S2, unofficial].
+- `thresh`: A scalar float threshold used for binarization [S1, S2, unofficial].
 
 **Outputs:**
-*   `bitfield`: A uint8 tensor of shape $[C, H^3 / 8]$ [S1, S2, unofficial]. Each byte stores the occupancy status of 8 consecutive voxels.
+- `bitfield`: A tensor of shape $[C, H^3 / 8]$ with dtype `uint8` [S1, S2, unofficial]. Each byte stores the occupancy status of 8 consecutive voxels.
 
-**Data Structure Layout:**
-The output `bitfield` packs 8 voxels into a single 8-bit integer. For a given channel $c$ and spatial index $(i, j, k)$, the corresponding bit index $b$ within the byte is determined by the linearized voxel index. Let $V_{ijk}$ be the density value at $(i, j, k)$. The bit $b$ is set to 1 if $V_{ijk} \ge \text{thresh}$, otherwise 0. The byte index $B$ in the output array is $\lfloor (c \cdot H^3 + \text{linear}(i,j,k)) / 8 \rfloor$, and the bit position is $(c \cdot H^3 + \text{linear}(i,j,k)) \pmod 8$.
+**Data Structures:**
+The bitfield is a linear array where the $k$-th bit of the $n$-th byte corresponds to a specific voxel in the original grid. The mapping assumes a row-major linearization of the 3D grid indices $(i, j, k)$ into a 1D index $I = i \cdot (Y \cdot Z) + j \cdot Z + k$ [G], where $X=Y=Z=H$. The bitfield index $B$ and bit position $b$ within the byte are derived from $I$:
+$$ B = \lfloor I / 8 \rfloor $$
+$$ b = I \pmod 8 $$
+The bit at position $b$ in byte $B$ is set to 1 if the density at $I$ exceeds `thresh`, and 0 otherwise.
 
-**Algorithm Steps:**
-1.  Ensure the input `grid` is a contiguous memory layout (e.g., a contiguous CUDA tensor or flattened array) [S1, unofficial].
-2.  Calculate the total number of output bytes $N = C \cdot H^3 / 8$ [S1, unofficial].
-3.  Iterate through each voxel in the grid.
-4.  Compare the voxel's density value against `thresh`.
-5.  Set the corresponding bit in the `bitfield` to 1 if the value is greater than or equal to `thresh`, and 0 otherwise [S1, S2, unofficial].
-6.  Pack the bits into uint8 bytes, typically with the first voxel in a group mapping to the least significant bit (LSB) or most significant bit (MSB) depending on the specific backend implementation [G: LSB is common in CUDA `__ballot_sync` or bit packing conventions, but exact bit order should be verified against the specific renderer's traversal logic].
+**Steps:**
+1.  Verify that the input `grid` is a contiguous tensor in memory [S1, unofficial].
+2.  Calculate the total number of output bytes $N$:
+    $$ N = \frac{C \cdot H^3}{8} $$
+3.  Iterate through each voxel in the `grid`. For each voxel value $v$:
+    - If $v > \text{thresh}$, set the corresponding bit in the `bitfield` to 1.
+    - Otherwise, set the corresponding bit to 0.
+4.  Return the `bitfield` [S1, S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def packbits(grid, thresh):
+import torch
+
+def packbits(grid: torch.Tensor, thresh: float) -> torch.Tensor:
     """
-    Packs a density grid into a bitfield.
+    Packs a floating-point density grid into a bitfield.
     
     Args:
-        grid: numpy array or torch tensor of shape (C, H, H, H) with dtype float32.
-        thresh: float threshold for binarization.
+        grid: torch.Tensor of shape [C, H*H*H], dtype float32. H must be even.
+        thresh: float, threshold for binarization.
         
     Returns:
-        bitfield: numpy array or torch tensor of shape (C, H^3 / 8) with dtype uint8.
+        torch.Tensor of shape [C, H*H*H/8], dtype uint8.
     """
-    # Ensure contiguous memory layout for efficient processing [S1, unofficial]
-    if not grid.flags['C_CONTIGUOUS']:
-        grid = np.ascontiguousarray(grid)
-        
-    C, H, _, _ = grid.shape
+    # Ensure contiguous memory layout [S1, unofficial]
+    grid = grid.contiguous()
     
-    # Validate dimensions [S1, S2, unofficial]
-    if H % 2 != 0:
-        raise ValueError("H must be even")
-        
-    # Calculate output size [S1, unofficial]
-    N = C * H * H * H // 8
+    C, H3 = grid.shape
+    assert H3 % 8 == 0, "Grid size must be divisible by 8"
     
-    # Initialize bitfield [G]
-    bitfield = np.zeros(N, dtype=np.uint8)
+    # Binarize: 1 if density > thresh, else 0
+    # Using torch.uint8 for the bitfield
+    binary = (grid > thresh).to(torch.uint8)
     
-    # Flatten grid for linear iteration
-    flat_grid = grid.flatten()
+    # Reshape to [C, H^3/8, 8] to group 8 voxels per byte
+    # Note: The linear index I maps to bit position I%8 within the byte index I//8
+    # The default row-major flattening preserves this order if we reshape correctly.
+    # Shape [C, H^3] -> [C, H^3/8, 8]
+    grouped = binary.reshape(C, H3 // 8, 8)
     
-    # Iterate and pack bits
-    for idx in range(len(flat_grid)):
-        voxel_val = flat_grid[idx]
-        
-        # Determine which byte and which bit within that byte
-        byte_idx = idx // 8
-        bit_pos = idx % 8
-        
-        # Binarize: 1 if density >= thresh, else 0 [S1, S2, unofficial]
-        is_filled = 1 if voxel_val >= thresh else 0
-        
-        # Set the bit. Assuming LSB is bit 0.
-        # Note: Endianness and bit-ordering (MSB vs LSB) may vary by hardware/backend.
-        bitfield[byte_idx] |= (is_filled << bit_pos)
-        
+    # Convert bits to byte value
+    # bit 0 is LSB, bit 7 is MSB. 
+    # If grouped[..., 0] is the first voxel, it corresponds to bit 0.
+    weights = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], dtype=torch.uint8, device=grid.device)
+    bitfield = torch.sum(grouped * weights, dim=2)
+    
     return bitfield
 ```
 
-**Parameters:**
-*   `thresh`: The density threshold. Typical values depend on the normalization of the input grid (e.g., 0.0 for signed distance fields, or a small positive epsilon for normalized densities) [S1, S2, unofficial]. Not given in the sources.
-
 **Edge Cases and Pitfalls:**
-*   **Precision:** Floating-point comparisons against `thresh` can be sensitive to noise. A small epsilon may be needed if the grid contains artifacts [G].
-*   **Boundary Conditions:** The method assumes a regular grid. Irregular domains require masking or padding [G].
-*   **Bit Order:** The mapping of voxel index to bit position (LSB-first vs MSB-first) must match the reader's traversal logic. Inconsistent ordering leads to incorrect empty-space skipping [G].
+-   **Precision:** The threshold comparison is exact. Small floating-point errors near the threshold may cause inconsistent occupancy flags if the grid is updated incrementally [G].
+-   **Boundary Conditions:** $H$ must be even to ensure $H^3$ is divisible by 8. If $H$ is odd, the grid must be padded or the packing logic must handle the final incomplete byte [S1, S2, unofficial].
+-   **Memory Layout:** The input grid must be contiguous. Non-contiguous tensors (e.g., from slicing) will produce incorrect results if not copied [S1, unofficial].
 
 ## Subtopics
-
-### Bitwise Density Computation
-Calculates the number of filled voxels between a scene point and a light position to simulate translucency [S3, unofficial]. It avoids expensive texture-based bit counting by using an arithmetic dyadic approach [S3, unofficial]. This method provides better solutions than taking a difference between front and back depth maps, which can contain artifacts [S3, unofficial]. On a Geforce 6, this approach exceeds 200 Hz for models with 60,000 triangles [S3, unofficial].
+#### Bitwise Density Computation
+Calculates the number of filled voxels between a scene point and a light position to simulate translucency, avoiding expensive texture-based bit counting by using an arithmetic dyadic approach [S3, unofficial]. This method provides better results than taking the difference between front and back depth maps, which can contain artifacts [S3, unofficial]. On a Geforce 6, this approach exceeds 200 Hz for models with 60,000 triangles [S3, unofficial].
 
 ## Operating characteristics
-**Time Complexity:** $O(C \cdot H^3)$ for packing. Querying occupancy is $O(1)$ per voxel check, but skipping empty regions depends on the bitfield traversal efficiency [S1, S2, unofficial].
-**Memory Complexity:** Reduces memory footprint by a factor of 32 compared to 32-bit float storage (assuming 1 bit per voxel vs 32 bits) [S1, S2, unofficial].
-**Performance:** The packing step is a simple linear pass. The benefit is realized during ray marching, where empty-space skipping reduces the number of texture fetches and shading computations [S1, S2, unofficial].
-**Strengths:** Significant memory bandwidth reduction; simple implementation; effective for sparse volumes [S1, S2, unofficial].
-**Limitations:** Loss of density information (only binary occupancy); requires re-packing if density values change significantly [S1, S2, unofficial].
-**When to use:** When the volume is sparse or when only binary occupancy is needed for shadowing/translucency [S3, unofficial].
-**When not to use:** When smooth density gradients are required for volume rendering (e.g., fog, smoke) [S1, S2, unofficial].
+-   **Time Complexity:** $O(C \cdot H^3)$ for packing. The packing step is linear in the number of voxels.
+-   **Memory Complexity:** Reduces storage from $32 \cdot C \cdot H^3$ bits (float32) to $1 \cdot C \cdot H^3$ bits (1-bit occupancy), a 32x compression ratio [S1, S2, unofficial].
+-   **Performance:** Accelerates ray marching by allowing traversal to skip empty space in chunks of 8 voxels per byte [S1, S2, unofficial]. The actual speedup depends on the sparsity of the volume.
+-   **Limitations:** Loses density magnitude information; only occupancy is preserved [S1, S2, unofficial]. Not suitable for rendering effects requiring density gradients or transfer functions based on density values.
 
 ## Background
-Originated in the context of GPU-based volume rendering and solid voxelization [S1, S2, S3, unofficial]. The specific implementation details (CUDA tensor handling, `packbits` kernel) are documented in unofficial repositories for NeRF-based rendering pipelines [S1, S2, unofficial]. The application of bitwise operations for density computation in translucency effects was described in "Single-pass GPU Solid Voxelization and Applications" [S3, unofficial].
+Density Bitfield Packing is used in neural radiance field (NeRF) implementations and real-time volume rendering to optimize traversal [S1, S2, unofficial]. It is particularly relevant in systems like ER-NeRF and IDDR-NGP where efficient empty-space skipping is critical for performance [S1, S2, unofficial]. The technique is a standard bit-packing operation often implemented via CUDA kernels or custom PyTorch functions [S1, S2, unofficial].
 
 ## Sources
 [S1] Fictionarry/ER-NeRF, https://github.com/Fictionarry/ER-NeRF, fetched 2026-10-26 (unofficial)

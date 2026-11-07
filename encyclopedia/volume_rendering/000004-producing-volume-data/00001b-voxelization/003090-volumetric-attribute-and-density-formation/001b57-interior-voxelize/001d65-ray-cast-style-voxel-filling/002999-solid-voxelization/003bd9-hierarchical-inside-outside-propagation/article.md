@@ -1,0 +1,256 @@
+# Hierarchical Inside/Outside Propagation
+
+Also called: Hierarchical bit-flip propagation, X-direction hierarchical solidification
+
+## Overview
+Hierarchical Inside/Outside Propagation is a post-processing step for solid voxelization that converts a potentially non-solid, boundary-defined voxel grid into a fully enclosed solid volume by propagating "inside" status hierarchically along the +x axis [S1]. It solves the problem of determining which voxels lie in the interior of a mesh after initial surface intersection, avoiding global ray-casting or flood-fill by leveraging the spatial coherence of the voxel grid [S1]. It differs from single-pass GPU methods by using a multi-level hierarchical approach with explicit neighbor pointers and flag propagation, making it suitable for CPU or hybrid implementations where memory locality and coarse-grained parallelism are prioritized over single-kernel throughput [S1, 3323-single-pass-gpu-solid-voxelization.md].
+
+## How it works
+**Inputs:** A hierarchical voxel grid (e.g., octree or SG-structure) where level-0 nodes contain a sub-grid of voxels (SG voxels). Each node has pointers to its +x and -x neighbors. Initial voxel states are binary (set/unset) based on surface intersection.
+**Outputs:** A solid voxelization where every voxel inside the mesh boundary is marked as "inside" (set) and outside voxels are "outside" (unset).
+
+**Data Structures:**
+*   **Node:** Contains an `inside` flag (boolean), a `flip` flag (boolean), and pointers to `+x_neighbor` and `-x_neighbor`.
+*   **Level-0 Node:** Contains a sub-grid of $N \times N \times N$ SG voxels (typically $4 \times 4 \times 4$ or similar, referred to as "SG voxel column" in sources).
+*   **SG Voxel:** Binary state (0 or 1).
+
+**Algorithm Steps:**
+
+1.  **Initialize Flags:** For every node in the hierarchy (starting from level-1 up to the root), initialize `inside = 0` and `flip = 0` [S1].
+
+2.  **Level-0 Propagation (Local Solidification):**
+    *   Identify "head" nodes: Loop over all even-indexed level-0 nodes in parallel. A node is a head if it has no level-0 -x neighbor (i.e., it is the start of an x-linked string) [S1].
+    *   For each head node, check the last bit in its SG voxel column (local x index 3, assuming 4-wide sub-grids). If this bit is set, it indicates the surface exits the node in the +x direction [S1].
+    *   Navigate along the +x-neighbor pointers from the head node. For each subsequent node in the string, if the previous node's last bit was set, flip the SG voxels in the current node's column (invert all bits in the column) [S1].
+    *   Continue until the end of the string (no +x neighbor). At the end of each string, the SG voxels with local x index 3 of all four level-0 nodes sharing the same level-1 parent are guaranteed to be in agreement [S1].
+
+3.  **Level-1 Propagation (Coarse Solidification):**
+    *   For each level-1 node, examine its children (level-0 nodes).
+    *   If a child level-0 node is at the end of an x-linked node string AND its SG voxels with local x index 3 are set, set the `flip` flag of the parent level-1 node to 1 [S1].
+    *   Identify level-1 head nodes (those with no level-1 -x neighbor).
+    *   Propagate the `flip` flag along x-linked level-1 node strings. If a level-1 node has `flip = 1`, flip both the `flip` and `inside` flags of its +x neighbor [S1].
+    *   This ensures that the `inside` flag of a level-1 node correctly reflects whether the volume enclosed by its children is solid [S1].
+
+4.  **Recursive Propagation to Higher Levels:**
+    *   Repeat Step 3 for all remaining levels up to the root. For each level $i$, propagate `flip` and `inside` flags along x-linked node strings at level $i$, based on the status of nodes at level $i-1$ [S1].
+
+5.  **Downward Propagation (Final Assignment):**
+    *   Start from the root (top level) and propagate the `inside` flag down to level-0 nodes.
+    *   For each node at level $i$ with `inside = 1`:
+        *   If the node has children, flip the `inside` flags of its children (or their SG voxels directly if they are leaves) [S1].
+        *   Specifically, if a parent is "inside", its children are initially "outside" (inverted), and vice versa, depending on the specific implementation of the flip logic described in step 3. The source states: "flip these child nodes' inside flags or their SG voxels, respectively" [S1].
+    *   **Final State:** A level-$i$ node without children is inside the solid object if its `inside` flag is set, and outside otherwise [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hierarchical_inside_outside_propagation(grid):
+    # grid is a hierarchical structure with nodes at levels 0 to L
+    # Each node has: inside (bool), flip (bool), +x_neighbor (Node or None), children (List[Node])
+    
+    # Step 1: Initialize flags
+    for level in range(1, grid.max_level + 1):
+        for node in grid.nodes_at_level(level):
+            node.inside = False
+            node.flip = False
+
+    # Step 2: Level-0 Propagation
+    # Identify head nodes (even-indexed, no -x neighbor)
+    head_nodes_l0 = [n for n in grid.nodes_at_level(0) if n.index % 2 == 0 and n.-x_neighbor is None]
+    
+    for head in head_nodes_l0:
+        current = head
+        propagate_flip = False
+        
+        # Check if head node's last bit is set
+        if head.sg_voxels[-1] == 1: # Assuming last bit is at local x index 3
+            propagate_flip = True
+            
+        while current is not None:
+            # If we are propagating a flip, invert the current node's SG voxels
+            if propagate_flip:
+                for i in range(len(current.sg_voxels)):
+                    current.sg_voxels[i] = 1 - current.sg_voxels[i]
+            
+            # Determine if we continue propagating
+            # The flip continues if the current node's last bit was set BEFORE flipping?
+            # Source says: "If the last bit... is set, all SG voxels... must be flipped."
+            # And "propagating bit flips to the next node."
+            # Logic: If the previous node caused a flip, we flip this node.
+            # Does this node cause a flip for the next?
+            # Source implies the condition is checked on the node being visited.
+            # "If a level-1 node's child... is at the end... and its SG voxels... are set, we set the flip flag."
+            # For L0, it seems the flip is triggered by the previous node's state or the current node's state?
+            # Re-reading: "If the last bit in a level-0 node's SG voxel column is set, all SG voxels... belonging to nodes in +x direction must be flipped."
+            # This implies: If Node A's last bit is set, Node B's voxels are flipped.
+            # So, propagate_flip for Node B depends on Node A's last bit.
+            
+            # Let's adjust:
+            # We need to know if the PREVIOUS node triggered a flip.
+            # But the source says "propagating bit flips".
+            # Let's assume the standard interpretation:
+            # If Node[i] has last bit set, then Node[i+1] voxels are flipped.
+            
+            # However, the source also says: "If a node's flip flag is set, we flip both the flip and the inside flag of its +x neighbor."
+            # This is for higher levels. For L0, it's direct voxel flipping.
+            
+            # Let's stick to the L0 description:
+            # "If the last bit in a level-0 node's SG voxel column is set, all SG voxels in the same column belonging to nodes in +x direction must be flipped."
+            
+            # So, if current node's last bit is set, the NEXT node's voxels are flipped.
+            
+            if current.sg_voxels[-1] == 1:
+                propagate_flip = True
+            else:
+                propagate_flip = False
+                
+            current = current.+x_neighbor
+
+    # Step 3: Level-1 Propagation
+    # Identify level-1 head nodes
+    head_nodes_l1 = [n for n in grid.nodes_at_level(1) if n.-x_neighbor is None]
+    
+    # Set flip flags for level-1 nodes based on their children
+    for node in grid.nodes_at_level(1):
+        # Check if any child is at the end of an x-linked string and has last bit set
+        # Note: "end of an x-linked node string" means no +x_neighbor
+        for child in node.children:
+            if child.+x_neighbor is None and child.sg_voxels[-1] == 1:
+                node.flip = True
+                break # Only need one child to trigger? Source says "If a level-1 node's child..."
+    
+    # Propagate flip and inside flags for level-1
+    for head in head_nodes_l1:
+        current = head
+        while current is not None:
+            if current.flip:
+                # Flip flip and inside flags of +x neighbor
+                if current.+x_neighbor is not None:
+                    current.+x_neighbor.flip = not current.+x_neighbor.flip
+                    current.+x_neighbor.inside = not current.+x_neighbor.inside
+            current = current.+x_neighbor
+
+    # Step 4: Recursive Propagation for Higher Levels
+    for level in range(2, grid.max_level + 1):
+        # Set flip flags for nodes at this level based on children at level-1
+        for node in grid.nodes_at_level(level):
+            for child in node.children:
+                if child.+x_neighbor is None and child.inside: # Or child.flip?
+                    # Source: "If a level-1 node's child... is at the end... and its SG voxels... are set"
+                    # For higher levels, the "SG voxels" concept is replaced by the child's "inside" status?
+                    # Source: "Propagate the flip information along x-linked level-1 node strings... If a node's flip flag is set, we flip both the flip and the inside flag of its +x neighbor."
+                    # It seems the logic is uniform:
+                    # 1. Determine if a node should have flip=1 based on its children's status at the end of strings.
+                    # 2. Propagate flip/inside along x-links.
+                    
+                    # For level i, children are level i-1.
+                    # If a child is at the end of its x-string and its "inside" flag is set (or flip flag?), set parent flip.
+                    # The source says for L1: "If a level-1 node's child... SG voxels... are set, we set the flip flag."
+                    # For higher levels, it says "analogously".
+                    # So, if child.inside is True (meaning the child volume is solid), does it trigger a flip?
+                    # Actually, the flip flag indicates "the next node should invert its inside status".
+                    
+                    # Let's assume: If child is at end of string and child.inside is True, then parent.flip = True.
+                    # But wait, the source says for L0: "SG voxels... are set".
+                    # For L1: "SG voxels... are set".
+                    # For higher levels: "analogously".
+                    # It likely means: If the child's "solidity" indicator is true.
+                    
+                    # Let's use child.inside as the indicator for higher levels.
+                    if child.+x_neighbor is None and child.inside:
+                        node.flip = True
+                        break
+        
+        # Propagate along x-links for this level
+        head_nodes = [n for n in grid.nodes_at_level(level) if n.-x_neighbor is None]
+        for head in head_nodes:
+            current = head
+            while current is not None:
+                if current.flip:
+                    if current.+x_neighbor is not None:
+                        current.+x_neighbor.flip = not current.+x_neighbor.flip
+                        current.+x_neighbor.inside = not current.+x_neighbor.inside
+                current = current.+x_neighbor
+
+    # Step 5: Downward Propagation
+    # Start from root
+    root = grid.root
+    # Root's inside flag is already set by the upward propagation
+    
+    def propagate_down(node):
+        if node.inside:
+            # If parent is inside, children are outside (inverted)
+            # Source: "flip these child nodes' inside flags or their SG voxels, respectively"
+            if node.children:
+                for child in node.children:
+                    child.inside = not child.inside
+                    propagate_down(child)
+            else:
+                # Leaf node (level-0)
+                # If inside is True, flip SG voxels?
+                # Source: "flip these child nodes' inside flags or their SG voxels, respectively"
+                # If child is leaf, flip SG voxels.
+                for i in range(len(node.sg_voxels)):
+                    node.sg_voxels[i] = 1 - node.sg_voxels[i]
+        else:
+            # If parent is outside, children are inside?
+            # No, the source says "flip... if inside flag is set".
+            # If inside flag is NOT set, do nothing?
+            # "For each node of level i that has its inside flag set... flip these child nodes' inside flags"
+            # This implies if inside is False, we do NOT flip.
+            # But this would leave children as they were.
+            # Initial state of children was 0 (outside).
+            # If parent is outside, children should be outside.
+            # If parent is inside, children should be outside (inverted from initial 0? No, initial 0 is outside).
+            # Wait.
+            # Initial state: All voxels are 0 (outside) or based on surface.
+            # The propagation determines the final state.
+            # If a node is "inside", it means the volume is solid.
+            # The "flip" operation inverts the state.
+            
+            # Let's re-read carefully:
+            # "If a node's flip flag is set, we flip both the flip and the inside flag of its +x neighbor."
+            # This sets the inside flag.
+            # Then: "Propagate the inside flag information from the top level down... For each node... that has its inside flag set... flip these child nodes' inside flags"
+            
+            # This suggests:
+            # 1. Upward pass sets the `inside` flag for each node correctly (True if solid, False if hollow/outside).
+            # 2. Downward pass uses this flag to determine the final voxel states.
+            # If a node is `inside` (True), its children are inverted.
+            # If a node is `outside` (False), its children are NOT inverted.
+            
+            # But what is the initial state of children?
+            # The initial state was the result of the surface intersection.
+            # The "flip" in the downward pass inverts this initial state.
+            
+            # So:
+            # If parent.inside == True:
+            #    child.inside = not child.inside (for non-leaves)
+            #    child.sg_voxels = invert(child.sg_voxels) (for leaves)
+            # If parent.inside == False:
+            #    Do nothing.
+            
+            pass
+
+    propagate_down(root)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Conditions:** Nodes at the boundary of the grid have no +x or -x neighbors. The algorithm handles this by checking for `None` pointers [S1].
+*   **Precision:** The algorithm relies on binary flags and bit states, so floating-point precision is not an issue for the propagation logic itself, but the initial voxelization step must be accurate [S1].
+*   **Degenerate Input:** If the mesh is not watertight, the "inside" flag may not propagate correctly, leading to incorrect solidification [S1].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of nodes, as each node is visited a constant number of times (once for initialization, once for upward propagation, once for downward propagation) [S1].
+*   **Memory Complexity:** $O(N)$ for storing the flags and pointers [S1].
+*   **Performance:** Efficient for CPU implementations due to low memory overhead and cache-friendly traversal of x-linked strings [S1].
+*   **Strengths:** Simple to implement, deterministic, works well with hierarchical structures [S1].
+*   **Limitations:** Requires explicit neighbor pointers, which may increase memory usage. Not as easily parallelizable as single-pass GPU methods for very large grids [S1, 3323-single-pass-gpu-solid-voxelization.md].
+
+## Background
+The method was introduced by Michael Schwarz et al. in "Fast Parallel Surface and Solid Voxelization on GPUs" (SIGGRAPH Asia 2010) as part of a broader framework for efficient voxelization [S1]. It was designed to complement GPU-based surface voxelization by providing a robust method for solidification that works well with hierarchical data structures [S1].
+
+## Sources
+[S1] Fast Parallel Surface and Solid Voxelization on GPUs, https://www.michael-schwarz.com/research/publ/files/vox-siga10.pdf, fetched 2026-10-27

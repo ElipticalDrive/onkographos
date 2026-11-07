@@ -2,90 +2,97 @@
 Also called: Four-channel 3D Texture Storage for FCC
 
 ## Overview
-The FCC Dataset Indexing Scheme is a method for storing and accessing Four-Cubic Close-Packed (FCC) volume datasets on graphics hardware that lacks native support for non-Cartesian lattices. It solves the problem of efficiently mapping FCC lattice points to standard 3D textures by grouping points into a four-channel (RGBA) Cartesian structure. It sets itself apart from the [1-channel scheme](3064-3d-texture-storage-and-sampling.md) by halving the memory footprint, though it incurs significant performance penalties due to hardware limitations in selective channel fetching.
+The FCC Dataset Indexing Scheme is a method for storing Four-Component Cubic (FCC) lattice volume data in standard hardware-accelerated 3D textures. It solves the problem that graphics hardware lacks native support for non-Cartesian (FCC) volume datasets, which would otherwise require inefficient layer shifting or multiple texture loads [S1]. It sets itself apart from sibling methods like [Density Bitfield Packing](3788-density-bitfield-packing.md) by preserving the geometric density of the FCC lattice (half the memory of a Cartesian grid) rather than compressing empty space, and from [3D Texture Storage and Sampling](3064-3d-texture-storage-and-sampling.md) by explicitly mapping a non-Cartesian index to a multi-channel Cartesian texture coordinate [S1].
 
 ## How it works
-**Inputs:** An FCC dataset embedded in a Cartesian lattice of size $N_x \times N_y \times N_z$.
-**Outputs:** A four-channel 3D texture of size $W \times H \times D \times 4$, where $W = \lceil N_x/2 \rceil$, $H = \lceil N_y/2 \rceil$, and $D = \lceil N_z/2 \rceil$.
+**Inputs:** An FCC dataset defined on a Cartesian bounding box of size $N_x \times N_y \times N_z$.
+**Outputs:** A four-channel (RGBA) 3D texture of size $W \times H \times D \times 4$, where $W = \lfloor (N_x + 1)/2 \rfloor$, $H = \lfloor (N_y + 1)/2 \rfloor$, and $D = \lfloor (N_z + 1)/2 \rfloor$.
 
 **Data Structures:**
-The texture stores values in a 4-channel format (e.g., `vec4` in GLSL). Each texel at coordinates $(u, v, w)$ and channel $c \in \{0, 1, 2, 3\}$ corresponds to a specific FCC lattice point.
+The FCC lattice $\mathbb{Z}_{\text{fcc}}$ is a subset of the integer Cartesian lattice $\mathbb{Z}^3$. The scheme groups lattice points into sets of four based on their parity. The texture stores these four points as the Red, Green, Blue, and Alpha channels of a single texel.
 
-**Mapping Logic:**
-The FCC lattice $\mathbb{Z}_{\text{fcc}}$ is defined by grouping points as:
+**Mapping Formula:**
+The FCC lattice is defined as:
 $$ \mathbb{Z}_{\text{fcc}} = \{j, j + \boldsymbol{\xi}_{110}, j + \boldsymbol{\xi}_{101}, j + \boldsymbol{\xi}_{011} : j \in 2\mathbb{Z}\} $$
-where $\boldsymbol{\xi}_{110} = (1,1,0)$, $\boldsymbol{\xi}_{101} = (1,0,1)$, and $\boldsymbol{\xi}_{011} = (0,1,1)$. Note that for any $j \in \mathbb{Z}_{\text{fcc}}$, the sum of coordinates $j(1)+j(2)+j(3)$ is always even.
+where $\boldsymbol{\xi}_{110} = (1,1,0)$, $\boldsymbol{\xi}_{101} = (1,0,1)$, and $\boldsymbol{\xi}_{011} = (0,1,1)$ [S1].
 
-For an FCC index $j$, the **parity vector** $\mathbf{p}_j$ is defined as:
+For any FCC index $j = (j(1), j(2), j(3))$, the parity vector is:
 $$ \mathbf{p}_j := (j(1) \bmod 2, j(2) \bmod 2, j(3) \bmod 2) $$
-Because the sum of coordinates is even, $\mathbf{p}_j$ can only take values from the set $\{\mathbf{0}, \boldsymbol{\xi}_{110}, \boldsymbol{\xi}_{101}, \boldsymbol{\xi}_{011}\}$. The channel index $c$ is derived from the parity vector as:
-$$ c = 2p_j(1) + p_j(2) $$
-This maps the parity to a unique integer in $\{0, 1, 2, 3\}$.
+Since $j \in \mathbb{Z}_{\text{fcc}}$, the sum $j(1)+j(2)+j(3)$ is always even. This restricts $\mathbf{p}_j$ to four possible values: $(0,0,0)$, $(1,1,0)$, $(1,0,1)$, and $(0,1,1)$ [S1].
 
-The texture coordinates $(u, v, w)$ are calculated by integer division (floor) of the FCC coordinates by 2:
-$$ u = \lfloor j(1)/2 \rfloor, \quad v = \lfloor j(2)/2 \rfloor, \quad w = \lfloor j(3)/2 \rfloor $$
+The channel index $c \in \{0, 1, 2, 3\}$ is calculated as:
+$$ c = 2p_j(1) + p_j(2) $$
+This maps the parity to a unique integer:
+- $(0,0,0) \to 0$
+- $(1,1,0) \to 2(1)+1 = 3$
+- $(1,0,1) \to 2(1)+0 = 2$
+- $(0,1,1) \to 2(0)+1 = 1$
+
+The 3D texture coordinates $(x, y, z)$ are calculated by integer division by 2:
+$$ x = \lfloor j(1)/2 \rfloor, \quad y = \lfloor j(2)/2 \rfloor, \quad z = \lfloor j(3)/2 \rfloor $$
 
 **Implementation Steps:**
-1.  Given an FCC lattice coordinate $j = (j_x, j_y, j_z)$, compute the texture coordinates:
-    *   $u = j_x \gg 1$ (bitwise right shift by 1)
-    *   $v = j_y \gg 1$
-    *   $w = j_z \gg 1$
-2.  Compute the channel index $c$:
-    *   Extract the least significant bits of $j_x$ and $j_y$: $b_x = j_x \& 1$, $b_y = j_y \& 1$.
-    *   Calculate $c = (b_x \ll 1) | b_y$.
-3.  Fetch the texel from the 3D texture at $(u, v, w)$.
-4.  Select the value at channel $c$.
+1.  Iterate through all valid FCC indices $j$ in the dataset.
+2.  Calculate the texture coordinates $(x, y, z)$ using bitwise right shift (`>> 1`) or integer division.
+3.  Calculate the channel index $c$ using bitwise operations on the least significant bits of the coordinates.
+4.  Store the value $V_j$ in the texture at `texel(x, y, z)[c]`.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def fetch_fcc_value(tex, j_x, j_y, j_z):
-    # Calculate texture coordinates
-    u = j_x >> 1
-    v = j_y >> 1
-    w = j_z >> 1
+# Assuming tex is a 3D texture object with write access
+# j is a tuple (jx, jy, jz) representing an FCC lattice index
+
+def store_fcc_value(tex, j, value):
+    jx, jy, jz = j
     
-    # Calculate channel index from parity bits
-    # j_x & 1 is the LSB of x, j_y & 1 is the LSB of y
-    channel = ((j_x & 1) << 1) | (j_y & 1)
+    # Calculate texture coordinates (integer division by 2)
+    tx = jx >> 1
+    ty = jy >> 1
+    tz = jz >> 1
     
-    # Fetch all four channels
-    texel = texel_fetch(tex, u, v, w)
+    # Calculate channel index using parity bits
+    # p_j(1) = jx & 1
+    # p_j(2) = jy & 1
+    # c = 2 * p_j(1) + p_j(2)
+    channel = ((jx & 1) << 1) | (jy & 1)
     
-    # Select the specific channel
-    # Note: Hardware does not support direct channel indexing efficiently.
-    # See Pitfalls for the required workaround.
-    return texel[channel]
+    # Store value in the specific channel
+    # Note: In GLSL/CUDA, this is a direct write to the channel component
+    tex[tx, ty, tz][channel] = value
+
+def fetch_fcc_value(tex, j):
+    jx, jy, jz = j
+    
+    tx = jx >> 1
+    ty = jy >> 1
+    tz = jz >> 1
+    
+    channel = ((jx & 1) << 1) | (jy & 1)
+    
+    # Retrieve value from specific channel
+    return tex[tx, ty, tz][channel]
 ```
 
-**Pitfalls:**
-*   **Selective Fetching:** Current graphics hardware does not allow efficient selective fetching of a single texture channel. Fetching all four channels and using a conditional or dot product to select one results in massive performance degradation.
-*   **Workaround:** The access must be rewritten as a dot product with a selector vector:
-    ```glsl
-    vec4 texel = texelFetch(tex, u, v, w);
-    vec4 selector = vec4(channel == 0, channel == 1, channel == 2, channel == 3);
-    float value = dot(texel, selector);
-    ```
-*   **Boundary Conditions:** The mapping assumes the FCC lattice is properly aligned within the Cartesian bounds. The resulting texture dimensions are $\lceil N_x/2 \rceil \times \lceil N_y/2 \rceil \times \lceil N_z/2 \rceil$.
+**Edge Cases and Pitfalls:**
+*   **Hardware Channel Fetching:** Current graphics hardware does not allow selective fetching of a single texture channel without loading all channels. To fetch a specific channel $c$, one must fetch the entire texel and use a dot product with a mask vector: `dot(texelFetch(tex, x, y, z), vec4(idx==0, idx==1, idx==2, idx==3))` [S1]. This results in massive performance degradation compared to a standard single-channel fetch [S1].
+*   **Boundary Conditions:** The texture dimensions are derived from the ceiling of half the Cartesian dimensions. Indices must be clamped to the texture bounds $[0, W-1] \times [0, H-1] \times [0, D-1]$ [S1].
 
 ## Subtopics
 
 ### BCC Dataset Indexing Scheme
-A scheme to convert a Body-Centered Cubic (BCC) dataset to a two-channel 3D texture. It uses a similar bitwise mapping logic but with a different parity structure. The access pattern is `texelFetch(texid, j.x >> 1, j.y >> 1, j.z >> 1)[j.x & 1]`. It requires half the memory footprint of a standard 1-channel Cartesian storage for BCC data, analogous to the FCC 4-channel scheme.
+A scheme to convert a Body-Centered Cubic (BCC) dataset to a two-channel (RG) 3D texture. It uses a similar bitwise mapping but with a different parity logic. The access pattern is `texelFetch(texid, j.x >> 1, j.y >> 1, j.z >> 1)[j.x & 1]` [S1]. It is chosen when the underlying data is naturally BCC rather than FCC, offering half the memory footprint of a Cartesian grid [S1].
 
 ## Operating characteristics
-**Time Complexity:** $O(1)$ per sample access. The mapping involves bitwise operations which are very fast. However, the hardware limitation on channel selection forces a full 4-channel fetch and a dot product, increasing the effective latency compared to a direct 1-channel fetch.
-**Memory Complexity:** The 4-channel scheme requires half the memory footprint of a 1-channel Cartesian scheme for the same FCC dataset density. The 1-channel scheme would require storing empty channels or padding, effectively doubling the memory usage for the same number of valid samples.
-**Performance:**
-*   **MRI-Head Dataset:** 4-channel scheme achieved 33.6 fps, while the 1-channel scheme achieved 65.2 fps.
-*   **VisMale Dataset:** 4-channel scheme achieved 31.5 fps, while the 1-channel scheme achieved 68.9 fps.
-*   **CT-Head Dataset:** 4-channel scheme achieved 25.3 fps, while the 1-channel scheme achieved 54.6 fps.
-*   **Carp Dataset:** 4-channel scheme achieved 7.3 fps, while the 1-channel scheme achieved 22.3 fps.
-The 4-channel scheme is consistently slower due to the channel selection overhead, despite the memory efficiency. It is suitable when memory bandwidth or capacity is the bottleneck, but not when raw rendering speed is the primary constraint.
+**Time Complexity:** Index mapping is $O(1)$ using bitwise operations. However, the effective time per sample is higher than standard Cartesian textures due to the hardware limitation requiring full texel fetches and dot-product masking for channel selection [S1].
+**Memory Complexity:** The scheme requires half the memory footprint of a standard one-channel Cartesian scheme storing the same number of points. A one-channel scheme would require twice the memory to store the same FCC data density [S1].
+**Performance:** In benchmarks on MRI-Head data, the 4-channel scheme achieved 33.6 fps, while a 1-channel scheme achieved 65.2 fps. The 4-channel scheme is significantly slower due to the channel selection overhead, despite being more memory efficient [S1].
+**Strengths:** Compact storage for FCC data; compatible with standard 3D texture hardware.
+**Limitations:** Severe performance penalty on current hardware due to inability to selectively fetch channels; not suitable for real-time applications where memory is not the primary bottleneck and latency is critical [S1].
 
 ## Background
-The scheme was proposed by Kim et al. in "GPU Isosurface Raycasting of FCC Datasets" [S1]. It addresses the lack of hardware support for non-Cartesian volume datasets. Previous attempts to load FCC layers into separate textures or shift layers were deemed inefficient due to overhead. The method leverages the mathematical structure of the FCC lattice to pack it into standard 3D textures.
+The scheme was proposed in 2012 by Kim et al. in "GPU Isosurface Raycasting of FCC Datasets" [S1]. It addresses the limitations of previous methods that either discarded half the data to fit Cartesian grids or used inefficient layer-shifting techniques [S1]. The FCC lattice is often used in medical imaging and scientific visualization for its optimal packing density and symmetry, but its non-Cartesian nature made it difficult to utilize on standard GPU architectures [S1].
 
 ## Sources
 [S1] GPU Isosurface Raycasting of FCC Datasets, https://minho-kim-uos.github.io/papers/kim12gpu.pdf, fetched 2026-10-29

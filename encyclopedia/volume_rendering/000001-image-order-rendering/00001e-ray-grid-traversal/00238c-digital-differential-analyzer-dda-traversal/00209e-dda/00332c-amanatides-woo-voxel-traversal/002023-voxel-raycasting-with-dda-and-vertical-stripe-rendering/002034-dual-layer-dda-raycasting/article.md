@@ -61,7 +61,7 @@ Dual-Layer DDA Raycasting is a real-time rendering technique that extends standa
     e.  Check for wall hit in layer 0 (hitA):
         If `worldMap[0][mapX][mapY] > 0` and `!hitA`, set `hitA = true` [S2, unofficial].
         Calculate perpendicular wall distance:
-        $$perpWallDist = \begin{cases} \frac{mapX - rayPosX + (1 - stepX) / 2}{rayDirX} & \text{if } side == 0 \\ \frac{mapY - rayPosY + (1 - stepY) / 2}{rayDirY} & \text{if } side == 1 \\ \frac{mapZ - rayPosZ + (1 - stepZ) / 2}{rayDirZ} & \text{if } side == 2 \end{cases}$$
+        $$perpWallDist = \begin{cases} \frac{mapX - rayPosX + (1 - stepX) / 2}{rayDirX} \cdot \frac{1}{2} & \text{if } side == 0 \\ \frac{mapY - rayPosY + (1 - stepY) / 2}{rayDirY} \cdot \frac{1}{2} & \text{if } side == 1 \\ \frac{mapZ - rayPosZ + (1 - stepZ) / 2}{rayDirZ} \cdot \frac{1}{2} & \text{if } side == 2 \end{cases}$$
         [S2, unofficial]
     f.  Check for wall hit in layer 1 (hitB):
         If `worldMap[1][mapX][mapY] > 0` and `!hitB`, set `hitB = true` [S2, unofficial].
@@ -72,9 +72,9 @@ Dual-Layer DDA Raycasting is a real-time rendering technique that extends standa
         If `hitA` is true:
         $$lineHeight = \left\lfloor \frac{h}{perpWallDist} \right\rfloor$$
         [S2, unofficial]
-        $$drawStart = \max\left(0, \left\lfloor \frac{h}{2} - \frac{lineHeight}{2} \right\rfloor\right)$$
+        $$drawStart = \max\left(0, \left\lfloor \frac{h}{2} \right\rfloor\right)$$
         [S2, unofficial]
-        $$drawEnd = \min\left(h - 1, \left\lfloor \frac{h}{2} + \frac{lineHeight}{2} \right\rfloor\right)$$
+        $$drawEnd = \min\left(h - 1, \left\lfloor \frac{lineHeight}{2} + \frac{h}{2} \right\rfloor\right)$$
         [S2, unofficial]
         Draw a vertical line from `drawStart` to `drawEnd` with color based on `worldMap[0][mapX][mapY]`, halving brightness if `side == 1` [S2, unofficial].
     b.  **Render Layer 1 Stripe (Floor):**
@@ -92,6 +92,8 @@ Dual-Layer DDA Raycasting is a real-time rendering technique that extends standa
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def dual_layer_dda_raycasting(world_map, camera_pos, camera_dir, screen_height, max_distance):
     """
     Renders ceiling (layer 0) and floor (layer 1) stripes for each screen column.
@@ -114,15 +116,16 @@ def dual_layer_dda_raycasting(world_map, camera_pos, camera_dir, screen_height, 
     stepY = -1 if rayDirY < 0 else 1
     stepZ = -1 if rayDirZ < 0 else 1
     
-    # Calculate delta distances
     # Guard against division by zero [G]
-    if rayDirX == 0: rayDirX = 1e-9
-    if rayDirY == 0: rayDirY = 1e-9
-    if rayDirZ == 0: rayDirZ = 1e-9
+    eps = 1e-9
+    rdx = rayDirX if abs(rayDirX) > eps else eps
+    rdy = rayDirY if abs(rayDirY) > eps else eps
+    rdz = rayDirZ if abs(rayDirZ) > eps else eps
     
-    deltaDistX = math.sqrt(1 + (rayDirY / rayDirX)**2 + (rayDirZ / rayDirX)**2)
-    deltaDistY = math.sqrt(1 + (rayDirX / rayDirY)**2 + (rayDirZ / rayDirY)**2)
-    deltaDistZ = math.sqrt(1 + (rayDirX / rayDirZ)**2 + (rayDirY / rayDirZ)**2)
+    # Calculate delta distances
+    deltaDistX = math.sqrt(1 + (rdy / rdx)**2 + (rdz / rdx)**2)
+    deltaDistY = math.sqrt(1 + (rdx / rdy)**2 + (rdz / rdy)**2)
+    deltaDistZ = math.sqrt(1 + (rdx / rdz)**2 + (rdy / rdz)**2)
     
     # Calculate initial side distances
     if rayDirX < 0:
@@ -146,7 +149,7 @@ def dual_layer_dda_raycasting(world_map, camera_pos, camera_dir, screen_height, 
     perpWallDist = 0.0
     
     # DDA Loop
-    while not (hitA and hitB):
+    while not hitA or not hitB:
         # Determine which side to step
         if sideDistX < sideDistY:
             if sideDistX < sideDistZ:
@@ -173,28 +176,28 @@ def dual_layer_dda_raycasting(world_map, camera_pos, camera_dir, screen_height, 
                 hitA = True
                 # Calculate perpWallDist for layer 0
                 if side == 0:
-                    perpWallDist = (mapX - rayPosX + (1 - stepX) / 2) / rayDirX
+                    perpWallDist = (mapX - rayPosX + (1 - stepX) / 2) / rdx / 2
                 elif side == 1:
-                    perpWallDist = (mapY - rayPosY + (1 - stepY) / 2) / rayDirY
+                    perpWallDist = (mapY - rayPosY + (1 - stepY) / 2) / rdy / 2
                 elif side == 2:
-                    perpWallDist = (mapZ - rayPosZ + (1 - stepZ) / 2) / rayDirZ
+                    perpWallDist = (mapZ - rayPosZ + (1 - stepZ) / 2) / rdz / 2
                     
             if not hitB and world_map[1][mapX][mapY] > 0:
                 hitB = True
                 # Calculate perpWallDist for layer 1 (same logic)
                 if side == 0:
-                    perpWallDist = (mapX - rayPosX + (1 - stepX) / 2) / rayDirX
+                    perpWallDist = (mapX - rayPosX + (1 - stepX) / 2) / rdx / 2
                 elif side == 1:
-                    perpWallDist = (mapY - rayPosY + (1 - stepY) / 2) / rayDirY
+                    perpWallDist = (mapY - rayPosY + (1 - stepY) / 2) / rdy / 2
                 elif side == 2:
-                    perpWallDist = (mapZ - rayPosZ + (1 - stepZ) / 2) / rayDirZ
+                    perpWallDist = (mapZ - rayPosZ + (1 - stepZ) / 2) / rdz / 2
                     
     # Rendering
     # Layer 0 (Ceiling)
     if hitA:
         lineHeight = int(screen_height / perpWallDist)
-        drawStart = max(0, int(screen_height / 2 - lineHeight / 2))
-        drawEnd = min(screen_height - 1, int(screen_height / 2 + lineHeight / 2))
+        drawStart = max(0, int(screen_height / 2))
+        drawEnd = min(screen_height - 1, int(lineHeight / 2 + screen_height / 2))
         # Draw vertical line from drawStart to drawEnd with color from world_map[0][mapX][mapY]
         # Halve brightness if side == 1
         
@@ -208,7 +211,7 @@ def dual_layer_dda_raycasting(world_map, camera_pos, camera_dir, screen_height, 
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Division by Zero:** If `rayDirX`, `rayDirY`, or `rayDirZ` is zero, the delta distance calculations involve division by zero, resulting in NaN or infinity values [S2, unofficial]. This must be handled by checking for zero direction components and using alternative formulas or clamping [G].
+*   **Division by Zero:** If `rayDirX`, `rayDirY`, or `rayDirZ` is zero, the delta distance calculations involve division by zero, resulting in NaN or infinity values [S1, unofficial]. This must be handled by checking for zero direction components and using alternative formulas or clamping [G].
 *   **Boundary Conditions:** The algorithm must handle cases where the ray exits the map bounds without hitting a wall, potentially requiring a default background color or termination condition [S2, unofficial].
 
 ## Subtopics
@@ -223,13 +226,13 @@ Uses a 3D DDA over dual cells for particle rendering with glossy and glass mater
 Computes the horizontal texture coordinate for a raycast hit against a grid-aligned wall. Choose when correct texture mapping on vertical and horizontal faces is required.
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Measured Performance:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources. [G]
+*   **Memory Complexity:** Not given in the sources. [G]
+*   **Measured Performance:** Not given in the sources. [G]
 *   **Strengths:** Simultaneous rendering of ceiling and floor layers reduces the number of ray casts per column [S2, unofficial].
 *   **Limitations:** Limited to two layers [S2, unofficial]. Requires careful handling of zero direction components [S2, unofficial].
-*   **When to Use:** Not given in the sources.
-*   **When Not to Use:** Not given in the sources.
+*   **When to Use:** Not given in the sources. [G]
+*   **When Not to Use:** Not given in the sources. [G]
 
 ## Background
 Dual-Layer DDA Raycasting is an extension of classic voxel raycasting techniques, specifically designed to handle both ceiling and floor surfaces in a single pass [S2, unofficial]. The method is commonly used in real-time voxel-based games and simulations where efficient rendering of 3D grids is necessary [S2, unofficial]. The specific implementation details, such as the use of two distinct layers and the rendering of vertical stripes, are documented in various online repositories and tutorials [S2, unofficial].

@@ -1,0 +1,221 @@
+--- v004.md
++++ v005.md
+@@ -4,127 +4,97 @@
+ 
+ ## Overview
+-Two-Level Grids for Ray Tracing on GPUs is a fixed-depth hierarchical acceleration structure designed to handle non-uniform primitive distributions in dynamic scenes [S1, S2, unofficial]. It solves the "teapot in a stadium problem" inherent in uniform grids by superimposing a sparse top-level grid over variable-resolution sub-grids (leaf grids) [S1, S2, unofficial]. Unlike siblings such as [Multi-Level Array Grid](3329-multi-level-array-grid.md) which may use deeper hierarchies or [Macrocell Grid Traversal](5207-macrocell-grid-traversal.md) with fixed macro-cells, this method allows arbitrary resolution for each leaf grid, optimizing for GPU parallel construction via radix sort [S1, S2, unofficial].
++Two-Level Grids are a fixed-depth hierarchical acceleration structure for ray tracing dynamic scenes, consisting of a sparse top-level grid where each cell contains a sub-grid (leaf grid) of arbitrary resolution [S1, unofficial]. It solves the problem of efficiently traversing sparse or complex volumetric/primitive data by leveraging coherence within top-level cells, offering a SIMD-friendly approach that minimizes code divergence except when rays disagree on the traversal level [S1, unofficial]. Unlike uniform grids which suffer from the 'teapot in a stadium problem' (poor acceleration in sparse regions), the two-level grid handles non-uniform primitive distributions more robustly by allowing variable resolution sub-grids [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **Input:** A set of triangles $t$, scene bounding box $b$, and top-level resolution $r$.
+-*   **Output:** A two-level grid structure consisting of a Top-Level Cells Array, a Leaf Array, and a Reference Array, enabling ray traversal and intersection testing.
++*   **Output:** A two-level grid structure comprising a Top-Level Cells Array, a Leaf Array, and a Reference Array, ready for ray traversal.
+ 
+ **Data Structures:**
+-The structure relies on three main arrays [S1, S2, unofficial]:
+-1.  **Top-Level Cells Array:** An array where each entry corresponds to a top-level cell. Each entry consists of two 32-bit integers:
+-    *   Bits 0–31: The index (location) of the first leaf cell in the Leaf Array.
+-    *   Bits 0–23: The resolution of the sub-grid (limiting resolution to $256^3$).
+-    *   Bits 24–31: Flags (e.g., 'is empty', 'has children') [S1, S2, unofficial].
+-2.  **Leaf Array:** Stores start and end indices into the Reference Array for each leaf cell. Each leaf cell is represented by two integral values indicating the interval of primitive references [S1, S2, unofficial].
+-3.  **Reference Array:** A flat array storing pairs of `(leaf_cell_index, primitive_id)`. Each primitive is referenced once for every leaf cell it overlaps. References for the same leaf cell are stored contiguously [S1, S2, unofficial].
++The structure uses three main arrays [S1, unofficial]:
++1.  **Reference Array:** Stores primitive IDs. Each primitive is referenced once per overlapping leaf cell. References for the same leaf cell are contiguous in this array.
++2.  **Leaf Array:** Stores start/end indices into the Reference Array for each leaf cell.
++3.  **Top-Level Cells Array:** Stores metadata for each top-level cell. Each entry consists of two 32-bit values:
++    *   A 32-bit integer for the location (index) of the first leaf cell in the Leaf Array.
++    *   A 32-bit integer where the lower 24 bits store the cell resolution (limiting resolution to $256^3$) and the upper 8 bits are flags (e.g., 'is empty', 'has children') [S1, unofficial][S2, unofficial].
+ 
+ **Construction Algorithm:**
+-The construction is performed in parallel on the GPU using a sort-based approach [S1, S2, unofficial].
++The construction is performed in a top-down manner using a single global sort to build the leaf level efficiently [S1, unofficial].
+ 
+ 1.  **Compute Bounds and Resolution:**
+-    *   Compute the scene bounding box $b$ [S1, S2, unofficial].
+-    *   Compute the top-level resolution $r$ based on a density parameter $\lambda$ [S1, S2, unofficial].
+-    *   Upload triangles $t$ to GPU memory [S1, S2, unofficial].
++    *   Compute the bounding box of all primitives: $b \leftarrow \text{COMPUTE BOUNDS}(t)$ [S2, unofficial].
++    *   Compute the top-level grid resolution $r$ based on a density parameter $\lambda$ [S1, unofficial]. Typical value for top-level cells is $\lambda = 1.2$ globally [S1, unofficial]. For hybrid intersector optimization, top-level density may be set to $\lambda = 1/16$ primitives referenced in the leaves [S1, unofficial].
++    *   Upload triangle data to GPU memory: $t \leftarrow \text{UPLOAD TRIANGLES}(t)$ [S2, unofficial].
+ 
+ 2.  **Build Top-Level Grid:**
+-    *   Build a temporary uniform grid using the sort-based approach by Kalojanov and Slusallek [KS09] to initialize top-level cells [S1, S2, unofficial].
+-    *   Determine all triangle-cell overlaps and store as pairs of `(Cell Index, Primitive ID)` [S1, S2, unofficial].
+-    *   Sort these pairs using cell indices as keys [S1, S2, unofficial].
+-    *   Extract sorted top-level pairs $Atl_p$, the number of top-level references $n$, and top-level cell ranges $tlc$ [S1, S2, unofficial].
++    *   Build a temporary uniform grid for top-level initialization: $\text{data} \leftarrow \text{BUILD UNIFORM GRID}(t, b, r)$ [S1, unofficial][S2, unofficial]. This uses the sort-based approach by Kalojanov and Slusallek [KS09] to determine triangle-cell overlaps [S1, unofficial].
++    *   Get sorted top-level pairs (Cell Index, Primitive ID): $\text{Atl}_p \leftarrow \text{GET SORTED TOP-LEVEL PAIRS}(\text{data})$ [S1, unofficial][S2, unofficial].
++    *   Get the number of top-level references: $n \leftarrow \text{GET NUMBER OF TOP-LEVEL REFERENCES}(\text{data})$ [S1, unofficial][S2, unofficial].
++    *   Get top-level cell ranges: $\text{tlc} \leftarrow \text{GET TOP-LEVEL CELL RANGES}(\text{data})$ [S1, unofficial][S2, unofficial].
+ 
+ 3.  **Compute Leaf Cell Locations:**
+-    *   Initialize an accumulator array $Acc$ of size $r_x \cdot r_y \cdot r_z + 1$ with zeros [S1, S2, unofficial].
+-    *   Count leaf cells per top-level cell using bounds $b$, resolution $r$, and ranges $tlc$: $Acc \leftarrow \text{COUNT LEAF CELLS}(b, r, tlc)$ [S1, S2, unofficial].
+-    *   Perform an exclusive scan on $Acc$: $Acc \leftarrow \text{EXCLUSIVE SCAN}(Acc, r_x \cdot r_y \cdot r_z + 1)$ [S1, S2, unofficial].
+-    *   Initialize top-level cell ranges with the scan results to determine the starting location of leaves for each top-level cell: $tlc \leftarrow \text{INITIALIZE}(Acc, tlc)$ [S1, S2, unofficial].
++    *   Define grid dimensions $G = (r_y, r_z)$ and block size $B = r_x$ [S2, unofficial].
++    *   Initialize an accumulator array $\text{Acc}$ of size $r_x \cdot r_y \cdot r_z + 1$ with zeros [S2, unofficial].
++    *   Count leaf cells per top-level cell: $\text{Acc} \leftarrow \text{COUNT LEAF CELLS}(b, r, \text{tlc})$ [S1, unofficial][S2, unofficial].
++    *   Perform an exclusive scan on $\text{Acc}$: $\text{Acc} \leftarrow \text{EXCLUSIVE SCAN}(\text{Acc}, r_x \cdot r_y \cdot r_z + 1)$ [S1, unofficial][S2, unofficial].
++    *   Initialize top-level cell ranges with the scan results to determine start indices for leaf cells: $\text{tlc} \leftarrow \text{INITIALIZE}(\text{Acc}, \text{tlc})$ [S1, unofficial][S2, unofficial].
+ 
+ 4.  **Compute Reference Array Size:**
+-    *   Initialize an accumulator array $Arc$ of size $G+1$ (where $G=128$ is a block dimension parameter) with zeros [S1, S2, unofficial].
+-    *   Count leaf references per top-level cell using triangles $t$, bounds $b$, resolution $r$, references $n$, sorted pairs $Atl_p$, and ranges $tlc$: $Arc \leftarrow \text{COUNT LEAF REFS}(t, b, r, n, Atl_p, tlc)$ [S1, S2, unofficial].
+-    *   Perform an exclusive scan on $Arc$: $Arc \leftarrow \text{EXCLUSIVE SCAN}(Arc, G+1)$ [S1, S2, unofficial].
+-    *   Get total size $m \leftarrow Arc[G]$ and allocate the leaf pairs array $Ap$ of size $m$ [S1, S2, unofficial].
++    *   Initialize an accumulator array $\text{Arc}$ of size $G+1$ (where $G=128$ in the source example, but generally depends on implementation) with zeros [S2, unofficial].
++    *   Count leaf references per top-level cell using a fast conservative triangle-cell intersection test (bounding box only) to ensure sufficient pre-allocation: $\text{Arc} \leftarrow \text{COUNT LEAF REFS}(t, b, r, n, \text{Atl}_p, \text{tlc})$ [S1, unofficial][S2, unofficial].
++    *   Perform an exclusive scan on $\text{Arc}$: $\text{Arc} \leftarrow \text{EXCLUSIVE SCAN}(\text{Arc}, G+1)$ [S1, unofficial][S2, unofficial].
++    *   Get total size $m \leftarrow \text{Arc}[G]$ [S1, unofficial].
++    *   Allocate leaf pairs array $\text{Ap}$ of size $m$ [S2, unofficial].
+ 
+ 5.  **Fill and Sort Reference Array:**
+-    *   Write pairs `(Leaf Location, Prim ID)` to $Ap$. The leaf location is computed from the leaf index and the starting location of the corresponding top-level cell. Use a fast conservative triangle-cell intersection test (bounding box only) for counting and a precise test (plane intersection) for generation. Invalid intersections are written with a dummy cell index [S1, S2, unofficial].
+-    *   Sort $Ap$ using an improved radix sort (Billeter et al. [BOA09]) with two- and four-way splits, sorting only on required bits [S1, S2, unofficial].
++    *   Write pairs of (Leaf Location, Primitive ID) to $\text{Ap}$. The Leaf Location is the global memory location in the leaf array, computed from the leaf index and the location of the first leaf for the corresponding top-level cell. This global location is used as the sort key because leaf indices relative to a top-level cell are not unique across the entire structure [S1, unofficial][S2, unofficial].
++    *   Use a more precise test (including plane intersection) when generating these pairs. Invalid intersections are written with a dummy cell index that is discarded during sorting [S1, unofficial].
++    *   Sort $\text{Ap}$ using an improved radix sort (e.g., Billeter et al. [BOA09]) with two- and four-way splits, sorting only on the required bits based on the known maximum key size [S1, unofficial][S2, unofficial].
+ 
+ 6.  **Extract Leaf Cells:**
+-    *   Extract leaf cell ranges from the sorted $Ap$ by checking for range borders (neighboring pairs with different keys): $leaves \leftarrow \text{EXTRACT CELL RANGES}(Ap, m)$ [S1, S2, unofficial].
+-    *   Compact the reference array out of the pairs array to free space [S1, S2, unofficial].
+-
+-**Ray Traversal:**
+-Traversal modifies the classic DDA algorithm [AW87] [S1, S2, unofficial]:
+-1.  Step through the top-level grid as a uniform grid.
+-2.  If a top-level cell is empty, skip it.
+-3.  If occupied, treat the top-level cell as a uniform grid (sub-grid) and perform standard DDA traversal within that local coordinate space [S1, S2, unofficial].
++    *   Extract leaf cell ranges from the sorted $\text{Ap}$ to finalize leaf cell intervals: $\text{leaves} \leftarrow \text{EXTRACT CELL RANGES}(\text{Ap}, m)$ [S1, unofficial][S2, unofficial]. This involves checking for range borders (neighboring pairs with different keys) in parallel [S1, unofficial].
++    *   Compact the data by extracting the reference array out of the pairs array to free space [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def build_two_level_grid(triangles, bounds, density_lambda):
+-    # 1. Initialization
++def build_two_level_grid(triangles, lambda_density=1.2):
++    # 1. Compute Bounds and Resolution
+     b = compute_bounds(triangles)
+-    r = compute_top_level_resolution(b, density_lambda)
+-    upload_triangles_to_gpu(triangles)
++    r = compute_top_level_resolution(b, lambda_density)
++    t = upload_to_gpu(triangles)
+     
+-    # 2. Top-Level Construction
+-    # Build temporary uniform grid to find overlaps
+-    temp_data = build_uniform_grid(triangles, b, r)
+-    atl_p = get_sorted_top_level_pairs(temp_data)
+-    n = get_number_of_top_level_references(temp_data)
+-    tlc = get_top_level_cell_ranges(temp_data)
++    # 2. Build Top-Level Grid
++    data = build_uniform_grid(t, b, r)
++    atl_p = get_sorted_top_level_pairs(data)
++    n = get_number_of_top_level_references(data)
++    tlc = get_top_level_cell_ranges(data)
+     
+     # 3. Compute Leaf Cell Locations
+-    # Acc stores the count of leaf cells per top-level cell
+-    acc_size = r.x * r.y * r.z + 1
+-    acc = zeros(acc_size)
+-    acc = count_leaf_cells(bounds, r, tlc, acc)
+-    acc = exclusive_scan(acc, acc_size)
++    G = (r.y, r.z)
++    B = r.x
++    acc = array_of_zeros(r.x * r.y * r.z + 1)
++    acc = count_leaf_cells(b, r, tlc)
++    acc = exclusive_scan(acc, r.x * r.y * r.z + 1)
+     tlc = initialize_top_level_cell_ranges(acc, tlc)
+     
+     # 4. Compute Reference Array Size
+-    # Arc stores the count of primitive references per top-level cell
+-    g_dim = 128
+-    arc_size = g_dim + 1
+-    arc = zeros(arc_size)
+-    arc = count_leaf_refs(triangles, bounds, r, n, atl_p, tlc, arc)
+-    arc = exclusive_scan(arc, arc_size)
+-    m = arc[g_dim]
++    # Note: G in Arc size is implementation specific, often related to max leaf cells per top cell
++    arc_size = 128 # Example from source, adjust based on G
++    arc = array_of_zeros(arc_size + 1)
++    arc = count_leaf_refs(t, b, r, n, atl_p, tlc)
++    arc = exclusive_scan(arc, arc_size + 1)
++    m = arc[arc_size]
+     ap = allocate_array(m)
+     
+-    # 5. Fill Reference Array
+-    # Use global leaf location as key to ensure unique sort keys
+-    # Conservative test for counting, precise for writing
+-    ap = write_pairs(triangles, bounds, r, n, atl_p, tlc, arc, ap)
++    # 5. Fill and Sort Reference Array
++    # Compute global leaf locations for sorting keys
++    # Use conservative test for counting (already done), precise for writing
++    ap = write_leaf_pairs(t, b, r, n, atl_p, tlc, arc)
++    ap = radix_sort(ap)
+     
+-    # 6. Sort and Extract
+-    ap = radix_sort(ap)
++    # 6. Extract Leaf Cells
+     leaves = extract_cell_ranges(ap, m)
+     
+-    # Compact reference array from pairs
+-    reference_array = compact_reference_array(ap)
+-    
+-    return TopLevelCells(tlc), LeafArray(leaves), ReferenceArray(reference_array)
+-
+-def traverse_two_level_grid(ray, top_level_cells, leaf_array, reference_array):
+-    # Phase 1: Coarse Traversal
+-    current_cell = dda_step_top_level(ray, top_level_cells)
+-    
+-    while current_cell is not empty:
+-        # Phase 2: Fine Traversal
+-        # Treat current top-level cell as a uniform sub-grid
+-        sub_grid = get_sub_grid(current_cell, top_level_cells)
+-        leaf_start, leaf_end = get_leaf_range(current_cell, leaf_array)
+-        
+-        # Intersect ray with primitives in the leaf range
+-        for prim_id in reference_array[leaf_start:leaf_end]:
+-            hit = intersect(ray, prim_id)
+-            if hit:
+-                return hit
+-        
+-        # Advance to next top-level cell
+-        current_cell = dda_step_top_level(ray, top_level_cells, current_cell)
+-        
+-    return None
++    return TopLevelCells(tlc), LeafArray(leaves), ReferenceArray(ap)
+ ```
+ 
+@@ -132,18 +102,24 @@
+ 
+ ### [Two-Level Grid Ray Traversal](6252-two-level-grid-ray-traversal.md)
+-A hierarchical ray traversal algorithm designed for two-level grid structures, modifying the classic DDA algorithm to step through top-level cells and then treat each top cell as a uniform grid for leaf traversal. It solves the problem of efficiently traversing sparse or complex volumetric data by leveraging coherence within top-level cells, offering a SIMD-friendly approach that minimizes code divergence except when rays disagree on the traversal level.
++Two-Level Grid Ray Traversal is a hierarchical ray traversal algorithm designed for two-level grid structures, modifying the classic DDA algorithm to step through top-level cells and then treat each top cell as a uniform grid for leaf traversal. It solves the problem of efficiently traversing sparse or complex volumetric data by leveraging coherence within top-level cells, offering a SIMD-friendly approach that minimizes code divergence except when rays disagree on the traversal level.
+ 
+ ### Two-Level Grid Construction
+-A construction algorithm for two-level acceleration structures that uses radix sort to build top-level and leaf-level grids efficiently on GPUs, solving the problem of fast, linear-complexity build times for large scenes [S1, unofficial]. It sorts pairs of `(key, primitive_id)` using radix sort, considering only required bits (up to two bits at a time) based on the known size of the largest key [S1, unofficial]. It computes leaf cells by checking in parallel for range borders (neighboring pairs with different keys) and extracts the reference array to compact data [S1, unofficial]. The work complexity is linear, provided cell resolution can be determined in constant time [S1, unofficial]. Typical parameters include a global density $\lambda = 1.2$ for top-level cells and $\lambda = 1/16$ primitives referenced in leaves for hybrid intersector optimization [S1, unofficial]. Pitfalls include the risk of slow construction if different densities/resolutions are chosen per top-level cell [S1, unofficial].
++Two-Level Grid Construction is a construction algorithm for two-level acceleration structures that uses radix sort to build top-level and leaf-level grids efficiently on GPUs, solving the problem of fast, linear-complexity build times for large scenes [S1, unofficial]. It differs from naive per-cell construction by using a single global sort for the leaf level. Work complexity is linear, provided cell resolution can be determined in constant time knowing the number of overlapped primitives and the extent of the bounding box of each top-level cell [S1, unofficial]. A key parameter is grid density ($\lambda$), typically $\lambda = 1.2$ globally, though $\lambda = 1/16$ may be used for hybrid intersector optimization [S1, unofficial]. Pitfalls include GPU memory constraints requiring pre-allocation of the reference array using conservative bounding box tests, and the necessity of using global memory locations as sort keys for leaf pairs rather than local indices [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Construction work complexity is linear $O(N)$, where $N$ is the number of primitives, assuming constant-time resolution determination [S1, unofficial].
+-*   **Memory Complexity:** Requires pre-allocation of the reference array. The size must be computed conservatively using bounding box tests before precise generation to ensure sufficient space [S1, unofficial].
+-*   **Performance:** On a GTX 470, the implementation traced 24 million primary rays/sec for the Conference scene and 22 million for the Fairy scene [S2, unofficial]. This is inferior to state-of-the-art static scene approaches like Aila and Laine [AL09], which reported 142 million and 75 million rays/sec respectively on the same hardware [S2, unofficial].
+-*   **Strengths:** Handles non-uniform primitive distributions robustly, avoiding the "teapot in a stadium problem" of uniform grids [S1, S2, unofficial]. Fast, linear-time construction suitable for dynamic scenes [S1, unofficial].
+-*   **Limitations:** Inferior traversal performance compared to optimized static BVHs or other hierarchical structures [S2, unofficial]. Resolution of top-level cells is limited to $256^3$ due to 24-bit storage [S1, S2, unofficial].
++**Time and Memory Complexity:**
++*   **Build Time:** The construction algorithm has linear work complexity [S1, unofficial]. The runtime is distributed across stages but benefits from the high parallelism of radix sort [S1, unofficial].
++*   **Memory:** Requires pre-allocation of the reference array. The size must be computed conservatively before precise generation to ensure sufficient space [S1, unofficial].
++
++**Measured Performance:**
++*   On an NVIDIA GTX 470, the implementation traced 24 million primary rays/sec for the Conference scene and 22 million for the Fairy scene [S2, unofficial].
++*   Compared to state-of-the-art approaches for static scenes (specifically Aila and Laine [AL09]), two-level grids offer inferior traversal performance: Aila and Laine reported 142 million and 75 million rays/sec for the Conference and Fairy scenes respectively [S2, unofficial].
++
++**Strengths and Limitations:**
++*   **Strengths:** Handles non-uniform primitive distributions more robustly than uniform grids, avoiding the "teapot in a stadium problem" [S1, unofficial]. Fast, linear-complexity construction suitable for dynamic scenes [S1, unofficial].
++*   **Limitations:** Inferior traversal performance compared to optimized static scene structures like BVHs [S2, unofficial]. Resolution of top-level cells is limited to $256^3$ due to 24-bit storage [S1, unofficial]. Choosing different density or resolution for different top-level cells improves quality but makes construction too slow [S1, unofficial].
+ 
+ ## Background
+-The two-level grid is a fixed-depth hierarchical acceleration structure introduced by Jevans and Wyvill [JW89] and applied to ray tracing on GPUs by Kalojanov, Billeter, and Slusallek [S1, S2, unofficial]. It builds upon sort-based uniform grid construction by Kalojanov and Slusallek [KS09] and improved radix sort by Billeter et al. [BOA09]. It is designed for dynamic scenes where fast reconstruction is critical [S1, S2, unofficial].
++The two-level grid is a fixed-depth hierarchy introduced by Jevans and Wyvill [JW89] as a member of the class of hierarchical grids. Its application to ray tracing on GPUs was described by Kalojanov, Billeter, and Slusallek in 2010 [S1, unofficial]. It builds on the sort-based uniform grid construction by Kalojanov and Slusallek [KS09] and the improved radix sort by Billeter et al. [BOA09].
+ 
+ ## Sources

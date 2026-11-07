@@ -1,0 +1,191 @@
+# Non-parametric Transfer Function Generation using Spatial Variance
+
+Also called: Abstract Feature Space Representation, Abstracted Feature Space, Kernel Density Estimation for TF Generation, Spatial Variance Transfer Function
+
+## Overview
+This method enhances a 2D histogram-based transfer function by mapping histogram entries to the spatial variance of the voxels that populate them, rather than the voxel count [S1, unofficial]. It solves the problem of background noise inclusion and incorrect feature segmentation (e.g., including air values with leaves) common in conventional transfer function views by leveraging spatial relationships [S1, unofficial]. It sets itself apart from sibling methods by using the magnitude of spatial standard deviation as the primary statistical property for clustering and density estimation in the abstract feature space [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Input**: A volumetric dataset $V$ with dimensions $(X, Y, Z)$, a 2D feature space histogram $H$ (e.g., value vs. gradient magnitude), and the spatial coordinates of all voxels.
+- **Output**: An abstracted transfer function where each histogram bin $(i, j)$ is colored by the magnitude of spatial variance $|\sigma_{i,j}|$, and a clustered segmentation of features based on this abstract space.
+
+**Data Structures**
+- **Histogram $H$**: A 2D grid where each cell $(i, j)$ stores a list of voxel indices or spatial coordinates $\{V_k\}$ that map to the feature pair corresponding to that bin.
+- **Voxel Data**: Each voxel $V_k$ has a scalar value, a gradient magnitude, and spatial coordinates $(x_k, y_k, z_k)$.
+
+**Parameters**
+- $N$: Total number of samples (voxels) in the volume.
+- $k$: Number of nearest neighbors for density estimation. Calculated as $k = \lfloor \sqrt{N} \rfloor$ [S1, unofficial].
+
+**Steps**
+
+1. **Map Voxels to Histogram**: For each entry $(i, j)$ in the 2D feature space histogram, identify the set of $N_{i,j}$ voxels $\{V_k\}$ that map to this location based on their feature values (e.g., scalar value and gradient magnitude) [S1, unofficial].
+
+2. **Calculate Mean Position**: For the set of voxels $\{V_k\}$ at histogram entry $(i, j)$, calculate the mean spatial position $\bar{V}_{(i,j)}$ [S1, unofficial]:
+   $$
+   \bar{V}_{(i,j)} = \frac{1}{N_{i,j}} \sum_{k=1}^{N_{i,j}} V_k
+   $$
+   Here, $V_k$ represents the spatial coordinate vector $(x_k, y_k, z_k)$ [S1, unofficial].
+
+3. **Calculate Spatial Variance Magnitude**: Compute the magnitude of the standard deviation $|\sigma_{i,j}|$ for the voxels at histogram entry $(i, j)$ [S1, unofficial]:
+   $$
+   |\sigma_{i,j}| = \sqrt{\frac{1}{N_{i,j}} \sum_{k=1}^{N_{i,j}} (V_k - \bar{V}_{(i,j)})^2}
+   $$
+   This formula calculates the Euclidean norm of the spatial spread of the voxels mapping to the bin [S1, unofficial].
+
+4. **Density Estimation (Kernel Density Estimation)**: To smooth the histogram and identify feature segments, apply Kernel Density Estimation (KDE) to the feature space points [S1, unofficial].
+   - For each sample point $X_i$ in the feature space, determine the distance $d_{i,k}$ to its $k$-th nearest neighbor in the feature space [S1, unofficial].
+   - Set the window width (bandwidth) of the kernel placed on point $X_i$ proportional to $d_{i,k}$ [S1, unofficial]. This ensures that data points in sparse regions have flatter kernels [S1, unofficial].
+   - Use the Epanechnikov kernel $K(u)$ for smoothing [S1, unofficial]:
+     $$
+     K(u) = \frac{3}{4} (1 - u^2) \mathbb{1}(\|u\| \le 1)
+     $$
+     where $u$ is the normalized distance variable, and $\mathbb{1}(\|u\| \le 1)$ is an indicator function equal to 1 if $\|u\| \le 1$ and 0 otherwise [S1, unofficial].
+   - The probability density estimate $\hat{f}_h(x)$ at location $x$ is given by [S1, unofficial]:
+     $$
+     \hat{f}_h(x) = \frac{1}{N} \sum_{i=1}^{N} \frac{1}{d_{i,k}} K\left(\frac{x - X_i}{d_{i,k}}\right)
+     $$
+
+5. **Clustering**: Cluster the data based on neighborhood information in the abstract feature space (using the density estimates or spatial variance values) to visualize underlying structure and define transfer function segments [S1, unofficial].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def calculate_spatial_variance(magnitude, voxels_in_bin):
+    """
+    Calculate the magnitude of spatial variance for a set of voxels.
+    
+    Args:
+        magnitude: The magnitude of the spatial vector (unused in formula, kept for context).
+        voxels_in_bin: List of spatial coordinates (x, y, z) for voxels mapping to a histogram bin.
+        
+    Returns:
+        sigma_mag: The magnitude of the standard deviation of the spatial coordinates.
+    """
+    n = len(voxels_in_bin)
+    if n == 0:
+        return 0.0
+    
+    # Step 2: Calculate mean position
+    sum_x = sum(v[0] for v in voxels_in_bin)
+    sum_y = sum(v[1] for v in voxels_in_bin)
+    sum_z = sum(v[2] for v in voxels_in_bin)
+    
+    mean_x = sum_x / n
+    mean_y = sum_y / n
+    mean_z = sum_z / n
+    
+    # Step 3: Calculate magnitude of standard deviation
+    sum_sq_diff = 0.0
+    for v in voxels_in_bin:
+        dx = v[0] - mean_x
+        dy = v[1] - mean_y
+        dz = v[2] - mean_z
+        sum_sq_diff += dx*dx + dy*dy + dz*dz
+        
+    sigma_mag = math.sqrt(sum_sq_diff / n)
+    return sigma_mag
+
+def epanechnikov_kernel(u_norm):
+    """
+    Epanechnikov kernel function.
+    
+    Args:
+        u_norm: The norm of the normalized distance vector u.
+        
+    Returns:
+        Kernel value.
+    """
+    if u_norm <= 1.0:
+        return 0.75 * (1.0 - u_norm * u_norm)
+    else:
+        return 0.0
+
+def kde_density_estimate(feature_points, k_neighbors, bandwidths):
+    """
+    Calculate KDE density estimate using Epanechnikov kernel.
+    
+    Args:
+        feature_points: List of feature space coordinates (e.g., [value, gradient]).
+        k_neighbors: Number of nearest neighbors (k).
+        bandwidths: List of bandwidths (d_{i,k}) for each point.
+        
+    Returns:
+        density_grid: A grid or list of density estimates for query points.
+    """
+    # Note: In practice, this would be evaluated on a grid or for specific query points.
+    # This pseudocode calculates the density at a single query point 'q'.
+    def density_at(q):
+        total = 0.0
+        n = len(feature_points)
+        for i in range(n):
+            xi = feature_points[i]
+            d_i = bandwidths[i]
+            if d_i == 0:
+                continue
+            # Calculate normalized distance u
+            diff = [q[j] - xi[j] for j in range(len(q))]
+            u_norm = math.sqrt(sum(d*d for d in diff)) / d_i
+            total += epanechnikov_kernel(u_norm) / d_i
+        return total / n
+    return density_at
+
+def generate_abstract_tf(volume_data, histogram_bins, k):
+    """
+    Main function to generate the abstract feature space transfer function.
+    
+    Args:
+        volume_data: Structured data containing voxel values, gradients, and spatial coords.
+        histogram_bins: Dictionary mapping bin indices (i, j) to lists of voxel indices.
+        k: Number of nearest neighbors for KDE.
+        
+    Returns:
+        abstract_tf: Dictionary mapping bin indices (i, j) to spatial variance magnitude.
+    """
+    abstract_tf = {}
+    
+    # Pre-calculate k for KDE if needed, though the primary output is spatial variance
+    # k = floor(sqrt(N)) is used for bandwidth selection in KDE step
+    
+    for bin_idx, voxel_indices in histogram_bins.items():
+        # Get spatial coordinates for voxels in this bin
+        voxel_coords = [volume_data[v].spatial_pos for v in voxel_indices]
+        
+        # Calculate spatial variance for this bin
+        sigma = calculate_spatial_variance(0, voxel_coords)
+        
+        abstract_tf[bin_idx] = sigma
+        
+    # Step 4 & 5: Density Estimation and Clustering would use the feature points
+    # and the calculated variances/bandwidths to segment the space.
+    # This involves computing KDE on the feature space points using k-nearest neighbor distances.
+    
+    return abstract_tf
+```
+
+**Edge Cases and Pitfalls**
+- **Background Noise**: Conventional TF space clustering includes background noise in feature segments [S1, unofficial].
+- **Air Segmentation**: Using only spatial deviation can cause distinct features (e.g., tree trunk and root ball) to be combined [S1, unofficial].
+- **Component Specificity**: Using individual x, y, or z spatial variance components separately may fail to segment air as a distinct cluster. Specifically, the y-spatial variance component associates air with another data grouping, allowing segmentation, while x and z do not [S1, unofficial].
+- **Precision**: The calculation of spatial variance involves summing squared differences, which can be sensitive to floating-point precision for large volumes [G].
+
+## Operating characteristics
+- **Time Complexity**: Calculating spatial variance for each bin is $O(N)$ per bin, where $N$ is the number of voxels in the bin. KDE adds complexity based on the number of points and neighbors. Overall, it is more computationally expensive than simple histogram counting due to the spatial calculations and KDE [S1, unofficial].
+- **Memory Complexity**: Requires storing spatial coordinates for all voxels and the histogram bins [S1, unofficial].
+- **Strengths**: Reduces background noise inclusion in feature segmentation compared to conventional transfer function views [S1, unofficial]. Enhances exploration by providing spatial relationship information [S1, unofficial].
+- **Limitations**: May combine distinct features that have similar spatial variance profiles (e.g., trunk and root ball) [S1, unofficial]. Single-component spatial variance may fail to segment certain features like air [S1, unofficial].
+- **When to Use**: When conventional TF segmentation includes excessive background noise or fails to separate features based on spatial coherence. Suitable for CT bonsai datasets and CFD simulations [S1, unofficial].
+- **When Not to Use**: When distinct features have similar spatial variance distributions, or when computational resources are limited [S1, unofficial].
+
+## Background
+- **Origin**: Proposed by R. Maciejewski, Y. Jang, D.S. Ebert, and K.P. Gaither in 2011 [S1, unofficial].
+- **History**: The method was introduced to address the difficulty of selecting appropriate features in multi-dimensional transfer functions by incorporating spatial domain information into the abstract feature space [S1, unofficial].
+- **Usage**: Applied to CT bonsai datasets and computational fluid dynamic (CFD) simulations for feature detection and transfer function design [S1, unofficial].
+
+## Sources
+[S1] Abstract Feature Space Representation for Volumetric Transfer Function Exploration, https://doi.org/10.4230/dfu.vol2.sciviz.2011.212, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,91 @@
+# Vertical Exponential Density Ramp
+
+
+## Overview
+The Vertical Exponential Density Ramp is a procedural density modulation technique used to simulate natural phenomena like rising steam or smoke by attenuating density as a function of vertical height. It builds on [Spherical Density Ramp with Noise](2610-spherical-density-ramp-with-noise.md) by adding a vertical falloff, solving the problem of volumetric objects appearing as solid, unnatural columns by ensuring density decays to zero above a certain altitude. It differs from generic noise textures by applying a specific mathematical ramp based on world-space Y coordinates rather than procedural pattern evaluation.
+
+## How it works
+**Inputs and Outputs:**
+- Input: World-space point `pnt_world`, base `density` value (from parent noise/ramp), volume shape metadata `vol.shape` (containing `center` and `inv_rad`), noise offset array `offset`, and parameter `parms[1]`.
+- Output: Modulated `density`.
+
+**Data Structures:**
+- `vol.shape`: Contains `center` (vector, typically 3D) and `inv_rad` (vector, inverse of bounding radius/scale).
+- `offset`: Array of noise offsets indexed by `indx`.
+- `parms`: Array of parameters, specifically `parms[1]`.
+
+**Steps:**
+1. Calculate the vertical distance from the volume center:
+   $$dist = pnt\_world.y - vol.shape.center.y$$
+2. If `dist > 0.0`, normalize the distance using the noise offset and inverse vertical radius:
+   $$dist = (dist + offset[indx] \times 0.1) \times vol.shape.inv\_rad.y$$
+3. If `dist > 0.05`, apply the exponential ramp-off:
+   a. Calculate intermediate offset:
+      $$offset2 = (dist - 0.05) \times 1.111111$$
+   b. Apply exponential decay function:
+      $$offset2 = 1 - \frac{\exp(offset2) - 1.0}{1.718282}$$
+   c. Scale by parameter:
+      $$offset2 = offset2 \times parms[1]$$
+   d. Multiply base density:
+      $$density = density \times offset2$$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def vertical_exponential_density_ramp(pnt_world, density, vol_shape, offset, indx, parms):
+    # Step 1: Vertical distance from center
+    dist = pnt_world.y - vol_shape.center.y
+    
+    # Step 2: Normalize if above center
+    if dist > 0.0:
+        dist = (dist + offset[indx] * 0.1) * vol_shape.inv_rad.y
+        
+        # Step 3: Exponential ramp off if above threshold
+        if dist > 0.05:
+            offset2 = (dist - 0.05) * 1.111111
+            offset2 = 1.0 - (exp(offset2) - 1.0) / 1.718282
+            offset2 = offset2 * parms[1]
+            density = density * offset2
+            
+    return density
+```
+
+**Parameters:**
+- `vol.shape.inv_rad.y`: Inverse radius related to vertical scaling. [S1, unofficial]
+- `parms[1]`: Scaling factor for the ramp intensity. [S1, unofficial]
+- `offset[indx]`: Noise offset value. [S1, unofficial]
+
+**Edge Cases and Pitfalls:**
+- If `dist <= 0.0`, the density remains unchanged (no ramp applied below the center). [S1, unofficial]
+- If `dist <= 0.05` (after normalization), the density remains unchanged. [S1, unofficial]
+- The constant `1.718282` is used as a divisor in the exponential term. [S1, unofficial]
+- The constant `1.111111` scales the distance above the 0.05 threshold. [S1, unofficial]
+
+## Subtopics
+
+### Exponential Medium Density Integration
+A method for analytically integrating density in a medium where particle density decreases exponentially in a normalized direction $\mathbf{n}$, offset by $\mathbf{o}$. It is chosen when closed-form integration of participating media is required for real-time rendering. It differs from the Vertical Exponential Density Ramp by providing an integral over a ray segment rather than a point-wise density modulation.
+- **Definition**: A medium where density $\varrho(\mathbf{x}')$ decreases exponentially along direction $\mathbf{n}$ offset by $\mathbf{o}$. [S2, unofficial]
+- **Formula**:
+  $$\varrho(\mathbf{x}') = \varrho' \cdot \exp(-b \cdot \langle \mathbf{x}' - \mathbf{o}, \mathbf{n} \rangle)$$
+  where $\varrho' \ge 0$ is density factor, $b > 0$ is exponential parameter, $\mathbf{n}$ is normalized direction, $\mathbf{o}$ is offset, and $\langle \cdot, \cdot \rangle$ is inner product. [S2, unofficial]
+- **Integrated Density**: For a ray $\mathbf{r}(t) = \mathbf{c} + t \cdot \boldsymbol{\omega}$ with length $D$, if $\langle \boldsymbol{\omega}, \mathbf{n} \rangle \neq 0$:
+  $$P(\mathbf{x}_{2D}) = \frac{\varrho'}{b \cdot \langle \boldsymbol{\omega}, \mathbf{n} \rangle} \cdot \exp(-b \cdot \langle \mathbf{c} - \mathbf{o}, \mathbf{n} \rangle) \cdot (1 - \exp(-b \cdot D \cdot \langle \boldsymbol{\omega}, \mathbf{n} \rangle))$$
+  If $\langle \boldsymbol{\omega}, \mathbf{n} \rangle = 0$, the integral is solved directly (linear accumulation). [S2, unofficial]
+- **Parameters**: $b > 0$ (exponential parameter), $\mathbf{n} \in \mathbb{R}^3, \|\mathbf{n}\|=1$ (direction), $\mathbf{o} \in \mathbb{R}^3$ (offset). [S2, unofficial]
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ per sample, involving basic arithmetic and one exponential function evaluation.
+- **Memory Complexity**: $O(1)$, requiring only local variables and access to input parameters.
+- **Strengths**: Produces natural-looking falloff for rising gases/steam; computationally inexpensive.
+- **Limitations**: Only affects density above the volume center; requires tuning of `parms[1]` and thresholds for different scales.
+- **When to use**: Simulating steam, smoke, or atmospheric layers where density naturally decreases with height.
+- **When not to use**: When uniform density or different falloff shapes (e.g., spherical) are required.
+
+## Background
+The Vertical Exponential Density Ramp was introduced by David Ebert in the context of procedural modeling and animation of gases and fluids. It is part of a suite of procedural techniques designed to create convincing steam and smoke effects without explicit fluid simulation. The method uses an exponential function to ramp off density as the gas rises, enhancing realism. [S1, unofficial]
+
+## Sources
+[S1] Procedural Modeling, Animation, and Rendering of Gases, Fluids, and Textures, https://www.researchgate.net/profile/David-Ebert-4/publication/2786953_Procedural_Modeling_Animation_and_Rendering_of_Gases_Fluids_and_Textures/links/00b7d51a73e42a3c4e000000/Procedural-Modeling-Animation-and-Rendering-of-Gases-Fluids-and-Textures.pdf, fetched 2026-10-31 (unofficial)
+[S2] PDF Real-Time Light Transport in Analytically Integrable Participating Media, https://cgg.mff.cuni.cz/~tomas/publications/pub-thesis-real-time-scattering/thesis.pdf, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,151 @@
+# IsosurfaceClassifier Lighting Model
+
+Also called: Isosurface Volume Rendering with Phong Lighting
+
+## Overview
+The IsosurfaceClassifier Lighting Model is a surface-shading technique for thresholded volumes that visualizes an isosurface by treating volume samples as surface points with opacity determined by a Gaussian transfer function, computing color using a Phong illumination model (ambient, diffuse, specular) with normals derived from the volume gradient [S1, unofficial]. It distinguishes itself from sibling methods like [Interval Shading](6414-interval-shading.md) by applying explicit surface lighting calculations (Blinn-Phong) rather than interval-based color mapping, and from [Volume Raycasting with Surface Extraction and Phong Shading](3662-volume-raycasting-with-surface-extraction-and-phong-shading.md) by integrating the lighting directly into the classifier's transfer function evaluation during ray marching [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A `VolumeSampleData` structure containing the scalar value, position, and gradient of the current sample; a `Camera` object for view direction; an array of `Light` objects; parameters `isovalue`, `sigma`, `kappa`, `ambient_magnitude`, `specular_shininess`, and step size `dt`; and a threshold `DELTA`.
+*   **Output:** An `OpticsData` structure containing the accumulated emission color and transparency (opacity) for the sample.
+
+**Data Structures**
+*   `VolumeSampleData`: Contains `position` (3D vector), `gradient` (3D vector), and scalar value accessors.
+*   `OpticsData`: Contains `color` (3D vector, RGB) and `transparency` (3D vector, RGBA alpha channel implied or separate).
+*   `Light`: Contains `getPosition()` (3D vector) and `getRadiance()` (3D vector).
+*   `Camera`: Contains `getPosition()` (3D vector).
+
+**Parameters**
+*   `isovalue`: The scalar value defining the isosurface. Range: $[-1.0, 1.0]$. Default: $0.0$. [S1, unofficial]
+*   `sigma`: Standard deviation for the Gaussian transfer function. Range: $[0.005, 0.1]$. Default: $0.01$. [S1, unofficial]
+*   `kappa`: Absorption coefficient for Beer-Lambert transparency. Default: $4000.0$. [S1, unofficial]
+*   `ambient_magnitude`: Multiplier for ambient light intensity. Range: $[0.01, 0.5]$. [S1, unofficial]
+*   `specular_shininess`: Exponent for the Blinn-Phong specular highlight. Range: $[1.0, 50.0]$. [S1, unofficial]
+*   `DELTA`: Threshold for the transfer value. If the transfer value is less than or equal to `DELTA`, no lighting is computed. Value not explicitly defined in sources. [S1, unofficial]
+*   `dt`: Step size (distance) along the ray. [S1, unofficial]
+
+**Algorithm Steps**
+1.  **Compute Transfer Value:** Calculate the Gaussian transfer value `val` based on the distance between the sample's scalar value and the `isovalue`, scaled by `sigma`.
+    $$ val = \exp\left(-\frac{(v_{data}.value - isovalue)^2}{2 \cdot \sigma^2}\right) $$
+    [S1, unofficial]
+2.  **Initialize Emission:** Initialize the emission accumulator vector $q$ to $(0, 0, 0)$. [S1, unofficial]
+3.  **Check Threshold:** If $val \le DELTA$, skip lighting calculations. The sample contributes no emission. [S1, unofficial]
+4.  **Iterate Lights:** For each light $L_i$ in the light list (from $i = 0$ to $lis\_num - 1$):
+    a.  **Compute View Direction:** Calculate the normalized vector from the sample position to the camera position.
+        $$ \vec{v} = \frac{\text{cam}.position - v_{data}.position}{\|\text{cam}.position - v_{data}.position\|} $$
+        [S1, unofficial]
+    b.  **Compute Normal:** Normalize the volume gradient to obtain the surface normal.
+        $$ \vec{n} = \frac{v_{data}.gradient}{\|v_{data}.gradient\|} $$
+        [S1, unofficial]
+    c.  **Map Color:** Retrieve the base visualization color $C_{base}$ using the transfer value and normal. This is typically done via a colormap function `getMappedColor(val, normal)`. [S1, unofficial]
+    d.  **Compute Ambient Component:** Calculate the ambient light contribution.
+        $$ C_a = L_i.radiance \cdot ambient\_magnitude $$
+        [S1, unofficial]
+    e.  **Compute Light Direction:** Calculate the normalized vector from the sample position to the light position.
+        $$ \vec{l} = \frac{L_i.position - v_{data}.position}{\|L_i.position - v_{data}.position\|} $$
+        [S1, unofficial]
+    f.  **Compute Diffuse Component:** Calculate the Lambertian diffuse shading factor.
+        $$ diff = \max(0.0, \vec{n} \cdot \vec{l}) $$
+        $$ C_d = diff \cdot L_i.radiance $$
+        [S1, unofficial]
+    g.  **Compute Specular Component:** Calculate the Blinn-Phong specular highlight.
+        $$ \vec{h} = \frac{\vec{v} + \vec{l}}{\|\vec{v} + \vec{l}\|} $$
+        $$ spec = \max(0.0, \vec{n} \cdot \vec{h})^{specular\_shininess} $$
+        $$ C_s = spec \cdot L_i.radiance $$
+        [S1, unofficial]
+    h.  **Accumulate Emission:** Add the weighted lighting contribution to the emission accumulator.
+        $$ q = q + (C_a + C_d + C_s) \odot C_{base} $$
+        where $\odot$ denotes element-wise (Hadamard) product. [S1, unofficial]
+5.  **Compute Transparency:** Calculate the transparency using the Beer-Lambert law.
+    $$ T = \exp(-\kappa \cdot val \cdot dt) $$
+    [S1, unofficial]
+6.  **Compute Output Color:** Scale the accumulated emission by the transfer value, step size, and a constant scaling factor.
+    $$ color = 1000.0 \cdot q \cdot val \cdot dt $$
+    [S1, unofficial]
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def IsosurfaceClassifier_transfer(v_data, cam, lights, lis_num, 
+                                  isovalue, sigma, kappa, 
+                                  ambient_magnitude, specular_shininess, dt):
+    # 1. Compute Transfer Value
+    # Gaussian transfer function
+    diff = v_data.value - isovalue
+    val = exp(-(diff * diff) / (2.0 * sigma * sigma))
+    
+    # 2. Initialize Emission
+    q = Vector3f(0.0, 0.0, 0.0)
+    
+    # 3. Check Threshold
+    if val <= DELTA:
+        # No lighting computed, emission remains zero
+        pass
+    else:
+        # 4. Iterate Lights
+        for i in range(lis_num):
+            li = lights[i]
+            
+            # 4a. Compute View Direction
+            view_dir = (cam.position - v_data.position).normalized()
+            
+            # 4b. Compute Normal
+            normal = v_data.gradient.normalized()
+            
+            # 4c. Map Color
+            # getMappedColor is a helper that maps val and normal to a base color
+            surface_color = getMappedColor(val, normal)
+            
+            # 4d. Compute Ambient Component
+            C_a = li.radiance * ambient_magnitude
+            
+            # 4e. Compute Light Direction
+            pos_diff = li.position - v_data.position
+            li_dist = pos_diff.norm()
+            li_dir = pos_diff / li_dist
+            
+            # 4f. Compute Diffuse Component
+            diff_factor = max(0.0, normal.dot(li_dir))
+            C_d = diff_factor * li.radiance
+            
+            # 4g. Compute Specular Component (Blinn-Phong)
+            halfway_dir = (view_dir + li_dir).normalized()
+            spec_factor = pow(max(0.0, normal.dot(halfway_dir)), specular_shininess)
+            C_s = spec_factor * li.radiance
+            
+            # 4h. Accumulate Emission
+            lighting_sum = C_a + C_d + C_s
+            q = q + lighting_sum.cwiseProduct(surface_color)
+            
+    # 5. Compute Transparency
+    transparency = Vector3f(1.0, 1.0, 1.0) * exp(-kappa * val * dt)
+    
+    # 6. Compute Output Color
+    color = Vector3f(1000.0) * q * val * dt
+    
+    return OpticsData(color, transparency)
+```
+
+**Edge Cases and Pitfalls**
+*   **Zero Gradient:** If the volume gradient is zero, the normal cannot be normalized. This results in undefined behavior or NaNs in lighting calculations. [G] Guard against this by checking gradient magnitude before normalization.
+*   **Camera/Light at Sample Position:** If the camera or light position coincides with the sample position, the view or light direction vector becomes zero-length, causing division by zero during normalization. [G] Add a small epsilon to the denominator or check for zero length.
+*   **DELTA Threshold:** If `val <= DELTA`, the emission `q` remains zero, making the sample effectively invisible in the final color calculation, although transparency is still computed. This can lead to artifacts if `DELTA` is set too high, causing parts of the isosurface to disappear. [S1, unofficial]
+*   **Precision:** The scaling factor `1000.0` suggests that the accumulated emission `q` is small. Ensure floating-point precision is sufficient to avoid underflow or overflow in the final color calculation. [G]
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot L)$ per ray, where $N$ is the number of samples along the ray and $L$ is the number of lights. Each sample requires a Gaussian evaluation, gradient normalization, and $L$ lighting calculations.
+*   **Memory Complexity:** $O(1)$ auxiliary memory per sample, excluding the storage for the volume data and light list.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Performance scales linearly with the number of lights and the number of samples per ray.
+*   **Strengths:** Provides realistic surface-like shading for isosurfaces, enhancing visual perception of shape and depth. Integrates seamlessly with existing ray marching frameworks.
+*   **Limitations:** Computationally expensive due to per-sample lighting calculations for multiple lights. Sensitive to the choice of `sigma` and `DELTA`. Gradient estimation errors can lead to incorrect normals and shading artifacts.
+*   **When to Use:** When realistic surface shading is desired for thresholded volume data and computational resources allow for per-sample lighting calculations.
+*   **When Not to Use:** For real-time applications with many lights or large volumes where performance is critical, or when the volume data has noisy gradients.
+
+## Background
+The IsosurfaceClassifier Lighting Model is implemented in the `volume_renderer` project by Yuehao Wang, a CUDA-based interactive volume renderer [S1, unofficial]. The specific class `IsosurfaceClassifier` inherits from a base `Classifier` class and uses Eigen for vector operations and `tinycolormap` for color mapping [S1, unofficial]. The method combines concepts from isosurface rendering (thresholding, Gaussian transfer functions) with surface shading techniques (Phong illumination, Blinn-Phong specular highlights) [S1, unofficial].
+
+## Sources
+[S1] GitHub - yuehaowang/volume_renderer: CUDA-based interactive volume ..., https://github.com/yuehaowang/volume_renderer, fetched 2026-10-29 (unofficial)

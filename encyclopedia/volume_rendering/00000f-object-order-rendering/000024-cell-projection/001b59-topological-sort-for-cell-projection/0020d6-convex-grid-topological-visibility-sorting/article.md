@@ -1,168 +1,203 @@
 # Convex Grid Topological Visibility Sorting
 
-Also called: Adjacency graph sort, Convex Grid Topological, Graph-based visibility sort, Topological Sort for Back-to-Front Visibility, Visibility Sorting (Convex Grid Topological)
+Also called: Adjacency graph sort, Convex Grid Topological, Graph-based visibility sort, Teller et al. Visibility Algorithm, Topological Sort for Back-to-Front Visibility, Visibility Sorting (Convex Grid Topological)
 
 ## Overview
-Convex Grid Topological Visibility Sorting is an $O(n)$ algorithm for determining the back-to-front rendering order of cells in a convex grid composed of convex polyhedral cells [S1][S2]. It solves the visibility sorting problem by constructing a directed graph of pairwise occlusion relations between adjacent cells and performing a topological sort [S1][S2]. Unlike [Exact Visibility Ordering for Cell Projection Volume Rendering (SXMPVO)](944-exact-visibility-ordering-for-cell-projection-volume-renderi.md) which may require more complex geometric checks, this method relies solely on the convexity of the grid volume and the cells to guarantee that local face-sharing relations imply global visibility order [S1][S2].
+Convex Grid Topological Visibility Sorting is an $O(n)$ algorithm that orders cells in a convex grid of convex polyhedral cells back-to-front for semi-transparent volume rendering [S2][S3, unofficial]. It constructs a directed adjacency graph where edges represent pairwise occlusion relations derived from the viewpoint position, then performs a topological sort to produce a valid compositing order [S1][S3, unofficial]. It sets itself apart from [Exact Visibility Ordering for Cell Projection Volume Rendering (SXMPVO)](944-exact-visibility-ordering-for-cell-projection-volume-renderi.md) and [Power Distance Sort](1060-power-distance-sort.md) by relying exclusively on local face-sharing topology rather than global geometric tests or distance metrics, provided the grid volume is convex [S2][S3, unofficial].
 
 ## How it works
-
-### Inputs and Outputs
 **Inputs:**
-1. A set of $n$ convex cells forming a convex grid volume [S1][S2].
-2. The 3D position of the viewpoint $V$ [S1][S2].
-3. An adjacency structure providing, for each face of each cell, the identity of the neighboring cell sharing that face [S1].
+- A grid of $n$ convex polyhedral cells.
+- An adjacency structure: for each face of each cell, the index of the neighboring cell sharing that face, or a null value if the face is on the boundary [S1].
+- A viewpoint position $V$ in 3D space [S2].
 
 **Outputs:**
-1. A list of cells sorted in back-to-front order (from farthest to nearest relative to $V$) [S1][S2].
+- A list of cell indices sorted in back-to-front order (from farthest to nearest relative to $V$) [S1][S3, unofficial].
 
-### Data Structures
-*   **Cell Object:** Represents a single cell. Contains:
-    *   `id`: Unique integer identifier.
-    *   `incount`: Integer, initialized to 0. Counts the number of direct predecessors in the occlusion graph (cells that must be rendered before this cell) [S2].
-    *   `faces`: List of face descriptors. Each face descriptor contains `neighbor_id` (integer ID of the adjacent cell, or `None` for boundary faces), `normal` (outward-pointing unit normal vector), and `point` (a known point on the face plane) [S1][S2].
-*   **Queue:** A FIFO queue containing cell IDs with `incount` equal to 0 [S2].
-*   **Output List:** A list to store the final sorted cell IDs [S2].
+**Data Structures:**
+- **Cell Node:** Contains an integer `incount` initialized to 0, representing the number of incoming edges in the directed graph [S2][S3, unofficial].
+- **Adjacency List:** For each cell, a list of neighbor cell indices corresponding to its faces [S1].
+- **Queue:** A FIFO queue storing cell indices with `incount` equal to 0 [S2][S3, unofficial].
+- **Output List:** A dynamic array or linked list storing the sorted cell indices [S2][S3, unofficial].
 
-### Partial Order Relation
-The core relation is $B <_{vp} A$, meaning cell $B$ must precede cell $A$ in the visibility sort [S1][S2].
+**Definitions:**
+- Let $F$ be a common face shared by cells $A$ and $B$.
+- Let $P_F$ be the plane equation of face $F$.
+- The partial order relation $B <_{vp} A$ holds if cell $B$ must precede cell $A$ in the visibility sort [S2][S3, unofficial].
+- $B <_{vp} A$ is true if the viewpoint $V$ is on the same side of the plane $P_F$ as cell $A$ [S2][S3, unofficial]. In this case, $A$ occludes $B$ across face $F$, but $B$ cannot occlude $A$ [S2][S3, unofficial].
+- The directed graph has a node for each cell and a directed edge from $B$ to $A$ whenever $B <_{vp} A$ [S2][S3, unofficial].
 
-**Definition:** Let $A$ and $B$ be two cells sharing a common face $F$ [S1][S2]. The relation $B <_{vp} A$ holds if and only if the viewpoint $V$ and cell $A$ lie on the same side of the plane defined by face $F$ [S1][S2].
+**Algorithm Steps:**
 
-**Geometric Test:**
-Let $N$ be the outward-pointing normal vector of face $F$ (pointing from $A$ into $B$) [S2]. Let $P_A$ be any point inside cell $A$ (e.g., the centroid) and $P_V$ be the viewpoint [S2].
-1. Calculate $d_A = (P_A - P_{face}) \cdot N$ [S2].
-2. Calculate $d_V = (P_V - P_{face}) \cdot N$ [S2].
-3. If $d_A$ and $d_V$ have the same sign (i.e., $V$ is on the same side of the face as $A$), then $A$ occludes $B$ from the perspective of $V$ [S1][S2]. Thus, $B <_{vp} A$ [S2].
+1. **Initialize Counts:**
+   For all cells $C$ in the grid, set $C.incount = 0$ [S2][S3, unofficial].
 
-### Algorithm Steps
-1. **Initialize Counts:** For each cell $C$ in the grid, set $C.incount = 0$ [S2].
-2. **Build Occlusion Graph:** For each cell $A$ in the grid, iterate over all its faces. For each face shared with neighbor $B$, evaluate the geometric test. If $B <_{vp} A$ holds, increment $A.incount$ by 1 [S2].
-3. **Initialize Queue:** For each cell $C$ in the grid, if $C.incount == 0$, add $C$ to the Queue [S2].
-4. **Topological Sort:** While the Queue is not empty, remove a cell $C$ from the Queue, append $C$ to the Output List, and iterate over all neighbors $B$ of $C$. If the relation $C <_{vp} B$ holds, decrement $B.incount$ by 1. If $B.incount$ reaches 0, add $B$ to the Queue [S2].
-5. **Cycle Detection:** If the Queue becomes empty and the Output List contains fewer than $n$ cells, a visibility cycle exists [S1][S2].
+2. **Build Directed Graph:**
+   For each cell $A$ and each of its faces $F$:
+   - Let $B$ be the neighbor cell sharing face $F$ (from the adjacency structure) [S1].
+   - If $B$ exists (i.e., $F$ is an interior face):
+     - Evaluate the plane equation $P_F$ at the viewpoint $V$.
+     - Evaluate the plane equation $P_F$ at the centroid (or any interior point) of cell $A$.
+     - If $V$ and $A$ are on the same side of $P_F$ (i.e., the signs of the plane evaluations are identical):
+       - The relation $B <_{vp} A$ holds [S2][S3, unofficial].
+       - Increment $A.incount$ by 1 [S2][S3, unofficial].
+       - Record a directed edge from $B$ to $A$ in the adjacency list of $B$ [S2][S3, unofficial].
 
-### Pseudocode
+3. **Initialize Queue:**
+   For all cells $C$ in the grid:
+   - If $C.incount == 0$, add $C$ to the Queue [S2][S3, unofficial].
+
+4. **Topological Sort:**
+   While the Queue is not empty:
+   - Remove a cell $C$ from the Queue [S2][S3, unofficial].
+   - Add $C$ to the end of the Output List [S2][S3, unofficial].
+   - For each neighbor $B$ such that there is a directed edge from $C$ to $B$ (i.e., $C <_{vp} B$):
+     - Decrement $B.incount$ by 1 [S2][S3, unofficial].
+     - If $B.incount == 0$, add $B$ to the Queue [S2][S3, unofficial].
+
+5. **Cycle Detection:**
+   - If the Output List contains fewer than $n$ cells, a visibility cycle exists [S2][S3, unofficial]. The algorithm fails to produce a total order for the remaining cells [S1, S2][S3, unofficial].
+
+**Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def convex_grid_topological_sort(cells, viewpoint):
+def convex_grid_topological_sort(cells, adjacency, viewpoint):
     """
-    Sorts convex cells in a convex grid back-to-front.
+    Sorts cells in back-to-front order for a convex grid.
     
     Args:
-        cells: List of Cell objects. Each Cell has:
-            - id: int
-            - faces: List of dicts with keys 'neighbor_id', 'normal', 'point'
-        viewpoint: tuple (x, y, z) representing the camera position.
+        cells: List of cell objects. Each cell has a method get_centroid().
+        adjacency: List of lists. adjacency[i][f] is the index of the neighbor 
+                   sharing face f of cell i, or -1 if boundary.
+        viewpoint: 3D vector (x, y, z).
         
     Returns:
-        List of Cell objects sorted back-to-front.
+        List of cell indices in back-to-front order.
     """
     n = len(cells)
-    output_list = []
-    queue = []
+    incount = [0] * n
+    # Adjacency list for the directed graph: graph[u] contains list of v where u -> v
+    graph = [[] for _ in range(n)]
     
-    # Step 1: Initialize incounts
-    for cell in cells:
-        cell.incount = 0
+    # Helper to determine which side of a plane a point is on
+    # Plane is defined by normal N and point P on plane.
+    # We assume adjacency provides face geometry or we compute it from cell vertices.
+    # For simplicity, we assume a function get_face_plane(cell_idx, face_idx) returns (N, P).
+    
+    for cell_idx in range(n):
+        cell = cells[cell_idx]
+        # Iterate over all faces of the cell
+        for face_idx, neighbor_idx in enumerate(adjacency[cell_idx]):
+            if neighbor_idx == -1:
+                continue # Boundary face, no directed edge
+            
+            # Get plane of the shared face
+            # Note: The plane equation must be consistent. 
+            # Typically, the normal points from the current cell to the neighbor.
+            # However, the condition "V and A are on the same side" depends on 
+            # the specific plane definition. 
+            # Standard approach: Plane defined by face vertices.
+            # Let's assume get_face_plane returns a plane where the normal points 
+            # towards the neighbor cell (or consistently defined).
+            # To be robust, we check the sign of the plane function for V and A.
+            
+            # Reconstruct plane from face vertices or use precomputed data.
+            # For this implementation, we assume we can evaluate the plane function.
+            # Let plane_func(point) return the signed distance or value.
+            # The condition is: sign(plane_func(V)) == sign(plane_func(A_centroid))
+            
+            # We need the plane of the face shared by cell_idx and neighbor_idx.
+            # The plane separates the two cells.
+            # Let's assume we have a function face_plane(cell_idx, face_idx) 
+            # that returns a plane object or coefficients.
+            
+            plane = get_face_plane(cell_idx, face_idx)
+            
+            val_v = plane.evaluate(viewpoint)
+            val_a = plane.evaluate(cell.get_centroid())
+            
+            # Check if V and A are on the same side
+            # If both are positive or both are negative, they are on the same side.
+            # If one is zero, it's on the plane (degenerate).
+            if (val_v > 0 and val_a > 0) or (val_v < 0 and val_a < 0):
+                # B <_vp A holds. B is neighbor_idx, A is cell_idx.
+                # Edge from B to A.
+                graph[neighbor_idx].append(cell_idx)
+                incount[cell_idx] += 1
+            elif (val_v < 0 and val_a > 0) or (val_v > 0 and val_a < 0):
+                # V and A are on opposite sides.
+                # Then A <_vp B holds.
+                # Edge from A to B.
+                graph[cell_idx].append(neighbor_idx)
+                incount[neighbor_idx] += 1
+            else:
+                # One of them is on the plane. 
+                # This is a degenerate case. 
+                # If V is on the plane, the edge direction is ambiguous.
+                # If A is on the plane, the centroid is on the plane (impossible for convex cell).
+                # If V is on the plane, we might skip or handle specially.
+                # For robustness, if V is on the plane, the occlusion is tangential.
+                # We can arbitrarily assign or skip. 
+                # However, if V is exactly on the plane, the ray grazes the face.
+                # Standard practice: if V is on the plane, the order is undefined.
+                # We will assume general position for now.
+                pass
+
+    # Initialize Queue
+    queue = []
+    for i in range(n):
+        if incount[i] == 0:
+            queue.append(i)
+            
+    output_list = []
+    
+    # Process Queue
+    head = 0
+    while head < len(queue):
+        c = queue[head]
+        head += 1
         
-    # Step 2: Build graph and compute incounts
-    for cell_A in cells:
-        for face in cell_A.faces:
-            neighbor_B_id = face['neighbor_id']
-            if neighbor_B_id is None:
-                continue
-            # Find neighbor_B object
-            neighbor_B = next(c for c in cells if c.id == neighbor_B_id)
-            
-            # Geometric test: V and A on same side of face plane
-            # N points out of A (into B)
-            N = face['normal']
-            P_face = face['point']
-            P_A = cell_A.center  # Assumes cell has a centroid attribute
-            P_V = viewpoint
-            
-            # Dot products to determine half-space
-            side_A = dot(P_A - P_face, N)
-            side_V = dot(P_V - P_face, N)
-            
-            # Check if same sign (both positive or both negative)
-            if (side_A > 0 and side_V > 0) or (side_A < 0 and side_V < 0):
-                # V and A are on the same side -> A occludes B -> B <vp A
-                # Edge in graph: B -> A. Increment incount of A.
-                cell_A.incount += 1
+        output_list.append(c)
+        
+        for b in graph[c]:
+            incount[b] -= 1
+            if incount[b] == 0:
+                queue.append(b)
                 
-    # Step 3: Initialize Queue
-    for cell in cells:
-        if cell.incount == 0:
-            queue.append(cell)
-            
-    # Step 4: Process Queue
-    while queue:
-        cell_C = queue.pop(0)
-        output_list.append(cell_C)
-        
-        # Iterate over neighbors of C
-        for face in cell_C.faces:
-            neighbor_B_id = face['neighbor_id']
-            if neighbor_B_id is None:
-                continue
-            neighbor_B = next(c for c in cells if c.id == neighbor_B_id)
-            
-            # Check if C <vp B
-            N = face['normal']
-            P_face = face['point']
-            P_C = cell_C.center
-            P_V = viewpoint
-            
-            side_C = dot(P_C - P_face, N)
-            side_V = dot(P_V - P_face, N)
-            
-            if (side_C > 0 and side_V > 0) or (side_C < 0 and side_V < 0):
-                # C and V are on the same side -> C occludes B -> C <vp B
-                # Edge C -> B. Decrement incount of B.
-                neighbor_B.incount -= 1
-                if neighbor_B.incount == 0:
-                    queue.append(neighbor_B)
-                    
-    # Step 5: Check for cycles
     if len(output_list) < n:
-        raise ValueError("Visibility cycle detected. Grid may not be convex or requires subdivision.")
+        raise ValueError("Visibility cycle detected. Grid is not convex or topology is invalid.")
         
     return output_list
-
-def dot(u, v):
-    """Standard dot product for 3D vectors."""
-    return u[0]*v[0] + u[1]*v[1] + u[2]*v[2]
 ```
 
-### Parameters and Edge Cases
-*   **Convexity:** The algorithm assumes the entire grid volume is convex [S1][S2]. If the grid is non-convex, the algorithm may fail because a viewing ray might exit the grid and re-enter it [S1][S2].
-*   **Boundary Cells:** Cells with external faces are called boundary cells [S2]. The basic algorithm does not account for rays crossing external gaps [S1][S2]. For non-convex grids, additional $O(b^2)$ tests between boundary cells are required to add directed edges across gaps [S1][S2].
-*   **Visibility Cycles:** If the queue empties before all cells are processed, a cycle exists [S1][S2]. In a strictly convex grid with a valid viewpoint, this should not occur [S1][S2].
-*   **Precision:** Geometric tests involving dot products and point-in-halfspace checks are sensitive to floating-point precision [G]. Degenerate cases (viewpoint exactly on a face plane) require epsilon-based tolerance checks [G].
-*   **Parameters:** Typical values for parameters are Not given in the sources.
+**Edge Cases and Pitfalls:**
+- **Visibility Cycles:** If the queue becomes empty before all cells are processed, a cycle exists [S1, S2][S3, unofficial]. This indicates the grid is not convex or contains cavities/concavities where viewing rays exit and re-enter the grid [S1][S3, unofficial]. The cells involved must be subdivided [S1].
+- **Non-Convex Grids:** The algorithm is not correct for non-convex grids because viewing rays may leave the grid volume through an external face, cross a gap, and re-enter another cell [S3, unofficial]. Cells with external faces are called boundary cells [S3, unofficial].
+- **Boundary Cells:** For non-convex grids, the algorithm can be extended by adding directed edges between boundary cells whenever a viewing ray crosses both [S1]. This requires $O(b^2)$ pairwise tests for $b$ boundary cells [S1][S3, unofficial].
+- **Plane Evaluation Precision:** If the viewpoint $V$ lies exactly on a face plane, the side determination is ambiguous [G]. A small epsilon tolerance should be used when comparing plane values.
 
 ## Subtopics
 
 ### [Visibility Ordering for Curvilinear Grids](6700-visibility-ordering-for-curvilinear-grids.md)
-An algorithm to generate a visibility ordering for cells in a curvilinear grid (hexahedra) to support semi-transparent rendering, using a combination of undirected breadth-first search and directed depth-first searches on the adjacency graph.
+An algorithm to generate a visibility ordering for cells in a curvilinear grid (hexahedra) to support semi-transparent rendering, using a combination of undirected breadth-first search and directed depth-first searches on the adjacency graph. It sets itself apart from [Convex Grid Topological Visibility Sorting](2370-convex-grid-topological-visibility-sorting.md) by handling non-convex volumes without requiring a convex decomposition, leveraging the implicit topology of curvilinear grids to avoid auxiliary data structures.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(n)$ for convex grids with adjacency structures, where $n$ is the number of cells [S1][S2]. The initialization and graph building steps process each cell twice and each directed edge once [S2]. The while loop treats each cell and each edge once [S2]. Since each cell has a maximum of six faces, the total number of edges is proportional to $n$ [S1][S2].
-*   **Extended Complexity:** For non-convex grids, the extended topological sort complexity is $O(n + b^2)$, where $b$ is the number of boundary cells [S1]. An optimized implementation by Silva et al. (1998) reduces this to $O((b + I)\log_2 b + n)$, where $I$ is the number of crossings among exterior face edges [S1].
-*   **Space Complexity:** $O(n)$ to store the graph (incounts) and the queue/output list [S2].
-*   **Strengths:** Extremely fast for convex grids [S1][S2]. No complex geometric intersection tests are needed during the sort phase, only local face tests [S1]. If the geometry does not change between views, the adjacency graph and plane equations can be reused, requiring only edge direction updates per viewpoint [S1].
-*   **Limitations:** Only applicable to convex grids of convex cells [S1][S2]. Fails or requires augmentation for non-convex grids [S1][S2]. Does not handle self-occlusion or complex internal structures that break convexity [S1].
-*   **When to Use:** Ideal for structured grids (e.g., regular hexahedral meshes) where the domain is convex and the viewpoint is external or the grid is treated as a convex hull [S1][S2].
-*   **When Not to Use:** Non-convex domains, unstructured grids with non-convex cells, or when high precision is required for complex occlusion scenarios not covered by local face relations [S1][S2].
+- **Time Complexity:** $O(n)$ for convex grids with adjacency structures, where $n$ is the number of cells, assuming each cell has at most six faces [S1, S2][S3, unofficial]. The extended algorithm for non-convex grids with $b$ boundary cells is $O(n + b^2)$ [S1][S3, unofficial]. An optimized version by Silva et al. (1998) achieves $O((b + I)\log_2 b + n)$, where $I$ is the number of crossings among exterior face edges [S1].
+- **Memory Complexity:** $O(n + e)$, where $e$ is the number of edges in the directed graph. Since each cell has a constant number of faces (e.g., 6), $e = O(n)$, so memory is $O(n)$ [S2][S3, unofficial].
+- **Strengths:** Linear time complexity for convex grids; simple implementation; reuses adjacency graph and plane equations across views if geometry is static, requiring only edge direction updates per viewpoint [S1].
+- **Limitations:** Fails for non-convex grids without extension; requires adjacency structure; visibility cycles may occur in complex geometries requiring subdivision [S1][S3, unofficial].
+- **When to Use:** Ideal for convex grids (e.g., structured hexahedral meshes) where performance is critical and the grid topology is well-defined [S2][S3, unofficial].
+- **When Not to Use:** Non-convex grids without sufficient boundary cell optimization; unstructured grids without precomputed adjacency [S1][S3, unofficial].
 
 ## Background
-*   **Origin:** The algorithm is described in the paper "Volume rendering for curvilinear and unstructured grids" by Comba et al. [S1][S2].
-*   **History:** It was developed as a faster alternative to $O(n^2)$ pairwise occlusion tests for volume rendering on curvilinear and unstructured grids [S1][S2]. The method leverages the topological properties of convex grids to reduce the sorting problem to a graph topological sort [S1][S2]. Edelsbrunner (1989) proved that for a Delaunay tetrahedralization of scattered data points, no visibility cycles are possible [S1].
-*   **Usage:** Used in volume rendering pipelines for scientific visualization where the data domain is convex and structured or curvilinear grids are used [S1][S2].
+- **Origin:** The algorithm is based on pairwise ordering relations between cells sharing a common face [S2][S3, unofficial]. It was described in the context of volume rendering for curvilinear and unstructured grids [S2][S3, unofficial].
+- **History:** Teller et al. developed a from-region visibility algorithm used by Funkhouser et al. in their walkthrough system, which requires long preprocessing times and assumes axis-aligned cells [S4, S4, unofficial]. The $O(n)$ topological sort for convex grids is a more efficient variant that does not require such strict assumptions [S2][S3, unofficial].
+- **Usage:** Used in hardware-assisted polyhedron projection for volume rendering [S1].
 
 ## Sources
 [S1] Approximate volume rendering for curvilinear and unstructured grids by hardware-assisted polyhedron projection, https://doi.org/10.1002/(sici)1098-1098(2000)11:1<53::aid-ima6>3.0.co;2-7, fetched 2026-10-25
-[S2] Volume rendering for curvilinear and unstructured grids, https://www.researchgate.net/publication/4023713_Volume_rendering_for_curvilinear_and_unstructured_grids, fetched 2026-10-30
+[S2] Volume rendering for curvilinear and unstructured grids, https://doi.org/10.1109/cgi.2003.1214468, fetched 2026-10-24
+[S3] Volume rendering for curvilinear and unstructured grids, https://www.researchgate.net/publication/4023713_Volume_rendering_for_curvilinear_and_unstructured_grids, fetched 2026-10-30 (unofficial)
+[S4] New Techniques for Out-Of-Core Visualization of Large Datasets, https://ctsilva.github.io/thesis/wagner-correa-thesis.pdf, fetched 2026-10-30 (unofficial)

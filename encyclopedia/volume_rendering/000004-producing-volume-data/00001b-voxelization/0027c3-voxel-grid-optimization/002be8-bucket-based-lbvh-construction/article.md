@@ -1,57 +1,89 @@
 # Bucket-based LBVH construction
-
 Also called: Fernandes and Walter LBVH construction
 
 ## Overview
-Bucket-based LBVH construction groups voxels into variable-sized buckets rather than using a uniform grid with a fixed brick size [S1, unofficial]. This approach is designed to handle sparse volumes more efficiently than fixed-grid methods, allowing for two to three times higher frame rates during ray marching by skipping empty space [S1, unofficial]. It sets itself apart from siblings like [Bounding Volume Optimization](3583-bounding-volume-optimization.md) by dynamically determining bucket boundaries based on voxel distribution rather than static spatial subdivisions.
+Bucket-based LBVH construction is a voxel grid optimization method that groups voxels into variable-sized buckets to facilitate efficient empty-space skipping during ray marching [S1, unofficial]. Unlike methods using uniform grids with fixed brick sizes, such as Zellmann et al.'s LBVH construction, this approach adapts to the spatial distribution of occupied voxels [S1, unofficial]. It sets itself apart by replacing fixed spatial partitions with bucket-based grouping, which can yield two to three times higher frame rates in sparse volumes by reducing unnecessary traversal [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A Depth-Sorted Voxels Texture containing all selected voxels, sorted by depth.
-*   **Output:** A Buckets Texture storing the position (index) of the last voxel (boundary voxel) of each bucket.
+*   **Input:** A discrete voxel grid produced by [Voxelization](12-voxelization.md).
+*   **Output:** A data structure organizing voxels into buckets, enabling optimized traversal.
 
 **Data Structures:**
-1.  **Depth-Sorted Voxels Texture:** A texture where each entry corresponds to a voxel. The alpha channel stores the voxel's index in the sorted list.
-2.  **Auxiliary Texture:** A temporary texture used to identify bucket boundaries.
-    *   **R/G Channels:** Store the bucket coordinates (indices) in the final Buckets Texture.
-    *   **B Channel:** Stores a "false" z-value. If the voxel is a bucket boundary, the value is inside the viewing frustum (e.g., 0.5). If not, it is outside the frustum.
-    *   **Alpha Channel:** Stores the voxel index from the Depth-Sorted Voxels Texture.
-3.  **Buckets Texture:** The final output texture. Each entry corresponds to a bucket and stores the index of the last voxel in that bucket within the Depth-Sorted Voxels Texture.
+The method replaces the uniform grid partitioning with a bucket structure. Each bucket contains a subset of voxels. The specific layout of the bucket metadata (e.g., boundary indices) is detailed in [Bucket Size Computation](8964-bucket-size-computation.md).
 
 **Steps:**
-The computation is split into two steps to avoid inefficient texture fetches in vertex shaders [S2, unofficial].
+1.  **Grouping:** Divide the voxel grid into buckets. Unlike fixed-size bricks, buckets are defined by the spatial clustering of occupied voxels [S1, unofficial].
+2.  **Boundary Identification:** Identify the boundary voxels for each bucket. This involves determining the index of the last voxel in each bucket [S1, unofficial].
+3.  **Texture Construction:** Construct a bucket texture that stores the position (index) of the last voxel of each bucket [S1, unofficial]. This is done to avoid high-cost texture fetches in vertex shaders [S1, unofficial].
+4.  **Traversal:** During ray marching, use the bucket structure to skip empty regions. The bucket boundaries allow the ray marcher to jump over empty space efficiently [S1, unofficial].
 
-1.  **Identify Boundary Voxels (Fragment Shader Pass):**
-    *   Render the Depth-Sorted Voxels Texture into the Auxiliary Texture using a fragment shader.
-    *   For each voxel, determine if it is a bucket boundary. A voxel $i$ is a boundary if the center of the next voxel ($i+1$) falls inside the next bucket slab [S2, unofficial].
-    *   Write the bucket coordinates to R/G.
-    *   Write the false z-value (inside frustum for boundary, outside for non-boundary) to B.
-    *   Write the voxel index to Alpha.
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-2.  **Construct Buckets Texture (Vertex Shader Pass):**
-    *   Use the Auxiliary Texture as a Vertex Buffer Object (VBO).
-    *   Render using `glPoints` of size one.
-    *   The graphics pipeline performs an early-depth test. Points with z-values outside the frustum (non-boundary voxels) are rejected.
-    *   Only points corresponding to bucket boundary voxels (z-value inside frustum) proceed to the fragment shader.
-    *   The fragment shader writes the voxel index (from the Alpha channel of the VBO) into the Buckets Texture at the location specified by the bucket coordinates (R/G).
+```python
+# Pseudocode for bucket-based grouping and boundary identification
+# Note: Specific GPU implementation details (fragment/vertex shader split) 
+# are described in [Bucket Size Computation](8964-bucket-size-computation.md).
 
-**Pitfalls:**
-*   Determining if a voxel is a bucket boundary requires comparing the current voxel's bucket with the next voxel's bucket. This is expensive in vertex shaders due to inefficient texture fetches [S2, unofficial]. The two-pass approach mitigates this by moving the comparison logic to the fragment shader in the first pass.
+def compute_bucket_boundaries(voxel_grid):
+    """
+    Groups voxels into buckets and identifies boundary indices.
+    voxel_grid: 3D array of voxel occupancy/density.
+    Returns: List of bucket boundary indices.
+    """
+    # 1. Identify occupied voxels
+    occupied_indices = find_occupied_voxels(voxel_grid)
+    
+    # 2. Group into buckets
+    # The exact grouping logic (e.g., spatial clustering, size constraints) 
+    # is not fully specified in the provided sources [S1, unofficial].
+    # [G] Assume a simple spatial clustering or fixed-count grouping for implementation.
+    buckets = group_voxels_into_buckets(occupied_indices)
+    
+    # 3. Identify boundary voxels
+    # For each bucket, find the index of the last voxel.
+    boundary_indices = []
+    for bucket in buckets:
+        if bucket:
+            last_voxel_index = bucket[-1]
+            boundary_indices.append(last_voxel_index)
+            
+    return boundary_indices
+
+def build_bucket_texture(boundary_indices):
+    """
+    Constructs a texture storing bucket boundary indices.
+    boundary_indices: List of indices of the last voxel in each bucket.
+    Returns: Texture object containing boundary indices.
+    """
+    # [G] Implementation detail: Map boundary_indices to a GPU texture format.
+    # The texture allows efficient lookup during ray marching.
+    texture = create_texture(boundary_indices)
+    return texture
+```
+
+**Parameters:**
+*   **Bucket Size:** Not given in the sources. The method uses variable-sized buckets, but the criteria for determining the size or number of buckets per group are not specified [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Sparse Volumes:** The method is particularly beneficial for sparse volumes where empty-space skipping is crucial [S1, unofficial].
+*   **Texture Fetch Costs:** Direct approaches using vertex shader texture fetches to compare bucket indices are inefficient [S1, unofficial]. The method avoids this by splitting computation between fragment and vertex shaders [S1, unofficial].
 
 ## Subtopics
 
-### Bucket Size Computation
-This stage computes the Buckets Texture on the GPU. It cannot be done directly from the Depth-Sorted Voxels Texture using fragment shaders because there is no direct relationship between the texture containing all voxels and the texture containing one voxel per bucket [S2, unofficial]. The method relies on the two-step rendering pipeline described in the main algorithm to efficiently identify and store bucket boundaries.
+### [Bucket Size Computation](8964-bucket-size-computation.md)
+Computes the bucket texture storing the position of the last voxel of each bucket. It sets itself apart by splitting computation into fragment and vertex shader steps to avoid inefficient vertex shader texture fetches. Choose it when optimizing GPU-based bucket boundary identification.
 
 ## Operating characteristics
-*   **Performance:** Allows for two to three times higher frame rates than using no empty-space skipping during ray marching [S1, unofficial].
-*   **Hardware:** Designed for GPU implementation, leveraging fragment and vertex shaders.
-*   **Strengths:** Efficient for sparse volumes; avoids fixed brick size limitations.
-*   **Limitations:** Requires multiple rendering passes; bucket boundary determination is computationally intensive if not optimized via the two-pass technique.
+*   **Performance:** Provides two to three times higher frame rates compared to no empty-space skipping [S1, unofficial].
+*   **Comparison:** Outperforms uniform grid approaches (e.g., Zellmann et al.) in sparse volumes by adapting to voxel distribution [S1, unofficial].
+*   **Limitations:** Specific time and memory complexity metrics are not given in the sources [S1, unofficial].
 
 ## Background
-The method was introduced by Fernandes and Walter [S2, unofficial]. It is cited in contrast to Zellmann et al.'s approach, which divides the volume into a uniform grid with a fixed brick size [S1, unofficial]. The technique is part of the broader field of volume rendering optimization, specifically targeting efficient empty-space skipping.
+*   **Origin:** Proposed by Fernandes and Walter [FW20] as an alternative to Zellmann et al.'s uniform grid LBVH construction [S1, unofficial].
+*   **Context:** Used in scalable web-based volume rendering of large biomedicinal datasets [S1, unofficial].
+*   **Development:** Part of the broader effort to optimize voxel grid access patterns for ray marching [S1, unofficial].
 
 ## Sources
 [S1] Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze, https://doi.org/10.34726/hss.2023.106203, fetched 2026-10-26 (unofficial)
-[S2] Image-space sheet-buffered splatting on the GPU, https://openalex.org/W2419486389, fetched 2026-10-27 (unofficial)

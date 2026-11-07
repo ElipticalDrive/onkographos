@@ -1,0 +1,26 @@
+# Learning and Training Methods
+
+
+## Overview
+This family encompasses optimization strategies and training pipelines for Gaussian Splatting that deviate from standard supervised reconstruction with known camera poses. It includes methods for reconstructing animatable dynamic avatars using parametric priors and feed-forward or pose-free approaches that eliminate the dependency on Structure-from-Motion (SfM) outputs. It is distinguished from standard [Gaussian Splatting](946-gaussian-splatting.md) by its explicit handling of deformation priors or joint pose optimization, and from [Base 3DGS Optimization](7549-base-3dgs-optimization.md) which assumes fixed, calibrated camera parameters.
+
+## Shared principles
+The methods in this family share the fundamental mechanism of treating volumetric data as a set of parametric primitives that are transformed and rasterized [S1, unofficial][S2, unofficial]. All variants rely on differentiable rendering to compute gradients from the rendered image to the Gaussian parameters (position, covariance, opacity, spherical harmonics) and/or network weights [S1, 6136-instantsplat.md, 6464-pixelsplat.md, unofficial]. The rendering process remains differentiable with respect to the scene representation [S1, 6136-instantsplat.md, 6464-pixelsplat.md, unofficial]. Loss functions typically combine photometric reconstruction error, such as $\mathcal{L}_{L1}$ or $\mathcal{L}_{MSE}$, with perceptual or structural metrics like $\mathcal{L}_{MS-SSIM}$ or $\mathcal{L}_{LPIPS}$ [6136-instantsplat.md][6464-pixelsplat.md].
+
+## Subtopics
+
+### [Gaussian Avatar Reconstruction](1575-gaussian-avatar-reconstruction.md)
+Gaussian Avatar Reconstruction is a family of methods that reconstruct animatable, dynamic 3D human or head avatars from video by representing them as collections of 3D Gaussians. It solves the problem of generating high-fidelity, real-time renderable avatars that can be driven by parametric body models (SMPL/FLAME) or pose features, serving as a dynamic alternative to static Neural Radiance Fields (NeRF) or traditional mesh-based animation. It is distinguished from its sibling [Gaussian Splatting](946-gaussian-splatting.md) by its explicit dependency on a parametric structural prior to drive deformation, and from [Gaussian Avatars](1477-gaussian-avatars.md) which typically focus on head-only reconstruction using the FLAME model.
+
+### [Pose-free and Feed-forward Training](6500-pose-free-and-feed-forward-training.md)
+This family of methods eliminates the dependency on pre-computed camera poses (typically from Structure-from-Motion) by either predicting them jointly with the scene representation or by using a feed-forward network to generate Gaussian primitives directly from input images. It solves the problem of requiring calibrated input data, enabling reconstruction from uncalibrated, sparse, or casual image collections. Unlike standard [Base 3DGS Optimization](7549-base-3dgs-optimization.md) which assumes known poses, these methods treat camera parameters as either learnable variables or implicit outputs of a neural network.
+
+#### VS-Splat with GenDen Augmentation
+- **Definition**: VS-Splat integrated with the GenDen add-on model [S1, unofficial].
+- **Performance**: On the CO3D dataset, VS-Splat + GenDen yields PSNR 22.09, SSIM 0.865, LPIPS 0.208 [S1, unofficial].
+
+## Background
+Gaussian Avatar Reconstruction methods emerged to address the limitations of static 3D Gaussian Splatting in representing dynamic subjects, leveraging parametric models like SMPL and FLAME to drive deformation [S2, unofficial]. Pose-free and feed-forward training methods developed to remove the bottleneck of pre-processing camera poses, allowing for end-to-end reconstruction from sparse or uncalibrated views [S1, 6888-joint-pose-optimization.md, unofficial]. These approaches build on [Splatting](23-splatting.md) by treating volumetric data as a set of parametric primitives that are transformed and rasterized [S1, unofficial][S2, unofficial].
+
+## Sources
+[S1] VS-Splat: Voxel-Selective feed-forward Gaussian Splatting for end-to-end 3D object reconstruction from sparse-views, https://doi.org/10.48550/arxiv.2609.12343, fetched 2026-10-26 (unofficial)

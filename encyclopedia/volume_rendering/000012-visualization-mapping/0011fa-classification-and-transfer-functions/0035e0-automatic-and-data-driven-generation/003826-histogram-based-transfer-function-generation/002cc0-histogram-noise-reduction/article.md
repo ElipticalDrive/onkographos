@@ -1,0 +1,114 @@
+# Histogram Noise Reduction
+
+Also called: Histogram Smoothing via Super-sampling, K-neighborhood Histogram Smoothing, Noise Reduction in Histograms
+
+## Overview
+Histogram Noise Reduction is a preprocessing step applied to 3D histograms of volumetric data (value, 1st derivative, 2nd derivative) to handle noisy regions where voxel counts are low, thereby preventing invalid classification in the resulting transfer function [S1]. It distinguishes itself from sibling methods like [Histogram Equalization](5642-histogram-equalization.md) by focusing on statistical smoothing of sparse bins rather than global intensity redistribution, and from [Histogram and Thumbnail Integration](5951-histogram-and-thumbnail-integration.md) by operating directly on the histogram density rather than visual aids.
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D histogram $H$ of volumetric data, where each bin contains a count of voxels.
+- Output: A smoothed histogram $H'$ with increased sample density in underrepresented regions.
+
+**Data Structures:**
+- The histogram is typically a 3D grid. The specific dimensions depend on the discretization of value, 1st derivative, and 2nd derivative.
+- Each bin stores an integer count of voxels.
+
+**Steps:**
+1. **Identify Noisy Regions:** Determine bins where the voxel count is below a threshold (e.g., 5–10 voxels). These regions are considered noisy and require smoothing [S1].
+2. **Super-sampling:** Increase the number of samples in the histogram by interpolating the volume data.
+   - For a super-sampling factor of $s$, the number of samples increases by a factor of $s^3$.
+   - Example: Two-times super-sampling ($s=2$) increases samples by a factor of 8 [S1].
+   - This involves performing trilinear interpolations for the additional sample points [S1].
+3. **K-neighborhood Smoothing (Alternative or Combined):** Add each voxel to its $k$-neighborhood in the histogram space.
+   - A $k$-neighborhood includes all bins within a Chebyshev distance $k$ in the 3D histogram space.
+   - For $k=1$, the number of samples increases by a factor of 9 (the central bin plus 8 neighbors) [S1].
+4. **Combined Approach:** For optimal results, combine super-sampling and k-neighborhood smoothing.
+   - Example: Use two-times super-sampling ($s=2$) and a $k$-neighborhood with $k=2$ [S1].
+   - This smooths noisy regions effectively while keeping the number of trilinear interpolations reasonable [S1].
+
+**Parameters:**
+- Super-sampling factor $s$: Typically 2. Four-times ($s=4$) was tested but increased preprocessing time dramatically due to the huge number of trilinear interpolations required [S1].
+- Neighborhood radius $k$: Typically 1 or 2. $k=1$ increases samples by a factor of 9; $k=2$ provides more extensive smoothing [S1].
+- Threshold for noisy bins: 5–10 voxels [S1].
+
+**Edge Cases and Pitfalls:**
+- **Preprocessing Time:** High super-sampling factors (e.g., $s=4$) significantly increase preprocessing time due to the computational cost of trilinear interpolations [S1].
+- **Over-smoothing:** Excessive smoothing may blur distinct material boundaries in the transfer function.
+- **Boundary Conditions:** When applying k-neighborhood smoothing, bins at the histogram boundaries have fewer neighbors, which may require special handling to avoid bias [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def histogram_noise_reduction(histogram, super_sample_factor=2, k=2):
+    """
+    Reduces noise in a 3D histogram by super-sampling and k-neighborhood smoothing.
+    
+    Args:
+        histogram: 3D numpy array of voxel counts.
+        super_sample_factor: Factor for super-sampling (e.g., 2).
+        k: Radius of the neighborhood for smoothing.
+        
+    Returns:
+        smoothed_histogram: 3D numpy array of smoothed voxel counts.
+    """
+    # Step 1: Super-sampling
+    # Increase the resolution of the histogram by interpolating the volume data.
+    # This step is performed on the volume data before histogramming.
+    # For super_sample_factor = s, the number of samples increases by s^3.
+    # The volume data is trilinearly interpolated at the new sample points.
+    # Note: The actual interpolation is done on the volume data, not the histogram.
+    # Here, we assume the histogram is already computed from super-sampled data.
+    # If super-sampling is applied, the histogram counts are effectively multiplied by s^3
+    # for the existing bins, plus new bins from the interpolated points.
+    # For simplicity, we assume the input histogram is from super-sampled data.
+    
+    # Step 2: K-neighborhood smoothing
+    smoothed_histogram = histogram.copy()
+    shape = histogram.shape
+    
+    # Define the k-neighborhood offsets
+    offsets = []
+    for i in range(-k, k + 1):
+        for j in range(-k, k + 1):
+            for l in range(-k, k + 1):
+                offsets.append((i, j, l))
+    
+    # Apply smoothing
+    for x in range(shape[0]):
+        for y in range(shape[1]):
+            for z in range(shape[2]):
+                total_count = 0
+                neighbor_count = 0
+                for dx, dy, dz in offsets:
+                    nx, ny, nz = x + dx, y + dy, z + dz
+                    if 0 <= nx < shape[0] and 0 <= ny < shape[1] and 0 <= nz < shape[2]:
+                        total_count += histogram[nx, ny, nz]
+                        neighbor_count += 1
+                # Average the counts in the k-neighborhood
+                if neighbor_count > 0:
+                    smoothed_histogram[x, y, z] = total_count / neighbor_count
+    
+    return smoothed_histogram
+```
+
+## Subtopics
+
+### [Non-parametric Transfer Function Generation using Spatial Variance](6682-non-parametric-transfer-function-generation-using-spatial-va.md)
+A technique for generating transfer functions by clustering volumetric data in an abstract feature space that combines scalar values with spatial variance statistics, using kernel density estimation to smooth the histogram and identify feature segments. It differs by using spatial variance and kernel density estimation rather than super-sampling and k-neighborhood smoothing.
+
+## Operating characteristics
+- **Time Complexity:** Super-sampling increases the number of samples by $s^3$, leading to $O(s^3 N)$ interpolations, where $N$ is the number of voxels. K-neighborhood smoothing is $O(N \cdot (2k+1)^3)$.
+- **Memory Complexity:** Super-sampling increases the memory required for the volume data by a factor of $s^3$. The histogram size remains the same.
+- **Measured Performance:** Two-times super-sampling with $k=2$ provides a good balance between noise reduction and preprocessing time [S1]. Four-times super-sampling was found to be too slow due to the large number of trilinear interpolations [S1].
+- **Strengths:** Effectively reduces noise in underrepresented regions of the histogram, enabling valid classification [S1].
+- **Limitations:** High super-sampling factors significantly increase preprocessing time [S1]. May blur distinct material boundaries if over-applied.
+- **When to Use:** When the histogram has noisy regions with low voxel counts (e.g., below 5–10 voxels) that prevent valid classification [S1].
+- **When Not to Use:** When preprocessing time is a critical constraint, or when the histogram is already sufficiently smooth.
+
+## Background
+Histogram Noise Reduction was introduced in the paper "Spatialized Transfer Functions" by Engel et al. (2005) [S1]. It is part of a broader approach to automatic and data-driven generation of transfer functions for volume rendering. The method addresses the issue of noisy histograms in underrepresented regions, which can lead to invalid classification in the transfer function.
+
+## Sources
+[S1] Spatialized Transfer Functions, https://doi.org/10.2312/vissym/eurovis05/271-278, fetched 2026-10-26

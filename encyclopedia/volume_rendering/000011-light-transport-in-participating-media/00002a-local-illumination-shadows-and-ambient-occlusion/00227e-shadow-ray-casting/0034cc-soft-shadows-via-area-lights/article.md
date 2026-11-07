@@ -3,47 +3,96 @@
 Also called: Area Light Shadow Sampling, Area Light Shadows, Partial Occlusion, Shadow Occlusion
 
 ## Overview
-This method models shadows cast by light sources with spatial extent, allowing points in space to be partially occluded, unlike point sources which cast sharp shadows [S2, unofficial]. It sets itself apart from its siblings by replacing the single boolean shadow test of point sources with area light sampling to compute natural soft shadows with penumbra [S1, unofficial][S2, unofficial].
+This method computes soft shadows by modeling light sources with spatial extent, allowing points in space to be partially occluded rather than fully lit or fully in shade [S2, unofficial]. Unlike point source approximations which cast sharp shadows, this approach samples the light source area to generate natural penumbra effects [S1, unofficial]. It is distinguished from sibling methods like [Variance Shadow Mapping for NeRFs](3561-variance-shadow-mapping-for-nerfs.md) by its direct sampling of the light geometry rather than statistical variance estimation, and from [Soft Shadows via Ray Tracing](5136-soft-shadows-via-ray-tracing.md) by its specific focus on area light integration within the volume ray marching context.
 
 ## How it works
-**Inputs and Outputs**
-*   **Input:** A ray origin $\mathbf{o}$ and direction $\boldsymbol{\omega}$, a distance field or volume representation of the scene, and an area light source definition (position, orientation, and extent).
-*   **Output:** The transmittance $T$ or shadow factor representing the fraction of light from the area source that reaches the point along the ray.
+**Inputs and Outputs:**
+*   **Input:** The position of the shading point $\mathbf{p}$, the light source geometry (defined by area $A$ and position $\mathbf{l}_{center}$), and the volume density field $\sigma_t(\mathbf{x})$.
+*   **Output:** The shadow factor $S \in [0, 1]$, representing the fraction of the light source visible from $\mathbf{p}$.
 
-**Data Structures**
-*   **Area Light:** Defined by a center position, a normal vector (for directional area lights), and a geometric extent (e.g., radius for disks, width/height for rectangles).
-*   **Sample Point:** A position on the light surface generated via uniform or stratified sampling.
+**Data Structures:**
+*   **Light Source:** Defined by a set of sample points $\{\mathbf{l}_i\}$ distributed over the light's area $A$. The number of samples $N$ determines the quality of the soft shadow.
+*   **Volume:** Accessible via a distance field or density grid for ray marching [S2, unofficial].
 
-**Steps**
-1.  **Sample the Area Light:** Generate a sample point $\mathbf{l}$ on the surface of the area light source. This replaces the single direction vector used for point lights [S1, unofficial].
-2.  **Compute Shadow Ray Direction:** Calculate the direction from the shading point $\mathbf{p}$ to the light sample: $\boldsymbol{\omega}_s = \frac{\mathbf{l} - \mathbf{p}}{\|\mathbf{l} - \mathbf{p}\|}$.
-3.  **Cast Shadow Ray:** Perform a shadow ray march or trace along $\boldsymbol{\omega}_s$ from $\mathbf{p}$ to $\mathbf{l}$ [S1, unofficial].
-4.  **Evaluate Occlusion:** Determine if the ray is blocked by geometry. In a distance field context, this involves checking if the distance to the surface is less than the distance along the ray [S2, unofficial].
-5.  **Accumulate:** Repeat steps 1-4 for multiple samples and average the results to estimate the partial occlusion [S1, unofficial].
+**Steps:**
+1.  **Sample the Light Area:** Generate $N$ sample points $\mathbf{l}_i$ uniformly distributed over the light source area $A$ [S1, unofficial].
+2.  **Cast Shadow Rays:** For each sample point $\mathbf{l}_i$, cast a shadow ray from $\mathbf{l}_i$ towards $\mathbf{p}$.
+3.  **Evaluate Transmittance:** For each ray, compute the transmittance $T_i$ from $\mathbf{l}_i$ to $\mathbf{p}$ by integrating the extinction coefficient $\sigma_t$ along the path:
+    $$ T_i = \exp\left(-\int_{\mathbf{l}_i}^{\mathbf{p}} \sigma_t(\mathbf{x}) \, d\mathbf{x}\right) $$
+    In discrete implementations, this is approximated by summing $\sigma_t \cdot \Delta s$ over samples along the ray segment [G].
+4.  **Compute Shadow Factor:** Average the transmittance values from all samples to determine the final shadow factor:
+    $$ S = \frac{1}{N} \sum_{i=1}^{N} T_i $$
+    If $N=1$, the result is a hard shadow (boolean occlusion) [S2, unofficial].
 
-**Formulas**
-The shadow factor $S$ is estimated by averaging $N$ samples:
-$$ S = \frac{1}{N} \sum_{i=1}^{N} \text{ShadowTest}(\mathbf{p}, \mathbf{l}_i) $$
-where $\text{ShadowTest}$ returns 1 if the path is clear and 0 if occluded [S2, unofficial].
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-**Parameters**
-*   **Number of Samples ($N$):** Not given in the sources. Higher $N$ reduces noise but increases cost [S1, unofficial].
+```python
+def compute_area_light_shadow(p, light_samples, volume_sampler):
+    """
+    Computes soft shadow factor for point p given light samples and volume.
+    
+    Args:
+        p: 3D vector, shading point position.
+        light_samples: List of 3D vectors, sample points on the light area.
+        volume_sampler: Function that returns sigma_t at a 3D position.
+        
+    Returns:
+        float: Shadow factor S in [0, 1].
+    """
+    total_transmittance = 0.0
+    n_samples = len(light_samples)
+    
+    for l_i in light_samples:
+        # Cast ray from light sample l_i to point p
+        # Approximate transmittance by sampling along the segment
+        # Note: In a full implementation, ray marching steps would be adaptive
+        # or fixed based on volume resolution. Here we assume a simple average
+        # or single-step check for brevity, but proper integration is required.
+        
+        # Direction from light to point
+        direction = p - l_i
+        distance = length(direction)
+        
+        # Sample along the ray from l_i to p
+        # Number of steps depends on required precision and volume resolution
+        num_steps = 10 # Placeholder for adaptive step count
+        transmittance = 1.0
+        
+        for step in range(num_steps):
+            t = step / num_steps
+            current_pos = l_i + direction * t
+            sigma_t = volume_sampler(current_pos)
+            
+            # Approximate integral contribution
+            # Delta s is the step size along the ray
+            delta_s = distance / num_steps
+            transmittance *= exp(-sigma_t * delta_s)
+            
+        total_transmittance += transmittance
+        
+    shadow_factor = total_transmittance / n_samples
+    return shadow_factor
+```
 
-**Edge Cases and Pitfalls**
-*   **Aliasing:** Insufficient sampling leads to noisy shadows [S1, unofficial].
-*   **Performance:** Shooting more rays per pixel increases computational cost exponentially [S1, unofficial].
+**Parameters:**
+*   $N$: Number of light samples. Typical values range from 1 (hard shadow) to 16-64 for soft shadows, depending on the desired quality and performance budget [S1, unofficial].
 
-## Subtopics
+**Edge Cases:**
+*   **$N=1$:** Results in a hard shadow, equivalent to a point source [S2, unofficial].
+*   **Zero Density:** If $\sigma_t = 0$ along all paths, $S=1$ (fully lit).
+*   **High Density:** If $\sigma_t$ is very high, $S \to 0$ (fully shadowed).
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with the number of samples $N$ and the cost of the shadow ray traversal.
-*   **Memory Complexity:** Low, requiring only storage for the scene representation and sample buffers.
-*   **Strengths:** Produces realistic soft shadows with penumbra; works well with dynamic geometry in raster engines if using filtered shadow maps, or with distance fields in raymarching [S2, unofficial].
-*   **Limitations:** Computationally expensive due to multiple ray casts; noise can be significant with few samples [S1, unofficial].
-*   **When to use:** When realistic lighting with soft shadows is required and performance allows for multiple samples per pixel.
+*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of light samples and $M$ is the number of volume samples per shadow ray. Performance degrades linearly with increased softness (higher $N$) and volume resolution (higher $M$) [S1, unofficial].
+*   **Memory Complexity:** $O(1)$ additional memory per shading point, assuming the volume data is accessed on the fly.
+*   **Strengths:** Produces physically plausible soft shadows with penumbra; works well with dynamic geometry if the volume is updated [S2, unofficial].
+*   **Limitations:** Computationally expensive due to multiple shadow rays per pixel; noise can appear if $N$ is too low [S1, unofficial].
+*   **When to Use:** When realistic soft shadows are required and performance allows for multiple ray casts per pixel.
+*   **When Not to Use:** In real-time applications with strict performance constraints where hard shadows or approximate methods (like [Lookup Table Shadow Rendering](3588-lookup-table-shadow-rendering.md)) are preferred.
 
 ## Background
-The concept of soft shadows arises from the physical reality that light sources have spatial extent, unlike the idealized point sources often used in early computer graphics [S2, unofficial]. The method of sampling area lights to approximate these shadows is a fundamental technique in global illumination and realistic rendering [S1, unofficial].
+The concept of soft shadows via area lights originated from the observation that real-world light sources have spatial extent, leading to partial occlusion and penumbra [S2, unofficial]. In raster graphics, this is often achieved via distance-based filtering of shadow maps [S2, unofficial]. In ray marching and volume rendering, direct sampling of the light area provides a more accurate and flexible solution, though at a higher computational cost [S1, unofficial]. This method is a fundamental technique in global illumination for volumes, enabling more realistic lighting effects compared to point source approximations.
 
 ## Sources
 [S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)

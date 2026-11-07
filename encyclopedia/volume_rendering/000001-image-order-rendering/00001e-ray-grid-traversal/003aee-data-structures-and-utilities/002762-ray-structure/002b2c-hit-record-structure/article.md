@@ -1,36 +1,50 @@
 # Hit Record Structure
 
-Also called: FrontFace Determination, Hit Record & Face Normal Orientation, HitRecord
+Also called: FrontFace Determination, Hit Data Structure, Hit Record & Face Normal Orientation, HitRecord
 
 ## Overview
-The Hit Record Structure is a data container used in ray tracing to store the geometric and material properties of a ray-surface intersection. It solves the problem of passing intersection details (position, normal, distance, and material) from the intersection test phase to the shading phase. It is distinguished from the [Ray Structure](4026-ray-structure.md) by storing the *result* of the intersection rather than the *query* parameters, and from sibling containers like [Ray Bundle](2179-ray-bundle.md) by focusing on single-ray per-hit state rather than batched ray state.
+The Hit Record Structure is a data container used in ray tracing and volume rendering to store the geometric and material properties of a ray-surface intersection. It solves the problem of passing intersection context (position, normal, distance, and material reference) from the traversal phase to the shading phase. It is distinguished from sibling structures like the [Ray Bundle](2179-ray-bundle.md) or [RayBatch container](4187-raybatch-container.md) by focusing on the state of a single intersection event rather than the propagation or batching of rays themselves.
 
 ## How it works
+The structure captures the result of a ray intersection test. Its primary computational responsibility is often the normalization of the surface normal to ensure consistent shading regardless of which side of the surface the ray struck.
+
 ### Inputs and Outputs
-- **Input**: A ray (origin, direction), a geometric primitive (e.g., sphere, plane, triangle), and optionally a material reference.
-- **Output**: A populated `HitRecord` structure containing the hit point, oriented normal, distance along the ray, front-face flag, and material pointer.
+*   **Input**: A ray (origin, direction), a geometric primitive (e.g., sphere, plane, splat), and optionally a material reference.
+*   **Output**: A populated Hit Record instance containing the hit point, oriented normal, distance along the ray, and material data.
 
-### Data Structures
-The structure typically contains the following fields [S1, S2, unofficial]:
-- `P` (or `point`): The 3D coordinates of the intersection point.
-- `Normal` (or `normal`): The surface normal at the hit point, oriented to point against the ray direction.
-- `T` (or `t`): The scalar distance from the ray origin to the hit point.
-- `FrontFace` (or `front_face`): A boolean flag indicating whether the ray hit the front or back face of the surface.
-- `Mat` (or `material`): A reference or pointer to the material properties at the hit point.
-- `Transmittance` (or `transmittance`): Optional field for volumetric or transmission effects, often initialized to 1.0 [S1, unofficial].
-- `IsTransmission` (or `is_transmission`): Optional boolean flag indicating if the interaction is a transmission event [S1, unofficial].
+### Data Structures and Layout
+Sources describe slightly different field sets depending on the rendering context (solid primitives vs. Gaussian splats vs. voxel traversal).
 
-### Front Face Determination
-The core algorithmic step in populating the hit record is determining the orientation of the normal. Geometric primitives often compute a "geometric outward normal" ($N_{\text{out}}$) based on the surface definition. However, for shading purposes, the normal must point against the incoming ray direction ($D$).
+**Common Fields:**
+*   `P` or `point`: The 3D coordinates of the intersection point.
+*   `N` or `normal`: The surface normal vector at the hit point.
+*   `t` or `distance`: The scalar distance from the ray origin to the hit point.
+*   `front_face` or `FrontFace`: A boolean flag indicating if the ray hit the front or back face of the surface.
+*   `Mat` or `material`: A reference to the material properties at the hit point.
 
-The front-face flag is determined by the dot product of the ray direction and the outward normal [S1, S2, unofficial]:
-$$ \text{FrontFace} = N_{\text{out}} \cdot D < 0 $$
+**Context-Specific Fields:**
+*   **Gaussian Splats**: Includes `splatIndex` to identify which splat was hit [S3, unofficial].
+*   **Voxel Tracing**: May include `transmittance` and `is_transmission` flags for volumetric effects [S1, unofficial].
 
-If the dot product is negative, the ray is hitting the front face (the normal points against the ray). If positive, it is hitting the back face. The oriented normal ($N$) is then computed as [S2, unofficial]:
-$$ N = \begin{cases} N_{\text{out}} & \text{if } N_{\text{out}} \cdot D < 0 \\ -N_{\text{out}} & \text{otherwise} \end{cases} $$
+### Algorithm: Front Face Determination
+The most critical operation within the Hit Record setup is determining the orientation of the normal. Geometric primitives often provide an "outward" normal. If the ray strikes the back face, this normal points in the same general direction as the ray, which causes incorrect shading (e.g., lighting calculations assuming the surface faces away from the viewer).
+
+The algorithm orients the normal to always point against the ray direction.
+
+**Formula:**
+Let $N_{\text{out}}$ be the geometric outward normal and $D$ be the ray direction. The oriented normal $N$ is:
+
+$$
+N = \begin{cases} 
+N_{\text{out}} & \text{if } N_{\text{out}} \cdot D < 0 \\
+-N_{\text{out}} & \text{otherwise}
+\end{cases}
+$$
+
+The boolean flag `front_face` is set to true if $N_{\text{out}} \cdot D < 0$ [S1, S2, unofficial].
 
 ### Pseudocode
-The following Python-like pseudocode implements the hit record structure and the front-face determination logic [S1, S2, unofficial].
+The following implementation combines the layout and logic from the cited sources into a unified Python-like style.
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
@@ -38,6 +52,7 @@ The following Python-like pseudocode implements the hit record structure and the
 import math
 
 class Vector3:
+    """Simple 3D vector class for demonstration."""
     def __init__(self, x, y, z):
         self.x = x
         self.y = y
@@ -49,120 +64,115 @@ class Vector3:
     def negate(self):
         return Vector3(-self.x, -self.y, -self.z)
 
-class Ray:
-    def __init__(self, origin, direction):
-        self.origin = origin
-        self.direction = direction
-
-    def at(self, t):
-        return Vector3(
-            self.origin.x + t * self.direction.x,
-            self.origin.y + t * self.direction.y,
-            self.origin.z + t * self.direction.z
-        )
-
-class Material:
-    """Placeholder for material properties."""
-    pass
+    def copy(self, other):
+        self.x = other.x
+        self.y = other.y
+        self.z = other.z
 
 class HitRecord:
+    """
+    Data structure representing a ray-splat or ray-surface intersection hit.
+    Stores hit location, surface normal, distance, and material info.
+    """
     def __init__(self):
-        self.P = Vector3(0.0, 0.0, 0.0)
+        # Point3 point (hit location)
+        self.point = Vector3(0.0, 0.0, 0.0)
+        # Vector3 normal (oriented normal)
         self.normal = Vector3(0.0, 0.0, 0.0)
-        self.t = 0.0
+        # double t (distance along ray)
+        self.distance = 0.0
+        # bool front_face
         self.front_face = False
-        self.mat = None
-        self.transmittance = 1.0  # Default initialization [S1, unofficial]
+        # Material reference (placeholder)
+        self.material = None
+        # Optional: splat index for Gaussian Splatting
+        self.splatIndex = 0
+        # Optional: transmittance for volumetric rendering
+        self.transmittance = 1.0
+        # Optional: transmission flag
         self.is_transmission = False
 
-    def set_face_normal(self, ray, outward_normal):
+    def set_face_normal(self, ray_direction, outward_normal):
         """
-        Determines front face and orients the normal.
-        Based on [S1, S2, unofficial].
+        Determines the front face and orients the normal vector.
+        Sets front_face = True if the outward normal points against the ray direction.
         """
-        # Check if outward normal points against ray direction
-        self.front_face = ray.direction.dot(outward_normal) < 0
+        # Calculate dot product of ray direction and outward normal
+        dot_product = ray_direction.dot(outward_normal)
         
-        # Orient normal to point against ray
+        # Determine if it is a front face
+        self.front_face = dot_product < 0
+        
+        # Orient the normal: if front face, keep outward normal; else negate it
         if self.front_face:
-            self.normal = outward_normal
+            self.normal.copy(outward_normal)
         else:
-            self.normal = outward_normal.negate()
+            self.normal.copy(outward_normal.negate())
 
-def hit_sphere(sphere, ray, t_min, t_max):
+    def set(self, origin, normal, distance, splat_index=0):
+        """
+        Updates the Hit instance with new values.
+        """
+        self.point.copy(origin)
+        self.normal.copy(normal)
+        self.distance = distance
+        self.splatIndex = splat_index
+
+    def clone(self):
+        """
+        Creates a new Hit instance and copies all fields from the current instance.
+        """
+        hit_clone = HitRecord()
+        hit_clone.point.copy(self.point)
+        hit_clone.normal.copy(self.normal)
+        hit_clone.distance = self.distance
+        hit_clone.splatIndex = self.splatIndex
+        hit_clone.front_face = self.front_face
+        hit_clone.material = self.material
+        hit_clone.transmittance = self.transmittance
+        hit_clone.is_transmission = self.is_transmission
+        return hit_clone
+
+def ray_at(ray_origin, ray_direction, t):
     """
-    Example intersection test for a sphere.
-    Returns True if hit, populating rec.
+    Helper function to calculate the point on the ray at distance t.
+    P(t) = Origin + t * Direction
     """
-    # Vector from ray origin to sphere center
-    oc = Vector3(
-        ray.origin.x - sphere.center.x,
-        ray.origin.y - sphere.center.y,
-        ray.origin.z - sphere.center.z
+    return Vector3(
+        ray_origin.x + t * ray_direction.x,
+        ray_origin.y + t * ray_direction.y,
+        ray_origin.z + t * ray_direction.z
     )
-    
-    # Quadratic equation coefficients
-    a = ray.direction.dot(ray.direction)
-    b = 2.0 * oc.dot(ray.direction)
-    c = oc.dot(oc) - sphere.radius * sphere.radius
-    
-    discriminant = b * b - 4 * a * c
-    
-    if discriminant < 0:
-        return False
-    
-    sqrt_disc = math.sqrt(discriminant)
-    
-    # Find the nearest valid t
-    root = (-b - sqrt_disc) / (2.0 * a)
-    if root < t_min or root > t_max:
-        root = (-b + sqrt_disc) / (2.0 * a)
-        if root < t_min or root > t_max:
-            return False
-            
-    rec = HitRecord()
-    rec.t = root
-    rec.P = ray.at(root)
-    
-    # Compute geometric outward normal
-    outward_normal = Vector3(
-        (rec.P.x - sphere.center.x) / sphere.radius,
-        (rec.P.y - sphere.center.y) / sphere.radius,
-        (rec.P.z - sphere.center.z) / sphere.radius
-    )
-    
-    # Set face normal and orientation
-    rec.set_face_normal(ray, outward_normal)
-    
-    # Assign material
-    rec.mat = sphere.material
-    
-    return True
 ```
 
 ### Parameters and Edge Cases
-- **Precision**: Floating-point precision errors can cause the dot product to be exactly zero or slightly off, leading to incorrect front-face determination. Using a small epsilon for comparisons is common practice [G].
-- **Boundaries**: The `t` value must be clamped to valid ranges (`t_min`, `t_max`) to avoid self-intersection or hitting the camera plane.
-- **Degenerate Input**: Rays with zero-length direction vectors or primitives with zero radius should be handled as invalid inputs [G].
+*   **Precision**: The dot product comparison `dot_product < 0` is sensitive to floating-point precision. In degenerate cases where the ray is parallel to the surface, the dot product is near zero. Standard implementations treat this as a back-face hit (or ignore it if `t` is invalid) [S1, S2, unofficial].
+*   **Boundaries**: The `distance` (t) must be checked against `t_min` and `t_max` before populating the Hit Record to ensure the hit is within the valid ray segment [S2, unofficial].
+*   **Initialization**: The `transmittance` field is typically initialized to 1.0 (fully opaque/start of path) [S1, unofficial].
 
 ## Subtopics
 
-### Ray Bundle
-A container for multiple rays, often used in GPU ray tracing. It differs from HitRecord by managing batched state rather than single-hit details. [Link](2179-ray-bundle.md)
-
-### RayBatch container
-Similar to Ray Bundle, optimized for batch processing. [Link](4187-raybatch-container.md)
+### Sentinel-Based Shading Dispatch
+A variant of hit record usage in voxel-based ray tracers where the hit record (or associated ray state) uses sentinel values to determine shading logic.
+*   **Definition**: Routes shading evaluation based on sentinel values stored in `ray.m_voxel` to distinguish between analytic primitives, TLAS (Top-Level Acceleration Structure) instances, and world voxels [S4, unofficial].
+*   **Mechanism**:
+    1.  Check `ray.m_voxel` against sentinel `0x40000000` (bit 30). If matched, dispatch to `shadeDielectric` or `shadeOpaqueSphere` based on material transparency [S4, unofficial].
+    2.  Check against sentinel `0x20000000` (bit 29). If matched, receive direct lighting and IBL using world-space normal and material ID from TLAS traversal [S4, unofficial].
+    3.  For all other nonzero values, treat as world voxel hits or mesh sentinel `0x80000000` (bit 31), dispatching to `shadeVoxel` [S4, unofficial].
+*   **Outcome**: Each shading function returns a `BounceResult` containing direct lighting contribution, throughput scale factor, and a continuation flag. The iterative trace loop accumulates color and updates throughput across bounces [S4, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: The hit record structure itself has $O(1)$ creation and update time. The cost lies in the intersection test that populates it.
-- **Memory Complexity**: $O(1)$ per hit record. The size is determined by the number of fields (typically 3-5 vectors/floats/bools).
-- **Strengths**: Simple, efficient, and standardizes the interface between intersection and shading.
-- **Limitations**: Does not handle multiple hits per ray (requires a list of HitRecords or a linked list).
-- **When to use**: Standard in ray tracers for single-bounce or path tracing where one intersection per ray is processed at a time.
+*   **Time Complexity**: The setup of the Hit Record is $O(1)$ relative to the scene size, as it only processes the single closest intersection found by the traversal algorithm. The front-face determination involves a single dot product and conditional branch.
+*   **Memory Complexity**: $O(1)$ per hit record. The size depends on the specific implementation (e.g., including `splatIndex` adds 4-8 bytes, `transmittance` adds 8 bytes).
+*   **Strengths**: Decouples traversal from shading. Ensures consistent normal orientation for lighting calculations.
+*   **Limitations**: In high-performance GPU implementations, storing full Hit Records for every potential hit (before discarding non-closest hits) can cause memory bandwidth bottlenecks. Optimizations often use early-z or discard logic to avoid populating the record for non-visible hits.
+*   **When to use**: Standard in any ray-traced or ray-marched renderer where surface properties (normal, material) are needed for shading.
 
 ## Background
-The Hit Record Structure is a fundamental component of ray tracing algorithms, popularized by the "Ray Tracing in One Weekend" series and similar educational resources. It abstracts the geometric intersection details into a uniform interface for shading. The front-face determination logic is a standard technique to ensure consistent normal orientation for lighting calculations, regardless of whether the ray hits the inside or outside of a closed surface.
+The Hit Record structure is a fundamental component of modern ray tracing, popularized by the "Ray Tracing in One Weekend" series and widely adopted in both CPU and GPU ray tracers. It abstracts the geometric intersection details into a uniform interface for the shading pipeline. Variants like the Gaussian Splat hit record [S3, unofficial] and Voxel sentinel dispatch [S4, unofficial] extend this concept to handle specific rendering primitives and acceleration structures.
 
 ## Sources
 [S1] TakTikFR/Volumetric-Path-Tracing, https://github.com/TakTikFR/Volumetric-Path-Tracing, fetched 2026-10-26 (unofficial)
 [S2] hexhowells/GoTracer, https://github.com/hexhowells/GoTracer, fetched 2026-10-26 (unofficial)
+[S3] mkkellogg/GaussianSplats3D, https://github.com/mkkellogg/GaussianSplats3D, fetched 2026-10-27 (unofficial)
+[S4] NiekMSoftware/bad-apple-voxel-raytracer, https://github.com/NiekMSoftware/bad-apple-voxel-raytracer, fetched 2026-10-24 (unofficial)

@@ -3,14 +3,14 @@
 Also called: DDA-like voxel traversal, Step-wise ray-sphere intersection for voxels
 
 ## Overview
-Voxel Raycasting with Normal Estimation is a brute-force raycasting algorithm for voxel grids that steps along a ray at fixed intervals to find the first solid voxel, then estimates the surface normal based on the direction of travel relative to the voxel grid axes [S1, unofficial]. It differs from [Amanatides and Woo Voxel Traversal](3132-amanatides-and-woo-voxel-traversal.md) by using fixed-step sampling rather than boundary-crossing logic, making it simpler to implement but less efficient for sparse or large-scale scenes [S1, unofficial].
+Voxel Raycasting with Normal Estimation is a brute-force raycasting algorithm for voxel grids that steps along a ray at fixed intervals to find the first solid voxel, then estimates the surface normal based on the direction of travel relative to the voxel grid axes [S1, unofficial]. It differs from [Amanatides-Woo Voxel Traversal](3132-amanatides-woo-voxel-traversal.md) by using fixed-step sampling rather than boundary-crossing logic [S1, unofficial].
 
 ## How it works
-**Inputs:** Ray origin $O$, ray direction $D$ (normalized), maximum distance $T_{max}$, voxel grid data structure providing `solidAtWorld(x, y, z)` or `solidAt(x, y, z)` queries.
-**Outputs:** Hit position $P_{hit}$, estimated surface normal $N$, and boolean hit status.
+**Inputs:** Ray origin $O$, ray direction $D$, maximum distance $T_{max}$, voxel grid query function `solidAtWorld(x, y, z)` or `solidAt(x, y, z)` [S1, unofficial].
+**Outputs:** Hit position $P_{hit}$, estimated surface normal $N$, and boolean hit status [S1, unofficial].
 
 **Data Structures:**
-The voxel grid is accessed via a function `solidAtWorld(x, y, z)` which returns true if the voxel at integer coordinates $(x, y, z)$ is solid, false otherwise [S1, unofficial]. The implementation assumes a world-space voxel grid where each voxel is a unit cube aligned with the axes.
+The voxel grid is accessed via a query function that returns true if the voxel at integer coordinates $(x, y, z)$ is solid, false otherwise [S1, unofficial]. The implementation assumes a world-space voxel grid where each voxel is a unit cube aligned with the axes [G].
 
 **Parameters:**
 - Step size $\Delta t$: Fixed increment for ray advancement. Typical value: $0.05$ [S1, unofficial].
@@ -21,21 +21,18 @@ The voxel grid is accessed via a function `solidAtWorld(x, y, z)` which returns 
 2. Loop while $t \le T_{max}$:
    a. Calculate current position: $P = O + D \cdot t$.
    b. Determine voxel coordinates: $x = \lfloor P_x \rfloor$, $y = \lfloor P_y \rfloor$, $z = \lfloor P_z \rfloor$.
-   c. Check if voxel is solid using `solidAtWorld(x, y, z)`.
+   c. Check if voxel is solid using `solidAtWorld(x, y, z)` or `solidAt(x, y, z)` [S1, unofficial].
    d. If solid:
       i. Set $P_{hit} = (x, y, z)$.
       ii. Calculate displacement vector: $diff = P - prev$.
       iii. Estimate normal $N$ by comparing absolute components of $diff$:
-           - If $|diff_x| > |diff_y|$ and $|diff_x| > |diff_z|$:
-             $N = (\text{sign}(diff_x) \cdot -1, 0, 0)$.
-           - Else if $|diff_y| > |diff_z|$:
-             $N = (0, \text{sign}(diff_y) \cdot -1, 0)$.
-           - Else:
-             $N = (0, 0, \text{sign}(diff_z) \cdot -1)$.
+           - If $|diff_x| > |diff_y|$ and $|diff_x| > |diff_z|$: $N = (\text{sign}(diff_x) \cdot -1, 0, 0)$.
+           - Else if $|diff_y| > |diff_z|$: $N = (0, \text{sign}(diff_y) \cdot -1, 0)$.
+           - Else: $N = (0, 0, \text{sign}(diff_z) \cdot -1)$.
       iv. Return true with $P_{hit}$ and $N$.
    e. Update `prev = P`.
    f. Increment $t = t + \Delta t$.
-3. If loop completes without hit, return false.
+3. If loop completes without hit, return false [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -62,22 +59,19 @@ def voxel_raycast_with_normal(origin, direction, max_dist, step_size, solid_at_w
             diff = pos - prev
             
             # Estimate normal based on largest component of displacement
-            abs_diff_x = abs(diff.x)
-            abs_diff_y = abs(diff.y)
-            abs_diff_z = abs(diff.z)
+            abs_dx = abs(diff.x)
+            abs_dy = abs(diff.y)
+            abs_dz = abs(diff.z)
             
-            if abs_diff_x > abs_diff_y and abs_diff_x > abs_diff_z:
+            if abs_dx > abs_dy and abs_dx > abs_dz:
                 # X-axis is dominant
-                sign_x = -1.0 if diff.x > 0 else 1.0
-                normal = (sign_x, 0.0, 0.0)
-            elif abs_diff_y > abs_diff_z:
+                normal = (-1.0 if diff.x > 0 else 1.0, 0.0, 0.0)
+            elif abs_dy > abs_dz:
                 # Y-axis is dominant
-                sign_y = -1.0 if diff.y > 0 else 1.0
-                normal = (0.0, sign_y, 0.0)
+                normal = (0.0, -1.0 if diff.y > 0 else 1.0, 0.0)
             else:
                 # Z-axis is dominant
-                sign_z = -1.0 if diff.z > 0 else 1.0
-                normal = (0.0, 0.0, sign_z)
+                normal = (0.0, 0.0, -1.0 if diff.z > 0 else 1.0)
             
             return True, hit_pos, normal
         
@@ -103,16 +97,20 @@ Allows resuming traversal from a previous state. Choose for multi-pass rendering
 ### [Naive Voxel Ray Traversal](5192-naive-voxel-ray-traversal.md)
 Simple iteration over all voxels. Choose for small grids or debugging.
 
+### DN_step_map
+Casts a ray into the voxel volume to find the first intersecting voxel, returning hit position, voxel data, and surface normal [S2, unofficial]. It iterates up to `maxSteps` along `rayDir` from `rayPos`, checking voxel occupancy at each step, and populates output pointers `hitPos`, `hitVoxel`, and `hitNormal` on success [S2, unofficial]. It does not perform bounds checking internally; the caller must ensure `rayPos` and `maxSteps` are valid to avoid out-of-bounds memory access [S2, unofficial].
+
 ## Operating characteristics
-- **Time Complexity:** $O(T_{max} / \Delta t)$ per ray, as it samples at fixed intervals. This is generally slower than boundary-crossing methods like Amanatides and Woo for sparse grids [S1, unofficial].
-- **Memory Complexity:** $O(1)$ auxiliary space, assuming the voxel grid is accessed via a function [S1, unofficial].
-- **Strengths:** Simple implementation, no complex boundary logic, easy to parallelize [S1, unofficial].
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** Not given in the sources.
 - **Limitations:** Inefficient for large or sparse grids, normal estimation can be inaccurate with large step sizes [S1, unofficial].
-- **When to Use:** Small voxel grids, prototyping, or when simplicity is prioritized over performance [S1, unofficial].
-- **When Not to Use:** Large-scale scenes, sparse voxel octrees, or when high precision is required [S1, unofficial].
+- **When to Use:** Not given in the sources.
+- **When Not to Use:** Not given in the sources.
 
 ## Background
-This method originates from a CPU rasterizer implementation in the `whudsontosh/CPU-Rasterizer` repository, where it was used for basic voxel visualization [S1, unofficial]. It represents a straightforward approach to voxel raycasting, prioritizing ease of implementation over efficiency.
+This method originates from a CPU rasterizer implementation in the `whudsontosh/CPU-Rasterizer` repository, where it was used for basic voxel visualization [S1, unofficial]. It represents a straightforward approach to voxel raycasting, prioritizing ease of implementation over efficiency [S1, unofficial].
 
 ## Sources
 [S1] whudsontosh/CPU-Rasterizer, https://github.com/whudsontosh/CPU-Rasterizer, fetched 2026-10-27 (unofficial)
+[S2] frozein/DoonEngine, https://github.com/frozein/DoonEngine, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,181 @@
+--- v001.md
++++ v002.md
+@@ -1,32 +1,32 @@
+ # Optimized Octree DDA Traversal for SSVDAGs
+ 
+-Also called: Symmetry-aware Sparse Voxel DAG Traversal, SSVDAG Traversal
+ 
+ ## Overview
+-This method extends the DDA Tree Traversal with Mini-Stack to support Symmetry-aware Sparse Voxel DAGs (SSVDAGs), a compression format that exploits geometric symmetries to reduce memory footprint [S1, unofficial]. It solves the problem of correctly traversing a DAG where child nodes and leaf voxels may be mirrored relative to their parent's coordinate system. The key distinction from standard octree DDA is the maintenance of a 3-bit `mirror_mask` that tracks reflection transformations, allowing the algorithm to map logical voxel indices to physical storage locations without decompressing the geometry [S1, unofficial].
++This method extends the DDA Tree Traversal with Mini-Stack to support Symmetry-aware Sparse Voxel DAGs (SSVDAGs), a compression format that exploits geometric symmetries to reduce memory footprint [S1, unofficial]. It solves the problem of correctly traversing a DAG where child nodes and leaf voxels may be mirrored relative to their parent's coordinate system [S1, unofficial]. The key distinction from standard octree DDA is the maintenance of a 3-bit `mirror_mask` that tracks reflection transformations, allowing the algorithm to map logical voxel indices to physical storage locations without decompressing the geometry [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A ray $r$ (origin, direction), `ray.t_min`, `ray.t_max`, and a projection factor `proj_factor` for resolution checks.
+-*   **Output:** The intersection distance $t$ or `NO_INTERSECTION`.
++*   **Input:** A ray $r$ (origin, direction), `ray.t_min`, `ray.t_max`, and a projection factor `proj_factor` for resolution checks [S1, unofficial].
++*   **Output:** The intersection distance $t$ or a sentinel value indicating no intersection [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Stack:** Stores tuples `(node_idx, inner_hdr, mirror_mask, level)` to restore state when moving up the tree. Implemented as a dynamically indexed local array (Shader Model 4.0) [S1, unofficial].
+-*   **Inner Header (`inner_hdr`):** Contains voxel occupancy bits and child pointers.
+-*   **Leaf Data (`leaf_data`):** Contains voxel occupancy bits for leaf nodes.
++*   **Stack:** Stores tuples `(node_idx, inner_hdr, mirror_mask, level)` to restore state when moving up the tree [S1, unofficial].
++*   **Inner Header (`inner_hdr`):** Contains voxel occupancy bits and child pointers [S1, unofficial].
++*   **Leaf Data (`leaf_data`):** Contains voxel occupancy bits for leaf nodes [S1, unofficial].
+ *   **Mirror Mask (`mirror_mask`):** A 3-bit integer indicating which reflections (X, Y, Z axes) must be applied to indices [S1, unofficial].
+ 
+ **Helper Functions:**
+-*   `DDA_init()`: Initializes DDA state for the root node. Returns `(voxidx, ...)`.
+-*   `DDA_next()`: Advances DDA to the next voxel at the current level. Returns `(voxidx, ...)`.
+-*   `DDA_down()`: Adjusts DDA state to descend into a child node. Returns `(voxidx, ...)`.
+-*   `is_in_bounds(voxidx, level)`: Checks if `voxidx` is within the valid range for the current tree level.
+-*   `inner_voxel_bit(mirrored_voxidx, inner_hdr)`: Checks if the voxel at `mirrored_voxidx` is full in the inner header.
+-*   `leaf_voxel_bit(mirrored_voxidx, leaf_data)`: Checks if the voxel at `mirrored_voxidx` is full in the leaf data.
+-*   `fetch_inner_hdr(node_idx)`: Loads the inner header for the given node index.
+-*   `fetch_leaf_data(node_idx)`: Loads the leaf data for the given node index.
++*   `DDA_init()`: Initializes DDA state for the root node. Returns `(voxidx, dda_state)` [G].
++*   `DDA_next(dda_state)`: Advances DDA to the next voxel at the current level. Returns updated `(voxidx, dda_state)` [G].
++*   `DDA_down(dda_state)`: Adjusts DDA state to descend into a child node. Returns updated `(voxidx, dda_state)` [G].
++*   `is_in_bounds(voxidx, level)`: Checks if `voxidx` is within the valid range for the current tree level [G].
++*   `inner_voxel_bit(mirrored_voxidx, inner_hdr)`: Checks if the voxel at `mirrored_voxidx` is full in the inner header [S1, unofficial].
++*   `leaf_voxel_bit(mirrored_voxidx, leaf_data)`: Checks if the voxel at `mirrored_voxidx` is full in the leaf data [S1, unofficial].
++*   `fetch_inner_hdr(node_idx)`: Loads the inner header for the given node index [S1, unofficial].
++*   `fetch_leaf_data(node_idx)`: Loads the leaf data for the given node index [S1, unofficial].
+ *   `fetch_tagged_ptr(inner_hdr, node_idx, mirrored_voxidx)`: Retrieves the child node index and symmetry mask `m` from the header. Uses a manually unrolled loop to compute offsets for tagged pointers (0, 2, or 4 bytes) [S1, unofficial].
+-*   `mirror(mask, voxidx, level)`: Applies reflections from `mask` to `voxidx` based on `level`.
+-*   `resolution_ok(t, cell_size, proj_factor)`: Determines if the current voxel size is sufficient for the desired resolution.
++*   `mirror(mask, voxidx, level)`: Applies reflections from `mask` to `voxidx` based on `level` [S1, unofficial].
++*   `resolution_ok(t, cell_size, proj_factor)`: Determines if the current voxel size is sufficient for the desired resolution [S1, unofficial].
++*   `stack_is_empty()`, `stack_push()`, `stack_pop()`: Standard mini-stack operations implemented as list operations [G].
+ 
+ **Algorithm Steps:**
+@@ -37,5 +37,5 @@
+     *   Set `level` = 0.
+     *   Set `cell_size` = 0.5.
+-    *   Initialize DDA: `(voxidx, ...) = DDA_init()`.
++    *   Initialize DDA: `(voxidx, dda_state) = DDA_init()`.
+     *   Set `node_idx` = 0.
+     *   Set `leaf_data` = 0.
+@@ -44,32 +44,33 @@
+ 
+ 2.  **Traversal Loop:**
+-    *   While $t < \text{ray.t\_max}$:
++    *   Execute at least once, then repeat while $t < \text{ray.t\_max}$:
+         1.  **Check Occupancy:**
+             *   If `level < MAX_LEVEL`: `is_full_voxel = inner_voxel_bit(mirrored_voxidx, inner_hdr)`.
+             *   Else: `is_full_voxel = leaf_voxel_bit(mirrored_voxidx, leaf_data)`.
+         2.  **If Empty (`!is_full_voxel`):**
+-            *   Advance DDA: `(voxidx, ...) = DDA_next()`.
++            *   Advance DDA: `(voxidx, dda_state) = DDA_next(dda_state)`.
+             *   Check Bounds: If `!is_in_bounds(voxidx, level)`:
+                 *   If Stack is Empty: Return `NO_INTERSECTION`.
+                 *   Else:
++                    *   Save `old_level = level`.
+                     *   Pop Stack: `(node_idx, inner_hdr, mirror_mask, level) = stack_pop()`.
+-                    *   Update Cell Size: `cell_size *= (1 << (old_level - level))` where `old_level` was the level before pop.
+-                    *   Advance DDA: `(voxidx, ...) = DDA_next()`.
++                    *   Update Cell Size: `cell_size *= (1 << (old_level - level))`.
++                    *   Advance DDA: `(voxidx, dda_state) = DDA_next(dda_state)`.
+         3.  **If Full (`is_full_voxel`):**
+             *   Check Termination: If `level == MAX_LEVEL` or `resolution_ok(t, cell_size, proj_factor)`:
+                 *   Return $t$ (Intersection Found).
+             *   Else (Refine):
+-                *   If `is_in_bounds(DDA_next())`: Push current state `(node_idx, inner_hdr, mirror_mask, level)` to stack.
++                *   If `is_in_bounds(voxidx, level)`: Push current state `(node_idx, inner_hdr, mirror_mask, level)` to stack.
+                 *   Fetch Child: `(m, node_idx) = fetch_tagged_ptr(inner_hdr, node_idx, mirrored_voxidx)`.
+                 *   Update Mask: `mirror_mask ^= m`.
+-                *   Increment Level: `level++`.
++                *   Increment Level: `level += 1`.
+                 *   Halve Cell Size: `cell_size *= 0.5`.
+-                *   Descend DDA: `(voxidx, ...) = DDA_down()`.
++                *   Descend DDA: `(voxidx, dda_state) = DDA_down(dda_state)`.
+                 *   Load Child Data:
+                     *   If `level < MAX_LEVEL - 1`: `inner_hdr = fetch_inner_hdr(node_idx)`.
+                     *   Else (Leaf):
+-                        *   Increment Level: `level++`.
++                        *   Increment Level: `level += 1`.
+                         *   Halve Cell Size: `cell_size *= 0.5`.
+-                        *   Descend DDA: `(voxidx, ...) = DDA_down()`.
++                        *   Descend DDA: `(voxidx, dda_state) = DDA_down(dda_state)`.
+                         *   Load Leaf Data: `leaf_data = fetch_leaf_data(node_idx)`.
+         4.  **Update Mirrored Index:**
+@@ -87,4 +88,5 @@
+ *   **Pointer Size:** Child pointers are tagged and can be 0, 2, or 4 bytes, requiring specific offset calculation logic in `fetch_tagged_ptr` [S1, unofficial].
+ *   **Mirror Mask Restoration:** The `mirror_mask` must be pushed to the stack and restored upon popping to ensure correct index mapping when backtracking [S1, unofficial].
++*   **Source Typo Fix:** The original listing contains `if (is_in_bounds(DDA_next()))`, which prematurely advances the DDA state. This is corrected to `if is_in_bounds(voxidx, level)` to check bounds on the current voxel before descending. The original listing also contains a colon typo `old_level = level: (node_idx, ...) = stack_pop();`, corrected to a semicolon.
+ 
+ ```python
+@@ -95,13 +97,14 @@
+     cell_size = 0.5
+     
+-    # DDA initialization
++    # Standard DDA initialization [G]
+     voxidx, dda_state = DDA_init()
+     node_idx = 0
+     leaf_data = 0
+     inner_hdr = fetch_inner_hdr(node_idx)
+-    
+     mirrored_voxidx = mirror(mirror_mask, voxidx, level)
+     
+-    while t < r.t_max:
++    stack = []
++    
++    while True:
+         # Check occupancy
+         if level < MAX_LEVEL:
+@@ -114,9 +117,9 @@
+             voxidx, dda_state = DDA_next(dda_state)
+             if not is_in_bounds(voxidx, level):
+-                if stack_is_empty():
++                if not stack:
+                     return NO_INTERSECTION
+                 else:
+                     old_level = level
+-                    node_idx, inner_hdr, mirror_mask, level = stack_pop()
++                    node_idx, inner_hdr, mirror_mask, level = stack.pop()
+                     cell_size *= (1 << (old_level - level))
+                     voxidx, dda_state = DDA_next(dda_state)
+@@ -127,6 +130,6 @@
+             
+             # Refine
+-            if is_in_bounds(DDA_next(dda_state)):
+-                stack_push(node_idx, inner_hdr, mirror_mask, level)
++            if is_in_bounds(voxidx, level):
++                stack.append((node_idx, inner_hdr, mirror_mask, level))
+                 
+             m, node_idx = fetch_tagged_ptr(inner_hdr, node_idx, mirrored_voxidx)
+@@ -147,14 +150,22 @@
+         mirrored_voxidx = mirror(mirror_mask, voxidx, level)
+         
++        if t >= r.t_max:
++            break
++            
+     return NO_INTERSECTION
+ ```
+ 
++## Subtopics
++
++### Octree Child Indirection Table Generation
++Precomputes a lookup table to accelerate octree child pointer indirection during traversal, reducing branching or pointer chasing [S2, unofficial]. Allocates a 65536×8 byte array of `sl::int8_t`. Layout is column-major over children: `data[j * 65536 + i]` stores child $j$'s indirection for node index $i$. Uploaded to GPU as a `GL_TEXTURE_BUFFER` with internal format `GL_R8I` [S2, unofficial]. The indirection value is computed as $val_j(i) = \sum_{k=j+1}^{7} \min\left(\left\lfloor \frac{i}{2^{2k}} \right\rfloor \bmod 4, 2\right)$ where $i \in [0, 65535]$ is the node index and $j \in [0, 7]$ is the child index [S2, unofficial]. Generation iterates $i$ from 0 to 65535 and $j$ from 0 to 7, summing masked bits of $i$ from bit 14 down to $2j+2$, clamped to 2, and storing the result [S2, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Proportional to the number of voxels visited along the ray path, including backtracking steps. The overhead of `mirror_mask` updates and tagged pointer fetching is constant per node visit.
+-*   **Memory Complexity:** Dominated by the mini-stack depth, which is bounded by the tree height. The stack stores `(node_idx, inner_hdr, mirror_mask, level)` per level.
+-*   **Strengths:** Significantly reduces memory bandwidth and storage by leveraging symmetries (SSVDAG compression). Avoids explicit decompression of mirrored nodes.
+-*   **Limitations:** Requires careful handling of mirrored indices and tagged pointers. Performance may degrade if the symmetry compression ratio is low.
+-*   **When to Use:** High-resolution scenes with significant geometric symmetries where memory bandwidth is a bottleneck.
+-*   **When Not to Use:** Scenes with little symmetry, or when hardware lacks efficient support for the required bitwise operations and stack management.
++*   **Time Complexity:** Proportional to the number of voxels visited along the ray path, including backtracking steps. The overhead of `mirror_mask` updates and tagged pointer fetching is constant per node visit [S1, unofficial].
++*   **Memory Complexity:** Dominated by the mini-stack depth, which is bounded by the tree height. The stack stores `(node_idx, inner_hdr, mirror_mask, level)` per level [S1, unofficial].
++*   **Strengths:** Significantly reduces memory bandwidth and storage by leveraging symmetries (SSVDAG compression). Avoids explicit decompression of mirrored nodes [S1, unofficial].
++*   **Limitations:** Requires careful handling of mirrored indices and tagged pointers. Performance may degrade if the symmetry compression ratio is low [S1, unofficial].
++*   **When to Use:** High-resolution scenes with significant geometric symmetries where memory bandwidth is a bottleneck [S1, unofficial].
++*   **When Not to Use:** Scenes with little symmetry, or when hardware lacks efficient support for the required bitwise operations and stack management [S1, unofficial].
+ 
+ ## Background
+@@ -162,3 +173,4 @@
+ 
+ ## Sources
+-[S1] Symmetry-aware Sparse Voxel DAGs (SSVDAGs) for compression-domain tracing of high-resolution geometric scenes, https://albertojaspe.net/publications/2017-JCGT-ssvdags.pdf, fetched 2026-10-24 (unofficial)+[S1] Symmetry-aware Sparse Voxel DAGs (SSVDAGs) for compression-domain tracing of high-resolution geometric scenes, https://albertojaspe.net/publications/2017-JCGT-ssvdags.pdf, fetched 2026-10-24 (unofficial)
++[S2] RvanderLaan/SVDAG-Compression, https://github.com/RvanderLaan/SVDAG-Compression, fetched 2026-10-26 (unofficial)

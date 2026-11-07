@@ -1,0 +1,217 @@
+# Image-based reconstruction optimization
+
+Also called: Chair reconstruction optimization, Differentiable rendering optimization, Face reconstruction optimization, Inverse Rendering Optimization, Shape reconstruction via gradient descent, Single image chair reconstruction
+
+## Overview
+Image-based reconstruction optimization is an inverse rendering technique that recovers latent 3D scene parameters—such as geometry, pose, texture, and lighting—from one or more observed images by minimizing the difference between rendered and target images using gradient-based optimization [S2, unofficial]. It differs from direct feed-forward reconstruction methods by iteratively refining parameters via backpropagation through a differentiable renderer, allowing for the incorporation of shape priors and complex lighting models [S2, unofficial].
+
+## How it works
+The method solves for object shapes and scene properties by minimizing image losses (typically $L_1$ or $L_2$) using gradients estimated via differentiable rendering techniques, such as boundary integral methods [S1].
+
+### Inputs and Outputs
+**Inputs:**
+*   One or more observed target images $I$.
+*   A differentiable renderer function $f$.
+*   A shape prior model (e.g., an autoencoder decoder $g$) [S2, unofficial].
+*   Optional: Texture decoder $h$ and lighting parameters $\eta$ [S2, unofficial].
+
+**Outputs:**
+*   Optimized latent shape vector $z$ (or $z_0$).
+*   Optimized pose parameters $\theta$.
+*   Optimized texture vector $\phi_0$ (if applicable).
+*   Optimized lighting parameters $\eta$ (if applicable).
+
+### Data Structures
+*   **Latent Shape Vector ($z_0$):** A fixed-dimensional vector representing the 3D shape.
+    *   Dimension: 200 for face reconstruction [S2, unofficial].
+    *   Dimension: 250 for chair reconstruction [S2, unofficial].
+*   **Pose Parameters ($\theta$):** Representing azimuth and elevation angles.
+*   **Texture Vector ($\phi_0$):** Latent representation of surface color/texture [S2, unofficial].
+*   **Lighting Parameters ($\eta$):** Latent representation of illumination [S2, unofficial].
+*   **Shape Prior Statistics:** Mean $\mu$ and Covariance $\Sigma$ of the latent shape vector $z_0$ estimated from a training set [S2, unofficial].
+
+### Formulas
+Two primary loss functions are used depending on the reconstruction task:
+
+1.  **General Inverse Rendering (e.g., Faces):**
+    Minimizes the rendering error between the observed image $I$ and the rendered image $f(g(z_0), \theta, h(\phi_0), \eta)$:
+    $$ \min_{z_0, \theta, \phi_0, \eta} \| I - f(g(z_0), \theta, h(\phi_0), \eta) \|^2 $$
+    Where:
+    *   $z_0$: Latent shape vector (dim 200) [S2, unofficial].
+    *   $\theta$: Pose parameter [S2, unofficial].
+    *   $\phi_0$: Texture vector [S2, unofficial].
+    *   $\eta$: Lighting parameter [S2, unofficial].
+    *   $g$: Decoder of an autoencoder learning shape priors [S2, unofficial].
+    *   $h$: Texture decoder [S2, unofficial].
+    *   $f$: Differentiable renderer [S2, unofficial].
+
+2.  **Single Image Chair Reconstruction:**
+    Minimizes a combined loss of rendering error and shape prior regularization:
+    $$ \min_{z, \theta} \alpha \| I - f(g(z_0), \theta) \|^2 + \beta (z - \mu)^T \Sigma^{-1} (z - \mu) $$
+    Where:
+    *   $z$: Latent shape vector (dim 250) [S2, unofficial].
+    *   $\theta$: Pose parameter [S2, unofficial].
+    *   $\alpha$: Weight of the rendering loss term (value 5) [S2, unofficial].
+    *   $\beta$: Weight of the shape prior term (value 1) [S2, unofficial].
+    *   $\mu$: Mean of $z_0$ from the training set [S2, unofficial].
+    *   $\Sigma$: Covariance of $z_0$ from the training set [S2, unofficial].
+    *   Note: In this specific formulation, the texture and lighting parameters are not explicitly optimized in the same manner as the face reconstruction, or are assumed fixed/simplified [S2, unofficial].
+
+### Parameters and Typical Values
+*   **Learning Rate:** Not given in the sources [S1][S2, unofficial].
+*   **Batch Size:** Mini-batch gradient descent is used, rendering only a subset of input images per iteration [S1].
+*   **Initializations:** Multiple sets of parameters are initialized to avoid local minima. Specifically, 5 initializations are used for face reconstruction [S2, unofficial].
+*   **Re-initialization Interval:** Parameters are re-initialized with the current best ones every 200 steps [S2, unofficial].
+*   **Convergence Steps:**
+    *   Face reconstruction: ~1800 steps [S2, unofficial].
+    *   Chair reconstruction: 2000 steps [S2, unofficial].
+
+### Pseudocode
+The following pseudocode outlines the optimization loop for the general case (e.g., face reconstruction), incorporating the grid subdivision strategy and multiple initializations described in [S2, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def image_based_reconstruction_optimization(target_images, renderer, shape_decoder, texture_decoder, 
+                                            num_initializations=5, reinit_interval=200, max_steps=1800):
+    """
+    Optimizes latent shape, pose, texture, and lighting parameters to match target images.
+    """
+    best_overall_loss = infinity
+    best_params = None
+    
+    # Initialize multiple sets of parameters to avoid local minima
+    initializations = []
+    for i in range(num_initializations):
+        # Initialize pose by subdividing pose space into a grid
+        # Face: azimuth [0-180], elevation [0-180]
+        # Chair: azimuth [0-360], elevation [0-180]
+        theta_init = initialize_pose_grid(azimuth_range=[0, 180], elevation_range=[0, 180])
+        
+        # Initialize latent vectors
+        z0_init = random_latent_vector(dim=200) # For faces
+        phi0_init = random_latent_vector(dim=?) # For texture
+        eta_init = random_latent_vector(dim=?)  # For lighting
+        
+        initializations.append({
+            'z0': z0_init,
+            'theta': theta_init,
+            'phi0': phi0_init,
+            'eta': eta_init
+        })
+    
+    for step in range(max_steps):
+        current_best_loss = infinity
+        current_best_params = None
+        
+        for init_idx, params in enumerate(initializations):
+            z0 = params['z0']
+            theta = params['theta']
+            phi0 = params['phi0']
+            eta = params['eta']
+            
+            # Render image using differentiable renderer
+            # f(g(z0), theta, h(phi0), eta)
+            rendered_image = renderer(
+                shape=shape_decoder(z0),
+                pose=theta,
+                texture=texture_decoder(phi0),
+                lighting=eta
+            )
+            
+            # Compute loss (L2 norm between target and rendered)
+            # Loss = || I - f(...) ||^2
+            loss = compute_l2_loss(target_images, rendered_image)
+            
+            # Compute gradients via backpropagation through renderer
+            # Gradients for z0, theta, phi0, eta
+            grads = compute_gradients(loss, z0, theta, phi0, eta)
+            
+            # Update parameters using gradient descent
+            # [G] Standard gradient descent update: param -= learning_rate * grad
+            z0 = z0 - learning_rate * grads['z0']
+            theta = theta - learning_rate * grads['theta']
+            phi0 = phi0 - learning_rate * grads['phi0']
+            eta = eta - learning_rate * grads['eta']
+            
+            # Track best parameters for this initialization
+            if loss < current_best_loss:
+                current_best_loss = loss
+                current_best_params = {
+                    'z0': z0,
+                    'theta': theta,
+                    'phi0': phi0,
+                    'eta': eta
+                }
+        
+        # Update the specific initialization with its best found parameters
+        # Note: The source says "re-initialise the parameters with the current best ones"
+        # This implies tracking the best state for each of the 5 runs, or potentially
+        # merging them. Based on "initialize multiples... and use gradient descent",
+        # we maintain separate trajectories.
+        initializations[init_idx] = current_best_params # Assuming single best per init
+        
+        # Re-initialize with current best ones after every 200 steps
+        if step % reinit_interval == 0:
+            # [G] Determine global best among initializations
+            global_best_loss = infinity
+            global_best_params = None
+            for params in initializations:
+                # Re-render to get accurate loss if not tracked
+                rendered = renderer(shape_decoder(params['z0']), params['theta'], ...)
+                l = compute_l2_loss(target_images, rendered)
+                if l < global_best_loss:
+                    global_best_loss = l
+                    global_best_params = params
+            
+            # Re-initialize all trajectories around the global best
+            for i in range(num_initializations):
+                # Perturb around global best to explore local space
+                initializations[i]['z0'] = global_best_params['z0'] + noise
+                initializations[i]['theta'] = global_best_params['theta'] + noise
+                # ... other params
+                
+        # Grid subdivision for pose
+        # Further subdivide the grid around current best pose parameters
+        # [G] This refines the search space for theta
+        refine_pose_grid(initializations)
+        
+        # Check for convergence
+        if global_best_loss < convergence_threshold:
+            break
+            
+    return global_best_params
+```
+
+### Edge Cases and Pitfalls
+*   **Local Minima:** The optimization is prone to local minima, necessitating multiple initializations and grid subdivision [S2, unofficial].
+*   **Pose Search Space:** Reconstructing objects like chairs is more challenging than faces due to a larger pose search space (azimuth [0–360] vs [0–180]) and greater geometric variance, particularly thin parts not captured by the shape prior [S2, unofficial].
+*   **Gradient Variance:** Using Multiple Importance Sampling (MIS) and edge sorting reduces variance in gradient estimates, leading to faster convergence and more accurate reconstructions compared to using only light or direction sampling without sorting [S1].
+*   **Shape Prior Limitations:** The shape prior (autoencoder) may fail to capture extreme geometric variations, such as very thin parts of chairs, leading to reconstruction artifacts [S2, unofficial].
+
+## Subtopics
+
+### [Inverse Rendering with Differentiable Ray Tracing](7478-inverse-rendering-with-differentiable-ray-tracing.md)
+Recovers latent scene parameters (camera pose, light placement, surface color) by formulating the problem as an unconstrained optimization task using gradients from the rendering pipeline.
+
+### [Inverse Rendering with Shape Prior](7506-inverse-rendering-with-shape-prior.md)
+Reconstructs 3D geometry, texture, pose, and lighting from a single image by optimizing a latent representation of a pre-trained 3D auto-encoder decoder, regularizing the reconstruction to prevent noisy results.
+
+### [Differentiable Inverse Graphics Framework](7617-differentiable-inverse-graphics-framework.md)
+A fully differentiable pipeline that infers latent 3D scene parameters (geometry, materials, lighting) from images by optimizing them via gradient backpropagation from rendering losses.
+
+## Operating characteristics
+*   **Time Complexity:** The optimization is iterative and can be slow. Convergence takes approximately 1800 steps for face reconstruction and 2000 steps for chair reconstruction [S2, unofficial]. Each step involves rendering and backpropagation through the differentiable renderer.
+*   **Memory Complexity:** Depends on the resolution of the rendered images and the size of the latent vectors (200-250 dimensions) [S2, unofficial].
+*   **Performance:** The method produces accurate reconstructions when combined with variance-reduction techniques like MIS and edge sorting [S1]. However, it is computationally expensive compared to feed-forward methods [S2, unofficial].
+*   **Strengths:** Can handle complex lighting and material models; incorporates strong shape priors; flexible for different object categories (faces, chairs) [S2, unofficial].
+*   **Limitations:** Slow convergence; sensitive to initialization; shape priors may not generalize to all geometries (e.g., thin parts) [S2, unofficial].
+*   **When to use:** When high-fidelity reconstruction is required and computational resources allow for iterative optimization; when shape priors are available and appropriate for the object class [S2, unofficial].
+*   **When not to use:** For real-time applications; for objects with geometries significantly different from the training set used to learn the shape prior [S2, unofficial].
+
+## Background
+The method originates from research in differentiable rendering and inverse graphics. Key contributions include the use of boundary integral techniques for gradient estimation in path-space differentiable rendering [S1] and the application of deep convolutional networks (RenderNet) for differentiable rendering from 3D shapes [S2, unofficial]. The specific optimization strategies, such as grid subdivision for pose and the use of autoencoder decoders for shape priors, were developed to address the challenges of single-image reconstruction for faces and chairs [S2, unofficial].
+
+## Sources
+[S1] Efficient estimation of boundary integrals for path-space differentiable rendering, https://doi.org/10.1145/3528223.3530080, fetched 2026-10-28
+[S2] RenderNet: A deep convolutional network for differentiable rendering from 3D shapes, https://doi.org/10.48550/arxiv.1806.06575, fetched 2026-10-26 (unofficial)

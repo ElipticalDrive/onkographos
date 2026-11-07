@@ -3,44 +3,37 @@
 Also called: SDF boolean operators, smooth minimum alternatives
 
 ## Overview
-Object Combination Operators are constructive operators that combine two Signed Distance Function (SDF) values, $a$ and $b$, to produce features such as rounded edges, chamfers, stairs, or other geometric details, rather than the sharp boolean edges produced by standard `min` or `max` operations [S1, unofficial][S2, unofficial]. They are distinguished from generic "smooth minimum" approximations (like the standard `smoothstep` blend) by their specific geometric construction, which aims to preserve Lipschitz continuity (gradient magnitude $\le 1$) and correct distance field properties in more cases [S1, unofficial][S2, unofficial]. While [SDF Smooth Union](1817-sdf-smooth-union.md) focuses on a continuous differentiable transition, these operators often provide specific geometric shapes (chamfers, rounds) or preserve sharp logic with material tracking [S1, unofficial][S2, unofficial].
+Object Combination Operators are constructive solid geometry (CSG) primitives that merge two Signed Distance Functions (SDFs), $a$ and $b$, into a single field with rounded edges, chamfers, or other specific features, replacing the sharp discontinuities of standard boolean operations [S1, S2, unofficial]. Unlike the basic [Constructive SDF Modeling (Min Combination)](871-constructive-sdf-modeling-min-combination.md) which uses `min` for unions and `max` for intersections, these operators introduce a radius parameter $r$ to control the geometry of the transition [S1, S2, unofficial]. They are distinguished from generic smooth blends by their specific geometric intent (e.g., fillets, stairs, pipes) and their ability to preserve Lipschitz continuity (gradient magnitude $\le 1$) under orthogonal gradient conditions, which is critical for stable ray marching [S1, S2, unofficial].
 
 ## Shared principles
-All operators in this family take two scalar SDF inputs, $a$ and $b$, representing the distance from a query point to two primitives, and a parameter $r$ (or $k$) controlling the feature size [S1, unofficial][S2, unofficial].
+All operators in this family take two scalar distance values $a$ and $b$ and a scalar radius parameter $r > 0$ as input, returning a single scalar distance $d_{out}$ [S1, S2, unofficial]. The parameter $r$ defines the size of the blending feature and must be significantly smaller than the scale of the objects to prevent geometric distortion [S1, S2, unofficial].
 
-**Parameter Constraints:**
-- $r$: The radius or smoothing factor. It must be significantly smaller than the size of the objects to maintain validity and prevent geometric distortion [S1, unofficial][S2, unofficial].
-- $n$: In stair/column operators, $n$ specifies the number of columns or stairs ($n-1$ features produced) [S2, unofficial].
+The core mathematical challenge is to blend the distance fields such that the resulting field remains a valid distance function (or a tight bound) in the transition region. A key property of these specific operators is that they preserve the Lipschitz continuity of the SDF (i.e., $|\nabla d| \le 1$) provided the gradients of the two input SDFs are orthogonal (at right angles) [S1, S2, unofficial]. If the gradients deviate by more than $30^\circ$ or if the surfaces are parallel and close, Lipschitz continuity is lost, leading to ray marching artifacts such as overshooting or jittering [S1, S2, unofficial].
 
-**Lipschitz Continuity:**
-The primary theoretical advantage of these specific operators over generic smooth blends is the preservation of Lipschitz continuity under specific conditions. The operator preserves Lipschitz continuity (gradient magnitude $\le 1$) when the gradients of the two SDFs are orthogonal (at right angles) [S1, unofficial][S2, unofficial].
-
-**Failure Conditions:**
-Lipschitz continuity is lost, causing ray marching artifacts, if:
-1. The gradients of the two SDFs deviate by more than $30^\circ$ [S1, unofficial][S2, unofficial].
-2. The surfaces are parallel and close to each other [S1, unofficial][S2, unofficial].
-
-**Data Structures:**
-The operations are element-wise on scalar distances. No complex data structures are required for the core distance calculation [G]. If material information is carried (as in [Multi-Material Distance Fields](1943-multi-material-distance-fields.md)), the operator may also blend or select material attributes, but the core distance calculation remains scalar [G].
+The operators are categorized by the shape of the resulting edge:
+1.  **Chamfer:** Linear blending of the distance values.
+2.  **Round:** Circular/arc blending of the distance values.
+3.  **Stairs/Columns:** Discrete or stepped blending.
+4.  **Soft:** Smooth, non-linear blending.
+5.  **Feature-specific:** Operators for specific geometric features like pipes, engravings, grooves, and tongues.
 
 ## Subtopics
 
 ### [SDF Smooth Union](1817-sdf-smooth-union.md)
-Blends two SDFs into a single smooth distance field with a rounded transition controlled by $k$. It provides a continuous, differentiable transition, differing from the sharp `min` operator. Choose this for general soft blending where geometric precision of the corner shape is less critical than smoothness.
+Blends two SDFs into a smooth union using either Polynomial (cubic) or LogSumExp (exponential) formulations. Chosen when organic curvature is desired or when computational cost/performance trade-offs dictate the use of one formulation over the other.
 
 ### [Smooth Intersection](1839-smooth-intersection.md)
-Blends the boolean intersection into a rounded feature controlled by radius $r$. It is distinguished by its specific geometric construction (S-Intersection) aimed at preserving distance field properties better than generic smooth minimums. Choose this for creating rounded internal corners.
+Blends the overlap of two SDFs to produce rounded internal corners (fillets). Chosen when a chamfered or rounded interior corner is required between two intersecting volumes, distinct from external union blending.
 
 ### [Multi-Material Distance Fields](1943-multi-material-distance-fields.md)
-Extends SDFs to return both distance and a material identifier. Unlike geometric blending operators, it preserves sharp boolean logic (min/max) while propagating shading data. Choose this when per-object material assignment is required within CSG scenes.
+Extends standard SDFs to return both a distance value and a material identifier. Chosen when distinct shading or material assignment is required for individual primitives within a CSG scene without requiring complex texture atlases.
 
 ### [Linear SDF Blend](3004-linear-sdf-blend.md)
-Creates a morphing transition by linearly interpolating distance values. It preserves the individual geometry of both shapes within the blend region. Choose this for shape morphing rather than geometric feature generation.
+Linearly interpolates between two SDFs based on a blend factor. Chosen for creating organic morphing transitions or time-varying geometry where the surface topology changes gradually, rather than for boolean CSG operations.
 
 ## Background
-The concept of constructive operators for SDFs originated in the context of ray marching and implicit modeling, where standard boolean operations (`min`, `max`) produce non-smooth surfaces. The specific "Object Combination Operators" described here, particularly those preserving Lipschitz continuity (chamfers, rounds, stairs), were popularized in shader coding communities and unofficial repositories such as `kushchevd/RayMarching` and `yeataro/TD-Raymarching-System` [S1, unofficial][S2, unofficial]. They represent a refinement over earlier "smooth minimum" approximations (like the cubic or log-sum-exp blends) by offering geometrically accurate rounded features (chamfers, rounds) rather than just smooth transitions.
+The specific formulas for Chamfer, Round, Stairs, Soft, Pipe, Engrave, Groove, and Tongue operators were documented in the context of GLSL-based ray marching shaders [S1, S2, unofficial]. The "Smooth Minimum" concept, often implemented via the `smin` function, is a broader category that these operators refine or replace to ensure better distance field properties [S1, S2, unofficial]. The preservation of Lipschitz continuity under orthogonality is a key theoretical distinction from naive smooth minimums, which often violate this property even at right angles [S1, S2, unofficial].
 
 ## Sources
-
 [S1] kushchevd/RayMarching, https://github.com/kushchevd/RayMarching, fetched 2026-10-26 (unofficial)
 [S2] yeataro/TD-Raymarching-System, https://github.com/yeataro/TD-Raymarching-System, fetched 2026-10-27 (unofficial)

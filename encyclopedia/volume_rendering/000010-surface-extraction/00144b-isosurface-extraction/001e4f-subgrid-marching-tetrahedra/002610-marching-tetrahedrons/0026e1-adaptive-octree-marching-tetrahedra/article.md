@@ -1,192 +1,237 @@
 # Adaptive Octree Marching Tetrahedra
 
+Also called: Adaptive Octree MT, Octree-based Marching Tetrahedra
 
 ## Overview
-An isosurface extraction method that uses an adaptive octree to subdivide a 3D volume only where the scalar field contains the target isovalue, applying the Marching Tetrahedra algorithm at leaf nodes to generate the mesh [S1, unofficial]. It differs from its parent [Marching Tetrahedrons](3720-marching-tetrahedrons.md) by introducing spatial adaptivity via octree subdivision, reducing computation in empty regions, and from [Naive Isosurface Extraction](4328-naive-isosurface-extraction.md) by avoiding uniform grid traversal [S1, unofficial].
+Adaptive Octree Marching Tetrahedra is an isosurface extraction method that combines adaptive spatial subdivision with the Marching Tetrahedra algorithm to generate meshes from volumetric scalar fields. It solves the problem of inefficient uniform-grid processing by subdividing the volume only where the scalar field contains the target isovalue, thereby reducing memory usage and computational cost for sparse or complex datasets [S1, unofficial]. Unlike [Naive Isosurface Extraction](4328-naive-isosurface-extraction.md) which processes every voxel, or [GPU Vertex Shader Isosurface Extraction](6706-gpu-vertex-shader-isosurface-extraction.md) which relies on fixed-function rasterization, this method explicitly constructs an octree data structure to manage resolution adaptivity before decomposing leaf nodes into tetrahedra for precise surface intersection [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- A 3D scalar field stored in a 1D array `teapotColour` of size $X \times Y \times Z$ (source assumes fixed $256^3$) [S1, unofficial].
-- Target isovalue `iso` [S1, unofficial].
-- Volume bounds defined by `topLeftFront` and `bottomRightBack` points [S1, unofficial].
+- A 3D scalar field stored in a 1D array (e.g., `teapotColour`) of size $X \times Y \times Z$. The source assumes a fixed width of 256 for indexing, i.e., index $= z \cdot 256^2 + y \cdot 256 + x$ [S1, unofficial].
+- A target isovalue `iso`.
+- Grid dimensions `x_axis`, `y_axis`, `z_axis` [S1, unofficial].
 
 **Outputs:**
-- A list of vertices (`newvert`) representing the isosurface mesh [S1, unofficial].
+- A list of vertices (`newvert`) and implied connectivity (triangles) representing the isosurface.
 
 **Data Structures:**
-- `Point`: Struct with fields `int x`, `int y`, `int z`. Default constructor initializes to $(-1, -1, -1)$ [S1, unofficial].
-- `Octree` Node:
-  - `Point* topLeftFront`: Minimum corner of the node's bounding box [S1, unofficial].
-  - `Point* bottomRightBack`: Maximum corner of the node's bounding box [S1, unofficial].
-  - `Point* point`: If `NULL`, the node is internal; if $(-1, -1, -1)$, the node is empty [S1, unofficial].
-  - `vector<Octree*> children`: Array of 8 child pointers [S1, unofficial].
+- **Point**: A structure containing integer coordinates `x`, `y`, `z`. Default constructor initializes to $(-1, -1, -1)$ [S1, unofficial].
+- **Octree Node**:
+  - `point`: Pointer to a `Point`. If `NULL`, the node is internal. If `(-1, -1, -1)`, the node is empty.
+  - `topLeftFront`: `Point*` defining the minimum corner $(x_1, y_1, z_1)$.
+  - `bottomRightBack`: `Point*` defining the maximum corner $(x_2, y_2, z_2)$.
+  - `children`: A vector of 8 pointers to child `Octree` nodes [S1, unofficial].
 
 **Algorithm Steps:**
 
-1. **Build Octree (`make` function):**
-   - Calculate midpoints: `midx = (topLeftFront->x + bottomRightBack->x) / 2`, `midy = (topLeftFront->y + bottomRightBack->y) / 2`, `midz = (topLeftFront->z + bottomRightBack->z) / 2` [S1, unofficial].
-   - Iterate through all voxels in the node's bounds to find `min_iso` and `max_iso` from `teapotColour` using index `z * 256 * 256 + y * 256 + x` [S1, unofficial].
-   - If node dimensions are greater than 1 (checked by `(midx - topLeftFront->x) > 1 || (midy - topLeftFront->y) > 1 || (bottomRightBack->z - midz) > 1`), create 8 child octants [S1, unofficial].
-   - Child indices (0-7) are defined by their bounding boxes relative to midpoints:
-     - Child 0: `(x1,y1,z1)` to `(midx,midy,midz)`
-     - Child 1: `(midx,y1,z1)` to `(x2,midy,midz)`
-     - Child 2: `(x1,midy,z1)` to `(midx,y2,midz)`
-     - Child 3: `(midx,midy,z1)` to `(x2,y2,midz)`
-     - Child 4: `(x1,y1,midz)` to `(midx,midy,z2)`
-     - Child 5: `(midx,y1,midz)` to `(x2,midy,z2)`
-     - Child 6: `(x1,midy,midz)` to `(midx,y2,z2)`
-     - Child 7: `(midx,midy,midz)` to `(x2,y2,z2)` [S1, unofficial].
-   - Recursively call `make()` on children if their dimensions > 1 [S1, unofficial].
+1. **Octree Construction (`make`)**:
+   - For a node defined by `topLeftFront` $(x_1, y_1, z_1)$ and `bottomRightBack` $(x_2, y_2, z_2)$, calculate midpoints:
+     $$ midx = \lfloor \frac{x_1 + x_2}{2} \rfloor, \quad midy = \lfloor \frac{y_1 + y_2}{2} \rfloor, \quad midz = \lfloor \frac{z_1 + z_2}{2} \rfloor $$
+   - Iterate through all voxels in the node's bounds to find `min_iso` and `max_iso` from the scalar field. The index calculation assumes a stride of 256 for the Y dimension: `index = z * 256 * 256 + y * 256 + x` [S1, unofficial].
+   - **Recursive Subdivision**: If the node dimensions are greater than 1 (checked by `(midx - x_1) > 1 || (midy - y_1) > 1 || (z_2 - midz) > 1`), create 8 child octants. The children are defined by the bounds:
+     - Child 0: $(x_1, y_1, z_1)$ to $(midx, midy, midz)$
+     - Child 1: $(midx, y_1, z_1)$ to $(x_2, midy, midz)$
+     - Child 2: $(x_1, midy, z_1)$ to $(midx, y_2, midz)$
+     - Child 3: $(midx, midy, z_1)$ to $(x_2, y_2, midz)$
+     - Child 4: $(x_1, y_1, midz)$ to $(midx, midy, z_2)$
+     - Child 5: $(midx, y_1, midz)$ to $(x_2, midy, z_2)$
+     - Child 6: $(x_1, midy, midz)$ to $(midx, y_2, z_2)$
+     - Child 7: $(midx, midy, midz)$ to $(x_2, y_2, z_2)$
+   - Recursively call `make()` on children if their dimensions exceed 1 [S1, unofficial].
 
-2. **Leaf Processing (`explore` function):**
-   - When a leaf node is reached (dimensions equal 1, i.e., `(-topLeftFront->x + bottomRightBack->x) == 1 && ...`), identify the 8 vertices of the cube [S1, unofficial].
-   - Indices into `teapotColour` (assuming $256^3$ grid):
-     - `a` (BottomLeftFront): `topLeftFront->z*256*256 + topLeftFront->y*256 + topLeftFront->x`
-     - `b` (BottomRightFront): `a + 1`
-     - `c` (TopLeftFront): `a + 257`
-     - `d` (BottomLeftBack): `a + 256`
-     - `e` (TopLeftBack): `256*256 + a`
-     - `f` (TopRightFront): `e + 1`
-     - `g` (TopRightBack): `e + 257`
-     - `h` (TopLeftBack? Note: Source labels `h` as TopLeftBack in comment but uses it in specific tetrahedra): `e + 256` [S1, unofficial].
-   - Decompose the cube into 5 tetrahedra. For each tetrahedron, pass the scalar values of its 4 vertices to the `tetra` function [S1, unofficial].
-     - Tet 1: Vertices `h, g, c, f`
-     - Tet 2: Vertices `h, c, d, b`
-     - Tet 3: Vertices `d, a, e, b`
-     - Tet 4: Vertices `h, d, e, b`
-     - Tet 5: Vertices `h, c, f, b` [S1, unofficial].
+2. **Leaf Processing (`explore`)**:
+   - When a leaf node is reached (dimensions equal 1, i.e., $x_2 - x_1 = 1, y_2 - y_1 = 1, z_2 - z_1 = 1$), identify the 8 vertices of the cube.
+   - Calculate indices into the scalar field array. Let $a$ be the index for `topLeftFront`:
+     $$ a = z_1 \cdot 256^2 + y_1 \cdot 256 + x_1 $$
+   - The other vertex indices are derived relative to $a$ and the fixed width 256:
+     - $b = a + 1$ (BottomRightFront)
+     - $c = a + 257$ (TopLeftFront)
+     - $d = a + 256$ (BottomLeftBack)
+     - $e = a + 256^2$ (TopLeftBack)
+     - $f = e + 1$ (TopRightBack)
+     - $g = e + 257$ (TopRightFront)
+     - $h = e + 256$ (BottomLeftBack? *Note: Source mapping is ambiguous, see Pitfalls*) [S1, unofficial].
+   - Retrieve scalar values `col` for the vertices involved in the tetrahedral decomposition. The source code decomposes the cube into 5 tetrahedra. For each tetrahedron, pass the scalar values and vertex indices to the `tetra` function [S1, unofficial].
 
-3. **Marching Tetrahedra Logic (`tetra` function):**
-   - Determine the case index based on which vertices are inside the isosurface (`val > isolevel`) [S1, unofficial].
-   - For each case, compute intersection points on the edges using linear interpolation:
-     $$ \text{interpolate}(v1, v2, \text{isolevel}, col1, col2) = v1 + \frac{\text{isolevel} - col1}{col2 - col1} (v2 - v1) $$
-   - Store resulting `Vector3f` in `newvert` array [S1, unofficial].
-   - Example Case `0x0C` (vertices `d, b, a, c` inside? Source code implies specific mapping):
-     - Intersect edge `d-b`: `interpolate(Vertices[d], Vertices[b], isolevel, col[3], col[1])`
-     - Intersect edge `a-d`: `interpolate(Vertices[a], Vertices[d], isolevel, col[0], col[3])`
-     - Intersect edge `a-c`: `interpolate(Vertices[a], Vertices[c], isolevel, col[0], col[2])` [S1, unofficial].
+3. **Marching Tetrahedra Logic (`tetra`)**:
+   - Determine the case index based on which vertices are inside the isosurface ($val > iso$).
+   - For each edge connecting a vertex inside the isosurface to one outside, compute the intersection point using linear interpolation:
+     $$ P_{inter} = P_1 + \frac{iso - val_1}{val_2 - val_1} (P_2 - P_1) $$
+     where $P_1, P_2$ are vertex coordinates and $val_1, val_2$ are their scalar values [S1, unofficial].
+   - Store resulting vertices in `newvert` and increment the pointer `p`.
+   - Specific cases (e.g., `0x0C`, `0x0E`) define which edges are intersected. For example, in case `0x0C`, intersections are computed on edges $(d,b)$, $(a,d)$, and $(a,c)$ [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def interpolate(v1, v2, isolevel, col1, col2):
-    """Linear interpolation of vertex v1 and v2 based on scalar values col1 and col2."""
-    if col2 == col1:
-        return v1  # Avoid division by zero
-    t = (isolevel - col1) / (col2 - col1)
-    return v1 + t * (v2 - v1)
+def interpolate(p1, p2, val1, val2, iso):
+    """
+    Linearly interpolate the position on the edge between p1 and p2
+    where the scalar value equals iso.
+    """
+    if val2 == val1:
+        return p1 # Avoid division by zero; treat as no intersection or edge case
+    t = (iso - val1) / (val2 - val1)
+    return p1 + t * (p2 - p1)
 
 def get_index(x, y, z, width=256):
-    """Get 1D index from 3D coordinates."""
+    """
+    Calculate 1D index from 3D coordinates assuming fixed width.
+    """
     return z * width * width + y * width + x
 
-def make_octree(top_left, bottom_right, teapot_color):
-    """Recursively build the adaptive octree."""
-    mid_x = (top_left.x + bottom_right.x) // 2
-    mid_y = (top_left.y + bottom_right.y) // 2
-    mid_z = (top_left.z + bottom_right.z) // 2
+def build_octree(node, scalar_field, width=256):
+    """
+    Recursively build the octree.
+    node: object with topLeftFront (x1,y1,z1) and bottomRightBack (x2,y2,z2)
+    """
+    x1, y1, z1 = node.topLeftFront
+    x2, y2, z2 = node.bottomRightBack
     
-    # Check if subdivision is needed
-    if (mid_x - top_left.x > 1 or mid_y - top_left.y > 1 or bottom_right.z - mid_z > 1):
-        # Define 8 children bounds
+    midx = (x1 + x2) // 2
+    midy = (y1 + y2) // 2
+    midz = (z1 + z2) // 2
+    
+    # Check if leaf node (dimension 1)
+    if (x2 - x1 == 1) and (y2 - y1 == 1) and (z2 - z1 == 1):
+        process_leaf(node, scalar_field, width)
+        return
+
+    # Check if subdivision is needed (dimensions > 1)
+    # Note: Source uses specific checks like (midx - x1) > 1
+    if (midx - x1 > 1) or (midy - y1 > 1) or (z2 - midz > 1):
+        # Create 8 children
         children_bounds = [
-            (top_left, (mid_x, mid_y, mid_z)),
-            ((mid_x, top_left.y, top_left.z), (bottom_right.x, mid_y, mid_z)),
-            ((top_left.x, mid_y, top_left.z), (mid_x, bottom_right.y, mid_z)),
-            ((mid_x, mid_y, top_left.z), (bottom_right.x, bottom_right.y, mid_z)),
-            ((top_left.x, top_left.y, mid_z), (mid_x, mid_y, bottom_right.z)),
-            ((mid_x, top_left.y, mid_z), (bottom_right.x, mid_y, bottom_right.z)),
-            ((top_left.x, mid_y, mid_z), (mid_x, bottom_right.y, bottom_right.z)),
-            ((mid_x, mid_y, mid_z), bottom_right)
+            ((x1, y1, z1), (midx, midy, midz)), # 0
+            ((midx, y1, z1), (x2, midy, midz)), # 1
+            ((x1, midy, z1), (midx, y2, midz)), # 2
+            ((midx, midy, z1), (x2, y2, midz)), # 3
+            ((x1, y1, midz), (midx, midy, z2)), # 4
+            ((midx, y1, midz), (x2, midy, z2)), # 5
+            ((x1, midy, midz), (midx, y2, z2)), # 6
+            ((midx, midy, midz), (x2, y2, z2))  # 7
         ]
         
-        for bounds in children_bounds:
-            child = OctreeNode(bounds[0], bounds[1])
-            make_octree(bounds[0], bounds[1], teapot_color)
-            # Add child to parent
-    else:
-        # Leaf node
-        explore_leaf(top_left, bottom_right, teapot_color)
+        for i, ((bx1, by1, bz1), (bx2, by2, bz2)) in enumerate(children_bounds):
+            child = OctreeNode(bx1, by1, bz1, bx2, by2, bz2)
+            node.children.append(child)
+            # Recursively build if child dimensions > 1
+            if (bx2 - bx1 > 1) or (by2 - by1 > 1) or (bz2 - bz1 > 1):
+                build_octree(child, scalar_field, width)
+            else:
+                process_leaf(child, scalar_field, width)
 
-def explore_leaf(top_left, bottom_right, teapot_color):
-    """Process a leaf node (1x1x1 cube) using Marching Tetrahedra."""
-    # Calculate indices for the 8 vertices
-    # Note: Source assumes fixed width 256
-    a_idx = get_index(top_left.x, top_left.y, top_left.z)
-    b_idx = a_idx + 1
-    c_idx = a_idx + 257
-    d_idx = a_idx + 256
-    e_idx = 256*256 + a_idx
-    f_idx = e_idx + 1
-    g_idx = e_idx + 257
-    h_idx = e_idx + 256
+def process_leaf(node, scalar_field, width=256):
+    """
+    Extract mesh from a leaf node (1x1x1 cube).
+    """
+    x1, y1, z1 = node.topLeftFront
+    x2, y2, z2 = node.bottomRightBack
     
-    # Get scalar values
-    col = [
-        teapot_color[h_idx], teapot_color[g_idx], teapot_color[c_idx], teapot_color[f_idx],
-        teapot_color[d_idx], teapot_color[b_idx], teapot_color[a_idx], teapot_color[e_idx]
+    # Indices for the 8 corners
+    # Based on source: a=TLF, b=BRF, c=TLF(y+1), d=BLB(z-1), e=TLB(z+1), f=TRB, g=TRF, h=BLB?
+    # Source mapping is ambiguous. Using standard corner indexing relative to a.
+    idx_a = get_index(x1, y1, z1, width)
+    idx_b = idx_a + 1
+    idx_c = idx_a + width + 1
+    idx_d = idx_a + width
+    idx_e = idx_a + width * width
+    idx_f = idx_e + 1
+    idx_g = idx_e + width + 1
+    idx_h = idx_e + width
+    
+    # Scalar values
+    vals = [
+        scalar_field[idx_h], # h
+        scalar_field[idx_g], # g
+        scalar_field[idx_c], # c
+        scalar_field[idx_f], # f
+        scalar_field[idx_d], # d
+        scalar_field[idx_b], # b
+        scalar_field[idx_a], # a
+        scalar_field[idx_e]  # e
     ]
     
-    # Define vertices coordinates
-    # Assuming integer coordinates for simplicity based on source
-    verts = [
-        Point(top_left.x, top_left.y, top_left.z), # a
-        Point(top_left.x+1, top_left.y, top_left.z), # b
-        Point(top_left.x, top_left.y+1, top_left.z), # c
-        Point(top_left.x, top_left.y, top_left.z+1), # d
-        Point(top_left.x, top_left.y+1, top_left.z+1), # e
-        Point(top_left.x+1, top_left.y+1, top_left.z), # f
-        Point(top_left.x+1, top_left.y+1, top_left.z+1), # g
-        Point(top_left.x, top_left.y, top_left.z+1) # h (Note: Source h is TopLeftBack, same as d? Source code ambiguity)
+    # Coordinates for the 8 corners
+    coords = [
+        Point(x1, y1, z2), # h (TopLeftBack) - Source mapping ambiguity
+        Point(x2, y1, z2), # g (TopRightBack)
+        Point(x1, y1, z1), # c (TopLeftFront)
+        Point(x2, y1, z1), # f (TopRightFront)
+        Point(x1, y2, z2), # d (BottomLeftBack)
+        Point(x2, y2, z2), # b (BottomRightBack)
+        Point(x1, y2, z1), # a (BottomLeftFront)
+        Point(x2, y2, z1)  # e (BottomRightFront)
     ]
     
-    # Decompose cube into 5 tetrahedra
-    # Tet 1: h, g, c, f
-    tetra([col[h_idx], col[g_idx], col[c_idx], col[f_idx]], [verts[h_idx], verts[g_idx], verts[c_idx], verts[f_idx]])
-    # Tet 2: h, c, d, b
-    tetra([col[h_idx], col[c_idx], col[d_idx], col[b_idx]], [verts[h_idx], verts[c_idx], verts[d_idx], verts[b_idx]])
-    # Tet 3: d, a, e, b
-    tetra([col[d_idx], col[a_idx], col[e_idx], col[b_idx]], [verts[d_idx], verts[a_idx], verts[e_idx], verts[b_idx]])
-    # Tet 4: h, d, e, b
-    tetra([col[h_idx], col[d_idx], col[e_idx], col[b_idx]], [verts[h_idx], verts[d_idx], verts[e_idx], verts[b_idx]])
-    # Tet 5: h, c, f, b
-    tetra([col[h_idx], col[c_idx], col[f_idx], col[b_idx]], [verts[h_idx], verts[c_idx], verts[f_idx], verts[b_idx]])
+    # Decompose cube into 5 tetrahedra as per source
+    # Tetra 1: h, g, c, f
+    tetra_extract([vals[0], vals[1], vals[2], vals[3]], [coords[0], coords[1], coords[2], coords[3]])
+    # Tetra 2: h, c, d, b
+    tetra_extract([vals[0], vals[2], vals[4], vals[5]], [coords[0], coords[2], coords[4], coords[5]])
+    # Tetra 3: d, a, e, b
+    tetra_extract([vals[4], vals[6], vals[7], vals[5]], [coords[4], coords[6], coords[7], coords[5]])
+    # Tetra 4: h, d, e, b
+    tetra_extract([vals[0], vals[4], vals[7], vals[5]], [coords[0], coords[4], coords[7], coords[5]])
+    # Tetra 5: h, c, f, b
+    tetra_extract([vals[0], vals[2], vals[3], vals[5]], [coords[0], coords[2], coords[3], coords[5]])
 
-def tetra(scalars, vertices):
-    """Apply Marching Tetrahedra to a single tetrahedron."""
-    # Determine case index
+def tetra_extract(vals, coords):
+    """
+    Apply Marching Tetrahedra logic to a single tetrahedron.
+    """
+    # Determine case index (bitmask of vertices inside isosurface)
     case = 0
-    for i in range(4):
-        if scalars[i] > isolevel:
+    for i, v in enumerate(vals):
+        if v > iso:
             case |= (1 << i)
             
-    # Handle cases
-    if case == 0x0C: # Example case from source
-        # Intersect edges d-b, a-d, a-c
-        # Note: Source mapping is ambiguous, using generic edge intersection logic
-        p1 = interpolate(vertices[3], vertices[1], isolevel, scalars[3], scalars[1])
-        p2 = interpolate(vertices[0], vertices[3], isolevel, scalars[0], scalars[3])
-        p3 = interpolate(vertices[0], vertices[2], isolevel, scalars[0], scalars[2])
-        newverts.append(p1)
-        newverts.append(p2)
-        newverts.append(p3)
+    # Generate intersections based on case
+    # This is a simplified representation; full implementation requires
+    # handling all 16 cases and specific edge pairs.
+    intersections = []
+    
+    # Example for Case 0x0C (vertices 2,3 inside? Source specific)
+    # Interpolate on edges (d,b), (a,d), (a,c)
+    # Note: Source code indices are ambiguous. General logic:
+    for i in range(4):
+        for j in range(i+1, 4):
+            if (vals[i] > iso) != (vals[j] > iso):
+                p = interpolate(coords[i], coords[j], vals[i], vals[j], iso)
+                intersections.append(p)
+                
+    # Connect intersections to form triangles
+    # (Triangle generation logic depends on the specific case and connectivity)
+    pass
 ```
 
 **Parameters:**
-- `iso`: Target isovalue [S1, unofficial].
-- Grid dimensions: `x_axis`, `y_axis`, `z_axis` (source uses fixed 256) [S1, unofficial].
+- `iso`: Target isovalue. Typical values depend on the dataset (e.g., 0.5 for normalized data) [S1, unofficial].
+- `width`: Fixed grid width for indexing. Source hardcodes 256 [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- Grid indexing assumes a fixed width of 256 for index calculation (`z * 256 * 256 + y * 256 + x`), which fails for volumes with different Y-axis dimensions [S1, unofficial].
-- Vertex labeling ambiguity: Variable names `a` through `h` in `explore` do not directly correspond to the `Vertices[a]`...`Vertices[h]` used in the `tetra` switch cases in the provided snippet [S1, unofficial].
+- **Grid Indexing Assumption**: The source code assumes a fixed grid width of 256 for index calculation (`z * 256 * 256 + y * 256 + x`). This will fail for volumes with different Y-axis dimensions or non-standard strides [S1, unofficial].
+- **Vertex Labeling Ambiguity**: The variable names `a` through `h` in the source code do not consistently correspond to standard vertex positions (e.g., TopLeftFront). The mapping between `col` array indices and `Vertices` array indices in the `tetra` function is unclear and may lead to incorrect edge intersections if not carefully reverse-engineered [S1, unofficial].
+- **Precision**: Linear interpolation assumes linear variation within the tetrahedron. Sharp features may be poorly approximated without dual vertices or higher-order interpolation [S1, unofficial].
+
+## Subtopics
+
+### [Adaptive Simplicial Partitioning with Dual Vertices](9042-adaptive-simplicial-partitioning-with-dual-vertices.md)
+An extension that introduces "dual vertices" within octree cells to minimize distance to local tangent planes, improving sharp feature approximation and reducing sliver triangles. Choose this when high-fidelity geometry is required and the basic tetrahedralization produces artifacts.
 
 ## Operating characteristics
-Not given in the sources.
+- **Time Complexity**: $O(N)$ where $N$ is the number of leaf nodes in the octree. In the worst case (uniform subdivision), $N$ is proportional to the total number of voxels. In the best case (sparse data), $N$ is significantly smaller.
+- **Memory Complexity**: $O(N)$ for storing the octree structure and the resulting mesh vertices. The octree nodes add overhead compared to a flat grid.
+- **Performance**: Reduces computation time for sparse volumes by avoiding processing empty or uniform regions. Performance degrades if the isosurface is complex and requires deep subdivision across the entire volume.
+- **Strengths**: Efficient for sparse data; adaptive resolution allows high detail where needed.
+- **Limitations**: Hard-coded indexing in the reference implementation limits flexibility; vertex labeling ambiguity complicates implementation; standard MT can produce sliver triangles.
+- **When to use**: When the volume is sparse or has varying feature density, and memory is a constraint.
+- **When not to use**: When the volume is dense and uniform, or when strict topological correctness is required without additional post-processing (standard MT can have connectivity issues at boundaries).
 
 ## Background
-Origin: Unofficial implementation by yashwanth850 [S1, unofficial].
+The method originates from an implementation by yashwanth850, described in a GitHub repository "Domain-search-isosurface-extraction" [S1, unofficial]. It builds upon the foundational Marching Tetrahedra algorithm by incorporating an adaptive octree structure to manage spatial subdivision. The specific implementation details, including the octree traversal and tetrahedral decomposition, are derived from this source code.
 
 ## Sources
 [S1] yashwanth850/Domain-search-isosurface-extraction, https://github.com/yashwanth850/Domain-search-isosurface-extraction, fetched 2026-10-27 (unofficial)

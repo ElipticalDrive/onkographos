@@ -1,0 +1,139 @@
+# Narrow beam distribution method
+
+Also called: Screen-space narrow beam filtering, Shinya et al. method
+
+## Overview
+A screen-space multiple-scattering approximation that filters vacuum-rendered images using a heuristic distribution function derived from the assumption that light remains concentrated in narrow beams. It differs from sibling methods by explicitly modeling the spatial variation of scattering moments for heterogeneous media, though it is generally too slow for real-time performance compared to simpler MIP-map based approaches.
+
+## How it works
+**Inputs:**
+*   Vacuum-rendered image $I(\mathbf{r}, \mathbf{s})$, where $\mathbf{r}$ is the screen-space position and $\mathbf{s}$ is the view direction.
+*   Medium parameters: absorption coefficient $C_a$, scattering coefficient $C_s$, and density profile $\varrho(z)$.
+*   Phase function approximation (Gaussian).
+
+**Outputs:**
+*   Final radiance image with multiple scattering effects.
+
+**Data Structures:**
+*   **Heuristic Distribution Function $\Psi(z, r)$**: A 2D function mapping depth $z$ and radial distance $r = \|\mathbf{r}\|$ to a weighting factor. For heterogeneous media, this is computed per pixel or per sample plane.
+*   **Weighting Function $w_{\mathbf{x}}$**: Derived from $\Psi$, used in the screen-space convolution kernel.
+
+**Assumptions:**
+1.  Radiance $L$ is concentrated near the original ray direction [S1, unofficial].
+2.  The phase function is axially symmetric around the forward direction and varies smoothly [S1, unofficial].
+3.  Medium particles are identical, making cross-sections and the phase function spatially invariant [S1, unofficial].
+4.  Density varies only along the z-axis: $\sigma_t(\mathbf{x}) = \sigma_t(z) = (C_a + C_s) \cdot \varrho(z)$ [S1, unofficial].
+
+**Method Steps:**
+1.  **Coordinate Transformation**: Replace the 3D position $\mathbf{x}$ and direction $\boldsymbol{\omega}$ with screen-space coordinates. The radiance is approximated as $L(\mathbf{x}, \boldsymbol{\omega}) \approx L(z, \mathbf{r}, \mathbf{s})$, where $z$ is depth, $\mathbf{r} \in \mathbb{R}^2$ is the screen-space offset, and $\mathbf{s} \in \mathbb{R}^2$ is the screen-space direction vector [S1, unofficial].
+2.  **Derive Heuristic Distribution**: Calculate the volume contribution weighting function $L_v$ by solving moments of the Radiative Transfer Equation (RTE). The RTE without emission is:
+    $$ (\boldsymbol{\omega} \cdot \nabla) L(\mathbf{x}, \boldsymbol{\omega}) = -\sigma_t(\mathbf{x}) L(\mathbf{x}, \boldsymbol{\omega}) + \sigma_s(\mathbf{x}) \int_{\Omega_{4\pi}} f_p(\boldsymbol{\omega}, \boldsymbol{\omega}') L(\mathbf{x}, \boldsymbol{\omega}') \, d\boldsymbol{\omega}' $$
+    Using Fourier transforms and a Gaussian phase function approximation, derive the heuristic distribution $\Psi(z, r)$ which represents the weight of the contribution for depth $z$ at radial distance $r$ [S1, unofficial].
+3.  **Compute Moments for Heterogeneous Media**: For each pixel $\mathbf{x}$ in heterogeneous media, calculate the moments of $L_v$ separately. This is approximated by sampling planes along the z-axis [S1, unofficial].
+4.  **Derive Weighting Function**: Convert $\Psi$ into the screen-space weighting function $w_{\mathbf{x}}$ [S1, unofficial].
+5.  **Screen-Space Filtering**: Apply the filter to the vacuum image $I$ using the weighting function. The filtering integral is expressed as:
+    $$ \int \int L_v(\mathbf{r} - \mathbf{r}', \mathbf{s}') I(\mathbf{r}', \mathbf{s}') d\mathbf{r}' d\mathbf{s}' $$
+    This is implemented in shaders, running in parallel with splatting and gathering algorithms [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for the Narrow Beam Distribution Method
+# Note: The exact derivation of Psi(z, r) from moments is complex and omitted.
+# This code assumes Psi is pre-computed or available as a lookup.
+
+def narrow_beam_filter(vacuum_image, medium_params, resolution):
+    """
+    Filters a vacuum image to approximate multiple scattering.
+    
+    Args:
+        vacuum_image: 2D array of radiance values I(r, s)
+        medium_params: Object containing Ca, Cs, rho(z)
+        resolution: (width, height)
+        
+    Returns:
+        filtered_image: 2D array with multiple scattering
+    """
+    width, height = resolution
+    filtered_image = zeros_like(vacuum_image)
+    
+    # Pre-compute or load the heuristic distribution function Psi(z, r)
+    # For heterogeneous media, this may vary per pixel or be sampled from planes
+    psi_function = compute_heuristic_distribution(medium_params)
+    
+    # Screen-space filtering loop
+    # In practice, this is done in a GPU shader using splatting/gathering
+    for y in range(height):
+        for x in range(width):
+            # Current pixel position in screen space
+            r_current = (x, y)
+            
+            # Accumulate contributions from neighboring pixels
+            # The integral is approximated by a discrete sum over the kernel
+            contribution = 0.0
+            
+            # Define kernel bounds based on the support of Psi
+            # Not given in sources: specific kernel radius or decay threshold
+            kernel_radius = estimate_kernel_radius(psi_function) 
+            
+            for dy in range(-kernel_radius, kernel_radius + 1):
+                for dx in range(-kernel_radius, kernel_radius + 1):
+                    r_neighbor = (x + dx, y + dy)
+                    
+                    # Check boundary
+                    if not (0 <= r_neighbor[0] < width and 0 <= r_neighbor[1] < height):
+                        continue
+                        
+                    # Radial distance between current and neighbor
+                    r_diff = sqrt(dx*dx + dy*dy)
+                    
+                    # Get depth z for the current pixel (from Z-buffer)
+                    z = get_depth(x, y)
+                    
+                    # Get weighting from heuristic distribution
+                    # Psi depends on z and r (radial distance)
+                    weight = psi_function.evaluate(z, r_diff)
+                    
+                    # Get vacuum radiance at neighbor
+                    # Note: s' (direction) is also part of the integral, 
+                    # but simplified here to spatial filtering for clarity
+                    # as per the abstract integral form in sources
+                    i_neighbor = vacuum_image[r_neighbor[1], r_neighbor[0]]
+                    
+                    contribution += weight * i_neighbor
+            
+            filtered_image[y, x] = contribution
+            
+    return filtered_image
+
+def compute_heuristic_distribution(medium_params):
+    """
+    Computes the heuristic distribution function Psi(z, r).
+    This involves solving moments of the RTE with Gaussian phase function.
+    Exact implementation details are in Shinya et al. [2016].
+    """
+    # Placeholder for the complex mathematical derivation
+    # Returns a function or lookup table for Psi(z, r)
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Performance**: The method is too slow for real-time requirements (target < 40 ms per frame for high resolution) [S1, unofficial].
+*   **Complexity**: The underlying integral is 9D, requiring significant simplification to be tractable in screen space [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: Depends on image resolution and kernel size. The source notes that MIP-map filtering (a related technique) has complexity $O(n^2 \log_2 n)$, but the narrow beam method is slower due to the per-pixel moment calculation for heterogeneous media [S1, unofficial].
+*   **Measured Performance**: Filtered a single frame in 100–110 ms for 640x480 resolution on a GeForce GTX 690 [S1, unofficial]. Path tracing took several days on the same hardware [S1, unofficial].
+*   **Strengths**: Can handle non-homogeneous media by calculating moments separately for each pixel or sample plane [S1, unofficial]. Claims higher accuracy than Elek et al. [2013] method [S1, unofficial].
+*   **Limitations**: Rendering times are too high for real-time applications (e.g., video games) [S1, unofficial].
+*   **When to use**: When high accuracy for heterogeneous media is required and real-time performance is not critical.
+*   **When not to use**: For real-time applications requiring < 40 ms frame times.
+
+## Background
+*   **Origin**: Presented by Shinya et al. in 2016 [S1, unofficial].
+*   **Context**: It is a screen-space based multiple-scattering method that builds on the idea of filtering vacuum-rendered images, similar to Elek et al. [2013], but with a different theoretical background focusing on narrow beam distributions [S1, unofficial].
+*   **Usage**: Discussed in the context of real-time light transport in participating media, specifically as a comparison point for more efficient MIP-map filtering techniques [S1, unofficial].
+
+## Sources
+[S1] Real-Time Light Transport in Analytically Integrable Participating Media, https://cgg.mff.cuni.cz/~tomas/publications/pub-thesis-real-time-scattering/thesis.pdf, fetched 2026-10-29 (unofficial)
