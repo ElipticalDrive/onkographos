@@ -1,120 +1,96 @@
 # Acceleration
 
-Also called: Volume rendering optimization, Rendering speedup
 
 ## Overview
-Acceleration techniques in volume rendering reduce the computational cost of generating images by minimizing redundant sampling, skipping invisible data, or parallelizing work. This family solves the bottleneck of evaluating the volume rendering integral for every ray or voxel, which is often prohibitively expensive for high-resolution datasets or neural fields. Unlike [Image-order rendering](16-image-order-rendering.md) which defines the traversal order (eye-space), acceleration methods optimize the *content* of that traversal—whether by skipping empty space, terminating rays early, or adapting resolution—without changing the fundamental image-order nature of the parent.
+Acceleration methods reduce the computational cost of image-order volume rendering by minimizing redundant sampling, skipping invisible data, or adapting resolution [G]. They solve the bottleneck of evaluating the volume rendering integral for every ray or voxel, which is prohibitively expensive for high-resolution datasets or neural fields. Unlike [Ray-grid traversal](17-ray-grid-traversal.md) or [Direct volume ray casting](19-direct-volume-ray-casting.md), acceleration methods optimize the content of the traversal—such as skipping empty space or terminating rays early—without changing the fundamental image-order nature of the parent [G].
 
 ## Shared principles
-The core mechanism shared by all acceleration methods is the reduction of work units (samples, voxels, or pixels) processed per frame while maintaining acceptable visual fidelity. This is achieved through three primary strategies:
-1.  **Culling/Skipping:** Identifying regions of the volume or ray path that do not contribute to the final image (e.g., empty space, occluded voxels) and bypassing their evaluation [S1, S2, S3, unofficial][S4][S5, S6, unofficial].
-2.  **Termination:** Halting the integration loop when the accumulated contribution becomes negligible (e.g., high opacity, low transmittance) [S1, S2, S3, unofficial][S4][S5, S6, unofficial].
-3.  **Adaptation:** Varying the computational effort based on local scene complexity or global performance budgets, such as adjusting sample density, step size, or output resolution [S1, S2, S3, unofficial][S4][S5, S6, unofficial].
-
+The core mechanism shared by all acceleration methods is the reduction of work units (samples, voxels, or pixels) processed per frame while maintaining acceptable visual fidelity [G]. This is achieved through three primary strategies:
+1. **Culling/Skipping:** Identifying regions of the volume or ray path that do not contribute to the final image (e.g., empty space, occluded voxels) and bypassing their evaluation [S2, unofficial][S4, S5].
+2. **Termination:** Halting the integration loop when the accumulated contribution becomes negligible (e.g., high opacity, low transmittance) [S1, S6, unofficial].
+3. **Adaptation:** Varying the computational effort based on local scene complexity or global performance budgets [S1, unofficial].
 Mathematically, these methods modify the standard front-to-back compositing loop:
 $$ C_{acc} = C_{acc} + C_{sample} \cdot \alpha_{sample} \cdot (1 - \alpha_{acc}) $$
 $$ \alpha_{acc} = \alpha_{acc} + \alpha_{sample} \cdot (1 - \alpha_{acc}) $$
-by introducing conditions that break the loop early, skip iterations, or reduce the number of $C_{sample}$ queries [S1, S2, S3, unofficial][S4][S5, S6, unofficial].
+by introducing conditions that break the loop early, skip iterations, or reduce the number of $C_{sample}$ queries.
 
 ## Subtopics
 
 ### [GL-NeRF](803-gl-nerf.md)
-A training-free acceleration for Neural Radiance Fields that replaces stochastic sampling with deterministic Gauss-Laguerre quadrature, reducing MLP calls by selecting points based on accumulated optical depth roots.
-
-### [Occlusion Clipping with Orthogonal Opacity Map](990-occlusion-clipping-with-orthogonal-opacity-map.md)
-An acceleration for texture-based rendering that skips occluded sub-volumes using a low-resolution opacity map orthogonal to the view direction, operating at the sub-volume level rather than per-voxel.
+A training-free acceleration method for volume rendering in Neural Radiance Fields (NeRF) that reduces the number of neural network (MLP) calls per ray by replacing stochastic sampling with deterministic point selection based on Gauss-Laguerre quadrature. Unlike sibling acceleration methods that introduce new data structures, depth oracles, or auxiliary neural networks, GL-NeRF modifies only the integration logic, requiring no additional representation or training.
 
 ### [Adaptive Sampling and Resolution](1412-adaptive-sampling-and-resolution.md)
-A family of techniques that dynamically adjust sample count, step size, or image resolution based on local metrics (e.g., density, variance) or global performance budgets to balance fidelity and cost.
+Builds on [Acceleration](18-acceleration.md), this family dynamically adjusts computational effort based on local scene complexity or global performance budgets [G]. It solves the problem of fixed-cost rendering by allocating more samples or higher resolution only where visually necessary, such as near boundaries or in high-variance regions, while skipping empty space or using lower fidelity elsewhere [G]. It sets itself apart from sibling methods by encompassing both per-ray sample count/step adjustments and global or pixel-level resolution changes, rather than relying solely on early termination or static culling [G].
 
 ### [Kernel Selection](1647-kernel-selection.md)
-A pre-processing strategy for Gaussian ellipsoid rendering that rasterizes bounding boxes to select a fixed number of nearest, high-density kernels per pixel, discarding distant primitives before tracing.
-
-### [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md)
-Techniques that halt ray marching or path integration when opacity thresholds are met, distance bounds are exceeded, or probabilistic weights indicate negligible contribution.
-
-### [Adaptive Refinement for Volume Rendering](1892-adaptive-refinement-for-volume-rendering.md)
-An iterative image-order technique that refines image resolution based on local visual error (e.g., FEM-based error control), starting coarse and adding rays only where variation is high.
-
-### [Conservative Early Ray Termination](1949-conservative-early-ray-termination.md)
-An optimization for scan conversion that prunes cell processing by determining if a ray is sufficiently opaque using a subscreen-based lookup table (ERT-table), allowing parallel visibility decisions.
+Kernel Selection is a pre-processing and filtering strategy used in volume rendering with Gaussian ellipsoids to reduce computational cost by tracing only a subset of primitives that contribute non-trivially to the final image. It solves the problem of expensive full-scene ray tracing for every pixel by discarding distant or low-density ellipsoids before the heavy blending stage. Unlike [Ray Intersection Selector (RIS)](3092-ray-intersection-selector-ris.md), which analytically computes precise ray-primitive intersections to replace stochastic sampling, Kernel Selection relies on a coarse rasterization pass and density thresholds to select a fixed number of nearest neighbors.
 
 ### [Inference Ray Marching and Integration](2148-inference-ray-marching-and-integration.md)
-A GPU-accelerated pipeline for real-time NeRF inference that uses density bitfields/occupancy grids for early termination and fixed step sizes, disabling gradients to prioritize latency.
+Inference Ray Marching and Integration is a GPU-accelerated pipeline for real-time volume rendering inference, designed to generate images from trained neural radiance fields (NeRFs) or sparse density grids without gradient computation. It solves the problem of efficiently traversing sparse volumetric data to sample points and integrate radiance, utilizing density bitfields or occupancy grids for acceleration and early termination to maximize throughput. It differs from training-time marchers by disabling gradient flow, using fixed or pre-computed step sizes, and operating on pre-computed ray samples with strict early-termination logic to prioritize latency over optimization stability.
 
 ### [Ray-guided volume rendering with missing brick reporting](2815-ray-guided-volume-rendering-with-missing-brick-reporting.md)
-An out-of-core technique that dynamically determines the working set by streaming only bricks accessed by rays, reporting missing bricks on the GPU for subsequent frames.
-
-### [Intra-ray Parallelism](3135-intra-ray-parallelism.md)
-A scheme that partitions each ray into depth bins to enable parallel accumulation of primitive contributions.
+Ray-guided volume rendering with missing brick reporting is an out-of-core rendering technique where the working set (the minimal subset of volume data required to render an image) is determined dynamically during the ray-casting process rather than in advance. It solves the problem of memory bottlenecks in large-scale volume rendering by streaming only the bricks accessed by the rays, ensuring optimal accuracy by never loading data that will not be used. It sets itself apart from sibling methods like [Occlusion Clipping with Orthogonal Opacity Map](990-occlusion-clipping-with-orthogonal-opacity-map.md) or [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md) by explicitly handling data availability: when a required brick is missing from the GPU cache, the method reports this "missing brick" to a subsystem for subsequent paging, rather than attempting to approximate the data or failing. This builds on the acceleration principles of [Acceleration](18-acceleration.md) by integrating data streaming directly into the rendering loop.
 
 ### [Acceleration Structure Rebuild](3266-acceleration-structure-rebuild.md)
-Not given in the sources.
+Acceleration Structure Rebuild is a method for maintaining spatial coherence in animated volume and triangle rendering by discarding the previous frame's acceleration structure and constructing a new one from scratch every frame. It solves the problem of supporting arbitrary, unrestricted animation types without the complexity or limitations of incremental or hierarchical update schemes. It differs from siblings like [Adaptive Multi-Step Empty Voxel Skipping](6289-adaptive-multi-step-empty-voxel-skipping.md) or [Temporal Coherence and Caching](6372-temporal-coherence-and-caching.md) by rejecting temporal reuse of the structure itself, relying instead on the speed of full reconstruction and parallel processing to maintain performance.
 
-### [Spatiotemporal Importance Sampling](4696-spatiotemporal-importance-sampling.md)
-A strategy for adaptive sampling that assigns higher probabilities to pixels occluded by tools or exhibiting motion, and lower probabilities to stationary tissues, to speed up convergence in surgical scenes.
+### [Visibility Feedback with Screen Space Subdivision](3439-visibility-feedback-with-screen-space-subdivision.md)
+Visibility Feedback with Screen Space Subdivision is an optimization technique for out-of-core volume rendering that uses visibility information gathered during rendering to optimize data management in the loader. It prevents wasting GPU memory resources and bandwidth by only refining nodes marked as visible in the previous frame, avoiding the inefficiency of discovering occluded areas only at rasterization time after data is loaded. Unlike standard early ray termination which discovers occlusion after data is in the working set, this method incorporates visibility feedback into the loader to prevent loading or refining occluded areas beforehand.
+
+### [Adaptive Undersampling](5397-adaptive-undersampling.md)
+Adaptive Undersampling accelerates volume rendering by replacing the full volume integral calculation for a subset of pixels with interpolation, while storing pre-computed integral values over fixed intervals to allow partial recomputation for pixels where interpolation is inaccurate. It differs from standard adaptive undersampling methods that use recursive block division (which are inefficient on GPUs) by employing a fixed two-pass approach with pre-computed intervals, ensuring only necessary intervals are integrated on the second pass.
 
 ### [Visibility Culling](6226-visibility-culling.md)
-Identifies and skips processing of data regions or rays that do not contribute to the final image, using geometric or scalar-based determination of visibility before integration.
-
-### [Parallelism and Distribution](6265-parallelism-and-distribution.md)
-Distributes ray casting, compositing, or voxel processing across multiple processors or nodes to increase throughput, addressing computational bottlenecks via spatial decomposition and task scheduling.
-
-### [Adaptive Multi-Step Empty Voxel Skipping](6289-adaptive-multi-step-empty-voxel-skipping.md)
-Combines empty voxel skipping (space leaping) with adaptive multi-step length sampling to reduce redundant computation on empty regions.
+Visibility culling in volume rendering identifies and skips the processing of data regions or rays that do not contribute to the final image, thereby reducing computational load and memory bandwidth usage [G]. It differs from its siblings by focusing on the geometric or scalar-based determination of "visible" vs. "invisible" primitives (cells, voxels, or rays) before expensive integration or rasterization occurs, whereas methods like [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md) operate during the ray-marching process itself [G].
 
 ### [Performance Optimization Techniques](6301-performance-optimization-techniques.md)
-Not given in the sources.
+Performance Optimization Techniques are a collection of heuristic strategies designed to mitigate the high computational cost of raymarching volumetric textures by reducing the number of shader evaluations and memory accesses per frame. Unlike structural acceleration methods that rely on spatial data structures for culling, these techniques operate primarily on the rendering pipeline and sampling parameters, often trading visual fidelity for frame rate stability. They are distinct from sibling methods like [Occlusion Clipping](990-occlusion-clipping-with-orthogonal-opacity-map.md) or [Acceleration Structure Rebuild](3266-acceleration-structure-rebuild.md) by focusing on resolution, temporal coherence, and step-size adaptation rather than geometric traversal optimization.
 
 ### [Temporal Coherence and Caching](6372-temporal-coherence-and-caching.md)
-Not given in the sources.
+This family accelerates image-order volume rendering by exploiting the similarity between consecutive frames in a sequence, reducing redundant computation by reusing or skipping work that has not changed. It differs from spatial acceleration methods like [Acceleration](18-acceleration.md) by operating across time rather than space, and from [Adaptive Sampling and Resolution](1412-adaptive-sampling-and-resolution.md) by relying on scene stability rather than perceptual error metrics to determine computational effort.
+
+### [Context-Based Adaptive Ray Sampling with Quadtree Subdivision](8164-context-based-adaptive-ray-sampling-with-quadtree-subdivisio.md)
+A training-stage sampling strategy that uses a quadtree to partition the image space, sampling more rays in nontrivial areas (high color change/high rendering error) and fewer in trivial areas to reduce training burden while capturing details.
+
+### [Efficient Space Skipping & Adaptive Sampling of Unstructured Volumes Using H.W. Accel. Ray Tracing](8217-efficient-space-skipping-adaptive-sampling-of-unstructured-v.md)
+A method for interactive visualization of large unstructured volumes (e.g., from finite element simulations) that leverages hardware-accelerated ray tracing to accelerate acceleration structure traversal and point-in-element tests, while reducing the number of samples taken along each ray via empty space skipping and adaptive sampling.
 
 ### Parsimonious Ray Sampling and Fused Rendering
 - **Definition**: A rendering optimization that infers ray-BBox intersection to sample query points only within the scene bounding box, applicable only to bounded scenes [S1, unofficial]. It also fuses approximately ten point-wise operations for the forward and backward pass of the density-to-alpha function conversion [S1, unofficial].
 - **Step**: In the volume rendering accumulation, halt tracking a ray once the accumulated transmittance falls below $10^{-3}$ [S1, unofficial].
 
-### Inter-Ray Coherency
-- **Definition**: A reference implementation that tracks rays from the eye point to first iso-surface intersection or volume exit, using fast voxel traversal and fast ray-surface intersection [S2, unofficial]. It exploits inter-ray coherency using a buffer storing cells encountered along the last ray and a flag indicating if an iso-surface portion is contained there [S2, unofficial].
-- **Number**: This technique accelerates rendering by about 60 percent [S2, unofficial].
-
 ### Image-Order Volumetric Compositing
-- **Definition**: A volume rendering framework proposed by Levoy, implemented on PIXEL-PLANES 5 hardware, using image-order volumetric compositing [S3, unofficial].
-- **Step**: Use empty space skipping and occlusion culling to accelerate rendering speed [S3, unofficial].
-- **Number**: The system achieved real-time or near real-time performance [S3, unofficial].
+- **Definition**: A volume rendering framework proposed by Levoy, implemented on PIXEL-PLANES 5 hardware, using image-order volumetric compositing [S2, unofficial].
+- **Step**: Use empty space skipping and occlusion culling to accelerate rendering speed [S2, unofficial].
+- **Number**: The system achieved real-time or near real-time performance [S2, unofficial].
 
-### Volume Level-of-Detail (LOD) Rendering
-- **Definition**: A rendering process that maximizes image quality within user-specified frame rate and system constraints (RAM, texture memory, bandwidth) by adaptively modifying the set of rendered cells [S4].
-- **Step**: 
-  - **Adapt/Load Phase**: Determine which octree cells to render. Load non-resident textures from RAM or disk to texture memory. Maintain an 'active cut' (nodes covering space exactly once) [S4].
-  - **Active Cut Maintenance**: Split queue contains non-leaf nodes on active cut, sorted by decreasing error. To decrease error: Move first split node to merge queue (mark inactive), add its children to split queue (mark active). To increase error (frame rate): Remove first node from merge queue to split queue (mark active), add its parent to merge queue, remove children from split queue (mark inactive) [S4].
-  - **Cull/Render Phase**: Traverse octree from root. Perform hierarchical cull. Render flagged nodes using 3D texture mapping and blending in back-to-front order [S4].
-- **Parameter**: User parameters: Desired frame rate, transfer function (data to RGBA), view position. System parameters: RAM, texture memory size, bandwidths, polygon and fill performance [S4].
+### Raw Volume Rendering
+- **Definition**: A rendering algorithm that does not use any precomputed data structures. It is significantly slower than the other two algorithms and is useful only for single renderings from a volume [S3].
+- **Step**: Load the volume data. Precompute the min-max octree with `vpCreateMinMaxOctree()`. Repeat: Choose the classification function. Repeat: Set the view and shading parameters. Repeat: Render with `vpRenderRawVolume()` [S3].
+- **Comparison**: Differs from the Min-Max Octree algorithm only in that there is no need to compute the min-max octree [S3].
 
-### Early Ray Termination via Depth Buffer
-- **Definition**: A technique to skip rendering fragments for rays that are already saturated (opaque) by testing against the depth buffer before executing the fragment shader for the brick [S5, unofficial].
-- **Step**: 
-  - Traverse the volume in front-to-back order to enable early termination [S5, unofficial].
-  - Before rendering a brick, execute a fragment shader program while drawing a solid bounding box around the brick with back face culling switched on. This shader writes the maximal depth value in the depth buffer for saturated rays [S5, unofficial].
-  - When slicing the brick texture, the early z-test prevents fragment operations for rays where the depth test fails (indicating saturation), reducing load on rasterization and fragment shader bottlenecks [S5, unofficial].
-- **Formula**: Color update: $C_{i+1} = (1 - A_i) \cdot \alpha_i \cdot c_i + C_i$. Opacity update: $A_{i+1} = (1 - A_i) \cdot \alpha_i + A_i$. Where $C, A$ are current ray color/opacity, $c, \alpha$ are sample color/opacity, and $i$ is the sample index. A ray is saturated when $A_i \approx 1$ [S5, unofficial].
-- **Pitfall**: Early ray termination is performed only once per brick, not per octree node or sample, because the overhead of changing fragment shaders and performing the test would annihilate benefits [S5, unofficial].
+### Hierarchical Bounding Box Tree for Empty-Space Skipping
+- **Definition**: A method for visualizing large-scale aerosols (smoke, fog, dust) by optimizing traditional ray casting to avoid sampling empty spaces and invalid voxels, reducing hardware load and improving speed [S4].
+- **Step**: Optimize and accelerate the traditional ray casting algorithm through the hierarchical bounding box tree. Combine an illumination model to enhance the color rendering of each voxel [S4].
+- **Comparison**: Reduces unnecessary space debris to lower hardware load and improve rendering speed, meeting real-time rendering requirements for large-scale aerosols [S4].
 
-### Depth-Prior Ray Truncation
-- **Definition**: Adjusts ray near/far bounds using a learned depth prior (disparity map) to restrict volumetric sampling to relevant depth ranges, reducing floater artifacts [S6, unofficial].
-- **Step**: 
-  1. Check `depthPriorLearned` flag. 
-  2. If true, set `near_t = rayInfo[0] + groundTruth.disparityDevice[pixelIndex] * 0.5`. 
-  3. Set `far_t = rayInfo[1] - 10.0`. 
-  4. If false, use raw AABB intersection $t_{min}$ and $t_{max}$ [S6, unofficial].
-- **Parameter**: `depthPriorLearned`: boolean flag enabling depth prior usage. `groundTruth.disparityDevice[pixelIndex]`: per-pixel disparity value from a depth prior. `0.5`: scaling factor applied to disparity. `10.0`: fixed offset subtracted from far bound [S6, unofficial].
+### Surface Localization Acceleration
+- **Definition**: Acceleration methods that localize the surface interface and concentrate samples only in relevant regions, effectively skipping empty space, because only 10-20% of evaluated samples have non-zero density [S5].
+- **Step**: Refine the sampling strategy to focus solely on the localized surface [S5].
+- **Comparison**: Standard volumetric rendering is inefficient because it samples the entire ray; surface localization reduces the number of required MLP evaluations by skipping empty space [S5].
+
+### Early Z-Test Acceleration
+- **Definition**: A mechanism applied before the shader program is executed for a particular fragment to avoid execution, enabling the fragment processor to process the next incoming fragment. It is used to integrate early ray termination and empty-space skipping [S6, unofficial].
+- **Pitfall**: The early z-test is only enabled if all other per-fragment tests are disabled and the fragment's depth value is not modified in the shader [S6, unofficial].
+- **Number**: Performance gain up to a factor of 3 for typical renditions of volumetric data sets on the ATI 9700 graphics card [S6, unofficial].
 
 ## Background
-Acceleration in volume rendering has evolved from hardware-specific optimizations to general algorithmic strategies. Early work by Levoy on image-order volumetric compositing demonstrated real-time performance using empty space skipping and occlusion culling on specialized hardware like PIXEL-PLANES 5 [S3, unofficial]. Subsequent research focused on software optimizations, such as cell-based first-hit ray casting which exploited inter-ray coherency to achieve significant speedups [S2, unofficial]. The advent of GPU rendering introduced techniques like early ray termination via depth buffers to mitigate fragment shader bottlenecks [S5, unofficial]. More recently, with the rise of Neural Radiance Fields (NeRF), acceleration has shifted towards optimizing neural network inference, including parsimonious ray sampling, fused operations, and deterministic quadrature methods like GL-NeRF [S1, S6, unofficial]. Out-of-core rendering techniques have also emerged to handle massive datasets by streaming data based on ray access patterns [S2, S1, unofficial].
+Acceleration in volume rendering has evolved from hardware-specific optimizations to general algorithmic strategies. Early work by Levoy on image-order volumetric compositing demonstrated real-time performance using empty space skipping and occlusion culling on specialized hardware like PIXEL-PLANES 5 [S2, unofficial]. Subsequent research focused on software optimizations, such as cell-based first-hit ray casting which exploited inter-ray coherency to achieve significant speedups [S2, unofficial]. The advent of GPU rendering introduced techniques like early ray termination via depth buffers to mitigate fragment shader bottlenecks [S6, unofficial]. More recently, with the rise of Neural Radiance Fields (NeRF), acceleration has shifted towards optimizing neural network inference, including parsimonious ray sampling, fused operations, and deterministic quadrature methods like GL-NeRF [S1, unofficial]. Surface localization acceleration methods address the inefficiency of sampling entire rays by focusing only on relevant regions where 10-20% of samples have non-zero density [S5]. Hierarchical bounding box trees and early z-tests further optimize traditional ray casting for large-scale aerosols and GPU-based rendering [S4][S6, unofficial].
 
 ## Sources
 [S1] Improved Direct Voxel Grid Optimization for Radiance Fields Reconstruction, https://doi.org/10.48550/arxiv.2206.05085, fetched 2026-10-26 (unofficial)
-[S2] (PDF) Cell-Based First-Hit Ray Casting - ResearchGate, https://www.researchgate.net/publication/2521319_Cell-Based_First-Hit_Ray_Casting, fetched 2026-10-27 (unofficial)
-[S3] A system for real-time rendering of compressed time-varying volume data, https://doi.org/10.7939/r3041m, fetched 2026-10-26 (unofficial)
-[S4] PDF Interactive Visualization of Unstructured Grids Using Hierarchical 3D ..., https://web.eecs.umich.edu/~jjcorso/pubs/leven02unstructgrid.pdf, fetched 2026-10-27
-[S5] PDF Optimizing GPU Volume Rendering - Danny Ruijters, https://dannyruijters.nl/docs/OptimizingGPUVolumeRendering_final.pdf, fetched 2026-10-26 (unofficial)
-[S6] nortonBryan/Clear-plenoxels, https://github.com/nortonBryan/Clear-plenoxels, fetched 2026-10-27 (unofficial)
+[S2] A system for real-time rendering of compressed time-varying volume data, https://doi.org/10.7939/r3041m, fetched 2026-10-26 (unofficial)
+[S3] VolPack User's Guide, http://www-graphics.stanford.edu/software/volpack/vp_userguide.html, fetched 2026-10-28
+[S4] (PDF) A Comparison between GPU-based Volume Ray Casting ..., https://www.researchgate.net/publication/321454253_A_Comparison_between_GPU-based_Volume_Ray_Casting_Implementations_Fragment_Shader_Compute_Shader_OpenCL_and_CUDA, fetched 2026-10-26
+[S5] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
+[S6] [PDF] Acceleration Techniques for GPU-based Volume Rendering, https://www.cs.cit.tum.de/fileadmin/w00cfj/cg/Research/Publications/2003/Acceleration_Techniques_for_GPU-based_Volume_Rendering/vis03-rc.pdf, fetched 2026-10-26 (unofficial)

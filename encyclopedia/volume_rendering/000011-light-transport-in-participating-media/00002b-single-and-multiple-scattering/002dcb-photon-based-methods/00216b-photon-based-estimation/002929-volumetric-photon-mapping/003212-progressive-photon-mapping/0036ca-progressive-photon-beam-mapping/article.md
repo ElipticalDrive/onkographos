@@ -1,0 +1,77 @@
+# Progressive Photon Beam Mapping
+
+
+## Overview
+Progressive Photon Beam Mapping is a memory-efficient volumetric light transport method that replaces the large, static photon map with a series of small, iteratively generated photon maps [S1]. It addresses the high memory costs associated with storing huge volumetric photon maps in participating media [S1]. Unlike standard photon mapping which requires storing all photons, this method discards the photon map after each iteration, significantly improving practicality for large scenes [S1].
+
+## How it works
+**Inputs:** Scene geometry, participating media properties (scattering coefficient, absorption coefficient, phase function), light sources, camera parameters.
+**Outputs:** Radiance estimate at shading points.
+
+**Data Structures:**
+- `PhotonMap`: A temporary structure storing photons for the current iteration. The exact layout is not specified in the sources [G].
+- `ShadingPoints`: A set of points in the volume where radiance is being estimated.
+
+**Steps:**
+1. Initialize the rendering process.
+2. Iterate for a specified number of passes or until convergence:
+   a. Generate a small photon map. This involves tracing photon beams from light sources into the participating media and storing their interactions [S1].
+   b. Use the current small photon map to update the radiance contribution at the shading points. The estimator is beam-to-beam [S1].
+   c. Discard the small photon map to free memory [S1].
+3. Return the accumulated radiance estimates.
+
+**Parameters:**
+- Number of iterations: Not given in the sources.
+- Number of photons per iteration: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- Convergence speed may vary depending on the media type. The method converges faster for some media, like fog [S1].
+- Precision issues may arise if the number of iterations is insufficient or if the photon density is too low [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def progressive_photon_beam_mapping(scene, shading_points, num_iterations):
+    # Initialize accumulated radiance
+    radiance = zeros_like(shading_points)
+    
+    for i in range(num_iterations):
+        # Generate a small photon map for the current iteration
+        photon_map = generate_small_photon_map(scene)
+        
+        # Update shading points using the current photon map
+        # The estimator is beam-to-beam
+        radiance += update_shading_points(shading_points, photon_map)
+        
+        # Discard the small photon map to save memory
+        del photon_map
+        
+    return radiance
+
+def generate_small_photon_map(scene):
+    # Trace photons from light sources into the participating media
+    # Store interactions in a temporary structure
+    # Implementation details not provided in sources
+    pass
+
+def update_shading_points(shading_points, photon_map):
+    # Estimate radiance at shading points using beam-to-beam estimator
+    # Implementation details not provided in sources
+    pass
+```
+
+## Subtopics
+
+## Operating characteristics
+- **Memory Complexity:** Significantly reduced compared to standard photon mapping, as only a small photon map is stored at any time [S1].
+- **Time Complexity:** Depends on the number of iterations and photons per iteration. Not given in the sources.
+- **Performance:** Improves practicality by eliminating memory limitations [S1]. Convergence can be faster for certain media like fog [S1].
+- **Strengths:** Memory efficiency, suitability for large scenes.
+- **Limitations:** Requires multiple passes, convergence speed may vary.
+
+## Background
+Progressive Photon Beam Mapping was proposed to address the memory limitations of previous photon-based methods that relied on huge volumetric photon maps [S1]. It builds on the observation that different representations (photons, beams, paths) are suitable for different types of participating media [S1]. The method is part of a broader effort to create unified solutions for light transport in participating media, such as the Unified Photon Beam Path (UPBP) method [S1].
+
+## Sources
+[S1] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26

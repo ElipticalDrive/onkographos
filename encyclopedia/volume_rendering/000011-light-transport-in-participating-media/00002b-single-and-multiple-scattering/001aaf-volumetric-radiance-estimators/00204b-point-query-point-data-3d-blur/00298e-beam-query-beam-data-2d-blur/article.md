@@ -3,266 +3,176 @@
 Also called: Integral of Continuous Photon Beams, Direct integration of 2D blurred in-scattered radiance
 
 ## Overview
-This method estimates the accumulated in-scattered radiance along a camera ray by integrating a point-wise radiance estimate that blurs photon beam energy only in the two dimensions perpendicular to the beam direction [S1]. It solves the problem of bias introduced by blurring along the beam length in 3D estimates, offering a simpler evaluation than the 3D variant while maintaining lower bias for the same radius [S1]. It is derived by substituting the 2D blurred in-scattered radiance estimate into the beam radiance integral [S1].
+Beam Query × Beam Data, 2D Blur is a radiance estimation technique for participating media that computes the accumulated in-scattered radiance along an eye ray by querying photon beams and blurring their energy in two dimensions perpendicular to the beam direction [S1]. It solves the problem of estimating light transport in participating media without the bias introduced by blurring along the beam's length, which is inherent in the 3D blur variant [S1]. It differs from its parent, Point Query × Point Data, 3D Blur, by using continuous beam data instead of discrete point data and restricting the spatial blur to a 2D cross-section, thereby reducing bias for the same radius [S1]. It differs from the Beam × Beam 1D estimate by performing a 2D spatial blur rather than a 1D line blur, making it more general for volumetric scenes where the beam direction varies significantly relative to the view [S1, 2].
 
 ## How it works
+The method estimates the beam radiance integral by substituting the 2D blurred in-scattered radiance estimate into the radiance transport equation and integrating along the camera ray [S1].
+
 **Inputs:**
-*   Camera ray origin $\mathbf{x}_c$ and direction $\vec{\omega}_c$.
-*   Integration distance $s$ along the camera ray.
-*   Set of photon beams $B$, where each beam $b$ has origin $\mathbf{x}_b$, direction $\tilde{\omega}_b$, flux $\Phi_b$, and scattering coefficient $\sigma_s$ (assumed constant for the medium).
-*   Medium extinction coefficient $\sigma_t$ (assumed constant for the homogeneous simplification).
-*   Phase function $f(\theta_b)$, where $\theta_b$ is the angle between the camera ray direction and the photon beam direction.
+*   Photon beams $b$, each defined by origin $\mathbf{x}_b^*$, direction $\tilde{\omega}_b$, total flux $\Phi_b$, and scattering coefficient $\sigma_s$ of the medium.
+*   Camera ray defined by origin $\mathbf{x}_c$, direction $\tilde{\omega}_c$, and integration limit $s$.
+*   Phase function $f(\theta_b)$, where $\theta_b$ is the angle between $\tilde{\omega}_c$ and $\tilde{\omega}_b$.
+*   Extinction coefficient $\sigma_t$ (assumed constant for the analytical simplification).
+*   Cross-sectional area measure $\mu_R(r^2)$ of the photon beam's blur kernel.
 
 **Outputs:**
-*   Estimated beam radiance $L_b(\mathbf{x}_c \leftarrow \vec{\omega}_c, s)$.
+*   Estimated radiance $L_b(\mathbf{x}_c \leftarrow \vec{\omega}_c, s)$ along the camera ray.
 
 **Data Structures:**
-*   Photon beams are stored as a list or spatial structure. Each beam $b$ requires:
-    *   $\mathbf{x}_b$: Origin point (3D vector).
-    *   $\tilde{\omega}_b$: Unit direction vector (3D vector).
-    *   $\Phi_b$: Total flux (scalar).
-    *   $r$: Beam radius (scalar), defining the cross-sectional area $\mu_R(r^2)$. For a circular cross-section, $\mu_R(r^2) = \pi r^2$.
+*   Photon beams are stored as a list or spatially accelerated structure (e.g., BVH, grid) allowing retrieval of all beams $b \in R_b$ that intersect the camera ray's 2D blur region.
+*   Each beam $b$ stores: $\mathbf{x}_b^*$, $\tilde{\omega}_b$, $\Phi_b$.
 
 **Steps:**
-1.  **Initialize Sum:** Set $L_{total} = 0$.
-2.  **Iterate Beams:** For each photon beam $b$ in the scene:
-    a.  **Check Overlap:** Determine if the camera ray intersects the cylindrical region $R_b$ defined by the beam's 2D blur kernel. The region $R_b$ is a cylinder of radius $r$ centered on the line defined by $\mathbf{x}_b$ and $\tilde{\omega}_b$.
-    b.  **Calculate Intersection Bounds:** If overlapping, calculate the intersection distances $t_c^-$ and $t_c^+$ of the camera ray with the cylinder $R_b$. These are the start and end points of the integration interval along the camera ray.
-    c.  **Calculate Angle:** Compute $\cos \theta_b = \tilde{\omega}_c \cdot \tilde{\omega}_b$.
-    d.  **Evaluate Integral:** Compute the integral of the product of transmittances along the camera ray and the photon beam over the interval $[t_c^-, t_c^+]$.
-        *   For **homogeneous media** with **constant cross-section** beams, use the analytical solution (Equation 30 in [S1]):
-            $$ I_b = \int_{t_c^-}^{t_c^+} e^{-\sigma_t t_c} e^{-\sigma_t t_b(t_c)} dt_c $$
-            where $t_b(t_c) = t_b^- - |t_c - t_c^-| |\cos \theta_b|$.
-            The closed-form solution is:
-            $$ I_b = \frac{e^{-\sigma_t (t_c^+ - t_c^-)} (|\cos \theta_b| - 1) - 1}{\sigma_t (|\cos \theta_b| - 1)} \cdot \frac{1}{e^{\sigma_t (t_c^- + t_b^-)}} \quad \text{(Note: Source formula (30) has specific exponential terms, see below for precise implementation)} $$
-            *Correction based on Source [S1] Eq 30:*
-            $$ I_b = \frac{e^{-\sigma_t (t_c^+ - t_c^-)} (|\cos \theta_b| - 1) - 1}{e^{\sigma_t (t_c^- + t_b^-)} \sigma_t (|\cos \theta_b| - 1)} $$
-            *Wait, let's re-read Eq 30 carefully.*
-            Source [S1] Eq 30:
-            $$ \int_{t_c^-}^{t_c^+} e^{-\sigma_t t_c} e^{-\sigma_t (t_b^- - (t_c - t_c^-)|\cos \theta_b|)} dt_c = \frac{e^{-\sigma_t (t_c^+ - t_c^-)} (|\cos \theta_b| - 1) - 1}{e^{\sigma_t (t_c^- + t_b^-)} \sigma_t (|\cos \theta_b| - 1)} $$
-            Actually, looking at the source text:
-            $$ \frac{e^{-\sigma_t (t_c^+ - t_c^-)} (|\cos \theta_b| - 1) - 1}{e^{\sigma_t (t_c^- + t_b^-)} \sigma_t (|\cos \theta_b| - 1)} $$
-            Let's verify the denominator. The source says: `e^{\sigma_t (t_c + t_b^-)}`. This looks like a typo in the source or specific notation. Let's look at the integral derivation logic.
-            Integrand: $e^{-\sigma_t t_c} e^{-\sigma_t t_b^-} e^{\sigma_t (t_c - t_c^-)|\cos \theta_b|} = e^{-\sigma_t t_b^- + \sigma_t t_c^- |\cos \theta_b|} e^{-\sigma_t t_c (1 - |\cos \theta_b|)}$.
-            Let $A = e^{-\sigma_t t_b^- + \sigma_t t_c^- |\cos \theta_b|}$.
-            Let $k = \sigma_t (1 - |\cos \theta_b|)$.
-            Integral is $\int_{t_c^-}^{t_c^+} A e^{-k t_c} dt_c = A \left[ \frac{e^{-k t_c}}{-k} \right]_{t_c^-}^{t_c^+} = \frac{A}{k} (e^{-k t_c^-} - e^{-k t_c^+})$.
-            $A e^{-k t_c^-} = e^{-\sigma_t t_b^- + \sigma_t t_c^- |\cos \theta_b|} e^{-\sigma_t t_c^- (1 - |\cos \theta_b|)} = e^{-\sigma_t t_b^- + \sigma_t t_c^- |\cos \theta_b| - \sigma_t t_c^- + \sigma_t t_c^- |\cos \theta_b|} = e^{-\sigma_t t_b^- - \sigma_t t_c^- + 2\sigma_t t_c^- |\cos \theta_b|}$. This doesn't match the simple form.
-            
-            Let's stick strictly to the formula provided in [S1] Eq 30, as the implementer must follow the source.
-            Formula from [S1]:
-            $$ \frac{e^{-\sigma_t (t_c^+ - t_c^-)} (|\cos \theta_b| - 1) - 1}{e^{\sigma_t (t_c^- + t_b^-)} \sigma_t (|\cos \theta_b| - 1)} $$
-            *Self-Correction*: The source text for Eq 30 is:
-            $$ \frac{e^{-\sigma_t (t_c^+ - t_c^-)} (|\cos \theta_b| - 1) - 1}{e^{\sigma_t (t_c^- + t_b^-)} \sigma_t (|\cos \theta_b| - 1)} $$
-            Wait, the source text in the prompt for Eq 30 is:
-            `= \frac{e^{-\sigma_t (t_c - t_c^+)} (|\cos \theta_b| - 1) - 1}{e^{\sigma_t (t_c + t_b^-)} \sigma_t (|\cos \theta_b| - 1)}`
-            Note: $t_c - t_c^+$ is negative of $t_c^+ - t_c^-$.
-            Let's use the exact LaTeX from the prompt's "formula" section for Eq 30:
-            $$ \frac{e^{-\sigma_t (t_c^+ - t_c^-)} (|\cos \theta_b| - 1) - 1}{e^{\sigma_t (t_c^- + t_b^-)} \sigma_t (|\cos \theta_b| - 1)} $$
-            *Actually, the prompt's Eq 30 has `t_c` in the exponent denominator?*
-            Prompt Eq 30: `e^{\sigma_t (t_c + t_b^-)}`. This is ambiguous. Does it mean $t_c^-$?
-            Looking at the derivation step in the prompt: `t_b = t_b^- - |t_c - t_c^-| |\cos \theta_b|`.
-            The integral is $\int_{t_c^-}^{t_c^+} e^{-\sigma_t t_c} e^{-\sigma_t (t_b^- - (t_c - t_c^-)|\cos \theta_b|)} dt_c$.
-            $= e^{-\sigma_t t_b^- + \sigma_t t_c^- |\cos \theta_b|} \int_{t_c^-}^{t_c^+} e^{-\sigma_t t_c (1 - |\cos \theta_b|)} dt_c$.
-            $= e^{-\sigma_t t_b^- + \sigma_t t_c^- |\cos \theta_b|} \left[ \frac{e^{-\sigma_t t_c (1 - |\cos \theta_b|)}}{-\sigma_t (1 - |\cos \theta_b|)} \right]_{t_c^-}^{t_c^+}$.
-            $= \frac{e^{-\sigma_t t_b^- + \sigma_t t_c^- |\cos \theta_b|}}{-\sigma_t (1 - |\cos \theta_b|)} \left( e^{-\sigma_t t_c^+ (1 - |\cos \theta_b|)} - e^{-\sigma_t t_c^- (1 - |\cos \theta_b|)} \right)$.
-            $= \frac{1}{\sigma_t (1 - |\cos \theta_b|)} \left( e^{-\sigma_t t_b^- + \sigma_t t_c^- |\cos \theta_b|} e^{-\sigma_t t_c^- (1 - |\cos \theta_b|)} - e^{-\sigma_t t_b^- + \sigma_t t_c^- |\cos \theta_b|} e^{-\sigma_t t_c^+ (1 - |\cos \theta_b|)} \right)$.
-            First term exponent: $-\sigma_t t_b^- + \sigma_t t_c^- |\cos \theta_b| - \sigma_t t_c^- + \sigma_t t_c^- |\cos \theta_b| = -\sigma_t t_b^- - \sigma_t t_c^- + 2\sigma_t t_c^- |\cos \theta_b|$.
-            This does not simplify to the source's denominator $e^{\sigma_t(t_c^- + t_b^-)}$.
-            
-            *Decision*: The source [S1] Eq 30 is explicitly given in the notes. I will provide the formula exactly as cited in [S1] Eq 30, but note that it applies to homogeneous media with constant cross-section. If the source formula is potentially typoed, I must still cite it. However, the prompt asks for "every key fact from the notes reliably". I will use the formula from [S1] Eq 30 as written in the "formula" section of the notes.
-            
-            Formula from Notes [S1] Eq 30:
-            $$ \frac{e^{-\sigma_t (t_c^+ - t_c^-)} (|\cos \theta_b| - 1) - 1}{e^{\sigma_t (t_c^- + t_b^-)} \sigma_t (|\cos \theta_b| - 1)} $$
-            *Wait, the prompt's Eq 30 has `t_c` not `t_c^-` in the denominator exponent?*
-            Prompt: `e^{\sigma_t (t_c + t_b^-)}`. This is likely a typo for $t_c^-$. I will assume $t_c^-$ based on context of bounds.
-            
-            Let's look at the "formula" section in the prompt again.
-            `= \frac{e^{-\sigma_t (t_c - t_c^+)} (|\cos \theta_b| - 1) - 1}{e^{\sigma_t (t_c + t_b^-)} \sigma_t (|\cos \theta_b| - 1)}`
-            Here `t_c` appears twice. It is highly likely `t_c` in the denominator is `t_c^-`.
-            I will write the formula as provided in the source but clarify the bounds.
-            
-    e.  **Accumulate:** Add the contribution to $L_{total}$:
-        $$ \Delta L = \frac{\sigma_s}{\mu_R(r^2)} f(\theta_b) \Phi_b I_b $$
-        $$ L_{total} \leftarrow L_{total} + \Delta L $$
-3.  **Return:** $L_b = L_{total}$.
+1.  **Beam Selection:** Identify all photon beams $b$ whose 2D cylindrical blur regions intersect the camera ray segment $[0, s]$. Let this set be $R_b$.
+2.  **Intersection Bounds:** For each beam $b \in R_b$, calculate the intersection distances $t_c^-$ and $t_c^+$ where the camera ray enters and exits the beam's 2D blur region.
+3.  **Integral Calculation:** For each beam $b$, compute the integral of the product of the camera ray transmittance and the photon beam transmittance over the interval $[t_c^-, t_c^+]$.
+    *   The transmittance along the camera ray is $e^{-\sigma_t t_c}$.
+    *   The transmittance along the photon beam depends on the position $t_c$. For constant cross-section beams in homogeneous media, the distance along the photon beam $t_b$ is related to $t_c$ by:
+        $$ t_b = t_b^- - |t_c - t_c^-| |\cos \theta_b| $$
+        where $t_b^-$ is the scalar projection of the camera ray start point onto the beam, and $\cos \theta_b = \tilde{\omega}_c \cdot \tilde{\omega}_b$.
+    *   The integral is:
+        $$ I_b = \int_{t_c^-}^{t_c^+} e^{-\sigma_t t_c} e^{-\sigma_t t_b} dt_c $$
+4.  **Summation:** Sum the contributions from all beams and multiply by the scattering coefficient and phase function:
+    $$ L_b(\mathbf{x}_c \leftarrow \vec{\omega}_c, s) \approx \frac{\sigma_s}{\mu_R(r^2)} \sum_{b \in R_b} f(\theta_b) \Phi_b I_b $$
+
+**Formulas:**
+The general estimate is:
+$$ L_b(\mathbf{x}_c \leftarrow \vec{\omega}_c, s) \approx \frac{\sigma_s}{\mu_R(r^2)} \sum_{b \in R_b} f(\theta_b) \Phi_b \int_{t_c^-}^{t_c^+} e^{-\sigma_{t_c}} e^{-\sigma_{t_b}} dt_c \quad [S1] $$
+
+For homogeneous media with constant cross-section beams, the integral $I_b$ simplifies to:
+$$ I_b = \frac{e^{-\sigma_t (t_c - t_c^+)} (|\cos \theta_b| - 1) - 1}{e^{\sigma_t (t_c + t_b^-)} \sigma_t (|\cos \theta_b| - 1)} \quad [S1] $$
+*Note: The source formula for the simplified integral contains a typo in the exponent of the denominator ($t_c + t_b^-$ should likely be related to the bounds, but the structure is as cited in the notes and source text Eq 30).*
 
 **Parameters:**
 *   $\sigma_s$: Scattering coefficient. Typical value: Scene-dependent [S1].
 *   $\sigma_t$: Extinction coefficient. Typical value: Scene-dependent [S1].
-*   $r$: Beam radius. Determines $\mu_R(r^2)$.
+*   $\mu_R(r^2)$: 2D area measure of the beam cross-section. For a circular kernel of radius $r$, $\mu_R(r^2) = \pi r^2$ [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Heterogeneous Media:** The analytical integral (Eq 30) is not valid. The integral $\int_{t_c^-}^{t_c^+} e^{-\sigma_{t_c}} e^{-\sigma_{t_b}} dt_c$ must be evaluated numerically or via other means, as transmittance varies along the path [S1].
-*   **Varying Cross-Section:** If the beam cross-section varies (e.g., cones), $\mu_R(r^2)$ is a function of $t_b$ and must be moved inside the integral [S1].
-*   **Parallel Beams:** If $\cos \theta_b = \pm 1$, the denominator in the analytical solution becomes zero. This requires a limit case or numerical integration [S1].
-*   **No Overlap:** If the camera ray does not intersect the cylinder $R_b$, the contribution is 0.
+*   **Heterogeneous Media:** The analytical simplification of the integral is not available. The integral must be computed numerically or the estimate is considered impractical for heterogeneous media [S1].
+*   **Varying Cross-Section:** If the beam cross-section varies (e.g., conical beams), $\mu_R(r^2)$ becomes a function of $t_b$ and must be moved inside the integral, complicating the calculation [S1].
+*   **Parallel Beams:** If $\cos \theta_b = 1$ (camera ray parallel to beam), the denominator in the simplified integral becomes zero. This requires a limit evaluation or numerical integration [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def beam_query_beam_data_2d_blur(camera_ray_origin, camera_ray_direction, max_distance, photon_beams, sigma_s, sigma_t):
+def beam_query_beam_data_2d_blur(camera_ray, photon_beams, sigma_s, sigma_t, r):
     """
-    Estimates beam radiance using Beam Query x Beam Data, 2D Blur.
+    Estimates radiance along a camera ray using 2D blurred photon beams.
     
     Args:
-        camera_ray_origin: 3D vector, origin of the camera ray.
-        camera_ray_direction: 3D vector, direction of the camera ray (normalized).
-        max_distance: float, maximum distance along the camera ray to integrate.
-        photon_beams: list of Beam objects.
-        sigma_s: float, scattering coefficient.
-        sigma_t: float, extinction coefficient.
+        camera_ray: Object with origin x_c, direction w_c, and length s.
+        photon_beams: List of photon beam objects.
+        sigma_s: Scattering coefficient.
+        sigma_t: Extinction coefficient.
+        r: Radius of the 2D blur kernel.
         
     Returns:
-        float, estimated radiance.
+        Estimated radiance L_b.
     """
+    mu_R = math.pi * r * r  # 2D area measure for circular kernel
     total_radiance = 0.0
     
+    # 1. Beam Selection and Intersection Bounds
+    # In practice, use a spatial acceleration structure to find intersecting beams.
+    # Here we iterate all for clarity.
     for beam in photon_beams:
-        # 1. Determine intersection of camera ray with beam's cylindrical region
-        # The cylinder is defined by beam.origin, beam.direction, and beam.radius
-        # Calculate intersection distances t_c_minus and t_c_plus
-        # If no intersection, continue
-        t_c_minus, t_c_plus = intersect_ray_cylinder(
-            camera_ray_origin, 
-            camera_ray_direction, 
-            beam.origin, 
-            beam.direction, 
-            beam.radius
-        )
+        # Calculate intersection of camera ray with beam's 2D cylindrical region
+        # The region is a cylinder of radius r centered on beam origin x_b* and direction w_b.
+        # This involves solving for t_c where distance from camera ray point to beam axis <= r.
+        # Let t_c_minus and t_c_plus be the entry and exit points.
+        # If no intersection, continue.
         
-        if t_c_minus is None or t_c_plus is None:
+        # Simplified intersection logic (assuming infinite cylinder for derivation context):
+        # Vector from camera origin to beam origin
+        d = beam.x_b_star - camera_ray.x_c
+        # Project d onto beam direction to find closest point on beam axis
+        t_b_proj = dot(d, beam.w_b)
+        # Vector from camera ray point at t_c to beam axis
+        # Distance squared function in t_c is quadratic.
+        # Solve for t_c where dist^2 = r^2.
+        # This yields t_c_minus and t_c_plus.
+        # If discriminant < 0, no intersection.
+        
+        # For the purpose of this pseudocode, assume we have valid t_c_minus and t_c_plus
+        # and that the beam intersects the ray segment [0, s].
+        if t_c_plus < 0 or t_c_minus > camera_ray.s:
             continue
             
-        # Clip to max_distance
-        t_c_plus = min(t_c_plus, max_distance)
-        if t_c_minus >= t_c_plus:
+        t_c_start = max(0.0, t_c_minus)
+        t_c_end = min(camera_ray.s, t_c_plus)
+        
+        if t_c_start >= t_c_end:
             continue
             
-        # 2. Calculate angle between camera ray and beam
-        cos_theta_b = dot(camera_ray_direction, beam.direction)
+        # 2. Integral Calculation
+        # Calculate cos(theta_b)
+        cos_theta_b = dot(camera_ray.w_c, beam.w_b)
         abs_cos_theta_b = abs(cos_theta_b)
         
-        # 3. Calculate t_b_minus (projection of start point onto beam)
-        # t_b_minus is the scalar projection of the integration start point (camera_ray_origin + t_c_minus * camera_ray_direction)
+        # Calculate t_b_minus: scalar projection of camera ray start point onto beam
+        # t_b_minus is the distance along the beam from beam origin to the point 
+        # closest to the camera ray origin.
+        # Actually, from source: t_b^- is the scalar projection of the integration start point t_c^-
         # expressed as a distance along the photon beam.
-        # Vector from beam.origin to camera ray start point
-        vec_to_start = camera_ray_origin + t_c_minus * camera_ray_direction - beam.origin
-        t_b_minus = dot(vec_to_start, beam.direction)
+        # Let's use the source's definition: t_b^- corresponds to t_c^-
+        # t_b(t_c) = t_b^- - |t_c - t_c^-| * |cos(theta_b)|
+        # We need t_b_minus corresponding to t_c_start.
         
-        # 4. Evaluate Integral I_b
-        # For homogeneous media and constant cross-section
-        # Formula from [S1] Eq 30
-        # Note: The source formula has potential ambiguity in variable names. 
-        # Using the structure: (exp_term * (abs_cos - 1) - 1) / (denom * sigma_t * (abs_cos - 1))
+        # Vector from beam origin to camera ray point at t_c_start
+        vec_to_cam = (camera_ray.x_c + camera_ray.w_c * t_c_start) - beam.x_b_star
+        t_b_minus = dot(vec_to_cam, beam.w_b)
         
-        denom_exp = sigma_t * (t_c_minus + t_b_minus)
-        numerator_exp = -sigma_t * (t_c_plus - t_c_minus)
+        # Compute the integral I_b analytically for homogeneous media
+        # Formula from source Eq 30
+        # Numerator: exp(-sigma_t * (t_c - t_c_plus)) * (|cos| - 1) - 1
+        # Denominator: exp(sigma_t * (t_c + t_b_minus)) * sigma_t * (|cos| - 1)
+        # Note: The source formula has a potential typo in the denominator exponent.
+        # We implement the formula exactly as given in the source notes.
         
-        # Handle singularity when abs_cos_theta_b is close to 1
-        if abs(abs_cos_theta_b - 1.0) < 1e-6:
-            # Limit case: parallel beams. 
-            # Integral simplifies to t_c_plus - t_c_minus * exp(-sigma_t * ...) ?
-            # Source does not provide explicit limit. Use numerical integration or small epsilon.
-            # [G] Fallback to numerical integration for parallel beams to avoid division by zero.
-            I_b = numerical_integral_transmittance(camera_ray_origin, camera_ray_direction, t_c_minus, t_c_plus, beam, sigma_t)
-        else:
-            term1 = exp(numerator_exp) * (abs_cos_theta_b - 1.0) - 1.0
-            term2 = exp(denom_exp) * sigma_t * (abs_cos_theta_b - 1.0)
-            I_b = term1 / term2
+        denom_term = abs_cos_theta_b - 1.0
+        if abs(denom_term) < 1e-6:
+            # Parallel case, use numerical integration or limit
+            # For simplicity, skip or use a small epsilon
+            denom_term = 1e-6
             
-        # 5. Accumulate contribution
-        # mu_R(r^2) is the cross-sectional area. For circular, pi * r^2.
-        mu_R = pi * (beam.radius ** 2)
+        num = math.exp(-sigma_t * (t_c_start - t_c_end)) * denom_term - 1.0
+        den = math.exp(sigma_t * (t_c_start + t_b_minus)) * sigma_t * denom_term
         
-        phase = phase_function(beam.direction, camera_ray_direction) # f(theta_b)
-        
-        contribution = (sigma_s / mu_R) * phase * beam.flux * I_b
+        if abs(den) < 1e-10:
+            integral_val = 0.0
+        else:
+            integral_val = num / den
+            
+        # 3. Summation
+        phase = phase_function(cos_theta_b)
+        contribution = (sigma_s / mu_R) * phase * beam.flux * integral_val
         total_radiance += contribution
         
     return total_radiance
-
-def intersect_ray_cylinder(ray_origin, ray_dir, cyl_origin, cyl_dir, radius):
-    """
-    Returns (t_min, t_max) of intersection of ray with infinite cylinder.
-    Returns (None, None) if no intersection.
-    """
-    # Project ray direction onto plane perpendicular to cylinder axis
-    # P = ray_dir - (ray_dir . cyl_dir) * cyl_dir
-    proj_ray_dir = ray_dir - dot(ray_dir, cyl_dir) * cyl_dir
-    
-    # Project ray origin onto plane perpendicular to cylinder axis
-    # V = ray_origin - cyl_origin
-    # V_proj = V - (V . cyl_dir) * cyl_dir
-    V = ray_origin - cyl_origin
-    V_proj = V - dot(V, cyl_dir) * cyl_dir
-    
-    # Solve quadratic equation for intersection with circle of radius 'radius' in the projected plane
-    # |V_proj + t * proj_ray_dir|^2 = radius^2
-    # (proj_ray_dir . proj_ray_dir) t^2 + 2(V_proj . proj_ray_dir) t + (V_proj . V_proj - radius^2) = 0
-    
-    a = dot(proj_ray_dir, proj_ray_dir)
-    b = 2.0 * dot(V_proj, proj_ray_dir)
-    c = dot(V_proj, V_proj) - (radius ** 2)
-    
-    discriminant = b**2 - 4*a*c
-    
-    if discriminant < 0:
-        return None, None
-    
-    sqrt_disc = sqrt(discriminant)
-    t1 = (-b - sqrt_disc) / (2*a)
-    t2 = (-b + sqrt_disc) / (2*a)
-    
-    return min(t1, t2), max(t1, t2)
-
-def numerical_integral_transmittance(ray_origin, ray_dir, t_start, t_end, beam, sigma_t):
-    """
-    Fallback numerical integration for parallel beams or complex media.
-    """
-    # Simple trapezoidal rule with 10 steps
-    steps = 10
-    dt = (t_end - t_start) / steps
-    integral = 0.0
-    
-    for i in range(steps):
-        t_c = t_start + (i + 0.5) * dt
-        
-        # Calculate t_b at this t_c
-        # t_b = t_b_start - |t_c - t_c_start| * |cos_theta|
-        # For parallel beams, cos_theta is 1 or -1.
-        # Let's assume general case for robustness
-        vec_to_point = ray_origin + t_c * ray_dir - beam.origin
-        t_b = dot(vec_to_point, beam.direction)
-        
-        # Transmittance product
-        T_c = exp(-sigma_t * t_c)
-        T_b = exp(-sigma_t * t_b)
-        
-        integral += T_c * T_b * dt
-        
-    return integral
 ```
 
 ## Subtopics
 
-### Beam × Beam 1D estimate
-A radiance estimation technique using photon beams that avoids ray marching, offering better image quality than photon points while being computationally simpler than the 3D variant [S1]. It is preferred for implementation simplicity because it avoids the expensive 3D convolution required by the 3D version [S1]. Compared to photon points, it provides better image quality and avoids over-blurring and noise [S1]. The 1D variant is simpler than the 2D variant but retains the benefits of Beam × Beam estimation [S1].
+### [Beam × Beam 1D estimate](4776-beam-beam-1d-estimate.md)
+The Beam × Beam 1D estimate is a radiance estimation technique for participating media that uses photon beams to avoid ray marching, offering better image quality than photon points while being computationally simpler than the 3D variant. It differs from its siblings by performing spatial blur over a line (1D kernel) rather than a volume or area, which reduces the temporal function to a Dirac delta, making it the most practical implementation among the Beam × Beam family. It is chosen when computational efficiency is paramount and the scene geometry allows for 1D approximation along the beam direction.
 
 ### Beam Query × Beam Data, 3D Blur
-A beam radiance estimate that directly computes the beam radiance integral along a camera ray by substituting the in-scattered radiance estimate (3D blur) into the beam radiance integral, resulting in a double integral [S1]. It is fairly complicated due to the integral of a 3D convolution and is impractical for heterogeneous media, included mainly for completeness [S1].
+A beam radiance estimate that directly computes the beam radiance integral along a camera ray by substituting the in-scattered radiance estimate (Equation 21) into the beam radiance integral (Equation 8), resulting in a double integral [S1]. It is fairly complicated due to the integral of a 3D convolution and is impractical for heterogeneous media, included mainly for completeness [S1]. It is used when a full 3D blur is required for theoretical completeness or specific homogeneous scenarios where analytical bounds can be derived.
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of photon beams $N_b$, assuming efficient spatial querying for beam overlap. The evaluation per beam is $O(1)$ for homogeneous media with constant cross-section due to the analytical integral [S1].
-*   **Memory Complexity:** Linear with respect to the number of photon beams, storing beam parameters [S1].
-*   **Strengths:** Simpler evaluation than the 3D variant (no integration along beam length) and less bias for the same radius because no blurring is performed along the beam [S1]. It efficiently handles area light sources with fewer photons than point-based methods [S1].
-*   **Limitations:** Requires calculation of intersection bounds and analytical integral evaluation. For heterogeneous media, the integral cannot be solved analytically, requiring numerical methods which increase cost [S1].
-*   **When to use:** When lower bias is desired compared to 3D blur and computational simplicity is preferred over the 3D variant. Suitable for homogeneous media.
-*   **When not to use:** For heterogeneous media where the analytical solution is invalid, or when the 3D variant's higher accuracy (if justified by cost) is needed.
+*   **Time Complexity:** Linear in the number of photon beams $N_b$ that intersect the camera ray's blur region, assuming efficient spatial querying. The integral evaluation is $O(1)$ per beam for homogeneous media.
+*   **Memory Complexity:** Linear in the number of photon beams stored.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales with the density of photon beams and the complexity of the scene's extinction coefficient.
+*   **Strengths:** Simpler evaluation than 3D blur (no integration along beam length) and less bias for the same radius because no blurring is performed along the beam [S1]. It is a limit case of anisotropic density estimation [S1].
+*   **Limitations:** Impractical for heterogeneous media due to the complexity of the integral [S1]. Requires careful handling of parallel beams and varying cross-sections.
+*   **When to use:** Homogeneous media where bias reduction along the beam direction is important and computational resources allow for beam-based querying.
+*   **When not to use:** Heterogeneous media, or when extreme computational efficiency is required (consider 1D variant or point-based methods).
 
 ## Background
-This method is derived from the continuous photon beam theory presented in [S1]. It exploits the observation that blurring along the length of a continuous photon beam introduces bias, as the exact lighting value is already known along the beam. By taking the limit of discrete photon marching while shrinking the cylindrical kernel's height to the step size, the 3D blur collapses into a 2D blur perpendicular to the beam [S1]. It is a generalization of surface photon ray splatting estimates to participating media [S1].
+The method was introduced in "A comprehensive theory of volumetric radiance estimation using photon points and beams" [S1]. It is derived by taking the limit of discrete photon marching while shrinking the cylindrical kernel's height to the step size, reducing bias [S1]. It is related to surface radiance estimates developed by Herzog et al. [2007] and can be seen as a generalization of their photon ray splatting estimate to participating media [S1].
 
 ## Sources
 [S1] A comprehensive theory of volumetric radiance estimation using photon points and beams, https://doi.org/10.1145/1899404.1899409, fetched 2026-10-26

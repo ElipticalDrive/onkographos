@@ -1,0 +1,37 @@
+# Object-order rendering
+
+## Overview
+Object-order rendering is a family of volume rendering techniques that compute the image by iterating over volumetric data and projecting contributions onto the 2D image plane [G]. It contrasts with image-order methods (like ray casting) that iterate over pixels and trace rays into the volume [G]. It is distinguished by its feed-forward data flow: information moves from the volume to the screen [G].
+
+## Shared principles
+The object-order family shares the fundamental mechanism of treating volumetric data as a set of geometric or parametric primitives that are transformed and rasterized [G].
+1. **Primitive Representation:** The volume is decomposed into primitives, which may be explicit geometric shapes or implicit functions sampled via texture hardware [G].
+2. **Transformation:** Primitives are transformed from volume space to screen space using the Model-View-Projection (MVP) matrix or specific factorizations [G].
+3. **Rasterization:** Transformed primitives are projected onto the 2D image plane, leveraging hardware-accelerated scan-conversion, depth testing, and blending [G].
+4. **Compositing:** Contributions are accumulated to form the final image, typically using alpha blending in back-to-front or front-to-back order to handle transparency correctly [G].
+5. **Hardware Acceleration:** Most methods in this family rely on GPU rasterization pipelines for performance, enabling real-time interactivity [G].
+
+## Subtopics
+
+### [Splatting](23-splatting.md)
+Projects volumetric primitives as overlapping smooth footprints (kernels) accumulated to form the image. It differs from siblings by mapping data elements into the image plane and treating the volume as discrete samples convolved with a filter, unlike ray casting which maps pixels into the data set. Choose it for cache-coherent traversal and efficient hardware acceleration.
+
+### [Shear-warp](24-shear-warp.md)
+Efficiently renders 3D data from arbitrary angles by factorizing the viewing transformation into a 3D shear and a 2D warp. It differs from siblings by transforming volume into a sheared object space for slice-by-slice compositing with fixed interpolation weights, supporting early ray termination unlike splatting. Choose it for real-time rendering with arbitrary rotations via affine factorization.
+
+### [Texture slicing](25-texture-slicing.md)
+Maps volumetric data into 2D/3D texture maps and renders by projecting parallel proxy planes composited back-to-front using hardware alpha blending. It differs from siblings by using explicit planar geometry rather than point-based splats, and relying on direct texture sampling rather than shear-warp factorization. Choose it for leveraging GPU rasterization and texture hardware for real-time interactivity on large datasets.
+
+### [Cell projection](26-cell-projection.md)
+Projects geometric boundaries of volumetric cells onto the 2D plane, decomposing into polygons rasterized and composited back-to-front. It differs from siblings by operating in object space and using exact geometric projections of cell boundaries, handling arbitrary cell shapes directly unlike texture slicing. Choose it for rendering unstructured, curvilinear, or irregular grids without resampling.
+
+### [Voxels rasterized as geometry](27-voxels-rasterized-as-geometry.md)
+Treats volumetric data as 3D primitives (cubes/quads) rendered using standard rasterization pipelines. It differs from siblings by generating explicit geometric primitives for volume elements, allowing precise occlusion culling and standard shading models at the cost of high primitive counts. Choose it for visualizing scalar field data by converting directly into mesh geometry.
+
+### [Domain-transform methods](28-domain-transform-methods.md)
+Transform volumetric data into an alternative domain (frequency, compression, wavelet) for efficient projection generation. It differs from siblings by decoupling rendering performance from dataset resolution via global transforms, producing order-independent linear projections without transparency control. Choose it when reducing per-view complexity from $O(N^3)$ to $O(N^2)$ or better is required.
+
+## Background
+Not given in the sources. [G] The family emerged to address the computational cost of early image-order ray casting methods by leveraging graphics hardware rasterization pipelines. [G] Early implementations focused on rasterizing explicit geometry or using texture mapping for slicing. [G] The family has evolved to include techniques like splatting and shear-warp, balancing quality and performance.
+
+## Sources

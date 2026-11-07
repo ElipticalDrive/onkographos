@@ -1,0 +1,78 @@
+# KiloNeRF
+
+Also called: KiloNeRF: Speeding up Neural Radiance Fields with Thousands of Tiny MLPs
+
+## Overview
+KiloNeRF is a method that adopts a teacher-student training paradigm where a standard NeRF is trained first, and its knowledge is distilled into a set of lightweight MLPs arranged in a 3D grid [S1]. It accelerates rendering by replacing the single large MLP with thousands of tiny MLPs and using a cached sparse 3D grid to quickly locate the surface, thereby skipping empty space [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A trained standard NeRF model (the "teacher") and a set of training images.
+*   **Output:** A set of lightweight MLPs arranged in a 3D grid (the "students") and a sparse 3D grid structure for surface localization.
+
+**Data Structures:**
+1.  **Sparse 3D Grid:** A cached structure used to store surface information. It allows for quick lookup of occupied regions to skip empty space during rendering [S1][S2, unofficial].
+2.  **Lightweight MLPs:** A collection of small neural networks, one for each cell in the 3D grid. These networks are significantly smaller than the original NeRF MLP [S1].
+
+**Steps:**
+1.  **Teacher Training:** Train a standard NeRF model on the scene data [S1].
+2.  **Student Initialization:** Initialize a set of lightweight MLPs arranged in a 3D grid covering the scene volume [S1].
+3.  **Distillation:** Distill the knowledge from the trained standard NeRF into the lightweight MLPs. This involves training the small MLPs to predict the same density and color outputs as the teacher NeRF for given 3D positions and viewing directions [S1].
+4.  **Surface Localization Setup:** Construct a cached sparse 3D grid to store surface information derived from the teacher NeRF or the distilled students, enabling efficient skipping of empty space during rendering [S1][S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Step 1: Train Teacher NeRF
+teacher_nerf = train_standard_nerf(training_images)
+
+# Step 2: Initialize Student MLPs in a 3D Grid
+# grid_resolution defines the dimensions of the 3D grid
+# num_tiny_mlp_params defines the size of each tiny MLP
+student_mlps = initialize_tiny_mlps(grid_resolution, num_tiny_mlp_params)
+
+# Step 3: Distill Knowledge
+# For each training step:
+#   1. Sample rays and 3D points from training images
+#   2. Get teacher predictions (density, color) for these points
+#   3. Identify which grid cell each point belongs to
+#   4. Get student predictions from the corresponding tiny MLP
+#   5. Compute loss between teacher and student predictions
+#   6. Update student MLP weights via backpropagation
+distill_teacher_to_students(teacher_nerf, student_mlps, training_images)
+
+# Step 4: Build Sparse Grid for Acceleration
+# Use the trained models to identify occupied voxels
+sparse_grid = build_sparse_surface_grid(student_mlps, grid_resolution)
+```
+
+**Parameters:**
+*   **Grid Resolution:** Not given in the sources.
+*   **Tiny MLP Size:** Not given in the sources, but described as "lightweight" and "tiny" compared to the original NeRF [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Memory Overhead:** Deploying a large number of MLPs incurs a substantial memory overhead [S1].
+
+## Subtopics
+
+### Mega-NeRF Spatial Partitioning
+Uses spatial cells to manage independent sub-networks, similar to KiloNeRF's grid approach but with different partitioning strategies. [Mega-NeRF Spatial Partitioning](8776-mega-nerf-spatial-partitioning.md)
+
+### Sparse Radiance Field (SRF) Representation
+Uses sparse voxel coordinates and a sparse grid, focusing on sparsity loss to reduce memory, whereas KiloNeRF uses distillation into tiny MLPs. [Sparse Radiance Field (SRF) Representation](8876-sparse-radiance-field-srf-representation.md)
+
+## Operating characteristics
+*   **Time Complexity:** Acceleration of up to three orders of magnitude compared to the original NeRF [S1].
+*   **Memory Complexity:** Substantial memory overhead due to the deployment of a large number of MLPs [S1].
+*   **Strengths:** Significant speedup in rendering time by using tiny MLPs and skipping empty space via surface localization [S1][S2, unofficial].
+*   **Limitations:** High memory consumption [S1].
+*   **When to use:** When rendering speed is critical and memory is not a primary constraint.
+*   **When not to use:** When memory usage is a significant bottleneck.
+
+## Background
+KiloNeRF was introduced by Reiser et al. in 2021 [S1]. It is part of the broader effort to accelerate Neural Radiance Fields (NeRF) by reducing the computational cost per sample point [S2, unofficial]. The method builds on the idea that many samples in volumetric rendering fall in empty space and that the original NeRF's single large MLP is computationally expensive [S1][S2, unofficial].
+
+## Sources
+[S1] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
+[S2] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)

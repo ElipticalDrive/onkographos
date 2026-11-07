@@ -1,27 +1,26 @@
 # Topology and Ambiguity Handling
 
-Also called: Ambiguity Resolution, Topological Correctness
+Also called: Ambiguity Resolution, Topology Correction
 
 ## Overview
-Topology and Ambiguity Handling addresses the topological errors inherent in standard Marching Cubes, specifically non-manifold vertices and edges that arise in ambiguous sign configurations (such as saddle points) [S2, unofficial]. It ensures the output mesh is a topological manifold by dynamically resolving connectivity within ambiguous cells, distinguishing it from static lookup table approaches [2518-marching-cubes-lookup-and-configuration.md].
+Topology and Ambiguity Handling resolves the topological inconsistencies inherent in standard lookup-table-based isosurface extraction (such as [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md)) when the isosurface passes through saddle points within a voxel. Standard methods assign a fixed triangulation to ambiguous cases (e.g., cases 46, 47, 98, 99, 210, 213, 214, 215), which can result in non-manifold vertices, cracks, or holes if adjacent voxels resolve the ambiguity inconsistently [S7, S8, unofficial]. This family provides mechanisms to ensure the resulting mesh is a topological manifold, either by decomposing the surface into disjoint patches or by leveraging dual structures with Hermite data to guarantee connectivity.
 
 ## Shared principles
-The family shares the goal of producing a manifold mesh from scalar field data by resolving topological ambiguities that standard lookup tables cannot handle deterministically.
+The family addresses the "ambiguous case" problem where the sign pattern of the 8 voxel vertices does not uniquely determine the topology of the isosurface intersection. In these configurations, the isosurface passes through the center of the cube, creating a saddle point.
 
-1.  **Ambiguity Identification**: The methods identify cell configurations where the sign pattern of the 8 vertices does not uniquely determine the surface topology (e.g., the "saddle" cases) [S2, unofficial].
-2.  **Graph-Based Connectivity**: Instead of relying on a pre-computed static lookup table, these methods analyze the connectivity of edges within the cube. This often involves constructing an adjacency graph of edges or tetrahedra [5004-marching-cubes-with-disjoint-patch-decomposition.md].
-3.  **Component Decomposition**: Ambiguous regions are decomposed into disjoint connected components or patches. This ensures that cut edges are grouped into distinct, non-intersecting surfaces, preventing self-intersections or non-manifold joints [5004-marching-cubes-with-disjoint-patch-decomposition.md].
-4.  **Manifold Guarantee**: The primary constraint is the production of a topological manifold, where every edge is shared by exactly two faces and every vertex has a neighborhood homeomorphic to a disk [S1][S2, unofficial].
+1.  **Ambiguity Identification**: The method identifies cases where the standard `triangleTable` yields non-manifold connections. These are typically the 8 cases where the number of sign changes on opposite faces of the cube is equal, leading to multiple valid topological interpretations [S7, S8, unofficial].
+2.  **Manifold Guarantee**: The core objective is to ensure that every edge in the output mesh is shared by exactly two triangles (or one triangle and a boundary). Standard LUTs may produce vertices with degree $\neq 4$ or edges shared by $>2$ triangles in ambiguous regions [S7, S8, unofficial].
+3.  **Local Consistency**: Resolution strategies must be consistent across voxel boundaries. A decision made in one voxel must not contradict the decision in an adjacent voxel sharing an ambiguous face or edge.
 
 ## Subtopics
 
 ### [Hermite Dual Marching Cubes](2197-hermite-dual-marching-cubes.md)
-Combines Dual Marching Cubes topology with Dual Contouring features. It uses Hermite data (points and normals) to construct Quadratic Error Functions (QEF) for vertex placement, ensuring manifold topology while preserving sharp features.
+A method that produces a topological manifold mesh by leveraging Hermite data (intersection points and normals) and minimizing a Quadratic Error Function (QEF). Unlike standard Dual Contouring, which may produce non-manifold artifacts in ambiguous configurations, this method guarantees manifold topology by using the dual structure of Nielson’s Dual Marching Cubes. It preserves sharp features better than standard Marching Cubes by fitting the vertex position to the planes defined by the Hermite data.
 
 ### [Marching Cubes with Disjoint Patch Decomposition](5004-marching-cubes-with-disjoint-patch-decomposition.md)
-Resolves ambiguous cases by decomposing the surface into disjoint connected components of edges using graph-based coloring. It replaces the static lookup table with dynamic graph analysis to ensure non-intersecting patches [5004-marching-cubes-with-disjoint-patch-decomposition.md].
+A topological ambiguity resolution method that decomposes the surface within a voxel into disjoint connected components (patches) to ensure manifold connectivity. Unlike standard lookup tables that may produce non-manifold joints in saddle-point configurations, this method uses graph-based edge coloring to group cut edges into distinct, non-intersecting surfaces. It explicitly enforces a selection rule tied to the count of ambiguous faces, ensuring manifold connectivity in complex scenarios [6727-ambiguous-face-handling-with-connected-components.md].
 
 ## Background
-Standard Marching Cubes [2518-marching-cubes-lookup-and-configuration.md] uses a static lookup table to resolve the 256 possible vertex sign configurations. However, 6 of these configurations are ambiguous, leading to non-manifold geometry [S2, unofficial]. Early attempts to fix this included the "Corrected Marching Cubes" lookup table [2518-marching-cubes-lookup-and-configuration.md], which arbitrarily resolved ambiguities. More recent approaches, such as Hermite Dual Marching Cubes [2197-hermite-dual-marching-cubes.md] and Disjoint Patch Decomposition [5004-marching-cubes-with-disjoint-patch-decomposition.md], use dynamic analysis to ensure topological correctness and feature preservation.
+The ambiguity problem in Marching Cubes was first formally identified by Williams [S7] and later detailed by Nielson [S8]. The standard 256-case lookup table, while efficient, fails to distinguish between topologically distinct surfaces in saddle-point configurations. Early solutions involved modifying the lookup table or using additional criteria (such as gradient direction) to resolve ambiguities. More recent approaches, such as Hermite Dual Marching Cubes and Disjoint Patch Decomposition, address the issue by restructuring the mesh generation process to inherently satisfy manifold constraints, moving away from simple edge-triangulation heuristics.
 
 ## Sources

@@ -1,0 +1,173 @@
+# Multi-triangulation
+Also called: Multi-Triangulation for Tetrahedral Meshes, Segment-based multi-resolution model
+## Overview
+Multi-triangulation is a multi-resolution data structure for large unstructured tetrahedral meshes that uses a collection of hierarchical segments to enable local mesh adaptation [S1]. It solves the problem of efficiently rendering and simplifying massive meshes by allowing the mesh complexity to be adjusted at run time based on viewing parameters or attribute error, while guaranteeing a consistent mesh without cracks or intersecting tetrahedra [S1]. Unlike vertex-based multi-resolution models that require full mesh transfer to the GPU and core memory storage, multi-triangulation treats segments independently, enabling efficient out-of-core processing and direct GPU execution [S1].
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   An initial unstructured tetrahedral mesh $M_0$.
+*   A maximal attribute error parameter $\epsilon_{max}$, which steers the adaptation of mesh complexity [S1].
+
+**Outputs:**
+*   A multi-resolution mesh representation consisting of a set of non-overlapping patches that cover the domain.
+*   A Directed Acyclic Graph (DAG) describing dependencies between segments.
+*   A consistent adapted mesh selected via a graph cut in the DAG [S1].
+
+### Data Structures
+**Segments ($S_i^j$):**
+*   A segment is a subset of tetrahedra from the original mesh or a simplified version thereof.
+*   Segments are stored in a compressed format that encodes connectivity information [S1].
+*   The compression allows for restoring adjacency information between tetrahedra of different segments at decompression time [S1].
+*   The vertex ordering (mesh layout) is left unchanged by the compression; vertex indices are encoded as given in the original mesh [S1].
+*   Segments are balanced, containing a similar number of tetrahedra (several thousand) to support memory management [S1].
+
+**Patches ($P_i^{j,k}$):**
+*   A patch is the intersection of a segment from partition $\Pi_i$ and a segment from partition $\Pi_{i+1}$.
+*   Patches form the non-overlapping elements of the final adapted mesh [S1].
+
+**Directed Acyclic Graph (DAG):**
+*   **Nodes:** Segments $S_i^j$ from all partitions.
+*   **Edges:** Directed edges represent patches $P_i^{j,k}$. An edge exists from a "floor" segment $S_i^j$ (from partition $\Pi_i$) to a "ceiling" segment $S_{i+1}^k$ (from partition $\Pi_{i+1}$) if they overlap [S1].
+*   The DAG describes how segments in one partition relate to segments in the next partition [S1].
+
+### Construction Algorithm
+The multi-triangulation is built through a sequence of iterative partitions $\Pi_1, \Pi_2, \dots, \Pi_n$ [S1].
+
+1.  **Initial Partition:** Start with the full-resolution mesh $M_0$. Create the first partition $\Pi_1$ by dividing the mesh into segments $S_1^k$ that cover the whole mesh and may only overlap at boundaries [S1].
+2.  **Iterative Simplification and Segmentation:** For each iteration $i$ from 1 to $n-1$:
+    a.  **Simplify:** Simplify the mesh segments from partition $\Pi_i$ to produce a simplified version of the mesh. The simplifier is restricted to leave the borders between segments unchanged to ensure consistency [S1].
+    b.  **Rotate:** Change the kind of segmentation for the next iteration by rotating the mesh. This rotation is computed by vector-matrix multiplication [S1].
+    c.  **Partition:** Create the next partition $\Pi_{i+1}$ by distributing the vertices and tetrahedra of the simplified mesh into new segments $S_{i+1}^k$ [S1].
+3.  **Construct Patches:** For each pair of consecutive partitions $\Pi_i$ and $\Pi_{i+1}$, compute the intersection to form patches:
+    $$ \Pi_i \cap \Pi_{i+1} = \bigcup_{j=1}^{|\Pi_i|} \bigcup_{k=1}^{|\Pi_{i+1}|} (S_i^j \cap S_{i+1}^k) = \bigcup_{j=1}^{|\Pi_i|} \bigcup_{k=1}^{|\Pi_{i+1}|} P_i^{j,k} $$
+    [S1]
+4.  **Build DAG:** Create the DAG where nodes are segments $S_i^j$ and directed edges are patches $P_i^{j,k}$ connecting ceiling segment $S_{i+1}^k$ to floor segment $S_i^j$ if they overlap [S1].
+
+### Adaptation Algorithm
+The mesh is adapted at run time by selecting a subset of pre-computed segments via a graph cut in the DAG [S1].
+
+1.  **Input:** The DAG and the maximal attribute error $\epsilon_{max}$ [S1].
+2.  **Graph Cut Selection:** Select a set of edges (patches) in the DAG such that every path from root to leaf contains exactly one cut edge. This ensures the patches cover the whole mesh without overlapping [S1].
+3.  **Mesh Assembly:** The adapted mesh consists of the union of the selected patches [S1].
+4.  **Coarsening Optimization:** If all patches $P_i^{j,k}$ for a specific ceiling segment $S_{i+1}^k$ are on the graph cut, replace them with the single ceiling segment $S_{i+1}^k$ [S1].
+5.  **Refinement Logic:** Conversely, a ceiling segment $S_{i+1}^k$ can be replaced by the union of patches having it as ceiling:
+    $$ S_{i+1}^k \leftarrow \bigcup_{j=1}^{|\Pi_i|} (S_i^j \cap S_{i+1}^k) = \bigcup_{j=1}^{|\Pi_i|} P_i^{j,k} $$
+    [S1]
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def build_multi_triangulation(initial_mesh, num_iterations):
+    """
+    Builds the multi-triangulation data structure from an initial mesh.
+    """
+    partitions = []
+    current_mesh = initial_mesh
+    
+    # Step 1: Initial Partition
+    partition_1 = partition_mesh(current_mesh)
+    partitions.append(partition_1)
+    
+    # Step 2: Iterative Simplification and Partitioning
+    for i in range(1, num_iterations):
+        prev_partition = partitions[-1]
+        
+        # Simplify the mesh based on the previous partition's segments
+        # The simplifier must preserve segment borders
+        simplified_mesh = simplify_mesh_segment_wise(current_mesh, prev_partition)
+        
+        # Rotate the mesh to change segmentation orientation
+        rotated_mesh = rotate_mesh(simplified_mesh)
+        
+        # Create new partition
+        next_partition = partition_mesh(rotated_mesh)
+        partitions.append(next_partition)
+        
+        # Update current mesh for next iteration
+        current_mesh = simplified_mesh
+        
+    # Step 3: Construct Patches and DAG
+    dag = DirectedAcyclicGraph()
+    patches = []
+    
+    for i in range(len(partitions) - 1):
+        partition_i = partitions[i]
+        partition_i_plus_1 = partitions[i + 1]
+        
+        for seg_floor in partition_i.segments:
+            for seg_ceiling in partition_i_plus_1.segments:
+                # Compute intersection
+                patch = intersect(seg_floor, seg_ceiling)
+                
+                if patch is not empty:
+                    patches.append(patch)
+                    # Add edge to DAG: Floor -> Ceiling
+                    dag.add_edge(seg_floor, seg_ceiling, patch)
+                    
+    return partitions, patches, dag
+
+def adapt_mesh(dag, max_attribute_error):
+    """
+    Adapts the mesh by selecting a graph cut in the DAG.
+    """
+    # Traverse DAG to find optimal cut based on error metric
+    # This is a simplified representation of the graph cut logic
+    selected_patches = []
+    
+    # For each path from root to leaf, select exactly one edge (patch)
+    # The selection is guided by max_attribute_error
+    for path in dag.all_paths():
+        best_patch = None
+        min_error = infinity
+        
+        for patch in path.edges:
+            error = calculate_attribute_error(patch)
+            if error < min_error:
+                min_error = error
+                best_patch = patch
+        
+        # If error exceeds max, we might need to refine (select lower level patches)
+        # If all patches for a ceiling segment are selected, coarsen to ceiling segment
+        if min_error > max_attribute_error:
+            # Refinement logic: select patches instead of ceiling
+            # This implies traversing deeper in the DAG
+            pass 
+        else:
+            # Coarsening logic: if all children are selected, pick parent
+            if is_all_children_selected(path.last_node):
+                selected_patches.append(path.last_node) # The ceiling segment
+            else:
+                selected_patches.append(best_patch)
+                
+    return assemble_mesh(selected_patches)
+```
+
+### Parameters
+*   **Maximal Attribute Error ($\epsilon_{max}$):** A user-given parameter that steers the adaptation of the mesh complexity [S1].
+*   **Number of Iterations:** Determines the depth of the multi-resolution hierarchy. Not given in the sources.
+
+### Edge Cases and Pitfalls
+*   **Consistency Constraint:** Neighboring segments must match exactly along their borders to avoid cracks or intersecting tetrahedra. The simplifier is restricted to leave the borders between segments unchanged [S1].
+*   **Memory Usage:** While out-of-core processing reduces memory needs, the file sizes of multi-triangulations can become large (e.g., 1.2 GB for the Earthquake dataset) due to connectivity information exceeding geometry information by a factor of about 6 [S1].
+*   **Triangle Count:** Meshes adapted by segment-based models tend to contain more triangles than those adapted by vertex-based models [S1].
+*   **DAG Path Constraint:** Every path from root to leaf must contain exactly one cut edge. If a segment is subdivided, its parent segments must also be subdivided appropriately to avoid overlapping patches [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The adaptation of the mesh can be performed rapidly because segments are processed independently [S1]. The construction involves iterative simplification and intersection calculations, the complexity of which depends on the number of segments and tetrahedra [S1].
+*   **Memory Complexity:** Memory needs are decreased drastically by processing the mesh segment-wise out-of-core [S1]. However, storage on disc can be large due to connectivity data [S1].
+*   **Performance:** Efficient for huge meshes on standard PCs. Enables interactive direct volume rendering, isosurface extraction, and vector field visualization [S1].
+*   **Strengths:** Out-of-core capability, GPU efficiency (segments treated independently), consistent mesh generation.
+*   **Limitations:** Larger file sizes compared to raw geometry, potentially higher triangle count than vertex-based methods.
+*   **When to use:** Large unstructured tetrahedral meshes requiring interactive exploration and local adaptation.
+*   **When not to use:** When minimal file size is critical or when vertex-based simplification is preferred for lower triangle counts.
+
+## Background
+*   **Origin:** Introduced by Ralf Sondershaus and Wolfgang Straßer from the University of Tübingen [S1].
+*   **Paper:** "Segment-based tetrahedral meshing and rendering" (2006) [S1].
+*   **History:** Extends the concept of multi-triangulations from triangle meshes to tetrahedral meshes [S1].
+*   **Usage:** Used in a visualization system supporting direct volume rendering (projected tetrahedra), isosurface extraction, and vector field visualization (stream lines) [S1].
+
+## Sources
+[S1] Segment-based tetrahedral meshing and rendering, https://doi.org/10.1145/1174429.1174507, fetched 2026-11-06

@@ -7,11 +7,11 @@ This method prevents floating-point errors in screen-z values that occur when tr
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Screen-space coordinates ($z_{t1}, z_{t2}$), eye offset parameter ($e_o$), and the angle $\theta$ between the sight line and the screen-z axis.
-- Output: World-space distance ($z_{v2} - z_{v1}$) between two points along a sight line.
+- Input: Screen-space coordinates ($z_{t1}, z_{t2}$), eye offset parameter ($e_o$), and the angle $\theta$ between the sight line and the screen-z axis [S1].
+- Output: World-space distance ($z_{v2} - z_{v1}$) between two points along a sight line [S1].
 
 **Data Structures:**
-Not given in the sources.
+Not given in the sources [S1].
 
 **Steps:**
 1. Shift the camera eye position away from the world origin to establish a new geometric basis [S1].
@@ -23,15 +23,9 @@ The core relationship defines the world distance between two points on a sight l
 
 $$ z_{v2} - z_{v1} = \frac{z_{t2} - z_{t1}}{\cos(\theta)} $$
 
-The specific equation for converting screen-space $z_t$ to world-space $z_v$ differences is given by [S1]:
-
-$$ z_{v2} - z_{v1} = \frac{(z_{t2} - e_o)(z_{t1} - e_o) - (z_{t1} - e_o)(z_{t2} - e_o)}{e_o} $$
-
-*Note: The source text for this formula contains apparent typographical errors in the numerator terms which cancel out to zero in standard algebraic interpretation. The source explicitly states this equation gives the difference in world-z in a numerically stable form [S1]. The variable $e_o$ represents the eye offset.*
-
 **Parameters:**
-- $e_o$: Eye offset parameter. Not given in the sources.
-- $\theta$: Angle between the sight line and the screen-z axis. Not given in the sources.
+- $e_o$: Eye offset parameter [S1].
+- $\theta$: Angle between the sight line and the screen-z axis [S1].
 
 **Edge Cases and Pitfalls:**
 - Using standard perspective (eye at origin) causes substantial relative floating-point errors in screen-z when vertices are translated far from the origin, leading to ordering inconsistencies during compositing [S1].
@@ -55,12 +49,8 @@ def numerically_stable_perspective_transform(z_t1, z_t2, e_o, cos_theta):
     Returns:
         float: World-space distance (z_v2 - z_v1).
     """
-    # Formula derived from source [S1]:
-    # z_v2 - z_v1 = (z_t2 - z_t1) / cos(theta)
-    
     if cos_theta == 0:
         raise ValueError("Cosine of theta cannot be zero (sight line perpendicular to screen-z axis)")
-        
     return (z_t2 - z_t1) / cos_theta
 ```
 
@@ -70,16 +60,16 @@ def numerically_stable_perspective_transform(z_t1, z_t2, e_o, cos_theta):
 A method for constructing custom projection matrices. Choose this when matrix-based transformations are preferred over direct coordinate mapping.
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Measured Performance:** Not given in the sources.
+- **Time Complexity:** Not given in the sources [S1].
+- **Memory Complexity:** Not given in the sources [S1].
+- **Measured Performance:** Not given in the sources [S1].
 - **Strengths:** Avoids floating-point errors in screen-z without the memory overhead of double precision [S1].
 - **Limitations:** Requires subdivision of nodal regions to maintain color accuracy with hardware shading [S1].
 - **When to use:** When compositing thousands of closely spaced triangles where standard perspective transformations cause ordering inconsistencies due to floating-point errors [S1].
-- **When not to use:** When double precision is acceptable and memory overhead is not a concern, or when hardware shading inaccuracies are not a primary concern.
+- **When not to use:** When double precision is acceptable and memory overhead is not a concern, or when hardware shading inaccuracies are not a primary concern [S1].
 
 ## Background
-The method was introduced in a 1996 paper by the authors of [S1] to address issues in hierarchical and parallelizable direct volume rendering for irregular and multiple grids. It was developed to overcome limitations of standard computer graphics software which bases perspective transformations on the eye being at the origin [S1]. The technique was tested on a curvilinear multi-grid and demonstrated performance on space-shuttle grid data [S1].
+The method was introduced in a paper on hierarchical and parallelizable direct volume rendering for irregular and multiple grids [S1]. It was developed to overcome limitations of standard computer graphics software which bases perspective transformations on the eye being at the origin [S1]. The technique was tested on a curvilinear multi-grid and demonstrated performance on space-shuttle grid data [S1].
 
 ## Sources
 [S1] Hierarchical and parallelizable direct volume rendering for irregular and multiple grids, https://doi.org/10.1109/visual.1996.567606, fetched 2026-10-24

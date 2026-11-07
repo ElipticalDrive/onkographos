@@ -1,0 +1,124 @@
+# Plane Grid Generation
+Also called: Structured Grid Triangle List Generation
+## Overview
+Plane Grid Generation precomputes vertex index arrays for triangle lists representing surfaces parallel to the xy, yz, and xz planes on a regular 3D grid [S2, unofficial]. It solves the problem of efficiently indexing grid vertices for rendering or processing planar slices without dynamic calculation during the rendering pass. It differs from its siblings by generating static, axis-aligned planar meshes rather than density-based sampling or coarse-to-fine hierarchical structures.
+## How it works
+**Inputs and Outputs:**
+- Input: Grid dimensions $n_x$ (ngx), $n_y$ (ngy), $n_z$ (ngz).
+- Output: Three integer arrays storing vertex indices for triangles parallel to the xy, yz, and xz planes.
+
+**Data Structures:**
+- `index`: Integer array.
+  - Size for xy-plane: $6(n_x-1)(n_y-1)$
+  - Size for yz-plane: $6(n_y-1)(n_z-1)$
+  - Size for xz-plane: $6(n_z-1)(n_x-1)$
+
+**Steps:**
+1. **Initialize** counters and stride variables for each plane type.
+2. **Generate xy-plane indices:**
+   - Loop $i$ from $0$ to $n_y-1$.
+   - Loop $j$ from $0$ to $n_x-1$.
+   - Compute base index $b = n_x \cdot i + j$.
+   - Assign 6 indices per cell to form two triangles:
+     - Triangle 1: $b$, $b+1$, $b+n_x+1$
+     - Triangle 2: $b$, $b+n_x+1$, $b+n_x$
+3. **Generate yz-plane indices:**
+   - Loop $i$ from $0$ to $n_z-1$.
+   - Set $m = i \cdot (n_x \cdot n_y)$.
+   - Loop $j$ from $0$ to $n_y-1$.
+   - Assign 6 indices:
+     - Triangle 1: $m$, $m+n_x$, $m+n_x+n_x n_y$
+     - Triangle 2: $m$, $m+n_x+n_x n_y$, $m+n_x n_y$
+   - Increment $m$ by $n_x$ after each inner iteration.
+4. **Generate xz-plane indices:**
+   - Loop $i$ from $0$ to $n_z-1$.
+   - Set $m = i \cdot (n_x \cdot n_y)$.
+   - Loop $j$ from $0$ to $n_x-1$.
+   - Assign 6 indices:
+     - Triangle 1: $m$, $m+1$, $m+1+n_x n_y$
+     - Triangle 2: $m$, $m+1+n_x n_y$, $m+n_x n_y$
+   - Increment $m$ by $1$ after each inner iteration.
+5. **Offset for Depth:** For xy-plane surfaces at $z > 0$, add the z-axis offset to all indices before rendering [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_plane_grids(ngx, ngy, ngz):
+    ngxy = ngx * ngy
+    
+    # xy-plane indices
+    xy_indices = []
+    for i in range(ngy - 1):
+        for j in range(ngx - 1):
+            base = ngx * i + j
+            xy_indices.extend([
+                base, base + 1, base + ngx + 1,
+                base, base + ngx + 1, base + ngx
+            ])
+            
+    # yz-plane indices
+    yz_indices = []
+    for i in range(ngz - 1):
+        m = i * ngxy
+        for j in range(ngy - 1):
+            yz_indices.extend([
+                m, m + ngx, m + ngx + ngxy,
+                m, m + ngx + ngxy, m + ngxy
+            ])
+            m += ngx
+            
+    # xz-plane indices
+    xz_indices = []
+    for i in range(ngz - 1):
+        m = i * ngxy
+        for j in range(ngx - 1):
+            xz_indices.extend([
+                m, m + 1, m + 1 + ngxy,
+                m, m + 1 + ngxy, m + ngxy
+            ])
+            m += 1
+            
+    return xy_indices, yz_indices, xz_indices
+```
+
+**Parameters:**
+- $n_x, n_y, n_z$: Grid dimensions in x, y, z directions.
+- $n_{xy}$: Product $n_x \cdot n_y$ used for stride calculations [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Indices must be offset by the z-axis grid position when computing triangle lists for surfaces parallel to the xy-plane, as the base list only covers the $z=0$ plane [S2, unofficial].
+- The loops run up to $n-1$ because they define cells between vertices, not vertices themselves.
+
+## Subtopics
+
+### Structured Grid Triangle List Generation
+Precomputes vertex index arrays for triangle lists representing surfaces parallel to the xy, yz, and xz planes on a regular 3D grid [S2, unofficial]. It is chosen when static, axis-aligned planar meshes are required for efficient rendering or processing. It differs from dynamic generation by storing indices in pre-allocated arrays. Pitfalls include forgetting to offset xy-plane indices by the z-axis position for planes other than $z=0$ [S2, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Time: $O(n_x n_y + n_y n_z + n_z n_x)$ to generate indices.
+- Memory: $O(n_x n_y + n_y n_z + n_z n_x)$ integers to store the index arrays.
+
+**Measured Performance:**
+- Not given in the sources.
+
+**Scaling:**
+- Linear with respect to the number of cells in each plane.
+
+**Strengths and Limitations:**
+- Strengths: Simple, static generation; efficient indexing for axis-aligned planes.
+- Limitations: Only covers axis-aligned planes; requires precomputation.
+
+**When to Use:**
+- Use when rendering or processing static, axis-aligned planar slices of a 3D grid.
+
+**When Not to Use:**
+- Do not use for non-axis-aligned planes or dynamic grid structures.
+
+## Background
+Originated in the context of visualizing surfaces and 3D vector fields on regular grids [S2, unofficial]. The method is part of a broader set of techniques for converting grid data into triangle lists for rendering.
+
+## Sources
+[S1] mayakeele/bad-minecraft, https://github.com/mayakeele/bad-minecraft, fetched 2026-10-27 (unofficial)
+[S2] Visualization of Surfaces and 3D Vector Fields, https://digital.library.unt.edu/ark:/67531/metadc3235/?q=vector field volume rendering, fetched 2026-10-28 (unofficial)

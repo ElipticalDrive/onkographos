@@ -1,0 +1,84 @@
+# DICOM Slice Processing
+Also called: DICOM Slice Loading and Sorting
+
+## Overview
+DICOM Slice Processing loads a set of 2D DICOM image slices from a directory, determines the global intensity range, and sorts the slices into the correct spatial order. It solves the problem of raw file ingestion by converting unordered or partially ordered disk files into a structured, sorted array of slice objects ready for volume reconstruction. It differs from [DICOM CT Projection Loading and Geometry Extraction](2661-dicom-ct-projection-loading-and-geometry-extraction.md) by operating on reconstructed 2D cross-sectional images rather than raw projection data.
+
+## How it works
+**Inputs:** A directory path containing DICOM files (specifically with extension `*.IMA` in the reference implementation).
+**Outputs:** A sorted array of `Slice` objects and global intensity bounds (`_minIntensity`, `_maxIntensity`).
+
+**Data Structures:**
+*   `Slice`: An object representing a single DICOM slice. It contains metadata fields including `LargestImagePixelValue` and `SmallestImagePixelValue`.
+*   `Slice[]`: An array of `Slice` objects.
+
+**Steps:**
+1.  **File Discovery:** Retrieve all files in the specified directory with the extension `*.IMA`.
+2.  **Initialization:** Initialize `max_intensity` to -1 and `min_intensity` to 99999.
+3.  **Intensity Aggregation:** Iterate through each discovered slice file:
+    *   Create a `Slice` object from the file.
+    *   Update `max_intensity` if `slice.info.LargestImagePixelValue` is greater than the current `max_intensity`.
+    *   Update `min_intensity` if `slice.info.SmallestImagePixelValue` is less than the current `min_intensity`.
+4.  **Global Bounds Storage:** Store the final `min_intensity` and `max_intensity` in `_minIntensity` and `_maxIntensity` respectively.
+5.  **Sorting:** Sort the `Slice` array. The specific sorting key (e.g., Image Position Patient, Slice Location) is not explicitly defined in the source code comments, but the result is a spatially ordered array [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def process_dicom_slices(directory_path):
+    # 1. Get all files with extension '*.IMA'
+    files = get_files_with_extension(directory_path, "*.IMA")
+    
+    # 2. Initialize max intensity to -1 and min intensity to 99999
+    max_intensity = -1
+    min_intensity = 99999
+    
+    slices = []
+    
+    # 3. Iterate through each slice file
+    for file in files:
+        # Create a Slice object
+        slice_obj = create_slice_object(file)
+        
+        # Update max/min based on info.LargestImagePixelValue and info.SmallestImagePixelValue
+        if slice_obj.info.LargestImagePixelValue > max_intensity:
+            max_intensity = slice_obj.info.LargestImagePixelValue
+        if slice_obj.info.SmallestImagePixelValue < min_intensity:
+            min_intensity = slice_obj.info.SmallestImagePixelValue
+            
+        slices.append(slice_obj)
+        
+    # 4. Store the global min and max intensities
+    _minIntensity = min_intensity
+    _maxIntensity = max_intensity
+    
+    # 5. Sort the slices array
+    # Note: Specific sorting key (e.g., Z-coordinate) is implementation-dependent
+    slices.sort(key=lambda s: s.spatial_index)
+    
+    return slices, _minIntensity, _maxIntensity
+```
+
+**Edge Cases and Pitfalls:**
+*   **Missing Metadata:** If `LargestImagePixelValue` or `SmallestImagePixelValue` are missing or invalid, the intensity range calculation will be incorrect [S1, unofficial].
+*   **Sorting Ambiguity:** The source code does not specify the exact field used for sorting. Relying on file system order is insufficient for correct volume rendering [S1, unofficial].
+*   **File Extension:** The method specifically looks for `*.IMA`. Other DICOM extensions (e.g., `.dcm`) are ignored in this specific implementation [S1, unofficial].
+
+## Subtopics
+
+### Slice to Binary Volume Conversion
+Converts a directory of 2D image slices into a binary volume file (`.bin`). It assumes slices are already ordered and calculates bounding box dimensions based on a fixed X width. It reads the first slice to determine width ($w$) and height ($h$), then calculates grid dimensions as $(w, h, N)$ where $N$ is the number of slices. The bounding box size is calculated as $bbox\_size[0] = BBOX\_SIZE\_X$ and $bbox\_size[1] = (BBOX\_SIZE\_X / grid\_dim[0]) \times (vol\_size[1] / vol\_size[0]) \times grid\_dim[1]$. The parameter $BBOX\_SIZE\_X$ is a fixed width of the bounding box in world units, with a default value of 5.0 [S2, unofficial].
+
+## Operating characteristics
+**Time Complexity:** $O(N \log N)$ due to sorting, where $N$ is the number of slices. Intensity aggregation is $O(N)$.
+**Memory Complexity:** $O(N)$ to store the slice objects and the sorted array.
+**Strengths:** Simple, direct loading of standard DICOM slice files. Provides necessary intensity normalization data.
+**Limitations:** Tied to specific file extensions (`*.IMA`). Sorting logic is opaque in the reference implementation. Does not handle 3D DICOM volumes directly, only 2D slice series.
+
+## Background
+This method is derived from implementations used in medical imaging research, specifically for loading CT head scans for surface reconstruction algorithms like Marching Tetrahedra [S1, unofficial]. It is also used in CUDA-based volume rendering pipelines for converting slice directories into binary volume formats [S2, unofficial].
+
+## Sources
+[S1] Torbenhjl/Marching-Tetrahedra-on-CT-headscan, https://github.com/Torbenhjl/Marching-Tetrahedra-on-CT-headscan, fetched 2026-10-27 (unofficial)
+[S2] GitHub - yuehaowang/volume_renderer: CUDA-based interactive volume ..., https://github.com/yuehaowang/volume_renderer, fetched 2026-10-29 (unofficial)

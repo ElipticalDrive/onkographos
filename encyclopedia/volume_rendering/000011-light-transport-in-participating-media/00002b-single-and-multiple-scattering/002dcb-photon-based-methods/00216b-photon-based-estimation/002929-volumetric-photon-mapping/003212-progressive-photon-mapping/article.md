@@ -1,55 +1,74 @@
 # Progressive Photon Mapping
-
 Also called: Multipass Photon Mapping
-
 ## Overview
-Progressive Photon Mapping is a multipass rendering technique that continuously emits photons into the image to gradually reduce illumination inaccuracy [S1]. It builds on [Volumetric Photon Mapping](2190-volumetric-photon-mapping.md) by addressing the memory limitations of storing a single huge volumetric photon map, which is costly for participating media [S2]. Unlike single-pass methods, it iteratively refines the estimate by discarding intermediate data structures after each pass [S2].
+Progressive Photon Mapping is a volumetric light transport method that addresses the memory bottlenecks of traditional photon-based estimation by replacing a single, massive volumetric photon map with a series of small, iterative photon maps [S1]. It builds on [Volumetric Photon Mapping](2190-volumetric-photon-mapping.md) by adopting a multipass strategy where photon contributions are updated incrementally, allowing for the efficient handling of participating media without exhausting system memory [S1]. It sets itself apart from siblings like [Beam Radiance Estimate](1283-beam-radiance-estimate.md) by using a global, iterative refinement of photon density rather than local beam-based approximations.
 
 ## How it works
-**Inputs:** Light source parameters, participating media properties (absorption coefficient $\sigma_a$, scattering coefficient $\sigma_s$, phase function $p$), and scene geometry.
-**Outputs:** Final radiance image.
+**Inputs and Outputs:**
+- Input: Scene geometry, participating media properties (absorption coefficient $\sigma_a$, scattering coefficient $\sigma_s$, phase function $p$), camera parameters, and a total number of passes $N_{passes}$.
+- Output: A rendered image with progressively refined illumination.
+
 **Data Structures:**
-- **Photon Map:** A spatial index (e.g., k-d tree) storing photon positions, energies, and surface normals or volume interaction points. In the progressive variant, this is replaced by a temporary, small photon map generated per iteration [S2].
-- **Shading Points:** Points on the volume or surface where radiance is estimated.
+- Photon Map: A dynamic structure storing photon interactions (position, energy, direction). In this method, it is not a single static map but is rebuilt or updated per pass [S1].
+- [G] A standard KD-tree or grid structure is typically used for neighbor search, though specific implementation details are not provided in the source [S1].
 
 **Steps:**
-1. **Initialize:** Set iteration counter $k = 0$. Initialize the final accumulated radiance buffer to zero [G].
-2. **Photon Emission:** For iteration $k$, emit a batch of photons from light sources into the scene [S1].
-3. **Photon Tracing:** Trace each photon through the participating media. At each interaction point (absorption or scattering), store the photon's position, energy, and direction in the current small photon map [S2]. If the photon is absorbed, terminate. If scattered, continue based on the phase function [S1, S2].
-4. **Radiance Estimation:** For each shading point in the scene, query the current small photon map to estimate radiance. The estimator typically uses a kernel density estimation approach, summing contributions from nearby photons within a radius $r_k$ [S1, S2]. The radius $r_k$ is adjusted per iteration to control bias-variance trade-off [G].
-   - Formula for radiance estimate $L$ at point $x$:
-     $$ L(x) = \frac{1}{V(r_k)} \sum_{i \in N(x)} \frac{E_i}{\sigma_t} p(\omega_i \to \omega_o) $$
-     Where $V(r_k)$ is the volume of the search sphere, $E_i$ is the energy of photon $i$, $\sigma_t$ is the extinction coefficient, $N(x)$ are photons within $r_k$, and $p$ is the phase function [G].
-5. **Accumulation:** Add the estimated radiance to the final accumulated radiance buffer [G].
-6. **Discard:** Discard the current small photon map to free memory [S2].
-7. **Iterate:** Increment $k$. If convergence criteria are not met, return to Step 2. The number of photons or the search radius may be adjusted in subsequent passes to reduce variance [S1].
+1. Initialize the photon map as empty or with initial photons [S1].
+2. For each pass $i$ from 1 to $N_{passes}$:
+   a. Emit a batch of photons from light sources into the scene [S1].
+   b. Trace photons through the participating media using ray marching, storing interactions in the photon map [S1].
+   c. Update the photon map with the new photons. This may involve merging with previous data or replacing it, as the method "passes photon energy layer-by-layer" [S1].
+   d. Render the image using the current photon map state. The rendering process uses the stored photons to estimate radiance, likely via density estimation [S1].
+3. Gradually reduce inaccuracy by increasing the number of photons or refining the search radius in subsequent passes [S1].
+
+**Formulas:**
+- Not given in the sources. The source mentions "passing photon energy layer-by-layer" but does not provide the specific density estimation formula [S1].
 
 **Parameters:**
-- Number of iterations: Not given in the sources.
-- Photons per iteration: Not given in the sources.
-- Search radius $r_k$: Decreases over iterations to reduce bias [G].
+- Number of passes $N_{passes}$: Not given in the sources.
+- Photons per pass: Not given in the sources.
 
-**Edge Cases:**
-- **Boundary Conditions:** Photons escaping the volume must be handled (e.g., terminated or reflected) [G].
-- **Precision:** Floating-point precision in energy accumulation may affect convergence [G].
+**Edge Cases and Pitfalls:**
+- Memory exhaustion: Mitigated by the iterative nature, but large photon counts per pass can still cause issues [S1].
+- Convergence: The method relies on gradual reduction of inaccuracy; insufficient passes may result in noisy images [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def progressive_photon_mapping(scene, camera, num_passes):
+    photon_map = EmptyPhotonMap()
+    for pass_index in range(1, num_passes + 1):
+        # Emit photons
+        new_photons = emit_photons(scene.lights, num_photons_per_pass)
+        
+        # Trace and store
+        for photon in new_photons:
+            trace_photon_through_media(photon, scene.media)
+            photon_map.add(photon)
+        
+        # Render using current photon map
+        image = render_with_photon_map(photon_map, camera, scene)
+        # Update display or accumulate result
+        update_image(image)
+```
 
 ## Subtopics
 
-### Progressive Photon Beam Mapping
-A progressive method that eliminates memory limitations by replacing the huge volumetric photon map with many small photon maps generated iteratively [S2]. It uses beam-to-beam estimators, which are suitable for low-order scattering objects like fog, offering faster convergence for such media [S2]. In each iteration, a small photon map is generated, used to update shading point contributions, and then discarded [S2]. This strategy greatly improves practicality by avoiding the storage of a single massive map [S2].
+### [Progressive Photon Beam Mapping](7795-progressive-photon-beam-mapping.md)
+Progressive Photon Beam Mapping is a volumetric light transport method that addresses the memory bottlenecks of traditional photon-based estimation by replacing a single, massive volumetric photon map with a series of small, iterative photon maps. It builds on [Progressive Photon Mapping](6672-progressive-photon-mapping.md) by adopting a multipass strategy where photon contributions are updated incrementally, allowing for the efficient handling of participating media without exhausting system memory.
 
 ## Operating characteristics
-**Time Complexity:** Linear with respect to the number of photons and shading points per iteration, but requires multiple passes [S1, S2].
-**Memory Complexity:** Significantly reduced compared to standard Volumetric Photon Mapping because only small photon maps are stored per iteration [S2].
-**Performance:** Convergence is gradual, improving accuracy with each pass [S1]. Beam-based variants converge faster for low-order scattering media like fog [S2].
-**Strengths:** Memory efficiency; ability to handle large scenes with participating media; gradual convergence allows for early termination if quality is sufficient [S1, S2].
-**Limitations:** Requires multiple passes, increasing total render time; bias-variance trade-off management is complex [S1, S2].
-**When to use:** When memory is constrained or when rendering participating media with low-order scattering where beam-based estimators are effective [S2].
-**When not to use:** When real-time single-pass performance is required and memory is not a constraint [S1].
+- Time Complexity: Not given in the sources.
+- Memory Complexity: Reduced compared to single-pass volumetric photon mapping due to iterative updates [S1].
+- Measured Performance: Not given in the sources.
+- Strengths: Efficient memory usage, gradual convergence [S1].
+- Limitations: Requires multiple passes for high quality, potentially slower convergence [S1].
+- When to use: When memory is constrained and high-quality volumetric rendering is needed [S1].
+- When not to use: When real-time single-pass rendering is required [S1].
 
 ## Background
-Progressive Photon Mapping was developed by Hachisuka et al. [S1]. It was proposed as a multipass rendering technique to continuously emit photons and gradually reduce inaccuracy [S1]. The method builds on the foundational photon mapping technique and addresses its scalability issues in participating media [S1, S2].
+Progressive Photon Mapping was developed by Hachisuka et al. [S1]. It was proposed as a multipass rendering technique to continuously emit photons into the image to gradually reduce inaccuracy [S1]. The method builds on earlier photon mapping techniques and adapts them for volumetric rendering [S1].
 
 ## Sources
 [S1] Real-time volume rendering for three-dimensional fetal ultrasound using volumetric photon mapping., https://doi.org/10.1186/s42492-024-00177-4, fetched 2026-10-26
-[S2] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26

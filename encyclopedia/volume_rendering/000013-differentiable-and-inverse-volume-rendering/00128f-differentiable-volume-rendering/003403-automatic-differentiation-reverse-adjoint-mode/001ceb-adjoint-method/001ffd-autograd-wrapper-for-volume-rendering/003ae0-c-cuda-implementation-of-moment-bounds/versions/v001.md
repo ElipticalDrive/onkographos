@@ -1,0 +1,51 @@
+# C++/CUDA Implementation of Moment Bounds
+
+Also called: Custom CUDA implementation, Primal/Adjoint C++ implementation
+
+## Overview
+A hand-written C++/CUDA implementation of the primal (forward) and adjoint (backward) algorithms for computing moment bounds, designed to avoid the overhead of automatic differentiation (AD) graph traversal and JIT compilation limitations [S1]. It builds on [Autograd Wrapper for Volume Rendering](2158-autograd-wrapper-for-volume-rendering.md) by providing the low-level compute kernels that the wrapper invokes. Unlike AD-based approaches, it generates highly optimized code by knowing the floating-point type and moment order $n$ at compile time [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Primal Kernel:** Input: density field, view direction, moment order $n$, floating-point type (32-bit float or 64-bit double). Output: moment bounds values.
+*   **Adjoint Kernel:** Input: upstream gradients, primal outputs (or retained roots), density field, view direction, $n$. Output: gradients with respect to density.
+
+**Data Structures:**
+*   Intermediate values are kept in registers to minimize global memory accesses, which are the primary bottleneck on GPUs [S1].
+*   The implementation depends only on a small subset of the C++ standard library [S1].
+
+**Algorithm Steps:**
+1.  **Compile-time Configuration:** The floating-point type and moment order $n$ are defined as template parameters or compile-time constants, enabling the compiler to generate specialized, optimized code [S1].
+2.  **Primal Computation:** All operations of the primal algorithm are compiled into a single CUDA kernel [S1]. This computes the moment bounds for the given scene parameters.
+3.  **Adjoint Computation:** A separate single CUDA kernel is compiled for the adjoint algorithm [S1]. It computes gradients by backpropagating through the primal operations.
+4.  **Root Handling (Default):** In the default variant, roots required for the adjoint phase are recomputed by re-running the primal algorithm [S1].
+5.  **Root Handling (Retained Roots Variant):** For $n > 2$, root finding is iterative and can dominate adjoint runtime [S1]. This variant stores the roots of the kernel polynomial computed during the forward pass and reuses them in the backward pass, avoiding redundant iterative root finding [S1].
+
+**Formulas:**
+*   Not given in the sources. The implementation relies on the algorithms defined in Section 5.1 of the source paper [S1].
+
+**Parameters:**
+*   $n$: Moment order, tested for $n = 1, \dots, 5$ [S1].
+*   Floating-point type: 32-bit float or 64-bit double [S1].
+
+**Edge Cases and Pitfalls:**
+*   For $n > 2$, root finding is an iterative procedure [S1]. Without the retained roots variant, this becomes the dominating operation during the adjoint phase [S1].
+*   Some operations (e.g., finding eigenvalues of a matrix) are currently unsupported by the AD compiler, making hand-written implementations necessary for these cases [S1].
+
+## Subtopics
+
+### Retained Roots Variant
+A variant of the C++/CUDA implementation that stores the roots of the kernel polynomial computed during the forward pass and reuses them in the backward pass to avoid redundant iterative root finding [S1]. It has similar computation time for the primal part but a considerably lower runtime for the adjoint part for $n > 2$ [S1]. Memory complexity increases compared to the default variant (primal output array size is $N$, adjoint requires storage for retained roots plus adjoints), but remains significantly lower than AD [S1].
+
+## Operating characteristics
+*   **Time Complexity:** For $n > 2$, the default variant's adjoint runtime is dominated by iterative root finding [S1]. The Retained Roots variant significantly reduces this runtime [S1].
+*   **Memory Complexity:** The retained roots variant increases memory usage compared to the default, but it is still significantly lower than AD [S1].
+*   **Performance:** On GPUs, global memory accesses are the bottleneck [S1]. The implementation mitigates this by keeping intermediate values in registers [S1]. Benchmarks show C++/CUDA implementations outperforming PyTorch AD, especially for $n > 2$ where AD suffers from JIT compilation limitations and unsupported operations [S1].
+*   **Strengths:** Highly optimized code generation due to compile-time knowledge of types and $n$ [S1]. Avoids AD graph traversal overhead [S1].
+*   **Limitations:** Requires manual implementation of primal and adjoint algorithms [S1]. Less flexible than AD for changing algorithms [S1].
+
+## Background
+Originated from the paper "Moment Bounds are Differentiable: Efficiently Approximating Measures in Inverse Rendering" [S1]. The authors found that PyTorch 2.x’s compile feature provided negligible improvements or worse runtime for $n > 2$ due to unsupported operations like matrix eigenvalue finding [S1]. Consequently, they implemented the primal and adjoint algorithms entirely in C++ with CUDA targeting [S1].
+
+## Sources
+[S1] Moment Bounds are Differentiable: Efficiently Approximating Measures in Inverse Rendering, https://doi.org/10.1145/3730899, fetched 2026-10-27

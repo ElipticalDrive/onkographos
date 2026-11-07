@@ -1,0 +1,381 @@
+--- v002.md
++++ v003.md
+@@ -4,16 +4,15 @@
+ 
+ ## Overview
+-Voxel Point Sprite Rendering is a technique that represents occupied voxels as geometric points (splatting) submitted to the graphics pipeline, typically utilizing a geometry shader to expand these points into screen-space primitives [S2, unofficial]. It solves the problem of rendering dense volumetric data by avoiding the overhead of generating and rasterizing explicit 3D mesh geometry for every voxel [S1, S2, unofficial]. Unlike sibling methods that rasterize ray-box intersections via quads [2253-ray-box-intersection-via-quad-rasterization.md] or use sparse octree structures [2993-sparse-voxel-octree-rendering-via-square-splats.md], this method relies on a flat buffer of point primitives, often employing mipmapping to manage detail levels and stochastic culling to maintain performance [S1, S2, unofficial].
++Voxel Point Sprite Rendering is a technique that stores voxels as points (splatting) in a buffer and renders them using a geometry shader, allowing for mipmapped voxel data to be drawn as points with a specific scale [S2, unofficial]. It addresses the performance bottleneck of slow fragment shaders in pure splatting methods when rendering voxels close to the camera, a problem inherent to its parent method, [Splatting and Point-based Rendering](4975-splatting-and-point-based-rendering.md) [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Input:** A voxel grid defined by dimensions $N_x, N_y, N_z$ (e.g., $200 \times 50 \times 200$ or $4 \times 4 \times 4$ logical blocks) [S1, S2, unofficial]. Each occupied voxel contains position data $(x, y, z)$ and color/albedo data [S1, S2, unofficial].
+-*   **Output:** A rasterized image where voxels are rendered as point sprites, with visibility determined by the depth buffer [S2, unofficial].
+-
+-**Data Structures**
+-The implementation varies slightly between source implementations, but both rely on packed integer formats for efficient memory transfer:
+-
+-1.  **Packed Voxel Format (Source [S1, unofficial]):**
+-    *   Stored in a flat `uint32_t` array of size `no_of_vertices * 2`.
++**Inputs and Outputs:**
++*   **Input:** A voxel grid defined by dimensions $width \times height \times depth$ (default 200x50x200 in [S1, unofficial] or 4x4x4 cubes in [S2, unofficial]). Each voxel contains position and color/albedo data.
++*   **Output:** A rendered image where voxels are drawn as point sprites, with size and LOD determined by camera distance.
++
++**Data Structures:**
++Two distinct packing layouts are cited in the sources:
++
++1.  **Layout A (Source [S1, unofficial]):** Voxel data is packed into pairs of `uint32_t`.
+     *   **Position (`uint32_t`):**
+         *   Bits 0-10 (11 bits): $x$
+@@ -24,146 +23,191 @@
+         *   Bits 5-10 (6 bits): $G$
+         *   Bits 11-15 (5 bits): $B$
+-    *   **Vertex Attribute Binding:** Bound to a VAO using `glVertexAttribIPointer(0, 2, GL_INT, 2 * sizeof(uint32_t), 0)` [S1, unofficial].
+-
+-2.  **Packed Voxel Format (Source [S2, unofficial]):**
+-    *   Stored in `std::vector<uint>` representing a `CUBE256::MipMap::voxels` structure.
+-    *   **Packing Order:** `x | (y << 8) | (z << 16) | (color << 24)`.
+-        *   $x$: 8 bits
+-        *   $y$: 8 bits
+-        *   $z$: 8 bits
+-        *   Color: 8 bits
+-    *   **VBO Layout for Geometry Shader:** Four 4-component attributes (`vertex0` to `vertex3`).
+-        *   Each attribute reads 4 unsigned bytes (`GL_UNSIGNED_BYTE`) with normalization (`GL_TRUE`).
+-        *   Stride: 16 bytes.
+-        *   `vertex0`: bytes 0-3, `vertex1`: bytes 4-7, `vertex2`: bytes 8-11, `vertex3`: bytes 12-15 [S2, unofficial].
+-
+-**Algorithm Steps**
+-
+-1.  **Voxel Grid Initialization:**
+-    *   Define grid dimensions. For [S1, unofficial], default is $200 \times 50 \times 200$. For [S2, unofficial], logical blocks are $4 \times 4 \times 4$ cubes, where each cube contains a $256 \times 256 \times 256$ local grid [S1, S2, unofficial].
+-    *   Populate the grid with voxel data. In [S2, unofficial], voxels are stored in mipmap levels. The local voxel index $(x, y, z)$ within a cube is calculated as $(x \& 255, y \& 255, z \& 255)$ [S2, unofficial]. Boundary checks ensure $0 \le x, y, z \le 255$; otherwise, the voxel is discarded [S2, unofficial].
+-
+-2.  **Mipmap Level Calculation (Source [S2, unofficial]):**
+-    *   Determine the mipmap level based on camera distance to the voxel.
+-    *   Formula:
+-        $$
+-        \text{mipmap} = \sqrt{\sqrt{\| \text{screen.pos} + (\text{pos} + \text{vec3f}(0.5, 0.5, 0.5) + \text{add}) \times 16 \|}} - 1
+-        $$
++    *   Stored in a flat `uint32_t` array of size `no_of_vertices * 2`.
++
++2.  **Layout B (Source [S2, unofficial]):** Used within `CUBE256::MipMap::voxels` (`std::vector<uint>`).
++    *   Single `uint32_t` per voxel: $x$ (8 bits) | $(y \ll 8)$ (8 bits) | $(z \ll 16)$ (8 bits) | $(color \ll 24)$ (8 bits).
++    *   The VBO layout for the geometry shader consists of four 4-component attributes (`vertex0` to `vertex3`), each reading 4 unsigned bytes (`GL_UNSIGNED_BYTE`) with normalization (`GL_TRUE`) from a stride of 16 bytes. `vertex0` reads bytes 0-3, `vertex1` reads bytes 4-7, etc.
++
++**Parameters:**
++*   `voxelSize`: Physical size of a single voxel in world units (e.g., 0.05) [S1, unofficial].
++*   `halfScreenSize`: Half of the viewport dimensions, used to scale projected AABB to screen space [S1, unofficial].
++*   `cubes_x, cubes_y, cubes_z`: Grid dimensions for the voxel space (default 4, 4, 4) [S2, unofficial].
++*   `scale`: Rendering scale of splats, calculated as $0.1f \times (1 \ll \text{mipmap})$ [S2, unofficial].
++
++**Steps:**
++
++1.  **Initialize Voxel Grid:**
++    *   Resize the cubes vector to `cubes_x * cubes_y * cubes_z` (default 64 cubes) [S2, unofficial].
++    *   For each voxel index $i$, compute packed position and albedo using bitwise shifts and random color generation [S1, unofficial].
++
++2.  **Set Voxel Position and Mipmap:**
++    *   Shift $x, y, z$ by mipmap level: $x \ll= \text{mipmap}$ [S2, unofficial].
++    *   Calculate cube ID: $\text{cubeID} = (x \gg 8) + (y \gg 8) \times \text{cubes\_x} + (z \gg 8) \times \text{cubes\_x} \times \text{cubes\_y}$ [S2, unofficial].
++    *   Store local voxel $(x \& 255, y \& 255, z \& 255)$ in the corresponding cube's mipmap [S2, unofficial].
++    *   Boundary check: If $x, y,$ or $z$ exceed 255, discard the voxel [S2, unofficial].
++
++3.  **Calculate Mipmap Level:**
++    *   Determine mipmap based on camera distance:
++        $$ \text{mipmap} = \sqrt{\sqrt{(\text{screen.pos} + (\text{pos} + \text{vec3f}(0.5, 0.5, 0.5) + \text{add}) \times 16).\text{length()}}} - 1 $$
+     *   Clamp mipmap to $\ge 0$ [S2, unofficial].
+ 
+-3.  **Vertex Shader Processing (Source [S1, unofficial]):**
+-    *   **Unpacking:** Extract coordinates from the packed position `uint32_t` `data.x`:
+-        $$
+-        \begin{aligned}
+-        u_x &= \text{data.x} \ \& \ 2047 \\
+-        u_y &= (\text{data.x} \ \& \ 2095104) \gg 11 \\
+-        u_z &= (\text{data.x} \ \& \ (2047 \ll 21)) \gg 21
+-        \end{aligned}
+-        $$
+-    *   **World Space Conversion:** Multiply by voxel size (e.g., $0.1$) [S1, unofficial].
+-    *   **Camera Culling:** Discard voxels behind the camera ($z \le 0$) by setting position to `vec4(-1, -1, -1, -1)` and `point_size = 0.0` [S1, unofficial].
+-
+-4.  **Stochastic Culling (Source [S1, unofficial]):**
+-    *   To maintain performance for distant/small voxels, apply probabilistic discard.
+-    *   Calculate projected area: $\text{stochasticCoverage} = \text{point\_size}^2$.
+-    *   If $\text{stochasticCoverage} < 0.8$, discard with probability proportional to size:
+-        $$
+-        \text{if } ((\text{stochasticCoverage} < 0.8) \ \&\& \ ((\text{gl\_VertexID} \ \& \ 0xffff) > \text{stochasticCoverage} \times (0xffff / 0.8))) \{
+-        \text{position} = \text{vec4}(-1, -1, -1, -1); \ \text{point\_size} = 0.0;
+-        \}
+-        $$
+-    *   [S1, unofficial]
+-
+-5.  **Point Sprite Sizing:**
+-    *   **Sphere Radius Approximation:** To approximate the voxel's spatial extent, calculate the sphere radius:
+-        $$
+-        \text{sphereRadius} = \text{voxelSize} \times 1.732051
+-        $$
+-        (where $1.732051 \approx \sqrt{3}$, the diagonal of a unit cube) [S1, unofficial].
+-    *   **Quadric Projection:** Calculate coefficients for projecting the voxel as a quadric surface in screen space:
+-        $$
+-        \text{eqCoefs} = \frac{\text{vec4}(\text{dot}(\text{matD}[0], \text{matT}[2]), \text{dot}(\text{matD}[1], \text{matT}[2]), \text{dot}(\text{matD}[0], \text{matT}[0]), \text{dot}(\text{matD}[1], \text{matT}[1]))}{\text{dot}(\text{matD}[2], \text{matT}[2])}
+-        $$
+-        where $\text{matT}$ and $\text{matD}$ are derived from the Model-View-Projection matrix scaled by $\text{sphereRadius}$ [S1, unofficial].
+-
+-6.  **Rendering:**
++4.  **Generate VBOs:**
++    *   For each mipmap with voxels, create a `GL_ARRAY_BUFFER`, bind it, and upload voxel data with `GL_STATIC_DRAW_ARB` [S2, unofficial].
++    *   Bind to a VAO using `glVertexAttribIPointer(0, 2, GL_INT, 2 * sizeof(uint32_t), 0)` for Layout A [S1, unofficial].
++
++5.  **Vertex Shader Processing:**
++    *   Unpack voxel coordinates from the packed position `uint32_t` using bitmasks:
++        $$ u_x = \text{data.x} \& \text{uint}(2047) $$
++        $$ u_y = (\text{data.x} \& \text{uint}(2095104)) \gg \text{uint}(11) $$
++        $$ u_z = (\text{data.x} \& (\text{uint}(2047) \ll \text{uint}(21))) \gg \text{uint}(21) $$
++    *   Convert to world space by multiplying by 0.1 [S1, unofficial].
++
++6.  **Stochastic Culling:**
++    *   Apply stochastic culling for distant/small voxels to maintain performance [S1, unofficial].
++    *   Calculate projected area: $\text{stochasticCoverage} = \text{point\_size} \times \text{point\_size}$.
++    *   If $\text{stochasticCoverage} < 0.8$, discard vertex with probability proportional to size:
++        ```glsl
++        if ((stochasticCoverage < 0.8) && ((gl_VertexID & 0xffff) > stochasticCoverage * (0xffff / 0.8))) {
++            position = vec4(-1, -1, -1, -1);
++            point_size = 0.0;
++        }
++        ```
++    *   Discard voxels behind the camera ($\text{position.z} \le 0.0$) by setting `position = vec4(-1,-1,-1,-1)` and `point_size = 0.0` [S1, unofficial].
++
++7.  **Sphere Radius and Quadric Projection:**
++    *   Approximate sphere radius: $\text{sphereRadius} = \text{voxelSize} \times 1.732051$ (where $1.732051 \approx \sqrt{3}$) [S1, unofficial].
++    *   Calculate quadric projection coefficients:
++        $$ \text{eqCoefs} = \frac{\text{vec4}(\text{dot}(\text{matD}[0], \text{matT}[2]), \text{dot}(\text{matD}[1], \text{matT}[2]), \text{dot}(\text{matD}[0], \text{matT}[0]), \text{dot}(\text{matD}[1], \text{matT}[1]))}{\text{dot}(\text{matD}[2], \text{matT}[2])} $$
++        where $\text{matT}$ and $\text{matD}$ are derived from the model-view-projection matrix scaled by $\text{sphereRadius}$ [S1, unofficial].
++
++8.  **Draw:**
+     *   Enable `GL_PROGRAM_POINT_SIZE` [S1, unofficial].
+-    *   Draw using `glDrawArrays(GL_POINTS, 0, no_of_vertices)` [S1, unofficial].
+-    *   In [S2, unofficial], bind the appropriate VBO for the calculated mipmap level, set uniforms (projection matrix, `block_pos`, `scale`), and draw [S2, unofficial]. The scale is calculated as:
+-        $$
+-        \text{scale} = 0.1f \times (1 \ll \text{mipmap})
+-        $$
+-        [S2, unofficial].
+-
+-**Pseudocode**
++    *   Draw with `glDrawArrays(GL_POINTS, 0, no_of_vertices)` [S1, unofficial].
++    *   For Layout B: Bind shader, set projection matrix uniform, enable 4 vertex attributes pointing to VBO with stride 16, set `block_pos` and `scale` uniforms, draw `GL_POINTS` with count `voxels.size()/4`, then disable attributes and unbind buffer [S2, unofficial].
++
++**Pseudocode:**
+ 
+ ```python
+ # Initialization
+-voxel_grid = create_grid(width=200, height=50, depth=200) # [S1, unofficial]
+-# OR
+-cubes_x, cubes_y, cubes_z = 4, 4, 4 # [S2, unofficial]
+-voxel_data = []
+-
+-# Populate Voxel Data (Simplified for [S1, unofficial] packed format)
+-for i in range(no_of_vertices):
+-    # Generate random or specific voxel data
+-    x, y, z = get_voxel_coordinates(i)
+-    r, g, b = get_voxel_color(i)
+-    
+-    # Pack Position: x(11b), y(10b), z(11b)
+-    pos_packed = (x & 0x7FF) | ((y & 0x3FF) << 11) | ((z & 0x7FF) << 21)
+-    
+-    # Pack Albedo: R(5b), G(6b), B(5b)
+-    albedo_packed = (r & 0x1F) | ((g & 0x3F) << 5) | ((b & 0x1F) << 11)
+-    
+-    voxel_data.append((pos_packed, albedo_packed))
+-
+-# Upload to GPU
+-vbo = create_buffer(voxel_data, usage=GL_STATIC_DRAW)
+-vao = create_vao()
+-bind_attribute(vao, index=0, size=2, type=GL_INT, stride=2*sizeof(uint32_t), offset=0)
+-
+-# Rendering Loop
+-enable(GL_PROGRAM_POINT_SIZE)
+-set_uniform("voxelSize", 0.05) # [S1, unofficial]
+-set_uniform("halfScreenSize", screen_size * 0.5) # [S1, unofficial]
+-
+-for voxel in voxel_data:
+-    pos_packed, albedo_packed = voxel
+-    
+-    # Vertex Shader Logic (Simulated)
+-    u_x = pos_packed & 0x7FF
+-    u_y = (pos_packed >> 11) & 0x3FF
+-    u_z = (pos_packed >> 21) & 0x7FF
++cubes_x, cubes_y, cubes_z = 4, 4, 4
++voxel_size = 0.05
++half_screen_size = screen_size * 0.5
++
++# Step 1 & 2: Initialize Grid and Set Voxel Position
++cubes = resize_vector(cubes_x * cubes_y * cubes_z)
++for mipmap_level in range(max_mipmaps):
++    for cube_id in range(len(cubes)):
++        cube = cubes[cube_id]
++        cube.mipmaps[mipmap_level].voxels = []
++        
++        for voxel in cube.mipmaps[mipmap_level].voxels:
++            x, y, z = voxel.position
++            # Shift by mipmap level
++            x_shifted = x << mipmap_level
++            y_shifted = y << mipmap_level
++            z_shifted = z << mipmap_level
++            
++            # Boundary check
++            if x_shifted > 255 or y_shifted > 255 or z_shifted > 255:
++                continue
++                
++            # Store local voxel
++            local_x = x_shifted & 255
++            local_y = y_shifted & 255
++            local_z = z_shifted & 255
++            cube.mipmaps[mipmap_level].voxels.append((local_x, local_y, local_z, voxel.color))
++
++# Step 3: Calculate Mipmap Level for each voxel based on camera distance
++def calculate_mipmap(screen_pos, voxel_pos_world, add_offset):
++    # Formula from [S2, unofficial]
++    # Note: 'screen.pos' and 'pos' need to be in compatible coordinate systems
++    length_sq = (screen_pos + (voxel_pos_world + vec3(0.5, 0.5, 0.5) + add_offset) * 16).length_squared()
++    mipmap = sqrt(sqrt(length_sq)) - 1
++    return max(0, int(mipmap))
++
++# Step 4: Generate VBOs
++vbo_list = []
++for cube in cubes:
++    for mipmap_level in range(len(cube.mipmaps)):
++        voxels = cube.mipmaps[mipmap_level].voxels
++        if not voxels:
++            continue
++            
++        # Create VBO
++        vbo = create_buffer(GL_ARRAY_BUFFER)
++        bind_buffer(vbo)
++        
++        # Upload data (Layout B: 4 attributes of 4 bytes each, stride 16)
++        # Each voxel is 4 bytes (x,y,z,color packed)
++        # We need to interleave or structure for 4 vertex attributes per voxel?
++        # Source [S2, unofficial] says "four 4-component attributes... vertex0 reads bytes 0-3..."
++        # This implies the VBO contains interleaved data for a single voxel's representation
++        # or the geometry shader processes 4 voxels at once? 
++        # Given "count = voxels.size()/4", it seems 4 voxels are packed into one draw call unit.
++        
++        data = []
++        for i in range(0, len(voxels), 4):
++            # Pack 4 voxels into 16 bytes per attribute? 
++            # Actually, source says "stride 16 bytes" and "vertex0 reads bytes 0-3".
++            # This suggests the VBO layout is: [v0.x, v0.y, v0.z, v0.c, v1.x, ...]
++            # But "vertex0" is an attribute. 
++            # Let's assume the VBO stores the 4 voxels sequentially.
++            for j in range(4):
++                if i + j < len(voxels):
++                    vx, vy, vz, vc = voxels[i+j]
++                    data.append(vx)
++                    data.append(vy)
++                    data.append(vz)
++                    data.append(vc)
++                else:
++                    data.append(0) # Padding
++                    
++        upload_data(vbo, data, GL_STATIC_DRAW_ARB)
++        vbo_list.append((vbo, len(voxels)//4, mipmap_level))
++
++# Step 5 & 6: Vertex Shader Logic (Conceptual)
++def vertex_shader(packed_data):
++    # Unpack position (Layout A example)
++    data_x = packed_data[0]
++    u_x = data_x & 2047
++    u_y = (data_x & 2095104) >> 11
++    u_z = (data_x & (2047 << 21)) >> 21
+     
+     # Convert to world space
+-    world_pos = vec3(u_x, u_y, u_z) * 0.1 # [S1, unofficial]
+-    
+-    # Check if behind camera
++    world_pos = vec3(u_x, u_y, u_z) * 0.1
++    
++    # Check behind camera
+     if world_pos.z <= 0.0:
+-        continue # Discard [S1, unofficial]
+-        
+-    # Calculate Point Size / Mipmap
+-    # For [S2, unofficial], mipmap is calculated based on distance
+-    # mipmap = sqrt(sqrt(length(...))) - 1
+-    # scale = 0.1f * (1 << mipmap)
+-    
+-    # For [S1, unofficial], stochastic culling
+-    point_size = calculate_point_size(world_pos)
+-    stochastic_coverage = point_size * point_size
+-    
+-    if stochastic_coverage < 0.8:
+-        vertex_id = get_vertex_id()
+-        threshold = stochastic_coverage * (0xFFFF / 0.8)
+-        if (vertex_id & 0xFFFF) > threshold:
+-            continue # Stochastic discard [S1, unofficial]
+-            
+-    # Transform to clip space
+-    clip_pos = mvp_matrix * vec4(world_pos, 1.0)
+-    
+-    # Rasterize Point
+-    rasterize_point(clip_pos, point_size, albedo_packed)
+-
+-disable(GL_PROGRAM_POINT_SIZE)
++        return vec4(-1, -1, -1, -1), 0.0
++        
++    return world_pos, point_size
++
++# Step 7: Sphere Radius and Quadric Projection
++def calculate_quadric_coefs(model_view_proj, sphere_radius):
++    # Derive matT and matD from MVP scaled by sphere_radius
++    # This is a simplified representation of the GLSL logic
++    matT = model_view_proj * sphere_radius
++    matD = ... # Derived from matT
++    
++    eq_coefs = vec4(
++        dot(matD[0], matT[2]),
++        dot(matD[1], matT[2]),
++        dot(matD[0], matT[0]),
++        dot(matD[1], matT[1])
++    ) / dot(matD[2], matT[2])
++    return eq_coefs
++
++# Step 8: Draw Loop
++for vbo, count, mipmap_level in vbo_list:
++    bind_shader()
++    set_uniform("projection_matrix", camera.projection)
++    set_uniform("block_pos", cube_position)
++    set_uniform("scale", 0.1f * (1 << mipmap_level))
++    
++    enable_vertex_attributes() # 4 attributes, stride 16, GL_UNSIGNED_BYTE, normalized
++    bind_buffer(vbo)
++    draw_arrays(GL_POINTS, 0, count)
++    disable_vertex_attributes()
++    unbind_buffer(vbo)
+ ```
+ 
+@@ -171,17 +215,18 @@
+ 
+ ### [Hybrid Voxel Rendering (Mesh/Splatting)](5766-hybrid-voxel-rendering-mesh-splatting.md)
+-Combines OpenGL splatting for distant voxels with mesh rendering for nearby voxels to reduce vertex count and mitigate slow fragment shader performance inherent to pure splatting when close to the camera.
++Hybrid Voxel Rendering is a strategy that combines OpenGL splatting for distant voxels with mesh rendering for nearby voxels to reduce vertex count while maintaining visual quality. It addresses the performance bottleneck of slow fragment shaders in pure splatting methods when rendering voxels close to the camera, a problem inherent to its parent method, Voxel Point Sprite Rendering.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of voxels $N$, $O(N)$, as each voxel generates a single point primitive [S1, S2, unofficial].
+-*   **Memory Complexity:** Linear with respect to $N$, storing packed voxel data in buffers [S1, S2, unofficial].
+-*   **Performance:** Performance is heavily dependent on fragment shader cost for large point sprites. Pure splatting can suffer from overdraw and expensive fragment processing when voxels are close to the camera [S1, unofficial]. Stochastic culling [S1, unofficial] and mipmapping [S2, unofficial] are used to mitigate this.
+-*   **Strengths:** Simple implementation using standard OpenGL point primitives; efficient for large, distant volumes; low vertex count compared to mesh-based voxel rendering.
+-*   **Limitations:** Poor performance for close-up views due to fragment shader load; potential aliasing artifacts if point sizing is not carefully managed; requires geometry shader or specific point sprite handling for proper 3D appearance [S1, S2, unofficial].
+-*   **When to use:** Rendering large-scale volumetric data where distant details are less critical, or as a fallback for simple visualization.
+-*   **When not to use:** High-fidelity close-up rendering where mesh geometry [5766-hybrid-voxel-rendering-mesh-splatting.md] or ray-traced methods are preferred.
++*   **Time Complexity:** Linear with respect to the number of voxels, $O(N)$, where $N$ is the number of active voxels. Stochastic culling reduces the effective $N$ for distant voxels.
++*   **Memory Complexity:** Linear with respect to the voxel grid size. Packing data into `uint32_t` arrays minimizes memory footprint.
++*   **Measured Performance:** Not given in the sources.
++*   **Scaling:** Scales well with voxel count due to point sprite efficiency. Mipmapping allows distant voxels to be rendered with lower resolution, reducing fragment shader load.
++*   **Strengths:** Efficient rendering of large voxel datasets; hardware-accelerated point sprites; stochastic culling improves performance for distant objects.
++*   **Limitations:** Potential artifacts from point sprite blending; requires geometry shader support; precision issues with large coordinate values if not packed carefully.
++*   **When to use:** Real-time rendering of large voxel datasets where performance is critical and visual quality can be approximated by splats.
++*   **When not to use:** When precise geometric boundaries are required, or when hardware does not support geometry shaders or point sprites.
+ 
+ ## Background
+-Voxel Point Sprite Rendering is an unofficial technique demonstrated in open-source experiments [S1, S2, unofficial]. It leverages OpenGL's point sprite capabilities and geometry shaders to render volumetric data efficiently. The approach was explored in repositories such as `clayjohn/voxel-renderer` [S1, unofficial] and `sp4cerat/OpenGL-Voxel-Splatting` [S2, unofficial] as alternatives to traditional mesh-based voxel rendering.
++Voxel Point Sprite Rendering is an implementation technique found in open-source voxel rendering experiments. It is associated with the "OpenGL-Voxel-Splatting" project by sp4cerat [S2, unofficial] and the "voxel-renderer" by clayjohn [S1, unofficial]. These projects demonstrate the use of OpenGL point sprites and geometry shaders for efficient voxel visualization.
+ 
+ ## Sources

@@ -1,0 +1,91 @@
+# Neural and primitive-based representations
+
+Also called: Neural representations, Implicit neural representations, Primitive-based rendering
+
+## Overview
+Neural and primitive-based representations encode volumetric or radiance fields using parameterized functions (typically neural networks) or explicit geometric primitives (such as Gaussians, ellipsoids, or splats) rather than dense voxel grids [G]. This family provides compact, continuous, or sparse representations that can be optimized from sparse input views [S1, unofficial][S3]. Unlike dense grids, these methods avoid the need for large, uniform memory allocation, and unlike pure implicit fields, primitive-based variants often offer faster rendering speeds and easier integration with standard graphics pipelines [S1, unofficial][S3].
+
+## Shared principles
+All methods in this family define a scene function $F_\Theta: \mathbb{R}^d \rightarrow \mathbb{R}^k$ using a neural network or a set of parameterized primitives [G]. The input is a continuous coordinate vector (typically 3D spatial position $\mathbf{x}$, potentially augmented with viewing direction $\mathbf{d}$ or time $t$), and the output is a signal vector (e.g., density $\sigma$ and color $\mathbf{c}$) [G]. The network or primitives are trained by minimizing a loss between rendered observations and ground truth images [G]. A critical shared challenge is **spectral bias**, where standard MLPs with smooth activations (like ReLU) struggle to learn high-frequency details, often necessitating specific architectural choices or activation functions [G].
+
+## Subtopics
+
+### [VoISDF Volume Rendering and Adaptive Sampling](821-voisdf-volume-rendering-and-adaptive-sampling.md)
+VoISDF is a neural volume rendering method that models volume density as a transformed function of a learned Signed Distance Function (SDF) to improve geometry reconstruction and enable adaptive sampling. Unlike prior methods that extract geometry from an arbitrary level set of a generic density MLP, VoISDF extracts the surface as the zero level-set of the learned SDF, providing a well-defined surface and inductive bias. It distinguishes itself from NeRF by using a single density network and error-bound-based adaptive sampling, avoiding the salt-and-pepper artifacts of random sampling and the density mismatch issues of using a second network for inverse CDF sampling.
+
+### [Gaussian Head Avatar (GHA)](1478-gaussian-head-avatar-gha.md)
+A method that uses two MLPs and a deformation module to predict 3D Gaussian positions based on facial expression and head pose, alongside a color MLP.
+
+### [MAtCha](1487-matcha.md)
+MAtCha is a method for high-quality avatar generation from sparse views, specifically designed to handle scenarios with minimal view overlap. It employs an atlas-of-charts and depth estimation as input to an MLP, which deforms the atlas and produces high-quality meshes represented with 2D Gaussians. Unlike feed-forward network (FFN) approaches that directly predict Gaussian parameters, MAtCha uses a deformation-based pipeline to ensure geometric consistency.
+
+### [Explicit Neural Feature Volume](1838-explicit-neural-feature-volume.md)
+Explicit Neural Feature Volume stores neural features as a large, directly addressable tensor, serving as the primary data structure for neural adaptive tomography. It solves the problem of balancing reconstruction fidelity with memory efficiency in limited-angle tomography, where hybrid explicit-implicit models suffer from increased blur and training costs. It differs from hybrid approaches like ACORN by avoiding implicit compression of feature volumes, which otherwise worsens PSNR in the missing wedge direction.
+
+### [Joint Learning with Shared MLPs](2086-joint-learning-with-shared-mlps.md)
+Joint Learning with Shared MLPs is a training strategy for neural and primitive-based volume representations that simultaneously optimizes multiple related scenes using a single, lightweight shared decoder (typically a shallow MLP). It solves the problem of redundant computation and memory usage when training individual neural fields or Gaussian splatting models for each scene independently. By exploiting inter-scene correlations through shared parameters, it significantly reduces training time, model size, and the number of required anchors/points compared to separate optimization, while maintaining reconstruction quality. It is distinct from single-scene methods like [NeuS](6060-neus.md) or [MLP Neural Fields](3854-mlp-neural-fields.md) by explicitly coupling the optimization of multiple datasets into a single forward/backward pass through a shared context model.
+
+### [Per-Primitive Color Representations](2582-per-primitive-color-representations.md)
+Per-Primitive Color Representations are mathematical functions used to encode view-dependent color per primitive during rendering. They solve the problem of efficiently storing and evaluating anisotropic or view-dependent appearance for individual primitives (such as surfels or splats) without relying on a global neural network or feature grid lookup for color. What sets them apart from sibling methods like [MLP Neural Fields](3854-mlp-neural-fields.md) or [Hash Grid Neural Fields](3855-hash-grid-neural-fields.md) is that they store explicit parameters directly on the primitive, avoiding hash collisions and the parameter overhead of large texture atlases.
+
+### [2D Feature Fusion](2907-2d-feature-fusion.md)
+2D Feature Fusion integrates 2D semantic segmentation and high-dimensional foundation features into a sparse 3D voxel representation to enable higher-resolution rendering of 2D features. It addresses the problem of inconsistent 2D predictions across multiple views by using multi-view ensemble smoothing, while leveraging detailed 3D geometry to maintain feature fidelity. It differs from sibling methods that rely solely on implicit fields or single-direction propagation by explicitly fusing 2D priors into a discrete sparse voxel structure.
+
+### [Splat the Net](3241-splat-the-net.md)
+A method using splattable neural primitives (MLP-based density fields) instead of Gaussian primitives to represent 3D scenes, requiring roughly 10x fewer primitives than 3DGS for the same scene representation while maintaining >100 FPS rendering speed.
+
+### [Neural Primitive Splatting](3300-neural-primitive-splatting.md)
+A rendering method using a mixture of volumetric primitives, where each primitive is bounded by an ellipsoid and contains a shallow neural network that defines a spatially varying density field. Rendering uses analytic closed-form integration of this density along view rays to compute splatting kernels, avoiding ray marching.
+
+### [K-planes](3317-k-planes.md)
+A white-box model for radiance fields in arbitrary dimensions d that uses planar factorization to represent a d-dimensional scene. It uses k = d choose 2 planes to represent every pair of dimensions, providing a compact, interpretable representation that scales gracefully with dimension.
+
+### [Neural Geometric Level of Detail](3484-neural-geometric-level-of-detail.md)
+A neural representation for implicit 3D shapes that uses a sparse voxel octree (SVO) to store learned feature vectors, enabling adaptive multi-level detail (LOD) and real-time rendering via sparse sphere tracing.
+
+### [MLP Neural Fields](3854-mlp-neural-fields.md)
+MLP Neural Fields represent continuous signals (such as scene geometry, density, and color) as the output of a Multi-Layer Perceptron (MLP) parameterized by weights $\Theta$. They solve the problem of view synthesis and signal reconstruction by optimizing a compact neural representation directly from sparse input images or samples, avoiding the need for explicit geometry reconstruction or large voxel grids. This family is distinguished from its siblings by its reliance on fully-connected networks to map continuous coordinates to signal values, contrasting with feature grids [1838-explicit-neural-feature-volume.md], Gaussian splatting [1478-gaussian-head-avatar-gha.md], or hybrid approaches like [K-planes](3317-k-planes.md).
+
+### [Hash Grid Neural Fields](3855-hash-grid-neural-fields.md)
+Hash Grid Neural Fields represent volumetric or radiance data by mapping spatial coordinates to feature vectors via a sparse, multi-resolution hash table, enabling efficient training and inference of neural implicit representations on consumer GPUs. They distinguish themselves from dense voxel grids by storing features in a sparse hash table, allowing high-resolution details to be captured with significantly less memory, and from pure MLP fields by replacing the heavy neural decoding of coordinates with fast hardware-accelerated lookups and trilinear interpolation.
+
+### [VEG](4089-veg.md)
+Not given in the sources.
+
+### [Forplane](5177-forplane.md)
+A method for reconstructing deformable tissues from monocular or binocular endoscopy videos by factorizing the 4D volume V4d (dimensions H x W x D x T) into a static 3D field Vs3d and a dynamic 3D field Vd3d, both composed of 2D neural planes, to accelerate optimization and inference while maintaining reconstruction quality.
+
+### [Feature Grid as Radiance Field](5508-feature-grid-as-radiance-field.md)
+A radiance field representation using explicit feature grids for density and appearance, decomposed into vector and matrix components via low-rank tensor factorization to reduce space complexity.
+
+### [NeuS](6060-neus.md)
+Designed a volume rendering technique for surface representation to improve geometric reconstruction quality.
+
+### Neural Anchors
+- **Definition**: Self-contained "baked" primitives used during inference where the dependency between the feature vector $f_i$ and the global hash grid position is severed [S2].
+- **Step**: During rendering, operations such as rigid transformation or non-rigid deformation are performed by simply updating the explicit parameters, with no requirement for retraining or complex volumetric warping [S2].
+- **Layout**: Each anchor stores explicit geometry parameters ($\mu_i, \Sigma_i$) and an implicit appearance code $f_i$ [S2].
+- **Comparison**: Unlike implicit NeRF frameworks that clip objects exiting the training volume, Neural Anchors maintain full rendering integrity by decoupling the sampling domain from static bounds [S2].
+- **Usage**: Bound to external physics engines (e.g., via tetrahedral cages or mesh skinning) to drive dynamic simulations including gravity, collisions, and soft-body deformations [S2].
+
+### [Structure-aware primitive learning](3157-structure-aware-primitive-learning.md)
+- **Step**: Fetch the next sequential ground-truth subvolume: $V_{gt} \leftarrow \text{NextSubvolume}(V)$. Retrieve ellipsoids overlapping the current subvolume: $V' \leftarrow \text{GetOverlappingEllipsoids}(E, V_{gt})$. Update primitive parameters using Adam optimizer on the loss gradient: $E \leftarrow \text{Adam}(\nabla L_{rec})$. Compute fractional anisotropy from covariance: $FA_j \leftarrow \text{ComputeFA}(\Sigma_j)$. Prune primitives with low importance scores: $\text{RemoveLowScore}(E)$.
+- **Formula**: Reconstruction loss: $L_{rec} \leftarrow \beta L_1(\hat{V}, V_{gt}) + (1 - \beta) L_{DSSIM}(\hat{V}, V_{gt})$, where $L_1$ is mean absolute error and $L_{DSSIM}$ is structural similarity loss.
+
+### Local Functional Encoder
+- **Definition**: A learned branch that embeds RGBA changes before weighted, permutation-invariant pooling to allow spatially different responses to the same transfer function preset [S3].
+- **Step**: Map each RGBA difference to a shared response basis using a bias-free pointwise MLP: $\phi_\eta(v) = W_2 \text{ReLU}(W_1 v)$, where $W_1 \in \mathbb{R}^{H \times 4}$ and $W_2 \in \mathbb{R}^{r \times H}$. Evaluate the MLP once over the $M \times B$ table at a TF switch, then use packed gathers to produce all primitive codes [S3].
+- **Parameter**: Latent dimension $r$: size of the shared response basis, controls factor matrix size independently of the number of TFs [S3].
+- **Layout**: MLP Weights: $W_1 \in \mathbb{R}^{H \times 4}$, $W_2 \in \mathbb{R}^{r \times H}$. Input $v$ is RGBA difference (4 components). Output is in $\mathbb{R}^r$ [S3].
+- **Pitfall**: Centering and bias-free layers ensure $z_{i,T0} = 0$ exactly, preventing base appearance changes at the reference preset. Encoding before pooling retains responses to individual local edits that would cancel if RGBA differences were averaged first [S3].
+
+## Background
+Neural representations for volume rendering emerged from the need to compress high-dimensional scene data and enable novel view synthesis from sparse inputs [G]. The foundational work on Neural Radiance Fields (NeRF) demonstrated that continuous volumetric scenes could be represented by MLPs [S1, unofficial]. Subsequent developments introduced hash grids to accelerate training and inference [S1, unofficial][S3], and primitive-based methods to enable real-time rendering [S1, unofficial][S3]. The family has evolved to include hybrid approaches that combine the geometric precision of implicit fields with the rendering efficiency of explicit primitives, such as Neural Anchors [S2] and Structure-aware primitive learning [S2]. These methods are widely used in computer graphics for 3D reconstruction, virtual reality, and medical imaging [S1, unofficial][S2, S3].
+
+## Sources
+[S1] Differentiable Rendering: A Survey, https://doi.org/10.48550/arxiv.2006.12057, fetched 2026-10-26 (unofficial)
+[S2] IRIS: Intersection-aware Ray-based Implicit Editable Scenes, https://doi.org/10.48550/arXiv.2603.15368, fetched 2026-10-29
+[S3] Improving Neural Volume Rendering via Learning View-Dependent Integral Approximation, https://doi.org/10.1109/tvcg.2025.3554692, fetched 2026-10-26
+[S4] NeRFPlayer: A Streamable Dynamic Scene Representation with Decomposed Neural Radiance Fields, https://doi.org/10.1109/tvcg.2023.3247082, fetched 2026-10-26
+[S5] MultiPlaneNeRF: Neural radiance field with non-trainable representation, https://doi.org/10.1016/j.eswa.2025.127350, fetched 2026-10-29
+[S6] SVGS: Enhancing Gaussian Splatting Using Primitives With Spatially Varying Colors., https://doi.org/10.1109/tvcg.2026.3690745, fetched 2026-10-26

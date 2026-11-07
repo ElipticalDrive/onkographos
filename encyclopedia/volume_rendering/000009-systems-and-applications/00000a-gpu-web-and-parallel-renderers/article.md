@@ -1,32 +1,33 @@
 # GPU, web and parallel renderers
-
-
 ## Overview
-This family encompasses rendering systems that offload volume rendering computations to parallel hardware (GPUs, multi-core CPUs) or execute entirely within web browsers using WebGL/WebGPU. It addresses the computational intensity of volume rendering by leveraging massive parallelism for tasks like ray casting, splatting, and data sorting. It is distinguished from [Voxel engines and games](47-voxel-engines-and-games.md) by its focus on general-purpose visualization rather than game engine integration, and from [Film and production rendering](48-film-and-production-rendering.md) by its emphasis on real-time or near-real-time interactivity and web compatibility.
+This family covers rendering systems that map volumetric data $I(x,y,z)$ to perceptible outputs by offloading computation to parallel hardware (GPUs, multi-core CPUs) or executing entirely within web browsers via WebGL/WebGPU [S1][S3, unofficial]. It addresses the computational intensity of volume rendering by leveraging massive parallelism for tasks like ray casting, splatting, and data sorting [S1, S2]. It is distinguished from [Voxel engines and games](47-voxel-engines-and-games.md) by its focus on general-purpose visualization rather than game engine integration, and from [Film and production rendering](48-film-and-production-rendering.md) by its emphasis on real-time or near-real-time interactivity and web compatibility [G].
 
 ## Shared principles
-The core mechanism involves mapping volumetric data processing onto parallel execution units. Common principles include:
-1.  **Parallel Data Access**: Volumetric data is often stored in textures (3D/4D) or structured buffers (OpenVDB, sparse grids) optimized for coalesced memory access on GPUs [S1].
-2.  **Depth Sorting**: For alpha-blended rendering (e.g., splatting), fragments or splats must be sorted by depth. This is often the bottleneck, addressed via GPU-based radix sorts or linked lists [S1].
-3.  **WebGL/WebGPU Constraints**: Web-based renderers must operate within the limitations of browser APIs, such as the lack of Shader Storage Buffer Objects (SSBOs) in WebGL2, requiring textures for read/write operations and atomic counters [S1].
-4.  **Multi-GPU/Stream Optimization**: Advanced implementations use multiple CUDA streams or multi-GPU contexts to overlap rendering stages (e.g., left/right eye in VR) or balance load, though synchronization overhead must be managed [S2].
+The articles in this family share the goal of mapping abstract volumetric data to a perceptible output through specific system constraints. Common mechanisms include:
+1. **Hardware Acceleration Mapping**: Offloading computationally intensive tasks (ray casting, splatting, sorting) to parallel execution units (GPUs, multi-core CPUs) to achieve real-time or near-real-time performance [S1, S2][S4, unofficial].
+2. **Data Structure Optimization**: Storing volumetric data in formats optimized for the target hardware, such as 3D/4D textures for coalesced memory access on GPUs or sparse structures for memory efficiency [S1][S3, unofficial].
+3. **Depth Management**: Handling the ordering of contributions for alpha-blended rendering, often requiring GPU-based sorting algorithms (radix sort, linked lists) to ensure correct compositing [S1, S2].
+4. **Physical-to-Digital Mapping**: In the case of volumetric displays, transforming 3D voxel coordinates into 2D control signals (pixel buffers, SLM patterns) synchronized with mechanical or optical processes to create a physical 3D light field [S1][S3, unofficial].
 
 ## Subtopics
 
 ### [WebSplatter](1741-websplatter.md)
-WebSplatter is a WebGPU-based renderer for 3D Gaussian Splatting (3DGS) designed to achieve high-performance, stable, and cross-device compatibility for web-based applications. It solves the critical bottlenecks of previous web-based 3DGS implementations, specifically addressing the instability of Firefox WebGPU, excessive memory consumption on mobile devices, and severe performance degradation due to spin-wait-based sorting on Apple Silicon architectures. WebSplatter distinguishes itself from its siblings by employing a wait-free GPU-based radix sort and a highly optimized pre-processing pipeline that prevents the renderer from becoming sort-bound, ensuring consistent frame times and low variance across a wide spectrum of hardware, from high-end desktops to low-end integrated graphics and mobile phones.
+WebSplatter is a WebGPU-based renderer for 3D Gaussian Splatting (3DGS) designed to achieve high-performance, cross-device compatibility in web browsers. It solves the problem of unstable and memory-intensive Gaussian Splatting implementations on the web by replacing CPU-based and spin-wait-based sorting with a wait-free GPU radix sort and optimizing memory access patterns. Unlike sibling methods that rely on WebGL or naive WebGPU ports, WebSplatter ensures stability on low-end mobile hardware and avoids the busy-waiting pitfalls of Apple M-series chips, maintaining visual fidelity comparable to native CUDA implementations. Choose this method when targeting stable, high-fidelity 3DGS in web environments across diverse hardware.
 
 ### [ClearView (Unified) Renderer](2460-clearview-unified-renderer.md)
-ClearView (Unified) is a 3-pass WebGL2 renderer for unstructured hexahedral meshes that uses a Parallel Prefix List (PPLL) to render wireframes and scalar fields on the GPU. It solves the problem of rendering complex volumetric meshes in web browsers by adapting a desktop GPU technique (which typically relies on Shader Storage Buffer Objects) to WebGL2's texture-only data storage model. It is distinguished from its siblings by its explicit 3-pass architecture (Clear, Gather, Resolve) and its use of atomic operations on image textures to build a linked list of fragments for depth-sorted alpha blending.
+ClearView (Unified) is a 3-pass WebGL2 renderer designed for visualizing unstructured hexahedral meshes, specifically wireframes and scalar fields, by adapting GPU-accelerated parallel prefix list (PPLL) techniques to browser constraints. It solves the problem of rendering complex volumetric meshes in WebGL2, which lacks Shader Storage Buffer Objects (SSBOs), by encoding mesh data into `image2D` textures and using atomic operations to manage fragment accumulation. Unlike [WebSplatter](1741-websplatter.md) which focuses on splatting, ClearView explicitly handles hexahedral topology via a gather-resolve pipeline that supports depth-sorted alpha blending without CPU-side sorting. Choose this method when rendering hexahedral meshes in WebGL2 without CPU-side sorting.
 
 ### [CPU-Driven Task Spawning](4397-cpu-driven-task-spawning.md)
-A model where the CPU decides when and how GPU tasks are launched, treating the GPU as a coprocessor that executes work requests originating from the CPU but cannot generate new work requests on its own.
+CPU-driven task spawning is a GPU execution model where the CPU acts as the central governor, deciding when and how GPU tasks are launched, while the GPU functions as a coprocessor that executes work requests but cannot generate new ones. This approach centralizes decision-making logic but suffers from high CPU-GPU communication latency, making it ineffective for pipelines with fine-grain micro-dependencies or stages that dynamically compute the work for subsequent stages. It differs from GPU-driven spawning (where the GPU generates its own work) and asynchronous submission (which hides latency but still relies on CPU-initiated commands) by strictly enforcing a top-down control hierarchy. Choose this method when centralized CPU control is required, but avoid it for fine-grain dynamic workloads.
 
 ### [Pure client-side renderers](5040-pure-client-side-renderers.md)
-Pure client-side renderers only require a file server as a backend.
+Pure client-side renderers perform all volume rendering computations within the user's web browser, requiring only a file server as a backend to serve volumetric data. This approach eliminates the need for dedicated rendering servers or backend gradient computation, shifting the processing load entirely to the client's GPU. It is distinguished from server-side rendering architectures by its reliance on local execution and from hybrid models by the absence of server-side rasterization or ray-marching services. Choose this method when avoiding dedicated rendering servers or backend services is a priority.
 
 ### [Single Node Multi-GPU/Server Architecture](5165-single-node-multi-gpu-server-architecture.md)
-Presents a similar approach using a single node server with multiple GPUs and CPUs instead.
+This architecture enables interactive visualization of large volumetric datasets on resource-constrained mobile clients by offloading all rendering computation to a server-side cluster. It differs from pure client-side renderers by requiring a dedicated rendering backend, and from distributed shared-memory schemes by utilizing a single node with multiple GPUs/CPUs or a cluster of nodes managed via the Chromium framework. It solves the problem of limited local hardware (e.g., PDAs) by transmitting compressed image buffers rather than raw volumetric data. Choose this method when client hardware is insufficient for local rendering but network transmission of compressed frames is viable.
+
+### [CPU Multithreaded Rendering](6052-cpu-multithreaded-rendering.md)
+CPU multithreaded rendering manages parallel chunk rendering using a thread pool pattern with a free renderer queue, active renderer counter, and condition variable synchronization. It differs from GPU-driven approaches by handling all scheduling and synchronization on the CPU, making it suitable for CPU-bound voxel worlds that use Z-buffering to prevent overdraw. Choose this method for CPU-based chunked rendering where thread pool management is preferred over GPU compute shaders.
 
 ### Multi-GPU Load Balancing
 - **Step**: Create a GL-Context on both X-screens (for multiple NVidia cards) and switch rendering between them one time per frame [S1]. Combine results of both cards. Since the second card's result is combined with the first, the second card need not be connected to a monitor [S1]. Split the sorted array of voxels equally over both cards by interleaving detail coefficients (and histogram) for each pyramid level [S1]. Combine resulting images using a pixel-wise maximum operator [S1].
@@ -43,18 +44,20 @@ Presents a similar approach using a single node server with multiple GPUs and CP
 ### Web-Based Volume Rendering
 - **Definition**: In web-based environments, research focuses on solutions to network latency when loading volumetric data and improving volume rendering performance on the web [S3, unofficial]. Designed to work without a dedicated rendering backend and relies only on a file server. All volume rendering is done in the browser itself [S3, unofficial].
 
-### CPU Multithreaded Rendering
-- **Step**: The CPU software version splits the world in sections for rendering in parallel [S4].
-- **Parameter**: Performance tested on CPU systems ranging from 1 core to 32 cores (Opteron) [S4].
-
 ### Neuroglancer Multi-channel Rendering
 - **Definition**: Uses the same technique as Viv for representing multiple channels on the GPU (accumulation-level intermixing) [S3, unofficial].
 
+### Threaded Chunk Rendering
+- **Definition**: Manages parallel chunk rendering using a thread pool pattern with a free renderer queue, active renderer counter, and condition variable synchronization [S4, unofficial].
+- **Step**: Iterate over loaded world chunks (i, j, k from 0 to LOADED_WORLD_SIZE). For each chunk, call renderChunk. In renderChunk, wait while activeRenderers >= MAX_RENDERERS and freeRenderers queue is empty. Pop a Renderer from freeRenderers or allocate a new one. Increment activeRenderers. Spawn a detached std::thread calling Chunk::render(chunk, renderer). When a renderer finishes, call freeRenderer to push it back to freeRenderers, decrement activeRenderers, and notify cv if activeRenderers reaches 0 [S4, unofficial].
+- **Parameter**: MAX_RENDERERS: 20 (maximum concurrent rendering threads) [S4, unofficial].
+- **Layout**: RendererManager state: `freeRenderers` (ThreadsafeQueue<Renderer*>), `cv` (std::condition_variable), `mtx` (std::mutex), `activeRenderers` (std::atomic<int> initialized to 0) [S4, unofficial].
+
 ## Background
-Web-based volume rendering research addresses network latency and browser performance, often relying on pure client-side architectures that require only a file server [S3, unofficial]. Early implementations focused on offloading rendering to remote servers, but modern approaches like WebSplatter and ClearView leverage WebGPU and WebGL2 for local computation [S1][S3, unofficial]. Multi-GPU techniques using NVidia drivers allow splitting workloads across cards via X-screens, though CPU-mediated data transfer remains a bottleneck [S1]. VR rendering optimizations utilize concurrent CUDA streams to overlap left/right eye rendering, improving utilization on imbalanced workloads [S2]. CPU-based multithreaded raycasting has been tested on systems up to 32 cores, showing linear scaling potential [S4].
+Web-based volume rendering research addresses network latency and browser performance, often relying on pure client-side architectures that require only a file server [S3, unofficial]. Early implementations focused on offloading rendering to remote servers, but modern approaches like WebSplatter and ClearView leverage WebGPU and WebGL2 for local computation [S1][S3, unofficial]. Multi-GPU techniques using NVidia drivers allow splitting workloads across cards via X-screens, though CPU-mediated data transfer remains a bottleneck [S1]. VR rendering optimizations utilize concurrent CUDA streams to overlap left/right eye rendering, improving utilization on imbalanced workloads [S2]. CPU-based multithreaded chunk rendering uses a thread pool with a maximum of 20 concurrent renderers to manage parallel world sections [S4, unofficial].
 
 ## Sources
 [S1] Multiresolution MIP Rendering of Large Volumetric Data Accelerated on Graphics Hardware, https://doi.org/10.2312/vissym/eurovis07/243-250, fetched 2026-10-26
 [S2] Splatshop: Efficiently Editing Large Gaussian Splat Models, https://doi.org/10.1111/cgf.70214, fetched 2026-10-31
 [S3] Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze, https://doi.org/10.34726/hss.2023.106203, fetched 2026-10-26 (unofficial)
-[S4] Voxel Game Engine, http://voxelgames.com/, fetched 2026-10-27
+[S4] VidFurlan/Voxel1993, https://github.com/VidFurlan/Voxel1993, fetched 2026-10-27 (unofficial)

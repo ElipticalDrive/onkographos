@@ -2,100 +2,100 @@
 
 
 ## Overview
-This method addresses the transparency artifacts inherent in standard Order Independent Transparency (OIT) when rendering opaque or semi-opaque kernels [S1, unofficial]. While standard OIT decouples depth sorting to achieve order independence, it often fails to correctly represent the visual weight of the closest occluding surface, leading to incorrect blending in close-up views [S1, unofficial]. This approach improves upon basic OIT by explicitly incorporating the contribution of the closest kernel sample into the final color calculation, thereby reducing artifacts while maintaining performance comparable to geometry instancing [S1, unofficial]. It builds on [Order Independent Transparency Approaches](3611-order-independent-transparency-approaches.md) by combining a depth-aware direct contribution with the weighted average of remaining fragments.
+This method improves the rendering of opaque kernels by incorporating the contribution of the closest sample into the transparency accumulation, reducing transparency artifacts compared to standard Order Independent Transparency (OIT) while maintaining performance close to geometry instancing [S1, unofficial]. It addresses the limitation of basic OIT, which fails to distinguish neighboring kernels in close-up views, by re-introducing depth information via the closest sample [S1, unofficial].
 
 ## How it works
-The method computes the final color $L$ for a pixel by combining the direct contribution of the closest kernel with a weighted average of all other kernels.
+The method combines a direct contribution from the closest kernel with a weighted average of all other kernels.
 
 **Inputs and Outputs:**
-- **Input:** The set of kernel clusters $\mathcal{C}_i$ contributing to the pixel, the closest kernel sample $\mathbf{p}_f$, its transparency $\alpha_f$, and the kernel value $\tilde{K}(\mathbf{d}, \mathbf{p}_f)$ at the direction $\mathbf{d}$.
-- **Output:** The final color $L$.
+- **Input:** A set of kernel clusters $\mathcal{C}_i$ for $i \in [0, N-1]$, where each cluster contains sample points $\mathbf{p}_j$. For each pixel, the closest kernel sample $\mathbf{p}_f$ and its transparency $\alpha_f$ are identified.
+- **Output:** Final color $L$.
 
 **Data Structures:**
-The method relies on the accumulated data from the OIT pass. Specifically, it requires:
-1.  The index or position of the closest sample $\mathbf{p}_f$ and its transparency $\alpha_f$. This is typically determined via a standard depth test or by tracking the minimum depth during the accumulation pass [S1, unofficial].
-2.  The sum of color contributions $\sum L_{\mathcal{C}_i}$ from all kernel clusters.
-3.  The sum of transparencies $\sum T(\mathbf{p}_j)$ from all samples in all clusters.
-
-**Parameters:**
--   $N$: The number of kernel clusters or slices used in the summation. Typical values in experiments are 32 samples per ray per evaluated kernel [S1, unofficial].
+- $N$: Number of kernel clusters or slices.
+- $\mathcal{C}_i^*$: The set of sample points in cluster $i$.
+- $L_{\mathcal{C}_i}$: Color contribution from cluster $i$.
+- $T(\mathbf{p}_j)$: Transparency at sample point $\mathbf{p}_j$.
+- $\tilde{K}(\mathbf{d}, \mathbf{p}_f)$: Kernel value at the closest sample point $\mathbf{p}_f$ with direction $\mathbf{d}$.
 
 **Steps:**
-1.  **Identify Closest Sample:** Determine the closest kernel sample $\mathbf{p}_f$ and its transparency $\alpha_f$ using a depth test [S1, unofficial].
-2.  **Calculate Direct Contribution:** Compute the direct contribution of the closest kernel as $\tilde{K}(\mathbf{d}, \mathbf{p}_f) \alpha_f$ [S1, unofficial].
-3.  **Compute Weighted Average:** Calculate the weighted average color of all other kernels by dividing the sum of their color contributions by the sum of their transparencies:
-    $$ \text{AvgColor} = \frac{\sum_{i=0}^{N-1} L_{\mathcal{C}_i}}{\sum_{i=0}^{N-1} \sum_{\mathbf{p}_j \in \mathcal{C}_i^*} T(\mathbf{p}_j)} $$
-    where $L_{\mathcal{C}_i}$ is the color contribution from cluster $i$, and $T(\mathbf{p}_j)$ is the transparency at sample point $\mathbf{p}_j$ in cluster $\mathcal{C}_i^*$ [S1, unofficial].
-4.  **Scale by Remaining Opacity:** Multiply the weighted average color by the remaining opacity $(1 - \alpha_f)$ [S1, unofficial].
-5.  **Combine:** Sum the direct contribution and the scaled weighted average to obtain the final color $L$ [S1, unofficial].
+1. Identify the closest kernel sample $\mathbf{p}_f$ and its transparency $\alpha_f$ using a depth test [S1, unofficial].
+2. Calculate the direct contribution of the closest kernel: $\tilde{K}(\mathbf{d}, \mathbf{p}_f) \alpha_f$ [S1, unofficial].
+3. Compute the weighted average color of all other kernels by summing their color contributions $\sum L_{\mathcal{C}_i}$ and dividing by the sum of their transparencies $\sum_{i=0}^{N-1} \sum_{\mathbf{p}_j \in \mathcal{C}_i^*} T(\mathbf{p}_j)$ [S1, unofficial].
+4. Multiply this average by the remaining opacity $(1 - \alpha_f)$ [S1, unofficial].
+5. Sum the direct contribution and the weighted average contribution to get the final color $L$ [S1, unofficial].
 
 **Formula:**
-The final color $L$ is computed as:
-$$ L \approx \tilde{K}(\mathbf{d}, \mathbf{p}_f) \alpha_f + \left( \frac{\sum_{i=0}^{N-1} L_{\mathcal{C}_i}}{\sum_{i=0}^{N-1} \sum_{\mathbf{p}_j \in \mathcal{C}_i^*} T(\mathbf{p}_j)} \right) (1 - \alpha_f) $$
-where:
--   $L$: Final color.
--   $\tilde{K}(\mathbf{d}, \mathbf{p}_f)$: Kernel value at the closest sample point $\mathbf{p}_f$ with direction $\mathbf{d}$.
--   $\alpha_f$: Transparency of the closest kernel.
--   $N$: Number of kernel clusters/slices.
--   $L_{\mathcal{C}_i}$: Color contribution from cluster $i$.
--   $T(\mathbf{p}_j)$: Transparency at sample point $\mathbf{p}_j$ in cluster $\mathcal{C}_i^*$ [S1, unofficial].
+$$L \approx \tilde{K}(\mathbf{d}, \mathbf{p}_f) \alpha_f + \left( \frac{\sum_{i=0}^{N-1} L_{\mathcal{C}_i}}{\sum_{i=0}^{N-1} \sum_{\mathbf{p}_j \in \mathcal{C}_i^*} T(\mathbf{p}_j)} \right) (1 - \alpha_f) \quad (1)$$
+
+Where:
+- $L$ is the final color.
+- $\tilde{K}(\mathbf{d}, \mathbf{p}_f)$ is the kernel value at the closest sample point $\mathbf{p}_f$ with direction $\mathbf{d}$.
+- $\alpha_f$ is the transparency of the closest kernel.
+- $N$ is the number of kernel clusters/slices.
+- $L_{\mathcal{C}_i}$ is the color contribution from cluster $i$.
+- $T(\mathbf{p}_j)$ is the transparency at sample point $\mathbf{p}_j$ in cluster $\mathcal{C}_i^*$.
+
+**Parameters:**
+- $N$: The number of kernel clusters or slices. In experiments, 32 samples per ray per evaluated kernel were used [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_improved_oit_color(closest_sample, alpha_f, sum_color_contributions, sum_transparencies, kernel_func, direction):
+def compute_color(closest_kernel_value, closest_transparency, cluster_colors, cluster_transparencies):
     """
     Computes the final color using Improved OIT for Opaque Kernels.
     
     Args:
-        closest_sample: The closest kernel sample point p_f.
-        alpha_f: Transparency of the closest kernel.
-        sum_color_contributions: Sum of color contributions L_C_i from all clusters.
-        sum_transparencies: Sum of transparencies T(p_j) from all samples in all clusters.
-        kernel_func: Function to evaluate kernel value K(d, p).
-        direction: The viewing direction d.
+        closest_kernel_value (float): K(d, p_f), the kernel value at the closest sample.
+        closest_transparency (float): alpha_f, the transparency of the closest kernel.
+        cluster_colors (list of float): List of L_C_i for all clusters.
+        cluster_transparencies (list of float): List of sum(T(p_j)) for all clusters.
         
     Returns:
-        L: The final color.
+        float: Final color L.
     """
-    # Step 2: Calculate direct contribution of the closest kernel
-    # K(d, p_f) * alpha_f
-    direct_contribution = kernel_func(direction, closest_sample) * alpha_f
+    # Step 2: Direct contribution of the closest kernel
+    direct_contribution = closest_kernel_value * closest_transparency
     
     # Step 3: Compute weighted average color of all other kernels
-    # Sum(L_C_i) / Sum(T(p_j))
-    # Guard against division by zero if no other kernels contribute
+    # Sum of color contributions
+    sum_colors = sum(cluster_colors)
+    # Sum of transparencies
+    sum_transparencies = sum(cluster_transparencies)
+    
+    # Avoid division by zero if no other kernels contribute
     if sum_transparencies == 0:
-        avg_color = 0.0
+        weighted_average = 0.0
     else:
-        avg_color = sum_color_contributions / sum_transparencies
+        weighted_average = sum_colors / sum_transparencies
         
     # Step 4: Multiply by remaining opacity
-    scaled_avg = avg_color * (1.0 - alpha_f)
+    remaining_opacity_contribution = weighted_average * (1.0 - closest_transparency)
     
     # Step 5: Sum contributions
-    L = direct_contribution + scaled_avg
+    final_color = direct_contribution + remaining_opacity_contribution
     
-    return L
+    return final_color
 ```
 
 **Edge Cases and Pitfalls:**
--   **Division by Zero:** If `sum_transparencies` is zero (no other kernels contribute), the weighted average term should be treated as zero to avoid NaNs [G].
--   **Precision:** The method relies on accurate depth testing to identify the closest sample. Limited depth precision can lead to incorrect identification of $\mathbf{p}_f$, causing artifacts [S1, unofficial].
--   **Opaque Kernels:** The method is specifically designed to improve results for opaque kernels. For highly transparent kernels, results are nearly identical to standard OIT [S1, unofficial].
+- **Division by Zero:** If the sum of transparencies for the non-closest kernels is zero, the weighted average is undefined. The pseudocode handles this by setting the average to 0.0 [G].
+- **Precision:** The method relies on accurate identification of the closest kernel. Depth precision issues can lead to incorrect identification of $\mathbf{p}_f$, causing artifacts [S1, unofficial].
+
+## Subtopics
 
 ## Operating characteristics
--   **Time Complexity:** The method adds a constant-time calculation per pixel to the standard OIT accumulation pass. The complexity is dominated by the accumulation of color and transparency sums, which is $O(N)$ where $N$ is the number of samples per pixel [S1, unofficial].
--   **Memory Complexity:** Requires storing the sum of color contributions and the sum of transparencies per pixel, in addition to the closest sample's depth/transparency. This is minimal overhead compared to linked-list based OIT [S1, unofficial].
--   **Performance:** On a GeForce 980 GPU, the method runs at approximately 2 fps for a scene with 400k impulses (e.g., lichen pattern on a dragon) [S1, unofficial]. This is roughly half the framerate of geometry instancing (which offers 60 fps for 800k kernels) but avoids the aliasing artifacts of instancing [S1, unofficial].
--   **Strengths:** Avoids transparency artifacts in close-up views compared to basic OIT; handles semi-transparency; avoids z-fighting artifacts associated with geometry instancing [S1, unofficial].
--   **Limitations:** Performance is lower than geometry instancing; still slower than basic OIT in some contexts due to the need for depth information [S1, unofficial].
--   **When to Use:** When rendering opaque or semi-opaque kernels where visual correctness is prioritized over maximum framerate, and when standard OIT produces noticeable transparency artifacts [S1, unofficial].
--   **When Not to Use:** When maximum performance is required and aliasing artifacts are acceptable (use geometry instancing); when kernels are highly transparent (standard OIT is sufficient) [S1, unofficial].
+- **Time and Memory Complexity:** The method is faster than traditional EWA Splatting because it avoids the severe performance and storage overhead of depth-sorting [S1, unofficial]. It runs at roughly half the framerate of geometry instancing [S1, unofficial].
+- **Measured Performance:** On a GeForce 980 with an OpenGL 4.3 framework and a 1920×1080 rendering window, interactive examples using flat Gaussian kernels run between 5 and 60+ fps, depending on kernel density and viewpoint [S1, unofficial]. For a lichen pattern with ≈ 400k impulses, it runs at ≈ 1.5 fps [S1, unofficial].
+- **Scaling:** Performance is strongly related to the density and complexity of the kernels [S1, unofficial].
+- **Strengths:** Avoids aliasing artifacts (z-fighting) and handles semi-transparency, which geometry instancing cannot [S1, unofficial]. It shows significant improvements for opaque kernels compared to standard OIT [S1, unofficial].
+- **Limitations:** Roughly half the framerate of geometry instancing [S1, unofficial]. Basic OIT is not precise enough to distinguish pairs of neighboring kernels, but this method improves upon that [S1, unofficial].
+- **When to Use:** When rendering opaque kernels where standard OIT shows transparency artifacts in close-up views, and geometry instancing causes z-fighting [S1, unofficial].
 
 ## Background
-This method was introduced in the context of volumetric spot noise for procedural 3D shell texture synthesis [S1, unofficial]. It addresses the limitations of previous OIT approaches when applied to opaque kernels, which are common in procedural noise models [S1, unofficial]. The work was published in 2013 in the Journal of Computer Graphics Techniques (JCGT) [S1, unofficial].
+The method was introduced in the context of Volumetric Spot Noise for Procedural 3D Shell Texture Synthesis [S1, unofficial]. It was developed to address the limitations of existing methods for rendering shell spot noise, specifically the trade-off between performance (geometry instancing) and visual quality (OIT) [S1, unofficial].
 
 ## Sources
 [S1] Volumetric Spot Noise for Procedural 3D Shell Texture Synthesis, https://hal.science/hal-02413269v1, fetched 2026-10-26 (unofficial)

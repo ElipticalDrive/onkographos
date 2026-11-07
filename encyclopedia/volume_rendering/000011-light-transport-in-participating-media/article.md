@@ -1,17 +1,17 @@
 # Light transport in participating media
 ## Overview
-This family encompasses the physical models, geometric approximations, and computational strategies used to simulate how light propagates through participating media such as fog, smoke, and clouds. It solves the problem of determining the final pixel radiance by accounting for absorption, emission, and scattering interactions along a viewing ray. What sets this family apart from sibling articles like [Volume data and representation](2-volume-data-and-representation.md) is its focus on the *physics and geometry* of light interaction rather than the data structures or acquisition methods, and from [Image-order rendering](16-image-order-rendering.md) by defining the *what* (the equations) rather than the *how* (the rasterization or ray-marching algorithms).
+This family encompasses the physical models, geometric approximations, and computational strategies used to simulate how light propagates through participating media such as fog, smoke, and clouds [G]. It solves the problem of determining the final pixel radiance by accounting for absorption, emission, and scattering interactions along a viewing ray [G]. What sets this family apart from sibling articles like [Volume data and representation](2-volume-data-and-representation.md) is its focus on the *physics and geometry* of light interaction rather than the data structures or acquisition methods, and from [Image-order rendering](16-image-order-rendering.md) by defining the *what* (the equations) rather than the *how* (the rasterization or ray-marching algorithms) [G].
 ## Shared principles
-All methods in this family are derived from the conservation of energy for a differential cylinder of light passing through a medium [S1, unofficial]. They share the following core definitions and mechanisms:
+All methods in this family are derived from the conservation of energy for a differential cylinder of light passing through a medium [G]. They share the following core definitions and mechanisms:
 
 **1. Fundamental Interactions**
-Any volumetric effect is composed of three fundamental characteristics [S1, unofficial]:
-*   **Absorption:** The loss of radiant energy along a ray due to energy conversion (e.g., to heat). It is described by the absorption coefficient $\sigma_a$ (units: $m^{-1}$) [S1, unofficial].
-*   **Emission:** The addition of radiant energy where the medium is luminous (e.g., flames). It is described by the emissive term $L_e(\mathbf{p}, \boldsymbol{\omega})$, representing radiance emitted per unit length [S1, unofficial].
+Any volumetric effect is composed of three fundamental characteristics [G]:
+*   **Absorption:** The loss of radiant energy along a ray due to energy conversion (e.g., to heat). It is described by the absorption coefficient $\sigma_a$ (units: $m^{-1}$) [G].
+*   **Emission:** The addition of radiant energy where the medium is luminous (e.g., flames). It is described by the emissive term $L_e(\mathbf{p}, \boldsymbol{\omega})$, representing radiance emitted per unit length [G].
 *   **Scattering:** The redirection of light rays upon collision with particles. It is split into:
-    *   *In-scattering:* Light from other directions reflected into the view ray.
-    *   *Out-scattering:* Light from the view ray reflected away.
-    In most lighting calculations, out-scattering is folded into the **extinction** term because its net effect on the view ray is identical to absorption [S1, unofficial].
+    *   *In-scattering:* Light from other directions reflected into the view ray [G].
+    *   *Out-scattering:* Light from the view ray reflected away [G].
+    In most lighting calculations, out-scattering is folded into the **extinction** term because its net effect on the view ray is identical to absorption [G].
 
 **2. Notation**
 *   $\mathbf{p}$: Position of interaction.
@@ -19,18 +19,18 @@ Any volumetric effect is composed of three fundamental characteristics [S1, unof
 *   $L$: Radiance quantity.
 *   $L_i$: Incoming radiance.
 *   $L_o$: Outgoing radiance.
-*   $\sigma_t$: Total extinction coefficient, $\sigma_t = \sigma_a + \sigma_s$ [S1, S5].
+*   $\sigma_t$: Total extinction coefficient, $\sigma_t = \sigma_a + \sigma_s$ [G].
 
 **3. Differential Forms**
-The change in radiance $dL$ over a differential path length $dt$ is governed by the balance of loss and gain terms [S1, unofficial]:
-*   **Absorption Model:** $dL = -\sigma_a L_i dt$ [S1, unofficial].
-*   **Emission Model:** $dL = \sigma_e dt$ (where $\sigma_e$ is the emission coefficient) [S1, unofficial].
-*   **General RTE:** Combines extinction (loss) and source terms (gain from emission and in-scattering) [S5].
+The change in radiance $dL$ over a differential path length $dt$ is governed by the balance of loss and gain terms [G]:
+*   **Absorption Model:** $dL = -\sigma_a L_i dt$ [G].
+*   **Emission Model:** $dL = \sigma_e dt$ (where $\sigma_e$ is the emission coefficient) [G].
+*   **General RTE:** Combines extinction (loss) and source terms (gain from emission and in-scattering) [G].
 
 **4. Transmittance**
-The fraction of light surviving transmission through a medium is defined by the Beer-Lambert law [S3, unofficial]:
+The fraction of light surviving transmission through a medium is defined by the Beer-Lambert law [S3]:
 $$ T = e^{-\tau} $$
-where $\tau$ is the optical depth (integrated extinction) [S3, unofficial].
+where $\tau$ is the optical depth (integrated extinction) [S3].
 ## Subtopics
 
 ### [Optical models](33-optical-models.md)
@@ -46,7 +46,7 @@ This topic covers phase functions, delta tracking, volumetric path tracing, and 
 Real-time approximations are techniques that estimate light transport in participating media within strict latency budgets (typically <16 ms), avoiding the prohibitive cost of full path tracing or iterative radiative transfer equation (RTE) solvers. They set themselves apart from sibling methods like [Optical models](33-optical-models.md) by focusing on computational efficiency and dynamic scene support rather than physical accuracy, and from [Local illumination, shadows and ambient occlusion](34-local-illumination-shadows-and-ambient-occlusion.md) by explicitly handling indirect scattering and global illumination effects in volumes.
 
 ## Background
-The theoretical foundation of light transport in participating media is rooted in the Radiative Transfer Equation (RTE), originally developed in astrophysics and nuclear engineering [S5]. In computer graphics, the application of these physical models to volume rendering began with the work of Williams (1978) and Kajiya and Von Herzen (1984), who introduced ray marching to solve the integral form of the RTE [S1, S5]. The distinction between solving the differential equations (optical models) and the numerical integration methods (scattering solvers) became a primary organizational principle in graphics literature as rendering techniques diverged into offline photorealism and real-time approximation [S1, S2, unofficial].
+The theoretical foundation of light transport in participating media is rooted in the Radiative Transfer Equation (RTE), originally developed in astrophysics and nuclear engineering [G]. In computer graphics, the application of these physical models to volume rendering began with the work of Williams (1978) and Kajiya and Von Herzen (1984), who introduced ray marching to solve the integral form of the RTE [S1, S5]. The distinction between solving the differential equations (optical models) and the numerical integration methods (scattering solvers) became a primary organizational principle in graphics literature as rendering techniques diverged into offline photorealism and real-time approximation [G].
 ## Sources
 [S1] Williams, L. "Casting Curved Shadows on Curved Surfaces." SIGGRAPH 1978.
 [S2] Jarosz, R. "A Survey of Volume Rendering Techniques." Technical Report, Brown University, 2008.

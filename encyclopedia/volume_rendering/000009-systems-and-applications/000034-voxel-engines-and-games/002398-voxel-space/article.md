@@ -2,36 +2,33 @@
 Also called: 2.5D voxel engine, color map and depth map 3D
 
 ## Overview
-Voxel Space is a 2.5D rendering technique that generates a pseudo-3D environment by plotting vertical lines whose colors are sampled from a color map and whose starting y-coordinates are determined by a depth map [S1, unofficial]. It distinguishes itself from full 3D rasterization by avoiding polygon projection, instead relying on pre-computed height and color data to simulate perspective, making it suitable for hardware with limited floating-point capabilities [S1, unofficial].
+Voxel Space is a 2.5D rendering technique that generates a pseudo-3D environment by plotting vertical lines whose colors are sampled from a color map and whose starting y-coordinates are determined by a depth map [S1, unofficial]. It avoids full 3D polygon projection by relying on pre-computed height and color data, making it suitable for hardware with limited processing power [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- A color map (2D texture storing surface colors).
-- A depth map (2D texture storing height/depth values for the environment).
-- Camera parameters: position, viewing angle, and vertical angle.
+- A color map (2D array storing surface colors) [S1, unofficial].
+- A depth map (2D array storing height/depth values for the environment) [S1, unofficial].
+- Camera parameters: position, viewing angle, and vertical angle [S1, unofficial].
 
 **Outputs:**
-- A 2D frame buffer containing the rendered image.
+- A 2D frame buffer containing the rendered image [S1, unofficial].
 
 **Data Structures:**
 - **Color Map:** A 2D array of color values. Dimensions are not explicitly defined in the sources, but the demo uses maps reverse-engineered from *Comanche* [S1, unofficial].
 - **Depth Map:** A 2D array of height/depth values. The source code defines `dim_mapa` as 1024 and `dim_mapa_log2` as 10, implying a $1024 \times 1024$ map [S1, unofficial].
-- **Math Tables:** Hardcoded tables for trigonometric functions and rotation calculations to avoid runtime computation [S1, unofficial].
+- **Math Tables:** Hardcoded tables for trigonometric and rotation calculations to avoid runtime computation [S1, unofficial].
 
 **Steps:**
-1. **Initialize Frame Buffer:** Allocate two frame buffers to allow double buffering. Use GBA Background Mode 5, which provides a high-resolution 2D bitmap mode [S1, unofficial].
-2. **Iterate Columns:** For each column $x$ in the output frame buffer:
-    a. Determine the corresponding entry in the depth map based on the camera's horizontal position and viewing angle.
-    b. Calculate the initial y-coordinate (base line) for the vertical line using the depth value. The depth value maps to a screen y-position [S1, unofficial].
-    c. Sample the color from the color map using the same column index (and potentially a row index derived from the camera's vertical angle or height) [S1, unofficial].
-    d. Plot a vertical line starting from the calculated y-coordinate downwards (or upwards, depending on coordinate system) using the sampled color. The length of the line may be determined by the depth value or a fixed horizon [S1, unofficial].
-3. **Optimize Rendering Frequency:** Reduce the frequency of horizontal plane rendering for distant columns. This is achieved by skipping columns or using coarser sampling for areas further from the camera center, as perceived depth changes less rapidly [S1, unofficial].
-4. **Apply Optimizations:**
-    a. **Code Relocation:** Copy the entire ARM engine code from ROM to RAM for faster execution [S1, unofficial].
-    b. **Math Tables:** Replace runtime trigonometric calculations with lookups from hardcoded tables. This restricts camera height and vertical angle to discrete values stored in the tables [S1, unofficial].
-    c. **Rotation Approximation:** Use bitwise shift operations (`<<`, `>>`) and fast approximations for rotation calculations instead of standard multiplication or division [S1, unofficial].
-    d. **Code Duplication:** Replicate and modify the main render routine for each specific angle rendering to avoid function call overhead [S1, unofficial].
-    e. **Intra-frames:** Use GBA background scaling and scrolling features to display intermediate frames ("intra-frames") before the full frame is rendered, improving perceived fluidity [S1, unofficial].
+1. **Initialize Frame Buffers:** Allocate two frame buffers to allow double buffering [S1, unofficial].
+2. **Render Vertical Lines:** For each column in the output frame buffer, determine the color from the color map and the initial y-coordinate from the depth map [S1, unofficial].
+3. **Apply Optimizations:**
+    a. **Code Relocation:** Copy the entire ARM engine code from ROM to RAM for faster data access [S1, unofficial].
+    b. **Adaptive Rendering Frequency:** Decrease the horizontal plane render frequency for distant columns [S1, unofficial].
+    c. **Math Tables:** Store repeated calculations in hardcoded math tables, which limits camera heights and vertical angles to stored values but multiplies speed [S1, unofficial].
+    d. **Background Mode:** Use GBA background mode 5 to decrease resolution and allow switching between the two frame buffers, increasing speed [S1, unofficial].
+    e. **Intra-frames:** Use GBA background scaling and scroll features to display intermediate frames before the final frame is rendered, improving fluidity [S1, unofficial].
+    f. **Fast Approximations:** Use bitwise shift operations (`<<`, `>>`) instead of multiplications for rotation and other calculations [S1, unofficial].
+    g. **Code Duplication:** Replicate and modify the main render routine for each angle rendering to avoid function call overhead [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -40,94 +37,57 @@ Voxel Space is a 2.5D rendering technique that generates a pseudo-3D environment
 # Constants from source
 DIM_MAPA = 1024
 DIM_MAPA_LOG2 = 10
+SCREEN_WIDTH = 240  # Standard GBA resolution [G]
+SCREEN_HEIGHT = 160 # Standard GBA resolution [G]
 
-# Pre-computed math tables to avoid runtime trig
-# These limit camera heights and vertical angles
-MATH_TABLES = load_hardcoded_tables()
+# Hardcoded math tables for rotation and trigonometry
+# These limit camera heights and vertical angles to stored values [S1, unofficial]
+TABLE_ROTATE_X = [...]
+TABLE_ROTATE_Y = [...]
 
 def render_voxel_space(color_map, depth_map, camera_x, camera_y, camera_angle, camera_vertical_angle):
-    # Allocate two frame buffers for double buffering
-    frame_buffer_1 = allocate_frame_buffer()
-    frame_buffer_2 = allocate_frame_buffer()
+    # Allocate two frame buffers for double buffering [S1, unofficial]
+    frame_buffer_1 = [[0] * SCREEN_WIDTH for _ in range(SCREEN_HEIGHT)]
+    frame_buffer_2 = [[0] * SCREEN_WIDTH for _ in range(SCREEN_HEIGHT)]
     current_buffer = frame_buffer_1
-    next_buffer = frame_buffer_2
 
-    # Copy code to RAM is a system-level optimization, not part of render loop logic
+    # System-level optimization: Copy ARM engine code to RAM for faster access [S1, unofficial]
 
     for x in range(SCREEN_WIDTH):
-        # Determine depth for this column
-        # Map camera position and angle to depth map coordinates
-        depth_map_x = calculate_depth_map_x(camera_x, camera_angle, x)
-        depth_map_y = calculate_depth_map_y(camera_y, camera_vertical_angle)
-        
-        # Clamp coordinates to map bounds
-        depth_map_x = clamp(depth_map_x, 0, DIM_MAPA - 1)
-        depth_map_y = clamp(depth_map_y, 0, DIM_MAPA - 1)
+        # Map camera position and angle to depth map coordinates using fast approximations [S1, unofficial]
+        depth_map_x = (camera_x + TABLE_ROTATE_X[camera_angle][x]) & (DIM_MAPA - 1)
+        depth_map_y = (camera_y + TABLE_ROTATE_Y[camera_vertical_angle]) & (DIM_MAPA - 1)
 
         # Get depth value (height)
         depth_value = depth_map[depth_map_y][depth_map_x]
 
-        # Get color value
-        # Color map indexing may depend on x and vertical angle
-        color_map_x = calculate_color_map_x(camera_x, camera_angle, x)
-        color_map_y = calculate_color_map_y(camera_y, camera_vertical_angle)
-        color_map_x = clamp(color_map_x, 0, DIM_MAPA - 1)
-        color_map_y = clamp(color_map_y, 0, DIM_MAPA - 1)
-        
+        # Get color value from color map
+        color_map_x = (camera_x + TABLE_ROTATE_X[camera_angle][x]) & (DIM_MAPA - 1)
+        color_map_y = (camera_y + TABLE_ROTATE_Y[camera_vertical_angle]) & (DIM_MAPA - 1)
         color = color_map[color_map_y][color_map_x]
 
         # Calculate initial y-coordinate from depth
-        # The exact mapping function is not specified, but it converts depth to screen y
-        start_y = depth_to_screen_y(depth_value)
+        start_y = depth_value
 
-        # Plot vertical line
-        # The length of the line is not explicitly defined, but implies drawing from start_y
-        # towards the horizon or bottom of screen
-        draw_vertical_line(current_buffer, x, start_y, color)
+        # Plot vertical line from start_y to bottom of screen
+        for y in range(start_y, SCREEN_HEIGHT):
+            current_buffer[y][x] = color
 
-    # Use GBA background scaling/scroll for intra-frames if full render takes multiple frames
-    # This is a display optimization, not part of the core pixel generation
+    # System-level optimization: Use GBA background scaling/scroll for intra-frames [S1, unofficial]
+    # System-level optimization: Replicate render routine per angle to avoid function calls [S1, unofficial]
+    # System-level optimization: Use bitwise shifts instead of multiplications [S1, unofficial]
 
     return current_buffer
-
-def calculate_depth_map_x(camera_x, camera_angle, screen_x):
-    # Fast approximation using math tables and shifts
-    # Exact formula not given, but uses pre-computed tables
-    return MATH_TABLES.rotate_x(camera_angle, screen_x) + camera_x
-
-def calculate_depth_map_y(camera_y, camera_vertical_angle):
-    # Fast approximation using math tables and shifts
-    return MATH_TABLES.rotate_y(camera_vertical_angle) + camera_y
-
-def calculate_color_map_x(camera_x, camera_angle, screen_x):
-    # Similar to depth map x, but for color map
-    return MATH_TABLES.rotate_x(camera_angle, screen_x) + camera_x
-
-def calculate_color_map_y(camera_y, camera_vertical_angle):
-    # Similar to depth map y, but for color map
-    return MATH_TABLES.rotate_y(camera_vertical_angle) + camera_y
-
-def depth_to_screen_y(depth_value):
-    # Map depth value to screen y-coordinate
-    # Exact mapping not specified
-    return depth_value
-
-def draw_vertical_line(buffer, x, start_y, color):
-    # Draw line from start_y to bottom of screen or horizon
-    # Exact end point not specified
-    for y in range(start_y, SCREEN_HEIGHT):
-        buffer[y][x] = color
 ```
 
 **Parameters:**
 - `DIM_MAPA`: 1024 [S1, unofficial].
 - `DIM_MAPA_LOG2`: 10 [S1, unofficial].
-- Camera height and vertical angle are limited to values present in the hardcoded math tables [S1, unofficial].
+- Camera heights and vertical angles are restricted to values present in the hardcoded math tables [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Performance:** Simple voxel space calculations are excessive for the GameBoy Advance ARM CPU, requiring significant optimization for a good frame rate [S1, unofficial].
+- **Performance:** Simple voxel space engine calculations are excessive for the GameBoy Advance ARM CPU, requiring significant optimization for a good frame rate [S1, unofficial].
 - **Precision:** Using hardcoded math tables limits the smoothness of camera movement and vertical angles [S1, unofficial].
-- **Boundaries:** Depth and color map coordinates must be clamped to prevent out-of-bounds access [S1, unofficial].
 
 ## Subtopics
 
@@ -138,13 +98,13 @@ Specific hardware-level optimizations for the GameBoy Advance, such as code relo
 General techniques for simulating 3D on 2D planes, including raycasting and mode-7. [2.5D Rendering](49-2-5d-rendering.md)
 
 ## Operating characteristics
-- **Time Complexity:** $O(W \times H)$ where $W$ is screen width and $H$ is screen height, but with optimizations that reduce the effective work per pixel (e.g., skipping distant columns). The use of hardcoded tables and bitwise operations reduces the constant factor significantly compared to general-purpose 3D rendering [S1, unofficial].
-- **Memory Complexity:** $O(DIM\_MAPA^2)$ for the color and depth maps, plus $O(1)$ for the frame buffers. The math tables add a small constant memory overhead [S1, unofficial].
-- **Measured Performance:** The method was designed to run on the GameBoy Advance ARM CPU. Without optimizations, it is too slow. With optimizations (RAM code, math tables, etc.), it achieves a "decent frame rate" [S1, unofficial].
-- **Strengths:** Low computational cost per pixel, simple implementation, suitable for hardware with limited floating-point support.
-- **Limitations:** Limited camera movement (due to math tables), potential for visual artifacts if depth/color maps are not aligned correctly, not true 3D (no occlusion handling beyond the depth map).
-- **When to Use:** When targeting hardware with limited processing power and no hardware 3D support, and when the environment can be represented by height and color maps.
-- **When Not to Use:** When true 3D geometry, dynamic lighting, or complex camera movements are required.
+- **Time Complexity:** Not given in the sources. The method iterates over screen columns and applies per-column optimizations [S1, unofficial].
+- **Memory Complexity:** $O(DIM\_MAPA^2)$ for the color and depth maps, plus $O(1)$ for the frame buffers and math tables [S1, unofficial].
+- **Measured Performance:** Designed for the GameBoy Advance ARM CPU. Simple calculations are excessive without optimization, but RAM code relocation, math tables, and shift operations achieve a decent frame rate [S1, unofficial].
+- **Strengths:** Low computational cost per pixel, simple implementation, suitable for hardware with limited processing power [G].
+- **Limitations:** Limited camera movement due to hardcoded math tables, not true 3D (no occlusion handling beyond the depth map) [G].
+- **When to Use:** When targeting hardware with limited processing power and no hardware 3D support, and when the environment can be represented by height and color maps [G].
+- **When Not to Use:** When true 3D geometry, dynamic lighting, or complex camera movements are required [G].
 
 ## Background
 The Voxel Space engine is a 2.5D technology used in games like *Comanche* [S1, unofficial]. The specific implementation discussed is an unofficial demo for the GameBoy Advance, reverse-engineered from *Comanche* maps [S1, unofficial]. The technology is potentially patented by NovaLogic [S1, unofficial]. The demo was created by juanmv94 and published on GitHub [S1, unofficial].

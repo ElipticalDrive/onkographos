@@ -41,12 +41,29 @@ def render_aabb_geometry(current_block, number_of_blocks, tcoord_flag, ren_win, 
         return True  # Abort rendering
 
     # Step 2: Generate VAO and VBO
-    vao = allocate_vertex_array_object()
-    vbo = allocate_vertex_buffer_object()
+    vao = create_vertex_array_object()
+    vbo = create_vertex_buffer_object()
 
-    # Step 3: Define vertices for AABB
-    # 6 faces, 2 triangles per face, 3 vertices per triangle = 36 vertices
-    vertices = generate_box_vertices(min_b, max_b)
+    # Step 3: Define vertices for AABB (36 floats: 12 triangles * 3 vertices * 3 components)
+    vertices = []
+    # Front face (z = max_b.z)
+    vertices.extend([min_b.x, min_b.y, max_b.z, max_b.x, min_b.y, max_b.z, max_b.x, max_b.y, max_b.z])
+    vertices.extend([min_b.x, min_b.y, max_b.z, max_b.x, max_b.y, max_b.z, min_b.x, max_b.y, max_b.z])
+    # Back face (z = min_b.z)
+    vertices.extend([min_b.x, min_b.y, min_b.z, min_b.x, max_b.y, min_b.z, max_b.x, max_b.y, min_b.z])
+    vertices.extend([min_b.x, min_b.y, min_b.z, max_b.x, max_b.y, min_b.z, max_b.x, min_b.y, min_b.z])
+    # Left face (x = min_b.x)
+    vertices.extend([min_b.x, min_b.y, min_b.z, min_b.x, max_b.y, min_b.z, min_b.x, max_b.y, max_b.z])
+    vertices.extend([min_b.x, min_b.y, min_b.z, min_b.x, max_b.y, max_b.z, min_b.x, min_b.y, max_b.z])
+    # Right face (x = max_b.x)
+    vertices.extend([max_b.x, min_b.y, min_b.z, max_b.x, max_b.y, min_b.z, max_b.x, max_b.y, max_b.z])
+    vertices.extend([max_b.x, min_b.y, min_b.z, max_b.x, max_b.y, max_b.z, max_b.x, min_b.y, max_b.z])
+    # Bottom face (y = min_b.y)
+    vertices.extend([min_b.x, min_b.y, min_b.z, max_b.x, min_b.y, min_b.z, max_b.x, min_b.y, max_b.z])
+    vertices.extend([min_b.x, min_b.y, min_b.z, max_b.x, min_b.y, max_b.z, min_b.x, min_b.y, max_b.z])
+    # Top face (y = max_b.y)
+    vertices.extend([min_b.x, max_b.y, min_b.z, min_b.x, max_b.y, max_b.z, max_b.x, max_b.y, max_b.z])
+    vertices.extend([min_b.x, max_b.y, min_b.z, max_b.x, max_b.y, max_b.z, max_b.x, max_b.y, min_b.z])
 
     # Step 4: Upload vertex data
     bind_buffer(GL_ARRAY_BUFFER, vbo)
@@ -67,36 +84,13 @@ def render_aabb_geometry(current_block, number_of_blocks, tcoord_flag, ren_win, 
 
     return False  # Continue rendering
 
-def allocate_vertex_array_object():
-    # Standard OpenGL: glGenVertexArrays(1, &vao)
-    return {"id": 1}
+def create_vertex_array_object():
+    # Equivalent to glGenVertexArrays(1, &vao)
+    return {"id": next_unique_id()}
 
-def allocate_vertex_buffer_object():
-    # Standard OpenGL: glGenBuffers(1, &vbo)
-    return {"id": 1}
-
-def generate_box_vertices(min_b, max_b):
-    # Generates 36 floats for 12 triangles defining 6 faces of the AABB
-    verts = []
-    # Front face (z = max_b.z)
-    verts.extend([min_b.x, min_b.y, max_b.z, max_b.x, min_b.y, max_b.z, max_b.x, max_b.y, max_b.z])
-    verts.extend([min_b.x, min_b.y, max_b.z, max_b.x, max_b.y, max_b.z, min_b.x, max_b.y, max_b.z])
-    # Back face (z = min_b.z)
-    verts.extend([min_b.x, min_b.y, min_b.z, min_b.x, max_b.y, min_b.z, max_b.x, max_b.y, min_b.z])
-    verts.extend([min_b.x, min_b.y, min_b.z, max_b.x, max_b.y, min_b.z, max_b.x, min_b.y, min_b.z])
-    # Left face (x = min_b.x)
-    verts.extend([min_b.x, min_b.y, min_b.z, min_b.x, max_b.y, min_b.z, min_b.x, max_b.y, max_b.z])
-    verts.extend([min_b.x, min_b.y, min_b.z, min_b.x, max_b.y, max_b.z, min_b.x, min_b.y, max_b.z])
-    # Right face (x = max_b.x)
-    verts.extend([max_b.x, min_b.y, min_b.z, max_b.x, max_b.y, min_b.z, max_b.x, max_b.y, max_b.z])
-    verts.extend([max_b.x, min_b.y, min_b.z, max_b.x, max_b.y, max_b.z, max_b.x, min_b.y, max_b.z])
-    # Bottom face (y = min_b.y)
-    verts.extend([min_b.x, min_b.y, min_b.z, max_b.x, min_b.y, min_b.z, max_b.x, min_b.y, max_b.z])
-    verts.extend([min_b.x, min_b.y, min_b.z, max_b.x, min_b.y, max_b.z, min_b.x, min_b.y, max_b.z])
-    # Top face (y = max_b.y)
-    verts.extend([min_b.x, max_b.y, min_b.z, min_b.x, max_b.y, max_b.z, max_b.x, max_b.y, max_b.z])
-    verts.extend([min_b.x, max_b.y, min_b.z, max_b.x, max_b.y, max_b.z, max_b.x, max_b.y, min_b.z])
-    return verts
+def create_vertex_buffer_object():
+    # Equivalent to glGenBuffers(1, &vbo)
+    return {"id": next_unique_id()}
 
 def bind_buffer(target, buffer): pass
 def upload_buffer_data(target, size, data, usage): pass
@@ -120,12 +114,12 @@ def delete_vertex_array_object(vao): pass
 Draws arbitrary bounding boxes for debugging. Choose when you need to visualize dynamic or non-axis-aligned bounds.
 
 ## Operating characteristics
-- **Time Complexity**: Not given in the sources.
-- **Memory Complexity**: Not given in the sources.
-- **Strengths**: Not given in the sources.
-- **Limitations**: Not given in the sources.
-- **When to use**: Not given in the sources.
-- **When not to use**: Not given in the sources.
+- **Time Complexity**: Not given in the sources [S1, unofficial][S2, unofficial].
+- **Memory Complexity**: Not given in the sources [S1, unofficial][S2, unofficial].
+- **Strengths**: Not given in the sources [S1, unofficial][S2, unofficial].
+- **Limitations**: Not given in the sources [S1, unofficial][S2, unofficial].
+- **When to use**: Not given in the sources [S1, unofficial][S2, unofficial].
+- **When not to use**: Not given in the sources [S1, unofficial][S2, unofficial].
 
 ## Background
 The method originates from VTK-based volume ray casting implementations and custom rendering engines [S1, unofficial][S2, unofficial]. It is applied in debug and visualization pipelines to render volume extents [S1, unofficial].

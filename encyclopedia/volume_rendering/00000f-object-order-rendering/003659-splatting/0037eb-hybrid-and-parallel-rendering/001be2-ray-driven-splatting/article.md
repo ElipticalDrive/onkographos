@@ -3,105 +3,105 @@
 Also called: Hybrid Splatting/Ray Casting, Muller Yagel hybrid, Muller and Yagel hybrid, Ray-driven volume splatting
 
 ## Overview
-Ray-driven splatting is a hybrid volume rendering technique that combines the precomputation of splatting with the accumulation logic of ray casting [S1, unofficial]. It solves the problem of inefficient and inaccurate perspective projection in traditional voxel-driven splatting, where mapping 3D footprints to the 2D image plane becomes complex and slow [S2, unofficial]. Unlike traditional splatting, which is sensitive to perspective transforms, this method spawns rays to intersect splats suspended in object space, enabling the use of ray-tracing optimizations like early ray termination and spatial acceleration structures [S2, unofficial].
+Ray-driven splatting is a hybrid volume rendering technique that merges the object-order projection of splatting with the ray-order accumulation of ray casting [S1, unofficial][S2, unofficial]. It solves the problem of inefficient and inaccurate perspective projection in traditional voxel-driven splatting by suspending splats in object space and intersecting them via spawned rays [S2, unofficial]. Unlike traditional splatting, which rasterizes footprints directly to the screen, this method enables ray-tracing optimizations such as early ray termination and spatial acceleration structures, offering superior performance for perspective views [S1, unofficial][S2, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A volumetric dataset represented as a grid of voxels, where each voxel contains scalar data (e.g., density, color) [S1, unofficial].
-*   **Output:** A 2D image where pixel values are accumulated contributions from splats intersected by view rays [S1, unofficial].
+**Inputs:** Volumetric dataset (voxel grid); camera parameters (viewing direction, projection type); splat kernel definition.
+**Outputs:** Final image (color and opacity per pixel).
 
 **Data Structures:**
-*   **Voxel Grid:** A 3D array storing scalar values.
-*   **Splat Representation:** Each voxel is associated with a "splat," which is a spatial footprint (kernel) suspended in object space [S2, unofficial]. The splat represents the contribution of the voxel to the final image.
+*   **Voxel Grid:** Regular 3D grid storing scalar values.
+*   **Splat Primitives:** One splat per voxel, suspended in object space. Each splat is defined by its center position (voxel center) and its footprint function (kernel).
+*   **Acceleration Structure:** Optional spatial structure (e.g., bounding volumes) to optimize ray-splat intersection [S2, unofficial].
 
 **Steps:**
-1.  **Splat Suspension:** Imagine splats suspended in object space, with one splat associated with every voxel in the volume [S2, unofficial].
-2.  **Ray Spawning:** For each pixel in the target image plane, spawn a ray originating from the camera center and passing through the pixel [S2, unofficial].
-3.  **Ray Traversal:** Traverse the ray through the object space [S2, unofficial].
-4.  **Splat Intersection:** Intersect the ray with the splats suspended in space [S2, unofficial]. This involves determining which splats the ray passes through and calculating the contribution of each intersection [S2, unofficial].
-5.  **Accumulation:** Accumulate the contributions of the intersected splats to the pixel value [S1, unofficial]. This step is similar to ray casting accumulation but operates on pre-defined splat footprints rather than direct voxel sampling [S1, unofficial].
+1.  **Precompute Voxel Contributions:** For each voxel in the volume, define a splat primitive in object space. The contribution of the voxel is associated with this splat [S1, unofficial].
+2.  **Suspend Splats:** Imagine one splat at every voxel, suspended in object space [S2, unofficial].
+3.  **Spawn Rays:** For each pixel in the image plane, spawn a ray through the volume [S2, unofficial].
+4.  **Intersect Splats:** Traverse the space along the ray and intersect it with the suspended splats [S2, unofficial].
+5.  **Accumulate:** Accumulate the contributions of the intersected splats to the pixel color and opacity, similar to ray casting [S1, unofficial].
 
 **Formulas:**
-Not given in the sources. The method relies on the geometric intersection of rays with splat footprints and the accumulation of scalar values, but specific mathematical formulations for the footprint function or accumulation weights are not provided in the cited notes [S1, unofficial][S2, unofficial].
+*   Ray equation: $R(t) = O + tD$, where $O$ is the ray origin, $D$ is the direction, and $t$ is the distance [S2, unofficial].
+*   Splat intersection: The ray intersects a splat if the distance from the ray to the splat center is within the splat's footprint radius at that depth [S2, unofficial].
+*   Accumulation: Standard volume rendering integral approximation, summing contributions from intersected splats [S1, unofficial].
 
 **Parameters:**
-*   **Viewport Size:** In the cited performance example, a $260^2$ viewport was used [S1, unofficial].
-*   **Data Set:** MRbrain data set [S1, unofficial].
+*   Splat kernel width: Determines the footprint size. Must overlap to avoid artifacts [S1, unofficial].
+*   Ray step size: Determines traversal resolution.
 
 **Edge Cases and Pitfalls:**
-*   **Perspective Complexity:** Traditional splatting struggles with perspective projection due to the complexity of mapping footprints. Ray-driven splatting is inherently insensitive to this complexity [S2, unofficial].
-*   **Aliasing:** While not a direct feature of the core ray-driven splatting method described by Muller and Yagel, aliasing effects can occur if reconstruction kernels are assumed to be non-overlapping. Techniques like EWA resampling can be adapted to reduce these artifacts [S1, unofficial].
+*   **Perspective Complexity:** Traditional splatting struggles with perspective transforms; ray-driven splatting is inherently insensitive to this complexity [S2, unofficial].
+*   **Aliasing:** Incorrect visibility determination during back-to-front compositing can cause aliasing if kernels are assumed non-overlapping. Kernels must overlap to avoid artifacts [S1, unofficial].
+*   **Performance:** Requires efficient intersection testing. Without acceleration, performance may degrade with large datasets [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pseudocode for Ray-Driven Splatting
-# Note: Specific intersection algorithms and footprint functions are not detailed in the sources.
-
-def ray_driven_splatting(volume_data, camera, image_width, image_height):
-    # Initialize image buffer
-    image = zeros((image_height, image_width, 3))
+def ray_driven_splatting(volume, camera, image_width, image_height):
+    # Initialize output image
+    image = zeros((image_height, image_width, 4))
     
-    # Iterate over each pixel
+    # Precompute splats in object space
+    splats = []
+    for voxel in volume:
+        splat = Splat(center=voxel.position, value=voxel.value, kernel=voxel.kernel)
+        splats.append(splat)
+    
+    # Optional: Build acceleration structure for splats
+    accel_struct = build_acceleration_structure(splats)
+    
+    # Spawn rays for each pixel
     for y in range(image_height):
         for x in range(image_width):
-            # Spawn a ray for the current pixel
-            ray = spawn_ray(camera, x, y)
+            ray_origin, ray_direction = camera.get_ray(x, y)
             
-            # Initialize pixel color
-            pixel_color = (0.0, 0.0, 0.0)
+            # Traverse space and intersect splats
+            hits = intersect_ray_splats(ray_origin, ray_direction, splats, accel_struct)
             
-            # Traverse the ray through object space
-            # This step involves finding intersections with splats
-            # The specific traversal and intersection logic is not detailed in the sources
-            intersections = find_ray_splat_intersections(ray, volume_data)
+            # Sort hits by distance (back-to-front)
+            hits.sort(key=lambda h: h.distance)
             
-            # Accumulate contributions from intersections
-            for intersection in intersections:
-                # Calculate contribution based on splat footprint and ray intersection
-                # Specific formula for contribution is not provided in the sources
-                contribution = calculate_splat_contribution(intersection)
-                pixel_color += contribution
+            # Accumulate contributions
+            color = vec3(0.0)
+            alpha = 0.0
+            for hit in hits:
+                # Evaluate splat contribution at intersection point
+                contribution = hit.splat.evaluate(hit.point)
+                
+                # Standard volume rendering accumulation
+                c = contribution.color
+                a = contribution.alpha
+                
+                color = color * (1.0 - a) + c * a
+                alpha = alpha + a * (1.0 - alpha)
+                
+                # Early ray termination if alpha is sufficiently high
+                if alpha > 0.99:
+                    break
             
-            image[y, x] = pixel_color
-            
+            image[y, x] = vec4(color, alpha)
+    
     return image
-
-def spawn_ray(camera, x, y):
-    # Generate a ray from the camera center through the pixel (x, y)
-    # Implementation details depend on camera model
-    pass
-
-def find_ray_splat_intersections(ray, volume_data):
-    # Find all splats (associated with voxels) that the ray intersects
-    # This can use acceleration structures like bounding volumes
-    # Specific algorithm is not detailed in the sources
-    pass
-
-def calculate_splat_contribution(intersection):
-    # Calculate the color/density contribution of a splat at the intersection point
-    # Depends on the splat footprint function and voxel data
-    # Specific implementation is not detailed in the sources
-    pass
 ```
 
 ## Subtopics
 
 ### [Splat Rasterization via Raycasting](1437-splat-rasterization-via-raycasting.md)
-This method implements splat rasterization on GPUs by drawing point primitives as screen-space squares and casting a ray for each fragment to test inclusion in the splat. It solves the problem of accurately projecting 3D splats onto the screen without underestimating extents, which causes rendering artifacts with previous approximations. Unlike Botsch et al.'s approximation, this raycasting approach provides a correct upper bound to extents and works for large splats near the near plane.
+Implements splat rasterization on GPUs by drawing point primitives as screen-space squares and casting a ray for each fragment to test inclusion in the splat. Solves the problem of accurately projecting 3D splats onto the screen without underestimating extents. Unlike Botsch et al.'s approximation, this raycasting approach provides a correct upper bound to extents and works for large splats near the near plane.
 
 ## Operating characteristics
-*   **Performance:** In a cited example, the method rendered the MRbrain data set with a $260^2$ viewport in 30 seconds on an SGI Indigo with a 200 MHz processor [S1, unofficial].
-*   **Projection Efficiency:** Offers competitive or superior performance for parallel projection, and superior performance for perspective projection compared to traditional splatting [S2, unofficial].
-*   **Optimizations:** Enables the use of ray tracing optimization techniques such as space leaping, adaptive screen sampling, or spatial acceleration structures [S1, unofficial].
-*   **Strengths:** Inherently insensitive to the complexity of the perspective viewing transform; supports acceleration methods like early ray termination and bounding volumes, which traditional voxel-driven splatting cannot benefit from [S2, unofficial].
-*   **Limitations:** Not explicitly stated in the sources, but the method requires efficient intersection testing between rays and splats, which can be computationally intensive if not optimized [S2, unofficial].
+*   **Time Complexity:** Depends on the number of splats intersected per ray. With acceleration structures, it can be significantly faster than naive ray casting.
+*   **Memory Complexity:** Linear in the number of voxels, as one splat is stored per voxel.
+*   **Performance:** 30 seconds for the MRbrain data set rendered with a 260x260 viewport on an SGI Indigo with 200 MHz [S1, unofficial]. Offers competitive or superior performance for parallel projection, and superior performance for perspective projection compared to traditional splatting [S2, unofficial].
+*   **Strengths:** Enables use of ray tracing optimizations (space leaping, adaptive screen sampling, spatial acceleration structures) [S1, unofficial]. Inherently insensitive to perspective viewing transform complexity [S2, unofficial].
+*   **Limitations:** Requires efficient intersection testing. Performance may degrade without acceleration structures for large datasets.
+*   **When to use:** When perspective projection accuracy and ray-tracing optimizations are needed.
+*   **When not to use:** When simple orthographic projection is sufficient and hardware acceleration for splatting is preferred.
 
 ## Background
-*   **Origin:** The method was suggested by Muller and Yagel [S1, unofficial].
-*   **History:** It was developed to address the limitations of traditional voxel-driven splatting, particularly regarding perspective projection and the inability to use ray-tracing optimizations [S2, unofficial].
-*   **Usage:** Used in volume rendering for medical imaging (e.g., MRbrain data set) and other applications requiring efficient perspective volume visualization [S1, unofficial][S2, unofficial].
+Ray-driven splatting was introduced by Muller and Yagel [S1, unofficial]. It addresses the limitations of traditional voxel-driven splatting, particularly regarding perspective projection and the inability to use ray-tracing optimizations [S2, unofficial]. The method merges splatting with raycasting principles, allowing splats to be suspended in object space and intersected by rays [S2, unofficial].
 
 ## Sources
 [S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)

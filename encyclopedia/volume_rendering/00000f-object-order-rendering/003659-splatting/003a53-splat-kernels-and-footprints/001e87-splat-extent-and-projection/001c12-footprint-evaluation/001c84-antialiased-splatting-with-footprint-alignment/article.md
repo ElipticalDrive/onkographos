@@ -3,55 +3,43 @@
 Also called: Antialiased splatting method, Perspective Anti-Aliased Splatting
 
 ## Overview
-Antialiased Splatting with Footprint Alignment is a forward-mapping volume rendering technique that prevents sample-rate aliasing in perspective views by dynamically scaling splat sizes and attenuating splat energy for voxels beyond a critical distance [S1, S2, unofficial]. It sets itself apart from standard splatting by varying the kernel size and energy as a function of depth to match the diverging integration grid rays, ensuring the integration grid sampling frequency remains above twice the maximum volume raster frequency [S1, S2, unofficial].
+Antialiased Splatting with Footprint Alignment is a forward-mapping volume rendering technique that prevents sample-rate aliasing in perspective views by dynamically scaling splat sizes and attenuating splat energy for voxels beyond a critical distance [S1, unofficial][S2, unofficial]. It sets itself apart from standard splatting by varying the kernel size and energy as a function of depth to match the diverging integration grid rays, ensuring the integration grid sampling frequency remains above twice the maximum volume raster frequency [S1, unofficial][S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** A volume dataset (typically stored as a subset of extracted voxels), camera parameters (eye position, view plane distance $z_{img}$, pixel extent $p$, viewing frustum half-angle $\phi_c$), and a transfer function.
+- **Input:** A volume dataset (typically stored as a subset of extracted voxels), camera parameters (eye position, view plane distance $z_{img}$, pixel extent $p$, viewing frustum half-angle $\phi_c$), and a transfer function [S1, unofficial][S2, unofficial].
 - **Output:** A 2D image with anti-aliased volume rendering.
 
 **Data Structures:**
-The volume subset is stored as a 2D array of splat rows. Each row is an array of voxels. Each voxel stores:
-- Location $(x, y, z)$ in eye space.
-- Normal vector.
-- Pre-computed transfer function value (e.g., color, opacity).
-- Voxels in a row are not necessarily contiguous [S1, S2, unofficial].
-
-The splat kernel is pre-computed and stored in a $256 \times 256$ table, which is texture-mapped onto the polygon representing the splat [S1, S2, unofficial].
+The volume subset is stored as a 2D array of splat rows. Each row is an array of voxels. Each voxel stores its location $(x, y, z)$ in eye space, a normal vector, and a pre-computed transfer function value (e.g., color, opacity) [S1, unofficial][S2, unofficial]. Voxels in a row are not necessarily contiguous [S1, unofficial][S2, unofficial].
+The splat kernel is pre-computed and stored in a $256 \times 256$ table, which is texture-mapped onto the polygon representing the splat [S1, unofficial][S2, unofficial].
 
 **Critical Distance ($z_k$ or $k$):**
-The distance $z_k$ along the z-axis where the volume raster sampling frequency $p$ equals the integration grid sampling frequency $\phi(z)$ divides eye space into two regions [S1, S2, unofficial]:
-- **Region 1 ($z < z_k$):** No aliasing; standard splatting is sufficient.
-- **Region 2 ($z > z_k$):** Aliasing possible; low-pass filtering (scaling/attenuation) is required.
+The distance $z_k$ along the z-axis where the volume raster sampling frequency $p$ equals the integration grid sampling frequency $\phi(z)$ divides eye space into two regions [S1, unofficial][S2, unofficial]:
+- **Region 1 ($z < z_k$):** No aliasing; standard splatting is sufficient [S1, unofficial][S2, unofficial].
+- **Region 2 ($z > z_k$):** Aliasing possible; low-pass filtering (scaling/attenuation) is required [S1, unofficial][S2, unofficial].
 
 The critical distance is calculated from similar triangles [S2, unofficial]:
 $$ z_k = \frac{p \cdot z_{img}}{p - 1} $$
 where $p$ is the extent of a pixel and $z_{img}$ is the distance from the eye point to the view plane [S2, unofficial]. Note: [S1, unofficial] uses $k$ for this distance.
 
 **Algorithm Steps:**
-1. **Traverse the volume:** Iterate through the voxels in back-to-front or front-to-back order [S1, S2, unofficial].
-2. **Determine Distance:** For each voxel, compute its distance $z_v$ (or $d$) from the eye point along the viewing axis [S1, S2, unofficial].
+1. **Traverse the volume:** Iterate through the voxels in back-to-front or front-to-back order [S1, unofficial][S2, unofficial].
+2. **Determine Distance:** For each voxel, compute its distance $z_v$ (or $d$) from the eye point along the viewing axis [S1, unofficial][S2, unofficial].
 3. **Check Region:**
    - If $z_v < z_k$ (or $d < k$):
      - Draw the splat with its standard size in eye space [S2, unofficial].
      - The polygon can be aligned parallel to the x-y plane or perpendicular to the ray [S2, unofficial].
-     - Use standard energy/alpha [S1, unofficial].
    - If $z_v \ge z_k$ (or $d \ge k$):
-     - **Scale Radius:** Scale the splat footprint radius to match the diverging rays.
-       Using similar triangles [S1, S2, unofficial]:
+     - **Scale Radius:** Scale the splat footprint radius to match the diverging rays. Using similar triangles [S1, unofficial][S2, unofficial]:
        $$ r_2 = r_1 \cdot \frac{z_v}{z_k} $$
-       where $r_1$ is the radius at $z_k$ and $r_2$ is the radius at $z_v$ [S2, unofficial].
-       [S1, unofficial] expresses this as $r_2 = (k/d) \cdot r_1$ where $r_1$ is the radius at distance $k$ (this implies $r_1$ in S1 is the *scaled* radius at $k$, effectively the base unit for scaling beyond $k$). The geometric intent is identical: radius grows linearly with distance beyond $z_k$.
-     - **Attenuate Energy:** Attenuate the splat's energy (e.g., alpha channel) to preserve total projected energy and avoid brightness artifacts [S1, S2, unofficial].
-       The total attenuation factor is $(z_k / z_v)^2$ [S2, unofficial].
-       [S1, unofficial] states $E_2 = (k^2 / d^2) \cdot E_1$.
-       [S2, unofficial] explicitly states: "We attenuate the alpha channel of the polygon according to the value of $(z_k/z_v)$". This implies the alpha is scaled by the square root of the energy attenuation factor, or that the energy attenuation is defined differently in their compositing model. Given [S2, unofficial] says "total attenuation factor is $(z_k/z_v)^2$" and then says "attenuate alpha... according to $(z_k/z_v)$", we assume the alpha value itself is multiplied by $(z_k/z_v)$ [S2, unofficial].
-     - **Footprint Alignment:** Rotate the splat polygon so it is perpendicular to the ray passing from the eye point through the voxel position [S1, S2, unofficial].
-       Two alignment strategies exist [S2, unofficial]:
-       1. **Grid-aligned:** Align stretched footprint with the y-axis of the grid.
-       2. **Ray-perpendicular:** Rotate stretched footprint to be perpendicular to the ray.
+       where $r_1$ is the radius at $z_k$ and $r_2$ is the radius at $z_v$ [S2, unofficial]. [S1, unofficial] expresses this as $r_2 = (k/d) \cdot r_1$ where $r_1$ is the radius at distance $k$ (this implies $r_1$ in S1 is the *scaled* radius at $k$, effectively the base unit for scaling beyond $k$). The geometric intent is identical: radius grows linearly with distance beyond $z_k$ [S1, unofficial][S2, unofficial].
+     - **Attenuate Energy:** Attenuate the splat's energy (e.g., alpha channel) to preserve total projected energy and avoid brightness artifacts [S1, unofficial][S2, unofficial]. The total attenuation factor is $(z_k / z_v)^2$ [S2, unofficial]. [S1, unofficial] states $E_2 = (k^2 / d^2) \cdot E_1$. [S2, unofficial] explicitly states: "We attenuate the alpha channel of the polygon according to the value of $(z_k/z_v)$". This implies the alpha is scaled by the square root of the energy attenuation factor, or that the energy attenuation is defined differently in their compositing model [S2, unofficial].
+     - **Footprint Alignment:** Rotate the splat polygon so it is perpendicular to the ray passing from the eye point through the voxel position [S1, unofficial][S2, unofficial]. Two alignment strategies exist [S2, unofficial]:
+       1. **Grid-aligned:** Align stretched footprint with the y-axis of the grid [S2, unofficial].
+       2. **Ray-perpendicular:** Rotate stretched footprint to be perpendicular to the ray [S2, unofficial].
        Ray-perpendicular is more accurate near $z_k$, while grid-aligned is better far from $z_k$ [S2, unofficial].
-4. **Render:** Texture map the pre-computed kernel onto the polygon and composite into the screen buffer [S1, S2, unofficial].
+4. **Render:** Texture map the pre-computed kernel onto the polygon and composite into the screen buffer [S1, unofficial][S2, unofficial].
 
 **Voxel Interpolation (Tri-Linear):**
 For trilinear interpolation, the value is distributed to 8 surrounding voxels [S3, unofficial]:
@@ -64,10 +52,11 @@ For trilinear interpolation, the value is distributed to 8 surrounding voxels [S
    - Add $value \cdot w$ to voxel at $corner + (i, j, k)$ if in bounds [S3, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def render_antialiased_splats(volume_subset, camera, kernel_table):
     """
     volume_subset: List of rows, each row is a list of Voxel objects.
@@ -75,53 +64,31 @@ def render_antialiased_splats(volume_subset, camera, kernel_table):
     kernel_table: 256x256 texture map of the splat kernel.
     """
     # Calculate critical distance z_k
-    # p is pixel extent, z_img is distance to view plane
     z_k = (camera.p * camera.z_img) / (camera.p - 1)
     
     for row in volume_subset:
         for voxel in row:
             # 1. Calculate distance from eye
-            # Assuming voxel.pos is in eye space and z-axis is viewing direction
             z_v = voxel.pos.z
             
             # 2. Determine scaling and attenuation
             if z_v < z_k:
-                # Region 1: Standard splat
                 scale_factor = 1.0
                 alpha_scale = 1.0
-                # Alignment: Can be parallel to x-y plane or ray-perp
-                # For simplicity, assume ray-perp for consistency with Region 2 logic
-                # or use grid-aligned if z_v is large
-                is_perp = True 
             else:
-                # Region 2: Anti-aliased splat
                 scale_factor = z_v / z_k
-                # Attenuate alpha by (z_k / z_v) as per [S2, unofficial]
                 alpha_scale = z_k / z_v
-                is_perp = True # Ray-perpendicular alignment recommended for accuracy near z_k
             
-            # 3. Create Polygon
-            # Center at voxel position
+            radius = voxel.base_radius * scale_factor
             center = voxel.pos
             
-            # If ray-perpendicular, rotate polygon normal to be parallel to eye-to-voxel ray
-            if is_perp:
-                ray_dir = normalize(center - camera.eye_pos)
-                # Construct rotation matrix to align polygon normal with ray_dir
-                # (Implementation detail: standard graphics pipeline rotation)
-                polygon = create_polygon(center, radius=voxel.base_radius * scale_factor, rotation=ray_dir)
-            else:
-                # Grid-aligned: parallel to x-y plane
-                polygon = create_polygon(center, radius=voxel.base_radius * scale_factor, rotation=Vector(0,0,1))
+            # Standard rotation to align polygon normal with eye-to-voxel ray
+            ray_dir = normalize(center - camera.eye_pos)
+            polygon = create_polygon(center, radius, ray_dir)
             
-            # 4. Texture Map and Composite
-            # Apply kernel texture
             polygon.texture = kernel_table
-            
-            # Modulate alpha by attenuation factor
             polygon.alpha *= alpha_scale
-            
-            # Composite into screen buffer
+            # Standard rasterization and alpha compositing into screen buffer
             composite_polygon(polygon)
 
 def tri_linear_interpolate(value, pos, buffer):
@@ -129,35 +96,15 @@ def tri_linear_interpolate(value, pos, buffer):
     Distributes 'value' at 'pos' to 8 surrounding voxels in 'buffer' using tri-linear interpolation.
     """
     # Offset by -0.5 to align with voxel centers
-    p = Vector(pos.x - 0.5, pos.y - 0.5, pos.z - 0.5)
+    p = (pos[0] - 0.5, pos[1] - 0.5, pos[2] - 0.5)
     
     # Lower-left corner
-    corner = Vector(floor(p.x), floor(p.y), floor(p.z))
+    corner = (math.floor(p[0]), math.floor(p[1]), math.floor(p[2]))
     
     # Fraction vector
-    # f = (1.0, 1.0, 1.0) - (floor(p) + 1 - p)
-    # Note: floor(p) is integer part. 
-    # Let's compute explicitly:
-    frac = Vector(1.0, 1.0, 1.0) - (Vector(floor(p.x), floor(p.y), floor(p.z)) + Vector(1,1,1) - p)
-    
-    for k in range(2):
-        frac.z = 1.0 - frac.z # Invert for next iteration? No, loop structure in [S3, unofficial] inverts at start of loop
-        # [S3, unofficial] code:
-        # for k in 0..1:
-        #   fraction[2] = 1.0 - fraction[2]
-        #   for j in 0..1:
-        #     fraction[1] = 1.0 - fraction[1]
-        #     for i in 0..1:
-        #       fraction[0] = 1.0 - fraction[0]
-        
-        # Resetting fraction for the loop structure in [S3, unofficial]
-        # Initial fraction calculation needs to be done before loops
-        # But [S3, unofficial] modifies fraction in place.
-        pass 
-
-    # Re-writing [S3, unofficial] loop exactly
-    # Initial fraction vector
-    f = Vector(1.0, 1.0, 1.0) - (Vector(floor(p.x), floor(p.y), floor(p.z)) + Vector(1,1,1) - p)
+    f = (1.0 - (math.floor(p[0]) + 1 - p[0]),
+         1.0 - (math.floor(p[1]) + 1 - p[1]),
+         1.0 - (math.floor(p[2]) + 1 - p[2]))
     
     for k in range(2):
         f[2] = 1.0 - f[2]
@@ -166,11 +113,21 @@ def tri_linear_interpolate(value, pos, buffer):
             for i in range(2):
                 f[0] = 1.0 - f[0]
                 weight = f[0] * f[1] * f[2]
-                target_x = corner.x + i
-                target_y = corner.y + j
-                target_z = corner.z + k
-                if buffer.is_in_bounds(target_x, target_y, target_z):
-                    buffer.add(target_x, target_y, target_z, value * weight)
+                tx, ty, tz = corner[0] + i, corner[1] + j, corner[2] + k
+                if buffer.is_in_bounds(tx, ty, tz):
+                    buffer.add(tx, ty, tz, value * weight)
+
+def normalize(v):
+    l = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+    return (v[0]/l, v[1]/l, v[2]/l)
+
+def create_polygon(center, radius, normal):
+    # Standard graphics pipeline: generate quad vertices, apply rotation matrix to align normal
+    return {"center": center, "radius": radius, "normal": normal}
+
+def composite_polygon(polygon):
+    # Standard graphics pipeline: rasterize polygon, texture map kernel, blend alpha into framebuffer
+    pass
 ```
 
 **Edge Cases and Pitfalls:**
@@ -182,24 +139,24 @@ def tri_linear_interpolate(value, pos, buffer):
 - **Grid Alignment:** Aligning footprints with the grid causes indexed ray integrals to differ significantly from true ray integrals for rays maintaining a large angle with the viewing axis [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the subset [S1, unofficial]. Per-voxel cost involves distance calculation, scaling factor computation, and polygon setup/compositing.
-- **Memory Complexity:** Depends on the volume subset size. Storing a 2D array of splat rows with non-contiguous voxels requires storing location and normal for each voxel [S1, S2, unofficial]. Kernel table is $256 \times 256$ [S1, S2, unofficial].
+- **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the subset [S1, unofficial]. Per-voxel cost involves distance calculation, scaling factor computation, and polygon setup/compositing [S1, unofficial].
+- **Memory Complexity:** Depends on the volume subset size. Storing a 2D array of splat rows with non-contiguous voxels requires storing location and normal for each voxel [S1, unofficial][S2, unofficial]. Kernel table is $256 \times 256$ [S1, unofficial][S2, unofficial].
 - **Performance:** Achieved real-time performance on Silicon Graphics hardware for datasets like $512 \times 512 \times 103$ (386K splats) [S1, unofficial].
 - **Strengths:**
-  - Prevents sample-rate aliasing in perspective views [S1, S2, unofficial].
+  - Prevents sample-rate aliasing in perspective views [S1, unofficial][S2, unofficial].
   - Efficient compared to ray-driven splatting or computing unique footprints for every voxel with diverging rays [S2, unofficial].
-  - Can be implemented using standard rendering hardware (texture-mapped polygons) [S1, S2, unofficial].
+  - Can be implemented using standard rendering hardware (texture-mapped polygons) [S1, unofficial][S2, unofficial].
 - **Limitations:**
   - Approximation errors in footprint alignment and projection [S1, unofficial].
   - Grid-aligned alignment is less accurate for rays at large angles [S2, unofficial].
-  - Ray-perpendicular alignment is more accurate but requires rotation per voxel [S1, S2, unofficial].
+  - Ray-perpendicular alignment is more accurate but requires rotation per voxel [S1, unofficial][S2, unofficial].
   - Does not address aliasing from non-ideal reconstruction filters, only sample-rate aliasing [S2, unofficial].
-- **When to Use:** Perspective volume rendering where aliasing artifacts are visible due to diverging rays or high volume resolution relative to image resolution [S1, S2, unofficial].
+- **When to Use:** Perspective volume rendering where aliasing artifacts are visible due to diverging rays or high volume resolution relative to image resolution [S1, unofficial][S2, unofficial].
 - **When Not to Use:** Orthographic views with low resolution (aliasing is uniform and less severe, or handled by standard filtering) [S2, unofficial].
 
 ## Background
 - **Origin:** The method was introduced in the late 1990s. [S1, unofficial] references "Perspective Splatting" (DTIC ADA363073) and [S2, unofficial] "Splatting Errors and Antialiasing" (DTIC ADA606764, IEEE TVCG 1998).
-- **Development:** Standard splatting (Westover) was designed for orthographic views. Perspective splatting introduced aliasing issues due to non-uniform sampling. This method extends splatting to perspective by scaling kernels and attenuating energy [S1, S2, unofficial].
+- **Development:** Standard splatting (Westover) was designed for orthographic views. Perspective splatting introduced aliasing issues due to non-uniform sampling. This method extends splatting to perspective by scaling kernels and attenuating energy [S1, unofficial][S2, unofficial].
 - **Usage:** Used in the "Tenderer" implementation on Silicon Graphics hardware [S1, unofficial]. Applied to terrain datasets from satellite photographs and microtubule studies from confocal microscopy [S1, unofficial].
 
 ## Sources
