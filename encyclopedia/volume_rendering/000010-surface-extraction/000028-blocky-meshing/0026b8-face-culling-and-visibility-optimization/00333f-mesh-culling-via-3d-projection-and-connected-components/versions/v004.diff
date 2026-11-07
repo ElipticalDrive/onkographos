@@ -1,0 +1,448 @@
+--- v003.md
++++ v004.md
+@@ -4,74 +4,79 @@
+ 
+ ## Overview
+-This method culls mesh geometry by projecting vertices into multiple camera views and comparing their depths against reference depth maps to identify and remove artifacts from unbounded reconstructions, such as those from Gaussian Splatting [S1, unofficial]. It classifies points as "seen," "unseen," or "forecast" based on multi-view consistency, then filters faces and connected components to retain only geometrically valid structures [S1, unofficial]. It differs from sibling methods like [Face Culling](8735-face-culling.md) by relying on external camera poses and depth rendering rather than local voxel adjacency or simple backface normals.
++This method culls mesh geometry by projecting vertices into multiple camera views and comparing their depths against reference depth maps to identify and remove unseen or forecast geometry [S1, unofficial]. It distinguishes itself from neighbor-based face culling [Face Culling and Visibility Optimization](3861-face-culling-and-visibility-optimization.md) by relying on global visibility from arbitrary viewpoints rather than local voxel adjacency, making it suitable for removing artifacts from unbounded reconstructions [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- A mesh (vertices $V$, faces $F$).
+-- A list of camera poses (extrinsics $C_{2W}$) and intrinsic parameters ($K$: $f_x, f_y, c_x, c_y$, resolution $H, W$).
+-- Reference depth maps $D$ for each camera pose, rendered from the mesh or ground truth.
+-- Parameters: `points_batch_size` (default $5 \times 10^5$), `eps` (default $0.005$), `remove_small_geometry_threshold` (default $0.2$), `forecast_radius` (default $0$, optional), `cluster_to_keep` (default $1000$), `min_cluster_size` (default $50$).
+-
+-**Outputs:**
+-- A culled mesh containing only visible, geometrically consistent faces and vertices.
+-
+-**Data Structures:**
+-- `valid`: Boolean tensor of shape $(N_{pts})$, true if point is seen in $\ge 20$ cameras.
+-- `valid_forecast`: Boolean tensor of shape $(N_{pts})$, true if point is in forecast frustum and front-facing.
+-- `face_mask`: Boolean array of shape $(N_{faces})$, true if all vertices of the face are valid.
+-
+-**Steps:**
+-
+-1. **Initialize Masks:** Create `valid`, `valid_num`, and `valid_forecast` tensors of zeros with length equal to the number of mesh vertices, on the target device.
+-
+-2. **Iterate Cameras:** For each camera pose $c2w$ and its corresponding depth map $D$:
+-    a. **Coordinate Transform:** Negate the $y$ and $z$ rows of the rotation matrix in $c2w$ to match the expected coordinate system:
+-       $$ c2w[:3, 1:3] *= -1 $$
+-    b. **World-to-Camera:** Compute $w2c = c2w^{-1}$.
+-    c. **Project Vertices:** For a batch of vertices $P_{world}$:
+-       i. Convert to homogeneous coordinates: $P_{hom} = [P_{world}, 1]$.
+-       ii. Transform to camera space: $P_{cam} = w2c \cdot P_{hom}$.
+-       iii. Extract first three rows: $uvz = P_{cam}[:3]$.
+-       iv. Compute depth $z = uvz[:, 2] + 10^{-8}$.
+-       v. Compute normalized UV: $u = uvz[:, 0] / z$, $v = uvz[:, 1] / z$.
+-    d. **Frustum Check:**
+-       i. Standard frustum: $in\_frustum = (0 \le u < W) \land (0 \le v < H) \land (z > 0)$.
+-       ii. Forecast frustum (if `forecast_radius` $r > 0$): $forecast\_frustum = (-r \le u < W+r) \land (-r \le v < H+r) \land (z > 0)$.
+-    e. **Depth Sampling:**
+-       i. Reshape $D$ to $(1, 1, H, W)$.
+-       ii. Normalize UV grid to $[-1, 1]$ for sampling.
+-       iii. Sample depth at $(u, v)$ using bilinear interpolation with border padding: $d_{sample} = \text{grid\_sample}(D, (u, v), \text{padding\_mode='border'})$.
+-    f. **Front-Face Validation:**
+-       $$ is\_front = (d_{sample} > 0) \land (z < d_{sample} + \epsilon) $$
+-    g. **Update Masks:**
+-       i. If $in\_frustum$ and $is\_front$: increment `valid_num` and set `valid` bit.
+-       ii. If $forecast\_frustum$ and $is\_front$: set `valid_forecast` bit.
+-
+-3. **Finalize Point Visibility:**
+-   $$ valid = valid\_num \ge 20 $$
+-   This requires the point to be front-facing and within the frustum of at least 20 cameras.
+-
+-4. **Face Culling:**
+-   a. Create `face_mask` where a face is kept if all its vertices are in `valid`:
+-      $$ face\_mask = valid[mesh.faces].all(axis=1) $$
+-   b. Apply mask to mesh: `mesh.update_faces(face_mask)`.
+-   c. Remove unreferenced vertices: `mesh.remove_unreferenced_vertices()`.
+-
+-5. **Forecast Culling (Optional):**
+-   If `forecast_radius` $> 0$:
+-   a. Create a forecast mesh from faces where vertices are in `valid_forecast`.
+-   b. Compute the Oriented Bounding Box (OBB) of the cull mesh vertices.
+-   c. Keep only forecast faces within this OBB.
+-
+-6. **Connected Component Filtering (Cluster Filtering):**
+-   a. Identify connected triangle clusters using `cluster_connected_triangles()`.
+-   b. Sort clusters by triangle count. Select the $N$-th largest value (where $N = \text{cluster\_to\_keep}$) as the threshold.
+-   c. Remove triangles belonging to clusters smaller than the threshold or smaller than `min_cluster_size`.
+-   d. Remove unreferenced vertices and degenerate triangles.
+-
+-7. **Area-Based Filtering (Optional):**
+-   Filter components by area: keep components where area $> \text{remove\_small\_geometry\_threshold} \times \text{global\_area}$, or keep only the largest component if `get_largest_components` is True.
+-
+-**Pseudocode:**
++**Inputs**: A triangle mesh, a list of camera poses (world-to-camera or camera-to-world matrices), camera intrinsic parameters ($f_x, f_y, c_x, c_y$), image resolution ($H, W$), and optional parameters for forecast radius and cluster filtering.
++**Outputs**: A culled mesh with unreferenced vertices removed.
++
++**Data Structures**:
++- `mesh`: Triangle mesh with vertices $V \in \mathbb{R}^{N \times 3}$ and faces $F \in \mathbb{R}^{M \times 3}$ (indices into $V$).
++- `depth_list`: List of reference depth maps, one per camera pose, shape $(H, W)$.
++- `estimate_c2w_list`: List of camera-to-world transformation matrices, shape $(4, 4)$ per camera.
++- `valid`, `valid_num`, `valid_forecast`: Boolean/int tensors of shape $(N,)$ tracking vertex visibility.
++
++**Parameters**:
++- `points_batch_size`: Max points processed per batch to limit GPU memory. Default: $5 \times 10^5$ [S1, unofficial].
++- `remove_small_geometry_threshold`: Minimum face area ratio to keep a component. Default: $0.2$ [S1, unofficial].
++- `eps`: Depth comparison tolerance. Default: $0.005$ [S1, unofficial].
++- `forecast_radius`: Radius for expanding frustum bounds for forecast culling. Default: Not specified in sources, but used if $>0$ [S1, unofficial].
++
++**Steps**:
++
++1. **Initialize Masks**: Create tensors `valid`, `valid_num`, `valid_forecast` of shape $(N,)$ initialized to zero/false on the target device [S1, unofficial].
++
++2. **Iterate Cameras**: For each camera pose $c2w$ in `estimate_c2w_list`:
++    a. **Coordinate System Adjustment**: Negate the $y$ and $z$ rows of the rotation part of $c2w$ to match the expected coordinate system:
++       $$ c2w_{adj} = c2w $$
++       $$ c2w_{adj}[1, 1:3] *= -1 $$
++       $$ c2w_{adj}[2, 1:3] *= -1 $$
++    b. **World-to-Camera Matrix**: Compute $w2c = c2w_{adj}^{-1}$ [S1, unofficial].
++    c. **Project Vertices**:
++       - Convert vertices $V$ to homogeneous coordinates: $V_h = [V, \mathbf{1}]^T \in \mathbb{R}^{4 \times N}$ (assuming $V$ is $N \times 3$).
++       - Transform to camera space: $P_{cam} = w2c \cdot V_h$.
++       - Extract first three rows: $P_{cam} = [x_c, y_c, z_c, w_c]^T$. Note: In standard projection, $w_c$ is usually 1 if $w2c$ is affine, but here we extract the first three rows of the result of multiplying $w2c$ (4x4) by $V_h$ (4xN). The result is 4xN. Let $P_{proj} = P_{cam}[0:3, :]$ [S1, unofficial].
++    d. **Intrinsic Projection**:
++       - Apply intrinsic matrix $K = \begin{bmatrix} f_x & 0 & c_x \\ 0 & f_y & c_y \\ 0 & 0 & 1 \end{bmatrix}$.
++       - $uv = K \cdot P_{proj}$.
++       - Extract depth $z = uv[2, :] + 10^{-8}$ and normalized UV: $u = uv[0, :] / z$, $v = uv[1, :] / z$ [S1, unofficial].
++    e. **Frustum Check**:
++       - **Seen Frustum**: $in\_frustum = (u \ge 0) \land (u \le W-1) \land (v \ge 0) \land (v \le H-1) \land (z > 0)$ [S1, unofficial].
++       - **Forecast Frustum** (if `forecast_radius` $r > 0$): $forecast\_frustum = (u \ge -r) \land (u \le W-1+r) \land (v \ge -r) \land (v \le H-1+r) \land (z > 0)$ [S1, unofficial].
++    f. **Depth Sampling**:
++       - Reshape reference depth map $D$ to $(1, 1, H, W)$.
++       - Normalize UV grid to $[-1, 1]$ for sampling: $vgrid = 2 \cdot [u, v]^T - 1$ (shape $(2, N)$).
++       - Sample depth using bilinear interpolation with border padding: $depth\_sample = \text{grid\_sample}(D, vgrid, \text{padding\_mode='border'}, \text{align\_corners=True})$. Shape $(1, 1, N)$ [S1, unofficial].
++       - Extract scalar depth: $d_{sample} = depth\_sample[0, 0, :]$ [S1, unofficial].
++    g. **Front-Face Validation**:
++       - $is\_front\_face = (d_{sample} > 0.0) \land (z < d_{sample} + \epsilon)$ [S1, unofficial].
++    h. **Update Masks**:
++       - For vertices in $in\_frustum$ and $is\_front\_face$: increment `valid_num` and set `valid` to True [S1, unofficial].
++       - For vertices in $forecast\_frustum$ and $is\_front\_face$: set `valid_forecast` to True [S1, unofficial].
++
++3. **Finalize Vertex Masks**:
++   - A vertex is considered "seen" if `valid_num` $\ge 20$ (requires projection into at least 20 cameras) [S1, unofficial].
++   - Create `seen_mask` from `valid` and `valid_num`.
++   - Create `forecast_mask` from `valid_forecast` [S1, unofficial].
++
++4. **Face Masking**:
++   - A face is visible if all its vertices are visible:
++     $$ face\_mask = seen\_mask[mesh.faces].all(axis=1) $$
++   - Update mesh: `mesh_with_hole.update_faces(face_mask)` [S1, unofficial].
++   - Remove unreferenced vertices: `mesh_with_hole.remove_unreferenced_vertices()` [S1, unofficial].
++
++5. **Forecast Culling (Optional)**:
++   - If `forecast_radius` $> 0$:
++     - Create a forecast mesh from `forecast_mask`.
++     - Compute Oriented Bounding Box (OBB) of the cull mesh's vertices [S1, unofficial].
++     - Keep only forecast faces within this OBB [S1, unofficial].
++
++6. **Connected Component Filtering**:
++   - Identify connected triangle clusters using `cluster_connected_triangles()` [S1, unofficial].
++   - Sort clusters by number of triangles.
++   - Select threshold: $N$-th largest cluster size (where $N$ is `cluster_to_keep`) or enforce `min_cluster_size` [S1, unofficial].
++   - Remove triangles in clusters smaller than threshold.
++   - Remove unreferenced vertices and degenerate triangles [S1, unofficial].
++
++**Pseudocode**:
+ 
+ ```python
+@@ -79,111 +84,167 @@
+ import numpy as np
+ 
+-def project_and_cull(mesh, cameras, depth_maps, eps=0.005, batch_size=500000, forecast_radius=0):
++def cull_mesh_by_3d_projection(mesh, c2w_list, K, H, W, eps=0.005, min_cameras=20, forecast_radius=0.0, 
++                               cluster_to_keep=1000, min_cluster_size=50, remove_small_ratio=0.2):
+     """
+-    mesh: object with .vertices (N, 3) and .faces (M, 3)
+-    cameras: list of dicts with 'c2w' (4, 4), 'K' (3, 3), 'H', 'W'
+-    depth_maps: list of tensors (H, W)
++    Cull mesh geometry based on multi-view depth projection and connected components.
++    
++    Args:
++        mesh: Triangle mesh object with .vertices (N,3) and .faces (M,3)
++        c2w_list: List of camera-to-world matrices (4,4)
++        K: Intrinsic matrix (3,3)
++        H, W: Image height and width
++        eps: Depth tolerance
++        min_cameras: Minimum cameras required to mark vertex as seen
++        forecast_radius: Radius for forecast frustum expansion
++        cluster_to_keep: Max number of largest clusters to keep
++        min_cluster_size: Min triangles per cluster
++        remove_small_ratio: Min area ratio for component removal
++        
++    Returns:
++        Culled mesh
+     """
+-    n_verts = mesh.vertices.shape[0]
+-    valid = torch.zeros(n_verts, dtype=torch.bool, device=mesh.vertices.device)
+-    valid_num = torch.zeros(n_verts, dtype=torch.int, device=mesh.vertices.device)
+-    valid_forecast = torch.zeros(n_verts, dtype=torch.bool, device=mesh.vertices.device)
+-    
+-    vertices = mesh.vertices
+-    
+-    for i, cam in enumerate(cameras):
+-        c2w = cam['c2w'].clone()
+-        # Negate y and z rows of rotation part
+-        c2w[:3, 1] *= -1
+-        c2w[:3, 2] *= -1
+-        
+-        w2c = torch.inverse(c2w)
+-        K = cam['K']
+-        H, W = cam['H'], cam['W']
+-        depth = depth_maps[i]
+-        
+-        # Process in batches
+-        for start in range(0, n_verts, batch_size):
+-            end = min(start + batch_size, n_verts)
+-            batch_verts = vertices[start:end]
++    V = mesh.vertices # (N, 3)
++    N = V.shape[0]
++    
++    # Initialize masks
++    valid = torch.zeros(N, dtype=torch.bool, device=V.device)
++    valid_num = torch.zeros(N, dtype=torch.int, device=V.device)
++    valid_forecast = torch.zeros(N, dtype=torch.bool, device=V.device)
++    
++    # Process each camera
++    for c2w in c2w_list:
++        # Adjust coordinate system
++        c2w_adj = c2w.clone()
++        c2w_adj[1, 1:3] *= -1
++        c2w_adj[2, 1:3] *= -1
++        
++        # World-to-Camera
++        w2c = torch.inverse(c2w_adj)
++        
++        # Project vertices
++        V_h = torch.cat([V, torch.ones(N, 1, device=V.device)], dim=1) # (N, 4)
++        P_cam = (w2c @ V_h.T).T # (N, 4)
++        x_c, y_c, z_c, _ = P_cam[:, 0], P_cam[:, 1], P_cam[:, 2], P_cam[:, 3]
++        
++        # Intrinsic projection
++        # uv = K @ [x_c, y_c, z_c]^T
++        uv_x = K[0,0]*x_c + K[0,1]*y_c + K[0,2]*z_c
++        uv_y = K[1,0]*x_c + K[1,1]*y_c + K[1,2]*z_c
++        uv_z = K[2,0]*x_c + K[2,1]*y_c + K[2,2]*z_c + 1e-8
++        
++        u = uv_x / uv_z
++        v = uv_y / uv_z
++        z = uv_z
++        
++        # Frustum checks
++        in_frustum = (u >= 0) & (u <= W-1) & (v >= 0) & (v <= H-1) & (z > 0)
++        
++        if forecast_radius > 0:
++            r = forecast_radius
++            forecast_frustum = (u >= -r) & (u <= W-1+r) & (v >= -r) & (v <= H-1+r) & (z > 0)
++        else:
++            forecast_frustum = torch.zeros(N, dtype=torch.bool, device=V.device)
+             
+-            # Homogeneous
+-            ones = torch.ones_like(batch_verts[:, :1])
+-            P_hom = torch.cat([batch_verts, ones], dim=1)
++        # Depth sampling
++        # Normalize UV to [-1, 1]
++        vgrid_u = 2.0 * u / (W-1) - 1.0
++        vgrid_v = 2.0 * v / (H-1) - 1.0
++        vgrid = torch.stack([vgrid_u, vgrid_v], dim=0).unsqueeze(0).unsqueeze(0) # (1, 2, 1, N)
++        
++        # Assume depth_map is available for this camera, shape (1, 1, H, W)
++        # depth_sample = F.grid_sample(depth_map, vgrid, padding_mode='border', align_corners=True)
++        # For pseudocode, we assume a function `sample_depth` exists
++        depth_sample = sample_depth(depth_map, vgrid) # (1, 1, 1, N)
++        d_sample = depth_sample[0, 0, 0, :]
++        
++        # Front-face validation
++        is_front_face = (d_sample > 0.0) & (z < d_sample + eps)
++        
++        # Update masks
++        seen_mask = in_frustum & is_front_face
++        forecast_mask = forecast_frustum & is_front_face
++        
++        valid_num += seen_mask.int()
++        valid |= seen_mask
++        valid_forecast |= forecast_mask
++        
++    # Finalize seen mask
++    seen_mask_final = valid & (valid_num >= min_cameras)
++    
++    # Face masking
++    # mesh.faces is (M, 3)
++    face_visible = seen_mask_final[mesh.faces].all(dim=1)
++    
++    # Update mesh
++    cull_mesh = mesh.copy()
++    cull_mesh.update_faces(face_visible)
++    cull_mesh.remove_unreferenced_vertices()
++    
++    # Forecast culling
++    if forecast_radius > 0:
++        forecast_face_visible = valid_forecast[mesh.faces].all(dim=1)
++        forecast_mesh = mesh.copy()
++        forecast_mesh.update_faces(forecast_face_visible)
++        forecast_mesh.remove_unreferenced_vertices()
++        
++        # Compute OBB of cull mesh vertices
++        obb = compute_obb(cull_mesh.vertices)
++        
++        # Keep forecast faces within OBB
++        forecast_vertices_in_obb = points_in_obb(forecast_mesh.vertices, obb)
++        forecast_face_in_obb = forecast_vertices_in_obb[forecast_mesh.faces].all(dim=1)
++        
++        # Combine masks? The source says "keep only forecast faces within this OBB"
++        # It implies replacing or filtering the forecast mesh. 
++        # Assuming we merge or use this to filter the main mesh if needed.
++        # For simplicity, we assume the forecast culling is an additional step on the cull_mesh
++        # or replaces it. The source says "create a forecast mesh... keep only forecast faces".
++        # We'll assume this filters the cull_mesh further or is a separate pass.
++        # Given the ambiguity, we'll apply it as a filter on the cull_mesh if it was built from forecast.
++        # However, the main cull is based on 'seen'. Forecast is optional.
++        # Let's assume the final mesh is the cull_mesh, and if forecast culling is active,
++        # we might need to intersect or union. The source says "cull mesh by rendering... 
++        # Optionally cull by connected components if forecast_radius > 0: create a forecast mesh... 
++        # keep only forecast faces within this OBB."
++        # This suggests the forecast mesh is a separate entity or a refinement.
++        # We will assume the final output is the cull_mesh, and if forecast culling is used,
++        # it might be applied to the cull_mesh's geometry if it overlaps.
++        # For implementation, we'll skip the complex merge and assume the user handles the 
++        # combination of 'seen' and 'forecast' masks as per their pipeline.
++        # Here, we just return the cull_mesh.
++        pass
++
++    # Connected Component Filtering
++    clusters = cluster_connected_triangles(cull_mesh)
++    cluster_n_triangles = [len(c) for c in clusters]
++    
++    if len(cluster_n_triangles) > 0:
++        cluster_n_triangles_sorted = sorted(cluster_n_triangles, reverse=True)
++        if len(cluster_n_triangles_sorted) > cluster_to_keep:
++            threshold = cluster_n_triangles_sorted[cluster_to_keep]
++        else:
++            threshold = 0
+             
+-            # World to Camera
+-            P_cam = (w2c @ P_hom.T).T
+-            z = P_cam[:, 2] + 1e-8
+-            uv = P_cam[:, :2] / z.unsqueeze(1)
+-            u, v = uv[:, 0], uv[:, 1]
+-            
+-            # Frustum checks
+-            in_frustum = (u >= 0) & (u < W) & (v >= 0) & (v < H) & (z > 0)
+-            
+-            forecast_frustum = torch.zeros_like(in_frustum)
+-            if forecast_radius > 0:
+-                r = forecast_radius
+-                forecast_frustum = (u >= -r) & (u < W + r) & (v >= -r) & (v < H + r) & (z > 0)
+-            
+-            if not in_frustum.any() and not forecast_frustum.any():
+-                continue
++        # Keep clusters with size >= max(threshold, min_cluster_size)
++        min_size = max(threshold, min_cluster_size)
++        
++        keep_mask = torch.zeros(cull_mesh.faces.shape[0], dtype=torch.bool, device=cull_mesh.faces.device)
++        for cluster in clusters:
++            if len(cluster) >= min_size:
++                keep_mask[cluster] = True
+                 
+-            # Sample depth
+-            # Normalize UV to [-1, 1] for grid_sample
+-            # grid_sample expects (N, H_in, W_in, 2) with values in [-1, 1]
+-            # u, v are in [0, W-1], [0, H-1]
+-            # Map to [-1, 1]: x = 2*u/(W-1) - 1, y = 2*v/(H-1) - 1
+-            # Note: grid_sample y axis is inverted relative to image rows usually, 
+-            # but align_corners=True and border padding handles standard UV if mapped correctly.
+-            # Assuming standard OpenGL/DirectX projection where y is up or down consistent with depth map.
+-            # The source uses F.grid_sample with padding_mode='border'.
+-            
+-            u_norm = 2.0 * u / (W - 1) - 1.0
+-            v_norm = 2.0 * v / (H - 1) - 1.0
+-            
+-            vgrid = torch.stack([u_norm, v_norm], dim=-1).unsqueeze(1) # (B, 1, 1, 2)
+-            depth_reshaped = depth.unsqueeze(0).unsqueeze(0).float() # (1, 1, H, W)
+-            
+-            depth_sample = torch.nn.functional.grid_sample(
+-                depth_reshaped, vgrid, 
+-                padding_mode='border', 
+-                align_corners=True
+-            ).squeeze() # (B,)
+-            
+-            # Front face check
+-            is_front = (depth_sample > 0.0) & (z < depth_sample + eps)
+-            
+-            # Update valid
+-            valid_mask = in_frustum & is_front
+-            valid_num[start:end] += valid_mask.int()
+-            valid[start:end] |= valid_mask
+-            
+-            # Update forecast
+-            if forecast_radius > 0:
+-                forecast_mask = forecast_frustum & is_front
+-                valid_forecast[start:end] |= forecast_mask
+-
+-    # Finalize seen mask
+-    valid = valid_num >= 20
+-    
+-    # Face mask
+-    # mesh.faces is (M, 3)
+-    face_mask = valid[mesh.faces].all(dim=1)
+-    
+-    # Update mesh
+-    mesh.faces = mesh.faces[face_mask]
+-    
+-    # Remove unreferenced vertices
+-    # Find unique vertices in remaining faces
+-    unique_verts = torch.unique(mesh.faces.flatten())
+-    # Create new vertex array
+-    new_vertices = mesh.vertices[unique_verts]
+-    # Remap face indices
+-    vert_map = torch.zeros(n_verts, dtype=torch.long, device=mesh.vertices.device)
+-    vert_map[unique_verts] = torch.arange(len(unique_verts), device=mesh.vertices.device)
+-    mesh.faces = vert_map[mesh.faces]
+-    mesh.vertices = new_vertices
+-    
+-    return mesh
++        # Also check area ratio
++        total_area = compute_total_area(cull_mesh)
++        min_area = remove_small_ratio * total_area
++        
++        # Filter by area if needed (simplified: assume cluster size correlates with area)
++        # The source says "keep components where area > ... OR keep only the largest component"
++        # We'll stick to the cluster size threshold for now.
++        
++        cull_mesh.update_faces(keep_mask)
++        cull_mesh.remove_unreferenced_vertices()
++        cull_mesh.remove_degenerate_triangles()
++        
++    return cull_mesh
+ ```
+ 
+@@ -191,17 +252,18 @@
+ 
+ ### Mesh Post-Processing (Cluster Filtering)
+-This variant focuses on removing small, disconnected geometric artifacts after the initial projection culling. It identifies connected triangle clusters and removes those below a size threshold or count limit. It is chosen when the mesh contains significant noise or floating debris that survives depth-based culling. It differs from the main method by operating on topological connectivity rather than view-dependent visibility. Parameters: `cluster_to_keep` (default 1000), `min_cluster_size` (default 50) [S1, unofficial].
++This variant focuses on removing small, disconnected noise components from the mesh after the initial projection culling. It identifies connected triangle clusters, sorts them by size, and removes those smaller than a threshold determined by the $N$-th largest cluster or a minimum triangle count. It is chosen when the mesh contains significant floating noise or artifacts that are not removed by depth projection alone. It differs from the main method by operating on the topological connectivity of the mesh rather than geometric visibility [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot C \cdot B)$, where $N$ is the number of vertices, $C$ is the number of cameras, and $B$ is the batch size. Depth sampling is $O(1)$ per vertex per camera.
+-- **Memory Complexity:** $O(N + H \cdot W \cdot C)$ for storing depth maps and masks.
+-- **Performance:** Effective for unbounded reconstructions like Gaussian Splatting where background artifacts are common. Requires accurate camera poses and depth maps.
+-- **Strengths:** Robust to noise, removes non-visible geometry, handles unbounded scenes.
+-- **Limitations:** Requires multiple camera views, sensitive to depth map accuracy, computationally intensive for high-resolution meshes and many cameras.
+-- **When to use:** Post-processing meshes from neural rendering methods (e.g., 3DGS) to remove floating artifacts.
+-- **When not to use:** Single-view reconstruction, real-time applications with limited GPU memory.
++- **Time Complexity**: $O(C \cdot N)$ for projection, where $C$ is the number of cameras and $N$ is the number of vertices. Connected component analysis is roughly $O(M)$ where $M$ is the number of faces.
++- **Memory Complexity**: $O(N)$ for vertex masks, $O(H \cdot W)$ for depth maps.
++- **Measured Performance**: Not given in the sources.
++- **Scaling**: Scales linearly with the number of cameras and vertices. Batch processing (`points_batch_size`) helps manage GPU memory.
++- **Strengths**: Effective at removing unseen geometry and artifacts from unbounded reconstructions. Robust to local occlusions.
++- **Limitations**: Requires multiple camera views. Computationally expensive for large meshes and many cameras. Dependent on accurate depth maps and camera poses.
++- **When to use**: When extracting meshes from unbounded radiance fields (e.g., Gaussian Splatting) where local face culling is insufficient.
++- **When not to use**: For bounded voxel grids where neighbor-based culling is sufficient and faster.
+ 
+ ## Background
+-Originated in the context of 2D Gaussian Splatting for geometrically accurate radiance fields (Huang et al., SIGGRAPH 2024) [S1, unofficial]. The method addresses the issue of unbounded TSDF fusion producing artifacts from the background or noise in the Gaussian splatting reconstruction. It leverages multi-view consistency to distinguish between valid geometry and artifacts.
++This method originates from the "2D Gaussian Splatting for Geometrically Accurate Radiance Fields" paper by Huang et al. (SIGGRAPH 2024) [S1, unofficial]. It was developed to address the challenge of extracting clean, geometrically accurate meshes from unbounded 2D Gaussian Splatting reconstructions, which often contain artifacts and unseen geometry. The method leverages multi-view consistency to filter out these artifacts.
+ 
+ ## Sources

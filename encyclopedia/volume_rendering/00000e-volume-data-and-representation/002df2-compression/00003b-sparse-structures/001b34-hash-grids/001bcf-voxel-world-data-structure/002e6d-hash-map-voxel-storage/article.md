@@ -1,0 +1,137 @@
+# Hash-Map Voxel Storage
+
+Also called: Sparse Voxel Storage, VoxelData
+
+## Overview
+Hash-Map Voxel Storage is a sparse voxel representation that maps 3D integer coordinates to voxel attributes (such as color) using a hash map, enabling efficient storage of non-uniform volumetric data. It builds on [Voxel World Data Structure](1101-voxel-world-data-structure.md) by replacing the simple existence set with a value-bearing lookup structure. It differs from [Brick-based Sparse Voxel Lookup with Open-Addressing Hash](2587-brick-based-sparse-voxel-lookup-with-open-addressing-hash.md) by storing individual voxels rather than bricks, and from [Multi-type Voxel Storage](1104-multi-type-voxel-storage.md) by focusing on a single attribute type per instance.
+
+## How it works
+**Inputs:** A stream or list of voxel definitions, each containing a 3D integer coordinate $(x, y, z)$ and an associated attribute (e.g., color).
+**Outputs:** A `VoxelData` structure containing a hash map of packed attributes, the total count of voxels, and the bounding box dimensions.
+
+**Data Structures:**
+The primary structure is `VoxelData`, defined as follows:
+- `datas`: A hash map (dictionary) where keys are packed 3D coordinates and values are packed 32-bit integers representing voxel attributes.
+- `count`: An integer storing the total number of voxels stored.
+- `width`, `height`, `depth`: Integers tracking the maximum extent of the grid in each dimension.
+
+**Coordinate Packing:**
+To serve as a hash map key, the 3D integer coordinate $(x, y, z)$ must be packed into a single integer. The specific bit-packing scheme is not detailed in the sources [S1, unofficial]. [G] A common approach for signed integers is to offset them to be non-negative and interleave bits, or use a tuple key if the hash map implementation supports it. For the purpose of this implementation, we assume a generic `pack_coord(x, y, z)` function exists.
+
+**Attribute Packing:**
+Voxel color is packed into a 32-bit integer in BGR + Alpha format [S1, unofficial]. The layout is:
+- Bits 0-7: Blue
+- Bits 8-15: Green
+- Bits 16-23: Red
+- Bits 24-31: Alpha
+
+**Algorithm:**
+1. Initialize `VoxelData` with empty `datas`, `count = 0`, and `width = height = depth = 0`.
+2. Iterate through each input voxel $v_i$ with coordinate $(x_i, y_i, z_i)$ and color $C_i = (r_i, g_i, b_i, a_i)$.
+3. Compute the packed coordinate key $K_i = \text{pack\_coord}(x_i, y_i, z_i)$.
+4. Compute the packed color value $V_i = (a_i \ll 24) | (r_i \ll 16) | (g_i \ll 8) | b_i$.
+5. Insert $V_i$ into `datas` at key $K_i$. If the key already exists, overwrite the value (or handle collision as per hash map implementation).
+6. Update `count` by incrementing it for each unique voxel inserted.
+7. Update `width`, `height`, and `depth` to be the maximum $x$, $y$, and $z$ values encountered, respectively. Note: The sources state these track grid bounds [S1, unofficial], but do not specify if they are 1-based or 0-based, or if they represent the count of cells or the max index. [G] Typically, these represent the dimensions of the bounding box, so `width = max_x + 1` if 0-indexed, or simply `max_x` if storing the extent. The source says "track grid bounds", implying the extent. We will store the maximum coordinate value encountered.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class VoxelData:
+    def __init__(self):
+        self.datas = {}  # Hash map: packed_coord -> packed_color
+        self.count = 0
+        self.width = 0
+        self.height = 0
+        self.depth = 0
+
+    def add_voxel(self, x, y, z, r, g, b, a):
+        # Pack coordinate into a single integer key
+        # Implementation of pack_coord depends on specific bit-packing strategy
+        # [G] Assuming a simple tuple key for clarity, or a custom packer
+        key = (x, y, z) 
+        
+        # Pack color into 32-bit integer: BGR + Alpha
+        # Alpha is in the most significant byte
+        packed_color = (a << 24) | (r << 16) | (g << 8) | b
+        
+        # Insert into hash map
+        self.datas[key] = packed_color
+        
+        # Update count
+        self.count += 1
+        
+        # Update bounds
+        if x > self.width:
+            self.width = x
+        if y > self.height:
+            self.height = y
+        if z > self.depth:
+            self.depth = z
+
+    def get_voxel(self, x, y, z):
+        key = (x, y, z)
+        if key in self.datas:
+            return self.datas[key]
+        else:
+            return None  # Voxel does not exist
+```
+
+**Parameters:**
+- Hash Map Type: Not specified [S1, unofficial]. [G] A standard open-addressing or chaining hash map is suitable.
+- Color Format: 32-bit BGR + Alpha [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Collision:** Hash collisions in the coordinate packing or the hash map itself must be handled by the underlying hash map implementation.
+- **Bounds:** The `width`, `height`, and `depth` fields track the maximum coordinate values, not necessarily the number of voxels. If the grid is sparse, these values can be large even with few voxels.
+- **Precision:** Integer coordinates are exact. Color packing assumes 8-bit per channel.
+
+## Subtopics
+
+### Online Random Access
+Online Random Access is a variant of sparse voxel storage used in NeuralVDB that supports direct random access to values from in-memory data without full reconstruction, balancing memory footprint and access time for real-time applications [S2]. It uses a configuration `[Hash, 5, 4, NN(3)]` [S2]. The method involves:
+1. Using standard accelerated random access techniques (level {3, 2, 1}) to determine if a query point maps to a tile or a voxel (level 0) [S2].
+2. If the query maps to a tile, returning the value explicitly encoded in the standard VDB structure [S2].
+3. If the query maps to a voxel (level 0), predicting the voxel value using a regressor (NN(3)) [S2].
+This configuration has the same performance characteristics as a standard VDB tree, except leaf values require additional regression [S2]. Its memory footprint is an order of magnitude smaller than `[Hash, 5, 4, 3]` [S2]. It can be trivially reconstructed from `[Hash, 5, NN(4), NN(3)]` by leaving the voxel regressor unchanged, acting as a pre-cached representation [S2].
+
+## Operating characteristics
+**Time Complexity:**
+- Insertion: $O(1)$ average case for hash map insertion [S1, unofficial].
+- Lookup: $O(1)$ average case for hash map lookup [S1, unofficial].
+- Bounds Update: $O(1)$ per voxel [S1, unofficial].
+
+**Memory Complexity:**
+- Proportional to the number of voxels stored, plus the overhead of the hash map [S1, unofficial].
+- For the Online Random Access variant, memory footprint is an order of magnitude smaller than `[Hash, 5, 4, 3]` [S2].
+
+**Measured Performance:**
+- Not given in the sources for the base Hash-Map Voxel Storage [S1, unofficial].
+- For Online Random Access, performance is comparable to standard VDB tree traversal, with additional cost for neural network inference at leaf voxels [S2].
+
+**Strengths:**
+- Efficient storage for sparse data [S1, unofficial].
+- Fast random access for individual voxels [S1, unofficial].
+- Compact representation for color data [S1, unofficial].
+
+**Limitations:**
+- Hash map overhead can be significant for very dense data.
+- Bounds tracking may not reflect the actual number of voxels if the grid is sparse [S1, unofficial].
+- No support for multi-type attributes in the base structure [S1, unofficial].
+
+**When to Use:**
+- When voxel data is sparse and attributes are simple (e.g., color) [S1, unofficial].
+- When fast random access to individual voxels is required [S1, unofficial].
+
+**When Not to Use:**
+- When data is dense, as the hash map overhead is unnecessary [S1, unofficial].
+- When multi-type attributes or complex hierarchical structures are needed [S1, unofficial].
+
+## Background
+Hash-Map Voxel Storage is described in the context of the "AfterHumanDeclined" project [S1, unofficial]. It is used to store voxel data for rendering purposes. The Online Random Access variant is part of the NeuralVDB project, which uses hierarchical neural networks for high-resolution sparse volume representation [S2]. NeuralVDB was published in 2022 [S2].
+
+## Sources
+[S1] nustxujun/AfterHumanDeclined, https://github.com/nustxujun/AfterHumanDeclined, fetched 2026-10-26 (unofficial)
+[S2] NeuralVDB: High-resolution Sparse Volume Representation using Hierarchical Neural Networks, https://www.emergentmind.com/papers/2208.04448, fetched 2026-10-27

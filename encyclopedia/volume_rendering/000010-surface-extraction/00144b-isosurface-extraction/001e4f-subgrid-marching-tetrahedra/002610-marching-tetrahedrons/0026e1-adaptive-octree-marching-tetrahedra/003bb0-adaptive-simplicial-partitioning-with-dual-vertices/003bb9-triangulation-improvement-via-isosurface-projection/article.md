@@ -1,0 +1,133 @@
+# Triangulation Improvement via Isosurface Projection
+
+Also called: Moving dual vertices to the isosurface, Surface triangulation improvement
+
+## Overview
+A post-processing step for isosurface extraction that reduces sliver triangles by moving dual vertices onto the isosurface while keeping them within their respective cells [S1]. It sets itself apart from standard Marching Tetrahedra by explicitly correcting vertex positions to minimize geometric error, addressing the issue where vertices pass close to the isosurface, creating numerous small, sliver triangles [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A simplicial partition (from Adaptive Simplicial Partitioning with Dual Vertices) with dual vertices $x$ located within cells, and a scalar field $F(p)$.
+*   **Output:** An improved mesh where dual vertices lie on the isosurface $F(p)=0$, with degenerate triangles removed.
+
+**Data Structures:**
+*   Dual vertices: Stored with their associated cell dimension $m$ (0 for vertex, 1 for edge, 2 for face, 3 for cube).
+*   Boundary graph: Adjacency list or Union-Find structure for topological testing.
+
+**Parameters:**
+*   $\epsilon$: Small constant used in parent method to scale cells (not directly used in projection, but defines cell boundaries).
+*   Bisection tolerance: Not given in the sources.
+
+**Steps:**
+1.  **Ordering:** Process cells from highest dimension $m$ to lowest dimension $0$ (3 to 0). This ensures that when a vertex is processed, its position is independent of lower-dimensional vertices that might depend on it [S1].
+2.  **Topological Safety Test:** Before moving a dual vertex $x$ in an $m$-cell, verify that the portion of the isosurface intersecting the cell is a topological disk. Build a graph of edges on the cell boundary connecting dual vertices of dimension $i < m$.
+    *   For $m=1$ (edge): Test that the two boundary vertices have opposite signs ($F(v_1) \cdot F(v_2) < 0$) [S1].
+    *   For $m=2$ (face): Check that there are exactly two sign changes along the boundary ring [S1].
+    *   For $m=3$ (cube): Use the Union-Find algorithm to find connected components in the boundary graph. The test passes if the boundary forms a connected sheet (two disjoint inside/outside sets) [S1].
+    *   If the test fails, do not move the vertex [S1].
+3.  **Direction Selection:** If the test passes, evaluate the error at each dual vertex on the boundary (dimension $i < m$) that has an opposite sign to $x$. Choose the boundary vertex $v_{bound}$ with the smallest error. The error metric is not explicitly defined in the provided text, but implies a measure of proximity or deviation [S1].
+4.  **Bisection:** Perform a bisection algorithm between the current dual vertex $x$ and the chosen boundary vertex $v_{bound}$ to find a new position $x_{new}$ such that $F(x_{new}) = 0$ and $x_{new}$ lies on the isosurface [S1].
+5.  **Update:** Replace $x$ with $x_{new}$ [S1].
+6.  **Degeneracy Removal:** After all vertices are processed, remove any triangles that become degenerate (e.g., zero area or volume) due to the vertex movement [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def improve_triangulation(dual_vertices, scalar_field, boundary_graphs):
+    # Process from m=3 down to m=0
+    for m in [3, 2, 1, 0]:
+        for cell in dual_vertices where cell.dimension == m:
+            x = cell.vertex
+            boundary_vertices = get_boundary_vertices(cell)
+            
+            # Topological Safety Test
+            if not is_topologically_safe(cell, boundary_vertices, scalar_field):
+                continue
+            
+            # Find best direction
+            opposite_vertices = [v for v in boundary_vertices 
+                                 if scalar_field(v) * scalar_field(x) < 0]
+            
+            if not opposite_vertices:
+                continue
+                
+            # Select vertex with smallest error (implementation detail not specified)
+            # Assuming error is distance or similar metric
+            v_bound = min(opposite_vertices, key=lambda v: compute_error(v, x))
+            
+            # Bisection to find isosurface intersection
+            x_new = bisection_isosurface(x, v_bound, scalar_field)
+            
+            # Update vertex position
+            cell.vertex = x_new
+
+    # Remove degenerate triangles
+    remove_degenerate_triangles(dual_vertices)
+
+def is_topologically_safe(cell, boundary_vertices, scalar_field):
+    m = cell.dimension
+    if m == 1:
+        # Edge: two vertices, must have opposite signs
+        if len(boundary_vertices) != 2:
+            return False
+        return scalar_field(boundary_vertices[0]) * scalar_field(boundary_vertices[1]) < 0
+    elif m == 2:
+        # Face: ring of vertices, exactly two sign changes
+        sign_changes = 0
+        for i in range(len(boundary_vertices)):
+            v1 = boundary_vertices[i]
+            v2 = boundary_vertices[(i + 1) % len(boundary_vertices)]
+            if scalar_field(v1) * scalar_field(v2) < 0:
+                sign_changes += 1
+        return sign_changes == 2
+    elif m == 3:
+        # Cube: Union-Find on boundary graph
+        # Build graph of edges connecting boundary dual vertices
+        graph = build_boundary_graph(cell)
+        components = union_find_components(graph)
+        # Check if boundary forms a connected sheet (implies specific component structure)
+        # The text states: "boundary forms two disjoint vertex sets... and the boundary is a connected sheet"
+        # This implies the graph of boundary vertices must be connected, 
+        # and the signs must split into two sets.
+        if len(components) != 1:
+            return False
+        # Verify sign split
+        signs = [scalar_field(v) for v in graph.nodes]
+        has_pos = any(s > 0 for s in signs)
+        has_neg = any(s < 0 for s in signs)
+        return has_pos and has_neg
+    return True
+
+def bisection_isosurface(x1, x2, scalar_field, tol=1e-6):
+    # Standard bisection between x1 and x2
+    # Assumes scalar_field(x1) and scalar_field(x2) have opposite signs
+    while distance(x1, x2) > tol:
+        mid = (x1 + x2) / 2.0
+        f_mid = scalar_field(mid)
+        if f_mid == 0:
+            return mid
+        if scalar_field(x1) * f_mid < 0:
+            x2 = mid
+        else:
+            x1 = mid
+    return x1
+```
+
+**Edge Cases and Pitfalls:**
+*   Moving vertices can change topology, creating non-manifold geometry if the portion of the isosurface intersecting the cell is not a topological disk [S1]. The topological safety test is required to prevent this [S1].
+*   The value at the dual vertices and the magnitude of the gradient cannot be used to indicate proximity to the isosurface because no restrictions are placed on $F(p)$ [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the bisection iterations and the Union-Find operations. Union-Find is nearly linear [S1]. Bisection is logarithmic with respect to precision.
+*   **Memory Complexity:** Requires storing the boundary graph for topological testing.
+*   **Strengths:** Reduces sliver triangles; preserves sharp features; exact topological safety test [S1].
+*   **Limitations:** Can create non-manifold geometry if the safety test is skipped; requires careful handling of degenerate triangles [S1].
+*   **When to use:** When high-quality triangulation is required and sliver triangles are a concern.
+*   **When not to use:** When performance is critical and sliver triangles are acceptable; or when the scalar field does not allow for reliable bisection.
+
+## Background
+Originated in the context of isosurfaces over simplicial partitions of multiresolution grids [S1]. It is similar to the method by Hall et al. [HW90] [S1]. The method addresses the issue of sliver triangles in Marching Tetrahedra-like methods where vertices pass close to the isosurface [S1].
+
+## Sources
+[S1] Isosurfaces Over Simplicial Partitions of Multiresolution Grids, http://faculty.cs.tamu.edu/schaefer/research/iso_simplicial.pdf, fetched 2026-10-29

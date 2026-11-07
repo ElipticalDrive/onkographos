@@ -7,19 +7,19 @@ Temporal Difference Encoding is a compression technique for time-varying volume 
 
 ## How it works
 **Inputs and Outputs**
-- **Input:** A sequence of time-varying volume datasets, where each time step $t$ is represented as an octree structure.
-- **Output:** A compressed representation where identical subtrees across time steps are linked via pointers, reducing storage requirements.
+- **Input:** A sequence of time-varying volume datasets, where each time step $t$ is represented as an octree structure [S1, S2, unofficial].
+- **Output:** A compressed representation where identical subtrees across time steps are linked via pointers, reducing storage requirements [S1, unofficial].
 
 **Data Structures**
-The method operates on the existing Sparse Voxel Octree (SVO) structure. Each node in the octree represents a spatial region. For temporal encoding, the structure is augmented to support references to nodes from previous time steps.
-- **Node Structure:** Standard SVO node fields (e.g., child pointers, data values, metadata).
-- **Temporal Pointer:** A reference or index pointing to the corresponding node in the previous time step's octree if the subtree is identical.
+The method operates on the existing Sparse Voxel Octree (SVO) structure [G]. Each node in the octree represents a spatial region [G]. For temporal encoding, the structure is augmented to support references to nodes from previous time steps [S1, unofficial].
+- **Node Structure:** Standard SVO node fields (e.g., child pointers, data values, metadata) [G].
+- **Temporal Pointer:** A reference or index pointing to the corresponding node in the previous time step's octree if the subtree is identical [S2, unofficial].
 
 **Steps**
-1. **Quantization:** Apply quantization to the volume data to attain voxel-level compression. This step significantly influences the performance of subsequent encoding and visualization [S1, S2, unofficial].
+1. **Quantization:** Apply quantization to the volume data to attain voxel-level compression [S1, S2, unofficial]. This step significantly influences the performance of subsequent encoding and visualization [S1, S2, unofficial].
 2. **Octree Encoding:** Encode the spatial structure of the volume at the current time step using standard octree encoding [S1, S2, unofficial].
 3. **Incremental Merging:** Compare the octree of the current time step $t$ with the octree of the previous time step $t-1$ [S1, S2, unofficial].
-   - Traverse both trees simultaneously.
+   - Traverse both trees simultaneously [S1, unofficial].
    - If a subtree at time step $t$ is identical to the corresponding subtree at time step $t-1$, store only a pointer to the subtree from time step $t-1$ in the current time step's structure [S1, S2, unofficial].
    - If the subtree has changed, recursively process the children or store the new data [S1, S2, unofficial].
 4. **Difference Prediction (Optional/General):** For individual samples, predict the value based on past data and encode the difference between the prediction and the actual sample value [S1, S2, unofficial]. This is particularly effective because time-varying volume data are highly correlated from time step to time step, similar to video and speech data [S1, S2, unofficial].
@@ -33,7 +33,7 @@ E_t(S) =
 \text{Encode}(S_t) & \text{otherwise}
 \end{cases}
 $$
-Where $S_t = S_{t-1}$ denotes structural and value identity.
+Where $S_t = S_{t-1}$ denotes structural and value identity [S1, S2, unofficial].
 
 **Parameters**
 - **Quantization Step:** Not given in the sources. The sources note that quantization is used and may have a significant influence on performance [S1, S2, unofficial].
@@ -47,44 +47,33 @@ Where $S_t = S_{t-1}$ denotes structural and value identity.
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def temporal_difference_encoding(current_octree, previous_octree):
-    """
-    Merges the current octree with the previous octree using temporal difference encoding.
-    
-    Args:
-        current_octree: The root node of the octree for the current time step.
-        previous_octree: The root node of the octree for the previous time step.
-        
-    Returns:
-        The merged octree structure with pointers to unchanged subtrees.
-    """
-    if current_octree is None:
+class Node:
+    def __init__(self, value=None, children=None):
+        self.value = value
+        self.children = children if children is not None else [None] * 8
+        self.is_leaf = children is None
+
+class PointerNode:
+    def __init__(self, ref_node):
+        self.ref_node = ref_node
+        self.is_leaf = True
+
+def temporal_difference_encoding(current_node, previous_node):
+    if current_node is None:
         return None
-    
-    if previous_octree is None:
-        # No previous data to compare against; encode fully
-        return encode_spatial_structure(current_octree)
-    
-    # Check if subtrees are identical
-    if is_subtree_identical(current_octree, previous_octree):
-        # Store pointer to previous subtree
-        return create_pointer_node(previous_octree)
-    else:
-        # Subtree has changed; process children
-        new_node = create_new_node()
-        new_node.children = []
-        for i in range(8): # Octree has 8 children
-            child_current = current_octree.children[i]
-            child_previous = previous_octree.children[i] if previous_octree.has_child(i) else None
-            new_node.children.append(
-                temporal_difference_encoding(child_current, child_previous)
-            )
-        return new_node
+    if previous_node is None:
+        return encode_spatial_structure(current_node)
+    if is_subtree_identical(current_node, previous_node):
+        return PointerNode(previous_node)
+    new_node = Node()
+    new_node.children = []
+    for i in range(8):
+        child_current = current_node.children[i] if i < len(current_node.children) else None
+        child_previous = previous_node.children[i] if previous_node and i < len(previous_node.children) else None
+        new_node.children.append(temporal_difference_encoding(child_current, child_previous))
+    return new_node
 
 def is_subtree_identical(node_a, node_b):
-    """
-    Checks if two subtrees are structurally and value-identical.
-    """
     if node_a is None and node_b is None:
         return True
     if node_a is None or node_b is None:
@@ -93,30 +82,20 @@ def is_subtree_identical(node_a, node_b):
         return False
     if node_a.is_leaf != node_b.is_leaf:
         return False
-    
     if node_a.is_leaf:
         return True
-    
-    # Recursively check children
     for i in range(8):
         if not is_subtree_identical(node_a.children[i], node_b.children[i]):
             return False
     return True
 
 def encode_spatial_structure(node):
-    """
-    Encodes the spatial structure of a node without temporal references.
-    """
-    new_node = create_new_node()
-    new_node.value = node.value
+    new_node = Node(value=node.value, children=[None]*8)
     new_node.is_leaf = node.is_leaf
     if not node.is_leaf:
-        new_node.children = []
         for i in range(8):
-            if node.has_child(i):
-                new_node.children.append(encode_spatial_structure(node.children[i]))
-            else:
-                new_node.children.append(None)
+            if node.children and i < len(node.children) and node.children[i] is not None:
+                new_node.children[i] = encode_spatial_structure(node.children[i])
     return new_node
 ```
 
@@ -144,7 +123,7 @@ Building a hierarchical structure for each time step, then grouping and encoding
 - Use for time-varying volume data with high temporal correlation, such as fluid simulations or medical imaging sequences [S1, S2, unofficial].
 
 **When Not to Use**
-- Avoid for data with low temporal coherence or where exact reconstruction is critical without quantization artifacts [S1, unofficial].
+- Not given in the sources.
 
 ## Background
 **Origin**

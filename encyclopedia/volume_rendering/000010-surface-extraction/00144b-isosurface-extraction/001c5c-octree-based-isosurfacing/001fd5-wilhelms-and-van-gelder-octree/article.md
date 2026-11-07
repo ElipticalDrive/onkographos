@@ -1,102 +1,134 @@
 # Wilhelms and Van Gelder Octree
-Also called: Wilhelms and Van Gelder method, Wilhelms and Van Gelder octree subdivision
+
+Also called: Wilhelms and Van Gelder method, WVG Octree
 
 ## Overview
-The Wilhelms and Van Gelder method is an octree-based isosurface extraction technique that accelerates cell enumeration by pruning branches of the spatial hierarchy that cannot contain the target isovalue [S1, unofficial]. It differs from sibling methods like [IsoOctree](1744-isooctree.md) by relying on a simple interval-based culling test during a recursive traversal rather than complex topological consistency guarantees or view-dependent visibility culling [S1, unofficial].
+The Wilhelms and Van Gelder Octree is a hierarchical spatial subdivision method that accelerates isosurface extraction by ignoring octree branches that cannot contain the target isovalue [S1, unofficial]. It sets itself apart from sibling methods like [Standard Interval Tree for Isosurface Extraction](1230-standard-interval-tree-for-isosurface-extraction.md) by using a rectilinear block-based octree structure where each node stores the union of value intervals of its constituent cells, allowing for efficient pruning during recursive traversal [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs**
-- Input: A scalar volume dataset $V$ defined on a rectilinear grid, and a scalar isovalue $t$.
-- Output: A set of polygons (typically triangles) representing the isosurface $\{ (x,y,z) \mid f(x,y,z) = t \}$.
+**Inputs:** A volumetric dataset $V$; an isovalue $t \in \mathbb{R}$.
+**Outputs:** A set of cells (or polygons) constituting the isosurface.
 
-**Data Structures**
-The method constructs an octree where each node $n$ corresponds to a rectilinear block $B$ of cells $C_{i,j,k}$ [S1, unofficial].
-- Each node $n$ stores an interval $[n_{min}, n_{max})$.
-- This interval is the union of the value ranges of all cells in the block:
-  $$ [n_{min}, n_{max}) = \bigcup_{C_{i,j,k} \in B} [v_{min}, v_{max}) $$
-- For a single cell $C_{i,j,k}$, the range is defined by the minimum and maximum scalar values at its vertices:
-  $$ [v_{min}, v_{max}) = [\min_{V_{i,j,k}}, \max_{V_{i,j,k}}] $$
-  where $V_{i,j,k}$ are the vertex values of the cell [S1, unofficial].
+**Data Structures:**
+The method constructs an octree where each node $n$ corresponds to a rectilinear block $B$ of cells $C_{i,j,k}$ from the volume data [S1, unofficial].
+Each node $n$ is attributed an interval $[n_{min}, n_{max})$ [S1, unofficial]. This interval is defined as the union of all intervals $[v_{min}, v_{max})$ of the cells belonging to the block $B$ [S1, unofficial].
+Mathematically, for a cell $C_{i,j,k}$, the interval is:
+$$ \hat{f}(C_{i,j,k}) := \{ f(x, y, z) \mid (x, y, z) \in C_{i,j,k} \} = [v_{min}, v_{max}] $$
+where:
+$$ v_{min} = \min_{V_{i,j,k}} $$
+$$ v_{max} = \max_{V_{i,j,k}} $$
+Here, $V_{i,j,k}$ represents the set of scalar values at the vertices of cell $C_{i,j,k}$ [S1, unofficial].
+The node interval $[n_{min}, n_{max})$ denotes the range of values the interpolation function $\hat{f}$ attains in the portion of the volume corresponding to node $n$ [S1, unofficial].
 
-**Algorithm Steps**
-1. **Tree Construction**: Build the octree over the volume data. For each node, compute the bounding interval $[n_{min}, n_{max})$ of the scalar values contained within its spatial block [S1, unofficial].
-2. **Recursive Traversal**: Start at the root node.
-3. **Culling Test**: For a current node $n$, check if the isovalue $t$ lies within its interval $[n_{min}, n_{max})$.
-   - If $t \notin [n_{min}, n_{max})$, the node cannot contain the isosurface. Prune this branch and return [S1, unofficial].
-   - If $t \in [n_{min}, n_{max})$, the node may contain the isosurface.
-4. **Leaf Processing**: If node $n$ is a leaf, process its constituent cells individually using a standard cell enumeration algorithm (e.g., Marching Cubes) to extract the surface geometry [S1, unofficial].
-5. **Internal Node Processing**: If node $n$ is not a leaf, recursively apply steps 3-4 to all eight children [S1, unofficial].
+**Algorithm Steps:**
+1.  **Construct Octree:** Build the octree over the volume dataset. For each node, compute $n_{min}$ and $n_{max}$ based on the min/max values of the cells in its block [S1, unofficial].
+2.  **Recursive Traversal:** Perform a recursive traversal of the octree starting from the root [S1, unofficial].
+3.  **Pruning:** For a node $n$, check if the isovalue $t$ lies within the node's interval $[n_{min}, n_{max})$ [S1, unofficial].
+    *   If $t \notin [n_{min}, n_{max})$, ignore (prune) this branch entirely [S1, unofficial].
+    *   If $t \in [n_{min}, n_{max})$, continue traversal to children if $n$ is not a leaf [S1, unofficial].
+4.  **Leaf Processing:** For leaf nodes $n$ where $t \in [n_{min}, n_{max})$, investigate the cells within the leaf node cell-by-cell using the standard enumeration algorithm (e.g., Marching Cubes) [S1, unofficial].
 
-**Pseudocode**
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def wilhelms_van_gelder_extract(volume, isovalue, node):
+def wilhelms_van_gelder_extract(volume, isovalue, root_node):
     """
-    Recursively extract isosurface from an octree node.
+    Extracts isosurface using Wilhelms and Van Gelder octree pruning.
     
     Args:
-        volume: The scalar field data.
-        isovalue: The target scalar value t.
-        node: The current octree node object.
-              node.min_val: n_min
-              node.max_val: n_max
-              node.is_leaf: Boolean
-              node.children: List of child nodes (if not leaf)
-              node.cells: List of cells (if leaf)
+        volume: The volumetric data structure.
+        isovalue: The scalar value t for the isosurface.
+        root_node: The root of the pre-constructed octree.
+        
+    Returns:
+        List of extracted cells/polygons.
     """
-    # Culling test: if isovalue is outside the node's value range, skip
-    if isovalue < node.min_val or isovalue >= node.max_val:
-        return []
+    extracted_cells = []
+    traverse(root_node, isovalue, extracted_cells)
+    return extracted_cells
 
-    polygons = []
+def traverse(node, isovalue, extracted_cells):
+    """
+    Recursive traversal with interval pruning.
+    
+    Args:
+        node: Current octree node.
+        isovalue: The target scalar value t.
+        extracted_cells: List to accumulate results.
+    """
+    # Check pruning condition: t not in [n_min, n_max)
+    # Note: Source [S1, unofficial] uses half-open interval notation [n_min, n_max)
+    # for the check, though cell intervals are defined as closed [v_min, v_max].
+    # We follow the source's explicit pruning condition.
+    if not (node.n_min <= isovalue < node.n_max):
+        return
 
-    if node.is_leaf:
-        # Leaf node: process cells individually using enumeration algorithm
+    # If leaf node, process cells individually
+    if node.is_leaf():
         for cell in node.cells:
-            # Extract polygons for this cell using standard method (e.g., Marching Cubes)
-            cell_polys = extract_cell_surface(cell, isovalue)
-            polygons.extend(cell_polys)
+            # Check if isovalue is within the cell's value range
+            # Cell interval is [v_min, v_max]
+            if cell.v_min <= isovalue <= cell.v_max:
+                # Extract cell using enumeration algorithm (e.g., Marching Cubes)
+                # This step assumes a standard enumeration function exists
+                polygons = enumerate_cell(cell, isovalue)
+                extracted_cells.extend(polygons)
     else:
-        # Internal node: recurse into children
+        # Recurse on children
         for child in node.children:
-            child_polys = wilhelms_van_gelder_extract(volume, isovalue, child)
-            polygons.extend(child_polys)
+            traverse(child, isovalue, extracted_cells)
 
-    return polygons
+def enumerate_cell(cell, isovalue):
+    """
+    Standard enumeration algorithm (e.g., Marching Cubes) for a single cell.
+    [G] Implementation details of Marching Cubes are omitted as they are 
+    standard and not specific to WVG.
+    """
+    # Determine cell case based on vertex values relative to isovalue
+    # Generate polygons based on case table
+    # Return list of polygons
+    pass
 ```
 
-**Parameters**
-- Typical values: Not specified in sources. The method is general for any isovalue $t$.
+**Parameters:**
+*   `isovalue` ($t$): The scalar value defining the surface.
+*   Octree depth/resolution: Not specified in sources, but determined by the volume data size and desired adaptive granularity [S1, unofficial].
 
-**Edge Cases and Pitfalls**
-- **Precision**: The interval test $t \in [n_{min}, n_{max})$ assumes exact arithmetic or sufficient floating-point precision. If $t$ is very close to $n_{min}$ or $n_{max}$, precision errors might lead to incorrect culling or inclusion [G].
-- **Boundaries**: The interval is defined as half-open $[n_{min}, n_{max})$ in the source [S1, unofficial]. Implementation must be consistent with this definition to avoid double-counting or missing boundaries if values are shared.
-- **Degenerate Input**: If the volume has constant values, the interval width is zero. The culling test works correctly (either includes or excludes).
+**Edge Cases and Pitfalls:**
+*   **Precision:** The interval arithmetic relies on the min/max values of vertices. Floating-point precision errors in computing $v_{min}$ and $v_{max}$ could lead to incorrect pruning if $t$ is very close to the boundary [G].
+*   **Boundary Conditions:** The source uses a half-open interval $[n_{min}, n_{max})$ for pruning but closed intervals $[v_{min}, v_{max}]$ for cell definitions. Consistency in interval handling is critical to avoid missing surfaces exactly at the boundary values [S1, unofficial].
+*   **Construction Overhead:** Building the octree requires additional CPU storage space and time [S1, unofficial].
 
 ## Subtopics
 
 ### [View-Dependent Isosurface Extraction](2309-view-dependent-isosurface-extraction.md)
-A method that extracts and renders only the visible portions of an isosurface to reduce polygon count and rendering time, exploiting depth complexity and occlusion in large datasets. It differs from non-view-dependent isocontouring by skipping internal sections that are occluded by the external isosurface, and from Greene's method by marking triangles as visible in software and forwarding them to graphics hardware for final visibility determination rather than rendering the visible portion in software.
+View-Dependent Isosurface Extraction is a method for extracting and rendering only the visible portions of an isosurface from large volumetric datasets, reducing polygon count and rendering time by exploiting depth complexity and occlusion. It sets itself apart from view-independent methods by performing coarse software visibility tests during octree traversal to prune hidden cells before hardware rendering, whereas siblings like [Branch-on-Need Octree (BONO)](6935-branch-on-need-octree-bono.md) focus on data-dependent error metrics for adaptive refinement without explicit view-based occlusion culling.
 
 ### [Branch-on-Need Octree (BONO)](6935-branch-on-need-octree-bono.md)
 The Branch-on-Need Octree (BONO) is a space-efficient geometric decomposition method for isosurface extraction that partitions volume data based on geometric positions to prune branches during traversal. Unlike even-subdivision octrees, BONO minimizes node count for non-power-of-two dimensions by aligning subdivisions to the largest possible power-of-two blocks, allowing the extraction algorithm to skip nodes whose value ranges do not span the isovalue.
 
 ### Octree Search Structure
-A hierarchical spatial index used to skip analysis of inactive cells during isosurface extraction, reducing computational load at the cost of construction time and memory [S2].
-- **Steps**: 1. Construct octree over the volume dataset. 2. Use octree to identify and skip inactive cells during extraction. 3. Extract isosurface only from active regions. 4. If extracting multiple surfaces, reuse the same index [S2].
-- **Pitfalls**: Construction overhead makes it slower than exhaustive WWMC for single or dual surface extraction. Requires downloading 219 MB of index data if processing on different resources. Parallel construction requires global coordinator, likely yielding sublinear speedup [S2].
+The Octree Search Structure is a hierarchical spatial index used to skip analysis of inactive cells during isosurface extraction, reducing computational load at the cost of construction time and memory [S2]. It is a spatial partitioning index used to skip inactive cell analysis during isosurface extraction, offering similar skipping benefits to octrees but with different memory and construction characteristics [S2].
+**Steps:**
+1. Construct octree over the volume dataset [S2].
+2. Use octree to identify and skip inactive cells during extraction [S2].
+3. Extract isosurface only from active regions [S2].
+4. If extracting multiple surfaces, reuse the same index [S2].
+**Pitfalls:** Construction overhead makes it slower than exhaustive WWMC for single or dual surface extraction [S2]. Requires downloading 219 MB of index data if processing on different resources [S2]. Parallel construction requires global coordinator, likely yielding sublinear speedup [S2].
 
 ## Operating characteristics
-- **Time Complexity**: The method achieves linear time complexity $O(n)$ with respect to the size of the volume data in the worst case, but offers considerable acceleration by ignoring branches that cannot contain the isosurface [S1, unofficial].
-- **Memory Complexity**: Requires moderate additional CPU storage space for the octree structure [S1, unofficial].
-- **Performance**: In experiments, using the octree allowed extraction of certain datasets (e.g., XT-180) in about one third of the time compared to exhaustive WWMC, as it could skip up to 99% of cells [S2]. However, for datasets with high active cell density (e.g., XT-25, where >50% of cells are active), the performance was comparable to WWMC [S2].
-- **Trade-offs**: The construction time of the octree is significant. When including construction time, the total time for a single surface extraction is often worse than exhaustive WWMC [S2]. Reusing the index for multiple surfaces improves the amortized cost, but WWMC can still be faster in some multi-surface scenarios (165.4 sec for WWMC vs 169 sec for Octree) [S2].
-- **Strengths**: Significant speedup for sparse isosurfaces or datasets with large inactive regions.
-- **Limitations**: High construction overhead; poor performance gain for dense isosurfaces; parallel construction is complex and yields sublinear speedup [S2].
+*   **Time Complexity:** The method yields a linear time complexity of $O(n)$ near the size of the volume data, but with a considerable acceleration in the cell extraction phase due to pruning [S1, unofficial].
+*   **Memory Complexity:** Requires moderate additional CPU storage space for the octree structure [S1, unofficial].
+*   **Performance:** In experiments, using the octree allowed extraction of specific isosurfaces (e.g., XT-180) in about one third of the time with respect to the exhaustive WWMC method [S2]. However, for cases where more than half of the cells are active (e.g., XT-25), the performance is comparable to WWMC [S2].
+*   **Construction Cost:** The time to compute and store the octree is significant. When considering the sum of construction time and extraction time for a single isosurface, the total time is worse than the exhaustive covering of all cells made by WWMC [S2].
+*   **Multi-Surface Extraction:** If extracting multiple surfaces using the same index, WWMC still presents better performance (165.4 sec.) than the use of the Octree (169 sec.) or KD-tree (200.7 sec.) [S2].
+*   **Parallelization:** Parallel construction of the search structure suffers from a coordinator bottleneck, likely yielding sublinear speedup [S2]. Subdividing analysis among parallel processes is limited by I/O and communication overheads [S2].
+*   **Strengths:** Significant acceleration for sparse isosurfaces where many cells can be skipped [S1, unofficial][S2].
+*   **Limitations:** High construction overhead makes it inefficient for single-surface extraction or dense isosurfaces [S2]. Not suitable for scenarios with limited memory or where construction time is prohibitive [S2].
 
 ## Background
-The method was proposed by Wilhelms and Van Gelder as a hierarchical spatial subdivision technique to accelerate cell extraction in isosurface computation [S1, unofficial]. It is a foundational approach in octree-based isosurfacing, enabling adaptive resolution by focusing computation only on regions where the isovalue exists.
+The Wilhelms and Van Gelder method was proposed by Wilhelms and Van Gelder as an octree subdivision technique to accelerate cell extraction in isosurface computation [S1, unofficial]. It is part of the broader field of isosurface extraction, which aims to generate a polygonal mesh representing a surface of constant value within a volumetric dataset [S1, unofficial]. The method leverages the hierarchical nature of the octree to prune branches that do not contain the isovalue, thereby reducing the number of cells that need to be processed by the enumeration algorithm [S1, unofficial].
 
 ## Sources
 [S1] Optimal hybrid memory constrained isosurface extraction, http://nbn-resolving.de/urn:nbn:de:bsz:352-130091, fetched 2026-10-30 (unofficial)

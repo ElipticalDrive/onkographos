@@ -3,51 +3,67 @@
 Also called: Regularized Inverse Problem Solver for Tomography, Variational Tomography Framework
 
 ## Overview
-This framework formulates tomographic reconstruction as a regularized inverse problem, minimizing a data fidelity term against a regularizer to recover volumetric data from projections [S1, unofficial]. It distinguishes itself from direct algebraic methods (like [SIRT](3101-sirt-simultaneous-iterative-reconstruction-technique.md)) by decoupling the data consistency and regularization steps via proximal splitting, allowing for complex, non-linear priors and flexible integration of physical constraints [S1, unofficial]. It serves as the foundational solver for advanced applications including sparse-view reconstruction, 3D super-resolution, and dynamic fluid capture [S1, unofficial].
+This framework formulates tomographic reconstruction as a regularized inverse problem, minimizing a data fidelity term against a regularizer to recover volumetric data from projections [S1, unofficial]. It distinguishes itself from direct algebraic methods by decoupling data consistency and regularization steps via proximal splitting, enabling flexible integration of complex priors and physical constraints [S1, unofficial]. It serves as the foundational solver for advanced applications including sparse-view reconstruction, 3D super-resolution, and dynamic fluid capture [S1, unofficial].
 
 ## Shared principles
-The framework solves the optimization problem:
+The framework builds on the differentiable forward projection $\mathcal{P}$ and adjoint back-projection $\mathcal{P}^T$ described in [Tomographic reconstruction as inverse rendering](45-tomographic-reconstruction-as-inverse-rendering.md) [G]. The core optimization problem is formulated as:
 
 $$
 \min_{\mathbf{f}} f(\mathbf{f}) + g(\mathbf{Kf})
 $$
 
-where $\mathbf{f}$ is the volume to be reconstructed, $f(\cdot)$ is the data fidelity term, and $g(\mathbf{Kf})$ is the regularizer [S1, unofficial].
+where $\mathbf{f}$ is the volume estimate, $f(\cdot)$ is the data fidelity term, and $g(\mathbf{Kf})$ is the regularizer [S1, unofficial].
 
-**Data Fidelity Term:**
-The data fidelity term is typically a linear least squares formulation:
+The data fidelity term is typically a linear least-squares formulation:
 
 $$
 f(\mathbf{f}) = \|A\mathbf{f} - \mathbf{p}\|_2^2
 $$
 
-where $A$ describes the projection geometry (forward projection operator) and $\mathbf{p}$ represents the observed projection images (sinogram) [S1, unofficial].
+where $A$ is the forward projection operator describing the geometry, and $\mathbf{p}$ is the observed sinogram [S1, unofficial].
 
-**Regularizer:**
-The regularizer consists of a loss function $g(\cdot)$ and a linear operator $K$ that transforms the volume $\mathbf{f}$ into a sparse domain [S1, unofficial]. A common configuration is Total Variation (TV), where $g(\cdot) = \|\cdot\|_1$ and $K$ is the volume gradient operator [S1, unofficial].
+The regularizer consists of a loss function $g(\cdot)$ and a linear operator $K$ that transforms the volume into a sparse domain [S1, unofficial]. A standard configuration is Total Variation (TV), where $g(\cdot) = \|\cdot\|_1$ and $K$ computes the volume gradient [S1, unofficial].
 
-**Optimization Strategy:**
-The problem is decomposed into independent proximal operators: one for the linear least squares data term and one for the non-linear regularizer [S1, unofficial]. These sub-problems are solved and combined iteratively.
+The optimization strategy decomposes the problem into independent proximal operators for the data term and the regularizer, solved iteratively [S1, unofficial]. Solving the linear least-squares subproblem requires a matrix-free solver to manage memory for large 3D volumes [S1, unofficial]. For this subproblem, SART converges better than Conjugate Gradients when projections are sparse [S1, unofficial].
 
-**Solver Requirements:**
-The linear least squares problem in the data term requires a matrix-free solver to control memory consumption [S1, unofficial]. For solving this data term proximal operator, SART yields better results than Conjugate Gradients, especially with sparse numbers of projections [S1, unofficial].
+The Chambolle-Pock primal-dual algorithm implements this decomposition with the following steps:
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def chambolle_pock(p, A, K, prox_data, prox_reg_dual, tau, eta, theta, T):
+    # Initialize primal f, extrapolated f_bar, dual y
+    f = zeros_like(p)  # Volume shape
+    f_bar = zeros_like(p)
+    y = zeros_like(p)  # Dual variable shape matches Kf output
+    for t in range(T):
+        # Store old primal for extrapolation
+        f_old = f.copy()
+        # Dual update: y^{t+1} = prox_{eta g*}(y^t + eta * K * f_bar^t)
+        y = prox_reg_dual(y + eta * K(f_bar), eta)
+        # Primal update: f^{t+1} = prox_{tau f}(f^t - tau * K^T * y^{t+1})
+        # prox_data solves the linear least-squares subproblem (e.g., via SART)
+        f = prox_data(f - tau * K.T(y), tau)
+        # Extrapolation: f_bar^{t+1} = f^{t+1} + theta * (f^{t+1} - f^t)
+        f_bar = f + theta * (f - f_old)
+    return f
+```
+
+Step sizes $\tau$ and $\eta$ must satisfy $\tau \eta \|K\|^2 < 1$ for stability, where $\|K\|$ is the spectral norm of the linear operator [S1, unofficial]. The extrapolation parameter $\theta$ is typically set to $1$ to accelerate convergence [S1, unofficial].
 
 ## Subtopics
 
 ### [Chambolle-Pock Algorithm](3282-chambolle-pock-algorithm.md)
-A proximal algorithm used to solve complex optimization problems by splitting them into smaller, independent sub-problems (proximal operators) that are solved and combined. It is used for CT reconstruction formulated as an optimization problem.
+A first-order primal-dual method that splits the problem into proximal operators for the data fidelity and regularizer, efficiently handling non-smooth terms like Total Variation. Choose it for sparse-view or super-resolution tasks requiring robust convergence with non-differentiable regularizers.
+
+### [Stochastic Tomography](8886-stochastic-tomography.md)
+A matrix-free stochastic solver that represents the volume estimate as discrete samples with density proportional to the volume, using a random walk to explore the space and reduce residuals. Choose it for large-scale problems where memory constraints prohibit dense operator storage.
 
 ### Coupled Density and Velocity Estimation
-A strategy to solve the ill-posed tomography problem with few cameras by predicting the current density field based on previous time steps using physical priors (transport and incompressibility), enabling efficient interactive reconstruction [S2].
+A strategy to solve the ill-posed tomography problem with few cameras by predicting the current density field based on previous time steps using physical priors (transport and incompressibility), enabling efficient interactive reconstruction [S2]. Steps: (1) Reconstruct velocity $u_{t-1}$ using VelRecon on the two previous density fields [S2]. (2) Estimate velocity $u_{t-1}$ based on densities of time $t-1$ and $t-2$ using Algorithm 5 [S2]. (3) Predict velocity guess $\tilde{u}_t$ by advecting velocity $u_{t-1}$ with itself and ensuring incompressibility via projection onto divergence-free space $\Pi_{DIV}$ [S2]. (4) Create density guess $\tilde{\rho}_t$ by advecting density $\rho_{t-1}$ forward with the velocity guess $\tilde{u}_{t-1}$ (Algorithm 4 lines 3–4) [S2]. Pitfall: Depth regularization breaks the sparse property of the matrix, making the optimization problem inefficient to solve; therefore, it is not applied [S2].
 
-**Steps:**
-1. Reconstruct velocity $u_{t-1}$ using VelRecon on the two previous density fields [S2].
-2. Estimate velocity $u_{t-1}$ based on densities of time $t-1$ and $t-2$ using Algorithm 5 [S2].
-3. Predict velocity guess $\tilde{u}_t$ by advecting velocity $u_{t-1}$ with itself and ensuring incompressibility via projection onto divergence-free space $\Pi_{DIV}$ [S2].
-4. Create density guess $\tilde{\rho}_t$ by advecting density $\rho_{t-1}$ forward with the velocity guess $\tilde{u}_{t-1}$ (Algorithm 4 lines 3–4) [S2].
-
-**Pitfall:**
-Depth regularization breaks the sparse property of the matrix, making the optimization problem inefficient to solve; therefore, it is not applied [S2].
+### Generative Tomography Reconstruction via Optimization
+Solves the linear inverse problem $Ax=y$ by optimizing over a latent variable $z$ of a generative model $G(r, z)$, rather than directly over the image $x$, using a weighted data fidelity term and a generator prior [S3, unofficial]. The standard regularization objective $\arg\min_x \|Ax - y\|_2^2 + \lambda D(x)$ is modified to account for non-uniform confidence in estimated sinogram values [S3, unofficial]. The final optimization objective is $\arg\min_{z \in S^m} \|AG(r, z) - \mu(r)\|_{\sigma(r)}^2 + \lambda D(G(r, z))$, where $z$ lies on an $m+1$ dimensional sphere [S3, unofficial].
 
 ## Background
 Originated in the work of Zang (2020), this framework was developed to address challenges in 3D super-resolution, sparse view tomography, space-time reconstruction of deforming objects, and dynamic fluid capture [S1, unofficial]. It provides a unified approach to incorporate novel regularizers flexibly depending on the application [S1, unofficial].
@@ -55,3 +71,4 @@ Originated in the work of Zang (2020), this framework was developed to address c
 ## Sources
 [S1] Space-Time Tomographic Reconstruction of Deforming Objects, https://vccimaging.org/Publications/Zang2020Thesis/Zang2020Thesis.pdf, fetched 2026-10-30 (unofficial)
 [S2] Physics-Based Differentiable Rendering for Efficient and Plausible Fluid Modeling from Monocular Video, https://doi.org/10.3390/e25091348, fetched 2026-10-26
+[S3] Generative Tomography Reconstruction, https://core.ac.uk/works/91148923, fetched 2026-10-31 (unofficial)

@@ -1,0 +1,36 @@
+# Custom Hardware Units
+Also called: Custom Hardware Rendering
+
+## Overview
+This family implements the emission-absorption optical model defined in [Direct volume ray casting](19-direct-volume-ray-casting.md) using dedicated, non-standard silicon rather than general-purpose programmable shaders. It solves the performance bottleneck of software-based volume rendering, where geometry operations and shading arithmetic consume significant CPU cycles [S1, unofficial]. Unlike [Hardware-Accelerated Volume Rendering](5616-hardware-accelerated-volume-rendering.md) which relies on standard GPU pipelines, this approach uses fixed-function geometry units and specialized processors (such as DSPs) to decouple data generation from image synthesis [S1, unofficial].
+
+## Shared principles
+The family implements the emission-absorption optical model defined in [Direct volume ray casting](19-direct-volume-ray-casting.md). All methods in this family adhere to the following shared mechanisms:
+
+1.  **Ray Generation via Geometry or Projection:** Rays are generated per-pixel. This is typically achieved by rendering the volume's bounding box geometry (front and back faces) to determine entry and exit points, or by computing ray parameters directly from camera matrices and projection models (e.g., MCOP) in the vertex/fragment shader [S1, unofficial][S2][S3, S4, unofficial].
+2.  **Hardware-Accelerated Sampling:** Scalar volume values $V(\mathbf{p})$ are sampled using the GPU's texture hardware. This involves trilinear interpolation of the 3D texture memory, which is optimized for fetching adjacent voxels in a single memory access [S1, unofficial][S2][S3, S4, unofficial].
+3.  **Fragment Shader Compositing:** The core ray marching loop, including classification (transfer function application) and front-to-back compositing, is executed within the fragment shader [S1, unofficial][S2][S3, S4, unofficial]. The standard compositing equation is applied:
+    $$
+    C'_{i} = C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i C_i
+    $$
+    $$
+    \alpha'_{i} = \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i
+    $$
+4.  **Early Ray Termination (ERT):** To optimize performance, rays are terminated when the accumulated opacity $\alpha'$ exceeds a threshold (typically 0.95 or 1.0), as subsequent samples are fully occluded [S1, unofficial][S2][S3, S4, unofficial].
+
+## Subtopics
+
+### [Hardware-based Geometry Unit Resampling](3139-hardware-based-geometry-unit-resampling.md)
+This method implements the geometry-intensive portion of the VIRIM basic visualization algorithm using dedicated hardware to perform perspective calculations, gradient estimation, and volume data resampling. It solves the performance bottleneck of software-based volume rendering, where geometry operations consume approximately 80% of the computation time per projection. Unlike general-purpose CPU implementations, this approach generates 26 to 36 million transformed locations per second by utilizing specialized address generation and conflict-free memory access patterns. It differs from the VOGUE architecture by replicating the entire volume memory in each parallel geometry unit to avoid data dependency issues, rather than partitioning the dataset.
+
+### [Hardware-based Direct Volume Ray Casting](5442-hardware-based-direct-volume-ray-casting.md)
+Hardware-based Direct Volume Ray Casting is a specialized architecture that offloads the computationally intensive tasks of ray-casting, shading, and compositing from the CPU to dedicated programmable Digital Signal Processors (DSPs). It solves the bottleneck of real-time volume visualization by decoupling the high-speed data generation of the geometry unit from the slower, complex arithmetic of the shading unit. Unlike general-purpose GPU ray casting, this method uses a fixed-function geometry pipeline to generate sample/gradient data and a DSP array to perform the final image synthesis, offering maximum flexibility for shading models while maintaining hardware-accelerated throughput.
+
+### Custom Hardware Rendering
+A direct volume rendering technique implemented via custom hardware [S1, unofficial].
+
+## Background
+Origin: The classification of volume rendering techniques into paradigms including "custom hardware" appears in early surveys of the field [S1, unofficial]. Specific implementations like the VIRIM system were developed to address the high computational cost of geometry operations in software-based ray casting [S1, unofficial].
+
+## Sources
+[S1] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)

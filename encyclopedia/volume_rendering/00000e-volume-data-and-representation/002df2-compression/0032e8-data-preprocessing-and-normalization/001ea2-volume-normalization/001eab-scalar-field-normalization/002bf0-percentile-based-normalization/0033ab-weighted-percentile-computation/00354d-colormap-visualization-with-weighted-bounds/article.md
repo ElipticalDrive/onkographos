@@ -1,0 +1,121 @@
+# Colormap Visualization with Weighted Bounds
+
+
+## Overview
+Visualizes a 1D scalar image and a 1D weighting map according to a colormap, using weighted percentiles to determine normalization bounds [S1, unofficial]. It differs from standard normalization by incorporating per-pixel weights into the percentile calculation, allowing the bounds to reflect the distribution of significant data rather than the full range [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `value`: 2D array of scalar values (H x W).
+- `weight`: 2D array of weights (H x W), same shape as `value`.
+- `colormap`: Optional callable or array mapping [0, 1] to RGB.
+- `percentile`: Float, default 99.
+- `lo`, `hi`: Optional explicit bounds.
+- `curve_fn`: Optional callable for non-linear scaling.
+- `modulus`: Optional float for modular arithmetic.
+
+**Data Structures:**
+- `value`, `weight`: NumPy or PyTorch tensors of shape `(H, W)`.
+- `lo_auto`, `hi_auto`: Scalars returned by `weighted_percentile`.
+
+**Steps:**
+1. Compute automatic bounds using weighted percentiles [S1, unofficial]:
+   $$ lo\_auto, hi\_auto = \text{weighted\_percentile}(value, weight, [50 - \frac{percentile}{2}, 50 + \frac{percentile}{2}]) $$
+2. Set final bounds with epsilon adjustment [S1, unofficial]:
+   $$ \epsilon = \text{np.finfo}(\text{np.float32}).\text{eps} $$
+   $$ lo = lo \text{ or } (lo\_auto - \epsilon) $$
+   $$ hi = hi \text{ or } (hi\_auto + \epsilon) $$
+3. Apply curve function to value, lo, and hi [S1, unofficial]:
+   $$ value, lo, hi = [\text{curve\_fn}(x) \text{ for } x \text{ in } [value, lo, hi]] $$
+4. If `modulus` is provided, normalize by modulus [S1, unofficial]:
+   $$ value = \frac{\text{np.mod}(value, modulus)}{modulus} $$
+   Note: If `modulus` is not None, `lo`, `hi`, and `percentile` have no effect [S1, unofficial].
+5. Otherwise, clip and scale value to [0, 1] [S1, unofficial]:
+   $$ value = \text{np.nan\_to\_num}\left(\text{np.clip}\left(\frac{value - \text{np.minimum}(lo, hi)}{\text{np.abs}(hi - lo)}, 0, 1\right)\right) $$
+6. Apply colormap if provided [S1, unofficial]:
+   $$ colorized = \text{colormap}(value)[:, :, :3] $$
+7. If no colormap, assume value is already RGB [S1, unofficial]:
+   $$ \text{assert len}(value.\text{shape}) == 3 \text{ and } value.\text{shape}[-1] == 3 $$
+   $$ colorized = value $$
+8. Return `colorized` image.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def visualize_cmap_with_weighted_bounds(value, weight, colormap=None, percentile=99, lo=None, hi=None, curve_fn=None, modulus=None):
+    """
+    Visualizes a 1D image and a 1D weighting according to a colormap, using weighted percentiles to determine normalization bounds.
+    
+    Args:
+        value: 2D array of scalar values.
+        weight: 2D array of weights.
+        colormap: Optional colormap function.
+        percentile: Percentile for automatic bounds (default 99).
+        lo, hi: Optional explicit bounds.
+        curve_fn: Optional curve function.
+        modulus: Optional modulus for modular normalization.
+        
+    Returns:
+        colorized: 3D array of RGB values.
+    """
+    # Step 1: Compute automatic bounds using weighted percentiles
+    # Note: weighted_percentile is assumed to be defined in the parent article [S1, unofficial]
+    lo_auto, hi_auto = weighted_percentile(value, weight, [50 - percentile / 2, 50 + percentile / 2])
+    
+    # Step 2: Set final bounds with epsilon adjustment
+    eps = np.finfo(np.float32).eps
+    lo = lo if lo is not None else (lo_auto - eps)
+    hi = hi if hi is not None else (hi_auto + eps)
+    
+    # Step 3: Apply curve function to value, lo, and hi
+    if curve_fn is not None:
+        value = curve_fn(value)
+        lo = curve_fn(lo)
+        hi = curve_fn(hi)
+    else:
+        # Identity function
+        pass
+        
+    # Step 4: If modulus is provided, normalize value by modulus
+    if modulus is not None:
+        value = np.mod(value, modulus) / modulus
+    else:
+        # Step 5: Clip and scale value to [0, 1]
+        # Note: np.minimum(lo, hi) handles cases where lo > hi
+        # Note: np.abs(hi - lo) prevents division by zero if lo == hi (though eps adjustment makes this unlikely)
+        value = np.nan_to_num(np.clip((value - np.minimum(lo, hi)) / np.abs(hi - lo), 0, 1))
+        
+    # Step 6: Apply colormap if provided
+    if colormap is not None:
+        # Assuming colormap returns (H, W, 4) or (H, W, 3)
+        colorized = colormap(value)[:, :, :3]
+    else:
+        # Step 7: If no colormap, assume value is already RGB
+        assert len(value.shape) == 3 and value.shape[-1] == 3
+        colorized = value
+        
+    # Step 8: Return colorized image
+    return colorized
+```
+
+**Parameters:**
+- `percentile`: The percentile of the value map to crop to when automatically generating `lo` and `hi`. Default is 99 [S1, unofficial].
+- `curve_fn`: A curve function applied to `value`, `lo`, and `hi` before visualization. Default is identity (lambda x: x) [S1, unofficial].
+- `modulus`: If not None, mod the normalized value by modulus. Use (0, 1]. If modulus is not None, `lo`, `hi` and `percentile` will have no effect [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- If `lo == hi`, division by zero occurs in step 5. The epsilon adjustment in step 2 mitigates this, but if `lo_auto == hi_auto` exactly, `hi` becomes `hi_auto + eps`, ensuring a non-zero denominator [S1, unofficial].
+- `np.nan_to_num` handles NaN values in `value` by replacing them with 0 before clipping [S1, unofficial].
+- If `modulus` is provided, `lo`, `hi`, and `percentile` are ignored [S1, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+This method is part of the DNGaussian pipeline for visualizing Gaussian splatting attributes [S1, unofficial]. It is used to render scalar fields (e.g., opacity, depth, or custom attributes) with appropriate normalization based on weighted distributions [S1, unofficial].
+
+## Sources
+[S1] Fictionarry/DNGaussian, https://github.com/Fictionarry/DNGaussian, fetched 2026-10-27 (unofficial)

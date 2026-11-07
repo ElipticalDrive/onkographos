@@ -3,68 +3,82 @@
 Also called: Soft Shadows (Volumetric), Volumetric Shadowing
 
 ## Overview
-Volumetric Soft Shadowing estimates soft shadows in participating media by sampling along random directions towards the light source, weighting samples by local density and distance [S1, unofficial]. It differs from hard shadow techniques like [Shadow Ray Casting](2796-shadow-ray-casting.md) by approximating the penumbra through stochastic sampling, and from [Two-Pass Shadow Casting](2196-two-pass-shadow-casting-kajiya-and-von-herzen.md) by operating directly on the volume data without requiring a separate depth buffer pass [S1, unofficial].
+Volumetric Soft Shadowing estimates soft shadows in participating media by sampling random directions towards the light source, weighting samples by local density and distance [S1, unofficial]. It differs from hard shadow techniques by approximating the penumbra through stochastic sampling, and from global illumination methods by focusing solely on direct visibility attenuation without simulating indirect bounces [S1, unofficial].
 
 ## How it works
 **Inputs:**
-*   Volume density field $V(\mathbf{p})$.
-*   Light direction $\mathbf{d}_L$ and radius $R_L$ (or angular spread).
-*   Current sample position $\mathbf{p}$.
-*   Number of shadow samples $N_s$ (default 10) [S1, unofficial].
+- Volume density field $V(\mathbf{x})$ [S1, unofficial].
+- Light direction vector $\mathbf{l}$ and light radius parameter $R$ (used as `uLightRadious`) [S1, unofficial].
+- Current shading position $\mathbf{p}$ [S1, unofficial].
+- Number of shadow samples $N$ (parameter `uNumShadowSamples`) [S1, unofficial].
 
 **Outputs:**
-*   Soft shadow contribution factor $S \in [0, 1]$ [S1, unofficial].
+- Shadow contribution factor $S \in [0, 1]$ [S1, unofficial].
 
 **Data Structures:**
-*   Accumulator: `vec4` or `float` initialized to 0.0 [S1, unofficial].
+- Accumulator: A scalar or vector `accumulatedShadowContribution` initialized to 0.0 [S1, unofficial].
+- Random number generator state `seed` for stochastic sampling [S1, unofficial].
+
+**Parameters:**
+- `uNumShadowSamples`: Number of shadow samples per pixel. Default value: 10 [S1, unofficial].
+- `uLightRadious`: Radius parameter for sampling distance [S1, unofficial].
+- `uShadowsWeight`: Weight applied when mixing shadow contribution into final color. Default value: 0.54 [S1, unofficial].
 
 **Steps:**
 1.  Initialize `accumulatedShadowContribution` to 0.0 [S1, unofficial].
-2.  Loop $i$ from 0 to $N_s - 1$:
-    a. Generate a random direction $\mathbf{r}$ towards the light. The source describes a specific perturbation around the light direction $\mathbf{d}_L = (vLight.x, vLight.y, vLight.z)$ using a random seed [S1, unofficial]:
-       $$ \mathbf{r} = \text{normalize}\left( \begin{bmatrix} -1.0 + vLight.x \cdot \text{rand}() \\ vLight.y + \text{rand}() \cdot vLight.z \\ -1.0 + 2.0 \cdot \text{rand}(\text{seed}).x \end{bmatrix} \right) \cdot \text{rand}() $$
-       *Note: The exact random number generation logic is implementation-specific [S1, unofficial].*
-    b. Sample the volume at $\mathbf{p} + \mathbf{r} \cdot R_L$. Let this density be $\rho$ [S1, unofficial].
-    c. Calculate `volumeShadowSample` as $\rho \cdot 0.2$ [S1, unofficial].
-    d. Update accumulator:
-       $$ \text{accumulatedShadowContribution} += \rho \cdot \text{volumeShadowSample} \cdot \|\mathbf{r}\|^{1.0} $$
-       *Note: $\|\mathbf{r}\|$ is typically 1.0 if normalized, but the source includes the length term [S1, unofficial].*
+2.  Loop $i$ from 0 to $N-1$:
+    a.  Generate a random direction $\mathbf{d}$ towards the light. The source code suggests a specific construction:
+        $$ \mathbf{d} = \text{normalize}\left( \begin{bmatrix} -1.0 + l_x \cdot \text{rand}() \\ l_y + \text{rand}() \cdot l_z \\ -1.0 + 2.0 \cdot \text{rand}()_x \end{bmatrix} \right) \cdot \text{rand}() $$
+        *Note: The exact random distribution and vector component mapping in the source snippet is ambiguous, but the intent is to sample directions biased towards the light [S1, unofficial].*
+    b.  Sample the volume density at $\mathbf{p} + \mathbf{d} \cdot R$. Let this sample be $v_{sample}$ [S1, unofficial].
+    c.  Calculate `volumeShadowSample` as $v_{sample} \cdot 0.2$ [S1, unofficial].
+    d.  Update accumulator:
+        $$ \text{accumulatedShadowContribution} \leftarrow \text{accumulatedShadowContribution} + v_{sample} \cdot \text{volumeShadowSample} \cdot \|\mathbf{d}\|^{1.0} $$
+        *Note: The source code multiplies by `pow(length(randomDirection), 1.0)`, which is 1.0 if normalized, suggesting the length term might be redundant or intended for non-normalized directions [S1, unofficial].*
 3.  Post-process the accumulator:
-    a. Raise to power 1.0 (identity, but specified in source) [S1, unofficial].
-    b. Divide by $N_s$ [S1, unofficial].
-    c. Multiply by 20.0 [S1, unofficial].
-    d. Clamp to $[0, 1]$ [S1, unofficial].
+    a.  Raise to power 1.0 (identity operation) [S1, unofficial].
+    b.  Divide by $N$ [S1, unofficial].
+    c.  Multiply by 20.0 [S1, unofficial].
+    d.  Clamp result to $[0, 1]$ [S1, unofficial].
 4.  Compute final shadow contribution $S_{raw}$:
     $$ S_{raw} = \text{mix}(1.0 - S_{raw}, \text{accumulatedShadowContribution}, 1.2) $$
-    *Note: The source uses `mix(1.0 - uSoftShadowsContribution, ...)` which implies a feedback loop or self-referential update in the original shader code. For a single-pass implementation, this is interpreted as mixing the inverse of the previous frame's contribution or a base value. Given the context of a single article, we assume $S_{raw}$ is the result of step 3.* [S1, unofficial].
-5.  Normalize:
+    *Note: The source code uses `mix(1.0 - uSoftShadowsContribution, accumulatedShadowContribution, 1.2)`. This implies an iterative or feedback loop if `uSoftShadowsContribution` is the output of the previous frame or a persistent state. For a single pass, this formula is ambiguous. Assuming standard mixing:*
+    $$ S_{raw} = (1.0 - S_{prev}) \cdot (1.0 - 1.2) + S_{acc} \cdot 1.2 $$
+    *However, mixing factors > 1.0 are non-standard. The source likely implies a specific blending logic [S1, unofficial].*
+5.  Normalize and clamp:
     $$ S = \frac{S_{raw}}{1.3} $$
-6.  Clamp $S$ to $[0, 1]$ [S1, unofficial].
+    Clamp $S$ to $[0, 1]$ [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_volumetric_soft_shadow(position, light_dir, light_radius, num_samples, seed):
+def volumetric_soft_shadowing(position, light_dir, light_radius, num_samples, seed):
     accumulated = 0.0
-    
     for i in range(num_samples):
-        # Generate random direction towards light with perturbation
-        # Note: Exact rand() implementation is source-specific [S1, unofficial]
-        r_x = -1.0 + light_dir.x * rand()
-        r_y = light_dir.y + rand() * light_dir.z
-        r_z = -1.0 + 2.0 * rand(seed).x
-        random_direction = normalize(vec3(r_x, r_y, r_z)) * rand()
+        # Generate random direction biased towards light
+        # Note: Exact random generation logic from source is ambiguous
+        rand_val_1 = random()
+        rand_val_2 = random()
+        rand_val_3 = random()
         
-        # Sample volume at offset position
-        sample_pos = position + random_direction * light_radius
-        density = sample_volume(sample_pos)
+        # Construct direction vector
+        dx = -1.0 + light_dir.x * rand_val_1
+        dy = light_dir.y + rand_val_2 * light_dir.z
+        dz = -1.0 + 2.0 * rand_val_3
         
-        # Calculate shadow sample weight
-        volume_shadow_sample = density * 0.2
+        direction = normalize(vec3(dx, dy, dz))
+        
+        # Sample volume
+        sample_pos = position + direction * light_radius
+        volume_sample = sample_volume(volume_field, sample_pos)
+        
+        # Weight sample
+        volume_shadow_sample = volume_sample * 0.2
         
         # Accumulate
-        accumulated += density * volume_shadow_sample * length(random_direction)
+        # Source multiplies by length(direction)^1.0, which is 1.0 if normalized
+        accumulated += volume_sample * volume_shadow_sample * length(direction)
         
     # Post-processing
     accumulated = pow(accumulated, 1.0)
@@ -72,27 +86,17 @@ def compute_volumetric_soft_shadow(position, light_dir, light_radius, num_sample
     accumulated = accumulated * 20.0
     accumulated = clamp(accumulated, 0.0, 1.0)
     
-    # Mix with inverse (assuming base contribution is 0 or previous frame)
-    # Source: mix(1.0 - uSoftShadowsContribution, accumulatedShadowContribution, 1.2)
-    # Interpreted as: final = mix(1.0, accumulated, 1.2) if starting from 0
-    # However, mix(a, b, t) = a + t*(b-a). If t=1.2, it extrapolates.
-    # Given the normalization step, we follow the source exactly.
-    soft_shadow_contribution = mix(1.0 - accumulated, accumulated, 1.2)
+    # Mixing
+    # Note: Source uses mix(1.0 - current, accumulated, 1.2)
+    # Assuming 'current' is previous shadow value or 0 for single pass
+    shadow_contribution = mix(1.0 - accumulated, accumulated, 1.2)
     
     # Normalize
-    soft_shadow_contribution = soft_shadow_contribution / 1.3
+    shadow_contribution = shadow_contribution / 1.3
+    shadow_contribution = clamp(shadow_contribution, 0.0, 1.0)
     
-    return clamp(soft_shadow_contribution, 0.0, 1.0)
+    return shadow_contribution
 ```
-
-**Parameters:**
-*   `uNumShadowSamples`: Number of shadow samples per pixel. Default: 10 [S1, unofficial].
-*   `uShadowsWeight`: Weight applied to the shadow contribution when mixing into the final color. Default: 0.54 [S1, unofficial].
-
-**Edge Cases:**
-*   **High Density:** If density is high, the shadow contribution may saturate quickly. The clamping steps prevent overflow [S1, unofficial].
-*   **Zero Density:** If the volume is empty, the shadow contribution should be 1.0 (no shadow). The initialization and accumulation logic must handle this [S1, unofficial].
-*   **Precision:** The multiplication by 20.0 and division by 1.3 are empirical scaling factors. Small errors in density sampling can lead to visible artifacts if not clamped properly [S1, unofficial].
 
 ## Subtopics
 
@@ -100,16 +104,14 @@ def compute_volumetric_soft_shadow(position, light_dir, light_radius, num_sample
 A global illumination technique that simulates light transmission as continuous slices to produce realistic global illumination and real-time interactivity, but modifies the base method to generate soft shadows instead of hard shadows, thereby preserving local details. It differs from [Volumetric Soft Shadowing](4507-volumetric-soft-shadowing.md) by operating in volume space using a light volume generated slice-by-slice, and from [ZM13](https://doi.org/10.1111/cgf.12188) by avoiding back-lighting which fails with high-opacity data and lacks directional depth perception.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N_s)$ per sample, where $N_s$ is the number of shadow samples. With $N_s=10$, this is constant time per pixel but expensive due to multiple volume lookups [S1, unofficial].
-*   **Memory Complexity:** $O(1)$ auxiliary memory per pixel, excluding the volume texture [S1, unofficial].
-*   **Performance:** Performance scales linearly with the number of samples. Higher sample counts reduce noise but increase rendering time [S1, unofficial].
-*   **Strengths:** Simple to implement; produces soft shadows that blend naturally with volumetric density [S1, unofficial].
-*   **Limitations:** Stochastic noise requires temporal accumulation or high sample counts for smooth results; empirical scaling factors (20.0, 1.3) may not generalize across all volume types [S1, unofficial].
-*   **When to Use:** Real-time applications where approximate soft shadows are acceptable and performance is critical [S1, unofficial].
-*   **When Not to Use:** Offline rendering requiring physically accurate shadow penumbra; scenes with very high dynamic range density variations [S1, unofficial].
+- **Time Complexity:** $O(N)$ per pixel, where $N$ is the number of shadow samples. Default $N=10$ [S1, unofficial].
+- **Memory Complexity:** $O(1)$ auxiliary memory per pixel, plus the volume data structure [S1, unofficial].
+- **Performance:** Depends heavily on the cost of volume sampling. Stochastic sampling can introduce noise if $N$ is low [S1, unofficial].
+- **Strengths:** Produces soft shadows suitable for volumetric media; relatively simple to implement [S1, unofficial].
+- **Limitations:** Stochastic nature leads to noise; specific mixing parameters (1.2, 1.3) are empirical and may not generalize [S1, unofficial].
 
 ## Background
-The method originates from the `terier/vpt` project, an unofficial volume rendering toolkit [S1, unofficial]. It is designed for real-time volumetric rendering, providing a lightweight alternative to more complex global illumination techniques [S1, unofficial].
+The method is described in the context of the `terier/vpt` project, an unofficial implementation [S1, unofficial]. The specific parameters and mixing logic appear to be tuned for real-time or specific visual effects rather than physically based rendering [S1, unofficial].
 
 ## Sources
 [S1] terier/vpt, https://github.com/terier/vpt, fetched 2026-10-26 (unofficial)

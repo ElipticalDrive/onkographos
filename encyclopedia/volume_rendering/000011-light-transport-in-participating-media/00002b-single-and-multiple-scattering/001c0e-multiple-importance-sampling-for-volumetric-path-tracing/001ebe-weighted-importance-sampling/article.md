@@ -2,87 +2,95 @@
 
 
 ## Overview
-Weighted Importance Sampling (WIS) is a biased but consistent technique used to simulate the use of a known target probability density function (PDF) $p$ with samples drawn from an arbitrary source PDF $q$ [S1]. It solves the problem where the ideal PDF for an integrand (the target) is unknown or difficult to sample from directly, but a suboptimal source PDF is available. It sets itself apart from standard Importance Sampling by using self-normalizing weights that prevent poor samples (low $q$ but high $p$) from inflating variance, thereby escaping Veach's theoretical bounds for optimal weights when $p$ is well-chosen [S1].
+Weighted Importance Sampling (WIS) is a biased but consistent technique used to simulate the use of a known target probability density function (PDF) $p$ with samples drawn from an arbitrary source PDF $q$ [S1]. It addresses the problem of evaluating integrals where the ideal sampling distribution is known but difficult or impossible to sample from directly, such as when shifted paths in volumetric rendering do not follow the base PDF of sampling the path from the pixel [S1]. It sets itself apart from Resampled Importance Sampling (RIS) by avoiding the intractable resampling of path prefixes required for unbounded paths, accepting bias in exchange for feasibility [S1].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A set of $N$ samples $\{x_i\}_{i=1}^N$ drawn from a source PDF $q(x)$.
-- Input: A target PDF $p(x)$ which is known and desirable for the integrand.
-- Output: An estimator for the integral $\int f(x) dx$.
+*   **Input:** A set of $N$ samples $\{x_i\}_{i=1}^N$ drawn from a source PDF $q(x)$. A target PDF $p(x)$ for which we wish to estimate the expectation. An estimator function $f(x)$ representing the integrand term (e.g., radiance contribution).
+*   **Output:** An estimate of the integral $\int f(x) p(x) dx$.
 
 **Data Structures:**
-- Samples $x_i$: Points in the domain of integration.
-- Weights $w_i$: Scalar values associated with each sample.
+*   No complex data structures are required beyond storing the samples $x_i$, their source weights $q(x_i)$, and target weights $p(x_i)$.
 
 **Method:**
-The core idea is to re-weight samples drawn from $q$ to behave as if they were drawn from $p$. The estimator for a function $f(x)$ is given by:
-
-$$
-\hat{I} = \frac{\sum_{i=1}^N w_i f(x_i)}{\sum_{i=1}^N w_i}
-$$
-
-where the weight $w_i$ for sample $x_i$ is defined as the ratio of the target PDF to the source PDF:
-
-$$
-w_i = \frac{p(x_i)}{q(x_i)}
-$$
+1.  For each sample $x_i$ drawn from $q$:
+    a. Evaluate the source PDF value $q(x_i)$.
+    b. Evaluate the target PDF value $p(x_i)$.
+    c. Evaluate the integrand term $f(x_i)$.
+2.  Compute the importance weight $w_i$ for each sample:
+    $$ w_i = \frac{p(x_i)}{q(x_i)} $$
+3.  Compute the weighted sum of the integrand terms:
+    $$ S = \sum_{i=1}^N f(x_i) w_i $$
+4.  Compute the sum of the weights:
+    $$ W = \sum_{i=1}^N w_i $$
+5.  The WIS estimator $\hat{I}$ is the ratio:
+    $$ \hat{I} = \frac{S}{W} = \frac{\sum_{i=1}^N f(x_i) \frac{p(x_i)}{q(x_i)}}{\sum_{i=1}^N \frac{p(x_i)}{q(x_i)}} $$
 
 **Parameters:**
-- $N$: Number of samples. Not given in the sources.
+*   $N$: Number of samples. Typical values depend on the rendering context (e.g., per-pixel or per-surface). Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Zero Source PDF:** If $q(x_i) = 0$ for any sample where $p(x_i) > 0$, the weight becomes infinite. In practice, samples must be drawn strictly from the support of $q$. If $q(x_i)=0$ and $p(x_i)=0$, the term is undefined but contributes zero to the integral; however, division by zero must be guarded against [G].
+*   **Bias:** The estimator is biased for finite $N$ because it is a ratio of random variables. It is consistent, meaning the bias converges to zero as $N \to \infty$ [S1].
+*   **Variance:** While consistent, WIS can have high variance if $p$ and $q$ have poor overlap or if $q$ has heavy tails where $p$ is small [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def weighted_importance_sampling(samples, target_pdf, source_pdf, integrand):
+def weighted_importance_sampling(samples, source_pdf, target_pdf, integrand):
     """
-    Estimates the integral using Weighted Importance Sampling.
+    Estimates the integral of integrand * target_pdf using samples from source_pdf.
     
     Args:
-        samples: List of N samples drawn from source_pdf.
-        target_pdf: Function p(x) representing the ideal PDF.
-        source_pdf: Function q(x) from which samples were drawn.
-        integrand: Function f(x) to integrate.
+        samples: List of sample points x_i.
+        source_pdf: Function q(x) evaluating the source PDF.
+        target_pdf: Function p(x) evaluating the target PDF.
+        integrand: Function f(x) evaluating the integrand term.
         
     Returns:
-        Estimated integral value.
+        The WIS estimate of the integral.
     """
     numerator = 0.0
     denominator = 0.0
     
     for x in samples:
-        # Calculate importance weight
-        # Note: If source_pdf(x) is 0, this is undefined. 
-        # In practice, samples are drawn from q, so q(x) > 0. [G]
-        weight = target_pdf(x) / source_pdf(x)
+        q_val = source_pdf(x)
         
-        numerator += weight * integrand(x)
+        # Guard against division by zero in source PDF
+        if q_val == 0:
+            continue
+            
+        p_val = target_pdf(x)
+        f_val = integrand(x)
+        
+        # Importance weight w_i = p(x) / q(x)
+        weight = p_val / q_val
+        
+        numerator += f_val * weight
         denominator += weight
         
-    # Avoid division by zero if all weights are zero
     if denominator == 0:
         return 0.0
         
     return numerator / denominator
 ```
 
-**Edge Cases and Pitfalls:**
-- **Zero Source PDF:** If $q(x_i) = 0$ for any sample $x_i$, the weight is undefined. However, since samples are drawn from $q$, this should not occur in valid implementations [S1].
-- **Bias:** The estimator is biased for finite $N$ due to the normalization by the sum of weights, but it is consistent (converges to the true value as $N \to \infty$) [S1].
-- **Variance:** By using self-normalizing weights, WIS prevents samples with low $q$ but high $p$ from dominating the variance, which is a key advantage over standard importance sampling in this context [S1].
-
 ## Subtopics
 
+### Self-Normalizing Multi-Strategy Estimator
+An estimator that combines Multiple Importance Sampling (MIS) weights with WIS weights to benefit from both techniques [S1]. It allows samples with a low source PDF value (poor for the source strategy) but high target PDF value (good for the integrand) to contribute without excessively increasing variance [S1]. This approach escapes Veach's theoretical bounds for optimal weights because poor samples do not increase the variance of the estimator if the target PDF $p$ is well chosen [S1].
+
 ## Operating characteristics
-- **Time Complexity:** $O(N)$, where $N$ is the number of samples. Each sample requires evaluation of $p(x)$, $q(x)$, and $f(x)$.
-- **Memory Complexity:** $O(N)$ to store samples and weights.
-- **Strengths:** Reduces variance compared to standard importance sampling when the target PDF is a better match for the integrand than the source PDF. It is consistent.
-- **Limitations:** It is biased for finite samples. It requires evaluating both $p(x)$ and $q(x)$ for every sample.
-- **When to use:** When you have samples from a source distribution $q$ but know a target distribution $p$ that is more suitable for the integrand, and you cannot resample from $p$ directly.
-- **When not to use:** When unbiasedness is strictly required for finite samples, or when resampling is feasible (in which case Resampled Importance Sampling (RIS) may be preferred) [S1].
+*   **Time Complexity:** $O(N)$, where $N$ is the number of samples. Requires evaluating $p(x)$, $q(x)$, and $f(x)$ for each sample.
+*   **Memory Complexity:** $O(1)$ auxiliary space if processing samples sequentially, or $O(N)$ if storing all weights.
+*   **Strengths:** Allows the use of a convenient source distribution $q$ to approximate an ideal target distribution $p$. Avoids the intractability of resampling path prefixes required by RIS in unbounded path tracing contexts [S1].
+*   **Limitations:** The estimator is biased for finite sample counts. Variance can be high if the support of $q$ does not cover the significant regions of $p$ [S1].
+*   **When to use:** When the ideal sampling distribution is known but difficult to sample from, and resampling (RIS) is computationally intractable (e.g., in unbounded volumetric paths) [S1].
+*   **When not to use:** When unbiased estimation is strictly required and $N$ is small, or when RIS is feasible.
 
 ## Background
-Weighted Importance Sampling was proposed as a technique to simulate the use of a known target PDF $p$ with samples drawn from an arbitrary source PDF $q$ [S1]. It has been used in rendering applications [S1]. Bitterli et al. showed that Resampled Importance Sampling (RIS) is a bias-corrected version of WIS [S1]. However, RIS requires resampling prefix candidates, which is intractable for unbounded paths in volumetric rendering, making WIS a practical alternative in such contexts [S1].
+Weighted Importance Sampling was proposed as a technique to simulate the use of a known target PDF with samples from an arbitrary source PDF [S1]. It has been used in rendering applications [S1]. Bitterli et al. showed that Resampled Importance Sampling (RIS) is a bias-corrected version of WIS [S1]. However, RIS requires resampling prefix candidates, which is intractable in the context of unbounded paths in volumetric rendering [S1].
 
 ## Sources
 [S1] Volumetric Multi‐View Rendering, https://doi.org/10.1111/cgf.14481, fetched 2026-10-26

@@ -1,0 +1,286 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Splat the Net is a neural primitive-based volume rendering method that replaces the Gaussian kernels of 3D Gaussian Splatting (3DGS) with splattable neural primitives [S1, unofficial]. It represents 3D scenes using a set of parameterized primitives, each containing a small Multi-Layer Perceptron (MLP) for density and Spherical Harmonics (SH) for color, allowing for higher expressivity per primitive [S1, unofficial]. The method achieves comparable real-time rendering speeds (>100 FPS) to 3DGS while requiring approximately 10 times fewer primitives for the same scene representation [S1, unofficial]. It builds on [Neural and primitive-based representations](10-neural-and-primitive-based-representations.md) by introducing neural density fields into the splatting framework.
++Splat the Net is a neural primitive-based volume rendering method that replaces the Gaussian kernels of 3D Gaussian Splatting (3DGS) with splattable neural primitives [S1, unofficial]. It represents 3D scenes using a set of parameterized primitives, each containing a small Multi-Layer Perceptron (MLP) for density and Spherical Harmonics (SH) for color, allowing for higher expressivity per primitive [S1, unofficial]. The method achieves comparable real-time rendering speeds (>100 FPS) to 3DGS while requiring approximately 10 times fewer primitives for the same scene representation [S1, unofficial]. It builds on [Neural and primitive-based representations](10-neural-and-primitive-based-representations.md) by introducing neural density fields into the splatting framework [G].
+ 
+ ## How it works
+@@ -10,11 +10,11 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-*   A set of $N$ primitives, each defined by geometric parameters and neural weights.
+-*   Camera parameters (position, orientation, intrinsics).
+-*   For dynamic scenes: a temporal variable $\xi_t \in [0, 1]$.
+-*   For relighting: a light direction $\mathbf{d}_l$.
++*   A set of $N$ primitives, each defined by geometric parameters and neural weights [S1, unofficial].
++*   Camera parameters (position, orientation, intrinsics) [G].
++*   For dynamic scenes: a temporal variable $\xi_t \in [0, 1]$ [S1, unofficial].
++*   For relighting: a light direction $\mathbf{d}_l$ [S1, unofficial].
+ 
+ **Outputs:**
+-*   Rendered RGB images for given camera viewpoints.
++*   Rendered RGB images for given camera viewpoints [G].
+ 
+ ### Data Structures
+@@ -26,7 +26,7 @@
+     *   Rotation represented as a unit quaternion $\mathbf{q} \in \mathbb{R}^4$.
+ 2.  **Neural Density MLP (41 parameters):**
+-    *   An 8-neuron MLP with specific weights and biases (details in formulas below).
++    *   An 8-neuron MLP with specific weights and biases [S1, unofficial].
+ 3.  **Color Representation (48 parameters):**
+-    *   Zero-order Spherical Harmonics (SH) coefficients. For dynamic scenes, these are time-dependent.
++    *   Zero-order Spherical Harmonics (SH) coefficients [S1, unofficial]. For dynamic scenes, these are time-dependent [S1, unofficial].
+ 
+ ### Formulas
+@@ -40,8 +40,8 @@
+ 
+ Where:
+-*   $W_1, W_2, \mathbf{b}_1, \mathbf{b}_2$ are learnable weights and biases of the MLP.
+-*   $\omega_0$ is a frequency parameter.
+-*   $W_t \in \mathbb{R}^{N_\sigma}$ is a learnable temporal weight vector.
+-*   $\xi_t \in [0, 1]$ is the normalized timestamp.
++*   $W_1, W_2, \mathbf{b}_1, \mathbf{b}_2$ are learnable weights and biases of the MLP [S1, unofficial].
++*   $\omega_0$ is a frequency parameter [G].
++*   $W_t \in \mathbb{R}^{N_\sigma}$ is a learnable temporal weight vector [S1, unofficial].
++*   $\xi_t \in [0, 1]$ is the normalized timestamp [S1, unofficial].
+ 
+ **2. Dynamic Color (Time-Dependent SH)**
+@@ -53,7 +53,7 @@
+ 
+ Where:
+-*   $S_0$ is the base zero-order SH coefficient.
+-*   $P_n(\xi_t) = \sum_{i=1}^n a_i \xi_t^i$ is a polynomial of degree $n$.
+-*   $F_l(\xi_t)$ is a Fourier series of order $l$.
++*   $S_0$ is the base zero-order SH coefficient [S1, unofficial].
++*   $P_n(\xi_t) = \sum_{i=1}^n a_i \xi_t^i$ is a polynomial of degree $n$ [S1, unofficial].
++*   $F_l(\xi_t) = \sum_{k=1}^l (b_k \cos(k \xi_t) + c_k \sin(k \xi_t))$ is a Fourier series of order $l$ [G].
+ *   In experiments, $n=4$ and $l=4$ [S1, unofficial].
+ 
+@@ -115,69 +115,50 @@
+ import numpy as np
+ 
+-def compute_density_neural_primitive(x, params, t=None):
++def evaluate_density(x, t, params):
++    """Computes density using the neural density field.
++    x: (3,) spatial coordinate
++    t: scalar temporal variable xi_t, None for static
++    params: dict with W1, W2, b1, b2, omega0, Wt
+     """
+-    Computes density using the neural density field.
+-    x: (3,) spatial coordinate
+-    params: dict containing W1, W2, b1, b2, omega0, Wt (if dynamic)
+-    t: (1,) temporal variable xi_t, None for static
++    z = params['W1'] @ x
++    if t is not None:
++        z = z + params['Wt'] * t
++    sigma = params['W2'] * np.cos(params['omega0'] * z + params['b1']) + params['b2']
++    return np.maximum(sigma, 0.0)  # Density must be non-negative
++
++def evaluate_dynamic_sh(S0, t, poly_coeffs, fourier_b, fourier_c, n=4, l=4):
++    """Computes time-dependent SH coefficient.
++    S0: scalar base coefficient
++    t: scalar temporal variable
++    poly_coeffs: (n,) array of a_i
++    fourier_b: (l,) array of b_k
++    fourier_c: (l,) array of c_k
+     """
+-    # Static part
+-    z = np.dot(params['W1'], x) + params['b1']
+-    if t is not None:
+-        z = z + np.dot(params['Wt'], t)
+-    
+-    # Activation
+-    z = np.cos(params['omega0'] * z)
+-    
+-    # Output
+-    sigma = np.dot(params['W2'], z) + params['b2']
+-    return sigma
+-
+-def compute_color_dynamic_sh(sh_coeffs, t, n=4, l=4):
+-    """
+-    Computes time-dependent SH coefficient.
+-    sh_coeffs: (N,) base SH coefficients S0
+-    t: (1,) temporal variable
+-    """
+-    S0 = sh_coeffs
+-    
+-    # Polynomial part
+-    P_n = 0
+-    for i in range(1, n + 1):
+-        # ai are learned parameters, assumed to be in sh_coeffs or separate
+-        # Assuming ai are stored in a separate array 'poly_coeffs'
+-        # For this pseudocode, we assume poly_coeffs is available
+-        P_n += poly_coeffs[i-1] * (t ** i)
+-        
+-    # Fourier part
+-    F_l = 0
+-    for k in range(1, l + 1):
+-        # bk, ck are learned parameters
+-        F_l += bk[k-1] * np.cos(k * t) + ck[k-1] * np.sin(k * t)
+-        
+-    return S0 + P_n + F_l
+-
+-def render_ray(ray_origin, ray_direction, primitives, camera_params, t=None):
+-    """
+-    Renders a single ray using splatting.
+-    """
+-    # Sort primitives by depth
+-    sorted_primitives = sort_primitives_by_depth(primitives, ray_origin, ray_direction)
++    poly_term = sum(poly_coeffs[i] * (t ** (i + 1)) for i in range(n))
++    fourier_term = sum(fourier_b[k] * np.cos((k + 1) * t) + fourier_c[k] * np.sin((k + 1) * t) for k in range(l))
++    return S0 + poly_term + fourier_term
++
++def render_ray(origin, direction, primitives, t=None):
++    """Renders a single ray using splatting."""
++    # Sort primitives by depth along the ray
++    distances = np.array([np.dot(p['center'] - origin, direction) for p in primitives])
++    sorted_indices = np.argsort(distances)
+     
+     alpha_accum = 0.0
+-    color_accum = np.array([0.0, 0.0, 0.0])
+-    
+-    for prim in sorted_primitives:
+-        # Compute distance from ray to primitive center
+-        # Simplified: assume primitive is a point with density field
+-        # In reality, this involves projecting the primitive to 2D and evaluating
+-        # the density field at the intersection or closest point
+-        
+-        # Evaluate density at a point along the ray within the primitive's influence
+-        # This is a simplified representation of the splatting process
+-        sigma = compute_density_neural_primitive(prim.center, prim.mlp_params, t)
+-        
+-        # Compute opacity alpha from sigma and primitive size
+-        alpha = 1.0 - np.exp(-sigma * prim.scale_factor)
++    color_accum = np.zeros(3)
++    
++    for idx in sorted_indices:
++        p = primitives[idx]
++        # Project primitive to ray
++        center_to_ray = p['center'] - origin
++        proj_dist = np.dot(center_to_ray, direction)
++        closest_point = origin + proj_dist * direction
++        dist_to_center = np.linalg.norm(closest_point - p['center'])
++        
++        # Evaluate density at closest point
++        sigma = evaluate_density(closest_point, t, p['mlp_params'])
++        
++        # Compute opacity from sigma and primitive scale
++        alpha = 1.0 - np.exp(-sigma * p['scale'])
+         
+         if alpha < 1e-5:
+@@ -186,69 +167,56 @@
+         # Compute color
+         if t is not None:
+-            color = compute_color_dynamic_sh(prim.sh_coeffs, t)
++            color = evaluate_dynamic_sh(
++                p['sh_params']['S0'], t, p['poly_coeffs'], 
++                p['fourier_b'], p['fourier_c']
++            )
+         else:
+-            color = prim.sh_coeffs # Static case, direct SH coeff
++            color = p['sh_params']['S0']
+             
+-        # Alpha compositing
+         weight = alpha * (1.0 - alpha_accum)
+         color_accum += weight * color
+         alpha_accum += weight
+-        
+         if alpha_accum > 0.99:
+             break
+             
+-    return color_accum, alpha_accum
+-
+-def train_step(primitives, images, targets, optimizer, iteration, dataset_type):
+-    """
+-    One training step including population control.
+-    """
+-    # Forward pass
+-    rendered_images = []
+-    for img in images:
+-        # Render all pixels
+-        rendered_img = render_image(img, primitives)
+-        rendered_images.append(rendered_img)
+-        
+-    # Compute loss
+-    loss = compute_loss(rendered_images, targets)
+-    
+-    # Backward pass
+-    gradients = compute_gradients(loss, primitives)
+-    optimizer.step(gradients)
+-    
+-    # Population Control
+-    if should_densify(iteration, dataset_type):
+-        densify_primitives(primitives, gradients, dataset_type)
+-    if should_prune(primitives, dataset_type):
+-        prune_primitives(primitives, dataset_type)
+-        
+-    return loss
+-
+-def should_densify(iteration, dataset_type):
+-    if dataset_type == 'dynamic':
+-        return 1000 <= iteration <= 30000 and iteration % 500 == 0
+-    elif dataset_type in ['mipnerf360', 'tanks', 'deep_blending']:
+-        return 1000 <= iteration <= 15000 and iteration % 500 == 0
+-    elif dataset_type == 'blendernerf':
+-        return 1000 <= iteration <= 20000 and iteration % 200 == 0
+-    return False
+-
+-def densify_primitives(primitives, gradients, dataset_type):
+-    densify_threshold = 1e-4 if dataset_type != 'blendernerf' else 1e-5
+-    grow_threshold = 1e-2
+-    
+-    for prim in primitives:
+-        grad_mag = np.linalg.norm(gradients[prim.id])
+-        if grad_mag > densify_threshold and prim.scale < grow_threshold:
+-            # Split or add new primitive
+-            add_new_primitive(prim)
+-
+-def prune_primitives(primitives, dataset_type):
+-    prune_threshold = 0.5
+-    
+-    for prim in primitives:
+-        if prim.scale > prune_threshold:
+-            remove_primitive(prim)
++    return color_accum
++
++def train_step(primitives, batch_images, batch_targets, optimizer, iteration, dataset_cfg):
++    """One training step including population control."""
++    # Forward render
++    rendered_batch = [render_ray(img['origin'], img['direction'], primitives, img.get('t')) for img in batch_images]
++    
++    # Compute loss (MSE)
++    loss = np.mean((np.array(rendered_batch) - np.array(batch_targets)) ** 2)
++    
++    # Backward pass (simulated gradient update)
++    optimizer.step(loss)
++    
++    # Population control
++    interval = dataset_cfg['interval']
++    start_iter, end_iter = dataset_cfg['start'], dataset_cfg['end']
++    densify_thresh = dataset_cfg['densify_thresh']
++    prune_thresh = dataset_cfg['prune_thresh']
++    grow_thresh = dataset_cfg['grow_thresh']
++    
++    if start_iter <= iteration <= end_iter and iteration % interval == 0:
++        # Compute gradient norms per primitive (simulated)
++        grad_norms = [np.linalg.norm(p.get('grad', np.zeros(3))) for p in primitives]
++        
++        new_primitives = []
++        for i, p in enumerate(primitives):
++            if grad_norms[i] > densify_thresh and p['scale'] < grow_thresh:
++                # Split: create two children with slightly offset centers and reduced scale
++                offset = np.random.randn(3) * p['scale'] * 0.5
++                child1 = dict(p, center=p['center'] + offset, scale=p['scale'] * 0.9)
++                child2 = dict(p, center=p['center'] - offset, scale=p['scale'] * 0.9)
++                new_primitives.extend([child1, child2])
++            elif p['scale'] > prune_thresh:
++                continue  # Prune
++            else:
++                new_primitives.append(p)
++        primitives = new_primitives
++        
++    return loss, primitives
+ ```
+ 

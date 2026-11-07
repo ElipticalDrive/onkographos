@@ -3,82 +3,47 @@
 Also called: Area Light Shadow Sampling, Area Light Shadows, Partial Occlusion, Shadow Occlusion
 
 ## Overview
-This method models shadows cast by light sources with spatial extent, allowing points in space to be partially occluded, unlike point sources which cast sharp shadows [S2, unofficial]. It differs from its sibling [Direct Illumination with Shadow Rays](2011-direct-illumination-with-shadow-rays.md) by replacing the single boolean visibility test with multiple samples across the light's area to compute natural soft shadows with penumbra [S1, unofficial][S2, unofficial].
+This method models shadows cast by light sources with spatial extent, allowing points in space to be partially occluded, unlike point sources which cast sharp shadows [S2, unofficial]. It sets itself apart from its siblings by replacing the single boolean shadow test of point sources with area light sampling to compute natural soft shadows with penumbra [S1, unofficial][S2, unofficial].
 
 ## How it works
-**Inputs:**
-*   Volume density field $\sigma_t(\mathbf{x})$.
-*   Light source geometry defining an area $A$ and position $\mathbf{p}_L$.
-*   Evaluation point $\mathbf{p}$.
-*   Number of samples $N$.
+**Inputs and Outputs**
+*   **Input:** A ray origin $\mathbf{o}$ and direction $\boldsymbol{\omega}$, a distance field or volume representation of the scene, and an area light source definition (position, orientation, and extent).
+*   **Output:** The transmittance $T$ or shadow factor representing the fraction of light from the area source that reaches the point along the ray.
 
-**Outputs:**
-*   Soft shadow factor $S \in [0, 1]$, representing the fraction of the light source visible from $\mathbf{p}$.
+**Data Structures**
+*   **Area Light:** Defined by a center position, a normal vector (for directional area lights), and a geometric extent (e.g., radius for disks, width/height for rectangles).
+*   **Sample Point:** A position on the light surface generated via uniform or stratified sampling.
 
-**Data Structures:**
-*   Sample points $\mathbf{l}_i$ distributed over the light area $A$.
+**Steps**
+1.  **Sample the Area Light:** Generate a sample point $\mathbf{l}$ on the surface of the area light source. This replaces the single direction vector used for point lights [S1, unofficial].
+2.  **Compute Shadow Ray Direction:** Calculate the direction from the shading point $\mathbf{p}$ to the light sample: $\boldsymbol{\omega}_s = \frac{\mathbf{l} - \mathbf{p}}{\|\mathbf{l} - \mathbf{p}\|}$.
+3.  **Cast Shadow Ray:** Perform a shadow ray march or trace along $\boldsymbol{\omega}_s$ from $\mathbf{p}$ to $\mathbf{l}$ [S1, unofficial].
+4.  **Evaluate Occlusion:** Determine if the ray is blocked by geometry. In a distance field context, this involves checking if the distance to the surface is less than the distance along the ray [S2, unofficial].
+5.  **Accumulate:** Repeat steps 1-4 for multiple samples and average the results to estimate the partial occlusion [S1, unofficial].
 
-**Steps:**
-1.  Sample $N$ points $\mathbf{l}_i$ uniformly (or via a pattern) across the light source area $A$.
-2.  For each sample $i$, compute the direction vector $\mathbf{d}_i = \mathbf{l}_i - \mathbf{p}$.
-3.  Perform a shadow ray cast from $\mathbf{p}$ along $\mathbf{d}_i$ to determine visibility $v_i$.
-    *   If the ray hits an occluder (density threshold exceeded) before reaching $\mathbf{l}_i$, $v_i = 0$.
-    *   Otherwise, $v_i = 1$.
-4.  Compute the soft shadow factor as the average visibility:
-    $$ S = \frac{1}{N} \sum_{i=1}^{N} v_i $$
+**Formulas**
+The shadow factor $S$ is estimated by averaging $N$ samples:
+$$ S = \frac{1}{N} \sum_{i=1}^{N} \text{ShadowTest}(\mathbf{p}, \mathbf{l}_i) $$
+where $\text{ShadowTest}$ returns 1 if the path is clear and 0 if occluded [S2, unofficial].
 
-**Parameters:**
-*   $N$: Number of samples. Higher values reduce noise but increase cost. Not given in the sources.
+**Parameters**
+*   **Number of Samples ($N$):** Not given in the sources. Higher $N$ reduces noise but increases cost [S1, unofficial].
 
-**Edge Cases:**
-*   If $N=1$, the method degenerates to hard shadow casting [S2, unofficial].
-*   Precision issues may arise if $\mathbf{p}$ is extremely close to the light source or occluder.
+**Edge Cases and Pitfalls**
+*   **Aliasing:** Insufficient sampling leads to noisy shadows [S1, unofficial].
+*   **Performance:** Shooting more rays per pixel increases computational cost exponentially [S1, unofficial].
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def compute_soft_shadow(p, light_area, sigma_t, N):
-    """
-    Compute soft shadow factor for point p given light_area and volume sigma_t.
-    light_area: object with method sample(N) returning N points on the light surface.
-    sigma_t: function returning density at a point.
-    """
-    samples = light_area.sample(N)
-    visible_count = 0
-    
-    for l_point in samples:
-        direction = l_point - p
-        # Simplified shadow ray cast: check if any point along the ray is occluded
-        # In a full implementation, this would involve raymarching
-        is_visible = True
-        t = 0.0
-        step_size = 0.01 # Not given in the sources.
-        max_dist = length(direction)
-        
-        while t < max_dist:
-            current_pos = p + direction * (t / max_dist)
-            if sigma_t(current_pos) > 0.1: # Threshold not given in the sources.
-                is_visible = False
-                break
-            t += step_size
-            
-        if is_visible:
-            visible_count += 1
-            
-    return visible_count / N
-```
+## Subtopics
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of light samples and $M$ is the number of steps per shadow ray.
-*   **Memory Complexity:** $O(1)$ additional memory beyond the volume data.
-*   **Strengths:** Produces physically plausible soft shadows with penumbra.
-*   **Limitations:** Computationally expensive due to multiple ray casts per shading point. Performance degrades exponentially with increasing $N$ [S1, unofficial].
-*   **When to use:** When realistic soft shadows are required and performance allows for multiple ray samples.
-*   **When not to use:** For real-time applications with strict performance constraints or when hard shadows are sufficient.
+*   **Time Complexity:** Linear with the number of samples $N$ and the cost of the shadow ray traversal.
+*   **Memory Complexity:** Low, requiring only storage for the scene representation and sample buffers.
+*   **Strengths:** Produces realistic soft shadows with penumbra; works well with dynamic geometry in raster engines if using filtered shadow maps, or with distance fields in raymarching [S2, unofficial].
+*   **Limitations:** Computationally expensive due to multiple ray casts; noise can be significant with few samples [S1, unofficial].
+*   **When to use:** When realistic lighting with soft shadows is required and performance allows for multiple samples per pixel.
 
 ## Background
-The concept of modeling light sources with spatial extent to achieve soft shadows was discussed in the context of raymarching distance fields [S2, unofficial]. The application of area light sampling to volume graphics for more natural appearing soft shadows was described in the context of interactive volume ray tracing [S1, unofficial].
+The concept of soft shadows arises from the physical reality that light sources have spatial extent, unlike the idealized point sources often used in early computer graphics [S2, unofficial]. The method of sampling area lights to approximate these shadows is a fundamental technique in global illumination and realistic rendering [S1, unofficial].
 
 ## Sources
 [S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)

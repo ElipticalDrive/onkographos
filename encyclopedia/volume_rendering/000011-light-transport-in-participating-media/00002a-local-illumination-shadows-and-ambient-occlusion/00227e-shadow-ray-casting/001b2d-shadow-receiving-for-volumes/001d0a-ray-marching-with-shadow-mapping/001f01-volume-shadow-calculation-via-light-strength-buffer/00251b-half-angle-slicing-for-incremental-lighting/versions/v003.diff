@@ -1,0 +1,279 @@
+--- v002.md
++++ v003.md
+@@ -1,159 +1,147 @@
+ # Half-Angle Slicing for Incremental Lighting
+ 
+-Also called: Two-Pass Volumetric Shadow Setup
++Also called: Two-Pass Volumetric Shadow Setup, Image Space Shadow Attenuation, Pixel Buffer Shadowing, Render to Texture Shadowing
+ 
+ ## Overview
+-Half-Angle Slicing is a technique for computing volumetric shadows efficiently by using a pixel buffer to accumulate light attenuation from the light's point of view, thereby avoiding the visual artifacts (such as blurry shadows and dark images) associated with volumetric shadow maps [S1]. It sets apart from its sibling [Volume Shadow Calculation via Light Strength Buffer](1914-volume-shadow-calculation-via-light-strength-buffer.md) by utilizing a shared slicing axis that is geometrically aligned between the viewer and the light source, allowing a single set of slices to be rendered from both perspectives in a two-pass loop per slice [S1].
++Half-Angle Slicing for Incremental Lighting is a multipass technique that computes volumetric shadows by accumulating light attenuation in an off-screen pixel buffer, thereby avoiding the memory overhead and leakage artifacts associated with volumetric shadow maps [S1, S2]. It differs from its parent method, [Volume Shadow Calculation via Light Strength Buffer](1914-volume-shadow-calculation-via-light-strength-buffer.md), by decoupling the light transport sampling from the data volume resolution and using a single 2D buffer instead of a 3D volume [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Volume data, transfer function (mapping scalar value to color $C$ and opacity $A$), eye view direction, light view direction, light color $C_L$, desired sampling distance along the observer view direction $d_v$ [S1].
+-*   **Outputs:** Final image in the eye buffer [S1].
++*   **Input:** Volume dataset, transfer function (color $C$, opacity $A$), light color $C_L$, observer view direction, light view direction, frame buffer resolution.
++*   **Output:** Final image with volumetric shadows in the eye buffer.
+ 
+ **Data Structures:**
+-1.  **Eye Buffer:** Standard framebuffer for the final composite image [S1].
+-2.  **Light Buffer:** A texture buffer used to accumulate light attenuation, initialized to the light color $C_L$ [S1].
+-3.  **Volume Data Texture:** 3D texture containing the scalar field [S1].
+-4.  **Slice Geometry:** Proxy geometry (e.g., a plane or box) representing the current slice [S1].
++1.  **Eye Buffer:** Standard frame buffer storing the final composited color.
++2.  **Light Buffer:** An off-screen render buffer (pixel buffer) or texture. It stores the accumulated light intensity arriving at each slice.
++    *   **Layout:** 2D texture/buffer.
++    *   **Initialization:** Cleared to the light color $C_L$ [S2]. Alternatively, initialized with an arbitrary image (e.g., for spotlights) [S1, S2].
++    *   **Resolution:** Typically 30–50% higher than the frame buffer resolution to mitigate shadow boundary artifacts [S1].
+ 
+ **Parameters:**
+-*   $C_L$: Light color [S1].
+-*   $d_v$: Desired sampling distance along the observer view direction [S1].
+-*   $\theta$: Angle between the observer view direction and the light view direction [S1].
+-*   $d_s$: Slice spacing, calculated to maintain constant sampling rate [S1].
++*   $d_v$: Desired sampling distance along the observer's view direction [S2].
++*   $\theta$: Angle between the observer's view direction and the light's view direction [S2].
++*   $d_s$: Slice spacing, calculated to maintain a constant sampling rate relative to the view direction [S2].
+ 
+ **Formulas:**
+-The slice spacing $d_s$ is determined by the angle $\theta$ between the observer and light view directions to ensure a constant sampling rate relative to the observer:
+-$$ d_s = \frac{d_v}{\cos(\theta/2)} $$
+-[S1]
++The slice spacing $d_s$ is determined by the angle $\theta$ between the view and light directions [S1, S2]:
++$$ d_s = d_v \cos\left(\frac{\theta}{2}\right) $$
++*Note: Source [S1] presents this as $d_s = \cos(\theta/2) d_v$. Source [S2] presents it as Equation 7 with the same geometric relationship.*
+ 
+ **Algorithm Steps:**
+-1.  **Initialization:** Clear the eye buffer and initialize the light buffer to the light color $C_L$ [S1].
+-2.  **Determine Slice Axis:** Compute the proxy geometry in object space [S1].
+-    *   Calculate the dot product of the light direction ($\vec{L}$) and the view direction ($\vec{V}$) [S1].
+-    *   If $\vec{L} \cdot \vec{V} > 0$: Set the slice direction to the vector halfway between the light and view directions [S1]. Render the volume front-to-back for the eye using the **Under** operator [S1]. Render front-to-back for the light using the **Over** operator [S1].
+-    *   If $\vec{L} \cdot \vec{V} \le 0$: Set the slice direction to the vector halfway between the light and the *inverted* view directions [S1]. Render the volume back-to-front for the eye using the **Over** operator [S1]. Render front-to-back for the light using the **Over** operator [S1].
+-3.  **Loop over Slices:** For each slice along the determined axis:
+-    *   **Pass 1 (Eye Rendering):** Render and blend the slice into the eye buffer [S1]. Project the slice vertices to the light buffer using the light's modelview and projection matrices [S1]. Convert the resulting vertex positions to 2D texture coordinates based on the size of the light's viewport and the light buffer [S1]. Bind the light buffer as a texture [S1]. In the fragment shader, evaluate the transfer function for reflective color $C$ and opacity $A$ [S1]. Multiply $C$ by the color sampled from the light buffer ($C_L$) [S1]. Blend $C$ and $A$ into the eye buffer using the appropriate operator (Under or Over) determined in Step 2 [S1].
+-    *   **Pass 2 (Light Buffer Update):** Render and blend the slice into the light buffer using the **Over** operator [S1]. In the fragment shader, evaluate the transfer function for the alpha component and set the fragment color to 0 [S1].
+-4.  **Finalize:** The eye buffer contains the final image with volumetric shadows [S1].
++1.  **Initialize Buffers:** Clear the eye buffer. Initialize the light buffer to $C_L$ [S2].
++2.  **Determine Slice Axis:**
++    *   Calculate the dot product of the light direction ($L$) and view direction ($V$).
++    *   If $L \cdot V > 0$ (acute angle): Set the slice axis to the vector halfway between $L$ and $V$. Render the volume front-to-back for the eye using the **Under** operator [S2].
++    *   If $L \cdot V \le 0$ (obtuse or perpendicular): Set the slice axis to the vector halfway between $L$ and $-V$ (inverted view). Render the volume back-to-front for the eye using the **Over** operator [S2].
++    *   In both cases, render the volume front-to-back for the light using the **Over** operator [S2].
++3.  **Iterate Slices:** For each slice defined by the calculated axis and spacing $d_s$:
++    *   **Pass 1 (Eye Rendering):**
++        *   Render the current slice geometry into the eye buffer.
++        *   Bind the light buffer as a texture.
++        *   In the fragment shader:
++            1.  Evaluate the transfer function to get reflective color $C$ and opacity $A$ [S2].
++            2.  Sample the light buffer at the corresponding 2D texture coordinates (derived from projecting slice vertices using the light's modelview and projection matrices) to get accumulated light color $C_L$ [S2].
++            3.  Modulate the slice color: $C_{final} = C \times C_L$ [S2].
++            4.  Blend $C_{final}$ and $A$ into the eye buffer using the operator determined in Step 2 (Over or Under) [S2].
++    *   **Pass 2 (Light Buffer Update):**
++        *   Render the same slice geometry into the light buffer.
++        *   In the fragment shader:
++            1.  Evaluate the transfer function for the alpha component $A$ [S2].
++            2.  Set the fragment color to 0 (or black) [S2].
++            3.  Blend into the light buffer using the **Over** operator. This accumulates the opacity, effectively reducing the light intensity for subsequent slices [S1, S2].
+ 
+ **Pseudocode:**
+ ```python
+-import math
+-
+-def dot(v1, v2):
+-    return sum(a * b for a, b in zip(v1, v2))
+-
+-def normalize(v):
+-    length = math.sqrt(sum(x * x for x in v))
+-    return [x / length for x in v]
+-
+-def clamp(val, min_val, max_val):
+-    return max(min_val, min(max_val, val))
+-
+-def half_angle_slicing(volume_data, transfer_function, eye_view, light_view, light_color, dv, light_buffer_size):
+-    # 1. Initialization
+-    eye_buffer = [0.0] * (light_buffer_size[0] * light_buffer_size[1] * 4)
+-    light_buffer = [light_color] * (light_buffer_size[0] * light_buffer_size[1] * 4) # Initialized to light color CL [S1]
+-
+-    # 2. Determine Slice Axis and Direction
+-    dot_product = dot(normalize(light_view), normalize(eye_view))
+-    dot_product = clamp(dot_product, -1.0, 1.0) # Fix precision bug for acos [G]
+-
++def half_angle_slicing(volume, transfer_function, light_color, view_dir, light_dir, frame_buffer, light_buffer):
++    # 1. Initialize
++    clear(frame_buffer)
++    # Light buffer initialized to light_color or a spotlight texture
++    set_texture(light_buffer, light_color) 
++    
++    # 2. Determine slicing parameters
++    dot_product = dot(light_dir, view_dir)
++    
+     if dot_product > 0:
+-        slice_axis = normalize([light_view[i] + eye_view[i] for i in range(3)])
+-        eye_blend_op = "UNDER"
+-        light_blend_op = "OVER"
+-        eye_render_order = "FRONT_TO_BACK"
++        # Acute angle: slice halfway between light and view
++        slice_axis = normalize(light_dir + view_dir)
++        eye_blend_op = UNDER_OPERATOR # Front-to-back for eye
+     else:
+-        slice_axis = normalize([light_view[i] - eye_view[i] for i in range(3)]) # Inverted view direction [S1]
+-        eye_blend_op = "OVER"
+-        light_blend_op = "OVER"
+-        eye_render_order = "BACK_TO_FRONT"
+-
+-    # Calculate slice spacing
+-    theta = math.acos(dot_product)
+-    ds = dv / math.cos(theta / 2)
+-
+-    # 3. Loop over slices
+-    slices = generate_slices(volume_data, slice_axis, ds)
+-
+-    for slice_obj in slices:
+-        # Pass 1: Render to Eye Buffer
+-        light_tex_coords = project_to_light_buffer(slice_obj.vertices, light_view, light_buffer_size)
+-        light_buffer_texture = light_buffer
+-        render_slice_to_buffer(
+-            slice_obj=slice_obj,
+-            buffer=eye_buffer,
+-            volume_data=volume_data,
+-            transfer_function=transfer_function,
+-            light_tex_coords=light_tex_coords,
+-            blend_op=eye_blend_op,
+-            order=eye_render_order
+-        )
+-
+-        # Pass 2: Render to Light Buffer
+-        render_slice_to_buffer(
+-            slice_obj=slice_obj,
+-            buffer=light_buffer,
+-            volume_data=volume_data,
+-            transfer_function=transfer_function,
+-            light_tex_coords=None,
+-            blend_op="OVER",
+-            order="FRONT_TO_BACK",
+-            color_override=0.0
+-        )
+-
+-def generate_slices(volume_data, axis, spacing):
+-    # Returns a list of slice objects representing planes along the axis [G]
+-    pass
+-
+-def project_to_light_buffer(vertices, light_view, light_buffer_size):
+-    # Converts 3D vertex positions to 2D texture coordinates based on light's viewport and buffer size [S1]
+-    pass
+-
+-def render_slice_to_buffer(slice_obj, buffer, volume_data, transfer_function, light_tex_coords, blend_op, order, color_override=None):
+-    for fragment in slice_obj.rasterize():
+-        value = sample_volume(volume_data, fragment.world_position)
+-        C, A = transfer_function(value)
+-
+-        if light_tex_coords is not None:
+-            C_L = sample_texture(light_tex_coords)
+-            C = [C[i] * C_L[i] for i in range(3)]
+-
+-        if color_override is not None:
+-            C = [color_override, color_override, color_override]
+-
+-        blend_into_buffer(buffer, fragment.position, C, A, blend_op)
+-
+-def sample_volume(volume_data, pos):
+-    # Standard 3D texture lookup [G]
+-    pass
+-
+-def sample_texture(tex_coords):
+-    # Standard 2D texture lookup [G]
+-    pass
+-
+-def blend_into_buffer(buffer, pos, C, A, op):
+-    # Blends color C and alpha A into buffer at pos using UNDER or OVER operator [S1]
+-    pass
++        # Obtuse angle: slice halfway between light and -view
++        slice_axis = normalize(light_dir - view_dir)
++        eye_blend_op = OVER_OPERATOR # Back-to-front for eye
++        
++    # Calculate slice spacing to maintain constant sampling rate dv
++    # theta is the angle between view_dir and light_dir
++    theta = acos(dot(normalize(view_dir), normalize(light_dir)))
++    ds = dv * cos(theta / 2.0)
++    
++    # 3. Render slices
++    num_slices = compute_num_slices(volume_bounds, slice_axis, ds)
++    
++    for i in range(num_slices):
++        # Get slice geometry at current depth along slice_axis
++        slice_geometry = get_slice_geometry(volume, slice_axis, i * ds)
++        
++        # --- Pass 1: Eye Buffer ---
++        bind_framebuffer(frame_buffer)
++        bind_texture(light_buffer, unit=0)
++        
++        # Project slice vertices to light buffer space to get 2D coords
++        light_view_proj = get_light_view_projection_matrix()
++        light_tex_coords = project_to_light_buffer(slice_geometry, light_view_proj)
++        
++        for each fragment in slice_geometry:
++            # Sample volume data
++            vol_data = sample_volume(volume, fragment.world_pos)
++            
++            # Evaluate transfer function
++            C, A = transfer_function(vol_data)
++            
++            # Get accumulated light attenuation from light buffer
++            # Note: Light buffer stores remaining light intensity
++            C_L = texture(light_buffer, light_tex_coords).rgb
++            
++            # Modulate color by light intensity
++            final_color = C * C_L
++            
++            # Blend into eye buffer
++            blend(fragment, final_color, A, eye_blend_op)
++            
++        # --- Pass 2: Light Buffer ---
++        bind_framebuffer(light_buffer)
++        
++        for each fragment in slice_geometry:
++            vol_data = sample_volume(volume, fragment.world_pos)
++            A = transfer_function(vol_data).alpha
++            
++            # Set color to 0, blend alpha to accumulate opacity
++            # This reduces the light intensity stored in the buffer for next slices
++            blend(fragment, vec3(0.0), A, OVER_OPERATOR)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Angle Adjustment:** As the angle between the observer and light changes, the slice distance $d_s$ must be adjusted to maintain a constant sampling rate [S1].
+-*   **Scattering:** The method ignores contributions from light scattering within the volume, which can result in dark and unrealistic images [S1].
++*   **Attenuation Leakage:** When the view and light directions are perpendicular, naive 2D shadow buffers suffer from "attenuation leakage," where light intensity is stored at a coarse resolution and interpolated, causing blurry shadows and overly dark surfaces [S1]. Using a light buffer with 30–50% higher resolution than the frame buffer mitigates this [S1].
++*   **Sharp Opacity Jumps:** Artifacts may appear at shadow boundaries if opacity jumps sharply from low to high due to image-space sampling [S1].
++*   **Angle Dependency:** As the angle between observer and light changes, $d_s$ must be adjusted to maintain the constant sampling rate $d_v$ [S2].
++
++## Subtopics
++
++### Volumetric Shadow Maps
++Pre-computed 3D textures storing shadow information. They are memory-intensive and suffer from interpolation artifacts compared to the image-space approach of Half-Angle Slicing [S1, S2].
++
++### Shear Warp Rendering
++A technique that slices along major volume axes. It is limited in the maximum angle between view and light directions it can handle effectively without reslicing artifacts [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Proportional to the number of slices times the number of fragments per slice, requiring two rendering passes per slice [S1].
+-*   **Memory Complexity:** Requires storage for the eye buffer, the light buffer, and the volume data, where the light buffer size depends on the light's viewport and resolution [S1].
+-*   **Strengths:** Avoids the artifacts of volumetric shadow maps (blurry shadows, dark images) by using a pixel buffer for attenuation accumulation and efficiently reuses slice geometry for both eye and light views [S1].
+-*   **Limitations:** Does not account for light scattering, leading to potentially dark images, and performance depends on the number of slices and the resolution of the light buffer [S1].
+-*   **When to use:** When real-time volumetric shadows are needed and shadow map artifacts are unacceptable, suitable for scenes where direct illumination attenuation is the primary shadowing component [S1].
+-*   **When not to use:** When accurate scattering effects (translucency, subsurface scattering) are required, as this method ignores them [S1].
++*   **Time Complexity:** Linear with respect to the number of slices and the resolution of the buffers. Each slice requires two rendering passes (eye and light buffer) [S1, S2].
++*   **Memory Complexity:** $O(W \times H)$ for the light buffer, where $W, H$ are the buffer dimensions. This is significantly less than the $O(N^3)$ required for volumetric shadow maps [S1].
++*   **Performance:** Efficient for interactive rendering as it decouples light transport sampling from the data volume resolution [S1].
++*   **Strengths:** Avoids volumetric shadow map artifacts; efficient memory usage; supports arbitrary view and light directions via the half-angle slice axis [S1, S2].
++*   **Limitations:** Does not account for light scattering within the volume (translucency), resulting in dark/unrealistic images if scattering is significant [S2]. Sensitive to resolution mismatches between light buffer and frame buffer [S1].
+ 
+ ## Background
+-The technique was described in *GPU Gems*, Chapter 39, "Volume Rendering Techniques," referencing Kniss et al. 2003 [S1]. It is presented as an improvement over volumetric shadow maps, which suffer from visual artifacts and high memory usage, and is part of the broader family of local illumination and shadowing techniques for participating media, specifically building upon the concepts of ray marching and shadow receiving for volumes [S1].
++The technique was introduced by Kniss et al. in 2003 as an improvement over volumetric shadow maps for interactive volume rendering [S2]. It utilizes an off-screen render buffer (pixel buffer) to accumulate light attenuation from the light's point of view, allowing the same slice to be rendered from both the eye and light points of view by modifying the slice axis to be halfway between the view and light directions [S1, S2].
+ 
+ ## Sources
+-[S1] GPU Gems ch39, Volume rendering techniques, https://developer.nvidia.com/sites/all/modules/custom/gpugems/books/GPUGems/gpugems_ch39.html, fetched 2026-10-29+[S1] Multidimensional Transfer Functions for Interactive Volume ..., https://www.academia.edu/5403340/Multidimensional_Transfer_Functions_for_Interactive_Volume_Rendering, fetched 2026-11-01
++[S2] GPU Gems ch39, Volume rendering techniques, https://developer.nvidia.com/sites/all/modules/custom/gpugems/books/GPUGems/gpugems_ch39.html, fetched 2026-10-29

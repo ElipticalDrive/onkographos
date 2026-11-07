@@ -1,0 +1,213 @@
+--- v001.md
++++ v002.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Ray origin `ray_origin`, ray direction `ray_dir`, grid extent `grid_ext` (uniform), occupancy textures (`chunk_masks`, `brick_masks`, `voxel_masks`), AADF textures (`chunk_aadf`, `brick_aadf`, `voxel_aadf`).
+-- Output: Packed cell info (voxel coordinate and entry axis) or sentinel `VX_NO_CELL` if the ray misses or exits the grid.
++- Input: Ray origin `ray_origin`, ray direction `ray_dir`, grid extent `grid_ext`, occupancy textures (`chunk_masks`, `brick_masks`, `voxel_masks`), AADF textures (`chunk_aadf`, `brick_aadf`, `voxel_aadf`) [S1, unofficial].
++- Output: Packed cell info (voxel coordinate and entry axis) or sentinel `VX_NO_CELL` if the ray misses or exits the grid [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -38,35 +38,34 @@
+ **Pseudocode:**
+ ```python
+-def sparse_voxel_ray_march(ray_origin, ray_dir, grid_ext, chunk_masks, brick_masks, voxel_masks, chunk_aadf, brick_aadf, voxel_aadf, VX_MASK_EXT, VX_BRICK_EXT, VX_CHUNK_EXT, VX_NO_CELL):
++def sparse_voxel_ray_march(ray_origin, ray_dir, grid_ext, chunk_masks, brick_masks, voxel_masks,
++                           chunk_aadf, brick_aadf, voxel_aadf, VX_MASK_EXT, VX_BRICK_EXT,
++                           VX_CHUNK_EXT, VX_NO_CELL):
+     # Step 1: Initialize Ray Inverse
+-    inv_dir = 1.0 / (ray_dir + (ray_dir == 0.0) * 1e-30)
++    inv_dir = tuple(1.0 / (d + 1e-30 if d == 0.0 else d) for d in ray_dir)
+ 
+     # Step 2: Initial AABB Test
+-    p0 = float3(0.0)
+-    p1 = float3(grid_ext)
+-    t0 = (p0 - ray_origin) * inv_dir
+-    t1 = (p1 - ray_origin) * inv_dir
+-    lo = min(t0, t1)
+-    hi = max(t0, t1)
+-    tmin = max(max(lo.x, lo.y), max(lo.z, 0.0))
+-    tmax = min(min(hi.x, hi.y), hi.z)
++    p0 = (0.0, 0.0, 0.0)
++    p1 = (float(grid_ext), float(grid_ext), float(grid_ext))
++    t0 = tuple((p0[i] - ray_origin[i]) * inv_dir[i] for i in range(3))
++    t1 = tuple((p1[i] - ray_origin[i]) * inv_dir[i] for i in range(3))
++    lo = tuple(min(t0[i], t1[i]) for i in range(3))
++    hi = tuple(max(t0[i], t1[i]) for i in range(3))
++    tmin = max(max(lo[0], lo[1]), max(lo[2], 0.0))
++    tmax = min(min(hi[0], hi[1]), hi[2])
+     if tmin > tmax:
+         return VX_NO_CELL
+ 
+     # Step 3: Initial Position
+-    start = ray_origin + tmin * ray_dir
+-    # entry_mask is determined by which face was entered; for simplicity, assume it's computed externally or derived from tmin relative to faces
+-    # entry_mask = float3(1.0 if ray_dir.x < 0 else 0.0, 1.0 if ray_dir.y < 0 else 0.0, 1.0 if ray_dir.z < 0 else 0.0)
+-    # Note: entry_mask logic in source is complex; assuming it's available or computed as:
+-    entry_mask = float3(1.0 if ray_dir.x < 0 else 0.0, 1.0 if ray_dir.y < 0 else 0.0, 1.0 if ray_dir.z < 0 else 0.0)
+-    ipos = int16_t3(floor(start + entry_mask * sign(ray_dir) * 0.5))
+-    local_pos = start - float3(ipos)
++    start = tuple(ray_origin[i] + tmin * ray_dir[i] for i in range(3))
++    entry_mask = tuple(1.0 if ray_dir[i] < 0.0 else 0.0 for i in range(3))
++    ipos = tuple(int(start[i] + entry_mask[i] * (1.0 if ray_dir[i] < 0.0 else -1.0) * 0.5) for i in range(3))
++    local_pos = tuple(start[i] - float(ipos[i]) for i in range(3))
+ 
+     # Step 4: Determine Initial Axis
+-    entry_weights = entry_mask * abs(ray_dir)
++    entry_weights = tuple(entry_mask[i] * abs(ray_dir[i]) for i in range(3))
+     crossed_axis = 0
+-    if entry_weights.y > entry_weights.x:
++    if entry_weights[1] > entry_weights[0]:
+         crossed_axis = 1
+-    if entry_weights.z > max(entry_weights.x, entry_weights.y):
++    if entry_weights[2] > max(entry_weights[0], entry_weights[1]):
+         crossed_axis = 2
+ 
+@@ -74,102 +73,83 @@
+     while True:
+         # 5a: Bounds Check
+-        if any(ipos >= grid_ext):
++        if any(ipos[i] >= grid_ext for i in range(3)):
+             return VX_NO_CELL
+ 
+         # 5b: Hierarchy Check
+-        # Chunk Level
+         cell_ext = VX_BRICK_EXT * VX_CHUNK_EXT
+-        coord = ipos / cell_ext
++        coord = tuple(ipos[i] // cell_ext for i in range(3))
+         if chunk_occupied(coord, chunk_masks, VX_MASK_EXT):
+-            return pack_voxel_cell(ipos, crossed_axis)
++            return (ipos, crossed_axis)
+ 
+-        # Brick Level
+         cell_ext = VX_BRICK_EXT
+-        coord = ipos / cell_ext
++        coord = tuple(ipos[i] // cell_ext for i in range(3))
+         if brick_occupied(coord, brick_masks, VX_MASK_EXT):
+-            return pack_voxel_cell(ipos, crossed_axis)
++            return (ipos, crossed_axis)
+ 
+-        # Voxel Level
+         cell_ext = 1
+         coord = ipos
+         if voxel_occupied(coord, voxel_masks, VX_MASK_EXT):
+-            return pack_voxel_cell(ipos, crossed_axis)
++            return (ipos, crossed_axis)
+ 
+         # 5c: AADF Skip
+-        # Determine which AADF texture to load based on the last checked level (voxel level in this case, as higher levels were empty)
+-        # Note: The source checks chunk, then brick, then voxel. If all are empty, we load the voxel AADF.
+-        aadf = voxel_aadf.Load(int4(coord, 0))
++        aadf = voxel_aadf.Load(coord + (0,))
+ 
+         # 5d: Exit Plane Calculation
+-        exit_plane = aadf_exit_plane(coord, cell_ext, aadf, ray_dir)
++        exit_plane = aadf_exit_plane(coord, cell_ext, aadf, ray_dir, grid_ext)
+ 
+         # 5e: Distance to Exit
+-        side_dist = (exit_plane - float3(ipos) - local_pos) * inv_dir
+-        # Handle zero ray direction components
+-        side_dist = side_dist + (side_dist == 0.0) * 3e+38 # Note: source sets to 3e+38 if ray_dir component is 0, not side_dist. Correcting:
+-        side_dist = side_dist + (ray_dir == 0.0) * 3e+38
++        side_dist = tuple((exit_plane[i] - float(ipos[i]) - local_pos[i]) * inv_dir[i] for i in range(3))
++        side_dist = tuple(3e+38 if ray_dir[i] == 0.0 else side_dist[i] for i in range(3))
+ 
+         # 5f: Find Minimum
+-        t = min(side_dist.x, min(side_dist.y, side_dist.z))
+-        crossed = step(side_dist, t) # This is a vector step function
+-        # Update crossed_axis based on weights of crossed axes
+-        # Note: source says "Update crossed_axis based on weights of the crossed axes."
+-        # This implies re-evaluating entry_weights or similar logic. For simplicity, we assume crossed_axis is updated to the axis of minimum t.
++        t = min(side_dist)
++        crossed = tuple(1.0 if side_dist[i] == t else 0.0 for i in range(3))
+         crossed_axis = 0
+-        if crossed.y > 0.5:
++        if crossed[1] > 0.5:
+             crossed_axis = 1
+-        if crossed.z > 0.5:
++        if crossed[2] > 0.5:
+             crossed_axis = 2
+ 
+         # 5g: Advance
+-        advanced = local_pos + max(t, 0.0001) * ray_dir
+-        cell_delta = int16_t3(floor(advanced + crossed * sign(ray_dir) * 0.5))
+-        ipos += cell_delta
+-        local_pos = advanced - float3(cell_delta)
++        advanced = tuple(local_pos[i] + max(t, 0.0001) * ray_dir[i] for i in range(3))
++        cell_delta = tuple(int(advanced[i] + crossed[i] * (1.0 if ray_dir[i] < 0.0 else -1.0) * 0.5) for i in range(3))
++        ipos = tuple(ipos[i] + cell_delta[i] for i in range(3))
++        local_pos = tuple(advanced[i] - float(ipos[i]) for i in range(3))
+ 
+-def chunk_occupied(coord, chunk_masks, VX_MASK_EXT):
+-    local = coord & (VX_MASK_EXT - 1)
+-    bit = local.x + local.y * VX_MASK_EXT + local.z * VX_MASK_EXT * VX_MASK_EXT
+-    mask = chunk_masks.Load(int4(coord / VX_MASK_EXT, 0))
++def chunk_occupied(coord, masks, VX_MASK_EXT):
++    local = tuple(c & (VX_MASK_EXT - 1) for c in coord)
++    bit = local[0] + local[1] * VX_MASK_EXT + local[2] * VX_MASK_EXT * VX_MASK_EXT
++    mask = masks.Load(tuple(c // VX_MASK_EXT for c in coord) + (0,))
+     return (mask & (1 << bit)) != 0
+ 
+-def brick_occupied(coord, brick_masks, VX_MASK_EXT):
+-    local = coord & (VX_MASK_EXT - 1)
+-    bit = local.x + local.y * VX_MASK_EXT + local.z * VX_MASK_EXT * VX_MASK_EXT
+-    mask = brick_masks.Load(int4(coord / VX_MASK_EXT, 0))
++def brick_occupied(coord, masks, VX_MASK_EXT):
++    local = tuple(c & (VX_MASK_EXT - 1) for c in coord)
++    bit = local[0] + local[1] * VX_MASK_EXT + local[2] * VX_MASK_EXT * VX_MASK_EXT
++    mask = masks.Load(tuple(c // VX_MASK_EXT for c in coord) + (0,))
+     return (mask & (1 << bit)) != 0
+ 
+-def voxel_occupied(coord, voxel_masks, VX_MASK_EXT):
+-    local = coord & (VX_MASK_EXT - 1)
+-    bit = local.x + local.y * VX_MASK_EXT + local.z * VX_MASK_EXT * VX_MASK_EXT
+-    mask = voxel_masks.Load(int4(coord / VX_MASK_EXT, 0))
++def voxel_occupied(coord, masks, VX_MASK_EXT):
++    local = tuple(c & (VX_MASK_EXT - 1) for c in coord)
++    bit = local[0] + local[1] * VX_MASK_EXT + local[2] * VX_MASK_EXT * VX_MASK_EXT
++    mask = masks.Load(tuple(c // VX_MASK_EXT for c in coord) + (0,))
+     return (mask & (1 << bit)) != 0
+ 
+-def aadf_exit_plane(coord, cell_ext, aadf, ray_dir):
+-    shift_x = 0 if ray_dir.x < 0.0 else 5
+-    shift_y = 10 if ray_dir.y < 0.0 else 15
+-    shift_z = 20 if ray_dir.z < 0.0 else 25
++def aadf_exit_plane(coord, cell_ext, aadf, ray_dir, grid_ext):
++    shift_x = 0 if ray_dir[0] < 0.0 else 5
++    shift_y = 10 if ray_dir[1] < 0.0 else 15
++    shift_z = 20 if ray_dir[2] < 0.0 else 25
+     bounds_x = (aadf >> shift_x) & 31
+     bounds_y = (aadf >> shift_y) & 31
+     bounds_z = (aadf >> shift_z) & 31
+-    lower = max((coord - bounds_x) * cell_ext, 0)
+-    upper = min((coord + 1 + bounds_x) * cell_ext, grid_ext) # Note: grid_ext should be passed or global
+-    # This is a simplified version; source calculates lower/upper for each axis separately
+-    lower_x = max((coord.x - bounds_x) * cell_ext, 0)
+-    upper_x = min((coord.x + 1 + bounds_x) * cell_ext, grid_ext)
+-    lower_y = max((coord.y - bounds_y) * cell_ext, 0)
+-    upper_y = min((coord.y + 1 + bounds_y) * cell_ext, grid_ext)
+-    lower_z = max((coord.z - bounds_z) * cell_ext, 0)
+-    upper_z = min((coord.z + 1 + bounds_z) * cell_ext, grid_ext)
+-    exit_x = lower_x if ray_dir.x < 0.0 else upper_x
+-    exit_y = lower_y if ray_dir.y < 0.0 else upper_y
+-    exit_z = lower_z if ray_dir.z < 0.0 else upper_z
+-    return float3(exit_x, exit_y, exit_z)
+-
+-def pack_voxel_cell(ipos, crossed_axis):
+-    # Packed cell info: voxel position and entry axis
+-    # Source says: "pack_voxel_cell(ipos, crossed_axis)"
+-    # Exact packing format not specified, but likely ipos in lower bits, axis in higher
+-    return (ipos.x | (ipos.y << 16) | (ipos.z << 32) | (crossed_axis << 60)) # Example packing
++    lower_x = max((coord[0] - bounds_x) * cell_ext, 0)
++    upper_x = min((coord[0] + 1 + bounds_x) * cell_ext, grid_ext)
++    lower_y = max((coord[1] - bounds_y) * cell_ext, 0)
++    upper_y = min((coord[1] + 1 + bounds_y) * cell_ext, grid_ext)
++    lower_z = max((coord[2] - bounds_z) * cell_ext, 0)
++    upper_z = min((coord[2] + 1 + bounds_z) * cell_ext, grid_ext)
++    exit_x = lower_x if ray_dir[0] < 0.0 else upper_x
++    exit_y = lower_y if ray_dir[1] < 0.0 else upper_y
++    exit_z = lower_z if ray_dir[2] < 0.0 else upper_z
++    return (exit_x, exit_y, exit_z)
+ ```
+ 

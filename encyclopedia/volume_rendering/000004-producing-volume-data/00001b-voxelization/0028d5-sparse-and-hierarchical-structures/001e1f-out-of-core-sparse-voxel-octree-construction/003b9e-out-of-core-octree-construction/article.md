@@ -1,0 +1,148 @@
+# Out-of-Core Octree Construction
+
+Also called: Incremental Octree Building, Octree build, Out-of-core spatialization algorithm, Spatialization Algorithm
+
+## Overview
+An incremental out-of-core algorithm to build an octree where leaves contain the geometry of a given dataset, designed for datasets larger than main memory [S1, unofficial]. It partitions the model into manageable pieces stored on disk, allowing the octree to be constructed directly on a machine with small memory without holding the entire dataset in main memory [S1, unofficial]. Unlike in-core brute-force approaches or algorithms that build from leaves upward, this method builds from the root downward, splitting leaves that exceed a primitive count limit, and ensures that each section insertion reads any affected node at most once [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A dataset of geometric primitives (e.g., triangles) potentially larger than available RAM; a parameter `max_vertices_per_leaf` defining the maximum number of vertices allowed in a leaf node before splitting [S1, unofficial].
+- Output: An octree spatialization data structure stored on disk, consisting of a Hierarchy Structure (HS) file and separate data files for leaf contents [S1, unofficial].
+
+**Data Structures:**
+1.  **Hierarchy Structure (HS) File:** A small file containing the skeleton of the octree. For each node, it stores spatial relationships, the node's bounding box, and auxiliary data for visibility culling [S1, unofficial]. It is assumed to fit entirely in main memory [S1, unofficial].
+2.  **Leaf Data Files:** Separate files storing the geometric contents of each octree node. To avoid linear search overhead on large numbers of files, leaves are saved in a hierarchy of directories, where each directory stores at most a certain number of files (typically 25) [S1, unofficial].
+
+**Parameters:**
+- `max_vertices_per_leaf`: The maximum number of vertices allowed in a leaf node. Example value: 480,000 vertices per leaf for the Boeing 777 dataset [S1, unofficial]. Typical values are not specified generally, but this limit bounds the size of data loaded into memory for a single leaf [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Sectioning:** Break the dataset into sections that fit in main memory. Let $N$ be the number of primitives in the dataset and $n$ be the number of primitives the machine can hold. Create $\lceil N/n \rceil$ sections of at most $n$ primitives each by reading at most $n$ primitives at a time and writing them to separate files [S1, unofficial]. If the dataset is already split into spatially coherent sections, this step may be skipped or adjusted [S1, unofficial].
+2.  **Bounding Box:** Compute the bounding box $b$ of the entire dataset. If the dataset is already split into sections, compute $b$ with a single pass over the dataset, bringing one section into memory at a time. Otherwise, compute $b$ while breaking the dataset into sections [S1, unofficial].
+3.  **Initialization:** Create an empty octree using the bounding box $b$ and `max_vertices_per_leaf`. Save the octree structure (HS file) to disk [S1, unofficial].
+4.  **Incremental Insertion:** For each section in the dataset, call `octree_insert_section(octree.root, section)` [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def octree_build(dataset, max_vertices_per_leaf):
+    # Step 1: Break dataset into sections fitting in memory
+    sections = break_dataset_into_sections(dataset, max_primitives_per_section=n)
+    
+    # Step 2: Compute bounding box b
+    b = compute_bounding_box(sections)
+    
+    # Step 3: Create empty octree and save structure
+    octree = create_empty_octree(bounding_box=b, max_vertices_per_leaf=max_vertices_per_leaf)
+    save_octree_structure(octree)
+    
+    # Step 4: Insert sections incrementally
+    for section in sections:
+        octree_insert_section(octree.root, section)
+
+def octree_insert_section(root, section):
+    # Load only the structure file, not existing node data
+    load_octree_structure(root)
+    load_section_data(section)
+    
+    # Route each primitive in the section
+    for primitive in section:
+        octree_route_primitive(root, primitive)
+        
+    # Save updated data and structure
+    octree_save_data(root)
+    save_octree_structure(root)
+    
+    # Free section data
+    free_section_data(section)
+
+def octree_route_primitive(node, primitive):
+    if node.is_leaf():
+        if not node.is_full():
+            # Insert primitive into node
+            node.insert(primitive)
+        else:
+            # Node is full, split into eight children
+            node.split()
+            # Distribute existing and new data among children
+            node.distribute_data(primitive)
+            # Recursively route primitive to appropriate children
+            for child in node.children:
+                if primitive_intersects(child.bounding_box, primitive):
+                    octree_route_primitive(child, primitive)
+    else:
+        # Node is internal, route to intersecting children
+        for child in node.children:
+            if primitive_intersects(child.bounding_box, primitive):
+                octree_route_primitive(child, primitive)
+
+def octree_save_data(root):
+    # Identify nodes that were leaves before this insertion
+    modified_leaves = get_nodes_that_were_leaves(root)
+    
+    for node in modified_leaves:
+        if node.is_leaf():
+            if node.has_new_data():
+                if node.had_old_data():
+                    old_data = read_old_data(node)
+                    new_data = node.get_new_data()
+                    merged_data = merge(old_data, new_data)
+                    free_old_data(node)
+                    remove_old_data_file(node)
+                    
+                    if size(merged_data) > max_vertices_per_leaf:
+                        node.split()
+                        redistribute_data(node, merged_data)
+                    else:
+                        write_data_files(node, merged_data)
+                else:
+                    # Node was empty, just write new data
+                    write_data_files(node, node.get_new_data())
+        else:
+            # Node is now internal
+            if node.had_old_data():
+                old_data = read_old_data(node)
+                new_subtree_data = collect_new_data_from_subtree(node)
+                merged_data = merge(old_data, new_subtree_data)
+                free_old_data(node)
+                remove_old_data_file(node)
+                redistribute_data(node, merged_data)
+            else:
+                # Node was empty, write new data from subtree
+                new_subtree_data = collect_new_data_from_subtree(node)
+                redistribute_data(node, new_subtree_data)
+            
+            # Write data files for the entire subtree
+            write_data_files_in_subtree(node)
+
+def grow_octree(root, new_section):
+    # Handle cases where new section falls outside original bounding box
+    while not bounding_box_contains(root.bounding_box, new_section.bounding_box):
+        # Create seven siblings for the current root
+        siblings = create_siblings(root)
+        # Create a new root that is the parent of old root and siblings
+        new_root = create_new_root(root, siblings)
+        root = new_root
+    return root
+```
+
+**Edge Cases and Pitfalls:**
+- **Bounding Box Growth:** If an incremental addition (new section) falls outside the original bounding box, the octree must be grown. This is done by creating seven siblings for the current root node and a new root that is the parent of the old root and its new siblings. This process repeats until the octree contains the new section [S1, unofficial].
+- **File System Limits:** The final number of leaf files may be large (e.g., tens of thousands). Saving all files in a single directory can cause linear search overhead when opening files. A hierarchy of directories is used, with each directory storing at most a certain number of files (typically 25) [S1, unofficial].
+- **Memory Assumption:** The algorithm assumes the HS file fits in memory. For typical datasets (e.g., Boeing 777 with 352 million triangles), the HS file size is negligible (e.g., 1.2 MB) [S1, unofficial].
+
+## Operating characteristics
+- **Memory Complexity:** $O(1)$ relative to dataset size. The memory required is limited to the current section being processed, the hierarchy structure (HS) file, and the contents of one leaf (bounded by `max_vertices_per_leaf`) [S1, unofficial].
+- **Performance:** The algorithm is fast because it reads an affected node at most once per section [S1, unofficial]. This contrasts with algorithms like Ueng et al. [141] which may read the same node multiple times when adding a new section [S1, unofficial].
+- **Strengths:** It is incremental, allowing new objects to be added without rebuilding the entire hierarchy, which is useful for applications like 3D scanning [S1, unofficial]. It handles extremely large data sets that do not fit in RAM [S1, unofficial].
+- **Limitations:** It requires a disk-based storage system capable of handling many small files efficiently (mitigated by the directory hierarchy) [S1, unofficial].
+
+## Background
+The algorithm was presented by Wagner Correa et al. in their thesis "New Techniques for Out-Of-Core Visualization of Large Datasets" [S1, unofficial]. It is designed for out-of-core visualization of large datasets, such as the Boeing 777 model with 352 million triangles [S1, unofficial]. The term "bulk loading" is used to refer to the out-of-core construction of spatial data structures, with related work by Agarwal et al. [2] and Arge et al. [8] for k-d trees, quadtrees, and R-trees [S1, unofficial]. The algorithm differs from Cignoni et al. [22] who build from leaves at a predefined depth and merge adjacent leaves, and from Ueng et al. [141] who may read nodes multiple times [S1, unofficial].
+
+## Sources
+[S1] New Techniques for Out-Of-Core Visualization of Large Datasets, https://ctsilva.github.io/thesis/wagner-correa-thesis.pdf, fetched 2026-10-30 (unofficial)

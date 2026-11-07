@@ -1,1060 +1,335 @@
-1
-RoofGS: Roofline-Guided End-to-End Acceleration
-of 3D Gaussian Splatting
-arXiv:2608.15785v1 [cs.CV] 16 Aug 2026
-Yang Luo , Yan Gong , Yongsheng Gao* , Jie Zhao , Senior Member, IEEE
-Abstract—3D Gaussian Splatting (3DGS) enables real-time
-novel-view synthesis but remains limited on GPUs at high
-resolutions. Through a stage-wise Roofline characterization, we
-identify two distinct hardware bottlenecks: global memory traffic
-dominates the front end, whereas instruction throughput limits
-rasterization. Guided by this analysis, we develop RoofGS, a
-rendering framework that applies bottleneck-specific optimizations
-rather than generic kernel acceleration. For the memory-bound
-front end, we design a resolution-adaptive quantized depth sorting
-key that compresses each key to 32 bits. For the compute-bound
-rasterizer, we introduce a range-aware bit-level fast exponential
-approximation tailored to the bounded exponent range after
-opacity culling, with a derived per-pixel error bound. These two
-core techniques are complemented by additional optimizations
-(kernel fusion, compact attribute storage, culling, dual-pixel
-evaluation) that additionally reduce memory traffic and improve
-instruction-level parallelism. Experiments show that RoofGS
-achieves a 10.1× end-to-end speedup over 3DGS at 4K on an
-RTX 4090, increasing throughput from 61 to 616 FPS, with only
-a 0.028 dB PSNR loss.
-Duplicate
-Preprocess
-G0
-G2
-Depth
-(μ’, Σ'-1,σ , SHs)
-Depth
-Sort
-G1
-Preprocess + Duplicate
-Depth
-G3
-Tile0
-Tile1
-Tile2
-G2
-G2
-G2
-Quantized
-Depth Sort
-(INT8 SHs)
-Tiles
-Quantized
-Attributes
-Rasterize
-Σ'-1,σ
-μ’
-Tiles
-Rasterize
-Fast
-Slow
-Original Exp Function
-1 Thread / 1 Pixel
-3DGS
-Ours
-61 FPS
-(10.1x) 616 FPS
-Fast Exp Approx
-3DGS
-Ours
-1 Thread / 2Pixel
-(-0.028)
-30.875 dB
-30.847 dB
-Fig. 1: Rendering pipeline comparison. RoofGS fuses preprocessing
-and duplication, employs INT8 spherical harmonics and quantized
-depth sorting, and accelerates rendering through fast exponential
-approximation and dual-pixel parallelism.
-optimize individual stages or operations, and their local gains
-may not translate into proportional end-to-end acceleration
-Index Terms—3D Gaussian Splatting, Hardware optimization, when the bottleneck shifts across the pipeline.
-Low-bit quantization, Rasterization, Roofline model.
-Some studies, particularly hardware-oriented analyses, have
-also observed that the stages of the 3DGS rendering pipeline
-exhibit substantially different execution characteristics [12]–
-I. I NTRODUCTION
-Novel view synthesis has emerged as an important technique [14]. The front end, including Gaussian projection, frustum
-for applications such as augmented and virtual reality (AR/VR), culling, tile assignment and duplication, and depth sorting,
-immersive gaming, robotic perception, and digital twins [1]–[5]. typically exhibits irregular memory-access patterns and low
-Among recent approaches, 3D Gaussian Splatting (3DGS) [6] arithmetic intensity. Rasterization, by contrast, involves more
-represents a scene using a set of anisotropic Gaussian primitives compute-intensive per-pixel operations, including Gaussian
-and renders novel views through a rasterization-based pipeline. evaluation, exponential computation, and alpha blending [12],
-Compared with NeRF-based methods [7], 3DGS generally [15]. However, these observations have been explored mainly
-provides faster optimization and rendering while achieving in hardware-oriented contexts, with limited attention to cocomparable or higher visual quality. However, its rendering cost ordinated software optimization across the whole rendering
-depends on factors such as the number of Gaussian primitives, pipeline.
-We present RoofGS, a Roofline-guided implementation
-image resolution, and scene complexity. For large-scale scenes
-framework
-for end-to-end 3DGS rendering acceleration. As
-or high-resolution rendering, the associated computation, memillustrated
-in
-Fig. 1, RoofGS uses stage-wise performance
-ory usage, and data movement remain substantial, hindering
-characterization
-to match optimization strategies to the domithe practical deployment of 3DGS in real-time applications.
-nant
-hardware
-constraints
-of the baseline pipeline, by reducing
-Existing approaches to accelerating 3DGS rendering mostly
-intermediate
-data
-movement
-in the front end and reducing
-follow a stage-specific optimization paradigm. TC-GS [8] and
-arithmetic
-overhead
-in
-rasterization.
-In the front end, it
-GEMMGS [9] accelerate rasterization using Tensor Cores,
-compresses
-SH
-and
-geometric
-attributes,
-packs the tile index
-whereas SpeedySplat [10] and AdR-GS [11] primarily focus on
-and
-quantized
-depth
-into
-a
-dynamic
-32-bit
-sorting key, and
-reducing front-end overhead. Although effective, these methods
-fuses preprocessing, tile duplication, and key generation into
-This work was supported by the National Science and Technology Major a single kernel. During rasterization, RoofGS evaluates two
-Project (Grant No. 2025ZD1603200) and the National Outstanding Youth
-adjacent pixels and replaces the standard exponential operation
-Science Fund of the National Natural Science Foundation of China (Grant No.
-with a bit-level approximation tailored to alpha-thresholded
-52025054). (Corresponding author: Yongsheng Gao)
-Yang Luo, Yan Gong, Yongsheng Gao, and Jie Zhao are with the State Key blending, thereby reducing arithmetic and special-functionLaboratory of Robotics and Systems, Harbin Institute of Technology, Harbin
-unit (SFU) pressure. At 4K resolution on an NVIDIA RTX
-150001, China (email: christoluo@outlook.com; gongyan2020@foxmail.com;
-4090 GPU, RoofGS increases the average rendering throughput
-gaoys@hit.edu.cn; jzhao@hit.edu.cn).
-2
-from 61 FPS to 616 FPS across Mip-NeRF 360 [16], Tanks &
-Temples [17], and Deep Blending [18], delivering about 10×
-end-to-end speedup with an average PSNR reduction of only
-0.028 dB.
+# RoofGS: Roofline-Guided End-to-End Acceleration of 3D Gaussian Splatting
+
+Yang Luo [,](https://orcid.org/0009-0002-7124-2296) Yan Gon[g](https://orcid.org/0000-0002-3148-8286) , Yongsheng Gao[\\*](https://orcid.org/0000-0002-1555-8328) , Jie Zhao [,](https://orcid.org/0000-0002-6086-9387) Senior Member, IEEE
+
+Abstract—3D Gaussian Splatting (3DGS) enables real-time novel-view synthesis but remains limited on GPUs at high resolutions. Through a stage-wise Roofline characterization, we identify two distinct hardware bottlenecks: global memory traffic dominates the front end, whereas instruction throughput limits rasterization. Guided by this analysis, we develop RoofGS, a rendering framework that applies bottleneck-specific optimizations rather than generic kernel acceleration. For the memory-bound front end, we design a resolution-adaptive quantized depth sorting key that compresses each key to 32 bits. For the compute-bound rasterizer, we introduce a range-aware bit-level fast exponential approximation tailored to the bounded exponent range after opacity culling, with a derived per-pixel error bound. These two core techniques are complemented by additional optimizations (kernel fusion, compact attribute storage, culling, dual-pixel evaluation) that additionally reduce memory traffic and improve instruction-level parallelism. Experiments show that RoofGS achieves a 10.1× end-to-end speedup over 3DGS at 4K on an RTX 4090, increasing throughput from 61 to 616 FPS, with only a 0.028 dB PSNR loss.
+
+Index Terms—3D Gaussian Splatting, Hardware optimization, Low-bit quantization, Rasterization, Roofline model.
+
+# I. INTRODUCTION
+
+Novel view synthesis has emerged as an important technique for applications such as augmented and virtual reality (AR/VR), immersive gaming, robotic perception, and digital twins [1]–[5]. Among recent approaches, 3D Gaussian Splatting (3DGS) [6] represents a scene using a set of anisotropic Gaussian primitives and renders novel views through a rasterization-based pipeline. Compared with NeRF-based methods [7], 3DGS generally provides faster optimization and rendering while achieving comparable or higher visual quality. However, its rendering cost depends on factors such as the number of Gaussian primitives, image resolution, and scene complexity. For large-scale scenes or high-resolution rendering, the associated computation, memory usage, and data movement remain substantial, hindering the practical deployment of 3DGS in real-time applications.
+
+Existing approaches to accelerating 3DGS rendering mostly follow a stage-specific optimization paradigm. TC-GS [8] and GEMMGS [9] accelerate rasterization using Tensor Cores, whereas SpeedySplat [10] and AdR-GS [11] primarily focus on reducing front-end overhead. Although effective, these methods
+
+
+
+Fig. 1: Rendering pipeline comparison. RoofGS fuses preprocessing and duplication, employs INT8 spherical harmonics and quantized depth sorting, and accelerates rendering through fast exponential approximation and dual-pixel parallelism.
+
+optimize individual stages or operations, and their local gains may not translate into proportional end-to-end acceleration when the bottleneck shifts across the pipeline.
+
+Some studies, particularly hardware-oriented analyses, have also observed that the stages of the 3DGS rendering pipeline exhibit substantially different execution characteristics [12]– [14]. The front end, including Gaussian projection, frustum culling, tile assignment and duplication, and depth sorting, typically exhibits irregular memory-access patterns and low arithmetic intensity. Rasterization, by contrast, involves more compute-intensive per-pixel operations, including Gaussian evaluation, exponential computation, and alpha blending [12], [15]. However, these observations have been explored mainly in hardware-oriented contexts, with limited attention to coordinated software optimization across the whole rendering pipeline.
+
+We present RoofGS, a Roofline-guided implementation framework for end-to-end 3DGS rendering acceleration. As illustrated in Fig. 1, RoofGS uses stage-wise performance characterization to match optimization strategies to the dominant hardware constraints of the baseline pipeline, by reducing intermediate data movement in the front end and reducing arithmetic overhead in rasterization. In the front end, it compresses SH and geometric attributes, packs the tile index and quantized depth into a dynamic 32-bit sorting key, and fuses preprocessing, tile duplication, and key generation into a single kernel. During rasterization, RoofGS evaluates two adjacent pixels and replaces the standard exponential operation with a bit-level approximation tailored to alpha-thresholded blending, thereby reducing arithmetic and special-functionunit (SFU) pressure. At 4K resolution on an NVIDIA RTX 4090 GPU, RoofGS increases the average rendering throughput
+
+This work was supported by the National Science and Technology Major Project (Grant No. 2025ZD1603200) and the National Outstanding Youth Science Fund of the National Natural Science Foundation of China (Grant No. 52025054). (Corresponding author: Yongsheng Gao)
+
+Yang Luo, Yan Gong, Yongsheng Gao, and Jie Zhao are with the State Key Laboratory of Robotics and Systems, Harbin Institute of Technology, Harbin 150001, China (email: christoluo@outlook.com; gongyan2020@foxmail.com; gaoys@hit.edu.cn; jzhao@hit.edu.cn).
+
+from 61 FPS to 616 FPS across Mip-NeRF 360 [16], Tanks & Temples [17], and Deep Blending [18], delivering about 10× end-to-end speedup with an average PSNR reduction of only 0.028 dB.
+
 The main contributions are summarized as follows:
-• We present a Roofline-guided stage-wise optimization
-methodology that allocates optimization effort according to
-the bottleneck of each stage, rather than applying uniform
-kernel acceleration.
-• We design a resolution-adaptive quantized depth sorting
-key that compresses the conventional 64-bit key into 32
-bits, reducing sorting traffic and the number of radix
-passes.
-• We introduce a range-aware bit-level fast exponential
-approximation tailored to the bounded exponent range
-after opacity culling, together with a derived per-pixel
-error bound.
-• We implement and evaluate RoofGS on multiple datasets
-and GPUs, achieving 10× end-to-end acceleration with
-negligible quality loss.
-II. R ELATED W ORK
-A. 3D Gaussian Splatting
-better exploit GPU Tensor Cores. While effective for their
-target kernels, these methods leave the remaining pipeline
-unchanged. Consequently, memory-bound stages, including
-preprocessing, attribute streaming, and sorting, continue to
-dominate execution time, limiting end-to-end acceleration.
-Pipeline-level optimization jointly redesigns multiple rendering stages to improve overall throughput. Existing systems such
-as FlashGS [23], StopThePop [24], SEELE [25], and MobileGS [26] optimize dataflow, memory access, and execution
-scheduling to reduce synchronization overhead and improve
-data locality. However, these designs are largely empirical
-and do not explicitly link their optimizations to the distinct
-hardware limits of each stage, making it difficult to decide
-how to balance memory-traffic reduction and arithmetic-cost
-reduction across scenes.
-Representation-level optimization reduces representation
-size [27] through pruning [28]–[34], quantization [35]–[37],
-and distillation [38]–[40], at the cost of additional retraining or
-post-training. These methods reduce storage requirements and
-offline memory consumption, but aggressive compression may
-degrade fine geometry and high-frequency textures. Moreover,
-existing quantization methods [35]–[37] primarily focus on
-storage compression. During rendering, the quantized Gaussian
-attributes are typically dequantized to floating-point values,
-which limits the potential runtime benefits for operations such
-as attribute streaming, projection, and sorting.
-Although these paradigms address complementary aspects
-of the rendering pipeline, limited attention has been given to
-using a unified stage-wise hardware characterization to guide
-the allocation of optimization effort between memory-bound
-and compute-bound stages. This motivates a coordinated endto-end design.
-3D Gaussian Splatting (3DGS) [2], [6], [19] represents 3D
-scenes using millions of optimizable Gaussian primitives, each
-parameterized by its spatial position, covariance, opacity, and
-view-dependent color encoded via Spherical Harmonics (SHs)
-coefficients. As illustrated on the left of Fig. 1, the standard
-pipeline routes these attributes through distinct preprocessing
-and rasterization stages. In the Preprocess stage, the 3D
-Gaussians are projected onto the camera image plane to
-compute their 2D means µ′ and inverse 2D covariance matrices
-Σ′−1 . In the Duplicate stage, primitives that intersect multiple
-tile boundaries are replicated across all overlapping tiles, while C. Roofline Performance Model
-The Roofline model [41], [42] is a principled analytical
-recording their camera-space depth D. The Depth Sort stage
-then groups these duplicated primitives by tile ID and sorts framework that bounds the attainable performance of an
-them within each tile by depth in back-to-front order. Finally, application on a given hardware architecture. By characterizing
-the Render stage feeds the sorted lists into a tile-based rasterizer. workloads through arithmetic intensity—the ratio of floatingEach tile is typically processed by a thread block that performs point operations to memory traffic (FLOPs/Byte)—it estabalpha blending over the contributing Gaussians to accumulate lishes an upper performance bound and clearly distinguishes
-pixel colors. This design enables efficient parallel rendering but bandwidth-bound from compute-bound regimes.
-In irregular workloads such as 3D Gaussian Splatting,
-can still incur substantial memory bandwidth and computational
-overhead at high resolutions such as 4K due to frequent attribute pipeline stages exhibit highly heterogeneous arithmetic intensities. Front-end operations (e.g., attribute streaming and sorting)
-streaming and per-Gaussian evaluations.
-are typically bandwidth-bound, while back-end rasterization
-is compute-intensive. This stage-wise imbalance implies that
-B. Acceleration of 3DGS
-end-to-end performance is highly sensitive to the optimization
-Existing acceleration strategies improve 3DGS performance
-effort between reducing memory traffic and lowering arithmetic
-from three complementary perspectives: kernel-level opticost.
-mization, pipeline-level optimization, and representation-level
-Although recent 3DGS accelerators [43], [44] employ the
-optimization.
-Roofline model to analyze and optimize individual kernels, few
-Kernel-level optimization accelerates individual computaworks leverage a quantitative hardware performance model
-tional hotspots without fundamentally changing the rendering
-to systematically determine which stages should prioritize
-pipeline. Representative culling methods, including Speedymemory-traffic reduction versus arithmetic-cost reduction.
-Splat [10], AdR-GS [11], Fast-GS [20], OccluGaussian [21]
-RoofGS uses the Roofline model as a practical design guide for
-and Proxy-GS [22], reduce redundant primitives using culling
-selecting and integrating stage-aware execution optimizations
-strategy. Rendering-oriented approaches such as GEMMeacross the rendering pipeline.
-GS [9] and TC-GS [8] reformulate Gaussian evaluation to
-3
-①Preprocessing + Duplication
-FP16
-s,R
-FP16
-INT8
-Parameter
-Transformation
-Keys (INT32)
-Dynamic
-Quantization
-μ
-SHs
-G2
-G1
-G0
-G3
-G4
-G4
-G3
-…
-Gn
-Dual Pixels
-x0
-Tile 0
-D1
-Tile 1
-D4
-(x0)2
-(x0)2
-Tile 1
-D4
-[<Tile 0, D2> , G2]
-y0
-y1
-[<Tile 0, D1> , G1]
-(y0)2
-(y1)2
-x0 y0
-x0 y1
-1
-1
-[<Tile 0, D4> , G4]
-[<Tile 0, D3> , G3]
-Values (FP16)
-Fast
-Exponentiation
-[<Tile 1, D0>, G0]
-α
-[<Tile 1, D1> , G1]
-G1{μ’, Σ', σ, c}
-G2{μ’, Σ', σ, c}
-[<Tile 1, D4> , G4]
-Alpha
-Accumulation
-(32bit Sorting)
-(Fast Exp + ILP)
-……
-σ
-G1
-x0
-G0{μ’, Σ', σ, c}
-Compute
-ColorFromSH
-Tile 0
-G2
-D1
-tiles
-μ’, Σ'
-③Rasterization
-Tile 0
-depth
-Projection
-FP16
-②Radix Sorting
-Gn{μ’, Σ', σ, c}
-(Quantization + Kernel Fusion)
-Threshold
-Tile 0
-、
-Tile 1
-3D-2D
-Projection
-Sorting by Depth
-Gaussian Duplication
-Acuumulation
-Fig. 2: Overall architecture of RoofGS. It streamlines the pipeline through quantization-aware kernel fusion in preprocessing, a compressed
-32-bit radix sort, and hardware-accelerated rasterization using dual-pixel instruction-level parallelism.
+
+- We present a Roofline-guided stage-wise optimization methodology that allocates optimization effort according to the bottleneck of each stage, rather than applying uniform kernel acceleration.
+- We design a resolution-adaptive quantized depth sorting key that compresses the conventional 64-bit key into 32 bits, reducing sorting traffic and the number of radix passes.
+- We introduce a range-aware bit-level fast exponential approximation tailored to the bounded exponent range after opacity culling, together with a derived per-pixel error bound.
+- We implement and evaluate RoofGS on multiple datasets and GPUs, achieving 10× end-to-end acceleration with negligible quality loss.
+
+# II. RELATED WORK
+
+# A. 3D Gaussian Splatting
+
+3D Gaussian Splatting (3DGS) [2], [6], [19] represents 3D scenes using millions of optimizable Gaussian primitives, each parameterized by its spatial position, covariance, opacity, and view-dependent color encoded via Spherical Harmonics (SHs) coefficients. As illustrated on the left of Fig. 1, the standard pipeline routes these attributes through distinct preprocessing and rasterization stages. In the Preprocess stage, the 3D Gaussians are projected onto the camera image plane to compute their 2D means µ ′ and inverse 2D covariance matrices Σ ′−1 . In the Duplicate stage, primitives that intersect multiple tile boundaries are replicated across all overlapping tiles, while recording their camera-space depth D. The Depth Sort stage then groups these duplicated primitives by tile ID and sorts them within each tile by depth in back-to-front order. Finally, the Render stage feeds the sorted lists into a tile-based rasterizer. Each tile is typically processed by a thread block that performs alpha blending over the contributing Gaussians to accumulate pixel colors. This design enables efficient parallel rendering but can still incur substantial memory bandwidth and computational overhead at high resolutions such as 4K due to frequent attribute streaming and per-Gaussian evaluations.
+
+# B. Acceleration of 3DGS
+
+Existing acceleration strategies improve 3DGS performance from three complementary perspectives: kernel-level optimization, pipeline-level optimization, and representation-level optimization.
+
+Kernel-level optimization accelerates individual computational hotspots without fundamentally changing the rendering pipeline. Representative culling methods, including Speedy-Splat [10], AdR-GS [11], Fast-GS [20], OccluGaussian [21] and Proxy-GS [22], reduce redundant primitives using culling strategy. Rendering-oriented approaches such as GEMMe-GS [9] and TC-GS [8] reformulate Gaussian evaluation to
+
+better exploit GPU Tensor Cores. While effective for their target kernels, these methods leave the remaining pipeline unchanged. Consequently, memory-bound stages, including preprocessing, attribute streaming, and sorting, continue to dominate execution time, limiting end-to-end acceleration.
+
+Pipeline-level optimization jointly redesigns multiple rendering stages to improve overall throughput. Existing systems such as FlashGS [23], StopThePop [24], SEELE [25], and Mobile-GS [26] optimize dataflow, memory access, and execution scheduling to reduce synchronization overhead and improve data locality. However, these designs are largely empirical and do not explicitly link their optimizations to the distinct hardware limits of each stage, making it difficult to decide how to balance memory-traffic reduction and arithmetic-cost reduction across scenes.
+
+Representation-level optimization reduces representation size [27] through pruning [28]–[34], quantization [35]–[37], and distillation [38]–[40], at the cost of additional retraining or post-training. These methods reduce storage requirements and offline memory consumption, but aggressive compression may degrade fine geometry and high-frequency textures. Moreover, existing quantization methods [35]–[37] primarily focus on storage compression. During rendering, the quantized Gaussian attributes are typically dequantized to floating-point values, which limits the potential runtime benefits for operations such as attribute streaming, projection, and sorting.
+
+Although these paradigms address complementary aspects of the rendering pipeline, limited attention has been given to using a unified stage-wise hardware characterization to guide the allocation of optimization effort between memory-bound and compute-bound stages. This motivates a coordinated endto-end design.
+
+# C. Roofline Performance Model
+
+The Roofline model [41], [42] is a principled analytical framework that bounds the attainable performance of an application on a given hardware architecture. By characterizing workloads through arithmetic intensity—the ratio of floatingpoint operations to memory traffic (FLOPs/Byte)—it establishes an upper performance bound and clearly distinguishes bandwidth-bound from compute-bound regimes.
+
+In irregular workloads such as 3D Gaussian Splatting, pipeline stages exhibit highly heterogeneous arithmetic intensities. Front-end operations (e.g., attribute streaming and sorting) are typically bandwidth-bound, while back-end rasterization is compute-intensive. This stage-wise imbalance implies that end-to-end performance is highly sensitive to the optimization effort between reducing memory traffic and lowering arithmetic cost.
+
+Although recent 3DGS accelerators [43], [44] employ the Roofline model to analyze and optimize individual kernels, few works leverage a quantitative hardware performance model to systematically determine which stages should prioritize memory-traffic reduction versus arithmetic-cost reduction. RoofGS uses the Roofline model as a practical design guide for selecting and integrating stage-aware execution optimizations across the rendering pipeline.
+
+
+
+Fig. 2: Overall architecture of RoofGS. It streamlines the pipeline through quantization-aware kernel fusion in preprocessing, a compressed 32-bit radix sort, and hardware-accelerated rasterization using dual-pixel instruction-level parallelism.
+
 Table I: Notation used in Roofline characterization.
-A. Preprocessing and Attribute Evaluation
-M, Ndup
-Average tile duplication factor and total
-duplicated instances.
-Skv , Npass
-Key-value entry size and number of radixsort passes.
-We estimate the arithmetic intensity of preprocessing to
-interpret its measured Roofline position. In the baseline FP32
-configuration, preprocessing computes the 3D covariance
-and view-dependent color online using degree-3 spherical
-harmonics (SH). The geometry attributes (position, scale,
-rotation, and opacity) occupy 44 Bytes per Gaussian, while
-the SH coefficients require 192 Bytes, giving a nominal input
-volume of
-I = F/B
-Arithmetic intensity, defined as operations
-divided by data movement.
-in
-Dpre
-= 44 + 16 × 3 × 4 = 236 Bytes/Gaussian.
-Symbol
-Description
-µ, r, s, α
-Gaussian mean, rotation, scale, and opacity.
-′
-Projected 2D mean and covariance matrix.
-µ ,Σ
-′
-III. A NALYTICAL ROOFLINE C HARACTERIZATION
-We use Roofline analysis [42] to identify the dominant
-bottlenecks of different stages in the 3DGS rendering pipeline.
-The achievable performance is bounded by
-P = min(Ppeak , BW · I),
-(1)
-where Ppeak is the peak compute throughput, BW is the
-memory bandwidth, and I is arithmetic intensity. On an
-NVIDIA RTX 4090 GPU, the FP32–DRAM balance point
-is approximately [45]
-82.6 TFLOPS
-≈ 81.9 FLOPs/Byte.
-(2)
-1008 GB/s
-Stages far below this point are generally more sensitive to
-memory traffic, whereas stages closer to it benefit more from
-compute optimizations.
-Iknee =
-(3)
-Point projection, covariance construction and transformation,
-SH evaluation, and screen-space extent computation require an
-estimated 400–800 FLOPs per Gaussian. The resulting inputstreaming arithmetic intensity is
-400–800
-≈ 1.69–3.39 FLOPs/Byte.
-(4)
-236
-This estimation excludes output and intermediate traffic. The
-estimated arithmetic intensity is far below the knee point of
-81.9 FLOPs/Byte defined in Eq. (2), suggesting that preprocessing is memory-bound, consistent with the observations
-reported in GCC and GScore [12], [13].
-in
-Ipre
-=
-B. Duplication and Key-Value Generation
-During tile assignment, each Gaussian is duplicated to all
-tiles intersecting its screen-space footprint. Let M denote the
-average number of intersected tiles. Each duplicated instance
-stores a tile-depth key and a Gaussian index, requiring 12 Bytes
-4
-in the baseline implementation. Thus, the output traffic grows
-linearly with M :
-Bdup ≥ 12M Bytes.
-(5)
-Key generation requires minimal computation, but reading
-Gaussian attributes and writing key–value pairs incur substantial
-global memory traffic. Since the number of generated entries
-grows with the number of tiles overlapped by each Gaussian,
-larger footprints can further increase memory traffic.
-C. Radix-Based Depth Sorting
-Before rasterization, duplicated key–value entries are sorted
-by tile and depth. GPU radix sort reads and writes the key–
-value array in multiple passes [46]. Its memory traffic can be
-approximated as
-Bsort ∝ Skv Ndup Npass ,
-(6)
-where Skv denotes the entry size, Ndup the number of entries,
-and Npass the number of sorting passes. Because each pass
-performs limited computation but accesses the full array, GPU
-radix sort is often memory-bound [12], [47]. Smaller entries
-and fewer passes can therefore reduce sorting traffic.
-D. Rendering
-Following the rasterization procedure of 3D Gaussian
-Splatting [6], each Gaussian primitive is first projected onto the
-image plane, yielding the projected mean µ′ and covariance
-Σ′ . For a pixel located at x, the contribution of the Gaussian
-is quantified by
-
-
-1
-(7)
-α(x) = o exp − (x − µ′ )T Σ′−1 (x − µ′ ) ,
-2
-where o denotes the opacity and the Gaussians are ordered from
-front-to-back according to their depth. Here, α(x) represents
-the effective opacity of the Gaussian at pixel x. Evaluating
-the exponential function introduces substantial instruction
-overhead, as a single IEEE-754 compliant single-precision
-exp operation typically expands into 15 to 20 GPU assembly
-(SASS) instructions [48], [49]. Additionally, each Gaussian–
-pixel contribution is evaluated and composited sequentially
-within a thread. Prior roofline analyses [13], [43], [44] have
-also shown that the rasterization stage of 3DGS is computebound.
-IV. M ETHODS
-Following the Roofline characterization, RoofGS organizes
-the rendering pipeline according to a stage-specific optimization principle: bandwidth-limited stages prioritize reductions
-in global memory traffic, whereas compute-intensive stages
-prioritize lower instruction cost and increased instruction-level
-parallelism (ILP) [50], [51]. As shown in Fig. 2, this principle is
-instantiated through front-end fusion, compact attribute storage,
-compressed radix-sort keys, and a reorganized rasterizer with
-dual-pixel ILP and fast exponential evaluation.
-A. Memory-Bound Optimization
-RoofGS reduces the dominant global memory traffic in
-bandwidth-bound stages through three optimizations (Fig. 2):
-low-bit Gaussian-attribute compression, dynamic depth-key
-compression, and cross-stage kernel fusion.
-1) Compact Attribute Storage: Streaming full-precision
-Gaussian attributes incurs high memory bandwidth demand.
-For third-degree SHs, each Gaussian stores 3(DSH + 1)2 = 48
-coefficients across the RGB channels, requiring 192 bytes in
-single precision when DSH = 3 [6]. As shown on the left side
-of Fig. 2, single-precision SH coefficients dominate the memory
-traffic of appearance attributes. Quantizing all SH coefficients
-with a single shared scale [52], however, is ineffective because
-their dynamic ranges differ substantially across frequency bands.
-The larger low-frequency coefficients dominate the shared scale,
-resulting in coarse quantization of the smaller high-frequency
-coefficients; conversely, a scale tailored to the high-frequency
-terms may clip the low-frequency terms. This range mismatch
-can degrade both the base appearance and fine-grained viewdependent details.
-To avoid the range mismatch of a single shared scale,
-RoofGS quantizes SH coefficients using separate symmetric
-INT8 scales for each SH degree d ∈ {0, 1, 2, 3} and color
-channel c ∈ {R, G, B} [53]. This degree- and channel-specific
-scheme accommodates the distinct coefficient distributions
-while reducing SH storage and memory traffic. The quantized
-coefficients are stored in global memory and dequantized on
-the fly during SH evaluation, as illustrated by the INT8 SH
-path in Fig. 2:
-maxi |SHi,d,c |
-,
-127
-!
-SHi,d,c
-int8
-,
-SHi,d,c = round
-sSH
-d,c
-sSH
-d,c =
-(8)
-int8
-c i,d,c = sSH
-SH
-d,c SHi,d,c .
-Here, SHi,d,c denotes the original FP32 coefficient, SHint8
-i,d,c
-is its quantized value stored in global memory, and c
-SHi,d,c is
-the reconstructed FP32 coefficient used for SH evaluation.
-RoofGS further reduces preprocessing traffic by storing the
-rotation r, scale s, and opacity o in FP16, while retaining the
-3D mean µ in FP32 to preserve projection accuracy. The FP16
-attributes are converted to FP32 in registers before geometric
-computation. Together with INT8 SH coefficients, this reduces
-the per-Gaussian attribute footprint from 236 to approximately
-96 bytes, a 59.3% reduction.
-All low-precision attributes are reconstructed to FP32 in
-registers before any computation, so subsequent SH evaluation,
-covariance projection, and quadric evaluation are performed in
-single precision.
-2) Resolution-Adaptive Sorting-Key Encoding: The sorting
-traffic Bsort in Eq. (6) scales with both the key–value entry
-size Skv and the number of radix passes Npass . In the baseline
-implementation, each duplicated Gaussian is sorted using a
-64-bit composite key consisting of a 32-bit tile ID and a 32-bit
-floating-point depth. This representation requires eight radix
-5
-passes and repeatedly streams the duplicated array, making
-depth sorting a major memory-bandwidth bottleneck.
-RoofGS compresses the sorting key into a 32-bit word that
-jointly encodes the tile index and a quantized camera-space
-depth, as illustrated in Fig. 2. This design reduces Skv and
-cuts Npass from 8 to 4, thereby lowering the dominant sorting
-traffic.
-The 32-bit budget is dynamically partitioned between the
-tile index and depth according to the current tile layout. Here,
-“dynamic” refers to this resolution-dependent bit allocation,
-rather than frame-wise estimation of the minimum and maximum depths of visible Gaussians. The quantization interval
-[znear , zfar ] is predefined according to the known scene extent
-and camera-frustum configuration. Gaussians outside this valid
-interval are rejected during visibility and frustum culling before
-key generation and therefore do not affect the quantization
-range or participate in sorting.
-For a valid projected Gaussian with camera-space depth d,
-the quantized depth is computed as
-
-qd = clamp
-
-
-
-d − znear
-bd
-bd
-2 − 1 , 0, 2 − 1 ,
-zfar − znear
-(9)
-RoofGS removes these unnecessary transfers by combining
-preprocessing, tile duplication, and key-value generation into
-a single kernel.
-Within the fused kernel, each thread computes the projected
-Gaussian attributes, evaluates tile coverage, and directly emits
-the duplicated entries. Duplicate allocation is handled cooperatively at the thread-block level using shared-memory prefix
-sums and a single global atomic operation per block, which
-keeps allocation mostly on-chip and avoids fine-grained atomic
-contention. Since µ′i , di , and Σ′−1
-are retained in registers
-i
-or shared memory, RoofGS eliminates intermediate global
-memory round trips between front-end stages. The quantized
-depth is directly packed into the 32-bit sorting key, and only
-the final color and key-value arrays are written back to global
-memory, reducing front-end global memory transactions from
-five to two per primitive.
-To further reduce the duplication traffic in (5) and the number
-of sorted entries in (6), RoofGS adopts the Gaussian culling
-strategy from Speedy-Splat [10]. This culling step removes
-Gaussians with negligible contributions before duplication,
-avoiding unnecessary generation of duplicated key-value entries.
-As a result, it reduces the effective duplication factor M , the
-number of duplicated entries Ndup , and the global memory
-traffic in both duplication and sorting.
-where bd is the number of bits allocated to depth. The
-clamp operation is used only as a safeguard against numerical
-round-off at the interval boundaries, rather than to accommodate arbitrary out-of-frustum primitives. The mapping is B. Compute-Bound Optimization
-1) Rasterization Reorganization for Dual-Pixel ILP: As
-monotonically non-decreasing, so quantization cannot reverse
-the order of Gaussians assigned to distinct depth bins. Ordering established in the Roofline characterization (Sec. III), the
-ambiguity is limited to Gaussians mapped to the same bin, rasterization stage is primarily bounded by the arithmetic
-whose depth difference is smaller than the quantization step throughput of the Streaming Multiprocessors (SMs). RoofGS
-therefore optimizes this stage by reformulating the per-pixel
-∆d = (zfar − znear )/(2bd − 1).
-Given a tile grid containing Nt = Tx Ty tiles, the tile index Gaussian evaluation and increasing instruction-level parallelism
-requires bt = ⌈log2 Nt ⌉ bits, leaving bd = 32 − bt bits for (ILP) inside the blending loop.
-For each Gaussian-pixel pair, the baseline rasterizer first
-depth. The tile index occupies the most significant bits, while
-the quantized depth occupies the least significant bits. Integer evaluates the Gaussian power as
-sorting therefore first groups duplicated Gaussians by tile and
-1
-p(x, y) = − a(x − u)2 + b(x − u)(y − v)
-then orders them by quantized depth within each tile.
-2
-(10)
-
-For example, at 1920 × 1080 resolution with 16 × 16 tiles,
-12
-+ c(y − v)2 .
-the tile grid contains 120 × 68 = 8,160 tiles. Since 2 <
-8,160 ≤ 213 , the tile index requires 13 bits, leaving 19 bits for
-which corresponds to the exponent term in the standard
-depth and providing 219 = 524,288 quantization levels. The
-Gaussian opacity evaluation defined in Eq. (7). The unclamped
-allocation automatically adapts to the rendering resolution: a
-opacity contribution is then computed as
-larger tile grid uses more bits for the tile index, whereas a
-α̃(x, y) = o exp(p(x, y)),
-(11)
-smaller grid leaves more bits for depth.
-This compression is consistent with the sorting-traffic model
-where (x, y) is the target pixel coordinate, (u, v) denotes the
-in Eq. (6): reducing the key–value representation lowers
-projected 2D Gaussian mean µ′ , (a, b, c) are the elements of
-Skv , while reducing the key width lowers Npass . Since radix
-the inverse 2D covariance matrix Σ′−1 , and o ∈ (0, 1] is the
-sorting repeatedly streams the key–value array and is primarily
-learned Gaussian opacity. The final opacity used for alpha
-memory-bandwidth-bound, the compressed 32-bit key directly
-blending is
-reduces the dominant memory traffic and also cuts the number
-of sorting passes.
-α(x, y) = min(0.99, α̃(x, y)).
-(12)
-3) Preprocessing Kernel Fusion: The baseline 3DGS
-pipeline executes projection, tile duplication, and sorting key In the baseline implementation, the offsets (x − u) and (y − v)
-generation as separate kernels. This separation introduces global are recomputed for every intersecting primitive, introducing
-memory round trips for intermediate data such as screen- repeated subtraction and temporary register usage within the
-innermost rendering loop.
-space coordinates µ′i , depth di , conic parameters Σ′−1
-i , and
-decoded color ci . As shown in the fused front-end of Fig. 2,
-6
-To reduce this instruction overhead, RoofGS expands the
-quadratic form and separates pixel-dependent terms from
-Gaussian-dependent terms:
-a(x − u)2 + b(x − u)(y − v) + c(y − v)2
-= ax2 + bxy + cy 2 − (2au + bv)x
-(13)
-− (2cv + bu)y + C0 ,
+
+| Symbol        | Description                                  |
+|---------------|----------------------------------------------|
+| µ , r , s , α | Gaussian mean, rotation, scale, and opacity. |
+| , Σ           |                                              |
+|               | Projected 2D mean and covariance matrix.     |
+| M, N dup      | Average tile duplication factor and total    |
+|               | duplicated instances.                        |
+| S kv , N pass | Key-value entry size and number of radix    |
+|               | sort passes.                                 |
+| I = F/B       | Arithmetic intensity, defined as operations  |
+|               | divided by data movement.                    |
+
+III. ANALYTICAL ROOFLINE CHARACTERIZATION We use Roofline analysis [42] to identify the dominant bottlenecks of different stages in the 3DGS rendering pipeline. The achievable performance is bounded by
+
+$$P = \min(P_{\text{peak}}, BW \cdot I), \quad (1)$$
+
+where Ppeak is the peak compute throughput, BW is the memory bandwidth, and I is arithmetic intensity. On an NVIDIA RTX 4090 GPU, the FP32–DRAM balance point is approximately [45]
+
+
+$$I_{\text{knee}} = \frac{82.6 \text{ TFLOPS}}{1008 \text{ GB/s}} \approx 81.9 \text{ FLOPS/Byte}. \quad (2)$$
+
+Stages far below this point are generally more sensitive to memory traffic, whereas stages closer to it benefit more from compute optimizations.
+
+## A. Preprocessing and Attribute Evaluation
+
+We estimate the arithmetic intensity of preprocessing to interpret its measured Roofline position. In the baseline FP32 configuration, preprocessing computes the 3D covariance and view-dependent color online using degree-3 spherical harmonics (SH). The geometry attributes (position, scale, rotation, and opacity) occupy 44 Bytes per Gaussian, while the SH coefficients require 192 Bytes, giving a nominal input volume of
+
+| $D_{\text{pre}}^{\text{in}} = 44 + 16 \times 3 \times 4 = 236$ Bytes/Gaussian. | (3) |
+|--------------------------------------------------------------------------------|-----|
+|--------------------------------------------------------------------------------|-----|
+
+Point projection, covariance construction and transformation, SH evaluation, and screen-space extent computation require an estimated 400–800 FLOPs per Gaussian. The resulting inputstreaming arithmetic intensity is
+
+$$I_{\text{pre}}^{\text{in}} = \frac{400-800}{236} \approx 1.69\text{--}3.39 \text{ FLOPs/Byte}. \quad (4)$$
+
+This estimation excludes output and intermediate traffic. The estimated arithmetic intensity is far below the knee point of 81.9 FLOPs/Byte defined in Eq. \(2\), suggesting that preprocessing is memory-bound, consistent with the observations reported in GCC and GScore [12], [13].
+
+# B. Duplication and Key-Value Generation
+
+During tile assignment, each Gaussian is duplicated to all tiles intersecting its screen-space footprint. Let M denote the average number of intersected tiles. Each duplicated instance stores a tile-depth key and a Gaussian index, requiring 12 Bytes in the baseline implementation. Thus, the output traffic grows linearly with M:
+
+
+
+| $B_{\text{dup}} \geq 12M$ | Bytes. | (5) |
+|---------------------------|--------|-----|
+|---------------------------|--------|-----|
+
+Key generation requires minimal computation, but reading Gaussian attributes and writing key–value pairs incur substantial global memory traffic. Since the number of generated entries grows with the number of tiles overlapped by each Gaussian, larger footprints can further increase memory traffic.
+
+## C. Radix-Based Depth Sorting
+
+Before rasterization, duplicated key–value entries are sorted by tile and depth. GPU radix sort reads and writes the key– value array in multiple passes [46]. Its memory traffic can be approximated as
+
+
+$$B_{\text{sort}} \propto S_{\text{kv}} N_{\text{dup}} N_{\text{pass}}, \quad (6)$$
+
+where Skv denotes the entry size, Ndup the number of entries, and Npass the number of sorting passes. Because each pass performs limited computation but accesses the full array, GPU radix sort is often memory-bound [12], [47]. Smaller entries and fewer passes can therefore reduce sorting traffic.
+
+## D. Rendering
+
+Following the rasterization procedure of 3D Gaussian Splatting [6], each Gaussian primitive is first projected onto the image plane, yielding the projected mean µ ′ and covariance Σ ′ . For a pixel located at x, the contribution of the Gaussian is quantified by
+
+
+$$\alpha(\mathbf{x}) = o \exp \left( -\frac{1}{2}(\mathbf{x} - \boldsymbol{\mu}')^T \boldsymbol{\Sigma}'^{-1}(\mathbf{x} - \boldsymbol{\mu}') \right), \quad (7)$$
+
+where o denotes the opacity and the Gaussians are ordered from front-to-back according to their depth. Here, α(x) represents the effective opacity of the Gaussian at pixel x. Evaluating the exponential function introduces substantial instruction overhead, as a single IEEE-754 compliant single-precision exp operation typically expands into 15 to 20 GPU assembly (SASS) instructions [48], [49]. Additionally, each Gaussian– pixel contribution is evaluated and composited sequentially within a thread. Prior roofline analyses [13], [43], [44] have also shown that the rasterization stage of 3DGS is computebound.
+
+## IV. METHODS
+
+Following the Roofline characterization, RoofGS organizes the rendering pipeline according to a stage-specific optimization principle: bandwidth-limited stages prioritize reductions in global memory traffic, whereas compute-intensive stages prioritize lower instruction cost and increased instruction-level parallelism (ILP) [50], [51]. As shown in Fig. 2, this principle is instantiated through front-end fusion, compact attribute storage, compressed radix-sort keys, and a reorganized rasterizer with dual-pixel ILP and fast exponential evaluation.
+
+#### A. Memory-Bound Optimization
+
+RoofGS reduces the dominant global memory traffic in bandwidth-bound stages through three optimizations (Fig. 2\): low-bit Gaussian-attribute compression, dynamic depth-key compression, and cross-stage kernel fusion.
+
+1) Compact Attribute Storage: Streaming full-precision Gaussian attributes incurs high memory bandwidth demand. For third-degree SHs, each Gaussian stores 3(DSH + 1)2 = 48 coefficients across the RGB channels, requiring 192 bytes in single precision when DSH = 3 [6]. As shown on the left side of Fig. 2, single-precision SH coefficients dominate the memory traffic of appearance attributes. Quantizing all SH coefficients with a single shared scale [52], however, is ineffective because their dynamic ranges differ substantially across frequency bands. The larger low-frequency coefficients dominate the shared scale, resulting in coarse quantization of the smaller high-frequency coefficients; conversely, a scale tailored to the high-frequency terms may clip the low-frequency terms. This range mismatch can degrade both the base appearance and fine-grained viewdependent details.
+
+To avoid the range mismatch of a single shared scale, RoofGS quantizes SH coefficients using separate symmetric INT8 scales for each SH degree d ∈ {0, 1, 2, 3} and color channel c ∈ {R, G, B} [53]. This degree- and channel-specific scheme accommodates the distinct coefficient distributions while reducing SH storage and memory traffic. The quantized coefficients are stored in global memory and dequantized on the fly during SH evaluation, as illustrated by the INT8 SH path in Fig. 2:
+
+$$s_{d,c}^{\text{SH}} = \frac{\max_i |\text{SH}_{i,d,c}|}{127},$$
+
+$$\text{SH}_{i,d,c}^{\text{int8}} = \text{round} \left( \frac{\text{SH}_{i,d,c}}{s_{d,c}^{\text{SH}}} \right), \quad (8)$$
+
+$$\widehat{\text{SH}}_{i,d,c} = s_{d,c}^{\text{SH}} \text{SH}_{i,d,c}^{\text{int8}}.$$
+
+Here, SHi,d,c denotes the original FP32 coefficient, SHint8 i,d,c is its quantized value stored in global memory, and SHci,d,c is the reconstructed FP32 coefficient used for SH evaluation.
+
+RoofGS further reduces preprocessing traffic by storing the rotation r, scale s, and opacity o in FP16, while retaining the 3D mean µ in FP32 to preserve projection accuracy. The FP16 attributes are converted to FP32 in registers before geometric computation. Together with INT8 SH coefficients, this reduces the per-Gaussian attribute footprint from 236 to approximately 96 bytes, a 59.3% reduction.
+
+All low-precision attributes are reconstructed to FP32 in registers before any computation, so subsequent SH evaluation, covariance projection, and quadric evaluation are performed in single precision.
+
+2) Resolution-Adaptive Sorting-Key Encoding: The sorting traffic Bsort in Eq. \(6\) scales with both the key–value entry size Skv and the number of radix passes Npass. In the baseline implementation, each duplicated Gaussian is sorted using a 64-bit composite key consisting of a 32-bit tile ID and a 32-bit floating-point depth. This representation requires eight radix passes and repeatedly streams the duplicated array, making depth sorting a major memory-bandwidth bottleneck.
+
+RoofGS compresses the sorting key into a 32-bit word that jointly encodes the tile index and a quantized camera-space depth, as illustrated in Fig. 2. This design reduces Skv and cuts Npass from 8 to 4, thereby lowering the dominant sorting traffic.
+
+The 32-bit budget is dynamically partitioned between the tile index and depth according to the current tile layout. Here, "dynamic" refers to this resolution-dependent bit allocation, rather than frame-wise estimation of the minimum and maximum depths of visible Gaussians. The quantization interval [znear, zfar] is predefined according to the known scene extent and camera-frustum configuration. Gaussians outside this valid interval are rejected during visibility and frustum culling before key generation and therefore do not affect the quantization range or participate in sorting.
+
+For a valid projected Gaussian with camera-space depth d, the quantized depth is computed as
+
+$$q_d = \text{clamp} \left( \left\lfloor \frac{d - z_{\text{near}}}{z_{\text{far}} - z_{\text{near}}} (2^{b_d} - 1) \right\rfloor, 2^{b_d} - 1 \right), \quad (9)$$
+
+where bd is the number of bits allocated to depth. The clamp operation is used only as a safeguard against numerical round-off at the interval boundaries, rather than to accommodate arbitrary out-of-frustum primitives. The mapping is monotonically non-decreasing, so quantization cannot reverse the order of Gaussians assigned to distinct depth bins. Ordering ambiguity is limited to Gaussians mapped to the same bin, whose depth difference is smaller than the quantization step ∆d = (zfar − znear)/(2bd − 1).
+
+Given a tile grid containing Nt = TxTy tiles, the tile index requires bt = ⌈log2 Nt⌉ bits, leaving bd = 32 − bt bits for depth. The tile index occupies the most significant bits, while the quantized depth occupies the least significant bits. Integer sorting therefore first groups duplicated Gaussians by tile and then orders them by quantized depth within each tile.
+
+For example, at 1920 × 1080 resolution with 16 × 16 tiles, the tile grid contains 120 × 68 = 8,160 tiles. Since 2 12 < 8,160 ≤ 2 13, the tile index requires 13 bits, leaving 19 bits for depth and providing 2 19 = 524,288 quantization levels. The allocation automatically adapts to the rendering resolution: a larger tile grid uses more bits for the tile index, whereas a smaller grid leaves more bits for depth.
+
+This compression is consistent with the sorting-traffic model in Eq. \(6\): reducing the key–value representation lowers Skv, while reducing the key width lowers Npass. Since radix sorting repeatedly streams the key–value array and is primarily memory-bandwidth-bound, the compressed 32-bit key directly reduces the dominant memory traffic and also cuts the number of sorting passes.
+
+3) Preprocessing Kernel Fusion: The baseline 3DGS pipeline executes projection, tile duplication, and sorting key generation as separate kernels. This separation introduces global memory round trips for intermediate data such as screenspace coordinates µ ′ i , depth di , conic parameters Σ ′−1 i , and decoded color ci . As shown in the fused front-end of Fig. 2, RoofGS removes these unnecessary transfers by combining preprocessing, tile duplication, and key-value generation into a single kernel.
+
+Within the fused kernel, each thread computes the projected Gaussian attributes, evaluates tile coverage, and directly emits the duplicated entries. Duplicate allocation is handled cooperatively at the thread-block level using shared-memory prefix sums and a single global atomic operation per block, which keeps allocation mostly on-chip and avoids fine-grained atomic contention. Since µ ′ i , di , and Σ ′−1 i are retained in registers or shared memory, RoofGS eliminates intermediate global memory round trips between front-end stages. The quantized depth is directly packed into the 32-bit sorting key, and only the final color and key-value arrays are written back to global memory, reducing front-end global memory transactions from five to two per primitive.
+
+To further reduce the duplication traffic in \(5\) and the number of sorted entries in \(6\), RoofGS adopts the Gaussian culling strategy from Speedy-Splat [10]. This culling step removes Gaussians with negligible contributions before duplication, avoiding unnecessary generation of duplicated key-value entries. As a result, it reduces the effective duplication factor M, the number of duplicated entries Ndup, and the global memory traffic in both duplication and sorting.
+
+## B. Compute-Bound Optimization
+
+1) Rasterization Reorganization for Dual-Pixel ILP: As established in the Roofline characterization (Sec. III\), the rasterization stage is primarily bounded by the arithmetic throughput of the Streaming Multiprocessors (SMs). RoofGS therefore optimizes this stage by reformulating the per-pixel Gaussian evaluation and increasing instruction-level parallelism (ILP) inside the blending loop.
+
+For each Gaussian-pixel pair, the baseline rasterizer first evaluates the Gaussian power as
+
+$$p(x, y) = -\frac{1}{2} \left( a(x - w)^2 + b(x - u)(y - v) + c(y - v)^2 \right). \quad (10)$$
+
+which corresponds to the exponent term in the standard Gaussian opacity evaluation defined in Eq. \(7\). The unclamped opacity contribution is then computed as
+
+$$\tilde{\alpha}(x, y) = o \exp(p(x, y)), \quad (11)$$
+
+where (x, y) is the target pixel coordinate, (u, v) denotes the projected 2D Gaussian mean µ ′ , (a, b, c) are the elements of the inverse 2D covariance matrix Σ ′−1 , and o ∈ (0, 1] is the learned Gaussian opacity. The final opacity used for alpha blending is
+
+$$\alpha(x, y) = \min(0.99, \tilde{\alpha}(x, y)). \quad (12)$$
+
+In the baseline implementation, the offsets (x − u) and (y − v) are recomputed for every intersecting primitive, introducing repeated subtraction and temporary register usage within the innermost rendering loop.
+
+To reduce this instruction overhead, RoofGS expands the quadratic form and separates pixel-dependent terms from Gaussian-dependent terms:
+
+$$\begin{aligned} & a(x - u)^2 + b(x - u)(y - v) + c(y - v)^2 \\ &= ax^2 + bxy + cy^2 - (2au + bv)x \\ &\quad - (2cv + bu)y + C_0, \end{aligned} \tag{13}$$
+
 where
-C0 = au2 + buv + cv 2 .
-(14)
-During the shared-memory loading stage, RoofGS folds
-the constant factor −0.5 and the opacity term log o into the
-Gaussian coefficients:
-C1 = −0.5a, C4 = au + 0.5bv,
-C2 = −0.5b,
-C5 = cv + 0.5bu,
-C3 = −0.5c,
-C6 = −0.5C0 + log o.
-(15)
-By combining coefficient folding, register-resident coordinate
-terms, and dual-pixel incremental evaluation, RoofGS reduces
-redundant arithmetic instructions and on-chip memory accesses
-in the innermost blending loop. This improves instruction
-scheduling and ILP within the rasterization core, enabling the
-compute-bound stage to operate closer to the peak arithmetic
-throughput of the SMs.
-2) Range-Aware Fast Exponential Evaluation: Gaussian
-blending requires evaluating an exponential function for every
-valid Gaussian–pixel pair, which can become a computational
-bottleneck. In the reorganized rasterizer, the learned opacity o
-is folded into the exponent:
-P (x, y) = p(x, y) + log o,
-(21)
-so that the unclamped opacity contribution becomes
-α̃(x, y) = exp(P (x, y)).
-(22)
-With these folded coefficients, the folded exponent can be
-evaluated as
-As derived in Appendix ??, opacity culling restricts the
-exponent for all surviving Gaussian–pixel pairs to
-P (x, y) = C1 x2 + C2 xy + C3 y 2 + C4 x + C5 y + C6 . (16)
-P (x, y) ∈ [− ln 255, 0] ≈ [−5.541, 0].
+
+$$C_0 = au^2 + buv + cv^2. \quad (14)$$
+
+During the shared-memory loading stage, RoofGS folds the constant factor −0.5 and the opacity term log o into the Gaussian coefficients:
+
+
+
+| $C_1 = -0.5a,$ | $C_4 = au + 0.5bu,$       |      |
+|----------------|---------------------------|------|
+| $C_2 = -0.5b,$ | $C_5 = cv + 0.5bu,$       | (15) |
+| $C_3 = -0.5c,$ | $C_6 = -0.5C_0 + \log o.$ |      |
+
+With these folded coefficients, the folded exponent can be evaluated as
+
+
+$$P(x, y) = C_1 x^2 + C_2 xy + C_3 y^2 + C_4 x + C_5 y + C_6. \quad (16)$$
+
 Here,
-P (x, y) = p(x, y) + log o,
-(17)
-and therefore the unclamped opacity contribution can be directly
-written as
-α̃(x, y) = exp(P (x, y)).
-(18)
-Since each active thread is assigned to a fixed pixel, the
-coordinate terms x2 , xy, y 2 , x, and y remain invariant across
-all Gaussians processed by that thread. RoofGS hoists these
-terms outside the primitive loop and keeps them in registers.
-As a result, the inner-loop exponent evaluation becomes a
-regular FMA sequence using the pre-folded coefficients in
-(15), removing repeated coordinate subtraction and improving
-instruction scheduling.
-RoofGS further exploits the spatial coherence between
-vertically adjacent pixels by assigning each thread to process
-two pixels, (x, y) and (x, y + 1). Both pixels traverse the
-same Gaussian sequence within a tile and therefore can reuse
-the same shared-memory attribute load. Let P (x, y) be the
-folded exponent computed by Eq. (16). For the adjacent pixel
-(x, y + 1), direct substitution gives
-P (x, y + 1) = C1 x2 + C2 x(y + 1) + C3 (y + 1)2
-+ C4 x + C5 (y + 1) + C6 .
-(19)
-Therefore, the second exponent can be derived incrementally
-as
-P (x, y + 1) = P (x, y) + C2 x + C3 (2y + 1) + C5 .
-(20)
-This avoids re-evaluating the full dot product for the second
-pixel. The first pixel uses the regular FMA path in (16), while
-the second pixel is computed through the lightweight update
-in (20). Thus, the same Gaussian coefficients are reused across
-two pixel evaluations with only a small amount of additional
-register-level arithmetic.
-This dual-pixel formulation also halves per-pixel sharedmemory traffic, since one attribute load is reused for both
-vertically adjacent pixels.
-(23)
+
+$$P(x, y) = p(x, y) + \log o, \quad (17)$$
+
+and therefore the unclamped opacity contribution can be directly written as
+
+| $\tilde{\alpha}(x, y) = \exp(P(x, y)).$ | (18) |
+|-----------------------------------------|------|
+|-----------------------------------------|------|
+
+Since each active thread is assigned to a fixed pixel, the coordinate terms x 2 , xy, y 2 , x, and y remain invariant across all Gaussians processed by that thread. RoofGS hoists these terms outside the primitive loop and keeps them in registers. As a result, the inner-loop exponent evaluation becomes a regular FMA sequence using the pre-folded coefficients in \(15\), removing repeated coordinate subtraction and improving instruction scheduling.
+
+RoofGS further exploits the spatial coherence between vertically adjacent pixels by assigning each thread to process two pixels, (x, y) and (x, y + 1). Both pixels traverse the same Gaussian sequence within a tile and therefore can reuse the same shared-memory attribute load. Let P(x, y) be the folded exponent computed by Eq. \(16\). For the adjacent pixel (x, y + 1), direct substitution gives
+
+| $P(x, y + 1) = C_1 x^2 + C_2 x(y + 1) + C_3(y + 1)^2 + C_4 x + C_5(y + 1) + C_6.$ | (19) |
+|-----------------------------------------------------------------------------------|------|
+|-----------------------------------------------------------------------------------|------|
+
+Therefore, the second exponent can be derived incrementally as
+
+
+
+| $P(x, y + 1) = P(x, y) + C_2x + C_3(2y + 1) + C_5$ | (20) |
+|----------------------------------------------------|------|
+|                                                    |      |
+
+This avoids re-evaluating the full dot product for the second pixel. The first pixel uses the regular FMA path in \(16\), while the second pixel is computed through the lightweight update in \(20\). Thus, the same Gaussian coefficients are reused across two pixel evaluations with only a small amount of additional register-level arithmetic.
+
+This dual-pixel formulation also halves per-pixel sharedmemory traffic, since one attribute load is reused for both vertically adjacent pixels.
+
+By combining coefficient folding, register-resident coordinate terms, and dual-pixel incremental evaluation, RoofGS reduces redundant arithmetic instructions and on-chip memory accesses in the innermost blending loop. This improves instruction scheduling and ILP within the rasterization core, enabling the compute-bound stage to operate closer to the peak arithmetic throughput of the SMs.
+
+2) Range-Aware Fast Exponential Evaluation: Gaussian blending requires evaluating an exponential function for every valid Gaussian–pixel pair, which can become a computational bottleneck. In the reorganized rasterizer, the learned opacity o is folded into the exponent:
+
+| $P(x, y) = p(x, y) + \log o,$ | (21) |
+|-------------------------------|------|
+|-------------------------------|------|
+
+so that the unclamped opacity contribution becomes
+
+$$\tilde{\alpha}(x, y) = \exp(P(x, y)). \quad (22)$$
+
+As derived in Appendix ??, opacity culling restricts the exponent for all surviving Gaussian–pixel pairs to
+
+| $P(x, y) \in [-\ln 255, 0] \approx [-5.541, 0].$ | (23) |
+|--------------------------------------------------|------|
+|--------------------------------------------------|------|
+
 This narrow, non-positive range is well suited to a fast bitlevel approximation of the exponential function.
-Following Schraudolph’s approximation [54], whose bit-level
-construction is derived in Appendix ??, we approximate the
-IEEE 754 single-precision representation of exp(P ) by
-
-
-I(P ) = P · 223 · log2 (e) + 223 · (127 − σ) ,
-
-ed
-xp(P ) = reinterpretfloat I(P ) .
-(24)
-where 223 is the mantissa scale, 127 is the single-precision
-exponent bias, and σ = 0.045677 is a calibration constant
-that reduces the approximation error. Here, I(P ) denotes a 32bit integer whose bit pattern is constructed to approximate
-the IEEE 754 single-precision encoding of exp(P ). The
-reinterpretfloat operation performs a bitwise reinterpretation
-rather than a numerical integer-to-floating-point conversion.
-Consequently, ed
-xp(P ) denotes the resulting approximation to
-exp(P ).
-For the calibration constant σ = 0.045677, the relative error
-of ed
-xp(P ) over the bounded range P ∈ [− ln 255, 0] is at
-most εmax ≈ 0.03. Hence the approximated opacity satisfies
-α̂ = α(1 + ε) with |ε| ≤ εmax . By the error propagation
-analysis in Appendix ??, this multiplicative perturbation leads
-to a per-pixel color error bounded by |∆C|∞ ≤ εmax ≈ 0.03 in
-continuous color space, independent of the number of blended
-Gaussians.
+
+Following Schraudolph's approximation [54], whose bit-level construction is derived in Appendix ??, we approximate the IEEE 754 single-precision representation of exp(P) by
+
+$$I(P) = [P \cdot 2^{23} \cdot \log_2(e) + 2^{23} \cdot (127 - \sigma)], \quad (24)$$
+
+$$\widehat{\exp}(P) = \text{reinterpret}_{\text{float}}(I(P)).$$
+
+where 2 23 is the mantissa scale, 127 is the single-precision exponent bias, and σ = 0.045677 is a calibration constant that reduces the approximation error. Here, I(P) denotes a 32 bit integer whose bit pattern is constructed to approximate the IEEE 754 single-precision encoding of exp(P). The reinterpretfloat operation performs a bitwise reinterpretation rather than a numerical integer-to-floating-point conversion. Consequently, exp( d P) denotes the resulting approximation to exp(P).
+
+For the calibration constant σ = 0.045677, the relative error of exp( d P) over the bounded range P ∈ [− ln 255, 0] is at most εmax ≈ 0.03. Hence the approximated opacity satisfies αˆ = α(1 + ε) with |ε| ≤ εmax. By the error propagation analysis in Appendix ??, this multiplicative perturbation leads to a per-pixel color error bounded by |∆C|∞ ≤ εmax ≈ 0.03 in continuous color space, independent of the number of blended Gaussians.
+
 The opacity used for alpha blending is then computed as
-α(x, y) = min (0.99, ˆ
-exp(P (x, y))) .
-(25)
-Thus, the transcendental operation exp(P ) is replaced by a
-small number of arithmetic and bit-level operations. This
-reduces the computational overhead of the Gaussian blending
-loop while maintaining sufficient accuracy over the bounded
-exponent range.
-7
-3DGS: 30.45dB
-RoofGS: 30.45dB
-3DGS: 33.38dB
-RoofGS: 33.33dB
-3DGS: 22.33dB
-RoofGS: 22.32dB
-3DGS: 28.65dB
-GT
-RoofGS: 28.65dB
-3DGS
-GT vs 3DGS
-RoofGS(Ours)
-GT vs RoofGS(Ours)
-3DGS vs RoofGS(Ours)
-Fig. 3: Qualitative comparison and residual error visualization. Each row shows a representative test view. From left to right: Ground Truth
-(GT), baseline 3DGS, absolute residual map of 3DGS (|GT − 3DGS|), RoofGS (Ours), absolute residual map of RoofGS (|GT − RoofGS|), and
-amplified difference map (|3DGS − RoofGS|). Red insets highlight zoomed-in regions containing fine details. RoofGS preserves reconstruction
-quality nearly identical to that of standard 3DGS. The amplified difference maps (rightmost column) confirm that residual deviations between
-the two methods are minimal and primarily confined to high-frequency edges. Single-view quantitative metrics (PSNR) are overlaid on the
-rendered images. The right colorbar denotes the absolute RGB error scale [0, 0.3].
-Table II: Orthogonality verification on RTX 4090: FPS and
-speedup over 3DGS (1080p and 4K).
-3DGS [6]
-RoofGS
-PUP 3D-GS [31] PUP + RoofGS
-Scene
-1080p 4K 1080p
-4K
-1080p
-4K
-1080p
-4K
-train
-truck
-drjohnson
-playroom
-157
-167
-131
-175
-530
-585
-586
-699
-642
-352
-576
-633
-160
-98
-158
-164
-3000
-2673
-3248
-3414
-1217
-997
-1371
-1408
-Mean
-Speedup
-158
-47 1423 600
-551
-1.0× 1.0× 9.0× 12.7× 3.5×
-145
-3.1×
-3084 1248
-19.6× 26.4×
-46
-52
-38
-53
-1478
-1348
-1294
-1570
-V. C ONCLUSION
-We presented RoofGS, a Roofline-guided implementation
-framework for end-to-end 3D Gaussian Splatting rendering
-acceleration. Rather than applying a uniform optimization
-strategy across the pipeline, RoofGS uses stage-wise hardware
-characterization to distinguish bandwidth-sensitive front-end
-processing from computation-intensive rasterization. Based on
-this distinction, it combines front-end dataflow fusion, compact
-attribute and sorting-key representations, and rasterization
-reorganization with dual-pixel evaluation and fast exponential
-computation. Across the Mip-NeRF 360, Tanks & Temples,
-and Deep Blending benchmarks at 4K resolution, RoofGS
-achieves an average 10.1× speedup while incurring a PSNR
-reduction of only 0.028 dB, reaching 616 FPS on an RTX 4090.
-The results show that coordinating established optimization
-mechanisms according to stage-specific hardware constraints
-can provide substantial end-to-end gains for high-resolution
-3DGS rendering. This perspective may also be applicable
-to future optimization of training pipelines and resourceconstrained deployment settings.
-R EFERENCES
-[1] A. Dalal, D. Hagen, K. G. Robbersmyr, and K. M. Knausgård, “Gaussian
-splatting: 3d reconstruction and novel view synthesis: A review,” IEEE
-Access, vol. 12, pp. 96 797–96 820, 2024.
-[2] B. Fei, J. Xu, R. Zhang, Q. Zhou, W. Yang, and Y. He, “3d gaussian
-splatting as a new era: A survey,” IEEE Transactions on Visualization
-and Computer Graphics, vol. 31, no. 8, pp. 4429–4449, 2025.
-[3] Z. Zhou, F. Hui, Y. Wu, and Y. Liu, “Six-dof pose estimation with
-efficient 3-d gaussian splatting representation for visual relocalization,”
-IEEE/ASME Transactions on Mechatronics, vol. 30, no. 6, pp. 4283–4292,
-2025.
-[4] M. Yao, Y. Huo, Y. Ran, Q. Tian, R. Wang, and H. Wang, “Neural
-radiance field-based visual rendering: A comprehensive review,” IEEE
-Transactions on Visualization and Computer Graphics, vol. 32, no. 7,
-pp. 7361–7379, 2026.
-[5] K. Wu, Z. Zhang, M. Tie, Z. Ai, Z. Gan, and W. Ding, “Vings-mono:
-Visual-inertial gaussian splatting monocular slam in large scenes,” IEEE
-Transactions on Robotics, vol. 41, pp. 5912–5931, 2025.
-[6] B. Kerbl, G. Kopanas, T. Leimkuehler, and G. Drettakis, “3D Gaussian
-Splatting for real-time radiance field rendering,” ACM Transactions on
-Graphics, vol. 42, no. 4, p. 85, Jul. 2023.
-[7] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi,
-and R. Ng, “NeRF: Representing scenes as neural radiance fields for view
-synthesis,” in Proceedings of the European Conference on Computer
-Vision (ECCV), ser. Lecture Notes in Computer Science, vol. 12346.
-Springer, 2020, pp. 1–18.
-[8] Z. Liao, J. Ding, S. Cui, R. Gong, B. Hu, Y. Wang, H. Li, H. Wang,
-X. Zhang, and R. Fu, “TC-GS: A faster Gaussian Splatting module
-utilizing Tensor Cores,” in Proceedings of the ACM SIGGRAPH Asia
-Conference Papers, 2025, pp. 1–9.
-8
-[9] H. Li, B. Zhu, F. Liu, Z. Wang, X. Liang, L. Jiang, and H. Guan,
-“Gemm-gs: Accelerating 3d gaussian splatting on tensor cores with
-gemm-compatible blending,” arXiv preprint arXiv:2604.02120, 2026.
-[10] A. Hanson, A. Tu, G. Lin, V. Singla, M. Zwicker, and T. Goldstein,
-“Speedy-splat: Fast 3d gaussian splatting with sparse pixels and sparse
-primitives,” in 2025 IEEE/CVF Conference on Computer Vision and
-Pattern Recognition (CVPR), 2025, pp. 21 537–21 546.
-[11] X. Wang, R. Yi, and L. Ma, “AdR-Gaussian: Accelerating Gaussian
-Splatting with adaptive radius,” in Proceedings of the SIGGRAPH Asia
-Conference Papers. ACM, 2024, pp. 1–10.
-[12] J. Lee, S. Lee, J. Lee, J. Park, and J. Sim, “GSCore: Efficient radiance
-field rendering via architectural support for 3D Gaussian Splatting,” in
-Proceedings of the 29th ACM International Conference on Architectural
-Support for Programming Languages and Operating Systems (ASPLOS),
-vol. 3, 2024, pp. 497–511.
-[13] M. Pei, G. Li, J. Si, Z. S. Zhu, Z. Mo, P. Wang, Z. Song, X. Liang,
-and J. Cheng, “GCC: A 3DGS inference architecture with Gaussianwise and cross-stage conditional processing,” in Proceedings of the 58th
-IEEE/ACM International Symposium on Microarchitecture (MICRO),
-2025, pp. 1824–1837.
-[14] C. Zhang, Y. Feng, J. Zhao, G. Liu, W. Ding, C. Wu, and M. Guo,
-“Streaminggs: Voxel-based streaming 3d gaussian splatting with memory
-optimization and architectural support,” in 2025 62nd ACM/IEEE Design
-Automation Conference (DAC), 2025, pp. 1–7.
-[15] W. Liu, Y. Li, Y. Li, J. Yu, and X. Lou, “Duplex-gs: Proxy-guided
-weighted blending for real-time order-independent gaussian splatting,”
-IEEE Transactions on Circuits and Systems for Video Technology, vol. 36,
-no. 7, pp. 9418–9431, 2026.
-[16] J. T. Barron, B. Mildenhall, D. Verbin, P. P. Srinivasan, and P. Hedman,
-“Mip-nerf 360: Unbounded anti-aliased neural radiance fields,” in 2022
-IEEE/CVF Conference on Computer Vision and Pattern Recognition
-(CVPR), 2022, pp. 5460–5469.
-[17] A. Knapitsch, J. Park, Q.-Y. Zhou, and V. Koltun, “Tanks and Temples:
-Benchmarking large-scale scene reconstruction,” IEEE Transactions on
-Visualization and Computer Graphics, vol. 36, no. 4, pp. 1–13, 2017.
-[18] P. Hedman, J. Philip, T. Price, J.-M. Frahm, G. Drettakis, and G. Brostow, “Deep blending for free-viewpoint image-based rendering,” IEEE
-Transactions on Visualization and Computer Graphics, vol. 37, no. 6,
-pp. 1–15, 2018.
-[19] Y. Bao, T. Ding, J. Huo, Y. Liu, Y. Li, W. Li, Y. Gao, and J. Luo, “3d
-gaussian splatting: Survey, technologies, challenges, and opportunities,”
-IEEE Transactions on Circuits and Systems for Video Technology, vol. 35,
-no. 7, pp. 6832–6852, 2025.
-[20] S. Ren, T. Wen, Y. Fang, and B. Lu, “Fastgs: Training 3D gaussian
-splatting in 100 seconds,” in Proceedings of the IEEE/CVF Conference
-on Computer Vision and Pattern Recognition (CVPR), June 2026, pp.
-26 094–26 103.
-[21] S. Liu, X. Tang, Z. Li, Y. He, C. Ye, J. Liu, B. Huang, S. Zhou, and
-X. Wu, “Occlugaussian: Occlusion-aware gaussian splatting for large
-scene reconstruction and rendering,” in 2025 IEEE/CVF International
-Conference on Computer Vision (ICCV), 2025, pp. 26 643–26 652.
-[22] Y. Gao, Y. Gong, Y. Liu, J. Li, D. Xu, Y. Zhang, D. Zhang, X. Sun, and
-Z. Zhong, “Proxy-gs: Unified occlusion priors for training and inference
-in structured 3d gaussian splatting,” in Proceedings of the IEEE/CVF
-Conference on Computer Vision and Pattern Recognition (CVPR), June
-2026, pp. 7330–7339.
-[23] G. Feng, S. Chen, R. Fu, Z. Liao, Y. Wang, T. Liu, B. Hu, L. Xu, Z. Pei,
-H. Li, X. Li, N. Sun, X. Zhang, and B. Dai, “Flashgs: Efficient 3d
-gaussian splatting for large-scale and high-resolution rendering,” in 2025
-IEEE/CVF Conference on Computer Vision and Pattern Recognition
-(CVPR), 2025, pp. 26 652–26 662.
-[24] L. Radl, M. Kopanas, B. Kerbl, M. Steinberger, and D. Schmalstieg,
-“Stopthepop: Sorted gaussian splatting for view-consistent rendering,”
-ACM Transactions on Graphics (TOG), vol. 43, no. 4, pp. 1–13, 2024.
-[25] H. Zhu, X. Huang, Z. Liu, W. Lin, X. Liu, Z. He, J. Leng, M. Guo,
-and Y. Feng, “Seele: A unified acceleration framework for real-time
-Gaussian Splatting on mobile devices,” in Proceedings of the IEEE/CVF
-Conference on Computer Vision and Pattern Recognition (CVPR), 2026,
-pp. 25 979–25 989.
-[26] X. Du, Y. Wang, K. Zhan, and X. Yu, “Mobile-gs: Real-time gaussian
-splatting for mobile devices,” in International Conference on Learning
-Representations (ICLR), 2026.
-[27] M. S. Ali, C. Zhang, M. Cagnazzo, G. Valenzise, E. Tartaglione, and
-S.-H. Bae, “Compression in 3d gaussian splatting: A survey of methods,
-trends, and future directions,” IEEE Transactions on Circuits and Systems
-for Video Technology, pp. 1–1, 2026.
-[28] H. Wang, G. Huang, F. Zhang, D. Bull, and N. Anantrasirichai, “Prune
-wisely, reconstruct sharply: Compact 3D Gaussian splatting via adaptive
-pruning and difference-of-Gaussian primitives,” in Proceedings of the
-IEEE/CVF Conference on Computer Vision and Pattern Recognition
-(CVPR), 2026, pp. 11 716–11 725.
-[29] Z. Fan, K. Wang, K. Wen, Z. Zhu, D. Xu, and Z. Wang, “Lightgaussian:
-Unbounded 3d gaussian compression with 15x reduction and 200+ FPS,”
-in Advances in Neural Information Processing Systems (NeurIPS), 2024.
-[30] S. Niedermayr, J. Stumpfegger, and R. Westermann, “Compressed
-3d gaussian splatting for accelerated novel view synthesis,” in 2024
-IEEE/CVF Conference on Computer Vision and Pattern Recognition
-(CVPR), 2024, pp. 10 349–10 358.
-[31] A. Hanson, A. Tu, V. Singla, M. Jayawardhana, M. Zwicker, and
-T. Goldstein, “Pup 3d-gs: Principled uncertainty pruning for 3d gaussian
-splatting,” in 2025 IEEE/CVF Conference on Computer Vision and Pattern
-Recognition (CVPR), 2025, pp. 5949–5958.
-[32] B. Ramlot, M. Courteaux, P. Lambert, and G. V. Wallendael, “Potr:
-Post-training 3dgs compression,” IEEE Transactions on Circuits and
-Systems for Video Technology, pp. 1–1, 2026.
-[33] D. R. Freitas, I. Tabus, and C. Guillemot, “Visibility-based geometry
-pruning of neural plenoptic scene representations,” IEEE Transactions
-on Multimedia, vol. 28, pp. 1–16, 2026.
-[34] H. Shuai, Y. Shi, Y. Sun, and Q. Liu, “Adversarial pruning networks
-for compact 3d gaussian splatting,” IEEE Transactions on Multimedia,
-vol. 28, pp. 1080–1089, 2026.
-[35] J. C. Lee, D. Rho, X. Sun, J. H. Ko, and E. Park, “Compact 3d gaussian
-representation for radiance field,” in 2024 IEEE/CVF Conference on
-Computer Vision and Pattern Recognition (CVPR), 2024, pp. 21 719–
-21 728.
-[36] Y. Chen, Q. Wu, W. Lin, M. Harandi, and J. Cai, “Hac++: Towards 100x
-compression of 3d gaussian splatting,” IEEE Transactions on Pattern
-Analysis and Machine Intelligence, vol. 47, no. 11, pp. 10 210–10 226,
-2025.
-[37] H. Xu, X. Wu, and X. Zhang, “Improving 3d gaussian splatting compression by scene-adaptive lattice vector quantization,” IEEE Transactions
-on Image Processing, vol. 35, pp. 5864–5879, 2026.
-[38] S. Zhou, H. Chang, S. Jiang, Z. Fan, Z. Zhu, D. Xu, P. Chari, S. You,
-Z. Wang, and A. Kadambi, “Feature 3dgs: Supercharging 3d gaussian
-splatting to enable distilled feature fields,” in 2024 IEEE/CVF Conference
-on Computer Vision and Pattern Recognition (CVPR), 2024, pp. 21 676–
-21 685.
-[39] I. Labe, N. Issachar, I. Lang, and S. Benaim, “DGD: Dynamic 3D
-Gaussians distillation,” in Computer Vision – ECCV 2024. Cham,
-Switzerland: Springer International Publishing, 2024, pp. 361–378.
-[40] S. Xie, W. Zhang, C. Tang, Y. Bai, R. Lu, S. Ge, and Z. Wang,
-“MesonGS: Post-training compression of 3D gaussians via efficient
-attribute transformation,” in Computer Vision – ECCV 2024. Cham:
-Springer Nature Switzerland, 2024, pp. 421–438.
-[41] S. Williams, A. Waterman, and D. Patterson, “Roofline: An insightful
-visual performance model for multicore architectures,” Communications
-of the ACM, vol. 52, no. 4, pp. 65–76, Apr. 2009.
-[42] T. Koskela, Z. Matveev, C. Yang, A. Adedoyin, R. Belenov, P. Thierry,
-Z. Zhao, R. Gayatri, H. Shan, L. Oliker, J. Deslippe, R. Green, and
-S. Williams, “A novel multi-level integrated Roofline model approach
-for performance characterization,” in High Performance Computing,
-R. Yokota, M. Weiland, D. Keyes, and C. Trinitis, Eds.
-Cham,
-Switzerland: Springer International Publishing, 2018, pp. 226–245.
-[43] L. Gao, Z. Wang, Z. Mo, and H. Fan, “SwiftGS: Algorithm and system
-co-optimization for fast 3d gaussian splatting on gpus,” in Proceedings
-of Machine Learning and Systems, A. Chowdhery and Z. Jia, Eds., vol. 8.
-Proceedings of Machine Learning and Systems, 2026, pp. 777–791.
-[Online]. Available: https://proceedings.mlsys.org/paper files/paper/2026/
-file/5f96a21345c138da929e99871fda138e-Paper-Conference.pdf
-[44] Z. Wang, G. He, L. Gao, D. Liu, S. X. Hu, C. Zhang, Z. Song, N. Lane,
-and H. Fan, “Efficient 3d gaussian splatting with axis-shared rasterization
-and order-independent transmittance,” in 2026 ACM/IEEE 53rd Annual
-International Symposium on Computer Architecture (ISCA), 2026, pp.
-2014–2028.
-[45] NVIDIA
-Corporation,
-“Nvidia
-Ada
-GPU
-Architecture,”
-https://images.nvidia.com/aem-dam/Solutions/geforce/ada/
-nvidia-ada-gpu-architecture.pdf, 2022, version V2.02. Appendix
-A contains GeForce RTX 4090 full specifications.
-[46] N. Satish, M. Harris, and M. Garland, “Designing efficient sorting
-algorithms for manycore gpus,” in 2009 IEEE International Symposium
-on Parallel & Distributed Processing, 2009, pp. 1–10.
-[47] E. Stehle and H.-A. Jacobsen, “A Memory Bandwidth-Efficient Hybrid
-Radix Sort on GPUs,” in Proceedings of the 2017 ACM International
-9
-Conference on Management of Data (SIGMOD). New York, NY, USA:
-ACM, 2017.
-[48] NVIDIA Corporation, NVIDIA CUDA C++ Programming Guide, https:
-//docs.nvidia.com/cuda/cuda-c-programming-guide/, 2023, appendix G:
-Compute Capabilities & Instruction Throughput. Accessed: 2024-03-15.
-[49] H. Wong, M.-M. Papadopoulou, M. Sadooghi-Alvandi, and A. Moshovos,
-“Demystifying gpu microarchitecture through microbenchmarking,” in
-2010 IEEE International Symposium on Performance Analysis of Systems
-& Software (ISPASS). IEEE, 2010, pp. 235–246.
-[50] D. W. Wall, “Limits of instruction-level parallelism,” in Proc. 4th Int.
-Conf. Architectural Support for Programming Languages and Operating
-Systems (ASPLOS IV), 1991, pp. 176–188.
-[51] N. P. Jouppi, “The nonuniform distribution of instruction-level and
-machine parallelism and its effect on performance,” IEEE Transactions
-on Computers, vol. 38, no. 12, pp. 1645–1658, Dec. 1989.
-[52] B. Jacob, S. Kligys, B. Chen, M. Zhu, M. Tang, A. Howard, H. Adam,
-and D. Kalenichenko, “Quantization and training of neural networks for
-efficient integer-arithmetic-only inference,” in Proceedings of the IEEE
-Conference on Computer Vision and Pattern Recognition (CVPR), June
-2018.
-[53] Z. Yao, R. Yazdani Aminabadi, M. Zhang, X. Wu, C. Li, and
-Y. He, “Zeroquant: Efficient and affordable post-training quantization for
-large-scale transformers,” in Advances in Neural Information Processing
-Systems, S. Koyejo, S. Mohamed, A. Agarwal, D. Belgrave, K. Cho, and
-A. Oh, Eds., vol. 35. Curran Associates, Inc., 2022, pp. 27 168–27 183.
-[Online]. Available: https://proceedings.neurips.cc/paper files/paper/
-2022/file/adf7fa39d65e2983d724ff7da57f00ac-Paper-Conference.pdf
-[54] N. N. Schraudolph, “A fast, compact approximation of the exponential
-function,” Neural Computation, vol. 11, no. 4, pp. 853–862, 1999.
+
+| $\alpha(x, y) = \min(0.99, \hat{\exp}(P(x, y))) \cdot$ | (25) |
+|--------------------------------------------------------|------|
+|--------------------------------------------------------|------|
+
+Thus, the transcendental operation exp(P) is replaced by a small number of arithmetic and bit-level operations. This reduces the computational overhead of the Gaussian blending loop while maintaining sufficient accuracy over the bounded exponent range.
+
+
+
+
+
+Fig. 3: Qualitative comparison and residual error visualization. Each row shows a representative test view. From left to right: Ground Truth (GT), baseline 3DGS, absolute residual map of 3DGS (|GT−3DGS|), RoofGS (Ours), absolute residual map of RoofGS (|GT−RoofGS|), and amplified difference map (|3DGS−RoofGS|). Red insets highlight zoomed-in regions containing fine details. RoofGS preserves reconstruction quality nearly identical to that of standard 3DGS. The amplified difference maps (rightmost column) confirm that residual deviations between the two methods are minimal and primarily confined to high-frequency edges. Single-view quantitative metrics (PSNR) are overlaid on the rendered images. The right colorbar denotes the absolute RGB error scale [0, 0.3].
+
+Table II: Orthogonality verification on RTX 4090: FPS and speedup over 3DGS (1080p and 4K).
+
+| Scene     | 3DGS 1080p | [6] 4K | 1080p | RoofGS 4K | PUP 1080p | 3D-GS 4K | [31] PUP 1080p | + RoofGS 4K |
+|-----------|------------|--------|-------|-----------|-----------|----------|----------------|-------------|
+| train     | 157        | 46     | 1478  | 530       | 642       | 160      | 3000           | 1217        |
+| truck     | 167        | 52     | 1348  | 585       | 352       | 98       | 2673           | 997         |
+| drjohnson | 131        | 38     | 1294  | 586       | 576       | 158      | 3248           | 1371        |
+| playroom  | 175        | 53     | 1570  | 699       | 633       | 164      | 3414           | 1408        |
+| Mean      | 158        | 47     | 1423  | 600       | 551       | 145      | 3084           | 1248        |
+| Speedup   | 1.0 ×      | 1.0 ×  | 9.0 × | 12.7      | × 3.5 ×   | 3.1 ×    | 19.6           | × 26.4 ×    |
+
+## V. CONCLUSION
+
+We presented RoofGS, a Roofline-guided implementation framework for end-to-end 3D Gaussian Splatting rendering acceleration. Rather than applying a uniform optimization strategy across the pipeline, RoofGS uses stage-wise hardware characterization to distinguish bandwidth-sensitive front-end processing from computation-intensive rasterization. Based on this distinction, it combines front-end dataflow fusion, compact attribute and sorting-key representations, and rasterization reorganization with dual-pixel evaluation and fast exponential computation. Across the Mip-NeRF 360, Tanks & Temples, and Deep Blending benchmarks at 4K resolution, RoofGS achieves an average 10.1× speedup while incurring a PSNR reduction of only 0.028 dB, reaching 616 FPS on an RTX 4090. The results show that coordinating established optimization mechanisms according to stage-specific hardware constraints can provide substantial end-to-end gains for high-resolution
+
+3DGS rendering. This perspective may also be applicable to future optimization of training pipelines and resourceconstrained deployment settings.
+
+## REFERENCES
+
+- [1] A. Dalal, D. Hagen, K. G. Robbersmyr, and K. M. Knausgard, "Gaussian ˚ splatting: 3d reconstruction and novel view synthesis: A review," IEEE Access, vol. 12, pp. 96 797–96 820, 2024. [2] B. Fei, J. Xu, R. Zhang, Q. Zhou, W. Yang, and Y. He, "3d gaussian splatting as a new era: A survey," IEEE Transactions on Visualization and Computer Graphics, vol. 31, no. 8, pp. 4429–4449, 2025. [3] Z. Zhou, F. Hui, Y. Wu, and Y. Liu, "Six-dof pose estimation with efficient 3-d gaussian splatting representation for visual relocalization," IEEE/ASME Transactions on Mechatronics, vol. 30, no. 6, pp. 4283–4292, 2025. [4] M. Yao, Y. Huo, Y. Ran, Q. Tian, R. Wang, and H. Wang, "Neural radiance field-based visual rendering: A comprehensive review," IEEE Transactions on Visualization and Computer Graphics, vol. 32, no. 7, pp. 7361–7379, 2026. [5] K. Wu, Z. Zhang, M. Tie, Z. Ai, Z. Gan, and W. Ding, "Vings-mono: Visual-inertial gaussian splatting monocular slam in large scenes," IEEE Transactions on Robotics, vol. 41, pp. 5912–5931, 2025. [6] B. Kerbl, G. Kopanas, T. Leimkuehler, and G. Drettakis, "3D Gaussian Splatting for real-time radiance field rendering," ACM Transactions on Graphics, vol. 42, no. 4, p. 85, Jul. 2023. [7] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi, and R. Ng, "NeRF: Representing scenes as neural radiance fields for view synthesis," in Proceedings of the European Conference on Computer Vision (ECCV), ser. Lecture Notes in Computer Science, vol. 12346. Springer, 2020, pp. 1–18. [8] Z. Liao, J. Ding, S. Cui, R. Gong, B. Hu, Y. Wang, H. Li, H. Wang,
+  - X. Zhang, and R. Fu, "TC-GS: A faster Gaussian Splatting module utilizing Tensor Cores," in Proceedings of the ACM SIGGRAPH Asia Conference Papers, 2025, pp. 1–9.
+
+- [9] H. Li, B. Zhu, F. Liu, Z. Wang, X. Liang, L. Jiang, and H. Guan, "Gemm-gs: Accelerating 3d gaussian splatting on tensor cores with gemm-compatible blending," arXiv preprint arXiv:2604.02120, 2026. [10] A. Hanson, A. Tu, G. Lin, V. Singla, M. Zwicker, and T. Goldstein, "Speedy-splat: Fast 3d gaussian splatting with sparse pixels and sparse primitives," in 2025 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2025, pp. 21 537–21 546. [11] X. Wang, R. Yi, and L. Ma, "AdR-Gaussian: Accelerating Gaussian Splatting with adaptive radius," in Proceedings of the SIGGRAPH Asia Conference Papers. ACM, 2024, pp. 1–10. [12] J. Lee, S. Lee, J. Lee, J. Park, and J. Sim, "GSCore: Efficient radiance field rendering via architectural support for 3D Gaussian Splatting," in Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS), vol. 3, 2024, pp. 497–511. [13] M. Pei, G. Li, J. Si, Z. S. Zhu, Z. Mo, P. Wang, Z. Song, X. Liang, and J. Cheng, "GCC: A 3DGS inference architecture with Gaussianwise and cross-stage conditional processing," in Proceedings of the 58th IEEE/ACM International Symposium on Microarchitecture (MICRO), 2025, pp. 1824–1837. [14] C. Zhang, Y. Feng, J. Zhao, G. Liu, W. Ding, C. Wu, and M. Guo, "Streaminggs: Voxel-based streaming 3d gaussian splatting with memory optimization and architectural support," in 2025 62nd ACM/IEEE Design Automation Conference (DAC), 2025, pp. 1–7. [15] W. Liu, Y. Li, Y. Li, J. Yu, and X. Lou, "Duplex-gs: Proxy-guided weighted blending for real-time order-independent gaussian splatting," IEEE Transactions on Circuits and Systems for Video Technology, vol. 36, no. 7, pp. 9418–9431, 2026. [16] J. T. Barron, B. Mildenhall, D. Verbin, P. P. Srinivasan, and P. Hedman, "Mip-nerf 360: Unbounded anti-aliased neural radiance fields," in 2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2022, pp. 5460–5469. [17] A. Knapitsch, J. Park, Q.-Y. Zhou, and V. Koltun, "Tanks and Temples: Benchmarking large-scale scene reconstruction," IEEE Transactions on Visualization and Computer Graphics, vol. 36, no. 4, pp. 1–13, 2017. [18] P. Hedman, J. Philip, T. Price, J.-M. Frahm, G. Drettakis, and G. Brostow, "Deep blending for free-viewpoint image-based rendering," IEEE Transactions on Visualization and Computer Graphics, vol. 37, no. 6, pp. 1–15, 2018. [19] Y. Bao, T. Ding, J. Huo, Y. Liu, Y. Li, W. Li, Y. Gao, and J. Luo, "3d gaussian splatting: Survey, technologies, challenges, and opportunities," IEEE Transactions on Circuits and Systems for Video Technology, vol. 35, no. 7, pp. 6832–6852, 2025. [20] S. Ren, T. Wen, Y. Fang, and B. Lu, "Fastgs: Training 3D gaussian splatting in 100 seconds," in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), June 2026, pp. 26 094–26 103. [21] S. Liu, X. Tang, Z. Li, Y. He, C. Ye, J. Liu, B. Huang, S. Zhou, and
+- X. Wu, "Occlugaussian: Occlusion-aware gaussian splatting for large scene reconstruction and rendering," in 2025 IEEE/CVF International Conference on Computer Vision (ICCV), 2025, pp. 26 643–26 652. [22] Y. Gao, Y. Gong, Y. Liu, J. Li, D. Xu, Y. Zhang, D. Zhang, X. Sun, and
+- Z. Zhong, "Proxy-gs: Unified occlusion priors for training and inference in structured 3d gaussian splatting," in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), June 2026, pp. 7330–7339. [23] G. Feng, S. Chen, R. Fu, Z. Liao, Y. Wang, T. Liu, B. Hu, L. Xu, Z. Pei,
+- H. Li, X. Li, N. Sun, X. Zhang, and B. Dai, "Flashgs: Efficient 3d gaussian splatting for large-scale and high-resolution rendering," in 2025 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2025, pp. 26 652–26 662. [24] L. Radl, M. Kopanas, B. Kerbl, M. Steinberger, and D. Schmalstieg, "Stopthepop: Sorted gaussian splatting for view-consistent rendering," ACM Transactions on Graphics (TOG), vol. 43, no. 4, pp. 1–13, 2024. [25] H. Zhu, X. Huang, Z. Liu, W. Lin, X. Liu, Z. He, J. Leng, M. Guo, and Y. Feng, "Seele: A unified acceleration framework for real-time Gaussian Splatting on mobile devices," in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2026, pp. 25 979–25 989. [26] X. Du, Y. Wang, K. Zhan, and X. Yu, "Mobile-gs: Real-time gaussian splatting for mobile devices," in International Conference on Learning Representations (ICLR), 2026. [27] M. S. Ali, C. Zhang, M. Cagnazzo, G. Valenzise, E. Tartaglione, and S.-H. Bae, "Compression in 3d gaussian splatting: A survey of methods, trends, and future directions," IEEE Transactions on Circuits and Systems for Video Technology, pp. 1–1, 2026. [28] H. Wang, G. Huang, F. Zhang, D. Bull, and N. Anantrasirichai, "Prune wisely, reconstruct sharply: Compact 3D Gaussian splatting via adaptive pruning and difference-of-Gaussian primitives," in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2026, pp. 11 716–11 725. [29] Z. Fan, K. Wang, K. Wen, Z. Zhu, D. Xu, and Z. Wang, "Lightgaussian: Unbounded 3d gaussian compression with 15x reduction and 200+ FPS," in Advances in Neural Information Processing Systems (NeurIPS), 2024. [30] S. Niedermayr, J. Stumpfegger, and R. Westermann, "Compressed 3d gaussian splatting for accelerated novel view synthesis," in 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2024, pp. 10 349–10 358. [31] A. Hanson, A. Tu, V. Singla, M. Jayawardhana, M. Zwicker, and
+  - T. Goldstein, "Pup 3d-gs: Principled uncertainty pruning for 3d gaussian splatting," in 2025 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2025, pp. 5949–5958. [32] B. Ramlot, M. Courteaux, P. Lambert, and G. V. Wallendael, "Potr: Post-training 3dgs compression," IEEE Transactions on Circuits and Systems for Video Technology, pp. 1–1, 2026. [33] D. R. Freitas, I. Tabus, and C. Guillemot, "Visibility-based geometry pruning of neural plenoptic scene representations," IEEE Transactions on Multimedia, vol. 28, pp. 1–16, 2026. [34] H. Shuai, Y. Shi, Y. Sun, and Q. Liu, "Adversarial pruning networks for compact 3d gaussian splatting," IEEE Transactions on Multimedia, vol. 28, pp. 1080–1089, 2026. [35] J. C. Lee, D. Rho, X. Sun, J. H. Ko, and E. Park, "Compact 3d gaussian representation for radiance field," in 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2024, pp. 21 719– 21 728. [36] Y. Chen, Q. Wu, W. Lin, M. Harandi, and J. Cai, "Hac++: Towards 100x compression of 3d gaussian splatting," IEEE Transactions on Pattern Analysis and Machine Intelligence, vol. 47, no. 11, pp. 10 210–10 226, 2025. [37] H. Xu, X. Wu, and X. Zhang, "Improving 3d gaussian splatting compression by scene-adaptive lattice vector quantization," IEEE Transactions on Image Processing, vol. 35, pp. 5864–5879, 2026. [38] S. Zhou, H. Chang, S. Jiang, Z. Fan, Z. Zhu, D. Xu, P. Chari, S. You,
+  - Z. Wang, and A. Kadambi, "Feature 3dgs: Supercharging 3d gaussian splatting to enable distilled feature fields," in 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2024, pp. 21 676– 21 685. [39] I. Labe, N. Issachar, I. Lang, and S. Benaim, "DGD: Dynamic 3D Gaussians distillation," in Computer Vision – ECCV 2024. Cham, Switzerland: Springer International Publishing, 2024, pp. 361–378. [40] S. Xie, W. Zhang, C. Tang, Y. Bai, R. Lu, S. Ge, and Z. Wang, "MesonGS: Post-training compression of 3D gaussians via efficient attribute transformation," in Computer Vision – ECCV 2024. Cham: Springer Nature Switzerland, 2024, pp. 421–438. [41] S. Williams, A. Waterman, and D. Patterson, "Roofline: An insightful visual performance model for multicore architectures," Communications of the ACM, vol. 52, no. 4, pp. 65–76, Apr. 2009. [42] T. Koskela, Z. Matveev, C. Yang, A. Adedoyin, R. Belenov, P. Thierry,
+    - Z. Zhao, R. Gayatri, H. Shan, L. Oliker, J. Deslippe, R. Green, and
+    - S. Williams, "A novel multi-level integrated Roofline model approach for performance characterization," in High Performance Computing,
+  - R. Yokota, M. Weiland, D. Keyes, and C. Trinitis, Eds. Cham, Switzerland: Springer International Publishing, 2018, pp. 226–245. [43] L. Gao, Z. Wang, Z. Mo, and H. Fan, "SwiftGS: Algorithm and system co-optimization for fast 3d gaussian splatting on gpus," in Proceedings of Machine Learning and Systems, A. Chowdhery and Z. Jia, Eds., vol. 8. Proceedings of Machine Learning and Systems, 2026, pp. 777–791. [Online]. Available: [https://proceedings.mlsys.org/paper](https://proceedings.mlsys.org/paper_files/paper/2026/file/5f96a21345c138da929e99871fda138e-Paper-Conference.pdf) files/paper/2026/ [file/5f96a21345c138da929e99871fda138e-Paper-Conference.pdf](https://proceedings.mlsys.org/paper_files/paper/2026/file/5f96a21345c138da929e99871fda138e-Paper-Conference.pdf) [44] Z. Wang, G. He, L. Gao, D. Liu, S. X. Hu, C. Zhang, Z. Song, N. Lane, and H. Fan, "Efficient 3d gaussian splatting with axis-shared rasterization and order-independent transmittance," in 2026 ACM/IEEE 53rd Annual International Symposium on Computer Architecture (ISCA), 2026, pp. 2014–2028. [45] NVIDIA Corporation, "Nvidia Ada GPU Architecture," [https://images.nvidia.com/aem-dam/Solutions/geforce/ada/](https://images.nvidia.com/aem-dam/Solutions/geforce/ada/nvidia-ada-gpu-architecture.pdf) [nvidia-ada-gpu-architecture.pdf,](https://images.nvidia.com/aem-dam/Solutions/geforce/ada/nvidia-ada-gpu-architecture.pdf) 2022, version V2.02. Appendix A contains GeForce RTX 4090 full specifications. [46] N. Satish, M. Harris, and M. Garland, "Designing efficient sorting algorithms for manycore gpus," in 2009 IEEE International Symposium on Parallel & Distributed Processing, 2009, pp. 1–10. [47] E. Stehle and H.-A. Jacobsen, "A Memory Bandwidth-Efficient Hybrid
+
+- Conference on Management of Data (SIGMOD). New York, NY, USA: ACM, 2017. [48] NVIDIA Corporation, NVIDIA CUDA C++ Programming Guide, [https:](https://docs.nvidia.com/cuda/cuda-c-programming-guide/) [//docs.nvidia.com/cuda/cuda-c-programming-guide/,](https://docs.nvidia.com/cuda/cuda-c-programming-guide/) 2023, appendix G: Compute Capabilities & Instruction Throughput. Accessed: 2024-03-15. [49] H. Wong, M.-M. Papadopoulou, M. Sadooghi-Alvandi, and A. Moshovos, "Demystifying gpu microarchitecture through microbenchmarking," in 2010 IEEE International Symposium on Performance Analysis of Systems & Software (ISPASS). IEEE, 2010, pp. 235–246. [50] D. W. Wall, "Limits of instruction-level parallelism," in Proc. 4th Int. Conf. Architectural Support for Programming Languages and Operating Systems (ASPLOS IV), 1991, pp. 176–188. [51] N. P. Jouppi, "The nonuniform distribution of instruction-level and machine parallelism and its effect on performance," IEEE Transactions on Computers, vol. 38, no. 12, pp. 1645–1658, Dec. 1989. [52] B. Jacob, S. Kligys, B. Chen, M. Zhu, M. Tang, A. Howard, H. Adam, and D. Kalenichenko, "Quantization and training of neural networks for efficient integer-arithmetic-only inference," in Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR), June 2018. [53] Z. Yao, R. Yazdani Aminabadi, M. Zhang, X. Wu, C. Li, and
+  - Y. He, "Zeroquant: Efficient and affordable post-training quantization for large-scale transformers," in Advances in Neural Information Processing Systems, S. Koyejo, S. Mohamed, A. Agarwal, D. Belgrave, K. Cho, and
+- A. Oh, Eds., vol. 35. Curran Associates, Inc., 2022, pp. 27 168–27 183. [Online]. Available: [https://proceedings.neurips.cc/paper](https://proceedings.neurips.cc/paper_files/paper/2022/file/adf7fa39d65e2983d724ff7da57f00ac-Paper-Conference.pdf) files/paper/ [2022/file/adf7fa39d65e2983d724ff7da57f00ac-Paper-Conference.pdf](https://proceedings.neurips.cc/paper_files/paper/2022/file/adf7fa39d65e2983d724ff7da57f00ac-Paper-Conference.pdf) [54] N. N. Schraudolph, "A fast, compact approximation of the exponential function," Neural Computation, vol. 11, no. 4, pp. 853–862, 1999.

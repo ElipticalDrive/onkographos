@@ -1,10 +1,10 @@
 # HDDA Hybrid
 ## Overview
-HDDA Hybrid is a ray traversal algorithm for sparse voxel grids that combines hierarchical skipping with fine-grained traversal. It uses Hierarchical Digital Differential Analyzer (HDDA) to skip empty tiles at resolutions coarser than the leaf level, and switches to standard Digital Differential Analyzer (DDA) to traverse occupied tiles voxel-by-voxel [S1, unofficial]. This approach avoids per-voxel checks in empty space while maintaining sampling accuracy in dense regions [S1, unofficial]. It builds on [Hierarchical Digital Differential Analyzer (HDDA)](1122-hierarchical-digital-differential-analyzer-hdda.md).
+HDDA Hybrid is a ray traversal algorithm for sparse voxel grids that combines hierarchical skipping with fine-grained traversal [S1, unofficial]. It uses Hierarchical Digital Differential Analyzer (HDDA) to skip empty tiles at resolutions coarser than the leaf level, and switches to standard Digital Differential Analyzer (DDA) to traverse occupied tiles voxel-by-voxel [S1, unofficial]. This approach avoids per-voxel checks in empty space while maintaining sampling accuracy in dense regions [S1, unofficial]. It builds on [Hierarchical Digital Differential Analyzer (HDDA)](1122-hierarchical-digital-differential-analyzer-hdda.md) [S1, unofficial].
 
 ## How it works
 **Inputs:** Ray origin $\mathbf{o}$ and direction $\mathbf{d}$, ray bounds $t_{min}, t_{max}$, VDB grid accessor `acc` providing `isActive(ijk)`, `getDim(ijk, ray)`, and root bounding box, `leafdim` (typically 8) [S1, unofficial], `cone_angle` (default 0.0) [S1, unofficial], `step_size` (default $10^{-3}$) [S1, unofficial], and `first_pass` flag [S1, unofficial].
-**Outputs:** A sequence of sample points $(t, \mathbf{x})$ along the ray within occupied regions.
+**Outputs:** A sequence of sample points $(t, \mathbf{x})$ along the ray within occupied regions [S1, unofficial].
 **Data Structures:** `hdda` (tile traversal state), `dda` (voxel traversal state), `tlast` (last processed time), `n_trav` (voxel counter) [S1, unofficial].
 
 **Pseudocode:**
@@ -21,8 +21,8 @@ def traverse_hdda_hybrid(ray, acc, leafdim, cone_angle, step_size, first_pass):
     dim = acc.get_dim(ijk, ray)
     tile_mode = dim >= leafdim
     hdda.init(ray, t0, t1, max(leafdim, dim))
-    
-    ddaIsValid = False
+
+    ddaIsValid = True
     tlast = t0
     n_trav = 0
     samples = []
@@ -58,12 +58,10 @@ def traverse_hdda_hybrid(ray, acc, leafdim, cone_angle, step_size, first_pass):
     return samples
 
 def calc_dt(tlast, cone_angle, step_size, max_dt):
-    # Linear cone angle step size adjustment [G]
     return min(step_size * (1 + cone_angle * tlast), max_dt)
 
 def advance_time(tlast, cone_angle, step_size, next_t):
-    # Ensure tlast does not overshoot the current tile boundary [G]
-    return min(tlast, next_t)
+    return max(tlast, next_t)  # [G]
 ```
 
 **Parameters:** `leafdim` = 8, `cone_angle` = 0.0, `step_size` = $10^{-3}$ [S1, unofficial].
@@ -81,8 +79,8 @@ Optimized for very small volumes or specific hardware constraints. Choose when m
 Uses a majorant function to skip empty space. Choose when a tight majorant is available and HDDA overhead is too high.
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
+- **Time Complexity:** Not given in the sources [S1, unofficial].
+- **Memory Complexity:** Not given in the sources [S1, unofficial].
 - **Performance:** Faster than pure DDA in sparse scenes due to skipping empty tiles, but slower than HDDA Skip when sampling is required due to DDA switching overhead [S1, unofficial].
 - **Strengths:** Efficient for sparse voxel grids with mixed density [S1, unofficial].
 - **Limitations:** Overhead of managing two traversal states [S1, unofficial].
@@ -90,7 +88,7 @@ Uses a majorant function to skip empty space. Choose when a tight majorant is av
 - **When not to use:** Fully dense volumes, or when only occupancy queries are needed (use HDDA Skip) [S1, unofficial].
 
 ## Background
-HDDA Hybrid was introduced in the context of accelerating occupancy grid-based NeRF rendering using VDB grids. It was presented by Yoshihiro Kato et al. in "Plug-and-Play Acceleration of Occupancy Grid-based NeRF Rendering using VDB Grid and Hierarchical Ray Traversal" (2024) [S1, unofficial]. The method leverages the B+tree structure of VDB to perform multi-resolution leapfrogging, combining the coarse skipping of HDDA with the precision of DDA [S1, unofficial].
+HDDA Hybrid was introduced in the context of accelerating occupancy grid-based NeRF rendering using VDB grids [S1, unofficial]. It was presented by Yoshihiro Kato et al. in "Plug-and-Play Acceleration of Occupancy Grid-based NeRF Rendering using VDB Grid and Hierarchical Ray Traversal" (2024) [S1, unofficial]. The method leverages the B+tree structure of VDB to perform multi-resolution leapfrogging, combining the coarse skipping of HDDA with the precision of DDA [S1, unofficial].
 
 ## Sources
 [S1] Yosshi999/faster-occgrid, https://github.com/Yosshi999/faster-occgrid, fetched 2026-10-24 (unofficial)

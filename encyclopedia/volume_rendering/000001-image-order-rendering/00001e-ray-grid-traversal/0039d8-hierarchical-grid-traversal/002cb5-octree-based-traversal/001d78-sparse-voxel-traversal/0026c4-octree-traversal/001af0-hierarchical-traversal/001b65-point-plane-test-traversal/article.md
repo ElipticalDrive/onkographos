@@ -38,7 +38,7 @@ Point Plane Test Traversal is a method for locating the specific child tetrahedr
         $$ RB = halfSpace(point, M_{TR}, M_{LB}, M_{TB}) $$
     c. Compute $TB$: Test if `point` is in the front half-space of the plane passing through midpoints $M_{TR} = \frac{t+r}{2}$, $M_{LB} = \frac{l+b}{2}$, and $M_{TL} = \frac{t+l}{2}$ [S1, unofficial].
         $$ TB = halfSpace(point, M_{TR}, M_{LB}, M_{TL}) $$
-    d. Compute $inner$: Perform four half-space tests and AND the results. The tests check if the point is on the same side of the planes forming the inner tetrahedron as the interior of the parent [S1, unofficial].
+    d. Compute $inner$: Perform four half-space tests and AND the results [S1, unofficial]. The tests check if the point is on the same side of the planes forming the inner tetrahedron as the interior of the parent [S1, unofficial].
         $$ inner = halfSpace(point, M_{TL}, M_{TB}, M_{TR}) \ \& \ halfSpace(point, M_{LT}, M_{LR}, M_{LB}) \ \& \ halfSpace(point, M_{RT}, M_{RB}, M_{RL}) \ \& \ halfSpace(point, M_{BT}, M_{BL}, M_{BR}) $$
         *Note: The source lists specific midpoint combinations for these four tests. To ensure self-containment, the midpoints are defined as:*
         *   Test 1: Plane through $\frac{t+l}{2}, \frac{t+b}{2}, \frac{t+r}{2}$ [S1, unofficial].
@@ -63,6 +63,7 @@ def halfSpace(point, A, B, C):
     Returns True if point is in the front half-space of plane ABC.
     Normal n = (B - A) x (C - A).
     Returns True if dot(n, point - A) > 0.
+    cross and dot are standard vector operations [G].
     """
     BA = B - A
     CA = C - A
@@ -119,6 +120,7 @@ def point_plane_traversal(coarseTetID, childCounts, maxDepth, point, get_coarse_
     tetID = coarseTetID
     V = get_coarse_vertices(tetID)
     
+    # Note: Source also mentions terminating if tetrahedron screen size falls below a threshold [S1, unofficial].
     while childCounts[tetID] > 0 and rLevel <= maxDepth:
         t, l, r, b = V
         
@@ -164,17 +166,17 @@ def point_plane_traversal(coarseTetID, childCounts, maxDepth, point, get_coarse_
 ## Subtopics
 
 ### Calculate Tetrahedron Vertices
-Computes the vertex coordinates of a child tetrahedron given the parent vertices $V$ and the local child number (0-7). It maps the local child index to a specific subset of the parent's vertices and the midpoints of its edges. The mapping is deterministic: child 0 is the top corner; child 7 is the central inner tetrahedron formed by all midpoints [S1, unofficial].
+Computes the vertex coordinates of a child tetrahedron given the parent vertices $V$ and the local child number (0-7) [S1, unofficial]. It maps the local child index to a specific subset of the parent's vertices and the midpoints of its edges [S1, unofficial]. The mapping is deterministic: child 0 is the top corner; child 7 is the central inner tetrahedron formed by all midpoints [S1, unofficial].
 
 ### Calculate Child ID
-Calculates the global tetrahedron ID of a child element given the parent ID, the local child number, and the `childCounts` array. It iterates through the siblings of the target child, skipping over their respective subtrees (counted by `childCounts`) to find the correct global index [S1, unofficial].
+Calculates the global tetrahedron ID of a child element given the parent ID, the local child number, and the `childCounts` array [S1, unofficial]. It iterates through the siblings of the target child, skipping over their respective subtrees (counted by `childCounts`) to find the correct global index [S1, unofficial].
 
 ### Exact Cell Sampling
-A method that uses refinement tree traversal to find the vertices of neighbor elements for accurate cell-centered sampling. It relies only on coarse mesh neighborhood information. It finds which coarse tetrahedron the neighbor is in, then uses the traversal process to find the vertices of the element to sample from, ensuring exact geometric alignment unlike approximate methods [S1, unofficial].
+A method that uses refinement tree traversal to find the vertices of neighbor elements for accurate cell-centered sampling [S1, unofficial]. It relies only on coarse mesh neighborhood information [S1, unofficial]. It finds which coarse tetrahedron the neighbor is in, then uses the traversal process to find the vertices of the element to sample from, ensuring exact geometric alignment unlike approximate methods [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(D)$ per query, where $D$ is the traversal depth. Each level requires a constant number of plane tests (6 total: 2 for quadrants, 4 for inner/outer, though the source notes a single test suffices once the quadrant is known, the algorithm provided uses 4 for conciseness) [S1, unofficial].
-*   **Memory Complexity:** $O(1)$ auxiliary space per traversal step, as vertex coordinates are computed on-the-fly and not stored for lower levels. The `childCounts` array is required for ID calculation [S1, unofficial].
+*   **Time Complexity:** $O(D)$ per query, where $D$ is the traversal depth [S1, unofficial]. Each level requires a constant number of plane tests (6 total: 2 for quadrants, 4 for inner/outer, though the source notes a single test suffices once the quadrant is known, the algorithm provided uses 4 for conciseness) [S1, unofficial].
+*   **Memory Complexity:** $O(1)$ auxiliary space per traversal step, as vertex coordinates are computed on-the-fly and not stored for lower levels [S1, unofficial]. The `childCounts` array is required for ID calculation [S1, unofficial].
 *   **Performance:** Faster than naive containment tests against all 8 children because it prunes the search space using geometric properties of red-refinement tetrahedra [S1, unofficial].
 *   **Strengths:** No need to store coordinates for refined elements; efficient lookup for sparse data [S1, unofficial].
 *   **Limitations:** Requires the `childCounts` array and a method to retrieve coarse vertices. Precision issues may arise near plane boundaries [G].

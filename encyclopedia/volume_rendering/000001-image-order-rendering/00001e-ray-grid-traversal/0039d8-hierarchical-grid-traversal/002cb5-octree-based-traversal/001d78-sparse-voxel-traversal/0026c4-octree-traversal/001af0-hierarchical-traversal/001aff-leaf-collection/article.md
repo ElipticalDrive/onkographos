@@ -1,131 +1,89 @@
 # Leaf Collection
 
-Also called: Leaf Node Collection, Active Leaf Extraction
 
 ## Overview
-Leaf Collection is the post-traversal phase of hierarchical ray-grid traversal that identifies and gathers all terminal nodes (leaves) intersected by the ray grid. It solves the problem of converting a sparse, hierarchical traversal path into a contiguous list of active volumetric blocks required for subsequent ray marching or shading. Unlike sibling methods that may integrate traversal and shading or use different culling strategies, Leaf Collection strictly separates the identification of relevant geometry from the computation of radiance, enabling efficient memory compaction and parallel processing [S1, unofficial].
+Leaf Collection identifies and gathers all terminal nodes (leaves) intersected by a ray grid during hierarchical traversal, converting a sparse traversal path into a contiguous list of active volumetric blocks for subsequent ray marching or shading. It separates node identification from radiance computation to enable efficient memory compaction and parallel processing.
 
 ## How it works
 **Inputs:**
-- A hierarchical sparse voxel structure (e.g., Octree) with nodes classified as Empty, Full, Branch, or Leaf.
-- A set of rays (ray grid) defined by origin and direction.
-- Traversal state tracking the current node and depth.
+- A hierarchical sparse voxel structure (e.g., Octree) with nodes classified as Empty, Full, Branch, or Leaf [G].
+- A set of rays (ray grid) defined by origin and direction [G].
+- Traversal state tracking the current node and depth [G].
 
 **Outputs:**
-- A list (vector) of leaf node identifiers (coordinates, indices, or pointers) intersected by the rays.
+- A list (vector) of leaf node identifiers (coordinates, indices, or pointers) intersected by the rays [G].
 
 **Data Structures:**
-- **Node Classification:** Each node has a type field: `EMPTY`, `FULL`, `BRANCH`, `LEAF`.
-- **Result Vector:** A dynamic array storing tuples of `(leaf_id, depth)` or `(x, y, z, depth)`.
+- **Node Classification:** Each node has a type field: `EMPTY`, `FULL`, `BRANCH`, `LEAF` [G].
+- **Result Vector:** A dynamic array storing tuples of `(leaf_id, depth)` or `(x, y, z, depth)` [G].
 
-**Algorithm:**
-The collection process is typically performed during or immediately after the hierarchical traversal. For each ray, the traversal proceeds from the root. When a terminal node is reached, it is added to the collection list.
-
-1. **Initialize** an empty result vector `L`.
+**Numbered Steps:**
+1. **Initialize** an empty result vector $L$ [G].
 2. **For each ray** $r$ in the ray grid:
-    a. Start traversal at the root node $N$.
+    a. Start traversal at the root node $N$ [G].
     b. **While** $N$ is not a terminal node (i.e., $N$ is `BRANCH`):
-        i. Determine which child of $N$ is intersected by $r$.
+        i. Determine which child of $N$ is intersected by $r$ [G].
         ii. Let $C$ be the intersected child.
-        iii. Update traversal state (e.g., current coordinates, depth).
-        iv. Set $N \leftarrow C$.
-    c. **If** $N$ is `LEAF`:
-        i. Add $N$'s identifier to $L$.
-    d. **If** $N$ is `FULL`:
-        i. Add $N$'s identifier to $L$ (representing a homogeneous volume).
-    e. **If** $N$ is `EMPTY`:
-        i. Skip (do not add to $L$).
+        iii. Update traversal state (e.g., current coordinates, depth) [G].
+        iv. Set $N \leftarrow C$ [G].
+    c. **If** $N$ is `LEAF`, `FULL`, or `EMPTY`:
+        i. Push $N$'s coordinates and depth to $L$ [S1, unofficial].
+
+**Formulas:**
+- Child coordinate update: $x_c = 2x_p + b_x$, $y_c = 2y_p + b_y$, $z_c = 2z_p + b_z$, where $(x_p, y_p, z_p)$ are the parent coordinates, and $(b_x, b_y, b_z)$ are the octant bits derived from the child index [S1, unofficial].
+
+**Parameters:**
+Not given in the sources.
+
+**Edge Cases:**
+Not given in the sources.
 
 **Pseudocode:**
-The following pseudocode implements the recursive collection logic described in [S1, unofficial]. It assumes a function `get_children(node)` returns the 8 children of a branch node and `is_leaf(node)` checks if the node is terminal.
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def collect_leaves(node, current_coords, depth, result_list):
     """
     Recursively collect leaf nodes from a hierarchical structure.
-    
-    Args:
-        node: The current node in the hierarchy.
-        current_coords: Tuple (x, y, z) representing the node's position.
-        depth: Current depth in the hierarchy.
-        result_list: List to append collected leaf identifiers.
+    Implements the logic from [S1, unofficial].
     """
     node_type = node.type
-    
-    if node_type == 'EMPTY':
-        # Empty nodes do not contribute to the volume; skip them.
-        return
-    elif node_type == 'FULL':
-        # Full nodes are homogeneous; treat as a leaf for collection.
-        result_list.append({
-            'coords': current_coords,
-            'depth': depth,
-            'type': 'FULL'
-        })
-    elif node_type == 'LEAF':
-        # Terminal node containing actual data.
-        result_list.append({
-            'coords': current_coords,
-            'depth': depth,
-            'type': 'LEAF'
-        })
+    if node_type in ('EMPTY', 'FULL', 'LEAF'):
+        result_list.append((current_coords, depth))
     elif node_type == 'BRANCH':
-        # Iterate through all 8 children.
-        # Note: In a real ray-grid traversal, we would only visit children
-        # intersected by the ray. This pseudocode reflects the general
-        # collection logic from [S1, unofficial] which pushes coordinates
-        # and depth for terminal nodes.
         for octant in range(8):
             child = node.children[octant]
-            # Compute child coordinates based on octant bit
-            # Assuming current_coords is (cx, cy, cz)
-            # and octant bits correspond to x, y, z increments
             child_coords = (
                 current_coords[0] * 2 + (octant & 1),
                 current_coords[1] * 2 + ((octant >> 1) & 1),
                 current_coords[2] * 2 + ((octant >> 2) & 1)
             )
             collect_leaves(child, child_coords, depth + 1, result_list)
-    else:
-        # Unknown node type; handle as error or skip.
-        pass
 ```
-
-**Parameters:**
-- **Recursion Limit:** Determined by the maximum depth of the octree.
-- **Memory Buffer:** Size of `result_list` must accommodate the maximum number of leaves per ray.
-
-**Edge Cases:**
-- **Empty Tree:** If the root is `EMPTY`, the result list is empty.
-- **Full Tree:** If the root is `FULL`, the result list contains a single entry.
-- **Precision:** Coordinate computation must handle integer overflow if depths are large. Use 64-bit integers for coordinates if necessary [S1, unofficial].
 
 ## Subtopics
 
 ### [Leaf Node Representation](3000-leaf-node-representation.md)
-The Leaf Node Representation defines the data structure and logic for the terminal nodes in a sparse voxel octree traversal. It encapsulates the volumetric data for a leaf block and provides methods for validity checking and color manipulation during ray marching. It differs from internal nodes by storing actual sample values rather than hierarchical pointers or aggregate statistics, serving as the primary source of radiance contribution in image-order rendering [3000-leaf-node-representation.md].
+The Leaf Node Representation defines the data structure and logic for terminal nodes in sparse voxel octree traversal. It encapsulates volumetric sample data alongside validity and leaf flags, providing methods for validity checking and color manipulation during ray marching.
 
 ### [Leaf Offset Computation](5185-leaf-offset-computation.md)
-Leaf Offset Computation calculates the linear memory offsets for each leaf node in an OpenVDB tree to facilitate parallel processing and data copying. It serves as the final step in leaf collection, transforming a count of active leaves into a contiguous index array that maps leaf IDs to their starting positions in a flattened voxel buffer.
+Leaf Offset Computation calculates the linear memory offsets for each leaf node in an OpenVDB tree to facilitate parallel processing and data copying. It serves as a prerequisite for [Leaf Processing](5189-leaf-processing.md), which uses these offsets to copy precomputed voxel data from a contiguous source buffer into leaf node buffers. Unlike [Leaf Node Representation](3000-leaf-node-representation.md), which defines the internal structure of a leaf, this method computes the external indexing required to map leaf nodes to a flat memory space.
 
 ### Rendered Feedback Information Collection
 This variant integrates leaf collection with level-of-detail (LOD) management and feedback mechanisms for streaming [S2, unofficial].
-- **Step:** During tree traversal, stop when reaching the node corresponding to the needed LOD. If required data is present, traverse the mipmapped brick and collect the current node index in a node-list. If the appropriate LOD is missing or the node is terminal, add it to the node-list. If the node needs further subdivision, add it to the node-list and indicate subdivision need via one bit in the node. Push rendered nodes into a FIFO during traversal. Shift the 48-element window over a small set of frames to increase retrievable nodes.
-- **Parameter:** In the first frame, stop pushing after 48 elements. In the second frame, stop pushing after 96 elements.
-- **Purpose:** This method ensures that the CPU keeps necessary elements in the pool for mipmapping updates, using temporal coherence and a FIFO buffer to manage bandwidth and reactivity [S2, unofficial].
+- **Step:** During tree traversal, stop when reaching the node corresponding to the needed level-of-detail [S2, unofficial]. If required data is present, traverse the mipmapped brick and collect the current node index in a node-list [S2, unofficial]. If the appropriate level-of-detail is missing or the node is terminal (no more refined data in the original model), add it to the node-list [S2, unofficial]. If the node needs further subdivision, add it to the node-list and indicate subdivision need via one bit in the node [S2, unofficial]. Push rendered nodes into a FIFO during traversal [S2, unofficial]. Shift the 48-element window over a small set of frames to increase retrievable nodes [S2, unofficial].
+- **Parameter:** In the first frame, stop pushing after 48 elements [S2, unofficial]. In the second frame, stop pushing after 96 elements [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ where $N$ is the number of nodes visited during traversal. In sparse volumes, this is proportional to the number of active leaves intersected by the ray grid.
-- **Memory Complexity:** $O(L)$ where $L$ is the number of collected leaves. The result vector grows linearly with the number of active leaves.
-- **Strengths:** Decouples traversal from shading, allowing for efficient batch processing and memory compaction. Enables adaptive LOD and streaming by identifying exactly which nodes need to be loaded or updated.
-- **Limitations:** Requires an additional pass or buffer to store the collected leaves. If the volume is dense, the list can become large, potentially causing memory pressure.
-- **When to Use:** Ideal for sparse voxel octrees where most of the space is empty, and efficient memory access patterns are critical. Also suitable for streaming scenarios where only relevant nodes need to be transferred to the GPU or CPU.
-- **When Not to Use:** For dense volumes where traversal overhead is negligible compared to shading, or when hardware supports direct hierarchical traversal without intermediate collection.
+- **Time Complexity:** $O(N)$ where $N$ is the number of nodes visited during traversal [G].
+- **Memory Complexity:** $O(L)$ where $L$ is the number of collected leaves [G].
+- **Strengths:** Decouples traversal from shading, allowing for efficient batch processing and memory compaction [G]. Enables adaptive LOD and streaming by identifying exactly which nodes need to be loaded or updated [G].
+- **Limitations:** Requires an additional pass or buffer to store the collected leaves [G]. If the volume is dense, the list can become large, potentially causing memory pressure [G].
+- **When to Use:** Ideal for sparse voxel octrees where most of the space is empty, and efficient memory access patterns are critical [G]. Also suitable for streaming scenarios where only relevant nodes need to be transferred to the GPU or CPU [G].
+- **When Not to Use:** For dense volumes where traversal overhead is negligible compared to shading, or when hardware supports direct hierarchical traversal without intermediate collection [G].
 
 ## Background
-Leaf Collection is a fundamental component of hierarchical volume rendering, particularly in sparse voxel octree-based rendering. It emerged as a necessary step to manage the complexity of hierarchical data structures, allowing renderers to efficiently identify and process only the relevant parts of the volume. The method is closely associated with techniques like OpenVDB and adaptive LOD rendering, where the separation of traversal and shading enables better performance and memory management.
+Not given in the sources.
 
 ## Sources
 [S1] narnia-ai-mason/isomesh, https://github.com/narnia-ai-mason/isomesh, fetched 2026-10-27 (unofficial)
