@@ -1,0 +1,179 @@
+--- v001.md
++++ v002.md
+@@ -8,31 +8,31 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** `vertices` (Float tensor, shape `[V, 3]`, dtype `float32`), `faces` (Integer tensor, shape `[F, 3]`, dtype `int32`), `target_vertex_count` (Integer, positive).
+-- **Output:** `new_vertices` (Float tensor, shape `[V', 3]`), `new_faces` (Integer tensor, shape `[F', 3]`).
++- **Input:** `vertices` (Float tensor, shape `[V, 3]`, dtype `float32`), `faces` (Integer tensor, shape `[F, 3]`, dtype `int32`), `target_vertex_count` (Integer, positive) [S1, unofficial].
++- **Output:** `new_vertices` (Float tensor, shape `[V', 3]`), `new_faces` (Integer tensor, shape `[F', 3]`) [S1, unofficial].
+ 
+ **Data Structures:**
+-- **Tri:** Struct with fields `v0`, `v1`, `v2` (int). Represents a triangular face. Invalid faces are marked by setting `v0 = -1` (and consequently `v1, v2 = -1`).
+-- **Edge:** Struct with fields `v0`, `v1` (int). Enforces canonical ordering `v0 < v1`.
+-- **Quadricf:** Struct with 10 float fields: `a00`, `a01`, `a02`, `a11`, `a12`, `a22`, `b0`, `b1`, `b2`, `c`. Represents the symmetric matrix $Q$ and vector $b$ of the Quadric Error Metric.
+-- **Adjacency:** Host-side CSR-like structures `vertex_to_face_map` (flat array of face indices) and `vertex_to_face_offsets` (array of size `num_vertices + 1`).
++- **Tri:** Struct with fields `v0`, `v1`, `v2` (int). Represents a triangular face. Invalid faces are marked by setting `v0 = -1` [S1, unofficial].
++- **Edge:** Struct with fields `v0`, `v1` (int). Enforces canonical ordering `v0 < v1` [S1, unofficial].
++- **Quadricf:** Struct with 10 float fields: `a00`, `a01`, `a02`, `a11`, `a12`, `a22`, `b0`, `b1`, `b2`, `c`. Represents the symmetric matrix $Q$ and vector $b$ of the Quadric Error Metric [S1, unofficial].
++- **Adjacency:** Host-side CSR-like structures `vertex_to_face_map` (flat array of face indices) and `vertex_to_face_offsets` (array of size `num_vertices + 1`) [S1, unofficial].
+ 
+ **Parameters:**
+ - `MAX_ITERATIONS`: Integer, set to 2 [S1, unofficial].
+ - `THREADS_PER_BLOCK`: Integer, set to 256 [S1, unofficial].
+-- `Boundary penalty multiplier`: Float, 1000.0 [S1, unofficial].
+-- `Degeneracy threshold`: Float, $10^{-11}$ (one-ring check) [S1, unofficial].
+-- `Singular matrix threshold`: Float, $10^{-8}$ (determinant check) [S1, unofficial].
++- `Boundary penalty multiplier`: Float, 1000.0, added to cost if edge is boundary [S1, unofficial].
++- `Degeneracy threshold`: Float, $10^{-12}$ for one-ring of v0, $10^{-11}$ for one-ring of v1, used to detect near-zero area triangles [S1, unofficial].
++- `Singular matrix threshold`: Float, $10^{-8}$, used to determine if quadric matrix is invertible [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1. **Transfer and Initialize:** Copy input `vertices` and `faces` to device vectors. Initialize host-side adjacency structures (`vertex_to_face_map`, `vertex_to_face_offsets`) by iterating over all faces. Transfer these adjacency structures to the device.
+-2. **Iteration Loop:** Repeat up to `MAX_ITERATIONS` times, while `num_vertices > target_vertex_count` and `num_faces > 0`:
+-    a. **Rebuild Adjacency:** Copy current `d_faces` to host, rebuild `vertex_to_face_adjacency`, and transfer back to device vectors `d_v_to_f_map` and `d_v_to_f_offsets`.
+-    b. **Calculate Vertex Quadrics:** Zero-initialize `d_vertex_quadrics`. Launch `kernel_calculate_vertex_quadrics` with grid size `(num_faces + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK`. Each thread processes one face, computes its quadric, and atomically adds it to the three vertex quadrics.
+-    c. **Extract Edges:** Launch `kernel_extract_face_edges`. For each face, generate 3 edges as normalized pairs `{min(v_i, v_j), max(v_i, v_j)}` into `d_all_edges`.
+-    d. **Identify Unique and Boundary Edges:** Sort `d_all_edges`. Use `thrust::unique` to get `d_unique_edges`. Use `thrust::reduce_by_key` on `d_all_edges` with a constant iterator `1` to count occurrences of each unique edge. An edge is a boundary edge if its count is 1.
+-    e. **Calculate Edge Costs:** Launch `kernel_calculate_edge_costs`. For each unique edge, sum the quadrics of its two vertices to get $Q$. Solve $Q \times pos = -b$ for the collapse position. If $|det(Q)| \le 10^{-8}$, fallback to midpoint. Check for normal flips and degeneracy in the one-ring neighborhood. Apply penalties for boundary edges or invalid collapses. Store cost and position.
+-    f. **Select Collapses:** Sort edges by cost (ascending). Transfer sorted indices and costs to host. Iterate through sorted edges, selecting an edge if neither of its vertices has been used in a previous collapse in this iteration. Mark vertices as used.
+-    g. **Update Mesh:** Launch `kernel_resolve_remap_table` to find final destination vertices. Launch `kernel_update_faces` to remap vertex indices; mark faces with duplicate vertices as invalid `{-1, -1, -1}`. Launch `kernel_update_vertex_positions` to write new positions to destination vertices.
+-    h. **Compact:** Remove invalid faces and unused vertices. Re-index active vertices and faces. Update `num_vertices` and `num_faces`. If `num_valid_faces == 0`, terminate.
++1. **Transfer and Initialize:** Copy input `vertices` and `faces` to device vectors [S1, unofficial]. Initialize host-side adjacency structures (`vertex_to_face_map`, `vertex_to_face_offsets`) by iterating over all faces, then transfer to device vectors [S1, unofficial].
++2. **Iteration Loop:** Repeat up to `MAX_ITERATIONS` times, while `num_vertices > target_vertex_count` and `num_faces > 0` [S1, unofficial]:
++    a. **Rebuild Adjacency:** Copy current `d_faces` to host, rebuild `vertex_to_face_adjacency`, and transfer back to device vectors `d_v_to_f_map` and `d_v_to_f_offsets` [S1, unofficial].
++    b. **Calculate Vertex Quadrics:** Zero-initialize `d_vertex_quadrics` [S1, unofficial]. Launch `kernel_calculate_vertex_quadrics` with grid size `(num_faces + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK` [S1, unofficial]. Each thread processes one face, computes its quadric, and atomically adds it to the three vertex quadrics [S1, unofficial].
++    c. **Extract Edges:** Launch `kernel_extract_face_edges` [S1, unofficial]. For each face, generate 3 edges as normalized pairs `{min(v_i, v_j), max(v_i, v_j)}` into `d_all_edges` [S1, unofficial].
++    d. **Identify Unique and Boundary Edges:** Sort `d_all_edges` [S1, unofficial]. Use `thrust::unique` to get `d_unique_edges` [S1, unofficial]. Use `thrust::reduce_by_key` on `d_all_edges` with a constant iterator `1` to count occurrences of each unique edge [S1, unofficial]. An edge is a boundary edge if its count is 1 [S1, unofficial].
++    e. **Calculate Edge Costs:** Launch `kernel_calculate_edge_costs` [S1, unofficial]. For each unique edge, sum the quadrics of its two vertices to get $Q$ [S1, unofficial]. Solve $Q \times pos = -b$ for the collapse position [S1, unofficial]. If $|det(Q)| \le 10^{-8}$, fallback to midpoint [S1, unofficial]. Check for normal flips and degeneracy in the one-ring neighborhood [S1, unofficial]. Apply penalties for boundary edges or invalid collapses [S1, unofficial]. Store cost and position [S1, unofficial].
++    f. **Select Collapses:** Sort edges by cost (ascending) [S1, unofficial]. Transfer sorted indices and costs to host [S1, unofficial]. Iterate through sorted edges, selecting an edge if neither of its vertices has been used in a previous collapse in this iteration [S1, unofficial]. Mark vertices as used [S1, unofficial].
++    g. **Update Mesh:** Launch `kernel_resolve_remap_table` to find final destination vertices [S1, unofficial]. Launch `kernel_update_faces` to remap vertex indices; mark faces with duplicate vertices as invalid `{-1, -1, -1}` [S1, unofficial]. Launch `kernel_update_vertex_positions` to write new positions to destination vertices [S1, unofficial].
++    h. **Compact:** Remove invalid faces and unused vertices [S1, unofficial]. Re-index active vertices and faces [S1, unofficial]. Update `num_vertices` and `num_faces` [S1, unofficial]. If `num_valid_faces == 0`, terminate [S1, unofficial].
+ 
+ **Formulas:**
+@@ -69,5 +69,5 @@
+     THREADS_PER_BLOCK = 256
+ 
+-    for iter in range(MAX_ITERATIONS):
++    for _ in range(MAX_ITERATIONS):
+         if num_vertices <= target_vertex_count or num_faces == 0:
+             break
+@@ -82,13 +82,9 @@
+         d_vertex_quadrics = zero_init(num_vertices, Quadricf)
+         grid_size = (num_faces + THREADS_PER_BLOCK - 1) // THREADS_PER_BLOCK
+-        kernel_calculate_vertex_quadrics<<<grid_size, THREADS_PER_BLOCK>>>(
+-            d_vertices, d_faces, num_faces, d_vertex_quadrics
+-        )
++        kernel_calculate_vertex_quadrics(d_vertices, d_faces, num_faces, d_vertex_quadrics, grid_size, THREADS_PER_BLOCK)
+ 
+         # 2c. Extract Edges
+         d_all_edges = empty(num_faces * 3, Edge)
+-        kernel_extract_face_edges<<<grid_size, THREADS_PER_BLOCK>>>(
+-            d_faces, num_faces, d_all_edges
+-        )
++        kernel_extract_face_edges(d_faces, num_faces, d_all_edges, grid_size, THREADS_PER_BLOCK)
+ 
+         # 2d. Identify Unique and Boundary Edges
+@@ -103,10 +99,8 @@
+         d_edge_costs = empty(num_unique_edges, float)
+         d_collapse_pos = empty(num_unique_edges, V3f)
+-        kernel_calculate_edge_costs<<<grid_size, THREADS_PER_BLOCK>>>(
+-            d_unique_edges, num_unique_edges,
++        kernel_calculate_edge_costs(d_unique_edges, num_unique_edges,
+             d_vertices, d_vertex_quadrics, d_faces,
+             d_is_boundary, d_v_to_f_map, d_v_to_f_offsets,
+-            d_edge_costs, d_collapse_pos
+-        )
++            d_edge_costs, d_collapse_pos, grid_size, THREADS_PER_BLOCK)
+ 
+         # 2f. Select Collapses
+@@ -122,7 +116,7 @@
+         
+         num_collapses_this_iteration = num_vertices - target_vertex_count
+-        if num_collapses_this_iteration <= 0:
++        if num_collapses_this_iteration <= 0 and num_vertices > target_vertex_count:
+             num_collapses_this_iteration = 1
+-        if num_collapses_this_iteration <= 0:
++        elif num_collapses_this_iteration <= 0:
+             break
+ 
+@@ -135,6 +129,4 @@
+                 vertex_used[e.v0] = True
+                 vertex_used[e.v1] = True
+-                # Collapse v1 into v0 (or vice versa, implementation dependent)
+-                # Here we assume v0 is kept, v1 is removed, but remap handles it
+                 collapses.append((e.v1, e.v0)) 
+                 new_positions_batch.append(h_collapse_pos[original_edge_idx])
+@@ -145,27 +137,14 @@
+ 
+         # 2g. Update Mesh
+-        # Create remap table: initially identity
+         d_remap_table = identity(num_vertices)
+-        # Mark removed vertices to point to kept vertices
+-        # Note: Implementation details vary on how remap is built. 
+-        # Based on notes, kernel_resolve_remap_table uses path compression.
+-        # We assume a preliminary remap is set up where v_to_remove -> v_to_keep
+         for v_remove, v_keep in collapses:
+             d_remap_table[v_remove] = v_keep
+         
+-        kernel_resolve_remap_table<<<grid_size, THREADS_PER_BLOCK>>>(
+-            d_remap_table, num_vertices
+-        )
+-
+-        kernel_update_faces<<<grid_size, THREADS_PER_BLOCK>>>(
+-            d_faces, num_faces, d_remap_table
+-        )
+-
+-        kernel_update_vertex_positions<<<grid_size, THREADS_PER_BLOCK>>>(
+-            d_vertices, d_remap_table, 
++        kernel_resolve_remap_table(d_remap_table, num_vertices, grid_size, THREADS_PER_BLOCK)
++        kernel_update_faces(d_faces, num_faces, d_remap_table, grid_size, THREADS_PER_BLOCK)
++        kernel_update_vertex_positions(d_vertices, d_remap_table, 
+             to_device(new_positions_batch), 
+             to_device(collapse_v0_indices_batch), 
+-            len(collapses)
+-        )
++            len(collapses), grid_size, THREADS_PER_BLOCK)
+ 
+         # 2h. Compact
+@@ -179,8 +158,8 @@
+             break
+ 
+-        # Compact vertices
+         d_active_vertices = mark_active(d_faces, num_vertices)
+         d_new_indices = exclusive_scan(d_active_vertices)
+-        # ... compact vertices logic ...
++        # Compact vertices using functor matching source implementation
++        compact_vertices(d_vertices, d_new_indices, d_active_vertices, grid_size, THREADS_PER_BLOCK)
+         num_vertices = sum(d_active_vertices)
+ 
+@@ -190,12 +169,6 @@
+ ## Subtopics
+ 
+-### [Mesh simplification via valence pattern removal](1931-mesh-simplification-via-valence-pattern-removal.md)
+-Removes vertices based on valence patterns rather than edge collapse costs. Choose when preserving specific topological features or vertex valences is critical.
+-
+-### [Linear Spline Simplification](3483-linear-spline-simplification.md)
+-Simplifies meshes by approximating geometry with linear splines. Choose for smooth surfaces where piecewise linear approximation is sufficient.
+-
+-### [Grid-based LOD Simplification](4423-grid-based-lod-simplification.md)
+-Generates LODs using grid-based techniques. Choose for dynamic LOD systems where precomputed levels are needed.
++### Quadric Error Metric Tetrahedral Simplification
++A mesh simplification algorithm that minimizes geometric error using quadric metrics, enhanced with a positional correction term for numerical stability [S2]. Apply quadric error metrics to evaluate simplification cost and incorporate a positional correction term during vertex/edge collapse operations to maintain stability [S2].
+ 
+ ## Operating characteristics
+@@ -204,11 +177,12 @@
+ - **Measured Performance:** Optimized for GPU memory bandwidth and parallelism using Thrust for sorting/scanning and CUDA kernels for computation [S1, unofficial].
+ - **Strengths:** Fast, parallelizable, handles boundary preservation and topological validity checks on-device.
+-- **Limitations:** Fixed iteration count may not reach exact target vertex count. Actual output vertex count may vary slightly due to mesh topology and invalid collapses [S1, unofficial]. Numerical instability can cause spikes, mitigated by clamping to midpoint [S1, unofficial].
++- **Limitations:** Fixed iteration count may not reach exact target vertex count. Actual output vertex count may vary slightly due to mesh topology and invalid collapses [S1, unofficial]. Numerical instability causing spikes is mitigated by clamping the new position to the midpoint if the distance squared exceeds the edge length squared [S1, unofficial].
+ - **When to Use:** When speed is prioritized over absolute geometric fidelity, and the mesh is triangular.
+ - **When Not to Use:** When exact vertex count is required, or for non-triangular meshes.
+ 
+ ## Background
+-Originating from the Quadric Error Metrics (QEM) method by Garland and Heckbert, this GPU-accelerated implementation adapts the technique for parallel execution on CUDA architectures [S1, unofficial]. It leverages Thrust for efficient data parallel operations and CUDA kernels for fine-grained control over mesh updates. The method is used in real-time rendering and geometry processing pipelines where rapid mesh simplification is required.
++This GPU-accelerated implementation adapts the Quadric Error Metrics (QEM) technique for parallel execution on CUDA architectures [S1, unofficial]. It leverages Thrust for efficient data parallel operations and CUDA kernels for fine-grained control over mesh updates. The method is used in geometry processing pipelines where rapid mesh simplification is required.
+ 
+ ## Sources
+-[S1] hwanhuh/spcumc, https://github.com/hwanhuh/spcumc, fetched 2026-10-27 (unofficial)+[S1] hwanhuh/spcumc, https://github.com/hwanhuh/spcumc, fetched 2026-10-27 (unofficial)
++[S2] Segment-based tetrahedral meshing and rendering, https://doi.org/10.1145/1174429.1174507, fetched 2026-11-06

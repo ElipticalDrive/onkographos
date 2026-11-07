@@ -1,0 +1,259 @@
+# GpuEdgeCost
+
+Also called: GPU edge-cost evaluator
+
+## Overview
+`GpuEdgeCost` is a WebGPU compute shader that evaluates the L2 field-error cost for merging pairs of 3D Gaussians, mirroring the logic of the CPU `computeEdgeCost` function [S1]. It enables differentiable inverse volume rendering optimizations by calculating the error introduced when two splats are merged, allowing the system to identify and remove redundant Gaussians [S1]. Unlike CPU-based implementations, it utilizes WGSL shaders and storage buffers to handle large datasets in batches, overcoming GPU memory binding limits [S1].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   **Splat Data Buffer (`splatBuf`)**: Interleaved storage of all splat attributes. Size is `maxN * SPLAT_STRIDE * 4` bytes [S1].
+*   **Neighbor Row Buffer (`nbRowBuf`)**: Array of `u32` containing neighbor row indices for the current dispatch batch. Size is `slotsPerBatch * 4` bytes [S1].
+*   **Uniforms Buffer**: Contains `slotBase` (u32) and `slotCount` (u32) [S1].
+*   **Host-side Validation**: The host must ensure `numSplats <= maxN`, `outCosts` length equals `nbRows` length, and `nbRows` length is a multiple of `k` [S1].
+
+**Outputs:**
+*   **Costs Buffer (`outBuf`)**: Array of `f32` storing the calculated cost per slot. Size is `slotsPerBatch * 4` bytes [S1].
+
+### Data Structures
+**Splat Storage Layout (Interleaved, Stride `SPLAT_STRIDE`):**
+Each splat occupies `SPLAT_STRIDE` floats. The layout is:
+*   `[0..2]`: Mean position `xyz` (`f32`)
+*   `[3..8]`: Covariance matrix $\Sigma$ elements `xx, xy, xz, yy, yz, zz` (`f32`)
+*   `[9]`: Sqrt determinant `sqrtDet` (`f32`)
+*   `[10]`: Alpha `alpha` (`f32`)
+*   `[11]`: Mass `mass` (`f32`)
+*   `[12..14]`: Base color `rgb` (`f32`)
+*   `[15]`: Squared norm of base color `|base|²` (`f32`)
+
+**Constants:**
+*   `SPLAT_STRIDE`: Equal to `CACHE_STRIDE` [S1].
+*   `SENTINEL`: `0xFFFFFFFF` (u32), indicating an empty slot [S1].
+*   `EPS_COV`: Small epsilon added to covariance diagonal terms to prevent singularity [S1].
+*   `PI_1_5`: Constant $\pi^{1.5}$ [S1].
+*   `COLOR_WEIGHT`: Weighting factor for color distance in the final cost [S1].
+
+### Algorithm Steps
+The host manages batching to respect the WebGPU limit of 65,535 workgroups per dimension. Each workgroup contains 64 threads [S1].
+
+1.  **Batch Setup**:
+    *   Calculate `numBatches = ceil(s / slotsPerBatch)`, where `s` is the total number of slots [S1].
+    *   Iterate `batch` from `0` to `numBatches - 1`:
+        *   `slotBase = batch * slotsPerBatch`
+        *   `slotCount = min(slotsPerBatch, s - slotBase)`
+        *   Copy the slice of `nbRows` from `slotBase` to `slotCount` into `nbRowBuf` [S1].
+        *   Dispatch the compute shader with `slotBase` and `slotCount` in the uniforms buffer [S1].
+        *   Read `slotCount * 4` bytes from `outBuf` into a scratch buffer `outScratch` [S1].
+        *   Copy the first `slotCount` elements from `outScratch` to `outCosts` starting at index `slotBase` [S1].
+
+2.  **Compute Shader Execution (Per Thread)**:
+    *   Each thread processes one dense slot.
+    *   Get global ID `gid.x`. Set `bid = gid.x` [S1].
+    *   If `bid >= uniforms.slotCount`, return [S1].
+    *   Read `row = nbRow[bid]` from `nbRowBuf` [S1].
+    *   If `row == SENTINEL`, set `costs[bid] = 0.0` and return [S1].
+    *   Calculate offsets:
+        *   `io = ((uniforms.slotBase + bid) / K) * SPLAT_STRIDE`
+        *   `jo = row * SPLAT_STRIDE`
+        *   *(Note: `K` is implied as the divisor for slot indexing, likely related to the neighbor grouping or stride logic, but exact definition of K is not explicitly provided in the source text beyond its usage in offset calculation)* [S1].
+    *   Load Splat `i` data from `splatBuf` at `io`: `mui`, `si` (6 elements), `sdi`, `ai`, `mi`, `bi`, `bni` [S1].
+    *   Load Splat `j` data from `splatBuf` at `jo`: `muj`, `sj`, `sdj`, `aj`, `mj`, `bj`, `bnj` [S1].
+
+3.  **Merge Calculation**:
+    *   **Merge Weights**:
+        *   `W = mi + mj`
+        *   `pi_ = select(0.5, mi / W, W > 0.0)`
+        *   `pj_ = 1.0 - pi_` [S1]
+    *   **Merged Mean**:
+        *   `mm = pi_ * mui + pj_ * muj`
+        *   `di = mui - mm`
+        *   `dj = muj - mm` [S1]
+    *   **Merged Covariance**:
+        *   Calculate `sm` (6 elements). For diagonal terms (indices 0, 3, 5), add `EPS_COV`.
+        *   Example for `xx` (index 0): `sm[0] = pi_ * (di.x * di.x + si[0]) + pj_ * (dj.x * dj.x + sj[0]) + EPS_COV`
+        *   Similar formulas apply for other elements using corresponding components of `di` and `dj` [S1].
+    *   **Merged Determinant**:
+        *   Calculate `detm` using cofactor expansion of `sm`.
+        *   Clamp `detm` to `1e-30` [S1].
+        *   `sqrtDetM = sqrt(detm)` [S1].
+    *   **Merged Opacity**:
+        *   Compute eigenvalues `e = eig3(sm)` [S1].
+        *   Scales `s0, s1, s2 = sqrt(max(e.x/y/z, 1e-18))` [S1].
+        *   `ellipsoidArea = ellipsoidArea(s0, s1, s2)` [S1].
+        *   `am = min(1.0, W / max(ellipsoidArea, 1e-30))` [S1].
+    *   **Color Terms**:
+        *   `bij = dot(bi, bj)`
+        *   `bim = pi_ * bni + pj_ * bij`
+        *   `bjm = pi_ * bij + pj_ * bnj`
+        *   `bnm = pi_ * pi_ * bni + 2.0 * pi_ * pj_ * bij + pj_ * pj_ * bnj` [S1]
+
+4.  **Error Cost Calculation**:
+    *   **Self-Interaction Terms**:
+        *   `selfI = ai * ai * bni * PI_1_5 * sdi`
+        *   `selfJ = aj * aj * bnj * PI_1_5 * sdj`
+        *   `selfM = am * am * bnm * PI_1_5 * sqrtDetM` [S1]
+    *   **Cross-Gaussian Products**:
+        *   `cIJ = crossG(sdi, sdj, si+sj, mui-muj)`
+        *   `cIM = crossG(sdi, sqrtDetM, si+sm, di)`
+        *   `cJM = crossG(sdj, sqrtDetM, sj+sm, dj)`
+        *   *(Note: `crossG` is a helper function for Gaussian product integration, assumed to be defined in the shader context)* [S1].
+    *   **Total Error E**:
+        *   `E = selfI + selfJ + selfM + 2.0 * ai * aj * bij * cIJ - 2.0 * ai * am * bim * cIM - 2.0 * aj * am * bjm * cJM` [S1]
+
+5.  **Final Cost Assembly**:
+    *   Calculate color distance squared: `dc2 = bni + bnj - 2.0 * bij`
+    *   Clamp `dc2` to `0.0` if negative (to handle float noise) [S1].
+    *   `costs[bid] = select(E, 0.0, E < 0.0) + COLOR_WEIGHT * select(dc2, 0.0, dc2 < 0.0)` [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Host-side batching logic
+def gpu_edge_cost_dispatch(nb_rows, splat_data, max_n, splat_stride, slots_per_batch=4194240):
+    s = len(nb_rows)
+    num_batches = ceil(s / slots_per_batch)
+    out_costs = [0.0] * s
+    
+    # Pre-allocate buffers (conceptual)
+    splat_buf = allocate_buffer(max_n * splat_stride * 4)
+    nb_row_buf = allocate_buffer(slots_per_batch * 4)
+    out_buf = allocate_buffer(slots_per_batch * 4)
+    
+    # Write splat data once
+    write_to_buffer(splat_buf, splat_data)
+    
+    for batch in range(num_batches):
+        slot_base = batch * slots_per_batch
+        slot_count = min(slots_per_batch, s - slot_base)
+        
+        # Prepare nbRow buffer for this batch
+        write_to_buffer(nb_row_buf, nb_rows[slot_base : slot_base + slot_count])
+        
+        # Dispatch Compute Shader
+        # Uniforms: slotBase=slot_base, slotCount=slot_count
+        # Bindings: splatBuf, nbRowBuf, outBuf
+        dispatch_compute_shader(slot_base, slot_count)
+        
+        # Read results
+        out_scratch = read_from_buffer(out_buf, slot_count * 4)
+        
+        # Copy to final output
+        for i in range(slot_count):
+            out_costs[slot_base + i] = out_scratch[i]
+            
+    return out_costs
+
+# Compute Shader Logic (Pseudocode)
+fn compute_edge_cost(gid: u32, uniforms: Uniforms, nb_row: array<u32>, splat_buf: array<f32>, costs: array<f32>):
+    bid = gid
+    if bid >= uniforms.slotCount:
+        return
+
+    row = nb_row[bid]
+    if row == 0xFFFFFFFF: # SENTINEL
+        costs[bid] = 0.0
+        return
+
+    # Offsets
+    io = ((uniforms.slotBase + bid) / K) * SPLAT_STRIDE
+    jo = row * SPLAT_STRIDE
+
+    # Load Splat i
+    mui = splat_buf[io + 0..3]
+    si = splat_buf[io + 3..9]
+    sdi = splat_buf[io + 9]
+    ai = splat_buf[io + 10]
+    mi = splat_buf[io + 11]
+    bi = splat_buf[io + 12..15]
+    bni = splat_buf[io + 15]
+
+    # Load Splat j
+    muj = splat_buf[jo + 0..3]
+    sj = splat_buf[jo + 3..9]
+    sdj = splat_buf[jo + 9]
+    aj = splat_buf[jo + 10]
+    mj = splat_buf[jo + 11]
+    bj = splat_buf[jo + 12..15]
+    bnj = splat_buf[jo + 15]
+
+    # Merge Weights
+    W = mi + mj
+    pi_ = if W > 0.0 then mi / W else 0.5
+    pj_ = 1.0 - pi_
+
+    # Merged Mean
+    mm = pi_ * mui + pj_ * muj
+    di = mui - mm
+    dj = muj - mm
+
+    # Merged Covariance
+    sm = [0.0] * 6
+    sm[0] = pi_ * (di.x * di.x + si[0]) + pj_ * (dj.x * dj.x + sj[0]) + EPS_COV
+    sm[1] = pi_ * (di.x * di.y + si[1]) + pj_ * (dj.x * dj.y + sj[1])
+    sm[2] = pi_ * (di.x * di.z + si[2]) + pj_ * (dj.x * dj.z + sj[2])
+    sm[3] = pi_ * (di.y * di.y + si[3]) + pj_ * (dj.y * dj.y + sj[3]) + EPS_COV
+    sm[4] = pi_ * (di.y * di.z + si[4]) + pj_ * (dj.y * dj.z + sj[4])
+    sm[5] = pi_ * (di.z * di.z + si[5]) + pj_ * (dj.z * dj.z + sj[5]) + EPS_COV
+
+    # Merged Determinant
+    detm = cofactor_expansion(sm)
+    detm = max(detm, 1e-30)
+    sqrtDetM = sqrt(detm)
+
+    # Merged Opacity
+    e = eig3(sm)
+    s0 = sqrt(max(e.x, 1e-18))
+    s1 = sqrt(max(e.y, 1e-18))
+    s2 = sqrt(max(e.z, 1e-18))
+    ellipsoidArea = ellipsoid_area(s0, s1, s2)
+    am = min(1.0, W / max(ellipsoidArea, 1e-30))
+
+    # Color Terms
+    bij = dot(bi, bj)
+    bim = pi_ * bni + pj_ * bij
+    bjm = pi_ * bij + pj_ * bnj
+    bnm = pi_ * pi_ * bni + 2.0 * pi_ * pj_ * bij + pj_ * pj_ * bnj
+
+    # Self-Interaction
+    selfI = ai * ai * bni * PI_1_5 * sdi
+    selfJ = aj * aj * bnj * PI_1_5 * sdj
+    selfM = am * am * bnm * PI_1_5 * sqrtDetM
+
+    # Cross-Gaussian Products
+    cIJ = cross_gaussian(sdi, sdj, si + sj, mui - muj)
+    cIM = cross_gaussian(sdi, sqrtDetM, si + sm, di)
+    cJM = cross_gaussian(sdj, sqrtDetM, sj + sm, dj)
+
+    # Total Error
+    E = selfI + selfJ + selfM + 2.0 * ai * aj * bij * cIJ - 2.0 * ai * am * bim * cIM - 2.0 * aj * am * bjm * cJM
+
+    # Final Cost
+    dc2 = bni + bnj - 2.0 * bij
+    dc2 = max(dc2, 0.0)
+    
+    cost_val = if E < 0.0 then 0.0 else E
+    cost_val += COLOR_WEIGHT * (if dc2 < 0.0 then 0.0 else dc2)
+    
+    costs[bid] = cost_val
+```
+
+### Edge Cases and Pitfalls
+*   **Empty Slots**: If a neighbor row index is `SENTINEL` (`0xFFFFFFFF`), the cost is set to `0.0` and the thread returns early. This prevents reading invalid memory [S1].
+*   **Float Noise**: Negative values resulting from squared norm calculations (e.g., `dc2`) are clamped to `0.0` to handle floating-point precision errors [S1].
+*   **NaN/Inf**: These are preserved in the calculation to allow the host to detect and fail loudly on degenerate input data [S1].
+*   **Memory Limits**: WebGPU has a maximum storage buffer binding size (typically ~2 GB). To avoid driver-side errors, data is processed in batches (`slotsPerBatch`) rather than uploading the full `N·k` slot list at once [S1]. The host must check `maxStorageBufferBindingSize` before buffer creation [S1].
+
+## Operating characteristics
+*   **Time Complexity**: $O(N)$ where $N$ is the number of slots, as each thread processes one slot independently. The batching overhead is $O(N / slotsPerBatch)$ dispatches.
+*   **Memory Complexity**: $O(N)$ for the splat data buffer. The auxiliary buffers (`nbRowBuf`, `outBuf`) are sized based on `slotsPerBatch`, not total $N$, keeping peak GPU memory usage constant regardless of scene size [S1].
+*   **Performance**: Performance is limited by the WebGPU workgroup limit (65,535 workgroups per dimension), necessitating the batching strategy [S1].
+*   **Strengths**: Efficiently handles large-scale Gaussian splat datasets by offloading the expensive merge-cost calculation to the GPU while managing memory constraints through batching [S1].
+*   **Limitations**: Requires WebGPU support. The batching introduces some host-GPU synchronization overhead for reading/writing buffers [S1].
+
+## Background
+`GpuEdgeCost` is part of the `splat-transform` project by PlayCanvas, implemented as a WebGPU compute shader to optimize 3D Gaussian Splatting data structures [S1]. It mirrors the logic of the CPU `computeEdgeCost` function, providing a high-performance alternative for differentiable inverse volume rendering tasks [S1].
+
+## Sources
+[S1] playcanvas/splat-transform, https://github.com/playcanvas/splat-transform, fetched 2026-10-27

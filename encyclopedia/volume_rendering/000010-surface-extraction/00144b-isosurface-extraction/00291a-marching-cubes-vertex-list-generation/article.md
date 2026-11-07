@@ -1,0 +1,137 @@
+# Marching Cubes Vertex List Generation
+
+Also called: Edge Vertex Calculation, Marching Cubes Vertex Interpolation, Vertex Interpolation for Marching Cubes
+
+## Overview
+Marching Cubes Vertex List Generation is the geometric refinement step in isosurface extraction that computes the precise 3D positions of vertices on an isosurface within a voxel grid [S1, unofficial]. It determines which edges of a voxel cell are intersected by the isosurface and calculates the exact intersection points via linear interpolation between corner values [S1, unofficial]. Unlike [Surface Nets](6419-surface-nets.md), which approximates surface points using grid vertices with the highest gradient, this method provides exact intersection locations [S1, unofficial]. It serves as the foundation for subsequent triangulation steps, such as those described in [Marching Cubes Surface Point Extraction](6417-marching-cubes-surface-point-extraction.md), which may apply further refinement like QEF minimization [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `voxelLocalPosition`: The 3D world position of the current voxel's origin (e.g., the corner with index 0).
+- `voxelDensities`: An array of 8 scalar values (densities) corresponding to the 8 corners of the voxel, indexed 0 to 7.
+- `isolevel`: The threshold density value defining the surface.
+- `EdgeIndexTable`: A lookup table mapping edge indices (0–11) to the indices of the two corner vertices that form that edge.
+- `CubeCorners`: An array of 8 local coordinate vectors (typically unit cube corners) indexed 0 to 7.
+
+**Outputs:**
+- `vertexList`: A list of 3D points representing the interpolated vertices on the intersected edges. The size of the list depends on the number of intersected edges (0 to 12).
+
+**Data Structures:**
+- `EdgeIndexTable`: An integer array of size 24 (12 edges × 2 corners). For edge $i$, the start corner is at index $2i$ and the end corner is at index $2i+1$.
+- `CubeCorners`: An array of 8 `float3` vectors. Standard Marching Cubes uses the unit cube corners: $(0,0,0)$ to $(1,1,1)$.
+
+**Algorithm Steps:**
+1. Initialize an empty list `vertexList`.
+2. Determine the `edgeIndex` (cube index) for the current voxel based on the sign of the density at each of the 8 corners relative to the `isolevel`. This is typically done by comparing `voxelDensities[j] < isolevel` for each corner $j$.
+3. Iterate through the 12 edges of the cube, indexed $i$ from 0 to 11.
+4. Check if the $i$-th bit of `edgeIndex` is set. If not, the edge does not intersect the isosurface; continue to the next edge.
+5. If the bit is set:
+   a. Retrieve the start corner index $c_1$ and end corner index $c_2$ from `EdgeIndexTable` at positions $2i$ and $2i+1$.
+   b. Get the local coordinates of these corners: $loc_1 = CubeCorners[c_1]$ and $loc_2 = CubeCorners[c_2]$.
+   c. Calculate the world positions: $p_1 = voxelLocalPosition + loc_1$ and $p_2 = voxelLocalPosition + loc_2$.
+   d. Retrieve the densities: $v_1 = voxelDensities[c_1]$ and $v_2 = voxelDensities[c_2]$.
+   e. Normalize densities if necessary (e.g., if stored as bytes 0–255, divide by 255.0 to get [0,1]). Similarly, normalize `isolevel`.
+   f. Calculate the interpolation factor $t$:
+      $$ t = \frac{isolevel - v_1}{v_2 - v_1} $$
+   g. Calculate the interpolated vertex position:
+      $$ p = p_1 + t \cdot (p_2 - p_1) $$
+   h. Add $p$ to `vertexList`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_vertex_list(voxel_local_pos, voxel_densities, isolevel, edge_index_table, cube_corners):
+    """
+    Generates a list of vertices for a single voxel cell.
+    
+    Args:
+        voxel_local_pos: float3, world position of the voxel's (0,0,0) corner.
+        voxel_densities: list of 8 floats, density at each corner of the voxel.
+        isolevel: float, the threshold density.
+        edge_index_table: list of 24 ints, mapping edge i to corners (2i, 2i+1).
+        cube_corners: list of 8 float3, local coordinates of cube corners.
+        
+    Returns:
+        list of float3, the interpolated vertex positions.
+    """
+    vertex_list = []
+    
+    # Normalize inputs if they are in [0, 255] range (common in voxel terrain)
+    # Assuming densities and isolevel are already normalized to [0, 1] for this implementation
+    # If not:
+    # voxel_densities = [d / 255.0 for d in voxel_densities]
+    # isolevel = isolevel / 255.0
+    
+    # Determine edge index (cube index)
+    # This part is usually handled by a preceding step that computes the cube index.
+    # For the sake of this method, we assume edge_index is provided or computed externally.
+    # edge_index = compute_cube_index(voxel_densities, isolevel)
+    
+    # Iterate over 12 edges
+    for i in range(12):
+        # Check if edge i is intersected
+        # Assuming edge_index is an integer where bit i corresponds to edge i
+        if (edge_index >> i) & 1:
+            # Get corner indices for this edge
+            c1 = edge_index_table[2 * i]
+            c2 = edge_index_table[2 * i + 1]
+            
+            # Get local coordinates
+            p1_local = cube_corners[c1]
+            p2_local = cube_corners[c2]
+            
+            # Convert to world coordinates
+            p1 = voxel_local_pos + p1_local
+            p2 = voxel_local_pos + p2_local
+            
+            # Get densities
+            v1 = voxel_densities[c1]
+            v2 = voxel_densities[c2]
+            
+            # Calculate interpolation factor
+            # Handle division by zero if v1 == v2
+            if v2 == v1:
+                # Degenerate case: edge is parallel to isosurface or value is exactly isosurface
+                # Use midpoint as fallback [G]
+                t = 0.5
+            else:
+                t = (isolevel - v1) / (v2 - v1)
+            
+            # Interpolate vertex position
+            p = p1 + t * (p2 - p1)
+            
+            vertex_list.append(p)
+            
+    return vertex_list
+```
+
+**Parameters:**
+- `isolevel`: The density level where the surface is created. Densities below this are considered inside (solid), and above are outside (air) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Division by Zero**: If $v_1 = v_2$, the denominator in the interpolation formula becomes zero. This occurs when both corners have the same density value. The source notes that the original code does not explicitly handle this, implying inputs are assumed distinct or the case is degenerate [S1, unofficial]. A robust implementation should handle this, e.g., by using the midpoint [G].
+- **Precision**: Floating-point precision issues may arise when $v_1$ and $v_2$ are very close to the `isolevel` or to each other.
+- **Boundary Conditions**: The method assumes a regular grid. For non-regular grids, the `CubeCorners` and `voxel_local_pos` calculations must be adjusted accordingly.
+
+## Subtopics
+
+### [Marching Cubes Surface Point Extraction](6417-marching-cubes-surface-point-extraction.md)
+Computes precise 3D positions using QEF minimization, centroid averaging, or cube center fallback after vertex list generation.
+
+### [Surface Nets](6419-surface-nets.md)
+Approximates surface points using grid vertices with the highest gradient, offering a simpler but less accurate alternative.
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ per voxel, as it involves a fixed number of operations (12 edge checks and interpolations).
+- **Memory Complexity**: $O(1)$ per voxel, storing a small list of vertices (up to 12).
+- **Strengths**: Simple, efficient, and produces smooth surfaces due to linear interpolation.
+- **Limitations**: Can produce artifacts if the voxel resolution is too low or if the isosurface is complex within a single voxel. Does not handle degenerate cases (e.g., $v_1 = v_2$) without additional logic.
+- **When to Use**: Suitable for real-time applications where performance is critical and the voxel resolution is sufficient to capture surface details.
+- **When Not to Use**: When higher accuracy is required, or when dealing with complex topologies that may require more advanced techniques like dual contouring.
+
+## Background
+The Marching Cubes algorithm was introduced by William E. Lorensen and Harvey E. Cline in 1987 [S1, unofficial]. It has become a standard technique for isosurface extraction in volume rendering and medical imaging. The vertex list generation step is a fundamental part of this algorithm, enabling the creation of smooth, continuous surfaces from discrete voxel data.
+
+## Sources
+[S1] Eldemarkki/Marching-Cubes-Terrain, https://github.com/Eldemarkki/Marching-Cubes-Terrain, fetched 2026-10-26 (unofficial)

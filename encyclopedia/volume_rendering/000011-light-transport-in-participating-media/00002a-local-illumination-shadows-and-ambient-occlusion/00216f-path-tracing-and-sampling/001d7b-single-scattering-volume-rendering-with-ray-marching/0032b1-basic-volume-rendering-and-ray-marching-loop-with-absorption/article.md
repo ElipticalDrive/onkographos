@@ -1,0 +1,146 @@
+# Basic Volume Rendering and Ray Marching Loop with Absorption & Scattering
+
+Also called: Single Scattering Ray Marching, Single-Scattering Volume Rendering with Fixed-Length Ray Marching, Volumetric Ray Marching
+
+## Overview
+This method renders participating media by simulating light interaction with particles assuming single scattering events, avoiding the computational cost of multi-scattering effects like distant fog blurring [S1, unofficial]. It differs from its sibling [Single Scattering Volume Rendering with Ray Marching](1532-single-scattering-volume-rendering-with-ray-marching.md) by explicitly detailing the ray marching loop structure, distance sampling, and throughput accumulation for homogeneous and heterogeneous media.
+
+## How it works
+**Inputs:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, scene geometry (for surface intersection), medium properties (absorption coefficient $\sigma_a$, scattering coefficient $\sigma_s$, phase function $p(\Omega)$), and maximum ray depth.
+**Outputs:** Final color $C$ for the pixel.
+
+**Data Structures:**
+*   `Ray`: struct containing `origin` (vec3), `direction` (vec3), `t_max` (float).
+*   `MediumInteraction`: struct containing `position` (vec3), `distance` (float), `transmittance` (float), `scattering_event` (bool).
+
+**Parameters:**
+*   $\sigma_a$: Absorption coefficient [S1, unofficial].
+*   $\sigma_s$: Scattering coefficient [S1, unofficial].
+*   $\sigma_t$: Extinction coefficient, $\sigma_t = \sigma_a + \sigma_s$ [S1, unofficial].
+*   Typical values: Not given in the sources.
+
+**Steps:**
+1.  **Ray Intersection:** Calculate the maximum extent for the ray before hitting a surface. If the ray does not hit a surface, check if the world contains a scatter medium; if not, return background color [S1, unofficial].
+2.  **Distance Sampling (Free-path Sampling):** For a homogeneous scattering medium, sample a distance $d$ traveled before a scattering event and evaluate transmittance $T$ [S1, unofficial].
+    *   The transmittance of a distance $d$ is calculated as:
+        $$ T(d) = \exp(-\sigma_t d) $$
+    *   The sampled distance $d$ is typically drawn from the distribution $p(d) = \sigma_t \exp(-\sigma_t d)$ [S1, unofficial].
+3.  **Medium Event Check:** If a medium event occurs (i.e., the sampled distance $d$ is less than the distance to the closest surface), proceed to Step 4. Otherwise, the ray hits the surface, and standard surface rendering applies [S1, unofficial].
+4.  **Phase Function Sampling:** Update the ray direction using the phase function $p(\Omega)$ [S1, unofficial]. The distance sampling already updates the ray origin to the scattering position [S1, unofficial].
+5.  **Throughput Update:** Update the path throughput by multiplying it by the transmittance value $T$ [S1, unofficial].
+6.  **Loop:** Update the ray for the next intersection and scattering event. Loop continues until max depth or termination [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_volume_ray(scene, ray, sigma_a, sigma_s, phase_function, max_depth):
+    sigma_t = sigma_a + sigma_s
+    throughput = vec3(1.0, 1.0, 1.0)
+    color = vec3(0.0, 0.0, 0.0)
+    
+    for _ in range(max_depth):
+        # Step 1: Ray intersection
+        hit = ray_intersection(scene, ray)
+        if not hit:
+            # Check if the world itself contains scatter medium, if not then we return
+            if not world_has_medium(scene):
+                return color
+            # If world has medium, continue ray marching into void
+        
+        # Step 2: Distance sampling (free-path sampling)
+        # For homogeneous scattering medium, sample distance d
+        # p(d) = sigma_t * exp(-sigma_t * d)
+        u = random_float()
+        d = -log(1.0 - u) / sigma_t if sigma_t > 0 else float('inf')
+        
+        # Evaluate transmittance
+        tr = exp(-sigma_t * d)
+        
+        # Determine if scattering event occurs before surface hit
+        # If hit exists, compare d with hit.t
+        if hit and d < hit.t:
+            # Step 3: Medium event occurs
+            # Update ray origin to scattering position
+            ray.origin = ray.origin + ray.direction * d
+            
+            # Step 4: Phase function sampling to update ray direction
+            # new_direction = sample_phase_function(phase_function, ray.direction)
+            # Note: Exact phase function sampling depends on the specific model (e.g., Henyey-Greenstein)
+            # [G] Assuming a simple isotropic phase function for this basic example
+            new_direction = normalize(vec3(random_float() - 0.5, random_float() - 0.5, random_float() - 0.5))
+            ray.direction = new_direction
+            
+            # Step 5: Update path throughput
+            throughput *= tr
+            
+            # Accumulate scattered light (simplified: assume single scattering contribution)
+            # [G] In a full path tracer, this would involve querying the light source or recursive call
+            # For basic volume rendering with absorption & scattering, we often just accumulate the transmitted light
+            # or sample the light direction. Here we assume a simple emission or direct light sample.
+            # Let's assume we sample a light direction and check visibility.
+            # This part is not fully detailed in the source for the loop body, so we mark it as a comment.
+            # color += throughput * sample_light(scene, ray.origin, ray.direction)
+            
+            # Update ray for next iteration
+            # ray.direction is already updated
+        else:
+            # Nothing to be said here, it's just basic surface rendering process
+            # One thing to note is that, transmittance value should be evaluated
+            # via ray marching (or some other algorithms) for non-uniform transmittance
+            # [G] If hitting surface, we might need to compute transmittance from camera to surface
+            # if the medium is heterogeneous. For homogeneous, it's exp(-sigma_t * hit.t)
+            if hit:
+                tr_surface = exp(-sigma_t * hit.t)
+                throughput *= tr_surface
+                # color += throughput * surface_color(hit)
+            break
+            
+        # Update ray for next intersection
+        # ray.origin is updated in the loop if scattering occurred, or we continue from previous origin if no hit
+        # In the case of no hit and no scattering (d > hit.t or no hit), we might need to step forward
+        # The source implies a loop that updates the ray for the next intersection.
+        # If we hit a surface, we break or handle surface shading.
+        # If we didn't hit a surface and didn't scatter (d > remaining distance), we might need to step.
+        # The source pseudo-code suggests a loop that continues.
+        # Let's assume if no hit and no scatter, we step by d or max step.
+        # However, the source says "Loop continues by updating the ray for the next intersection".
+        # If we are in a void, we might just return or step.
+        # For simplicity, if no hit and no scatter, we break or step.
+        # The source pseudo-code has a comment "Okay, then we update our ray for the next intersection and scattering event. Loop continues."
+        # This implies the ray is advanced.
+        # If we scattered, ray.origin is at scattering point.
+        # If we didn't scatter, we might need to advance ray.origin by d?
+        # The source says "distance sampling already updates the origin of the ray" only if medium_event is true.
+        # If medium_event is false, we don't update origin?
+        # This is ambiguous. Let's assume if no hit and no scatter, we advance by d.
+        if not hit:
+            ray.origin = ray.origin + ray.direction * d
+            
+    return color
+```
+
+**Edge Cases and Pitfalls:**
+*   **Non-uniform transmittance:** For heterogeneous media, transmittance must be evaluated via ray marching (subdividing space and multiplying parts together) rather than analytically [S1, unofficial].
+*   **Highly scattering media:** In highly scattering media (high $\sigma_s$, low $\sigma_a$), path tracing converges poorly because the estimator value is approximately 1, requiring a huge amount of scattering events and resulting in high variance [S1, unofficial].
+    *   Estimator for homogeneous example:
+        $$ \text{estimator} = \sigma_s \frac{f(x)}{p(x)} = \sigma_s \frac{\exp(-\sigma_t d)}{\sigma_t \exp(-\sigma_t d)} = \frac{\sigma_s}{\sigma_s + \sigma_a} \approx 1 $$
+        [S1, unofficial]
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of scattering events and ray steps. For heterogeneous media, additional steps are required for transmittance evaluation.
+*   **Memory Complexity:** Low, as it only requires storing the current ray state and medium properties.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Performance degrades in highly scattering media due to high variance and the need for many scattering events [S1, unofficial].
+*   **Strengths:** Simple to implement, efficient for homogeneous media, provides physically plausible single-scattering effects.
+*   **Limitations:** Poor convergence in highly scattering media, inaccurate for multi-scattering effects, requires careful handling of heterogeneous media transmittance.
+*   **When to use:** Real-time rendering of thin volumes, smoke, fog, or subsurface scattering approximations where multi-scattering is negligible.
+*   **When not to use:** Dense, highly scattering media (e.g., milk, thick fog) where multi-scattering is significant, or when high-quality offline rendering is required.
+
+## Background
+*   **Origin:** The method is based on basic volume rendering principles and ray marching techniques, as discussed in community forums [S1, unofficial].
+*   **History and Development:** The technique has been widely used in real-time graphics for simulating volumetric effects. Improvements and alternative methods like delta-tracking have been developed for heterogeneous media [S1, unofficial].
+*   **Where it is used:** Real-time games, interactive visualizations, and educational contexts for understanding volume rendering.
+
+## Sources
+[S1] Volume Rendering: Implementation, https://computergraphics.stackexchange.com/questions/5220/volume-rendering-implementation?noredirect=1&lq=1, fetched 2026-10-30 (unofficial)

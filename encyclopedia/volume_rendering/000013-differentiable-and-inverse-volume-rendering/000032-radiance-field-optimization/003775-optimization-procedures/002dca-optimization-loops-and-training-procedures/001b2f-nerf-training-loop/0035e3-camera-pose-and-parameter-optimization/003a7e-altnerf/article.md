@@ -3,64 +3,167 @@
 Also called: Alternating Depth-Pose Optimization
 
 ## Overview
-AltNeRF is a framework for creating resilient Neural Radiance Field (NeRF) representations from monocular videos without relying on known camera poses [S1]. It solves the problem of suboptimal NeRF reconstruction caused by imprecise initial camera poses and lack of explicit 3D supervision by using an alternating algorithm to harmonize NeRF outputs with self-supervised monocular depth estimation (SMDE) priors [S1]. Unlike methods that strictly align rendered depth with depth priors, AltNeRF uses error-tolerant regularization because the depth prior itself is not precise [S1]. It sets itself apart from siblings like BARF by introducing a dual-module architecture (Scene Prior Module and Scene Representation Module) that iteratively refines both pose and geometry, leveraging the complementary strengths of SMDE's robustness and NeRF's fine geometric detail [S1].
+AltNeRF is a framework for creating resilient Neural Radiance Field (NeRF) representations from monocular videos without relying on known camera poses [S1]. It solves the problem of suboptimal NeRF reconstruction caused by the lack of explicit 3D supervision and imprecise initial camera poses by integrating self-supervised monocular depth estimation (SMDE) [S1]. Unlike methods that strictly align rendered depth with priors, AltNeRF uses an alternating algorithm to harmonize NeRF outputs with SMDE through an error-tolerant regularization mechanism, allowing it to progressively refine both the scene geometry and camera parameters [S1].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A monocular video sequence $V$ consisting of frames $I_t$, and known camera intrinsics $K$ [S1].
-*   **Output:** A refined NeRF representation $f_n$ (density $\sigma$ and color $c$) and refined camera poses $P$ for all frames [S1].
+AltNeRF comprises two components: the Scene Prior Module (SPM) and the Scene Representation Module (SRM) [S1]. The SPM provides robust depth and pose priors, while the SRM refines these poses and learns the 3D scene representation, regularized by the depth priors [S1]. The modules interact via an alternating optimization loop [S1].
 
-**Data Structures:**
-1.  **Scene Prior Module (SPM) $\Phi$:**
-    *   **Depth Network $f_d$:** Encoder is ResNet-50 (fully-connected layer removed). Decoder has ten $3 \times 3$ convolutional layers (two per scale) with bilinear up-sampling [S1].
-    *   **Pose Network $f_p$:** Structured with ResNet-34. Outputs a vector of 9 elements: first 6 are continuous rotation representation (axis-angle), last 3 are translations [S1].
-2.  **Scene Representation Module (SRM) $\Psi$:**
-    *   **NeRF Network $f_n$:** Eight fully-connected layers with skip connections for density output, one linear layer for color [S1].
-    *   **Pose Parameters:** Residual pose $\Delta P$ (6D vector: 3 rotation, 3 translation) optimized alongside NeRF weights [S1].
+### Inputs and Outputs
+*   **Input:** A monocular video sequence $V$ consisting of frames $I_t$. Known camera intrinsics $K$ are required for the SMDE component [S1].
+*   **Output:** A NeRF representation $f_n$ (density $\sigma$ and color $c$) and refined camera poses $P_i$ for each frame [S1].
 
-**Numbered Steps:**
+### Data Structures and Layouts
 
-1.  **SPM Pretraining:** Pretrain SPM on a large dataset (e.g., NYUv2, VOID) to accumulate prior knowledge for 3D recovery. The training objective combines photometric loss $\mathcal{L}_p$, distilling loss $\mathcal{L}_r$, and edge-aware smoothness loss $\mathcal{L}_s$ [S1]:
+**Scene Prior Module (SPM)**
+The SPM consists of two networks, $f_d$ and $f_p$, built on SMDE architectures [S1]:
+1.  **Depth Network ($f_d$):**
+    *   **Encoder:** ResNet-50 with the fully-connected layer removed [S1].
+    *   **Decoder:** Ten $3 \times 3$ convolutional layers (two per scale) with bilinear up-sampling [S1].
+    *   **Input/Output:** Input image $I \rightarrow$ Depth map $D$ [S1].
+2.  **Pose Network ($f_p$):**
+    *   **Structure:** ResNet-34 [S1].
+    *   **Output:** A vector of 9 elements. The first 6 elements represent continuous rotation (axis-angle or similar continuous representation), and the last 3 elements represent translation [S1].
+    *   **Input/Output:** Pair of frames $(I_t, I_s) \rightarrow$ Relative pose $P_{t \to s}$ [S1].
+
+**Scene Representation Module (SRM)**
+The SRM uses a standard NeRF architecture [S1]:
+*   **Network ($f_n$):** Eight fully-connected layers with skip connections for density output, and one linear layer for color [S1].
+*   **Input/Output:** 3D point $p \in \mathbb{R}^3$ and viewing direction $d \in \mathbb{R}^3 \rightarrow$ Density $\sigma$ and color $c$ [S1].
+
+### Algorithm Steps
+
+**1. SPM Pretraining and Initialization**
+The SPM is pretrained on a large dataset (e.g., NYUv2, VOID) to accumulate prior knowledge [S1]. To adapt to the target video, the SPM is fine-tuned briefly using the input video data to close the domain gap [S1].
+*   **Pose Initialization:** The world coordinate system is aligned with the first frame $I_0$ (identity matrix) [S1].
+*   **Pose Calculation:** SPM predicts relative transformations $P_{i-1 \to i}$ between adjacent frames. Absolute poses $P_i$ are calculated using the chain rule:
+    $$ P_i = P_{i-1 \to i} \times P_{i-1} $$
+    where $P_0 = I$ [S1].
+*   **Depth Prior:** The initial depth prior $D_0$ is obtained from $f_d(I_0)$ [S1].
+
+**2. Alternating Optimization Loop**
+The core algorithm alternates between SRM and SPM. Let cycle $i$ denote the current step. SPM at step $i$ is denoted $\Phi_i$ and SRM is $\Psi_i$ [S1].
+
+**Step 2.1: SRM Iteration (Pose Refinement and NeRF Learning)**
+SRM takes the initial pose $P_i$ and depth prior $D_i$ from the previous SPM step [S1].
+*   **Improved Pose Initialization:** The initial pose for optimization is set to $P_0$ (from SPM). The optimization targets a residual pose $\Delta P$ [S1]. The refined pose is computed as:
+    $$ \hat{P} = \Delta P \times P_0 $$
+    [S1].
+*   **Warmup Learning:** The learning rate for $\Delta P$ is set to a low value initially and linearly increases to the original rate after 1K iterations. This allows the NeRF to learn a scene prototype before pose updates become aggressive [S1].
+*   **Loss Function:** The SRM is supervised by a combined loss $\mathcal{L}_{sr}$:
+    $$ \mathcal{L}_{sr} = \mathcal{L}_c + \gamma \cdot \mathcal{L}_e $$
+    where $\mathcal{L}_c$ is the NeRF reconstruction loss and $\mathcal{L}_e$ is the error-tolerant depth regularization loss [S1].
+    *   **Reconstruction Loss ($\mathcal{L}_c$):**
+        $$ \mathcal{L}_c = \| \hat{C}(r) - C(r) \|_2^2 $$
+        where $\hat{C}(r)$ is the rendered color and $C(r)$ is the ground truth color for ray $r$ [S1].
+    *   **Error-Tolerant Depth Regularization ($\mathcal{L}_e$):**
+        Instead of strict alignment, AltNeRF enforces that the rendered depth $\hat{D}$ fits within a possible range defined by the prior $D$:
+        $$ \mathcal{L}_e = H\left( \frac{\| \hat{D} - D \|_1}{\hat{D} + D} - \epsilon, 0 \right) $$
+        where $H(\cdot)$ is the Huber loss, $\epsilon$ is a tolerance coefficient, and $\| \cdot \|_1$ is the L1 norm [S1].
+    *   **Rendered Depth ($\hat{D}$):**
+        $$ \hat{D}(r) = \int_{t_n}^{t_f} T(t)\sigma(t)t \, dt $$
+        where $T(t) = \exp\left(-\int_{t_n}^t \sigma(s) \, ds\right)$ is the accumulated transmittance, and $t_n, t_f$ are near and far bounds [S1].
+*   **Multi-view Consistency Check:** To handle unreliable depth estimates, uncertainty $U_t$ is computed for depth map $D_t$ by warping depth from nearby source views $I_s$ using poses $P_{t \to s}$:
+    $$ U_t = \| D_t - D_{s \to t} \|_1 $$
+    The average difference from the four views with the smallest differences is used. This uncertainty weights the loss functions (via Softmin) to mitigate the effect of unreliable estimates [S1].
+*   **Iteration:** SRM runs for $S_r$ iterations [S1].
+*   **Output:** Estimated depth $\hat{D}_{i+1}$ and improved pose $\hat{P}_{i+1}$ [S1].
+
+**Step 2.2: SPM Fine-tuning**
+The refined outputs $\hat{D}_{i+1}$ and $\hat{P}_{i+1}$ are fed back to the SPM [S1].
+*   **Distillation:** The SPM depth network $f_d$ is fine-tuned for $S_p$ iterations. The distillation loss $\mathcal{L}_r$ replaces the reference depth $D_r$ (from an off-the-shelf estimator like DPT) with the SRM-rendered depth $\hat{D}_{i+1}$ [S1]:
+    $$ \mathcal{L}_r = 1 - \text{SSIM}(D, \hat{D}_{i+1}) + 0.1 \times (E_r \oplus E / \text{size}(E)) $$
+    where $E_r$ and $E$ are occluding boundary maps of the reference and predicted depths, respectively, and $\oplus$ is the XOR operation [S1].
+*   **Final SPM Loss:**
     $$ \mathcal{L}_{pt} = \mathcal{L}_p + \mathcal{L}_r + 1.0 \times 10^{-3} \times \mathcal{L}_s $$
-    where $\mathcal{L}_p$ is the photometric loss for view synthesis, $\mathcal{L}_r$ is the distilling loss against a reference depth estimator (DPT), and $\mathcal{L}_s$ ensures depth smoothness [S1].
+    where $\mathcal{L}_p$ is the photometric loss for SMDE reconstruction and $\mathcal{L}_s$ is the edge-aware smoothness loss [S1].
+    *   **Photometric Loss ($\mathcal{L}_p$):**
+        $$ \mathcal{L}_p(I_t, \hat{I}_t) = (1 - \text{SSIM}(I_t, \hat{I}_t)) + \frac{\alpha}{2} (1 - \alpha) \| I_t - \hat{I}_t \|_1 $$
+        where $\alpha = 0.85$ [S1].
+    *   **Smoothness Loss ($\mathcal{L}_s$):**
+        $$ \mathcal{L}_s = |\partial_x D| e^{-|\partial_x I|} + |\partial_y D| e^{-|\partial_y I|} $$
+        where $\partial_x, \partial_y$ are image gradients [S1].
+*   **Output:** Updated depth $D_{i+1}$ and pose $P_{i+1}$ [S1].
 
-2.  **Pose Initialization:**
-    *   Establish a world coordinate system aligning with the first frame $I_0$ (identity matrix) [S1].
-    *   SPM predicts relative transformations $P_{i-1 \to i}$ between adjacent frames. Compute initial absolute poses $P_i$ using the chain rule:
-        $$ P_i = P_{i-1 \to i} \times P_{i-1} $$
-    *   Use these poses $P_0$ as initialization for SRM. Refine by optimizing a residual pose $\Delta P$. The refined pose $\hat{P}$ is calculated as:
-        $$ \hat{P} = \Delta P \times P $$
-    *   Apply **Warmup Learning**: Set the learning rate of $\Delta P$ to a low value initially, linearly increasing to the original rate after 1K iterations to allow SRM to learn a scene prototype before updating the pose [S1].
+**3. Termination**
+The loop repeats for a total of $N$ alternations. The final NeRF model and poses are output [S1].
 
-3.  **Alternating Algorithm Workflow:**
-    The framework alternates between SRM ($\Psi_i$) and SPM ($\Phi_i$) for $N$ cycles (typically 2) [S1].
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def AltNeRF(video_frames, intrinsics_K, num_alternations=2, Sr=50000, Sp=500):
+    """
+    video_frames: List of images [I_0, I_1, ..., I_N]
+    intrinsics_K: Camera intrinsic matrix
+    """
+    # 1. Initialize SPM
+    SPM = ScenePriorModule()
+    SPM.pretrain_on_dataset() # Pretrained on NYUv2/VOID
+    SPM.fine_tune_on_video(video_frames) # Test-time adaptation
     
-    *   **Step 3a: SRM Iteration (Scene Representation Module):**
-        *   SRM takes initial pose $P_i$ and depth prior $D_i$ from SPM [S1].
-        *   Optimize NeRF weights and residual pose $\Delta P$ to minimize the SRM loss $\mathcal{L}_{sr}$ [S1]:
-            $$ \mathcal{L}_{sr} = \mathcal{L}_c + \gamma \cdot \mathcal{L}_e $$
-            where $\mathcal{L}_c = \|\hat{C}(r) - C(r)\|_2^2$ is the photometric reconstruction loss, and $\mathcal{L}_e$ is the error-tolerant depth regularization loss [S1]:
-            $$ \mathcal{L}_e = H\left( \frac{\|\hat{D} - D\|_1}{\hat{D} + D} - \epsilon, 0 \right) $$
-            Here, $H(\cdot, \cdot)$ is the Huber loss, $\epsilon$ is a tolerance coefficient, and $\hat{D}$ is the rendered depth [S1].
-        *   Rendered depth $\hat{D}(r)$ is computed as the mean terminating distance of ray $r = o + td$:
-            $$ \hat{D}(r) = \int_{t_n}^{t_f} T(t)\sigma(t)t \, dt $$
-            where $T(t) = \exp\left(-\int_{t_n}^t \sigma(s) \, ds\right)$ [S1].
-        *   Run for $S_r$ iterations (typically 50K). Output estimated depth $\hat{D}_{i+1}$ and improved pose $\hat{P}_{i+1}$ [S1].
+    # 2. Initialize Poses and Depth Priors
+    # World coord system aligned with I_0
+    poses = [IdentityMatrix()] 
+    # Predict relative poses using SPM pose network fp
+    for i in range(1, len(video_frames)):
+        rel_pose = SPM.fp(video_frames[i-1], video_frames[i])
+        poses.append(rel_pose * poses[i-1])
+        
+    # Predict initial depth using SPM depth network fd
+    depths = [SPM.fd(I) for I in video_frames]
+    
+    # 3. Initialize SRM (NeRF)
+    SRM = SceneRepresentationModule()
+    
+    # 4. Alternating Loop
+    for i in range(num_alternations):
+        # --- SRM Step ---
+        # Use current pose and depth prior
+        current_pose = poses[i]
+        current_depth_prior = depths[i]
+        
+        # Warmup strategy for pose refinement
+        # Initialize residual pose delta_P to small values
+        # Learning rate for delta_P starts low, linearly increases to 2.0e-3 over 1000 iters
+        
+        # Optimize SRM for Sr iterations
+        # Loss: L_sr = L_c + gamma * L_e
+        # L_c: NeRF reconstruction loss
+        # L_e: Error-tolerant depth regularization against current_depth_prior
+        # Multi-view consistency check applied to weight losses
+        SRM.optimize(
+            frames=video_frames, 
+            poses=current_pose, 
+            depth_prior=current_depth_prior, 
+            iterations=Sr,
+            gamma=0.08 # or 0.15 depending on dataset
+        )
+        
+        # Get refined outputs from SRM
+        refined_depth = SRM.render_depth() # D_hat_{i+1}
+        refined_pose = SRM.get_refined_pose() # P_hat_{i+1}
+        
+        # --- SPM Step ---
+        # Fine-tune SPM depth network fd for Sp iterations
+        # Loss: L_pt = L_p + L_r + 1e-3 * L_s
+        # L_r: Distillation loss using refined_depth as reference
+        SPM.fine_tune(
+            frames=video_frames, 
+            reference_depth=refined_depth, 
+            iterations=Sp
+        )
+        
+        # Update poses and depths for next iteration
+        # Repredict poses and depths using updated SPM
+        poses[i+1] = SPM.predict_pose(video_frames[i])
+        depths[i+1] = SPM.predict_depth(video_frames[i])
+        
+    return SRM, poses
+```
 
-    *   **Step 3b: SPM Fine-tuning (Scene Prior Module):**
-        *   Fine-tune SPM for $S_p$ iterations (typically 500) using the outputs from SRM [S1].
-        *   Replace the reference depth $D_r$ in the distilling loss $\mathcal{L}_r$ with the rendered depth $\hat{D}_{i+1}$ from SRM [S1]:
-            $$ \mathcal{L}_r = 1 - \text{SSIM}(D, \hat{D}_{i+1}) + 0.1 \times (E_r \oplus E / \text{size}(E)) $$
-            where $E_r$ and $E$ are occluding boundary maps of the reference and predicted depths, respectively, and $\oplus$ is the XOR operation [S1].
-        *   The final loss for SPM fine-tuning is $\mathcal{L}_{pt}$ (Eq. 7 in [S1]), using $\hat{D}_{i+1}$ as the target [S1].
-        *   Output updated depth $D_{i+1}$ and pose $P_{i+1}$ [S1].
-
-4.  **Multi-view Consistency Check:**
-    *   Compute uncertainty $U_t = \|D_t - D_{s \to t}\|_1$, where $D_{s \to t}$ are depth maps warped from nearby source views using predicted poses [S1].
-    *   Incorporate this uncertainty into loss functions ($\mathcal{L}_r$ and $\mathcal{L}_e$) by weighting them with $\text{Softmin}(\cdot)$ to mitigate the effect of unreliable depth estimates [S1].
-
-**Parameters:**
-*   $\gamma$: Scalar hyper-parameter balancing reconstruction and depth regularization losses. Value: 0.08 for LLFF and CO3D; 0.15 for ScanNet and Captures [S1].
+### Parameters
+*   $\gamma$: Balances reconstruction and depth regularization losses. Value: 0.08 for LLFF and CO3D; 0.15 for ScanNet and Captures [S1].
 *   $S_r$: Number of SRM iterations per alternation. Value: 50K [S1].
 *   $S_p$: Number of SPM fine-tuning iterations per alternation. Value: 500 [S1].
 *   Alternations: Number of full alternating cycles. Value: 2 [S1].
@@ -69,109 +172,22 @@ AltNeRF is a framework for creating resilient Neural Radiance Field (NeRF) repre
 *   SRM NeRF LR: Initial learning rate for NeRF learning in SRM. Value: $10^{-3}$, exponentially decays to $10^{-4}$ [S1].
 *   SRM Pose LR: Initial learning rate for pose refinement. Value: $10^{-5}$, linearly increases to $2.0 \times 10^{-3}$ after 1K iterations, then exponentially decays to $10^{-5}$ [S1].
 
-**Pseudocode:**
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def altnerf_train(video_frames, intrinsics_K):
-    # 1. Pretrain SPM
-    spm = ScenePriorModule()
-    spm.pretrain(dataset="NYUv2+VOID", lr=1e-4)
-    
-    # 2. Initialize Poses from SPM
-    # Predict relative poses and chain them to get absolute poses P0
-    P0 = spm.predict_poses(video_frames)
-    # Initialize SRM with P0 and SPM depth prior D0
-    srm = SceneRepresentationModule()
-    srm.init_pose(P0)
-    
-    # 3. Alternating Loop
-    for i in range(2): # 2 alternations
-        # --- SRM Step ---
-        # Warmup learning for pose: start with low LR, linearly increase to 2e-3 over 1000 iters
-        srm.set_pose_lr_warmup(start_lr=1e-5, peak_lr=2e-3, warmup_iters=1000)
-        
-        # Optimize SRM for Sr iterations
-        for step in range(50000):
-            # Render depth D_hat and color C_hat from current NeRF and pose
-            D_hat, C_hat = srm.render(video_frames, intrinsics_K)
-            
-            # Compute uncertainty using multi-view consistency
-            U = compute_multi_view_uncertainty(D_hat, video_frames, intrinsics_K, srm.get_poses())
-            
-            # Compute losses
-            L_c = photometric_loss(C_hat, video_frames)
-            L_e = error_tolerant_depth_loss(D_hat, spm.get_depth(), uncertainty=U)
-            L_sr = L_c + gamma * L_e
-            
-            # Backpropagate to update NeRF weights and residual pose Delta P
-            srm.backward(L_sr)
-            srm.step()
-            
-        # Get refined outputs
-        D_hat_next = srm.get_depth()
-        P_hat_next = srm.get_poses()
-        
-        # --- SPM Fine-tuning Step ---
-        # Fine-tune SPM for Sp iterations using D_hat_next as reference
-        for step in range(500):
-            # Predict depth D from SPM
-            D = spm.predict_depth(video_frames)
-            
-            # Compute distilling loss against D_hat_next
-            L_r = distilling_loss(D, D_hat_next)
-            L_s = smoothness_loss(D, video_frames)
-            L_pt = L_r + L_s # Plus photometric loss if needed for SPM self-supervision
-            
-            # Backpropagate to update SPM weights
-            spm.backward(L_pt)
-            spm.step()
-            
-        # Update initial poses for next iteration
-        P0 = spm.get_poses()
-        D0 = spm.get_depth()
-        
-    return srm.get_nerf(), srm.get_poses()
-
-def error_tolerant_depth_loss(D_hat, D_prior, uncertainty):
-    # Huber loss on normalized difference, weighted by uncertainty
-    diff = abs(D_hat - D_prior) / (D_hat + D_prior + epsilon)
-    # Apply tolerance epsilon in Huber loss
-    huber = huber_loss(diff - epsilon, delta=1.0)
-    # Weight by Softmin of uncertainty
-    weight = softmin(uncertainty)
-    return mean(huber * weight)
-```
-
-## Subtopics
-
-### BARF (Bundle-Adjusting Neural Radiance Fields)
-Uses frequency annealing to gradually introduce high-frequency details, stabilizing pose optimization. Choose when computational resources are limited and coarse-to-fine frequency scheduling is preferred over explicit depth priors. [Link](6872-barf-bundle-adjusting-neural-radiance-fields.md)
-
-### NeRF with Unknown Camera Parameters
-Jointly optimizes NeRF and camera poses using a standard photometric loss without explicit depth priors. Choose when depth estimation is unreliable or unavailable. [Link](7405-nerf-with-unknown-camera-parameters.md)
-
-### L2G-NeRF
-Uses a global optimization approach for camera poses, often leveraging geometric constraints. Choose when global consistency is critical and local optimization gets stuck. [Link](8671-l2g-nerf.md)
-
-### NoPe-NeRF
-Uses neural positional encoding to model camera pose uncertainty, allowing for robust optimization under pose noise. Choose when pose estimates are noisy but not entirely absent. [Link](8705-nope-nerf.md)
-
-### CBARF
-Combines BARF's frequency annealing with bundle adjustment. Choose when a hybrid of frequency scheduling and explicit bundle adjustment is desired. [Link](9066-cbarf.md)
+### Edge Cases and Pitfalls
+*   **Imprecise Priors:** The depth prior from SPM is not precise. Strict alignment leads to suboptimal solutions. The error-tolerant regularization ($\mathcal{L}_e$) is critical to handle this [S1].
+*   **Dynamic Objects:** SMDE is susceptible to dynamic objects. The distilling strategy and multi-view consistency check help mitigate this [S1].
+*   **Non-convex Optimization:** Joint optimization of pose and NeRF is highly non-convex. The warmup learning strategy prevents incorrect pose update directions early in training [S1].
+*   **Occlusions:** The multi-view consistency check accounts for occlusions by computing uncertainty and weighting losses [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Training takes 150K-200K total iterations, costing 4.0-6.4 hours on a single RTX 3090 [S1]. The alternating nature adds overhead compared to single-module optimization, but the pretraining of SPM amortizes some cost.
-*   **Memory Complexity:** Requires storing parameters for both SPM (ResNet-50/34 based) and SRM (8-layer MLP NeRF), plus intermediate depth maps and feature maps during rendering [S1].
-*   **Scaling:** Performance scales with the number of frames and the quality of the initial SPM priors. The method is designed for monocular videos, so it does not scale to multi-view setups with known poses in the same way.
-*   **Strengths:** Robust to dynamic objects and view-dependent appearances due to SPM's distillation strategy. Error-tolerant depth regularization prevents divergence when priors are imprecise.
-*   **Limitations:** Relies on the quality of the pre-trained SPM. If the target domain is significantly different from the pretraining data (NYUv2/VOID), performance may degrade without fine-tuning. The alternating loop increases training time.
-*   **When to use:** When camera poses are unknown or highly inaccurate, and monocular video data is available.
-*   **When not to use:** When precise camera poses are known, or when real-time training is required.
+*   **Time Complexity:** Training takes 150K-200K total iterations, costing approximately 4.0-6.4 hours on a single RTX 3090 GPU [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Resilient to imprecise camera poses; leverages complementary strengths of SMDE (robust priors) and NeRF (fine geometry); error-tolerant regularization handles noisy depth priors [S1].
+*   **Limitations:** Relies on the quality of the pre-trained SPM; alternating algorithm adds complexity compared to single-stage optimization [S1].
+*   **When to use:** When camera poses are unknown or imprecise, and monocular video data is available [S1].
+*   **When not to use:** When precise camera poses are already known (standard NeRF is more efficient); when real-time performance is required [S1].
 
 ## Background
-AltNeRF was proposed in 2024 by researchers at The Thirty-Eighth AAAI Conference on Artificial Intelligence [S1]. It builds on the limitations of existing NeRF approaches that suffer from suboptimal outcomes due to lack of explicit 3D supervision and imprecise camera poses [S1]. The method integrates concepts from Self-supervised Monocular Depth Estimation (SMDE) and NeRF, introducing an alternating algorithm to synergistically boost both modules [S1]. It addresses the non-convexity of joint pose-NeRF optimization by using a robust scene prior from SPM and refining it with SRM [S1].
+AltNeRF was proposed in 2024 by researchers presenting at the Thirty-Eighth AAAI Conference on Artificial Intelligence [S1]. It builds upon the BARF (Bundle-Adjusting Neural Radiance Fields) approach by introducing depth regularization, improved pose initialization, and warmup learning [S1]. The method addresses the limitations of existing NeRF approaches that suffer from suboptimal outcomes due to lack of explicit 3D supervision and imprecise camera poses [S1].
 
 ## Sources
 [S1] AltNeRF: Learning Robust Neural Radiance Field via Alternating Depth-Pose Optimization, https://doi.org/10.1609/aaai.v38i6.28360, fetched 2026-10-26

@@ -3,134 +3,176 @@
 Also called: 2D Transfer Function Support in GPUVolumeMapper, 2D Transfer Function in GPUVolumeMapper, Gradient-Aware Transfer Function, Intensity-Gradient Transfer Function, Joint histogram transfer function, scalar value vs. gradient magnitude transfer function
 
 ## Overview
-This method extends the classification domain from a single scalar value to a two-dimensional space comprising the scalar value $v$ and the gradient magnitude $g = \|\nabla f(\mathbf{x})\|$ [S1, book][S2]. It solves the ambiguity inherent in 1D transfer functions where distinct material features (e.g., a smooth interior vs. a sharp boundary) share the same intensity but require different visual treatments [S2][S3, unofficial]. By mapping these two parameters simultaneously to color and opacity, it enables finer control over material boundaries and allows the isolation of features that are indistinguishable in 1D space [S1, book][S2]. Unlike the legacy approach which uses three independent 1D functions, this method uses a single 2D lookup texture to disambiguate regions based on the joint distribution of value and gradient [S3, unofficial].
+The 2D Transfer Function with Gradient Magnitude extends the classification domain from a single scalar value to a joint space of intensity and gradient magnitude, allowing users to isolate features that share the same density but differ in their boundary characteristics [S2][S3, unofficial]. Unlike independent 1D functions which map scalar value to color and gradient magnitude to opacity separately, this method uses a single 2D lookup texture to simultaneously disambiguate regions based on both parameters, enabling finer control over material boundary visualization [S3, unofficial]. It is primarily implemented as a 2D texture sampled during ray casting, where the horizontal axis represents data values and the vertical axis represents gradient magnitudes [S1, book][S2].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D scalar volume $f(\mathbf{x})$ and a 2D transfer function texture $T$.
-*   **Output:** A 2D image where each pixel is colored and modulated by opacity based on the sampled $(v, g)$ pair.
+*   **Input Data:** A 3D scalar volume $V$ and a precomputed 3D gradient magnitude volume $G$, where $G(\mathbf{x}) = \|\nabla V(\mathbf{x})\|_2$ [S2].
+*   **Transfer Function:** A 2D texture $T$ of size $W \times H$ with 4 floating-point components per pixel (RGBA), representing the mapping from the 2D input space $(v, g)$ to the 4D output space $(R, G, B, \alpha)$ [S3, unofficial].
+*   **Output:** For each sample point along a ray, a color vector $\mathbf{c} \in [0,1]^3$ and opacity $\alpha \in [0,1]$ are retrieved from $T$ based on the local scalar value and gradient magnitude [S2].
 
 **Data Structures:**
-The 2D transfer function is stored as a 2D texture (or `vtkImageData` object) with 4 floating-point components per pixel [S1, book][S3, unofficial].
-*   **Texture Dimensions:** The horizontal axis ($u$) maps to scalar values $v$. The vertical axis ($v_{tex}$) maps to gradient magnitudes $g$ [S1, book][S2].
-*   **Pixel Format:** RGBA (Red, Green, Blue, Alpha), where each component is a float in $[0, 1]$ [S3, unofficial].
-*   **Mapping:** $T(u, v_{tex}) \rightarrow (R, G, B, \alpha)$ [S2].
-
-**Gradient Magnitude Calculation:**
-The gradient magnitude $g$ at a sample point is the L2-norm of the gradient vector $\nabla f$ [S2]:
-$$ g = \|\nabla f(\mathbf{x})\| = \sqrt{\left(\frac{\partial f}{\partial x}\right)^2 + \left(\frac{\partial f}{\partial y}\right)^2 + \left(\frac{\partial f}{\partial z}\right)^2} $$
-In practice, $\nabla f$ is computed via finite differences or by sampling the gradient from a pre-computed gradient texture [S1, book][S2].
+The transfer function is stored as a `vtkImageData` object (or equivalent 2D texture) with 4 components per pixel, where each component is a float [S3, unofficial]. The texture coordinates $(u, v)$ are normalized to $[0, 1]$, mapping to the range of scalar values and gradient magnitudes respectively [S1, book].
 
 **Algorithm Steps:**
-1.  **Initialize Transfer Function:** Create a 2D texture $T$ of size $W \times H$. Initialize all pixels to transparent black $(0, 0, 0, 0)$ [S1, book][S4, unofficial].
-2.  **Define Mapping:** Map the scalar value range $[v_{min}, v_{max}]$ to the horizontal texture coordinate $u \in [0, 1]$ and the gradient magnitude range $[g_{min}, g_{max}]$ to the vertical texture coordinate $v_{tex} \in [0, 1]$ [S1, book][S2].
-3.  **Paint/Define Regions:**
-    *   *Interactive:* Use brushes to paint color and opacity directly into the 2D texture at coordinates corresponding to specific $(v, g)$ ranges [S1, book].
-    *   *Sketching:* Draw arbitrary patches or closed curves in the 2D domain to define regions of interest; points outside these patches are set to zero opacity [S4, unofficial].
-    *   *Histogram-based:* Use an underlying 2D histogram of the data to guide the placement of transfer function elements (e.g., arches indicating material boundaries) [S1, book][S4, unofficial].
-4.  **Rendering Loop (Ray Casting):**
-    For each ray:
-    a.  Sample the volume at position $\mathbf{x}$ to get scalar value $v = f(\mathbf{x})$ [S2].
-    b.  Sample the gradient magnitude $g = \|\nabla f(\mathbf{x})\|$ at $\mathbf{x}$ [S2].
-    c.  Normalize $v$ and $g$ to texture coordinates $u, v_{tex}$ based on their respective ranges [S1, book].
-    d.  Sample the transfer function texture: $(R, G, B, \alpha) = T(u, v_{tex})$ [S2].
-    e.  Accumulate color and opacity using standard volume integration (e.g., front-to-back compositing) [S1, book][S2].
+1.  **Precompute Gradient Magnitude:** Calculate the gradient magnitude $g(\mathbf{x})$ for every voxel in the volume. This is typically done using central differences or Sobel filters to obtain the L2-norm of the gradient vector [S2].
+    $$ g(\mathbf{x}) = \sqrt{ \left(\frac{\partial V}{\partial x}\right)^2 + \left(\frac{\partial V}{\partial y}\right)^2 + \left(\frac{\partial V}{\partial z}\right)^2 } $$
+2.  **Initialize Transfer Function Texture:** Create a 2D texture $T$ of resolution $W \times H$ initialized to zero opacity and black color [S3, unofficial].
+3.  **Define Mapping:** The user paints or defines regions in the 2D domain. The horizontal axis $x$ corresponds to the scalar value $v$, and the vertical axis $y$ corresponds to the gradient magnitude $g$ [S1, book][S2].
+    $$ T(u, v) = (R, G, B, \alpha) $$
+    where $u = \frac{v - v_{min}}{v_{max} - v_{min}}$ and $v = \frac{g - g_{min}}{g_{max} - g_{min}}$ [S1, book][S2].
+4.  **Ray Casting Sampling:** For each sample point $\mathbf{x}$ along a ray:
+    a. Interpolate the scalar value $v = V(\mathbf{x})$ from the volume data.
+    b. Interpolate the gradient magnitude $g = G(\mathbf{x})$ from the gradient data.
+    c. Normalize $v$ and $g$ to texture coordinates $(u, v)$.
+    d. Sample the transfer function texture: $(R, G, B, \alpha) = T(u, v)$ [S1, book].
+5.  **Composite:** Use the retrieved $\alpha$ and $(R, G, B)$ in the standard volume rendering accumulation equation (e.g., front-to-back compositing) [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_2d_tf_ray(ray_origin, ray_direction, volume, gradient_volume, tf_texture, tf_range_v, tf_range_g):
+def render_2d_tf_ray(ray_origin, ray_direction, volume_data, gradient_data, tf_texture, volume_bounds):
     """
     Renders a single ray using a 2D transfer function.
     
     Args:
         ray_origin: (x, y, z) start of ray.
-        ray_direction: (dx, dy, dz) normalized ray direction.
-        volume: 3D array or texture for scalar values f(x).
-        gradient_volume: 3D array or texture for gradient magnitudes g(x).
-        tf_texture: 2D array or texture storing (R, G, B, A) values.
-        tf_range_v: (v_min, v_max) range of scalar values.
-        tf_range_g: (g_min, g_max) range of gradient magnitudes.
+        ray_direction: (dx, dy, dz) normalized direction.
+        volume_data: 3D array of scalar values.
+        gradient_data: 3D array of gradient magnitudes.
+        tf_texture: 2D array of shape (H, W, 4) with float values [R, G, B, A].
+        volume_bounds: (xmin, xmax, ymin, ymax, zmin, zmax) of the volume.
         
     Returns:
-        (R, G, B, A) accumulated color and opacity.
+        (R, G, B, A) of the final pixel.
     """
-    # Standard ray casting setup
-    num_samples = 100
-    step_size = 1.0 / num_samples
+    # Determine intersection with volume bounding box
+    t_min, t_max = intersect_box(ray_origin, ray_direction, volume_bounds)
+    if t_max < t_min:
+        return (0.0, 0.0, 0.0, 0.0)
+
+    # Calculate step size and number of samples
+    # Note: Step size depends on desired sampling rate and volume resolution
+    step_size = calculate_step_size(volume_bounds, ray_direction)
+    num_samples = int((t_max - t_min) / step_size)
+    
+    # Accumulators
     accumulated_color = (0.0, 0.0, 0.0)
     accumulated_alpha = 0.0
-    front_factor = 1.0
+    weight = 1.0
     
+    # Precompute min/max for normalization if not done globally
+    v_min, v_max = min_max(volume_data)
+    g_min, g_max = min_max(gradient_data)
+    
+    # Avoid division by zero
+    if v_max == v_min: v_max = v_min + 1e-6
+    if g_max == g_min: g_max = g_min + 1e-6
+
     for i in range(num_samples):
-        # Sample position
-        t = i * step_size
+        t = t_min + i * step_size
         pos = ray_origin + t * ray_direction
         
-        # 1. Get scalar value v
-        v = sample_volume(volume, pos)
-        
-        # 2. Get gradient magnitude g
-        # In a full implementation, gradient_volume might be pre-computed.
-        # If not, compute finite differences from volume[pos].
-        g = sample_volume(gradient_volume, pos)
-        
-        # 3. Normalize to texture coordinates [0, 1]
-        # Clamp to avoid out-of-bounds sampling
-        u = clamp((v - tf_range_v[0]) / (tf_range_v[1] - tf_range_v[0]), 0.0, 1.0)
-        v_tex = clamp((g - tf_range_g[0]) / (tf_range_g[1] - tf_range_g[0]), 0.0, 1.0)
-        
-        # 4. Sample 2D Transfer Function
-        rgba = sample_2d_texture(tf_texture, u, v_tex)
-        R, G, B, alpha = rgba
-        
-        # 5. Composite
-        # Front-to-back compositing
-        weight = alpha * front_factor
-        accumulated_color = accumulated_color + weight * (R, G, B)
-        accumulated_alpha = accumulated_alpha + weight
-        front_factor = front_factor * (1.0 - alpha)
-        
-        # Early ray termination optimization
-        if accumulated_alpha > 0.99:
+        # Check if position is inside volume bounds
+        if not is_inside(pos, volume_bounds):
             break
             
-    return accumulated_color, accumulated_alpha
+        # Sample scalar value
+        v = interpolate_trilinear(volume_data, pos)
+        
+        # Sample gradient magnitude
+        g = interpolate_trilinear(gradient_data, pos)
+        
+        # Normalize to [0, 1] for texture lookup
+        u = clamp((v - v_min) / (v_max - v_min), 0.0, 1.0)
+        v_coord = clamp((g - g_min) / (g_max - g_min), 0.0, 1.0)
+        
+        # Map to texture coordinates (u, v_coord) -> (x, y) in texture
+        # Assuming texture width W, height H
+        tex_x = int(u * (tf_texture.shape[1] - 1))
+        tex_y = int(v_coord * (tf_texture.shape[0] - 1))
+        
+        # Sample TF
+        tf_rgba = tf_texture[tex_y, tex_x]
+        alpha = tf_rgba[3]
+        color = tf_rgba[:3]
+        
+        # Front-to-back compositing
+        # C_out = C_in + (1 - C_in_alpha) * alpha * color
+        # A_out = A_in + (1 - A_in_alpha) * alpha
+        
+        # Standard pre-multiplied alpha compositing
+        # Note: Implementation details may vary based on whether TF stores pre-multiplied alpha
+        # Here we assume non-premultiplied color and alpha from TF
+        new_alpha = accumulated_alpha + (1.0 - accumulated_alpha) * alpha
+        if new_alpha > 0.0:
+            accumulated_color = (
+                accumulated_color[0] * (1.0 - alpha) + color[0] * alpha * (1.0 - accumulated_alpha),
+                accumulated_color[1] * (1.0 - alpha) + color[1] * alpha * (1.0 - accumulated_alpha),
+                accumulated_color[2] * (1.0 - alpha) + color[2] * alpha * (1.0 - accumulated_alpha)
+            )
+            # Correction for standard compositing formula:
+            # C_final = C_accum + (1 - A_accum) * alpha * color
+            # A_final = A_accum + (1 - A_accum) * alpha
+            
+            # Re-evaluating standard front-to-back:
+            # C_out = C_in + (1 - A_in) * alpha * color
+            # A_out = A_in + (1 - A_in) * alpha
+            
+            accumulated_color = (
+                accumulated_color[0] + (1.0 - accumulated_alpha) * alpha * color[0],
+                accumulated_color[1] + (1.0 - accumulated_alpha) * alpha * color[1],
+                accumulated_color[2] + (1.0 - accumulated_alpha) * alpha * color[2]
+            )
+            accumulated_alpha = new_alpha
+            
+        if accumulated_alpha >= 0.99: # Threshold for early ray termination
+            break
+            
+    return (accumulated_color[0], accumulated_color[1], accumulated_color[2], accumulated_alpha)
 ```
 
 **Parameters:**
-*   **Sampling Rate:** Affects opacity scaling. If fewer slices are used, opacity values in the TF may need to be scaled up to maintain visual intensity [S1, book].
-*   **Gradient Range:** The range $[g_{min}, g_{max}]$ used for normalizing gradient magnitudes to the texture vertical axis [S2].
+*   **Texture Resolution ($W \times H$):** Not given in the sources. Typical values depend on the range of scalar and gradient values; higher resolution allows finer control but increases memory usage [S3, unofficial].
+*   **Sampling Rate:** The distance between sample points along the ray. Opacity may need scaling if the sampling rate changes from a reference rate $s_0$ to $s$ [S1, book].
+*   **Normalization Range:** The min/max values of scalar and gradient data used to map to texture coordinates [S1, book][S2].
 
 **Edge Cases and Pitfalls:**
-*   **Gradient Noise:** Noise in the volume data can produce high gradient magnitudes, leading to unwanted edge highlighting. Smoothing or filtering the volume before gradient computation is often required [S1, book][S2].
-*   **Boundary Artifacts:** If the gradient magnitude range is not chosen carefully, boundaries may be over-emphasized or under-emphasized [S2].
-*   **Implementation Limitation:** In VTK, only `vtkGPUVolumeRayCastMapper` with the OpenGL2 backend supports 2D transfer functions [S3, unofficial].
+*   **Noise:** Gradient magnitude is sensitive to noise, which can create false boundaries in the 2D domain [S5, unofficial].
+*   **Partial Volume Effects:** These can blur the distinction between interior and boundary, making it difficult to select clear arches in the 2D histogram [S5, unofficial].
+*   **Hardware Support:** In VTK, only `vtkGPUVolumeRayCastMapper` with the OpenGL2 backend supports 2D transfer functions [S3, unofficial].
+*   **Opacity Correction:** When changing the sampling rate, opacity values in the transfer function may need to be scaled to maintain consistent visual intensity [S1, book].
 
 ## Subtopics
 
 ### [Rectangular Classification Widget](5634-rectangular-classification-widget.md)
-An interactive tool for defining transfer functions in the 2D value-gradient domain for data lacking clear material boundaries. It allows users to define regions of interest via a resizable rectangle. Unlike triangular widgets that emphasize surfaces, this widget supports flexible opacity falloffs (ellipsoidal, linear ramps, tents, or pyramids) while maintaining constant color within the defined region. It builds on [2D Transfer Function with Gradient Magnitude](5491-2d-transfer-function-with-gradient-magnitude.md).
+The Rectangular Classification Widget is an interactive tool for defining general transfer functions for scalar data that lacks clear material boundaries. It operates in the 2D domain of data value and gradient magnitude, allowing users to define regions of interest via a resizable rectangle. Unlike triangular widgets which emphasize surfaces, this widget supports flexible opacity falloffs (ellipsoidal, linear ramps, tents, or pyramids) while maintaining constant color within the defined region. It builds on [2D Transfer Function with Gradient Magnitude](5491-2d-transfer-function-with-gradient-magnitude.md).
 
 ### [Multivariate Gradient Magnitude](5652-multivariate-gradient-magnitude.md)
-A first-derivative measure for multivariate data (e.g., RGB color) that captures the total amount of local change across all data components. It sets itself apart from scalar gradient magnitude by operating on a tensor derived from the Jacobian of the multivariate field, providing a rotationally invariant measure of local contrast. Unlike non-rotationally invariant measures of the gradient tensor used in other work, this method uses the L2 norm of the resulting tensor $G$ to ensure directional independence.
+Multivariate Gradient Magnitude provides a scalar measure of local change in multidimensional volume data (e.g., RGB color, meteorological fields) by computing the L2 norm of the structure tensor $G$. It solves the problem that gradient estimation for multivalued fields is not well-defined in the same way as for scalar datasets, where a single gradient vector exists. Unlike scalar volume rendering which relies on a single intensity axis, this method generalizes gradient-based edge detection by incorporating a first-derivative measure of total local change across all data components as an additional axis in multidimensional transfer functions. It is distinguished from its siblings by its use of the rotationally invariant L2 norm of the tensor, rather than the principal eigenvalue or non-rotationally invariant measures.
 
 ### 2D Patch Sketching
-A proposed technique to map opacity values to each intensity-gradient pair using a sketchpad with an underlying 2D histogram [S4, unofficial]. It places 1D transfer functions at the bottom and left side of the 2D domain to help users draw or delete patches of interest [S4, unofficial]. Users draw arbitrary patches or closed curves to define segments; points outside the patch are set to zero opacity [S4, unofficial]. For opacity adjustment, the view can switch to a 3D plot where users rotate the plot and raise/lower the transparency height of the selected patch [S4, unofficial].
+A proposed technique to map opacity values to each intensity-gradient pair using a sketchpad with an underlying 2D histogram [S4, unofficial]. Users place 1D transfer functions at the bottom and left side of the 2D domain to better draw or delete the patch of interest [S4, unofficial]. Over the sketchpad, users draw arbitrary patches or closed curves to define or delete specific segments within the 2D domain, setting points outside the selection patch to zero opacity [S4, unofficial]. When opacity values need to be settled, the flat 2D histogram view can be converted to a 3D plot where users can rotate the plot, select the 2D patch, and raise/lower the transparency height [S4, unofficial].
+
+### Local Histogram-based Transfer Function
+A 2D transfer function space that uses local histograms to better discern tissues in medical datasets, addressing the difficulty of selecting boundaries in gradient magnitude-based transfer functions due to noise and partial volume effects [S5, unofficial]. Lundstrom et al. employ local histograms to create a 2D transfer function space using a competitive classification certainty measure in addition to scalar values [S5, unofficial]. Sereda et al. use a 2D LH histogram-based transfer function for easier boundary identification and selection, further using this boundary information for a region growing segmentation schema [S5, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Rendering time is proportional to the number of samples per ray and the cost of gradient computation. If gradients are pre-computed, the cost is dominated by two texture lookups (volume and TF) per sample [S1, book][S2]. If gradients are computed on-the-fly, the cost increases significantly due to finite difference calculations [S1, book].
-*   **Memory Complexity:** Requires storage for the volume data, the gradient magnitude volume (if pre-computed), and the 2D transfer function texture [S3, unofficial]. The gradient volume adds $O(N)$ memory overhead where $N$ is the number of voxels [S1, book].
-*   **Performance:** The 2D TF approach is more computationally expensive than 1D TFs due to the additional gradient calculation and 2D texture sampling [S2][S3, unofficial]. However, it provides superior feature discrimination [S3, unofficial].
-*   **Strengths:** Effective isolation of features with similar intensities but different boundaries (e.g., smooth vs. sharp) [S2]. Intuitive interaction via painting or sketching in the 2D domain [S1, book][S4, unofficial].
-*   **Limitations:** Requires careful selection of gradient magnitude ranges to avoid noise artifacts [S1, book][S2]. Limited to scalar data unless extended to multivariate gradient magnitude [S1, book]. Implementation support is limited to specific hardware backends (e.g., OpenGL2 in VTK) [S3, unofficial].
+*   **Time Complexity:** The per-sample cost is dominated by the gradient magnitude lookup and the 2D texture lookup, both of which are $O(1)$ operations. The overall complexity is proportional to the number of samples per ray, same as 1D transfer functions [S2][S3, unofficial].
+*   **Memory Complexity:** Requires storing an additional 3D volume for gradient magnitudes (same size as input volume) and a 2D texture for the transfer function [S3, unofficial]. The gradient volume can be computed on the fly or precomputed; precomputing saves computation time but increases memory usage [S2].
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Allows visual distinction of data points with the same intensity but different gradient magnitudes, enabling better feature isolation and segmentation [S2][S3, unofficial]. It provides finer control over material boundaries compared to 1D functions [S1, book].
+*   **Limitations:** Sensitive to noise in gradient estimation, which can complicate transfer function design [S5, unofficial]. Requires hardware support for 2D texture sampling in the volume renderer [S3, unofficial].
+*   **When to Use:** When the volume contains structures with similar densities but distinct boundaries (e.g., different materials with similar attenuation coefficients) [S2].
+*   **When Not to Use:** When the data is very noisy and gradient estimation is unreliable, or when hardware support for 2D transfer functions is not available [S3, S5, unofficial].
 
 ## Background
-The concept of incorporating gradient magnitude into transfer functions was introduced by Kindlmann and Durkin (1998) and Kindlmann (1999) to allow finer control and sophisticated visualization of material boundaries [S1, book]. The 2D transfer function domain was further developed to overcome the limitations of 1D functions, which cannot distinguish between data points with the same intensity but different gradient characteristics [S2]. In the VTK ecosystem, 2D transfer function support was added to the `GPUVolumeRayCastMapper` thanks to developments in tomviz under DOE Office of Science contract DE-SC0011385, announced on September 1, 2017 [S3, unofficial]. This replaced the legacy approach of using three independent 1D functions (scalar-to-color, scalar-to-opacity, gradient-to-opacity) with a single 2D function [S3, unofficial].
+The concept of incorporating gradient magnitude into transfer functions was introduced by Kindlmann and Durkin (1998) and Kindlmann (1999) to allow for finer control and more sophisticated visualization of material boundaries [S1, book]. The specific implementation of 2D transfer functions as a single 2D texture mapping scalar value and gradient magnitude simultaneously was added to VTK's `vtkGPUVolumeRayCastMapper` thanks to developments in tomviz under DOE Office of Science contract DE-SC0011385, announced on September 1, 2017 [S3, unofficial]. This feature allows users to switch between the legacy 1D triad (scalar value to color, scalar value to opacity, gradient magnitude to opacity) and the 2D mode [S3, unofficial].
 
 ## Sources
 [S1] Chapter 39. Volume Rendering Techniques | NVIDIA Developer, https://developer.nvidia.com/gpugems/gpugems/part-vi-beyond-triangles/chapter-39-volume-rendering-techniques, fetched 2026-10-26 (book)
 [S2] PDF Dimensionality reduction on multi-dimensional transfer functions for ..., https://cseweb.ucsd.edu/~hskim/files/IVS_ivs20106.pdf, fetched 2026-10-27
 [S3] 2D Transfer Function Support in GPUVolumeMapper, https://www.kitware.com/2d-transfer-function-support-in-gpuvolumemapper/, fetched 2026-10-28 (unofficial)
 [S4] Explicit design of transfer functions for volume-rendered images, https://web.tecnico.ulisboa.pt/daniel.s.lopes/papers/Explicit%20design%20of%20transfer%20functions%20for%20volume-rendered%20images%20-%20Vis%20Comp%202017.pdf, fetched 2026-10-29 (unofficial)
+[S5] MULTIVARIATE TRANSFER FUNCTION DESIGN, https://www.sci.utah.edu/~lzhou/dissertation_final_zhoul.pdf, fetched 2026-10-27 (unofficial)

@@ -1,68 +1,85 @@
 # Direct Volume Rendering with Phong Illumination
-
-Also called: Phong Illumination
+Also called: Phong Shading, Phong Illumination Model in DVR
 
 ## Overview
-Direct Volume Rendering with Phong Illumination is a shading technique applied to Direct Volume Ray Casting that enhances photo-realism by calculating specular highlights and diffuse lighting at each sample point [S1, unofficial]. It distinguishes itself from non-photorealistic methods like Tone or Contour Rendering by providing superior depth cues and a "plastic" appearance, albeit at a significantly higher computational cost due to the requirement for gradient precalculation and vector-based light intensity calculations for every sample [S1, unofficial].
+Direct Volume Rendering with Phong Illumination is a shading technique applied within the Direct Volume Ray Casting pipeline to produce photo-realistic images with strong depth cues and a plastic appearance [S1, unofficial]. It distinguishes itself from non-photorealistic methods (such as Tone or Contour Rendering) by calculating ambient, diffuse, and specular light intensities at each sample point, thereby enhancing the visual realism of the volume data [S1, unofficial]. The method integrates the Phong lighting model into the standard front-to-back compositing loop, modulating the base color derived from transfer functions with lighting contributions while leaving the opacity values unchanged during the shading step [S1, unofficial].
 
 ## How it works
-The method integrates Phong shading into the standard Direct Volume Ray Casting pipeline, which consists of three main steps: Classification, Shading, and Compositing [S1, unofficial].
+The method operates within the front-to-back compositing pipeline of [Direct volume ray casting](19-direct-volume-ray-casting.md). It consists of three main steps: Classification, Shading, and Compositing [S1, unofficial].
 
 ### Inputs and Outputs
-*   **Input:** A 3D scalar volume dataset $V$, a 1D transfer function mapping scalar values to color and opacity, a light direction vector $\mathbf{L}$, a view direction vector $\mathbf{V}$, and rendering parameters (sampling distance, Phong coefficients, depth cueing constants).
-*   **Output:** A 2D image where each pixel color is the result of front-to-back compositing of shaded sample points along the corresponding ray.
+**Inputs:**
+*   Scalar volume field $V(\mathbf{p})$.
+*   1D Transfer Functions for color $C_{base}(\mathbf{p})$ and opacity $\alpha(\mathbf{p})$.
+*   Light direction $\mathbf{L}$ (normalized).
+*   View direction $\mathbf{V}$ (normalized).
+*   Phong parameters: ambient coefficient $k_a^\lambda$, diffuse coefficient $k_d^\lambda$, specular coefficient $k_s^\lambda$, highlight exponent $n$, and depth cueing constants $k_1, k_2$ [S1, unofficial].
+*   Sampling Distance defining the spacing between sample points along the ray [S1, unofficial].
+
+**Outputs:**
+*   Final pixel color $C_{pixel}$ and opacity $\alpha_{pixel}$ for each ray cast through the image plane.
 
 ### Data Structures
-The implementation requires storing interpolated values for each sample point $\mathbf{x}_i$ along a ray:
-1.  **Scalar Value:** $V(\mathbf{x}_i)$, interpolated from neighboring voxels.
-2.  **Gradient Vector:** $\mathbf{n}(\mathbf{x}_i) = \nabla V(\mathbf{x}_i)$, estimated via Central Differences or 4D Linear Regression, then normalized to $\hat{\mathbf{n}}(\mathbf{x}_i)$.
-3.  **Classification Color:** $C^p_\lambda$ (base color from transfer function).
-4.  **Classification Opacity:** $\alpha(\mathbf{x}_i)$ (from transfer function).
-5.  **Shaded Color:** $C_\lambda(\mathbf{x}_i)$, computed by applying the Phong model to $C^p_\lambda$.
+*   **Volume Data:** A 3D grid of scalar values.
+*   **Gradient Data:** A 3D grid of 3D vectors $\nabla V$, precalculated for every voxel.
+*   **Ray State:** Accumulated ray color $C^{in}$ and ray opacity $\alpha^{in}$, initialized to $(0,0,0)$ and $0$ respectively for each pixel [S1, unofficial].
 
 ### Numbered Steps
 
-1.  **Ray Casting and Sampling:**
-    Cast a ray from the camera through each pixel into the volume. Sample points $\mathbf{x}_i$ are placed at even intervals defined by the `Sampling Distance`.
+1.  **Gradient Precalculation:**
+    Compute the gradient $\nabla V(\mathbf{p})$ for every voxel in the volume. This is a prerequisite step performed once before ray casting. Two methods are cited:
+    *   **Central Differences:** A fast method approximating the first derivative in $x, y, z$ directions. It is noted as low quality [S1, unofficial].
+    *   **4D Linear Regression:** A higher quality method with lower approximation error but significantly higher computational cost [S1, unofficial].
+    *   The gradient vector at a sample point $\mathbf{p}_i$ is interpolated from the surrounding voxel gradients. The surface normal is $\mathbf{N}(\mathbf{p}_i) = \nabla V(\mathbf{p}_i)$. If the gradient magnitude is near zero, a default normal is used [G].
 
-2.  **Classification:**
-    For each sample point $\mathbf{x}_i$:
-    *   Interpolate the scalar value $V(\mathbf{x}_i)$ from the volume data.
-    *   Use the 1D transfer function to determine the base color component $C^p_\lambda$ and opacity $\alpha(\mathbf{x}_i)$ for each color channel $\lambda \in \{r, g, b\}$ [S1, unofficial].
-    *   Estimate the gradient $\mathbf{n}(\mathbf{x}_i)$ at $\mathbf{x}_i$. The source notes that Central Differences is fast but low quality, while 4D Linear Regression is higher quality but expensive [S1, unofficial]. Normalize to get $\hat{\mathbf{n}}(\mathbf{x}_i)$.
+2.  **Ray Casting Loop (for each pixel):**
+    Initialize ray color $C^{in}_\lambda = 0$ and ray opacity $\alpha^{in} = 0$ for all color components $\lambda \in \{r, g, b\}$ [S1, unofficial].
+    Cast a ray through the volume. Determine sample points $\mathbf{x}_i$ spaced by the **Sampling Distance** [S1, unofficial].
 
-3.  **Shading (Phong Illumination with Depth Cueing):**
-    Compute the final color $C_\lambda(\mathbf{x}_i)$ for the sample point. The opacity $\alpha(\mathbf{x}_i)$ remains unchanged from the classification step [S1, unofficial].
+3.  **Classification (for each sample point $\mathbf{x}_i$):**
+    *   Interpolate the scalar value $V(\mathbf{x}_i)$ from neighboring voxels.
+    *   Apply the transfer function to get base color $C^p_\lambda$ (or $C_{base}$) and opacity $\alpha(\mathbf{x}_i)$ [S1, unofficial].
+    *   Interpolate the precalculated gradient $\mathbf{N}(\mathbf{x}_i)$ from neighboring voxel gradients [S1, unofficial].
+
+4.  **Shading (for each sample point $\mathbf{x}_i$):**
+    Calculate the shaded color $C_\lambda(\mathbf{x}_i)$ using the Phong Illumination model with depth cueing. The opacity $\alpha(\mathbf{x}_i)$ remains identical to the classification opacity and is **not** altered by shading [S1, unofficial].
     
-    The Phong illumination formula with depth cueing is:
+    The formula for the sample point color component $\lambda$ is [S1, unofficial]:
     $$
-    C_\lambda(\mathbf{x}_i) = \frac{C^p_\lambda k_a^\lambda + \frac{k_d^\lambda (\hat{\mathbf{n}}(\mathbf{x}_i) \cdot \mathbf{L}) + k_s^\lambda (\hat{\mathbf{n}}(\mathbf{x}_i) \cdot \mathbf{H})^n}{k_1 + k_2 d(\mathbf{x}_i)}}{d^\lambda}
+    C_\lambda(\mathbf{x}_i) = \frac{C^p_\lambda k_a^\lambda + \frac{k_d^\lambda (\mathbf{N}(\mathbf{x}_i) \cdot \mathbf{L}) + k_s^\lambda (\mathbf{N}(\mathbf{x}_i) \cdot \mathbf{H})^n}{k_1 + k_2 d(\mathbf{x}_i)}}{d^\lambda}
     $$
     
     Where:
-    *   $C^p_\lambda$: Directional light color component (or base color from transfer function, as implied by the structure $C^p_\lambda k_a^\lambda$).
-    *   $k_a^\lambda, k_d^\lambda, k_s^\lambda$: Ambient, diffuse, and specular reflectivity coefficients for channel $\lambda$.
-    *   $\mathbf{L}$: Normalized light direction vector.
-    *   $\mathbf{H}$: Normalized highlight direction, approximated as $\mathbf{H} = \frac{\mathbf{V} + \mathbf{L}}{\|\mathbf{V} + \mathbf{L}\|}$, where $\mathbf{V}$ is the normalized view direction.
-    *   $n$: Shininess/exponent for the specular highlight.
-    *   $k_1, k2$: Constants for linear depth cueing approximation.
+    *   $C^p_\lambda$: Color component of the directional light source.
+    *   $k_a^\lambda, k_d^\lambda, k_s^\lambda$: Ambient, diffuse, and specular reflection coefficients for component $\lambda$.
+    *   $n$: Highlight exponent.
+    *   $k_1, k_2$: Constants for linear depth cueing approximation.
     *   $d(\mathbf{x}_i)$: Perpendicular distance from the image plane to the sample point $\mathbf{x}_i$.
-    *   $d^\lambda$: A divisor term mentioned in the source formula. The source text lists $d^\lambda$ in the denominator of the entire expression but does not explicitly define $d^\lambda$ separate from $d(\mathbf{x}_i)$ or depth cueing. In standard Phong models, this term is often absent or represents a specific attenuation. Given the source formula: $\frac{C^p_\lambda k_a^\lambda + \dots}{d^\lambda}$, and the context of depth cueing being in the numerator's denominator, $d^\lambda$ is treated as a distinct parameter or potential typo for $1$ or $d(\mathbf{x}_i)$. However, strictly following the source [S1, unofficial], it is included as $d^\lambda$. *Note: The source formula structure is complex. It places the depth cueing denominator $(k_1 + k_2 d)$ inside the numerator's fraction, and then divides the whole sum by $d^\lambda$. This is implemented exactly as written.*
+    *   $\mathbf{N}(\mathbf{x}_i)$: Normalized surface normal at $\mathbf{x}_i$.
+    *   $\mathbf{L}$: Normalized light direction vector.
+    *   $\mathbf{H}$: Normalized highlight direction vector, approximated as:
+        $$
+        \mathbf{H} = \frac{\mathbf{V} + \mathbf{L}}{\|\mathbf{V} + \mathbf{L}\|}
+        $$
+        where $\mathbf{V}$ is the normalized view direction [S1, unofficial].
+    *   $d^\lambda$: Not explicitly defined in the source text, but appears in the denominator. Given the context of "linear approximation of depth cueing" and the structure, this term likely relates to distance attenuation or is a typo for $d(\mathbf{x}_i)$ or a constant. However, the source explicitly lists $k_1, k_2$ for depth cueing in the numerator's denominator. The term $d^\lambda$ in the final denominator is ambiguous. Standard Phong does not typically divide the entire sum by $d^\lambda$ if depth cueing is handled in the numerator. *Note: The source formula is transcribed exactly as provided in [S1, unofficial]. Implementers should verify if $d^\lambda$ is a typo for $1$ or if it represents a specific distance attenuation model not fully explained in the excerpt.* [S1, unofficial].
 
-4.  **Compositing:**
-    Blend the sample points along the ray in Front-to-Back (FTB) order. Initialize ray color $C^{in}_\lambda = 0$ and ray opacity $\alpha^{in} = 0$. For each sample point $\mathbf{x}_i$:
+5.  **Compositing (Front-to-Back):**
+    Blend the shaded sample point into the ray accumulator using the standard front-to-back alpha blending equations [S1, unofficial]:
     
-    Update ray color:
+    Update Ray Color:
     $$
-    C^{out}_\lambda = C^{in}_\lambda + (1 - \alpha^{in}) \cdot C_\lambda(\mathbf{x}_i) \cdot \alpha(\mathbf{x}_i)
-    $$
-    
-    Update ray opacity:
-    $$
-    \alpha^{out} = \alpha^{in} + (1 - \alpha^{in}) \cdot \alpha(\mathbf{x}_i)
+    C^{out}_\lambda(\mathbf{u}_i) = C^{in}_\lambda(\mathbf{u}_i) + (1 - \alpha^{in}(\mathbf{u}_i)) \cdot C_\lambda(\mathbf{x}_i) \cdot \alpha(\mathbf{x}_i)
     $$
     
-    Set $C^{in}_\lambda = C^{out}_\lambda$ and $\alpha^{in} = \alpha^{out}$ for the next sample. The final pixel color is $C^{out}_\lambda$ [S1, unofficial].
+    Update Ray Opacity:
+    $$
+    \alpha^{out}(\mathbf{u}_i) = \alpha^{in}(\mathbf{u}_i) + (1 - \alpha^{in}(\mathbf{u}_i)) \cdot \alpha(\mathbf{x}_i)
+    $$
+    
+    Set $C^{in} \leftarrow C^{out}$ and $\alpha^{in} \leftarrow \alpha^{out}$.
+    
+    If $\alpha^{in}(\mathbf{u}_i) \ge 1.0$, terminate the ray early (standard optimization) [G].
 
 ### Pseudocode
 
@@ -71,148 +88,161 @@ The implementation requires storing interpolated values for each sample point $\
 ```python
 import math
 
-def compute_phong_shaded_color(sample_point, volume_data, transfer_function, light_dir, view_dir, params):
+def compute_gradient_central_diff(volume, x, y, z):
     """
-    Computes the shaded color C_lambda for a single sample point.
+    Approximate gradient using central differences.
+    volume: 3D array of scalars.
+    Returns: (gx, gy, gz)
     """
-    # 1. Classification
-    scalar_val = interpolate_volume(sample_point, volume_data)
-    base_color = transfer_function.get_color(scalar_val) # Returns (Cp_r, Cp_g, Cp_b)
-    opacity = transfer_function.get_opacity(scalar_val)
-    
-    # 2. Gradient Estimation
-    # Using Central Differences as per source note on speed vs quality
-    gradient = estimate_gradient_central_differences(sample_point, volume_data)
-    normal = normalize(gradient)
-    
-    # 3. Phong Illumination with Depth Cueing
-    # Vectors
-    L = normalize(light_dir)
-    V = normalize(view_dir)
-    H = normalize(add_vectors(V, L))
-    
-    # Distances
-    # d(xi) is perpendicular distance from image plane. 
-    # Assuming sample_point is in world/camera space where z is depth.
-    d_xi = sample_point.z 
-    
-    # Coefficients
-    k_a = params['ambient']
-    k_d = params['diffuse']
-    k_s = params['specular']
-    n = params['shininess']
-    k1 = params['depth_cue_k1']
-    k2 = params['depth_cue_k2']
-    
-    # Depth cueing factor
-    depth_factor = k1 + k2 * d_xi
-    
-    shaded_color = [0.0, 0.0, 0.0]
-    
-    for channel_idx, channel in enumerate(['r', 'g', 'b']):
-        Cp = base_color[channel_idx]
-        
-        # Ambient
-        ambient_term = Cp * k_a
-        
-        # Diffuse
-        # Source uses N(xi) * L. Assuming dot product.
-        diffuse_term = k_d * dot(normal, L)
-        
-        # Specular
-        # Source uses (N(xi) * H)^n. Assuming dot product.
-        spec_term = k_s * pow(max(dot(normal, H), 0.0), n)
-        
-        # Combined numerator term for this channel
-        # Formula: (Cp * ka + (kd * (N*L) + ks * (N*H)^n) / (k1 + k2*d)) / d^lambda
-        # Note: The source formula structure is:
-        # C = [ Cp*ka + (kd*(N*L) + ks*(N*H)^n) / (k1 + k2*d) ] / d^lambda
-        # However, d^lambda is not defined. If d^lambda is 1, it simplifies.
-        # If d^lambda refers to distance attenuation, it might be d_xi.
-        # Given the ambiguity and strict adherence to source [S1, unofficial], we include d_lambda.
-        # If d_lambda is not provided, it is treated as 1.0 [G].
-        d_lambda = 1.0 
-        
-        numerator = ambient_term + (diffuse_term + spec_term) / depth_factor
-        shaded_color[channel_idx] = numerator / d_lambda
-        
-    return shaded_color, opacity
+    # Boundary checks omitted for brevity; assume padding or clamping
+    gx = volume[x+1, y, z] - volume[x-1, y, z]
+    gy = volume[x, y+1, z] - volume[x, y-1, z]
+    gz = volume[x, y, z+1] - volume[x, y, z-1]
+    return (gx, gy, gz)
 
-def direct_volume_rendering_phong(volume_data, transfer_function, camera, light_dir, params):
+def phong_shading_sample(x_i, normal, view_dir, light_dir, params, volume_data):
     """
-    Main rendering loop.
+    Calculate shaded color for a single sample point.
+    params: dict with k_a, k_d, k_s, n, k1, k2, C_p (light color)
     """
-    image_width = camera.width
-    image_height = camera.height
-    image = zeros((image_height, image_width, 3))
+    # Calculate Highlight Direction H
+    v_plus_l = (view_dir[0] + light_dir[0], 
+                view_dir[1] + light_dir[1], 
+                view_dir[2] + light_dir[2])
+    h_len = math.sqrt(v_plus_l[0]**2 + v_plus_l[1]**2 + v_plus_l[2]**2)
+    if h_len == 0:
+        h = (0, 0, 1) # Default
+    else:
+        h = (v_plus_l[0]/h_len, v_plus_l[1]/h_len, v_plus_l[2]/h_len)
     
-    sampling_distance = params['sampling_distance']
+    # Dot products
+    nl = max(0, normal[0]*light_dir[0] + normal[1]*light_dir[1] + normal[2]*light_dir[2])
+    nh = max(0, normal[0]*h[0] + normal[1]*h[1] + normal[2]*h[2])
     
-    for y in range(image_height):
-        for x in range(image_width):
-            ray = camera.get_ray(x, y)
+    # Depth cueing denominator
+    d_xi = params['distance_from_plane'] # Pre-calculated distance
+    depth_factor = params['k1'] + params['k2'] * d_xi
+    
+    # Phong components
+    ambient = params['C_p'] * params['k_a']
+    diffuse = params['C_p'] * params['k_d'] * nl
+    specular = params['C_p'] * params['k_s'] * (nh ** params['n'])
+    
+    # Combine and apply depth cueing
+    # Note: Source formula divides by d^lambda. Assuming d^lambda is 1 or 
+    # handled by depth_factor if typo. We follow source structure strictly.
+    # If d^lambda is distance, it should be d_xi. Source is ambiguous.
+    # We assume d^lambda is a constant 1 or part of the depth cueing logic 
+    # not fully detailed. Standard interpretation of the provided formula:
+    
+    numerator = ambient + (diffuse + specular) / depth_factor
+    
+    # The source divides by d^lambda. Without definition, we assume 1 for 
+    # standard Phong or that d^lambda is a typo for 1. 
+    # However, to be safe and strictly follow "C_lambda(x_i) = ... / d^lambda",
+    # we check if d^lambda is defined. It is NOT defined in the variable list.
+    # We will assume d^lambda = 1.0 as a placeholder for undefined behavior [G].
+    d_lambda = 1.0 
+    
+    color = numerator / d_lambda
+    return color
+
+def ray_cast_phong(volume, transfer_func, view_dir, light_dir, params):
+    """
+    Main ray casting loop.
+    """
+    # Precalculate gradients if not already done
+    # gradients = precalculate_gradients(volume) 
+    
+    # Initialize ray accumulators
+    ray_color = [0.0, 0.0, 0.0]
+    ray_alpha = 0.0
+    
+    # Cast ray
+    # Determine ray origin and direction based on pixel coordinates
+    # Sample points x_i are spaced by Sampling Distance
+    
+    for x_i in ray_samples:
+        # 1. Classification
+        # Interpolate scalar value V(x_i)
+        v_val = interpolate_volume(volume, x_i)
+        
+        # Get base color and opacity from transfer function
+        base_color = transfer_func.get_color(v_val)
+        alpha_sample = transfer_func.get_opacity(v_val)
+        
+        # 2. Shading
+        # Interpolate normal N(x_i) from precalculated gradients
+        normal = interpolate_gradient(volume, x_i) # Or from gradients grid
+        normal_len = math.sqrt(normal[0]**2 + normal[1]**2 + normal[2]**2)
+        if normal_len == 0:
+            normal = (0, 0, 1)
+        else:
+            normal = (normal[0]/normal_len, normal[1]/normal_len, normal[2]/normal_len)
             
-            # Initialize compositing
-            ray_color = [0.0, 0.0, 0.0]
-            ray_opacity = 0.0
+        # Calculate distance from image plane for depth cueing
+        dist = calculate_distance_from_plane(x_i)
+        params['distance_from_plane'] = dist
+        
+        # Compute shaded color
+        shaded_color = phong_shading_sample(x_i, normal, view_dir, light_dir, params, volume)
+        
+        # 3. Compositing (Front-to-Back)
+        # Update color
+        for c in range(3):
+            ray_color[c] = ray_color[c] + (1.0 - ray_alpha) * shaded_color[c] * alpha_sample
+        
+        # Update opacity
+        ray_alpha = ray_alpha + (1.0 - ray_alpha) * alpha_sample
+        
+        # Early termination
+        if ray_alpha >= 1.0:
+            break
             
-            # Cast ray
-            t = 0.0
-            while t < ray.length:
-                sample_point = ray.origin + ray.direction * t
-                
-                # Check if inside volume bounds
-                if not is_inside_volume(sample_point, volume_data):
-                    break
-                
-                # Classification and Shading
-                shaded_color, sample_opacity = compute_phong_shaded_color(
-                    sample_point, volume_data, transfer_function, 
-                    light_dir, ray.direction, params
-                )
-                
-                # Front-to-Back Compositing
-                # Cout = Cin + (1 - Ain) * C_sample * Alpha_sample
-                # Aout = Ain + (1 - Ain) * Alpha_sample
-                
-                for channel in range(3):
-                    ray_color[channel] = ray_color[channel] + \
-                        (1.0 - ray_opacity) * shaded_color[channel] * sample_opacity
-                
-                ray_opacity = ray_opacity + (1.0 - ray_opacity) * sample_opacity
-                
-                # Early ray termination if fully opaque
-                if ray_opacity >= 1.0:
-                    break
-                
-                t += sampling_distance
-            
-            image[y, x] = ray_color
-            
-    return image
+    return ray_color, ray_alpha
 ```
 
 ### Parameters
 *   **Sampling Distance:** Defines the even spacing between sample points along the cast ray [S1, unofficial].
 *   **$k_1, k_2$:** Constants used in the linear approximation of depth cueing [S1, unofficial].
-*   **$n$:** Exponent used to approximate the specular highlight (shininess) [S1, unofficial].
-*   **$k_a, k_d, k_s$:** Ambient, diffuse, and specular reflectivity coefficients [S1, unofficial].
+*   **$n$:** Exponent used to approximate the specular highlight [S1, unofficial].
+*   **$k_a^\lambda, k_d^\lambda, k_s^\lambda$:** Ambient, diffuse, and specular coefficients for each color component [S1, unofficial].
 
 ### Edge Cases and Pitfalls
-*   **Gradient Quality:** The quality of the Phong result is heavily dependent on gradient estimation. Central Differences is fast but yields low-quality gradients; 4D Linear Regression yields higher quality but is computationally expensive [S1, unofficial].
-*   **Performance:** The method is very expensive in time and calculation compared to other methods because it requires gradient precalculation for every single sample point and costly vector-based light intensity calculations [S1, unofficial].
-*   **Opacity Invariance:** The shading step does not alter the opacity value; it remains identical to the classification opacity [S1, unofficial].
+*   **Gradient Estimation Quality:** The quality of the Phong results is heavily dependent on the gradient estimation method. Central Differences is fast but yields low-quality results; 4D Linear Regression yields higher quality but is computationally expensive [S1, unofficial].
+*   **Zero Gradient:** If the gradient magnitude is near zero, the normal is undefined. A default normal (e.g., $(0,0,1)$) must be used [G].
+*   **Ambiguous Depth Term:** The source formula includes a division by $d^\lambda$ in the final Phong equation, but $d^\lambda$ is not defined in the variable list, while $d(\mathbf{x}_i)$ is defined as the perpendicular distance. Implementers must clarify if $d^\lambda$ is a typo for $1$ or $d(\mathbf{x}_i)$ [S1, unofficial].
+
+## Subtopics
+
+### Hybrid Gradient Volume Raycasting with Lasso Masking
+Uses gradient information for masking rather than just shading. [Link](2059-hybrid-gradient-volume-raycasting-with-lasso-masking.md)
+
+### Next Event Estimation for Emissive Volumes
+Handles emissive lighting via path tracing concepts, distinct from the local Phong model. [Link](3557-next-event-estimation-for-emissive-volumes.md)
+
+### Direct Volume Rendering with Phong Shading
+Likely a variant or synonym; check for specific implementation differences in shading integration. [Link](3686-direct-volume-rendering-with-phong-shading.md)
+
+### Illumination Caching
+Optimizes the expensive lighting calculations by caching results. [Link](7548-illumination-caching.md)
+
+### Extinction-based Shading and Illumination
+Uses extinction properties for shading instead of gradients. [Link](9147-extinction-based-shading-and-illumination.md)
+
+### Extinction-based Shadow and Scattering Approximation
+Approximates global illumination effects using extinction. [Link](9149-extinction-based-shadow-and-scattering-approximation.md)
 
 ## Operating characteristics
-*   **Time Complexity:** High. The cost is dominated by the per-sample gradient estimation and Phong lighting calculation. It is significantly more expensive than non-photorealistic methods like Tone or Contour Rendering [S1, unofficial].
-*   **Memory Complexity:** Standard for DVR, requiring storage for the volume data and temporary buffers for ray compositing. Gradient precalculation can be done on-the-fly or precomputed, impacting memory if precomputed [S1, unofficial].
-*   **Strengths:** Produces the most photo-realistic image quality among implemented methods, offering good depth effect and a plastic appearance [S1, unofficial].
-*   **Limitations:** High computational cost makes it less suitable for real-time applications without optimization (e.g., illumination caching, which is a sibling method).
+*   **Time Complexity:** Very expensive in time and calculation compared to non-photorealistic methods. It requires gradient precalculation for every sample point (or voxel) and costly vector-based light intensity calculations (dot products, powers) for every sample along every ray [S1, unofficial].
+*   **Memory Complexity:** Requires storage for the volume data and, if precalculated, the gradient field (3x volume size).
+*   **Strengths:** Produces the most photo-realistic image quality among the implemented methods in the source context, providing good depth effect and exceptional plastic appearance [S1, unofficial].
+*   **Limitations:** High computational cost due to gradient estimation and per-sample lighting calculations [S1, unofficial].
 *   **When to use:** When photo-realism and depth cues are prioritized over rendering speed.
-*   **When not to use:** When real-time performance is required or when abstract visualization (e.g., contour lines) is more appropriate for the data [S1, unofficial].
+*   **When not to use:** When real-time performance is required or when non-photorealistic visualization (e.g., contour lines) is preferred for abstract information conveyance [S1, unofficial].
 
 ## Background
-Direct Volume Rendering with Phong Illumination is based on the standard rendering pipeline introduced by [4] (referenced in [S1, unofficial]). It combines Direct Volume Rendering with the Phong Illumination model to produce photo-realistic images. The method was implemented and described in the context of Importance-Driven Volume Rendering [S1, unofficial]. It is compared against other methods such as Maximum Intensity Projection (MIP), Local Maximum Intensity Projection (LMIP), Tone Rendering, and Contour Rendering [S1, unofficial].
+The method is based on the standard rendering pipeline introduced by [4] (likely Levoy, 1988, or similar foundational DVR paper) and combines Direct Volume Rendering with the Phong Illumination model [S1, unofficial]. It is described in the context of importance-driven volume rendering and various shading models (Tone, Contour) to convey specific informational contents [S1, unofficial]. The specific implementation details, including the depth cueing formula, are documented in the thesis "Implementation of Importance-Driven Volume Rendering" by Thurner (2005) [S1, unofficial].
 
 ## Sources
 [S1] Implementation of Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2005/Thurner-2005-IVR/Thurner-2005-IVR-paper.pdf, fetched 2026-10-29 (unofficial)

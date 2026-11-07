@@ -1,6 +1,6 @@
 # YCoCg Color Space Rectification
 
-Also called: Color Space Selection for History Rectification, YCrCb Rectification
+Also called: Color Space Selection for History Rectification, YCrCb Rectification, YCrCb Rectification [S1, unofficial]
 
 ## Overview
 YCoCg Color Space Rectification is a history rectification technique used in Temporal Anti-Aliasing (TAA) for volumetric rendering that transforms colors into a luminance-chrominance color space (specifically YCoCg or YCrCb) before applying clipping or clamping operations [S1, unofficial]. It solves the problem of color-related ghosting artifacts and temporal color bleeding that occur when history rectification is performed directly in RGB space, where channels are highly correlated and bounding boxes are poorly aligned with the actual distribution of color samples [S1, unofficial]. What sets it apart from its siblings and nearest alternatives, such as [AABB Clamping](2019-aabb-clamping.md) and [Variance Clipping](1970-variance-clipping.md), is the explicit decoupling of luminance and chrominance to orient the rectification bounds along the luma direction, which typically has high local contrast while chroma does not [S1, unofficial].
@@ -132,7 +132,7 @@ def rectify_color_in_ycrcb(current_color, historical_color, bounds_min, bounds_m
 AABB Clamping is a history rectification technique used in Temporal Anti-Aliasing (TAA) to prevent ghosting artifacts by restricting reprojected historical color values to a valid range defined by the current frame. It solves the problem of temporal lag and ghosting during abrupt scene changes where a baseline Exponential Moving Average (EMA) fails to react quickly enough. What sets it apart from its siblings and nearest alternatives is its use of a simple Axis-Aligned Bounding Box (AABB) approximation constructed from per-channel minimum and maximum values, whereas History Rectification encompasses more sophisticated variants like Variance Clipping that handle color distributions more accurately. It builds on [YCoCg Color Space Rectification](1971-ycocg-color-space-rectification.md), which transforms colors into a luminance-chrominance space before applying this rectification to reduce color-related ghosting.
 
 ### Color Space Conversion for TAA
-Transformation of volumetric samples into a specific color space before blending, then transforming back to RGB for storage. Evaluated spaces include RGB, YCoCg, and YCrCb [S1, unofficial].
+Transformation of volumetric samples into a specific color space before blending, then transforming back to RGB for storage [S1, unofficial]. Evaluated spaces include RGB, YCoCg, and YCrCb [S1, unofficial].
 
 ## Operating characteristics
 - **Time Complexity:** The transformation and inverse transformation involve a constant number of arithmetic operations (matrix-vector multiplications), so the time complexity per sample is $O(1)$ [G].
@@ -140,8 +140,8 @@ Transformation of volumetric samples into a specific color space before blending
 - **Measured Performance:** YCoCg and YCrCb reduce chrominance color bleeding artifacts compared to RGB space [S1, unofficial]. However, this comes at the cost of increased luminance artifacts in certain scenarios, such as when color changes from green to blue [S1, unofficial].
 - **Strengths:** Reduces color-related ghosting and temporal color bleeding by decoupling luminance and chrominance. YCoCg provides better decorrelation than YCrCb [S1, unofficial].
 - **Limitations:** Can introduce luminance artifacts when chrominance changes rapidly. Requires additional matrix multiplications [S1, unofficial].
-- **When to use:** Not given in the sources.
-- **When not to use:** Not given in the sources.
+- **When to use:** Not given in the sources. [G]
+- **When not to use:** Not given in the sources. [G]
 
 ## Background
 YCoCg Color Space Rectification originates from research into temporal anti-aliasing for real-time froxel-based volumetric rendering [S1, unofficial]. It was explored as a method to improve the quality of TAA by addressing the limitations of RGB-space rectification [S1, unofficial]. The technique leverages the properties of luminance-chrominance color spaces to better align the rectification bounds with the natural distribution of color data in images [S1, unofficial].

@@ -1,6 +1,5 @@
 # IsoOctree
 
-Also called: Unconstrained Isosurface Extraction on Arbitrary Octrees
 
 ## Overview
 IsoOctree is an unconstrained isosurface extraction method that operates on arbitrary octrees by computing the Euclidean Distance Transform (EDT) of an input mesh and adapting the octree to sample this transform [S1, unofficial]. It solves the problem of generating simplified, adaptive polygonal representations of meshes by refining the octree resolution near the surface and in high-curvature regions [S1, unofficial]. It sets itself apart from constrained octree methods by allowing arbitrary octree structures (non-conforming) and by operating on the distance field rather than raw scalar voxel data, enabling direct mesh simplification [S1, unofficial].
@@ -11,11 +10,14 @@ IsoOctree is an unconstrained isosurface extraction method that operates on arbi
 - Output: An extracted isosurface, typically as a polygonal mesh in PLY format [S1, unofficial].
 
 **Data Structures:**
-- **Octree:** An adaptive spatial data structure. Nodes are defined by their depth and spatial extent. Leaf nodes store samples of the Euclidean Distance Transform (EDT). The structure is "arbitrary," meaning it does not strictly enforce depth-disparity constraints unless the `--conforming` flag is used [S1, unofficial].
+- **Octree:** An adaptive spatial data structure where nodes are defined by their depth and spatial extent [G]. Leaf nodes store samples of the Euclidean Distance Transform (EDT) [S1, unofficial]. The structure is "arbitrary," meaning it does not strictly enforce depth-disparity constraints unless the `--conforming` flag is used [S1, unofficial].
 - **Euclidean Distance Transform (EDT):** A scalar field where each point's value is the shortest Euclidean distance to the input mesh surface [S1, unofficial].
 
+**Formulas:**
+Not given in the sources.
+
 **Parameters:**
-- `--maxDepth` (integer): The maximum depth of the octree [S1, unofficial].
+- `--maxDepth` (integer): The maximum depth of the octree used to sample the EDT [S1, unofficial].
 - `--curvature` (float): Cut-off value for refinement. Typical value: ~0.99. Refinement is restricted to regions where curvature exceeds this threshold, resulting in coarser triangles in flat regions and finer triangles in high-detail areas [S1, unofficial].
 - `--conforming` (flag): Forces the octree to satisfy the condition that the depth-disparity between face-adjacent leaf nodes is never greater than one [S1, unofficial].
 - `--fullCaseTable` (flag): Disambiguates ambiguous Marching-Cubes cases by assigning the face-center value equal to the average of the corner values [S1, unofficial].
@@ -31,46 +33,36 @@ IsoOctree is an unconstrained isosurface extraction method that operates on arbi
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def iso_octree(input_mesh_file, output_mesh_file, max_depth, curvature=0.99, 
+def iso_octree(input_mesh, output_file, max_depth, curvature=0.99,
                conforming=False, full_case_table=False, triangle_mesh=False, dual=False):
-    # Step 1: Compute Euclidean Distance Transform (EDT)
-    # Assumes input_mesh is watertight and properly oriented.
-    # If not, spurious disconnected patches may occur [S1, unofficial].
-    edt_field = compute_edt(input_mesh_file)
-    
-    # Step 2: Adapt Octree to EDT
-    # Initialize octree with max_depth
-    octree = Octree(max_depth=max_depth)
-    
-    # Refine octree based on curvature and distance
-    # Refinement is finer near the surface and in high-curvature regions
-    adapt_octree_to_edt(octree, edt_field, curvature)
-    
-    # Enforce conforming constraint if specified
+    # Step 1: Compute Euclidean Distance Transform (EDT) of the input mesh [S1, unofficial]
+    # Assumes input mesh is watertight and properly oriented [S1, unofficial]
+    edt_field = compute_edt(input_mesh)  # Standard EDT algorithm [G]
+
+    # Step 2: Adapt octree to sample the EDT, refining near surface and high-curvature regions [S1, unofficial]
+    octree = create_octree(max_depth)  # Initialize octree structure [G]
+    adapt_octree(octree, edt_field, curvature)  # Refine nodes where curvature > cut-off [S1, unofficial]
     if conforming:
-        enforce_conforming(octree)
-        
-    # Step 3: Extract Isosurface
-    # Compute zero-crossing isosurface from sampled EDT
+        enforce_conforming(octree)  # Ensure depth-disparity between face-adjacent leaves <= 1 [G]
+
+    # Step 3: Compute zero-crossing isosurface from sampled EDT [S1, unofficial]
     if dual:
-        # Sample EDT at centers of octree leaf-nodes [S1, unofficial]
-        samples = sample_edt_at_centers(octree, edt_field)
-        isosurface = extract_primal_dual_isosurface(samples, octree)
+        samples = [node.center for node in octree.leaves]  # Sample EDT at leaf centers [S1, unofficial]
+        isosurface = extract_primal_dual_isosurface(samples, octree)  # Primal/dual extraction [S1, unofficial]
     else:
-        # Standard extraction at corners
-        samples = sample_edt_at_corners(octree, edt_field)
+        samples = [node.corners for node in octree.leaves]  # Sample EDT at corners (default)
         isosurface = extract_marching_cubes_isosurface(samples, octree)
-        
-    # Handle ambiguous cases if specified
+
     if full_case_table:
-        disambiguate_marching_cubes_cases(isosurface, method='face_center_average')
-        
-    # Triangulate if specified
+        # Disambiguate ambiguous Marching-Cubes cases by averaging face-center values [S1, unofficial]
+        isosurface = disambiguate_mc_cases(isosurface)
+
     if triangle_mesh:
+        # Minimal area triangulation of isosurface polygons [S1, unofficial]
         isosurface = minimal_area_triangulation(isosurface)
-        
-    # Write output
-    write_mesh(isosurface, output_mesh_file, format='PLY')
+
+    write_mesh(isosurface, output_file, format='PLY')  # Output in PLY format [S1, unofficial]
+    return isosurface
 ```
 
 **Edge Cases and Pitfalls:**
@@ -80,32 +72,32 @@ def iso_octree(input_mesh_file, output_mesh_file, max_depth, curvature=0.99,
 ## Subtopics
 
 ### [Marching Cubes with Octree](1259-marching-cubes-with-octree.md)
-Uses Marching Cubes on an octree grid. Simpler but may require strict grid alignment.
+Applies Marching Cubes directly on an octree grid. Simpler to implement but requires strict grid alignment and may produce cracks if the octree is not adapted to the surface [G]. Choose when uniform refinement is acceptable and simplicity is prioritized.
 
 ### [Wilhelms and Van Gelder Octree](2107-wilhelms-and-van-gelder-octree.md)
-Early octree-based isosurfacing. Focuses on efficient traversal and extraction.
+An early octree-based isosurfacing technique focusing on efficient traversal and extraction [G]. Sets itself apart by using octree traversal to skip empty space. Choose for legacy systems or when traversal efficiency is critical.
 
 ### [Ashida and Badla Octree Contouring](2117-ashida-and-badla-octree-contouring.md)
-Specific contouring technique on octrees.
+A specific contouring technique designed for octree structures [G]. Sets itself apart by optimizing contour generation directly on hierarchical grids. Choose when working with pre-existing octree data and needing fast contour extraction.
 
 ### [Unconstrained Isosurface Extraction on Arbitrary Octrees](2413-unconstrained-isosurface-extraction-on-arbitrary-octrees.md)
-General framework for unconstrained extraction, of which IsoOctree is a specific implementation.
+A general framework for unconstrained extraction that provides the theoretical basis for methods like IsoOctree [G]. Sets itself apart by allowing arbitrary octree topologies without strict constraints. Choose when maximum flexibility in octree structure is required.
 
 ### [Consistent Isovertex Definition via Edge-Trees](2427-consistent-isovertex-definition-via-edge-trees.md)
-Ensures consistent vertex placement across octree boundaries.
+Ensures consistent vertex placement across octree boundaries using edge-trees [G]. Sets itself apart by explicitly managing boundary consistency. Choose when crack-free surfaces on non-conforming octrees are mandatory.
 
 ### [Adaptive Octree Generation with Flatness Criterion](2482-adaptive-octree-generation-with-flatness-criterion.md)
-Focuses on flatness-based refinement criteria.
+Focuses on flatness-based refinement criteria for octree generation [G]. Sets itself apart by using geometric flatness to drive adaptation. Choose when preserving flat regions is more important than curvature-based detail.
 
 ## Operating characteristics
 - **Time Complexity:** Not given in the sources.
 - **Memory Complexity:** Not given in the sources.
 - **Measured Performance:** Not given in the sources.
 - **Scaling:** Not given in the sources.
-- **Strengths:** Adaptive resolution allows for coarser triangles in flat regions and finer triangles in high-detail regions, leading to simplified models [S1, unofficial]. Supports arbitrary octree structures.
+- **Strengths:** Adaptive resolution allows for coarser triangles in flat regions and finer triangles in high-detail regions, leading to simplified models [S1, unofficial]. Supports arbitrary octree structures [S1, unofficial].
 - **Limitations:** Requires watertight, properly oriented input mesh. Spurious patches may occur if input conditions are not met [S1, unofficial].
-- **When to use:** When adaptive simplification of a mesh is desired, and the input mesh is watertight.
-- **When not to use:** When the input mesh is not watertight or has improperly oriented triangles.
+- **When to use:** When adaptive simplification of a mesh is desired, and the input mesh is watertight [S1, unofficial].
+- **When not to use:** When the input mesh is not watertight or has improperly oriented triangles [S1, unofficial].
 
 ## Background
 IsoOctree was introduced in the paper "Unconstrained Isosurface Extraction on Arbitrary Octrees" presented at SGP 2007 [S1, unofficial]. It is part of a codebase provided for mesh simplification contexts [S1, unofficial]. The method builds on the primal/dual method of [Schaeffer and Warren 04] when the `--dual` flag is used [S1, unofficial].

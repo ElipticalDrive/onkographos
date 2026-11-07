@@ -1,0 +1,159 @@
+# Composite Photometric and Regularization Loss
+
+Also called: Model Optimization with Loss Functions, Training Losses
+
+## Overview
+This method defines the composite objective function used to optimize radiance field models (such as dynamic voxel grids or Gaussian splats) from monocular video inputs. It solves the ill-posed problem of reconstructing 3D appearance and motion by combining photometric fidelity with multiple regularization terms that enforce physical plausibility, such as spatial smoothness, static background, and geometric constraints. It differs from simple photometric loss by explicitly penalizing artifacts like thin Gaussians, non-static background noise, and discontinuous motion fields, which are critical for stable convergence in dynamic scenes.
+
+## How it works
+The optimization minimizes a weighted sum of a composite photometric loss and several regularization terms. The method supports two primary contexts: voxel-based dynamic radiance fields [S1] and 3D Gaussian Splatting [S2, unofficial].
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   $\mathcal{R}$: Set of rays sampled in a batch.
+    *   $\mathbf{C}_{\text{gt}}(\mathbf{r})$: Ground truth color for ray $\mathbf{r}$.
+    *   $\mathbf{C}_{\text{Inp}}(\mathbf{r})$: Rendered color from an inpainted voxel grid (or base representation).
+    *   $\mathbf{C}_{\text{Up}}(\mathbf{r})$: Rendered color from an up-sampled voxel grid (without inpainting) [S1].
+    *   $V^{\text{flow}}_t$: 3D flow field in canonical space [S1].
+    *   $V^{\sigma}_{\text{Can}}$: Density field in canonical space [S1].
+    *   $\mathbf{D}$: Rendered depth maps of image patches [S1].
+    *   $\hat{s}_i, \tilde{s}_i$: Maximum and minimum scaling values of the $i$-th Gaussian [S2, unofficial].
+    *   $I, I_{\text{gt}}$: Rendered and ground truth images [S2, unofficial].
+*   **Outputs:**
+    *   $\mathcal{L}$: Total scalar loss value.
+
+### Data Structures and Formulas
+The total loss is defined as:
+$$ \mathcal{L} = \mathcal{L}_{\text{photo}} + w_1\mathcal{L}_{\text{ptc}} + w_2\mathcal{L}_{\text{bg}} + w_3\mathcal{L}_{\text{flow}} + w_4\mathcal{L}_{\text{vdiff}} + w_5\mathcal{L}_{\text{tv}}(V^{\sigma}_{\text{Can}}) + w_6\mathcal{L}_{\text{tv}}(V^{\text{flow}}_t) + w_7\mathcal{L}_{\text{tv}}(\mathbf{D}) $$
+where $w_1 \sim w_7$ are hyperparameters balancing the components [S1].
+
+**1. Photometric Loss ($\mathcal{L}_{\text{photo}}$)**
+For voxel-based methods, this combines errors from two grid resolutions to ensure consistency:
+$$ \mathcal{L}_{\text{photo}} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \left\| \mathbf{C}_{\text{Inp}}(\mathbf{r}) - \mathbf{C}_{\text{gt}}(\mathbf{r}) \right\|_2^2 + \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \left\| \mathbf{C}_{\text{Up}}(\mathbf{r}) - \mathbf{C}_{\text{gt}}(\mathbf{r}) \right\|_2^2 $$
+where $\mathbf{C}_{\text{Inp}}$ is rendered from the inpainted grid and $\mathbf{C}_{\text{Up}}$ from the up-sampled grid [S1].
+For Gaussian Splatting, the photometric component typically includes L1 loss and perceptual loss (LPIPS) [S2, unofficial].
+
+**2. Point-wise Color Supervision ($\mathcal{L}_{\text{ptc}}$)**
+Directly supervises the color of sampled points, weighted by their contribution to the final render, following the DVGO approach [S1].
+
+**3. Background Entropy Loss ($\mathcal{L}_{\text{bg}}$)**
+Encourages densities to concentrate on either the foreground or the background, reducing semi-transparent artifacts in empty space [S1].
+
+**4. Flow Regularization ($\mathcal{L}_{\text{flow}}$)**
+Defined as the L1 norm of the flow field in canonical space:
+$$ \mathcal{L}_{\text{flow}} = \left\| V^{\text{flow}}_t \right\|_1 $$
+This encourages most 3D points in the canonical space to remain static, modeling only the necessary motion [S1].
+
+**5. Inpaint Network Loss ($\mathcal{L}_{\text{vdiff}}$)**
+Used when an inpainting network completes warped voxel grids. It minimizes the difference between the inpainted output and the input:
+$$ \mathcal{L}_{\text{vdiff}} = \left\| V^{\text{R}_{\text{Inp}}}_t - V^{\text{R}_{\text{Up}}}_t \right\|_1 $$
+where $V^{\text{R}_{\text{Inp}}}_t$ and $V^{\text{R}_{\text{Up}}}_t$ are the voxel grids before and after inpainting [S1].
+
+**6. Total Variation Regularization ($\mathcal{L}_{\text{tv}}$)**
+Applied to ensure spatial smoothness of:
+*   Density in canonical space: $\mathcal{L}_{\text{tv}}(V^{\sigma}_{\text{Can}})$ [S1].
+*   Motion fields: $\mathcal{L}_{\text{tv}}(V^{\text{flow}}_t)$ [S1].
+*   Rendered depths: $\mathcal{L}_{\text{tv}}(\mathbf{D})$, inspired by RegNeRF [S1].
+
+**7. Scaling Regularization (Gaussian Splatting Variant)**
+Prevents Gaussians from growing excessively long and thin. Applied to the maximum scaling $\hat{s}_i$ of a Gaussian $i$:
+$$ \mathcal{L}_{\text{scaling}}(i) = \begin{cases} |\hat{s}_i|, & \hat{s}_i > \max(T_s, T_r \tilde{s}_i) \\ 0, & \text{otherwise} \end{cases} $$
+where $T_s$ is the threshold for length and $T_r$ is the threshold for the thinness ratio relative to the minimum scaling $\tilde{s}_i$ [S2, unofficial].
+
+**8. Background Mixing (Gaussian Splatting Variant)**
+A random background color is generated every iteration. This color is mixed with the rendered image $I$ and ground truth $I_{\text{gt}}$ to provide strong silhouette cues for the optimizer [S2, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_total_loss(batch_rays, gt_colors, model_state, config):
+    """
+    Computes the composite loss for radiance field optimization.
+    Supports both Voxel-based (S1) and Gaussian Splatting (S2) variants.
+    """
+    loss = 0.0
+    
+    # 1. Photometric Loss
+    # Variant A: Voxel-based (S1)
+    if model_type == "voxel":
+        c_inp = render(model_state.grid_inp, batch_rays)
+        c_up = render(model_state.grid_up, batch_rays)
+        l_photo = mean_squared_error(c_inp, gt_colors) + mean_squared_error(c_up, gt_colors)
+        
+        # 2. Point-wise Color Supervision (S1)
+        l_ptc = supervise_point_colors(model_state.sampled_points, batch_rays)
+        
+        # 3. Background Entropy (S1)
+        l_bg = compute_entropy_loss(model_state.density_field)
+        
+        # 4. Flow Regularization (S1)
+        l_flow = l1_norm(model_state.flow_field)
+        
+        # 5. Inpaint Diff Loss (S1)
+        l_vdiff = l1_norm(model_state.grid_inp - model_state.grid_up)
+        
+        # 6. Total Variation Regularization (S1)
+        l_tv_density = total_variation(model_state.density_field)
+        l_tv_flow = total_variation(model_state.flow_field)
+        l_tv_depth = total_variation(render_depths(model_state, batch_rays))
+        
+        loss = (l_photo 
+                + config.w1 * l_ptc 
+                + config.w2 * l_bg 
+                + config.w3 * l_flow 
+                + config.w4 * l_vdiff 
+                + config.w5 * l_tv_density 
+                + config.w6 * l_tv_flow 
+                + config.w7 * l_tv_depth)
+
+    # Variant B: Gaussian Splatting (S2)
+    elif model_type == "gaussian":
+        # Background Mixing: Generate random background color
+        random_bg = generate_random_color()
+        
+        # Render with background mixing for silhouette cues
+        # Note: Implementation detail [G] - mix rendered alpha with random bg
+        i_rendered = render_gaussians(model_state.gaussians, batch_rays, background=random_bg)
+        
+        # Photometric: L1 + Perceptual (LPIPS)
+        l_photo = l1_loss(i_rendered, gt_colors) + perceptual_loss(i_rendered, gt_colors)
+        
+        # Scaling Regularization
+        l_scaling = 0.0
+        for gaussian in model_state.gaussians:
+            s_hat = max(gaussian.scaling) # Max scaling
+            s_tilde = min(gaussian.scaling) # Min scaling
+            # Condition: Long (s_hat > Ts) AND Thin (s_hat > Tr * s_tilde)
+            if s_hat > max(config.Ts, config.Tr * s_tilde):
+                l_scaling += abs(s_hat)
+        
+        loss = l_photo + config.lambda_l * l_lpip + config.lambda_s * l_scaling
+
+    return loss
+```
+
+### Parameters and Edge Cases
+*   **Weights ($w_1 \sim w_7$):** Balance the components. Exact values are not specified in the sources, but they are tuned to balance the final coarse loss [S1].
+*   **Scaling Thresholds ($T_s, T_r$):** $T_s$ is the length threshold; $T_r$ is the thinness ratio threshold. These prevent degenerate Gaussian shapes [S2, unofficial].
+*   **Edge Cases:**
+    *   **Monocular Ambiguity:** The method relies on regularization (flow, TV, background entropy) to resolve ambiguities inherent in monocular video [S1].
+    *   **Degenerate Gaussians:** Without scaling regularization, Gaussians may grow infinitely long and thin to fit noise, leading to artifacts [S2, unofficial].
+
+## Subtopics
+
+### Scaling and Background Mixing Regularization
+A variant specifically for 3D Gaussian Splatting optimization. It introduces a scaling penalty $\mathcal{L}_{\text{scaling}}$ to prevent Gaussians from becoming excessively long and thin by penalizing the maximum scaling $\hat{s}_i$ when it exceeds a length threshold $T_s$ and a thinness ratio relative to the minimum scaling $\tilde{s}_i$. It also employs background mixing, where a random background color is generated per iteration and mixed with the rendered image to provide silhouette cues, improving the separation of foreground and background. This variant is chosen when optimizing Gaussian primitives from monocular video to prevent geometric degeneracy [S2, unofficial].
+
+## Operating characteristics
+*   **Complexity:** The photometric loss scales linearly with the number of rays $|\mathcal{R}|$. Total variation terms scale with the number of voxels or Gaussians. The background mixing adds negligible overhead.
+*   **Performance:** The method enables high-quality novel view synthesis for dynamic scenes, achieving state-of-the-art PSNR/SSIM on datasets like D-NeRF (e.g., 32.68 PSNR with $80^3$ resolution) [S1].
+*   **Strengths:** Robust to monocular ambiguity; prevents common artifacts like floating geometry and flickering motion.
+*   **Limitations:** Requires careful tuning of multiple hyperparameters ($w_i, T_s, T_r$). The inpainting network loss adds computational overhead for voxel-based methods [S1].
+
+## Background
+The composite loss function originates from the optimization of dynamic radiance fields. The voxel-based formulation with inpainting and flow regularization was introduced in "Forward Flow for Novel View Synthesis of Dynamic Scenes" (ICCV 2023) [S1]. The Gaussian Splatting variant with scaling regularization and background mixing was introduced in "SplattingAvatar" (arXiv 2024) [S2, unofficial]. The approach builds on earlier works like DVGO [S1] and RegNeRF [S1].
+
+## Sources
+[S1] Forward Flow for Novel View Synthesis of Dynamic Scenes, https://doi.org/10.1109/iccv51070.2023.01468, fetched 2026-10-26
+[S2] SplattingAvatar, https://arxiv.org/abs/2403.05087, fetched 2026-10-27 (unofficial)

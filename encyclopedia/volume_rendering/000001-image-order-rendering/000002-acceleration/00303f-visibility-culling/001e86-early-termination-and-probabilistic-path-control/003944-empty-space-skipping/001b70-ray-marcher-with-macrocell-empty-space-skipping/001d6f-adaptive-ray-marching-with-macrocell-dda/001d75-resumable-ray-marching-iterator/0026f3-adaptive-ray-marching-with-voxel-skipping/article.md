@@ -3,10 +3,10 @@
 Also called: Sparse Ray Marching
 
 ## Overview
-This method accelerates volume rendering by performing a two-pass adaptive ray marching process that skips empty space based on a density grid. Unlike standard fixed-step marching, it dynamically adjusts step sizes for occupied regions and jumps over empty voxels, significantly reducing the number of shader evaluations. It differs from [Voxel Bricks](5794-voxel-bricks.md) by using a single-resolution density grid for occupancy testing rather than hierarchical macrocells, and from [Woodcock Collision Estimation (Standard)](3331-woodcock-collision-estimation-standard.md) by using deterministic density thresholds rather than probabilistic distance sampling.
+Adaptive Ray Marching with Voxel Skipping is a visibility culling technique for direct volume rendering that accelerates ray marching by dynamically adjusting the step size based on local density. It solves the problem of excessive sampling in large empty volumes by using a low-precision traversal algorithm for empty regions and switching to a high-precision algorithm when approaching data. It differs from standard empty-space skipping by dynamically adjusting precision based on proximity to data, rather than using a static skip distance or hierarchical structure like [Adaptive Ray Marching with Macrocell DDA](3869-adaptive-ray-marching-with-macrocell-dda.md).
 
 ## How it works
-The algorithm operates in two passes on the GPU to decouple step counting from sample generation, allowing for compact output buffers.
+The method operates in two passes to decouple step counting from sample storage, allowing for compact output buffers. It uses a single-resolution density grid to determine occupancy and adapts the step size exponentially in occupied regions while skipping linearly in empty regions.
 
 ### Inputs and Outputs
 **Inputs:**
@@ -14,81 +14,80 @@ The algorithm operates in two passes on the GPU to decouple step counting from s
 - `rays_d`: Ray directions, shape `[N, 3]`.
 - `grid`: 3D density grid of shape `[H, H, H]`, flattened to 1D. Accessed via linear index `nx * H * H + ny * H + nz`.
 - `bound`: Half-width of the cubic scene volume `[-bound, bound]`.
-- `H`: Grid resolution (e.g., 128).
-- `density_thresh`: Threshold for occupancy (default `10.0f`).
-- `MAX_STEPS`: Maximum steps per ray (default `1024`).
-- `perturb`: Boolean flag for jittering start positions.
+- `H`: Grid resolution (assumed cubic).
 
 **Outputs:**
 - `xyzs`: Sampled point positions, shape `[M, 3]`.
-- `dirs`: Ray directions at samples, shape `[M, 3]`.
-- `deltas`: Step sizes, shape `[M]`.
-- `rays`: Metadata per input ray, shape `[N, 3]`. Each row: `[ray_index, start_point_index, num_steps]`.
+- `dirs`: Ray directions at sampled points, shape `[M, 3]`.
+- `deltas`: Step sizes (distances) at sampled points, shape `[M]`.
+- `rays`: Ray metadata, shape `[N, 3]`. Each row `i` contains `[ray_index, start_point_index, num_steps]`.
 
 ### Data Structures
-- **Grid**: A 3D array of density values. The code assumes a uniform grid covering `[-bound, bound]`.
-- **Rays Metadata**: A buffer storing the starting index in the `xyzs` buffer and the number of valid steps for each ray.
+- **Grid**: A 3D array of floats representing density. The source uses a fixed resolution `H=128` for simplicity, though the algorithm is resolution-agnostic.
+- **Rays Metadata**: A 1D array of size `3*N` storing ray index, starting index in `xyzs`, and number of steps.
 
 ### Parameters
-- `DENSITY_THRESH`: `10.0f`. Note: Sources indicate uncertainty on the optimal value (`// TODO: how to decide this threshold ?`) [S1, unofficial].
-- `MAX_STEPS`: `1024`.
-- `MIN_STEPSIZE`: `2 * SQRT3() / MAX_STEPS()`. Represents the diagonal of the smallest voxel in a unit cube divided by max steps. Actual `dt_min` is `MIN_STEPSIZE * bound` [S1, unofficial].
-- `MIN_NEAR`: `0.05f`. Minimum clipping distance [S1, unofficial].
-- `DT_GAMMA`: `1.f / 256.f`. Scaling factor for step size growth [S1, unofficial].
-- `bound`: Scene half-width. `rbound = 1 / bound` [S1, unofficial].
+- `DENSITY_THRESH`: Density threshold for occupancy. Default `10.0f`. [S1, unofficial]
+- `MAX_STEPS`: Maximum steps per ray. Default `1024`. [S1, unofficial]
+- `MIN_STEPSIZE`: Minimum step size in world units. Calculated as `2 * SQRT3() / MAX_STEPS()`. Represents the diagonal of the smallest voxel in a unit cube divided by max steps. Actual `dt_min` is `MIN_STEPSIZE() * bound`. [S1, unofficial]
+- `MIN_NEAR`: Minimum near clipping distance. Default `0.05f`. [S1, unofficial]
+- `DT_GAMMA`: Gamma factor for step size scaling. Default `1.f / 256.f`. [S1, unofficial]
+- `perturb`: Boolean flag. If true, adds random jitter to starting position `t0` using a PCG32 random number generator seeded by ray index `n`. [S1, unofficial]
 
 ### Algorithm Steps
 
-1. **Ray-Bounding Box Intersection**:
-   For each ray, calculate near and far intersection distances with the bounding box `[-bound, bound]`.
-   - Compute `rdx = 1.0 / rays_d.x` (and similarly for y, z).
-   - `near_x = (-bound - rays_o.x) * rdx`, `far_x = (bound - rays_o.x) * rdx`.
-   - Swap `near_x` and `far_x` if `near_x > far_x`.
-   - `t_near = max(near_x, near_y, near_z, MIN_NEAR())`.
-   - `t_far = min(far_x, far_y, far_z)`.
-   - If `t_near >= t_far`, the ray misses the box; skip.
+1.  **Ray-Box Intersection**:
+    For each ray, calculate near and far intersection distances with the bounding box `[-bound, bound]`.
+    -   Compute inverse direction: `rdx = 1.0 / rays_d[n][0]`, etc.
+    -   For each axis `i`:
+        -   `near_i = (-bound - rays_o[n][i]) * rdx_i`
+        -   `far_i = (bound - rays_o[n][i]) * rdx_i`
+        -   If `near_i > far_i`, swap them.
+    -   `t_near = max(near_x, near_y, near_z, MIN_NEAR)`
+    -   `t_far = min(far_x, far_y, far_z)`
+    -   If `t_near >= t_far`, the ray misses the volume; skip.
 
-2. **Initialize Step Limits**:
-   - `dt_min = MIN_STEPSIZE() * bound`.
-   - `dt_max = 2 * bound / (H - 1)`.
-   - `dt_gamma = DT_GAMMA()` if `bound > 1`, else `0.0f`.
+2.  **Initialize Step Limits**:
+    -   `dt_min = MIN_STEPSIZE() * bound`
+    -   `dt_max = 2 * bound / (H - 1)`
+    -   `dt_gamma = DT_GAMMA()` if `bound > 1`, else `0.0f`.
 
-3. **First Pass: Step Counting**:
-   For each ray, estimate the number of steps required to traverse the occupied volume.
-   - Initialize `t = t0` (where `t0 = t_near`, optionally perturbed if `perturb` is true using PCG32 seeded by ray index [S1, unofficial]).
-   - Initialize `num_steps = 0`.
-   - Loop while `t < t_far` and `num_steps < MAX_STEPS()`:
-     - Calculate current position `x, y, z` clamped to `[-bound, bound]`.
-     - Map to grid indices: `nx = clamp(0.5 * (x * rbound + 1) * H, 0.0f, (float)(H - 1))` (and similarly for ny, nz).
-     - Query `density = grid[index]`.
-     - If `density > density_thresh`:
-       - Increment `num_steps`.
-       - Advance `t` by `dt = clamp(t * dt_gamma, dt_min, dt_max)`.
-     - Else (empty space):
-       - Calculate distance to next voxel boundary `tt`.
-       - Advance `t` in small steps (or jump directly if possible) until `t >= tt`. *Note: The source describes advancing in small steps until `t >= tt` for empty space, implying a coarse traversal or fixed small steps for empty regions, though typically DDA is used for empty skipping. The source text says "advance t in small steps until t >= tt" [S1, unofficial].*
+3.  **First Pass: Estimate Steps**:
+    Initialize `t = t_near`. Loop while `t < t_far` and `num_steps < MAX_STEPS`.
+    -   Calculate current position: `x = rays_o[n][0] + t * rays_d[n][0]`, etc.
+    -   Clamp position to `[-bound, bound]`.
+    -   Map to grid indices:
+        -   `rbound = 1.0 / bound`
+        -   `nx = clamp(0.5 * (x * rbound + 1) * H, 0.0, H - 1)`
+        -   `ny = clamp(0.5 * (y * rbound + 1) * H, 0.0, H - 1)`
+        -   `nz = clamp(0.5 * (z * rbound + 1) * H, 0.0, H - 1)`
+    -   Query density: `density = grid[nx * H * H + ny * H + nz]`.
+    -   **If `density > DENSITY_THRESH`**:
+        -   Increment `num_steps`.
+        -   Advance `t` by `dt = clamp(t * dt_gamma, dt_min, dt_max)`.
+    -   **Else (Empty Space)**:
+        -   Calculate distance to next voxel boundary `tt`.
+        -   Advance `t` in small steps (unit steps or minimal increments) until `t >= tt`. [S1, unofficial]
 
-4. **Allocate Output Space**:
-   - Use atomic adds to allocate space in the output buffers.
-   - `point_index = atomicAdd(counter, num_steps)`.
-   - `ray_index = atomicAdd(counter + 1, 1)`.
-   - Store metadata: `rays[ray_index * 3] = n` (ray ID), `rays[ray_index * 3 + 1] = point_index` (start index in `xyzs`), `rays[ray_index * 3 + 2] = num_steps` (step count).
+4.  **Allocate Output Space**:
+    -   `point_index = atomicAdd(counter, num_steps)`
+    -   `ray_index = atomicAdd(counter + 1, 1)`
+    -   Store metadata:
+        -   `rays[ray_index * 3] = n`
+        -   `rays[ray_index * 3 + 1] = point_index`
+        -   `rays[ray_index * 3 + 2] = num_steps`
 
-5. **Second Pass: Sample Writing**:
-   For each ray, write the actual samples to the output buffers.
-   - Reset `t = t0`.
-   - Initialize `step = 0`.
-   - Loop while `t < t_far` and `step < num_steps`:
-     - Calculate position `x, y, z` and grid indices.
-     - Query `density`.
-     - If `density > density_thresh`:
-       - Write `x, y, z` to `xyzs`.
-       - Write `dx, dy, dz` (ray direction) to `dirs`.
-       - Write `dt` (current step size) to `deltas`.
-       - Advance `t` by `dt = clamp(t * dt_gamma, dt_min, dt_max)`.
-       - Increment `step`.
-     - Else:
-       - Skip to next voxel boundary `tt` using the same logic as the first pass.
+5.  **Second Pass: Write Samples**:
+    Reset `t = t_near`. Initialize `step = 0`. Loop while `t < t_far` and `step < num_steps`.
+    -   Calculate position, grid indices, and density (same as Step 3).
+    -   **If `density > DENSITY_THRESH`**:
+        -   Write `x, y, z` to `xyzs[point_index + step]`.
+        -   Write `rays_d[n]` to `dirs[point_index + step]`.
+        -   Write `dt` to `deltas[point_index + step]`.
+        -   Advance `t` by `dt = clamp(t * dt_gamma, dt_min, dt_max)`.
+        -   Increment `step`.
+    -   **Else (Empty Space)**:
+        -   Skip to next voxel boundary `tt` using the same logic as Step 3.
 
 ### Pseudocode
 
@@ -97,182 +96,63 @@ The algorithm operates in two passes on the GPU to decouple step counting from s
 ```python
 import math
 
-def adaptive_ray_marching(rays_o, rays_d, grid, H, bound, density_thresh, MAX_STEPS, perturb):
+def adaptive_ray_marching(rays_o, rays_d, grid, H, bound, perturb=False):
     """
-    Performs adaptive ray marching with voxel skipping.
-    Returns xyzs, dirs, deltas, rays_metadata.
+    Adaptive Ray Marching with Voxel Skipping.
+    
+    Args:
+        rays_o: [N, 3] array of ray origins.
+        rays_d: [N, 3] array of ray directions.
+        grid: [H, H, H] array of densities (flattened access).
+        H: Grid resolution.
+        bound: Half-width of the scene box [-bound, bound].
+        perturb: Whether to perturb ray origins.
+        
+    Returns:
+        xyzs: [M, 3] sampled positions.
+        dirs: [M, 3] sampled directions.
+        deltas: [M] step sizes.
+        rays_meta: [N, 3] ray metadata [ray_idx, start_idx, num_steps].
     """
-    N = len(rays_o)
-    rbound = 1.0 / bound
-    dt_min = (2.0 * math.sqrt(3.0) / MAX_STEPS) * bound
-    dt_max = 2.0 * bound / (H - 1)
-    dt_gamma = 1.0 / 256.0 if bound > 1 else 0.0
+    N = rays_o.shape[0]
+    
+    # Constants
+    DENSITY_THRESH = 10.0
+    MAX_STEPS = 1024
     MIN_NEAR = 0.05
-    MIN_STEPSIZE_VAL = 2.0 * math.sqrt(3.0) / MAX_STEPS
-
-    # Pre-allocate counters for atomic operations simulation
-    # In GPU, these are atomicAdd. Here we simulate the logic.
-    # We need to know the total M to allocate buffers.
-    # Pass 1: Count steps
-    ray_meta = [] # List of [ray_idx, start_idx, num_steps]
-    current_point_idx = 0
+    DT_GAMMA = 1.0 / 256.0
+    SQRT3 = math.sqrt(3.0)
+    MIN_STEPSIZE_VAL = 2 * SQRT3 / MAX_STEPS
     
-    # Temporary storage for step counts to allocate buffers
-    step_counts = []
+    # Precompute bounds
+    rbound = 1.0 / bound
+    dt_min = MIN_STEPSIZE_VAL * bound
+    dt_max = 2 * bound / (H - 1)
+    dt_gamma = DT_GAMMA if bound > 1 else 0.0
     
+    # Storage for metadata and counts
+    rays_meta = np.zeros((N, 3), dtype=np.int32)
+    step_counts = np.zeros(N, dtype=np.int32)
+    
+    # First Pass: Count steps
     for n in range(N):
         ox, oy, oz = rays_o[n]
         dx, dy, dz = rays_d[n]
         
-        # 1. Ray-BBox Intersection
+        # Inverse direction
         rdx = 1.0 / dx if dx != 0 else float('inf')
         rdy = 1.0 / dy if dy != 0 else float('inf')
         rdz = 1.0 / dz if dz != 0 else float('inf')
         
-        near_x = (-bound - ox) * rdx
-        far_x = (bound - ox) * rdx
-        if near_x > far_x:
-            near_x, far_x = far_x, near_x
-            
-        near_y = (-bound - oy) * rdy
-        far_y = (bound - oy) * rdy
-        if near_y > far_y:
-            near_y, far_y = far_y, near_y
-            
-        near_z = (-bound - oz) * rdz
-        far_z = (bound - oz) * rdz
-        if near_z > far_z:
-            near_z, far_z = far_z, near_z
-            
-        t_near = max(near_x, near_y, near_z, MIN_NEAR)
-        t_far = min(far_x, far_y, far_z)
-        
-        if t_near >= t_far:
-            step_counts.append(0)
-            continue
-            
-        # Perturbation
-        t0 = t_near
-        if perturb:
-            # PCG32 seeded by n would be used here. 
-            # [G] Using a simple deterministic jitter for simulation completeness.
-            t0 += (n % 1000) / 10000.0 
-            
-        # 2. First Pass: Count Steps
-        num_steps = 0
-        t = t0
-        
-        while t < t_far and num_steps < MAX_STEPS:
-            # Clamp position to bound
-            x = max(-bound, min(bound, ox + t * dx))
-            y = max(-bound, min(bound, oy + t * dy))
-            z = max(-bound, min(bound, oz + t * dz))
-            
-            # Map to grid indices
-            nx = int(max(0, min(H - 1, 0.5 * (x * rbound + 1) * H)))
-            ny = int(max(0, min(H - 1, 0.5 * (y * rbound + 1) * H)))
-            nz = int(max(0, min(H - 1, 0.5 * (z * rbound + 1) * H)))
-            
-            # Query density
-            idx = nx * H * H + ny * H + nz
-            density = grid[idx]
-            
-            if density > density_thresh:
-                num_steps += 1
-                # Advance by adaptive step
-                dt = max(dt_min, min(dt_max, t * dt_gamma))
-                t += dt
-            else:
-                # Skip empty space
-                # [G] Calculate distance to next voxel boundary
-                # This is a simplified DDA skip. 
-                # Exact implementation depends on direction signs.
-                # For each axis, calculate distance to next boundary.
-                # If x > 0, next boundary is (nx + 1) / H mapped to world.
-                # We advance t to the minimum of these distances.
-                
-                # Simplified "small steps" as per source description for empty space
-                # However, efficient implementation uses DDA. 
-                # Source says: "advance t in small steps until t >= tt"
-                # We will simulate a jump to the next boundary for correctness.
-                
-                # Calculate next boundary distances
-                # World coords of voxel boundaries
-                # x boundaries: (nx + (1 if dx>0 else 0)) / H * bound * 2 - bound? 
-                # Grid is [-bound, bound]. 
-                # x = 2 * bound * (nx / H - 0.5) ? No, formula is 0.5*(x*rbound+1)*H = nx
-                # x = (nx/H - 0.5) * 2 * bound
-                
-                # Let's compute the world coordinate of the next voxel face
-                # Current voxel min/max in world:
-                # x_min = (nx/H - 0.5) * 2 * bound
-                # x_max = ((nx+1)/H - 0.5) * 2 * bound
-                
-                # Distance to next face in x
-                if dx > 0:
-                    next_x_face = ((nx + 1) / H - 0.5) * 2 * bound
-                    dist_x = (next_x_face - x) / dx if dx != 0 else float('inf')
-                else:
-                    next_x_face = (nx / H - 0.5) * 2 * bound
-                    dist_x = (next_x_face - x) / dx if dx != 0 else float('inf')
-                    
-                if dy > 0:
-                    next_y_face = ((ny + 1) / H - 0.5) * 2 * bound
-                    dist_y = (next_y_face - y) / dy if dy != 0 else float('inf')
-                else:
-                    next_y_face = (ny / H - 0.5) * 2 * bound
-                    dist_y = (next_y_face - y) / dy if dy != 0 else float('inf')
-                    
-                if dz > 0:
-                    next_z_face = ((nz + 1) / H - 0.5) * 2 * bound
-                    dist_z = (next_z_face - z) / dz if dz != 0 else float('inf')
-                else:
-                    next_z_face = (nz / H - 0.5) * 2 * bound
-                    dist_z = (next_z_face - z) / dz if dz != 0 else float('inf')
-                    
-                dt_empty = min(dist_x, dist_y, dist_z)
-                if dt_empty < 0: dt_empty = 0 # Guard
-                t += dt_empty
-                
-        step_counts.append(num_steps)
-        
-    # 3. Allocate Output Space
-    # In GPU: atomicAdd. Here we compute offsets.
-    total_steps = sum(step_counts)
-    M = total_steps
-    
-    xyzs = []
-    dirs = []
-    deltas = []
-    rays_metadata = []
-    
-    current_point_idx = 0
-    for n in range(N):
-        num_steps = step_counts[n]
-        start_idx = current_point_idx
-        
-        # Store metadata: [ray_index, start_point_index, num_steps]
-        rays_metadata.append([n, start_idx, num_steps])
-        
-        if num_steps == 0:
-            current_point_idx += 0
-            continue
-            
-        # 4. Second Pass: Write Samples
-        ox, oy, oz = rays_o[n]
-        dx, dy, dz = rays_d[n]
-        
-        # Re-calculate t_near etc for the second pass
-        rdx = 1.0 / dx if dx != 0 else float('inf')
-        rdy = 1.0 / dy if dy != 0 else float('inf')
-        rdz = 1.0 / dz if dz != 0 else float('inf')
-        
+        # Intersection with [-bound, bound]
         near_x = (-bound - ox) * rdx
         far_x = (bound - ox) * rdx
         if near_x > far_x: near_x, far_x = far_x, near_x
+        
         near_y = (-bound - oy) * rdy
         far_y = (bound - oy) * rdy
         if near_y > far_y: near_y, far_y = far_y, near_y
+        
         near_z = (-bound - oz) * rdz
         far_z = (bound - oz) * rdz
         if near_z > far_z: near_z, far_z = far_z, near_z
@@ -280,83 +160,197 @@ def adaptive_ray_marching(rays_o, rays_d, grid, H, bound, density_thresh, MAX_ST
         t_near = max(near_x, near_y, near_z, MIN_NEAR)
         t_far = min(far_x, far_y, far_z)
         
-        t0 = t_near
-        if perturb:
-            t0 += (n % 1000) / 10000.0
+        if t_near >= t_far:
+            step_counts[n] = 0
+            continue
             
-        t = t0
-        step = 0
+        t = t_near
+        num_steps = 0
         
-        while t < t_far and step < num_steps:
-            x = max(-bound, min(bound, ox + t * dx))
-            y = max(-bound, min(bound, oy + t * dy))
-            z = max(-bound, min(bound, oz + t * dz))
+        # Perturbation [G]
+        if perturb:
+            # Simple jitter implementation [G]
+            # In practice, use PCG32 seeded by n
+            t += (np.random.rand() - 0.5) * dt_min 
+            
+        while t < t_far and num_steps < MAX_STEPS:
+            # Current position
+            x = ox + t * dx
+            y = oy + t * dy
+            z = oz + t * dz
+            
+            # Clamp to bounds
+            x = max(-bound, min(bound, x))
+            y = max(-bound, min(bound, y))
+            z = max(-bound, min(bound, z))
+            
+            # Map to grid indices
+            nx = int(max(0, min(H - 1, 0.5 * (x * rbound + 1) * H)))
+            ny = int(max(0, min(H - 1, 0.5 * (y * rbound + 1) * H)))
+            nz = int(max(0, min(H - 1, 0.5 * (z * rbound + 1) * H))
+            
+            # Query density
+            density = grid[nx * H * H + ny * H + nz]
+            
+            if density > DENSITY_THRESH:
+                num_steps += 1
+                # Adaptive step size
+                dt = t * dt_gamma
+                dt = max(dt_min, min(dt_max, dt))
+                t += dt
+            else:
+                # Skip to next voxel boundary [S1, unofficial]
+                # Calculate distance to next boundary for each axis
+                # This is a simplified linear skip [G]
+                # Exact implementation requires calculating t_next for each axis crossing
+                # and taking the minimum positive t_next > t
+                t_next_x = float('inf')
+                t_next_y = float('inf')
+                t_next_z = float('inf')
+                
+                if dx > 0:
+                    t_next_x = ((nx + 1) / (0.5 * rbound * H) - 1) * 0.5 * bound - ox) / dx
+                elif dx < 0:
+                    t_next_x = ((nx) / (0.5 * rbound * H) - 1) * 0.5 * bound - ox) / dx
+                
+                if dy > 0:
+                    t_next_y = ((ny + 1) / (0.5 * rbound * H) - 1) * 0.5 * bound - oy) / dy
+                elif dy < 0:
+                    t_next_y = ((ny) / (0.5 * rbound * H) - 1) * 0.5 * bound - oy) / dy
+                    
+                if dz > 0:
+                    t_next_z = ((nz + 1) / (0.5 * rbound * H) - 1) * 0.5 * bound - oz) / dz
+                elif dz < 0:
+                    t_next_z = ((nz) / (0.5 * rbound * H) - 1) * 0.5 * bound - oz) / dz
+                
+                t_next = min(t_next_x, t_next_y, t_next_z)
+                if t_next > t:
+                    t = t_next
+                else:
+                    t += dt_min # Prevent infinite loop [G]
+                    
+        step_counts[n] = num_steps
+
+    # Allocate output buffers
+    M = sum(step_counts)
+    xyzs = np.zeros((M, 3))
+    dirs = np.zeros((M, 3))
+    deltas = np.zeros(M)
+    
+    # Compute start indices using cumulative sum
+    start_indices = np.zeros(N, dtype=np.int32)
+    if N > 0:
+        start_indices[1:] = np.cumsum(step_counts[:-1])
+        
+    # Second Pass: Write samples
+    for n in range(N):
+        if step_counts[n] == 0:
+            continue
+            
+        ox, oy, oz = rays_o[n]
+        dx, dy, dz = rays_d[n]
+        
+        rdx = 1.0 / dx if dx != 0 else float('inf')
+        rdy = 1.0 / dy if dy != 0 else float('inf')
+        rdz = 1.0 / dz if dz != 0 else float('inf')
+        
+        near_x = (-bound - ox) * rdx
+        far_x = (bound - ox) * rdx
+        if near_x > far_x: near_x, far_x = far_x, near_x
+        
+        near_y = (-bound - oy) * rdy
+        far_y = (bound - oy) * rdy
+        if near_y > far_y: near_y, far_y = far_y, near_y
+        
+        near_z = (-bound - oz) * rdz
+        far_z = (bound - oz) * rdz
+        if near_z > far_z: near_z, far_z = far_z, near_z
+        
+        t_near = max(near_x, near_y, near_z, MIN_NEAR)
+        t_far = min(far_x, far_y, far_z)
+        
+        t = t_near
+        step = 0
+        current_idx = start_indices[n]
+        
+        while t < t_far and step < step_counts[n]:
+            x = ox + t * dx
+            y = oy + t * dy
+            z = oz + t * dz
+            
+            x = max(-bound, min(bound, x))
+            y = max(-bound, min(bound, y))
+            z = max(-bound, min(bound, z))
             
             nx = int(max(0, min(H - 1, 0.5 * (x * rbound + 1) * H)))
             ny = int(max(0, min(H - 1, 0.5 * (y * rbound + 1) * H)))
             nz = int(max(0, min(H - 1, 0.5 * (z * rbound + 1) * H)))
             
-            idx = nx * H * H + ny * H + nz
-            density = grid[idx]
+            density = grid[nx * H * H + ny * H + nz]
             
-            if density > density_thresh:
-                xyzs.append([x, y, z])
-                dirs.append([dx, dy, dz])
-                dt = max(dt_min, min(dt_max, t * dt_gamma))
-                deltas.append(dt)
+            if density > DENSITY_THRESH:
+                xyzs[current_idx] = [x, y, z]
+                dirs[current_idx] = [dx, dy, dz]
+                
+                dt = t * dt_gamma
+                dt = max(dt_min, min(dt_max, dt))
+                deltas[current_idx] = dt
+                
                 t += dt
+                current_idx += 1
                 step += 1
             else:
-                # Skip empty space (same logic as pass 1)
+                # Skip to next voxel boundary
+                t_next_x = float('inf')
+                t_next_y = float('inf')
+                t_next_z = float('inf')
+                
                 if dx > 0:
-                    next_x_face = ((nx + 1) / H - 0.5) * 2 * bound
-                    dist_x = (next_x_face - x) / dx if dx != 0 else float('inf')
-                else:
-                    next_x_face = (nx / H - 0.5) * 2 * bound
-                    dist_x = (next_x_face - x) / dx if dx != 0 else float('inf')
-                    
+                    t_next_x = (((nx + 1) / (0.5 * rbound * H) - 1) * 0.5 * bound - ox) / dx
+                elif dx < 0:
+                    t_next_x = (((nx) / (0.5 * rbound * H) - 1) * 0.5 * bound - ox) / dx
+                
                 if dy > 0:
-                    next_y_face = ((ny + 1) / H - 0.5) * 2 * bound
-                    dist_y = (next_y_face - y) / dy if dy != 0 else float('inf')
-                else:
-                    next_y_face = (ny / H - 0.5) * 2 * bound
-                    dist_y = (next_y_face - y) / dy if dy != 0 else float('inf')
+                    t_next_y = (((ny + 1) / (0.5 * rbound * H) - 1) * 0.5 * bound - oy) / dy
+                elif dy < 0:
+                    t_next_y = (((ny) / (0.5 * rbound * H) - 1) * 0.5 * bound - oy) / dy
                     
                 if dz > 0:
-                    next_z_face = ((nz + 1) / H - 0.5) * 2 * bound
-                    dist_z = (next_z_face - z) / dz if dz != 0 else float('inf')
-                else:
-                    next_z_face = (nz / H - 0.5) * 2 * bound
-                    dist_z = (next_z_face - z) / dz if dz != 0 else float('inf')
-                    
-                dt_empty = min(dist_x, dist_y, dist_z)
-                if dt_empty < 0: dt_empty = 0
-                t += dt_empty
+                    t_next_z = (((nz + 1) / (0.5 * rbound * H) - 1) * 0.5 * bound - oz) / dz
+                elif dz < 0:
+                    t_next_z = (((nz) / (0.5 * rbound * H) - 1) * 0.5 * bound - oz) / dz
                 
-        current_point_idx += num_steps
+                t_next = min(t_next_x, t_next_y, t_next_z)
+                if t_next > t:
+                    t = t_next
+                else:
+                    t += dt_min
+                    
+        rays_meta[n] = [n, start_indices[n], step_counts[n]]
         
-    return xyzs, dirs, deltas, rays_metadata
+    return xyzs, dirs, deltas, rays_meta
 ```
 
 ### Edge Cases and Pitfalls
-- **Empty Rays**: Rays that miss the bounding box or have `num_steps == 0` result in zero entries in the output buffers. The composite kernel must check `if (num_steps == 0 || offset + num_steps >= M)` to handle these gracefully [S1, unofficial].
-- **Precision**: The mapping from world coordinates to grid indices uses floating-point arithmetic. Clamping is essential to prevent out-of-bounds access [S1, unofficial].
-- **Threshold Selection**: The `density_thresh` parameter has no definitive optimal value in the source, marked with a TODO [S1, unofficial].
+-   **Empty Rays**: Rays that miss the bounding box or have `t_near >= t_far` result in zero steps. The composite kernel should check `if (num_steps == 0)` and return early with zeroed outputs. [S1, unofficial]
+-   **Max Steps Exceeded**: If a ray exceeds `MAX_STEPS`, the first pass stops counting. The second pass will only write the counted steps. The composite kernel should check `if (offset + num_steps >= M)` to prevent buffer overflows. [S1, unofficial]
+-   **Precision**: The mapping from world coordinates to grid indices uses clamping. Ensure `rbound` and grid indices are computed consistently between passes. [S1, unofficial]
+-   **Threshold Selection**: The source notes uncertainty about how to decide `DENSITY_THRESH`. [S1, unofficial]
 
 ## Subtopics
 
 ### Shadow ray bit-flag acceleration
-A technique to eliminate unnecessary shadow ray casts by storing per-voxel, per-light status flags in the spatial grid. Each voxel stores two bits per light source: bit 0 indicates the voxel is completely in shadow, and bit 1 indicates the voxel is unobstructed from the light source. Before casting a shadow ray, the corresponding bit flag is checked; if it indicates full shadow or clear visibility, the ray cast is skipped [S2, unofficial].
+A technique to eliminate unnecessary shadow ray casts by storing per-voxel, per-light status flags in the spatial grid. Before casting a shadow ray to a light source, check the corresponding bit flag in the current voxel; if the flag indicates full shadow or clear visibility, skip the ray cast. Each voxel stores two bits per light source: bit 0 indicates the voxel is completely in shadow, bit 1 indicates the voxel is unobstructed from the light source. [S2, unofficial]
 
 ## Operating characteristics
-- **Time Complexity**: The first pass requires traversing the ray volume, skipping empty space. The second pass writes samples. The complexity depends on the sparsity of the density grid. In dense regions, it behaves like standard marching; in sparse regions, it skips large distances.
-- **Memory Complexity**: Requires storage for the density grid `[H, H, H]` and output buffers `xyzs`, `dirs`, `deltas` of size `M` (total steps). The `rays` metadata buffer is size `N`.
-- **Performance**: Significantly faster than fixed-step marching for sparse scenes. The two-pass approach allows for compact output buffers but requires two traversals of the ray volume.
-- **Strengths**: Efficiently handles large empty spaces. Adaptive step sizes improve accuracy in dense regions.
-- **Limitations**: Requires a density grid. The two-pass nature doubles the traversal cost for rays that are fully occupied. The threshold selection is heuristic [S1, unofficial].
+-   **Time Complexity**: The first pass is $O(N \cdot S_{empty} + N \cdot S_{occupied})$ where $S_{empty}$ is the number of empty steps skipped and $S_{occupied}$ is the number of occupied steps. The second pass is proportional to the total number of samples $M$.
+-   **Memory Complexity**: $O(M)$ for output buffers, where $M$ is the total number of samples. $O(H^3)$ for the density grid.
+-   **Performance**: The method reduces the number of samples significantly in empty regions by skipping to voxel boundaries. In occupied regions, it uses adaptive step sizes to reduce samples in smooth areas. [S1, unofficial]
+-   **Strengths**: Efficient for scenes with large empty spaces. Simple implementation. [S1, unofficial]
+-   **Limitations**: Requires two passes. The density grid must be updated regularly. The threshold `DENSITY_THRESH` is heuristic. [S1, unofficial]
 
 ## Background
-This method is part of the implementation of Instant Neural Graphics Primitives (instant-ngp) [S1, unofficial]. It is designed for fast training and rendering of neural radiance fields (NeRF) using hash encodings. The specific kernel `march_rays_train` is used during the training phase to sample points for the neural network. The approach builds on the concept of resumable ray marching iterators [1505-resumable-ray-marching-iterator.md] but optimizes for the specific needs of neural rendering by using a density grid for occupancy testing.
+The method is part of the Instant-NGP implementation, specifically the `march_rays_train` kernel. It is designed for training neural radiance fields (NeRF) with hash encodings. The approach builds on [Resumable Ray Marching Iterator](1505-resumable-ray-marching-iterator.md). [S1, unofficial]
 
 ## Sources
 [S1] megvii-research/cv-master-ex, https://github.com/megvii-research/cv-master-ex, fetched 2026-10-27 (unofficial)

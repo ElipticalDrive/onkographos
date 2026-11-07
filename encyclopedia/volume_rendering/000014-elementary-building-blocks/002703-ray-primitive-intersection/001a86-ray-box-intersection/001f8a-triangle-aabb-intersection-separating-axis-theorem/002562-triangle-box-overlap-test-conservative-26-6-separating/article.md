@@ -3,23 +3,22 @@
 Also called: 26-separating and 6-separating Triangle-Box Test, Conservative Triangle-AABB Overlap
 
 ## Overview
-This method determines if an axis-aligned box (AABB) overlaps a triangle, serving as the core primitive test for conservative voxelization. It extends the 2D overlap test by Möller and Aila [2005] and Schwarz and Seidel [2010] to 3D by decomposing the problem into a plane-box intersection check and 2D projection tests along the three principal axes [S1]. It is distinguished from its parent [Triangle-AABB Intersection (Separating Axis Theorem)](2050-triangle-aabb-intersection-separating-axis-theorem.md) by optimizing for the specific case of axis-aligned boxes and triangle meshes, using precomputed edge functions to amortize the cost of testing multiple voxels (scanlines) against a single triangle [S1].
+This method determines if an axis-aligned box overlaps a triangle, serving as the core primitive test for conservative voxelization [S1]. It extends the 2D overlap test by Möller and Aila [2005] and Schwarz and Seidel [2010] to 3D by decomposing the problem into a plane-box intersection check and 2D projection tests along the three principal axes [S1]. It is distinguished from its parent [Triangle-AABB Intersection (Separating Axis Theorem)](2050-triangle-aabb-intersection-separating-axis-theorem.md) by optimizing for the specific case of axis-aligned boxes and triangle meshes, using precomputed edge functions to amortize the cost of testing multiple voxels (scanlines) against a single triangle [S1].
 
 ## How it works
 The test determines overlap by verifying two conditions: (1) the triangle's plane intersects the box, and (2) the 2D projection of the triangle overlaps the 2D projection of the box along all three axes (for 26-separating) or the dominant axis (for 6-separating) [S1].
 
 ### Inputs and Outputs
 *   **Inputs**:
-    *   Triangle vertices $\mathbf{v}_0, \mathbf{v}_1, \mathbf{v}_2$.
-    *   Triangle normal $\mathbf{n}$.
-    *   Box defined by minimum corner $\mathbf{p}_{min}$, maximum corner $\mathbf{p}_{max}$, and diagonal $\Delta \mathbf{p} = \mathbf{p}_{max} - \mathbf{p}_{min}$.
-    *   Voxel grid origin $\mathbf{p}$ and voxel size $\Delta \mathbf{p}_{voxel}$ (implied by grid coordinates $u,v,w$).
-*   **Outputs**: Boolean indicating overlap.
+    *   Triangle vertices $\mathbf{v}_0, \mathbf{v}_1, \mathbf{v}_2$ [S1].
+    *   Triangle normal $\mathbf{n}$ [S1].
+    *   Voxel grid origin $\mathbf{p}$ and voxel diagonal $\Delta \mathbf{p}$ [S1].
+*   **Outputs**: Boolean indicating overlap [S1].
 
 ### Data Structures
 The method precomputes 9 floating-point values per triangle to amortize the cost of testing multiple voxels [S1]:
-*   $n_i^x, n_i^y$ for $i \in \{0, 1, 2\}$: Scaled 2D edge normal components.
-*   $d_i^{xy}$ for $i \in \{0, 1, 2\}$: Edge function constants at the critical point.
+*   $n_i^x, n_i^y$ for $i \in \{0, 1, 2\}$: Scaled 2D edge normal components [S1].
+*   $d_i^{xy}$ for $i \in \{0, 1, 2\}$: Edge function constants at the critical point [S1].
 
 ### Steps
 
@@ -28,78 +27,64 @@ Compute the 2D edge normals for the XY plane. Let $\mathbf{e}_i = \mathbf{v}_{i+
 
 1.  Compute 2D edge normals $\mathbf{n}_i^{xy}$:
     $$ \mathbf{n}_i^{xy} = (-\mathbf{e}_{i,y}, \mathbf{e}_{i,x}) \cdot \text{sgn}(\mathbf{n}_z) \quad (1) $$
-    *Note: This assumes the dominant axis is Z. For other axes, rotate components accordingly.* [S1]
+    *Note: This assumes the dominant axis is Z. For other axes, rotate components accordingly* [S1].
 
 2.  Precompute scaled normal components $n_i^x, n_i^y$:
     $$ n_i^x = \mathbf{n}_i^{xy}_x \cdot \Delta p_x $$
     $$ n_i^y = \mathbf{n}_i^{xy}_y \cdot \Delta p_y \quad (2) $$
-    Where $\Delta p_x, \Delta p_y$ are the box dimensions along X and Y. [S1]
+    Where $\Delta p_x, \Delta p_y$ are the box dimensions along X and Y [S1].
 
 3.  Precompute constants $d_i^{xy}$:
     $$ d_i^{xy} = -\mathbf{n}_i^{xy} \cdot \mathbf{v}_{i,xy} + \mathbf{n}_i^{xy} \cdot \mathbf{p}_{i,xy} + \max\{0, \Delta p_x n_{i,x}^x\} + \max\{0, \Delta p_y n_{i,x}^y\} \quad (3) $$
-    *Clarification*: The term $\mathbf{p}_{i,xy}$ refers to the box corner used in the projection. In the context of voxel testing, this is often the origin $\mathbf{p}$ or derived from the voxel grid. The source formula uses $\mathbf{p}_{i,xy}$ which likely represents the box minimum corner projected to 2D. [S1]
+    The term $\mathbf{p}_{i,xy}$ refers to the box minimum corner projected to 2D [S1].
 
-4.  Precompute the plane equation coefficients. Store compactly by normalizing the dominant axis coordinate to 1. [S1]
+4.  Precompute the plane equation coefficients. Store compactly by normalizing the dominant axis coordinate to 1 [S1].
 
 #### 2. Test Phase (Per Voxel)
-For a voxel with integer grid coordinates $(u, v, w)$, the box minimum corner is $\mathbf{p} + (u, v, w)\Delta \mathbf{p}_{voxel}$ and maximum is $\mathbf{p} + (u+1, v+1, w+1)\Delta \mathbf{p}_{voxel}$.
+For a voxel with integer grid coordinates $(u, v, w)$, the box minimum corner is $\mathbf{p} + (u, v, w)\Delta \mathbf{p}$ and maximum is $\mathbf{p} + (u+1, v+1, w+1)\Delta \mathbf{p}$ [S1].
 
-1.  **Plane-Box Intersection**: Check if the triangle plane intersects the box. [S1]
+1.  **Plane-Box Intersection**: Check if the triangle plane intersects the box [S1].
 2.  **2D Projection Test**: For each of the three axes (X, Y, Z), perform the 2D overlap test. For the XY plane, the test is positive if:
     $$ \bigwedge_{i=0,1,2} (d_i^{xy} + v \cdot n_i^y + u \cdot n_i^x \geq 0) \quad (4) $$
-    The 3D overlap is true if the plane intersects the box AND the 2D tests are positive for all three axes (26-separating) or the dominant axis (6-separating). [S1]
+    The 3D overlap is true if the plane intersects the box AND the 2D tests are positive for all three axes (26-separating) or the dominant axis (6-separating) [S1].
 
 #### 3. Scanline Optimization
 To optimize testing a scanline (fixed $v$, varying $u$):
 
 1.  Rewrite the condition for edge $i$ as:
     $$ c_i + u \cdot n_i^x \geq 0 \quad (5) $$
-    Where $c_i = d_i^{xy} + v \cdot n_i^y$. [S1]
+    The term $c_i$ is defined as $d_i^{xy} + v \cdot n_i^y$ [S1].
 
 2.  Solve for bounds on $u$:
     *   If $n_i^x > 0$: $u \geq -c_i / n_i^x$
     *   If $n_i^x < 0$: $u \leq -c_i / n_i^x$
-    *   If $n_i^x = 0$: The condition is either always true or always false depending on $c_i \geq 0$. [S1]
+    *   If $n_i^x = 0$: The condition is independent of $u$; if $c_i < 0$, the edge does not overlap [S1].
 
-3.  Intersect the semi-intervals for $i=0,1,2$ to get a range $[u_{min}, u_{max}]$. If the range is degenerate (empty), the scanline does not intersect. [S1]
+3.  Intersect the semi-intervals for $i=0,1,2$ to get a range $[u_{min}, u_{max}]$ [S1]. If the range is degenerate (empty), the scanline does not intersect [S1].
 
-4.  Precompute $1/n_i^x$ to avoid division in the inner loop. Test only voxels in the calculated $u$ range. [S1]
+4.  Precompute $1/n_i^x$ to avoid division in the inner loop. Test only voxels in the calculated $u$ range [S1].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def triangle_box_overlap_2d_separating(v0, v1, v2, box_min, box_max, voxel_origin, voxel_size):
-    """
-    Performs the 2D overlap test for the XY plane as part of the 26-separating test.
-    Returns True if the triangle overlaps the box in the XY projection.
-    """
-    # Edges
+def setup_triangle_box_test(v0, v1, v2, p_min, p_max, voxel_origin, voxel_size):
+    """Precomputes 9 floating-point values per triangle for the 2D overlap test."""
     e0 = v1 - v0
     e1 = v2 - v1
     e2 = v0 - v2
     
-    # Normal
     n = cross(v1 - v0, v2 - v0)
-    
-    # Determine dominant axis for 2D projection (example: Z)
-    # In full 26-separating, this is repeated for X, Y, Z
-    dominant_axis = 'z'
-    
-    # 2D Edge Normals (for XY plane, assuming dominant axis is Z)
-    # n_i_xy = (-e_i.y, e_i.x) * sgn(n_z)
-    sgn_nz = 1 if n.z >= 0 else -1
+    sgn_nz = 1.0 if n.z >= 0.0 else -1.0
     
     n0_xy = (-e0.y, e0.x) * sgn_nz
     n1_xy = (-e1.y, e1.x) * sgn_nz
     n2_xy = (-e2.y, e2.x) * sgn_nz
     
-    # Box dimensions
-    dp_x = box_max.x - box_min.x
-    dp_y = box_max.y - box_min.y
+    dp_x = p_max.x - p_min.x
+    dp_y = p_max.y - p_min.y
     
-    # Precompute n_i^x, n_i^y
     n0_x = n0_xy[0] * dp_x
     n0_y = n0_xy[1] * dp_y
     n1_x = n1_xy[0] * dp_x
@@ -107,108 +92,44 @@ def triangle_box_overlap_2d_separating(v0, v1, v2, box_min, box_max, voxel_origi
     n2_x = n2_xy[0] * dp_x
     n2_y = n2_xy[1] * dp_y
     
-    # Precompute d_i^xy
-    # d_i^xy = -n_i_xy . v_i_xy + n_i_xy . p_xy + max(0, dp_x * n_i_x) + max(0, dp_y * n_i_y)
-    # Note: p_xy is the box minimum corner projected to 2D
-    p_xy = (box_min.x, box_min.y)
+    p_xy = (p_min.x, p_min.y)
     
-    d0_xy = -dot(n0_xy, (v0.x, v0.y)) + dot(n0_xy, p_xy) + max(0, dp_x * n0_x) + max(0, dp_y * n0_y)
-    d1_xy = -dot(n1_xy, (v1.x, v1.y)) + dot(n1_xy, p_xy) + max(0, dp_x * n1_x) + max(0, dp_y * n1_y)
-    d2_xy = -dot(n2_xy, (v2.x, v2.y)) + dot(n2_xy, p_xy) + max(0, dp_x * n2_x) + max(0, dp_y * n2_y)
+    d0_xy = -dot(n0_xy, (v0.x, v0.y)) + dot(n0_xy, p_xy) + max(0.0, dp_x * n0_x) + max(0.0, dp_y * n0_y)
+    d1_xy = -dot(n1_xy, (v1.x, v1.y)) + dot(n1_xy, p_xy) + max(0.0, dp_x * n1_x) + max(0.0, dp_y * n1_y)
+    d2_xy = -dot(n2_xy, (v2.x, v2.y)) + dot(n2_xy, p_xy) + max(0.0, dp_x * n2_x) + max(0.0, dp_y * n2_y)
     
-    # Test for a specific voxel (u, v)
-    # The box for voxel (u,v) is shifted by u*voxel_size, v*voxel_size
-    # However, the precomputed d_i^xy uses the global box_min.
-    # We need to adjust for the voxel offset.
-    # The formula (4) uses u and v directly as grid coordinates.
-    # The term n_i^x * u + n_i^y * v accounts for the voxel position relative to the origin.
-    
-    # Check if the triangle plane intersects the box (omitted for brevity, see parent article)
-    
-    # 2D Overlap Test
-    # Condition: d_i^xy + v * n_i^y + u * n_i^x >= 0 for all i
-    # Note: u and v here are the integer grid coordinates of the voxel.
-    
-    # For a single voxel test:
-    for u in range(voxel_min_u, voxel_max_u + 1):
-        for v in range(voxel_min_v, voxel_max_v + 1):
-            cond0 = d0_xy + v * n0_y + u * n0_x >= 0
-            cond1 = d1_xy + v * n1_y + u * n1_x >= 0
-            cond2 = d2_xy + v * n2_y + u * n2_x >= 0
-            if cond0 and cond1 and cond2:
-                return True
-    return False
+    return {
+        'n_x': [n0_x, n1_x, n2_x],
+        'n_y': [n0_y, n1_y, n2_y],
+        'd_xy': [d0_xy, d1_xy, d2_xy],
+        'inv_n_x': [1.0/n if n != 0.0 else float('inf') for n in [n0_x, n1_x, n2_x]]
+    }
 
-def scanline_optimization(v0, v1, v2, box_min, box_max, voxel_origin, voxel_size, fixed_v):
-    """
-    Optimizes the 2D overlap test for a fixed scanline v.
-    Returns the range [u_min, u_max] of u values where overlap may occur.
-    """
-    # Setup phase (same as above)
-    e0 = v1 - v0
-    e1 = v2 - v1
-    e2 = v0 - v2
-    n = cross(v1 - v0, v2 - v0)
-    sgn_nz = 1 if n.z >= 0 else -1
-    
-    n0_xy = (-e0.y, e0.x) * sgn_nz
-    n1_xy = (-e1.y, e1.x) * sgn_nz
-    n2_xy = (-e2.y, e2.x) * sgn_nz
-    
-    dp_x = box_max.x - box_min.x
-    dp_y = box_max.y - box_min.y
-    
-    n0_x = n0_xy[0] * dp_x
-    n1_x = n1_xy[0] * dp_x
-    n2_x = n2_xy[0] * dp_x
-    
-    p_xy = (box_min.x, box_min.y)
-    
-    d0_xy = -dot(n0_xy, (v0.x, v0.y)) + dot(n0_xy, p_xy) + max(0, dp_x * n0_x) + max(0, dp_y * n0_xy[1] * dp_y)
-    d1_xy = -dot(n1_xy, (v1.x, v1.y)) + dot(n1_xy, p_xy) + max(0, dp_x * n1_x) + max(0, dp_y * n1_xy[1] * dp_y)
-    d2_xy = -dot(n2_xy, (v2.x, v2.y)) + dot(n2_xy, p_xy) + max(0, dp_x * n2_x) + max(0, dp_y * n2_xy[1] * dp_y)
-    
-    # Precompute 1/n_i^x
-    inv_n0_x = 1.0 / n0_x if n0_x != 0 else float('inf')
-    inv_n1_x = 1.0 / n1_x if n1_x != 0 else float('inf')
-    inv_n2_x = 1.0 / n2_x if n2_x != 0 else float('inf')
-    
-    # Calculate bounds for u
-    # c_i = d_i^xy + v * n_i^y
-    c0 = d0_xy + fixed_v * n0_xy[1] * dp_y
-    c1 = d1_xy + fixed_v * n1_xy[1] * dp_y
-    c2 = d2_xy + fixed_v * n2_xy[1] * dp_y
-    
+def test_voxel_overlap(params, u, v):
+    """Tests a single voxel (u, v) against the precomputed triangle data."""
+    for i in range(3):
+        if params['d_xy'][i] + v * params['n_y'][i] + u * params['n_x'][i] < 0:
+            return False
+    return True
+
+def compute_scanline_bounds(params, fixed_v):
+    """Computes the u-range [u_min, u_max] for a fixed scanline v."""
     u_min = -float('inf')
     u_max = float('inf')
     
-    # Edge 0
-    if n0_x > 0:
-        u_min = max(u_min, -c0 * inv_n0_x)
-    elif n0_x < 0:
-        u_max = min(u_max, -c0 * inv_n0_x)
-    else:
-        if c0 < 0:
-            return (float('inf'), -float('inf')) # Degenerate, no intersection
-            
-    # Edge 1
-    if n1_x > 0:
-        u_min = max(u_min, -c1 * inv_n1_x)
-    elif n1_x < 0:
-        u_max = min(u_max, -c1 * inv_n1_x)
-    else:
-        if c1 < 0:
-            return (float('inf'), -float('inf'))
-            
-    # Edge 2
-    if n2_x > 0:
-        u_min = max(u_min, -c2 * inv_n2_x)
-    elif n2_x < 0:
-        u_max = min(u_max, -c2 * inv_n2_x)
-    else:
-        if c2 < 0:
-            return (float('inf'), -float('inf'))
-            
+    for i in range(3):
+        c_i = params['d_xy'][i] + fixed_v * params['n_y'][i]
+        n_x = params['n_x'][i]
+        inv_n_x = params['inv_n_x'][i]
+        
+        if n_x > 0:
+            u_min = max(u_min, -c_i * inv_n_x)
+        elif n_x < 0:
+            u_max = min(u_max, -c_i * inv_n_x)
+        else:
+            if c_i < 0:
+                return (float('inf'), -float('inf'))
+                
     if u_min > u_max:
         return (float('inf'), -float('inf'))
         
@@ -220,24 +141,28 @@ def scanline_optimization(v0, v1, v2, box_min, box_max, voxel_origin, voxel_size
 *   **Plane Equation**: 3 coefficients, normalized by the dominant axis [S1].
 
 ### Edge Cases and Pitfalls
-*   **Degenerate Scanline**: If the range $[u_{min}, u_{max}]$ is empty, the scanline does not intersect. [S1]
-*   **Zero Normal Component**: If $n_i^x = 0$, the condition is independent of $u$. If $c_i < 0$, there is no intersection. [S1]
-*   **Precision**: The test relies on floating-point comparisons. Conservative rasterization requires careful handling of boundary cases to ensure no voxels are missed. [S1]
+*   **Degenerate Scanline**: If the range $[u_{min}, u_{max}]$ is empty, the scanline does not intersect [S1].
+*   **Zero Normal Component**: If $n_i^x = 0$, the condition is independent of $u$; if $c_i < 0$, the edge does not overlap [S1].
+*   **Precision**: The test relies on floating-point comparisons. Conservative rasterization requires careful handling of boundary cases to ensure no voxels are missed [S1].
 
 ## Subtopics
 
 ### Cone Overlap Test (Mesh Level)
-A pruning test for mesh-level nodes that extends the sub-triangle cone overlap test by using a 3D position bounding box instead of a 2D triangle. It checks if the shading normal bounding cone and the light/view directions, as seen from any point in the position bounding box, can lie within the required ranges. [S2]
+A pruning test for mesh-level nodes that extends the sub-triangle cone overlap test by using a 3D position bounding box instead of a 2D triangle [S2]. It checks if the shading normal bounding cone and the light/view directions, as seen from any point in the position bounding box, can lie within the required ranges [S2].
+
+### 6-Separating Surface Voxelization
+A surface voxelization technique that produces a voxel set that is thinner than conservative voxelization but remains connected and gap-free [S3]. It is derived by adapting the triangle/box overlap test to check only the dominant axis projection [S3]. Unlike conservative voxelization which sets all overlapped voxels, this method sets fewer voxels while maintaining 6-connectivity and lacking gaps [S3].
 
 ## Operating characteristics
 *   **Time Complexity**: The amortized cost of a 2D overlap test with each voxel in a scanline is 3 FMAs and 3 comparisons per voxel [S1]. With scanline optimization, the cost is 3 FMULs per scanline plus the initial setup cost of 3 reciprocals per triangle [S1].
 *   **Memory Complexity**: Minimal, requiring only 9 precomputed floats per triangle [S1].
-*   **Strengths**: Highly efficient for conservative voxelization of triangle meshes. The scanline optimization eliminates unnecessary voxel tests. [S1]
-*   **Limitations**: Requires precomputation per triangle. The 26-separating test is more expensive than the 6-separating test. [S1]
+*   **Strengths**: Highly efficient for conservative voxelization of triangle meshes. The scanline optimization eliminates unnecessary voxel tests [S1].
+*   **Limitations**: Requires precomputation per triangle. The 26-separating test is more expensive than the 6-separating test [S1].
 
 ## Background
-The method is based on the work of Schwarz and Seidel [2010], which itself is an extension and improvement of the 2D variant proposed by Möller and Aila [2005]. It is used in the VoxelPipe pipeline for 3D voxelization. [S1]
+The method is based on the work of Schwarz and Seidel [2010], which itself is an extension and improvement of the 2D variant proposed by Möller and Aila [2005] [S1]. It is described in the VoxelPipe paper for 3D voxelization [S1].
 
 ## Sources
 [S1] VoxelPipe: A Programmable Pipeline for 3D Voxelization, https://research.nvidia.com/sites/default/files/pubs/2011-08_VoxelPipe-A-Programmable/voxel-pipe.pdf, fetched 2026-10-27
 [S2] Single Scattering in Refractive Media with Triangle Mesh Boundaries, https://doi.org/10.1145/1531326.1531398, fetched 2026-10-26
+[S3] Fast Parallel Surface and Solid Voxelization on GPUs, https://www.michael-schwarz.com/research/publ/files/vox-siga10.pdf, fetched 2026-10-27

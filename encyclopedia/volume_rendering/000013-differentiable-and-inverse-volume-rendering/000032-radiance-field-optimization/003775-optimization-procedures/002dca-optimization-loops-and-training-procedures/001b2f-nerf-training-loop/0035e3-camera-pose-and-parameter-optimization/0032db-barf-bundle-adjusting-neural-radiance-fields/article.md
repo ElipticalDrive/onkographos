@@ -2,115 +2,95 @@
 Also called: Bundle-Adjusting NeRF
 
 ## Overview
-BARF reconstructs a Neural Radiance Field (NeRF) given camera poses with errors and corresponding multi-view images [S1, unofficial]. It addresses the sensitivity of NeRF to inaccurate camera poses by jointly optimizing the network weights and camera parameters. It sets itself apart from standard NeRF by explicitly handling pose uncertainty through a coarse-to-fine refinement strategy that gradually increases the high-frequency part of positional encoding, stabilizing the optimization landscape [S1, unofficial].
+BARF reconstructs a Neural Radiance Field (NeRF) from multi-view images when the input camera poses contain significant errors [S1, unofficial]. It addresses the sensitivity of standard NeRF to pose inaccuracies by decoupling the optimization of geometry and appearance from the optimization of camera parameters. Unlike methods that jointly optimize poses and network weights from the start, BARF employs a coarse-to-fine refinement strategy that gradually introduces high-frequency positional encoding details, allowing the model to first converge on low-frequency structures (which are robust to pose errors) before refining high-frequency details [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- **Inputs:** Multi-view images $I_i$, initial camera poses $P_i$ (containing errors), and a NeRF architecture.
-- **Outputs:** Optimized NeRF weights $\Theta$ and refined camera poses $P_i$.
+- **Inputs:** A set of $N$ images $\{I_i\}_{i=1}^N$ and their corresponding initial camera poses $\{\pi_i\}_{i=1}^N$, where $\pi_i$ includes rotation, translation, and focal length. The initial poses may contain errors.
+- **Outputs:** A trained NeRF model (MLPs for density and color) and refined camera poses $\{\hat{\pi}_i\}_{i=1}^N$.
 
 **Data Structures:**
-- **NeRF:** Standard MLPs mapping 3D coordinates and viewing directions to density and color.
-- **Positional Encoding (PE):** Hierarchical sinusoidal features. The encoding is split into low-frequency and high-frequency bands.
-- **Camera Poses:** Represented as rigid transformations in $SE(3)$, parameterized via axis-angle or Lie algebra as per the parent method [7611-camera-pose-and-parameter-optimization.md].
+- **NeRF Model:** Standard MLP architecture mapping 3D coordinates and viewing directions to volume density $\sigma$ and color $\mathbf{c}$.
+- **Positional Encoding (PE):** Hierarchical sinusoidal feature maps. The PE is parameterized by a frequency cutoff $\lambda$.
 
-**Method Steps:**
-1.  **Initialization:** Initialize NeRF weights $\Theta$ and camera poses $P_i$.
-2.  **Coarse-to-Fine Schedule:** Define a schedule for the positional encoding. Initially, only the lowest frequency bands of the PE are used. As training progresses, higher frequency bands are gradually introduced. This allows the model to first converge to the global structure (low-frequency) before refining details (high-frequency), preventing the optimizer from getting stuck in local minima caused by pose errors [S1, unofficial].
-3.  **Rendering:** For each training image, sample rays through the scene. Compute the volume rendering integral to predict pixel colors $\hat{I}$.
-4.  **Loss Computation:** Calculate the photometric loss $\mathcal{L}_{photo} = \| \hat{I} - I \|^2$.
-5.  **Backpropagation:** Compute gradients with respect to both NeRF weights $\nabla_\Theta \mathcal{L}$ and camera parameters $\nabla_\pi \mathcal{L}$ via backpropagation through the volume rendering integral [7611-camera-pose-and-parameter-optimization.md].
-6.  **Update:** Update $\Theta$ and $\pi$ using an optimizer (e.g., Adam).
-7.  **Frequency Annealing:** Update the PE schedule based on the current training step.
-8.  **Repeat:** Steps 3-7 until convergence.
+**Algorithm Steps:**
+1. **Initialization:** Initialize the NeRF MLP weights randomly. Initialize camera poses $\hat{\pi}_i$ to the provided (potentially erroneous) initial poses.
+2. **Coarse-to-Fine Schedule:** Define a schedule for the positional encoding frequency cutoff $\lambda(t)$, where $t$ is the training iteration. The schedule starts with a low $\lambda$ (low-frequency only) and gradually increases to the full frequency range.
+3. **Ray Sampling:** For each training image $i$, generate rays using the current pose estimates $\hat{\pi}_i$. Sample points along each ray.
+4. **Volume Rendering:** Compute the rendered color $\hat{C}_i(p)$ for each pixel $p$ using the standard volume rendering integral [7405-nerf-with-unknown-camera-parameters.md].
+5. **Loss Computation:** Calculate the photometric loss $\mathcal{L}_{photo} = \| \hat{C}_i(p) - C_i(p) \|^2$.
+6. **Optimization:** Perform gradient descent to update both the NeRF weights $\Theta$ and the camera parameters $\hat{\pi}_i$.
+   - In early stages (low $\lambda$), the gradients for $\hat{\pi}_i$ are dominated by low-frequency components, making the optimization robust to initial pose errors.
+   - In later stages (high $\lambda$), high-frequency details are introduced, refining the pose estimates and geometry.
+7. **Iteration:** Repeat steps 3-6 until convergence or a maximum number of iterations is reached.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def barf_training(images, initial_poses, nerf_model, pe_schedule, optimizer, num_iterations):
-    # Initialize learnable parameters
-    # poses are stored in a format compatible with SE(3) parameterization (e.g., axis-angle or Lie algebra)
-    poses = initial_poses.clone() 
-    poses.requires_grad = True
-    
+def barf_training(images, initial_poses, max_iterations, lr):
     # Initialize NeRF weights
-    nerf_model.train()
+    nerf_weights = initialize_random_weights()
     
-    for step in range(num_iterations):
-        # 1. Determine current frequency bandwidth based on schedule
-        # pe_schedule returns the max frequency index or bandwidth to use
-        current_bandwidth = pe_schedule(step)
+    # Initialize camera poses with provided (potentially erroneous) poses
+    camera_poses = copy(initial_poses)
+    
+    # Define frequency schedule: lambda starts low, increases to max_freq
+    # lambda(t) could be a linear or cosine annealing schedule
+    max_freq = 10  # Example max frequency for positional encoding
+    
+    for t in range(max_iterations):
+        # Determine current frequency cutoff based on iteration t
+        lambda_t = schedule_lambda(t, max_iterations, max_freq)
         
-        # 2. Sample rays for each image
-        rays = sample_rays(images, poses)
+        # Sample rays using current camera poses
+        rays = generate_rays(images, camera_poses)
         
-        # 3. Render images using NeRF with limited bandwidth PE
-        # The PE function is modified to zero out frequencies above current_bandwidth
-        rendered_images = []
-        for ray in rays:
-            # Get 3D points and viewing directions from rays
-            points, directions = ray.points, ray.directions
-            
-            # Apply positional encoding with limited bandwidth
-            # This is the key BARF mechanism: coarse-to-fine
-            encoded_points = positional_encoding(points, max_freq=current_bandwidth)
-            encoded_directions = positional_encoding(directions, max_freq=current_bandwidth)
-            
-            # Query NeRF
-            density, color = nerf_model(encoded_points, encoded_directions)
-            
-            # Volume rendering
-            ray_color = volume_rendering(ray, density, color)
-            rendered_images.append(ray_color)
-            
-        rendered_images = torch.stack(rendered_images)
+        # Render images using NeRF with positional encoding limited to lambda_t
+        rendered_images = render_nerf(nerf_weights, rays, lambda_t)
         
-        # 4. Compute photometric loss
-        loss = torch.mean((rendered_images - images) ** 2)
+        # Compute photometric loss
+        loss = compute_mse_loss(rendered_images, images)
         
-        # 5. Backpropagate
-        optimizer.zero_grad()
-        loss.backward()
+        # Backpropagate to update both NeRF weights and camera poses
+        gradients = compute_gradients(loss, nerf_weights, camera_poses)
         
-        # 6. Update parameters
-        optimizer.step()
+        # Update parameters
+        nerf_weights = update_weights(nerf_weights, gradients['nerf'], lr)
+        camera_poses = update_poses(camera_poses, gradients['poses'], lr)
         
-        # Note: Gradients flow through the rendering process to the poses
-        # and to the NeRF weights.
+    return nerf_weights, camera_poses
 ```
 
 **Parameters:**
-- **PE Schedule:** Controls the rate at which high frequencies are introduced. Typical schedules linearly or exponentially increase the bandwidth over the training iterations.
-- **Optimizer:** Adam is commonly used.
+- **Learning Rate:** Standard values for NeRF (e.g., $5 \times 10^{-4}$ for weights, potentially different for poses).
+- **Frequency Schedule:** The rate at which high-frequency positional encodings are introduced. A common approach is to start with only the base frequency and gradually add higher frequencies over the course of training [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Precision:** The gradual introduction of frequencies requires careful tuning of the schedule. If high frequencies are introduced too early, the optimization may diverge due to pose errors [S1, unofficial].
-- **Boundaries:** The method assumes the initial poses are within a reasonable basin of attraction. Large initial errors may still cause failure.
+- **Precision:** Optimizing camera poses jointly with network weights can lead to instability if high frequencies are introduced too early. The coarse-to-fine strategy mitigates this [S1, unofficial].
+- **Boundaries:** The method assumes that the initial poses are not completely incorrect (e.g., 180-degree flips). If the initial poses are too far off, the low-frequency optimization may not converge to the correct global minimum.
 
 ## Subtopics
 
 ### Iterative Alignment Strategy
-An iterative process to generate better-aligned training and testing data by using optical flow to warp ground truth images to match the geometry estimated by NeRF, addressing misalignment from camera pose errors and non-rigid motion [S2]. It is used for analysis and data generation to demonstrate the impact of misalignment, rather than as the core algorithm of BARF itself [S2].
+An iterative post-processing or auxiliary training strategy used to refine data alignment when camera pose errors are severe or non-rigid motion is present [S2]. It uses optical flow to warp ground truth images to match the geometry estimated by NeRF.
+- **Definition:** An iterative process to generate better-aligned training and testing data by using optical flow to warp ground truth images to match the geometry estimated by NeRF, addressing misalignment from camera pose errors and non-rigid motion [S2].
 - **Steps:**
-  1. Train a NeRF (e.g., mip-NeRF 360) using the current training set.
+  1. Train a NeRF model (e.g., mip-NeRF 360) using the current training set.
   2. Calculate optical flow from the rendered views to the ground truth views using PWC-Net [S2].
   3. Warp the ground truth images using the estimated optical flows to build a new, better-aligned training set [S2].
   4. Repeat steps 1-3 for 2-3 iterations to reach best quality, leveraging sharper images to improve flow accuracy in subsequent rounds [S2].
-- **Pitfalls:** PWC-Net may run out of memory on high-resolution images; RAFT was considered but rejected for the same reason [S2]. NeRF rendered images are often blurry due to misalignment, which violates the general optical flow assumption of sharp paired inputs, though PWC-Net produces reasonable results based on global structures [S2].
-- **Usage:** Used to generate a better-aligned test set to avoid biased conclusions from misaligned data [S2].
+- **Pitfalls:** PWC-Net may run out of memory on high-resolution images. RAFT was considered but rejected for the same reason [S2]. NeRF rendered images are often blurry due to misalignment, which violates the general optical flow assumption of sharp paired inputs. However, PWC-Net produces reasonable results based on global structures [S2].
+- **Usage:** Used for analysis and data generation in experiments. It does not represent the core BARF algorithm but demonstrates the impact of misalignment [S2].
 
 ## Operating characteristics
-- **Time Complexity:** Training time is comparable to standard NeRF, potentially slightly longer due to the joint optimization of poses and the iterative nature if alignment strategies are used [S2].
-- **Memory Complexity:** Similar to standard NeRF. However, iterative alignment strategies may require additional memory for storing optical flow fields and intermediate rendered images [S2].
-- **Performance:** BARF improves reconstruction quality when camera poses are inaccurate. It is particularly effective in scenarios with sparse views or pose errors [S1, unofficial].
-- **Strengths:** Robust to camera pose errors; does not require precise initial poses.
-- **Limitations:** Requires careful tuning of the PE schedule; may converge slowly if the initial poses are very poor.
-- **When to use:** When camera poses are estimated with error (e.g., from SfM) and cannot be refined separately.
-- **When not to use:** When precise camera poses are already available; standard NeRF is sufficient and faster.
+- **Time Complexity:** Training time is comparable to standard NeRF, but may require more iterations if the initial poses are very poor. The iterative alignment strategy adds significant overhead due to multiple training and optical flow computation cycles [S2].
+- **Memory Complexity:** Standard NeRF memory usage. The iterative alignment strategy requires storing intermediate NeRF models and optical flow fields, which can be memory-intensive for high-resolution images [S2].
+- **Strengths:** Robust to initial camera pose errors. Does not require precise initial poses.
+- **Limitations:** Requires a coarse-to-fine schedule to be effective. Performance degrades if initial poses are extremely inaccurate. The iterative alignment strategy is computationally expensive and may not be suitable for real-time applications.
 
 ## Background
-BARF (Bundle-Adjusting Neural Radiance Fields) was introduced in ICCV 2021 [S1, unofficial]. It addresses the issue of NeRF's sensitivity to camera pose accuracy, which is a common problem in real-world scenarios where poses are estimated from Structure-from-Motion (SfM) and may contain errors. The method builds on the principle of treating camera parameters as learnable variables alongside NeRF weights, employing a coarse-to-fine strategy to stabilize the non-convex optimization landscape [7611-camera-pose-and-parameter-optimization.md].
+BARF (Bundle-Adjusting Neural Radiance Fields) was introduced in ICCV 2021 [S1, unofficial]. It addresses the issue of NeRF's sensitivity to camera pose inaccuracies, which is a common problem in real-world scenarios where precise camera calibration is not available. The method builds on the idea that low-frequency components of the scene are more robust to pose errors, allowing for a gradual refinement of both geometry and camera parameters.
 
 ## Sources
 [S1] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)

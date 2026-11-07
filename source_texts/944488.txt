@@ -1,0 +1,770 @@
+Contribute to daanrongen/splat development by creating an account on GitHub.
+
+feat(render): oriented alpha-blended ellipsoids on Cycles, real camer… · daanrongen/splat@b549970 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+File tree
+Expand file treeCollapse file tree
+Open diff view settings
+Filter options
+src/splat
+adapters/render
+_blender_script.py
+blender.py
+cli
+render.py
+handlers
+render.py
+tests/adapters/render
+test_blender.py
+Expand file treeCollapse file tree
+Open diff view settings
+Collapse file
+‎src/splat/adapters/render/_blender_script.py‎
+Copy file name to clipboardExpand all lines: src/splat/adapters/render/_blender_script.py
++170-34Lines changed: 170 additions & 34 deletions
+Original file line numberDiff line numberDiff line change
+@@ -2,18 +2,28 @@
+22
+# <this file> -- --input ... --output ...`), not splat's venv - only
+33
+# bpy/numpy/stdlib are available here, no `splat` imports.
+44
+#
+5-
+# Reads the .npz dump written by BlenderBackend (means/colors/radius)
+6-
+# and renders it as a native Blender point cloud colored by the flattened SH
+7-
+# DC term, framed by a robust (median) center/radius - the same technique
+8-
+# validated interactively over blender-mcp before this was wired up as a
+9-
+# standalone script.
+5+
+# Reads the .npz dump written by BlenderBackend (means/colors/scales/rotations/
+6+
+# opacities, plus an optional camera_position/camera_rotation/camera_intrinsics -
+7+
+# already converted to Blender's axis convention on the splat-venv side) and
+8+
+# renders each Gaussian as a true oriented, anisotropically-scaled, alpha-blended
+9+
+# ellipsoid via geometry nodes, replacing v1's flat uniform-radius point splats
+10+
+# (see issue #50 for that scope cut, #58/#60 for this one).
+11+
+#
+12+
+# Two Blender quirks this graph works around, found by prototyping interactively
+13+
+# over blender-mcp before wiring this up as a standalone script:
+14+
+# - a point-domain attribute must be explicitly re-stored onto the INSTANCE
+15+
+# domain (Store Named Attribute) before Realize Instances - it does not
+16+
+# survive automatically just by existing on the pre-instancing points.
+17+
+# - a material assigned via `pointcloud.materials.append(...)` is not picked
+18+
+# up by geometry-nodes-generated output - it needs an explicit Set Material
+19+
+# node inside the tree itself.
+1020
+1121
+import argparse
+1222
+import sys
+1323
+1424
+import bpy
+1525
+import numpy as np
+16-
+from mathutils import Vector
+26+
+from mathutils import Matrix, Vector
+1727
+1828
+1929
+def _parse_args():
+@@ -24,39 +34,107 @@ def _parse_args():
+2434
+parser.add_argument("--width", type=int, default=1280)
+2535
+parser.add_argument("--height", type=int, default=720)
+2636
+parser.add_argument("--samples", type=int, default=32)
+37+
+parser.add_argument("--engine", choices=["cycles", "eevee"], default="cycles")
+2738
+return parser.parse_args(argv)
+2839
+2940
+30-
+def _build_point_cloud(means: np.ndarray, colors: np.ndarray, radius: float):
+31-
+pc = bpy.data.pointclouds.new("GaussianCloud")
+41+
+def _build_point_cloud(means, colors, scales, rotations, opacities):
+3242
+n = len(means)
+43+
+pc = bpy.data.pointclouds.new("GaussianCloud")
+3344
+pc.resize(n)
+3445
+pc.attributes["position"].data.foreach_set("vector", means.flatten().tolist())
+35-
+pc.attributes.new("radius", "FLOAT", "POINT")
+36-
+pc.attributes["radius"].data.foreach_set("value", np.full(n, radius, dtype=np.float32).tolist())
+46+
+47+
+pc.attributes.new("pt_scale", "FLOAT_VECTOR", "POINT").data.foreach_set(
+48+
+"vector", scales.flatten().tolist()
+49+
+)
+50+
+pc.attributes.new("pt_rotation", "QUATERNION", "POINT").data.foreach_set(
+51+
+"value", rotations.flatten().tolist()
+52+
+)
+53+
+pc.attributes.new("pt_opacity", "FLOAT", "POINT").data.foreach_set("value", opacities.tolist())
+3754
+3855
+col_attr = pc.color_attributes.new("Col", "FLOAT_COLOR", "POINT")
+3956
+rgba = np.concatenate([colors, np.ones((n, 1), dtype=np.float32)], axis=1)
+4057
+col_attr.data.foreach_set("color", rgba.flatten().tolist())
+41-
+42-
+mat = bpy.data.materials.new("GaussianColor")
+43-
+mat.use_nodes = True # deprecated for removal in Blender 6.0; harmless until then
+44-
+node_tree = mat.node_tree
+45-
+node_tree.nodes.clear()
+46-
+attr = node_tree.nodes.new("ShaderNodeAttribute")
+47-
+attr.attribute_name = "Col"
+48-
+emit = node_tree.nodes.new("ShaderNodeEmission")
+49-
+output = node_tree.nodes.new("ShaderNodeOutputMaterial")
+50-
+node_tree.links.new(attr.outputs["Color"], emit.inputs["Color"])
+51-
+node_tree.links.new(emit.outputs["Emission"], output.inputs["Surface"])
+52-
+pc.materials.append(mat)
+53-
+54-
+obj = bpy.data.objects.new("GaussianCloud", pc)
+55-
+bpy.context.collection.objects.link(obj)
+56-
+return obj
+57-
+58-
+59-
+def _frame_camera(means: np.ndarray) -> float:
+58+
+return pc
+59+
+60+
+61+
+def _make_material():
+62+
+mat = bpy.data.materials.new("GaussianMat")
+63+
+mat.use_nodes = True
+64+
+nt = mat.node_tree
+65+
+nt.nodes.clear()
+66+
+out = nt.nodes.new("ShaderNodeOutputMaterial")
+67+
+bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
+68+
+bsdf.inputs["Roughness"].default_value = 0.5
+69+
+attr_col = nt.nodes.new("ShaderNodeAttribute")
+70+
+attr_col.attribute_name = "Col"
+71+
+attr_op = nt.nodes.new("ShaderNodeAttribute")
+72+
+attr_op.attribute_name = "pt_opacity"
+73+
+nt.links.new(attr_col.outputs["Color"], bsdf.inputs["Base Color"])
+74+
+nt.links.new(attr_op.outputs["Fac"], bsdf.inputs["Alpha"])
+75+
+nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+76+
+mat.blend_method = "HASHED" # EEVEE preview only; Cycles alpha is unaffected by this setting
+77+
+return mat
+78+
+79+
+80+
+def _build_ellipsoid_instancer(mat, subdivisions=1):
+81+
+ng = bpy.data.node_groups.new("EllipsoidInstancer", "GeometryNodeTree")
+82+
+ng.interface.new_socket(name="Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
+83+
+ng.interface.new_socket(name="Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+84+
+group_in = ng.nodes.new("NodeGroupInput")
+85+
+group_out = ng.nodes.new("NodeGroupOutput")
+86+
+87+
+ico = ng.nodes.new("GeometryNodeMeshIcoSphere")
+88+
+ico.inputs["Radius"].default_value = 1.0
+89+
+ico.inputs["Subdivisions"].default_value = subdivisions
+90+
+91+
+named_scale = ng.nodes.new("GeometryNodeInputNamedAttribute")
+92+
+named_scale.data_type = "FLOAT_VECTOR"
+93+
+named_scale.inputs["Name"].default_value = "pt_scale"
+94+
+95+
+named_rot = ng.nodes.new("GeometryNodeInputNamedAttribute")
+96+
+named_rot.data_type = "QUATERNION"
+97+
+named_rot.inputs["Name"].default_value = "pt_rotation"
+98+
+99+
+named_col = ng.nodes.new("GeometryNodeInputNamedAttribute")
+100+
+named_col.data_type = "FLOAT_COLOR"
+101+
+named_col.inputs["Name"].default_value = "Col"
+102+
+103+
+named_op = ng.nodes.new("GeometryNodeInputNamedAttribute")
+104+
+named_op.data_type = "FLOAT"
+105+
+named_op.inputs["Name"].default_value = "pt_opacity"
+106+
+107+
+inst = ng.nodes.new("GeometryNodeInstanceOnPoints")
+108+
+ng.links.new(group_in.outputs["Geometry"], inst.inputs["Points"])
+109+
+ng.links.new(ico.outputs["Mesh"], inst.inputs["Instance"])
+110+
+ng.links.new(named_scale.outputs["Attribute"], inst.inputs["Scale"])
+111+
+ng.links.new(named_rot.outputs["Attribute"], inst.inputs["Rotation"])
+112+
+113+
+store_col = ng.nodes.new("GeometryNodeStoreNamedAttribute")
+114+
+store_col.data_type = "FLOAT_COLOR"
+115+
+store_col.domain = "INSTANCE"
+116+
+store_col.inputs["Name"].default_value = "Col"
+117+
+ng.links.new(inst.outputs["Instances"], store_col.inputs["Geometry"])
+118+
+ng.links.new(named_col.outputs["Attribute"], store_col.inputs["Value"])
+119+
+120+
+store_op = ng.nodes.new("GeometryNodeStoreNamedAttribute")
+121+
+store_op.data_type = "FLOAT"
+122+
+store_op.domain = "INSTANCE"
+123+
+store_op.inputs["Name"].default_value = "pt_opacity"
+124+
+ng.links.new(store_col.outputs["Geometry"], store_op.inputs["Geometry"])
+125+
+ng.links.new(named_op.outputs["Attribute"], store_op.inputs["Value"])
+126+
+127+
+realize = ng.nodes.new("GeometryNodeRealizeInstances")
+128+
+ng.links.new(store_op.outputs["Geometry"], realize.inputs["Geometry"])
+129+
+130+
+set_mat = ng.nodes.new("GeometryNodeSetMaterial")
+131+
+set_mat.inputs["Material"].default_value = mat
+132+
+ng.links.new(realize.outputs["Geometry"], set_mat.inputs["Geometry"])
+133+
+ng.links.new(set_mat.outputs["Geometry"], group_out.inputs["Geometry"])
+134+
+return ng
+135+
+136+
+137+
+def _frame_camera_auto_fit(means: np.ndarray):
+60138
+median_center = np.median(means, axis=0)
+61139
+radii = np.linalg.norm(means - median_center, axis=1)
+62140
+median_radius = float(np.median(radii)) or 1.0
+@@ -70,26 +148,84 @@ def _frame_camera(means: np.ndarray) -> float:
+70148
+direction = (center - cam_obj.location).normalized()
+71149
+cam_obj.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
+72150
+bpy.context.scene.camera = cam_obj
+73-
+return median_radius
+151+
+152+
+153+
+def _frame_camera_from_capture(position, rotation, intrinsics):
+154+
+cam_data = bpy.data.cameras.new("RenderCamera")
+155+
+cam_obj = bpy.data.objects.new("RenderCamera", cam_data)
+156+
+bpy.context.collection.objects.link(cam_obj)
+157+
+cam_obj.location = Vector(position.tolist())
+158+
+cam_obj.rotation_mode = "QUATERNION"
+159+
+cam_obj.rotation_quaternion = Matrix(rotation.tolist()).to_quaternion()
+160+
+if intrinsics is not None:
+161+
+fx, _fy, _cx, _cy, width, _height = intrinsics.tolist()
+162+
+cam_data.sensor_fit = "HORIZONTAL"
+163+
+cam_data.lens_unit = "FOV"
+164+
+cam_data.angle = 2.0 * np.arctan(width / (2.0 * fx))
+165+
+bpy.context.scene.camera = cam_obj
+166+
+167+
+168+
+def _enable_gpu_compute(scene) -> None:
+169+
+"""Cycles defaults to CPU-only unless a compute backend is both selected in
+170+
+preferences AND enabled per-device - falls back silently (not an error) if
+171+
+no GPU backend is available, e.g. in a CI/headless-Linux-CPU environment."""
+172+
+prefs = bpy.context.preferences.addons["cycles"].preferences
+173+
+for backend in ("METAL", "OPTIX", "CUDA", "HIP"):
+174+
+try:
+175+
+prefs.compute_device_type = backend
+176+
+except TypeError:
+177+
+continue
+178+
+prefs.get_devices()
+179+
+gpu_devices = [d for d in prefs.devices if d.type == backend]
+180+
+if gpu_devices:
+181+
+for device in prefs.devices:
+182+
+device.use = device.type in (backend, "CPU") and device.type != "CPU"
+183+
+scene.cycles.device = "GPU"
+184+
+return
+74185
+75186
+76187
+def main() -> None:
+77188
+args = _parse_args()
+78189
+data = np.load(args.input)
+79190
+means, colors = data["means"], data["colors"]
+191+
+scales, rotations, opacities = data["scales"], data["rotations"], data["opacities"]
+80192
+81193
+for obj in list(bpy.data.objects):
+82194
+bpy.data.objects.remove(obj, do_unlink=True)
+83195
+84-
+median_radius = _frame_camera(means)
+85-
+_build_point_cloud(means, colors, median_radius * 0.03)
+196+
+mat = _make_material()
+197+
+ng = _build_ellipsoid_instancer(mat)
+198+
+pc = _build_point_cloud(means, colors, scales, rotations, opacities)
+199+
+obj = bpy.data.objects.new("GaussianCloud", pc)
+200+
+bpy.context.collection.objects.link(obj)
+201+
+modifier = obj.modifiers.new("Ellipsoids", "NODES")
+202+
+modifier.node_group = ng
+203+
+204+
+if "camera_position" in data and "camera_rotation" in data:
+205+
+_frame_camera_from_capture(
+206+
+data["camera_position"], data["camera_rotation"], data.get("camera_intrinsics")
+207+
+)
+208+
+else:
+209+
+_frame_camera_auto_fit(means)
+210+
+211+
+sun_data = bpy.data.lights.new("Sun", type="SUN")
+212+
+sun_data.energy = 2.5
+213+
+sun = bpy.data.objects.new("Sun", sun_data)
+214+
+sun.rotation_euler = (0.9, 0.0, 0.6)
+215+
+bpy.context.collection.objects.link(sun)
+86216
+87217
+scene = bpy.context.scene
+88218
+scene.render.resolution_x = args.width
+89219
+scene.render.resolution_y = args.height
+90220
+scene.render.filepath = args.output
+91-
+if hasattr(scene, "eevee"):
+92-
+scene.eevee.taa_render_samples = args.samples
+221+
+if args.engine == "cycles":
+222+
+scene.render.engine = "CYCLES"
+223+
+scene.cycles.samples = args.samples
+224+
+_enable_gpu_compute(scene)
+225+
+else:
+226+
+scene.render.engine = "BLENDER_EEVEE"
+227+
+if hasattr(scene, "eevee"):
+228+
+scene.eevee.taa_render_samples = args.samples
+93229
+94230
+bpy.ops.render.render(write_still=True)
+95231
+Collapse file
+‎src/splat/adapters/render/blender.py‎
+Copy file name to clipboardExpand all lines: src/splat/adapters/render/blender.py
++72-6Lines changed: 72 additions & 6 deletions
+Original file line numberDiff line numberDiff line change
+@@ -2,11 +2,12 @@
+22
+--python _blender_script.py` to render a GaussianCloud as a native Blender
+33
+point cloud (see that script for the actual scene setup).
+44
+5-
+v1 renders flat-colored point splats (position + SH DC color + a uniform
+6-
+per-point radius derived from scale) - no ellipsoid orientation from the
+7-
+rotation quaternion, no opacity blending, no view-dependent SH. That's a
+8-
+deliberate scope cut (see issue #50): enough to inspect a reconstruction's
+9-
+shape/orientation at a glance, not a differentiable-rasterizer replacement.
+5+
+v2 renders true oriented/scaled ellipsoids (rotation quaternion + per-axis
+6+
+scale) alpha-blended by opacity, on Cycles by default - EEVEE remains
+7+
+available as a faster, approximate preview (`--engine eevee`). Defaults to
+8+
+a real captured camera pose (see #59) when the cloud has one, falling back
+9+
+to v1's auto-fit heuristic otherwise. See issue #50 for the v1 scope cut
+10+
+this replaces, and #58 for the motivating research.
+1011
+"""
+1112
+1213
+from __future__ import annotations
+@@ -25,6 +26,12 @@
+2526
+_SCRIPT_PATH = Path(__file__).parent / "_blender_script.py"
+2627
+_SH_C0 = 0.28209479177387814
+2728
+29+
+# COLMAP/OpenCV world convention (+X right, +Y down, +Z forward) -> Blender/OpenGL
+30+
+# (+X right, +Y up, -Z forward). diag(1,-1,-1) has determinant +1: this is a proper
+31+
+# 180-degree rotation about X, not a mirroring, so it applies cleanly to positions,
+32+
+# per-Gaussian orientations, and camera poses alike.
+33+
+_COLMAP_TO_BLENDER_FLIP = np.array([1.0, -1.0, -1.0], dtype=np.float32)
+34+
+2835
+2936
+def _resolve_blender_bin(explicit: str | None) -> str:
+3037
+candidate = explicit or os.environ.get("SPLAT_BLENDER_BIN") or shutil.which("blender")
+@@ -36,9 +43,65 @@ def _resolve_blender_bin(explicit: str | None) -> str:
+3643
+return candidate
+3744
+3845
+46+
+def _convert_positions(points: np.ndarray) -> np.ndarray:
+47+
+return (points * _COLMAP_TO_BLENDER_FLIP).astype(np.float32)
+48+
+49+
+50+
+def _convert_gaussian_rotations(quats: np.ndarray) -> np.ndarray:
+51+
+"""Conjugating a (w,x,y,z) quaternion by the 180-about-X flip works out to
+52+
+negating just the y,z components - derived from the Hamilton product, not
+53+
+guessed (a matrix round-trip gives the identical result, checked in tests)."""
+54+
+return (quats * np.array([1.0, 1.0, -1.0, -1.0], dtype=np.float32)).astype(np.float32)
+55+
+56+
+57+
+def _convert_camera_rotation(rotation_colmap: list[list[float]]) -> np.ndarray:
+58+
+"""World-to-camera -> camera-to-world, then conjugate by the flip on both the
+59+
+world side (left) and the camera's own local-axis convention side (right) -
+60+
+COLMAP cameras look down local +Z with +Y down; Blender cameras look down
+61+
+local -Z with +Y up, also related by the same 180-about-X rotation."""
+62+
+r_world_to_cam = np.asarray(rotation_colmap, dtype=np.float32)
+63+
+r_cam_to_world = r_world_to_cam.T
+64+
+flip = np.diag(_COLMAP_TO_BLENDER_FLIP)
+65+
+return (flip @ r_cam_to_world @ flip).astype(np.float32)
+66+
+67+
+3968
+def _cloud_to_npz(cloud: GaussianCloud, path: Path) -> None:
+69+
+colmap = cloud.metadata.coordinate_convention == "colmap"
+70+
+means = _convert_positions(cloud.means) if colmap else cloud.means.astype(np.float32)
+71+
+rotations = (
+72+
+_convert_gaussian_rotations(cloud.rotations)
+73+
+if colmap
+74+
+else cloud.rotations.astype(np.float32)
+75+
+)
+4076
+colors = np.clip(0.5 + _SH_C0 * cloud.sh_dc, 0.0, 1.0).astype(np.float32)
+41-
+np.savez(path, means=cloud.means.astype(np.float32), colors=colors)
+77+
+scales = cloud.to_linear_scales().astype(np.float32)
+78+
+opacities = cloud.to_activated_opacities().astype(np.float32)
+79+
+80+
+arrays = {
+81+
+"means": means,
+82+
+"colors": colors,
+83+
+"scales": scales,
+84+
+"rotations": rotations,
+85+
+"opacities": opacities,
+86+
+}
+87+
+88+
+metadata = cloud.metadata
+89+
+if (
+90+
+metadata.capture_camera_position is not None
+91+
+and metadata.capture_camera_rotation is not None
+92+
+):
+93+
+position = np.asarray(metadata.capture_camera_position, dtype=np.float32)
+94+
+arrays["camera_position"] = _convert_positions(position) if colmap else position
+95+
+rotation = metadata.capture_camera_rotation
+96+
+arrays["camera_rotation"] = (
+97+
+_convert_camera_rotation(rotation) if colmap else np.asarray(rotation, dtype=np.float32)
+98+
+)
+99+
+if metadata.capture_camera_intrinsics is not None:
+100+
+arrays["camera_intrinsics"] = np.asarray(
+101+
+metadata.capture_camera_intrinsics, dtype=np.float32
+102+
+)
+103+
+104+
+np.savez(path, **arrays)
+42105
+43106
+44107
+class BlenderBackend:
+@@ -52,6 +115,7 @@ def render(
+52115
+width: int = 1280,
+53116
+height: int = 720,
+54117
+samples: int = 32,
+118+
+engine: str = "cycles",
+55119
+blender_bin: str | None = None,
+56120
+**params,
+57121
+) -> None:
+@@ -78,6 +142,8 @@ def render(
+78142
+str(height),
+79143
+"--samples",
+80144
+str(samples),
+145+
+"--engine",
+146+
+engine,
+81147
+]
+82148
+result = subprocess.run(command, capture_output=True, text=True)
+83149
+Collapse file
+‎src/splat/cli/render.py‎
+Copy file name to clipboardExpand all lines: src/splat/cli/render.py
++13-1Lines changed: 13 additions & 1 deletion
+Original file line numberDiff line numberDiff line change
+@@ -19,13 +19,25 @@ def render(
+1919
+width: int = typer.Option(1280, "--width", help="Render width in pixels."),
+2020
+height: int = typer.Option(720, "--height", help="Render height in pixels."),
+2121
+samples: int = typer.Option(32, "--samples", help="Render samples (backend-dependent)."),
+22+
+engine: str = typer.Option(
+23+
+"cycles",
+24+
+"--engine",
+25+
+help="cycles (accurate alpha-blended ellipsoids) | eevee (fast preview).",
+26+
+),
+2227
+) -> None:
+2328
+"""Render a Gaussian splat to a still image."""
+2429
+cache = get_manifest_repository()
+2530
+try:
+2631
+inputs = resolve_inputs(input, cache, default_kind=ManifestKind.GAUSSIAN_CLOUD)
+2732
+results = handle(
+28-
+RenderRequest(inputs=inputs, model=model, width=width, height=height, samples=samples)
+33+
+RenderRequest(
+34+
+inputs=inputs,
+35+
+model=model,
+36+
+width=width,
+37+
+height=height,
+38+
+samples=samples,
+39+
+engine=engine,
+40+
+)
+2941
+)
+3042
+except SplatDomainError as exc:
+3143
+error(str(exc))
+0 commit comments
+Comments
+0 (0)
+You can’t perform that action at this time.

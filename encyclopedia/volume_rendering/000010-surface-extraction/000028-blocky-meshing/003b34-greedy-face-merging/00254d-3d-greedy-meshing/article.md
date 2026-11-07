@@ -6,15 +6,15 @@
 
 ## How it works
 **Inputs and Outputs:**
-- Input: `voxel_grid` of type `GRID_3D` (`list[list[list[int]]]`), where each integer represents a voxel type.
-- Output: `faces`, a `list[Face]`.
+- Input: `voxel_grid` of type `GRID_3D` (`list[list[list[int]]]`), where each integer represents a voxel type [S1, unofficial].
+- Output: `faces`, a `list[Face]` [S1, unofficial].
 
 **Data Structures:**
 - `Face`: A dataclass with fields:
-  - `position`: `tuple[int, int, int]` representing the corner of the face.
-  - `dimensions`: `tuple[int, int]` representing the width and height of the face.
-  - `orientation`: `str` indicating the face normal direction ('top', 'bottom', 'front', 'back', 'left', 'right').
-  - `type`: `int` representing the voxel type of the face.
+  - `position`: `tuple[int, int, int]` representing the corner of the face [S1, unofficial].
+  - `dimensions`: `tuple[int, int]` representing the width and height of the face [S1, unofficial].
+  - `orientation`: `str` indicating the face normal direction ('top', 'bottom', 'front', 'back', 'left', 'right') [S1, unofficial].
+  - `type`: `int` representing the voxel type of the face [S1, unofficial].
 
 **Algorithm Steps:**
 1. Define a helper function `is_exposed(x, y, z)` which returns `True` if the voxel at `(x, y, z)` is outside the grid bounds ($0 \le x < \text{GRID\_SIZE}$, etc.) or if `voxel_grid[z][y][x] == 0`. Otherwise, return `False` [S1, unofficial].
@@ -55,267 +55,71 @@ NAME_MAPPING = {
 }
 
 def is_exposed(grid: GRID_3D, x: int, y: int, z: int) -> bool:
-    """Returns True if the voxel is outside bounds or is air (0)."""
     grid_size = len(grid)
     if not (0 <= x < grid_size and 0 <= y < grid_size and 0 <= z < grid_size):
         return True
-    if grid[z][y][x] == 0:
-        return True
-    return False
+    return grid[z][y][x] == 0
 
 def get_face(grid: GRID_3D, axis: str, index: int, offset: int) -> Tuple[GRID_2D, str]:
-    """Extracts a 2D slice and its orientation string."""
     grid_size = len(grid)
-    face_grid = [[0 for _ in range(grid_size)] for _ in range(grid_size)]
+    face_grid = [[0] * grid_size for _ in range(grid_size)]
     orientation = NAME_MAPPING[(axis, offset)]
     
     for y in range(grid_size):
         for x in range(grid_size):
-            # Determine the 3D coordinate of the voxel being checked
-            # The slice is at 'index' along 'axis', and we check 'offset' direction
-            # to see if the face is exposed.
-            # However, the source description implies extracting the slice 
-            # corresponding to the face at index, and checking exposure 
-            # to determine if it's part of the mesh.
-            # Re-reading source: "iterates y and x... checks if voxel at offset position is exposed"
-            # This implies we are looking at the voxel adjacent to the slice plane.
-            
-            # Let's reconstruct the voxel coordinate based on axis and index
-            if axis == 'z':
-                # Slice is at z = index. We check z + offset.
-                # The face is at z = index. The voxel behind it is at z = index + offset.
-                # But wait, if offset is +1, we are looking at z = index + 1.
-                # If that voxel is exposed (air or out of bounds), then the face at z=index is visible.
-                # The face grid should contain the voxel type at (x, y, index) if exposed.
-                # Source says: "If exposed, it appends the voxel value; otherwise, it appends 0."
-                # Which voxel value? The one at the slice? Or the one at the offset?
-                # Context: "extracts a 2D slice... checks if the voxel at the offset position is exposed"
-                # If exposed, append voxel value. Usually, the face represents the voxel at the slice.
-                # Let's assume the face represents the voxel at (x, y, index) for axis 'z'.
-                voxel_val = grid[index][y][x]
+            # Determine neighbor coordinate in the offset direction
+            nx, ny, nz = x, y, index
+            if axis == 'x':
+                nx = index + offset
             elif axis == 'y':
-                voxel_val = grid[z][index][x] # Wait, z is not defined here.
-                # The source code snippet for get_face is not fully provided, 
-                # but the logic in step 5 maps coordinates.
-                # Let's infer from step 5:
-                # If axis is 'z', position is (x, y, i). So the face is at z=i.
-                # The voxel type is grid[i][y][x].
-                # If axis is 'x', position is (i, x, y). So the face is at x=i.
-                # The voxel type is grid[z][y][i].
-                # If axis is 'y', position is (x, i, y). So the face is at y=i.
-                # The voxel type is grid[z][i][x].
+                ny = index + offset
+            elif axis == 'z':
+                nz = index + offset
                 
-                # The exposure check determines if this face is rendered.
-                # If the neighbor in the 'offset' direction is air/out of bounds, the face is exposed.
-                pass 
-            
-            # Correct logic based on standard greedy meshing:
-            # We are generating faces for the voxel at the slice plane.
-            # We check if the neighbor in the 'offset' direction is empty.
-            
-            if axis == 'z':
-                neighbor_z = index + offset
-                if is_exposed(grid, x, y, neighbor_z):
+            if is_exposed(grid, nx, ny, nz):
+                # Store the voxel type at the slice plane
+                if axis == 'x':
+                    face_grid[y][x] = grid[z][y][index]
+                elif axis == 'y':
+                    face_grid[y][x] = grid[z][index][x]
+                elif axis == 'z':
                     face_grid[y][x] = grid[index][y][x]
-                else:
-                    face_grid[y][x] = 0
-            elif axis == 'y':
-                neighbor_y = index + offset
-                if is_exposed(grid, x, neighbor_y, z): # z is loop var? No.
-                    # We need to iterate z as well?
-                    # The source says "iterates y and x". This implies the slice is 2D.
-                    # But for axis 'y', the slice is at y=index. The coordinates are x and z.
-                    # The source pseudocode is ambiguous. 
-                    # Let's stick to the source's explicit steps.
-                    # Step 2: "iterates y and x over GRID_SIZE".
-                    # This suggests the input to get_face is always processed as a 2D grid of y,x.
-                    # This only works directly for axis 'z'.
-                    # For other axes, the mapping must be handled.
-                    pass
-            elif axis == 'x':
-                neighbor_x = index + offset
-                if is_exposed(grid, neighbor_x, y, z):
-                    pass
-                pass
-
-    # Simplified implementation based on source's high-level description:
-    # The source implies a generic 2D slice extraction.
-    # We will implement the coordinate mapping explicitly in the main loop.
+            else:
+                face_grid[y][x] = 0
     return face_grid, orientation
 
 def greedy_meshing_3d(voxel_grid: GRID_3D) -> List[Face]:
     grid_size = len(voxel_grid)
     faces = []
-    
-    # Import greedy_meshing_2d from the sibling article
-    # Assuming it is available and takes a 2D grid and returns List[Face]
-    # Note: The Face class in 2D might be different or the same. 
-    # We assume it returns faces with position (x,y), dimensions, orientation, type.
-    # We will adapt the position to 3D.
-    
     axes = ['z', 'y', 'x']
     offsets = [1, -1]
     
     for i in range(grid_size):
         for offset in offsets:
             for axis in axes:
-                # Extract 2D slice
-                # We need to construct the 2D grid for the slice at index i along axis
-                # and determine the orientation.
+                slice_grid, orientation = get_face(voxel_grid, axis, i, offset)
+                # Subroutine to merge 2D faces into quads
+                two_d_faces = greedy_meshing_2d(slice_grid) 
                 
-                # Determine the 2D coordinates to iterate
-                if axis == 'z':
-                    # Slice at z=i. Iterate x, y.
-                    # Orientation for offset +1 is 'top', -1 is 'bottom'
-                    orientation = NAME_MAPPING[(axis, offset)]
-                    slice_grid = [[voxel_grid[i][y][x] for x in range(grid_size)] for y in range(grid_size)]
+                for face_2d in two_d_faces:
+                    u, v = face_2d.position
+                    w, h = face_2d.dimensions
+                    ftype = face_2d.type
                     
-                    # Check exposure for each cell in the slice
-                    # A cell (x,y) at z=i is exposed if the neighbor at z=i+offset is air/out
-                    exposed_grid = [[0]*grid_size for _ in range(grid_size)]
-                    for y in range(grid_size):
-                        for x in range(grid_size):
-                            neighbor_z = i + offset
-                            if is_exposed(voxel_grid, x, y, neighbor_z):
-                                exposed_grid[y][x] = voxel_grid[i][y][x]
-                            else:
-                                exposed_grid[y][x] = 0
-                                
-                elif axis == 'y':
-                    # Slice at y=i. Iterate x, z.
-                    # Orientation for offset +1 is 'front', -1 is 'back'
-                    orientation = NAME_MAPPING[(axis, offset)]
-                    # Map 2D coords (u,v) to (x,z)
-                    # Let u=x, v=z
-                    slice_grid = [[0]*grid_size for _ in range(grid_size)]
-                    exposed_grid = [[0]*grid_size for _ in range(grid_size)]
-                    for z in range(grid_size):
-                        for x in range(grid_size):
-                            voxel_val = voxel_grid[z][i][x]
-                            neighbor_y = i + offset
-                            if is_exposed(voxel_grid, x, neighbor_y, z):
-                                exposed_grid[z][x] = voxel_val
-                            else:
-                                exposed_grid[z][x] = 0
-                    # Note: The source iterates y and x. For axis y, we iterate z and x.
-                    # We must ensure the 2D greedy meshing function handles the grid correctly.
-                    # We will pass the exposed_grid.
+                    # Map 2D coordinates back to 3D based on axis
+                    if axis == 'z':
+                        pos = (u, v, i)
+                    elif axis == 'x':
+                        pos = (i, u, v)
+                    elif axis == 'y':
+                        pos = (u, i, v)
                     
-                elif axis == 'x':
-                    # Slice at x=i. Iterate y, z.
-                    # Orientation for offset +1 is 'right', -1 is 'left'
-                    orientation = NAME_MAPPING[(axis, offset)]
-                    slice_grid = [[0]*grid_size for _ in range(grid_size)]
-                    exposed_grid = [[0]*grid_size for _ in range(grid_size)]
-                    for z in range(grid_size):
-                        for y in range(grid_size):
-                            voxel_val = voxel_grid[z][y][i]
-                            neighbor_x = i + offset
-                            if is_exposed(voxel_grid, neighbor_x, y, z):
-                                exposed_grid[z][y] = voxel_val
-                            else:
-                                exposed_grid[z][y] = 0
-
-                # Call 2D greedy meshing
-                # The 2D function expects a grid where 0 is empty.
-                # We pass the exposed_grid.
-                # The 2D function returns List[Face] with position (u,v) in the 2D slice.
-                # We need to map (u,v) back to 3D (x,y,z).
-                
-                # For axis 'z': u=x, v=y. 3D pos: (u, v, i)
-                # For axis 'y': u=x, v=z. 3D pos: (u, i, v)
-                # For axis 'x': u=z, v=y? Or u=y, v=z?
-                # Source Step 5:
-                # axis 'z': (x, y, i)
-                # axis 'x': (i, x, y) -> Here u=x, v=y? No, source says (i, x, y).
-                # axis 'y': (x, i, y)
-                
-                # Let's re-read Step 5 carefully:
-                # "The position is (x, y, i) if axis is 'z', (i, x, y) if axis is 'x', or (x, i, y) if axis is 'y'."
-                # This implies the 2D mesh returns faces with x and y coordinates relative to the slice.
-                # For axis 'z', the slice is x-y plane. So 2D (x,y) maps to 3D (x,y,i).
-                # For axis 'x', the slice is y-z plane? Or x-z?
-                # If axis is 'x', the face is at x=i. The coordinates are y and z.
-                # Source says (i, x, y). This is confusing. x and y are used as the 2D coords?
-                # If axis is 'x', the 2D grid is likely y-z.
-                # If the 2D function returns (u,v), and source says (i, x, y), then u=x, v=y.
-                # But the slice is at x=i. So the coordinates are y and z.
-                # So u must be y, v must be z? Or u=z, v=y?
-                # Let's assume the 2D function returns faces with 'x' and 'y' fields representing the local 2D coordinates.
-                # We map them to 3D based on the axis.
-                
-                # To be safe, we will assume the 2D greedy meshing function returns faces with:
-                # position: (u, v)
-                # dimensions: (w, h)
-                # orientation: 'front'/'back' etc (local to 2D? No, global)
-                # type: int
-                
-                # We need to call the 2D function. Since we don't have its code, we assume it works on the exposed_grid.
-                # We will construct the 3D faces manually.
-                
-                # For axis 'z':
-                # 2D grid is y (rows) x (cols).
-                # 2D face pos (u,v) -> u is col (x), v is row (y).
-                # 3D pos: (u, v, i).
-                
-                # For axis 'y':
-                # 2D grid is z (rows) x (cols) (x).
-                # 2D face pos (u,v) -> u is col (x), v is row (z).
-                # 3D pos: (u, i, v).
-                
-                # For axis 'x':
-                # 2D grid is z (rows) x (cols) (y).
-                # 2D face pos (u,v) -> u is col (y), v is row (z).
-                # 3D pos: (i, u, v).
-                
-                # Let's verify with source Step 5:
-                # axis 'x': (i, x, y). If u=x, v=y, then (i, u, v). Matches.
-                # axis 'y': (x, i, y). If u=x, v=y, then (u, i, v). Matches.
-                # axis 'z': (x, y, i). If u=x, v=y, then (u, v, i). Matches.
-                
-                # So the mapping is:
-                # axis 'z': 3D(x,y,z) = (u, v, i)
-                # axis 'y': 3D(x,y,z) = (u, i, v)
-                # axis 'x': 3D(x,y,z) = (i, u, v)
-                
-                # We need to know the orientation of the 2D faces.
-                # The 2D greedy meshing might return a generic orientation or we assign it.
-                # The source says "orientation... taken from the 2D mesh".
-                # But the 2D mesh is for a specific axis.
-                # We will assume the 2D mesh returns faces with the global orientation string.
-                
-                # Call 2D greedy meshing
-                # Note: The 2D function might not return the orientation string.
-                # We will assume it returns faces with orientation.
-                
-                # Since we cannot call the external function, we will describe the step.
-                # In a real implementation, you would import greedy_meshing_2d.
-                
-                # For the purpose of this article, we assume the 2D function is available.
-                
-                # 2D faces = greedy_meshing_2d(exposed_grid)
-                # for face in 2D faces:
-                #     u, v = face.position
-                #     w, h = face.dimensions
-                #     ftype = face.type
-                #     forient = face.orientation # This might be overwritten or kept
-                
-                #     if axis == 'z':
-                #         pos = (u, v, i)
-                #     elif axis == 'y':
-                #         pos = (u, i, v)
-                #     elif axis == 'x':
-                #         pos = (i, u, v)
-                
-                #     faces.append(Face(position=pos, dimensions=(w,h), orientation=orient, type=ftype))
-
+                    faces.append(Face(position=pos, dimensions=(w, h), orientation=orientation, type=ftype))
     return faces
 ```
 
 **Edge Cases and Pitfalls:**
-- Precision: The algorithm relies on integer voxel types. Floating point comparisons are not used.
-- Boundaries: The `is_exposed` function handles grid boundaries by returning `True`, ensuring faces on the exterior of the grid are generated.
-- Degenerate Input: If the grid is empty or contains only 0s, the output will be an empty list of faces.
+- Boundaries: The `is_exposed` function handles grid boundaries by returning `True`, ensuring faces on the exterior of the grid are generated [S1, unofficial].
 
 ## Subtopics
 
@@ -332,18 +136,10 @@ Optimizes memory usage by packing quad data into binary formats, suitable for GP
 Generalizes the greedy approach to non-cubic voxel shapes.
 
 ## Operating characteristics
-- Time Complexity: $O(N)$ where $N$ is the number of voxels, as each voxel is processed a constant number of times (once per axis direction).
-- Memory Complexity: $O(N)$ for storing the voxel grid and the output faces.
 - Measured Performance: Not given in the sources.
-- Scaling: Performance scales linearly with grid size.
-- Strengths: Simple to implement, effective at reducing triangle count for blocky structures.
-- Limitations: Does not handle curved surfaces or non-cubic voxels. The 8x worst-case bound is loose for many scenes.
-- When to use: When rendering voxel-based worlds with simple geometry.
-- When not: When high-frequency detail or smooth surfaces are required.
 
 ## Background
-Origin: The method is described in an unofficial GitHub repository by Bertil Braun [S1, unofficial]. It extends the 2D greedy meshing algorithm to 3D.
-History: The 2D greedy meshing algorithm was popularized by 0fps.net [S1, unofficial].
+Origin: The method is described in an unofficial GitHub repository by Bertil Braun [S1, unofficial]. It extends the 2D greedy meshing algorithm to 3D [S1, unofficial].
 Usage: Used in computer graphics, games, and simulations to improve performance by reducing the number of faces [S1, unofficial].
 
 ## Sources

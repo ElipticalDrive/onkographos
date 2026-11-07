@@ -10,22 +10,22 @@ The method extends the binary lookup table technique to viewing directions where
 
 ### Inputs and Outputs
 **Inputs:**
-*   Volume dimensions: $X, Y, Z$.
-*   Binary volume mask $B$ indicating opaque voxels (1) and transparent voxels (0).
-*   Current viewing direction defined by points $p_0$ and $p_1$.
+*   Volume dimensions: $X, Y, Z$ [S1, unofficial].
+*   Binary volume mask $B$ indicating opaque voxels (1) and transparent voxels (0) [S2, unofficial].
+*   Current viewing direction defined by points $p_0$ and $p_1$ [S1, unofficial].
 *   Super cell size $S$ (integer, typically 1-4) [S1, unofficial].
 
 **Outputs:**
-*   Rotated binary mask.
-*   Final rendered image.
+*   Rotated binary mask [S1, unofficial].
+*   Final rendered image [S1, unofficial].
 
 ### Data Structures
 The binary volume is stored in an extended integer array to handle bitwise shifts safely [S1, unofficial]:
 
-*   `mask[depth][height][width]`: Extended integer array.
-    *   `depth = (Z + 31) div 32`
-    *   `height = Y + Z`
-    *   `width = X + Z`
+*   `mask[depth][height][width]`: Extended integer array [S1, unofficial].
+    *   `depth = (Z + 31) div 32` [S1, unofficial].
+    *   `height = Y + Z` [S1, unofficial].
+    *   `width = X + Z` [S1, unofficial].
     *   The array is extended by $Z/2$ rows filled with zeros along the x and y axes in both directions to prevent bits from shifting out of bounds [S1, unofficial].
 *   `shift_x[depth]`: Integer array storing binary vectors of size $Z$. Indicates which z-positions (slices) need to be shifted in the current shearing phase [S1, unofficial].
 *   `shift_y[depth]`: Integer array for y-direction shifts (analogous to `shift_x`) [S1, unofficial].
@@ -48,12 +48,12 @@ The shift vector `shift_x` is computed by comparing the new interpolated x-coord
 $$ x = \frac{x_0 \cdot (l - z) + x_1 \cdot z}{l} $$
 
 Where:
-*   $x_0 = trans\_x[0] - 1.0$
-*   $x_1 = trans\_x[Z-1] + 1.0$
-*   $l = Z - 1$
-*   $z$ is the current slice index.
+*   $x_0 = trans\_x[0] - 1.0$ [S1, unofficial].
+*   $x_1 = trans\_x[Z-1] + 1.0$ [S1, unofficial].
+*   $l = Z - 1$ [S1, unofficial].
+*   $z$ is the current slice index [S1, unofficial].
 
-If $\lfloor x \rfloor \neq \lfloor trans\_x[z] \rfloor$, the bit corresponding to $z$ is set in `shift_x`.
+If $\lfloor x \rfloor \neq \lfloor trans\_x[z] \rfloor$, the bit corresponding to $z$ is set in `shift_x` [S1, unofficial].
 
 **Shear Operation:**
 The shear operation processes 32 voxels in each step of the internal loop. The direction of the loop depends on the half of the depth array [S1, unofficial]:
@@ -61,55 +61,48 @@ The shear operation processes 32 voxels in each step of the internal loop. The d
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def shear_left(mask, shift_x, depth, height, width):
     """
     Performs one shear step in the left direction.
-    mask: int[depth][height][width]
-    shift_x: int[depth]
+    mask: list of list of list of int
+    shift_x: list of int
     """
-    for k in range(0, depth // 2):
-        for j in range(0, height):
-            for i in range(0, width - 1):
-                # Shift bits from i+1 to i if shift_x[k] has bit set
-                mask[k][j][i] = (mask[k][j][i] & ~shift_x[k]) | \
-                                (mask[k][j][i+1] & shift_x[k])
-            # Clear bits that shifted out of the right edge
-            mask[k][j][width-1] &= ~shift_x[k]
-
+    # First half of depth array: shift bits from i+1 to i
+    for k in range(depth // 2):
+        for j in range(height):
+            for i in range(width - 1):
+                mask[k][j][i] = (mask[k][j][i] & ~shift_x[k]) | (mask[k][j][i+1] & shift_x[k])
+            mask[k][j][width - 1] &= ~shift_x[k]
+            
+    # Second half of depth array: shift bits from i-1 to i
     for k in range(depth // 2, depth):
-        for j in range(0, height):
+        for j in range(height):
             for i in range(width - 1, 0, -1):
-                # Shift bits from i-1 to i if shift_x[k] has bit set
-                mask[k][j][i] = (mask[k][j][i] & ~shift_x[k]) | \
-                                (mask[k][j][i-1] & shift_x[k])
-            # Clear bits that shifted out of the left edge
+                mask[k][j][i] = (mask[k][j][i] & ~shift_x[k]) | (mask[k][j][i-1] & shift_x[k])
             mask[k][j][0] &= ~shift_x[k]
 
-def compute_new_shift_x(trans_x, shift_x, Z):
+def compute_new_shift_x(trans_x, shift_x, Z, depth):
     """
     Computes the new shift_x array based on incremental rotation.
-    trans_x: double[Z] (modified in place)
-    shift_x: int[depth] (modified in place)
+    trans_x: list of float (modified in place)
+    shift_x: list of int (modified in place)
     """
-    x0 = trans_x[0] -= 1.0
-    x1 = trans_x[Z-1] += 1.0
+    trans_x[0] -= 1.0
+    trans_x[Z - 1] += 1.0
+    x0 = trans_x[0]
+    x1 = trans_x[Z - 1]
     bit = 0x80000000
     l = Z - 1
     
-    for z in range(0, Z):
+    for z in range(Z):
         x = (x0 * (l - z) + x1 * z) / l
-        if floor(x) != floor(trans_x[z]):
-            # Set bit at position z % 32 in shift_x[z // 32]
-            shift_x[z // 32] |= (bit >> (z % 32))
+        if math.floor(x) != math.floor(trans_x[z]):
+            shift_x[z // 32] |= bit >> (z % 32)
         else:
             # Clear bit at position z % 32 in shift_x[z // 32]
-            # Note: Source uses |= ~bit, which is equivalent to clearing if bit is 1
-            # However, standard clearing is & ~bit. The source code snippet 
-            # uses |= ~(bit >> (z % 32)). This sets all bits EXCEPT the target bit.
-            # To clear only the target bit, one should use & ~. 
-            # The source snippet: shift_x[z/32] |= ~(bit >> (z % 32);
-            # This is likely a typo in the source or implies a specific bit manipulation context.
-            # Standard interpretation for clearing a bit:
+            # Note: Source uses |= ~(...), which is a known typo for &= ~(...)
             shift_x[z // 32] &= ~(bit >> (z % 32))
         trans_x[z] = x
 ```
@@ -126,20 +119,20 @@ def compute_new_shift_x(trans_x, shift_x, Z):
 
 ## Operating characteristics
 *   **Time Complexity:** Shearing time decreases with larger super cell sizes, while rendering time increases. The optimal cell size balances these two [S1, unofficial].
-*   **Memory Complexity:** Requires extended integer arrays for the mask and translation tables.
+*   **Memory Complexity:** Requires extended integer arrays for the mask and translation tables [S1, unofficial].
 *   **Measured Performance:**
     *   On SGI Indy workstation, for $128 \times 128 \times 113$ CT head:
-        *   Cell size 1: 6.87 Hz (0.019s shear, 0.114s render)
-        *   Cell size 2: 8.64 Hz (0.005s shear, 0.107s render)
-        *   Cell size 3: 8.11 Hz (0.002s shear, 0.118s render)
-        *   Cell size 4: 6.26 Hz (0.001s shear, 0.156s render)
+        *   Cell size 1: 6.87 Hz (0.019s shear, 0.114s render) [S1, unofficial].
+        *   Cell size 2: 8.64 Hz (0.005s shear, 0.107s render) [S1, unofficial].
+        *   Cell size 3: 8.11 Hz (0.002s shear, 0.118s render) [S1, unofficial].
+        *   Cell size 4: 6.26 Hz (0.001s shear, 0.156s render) [S1, unofficial].
     *   On SGI Indy workstation, for $256 \times 256 \times 225$ CT head:
-        *   Cell size 1: 1.21 Hz (0.160s shear, 0.590s render)
-        *   Cell size 2: 1.81 Hz (0.040s shear, 0.492s render)
-        *   Cell size 3: 1.78 Hz (0.017s shear, 0.535s render)
+        *   Cell size 1: 1.21 Hz (0.160s shear, 0.590s render) [S1, unofficial].
+        *   Cell size 2: 1.81 Hz (0.040s shear, 0.492s render) [S1, unofficial].
+        *   Cell size 3: 1.78 Hz (0.017s shear, 0.535s render) [S1, unofficial].
         *   Cell size 4: 1.37 Hz (0.009s shear, 0.709s render) [S1, unofficial].
-*   **Strengths:** Provides interactive frame rates without specialized hardware. Precisely skips empty regions.
-*   **Limitations:** Requires pre-classification of the volume. Low opacity transfer functions significantly slow down rendering.
+*   **Strengths:** Provides interactive frame rates without specialized hardware. Precisely skips empty regions [S1, unofficial].
+*   **Limitations:** Requires pre-classification of the volume. Low opacity transfer functions significantly slow down rendering [S1, unofficial].
 *   **When to use:** Fast previewing of iso-surface rendering with interactive viewing direction. Suitable for surface-oriented algorithms where rays terminate after reaching an opaque surface [S1, unofficial].
 
 ## Background

@@ -3,48 +3,47 @@
 Also called: Joint Histogram
 
 ## Overview
-A 2D histogram visualization maps the frequency of co-occurring scalar values in a volume to a 2D grid, where each bin's color intensity represents the voxel count. It serves as a visual aid to identify sparse regions in the range space and material boundaries, distinguishing itself from continuous scatterplots by using discrete bins for easier implementation and clearer sparse region conveyance [S1].
+A precomputed 2D histogram used as a visual aid to convey sparse regions of the range space, colored by the number of voxels in each bin [S1]. It sets itself apart from continuous scatterplots by using discrete bins for ease of implementation and better conveyance of sparse data [S1].
 
 ## How it works
-**Inputs:** A volume dataset with scalar fields. For the line-based variant, gradient direction information is required to determine sampling axes [S2].
-**Outputs:** A 2D image (histogram) where pixel intensity corresponds to bin counts [S1, S2].
+**Inputs:** A dataset of scalar fields (e.g., distance fields, scalar values).
+**Outputs:** A 2D histogram image where pixel intensity or color represents voxel counts.
 
 **Data Structures:**
-1.  **2D Histogram Grid:** A 2D array of integer counters. Dimensions correspond to the discretized range of the two scalar fields being compared.
-2.  **Line Representation (Variant):** A set of line segments defined by endpoints on two parallel axes [S2].
+*   **Histogram Grid:** A 2D array of integer counters. The dimensions correspond to the discretized ranges of the two scalar fields being compared.
+*   **Bin Mapping:** A mapping function that assigns a scalar value pair $(s_1, s_2)$ to a specific bin index $(i, j)$ based on the defined range and resolution of the histogram.
 
 **Steps:**
-1.  **Compute Histogram:** Iterate through the volume data. For each voxel (or sample point), determine its scalar values $(s_1, s_2)$ for the two dimensions. Increment the counter in the corresponding bin of the 2D histogram grid [S1].
-    *   *Note:* The computation is $O(N)$ where $N$ is the number of samples [S1].
-2.  **Color Mapping:** Map the integer count in each bin to a color intensity. Higher counts result in higher intensity/brightness [S1].
-3.  **Line-Based Rendering (Variant):**
-    *   Define two parallel axes: a bottom axis for scalar values read in the gradient direction (increasing left to right) and a top axis for scalar values sampled opposite to the gradient direction [S2].
-    *   For each bin with a non-zero count representing a pair $(s_1, s_2)$, draw a line connecting the position $s_1$ on the bottom axis to $s_2$ on the top axis [S2].
-    *   Set the intensity of the line proportional to the bin count (number of transitions) [S2].
+1.  **Initialize:** Create a 2D histogram grid of size $W \times H$ (width and height corresponding to the number of bins for each scalar dimension) and initialize all counters to zero.
+2.  **Sample:** Iterate through the input dataset. For each voxel or sample point, extract the pair of scalar values $(s_1, s_2)$.
+3.  **Bin Assignment:** Map the scalar pair $(s_1, s_2)$ to the corresponding bin $(i, j)$ in the histogram grid. This involves clamping the values to the valid range and scaling them to the bin indices.
+4.  **Increment:** Increment the counter at `histogram[i][j]` by one for each sample falling into that bin.
+5.  **Visualization:** Render the histogram grid. Each pixel $(i, j)$ is colored based on the value of `histogram[i][j]`. Typically, higher counts are mapped to brighter or more saturated colors to highlight dense regions, while sparse regions are shown with lower intensity or distinct colors.
 
 **Parameters:**
-*   **Bin Resolution:** Not given in the sources.
-*   **Segment Size:** In the context of fiber surface ray casting, segment sizes (e.g., 0.03 voxel units) affect convergence and performance, but this is specific to the ray casting application rather than the histogram generation itself [S1].
+*   **Histogram Resolution:** The number of bins along each axis. Not given in the sources.
+*   **Scalar Range:** The minimum and maximum values for each scalar dimension that define the histogram's domain. Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-*   **Floating Point Error:** For very small segment sizes, floating point errors may limit precision [S1].
-*   **Discretization:** The choice of discrete bins may miss sparse regions compared to continuous scatterplots, though it is chosen for ease of implementation [S1].
+*   **Floating Point Error:** For very small segment sizes or fine discretizations, floating-point errors may affect bin assignment [S1].
+*   **Discretization:** The choice of bin size affects the granularity of the visualization. Too coarse may obscure details; too fine may result in sparse, noisy histograms [S1].
 
 ## Subtopics
 
-### Line-based Histogram for 2D Scalar Pairs
-A visualization method that displays the 2D histogram of scalar value pairs sampled along the gradient direction using lines instead of point primitives to make material boundaries intuitive [S2]. Dense vertical lines represent homogeneous regions, while diagonal lines illustrate boundaries between two materials, with start and end points indicating the scalar values of the different materials [S2]. It uses two parallel axes: the bottom for the scalar in the gradient direction and the top for the scalar opposite to it [S2]. Line intensity increases with the number of transitions [S2].
+### [Line-based Histogram for 2D Scalar Pairs](6702-line-based-histogram-for-2d-scalar-pairs.md)
+A visualization method for displaying the 2D histogram of scalar value pairs sampled along the gradient direction, using lines instead of point primitives to make material boundaries intuitive. It sets itself apart from standard 2D histogram visualizations (which use colored bins or points) by mapping histogram entries to geometric primitives that explicitly connect the scalar values of the two materials at a boundary, allowing users to directly perceive homogeneous regions and material interfaces.
 
 ## Operating characteristics
 *   **Time Complexity:** Histogram computation is $O(N)$, where $N$ is the number of samples [S1].
-*   **Performance:** Histogram computation is generally on the order of seconds for large datasets and is not a bottleneck; it can be computed simultaneously with other preprocessing steps like macrocell generation [S1].
-*   **Memory:** Requires storage for the 2D histogram grid. The size depends on the bin resolution and scalar range [S1].
-*   **Strengths:** Easier to implement than continuous scatterplots; better conveys sparse regions of the range space; provides intuitive visualization of material boundaries in the line-based variant [S1, S2].
-*   **Limitations:** Discrete nature may lose some continuity compared to scatterplots; precision limited by floating point errors at very small scales [S1].
+*   **Performance:** Histogram computation is generally on the order of seconds for large datasets and is not a bottleneck [S1]. It can be computed simultaneously alongside other preprocessing steps like macrocell generation [S1].
+*   **Memory:** Requires memory proportional to the product of the histogram dimensions ($W \times H$). Not given in the sources.
+*   **Strengths:** Ease of implementation; effectively conveys sparse regions of the range space [S1].
+*   **Limitations:** Discrete nature may lose some continuity compared to scatterplots; binning artifacts may occur [S1].
+*   **When to Use:** When a quick visual overview of the joint distribution of two scalar fields is needed, particularly to identify sparse regions or material boundaries [S1].
+*   **When Not to Use:** When continuous distribution details are critical or when the dataset is too small to benefit from binning [S1].
 
 ## Background
-The 2D histogram visualization was introduced in the context of direct multifield volume ray casting of fiber surfaces [S1]. It was proposed as an alternative to continuous scatterplots to simplify implementation and improve the visibility of sparse regions in the range space [S1]. The line-based variant was developed to make boundary relationships between materials immediately visible by leveraging gradient-aligned sampling [S2].
+Originated in the context of fiber surface visualization, specifically in the paper "Direct Multifield Volume Ray Casting of Fiber Surfaces" [S1]. It was introduced as an alternative to continuous scatterplots to provide a more efficient and intuitive way to explore fiber surfaces by highlighting material interfaces [S1].
 
 ## Sources
 [S1] Direct Multifield Volume Ray Casting of Fiber Surfaces, https://doi.org/10.1109/tvcg.2016.2599040, fetched 2026-10-26
-[S2] PDF Lighting Transfer Functions Using Gradient Aligned Sampling, https://www.cs.ucdavis.edu/~ma/papers/lightingtf.pdf, fetched 2026-10-29
