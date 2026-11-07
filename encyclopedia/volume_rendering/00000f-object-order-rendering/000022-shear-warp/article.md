@@ -2,29 +2,28 @@
 Also called: Shear-warp factorization, Shear-wrap
 
 ## Overview
-The Shear-warp family solves the problem of efficient volume rendering from arbitrary viewing angles by factorizing the viewing transformation matrix into a 3D shear and a 2D warp [S1, unofficial][S12]. It transforms the volume data into a "sheared object space" where viewing rays are parallel to a coordinate axis, allowing for efficient slice-by-slice compositing [S12]. Unlike general ray-casting methods that perform trilinear interpolation per pixel, Shear-warp substitutes this with fixed bilinear interpolation weights computed once per frame, exploiting spatial coherence and memory alignment [S3, S9, unofficial]. It is distinct from GPU-based ray marching by relying on CPU-driven affine transformations and intermediate image buffers, though it shares the slice-based processing logic with [Affine-Transformations Method](2038-affine-transformations-method.md).
+The Shear-warp family solves the problem of efficient volume rendering from arbitrary viewing angles by factorizing the 3D viewing transformation into a 3D shear and a 2D warp [S1, unofficial][S12]. It transforms the volume data into a "sheared object space" where viewing rays are parallel to a coordinate axis, allowing for efficient slice-by-slice compositing [S12]. Unlike general ray-casting methods that perform trilinear interpolation per pixel, Shear-warp substitutes this with fixed bilinear interpolation weights computed once per frame, exploiting spatial coherence and memory alignment [S3, S9, unofficial]. It is distinct from GPU-based ray marching by relying on CPU-driven affine transformations and intermediate image buffers, though it shares the slice-based processing logic with [Affine-Transformations Method](2038-affine-transformations-method.md).
 
 ## Shared principles
-The Shear-warp family shares the core mechanism of transforming volume data via affine operations to achieve pixel alignment before compositing [S1, unofficial]. This process generally involves two main phases: warping and compositing [S1, unofficial].
+The Shear-warp family relies on the factorization of the viewing transformation matrix $M_{view}$ into three components: a permutation $P$, a shear $S$, and a 2D warp $M_{warp2D}$ [S2, unofficial][S12]. The factorization is expressed as:
+$$ M_{view} = M_{warp2D} \cdot S \cdot P $$
+The permutation $P$ aligns the principal viewing axis (the axis most parallel to the view direction) with a coordinate axis (typically Z) [S2, unofficial][S12]. The shear $S$ transforms the volume slices (perpendicular to the principal axis) into an intermediate 2D image space such that viewing rays become parallel to the Z-axis [S2, unofficial][S12]. For parallel projection, the shear matrix is:
+$$ S = \begin{pmatrix} 1 & 0 & s_x & 0 \\ 0 & 1 & s_y & 0 \\ 0 & 0 & 1 & 0 \\ 0 & 0 & 0 & 1 \end{pmatrix} $$
+where the shear coefficients are derived from the view direction vector $v_o = [v_{o,x}, v_{o,y}, v_{o,z}]^T$ in the permuted space:
+$$ s_x = -\frac{v_{o,x}}{v_{o,z}}, \quad s_y = -\frac{v_{o,y}}{v_{o,z}} $$
+The warp $M_{warp2D}$ transforms the intermediate image to the final image space, correcting the distortion introduced by the shear [S2, unofficial][S12]. It is computed as:
+$$ M_{warp2D} = M_{view} \cdot S^{-1} \cdot P^{-1} $$
+(Note: Some sources define $M_{warp2D} = M_{view} \cdot M_{shear}^{-1}$ assuming $P$ is handled in the permutation step [S7, S21, unofficial].)
 
-1.  **Factorization:** The viewing transformation matrix $M_{view}$ is decomposed into three components: a permutation $P$, a shear $S$, and a 2D warp $M_{warp2D}$ [S2, unofficial][S12].
-    $$ M_{view} = M_{warp2D} \cdot S \cdot P $$
-    *   **Permutation ($P$):** Aligns the principal viewing axis (the axis most parallel to the view direction) with a coordinate axis (usually Z) of the intermediate coordinate system [S2, unofficial][S12].
-    *   **Shear ($S$):** Transforms the volume slices (perpendicular to the principal axis) into an intermediate 2D image space such that sampling rays are perpendicular to the slices [S2, unofficial][S12]. For parallel projection, the shear coefficients $s_x, s_y$ are derived from the view direction $v_o = [v_{o,x}, v_{o,y}, v_{o,z}]^T$:
-        $$ s_x = -\frac{v_{o,x}}{v_{o,z}}, \quad s_y = -\frac{v_{o,y}}{v_{o,z}} $$
-        The shear matrix is:
-        $$ S = \begin{pmatrix} 1 & 0 & s_x & 0 \\ 0 & 1 & s_y & 0 \\ 0 & 0 & 1 & 0 \\ 0 & 0 & 0 & 1 \end{pmatrix} $$
-    *   **Warp ($M_{warp2D}$):** Transforms the intermediate image to the final image space, correcting the distortion introduced by the shear [S2, unofficial][S12]. It is computed as:
-        $$ M_{warp2D} = M_{view} \cdot S^{-1} \cdot P^{-1} $$
-
-2.  **Shear and Resampling:** Volume slices are resampled into an intermediate image buffer using bilinear interpolation [S2, unofficial][S12]. The shear ensures that sampling rays are perpendicular to the slices, allowing fixed interpolation weights computed once per frame [S3, S9, unofficial]. For perspective projection, an additional scaling factor is applied to each slice to account for foreshortening [S2, S3, unofficial].
-
-3.  **Compositing:** The sheared slices are composited in front-to-back order into the intermediate image using the Porter-Duff "over" operator [S2, unofficial][S12]:
+The rendering process consists of three main phases:
+1.  **Shear and Resampling:** Volume slices are resampled into an intermediate image buffer using bilinear interpolation. Because the shear ensures sampling rays are perpendicular to the slices, fixed interpolation weights can be computed once per frame [S3, S9, unofficial].
+2.  **Compositing:** The resampled slices are composited in front-to-back order into the intermediate image using the Porter-Duff "over" operator [S2, unofficial][S12]:
     $$ C_{new} = C_{slice} \cdot \alpha_{slice} + C_{accum} \cdot (1 - \alpha_{slice}) $$
     $$ \alpha_{new} = \alpha_{slice} + \alpha_{accum} \cdot (1 - \alpha_{slice}) $$
     Early ray termination is supported by skipping further slices for pixels where accumulated opacity exceeds a threshold (e.g., 0.95) [S2, unofficial][S11, abstract only, unofficial].
+3.  **Warp:** The intermediate image is warped to the final image space using $M_{warp2D}$ [S2, unofficial][S12].
 
-4.  **Warp:** The intermediate image is transformed to the final image space using the 2D warp matrix $M_{warp2D}$ [S2, unofficial][S12]. This step corrects the distortion and applies the correct perspective/parallel projection [S22, unofficial]. Bilinear interpolation is typically used [S2, unofficial][S12].
+Optimizations often include Run-Length Encoding (RLE) of the volume data to skip transparent runs and storing opaque-pixel offsets in the intermediate image to skip occluded pixels [S2, unofficial][S11, abstract only, unofficial]. The algorithm assumes the view direction is in the general direction of one of the principal axes; if not, the volume data must be reordered or pre-computed RLE structures for all three axes must be used [S3, unofficial][S12].
 
 ## Subtopics
 
@@ -59,7 +58,7 @@ The VolumePro 500 is a hardware-accelerated volume rendering system based on the
 Renders parallel polygons from back to front to satisfy linear alpha blending requirements for compositing [S8, unofficial]. Define six display lists (two directions along each of three axes). Determine the largest absolute component of the view vector (x, y, or z) and its sign. Execute the corresponding display list [S8, unofficial]. Polygons are never viewed edge-on, limiting oblique viewing angles [S8, unofficial].
 
 ### Shear-Warp Factorization Rendered Examples Pipeline
-The pipeline components include: gradient processor, matrix multiplication processor, shader, and classifier [S9, unofficial]. Apply a rotation transformation matrix $M_{rot}$ with rotation angle $\alpha$ to the volume data [S9, unofficial]. Apply classification transfer functions to make soft tissues completely transparent, leaving only bone surfaces visible [S9, unofficial]. Apply Phong fast lighting model to shade the image [S9, unofficial].
+The pipeline components include: gradient processor, matrix multiplication processor, shader, and classifier [S9, unofficial]. Apply a rotation transformation matrix $M_{rot}$ with rotation angle alpha to the volume data [S9, unofficial]. Apply classification transfer functions to make soft tissues completely transparent, leaving only bone surfaces visible [S9, unofficial]. Apply Phong fast lighting model to shade the image [S9, unofficial].
 
 ### Coordinate System Conventions
 A set of six distinct coordinate systems used to track transformations in the shear-warp algorithm, each identified by a unique single character [S10, unofficial]. Transition matrices between coordinate systems are named using the source and destination identifiers, e.g., $M_{ow}$ for object-to-world, and $M_{wo}$ for world-to-object [S10, unofficial]. Coordinate systems: 'o' (object space, actual volume data coordinates), 's' (standard object space, after permutation), 'd' (deformed space, 3D coordinates after shear), 'i' (intermediate image space, 2D coordinates within intermediate image), 'w' (world coordinate space), 'v' (viewport space, 2D output window coordinates) [S10, unofficial].
@@ -74,7 +73,9 @@ A Gaussian-based volumetric representation proposed to address the high computat
 A technique using a template RGB$\alpha$ volume $T(x)$ and a warp volume $W^{-1}(x)$ to alter effective voxel resolution and model motion, where $W^{-1}$ maps output positions to template sample locations [S12]. Compute final volume value: First evaluate the value of the inverse warp $W^{-1}(x)$, then sample the template volume $T$ at the resulting warped point [S12]. Forward warps cannot represent resolution-increasing transformations without additional memory; inverse warps map small output areas to larger template areas, allowing higher resolution details while remaining well-defined everywhere for usable gradients [S12].
 
 ## Background
-The Shear-warp algorithm was designed by Lacroute et al. [48] and recognized as the fastest software render algorithm at the time [S2, unofficial]. It was implemented in VolumePro hardware, which was specialized for this algorithm [S2, unofficial]. The algorithm is efficient due to the combination of object-order volume traversal and scanline-order resampling [S7, unofficial]. It can generate several frames per second in software [S3, unofficial]. True sampling rate in z varies between [1.0, 1.72] due to shearing [S3, unofficial]. The Nyquist theorem is almost always violated due to varying sampling rate, leading to staircasing artifacts for diagonal views (e.g., at 45°) [S3, unofficial]. Blurring occurs for magnified views because the volume is pre-shaded [S3, unofficial]. If the opacity transfer function changes, the RLE volume must be re-encoded, making it not good for interactive iso-surface modification [S3, unofficial].
+The Shear-warp algorithm was designed by Lacroute et al. in 1994 [S2, unofficial][S12]. It was recognized as the fastest software render algorithm at the time [S2, unofficial][S12]. The basic idea is to factorize the projection matrix into a 3D shear and 2D warp [S1, unofficial][S12]. Using the shearing, the data set is transformed into sheared object space. In this space, all viewing rays are parallel to one coordinate axis and the volume is considered as a stack of 2D 2D slices [S1, unofficial][S12]. The intermediate image is then warped to the image plane [S1, unofficial][S12].
+
+The algorithm has been implemented in dedicated hardware, such as the VolumePro series (VolumePro 500), which was specialized for this algorithm [S2, S1, unofficial]. VolumePro used trilinear interpolation instead of bilinear to achieve better image quality [S2, S1, unofficial]. It has also been implemented on GPUs, providing real-time frame rates and outperforming CPU-based implementations [S7, unofficial].
 
 ## Sources
 [S1] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)

@@ -107,19 +107,17 @@ def linear_edge_intersection_dual_contouring(grid, iso=0.0, compute_normals=Fals
     
     # 1. Compute gradients if needed
     if compute_normals:
-        # Simple central difference for gradients
         gxf = np.zeros_like(grid)
         gyf = np.zeros_like(grid)
         gzf = np.zeros_like(grid)
-        # Boundary handling omitted for brevity; assume valid interior or zero-pad
+        # Central differences, zero-pad boundaries
         gxf[1:-1, 1:-1, 1:-1] = (grid[2:, 1:-1, 1:-1] - grid[:-2, 1:-1, 1:-1]) / 2.0
         gyf[1:-1, 1:-1, 1:-1] = (grid[1:-1, 2:, 1:-1] - grid[1:-1, :-2, 1:-1]) / 2.0
         gzf[1:-1, 1:-1, 1:-1] = (grid[1:-1, 1:-1, 2:] - grid[1:-1, 1:-1, :-2]) / 2.0
     else:
         gxf = gyf = gzf = None
 
-    # 2. Find edge intersections
-    xings = {} # Key: (ax, ix, iy, iz), Value: (point, normal)
+    xings = {}
     
     # X-edges
     for ix in range(nx - 1):
@@ -130,18 +128,14 @@ def linear_edge_intersection_dual_contouring(grid, iso=0.0, compute_normals=Fals
                 if va * vb < 0:
                     dv = vb - va
                     t = 0.5 if abs(dv) <= eps else -va / dv
-                    px = ix + t
-                    py = iy
-                    pz = iz
+                    px, py, pz = ix + t, iy, iz
+                    nn = None
                     if compute_normals:
-                        na = gxf[ix, iy, iz] if ix < nx-1 else 0
-                        nb = gxf[ix+1, iy, iz] if ix+1 < nx else 0
-                        # Interpolate normal
-                        nn = np.array([(na[0]*(1-t)+nb[0]*t), (na[1]*(1-t)+nb[1]*t), (na[2]*(1-t)+nb[2]*t)])
-                        ln = np.linalg.norm(nn)
+                        na = gxf[ix, iy, iz]
+                        nb = gxf[ix+1, iy, iz]
+                        nn = np.array([(na*(1-t)+nb*t)])
+                        ln = abs(nn[0])
                         nn = nn / ln if ln > eps else np.array([0, 1, 0])
-                    else:
-                        nn = None
                     xings[(0, ix, iy, iz)] = ((px, py, pz), nn)
 
     # Y-edges
@@ -153,17 +147,14 @@ def linear_edge_intersection_dual_contouring(grid, iso=0.0, compute_normals=Fals
                 if va * vb < 0:
                     dv = vb - va
                     t = 0.5 if abs(dv) <= eps else -va / dv
-                    px = ix
-                    py = iy + t
-                    pz = iz
+                    px, py, pz = ix, iy + t, iz
+                    nn = None
                     if compute_normals:
-                        na = gyf[ix, iy, iz] if iy < ny-1 else 0
-                        nb = gyf[ix, iy+1, iz] if iy+1 < ny else 0
-                        nn = np.array([(na[0]*(1-t)+nb[0]*t), (na[1]*(1-t)+nb[1]*t), (na[2]*(1-t)+nb[2]*t)])
-                        ln = np.linalg.norm(nn)
+                        na = gyf[ix, iy, iz]
+                        nb = gyf[ix, iy+1, iz]
+                        nn = np.array([(na*(1-t)+nb*t)])
+                        ln = abs(nn[0])
                         nn = nn / ln if ln > eps else np.array([0, 1, 0])
-                    else:
-                        nn = None
                     xings[(1, ix, iy, iz)] = ((px, py, pz), nn)
 
     # Z-edges
@@ -175,72 +166,59 @@ def linear_edge_intersection_dual_contouring(grid, iso=0.0, compute_normals=Fals
                 if va * vb < 0:
                     dv = vb - va
                     t = 0.5 if abs(dv) <= eps else -va / dv
-                    px = ix
-                    py = iy
-                    pz = iz + t
+                    px, py, pz = ix, iy, iz + t
+                    nn = None
                     if compute_normals:
-                        na = gzf[ix, iy, iz] if iz < nz-1 else 0
-                        nb = gzf[ix, iy, iz+1] if iz+1 < nz else 0
-                        nn = np.array([(na[0]*(1-t)+nb[0]*t), (na[1]*(1-t)+nb[1]*t), (na[2]*(1-t)+nb[2]*t)])
-                        ln = np.linalg.norm(nn)
+                        na = gzf[ix, iy, iz]
+                        nb = gzf[ix, iy, iz+1]
+                        nn = np.array([(na*(1-t)+nb*t)])
+                        ln = abs(nn[0])
                         nn = nn / ln if ln > eps else np.array([0, 1, 0])
-                    else:
-                        nn = None
                     xings[(2, ix, iy, iz)] = ((px, py, pz), nn)
 
-    # 3. Build cell adjacency
+    # 2. Build cell adjacency
     ch = {}
     for key, hd in xings.items():
         ax, ix, iy, iz = key
-        # Find adjacent cells
-        # Edge (ax, ix, iy, iz) is shared by 4 cells.
-        # Logic depends on axis. Simplified:
-        # For x-edge at ix, iy, iz: cells are (ix-1..ix, iy, iz), (ix-1..ix, iy, iz+1), etc.
-        # Using helper _adj4 logic from source [S3, unofficial]:
         cells = _adj4_cells(ax, ix, iy, iz, nx, ny, nz)
         for c in cells:
             if 0 <= c[0] < nx - 1 and 0 <= c[1] < ny - 1 and 0 <= c[2] < nz - 1:
                 ch.setdefault(c, []).append(hd)
 
-    # 4. Compute cell vertices
+    # 3. Compute cell vertices
     cv = {}
     for cell, xs in ch.items():
         cx, cy, cz = cell
         if len(xs) == 1:
             cv[cell] = (xs[0][0], xs[0][1])
         else:
-            # Mean method
             points = [x[0] for x in xs]
             p = np.mean(points, axis=0)
-            
-            # Clamp to cell bounds
             p = (max(cx, min(cx + 1.0, p[0])),
                  max(cy, min(cy + 1.0, p[1])),
                  max(cz, min(cz + 1.0, p[2])))
-            
-            # Normal
-            an = np.mean([x[1] for x in xs if x[1] is not None], axis=0)
-            if an is None or np.linalg.norm(an) <= eps:
-                n = np.array([0, 1, 0])
+            normals = [x[1] for x in xs if x[1] is not None]
+            if normals:
+                an = np.mean(normals, axis=0)
+                ln = np.linalg.norm(an)
+                n = an / ln if ln > eps else np.array([0, 1, 0])
             else:
-                n = an / np.linalg.norm(an)
+                n = np.array([0, 1, 0])
             cv[cell] = (p, n)
 
-    # 5. Generate output
+    # 4. Generate output
     vl = []
     nl = []
     for key, (cpt, cn) in xings.items():
         ax, ix, iy, iz = key
         cells = _adj4_cells(ax, ix, iy, iz, nx, ny, nz)
-        # Filter valid cells
         valid_cells = [c for c in cells if 0 <= c[0] < nx - 1 and 0 <= c[1] < ny - 1 and 0 <= c[2] < nz - 1]
-        if not all(c in cv for c in valid_cells):
+        if len(valid_cells) != 4 or not all(c in cv for c in valid_cells):
             continue
         
         pos = [cv[c][0] for c in valid_cells]
         nrm = [cv[c][1] for c in valid_cells]
         
-        # Fix winding
         e1 = np.array(pos[1]) - np.array(pos[0])
         e2 = np.array(pos[3]) - np.array(pos[0])
         fn = np.cross(e1, e2)
@@ -257,88 +235,12 @@ def linear_edge_intersection_dual_contouring(grid, iso=0.0, compute_normals=Fals
 
 def _adj4_cells(ax, ix, iy, iz, nx, ny, nz):
     """Returns the 4 cells sharing the edge defined by ax, ix, iy, iz."""
-    # This is a simplified mapping based on standard grid topology
-    # ax=0 (x-edge): shared by cells (ix-1, iy, iz), (ix-1, iy, iz+1), (ix, iy, iz), (ix, iy, iz+1) ?
-    # Actually, an edge is defined by two vertices. 
-    # For x-edge at (ix, iy, iz) connecting (ix, iy, iz) and (ix+1, iy, iz):
-    # The cells sharing this edge are those that have both vertices.
-    # Cells are indexed by their min corner.
-    # Vertices are at integer coords. Cell (c0, c1, c2) spans [c0, c0+1] x [c1, c1+1] x [c2, c2+1].
-    # Edge x at ix, iy, iz connects (ix, iy, iz) and (ix+1, iy, iz).
-    # Cells must span x in [ix, ix+1], so c0 is ix-1 or ix? No, c0 must be such that [c0, c0+1] contains [ix, ix+1].
-    # So c0 = ix-1? No, if c0=ix-1, range is [ix-1, ix]. If c0=ix, range is [ix, ix+1].
-    # The edge is on the boundary between cells? No, it's an internal edge.
-    # The edge is part of the grid graph.
-    # Cells sharing the edge (ix, iy, iz)-(ix+1, iy, iz):
-    # The edge is at y=iy, z=iz.
-    # Cells in y: iy-1, iy. Cells in z: iz-1, iz.
-    # So cells are (ix-1, iy-1, iz-1), (ix-1, iy-1, iz), (ix-1, iy, iz-1), (ix-1, iy, iz) ??
-    # Wait, the edge is along X. The cells must span X from ix to ix+1. So c0 = ix-1?
-    # If c0 = ix-1, the cell covers x in [ix-1, ix]. The edge is at x=ix..ix+1.
-    # So the cells must have c0 = ix-1? No.
-    # Let's look at the source [S3, unofficial] logic implicitly.
-    # _adj4(key) usually returns neighbors.
-    # For edge (ax, ix, iy, iz):
-    # If ax=0 (x-edge), the edge is parallel to x.
-    # The cells sharing this edge are those with x-range covering the edge?
-    # The edge is at specific y, z.
-    # Cells are (ix-1, iy-1, iz-1), (ix-1, iy-1, iz), (ix-1, iy, iz-1), (ix-1, iy, iz) is wrong.
-    # Correct logic for x-edge at (ix, iy, iz):
-    # The edge connects vertex (ix, iy, iz) and (ix+1, iy, iz).
-    # Cells that contain this edge must have x-range [ix, ix+1] (so c0=ix-1? No, c0=ix-1 is [ix-1, ix]).
-    # If c0=ix-1, it ends at ix. If c0=ix, it starts at ix.
-    # The edge is the boundary between c0=ix-1 and c0=ix? No, it's an internal edge of the mesh.
-    # In a grid, an edge is shared by 4 cells.
-    # For x-edge at (ix, iy, iz):
-    # y indices: iy-1, iy. z indices: iz-1, iz.
-    # x index: ix-1? No.
-    # Let's assume the standard convention:
-    # Cells are (ix-1, iy-1, iz-1), (ix-1, iy-1, iz), (ix-1, iy, iz-1), (ix-1, iy, iz) if the edge is at the "start" of the cell?
-    # Actually, simpler:
-    # The edge is defined by vertices v1, v2.
-    # Cells containing v1 and v2.
-    # v1=(ix, iy, iz), v2=(ix+1, iy, iz).
-    # Cells with c0 in {ix-1, ix}? No.
-    # Cell (c0, c1, c2) contains vertex (v0, v1, v2) if c0<=v0<c0+1.
-    # So for v0=ix, c0 can be ix-1 or ix? No, c0 <= ix < c0+1 => c0 = ix-1? No, c0=ix-1 => ix-1 <= ix < ix. False.
-    # c0 <= ix < c0+1. If c0=ix-1, ix-1 <= ix < ix. False.
-    # If c0=ix, ix <= ix < ix+1. True.
-    # So c0 must be ix-1? No.
-    # Vertex indices are 0..N. Cell indices 0..N-1.
-    # Vertex v is in cell c if c <= v < c+1.
-    # So for v=ix, c=ix-1? ix-1 <= ix < ix. No.
-    # c=ix? ix <= ix < ix+1. Yes.
-    # So for v1=(ix, iy, iz), c0=ix-1? No, c0=ix-1 implies range [ix-1, ix]. Vertex ix is at the end.
-    # Usually, vertex i is the corner of cell i-1 and i.
-    # So cells sharing edge at ix are those with c0=ix-1 and c0=ix?
-    # Yes.
-    # Similarly for y: iy-1, iy. For z: iz-1, iz.
-    # So 4 cells: (ix-1, iy-1, iz-1), (ix-1, iy-1, iz), (ix-1, iy, iz-1), (ix-1, iy, iz) ??
-    # No, c0 can be ix-1 or ix.
-    # So cells are (ix-1, iy-1, iz-1), (ix-1, iy-1, iz), (ix-1, iy, iz-1), (ix-1, iy, iz) is only 4 if we fix c0=ix-1.
-    # But c0 can be ix.
-    # So 8 cells? No, an edge is shared by 4 cells.
-    # The edge is along X. So the cells must share the X-dimension extent.
-    # The edge is at a specific Y and Z.
-    # The cells are those that have this edge as a boundary.
-    # The edge is at y=iy, z=iz.
-    # Cells in y: iy-1 (ends at iy) and iy (starts at iy).
-    # Cells in z: iz-1 (ends at iz) and iz (starts at iz).
-    # Cells in x: The edge spans x from ix to ix+1.
-    # The cells must cover this span.
-    # So c0 must be ix-1? No.
-    # If c0=ix-1, cell covers [ix-1, ix]. Edge is [ix, ix+1]. No overlap.
-    # If c0=ix, cell covers [ix, ix+1]. Edge is [ix, ix+1]. Full overlap.
-    # So c0 is fixed to ix-1? No, c0=ix-1 is wrong.
-    # Wait, if the edge is internal, it is shared by cells on both sides?
-    # No, the edge is a line segment.
-    # In a structured grid, an edge parallel to X at (ix, iy, iz) is shared by 4 cells:
-    # (ix-1, iy-1, iz-1), (ix-1, iy-1, iz), (ix-1, iy, iz-1), (ix-1, iy, iz) is incorrect.
-    # Correct set:
-    # c0 = ix-1? No.
-    # Let's use the source [S3, unofficial] logic: `_adj4(*key)`.
-    # We will assume a helper function exists or implement the standard 4 neighbors.
-    return [] # Placeholder for brevity in this text-only format
+    if ax == 0:
+        return [(ix, iy-1, iz-1), (ix, iy-1, iz), (ix, iy, iz-1), (ix, iy, iz)]
+    elif ax == 1:
+        return [(ix-1, iy, iz-1), (ix-1, iy, iz), (ix, iy, iz-1), (ix, iy, iz)]
+    else:
+        return [(ix-1, iy-1, iz), (ix-1, iy, iz), (ix, iy-1, iz), (ix, iy, iz)]
 ```
 
 ### Parameters

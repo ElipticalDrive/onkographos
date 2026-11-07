@@ -1,19 +1,8 @@
 # Dense grids and memory layout
-
-
 ## Overview
 Dense grids and memory layout define how a continuous volumetric field $f(\mathbf{x})$ is discretized into a regular lattice and stored in linear memory [G]. It solves the problem of mapping 3D spatial coordinates to hardware-accessible memory addresses while balancing spatial locality, memory overhead, and interpolation accuracy [G]. It differs from [Compression](4-compression.md) by focusing on raw data placement rather than entropy reduction, and from [Non-regular volumes](9-non-regular-volumes.md) by enforcing a fixed, uniform topology where every cell in the bounding box exists, regardless of whether it contains data [G].
 
 ## Shared principles
-All volume representations must support two fundamental operations: **storage** (mapping a field $f(\mathbf{x})$ to memory) and **query** (evaluating $f(\mathbf{x})$ at arbitrary coordinates $\mathbf{x}$) [G]. The choice of representation dictates the trade-off between spatial locality, memory overhead, and interpolation accuracy [G].
-
-1. **Domain Discretization:** The continuous domain $\Omega \subset \mathbb{R}^3$ is discretized into a set of elements or samples [G]. For regular grids, this is a lattice $\mathbf{x}_{ijk} = \mathbf{x}_0 + i\Delta x \hat{i} + j\Delta y \hat{j} + k\Delta z \hat{k}$ [G]. For irregular volumes, it is a set of nodes and connectivity graphs [G].
-2. **Value Encoding:** Scalar values are stored as discrete integers or floating-point numbers [G]. The precision (e.g., 8-bit unsigned, 16-bit float, 32-bit float) determines the dynamic range and quantization error [G].
-3. **Interpolation:** Since rays or query points rarely align with sample centers, values must be interpolated [G]. Common kernels include:
-   * **Nearest Neighbor:** $V(P) = V(\text{round}(\mathbf{x}))$ [G].
-   * **Trilinear:** $V(P) = \sum_{i,j,k \in \{0,1\}} w_i w_j w_k V_{ijk}$, where $w$ are distances to grid nodes [G]. Continuous, first-order derivatives.
-   * **Higher-Order:** Bilinear/Bicubic splines or cubic convolution for smoother gradients [G].
-4. **Coordinate Mapping:** A transformation maps world coordinates to texture/grid coordinates [G]. For GPU rendering, this often involves normalizing coordinates to $[0, 1]$ for texture sampling [G].
 
 ## Subtopics
 
@@ -58,7 +47,7 @@ This method defines the memory layout and storage requirements for hardware-base
 
 ### Frustum-shaped voxel buffers
 **Definition:** A voxel buffer where voxel size adapts to distance from the camera: voxels close to the camera are small, those far away are large. These buffers are tied to a camera and follow camera animation [S3, unofficial].
-**Layout:** Resolution in the XY plane is normally locked to camera resolution times a multiplier. The number of Z slices is a user parameter, usually on the order of a few hundred. When viewed from the camera, each row of voxels lines up perfectly with the projection of a pixel into the scene [S3, unofficial].
+**Layout:** Resolution in the XY plane is normally locked to camera resolution times a multiplier [S3, unofficial]. The number of Z slices is a user parameter, usually on the order of a few hundred [S3, unofficial]. When viewed from the camera, each row of voxels lines up perfectly with the projection of a pixel into the scene [S3, unofficial].
 **Implementation:** The transform from world space to voxel space can be implemented by mapping world coordinates to the camera's 0..1 NDC space, then applying a local-to-voxel transform:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
@@ -69,7 +58,7 @@ void FrustumMapping::worldToVoxel(const V3f &wsP, V3f &vsP) {
     localToVoxel(nsP, vsP);
 }
 ```
-**Comparison:** Can be combined with sparse buffers to optimize memory use. Since the coordinate transform is independent of the data structure used for voxel storage, this is straightforward, combining finer detail close to the camera with empty space optimization [S3, unofficial].
+**Comparison:** Can be combined with sparse buffers to optimize memory use [S3, unofficial]. Since the coordinate transform is independent of the data structure used for voxel storage, this is straightforward, combining finer detail close to the camera with empty space optimization [S3, unofficial].
 
 ### Tiled Volume Textures
 **Definition:** A DirectX 11.3/12 feature using hardware virtual addressing to load high-resolution 3D textures by only loading part of the texture onto the GPU at any given time, targeting memory issues while maintaining performance [S4, unofficial].
@@ -79,7 +68,7 @@ void FrustumMapping::worldToVoxel(const V3f &wsP, V3f &vsP) {
 ### Z-curve Texture Memory Layout
 **Definition:** A memory layout for 3D texture memory where z-curves (Morton order) are applied in each 2D slice to enhance spatial locality [S5].
 **Formula:** Memory stride ratio along X, Y, Z axes is $1 : 2 : 6$. $Stride_X : Stride_Y : Stride_Z = 1 : 2 : 6$ [S5].
-**Pitfall:** Taking samples across different 2D slices results in a big memory stride and low texture cache hit rates. Taking samples on the same 2D slice is expected to yield good texture cache performance [S5].
+**Pitfall:** Taking samples across different 2D slices results in a big memory stride and low texture cache hit rates [S5]. Taking samples on the same 2D slice is expected to yield good texture cache performance [S5].
 
 ### Z-order Curve Flattening
 **Definition:** A flattening function that converts 3D voxel coordinates to a 1D index, placing voxels nearby in space nearby in memory to improve GPU cache locality [S6, unofficial].
@@ -88,16 +77,17 @@ void FrustumMapping::worldToVoxel(const V3f &wsP, V3f &vsP) {
 
 ### BCC Grid Rendering
 **Definition:** Using a Body-Centered Cartesian (BCC) grid instead of a cubic Cartesian (CC) grid to reduce the number of required sample points while maintaining lossless compression for spherically bandlimited signals [S7, unofficial].
-**Step:** Apply all usual point rendering methods. Shift slices by 1/2 when rendering BCC grids [S7, unofficial].
+**Step:** Apply all usual point rendering methods [S7, unofficial]. Shift slices by 1/2 when rendering BCC grids [S7, unofficial].
 **Performance:** BCC grid reduces required point samples to 70.3% of cubic grid; 4D BCC requires 50% of equivalent 4D cubic grid samples [S7, unofficial]. Neophytou '02: Turbulent Jet 4D BCC rendered in 1.01s (71% of CC time) with 138 time steps vs 99 for CC [S7, unofficial].
 
 ## Background
-The use of dense grids for volume rendering dates back to the early 1990s, with the first 3D texture-based implementation of ray-casting by Levoy (1988), Cullip and Neumann (1993), and Cabral et al. (1994) [S4, unofficial]. Early methods relied on view-aligned or axis-aligned 2D texture arrays [S4, unofficial]. As hardware evolved, the focus shifted to optimizing memory access patterns, leading to the development of Z-order (Morton) curve flattening to improve cache locality [S5]. Modern implementations leverage GPU-specific features like Tiled Resources (DirectX 11.3+) to handle memory issues [S4, unofficial], and specialized indexing schemes like Four-Cubic Close-Packed (FCC) lattices [S5] or Body-Centered Cartesian (BCC) grids [S7, unofficial] to handle larger datasets and irregular lattices.
+The use of dense grids for volume rendering dates back to the early 1990s, with the first 3D texture-based implementation of ray-casting by Levoy (1988), Cullip and Neumann (1993), and Cabral et al. (1994) [S5]. Early methods relied on view-aligned or axis-aligned 2D texture arrays [S5]. As hardware evolved, the focus shifted to optimizing memory access patterns, leading to the development of Z-order (Morton) curve flattening to improve cache locality [S5]. Modern implementations leverage GPU-specific features like Tiled Resources (DirectX 11.3+) to handle memory issues [S4, unofficial], and specialized indexing schemes like Four-Cubic Close-Packed (FCC) lattices [S5] or Body-Centered Cartesian (BCC) grids [S7, unofficial] to handle larger datasets and irregular lattices.
 
 ## Sources
-[S1] Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)
-[S2] Production Volume Rendering, https://cg.informatik.uni-freiburg.de/intern/seminar/volumeRenderingProductionFundamentals2011.pdf, fetched 2026-10-27
-[S3] Voxel Cone Traced Global Illumination - Leif Node, https://leifnode.com/2015/05/voxel-cone-traced-global-illumination/, fetched 2026-10-27 (unofficial)
-[S4] A cache-friendly sampling strategy for texture-based volume rendering on GPU, https://doi.org/10.1016/j.visinf.2017.08.001, fetched 2026-10-26 (unofficial)
-[S5] This Tiny Algorithm Can Render BILLIONS of Voxels in Real Time, https://www.youtube.com/watch?v=ztkh1r1ioZo, fetched 2026-10-25
-[S6] Volumetric Points - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/teaching/cse616/volPts.pdf, fetched 2026-10-29 (unofficial)
+[S1] PDF Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)
+[S2] https://github.com/theHimanshuShekhar/bhayanakvoxel/blob/research/voxel-data-structures/docs/research/voxel-data-structures.md, https://github.com/theHimanshuShekhar/bhayanakvoxel/blob/research/voxel-data-structures/docs/research/voxel-data-structures.md, fetched 2026-10-28
+[S3] Production Volume Rendering, https://cg.informatik.uni-freiburg.de/intern/seminar/volumeRenderingProductionFundamentals2011.pdf, fetched 2026-10-27 (unofficial)
+[S4] Voxel Cone Traced Global Illumination - Leif Node, https://leifnode.com/2015/05/voxel-cone-traced-global-illumination/, fetched 2026-10-27 (unofficial)
+[S5] A cache-friendly sampling strategy for texture-based volume rendering on GPU, https://doi.org/10.1016/j.visinf.2017.08.001, fetched 2026-10-26
+[S6] This Tiny Algorithm Can Render BILLIONS of Voxels in Real Time, https://www.youtube.com/watch?v=ztkh1r1ioZo, fetched 2026-10-25 (unofficial)
+[S7] Volumetric Points - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/teaching/cse616/volPts.pdf, fetched 2026-10-29 (unofficial)

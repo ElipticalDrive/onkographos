@@ -7,8 +7,8 @@ Subgroup operations are hardware-synchronized collective computations performed 
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Per-thread data values (e.g., integers, booleans) and the subgroup ID context.
-*   **Output:** Aggregated results (sums, counts) or ballot masks, available to all threads in the subgroup or specific threads.
+*   **Input:** Per-thread data values (e.g., integers, booleans) and the subgroup context [S1, unofficial].
+*   **Output:** Aggregated results (sums, counts) or ballot masks, available to all threads in the subgroup or specific threads [S1, unofficial].
 
 **Data Structures:**
 *   **Ballot Mask:** A `uvec4` (128-bit unsigned integer vector) used to store the boolean state of all threads in the subgroup [S1, unofficial]. This size is sufficient for the maximum subgroup size of 64 threads (AMD) [S1, unofficial].
@@ -31,64 +31,69 @@ To use these operations, the following extensions must be enabled [S1, unofficia
 6.  **Count Bits:** Use `subgroupBallotBitCount(mask)` to count the number of set bits (true conditions) in the ballot result [S1, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+# Helper functions implementing hardware intrinsics explicitly
+def subgroup_add(value, subgroup_size):
+    """Returns the sum of `value` across all threads in the subgroup."""
+    return sum(value for _ in range(subgroup_size))
+
+def subgroup_elect(thread_id_in_subgroup):
+    """Returns True if the current thread has the lowest ID in the subgroup."""
+    return thread_id_in_subgroup == 0
+
+def subgroup_ballot(predicate, subgroup_size):
+    """Collects boolean conditions from all threads into a bitmask."""
+    mask = 0
+    for i in range(subgroup_size):
+        if predicate:
+            mask |= (1 << i)
+    return mask
+
+def subgroup_ballot_bit_count(mask):
+    """Counts the number of set bits in the ballot mask."""
+    return bin(mask).count('1')
+
+def subgroup_exclusive_add(value, thread_id_in_subgroup):
+    """Returns the sum of `value` from threads with lower IDs in the subgroup."""
+    return sum(value for _ in range(thread_id_in_subgroup))
+
 # Example 1: Reducing atomicAdd latency using subgroupAdd
 # Layout: local_size_x = 64
-# Buffers: count (global atomic counter), array (output)
-
-def main():
-    gid = gl_GlobalInvocationID.x
-    
-    # 1. Compute subgroup-local sum
-    # All threads in the subgroup receive the same total sum
-    tmp = subgroupAdd(1)
-    
-    # 2. Only the thread with the lowest ID in the subgroup writes to global memory
-    if subgroupElect():
-        atomicAdd(count, tmp)
+# Buffers: count (global atomic counter)
+def reduce_atomic_latency(count_buffer, subgroup_size, global_id):
+    thread_in_subgroup = global_id % subgroup_size
+    # subgroupAdd(1): compute subgroup-local sum
+    local_sum = subgroup_add(1, subgroup_size)
+    # subgroupElect(): gate global write to leader thread only
+    if subgroup_elect(thread_in_subgroup):
+        count_buffer += local_sum
 
 # Example 2: Counting threads satisfying a condition using Ballot
 # Layout: local_size_x = 64
-# Buffers: counts (array of uint, one per subgroup), array (output)
-
-def main():
-    gid = gl_GlobalInvocationID.x
-    
-    # 1. Define a predicate
-    value = gid * gid
+# Buffers: counts (array of uint, one per subgroup)
+def ballot_count(counts_buffer, subgroup_size, global_id):
+    thread_in_subgroup = global_id % subgroup_size
+    value = global_id * global_id
     condition = (value % 100 == 0)
-    
-    # 2. Collect boolean states from all threads into a 128-bit mask
-    vote = subgroupBallot(condition)
-    
-    # 3. Count the number of true conditions in this subgroup
-    # Note: gid / 32 assumes 32-thread subgroups (NVIDIA). 
-    # For AMD (64 threads), use gid / 64.
-    subgroup_index = gid / 32 
-    counts[subgroup_index] = subgroupBallotBitCount(vote)
+    # subgroupBallot(condition): collect predicates into 128-bit mask
+    vote = subgroup_ballot(condition, subgroup_size)
+    # subgroupBallotBitCount(vote): count true conditions
+    count = subgroup_ballot_bit_count(vote)
+    # Index into counts array per subgroup (divisor must match hardware size)
+    subgroup_index = global_id // subgroup_size
+    counts_buffer[subgroup_index] = count
 
 # Example 3: Generating exclusive indices for scattering
 # Layout: local_size_x = 64
-# Buffers: array (output), count (global atomic counter)
-
-def main():
-    gid = gl_GlobalInvocationID.x
-    
-    # 1. Compute exclusive sum of 1s
-    # This gives the index within the subgroup (0 to N-1)
-    index = subgroupExclusiveAdd(1)
-    
-    # 2. Optionally, compute the global offset using atomicAdd on the subgroup sum
-    # (Not shown in source, but implied by the need for global offsets)
-    
-    # 3. Write to global array using the local index
-    # Note: Source snippet implies writing to 'array' using 'index'
-    # However, without a global offset, this only fills the first N slots.
-    # A complete implementation would add a global offset to 'index'.
-    array[index] = gid 
+# Buffers: array (output)
+def exclusive_indices(array_buffer, subgroup_size, global_id):
+    thread_in_subgroup = global_id % subgroup_size
+    # subgroupExclusiveAdd(1): compute local offset within subgroup
+    index = subgroup_exclusive_add(1, thread_in_subgroup)
+    # array[gid] = index
+    array_buffer[global_id] = index
 ```
 
 **Edge Cases and Pitfalls:**
@@ -97,12 +102,12 @@ def main():
 *   **Division for Subgroup Index:** When indexing into a results array per subgroup, the divisor must match the hardware subgroup size (32 for NVIDIA, 64 for AMD) [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per subgroup for collective operations. Significantly faster than global atomic operations due to the absence of global memory serialization [S1, unofficial].
-*   **Memory Complexity:** $O(1)$ per thread (registers). No additional global memory is required for the collective computation itself [S1, unofficial].
-*   **Strengths:** High performance for reductions, ballots, and shuffles within a warp/wave. Reduces contention on global memory atomics [S1, unofficial].
-*   **Limitations:** Results are confined to the subgroup. Cross-subgroup synchronization requires global memory atomics or barriers. Performance characteristics vary between NVIDIA (32) and AMD (64) hardware [S1, unofficial].
-*   **When to use:** When performing reductions, ballots, or shuffles within a warp/wave. When reducing the number of global atomic operations [S1, unofficial].
-*   **When not to use:** When data needs to be shared across multiple subgroups or warps without global memory synchronization [S1, unofficial].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Subgroup operations are significantly faster than atomic operations because they do not involve global memory synchronization [S1, unofficial].
+*   **Limitations:** Results are confined to the subgroup. Performance characteristics vary between NVIDIA (32 threads) and AMD (64 threads) hardware [S1, unofficial].
+*   **When to use:** Use subgroups to reduce the number of global atomic operations, or when performing reductions and ballots within a warp/wave [S1, unofficial].
+*   **When not to use:** Not given in the sources.
 
 ## Background
 Subgroup operations were introduced in Vulkan and OpenGL as a cross-vendor abstraction for warp-level (NVIDIA) and wave-level (AMD) intrinsics [S1, unofficial]. They provide a standardized way to access hardware-specific collective instructions in GLSL [S1, unofficial].

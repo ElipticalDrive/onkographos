@@ -1,0 +1,109 @@
+--- v002.md
++++ v003.md
+@@ -12,5 +12,5 @@
+ 
+ **Data Structures:**
+-*   **Ballot Mask:** A `uvec4` (128-bit unsigned integer vector) used to store the boolean state of all threads in the subgroup [S1, unofficial]. This size is sufficient for the maximum subgroup size of 64 threads (AMD) [S1, unofficial].
++*   **Ballot Mask:** A `uvec4` (128-bit unsigned integer vector) used to store the boolean state of all threads in the subgroup [S1, unofficial]. This size is sufficient for the maximum subgroup size of 64 threads on AMD hardware [S1, unofficial].
+ 
+ **Required Extensions (GLSL):**
+@@ -26,6 +26,6 @@
+ 1.  **Enable Extensions:** Include the required GLSL extensions in the shader source [S1, unofficial].
+ 2.  **Compute Aggregates:** Use `subgroupAdd(value)` to compute the sum of `value` across all threads in the subgroup. Every thread receives the same total sum [S1, unofficial].
+-3.  **Compute Exclusive Indices:** Use `subgroupExclusiveAdd(value)` to compute the sum of `value` from threads with lower IDs than the current thread within the subgroup. This returns unique indices per thread, suitable for scatter/gather operations [S1, unofficial].
+-4.  **Identify Leader:** Use `subgroupElect()` to determine if the current thread has the lowest ID in the subgroup. This is used to gate global memory writes (e.g., `atomicAdd`) to a single thread to avoid redundant writes [S1, unofficial].
++3.  **Compute Exclusive Indices:** Use `subgroupExclusiveAdd(value)` to compute the sum of `value` from threads with lower IDs than the current thread within the subgroup. This returns unique indices per thread [S1, unofficial].
++4.  **Identify Leader:** Use `subgroupElect()` to determine if the current thread has the lowest ID in the subgroup. This is used to gate global memory writes (e.g., `atomicAdd`) to a single thread [S1, unofficial].
+ 5.  **Ballot Collection:** Use `subgroupBallot(predicate)` to collect boolean conditions from all threads in the subgroup into a `uvec4` bitmask [S1, unofficial].
+ 6.  **Count Bits:** Use `subgroupBallotBitCount(mask)` to count the number of set bits (true conditions) in the ballot result [S1, unofficial].
+@@ -33,8 +33,11 @@
+ **Pseudocode:**
+ ```python
+-# Helper functions implementing hardware intrinsics explicitly
+-def subgroup_add(value, subgroup_size):
+-    """Returns the sum of `value` across all threads in the subgroup."""
+-    return sum(value for _ in range(subgroup_size))
++def subgroup_add(thread_local_value, subgroup_values):
++    """Returns the sum of values across all threads in the subgroup."""
++    return sum(subgroup_values)
++
++def subgroup_exclusive_add(thread_local_value, thread_id_in_subgroup, subgroup_values):
++    """Returns the sum of values from threads with lower IDs in the subgroup."""
++    return sum(subgroup_values[:thread_id_in_subgroup])
+ 
+ def subgroup_elect(thread_id_in_subgroup):
+@@ -42,9 +45,9 @@
+     return thread_id_in_subgroup == 0
+ 
+-def subgroup_ballot(predicate, subgroup_size):
++def subgroup_ballot(thread_predicate, subgroup_predicates):
+     """Collects boolean conditions from all threads into a bitmask."""
+     mask = 0
+-    for i in range(subgroup_size):
+-        if predicate:
++    for i, pred in enumerate(subgroup_predicates):
++        if pred:
+             mask |= (1 << i)
+     return mask
+@@ -54,43 +57,28 @@
+     return bin(mask).count('1')
+ 
+-def subgroup_exclusive_add(value, thread_id_in_subgroup):
+-    """Returns the sum of `value` from threads with lower IDs in the subgroup."""
+-    return sum(value for _ in range(thread_id_in_subgroup))
+-
+ # Example 1: Reducing atomicAdd latency using subgroupAdd
+-# Layout: local_size_x = 64
+-# Buffers: count (global atomic counter)
+-def reduce_atomic_latency(count_buffer, subgroup_size, global_id):
++def reduce_atomic_latency_example(subgroup_size, global_id, subgroup_values):
+     thread_in_subgroup = global_id % subgroup_size
+-    # subgroupAdd(1): compute subgroup-local sum
+-    local_sum = subgroup_add(1, subgroup_size)
+-    # subgroupElect(): gate global write to leader thread only
++    local_sum = subgroup_add(1, subgroup_values)
+     if subgroup_elect(thread_in_subgroup):
+-        count_buffer += local_sum
++        # atomicAdd(count, local_sum) simulated
++        return local_sum
++    return 0
+ 
+ # Example 2: Counting threads satisfying a condition using Ballot
+-# Layout: local_size_x = 64
+-# Buffers: counts (array of uint, one per subgroup)
+-def ballot_count(counts_buffer, subgroup_size, global_id):
++def ballot_count_example(subgroup_size, global_id, subgroup_predicates):
+     thread_in_subgroup = global_id % subgroup_size
+     value = global_id * global_id
+     condition = (value % 100 == 0)
+-    # subgroupBallot(condition): collect predicates into 128-bit mask
+-    vote = subgroup_ballot(condition, subgroup_size)
+-    # subgroupBallotBitCount(vote): count true conditions
++    vote = subgroup_ballot(condition, subgroup_predicates)
+     count = subgroup_ballot_bit_count(vote)
+-    # Index into counts array per subgroup (divisor must match hardware size)
+     subgroup_index = global_id // subgroup_size
+-    counts_buffer[subgroup_index] = count
++    return subgroup_index, count
+ 
+ # Example 3: Generating exclusive indices for scattering
+-# Layout: local_size_x = 64
+-# Buffers: array (output)
+-def exclusive_indices(array_buffer, subgroup_size, global_id):
++def exclusive_indices_example(subgroup_size, global_id, subgroup_values):
+     thread_in_subgroup = global_id % subgroup_size
+-    # subgroupExclusiveAdd(1): compute local offset within subgroup
+-    index = subgroup_exclusive_add(1, thread_in_subgroup)
+-    # array[gid] = index
+-    array_buffer[global_id] = index
++    index = subgroup_exclusive_add(1, thread_in_subgroup, subgroup_values)
++    return index
+ ```
+ 
+@@ -105,5 +93,5 @@
+ *   **Strengths:** Subgroup operations are significantly faster than atomic operations because they do not involve global memory synchronization [S1, unofficial].
+ *   **Limitations:** Results are confined to the subgroup. Performance characteristics vary between NVIDIA (32 threads) and AMD (64 threads) hardware [S1, unofficial].
+-*   **When to use:** Use subgroups to reduce the number of global atomic operations, or when performing reductions and ballots within a warp/wave [S1, unofficial].
++*   **When to use:** Use subgroups to reduce the number of global atomic operations, or when performing reductions and ballots within a warp or wave [S1, unofficial].
+ *   **When not to use:** Not given in the sources.
+ 

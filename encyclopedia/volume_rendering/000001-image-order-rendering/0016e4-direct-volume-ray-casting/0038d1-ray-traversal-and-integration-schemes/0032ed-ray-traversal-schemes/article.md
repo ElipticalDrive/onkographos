@@ -3,46 +3,33 @@
 Also called: Accumulate Projection, Depth Projection, Max Intensity Projection, Ray Traversal -Accumulate
 
 ## Overview
-Ray traversal schemes aggregate scalar or color values along a ray to produce a 2D image, serving as the final compositing step in direct volume ray casting. Unlike [Ray Marching and Discretization](2788-ray-marching-and-discretization.md) which focuses on sample placement, or [LOS-integration for visualization](4807-los-integration-for-visualization.md) which handles physical light transport, these schemes define the mathematical aggregation function (e.g., max, average, or alpha compositing) applied to the discrete samples. They are distinguished by their specific aggregation logic, ranging from simple extrema extraction to physically-based opacity accumulation.
+Ray traversal schemes define the aggregation logic applied to sample values along a ray to produce a final pixel color, ranging from simple scalar projections to full volumetric compositing [S1, S2, S3, unofficial]. Unlike standard front-to-back volume ray casting which integrates opacity and color to simulate light transport, these schemes often prioritize specific data features (such as maximum intensity or average density) or simplified accumulation models [S2, S3, unofficial]. They differ from [Ray Marching and Discretization](2788-ray-marching-and-discretization.md) by focusing on the compositing/aggregation operator rather than the step-size selection, and from [Monte Carlo Path Tracing for Volume Rendering](4980-monte-carlo-path-tracing-for-volume-rendering.md) by using deterministic integration paths [S2, S3, unofficial].
 
 ## Shared principles
-All ray traversal schemes operate on a sequence of samples $s_i$ collected along a ray. Each sample $i$ provides an intensity value $I_i$ (or color) and an opacity value $\alpha_i$ derived from transfer functions. The schemes share the following common structure:
-
-1.  **Input**: A sequence of samples $(I_i, \alpha_i)$ for $i = 0 \dots N-1$.
-2.  **Order**: Samples are processed in a specific order (typically front-to-back for accumulation, or any order for extrema).
-3.  **Output**: A single pixel value $(C, A)$ or scalar value.
-
-The general compositing equation for front-to-back rendering, which underpins the Accumulate scheme, is:
-$$
-C = C_s \cdot \alpha_s \cdot (1 - A) + C
-$$
-$$
-A = \alpha_s \cdot (1 - A) + A
-$$
-where $C_s, \alpha_s$ are the sample color and opacity, and $C, A$ are the accumulated color and opacity [S2, S3, unofficial].
+All methods in this family operate on the discretized ray segment $[t_{start}, t_{end}]$ defined in the parent article. For each sample $i$ along the ray, a scalar value $d_i$ (intensity) and optionally an opacity $\alpha_i$ are obtained via sampling and classification [S1, S2, S3, unofficial]. The core distinction lies in the reduction function $R$ that maps the sequence of samples $\{(d_i, \alpha_i)\}$ to a single pixel result. The parent article's compositing equation is a specific instance (Accumulate) of these schemes [S2, unofficial].
 
 ## Subtopics
 
-### Intensity
-Extracts the raw scalar value of the sample. Used as a base for other projections.
+### Intensity Projection
+Projects the raw scalar value of a single sample or the final sample onto the pixel. It is rarely used in isolation for visualization as it lacks depth cues, serving primarily as a baseline for other schemes [S1, S2, unofficial].
 
-### Max (Maximum Intensity Projection)
-Projects the maximum intensity value along the ray. It is used for Magnetic Resonance Angiogram (MRA) to highlight high-intensity structures like blood vessels [S2, S3, unofficial].
+### Max Intensity Projection (MIP)
+Projects the maximum scalar value encountered along the ray. It is used to visualize high-intensity structures, such as blood vessels in Magnetic Resonance Angiography, by ignoring lower-intensity background tissue [S2, S3, unofficial].
 
-### Average
-Produces an X-ray picture by averaging values along the ray. It provides a global view of density but loses depth information [S1, S2, S3, unofficial].
+### Average Projection
+Averages the scalar values along the ray. It produces an X-ray-like picture where dense structures appear brighter or darker depending on the transfer function, effectively integrating density [S1, S2, S3, unofficial].
 
-### Accumulate
-Accumulates opacity while compositing colors to make transparent layers visible. This is the standard volumetric compositing method, allowing visibility of internal structures through semi-transparent volumes. Originated with Levoy '88 [S2, S3, unofficial].
+### Accumulate Projection
+Accumulates opacity while compositing colors to make transparent layers visible. This is the standard volumetric compositing approach described in the parent article, often attributed to Levoy (1988) [S2, S3, unofficial]. It handles transparency and depth simultaneously.
 
-### First
-Extracts the first sample that exceeds a threshold or is non-empty. Used to extract iso-surfaces or the nearest surface [S1, unofficial].
+### First Projection
+Extracts the first sample that meets a specific criterion (e.g., threshold crossing). It is used to extract iso-surfaces or the first intersection with a structure [S1, S2, unofficial].
 
-### Depth
-Records the distance or index of the sample where the ray terminates or a condition is met. Used for depth buffering or surface localization [S1, S2, S3, unofficial].
+### Depth Projection
+Records the distance $t$ or index $i$ of the sample that determined the final pixel value (e.g., the sample with max intensity in MIP). It is used for depth mapping or auxiliary buffers [S1, S2, S3, unofficial].
 
 ## Background
-Ray traversal schemes are fundamental to Direct Volume Rendering (DVR). The Accumulate scheme was formalized by Levoy in 1988, establishing the standard front-to-back alpha compositing approach [S2, S3, unofficial]. Max Intensity Projection (MIP) and Average projections are older techniques adapted from projectional radiology and CT visualization. The "First" and "Depth" schemes are often used for auxiliary tasks like surface extraction or depth cueing. These schemes are implemented in visualization toolkits like VTK, where they form the core of the ray casting pipeline [S2, S3, unofficial].
+The classification of these schemes appears in educational materials on Direct Volume Rendering (DVR) and ray casting pipelines [S1, S2, S3, unofficial]. The "Accumulate" scheme is explicitly linked to Levoy (1988) in these sources [S2, S3, unofficial]. The "Max" scheme is noted for its application in Magnetic Resonance Angiography [S2, S3, unofficial]. The "First" scheme is associated with iso-surface extraction techniques [S1, unofficial].
 
 ## Sources
 [S1] PPT - Direct Volume Rendering (DVR): Ray-casting PowerPoint Presentation - ID:465503, https://slideserve.com/jariath/direct-volume-rendering-dvr-ray-casting, fetched 2026-10-24 (unofficial)

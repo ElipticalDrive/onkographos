@@ -3,15 +3,15 @@
 Also called: Bristorbrot
 
 ## Overview
-Bristorbrot generates a 3D fractal using a specific iterative polynomial mapping in Cartesian coordinates [S1, unofficial]. It differs from its parent, the Mandelbulb, which uses polar coordinate power transformations, by employing a distinct set of quadratic and cubic-like mixing terms that do not rely on spherical harmonics [S1, unofficial].
+Bristorbrot generates a 3D fractal using a specific iterative polynomial mapping in Cartesian coordinates [S1, unofficial]. It computes an escape-time field for voxel rendering by iterating a fixed 3D polynomial and checking against a distance threshold [S1, unofficial].
 
 ## How it works
-**Inputs:** A 3D point $p$ (the voxel center or ray origin).
-**Outputs:** A boolean indicating whether the point belongs to the fractal set (escape time or distance).
+**Inputs:** A 3D point $p$ representing the voxel center or ray origin [S1, unofficial].
+**Outputs:** A boolean indicating whether the point belongs to the fractal set (escape time or distance) [S1, unofficial].
 
 **Data Structures:**
-- `point3d`: A structure containing three floating-point fields `x`, `y`, `z`.
-- `float`: Standard 32-bit or 64-bit floating-point number.
+- `point3d`: A structure containing three floating-point fields `x`, `y`, `z` [S1, unofficial].
+- `float`: Standard 32-bit or 64-bit floating-point number [S1, unofficial].
 
 **Parameters:**
 - `max_iterations`: Integer, default 30 [S1, unofficial].
@@ -21,7 +21,7 @@ Bristorbrot generates a 3D fractal using a specific iterative polynomial mapping
 1. Initialize the iteration variable $z$ to the input point $p_{in}$:
    $$z = p_{in}$$
 2. Initialize the squared distance $z_{dist}$ to the squared length of $z$:
-   $$z_{dist} = x^2 + y^2 + z^2$$
+   $$z_{dist} = z.x^2 + z.y^2 + z.z^2$$
 3. Loop $i$ from 0 to `max_iterations` - 1:
    a. Compute the new coordinates $p_{new}$ based on the current $z$:
       $$p_{new}.x = z.x^2 - z.y^2 - z.z^2$$
@@ -31,8 +31,8 @@ Bristorbrot generates a 3D fractal using a specific iterative polynomial mapping
       $$z = p_{new} + p_{in}$$
    c. Update the squared distance:
       $$z_{dist} = z.x^2 + z.y^2 + z.z^2$$
-   d. Check for escape: If $z_{dist} >$ `max_distance`, break the loop.
-4. If the loop completes all `max_iterations` without breaking, the point is considered part of the fractal set.
+   d. Check for escape: If $z_{dist} >$ `max_distance`, break the loop [S1, unofficial].
+4. If the loop completes all `max_iterations` without breaking, the point is considered part of the fractal set [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -62,19 +62,19 @@ def bristorbrot(p_in, max_iterations=30, max_distance=200):
 ```
 
 **Edge Cases and Pitfalls:**
-- Precision: Squaring large coordinates can lead to overflow if `max_distance` is set excessively high. The default 200 is safe for standard float ranges.
-- Boundaries: The method assumes the input point $p$ is within the bounding box of the fractal. Points far outside will escape immediately.
+- Precision: Squaring large coordinates can lead to overflow if `max_distance` is set excessively high; the default 200 is standard for 32-bit float ranges [G].
+- Boundaries: The method assumes the input point $p$ is within the bounding box of the fractal; points far outside will escape immediately [G].
 
 ## Subtopics
 
 ### Knot Fractal Generation
-A fractal distance function representing a knot shape, constructed by iterating and transforming a base curve [S2, unofficial]. It differs from Bristorbrot by operating on a 2D cross-section (r, ang) extended into 3D, rather than a direct 3D polynomial map. It is chosen when a knotted topology is desired rather than a bulbous fractal structure.
+A fractal distance function representing a knot shape, constructed by iterating and transforming a base curve [S2, unofficial]. It differs from Bristorbrot by operating on a 2D cross-section $(r, \text{ang})$ extended into 3D, rather than a direct 3D polynomial map [S2, unofficial]. It is chosen when a knotted topology is desired rather than a bulbous fractal structure [S2, unofficial].
 
 **Definition:**
 Iterates $n$ times to refine the distance to a knot shape [S2, unofficial].
 
 **Steps:**
-1. Initialize $r = \sqrt{p.x^2 + p.z^2}$, $ang = \text{atan2}(p.z, p.x)$, $y = p.y$, and distance $d = \infty$ [S2, unofficial].
+1. Initialize $r = \sqrt{p.x^2 + p.z^2}$, $ang = \text{atan}(p.z, p.x)$, $y = p.y$, and distance $d = \infty$ [S2, unofficial].
 2. Loop $n$ from 0 to `ITERATIONS` - 1:
    a. Create a temporary point $p_{temp} = (r, y, ang + 2.0 \cdot \pi \cdot n)$ [S2, unofficial].
    b. Subtract `offset.z` from $p_{temp}.x$ [S2, unofficial].
@@ -90,14 +90,14 @@ Iterates $n$ times to refine the distance to a knot shape [S2, unofficial].
 - `clamp`: `vec3(-2.0, -4.0, 3.0)` [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(I)$ per voxel, where $I$ is `max_iterations`.
-- **Memory Complexity:** $O(1)$ auxiliary space per voxel evaluation.
-- **Performance:** The Bristorbrot iteration involves several multiplications and additions per step. It is generally faster than high-power Mandelbulbs (e.g., power 8+) but slower than simple quadratic Julia sets due to the 3D mixing terms.
-- **Strengths:** Produces intricate, organic structures with distinct "bristle" or "spike" features compared to the smoother Mandelbulb.
-- **Limitations:** The escape radius of 200 is arbitrary; tuning it may reveal more detail or cause overflow. The specific polynomial mapping may not converge for all initial points in the same way as standard Mandelbrot sets.
+- Time and memory complexity: Not given in the sources.
+- Measured performance with hardware, resolution and scene: Not given in the sources.
+- Scaling: Not given in the sources.
+- Strengths and limitations: Not given in the sources.
+- When to use it and when not: Not given in the sources.
 
 ## Background
-The Bristorbrot is a variant of 3D fractal generation explored in the context of procedural volume rendering and voxel-based visualization [S1, unofficial]. It was implemented in the `holographic_fractals` repository as an alternative to the Mandelbulb, offering a different topological structure through its specific Cartesian polynomial iteration [S1, unofficial].
+The Bristorbrot is a 3D fractal generation method explored in the context of procedural volume rendering and voxel-based visualization [S1, unofficial]. It is implemented alongside other fractal drawing routines in the referenced codebase [S1, unofficial].
 
 ## Sources
 [S1] jtomori/holographic_fractals, https://github.com/jtomori/holographic_fractals, fetched 2026-10-26 (unofficial)

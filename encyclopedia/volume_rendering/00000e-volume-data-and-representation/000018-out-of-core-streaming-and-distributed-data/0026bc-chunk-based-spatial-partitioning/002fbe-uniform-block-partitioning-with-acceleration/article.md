@@ -1,52 +1,87 @@
 # Uniform Block Partitioning with Acceleration
-
 Also called: Volume Partitioning with Acceleration, Volume subdivision with acceleration
 
 ## Overview
-Uniform Block Partitioning with Acceleration is a technique for interactive volume rendering that decomposes a dataset into uniform-sized blocks and applies acceleration primitives such as early ray termination, empty space skipping, and occlusion clipping [S1]. It distinguishes itself from sibling methods like [Chunk-based World Streaming](2369-chunk-based-world-streaming.md) by focusing on rendering acceleration within the active memory context rather than I/O scheduling for out-of-core data, and from [Chunk Trees](4050-chunk-trees.md) by using a flat uniform grid instead of a hierarchical tree structure for the base partitioning.
+Uniform Block Partitioning with Acceleration divides a volume dataset into fixed-size spatial blocks to enable independent processing and applies acceleration techniques such as early ray termination, empty space skipping, and occlusion clipping to achieve interactive rendering [S1]. It differs from sibling methods like [Chunk-based World Streaming](2369-chunk-based-world-streaming.md) by focusing on static partitioning with immediate acceleration rather than dynamic streaming, and from [Chunk Trees](4050-chunk-trees.md) by using a flat uniform grid instead of a hierarchical tree structure.
 
 ## How it works
-**Inputs:** A 3D volume dataset $V$ with spatial dimensions $D_x \times D_y \times D_z$ and density values.
-**Outputs:** A rendered image or isosurface mesh.
+**Inputs:** A 3D volume dataset $V$ with dimensions $D_x \times D_y \times D_z$.
+**Outputs:** Rendered image or extracted isosurface.
 
 **Data Structures:**
-The volume is decomposed into a 3D grid of uniform blocks. Each block $B_{i,j,k}$ contains a fixed number of voxels. The global coordinate $(x,y,z)$ maps to a block index $(i,j,k)$ via integer division by the block dimensions $(B_x, B_y, B_z)$:
-$$ i = \lfloor x / B_x \rfloor, \quad j = \lfloor y / B_y \rfloor, \quad k = \lfloor z / B_z \rfloor $$
-[G] The block dimensions are typically powers of two to facilitate bitwise operations for index calculation, though not strictly required.
+The volume is decomposed into a 3D grid of uniform blocks. Each block $B_{i,j,k}$ contains a fixed number of voxels. The global coordinate $(x, y, z)$ maps to block indices $(i, j, k)$ using the parent's coordinate mapping logic [S1, Parent].
 
 **Steps:**
-1.  **Partitioning:** Subdivide the volume dataset into uniform-sized blocks [S1].
-2.  **Acceleration Structure Construction (Variant):** For each block, compute the minimum and maximum density values using a parallel reduction algorithm [S2, unofficial]. Store these min/max pairs in an acceleration structure.
-3.  **Ray Casting/Processing:** For each ray or processing unit:
-    a.  **Empty Space Skipping:** If the acceleration structure indicates a block's density range $[min, max]$ does not contain the target isovalue (for surface extraction) or is below a visibility threshold, skip processing that block [S1][S2, unofficial].
-    b.  **Occlusion Clipping:** Use depth information or silhouette maps to skip blocks occluded by previously rendered geometry [S1].
-    c.  **Early Ray Termination:** During volume integration, if the accumulated opacity exceeds a threshold, terminate the ray early [S1].
-4.  **Rendering/Extraction:** Process the remaining blocks to generate the final image or surface mesh [S1][S2, unofficial].
+1.  **Subdivision:** Subdivide the volume dataset into uniform-sized blocks [S1].
+2.  **Acceleration Application:** Apply acceleration techniques to the blocks [S1]:
+    *   **Early Ray Termination:** Stop ray casting when accumulated opacity exceeds a threshold.
+    *   **Empty Space Skipping:** Skip blocks that do not contribute to the view (e.g., contain only background or are occluded).
+    *   **Occlusion Clipping:** Clip rays against previously rendered geometry or opaque blocks.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_volume(volume, camera, blocks):
+    # Initialize output buffer
+    image = zeros(camera.resolution)
+    
+    # Iterate over pixels
+    for u, v in camera.pixel_coordinates():
+        ray = camera.cast_ray(u, v)
+        accumulated_color = 0.0
+        accumulated_opacity = 0.0
+        
+        # Traverse blocks along the ray
+        for block in blocks.intersected_by(ray):
+            # Check for empty space skipping
+            if block.is_empty():
+                continue
+                
+            # Sample block data
+            block_data = block.sample(ray)
+            
+            # Apply early ray termination
+            if accumulated_opacity > 0.99:
+                break
+                
+            # Composite block contribution
+            color, opacity = block_data.compute_compositing()
+            accumulated_color += color * (1.0 - accumulated_opacity)
+            accumulated_opacity += opacity * (1.0 - accumulated_opacity)
+            
+        image[u, v] = accumulated_color
+        
+    return image
+```
 
 **Parameters:**
 *   Block size: Not given in the sources.
-*   Isosurface threshold: Application-dependent.
+*   Opacity threshold for early termination: Not given in the sources.
 
 **Edge Cases:**
-*   **Boundary Artifacts:** To prevent visual artifacts at chunk boundaries (e.g., black stripes), overlapping data or replicated boundary voxels are often used during local processing [S2, unofficial].
-*   **Precision:** Parallel reduction for min/max values must handle NaN or undefined values appropriately [S2, unofficial].
+*   **Boundary Artifacts:** As noted in the parent, naive division creates discontinuities. Overlap regions or specific boundary handling are required to prevent visual artifacts like black stripes in ray casting [Parent].
+*   **Precision:** Floating-point precision in ray-block intersection tests may cause gaps if not handled carefully [Parent].
 
 ## Subtopics
 
 ### Block-based Acceleration Structure
-A hierarchical data structure used to efficiently select relevant parts of the volume for surface extraction, enabling interactive frame rates by avoiding processing of empty or irrelevant blocks. It sets itself apart by explicitly computing min/max density ranges per block via parallel reduction to filter blocks based on isovalue containment. Choose this when interactive surface extraction is required and the volume has significant empty space or low-density regions. Link: [Block-based Acceleration Structure](1093-mpi-based-volume-partitioning.md) (Note: No specific article exists for this variant in the tree, so it is listed here as a subtopic of the parent method).
+A hierarchical data structure used to efficiently select relevant parts of the volume for surface extraction, enabling interactive frame rates by avoiding processing of empty or irrelevant blocks [S2, unofficial]. It sets itself apart by computing min/max density values per block to quickly cull blocks where the isovalue does not lie within the range [S2, unofficial]. Choose this when interactive surface extraction is required.
+
+**Steps:**
+1.  Subdivide the volume into blocks with a fixed number of cells [S2, unofficial].
+2.  For each block, compute the minimum and maximum density values using a parallel reduction algorithm [S2, unofficial].
+3.  Use the min/max values to determine if the isovalue lies within the block's range; if so, process the block for surface extraction [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the number of non-empty blocks and ray length. Acceleration structures reduce the number of blocks processed per ray.
-*   **Memory Complexity:** $O(N)$ where $N$ is the number of blocks, plus overhead for acceleration data (min/max values).
-*   **Performance:** Enables interactive display of large datasets like CT scans [S1].
-*   **Strengths:** Simple implementation, efficient parallel mapping for block processing [S2, unofficial].
-*   **Limitations:** Uniform blocks may not adapt well to complex geometries compared to octrees [S1].
-*   **When to use:** Interactive rendering of large, uniform volumes with significant empty space.
-*   **When not to use:** Highly anisotropic data where uniform blocks cause excessive processing of irrelevant regions.
+*   **Time Complexity:** Depends on the number of non-empty blocks and acceleration effectiveness. Early ray termination reduces per-ray cost.
+*   **Memory Complexity:** Linear with respect to the number of blocks.
+*   **Performance:** Enables interactive display of CT datasets [S1].
+*   **Strengths:** Simple implementation, good parallelization potential [S2, unofficial].
+*   **Limitations:** Uniform blocks may lead to inefficient memory usage if the volume has varying density [S1].
 
 ## Background
-The technique was employed by Xie et al. to subdivide volume datasets into uniform-sized blocks for interactive display of CT datasets [S1]. It builds on earlier work using octrees for empty space skipping [S1] and slab silhouette maps [S1]. The block-based acceleration structure variant was developed for interactive modeling and visualization of complex terrains [S2, unofficial].
+The technique was employed by Xie et al. to subdivide volume datasets into uniform-sized blocks for interactive display of CT datasets [S1]. It builds on earlier work using octrees for empty space skipping [S1].
 
 ## Sources
 [S1] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27

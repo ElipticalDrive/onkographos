@@ -3,57 +3,37 @@
 Also called: DMC Vertex Processing, vertProc
 
 ## Overview
-Dual Marching Cubes Vertex Processing (`vertProc`) is the recursive core routine that resolves a dual cell into mesh primitives by applying the Marching Cubes lookup tables to the dual vertices [S1, unofficial]. It differs from primal Marching Cubes by operating on the dual grid topology, where each connected patch of triangulation in a cell becomes a vertex, and it handles hierarchical subdivision by recursively resolving child nodes before generating geometry [S1, unofficial].
+Dual Marching Cubes Vertex Processing (`vertProc`) processes a dual cell (8 nodes) to generate mesh vertices and triangles using Marching Cubes on the dual vertices [S1, unofficial]. It handles hierarchical subdivision by recursively resolving child nodes before generating geometry [S1, unofficial].
 
 ## How it works
 ### Inputs and Outputs
-- **Input**: A pointer to a dual cell node (containing `dualVertex.w`, `normal`, `material`, and potential children).
-- **Output**: Vertices and triangles added to the global mesh and `vtx_map` (a hash map storing edge vertices to ensure manifold connectivity).
+- **Input**: A dual cell node containing `dualVertex.w`, `normal`, `material`, and potential children [S1, unofficial].
+- **Output**: Vertices and triangles added to the global mesh and `vtx_map` (a hash map storing edge vertices to ensure manifold connectivity) [S1, unofficial].
 
 ### Data Structures
-- **`sub[8]`**: Array of 8 resolved child nodes.
-- **`vertex_mask`**: 8-bit integer where bit $i$ is set if `sub[i].dualVertex.w <= 0.0f`.
-- **`edge_mask`**: 12-bit integer derived from `vertex_mask` via `kMcVertexMaskToEdgeMask`.
-- **`vtx_map`**: Hash map mapping an edge key (min/max node pointers) to a generated vertex index.
+- **`sub[8]`**: Array of 8 resolved child nodes [S1, unofficial].
+- **`vertex_mask`**: 8-bit integer where bit $i$ is set if `sub[i].dualVertex.w <= 0.0` [S1, unofficial].
+- **`edge_mask`**: 12-bit integer derived from `vertex_mask` via `kMcVertexMaskToEdgeMask` [S1, unofficial].
+- **`vtx_map`**: Hash map mapping an edge key (min/max node pointers) to a generated vertex index [S1, unofficial].
 
 ### Steps
-1. **Resolve Nodes**: For each of the 8 nodes in the current cell:
-   - If the node is subdivided, replace it with its child at index `[7-i]` (inverted index).
-   - Otherwise, keep the node itself.
-   - Store the result in `sub[8]`.
-2. **Recursion Check**: If any node was subdivided (`has_lesser` is true), recursively call `vertProc` on each resolved `sub[i]` and return immediately.
-3. **Compute Vertex Mask**: Initialize `vertex_mask` to 0. For each $i \in [0, 7]$:
-   - If `sub[i].dualVertex.w <= 0.0f`, set bit $i$ in `vertex_mask`.
-4. **Compute Edge Mask**: Set `edge_mask = kMcVertexMaskToEdgeMask[vertex_mask]`.
-5. **Process Edges**: For each of the 12 edges $i \in [0, 11]$:
-   - If bit $i$ is set in `edge_mask`:
-     - Identify the two sub-nodes at the edge endpoints: `n1 = sub[kCellEdgeEndpoint[i][0]]` and `n2 = sub[kCellEdgeEndpoint[i][1]]`.
-     - Form an edge key using the min/max of `n1` and `n2` pointers to ensure consistent hashing.
-     - If the edge key is not in `vtx_map`:
-       - **Interpolate Point**: Compute the vertex position using weighted linear interpolation:
-         $$
-         \text{point} = \frac{w_b \cdot \text{pos}_a + w_a \cdot \text{pos}_b}{w_a + w_b}
-         $$
-         where $w_a = |\text{n1}.dualVertex.w|$ and $w_b = |\text{n2}.dualVertex.w|$. [S1, unofficial]
-       - **Interpolate Normal**: Compute the vertex normal:
-         $$
-         \text{normal} = \text{normalize}(\text{lerp}(\text{n1}.normal, w_1, \text{n2}.normal, w_2))
-         $$
-         where $w_1$ and $w_2$ are the weights corresponding to the interpolation (typically $w_a$ and $w_b$ respectively, normalized or used directly depending on implementation details not fully specified in the source, but implied by the formula structure) [S1, unofficial].
-       - **Determine Material**: Select the material for the vertex:
-         $$
-         \text{mat} = (\text{n1}.material == \text{Empty}) ? \text{n2}.material : \text{n1}.material
-         $$
-       - Add the vertex (position, normal, material) to the mesh and store its index in `vtx_map[edge_key]`.
-6. **Add Triangles**: Iterate through `kMcTriangleTable[vertex_mask]` in steps of 3. For each triplet of edge indices $(e_1, e_2, e_3)$:
-   - Retrieve the vertex indices from `vtx_map` using the edge keys for $e_1, e_2, e_3$.
-   - Add the triangle to the mesh.
+1. **Resolve Nodes**: For each of the 8 nodes in the current cell, if the node is subdivided, use its child at index `[7-i]` (inverted index); otherwise, use the node itself. Store the results in `sub[8]` [S1, unofficial].
+2. **Recursion Check**: If any node was subdivided (`has_lesser` is true), recursively call `vertProc` on each resolved `sub[i]` and return immediately [S1, unofficial].
+3. **Compute Vertex Mask**: Initialize `vertex_mask` to 0. For each $i \in [0, 7]$, if `sub[i].dualVertex.w <= 0.0`, set bit $i$ in `vertex_mask` [S1, unofficial].
+4. **Compute Edge Mask**: Set `edge_mask = kMcVertexMaskToEdgeMask[vertex_mask]` [S1, unofficial].
+5. **Process Edges**: For each of the 12 edges $i \in [0, 11]$, if bit $i$ is set in `edge_mask`, find the two sub-nodes at the edge endpoints (`n1 = sub[kCellEdgeEndpoint[i][0]]`, `n2 = sub[kCellEdgeEndpoint[i][1]]`). Form an edge key using the min/max of `n1` and `n2` pointers. If the edge key is not in `vtx_map`, compute the vertex position and normal via weighted lerp of the dual vertices and normals, determine material (non-Empty if possible), add to mesh, and store in `vtx_map` [S1, unofficial].
+6. **Add Triangles**: Iterate through `kMcTriangleTable[vertex_mask]` in steps of 3, adding triangles formed by the edge vertices [S1, unofficial].
+
+### Formulas
+- **Point interpolation**: $\text{point} = \frac{w_b \cdot \text{pos}_a + w_a \cdot \text{pos}_b}{w_a + w_b}$, where $w_a = |\text{n1}.dualVertex.w|$ and $w_b = |\text{n2}.dualVertex.w|$ [S1, unofficial].
+- **Normal interpolation**: $\text{normal} = \text{normalize}(\text{lerp}(\text{n1}.normal, w_a, \text{n2}.normal, w_b))$ [S1, unofficial].
+- **Material selection**: $\text{mat} = (\text{n1}.material == \text{Empty}) ? \text{n2}.material : \text{n1}.material$ [S1, unofficial].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def vertProc(node):
+def vertProc(node, vtx_map, mesh_vertices, mesh_triangles):
     # 1. Resolve nodes
     sub = [None] * 8
     has_lesser = False
@@ -64,126 +44,112 @@ def vertProc(node):
             has_lesser = True
         else:
             sub[i] = node
-            if node.has_lesser: # Check if the node itself has children
-                has_lesser = True # This logic might need adjustment based on exact tree structure, 
-                                  # but source says "if a node is subdivided... recursively call"
-                                  # Assuming 'has_lesser' flag on the node indicates subdivision status.
-    
-    # Correction based on source: "If any node was subdivided (has_lesser is true)"
-    # The source implies checking the flag on the current node or the resolved children.
-    # Let's stick to the source's explicit step: "If any node was subdivided... recursively call"
-    # We need to check if the original node had children.
-    if node.has_lesser:
+            if node.has_lesser:
+                has_lesser = True
+
+    # 2. Recursion check
+    if has_lesser:
         for i in range(8):
-            vertProc(sub[i])
+            vertProc(sub[i], vtx_map, mesh_vertices, mesh_triangles)
         return
 
-    # 2. Compute vertex_mask
+    # 3. Compute vertex_mask
     vertex_mask = 0
     for i in range(8):
-        if sub[i].dualVertex.w <= 0.0f:
+        if sub[i].dualVertex.w <= 0.0:
             vertex_mask |= (1 << i)
 
-    # 3. Compute edge_mask
+    # 4. Compute edge_mask
+    # kMcVertexMaskToEdgeMask is a 256-entry lookup table provided by the implementation
     edge_mask = kMcVertexMaskToEdgeMask[vertex_mask]
 
-    # 4. Process edges
+    # 5. Process edges
     for i in range(12):
         if (edge_mask >> i) & 1:
             idx1 = kCellEdgeEndpoint[i][0]
             idx2 = kCellEdgeEndpoint[i][1]
             n1 = sub[idx1]
             n2 = sub[idx2]
-            
-            # Create edge key
+
+            # Form edge key using min/max pointers
             if n1 < n2:
                 edge_key = (n1, n2)
             else:
                 edge_key = (n2, n1)
-            
+
             if edge_key not in vtx_map:
-                # Interpolate Point
                 wa = abs(n1.dualVertex.w)
                 wb = abs(n2.dualVertex.w)
                 denom = wa + wb
                 if denom == 0:
-                    # Degenerate case: both weights are zero. 
-                    # Source does not specify fallback. [G] Use midpoint.
-                    point = (n1.position + n2.position) / 2.0
+                    point = (n1.position + n2.position) * 0.5  # [G] Fallback for zero weights
                 else:
                     point = (wb * n1.position + wa * n2.position) / denom
-                
-                # Interpolate Normal
-                # Source formula: normal = normalize(lerp(sub[i1]->normal, w1, sub[i2]->normal, w2))
-                # Assuming w1=wa, w2=wb for consistency with point interpolation
-                w1 = wa
-                w2 = wb
+
                 if denom == 0:
-                    normal = normalize(n1.normal + n2.normal)
+                    normal = normalize(n1.normal + n2.normal)  # [G] Fallback
                 else:
-                    normal = normalize(n1.normal * w1 + n2.normal * w2)
-                
-                # Determine Material
+                    normal = normalize(n1.normal * wa + n2.normal * wb)
+
                 if n1.material == Empty:
                     mat = n2.material
                 else:
                     mat = n1.material
-                
-                # Add to mesh and map
-                vertex_index = add_vertex_to_mesh(point, normal, mat)
+
+                vertex_index = len(mesh_vertices)
+                mesh_vertices.append((point, normal, mat))
                 vtx_map[edge_key] = vertex_index
 
-    # 5. Add triangles
+    # 6. Add triangles
     tri_table = kMcTriangleTable[vertex_mask]
     for i in range(0, len(tri_table), 3):
         e1 = tri_table[i]
         e2 = tri_table[i+1]
         e3 = tri_table[i+2]
-        
-        # Get edge keys
+
         idx1_1 = kCellEdgeEndpoint[e1][0]
         idx1_2 = kCellEdgeEndpoint[e1][1]
         n1_1 = sub[idx1_1]
         n1_2 = sub[idx1_2]
         key1 = (min(n1_1, n1_2), max(n1_1, n1_2))
-        
+
         idx2_1 = kCellEdgeEndpoint[e2][0]
         idx2_2 = kCellEdgeEndpoint[e2][1]
         n2_1 = sub[idx2_1]
         n2_2 = sub[idx2_2]
         key2 = (min(n2_1, n2_2), max(n2_1, n2_2))
-        
+
         idx3_1 = kCellEdgeEndpoint[e3][0]
         idx3_2 = kCellEdgeEndpoint[e3][1]
         n3_1 = sub[idx3_1]
         n3_2 = sub[idx3_2]
         key3 = (min(n3_1, n3_2), max(n3_1, n3_2))
-        
+
         v1 = vtx_map[key1]
         v2 = vtx_map[key2]
         v3 = vtx_map[key3]
-        
-        add_triangle_to_mesh(v1, v2, v3)
+
+        mesh_triangles.append((v1, v2, v3))
 ```
 
 ### Parameters
-- `kMcVertexMaskToEdgeMask`: Lookup table mapping 8-bit vertex masks to 12-bit edge masks.
-- `kCellEdgeEndpoint`: Array of size 12, each entry containing two indices into the 8-node array.
-- `kMcTriangleTable`: Lookup table mapping vertex masks to triangle indices.
+- `kMcVertexMaskToEdgeMask`: 256-entry lookup table mapping 8-bit vertex masks to 12-bit edge masks [S1, unofficial].
+- `kCellEdgeEndpoint`: Array of size 12, each entry containing two indices into the 8-node array [S1, unofficial].
+- `kMcTriangleTable`: Lookup table mapping vertex masks to triangle edge indices [S1, unofficial].
 
 ### Edge Cases and Pitfalls
-- **Zero Weights**: If both dual vertices on an edge have `w == 0`, the denominator in interpolation is zero. The source does not specify a fallback, but a midpoint or average normal is a standard [G] safeguard.
-- **Subdivision**: The recursion must handle the inverted index `[7-i]` correctly to maintain orientation.
-- **Material Selection**: The logic `mat = (n1->material == Empty) ? n2->material : n1->material` prioritizes non-Empty materials. If both are Empty, the result is Empty.
+- **Zero Weights**: If both dual vertices on an edge have `w == 0`, the denominator in interpolation is zero. The source does not specify a fallback, but using the midpoint and averaged normal is a standard [G] safeguard.
+- **Subdivision**: The recursion must handle the inverted index `[7-i]` correctly to maintain orientation [S1, unofficial].
+- **Material Selection**: The logic prioritizes non-Empty materials; if both are Empty, the result is Empty [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: Linear with respect to the number of dual cells and the number of triangles generated. Recursion depth depends on the tree depth.
-- **Memory Complexity**: Proportional to the number of edges in the mesh due to `vtx_map`.
-- **Strengths**: Handles hierarchical data structures efficiently; ensures manifold connectivity via edge caching.
-- **Limitations**: Requires significant memory for `vtx_map` in dense scenes; recursion overhead for deep trees.
+- **Time Complexity**: Not given in the sources. [G] Linear with respect to the number of dual cells and generated triangles.
+- **Memory Complexity**: Not given in the sources. [G] Proportional to the number of edges in the mesh due to `vtx_map`.
+- **Strengths**: Handles hierarchical data structures efficiently; ensures manifold connectivity via edge caching [G].
+- **Limitations**: Requires significant memory for `vtx_map` in dense scenes; recursion overhead for deep trees [G].
 
 ## Background
-Dual Marching Cubes Vertex Processing is part of the Dual Marching Cubes algorithm family, which adapts the classic Marching Cubes algorithm to a dual grid representation. This approach is particularly useful for hierarchical data structures like octrees or adaptive grids, where cells can be subdivided. The method was implemented in the `isomesh` library by Svenny [S1, unofficial].
+Dual Marching Cubes Vertex Processing is part of the Dual Marching Cubes algorithm family, which adapts the classic Marching Cubes algorithm to a dual grid representation [S1, unofficial]. This approach is particularly useful for hierarchical data structures like octrees or adaptive grids, where cells can be subdivided [S1, unofficial]. Origin and development history are not given in the sources.
 
 ## Sources
 [S1] Svenny/isomesh, https://github.com/Svenny/isomesh, fetched 2026-10-27 (unofficial)

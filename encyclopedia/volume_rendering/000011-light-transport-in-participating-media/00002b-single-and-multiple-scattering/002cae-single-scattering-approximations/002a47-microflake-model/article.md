@@ -3,178 +3,139 @@
 Also called: Jakob et al. model, Physically-based microflake model, Standard Microflake Model, anisotropic microflake model
 
 ## Overview
-The Microflake Model is a physically-based participating medium model that represents a volume as a homogeneous cloud of microscopic, perfectly specular flakes [S1]. It solves the problem of rendering anisotropic media (such as fur, hair, or certain powders) by deriving direction-dependent attenuation coefficients and phase functions from a statistical Normal Distribution Function (NDF) of the microflake orientations [S1]. Unlike arbitrary anisotropic phase functions which often violate Helmholtz reciprocity, the Microflake Model satisfies reciprocity by construction [S1]. It differs from homogeneous single-scattering models by accounting for the geometric orientation of scatterers, and from the Microscopic Self-Shadowing variant by assuming uncorrelated microflake positions [S1].
+The Microflake Model is a physically-based participating medium model that represents a medium as a homogeneous cloud of microscopic flakes, where orientations are statistically described by a Normal Distribution Function (NDF) $D(\boldsymbol{\omega})$ [S1]. It solves the problem of rendering anisotropic media (such as fur, hair, or fibrous materials) by deriving direction-dependent attenuation coefficients and phase functions that satisfy Helmholtz's reciprocity principle by construction [S1]. It differs from isotropic single-scattering approximations [Single Scattering](5566-single-scattering.md) by accounting for the geometric alignment of scattering elements, and it differs from the Microscopic Self-Shadowing variant [Microscopic Self-Shadowing Microflake Model](4746-microscopic-self-shadowing-microflake-model.md) by assuming uncorrelated microflake positions (no microscopic self-shadowing) [S1].
 
 ## How it works
-The model computes the optical properties of the medium based on the statistical distribution of microflake normals. It assumes the medium is a homogeneous cloud of microflakes where the orientations are described by a microflake normal distribution function $D(\boldsymbol{\omega}_m)$ [S1].
-
-### Inputs and Outputs
 **Inputs:**
-*   $\boldsymbol{\omega}$: The view direction (or incident light direction, due to reciprocity).
-*   $D(\boldsymbol{\omega}_m)$: The microflake Normal Distribution Function (NDF), defined over the unit sphere [S1].
-*   $\rho$: The density, representing the total area of microflake surface per unit volume [S1].
-*   $\alpha(\lambda)$: The wavelength-dependent albedo of the microflakes [S1].
+*   $\boldsymbol{\omega}$: Incoming light direction (or view direction for attenuation).
+*   $\boldsymbol{\omega}'$: Outgoing light direction (or view direction for scattering).
+*   $D(\boldsymbol{\omega}_m)$: Microflake Normal Distribution Function (NDF), defined over the unit sphere.
+*   $\rho$: Density, representing the total area of microflake surface per unit volume [S1].
+*   $\alpha(\lambda)$: Wavelength-dependent albedo of the microflakes [S1].
 
 **Outputs:**
-*   $\sigma_t(\boldsymbol{\omega})$: The attenuation coefficient [S1].
-*   $\sigma_s(\boldsymbol{\omega})$: The scattering coefficient [S1].
-*   $f(\boldsymbol{\omega} \rightarrow \boldsymbol{\omega}')$: The phase function for scattering from direction $\boldsymbol{\omega}$ to $\boldsymbol{\omega}'$ [S1].
+*   $\sigma_t(\boldsymbol{\omega})$: Attenuation coefficient [S1].
+*   $\sigma_s(\boldsymbol{\omega})$: Scattering coefficient [S1].
+*   $f(\boldsymbol{\omega} \rightarrow \boldsymbol{\omega}')$: Phase function [S1].
 
-### Data Structures
-The core data structure is the NDF $D(\boldsymbol{\omega}_m)$. In implementation, this is typically represented as:
-1.  **Analytical Function:** A closed-form mathematical function evaluating $D$ for any normal $\boldsymbol{\omega}_m$ (e.g., Gaussian, Power of Sine/Cosine).
-2.  **Lookup Table:** A discretized representation of $D$ on a grid or spherical harmonics, if an analytical form is unavailable or expensive [S1, G].
+**Data Structures:**
+The model relies on the evaluation of the NDF $D(\boldsymbol{\omega}_m)$ for any given normal $\boldsymbol{\omega}_m$. Common implementations use analytical distributions (e.g., Gaussian, Power of Sine/Cosine) or precomputed lookup tables. The NDF must satisfy the symmetry condition $D(\boldsymbol{\omega}) = D(-\boldsymbol{\omega})$ [S1].
 
-The parameters $\rho$ and $\alpha(\lambda)$ are scalar or vector values (for RGB) constant throughout the volume.
+**Steps:**
 
-### Formulas and Definitions
-Let $\langle \cdot \rangle$ denote the clamped dot product, defined as $\langle \mathbf{a} \cdot \mathbf{b} \rangle = \max(0, \mathbf{a} \cdot \mathbf{b})$ [S1].
-
-1.  **Attenuation Coefficient:**
-    The attenuation coefficient is derived from the integral of projected areas over all microflake orientations [S1]:
+1.  **Compute the Attenuation Coefficient $\sigma_t(\boldsymbol{\omega})$**:
+    Calculate the integral of the projected areas over all microflake orientations. This represents the extinction coefficient for a ray traveling in direction $\boldsymbol{\omega}$ [S1].
     $$ \sigma_t(\boldsymbol{\omega}) = \rho \int_{S^2} D(\boldsymbol{\omega}_m) \langle \boldsymbol{\omega} \cdot \boldsymbol{\omega}_m \rangle d\boldsymbol{\omega}_m $$
-    where $\boldsymbol{\omega}_m$ is the microflake normal [S1].
+    where $\langle x \rangle = \max(0, x)$ is the clamped dot product [S1].
 
-2.  **Scattering Coefficient:**
-    Assuming the microflake albedo is not view-dependent, the scattering coefficient for a wavelength $\lambda$ is proportional to the attenuation coefficient [S1]:
+2.  **Compute the Scattering Coefficient $\sigma_s(\boldsymbol{\omega})$**:
+    Derive the scattering coefficient from the attenuation coefficient and the albedo. This assumes the albedo is not view-dependent [S1].
     $$ \sigma_s(\boldsymbol{\omega}) = \alpha(\lambda) \sigma_t(\boldsymbol{\omega}) $$
-    This implies the single-scattering albedo is constant and equal to $\alpha(\lambda)$ [S1].
 
-3.  **Phase Function:**
-    For perfectly specular microflakes, the phase function describes the probability of scattering from incident direction $\boldsymbol{\omega}$ to outgoing direction $\boldsymbol{\omega}'$ [S1]. It is defined using the half-vector $\boldsymbol{\omega}_h$ [S1]:
-    $$ \boldsymbol{\omega}_h = \frac{\boldsymbol{\omega} + \boldsymbol{\omega}'}{\|\boldsymbol{\omega} + \boldsymbol{\omega}'\|} $$
+3.  **Compute the Phase Function $f(\boldsymbol{\omega} \rightarrow \boldsymbol{\omega}')$**:
+    For specular microflakes, the phase function is determined by the NDF evaluated at the half-vector between the incoming and outgoing directions [S1].
     $$ f(\boldsymbol{\omega} \rightarrow \boldsymbol{\omega}') = \frac{\rho \alpha(\lambda) D(\boldsymbol{\omega}_h)}{4 \sigma_s(\boldsymbol{\omega})} $$
-    Substituting $\sigma_s(\boldsymbol{\omega}) = \alpha(\lambda) \sigma_t(\boldsymbol{\omega})$, this simplifies to:
-    $$ f(\boldsymbol{\omega} \rightarrow \boldsymbol{\omega}') = \frac{\rho D(\boldsymbol{\omega}_h)}{4 \sigma_t(\boldsymbol{\omega})} $$
-    [S1].
+    where $\boldsymbol{\omega}_h$ is the normalized half-vector:
+    $$ \boldsymbol{\omega}_h = \frac{\boldsymbol{\omega} + \boldsymbol{\omega}'}{\|\boldsymbol{\omega} + \boldsymbol{\omega}'\|} $$
 
-### Parameters and Typical Values
-*   **$D(\boldsymbol{\omega}_m)$**: Unitless, units of $sr^{-1}$. The specific form depends on the material (e.g., isotropic for powder, anisotropic for fur) [S1].
-*   **$\rho$**: Units of $m^{-1}$. Represents the amount of microflake surface per unit volume [S1].
-*   **$\alpha(\lambda)$**: Unitless. Wavelength-dependent albedo [S1].
+**Parameters:**
+*   $\rho$: Density ($m^{-1}$). Typical values depend on the specific material (e.g., fur density). Not given in the sources.
+*   $\alpha(\lambda)$: Albedo (unitless). Wavelength-dependent.
+*   $D(\boldsymbol{\omega})$: NDF (unit $sr^{-1}$). Specific form depends on the chosen distribution (e.g., Gaussian, Beckmann).
 
-### Edge Cases and Pitfalls
-*   **Reciprocity:** Arbitrary anisotropic phase functions often break Helmholtz's reciprocity principle ($\sigma_s(\boldsymbol{\omega})f(\boldsymbol{\omega} \rightarrow \boldsymbol{\omega}') = \sigma_s(\boldsymbol{\omega}')f(\boldsymbol{\omega}' \rightarrow \boldsymbol{\omega})$) [S1]. The Microflake Model satisfies reciprocity by construction because the phase function and scattering coefficient are derived from the same underlying geometric model [S1].
-*   **Double-Sided Reflections:** The model assumes microflakes reflect on both sides, requiring the NDF to satisfy $D(\boldsymbol{\omega}) = D(-\boldsymbol{\omega})$ [S1]. If the NDF does not satisfy this symmetry, the model may produce physically incorrect results for back-facing flakes [S1, G].
-*   **Specular Assumption:** The standard model assumes perfectly specular microflakes. If the material is diffuse, this model is inaccurate [S1].
+**Edge Cases and Pitfalls:**
+*   **Reciprocity**: Arbitrary phase functions in anisotropic media often break Helmholtz's reciprocity principle ($\sigma_s(\boldsymbol{\omega})f(\boldsymbol{\omega} \rightarrow \boldsymbol{\omega}') = \sigma_s(\boldsymbol{\omega}')f(\boldsymbol{\omega}' \rightarrow \boldsymbol{\omega})$) [S1]. The Microflake Model satisfies reciprocity by construction because the phase function and scattering coefficient are derived from the same physical principles [S1].
+*   **NDF Symmetry**: The model assumes $D(\boldsymbol{\omega}) = D(-\boldsymbol{\omega})$, meaning microflakes reflect on both sides [S1]. If the NDF does not satisfy this, the model's physical validity is compromised.
+*   **Singularity**: If $\sigma_s(\boldsymbol{\omega}) = 0$, the phase function is undefined. This occurs if $\sigma_t(\boldsymbol{\omega}) = 0$ (no flakes aligned to attenuate) or $\alpha(\lambda) = 0$ (perfectly absorbing flakes). In practice, a small epsilon should be added to the denominator or the result clamped to zero.
 
-### Pseudocode
-The following Python-like pseudocode computes the optical properties for a given view direction and NDF. It assumes an analytical NDF is provided.
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import numpy as np
-
-def microflake_model(view_dir, ndf_func, density, albedo):
+def microflake_model(omega_in, omega_out, D_func, rho, albedo):
     """
     Computes attenuation, scattering coefficients, and phase function
     for the standard Microflake Model.
 
     Args:
-        view_dir (np.array): Incident or view direction vector (3D).
-        ndf_func (callable): Function D(omega_m) returning the NDF value.
-        density (float): Microflake surface area per unit volume (rho).
-        albedo (float or np.array): Wavelength-dependent albedo (alpha).
+        omega_in (Vector3): Incoming direction (or view direction for sigma_t).
+        omega_out (Vector3): Outgoing direction (or view direction for scattering).
+        D_func (Function): Normal Distribution Function D(omega_m).
+        rho (float): Density (total area of flakes per unit volume).
+        albedo (float): Albedo of the microflakes.
 
     Returns:
         sigma_t (float): Attenuation coefficient.
         sigma_s (float): Scattering coefficient.
-        phase_func (callable): Function f(omega_in, omega_out) returning phase value.
+        phase (float): Phase function value.
     """
     
-    # Helper: Clamped dot product
-    def clamped_dot(a, b):
-        return max(0.0, np.dot(a, b))
-
-    # 1. Compute Attenuation Coefficient sigma_t
-    # sigma_t = rho * integral(D(omega_m) * <omega . omega_m> d omega_m)
-    # This integral must be computed numerically or analytically depending on D.
-    # For implementation, we assume a numerical quadrature over the hemisphere/sphere.
+    # Step 1: Compute Attenuation Coefficient sigma_t
+    # sigma_t(omega) = rho * integral(D(omega_m) * max(0, omega . omega_m)) d(omega_m)
+    # Note: The integral must be computed numerically or via closed-form solution
+    # depending on the specific D_func implementation.
+    # [G] For analytical NDFs (e.g., Gaussian), this integral has a closed form.
+    # For generic D_func, use Monte Carlo integration or precomputed table.
+    sigma_t = rho * compute_projected_area_integral(omega_in, D_func)
     
-    # Example: Monte Carlo integration over the sphere
-    num_samples = 10000
-    # Generate random normals on the sphere
-    # Note: In practice, importance sampling D(omega_m) is preferred for efficiency.
-    # Here we use uniform sampling for clarity of the formula.
-    omega_m_samples = uniform_sphere_samples(num_samples)
-    
-    # Evaluate NDF and projected area
-    ndf_values = np.array([ndf_func(om) for om in omega_m_samples])
-    projected_areas = np.array([clamped_dot(view_dir, om) for om in omega_m_samples])
-    
-    # Integral approximation: Mean * Area of sphere (4*pi)
-    # E[D * <w, m>] * 4pi
-    integral_mean = np.mean(ndf_values * projected_areas)
-    sigma_t = density * integral_mean * 4.0 * np.pi
-    
-    # 2. Compute Scattering Coefficient sigma_s
+    # Step 2: Compute Scattering Coefficient sigma_s
     sigma_s = albedo * sigma_t
     
-    # 3. Define Phase Function
-    def phase_func(omega_in, omega_out):
-        # Compute half-vector
-        half_vec = omega_in + omega_out
-        norm_half = np.linalg.norm(half_vec)
-        if norm_half < 1e-8:
-            return 0.0
-        omega_h = half_vec / norm_half
-        
-        # f(w -> w') = (rho * alpha * D(wh)) / (4 * sigma_s(w))
-        # Note: sigma_s(w) is sigma_s computed above for the incident direction
-        # In the context of the RTE, sigma_s(w) is the scattering coefficient 
-        # for the direction of the incoming light.
-        
-        # If omega_in is the view direction (outgoing), we use sigma_s(view_dir)
-        # If omega_in is the light direction, we use sigma_s(light_dir)
-        
-        # For the standard evaluation in rendering, we usually evaluate f(w_in -> w_out)
-        # where w_in is the incident direction.
-        
-        d_omega_h = ndf_func(omega_h)
-        
-        # Reciprocity check: sigma_s(w_in) * f(w_in -> w_out) should equal 
-        # sigma_s(w_out) * f(w_out -> w_in)
-        
-        numerator = density * albedo * d_omega_h
-        denominator = 4.0 * sigma_s # sigma_s is for the incident direction w_in
-        
-        return numerator / denominator
-
-    return sigma_t, sigma_s, phase_func
-
-def uniform_sphere_samples(n):
-    """Generates n random points uniformly distributed on the unit sphere."""
-    # Using spherical coordinates
-    phi = np.random.uniform(0, 2 * np.pi, n)
-    cos_theta = np.random.uniform(-1, 1, n)
-    sin_theta = np.sqrt(1 - cos_theta**2)
+    # Step 3: Compute Phase Function
+    # If sigma_s is zero, phase is undefined (or zero if no scattering)
+    if sigma_s < 1e-8:
+        return sigma_t, sigma_s, 0.0
     
-    x = sin_theta * np.cos(phi)
-    y = sin_theta * np.sin(phi)
-    z = cos_theta
+    # Compute half-vector
+    half_vec = normalize(omega_in + omega_out)
     
-    return np.vstack((x, y, z)).T
+    # Evaluate NDF at half-vector
+    D_half = D_func(half_vec)
+    
+    # Phase function formula
+    phase = (rho * albedo * D_half) / (4.0 * sigma_s)
+    
+    return sigma_t, sigma_s, phase
+
+def compute_projected_area_integral(omega, D_func):
+    """
+    Computes the integral of D(omega_m) * max(0, omega . omega_m) over the sphere.
+    This is a helper function. The implementation depends on D_func.
+    [G] Example for Gaussian NDF:
+    If D(omega_m) is Gaussian with width sigma, the integral can be computed analytically.
+    For generic D_func, use Monte Carlo sampling:
+    """
+    # Monte Carlo estimation (simplified)
+    num_samples = 1024
+    sum_val = 0.0
+    for i in range(num_samples):
+        # Sample omega_m uniformly on sphere
+        omega_m = sample_uniform_sphere()
+        dot = max(0.0, dot_product(omega, omega_m))
+        sum_val += D_func(omega_m) * dot
+    # Average over sphere area (4*pi)
+    return sum_val / num_samples * (4.0 * 3.14159265359)
 ```
 
 ## Subtopics
 
 ### [Microscopic Self-Shadowing Microflake Model](4746-microscopic-self-shadowing-microflake-model.md)
-Extends the standard model by introducing correlations of microflake positions to handle dense/clustered media where self-shadowing occurs. Choose this when the medium is dense enough that microflakes occlude each other.
+Extends the standard model by introducing correlations of microflake positions at a microscopic scale, using a shadowing function $A(\omega)$ to account for self-shadowing and masking. Choose this for dense or clustered media where occlusion between flakes is significant.
 
 ### [Gaussian Fiber Distribution](6661-gaussian-fiber-distribution.md)
-A specific NDF used within the Microflake Model for simulating anisotropic media like fur. It is an efficient alternative to Power of Sine/Cosine distributions but lacks a closed-form attenuation coefficient. Choose this for hair/fur rendering where computational efficiency is prioritized.
+A specific NDF used within the Microflake Model for simulating anisotropic media like fur. It offers improved computational efficiency over Power of Sine/Cosine distributions but lacks a closed-form expression for the attenuation coefficient, relying on approximations. Choose this for efficient fur rendering.
 
 ## Operating characteristics
-*   **Time Complexity:** The evaluation of the attenuation coefficient $\sigma_t(\boldsymbol{\omega})$ requires an integral over the sphere. If computed analytically, it is $O(1)$. If computed numerically (e.g., Monte Carlo), it is $O(N)$ where $N$ is the number of samples. The phase function evaluation is $O(1)$ given the NDF evaluation.
-*   **Memory Complexity:** $O(1)$ if the NDF is analytical. $O(M)$ if the NDF is stored as a lookup table or spherical harmonics coefficients, where $M$ is the size of the representation.
-*   **Strengths:** Physically based; satisfies Helmholtz reciprocity; handles anisotropy naturally through the NDF; simple to implement if analytical NDFs are available.
-*   **Limitations:** Assumes perfectly specular microflakes; assumes uncorrelated positions (fails in dense media); requires numerical integration for $\sigma_t$ if no analytical form exists.
-*   **When to use:** Rendering anisotropic participating media like fur, hair, or powders where single scattering is a sufficient approximation and the medium is not extremely dense.
-*   **When not to use:** Dense media with significant multiple scattering or self-shadowing (use Microscopic Self-Shadowing variant); diffuse media.
+*   **Time Complexity**: The core evaluation depends on the computation of the integral for $\sigma_t(\boldsymbol{\omega})$. If the NDF $D$ allows a closed-form solution for this integral (e.g., Gaussian), the evaluation is $O(1)$. If numerical integration is required, it is $O(N)$ where $N$ is the number of samples. The phase function evaluation is $O(1)$ given the NDF evaluation.
+*   **Memory Complexity**: $O(1)$ if the NDF is analytical. $O(M)$ if the NDF is stored in a lookup table of size $M$.
+*   **Strengths**: Physically-based; satisfies Helmholtz reciprocity; handles anisotropy naturally; can represent complex materials like fur and hair.
+*   **Limitations**: Assumes uncorrelated microflake positions (no self-shadowing in the standard model); requires an NDF; the integral for $\sigma_t$ may be expensive or require approximations for complex NDFs.
+*   **When to use**: Rendering anisotropic participating media where physical accuracy and reciprocity are important, and the medium can be approximated as a cloud of uncorrelated flakes.
+*   **When not to use**: When microscopic self-shadowing is significant (use [Microscopic Self-Shadowing Microflake Model](4746-microscopic-self-shadowing-microflake-model.md)); when the medium is isotropic (use [Single Scattering](5566-single-scattering.md)).
 
 ## Background
-The Microflake Model was introduced by Jakob et al. in 2010 [JAM* 10]. It is based on the anisotropic Radiative Transfer Equation (RTE) framework. The model derives optical properties from a microscopic description of the medium as a cloud of flakes. It was developed to provide a physically-based way to render anisotropic media, addressing the limitations of arbitrary phase functions which often violate reciprocity. The model has been extended by Heitz et al. to include microscopic self-shadowing for more accurate volume downsampling and dense media rendering [S1].
+The Microflake Model was introduced by Jakob et al. in 2010 [JAM* 10] as a physically-based model for anisotropic participating media. It is based on the anisotropic Radiative Transfer Equation (RTE) and derives attenuation coefficients and phase functions from a microflake Normal Distribution Function (NDF). The model assumes that microflakes are perfectly specular and reflect on both sides, satisfying the symmetry condition $D(\boldsymbol{\omega}) = D(-\boldsymbol{\omega})$ [S1]. It was developed to address the limitations of arbitrary phase functions in anisotropic media, which often break reciprocity [S1].
 
 ## Sources
 [S1] A new microflake model with microscopic self-shadowing for accurate volume downsampling, https://doi.org/10.1111/cgf.13346, fetched 2026-10-26

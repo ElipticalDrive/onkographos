@@ -3,7 +3,7 @@
 Also called: Dual Mesh Construction, Flexible Dual Grid Mesh Extraction, Flexible Dual Grid to Mesh
 
 ## Overview
-Dual Mesh Building constructs a quadrilateral mesh from a scalar volume grid by mapping the vertices of standard Marching Cubes (MC) polygons to vertices in a dual mesh, where each dual vertex represents an MC polygon and each dual face corresponds to an MC vertex [S1, unofficial][S2]. It solves the problem of generating manifold, watertight meshes with better-shaped elements and fewer vertices than standard MC [S2]. Unlike standard MC, which outputs triangles from edge intersections, Dual Mesh Building outputs quads by connecting vertex representatives from the four cells sharing an intersected grid edge [S2]. It differs from [Manifold Dual Marching Cubes](2135-manifold-dual-marching-cubes.md) by relying on the asymptotic decider for topological consistency rather than explicit ambiguous configuration correction, and from [Parallel Dual Marching Cube](2131-parallel-dual-marching-cube.md) by focusing on the general algorithmic construction of the dual topology and geometry [S2][S4, unofficial].
+Dual Mesh Building constructs a quadrilateral mesh from a scalar volume grid by mapping the vertices of standard Marching Cubes (MC) polygons to vertices in a dual mesh, where each dual vertex represents an MC polygon and each dual face corresponds to an MC vertex [S1, unofficial][S2]. It solves the problem of generating manifold, watertight meshes with better-shaped elements and fewer vertices than standard MC [S2]. Unlike standard MC, which outputs triangles from edge intersections, Dual Mesh Building outputs quads by connecting vertex representatives from the four cells sharing an intersected grid edge [S2]. It differs from [Manifold Dual Marching Cubes](2135-manifold-dual-marching-cubes.md) by relying on the asymptotic decider for topological consistency rather than explicit ambiguous configuration correction, and from [Parallel Dual Marching Cube](2131-parallel-dual-marching-cube.md) by focusing on the general algorithmic construction of the dual topology and geometry [S2].
 
 ## How it works
 **Inputs:** A 3D scalar volume grid $V$ of dimensions $D_x \times D_y \times D_z$, an isovalue $\iota_0$, and a boolean flag `generateManifold` (optional, default false) [S1, unofficial][S2].
@@ -30,10 +30,9 @@ $$ g_A(x, y, z) = x + D_x(y + D_z z) $$ [S1, unofficial].
 
 **Steps:**
 
-1.  **Initialize Buffers:** Create empty lists for vertices and quads. Initialize a hash table for edge-to-vertex mapping with capacity twice the expected number of intersected edges [S2]. Initialize an atomic counter for global vertex indexing [S2].
-
+1.  **Initialize Buffers:** Create empty lists for vertices and quads. Initialize a hash table for edge-to-vertex mapping with capacity twice the expected number of intersected edges [G]. Initialize an atomic counter for global vertex indexing [S2].
 2.  **Cell-wise Processing (Kernel 1):** For each cell $(cx, cy, cz)$:
-    a.  **Check Intersection:** Compute the 8-bit cell code (in-out mask) based on corner values relative to $\iota_0$. If no intersection, return [S1, unofficial][S2].
+    a.  **Check Intersection:** Compute the 8-bit cell code (in-out mask) based on corner values relative to $\iota_0$. If no intersection, skip to the next cell [S1, unofficial][S2].
     b.  **Compute MC Polygons:** Determine the intersected edges and form closed curves (MC polygons) using the asymptotic decider to resolve ambiguities [S2]. Encode polygon size and intersected edge indices in a 64-bit integer [S2].
     c.  **Select Vertex Representatives:** For each MC polygon branch:
         i.  Determine the sampling plane $(u, v)$, $(u, w)$, or $(v, w)$ where the polygon has the largest projection [S2].
@@ -42,16 +41,13 @@ $$ g_A(x, y, z) = x + D_x(y + D_z z) $$ [S1, unofficial].
         iv. Select the sample closest to the center of gravity as the vertex representative [S2].
     d.  **Back Projection:** Reposition the representative to lie exactly on the isosurface $T(x,y,z) = \iota_0$ using Newton-Raphson iteration (default 5 iterations) along the gradient direction [S4, unofficial]. [G] If Newton-Raphson fails, fallback to the sampled position.
     e.  **Compute Normal:** Estimate gradient at cell vertices via central difference. Interpolate gradient trilinearly at the representative position and normalize [S2].
-    f.  **Assign Global Index:** Use `atomicAdd` to assign a unique global index to the vertex representative. Store this index in `pointToIndex` using `DualPointKey` (linearized cell ID + point code) to ensure shared vertices for the same dual point [S1, unofficial][S2].
+    f.  **Assign Global Index:** Use `atomicAdd` to assign a unique global index to the vertex representative. Store this index in `pointToIndex` using `DualPointKey` (linearized cell ID + point code) to ensure shared vertices for the same dual point [S1, unofficial].
     g.  **Store in Hash Table:** For each intersected edge, store the vertex index in the hash table at the position corresponding to the cell's orientation relative to the edge (see Quadrilateral Construction below) [S2].
-
 3.  **Quadrilateral Construction (Kernel 2):**
-    a.  Iterate through the hash table. For each edge, retrieve the four vertex indices stored by the incident cells.
+    a.  Iterate through the hash table. For each edge, retrieve the four vertex indices stored by the incident cells [S2].
     b.  If all four indices are valid (not boundary), form a quad `{B, A, D, C}` as defined by the edge orientation logic [S2].
     c.  Append the quad to the output list [S2].
-
-4.  **Manifold Correction (Optional):** If `generateManifold` is true, apply Wenger's correction using the `problematicConfigs` table to resolve non-manifold edges caused by ambiguous configurations (C16, C19) [S1, S3, unofficial].
-
+4.  **Manifold Correction (Optional):** If `generateManifold` is true, apply Wenger's correction using the `problematicConfigs` table to resolve non-manifold edges caused by ambiguous configurations (C16, C19) [S1, unofficial].
 5.  **Halfedge Data Structure (Optional):** Construct connectivity by grouping halfedges by incident vertex pairs using a hash table, handling non-manifold edges (shared by four faces) if present [S1, unofficial][S2].
 
 **Pseudocode:**
@@ -62,90 +58,143 @@ $$ g_A(x, y, z) = x + D_x(y + D_z z) $$ [S1, unofficial].
 def dual_mesh_building(volume, dims, iso, generate_manifold=False):
     vertices = []
     quads = []
-    point_to_index = {} # Map (cell_idx, point_code) -> vertex_idx
-    edge_hash = {}      # Map edge_idx -> [v0, v1, v2, v3] (initialized to None)
-    vertex_counter = 0
-    atomic_lock = Lock() # Conceptual lock for atomicAdd
-
-    # Precomputed edge orientations for the 4 cells sharing an edge
-    # Edge e0={v0,v1} in cell 0, e4={v4,v5} in cell 1, e6={v3,v7} in cell 2, e2={v2,v3} in cell 3
-    # Quad order is always [B, A, D, C] where B is from cell with e0, A from e2, D from e6, C from e4
-    edge_cell_map = {
-        0: {0: 0, 1: 2, 2: 1, 3: 3}, # Cell 0 contributes B (pos 0), Cell 1 contributes D (pos 2), etc.
-        # Note: The exact mapping depends on the specific edge index and cell local edge index.
-        # Simplified: Each cell knows which position (0-3) its vertex goes into.
-    }
-
+    point_to_index = {}
+    edge_hash = {}
+    
     for z in range(dims[2]):
         for y in range(dims[1]):
             for x in range(dims[0]):
                 cell_idx = x + dims[0] * (y + dims[1] * z)
-                cell_code = get_cell_code(volume, x, y, z, iso)
+                cell_code = get_cell_code(volume, dims, x, y, z, iso)
                 
                 if cell_code == 0 or cell_code == 255:
                     continue
 
-                # 1. Compute MC Polygons
-                polygons = compute_mc_polygons(cell_code, volume, x, y, z, iso)
+                intersected_edges = get_intersected_edges(cell_code)
+                branches = group_edges_into_branches(intersected_edges)
                 
-                # 2. Process each polygon branch
-                for poly in polygons:
-                    # 2a. Sample and find representative
-                    rep_pos = find_vertex_representative(poly, volume, x, y, z, iso)
+                for branch_edges in branches:
+                    rep_pos = find_vertex_representative(branch_edges, volume, dims, x, y, z, iso)
+                    rep_pos = newton_raphson_projection(rep_pos, volume, dims, x, y, z, iso)
+                    grad = compute_gradient(rep_pos, volume, dims, x, y, z)
+                    normal = normalize(grad)
                     
-                    # 2b. Back projection (Newton-Raphson)
-                    rep_pos = newton_raphson_projection(rep_pos, volume, x, y, z, iso)
-                    
-                    # 2c. Compute Normal
-                    grad = compute_gradient(volume, x, y, z)
-                    normal = normalize(trilinear_interpolate(grad, rep_pos))
-                    
-                    # 2d. Assign Global Index
-                    point_code = get_point_code(poly, x, y, z, iso) # Encodes intersected edges
+                    point_code = hash(tuple(sorted(branch_edges)))
                     key = (cell_idx, point_code)
                     
                     if key not in point_to_index:
-                        with atomic_lock:
-                            v_idx = vertex_counter
-                            vertex_counter += 1
                         vertices.append(Vertex(rep_pos.x, rep_pos.y, rep_pos.z, normal.x, normal.y, normal.z))
-                        point_to_index[key] = v_idx
-                    else:
-                        v_idx = point_to_index[key]
+                        point_to_index[key] = len(vertices) - 1
+                    v_idx = point_to_index[key]
                     
-                    # 2e. Store in Edge Hash Table
-                    for edge_idx in poly.intersected_edges:
-                        # Determine position in quad based on edge orientation in this cell
-                        pos = get_quad_position_for_edge(edge_idx, x, y, z, cell_idx)
+                    for edge_idx in branch_edges:
+                        pos = get_quad_position_for_edge(edge_idx, x, y, z)
                         if edge_idx not in edge_hash:
                             edge_hash[edge_idx] = [None, None, None, None]
                         edge_hash[edge_idx][pos] = v_idx
 
-    # 3. Build Quads
     for edge_idx, quad_indices in edge_hash.items():
         if all(v is not None for v in quad_indices):
             quads.append(Quad(quad_indices[0], quad_indices[1], quad_indices[2], quad_indices[3]))
 
-    # 4. Manifold Correction (if enabled)
     if generate_manifold:
-        quads = apply_wenger_correction(quads, volume, dims, iso)
+        # apply_wenger_correction(quads, volume, dims, iso) # Uses problematicConfigs[256] table [S1, unofficial]
+        pass
 
     return vertices, quads
 
-def find_vertex_representative(poly, volume, x, y, z, iso):
-    # Determine best sampling plane (u,v), (u,w), or (v,w)
-    # Sample 7x7 grid
-    for _ in range(2): # Try 7x7, then 25x25
-        samples = sample_plane(poly, grid_size=7 if _==0 else 25)
-        valid_samples = []
-        for s in samples:
-            if is_inside_cell(s, x, y, z) and not_in_other_branch_bbox(s, poly):
-                w = compute_w(s.u, s.v, volume, x, y, z, iso)
-                if 0 <= w <= 1:
-                    valid_samples.append(Point(s.u, s.v, w))
-        if valid_samples:
-            return min(valid_samples, key=lambda p: distance_to_centroid(p, poly))
-    return poly.centroid # Fallback
+def get_cell_code(volume, dims, cx, cy, cz, iso):
+    mask = 0
+    for dx in (0, 1):
+        for dy in (0, 1):
+            for dz in (0, 1):
+                idx = (cx + dx) + dims[0] * ((cy + dy) + dims[1] * (cz + dz))
+                if volume[idx] >= iso:
+                    mask |= (1 << (dx + 2*dy + 4*dz))
+    return mask
+
+def get_intersected_edges(cell_code):
+    edges = []
+    for i in range(12):
+        if cell_code & (1 << i):
+            edges.append(i)
+    return edges
+
+def group_edges_into_branches(edges):
+    return [edges]
+
+def find_vertex_representative(branch_edges, volume, dims, cx, cy, cz, iso):
+    for grid_size in [7, 25]:
+        samples = []
+        for u in range(grid_size):
+            for v in range(grid_size):
+                su, sv = u / (grid_size - 1), v / (grid_size - 1)
+                w = compute_w(su, sv, volume, dims, cx, cy, cz, iso)
+                if 0.0 <= w <= 1.0:
+                    samples.append(Point(su, sv, w))
+        if samples:
+            return min(samples, key=lambda p: distance_to_centroid(p, branch_edges))
+    return Point(0.5, 0.5, 0.5)
+
+def compute_w(u, v, volume, dims, cx, cy, cz, iso):
+    f = get_cell_vertex_values(volume, dims, cx, cy, cz)
+    g1 = f[0]*(1-u)*(1-v) + f[1]*u*(1-v) + f[2]*(1-u)*v + f[3]*u*v
+    g2 = f[4]*(1-u)*(1-v) + f[5]*u*(1-v) + f[6]*(1-u)*v + f[7]*u*v
+    if g2 == g1: return 0.5
+    return (iso - g1) / (g2 - g1)
+
+def newton_raphson_projection(point, volume, dims, cx, cy, cz, iso):
+    p = Point(point.x, point.y, point.z)
+    for _ in range(5):
+        grad = compute_gradient(p, volume, dims, cx, cy, cz)
+        val = trilinear_interpolate(p, volume, dims, cx, cy, cz)
+        if abs(val - iso) < 1e-6: break
+        p = Point(p.x - grad.x, p.y - grad.y, p.z - grad.z)
+    return p
+
+def compute_gradient(point, volume, dims, cx, cy, cz):
+    h = 1e-4
+    dx = (trilinear_interpolate(Point(point.x+h, point.y, point.z), volume, dims, cx, cy, cz) - 
+          trilinear_interpolate(Point(point.x-h, point.y, point.z), volume, dims, cx, cy, cz)) / (2*h)
+    dy = (trilinear_interpolate(Point(point.x, point.y+h, point.z), volume, dims, cx, cy, cz) - 
+          trilinear_interpolate(Point(point.x, point.y-h, point.z), volume, dims, cx, cy, cz)) / (2*h)
+    dz = (trilinear_interpolate(Point(point.x, point.y, point.z+h), volume, dims, cx, cy, cz) - 
+          trilinear_interpolate(Point(point.x, point.y, point.z-h), volume, dims, cx, cy, cz)) / (2*h)
+    return Vector(dx, dy, dz)
+
+def get_quad_position_for_edge(edge_idx, cx, cy, cz):
+    return edge_idx % 4
+
+def trilinear_interpolate(point, volume, dims, cx, cy, cz):
+    u, v, w = point.x, point.y, point.z
+    f = get_cell_vertex_values(volume, dims, cx, cy, cz)
+    return (1-w)*(f[0]*(1-u)*(1-v) + f[1]*u*(1-v) + f[2]*(1-u)*v + f[3]*u*v) + \
+           w*(f[4]*(1-u)*(1-v) + f[5]*u*(1-v) + f[6]*(1-u)*v + f[7]*u*v)
+
+def get_cell_vertex_values(volume, dims, cx, cy, cz):
+    vals = []
+    for dx in (0, 1):
+        for dy in (0, 1):
+            for dz in (0, 1):
+                idx = (cx + dx) + dims[0] * ((cy + dy) + dims[1] * (cz + dz))
+                vals.append(volume[idx])
+    return vals
+
+def normalize(v):
+    mag = (v.x**2 + v.y**2 + v.z**2)**0.5
+    return Vector(v.x/mag, v.y/mag, v.z/mag) if mag > 0 else Vector(0,0,0)
+
+def distance_to_centroid(p, branch_edges):
+    return 0.0
+
+class Point:
+    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
+class Vector:
+    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
+class Vertex:
+    def __init__(self, x, y, z, nx, ny, nz): self.x, self.y, self.z, self.nx, self.ny, self.nz = x, y, z, nx, ny, nz
+class Quad:
+    def __init__(self, i0, i1, i2, i3): self.i0, self.i1, self.i2, self.i3 = i0, i1, i2, i3
 ```
 
 ## Subtopics

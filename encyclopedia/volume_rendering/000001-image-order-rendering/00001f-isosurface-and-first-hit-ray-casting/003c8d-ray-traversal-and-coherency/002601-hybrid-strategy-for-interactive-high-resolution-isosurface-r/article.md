@@ -8,30 +8,29 @@ This method enables interactive isosurface rendering on multi-core processors by
 The method operates in two distinct phases to minimize memory overhead and maximize multi-core utilization [S1, unofficial].
 
 ### Inputs and Outputs
-*   **Input:** A volumetric dataset represented as a 3D-tiled structure (data blocks). The dataset size is limited by main memory capacity.
-*   **Output:** A rendered image at the target screen resolution (e.g., $1024 \times 1024$) showing the isosurface.
+*   **Input:** A volumetric dataset represented as a 3D-tiled structure (data blocks) [S1, unofficial]. Datasets up to the maximum size fitting in main memory are supported [S1, unofficial].
+*   **Output:** A rendered image at the target screen resolution (e.g., $1024 \times 1024$) showing the isosurface [S1, unofficial].
 
 ### Data Structures
 *   **3D-Tiled Dataset:** The volume is partitioned into 3D tiles, referred to as "data blocks" or simply "blocks" [S1, unofficial].
 *   **Compact Indexing Structure:** Used during Phase I to efficiently traverse the 3D-tiled volume and identify visible blocks [S1, unofficial].
-*   **Candidate Block Lists:** For each pixel (or packet of adjacent pixels), a list of data blocks that are both visible from the viewpoint and intersect the isosurface. These lists are ordered front-to-back relative to the viewpoint [S1, unofficial].
+*   **Candidate Block Lists:** For each pixel (or packet of adjacent pixels), a list of data blocks that are both visible from the viewpoint and intersect the isosurface [S1, unofficial]. These lists are ordered front-to-back relative to the viewpoint [S1, unofficial].
 
 ### Steps
 
 **Phase I: Object-Order Projection and Candidate Identification**
-1.  **Partition Image:** The screen is partitioned into initial groups (packets) of contiguous pixels [S1, unofficial].
+1.  **Image Partitioning:** The rendering starts with an initial image partitioning to group adjacent pixels into packets [S1, unofficial].
 2.  **Traverse Volume:** Perform a traversal of the 3D-tiled volumetric dataset using the compact indexing structure [S1, unofficial].
-3.  **Project and Identify:** Project the 3D data blocks from object space onto the image space. Identify which blocks are visible and intersect the isosurface for each pixel/packet [S1, unofficial].
+3.  **Project and Identify:** Project the 3D data blocks from object space onto the image space [S1, unofficial]. Identify which blocks are visible and intersect the isosurface for each pixel/packet [S1, unofficial].
 4.  **Sort Candidates:** Organize the identified blocks into a list for each pixel/packet in front-to-back order relative to the viewpoint [S1, unofficial].
 
 **Phase II: Restricted Ray Casting with Dynamic Load Balancing**
 1.  **Dynamic Allocation:** Instead of static screen partitioning, dynamically allocate groups of ray casting tasks (corresponding to the candidate block lists) among the available processor cores [S1, unofficial].
 2.  **Ray Casting:** For each allocated task, shoot rays from the pixels through their specific ordered list of candidate data blocks [S1, unofficial].
-3.  **Intersection:** Perform isosurface ray casting restricted to these limited-size lists. This reduces the search space compared to traversing the entire volume for every ray [S1, unofficial].
+3.  **Intersection:** Perform isosurface ray casting restricted to these limited-size lists [S1, unofficial]. This reduces the search space compared to traversing the entire volume for every ray [S1, unofficial].
 4.  **Render:** Compute the final pixel color based on the first intersection found within the candidate blocks [S1, unofficial].
 
 ### Pseudocode
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
@@ -130,7 +129,7 @@ def render_packet(candidates, camera, isovalue):
 
 ## Operating characteristics
 *   **Time Complexity:** Not explicitly stated, but the method achieves interactive rendering for $1024 \times 1024$ resolution on large datasets [S1, unofficial].
-*   **Memory Complexity:** Depends on the size of the 3D-tiled dataset and the compact indexing structure. The method is designed to fit within main memory [S1, unofficial].
+*   **Memory Complexity:** Depends on the size of the 3D-tiled dataset and the compact indexing structure. Datasets up to the maximum size fitting in main memory are supported [S1, unofficial].
 *   **Performance:** Achieves interactive isosurface rendering on a $1024 \times 1024$ screen for all tested datasets up to the maximum size fitting in main memory [S1, unofficial].
 *   **Scalability:** The method is described as efficient and scalable, with excellent load balancing and high cache performance [S1, unofficial].
 *   **Strengths:** Superior performance compared to previous algorithms due to dynamic load balancing and memory hierarchy optimization [S1, unofficial].

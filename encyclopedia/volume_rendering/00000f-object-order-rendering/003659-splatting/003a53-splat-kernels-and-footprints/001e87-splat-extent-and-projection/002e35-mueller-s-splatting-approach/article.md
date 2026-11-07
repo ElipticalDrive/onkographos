@@ -1,185 +1,134 @@
 # Mueller's Splatting Approach
 
-Also called: Footprint-based Splatting, Object Order Algorithm, Splatting, Splatting Algorithms
+Also called: Footprint-based Splatting, Mueller splatting, Object Order Algorithm, Splatting (Feed Forward Convolution), Splatting Algorithms
 
 ## Overview
-Mueller's Splatting Approach is an object-order volume rendering method that treats a gray-scale volume as a 3D discrete density function, calculating the influence of each voxel on multiple output pixels to accelerate Direct Volume Rendering (DVR) [S1, unofficial][S2][S3, S4, unofficial]. It distinguishes itself from ray-casting by exploiting cache coherency through sequential memory traversal and supporting incremental rendering, though it introduces blurring due to spherically symmetric reconstruction kernels [S1, unofficial][S2][S3, S4, unofficial].
+Mueller's Splatting Approach is an object-order volume rendering algorithm that accelerates Direct Volume Rendering (DVR) by projecting 3D voxel data onto the 2D image plane using precomputed footprint tables, thereby avoiding the random memory access patterns of ray casting [S1, S3, unofficial]. It distinguishes itself from basic splatting by aligning sheet buffers parallel to the image plane (image-aligned splatting), which eliminates the "popping" artifacts and brightness variations inherent in axis-aligned sheet approaches [S2, S5].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D volume represented as a discrete density function $f(s)$, where $s=(x_s, y_s, z_s)$ is a voxel position and $f(s)$ is its density [S1, S3, S4, unofficial]. A reconstruction kernel $h$ (e.g., Gaussian, Cone, Sinc) [S1, unofficial][S2][S3, S4, unofficial]. A viewing transformation (orthographic or perspective) [S1, S3, S4, unofficial].
-*   **Output:** A 2D image where each pixel $(x,y)$ accumulates contributions from all voxels [S1, S3, S4, unofficial].
+*   **Input:** A 3D discrete gray-scale volume density function $f(s)$, where $s=(x_s, y_s, z_s)$ is a voxel center; a reconstruction kernel $h$; a viewing transformation; and a Transfer Function (TF) for color/opacity classification [S1, unofficial][S2][S3, unofficial].
+*   **Output:** A 2D image composed of accumulated color and opacity values [S2].
 
 **Data Structures:**
-*   **Footprint Table:** A precomputed 2D grid storing the integrated kernel weights. The resolution of this table is much higher than the image plane resolution to ensure accuracy [S1, S3, S4, unofficial]. Values outside the table extent are zero and ignored [S1, S3, S4, unofficial].
-*   **Sheet Buffers:** In the axis-aligned variant, three stacks of sheet buffers are maintained to handle depth sorting and prevent color bleeding [S2][S4, unofficial]. In the image-aligned variant, buffers are parallel to the image plane [S2][S4, unofficial].
+1.  **Volume Data:** Array of voxel densities $f(s)$.
+2.  **Footprint Table:** A 2D grid storing the analytically integrated kernel function along the viewing ray. The resolution of this table is significantly higher than the image plane resolution to ensure smooth sampling [S1, S3, unofficial].
+3.  **Sheet Buffer:** A 2D buffer aligned parallel to the image plane, storing accumulated color and opacity for a specific slab of voxels [S5].
+4.  **Occlusion Map:** A dynamically constructed map used to cull invisible splats [S5].
 
-**Numbered Steps:**
+**Formulas:**
+The contribution of a single sample $s$ to a point $(x, y, z)$ in space is defined by:
+$$C(x, y, z) = h(x - x_s, y - y_s, z - z_s) \cdot f(s) \quad [S1, S3, unofficial]$$
+where $f(s)$ is the density of sample $s$ and $h$ is the convolution kernel [S1, S3, unofficial].
 
-1.  **Kernel Definition:** Define the 3D reconstruction kernel $h(x, y, z)$. Common choices include Gaussian, Cone, Sinc, or Bilinear functions [S1, unofficial][S2][S3, S4, unofficial]. The kernel is typically rotationally symmetric [S2][S3, S4, unofficial].
+To project this to the image plane, the contribution is integrated along the viewing ray (axis $u$ parallel to the ray):
+$$C(x, y) = f(s) \int_{-\infty}^{\infty} h(x - x_s, y - y_s, u) du \quad [S1, S3, unofficial]$$
 
-2.  **Footprint Table Generation:** Compute the footprint function $F(x, y)$ by integrating the kernel along the viewing ray direction (axis $u$) [S1, S3, S4, unofficial]:
-    $$ F(x, y) = \int_{-\infty}^{\infty} h(x - x_s, y - y_s, u) \, du $$
-    where $(x, y)$ is the displacement from the sample's projected center [S1, S3, S4, unofficial]. Evaluate this integral on a high-resolution grid to create the Footprint Table [S1, S3, S4, unofficial]. For orthographic projection, only one generic footprint table is needed per view, as offsets are handled during rendering [S1, S3, S4, unofficial].
+The integral term is independent of sample density and defines the **footprint function** $F(x, y)$:
+$$F(x, y) = \int_{-\infty}^{\infty} h(x - x_s, y - y_s, u) du \quad [S1, S3, unofficial]$$
+where $(x, y)$ is the displacement from the sample's projected center [S1, S3, unofficial].
 
-3.  **Voxel Processing (Object Order):** For each voxel $s$ in the volume:
-    a. Transform the voxel position $s$ to screen space $(x_s, y_s, z_s)$ [S1, S3, S4, unofficial].
-    b. Classify the voxel density $f(s)$ into color and opacity using a Transfer Function (TF) [S2][S4, unofficial].
-    c. Determine the 2D footprint on the image plane centered at $(x_s, y_s)$ [S1, S3, S4, unofficial].
+For image-aligned splatting, voxels are processed in slabs of width $\Delta s$. The average density $f(s_i)$, opacity $\alpha(s_i)$, and color $C_\lambda(s_i)$ for a slab are computed by integrating over the slab interval $[i\Delta s, (i+1)\Delta s]$ [S5]:
+$$f(s_i) = \frac{1}{\Delta s} \int_{i\Delta s}^{(i+1)\Delta s} f(s) ds$$
+$$\alpha(s_i) = \frac{\int_{i\Delta s}^{(i+1)\Delta s} \alpha(s) ds}{\Delta s} \cdot C_\lambda(s_i) \quad \text{(Note: Source [S5] formula for } \alpha \text{ and } C_\lambda \text{ is coupled; standard composition uses accumulated opacity)}$$
+*Correction based on [S5]:* The source provides specific averaging formulas for the slab. The opacity and color terms are derived from the integrals of the slab's properties.
 
-4.  **Splatting (Projection):** Distribute the voxel's contribution to the affected pixels. The contribution $C(x, y)$ to a pixel $(x, y)$ is:
-    $$ C(x, y) = f(s) \cdot F(x - x_s, y - y_s) $$
-    where $F$ is sampled from the Footprint Table [S1, S3, S4, unofficial]. The table is centered on the projected location of $s$ [S1, S3, S4, unofficial].
-
-5.  **Compositing:**
-    *   **Axis-Aligned (Sheet Buffer):** Voxels are processed in sheets (x-y, x-z, or y-z) parallel to the image plane. Sheets are composited back-to-front using the Porter-Duff over operator (alpha blending) [S1, unofficial][S2][S4, unofficial]. Three stacks of sheets are maintained to handle view changes [S2][S4, unofficial].
-    *   **Image-Aligned:** Sheet buffers are aligned parallel to the image plane to reduce popping artifacts [S2][S4, unofficial].
-    *   **Incremental:** Rendering can be performed incrementally in front-to-back or back-to-front order [S1, S4, unofficial].
-
-**Parameters:**
-*   **Footprint Table Size:** Small tables cause blocky images; large tables smooth details and consume more memory [S1, S3, S4, unofficial].
-*   **Sampling Method:** Nearest-neighbor sampling is fast but causes aliasing; bilinear interpolation is smoother but slower [S1, S3, S4, unofficial].
-*   **Reconstruction Filter:** Choice of $h$ (Gaussian, Cone, Sinc, Bilinear) affects image quality [S1, S3, S4, unofficial].
+**Steps:**
+1.  **Precompute Footprint Table:** Evaluate the integral $F(x, y)$ on a high-resolution grid [S1, S3, unofficial]. Values outside the footprint extent are zero and ignored [S3, unofficial].
+2.  **Transform and Project:** For each voxel $s$, transform its center into screen space [S5].
+3.  **Occlusion Culling:** Index into the occlusion map to test if the voxel is visible [S5]. If not visible, skip rasterization (though transformation is still required) [S5].
+4.  **Rasterize Footprint:** Center the footprint table on the projected location of $s$ and sample it to determine weights for affected pixels [S1, S3, unofficial]. Rasterize these weights into the sheet buffer [S5].
+    *   *Sampling:* Use nearest-neighbor (fast, aliasing) or bilinear interpolation (smoother, slower) to sample the view-transformed footprint table [S1, unofficial].
+5.  **Slab Accumulation:** Clip voxel kernels overlapping a slab to the slab and sum them into the sheet buffer [S5].
+6.  **Composite Sheets:** Composite the current sheet buffer with the previous accumulated result using the Porter-Duff over operator (alpha blending) [S1, unofficial][S5].
+7.  **Update Occlusion Map:** Perform a convolution operation on the composite result to update the occlusion map, limited to tiles that received splat contributions [S5].
+8.  **Repeat:** Process subsequent slabs until the volume is exhausted.
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def mueller_splatting(volume, transfer_function, kernel, view_transform, image_width, image_height):
-    """
-    volume: 3D array of densities f(s)
-    transfer_function: function mapping density to (color, opacity)
-    kernel: function h(x, y, z)
-    view_transform: function mapping 3D voxel coord to 2D screen coord (x, y) and depth z
-    image_width, image_height: dimensions of the output image
-    """
+def mueller_splatting(volume, kernel, view_transform, image_width, image_height):
+    # 1. Precompute generic footprint table
+    # F(x,y) = integral of kernel along viewing ray
+    footprint_table = compute_footprint_table(kernel, resolution=HIGH)
     
-    # Step 1: Generate Footprint Table
-    # Determine extent of kernel h for integration
-    kernel_extent = determine_kernel_extent(kernel)
+    # Initialize sheet buffer and final image
+    sheet_buffer = zeros((image_width, image_height, 4)) # RGBA
+    final_image = zeros((image_width, image_height, 4))
     
-    # High-resolution grid for footprint table
-    footprint_resolution = image_width * 4  # Example: 4x image resolution
-    footprint_table = zeros((footprint_resolution, footprint_resolution))
+    # Initialize occlusion map (conservative estimate of opacity)
+    occlusion_map = zeros((image_width, image_height))
     
-    # Evaluate integral F(x,y) = integral(h(x-xs, y-ys, u) du)
-    # For simplicity, assume orthographic projection along z-axis for table generation
-    # In practice, this is done per view or transformed later
-    for i in range(-kernel_extent, kernel_extent):
-        for j in range(-kernel_extent, kernel_extent):
-            # Integrate along the viewing ray (u)
-            integral_value = integrate_kernel_along_ray(kernel, i, j)
-            footprint_table[i + kernel_extent, j + kernel_extent] = integral_value
+    # 2. Process volume in slabs aligned with image plane
+    for slab in volume_slabs_aligned_with_image_plane:
+        current_sheet = zeros((image_width, image_height, 4))
+        
+        for voxel in slab:
+            # Transform voxel center to screen space
+            screen_pos = view_transform(voxel.center)
             
-    # Step 2: Initialize Image Buffer
-    image_buffer = zeros((image_height, image_width, 4)) # RGBA
-    
-    # Step 3: Process Voxels
-    # Traverse volume in memory order for cache coherency
-    for s in volume.iter_voxels():
-        density = volume[s]
+            # Check occlusion
+            if occlusion_map[screen_pos] >= 1.0:
+                continue # Early splat elimination
+            
+            # Get footprint weights
+            # Center footprint table on screen_pos
+            weights = sample_footprint_table(footprint_table, screen_pos, sampling_method=BILINEAR)
+            
+            # Classify voxel via Transfer Function
+            color, opacity = transfer_function(voxel.density)
+            
+            # Rasterize into current sheet
+            for pixel_offset, weight in weights:
+                pixel = screen_pos + pixel_offset
+                if is_in_bounds(pixel):
+                    # Add contribution: weight * color * opacity
+                    current_sheet[pixel].color += weight * color * opacity
+                    current_sheet[pixel].opacity += weight * opacity * (1.0 - current_sheet[pixel].opacity)
         
-        # Classify
-        color, opacity = transfer_function(density)
+        # Composite current sheet into final image
+        final_image = alpha_blend(final_image, current_sheet)
         
-        # Project to screen
-        sx, sy, sz = view_transform(s)
+        # Update occlusion map for next slab
+        # Convolve final_image to update opacity coverage
+        update_occlusion_map(occlusion_map, final_image)
         
-        # Determine footprint extent on screen
-        # Map kernel extent to screen space
-        footprint_radius = map_kernel_extent_to_screen(kernel_extent, sz)
-        
-        # Iterate over pixels covered by the splat
-        for dy in range(-footprint_radius, footprint_radius):
-            for dx in range(-footprint_radius, footprint_radius):
-                px = int(sx + dx)
-                py = int(sy + dy)
-                
-                if 0 <= px < image_width and 0 <= py < image_height:
-                    # Sample footprint table
-                    # Normalize dx, dy to table coordinates
-                    table_x = int((dx + kernel_extent) * (footprint_resolution / (2 * kernel_extent)))
-                    table_y = int((dy + kernel_extent) * (footprint_resolution / (2 * kernel_extent)))
-                    
-                    # Clamp to table bounds
-                    table_x = clamp(table_x, 0, footprint_resolution - 1)
-                    table_y = clamp(table_y, 0, footprint_resolution - 1)
-                    
-                    weight = footprint_table[table_x, table_y]
-                    
-                    # Contribution
-                    contribution = weight * density
-                    
-                    # Alpha Blend
-                    # Pre-multiply color by opacity for standard blending
-                    src_color = color * opacity
-                    src_alpha = opacity
-                    
-                    dst_color = image_buffer[py, px, :3]
-                    dst_alpha = image_buffer[py, px, 3]
-                    
-                    # Porter-Duff Over Operator
-                    new_alpha = src_alpha + dst_alpha * (1 - src_alpha)
-                    if new_alpha > 0:
-                        new_color = (src_color + dst_color * dst_alpha * (1 - src_alpha)) / new_alpha
-                    else:
-                        new_color = src_color
-                        
-                    image_buffer[py, px, :3] = new_color
-                    image_buffer[py, px, 3] = new_alpha
-
-    return image_buffer
-
-def integrate_kernel_along_ray(kernel, dx, dy):
-    """
-    Computes integral of kernel along u (viewing ray) for displacement dx, dy.
-    """
-    # Numerical integration
-    u_range = determine_u_range(kernel, dx, dy)
-    integral = 0
-    step = 0.1
-    for u in u_range:
-        integral += kernel(dx, dy, u) * step
-    return integral
-
-def determine_kernel_extent(kernel):
-    """
-    Determines the radius where kernel value is negligible.
-    """
-    # For Gaussian with sigma=1, radius 2 is common
-    return 2
-
-def map_kernel_extent_to_screen(kernel_extent, depth):
-    """
-    Maps 3D kernel extent to 2D screen pixels based on depth and projection.
-    """
-    # Depends on view transform (orthographic vs perspective)
-    # Placeholder for specific projection math
-    return kernel_extent
+    return final_image
 ```
 
+**Parameters:**
+*   **Footprint Table Size:** Small tables cause blocky images; large tables smooth details but require more memory [S1, unofficial].
+*   **Reconstruction Filter:** Cone, Gaussian, Sinc, or bilinear functions [S1, unofficial]. Gaussian is common for rotational symmetry [S2, S5].
+*   **Sampling Method:** Nearest-neighbor or bilinear interpolation for the footprint table [S1, unofficial].
+
 **Edge Cases and Pitfalls:**
-*   **Blurring:** Images are blurred because of the spherically symmetric reconstruction kernel [S1, S3, S4, unofficial].
-*   **Color Bleeding:** Basic splatting suffers from color bleeding artifacts [S2][S4, unofficial].
-*   **Popping:** Axis-aligned sheet buffers introduce "popping" artifacts when the view switches between stacks [S2][S4, unofficial].
-*   **Aliasing:** Splatting is prone to aliasing problems [S2][S4, unofficial].
-*   **Performance:** Ideal splatting (evaluating kernel for every pixel) is terribly expensive [S4, unofficial].
+*   **Blurring:** Spherically symmetric kernels cause image blurring compared to ray casting with trilinear reconstruction [S1, unofficial].
+*   **Color Bleeding:** Basic splatting suffers from color bleeding; solved by Mueller's sheet alignment [S2].
+*   **Popping Artifacts:** Axis-aligned sheet buffers cause popping when the view switches stacks; image-aligned slabs eliminate this [S2].
+*   **Early Splat Limitation:** Early splat elimination only culls rasterization; the voxel must still be transformed to screen space to check occlusion, unlike early ray termination which skips voxels entirely [S5].
+*   **Aliasing:** Splatting introduces low-pass filtering which reduces aliasing but smooths signals [S5].
+
+## Subtopics
+
+### [Multi-texture Mapping Splatting](7515-multi-texture-mapping-splatting.md)
+Accelerates footprint-based splatting by dividing volume data into texture slices along the primary viewing direction, projecting voxels to these slices, and blending them using hardware-assisted multi-texture mapping to reduce depth sorting complexity.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(V \cdot A)$, where $V$ is the number of voxels and $A$ is the average area of the footprint in pixels. Each voxel is touched once, but each pixel is touched often [S4, unofficial].
-*   **Memory Complexity:** $O(V)$ for the volume and $O(F)$ for the footprint table, where $F$ is the footprint table size [S1, S3, S4, unofficial].
-*   **Performance:** Faster than ray-casting due to cache coherency (sequential memory access) [S1, S3, S4, unofficial]. Supports incremental rendering [S1, S4, unofficial].
-*   **Strengths:** Cache-friendly, supports incremental rendering, renders smooth surfaces without staircase artifacts [S1, S3, S4, unofficial].
-*   **Limitations:** Blurred images due to spherical kernels, color bleeding, popping artifacts (in axis-aligned variants), aliasing [S1, unofficial][S2][S3, S4, unofficial].
-*   **When to Use:** When rendering speed is prioritized over sharp boundaries, and cache coherency is beneficial [S1, S3, S4, unofficial].
-*   **When Not to Use:** When sharp object boundaries are required (use ray-casting with trilinear reconstruction) [S1, S3, S4, unofficial].
+*   **Time Complexity:** Linear with respect to the number of voxels and footprint table size. Cache coherency is exploited by sequentially traversing voxels in memory order, unlike the random access of ray casting [S1, unofficial].
+*   **Memory Complexity:** Requires storage for the volume, footprint table, and sheet buffers. Footprint table size is a critical parameter [S1, unofficial].
+*   **Performance:** Faster than ray casting for large volumes due to reduced data processing (only relevant voxels are projected) [S5].
+*   **Strengths:** Supports incremental rendering (front-to-back or back-to-front); renders smooth surfaces without staircase artifacts; reduces aliasing through low-pass filtering [S1, unofficial][S5].
+*   **Limitations:** Images are blurred due to kernel symmetry; "popping" artifacts if not image-aligned; early splat elimination is less efficient than early ray termination because transformation is still required [S1, unofficial][S5].
+*   **When to Use:** When cache coherency is critical, or when smooth surfaces are preferred over sharp boundaries; suitable for hardware acceleration via texture mapping [S1, unofficial][S2].
+*   **When Not to Use:** When sharp object boundaries are required (ray casting with trilinear reconstruction is better) [S1, unofficial].
 
 ## Background
-Mueller's Splatting Approach is based on the work of Westover (1989, 1990) and was further developed by Mueller (1998, 1999) with image-aligned sheet-based splatting and post-classified splatting [S3, S4, unofficial]. It is an object-order method that treats the volume as a 3D discrete density function [S1, S3, S4, unofficial]. It is widely used in medical image visualization [S2][S4, unofficial].
+Mueller's Splatting Approach was developed by Mueller et al. in the late 1990s (1998-1999) as an improvement over Westover's original splatting algorithm [S2][S3, unofficial]. Westover's method used axis-aligned sheet buffers, which caused "popping" artifacts and brightness variations during animation [S2, S5]. Mueller proposed aligning the sheet buffers parallel to the image plane (image-aligned splatting) to eliminate these issues [S2, S5]. The method is an example of feed-forward convolution, where input energy is spread to many output pixels, contrasting with the feed-backward approach of ray casting [S4, unofficial]. It has been widely used in medical visualization and accelerated with GPUs and multi-texture mapping [S2, S5].
 
 ## Sources
 [S1] Interactive Volume-Rendering Techniques for Medical Data Visualization, https://doi.org/10.2312/diss.20018138, fetched 2026-10-26 (unofficial)
 [S2] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
 [S3] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
 [S4] PDF Direct Volume Rendering, https://www.cs.unh.edu/~cs880/lectureNotes/DVR.pdf, fetched 2026-10-28 (unofficial)
+[S5] A Practical Evaluation of Popular Volume Rendering ..., https://courses.cs.duke.edu/spring03/cps296.8/papers/PracticalEvaluationofVolumeRenderingAlgorithms.pdf, fetched 2026-10-29

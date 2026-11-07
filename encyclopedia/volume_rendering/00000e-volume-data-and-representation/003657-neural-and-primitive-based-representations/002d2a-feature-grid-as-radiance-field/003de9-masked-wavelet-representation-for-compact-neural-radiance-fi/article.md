@@ -1,0 +1,253 @@
+# Masked Wavelet Representation for Compact Neural Radiance Fields
+
+Also called: MW-NeRF, Masked Wavelet NERF, Masked Wavelet TensoRF
+
+## Overview
+Masked Wavelet Representation (MW-NeRF) reduces the memory footprint of grid-based neural radiance fields by transforming spatial grid coefficients into the wavelet domain, applying a trainable binary mask to induce sparsity, and compressing the result. It sets itself apart from standard grid-based methods like [Feature Grid as Radiance Field](5508-feature-grid-as-radiance-field.md) by leveraging the compactness of wavelet coefficients for smooth signals and per-scene optimized masking, achieving state-of-the-art performance within a 2 MB memory budget.
+
+## How it works
+**Inputs:**
+- A 3D scene represented by a grid-based neural field (e.g., TensoRF decomposition).
+- Training images and camera poses.
+
+**Outputs:**
+- Compressed wavelet coefficients and masks.
+- A rendering pipeline that reconstructs spatial grids from these coefficients at test time.
+
+**Data Structures:**
+The 3D grid is decomposed into 2D matrices and 1D vectors using matrix-vector decomposition (TensoRF). For density (subscript $\sigma$, omitted for brevity), the set is:
+$$ \gamma_\sigma = \{W_{x,\sigma,r}, W_{y,\sigma,r}, W_{z,\sigma,r}, v_{x,\sigma,r}, v_{y,\sigma,r}, v_{z,\sigma,r}\}_{r=1}^{N_\sigma} $$
+- $W_{x,r} \in \mathbb{R}^{H \times W}$, $W_{y,r} \in \mathbb{R}^{W \times D}$, $W_{z,r} \in \mathbb{R}^{H \times D}$ are 2D matrices.
+- $v_{x,r} \in \mathbb{R}^{D}$, $v_{y,r} \in \mathbb{R}^{H}$, $v_{z,r} \in \mathbb{R}^{W}$ are 1D vectors.
+- $H, W, D$ are grid resolutions.
+- $N_r$ is the number of ranks.
+
+**Trainable Masks:**
+Element-wise trainable masks are defined for each component:
+$$ M = \{M_{x,r}, M_{y,r}, M_{z,r}, m_{x,r}, m_{y,r}, m_{z,r}\}_{r=1}^{N_r} $$
+These masks are optimized jointly with grid parameters.
+
+**Numbered Steps:**
+
+1.  **Decomposition:** Decompose the 3D grid into 2D matrices and 1D vectors as defined in TensoRF.
+2.  **Multi-level DWT:** Apply a multi-level Discrete Wavelet Transform (DWT) to the 2D matrices only. Do not apply DWT to 1D vectors, as it causes significant quality degradation [S1].
+    -   For a 2-level DWT, coefficients are grouped by level: $\{HL_1, LH_1, HH_1\}$, $\{HL_2, LH_2, HH_2\}$, and $\{LL_2\}$.
+    -   Apply scaling factors $s$ to handle varying gradient scales. High-pass coefficients have larger gradient scales and smaller weight ranges. Scale coefficients by the inverse of their frequency:
+        -   $s = 1/2$ for $HL_2, LH_2, HH_2$.
+        -   $s = 1/3$ for $HL_1, LH_1, HH_1$.
+        -   $s = 1$ for $LL_2$.
+3.  **Masking (Training):** Multiply wavelet coefficients by binarized masks using the Straight-Through Estimator (STE) to allow gradient flow. The masked matrix parameters $\widehat{\mathcal{W}}_r$ are computed as:
+    $$ \widehat{\mathcal{W}}_r = \text{sg}((\mathcal{H}(\mathcal{M}_r) - \sigma(\mathcal{M}_r)) \odot \mathcal{W}_r) + \sigma(\mathcal{M}_r) \odot \mathcal{W}_r $$
+    where $\text{sg}(\cdot)$ is stop-gradient, $\sigma(\cdot)$ is sigmoid, $\mathcal{H}(\cdot)$ is Heaviside step, and $\odot$ is Hadamard product.
+4.  **Optimization:** Train the network end-to-end. The loss function is:
+    $$ \mathcal{L} = \mathcal{L}_r + \lambda_m \mathcal{L}_m $$
+    where $\mathcal{L}_r$ is the rendering loss and $\mathcal{L}_m$ is the sum of all mask values (to enforce sparsity). $\lambda_m$ controls sparsity [S1].
+5.  **Compression Pipeline:**
+    -   **Grouping:** Group wavelet coefficient masks by decomposition level (e.g., HL1, LH1, HH1 together).
+    -   **Casting:** Cast binary mask values to $n$-bit unsigned integers (default $n=8$) to avoid inefficient bit allocation from repeating zeros in RLE.
+    -   **RLE:** Apply Run-Length Encoding to the $n$-bit mask streams.
+    -   **Huffman:** Apply Huffman encoding to the RLE outputs for entropy coding.
+    -   Store the compressed masks and the non-zero wavelet coefficients.
+6.  **Inference (Test Time):**
+    -   Decompress masks and coefficients.
+    -   Apply one Inverse DWT (IDWT) per grid to transform wavelet grids back into spatial grids.
+    -   Render using the reconstructed spatial grids, identical to standard grid-based NeRF.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def idwt_2d(W, wavelet_filter='bior4.4'):
+    """
+    Performs 2D Inverse Discrete Wavelet Transform on a single level.
+    W is a matrix of wavelet coefficients [LL, HL, LH, HH] concatenated or structured.
+    Assumes W is split into 4 quadrants of size m/2 x n/2.
+    """
+    # Split W into LL, HL, LH, HH
+    m, n = W.shape
+    h_m, h_n = m // 2, n // 2
+    
+    LL = W[:h_m, :h_n]
+    HL = W[:h_m, h_n:]
+    LH = W[h_m:, :h_n]
+    HH = W[h_m:, h_n:]
+    
+    # Upscale by 2 (nearest neighbor)
+    LL_up = np.repeat(np.repeat(LL, 2, axis=0), 2, axis=1)
+    HL_up = np.repeat(np.repeat(HL, 2, axis=0), 2, axis=1)
+    LH_up = np.repeat(np.repeat(LH, 2, axis=0), 2, axis=1)
+    HH_up = np.repeat(np.repeat(HH, 2, axis=0), 2, axis=1)
+    
+    # Get wavelet and scaling functions
+    phi, psi_hl, psi_lh, psi_hh = get_wavelet_filters(wavelet_filter)
+    
+    # Cross correlation (convolution with flipped kernel)
+    # Note: In many libraries, conv2d with padding handles this. 
+    # Here we assume standard cross-correlation implementation.
+    out = np.zeros((m, n))
+    out += conv2d(LL_up, phi, mode='same')
+    out += conv2d(HL_up, psi_hl, mode='same')
+    out += conv2d(LH_up, psi_lh, mode='same')
+    out += conv2d(HH_up, psi_hh, mode='same')
+    
+    return out
+
+def straight_through_estimator(mask_logit, weight):
+    """
+    Applies STE to binarize mask while allowing gradients.
+    mask_logit: trainable parameter (logits)
+    weight: wavelet coefficient
+    """
+    # Forward pass: binarize
+    mask_bin = (mask_logit > 0).astype(weight.dtype)
+    # Backward pass: use sigmoid as proxy for gradient
+    mask_grad = 1.0 / (1.0 + np.exp(-mask_logit))
+    
+    # Result is binarized, but gradient flows through sigmoid
+    return mask_bin * weight, mask_grad
+
+def compress_mask(mask_nbit):
+    """
+    Compresses n-bit mask using RLE and Huffman.
+    """
+    # RLE
+    rle_stream = []
+    count = 0
+    current_val = mask_nbit[0]
+    for val in mask_nbit:
+        if val == current_val:
+            count += 1
+        else:
+            rle_stream.append((current_val, count))
+            current_val = val
+            count = 1
+    rle_stream.append((current_val, count))
+    
+    # Huffman Encoding
+    # Build frequency table from RLE stream
+    freq = {}
+    for val, count in rle_stream:
+        freq[val] = freq.get(val, 0) + count
+    
+    # Generate Huffman codes
+    huffman_codes = generate_huffman_codes(freq)
+    
+    # Encode
+    bit_stream = ""
+    for val, count in rle_stream:
+        bit_stream += huffman_codes[val] + bin(count)[2:].zfill(8) # Simplified: assuming count fits in 8 bits or variable length
+    
+    return bit_stream
+
+def train_mw_nerf(scene_data, num_ranks, grid_res, lambda_m=0.01):
+    """
+    Main training loop for MW-NeRF.
+    """
+    # Initialize TensoRF grids
+    W_x = np.random.randn(grid_res[0], grid_res[1], num_ranks)
+    W_y = np.random.randn(grid_res[1], grid_res[2], num_ranks)
+    W_z = np.random.randn(grid_res[0], grid_res[2], num_ranks)
+    v_x = np.random.randn(grid_res[2], num_ranks)
+    v_y = np.random.randn(grid_res[0], num_ranks)
+    v_z = np.random.randn(grid_res[1], num_ranks)
+    
+    # Initialize mask logits
+    M_x = np.zeros_like(W_x)
+    M_y = np.zeros_like(W_y)
+    M_z = np.zeros_like(W_z)
+    m_x = np.zeros_like(v_x)
+    m_y = np.zeros_like(v_y)
+    m_z = np.zeros_like(v_z)
+    
+    for epoch in range(num_epochs):
+        # 1. Multi-level DWT on Matrices
+        # Apply DWT to W_x, W_y, W_z
+        W_x_wav = apply_dwt(W_x)
+        W_y_wav = apply_dwt(W_y)
+        W_z_wav = apply_dwt(W_z)
+        
+        # 2. Scaling
+        # Scale high-pass coefficients by inverse frequency
+        W_x_wav_scaled = scale_wavelets(W_x_wav, levels=2)
+        W_y_wav_scaled = scale_wavelets(W_y_wav, levels=2)
+        W_z_wav_scaled = scale_wavelets(W_z_wav, levels=2)
+        
+        # 3. Masking (STE)
+        W_x_hat, grad_M_x = straight_through_estimator(M_x, W_x_wav_scaled)
+        W_y_hat, grad_M_y = straight_through_estimator(M_y, W_y_wav_scaled)
+        W_z_hat, grad_M_z = straight_through_estimator(M_z, W_z_wav_scaled)
+        v_x_hat, grad_m_x = straight_through_estimator(m_x, v_x)
+        v_y_hat, grad_m_y = straight_through_estimator(m_y, v_y)
+        v_z_hat, grad_m_z = straight_through_estimator(m_z, v_z)
+        
+        # 4. Reconstruct Grid
+        # G = sum(v_r^d outer idwt(W_hat_r^d * s_r^d))
+        # Note: IDWT is applied during reconstruction for rendering loss calculation
+        # In training, we need to render. So we apply IDWT to get spatial grids.
+        G_x = reconstruct_grid(W_x_hat, v_x_hat) # IDWT applied here
+        G_y = reconstruct_grid(W_y_hat, v_y_hat)
+        G_z = reconstruct_grid(W_z_hat, v_z_hat)
+        
+        # 5. Render and Compute Loss
+        images = render_from_grids(G_x, G_y, G_z, scene_data.cameras)
+        loss_r = compute_rendering_loss(images, scene_data.targets)
+        
+        # 6. Mask Loss
+        loss_m = np.sum(np.sigmoid(M_x)) + np.sum(np.sigmoid(M_y)) + ... # Sum of all mask logits/sigmoid values
+        
+        total_loss = loss_r + lambda_m * loss_m
+        
+        # 7. Backpropagate
+        # Gradients flow through STE for masks and through IDWT for weights
+        update_parameters(W_x, W_y, W_z, v_x, v_y, v_z, M_x, M_y, M_z, m_x, m_y, m_z, total_loss)
+
+def reconstruct_grid(W_hat, v_hat):
+    """
+    Reconstructs spatial grid from masked wavelet coefficients.
+    """
+    # W_hat is already scaled by s in training, but IDWT expects unscaled?
+    # Eq 9: idwt(W_hat^d o s_r^d). 
+    # If W_hat includes the mask but not the scale, we apply scale here.
+    # Assuming W_hat is masked wavelet coeff.
+    # We need to apply IDWT.
+    spatial = idwt_2d(W_hat)
+    # Outer product with vector
+    # G_x = v_x outer spatial
+    return np.einsum('ij,k->ijk', v_hat, spatial)
+```
+
+**Parameters:**
+-   **Memory Budget:** 2 MB [S1].
+-   **Scaling Factors ($s$):** For 2-level DWT, $s=1/2$ for HL2, LH2, HH2; $s=1/3$ for HL1, LH1, HH1; $s=1$ for LL2 [S1].
+-   **$\lambda_m$:** Mask regularization weight. Value not specified, adjusted to control size [S1].
+-   **$n$:** Bit depth for mask casting before RLE. Default 8 [S1].
+
+**Edge Cases and Pitfalls:**
+-   **IDWT on Vectors:** Applying IDWT to 1D vectors causes significant quality degradation. IDWT is applied only to 2D matrices [S1].
+-   **Multi-level DWT Optimization:** Naive multi-level DWT degrades quality due to varying gradient scales of high-pass coefficients. Scaling by inverse frequency mitigates this [S1].
+-   **Smooth Signals:** Wavelets are less efficient than Fourier for smooth signals, but grid resolutions in NeRF are constrained to detailed scenes, making wavelets effective [S1].
+
+## Subtopics
+
+### TensoRF
+A method that decomposes 3D grids into 2D planes and 1D vectors. MW-NeRF builds on this structure. [TensoRF](5508-feature-grid-as-radiance-field.md)
+
+### NeRF
+The foundational neural radiance field method. MW-NeRF replaces the MLP with explicit grids. [NeRF](5508-feature-grid-as-radiance-field.md)
+
+## Operating characteristics
+-   **Time Complexity:** Negligible increase at test time. Requires one IDWT per grid during initialization, then rendering is identical to spatial grid-based NeRF [S1].
+-   **Memory Complexity:** Significantly reduced. Achieves >95% sparsity in grid parameters. State-of-the-art performance within 2 MB budget [S1].
+-   **Strengths:** High compression ratio, maintains reconstruction quality, fast inference.
+-   **Limitations:** Requires per-scene optimization of masks. Wavelet transform may be less efficient for very smooth signals (though rare in NeRF grids) [S1].
+-   **When to use:** When memory is constrained (e.g., <2 MB) and high-quality novel view synthesis is required.
+-   **When not to use:** When real-time training is critical and per-scene mask optimization is too slow, or for scenes with extremely smooth, low-frequency content where Fourier might be better [S1].
+
+## Background
+MW-NeRF was proposed in 2023 by Daniel et al. [S1]. It addresses the high memory usage of explicit grid-based neural fields by combining wavelet transforms with trainable masking. It builds on TensoRF's decomposition strategy and standard image compression techniques (RLE, Huffman) [S1].
+
+## Sources
+[S1] Masked Wavelet Representation for Compact Neural Radiance Fields, https://doi.org/10.1109/cvpr52729.2023.01981, fetched 2026-10-26

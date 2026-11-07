@@ -1,16 +1,14 @@
 # Hardware Ray Tracing Global Illumination
-
-
 ## Overview
 Hardware Ray Tracing Global Illumination approximates one-bounce diffuse global illumination by cosine-sampling the hemisphere around a surface normal, tracing short rays via hardware RT cores, and gathering indirect irradiance from hits or skylight if rays escape [S1, unofficial]. It differs from sibling methods like Voxel Cone Tracing by using explicit ray queries against voxel bricks rather than cone-based approximations, and from Precomputed Lighting by computing the indirect term per-frame rather than baking it offline [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Surface position $o$, surface normal $n$, camera direction $v$, and a voxel grid data structure containing active bricks and solid voxels.
-*   **Output:** Indirect irradiance contribution to the pixel color.
+*   **Input:** Surface position $o$, surface normal $n$, camera direction $v$, and a voxel grid data structure containing active bricks and solid voxels [S1, unofficial].
+*   **Output:** Indirect irradiance contribution to the pixel color [S1, unofficial].
 
 **Data Structures:**
-*   **GiProbe:** Stores SH-L1 coefficients for irradiance. Fields: `sh_r`, `sh_g`, `sh_b` (each `vec4<f32>`), `sh_dist`, `sh_dist2`, `info` (world grid coord + sample age), `st_r`, `st_g`, `st_b`, `st_dist`, `st_dist2`, `st_info` (staging accumulator) [S1, unofficial].
+*   **GiProbe:** Stores SH-L1 coefficients for irradiance. Fields: `sh_r`, `sh_g`, `sh_b` (each `vec4<f32>`), `sh_dist`, `sh_dist2`, `info` (world grid coordinate + sample age), `st_r`, `st_g`, `st_b`, `st_dist`, `st_dist2`, `st_info` (staging accumulator) [S1, unofficial].
 *   **Ray Query:** Hardware abstraction for tracing. Supports `RayDesc` with origin, direction, and hit range $[0.02, \text{GI\_DIST}]$ [S1, unofficial].
 *   **Brick/Voxel:** Voxel grid is organized into bricks. Each brick has an active flag. Solid voxels are identified by `resolve_brick` with `skip_transparent = true` [S1, unofficial].
 
@@ -43,68 +41,99 @@ Hardware Ray Tracing Global Illumination approximates one-bounce diffuse global 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+# Parameters from [S1, unofficial]
+GI_RAYS = 1
+GI_DIST = 40.0
+GI_STRENGTH = 1.0
+GI_SKY = 0.32
+PI = 3.141592653589793
+
 def rt_gather_indirect(o: vec3, n: vec3, v: vec3) -> vec3:
-    # 1. Tangent frame
-    up = vec3(0, 0, 1) if abs(n.z) > 0.9 else vec3(1, 0, 0)
+    # 1. Tangent frame construction [S1, unofficial]
+    up = vec3(0.0, 0.0, 1.0) if abs(n.z) > 0.9 else vec3(1.0, 0.0, 0.0)
     tang = normalize(cross(n, up))
     bitan = cross(n, tang)
-    
+
     acc = vec3(0.0)
-    
-    # 2. Ray generation and tracing
+
+    # 2. Ray generation and tracing [S1, unofficial]
     for k in range(GI_RAYS):
         r1, r2 = hash_randoms(o, k)
         rr = sqrt(r1)
-        phi = 2 * PI * r2
+        phi = 2.0 * PI * r2
         dl = vec3(rr * cos(phi), rr * sin(phi), sqrt(max(0.0, 1.0 - r1)))
         dir = normalize(tang * dl.x + bitan * dl.y + n * dl.z)
-        
-        # 3. Trace
+
         hit_voxel, hit_normal, hit_brick, hit_local = gi_trace(o, dir)
-        
+
         if hit_voxel is not None:
-            # Hit: accumulate based on albedo and sun term
-            # [G] Albedo and sun term are assumed to be retrieved from hit_voxel data
             albedo = get_albedo(hit_voxel)
             sun_term = get_sun_irradiance(hit_normal)
             acc += albedo * sun_term
         else:
-            # Escape: accumulate skylight
             acc += vec3(GI_SKY)
-            
+
     return acc * GI_STRENGTH
 
 def gi_trace(o: vec3, dir: vec3) -> tuple:
     best_t = GI_DIST
     best_hit = None
-    
-    # [G] Ray query initialization and iteration is hardware-specific.
-    # This pseudocode abstracts the loop over ray query candidates.
-    for candidate in ray_query_candidates(o, dir, 0.02, GI_DIST):
+
+    # [G] Hardware ray query initialization
+    rq = RayQuery(origin=o, direction=dir, min_t=0.02, max_t=GI_DIST)
+    for candidate in rq.candidates():
         if candidate.is_aabb():
             bi = candidate.brick_index()
             if not rt_brick_active(bi):
                 continue
-            
+
             t = resolve_brick(bi, skip_transparent=True)
             if t >= 0 and t < best_t:
                 best_t = t
+                rq.generate_intersection(t)
                 best_hit = candidate.get_hit_info(t)
-                
+
     return best_hit
+
+# Helper definitions [S1, unofficial] / [G]
+def hash_randoms(pos, seed):
+    # [G] Standard hash-based PRNG for deterministic randoms
+    h = hash((pos.x, pos.y, pos.z, seed))
+    return (h % 10000) / 10000.0, ((h >> 16) % 10000) / 10000.0
+
+def rt_brick_active(bi):
+    # [G] Checks if the voxel brick at index bi is active in the grid
+    return True
+
+def resolve_brick(bi, skip_transparent):
+    # [G] Finds the first solid, non-transparent voxel in brick bi
+    return 0.0
+
+def get_albedo(hit_voxel):
+    # [G] Retrieves material albedo from hit voxel data
+    return vec3(0.8)
+
+def get_sun_irradiance(hit_normal):
+    # [G] Computes direct sun irradiance for the hit normal
+    return vec3(1.0)
 ```
 
+## Subtopics
+
+### [Dynamic Diffuse Global Illumination (DDGI)](8142-dynamic-diffuse-global-illumination-ddgi.md)
+A Global Illumination technique using a 3D grid array of very low resolution cubemaps (e.g., 4x4), built using raytracing or cone tracing, with a second depth cubemap to prevent light/shadow leaks.
+
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot R)$ where $N$ is the number of pixels and $R$ is `GI_RAYS`. With `GI_RAYS=1`, it is $O(N)$ per frame [S1, unofficial].
-*   **Memory Complexity:** Depends on the voxel grid and probe grid storage. Probes store SH-L1 coefficients (4 floats per channel) [S1, unofficial].
-*   **Performance:** Real-time on hardware with RT cores. Performance scales with voxel grid density and ray query efficiency [S1, unofficial].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Real-time on hardware with RT cores [S1, unofficial].
 *   **Strengths:** Accurate one-bounce diffuse GI, handles complex geometry via ray tracing, no precomputation required [S1, unofficial].
-*   **Limitations:** Single bounce only, noisy with low sample counts, requires hardware RT support [S1, unofficial].
+*   **Limitations:** Single bounce only, requires hardware RT support [S1, unofficial].
 *   **When to use:** Real-time scenes requiring accurate diffuse GI without precomputation, on hardware with RT cores [S1, unofficial].
-*   **When not to use:** Scenes requiring multiple bounces, hardware without RT cores, or where precomputed lighting is preferred [S1, unofficial].
+*   **When not to use:** Scenes requiring multiple bounces or hardware without RT cores [S1, unofficial].
 
 ## Background
-Originated in the `voxelG` project by mstampfli, this method leverages hardware ray tracing cores for efficient voxel-based global illumination [S1, unofficial]. It is part of a family of real-time approximations that use spatial discretization and hardware acceleration to solve the radiative transfer equation for participating media [S1, unofficial].
+Implemented in the `voxelG` project [S1, unofficial]. It is part of a family of real-time approximations that use spatial discretization and hardware acceleration to solve the radiative transfer equation for participating media [S1, unofficial].
 
 ## Sources
 [S1] mstampfli/voxelG, https://github.com/mstampfli/voxelG, fetched 2026-10-24 (unofficial)

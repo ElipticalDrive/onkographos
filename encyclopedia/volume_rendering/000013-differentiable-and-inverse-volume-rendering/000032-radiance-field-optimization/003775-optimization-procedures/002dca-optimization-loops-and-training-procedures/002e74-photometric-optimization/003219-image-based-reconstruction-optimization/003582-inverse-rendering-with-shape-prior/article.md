@@ -1,0 +1,93 @@
+# Inverse Rendering with Shape Prior
+
+Also called: RenderNet EC-Deep, RenderNet Inverse Rendering with Shape Prior, RenderNet with 3D Auto-Encoder Prior
+
+## Overview
+This method reconstructs 3D geometry, texture, pose, and lighting from a single image by optimizing a latent representation of a pre-trained 3D auto-encoder decoder, regularizing the reconstruction to prevent noisy results [S1, unofficial]. Unlike [DC-IGN](7478-inverse-rendering-with-differentiable-ray-tracing.md) which learns a disentangled graphics code $Z$ for manipulation, RenderNet explicitly reconstructs 3D geometry, pose, lighting, and texture, allowing for higher resolution (512x512 vs 150x150) and better control in out-of-plane rotation and re-texturing [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A single observed image $I$.
+*   **Outputs:** Reconstructed 3D geometry (voxel grid or implicit surface), texture (albedo), pose parameters, and lighting parameters.
+
+**Data Structures:**
+*   **Latent Shape Vector ($z^0$):** A vector in the latent space of the pre-trained 3D auto-encoder. The dimension is not specified in the sources [G].
+*   **Network Parameters ($\theta$):** Parameters for the differentiable renderer (RenderNet).
+*   **Latent Texture Vector ($\phi^0$):** A vector in the latent space of the texture decoder. The dimension is not specified in the sources [G].
+*   **Lighting Parameters ($\eta$):** Parameters defining the lighting environment (e.g., light color, brightness, position/elevation/azimuth).
+
+**Method Steps:**
+1.  **Initialize Optimization Variables:** Initialize the latent shape vector $z^0$, network parameters $\theta$, latent texture vector $\phi^0$, and lighting parameters $\eta$.
+2.  **Generate Geometry:** Pass the latent shape vector $z^0$ through the decoder $g$ of the pre-trained 3D auto-encoder to generate the shape geometry $g(z^0)$. This step regularizes the reconstructed shape by using the prior shape knowledge (weights in the decoder) for shape generation [S1, unofficial].
+3.  **Generate Texture:** Pass the latent texture vector $\phi^0$ through the decoder $h$ (trained with RenderNet for texture rendering) to generate the texture representation $h(\phi^0)$. This regularizes the texture variable [S1, unofficial].
+4.  **Render Image:** Use the differentiable renderer $f$ with the generated geometry $g(z^0)$, texture $h(\phi^0)$, pose, and lighting parameters $\eta$ to render the synthetic image.
+5.  **Compute Loss:** Calculate the L2 norm between the observed image $I$ and the rendered image.
+6.  **Optimize:** Minimize the objective function with respect to $z^0$, $\theta$, $\phi^0$, and $\eta$.
+
+**Objective Function:**
+The objective function to minimize is:
+$$ \min_{z^0, \theta, \phi^0, \eta} \| I - f(g(z^0), \theta, h(\phi^0), \eta) \|_2^2 $$
+where:
+*   $I$ is the observed image.
+*   $f$ is the differentiable renderer.
+*   $g$ is the decoder of the 3D auto-encoder.
+*   $h$ is the decoder trained with RenderNet for texture rendering.
+*   $z^0$ is the latent shape vector.
+*   $\phi^0$ is the latent texture vector.
+*   $\eta$ represents the lighting parameters.
+*   $\theta$ represents the network parameters of the renderer.
+
+This corresponds to MAP estimation, where the prior term is the shape decoder and the likelihood term is given by RenderNet [S1, unofficial].
+
+**Parameters:**
+*   **Resolution:** 512x512 [S1, unofficial].
+*   **Auto-Encoder Size:** The pre-trained 3D auto-encoder was trained with 80,000 shapes [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   Directly minimizing the loss without the shape prior often leads to noisy, unstable results [S1, unofficial].
+*   The method is straightforward to extend to multi-view reconstruction by summing over multiple per-image losses with shared shape and appearance [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def inverse_rendering_with_shape_prior(observed_image, pre_trained_shape_decoder_g, pre_trained_texture_decoder_h, differentiable_renderer_f):
+    # Initialize optimization variables
+    # Note: Dimensions of z0 and phi0 are not specified in sources [G]
+    z0 = initialize_latent_vector()
+    theta = initialize_renderer_parameters()
+    phi0 = initialize_latent_vector()
+    eta = initialize_lighting_parameters()
+    
+    # Optimization loop
+    while not converged():
+        # Generate geometry from latent shape vector using pre-trained decoder
+        geometry = pre_trained_shape_decoder_g(z0)
+        
+        # Generate texture from latent texture vector using pre-trained decoder
+        texture = pre_trained_texture_decoder_h(phi0)
+        
+        # Render image using differentiable renderer with geometry, texture, pose, and lighting
+        rendered_image = differentiable_renderer_f(geometry, theta, texture, eta)
+        
+        # Compute L2 loss between observed and rendered image
+        loss = sum((observed_image - rendered_image) ** 2)
+        
+        # Backpropagate and update variables
+        # Note: Specific optimizer details are not provided in sources [G]
+        update_variables(z0, theta, phi0, eta, loss)
+        
+    return geometry, texture, eta
+```
+
+## Operating characteristics
+*   **Performance:** On the face dataset, the Intersection-over-Union (IOU) between the ground truth and reconstructed voxel grid is 42.99 ± 0.64 for a 95% confidence interval [S1, unofficial].
+*   **Strengths:** Explicit reconstruction creates sharper images with higher levels of detail in novel-view prediction. It provides more control in relighting (light color, brightness, position) and re-texturing tasks [S1, unofficial].
+*   **Limitations:** Direct minimization without regularization leads to noisy results [S1, unofficial].
+*   **When to use:** When high-resolution (512x512) reconstruction, explicit 3D geometry, and detailed control over lighting and texture are required, particularly for tasks like out-of-plane rotation and re-texturing [S1, unofficial].
+
+## Background
+This method is part of the RenderNet architecture, used for novel-view synthesis, relighting, and generalization tasks [S1, unofficial]. It builds on the concept of using a pre-trained 3D auto-encoder as a shape prior, similar to the TL-embedding network [S1, unofficial].
+
+## Sources
+[S1] RenderNet: A deep convolutional network for differentiable rendering from 3D shapes, https://doi.org/10.48550/arxiv.1806.06575, fetched 2026-10-26 (unofficial)

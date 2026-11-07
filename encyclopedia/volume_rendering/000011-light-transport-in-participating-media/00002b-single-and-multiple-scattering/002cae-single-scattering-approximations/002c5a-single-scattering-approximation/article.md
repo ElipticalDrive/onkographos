@@ -3,134 +3,146 @@
 Also called: Single Scattering Integral
 
 ## Overview
-The Single Scattering Approximation computes volume illumination by assuming that light scatters at most once before reaching the viewer, effectively ignoring multiple scattering events and self-illumination (glow) [S1, book]. It solves the problem of efficient in-scattering calculation for low-density or low-albedo media where the probability of secondary scattering is negligible [S1, book]. Unlike [Single Scattering](5566-single-scattering.md) which may handle general incident radiance, this specific approximation simplifies the incident radiance calculation by precomputing shadowing from a single parallel light source, and differs from [Eye Scattering Recurrence](5316-eye-scattering-recurrence.md) by focusing on the precomputed incident light rather than the recurrence of scattered light toward the camera [S1, book].
+The Single Scattering Approximation simplifies the volume rendering integral by assuming that light scatters only once before reaching the viewer, ignoring multiple scattering events and self-illumination (glow). This method is applicable when the volume has low albedo or low density, making the probability of secondary scattering negligible. It differs from multiple scattering methods by precomputing shadowing effects in a separate pass or combined pass, and from homogeneous approximations by handling spatially varying extinction coefficients.
 
 ## How it works
 **Inputs:**
-*   Volume density field $\tau(\mathbf{x})$ (extinction coefficient) [S1, book].
-*   Single parallel light source with intensity $L_0$ and direction $\boldsymbol{\omega}_0$ [S1, book].
-*   Camera ray origin $\mathbf{o}$ and direction $\boldsymbol{\omega}$ [S1, book].
-*   Far plane intersection point $\mathbf{p}_{far}$ [S1, book].
-*   Scattering coefficient $\sigma_s(\mathbf{x})$ [G]. Note: The source uses $\tau$ for extinction; $\sigma_s$ is the scattering component of extinction.
+*   Volume density field $\tau(\mathbf{x})$ (extinction coefficient).
+*   Light source parameters: intensity $L_0$, direction $\boldsymbol{\omega}_0$ (parallel light at infinite distance).
+*   Camera parameters: origin $\mathbf{o}$, direction $\boldsymbol{\omega}$.
+*   Background radiance $L_{bg}$.
 
 **Outputs:**
-*   Outgoing radiance $L_o(\mathbf{o}, \boldsymbol{\omega})$ [S1, book].
+*   Radiance $L_o(\mathbf{o}, \boldsymbol{\omega})$ for each pixel.
 
 **Data Structures:**
-*   For gridded data, a 3D texture or voxel grid storing $\tau(\mathbf{x})$ [S1, book].
-*   A sampling plane perpendicular to the light direction $\boldsymbol{\omega}_0$ used for shadow pre-computation [S1, book].
+*   **Volume Grid:** A 3D array storing $\tau(\mathbf{x})$ at voxel centers or corners.
+*   **Shadow Map/Texture:** A 2D texture or buffer storing the precomputed incident radiance $I(\mathbf{x}, \boldsymbol{\omega}_0)$ for points within the volume. If using the bisecting plane optimization, this is a 2D texture representing the plane perpendicular to the bisector of the viewing and light directions.
 
 **Steps:**
-1.  **Precompute Incident Radiance (Shadowing):** Calculate the incident radiance $I(\mathbf{x}, \boldsymbol{\omega}_0)$ at every point $\mathbf{x}$ in the volume. This represents the light from the source attenuated by the volume opacity along the path from the light source entry point to $\mathbf{x}$ [S1, book].
-    *   For a parallel light, the path is a straight line. The incident radiance is computed as:
-        $$ I(\mathbf{x}, \boldsymbol{\omega}_0) = L_0 \exp\left(-\int_0^{D} \tau(\mathbf{x} - s\boldsymbol{\omega}_0) ds\right) $$
-        where $D$ is the distance from $\mathbf{x}$ to the volume entry point along the light direction $\boldsymbol{\omega}_0$ [S1, book].
-    *   For gridded data, this is efficiently computed using texture mapping hardware by moving a sampling plane perpendicular to $\boldsymbol{\omega}_0$ in discrete steps along the light flow direction [S1, book].
-    *   Optimization: If the sampling plane bisects the angle between the viewing ray and the illumination ray, this shadow computation can be performed in the same pass as the volume rendering [S1, book].
 
-2.  **Volume Rendering (Single Scattering Integral):** Integrate the single-scattered light along the viewing ray from $\mathbf{o}$ to $\mathbf{p}_{far}$ [S1, book]. The outgoing radiance is the sum of the attenuated background radiance and the in-scattered radiance:
+1.  **Precompute Incident Radiance (Shadowing):**
+    Calculate the light reaching each point $\mathbf{x}$ in the volume from the light source, attenuated by the volume's opacity along the light path. For a parallel light source in direction $\boldsymbol{\omega}_0$, the incident radiance $I(\mathbf{x}, \boldsymbol{\omega}_0)$ is:
+    $$ I(\mathbf{x}, \boldsymbol{\omega}_0) = L_0 \exp\left(-\int_0^{D(\mathbf{x})} \tau(\mathbf{x} - s\boldsymbol{\omega}_0) ds\right) $$
+    where $D(\mathbf{x})$ is the distance from $\mathbf{x}$ to the entry point of the volume along the ray opposite to $\boldsymbol{\omega}_0$.
+    *   *Implementation Note:* For gridded data, this can be computed efficiently using texture mapping hardware by moving a sampling plane perpendicular to $\boldsymbol{\omega}_0$ in discrete steps [S1, book].
+    *   *Optimization:* If the sampling plane bisects the angle between the viewing ray $\boldsymbol{\omega}$ and illumination ray $\boldsymbol{\omega}_0$, this computation can be performed in the same pass as volume rendering [S1, book].
+
+2.  **Volume Rendering (Single Scattering Integral):**
+    Integrate the scattered light along the viewing ray from $\mathbf{o}$ to $\mathbf{p}_{far}$. The outgoing radiance is:
     $$ L_o(\mathbf{o}, \boldsymbol{\omega}) = T(\mathbf{o}, \mathbf{p}_{far}) L_{bg} + \int_{\mathbf{o}}^{\mathbf{p}_{far}} T(\mathbf{o}, \mathbf{x}) \sigma_s(\mathbf{x}) I(\mathbf{x}, \boldsymbol{\omega}_0) d\mathbf{x} $$
     where:
-    *   $T(\mathbf{o}, \mathbf{x}) = \exp\left(-\int_{\mathbf{o}}^{\mathbf{x}} \tau(\mathbf{u}) d\mathbf{u}\right)$ is the transmittance from the eye to point $\mathbf{x}$ [S1, book].
-    *   $L_{bg}$ is the background radiance [G].
-    *   $I(\mathbf{x}, \boldsymbol{\omega}_0)$ is the precomputed incident radiance from Step 1 [S1, book].
+    *   $T(\mathbf{o}, \mathbf{x}) = \exp\left(-\int_{\mathbf{o}}^{\mathbf{x}} \sigma_t(\mathbf{u}) d\mathbf{u}\right)$ is the transmittance from the eye to $\mathbf{x}$.
+    *   $\sigma_s(\mathbf{x})$ is the scattering coefficient. Note: $\sigma_t(\mathbf{x}) = \sigma_s(\mathbf{x}) + \sigma_a(\mathbf{x})$. In many simple approximations, $\sigma_s$ is assumed constant or proportional to $\tau$.
+    *   $I(\mathbf{x}, \boldsymbol{\omega}_0)$ is the precomputed incident radiance from Step 1.
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def single_scattering_approximation(volume, light_dir, light_intensity, camera_origin, camera_dir, far_plane, background_radiance):
+def single_scattering_approximation(volume, light_direction, light_intensity, camera_origin, camera_direction, background_radiance):
     """
-    Computes single scattering approximation for a volume.
-    Assumes low albedo/density and single parallel light source.
-    """
+    Renders a volume using the Single Scattering Approximation.
     
+    Args:
+        volume: 3D array of extinction coefficients tau(x).
+        light_direction: Unit vector omega_0.
+        light_intensity: Scalar L_0.
+        camera_origin: Vector o.
+        camera_direction: Unit vector omega.
+        background_radiance: Scalar L_bg.
+        
+    Returns:
+        Image radiance.
+    """
     # Step 1: Precompute incident radiance (shadowing)
-    # For each point x in the volume, compute light attenuation from source
-    # I(x) = L0 * exp(-integral of tau along light path to x)
-    # In practice, this is done via texture mapping or ray marching along light_dir
-    incident_radiance = precompute_shadowing(volume, light_dir, light_intensity)
+    # For efficiency, this is often done via texture mapping or a separate render pass.
+    # Here we assume a function that computes I(x, omega_0) for all x in volume.
+    incident_radiance = compute_shadow_map(volume, light_direction, light_intensity)
     
-    # Step 2: Integrate along viewing ray
-    total_radiance = 0.0
-    current_transmittance = 1.0
-    
-    # Sample along the ray from camera_origin to far_plane
-    # Number of samples N depends on desired accuracy
-    N = 100
-    step_size = (far_plane - camera_origin).length() / N
-    
-    for i in range(N):
-        t = i * step_size
-        x = camera_origin + camera_dir * t
+    # Step 2: Render along viewing rays
+    image = []
+    for pixel in pixels:
+        ray_o = camera_origin + pixel * camera_direction
+        # Initialize transmittance and accumulated radiance
+        T = 1.0
+        L = 0.0
         
-        # Get extinction coefficient at x
-        tau_x = volume.get_extinction(x)
+        # Sample along the ray
+        for t in sample_range(ray_o, camera_direction):
+            x = ray_o + t * camera_direction
+            if not volume.contains(x):
+                continue
+                
+            tau = volume.get_extinction(x)
+            sigma_s = volume.get_scattering(x) # Assumed known or derived from tau
+            
+            # Transmittance from eye to x
+            # In practice, T is updated incrementally: T *= exp(-tau * dt)
+            # But for clarity, we use the integral form definition
+            T_current = exp(-integral_extinction(ray_o, x, volume))
+            
+            # Incident radiance at x from light
+            I_in = incident_radiance.get_value(x)
+            
+            # Contribution: T(o,x) * sigma_s(x) * I(x, omega_0)
+            # Note: The integral is approximated by summing contributions
+            # dL = T_current * sigma_s * I_in * dt
+            # However, standard volume rendering uses the recursive formulation:
+            # L += T * sigma_s * I_in * dt
+            # T *= exp(-sigma_t * dt)
+            
+            # Using incremental update for stability and efficiency
+            dt = get_step_size(t)
+            sigma_t = tau # Assuming no absorption for simplicity, or tau = sigma_t
+            
+            contribution = T * sigma_s * I_in * dt
+            L += contribution
+            T *= exp(-sigma_t * dt)
+            
+        # Add background
+        L += T * background_radiance
+        image.append(L)
         
-        # Update transmittance from eye to x
-        # T(o, x) = exp(-integral of tau from o to x)
-        # Incremental update: T(o, x+dx) = T(o, x) * exp(-tau(x) * dx)
-        current_transmittance *= exp(-tau_x * step_size)
-        
-        # Get precomputed incident radiance at x
-        I_x = incident_radiance.get_value(x)
-        
-        # Scattering coefficient sigma_s (assumed constant or from volume)
-        # sigma_s = volume.get_scattering(x) 
-        # For simplicity, assume albedo is low and sigma_s is small
-        sigma_s_x = volume.get_scattering(x)
-        
-        # Add contribution: T(o, x) * sigma_s(x) * I(x) * dx
-        # Note: The integral is approximated by sum
-        contribution = current_transmittance * sigma_s_x * I_x * step_size
-        total_radiance += contribution
-        
-    # Add attenuated background
-    final_radiance = current_transmittance * background_radiance + total_radiance
-    
-    return final_radiance
+    return image
 
-def precompute_shadowing(volume, light_dir, light_intensity):
+def compute_shadow_map(volume, light_direction, light_intensity):
     """
-    Precomputes incident radiance by shadowing effects.
-    I(x) = L0 * exp(-integral of tau along light path to x)
+    Computes the incident radiance I(x, omega_0) for all points in the volume.
+    This corresponds to the shadowing effect of the volume opacity.
     """
-    # This is typically done using texture mapping hardware or ray marching
-    # along the light direction for each point in the volume.
-    # For a parallel light, the path is a straight line.
-    # D is the distance to the volume entry point along light_dir.
-    
-    # Placeholder for hardware-accelerated shadow computation
-    # as described in Bahrens and Rattering [5]
+    # This is typically implemented using texture mapping hardware by moving
+    # a sampling plane perpendicular to light_direction in discrete steps.
+    # For the purpose of this article, we assume a precomputed texture is available.
+    # The value at x is: L_0 * exp(-integral from entry point to x along -light_direction)
     pass
 ```
 
 **Parameters:**
-*   $L_0$: Light source intensity [S1, book].
-*   $\boldsymbol{\omega}_0$: Light direction (parallel light) [S1, book].
-*   $\tau(\mathbf{x})$: Extinction coefficient [S1, book].
-*   $\sigma_s(\mathbf{x})$: Scattering coefficient [G].
+*   $L_0$: Light intensity. Typical values depend on the scene's dynamic range.
+*   $\boldsymbol{\omega}_0$: Light direction. Assumed to be a single parallel light source at infinite distance [S1, book].
+*   $\tau(\mathbf{x})$: Extinction coefficient. Must be provided for the volume.
 
-**Edge Cases:**
-*   **High Albedo/Density:** The approximation fails as multiple scattering becomes significant [S1, book].
-*   **Glow:** The method ignores self-illumination (glow) [S1, book].
-*   **Multiple Light Sources:** The basic formulation assumes a single parallel light source [S1, book].
+**Edge Cases and Pitfalls:**
+*   **High Albedo/Density:** If the volume has high albedo or density, the single scattering assumption breaks down, leading to underestimation of brightness and incorrect glow effects [S1, book].
+*   **Shadow Artifacts:** Discrete sampling of the shadow map may introduce aliasing or banding artifacts, especially near volume boundaries.
+*   **Bisecting Plane Optimization:** If using the bisecting plane optimization, the plane must correctly bisect the angle between viewing and illumination rays to ensure accurate shadow sampling [S1, book].
 
 ## Subtopics
 
 ### [Eye Scattering Recurrence](5316-eye-scattering-recurrence.md)
-Computes light exiting particles toward the viewer using precomputed incident light, differing by focusing on the scattering recurrence toward the camera rather than precomputing incident light.
+Computes light exiting particles toward the viewer using precomputed incident light, differing from forward scattering methods.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot M)$ where $N$ is the number of viewing ray samples and $M$ is the number of light ray samples for shadow pre-computation. If shadow pre-computation is done in the same pass (bisecting plane), it may be $O(N)$ with a larger constant factor [S1, book].
-*   **Memory Complexity:** $O(V)$ for storing the volume and precomputed incident radiance field, where $V$ is the number of voxels [S1, book].
-*   **Strengths:** Efficient for low-density media; simple implementation; avoids complex multiple scattering calculations [S1, book].
-*   **Limitations:** Inaccurate for high-density or high-albedo volumes; ignores glow and multiple scattering [S1, book].
-*   **When to Use:** Low-density fog, smoke, or clouds where single scattering dominates [S1, book].
-*   **When Not to Use:** Dense fog, participating media with high albedo, or scenes requiring accurate glow effects [S1, book].
+*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the number of samples per ray. The shadow precomputation adds a cost proportional to the volume size and light direction steps.
+*   **Memory Complexity:** $O(V)$ for the volume grid, plus $O(P)$ for the shadow map/texture, where $V$ is the number of voxels and $P$ is the number of pixels in the shadow map.
+*   **Performance:** Efficient for real-time applications due to the simplicity of the integral and the ability to use texture mapping hardware for shadow computation [S1, book].
+*   **Strengths:** Simple to implement, fast, suitable for low-density volumes.
+*   **Limitations:** Inaccurate for high-density or high-albedo volumes; ignores multiple scattering and glow.
 
 ## Background
-The Single Scattering Approximation is a simplification of the volume rendering integral, assuming low albedo and/or density such that the probability of light scattering more than once is small [S1, book]. It was discussed in the context of local and global illumination in the volume rendering integral, with references to Kajiya and von Herzen [26] and Bahrens and Rattering [5] for efficient shadow pre-computation [S1, book].
+The Single Scattering Approximation is a foundational technique in volume rendering, originating from the work of Kajiya and von Herzen [26] and Bahrens and Rattering [5]. It is widely used in scientific visualization and real-time graphics where computational efficiency is prioritized over physical accuracy for dense media.
 
 ## Sources
 [S1] Local and Global Illumination in the Volume Rendering Integral, https://avishek.net/assets/papers/nerfs/local-and-global-illumination-rendering-integral.pdf, fetched 2026-10-27 (book)

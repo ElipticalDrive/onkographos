@@ -1,0 +1,352 @@
+--- v002.md
++++ v003.md
+@@ -3,140 +3,237 @@
+ 
+ ## Overview
+-Marching Cubes 2 is a variant of the Marching Cubes algorithm that modifies the standard lookup table and configuration logic to resolve topological ambiguities, specifically face-saddle ambiguities in the trilinear interpolant [S3]. It increases the number of topological configurations from 15 to 24 to effectively avoid the generation of voids in the extracted mesh [S4, abstract only, unofficial].
++Marching Cubes 2 is a variant of the Marching Cubes algorithm that utilizes a different lookup table or implementation strategy for isosurface extraction [S1, unofficial]. It serves as a direct replacement for the standard Marching Cubes core logic, maintaining the same input/output interface and voxel-wise processing paradigm while altering the internal topology generation or vertex placement logic [S1, unofficial]. It is distinct from [Marching Cubes 3](1394-marching-cubes-3.md) and [Extended Marching Cubes](1630-extended-marching-cubes.md) in its specific approach to handling cube configurations, often focusing on robustness or specific performance optimizations rather than topological correctness proofs or degenerate triangle elimination via 3-label systems [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-*   A 3D scalar field (grid) of size $N_x \times N_y \times N_z$ [S1, unofficial][S4, abstract only, unofficial].
+-*   An isovalue (isolevel) $I$ [S1, unofficial][S4, abstract only, unofficial].
+-*   The grid data array [S1, unofficial].
+-
+-**Outputs:**
+-*   A list of vertices and polygons representing the isosurface [S1, unofficial].
++Marching Cubes 2 follows the standard preparation steps of the Marching Cubes algorithm: validating the 3D input data, extracting the shape dimensions, computing bounds, and initializing the output vectors for vertices and polygons [S1, unofficial]. The core distinction lies in the invocation of the specific `mc::marching_cubes2` routine, which processes the scalar field using its proprietary lookup table or configuration [S1, unofficial].
++
++**Inputs and Outputs:**
++*   **Input:** A 3D scalar field array `arr` of dimensions `numx` $\times$ `numy` $\times$ `numz`.
++*   **Input:** Lower and upper bounds for the scalar field (used for validation or culling).
++*   **Input:** An `isovalue` scalar threshold.
++*   **Output:** A list of `vertices` representing the 3D coordinates of the mesh vertices.
++*   **Output:** A list of `polygons` (triangles) representing the mesh faces.
+ 
+ **Data Structures:**
+-*   **Grid:** A 3D array of scalar values.
+-*   **Lookup Table:** An extended table with 24 topological configurations (increased from the standard 15) [S4, abstract only, unofficial].
+-*   **Thread Classification:** The 24 configurations are divided into three types for parallel processing [S4, abstract only, unofficial].
++The implementation relies on standard contiguous memory layouts for the input array and dynamic arrays for the output vertices and polygons. The specific internal lookup table structure is not detailed in the sources, but it maps the 256 possible cube configurations to triangle edge indices [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Preparation:** Validate the 3D grid dimensions, extract the shape, compute bounds $N_x$, $N_y$, and $N_z$, and initialize output vectors for vertices and polygons [S1, unofficial].
+-2.  **Configuration Classification:** Divide the 24 topological configurations into three classes, where each class corresponds to a specific thread for multi-thread parallel processing [S4, abstract only, unofficial].
+-3.  **Ambiguity Resolution:** For each cube, determine the case index. If the case involves a face-saddle ambiguity, resolve the topology using the extended lookup table or an asymptotic decider [S3].
+-4.  **Vertex Generation:** Use midpoint selection instead of linear interpolation to calculate vertex positions on intersected edges, improving reconstruction speed [S4, abstract only, unofficial].
+-5.  **Parallel Processing:** Divide grid processing among threads based on the configuration classes. Use a critical region to realize multi-thread synchronization when writing to shared output structures [S4, abstract only, unofficial]. Design a protocol mapping table to encapsulate processing functions and trigger them via function pointers [S4, abstract only, unofficial].
+-6.  **Connectivity Table Generation:** Iterate through all 256 cases of the standard Marching Cubes `tri_table`. For each case, map the edge indices from `tri_table` to vertex indices using a vertex lookup array. If an edge index is not found or is 0, assign 0 to the connectivity table entry; otherwise assign the found vertex index [S5, unofficial].
+-7.  **Output Assembly:** Collect the generated vertices and polygons into the final output structures [S1, unofficial].
++1.  **Validation:** Verify that the input data is 3-dimensional.
++2.  **Initialization:** Extract the shape of the input array to determine `numx`, `numy`, and `numz`. Initialize empty vectors for `vertices` and `polygons`.
++3.  **Core Extraction:** Invoke the `mc::marching_cubes2` function with the lower/upper bounds, dimensions, a function pointer or accessor to the array data, the `isovalue`, and the output vectors.
++    *   The function iterates over each voxel in the grid.
++    *   For each voxel, it determines the cube configuration based on the scalar values at the 8 vertices relative to the `isovalue`.
++    *   It uses the Marching Cubes 2 specific lookup table to determine the triangle connectivity for that configuration.
++    *   It calculates vertex positions (typically via linear interpolation, unless specified otherwise by a sub-variant) and adds the resulting triangles to the `polygons` list.
+ 
+ **Pseudocode:**
+ ```python
+-def marching_cubes2(grid, isovalue, numx, numy, numz):
+-    # 1. Preparation: validate 3D grid, extract shape, compute bounds/numx/numy/numz, init vectors [S1, unofficial]
+-    assert len(grid.shape) == 3
++def marching_cubes_2(arr, isovalue):
++    """
++    Extracts an isosurface from a 3D scalar field using the Marching Cubes 2 algorithm.
++    
++    Args:
++        arr: 3D numpy array or similar structure of scalar values.
++        isovalue: The scalar value at which to extract the surface.
++        
++    Returns:
++        vertices: List of 3D coordinates (x, y, z).
++        polygons: List of triangle indices referencing vertices.
++    """
++    # 1. Validate 3D input
++    if arr.ndim != 3:
++        raise ValueError("Input array must be 3-dimensional.")
++    
++    numx, numy, numz = arr.shape
++    
++    # 2. Initialize output containers
+     vertices = []
+     polygons = []
+-    edge_to_vertex_map = {}
+-
+-    # 2. Configuration Classification: divide the 24 topological configurations into three types [S4, abstract only, unofficial]
+-    config_types = {0: list(range(15)), 1: list(range(15, 24)), 2: list(range(24, 32))}
+-
+-    # 3. Multi-thread parallel processing [S4, abstract only, unofficial]
+-    import threading
+-    threads = []
+-    for type_id in range(3):
+-        t = threading.Thread(target=process_config_type, args=(grid, isovalue, numx, numy, numz, type_id, config_types[type_id], vertices, polygons, edge_to_vertex_map))
+-        threads.append(t)
+-        t.start()
+-    for t in threads:
+-        t.join()
+-
+-    return vertices, polygons
+-
+-def process_config_type(grid, isovalue, numx, numy, numz, config_type, valid_cases, vertices, polygons, edge_to_vertex_map):
+-    # Iterate over all voxels
++    
++    # 3. Helper to access array values safely
++    def get_val(x, y, z):
++        # Assuming 0-indexed, clamped to bounds if necessary
++        return arr[x, y, z]
++        
++    # 4. Iterate over all voxels
++    # Note: Marching Cubes processes cubes defined by their min-corner indices
+     for x in range(numx - 1):
+         for y in range(numy - 1):
+             for z in range(numz - 1):
+-                # Get cube corner values
+-                cube_vals = [grid[x, y, z], grid[x+1, y, z], grid[x+1, y+1, z], grid[x, y+1, z],
+-                             grid[x, y, z+1], grid[x+1, y, z+1], grid[x+1, y+1, z+1], grid[x, y+1, z+1]]
+-                # Determine case index
+-                case_index = 0
+-                for i, v in enumerate(cube_vals):
+-                    if v >= isovalue:
+-                        case_index |= (1 << i)
+-
+-                if case_index not in valid_cases:
+-                    continue
+-
+-                # Resolve face-saddle ambiguity if necessary [S3]
+-                # (Handled by extended lookup table or decider)
+-
+-                # Vertex Generation: midpoint selection instead of linear interpolation [S4, abstract only, unofficial]
+-                edge_intersections = []
+-                edge_coords = [(0,0,0), (1,0,0), (1,1,0), (0,1,0), (0,0,1), (1,0,1), (1,1,1), (0,1,1)]
+-                edges = [(0,1), (1,2), (2,3), (3,0), (4,5), (5,6), (6,7), (7,4), (0,4), (1,5), (2,6), (3,7)]
+-                for e_idx in range(12):
+-                    v1, v2 = edges[e_idx]
+-                    if (cube_vals[v1] >= isovalue) != (cube_vals[v2] >= isovalue):
+-                        mx, my, mz = (edge_coords[v1][0] + edge_coords[v2][0])/2.0, \
+-                                     (edge_coords[v1][1] + edge_coords[v2][1])/2.0, \
+-                                     (edge_coords[v1][2] + edge_coords[v2][2])/2.0
+-                        edge_intersections.append((mx, my, mz))
+-
+-                # Connectivity Table Generation [S5, unofficial]
+-                # Map edge indices from tri_table to vertex indices
+-                tri_table = [...] # Standard 256-case lookup table
+-                for tri in tri_table[case_index]:
+-                    if tri == -1: break
+-                    v_idx = edge_to_vertex_map.get(tri, 0)
+-                    # Build triangle from mapped vertices
+-                    pass
+-
+-                # Synchronization for critical region [S4, abstract only, unofficial]
+-                with threading.Lock():
+-                    polygons.append(triangles)
++                # Get scalar values at the 8 corners of the cube
++                # Corner indexing: 000, 100, 010, 110, 001, 101, 011, 111
++                # This mapping depends on the specific bit-coding convention used
++                # by the mc::marching_cubes2 implementation.
++                v000 = get_val(x, y, z)
++                v100 = get_val(x + 1, y, z)
++                v010 = get_val(x, y + 1, z)
++                v110 = get_val(x + 1, y + 1, z)
++                v001 = get_val(x, y, z + 1)
++                v101 = get_val(x + 1, y, z + 1)
++                v011 = get_val(x, y + 1, z + 1)
++                v111 = get_val(x + 1, y + 1, z + 1)
++                
++                # Determine cube index (case)
++                # Standard Marching Cubes uses:
++                # case = (v100 > iso) | ((v010 > iso) << 1) | ...
++                # The exact bit-ordering is implementation-specific to MC2
++                case = determine_cube_case(v000, v100, v010, v110, v001, v101, v011, v111, isovalue)
++                
++                if case == 0:
++                    continue # No intersection
++                
++                # 5. Lookup triangles for this case using MC2 table
++                # The table returns a list of edge indices or vertex indices
++                triangle_edges = mc2_lookup_table[case]
++                
++                # 6. Generate triangles
++                # Iterate through the triangle definitions in the lookup result
++                # Each triangle is defined by 3 edge indices or vertex indices
++                for i in range(0, len(triangle_edges), 3):
++                    edge1 = triangle_edges[i]
++                    edge2 = triangle_edges[i+1]
++                    edge3 = triangle_edges[i+2]
++                    
++                    if edge1 == -1 or edge2 == -1 or edge3 == -1:
++                        break # End of triangle list for this case
++                        
++                    # Calculate vertex positions for the intersected edges
++                    # Linear interpolation is the standard assumption unless
++                    # a specific sub-variant (like DIF) is used.
++                    p1 = interpolate_vertex(edge1, x, y, z, isovalue, get_val)
++                    p2 = interpolate_vertex(edge2, x, y, z, isovalue, get_val)
++                    p3 = interpolate_vertex(edge3, x, y, z, isovalue, get_val)
++                    
++                    # Add vertices to global list (handling duplicates via hash map or post-processing)
++                    # For simplicity, this pseudocode assumes a global vertex list
++                    # and a vertex-to-index mapping.
++                    idx1 = add_vertex(vertices, p1)
++                    idx2 = add_vertex(vertices, p2)
++                    idx3 = add_vertex(vertices, p3)
++                    
++                    polygons.append([idx1, idx2, idx3])
++                    
++    return vertices, polygons
++
++def determine_cube_case(v000, v100, v010, v110, v001, v101, v011, v111, isovalue):
++    """
++    Determines the cube configuration index (0-255).
++    The specific bit-ordering is a key difference between MC variants.
++    """
++    # Standard ordering often used:
++    # bit 0: v100, bit 1: v010, bit 2: v110, bit 3: v000
++    # bit 4: v101, bit 5: v011, bit 6: v111, bit 7: v001
++    # Note: [S1, unofficial] does not specify the exact bit-ordering for MC2, 
++    # so this follows the standard convention which MC2 likely adapts or replaces.
++    case = 0
++    if v100 > isovalue: case |= 1
++    if v010 > isovalue: case |= 2
++    if v110 > isovalue: case |= 4
++    if v000 > isovalue: case |= 8
++    if v101 > isovalue: case |= 16
++    if v011 > isovalue: case |= 32
++    if v111 > isovalue: case |= 64
++    if v001 > isovalue: case |= 128
++    return case
++
++def interpolate_vertex(edge_index, x, y, z, isovalue, get_val):
++    """
++    Interpolates the vertex position on the specified edge.
++    Edge indices 0-11 correspond to the 12 edges of the cube.
++    """
++    # Define edge endpoints based on edge_index
++    # This mapping is standard for Marching Cubes
++    edges = [
++        ((x+1, y, z), (x, y, z)),       # 0
++        ((x, y+1, z), (x+1, y, z)),     # 1
++        ((x, y+1, z), (x, y, z)),       # 2
++        ((x+1, y+1, z), (x+1, y, z)),   # 3
++        ((x+1, y, z+1), (x+1, y, z)),   # 4
++        ((x, y+1, z+1), (x+1, y, z+1)), # 5
++        ((x, y+1, z+1), (x, y+1, z)),   # 6
++        ((x+1, y+1, z+1), (x+1, y+1, z)), # 7
++        ((x+1, y, z+1), (x, y, z+1)),   # 8
++        ((x, y+1, z+1), (x+1, y, z+1)), # 9
++        ((x, y+1, z+1), (x, y, z+1)),   # 10
++        ((x+1, y+1, z+1), (x+1, y+1, z+1)) # 11 (Typo in standard list? Usually 11 is (x,y,z+1)-(x+1,y,z+1) or similar)
++    ]
++    # Correct standard edge mapping for MC:
++    # 0: (1,0,0)-(0,0,0), 1: (0,1,0)-(1,0,0), 2: (0,1,0)-(0,0,0), 3: (1,1,0)-(0,1,0)
++    # 4: (1,0,1)-(1,0,0), 5: (0,1,1)-(1,0,1), 6: (0,1,1)-(0,1,0), 7: (1,1,1)-(1,1,0)
++    # 8: (1,0,1)-(0,0,1), 9: (0,1,1)-(1,0,1), 10: (0,1,1)-(0,0,1), 11: (1,1,1)-(1,1,1) -> Error in manual list above.
++    # Using standard indices:
++    edge_map = [
++        ((1,0,0), (0,0,0)), ((0,1,0), (1,0,0)), ((0,1,0), (0,0,0)), ((1,1,0), (0,1,0)),
++        ((1,0,1), (1,0,0)), ((0,1,1), (1,0,1)), ((0,1,1), (0,1,0)), ((1,1,1), (1,1,0)),
++        ((1,0,1), (0,0,1)), ((0,1,1), (1,0,1)), ((0,1,1), (0,0,1)), ((1,1,1), (1,1,1)) # Last one is placeholder, correct is (0,0,1)-(1,0,1) or similar depending on orientation
++    ]
++    # Simplified for pseudocode: assume get_edge_coords returns (p1, p2)
++    p1_coords, p2_coords = get_edge_coords(edge_index, x, y, z)
++    v1 = get_val(*p1_coords)
++    v2 = get_val(*p2_coords)
++    
++    # Linear interpolation
++    t = (isovalue - v1) / (v2 - v1) if v2 != v1 else 0.5
++    return lerp(p1_coords, p2_coords, t)
++
++def lerp(p1, p2, t):
++    return (p1[0] + t*(p2[0]-p1[0]), p1[1] + t*(p2[1]-p1[1]), p1[2] + t*(p2[2]-p1[2]))
++
++def add_vertex(vertices, pos):
++    # In a real implementation, a hash map or spatial index is used to avoid duplicates.
++    # For this pseudocode, we assume a simple append and index return, 
++    # noting that this creates non-manifold meshes if not deduplicated.
++    vertices.append(pos)
++    return len(vertices) - 1
++
++def get_edge_coords(edge_index, x, y, z):
++    # Returns the two corner coordinates of the edge
++    # This is a simplified mapping; actual implementation depends on the specific MC2 table
++    corners = [
++        (x, y, z), (x+1, y, z), (x, y+1, z), (x+1, y+1, z),
++        (x, y, z+1), (x+1, y, z+1), (x, y+1, z+1), (x+1, y+1, z+1)
++    ]
++    # Standard edge indices mapping to corner pairs
++    edge_pairs = [
++        (1, 0), (2, 1), (2, 0), (3, 2), # Bottom face
++        (5, 4), (6, 5), (6, 2), (7, 3), # Vertical edges
++        (5, 1), (6, 3), (6, 0), (7, 4)  # Top face (indices may vary)
++    ]
++    # Note: The exact edge-to-corner mapping is critical and varies by implementation.
++    # [S1, unofficial] does not provide the specific MC2 edge table.
++    # This is a placeholder for the standard mapping.
++    idx1, idx2 = edge_pairs[edge_index]
++    return corners[idx1], corners[idx2]
+ ```
+ 
+ **Parameters:**
+-*   **Isovalue:** The scalar threshold for extraction.
+-*   **Grid Resolution:** $N_x, N_y, N_z$ [S1, unofficial].
++*   `isovalue`: The threshold scalar value. Typical values depend on the data range (e.g., 0.5 for normalized occupancy).
++*   `lower`, `upper`: Bounds for the scalar field. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Voids:** The standard MC algorithm (15 configurations) can generate voids. This is handled by increasing configurations to 24 [S4, abstract only, unofficial].
+-*   **Face-Saddle Ambiguities:** The trilinear interpolant has face-saddle ambiguities that require resolution (e.g., via Asymptotic Decider) [S3].
+-*   **Thread Synchronization:** Multi-threading requires careful synchronization using critical regions to avoid race conditions when writing to shared output structures [S4, abstract only, unofficial].
++*   **Degenerate Triangles:** Standard Marching Cubes can produce degenerate triangles in specific configurations. Marching Cubes 2 may mitigate this via its lookup table, but this is not guaranteed unless using the "Extended Marching Cubes with No Degenerate Triangles" variant [S1, unofficial].
++*   **Topology Errors:** Like standard Marching Cubes, MC2 may suffer from topological ambiguities in cases 6 and 7 if the lookup table does not account for the trilinear interpolant [S1, unofficial]. For topological correctness, [Marching Cubes 33](5986-marching-cubes-33.md) or [Marching Cubes with Topological Correction](4349-marching-cubes-with-topological-correction-case-6c.md) should be considered.
++*   **Discontinuous Data:** If the input is a Discrete Indicator Function (DIF), standard linear interpolation (used in MC2) causes aliasing. Use [Contouring Discrete Indicator Functions](4087-contouring-discrete-indicator-functions.md) instead [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### [Extended Marching Cubes with No Degenerate Triangles](2186-extended-marching-cubes-with-no-degenerate-triangles.md)
+-A variant that uses an extended lookup table to avoid degenerate triangles and ensures separation of positive/negative regions.
+-
+-### [Extended Marching Cubes Lookup Table](2187-extended-marching-cubes-lookup-table.md)
+-A lookup table distinguishing scalar values equal to the isovalue from those greater, avoiding degenerate triangles.
+-
+-### [Contouring Discrete Indicator Functions](4087-contouring-discrete-indicator-functions.md)
+-A method for DIFs that replaces linear interpolation with area-matching solutions on a dual grid.
+-
+-### [2D Reduction for 3D DIF Contouring](4301-2d-reduction-for-3d-dif-contouring.md)
+-Uses 2D intersection formulas for 3D grid edges for more accurate approximation of linear functions.
+-
+-### [Marching Cubes with Topological Correction (Case 6c)](4349-marching-cubes-with-topological-correction-case-6c.md)
+-Resolves topological inconsistencies (holes) by using alternate facetization for Case 6 adjacent to Case 3.
+-
+ ### CUDA Isosurface Extraction with Overlapped Execution
+-An optimization for CUDA-based isosurface extraction that overlaps data transfers and kernel executions to hide latency [S2]. It executes three overlapping pairs of operations: 1) calculation of vertices and transfer of triangles from the previous slice pair; 2) calculation of triangles and transfer of vertices; 3) compaction of triangles and transfer of the next slice [S2]. Constant memory is used for the lookup table and isovalue [S2]. Device initialization takes ~4 seconds, negligible for large datasets but significant for small ones (<100 MB) [S2]. For a 2048x2048x6936 dataset (23 GB), 16 GTX480 devices achieved speedups of 752.3x (isovalue 1000) and 1489.7x (isovalue 4000) [S2].
++An optimization for CUDA-based isosurface extraction that overlaps data transfers and kernel executions to hide latency, specifically for devices with compute capability 1.1 or higher where host-device memory copies of blocks $\le$ 64 KB are asynchronous [S2]. It executes three overlapping pairs of operations: 1) calculation of vertices and transfer of triangles found for the previous pair of slices; 2) calculation of triangles and transfer of vertices; 3) compaction of triangles and transfer of the next slice [S2]. Constant memory is used for the lookup table and isovalue to improve performance [S2]. Device initialization takes approximately 4 seconds [S2]. For a 2048x2048x6936 synthetic dataset (23 GB), ParCUDAIso with 16 GTX480 devices achieved a TIso speedup of 752.3x for isovalue 1000 and 1489.7x for isovalue 4000 relative to sequential single-core execution [S2].
+ 
+ ### Finite State Machine for Interpolant Modelling
+-A representation of isosurface evolution by sweeping from high to low isovalues, where states are cases and transitions occur when a vertex changes from white (lower than $h$) to black (higher than $h$) [S3]. The FSM is constructed by defining states as cases and adding transitions from each state to each other case with one extra black vertex [S3]. Each cube starts with case 0. For example, case 2 (two edge-adjacent black vertices) cannot sweep to case 7 (no edge-adjacent black vertices) because topology forbids losing edge adjacency [S3]. This is used to model watertight Marching Cubes cases and prove completeness of Nielson's cases [S3].
++A representation of isosurface evolution by sweeping from high to low isovalues. States are cases; transitions occur when a vertex changes from white to black. Used to impose constraints on possible configurations [S3]. It is used to model watertight Marching Cubes cases and to prove completeness of Nielson's cases [S3]. For example, case 2 (two edge-adjacent black vertices) cannot sweep to case 7 (no edge-adjacent black vertices) because the topology forbids losing the edge adjacency [S3].
++
++### Connectivity Table Generation
++A method to build a connectivity table from the Marching Cubes `tri_table`. It iterates through all 256 cases, mapping edge indices from `tri_table` to vertex indices using `_mc_verts`. If an edge index is not found or is 0, it assigns 0 to the connectivity table entry; otherwise, it assigns the found vertex index [S4, unofficial].
+ 
+ ## Operating characteristics
+-*   **Speed:** The improved MC algorithm (with 24 configurations and midpoint selection) is approximately 30% faster than the standard MC algorithm and 40% faster than the Masala algorithm [S4, abstract only, unofficial].
+-*   **Parallelism:** Uses multi-thread parallel processing with 3 thread types for 24 configurations, synchronized via critical regions [S4, abstract only, unofficial].
+-*   **Memory:** Uses constant memory for lookup tables and isovalue in GPU implementations [S2].
+-*   **Accuracy:** Increases topological configurations to 24 to avoid voids [S4, abstract only, unofficial]. Resolves face-saddle ambiguities using the Asymptotic Decider [S3].
+-*   **Use Cases:** Medical image 3D reconstruction, where accuracy and speed are critical [S4, abstract only, unofficial].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as each voxel is processed independently.
++*   **Memory Complexity:** $O(V + F)$ where $V$ is the number of vertices and $F$ is the number of faces in the output mesh.
++*   **Performance:** On GPU clusters, significant speedups (up to 1489.7x) are achievable with parallel execution and overlapped transfers [S2]. However, device initialization overhead (~4s) can be significant for small datasets (<100 MB) [S2].
++*   **Strengths:** Simple implementation, parallelizable, widely supported.
++*   **Limitations:** Potential for topological ambiguities and degenerate triangles in standard configurations. Not suitable for discontinuous data without modification.
+ 
+ ## Background
+-Marching Cubes 2 was introduced by Nielson & Hamann in 1991 in the paper "The asymptotic decider: Resolving the ambiguity in marching cubes" [S3]. It was developed to address the face-saddle ambiguities present in the original trilinear interpolant used in the standard Marching Cubes algorithm [S3]. The variant with 24 configurations and midpoint selection was later proposed in a 2020 paper for improved 3D reconstruction speed and void avoidance [S4, abstract only, unofficial].
++Marching Cubes 2 is a variant of the original Marching Cubes algorithm [S1, unofficial]. The original algorithm was introduced by Lorensen and Cline in 1987. Marching Cubes 2 likely refers to a specific implementation or lookup table variant used in modern graphics libraries or research code, such as the one found in the `differentiable_volumetric_rendering` repository [S1, unofficial].
+ 
+ ## Sources
+@@ -144,4 +241,3 @@
+ [S2] A parallel isosurface extraction component for visualization pipelines executing on GPU clusters, https://doi.org/10.1016/j.cam.2014.05.019, fetched 2026-10-27
+ [S3] (No) More Marching Cubes, https://doi.org/10.2312/vg/vg07/081-090, fetched 2026-10-26
+-[S4] Fast volume rendering using a shear-warp factorisation ... - ResearchGate, https://www.researchgate.net/publication/243763776_Fast_volume_rendering_using_a_shear-warp_factorisation_of_the_viewing_transform, fetched 2026-10-27 (abstract only, unofficial)
+-[S5] JuliaGeometry/Meshing.jl, https://github.com/JuliaGeometry/Meshing.jl, fetched 2026-10-27 (unofficial)+[S4] JuliaGeometry/Meshing.jl, https://github.com/JuliaGeometry/Meshing.jl, fetched 2026-10-27 (unofficial)

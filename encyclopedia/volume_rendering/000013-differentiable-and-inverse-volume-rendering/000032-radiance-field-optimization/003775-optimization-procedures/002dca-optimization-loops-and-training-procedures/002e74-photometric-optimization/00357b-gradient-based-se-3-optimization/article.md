@@ -1,0 +1,118 @@
+# Gradient-Based SE(3) Optimization
+
+Also called: Photometric Loss Optimization, VF-NeRF Optimization
+
+## Overview
+This method refines the rigid transformation $\hat{T} \in SE(3)$ between two NeRF scenes (Scene A and Scene B) by minimizing photometric error on rays sampled from high-confidence regions. It differs from single-image alignment methods (like iNeRF) by optimizing over multiple images in the source set $C_A$ and utilizes Viewshed Fields (VF) to mask out unreliable pixels, thereby avoiding NeRF artifacts [S1].
+
+## How it works
+**Inputs:**
+*   Set of novel views $C_A$ from Scene A.
+*   Corresponding Viewshed Field (VF) maps (masks) for $C_A$.
+*   Fixed NeRF parameters $\Theta_b$ for Scene B.
+*   Initial transformation estimate $\hat{T}_0 \in SE(3)$.
+*   Number of rays $n$ per iteration.
+
+**Outputs:**
+*   Optimized transformation $T \in SE(3)$.
+
+**Data Structures:**
+*   $\hat{T}$: A 6-DoF parameter vector representing rotation and translation.
+*   $R_i$: A set of $n$ rays sampled for iteration $i$.
+*   $I(r)$: The radiance value rendered by a NeRF for ray $r$.
+
+**Steps:**
+1.  **Ray Sampling:** For each iteration $i$, sample a set of $n$ rays $R_i$. Rays are selected from images across the entire set $C_A$. Selection is restricted to pixels where the VF score exceeds a threshold, ensuring high confidence in the RGB values [S1].
+2.  **Loss Calculation:** Compute the photometric loss $\mathcal{L}_{photo}$ using the squared difference between the pixel value from Scene A and the transformed pixel value from Scene B [S1]:
+    $$
+    \mathcal{L}_{photo}(\hat{T}_{i-1}|R_i,\Theta_b) = \frac{1}{n} \sum_{r \in R_i} \left( I(r) - I(\hat{T}_{i-1}(r)) \right)^2
+    $$
+    Where $I(r)$ is the pixel value from Scene A and $I(\hat{T}_{i-1}(r))$ is the pixel value from Scene B after applying the current transformation estimate $\hat{T}_{i-1}$ [S1].
+3.  **Optimization:** Update $\hat{T}$ using Stochastic Gradient Descent (SGD) to minimize $\mathcal{L}_{photo}$. The NeRF parameters $\Theta_b$ remain fixed during this process [S1].
+4.  **Iteration:** Repeat steps 1-3 until convergence.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gradient_based_se3_optimization(C_A, VF_maps, Theta_b, T_hat_0, n_rays, num_iterations, lr):
+    """
+    C_A: List of image indices or data for Scene A novel views.
+    VF_maps: List of viewshed masks corresponding to C_A.
+    Theta_b: Fixed NeRF parameters for Scene B.
+    T_hat_0: Initial 6-DoF transformation (rotation + translation).
+    n_rays: Number of rays to sample per iteration.
+    num_iterations: Total optimization steps.
+    lr: Learning rate for SGD.
+    """
+    T_hat = T_hat_0
+    
+    for i in range(num_iterations):
+        # 1. Sample rays from high VF score regions across all images in C_A
+        R_i = []
+        for img_idx in C_A:
+            mask = VF_maps[img_idx]
+            # Select pixels where mask value is above a threshold (e.g., 0.5)
+            high_conf_pixels = get_high_confidence_pixels(mask)
+            # Sample n_rays distributed across these high-confidence pixels
+            # Note: Exact sampling distribution (uniform vs weighted) is not specified in sources
+            rays = sample_rays_from_pixels(high_conf_pixels, n_rays)
+            R_i.extend(rays)
+            
+        # Ensure we have exactly n_rays or handle batch size variations
+        # If sources imply fixed batch size n, truncate or pad. 
+        # Source says "sample a set of n rays", implying fixed n.
+        if len(R_i) > n_rays:
+            R_i = R_i[:n_rays]
+        elif len(R_i) < n_rays:
+            # Fallback to random sampling if insufficient high-confidence rays?
+            # Source does not specify fallback. [G] Assume valid input ensures n_rays available.
+            pass
+
+        # 2. Calculate Photometric Loss
+        loss = 0.0
+        for r in R_i:
+            # I(r) is rendered from Scene A (using its own NeRF, assumed available)
+            # I(T_hat(r)) is rendered from Scene B (using Theta_b)
+            # Note: The source formula uses I(r) and I(T_hat(r)). 
+            # In context, I(r) refers to the target image from Scene A.
+            pixel_A = render_ray(r, Theta_a) # Theta_a is implicit for Scene A
+            transformed_r = apply_transform(r, T_hat)
+            pixel_B = render_ray(transformed_r, Theta_b)
+            
+            diff = pixel_A - pixel_B
+            loss += diff * diff
+            
+        loss = loss / n_rays
+        
+        # 3. Optimize T_hat using SGD
+        # Compute gradient of loss with respect to T_hat
+        grad = compute_gradient(loss, T_hat, Theta_b, R_i)
+        
+        # Update transformation parameters
+        T_hat = T_hat - lr * grad
+        
+    return T_hat
+```
+
+**Parameters:**
+*   **Optimizer:** SGD (Stochastic Gradient Descent). Chosen for reliability when the initial transformation $T_0$ is not precise [S1].
+*   **Learning Rate:** Not given in the sources.
+*   **Threshold:** Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **NeRF Artifacts:** Sampling outside high-confidence regions (low VF score) introduces artifacts into the loss calculation. The thresholded viewshed mask is critical to avoid this [S1].
+*   **Initial Pose:** SGD reliability depends on the quality of $T_0$. Poor initialization may lead to local minima [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of iterations and the number of rays $n$ per iteration. Each iteration requires rendering $n$ rays for both Scene A and Scene B.
+*   **Memory Complexity:** Depends on the storage of the NeRF models and the VF maps. The optimization loop itself requires minimal memory beyond the current batch of rays.
+*   **Strengths:** Robust to artifacts by using VF masks; better scene coverage by optimizing over multiple images in $C_A$ rather than a single image [S1].
+*   **Limitations:** Requires fixed NeRF parameters for Scene B; relies on the accuracy of the Viewshed Field for masking.
+*   **When to use:** When registering two NeRF scenes where one has a known fixed representation (Scene B) and the other provides novel views with associated confidence maps (Scene A).
+
+## Background
+This method is based on the VF-NeRF paper, which introduces Viewshed Fields for rigid NeRF registration. It builds upon the gradient-based optimization approach used in iNeRF but extends it to multi-image sets and incorporates viewshed masking [S1]. The method was evaluated on the LLFF, custom casual video, and Objaverse datasets [S1].
+
+## Sources
+[S1] VF-NeRF: Viewshed Fields for Rigid NeRF Registration, https://doi.org/10.1007/978-3-031-73027-6_10, fetched 2026-10-26

@@ -1,0 +1,135 @@
+# Fragment Shader Volume Ray Casting
+
+Also called: OpenGL Fragment Shader Volume Rendering
+
+## Overview
+Fragment Shader Volume Ray Casting is a GPU-accelerated volume rendering technique that leverages OpenGL rasterization to determine ray-volume intersections, thereby avoiding the overhead of explicit ray-triangle intersection tests. It solves the problem of efficiently mapping view rays to volume entry and exit points by using a two-pass rendering pipeline. Unlike explicit ray-casting methods that compute intersections via geometry shaders or compute shaders, this method relies on the fixed-function rasterizer to provide the entry point via interpolated vertex attributes and the exit point via a pre-computed texture lookup.
+
+## How it works
+The method operates in two distinct rendering passes. The first pass calculates the exit point of each view ray through the volume bounding box. The second pass performs the actual volume integration.
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   `lastHit`: A 2D texture (`sampler2D`) at binding point 1, storing the exit point coordinates for each pixel.
+    *   `transferFunction`: A 1D texture (`sampler1D`) at binding point 2, mapping scalar density values to color and opacity.
+    *   `volume`: A 3D texture (`sampler3D`) at binding point 3, storing the scalar field data.
+    *   `first`: A uniform `vec3` storing the entry point of the ray (interpolated from the front face vertices of the volume cube).
+    *   `h`: A uniform `float` representing the step size for ray traversal.
+    *   `opacityThreshold`: A constant threshold for early ray termination, typically `0.99`.
+*   **Outputs**:
+    *   `vFragColor`: A `vec4` output variable storing the final accumulated color and opacity.
+
+### Data Structures
+*   **Exit Point Texture (`lastHit`)**: A 2D texture where each texel `(x, y)` corresponds to a pixel on the screen. The RGB components store the 3D world coordinates of the ray's exit point from the volume.
+*   **Volume Texture (`volume`)**: A 3D texture containing the scalar field. Sampling returns a scalar value (density).
+*   **Transfer Function (`transferFunction`)**: A 1D texture. Sampling at index `u` (derived from the scalar field value) returns a `vec4` containing RGB color and alpha (opacity) values.
+
+### Algorithm Steps
+1.  **Fetch Exit Point**: In the fragment shader, retrieve the exit point `last` from the `lastHit` texture using `texelFetch` at the current fragment coordinates (`gl_FragCoord.xy`).
+2.  **Compute Ray Geometry**:
+    *   Calculate the direction vector: $\vec{d} = \text{last} - \text{first}$.
+    *   Calculate the ray length: $D = \|\vec{d}\|$.
+    *   Normalize the direction: $\vec{d} = \frac{\vec{d}}{\|\vec{d}\|}$.
+3.  **Initialize Accumulators**:
+    *   Initialize accumulated color `color` to `(0.0, 0.0, 0.0, 1.0)`. Note: The alpha channel is initialized to 1.0 to represent full background opacity initially, which will be reduced as volume samples are composited.
+    *   Initialize current ray position `tr` to `first`.
+    *   Calculate step vector: $\vec{step} = \vec{d} \times h$.
+4.  **Ray Marching Loop**: Iterate from $t = 0$ to $t \le D$ with increment $h$.
+    *   **Sample Volume**: Sample the scalar field at `tr` from the `volume` texture. Let the scalar value be $s$.
+    *   **Sample Transfer Function**: Sample the transfer function at index $s$. Let the result be `samp` (vec4: rgb, a).
+    *   **Calculate Local Alpha**: Compute the alpha contribution of the current step using the formula:
+        $$ \alpha_{samp} = 1.0 - \exp(-0.5 \times \text{samp}.a) $$
+    *   **Pre-multiply Color**:
+        $$ \text{samp}.rgb = \text{samp}.rgb \times \alpha_{samp} $$
+    *   **Composite (Under Operator)**:
+        *   Update accumulated color:
+            $$ \text{color}.rgb += \text{samp}.rgb \times \text{color}.a $$
+        *   Update accumulated alpha (background transparency):
+            $$ \text{color}.a = 1.0 - \text{samp}.w $$
+            *(Note: In the source code, `samp.w` is used for the alpha update, which corresponds to `samp.a` in the previous line. This implies `samp.w` holds the calculated alpha or the original alpha depending on implementation details, but the source explicitly uses `samp.w` for the alpha update formula $1.0 - \text{samp}.w$. Given the context of under operator, `color.a` represents the remaining background transmission. The source code sets `color.a = 1.0f - samp.w`. If `samp.w` is the alpha of the sample, this logic seems inverted for standard under operator where $C_{out} = C_{in} + C_{sample}(1-\alpha_{sample})$. However, we must follow the source code exactly. The source code initializes `color.a = 1.0`. Then `color.a = 1.0 - samp.w`. If `samp.w` is the sample's alpha, this reduces the background alpha. This is consistent with `color.a` tracking the *remaining* background opacity.)*
+    *   **Early Ray Termination**: If the accumulated opacity $1.0 - \text{color}.a$ exceeds `opacityThreshold` (0.99), break the loop.
+    *   **Advance Ray**: Update position: $\text{tr} += \vec{step}$.
+5.  **Finalize**:
+    *   Calculate final background opacity: $\text{color}.a = 1.0 - \text{color}.a$.
+    *   Output `vFragColor = color`.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Inputs
+# lastHit: sampler2D (binding 1)
+# transferFunction: sampler1D (binding 2)
+# volume: sampler3D (binding 3)
+# first: vec3 uniform
+# h: float uniform
+# opacityThreshold: float constant (0.99)
+
+# Fragment Shader Main
+coord = ivec2(gl_FragCoord.xy)
+last = texelFetch(lastHit, coord, 0).xyz
+
+# Ray Geometry
+direction = last - first
+D = length(direction)
+direction = normalize(direction)
+
+# Accumulators
+color = vec4(0.0, 0.0, 0.0, 1.0)
+tr = first
+rayStep = direction * h
+
+# Ray Marching
+t = 0.0
+while t <= D:
+    # Sample scalar field
+    scalar = texture(volume, tr).x
+    
+    # Sample transfer function
+    samp = texture(transferFunction, scalar).rgba
+    
+    # Calculate alpha
+    samp_a = 1.0 - exp(-0.5 * samp.a)
+    
+    # Pre-multiply color
+    samp.rgb = samp.rgb * samp_a
+    
+    # Composite
+    color.rgb += samp.rgb * color.a
+    color.a = 1.0 - samp.w  # Note: Source uses samp.w for alpha update
+    
+    # Early Ray Termination
+    if (1.0 - color.a) > opacityThreshold:
+        break
+        
+    # Advance
+    tr += rayStep
+    t += h
+
+# Finalize
+color.a = 1.0 - color.a
+vFragColor = color
+```
+
+### Parameters
+*   `h`: Step size. Not given in the sources.
+*   `opacityThreshold`: `0.99`.
+
+### Edge Cases and Pitfalls
+*   **Precision**: The use of `texelFetch` for `lastHit` ensures exact texel access, avoiding interpolation artifacts for the exit point. However, `texture()` is used for `volume` and `transferFunction`, implying linear interpolation.
+*   **Boundary Conditions**: The loop condition `t <= D` ensures the exit point is included.
+*   **Alpha Logic**: The source code uses `samp.w` in the alpha update `color.a = 1.0 - samp.w`. In GLSL, `rgba` and `stpq` are interchangeable. If `samp` is `vec4`, `samp.w` is the alpha component. The logic `color.a = 1.0 - samp.w` suggests `color.a` tracks the *remaining* background transmission. If `samp.w` is the sample's opacity, this reduces the background. This is consistent with the initialization `color.a = 1.0`.
+
+## Operating characteristics
+*   **Time Complexity**: $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the number of steps per ray.
+*   **Memory Complexity**: $O(N)$ for the `lastHit` texture and $O(V)$ for the volume data.
+*   **Strengths**: Minimal overhead for intersection calculation; leverages existing rasterization pipeline.
+*   **Limitations**: Requires two passes; fixed step size may lead to aliasing or inefficiency; early ray termination depends on threshold.
+*   **When to use**: When OpenGL rasterization is available and explicit ray-triangle intersection is too costly.
+*   **When not to use**: When adaptive step sizes or complex geometry intersections are required.
+
+## Background
+This method was described in a 2017 paper comparing GPU-based volume ray casting implementations. It utilizes OpenGL fragment shaders to perform volume rendering by rasterizing the volume bounding box and using the fragment shader to integrate the volume rendering equation.
+
+## Sources
+[S1] A Comparison between GPU-based Volume Ray Casting Implementations: Fragment Shader, Compute Shader, OpenCL and CUDA, https://www.researchgate.net/publication/321454253_A_Comparison_between_GPU-based_Volume_Ray_Casting_Implementations_Fragment_Shader_Compute_Shader_OpenCL_and_CUDA, fetched 2026-10-26
