@@ -1,0 +1,696 @@
+I am fairly new to this engine and while exploring the sample optixTriangle program , I made the following changes to the optixTriangle.cpp program - 
+
+
+I changed some camera properties 
+
+
+And I made some changes to tria…
+
+Exploring the sample optixTriangle program - OptiX - NVIDIA Developer Forums
+Exploring the sample optixTriangle program
+Gaming and Visualization Technologies
+Visualization
+OptiX
+ssv
+April 11, 2023, 3:48am
+1
+I am fairly new to this engine and while exploring the sample optixTriangle program , I made the following changes to the optixTriangle.cpp program -
+I changed some camera properties
+And I made some changes to triangle build input by changing the total no of triangles from 1 to a randomly generated 10k triangles all of which would lie in the range (-10,-10,-10) to (10,10,10)
+Changed the miss record data to { 0.7f, 0.8f, 1.0f } so that we can have a sky blue color as our background and in the extern "C" __global__ void __closesthit__ch() in the optixTriangle.cu I am setting the payload to a constant value of setPayload( make_float3(0.98f, 0.360f, 0.360f) ) so that I can have a uniform color on all of my rendered triangles.
+I am attaching the optixTriangle.cpp code for reference , but other than the above changes I have not changed anything else from the sample project.
+```
+#include <optix.h>
+#include <optix_function_table_definition.h>
+#include <optix_stack_size.h>
+#include <optix_stubs.h>
+
+#include <cuda_runtime.h>
+
+#include <sampleConfig.h>
+
+#include <sutil/CUDAOutputBuffer.h>
+#include <sutil/Exception.h>
+#include <sutil/sutil.h>
+
+#include "optixTriangle.h"
+
+#include <array>
+#include <iomanip>
+#include <iostream>
+#include <string>
+
+#include <sutil/Camera.h>
+#include <sutil/Trackball.h>
+
+
+
+template <typename T>
+struct SbtRecord
+{
+    __align__( OPTIX_SBT_RECORD_ALIGNMENT ) char header[OPTIX_SBT_RECORD_HEADER_SIZE];
+    T data;
+};
+
+typedef SbtRecord<RayGenData>     RayGenSbtRecord;
+typedef SbtRecord<MissData>       MissSbtRecord;
+typedef SbtRecord<HitGroupData>   HitGroupSbtRecord;
+
+
+void configureCamera( sutil::Camera& cam, const uint32_t width, const uint32_t height )
+{
+    cam.setEye( {-5.0f, 0.0f, -25.0f} );
+    cam.setLookat( {0.0f, 0.0f, 0.0f} );
+    cam.setUp( {0.0f, 1.0f, 0.0f} );
+    cam.setFovY( 65.0f );
+    cam.setAspectRatio( (float)width / (float)height );
+}
+
+
+void printUsageAndExit( const char* argv0 )
+{
+    std::cerr << "Usage  : " << argv0 << " [options]\n";
+    std::cerr << "Options: --file | -f <filename>      Specify file for image output\n";
+    std::cerr << "         --help | -h                 Print this usage message\n";
+    std::cerr << "         --dim=<width>x<height>      Set image dimensions; defaults to 512x384\n";
+    exit( 1 );
+}
+
+
+static void context_log_cb( unsigned int level, const char* tag, const char* message, void* /*cbdata */)
+{
+    std::cerr << "[" << std::setw( 2 ) << level << "][" << std::setw( 12 ) << tag << "]: "
+              << message << "\n";
+}
+
+
+int main( int argc, char* argv[] )
+{
+    std::string outfile;
+    int         width  = 1024;
+    int         height =  768;
+
+    for( int i = 1; i < argc; ++i )
+    {
+        const std::string arg( argv[i] );
+        if( arg == "--help" || arg == "-h" )
+        {
+            printUsageAndExit( argv[0] );
+        }
+        else if( arg == "--file" || arg == "-f" )
+        {
+            if( i < argc - 1 )
+            {
+                outfile = argv[++i];
+            }
+            else
+            {
+                printUsageAndExit( argv[0] );
+            }
+        }
+        else if( arg.substr( 0, 6 ) == "--dim=" )
+        {
+            const std::string dims_arg = arg.substr( 6 );
+            sutil::parseDimensions( dims_arg.c_str(), width, height );
+        }
+        else
+        {
+            std::cerr << "Unknown option '" << arg << "'\n";
+            printUsageAndExit( argv[0] );
+        }
+    }
+
+    try
+    {
+        //
+        // Initialize CUDA and create OptiX context
+        //
+        OptixDeviceContext context = nullptr;
+        {
+            // Initialize CUDA
+            CUDA_CHECK( cudaFree( 0 ) );
+
+            // Initialize the OptiX API, loading all API entry points
+            OPTIX_CHECK( optixInit() );
+
+            // Specify context options
+            OptixDeviceContextOptions options = {};
+            options.logCallbackFunction       = &context_log_cb;
+            options.logCallbackLevel          = 4;
+
+            // Associate a CUDA context (and therefore a specific GPU) with this
+            // device context
+            CUcontext cuCtx = 0;  // zero means take the current context
+            OPTIX_CHECK( optixDeviceContextCreate( cuCtx, &options, &context ) );
+        }
+
+
+        //
+        // accel handling
+        //
+        OptixTraversableHandle gas_handle;
+        CUdeviceptr            d_gas_output_buffer;
+        {
+            // Use default options for simplicity.  In a real use case we would want to
+            // enable compaction, etc
+            OptixAccelBuildOptions accel_options = {};
+            accel_options.buildFlags = OPTIX_BUILD_FLAG_NONE;
+            accel_options.operation  = OPTIX_BUILD_OPERATION_BUILD;
+            //accel_options.acceleratorDescriptor.type = OPTIX_ACCELERATION_LBVH;
+
+            // Triangle build input: simple list of three vertices
+            std::vector<float3> vertices;
+            for (int i = 0; i < 10000; i++)
+            {
+                float3 rand_point = make_float3(static_cast<float>(rand()) / RAND_MAX * 20.0f - 10.0f,
+                    static_cast<float>(rand()) / RAND_MAX * 20.0f - 10.0f,
+                    static_cast<float>(rand()) / RAND_MAX * 20.0f - 10.0f);
+                float3 v1 = rand_point - make_float3(static_cast<float>(rand()) / RAND_MAX - 0.5f,
+                    static_cast<float>(rand()) / RAND_MAX - 0.5f,
+                    static_cast<float>(rand()) / RAND_MAX - 0.5f);
+                float3 v2 = rand_point - make_float3(static_cast<float>(rand()) / RAND_MAX - 0.5f,
+                    static_cast<float>(rand()) / RAND_MAX - 0.5f,
+                    static_cast<float>(rand()) / RAND_MAX - 0.5f);
+                float3 v3 = rand_point - make_float3(static_cast<float>(rand()) / RAND_MAX - 0.5f,
+                    static_cast<float>(rand()) / RAND_MAX - 0.5f,
+                    static_cast<float>(rand()) / RAND_MAX - 0.5f);
+                
+                vertices.push_back(v1);
+                vertices.push_back(v2);
+                vertices.push_back(v3);
+            }
+
+            const size_t vertices_size = sizeof( float3 )*vertices.size();
+            CUdeviceptr d_vertices=0;
+            CUDA_CHECK( cudaMalloc( reinterpret_cast<void**>( &d_vertices ), vertices_size ) );
+            CUDA_CHECK( cudaMemcpy(
+                        reinterpret_cast<void*>( d_vertices ),
+                        vertices.data(),
+                        vertices_size,
+                        cudaMemcpyHostToDevice
+                        ) );
+
+            // Our build input is a simple list of non-indexed triangle vertices
+            const uint32_t triangle_input_flags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
+            OptixBuildInput triangle_input = {};
+            triangle_input.type                        = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
+            triangle_input.triangleArray.vertexFormat  = OPTIX_VERTEX_FORMAT_FLOAT3;
+            triangle_input.triangleArray.numVertices   = static_cast<uint32_t>( vertices.size() );
+            triangle_input.triangleArray.vertexBuffers = &d_vertices;
+            triangle_input.triangleArray.flags         = triangle_input_flags;
+            triangle_input.triangleArray.numSbtRecords = 1;
+
+            OptixAccelBufferSizes gas_buffer_sizes;
+            OPTIX_CHECK( optixAccelComputeMemoryUsage(
+                        context,
+                        &accel_options,
+                        &triangle_input,
+                        1, // Number of build inputs
+                        &gas_buffer_sizes
+                        ) );
+            CUdeviceptr d_temp_buffer_gas;
+            CUDA_CHECK( cudaMalloc(
+                        reinterpret_cast<void**>( &d_temp_buffer_gas ),
+                        gas_buffer_sizes.tempSizeInBytes
+                        ) );
+            CUDA_CHECK( cudaMalloc(
+                        reinterpret_cast<void**>( &d_gas_output_buffer ),
+                        gas_buffer_sizes.outputSizeInBytes
+                        ) );
+
+            OPTIX_CHECK( optixAccelBuild(
+                        context,
+                        0,                  // CUDA stream
+                        &accel_options,
+                        &triangle_input,
+                        1,                  // num build inputs
+                        d_temp_buffer_gas,
+                        gas_buffer_sizes.tempSizeInBytes,
+                        d_gas_output_buffer,
+                        gas_buffer_sizes.outputSizeInBytes,
+                        &gas_handle,
+                        nullptr,            // emitted property list
+                        0                   // num emitted properties
+                        ) );
+
+            // We can now free the scratch space buffer used during build and the vertex
+            // inputs, since they are not needed by our trivial shading method
+            CUDA_CHECK( cudaFree( reinterpret_cast<void*>( d_temp_buffer_gas ) ) );
+            CUDA_CHECK( cudaFree( reinterpret_cast<void*>( d_vertices        ) ) );
+        }
+
+        //
+        // Create module
+        //
+        OptixModule module = nullptr;
+        OptixPipelineCompileOptions pipeline_compile_options = {};
+        {
+            OptixModuleCompileOptions module_compile_options = {};
+#if !defined( NDEBUG )
+            module_compile_options.optLevel   = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0;
+            module_compile_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
+#endif
+
+            pipeline_compile_options.usesMotionBlur        = false;
+            pipeline_compile_options.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
+            pipeline_compile_options.numPayloadValues      = 3;
+            pipeline_compile_options.numAttributeValues    = 3;
+#ifdef DEBUG // Enables debug exceptions during optix launches. This may incur significant performance cost and should only be done during development.
+            pipeline_compile_options.exceptionFlags = OPTIX_EXCEPTION_FLAG_DEBUG | OPTIX_EXCEPTION_FLAG_TRACE_DEPTH | OPTIX_EXCEPTION_FLAG_STACK_OVERFLOW;
+#else
+            pipeline_compile_options.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
+#endif
+            pipeline_compile_options.pipelineLaunchParamsVariableName = "params";
+            pipeline_compile_options.usesPrimitiveTypeFlags = OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE;
+
+            size_t      inputSize  = 0;
+            const char* input      = sutil::getInputData( OPTIX_SAMPLE_NAME, OPTIX_SAMPLE_DIR, "optixTriangle.cu", inputSize );
+
+            OPTIX_CHECK_LOG( optixModuleCreateFromPTX(
+                        context,
+                        &module_compile_options,
+                        &pipeline_compile_options,
+                        input,
+                        inputSize,
+                        LOG, &LOG_SIZE,
+                        &module
+                        ) );
+        }
+
+        //
+        // Create program groups
+        //
+        OptixProgramGroup raygen_prog_group   = nullptr;
+        OptixProgramGroup miss_prog_group     = nullptr;
+        OptixProgramGroup hitgroup_prog_group = nullptr;
+        {
+            OptixProgramGroupOptions program_group_options   = {}; // Initialize to zeros
+
+            OptixProgramGroupDesc raygen_prog_group_desc    = {}; //
+            raygen_prog_group_desc.kind                     = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
+            raygen_prog_group_desc.raygen.module            = module;
+            raygen_prog_group_desc.raygen.entryFunctionName = "__raygen__rg";
+            OPTIX_CHECK_LOG( optixProgramGroupCreate(
+                        context,
+                        &raygen_prog_group_desc,
+                        1,   // num program groups
+                        &program_group_options,
+                        LOG, &LOG_SIZE,
+                        &raygen_prog_group
+                        ) );
+
+            OptixProgramGroupDesc miss_prog_group_desc  = {};
+            miss_prog_group_desc.kind                   = OPTIX_PROGRAM_GROUP_KIND_MISS;
+            miss_prog_group_desc.miss.module            = module;
+            miss_prog_group_desc.miss.entryFunctionName = "__miss__ms";
+            OPTIX_CHECK_LOG( optixProgramGroupCreate(
+                        context,
+                        &miss_prog_group_desc,
+                        1,   // num program groups
+                        &program_group_options,
+                        LOG, &LOG_SIZE,
+                        &miss_prog_group
+                        ) );
+
+            OptixProgramGroupDesc hitgroup_prog_group_desc = {};
+            hitgroup_prog_group_desc.kind                         = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
+            hitgroup_prog_group_desc.hitgroup.moduleCH            = module;
+            hitgroup_prog_group_desc.hitgroup.entryFunctionNameCH = "__closesthit__ch";
+            OPTIX_CHECK_LOG( optixProgramGroupCreate(
+                        context,
+                        &hitgroup_prog_group_desc,
+                        1,   // num program groups
+                        &program_group_options,
+                        LOG, &LOG_SIZE,
+                        &hitgroup_prog_group
+                        ) );
+        }
+
+        //
+        // Link pipeline
+        //
+        OptixPipeline pipeline = nullptr;
+        {
+            const uint32_t    max_trace_depth = 1;
+            OptixProgramGroup program_groups[] = { raygen_prog_group, miss_prog_group, hitgroup_prog_group };
+
+            OptixPipelineLinkOptions pipeline_link_options = {};
+            pipeline_link_options.maxTraceDepth          = max_trace_depth;
+            pipeline_link_options.debugLevel             = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
+
+            OPTIX_CHECK_LOG( optixPipelineCreate(
+                        context,
+                        &pipeline_compile_options,
+                        &pipeline_link_options,
+                        program_groups,
+                        sizeof( program_groups ) / sizeof( program_groups[0] ),
+                        LOG, &LOG_SIZE,
+                        &pipeline
+                        ) );
+
+            OptixStackSizes stack_sizes = {};
+            for( auto& prog_group : program_groups )
+            {
+                OPTIX_CHECK( optixUtilAccumulateStackSizes( prog_group, &stack_sizes ) );
+            }
+
+            uint32_t direct_callable_stack_size_from_traversal;
+            uint32_t direct_callable_stack_size_from_state;
+            uint32_t continuation_stack_size;
+            OPTIX_CHECK( optixUtilComputeStackSizes( &stack_sizes, max_trace_depth,
+                                                     0,  // maxCCDepth
+                                                     0,  // maxDCDEpth
+                                                     &direct_callable_stack_size_from_traversal,
+                                                     &direct_callable_stack_size_from_state, &continuation_stack_size ) );
+            OPTIX_CHECK( optixPipelineSetStackSize( pipeline, direct_callable_stack_size_from_traversal,
+                                                    direct_callable_stack_size_from_state, continuation_stack_size,
+                                                    1  // maxTraversableDepth
+                                                    ) );
+        }
+
+        //
+        // Set up shader binding table
+        //
+        OptixShaderBindingTable sbt = {};
+        {
+            CUdeviceptr  raygen_record;
+            const size_t raygen_record_size = sizeof( RayGenSbtRecord );
+            CUDA_CHECK( cudaMalloc( reinterpret_cast<void**>( &raygen_record ), raygen_record_size ) );
+            RayGenSbtRecord rg_sbt;
+            OPTIX_CHECK( optixSbtRecordPackHeader( raygen_prog_group, &rg_sbt ) );
+            CUDA_CHECK( cudaMemcpy(
+                        reinterpret_cast<void*>( raygen_record ),
+                        &rg_sbt,
+                        raygen_record_size,
+                        cudaMemcpyHostToDevice
+                        ) );
+
+            CUdeviceptr miss_record;
+            size_t      miss_record_size = sizeof( MissSbtRecord );
+            CUDA_CHECK( cudaMalloc( reinterpret_cast<void**>( &miss_record ), miss_record_size ) );
+            MissSbtRecord ms_sbt;
+            ms_sbt.data = { 0.7f, 0.8f, 1.0f };
+            OPTIX_CHECK( optixSbtRecordPackHeader( miss_prog_group, &ms_sbt ) );
+            CUDA_CHECK( cudaMemcpy(
+                        reinterpret_cast<void*>( miss_record ),
+                        &ms_sbt,
+                        miss_record_size,
+                        cudaMemcpyHostToDevice
+                        ) );
+
+            CUdeviceptr hitgroup_record;
+            size_t      hitgroup_record_size = sizeof( HitGroupSbtRecord );
+            CUDA_CHECK( cudaMalloc( reinterpret_cast<void**>( &hitgroup_record ), hitgroup_record_size ) );
+            HitGroupSbtRecord hg_sbt;
+            OPTIX_CHECK( optixSbtRecordPackHeader( hitgroup_prog_group, &hg_sbt ) );
+            CUDA_CHECK( cudaMemcpy(
+                        reinterpret_cast<void*>( hitgroup_record ),
+                        &hg_sbt,
+                        hitgroup_record_size,
+                        cudaMemcpyHostToDevice
+                        ) );
+
+            sbt.raygenRecord                = raygen_record;
+            sbt.missRecordBase              = miss_record;
+            sbt.missRecordStrideInBytes     = sizeof( MissSbtRecord );
+            sbt.missRecordCount             = 1;
+            sbt.hitgroupRecordBase          = hitgroup_record;
+            sbt.hitgroupRecordStrideInBytes = sizeof( HitGroupSbtRecord );
+            sbt.hitgroupRecordCount         = 1;
+        }
+
+        sutil::CUDAOutputBuffer<uchar4> output_buffer( sutil::CUDAOutputBufferType::CUDA_DEVICE, width, height );
+
+        //
+        // launch
+        //
+        {
+            CUstream stream;
+            CUDA_CHECK( cudaStreamCreate( &stream ) );
+
+            sutil::Camera cam;
+            configureCamera( cam, width, height );
+
+            Params params;
+            params.image        = output_buffer.map();
+            params.image_width  = width;
+            params.image_height = height;
+            params.handle       = gas_handle;
+            params.cam_eye      = cam.eye();
+            cam.UVWFrame( params.cam_u, params.cam_v, params.cam_w );
+
+            CUdeviceptr d_param;
+            CUDA_CHECK( cudaMalloc( reinterpret_cast<void**>( &d_param ), sizeof( Params ) ) );
+            CUDA_CHECK( cudaMemcpy(
+                        reinterpret_cast<void*>( d_param ),
+                        &params, sizeof( params ),
+                        cudaMemcpyHostToDevice
+                        ) );
+
+            OPTIX_CHECK( optixLaunch( pipeline, stream, d_param, sizeof( Params ), &sbt, width, height, /*depth=*/1 ) );
+            CUDA_SYNC_CHECK();
+
+            output_buffer.unmap();
+            CUDA_CHECK( cudaFree( reinterpret_cast<void*>( d_param ) ) );
+        }
+
+        //
+        // Display results
+        //
+        {
+            sutil::ImageBuffer buffer;
+            buffer.data         = output_buffer.getHostPointer();
+            buffer.width        = width;
+            buffer.height       = height;
+            buffer.pixel_format = sutil::BufferImageFormat::UNSIGNED_BYTE4;
+            if( outfile.empty() )
+                sutil::displayBufferWindow( argv[0], buffer );
+            else
+                sutil::saveImage( outfile.c_str(), buffer, false );
+        }
+
+        //
+        // Cleanup
+        //
+        {
+            CUDA_CHECK( cudaFree( reinterpret_cast<void*>( sbt.raygenRecord       ) ) );
+            CUDA_CHECK( cudaFree( reinterpret_cast<void*>( sbt.missRecordBase     ) ) );
+            CUDA_CHECK( cudaFree( reinterpret_cast<void*>( sbt.hitgroupRecordBase ) ) );
+            CUDA_CHECK( cudaFree( reinterpret_cast<void*>( d_gas_output_buffer    ) ) );
+
+            OPTIX_CHECK( optixPipelineDestroy( pipeline ) );
+            OPTIX_CHECK( optixProgramGroupDestroy( hitgroup_prog_group ) );
+            OPTIX_CHECK( optixProgramGroupDestroy( miss_prog_group ) );
+            OPTIX_CHECK( optixProgramGroupDestroy( raygen_prog_group ) );
+            OPTIX_CHECK( optixModuleDestroy( module ) );
+
+            OPTIX_CHECK( optixDeviceContextDestroy( context ) );
+        }
+    }
+    catch( std::exception& e )
+    {
+        std::cerr << "Caught exception: " << e.what() << "\n";
+        return 1;
+    }
+    return 0;
+}
+```
+I got the following output -
+image998×759 32.2 KB
+Now I wanted to make some more changes but have no idea how to proceed further -
+I am not sure which acceleration structure this program is using, I checked the accel options but didnt find anything concrete. I wanted to use a BVH structure so what changes should I make in the code which would warantee that I am using a BVH acceleration structure.
+I wanted to change the samples pex pixel , from the output I would assume that by default the samples per pixel for the program is very low and I wanted to set the samples per pixel to 64
+Even after I change the max trace depth to a higher no other than 1, I get no visible changes , I was expecting shadows/depth but I am getting the same output each and every time.
+```
+     // Link pipeline
+     //
+     OptixPipeline pipeline = nullptr;
+     {
+         const uint32_t    max_trace_depth = 10;
+         OptixProgramGroup program_groups[] = { raygen_prog_group, miss_prog_group, hitgroup_prog_group }; ```
+```
+I had built a custom ray tracer a while back and with the above variables I was expecting an output similar to this -
+image716×634 87 KB
+But in the output that I got from my optix program , I see no depth and no shadows. I know i might be missing a lot of points but as I said I am fairly new to this engine and finding it very difficult to navigate around.
+Optix Hello World
+dhart
+April 11, 2023, 7:20pm
+2
+Hi @ssv,
+OptiX does have a little bit of a learning curve, but it sounds like you’re familiar with CPU ray tracing, so it should be pretty easy for you to map the concepts you know to OptiX.
+Even after I change the max trace depth to a higher no other than 1, I get no visible changes , I was expecting shadows/depth but I am getting the same output each and every time.
+Probably the first thing to point out is that OptiX is not a renderer, it’s a library and a programming model for tracing rays and handling intersections. OptiX does not come with any specific rendering algorithms built-in, aside from ray traversal through the BVH. The max trace depth is there to let you allocate enough stack space for a complex rendering algorithm, but it does not come with built-in shadowing, you need to provide the code structure that implements shadows yourself (hint: specifically, this means casting a ray toward sources of light, and writing code to accumulate the colors differently depending on whether you hit the light or an occluder. You’ll put this code either in your raygen shader or your closest-hit shader.) Here’s the OptiX Programming Guide section that discusses how max trace depth works: https://raytracing-docs.nvidia.com/optix7/guide/index.html#program_pipeline_creation#pipeline-stack-size
+I am not sure which acceleration structure this program is using, I checked the accel options but didnt find anything concrete. I wanted to use a BVH structure so what changes should I make in the code which would warantee that I am using a BVH acceleration structure.
+You can’t use OptiX without an acceleration structure, so your pictures demonstrate it already. :) You modified the section of the code labeled “accel handling”, and it culminates in a call to optixAccelBuild() which builds the BVH over the triangles you provided. From there, the handle to the BVH is routed into the raygen program and it gets passed to the call to optixTrace().
+I wanted to change the samples pex pixel , from the output I would assume that by default the samples per pixel for the program is very low and I wanted to set the samples per pixel to 64
+Typically you can do this in your raygen program by looping over samples. You can find an example of this in our SDK sample optixPathTracer.
+Now I wanted to make some more changes but have no idea how to proceed further
+My recommendation would be to read through the OptiX Programming Guide at least once, especially the first couple of sections that outline the structure and programming model behind OptiX (https://raytracing-docs.nvidia.com/optix7/guide/index.html#basic_concepts_and_definitions#basic-concepts-and-definitions). Next, make sure to go through more of our SDK samples and modify them to see how they work. You have a very good start already, it’s great that you changed optixTriangle to give it a cloud of triangles. Next try adding the shadowing algorithm. You can cheat by looking at the other samples that have shadows (optixPathTracer also has shadows, BTW). Completing the exercise of adding the shadowing functionality yourself to optixTriangle will help you learn a lot about how the pieces are glued together.
+Our SDK samples are intentionally very narrowly focused demonstrations of the OptiX API, which is why optixTriangle doesn’t have shadows, for example. So after you get through the Programming Guide and OptiX SDK samples, it’s a good idea to take a tour of Detlef’s Advanced Samples repository to see how OptiX usage looks like in more sophisticated scenarios.
+I hope that gets you unstuck. Good luck on your journey, and feel free to ask more questions on the way, we are happy to help.
+–
+David.
+ssv
+April 11, 2023, 7:57pm
+3
+Thank you for your reply @dhart , its not everyday that you actually see a positive response from a stranger lol , anyways I looked further into it and as you said by making some changes in the __raygen__rg() and computeRay() functions I was able to accomodate multiple samples per pixel in my program.I am attaching the updated __raygen__rg() function.
+```
+static __forceinline__ __device__ void computeRay( uint3 idx, uint3 dim, float3& origin, float3& direction,float2 &jitter)
+{
+    const float3 U = params.cam_u;
+    const float3 V = params.cam_v;
+    const float3 W = params.cam_w;
+    const float2 d = 2.0f * make_float2(
+            jitter.x,
+            jitter.y
+            ) - 1.0f;
+
+    origin    = params.cam_eye;
+    direction = normalize( d.x * U + d.y * V + W );
+}
+extern "C" __global__ void __raygen__rg()
+{
+    
+    // Lookup our location within the launch grid
+    const uint3 idx = optixGetLaunchIndex();
+    const uint3 dim = optixGetLaunchDimensions();
+    curandState local_state;
+    curand_init(1984 + idx.y * params.image_width + idx.x, 0, 0, &local_state);
+    float3 result = make_float3(0.0f);
+    for (int i = 0; i < 10; i++)
+    {   
+        // Map our launch idx to a screen location and create a ray from the camera
+        // location through the screen
+        float3 ray_origin, ray_direction;
+        
+        float2 sample_pos = make_float2(
+            curand_uniform(&local_state),
+            curand_uniform(&local_state));
+        float2 jitter = make_float2(
+            (sample_pos.x + idx.x) / static_cast<float>(dim.x),
+            (sample_pos.y + idx.y) / static_cast<float>(dim.y));
+
+
+        computeRay(idx, dim, ray_origin, ray_direction,jitter);
+        // Trace the ray against our scene hierarchy
+        unsigned int p0, p1, p2;
+        optixTrace(
+            params.handle,
+            ray_origin,
+            ray_direction,
+            0.0f,                // Min intersection distance
+            1e16f,               // Max intersection distance
+            0.0f,                // rayTime -- used for motion blur
+            OptixVisibilityMask(255), // Specify always visible
+            OPTIX_RAY_FLAG_DISABLE_ANYHIT,
+            0,                   // SBT offset   -- See SBT discussion
+            1,                   // SBT stride   -- See SBT discussion
+            0,                   // missSBTIndex -- See SBT discussion
+            p0, p1, p2);
+        
+        result.x += __uint_as_float(p0);
+        result.y += __uint_as_float(p1);
+        result.z += __uint_as_float(p2);
+    }
+    
+    result /= 10.0f;
+    // Record results in our output raster
+    params.image[idx.y * params.image_width + idx.x] = make_color( result );
+}
+```
+While for adding shadows I have had some experience with ray tracers before and as far as I know , we just need to add a recursive function to trace my ray instead of just using optixTrace(). For that too happen I think I need the point of intersection and the normal at that point and that’s where I think I am getting stuck.
+I know I need to change the __closesthit__ch() function to return a payload which will have our point of intersection and the required normals , but I am not sure how I can do it. Right now my __closesthit__ch() function looks like this -
+```
+extern "C" __global__ void __closesthit__ch()
+{
+    // When built-in triangle intersection is used, a number of fundamental
+    // attributes are provided by the OptiX API, indlucing barycentric coordinates.
+    //const float2 barycentrics = optixGetTriangleBarycentrics();
+
+    setPayload( make_float3(0.98f, 0.360f, 0.360f) );
+}
+```
+Once I will have the information regarding the point of intersection and the corresponding normals I am pretty sure I will be able to add shadows to the triangles that I am rendering.
+dhart
+April 11, 2023, 8:41pm
+4
+Once I will have the information regarding the point of intersection and the corresponding normals I am pretty sure I will be able to add shadows to the triangles that I am rendering.
+I think it will click if you go ahead and study optixPathTracer for a few minutes.
+In the function __closesthit__radiance(), you’ll see it gathers information about the hit, the ray, the primitive, and the light source, and then it calls optixTrace() recursively. (This means that it set the max trace depth greater than zero to allow the extra stack frame. A bit more on this below.)
+This 2nd call to optixTrace() is sent using a different “ray type”, which means that upon hit a different closest-hit program is invoked: __closesthit__occlusion(). Note how this occlusion hit program looks about as simple as the example closest hit program you have right now, it sets something in the payload and returns. Take a look at how the payload value is handled: it’s abstracted inside the function called traceOcclusion, and then returned and used back in the __closesthit__radiance() function.
+Regarding stack size and trace depth… optixPathTracer is doing full path tracing, but the path tracing part is not recursive, it is iterative. Only the shadow rays are recursive, and so the max trace depth only needs to be 2. The iterative path tracing algorithm is handled inside the raygen function, so it’s good to stare at the loop in raygen and study how the payload is being used there as well.
+–
+David.
+droettger
+April 12, 2023, 6:52am
+5
+Once you’ve read through the OptiX Programming Guide to see what’s possible with the the OptiX host API and the CUDA device code and have worked through the optixPathTracer SDK example which is still using a single hardcoded geometry acceleration structure (GAS) for its very simple scene, you can find the more advanced OptiX 7 examples in this sticky post at the top of this OptiX sub-forum:
+https://forums.developer.nvidia.com/t/optix-advanced-samples-on-github/48410/4
+All these examples implement viewer-like applications which either generate some simple hardcoded scene geometry (plane, box, sphere, torus) or later load system and scene description text files which define what geometry should be generated or loaded and placed into the world.
+These are all global illumination path tracers with increasing complexity described in the README.md there, starting with rather simple materials and then adding more OptiX features with increasingly complex system configuration setups for CUDA-OpenGL interoperability, multi-GPU and CUDA peer-to-peer sharing of resources.
+The newest example MDL_renderer is showing what is possible with an advanced material system using the NVIDIA Material Definition Language.
+To help with your current questions, there are only two optixTrace calls in any of these path tracer examples, one inside the ray generation program implementing the iterative path tracing through the scene itself and one inside the closest hit program(s) shooting a shadow/visibility ray.
+Note that there are two different implementations for shadow rays shown in these examples which depend on the support for cutout opacity.
+rtigo10 shows the maximum performance implementation when not supporting cutout opacity which would apply to your scene setup above. It only needs a miss program for the shadow ray type and terminates shadow rays on first hit via ray flags.
+rtigo9_omm uses a variation of that because it supports the Opacity Micromap feature added in OptiX 7.6.0.
+All other examples implement shadow/visibility rays via anyhit programs which is more costly but required esp. when supporting arbitrary procedural opacity values.
+You’ll see that the vector of OptixProgramGroupDesc which define what device programs build the OptixPipeline for the resp. renderer is setup differently in these cases.
+Related topics
+Topic
+Replies
+Views
+Activity
+How to Get Started with OptiX 7
+Technical Blog
+4
+1107
+June 14, 2022
+Comparing Optix performance to CUDA
+OptiX
+19
+6859
+January 12, 2021
+Beginner with simple geometry program problems
+OptiX
+6
+1238
+March 4, 2024
+How CUDA works within Optix
+OptiX
+cuda
+20
+1230
+March 25, 2025
+Porting APP from Optix 3.8 (32 bit) to Optix 6.5 (64 bit) : Need some help, please
+OptiX
+52
+3142
+May 6, 2022
+Trimesh.ray equivalent in Optix
+OptiX
+1
+125
+April 17, 2026
+Some questions about ray
+OptiX
+10
+2258
+May 12, 2023
+rtTrace only results in miss program invocation
+OptiX
+2
+1549
+December 15, 2014
+OptiX 7 and MSVS 2017 - Hello World on Windows 10
+OptiX
+cuda
+,
+visual-studio
+9
+3470
+July 20, 2020
+Help reduce the high register count of an Optix raytracer code
+OptiX
+11
+1824
+August 18, 2022

@@ -3,130 +3,126 @@
 Also called: Woodcock tracker, stochastic ray marching with majorant
 
 ## Overview
-This method performs volume rendering using Woodcock tracking (null-collision) within coarse mesh elements, utilizing macrocell densities to determine the majorant extinction value [S1, unofficial]. It builds on [Ray-grid traversal](17-ray-grid-traversal.md) by integrating the traversal of a coarse mesh structure to manage the underlying adaptive mesh refinement (AMR) data [S1, unofficial]. Using macrocell majorant values provides a tighter majorant than using only transfer function opacity, reducing null collisions and improving performance [S1, unofficial].
+Woodcock Tracking with Macrocell Majorant is a stochastic ray marching technique for volume rendering on unstructured tetrahedral meshes that utilizes a coarse mesh hierarchy to compute a tighter majorant extinction value [S1, unofficial]. It solves the problem of high null-collision rates in heterogeneous volumes by bounding the local extinction with a precomputed macrocell value, thereby reducing the number of rejected samples compared to using a global or loose majorant [S1, unofficial]. It differs from standard Woodcock tracking by integrating coarse mesh traversal logic to manage the majorant bounds, and from [Hierarchical Trilinear Ray Casting](851-hierarchical-trilinear-ray-casting.md) by relying on stochastic free-path sampling rather than deterministic grid traversal [S1, unofficial].
 
 ## How it works
-The algorithm advances a ray through a coarse mesh element (e.g., a tetrahedron) using stochastic steps determined by a majorant extinction coefficient. It handles sub-element traversal by detecting when a step exits the current coarse element, re-traversing to find the new leaf element, and updating the exit distance.
-
-**Inputs:**
-*   `ray`: Ray structure with origin `ray.org`, direction `ray.dir`, and current distance `ray.t` (initialized to 0 or entry point).
-*   `tMax`: Maximum ray distance for traversal. If exceeded, the ray is terminated [S1, unofficial].
-*   `coarseTetID`: Identifier for the current coarse mesh element (e.g., tetrahedron) [S1, unofficial].
-*   `macrocellMajorant`: Precomputed majorant value for the coarse element [S1, unofficial].
-*   `tf`: Transfer function object providing `opacity`, `getColor(scalar)`, and `inRange(scalar)` [S1, unofficial].
-
-**Outputs:**
-*   `color`: The accumulated color if a collision is accepted; otherwise, the function returns `false` (transparent/background) [S1, unofficial].
+**Inputs and Outputs:**
+*   **Input:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, maximum traversal distance $t_{\text{max}}$, current coarse element ID (`coarseTetID`), macrocell majorant value $M_{\text{macro}}$, and a transfer function $\text{tf}$ mapping scalar values to color and opacity [S1, unofficial].
+*   **Output:** A color value if a collision occurs within $t_{\text{max}}$, or `false` (transparent) if the ray exits the volume or exceeds $t_{\text{max}}$ [S1, unofficial].
 
 **Data Structures:**
-*   `sampleTetID`: Integer identifier for the current leaf tetrahedron [S1, unofficial].
-*   `tetVertices`: Array of 4 vertices defining the current leaf tetrahedron [S1, unofficial].
-*   `tExit`: Floating-point distance along the ray to the exit face of the current leaf tetrahedron [S1, unofficial].
+*   **Macrocell Majorant ($M_{\text{macro}}$):** A scalar value representing the upper bound of extinction for a coarse mesh element [S1, unofficial].
+*   **Tetrahedron Vertices (`tetVertices`):** An array of four 3D coordinates defining the current tetrahedron [S1, unofficial].
+*   **Sample Point (`samplePoint`):** The 3D position in space where the scalar value is sampled [S1, unofficial].
+
+**Parameters:**
+*   $t_{\text{max}}$: The maximum distance the ray is allowed to travel [S1, unofficial].
+*   $\varepsilon$: A small epsilon value used for floating-point comparisons (implied by `nextafterf` usage) [S1, unofficial].
 
 **Algorithm Steps:**
-
-1.  **Initialize Majorant:**
-    Compute the effective majorant for the coarse element:
-    $$ \text{majorant} \leftarrow \text{tf.opacity} \times \text{macrocellMajorant} $$
-    If $\text{majorant} \le 0$, return `false` (skip ray) [S1, unofficial].
-
-2.  **Initialize Traversal State:**
-    Set the exit threshold for the current tetrahedron to slightly less than the current ray distance to ensure the first sample is processed:
-    $$ t_{\text{Exit}} \leftarrow \text{nextafterf}(ray.t, -\infty) $$
-    Initialize `sampleTetID` to 0 and `tetVertices` to an empty set [S1, unofficial].
-
-3.  **Stochastic Step Loop:**
-    Iterate indefinitely:
-    a.  **Advance Ray:** Generate a random number $u \in (0, 1)$. Update the ray distance:
-        $$ ray.t \leftarrow ray.t - \frac{\ln(1 - u)}{\text{majorant}} $$
-        If $ray.t \ge t_{\text{Max}}$, return `false` [S1, unofficial].
-    b.  **Sample Point:** Calculate the 3D sample position:
-        $$ \text{samplePoint} \leftarrow ray.org + ray.t \times ray.dir $$
-    c.  **Boundary Check:** If $ray.t > t_{\text{Exit}}$:
-        i.  Traverse the mesh to find the new leaf element containing `samplePoint`:
-            $$ (\text{sampleTetID}, \text{tetVertices}) \leftarrow \text{traverse}(\text{samplePoint}, \text{coarseTetID}) $$
-        ii. Calculate the new exit distance for the new leaf element:
-            $$ t_{\text{Exit}} \leftarrow \text{intersectFaces}(ray.t, \text{samplePoint}, ray.dir, \text{tetVertices}) $$
-    d.  **Sample Data:** Retrieve the scalar value at `samplePoint` using `sampleData(samplePoint, sampleTetID, tetVertices)` [S1, unofficial].
-    e.  **Range Check:** If the scalar is not in the transfer function range (`!tf.inRange(scalar)`), `continue` to the next iteration [S1, unofficial].
-    f.  **Get Color:** Compute the color from the transfer function:
-        $$ \text{color} \leftarrow \text{tf.getColor}(scalar) $$
-    g.  **Acceptance Test:** Generate a random number $v \in (0, 1)$. If:
-        $$ \text{color.opacity} \times \text{tf.opacity} \ge v \times \text{majorant} $$
-        Return `color` [S1, unofficial].
+1.  **Initialize Majorant:** Compute the effective majorant $M$ as the product of the transfer function's maximum opacity and the macrocell majorant: $M = \text{tf.opacity} \times M_{\text{macro}}$ [S1, unofficial].
+2.  **Check Validity:** If $M \le 0$, the ray is skipped and `false` is returned [S1, unofficial].
+3.  **Set Exit Boundary:** Initialize the exit distance for the current coarse element. This is set to the smallest representable float less than the current ray distance $t$ to ensure the first sample is processed: $t_{\text{exit}} = \text{nextafterf}(t, -\infty)$ [S1, unofficial].
+4.  **Initialize State:** Set `sampleTetID` to 0 and `tetVertices` to an empty set [S1, unofficial].
+5.  **Stochastic Step:** Generate a random number $r \in [0, 1)$. Advance the ray distance $t$ using the Woodcock step formula:
+    $$ t \leftarrow t - \frac{\ln(1 - r)}{M} $$
+    [S1, unofficial].
+6.  **Check Max Distance:** If $t \ge t_{\text{max}}$, return `false` [S1, unofficial].
+7.  **Calculate Sample Point:** Compute the 3D position:
+    $$ \mathbf{p} = \mathbf{o} + t \cdot \mathbf{d} $$
+    [S1, unofficial].
+8.  **Check Element Boundary:** If $t > t_{\text{exit}}$, the ray has crossed a coarse element boundary. Traverse the coarse mesh to find the new tetrahedron containing $\mathbf{p}$:
+    $$ (\text{sampleTetID}, \text{tetVertices}) \leftarrow \text{traverse}(\mathbf{p}, \text{coarseTetID}) $$
+    [S1, unofficial].
+    Update the exit distance for the new tetrahedron by intersecting the ray with the tetrahedron faces:
+    $$ t_{\text{exit}} \leftarrow \text{intersectFaces}(t, \mathbf{p}, \mathbf{d}, \text{tetVertices}) $$
+    [S1, unofficial].
+9.  **Sample Data:** Sample the scalar value $s$ at $\mathbf{p}$ using the current tetrahedron:
+    $$ s \leftarrow \text{sampleData}(\mathbf{p}, \text{sampleTetID}, \text{tetVertices}) $$
+    [S1, unofficial].
+10. **Check Transfer Function Range:** If $s$ is not within the transfer function's valid range, continue to step 5 (null collision due to empty space) [S1, unofficial].
+11. **Get Color:** Retrieve the color $C$ and opacity $\alpha$ from the transfer function:
+    $$ (C, \alpha) \leftarrow \text{tf.getColor}(s) $$
+    [S1, unofficial].
+12. **Acceptance Test:** Perform the analog acceptance test. Generate a new random number $r' \in [0, 1)$. If:
+    $$ \alpha \times \text{tf.opacity} \ge r' \times M $$
+    return $C$ [S1, unofficial]. Otherwise, continue to step 5 (null collision) [S1, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def woodcock_elem(ray, tMax, coarseTetID, macrocellMajorant, tf):
-    # 1. Initialize Majorant
-    majorant = tf.opacity * macrocellMajorant
+def woodcock_tracking_with_macrocell(ray_origin, ray_direction, t_max, coarse_tet_id, macrocell_majorant, tf):
+    # 1. Initialize majorant
+    majorant = tf.opacity * macrocell_majorant
+    
+    # 2. Check validity
     if majorant <= 0:
         return False
-
-    # 2. Initialize Traversal State
-    # nextafterf returns the next representable floating-point value below ray.t
-    tExit = nextafterf(ray.t, -float('inf'))
-    sampleTetID = 0
-    tetVertices = {}
-
-    # 3. Stochastic Step Loop
+    
+    # 3. Set exit boundary
+    # nextafterf(t, -INFINITY) gets the smallest representable float < t
+    t_exit = nextafterf(ray_origin.t, -float('inf'))
+    
+    # 4. Initialize state
+    sample_tet_id = 0
+    tet_vertices = {}
+    
+    # 5-12. Loop
     while True:
-        # a. Advance Ray
-        u = random()
-        ray.t = ray.t - log(1 - u) / majorant
+        # 5. Stochastic step
+        r = random()
+        ray_origin.t -= log(1 - r) / majorant
         
-        if ray.t >= tMax:
+        # 6. Check max distance
+        if ray_origin.t >= t_max:
             return False
-
-        # b. Sample Point
-        samplePoint = ray.org + ray.t * ray.dir
-
-        # c. Boundary Check
-        if ray.t > tExit:
-            # Traverse to find new leaf element
-            sampleTetID, tetVertices = traverse(samplePoint, coarseTetID)
-            # Update exit distance for the new leaf
-            tExit = intersect_faces(ray.t, samplePoint, ray.dir, tetVertices)
-
-        # d. Sample Data
-        scalar = sample_data(samplePoint, sampleTetID, tetVertices)
-
-        # e. Range Check
+            
+        # 7. Calculate sample point
+        sample_point = ray_origin.org + ray_origin.t * ray_direction
+        
+        # 8. Check element boundary
+        if ray_origin.t > t_exit:
+            sample_tet_id, tet_vertices = traverse(sample_point, coarse_tet_id)
+            t_exit = intersect_faces(ray_origin.t, sample_point, ray_direction, tet_vertices)
+            
+        # 9. Sample data
+        scalar = sample_data(sample_point, sample_tet_id, tet_vertices)
+        
+        # 10. Check transfer function range
         if not tf.in_range(scalar):
             continue
-
-        # f. Get Color
+            
+        # 11. Get color
         color = tf.get_color(scalar)
-
-        # g. Acceptance Test
-        v = random()
-        if color.opacity * tf.opacity >= v * majorant:
+        
+        # 12. Acceptance test
+        r_prime = random()
+        if color.opacity * tf.opacity >= r_prime * majorant:
             return color
 ```
 
-**Parameters:**
-*   `tMax`: Maximum ray distance. Typical values depend on the scene bounds [S1, unofficial].
-
 **Edge Cases and Pitfalls:**
-*   **Zero Majorant:** If `majorant` is zero or negative, the ray is skipped immediately to avoid division by zero or infinite steps [S1, unofficial].
-*   **Boundary Crossing:** When `ray.t` exceeds `tExit`, the algorithm must re-traverse the mesh. Failure to update `tExit` correctly can lead to missing collisions or processing the same element multiple times [S1, unofficial].
-*   **Performance Degradation:** On datasets with shallow trees or specific structures (e.g., Agulhas), macrocell optimizations can degrade performance. This occurs because processing must restart from the beginning of the next element to avoid overstepping into denser regions and missing collisions [S1, unofficial].
+*   **Overstepping:** When using macrocell values, if the ray crosses a boundary into a denser region, the majorant may no longer be valid. The algorithm must restart traversal from the beginning of the next element to avoid missing collisions [S1, unofficial].
+*   **Performance Degradation:** On datasets with shallow trees or specific structures (e.g., Agulhas), macrocell optimizations can decrease performance due to the overhead of restarting element processing [S1, unofficial].
 
 ## Subtopics
 
 ### [Woodcock Tracking with Coarse Mesh and Macrocells](1048-woodcock-tracking-with-coarse-mesh-and-macrocells.md)
-This method performs volume rendering using Woodcock tracking (null-collision) within coarse mesh elements, utilizing macrocell densities to determine the majorant extinction value. It builds on [Woodcock Tracking with Macrocell Majorant](986-woodcock-tracking-with-macrocell-majorant.md) by integrating the traversal of a coarse mesh structure to manage the underlying adaptive mesh refinement (AMR) data. Using macrocell majorant values provides a tighter majorant than using only transfer function opacity, reducing null collisions and improving performance.
+Extends this method by integrating coarse mesh traversal for AMR data, using macrocell densities to provide tighter majorants than transfer function opacity alone.
+
+### [Weighted Decomposition Tracking](9232-weighted-decomposition-tracking.md)
+An alternative acceleration technique that decomposes the medium into homogeneous and heterogeneous components, allowing non-bounding control extinction.
 
 ## Operating characteristics
-*   **Performance:** Macrocell optimization improves Woodcock performance on most datasets by providing tighter majorants, reducing rejected samples [S1, unofficial].
-*   **Limitations:** On the Agulhas dataset, using macrocell optimizations for Woodcock tracking decreases performance [S1, unofficial]. This is because processing must restart from the beginning of the next element when using macrocell values to avoid overstepping into denser regions and missing collisions [S1, unofficial].
-*   **Comparison:** Turning on the local majorant optimization almost always increases performance for the Woodcock renderer, as it allows for tighter majorants, decreasing the number of null collisions [S1, unofficial].
+*   **Time Complexity:** Depends on the density of the volume and the tightness of the majorant. Tighter majorants reduce the number of null collisions, improving performance [S1, unofficial].
+*   **Memory Complexity:** Low, as it primarily stores the coarse mesh structure and transfer function data [S1, unofficial].
+*   **Measured Performance:** On the Agulhas dataset, macrocell optimizations degraded performance due to traversal overhead [S1, unofficial]. On other datasets, tighter majorants generally improved rendering times [S1, unofficial].
+*   **Strengths:** Reduces null collisions in heterogeneous volumes by providing tighter bounds than global majorants [S1, unofficial].
+*   **Limitations:** Performance can degrade on specific dataset structures (e.g., shallow trees) due to the cost of boundary traversal and restart logic [S1, unofficial].
 
 ## Background
-The method is described in the context of direct volume rendering of tree-based tetrahedral adaptive mesh refinement (AMR) data [S1, unofficial]. It addresses the challenge of efficiently rendering unstructured mesh data by combining stochastic ray marching with hierarchical mesh traversal [S1, unofficial].
+This method is described in the context of direct volume rendering of tree-based tetrahedral adaptive mesh refinement (AMR) data [S1, unofficial]. It builds upon the principles of Woodcock tracking (null-collision method) and adapts them for unstructured tetrahedral meshes using a coarse mesh hierarchy to manage majorant values [S1, unofficial].
 
 ## Sources
 [S1] Direct volume rendering of tree-based tetrahedral adaptive mesh refinement data, https://repository.bilkent.edu.tr/items/fcbc592a-2646-49af-8b84-67308b6fd3e9, fetched 2026-10-27 (unofficial)

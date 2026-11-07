@@ -1,0 +1,109 @@
+# Parallel Reordering of Interleaved Voxel Bits
+
+Also called: Parallel Reordering of Interleaved 4-bit Groups, Parallel Reordering of Interleaved Voxel Groups
+
+## Overview
+This method reorders two integers containing interleaved 4-bit groups representing voxel indices into contiguous blocks, specifically separating even-indexed voxels (0, 2, 4, 6) from odd-indexed voxels (1, 3, 5, 7) [S1, S2, unofficial]. It serves as a parallel optimization step within the broader Volume Interleaving pipeline, addressing the need to deinterleave data for subsequent processing stages such as density computation or texture storage [S1, S2, unofficial]. Unlike sequential bit-manipulation approaches, this technique shifts groups of information simultaneously to achieve reordering in parallel, leveraging the SIMD capabilities of modern GPUs [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** Two integers (or registers) containing interleaved 4-bit groups. The first integer holds the even-indexed voxels in a permuted order (e.g., 0, 2, 6, 4), and the second holds the odd-indexed voxels (e.g., 1, 3, 5, 7) [S1, S2, unofficial]. The source material depicts the input state as:
+    *   Even group: `[0, 2, 6, 4]`
+    *   Odd group: `[1, 3, 5, 7]`
+    *   (Note: The source figure [S1, S2, unofficial] shows `0 2 6 4` and `1 3 5 7` as the interleaved input pattern to be reordered).
+*   **Output:** Two integers with contiguous 4-bit groups. The first integer contains the even voxels in natural order `[0, 2, 4, 6]`, and the second contains the odd voxels in natural order `[1, 3, 5, 7]` [S1, S2, unofficial].
+
+**Data Structures**
+The method operates on fixed-width integer registers. The source specifies the use of 4-bit groups. In practice, these groups are packed into standard integer types (e.g., 32-bit integers) [S1, S2, unofficial].
+
+**Algorithm Steps**
+The reordering is performed using parallel bitwise operations. The core idea is to shift groups of information simultaneously whenever possible [S1, S2, unofficial].
+
+1.  **Identify Bit Positions:** Assume the 4-bit groups are packed into a 32-bit integer. Let the groups be indexed $g_0, g_1, g_2, g_3$ from least significant to most significant (or vice versa, depending on packing convention; the source implies a specific permutation).
+2.  **Parallel Shifts:** Apply bitwise shifts to align the groups. The source states: "The idea is to shift groups of information at the same time, whenever it is possible" [S1, S2, unofficial].
+3.  **Masking and Merging:** Use bitwise masks to isolate the shifted groups and merge them into the target positions.
+
+**Pseudocode**
+The source does not provide explicit bitwise masks or shift counts for the 4-bit reordering, only the conceptual description of shifting groups in parallel [S1, S2, unofficial]. However, based on the input `[0, 2, 6, 4]` to output `[0, 2, 4, 6]`, the permutation requires swapping the 3rd and 4th groups (indices 2 and 3 in 0-based indexing of the 4 groups).
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def reorder_interleaved_voxels(even_voxels, odd_voxels):
+    """
+    Reorders interleaved 4-bit groups.
+    Input: even_voxels contains [0, 2, 6, 4] packed in 4-bit fields.
+           odd_voxels contains [1, 3, 5, 7] packed in 4-bit fields.
+    Output: even_voxels contains [0, 2, 4, 6].
+            odd_voxels contains [1, 3, 5, 7].
+    """
+    # Note: The source [S1, S2, unofficial] describes the reordering conceptually as 
+    # "shift groups of information at the same time". 
+    # The specific permutation from [0,2,6,4] to [0,2,4,6] implies 
+    # swapping the last two 4-bit groups.
+    
+    # Mask for the last two 4-bit groups (bits 16-31)
+    MASK_HIGH = 0xFFFF0000
+    MASK_LOW = 0x0000FFFF
+    
+    # Extract high and low parts
+    high_even = even_voxels & MASK_HIGH
+    low_even = even_voxels & MASK_LOW
+    
+    # The source input is [0, 2, 6, 4]. 
+    # If packed as [g3, g2, g1, g0] where g0 is LSB:
+    # Input: g3=0, g2=2, g1=6, g0=4.
+    # Output: g3=0, g2=2, g1=4, g0=6.
+    # This requires swapping g1 and g0.
+    
+    # However, the source figure shows:
+    # Input: 0 2 6 4
+    # Output: 0 2 4 6
+    # This is a swap of the last two elements.
+    
+    # Since the exact bit-packing order (MSB vs LSB) is not explicitly defined 
+    # in the text, we assume a standard little-endian packing where the 
+    # first element in the list is the LSB.
+    # List: [0, 2, 6, 4] -> g0=0, g1=2, g2=6, g3=4.
+    # Target: [0, 2, 4, 6] -> g0=0, g1=2, g2=4, g3=6.
+    # Swap g2 and g3.
+    
+    # Mask for g2 (bits 8-11) and g3 (bits 12-15)
+    # Assuming 4-bit groups in a 32-bit int, we only use the lower 16 bits 
+    # if there are only 4 groups.
+    
+    MASK_G2 = 0x0000F000
+    MASK_G3 = 0x00000F00
+    
+    g2 = (even_voxels & MASK_G2) >> 8
+    g3 = (even_voxels & MASK_G3) >> 4
+    
+    # Swap
+    even_voxels = (even_voxels & ~(MASK_G2 | MASK_G3)) | (g2 << 8) | (g3 << 4)
+    
+    # The odd voxels [1, 3, 5, 7] are already in order [1, 3, 5, 7] 
+    # in the input description? 
+    # Source says: "Input: interleaved groups [0, 2, 6, 4] and [1, 3, 5, 7]"
+    # Output: "reordered groups [0, 2, 4, 6] and [1, 3, 5, 7]"
+    # So odd voxels do not change.
+    
+    return even_voxels, odd_voxels
+```
+
+**Parameters and Edge Cases**
+*   **Bit Width:** The method operates on 4-bit groups. The source mentions using 28 bits per color channel (a multiple of 4 below 32) for density computation, leading to 960 slices instead of 1024 [S1, S2, unofficial].
+*   **32nd Bit:** The 32nd bit (sign bit or highest bit) is reserved for other purposes and should be excluded or handled separately. For solid voxelization, the 1D texture is modified to exclude the highest bit [S1, S2, unofficial].
+*   **Precision:** The method is exact for integer bit manipulation. No floating-point precision issues are noted.
+
+## Operating characteristics
+*   **Performance:** The reordering is described as "effectively free" for DX9 implementations due to cache behavior, while for DX10 implementations, it incurs a minor cost, resulting in approximately a 10% variation in overall results [S2, unofficial].
+*   **Complexity:** The operation is $O(1)$ per pair of integers, relying on constant-time bitwise shifts and masks.
+*   **Strengths:** Parallel execution on GPU hardware; minimal overhead compared to the overall voxelization pipeline.
+*   **Limitations:** Specific to 4-bit groups; requires careful handling of the 32nd bit if using 32-bit integers [S1, S2, unofficial].
+
+## Background
+This technique is part of the "Single-Pass GPU Solid Voxelization" method introduced by Laine and Karras [S1, S2, unofficial]. The paper was presented at SIGGRAPH 2005 [S1, S2, unofficial]. The reordering step is necessary to organize voxel data for efficient texture storage and density computation in the subsequent stages of the voxelization pipeline. The method builds on the concept of Volume Interleaving, which decomposes the volume into small blocks and interleaves coordinate bits to reduce cache misses [Parent].
+
+## Sources
+[S1] Single-pass GPU Solid Voxelization and Applications, https://inria.hal.science/inria-00345291, fetched 2026-10-26 (unofficial)
+[S2] PDF Single-Pass GPU Solid Voxelization for Real-Time Applications, https://wo1fsea.github.io/files/About_NavMesh/P3_Single-Pass_GPU_Solid_Voxelization_for_Real-Time_Applications.pdf, fetched 2026-10-09 (unofficial)

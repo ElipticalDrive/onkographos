@@ -1,123 +1,107 @@
 # Multiple Flat Shaded Opaque Isosurfaces
 
-Also called: Texture-map based isosurface extraction, View-independent cell projection for isosurfaces
+Also called: Hardware-based view-independent cell projection for multiple isosurfaces
 
 ## Overview
-This method renders multiple flat-shaded opaque isosurfaces from an unstructured tetrahedral mesh without requiring visibility sorting of the cells [S1]. It solves the problem of correct occlusion and transparency handling in joint rendering by using a texture map to extract isosurface fragments and combining the alpha test with the OpenGL z-test [S1]. Unlike sibling methods that may rely on geometric sorting or point rendering, this approach leverages hardware rasterization features to handle multiple isovalues simultaneously, though it is limited to flat shading due to the lack of interpolated gradients [S1].
+This method renders multiple flat-shaded opaque isosurfaces from an unstructured tetrahedral mesh without requiring explicit visibility sorting of the cells [S1]. It leverages a texture map to identify isosurface fragments within each tetrahedron and combines the OpenGL alpha test with the z-test to guarantee correct occlusion [S1]. Unlike siblings that may rely on cell sorting or point rendering, this approach handles multiple isovalue surfaces simultaneously by encoding visibility ordering directly into the scalar field values relative to the isovalue [S1].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A tetrahedral mesh where each tetrahedron has scalar values $s_f$ and $s_b$ at its vertices (specifically, the scalar values at the "front" and "back" vertices relative to the view direction, or more generally, the scalar values defining the isosurface intersection). For multiple isosurfaces, a set of isovalues $\{s_{\text{iso}, i}\}$ is provided.
-*   **Output:** A 2D image with correct occlusion between multiple isosurfaces and lighting.
+**Inputs:**
+- A tetrahedral mesh where each vertex $v_i$ has an associated scalar value $s_i$.
+- A set of isovalue thresholds $\tau_k$ for $k=1 \dots N$.
+- Camera parameters and light definitions (direction and diffuse color).
+
+**Outputs:**
+- A 2D image with flat-shaded, opaque isosurfaces for each $\tau_k$, correctly occluded.
 
 **Data Structures:**
-*   **Texture Map:** A 2D texture used to encode isosurface presence and color.
-    *   The texture is indexed by the normalized scalar values or a derived coordinate based on the tetrahedron's scalar range.
-    *   For a single isosurface, the texture stores the ambient material color in the RGB channels and 0 in the alpha channel when no isosurface is present.
-    *   For multiple isosurfaces, the texture map is "thickened" to avoid gaps between patches in adjacent tetrahedra [S1]. The texture encodes visibility ordering: for $s_f < s_b$, smaller isovalues occlude greater isovalues, and vice versa [S1].
-    *   Each texel contains the material color for the specific isovalue if the isosurface intersects the tetrahedron, and alpha 0 otherwise.
+1. **Texture Map:** A 2D texture used to look up material properties based on the scalar field configuration within a tetrahedron.
+   - The texture is indexed by the relative positions of the isovalue $\tau$ with respect to the tetrahedron's vertex scalar values.
+   - For multiple isosurfaces, the texture encodes the "visibility ordering." If $s_f < s_b$ (front/back vertex values), the gradient direction implies that smaller isovalues occlude larger ones, and vice versa [S1].
+   - The texture stores the ambient material color for the specific isosurface hit.
+   - The alpha channel is set to 0 if no isosurface is present in the tetrahedron for the current fragment [S1].
+   - The texture map is "thickened" slightly to avoid gaps between isosurface patches in adjacent tetrahedra [S1].
+
+2. **Vertex Attributes:**
+   - For each light $L_j$: Light direction in object coordinates and diffuse light color. These are passed as entries in the vertex program's attribute vector [S1].
 
 **Steps:**
-1.  **Preprocessing:** Construct the texture map. For each isovalue $s_{\text{iso}}$, determine the color. "Thicken" the isosurface regions in the texture map to prevent gaps between adjacent tetrahedra [S1].
-2.  **Vertex Processing:** For each tetrahedron, compute the scalar values $s_f$ and $s_b$ at the vertices. Calculate lighting for the vertex program.
-    *   Lighting calculation supports an arbitrary number of directional lights.
-    *   For each light, two entries are required in the vertex program's attribute vector: light direction in object coordinates and diffuse light color [S1].
-    *   Lighting computation costs three vertex program operations per light [S1].
-3.  **Rasterization:** Render the tetrahedra as triangles (or quads, depending on the projection method) using the vertex program.
-    *   The vertex program passes the scalar values $s_f$ and $s_b$ to the fragment shader.
-4.  **Fragment Processing:**
-    *   For each fragment, determine if an isosurface is present.
-    *   Check the inequalities: $s_f < s_{\text{iso}}$ and $s_b > s_{\text{iso}}$, or vice versa [S1].
-    *   If the condition holds, perform a texture map lookup.
-    *   The texture lookup returns the ambient material color for the isosurface.
-    *   If no isosurface is present, the texture lookup returns an alpha value of 0 [S1].
-5.  **Visibility and Occlusion:**
-    *   Use the alpha test to discard fragments with alpha 0.
-    *   Use the OpenGL z-test to guarantee correct occlusion of isosurface fragments without sorting cells [S1].
-    *   The visibility ordering is implicit: for $s_f < s_b$, isosurfaces for smaller isovalues occlude those for greater isovalues, and vice versa [S1].
-6.  **Multiple Isovalues:** Assign different material colors for each isovalue. The texture map handles the selection of the correct color based on the isovalue and the scalar values of the tetrahedron [S1].
+1. **Projection:** Project each tetrahedron of the unstructured mesh onto the screen (view-independent cell projection) [S1].
+2. **Rasterization:** Rasterize the projected tetrahedra.
+3. **Fragment Processing:** For each fragment generated by a tetrahedron:
+   a. Determine the scalar values at the vertices of the tetrahedron ($s_f, s_b$, etc.).
+   b. Check if the viewing ray intersects an isosurface for any $\tau_k$. This is detected by checking if the inequalities $s_f < \tau_k$ and $s_b > \tau_k$ (or vice versa) hold [S1].
+   c. Perform a lookup in the texture map using the scalar configuration.
+   d. If an isosurface is present, the texture lookup returns the ambient material color assigned to that specific isovalue [S1].
+   e. If no isosurface is present, the texture lookup returns an alpha value of 0 [S1].
+4. **Lighting Calculation:** Calculate lighting in the vertex program. Since gradients are not interpolated, shading is flat. The vertex program computes the complete lighting contribution from all directional lights [S1].
+   - Cost: 3 vertex program operations per light [S1].
+5. **Alpha Test:** Apply the OpenGL alpha test. Fragments with alpha = 0 (no isosurface) are discarded. Fragments with alpha > 0 (isosurface present) are passed to the z-test [S1].
+6. **Z-Test:** The OpenGL z-test ensures correct occlusion between the remaining isosurface fragments, eliminating the need for cell sorting [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 # Vertex Program
-def vertex_program(tetrahedron, lights):
-    # Compute scalar values at vertices
-    s_values = [get_scalar(v) for v in tetrahedron.vertices]
-    
-    # Determine front and back scalar values based on view direction
-    # Note: The exact definition of s_f and s_b depends on the view-independent projection
-    # For simplicity, assume s_f and s_b are the min and max scalar values in the tetrahedron
-    # or specific vertices as defined by the cell projection method.
-    s_f = min(s_values)
-    s_b = max(s_values)
-    
-    # Calculate lighting
-    # Each light requires 2 attribute entries: direction and color
-    # 3 operations per light
-    lighting = calculate_lighting(tetrahedron.normal, lights)
-    
-    return {
-        's_f': s_f,
-        's_b': s_b,
-        'color': lighting,
-        'position': project(tetrahedron.vertices)
-    }
+def vertex_program(vertex_position, vertex_scalar, light_directions, light_colors):
+    # Calculate lighting for all lights
+    diffuse_color = vec3(0.0)
+    for i in range(num_lights):
+        # Simple flat shading: use vertex normal or average of tetrahedron normals
+        # Note: The source specifies flat shading, so interpolated gradients are not used [S1]
+        normal = compute_flat_normal(vertex_position, tetrahedron_vertices)
+        light_dir = normalize(light_directions[i])
+        diffuse_color += light_colors[i] * max(dot(normal, light_dir), 0.0)
+    return diffuse_color
 
-# Fragment Program
-def fragment_program(s_f, s_b, texture_map, isovalues):
-    for s_iso in isovalues:
-        # Check if isosurface intersects the tetrahedron
-        # Inequalities: s_f < s_iso and s_b > s_iso, or vice versa
-        if (s_f < s_iso and s_b > s_iso) or (s_f > s_iso and s_b < s_iso):
-            # Lookup texture map
-            # Texture map is "thickened" to avoid gaps
-            tex_color = texture_lookup(texture_map, s_f, s_b, s_iso)
+# Fragment Program / Texture Lookup Logic
+def fragment_program(tetrahedron_scalars, isovalue_thresholds, texture_map):
+    # Determine which isosurface, if any, is intersected
+    # Check inequalities s_f < s_iso and s_b > s_iso or vice versa [S1]
+    hit_isovalue = None
+    for tau in isovalue_thresholds:
+        if (tetrahedron_scalars.min() < tau < tetrahedron_scalars.max()):
+            # Determine visibility ordering based on scalar field gradient direction [S1]
+            # If s_f < s_b, smaller isovalues occlude larger ones
+            hit_isovalue = tau
+            break
             
-            # If isosurface is present, tex_color has alpha > 0
-            # If not, alpha is 0
-            if tex_color.alpha > 0:
-                return tex_color.color
-    
-    # No isosurface found
-    return Color(alpha=0)
-
-# Main Rendering Loop
-def render(tetrahedra, isovalues, texture_map, lights):
-    for tet in tetrahedra:
-        vertex_data = vertex_program(tet, lights)
-        rasterize(vertex_data)
+    if hit_isovalue is not None:
+        # Lookup material color from texture map
+        # Texture map is thickened to avoid gaps [S1]
+        material_color = texture_map.lookup(tetrahedron_scalars, hit_isovalue)
+        alpha = 1.0
+    else:
+        material_color = vec3(0.0)
+        alpha = 0.0 # Alpha test will discard this fragment [S1]
         
-        # Fragment shader is called for each pixel covered by the tetrahedron
-        # It performs the texture lookup and alpha test
+    return material_color, alpha
 ```
 
 **Parameters:**
-*   **Isovalues:** A list of scalar values defining the isosurfaces.
-*   **Texture Map Size:** Not given in the sources.
-*   **Thickening Factor:** Not given in the sources, but required to avoid gaps [S1].
+- **Light Data:** Per light, two entries in the vertex program's attribute vector: light direction in object coordinates and diffuse light color [S1].
+- **Light Processing Cost:** Three vertex program operations per light [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Gaps between tetrahedra:** Without thickening the texture map, gaps may appear between isosurface patches in adjacent tetrahedra [S1].
-*   **Flat Shading Limitation:** The approach does not provide interpolated gradients, limiting rendering to flat shaded isosurfaces [S1].
-*   **Visibility Ordering:** The method relies on the implicit visibility ordering derived from $s_f$ and $s_b$. If the view direction changes, the ordering may change, but the method is view-independent in terms of cell projection [S1].
+- **Gaps:** Gaps between isosurface patches in adjacent tetrahedra can occur if the texture map is not "thickened" [S1].
+- **Shading Limitation:** The approach does not provide interpolated gradients, limiting rendering to flat-shaded isosurfaces [S1].
+- **Visibility Ordering:** Correct occlusion relies on the relationship between scalar values. For $s_f < s_b$, isosurfaces for smaller isovalues occlude those for greater isovalues, and vice versa [S1].
 
 ## Subtopics
 
 ### Joint Rendering for Transparency
-Joint rendering for transparency ensures that transparency is handled correctly when rendering multiple contour surfaces together, particularly for the rgl engine [S2]. It is essential for the standard and grid engines because these draw triangles in back-to-front order, which can lead to incorrect transparency blending if surfaces are not rendered jointly [S2]. This variant is crucial for medical imaging data where transparency is used to visualize internal structures [S2].
+Joint rendering is a variant used to render multiple contour surfaces together, ensuring transparency is handled correctly, particularly in the `rgl` engine [S2]. It is essential for the standard and grid engines because these engines draw triangles in back-to-front order, which requires careful handling of transparency across multiple surfaces [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** The method is efficient as it avoids cell sorting. The cost is dominated by rasterization and fragment processing. Lighting calculation adds $O(L)$ per vertex, where $L$ is the number of lights [S1].
-*   **Memory Complexity:** Requires a texture map for the isosurfaces. The size of the texture map depends on the number of isovalues and the resolution of the scalar field [S1].
-*   **Strengths:** No need for cell sorting; handles multiple isosurfaces efficiently; leverages hardware rasterization features [S1].
-*   **Limitations:** Limited to flat shading; requires careful tuning of the texture map to avoid gaps [S1].
-*   **When to Use:** Suitable for real-time rendering of multiple isosurfaces where flat shading is acceptable and cell sorting is too expensive [S1].
-*   **When Not to Use:** When smooth shading or interpolated gradients are required [S1].
+- **Time Complexity:** The cost is proportional to the number of tetrahedra and the number of lights. Each light adds 3 vertex program operations [S1].
+- **Memory Complexity:** Requires a texture map to store material colors and alpha values for the isosurfaces [S1].
+- **Strengths:** No visibility sorting of cells is required; correct occlusion is guaranteed by the combination of alpha and z-tests [S1]. Supports a virtually arbitrary number of directional lights [S1].
+- **Limitations:** Limited to flat shading due to the lack of interpolated gradients [S1].
+- **When to use:** When rendering multiple opaque isosurfaces from unstructured tetrahedral meshes without the overhead of cell sorting [S1].
 
 ## Background
-This method was introduced by Weiler and Kraus in their paper "Hardware-based view-independent cell projection" [S1]. It builds on earlier work by Röttger et al. [S1]. The technique is part of the broader field of volume rendering and isosurface extraction, specifically focusing on hardware-accelerated rendering of unstructured meshes. It is used in medical imaging and scientific visualization where efficient rendering of multiple isosurfaces is required [S1, S2].
+This method was demonstrated in the context of hardware-based view-independent cell projection [S1]. It builds on earlier work by Röttger et al. [14] and Stein et al. [16] regarding texture map-based isosurface rendering [S1]. The technique allows for the integration of published improvements to the original PT algorithm [S1].
 
 ## Sources
 [S1] Hardware-based view-independent cell projection, https://www.semanticscholar.org/paper/Hardware-based-view-independent-cell-projection-Weiler-Kraus/36615d19709bce724437ec3257e43a1916f7de26, fetched 2026-10-29

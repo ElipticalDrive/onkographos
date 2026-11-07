@@ -1,0 +1,322 @@
+--- v001.md
++++ v002.md
+@@ -7,18 +7,18 @@
+ 
+ ## How it works
+-**Inputs:** A set of camera poses $\{(\mathbf{o}_i, \mathbf{d}_i)\}$ and corresponding ground-truth images.
+-**Outputs:** Rendered images via front-to-back compositing.
++**Inputs:** A set of camera poses $\{(\mathbf{o}_i, \mathbf{d}_i)\}$ and corresponding ground-truth images [S1, unofficial].
++**Outputs:** Rendered images via front-to-back compositing [G].
+ 
+ **Data Structures:**
+-The scene is defined by a set of primitives $\mathcal{P} = \{P_i\}$. Each primitive $P_i$ consists of:
++The scene is defined by a set of primitives $\mathcal{P} = \{P_i\}$ [S1, unofficial]. Each primitive $P_i$ consists of:
+ 1.  **Geometry:** An ellipsoid bounding volume $B$ defined by:
+-    *   Center $\mathbf{x}_B \in \mathbb{R}^3$
+-    *   Scaling vector $\mathbf{s}_B \in \mathbb{R}^3$ (along principal axes)
+-    *   Rotation quaternion $\mathbf{q}_B \in \mathbb{R}^4$
++    *   Center $\mathbf{x}_B \in \mathbb{R}^3$ [S1, unofficial].
++    *   Scaling vector $\mathbf{s}_B \in \mathbb{R}^3$ (along principal axes) [S1, unofficial].
++    *   Rotation quaternion $\mathbf{q}_B \in \mathbb{R}^4$ [S1, unofficial].
+ 2.  **Neural Density Field:** A shallow neural network $f_\sigma$ with parameters $\Theta_i = \{W_1, W_2, \mathbf{b}_1, \mathbf{b}_2\}$:
+-    *   $W_1 \in \mathbb{R}^{N_\sigma \times 3}$
+-    *   $W_2 \in \mathbb{R}^{1 \times N_\sigma}$
+-    *   $\mathbf{b}_1 \in \mathbb{R}^{N_\sigma}$
+-    *   $\mathbf{b}_2 \in \mathbb{R}$
++    *   $W_1 \in \mathbb{R}^{N_\sigma \times 3}$ [S1, unofficial].
++    *   $W_2 \in \mathbb{R}^{1 \times N_\sigma}$ [S1, unofficial].
++    *   $\mathbf{b}_1 \in \mathbb{R}^{N_\sigma}$ [S1, unofficial].
++    *   $\mathbf{b}_2 \in \mathbb{R}$ [S1, unofficial].
+     *   Total parameters per primitive: 99 (with $N_\sigma=8$) [S1, unofficial].
+ 3.  **Color:** Spherical Harmonics (SH) coefficients for view-dependent color (4 bands) [S1, unofficial].
+@@ -36,5 +36,5 @@
+ 2.  **Rendering (Per Pixel):**
+     For a view ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$:
+-    a.  Identify all primitives $P_i$ whose bounding ellipsoid $B_i$ intersects the ray.
++    a.  Identify all primitives $P_i$ whose bounding ellipsoid $B_i$ intersects the ray [S1, unofficial].
+     b.  For each intersecting primitive, compute entry $t_{in}$ and exit $t_{out}$ distances via analytic line-ellipsoid intersection [S1, unofficial].
+     c.  Compute the density integral $\hat{\alpha}$ along the ray segment $[t_{in}, t_{out}]$ using the closed-form antiderivative $S(t; \mathbf{o}, \mathbf{d})$:
+@@ -42,11 +42,11 @@
+         where:
+         $$ S(t; \mathbf{o}, \mathbf{d}) = [W_2 \oslash (\omega_0 \cdot W_1(\mathbf{d}))] \sin(\omega_0 (t \cdot W_1(\mathbf{d}) + W_1(\mathbf{o}) + \mathbf{b}_1)) + t \cdot \mathbf{b}_2 $$
+-        Here $\oslash$ denotes elementwise division. Note: The density $\sigma(\mathbf{x})$ is never evaluated directly; computations operate on $S$ [S1, unofficial].
++        Here $\oslash$ denotes elementwise division [S1, unofficial]. Note: The density $\sigma(\mathbf{x})$ is never evaluated directly; computations operate on $S$ [S1, unofficial].
+     d.  Compute the splatting kernel alpha:
+         $$ \alpha(\mathbf{r}) = 1 - \exp(-\max(0, \hat{\alpha}(t_{in}, t_{out}, \mathbf{o}, \mathbf{d}))) $$
+         Clamping to zero ensures non-negative accumulated density [S1, unofficial].
+-    e.  Compute color $\mathbf{c}$ using SH evaluation at $\mathbf{d}$ and the primitive's center [S1, unofficial].
+-    f.  Sort primitives by depth $t_{in}$.
+-    g.  Composite colors using front-to-back volume rendering equation [S1, unofficial].
++    e.  Compute color $\mathbf{c}$ using SH evaluation at the view direction $\mathbf{d}$ [S1, unofficial].
++    f.  Sort primitives by depth $t_{in}$ [G].
++    g.  Composite colors using front-to-back volume rendering equation [G].
+ 
+ 3.  **Training:**
+@@ -65,36 +65,101 @@
+ import math
+ 
++def intersect_ellipsoid(primitive, ray_o, ray_d):
++    """
++    Analytic line-ellipsoid intersection.
++    Returns (t_in, t_out) or (None, None) if no intersection.
++    """
++    # Ellipsoid: center xB, scale sB, rotation qB
++    xB = primitive.xB
++    sB = primitive.sB
++    qB = primitive.qB
++    
++    # Rotation matrix from quaternion
++    R = quaternion_to_rotation_matrix(qB)
++    
++    # Transform ray to local ellipsoid space
++    o_local = R.T @ (ray_o - xB)
++    d_local = R.T @ ray_d
++    
++    # Solve ||o_local + t * d_local||^2 / sB^2 = 1
++    # A*t^2 + B*t + C = 0
++    sB_sq = sB ** 2
++    A = torch.sum(d_local ** 2 / sB_sq)
++    B = 2.0 * torch.sum(o_local * d_local / sB_sq)
++    C = torch.sum(o_local ** 2 / sB_sq) - 1.0
++    
++    disc = B ** 2 - 4 * A * C
++    if disc < 0:
++        return None, None
++    
++    sqrt_disc = torch.sqrt(disc)
++    t1 = (-B - sqrt_disc) / (2 * A)
++    t2 = (-B + sqrt_disc) / (2 * A)
++    
++    t_in = min(t1, t2)
++    t_out = max(t1, t2)
++    return t_in, t_out
++
++def evaluate_sh(sh_coeffs, direction):
++    """
++    Evaluates 4-band (degree 3) Spherical Harmonics for a direction.
++    sh_coeffs: [3, 16] (RGB x 16 coefficients)
++    direction: [3]
++    Returns: [3] color
++    """
++    # Standard SH basis evaluation for degree 3 (16 terms) [G]
++    x, y, z = direction
++    norm = torch.sqrt(x**2 + y**2 + z**2)
++    x, y, z = x/norm, y/norm, z/norm
++    
++    # SH basis functions for degree 0 to 3
++    sh = torch.zeros(16)
++    sh[0] = 0.282095
++    sh[1] = 0.488603 * y
++    sh[2] = 0.488603 * z
++    sh[3] = 0.488603 * x
++    sh[4] = 1.092548 * x * y
++    sh[5] = -0.315392 * (3 * z**2 - 1)
++    sh[6] = 1.092548 * y * z
++    sh[7] = -0.734694 * y * (3 * x**2 - y**2) # Simplified m=-3
++    sh[8] = 0.546274 * x * (x**2 - 3 * y**2) # Simplified m=3
++    sh[9] = 1.092548 * x * z
++    sh[10] = -0.315392 * (x**2 - y**2)
++    sh[11] = 1.092548 * y * z
++    sh[12] = -0.590044 * y * (5 * z**2 - 1)
++    sh[13] = 2.890611 * x * y * z
++    sh[14] = -0.457587 * y * (7 * z**2 - 3)
++    sh[15] = 0.373176 * z * (7 * z**2 - 3)
++    
++    color = torch.matmul(sh_coeffs, sh)
++    return color
++
++def copy_primitive(p):
++    """Deep copy a primitive's parameters."""
++    new_p = type(p)()
++    new_p.xB = p.xB.clone()
++    new_p.sB = p.sB.clone()
++    new_p.qB = p.qB.clone()
++    new_p.W1 = p.W1.clone()
++    new_p.W2 = p.W2.clone()
++    new_p.b1 = p.b1.clone()
++    new_p.b2 = p.b2.clone()
++    new_p.SH_coeffs = p.SH_coeffs.clone()
++    return new_p
++
+ def compute_antiderivative(t, o, d, W1, W2, b1, b2, omega0):
+     """
+     Computes the closed-form antiderivative S(t; o, d) for the neural density field.
+     """
+-    # W1: [N_sigma, 3], W2: [1, N_sigma], b1: [N_sigma], b2: [1]
+-    # o, d: [3]
+-    
+-    # Linear term inside cosine: W1(o) + b1
+-    # Linear term inside cosine for t: W1(d) * t
+-    
+-    # Precompute common terms
+-    # W1(d) is [N_sigma]
+     wd = torch.matmul(W1, d) # [N_sigma]
+     wo = torch.matmul(W1, o) # [N_sigma]
+     
+-    # Argument of sine: omega0 * (t * W1(d) + W1(o) + b1)
+-    # t is scalar, wd, wo, b1 are vectors
+     arg = omega0 * (t * wd + wo + b1)
+-    
+-    # Sine term
+     sin_term = torch.sin(arg) # [N_sigma]
+     
+-    # Coefficient: W2 / (omega0 * W1(d))
+     # W2 is [1, N_sigma], wd is [N_sigma]
+-    # Elementwise division
+     coeff = W2 / (omega0 * wd) # [1, N_sigma]
+     
+-    # Result: coeff @ sin_term + t * b2
+-    # coeff is [1, N_sigma], sin_term is [N_sigma] -> dot product -> scalar
+-    # b2 is scalar
+     S = torch.matmul(coeff, sin_term) + t * b2
+-    
+     return S
+ 
+@@ -104,9 +169,4 @@
+     Returns alpha and color contribution.
+     """
+-    # 1. Line-Ellipsoid Intersection
+-    # Ellipsoid defined by center xB, scale sB, rotation qB
+-    # Transform ray to local space of ellipsoid
+-    # Solve quadratic for t_in, t_out
+-    # (Implementation details of line-ellipsoid intersection omitted as standard geometry)
+     t_in, t_out = intersect_ellipsoid(primitive, ray_o, ray_d)
+     
+@@ -114,6 +174,4 @@
+         return 0.0, torch.zeros(3)
+         
+-    # 2. Compute Density Integral via Antiderivative
+-    # Get network weights
+     W1 = primitive.W1
+     W2 = primitive.W2
+@@ -126,10 +184,6 @@
+     
+     alpha_integral = S_out - S_in
+-    
+-    # 3. Compute Splatting Alpha
+     alpha = 1.0 - torch.exp(-torch.clamp(alpha_integral, min=0.0))
+     
+-    # 4. Compute Color
+-    # Use SH coefficients and view direction
+     color = evaluate_sh(primitive.SH_coeffs, ray_d)
+     
+@@ -140,5 +194,4 @@
+     Renders the full scene for a ray using front-to-back compositing.
+     """
+-    # 1. Find intersecting primitives and compute t_in
+     candidates = []
+     for p in primitives:
+@@ -147,21 +200,14 @@
+             candidates.append((t_in, p))
+             
+-    # 2. Sort by depth
+     candidates.sort(key=lambda x: x[0])
+     
+-    # 3. Front-to-back compositing
+-    T = 1.0 # Transmittance
++    T = 1.0
+     color = torch.zeros(3)
+     
+     for t_in, p in candidates:
+         alpha, p_color = render_primitive(p, ray_o, ray_d)
+-        
+-        # Contribution
+         contribution = T * alpha * p_color
+         color += contribution
+-        
+-        # Update Transmittance
+         T *= (1.0 - alpha)
+-        
+         if T < 1e-4:
+             break
+@@ -175,5 +221,4 @@
+     optimizer.zero_grad()
+     
+-    # Render images
+     rendered_images = []
+     for ray_o, ray_d in batch.rays:
+@@ -182,23 +227,19 @@
+     rendered_images = torch.stack(rendered_images)
+     
+-    # Loss
+     gt_images = batch.images
+     l1_loss = torch.abs(rendered_images - gt_images).mean()
+-    ssim_loss = 1.0 - ssim(rendered_images, gt_images) # Assuming SSIM function
+-    
+-    # Geometric Regularization
++    # Standard SSIM metric computation [G]
++    ssim_loss = 1.0 - compute_ssim(rendered_images, gt_images)
++    
+     reg_loss = 0.0
+     for p in primitives:
+-        # Standard deviation of scale vector components
+-        s_B = p.s_B
+-        reg_loss += torch.std(s_B)
++        reg_loss += torch.std(p.s_B)
+     reg_loss = reg_loss / len(primitives)
+     
+-    total_loss = l1_loss + ssim_loss + 0.1 * reg_loss # Weight for reg not specified, assumed small
++    total_loss = l1_loss + ssim_loss + 0.1 * reg_loss
+     
+     total_loss.backward()
+     optimizer.step()
+     
+-    # Population Control
+     update_primitives(primitives)
+     
+@@ -209,8 +250,6 @@
+     Densification and Pruning based on gradient magnitude of network weights.
+     """
+-    # Compute gradient magnitudes for each primitive's weights
+     grads = []
+     for p in primitives:
+-        # Sum of squared gradients of W1, W2, b1, b2
+         g = torch.norm(p.W1.grad)**2 + torch.norm(p.W2.grad)**2 + \
+             torch.norm(p.b1.grad)**2 + torch.norm(p.b2.grad)**2
+@@ -218,19 +257,17 @@
+     grads = torch.tensor(grads)
+     
+-    # Thresholds (values not specified in sources)
+-    densify_threshold = 0.01 # Placeholder
+-    prune_threshold = 0.001  # Placeholder
++    densify_threshold = 0.01 # Placeholder: threshold not specified in sources
++    prune_threshold = 0.001  # Placeholder: threshold not specified in sources
+     
+     new_primitives = []
+     for i, p in enumerate(primitives):
+         if grads[i] > densify_threshold:
+-            # Duplicate or split
+             p1 = copy_primitive(p)
+             p2 = copy_primitive(p)
+-            # Perturb p2 slightly
++            # Perturb p2 slightly (standard practice, not specified in sources)
++            p2.xB += torch.randn_like(p2.xB) * 0.01
+             new_primitives.append(p1)
+             new_primitives.append(p2)
+         elif grads[i] < prune_threshold:
+-            # Prune
+             pass
+         else:
+@@ -238,8 +275,21 @@
+             
+     return new_primitives
++
++def quaternion_to_rotation_matrix(q):
++    """Converts quaternion [w, x, y, z] to 3x3 rotation matrix."""
++    w, x, y, z = q
++    return torch.tensor([
++        [1 - 2*(y**2 + z**2), 2*(x*y - w*z), 2*(x*z + w*y)],
++        [2*(x*y + w*z), 1 - 2*(x**2 + z**2), 2*(y*z - w*x)],
++        [2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x**2 + y**2)]
++    ])
++
++def compute_ssim(img1, img2):
++    """Placeholder for standard SSIM computation [G]."""
++    return 0.0 # Standard implementation omitted for brevity
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering is efficient as it avoids ray marching, relying on closed-form integration and sorting. However, convergence is slower than Gaussian-based methods due to the complex optimization landscape of neural fields [S1, unofficial].
++*   **Time Complexity:** Rendering is efficient as it avoids ray marching, relying on closed-form integration and sorting [S1, unofficial]. However, convergence is slower than Gaussian-based methods due to the complex optimization landscape of neural fields [S1, unofficial].
+ *   **Memory Complexity:** Uses 10× fewer primitives and 6× fewer parameters than 3DGS [S1, unofficial]. Each primitive has 99 parameters (vs ~60 for 3DGS Gaussian), but the total count is much lower [S1, unofficial].
+ *   **Performance:** On Tanks & Temples, achieves PSNR 23.59 vs 23.14 (3DGS), FPS 158 vs 188 (3DGS), Memory 80 MB vs 411 MB (3DGS) [S1, unofficial].

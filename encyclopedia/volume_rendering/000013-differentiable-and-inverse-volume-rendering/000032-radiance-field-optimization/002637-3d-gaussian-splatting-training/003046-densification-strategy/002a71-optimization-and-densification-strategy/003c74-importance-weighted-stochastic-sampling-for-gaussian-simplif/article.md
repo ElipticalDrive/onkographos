@@ -1,0 +1,112 @@
+# Importance-Weighted Stochastic Sampling for Gaussian Simplification
+
+Also called: Importance Sampling Simplification, Stochastic Pruning
+
+## Overview
+This method simplifies a set of 3D Gaussians by replacing deterministic pruning with stochastic sampling weighted by Gaussian importance, thereby preserving local geometric structure [S1]. Unlike deterministic pruning, which removes neighbors with similar importance simultaneously and disrupts geometry, this approach maintains the overall scene structure while reducing the Gaussian count [S1]. It serves as a core simplification step within the [Optimization and Densification Strategy](4777-optimization-and-densification-strategy.md) pipeline.
+
+## How it works
+**Inputs:**
+- A set of $N$ Gaussians $\mathcal{G} = \{\mathcal{G}_1, \dots, \mathcal{G}_N\}$.
+- An importance value $I_i$ for each Gaussian $i$.
+- A target number of Gaussians to keep, $N_{target}$ (where $N_{target} < N$).
+
+**Outputs:**
+- A subset of $N_{target}$ Gaussians selected via stochastic sampling.
+
+**Data Structures:**
+- **Importance Array:** A 1D array of size $N$ containing float values $I_i$.
+- **Probability Array:** A 1D array of size $N$ containing float values $P_i$.
+- **Selection Mask:** A boolean array of size $N$ indicating which Gaussians are kept.
+
+**Steps:**
+1. **Calculate Importance:** Compute the importance metric $I_i$ for each Gaussian. The source indicates that blending weight-based importance yields better performance than other metrics (e.g., scale or rendered index alone) [S1]. Specific combinations of blending weight, scale, and rendered index may vary by scene type (indoor vs. outdoor) [S1].
+2. **Normalize Importance:** Compute the sum of all importance values:
+   $$ S = \sum_{j=1}^{N} I_j $$
+3. **Compute Sampling Probabilities:** Calculate the sampling probability $P_i$ for each Gaussian:
+   $$ P_i = \frac{I_i}{S} $$
+4. **Stochastic Sampling:** Sample $N_{target}$ indices from the set $\{1, \dots, N\}$ according to the probability distribution $\{P_1, \dots, P_N\}$. The selected Gaussians form the simplified set.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def importance_weighted_stochastic_sampling(gaussians, importance_values, target_count):
+    """
+    Simplifies a set of Gaussians using importance-weighted stochastic sampling.
+    
+    Args:
+        gaussians: List of Gaussian objects.
+        importance_values: List of float importance scores I_i for each Gaussian.
+        target_count: Integer, the desired number of Gaussians to keep.
+        
+    Returns:
+        List of selected Gaussian objects.
+    """
+    n = len(gaussians)
+    if target_count >= n:
+        return gaussians
+    
+    # Step 1 & 2: Compute sum of importance
+    total_importance = sum(importance_values)
+    
+    # Guard against division by zero
+    if total_importance == 0:
+        # If all importances are zero, sample uniformly or randomly
+        probabilities = [1.0 / n] * n
+    else:
+        # Step 3: Compute sampling probabilities
+        probabilities = [i_val / total_importance for i_val in importance_values]
+    
+    # Step 4: Sample indices based on probabilities
+    # Note: Standard libraries like numpy.random.choice support this directly.
+    # Here we assume a helper function for weighted sampling without replacement.
+    selected_indices = weighted_sample_without_replacement(range(n), probabilities, target_count)
+    
+    # Return the selected Gaussians
+    return [gaussians[i] for i in selected_indices]
+
+def weighted_sample_without_replacement(population, weights, k):
+    """
+    Samples k unique indices from population with given weights.
+    Implementation detail: Uses cumulative weights and binary search or 
+    a standard library equivalent (e.g., numpy.random.choice).
+    """
+    import numpy as np
+    return np.random.choice(population, size=k, replace=False, p=weights)
+```
+
+**Parameters:**
+- **Importance Metric ($I_i$):** The value used to weight sampling. Blending weight-based importance is recommended for best performance [S1].
+- **Target Count ($N_{target}$):** The number of Gaussians to retain.
+
+**Edge Cases and Pitfalls:**
+- **Deterministic Pruning Failure:** Direct pruning disrupts local geometry because neighboring Gaussians often have similar importance, causing them to be removed or preserved simultaneously. This leads to significant chamfer distance between centers of pruned and non-simplified Gaussians, especially at low preserving ratios [S1].
+- **Zero Importance:** If all $I_i$ are zero, the probability distribution is undefined. A uniform distribution or random sampling should be used as a fallback [G].
+
+## Subtopics
+
+### Importance-weighted Sampling
+A sampling approach that considers the geometric structure of the scene to enhance rendering quality while maintaining a sparse set of Gaussians [S1]. It addresses the limitations of direct pruning by assigning each Gaussian a pre-defined importance value $I_i$ and sampling based on this distribution [S1]. However, specific implementation details of the weighting/sampling distribution are not fully detailed in the source text beyond the general stochastic formulation [S1]. It is chosen when preserving local geometry is critical and deterministic pruning leads to suboptimal simplification results due to the removal of neighboring Gaussians with similar importance [S1].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- **Time:** $O(N)$ to compute importance and normalize probabilities. Sampling is $O(N_{target} \log N)$ or $O(N_{target})$ depending on the sampling algorithm used [G].
+- **Memory:** $O(N)$ to store importance and probability arrays.
+
+**Measured Performance:**
+- Mini-Splatting (using this method) outperforms VQ (pruning from [21]) and LightGaussian (prune/recovery from [11]) at similar Gaussian counts [S1].
+- Stochastic sampling maintains overall geometry better than deterministic pruning, as evidenced by lower chamfer distance [S1].
+
+**Strengths and Limitations:**
+- **Strengths:** Preserves local geometric structure better than deterministic pruning; robust to large pruning ratios where deterministic methods fail [S1].
+- **Limitations:** Requires careful tuning of the importance metric (blending weight vs. scale vs. rendered index) for different scene types (indoor vs. outdoor) [S1].
+
+**When to Use:**
+- Use when simplifying 3D Gaussian representations for resource-efficient training and rendering, and when preserving geometric fidelity is more important than strict deterministic removal of low-importance elements [S1].
+
+## Background
+The concept of pruning in neural representation was initially introduced for grid-based neural radiance fields [21, 41] and extended to Gaussian representations [S1]. This specific importance-weighted stochastic sampling method was introduced in the Mini-Splatting paper [S1]. It was developed to address the collapse in rendering quality observed when using direct pruning at large ratios, by leveraging the observation that stochastic sampling better maintains overall geometry [S1].
+
+## Sources
+[S1] Mini-Splatting: Representing Scenes with a Constrained Number of Gaussians, https://doi.org/10.1007/978-3-031-72980-5_10, fetched 2026-10-26

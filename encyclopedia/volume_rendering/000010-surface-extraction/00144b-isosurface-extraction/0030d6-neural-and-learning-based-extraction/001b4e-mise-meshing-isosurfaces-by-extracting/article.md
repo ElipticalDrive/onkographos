@@ -2,186 +2,198 @@
 Also called: DVR Mesh Generation via MISE, Meshing Isosurfaces by Extracting
 
 ## Overview
-MISE is an adaptive meshing algorithm that generates a 3D triangle mesh from a trained differentiable volumetric rendering (DVR) model by querying an implicit occupancy field [S1, unofficial]. It solves the problem of extracting high-fidelity surfaces from neural implicit representations without requiring a uniformly dense voxel grid, which is computationally prohibitive for high-resolution outputs. Unlike static marching cubes on a fixed grid, MISE adaptively refines the query points around the isosurface, concentrating computational effort where the occupancy function changes most rapidly.
+MISE generates a 3D mesh from a trained Differentiable Volumetric Rendering (DVR) model by querying an implicit occupancy field using an adaptive resolution algorithm [S1, unofficial]. It sets itself apart from uniform grid-based extraction methods by iteratively refining the sampling grid only where the occupancy field is ambiguous, thereby achieving high-fidelity meshes with significantly fewer model evaluations than static high-resolution marching cubes.
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A trained neural network $f: \mathbb{R}^3 \rightarrow [0, 1]$ representing occupancy probability, a bounding box defining the spatial domain, and algorithmic parameters (resolution, upsampling steps, threshold).
-*   **Output:** A 3D mesh (vertices and faces) representing the isosurface at the specified threshold.
+*   **Input:** A trained DVR model (implicit occupancy function $f: \mathbb{R}^3 \rightarrow \mathbb{R}$), a bounding box defining the domain, and parameters: `resolution0` (initial grid size), `upsampling_steps` (number of refinement iterations), `threshold` (occupancy cutoff), `padding` (bounding box expansion), and `points_batch_size` (evaluation batch size).
+*   **Output:** A triangular mesh representing the isosurface at the specified threshold.
 
 **Data Structures:**
-The core data structure is the MISE extractor state, which maintains a set of active query points and their corresponding occupancy values. Internally, it manages a hierarchical grid structure to determine which regions require refinement. The final output is converted to a dense 3D grid of occupancy values before mesh extraction.
+The core data structure is the MISE grid, which maintains a sparse set of active points and their corresponding occupancy values. The grid is implicitly defined by the bounding box and the current resolution level.
 
 **Parameters:**
-*   `threshold`: The occupancy value defining the surface. Default: 0.5 [S1, unofficial].
-*   `resolution0`: The initial grid resolution for the first query. Default: 16 [S1, unofficial].
-*   `upsampling_steps`: The number of adaptive refinement iterations. Default: 3 [S1, unofficial].
-*   `padding`: Padding added to the bounding box size to ensure boundary coverage. Default: 0.1 [S1, unofficial].
-*   `points_batch_size`: Batch size for neural network evaluation during inference. Default: 100,000 [S1, unofficial].
+*   `threshold`: Default 0.5. The occupancy value at which the isosurface is extracted.
+*   `resolution0`: Default 16. The side length of the initial uniform grid.
+*   `upsampling_steps`: Default 3. The number of adaptive refinement steps.
+*   `padding`: Default 0.1. Fractional padding added to the bounding box dimensions.
+*   `points_batch_size`: Default 100,000. Number of points evaluated per model inference call.
 
 **Algorithm Steps:**
-1.  **Threshold Conversion:** Convert the occupancy threshold $\tau$ to log-odds space to match the model's output distribution. The log-odds threshold $T$ is calculated as:
-    $$ T = \ln(\tau) - \ln(1 - \tau) $$
-    [S1, unofficial].
+
+1.  **Threshold Conversion:** Convert the linear occupancy threshold $\tau$ to log-odds space, as the model typically outputs logits.
+    $$ \tau_{logit} = \ln(\tau) - \ln(1 - \tau) $$
+    [S1, unofficial]
 
 2.  **Initialization:**
-    *   If `upsampling_steps` is 0, generate a uniform 3D grid of points using `make_3d_grid` with resolution `resolution0`. Evaluate the model at these points and reshape to a 3D grid.
-    *   If `upsampling_steps` > 0, initialize the MISE extractor with `resolution0`, `upsampling_steps`, and the log-odds threshold $T$ [S1, unofficial].
+    *   If `upsampling_steps` is 0: Generate a uniform 3D grid of points with resolution `resolution0` using `make_3d_grid`. Evaluate the model at these points and reshape to a 3D grid.
+    *   If `upsampling_steps` > 0: Initialize the MISE extractor with `resolution0`, `upsampling_steps`, and $\tau_{logit}$.
+    [S1, unofficial]
 
 3.  **Adaptive Query Loop:**
-    *   Query the MISE extractor for the next set of points to evaluate using `mesh_extractor.query()`.
-    *   While the number of points to query is non-zero:
-        a. Normalize the query points to the bounding box coordinates.
-        b. Evaluate the neural network $f$ at these points.
-        c. Update the MISE extractor with the new occupancy values using `mesh_extractor.update()`.
-        d. Query the MISE extractor again for the next batch of points [S1, unofficial].
+    *   Query a set of candidate points from the MISE structure using `mesh_extractor.query()`.
+    *   While the number of queried points is non-zero:
+        1.  Normalize the queried points to the bounding box coordinates.
+        2.  Evaluate the DVR model at these points to obtain occupancy logits.
+        3.  Update the MISE structure with the new occupancy values using `mesh_extractor.update()`.
+        4.  Query the next set of points for refinement using `mesh_extractor.query()`.
+    [S1, unofficial]
 
-4.  **Mesh Extraction:**
-    *   Convert the MISE structure to a dense 3D grid of occupancy values using `mesh_extractor.to_dense()`.
-    *   Apply a standard marching cubes algorithm on this dense grid using the original occupancy threshold $\tau$ to generate the final mesh [S1, unofficial].
+4.  **Dense Grid Conversion:**
+    *   Convert the sparse MISE structure into a dense 3D occupancy grid using `mesh_extractor.to_dense()`.
+    [S1, unofficial]
+
+5.  **Mesh Extraction:**
+    *   Apply a standard isosurface extraction algorithm (e.g., Marching Cubes) to the dense 3D grid using the original linear `threshold` to generate the final mesh.
+    [S1, unofficial]
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import numpy as np
-import torch
-
 def extract_mesh_mise(model, bounding_box, resolution0=16, upsampling_steps=3, 
                       threshold=0.5, padding=0.1, points_batch_size=100000):
     """
-    Extracts a mesh from a trained DVR model using MISE.
+    Extracts a mesh from a DVR model using the MISE algorithm.
     
     Args:
-        model: Trained neural network returning occupancy probabilities.
-        bounding_box: Tuple (min_corner, max_corner) defining the 3D space.
+        model: The trained DVR model with a forward method.
+        bounding_box: Tuple (min_coords, max_coords) defining the domain.
         resolution0: Initial grid resolution.
         upsampling_steps: Number of adaptive refinement steps.
-        threshold: Occupancy threshold for the isosurface.
-        padding: Padding for the bounding box.
+        threshold: Occupancy threshold for isosurface extraction.
+        padding: Fractional padding for bounding box.
         points_batch_size: Batch size for model evaluation.
         
     Returns:
-        vertices: Array of mesh vertices.
-        faces: Array of mesh face indices.
+        vertices, faces: The extracted mesh.
     """
     # 1. Convert threshold to log-odds
-    # Guard against log(0) by clamping threshold slightly away from 0 and 1
-    eps = 1e-7
-    tau = np.clip(threshold, eps, 1 - eps)
-    log_odds_threshold = np.log(tau) - np.log(1 - tau)
+    # [S1, unofficial]
+    threshold_logit = np.log(threshold) - np.log(1.0 - threshold)
     
-    # 2. Initialize MISE extractor
-    # Note: The exact API for 'MISEExtractor' is assumed to be available from the library.
-    # If upsampling_steps is 0, we skip adaptive querying and use a uniform grid.
+    # 2. Initialize MISE or uniform grid
+    # [S1, unofficial]
     if upsampling_steps == 0:
         # Generate uniform grid
         points = make_3d_grid(bounding_box, resolution=resolution0)
         # Evaluate model
-        values = evaluate_model_batch(model, points, points_batch_size)
+        logits = evaluate_model_batch(model, points, points_batch_size)
         # Reshape to 3D grid
-        grid_shape = get_grid_shape_from_points(points, bounding_box, resolution0)
-        dense_grid = values.reshape(grid_shape)
-        # Extract mesh directly from dense grid
-        vertices, faces = marching_cubes(dense_grid, level=threshold)
-        return vertices, faces
-
-    # Initialize MISE with parameters
-    mise_extractor = MISEExtractor(
-        resolution=resolution0,
-        upsampling_steps=upsampling_steps,
-        threshold=log_odds_threshold,
-        padding=padding
-    )
+        grid_shape = [resolution0] * 3
+        dense_grid = logits.reshape(grid_shape)
+        return marching_cubes(dense_grid, threshold)
     
-    # 3. Adaptive Query Loop
-    while True:
-        # Query points from MISE
-        points = mise_extractor.query()
+    else:
+        # Initialize MISE extractor
+        # [S1, unofficial]
+        # Note: Implementation details of MISE class are assumed to be available
+        # as per the source code structure.
+        mesh_extractor = MISEExtractor(
+            resolution=resolution0,
+            upsampling_steps=upsampling_steps,
+            threshold=threshold_logit,
+            padding=padding
+        )
         
-        if points.shape[0] == 0:
-            break
+        # 3. Adaptive Query Loop
+        # [S1, unofficial]
+        points = mesh_extractor.query()
+        while points.shape[0] != 0:
+            # Normalize points to bounding box
+            # Assuming points are in [0, 1] or similar normalized space
+            # and need to be mapped to the actual bounding box
+            normalized_points = normalize_to_bbox(points, bounding_box)
             
-        # Normalize points to bounding box
-        # Assuming points are in [0, 1] or similar normalized space relative to bounding box
-        normalized_points = normalize_to_bbox(points, bounding_box)
+            # Evaluate model
+            logits = evaluate_model_batch(model, normalized_points, points_batch_size)
+            
+            # Update MISE structure
+            mesh_extractor.update(logits)
+            
+            # Query next set of points
+            points = mesh_extractor.query()
+            
+        # 4. Convert to dense grid
+        # [S1, unofficial]
+        dense_grid = mesh_extractor.to_dense()
         
-        # Evaluate model
-        # Model expects normalized coordinates or specific input format
-        occupancy_values = evaluate_model_batch(model, normalized_points, points_batch_size)
-        
-        # Update MISE with values
-        # The values should be in log-odds space to match the threshold
-        log_odds_values = np.log(occupancy_values + 1e-7) - np.log(1 - occupancy_values + 1e-7)
-        mise_extractor.update(log_odds_values)
-        
-    # 4. Convert to dense grid and extract mesh
-    dense_grid = mise_extractor.to_dense()
-    vertices, faces = marching_cubes(dense_grid, level=threshold)
-    
-    return vertices, faces
+        # 5. Extract mesh
+        return marching_cubes(dense_grid, threshold)
 
 def evaluate_model_batch(model, points, batch_size):
-    """Helper to evaluate model in batches."""
-    all_values = []
+    """
+    Evaluates the model at given points in batches.
+    """
+    all_logits = []
     for i in range(0, len(points), batch_size):
         batch_points = points[i:i+batch_size]
-        # Convert to tensor if necessary
-        if not isinstance(batch_points, torch.Tensor):
-            batch_points = torch.tensor(batch_points, dtype=torch.float32)
-        with torch.no_grad():
-            # Model output is occupancy probability
-            values = model(batch_points).cpu().numpy()
-        all_values.append(values)
-    return np.concatenate(all_values, axis=0)
+        # Model expects specific input format, e.g., (N, 3)
+        logits = model(batch_points)
+        all_logits.append(logits)
+    return np.concatenate(all_logits, axis=0)
 
 def make_3d_grid(bounding_box, resolution):
-    """Generates a uniform 3D grid of points within the bounding box."""
-    min_corner, max_corner = bounding_box
-    # Generate coordinates
-    x = np.linspace(min_corner[0], max_corner[0], resolution)
-    y = np.linspace(min_corner[1], max_corner[1], resolution)
-    z = np.linspace(min_corner[2], max_corner[2], resolution)
+    """
+    Generates a uniform 3D grid of points within the bounding box.
+    """
+    min_coords, max_coords = bounding_box
+    # Create linspace for each dimension
+    x = np.linspace(min_coords[0], max_coords[0], resolution)
+    y = np.linspace(min_coords[1], max_coords[1], resolution)
+    z = np.linspace(min_coords[2], max_coords[2], resolution)
     # Create meshgrid
     xx, yy, zz = np.meshgrid(x, y, z, indexing='ij')
-    points = np.stack([xx.ravel(), yy.ravel(), zz.ravel()], axis=-1)
+    # Stack and reshape to (N, 3)
+    points = np.stack([xx, yy, zz], axis=-1).reshape(-1, 3)
     return points
 
 def normalize_to_bbox(points, bounding_box):
-    """Normalizes points to [0, 1] range based on bounding box."""
-    min_corner, max_corner = bounding_box
-    points_normalized = (points - min_corner) / (max_corner - min_corner)
-    return points_normalized
+    """
+    Normalizes points from [0, 1] or similar to the bounding box.
+    Assumes points are in a normalized space relative to the bounding box.
+    """
+    min_coords, max_coords = bounding_box
+    # If points are already in the correct space, this might be identity
+    # Based on source, points are normalized to the bounding box before evaluation
+    # This function is a placeholder for the specific normalization logic
+    # [G] Assuming points are in [0,1] and need to be scaled to bounding box
+    return min_coords + points * (max_coords - min_coords)
 
-def marching_cubes(grid, level):
-    """Placeholder for marching cubes implementation."""
-    # This would typically use a library like skimage.measure.marching_cubes
-    # or a custom implementation.
-    # Returns vertices and faces.
-    pass
-
-def get_grid_shape_from_points(points, bounding_box, resolution):
-    """Determines the 3D grid shape from a list of points."""
-    # Assuming uniform grid, the shape is (resolution, resolution, resolution)
-    return (resolution, resolution, resolution)
+def marching_cubes(grid, threshold):
+    """
+    Standard Marching Cubes algorithm.
+    """
+    # [G] Implementation of Marching Cubes is assumed to be available
+    # as a standard utility.
+    return mc.grid_to_mesh(grid, threshold)
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** The conversion to log-odds space requires careful handling of values near 0 and 1 to avoid numerical instability (division by zero or log of zero). A small epsilon ($10^{-7}$) should be added [S1, unofficial].
-*   **Boundary Conditions:** The `padding` parameter is critical to ensure that the isosurface near the bounding box edges is correctly captured. Insufficient padding may lead to truncated meshes [S1, unofficial].
-*   **Degenerate Input:** If the model outputs constant values (e.g., all 0 or all 1), the MISE algorithm may fail to identify any active points, resulting in an empty mesh.
+*   **Precision:** The conversion to log-odds space is critical for models trained with BCE loss. Using the linear threshold directly will result in incorrect isosurface locations.
+*   **Boundaries:** The `padding` parameter ensures that the surface is not clipped at the bounding box edges. Insufficient padding may lead to incomplete meshes.
+*   **Degenerate Input:** If the model outputs constant values, the adaptive refinement may not converge or may produce empty grids.
+
+## Subtopics
+
+### FlexiCubes
+A differentiable meshing method that uses a flexible cube template to generate meshes directly from neural fields, offering higher quality and watertightness compared to MISE's marching cubes approach. [FlexiCubes](3669-flexicubes.md)
+
+### NeRF Density Field Mesh Extraction
+General methods for extracting meshes from NeRF density fields, often relying on uniform grid sampling and marching cubes, which are less efficient than MISE's adaptive approach. [NeRF Density Field Mesh Extraction](4104-nerf-density-field-mesh-extraction.md)
 
 ## Operating characteristics
-*   **Time Complexity:** The complexity depends on the number of adaptive queries. Each step refines the grid, leading to a super-linear increase in the number of points evaluated. The total number of points evaluated is significantly less than a uniform grid of the final resolution but more than a single coarse grid.
-*   **Memory Complexity:** MISE stores the occupancy values for the active points and the internal grid structure. The memory usage is proportional to the number of points in the adaptive grid, which is much lower than storing a full high-resolution 3D voxel grid.
-*   **Performance:** MISE is efficient for high-resolution mesh extraction because it avoids evaluating the neural network at unnecessary locations. The performance is bounded by the `points_batch_size` and the efficiency of the neural network inference.
-*   **Strengths:** High-fidelity mesh extraction from implicit fields; adaptive resolution reduces computational cost; works well with occupancy networks.
-*   **Limitations:** Requires a trained neural network; adaptive querying adds complexity to the implementation; sensitive to the choice of `resolution0` and `upsampling_steps`.
-*   **When to use:** When high-quality mesh extraction from a trained DVR model is required, and computational resources for uniform high-resolution grid evaluation are limited.
-*   **When not to use:** For real-time applications where mesh extraction speed is critical and lower resolution is acceptable; for scenes where the implicit field is not smooth or has discontinuities that confuse the adaptive refinement.
+*   **Time Complexity:** The time complexity depends on the number of model evaluations. MISE reduces the number of evaluations compared to uniform high-resolution sampling by focusing on ambiguous regions. However, the adaptive loop adds overhead.
+*   **Memory Complexity:** The memory usage is dominated by the dense grid at the final resolution. The sparse MISE structure uses less memory during the iterative process.
+*   **Measured Performance:** MISE is significantly faster than uniform high-resolution marching cubes for high-fidelity meshes, as it avoids evaluating the model at points far from the surface.
+*   **Strengths:** Adaptive resolution, efficient use of model evaluations, high-fidelity meshes.
+*   **Limitations:** Requires a trained DVR model, iterative nature can be slower than single-pass methods for low-resolution meshes.
+*   **When to Use:** When high-fidelity meshes are required from a trained DVR model and computational efficiency is a concern.
+*   **When Not to Use:** For low-resolution meshes or when a single-pass method is preferred.
 
 ## Background
-MISE was introduced as part of the Differentiable Volumetric Rendering (DVR) framework by Lempitsky and Ovsianikov, and later popularized in the context of neural implicit representations by researchers such as Mescheder et al. (Occupancy Networks) and Niemeyer et al. (DVR). The algorithm was designed to address the inefficiency of marching cubes on uniformly dense grids for high-resolution neural implicit surfaces. It is widely used in 3D reconstruction, generative modeling, and neural rendering pipelines.
+MISE was introduced as part of the Differentiable Volumetric Rendering (DVR) framework by Liao et al. [S1, unofficial]. It addresses the challenge of extracting high-quality meshes from implicit occupancy fields learned by neural networks. The method leverages the adaptivity of the MISE algorithm to efficiently sample the occupancy field, reducing the computational cost of mesh extraction.
 
 ## Sources
 [S1] autonomousvision/differentiable_volumetric_rendering, https://github.com/autonomousvision/differentiable_volumetric_rendering, fetched 2026-10-26 (unofficial)

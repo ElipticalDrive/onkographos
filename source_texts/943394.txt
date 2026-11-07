@@ -1,0 +1,382 @@
+Hi, 
+I have compared a sample application in CUDA to same application written in Optix. I am experiencing quite a difference. The app calculates direct sky irradiance on a series of points which basically is just shootin…
+
+Comparing Optix performance to CUDA - OptiX - NVIDIA Developer Forums
+Comparing Optix performance to CUDA
+Gaming and Visualization Technologies
+Visualization
+OptiX
+afatourechi
+May 15, 2019, 8:25am
+1
+Hi,
+I have compared a sample application in CUDA to same application written in Optix. I am experiencing quite a difference. The app calculates direct sky irradiance on a series of points which basically is just shooting primary rays from point inside a room at desk height to the window. With no further bounce.
+The CUDA code is based on Ray Tracey’s blog: GPU path tracer [url]http://raytracey.blogspot.com/2016/09/gpu-path-tracing-tutorial-4-optimised.html[/url] which uses Spatial split BVH.
+The Optix code is based on Optix Advanced Samples, optixIntro_06 project. The code is modified in this way:
+no closestHit program, as it only needs to calculate direct sky(rays that are missed), no bounce
+only one ray type which is shadow ray
+using anyhit program to terminate the obscured rays
+miss program for visible sky
+I have added a new ray generation program which is the entry to shoot rays from calc point to room windows
+The data structure to hold room points and windows are similar in both cuda and optix:
+RoomVertex structure to hold one float3 for point, and an index to windows corners array
+Window Corners array of float3
+The CUDA code runs 18258 calc points in ~8s
+The optix code runs same number of points in ~30s
+In optix project:
+The “USE_DEBUG_EXCEPTIONS” flag is false. Generate Relocatable Device code is true. Use Fast Math is true.
+I tried both compute_61,sm_61 and compute_35,sm_35 as the code generation.
+Intel i7-8700K CPU 3.7GH, Windows 10 Pro, 16GB RAM,
+GPU: GeForce GTX 1060 6GBd, driver ver: 419.35, cuda cores 1280
+dhart
+May 15, 2019, 5:00pm
+2
+Hey @afatourechi,
+Let me ask a few more questions…
+Are you using OptiX SDK version 6?
+How big is your scene?
+What kind of primitives in your scenes? Triangles or custom geometry?
+Is the scene contained in a single acceleration structure?
+What are calc points?
+How many rays are you actually sending, and have you verified it’s the same number of rays in both cases? Are you recording the same number of hits as well?
+What is your launch size?
+What is your ray payload size in bytes?
+How is the room points & windows data structure you mentioned used & where is it accessed from?
+How long are your raygen and anyhit programs? Are they doing anything particularly branchy or mathy?
+Are you launching once or multiple times in OptiX? If multiple, are you updating any variables between launches?
+I don’t see anything obvious yet, but I don’t really understand your setup yet. From your description so far, it does sound like a simple setup that is normally a near ideal workload, since it’s shadowing only without secondary bounces. FWIW, this sounds like the kind of workload that is seeing very large speedups with RTX hardware.
+If you’re using OptiX 6, have you tried enabling RTX mode?
+Also if you’re using OptiX 6, the one thing I see in your description is use of the anyhit shader. With RTX hardware and OptiX 6, our recommendation for shadows changed to not use an anyhit shader any more (and even to actively disable anyhit shaders completely), instead use a closest hit shader along with the rtTrace flag RT_RAY_FLAG_TERMINATE_ON_FIRST_HIT. I’m not sure you will see any difference with your GTX 1060, but maybe it’s something to try, and something to be aware of if you end up using any RTX hardware.
+With answers to the above questions, hopefully a clearer picture will start to emerge.
+–
+David.
+afatourechi
+May 15, 2019, 6:45pm
+3
+Thanks for your reply David,
+Here are the answers:
+Are you using OptiX SDK version 6? Yes Optix 6 and CUDA version 10
+How big is your scene? It has Vertices = 4166, Triangles = 12174
+What kind of primitives in your scenes? Triangles or custom geometry? Triangles only.
+Is the scene contained in a single acceleration structure?
+The m_rootAcceleration is assigned to m_rootGroup. There is a single geometry object that holds all the
+triangles. Its GeometryInstance is a child of another GeometryGroup. An acceleration structure is assigned to this GeometryGroup. And this group is itself a child of the m_rootGroup.
+So basically two acceleration structures, two groups, one geometry.
+What are calc points?
+calc points are RoomVertex structure. basically a float3 for the calc point and an index to windows rectangle vertices start position index in an separate array:
+in Optix project:
+struct RoomVertex
+{
+optix::float3 point;
+unsigned int winsStartIndex;
+unsigned int winsCount;
+};
+in CUDA project:
+struct RoomVertex : public Vec3f
+{
+int _winCount;
+int _winStartIndex;
+```
+__host__ __device__ RoomVertex(float x, float y, float z)
+	:Vec3f(x, y, z)
+{  
+}
+```
+};
+How many rays are you actually sending, and have you verified it’s the same number of rays in both cases? Are you recording the same number of hits as well?
+The number of rays depends on the solid angle subtended by the window from the calculation point of view. It gets smaller as it goes deeper into the room. The subdivision of the solid angle is done horizontally(1 deg step) and vertically(0.15 of a degree). I have not verified whether same number of rays are shoot but the code is exactly copy/paste between the two projects.
+What is your launch size?
+Overall there are about 18000 calc points.
+In optix I simply call: m_context->launch(0, m_RoomPointsCount); m_RoomPointsCount = 18000.
+In cuda :
+int threadsPerBlock = 256;
+int blocksPerGrid = (m_RoomPointsCount + threadsPerBlock - 1) / threadsPerBlock;
+CalcDirectSky <<<blocksPerGrid, threadsPerBlock >>> (roompoints, windowsBB, m_RoomPointsCount);
+What is your ray payload size in bytes?
+I am using PerRayData_shadow structure already defined in the samples, which has only one boolean variable “visible”.
+How is the room points & windows data structure you mentioned used & where is it accessed from?
+In optix they are assigned to the context in this way:
+```
+m_roomsPoints_buffer = m_context->createBuffer(RT_BUFFER_INPUT_OUTPUT, RT_FORMAT_USER);
+m_roomsPoints_buffer->setElementSize(sizeof(RoomVertex));
+m_roomsPoints_buffer->setSize(m_RoomPointsCount);
+
+RoomVertex* roomPoints_data = static_cast<RoomVertex*>(m_roomsPoints_buffer->map(0, RT_BUFFER_MAP_WRITE_DISCARD));
+ 
+for (unsigned int k = 0; k < m_RoomPointsCount; ++k) {
+	roomPoints_data[k] = m_RoomPoints[k];
+}
+m_roomsPoints_buffer->unmap();
+m_context["sysRoomPoints"]->set(m_roomsPoints_buffer);
+```
+// 4 vertex per window for its 4 corners
+int winBBNo = m_WindowsCount * 4;
+m_WindowsBB_buffer = m_context->createBuffer(RT_BUFFER_INPUT_OUTPUT, RT_FORMAT_USER);
+m_WindowsBB_buffer->setElementSize(sizeof(optix::float3));
+m_WindowsBB_buffer->setSize(winBBNo);
+```
+optix::float3* winsBB_data = static_cast<optix::float3*>(m_WindowsBB_buffer->map(0, RT_BUFFER_MAP_WRITE_DISCARD));
+
+for (unsigned int k = 0; k < winBBNo; ++k) {
+	winsBB_data[k] = m_WindowsAABB[k];
+}
+m_WindowsBB_buffer->unmap();
+m_context["sysWinsBB"]->set(m_WindowsBB_buffer);
+```
+How long are your raygen and anyhit programs?
+I have uploaded the main .cu file here:
+and the ptx file:
+I didn’t change the anyhit program. It only changes the raypayload visible flag to false and terminates the ray:
+RT_PROGRAM void anyhit_shadow()
+{
+//rtPrintf(“anyhit_shadow”);
+thePrdShadow.visible = false;
+rtTerminateRay();
+}
+Are they doing anything particularly branchy or mathy?
+Not much. The only math done is to calculate min,max angles relative to calc point based on the four corners of a rectangle window. It is all on the rol.cu file, if you could have a look.
+Are you launching once or multiple times in OptiX? If multiple, are you updating any variables between launches?
+Not at the moment just once for all points.
+dhart
+May 15, 2019, 9:38pm
+4
+Interesting, I don’t see any obvious culprits yet. The scene is on the small side, but I don’t think that would make a huge difference. To be clear, we still don’t know if this is expected behavior or not, there are plenty of reasons your CUDA project might be faster, I might need to understand more about what it’s doing. In some sense you could think of OptiX being like C or C++ compared to CUDA being assembly language. Since OptiX has some high level abstractions and it has to compile to CUDA on non-RTX devices, it may not be a surprise that hand-written CUDA can go faster, at least on non-RTX hardware.
+If I had to guess right now, I’d suspect one of two generic reasons that OptiX differs from a hand-coded CUDA ray tracer: compiled OptiX continuations, and memory usage. The compiled OptiX code might be bottlenecked on doing more reads & writes, and that could be due to, or in addition to, compiled continuations we have to put around rtTrace(), intersection programs, and anyhit programs. Your CUDA project’s trace and anyhit calls are almost certainly more lightweight and they might even be completely inlined instead.
+Another difference that will be hard to quantify is your CUDA BVH. We don’t have any direct ways to compare them, but your CUDA BVH may be completely different than OptiX’s BVH, and the CUDA BVH might be favoring your scene. OptiX BVH & traversal is geared for a wide range of scene types, and might not be as good for your specific scene as the BVH you’re using in CUDA. The different BVH types available in OptiX also have different performance characteristics on different scenes.
+Since you’re posting the shaders… are your 2 projects something you’re actually willing & able to share so we could repro & investigate? I can’t promise anything, but if you send it, I’ll at least take a look and try to make the OptiX version run faster. If you can, but you would prefer not to post to the forum, you’re welcome to DM me or email optix-help.
+To me it seems worth tallying your rays to make sure they’re roughly the same number of casts and hits, even if the code seems identical, to completely rule out typos or wiring mistakes or even compiler inconsistencies.
+I also want to understand the workload. If I’m reading right, it looks like you’re casting about 18k * winCount * maxha/dha * maxva/dva rays, which is 18k * 360 * 1200 * winCount, or ~7.7e9*winCount, correct? Does the number of windows change on a per-calc-point basis? I might have expected it to be constant.
+So you could experiment with using RTX mode and a closest hit shader in place of anyhit, just to see if there’s any difference. Some people here reported seeing minor speed improvements by just turning on RTX mode. Like I said, I’m not sure that will give you any difference, but still worth trying since it’s relatively easy.
+Another idea is maybe you can reorganize the OptiX raygen shader & launch & rtTrace() call to make the launch larger and the continuation smaller. 18k threads in a launch seems very small, but your threads are very heavy since each one is casting millions of rays. People sometimes report with lightweight work threads that CUDA needs to have a launch size of a million or more before they see the GPU saturate. If you could somehow migrate one or more of your raygen loops into your launch, it might lead to improved performance. There might be less state in the rtTrace continuation, for example.
+Random side note, but I notice one pair of sin/cos calls in calcROL() that I assume could be sinf/cosf like the others? I also see a sqrtf followed by an explicit reciprocal in the PTX, so it makes me wonder if the fast math option might not be working as expected.
+Finally, are you interested in algorithmic improvements? Do you know about the paper from Solid Angle (the company) to distribute rays according to solid angle (the math)? Using this might dramatically improve your convergence rates for this program. You would want to dynamically choose how many rays to send through each window in proportion to the solid angle of the whole window, and then map in a regular grid of sample points like you are now, or even use stratified random or a low discrepancy sequence if you want to get fancy. https://www.arnoldrenderer.com/research/egsr2013_spherical_rectangle.pdf
+–
+David.
+afatourechi
+May 16, 2019, 4:27pm
+5
+Thanks for your helpful answer. I will simplify the projects and send it across. It would be good if you could have a look.
+I have tried optix and it is really great framework to work with in rendering. And I would like not to go on the route of rewriting everything from scratch in cuda. Hopefully the speed issue gets resolved.
+afatourechi
+May 17, 2019, 6:57pm
+6
+Hi David,
+I have sent a private message with the link to the projects. I appreciate if you could download and try both application when you get a chance. The readme file in the folder hopefully has all the explanations.
+As I said optix framework is great and I assume you guys must have doing these kind of tests and comparisons to cuda on developing optix. So I hope I am doing something wrong in my optix project.
+So that I won’t have to go back to cuda. The difference in speed is bit suspicious, cuda 10s, optix 30s.
+just a note: a room point can have more than one window. Also the horizontal angle range is not necessarily 360. it is rather bounded by window boundary, and rays are only shot for this range.
+dhart
+May 17, 2019, 10:24pm
+7
+Thanks, I’ve got the files. I’ll see what I can do with it as time permits and post any results I get here for posterity. I won’t be able to start looking for about a week, just so you know what to expect.
+We don’t have a renderer written in pure CUDA vs OptiX to compare against. But again, just to hammer on this point a little more: we’re comparing apples to oranges here, there can never be a fair comparison. Because OptiX is and API, and is more scalable and has a wider range of features and use cases than Ray Tracey’s example CUDA renderer, it might be expected and reasonable that Ray Tracey’s code is highly tuned and faster than OptiX can go in your case, due to hard-coding aspects of the traversal and shading that OptiX cannot do. OptiX is an API that is user programmable, and we sometimes can’t optimize across the API boundary. Here we’re comparing OptiX to oned small and specific renderer that is not user programmable and doesn’t have production level requirements. (That’s no judgement on your CUDA renderer in any way, just clarifying how very different it is from OptiX.)
+But… I’ll try to make the OptiX version faster anyway.
+While we like to always be as fast as possible, of course, reasons to use OptiX over CUDA also include convenience and developer time. You get things like BVH builds and traversal and motion blur and instancing included, just to name a few, instead of having to write your own from scratch.
+BTW, what determines which windows belong to which calc points? Are you checking whether a window is fully occluded first or something?
+–
+David.
+afatourechi
+May 18, 2019, 11:37am
+8
+"Another idea is maybe you can reorganize the OptiX raygen shader & launch & rtTrace() call to make the launch larger and the continuation smaller. 18k threads in a launch seems very small, "
+This is very good idea if implementation wise be possible. I will think about it. thanks.
+The input room.rms file has information for the links between calculation points and windows(that which calc points sees which windows). please have a look at this diagram in this link:
+afatourechi
+May 20, 2019, 9:06am
+9
+I spread the loop over the windows in the raygen program across threads: that is more calc points(more threads) but each point now points to only one window. That increased the calc points from 18k to ~250k due to duplicates as now if a calc point has say two windows there will be two entries for the this point.
+I was expecting increase in speed, due to a more lightweight thread work as you said too, but it didn’t change much in fact increased 2-3s in cuda.
+dhart
+May 20, 2019, 5:55pm
+10
+I probably wouldn’t expect any perf difference from a 10x change in the number of rays per thread since your per-thread workload is so large. I’m not sure I understand, though, the calc points increase 13x but the speed only took 10% longer? That sounds like it might be a big speed increase, but you’d really have to know how many rays you cast in total before and after in order to even know if your change increased or decreased the speed. It would also be helpful to count rays in order to estimate your rays/second throughput. That would give me a better idea if the performance you’re getting is expected or sub-par.
+Also, I was thinking more along the lines of getting all the way down to 1 or only a few rays per thread. Even with a single window, you might have up to as many as ~432k rays per window in each thread by my calculations (is that correct?). If there is a thread divergence problem here, having these super-massive workloads in a single thread might make that problem worse. Going down to one ray per thread might not solve the problem, but there’s a chance, so I thought it might be a good test.
+–
+David.
+SuperGastrocnemius
+May 24, 2019, 3:31pm
+11
+Hi David and afatourechi, Ray Tracey here ;) The CUDA renderer I wrote a few years ago is based on Nvidia’s highly optimised CUDA ray tracing kernels (by Aila, Laine and Karras). The code is kept as simple as possible on purpose. It uses hardcoded values for the materials and misses a lot of features, hence the better performance compared to Optix.
+I’m quite interested in the topic of performance, since we’re using Optix for a new type of render engine and are planning to purchase a few Quadro RTX cards.
+dhart
+May 24, 2019, 8:24pm
+12
+OH that’s you, hi there! That’s great to know, and thanks for jumping in, it will be super helpful to hear your take as well.
+Yes, hard coded shortcuts & compilation & feature set are pretty likely to be a factor here. The launch structure & thread workload in this particular case might also.
+I read that your CUDA renderer was used as the basis for Blender’s GPU path in Cycles. Are you involved in that effort, and do you know how much it has changed? Time permitting, I am interested in testing Cycles a bit…
+–
+David.
+SuperGastrocnemius
+May 25, 2019, 10:21am
+13
+Hi, I wasn’t aware of my renderer being used as the basis for Cycles’ GPU renderer (to my knowledge, Cycles GPU was created by Brecht van Lommel). But I was involved in the development and feature roadmap planning of Octane Render and Brigade, a real-time path tracer which was kind of popular 6 years ago.
+I know there is a new effort called E-Cycles since a few months, which provides a 50% speed-up compared to vanilla Cycles, but I’m not sure how that speedup was achieved.
+Cheers,
+Sam
+afatourechi
+May 28, 2019, 9:09am
+14
+Just modifying the optix code to launch one ray per thread. I am facing an implementation issue:
+The pointAngles in RoomVertex struct points to an array of float4 where the size is _winsCount.
+I am struggling to allocate memory(or create buffer) for RoomVertex struct and to pass it to gpu.
+```
+struct RoomVertex : public optix::float3
+{
+	unsigned int _winsCount;
+	unsigned int _winsStartIndex;
+
+	optix::float4* pointAngles;//This points to an array of _winsCount size
+
+        //optix::float4 pointAngles[_winsCount]; this doesn't compile
+
+	__host__ __device__ RoomVertex(float x1, float y1, float z1)
+	{
+		x = x1; y = y1; z = z1;
+	}
+};
+
+m_roomsPoints_buffer = m_context->createBuffer(RT_BUFFER_INPUT_OUTPUT, RT_FORMAT_USER);
+m_roomsPoints_buffer->setElementSize(sizeof(RoomVertex));
+m_roomsPoints_buffer->setSize(roomPointsCount);
+RoomVertex* roomPoints_data = static_cast<RoomVertex*>(m_roomsPoints_buffer->map(0, RT_BUFFER_MAP_WRITE_DISCARD));
+```
+The above createBuffer code with setSize(roomPointsCount) doesn’t allocate enough memory due to float4* pointAngles array.
+dhart
+May 28, 2019, 4:11pm
+15
+I’m sorry if I’m sending you down a difficult road!
+I haven’t looked at the code carefully yet, so I don’t have a strong understand of what you’re code is doing. Are you allocating one RoomVertex for every thread in your launch?
+In your case, I would expect that you need to have a clever indexing scheme. To get down to 1 ray per thread or even something small-ish like 16 rays per thread, you have enough rays that you will want to not allocate any memory per thread, but instead come up with an indexing scheme of some kind so that you can use the thread id or launch id and decode it as a way to locate the memory you need for the thread. You just need to use your thread id or launch id to recover the window id and the calc point id, right? You might have a buffer allocated for window data that is # windows in length, and another buffer for calc points that is # calc points in length. That way, you could imagine organizing your threads so that all the calc points for a given window are in a group, and perhaps a buffer of indices noting the starting calc point id and window id for each thread in the batch. Finding the calc point id would be a matter of looking up the start id for your batch and subtracting that from your thread id.
+Let me know if that makes any sense and whether it’s helpful or not. The main idea is to treat your thread id or launch index as a virtual index, not something to use directly or explicitly as an index in any arrays. Invent a scheme so that you can figure out the array indices you need in any given thread. The closer you can get to using arithmetic to decode your thread id rather than memory indirection, the better.
+BTW, it is a good idea to have control over how many rays per thread. In general one ray per thread isn’t the best performance, what I mean to suggest for you is to have a controllable small constant number of rays per thread. The main worry I have about your setup is that you might have a very large and dramatically different number of rays per thread, which could potentially mean a lot of wasted time in warps with a few super long running threads.
+–
+David.
+afatourechi
+June 3, 2019, 10:08am
+16
+Ok. I implemented David’s idea to be able to control number of rays per thread.
+Memory wise, there are three arrays that are sent to gpu:
+an array of surface points(here they are a grid of points just above room floor height)
+an array of Angles_Offset struct which holds total number of shadow rays for a pair of surface point-light source(rectangular window), and a pair of angles(phi, theta) to window bottom left corner. The method is not monte-carlo but to stratifying the light source and deterministically send shadow rays. The angles steps are fixed(dPhi =1 degree, dTheta = 0.15 of a degree) and so the total number of shadow rays are pre-calculated for all pairs of surface point-light source, before they are sent to gpu. Total number of shadow rays varies based on distance of surface point to light source. Having the starting angles plus total shadow rays for a pair of surfacePoint-lightSource, rays directions can be built up later in gpu kernel. A surface point can have more than one light source. it depends on the number of windows of the room(the room the point belongs to).
+an array of float which holds each ray result. It is assumed the sky is uniform and no further bounce is done hence irradiance scalar.
+I ran two tests with different models complexity(one small, one big), number of surface points, light sources. The source codes and algorithm for both optix, cuda are identical, all copy-paste.
+Here are the results:
+The variable is set to 1 ray per thread(launch size equals total number of rays). That is all that a kernel does is building up the ray direction, starting point using three above arrays and cast a shadow ray.
+Small model:
+total vertices: 4739
+total triangles: 12174
+total light sources(windows): 181
+total surface points: 18,258 size of first array <1MB
+total point-window pair: 63,133 size of second array <3MB
+Total rays: 312,045,607 launch size: 1248 MB
+CUDA: 1.14 seconds
+Optix: 5.69 seconds
+Bigger model:
+total vertices: 77036
+total triangles: 150351
+total light sources(windows): 421
+total surface points: 71,235 size of first array <2MB
+total point-window pair: 92,655 size of second array <3MB
+Total rays: 885,401,961 launch size: 3541 MB
+CUDA: 3 seconds
+Optix: 11.2 seconds
+I tried increasing the number of rays per thread to 4, 8, 16 and it slowed down the speed for both cuda and optix. For example with 8 rays per thread:
+Small model:
+CUDA: slowed down from 1.14 to 1.31 seconds
+Optix: slowed down from 5.69 to 6.6 seconds
+Bigger model:
+CUDA: slowed down from 3 to 3.2 seconds
+Optix: slowed down from 11.2 to 12.3 seconds
+Implementing David’s suggestion to send just few rays per thread(best seems to be one) almost dramatically speed up the calculation time for optix. I still hope there is room to improve the optix code in my project( I will upload the code for David). The cuda is however is much faster. This is a shame but as is, the speed difference is not promising and convincing to switch to optix to benefit from its lovely/handy raytracing framework for a developer.
+dhart
+June 3, 2019, 4:37pm
+17
+Thanks for the update!
+I will check out the new code and see if I can make the OptiX version run faster. I will also compare what happens with RTX hardware.
+Do your timings include OptiX program compilation? Or are you timing only the launch?
+So these results are very useful, thank you for tallying the ray totals. It looks like for the large workload you’re getting about 80M rays/sec., which isn’t extremely bad on a 1060, but not that great either, I think we would normally expect it to be somewhat faster, and your rays should be pretty fast compared to path tracing or heavy shading.
+In any case, it sounds like we’ve managed to speed up your process by around 3x in both cases, is that right? Whether or not OptiX is winning for you, I’m relieved my advice wasn’t totally bogus. :)
+–
+David.
+afatourechi
+June 4, 2019, 8:19am
+18
+The time is only the launch.
+The m_ThreadRays in Application class controls the number of rays per thread.
+I forgot to upload the model with larger workload. Here is the input model and room file:
+make sure to delete the cached .bvh file first.
+Yes your suggestion was awesome, thanks :)
+afatourechi
+January 12, 2021, 12:25pm
+19
+This is almost a year after this discussion. But I found that compiling with “-rdc=true” (Relocatable Device Code) is possibly the cause of speed reduction.
+The Raytracy sample code has all the cuda traversal and path tracing methods in one cu file and hence didn’t need to compile with -rdc flag.
+As the code gets bigger I had to separate methods in different cuh and cu files (specifically the IntersectBVH module) and that was when the performance came down similar to Optix. I guess Optix modules under the hood are built with -rdc flag (?) and hence the slow fps compare to single cu file in cuda ?
+This seems to be a known issue and “apparently the nvcc is not yet optimized at link stage”.
+droettger
+January 12, 2021, 1:31pm
+20
+Even if all device programs are inside a single file, note that using callables will require either the NVCC --keep-device-functions or --relocatable-device-code=true option. NVRTC only supports the latter. Otherwise the callables get removed as dead code because there is no call to them inside the module’s remaining code.
+That’s actually a setting in the OptiX SDK examples’ CMakeLists.txt files.
+Or here in my OptiX 7 examples
+Problems with callable functions
+next page →
+Related topics
+Topic
+Replies
+Views
+Activity
+How CUDA works within Optix
+OptiX
+cuda
+20
+1230
+March 25, 2025
+Help reduce the high register count of an Optix raytracer code
+OptiX
+11
+1824
+August 18, 2022
+OptiX 7 and MSVS 2017 - Hello World on Windows 10
+OptiX
+cuda
+,
+visual-studio
+9
+3470
+July 20, 2020
+How does optix code compilation work?
+OptiX
+24
+4367
+July 7, 2022
+Exploring the sample optixTriangle program
+OptiX
+4
+2004
+April 12, 2023
+Trimesh.ray equivalent in Optix
+OptiX
+1
+125
+April 17, 2026
+Baking to Texture
+OptiX
+19
+4074
+February 22, 2018
+Struct of vectors instead of vector of structs in Optix API
+OptiX
+5
+1745
+January 10, 2018
+optiXTutorial 11 - remove (free)GLUT
+OptiX
+36
+5242
+May 15, 2017
+Profiling optix
+OptiX
+10
+1792
+October 25, 2022

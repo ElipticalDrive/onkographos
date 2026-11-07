@@ -1,0 +1,84 @@
+# Zero Padding for Aliasing Reduction
+
+Also called: Spatial Zero Padding, Zero Padding
+
+## Overview
+Zero padding is a preprocessing step that extends the spatial volume with zeros to suppress overlapping between the central projection image and surrounding replicas in the spatial domain [S1]. It reduces aliasing artifacts caused by imperfect resampling filters by ensuring that energy in the stop band projects zeros instead of dataset data, thereby nullifying artifacts [S2, unofficial]. This method sets itself apart from filter design improvements by trading increased memory usage for artifact suppression without additional computational overhead during the rendering pass [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Original 3-D spatial dataset $V$ of dimensions $D_x \times D_y \times D_z$.
+- Output: Padded volume $V_{pad}$ of dimensions $D'_x \times D'_y \times D'_z$.
+
+**Data Structures:**
+- $V_{pad}$: A 3-D array with the same data type as $V$. The interior region corresponds to $V$, and the boundary region is filled with zeros.
+
+**Steps:**
+1. Determine the padding size. For 100% zero-padding, the new dimensions are doubled in each axis: $D'_x = 2D_x$, $D'_y = 2D_y$, $D'_z = 2D_z$ [S1].
+2. Allocate memory for $V_{pad}$ [G].
+3. Copy the original volume $V$ into the center of $V_{pad}$. The indices for the original data in the padded volume are:
+   $$ V_{pad}[i + \frac{D'_x}{2}, j + \frac{D'_y}{2}, k + \frac{D'_z}{2}] = V[i, j, k] $$
+   for $0 \le i < D_x$, $0 \le j < D_y$, $0 \le k < D_z$ [S1][S2, unofficial].
+4. Fill all remaining elements of $V_{pad}$ with zero [S1][S2, unofficial].
+
+**Parameters:**
+- Zero-padding factor: The ratio of padded size to original size. A factor of 2 (100% padding) is cited as a standard example [S1].
+
+**Edge Cases and Pitfalls:**
+- Memory usage increases significantly. 100% zero-padding increases memory requirements by a factor of 8 ($2^3$) [S1].
+- If the volume is not padded, rotating the volume results in overlapping artifacts between the central image and replicas [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def zero_pad_volume(V, pad_factor=2):
+    """
+    Zero pads a 3D volume to reduce aliasing.
+    
+    Args:
+        V: 3D numpy array of shape (Dx, Dy, Dz)
+        pad_factor: Integer multiplier for each dimension (e.g., 2 for 100% padding)
+        
+    Returns:
+        V_pad: 3D numpy array of shape (Dx*pad_factor, Dy*pad_factor, Dz*pad_factor)
+    """
+    Dx, Dy, Dz = V.shape
+    new_Dx = Dx * pad_factor
+    new_Dy = Dy * pad_factor
+    new_Dz = Dz * pad_factor
+    
+    # Initialize padded volume with zeros
+    V_pad = np.zeros((new_Dx, new_Dy, new_Dz), dtype=V.dtype)
+    
+    # Calculate start indices for copying original volume
+    start_x = (new_Dx - Dx) // 2
+    start_y = (new_Dy - Dy) // 2
+    start_z = (new_Dz - Dz) // 2
+    
+    # Copy original volume to center
+    V_pad[start_x:start_x+Dx, start_y:start_y+Dy, start_z:start_z+Dz] = V
+    
+    return V_pad
+```
+
+## Subtopics
+
+### [3D Image Resize and Crop](2703-3d-image-resize-and-crop.md)
+The parent method. Zero padding is applied before or during resize operations to prevent aliasing. Choose zero padding when high-frequency artifacts are unacceptable and memory is not the primary constraint.
+
+## Operating characteristics
+- **Time Complexity:** The padding operation itself is $O(N)$ where $N$ is the number of voxels in the padded volume. However, it adds no performance overhead to the subsequent rendering or transformation steps [S1].
+- **Memory Complexity:** Increases by a factor of $pad\_factor^3$. For 100% padding (factor of 2), memory usage increases by 8x [S1].
+- **Measured Performance:** Zero padding dramatically reduces overlapping artifacts with zero additional computational cost during the rendering pass [S1].
+- **Strengths:** Eliminates overlapping artifacts; no performance penalty during rendering; simple to implement [S1][S2, unofficial].
+- **Limitations:** High memory consumption, especially for large volumes or high padding factors [S1].
+- **When to use:** When aliasing artifacts from imperfect resampling filters are visible and memory resources allow for increased volume size [S1][S2, unofficial].
+- **When not to use:** When memory is severely constrained or the volume is already very large [S1].
+
+## Background
+Zero padding in the context of Fourier Volume Rendering (FVR) was introduced to address aliasing issues arising from the periodic nature of the discrete Fourier transform and imperfect resampling filters [S2, unofficial]. It is a key preprocessing step in high-performance GPU-based FVR pipelines [S1]. The technique is particularly relevant for Maximum Intensity Projection (MIP) and other frequency-domain rendering methods where rotation and resampling are performed [S1][S2, unofficial].
+
+## Sources
+[S1] High Performance GPU-Based Fourier Volume Rendering, https://doi.org/10.1155/2015/590727, fetched 2026-10-27
+[S2] Fourier volume rendering, https://shiftleft.com/mirrors/www.hpl.hp.com/techreports/95/HPL-95-73.pdf, fetched 2026-10-31 (unofficial)

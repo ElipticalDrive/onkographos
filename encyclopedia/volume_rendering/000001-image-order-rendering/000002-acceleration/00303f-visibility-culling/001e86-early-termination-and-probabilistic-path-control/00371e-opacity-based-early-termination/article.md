@@ -1,46 +1,37 @@
 # Opacity-based Early Termination
-Also called: Threshold-based Early Termination, Opacity Thresholding
+
 
 ## Overview
-Opacity-based Early Termination is a family of acceleration techniques for front-to-back volume ray casting that terminates ray traversal when the accumulated opacity exceeds a predefined threshold, thereby skipping redundant samples that would not significantly alter the final pixel color. It differs from its siblings by defining the general mechanism of threshold checks on accumulated opacity, whereas specific implementations like [Early Ray Termination](1019-early-ray-termination.md) focus on deterministic high thresholds and [Russian Roulette](1371-russian-roulette.md) introduces probabilistic unbiased correction.
+Opacity-based Early Termination is a family of acceleration techniques for image-order volume rendering that terminates ray traversal when the accumulated opacity exceeds a predefined threshold or when a probabilistic survival check fails. It solves the problem of redundant computation in transparent or semi-transparent volumes by exploiting the fact that once a ray strikes an opaque object or traverses sufficient distance, the accumulated color stabilizes and further samples do not significantly alter the final pixel color [S1][S8, unofficial][S9, unofficial]. Unlike siblings such as [Empty-space skipping](1002-empty-space-skipping.md) which skip empty regions, this family actively samples until a visibility threshold is met, and unlike [Bounding Volume Culling](1239-bounding-volume-culling.md) which uses geometric bounds, it uses radiometric accumulation. It builds on [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md).
 
 ## Shared principles
-The core mechanism shared by all methods in this family is the modification of the standard front-to-back compositing loop to include a termination condition. The standard loop updates accumulated color $C_{acc}$ and opacity $\alpha_{acc}$ as:
-$$ C_{acc} = C_{acc} + C_{sample} \cdot \alpha_{sample} \cdot (1 - \alpha_{acc}) $$
-$$ \alpha_{acc} = \alpha_{acc} + \alpha_{sample} \cdot (1 - \alpha_{acc}) $$
-[Parent](1791-early-termination-and-probabilistic-path-control.md).
+The standard front-to-back compositing loop updates the accumulated color $C_{acc}$ and accumulated opacity $\alpha_{acc}$ for each sample $i$ with color $C_i$ and opacity $\alpha_i$ as follows [7920-opacity-based-early-termination.md]:
 
-Methods in this family introduce a check after each sample (or at specific intervals) to determine if the loop should break. The decision is based on one of two criteria:
-1.  **Deterministic Threshold:** The accumulated opacity $\alpha_{acc}$ exceeds a predefined threshold $\tau$ (e.g., 0.95 or 1.0), or the transmittance $T = 1 - \alpha_{acc}$ drops below a small epsilon $\epsilon$. This introduces systematic bias by ignoring the ray tail [1019-early-ray-termination.md].
+$$ C_{acc} = C_{acc} + C_i \cdot \alpha_i \cdot (1 - \alpha_{acc}) $$
+$$ \alpha_{acc} = \alpha_{acc} + \alpha_i \cdot (1 - \alpha_{acc}) $$
+
+Methods in this family modify this loop by introducing a termination check after each sample (or at specific intervals). The traversal must be performed in front-to-back order to ensure $\alpha_{acc}$ correctly represents the occlusion of subsequent samples [7920-opacity-based-early-termination.md][S2].
+
+The termination decision is based on one of two criteria:
+1.  **Deterministic Threshold:** The loop breaks if $\alpha_{acc}$ exceeds a predefined threshold $\tau$ (e.g., 0.95) or if the transmittance $T = 1 - \alpha_{acc}$ drops below a small epsilon $\epsilon$. This introduces systematic bias by ignoring the ray tail [7920-opacity-based-early-termination.md].
 2.  **Probabilistic Survival:** A random number is compared against a survival probability derived from the current path weight or transmittance. If the path is terminated, its contribution is scaled by the inverse of the survival probability to maintain an unbiased estimator [1371-russian-roulette.md].
-
-All methods require the ray to be traversed in front-to-back order to ensure that accumulated opacity correctly represents the occlusion of subsequent samples [1019-early-ray-termination.md][S2, unofficial].
 
 ## Subtopics
 
 ### [Early ray termination](1019-early-ray-termination.md)
-Early Ray Termination (ERT) is an acceleration technique for front-to-back volume ray casting that terminates ray traversal when the accumulated opacity exceeds a predefined threshold, skipping redundant samples that would not significantly alter the final pixel color. It exploits the observation that once a ray strikes an opaque object or accumulates sufficient opacity through semi-transparent data, the ray color stabilizes. Unlike its sibling [Opacity-based Early Termination](7920-opacity-based-early-termination.md), which defines the general family of threshold checks, ERT specifically refers to the deterministic opacity threshold check (often $\alpha \ge 1.0$ or a high value like 0.95) without the probabilistic unbiased correction of [Russian Roulette](1371-russian-roulette.md). It is distinct from [Empty Space Skipping](52-name.md) (not listed in tree but implied by context), which skips transparent regions, whereas ERT skips opaque regions.
+Early Ray Termination (ERT) is an acceleration technique for image-order volume ray casting that stops ray traversal when the accumulated opacity exceeds a predefined threshold, neglecting irrelevant contributions from far-away regions. It solves the problem of redundant computation in transparent or semi-transparent volumes by exploiting the fact that once a ray strikes an opaque object or traverses sufficient distance through semi-transparent data, the accumulated color stabilizes and further samples do not significantly alter the final pixel color. Unlike its siblings in the opacity-based family, standard ERT uses a deterministic threshold (e.g., $\alpha_{acc} \ge 1.0$ or $0.95$) which introduces systematic bias, whereas variants like Russian Roulette use probabilistic survival to maintain unbiased estimators. It builds on [Opacity-based Early Termination](7920-opacity-based-early-termination.md).
 
 ### Low Opacity Skipping
-#### definition
-- [S1] An optimization technique where the opacity of a sample is checked before shading; if opacity is under a threshold, shading and compositing are skipped.
-#### step
-- [S1] Lookup opacity in transfer function.
-- [S1] If sample opacity > threshold, proceed to shading; otherwise skip.
+An optimization technique where the opacity of a sample is checked before shading; if opacity is under a threshold, shading and compositing are skipped [S3]. The step involves looking up the opacity in the transfer function and, if the sample opacity is greater than the threshold, proceeding to shading; otherwise, the operation is skipped [S3]. This is distinct from early termination as it skips individual samples rather than terminating the entire ray, though it is often used in conjunction with it.
 
 ### Early Termination
-#### definition
-- [S2, unofficial] A test-time rendering function that supports early stopping based on a maximum sample count and an epsilon threshold for accumulated opacity.
-#### step
-- [S2, unofficial] Reshape ray origins and viewdirs if 3D into 2D, identical to training pipeline.
-- [S2, unofficial] Define rgb_sigma_fn to query radiance field for RGB and sigma at midpoints, handling timestamps for temporal scenes.
-
-### parameter
-- [S2, unofficial] max_samples: int, maximum number of samples per ray. near_plane: float, default 0.0. far_plane: float, default 1e10. render_step_size: float, default 1e-3. cone_angle: float, default 0.0. alpha_thre: float, default 0.0. early_stop_eps: float, default 1e-4.
+A test-time rendering function that supports early stopping based on a maximum sample count and an epsilon threshold for accumulated opacity [S4, unofficial]. It defines parameters such as `max_samples`, `near_plane`, `far_plane`, `render_step_size`, `cone_angle`, `alpha_thre`, and `early_stop_eps` [S4, unofficial]. This variant is often associated with neural radiance fields (NeRF) where the termination is based on the learned density field's opacity accumulation.
 
 ## Background
-Early ray termination was introduced as a software ray casting optimization to speed up computation by terminating sampling, shading, and compositing once the ray reaches full opacity [S1]. It is particularly effective in hardware-accelerated volume rendering where shading operations dominate rendering time, although hardware blending constraints can make direct threshold checking difficult without expensive frame buffer reads [S13]. The technique is widely used in modern neural rendering pipelines, such as those utilizing occupancy grids, where it serves as a critical component for efficient test-time rendering by limiting sample counts based on opacity thresholds [S2, unofficial].
+The concept of early ray termination was introduced as an optimization to reduce the computational cost of volume rendering by avoiding unnecessary resampling in transparent regions [S1]. It is described as highly desirable for large production assets where lengthy precomputations impede productivity [S2]. The technique relies on the front-to-back compositing order, as back-to-front compositing does not allow for early termination based on accumulated opacity from the viewer's perspective [S17].
 
 ## Sources
-[S1] High-Quality Volume Rendering Using Texture Mapping ..., https://cfcs.pku.edu.cn/baoquan/docs/20180622110034067331.pdf, fetched 2026-10-27
-[S2] Yosshi999/faster-occgrid, https://github.com/Yosshi999/faster-occgrid, fetched 2026-10-24 (unofficial)
+[S1] Volume rendering on scalable shared-memory MIMD architectures, https://doi.org/10.1145/147130.147141, fetched 2026-10-25
+[S2] PDF Spectral and Decomposition Tracking for Rendering Heterogeneous Volumes, https://media.disneyanimation.com/uploads/production/publication_asset/158/asset/SpectralAndDecompositionTracking.pdf, fetched 2026-10-30
+[S3] High-Quality Volume Rendering Using Texture Mapping ..., https://cfcs.pku.edu.cn/baoquan/docs/20180622110034067331.pdf, fetched 2026-10-27
+[S4] Yosshi999/faster-occgrid, https://github.com/Yosshi999/faster-occgrid, fetched 2026-10-24 (unofficial)

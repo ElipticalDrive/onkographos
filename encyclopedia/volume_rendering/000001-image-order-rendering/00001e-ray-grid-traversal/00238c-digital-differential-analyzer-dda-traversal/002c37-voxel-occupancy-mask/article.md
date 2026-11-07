@@ -3,28 +3,28 @@
 Also called: Bitmask Brick Traversal
 
 ## Overview
-Voxel Occupancy Mask is an optimization for brick-level ray traversal that replaces per-brick occupancy flags with a 64-bit bitmask representing the occupancy of every voxel within a small brick. This allows the renderer to skip empty voxels inside an occupied brick without performing additional texture lookups for occupancy data. It differs from the parent [Digital Differential Analyzer (DDA) Traversal](3061-digital-differential-analyzer-dda-traversal.md) by introducing a finer-grained brick structure (4x4x4) and explicit bit-level occupancy checks, and from [OpenVDB DDA](2149-openvdb-dda.md) by using a dense bitmask rather than sparse hierarchical structures.
+Voxel Occupancy Mask is an optimization for brick-level ray traversal that replaces per-brick occupancy flags with a 64-bit bitmask representing the occupancy of every voxel within a small brick [S1, unofficial]. This allows the renderer to skip empty voxels inside an occupied brick without performing additional texture lookups for occupancy data [S1, unofficial]. It differs from the parent [Digital Differential Analyzer (DDA) Traversal](3061-digital-differential-analyzer-dda-traversal.md) by introducing a finer-grained brick structure (4×4×4) and explicit bit-level occupancy checks [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Ray origin, direction, inverse direction, delta values for DDA step, current brick cell coordinates.
-- Output: Palette index of the first occupied voxel hit, or 0 if the brick is empty or the ray exits without hitting occupied voxels.
+- Input: Ray origin, direction, inverse direction, DDA delta values, current brick cell coordinates, and texture/buffer resources.
+- Output: Palette index of the first occupied voxel hit, or 0 if the brick is empty or the ray exits without hitting occupied voxels [S1, unofficial].
 
 **Data Structures:**
-- `Texture3D<uint2> voxel_masks`: A 3D texture where each texel corresponds to a brick. The value is a `uint2` (64 bits total), storing the occupancy bits for the 64 voxels in that brick. The layout is linear: voxel index $i$ maps to bit $i$ within the 64-bit integer formed by the two 32-bit words.
-- `Texture3D<uint> voxels`: The voxel color/opacity grid.
-- `StructuredBuffer<uint> palette_rgba`: The color palette.
+- `Texture3D<uint2> voxel_masks`: A 3D texture where each texel corresponds to a brick [S1, unofficial]. The value is a `uint2` (64 bits total), storing the occupancy bits for the 64 voxels in that brick [S1, unofficial]. The layout is linear: voxel index $i$ maps to bit $i$ within the 64-bit integer formed by the two 32-bit words [S1, unofficial].
+- `Texture3D<uint> voxels`: The voxel color/opacity grid [S1, unofficial].
+- `StructuredBuffer<uint> palette_rgba`: The color palette [S1, unofficial].
 
 **Parameters:**
-- `VX_BRICK_EXT`: The side length of a brick in voxels. Set to 4. Total voxels per brick = $4^3 = 64$.
+- `VX_BRICK_EXT`: The side length of a brick in voxels. Set to 4 in this implementation, yielding $4^3 = 64$ voxels per brick [S1, unofficial].
 
 **Steps:**
-1. **Load Mask:** Load the 64-bit occupancy mask for the current brick from `voxel_masks`.
-   $$ \text{mask} = \text{voxel\_masks.Load}(\text{brick\_cell}, 0).rg $$
-2. **Check Brick Occupancy:** If both 32-bit words of the mask are zero, the brick is empty. Skip the brick.
+1. **Load Mask:** Load the 64-bit occupancy mask for the current brick from `voxel_masks` [S1, unofficial].
+   $$ \text{mask} = \text{voxel\_masks.Load}(\text{brick\_cell}, 0).\text{rg} $$
+2. **Check Brick Occupancy:** If both 32-bit words of the mask are zero, the brick is empty and can be skipped [S1, unofficial].
    $$ \text{if } (\text{any}(\text{mask} \neq \text{uint2}(0u, 0u))) $$
-3. **Trace Brick:** Call `trace_brick` with the ray parameters and the loaded mask.
-4. **Inside `trace_brick`:**
+3. **Trace Brick:** Perform DDA traversal within the brick bounds, using the loaded mask for occupancy checks [S1, unofficial].
+4. **Inside Traversal Loop:**
    a. Calculate the linear voxel index for the current local cell within the brick:
       $$ \text{voxel\_idx} = \text{local\_cell}.x + \text{local\_cell}.y \times \text{VX\_BRICK\_EXT} + \text{local\_cell}.z \times \text{VX\_BRICK\_EXT}^2 $$
    b. Determine which 32-bit word and bit corresponds to this voxel:
@@ -32,68 +32,85 @@ Voxel Occupancy Mask is an optimization for brick-level ray traversal that repla
       $$ \text{bit} = 1u \ll (\text{voxel\_idx} \& 31u) $$
    c. Check if the bit is set:
       $$ \text{if } ((\text{word} \& \text{bit}) \neq 0u) $$
-   d. If occupied, load the voxel color from the `voxels` texture at the brick-minimum plus local cell offset and return the palette index.
-   e. If not occupied, continue DDA traversal to the next voxel within the brick. If the ray exits the brick without finding an occupied voxel, return 0.
+   d. If occupied, load the voxel color from the `voxels` texture at the brick-minimum plus local cell offset and return the palette index [S1, unofficial].
+   e. If not occupied, advance the DDA to the next voxel within the brick [S1, unofficial].
+5. **Exit Condition:** If the ray exits the brick without finding an occupied voxel, return 0 [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Assume standard DDA variables: origin, dir, inv_dir, tdelta, brick_cell
-# Assume VX_BRICK_EXT = 4
+def voxel_occupancy_mask_traversal(origin, dir, brick_cell, voxel_masks, voxels, palette_rgba):
+    VX_BRICK_EXT = 4
+    brick_min = [brick_cell[i] * VX_BRICK_EXT for i in range(3)]
+    brick_max = [brick_min[i] + VX_BRICK_EXT for i in range(3)]
 
-def trace_brick_with_occupancy_mask(origin, dir, inv_dir, tdelta, brick_cell, voxel_masks):
-    # 1. Load the 64-bit mask (stored as uint2)
-    mask = voxel_masks.Load(int4(brick_cell, 0)).rg
-    
-    # 2. Check if brick has any occupied voxels
-    if any(mask != uint2(0u, 0u)):
-        # 3. Perform DDA within the brick, using mask for occupancy
-        # Note: Standard DDA logic for brick-local traversal is assumed here
-        # as the source only provides the occupancy check part.
-        # We iterate through voxels in the brick along the ray.
-        
-        # Initialize local cell to entry point of brick (or first voxel hit)
-        # This part relies on the parent DDA traversal logic to determine
-        # the starting local_cell within the brick.
-        local_cell = get_local_entry_cell(origin, dir, brick_cell, VX_BRICK_EXT)
-        
-        while is_inside_brick(local_cell, VX_BRICK_EXT):
-            # Calculate linear index
-            voxel_idx = local_cell.x + local_cell.y * VX_BRICK_EXT + local_cell.z * VX_BRICK_EXT * VX_BRICK_EXT
-            
-            # Check occupancy bit
-            word = mask[voxel_idx >> 5u]
-            bit = 1u << (voxel_idx & 31u)
-            
-            if (word & bit) != 0u:
-                # Occupied: Load color and return
-                # brick_min is the world-space minimum coordinate of the brick
-                color_idx = voxels.Load(int4(brick_min + local_cell, 0)).r
-                return color_idx
-            
-            # Advance DDA to next voxel
-            local_cell = advance_dda(local_cell, dir, inv_dir, tdelta, VX_BRICK_EXT)
-            
-        return 0 # No occupied voxel hit in this brick
-    else:
-        return 0 # Brick is empty
+    # Handle zero direction components [G]
+    inv_dir = [1.0 / d if d != 0.0 else 0.0 for d in dir]
+    step = [1 if d > 0 else -1 if d < 0 else 0 for d in dir]
+
+    # Compute brick entry/exit t [G]
+    t_entry = max((brick_min[i] - origin[i]) * inv_dir[i] if inv_dir[i] != 0 else (float('inf') if origin[i] < brick_min[i] else float('-inf')) for i in range(3))
+    t_exit = min((brick_max[i] - origin[i]) * inv_dir[i] if inv_dir[i] != 0 else (float('-inf') if origin[i] >= brick_max[i] else float('inf')) for i in range(3))
+
+    if t_exit < 0 or t_entry > t_exit:
+        return 0
+
+    t = max(t_entry, 0.0)
+    voxel = [int(origin[i] + t * dir[i]) for i in range(3)]
+
+    # Precompute next boundary and t_max [G]
+    next_boundary = [brick_min[i] + step[i] if step[i] != 0 else brick_min[i] for i in range(3)]
+    t_max = [abs(next_boundary[i] - origin[i]) * inv_dir[i] if inv_dir[i] != 0 else float('inf') for i in range(3)]
+
+    while t < t_exit:
+        if not all(brick_min[i] <= voxel[i] < brick_max[i] for i in range(3)):
+            break
+
+        # Load mask
+        mask = voxel_masks[brick_cell]
+        if mask[0] == 0 and mask[1] == 0:
+            return 0
+
+        # Calculate linear voxel index
+        local = [voxel[i] - brick_min[i] for i in range(3)]
+        voxel_idx = local[0] + local[1] * VX_BRICK_EXT + local[2] * VX_BRICK_EXT * VX_BRICK_EXT
+
+        # Check occupancy bit
+        word = mask[voxel_idx >> 5]
+        bit = 1 << (voxel_idx & 31)
+        if (word & bit) != 0:
+            color_idx = voxels[brick_min[0] + local[0], brick_min[1] + local[1], brick_min[2] + local[2]]
+            return palette_rgba[color_idx]
+
+        # Advance DDA [G]
+        min_t = min(t_max)
+        t += min_t
+        for i in range(3):
+            if t_max[i] == min_t:
+                voxel[i] += step[i]
+                next_boundary[i] += step[i]
+                t_max[i] = abs(next_boundary[i] - origin[i]) * inv_dir[i] if inv_dir[i] != 0 else float('inf')
+
+    return 0
 ```
 
 **Edge Cases and Pitfalls:**
-- **Precision:** Bitwise operations on large indices must be handled carefully to avoid overflow. The shift amount `voxel_idx & 31u` ensures the shift is within 0-31.
-- **Boundaries:** The DDA traversal must correctly handle the brick boundaries. If the ray enters or exits a brick, the `local_cell` calculation must be accurate.
-- **Degenerate Input:** If the ray is parallel to an axis, `inv_dir` may be infinite. Standard DDA handling applies.
+- **Precision:** Bitwise operations on large indices must be handled carefully to avoid overflow [S1, unofficial]. The shift amount `voxel_idx & 31` ensures the shift is within 0–31 [S1, unofficial].
+- **Boundaries:** The DDA traversal must correctly handle brick boundaries [S1, unofficial]. If the ray enters or exits a brick, the `local_cell` calculation must be accurate [S1, unofficial].
+- **Degenerate Input:** If the ray is parallel to an axis, `inv_dir` may be infinite or zero [S1, unofficial]. Standard DDA handling applies [G].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per brick for the occupancy check. Traversal within an occupied brick is proportional to the number of voxels traversed, but empty voxels are skipped without texture lookups.
-- **Memory Complexity:** Adds a `Texture3D<uint2>` for masks. For a 4x4x4 brick, this is 64 bits per brick, which is very compact.
-- **Performance:** In the specific implementation cited, this method performed worse than the parent commit in every scene. The smaller brick granularity (4x4x4) resulted in more bricks being visited along the ray, slowing down rendering, especially when viewing the model from afar [S1, unofficial].
-- **Strengths:** Eliminates texture lookups for occupancy checks within bricks.
-- **Limitations:** Increased number of bricks visited due to smaller size. The overhead of managing smaller bricks outweighed the benefit of skipping empty voxels in the tested scenes.
+- **Time Complexity:** $O(1)$ per brick for the occupancy check [S1, unofficial]. Traversal within an occupied brick is proportional to the number of voxels traversed, but empty voxels are skipped without texture lookups [S1, unofficial].
+- **Memory Complexity:** Adds a `Texture3D<uint2>` for masks [S1, unofficial]. For a 4×4×4 brick, this is 64 bits per brick, which is very compact [S1, unofficial].
+- **Performance:** In the specific implementation cited, this method performed worse than the parent commit in every scene [S1, unofficial]. The smaller brick granularity (4×4×4) resulted in more bricks being visited along the ray, slowing down rendering, especially when viewing the model from afar [S1, unofficial].
+- **Strengths:** Eliminates texture lookups for occupancy checks within bricks [S1, unofficial].
+- **Limitations:** Increased number of bricks visited due to smaller size [S1, unofficial]. The overhead of managing smaller bricks outweighed the benefit of skipping empty voxels in the tested scenes [S1, unofficial].
+- **When to use:** Not given in the sources.
+- **When not to use:** Not given in the sources.
 
 ## Background
-This method was introduced as an exploration in a voxel raytracer development log. It was implemented in commit `fdf44f3` on 2026-08-04 and reverted in commit `8cb6aae` on 2026-08-05 due to poor performance [S1, unofficial]. The author noted that while it performed better in some scenes with `VX_BRICK_EXT` set to 4, the overall impact was negative, suggesting potential for future reconsideration [S1, unofficial].
+This method was introduced as an exploration in a voxel raytracer development log [S1, unofficial]. It was implemented in commit `fdf44f3` on 2026-08-04 and reverted in commit `8cb6aae` on 2026-08-05 due to poor performance [S1, unofficial]. The author noted that while it performed better in some scenes with `VX_BRICK_EXT` set to 4, the overall impact was negative, suggesting potential for future reconsideration [S1, unofficial].
 
 ## Sources
 [S1] Voxel Raytracer Devlog // My thought repository, https://nelari.us/post/voxel-ray-tracing/, fetched 2026-10-24 (unofficial)

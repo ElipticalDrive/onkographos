@@ -2,125 +2,131 @@
 Also called: Transfer Function Evaluation
 
 ## Overview
-The Fast Classification Algorithm is an optimization technique for volume rendering that accelerates the evaluation of opacity transfer functions by skipping transparent regions of the volume and opaque regions of the image [S1, unofficial]. It solves the problem of redundant computation in ray casting or shear-warp rendering where many samples contribute zero opacity or are occluded by fully opaque foreground samples [S1, unofficial]. Unlike methods that pre-compute classification into run-length encodings (which prevents interactive transfer function experimentation), this method keeps the full volume data and evaluates the opacity transfer function dynamically during rendering [S1, unofficial]. It sets itself apart from [Post-classification Transfer Function Sampling](1272-post-classification-transfer-function-sampling.md) by using spatial coherence (octrees) and functional coherence (summed area tables) to prune the search space, rather than relying solely on sampling density.
+The Fast Classification Algorithm is a volume rendering optimization technique that accelerates the evaluation of opacity transfer functions by skipping transparent regions of the volume data [S1, unofficial]. It solves the problem of inefficiently processing voxels that contribute no visible light to the final image, specifically addressing the limitation of previous methods where transfer function experimentation required expensive preprocessing or run-length encoding [S1, unofficial]. It sets itself apart from its siblings by supporting arbitrary, user-defined multi-dimensional opacity functions evaluated at render time, whereas [Real-time transfer function evaluation](1551-real-time-transfer-function-evaluation.md) often relies on pre-classified data or fixed transfer functions [S2].
 
 ## How it works
-The method relies on two primary data structures: a **min-max octree** and a **summed area table (SAT)**, applied within a scanline-based rendering loop (such as Shear-Warp) [S1, unofficial].
+The method combines a spatial data structure (min-max octree) with a functional data structure (summed area table) to perform a "Region Transparency Test" before processing individual voxels.
 
-### Inputs and Outputs
-*   **Input:** A 3D voxel array $V$ of scalar values; an opacity transfer function $\alpha = f(p, q, \dots)$ where $p, q, \dots$ are parameters such as data value, gradient magnitude, etc. [S1, unofficial].
-*   **Output:** A 2D image where transparent regions are skipped, and non-transparent regions are classified and rendered [S1, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A 3D voxel array containing scalar data values; an opacity transfer function $f$ mapping parameter values to opacity $\alpha$.
+*   **Output:** A rendered image where transparent regions are skipped, reducing computational load.
 
-### Data Structures
+**Data Structures:**
+1.  **Min-Max Octree:** A hierarchical spatial index built during preprocessing. Each node stores the minimum and maximum values of the transfer function parameters (e.g., data value, gradient magnitude) for all voxels in its sub-cube [S1, unofficial]. This structure is independent of the view and the transfer function [S1, unofficial].
+2.  **Summed Area Table (SAT):** A pre-computed table derived from the opacity transfer function. It allows for the rapid calculation of the sum of opacity values over a range of parameter values [S1, unofficial].
+3.  **3D Voxel Array:** The raw volume data, accessed in scanline order [S1, unofficial].
 
-**1. Min-Max Octree**
-*   **Layout:** A hierarchical tree structure representing the 3D volume. Each node stores the minimum and maximum values of the transfer function parameters ($p_{min}, p_{max}, q_{min}, q_{max}, \dots$) for all voxels in its sub-cube [S1, unofficial].
-*   **Construction:** Built once at data loading time. It is independent of the view direction and the transfer function [S1, unofficial].
-*   **Purpose:** To quickly determine if a region of the volume contains any non-transparent values.
+**Algorithm Steps:**
 
-**2. Summed Area Table (SAT)**
-*   **Layout:** A multi-dimensional array (1D, 2D, or 3D depending on the number of parameters) storing the cumulative sum of the opacity function values. Let $T$ be the SAT. For a 1D case, $T[i] = \sum_{k=0}^{i} f(k)$ [S1, unofficial].
-*   **Construction:** Built just before rendering, based on the current transfer function $f$ and the discretized range of parameters [S1, unofficial].
-*   **Purpose:** To compute the sum of opacity values over a range of parameter values in $O(1)$ time.
+1.  **Preprocessing (Min-Max Octree):**
+    *   Traverse the 3D voxel array.
+    *   For each node in the octree, compute the minimum ($p_{min}, q_{min}, \dots$) and maximum ($p_{max}, q_{max}, \dots$) values of the parameters defining the transfer function for all voxels in the node's spatial extent [S1, unofficial].
+    *   Store these extrema in the node. This step is performed once at data loading [S1, unofficial].
 
-### Algorithm Steps
-
-1.  **Preprocessing:**
-    *   Build the min-max octree from the input voxel data [S1, unofficial].
-
-2.  **Initialization:**
+2.  **Transfer Function Setup (Summed Area Table):**
     *   Define the opacity transfer function $\alpha = f(p, q, \dots)$ [S1, unofficial].
-    *   Discretize the parameter space of $f$.
-    *   Build the Summed Area Table (SAT) for $f$ [S1, unofficial].
+    *   Discretize the parameter space of $f$ into a grid.
+    *   Compute the SAT for the opacity values. The SAT entry at index $(i, j, \dots)$ stores the cumulative sum of opacity values from the origin $(0, 0, \dots)$ to $(i, j, \dots)$ [S1, unofficial].
+    *   This step is performed just before rendering, allowing for interactive changes to the transfer function [S1, unofficial].
 
-3.  **Rendering Loop (per scanline):**
-    *   Identify the region of the volume intersected by the current scanline [S1, unofficial].
-    *   Traverse the min-max octree to find the extrema ($p_{min}, p_{max}, q_{min}, q_{max}, \dots$) of the parameters for the voxels in this region [S1, unofficial].
+3.  **Rendering Loop (Scanline-based):**
+    *   Use a parallel or perspective shear-warp algorithm to access voxels in scanline order [S1, unofficial].
+    *   For each scanline, determine the spatial region of the volume it intersects.
+    *   **Region Transparency Test:**
+        *   Identify the octree nodes covering the scanline's region.
+        *   Retrieve the parameter extrema ($p_{min}, p_{max}, \dots$) from the relevant octree nodes [S1, unofficial].
+        *   Calculate the sum of opacity values over the parameter range $[p_{min}, p_{max}] \times [q_{min}, q_{max}] \times \dots$ using the SAT. The sum $S$ is computed as:
+            $$ S = \sum_{p=p_{min}}^{p_{max}} \sum_{q=q_{min}}^{q_{max}} \dots f(p, q, \dots) $$
+            Using the SAT, this sum is retrieved in $O(1)$ time [S1, unofficial].
+        *   If $S = 0$, the entire region is transparent. Discard the scanline and skip to the next [S1, unofficial].
+        *   If the region is small enough (e.g., a single voxel or a small block), render it directly.
+        *   If the region is large and non-transparent, subdivide the scanline and region, and recurse [S1, unofficial].
 
-4.  **Region Transparency Test:**
-    *   Calculate the sum of opacity values for the entire parameter range defined by the extrema using the SAT. For a 1D parameter $p$, the sum is $S = T[p_{max}] - T[p_{min}-1]$ [S1, unofficial]. For multiple parameters, use the corresponding multi-dimensional SAT query [S1, unofficial].
-    *   If $S = 0$, the region is transparent everywhere. Discard the scanline (or sub-region) and skip processing [S1, unofficial].
-    *   If $S > 0$, the region may contain non-transparent voxels.
+4.  **Voxel Classification:**
+    *   For voxels in non-transparent regions, classify each voxel using a lookup table (LUT) based on the current transfer function [S1, unofficial].
+    *   Proceed with standard volume rendering accumulation (e.g., shear-warp) [S1, unofficial].
 
-5.  **Recursive Subdivision or Rendering:**
-    *   If the region is small enough (e.g., a single voxel or a small block), render it directly.
-    *   If the region is large, subdivide the scanline and the volume region, and recurse to step 4 [S1, unofficial].
-
-6.  **Voxel Classification:**
-    *   For voxels in non-transparent regions, classify each voxel using a lookup table (LUT) derived from $f$ [S1, unofficial].
-    *   Proceed with standard accumulation (e.g., shear-warp or ray casting). Note that opaque regions of the *image* still cause voxel processing to be skipped if the accumulation logic supports early termination [S1, unofficial].
-
-### Pseudocode
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def fast_classification_render(volume, transfer_function, image_width, image_height):
-    # Preprocessing: Build min-max octree once
+def fast_classification_render(volume, transfer_function, image_dimensions):
+    # Step 1: Preprocessing (done once)
     octree = build_min_max_octree(volume)
     
-    # Initialization: Build SAT for the current transfer function
-    # Discretize parameters p, q, ... into indices
+    # Step 2: Setup for rendering (done per transfer function change)
     sat = build_summed_area_table(transfer_function)
     
-    # Rendering: Process each scanline
-    for y in range(image_height):
-        for x in range(image_width):
-            # Determine the ray/scanline path through the volume
-            volume_region = get_volume_region_for_pixel(x, y)
+    # Step 3: Rendering
+    for scanline in generate_scanlines(image_dimensions):
+        region = get_volume_region_for_scanline(scanline, octree)
+        
+        if is_region_transparent(region, sat):
+            continue  # Skip transparent regions
             
-            # Get extrema from octree
-            extrema = octree.get_extrema(volume_region)
-            
-            # Test transparency using SAT
-            if is_transparent(extrema, sat):
-                continue  # Skip this region
-            
-            # If not transparent, render the region
-            render_region(volume_region, transfer_function, image, x, y)
+        render_scanline(scanline, volume, transfer_function, image_dimensions)
 
-def is_transparent(extrema, sat):
-    # extrema contains p_min, p_max, q_min, q_max, ...
-    # Calculate sum of opacity over the parameter range
-    # For 1D parameter p: sum = SAT[p_max] - SAT[p_min - 1]
-    # For multi-D, use inclusion-exclusion principle on SAT
+def build_min_max_octree(volume):
+    """
+    Builds an octree where each node stores min/max of parameters
+    for all voxels in its sub-cube.
+    """
+    # Implementation details for octree construction
+    # Not given in the sources. [G]
+    pass
+
+def build_summed_area_table(transfer_function):
+    """
+    Computes the 2D or 3D summed area table for the opacity function.
+    """
+    # Discretize parameter space
+    # Compute cumulative sums
+    # Not given in the sources. [G]
+    pass
+
+def is_region_transparent(region, sat):
+    """
+    Checks if the opacity sum over the region's parameter range is zero.
+    """
+    p_min, p_max = region.p_min, region.p_max
+    q_min, q_max = region.q_min, region.q_max
     
-    opacity_sum = query_sat(extrema, sat)
+    # Calculate sum using SAT
+    # Sum = SAT(p_max, q_max) - SAT(p_min-1, q_max) - SAT(p_max, q_min-1) + SAT(p_min-1, q_min-1)
+    # For 3D, extend inclusion-exclusion principle.
+    # Not given in the sources. [G]
+    opacity_sum = 0 
     
-    # If sum is 0, all values in the range are 0 (transparent)
     return opacity_sum == 0
 
-def query_sat(extrema, sat):
-    # Implementation depends on dimensionality of parameters
-    # Example for 1D:
-    p_min, p_max = extrema['p_min'], extrema['p_max']
-    if p_min == 0:
-        return sat[p_max]
-    else:
-        return sat[p_max] - sat[p_min - 1]
+def render_scanline(scanline, volume, transfer_function, image_dimensions):
+    """
+    Renders a non-transparent scanline.
+    """
+    # Classify voxels and accumulate
+    # Not given in the sources. [G]
+    pass
 ```
 
-### Parameters and Edge Cases
-*   **Quantization:** If parameters have large ranges, they must be quantized to keep the SAT size manageable [S1, unofficial].
-*   **Dimensionality:** If the transfer function depends on 3 parameters, a 3D SAT is required [S1, unofficial].
+**Parameters and Edge Cases:**
+*   **Parameter Quantization:** If the transfer function parameters have large ranges, they must be quantized to keep the SAT size manageable [S1, unofficial].
+*   **Dimensionality:** For $N$ parameters, an $N$-dimensional SAT is required [S1, unofficial].
 *   **Overhead:** Octree traversal and SAT computations add overhead. This can be reduced by caching transparency test results in the octree nodes [S1, unofficial].
-*   **Limitations:** The opacity transfer function must allow for integration (summation). Discontinuous functions may require careful handling or fine discretization [S1, unofficial].
 
 ## Subtopics
 
-### Region Transparency Test
-A specific optimization step within the Fast Classification Algorithm. It uses the min-max octree to obtain parameter extrema for a volume sub-cube and the SAT to determine if the integral of the opacity function over that parameter range is zero. If the sum is zero, the region is guaranteed to be transparent, allowing the renderer to skip it entirely [S1, unofficial]. Pitfalls include the need for quantization if parameter ranges are large, and the computational cost of building multi-dimensional SATs for high-dimensional transfer functions [S1, unofficial].
+### [Region Transparency Test](6496-region-transparency-test.md)
+The core optimization step of the Fast Classification Algorithm. It uses the min-max octree and SAT to determine if a volume region is transparent, allowing the renderer to skip processing those voxels. It sets itself apart by enabling dynamic transfer function evaluation without pre-classification.
 
 ## Operating characteristics
-*   **Time Complexity:** The preprocessing (octree build) is $O(N)$ where $N$ is the number of voxels. The SAT build is $O(M)$ where $M$ is the size of the discretized parameter space. Rendering time is reduced by skipping transparent regions, but overhead from octree traversal and SAT queries exists [S1, unofficial].
-*   **Memory Complexity:** Requires $O(N)$ for the octree and $O(M)$ for the SAT [S1, unofficial].
-*   **Strengths:** Allows interactive transfer function experimentation because classification is done at render time, not pre-computed [S1, unofficial]. Significantly speeds up rendering of volumes with large transparent areas [S1, unofficial].
-*   **Limitations:** Overhead from octree traversal and SAT computations can negate benefits for small volumes or volumes with little transparency [S1, unofficial]. The transfer function must be integrable or discretizable [S1, unofficial].
-*   **When to use:** When the volume has significant transparent regions and the transfer function is expected to change frequently during interaction [S1, unofficial].
-*   **When not to use:** When the volume is small, or when the transfer function is very complex and high-dimensional, making the SAT too large [S1, unofficial].
+*   **Time Complexity:** The preprocessing of the min-max octree is $O(N)$ where $N$ is the number of voxels. The SAT construction is $O(M)$ where $M$ is the size of the parameter grid. During rendering, the transparency test is $O(1)$ per region using the SAT, but octree traversal adds logarithmic overhead. The overall speedup depends on the sparsity of the volume and the transparency of the transfer function.
+*   **Memory Complexity:** Requires storage for the min-max octree ($O(N)$) and the SAT ($O(M)$). The SAT size can become prohibitive for high-dimensional transfer functions or large parameter ranges [S1, unofficial].
+*   **Strengths:** Allows interactive modification of transfer functions without re-preprocessing the volume data. Significantly reduces computation for volumes with large transparent regions [S1, unofficial].
+*   **Limitations:** Overhead from octree traversal and SAT computation. Restricted to opacity functions that can be discretized and summed. Does not handle opaque regions of the image as efficiently as other methods (opaque regions still cause voxel processing to be skipped only if the region test fails, but the text notes "opaque regions of the image still cause voxel processing to be skipped" which implies the algorithm handles opacity accumulation, but the primary gain is skipping transparent volume regions) [S1, unofficial].
 
 ## Background
-The Fast Classification Algorithm was presented in the context of Shear-Warp volume rendering [S1, unofficial]. It addresses the limitation of earlier algorithms that performed classification in run-length encoding, which prevented real-time transfer function experimentation [S1, unofficial]. The method builds on the concept of Summed Area Tables, originally developed by Crow (1984) for texture mapping [S1, unofficial].
+The Fast Classification Algorithm was introduced in the context of Shear-Warp volume rendering. It addresses the limitations of earlier algorithms that performed classification during run-length encoding, which prevented real-time experimentation with transfer functions [S1, unofficial]. The method builds on the concept of the Summed Area Table, originally developed by Crow in 1984 for texture mapping [S1, unofficial].
 
 ## Sources
 [S1] PDF Shear-Warp Volume Rendering - Computer Science, https://www.cs.unh.edu/~cs880/lectureNotes/ShearWarp.color.pdf, fetched 2026-10-27 (unofficial)

@@ -3,99 +3,120 @@
 Also called: Density Field Meshing
 
 ## Overview
-Extracts a triangle mesh from a trained Neural Radiance Field (NeRF) by evaluating the learned volume density $\sigma$ on a 3D grid and applying the marching cubes algorithm at a specific threshold [S1, unofficial]. It differs from adaptive methods like MISE [MISE (Meshing Isosurfaces by Extracting)](977-mise-meshing-isosurfaces-by-extracting.md) by using a fixed uniform grid, which is simpler to implement but less efficient for complex geometries, and from differentiable methods like FlexiCubes [FlexiCubes](3669-flexicubes.md) by producing a static mesh without gradient-based optimization of the surface vertices [Parent](6371-neural-and-learning-based-extraction.md).
+This method extracts a triangle mesh from a trained Neural Radiance Field (NeRF) by querying the learned density field $\sigma$ on a 3D grid and applying the marching cubes algorithm at a specific threshold [S1, unofficial]. It solves the problem of converting a volumetric, implicit representation into an explicit, watertight geometric mesh suitable for standard rendering pipelines or downstream geometry processing. It differs from its siblings, MISE and FlexiCubes, by relying on a fixed-resolution regular grid and a static isosurface threshold rather than adaptive refinement or learned cube templates [977-mise-meshing-isosurfaces-by-extracting.md][3669-flexicubes.md].
 
 ## How it works
-**Inputs:**
-- `coarse_model`: A trained NeRF MLP (or hierarchy) capable of querying volume density $\sigma$ given 3D coordinates.
-- `resolution`: Integer, the side length of the cubic query grid (default 128) [S1, unofficial].
-- `scene_scale`: Float, half-extent of the bounding box containing the scene (default 1.5) [S1, unofficial].
-- `sigma_threshold`: Float, the density value defining the isosurface (default 50.0) [S1, unofficial].
-- `chunk`: Integer, number of points to query per batch to manage memory (default 32768) [S1, unofficial].
-
-**Outputs:**
-- `verts`: Array of shape $[V, 3]$ containing vertex coordinates in world space.
-- `faces`: Array of shape $[F, 3]$ containing triangle indices.
-- `normals`: Array of shape $[V, 3]$ containing vertex normals (optional, computed by marching cubes).
+**Inputs and Outputs:**
+*   **Input:** A trained NeRF model (typically a coarse/fine hierarchy), the scene bounding box defined by `scene_scale`, and extraction parameters (`resolution`, `sigma_threshold`, `chunk`).
+*   **Output:** A triangle mesh defined by vertices `verts`, faces `faces`, and normals `normals` in world coordinates.
 
 **Data Structures:**
-- `lin`: 1D tensor of shape $[resolution]$.
-- `pts`: 2D tensor of shape $[resolution^3, 3]$.
-- `sigma_grid`: 3D tensor of shape $[resolution, resolution, resolution]$.
+*   **Grid:** A 3D tensor of shape `[resolution, resolution, resolution]` storing scalar density values $\sigma$.
+*   **Points:** A 2D tensor of shape `[N, 3]` where $N = resolution^3$, containing the 3D coordinates of grid vertices.
 
 **Steps:**
-1.  **Grid Generation**: Create a 1D linear space from $-scene\_scale$ to $scene\_scale$ with `resolution` points:
-    $$ lin = \text{linspace}(-scene\_scale, scene\_scale, resolution) $$
-    Create a 3D meshgrid using `lin` for x, y, and z axes. Note that NeRF conventions often swap Y and Z axes relative to standard Cartesian coordinates. Stack the coordinates into a point cloud tensor `pts` of shape $[resolution^3, 3]$ [S1, unofficial].
-    *Pitfall*: Ensure Y and Z axes are swapped if the NeRF model expects coordinates in the format $(x, z, y)$ or similar, as standard meshgrid indexing may differ from the training data convention [S1, unofficial].
-
-2.  **Density Querying**: Evaluate the density $\sigma$ for all points in `pts` using the trained `coarse_model`. To avoid out-of-memory errors, process `pts` in batches of size `chunk`. For each batch $i$, query the model:
-    $$ \sigma_i = \text{coarse\_model}(pts[i:i+chunk]) $$
-    Concatenate the results to form a flat array of densities.
-
-3.  **Reshaping**: Reshape the flat density array into a 3D tensor `sigma_grid` of shape $[resolution, resolution, resolution]$ [S1, unofficial].
-
-4.  **Marching Cubes**: Apply the marching cubes algorithm to `sigma_grid` with `level = sigma_threshold` to extract the isosurface. This returns vertices, faces, normals, and values [S1, unofficial].
-
-5.  **Coordinate Rescaling**: The vertices returned by marching cubes are in grid indices $[0, resolution-1]$. Rescale them to world coordinates:
-    $$ verts_{world} = \frac{verts_{grid}}{resolution - 1} \times (2 \times scene\_scale) - scene\_scale $$
-    This maps the grid range $[0, resolution-1]$ to $[-scene\_scale, scene\_scale]$ [S1, unofficial].
+1.  **Grid Generation:** Create a 1D linearly spaced array `lin` from `-scene_scale` to `scene_scale` with `resolution` points. Generate a 3D meshgrid using `torch.meshgrid(lin, lin, lin, indexing="ij")` to produce coordinate tensors `xx`, `yy`, `zz`. Stack these into a point tensor `pts` of shape `[resolution^3, 3]`. Note: The Y and Z axes are swapped during stacking (`[xx, zz, yy]`) to match the NeRF coordinate convention where Y is up and Z is forward/backward [S1, unofficial].
+2.  **Density Query:** Query the NeRF model for density $\sigma$ at each point in `pts`. To manage memory, this is done in batches of size `chunk`. For each batch `i`, pass `pts[i:i+chunk]` to the coarse NeRF model (directions are dummy/ignored for density-only query) to obtain $\sigma$. Concatenate results to form the full density array.
+3.  **Reshaping:** Reshape the concatenated 1D density array into a 3D grid of shape `[resolution, resolution, resolution]`.
+4.  **Marching Cubes:** Apply the marching cubes algorithm to the density grid using `sigma_threshold` as the isovalue. This returns vertices, faces, normals, and a gradient array.
+5.  **Coordinate Rescaling:** The marching cubes algorithm returns vertices in grid index space `[0, resolution-1]`. Rescale these to world coordinates using the formula:
+    $$ \text{verts}_{world} = \frac{\text{verts}_{grid}}{\text{resolution} - 1} \times (2 \times \text{scene\_scale}) - \text{scene\_scale} $$
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import torch
+import numpy as np
 from skimage import measure
 
 def extract_mesh(coarse_model, resolution=128, scene_scale=1.5, sigma_threshold=50.0, chunk=32768):
-    # 1. Grid Generation
+    """
+    Extract a mesh from a NeRF density field using marching cubes.
+    
+    Args:
+        coarse_model: The trained NeRF model (coarse stage).
+        resolution: Voxel grid resolution.
+        scene_scale: Half-extent of the query box.
+        sigma_threshold: Iso-value for the surface.
+        chunk: Number of points queried per batch.
+        
+    Returns:
+        verts: [V, 3] World space vertices.
+        faces: [F, 3] Face indices.
+        normals: [V, 3] Vertex normals.
+    """
+    # 1. Create 1D coordinate array
     lin = torch.linspace(-scene_scale, scene_scale, resolution, device=coarse_model.device)
+    
+    # 2. Create 3D grid
     xx, yy, zz = torch.meshgrid(lin, lin, lin, indexing="ij")
-    # NeRF convention often swaps Y and Z; adjust if necessary
+    
+    # 3. Stack and reshape to points (swap Y/Z for NeRF convention)
     pts = torch.stack([xx, zz, yy], dim=-1).reshape(-1, 3)
     
-    # 2. Density Querying
+    # 4. Query density sigma in chunks
     sigma_list = []
-    with torch.no_grad():
-        for i in range(0, pts.shape[0], chunk):
-            batch_pts = pts[i:i+chunk]
-            # Query density; dummy_dirs may be required by the model signature
-            _, sigma = coarse_model(batch_pts, batch_pts) 
-            sigma_list.append(sigma)
-    sigma_flat = torch.cat(sigma_list, dim=0)
+    num_points = pts.shape[0]
     
-    # 3. Reshaping
-    sigma_grid = sigma_flat.reshape(resolution, resolution, resolution)
+    # Dummy directions tensor (shape [N, 3]) - values do not affect density query
+    dummy_dirs = torch.zeros_like(pts) 
     
-    # 4. Marching Cubes
-    verts, faces, normals, _ = measure.marching_cubes(sigma_grid.cpu().numpy(), level=sigma_threshold)
+    for i in range(0, num_points, chunk):
+        end_idx = min(i + chunk, num_points)
+        batch_pts = pts[i:end_idx]
+        batch_dirs = dummy_dirs[i:end_idx]
+        
+        # Query the coarse model
+        # Assuming model returns (rgb, sigma) or similar; we only need sigma
+        # [G] Implementation detail: The specific return signature of coarse_model
+        # depends on the NeRF implementation. Here we assume it returns a tuple
+        # where the second element is sigma.
+        _, sigma = coarse_model(batch_pts, batch_dirs)
+        
+        sigma_list.append(sigma)
+        
+    # 5. Concatenate and reshape to [resolution, resolution, resolution]
+    sigma_grid = torch.cat(sigma_list, dim=0).reshape(resolution, resolution, resolution)
     
-    # 5. Coordinate Rescaling
-    verts = verts / (resolution - 1) * (2 * scene_scale) - scene_scale
+    # 6. Run marching cubes
+    # [G] skimage.measure.marching_cubes expects a numpy array
+    verts_grid, faces, normals, _ = measure.marching_cubes(sigma_grid.cpu().numpy(), level=sigma_threshold)
+    
+    # 7. Rescale vertices from [0, resolution] to world coordinates
+    # Formula: v_world = (v_grid / (res - 1)) * (2 * scale) - scale
+    verts = verts_grid / (resolution - 1) * (2 * scene_scale) - scene_scale
     
     return verts, faces, normals
 ```
 
+**Parameters:**
+*   `resolution`: Voxel grid resolution. Default: 128 [S1, unofficial].
+*   `scene_scale`: Half-extent of the query box. Default: 1.5 [S1, unofficial].
+*   `sigma_threshold`: Iso-value for the surface. Default: 50.0 [S1, unofficial].
+*   `chunk`: Number of points queried per batch. Default: 32768 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Coordinate Convention:** The Y and Z axes must be swapped during grid creation to match the NeRF coordinate system (Y-up, Z-forward). Failure to do so results in a rotated mesh [S1, unofficial].
+*   **Threshold Selection:** The `sigma_threshold` is critical. Too low, and the mesh is noisy or incomplete; too high, and it shrinks or disappears. The value 50.0 is specific to the Blender dataset normalization [S1, unofficial].
+*   **Memory:** Querying the entire grid at once can exceed GPU memory. Chunking is necessary for high resolutions.
+
 ## Subtopics
 
-### [NeRF-based Mesh Extraction with Color Fusion](7372-nerf-based-mesh-extraction-with-color-fusion.md)
-Extracts a textured 3D mesh from a trained NeRF by combining isosurface extraction with a color fusion strategy that aggregates information from multiple training views [NeRF-based Mesh Extraction with Color Fusion](7372-nerf-based-mesh-extraction-with-color-fusion.md). It solves the problem of generating a watertight, color-accurate mesh from a volumetric representation that lacks explicit geometry and consistent surface color. It differs from basic NeRF mesh extraction [Parent](4104-nerf-density-field-mesh-extraction.md) by replacing simple vertex shading with a multi-view color fusion process that weights colors by occlusion and depth, or by using vertex normals to query the NeRF, thereby reducing artifacts from single-view sampling [NeRF-based Mesh Extraction with Color Fusion](7372-nerf-based-mesh-extraction-with-color-fusion.md).
-
 ### Differentiable Marching Tetrahedrons (DMTet)
-A differentiable surface extraction method used to create a triangle mesh from a Signed Distance Field (SDF) [S2, unofficial]. Introduced by Shen et al. in 2021 [S2, unofficial]. It is used in frameworks like JOC to generate triangle meshes initialized by the SDF from a neural field, allowing for joint optimization of geometry, material, and light [S2, unofficial].
+A differentiable surface extraction method used to create a triangle mesh from a Signed Distance Field (SDF) [S2, unofficial]. Introduced by Shen et al. in 2021, it is used in methods like JOC to generate triangle meshes initialized by the SDF from a neural field, allowing for joint optimization of geometry, material, and light through backpropagation [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: $O(N \cdot Q)$, where $N$ is the number of grid points ($resolution^3$) and $Q$ is the cost of a single NeRF query. Marching cubes is $O(N)$.
-- **Memory Complexity**: $O(N)$ for storing the density grid and intermediate query results. High-resolution grids (e.g., 256+) can exceed GPU memory, necessitating chunked querying [S1, unofficial].
-- **Performance**: Fast and deterministic. Performance depends heavily on the resolution and the speed of the NeRF inference.
-- **Strengths**: Simple to implement; produces watertight meshes; leverages existing NeRF training infrastructure.
-- **Limitations**: Fixed grid resolution may miss fine details or include noise; requires careful tuning of `sigma_threshold`; Y/Z axis swapping pitfalls [S1, unofficial]; does not support differentiable optimization of the mesh geometry itself.
-- **When to use**: When a quick, static mesh is needed from a pre-trained NeRF and high-fidelity differentiable optimization is not required.
-- **When not to use**: When adaptive resolution is needed (use MISE) or when the mesh needs to be optimized for downstream tasks like rendering or physics (use DMTet or FlexiCubes).
+*   **Time Complexity:** $O(N \cdot M)$ where $N$ is the number of grid points ($resolution^3$) and $M$ is the cost of a single NeRF forward pass. The marching cubes step is $O(resolution^3)$ but is negligible compared to the neural query.
+*   **Memory Complexity:** $O(N)$ for storing the grid and intermediate query results. Chunking reduces peak memory usage for the query phase.
+*   **Performance:** Depends heavily on the NeRF model size and resolution. A 128^3 grid with a standard MLP NeRF can take several minutes to query on a modern GPU.
+*   **Strengths:** Simple to implement; produces watertight meshes; leverages mature marching cubes implementations.
+*   **Limitations:** Fixed resolution leads to aliasing or excessive memory usage; sensitive to the choice of `sigma_threshold`; does not adapt to surface complexity.
+*   **When to use:** When a quick, approximate mesh is needed from a standard NeRF without complex optimization.
+*   **When not to use:** When high-fidelity geometry is required (use MISE or FlexiCubes) or when the scene is very large (requires octree-based approaches).
 
 ## Background
-Originated from the standard post-processing pipeline for Neural Radiance Fields (NeRF) [S1, unofficial]. The method leverages the fact that NeRFs learn a volume density field $\sigma(\mathbf{x})$, which can be treated as an implicit surface definition when thresholded. It builds on the classic marching cubes algorithm [S1, unofficial].
+This method is a standard post-processing step for NeRFs, popularized by the original NeRF paper and subsequent implementations like the one in the `nerf-3d-vision` repository [S1, unofficial]. It bridges the gap between implicit neural representations and explicit mesh-based rendering.
 
 ## Sources
 [S1] yashtmy/nerf-3d-vision, https://github.com/yashtmy/nerf-3d-vision, fetched 2026-10-26 (unofficial)

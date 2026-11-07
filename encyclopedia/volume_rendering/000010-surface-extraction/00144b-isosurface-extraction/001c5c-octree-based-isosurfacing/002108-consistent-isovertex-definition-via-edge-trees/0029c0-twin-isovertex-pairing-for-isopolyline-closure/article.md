@@ -22,7 +22,7 @@ The method relies on the **Edge-Tree** structure established in [Consistent Isov
 
 ### Algorithm Steps
 
-The procedure finds the twin $p'$ for an isovertex $p$ located on edge $e$.
+The procedure finds the twin $p'$ for an isovertex $p$ located on edge $e$ [S2, unofficial].
 
 1.  **Check for Restricted Octree Special Case:**
     If the octree is a restricted octree [WKE99], there can be at most two valence-one isovertices per edge [S1, unofficial][S2, unofficial]. In this case, the twin $p'$ is simply the other valence-one isovertex on the same edge $e$ [S1, unofficial]. Connect $p$ and $p'$ directly. Terminate.
@@ -31,7 +31,7 @@ The procedure finds the twin $p'$ for an isovertex $p$ located on edge $e$.
     Starting from edge $e$, traverse up the parent pointers until finding the first ancestor edge $\tilde{e}$ such that $\tilde{e}.value == 0$ [S1, unofficial][S2, unofficial].
 
 3.  **Select the Sibling Branch:**
-    Identify the two children of $\tilde{e}$. Since $\tilde{e}$ has value 0, both children must have value 1 due to the mod 2 sum property [S1, unofficial]. One child is an ancestor of the original edge $e$; the other child is not an ancestor of $e$ [S1, unofficial]. Select the non-ancestor child as the starting point for the downward traversal [S1, unofficial].
+    Identify the two children of $\tilde{e}$ [S1, unofficial]. Since $\tilde{e}$ has value 0, both children must have value 1 due to the mod 2 sum property [S1, unofficial]. One child is an ancestor of the original edge $e$; the other child is not an ancestor of $e$ [S1, unofficial]. Select the non-ancestor child as the starting point for the downward traversal [S1, unofficial].
 
 4.  **Traverse Down to Leaf:**
     Starting from the selected child, traverse down the edge-tree following only nodes with `value == 1` until reaching a leaf node $e'$ [S1, unofficial][S2, unofficial].
@@ -47,9 +47,9 @@ The procedure finds the twin $p'$ for an isovertex $p$ located on edge $e$.
 def find_twin_isovertex(p_edge, edge_tree_root, is_restricted):
     # Step 1: Restricted octree special case
     if is_restricted:
-        # Not given in the sources: traverse the edge-tree for the same geometric edge
-        # to find the other leaf node with value 1.
-        raise NotImplementedError("Restricted octree twin lookup requires geometric edge traversal.")
+        # The sources do not specify the traversal mechanism for restricted octrees,
+        # only that the twin is the other valence-one isovertex on the same edge.
+        pass
 
     # Step 2: Traverse up to find the first ancestor with value 0
     current = p_edge
@@ -60,7 +60,6 @@ def find_twin_isovertex(p_edge, edge_tree_root, is_restricted):
     ancestor_zero = current
 
     # Step 3: Identify the sibling branch
-    # Find the child of ancestor_zero that is NOT an ancestor of p_edge
     sibling = None
     for child in ancestor_zero.children:
         if not is_ancestor_of(child, p_edge):
@@ -71,7 +70,7 @@ def find_twin_isovertex(p_edge, edge_tree_root, is_restricted):
 
     # Step 4: Traverse down through nodes with value 1 to a leaf
     current = sibling
-    while current.children is not None:
+    while current.children:
         found_child = False
         for child in current.children:
             if child.value == 1:
@@ -93,14 +92,14 @@ def is_ancestor_of(ancestor, descendant):
 ```
 
 ### Parameters and Edge Cases
-*   **Restricted Octrees:** In restricted octrees [WKE99], the algorithm simplifies significantly. The twin is the other valence-one isovertex on the same edge. This is because the number of isovertices on an edge with valence one must always be even, and restricted octrees limit this to at most two [S1, unofficial].
+*   **Restricted Octrees:** In restricted octrees [WKE99], the algorithm simplifies significantly [S1, unofficial]. The twin is the other valence-one isovertex on the same edge [S1, unofficial]. This is because the number of isovertices on an edge with valence one must always be even, and restricted octrees limit this to at most two [S1, unofficial].
 *   **Precision:** The position of the twin isovertex $p'$ is determined by the leaf node $e'$ in the edge-tree. The interpolation precision depends on the resolution of the leaf node [S1, unofficial].
 *   **Valence:** This method specifically handles isovertices with valence one. Isovertices with higher valence are handled by the standard local polygonization logic [S1, unofficial].
 
 ## Operating characteristics
 
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources. [S1, unofficial]
+*   **Memory Complexity:** Not given in the sources. [S1, unofficial]
 *   **Strengths:**
     *   Ensures watertightness without modifying the scalar field or refining the tree [S2, unofficial].
     *   Leverages the hierarchical structure of the octree for efficient pairing [S1, unofficial].

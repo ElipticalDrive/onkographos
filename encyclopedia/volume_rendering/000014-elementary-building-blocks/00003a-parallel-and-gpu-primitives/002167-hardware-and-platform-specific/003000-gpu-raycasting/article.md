@@ -1,0 +1,158 @@
+# GPU Raycasting
+
+Also called: GPU Fragment Program Ray Casting, Hardware-accelerated Volume Raycasting, Ray-casting algorithm base on GPU, Ray-casting algorithm based GPU, Stegmaier's approach, rectilinear volume ray caster on GPU
+
+## Overview
+GPU Raycasting is a volume rendering technique that generates 2D images from 3D data fields by casting rays through the volume, where the calculation of resampling and image synthesis is processed by the GPU fragment shader for parallel computation [S2]. It approximates the volume rendering integral by sampling at a finite number of positions along each ray [S1, unofficial]. Unlike parallel transfer (PT) or visibility-ordering methods, it appears to sidestep the explicit need for computing visibility orders and many associated accuracy issues, though it introduces its own limitations regarding ray-triangle intersection accuracy and memory constraints [S4, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** 3D volume data (loaded as a 3D texture), transfer function (loaded as a 1D texture), opacity function (loaded as a 1D texture), ray entry point ($p_{in}$), ray exit point ($p_{out}$), and sampling step size ($rayDir$) [S2].
+*   **Outputs:** Final color ($destColor$) and opacity ($1.0 - remainOpacity$) for each pixel [S2].
+
+**Data Structures:**
+*   **3D Texture:** Stores the scalar volume data. Accessed via `texture3D` [S2].
+*   **1D Texture:** Stores the transfer function mapping scalar values to color and opacity. Access via `texture1D` [S2].
+*   **Variables:**
+    *   $pos$: Current sampling position in world/texture coordinates.
+    *   $destColor$: Accumulated color (RGB + A).
+    *   $remainOpacity$: Accumulated transparency (initially $1.0$).
+    *   $t$: Counter for sampling steps.
+    *   $t_{Max}$: Maximum number of sampling points (determined by volume extent and step size).
+    *   $inside$: Boolean flag indicating if the current sample is within the volume bounds and opacity threshold [S2].
+
+**Parameters:**
+*   $p_{in}$: Position of the ray entering the data volume [S2].
+*   $p_{out}$: Position of the ray running out of the data volume [S2].
+*   $rayDir$: Distance of the resampling point (step size) [S2].
+*   Threshold for opacity: $0.0039$ (equivalent to $1/255$) [S2].
+
+**Algorithm Steps:**
+1.  **Initialization:**
+    *   Calculate $p_{in}$ and $p_{out}$ based on the view direction and volume bounding box.
+    *   Convert $p_{in}$ and $p_{out}$ to volume texture coordinates.
+    *   Calculate $rayDir$ based on the volume data resolution and desired sampling density [S2].
+    *   Initialize $destColor$ to the initial color (typically black or background) [S2].
+    *   Initialize $remainOpacity \leftarrow 1.0 - destColor.a$ [S2].
+    *   Initialize $pos \leftarrow p_{in}$ [S2].
+    *   Initialize $t \leftarrow 0$ [S2].
+
+2.  **Ray Marching Loop:**
+    *   While $inside$ is true:
+        *   Sample the volume texture at $pos$: $value \leftarrow texture3D(dataSetTexture, pos)$ [S2].
+        *   Map the scalar value to a transfer function index: $scalar \leftarrow scalarFromValue(value)$ [S2].
+        *   Retrieve opacity from the 1D opacity texture: $opacity \leftarrow texture1D(opacityTexture, scalar)$ [S2].
+        *   If $opacity > 0.0$:
+            *   Calculate the color contribution: $color \leftarrow shade(value)$ [S2].
+            *   Modulate color by opacity: $color \leftarrow color \times opacity$ [S2].
+            *   Update accumulated color: $destColor \leftarrow destColor + color \times remainOpacity$ [S2].
+            *   Update remaining opacity: $remainOpacity \leftarrow remainOpacity \times (1.0 - opacity)$ [S2].
+        *   Advance position: $pos \leftarrow pos + rayDir$ [S2].
+        *   Increment step counter: $t \leftarrow t + 1.0$ [S2].
+        *   Check termination conditions:
+            *   If $t \ge t_{Max}$, set $inside \leftarrow false$ [S2].
+            *   If $remainOpacity < 0.0039$, set $inside \leftarrow false$ [S2].
+            *   If $pos - p_{in} > p_{out} - p_{in}$, the point is out of volume data; set $inside \leftarrow false$ [S2].
+
+3.  **Output:**
+    *   Output $destColor$ as the fragment color [S2].
+    *   Output $1.0 - remainOpacity$ as the fragment alpha [S2].
+
+**Formulas:**
+*   Sampling position:
+    $$ pos = p_{in} + i \times rayDir \times \text{normalize}(p_{out} - p_{in}) $$
+    where $i \in \mathbb{N}$ is the index of the resampling point [S2].
+*   Color accumulation:
+    $$ destColor_i = destColor_{i-1} + color \times remainOpacity_{i-1} $$
+    where $destColor_i$ is the color value after passing through the $i$-th volume element [S2].
+*   Opacity accumulation:
+    $$ remainOpacity_i = remainOpacity_{i-1} \times (1.0 - opacity) $$
+    where $remainOpacity_i$ is the opacity value after passing through the $i$-th volume element [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def trace(p_in, p_out, ray_dir, t_max, volume_texture, opacity_texture):
+    # Initialize
+    dest_color = vec4(0.0, 0.0, 0.0, 0.0)
+    remain_opacity = 1.0 - dest_color.a
+    pos = p_in
+    t = 0.0
+    inside = True
+    
+    # Pre-calculate normalized direction vector
+    dir_vec = normalize(p_out - p_in)
+    
+    while inside:
+        # Check if out of volume bounds based on distance
+        if (pos - p_in) > (p_out - p_in):
+            inside = False
+            break
+            
+        # Sample volume
+        value = texture3D(volume_texture, pos)
+        
+        # Map value to scalar index for transfer function
+        scalar = scalar_from_value(value)
+        
+        # Get opacity
+        opacity = texture1D(opacity_texture, scalar)
+        
+        if opacity > 0.0:
+            # Shade the point
+            color = shade(value)
+            color = color * opacity
+            
+            # Composite
+            dest_color = dest_color + color * remain_opacity
+            remain_opacity = remain_opacity * (1.0 - opacity)
+            
+        # Advance
+        pos = pos + ray_dir
+        t = t + 1.0
+        
+        # Termination conditions
+        if t >= t_max:
+            inside = False
+        elif remain_opacity < 0.0039: # 1/255
+            inside = False
+            
+    return dest_color, 1.0 - remain_opacity
+```
+
+## Subtopics
+
+### [GPU Ray Casting with Fast Intersection](7032-gpu-ray-casting-with-fast-intersection.md)
+A ray casting implementation on GPU that tests each ray for intersection with the volume only once per pass, supporting one object per pass [7032-gpu-ray-casting-with-fast-intersection.md].
+
+### [GPU-based Ray Casting](7131-gpu-based-ray-casting.md)
+A rendering technique that appears to sidestep the limitations of visibility orders and PT by avoiding explicit visibility order computation and many PT accuracy issues [7131-gpu-based-ray-casting.md].
+
+### [GPU Ray Casting with Depth Peeling and Tile-Based Subdivision](7813-gpu-ray-casting-with-depth-peeling-and-tile-based-subdivisio.md)
+An improved GPU-based ray caster using a compact 2D texture representation, tile-based screen subdivision, and depth-peeling for non-convex meshes [7813-gpu-ray-casting-with-depth-peeling-and-tile-based-subdivisio.md].
+
+### [Recursive Ray-casting for Global Illumination](8544-recursive-ray-casting-for-global-illumination.md)
+An extension of GPU-based volume ray-casting that computes specular reflection and refraction effects at interactive frame rates by processing a ray-caster multiple times with different entry and exit points, supporting both DVR and isosurface rendering [8544-recursive-ray-casting-for-global-illumination.md].
+
+### FPGA-based Raycasting
+An FPGA-based system (1997, U. Tbingen) for perspective view raycasting that requires long pre-processing. It achieves 10 Hz for a $256^3$ volume with perspective view [S5, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of samples per ray and the number of pixels [S1, unofficial].
+*   **Memory Complexity:** Requires all volume data to be loaded into GPU memory [S4, unofficial]. This limits the size of datasets that can be rendered, unlike PT which streams data from CPU memory [S4, unofficial].
+*   **Performance:** Feasible from a computational standpoint due to advances in graphics hardware and algorithms [S3, unofficial].
+*   **Strengths:** High parallelism via fragment shaders; avoids explicit visibility ordering [S4, unofficial].
+*   **Limitations:** Accuracy limitations due to ray-triangle intersections can lower image quality [S4, unofficial]. Memory constraints limit dataset size [S4, unofficial].
+*   **When to use:** When interactive frame rates are needed for moderate-sized volumes and GPU memory is sufficient [S3, S4, unofficial].
+*   **When not to use:** For very large datasets that exceed GPU memory, or when high geometric accuracy is critical and ray-triangle errors are unacceptable [S4, unofficial].
+
+## Background
+GPU Raycasting was introduced by Kruger in 2003, making it feasible from a computational standpoint due to advances in graphics hardware and algorithms [S3, unofficial]. It was initially applied to medical visualization, such as studying the evolution of brain white matter lesions [S3, unofficial]. The technique leverages the parallel processing capabilities of the GPU fragment shader to perform resampling and image synthesis [S2].
+
+## Sources
+[S1] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)
+[S2] Volume Rendering of 3D Borehole Data Based on GPU, https://doi.org/10.2991/icsem.2013.181, fetched 2026-10-26
+[S3] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
+[S4] A Survey of GPU-Based Volume Rendering of Unstructured Grids., https://www.researchgate.net/publication/220162223_A_Survey_of_GPU-Based_Volume_Rendering_of_Unstructured_Grids, fetched 2026-10-28 (unofficial)
+[S5] Volume Ray Casting Techniques, https://www.scribd.com/document/102700078/03-raycasting, fetched 2026-10-25 (unofficial)

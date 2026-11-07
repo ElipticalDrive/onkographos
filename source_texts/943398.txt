@@ -1,0 +1,642 @@
+At present, when my project uses optix to call cuda parallel computing, the system cuda usage is about 50%, and my computer graphics card is RTX4060, so I can only use ordinary threads, but my project sets the number of …
+
+How CUDA works within Optix - OptiX - NVIDIA Developer Forums
+How CUDA works within Optix
+Gaming and Visualization Technologies
+Visualization
+OptiX
+cuda
+Logic6023
+January 13, 2025, 1:48am
+1
+At present, when my project uses optix to call cuda parallel computing, the system cuda usage is about 50%, and my computer graphics card is RTX4060, so I can only use ordinary threads, but my project sets the number of rays to 64800 for each ray tracing, do you have any suggestions for improving the cuda usage? I want to improve the computational efficiency, but it’s not clear how optix calls the cuda allocation thread?
+Keith_Morley
+January 13, 2025, 8:00pm
+2
+Hello. By ‘cuda usage’ do you mean GPU usage or CUDA occupancy or something else. You will likely need more threads to start with. 64K is not enough to saturate the GPU.
+You can roughly think of an optix launch of dimensions X by Y similarly to a cuda runtime launch of X by Y. So
+cuda_kernel<<<X, Y>>>() is similar to optixLaunch(..., X, Y, 1)
+Logic6023
+February 25, 2025, 11:51am
+3
+include “app_config.h”
+include <optix.h>
+include <optixu/optixu_math_namespace.h>
+#include<cuComplex.h>
+include <vector_functions.h>
+include “rt_function.h”
+include “per_ray_data.h”
+include"reflectionpar.h"
+include"materialparameterforFog.h"
+include"materialparametersforwoods.h"
+include “shader_common.h”
+include"parameters_transmitter.h"
+include"parameters_receiver.h"
+include “rt_assert.h”
+include"efield_calculation_util.h"
+using namespace optix;
+rtBuffer<float4, 3> sysOutputBuffer;
+rtBuffer<float4, 3> extrabuffer;
+rtDeclareVariable(int, width, , );
+rtDeclareVariable(int, height, , );
+rtDeclareVariable(int, pathDepth, , );
+rtDeclareVariable(int, tx_num, , );// number of txs
+rtDeclareVariable(int, rx_num, , );
+rtDeclareVariable(float, TXpower, , );
+rtDeclareVariable(float, frequency, , );
+rtDeclareVariable(int, bufferlength, , );
+rtDeclareVariable(int, Istest, , );
+rtDeclareVariable(int, InRain, , );
+rtDeclareVariable(int, InCloud, , );
+rtDeclareVariable(int, InFog, , );
+rtDeclareVariable(int, InWood, , );
+rtDeclareVariable(rtObject, sysTopObject, , );
+rtDeclareVariable(float, sysSceneEpsilon, , );
+rtDeclareVariable(int2, sysPathLengths, , );
+rtDeclareVariable(float3, sysCameraPosition, , );
+rtBuffer MaterialParametersForTXS; // Context global buffer with an array of MaterialParameter for rain cloud fog.
+rtBuffer MaterialParametersForRXS;
+rtDeclareVariable(uint2, theLaunchDim, rtLaunchDim, );
+rtDeclareVariable(uint2, theLaunchIndex, rtLaunchIndex, );
+rtDeclareVariable(int, RXindex, attribute RX_INDEX, );//index of tx
+rtDeclareVariable(int, TXindex, attribute TX_INDEX, );//index of tx
+rtDeclareVariable(float, TXtheta, , );
+rtDeclareVariable(float, TXphi, , );
+rtBuffer TXRXgainProportion;
+RT_FUNCTION void initialray(const float2 pixel, float3& origin, float3& direction)
+{
+```
+float indexOfRX;
+float3 positionOfRX;
+if (pixel.y > height - 1)//设置一定数量的线程，使得这些线程专门处理直射情况是否存在
+{
+	//rtPrintf("pixel%f %f\n", pixel.x, pixel.y);
+
+	origin = sysCameraPosition;
+	indexOfRX = (pixel.y - height) * width + pixel.x;
+	//rtPrintf("%d tx\n", indexOfRX);
+	if (indexOfRX < rx_num)
+	{
+		positionOfRX = MaterialParametersForRXS[indexOfRX].position;
+		//positionOfTX = MaterialParametersForTXS[1].position;//for test
+		direction = optix::normalize(make_float3(positionOfRX.x - origin.x, positionOfRX.y - origin.y, positionOfRX.z - origin.z));
+		//rtPrintf("direction is %f,%f,%f pos is%f,%f,%f\n", direction.x, direction.y, direction.z, positionOfTX.x, positionOfTX.y, positionOfTX.z);
+	}
+	else
+	{
+		rtThrow(MY_EXCEPTION_1);
+	}
+}
+else {
+	//const float2 screen= make_float2(width, height);
+	/*
+	发射方式为：尽量保证每条射线的夹角为1度
+	theta=i *1°i在1-180范围
+	phi=j *1°/sin(theta) j在1-360*sin(theta)范围
+	*/
+	const float temptheta = pixel.x / width;
+	const float theta = temptheta * M_PIf;
+	float tempphi = 0.0f;
+	const float sinTheta = sinf(theta);
+	const int distribution = (int)(height * sinTheta);
+	if (sinTheta == 0.0f)
+	{
+		origin = sysCameraPosition;
+		direction = make_float3(0.0f, 0.0f, 1.0f);
+		return;
+	}
+	else
+	{
+		if (pixel.y < distribution)
+		{
+			tempphi = pixel.y / sinTheta;
+		}
+		else
+		{
+			rtThrow(MY_EXCEPTION_1);
+		}
+	}
+
+	const float phi = tempphi  * 2.0f * M_PIf / height;
+	/* const float3 v = make_float3(-sinf(phi) * sinTheta,
+	-cosf(theta),
+	-cosf(phi) * sinTheta);*/
+	//rtPrintf("theta is %f,phi is %f", theta*180, phi*180);
+	const float3 v = make_float3(cosf(phi) * sinTheta, sinf(phi)*sinTheta, cosf(theta));
+
+	/*const float3 U = optix::normalize(sysCameraU);
+	const float3 V = optix::normalize(sysCameraV);
+	const float3 W = optix::normalize(sysCameraW);*/
+
+	origin = sysCameraPosition;
+	direction = v;
+	//direction = optix::normalize(v.x * U + v.y * V + v.z * W);
+	//direction = v;
+	//rtPrintf("position is %f,%f,%f", origin.x, origin.y, origin.z);
+	//rtPrintf("screen is %f,%f", screen.x, screen.y);
+	//rtPrintf("direction is %f,%f,%f",v.x,v.y,v.z);
+}
+```
+}
+RT_PROGRAM void raygeneration()
+{
+```
+// 获取当前线程的发射索引
+int2 launchIndex = make_int2(theLaunchIndex.x, theLaunchIndex.y);
+
+// 使用 rtPrintf 打印当前线程的索引
+//rtPrintf("Launching thread at index: (%d, %d)\n", launchIndex.x, launchIndex.y);
+
+
+PerRayData prd;
+
+//prd.seed = tea<8>(theLaunchIndex.y * theLaunchDim.x + theLaunchIndex.x, sysIterationIndex);//每次计算即使是相同线程下seed也不一样，保证了渲染效果，但在此项目下用不上
+// In this case theLaunchIndex is the pixel coordinate and theLaunchDim is sysOutputBuffer.size().
+//sysLensShader[sysCameraType](make_float2(theLaunchIndex), make_float2(theLaunchDim), rng2(prd.seed), prd.pos, prd.direction); // Calculate the primary ray with a lens shader program.
+
+//对prd中的成员进行初始化
+if (!Istest)//如果时预追踪，就没必要初始化发射射线，方向统一为（0，0，1）
+	initialray(make_float2(theLaunchIndex), prd.pos, prd.direction);
+prd.istest = Istest;
+
+prd.index_TXgain = -1;
+prd.index_RXgain = -1;
+prd.timedelay = 0.0f;
+
+prd.rx_index = -1;
+prd.depth = 0;
+prd.reflectiondepth = 0;
+prd.indexofcloudbuffer1 = -1;
+prd.indexofrainbuffer1 = -1;
+prd.indexoffogbuffer1 = -1;
+prd.indexofcloudbuffer2 = -1;
+prd.indexofrainbuffer2 = -1;
+prd.indexoffogbuffer2 = -1;
+prd.indexofwoodbuffer1 = -1;
+prd.indexofwoodbuffer2 = -1;
+
+prd.distance = 0.0f;
+prd.distanceofcloud1 = 0.0f;
+prd.distanceofcloud2 = 0.0f;
+prd.distanceofrain1 = 0.0f;
+prd.distanceofrain2 = 0.0f;
+prd.distanceoffog1 = 0.0f;
+prd.distanceoffog2 = 0.0f;
+prd.distanceofwood1 = 0.0f;
+prd.distanceofwood2 = 0.0f;
+prd.indexofreflection1 = -1;
+prd.indexofreflection2 = -1;
+prd.indexofreflection3 = -1;
+
+prd.flag = FLAG_TX;
+
+prd.open = false;
+prd.difDepth = -1;
+prd.index_firstPos = -1;
+prd.faceCount = -1;
+//rtPrintf("width %d\n", width);
+//把第一次测试追踪的信息赋值到prd。
+if (InRain + 1 != 0)//如果在检测追踪检测到接收机在雨区，则将标志位置1，同时存下该雨区索引
+{
+	prd.flag |= FLAG_RAIN;
+	prd.indexofrainbuffer1 = InRain;
+	//rtPrintf("prepare succeed\n");
+}
+if (InCloud + 1 != 0)
+{
+	prd.flag |= FLAG_CLOUD;
+	prd.indexofcloudbuffer1 = InCloud;
+
+}
+if (InFog + 1 != 0)
+{
+	prd.flag |= FLAG_FOG;
+	prd.indexoffogbuffer1 = InFog;
+	//rtPrintf("prepare succeed\n");
+}
+if (InWood + 1 != 0)
+{
+	prd.flag |= FLAG_WOOD;
+	prd.indexofwoodbuffer1 = InWood;
+	//rtPrintf("prepare succeed\n");
+}
+
+
+int length = 0;
+int rxsOfOnepath = 0;
+uint3 index3;
+if (theLaunchIndex.y < height)
+{
+	for (int i = 0; i < pathDepth; ++i) {
+		index3 = make_uint3(i, theLaunchIndex.x, theLaunchIndex.y);
+		sysOutputBuffer[index3] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+	}
+	index3 = make_uint3(length, theLaunchIndex.x, theLaunchIndex.y);
+}
+else
+{
+	for (int i = 0; i < pathDepth; ++i) {
+		index3 = make_uint3(i, theLaunchIndex.x, theLaunchIndex.y - height);
+		extrabuffer[index3] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+	}
+	index3 = make_uint3(length, theLaunchIndex.x, theLaunchIndex.y - height);
+	//rtPrintf("init index\n");
+}
+
+
+//这次追踪是测试追踪，得到接收机是否在云雨雾中
+if (Istest)
+{
+	//rtPrintf("rendertest\n");
+	prd.direction = make_float3(0.0f, 0.0f, 1.0f);
+	prd.pos = sysCameraPosition;
+	while (true)
+	{
+		optix::Ray ray = optix::make_Ray(prd.pos, prd.direction, 0, sysSceneEpsilon, RT_DEFAULT_MAX);//ray type only has 0
+		rtTrace(sysTopObject, ray, prd);
+
+		//线程0，0检测接收机是否在云里
+		if (theLaunchIndex.x == 0)
+		{
+			if (prd.indexofcloudbuffer1 + 1 != 0)
+			{
+				sysOutputBuffer[index3] = make_float4(0.0f, prd.indexofcloudbuffer1, 0.0f, 0.0f);
+				//rtPrintf("cloud test succeed\n");
+				break;
+			}
+			sysOutputBuffer[index3] = make_float4(0.0f, prd.indexofcloudbuffer1, 0.0f, 0.0f);
+		}
+		//线程1，0检测接收机是否在雨里
+		if (theLaunchIndex.x == 1)
+		{
+			if (prd.indexofrainbuffer1 + 1 != 0)
+			{
+				sysOutputBuffer[index3] = make_float4(0.0f, prd.indexofrainbuffer1, 0.0f, 0.0f);
+				//rtPrintf("rain test succeed\n");
+				break;
+			}
+			sysOutputBuffer[index3] = make_float4(0.0f, prd.indexofrainbuffer1, 0.0f, 0.0f);
+			//rtPrintf("雨的参数索引%d\n", prd.indexofrainbuffer1);
+
+		}
+
+		//线程2，0检测接收机是否在雾里
+		if (theLaunchIndex.x == 2)// theLaunchIndex.y == 0
+		{
+			if (prd.indexoffogbuffer1 + 1 != 0)
+			{
+				sysOutputBuffer[index3] = make_float4(0.0f, prd.indexoffogbuffer1, 0.0f, 0.0f);
+				//rtPrintf("fog test succeed\n");
+				break;
+			}
+			sysOutputBuffer[index3] = make_float4(0.0f, prd.indexoffogbuffer1, 0.0f, 0.0f);
+		}
+		//线程3，0检测接收机是否在树林里
+		if (theLaunchIndex.x == 3)// theLaunchIndex.y == 0
+		{
+			if (prd.indexofwoodbuffer1 + 1 != 0)
+			{
+				sysOutputBuffer[index3] = make_float4(0.0f, prd.indexofwoodbuffer1, 0.0f, 0.0f);
+				//rtPrintf("wood test succeed\n");
+				break;
+			}
+			sysOutputBuffer[index3] = make_float4(0.0f, prd.indexofwoodbuffer1, 0.0f, 0.0f);
+		}
+
+		if (!(prd.flag & FLAG_ISMISS))//如果miss，停止追踪
+		{
+			sysOutputBuffer[index3] = make_float4(0.0f, -1.0f, 0.0f, 0.0f);
+			break;
+		}
+	}
+}
+else
+{
+	//正式的追踪
+
+	while (length < bufferlength)
+	{
+		//rtPrintf("更新射线，进行追踪\n");
+		optix::Ray ray = optix::make_Ray(prd.pos, prd.direction, 0, sysSceneEpsilon, RT_DEFAULT_MAX);
+
+		//开始追踪
+		rtTrace(sysTopObject, ray, prd);
+		if (prd.flag & FLAG_NOTHING)//在直射检测追踪时，如果打到了其他的发射机，则忽略，继续追踪
+		{
+			prd.flag = prd.flag^FLAG_NOTHING;
+			continue;
+		}
+		if (prd.flag & FLAG_DIRECTION)//直射检测射线打到了对应发射机
+		{
+			extrabuffer[index3] = make_float4(prd.etheta, prd.ephi);
+			index3 = make_uint3(++length, theLaunchIndex.x, theLaunchIndex.y - height);
+			extrabuffer[index3] = make_float4(prd.rx_index, prd.timedelay, prd.index_RXgain, prd.index_TXgain);
+			break;
+		}
+		//如果miss，直接停止追踪
+		if (!(prd.flag & FLAG_ISMISS))
+		{
+			if (prd.difDepth == -1) {
+				break;
+			}
+			else {															
+				sysOutputBuffer[index3] = make_float4(-4,prd.difDepth,prd.faceCount,0);
+				index3 = make_uint3(++length, theLaunchIndex.x, theLaunchIndex.y);
+
+				sysOutputBuffer[index3] = make_float4(-4, prd.difDirection);
+				index3 = make_uint3(++length, theLaunchIndex.x, theLaunchIndex.y);
+
+				sysOutputBuffer[index3] = make_float4(-4, prd.boxMax);
+				index3 = make_uint3(++length, theLaunchIndex.x, theLaunchIndex.y);
+
+				sysOutputBuffer[index3] = make_float4(-4, prd.boxMin);
+				index3 = make_uint3(++length, theLaunchIndex.x, theLaunchIndex.y);
+
+				sysOutputBuffer[index3] = make_float4(-4,prd.edgeVertex1);
+				index3 = make_uint3(++length, theLaunchIndex.x, theLaunchIndex.y);
+				
+				sysOutputBuffer[index3] = make_float4(-4, prd.edgeVertex2);
+				index3 = make_uint3(++length, theLaunchIndex.x, theLaunchIndex.y);
+
+				sysOutputBuffer[index3] = make_float4(-4, prd.difEphi,0);
+				index3 = make_uint3(++length, theLaunchIndex.x, theLaunchIndex.y);
+
+				sysOutputBuffer[index3] = make_float4(-4,prd.difEtheta,0);
+				index3 = make_uint3(++length, theLaunchIndex.x, theLaunchIndex.y);
+				
+				sysOutputBuffer[index3] = make_float4(-4, prd.difTimeDelay, -4, prd.index_TXgain);
+				index3 = make_uint3(++length, theLaunchIndex.x, theLaunchIndex.y);
+
+				sysOutputBuffer[index3] = make_float4(-3, prd.difPos);
+				index3 = make_uint3(++length, theLaunchIndex.x, theLaunchIndex.y);
+				break;	
+				
+			}
+				
+			break;
+				
+			}
+
+		//}
+
+		//如果打到发射机，向outputbuffer记下发射机信息和当时的场强信息
+		if (prd.flag & FLAG_RX)//如果打到发射机，则先把位置信息和增益索引存下，然后存下场强
+		{
+			if (prd.rx_index + 1 == 0)//如果进入这里，表明由于intersection tx的计算不准确，连续两次打在同一个发射机上，因此忽略第二次。
+			{
+				continue; 
+			}
+			//rtPrintf("prd.etheta %f\n", prd.etheta);
+			//选择存取的方式，第一种方式对应主机端读出的路径是RX->TX,第二种对应的读出路径是TX->RX
+			//if (speedorshow)
+			//{
+			//	sysOutputBuffer[index3] = make_float4(prd.tx_index, prd.timedelay,prd.index_RXgain, prd.index_TXgain);
+			//	//这里的position存的不是位置，而是在pos.x存了发射机的索引
+			//	index3 = make_uint3(++length, theLaunchIndex.x, theLaunchIndex.y);
+			//	sysOutputBuffer[index3] = make_float4(prd.etheta, prd.ephi);
+			//	index3 = make_uint3(++length, theLaunchIndex.x, theLaunchIndex.y);
+			//}
+			//else
+			//{
+			sysOutputBuffer[index3] = make_float4(prd.etheta, prd.ephi);
+			index3 = make_uint3(++length, theLaunchIndex.x, theLaunchIndex.y);
+			sysOutputBuffer[index3] = make_float4(prd.rx_index, prd.timedelay, prd.index_RXgain, prd.index_TXgain);
+			index3 = make_uint3(++length, theLaunchIndex.x, theLaunchIndex.y);
+
+		//	rtPrintf("pos(%f,%f,%f) DXgain: %d width %d \n", sysCameraPosition.x, sysCameraPosition.y, sysCameraPosition.z, prd.index_TXgain, width);
+
+			prd.flag = prd.flag^FLAG_TX;//消除标志位
+										//break;
+			if (++rxsOfOnepath > 1)//一旦一条路径上出现两个发射机，立即停止追踪
+				break;
+			else
+				continue;
+
+		}
+
+		if (prd.index_RXgain == -2) {
+			continue;
+		}
+		sysOutputBuffer[index3] = make_float4(prd.index_RXgain, prd.pos);
+		index3 = make_uint3(++length, theLaunchIndex.x, theLaunchIndex.y);
+
+		//if (theLaunchIndex.y < height)
+		//{
+		//	//rtPrintf("record the pathnode\n");
+		//	sysOutputBuffer[index3] = make_float4(prd.index_TXgain, prd.pos);
+		//	index3 = make_uint3(++length, theLaunchIndex.x, theLaunchIndex.y);
+		//}
+		//else
+		//{
+		//	extrabuffer[index3] = make_float4(prd.index_TXgain, prd.pos);
+		//	index3 = make_uint3(++length, theLaunchIndex.x, theLaunchIndex.y- height);
+		//}
+
+		//depth++;
+		//rtPrintf("cross the boundary\n");
+
+	}
+}
+```
+}
+Logic6023
+February 25, 2025, 11:54am
+4
+I don’t use CUDA kernel functions directly in my functions, so if I want to improve CUDA utilization, do I need to write a part of the kernel functions separately, do you have any suggestions? What part of my function can be written separately into the kernel function
+dhart
+February 25, 2025, 5:15pm
+5
+Hi @Logic6023,
+It looks like you’re handling all your materials in your raygen program. This can lead to divergent code, with the various branches checking material parameters. It can also cause higher register pressure, and even limit GPU occupancy, since you have data for all materials in a single payload.
+A few ways you can increase your kernel’s efficiency:
+use hit programs for your different materials, and let OptiX dispatch to the correct closest hit shader based on material.
+using hit programs will allow you to keep fewer values in your payload, which will reduce register pressure. You only need the values associated with 1 material in your payload.
+You could alternatively use overloaded payload values, for instance you probably don’t need indexofcloudbuffer1 and indexofrainbuffer1 in the same payload, if you can only have 1 material at a time.
+There are several even bigger opportunities for optimization if you can upgrade to the current version OptiX 9:
+You can use payload types & payload semantics API to futher optimize the payload and reduce register pressure.
+You can have explicit control over the Shader Binding Table (SBT) and control the association between materials and shader programs.
+You can use Shader Execution Reordering (SER) to significantly reduce the divergence between rays/threads with different materials in a warp.
+As an alternative to shader programs, You may be able to get away with the SER-related function optixTraverse() to avoid having a payload.
+You can use Launch Parameter Specialization to create compile time constants that help the compiler elide variables like Istest, and the associated branches. It’s useful to be able to eliminate test code from your compiled shader when you care about performance. Having the test branches & code in your compiled shader can slow it down even when you aren’t using it.
+Aside from those things, as Keith mentioned, your launch size is quite small. A small launch will not be able to utilize the GPU efficiently, so if you want a higher utilization, you can increase your batch/launch size. If you do not have more work for a launch, then using CUDA utilization might not be the best metric. In that case you should consider focusing on launch latency and not worry about utilization.
+Another thing to keep in mind is that Nsight tools show your shader utilization but may not show ray tracing RTCore utilization, and so low CUDA utilization does not necessary mean your GPU is under-utilized.
+–
+David.
+Logic6023
+February 26, 2025, 1:47am
+6
+Thank you for your reply
+That’s true, when I use the RTX4060 to run the program, I check that the CUDA usage is about 50% on the task manager, but when I run it with the RTX4090D, the CUDA utilization rate is only about 10%, maybe the number of cores of the two graphics cards is different, so what I really want to do is to make this set of programs on different graphics cards can make the maximum use of CUDA to calculate, so as to improve the computing efficiency.
+image562×731 9.56 KB
+dhart
+February 26, 2025, 6:32pm
+7
+I would recommend not using the task manager for understanding utilization or performance. Please instead use Nsight Systems and/or Nsight Compute to measure and understand your utilization and performance. The difference between 10% utilization and 50% utilization is enormous, but perf data from the task manager is probably not very reliable. Either way, if there is such a large perf difference, I would guess it is not likely to be caused by the difference in the number of cores.
+It’s useful to distinguish between CUDA and OptiX shaders. As I mentioned earlier, OptiX will make use of the RT Cores on your GPU that may not be reflected in your utilization stats, meaning utilization shown by tools will appear to be lower than the actual GPU utilization. It might help to compute your rays-per-second throughput from your OptiX launches.
+–
+David.
+Logic6023
+February 27, 2025, 1:11am
+8
+Thank you for your reply
+I have also tried the tools you mentioned, but it seems that VS2015 does not support them, so they cannot be used. I’m not sure how to improve the utilization of this part in the future; is it by writing .cu files?
+dhart
+March 1, 2025, 12:07am
+9
+Nsight Compute and Nsight Systems do not require Visual Studio integration, they are standalone tools you can use regardless of what IDE you use. You may be thinking of Nsight Visual Studio edition, which is a CUDA debugger. Nsight Systems is for high level profiling of your app, it can show you how long kernel launches run, overall utilization, and associations between your kernels & CUDA API calls & host code. Nsight Compute is for low level profiling of specific kernels, it can show you instruction level costs, compute and memory utilizations, locations of common instruction stalls and the reasons behind them. Typically one would use Nsight Systems first to identify overall behavior and find problematic kernels, and then use Nsight Compute to inspect the problematic kernels if needed.
+The .cu file extension does not identify CUDA vs OptiX files. Both OptiX and CUDA use .cu for device code. I recommend the first activity should be getting a better idea of your utilization either using code you write to carefully measure rays per second, or using Nsight tools to identify problematic areas. Ideally, both of those are a good idea and when we profile internally we do both rays/second and Nsight profiling. After that, once you have profiling data, refer to my earlier message with a list of ways to increase utilization, starting with larger batches on the very easy side, to taking advantage of OptiX 9 features like SER, specialization, and the payload API, which may take more time.
+Use the profiling data to help estimate the benefits of any given optimization idea and prioritize your efforts. For example, if Nsight Compute shows that you are not register limited and you are already getting the highest occupancy, then you probably don’t need to worry about using the payload API to try to reduce register pressure.
+–
+David.
+Logic6023
+March 3, 2025, 7:55am
+11
+Thank you for your reply
+My project is based on Optix6.0+Vs2015+cuda8.0. Currently running on my own computer (RTX4060), debugging. I’m going to try some more of the methods you mentioned.
+darofearth
+March 5, 2025, 3:21pm
+12
+Note that the code you based your application on is from an OptiX 5 API example, means it pre-dates support for built-in triangle primitives, which means your triangle geometry is not making use of the RT cores for ray-triangle intersection on the RTX boards.
+Means you should remove the boundingbox_triangle_indexed.cu and intersection_triangle_indexed.cu by replacing these custom triangle primitives with the built-in triangle primitives first.
+Much better would be to port all that code to the more modern OptiX API of versions 7 and higher.
+For that I would also recommend using a newer Microsoft Visual Studio version. The free MSVS 2022 Community Edition will work (unless you’re planning a commercial application), and that is also supported by current CUDA versions.
+To speed up that porting, there actually exist two ports of that old optixIntro_7 from the legacy OptiX 5 API to the new OptiX 7/8/9 API already inside the OptiX advanced samples here:
+https://forums.developer.nvidia.com/t/optix-advanced-samples-on-github/48410/4
+Logic6023
+March 7, 2025, 7:56am
+13
+I also wanted to upgrade the version of Vs2015 to 2022 before, but the 2015 version has some dependencies that are not available on 2022, so it can only be ported and failed, and I also wanted to upgrade the version of optix to 7.0, but when using the 7.0 version, some files could not be found when cmake, and I am not sure if it is a compatibility problem between the higher version and the lower version, resulting in some files that have been abandoned
+darofearth
+March 7, 2025, 9:45am
+14
+You do not “upgrade” Microsoft Visual Studio versions, you can install all different MSVS major versions side-by-side. (Though when installing multiple, make sure to install them in order of increasing version numbers or some might change settings of newer versions inadvertently.)
+Always install MSVS before CUDA Toolkit versions because the CUDA Visual Studio Integrations will then be installed for all found compatible MSVS versions as well. I never install the display driver inside the CUDA Toolkit but always use the newest official display driver version instead. Install that after a CUDA Toolkit if you inadvertently replaced the display driver.
+Similarly with OptiX SDK versions. You can have all ever released OptiX SDK versions installed side-by-side. They do not affect each other. You would only make sure you use the desired version for your application.
+The only dependency is the NVIDIA Display Driver! Each OptiX SDK versions requires a minimal display driver version to function because the OptiX core implementation is inside the drivers since OptiX SDK 6.0.0.
+Always read the OptiX SDK Release Notes for each version (link directly beneath the resp. download button) before you setup an OptiX development environment on your system.
+It’s recommended to use the newest OptiX SDK version available because that contains the most features and bugfixes, means right now that would be OptiX SDK 9.0.0.
+When that is too new for you, use the lastest version of a lower SDK version (8.1.0 or 7.7.0).
+Same is true for your current OptiX SDK 6.0.0. That is really old and you should better use the last legacy release OptiX SDK 6.5.0 instead.
+The legacy OptiX API used in SDK versions 1.0 to 6.5 is very different than the OptiX API in SDK versions since 7.0.0. It only changed slightly between 7.0.0 and 9.0.0 with added features and some API adjustments.
+Means porting from your OptiX SDK 5.0.0 based application to one of the OptiX SDK 7/8/9 versions requires a rewrite of the OptiX related host and device code! You cannot simply compile your OptiX 5 application with an OptiX SDK 7/8/9.
+That is why I linked to the already ported OptiX Advanced Samples intro_runtime and intro_driver which are doing exactly the same as the original optixIntro_7 you based your application on.
+So if you get these two introductory OptiX Advanced Samples to work, you should be able to port your own changes you did to the original legacy API example over to that new OptiX application structure and API more quickly.
+While looking at the differences between these old and new API example programs, please read the OptiX Programming Guide and API reference along to understand what the new OptiX API host and device functions do.
+Links to most up-to-date versions here (usually newer than the PDFs inside the local OptiX SDK installation doc folders.
+https://raytracing-docs.nvidia.com/
+lspano
+March 7, 2025, 11:00am
+15
+[Pls Ignore]
+Logic6023
+March 10, 2025, 1:07am
+16
+Thanks for the reply, I’ll try to upgrade the version now
+Logic6023
+March 10, 2025, 1:08am
+17
+Thank you
+Logic6023
+March 24, 2025, 7:00am
+18
+When I use optix7 to configure the path, I found that the optix.7.0.0.dll that the program needs, optixu.7.0.0.dll wait for the file to be gone, and then the configuration can’t be made, I’ve been solving this problem now, and I want to ask if I need to modify the configuration in those places, such as the cmakelist file.
+darofearth
+March 24, 2025, 9:23am
+19
+OptiX is a header-only API since SDK version 7.0.0.
+There exist neither an optix.7.0.0.dll, nor an optixu.7.0.0.dll anymore!
+These were present in the legacy OptiX SDK 5.x versions you based your app on.
+Again, when porting your changes from the legacy optix_7 example code, you should use the CMakeLists.txt files from the root of the new OptiX Advanced Examples plus the one inside the intro_runtime example folder as foundation (plus the helper scripts inside the 3rdparty/CMake).
+The root CMakeLists.txt looks for all installed OptiX SDK versions and uses the newest one it finds.
+These together build a solution for the new OptiX 7/8/9 based port of that legacy example.
+If you have that running, you need to port your own code changes to the host and device code over to the new OptiX API and add these files to the respective source groups in that new CMakeLists.txt.
+For a more standalone application configuration using built-in CMake LANGUAGES features, which supports both native CUDA kernels and OptiX device programs in the same solution, look into the GLTF_renderer example. The partitioning into host, CUDA, and OptiX headers and sources allows for easy adaptation to own applications.
+Since this thread started with performance questions, the fastest renderer architecture inside the OptiX Advanced Examples is rtigo10 because it uses dedicated closest hit programs per BXDF instead of direct callable programs and doesn’t support cutout opacity which means it doesn’t need anyhit programs.
+Also please do not use OptiX SDK 7.0.0. That is much too old for new app developments. There have been 10 newer OptiX SDK releases since then!
+Please read the OptiX SDK Release Notes directly beneath the downlowd button of each OptiX SDK version and check which minimum display driver version is required for each of them. Also take note of the recommended CUDA version for each.
+If you cannot update your display drivers to the newest available drivers, pick the newest one you can install, and then the newest OptiX SDK 7/8/9 that is supported by that driver version. Means try configuring your development environment to support OptiX SDK 9.0.0 or 8.1.0 or 7.7.0.
+Mind that this will affect which minimum display driver the target machine of end-users need to have installed.
+Logic6023
+March 24, 2025, 10:08am
+20
+thank you
+Do I need to modify the old version of the cmakelist file now, and I want to know how the threads are computed in parallel in the ray tracing process, is it only parallel when calculating a certain part, for example, tracking the transmitter, the process of tracking 100 transmitters from receiver 1 is parallel, so is the process of tracking receiver 1 and receiver 2 to the transmitter parallel?
+darofearth
+March 24, 2025, 10:38am
+21
+I recomended twice now to start fresh with the application framework of the new OptiX Advanced Examples CMakeLists.txt and get these working first.
+Then duplicate and rename one of the individual example folders, rename the project inside its CMakeLists.txt and rename the destination folder of the OptiX device modules (the folder ending with _core) in both the CMakeLists.txt and inside the host C++ code loading the modules.
+Then add that new example subfolder to the root CMakeLists.txt. Configure and generate the solution, load it, and rebuild that new example.
+Now you have your own working copy of one of the examples under a different name which you can change to your liking.
+Then starts the more complicated part: Port over your host and device code to the new OptiX API and change the list of files inside the new example’s CMakeList.txt as needed until everything works like in your old application.
+Do not use custom primitives for triangles though. Keep the built-in ones used in the advanced examples.
+Mind that there are no bounding box programs inside the new OptiX API, instead custom primitives take axis aligned bounding boxes (AABB) as build inputs, and you need to calculate and provide them.
+You could of course also change your existing CMakeLists.txt, but the end result would look the same, so my recommendation is to start with a fresh new example copy instead.
+The number of parallel threads depends on the optixLaunch dimension you pick.
+That number is scheduled by OptiX to the underlying GPU hardware as best as possible, and the number of active threads depends on the GPU and the required hardware resources like number of registers inside the OptiX kernel built from your device code.
+There is some minimum number of threads which will saturate a GPU. That number depends on the underlying GPU (number of cores, etc.) You should try to keep it above 64k to be on the safe side.
+Please search the OptiX Programming Guide and this sub-forum for “single ray programming model” and you’ll find more explanations about that.
+So if you have to calculate visibility between transmitters and receivers, it depends on how you architect the algorithm if that saturates your GPU or not.
+For example, if you have a number of transmitters T and a number of receivers R and each need to check direct visibility between each other, then your result vector is T×R values, so a straightforward 2D optixLaunch dimension would be (T,R,1), or better a 1D launch (T×R,1,1) if one of the values is below 8.
+If that exceeds the OptiX launch dimension limit of 2^30, split it into multiple smaller optixLaunch dimensions.
+If the workload is too small to saturate your GPU, find ways to increase the workload per optixLaunch.
+next page →
+Related topics
+Topic
+Replies
+Views
+Activity
+Comparing Optix performance to CUDA
+OptiX
+19
+6859
+January 12, 2021
+OptiX 7 and MSVS 2017 - Hello World on Windows 10
+OptiX
+cuda
+,
+visual-studio
+9
+3470
+July 20, 2020
+Help reduce the high register count of an Optix raytracer code
+OptiX
+11
+1824
+August 18, 2022
+Exploring the sample optixTriangle program
+OptiX
+4
+2004
+April 12, 2023
+Optix-low computational usage on GPU
+OptiX
+12
+1299
+June 22, 2022
+How to Get Started with OptiX 7
+Technical Blog
+4
+1107
+June 14, 2022
+How does optix code compilation work?
+OptiX
+24
+4367
+July 7, 2022
+optiXTutorial 11 - remove (free)GLUT
+OptiX
+36
+5242
+May 15, 2017
+OptiX, OptiX Prime, Compatibility with CPU and RTX
+OptiX
+22
+6997
+June 21, 2019
+OptiX 6.0.0 is broken on driver 591.44
+OptiX
+optix
+25
+4254
+January 5, 2026

@@ -1,0 +1,342 @@
+I am trying to figure out how the ray generation part of the Optix pipeline works by focusing on the optixTriangle sample. 
+I would like to know how could I convert the 
+static __forceinline__ __device__ void computeRay(…
+
+optixTriangle: how to shoot rays to specific set of co-ordinates? - OptiX - NVIDIA Developer Forums
+optixTriangle: how to shoot rays to specific set of co-ordinates?
+Gaming and Visualization Technologies
+Visualization
+OptiX
+fatecasino
+June 10, 2024, 11:18pm
+1
+I am trying to figure out how the ray generation part of the Optix pipeline works by focusing on the optixTriangle sample.
+I would like to know how could I convert the
+```
+static __forceinline__ __device__ void computeRay( uint3 idx, uint3 dim, float3& origin, float3& direction )
+{
+    const float3 U = params.cam_u;
+    const float3 V = params.cam_v;
+    const float3 W = params.cam_w;
+    const float2 d = 2.0f * make_float2(
+            static_cast<float>( idx.x ) / static_cast<float>( dim.x ),
+            static_cast<float>( idx.y ) / static_cast<float>( dim.y )
+            ) - 1.0f;
+
+    origin    = params.cam_eye;
+    direction = normalize( d.x * U + d.y * V + W );
+}
+```
+in order to set the rays according to a fixed array of coordinates, ie
+```
+const static double raysCoords[10000][3] = { 
+{0.25765993558, 0.956717920463, 0.0056745},
+{0.257696788, 0.9567420679463, 0.0059675},
+....
+{0.212393558, 0.23717920463, 0.0463445}
+ };
+```
+In other words, I am trying to modify the optixTriangle sample and make it shoot a predefined set of rays and return if it hit the triangle or not.
+Any suggestions on this? I am a bit confused of how to modify the sample (or if it is the right sample to experiment for solving my problem).
+Thanks!
+droettger
+June 11, 2024, 8:18am
+2
+Most of the examples are using a pinhole camera description which uses the camera position (“eye”) and three vectors U, V, W which span the upper-right (mathematically the first) quadrant of a left-handed coordinate system where U points to the right, V points up and W points forward.
+That upper-right quadrant spans the normalized device coordinate range [0.0, 1.0] for U and V.
+For the full camera plane, all four quadrants, the normalized device coordinate range is from [-1.0, 1.0] and that is where that * 2.0f - 1.0f in the normalized device coordinate calculation comes from.
+That UVW coordinate system doesn’t need to use normalized vectors (and they don’t even need to be perpendicular, so this could even define some sheared viewing frustum which could come in handy for stereoscopic view frusta with less foreshortening differences between eyes. I digress.)
+The launch index (0, 0) is then usually at the bottom-left corner of the camera plane, means lower-left origin starts at smaller addresses on the resulting image memory, which matches the OpenGL texture image orientation.
+Looks like this (with the legacy OptiX API terms):
+Maybe this code is clearer:
+https://github.com/NVIDIA/OptiX_Apps/blob/master/apps/intro_runtime/shaders/raygeneration.cu#L52
+https://github.com/NVIDIA/OptiX_Apps/blob/master/apps/intro_runtime/shaders/lens_shader.cu#L40
+It’s unclear what your raysCoords actually are, positions or directions?
+Also really double precision?!
+Let’s assume these are actually float. Then I would first change the definition to use float3 types to make the rest of the code easier.
+You would upload them into a buffer on the GPU device and put the device pointer to that buffer into the launch parameters to make them accessible to any program in your pipeline, here the raygen program.
+If these are normalized directions originating from a single point in world space (doesn’t look like it, they aren’t normalized), then you would simply put these raysCoords into the direction of each primary ray.
+```
+ origin    = params.my_ray_coord_origin;
+ direction = params.raysCoords[linear_launch_index]; // This assumes launch dimension == raysCoords size (here 10,000).
+```
+But if the raysCoords are actually positions in world space, what exactly do you want to do with them?
+Do you want to shoot rays from a single world position to these world coordinates?
+Then it looks like this:
+```
+ origin    = params.my_ray_coord_origin;
+ direction = normalize(params.raysCoords[linear_launch_index] - origin); // Assumes none of the raysCoords match the origin or the normalize() produces NaN.
+```
+Or do you need to project the raysCoords world positions into an existing camera setup?
+That would require a projection into the camera coordinate system, then onto the camera plane normalized device coordinates to determine if any and then which pixel is hit and then it depends to what you size your launch dimension, means if you need individual results per ray or accumulated results per pixel. Latter would be a scatter algorithm requiring atomics.
+Depth Image Has Striations - How to debug this effectively?
+fatecasino
+June 11, 2024, 11:01pm
+3
+Thank you very much for your extended response!
+Indeed, my case is the second one, where the raysCoords are coordinates of actual positions in world space. My intention is to shoot rays from a single world position to these world coordinates and check out if a ray of index i hits the triangle.
+At which part of the ray tracing pipeline of the optixTriangle sample will I be able to check the hit/miss event?
+Thanks!
+droettger
+June 12, 2024, 6:49am
+4
+At which part of the ray tracing pipeline of the optixTriangle sample will I be able to check the hit/miss event?
+Not sure if you’re trolling now. :-)
+Please scroll down inside the optixTriangle.cu file and look at the __closesthit__ch() and __miss__ms() programs.
+The OptiX Programming Guide explains what each program domain does:
+https://raytracing-docs.nvidia.com/optix8/guide/index.html#basic_concepts_and_definitions#program-and-data-model
+Of you only need to determine if you hit or missed something, you wouldn’t even need one of these programs.
+That would be a visibility test ray which can be implemented with just a miss program or an anyhit program like described here when following the links in this post:
+https://forums.developer.nvidia.com/t/optix-payload-value-incorrect/294505/8
+fatecasino
+June 13, 2024, 12:17am
+5
+I apologize for the naivety of my previous questions, but with optix pipeline it has already happened to me often to build some understanding on something that I thought it was right but it was eventually proven wrong or false :) At the point of the learning curve I am now, I have somehow to reconfirm what’s surely right or wrong until I get “some” solid understanding. Thanks for your patience! really appreciated!
+In the same way now I have some gaps on the ray generation part, which I suspect it might be easier than other parts of optix that I have encountered so far :)
+I followed your suggestion with
+```
+ origin    = params.my_ray_coord_origin;
+ direction = normalize(params.raysCoords[linear_launch_index] - origin);
+```
+but I messed defining the linear_launch_index (or probably something else too).
+In more detail, I changed the Params struct to be able to load a pointer to the fixed vector of rays that I want to shoot:
+```
+struct Params
+{
+    uchar4*                image;
+    unsigned int           image_width;
+    unsigned int           image_height;
+    float3                 cam_eye;
+    float3                 cam_u, cam_v, cam_w;
+    OptixTraversableHandle handle;
+    float3* rayCoords;
+
+};
+```
+then in main I set these 100 rays:
+```
+           const int numOfRays = 100;
+            std::vector<float3> currentRayCoords(numOfRays);
+
+            for (int i = 0; i < numOfRays; i++) {
+
+                currentRayCoords[i].x = static_cast<float>(raysCoords[i][0]);
+                currentRayCoords[i].y = static_cast<float>(raysCoords[i][1]);
+                currentRayCoords[i].z = static_cast<float>(raysCoords[i][2]);
+
+            }
+
+
+            params.rayCoords = currentRayCoords.data();
+```
+In computeRay function I just calculate the direction:
+```
+static __forceinline__ __device__ void computeRay( uint3 idx, uint3 dim, float3& origin, float3& direction )
+{
+
+    const float2 d = 2.0f * make_float2(
+            static_cast<float>( idx.x ) / static_cast<float>( dim.x ),
+            static_cast<float>( idx.y ) / static_cast<float>( dim.y )
+            ) - 1.0f;
+
+    origin    = params.cam_eye;
+
+const unsigned int linear_launch_index = idx.y * dim.x + idx.x;
+ direction = normalize(params.rayCoords[linear_launch_index ] - origin); 
+ // Assumes none of the raysCoords match the origin or the normalize() produces NaN.
+
+}
+```
+The program builds but when I run it my system freezes ( I have to hard reboot it) and I see the following error in the terminal:
+CUDA call (cudaFree( reinterpret_cast<void*>( m_device_pixels ) ) ) failed with error: 'an illegal memory access was encountered' (C:\ProgramData\NVIDIA Corporation\OptiX RayTracer Project\SDK\sutil/CUDAOutputBuffer.h:139)
+How should I define the ray_index in the computeRay function? Are there other parts of the the optix pipeline that I should adjust if I want to shoot this predefined set of 100 (it could be 1000, 10000, etc) rays?
+droettger
+June 13, 2024, 8:27am
+6
+Please don’t provide just code excerpts.
+You’re missing exactly the parts which would show potentially incorrect code
+0.)
+```
+std::vector<float3> currentRayCoords(numOfRays);
+...
+params.rayCoords = currentRayCoords.data();
+```
+That is plain wrong!
+params rayCoords must be a device pointer, not the host pointer.
+You’re missing something like
+```
+      CUDA_CHECK( cudaMalloc(reinterpret_cast<void**>(&params.rayCoords), numOfRays * sizeof(float3)) );
+      CUDA_CHECK( cudaMemcpy(reinterpret_cast<void*>(params.rayCoords), currentRayCoords.data(), numOfRays * sizeof(float3), cudaMemcpyHostToDevice) );
+```
+1.) Inside your launch parameter structure you have these.
+```
+    uchar4*                image;
+    unsigned int           image_width;
+    unsigned int           image_height;
+```
+Are your optixLaunch argument width and height matching that output image dimension (and depth == 1)?
+Does the image output buffer match that size?
+2.) With what arguments did you call computeRay?
+3.) If each launch index is reading one ray coordinate from rayCoords, is that array the same size as the launch dimension and image dimension?
+4.) During debugging of you host code please enable the OptixDeviceContextOptions validation mode and provide a logger callback, set the debug level to at least 3 (maximum is 4) to get additional information from OptiX on error.
+5.) Your linear launch index calculation is correct when idx == launch index and dim == launch dimension and launch dimension == image dimension == number elements in rayCoords.
+If rayCords is smaller you access it out of bounds.
+6.) The normalized device coordinate const float2 d is unused and that code can be deleted.
+fatecasino
+June 13, 2024, 11:02pm
+7
+Sorry if I forgot to mention, I just provided my modifications, the rest of the code is identical to the optixTriangle sample.
+That’s true, I was somehow misled by the lines:
+```
+            CUdeviceptr d_param;
+            CUDA_CHECK( cudaMalloc( reinterpret_cast<void**>( &d_param ), sizeof( Params ) ) );
+            CUDA_CHECK( cudaMemcpy(
+                        reinterpret_cast<void*>( d_param ),
+                        &params, sizeof( params ),
+                        cudaMemcpyHostToDevice
+                        ) );
+```
+which made me think that all params are copied to device. I add the 2 suggested lines.
+I used the optixTriangle sizes:
+```
+    int         width  = 1024;
+    int         height =  768;
+```
+so I think the buffer size is set correctly:
+```
+            sutil::ImageBuffer buffer;
+            buffer.data         = output_buffer.getHostPointer();
+            buffer.width        = width;
+            buffer.height       = height;
+            buffer.pixel_format = sutil::BufferImageFormat::UNSIGNED_BYTE4;
+```
+I call the computeRay exactly as is in optixTriangle:
+```
+extern "C" __global__ void __raygen__rg()
+{
+    // Lookup our location within the launch grid
+    const uint3 idx = optixGetLaunchIndex();
+    const uint3 dim = optixGetLaunchDimensions();
+
+    // Map our launch idx to a screen location and create a ray from the camera
+    // location through the screen
+    float3 ray_origin, ray_direction;
+
+    computeRay( idx, dim, ray_origin, ray_direction );
+```
+This is exactly what I am missing in the raygen. I don’t really undestand how number of pixels, launch dimensions and number of arrays are connected to each other. Hence, my main question is starting that I want to shoot 10000 rays, how should I modify the rest dimensions to match with these rays?
+I see that in optixTriangle this option is activated but somehow I can only locate the build log files.
+```
+            OptixDeviceContextOptions options = {};
+            options.logCallbackFunction       = &context_log_cb;
+            options.logCallbackLevel          = 4;
+```
+This is what I am trying to figure out as mentioned in 3, starting from number elements in rayCoords=10000 how should I configure:
+launch index
+launch dimension
+image dimension
+Some small code example would be really helpful here!
+Thanks!
+droettger
+June 14, 2024, 6:42am
+8
+You cannot simply set the width = 1024 and height = 768 if you want to shoot only 10,000 rays.
+Your optixLaunch dimension arguments must fulfill width * height * depth == 10000 then.
+The simplest case would be to do a 1D launch with width = 10000, height =1, depth = 1.
+Then optixGetLaunchDimension() returns uint3(10000, 1, 1) and optixGetLaunchIndex() returns one of uint3(0..9999, 0, 0) per launch index.
+Means your linear index with which you read from and write to device buffers (image, rayCoords) per launch index is simply the launch index x-component in such a 1D launch.
+All your input and output buffers you access via the launch index must have at least that number of elements.
+I see that in optixTriangle this option is activated but somehow I can only locate the build log files.
+The OptiX validation will produce output at runtime, not at compile time.
+When running the OptiX application in the command prompt window, that should print additional information, esp. when running at debug level 4 with a cold OptiX program cache.
+Find a link to another example code enabling it here:
+https://forums.developer.nvidia.com/t/crash-when-applying-instance-transform-in-closest-hit/291654/4
+How to configure launch grid configuration for computational task?
+fatecasino
+June 15, 2024, 1:11am
+9
+My first question is rather simple, what does launch actually optix create when you render a 1024 x 768 size?
+Reading about cuda indexing I see that there is:
+a grid with x,y,z dimensions containing blocks
+a block with x,y,z containing threads
+and threads
+I am not sure but when you render a1024 x 768 image, do you simply create a single1024 x 768 block with 786,432 threads?
+My other question has to do with handling the hit event. Let’s say a ray hits the triangle and I want to store all the x coordinates of the rays that had a hit. How can I transfer this collection of x back to the main function?
+Thanks!
+droettger
+June 20, 2024, 1:16pm
+10
+My first question is rather simple, what does launch actually optix create when you render a 1024 x 768 size?
+Reading about cuda indexing I see that there is:
+a grid with x,y,z dimensions containing blocks
+a block with x,y,z containing threads
+and threads
+You do not need to be concerned about that because OptiX provides a single-ray programming model and all scheduling of that to available GPU hardware capabilities is handled internally.
+You only need to care about the optixLaunch arguments and the optixGetLaunchDimensions and optixGetLaunchIndex to do work per launch index.
+Note that the OptiX launch dimension is limited to 2^30 which is smaller than in native CUDA. See the Limits chapter inside the OptiX Programming Guide.
+These launch indices are effectively CUDA threads which are running in warps of 32 threads. How many blocks are used internally depends on the amount of resources being used.
+You could be concerned about occupancy in warps when programming your kernels (the more divergent code is executed in threads in a warp, the lower the occupancy, the worse the efficiency of your kernel). So program device code in a way that most code does the same thing when possible.
+The other thing which affects the scheduling is the number of registers a kernel is allowed to use and the default in OptiX is 128 because there is usually a performance cliff when going higher, but in a few cases, depending on the complexity of the device code and the underlying GPUs, higher values can make sense when there is too much register spilling when allowing too few registers, so there is a setting in OptiX to experiment with that number of registers. (See link below.)
+Mind that this is per GPU and you should not change the default blindly for all GPUs when you’re not able to verify the effect. I recommend to not touch the default before you’ve optimized everything else.
+You will be able to see the occupancy and number of blocks OptiX kernels launched inside an Nsight Compute profile summary.
+Read this post for more details: https://forums.developer.nvidia.com/t/high-stall-mio-throttle/274590/4
+I am not sure but when you render a1024 x 768 image, do you simply create a single1024 x 768 block with 786,432 threads?
+Nope, that’s not how the grouping of threads into blocks works. If you read the CUDA Programming Model chapter inside the CUDA Programming Guide again, you’ll find this sentence: “On current GPUs, a thread block may contain up to 1024 threads.”
+My other question has to do with handling the hit event. Let’s say a ray hits the triangle and I want to store all the x coordinates of the rays that had a hit. How can I transfer this collection of x back to the main function?
+I’ll answer that inside the other thread with the same question.
+How to configure launch grid configuration for computational task?
+Related topics
+Topic
+Replies
+Views
+Activity
+Some questions about ray
+OptiX
+10
+2258
+May 12, 2023
+How to record hits while traversing a mesh?
+OptiX
+9
+3468
+September 2, 2023
+optiXTutorial 11 - remove (free)GLUT
+OptiX
+36
+5242
+May 15, 2017
+I would like to know why "miss" is occurring
+OptiX
+14
+1630
+September 26, 2023
+Wraps in Ray gen and how data is initially stored in the memory hierarchy
+OptiX
+12
+1377
+July 2, 2021
+How to configure launch grid configuration for computational task?
+OptiX
+1
+362
+June 20, 2024
+"illegal memory access" when trying to set up multiple cameras
+OptiX
+7
+416
+July 13, 2024
+Pick ray in Optix7
+OptiX
+12
+1409
+October 11, 2019
+Benchmarking: count actual hit rays, and relative hit rays
+OptiX
+7
+1212
+August 15, 2022
+Comparing Optix performance to CUDA
+OptiX
+19
+6859
+January 12, 2021
