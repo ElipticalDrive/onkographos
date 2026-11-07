@@ -9,26 +9,26 @@ Coarse-to-Fine NeRF is a hierarchical sampling strategy that improves the learni
 The method employs two separate Multi-Layer Perceptrons (MLPs), a coarse network and a fine network, which share the same architecture but maintain distinct parameters [S2, S3, unofficial]. Both networks are trained jointly to predict volume density and view-dependent color [S2, unofficial].
 
 ### Inputs and Outputs
-*   **Inputs**: Ray origins $\mathbf{o} \in \mathbb{R}^3$, ray directions $\mathbf{d} \in \mathbb{R}^3$, near bound $t_{near}$, far bound $t_{far}$.
-*   **Outputs**: Rendered color $\mathbf{C} \in \mathbb{R}^3$, depth map, accumulated alpha (opacity), and weights for each sample.
+*   **Inputs**: Ray origins $\mathbf{o} \in \mathbb{R}^3$, ray directions $\mathbf{d} \in \mathbb{R}^3$, near bound $t_{near}$, far bound $t_{far}$ [S3, unofficial].
+*   **Outputs**: Rendered color $\mathbf{C} \in \mathbb{R}^3$, depth map, accumulated alpha (opacity), and weights for each sample [S4, unofficial].
 
 ### Data Structures
-*   **Coarse Samples**: A tensor of shape $(N, N_c)$ containing depth values $t_c$ along $N$ rays, where $N_c$ is the number of coarse samples per ray.
-*   **Fine Samples**: A tensor of shape $(N, N_f)$ containing depth values $t_{fine}$, where $N_f$ is the number of fine samples per ray.
-*   **Concatenated Samples**: A sorted tensor of shape $(N, N_c + N_f)$ containing all sample depths $t_f$.
+*   **Coarse Samples**: A tensor of shape $(N, N_c)$ containing depth values $t_c$ along $N$ rays, where $N_c$ is the number of coarse samples per ray [S3, unofficial].
+*   **Fine Samples**: A tensor of shape $(N, N_f)$ containing depth values $t_{fine}$, where $N_f$ is the number of fine samples per ray [S3, unofficial].
+*   **Concatenated Samples**: A sorted tensor of shape $(N, N_c + N_f)$ containing all sample depths $t_f$ [S3, unofficial].
 *   **Raw Network Output**: A tensor of shape $(N, N_{samples}, 4)$, where the first 3 channels are RGB color (sigmoided to $[0,1]$) and the 4th channel is volume density $\sigma$ [S4, unofficial].
 
 ### Parameters
 *   $N_c$: Number of coarse samples per ray. Default: 64 [S3, unofficial].
 *   $N_f$: Number of fine samples per ray. Default: 128 [S3, unofficial].
-*   `perturb`: Boolean flag to enable stratified sampling (jittering) during the coarse pass to break symmetry and reduce aliasing. Default: True [S3, unofficial].
+*   `perturb`: Boolean flag to enable perturbation of uniform samples during the coarse pass to break symmetry and reduce aliasing. Default: True [S3, unofficial].
 *   `raw_noise_std`: Standard deviation of uniform noise added to volume density $\sigma$ before ReLU activation. Default: 0 [S4, unofficial].
 *   `white_bkgd`: Boolean flag. If True, adds unaccounted transmittance $(1 - \alpha_{acc})$ to the RGB map, assuming a white background [S4, unofficial].
 *   `pos_levels`: Number of frequency octaves for positional encoding. Default: 10 [S2, unofficial].
 *   `dir_levels`: Number of frequency octaves for directional encoding. Default: 4 [S2, unofficial].
 
 ### Steps
-1.  **Coarse Sampling**: Generate $N_c$ sample depths $t_c$ uniformly along the ray segment $[t_{near}, t_{far}]$. If `perturb` is enabled, apply stratified sampling by adding uniform noise within each bin to break symmetry [S3, S4, unofficial].
+1.  **Coarse Sampling**: Generate $N_c$ sample depths $t_c$ uniformly along the ray segment $[t_{near}, t_{far}]$. If `perturb` is enabled, apply perturbation to uniform samples during the coarse pass to break symmetry and reduce aliasing [S3, unofficial].
 2.  **Coarse Query**: Convert $t_c$ to 3D points $\mathbf{p}_c = \mathbf{o} + t_c \mathbf{d}$. Query the coarse MLP with $\mathbf{p}_c$ and view directions to obtain raw outputs $\mathbf{raw}_c$ [S3, S4, unofficial].
 3.  **Coarse Rendering**: Convert $\mathbf{raw}_c$ to weights $w_c$ using volume rendering equations (see Formulas). Compute the coarse color $\mathbf{rgb}_{coarse}$ and depth [S3, S4, unofficial].
 4.  **Hierarchical Sampling**: Use the coarse weights $w_c$ to define a probability distribution. Sample $N_f$ new depths $t_{fine}$ from this distribution using inverse transform sampling (or `sample_pdf`) [S3, S4, unofficial].
@@ -138,7 +138,7 @@ def coarse_to_fine_render(rays_o, rays_d, near, far, n_coarse, n_fine,
     t_vals = t_vals.expand(rays_o.shape[0], n_coarse)
 
     if perturb:
-        # Stratified sampling: jitter within bins
+        # Perturbation: jitter within bins to break symmetry
         mid = (t_vals[..., :-1] + t_vals[..., 1:]) / 2
         upper = torch.cat([mid, t_vals[..., -1:]], dim=-1)
         lower = torch.cat([t_vals[..., :1], mid], dim=-1)
@@ -161,33 +161,19 @@ def coarse_to_fine_render(rays_o, rays_d, near, far, n_coarse, n_fine,
     
     # Sample N_f points from the distribution defined by weights_c
     # Using inverse transform sampling on the CDF of weights_c
-    # This is a simplified representation of sample_pdf
-    cdf = weights_c_detached / (weights_c_detached.sum(dim=-1, keepdim=True) + 1e-10)
-    # Generate uniform random numbers for inverse transform
-    u = torch.rand_like(t_c_detached)
-    # Find indices where CDF >= u
-    # In practice, this involves torch.searchsorted or similar logic
-    # Here we assume a helper function sample_pdf exists or implement basic inverse transform
-    # For completeness, we note that t_fine is drawn from the distribution of weights_c
-    
-    # Simplified implementation of sampling from weights:
-    # Normalize weights to probabilities
     probs = weights_c_detached / (weights_c_detached.sum(dim=-1, keepdim=True) + 1e-10)
-    # Cumulative sum
     cdf_probs = torch.cumsum(probs, dim=-1)
     # Pad with 0 at start and 1 at end
     cdf_probs = torch.cat([torch.zeros_like(cdf_probs[..., :1]), cdf_probs, 
                            torch.ones_like(cdf_probs[..., :1])], dim=-1)
-    # Clip u to [0, 1]
+    # Generate uniform random numbers for inverse transform
+    u = torch.rand_like(t_c_detached)
     u = torch.clamp(u, min=0, max=1)
     # Find bin indices
     bin_indices = torch.searchsorted(cdf_probs, u, side='right') - 1
     # Linear interpolation within bins (standard inverse transform sampling)
-    # Lower bound of bin
     t_low = t_c_detached.gather(1, bin_indices)
-    # Upper bound of bin
     t_high = t_c_detached.gather(1, bin_indices + 1)
-    # Normalize u within the bin's CDF range
     p = cdf_probs.gather(1, bin_indices + 1) - cdf_probs.gather(1, bin_indices)
     p = torch.clamp(p, min=1e-10)
     t_fine = t_low + (u - cdf_probs.gather(1, bin_indices)) / p * (t_high - t_low)
@@ -230,8 +216,8 @@ A strategy that selectively increases the sampling rate only within the bounding
 A method to translate depth oracle classification outputs into sample locations by treating the output vector as a piecewise-constant Probability Density Function (PDF) and sampling from its Cumulative Distribution Function (CDF) [S7]. Unlike NeRF, which builds a PDF from opacity outputs of a coarse shading network evaluated at multiple sample locations, DONeRF uses the output from a single oracle network evaluation [S7].
 
 ## Operating characteristics
-*   **Time Complexity**: The method requires two forward passes per ray (coarse and fine), effectively doubling the number of MLP queries compared to a single-pass uniform sampler with the same total sample count, but providing higher quality. The total number of samples is $N_c + N_f$.
-*   **Memory Complexity**: Requires storing outputs for both coarse and fine passes, including weights, colors, and depths for $N_c + N_f$ samples per ray.
+*   **Time Complexity**: The method requires two forward passes per ray (coarse and fine), effectively doubling the number of MLP queries compared to a single-pass uniform sampler with the same total sample count, but providing higher quality. The total number of samples is $N_c + N_f$ [S3, unofficial].
+*   **Memory Complexity**: Requires storing outputs for both coarse and fine passes, including weights, colors, and depths for $N_c + N_f$ samples per ray [S4, unofficial].
 *   **Performance**: Significantly improves reconstruction quality for high-frequency details compared to uniform sampling [S1, S3, unofficial].
 *   **Strengths**: Efficiently allocates samples to opaque regions; reduces aliasing when combined with perturbation [S3, unofficial].
 *   **Limitations**: Requires careful handling of the computation graph to prevent cyclic dependencies (detaching coarse samples) [S4, unofficial]. The non-differentiable sampling step prevents joint optimization of the sampling distribution with the network weights [S3, unofficial].

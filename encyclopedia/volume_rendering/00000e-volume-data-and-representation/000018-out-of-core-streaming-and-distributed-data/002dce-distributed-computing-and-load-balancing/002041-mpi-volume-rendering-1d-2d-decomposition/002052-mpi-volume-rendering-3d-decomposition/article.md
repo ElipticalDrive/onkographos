@@ -24,8 +24,7 @@ MPI Volume Rendering (3D Decomposition) is a distributed memory parallel volume 
 ### Data Structures
 
 **Volume Dataset:**
-*   Stored as a contiguous 1D array of `float32` values in memory, reshaped into a 3D grid $(X, Y, Z)$ [S2, S3, S4, unofficial].
-*   File format: Raw binary data. The source implementations use Fortran order (`order='F'`) for reshaping, meaning the Z-axis is the fastest varying dimension in memory layout [S3, S4, unofficial].
+*   Stored as a contiguous 1D array of `float32` values in memory, reshaped into a 3D grid $(X, Y, Z)$ using Fortran order (`order='F'`), meaning the Z-axis is the fastest varying dimension in memory layout [S3, S4, unofficial].
 *   Index mapping for a voxel at $(x, y, z)$ in a local subdomain of size $(X_{loc}, Y_{loc}, Z_{loc})$:
     $$ \text{index} = z \cdot (X_{loc} \cdot Y_{loc}) + y \cdot X_{loc} + x $$
 
@@ -42,59 +41,44 @@ MPI Volume Rendering (3D Decomposition) is a distributed memory parallel volume 
 
 1.  **Initialize MPI:** Initialize the MPI environment, determine the global rank $r$ and total number of processes $P$ [S3, S4, unofficial].
 2.  **Parse Arguments:** Read command-line arguments for dataset, divisions, step size, and TF paths [S3, S4, unofficial].
-3.  **Calculate Global Boundaries (Rank 0):**
-    *   Determine the global volume dimensions $X, Y, Z$ from the filename or file header [S3, S4, unofficial].
-    *   Compute boundary arrays to distribute the remainder of the division evenly among the first blocks [S2, unofficial]:
-        ```python
-        xBound = [0] * (xdiv + 1)
-        rem = X % xdiv
-        for i in range(1, xdiv + 1):
-            # Add 1 to size if remainder exists, decrementing rem
-            xBound[i] = xBound[i-1] + (X // xdiv) + (1 if rem > 0 else 0)
-            if rem > 0:
-                rem -= 1
-        # Repeat for yBound and zBound
-        ```
-    *   Note: Some implementations clamp boundaries to data bounds if cropping is requested [S4, unofficial].
-4.  **Load and Crop Data (Rank 0):**
-    *   Load the raw volume data into a contiguous `float32` array [S3, S4, unofficial].
-    *   If cropping is specified, extract the sub-volume defined by $(x_{min}, x_{max}, y_{min}, y_{max})$ [S3, S4, unofficial].
-5.  **Decompose and Distribute Data:**
-    *   Rank 0 splits the volume into $P$ subdomains based on the 3D grid defined by `xBound`, `yBound`, `zBound` [S2, S4, unofficial].
-    *   The rank's position in the 3D grid is calculated as:
-        $$ idx_x = r \pmod{xdiv} $$
-        $$ idx_y = (r // xdiv) \pmod{ydiv} $$
-        $$ idx_z = (r // (xdiv \cdot ydiv)) \pmod{zdiv} $$
-    *   Rank 0 sends the subdomain corresponding to each rank $i$ to rank $i$ using `MPI_Send` with tag $i$ [S2, S4, unofficial]. Non-zero ranks receive their data using `MPI_Recv` with tag equal to their rank [S2, S4, unofficial].
-    *   *Alternative Distribution:* Some implementations use `MPI_Scatter` or manual slicing via `np.array_split` followed by `scatter` [S3, unofficial].
-6.  **Broadcast Transfer Functions (Rank 0):**
-    *   Rank 0 parses the CTF and OTF files into lists of tuples [S3, S4, unofficial].
-    *   Rank 0 broadcasts these lists to all other ranks using `MPI_Bcast` [S3, unofficial].
-7.  **Local Ray Casting:**
-    *   Each rank performs ray casting on its local subdomain [S1, S4, unofficial].
-    *   For each pixel $(x, y)$ in the local image slice (corresponding to the local X and Y bounds):
-        *   Initialize `accumulated_color = (0,0,0)` and `accumulated_opacity = 0` [S4, unofficial].
-        *   March along the Z-axis with `step_size`. For each sample position $z$:
-            *   **Interpolate Volume Value:** Use trilinear interpolation (or linear along Z if X/Y are discrete indices) to get `voxel_val` from the local subdomain [S3, S4, unofficial].
-                $$ \text{voxel\_val} = (1-t) \cdot \text{data}[x, y, z_0] + t \cdot \text{data}[x, y, z_1] $$
-                where $z_0 = \lfloor z \rfloor$, $z_1 = \min(z_0+1, Z_{loc}-1)$, and $t = z - z_0$ [S4, unofficial].
-            *   **Interpolate Transfer Functions:**
-                *   Find bracketing interval $[v_0, v_1]$ in CTF/OTF.
-                *   Compute interpolation factor $t_{tf} = \frac{\text{voxel\_val} - v_0}{v_1 - v_0}$ if $v_1 \neq v_0$, else $0$ [S3, unofficial].
-                *   Get color $(r,g,b)$ and opacity $o$ [S4, unofficial].
-            *   **Front-to-Back Compositing:**
-                $$ \text{accumulated\_color} \leftarrow \text{accumulated\_color} + (1 - \text{accumulated\_opacity}) \cdot \text{color} \cdot \text{opacity} $$
-                $$ \text{accumulated\_opacity} \leftarrow \text{accumulated\_opacity} + (1 - \text{accumulated\_opacity}) \cdot \text{opacity} $$
-            *   **Early Termination:** If `accumulated_opacity` $\ge 0.98$ (or $0.95$ in some implementations), break the ray march and increment an early termination counter [S3, S4, unofficial].
-        *   Store the final `accumulated_color` in the local image slice at $(x, y)$ [S4, unofficial].
-8.  **Gather Results:**
-    *   Each rank sends its local image slice to Rank 0 using `MPI_Gather` or `MPI_Send` [S3, S4, unofficial].
-    *   Rank 0 also gathers early termination counts using `MPI_Reduce` with `MPI.SUM` [S3, S4, unofficial].
-9.  **Stitch Image (Rank 0):**
-    *   Rank 0 assembles the final image from the gathered slices based on the decomposition type [S3, S4, unofficial].
-    *   For standard 3D decomposition, the slices are arranged in a 3D grid. However, since the output is 2D, the Z-dimension is collapsed. The stitching logic depends on how the image plane is mapped to the process grid. Typically, if the view is along the Z-axis, the image plane is XY. The processes are arranged in a 3D grid, but only the XY projection matters for the image. Rank 0 reconstructs the 2D image by placing each rank's slice at the correct $(x,y)$ offset in the global image buffer [S4, unofficial].
-        *   If using Type 1 (1D split along X): `np.vstack` of slices [S3, unofficial].
-        *   If using Type 2 (2D split): Reconstruct 2D grid of slices using `np.hstack` and `np.vstack` [S3, S4, unofficial].
+3.  **Calculate Global Boundaries (Rank 0):** Determine the global volume dimensions $X, Y, Z$ from the filename or file header [S3, S4, unofficial]. Compute boundary arrays to distribute the remainder of the division evenly among the first blocks [S2, unofficial]:
+    ```python
+    xBound = [0] * (xdiv + 1)
+    rem = X % xdiv
+    for i in range(1, xdiv):
+        xBound[i] = xBound[i-1] + (X // xdiv) + (1 if rem > 0 else 0)
+        if rem > 0:
+            rem -= 1
+    xBound[xdiv] = X
+    # Repeat for yBound and zBound
+    ```
+    Note: Some implementations clamp boundaries to data bounds if cropping is requested [S4, unofficial].
+4.  **Load and Crop Data (Rank 0):** Load the raw volume data into a contiguous `float32` array [S3, S4, unofficial]. If cropping is specified, extract the sub-volume defined by $(x_{min}, x_{max}, y_{min}, y_{max})$ [S3, S4, unofficial].
+5.  **Decompose and Distribute Data:** Rank 0 splits the volume into $P$ subdomains based on the 3D grid defined by `xBound`, `yBound`, `zBound` [S2, S4, unofficial]. The rank's position in the 3D grid is calculated as:
+    $$ idx_x = r \pmod{xdiv} $$
+    $$ idx_y = (r // xdiv) \pmod{ydiv} $$
+    $$ idx_z = (r // (xdiv \cdot ydiv)) \pmod{zdiv} $$
+    Rank 0 sends the subdomain corresponding to each rank $i$ to rank $i$ using `MPI_Send` with tag $i$ [S2, S4, unofficial]. Non-zero ranks receive their data using `MPI_Recv` with tag equal to their rank [S2, S4, unofficial].
+6.  **Broadcast Transfer Functions (Rank 0):** Rank 0 parses the CTF and OTF files into lists of tuples [S3, S4, unofficial]. Rank 0 broadcasts these lists to all other ranks using `MPI_Bcast` [S3, unofficial].
+7.  **Local Ray Casting:** Each rank performs ray casting on its local subdomain [S1, S4, unofficial]. For each pixel $(x, y)$ in the local image slice (corresponding to the local X and Y bounds):
+    *   Initialize `accumulated_color = (0,0,0)` and `accumulated_opacity = 0` [S4, unofficial].
+    *   March along the Z-axis with `step_size`. For each sample position $z$:
+        *   **Interpolate Volume Value:** Use linear interpolation along Z to get `voxel_val` from the local subdomain [S3, S4, unofficial].
+            $$ \text{voxel\_val} = (1-t) \cdot \text{data}[x, y, z_0] + t \cdot \text{data}[x, y, z_1] $$
+            where $z_0 = \lfloor z \rfloor$, $z_1 = \min(z_0+1, Z_{loc}-1)$, and $t = z - z_0$ [S4, unofficial].
+        *   **Interpolate Transfer Functions:**
+            *   Find bracketing interval $[v_0, v_1]$ in CTF/OTF.
+            *   Compute interpolation factor $t_{tf} = \frac{\text{voxel\_val} - v_0}{v_1 - v_0}$ if $v_1 \neq v_0$, else $0$ [S3, unofficial].
+            *   Get color $(r,g,b)$ and opacity $o$ [S4, unofficial].
+        *   **Front-to-Back Compositing:**
+            $$ \text{accumulated\_color} \leftarrow \text{accumulated\_color} + (1 - \text{accumulated\_opacity}) \cdot \text{color} \cdot \text{opacity} $$
+            $$ \text{accumulated\_opacity} \leftarrow \text{accumulated\_opacity} + (1 - \text{accumulated\_opacity}) \cdot \text{opacity} $$
+        *   **Early Termination:** If `accumulated_opacity` $\ge 0.98$ (or $0.95$ in some implementations), break the ray march and increment an early termination counter [S3, S4, unofficial].
+    *   Store the final `accumulated_color` in the local image slice at $(x, y)$ [S4, unofficial].
+8.  **Gather Results:** Each rank sends its local image slice to Rank 0 using `MPI_Gather` or `MPI_Send` [S3, S4, unofficial]. Rank 0 also gathers early termination counts using `MPI_Reduce` with `MPI.SUM` [S3, S4, unofficial].
+9.  **Stitch Image (Rank 0):** Rank 0 assembles the final image from the gathered slices based on the decomposition type [S3, S4, unofficial]. For standard 3D decomposition, the slices are arranged in a 3D grid. However, since the output is 2D, the Z-dimension is collapsed. The stitching logic depends on how the image plane is mapped to the process grid. Typically, if the view is along the Z-axis, the image plane is XY. The processes are arranged in a 3D grid, but only the XY projection matters for the image. Rank 0 reconstructs the 2D image by placing each rank's slice at the correct $(x,y)$ offset in the global image buffer [S4, unofficial].
+    *   If using Type 1 (1D split along X): `np.vstack` of slices [S3, unofficial].
+    *   If using Type 2 (2D split): Reconstruct 2D grid of slices using `np.hstack` and `np.vstack` [S3, S4, unofficial].
     *   Convert to `uint8` and save as PNG [S3, S4, unofficial].
 
 ### Pseudocode
@@ -102,166 +86,22 @@ MPI Volume Rendering (3D Decomposition) is a distributed memory parallel volume 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import sys
 import numpy as np
+import matplotlib.pyplot as plt
 from mpi4py import MPI
-
-def main():
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    size = comm.Get_size()
-    
-    # 1. Parse arguments (simplified)
-    # argv: dataset, xdiv, ydiv, zdiv, step, color_tf, opacity_tf
-    dataset = sys.argv[1]
-    xdiv, ydiv, zdiv = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
-    step = float(sys.argv[5])
-    
-    # 2. Calculate boundaries (Rank 0)
-    if rank == 0:
-        # Load shape from filename or file header
-        X, Y, Z = get_shape(dataset)
-        
-        # Calculate xBound, yBound, zBound
-        xBound = calculate_boundaries(X, xdiv)
-        yBound = calculate_boundaries(Y, ydiv)
-        zBound = calculate_boundaries(Z, zdiv)
-        
-        # Load volume data
-        volume = np.fromfile(dataset, dtype=np.float32).reshape((X, Y, Z), order='F')
-        
-        # Load TFs
-        color_tf = load_tf(sys.argv[6], is_color=True)
-        opacity_tf = load_tf(sys.argv[7], is_color=False)
-        
-        # Decompose volume
-        # Create list of subdomains and their global coordinates
-        subdomains = []
-        for iz in range(zdiv):
-            for iy in range(ydiv):
-                for ix in range(xdiv):
-                    x_start, x_end = xBound[ix], xBound[ix+1]
-                    y_start, y_end = yBound[iy], yBound[iy+1]
-                    z_start, z_end = zBound[iz], zBound[iz+1]
-                    
-                    # Extract subdomain
-                    sub = volume[x_start:x_end, y_start:y_end, z_start:z_end]
-                    subdomains.append(sub)
-                    
-        # 3. Distribute data
-        # Scatter subdomains to all ranks
-        # Note: MPI_Scatter requires equal sized buffers. 
-        # If subdomains are unequal, use MPI_Scatterv or manual send/recv.
-        # Here we assume manual send/recv for simplicity or use scatterv.
-        
-        # Calculate displacements and counts for Scatterv
-        counts = [sub.shape[0]*sub.shape[1]*sub.shape[2] for sub in subdomains]
-        displs = [sum(counts[:i]) for i in range(size)]
-        
-        # Flatten volume for scatterv
-        volume_flat = volume.flatten()
-        
-        # Local buffer
-        local_volume = np.empty(counts[rank], dtype=np.float32)
-        comm.Scatterv([volume_flat, (displs, MPI.FLOAT), (counts, MPI.INT), MPI.FLOAT], 
-                      local_volume, root=0)
-        
-        # Broadcast TFs
-        color_tf = comm.bcast(color_tf, root=0)
-        opacity_tf = comm.bcast(opacity_tf, root=0)
-        
-        # 4. Ray Casting
-        # Determine local image dimensions
-        h, w, d = local_volume.shape
-        
-        # Map rank to image grid position
-        # Assuming view along Z, image is XY.
-        # Rank index in 3D grid:
-        ix = rank % xdiv
-        iy = (rank // xdiv) % ydiv
-        # iz is ignored for image stitching if view is along Z
-        
-        local_image = np.zeros((h, w, 3), dtype=np.float32)
-        early_terminated = 0
-        
-        for y in range(w):
-            for x in range(h):
-                acc_color = np.array([0.0, 0.0, 0.0])
-                acc_opacity = 0.0
-                z = 0.0
-                
-                while z < d:
-                    # Interpolate volume value
-                    z0 = int(z)
-                    z1 = min(z0 + 1, d - 1)
-                    t = z - z0
-                    val = (1 - t) * local_volume[x, y, z0] + t * local_volume[x, y, z1]
-                    
-                    # Interpolate TFs
-                    color = interpolate_tf(val, color_tf)
-                    opacity = interpolate_tf(val, opacity_tf)
-                    
-                    # Compositing
-                    acc_color += (1 - acc_opacity) * color * opacity
-                    acc_opacity += (1 - acc_opacity) * opacity
-                    
-                    if acc_opacity >= 0.98:
-                        early_terminated += 1
-                        break
-                    
-                    z += step
-                
-                local_image[x, y] = acc_color
-        
-        # 5. Gather Results
-        # Gather images to Rank 0
-        # Since image sizes may vary, use Gatherv or manual send
-        # For simplicity, assume fixed size or use Gather with padding
-        gathered_images = comm.gather(local_image, root=0)
-        gathered_early = comm.reduce(early_terminated, op=MPI.SUM, root=0)
-        
-        # 6. Stitch Image (Rank 0)
-        if rank == 0:
-            final_image = np.zeros((Y, X, 3), dtype=np.float32)
-            
-            # Reconstruct image from gathered slices
-            # Iterate over all ranks and place their slice
-            for r in range(size):
-                if r == 0: # Skip rank 0 if it didn't send, but it did
-                    pass
-                
-                # Get ix, iy for rank r
-                ix_r = r % xdiv
-                iy_r = (r // xdiv) % ydiv
-                
-                # Get slice
-                slice_img = gathered_images[r]
-                h_s, w_s, _ = slice_img.shape
-                
-                # Place in final image
-                # Note: xBound[ix_r] is the start index in global X
-                # But local_image[x,y] corresponds to global (xBound[ix_r]+x, yBound[iy_r]+y)
-                # Wait, local_volume shape is (x_end-x_start, y_end-y_start, ...)
-                # So x in local is 0..h_s-1, which maps to global x_start..x_end-1
-                
-                x_start = xBound[ix_r]
-                y_start = yBound[iy_r]
-                
-                final_image[x_start:x_start+h_s, y_start:y_start+w_s, :] = slice_img
-            
-            # Save final_image
-            save_image(final_image)
 
 def calculate_boundaries(dim, divs):
     bounds = [0] * (divs + 1)
     rem = dim % divs
-    for i in range(1, divs + 1):
+    for i in range(1, divs):
         bounds[i] = bounds[i-1] + (dim // divs) + (1 if rem > 0 else 0)
         if rem > 0:
             rem -= 1
+    bounds[divs] = dim
     return bounds
 
 def interpolate_tf(val, tf_list):
-    # Find bracketing interval
     for i in range(len(tf_list) - 1):
         v0, c0 = tf_list[i]
         v1, c1 = tf_list[i+1]
@@ -269,22 +109,122 @@ def interpolate_tf(val, tf_list):
             if v1 == v0:
                 return c0
             t = (val - v0) / (v1 - v0)
-            if isinstance(c0, tuple) and len(c0) == 3: # Color
+            if isinstance(c0, tuple) and len(c0) == 3:
                 return tuple(c0[j] + t * (c1[j] - c0[j]) for j in range(3))
-            else: # Opacity
+            else:
                 return c0 + t * (c1 - c0)
     return tf_list[0][1] if val < tf_list[0][0] else tf_list[-1][1]
 
-def load_tf(path, is_color):
-    tf = []
-    with open(path) as f:
-        for line in f:
-            parts = list(map(float, line.strip().replace(',', '').split()))
-            if is_color:
-                tf.append((parts[0], (parts[1], parts[2], parts[3])))
+def main():
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+    
+    dataset = sys.argv[1]
+    xdiv, ydiv, zdiv = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
+    step = float(sys.argv[5])
+    color_tf_path = sys.argv[6]
+    opacity_tf_path = sys.argv[7]
+    
+    if rank == 0:
+        # Determine dimensions from filename or file
+        X, Y, Z = 1000, 1000, 200  # Example from sources
+        xBound = calculate_boundaries(X, xdiv)
+        yBound = calculate_boundaries(Y, ydiv)
+        zBound = calculate_boundaries(Z, zdiv)
+        
+        volume = np.fromfile(dataset, dtype=np.float32).reshape((X, Y, Z), order='F')
+        
+        color_tf = []
+        opacity_tf = []
+        with open(color_tf_path) as f:
+            for line in f:
+                parts = list(map(float, line.strip().replace(',', '').split()))
+                color_tf.append((parts[0], (parts[1], parts[2], parts[3])))
+        with open(opacity_tf_path) as f:
+            for line in f:
+                parts = list(map(float, line.strip().replace(',', '').split()))
+                opacity_tf.append((parts[0], parts[1]))
+                
+        # Broadcast boundaries and TFs so all ranks know their local chunk sizes
+        comm.Bcast(xBound, root=0)
+        comm.Bcast(yBound, root=0)
+        comm.Bcast(zBound, root=0)
+        comm.Bcast(color_tf, root=0)
+        comm.Bcast(opacity_tf, root=0)
+        
+        # Distribute volume
+        for r in range(size):
+            ix = r % xdiv
+            iy = (r // xdiv) % ydiv
+            iz = (r // (xdiv * ydiv)) % zdiv
+            
+            x_start, x_end = xBound[ix], xBound[ix+1]
+            y_start, y_end = yBound[iy], yBound[iy+1]
+            z_start, z_end = zBound[iz], zBound[iz+1]
+            
+            sub = volume[x_start:x_end, y_start:y_end, z_start:z_end]
+            sub_flat = sub.flatten()
+            
+            if r == 0:
+                local_volume = sub_flat
             else:
-                tf.append((parts[0], parts[1]))
-    return tf
+                comm.Send(sub_flat, dest=r, tag=r)
+    else:
+        local_volume = np.empty(0, dtype=np.float32)
+        comm.Recv(local_volume, source=0, tag=rank)
+        color_tf = None
+        opacity_tf = None
+        comm.Bcast(color_tf, root=0)
+        comm.Bcast(opacity_tf, root=0)
+
+    # Ray casting
+    h, w, d = local_volume.shape
+    local_image = np.zeros((h, w, 3), dtype=np.float32)
+    early_terminated = 0
+    
+    for y in range(w):
+        for x in range(h):
+            acc_color = np.array([0.0, 0.0, 0.0])
+            acc_opacity = 0.0
+            z = 0.0
+            while z < d:
+                z0 = int(z)
+                z1 = min(z0 + 1, d - 1)
+                t = z - z0
+                val = (1 - t) * local_volume[x, y, z0] + t * local_volume[x, y, z1]
+                
+                color = interpolate_tf(val, color_tf)
+                opacity = interpolate_tf(val, opacity_tf)
+                
+                acc_color += (1 - acc_opacity) * color * opacity
+                acc_opacity += (1 - acc_opacity) * opacity
+                
+                if acc_opacity >= 0.98:
+                    early_terminated += 1
+                    break
+                z += step
+            local_image[x, y] = acc_color
+            
+    # Gather
+    gathered_images = comm.gather(local_image, root=0)
+    gathered_early = comm.reduce(early_terminated, op=MPI.SUM, root=0)
+    
+    if rank == 0:
+        final_image = np.zeros((Y, X, 3), dtype=np.float32)
+        for r in range(size):
+            ix_r = r % xdiv
+            iy_r = (r // xdiv) % ydiv
+            slice_img = gathered_images[r]
+            h_s, w_s, _ = slice_img.shape
+            x_start = xBound[ix_r]
+            y_start = yBound[iy_r]
+            final_image[x_start:x_start+h_s, y_start:y_start+w_s, :] = slice_img
+        final_image = (final_image * 255).astype(np.uint8)
+        plt.imsave('Rendered_Image.png', final_image)
+
+if __name__ == '__main__':
+    main()
 ```
 
 ### Parameters
@@ -297,8 +237,6 @@ def load_tf(path, is_color):
 *   **Boundary Calculation:** The remainder distribution logic (`rem--`) must be implemented carefully to ensure block sizes are correct and sum to the total dimension [S2, unofficial].
 *   **Division by Zero:** Transfer function interpolation must check if $v_1 == v_0$ to avoid division by zero [S3, unofficial].
 *   **Index Out of Bounds:** When interpolating Z-values, $z_1$ must be clamped to $Z_{loc} - 1$ [S4, unofficial].
-*   **Load Imbalance:** Fixed 3D decomposition may lead to load imbalance if the volume's opacity distribution is non-uniform, as some processes may cast rays through dense regions while others cast through empty space [S1, S4, unofficial].
-*   **Communication Overhead:** Distributing large volumes and gathering images can be a bottleneck. Using `MPI_Scatterv` and `MPI_Gatherv` is more efficient than `MPI_Send`/`MPI_Recv` loops for unequal block sizes [S2, S4, unofficial].
 
 ## Subtopics
 
@@ -322,11 +260,9 @@ Decomposes the object space (volume) rather than image space. Choose for large v
 
 ## Operating characteristics
 
-*   **Time Complexity:** $O(P \cdot \frac{X \cdot Y \cdot Z}{P} \cdot R)$, where $R$ is the average number of samples per ray. Communication overhead is $O(X \cdot Y)$ for gathering images [S1, S4, unofficial].
-*   **Memory Complexity:** $O(\frac{X \cdot Y \cdot Z}{P})$ per process for the local volume subdomain [S2, S4, unofficial].
 *   **Performance:** Scales well with the number of processes if the volume is large enough to keep all processes busy [S1, unofficial]. Performance is limited by network bandwidth during data distribution and image gathering [S2, S4, unofficial].
 *   **Strengths:** Scalable to large datasets and clusters; simple decomposition logic; leverages distributed memory [S1, S4, unofficial].
-*   **Limitations:** Load imbalance if opacity is non-uniform; communication overhead for large images; fixed decomposition may not match data aspect ratio optimally [S1, S4, unofficial].
+*   **Limitations:** Fixed decomposition may not match data aspect ratio optimally [S1, S4, unofficial].
 *   **When to Use:** Large volumetric datasets that fit across multiple nodes; uniform opacity distribution; fixed view direction [S1, S4, unofficial].
 *   **When Not to Use:** Small datasets that fit on a single node; highly non-uniform opacity distribution without load balancing; interactive rendering requiring low latency [S1, S4, unofficial].
 

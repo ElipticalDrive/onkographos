@@ -1,0 +1,277 @@
+--- v003.md
++++ v004.md
+@@ -1,150 +1,157 @@
+ # Hybrid Implicit Isosurface Ray Tracing
+-
+ Also called: Hybrid Isosurface Method
+ 
+ ## Overview
+-Hybrid Implicit Isosurface Ray Tracing is a rendering technique that combines explicit voxel selection with implicit ray-primitive intersection to render high-quality, crack-free isosurfaces from rectilinear volumes [S1, unofficial]. It solves the problem of surface detail loss and artifacts inherent in fixed-step sample-based isosurface rendering, particularly in regions with high spatial refinement [S1, unofficial]. Unlike sibling methods such as [Binary Search IsoSurface Extraction](1316-binary-search-isosurface-extraction.md) which rely on iterative root-finding within cells, or [Trilinear Isosurface Intersection](2213-trilinear-isosurface-intersection.md) which computes exact intersection points analytically, this method builds a Bounding Volume Hierarchy (BVH) over active voxels and performs implicit intersections within each voxel without generating polygonal geometry [S1, unofficial].
++Hybrid Implicit Isosurface Ray Tracing is a rendering technique that combines explicit voxel selection with implicit ray-surface intersection to produce high-quality, crack-free isosurfaces from rectilinear volumes [S1, unofficial]. It solves the problem of surface detail loss and artifacts common in fixed-step sample-based methods by restricting ray traversal to active voxels and performing exact implicit intersections within them [S1, unofficial]. Unlike sibling methods such as [Binary Search IsoSurface Extraction](1316-binary-search-isosurface-extraction.md) which may extract polygons, or [Trilinear Isosurface Intersection](2213-trilinear-isosurface-intersection.md) which operates on uniform grids, this method builds a Bounding Volume Hierarchy (BVH) over logical voxels (such as octants in AMR data) and uses an implicit intersection routine, allowing for efficient rendering of adaptive mesh refinement (AMR) data [S1, unofficial].
+ 
+ ## How it works
+-The method integrates into a ray tracing framework (specifically demonstrated in OSPRay) by treating the volume as a source of logical voxels. It avoids explicit polygon extraction by using the voxel boundaries as the primitives for ray traversal, while computing the isosurface intersection implicitly within those boundaries.
++**Inputs:** A rectilinear volume (e.g., regular grid, rectilinear grid, or BS-AMR) provided as a `VoxelSource`.
++**Outputs:** A ray-traced image of the isosurface defined by a user-specified isovalue.
+ 
+-### Inputs and Outputs
+-*   **Input:** A rectilinear volume (e.g., regular grid, rectilinear grid, or BS-AMR) provided as a `VoxelSource`.
+-*   **Input:** An isovalue (or list of isovalue) defining the surface.
+-*   **Output:** A ray-traced image containing the isosurface, potentially combined with direct volume rendering.
++**Data Structures:**
++1.  **Voxel Abstraction:** Each logical voxel is treated as a cube with trilinearly interpolated scalar values at its vertices.
++    *   **Fields:**
++        *   `x, y, z`: 3D coordinates of the voxel's origin (3 values).
++        *   `width`: Size of the voxel along the x-axis (1 value).
++        *   `height`: Size of the voxel along the y-axis (1 value, required for general rectilinear volumes).
++        *   `depth`: Size of the voxel along the z-axis (1 value, required for general rectilinear volumes).
++        *   `v0...v7`: Scalar values at the 8 vertices of the voxel (8 values).
++    *   **Total:** 12 values for general rectilinear volumes; 11 values if width=height=depth (regular grid).
++    *   **Active Voxel Encoding:** Active voxels are encoded into a single 64-bit integer reference (e.g., 21:21:21 bit partitioning for coordinates) to allow fast lookup in the `VoxelSource` [S1, unofficial].
++2.  **Embree User Geometry:** A primitive list where each primitive corresponds to one active voxel. The primitive's bounding box is queried dynamically from the `VoxelSource` [S1, unofficial].
+ 
+-### Data Structures
++**Algorithm Steps:**
++1.  **Active Voxel Extraction:** The `VoxelSource` generates a list of all active voxels. A voxel is active if its value range (min/max of its 8 vertices) contains the target isovalue [S1, unofficial].
++2.  **Reference Encoding:** Each active voxel is assigned a unique 64-bit reference ID [S1, unofficial].
++3.  **BVH Construction:**
++    *   Create an Embree "user geometry" with a number of primitives equal to the number of active voxels.
++    *   Implement a `getBounds` callback for the user geometry. When Embree requests the bounds of a primitive (identified by its index/ID), the callback decodes the 64-bit reference, queries the `VoxelSource` for the voxel's spatial dimensions (`width`, `height`, `depth`, `x`, `y`, `z`), and returns the axis-aligned bounding box (AABB) of the voxel [S1, unofficial].
++    *   Embree builds the BVH over these dynamic bounding boxes.
++4.  **Ray Traversal and Intersection:**
++    *   Traverse rays through the BVH.
++    *   For each hit primitive, invoke the intersection routine.
++    *   The intersection routine decodes the 64-bit reference to fetch the full voxel data (coordinates, dimensions, 8 vertex values) from the `VoxelSource` [S1, unofficial].
++    *   Perform an implicit ray-isosurface intersection within the voxel using the trilinear interpolation function. This is implemented using the technique by Marmitt et al. [27], adapted for ISPC [S1, unofficial].
++    *   The intersection routine handles ray packets (4-, 8-, or 16-wide) as required by the underlying ray tracer's SIMD execution model [S1, unofficial].
+ 
+-**Voxel Abstraction**
+-Each logical voxel is defined as a cube with trilinearly interpolated scalar values at its vertices.
+-*   **Regular Grid Voxel:** Described by 12 values:
+-    *   3 values: 3D coordinates of the voxel origin.
+-    *   1 value: Width of the voxel.
+-    *   8 values: Scalar values at the 8 vertices.
+-*   **Rectilinear Volume Voxel:** Requires 2 additional values to specify height and depth (total 14 values).
+-*   **Active Voxel Encoding:** Active voxels are encoded into a single 64-bit reference value. The source example uses a 21:21:21 bit partitioning for coordinates [S1, unofficial].
++**Pseudocode:**
++```python
++# Pseudocode for the Hybrid Implicit Isosurface Ray Tracing pipeline
+ 
+-**Embree User Geometry**
+-*   **Primitives:** One primitive per active voxel.
+-*   **Bounding Box Callback:** Queries the `VoxelSource` using the 64-bit reference to retrieve the voxel's spatial bounding box.
+-*   **Intersection Callback:** An ISPC implementation of the ray-iso voxel intersection algorithm by Marmitt et al. [S1, unofficial].
+-
+-### Steps
+-
+-1.  **Identify Active Voxels:**
+-    The `VoxelSource` generates a list of all active voxels. A voxel is active if its value range (min/max of its 8 vertices) contains the target isovalue [S1, unofficial].
+-
+-2.  **Encode References:**
+-    Convert the spatial coordinates of each active voxel into a 64-bit reference ID [S1, unofficial].
+-
+-3.  **Construct BVH:**
+-    Create an Embree "user geometry" with the number of primitives equal to the number of active voxels.
+-    *   Register a `getBounds` callback. When Embree queries the bounds of a primitive, the callback uses the primitive's ID to query the `VoxelSource` for the voxel's bounding box.
+-    *   Embree builds the BVH over these bounding boxes.
+-
+-4.  **Ray Traversal:**
+-    Traverse rays through the BVH. For each ray that intersects a primitive (voxel), invoke the intersection routine.
+-
+-5.  **Implicit Intersection:**
+-    Inside the intersection routine:
+-    *   Query the full voxel data (coordinates, dimensions, vertex values) from the `VoxelSource` using the 64-bit reference.
+-    *   Perform the ray-iso voxel intersection using the method by Marmitt et al. [S1, unofficial]. This determines if and where the ray intersects the isosurface within the voxel's trilinear field.
+-
+-### Pseudocode
+-
+-```python
+-# Data structures
+ class VoxelSource:
+-    def get_bounds(self, voxel_id: int) -> BoundingBox:
+-        """Returns the 3D bounding box of the voxel."""
++    """Abstract interface for accessing volume data."""
++    def get_active_voxels(self, isovalue):
++        """Returns a list of active voxel IDs whose value range contains isovalue."""
+         pass
+ 
+-    def get_data(self, voxel_id: int) -> VoxelData:
+-        """Returns coordinates, dimensions, and 8 vertex scalar values."""
++    def get_voxel_data(self, voxel_id):
++        """
++        Returns voxel data for a given 64-bit ID.
++        Returns: {
++            'x': float, 'y': float, 'z': float,
++            'w': float, 'h': float, 'd': float,
++            'v': [float, ...8 values]
++        }
++        """
+         pass
+ 
+-    def is_active(self, voxel_id: int, isovalue: float) -> bool:
+-        """Returns true if the voxel's value range contains the isovalue."""
+-        pass
++class HybridIsosurfaceGeometry:
++    def __init__(self, voxel_source, isovalue):
++        self.voxel_source = voxel_source
++        self.isovalue = isovalue
++        self.active_voxel_ids = []
++        self.bvh = None
+ 
+-class VoxelData:
+-    origin: Vector3
+-    width: float
+-    height: float
+-    depth: float
+-    vertex_values: Array[8, float]
++    def build(self):
++        # Step 1: Extract active voxels
++        self.active_voxel_ids = self.voxel_source.get_active_voxels(self.isovalue)
++        
++        # Step 2: Create Embree User Geometry
++        # The number of primitives equals the number of active voxels
++        self.user_geometry = create_embree_user_geometry(len(self.active_voxel_ids))
++        
++        # Step 3: Define getBounds callback
++        def get_bounds_callback(primitive_index):
++            voxel_id = self.active_voxel_ids[primitive_index]
++            data = self.voxel_source.get_voxel_data(voxel_id)
++            # Construct AABB from voxel coordinates and dimensions
++            min_pt = [data['x'], data['y'], data['z']]
++            max_pt = [
++                data['x'] + data['w'],
++                data['y'] + data['h'],
++                data['z'] + data['d']
++            ]
++            return AABB(min_pt, max_pt)
++        
++        self.user_geometry.set_get_bounds_callback(get_bounds_callback)
++        
++        # Step 4: Define intersection callback
++        def intersect_callback(primitive_index, ray):
++            voxel_id = self.active_voxel_ids[primitive_index]
++            data = self.voxel_source.get_voxel_data(voxel_id)
++            
++            # Perform implicit ray-iso voxel intersection
++            # Uses trilinear interpolation defined by data['v']
++            # Returns hit distance if intersection exists, else infinity
++            hit_t = marmitt_ray_iso_intersection(ray, data)
++            return hit_t
+ 
+-class Ray:
+-    origin: Vector3
+-    direction: Vector3
++        self.user_geometry.set_intersect_callback(intersect_callback)
++        
++        # Step 5: Build BVH using Embree
++        self.bvh = embree_build_bvh([self.user_geometry])
+ 
+-class HitRecord:
+-    t: float
+-    voxel_id: int
++    def trace(self, rays):
++        # Traverse rays through the BVH
++        hits = self.bvh.intersect(rays)
++        return hits
+ 
+-# Step 1 & 2: Setup
+-def setup_hybrid_geometry(volume: VoxelSource, isovalue: float):
+-    active_voxels = []
+-    for voxel_id in volume.all_voxels():
+-        if volume.is_active(voxel_id, isovalue):
+-            active_voxels.append(voxel_id)
+-    
+-    # Create Embree user geometry with len(active_voxels) primitives
+-    # Each primitive corresponds to one voxel_id in active_voxels
+-    user_geom = EmbreeUserGeometry(active_voxels)
+-    
+-    # Register bounds callback
+-    def get_bounds_callback(primitive_id):
+-        voxel_id = active_voxels[primitive_id]
+-        return volume.get_bounds(voxel_id)
+-    
+-    user_geom.set_bounds_callback(get_bounds_callback)
+-    
+-    # Register intersection callback
+-    def intersect_callback(ray: Ray, primitive_id):
+-        voxel_id = active_voxels[primitive_id]
+-        voxel_data = volume.get_data(voxel_id)
+-        
+-        # Marmitt et al. ray-iso voxel intersection
+-        hit_t = marmitt_ray_iso_intersect(ray, voxel_data, isovalue)
+-        
+-        if hit_t is not None:
+-            return HitRecord(t=hit_t, voxel_id=voxel_id)
+-        return None
+-
+-    user_geom.set_intersect_callback(intersect_callback)
+-    return user_geom
+-
+-# Step 3 & 4: Ray Tracing
+-def render(scene, rays):
+-    # Traverse rays through the BVH built by Embree
+-    for ray in rays:
+-        hit = scene.bvh.traverse(ray)
+-        if hit:
+-            # Process hit (e.g., shading, normal calculation)
+-            pass
++def marmitt_ray_iso_intersection(ray, voxel_data):
++    """
++    Implements the implicit ray-isosurface intersection for a trilinear voxel.
++    ray: {origin: [x,y,z], direction: [dx,dy,dz]}
++    voxel_data: {x, y, z, w, h, d, v[8]}
++    Returns: t (distance along ray) or infinity if no hit.
++    """
++    # Implementation details based on Marmitt et al. [27]
++    # 1. Transform ray into voxel-local space
++    # 2. Solve for intersection with the trilinear isosurface
++    # 3. Return t if valid, else infinity
++    pass
+ ```
+ 
+-### Parameters and Edge Cases
+-*   **Packet Size:** The ISPC intersection routine processes ray packets of 4, 8, or 16 rays. Due to the small size of voxels, the number of active rays per intersection is often small, which may lead to underutilization of SIMD units [S1, unofficial].
+-*   **Rectilinear vs. Regular:** For general rectilinear volumes, the voxel abstraction must account for varying height and depth, not just width [S1, unofficial].
+-*   **Precision:** The method relies on the accuracy of the implicit intersection routine. Degenerate voxels (zero width/height/depth) should be filtered out during active voxel identification.
++**Parameters:**
++*   **Isovalue:** The scalar value defining the isosurface.
++*   **Ray Packet Size:** 4, 8, or 16 rays, depending on the hardware and ray tracer configuration [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Precision:** The 64-bit encoding of voxel coordinates must be sufficient to uniquely identify voxels in the volume. If the volume exceeds the addressable space of the encoding scheme, collisions may occur [S1, unofficial].
++*   **Refined Regions:** Fixed-step sample-based methods fail in refined regions because the step size is too large to capture the surface. This hybrid method avoids this by using implicit intersection within each voxel, ensuring detail is preserved regardless of voxel size [S1, unofficial].
++*   **Empty Voxels:** Voxels that do not contain the isovalue are excluded from the BVH, reducing memory overhead and traversal cost [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Active Cell Filtering](9505-active-cell-filtering.md)
+-A pre-processing optimization that prunes input cells whose value ranges do not overlap with the isovalue, reducing the number of primitives in the BVH.
++A pre-processing optimization that prunes input cells whose value ranges do not overlap with the isovalue before primitive construction.
+ 
+ ### [Dual Cell Optimization for Isosurface Extraction](9508-dual-cell-optimization-for-isosurface-extraction.md)
+-Replaces octants with dual cells in non-boundary regions to reduce the number of primitives, achieving a ~4× speedup in extraction time.
++An optimization that merges eight octants into a single dual cell in non-boundary regions to reduce the number of primitives in the BVH.
+ 
+ ## Operating characteristics
+-*   **Performance:** The method yields better framerates than OSPRay's built-in sample-based isosurface method while providing higher quality [S1, unofficial].
+-*   **Quality:** Produces high-quality, crack-free isosurfaces. It preserves key features and detail in refined regions where sample-based methods fail due to fixed step sizes being too large [S1, unofficial].
+-*   **Memory:** Memory overhead is reduced by optimizations like active octant filtering and octant merging, which minimize the number of primitives in the BVH [S1, unofficial].
+-*   **Limitations:** The reliance on packet-based intersection in ISPC may be inefficient if the number of active rays per voxel intersection is consistently low [S1, unofficial].
++*   **Time Complexity:** BVH construction is $O(N \log N)$ where $N$ is the number of active voxels, dominated by Embree's build process. Ray traversal is $O(\log N)$ per ray. Intersection per hit is constant time relative to voxel size but depends on the complexity of the trilinear root-finding algorithm [S1, unofficial].
++*   **Memory Complexity:** Proportional to the number of active voxels. Each active voxel requires a 64-bit ID and a BVH node. The `VoxelSource` must store the full volume data or provide fast random access [S1, unofficial].
++*   **Performance:** In OSPRay, this method yields better framerates than sample-based isosurface rendering for AMR data. It provides high-quality, crack-free surfaces with more detail in refined regions [S1, unofficial].
++*   **Strengths:**
++    *   Crack-free surfaces.
++    *   High detail in adaptive/refined regions.
++    *   Reuses standard BVH builders (Embree).
++    *   Supports rectilinear and AMR volumes.
++*   **Limitations:**
++    *   Requires implementation of a custom intersection routine (Marmitt et al.).
++    *   Ray packet efficiency may be low if most rays hit only one voxel at a time, though ISPC handles this gracefully [S1, unofficial].
++    *   Not given in the sources: Exact scaling behavior with respect to voxel count or hardware generation.
+ 
+ ## Background
+-The method was introduced by Feng et al. in 2018 as part of the OSPRay framework [S1, unofficial]. It extends previous work on AMR volume rendering (Wald et al.) by integrating a hybrid geometry type that supports interactive visualization of gigascale BS-AMR data [S1, unofficial]. The intersection routine is based on the work of Marmitt et al. [S1, unofficial].
++The method was introduced by Feng et al. in 2018 as part of the OSPRay project [S1, unofficial]. It integrates into the OSPRay ray tracing framework, extending its existing AMR volume structures. The core intersection technique is based on the work of Marmitt et al. [27]. The method addresses the limitations of previous sample-based isosurface rendering in OSPRay, which suffered from missing features and holes in refined regions due to fixed step sizes [S1, unofficial].
+ 
+ ## Sources

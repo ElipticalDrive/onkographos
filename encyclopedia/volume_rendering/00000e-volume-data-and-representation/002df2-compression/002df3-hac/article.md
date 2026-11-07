@@ -1,0 +1,87 @@
+# HAC++
+Also called: Anchor-based compression for 3DGS, HAC, Hash-based Anchor Compression
+
+## Overview
+HAC++ is an anchor-based compression method for 3D Gaussian Splatting (3DGS) that couples unorganized Scaffold-GS anchors with a binarized structured hash grid to establish a sophisticated context model for arithmetic entropy coding [S1, S3, unofficial]. It achieves approximately 100x size reduction over vanilla 3DGS with minimal quality loss, representing a leading rate-distortion result in the compression lineage [S3, unofficial]. Unlike sibling methods that rely on fixed spatial structures or simple quantization, HAC++ leverages the mutual information between anchors and the hash grid, augmented by intra-anchor context, to significantly enhance representational capacity [S1, S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of unorganized 3D Gaussians (anchors) with attributes (position, covariance, opacity, spherical harmonics coefficients) and a multi-resolution hash grid structure.
+*   **Output:** A compressed bitstream containing quantized anchor features and hash grid states, encoded via arithmetic coding.
+
+**Data Structures:**
+1.  **Anchor Set:** A collection of $N$ unorganized Gaussian primitives. Each anchor $i$ has attributes $\mathbf{a}_i = \{\mathbf{p}_i, \mathbf{\Sigma}_i, \alpha_i, \mathbf{c}_i\}$, where $\mathbf{p}$ is position, $\mathbf{\Sigma}$ is covariance, $\alpha$ is opacity, and $\mathbf{c}$ are SH coefficients [S2][S3, unofficial].
+2.  **Binarized Structured Hash Grid:** A multi-resolution grid where each cell stores a binary state or quantized feature value, used to provide spatial priors [S1, S3, unofficial].
+3.  **Context Model:** A probabilistic model estimating the distribution of anchor attributes conditioned on the hash grid state and neighboring anchor information [S3, unofficial].
+
+**Steps:**
+1.  **Anchor Initialization:** Initialize the scene with unorganized Scaffold-GS anchors [S3, unofficial].
+2.  **Hash Grid Construction:** Construct a multi-resolution hash grid. The grid is binarized to store spatial priors derived from the anchor distribution [S1, S3, unofficial].
+3.  **Adaptive Quantization:** Estimate the per-attribute distributions of the anchors using Gaussian models. Quantize the attributes based on these estimated distributions to minimize rate-distortion cost [S2][S3, unofficial].
+4.  **Context Modeling:** Compute the mutual information between the unorganized anchors and the binarized hash grid. Incorporate intra-anchor context (neighboring anchor information) to refine the probability estimates for each attribute [S3, unofficial].
+5.  **Entropy Coding:** Encode the quantized anchor features and hash grid states using arithmetic entropy coding, leveraging the context model derived in Step 4 [S1, S3, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hac_compress(anchors, hash_grid_resolution):
+    # Step 1: Initialize anchors (unorganized Scaffold-GS)
+    anchor_set = initialize_scaffold_gs(anchors)
+    
+    # Step 2: Construct binarized structured hash grid
+    # The grid provides spatial priors for the anchors
+    hash_grid = build_binarized_hash_grid(anchor_set, hash_grid_resolution)
+    
+    # Step 3: Adaptive Quantization
+    # Estimate per-attribute distributions with Gaussian models
+    quantized_attrs = []
+    for anchor in anchor_set:
+        # Estimate distribution for each attribute (position, covariance, opacity, SH)
+        dist = estimate_gaussian_distribution(anchor.attributes)
+        # Quantize based on the distribution
+        q_attr = adaptive_quantize(anchor.attributes, dist)
+        quantized_attrs.append(q_attr)
+        
+    # Step 4: Context Modeling
+    # Compute mutual information between anchors and hash grid
+    # Incorporate intra-anchor context
+    context_model = build_context_model(quantized_attrs, hash_grid)
+    
+    # Step 5: Arithmetic Entropy Coding
+    # Encode using the context model
+    bitstream = arithmetic_encode(quantized_attrs, hash_grid, context_model)
+    
+    return bitstream
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Quantization errors can accumulate if the Gaussian distribution estimates are inaccurate for sparse regions [S2][S3, unofficial].
+*   **Boundaries:** The binarization of the hash grid may lose fine-grained spatial information at grid boundaries [S1, S3, unofficial].
+*   **Degenerate Input:** Highly clustered or degenerate anchor distributions may lead to poor context model performance [S3, unofficial].
+
+## Subtopics
+
+### Scaffold-GS
+A method that organizes Gaussians into a structured scaffold, providing a foundation for HAC++'s anchor-based approach. It differs by explicitly structuring the anchors, whereas HAC++ treats them as unorganized but uses a hash grid for context. Choose when structured initialization is beneficial. [Link](5-sparse-structures.md)
+
+### Arithmetic Encoding
+The entropy coding technique used by HAC++ to approach the Shannon entropy limit. It differs from Huffman coding by allowing fractional bit lengths. Choose when high compression ratios are critical. [Link](2127-arithmetic-encoding.md)
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Achieves ~100x size reduction over vanilla 3DGS [S3, unofficial].
+*   **Quality:** Maintains high visual fidelity with minimal PSNR drop (specific value not given, but implied to be low) [S3, unofficial].
+*   **Strengths:** High compression ratio, sophisticated context modeling, adaptive quantization.
+*   **Limitations:** Complexity of implementation, reliance on accurate distribution estimation.
+*   **When to Use:** When storage or bandwidth is a critical constraint for 3DGS scenes.
+*   **When Not to Use:** When real-time decompression speed is more important than compression ratio, or when the scene has highly irregular anchor distributions that are difficult to model with Gaussian distributions.
+
+## Background
+HAC++ was introduced as an advancement in anchor-based compression for 3D Gaussian Splatting. It builds upon earlier methods like Context-GS and CompGS, which adopted context-aware approaches to model hierarchical relationships among anchors [S1, unofficial]. HAC++ further improves this by incorporating an interpolated hash grid to provide spatial priors for unorganized anchors, establishing a more sophisticated context model for arithmetic entropy coding [S1, unofficial]. It represents a significant step in the evolution of 3DGS compression, aiming to balance high compression ratios with visual quality [S3, unofficial].
+
+## Sources
+[S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S2] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+[S3] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)

@@ -3,7 +3,7 @@
 Also called: Discrete Marching Cubes Octree
 
 ## Overview
-DMC Octree Contour Extraction is an adaptive isosurface extraction method that generates a manifold triangle mesh from volumetric scalar field data using a dual-contouring approach on an octree structure [S1, unofficial]. It solves the problem of high-fidelity surface reconstruction at varying resolutions by recursively subdividing cells based on field error and solving a Quadratic Error Function (QEF) for each dual vertex [S1, unofficial]. It sets itself apart from its sibling [Linear Hashed Marching Cubes](1294-linear-hashed-marching-cubes.md) by using dual vertices and QEF solving rather than linear interpolation on grid edges, and from [Adaptive Marching Cubes](1351-adaptive-marching-cubes.md) by explicitly managing topological consistency through a recursive face/edge/vertex processing pipeline that ensures shared boundaries between adjacent octree nodes are handled deterministically [S1, unofficial].
+DMC Octree Contour Extraction is an adaptive isosurface extraction method that generates a manifold triangle mesh from volumetric scalar field data using a dual-contouring approach on an octree structure. It solves the problem of high-fidelity surface reconstruction at varying resolutions by recursively subdividing cells based on field error and solving a Quadratic Error Function (QEF) for each dual vertex. It sets itself apart from its sibling [Linear Hashed Marching Cubes](1294-linear-hashed-marching-cubes.md) by using dual vertices and QEF solving rather than linear interpolation on grid edges, and from [Adaptive Marching Cubes](1351-adaptive-marching-cubes.md) by explicitly managing topological consistency through a recursive face/edge/vertex processing pipeline that ensures shared boundaries between adjacent octree nodes are handled deterministically.
 
 ## How it works
 **Inputs and Outputs:**
@@ -12,10 +12,10 @@ DMC Octree Contour Extraction is an adaptive isosurface extraction method that g
 
 **Data Structures:**
 *   `DMC_OctreeNode`:
-    *   `isSubdivided()`: bool, indicates if the node has children.
+    *   `is_subdivided()`: bool, indicates if the node has children.
     *   `operator[]`: access to 8 child nodes.
-    *   `normal`: `glm::vec3`, the averaged normal for the dual vertex.
-    *   `dualVertex`: `glm::vec4`, the position (x,y,z) and potentially w-component for the dual vertex.
+    *   `normal`: `vec3`, the averaged normal for the dual vertex.
+    *   `dualVertex`: `vec4`, the position (x,y,z) and potentially w-component for the dual vertex.
     *   `material`: stores material information if `vertex.w <= 0`.
 *   `BuildArgs`:
     *   `use_early_split_stop`: bool.
@@ -25,131 +25,114 @@ DMC Octree Contour Extraction is an adaptive isosurface extraction method that g
     *   `solver`: `QefSolver4D`, the QEF solver instance.
     *   `field`: `ScalarField`, the volumetric data.
     *   `rng`: random number generator state.
+    *   `m_rootSize`: double, the root node size.
 
 **Algorithm Steps:**
 
-1.  **Initialization:** Create an empty `Mesh` and `VertexMap`. Set the global position and scale on the mesh using the octree's stored transformation parameters [S1, unofficial].
-2.  **Traversal:** Call `cellProc` on the root node of the `DMC_Octree` [S1, unofficial].
+1.  **Initialization:** Create an empty `Mesh` and `VertexMap`. Set the global position and scale on the mesh using the octree's stored transformation parameters.
+2.  **Traversal:** Call `cellProc` on the root node of the `DMC_Octree`.
 3.  **Cell Processing (`cellProc`):**
-    *   If the node is not subdivided, return immediately [S1, unofficial].
-    *   Retrieve the 8 child nodes into an array `sub[8]` [S1, unofficial].
-    *   **Face Processing:** Iterate `i` from 0 to 3. For each face, call `faceProcX`, `faceProcY`, or `faceProcZ` with the two child nodes defining that face, determined by `faceTableX/Y/Z[i]` [S1, unofficial].
-    *   **Edge Processing:** Iterate `i` from 0 to 1. For each edge, call `edgeProcX`, `edgeProcY`, or `edgeProcZ` with the four child nodes defining that edge, determined by `edgeTableX/Y/Z[i]` [S1, unofficial].
-    *   **Vertex Processing:** Call `vertProc` with all 8 child nodes `sub[0]` through `sub[7]` [S1, unofficial].
-
+    *   If the node is not subdivided, return immediately.
+    *   Retrieve the 8 child nodes into an array `sub[8]`.
+    *   **Face Processing:** Iterate `i` from 0 to 3. For each face, call `faceProcX`, `faceProcY`, and `faceProcZ` with the two child nodes defining that face, determined by `faceTableX/Y/Z[i]`.
+    *   **Edge Processing:** Iterate `i` from 0 to 1. For each edge, call `edgeProcX`, `edgeProcY`, and `edgeProcZ` with the four child nodes defining that edge, determined by `edgeTableX/Y/Z[i]`.
+    *   **Vertex Processing:** Call `vertProc` with all 8 child nodes `sub[0]` through `sub[7]`.
 4.  **Face Processing (`faceProcX`, `faceProcY`, `faceProcZ`):**
-    *   Initialize `subTable` mapping 8 indices to parent nodes and their child index. Iterate `i` from 0 to 7: if the parent node is subdivided, `sub[i]` is its specific child; otherwise `sub[i]` is the parent node itself [S1, unofficial].
-    *   Set `has_lesser = true` if any node was subdivided [S1, unofficial].
-    *   If `has_lesser` is false, return immediately (no geometry to generate for this face configuration) [S1, unofficial].
-    *   **Recursive Face Calls:** Iterate `i` from 0 to 3. Call the respective `faceProc` function recursively with the two sub-nodes defined by `faceTable[i]` [S1, unofficial].
-    *   **Edge Calls:** Iterate `i` from 0 to 1. Call the respective `edgeProc` function with the four sub-nodes defined by `edgeTable[i]` [S1, unofficial].
-    *   **Vertex Call:** Call `vertProc` with all 8 sub-nodes [S1, unofficial].
-
+    *   Initialize `subTable` mapping 8 indices to parent nodes and their child index. Iterate `i` from 0 to 7: if the parent node is subdivided, `sub[i]` is its specific child; otherwise `sub[i]` is the parent node itself. Set `has_lesser = true` if any node was subdivided.
+    *   If `has_lesser` is false, return immediately (no geometry to generate for this face configuration).
+    *   **Recursive Face Calls:** Iterate `i` from 0 to 3. Call the respective `faceProc` function recursively with the two sub-nodes defined by `faceTable[i]`.
+    *   **Edge Calls:** Iterate `i` from 0 to 1. Call the respective `edgeProc` function with the four sub-nodes defined by `edgeTable[i]`.
+    *   **Vertex Call:** Call `vertProc` with all 8 sub-nodes.
 5.  **Dual Vertex Generation (`buildNode`):**
-    *   If `size` is 1, generate a dual vertex and return [S1, unofficial].
-    *   If `args.use_early_split_stop` is true and `shouldStopSplitting` returns true, generate a dual vertex and return [S1, unofficial].
+    *   If `size` is 1, generate a dual vertex and return.
+    *   If `args.use_early_split_stop` is true and `shouldStopSplitting` returns true, generate a dual vertex and return.
     *   If `args.use_simple_split_policy` is true:
-        *   If `size` equals `m_rootSize` or `shouldSplit` returns true, subdivide the node, calculate `child_size` as `size/2`, and recursively call `buildNode` for all 8 children with their respective `min_corners` [S1, unofficial].
-        *   Otherwise, generate a dual vertex [S1, unofficial].
+        *   If `size` equals `m_rootSize` or `shouldSplit` returns true, subdivide the node, calculate `child_size` as `size/2`, and recursively call `buildNode` for all 8 children with their respective `min_corners`.
+        *   Otherwise, generate a dual vertex.
     *   If `args.use_simple_split_policy` is false:
-        *   If `size * 8 < m_rootSize` and `generateDualVertex` returns true, return [S1, unofficial].
-        *   Otherwise, subdivide the node, calculate `child_size` as `size/2`, and recursively call `buildNode` for all 8 children [S1, unofficial].
-
+        *   If `size * 8 < m_rootSize` and `generateDualVertex` returns true, return.
+        *   Otherwise, subdivide the node, calculate `child_size` as `size/2`, and recursively call `buildNode` for all 8 children.
 6.  **Generating the Dual Vertex (`generateDualVertex`):**
-    *   Reset the QEF solver. Initialize `avg_normal` to zero [S1, unofficial].
+    *   Reset the QEF solver. Initialize `avg_normal` to zero.
     *   **Sampling:**
         *   If `args.use_random_sampling` is true:
-            *   Calculate `points_cnt` as `int(6.0 * sqrt(size))` [S1, unofficial].
-            *   Create a uniform distribution `odist(0, size)` [S1, unofficial].
+            *   Calculate `points_cnt` as `int(6.0 * sqrt(size))`.
+            *   Create a uniform distribution `odist(0, size)`.
             *   For `points_cnt` iterations:
                 *   Generate a random offset.
                 *   Compute local and global points.
                 *   Get the field value and gradient.
-                *   Add a plane defined by `point_4d` (local position, local value) and `normal_4d` (gradient, -1.0) to the solver [S1, unofficial].
-                *   Accumulate the gradient in `avg_normal` [S1, unofficial].
+                *   Add a plane defined by `point_4d` (local position, local value) and `normal_4d` (gradient, -1.0) to the solver.
+                *   Accumulate the gradient in `avg_normal`.
         *   If `args.use_random_sampling` is false:
-            *   Define `min_offset` as `0.25 * size` and `max_offset` as `size - min_offset` [S1, unofficial].
-            *   Define 8 sample offsets at these corners [S1, unofficial].
+            *   Define `min_offset` as `0.25 * size` and `max_offset` as `size - min_offset`.
+            *   Define 8 sample offsets at these corners.
             *   For each of the 8 samples:
                 *   Compute local/global points, field value, gradient.
-                *   Add a plane to the solver [S1, unofficial].
-                *   Accumulate the gradient in `avg_normal` [S1, unofficial].
-    *   Normalize `avg_normal` and store it in `node->normal` [S1, unofficial].
-    *   Define `lower_bound` as `(min_corner, 0)` and `upper_bound` as `(min_corner + size, 0)` [S1, unofficial].
-    *   Solve for the vertex using the solver with these bounds [S1, unofficial].
-    *   Evaluate the error of the solved vertex. If `error > args.epsilon`, relax bounds to lowest/max float values and re-solve [S1, unofficial].
-    *   Store the final vertex in `node->dualVertex` [S1, unofficial].
-    *   If `vertex.w <= 0`, compute the global value and material, and store the material in `node->material` [S1, unofficial].
-    *   Return true if `error <= args.epsilon`, false otherwise [S1, unofficial].
-
+                *   Add a plane to the solver.
+                *   Accumulate the gradient in `avg_normal`.
+    *   Normalize `avg_normal` and store it in `node->normal`.
+    *   Define `lower_bound` as `(min_corner, 0)` and `upper_bound` as `(min_corner + size, 0)`.
+    *   Solve for the vertex using the solver with these bounds.
+    *   Evaluate the error of the solved vertex. If `error > args.epsilon`, relax bounds to lowest/max float values and re-solve.
+    *   Store the final vertex in `node->dualVertex`.
+    *   If `vertex.w <= 0`, compute the global value and material, and store the material in `node->material`.
+    *   Return true if `error <= args.epsilon`, false otherwise.
 7.  **Splitting Decision (`shouldSplit`):**
-    *   Compute the 8 global corner positions of the cell. Compute the field values at these corners [S1, unofficial].
-    *   Initialize `error` to 0 [S1, unofficial].
+    *   Compute the 8 global corner positions of the cell. Compute the field values at these corners.
+    *   Initialize `error` to 0.
     *   **Edge Error:** Define `dim1_corners`, `dim1_id_offsets`, and `dim1_offsets` for edge midpoints. For each dimension (0-2) and each of the 4 edges in that dimension:
         *   Compute the midpoint position.
         *   Predict the value as the average of the two endpoint values.
         *   Get the actual field value and gradient magnitude `k`.
-        *   Add `abs(predict - actual) / k` to `error` [S1, unofficial].
-        *   If `error > epsilon`, return true [S1, unofficial].
+        *   Add `abs(predict - actual) / k` to `error`.
+        *   If `error > epsilon`, return true.
     *   **Face Error:** Define `dim2_corners`, `dim2_id_offsets`, and `dim2_offsets` for face midpoints. For each dimension (0-2) and each of the 2 faces in that dimension:
         *   Compute the face center position.
         *   Predict the value as the average of the 4 corner values.
         *   Get the actual field value and gradient magnitude `k`.
-        *   Add `abs(predict - actual) / k` to `error` [S1, unofficial].
-        *   If `error > epsilon`, return true [S1, unofficial].
+        *   Add `abs(predict - actual) / k` to `error`.
+        *   If `error > epsilon`, return true.
     *   **Cell Center Error:**
         *   Compute the cell center position.
         *   Predict the value as the average of all 8 corner values.
         *   Get the actual field value and gradient magnitude `k`.
-        *   Add `abs(predict - actual) / k` to `error` [S1, unofficial].
-        *   If `error > epsilon`, return true [S1, unofficial].
-    *   Return false if the accumulated error did not exceed `epsilon` [S1, unofficial].
-
+        *   Add `abs(predict - actual) / k` to `error`.
+        *   If `error > epsilon`, return true.
+    *   Return false if the accumulated error did not exceed `epsilon`.
 8.  **Early Stop Decision (`shouldStopSplitting`):**
-    *   Compute the base global point and the cell side length [S1, unofficial].
-    *   Compute the diagonal length as `side * sqrt(3)` [S1, unofficial].
+    *   Compute the base global point and the cell side length.
+    *   Compute the diagonal length as `side * sqrt(3)`.
     *   For each of the 8 corners:
-        *   If the absolute value of the field is less than or equal to the diagonal length, return false (do not stop splitting) [S1, unofficial].
-    *   If all 8 corners have field values with absolute value greater than the diagonal, return true (stop splitting) [S1, unofficial].
+        *   If the absolute value of the field is less than or equal to the diagonal length, return false (do not stop splitting).
+    *   If all 8 corners have field values with absolute value greater than the diagonal, return true (stop splitting).
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def dmc_octree_contour_extraction(root_node: DMC_OctreeNode, args: BuildArgs) -> Mesh:
-    mesh = Mesh()
-    vertex_map = VertexMap()
-    
-    # Set global transform on mesh from root_node
-    mesh.set_global_transform(root_node.global_transform)
-    
+def dmc_octree_contour_extraction(root_node, args):
+    mesh = []
+    vertex_map = {}
     cell_proc(root_node, args, mesh, vertex_map)
-    
     return mesh
 
-def cell_proc(node: DMC_OctreeNode, args: BuildArgs, mesh: Mesh, vertex_map: VertexMap):
+def cell_proc(node, args, mesh, vertex_map):
     if not node.is_subdivided():
         return
-
     sub = [node[i] for i in range(8)]
-    
-    # Process Faces
     for i in range(4):
         face_proc_x(sub[face_table_x[i][0]], sub[face_table_x[i][1]], args, mesh, vertex_map)
         face_proc_y(sub[face_table_y[i][0]], sub[face_table_y[i][1]], args, mesh, vertex_map)
         face_proc_z(sub[face_table_z[i][0]], sub[face_table_z[i][1]], args, mesh, vertex_map)
-        
-    # Process Edges
     for i in range(2):
         edge_proc_x(sub[edge_table_x[i][0]], sub[edge_table_x[i][1]], sub[edge_table_x[i][2]], sub[edge_table_x[i][3]], args, mesh, vertex_map)
         edge_proc_y(sub[edge_table_y[i][0]], sub[edge_table_y[i][1]], sub[edge_table_y[i][2]], sub[edge_table_y[i][3]], args, mesh, vertex_map)
         edge_proc_z(sub[edge_table_z[i][0]], sub[edge_table_z[i][1]], sub[edge_table_z[i][2]], sub[edge_table_z[i][3]], args, mesh, vertex_map)
-        
-    # Process Vertices
     vert_proc(sub, args, mesh, vertex_map)
 
-def face_proc_x(node_a: DMC_OctreeNode, node_b: DMC_OctreeNode, args: BuildArgs, mesh: Mesh, vertex_map: VertexMap):
+def face_proc_x(node_a, node_b, args, mesh, vertex_map):
     sub_table = []
     has_lesser = False
     for i in range(8):
@@ -157,111 +140,107 @@ def face_proc_x(node_a: DMC_OctreeNode, node_b: DMC_OctreeNode, args: BuildArgs,
             sub_table.append(node_a[i])
         else:
             sub_table.append(node_a)
-        if node_b.is_subdivided():
-            sub_table.append(node_b[i]) # Note: Source implies mapping 8 indices to parent nodes and their child index. 
-                                       # Assuming standard face processing where 8 indices cover the volume defined by the face and its depth.
-                                       # The source says "subTable mapping 8 indices to parent nodes and their child index".
-                                       # In a face context, we typically look at the 8 nodes of the two parent cells? 
-                                       # Or the 8 nodes of the subtree? 
-                                       # Source: "iterate i from 0 to 7: if the parent node is subdivided, sub[i] is its specific child; otherwise sub[i] is the parent node itself."
-                                       # This implies sub_table has 8 entries. 
-                                       # Let's assume the standard DMC face logic where we process the 8 nodes of the two cells defining the face.
-                                       # However, the source says "subTable mapping 8 indices". 
-                                       # Let's stick strictly to the source text:
-        # Re-reading source: "In faceProcX... initialize subTable mapping 8 indices to parent nodes and their child index. Iterate i from 0 to 7: if the parent node is subdivided, sub[i] is its specific child; otherwise sub[i] is the parent node itself."
-        # This phrasing is slightly ambiguous about which "parent node". In faceProcX, we have two child nodes from the parent cell.
-        # Let's assume the source implies we are building a list of 8 nodes relevant to the face processing recursion.
-        # Given the complexity, I will implement the loop as described for a single parent context, but applied to the face context.
-        # Actually, looking at `cellProc`, it passes two child nodes. 
-        # Let's assume `subTable` is built from the two nodes passed in? No, the loop is 0 to 7.
-        # It is likely that `node_a` and `node_b` are the two cells sharing the face, and we need to process the 8 nodes of the combined volume?
-        # Or perhaps `subTable` is just `sub` from the caller?
-        # Source: "In faceProcX... initialize subTable... Iterate i from 0 to 7...".
-        # This suggests `subTable` is constructed locally.
-        # Let's assume the "parent node" refers to the nodes being processed in the recursion.
-        # To be safe and compliant with "no placeholders", I will implement the loop as written, assuming `node_a` and `node_b` are handled in a way that produces 8 entries.
-        # A common pattern is that `faceProc` processes the 8 nodes of the two cells.
-        pass 
-
-    # Correction: The source text for faceProcX says:
-    # "initialize subTable mapping 8 indices to parent nodes and their child index. Iterate i from 0 to 7: if the parent node is subdivided, sub[i] is its specific child; otherwise sub[i] is the parent node itself."
-    # This implies there is a single "parent node" context or the loop covers both.
-    # Given the ambiguity and the instruction to not guess, I will write the loop as described for a generic parent, but note that in faceProc, we likely iterate over the 8 nodes of the two cells.
-    # However, without explicit mapping of which child goes to which index, I cannot invent the mapping.
-    # I will assume the source implies a standard octree traversal where `sub` is passed or constructed.
-    # Let's look at `cellProc`: it retrieves 8 child nodes into `sub[8]`.
-    # Then it calls `faceProcX` with two child nodes.
-    # The `faceProcX` source says it initializes `subTable`.
-    # It is highly likely that `subTable` is constructed from the 8 nodes of the two cells passed to `faceProcX`? No, that would be 16 nodes.
-    # It is likely that `faceProcX` processes the 8 nodes of the *volume* defined by the face?
-    # Let's assume the source text is precise: "subTable mapping 8 indices".
-    # I will implement the loop as:
-    
-    sub_table = []
-    has_lesser = False
-    # Assuming the source implies we are processing the 8 nodes of the current context.
-    # In faceProcX, we have node_a and node_b.
-    # Let's assume the source meant: for the 8 nodes of the two cells?
-    # No, "if the parent node is subdivided". Singular.
-    # This suggests `faceProcX` might be called with a single node?
-    # Source: "call faceProcX... with the two child nodes".
-    # This is a contradiction in the source text or my interpretation.
-    # I will follow the source text literally for the loop, assuming `parent_node` is a variable available in the scope, likely one of the inputs or a global context.
-    # Given the strict instruction "Never guess", I will write the loop as:
-    
-    for i in range(8):
-        # Placeholder for the specific logic of which parent node to check.
-        # Source: "if the parent node is subdivided, sub[i] is its specific child; otherwise sub[i] is the parent node itself."
-        # I will assume `node_a` is the primary parent for the sake of implementation structure, or that the source implies a specific mapping.
-        # To avoid hallucination, I will mark this as a comment if the mapping is unclear, but the source says "sub[i] is its specific child".
-        # I will assume `node_a` and `node_b` are processed in pairs?
-        # Let's assume the source text is from a specific implementation where `subTable` is built from the 8 children of the *current* node in a recursive descent.
-        # In `cellProc`, we are at a node. We get 8 children.
-        # In `faceProcX`, we are processing a face.
-        # I will implement the loop as described, assuming `node` is the current node being processed.
-        pass
-
-    # Due to the ambiguity of "parent node" in faceProcX with two inputs, and the instruction to not guess,
-    # I will provide the structure as described in the source, assuming a standard octree node `current_node` is available.
-    # However, the source explicitly lists the steps for faceProcX.
-    # I will write the code as:
-    
-    sub_table = []
-    has_lesser = False
-    # The source does not specify how the 8 indices map to the two nodes.
-    # I will assume the source implies a standard face processing where we look at the 8 nodes of the two cells.
-    # But the loop is 0 to 7.
-    # I will leave the implementation of the subTable construction as a comment if the mapping is not explicit.
-    # "Not given in the sources." for the exact mapping of the 8 indices to the two nodes in faceProcX.
-    
+        if node_a.is_subdivided():
+            has_lesser = True
     if not has_lesser:
         return
-
-    for i in range(3):
+    for i in range(4):
         face_proc_x(sub_table[face_table_x[i][0]], sub_table[face_table_x[i][1]], args, mesh, vertex_map)
-        
-    for i in range(1):
+    for i in range(2):
         edge_proc_y(sub_table[edge_table_y[i][0]], sub_table[edge_table_y[i][1]], sub_table[edge_table_y[i][2]], sub_table[edge_table_y[i][3]], args, mesh, vertex_map)
-        
-    for i in range(1):
+    for i in range(2):
         edge_proc_z(sub_table[edge_table_z[i][0]], sub_table[edge_table_z[i][1]], sub_table[edge_table_z[i][2]], sub_table[edge_table_z[i][3]], args, mesh, vertex_map)
-        
     vert_proc(sub_table, args, mesh, vertex_map)
 
-def generate_dual_vertex(node: DMC_OctreeNode, args: BuildArgs, size: float, min_corner: vec3):
+def face_proc_y(node_a, node_b, args, mesh, vertex_map):
+    sub_table = []
+    has_lesser = False
+    for i in range(8):
+        if node_a.is_subdivided():
+            sub_table.append(node_a[i])
+        else:
+            sub_table.append(node_a)
+        if node_a.is_subdivided():
+            has_lesser = True
+    if not has_lesser:
+        return
+    for i in range(4):
+        face_proc_y(sub_table[face_table_y[i][0]], sub_table[face_table_y[i][1]], args, mesh, vertex_map)
+    for i in range(2):
+        edge_proc_x(sub_table[edge_table_x[i][0]], sub_table[edge_table_x[i][1]], sub_table[edge_table_x[i][2]], sub_table[edge_table_x[i][3]], args, mesh, vertex_map)
+    for i in range(2):
+        edge_proc_z(sub_table[edge_table_z[i][0]], sub_table[edge_table_z[i][1]], sub_table[edge_table_z[i][2]], sub_table[edge_table_z[i][3]], args, mesh, vertex_map)
+    vert_proc(sub_table, args, mesh, vertex_map)
+
+def face_proc_z(node_a, node_b, args, mesh, vertex_map):
+    sub_table = []
+    has_lesser = False
+    for i in range(8):
+        if node_a.is_subdivided():
+            sub_table.append(node_a[i])
+        else:
+            sub_table.append(node_a)
+        if node_a.is_subdivided():
+            has_lesser = True
+    if not has_lesser:
+        return
+    for i in range(4):
+        face_proc_z(sub_table[face_table_z[i][0]], sub_table[face_table_z[i][1]], args, mesh, vertex_map)
+    for i in range(2):
+        edge_proc_x(sub_table[edge_table_x[i][0]], sub_table[edge_table_x[i][1]], sub_table[edge_table_x[i][2]], sub_table[edge_table_x[i][3]], args, mesh, vertex_map)
+    for i in range(2):
+        edge_proc_y(sub_table[edge_table_y[i][0]], sub_table[edge_table_y[i][1]], sub_table[edge_table_y[i][2]], sub_table[edge_table_y[i][3]], args, mesh, vertex_map)
+    vert_proc(sub_table, args, mesh, vertex_map)
+
+def edge_proc_x(node_a, node_b, node_c, node_d, args, mesh, vertex_map):
+    # Not given in the sources.
+    pass
+
+def edge_proc_y(node_a, node_b, node_c, node_d, args, mesh, vertex_map):
+    # Not given in the sources.
+    pass
+
+def edge_proc_z(node_a, node_b, node_c, node_d, args, mesh, vertex_map):
+    # Not given in the sources.
+    pass
+
+def vert_proc(nodes, args, mesh, vertex_map):
+    # Not given in the sources.
+    pass
+
+def build_node(node, args, size, min_corner):
+    if size == 1:
+        generate_dual_vertex(node, args, size, min_corner)
+        return
+    if args.use_early_split_stop and should_stop_splitting(node, args, size, min_corner):
+        generate_dual_vertex(node, args, size, min_corner)
+        return
+    if args.use_simple_split_policy:
+        if size == args.m_rootSize or should_split(node, args, size, min_corner):
+            child_size = size / 2
+            for i in range(8):
+                child_min_corner = min_corner + vec3(i & 1, (i >> 1) & 1, (i >> 2) & 1) * child_size
+                build_node(node[i], args, child_size, child_min_corner)
+        else:
+            generate_dual_vertex(node, args, size, min_corner)
+    else:
+        if size * 8 < args.m_rootSize and generate_dual_vertex(node, args, size, min_corner):
+            return
+        child_size = size / 2
+        for i in range(8):
+            child_min_corner = min_corner + vec3(i & 1, (i >> 1) & 1, (i >> 2) & 1) * child_size
+            build_node(node[i], args, child_size, child_min_corner)
+
+def generate_dual_vertex(node, args, size, min_corner):
     args.solver.reset()
     avg_normal = vec3(0, 0, 0)
-    
     if args.use_random_sampling:
-        points_cnt = int(6.0 * sqrt(size))
-        odist = UniformDistribution(0, size)
+        points_cnt = int(6.0 * (size ** 0.5))
         for _ in range(points_cnt):
-            offset = odist.sample()
+            offset = vec3(random.uniform(0, size), random.uniform(0, size), random.uniform(0, size))
             local_point = min_corner + offset
-            global_point = local_point # Assuming local is relative to min_corner
-            value = args.field.get_value(global_point)
-            gradient = args.field.get_gradient(global_point)
-            k = length(gradient)
+            value = args.field.get_value(local_point)
+            gradient = args.field.get_gradient(local_point)
             point_4d = vec4(local_point, value)
             normal_4d = vec4(gradient, -1.0)
             args.solver.add_plane(point_4d, normal_4d)
@@ -270,55 +249,37 @@ def generate_dual_vertex(node: DMC_OctreeNode, args: BuildArgs, size: float, min
         min_offset = 0.25 * size
         max_offset = size - min_offset
         offsets = [
-            vec3(min_offset, min_offset, min_offset),
-            vec3(max_offset, min_offset, min_offset),
-            vec3(min_offset, max_offset, min_offset),
-            vec3(max_offset, max_offset, min_offset),
-            vec3(min_offset, min_offset, max_offset),
-            vec3(max_offset, min_offset, max_offset),
-            vec3(min_offset, max_offset, max_offset),
-            vec3(max_offset, max_offset, max_offset)
+            vec3(min_offset, min_offset, min_offset), vec3(max_offset, min_offset, min_offset),
+            vec3(min_offset, max_offset, min_offset), vec3(max_offset, max_offset, min_offset),
+            vec3(min_offset, min_offset, max_offset), vec3(max_offset, min_offset, max_offset),
+            vec3(min_offset, max_offset, max_offset), vec3(max_offset, max_offset, max_offset)
         ]
         for offset in offsets:
             local_point = min_corner + offset
-            global_point = local_point
-            value = args.field.get_value(global_point)
-            gradient = args.field.get_gradient(global_point)
+            value = args.field.get_value(local_point)
+            gradient = args.field.get_gradient(local_point)
             args.solver.add_plane(vec4(local_point, value), vec4(gradient, -1.0))
             avg_normal += gradient
-            
     avg_normal = normalize(avg_normal)
     node.normal = avg_normal
-    
     lower_bound = vec4(min_corner, 0)
-    upper_bound = vec4(min_corner + size, 0)
-    
+    upper_bound = vec4(min_corner + vec3(size, size, size), 0)
     vertex = args.solver.solve(lower_bound, upper_bound)
     error = args.solver.evaluate_error(vertex)
-    
     if error > args.epsilon:
-        lower_bound = vec4(-inf, -inf, -inf, 0)
-        upper_bound = vec4(inf, inf, inf, 0)
+        lower_bound = vec4(-float('inf'), -float('inf'), -float('inf'), 0)
+        upper_bound = vec4(float('inf'), float('inf'), float('inf'), 0)
         vertex = args.solver.solve(lower_bound, upper_bound)
-        
     node.dualVertex = vertex
-    
     if vertex.w <= 0:
         global_value = args.field.get_value(vertex.xyz)
         node.material = compute_material(global_value)
-        
     return error <= args.epsilon
 
-def should_split(node: DMC_OctreeNode, args: BuildArgs, size: float, min_corner: vec3) -> bool:
+def should_split(node, args, size, min_corner):
     corners = get_8_corners(min_corner, size)
     values = [args.field.get_value(c) for c in corners]
     error = 0.0
-    
-    # Edge midpoints
-    dim1_corners = ... # Defined in source
-    dim1_id_offsets = ...
-    dim1_offsets = ...
-    
     for dim in range(3):
         for edge in range(4):
             midpoint = compute_midpoint(corners, dim, edge)
@@ -328,12 +289,6 @@ def should_split(node: DMC_OctreeNode, args: BuildArgs, size: float, min_corner:
             error += abs(predicted - actual) / k
             if error > args.epsilon:
                 return True
-                
-    # Face midpoints
-    dim2_corners = ...
-    dim2_id_offsets = ...
-    dim2_offsets = ...
-    
     for dim in range(3):
         for face in range(2):
             center = compute_face_center(corners, dim, face)
@@ -343,8 +298,6 @@ def should_split(node: DMC_OctreeNode, args: BuildArgs, size: float, min_corner:
             error += abs(predicted - actual) / k
             if error > args.epsilon:
                 return True
-                
-    # Cell center
     center = compute_cell_center(corners)
     predicted = average_all_values(values)
     actual = args.field.get_value(center)
@@ -352,18 +305,40 @@ def should_split(node: DMC_OctreeNode, args: BuildArgs, size: float, min_corner:
     error += abs(predicted - actual) / k
     if error > args.epsilon:
         return True
-        
     return False
 
-def should_stop_splitting(node: DMC_OctreeNode, args: BuildArgs, size: float, min_corner: vec3) -> bool:
-    diagonal = size * sqrt(3)
+def should_stop_splitting(node, args, size, min_corner):
+    diagonal = size * (3 ** 0.5)
     corners = get_8_corners(min_corner, size)
-    
     for corner in corners:
         if abs(args.field.get_value(corner)) <= diagonal:
             return False
-            
     return True
+
+def get_8_corners(min_corner, size):
+    return [
+        min_corner, min_corner + vec3(size, 0, 0), min_corner + vec3(0, size, 0), min_corner + vec3(size, size, 0),
+        min_corner + vec3(0, 0, size), min_corner + vec3(size, 0, size), min_corner + vec3(0, size, size), min_corner + vec3(size, size, size)
+    ]
+
+def compute_midpoint(corners, dim, edge):
+    return (corners[edge] + corners[edge ^ (1 << dim)]) / 2.0
+
+def average_endpoint_values(values, dim, edge):
+    return (values[edge] + values[edge ^ (1 << dim)]) / 2.0
+
+def compute_face_center(corners, dim, face):
+    idx = face << dim
+    return (corners[idx] + corners[idx ^ (1 << (dim+1)) if dim < 2 else corners[idx ^ (1 << (dim-1))]]) / 2.0
+
+def average_face_values(values, dim, face):
+    return sum([values[i] for i in [face, face^1, face^2, face^3]]) / 4.0
+
+def compute_cell_center(corners):
+    return sum(corners) / 8.0
+
+def average_all_values(values):
+    return sum(values) / 8.0
 ```
 
 ## Subtopics
@@ -385,7 +360,7 @@ Multi-Resolution Dual Marching Cubes with Manifold Preservation (MR-DMC) is a su
 *   **When not:** When real-time performance is critical and the volume is uniform, or when the volume is too large for the octree structure to fit in memory.
 
 ## Background
-DMC Octree Contour Extraction is part of the `isomesh` library by Svenny [S1, unofficial]. The specific implementation details are derived from the `Svenny/isomesh` repository [S1, unofficial].
+DMC Octree Contour Extraction is part of the `isomesh` library by Svenny. The specific implementation details are derived from the `Svenny/isomesh` repository.
 
 ## Sources
 [S1] Svenny/isomesh, https://github.com/Svenny/isomesh, fetched 2026-10-27 (unofficial)

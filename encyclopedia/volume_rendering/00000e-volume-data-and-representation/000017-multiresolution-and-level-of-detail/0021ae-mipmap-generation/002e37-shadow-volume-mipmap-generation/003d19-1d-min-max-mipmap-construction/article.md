@@ -1,0 +1,95 @@
+# 1D Min-Max Mipmap Construction
+
+Also called: 1D Min-Max Mipmap, Rectified Shadow Map Mipmap, Epipolar Min-Max Tree
+
+## Overview
+This method constructs a hierarchical data structure from each row of a rectified shadow map to accelerate the identification of lit segments along a camera ray. It solves the problem of efficiently determining which parts of a rectified shadow map are occluded by geometry, thereby allowing volume rendering algorithms to skip fully shadowed regions. It sets itself apart from naive ray marching by using hierarchical min-max bounds to skip large portions of the domain, and from standard binary tree traversal by utilizing a flat array representation with specific iterative advancement rules to avoid recursion overhead in shaders [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A rectified shadow map $S$, where each row represents a 1D heightfield in an epipolar slice. The resolution of the shadow map in the $\gamma$ direction (number of light rays) is denoted by $d$ [S1].
+*   **Output:** A single coalesced buffer containing the min-max mipmap for all rows, laid out level by level using Ahnentafel indexing [S1].
+
+**Data Structures**
+The output is a flat array. For a single row of resolution $d$, the tree is a complete binary tree. The nodes are stored in a single buffer using Ahnentafel indexing, starting with the root at index 1. Each node stores the minimum and maximum values of the shadow heightfield $S$ below that node [S1].
+
+**Algorithm Steps**
+1.  Initialize the leaf level of the tree. For a row of resolution $d$, there are $d$ leaves. Each leaf $i$ (where $0 \le i < d$) stores the value $S[i]$ as both its minimum and maximum.
+2.  Compute the tree using $\log_2 d$ ping-pong passes. Let $L = \log_2 d$.
+3.  For each level $l$ from $1$ to $L$:
+    a. Read the values from the previous level (level $l-1$).
+    b. For each pair of sibling nodes at level $l-1$, compute the parent node at level $l$.
+    c. The parent's minimum value is the minimum of its two children's minimum values.
+    d. The parent's maximum value is the maximum of its two children's maximum values.
+    e. Store the result in the buffer for level $l$.
+4.  Coalesce the buffers. Combine the levels into a single buffer. For each row, lay out the levels level by level, starting with the root at index 1, following Ahnentafel indexing [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def build_1d_min_max_mipmap(S, d):
+    """
+    S: 1D array of shadow heights for a single row, length d.
+    d: Resolution of the shadow map in the gamma direction.
+    Returns: A list of lists, where each inner list represents a level of the tree.
+    """
+    # Assume d is a power of 2
+    levels = []
+    
+    # Level 0: Leaves
+    # Each leaf stores (min, max) of the corresponding shadow height
+    current_level = [(S[i], S[i]) for i in range(d)]
+    levels.append(current_level)
+    
+    # Compute log2(d) levels
+    num_levels = int(math.log2(d))
+    
+    for l in range(1, num_levels + 1):
+        prev_level = levels[-1]
+        next_level = []
+        
+        # Each parent has two children
+        for i in range(0, len(prev_level), 2):
+            left_child = prev_level[i]
+            right_child = prev_level[i + 1]
+            
+            # Compute min and max for the parent
+            parent_min = min(left_child[0], right_child[0])
+            parent_max = max(left_child[1], right_child[1])
+            
+            next_level.append((parent_min, parent_max))
+        
+        levels.append(next_level)
+    
+    return levels
+```
+
+**Parameters**
+*   $d$: Resolution of the shadow map in the $\gamma$ direction (number of light rays) [S1].
+
+**Edge Cases and Pitfalls**
+*   $d$ must be a power of 2 for the complete binary tree structure to hold without padding [S1].
+*   Precision issues may arise if the shadow heightfield values have a large dynamic range, affecting the min/max comparisons.
+*   Boundary conditions: Ensure that the leaf level correctly maps to the input array $S$ without off-by-one errors.
+
+## Subtopics
+
+### [Min-Max Mipmap Traversal](9419-min-max-mipmap-traversal.md)
+Min-Max Mipmap Traversal is a recursive algorithm implemented iteratively in a pixel shader to traverse a 1D min-max mipmap, identifying lit segments of a ray to integrate using prefix sums. It solves the problem of efficiently determining which parts of a rectified shadow map are occluded by geometry, thereby accelerating volume rendering by skipping fully shadowed regions. It sets itself apart from naive ray marching by using the hierarchical min-max bounds to skip large portions of the domain, and from standard binary tree traversal by utilizing a flat array representation with specific iterative advancement rules to avoid recursion overhead in shaders.
+
+## Operating characteristics
+*   **Time Complexity:** The construction requires $\log_2 d$ ping-pong passes, where $d$ is the number of light rays. Each pass processes all nodes at the current level, resulting in a total time complexity of $O(d)$ per row [S1].
+*   **Memory Complexity:** The memory required is proportional to the number of nodes in the complete binary tree, which is $2d - 1$ nodes per row. The coalesced buffer stores all levels, so the total memory is $O(d)$ per row [S1].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** The method scales linearly with the resolution $d$ for construction. The traversal complexity is logarithmic, $O(\log d)$, for finding lit segments [S1].
+*   **Strengths:** Efficiently skips fully shadowed regions, reducing the number of ray marching steps. The flat array representation is suitable for shader implementation.
+*   **Limitations:** Requires $d$ to be a power of 2. The construction cost is non-trivial for very large $d$.
+*   **When to use:** When rendering volumetric shadows with rectified shadow maps and needing to accelerate ray marching by skipping occluded regions.
+*   **When not to use:** When the shadow map resolution is not a power of 2, or when the overhead of constructing the mipmap outweighs the benefits of skipping (e.g., very small $d$).
+
+## Background
+The 1D Min-Max Mipmap was introduced in the paper "Real-Time Volumetric Shadows using 1D Min-Max Mipmaps" by the MIT Computer Science and Artificial Intelligence Laboratory (CSAIL) [S1]. The method is part of a broader technique for real-time volumetric shadow rendering, leveraging rectified shadow maps to simplify the geometry of occluders into 1D heightfields. The use of min-max mipmaps allows for efficient culling of shadowed regions during volume rendering.
+
+## Sources
+[S1] Real-Time Volumetric Shadows using 1D Min-Max Mipmaps, https://groups.csail.mit.edu/graphics/mmvs/mmvs.pdf, fetched 2026-10-28

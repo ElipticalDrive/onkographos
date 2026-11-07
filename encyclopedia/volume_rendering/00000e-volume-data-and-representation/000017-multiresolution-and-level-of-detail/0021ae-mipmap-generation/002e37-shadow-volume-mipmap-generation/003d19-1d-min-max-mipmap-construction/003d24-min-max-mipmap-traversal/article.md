@@ -1,0 +1,93 @@
+# Min-Max Mipmap Traversal
+
+Also called: Heightfield Rendering Optimization, Min-Max Mipmap Traversal Optimization, Shader Optimization for Tree Traversal, Tree Traversal for Integration
+
+## Overview
+Min-Max Mipmap Traversal is a recursive algorithm implemented iteratively in a pixel shader to traverse a 1D min-max mipmap, identifying lit segments of a ray to integrate using prefix sums. It solves the problem of efficiently determining which parts of a rectified shadow map are occluded by geometry, thereby accelerating volume rendering by skipping fully shadowed regions. It sets itself apart from naive ray marching by using the hierarchical min-max bounds to skip large portions of the domain, and from standard binary tree traversal by utilizing a flat array representation with specific iterative advancement rules to avoid recursion overhead in shaders.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Camera ray coordinates $(x, y)$, depth $D[x, y]$, the min-max mipmap array `min` and `max` indexed by node index and epipolar angle $\alpha$, and the prefix sum array $\Gamma_{sum}$ of the integrand $\Gamma(\gamma)$.
+*   **Output:** Accumulated radiance contribution `out` for the pixel.
+
+**Data Structures:**
+*   **Min-Max Mipmap:** A flat array where `min[node, α]` and `max[node, α]` store the minimum and maximum shadow heights for the range covered by `node` at angle $\alpha$.
+*   **Prefix Sum Array:** $\Gamma_{sum}$ stores cumulative integrals of $\Gamma(\gamma)$.
+*   **Tree Indexing:** The tree is stored in a flat array using heap-like indexing. The root is index 1. For a node `n`, the left child is `2*n` and the right child is `2*n + 1`.
+
+**Steps:**
+1.  **Initialization:** Convert camera ray $(x, y)$ with depth $D[x, y]$ to epipolar coordinates $(\alpha, \beta, \gamma_1)$ using `TO-EPIPOLAR`. Initialize `node = 1` (root). Get the $\gamma$-range $(\gamma_-, \gamma_+)$ for the current node using `RANGE(node)`. Initialize output accumulator `out = (0,0,0,0)`.
+2.  **Traversal Loop:** Iterate while `node != 1` and the ray extends into the node ($\gamma_1 > \gamma_-$).
+3.  **Boundary Check:** Compare the ray height $\beta$ with the node's bounds `min[node, α]` and `max[node, α]`.
+    *   **Case 1: Boundary Inside ($\min[node, \alpha] \le \beta < \max[node, \alpha]$):** The node contains a shadow boundary. Recurse to the left child by setting `node = node * 2`.
+    *   **Case 2: Fully Lit ($\beta < \min[node, \alpha]$):** The entire range of this node is lit. Add the integral over the node's range to the output:
+        $$ out = out + \Gamma_{sum}[\min(\gamma_1, \gamma_+)] - \Gamma_{sum}[\gamma_-] $$
+        Then, advance to the next node.
+    *   **Case 3: Fully Shadowed ($\beta > \max[node, \alpha]$):** The entire range is shadowed. Skip the node.
+4.  **Advancement (for Cases 2 and 3):**
+    *   Increment `node` by 1 (`node = node + 1`).
+    *   If the new `node` is even (a left child), move up to the parent (`node = node / 2`). [G] The source notes an optimization where this `while` loop is replaced by a single `if` statement, limiting upward movement to at most one level.
+5.  **Update Range:** Get the new $\gamma$-range $(\gamma_-, \gamma_+)$ for the current `node`.
+6.  **Final Integration:** After the loop, compute the final radiance by dotting the accumulated `out` with the basis function $B[\beta]$:
+    $$ \text{Result} = \text{dot}(B[\beta], out) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+proc INTEGRATE-RAY(x, y):
+    depth = D[x, y]
+    (alpha, beta, gamma1) = TO-EPIPOLAR(x, y, depth)
+    
+    node = 1  # Start at root
+    (gamma_minus, gamma_plus) = RANGE(node)
+    out = (0, 0, 0, 0)
+    
+    do:
+        if min[node, alpha] <= beta < max[node, alpha]:
+            # Node contains boundary, recurse to left child
+            node = node * 2
+        else:
+            if beta < min[node, alpha]:
+                # Fully lit: add integral over node range
+                upper = min(gamma1, gamma_plus)
+                out = out + Gamma_sum[upper] - Gamma_sum[gamma_minus]
+            
+            # Advance to next node
+            node = node + 1
+            
+            # Move up if we are a left child
+            # Optimization: Source replaces while with if for single level up
+            if node % 2 == 0:
+                node = node / 2
+            
+        (gamma_minus, gamma_plus) = RANGE(node)
+        
+    while node != 1 and gamma1 > gamma_minus
+    
+    return dot(B[beta], out)
+```
+
+**Parameters and Edge Cases:**
+*   **$\gamma_1$:** The end of the ray segment in $\gamma$-space.
+*   **Precision:** Floating point comparisons between $\beta$ and min/max values must handle equality carefully.
+*   **Degenerate Input:** If the ray does not intersect the volume or the mipmap is empty, the loop condition `node != 1` handles termination.
+
+## Subtopics
+
+### [Textured Light Integration](9425-textured-light-integration.md)
+Extends the method to handle textured lights (e.g., stained-glass windows) by rectifying the light texture map $T(\alpha, \gamma)$ and multiplying it into the integrand. It requires precomputing prefix sums of $\Gamma_i(\gamma)T(\alpha, \gamma)$ per $\alpha$ using pingpong passes.
+
+## Operating characteristics
+*   **Time Complexity:** The traversal is $O(\log N)$ in the best case (fully lit or fully shadowed nodes) and $O(N)$ in the worst case (zig-zagging through boundaries), but typically much faster than linear sampling. The iterative implementation avoids function call overhead.
+*   **Memory Complexity:** Requires storage for the min-max mipmap and the prefix sum array. For textured lights, additional storage is needed for the per-$\alpha$ prefix sums of the texture-modulated integrand.
+*   **Strengths:** Efficiently skips large shadowed or lit regions. Suitable for real-time rendering via pixel shaders due to iterative implementation.
+*   **Limitations:** Performance degrades if the shadow boundary is highly complex and intersects many nodes. The optimization of limiting upward movement to one level may increase the number of nodes visited in certain tree structures [S1].
+*   **When to use:** When rendering volumetric shadows from rectified shadow maps where the shadow boundary is sparse or smooth.
+*   **When not to use:** When the shadow boundary is extremely jagged or the volume is small enough that linear sampling is faster.
+
+## Background
+This optimization was previously used for heightfield rendering by Tevs et al. in 2008 [S1]. It was adapted for real-time volumetric shadows using 1D min-max mipmaps to accelerate the integration of light along camera rays.
+
+## Sources
+[S1] Real-Time Volumetric Shadows using 1D Min-Max Mipmaps, https://groups.csail.mit.edu/graphics/mmvs/mmvs.pdf, fetched 2026-10-28

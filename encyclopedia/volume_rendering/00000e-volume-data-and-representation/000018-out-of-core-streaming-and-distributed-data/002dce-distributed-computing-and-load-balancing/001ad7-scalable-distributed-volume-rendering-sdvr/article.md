@@ -3,100 +3,159 @@
 Also called: Cluster-based Distributed Volume Rendering, Distributed Volume Rendering System, Distributed rendering system for unstructured data, Distributed slicing rendering, MPI-based distributed volume rendering
 
 ## Overview
-Scalable Distributed Volume Rendering (SDVR) is a distributed rendering system for unstructured data targeting large PC clusters, designed to maintain constant rendering time as dataset size and node count increase [S1][S2, unofficial]. It solves the scalability problem in volume visualization by partitioning data into load-balanced chunks and distributing them across a cluster, where each node performs local slicing and compositing [S1][S2, unofficial]. Unlike sibling methods that may rely on global spatial indices or shared virtual memory, SDVR uses an out-of-core preprocessing step based on modified k-d decomposition to create brick-shaped chunks, ensuring load balance without requiring complex runtime data movement or global synchronization during rendering [S1][S2, unofficial].
+Scalable Distributed Volume Rendering (SDVR) is a distributed rendering system for unstructured data targeting large PC clusters, using OpenGL and MPI, designed for scalability where rendering time remains constant as data size and node count increase [S1][S2, unofficial]. It solves the problem of rendering massive unstructured grids on clusters by partitioning the dataset into load-balanced chunks, distributing them to nodes for independent slicing and rendering, and accumulating the resulting subimages [S1][S2, unofficial]. What sets it apart from its siblings is its specific reliance on an out-of-core modified k-d decomposition for preprocessing load balancing and its design to run with or without graphics hardware on any platform, prioritizing scalability over peak performance [S1][S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A large unstructured volume dataset (e.g., curvilinear or unstructured grids) and a cluster of $N$ nodes.
-*   **Output:** A final composite image.
+*   **Input:** An unstructured volume dataset (e.g., curvilinear or unstructured grids) [S1][S2, unofficial].
+*   **Output:** A composite rendered image [S1][S2, unofficial].
 
 **Data Structures:**
-*   **Chunks:** The dataset is partitioned into "brick-shaped chunks." The exact internal structure of a chunk (e.g., number of cells, voxelization) is not specified in the sources, but they are treated as independent units for distribution [S1][S2, unofficial].
-*   **Distribution Map:** A mapping of chunks to cluster nodes, generated during preprocessing [S1][S2, unofficial].
+*   **Chunks:** The dataset is partitioned into "brick-shaped chunks" [S1][S2, unofficial]. The exact internal layout of a chunk is not specified, but it represents a load-balanced subset of the unstructured data [S1][S2, unofficial].
+*   **Subimages:** Each node produces a subimage corresponding to its assigned chunks [S1][S2, unofficial].
 
-**Steps:**
-1.  **Preprocessing (Partitioning):** The dataset is partitioned into small, load-balanced chunks using an out-of-core algorithm based on a modified k-d decomposition [S1][S2, unofficial]. This step ensures that each chunk represents approximately equal computational work.
-2.  **Distribution:** The brick-shaped chunks are distributed to the nodes of the cluster [S1][S2, unofficial].
-3.  **Local Rendering:** Each node renders its assigned chunks independently. This involves:
-    *   Slicing the chunks.
-    *   Clipping the slices.
-    *   Rendering the slices (applying transfer functions and compositing locally) [S1][S2, unofficial].
-4.  **Compositing:** The resulting subimages from all nodes are gathered and accumulated over the interconnect system to form the final image [S1][S2, unofficial].
+**Preprocessing (Partitioning):**
+1.  The dataset is partitioned into small load-balanced chunks [S1][S2, unofficial].
+2.  This is performed in a preprocessing step using an out-of-core algorithm based on a modified k-d decomposition [S1][S2, unofficial].
+3.  The goal is to ensure that each chunk requires approximately equal computational effort to render [S1][S2, unofficial].
+
+**Distribution:**
+1.  The brick-shaped chunks are distributed to the nodes of the cluster [S1][S2, unofficial].
+2.  Distribution is managed via MPI [S1][S2, unofficial].
+
+**Rendering (Per Node):**
+1.  Each node receives its assigned chunks [S1][S2, unofficial].
+2.  Each node slices, clips, and renders its chunks [S1][S2, unofficial].
+3.  The slicing method is used for rendering [S1][S2, unofficial].
+4.  If graphics hardware is present, OpenGL is used; otherwise, software rendering is employed [S1][S2, unofficial].
+
+**Compositing:**
+1.  The resulting subimages from all nodes are gathered and accumulated over the interconnect system [S1][S2, unofficial].
+2.  The accumulation step combines the subimages into the final image [S1][S2, unofficial].
+
+**Parameters:**
+*   **Graphics Hardware:** Optional. The system runs with or without it, though peak performance requires hardware [S2, unofficial].
+*   **APIs:** OpenGL and MPI [S1][S2, unofficial].
+*   **Platform:** Linux/UNIX [S1][S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Preprocessing Phase (Offline)
+# Preprocessing Phase (Run on Master/Coordinator Node)
 def preprocess_dataset(dataset):
-    # Use out-of-core algorithm based on modified k-d decomposition
-    # to partition dataset into load-balanced brick-shaped chunks
-    chunks = modified_kd_decomposition(dataset)
+    """
+    Partition the unstructured dataset into load-balanced brick-shaped chunks.
+    Uses an out-of-core algorithm based on modified k-d decomposition.
+    """
+    # The specific details of the "modified k-d decomposition" algorithm are not provided in the sources.
+    # [G] Implementation note: A standard k-d tree splits space recursively. 
+    # "Modified" likely implies handling of unstructured cells or out-of-core constraints.
+    # The output is a list of chunks, each containing a subset of cells/voxels.
+    chunks = modified_kd_decomposition_out_of_core(dataset)
     return chunks
 
-# Runtime Phase (Distributed)
-def sdvr_render(chunks, cluster_nodes):
-    # Step 1: Distribution
-    # Assign chunks to nodes. The sources do not specify the exact
-    # assignment algorithm, only that chunks are distributed.
-    node_assignments = distribute_chunks(chunks, cluster_nodes)
+# Distribution Phase
+def distribute_chunks(chunks, num_nodes):
+    """
+    Distribute chunks to cluster nodes via MPI.
+    """
+    # [G] Implementation note: Use MPI_Scatter or MPI_Gatherv to distribute 
+    # the list of chunks to each rank.
+    assigned_chunks = distribute_to_nodes(chunks)
+    return assigned_chunks
 
-    # Step 2: Local Rendering (Parallel)
+# Rendering Phase (Run on Each Node)
+def render_node(assigned_chunks, view_params):
+    """
+    Slice, clip, and render assigned chunks.
+    """
     subimages = []
-    for node in cluster_nodes:
-        assigned_chunks = node_assignments[node]
+    for chunk in assigned_chunks:
+        # Slice the chunk geometry
+        slices = slice_chunk(chunk, view_params)
         
-        # Local rendering: slice, clip, and render
-        local_subimage = render_local(assigned_chunks)
-        subimages.append((node, local_subimage))
+        # Clip slices based on view frustum
+        clipped_slices = clip_slices(slices, view_params)
+        
+        # Render the clipped slices
+        # If graphics hardware is available, use OpenGL.
+        # Otherwise, use software rendering.
+        subimage = render_slices(clipped_slices)
+        subimages.append(subimage)
+    
+    # Accumulate subimages from this node if multiple chunks produced multiple subimages
+    # [G] Implementation note: Alpha compositing is typically used for volume rendering.
+    composite_subimage = accumulate_subimages(subimages)
+    return composite_subimage
 
-    # Step 3: Global Compositing
-    # Gather and accumulate subimages over the interconnect
-    final_image = accumulate_subimages(subimages)
+# Compositing Phase
+def accumulate_subimages(all_subimages):
+    """
+    Gather and accumulate resulting subimages over the interconnect system.
+    """
+    # [G] Implementation note: Use MPI_Reduce or MPI_Gather to collect subimages 
+    # from all nodes, then perform global alpha compositing.
+    final_image = global_composite(all_subimages)
     return final_image
 
-def render_local(chunks):
-    # The sources do not specify the exact slicing/clip/rendering
-    # implementation details beyond "slices, clips, and renders".
-    # This is a placeholder for the local rendering logic [G].
-    image = create_empty_image()
-    for chunk in chunks:
-        slices = slice_chunk(chunk)
-        for slice in slices:
-            clipped_slice = clip_slice(slice)
-            rendered_slice = apply_transfer_and_composite(clipped_slice)
-            image = accumulate_image(image, rendered_slice)
-    return image
+# Main Execution
+def sdvr_main(dataset, view_params, num_nodes):
+    chunks = preprocess_dataset(dataset)
+    assigned_chunks = distribute_chunks(chunks, num_nodes)
+    my_subimage = render_node(assigned_chunks, view_params)
+    final_image = accumulate_subimages([my_subimage]) # Simplified for single node example
+    return final_image
 ```
-
-**Parameters:**
-*   **Graphics Hardware:** Optional. The system runs with or without graphics hardware, though peak performance requires it [S2, unofficial].
-*   **APIs:** OpenGL and MPI [S1][S2, unofficial].
-*   **Platform:** LINUX/UNIX [S1][S2, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Communication Overhead:** The sources note that speed-up curves level out due to communication overhead, particularly when the number of projection threads increases [S1][S2, unofficial]. This limits scalability as $P$ increases.
-*   **Hardware Dependency:** While the system is designed to run on any platform, performance is not peak without graphics hardware [S2, unofficial].
 
 ## Subtopics
 
 ### [Distributed Volume Ray Tracing with Global Kd-Tree](1774-distributed-volume-ray-tracing-with-global-kd-tree.md)
-A distributed rendering method for load balancing where adjacent tetrahedra are scattered across nodes rather than clustered, using a global kd-tree to restore ordering during rendering. Unlike SDVR which clusters adjacent tetrahedra into brick-shaped chunks, this method scatters them to maintain load balance for close views, at the cost of requiring a global kd-tree.
+A distributed rendering method for load balancing where adjacent tetrahedra are scattered across nodes rather than clustered, using a global kd-tree to restore ordering during rendering. Unlike Kd-partitioning which clusters adjacent tetrahedra, this method scatters them to maintain load balance for close views, at the cost of requiring a global kd-tree.
 
 ### [Distributed Shared Virtual Memory Volume Rendering](1916-distributed-shared-virtual-memory-volume-rendering.md)
-Distributed Shared Virtual Memory (DSVM) Volume Rendering is a method for rendering tera-scale volumes on GPU clusters by mapping the entire volume into a single shared 3D virtual memory space accessible by all nodes. It solves the problem of managing massive datasets that exceed the physical memory of individual GPUs by using on-demand paging of small voxel blocks, allowing multiple nodes to render disjoint parts of the volume simultaneously without explicit data partitioning or load balancing. It differs from SDVR by relying on a flat virtual memory address space with hardware-assisted page fault handling rather than explicit chunk distribution, and by targeting small GPU clusters where implicit load balancing via interleaved distribution units suffices.
+Distributed Shared Virtual Memory (DSVM) Volume Rendering is a method for rendering tera-scale volumes on GPU clusters by mapping the entire volume into a single shared 3D virtual memory space accessible by all nodes. It solves the problem of managing massive datasets that exceed the physical memory of individual GPUs by using on-demand paging of small voxel blocks, allowing multiple nodes to render disjoint parts of the volume simultaneously without explicit data partitioning or load balancing. It differs from sibling methods like Distributed Volume Ray Tracing with Global Kd-Tree by relying on a flat virtual memory address space with hardware-assisted page fault handling rather than a distributed spatial index, and by targeting small GPU clusters where implicit load balancing via interleaved distribution units suffices.
 
 ### [Interactive Resource Management](7188-interactive-resource-management.md)
 Interactive Resource Management is a subsystem within the Scalable Distributed Volume Rendering (SDVR) architecture designed to manage cluster resources for visualization tasks in an interactive manner, avoiding traditional batch-fashion resource management systems. It solves the problem of allocating distributed memory nodes for rendering on shared High-Performance Computing (HPC) systems where access is not granted to a single user exclusively. It sets itself apart from its siblings by focusing on the dynamic, real-time negotiation of resources and network connections for interactive volume rendering, rather than static allocation or global data structures.
 
 ## Operating characteristics
-*   **Scalability:** The primary goal is scalability: rendering time remains constant as dataset size increases, provided additional computational nodes are added [S1][S2, unofficial].
-*   **Performance:** A prototype ran successfully at interactive rates on up to 32 nodes of a PC cluster equipped with Nvidia GeForce-3 graphics cards [S1][S2, unofficial].
-*   **Limitations:** Speed-up curves level out as the number of processors increases due to communication overhead [S1][S2, unofficial]. The sources do not provide specific timing measurements or complexity formulas.
-*   **Hardware Requirements:** Can run on clusters with or without graphics hardware, but peak performance requires graphics hardware [S2, unofficial].
+**Time and Memory Complexity:**
+*   The primary goal is scalability: rendering time remains constant as the dataset size increases, provided additional computational nodes are provided [S1][S2, unofficial].
+*   The specific time and memory complexity formulas are not given in the sources [S1][S2, unofficial].
+
+**Measured Performance:**
+*   A prototype of the system ran successfully at interactive rates on up to 32 nodes of a PC cluster all of which had Nvidia GeForce-3 graphics cards [S1][S2, unofficial].
+*   The system is targeted to large (16-1000+ node) PC clusters [S1][S2, unofficial].
+
+**Scaling:**
+*   The system is designed to scale by adding computational nodes to maintain constant rendering time as data size increases [S1][S2, unofficial].
+*   Speed-up curves leveled out after a certain number of projection threads (about 5 for slicing, 18 for general grids), which is attributed to communication overhead [S1][S2, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Scalability to large clusters (16-1000+ nodes); ability to run with or without graphics hardware; platform independence (Linux/UNIX) [S1][S2, unofficial].
+*   **Limitations:** Not at peak performance if run without graphics hardware or on non-optimized platforms; communication overhead can limit speed-up [S1][S2, unofficial].
+
+**When to Use:**
+*   When rendering large unstructured datasets on a PC cluster where scalability is more important than peak performance per node [S1][S2, unofficial].
+*   When the cluster may have heterogeneous hardware (some nodes with graphics cards, some without) [S1][S2, unofficial].
+
+**When Not to Use:**
+*   When peak performance is required and hardware acceleration is available [S1][S2, unofficial].
+*   When the dataset is small and does not benefit from distributed processing [S1][S2, unofficial].
 
 ## Background
-SDVR was developed for large PC clusters (16-1000+ nodes) running LINUX/UNIX, using OpenGL and MPI [S1][S2, unofficial]. The work was performed under the auspices of the U.S. Department of Energy by Lawrence Livermore National Laboratory [S1][S2, unofficial]. The system targets unstructured data, such as curvilinear and unstructured grids [S1][S2, unofficial].
+**Origin:**
+*   The Scalable Distributed Volume Rendering (SDVR) System was developed for unstructured data targeting large PC clusters [S1][S2, unofficial].
+*   It uses OpenGL and MPI [S1][S2, unofficial].
+*   The work was performed under the auspices of the U.S. Department of Energy by Lawrence Livermore National Laboratory under contract no. W-7405-Eng-48 [S1][S2, unofficial].
+
+**History and Development:**
+*   A prototype was constructed and tested on up to 32 nodes with Nvidia GeForce-3 graphics cards [S1][S2, unofficial].
+*   The system is designed to run on Linux/UNIX platforms [S1][S2, unofficial].
+
+**Where it is Used:**
+*   Volume rendering for curvilinear and unstructured grids [S1][S2, unofficial].
 
 ## Sources
 [S1] Volume Rendering for Curvilinear and Unstructured Grids, https://www.sci.utah.edu/~csilva/papers/cgi2003.pdf, fetched 2026-10-27

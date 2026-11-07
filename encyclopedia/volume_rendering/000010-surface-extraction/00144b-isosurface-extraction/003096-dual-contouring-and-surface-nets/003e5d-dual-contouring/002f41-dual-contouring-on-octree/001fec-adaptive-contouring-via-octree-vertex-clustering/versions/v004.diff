@@ -1,0 +1,312 @@
+--- v003.md
++++ v004.md
+@@ -10,10 +10,10 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-*   An octree representation of the scalar field.
++*   An octree representation of the scalar field [S1][S2, unofficial].
+ *   An error threshold $\epsilon$ [S1][S2, unofficial].
+ *   Hermite data (surface normals and intersection points) associated with octree edges [S1][S2, unofficial].
+ 
+ **Outputs:**
+-*   A triangle mesh representing the iso-surface.
++*   A triangle mesh representing the iso-surface [S1][S2, unofficial].
+ *   Vertices are those marked "collapsible" that do not have any collapsible ancestors in the vertex tree [S1][S2, unofficial].
+ 
+@@ -22,5 +22,5 @@
+ **Vertex Structure:**
+ Each vertex in the vertex tree contains:
+-1.  **Position:** The 3D coordinates of the vertex.
++1.  **Position:** The 3D coordinates of the vertex [S1][S2, unofficial].
+ 2.  **Parent Pointer:** A reference to the parent vertex in the vertex tree (initially `NULL`) [S1][S2, unofficial].
+ 3.  **QEF:** The Quadratic Error Function matrix and vector associated with the vertex [S1][S2, unofficial].
+@@ -44,5 +44,5 @@
+     *   For each non-leaf cell, consider its eight children [S1][S2, unofficial].
+     *   Identify the 12 internal faces shared between these children (4 for each Euclidean axis: X, Y, Z) [S1][S2, unofficial].
+-    *   Find all vertices at the root of the vertex tree that are topologically connected by edges dual to these 12 internal faces. This is done using the recursive octree traversal algorithm from Ju et al. [3] (see [S1][S2, unofficial]) [S1][S2, unofficial].
++    *   Find all vertices at the root of the vertex tree that are topologically connected by edges dual to these 12 internal faces [S1].
+     *   Group these vertices into clusters based on their topological connectivity [S1][S2, unofficial].
+     *   For each cluster group:
+@@ -57,5 +57,5 @@
+     *   During the clustering process, mark a cell as **collapsed** if:
+         *   All clustered vertices created in that cell satisfy the collapsible criterion (error $< \epsilon$) [S1][S2, unofficial].
+-        *   All children of that cell are either leaf cells or marked as collapsed [S1][S2, unofficial].
++        *   All children of that cell are either leaf cells or marked collapsed [S1][S2, unofficial].
+     *   This flag is used to truncate traversal in subsequent steps [S1][S2, unofficial].
+ 
+@@ -74,34 +74,22 @@
+ ```python
+ def adaptive_contouring_octree_vertex_clustering(octree, error_threshold):
+-    """
+-    Performs adaptive contouring via octree vertex clustering.
+-    
+-    Args:
+-        octree: The root of the octree structure.
+-        error_threshold: The maximum allowed QEF error for a vertex to be collapsible.
+-        
+-    Returns:
+-        A list of triangles representing the iso-surface.
+-    """
+-    
+     # Step 1: Initialization
+-    # Create vertex tree starting with finest level vertices
+     finest_vertices = get_finest_level_vertices(octree)
+-    vertex_tree = {} # Map from vertex_id to Vertex object
+-    
++    vertex_tree = {} 
++
+     for v in finest_vertices:
+-        qef = compute_qef_from_hermite_data(v)
+-        error = evaluate_qef(qef, v.position)
+-        vertex = Vertex(
+-            position=v.position,
+-            qef=qef,
+-            error=error,
+-            parent=None,
+-            collapsible=(error < error_threshold)
+-        )
++        qef_A, qef_b = compute_qef_from_hermite_data(v)
++        error = evaluate_qef(qef_A, qef_b, v.position)
++        vertex = {
++            'position': v.position,
++            'qef_A': qef_A,
++            'qef_b': qef_b,
++            'error': error,
++            'parent': None,
++            'collapsible': error < error_threshold
++        }
+         vertex_tree[v.id] = vertex
+ 
+     # Step 2: Bottom-Up Traversal and Clustering
+-    # Traverse octree from bottom to top
+     non_leaf_cells = get_non_leaf_cells_in_bottom_up_order(octree)
+     
+@@ -111,42 +99,29 @@
+             continue
+             
+-        # Identify 12 internal faces between children
+         internal_faces = get_internal_faces(children)
+-        
+-        # Find vertices connected by edges dual to these internal faces
+-        # Using Ju et al. [3] algorithm logic
+         clusters = find_topologically_connected_vertices(children, internal_faces, vertex_tree)
+         
+         for cluster in clusters:
+-            # Combine QEFs
+-            combined_qef = sum(v.qef for v in cluster)
+-            
+-            # Minimize QEF to find new vertex location
+-            new_vertex_pos = minimize_qef(combined_qef)
+-            new_error = evaluate_qef(combined_qef, new_vertex_pos)
+-            
+-            # Create new parent vertex
+-            new_vertex = Vertex(
+-                position=new_vertex_pos,
+-                qef=combined_qef,
+-                error=new_error,
+-                parent=None,
+-                collapsible=(new_error < error_threshold)
+-            )
+-            
+-            # Update parent pointers of children in cluster
++            combined_A = sum(v['qef_A'] for v in cluster)
++            combined_b = sum(v['qef_b'] for v in cluster)
++            
++            new_vertex_pos = minimize_qef(combined_A, combined_b)
++            new_error = evaluate_qef(combined_A, combined_b, new_vertex_pos)
++            
++            new_vertex = {
++                'position': new_vertex_pos,
++                'qef_A': combined_A,
++                'qef_b': combined_b,
++                'error': new_error,
++                'parent': None,
++                'collapsible': new_error < error_threshold
++            }
++            
+             for v in cluster:
+-                v.parent = new_vertex
+-                vertex_tree[v.id] = new_vertex # Replace or link? 
+-                # Note: The new vertex is a new entity in the tree, 
+-                # children point to it. The new vertex itself is added to the tree 
+-                # for its own children (if any) or for polygon generation.
+-            
+-            # Add new vertex to tree for potential further clustering
+-            # The new vertex acts as a root for this cluster in the next level up
+-            vertex_tree[new_vertex.id] = new_vertex 
+-            
+-            # Mark cell as collapsed if applicable
+-            if all(v.collapsible for v in cluster) and all_is_leaf_or_collapsed(cell):
++                v['parent'] = new_vertex
++            
++            vertex_tree[new_vertex['id']] = new_vertex 
++            
++            if all(v['collapsible'] for v in cluster) and all_is_leaf_or_collapsed(cell):
+                 cell.collapsed = True
+             else:
+@@ -156,14 +131,8 @@
+     triangles = []
+     
+-    # Traverse octree to find sign-changing edges
+-    # Use Ju et al. [3] traversal functions: cellProc, faceProc, edgeProc
+-    # Optimization: Truncate if cell is collapsed
+-    
+     def cell_proc(current_cell):
+         if current_cell.collapsed:
+-            return # Truncate traversal
+-        
++            return 
+         if current_cell.is_leaf():
+-            # Process leaf cell for sign-changing edges
+             process_leaf_edges(current_cell, triangles, vertex_tree)
+         else:
+@@ -171,72 +140,70 @@
+                 cell_proc(child)
+                 
+-        # Process faces if needed (though faceProc is separate)
+-        
+     def face_proc(current_face):
+-        # Check if both adjacent cells are collapsed
+         cell1, cell2 = current_face.adjacent_cells
+         if cell1.collapsed and cell2.collapsed:
+-            return # Truncate traversal
+-        
+-        # Process face for sign-changing edges
++            return 
+         process_face_edges(current_face, triangles, vertex_tree)
+ 
+     def edge_proc(current_edge):
+-        # Find vertices associated with this edge
+         vertices = get_vertices_for_edge(current_edge, vertex_tree)
+-        
+-        # Resolve to last collapsible ancestor
+         resolved_vertices = []
+         for v in vertices:
+             current = v
+             while current is not None:
+-                if current.collapsible:
++                if current['collapsible']:
+                     resolved_vertices.append(current)
+-                current = current.parent
++                current = current['parent']
+         
+-        # Construct polygon
+         if len(resolved_vertices) >= 3:
+             triangles.append(create_triangle(resolved_vertices))
+-        elif len(resolved_vertices) == 2:
+-            # Collapses to edge, discard
+-            pass
+-        elif len(resolved_vertices) == 1:
+-            # Collapses to vertex, discard
+-            pass
+-
+-    # Start traversal
++        elif len(resolved_vertices) <= 2:
++            pass 
++
+     cell_proc(octree)
+-    
+     return triangles
+ 
+ def get_finest_level_vertices(octree):
+-    """Returns all vertices at the finest level of the octree."""
+-    # Implementation detail: Traverse to leaves and collect edge intersection vertices
++    # Traverse to leaves and collect edge intersection vertices
+     pass
+ 
+ def compute_qef_from_hermite_data(vertex):
+-    """Computes the QEF from Hermite data (normal and intersection point) on incident edges."""
+-    # QEF = sum (n_i * n_i^T) * x = sum (n_i * p_i)
+-    # For a single plane: A = n*n^T, b = n*p
+-    pass
+-
+-def minimize_qef(qef):
+-    """Minimizes the QEF Ax = b to find x."""
+-    # Solve linear system Ax = b
+-    # x = A^{-1} b
++    # QEF for a plane with normal n and point p: A = n*n^T, b = n*(n*p)
++    # Sum over all incident edges
++    A = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
++    b = [0.0, 0.0, 0.0]
++    for edge in vertex.incident_edges:
++        n = edge.normal
++        p = edge.intersection_point
++        # A += n * n^T
++        for i in range(3):
++            for j in range(3):
++                A[i][j] += n[i] * n[j]
++        # b += n * (n . p)
++        dot_np = sum(n[k] * p[k] for k in range(3))
++        for i in range(3):
++            b[i] += n[i] * dot_np
++    return A, b
++
++def evaluate_qef(A, b, x):
++    # Computes x^T A x - 2 b^T x
++    Ax = [[sum(A[i][j] * x[j] for j in range(3)) for i in range(3)]]
++    term1 = sum(x[i] * Ax[0][i] for i in range(3))
++    term2 = 2 * sum(b[i] * x[i] for i in range(3))
++    return term1 - term2
++
++def minimize_qef(A, b):
++    # Solve 3x3 linear system Ax = b
+     pass
+ 
+ def get_internal_faces(children):
+-    """Returns the 12 internal faces shared among 8 children of an octree cell."""
+-    # 4 faces per axis (X, Y, Z)
++    # Returns the 12 internal faces shared among 8 children of an octree cell
+     pass
+ 
+ def find_topologically_connected_vertices(children, internal_faces, vertex_tree):
+-    """Finds groups of vertices connected by edges dual to internal faces."""
+     # Uses recursive octree traversal algorithm from Ju et al. [3]
+     pass
+ 
+ def all_is_leaf_or_collapsed(cell):
+-    """Checks if all children are leaves or marked collapsed."""
+     for child in cell.children:
+         if not child.is_leaf() and not child.collapsed:
+@@ -245,5 +212,4 @@
+ 
+ def process_leaf_edges(cell, triangles, vertex_tree):
+-    """Processes edges of a leaf cell for sign changes."""
+     for edge in cell.edges:
+         if edge.has_sign_change():
+@@ -251,8 +217,10 @@
+ 
+ def process_face_edges(face, triangles, vertex_tree):
+-    """Processes edges of a face for sign changes."""
+     for edge in face.edges:
+         if edge.has_sign_change():
+             edge_proc(edge)
++
++def create_triangle(vertices):
++    return (vertices[0], vertices[1], vertices[2])
+ ```
+ 
+@@ -261,5 +229,5 @@
+ 
+ ### Pitfalls and Edge Cases
+-*   **Non-Manifold Topology:** Clustering topologically connected vertices without additional constraints may yield non-manifold topology (e.g., threads collapsing to single polygons or non-manifold edges) [S1][S2, unofficial]. This is addressed in the sibling article [Manifold Dual Contouring](2138-manifold-dual-contouring.md).
++*   **Non-Manifold Topology:** Clustering topologically connected vertices without additional constraints may yield non-manifold topology (e.g., threads collapsing to single polygons or non-manifold edges) [S1][S2, unofficial]. This is addressed in the sibling article [Manifold Dual Contouring](2138-manifold-dual-contouring.md) [S1][S2, unofficial].
+ *   **Degenerate Polygons:** If the resulting polygon collapses to an edge or a vertex, it must be discarded [S1][S2, unofficial].
+ *   **Precision:** QEF minimization requires solving a linear system. Numerical stability should be considered, especially for flat regions where the QEF matrix may be ill-conditioned [G].
+@@ -268,6 +236,6 @@
+ ## Operating characteristics
+ 
+-*   **Time Complexity:** The clustering phase involves a bottom-up traversal of the octree. For each non-leaf cell, vertices are clustered by combining QEFs and minimizing them. The complexity depends on the number of vertices and the depth of the octree. The polygon generation phase also traverses the octree, but can be optimized by truncating collapsed cells [S1][S2, unofficial].
+-*   **Memory Complexity:** Requires storing the vertex tree, QEFs for each vertex, and octree structure. The vertex tree can grow significantly if many vertices are not collapsed [S1][S2, unofficial].
++*   **Time Complexity:** The clustering phase involves a bottom-up traversal of the octree [S1][S2, unofficial]. For each non-leaf cell, vertices are clustered by combining QEFs and minimizing them [S2, unofficial]. The polygon generation phase also traverses the octree, but can be optimized by truncating collapsed cells [S1][S2, unofficial].
++*   **Memory Complexity:** Requires storing the vertex tree, QEFs for each vertex, and octree structure [S1][S2, unofficial].
+ *   **Measured Performance:** Not given in the sources.
+ *   **Scaling:** Scales with the resolution of the octree and the complexity of the surface. Flat regions are simplified more aggressively, reducing polygon count [S1][S2, unofficial].
+@@ -280,6 +248,6 @@
+     *   Requires Hermite data (normals and intersections) [S1][S2, unofficial].
+     *   Optimization via collapsed cells requires careful implementation to ensure correctness [S1][S2, unofficial].
+-*   **When to Use:** When a multi-resolution iso-surface is desired, and the surface has large flat regions that can be simplified. Suitable when Hermite data is available.
+-*   **When Not to Use:** When manifold topology is strictly required (use [Manifold Dual Contouring](2138-manifold-dual-contouring.md) instead). When Hermite data is not available.
++*   **When to Use:** When a multi-resolution iso-surface is desired, and the surface has large flat regions that can be simplified. Suitable when Hermite data is available [S1][S2, unofficial].
++*   **When Not to Use:** When manifold topology is strictly required (use [Manifold Dual Contouring](2138-manifold-dual-contouring.md) instead). When Hermite data is not available [S1][S2, unofficial].
+ 
+ ## Background

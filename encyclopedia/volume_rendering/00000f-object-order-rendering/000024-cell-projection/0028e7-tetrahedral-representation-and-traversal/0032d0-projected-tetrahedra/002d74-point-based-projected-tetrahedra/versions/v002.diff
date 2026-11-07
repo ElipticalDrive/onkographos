@@ -1,0 +1,170 @@
+--- v001.md
++++ v002.md
+@@ -8,14 +8,14 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: An unstructured tetrahedral mesh with vertex-centered or cell-centered scalar data.
+-- Output: A rendered image of the volume.
++- Input: An unstructured tetrahedral mesh with vertex-centered or cell-centered scalar data [S1].
++- Output: A rendered image of the volume [S1].
+ 
+ **Data Structures:**
+ For each tetrahedron $i$, the following precomputed data is stored:
+-1.  **Affine Transformation Matrix $T_i$**: A $4 \times 4$ matrix mapping the unit tetrahedron $\hat{\sigma}$ (inscribed in the unit sphere, centered at the origin) to the target tetrahedron $\sigma_i$.
+-2.  **Point Location $v_i$**: The 3D position of the point representing the tetrahedron, calculated as the transformed barycenter of the unit tetrahedron: $v_i = T_i \cdot \hat{c}$, where $\hat{c}$ is the barycenter of $\hat{\sigma}$.
++1.  **Affine Transformation Matrix $T_i$**: A $4 \times 4$ matrix mapping the unit tetrahedron $\hat{\sigma}$ (inscribed in the unit sphere, centered at the origin) to the target tetrahedron $\sigma_i$ [S1].
++2.  **Point Location $v_i$**: The 3D position of the point representing the tetrahedron, calculated as the transformed barycenter of the unit tetrahedron: $v_i = T_i \cdot \hat{c}$, where $\hat{c}$ is the barycenter of $\hat{\sigma}$ [S1].
+ 3.  **Scalar Value $s_i$**:
+-    - If vertex-centered: The mean of the scalar values at the tetrahedron's four vertices.
+-    - If cell-centered: The scalar value assigned to the cell.
++    - If vertex-centered: The mean of the scalar values at the tetrahedron's four vertices [S1].
++    - If cell-centered: The scalar value assigned to the cell [S1].
+ 4.  **Normal Information (Optional)**: Gradients of the scalar field calculated during preprocessing for shading models [S1].
+ 
+@@ -24,11 +24,11 @@
+ 1.  **Preprocessing (CPU):**
+     - For each tetrahedron $\sigma_i$:
+-        - Compute the affine transformation $T_i$ such that $T_i(\hat{\sigma}) = \sigma_i$.
+-        - Calculate the point location $v_i = T_i \cdot \hat{c}$.
+-        - Assign the scalar value $s_i$ (mean of vertices or cell value).
++        - Compute the affine transformation $T_i$ such that $T_i(\hat{\sigma}) = \sigma_i$ [S1].
++        - Calculate the point location $v_i = T_i \cdot \hat{c}$ [S1].
++        - Assign the scalar value $s_i$ (mean of vertices or cell value) [S1].
+         - (Optional) Calculate gradients for normal information [S1].
+ 
+ 2.  **Per-Frame CPU (Sorting and LOD):**
+-    - Sort all points front-to-back based on the depth of their centroids $v_i$ relative to the current viewpoint.
++    - Sort all points front-to-back based on the depth of their centroids $v_i$ relative to the current viewpoint [S1].
+     - Determine the Level-of-Detail (LOD) for the current frame. This may involve compromising accuracy for speed during camera interaction and switching to full-quality after interaction stops [S1].
+ 
+@@ -44,6 +44,6 @@
+ 
+ 5.  **Per-Frame GPU (Compositing):**
+-    - Keep one fragment in a texture.
+-    - Composite the ray-gap between the current fragment and the previous fragment using a pre-integrated table.
++    - Keep one fragment in a texture [S1].
++    - Composite the ray-gap between the current fragment and the previous fragment using a pre-integrated table [S1].
+     - Compositing is performed using fragment distances, not pre-assigned alpha values, to mitigate over-representation error [S1].
+ 
+@@ -68,72 +68,64 @@
+ 
+ ```python
+-# Preprocessing (CPU)
++import math
++
+ def preprocess_mesh(tetrahedra):
+     points = []
++    c_hat = (0.0, 0.0, 0.0)  # [G] Barycenter of centered unit tetrahedron
+     for tet in tetrahedra:
+-        # Compute affine transformation T from unit tetrahedron to tet
+-        T = compute_affine_transform(tet)
+-        
+-        # Compute point location (transformed barycenter of unit tetrahedron)
+-        # Assuming unit tetrahedron barycenter is at origin or known constant c_hat
+-        c_hat = get_unit_tetrahedron_barycenter()
++        # Compute affine transformation T mapping unit tetrahedron to target
++        T = compute_affine_transform(tet.vertices)
++        # Point location: transform barycenter
+         v = transform_point(T, c_hat)
+-        
+         # Assign scalar value
+         if tet.data_type == 'vertex_centered':
+-            s = mean(tet.vertex_scalars)
++            s = sum(tet.vertex_scalars) / len(tet.vertex_scalars)
+         else:
+             s = tet.cell_scalar
+-        
+-        # Optional: Compute normal for shading
+-        normal = compute_gradient_normal(tet)
+-        
+-        points.append({
+-            'T': T,
+-            'v': v,
+-            's': s,
+-            'normal': normal
+-        })
++        # Optional: compute gradients for shading normals
++        normal = compute_gradient_normal(tet.scalars)
++        points.append({'T': T, 'v': v, 's': s, 'normal': normal})
+     return points
+ 
+-# Per-Frame Rendering
+ def render_frame(points, viewpoint, lod_strategy):
+-    # Sort points front-to-back based on centroid depth
+-    sorted_points = sort_points_by_depth(points, viewpoint)
++    # Sort points front-to-back by centroid depth relative to viewpoint
++    sorted_points = sorted(points, key=lambda p: dot(p['v'] - viewpoint, normalize(viewpoint)))
++    # Determine LOD for current frame
++    active_points = lod_strategy.select(sorted_points)
+     
+-    # Determine LOD
+-    active_points = lod_strategy.select_points(sorted_points)
+-    
+-    # GPU Vertex Shader
+-    for point in active_points:
+-        # Resize point primitive based on T and distance
+-        point_size = compute_point_size(point['T'], viewpoint)
++    # GPU Vertex Shader phase
++    rasterized_data = []
++    for p in active_points:
++        # Resize point primitive using precomputed T
++        size = compute_point_size(p['T'], viewpoint)
++        # Pass footprint parameters (center, radius/ellipsoid matrix) via texture coordinates
++        footprint_params = compute_footprint_params(p['T'], size)
++        rasterized_data.append({'v': p['v'], 's': p['s'], 'size': size, 'params': footprint_params})
+         
+-        # Pass parameters to fragment shader
+-        # For circular footprint: center and radius
+-        # For ellipsoidal footprint: ellipsoid parameters derived from T
+-        pass_to_fragment(point, point_size)
+-        
+-    # GPU Fragment Shader
+-    # Compositing loop
++    # GPU Fragment Shader phase (conceptual loop over generated fragments)
+     previous_fragment = None
+-    for fragment in rasterized_fragments:
+-        # Cull based on footprint shape (circle or ellipsoid)
+-        if not is_inside_footprint(fragment, point['footprint_params']):
++    for frag in generate_fragments(rasterized_data):
++        # Cull fragments outside the footprint shape (circle or ellipsoid)
++        if not is_inside_footprint(frag, rasterized_data[frag.idx]['params']):
+             continue
+-            
+-        # Composite with previous fragment using pre-integrated table
+-        # Distance-based compositing
++        # Composite ray-gap using pre-integrated table based on fragment distances
+         if previous_fragment is not None:
+-            composite_result = pre_integrated_composite(
+-                previous_fragment, 
+-                fragment, 
+-                fragment.distance_to_previous
+-            )
+-            previous_fragment = composite_result
++            dist = frag.z - previous_fragment.z
++            previous_fragment = pre_integrated_composite(previous_fragment, frag, dist)
+         else:
+-            previous_fragment = fragment
+-            
++            previous_fragment = frag
+     return previous_fragment
++
++# Standard math/vector operations used above
++def compute_affine_transform(vertices): return ...  # [G] Standard linear algebra solve
++def transform_point(T, p): return ...              # [G] Standard matrix-vector multiply
++def compute_gradient_normal(scalars): return ...   # [G] Standard finite difference or analytical gradient
++def dot(a, b): return sum(x*y for x,y in zip(a,b)) # [G] Standard dot product
++def normalize(v): return v / math.sqrt(dot(v,v))   # [G] Standard normalization
++def compute_point_size(T, viewpoint): return ...   # [G] Standard projection and distance scaling
++def compute_footprint_params(T, size): return ...  # [G] Standard derivation of screen-space footprint from T
++def generate_fragments(data): return ...           # [G] Standard GPU rasterization simulation
++def is_inside_footprint(frag, params): return ...  # [G] Standard point-in-circle/ellipsoid test
++def pre_integrated_composite(prev, curr, dist): return ... # [G] Standard pre-integrated table lookup
+ ```
+ 
+@@ -147,5 +139,5 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Preprocessing is $O(N)$ where $N$ is the number of tetrahedra. Per-frame sorting is $O(N \log N)$. Rendering is $O(N)$ points, but fragment generation depends on footprint size and LOD.
++- **Time Complexity**: Preprocessing is $O(N)$ where $N$ is the number of tetrahedra. Per-frame sorting is $O(N \log N)$. Rendering is $O(N)$ points, but fragment generation depends on footprint size and LOD [S1].
+ - **Memory Complexity**: $O(N)$ for storing point data (T, v, s). No connectivity storage required [S1].
+ - **Measured Performance**: Achieves interactive framerates for large datasets (e.g., Heart, SPX, fighter, F16) [S1].

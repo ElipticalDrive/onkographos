@@ -1,0 +1,217 @@
+# Hierarchical Digital Differential Analyzer (HDDA)
+
+
+## Overview
+Hierarchical Digital Differential Analyzer (HDDA) is a ray traversal algorithm for sparse voxel grids (specifically VDB structures) that performs multi-resolution leapfrogging to skip empty space efficiently [S1, unofficial][S5]. Unlike standard DDA which steps voxel-by-voxel with a fixed size, HDDA adapts its step size to the current tree level (node or leaf), allowing it to jump over large empty regions defined by internal nodes [S2, unofficial][S4]. It builds on [Digital Differential Analyzer (DDA) Traversal](3061-digital-differential-analyzer-dda-traversal.md) by adding hierarchical awareness.
+
+## How it works
+**Inputs:** A ray defined by origin $O$, direction $D$, inverse direction $I = 1/D$, and time bounds $[t_{min}, t_{max}]$ (or $[t_0, t_1]$). A hierarchical grid (e.g., VDB/NanoVDB) with nodes of varying dimensions.
+
+**Data Structures:**
+The core state is maintained in an `HDDA` object [S3, S7, unofficial]:
+- `mDim`: Integer dimension size of the current traversal unit (power of 2). For a voxel, `mDim=1`. For a node, `mDim` is the node's side length (e.g., 8, 16, 32) [S3, S7, unofficial].
+- `mT0`: Current ray parameter (time) at the start of the current step [S3, S7, unofficial].
+- `mT1`: Maximum ray parameter (end of ray) [S3, S7, unofficial].
+- `mVoxel`: Coordinate of the current voxel/node origin, aligned to `mDim` [S3, S7, unofficial].
+- `mStep`: Direction step per axis ($+1$ or $-1$) [S3, S7, unofficial].
+- `mDelta`: Time delta per axis to advance by one `mDim` step [S3, S7, unofficial].
+- `mNext`: Time of the next boundary crossing for each axis [S3, S7, unofficial].
+
+**Algorithm Steps:**
+
+1. **Initialization (`init`):**
+   Given ray $R(t)$, start time $t_{start}$, max time $t_{max}$, and current dimension $dim$:
+   - Set `mDim = dim`, `mT0 = t_{start}`, `mT1 = t_{max}` [S3, unofficial].
+   - Compute current position $P = R(t_{start})$ [S3, unofficial].
+   - Compute aligned voxel origin: $V = \lfloor P \rfloor \ \& \ \sim(dim - 1)$ [S3, S7, unofficial]. (Bitwise AND with complement of $dim-1$ aligns to the grid of size $dim$).
+   - For each axis $a \in \{0, 1, 2\}$:
+     - If $D[a] == 0$:
+       - Set `mNext[a] = +∞` (or `Maximum<RealT>::value()`) [S3, S7, unofficial].
+       - Set `mStep[a] = 0` [S3, S7, unofficial].
+     - Else if $I[a] > 0$ (ray moving in positive direction):
+       - Set `mStep[a] = 1` [S3, unofficial].
+       - Set `mDelta[a] = I[a]` [S3, unofficial].
+       - Set `mNext[a] = t_{start} + (V[a] + dim - P[a]) * I[a]` [S3, S7, unofficial].
+     - Else ($I[a] < 0$, ray moving in negative direction):
+       - Set `mStep[a] = -1` [S3, unofficial].
+       - Set `mDelta[a] = -I[a]` [S3, unofficial].
+       - Set `mNext[a] = t_{start} + (V[a] - P[a]) * I[a]` [S3, S7, unofficial].
+
+2. **Traversal Loop (`step`):**
+   Repeat until `mT0 > mT1` or termination condition met:
+   - Find axis $a$ with minimum `mNext[a]`: $a = \text{argmin}_a(\text{mNext}[a])$ [S3, S7, unofficial].
+   - **Round-off Correction:** If `mNext[a] <= mT0` (due to floating point error), apply correction:
+     $$ \text{mNext}[a] \leftarrow \text{mNext}[a] + t_0 - 0.999999 \cdot \text{mNext}[a] + 1.0 \times 10^{-6} $$
+     This ensures forward stepping [S3, S7, unofficial]. Controlled by macro `ENFORCE_FORWARD_STEPPING` [S3, unofficial].
+   - Advance time: `mT0 = mNext[a]` [S3, S7, unofficial].
+   - Update next hit time for axis $a$: `mNext[a] += mDim * mDelta[a]` [S3, S7, unofficial].
+   - Update voxel coordinate: `mVoxel[a] += mDim * mStep[a]` [S3, S7, unofficial].
+   - Return `mT0 <= mT1` [S3, S7, unofficial].
+
+3. **Hierarchical Update (`update`):**
+   When the ray exits the current node/leaf and enters a new region with a different resolution $dim_{new}$:
+   - If `mDim == dim_{new}`, return false (no change needed) [S3, S7, unofficial].
+   - Compute valid voxel range for the transition to prevent out-of-bounds access:
+     - $V_{max} = (mVoxel + (mDim - 1)) \ \& \ \sim(dim_{new} - 1)$
+     - $V_{min} = mVoxel \ \& \ \sim(dim_{new} - 1)$
+   - Set `mDim = dim_{new}` [S3, S7, unofficial].
+   - Recompute $P = R(mT0)$ and $V = \lfloor P \rfloor \ \& \ \sim(dim_{new} - 1)$ [S3, S7, unofficial].
+   - Clamp $V$ to $[V_{min}, V_{max}]$ [S3, unofficial].
+   - For each axis $a$ where `mStep[a] != 0`:
+     - Set `mNext[a] = mT0 + (V[a] - P[a]) * I[a]` [S3, S7, unofficial].
+     - If `mStep[a] > 0`, add $dim_{new} \cdot I[a]$ to `mNext[a]` [S3, S7, unofficial].
+   - Return true [S3, S7, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class HDDA:
+    def __init__(self):
+        self.mDim = 0
+        self.mT0 = 0.0
+        self.mT1 = 0.0
+        self.mVoxel = [0, 0, 0]
+        self.mStep = [0, 0, 0]
+        self.mDelta = [0.0, 0.0, 0.0]
+        self.mNext = [0.0, 0.0, 0.0]
+
+    def init(self, ray_origin, ray_inv_dir, start_time, max_time, dim):
+        self.mDim = dim
+        self.mT0 = start_time
+        self.mT1 = max_time
+        
+        # Current position at start_time
+        pos = ray_origin + ray_inv_dir * start_time # Note: ray(t) = O + t*D. D = 1/inv. 
+        # However, standard DDA uses invDir directly for deltas. 
+        # Let's assume ray object provides pos(t) and invDir.
+        # Re-reading source: pos = ray(mT0). 
+        # We need D to compute pos if only invDir is given? 
+        # Source S3 says: const Vec3T &pos = ray(mT0), &dir = ray.dir(), &inv = ray.invDir()
+        # So we assume ray(t) is available.
+        
+        # Align voxel to dim
+        self.mVoxel = [floor(pos[i]) & ~(dim - 1) for i in range(3)]
+        
+        for axis in range(3):
+            if ray_inv_dir[axis] == 0:
+                self.mNext[axis] = float('inf')
+                self.mStep[axis] = 0
+            elif ray_inv_dir[axis] > 0:
+                self.mStep[axis] = 1
+                self.mDelta[axis] = ray_inv_dir[axis]
+                # Next hit is at the next grid boundary in positive direction
+                self.mNext[axis] = start_time + (self.mVoxel[axis] + dim - pos[axis]) * ray_inv_dir[axis]
+            else:
+                self.mStep[axis] = -1
+                self.mDelta[axis] = -ray_inv_dir[axis]
+                # Next hit is at the next grid boundary in negative direction
+                self.mNext[axis] = start_time + (self.mVoxel[axis] - pos[axis]) * ray_inv_dir[axis]
+
+    def step(self):
+        # Find axis with smallest next hit time
+        axis = 0
+        min_t = self.mNext[0]
+        for i in range(1, 3):
+            if self.mNext[i] < min_t:
+                min_t = self.mNext[i]
+                axis = i
+        
+        # Round-off correction
+        if self.mNext[axis] <= self.mT0:
+            self.mNext[axis] += self.mT0 - 0.999999 * self.mNext[axis] + 1.0e-6
+        
+        # Advance
+        self.mT0 = self.mNext[axis]
+        self.mNext[axis] += self.mDim * self.mDelta[axis]
+        self.mVoxel[axis] += self.mDim * self.mStep[axis]
+        
+        return self.mT0 <= self.mT1
+
+    def update(self, ray_origin, ray_inv_dir, dim):
+        if self.mDim == dim:
+            return False
+        
+        # Compute valid range for clamping
+        # voxelMax: max possible current voxel aligned to new dim
+        # voxelMin: min possible current voxel aligned to new dim
+        # Source S3: Coord voxelMax = (mVoxel + Coord(mDim - 1)) & (~(dim - 1))
+        # This logic seems to define the range of the OLD dim that contains the NEW dim boundary?
+        # Actually, it ensures we don't jump too far.
+        
+        voxel_max = [(self.mVoxel[i] + (self.mDim - 1)) & ~(dim - 1) for i in range(3)]
+        voxel_min = [self.mVoxel[i] & ~(dim - 1) for i in range(3)]
+        
+        self.mDim = dim
+        
+        pos = ray_origin + ray_inv_dir * self.mT0 # Re-eval pos at current t0
+        
+        self.mVoxel = [floor(pos[i]) & ~(dim - 1) for i in range(3)]
+        
+        # Clamp
+        for i in range(3):
+            self.mVoxel[i] = max(voxel_min[i], min(voxel_max[i], self.mVoxel[i]))
+            
+        for axis in range(3):
+            if self.mStep[axis] == 0:
+                continue
+            
+            self.mNext[axis] = self.mT0 + (self.mVoxel[axis] - pos[axis]) * ray_inv_dir[axis]
+            if self.mStep[axis] > 0:
+                self.mNext[axis] += dim * ray_inv_dir[axis]
+                
+        return True
+```
+
+**Parameters:**
+- `dim`: The size of the current traversal unit (power of 2). `Log2Dim=0` implies a single voxel (`dim=1`). `Log2Dim>0` implies a node of size $2^{Log2Dim}$ [S3, S7, unofficial].
+- `ENFORCE_FORWARD_STEPPING`: Macro enabling round-off correction [S3, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Zero Direction:** If $D[a] == 0$, the axis is disabled (`mNext[a] = \infty`, `mStep[a] = 0`) to prevent division by zero [S3, S7, unofficial].
+- **Round-off Error:** Floating point inaccuracies can cause `mNext[a] <= mT0`, leading to infinite loops or backward stepping. The correction term `mT0 - 0.999999 * mNext[a] + 1.0e-6` forces forward progress [S3, S7, unofficial].
+- **Non-linear Transforms:** HDDA assumes rays are linear in index space. For grids with non-linear transforms (e.g., frustum warping), shadow rays are not straight in index space. Solution: Construct an auxiliary VDB with a linear transform to act as a mask for active values [S1, unofficial][S5].
+
+## Subtopics
+
+### [OpenVDB DDA](2149-openvdb-dda.md)
+Specialized for OpenVDB grids, iterates through nodes/voxels using fixed step-size `Log2Dim`. Unlike HDDA which skips empty space via hierarchy, it marches through every boundary.
+
+### [NanoVolumeHDDA](3125-nanovolumehdda.md)
+Iterator for `NanoGrid` yielding merged active spans without heap allocations. Merges adjacent leaves/tiles to eliminate seam artifacts at 8-voxel tile edges.
+
+### [RayMajorantIterator](5199-raymajorantiterator.md)
+Uses HDDA to step through voxels/leaves, computing the maximum density (majorant) for segments where it is constant. Bundles steps with identical majorants to reduce overhead.
+
+### [HDDA Hybrid](5201-hdda-hybrid.md)
+Combines hierarchical skipping (HDDA) for empty tiles with fine-grained DDA for occupied tiles. Avoids per-voxel checks in empty space while maintaining accuracy in dense regions.
+#### HDDA Branch
+A variant that samples every tile/voxel, branching based on occupancy. It initializes HDDA with ray bounds, then loops: if the current voxel is active, it records samples and advances; if inactive, it skips time. It calculates `dt` based on cone angle and step size, and updates `tlast` and `dt` dynamically [S9, unofficial].
+#### Teardown Hierarchical Traversal
+A method that uses DDA within a level and switches levels by rescaling the grid so the new level becomes level 0, restarting the DDA. It calculates position as $pos = \lfloor (O + t \cdot D) / 2^{level} \rfloor$. Pitfall: Floating-point issues in $O + tD$ can cause outliers in depth/normal buffers, and corner traversal can cause normal issues [S10, unofficial].
+#### Distance LOD
+Reduces traversal granularity for distant objects (>400 voxels) by terminating DDA at brick granularity. Shading uses the brick's topmost solid material to preserve distant surface color [S11, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Proportional to the number of occupied nodes/voxels traversed, not the total volume. Significantly faster than standard DDA for sparse volumes due to skipping empty internal nodes [S1, unofficial][S4].
+- **Memory Complexity:** Low overhead. The HDDA state is small (fixed size arrays). Template meta-programming is used to inline and collapse the hierarchical algorithm at compile-time, reducing vertical navigation overhead [S1, unofficial][S5].
+- **Performance:** Tested on RTX 3080 rendering WDAS cloud dataset at 1920x1080 in 6 ms [S8, unofficial].
+- **Strengths:** Efficient empty-space skipping in hierarchical sparse grids (VDB/NanoVDB). Minimal interpolation overhead for level sets [S1, unofficial].
+- **Limitations:** Requires hierarchical grid structure (VDB). Non-linear transforms require auxiliary grids [S1, unofficial][S5].
+
+## Background
+Originated with Ken Museth in the context of OpenVDB (VDB) for high-resolution sparse volumes [S1, unofficial][S5]. The algorithm leverages the B+tree structure of VDB to perform multi-resolution leapfrogging [S1, unofficial]. It is conceptually similar to Bresenham's line algorithm extended to 3D hierarchical structures [S3, S7, unofficial]. Used in OpenVDB v2+ for volume rendering (clouds) and narrow-band level set intersection [S1, unofficial][S5]. Implemented in various engines including Unity HDRP (NanoVDB) and Web-compatible voxel renderers (woxel) [S2, S8, unofficial].
+
+## Sources
+[S1] Hierarchical Digital Differential Analyzer, https://museth.org/Ken/Publications_files/Museth_SIG14.pdf, fetched 2026-10-24 (unofficial)
+[S2] NemoInfo/woxel, https://github.com/NemoInfo/woxel, fetched 2026-10-24 (unofficial)
+[S3] openvdb/nanovdb/nanovdb/math/HDDA.h at master, https://github.com/AcademySoftwareFoundation/openvdb/blob/master/nanovdb/nanovdb/math/HDDA.h, fetched 2026-10-25 (unofficial)
+[S4] nanovdb/util/HDDA.h File Reference - OpenVDB, https://academysoftwarefoundation.github.io/openvdb/HDDA_8h.html, fetched 2026-10-25
+[S5] Hierarchical digital differential analyzer for efficient ray-marching ..., https://www.semanticscholar.org/paper/7dbb75bb242819dc2ddae1a32c38849fb26742ad, fetched 2026-10-26
+[S6] tobiasosborne/Lyr.jl, https://github.com/tobiasosborne/Lyr.jl, fetched 2026-10-26 (unofficial)
+[S7] ZephirFXEC/HNanoSolver, https://github.com/ZephirFXEC/HNanoSolver, fetched 2026-10-27 (unofficial)
+[S8] andersblomqvist/unity-nanovdb-renderer, https://github.com/andersblomqvist/unity-nanovdb-renderer, fetched 2026-10-27 (unofficial)
+[S9] Yosshi999/faster-occgrid, https://github.com/Yosshi999/faster-occgrid, fetched 2026-10-24 (unofficial)
+[S10] versal algorithm for ray tracing Hur man gör en hierarkisk ..., https://kth.diva-portal.org/smash/get/diva2:2069409/FULLTEXT01.pdf, fetched 2026-10-25 (unofficial)
+[S11] mstampfli/voxelG, https://github.com/mstampfli/voxelG, fetched 2026-10-24 (unofficial)

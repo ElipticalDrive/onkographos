@@ -1,0 +1,234 @@
+--- v002.md
++++ v003.md
+@@ -4,48 +4,48 @@
+ 
+ ## Overview
+-The Cell Count Algorithm is a load-balancing strategy for distributed volume rendering that assigns spatial data blocks to processors based on their computational cost (cell count) rather than their spatial extent or block count [S1, unofficial]. It solves the inefficiency of uniform spatial decomposition in adaptive-resolution datasets, where processors handling low-resolution regions finish early and remain idle while others process high-resolution regions [S1, unofficial]. It sets itself apart from siblings like [Scalable Distributed Volume Rendering (SDVR)](863-scalable-distributed-volume-rendering-sdvr.md) and [MPI Volume Rendering (1D/2D Decomposition)](2249-mpi-volume-rendering-1d-2d-decomposition.md) by explicitly decoupling the number of assigned blocks from the workload, ensuring that each processor renders approximately the same total number of voxels [S1, unofficial].
++The Cell Count Algorithm is a load-balancing strategy for distributed volume rendering of adaptive-resolution datasets, where data is partitioned into blocks of varying resolutions [S1, unofficial]. It solves the problem of processor idle time caused by uneven computational costs: in adaptive data, high-resolution blocks require significantly more rendering time than low-resolution ones, so assigning equal spatial extents or equal block counts leads to severe load imbalance [S1, unofficial]. Unlike uniform decomposition or simple round-robin distribution, this method balances the total number of cells (voxels) assigned to each processor, ensuring that all processors complete their work at approximately the same time [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-*   A set of $n$ data blocks $B = \{B_1, B_2, \dots, B_n\}$.
+-*   For each block $B_i$, the cell count $C_i$ (number of voxels/cells), representing its resolution and computational cost [S1, unofficial].
+-*   The number of available processors $P$ [S1, unofficial].
++- A set of $n$ data blocks $B = \{B_1, B_2, \dots, B_n\}$.
++- For each block $B_x$, the cell count $C_x$ (number of voxels/cells in the block).
++- The number of available processors $P$.
+ 
+ **Outputs:**
+-*   An assignment map mapping each processor $p_j$ to a subset of blocks such that the sum of cell counts for each processor is approximately equal [S1, unofficial].
++- An assignment mapping each block $B_x$ to a processor $p_i$.
++- Each processor $p_i$ receives a subset of blocks such that the sum of cell counts is balanced across all processors.
+ 
+ **Data Structures:**
+-*   **Block List:** A list of objects containing at least the field `cell_count` (integer).
+-*   **Processor List:** A list of processor identifiers or objects, initially containing all $P$ processors.
+-*   **Sorted Blocks:** The Block List sorted in descending order of `cell_count`.
++- `blocks`: A list of objects, each containing `id` (block identifier) and `cell_count` (integer).
++- `processors`: A list of $P$ processor objects, each containing `id`, `assigned_cells` (integer, initialized to 0), and `is_full` (boolean, initialized to false).
++- `sorted_blocks`: A list of blocks sorted in descending order of `cell_count`.
+ 
+ **Parameters:**
+-*   $P$: Number of processors.
+-*   $n$: Number of blocks.
+-*   Note: If $P > n$, the algorithm may assign one block per processor and ignore the rest, or subdivide blocks (implementation detail not specified in source) [S1, unofficial].
++- $P$: Number of processors.
++- $n$: Number of data blocks.
+ 
+-**Steps:**
++**Algorithm Steps:**
+ 1.  **Calculate Total Cells:** Compute the total number of cells in the dataset:
+-    $$ C_{total} = \sum_{i=1}^{n} C_i $$
++    $$ C_{total} = \sum_{x=1}^{n} C_x $$
+ 2.  **Calculate Optimal Load:** Determine the target number of cells per processor:
+-    $$ C_{opt} = \lceil C_{total} / P \rceil $$
+-    Where $\lceil \cdot \rceil$ denotes rounding up to the nearest integer [S1, unofficial].
+-3.  **Sort Blocks:** Sort the blocks in descending order of their cell count $C_i$ [S1, unofficial].
+-4.  **Initialize:** Create an active list of processors containing all $P$ processors. Initialize a pointer to the start of the sorted blocks list [S1, unofficial].
+-5.  **Assign Blocks (Shuttle):** While there are unassigned blocks:
+-    a. Select the next available processor from the active list (cycling through processors) [S1, unofficial].
+-    b. Select the next block from the sorted blocks list [S1, unofficial].
+-    c. Assign the block to the processor.
+-    d. Update the processor's accumulated cell count.
+-    e. If the processor's accumulated cell count $\ge C_{opt}$, mark the processor as full and remove it from the active list [S1, unofficial].
+-6.  **Termination:** The algorithm ends when all blocks are assigned [S1, unofficial].
++    $$ C_{optimal} = \lceil C_{total} / P \rceil $$
++    [G] Rounding up ensures that if $C_{total}$ is not divisible by $P$, the last processor may exceed the average slightly, but no processor is assigned less than the floor value unnecessarily.
++3.  **Sort Blocks:** Sort the list of blocks in descending order based on `cell_count`. This greedy approach handles large blocks first, which is critical for balancing because large blocks are harder to fit into remaining space.
++4.  **Initialize Processors:** Create a list of $P$ processors. Initialize `assigned_cells` to 0 for all. Maintain a pointer or index to the next available processor in a round-robin fashion.
++5.  **Assign Blocks:** Iterate through the sorted blocks. For each block:
++    a. Select the next available processor from the list (cycling through $0$ to $P-1$).
++    b. Assign the current block to this processor.
++    c. Update the processor's `assigned_cells` by adding the block's `cell_count`.
++    d. Check if the processor's `assigned_cells` $\ge C_{optimal}$. If true, mark the processor as `is_full = true` and remove it from the active assignment list.
++    e. Repeat until all blocks are assigned.
+ 
+ **Pseudocode:**
++
+ ```python
+ def cell_count_algorithm(blocks, num_processors):
+     """
+-    blocks: list of dicts or objects with 'id' and 'cell_count'
+-    num_processors: integer P
+-    returns: dict mapping processor_id to list of assigned block_ids
++    blocks: List of dicts with keys 'id' and 'cell_count'
++    num_processors: Integer P
++    Returns: List of lists, where result[i] contains block IDs assigned to processor i
+     """
+     # Step 1 & 2: Calculate total and optimal cells
+@@ -56,124 +56,53 @@
+     sorted_blocks = sorted(blocks, key=lambda b: b['cell_count'], reverse=True)
+     
+-    # Step 4: Initialize processor state
+-    # Each processor tracks its current load and assigned blocks
++    # Step 4: Initialize processors
+     processors = []
+     for i in range(num_processors):
+         processors.append({
+             'id': i,
+-            'current_load': 0,
+-            'assigned_blocks': [],
+-            'is_full': False
++            'assigned_cells': 0,
++            'is_full': False,
++            'assigned_blocks': []
+         })
+     
+-    active_processors = list(range(num_processors)) # Indices of active processors
+-    block_idx = 0
+-    num_blocks = len(sorted_blocks)
++    active_processor_index = 0
+     
+-    # Step 5: Shuttle assignment
+-    while block_idx < num_blocks:
+-        if not active_processors:
+-            # No active processors left but blocks remain.
+-            # This implies P < n and all processors are full, 
+-            # but blocks remain. Source says "rest of extra processors can be ignored" 
+-            # if P > n, but doesn't explicitly handle P < n overflow in the loop logic 
+-            # other than removing full processors. 
+-            # In a real implementation, one might wrap around or assign to the least loaded.
+-            # Based on source description: "This algorithm continues until there are no more blocks to assign."
+-            # If active_processors is empty, we must have assigned all blocks or P is too small.
+-            # Assuming the source implies P >= number of high-res blocks or similar, 
+-            # we break or handle error. For strict adherence to source loop:
+-            break 
++    # Step 5: Assign blocks
++    for block in sorted_blocks:
++        # Find next active processor
++        while processors[active_processor_index]['is_full']:
++            active_processor_index = (active_processor_index + 1) % num_processors
+             
+-        # Get next available processor (cycling)
+-        # The source says "Get the next available processor from the list (cycling through processors)"
+-        # and "remove it from the active list" when full.
+-        # We use a pointer to cycle through the original list, skipping full ones.
++        current_proc = processors[active_processor_index]
+         
+-        # Find next active processor
+-        current_proc_idx = None
+-        # Simple cycling: just take the first available in the active list? 
+-        # Source: "Get the next available processor from the list (cycling through processors)"
+-        # This implies a round-robin among active ones.
++        # Assign block
++        current_proc['assigned_blocks'].append(block['id'])
++        current_proc['assigned_cells'] += block['cell_count']
+         
+-        # Let's implement a pointer that cycles through 0..P-1
+-        # But the source pseudocode uses `processor_list.get_next()` and `mark_processor_full`.
+-        # It implies a queue or list where full items are removed.
++        # Check if processor is full
++        if current_proc['assigned_cells'] >= optimal_cells:
++            current_proc['is_full'] = True
++            
++        # Move to next processor for next block
++        active_processor_index = (active_processor_index + 1) % num_processors
+         
+-        # Re-reading source pseudocode:
+-        # while( more blocks ) {
+-        #   current_processor = processor_list.get_next();
+-        #   ...
+-        #   if( current_processor.cellcount >= optimal ) processor_list.mark_processor_full( current_processor );
+-        # }
+-        # This suggests `processor_list` is a dynamic list. `get_next()` likely returns the next item.
+-        # If it cycles, it might wrap. However, if a processor is full, it is removed.
+-        # So `get_next()` just takes the head of the active list?
+-        # "cycling through processors" might refer to the initial distribution strategy if not removed.
+-        # But since they are removed when full, it's effectively a round-robin over the *remaining* capacity.
+-        
+-        # Let's assume a simple round-robin over the active list indices.
+-        # To keep it simple and self-contained:
+-        if not active_processors:
+-            break
+-            
+-        # Get the first active processor (Round Robin style on active set)
+-        # If we want to cycle, we might need an index. 
+-        # Source: "Get the next available processor from the list (cycling through processors)"
+-        # If we remove from the list, "cycling" is ambiguous. 
+-        # However, standard shuttle algorithms often just pick the next in a queue.
+-        # Let's assume `processor_list` is a queue.
+-        
+-        proc_idx = active_processors.pop(0) # Get next active processor
+-        proc = processors[proc_idx]
+-        
+-        # Get next block
+-        block = sorted_blocks[block_idx]
+-        block_idx += 1
+-        
+-        # Assign
+-        proc['assigned_blocks'].append(block['id'])
+-        proc['current_load'] += block['cell_count']
+-        
+-        # Check if full
+-        if proc['current_load'] >= optimal_cells:
+-            proc['is_full'] = True
+-            # Processor is removed from active list (already popped)
+-        else:
+-            # Put it back at the end to cycle? 
+-            # Source: "cycling through processors"
+-            # If we just pop from front, it's FIFO. 
+-            # If we want to cycle, we append to back if not full.
+-            active_processors.append(proc_idx)
+-
+-    # Return assignment
+-    assignment = {p['id']: p['assigned_blocks'] for p in processors}
+-    return assignment
++    return [p['assigned_blocks'] for p in processors]
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Cell counts are integers. The optimal load is an integer ceiling. Small discrepancies in total load distribution are inevitable if block sizes do not divide evenly [S1, unofficial].
+-*   **Boundaries:** If the number of processors $P$ is greater than the number of blocks $n$, the source suggests ignoring extra processors or subdividing blocks [S1, unofficial].
+-*   **Degenerate Input:** If a single block has a cell count greater than $C_{opt}$, that processor will exceed the optimal load significantly. The algorithm does not specify splitting such blocks, so the load balance will be suboptimal for that specific processor [S1, unofficial].
+-
+-## Subtopics
+-
+-### Uniform Resolution Decomposition
+-Assigns equal spatial portions or equal numbers of blocks regardless of resolution. Inefficient for adaptive data as low-resolution processors finish early [S1, unofficial].
+-
+-### Shuttle Algorithm
+-The specific assignment mechanism used within the Cell Count Algorithm, cycling through processors and assigning sorted blocks until capacity is reached [S1, unofficial].
++- **Uneven Division:** If $C_{total}$ is not divisible by $P$, some processors will have more cells than others. The algorithm minimizes the maximum load but does not guarantee perfect equality.
++- **Large Blocks:** If a single block's cell count exceeds $C_{optimal}$, that processor will exceed the optimal load. The source notes that if the number of processors is less than the number of blocks, this algorithm is used; however, if a block is larger than the average, it cannot be split without breaking the "consistent resolution" constraint mentioned in the source [S1, unofficial].
++- **Processor Count vs Block Count:** If $P > n$, some processors will receive no blocks. The algorithm handles this naturally as the loop terminates when blocks are exhausted. If $P < n$, blocks are distributed among fewer processors.
++- **Consistent Resolution:** The source emphasizes that each processor should ideally have blocks of consistent resolution or a mix that balances the total cells. The algorithm does not enforce resolution consistency within a processor, only cell count balance [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Sorting blocks takes $O(n \log n)$. The assignment loop is $O(n)$ as each block is visited once. Total: $O(n \log n)$ [S1, unofficial].
+-*   **Memory Complexity:** $O(n)$ to store block metadata and assignments [S1, unofficial].
+-*   **Performance:** Balances computational load by ensuring each processor renders approximately the same number of cells. Prevents idle time caused by low-resolution blocks finishing early [S1, unofficial].
+-*   **Strengths:** Simple to implement; effective for datasets with known block resolutions; reduces idle time in adaptive-resolution scenarios [S1, unofficial].
+-*   **Limitations:** Requires pre-calculation of cell counts; assumes cell count is a perfect proxy for rendering time (ignores transfer function complexity, etc.); does not handle dynamic load changes during rendering [S1, unofficial].
+-*   **When to use:** Adaptive-resolution volume datasets where block resolutions vary significantly and static load balancing is required [S1, unofficial].
+-*   **When not to use:** Uniform resolution data (where simple spatial decomposition suffices) or dynamic datasets where block costs change unpredictably [S1, unofficial].
++- **Time Complexity:** Sorting blocks takes $O(n \log n)$. The assignment loop takes $O(n)$ assuming constant-time processor selection. Total time is $O(n \log n)$.
++- **Memory Complexity:** $O(n)$ to store the block list and processor states.
++- **Performance:** This method significantly reduces idle time compared to uniform spatial decomposition or equal block count assignment. In the example from the source with 4 processors and blocks of sizes 16, 16, 4, 4, 4, 4, 1, 1, the algorithm assigns loads of 16, 16, 9, and 9 cells, whereas equal block assignment might assign 17, 20, etc., leading to imbalance [S1, unofficial].
++- **Strengths:** Simple to implement; effective for adaptive-resolution data where resolution correlates with computational cost; balances load based on actual work units (cells).
++- **Limitations:** Does not account for other factors like transfer function evaluation cost or opacity variations; assumes cell count is a perfect proxy for rendering time; may result in suboptimal cache locality if blocks are spatially disjoint.
+ 
+ ## Background
+-The algorithm was described in the context of volume visualization of time-varying data using parallel, multiresolution, and adaptive-resolution techniques [S1, unofficial]. It addresses the specific challenge of distributing adaptive-resolution data among processors to prevent idle time, contrasting with uniform resolution decomposition methods [S1, unofficial].
++The algorithm was described in the context of volume visualization of time-varying data using parallel, multiresolution, and adaptive-resolution techniques [S1, unofficial]. It addresses the inefficiency of dividing adaptive-resolution data equally by spatial extent, which causes processors handling low-resolution portions to finish early and sit idle [S1, unofficial]. The method is also referred to as the "shuttle algorithm" for block assignment in some contexts [S1, unofficial].
+ 
+ ## Sources

@@ -42,55 +42,55 @@ Dual Contouring on Octree is a surface extraction method that generates a triang
 **Algorithm Steps:**
 
 1.  **Octree Construction:**
-    -   Recursively subdivide the bounding box.
+    -   Recursively subdivide the bounding box [S1, S3, unofficial].
     -   For each node, if depth < max depth and the node intersects the isosurface (or based on error threshold), create 8 children [S1, S3, unofficial].
     -   Combine QEF matrices from valid children into the parent's grid if applicable [S3, unofficial].
     -   At leaf nodes (depth == 1 or terminal), sample the scalar field, solve the QEF to get vertex position, and mark as leaf [S3, unofficial].
 
 2.  **Vertex Index Generation (Pre-pass [S2, unofficial]):**
-    -   Traverse the octree. For every leaf or pseudo-node, assign a unique index, append position to vertex list, and append normal to normal list.
+    -   Traverse the octree. For every leaf or pseudo-node, assign a unique index, append position to vertex list, and append normal to normal list [S2, unofficial].
 
 3.  **Recursive Contouring (Post-order traversal):**
     -   **ContourCellProc(node):**
-        -   If node is null or leaf, return.
-        -   Recursively call `ContourCellProc` on all 8 children.
+        -   If node is null or leaf, return [S1, unofficial].
+        -   Recursively call `ContourCellProc` on all 8 children [S1, unofficial].
         -   For each of the 12 faces of the cell:
-            -   Get the two adjacent child nodes using `cellProcFaceMask[i]`.
-            -   Call `ContourFaceProc(faceNodes, direction)`.
+            -   Get the two adjacent child nodes using `cellProcFaceMask[i]` [S1, unofficial].
+            -   Call `ContourFaceProc(faceNodes, direction)` [S1, unofficial].
         -   For each of the 6 edges of the cell:
-            -   Get the four adjacent child nodes using `cellProcEdgeMask[i]`.
-            -   Call `ContourEdgeProc(edgeNodes, direction)`.
+            -   Get the four adjacent child nodes using `cellProcEdgeMask[i]` [S1, unofficial].
+            -   Call `ContourEdgeProc(edgeNodes, direction)` [S1, unofficial].
 
     -   **ContourFaceProc(nodes, direction):**
-        -   If `nodes[0]` or `nodes[1]` is null, return.
-        -   If both nodes are leaves, return.
+        -   If `nodes[0]` or `nodes[1]` is null, return [S1, unofficial].
+        -   If both nodes are leaves, return [S2, unofficial].
         -   If either node is internal:
-            -   Subdivide the face into 4 child faces.
-            -   For each child face, get the 2 adjacent sub-face nodes using `faceProcFaceMask`.
-            -   Recursively call `ContourFaceProc`.
-            -   For each of the 4 adjacent sub-edges, get the 4 edge nodes using `faceProcEdgeMask` and orders table.
-            -   Recursively call `ContourEdgeProc`.
-        -   If both are leaves (or pseudo-nodes), process the edge directly (see `ContourProcessEdge` logic adapted for face context, though typically face processing delegates to edge processing for the boundary). *Note: Source [S2, unofficial] implies that if both are leaves, it returns, and the actual triangle generation happens at the edge level or via the pseudo-node logic.*
+            -   Subdivide the face into 4 child faces [S3, unofficial].
+            -   For each child face, get the 2 adjacent sub-face nodes using `faceProcFaceMask` [S2, unofficial].
+            -   Recursively call `ContourFaceProc` [S3, unofficial].
+            -   For each of the 4 adjacent sub-edges, get the 4 edge nodes using `faceProcEdgeMask` and orders table [S2, unofficial].
+            -   Recursively call `ContourEdgeProc` [S2, unofficial].
+        -   If both are leaves (or pseudo-nodes), process the edge directly (see `ContourProcessEdge` logic adapted for face context, though typically face processing delegates to edge processing for the boundary) [S2, unofficial].
 
     -   **ContourEdgeProc(nodes, direction):**
-        -   If any node is null, return.
+        -   If any node is null, return [S1, unofficial].
         -   If all 4 nodes are leaves (or pseudo-nodes):
-            -   Call `ContourProcessEdge(nodes, direction)`.
+            -   Call `ContourProcessEdge(nodes, direction)` [S1, unofficial].
         -   Otherwise (if any node is internal):
-            -   Subdivide the edge into 2 child edges.
-            -   Get the 4 edge nodes using `edgeProcEdgeMask`.
-            -   Recursively call `ContourEdgeProc`.
+            -   Subdivide the edge into 2 child edges [S2, unofficial].
+            -   Get the 4 edge nodes using `edgeProcEdgeMask` [S2, unofficial].
+            -   Recursively call `ContourEdgeProc` [S2, unofficial].
 
     -   **ContourProcessEdge(nodes, direction):**
         -   Check buffer overflow: If `vertices.Count + 4 > MAX_VERTS_PER_MESH` (typically 30,000), flush mesh buffers [S1, unofficial].
-        -   Initialize `ptrs` array of size 4 to -1.
-        -   Initialize `signChange` array of size 4 to false.
-        -   Initialize `minSize` to Infinity, `minIndex` to 0, `flip` to false.
+        -   Initialize `ptrs` array of size 4 to -1 [S1, unofficial].
+        -   Initialize `signChange` array of size 4 to false [S1, unofficial].
+        -   Initialize `minSize` to Infinity, `minIndex` to 0, `flip` to false [S1, unofficial].
         -   Loop `i` from 0 to 3:
             -   Get bounds and data for `nodes[i]`.
-            -   Get edge index from `processEdgeMask[direction, i]` and encoding from `data.cornerEncoding`.
+            -   Get edge index from `processEdgeMask[direction, i]` and encoding from `data.cornerEncoding` [S1, unofficial].
             -   Check sign change:
-                -   `c0Sign = ((encoding >> edgevmap[edge, 0]) & 1) > 0`
+                -   `c0Sign = ((encoding >> edgevmap[edge, 0]) & 1) > 0` [S1, unofficial]
                 -   `c1Sign = ((encoding >> edgevmap[edge, 1]) & 1) > 0`
                 -   `signChange[i] = c0Sign != c1Sign`
             -   If `size < minSize`:
@@ -157,7 +157,7 @@ A vertex clustering approach for simplifying contours in adaptive octree-based D
 -   **When not to use:** When a uniform resolution is required and the overhead of octree traversal is unjustified. When strict manifold guarantees are needed without additional post-processing or manifold-specific variants.
 
 ## Background
-Dual Contouring was introduced by Schaefer et al. as a method to extract manifolds from scalar fields by placing vertices inside cells and minimizing QEFs [S6, unofficial]. The octree-based variant extends this by using a hierarchical grid structure to allow adaptive refinement, addressing the inefficiency of uniform grids for sparse data [S3, unofficial]. It builds on the original Dual Contouring algorithm [778-dual-contouring.md] and incorporates techniques from manifold dual contouring to ensure topological correctness [S6, unofficial].
+The octree-based variant extends the original Dual Contouring algorithm by using a hierarchical grid structure to allow adaptive refinement, addressing the inefficiency of uniform grids for sparse data [S3, unofficial]. It builds on the original Dual Contouring algorithm [778-dual-contouring.md] and incorporates techniques from manifold dual contouring to ensure topological correctness [S6, unofficial].
 
 ## Sources
 [S1] nivshalomlom/Dual-contouring, https://github.com/nivshalomlom/Dual-contouring, fetched 2026-10-26 (unofficial)

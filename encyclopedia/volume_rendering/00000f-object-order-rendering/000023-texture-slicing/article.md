@@ -1,67 +1,68 @@
 # Texture slicing
 
-Also called: Volume Slicing, 3D Texture Slicing, Hardware-Assisted Volume Slicing
+Also called: volume slicing, hardware-assisted volume rendering, proxy geometry rendering
 
 ## Overview
-Texture slicing is an object-order direct volume rendering technique that maps volumetric data into 2D or 3D texture maps and renders the volume by projecting a set of parallel proxy planes (slices) through the texture, compositing them back-to-front using hardware-accelerated alpha blending [S1, unofficial][S3, S4, book]. It solves the performance bottleneck of software-based ray casting by leveraging GPU rasterization and texture hardware, enabling real-time interactivity for large datasets [S1, unofficial][S3, S4, book]. It distinguishes itself from [Splatting](23-splatting.md) by using explicit planar geometry rather than point-based splats, and from [Shear-warp](24-shear-warp.md) by relying on direct texture sampling of parallel planes rather than a shear-warp factorization of the projection matrix [S4, book].
+Texture slicing is an object-order volume rendering technique that maps volumetric data into 2D or 3D textures and renders the volume as a series of parallel planes (proxy geometry) that slice through the texture data [S4, book]. It solves the problem of efficiently visualizing 3D scalar fields on graphics hardware by leveraging rasterization pipelines and hardware alpha blending, avoiding the computational cost of per-pixel ray casting [S3, book][S4, book]. It sets itself apart from siblings like [Splatting](23-splatting.md) by using explicit polygonal geometry for slices rather than point-based splats, and from [Ray casting](21-ray-casting.md) (image-order) by relying on hardware-accelerated scan-conversion and compositing rather than iterative sampling along view rays [S4, book].
 
 ## Shared principles
 The texture slicing family shares the following mechanism, terms, and mathematical foundations:
 
-1.  **Texture Mapping:** The scalar volume data is classified into RGBA values (color and opacity) and stored in a texture map. This can be a **3D texture** (where the volume is stored directly in 3D memory) or a set of **2D texture stacks** (where the volume is decomposed into axis-aligned 2D slices) [S1, unofficial][S3, S4, book].
-2.  **Proxy Geometry:** The volume is intersected by a series of parallel planes. These planes are represented as geometric primitives (typically quads or polygons) in screen space or object space. For 3D textures, these planes are often aligned with the image plane (view-aligned) or the volume axes (object-aligned) [S3, S4, book].
-3.  **Rasterization and Sampling:** The proxy geometry is rasterized. During rasterization, texture coordinates are interpolated across the primitive, and the fragment shader samples the texture map to retrieve the RGBA value for each pixel [S1, unofficial][S3, S4, book].
-4.  **Hardware Compositing:** The fragments are composited into the frame buffer using hardware-supported alpha blending. The standard blending equation is:
+1.  **Proxy Geometry:** The volume is intersected by a series of parallel planes. These planes are represented as geometric primitives (typically quads, triangles, or triangle strips) in screen space or object space. The geometry represents the "cut" through the volume [S1, unofficial][S2, unofficial][S3, book].
+2.  **Intersection Computation:** The core algorithm involves calculating the intersection points between the slicing plane and the volume's bounding box or individual cells. For bounding box approaches, this involves solving line-plane intersection equations [S1, unofficial][S2, unofficial]. For cell-based approaches, it involves slicing individual grid cells [S1, S2, unofficial][S3, book].
+3.  **Polygon Tessellation:** The resulting intersection points are sorted and tessellated into triangles or triangle strips suitable for rasterization. Sorting is often done by projecting points onto a 2D plane and computing a pseudo-angle to avoid trigonometric functions [S2, unofficial][S4, book].
+4.  **Texture Mapping:** The generated polygons are textured using the volume data. This typically involves mapping the 3D position of the polygon vertices to 3D texture coordinates to sample the scalar field [S1, unofficial][S2, unofficial].
+5.  **Hardware Compositing:** The fragments are composited into the frame buffer using hardware-supported alpha blending. The standard blending equation is:
     $$ C_{dest} = C_{src} \cdot A_{src} + C_{dest} \cdot (1 - A_{src}) $$
     where $C_{src}$ and $A_{src}$ are the color and opacity from the texture sample, and $C_{dest}$ is the current frame buffer color [S3, book]. This implements the discrete volume rendering integral when slices are processed in correct depth order [S3, book].
-5.  **Depth Ordering:** To ensure correct transparency, slices must be rendered in back-to-front (or front-to-back with appropriate blending) order relative to the viewer [S1, unofficial][S3, S4, book].
+6.  **Depth Ordering:** To ensure correct transparency, slices must be rendered in back-to-front (or front-to-back with appropriate blending) order relative to the viewer [S1, unofficial][S3, S4, book].
 
 ## Subtopics
 
-### [Plane Slicing](845-plane-slicing.md)
-A method that approximates the volume by slicing individual cells into explicit polygons using evenly spaced, axis-aligned planes, often using a marching cubes variant. It distinguishes itself by generating explicit geometry from the volume data, allowing it to handle unstructured or curvilinear grids effectively, unlike standard texture slicing which relies on regular texture sampling. Choose this when working with unstructured grids or when explicit polygonal control is required.
+### [AR mapping to 3D texture](884-ar-mapping-to-3d-texture.md)
+Uses a linear mapping for texture coordinates to allow parallel polygons to be legally rotated without recalculating coordinates, enabling the use of display lists for performance.
 
 ### [Alpha Dithering via Texture Map](888-alpha-dithering-via-texture-map.md)
-An optimization technique for texture slicing that expands the range of representable opacity values on 8-bit hardware. It solves the problem where low per-slice opacities become indistinguishable on standard 8-bit displays. It distinguishes itself by dynamically adjusting the transfer function in the texture map based on slice spacing, rather than relying on fixed hardware blending. Choose this when rendering with high slice density on legacy or constrained 8-bit hardware.
+Expands the effective range of allowable opacity values on graphics hardware restricted to 8 bits per channel by dynamically adjusting the transfer function stored in the texture map to compensate for slice spacing.
 
 ### [2D Texture-Based Volume Rendering](916-2d-texture-based-volume-rendering.md)
-An object-space technique that decomposes the volume into parallel, object-aligned 2D slices stored in texture maps, projected and composited back-to-front. It solves the problem of real-time rendering on hardware lacking native 3D texture support by using bilinear interpolation on 2D textures. It distinguishes itself from [3-Pass Texture Mapping with Compositing](1354-3-pass-texture-mapping-with-compositing.md) by relying on fixed axis-aligned stacks, trading image quality (bilinear vs trilinear) for broad compatibility. Choose this for maximum compatibility with older GPUs.
-
-### [GPU-based Cut-off Slice Generation](948-gpu-based-cut-off-slice-generation.md)
-A technique that computes proxy geometry (polygons representing the intersection of slicing planes with the volume's bounding box) directly on the GPU. It solves the CPU bottleneck of slice generation by offloading intersection calculation and sorting to the vertex shader. It distinguishes itself from [Plane Slicing](845-plane-slicing.md) by keeping geometry generation entirely within the graphics hardware, balancing workload for interactive camera rotation. Choose this for dynamic, view-dependent slicing with high performance.
+Decomposes the 3D scalar field into a set of axis-aligned 2D slices, storing each slice as a 2D texture, and compositing them back-to-front using hardware alpha blending. It trades mathematical accuracy for compatibility with older graphics hardware and reduced geometry generation overhead.
 
 ### [3-Pass Texture Mapping with Compositing](1354-3-pass-texture-mapping-with-compositing.md)
-A method that accelerates geometric transformation by pre-computing scalar values into intermediate 3-D datasets and re-sampling separately in three orthogonal directions. It distinguishes itself by reducing computational expense through orthogonal decomposition, allowing rapid interactive manipulation. It may use view-aligned geometry but focuses on the multi-pass resampling strategy. Choose this for efficient view-dependent transformations without full ray casting.
+Accelerates geometric transformation by pre-computing scalar values into intermediate 3-D datasets, then re-sampling separately in three orthogonal directions to reduce computational expense.
 
 ### [2D Volume Cross-Section Rendering](1764-2d-volume-cross-section-rendering.md)
-A method that extracts a single 2D slice from a 3D volume by intersecting it with an arbitrarily positioned plane. It solves the problem of visualizing internal structures in specific orientations (coronal, sagittal, oblique) without full volume rendering overhead. It distinguishes itself by rendering a single opaque plane, lacking the transparency blending of full volume rendering. Choose this for Multi-Planar Reformation (MPR) tasks.
-
-### [Sliced Volume Rendering](3568-sliced-volume-rendering.md)
-A real-time technique that dynamically generates slice geometry and applies per-pixel lighting and classification via GLSL or precomputed textures. It distinguishes itself by integrating dynamic lighting (up to 4 lights) and transfer functions directly into the pipeline, either computed on-the-fly or precomputed into a single RGB texture. Choose this when dynamic lighting effects are required for sliced volume rendering.
+Extracts a single two-dimensional slice from a three-dimensional volume dataset by intersecting it with an arbitrarily positioned plane, rendering a single opaque plane without depth accumulation.
 
 ### [Slice Polygon Computation (3D Texture)](5680-slice-polygon-computation-3d-texture.md)
-Not given in the sources.
+Generates proxy geometry (polygons) that intersect a 3D volume texture along planes perpendicular to the viewing direction, storing the entire volume in a single 3D texture object rather than replicating data into three 2D texture stacks.
 
 ### [Palette Texture Volume Rendering](6502-palette-texture-volume-rendering.md)
-An approach for accelerating 2D slicing volume visualization on mobile devices using adaptive screen-resolution rendering, compressed palette textures, and basic graphics hardware functionality. It distinguishes itself by optimizing for mobile constraints through palette compression and adaptive resolution. Choose this for mobile or low-power embedded systems.
+An acceleration technique for mobile devices that maps 8-bit indexed data to RGBA values via a palette, reducing texture memory footprint to approximately one-fourth of the original size.
 
 ### [View-Aligned Slicing with 3D Textures](6687-view-aligned-slicing-with-3d-textures.md)
+Renders the volume as a series of parallel planes orthogonal to the current view direction, minimizing overdraw and maintaining consistent pixel coverage regardless of camera orientation.
+
+### [Slice Geometry Generation](6883-slice-geometry-generation.md)
+Procedurally creates proxy geometric primitives (polygons) that represent the intersection of slicing planes with a volumetric dataset, allowing for complex geometric operations like dynamic lighting.
+
+### [Cabral Texture Mapping](7257-cabral-texture-mapping.md)
 Not given in the sources.
 
-### Image-Aligned Kernel-Slicing
-A technique proposed by Mueller and Crawfis to avoid popping artifacts when slice direction changes, using image-aligned kernel-slicing and traversal order [S5, unofficial]. It distinguishes itself by aligning slices with the image plane rather than the volume axes during direction changes. Pitfall: The GPU implementation has high computational cost and needs future investigation [S5, unofficial]. Choose this when popping artifacts during view rotation are unacceptable and performance allows.
+#### Image-Aligned Kernel-Slicing
+Proposed by Mueller and Crawfis to avoid popping artifacts when slice direction changes, using image-aligned kernel-slicing and traversal order [S5, unofficial]. However, the GPU implementation has high computational cost and needs future investigation [S5, unofficial].
 
-### 3D Texture Generation via Slicing
-A method to generate a 3D texture by rendering 2D slices of a scene to a 2D texture, reading pixels, and assembling them into a 3D texture [S6, unofficial]. It distinguishes itself by constructing the 3D texture from rendered 2D outputs rather than raw scalar data. Step: Loop through slices, set material slice parameter, render to target, read pixels, extract red channel, and upload to 3D texture [S6, unofficial]. Choose this when generating 3D textures from rendered scenes rather than scalar fields.
+#### 3D Texture Generation via Slicing
+Generates a 3D texture by rendering 2D slices of a scene to a 2D texture, reading pixels, and assembling them into a 3D texture [S6, unofficial].
 
-### Spherical Coordinate Volume Rendering
-A method for planet-scaled atmospheric data that avoids accuracy loss from Cartesian-to-geodetic conversion by operating directly in spherical coordinates [S7, unofficial]. It distinguishes itself by representing volume vertices and textures in spherical coordinates. Step: Calculate proxy geometry using spherical coordinate representation [S7, unofficial]. Choose this for global atmospheric or planetary volume rendering.
+#### Spherical Coordinate Volume Rendering
+A method for planet-scaled atmospheric data that avoids accuracy loss from Cartesian-to-geodetic coordinate conversion by operating directly in spherical coordinates [S7, unofficial].
 
-### Fiber Surface Texturing
-A technique for texturing fiber surfaces where each vertex is assigned a parameter $t \in [0,1]$ based on its position on the FSCP edge. It distinguishes itself by mapping vertex parameters to a global range for texture lookup, allowing dotted lines in the texture map to indicate fiber presence [S8]. Step: Assign parameter $t$, map to global range, store dotted line in texture map (black=fiber, white=no fiber) [S8]. Choose this for visualizing fiber structures on tetrahedral meshes.
+#### Fiber Surface Texturing
+Assigns each vertex a parameter $t$ in $[0,1]$ based on its position on the FSCP edge, mapping vertex parameters to global range $[0,1]$ for texture lookup, and storing a dotted line in the texture map where black values indicate a fiber to be drawn [S8].
 
 ## Background
-Texture slicing was first described by Wilson et al. in 1994 as "volume slicing" using hardware-assisted 3D texture mapping for direct volume rendering [WGW94, S1, S3, S4, unofficial]. It was developed to address the slowness of software-based volume rendering by leveraging the emerging 3D texturing capabilities of GPUs. The method became widely adopted as 3D texture hardware became standard in consumer graphics cards, such as the NVIDIA GeForce3 family released in 2001 [S1, unofficial]. Early implementations relied on 2D texture stacks due to hardware limitations, later evolving to native 3D textures for better performance and quality [S4, book]. It is commonly used in medical imaging, scientific visualization, and real-time interactive applications where performance is critical [S1, unofficial][S3, S4, book].
+Volume slicing was first described by Wilson et al. in 1994 [WGW94], using hardware-assisted 3D texture mapping for direct volume rendering. The method maps voxels through classification functions into RGBA values, stores them in a 3D texture map, and slices the texture with parallel planes [S1, unofficial]. Early graphics boards only supported 2D textures, requiring data replication in three axis directions to allow quick construction of geometry for the axis most aligned with the viewpoint [S4, book]. The advent of 3D texturing capabilities improved the method by allowing proxy geometry consisting of parallel polygons orthogonal to the viewing direction [S4, book]. The NVIDIA GeForce3 family, released in 2001, fulfilled the prediction that 3D texture mapping in hardware would become common, enabling interactive frame rates for volumes up to $256 \times 256 \times 256$ [S1, unofficial].
 
 ## Sources
 [S1] Volume Visualisation Via Variable-Detail Non-Photorealistic Illustration, https://uwspace.uwaterloo.ca/bitstream/10012/1104/1/jlmckinl2002.pdf, fetched 2026-10-26 (unofficial)
