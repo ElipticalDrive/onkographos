@@ -1,0 +1,91 @@
+# Proxy Mesh Rendering for Page Visibility
+
+Also called: Visibility Buffer Reduction
+
+## Overview
+Proxy Mesh Rendering for Page Visibility determines which virtual memory pages are visible in a scene by rendering a simplified proxy mesh to a visibility buffer and reducing that buffer to a list of active page IDs [S1]. It differs from standard visibility buffers by encoding depth information to support Level of Detail (LOD) selection and by utilizing a compute shader reduction step to minimize memory bandwidth, addressing the performance bottlenecks of atomic operations in concurrent thread updates [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A proxy mesh representing the geometry of the scene, where each face is associated with a specific virtual memory page ID.
+*   **Output:** A CPU-accessible array of page IDs. Entries are zero for invisible pages and contain integer depth values for visible pages.
+
+**Data Structures**
+*   **Visibility Buffer:** A single-channel, 32-bit unsigned integer image. The resolution is intentionally low to enhance performance [S1].
+*   **Page ID Buffer:** A buffer passed to the fragment shader containing the page ID for each face, indexed by the face index [S1].
+
+**Steps**
+1.  **Vertex Shader Execution:** The vertex shader receives vertex positions and applies model and camera transformations [S1].
+2.  **Fragment Shader Execution:** For each rasterized fragment, the fragment shader retrieves the page ID corresponding to the input face index. If the face is background or unassigned, it outputs a zero page ID [S1].
+3.  **Visibility Buffer Reduction:** A compute shader processes the visibility buffer to generate a list of required page IDs.
+    *   The shader updates each pixel's list entry in parallel.
+    *   Depth is encoded as integers that decrease with greater depth (i.e., closer objects have higher integer values).
+    *   `atomicMax()` is used to ensure that only the closest depth value (maximum integer) is written to the buffer for each pixel [S1].
+    *   The shader iterates through linked pages per pixel to set buffer entries, connecting nearby pages to mitigate the effects of low resolution [S1].
+4.  **Data Transfer:** The buffer is transferred to CPU memory. The resulting array contains zeroes for unneeded pages and depth values for needed pages [S1].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Vertex Shader
+def vertex_shader(position, model_matrix, camera_matrix):
+    # Apply model and camera transformations
+    transformed_position = camera_matrix * (model_matrix * position)
+    return transformed_position
+
+# Fragment Shader
+def fragment_shader(face_index, page_id_buffer):
+    # Retrieve page ID for the current face
+    page_id = page_id_buffer[face_index]
+    
+    # Background and unassigned faces result in zero page
+    if page_id is None or is_background(face_index):
+        return 0
+    return page_id
+
+# Compute Shader (Reduction)
+def compute_shader_reduction(visibility_buffer, linked_pages):
+    # Shared memory for workgroup optimization to avoid atomic contention
+    shared_depth = [0] * WORKGROUP_SIZE
+    
+    # Parallel update of pixel list entries
+    for pixel in visibility_buffer:
+        # Encode depth as integers decreasing with greater depth
+        # Use atomicMax to ensure only the closest (max integer) depth is kept
+        current_depth = atomicMax(pixel.depth, pixel.depth)
+        
+        # Iterate through linked pages per pixel to set buffer entries
+        for linked_page in linked_pages[pixel.id]:
+            set_buffer_entry(pixel.id, linked_page)
+
+# CPU Side
+def transfer_to_cpu(visibility_buffer):
+    # Transfer buffer to CPU memory
+    cpu_array = copy_to_cpu(visibility_buffer)
+    
+    # Zeroes indicate unneeded pages; depth values indicate needed pages
+    return cpu_array
+```
+
+**Parameters**
+*   **Resolution:** The visibility buffer is rendered at low resolution. This enhances performance by allowing atomic operations to be avoided in favor of shared memory in workgroups [S1].
+
+**Edge Cases and Pitfalls**
+*   **Race Conditions:** Finding the minimum depth for LOD communication can lead to race conditions. While `atomicMax()` is employed, it has an adverse performance impact on concurrent thread updates [S1].
+*   **Primitive ID Performance:** Using `gl_PrimitiveID` has a negative performance impact [S1]. The implementation uses the leading vertex to determine triangle primitive IDs instead [S1].
+*   **Distant Page Misses:** Low resolution can cause distant pages to be missed in virtual texturing [S1]. However, in this renderer, overlapping Gaussians cause nearby pages to remain memory-bound, making the trade-off acceptable [S1].
+
+## Operating characteristics
+*   **Performance:** Rendering at low resolution improves performance by reducing the number of atomic operations required [S1]. However, atomic operations themselves have an adverse performance impact on concurrent thread updates [S1].
+*   **Memory:** The method reduces memory bandwidth usage by transferring a reduced list of page IDs rather than full visibility data [S1].
+*   **Accuracy:** Low resolution may cause distant pages to be missed [S1]. This is mitigated by page linking, which connects nearby pages [S1].
+*   **When to use:** Suitable for virtual texturing systems where nearby pages are memory-bound due to overlapping geometry (e.g., 3D Gaussian Splatting) [S1].
+*   **When not to use:** Not suitable when precise visibility of distant, non-overlapping pages is critical, as low resolution may miss them [S1].
+
+## Background
+The method is described in the context of virtual memory for 3D Gaussian Splatting [S1]. It builds on techniques discussed by Hable [45] regarding primitive ID performance and Mayer [31] regarding small visibility buffers for virtual texturing. The implementation is part of a Vulkan-based system described by Haberl [46] [S1].
+
+## Sources
+[S1] Virtual memory for 3D Gaussian Splatting, https://zenodo.org/records/19690968, fetched 2026-10-26

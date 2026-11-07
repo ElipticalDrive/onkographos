@@ -3,151 +3,117 @@
 Also called: Coarse and Fine Sampling, Proposal Network Sampler, Rendering Sampling Strategy
 
 ## Overview
-Two-stage NeRF Rendering is a volume rendering acceleration and quality improvement method that decouples the estimation of scene density from the final color and density evaluation [S1, S3]. It solves the problem of inefficient uniform sampling, where computational resources are wasted on empty space or low-detail regions, by first using a coarse network to estimate the transmittance and density distribution along a ray, and then using that distribution to importance-sample a finer set of points for the final rendering pass [S2, unofficial][S3]. It sets itself apart from single-stage methods by explicitly separating the "rough" density estimation from the "detailed" radiance evaluation, and from simple uniform sampling by concentrating network queries on high-density regions identified in the first pass [S3].
+Two-stage NeRF Rendering is an acceleration technique for Neural Radiance Fields that decouples the estimation of scene density from the final color and density evaluation [S1][S2, unofficial]. It solves the problem of inefficient uniform sampling by first using a coarse network to identify high-density regions, then using that information to importance-sample a fine network for high-quality rendering [S1][S2, unofficial][S3]. It sets itself apart from uniform sampling by concentrating computational effort on occupied space, and from single-stage methods by explicitly separating the rough density estimation pass from the detailed evaluation pass [S2, unofficial][S3].
 
 ## How it works
-The method consists of two distinct rendering passes (coarse and fine) that can be implemented using either a single network queried twice or a hierarchy of proposal networks [S1, S3]. The core logic involves sampling points based on a learned probability density function (PDF) derived from the coarse pass.
+**Inputs and Outputs:**
+*   **Inputs:** Ray bundle (origin $\mathbf{o}$, direction $\mathbf{d}$), coarse network $N_c$, fine network $N_f$ (or proposal networks $N_p$), near/far bounds $[t_n, t_f]$.
+*   **Outputs:** Rendered color $\mathbf{C}$ and accumulated transmittance $\alpha$ for each ray.
 
-### Inputs and Outputs
-*   **Inputs**: Ray bundle (origin $\mathbf{o}$, direction $\mathbf{d}$), near/far bounds ($t_n, t_f$), coarse network $N_c$, fine network $N_f$ (or proposal networks $N_p$), and sampling configuration parameters.
-*   **Outputs**: Rendered color $\mathbf{C}$ and accumulated transmittance $\alpha$ for each pixel.
+**Data Structures:**
+*   **Ray Samples:** A list of 3D points $\mathbf{x}_i$ along the ray.
+*   **Network Outputs:** For each point, a density $\sigma_i$ and color $\mathbf{c}_i$ (or feature vector).
+*   **Weights:** Accumulated weights $w_i$ for compositing.
 
-### Data Structures
-*   **Ray Samples**: A list of 3D positions $\mathbf{x}_i$ and their corresponding distances $t_i$ along the ray.
-*   **Network Outputs**: For each sample point, the network outputs density $\sigma$ and color $\mathbf{c}$ (and optionally feature vectors).
-*   **Weights**: Accumulated weights $w_i$ for each sample, used in the volume rendering integral.
+**Numbered Steps:**
 
-### Numbered Steps
+1.  **Initialization:** Determine the initial sampling strategy. If the configuration specifies 'uniform', initialize a `UniformSampler` with single jittering; otherwise, initialize a piecewise sampler or `None` [S2, unofficial].
+2.  **Coarse Sampling (Proposal):**
+    *   Sample $N_c$ points along the ray interval $[t_n, t_f]$. In the original NeRF implementation, $N_c = 64$ [S1]. In Base-NeRF, the first proposal network queries 128 linearly spaced samples [S3].
+    *   Query the coarse network $N_c$ at these points to obtain densities $\sigma_i$ and colors $\mathbf{c}_i$.
+    *   Compute the cumulative transmittance $T_i = \exp(-\sum_{j < i} \sigma_j \Delta t_j)$ and weights $w_i = T_i (1 - \exp(-\sigma_i \Delta t_i))$ [S1][S2, unofficial].
+3.  **Fine Sampling (Importance Sampling):**
+    *   Use the weights $w_i$ from the coarse pass to define a probability density function (PDF) for sampling.
+    *   Sample $N_f$ additional points. In the original NeRF, $N_f = 192$ (64 initial + 128 additional) [S1]. In Base-NeRF, the second proposal network queries 96 samples and the final NeRF queries 48 samples using probability density sampling [S3]. At test time, Base-NeRF increases the final NeRF sampling to 192 points [S3].
+    *   Query the fine network $N_f$ (or subsequent proposal networks) at these new points.
+4.  **Rendering:**
+    *   Combine all samples (coarse and fine) to compute the final color:
+        $$ \mathbf{C}(\mathbf{r}) = \sum_{i=1}^{N} w_i \mathbf{c}_i $$
+    *   Total network queries per ray in the original NeRF are 256 (64 coarse + 192 fine) [S1].
 
-1.  **Coarse Sampling**:
-    *   Generate $N_c$ sample points along the ray. In the original NeRF implementation, these are typically linearly spaced or uniformly jittered [S1, S3].
-    *   Query the coarse network $N_c$ at these positions to obtain density $\sigma_c$ and color $\mathbf{c}_c$.
-    *   Compute the transmittance $T_i$ and weights $w_i$ for the coarse samples using the standard volume rendering equation:
-        $$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) $$
-        $$ w_i = T_i (1 - \exp(-\sigma_i \delta_i)) $$
-        where $\delta_i = t_{i+1} - t_i$ is the distance between adjacent samples [S1].
+**Parameters:**
+*   **Coarse samples ($N_c$):** 64 [S1].
+*   **Fine samples ($N_f$):** 192 total (64 initial + 128 additional) [S1]. Base-NeRF uses 128 for Proposal 1, 96 for Proposal 2, and 48 (or 192 at test) for Final NeRF [S3].
+*   **Total samples:** 256 per ray in standard NeRF [S1].
+*   **Initial Sampler:** 'uniform' with single jitter or piecewise [S2, unofficial].
+*   **Update Schedule:** Determines how often proposal networks are updated during training [S2, unofficial].
 
-2.  **Importance Sampling Distribution Construction**:
-    *   Use the weights $w_i$ from the coarse pass to construct a discrete probability distribution over the ray segments.
-    *   If using proposal networks (as in [S3]), the first proposal network $N_{p1}$ may query linearly spaced samples, and subsequent proposals $N_{p2}$ query samples based on the PDF derived from previous stages [S3].
-
-3.  **Fine Sampling**:
-    *   Generate $N_f$ additional sample points along the ray. These points are sampled according to the PDF constructed in Step 2 (importance sampling) [S2, unofficial][S3].
-    *   In the original NeRF [S1], $N_f$ includes the coarse samples plus additional samples (e.g., 64 coarse + 128 fine = 192 total for the fine pass). In [S3], the final NeRF model queries 48 samples during training and 192 at test time using probability density sampling.
-    *   Query the fine network $N_f$ (or the final NeRF network) at these positions to obtain $\sigma_f$ and $\mathbf{c}_f$.
-
-4.  **Volume Rendering**:
-    *   Combine the outputs from the fine pass to compute the final pixel color:
-        $$ \mathbf{C} = \sum_{i=1}^{N_f} w_i \mathbf{c}_i $$
-    *   The weights $w_i$ are recomputed using the fine network's density $\sigma_f$ and the inter-sample distances [S1].
-
-### Pseudocode
-
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_two_stage(ray_origins, ray_directions, t_near, t_far, 
-                     coarse_net, fine_net, num_coarse_samples, num_fine_samples):
+def render_two_stage(ray_origins, ray_directions, near, far, coarse_net, fine_net):
     """
-    Renders a batch of rays using two-stage NeRF sampling.
-    
-    Args:
-        ray_origins: (B, 3) Tensor of ray origins.
-        ray_directions: (B, 3) Tensor of ray directions.
-        t_near: (B,) Tensor of near plane distances.
-        t_far: (B,) Tensor of far plane distances.
-        coarse_net: Function/Model for coarse density/color.
-        fine_net: Function/Model for fine density/color.
-        num_coarse_samples: Integer, number of samples in coarse pass.
-        num_fine_samples: Integer, number of samples in fine pass.
-        
-    Returns:
-        colors: (B, 3) Rendered RGB colors.
+    Renders a batch of rays using two-stage sampling.
     """
-    # Step 1: Coarse Sampling
-    # Generate linearly spaced or jittered samples for the coarse pass
-    # [S1] uses 64 samples; [S3] uses 128 for Proposal 1
-    t_coarse = linearly_spaced_samples(t_near, t_far, num_coarse_samples)
-    x_coarse = ray_origins + ray_directions * t_coarse.unsqueeze(-1)
+    # 1. Coarse Sampling
+    # Sample 64 points linearly or with jitter between near and far
+    coarse_t = sample_points(ray_origins, ray_directions, near, far, num_samples=64)
     
-    # Query coarse network
-    # [S1] Network outputs sigma and color
-    sigma_coarse, color_coarse = coarse_net(x_coarse)
+    # Query coarse network for density and color
+    coarse_sigma, coarse_color = coarse_net(coarse_t)
     
-    # Compute coarse weights for importance sampling
-    # delta is the distance between adjacent samples
-    delta_coarse = torch.diff(t_coarse, dim=-1, prepend=t_near.unsqueeze(-1))
-    # Transmittance T_i = exp(-sum_{j<i} sigma_j * delta_j)
-    alpha_coarse = 1.0 - torch.exp(-sigma_coarse * delta_coarse)
-    transmittance_coarse = torch.cumprod(1.0 - alpha_coarse + 1e-10, dim=-1)
-    transmittance_coarse = torch.cat([torch.ones_like(transmittance_coarse[:, :1]), 
-                                      transmittance_coarse[:, :-1]], dim=-1)
-    weights_coarse = transmittance_coarse * alpha_coarse
+    # Compute weights for importance sampling
+    # T[i] = exp(-sum(sigma[0:i] * delta_t))
+    # w[i] = T[i] * (1 - exp(-sigma[i] * delta_t[i]))
+    coarse_weights = compute_weights(coarse_sigma, coarse_t)
     
-    # Step 2: Fine Sampling (Importance Sampling)
-    # Sample t_fine based on weights_coarse PDF
-    # [S3] uses probability density sampling for Proposal 2 and Final NeRF
-    # [S1] uses 128 additional samples for the fine pass
-    t_fine = importance_sample(t_near, t_far, weights_coarse, num_fine_samples)
-    x_fine = ray_origins + ray_directions * t_fine.unsqueeze(-1)
+    # 2. Fine Sampling
+    # Use coarse_weights to define PDF for importance sampling
+    # Sample 192 points (64 initial + 128 additional) based on PDF
+    fine_t = importance_sample(ray_origins, ray_directions, near, far, coarse_weights, num_samples=192)
     
     # Query fine network
-    sigma_fine, color_fine = fine_net(x_fine)
+    fine_sigma, fine_color = fine_net(fine_t)
     
-    # Compute fine weights
-    delta_fine = torch.diff(t_fine, dim=-1, prepend=t_near.unsqueeze(-1))
-    alpha_fine = 1.0 - torch.exp(-sigma_fine * delta_fine)
-    transmittance_fine = torch.cumprod(1.0 - alpha_fine + 1e-10, dim=-1)
-    transmittance_fine = torch.cat([torch.ones_like(transmittance_fine[:, :1]), 
-                                    transmittance_fine[:, :-1]], dim=-1)
-    weights_fine = transmittance_fine * alpha_fine
+    # 3. Composite
+    # Combine coarse and fine samples
+    all_t = concatenate(coarse_t, fine_t)
+    all_sigma = concatenate(coarse_sigma, fine_sigma)
+    all_color = concatenate(coarse_color, fine_color)
     
-    # Step 3: Volume Rendering
-    colors = torch.sum(weights_fine.unsqueeze(-1) * color_fine, dim=-2)
+    # Recompute weights for all samples
+    final_weights = compute_weights(all_sigma, all_t)
     
-    return colors
+    # Render color
+    rendered_color = sum(final_weights * all_color)
+    
+    return rendered_color
 ```
 
-### Parameters and Typical Values
-*   **num_coarse_samples**: 64 [S1], 128 [S3] (Proposal 1).
-*   **num_fine_samples**: 192 total (64 coarse + 128 additional) [S1]; 48 training / 192 test [S3].
-*   **total_samples_per_ray**: 256 [S1].
-*   **initial_sampler**: Uniform with single jitter [S2, unofficial].
-*   **update_schedule**: Determines how often proposal networks are updated during training [S2, unofficial].
-
-### Edge Cases and Pitfalls
-*   **Precision**: Cumulative product for transmittance can underflow to zero, causing all subsequent weights to be zero. Use `1e-10` epsilon or log-space arithmetic [G].
-*   **Boundary Conditions**: Ensure `t_near` and `t_far` are correctly handled when computing `delta`. The first sample's delta is $t_1 - t_{near}$ [G].
-*   **Degenerate Input**: If a ray has no intersection with the scene (all $\sigma \approx 0$), the weights will be negligible, and the background color should be returned.
+**Edge Cases and Pitfalls:**
+*   **Empty Space:** If a ray passes through empty space, the coarse network should output low density. Failure to do so leads to unnecessary fine sampling [S1][S4, unofficial].
+*   **Precision:** Density values must be handled carefully to avoid numerical instability in the exponential transmittance calculation [S1].
+*   **Boundary Conditions:** Ensure near and far bounds are correctly set to avoid sampling outside the scene or missing geometry [S2, unofficial].
 
 ## Subtopics
 
 ### [Combined Sampling (Occupancy Grid + Proposal Network)](1626-combined-sampling-occupancy-grid-proposal-network.md)
-Stacks an occupancy grid on top of a proposal network to reduce ray count and shrink near-far planes, leveraging transmittance from both.
+Combined sampling stacks an occupancy grid on top of a proposal network to reduce the number of rays and shrink the near-far plane for remaining rays [1626-combined-sampling-occupancy-grid-proposal-network]. It addresses the inefficiency of uniform or single-stage sampling in scenes with significant empty space by using the proposal network to identify likely object regions and the occupancy grid to prune rays that pass through empty voxels. It sets itself apart from [Coarse-Fine Sampling](8172-coarse-fine-sampling.md) by explicitly decoupling spatial sparsity estimation (grid) from density prediction (network), and from [VF-NeRF Rendering Pipeline](3302-vf-nerf-rendering-pipeline.md) by focusing on the specific synergy of these two pruning mechanisms rather than a full training pipeline.
 
 ### [VF-NeRF Rendering Pipeline](3302-vf-nerf-rendering-pipeline.md)
-Uses a vector field network to predict normals and Jacobians for density estimation, deriving density from directional derivatives rather than a scalar field.
+The VF-NeRF rendering pipeline is a two-stage volume rendering method that uses a vector field network to predict surface normals, features, and Jacobians for density estimation and shading. It differs from standard NeRF by deriving density from the directional derivative of the vector field rather than a direct scalar field prediction, enabling explicit surface representation within the implicit volume. It builds on [Two-stage NeRF Rendering](925-two-stage-nerf-rendering.md) by integrating vector field-based density computation into the coarse and fine sampling passes.
 
 ### [Coarse-Fine Sampling](8172-coarse-fine-sampling.md)
-The foundational two-pass technique that improves quality by estimating density distribution in the first pass and importance-sampling in the second.
+Coarse-Fine Sampling is a two-pass rendering technique for Neural Radiance Fields (NeRF) that improves image quality and sampling efficiency by first estimating the scene's density distribution with a coarse pass, then using that distribution to importance-sample a fine pass. It sets itself apart from uniform sampling by concentrating computational effort on high-density regions identified in the first pass, and from single-stage methods by decoupling the rough density estimation from the detailed color/density evaluation.
 
 ### Base-NeRF Sampling & Architecture
-Uses a hierarchy of proposal networks with Hash Grid and MLP components. Proposal 1 queries 128 linearly spaced samples; Proposal 2 queries 96 samples via PDF; Final NeRF queries 48 (training) or 192 (test) samples via PDF [S3]. Architecture details: Proposal 1 Hash Grid 5/17/16/64, MLP 1/16; Proposal 2 Hash Grid 5/17/16/256, MLP 1/16; NeRF Hash Grid 5/19/16/2048, MLP 1/64 [S3].
+Base-NeRF uses a multi-proposal network architecture. Proposal 1 queries 128 linearly spaced samples. Proposal 2 queries 96 samples using probability density sampling. The final NeRF model queries 48 samples using probability density sampling, increased to 192 at test time for higher quality [S3]. The architecture uses Hash Grids and MLPs. Proposal 1: Hash Grid 5/17/16/64, MLP 1/16. Proposal 2: Hash Grid 5/17/16/256, MLP 1/16. NeRF: Hash Grid 5/19/16/2048, MLP 1/64. Positional embedding uses standard encoding. Directional embedding uses spherical harmonics. Sigma MLP: 1/64. Color MLP: 2/64 [S3].
 
 ### Speedup via importance thresholding
-Prunes rays corresponding to background regions based on an importance threshold, yielding significant speedups (up to 50% faster on Blender dataset) while maintaining or improving quality [S4, unofficial].
+On the Blender dataset, rays corresponding to background can be heavily pruned, yielding large speedups. NeRF-ID renders views up to 50% faster while achieving better results than NeRF† [S4, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity**: $O(N \cdot (N_c + N_f))$ per ray, where $N$ is the number of rays. Total network queries per ray is typically 256 [S1].
-*   **Memory Complexity**: Stores intermediate densities, colors, and transmittance for all samples. For 640k rays/image with 256 samples, this requires significant VRAM [S1].
-*   **Measured Performance**: On an NVIDIA V100, rendering a 640k ray image (realistic synthetic) or 762k ray image (real scenes) takes approximately 30 seconds per frame, resulting in 150-200 million network queries per image [S1].
-*   **Strengths**: Significantly reduces noise and improves convergence compared to uniform sampling by focusing computation on relevant geometry [S3].
-*   **Limitations**: Requires training two networks (or a proposal hierarchy), increasing training complexity and memory usage [S1, S3].
-*   **When to use**: High-quality novel view synthesis where rendering time is acceptable and uniform sampling is too noisy.
-*   **When not to use**: Real-time applications requiring sub-millisecond per-pixel latency without hardware acceleration.
+*   **Time Complexity:** $O(N \cdot M)$ where $N$ is the number of rays and $M$ is the total samples per ray. The original NeRF requires 256 network queries per ray [S1]. For a 640k ray image, this results in 150-200 million network queries per image [S1].
+*   **Memory Complexity:** Depends on the storage of the neural networks and the intermediate activations for all sampled points.
+*   **Measured Performance:** On an NVIDIA V100, rendering a realistic synthetic dataset (640k rays/image) or real scenes (762k rays/image) takes approximately 30 seconds per frame [S1].
+*   **Strengths:** Significantly reduces the number of unnecessary network queries in empty space compared to uniform sampling [S1][S4, unofficial]. Improves rendering quality by allocating more samples to complex regions [S2, unofficial][S3].
+*   **Limitations:** Requires training multiple networks (coarse and fine) or proposal networks, increasing training complexity and memory usage [S1, S3]. The two-stage process adds overhead to the rendering pipeline [S2, unofficial].
+*   **When to use:** Scenes with significant empty space or varying density where uniform sampling is inefficient [S1][S4, unofficial].
+*   **When not to use:** Scenes with uniform density or very small volumes where the overhead of two-stage sampling outweighs the benefits.
 
 ## Background
-Two-stage NeRF Rendering was introduced in the seminal NeRF paper by Mildenhall et al. in 2020 [S1]. It was designed to address the slow convergence and noisy outputs of single-stage NeRF models that used uniform sampling. The method has since been extended with proposal networks [S2, unofficial][S3] and integrated into various other frameworks like VF-NeRF [S3] and NeRF-ID [S4, unofficial].
+Two-stage NeRF Rendering was introduced in the original NeRF paper by Mildenhall et al. in 2020 [S1]. It was designed to address the computational cost of rendering novel views from sparse input images by efficiently sampling along rays. The method has since been extended and adapted in various forms, such as the proposal network sampler in Instant-NGP and other variants [S2, unofficial][S3][S4, unofficial].
 
 ## Sources
 [S1] NeRF: Representing scenes as neural radiance fields for view synthesis, http://www.matthewtancik.com/nerf, fetched 2026-10-27

@@ -3,10 +3,10 @@
 Also called: Band-by-band optimization, SH Band Strategy
 
 ## Overview
-Hierarchical Spherical Harmonics (SH) Optimization is a training schedule strategy for radiance-field optimization that iteratively refines the directional color representation of a scene by optimizing SH coefficients from a starting band up to a target maximum band [S1, unofficial]. It sequentially activates bands, allowing the scene density and low-frequency color to stabilize before introducing higher-frequency details [S1, unofficial].
+Hierarchical Spherical Harmonics (SH) Optimization is a training schedule strategy that iteratively refines a scene representation by optimizing SH coefficients sequentially from a starting band up to a target maximum band [S1, unofficial]. It initializes parameters for each band in order, allowing low-frequency color and scene density to stabilize before introducing higher-frequency details [S1, unofficial].
 
 ## How it works
-The method controls the optimization of Spherical Harmonics coefficients by managing which bands are active and how their parameters are initialized during the training loop [S1, unofficial]. It relies on specific configuration flags to determine the starting band and initialization behavior [S1, unofficial].
+The method controls the optimization of SH coefficients by managing which bands are active and how their parameters are initialized during the training loop [S1, unofficial]. It relies on specific configuration flags to determine the starting band and initialization behavior [S1, unofficial].
 
 ### Inputs and Outputs
 **Inputs:**
@@ -261,11 +261,11 @@ def hierarchical_sh_optimization(configs, scene, scene_optimizer, ray, render_ut
 ```
 
 ### Parameters
-- `configs->sphericalHarmonicsBand`: Maximum SH band index. Typical values depend on desired detail (e.g., 3 or 4 for NeRF-like scenes). Not given in the sources.
+- `configs->sphericalHarmonicsBand`: Maximum SH band index [S1, unofficial].
 - `configs->hierarchyBandStrategy`: Boolean. Controls hierarchical vs. flat optimization [S1, unofficial].
 - `configs->SHsForTargetResoOnly`: Boolean. Resets start band to 0 if true and not at minimum hierarchy [S1, unofficial].
 - `configs->initialFromFile`: Boolean. Skips density re-initialization if true and band matches `availableSHBand+1` [S1, unofficial].
-- `configs->learningRate`, `configs->shLearningRate`: Base learning rates. Reset at each band start [S1, unofficial].
+- `configs->learningRate`, `configs->shLearningRate`: Base learning rates. Reset at each band start and decayed per batch [S1, unofficial].
 - `configs->epochs`: Number of epochs per band [S1, unofficial].
 - `configs->batchSize`: Batch size for ray sampling [S1, unofficial].
 - `configs->solidStrategy`: If false, applies self-sample offset [S1, unofficial].
@@ -283,16 +283,10 @@ def hierarchical_sh_optimization(configs, scene, scene_optimizer, ray, render_ut
 - **Learning Rate Decay**: The decay factor is applied per batch, not per epoch, which can lead to significant decay over many batches [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: The method adds overhead by iterating through SH bands. For each band, it runs a full training loop (epochs * batches). If the maximum band is $B$, and each band requires $E$ epochs and $N$ batches, the total complexity is roughly $O(B \cdot E \cdot N)$. However, since lower bands are simpler, the per-band cost may decrease, but the source does not provide specific timing data.
-- **Memory Complexity**: Memory usage is dominated by the scene representation and the SH coefficients. Optimizing bands sequentially allows for potential memory savings if lower bands are discarded, but the source does not specify memory management details beyond the standard scene and loss arrays.
-- **Performance**: The method aims to improve convergence stability by avoiding the initialization of high-frequency bands too early. This can lead to better final quality but increases total training time due to the sequential nature.
-- **Strengths**: Prevents instability from high-frequency SH coefficients; allows for controlled refinement of detail.
-- **Limitations**: Increases training time; requires careful tuning of band transition parameters (`hierarchyBandStrategy`, `SHsForTargetResoOnly`).
-- **When to Use**: When training radiance fields with SH representations and experiencing instability or poor convergence with high-frequency details.
-- **When Not to Use**: When training time is critical and the scene does not require high-frequency detail; or when using a representation that does not support SH bands.
+Not given in the sources.
 
 ## Background
-Hierarchical Spherical Harmonics Optimization is a training schedule strategy used in differentiable volume rendering, specifically in the context of NeRF (Neural Radiance Fields) and related radiance-field optimizations. It is implemented in the `Clear-plenoxels` repository [S1, unofficial]. The method addresses the challenge of optimizing high-dimensional SH coefficients by breaking the problem into smaller, more manageable sub-problems (bands). This approach is similar to other hierarchical optimization techniques in graphics, such as multi-resolution rendering or progressive refinement.
+Not given in the sources.
 
 ## Sources
 [S1] nortonBryan/Clear-plenoxels, https://github.com/nortonBryan/Clear-plenoxels, fetched 2026-10-27 (unofficial)

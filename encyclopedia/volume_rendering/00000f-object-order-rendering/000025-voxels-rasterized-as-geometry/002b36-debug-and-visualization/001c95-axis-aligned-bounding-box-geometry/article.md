@@ -3,127 +3,98 @@
 Also called: AABB Geometry, RenderClippedBoundingBox, Volume Extent Bounding Box
 
 ## Overview
-Renders the clipped bounding box geometry to the framebuffer, optionally including texture coordinates [S1, unofficial]. It defines the geometry for a bounding box using 36 vertices (12 triangles) to render the volume extent [S2, unofficial]. The method operates on a fixed axis-aligned bounding box defined by minimum and maximum corner coordinates [S2, unofficial].
+This method renders the clipped axis-aligned bounding box (AABB) geometry of a voxel volume to the framebuffer, providing visual feedback about the volume's spatial extent without contributing to the final volumetric appearance [S1, S3, unofficial]. It differs from [Bounding Box Drawing](2733-bounding-box-drawing.md) by explicitly generating the 36-vertex triangle mesh for the full box surface rather than just drawing wireframe lines, and from [Debug Voxel Visualization](7095-debug-voxel-visualization.md) by operating on the aggregate volume bounds rather than individual voxel cells [S2, S3, unofficial].
 
 ## How it works
 **Inputs:**
-- `currentBlock`: `size_t` index of the current rendering block [S1, unofficial].
-- `numberOfBlocks`: `size_t` total number of blocks to process [S1, unofficial].
-- `tcoordFlag`: Boolean/int flag indicating whether to render texture coordinates [S1, unofficial].
-- `renWin`: Pointer to the render window context [S1, unofficial].
-- `minB`: Minimum corner of the bounding box, set to `(-1.0, -1.0, -0.42578125)` [S2, unofficial].
-- `maxB`: Maximum corner of the bounding box, set to `(1.0, 1.0, 0.42578125)` [S2, unofficial].
+- `box`: An AABB structure containing `minCorner()` and `maxCorner()` vectors (typically `vec3` or `fvec3`) [S3, unofficial].
+- `img_size`: Optional 3D integer vector defining the voxel grid dimensions, used to compute normalized texture coordinates [S3, unofficial].
+- `tcoordFlag`: Boolean flag indicating whether to generate and upload texture coordinates [S1, unofficial].
+- `currentBlock`: Index of the current rendering block, used for validation [S1, unofficial].
+- `numberOfBlocks`: Total number of blocks to process [S1, unofficial].
 
 **Outputs:**
-- Framebuffer with the bounding box geometry rendered [S1, unofficial].
-- Boolean return value: `true` if rendering should abort, `false` otherwise [S1, unofficial].
+- A Vertex Array Object (VAO) and Vertex Buffer Object (VBO) containing the box geometry [S2, unofficial].
+- Optional texture coordinate buffer [S3, unofficial].
 
 **Data Structures:**
-- **Vertices Array**: A flat array of 36 floats (12 triangles $\times$ 3 vertices $\times$ 3 components), defining 6 faces of the box [S2, unofficial].
-- **VAO/VBO**: Vertex attribute configuration and buffer storage are managed via standard OpenGL Vertex Array Object (VAO) and Vertex Buffer Object (VBO) mechanisms [S2, unofficial].
+- `vertices`: Array of 36 floats (12 triangles × 3 vertices × 3 components) defining the 6 faces of the box [S2, unofficial].
+- `texc`: Array of 8 `fvec3` elements (one per corner) for texture coordinates [S3, unofficial].
 
 **Steps:**
-1. Validate that `currentBlock` is within `[0, numberOfBlocks)` [S1, unofficial].
-2. Generate a VAO and a VBO [S2, unofficial].
-3. Upload the vertex data to the VBO with `GL_STATIC_DRAW` usage [S2, unofficial].
-4. Set the vertex attribute pointer for attribute index 0 to read 3 floats per vertex, with stride `3 * sizeof(GLfloat)` and offset 0 [S2, unofficial].
-5. Enable the vertex attribute array for index 0 [S2, unofficial].
-6. Render the geometry to the framebuffer [S1, unofficial].
-7. Return `true` if rendering should abort, `false` otherwise [S1, unofficial].
+1. Validate that `currentBlock` is within the range `[0, numberOfBlocks)` [S1, unofficial].
+2. Extract the minimum and maximum corners of the AABB:
+   $$
+   \begin{aligned}
+   x_0 &= \text{box.minCorner().x()}, & y_0 &= \text{box.minCorner().y()}, & z_0 &= \text{box.minCorner().z()} \\
+   x_1 &= \text{box.maxCorner().x()}, & y_1 &= \text{box.maxCorner().y()}, & z_1 &= \text{box.maxCorner().z()}
+   \end{aligned}
+   $$
+   [S3, unofficial]
+3. Define the 8 corner positions in the following order:
+   $$
+   \begin{aligned}
+   & (x_0, y_0, z_1), (x_1, y_0, z_1), (x_1, y_1, z_1), (x_0, y_1, z_1) \\
+   & (x_0, y_0, z_0), (x_1, y_0, z_0), (x_1, y_1, z_0), (x_0, y_1, z_0)
+   \end{aligned}
+   $$
+   [S3, unofficial]
+4. If `tcoordFlag` is true and `img_size` is provided, compute normalized texture coordinates:
+   $$
+   \begin{aligned}
+   dx &= 0.5 / \text{img\_size.x()}, & dy &= 0.5 / \text{img\_size.y()}, & dz &= 0.5 / \text{img\_size.z()} \\
+   x_0 &= \text{min\_corner.x()} / \text{img\_size.x()} + dx, & x_1 &= \text{max\_corner.x()} / \text{img\_size.x()} - dx \\
+   y_0 &= \text{min\_corner.y()} / \text{img\_size.y()} + dy, & y_1 &= \text{max\_corner.y()} / \text{img\_size.y()} - dy \\
+   z_0 &= \text{min\_corner.z()} / \text{img\_size.z()} + dz, & z_1 &= \text{max\_corner.z()} / \text{img\_size.z()} - dz
+   \end{aligned}
+   $$
+   [S3, unofficial]
+5. Generate VAO and VBO:
+   ```python
+   glGenVertexArrays(1, &vao)
+   glGenBuffers(1, &vbo)
+   ```
+   [S2, unofficial]
+6. Upload vertex data to the GPU:
+   ```python
+   glBindBuffer(GL_ARRAY_BUFFER, vbo)
+   glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW)
+   ```
+   [S2, unofficial]
+7. Set vertex attribute pointer:
+   ```python
+   glBindVertexArray(vao)
+   glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), (GLvoid*)0)
+   glEnableVertexAttribArray(0)
+   ```
+   [S2, unofficial]
+8. If `tcoordFlag` is true, copy texture coordinates to the texture coordinate buffer and mark bounds as dirty:
+   ```python
+   memcpy(mTexCoord->ptr(), texc, sizeof(texc))
+   mGeometry->setBoundsDirty(True)
+   ```
+   [S3, unofficial]
+9. Return `True` if rendering should abort, `False` otherwise [S1, unofficial].
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def render_aabb_geometry(current_block, number_of_blocks, tcoord_flag, ren_win, min_b, max_b):
-    # Step 1: Validate block index
-    if current_block >= number_of_blocks:
-        return True  # Abort rendering
-
-    # Step 2: Generate VAO and VBO
-    vao = create_vertex_array_object()
-    vbo = create_vertex_buffer_object()
-
-    # Step 3: Define vertices for AABB (36 floats: 12 triangles * 3 vertices * 3 components)
-    vertices = []
-    # Front face (z = max_b.z)
-    vertices.extend([min_b.x, min_b.y, max_b.z, max_b.x, min_b.y, max_b.z, max_b.x, max_b.y, max_b.z])
-    vertices.extend([min_b.x, min_b.y, max_b.z, max_b.x, max_b.y, max_b.z, min_b.x, max_b.y, max_b.z])
-    # Back face (z = min_b.z)
-    vertices.extend([min_b.x, min_b.y, min_b.z, min_b.x, max_b.y, min_b.z, max_b.x, max_b.y, min_b.z])
-    vertices.extend([min_b.x, min_b.y, min_b.z, max_b.x, max_b.y, min_b.z, max_b.x, min_b.y, min_b.z])
-    # Left face (x = min_b.x)
-    vertices.extend([min_b.x, min_b.y, min_b.z, min_b.x, max_b.y, min_b.z, min_b.x, max_b.y, max_b.z])
-    vertices.extend([min_b.x, min_b.y, min_b.z, min_b.x, max_b.y, max_b.z, min_b.x, min_b.y, max_b.z])
-    # Right face (x = max_b.x)
-    vertices.extend([max_b.x, min_b.y, min_b.z, max_b.x, max_b.y, min_b.z, max_b.x, max_b.y, max_b.z])
-    vertices.extend([max_b.x, min_b.y, min_b.z, max_b.x, max_b.y, max_b.z, max_b.x, min_b.y, max_b.z])
-    # Bottom face (y = min_b.y)
-    vertices.extend([min_b.x, min_b.y, min_b.z, max_b.x, min_b.y, min_b.z, max_b.x, min_b.y, max_b.z])
-    vertices.extend([min_b.x, min_b.y, min_b.z, max_b.x, min_b.y, max_b.z, min_b.x, min_b.y, max_b.z])
-    # Top face (y = max_b.y)
-    vertices.extend([min_b.x, max_b.y, min_b.z, min_b.x, max_b.y, max_b.z, max_b.x, max_b.y, max_b.z])
-    vertices.extend([min_b.x, max_b.y, min_b.z, max_b.x, max_b.y, max_b.z, max_b.x, max_b.y, min_b.z])
-
-    # Step 4: Upload vertex data
-    bind_buffer(GL_ARRAY_BUFFER, vbo)
-    upload_buffer_data(GL_ARRAY_BUFFER, len(vertices) * 4, vertices, GL_STATIC_DRAW)
-
-    # Step 5: Set vertex attribute pointer
-    bind_vertex_array(vao)
-    set_vertex_attribute_pointer(0, 3, GL_FLOAT, GL_FALSE, 3 * 4, None)
-    enable_vertex_attribute_array(0)
-
-    # Step 6: Render
-    # Note: tcoordFlag is provided but texture coordinate generation is not specified in the sources.
-    draw_arrays(GL_TRIANGLES, 0, 36)
-
-    # Step 7: Cleanup
-    delete_vertex_buffer_object(vbo)
-    delete_vertex_array_object(vao)
-
-    return False  # Continue rendering
-
-def create_vertex_array_object():
-    # Equivalent to glGenVertexArrays(1, &vao)
-    return {"id": next_unique_id()}
-
-def create_vertex_buffer_object():
-    # Equivalent to glGenBuffers(1, &vbo)
-    return {"id": next_unique_id()}
-
-def bind_buffer(target, buffer): pass
-def upload_buffer_data(target, size, data, usage): pass
-def bind_vertex_array(vao): pass
-def set_vertex_attribute_pointer(index, size, type, normalized, stride, pointer): pass
-def enable_vertex_attribute_array(index): pass
-def draw_arrays(mode, first, count): pass
-def delete_vertex_buffer_object(buffer): pass
-def delete_vertex_array_object(vao): pass
-```
+**Parameters:**
+- `minB`: Minimum corner of the bounding box, typically set to `(-1.0, -1.0, -0.42578125)` [S2, unofficial].
+- `maxB`: Maximum corner of the bounding box, typically set to `(1.0, 1.0, 0.42578125)` [S2, unofficial].
+- `renWin`: Pointer to `vtkRenderWindow` for context and framebuffer access [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Precision**: The z-coordinate `0.42578125` is a specific value from the source [S2, unofficial].
-- **Boundaries**: The method assumes a fixed AABB defined by `minB` and `maxB` [S2, unofficial].
-- **Degenerate Input**: If `minB` equals `maxB`, the box has zero volume and will not render visibly [G].
-- **Texture Coordinates**: The source mentions `tcoordFlag` but does not specify how texture coordinates are generated or applied [S1, unofficial].
-
-## Subtopics
-
-### [Bounding Box Drawing](2733-bounding-box-drawing.md)
-Draws arbitrary bounding boxes for debugging. Choose when you need to visualize dynamic or non-axis-aligned bounds.
+- If `img_size` contains zero components, texture coordinate generation fails and logs an error [S3, unofficial].
+- Scalar types `VTK_CHAR`, `VTK_BIT`, `VTK_ID_TYPE`, and `VTK_STRING` are not supported in the broader rendering context, though this method focuses on geometry [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: Not given in the sources [S1, unofficial][S2, unofficial].
-- **Memory Complexity**: Not given in the sources [S1, unofficial][S2, unofficial].
-- **Strengths**: Not given in the sources [S1, unofficial][S2, unofficial].
-- **Limitations**: Not given in the sources [S1, unofficial][S2, unofficial].
-- **When to use**: Not given in the sources [S1, unofficial][S2, unofficial].
-- **When not to use**: Not given in the sources [S1, unofficial][S2, unofficial].
+- **Time Complexity:** $O(1)$ for geometry generation, as the box always has 8 corners and 12 triangles [S2, unofficial].
+- **Memory Complexity:** $O(1)$, requiring fixed-size buffers for 36 floats and 8 texture coordinate vectors [S2, S3, unofficial].
+- **Strengths:** Simple, fast, and effective for visualizing volume extent [S1, S3, unofficial].
+- **Limitations:** Does not provide per-voxel detail or internal structure [S3, unofficial].
 
 ## Background
-The method originates from VTK-based volume ray casting implementations and custom rendering engines [S1, unofficial][S2, unofficial]. It is applied in debug and visualization pipelines to render volume extents [S1, unofficial].
+This method is used in volume rendering systems to visualize the spatial bounds of voxel data, often in conjunction with debug or visualization tools [S1, S3, unofficial]. It relies on standard OpenGL rasterization states and simple geometric primitives [G].
 
 ## Sources
 [S1] bozorgi/VTKMultiVolumeRayCaster, https://github.com/bozorgi/VTKMultiVolumeRayCaster, fetched 2026-10-26 (unofficial)
 [S2] ShashwatC/Ray, https://github.com/ShashwatC/Ray, fetched 2026-10-26 (unofficial)
+[S3] RaycastVolume.cpp, https://visualizationlibrary.org/documentation/_raycast_volume_8cpp_source.html, fetched 2026-10-27 (unofficial)

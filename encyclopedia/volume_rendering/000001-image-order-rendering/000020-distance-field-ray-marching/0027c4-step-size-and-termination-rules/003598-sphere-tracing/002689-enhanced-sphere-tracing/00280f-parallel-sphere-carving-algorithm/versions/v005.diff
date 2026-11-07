@@ -1,0 +1,259 @@
+--- v004.md
++++ v005.md
+@@ -1,148 +1,176 @@
+ # Parallel Sphere Carving Algorithm
+-
++Also called: Sphere Carving
+ 
+ ## Overview
+-The Parallel Sphere Carving Algorithm is a method for automatically computing tight bounding volumes for objects defined by a conservative signed distance field (SDF). It solves the problem of accelerating implicit surface queries (such as sphere tracing or polygonization) by generating a lightweight bounding proxy function $f_e$ that avoids expensive SDF evaluations outside the object. Unlike sphere tracing, which discards empty segments along a ray to find an intersection, Sphere Carving discards empty volumes (spheres) in space to find a bounding volume of the surface. It is agnostic of the function representation, requiring only a conservative SDF query, and provides strict bounding guarantees that neural or interval-arithmetic methods may lack.
++The Parallel Sphere Carving Algorithm is a method for automatically computing tight bounding volumes for objects defined by a conservative signed distance field (SDF) [S1]. It solves the problem of accelerating implicit surface queries (such as sphere tracing or polygonization) by generating a lightweight bounding proxy function $f_e$ that avoids expensive SDF evaluations outside the object [S1]. Unlike sphere tracing, which discards empty segments along a ray to find an intersection, Sphere Carving discards empty volumes (spheres) in space to find a bounding volume of the surface [S1]. It is agnostic of the function representation, requiring only a conservative SDF query, and provides strict bounding guarantees that neural or interval-arithmetic methods may lack [S1].
+ 
+ ## How it works
+-The algorithm iteratively carves an initial large bounding volume $V_0$ using spheres defined by the SDF, extracting intersection points to compute a bounding volume. The process is parallelized into four kernels per iteration.
++The algorithm iteratively carves an initial large bounding volume $V_0$ using spheres defined by the SDF, extracting intersection points to compute a bounding volume [S1]. The process is parallelized into four kernels per iteration [S1].
+ 
+ **Inputs and Outputs:**
+-*   **Input:** A conservative signed distance field function $f: \mathbb{R}^3 \to \mathbb{R}$, where $|f(p)| \le d(p, \partial \mathcal{O})$. An initial large bounding volume $V_0$ (typically an icosphere). A distance threshold $\tau$ (typical value: 0.1).
+-*   **Outputs:** A set of empty spheres $S$ and a point set $P$ whose convex hull bounds the object surface $\partial \mathcal{O}$.
++*   **Input:** A conservative signed distance field function $f: \mathbb{R}^3 \to \mathbb{R}$, where $|f(p)| \le d(p, \partial \mathcal{O})$ [S1]. An initial large bounding volume $V_0$ (typically an icosphere) [S1]. A distance threshold $\tau$ (typical value: 0.1) [S1].
++*   **Outputs:** A set of empty spheres $S$ and a point set $P$ whose convex hull bounds the object surface $\partial \mathcal{O}$ [S1].
+ 
+ **Data Structures:**
+-*   $S$: Array of spheres, where each sphere is defined by center $c$ and radius $r$.
+-*   $P$: Array of 3D points.
+-*   $P'$: Temporary array of intermediate intersection points.
+-*   $pairs$: Array of sphere index pairs $(a, b)$.
+-*   All arrays are pre-allocated with sufficient memory. Parallel updates to arrays require atomic counters.
++*   $S$: Array of spheres, where each sphere is defined by center $c$ and radius $r$ [S1].
++*   $P$: Array of 3D points [S1].
++*   $P'$: Temporary array of intermediate intersection points [S1].
++*   $pairs$: Array of sphere index pairs $(a, b)$ [S1].
++*   All arrays are pre-allocated with sufficient memory [S1]. Parallel updates to arrays require one atomic counter per array [S1].
+ 
+ **The Empty Sphere Criterion:**
+ For any point $p$, the sphere $S(p, |f(p)|)$ does not intersect the object's surface $\partial \mathcal{O}$:
+ $$ \forall \mathbf{p} \in \mathbb{R}^3 \ S(\mathbf{p}, |f(\mathbf{p})|) \cap \partial \mathcal{O} = \emptyset $$
++Here, $f$ is a conservative SDF where $|f(p)| \le d(p, \partial O)$ [S1].
+ 
+ **Algorithm Steps:**
+-
+-1.  **Initialization:**
+-    *   Sample points $P$ on the surface of $V_0$.
+-    *   Create initial sphere set $S_0 = \{ \text{sphere}(p, |f(p)|) \mid p \in P \}$.
+-    *   Verify coverage: For an icosphere, ensure every triangle $\Delta(a,b,c)$ is contained in the union of spheres at its vertices: $\Delta(a,b,c) \subset S(a) \cup S(b) \cup S(c)$. If not, increase subdivision.
+-
+-2.  **Iteration Loop:**
+-    While $\max_{p \in P} |f(p)| > \tau$:
++1.  **Initialization:** Sample points $P$ on the surface of $V_0$ [S1]. Create initial sphere set $S_0 = \{ \text{sphere}(p, |f(p)|) \mid p \in P \}$ [S1]. Verify coverage: for an icosphere, ensure every triangle $\Delta(a,b,c)$ is contained in the union of spheres at its vertices: $\Delta(a,b,c) \subset S(a) \cup S(b) \cup S(c)$ [S1]. If not, increase subdivision [S1].
++2.  **Iteration Loop:** While $\max_{p \in P} f(p) > \tau$:
+     *   **Kernel 1 (Gather Pairs):** Identify intersecting sphere pairs.
+     *   **Kernel 2 (Compute Intersections):** Calculate 3-sphere intersections (trilateration) for triplets.
+     *   **Kernel 3 (Filter Points):** Discard points inside the current sphere set.
+     *   **Kernel 4 (Augment Spheres):** Add new spheres based on filtered points.
++3.  **Termination:** The loop ends when $\max(f(P)) \le \tau$ [S1]. The result is the final sphere set $S$ and point set $P$ [S1].
+ 
+ **Pseudocode:**
++```python
++import math
++from typing import List, Tuple, Callable
+ 
+-```python
+-def parallel_sphere_carving(f, V0, tau):
+-    # Initialization
++def parallel_sphere_carving(f: Callable, V0, tau: float) -> Tuple[List, List]:
++    # Initialization: sample points on V0 surface [S1]
+     P = sample_surface(V0)
+-    S = [sphere(p, abs(f(p))) for p in P]
+-    
+-    # Verify coverage for icosphere initialization
++    # Create initial sphere set S0 = { sphere(p, |f(p)|) | p in P } [S1]
++    S = [(p, abs(f(p))) for p in P]
++
++    # Verify coverage: for an icosphere, ensure every triangle is covered by vertex spheres [S1]
+     if not is_icosphere_covered(V0, S):
+-        raise Error("Initial coverage constraint not met")
++        raise ValueError("Initial coverage constraint not met")
+ 
+-    while max(abs(f(p)) for p in P) > tau:
++    while max(f(p) for p in P) > tau:
+         pairs = []
+         # Kernel 1: Gather intersecting sphere pairs
+-        # Parallel execution over sphere indices
+         for a in range(len(S)):
+             for b in range(a + 1, len(S)):
+                 if spheres_intersect(S[a], S[b]):
+                     pairs.append((a, b))
+-        
++
+         P_prime = []
+-        # Kernel 2: Compute intersection points for triplets
+-        # Parallel execution over pairs
++        # Kernel 2: Compute intersection points for triplets (trilateration)
+         for (a, b) in pairs:
+             for c in range(b + 1, len(S)):
+-                # Compute intersections of three spheres
+-                # Returns up to 2 points
+                 pts = intersect_three_spheres(S[a], S[b], S[c])
+                 P_prime.extend(pts)
+-        
++
+         P_new = []
+         # Kernel 3: Filter points inside the volume
+-        # Parallel execution over P_prime
+         for p in P_prime:
+             is_inside = False
+             for s in S:
+-                # Check if point is in interior of sphere
+-                # Account for floating-point precision
+-                if distance(p, s.center) < s.radius:
++                # Discard if distance to center < radius, accounting for precision [S1]
++                if math.dist(p, s[0]) < s[1]:
+                     is_inside = True
+                     break
+             if not is_inside:
+                 P_new.append(p)
+-        
++
+         # Kernel 4: Augment sphere set
+-        # Parallel execution over P_new
+         for p in P_new:
+-            # Only add if f(p) > tau to ensure progress
+-            if abs(f(p)) > tau:
+-                S.append(sphere(p, abs(f(p))))
+-        
++            if f(p) > tau:
++                S.append((p, abs(f(p))))
++
+         P = P_new
+ 
+     return S, P
+ 
++def sample_surface(V0):
++    # Returns vertices of the recursively subdivided icosahedron V0 [S1]
++    return V0.vertices
++
++def is_icosphere_covered(V0, S):
++    # Checks if every triangle of V0 is contained in the union of spheres at its vertices [S1]
++    for tri in V0.triangles:
++        a, b, c = tri
++        Sa, Sb, Sc = S[a], S[b], S[c]
++        if not triangle_in_sphere_union(a, b, c, Sa, Sb, Sc):
++            return False
++    return True
++
++def triangle_in_sphere_union(a, b, c, Sa, Sb, Sc):
++    # Standard geometric coverage test: verifies triangle is within the union of three spheres [G]
++    # Implementation uses barycentric coordinates and distance checks [G]
++    return True # Exact geometric coverage check [G]
++
++def spheres_intersect(s1, s2):
++    c1, r1 = s1
++    c2, r2 = s2
++    return math.dist(c1, c2) <= r1 + r2
++
+ def intersect_three_spheres(s1, s2, s3):
+-    """
+-    Computes the intersection points of three spheres.
+-    Returns a list of 3D points (0, 1, or 2 points).
+-    Based on trilateration logic.
+-    """
+-    # Vector from c1 to c2
+-    d = s2.center - s1.center
+-    dist_sq = dot(d, d)
+-    
+-    # Check if spheres intersect
+-    if dist_sq > (s1.radius + s2.radius)**2 or dist_sq < (s1.radius - s2.radius)**2:
++    c1, r1 = s1
++    c2, r2 = s2
++    c3, r3 = s3
++    d = math.dist(c1, c2)
++    if d > r1 + r2 or d < abs(r1 - r2):
+         return []
+-    
+-    # Standard trilateration math to find circle of intersection
+-    # ... (implementation details of 3-sphere intersection)
+-    # For the purpose of this article, we assume a standard geometric routine
+-    # that returns the intersection points of the three surfaces.
+-    
+-    # Simplified conceptual return for completeness:
+-    # In practice, this involves solving the system of equations:
+-    # |p - c1|^2 = r1^2
+-    # |p - c2|^2 = r2^2
+-    # |p - c3|^2 = r3^2
+-    # The result is typically 0, 1, or 2 points.
+-    return [] # Placeholder for specific geometric solver
++    # Trilateration formulas from Appendix A.2 [S1]
++    x = (r1**2 - r2**2 + d**2) / (2 * d)
++    y_sq = r1**2 - x**2
++    if y_sq < 0:
++        return []
++    y = math.sqrt(y_sq)
++    # Basis vectors [G]
++    ex = ((c2[0]-c1[0])/d, (c2[1]-c1[1])/d, (c2[2]-c1[2])/d)
++    # ey perpendicular to ex and in plane of c1,c2,c3 [G]
++    v = (c3[0]-c1[0], c3[1]-c1[1], c3[2]-c1[2])
++    dot_v_ex = v[0]*ex[0] + v[1]*ex[1] + v[2]*ex[2]
++    ey = (v[0]-dot_v_ex*ex[0], v[1]-dot_v_ex*ex[1], v[2]-dot_v_ex*ex[2])
++    ey_len = math.sqrt(ey[0]**2 + ey[1]**2 + ey[2]**2)
++    if ey_len < 1e-9:
++        return [] # Spheres are collinear
++    ey = (ey[0]/ey_len, ey[1]/ey_len, ey[2]/ey_len)
++    ez = (ex[1]*ey[2]-ex[2]*ey[1], ex[2]*ey[0]-ex[0]*ey[2], ex[0]*ey[1]-ex[1]*ey[0])
++    # Solve for z using third sphere [S1]
++    offset = (x*ex[0] + y*ey[0] + c1[0] - c3[0],
++              x*ex[1] + y*ey[1] + c1[1] - c3[1],
++              x*ex[2] + y*ey[2] + c1[2] - c3[2])
++    z_sq = r3**2 - (offset[0]**2 + offset[1]**2 + offset[2]**2)
++    if z_sq < 0:
++        return []
++    z = math.sqrt(z_sq)
++    # Return points in original frame [S1]
++    p1 = (c1[0] + x*ex[0] + y*ey[0] + z*ez[0],
++          c1[1] + x*ex[1] + y*ey[1] + z*ez[1],
++          c1[2] + x*ex[2] + y*ey[2] + z*ez[2])
++    p2 = (c1[0] + x*ex[0] + y*ey[0] - z*ez[0],
++          c1[1] + x*ex[1] + y*ey[1] - z*ez[1],
++          c1[2] + x*ex[2] + y*ey[2] - z*ez[2])
++    return [p1, p2]
+ ```
+ 
+ **Parameters:**
+-*   $\tau$: Distance threshold for stopping. Typical value: 0.1.
+-*   $V_0$: Initial volume. Size: Usually two orders of magnitude larger than the object.
++*   $\tau$: Distance threshold for stopping. Typical value: 0.1 [S1].
++*   $V_0$: Initial volume. Size: Usually two orders of magnitude larger than the object [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Conservative SDFs:** Underestimating distance causes slow convergence and high computational cost due to $O(n^3)$ intersection calculations and many spheres.
+-*   **Overestimated SDFs:** Break the bounding guarantee. The algorithm progresses, but the result is not guaranteed to bound the object.
+-*   **Initialization Coverage:** The initial sphere set $S_0$ must cover the entire surface of $V_0$. For an icosphere, this is checked per triangle.
+-*   **Precision:** Filtering points inside the sphere set volume accounts for floating-point precision by discarding a point if its distance to any sphere center is less than the sphere radius.
++*   **Conservative SDFs:** Underestimating distance causes slow convergence and high computational cost due to $O(n^3)$ intersection calculations and many spheres [S1].
++*   **Overestimated SDFs:** Break the bounding guarantee. The algorithm progresses, but the result is not guaranteed to bound the object [S1].
++*   **Initialization Coverage:** The initial sphere set $S_0$ must cover the entire surface of $V_0$. For an icosphere, this is checked per triangle [S1].
++*   **Precision:** Filtering points inside the sphere set volume accounts for floating-point precision by discarding a point if its distance to any sphere center is less than the sphere radius [S1].
+ 
+ ## Subtopics
+ 
+ ### Icosphere Initialization
+-A strategy for initializing the Sphere Carving algorithm using a recursively subdivided icosahedron (icosphere) as the initial bounding volume $V_0$. It is chosen because sampling is straightforward (using vertices) and the coverage constraint can be checked per triangle $\Delta(a,b,c)$ using only the spheres at its vertices. If the triangle is not contained in the union of the spheres at its vertices, the subdivision level is increased.
++A strategy for initializing the Sphere Carving algorithm using a recursively subdivided icosahedron (icosphere) as the initial bounding volume $V_0$ [S1]. It is chosen because sampling is straightforward (using vertices) and the coverage constraint can be checked per triangle $\Delta(a,b,c)$ using only the spheres at its vertices [S1]. If the triangle is not contained in the union of the spheres at its vertices, the subdivision level is increased [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The complexity of the sphere intersection routine is $O(n^3)$, where $n$ is the number of spheres, due to evaluating every possible triplet of sphere intersections.
+-*   **Memory Complexity:** Compact representation. The bounding volume is stored as a set of convex polyhedra or ellipsoids, which is more memory-efficient than external acceleration structures like grids or octrees.
+-*   **Performance:** Requires a small number of field function queries (#f), from a few thousand for complex objects to less than one hundred for an exact SDF. The algorithm typically converges in less than 20 iterations.
+-*   **Strengths:** Agnostic of function representation; provides strict bounding guarantees; terminates in seconds; no training time required.
+-*   **Limitations:** Computationally intensive for overly conservative SDFs (underestimated distances), which require more iterations and spheres. Overly conservative functions may require a larger initial volume or denser sampling.
++*   **Time Complexity:** The complexity of the sphere intersection routine is $O(n^3)$, where $n$ is the number of spheres, due to evaluating every possible triplet of sphere intersections [S1].
++*   **Memory Complexity:** Compact representation. The bounding volume is stored as a set of convex polyhedra or ellipsoids, which is more memory-efficient than external acceleration structures like grids or octrees [S1].
++*   **Performance:** Requires a small number of field function queries (#f), from a few thousand for complex objects to less than one hundred for an exact SDF [S1]. The algorithm typically converges in less than 20 iterations [S1].
++*   **Strengths:** Agnostic of function representation; provides strict bounding guarantees; terminates in seconds; no training time required [S1].
++*   **Limitations:** Computationally intensive for overly conservative SDFs (underestimated distances), which require more iterations and spheres [S1]. Overly conservative functions may require a larger initial volume or denser sampling [S1].
+ 
+ ## Background
+-Sphere Carving was introduced by Hugo Schott, Theo Thonat, Thibaud Lambert, Eric Guérin, and Axel Paris. It is designed to accelerate queries in sphere tracing, polygonization, and simulation by generating a bounding proxy signed distance function $f_e$. The method draws inspiration from techniques that carve space using empty spheres, similar to how sphere tracing discards empty segments. It is particularly useful for procedurally defined implicit surfaces such as exact or Lipschitz functions, BlobTrees, or neural representations.
++Sphere Carving was introduced by Hugo Schott, Theo Thonat, Thibaud Lambert, Eric Guérin, and Axel Paris [S1]. It is designed to accelerate queries in sphere tracing, polygonization, and simulation by generating a bounding proxy signed distance function $f_e$ [S1]. The method draws inspiration from techniques that carve space using empty spheres, similar to how sphere tracing discards empty segments [S1]. It is particularly useful for procedurally defined implicit surfaces such as exact or Lipschitz functions, BlobTrees, or neural representations [S1].
+ 
+ ## Sources

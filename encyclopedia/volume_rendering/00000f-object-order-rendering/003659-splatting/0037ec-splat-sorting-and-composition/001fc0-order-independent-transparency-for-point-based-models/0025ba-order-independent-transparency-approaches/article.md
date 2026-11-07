@@ -3,28 +3,32 @@
 Also called: Transparency Handling
 
 ## Overview
-Order Independent Transparency (OIT) approaches solve the problem of rendering translucent objects where the final color depends on the depth order of overlapping fragments, which standard rasterization does not preserve. Unlike sibling methods that rely on explicit sorting (e.g., [Improved Order Independent Transparency for Opaque Kernels](4562-improved-order-independent-transparency-for-opaque-kernels.md)) or depth peeling, these approaches aim to achieve correct compositing without the high computational cost of sorting or multiple render passes, often by using auxiliary buffers or weights to approximate the commutative nature of transparency blending.
+Order Independent Transparency (OIT) approaches solve the problem of correctly compositing translucent fragments in a scene without requiring explicit depth sorting, which is computationally expensive or impossible to perform efficiently on the GPU for arbitrary fragment counts [S1, unofficial]. Unlike standard alpha blending, which is order-dependent and produces incorrect results when fragments overlap in arbitrary orders, OIT methods approximate the correct compositing result in a single or multi-pass pipeline [S1, unofficial]. This family distinguishes itself from sibling methods like [Improved Order Independent Transparency for Opaque Kernels](4562-improved-order-independent-transparency-for-opaque-kernels.md) and [Weighted Blended Order-Independent Transparency](8931-weighted-blended-order-independent-transparency.md) by providing the theoretical framework and specific algorithmic variations (such as weight-based approximation or closest-sample separation) used to handle non-commutative transparency accumulation.
 
 ## Shared principles
-The core challenge addressed by all OIT approaches is that alpha compositing is not commutative; the order in which translucent layers are drawn affects the final pixel color. Standard rasterization overwrites pixels, losing depth information for fragments behind the current depth buffer value. OIT methods generally introduce a mechanism to either:
-1.  Store multiple fragments per pixel (e.g., linked lists, buffers) to sort or blend them later.
-2.  Use a weight or auxiliary value to estimate the contribution of occluded fragments, allowing a single-pass approximation.
+All methods in this family address the fundamental issue that alpha compositing is not commutative; a stack of translucent objects looks different based on the order in which they are drawn [S1, unofficial]. Standard hardware blending operations (e.g., `GL_BLEND`) assume a specific draw order and cannot handle arbitrary fragment overlaps correctly without sorting [S1, unofficial].
 
-All methods must handle the accumulation of color and opacity contributions from multiple samples or kernels that map to the same screen pixel. The fundamental equation for alpha compositing remains:
-$$ C_{out} = C_{in} \alpha_{in} + C_{src} (1 - \alpha_{in}) $$
-where $C_{out}$ is the output color, $C_{in}$ is the input (background) color, $C_{src}$ is the source color, and $\alpha$ is the opacity. OIT methods modify how $C_{src}$ and $\alpha_{src}$ are determined for the current fragment relative to all other fragments covering the same pixel.
+The core principle shared by these approaches is the modification of the rendering pipeline to either:
+1.  Approximate the correct order using weights or heuristics that make the blending operation effectively commutative or order-independent [S1, unofficial].
+2.  Separate the contribution of the closest fragment from the rest to mitigate aliasing and depth-fighting artifacts inherent in dense splatting [S1, unofficial].
+
+Common data structures include standard frame buffers (color and depth) and potentially additional accumulation buffers for weights or sums of transparency/color contributions [S1, unofficial]. The goal is to avoid the high cost of CPU-side sorting (e.g., ~150ms for 1M splats) or complex GPU-side sorting algorithms like Bitonic Sort, which may be too slow for real-time applications on certain hardware [S1, unofficial].
 
 ## Subtopics
 
 ### [Improved Order Independent Transparency for Opaque Kernels](4562-improved-order-independent-transparency-for-opaque-kernels.md)
-This method improves the rendering of opaque kernels by incorporating the contribution of the closest sample into the transparency accumulation, reducing transparency artifacts compared to standard Order Independent Transparency (OIT) while maintaining performance close to geometry instancing [4562-improved-order-independent-transparency-for-opaque-kernels]. It addresses the limitation of basic OIT, which fails to distinguish neighboring kernels in close-up views, by re-introducing depth information via the closest sample [4562-improved-order-independent-transparency-for-opaque-kernels].
+A variant that improves rendering of opaque kernels by explicitly incorporating the closest sample's contribution and using a weighted average for the rest. It solves transparency artifacts and aliasing in dense models while maintaining performance close to geometry instancing.
 
-### Weighted Blended Order-Independent Transparency
-A weight-based sorting OIT technique that reduces computational cost by performing sorting in a single pass without depth-based sorting, using weights in the translucency equation to estimate occlusion [S2]. The algorithm uses weights in the translucency equation running through the scene to estimate the occlusion for each depth as a function of the transparency of the rest of the objects considered [S2]. Rendering quality decreases in cases with close clusters of several transparent elements of different colors, and weight assignment requires expert adjustment for each scene [S2].
+### [Weighted Blended Order-Independent Transparency](8931-weighted-blended-order-independent-transparency.md)
+A weight-based sorting technique that reduces computational cost by performing sorting in a single pass without explicit depth-based sorting. It uses weights in the translucency equation to estimate occlusion, achieving single-pass performance at the expense of accuracy in complex scenes with clustered translucent elements.
 
 ## Background
-The problem of rendering translucent objects is described as "somewhat unsolved" in computer graphics because compositing is not commutative [S1, unofficial]. Early solutions included speculative transparency, which discards pixels based on random numbers to simulate translucency, resulting in a noisy, dithered look [S1, unofficial]. Another approach is the Painter's Algorithm, which pre-sorts all objects before rendering, but this can be expensive on the CPU for large datasets (e.g., ~150ms for 1M splats) [S1, unofficial]. Depth peeling, which renders top translucent objects and peels layers back, was noted as likely slow and difficult to implement [S1, unofficial]. Weighted Blended Order-Independent Transparency (WBOIT) was explored as a single-pass alternative using auxiliary buffers for weights, but it failed in experiments with high opacity splats [S1, unofficial]. The author of the primary source ultimately settled on CPU-side sorting in a web worker as a practical compromise, accepting lower frame rates for correctness [S1, unofficial].
+The problem of rendering translucent objects is described as "somewhat unsolved" in real-time computer graphics due to the non-commutative nature of compositing [S1, unofficial]. Early or simple solutions included:
+*   **Speculative Transparency:** Simulating translucency by randomly discarding pixels based on opacity, resulting in a noisy, dithered look [S1, unofficial].
+*   **Painter's Algorithm:** Pre-sorting all objects before rendering, which is expensive on the CPU for large datasets [S1, unofficial].
+*   **Depth Peeling:** A multi-pass technique that renders the top translucent layer, peels it off, and repeats, but is expected to be slow and difficult to implement efficiently [S1, unofficial].
+
+The specific OIT variants discussed here emerged as alternatives to these methods, particularly in the context of Gaussian Splatting and point-based rendering, where GPU-side sorting was deemed too slow or buggy on certain platforms (e.g., WebGL 2.0 on Safari with M1 chips) [S1, unofficial]. Weighted Blended OIT was noted as not working well in experiments with high-opacity splats, leading to the exploration of other variants like the Improved OIT for Opaque Kernels [S1, unofficial].
 
 ## Sources
 [S1] antimatter15/splat, https://github.com/antimatter15/splat, fetched 2026-10-27 (unofficial)
-[S2] Hybrid visualisation of medical image: Surface and volume rendering ..., https://www.sciencedirect.com/science/article/pii/S0097849325002948, fetched 2026-10-28

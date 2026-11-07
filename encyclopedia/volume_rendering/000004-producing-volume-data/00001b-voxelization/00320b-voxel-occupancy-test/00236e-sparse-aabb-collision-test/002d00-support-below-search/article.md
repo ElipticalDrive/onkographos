@@ -30,15 +30,15 @@ Support Below Search determines if a voxel position has structural support direc
 - `kMaxCollisionSupportSamples`: Constant `uint64_t` set to 32768, limiting the maximum number of samples to prevent infinite loops or excessive computation [S1, unofficial].
 
 **Steps:**
-1. Validate that the footprint AABB bounds are finite and `maxDrop >= 0.0f`. If invalid, return an empty result [S1, unofficial].
-2. Convert the footprint's X and Z bounds to voxel indices (`minX`, `maxX`, `minZ`, `maxZ`). Convert the Y bounds to voxel indices, calculating `startY` from the AABB and `endY = startY - maxDrop` [S1, unofficial].
-3. Check if `endY > startY` or if the total sample count would exceed `kMaxCollisionSupportSamples`. If so, return an empty result [S1, unofficial].
+1. Validate that the footprint AABB bounds are finite and `maxDrop >= 0.0f` [S1, unofficial]. If invalid, return an empty result [S1, unofficial].
+2. Convert the footprint's X and Z bounds to voxel indices (`minX`, `maxX`, `minZ`, `maxZ`) [S1, unofficial]. Convert the Y bounds to voxel indices, calculating `startY` from the AABB and `endY = startY - maxDrop` [S1, unofficial].
+3. Check if `endY > startY` or if the total sample count would exceed `kMaxCollisionSupportSamples` [S1, unofficial]. If so, return an empty result [S1, unofficial].
 4. Precompute per-column terrain height and relief for the XZ footprint [S1, unofficial].
-5. Iterate Y from `startY` down to `endY`. For each Y, iterate Z from `minZ` to `maxZ`, and X from `minX` to `maxX` [S1, unofficial].
+5. Iterate Y from `startY` down to `endY` [S1, unofficial]. For each Y, iterate Z from `minZ` to `maxZ`, and X from `minX` to `maxX` [S1, unofficial].
 6. Sample the voxel at `(x, y, z)` using `SampleWithColumn`, passing the precomputed column height and relief [S1, unofficial].
 7. Increment `result.sampledVoxels` [S1, unofficial].
 8. If `sample.status` is `KnownSolid`: increment `result.solidVoxels`, set `result.found = true`, record `supportX`, `supportY`, `supportZ`, `voxel`, and `fromEdit`, then return the result [S1, unofficial].
-9. If `sample.status` is `KnownLiquid`: increment `result.liquidVoxels`. If `liquidsSupport` is true, set `result.found = true`, record `supportX`, `supportY`, `supportZ`, `voxel`, and `fromEdit`, then return the result [S1, unofficial].
+9. If `sample.status` is `KnownLiquid`: increment `result.liquidVoxels` [S1, unofficial]. If `liquidsSupport` is true, set `result.found = true`, record `supportX`, `supportY`, `supportZ`, `voxel`, and `fromEdit`, then return the result [S1, unofficial].
 10. If `sample.status` is `UnknownBlocked`: set `result.found = true`, record `supportX`, `supportY`, `supportZ`, `voxel`, and `fromEdit`, then return the result [S1, unofficial].
 11. If the loop completes without finding support, return an empty result [S1, unofficial].
 
@@ -46,8 +46,6 @@ Support Below Search determines if a voxel position has structural support direc
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
 def support_below_search(footprint_aabb, max_drop, liquids_support):
     # 1. Validate inputs
     if not all(math.isfinite(v) for v in [footprint_aabb.min_x, footprint_aabb.max_x, footprint_aabb.min_y, footprint_aabb.max_y, footprint_aabb.min_z, footprint_aabb.max_z]) or max_drop < 0.0:
@@ -74,7 +72,6 @@ def support_below_search(footprint_aabb, max_drop, liquids_support):
         return {'found': False, 'sampledVoxels': 0, 'solidVoxels': 0, 'liquidVoxels': 0, 'supportX': 0, 'supportY': 0, 'supportZ': 0, 'voxel': None, 'fromEdit': False}
 
     # 4. Precompute column data
-    # Precompute per-column terrain height and relief for the XZ footprint [S1, unofficial]
     col_height = [0.0] * (span_x * span_z)
     col_relief = [0.0] * (span_x * span_z)
 
@@ -98,8 +95,7 @@ def support_below_search(footprint_aabb, max_drop, liquids_support):
                 idx = (x - min_x) + (z - min_z) * span_x
                 
                 # 6. Sample voxel
-                # Sample the voxel at (x, y, z) using SampleWithColumn, passing the precomputed column height and relief [S1, unofficial]
-                # Implementation not given in sources
+                # SampleWithColumn implementation not given in the sources [S1, unofficial]
                 sample = {'status': 'Unknown', 'voxel': None, 'from_edit': False}
                 result['sampledVoxels'] += 1
 
@@ -145,8 +141,8 @@ def support_below_search(footprint_aabb, max_drop, liquids_support):
 - Boundary precision uses `nextafter` implicitly via `TryBuildVoxelRange` [S1, unofficial].
 
 ## Operating characteristics
-**Time Complexity:** Not given in the sources.
-**Memory Complexity:** Not given in the sources.
+**Time Complexity:** Not given in the sources [S1, unofficial].
+**Memory Complexity:** Not given in the sources [S1, unofficial].
 **Strengths:** Efficiently finds the first support below a position; handles liquids and unknown blocks as configurable support types [S1, unofficial].
 **Limitations:** Limited by `kMaxCollisionSupportSamples` (32768); may miss support if the drop distance is too large or the footprint is too wide [S1, unofficial].
 **When to use:** When determining if an entity can stand on terrain below a specific position [G].

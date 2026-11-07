@@ -2,149 +2,166 @@
 Also called: CBARF (Cascaded Bundle-Adjusting Neural Radiance Fields), Cascaded BA
 
 ## Overview
-CBARF is a 3D reconstruction model that optimizes imperfect camera poses using a cascaded bundle-adjustment (BA) structure to progressively refine poses and rectify erroneous ones [S1]. It builds on [BARF](6872-barf-bundle-adjusting-neural-radiance-fields.md) by introducing a coarse-to-fine optimization strategy with distinct stages, allowing it to handle larger initial pose errors (e.g., 30.4° rotation deviation) where standard BARF may overfit or diverge [S1].
+CBARF is a 3D reconstruction model that optimizes imperfect camera poses using a cascaded bundle-adjustment (BA) structure to progressively refine poses and rectify erroneous ones [S1]. It addresses the problem of joint optimization divergence caused by large initial pose errors, which standard methods like [BARF](6872-barf-bundle-adjusting-neural-radiance-fields.md) may fail to resolve due to overfitting or local minima [S1]. By employing a coarse-to-fine scheduling strategy with distinct modulation factors, CBARF stabilizes the optimization landscape where nearest alternatives might converge incorrectly [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A set of images with imperfect camera poses $\hat{P}$, a NeRF backbone (typically BARF), and ground-truth images for photometric loss.
-*   **Outputs:** Refined camera poses $Q$, optimized NeRF parameters, and synthesized images.
+*   **Inputs:** A set of images with initial camera poses $P \in \mathbb{R}^{3 \times 4}$ (potentially noisy or incomplete), and a NeRF backbone (specifically the BARF network architecture) [S1].
+*   **Outputs:** Refined camera poses $Q \in \mathbb{R}^{3 \times 4}$ and a trained NeRF representation $\Theta$ [S1].
 
-**Data Structures:**
-*   **Camera Pose:** Represented as $P \in \mathbb{R}^{3 \times 4}$, defined as $P = [R_p \ t_p]$ where $R_p \in SO(3)$ and $t_p \in \mathbb{R}^3$ [S1]. The last row of the $4 \times 4$ transformation matrix is dropped [S1].
-*   **Lie Algebra Noise:** Perturbations are represented as $n \in \mathbb{R}^6$ from the Lie algebra $\mathfrak{se}(3)$ [S1].
+**Data Structures and Layout:**
+*   **Camera Pose:** Represented as $P = [R_p \ t_p] \in \mathbb{R}^{3 \times 4}$, where $R_p \in SO(3)$ and $t_p \in \mathbb{R}^3$ [S1]. The last row of the $4 \times 4$ transformation matrix is dropped [S1].
+*   **Lie Algebra Perturbation:** Noise and refinement parameters are represented as vectors $n, p \in \mathbb{R}^6$ in the Lie algebra $se(3)$ [S1].
+*   **Transform Matrix:** A 6D vector $v \in se(3)$ is transformed into a $3 \times 4$ matrix $M = [R_v \ t_v]$ [S1].
 
-**Optimization Steps:**
+**Parameters:**
+*   **Noise Coefficient:** $0.35$ for generating initial imperfect poses (compared to $0.15$ in BARF) [S1].
+*   **Modulation Factors:** $10.0$ (coarse stage), $3.0$ (recursive stage), $1.0$ (fine stage) [S1].
+*   **Iterations:** $20,000$ iterations per compact BA module for coarse and recursive stages; $200,000$ for the fine stage [S1].
+*   **Resolution:** $400 \times 400$ pixels during pose optimization (half of the standard $800 \times 800$ training resolution) [S1].
 
-1.  **Initialization with Noise:**
-    Simulate imperfect poses by adding noise to reference poses. Generate noise $n$ from a 6-dimensional normal distribution:
+**Algorithm Steps:**
+
+1.  **Initialization (Simulating Imperfect Poses):**
+    Generate noise $n \in se(3)$ from a 6-dimensional random normal distribution:
     $$ n = 0.35 \mathcal{N}(0, I) \in \mathbb{R}^6 $$
-    [S1]. This corresponds to an average rotation deviation of $30.4^\circ$ and translation deviation of $0.56$ [S1]. Transform $n$ into a transform matrix $N = [R_n \ t_n]$ and compose with the reference pose $P$ to get imperfect poses $\hat{P}$:
-    $$ \hat{P} = [R_p \ R_n \ t_p + t_n] $$
-    [S1].
+    Transform $n$ into a camera transform matrix $N = [R_n \ t_n]$ [S1]. Compose with the reference pose $P$ to create imperfect poses $\hat{P}$:
+    $$ \hat{P} = [R_p R_n \ t_p + t_n] $$
+    [S1]
 
-2.  **Cascaded BA Structure:**
-    Use a coarse-to-fine structure with compact BA modules, using BARF as the backbone [S1]. The process consists of three stages: Coarse, Recursive, and Fine [S1].
+2.  **Cascaded Optimization Structure:**
+    The method uses a coarse-to-fine structure consisting of compact BA modules. The BARF network serves as the backbone for each module [S1].
 
-3.  **Pose Refinement:**
-    In each stage, optimize camera refine parameters $p \in \mathfrak{se}(3)$. Convert $p$ to a transform matrix $P_r = [R_r \ t_r]$ and compose with the current imperfect pose $\hat{P}$ to obtain refined poses $Q$:
-    $$ Q = [R_p \ R_n \ R_r \ t_p + t_n + t_r] $$
-    [S1].
+3.  **Pose Refinement Loop (per stage):**
+    For each stage (coarse, recursive, fine):
+    a.  **Parameterization:** Optimize camera refine parameters $p \in se(3)$ [S1].
+    b.  **Transformation:** Convert $p$ into a camera transform matrix $P_r = [R_r \ t_r]$ [S1].
+    c.  **Composition:** Update the current pose estimate (initially $\hat{P}$, subsequently the output of the previous stage) to obtain refined poses $Q$:
+        $$ Q = [R_p R_n R_r \ t_p + t_n + t_r] $$
+        [S1]
+    d.  **Learning Rate Scheduling:** Calculate the learning rate using exponential interpolation with a stage-specific modulation factor $\alpha$. A larger $\alpha$ biases the learning rate towards the initial high value [S1].
+    e.  **Training:** Train the NeRF weights $\Theta$ and the refine parameters $p$ simultaneously using gradient descent [S1].
 
-4.  **Learning Rate Schedule:**
-    Use exponential interpolation with a modulation factor $\alpha$ to bias learning towards the initial high value [S1]. The modulation factors for the Coarse, Recursive, and Fine stages are $10.0$, $3.0$, and $1.0$ respectively [S1]. A factor of $1.0$ corresponds to the original exponential learning rate [S1].
+4.  **Handling Incomplete Poses:**
+    If camera poses are incomplete, randomly drop $10\%$ of poses to form a test set $F$. Assign an initial pose $P_{ini}$ to images in $F$. Jointly optimize poses for both the training set $T$ and test set $F$ [S1].
 
-5.  **Incomplete Poses Handling:**
-    For test sets with missing poses, randomly drop 10% of poses, assign an initial pose $P_{ini}$ to them, and jointly optimize poses for both training and test sets [S1].
-
-6.  **Evaluation Alignment:**
-    Use Procrustes analysis to align optimized poses with ground-truth before evaluation to remove global offset [S1].
+5.  **Evaluation Alignment:**
+    Apply Procrustes analysis to align the optimized poses with the ground-truth before evaluation to remove global coordinate system offsets [S1].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def cbarf_optimize(images, imperfect_poses, nerf_model, stages):
+def cbarf_optimize(images, initial_poses_P, num_stages=3):
     """
-    stages: list of dicts with keys 'iterations', 'modulation_factor', 'resolution'
+    CBARF Optimization Loop.
+    images: List of training images.
+    initial_poses_P: List of initial camera poses [R_p, t_p] in R^{3x4}.
+    num_stages: Number of cascaded BA stages (coarse, recursive, fine).
     """
-    current_poses = imperfect_poses
-    nerf_params = nerf_model.parameters()
     
-    for stage in stages:
-        iterations = stage['iterations']
-        alpha = stage['modulation_factor']
-        res = stage['resolution']
+    # Stage 1: Create imperfect poses by adding noise
+    # n ~ 0.35 * N(0, I) in R^6
+    noise_n = generate_se3_noise(scale=0.35, count=len(initial_poses_P))
+    
+    # Transform noise to matrix N = [R_n, t_n]
+    # Compose with P to get P_hat = [R_p*R_n, t_p + t_n]
+    imperfect_poses_P_hat = []
+    for P in initial_poses_P:
+        R_p, t_p = decompose_pose(P)
+        R_n, t_n = se3_to_matrix(noise_n[imperfect_poses_P_hat.index(P)])
+        R_new = matrix_multiply(R_p, R_n)
+        t_new = vector_add(t_p, t_n)
+        imperfect_poses_P_hat.append(compose_pose(R_new, t_new))
         
-        # Initialize optimizer for current stage
-        # Note: Specific optimizer details (e.g., Adam) are not specified in [S1]
-        optimizer = create_optimizer([nerf_params, current_poses])
+    current_poses = imperfect_poses_P_hat
+    
+    # Define stage parameters
+    # Coarse/Recursive: 20k iters, mod=10.0, Res=400x400
+    # Fine: 200k iters, mod=1.0, Res=400x400 (Note: source says 400x400 for all pose opt stages)
+    stage_configs = [
+        {"iters": 20000, "modulation": 10.0, "name": "coarse"},
+        {"iters": 20000, "modulation": 3.0, "name": "recursive"},
+        {"iters": 200000, "modulation": 1.0, "name": "fine"}
+    ]
+    
+    # Initialize NeRF backbone (BARF)
+    nerf = BARF_Backbone()
+    
+    for i, config in enumerate(stage_configs[:num_stages]):
+        # Initialize refine parameters p in se(3) to zero or small random
+        refine_params_p = [zeros_se3() for _ in current_poses]
         
-        for step in range(iterations):
-            # Calculate learning rate with modulation
-            lr = calculate_lr(step, iterations, alpha)
-            optimizer.set_lr(lr)
+        for step in range(config["iters"]):
+            # Calculate learning rate with modulation factor
+            lr = calculate_exponential_lr(step, config["modulation"])
             
-            # Sample rays at reduced resolution
-            rays = generate_rays(current_poses, width=res, height=res)
+            # Sample rays using current_poses
+            rays = generate_rays(images, current_poses, resolution=400)
             
-            # Render
-            rendered_colors = nerf_model(rays)
+            # Render and compute loss
+            rendered_colors = nerf.forward(rays, refine_params_p)
+            loss = photometric_loss(rendered_colors, images)
             
-            # Compute loss (MSE/LPIPS)
-            loss = compute_loss(rendered_colors, images)
+            # Compute gradients w.r.t nerf weights and refine_params_p
+            grad_nerf, grad_p = compute_gradients(loss, nerf, refine_params_p)
             
-            # Backpropagate
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
+            # Update parameters
+            nerf.update(grad_nerf, lr)
+            refine_params_p = update_se3_params(refine_params_p, grad_p, lr)
             
-            # Update poses via refinement parameters p in se(3)
-            # The specific update rule for p -> Pr -> Q is handled by the optimizer
-            # on the pose parameters, which are initialized as noise in se(3)
+        # After stage, compose refined poses
+        # Q = [R_p R_n R_r, t_p + t_n + t_r]
+        # Note: R_p, t_p, R_n, t_n are from the initial imperfect pose construction
+        # R_r, t_r come from the current refine_params_p
+        next_poses = []
+        for j, P_hat in enumerate(current_poses):
+            R_p_hat, t_p_hat = decompose_pose(P_hat)
+            R_r, t_r = se3_to_matrix(refine_params_p[j])
             
-        # After stage, current_poses are updated to Q
-        current_poses = refine_poses(current_poses)
+            R_final = matrix_multiply(R_p_hat, R_r)
+            t_final = vector_add(t_p_hat, t_r)
+            next_poses.append(compose_pose(R_final, t_final))
+            
+        current_poses = next_poses
         
-    return current_poses, nerf_model
+    # Final evaluation alignment
+    aligned_poses = procrustes_align(current_poses, ground_truth_poses)
+    return aligned_poses, nerf
 
-def calculate_lr(step, total_steps, modulation_factor):
-    """
-    Exponential interpolation with modulation factor.
-    If modulation_factor == 1.0, uses standard exponential decay.
-    """
-    # Standard exponential decay formula from BARF/NeRF literature [S1]
-    # Base learning rate is not specified in [S1], assumed to be standard NeRF value
-    base_lr = 0.0001 
-    decay = 0.95 # Example decay rate, not explicitly given in [S1]
-    
-    # Modulation factor biases the learning rate towards the initial value
-    # Formula: lr = base_lr * (decay ^ (step / total_steps * modulation_factor))
-    # Note: Exact formula for modulation is not explicitly written in [S1], 
-    # but described as "biasing learning towards the initial high value".
-    # Implementation detail [G]: Assuming standard exponential scaling with exponent scaled by alpha.
-    lr = base_lr * (decay ** (step / total_steps * modulation_factor))
-    return lr
+def generate_se3_noise(scale, count):
+    # Returns list of 6D vectors from N(0, I) scaled by scale
+    return [scale * random_normal_vector(6) for _ in range(count)]
 
-def refine_poses(poses):
-    """
-    Compose current poses with the learned refinement transform Pr.
-    poses: [R_p R_n t_p + t_n]
-    """
-    # Get the refinement parameters p from the optimizer state
-    p = get_refinement_params() # p in se(3)
-    
-    # Convert p to matrix Pr
-    Pr = se3_to_matrix(p) # R_r, t_r
-    
-    # Compose: Q = P * Pr
-    # Note: [S1] defines Q = [Rp Rn Rr tp + tn + tr]
-    # This implies right-multiplication by the refinement matrix if P is [R t]
-    # However, standard composition is T_new = T_old * T_refine
-    # We assume the optimizer updates the parameters such that the composition is handled correctly.
-    return compose_poses(poses, Pr)
+def se3_to_matrix(v):
+    # Converts 6D Lie algebra vector to 3x4 matrix [R, t]
+    # Implementation of exponential map from se(3) to SO(3) x R^3
+    # Not given in sources, assumed standard implementation [G]
+    pass
+
+def calculate_exponential_lr(step, modulation_factor):
+    # Exponential interpolation biased by modulation factor
+    # Standard exponential decay: lr = lr_init * decay^step
+    # Modulation factor biases towards initial high value
+    # Exact formula not provided, standard exponential decay with scaling [G]
+    pass
 ```
 
-**Parameters:**
-*   **Noise Coefficient:** $0.35$ for CBARF (vs $0.15$ in BARF) [S1].
-*   **Iterations:** $20,000$ for Coarse and Recursive stages; $200,000$ for Fine stage [S1].
-*   **Resolution:** $400 \times 400$ during pose optimization (half of $800 \times 800$ training resolution) [S1].
-*   **Modulation Factors:** $10.0$ (Coarse), $3.0$ (Recursive), $1.0$ (Fine) [S1].
-
 **Edge Cases and Pitfalls:**
-*   **Overfitting:** Standard BARF may overfit before completing optimization with large initial errors; CBARF mitigates this via cascaded stages [S1].
-*   **Coordinate Misalignment:** Optimized poses may have a global offset relative to ground truth; Procrustes analysis is required for evaluation [S1].
-*   **Incomplete Poses:** Randomly dropping 10% of poses requires joint optimization of training and test set poses [S1].
+*   **Overfitting:** Standard BA methods like BARF may overfit before completing optimization if the initial noise is large; CBARF mitigates this via the cascaded structure [S1].
+*   **Coordinate Misalignment:** Optimized poses may have a different coordinate system than the ground truth. Procrustes analysis is required for accurate evaluation [S1].
+*   **Incomplete Poses:** Randomly dropping poses requires joint optimization of training and test sets, using rendering quality as an indirect proxy for pose accuracy when ground truth is missing [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Higher than standard NeRF due to the cascaded structure and multiple optimization stages (Coarse, Recursive, Fine) [S1].
-*   **Memory Complexity:** Similar to BARF, as it uses the same backbone and reduces image resolution during optimization ($400 \times 400$) [S1].
-*   **Performance:** Successfully optimizes poses with $30.4^\circ$ rotation deviation, whereas BARF fails [S1]. Rendering quality is comparable to ground-truth poses [S1].
-*   **Strengths:** Handles large initial pose errors; robust to incomplete poses; rectifies erroneous poses via cascaded refinement [S1].
-*   **Limitations:** Requires careful tuning of modulation factors and iteration counts per stage; evaluation requires Procrustes alignment [S1].
+*   **Time Complexity:** The method is computationally intensive due to the cascaded structure. It requires $20,000$ iterations for coarse and recursive stages and $200,000$ for the fine stage per module [S1].
+*   **Memory Complexity:** Uses half resolution ($400 \times 400$) during pose optimization to improve efficiency, reducing memory footprint compared to full-resolution training [S1].
+*   **Performance:** Successfully optimizes camera poses with average deviations of $30.4^\circ$ in rotation and $0.56$ in translation (simulated via noise coefficient $0.35$), outperforming BARF which encounters overfitting under similar conditions [S1].
+*   **Strengths:** Effective at rectifying erroneous poses that standard BA cannot fix automatically; robust to large initial pose errors [S1].
+*   **Limitations:** Requires careful tuning of modulation factors and iteration counts; relies on the BARF backbone, inheriting its computational cost [S1].
 
 ## Background
-CBARF was proposed in 2024 by authors publishing in the IEEE Transactions on Multimedia [S1]. It extends the BARF method [S1] by addressing the limitation of standard bundle adjustment in handling large initial pose errors through a cascaded coarse-to-fine strategy.
+CBARF was proposed in the paper "CBARF: Cascaded Bundle-Adjusting Neural Radiance Fields From Imperfect Camera Poses" [S1]. It builds upon the BARF method [S1], addressing its limitations in handling large pose errors by introducing a cascaded bundle-adjustment structure. The method is used in 3D reconstruction tasks where accurate camera poses are not available or are corrupted, such as in scenarios with imperfect initialization or incomplete data [S1].
 
 ## Sources
 [S1] CBARF: Cascaded Bundle-Adjusting Neural Radiance Fields From Imperfect Camera Poses, https://doi.org/10.1109/tmm.2024.3388929, fetched 2026-10-26

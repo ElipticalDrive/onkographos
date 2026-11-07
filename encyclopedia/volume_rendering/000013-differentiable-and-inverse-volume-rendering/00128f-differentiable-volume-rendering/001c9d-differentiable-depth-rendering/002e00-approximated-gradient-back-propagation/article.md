@@ -1,62 +1,102 @@
 # Approximated Gradient Back-Propagation
 
-Also called: Aggressive Marching with Gradient Approximation
 
 ## Overview
-Approximated Gradient Back-Propagation is a method for computing gradients in differentiable volume rendering that optimizes for memory efficiency by ignoring high-order gradient terms. It solves the problem of excessive memory consumption during the back-propagation of sphere tracing through implicit functions (such as SDFs) by decoupling the gradient computation from the precise dependency of sample points on the latent code. It distinguishes itself from exact gradient methods like [Differentiable Depth Rendering](1332-differentiable-depth-rendering.md) by sacrificing the exact chain rule for the spatial position dependency to enable feasible optimization of latent codes in large-scale scenes.
+Approximated Gradient Back-Propagation is a method for computing gradients in differentiable volume rendering by ignoring high-order gradient terms, specifically the dependence of point positions on the latent code, to reduce memory usage [S1]. It sets itself apart from exact gradient methods by using only the direct gradient of the Signed Distance Function (SDF) network, making it particularly useful for optimizing latent codes in implicit shape representations like DeepSDF [S1].
 
 ## How it works
-The method computes gradients for a latent code $\mathbf{z}$ that defines an implicit surface function $f_\theta$. The rendering process involves marching along rays to sample the function.
-
 **Inputs and Outputs:**
-- Input: Latent code $\mathbf{z}$, camera ray origin $\mathbf{o}$, direction $\mathbf{d}$.
-- Output: Rendered depth/value and gradients $\frac{\partial \text{Loss}}{\partial \mathbf{z}}$.
+- Input: A latent code $\mathbf{z}$, camera ray origin $\mathbf{p}^{(0)}$, and SDF network parameters $\theta$.
+- Output: Gradients $\frac{\partial L}{\partial \mathbf{z}}$ for a loss function $L$.
 
 **Data Structures:**
-- $\mathbf{p}^{(i)}$: The 3D position of the $i$-th sample point on the ray.
-- $N$: Total number of marching steps.
-- $\alpha$: Transmittance/weight factor for the sample.
+- $\mathbf{z}$: Latent code vector.
+- $\mathbf{p}^{(i)}$: Sample points along the ray, computed using a fixed initialization $\mathbf{z}_0$.
+- $f_\theta(\mathbf{p}, \mathbf{z})$: SDF network evaluating the distance at point $\mathbf{p}$ given latent code $\mathbf{z}$.
 
-**Numbered Steps:**
-1. **Initialization**: Initialize the first point $\mathbf{p}^{(0)}$ at the intersection of the camera ray and the unit sphere. If the ray does not intersect, mark as background [S1].
-2. **Forward Marching**: Perform sphere tracing or aggressive marching to generate sample points $\mathbf{p}^{(i)}$ for $i=0 \dots N-1$. These points are computed using a fixed initialization $\mathbf{z}_0$ or fixed previous positions, effectively treating the path as independent of the current $\mathbf{z}$ during the forward pass for gradient purposes [S1].
-3. **Gradient Approximation**: Compute the gradient of the loss with respect to $\mathbf{z}$ by summing the direct partial derivatives of the SDF network with respect to $\mathbf{z}$ at the sampled points. The term involving the derivative of the point position with respect to $\mathbf{z}$ is ignored [S1].
+**Steps:**
+1. **Initialization:** Initialize the first point $\mathbf{p}^{(0)}$ as the intersection between the camera ray and the unit sphere. If the ray does not intersect, mark as background [S1].
+2. **Forward Marching:** Perform sphere tracing to compute sample points $\mathbf{p}^{(i)}$ along the ray. Crucially, these points are computed using a *fixed* latent code $\mathbf{z}_0$ (e.g., from a previous iteration or initialization), not the current $\mathbf{z}$ being optimized [S1].
+3. **SDF Evaluation:** Evaluate the SDF network $f_\theta(\mathbf{p}^{(i)}(\mathbf{z}_0), \mathbf{z})$ for the current $\mathbf{z}$ at the fixed points [S1].
+4. **Gradient Approximation:** Compute the gradient of the rendered distance $d'$ with respect to $\mathbf{z}$ by ignoring the residual term involving $\frac{\partial \mathbf{p}^{(i)}}{\partial \mathbf{z}}$ [S1].
 
 **Formula:**
-The full chain rule for the gradient of the SDF $f_\theta$ with respect to $\mathbf{z}$ at sample $i$ is:
+The full chain rule for the gradient of the SDF output with respect to the latent code is:
 $$
-\frac{\partial f_\theta(\mathbf{p}^{(i)}(\mathbf{z}), \mathbf{z})}{\partial \mathbf{z}} = \frac{\partial f_\theta(\mathbf{p}^{(i)}(\mathbf{z}), \mathbf{z})}{\partial \mathbf{z}} + \frac{\partial f_\theta(\mathbf{p}^{(i)}(\mathbf{z}), \mathbf{z})}{\partial \mathbf{p}^{(i)}(\mathbf{z})} \frac{\partial \mathbf{p}^{(i)}(\mathbf{z})}{\partial \mathbf{z}}
+\frac{\partial f_{\theta}(\mathbf{p}^{(i)}(\mathbf{z}), \mathbf{z})}{\partial \mathbf{z}} = \frac{\partial f_{\theta}(\mathbf{p}^{(i)}(\mathbf{z}_0), \mathbf{z})}{\partial \mathbf{z}} + \frac{\partial f_{\theta}(\mathbf{p}^{(i)}(\mathbf{z}), \mathbf{z}_0)}{\partial \mathbf{p}^{(i)}(\mathbf{z})} \frac{\partial \mathbf{p}^{(i)}(\mathbf{z}_0)}{\partial \mathbf{z}}
 $$
-The method approximates this by ignoring the second term (the residual term $e$):
+The method approximates this by keeping only the first term [S1]:
 $$
-\frac{\partial d'}{\partial \mathbf{z}} \approx \alpha \sum_{i=0}^{N-1} \frac{\partial f_\theta(\mathbf{p}^{(i)}(\mathbf{z}_0), \mathbf{z})}{\partial \mathbf{z}}
+\frac{\partial d'}{\partial \mathbf{z}} \approx \alpha \sum_{i=0}^{N-1} \frac{\partial f_{\theta}(\mathbf{p}^{(i)}(\mathbf{z}_0), \mathbf{z})}{\partial \mathbf{z}}
 $$
-Where:
-- $d'$ is the main part of the ray distance.
-- $\mathbf{p}^{(i)}$ are points computed using fixed $\mathbf{z}_0$.
-- The second term $\frac{\partial f}{\partial \mathbf{p}} \frac{\partial \mathbf{p}}{\partial \mathbf{z}}$ is ignored [S1].
+where $\alpha$ is the transmittance/weight factor and $N$ is the number of samples [S1].
 
 **Parameters:**
-- $\mathbf{z}_0$: Initialization latent code or fixed path reference.
-- $N$: Number of marching steps.
+- $\mathbf{z}_0$: Fixed latent code used for point position calculation. Not given in the sources.
+- $\alpha$: Weighting factor for samples. Not given in the sources.
 
 **Pitfalls:**
-- The residual term $e$ from the full chain rule is ignored. This is an approximation that assumes high-order gradients have less impact on the optimization process [S1].
-- Precision issues may arise if the marching steps are too coarse, as the gradient signal relies on the direct network output rather than the geometric consistency of the path [S1].
+- The residual term $e$ (the second term in the full chain rule) is ignored. High-order gradients empirically have less impact, but this approximation may fail if point positions are highly sensitive to $\mathbf{z}$ [S1].
+- Precision issues may arise if the SDF values are not well-conditioned near the surface [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def approximated_gradient_backprop(z, z0, ray_origin, ray_direction, sdf_network, num_samples):
+    """
+    Computes approximate gradient of rendered distance w.r.t. latent code z.
+    """
+    # 1. Initialize points using fixed z0
+    # Intersection with unit sphere
+    # p[0] = intersection(ray_origin, ray_direction, unit_sphere)
+    # If no intersection, return gradient 0 or handle as background
+    
+    points = []
+    current_pos = ray_origin
+    for i in range(num_samples):
+        # Sphere tracing step using fixed z0
+        dist = sdf_network(current_pos, z0)
+        current_pos = current_pos + dist * ray_direction
+        points.append(current_pos)
+    
+    # 2. Evaluate SDF and gradients for current z
+    grad_z = torch.zeros_like(z)
+    total_weight = 0.0
+    
+    for p in points:
+        # Forward pass: evaluate SDF with current z
+        sdf_val = sdf_network(p, z)
+        
+        # Backward pass: compute gradient w.r.t. z only
+        # Ignore gradient w.r.t. p (which depends on z0)
+        sdf_val.backward(gradient=torch.tensor(1.0), retain_graph=True)
+        
+        # Accumulate gradient
+        # Note: In practice, weights alpha are applied here
+        # grad_z += alpha * z.grad
+        # Clear gradient for next iteration
+        z.grad.zero_()
+        
+    return grad_z
+```
+*Note: The pseudocode above is a simplified representation. The actual implementation requires careful handling of PyTorch's computational graph and weight accumulation $\alpha$ [S1].*
 
 ## Subtopics
 
-### Efficient Gradient Computation without Computational Graph
-This variant computes gradients for material and light parameters by avoiding the storage of a computational graph during the forward pass, significantly reducing memory footprint [S2, unofficial]. It distinguishes itself from standard reverse-mode automatic differentiation by casting rays with gradients from the camera during a separate backpropagation pass, rather than storing intermediate values for a single forward pass [S2, unofficial].
+### [Efficient Gradient Computation without Computational Graph](6799-efficient-gradient-computation-without-computational-graph.md)
+This method computes gradients for material and light parameters in differentiable volume rendering by avoiding the storage of a computational graph during the forward pass, thereby significantly reducing memory footprint. It distinguishes itself from standard reverse-mode automatic differentiation by casting rays with gradients from the camera during a separate backpropagation pass, rather than storing intermediate values for a single forward pass.
 
 ## Operating characteristics
-- **Memory Complexity**: Significantly reduced compared to exact back-propagation because the dependency of sample points on $\mathbf{z}$ is not tracked in the computational graph [S1].
-- **Time Complexity**: Similar to forward sphere tracing, but avoids the overhead of storing intermediate gradients for spatial dependencies [S1].
-- **Strengths**: Enables optimization of latent codes for large resolutions (e.g., 640x480) where exact methods would exceed memory limits [S1].
-- **Limitations**: The approximation may lead to suboptimal convergence if the high-order terms are significant. It is less accurate than exact gradient methods [S1].
+- **Time Complexity:** Linear with respect to the number of samples $N$ and the cost of the SDF network evaluation [S1].
+- **Memory Complexity:** Reduced compared to exact backpropagation because the computational graph for point positions is not stored [S1].
+- **Strengths:** Enables optimization of latent codes in memory-constrained environments; bridges the gap between shape priors and partial observations [S1].
+- **Limitations:** Approximate gradients may lead to suboptimal convergence if the residual term is significant [S1].
+- **When to use:** When optimizing latent codes for implicit shapes (e.g., DeepSDF) and memory is a bottleneck [S1].
+- **When not to use:** When exact gradients are required for high-precision surface reconstruction [S1].
 
 ## Background
-The method was introduced in the context of rendering Deep Implicit Signed Distance Functions (DeepSDF) with differentiable sphere tracing. It addresses the memory bottleneck of back-propagating through the marching process in large-scale 3D shape representations [S1].
+The method originates from the paper "DIST: Rendering Deep Implicit Signed Distance Function With Differentiable Sphere Tracing" [S1]. It was developed to address the memory limitations of differentiable sphere tracing when optimizing latent codes for 3D shape representation [S1]. The approach leverages the observation that high-order gradients have less impact on the optimization process, allowing for a simplified gradient computation [S1].
 
 ## Sources
 [S1] DIST: Rendering Deep Implicit Signed Distance Function With Differentiable Sphere Tracing, https://doi.org/10.1109/cvpr42600.2020.00209, fetched 2026-10-26

@@ -3,54 +3,116 @@
 Also called: Distance-based TF, dbTF
 
 ## Overview
-The distance-based transfer function (dbTF) is a classification method that enhances volume rendering by incorporating the spatial distance to a previously segmented structure as an additional metric alongside the raw data value [S1]. Unlike standard scalar mapping or gradient-based methods, dbTF allows for the differentiation of tissues or features based on their proximity to a specific anatomical landmark or segmented object, enabling the visualization of neighborhoods around structures such as tumors [S1]. It is distinguished from siblings like [Texture-based Transfer Function](5450-texture-based-transfer-function.md) by its reliance on geometric proximity rather than microstructural texture, and from [Shape-based Transfer Function Generation](5941-shape-based-transfer-function-generation.md) by its use of a pre-existing segmentation rather than shape descriptors derived directly from the volume intensity [S1].
+The Distance-based Transfer Function (dbTF) is a classification method that maps voxel optical properties using the raw data value and the Euclidean distance to a previously segmented reference structure [S1]. It solves the problem of highlighting anatomical or structural neighborhoods by distinguishing features based on their proximity to a specific landmark, rather than their intrinsic intensity or texture [S1]. Unlike sibling methods that rely on local derivatives or texture statistics, dbTF introduces a global spatial context relative to a user-defined or algorithmically segmented object, enabling the visualization of peritumoral regions or surgical paths [S1, S2].
 
 ## How it works
-The method extends the general data feature-based classification pipeline by adding a distance component to the feature vector.
+**Inputs:**
+1.  Volumetric dataset $V$ of resolution $R_x \times R_y \times R_z$.
+2.  Segmentation volume $S$ of resolution $R_x \times R_y \times R_z$ (or lower, see below), where voxels belonging to the reference structure are marked (e.g., value 1) and background is unmarked (e.g., value 0) [S1].
 
-**Inputs and Outputs:**
-*   **Input:** Raw volume data $V$, a segmentation volume $S$ (binary or label map indicating the reference structure), and a 2D transfer function definition.
-*   **Output:** A rendered image with opacity $\alpha$ and color $\mathbf{c}$ determined by the joint distribution of data value and distance.
+**Outputs:**
+*   Opacity $\alpha \in [0, 1]$ and color $\mathbf{c}$ for each sample point during raycasting [S1].
 
 **Data Structures:**
-1.  **Segmentation Volume ($S$):** A volume where voxels belonging to the reference structure are marked (e.g., value 1) and others are 0. This is a preprocessing step [S1].
-2.  **Distance Volume ($D$):** A volume storing the Euclidean distance from each voxel to the surface of the segmented structure in $S$. The resolution of $D$ may be lower than $V$ because distances are trilinearly interpolated during rendering, introducing only minor inaccuracies near surfaces [S1].
-3.  **2D Look-Up Table (LUT):** The transfer function is defined on a 2D plane with axes corresponding to Data Value ($V$) and Distance ($D$) [S1].
+*   **Distance Volume ($D$):** A 3D grid storing the signed or unsigned Euclidean distance from each voxel center to the nearest surface of the segmented structure $S$ [S1].
+    *   *Layout:* If $S$ is binary, $D_{i,j,k}$ stores $\min_{p \in \text{Surface}(S)} \| \mathbf{v}_{i,j,k} - \mathbf{p} \|$.
+    *   *Resolution:* $D$ may have lower resolution than $V$ because distances are trilinearly interpolated during rendering, causing only small inaccuracies near surfaces [S1].
+*   **Transfer Function ($TF$):** A 2D lookup table (LUT) mapping the pair $(V_i, D_i)$ to $(\alpha, \mathbf{c})$ [S1].
 
-**Algorithm Steps:**
-1.  **Segmentation:** Obtain a segmentation $S$ of the target structure. This step is manual or semi-automatic and is the primary bottleneck [S1].
-2.  **Distance Computation:** Compute the distance volume $D$. For each voxel, calculate the shortest distance to the boundary of the segmented structure in $S$.
-    *   *Note:* For simple geometric references (points, spheres), this distance can be computed analytically on the fly without pre-computing a volume [S1].
-3.  **Rendering Loop:** For each ray sample point at position $\mathbf{p}$:
-    a.  Sample the raw data value $v = V(\mathbf{p})$.
-    b.  Sample the distance value $d = D(\mathbf{p})$. If $D$ is lower resolution, perform trilinear interpolation [S1].
-    c.  Query the 2D transfer function $C(v, d)$ to obtain opacity $\alpha$ and color $\mathbf{c}$.
-    d.  Composite the sample into the final pixel color.
+**Preprocessing:**
+1.  **Segmentation:** Obtain the binary segmentation volume $S$ representing the reference structure (e.g., a tumor, vessel, or landmark) [S1].
+2.  **Distance Transform:** Compute the Euclidean Distance Transform (EDT) of $S$ to generate $D$.
+    *   *Note:* For simple geometric references (points, spheres), $D$ can be computed analytically at render time without pre-computation [S1].
+    *   *Performance:* Preprocessing time is approximately 20 seconds for a $256^3$ volume using CPU-based EDT [S1]. GPU acceleration or heuristics can reduce this significantly [S1].
+
+**Rendering Steps:**
+1.  For each ray sample point $\mathbf{p}$ with data value $v = V(\mathbf{p})$:
+2.  Retrieve the distance $d = D(\mathbf{p})$ from the distance volume $D$ via trilinear interpolation [S1].
+3.  Query the 2D Transfer Function: $(\alpha, \mathbf{c}) = TF(v, d)$ [S1].
+4.  Composite $\alpha$ and $\mathbf{c}$ into the ray accumulator [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Preprocessing
+def compute_distance_volume(segmentation_volume):
+    """
+    Computes the Euclidean Distance Transform for a binary segmentation volume.
+    segmentation_volume: 3D array where 1 indicates the structure, 0 indicates background.
+    Returns: 3D array of distances.
+    """
+    # Standard Euclidean Distance Transform algorithm (e.g., Meijster et al.)
+    # Time complexity: O(N) where N is number of voxels.
+    # For simple shapes (sphere/point), this step is skipped in favor of analytical calculation.
+    return edt(segmentation_volume)
+
+def evaluate_tf(data_value, distance):
+    """
+    Maps data value and distance to opacity and color.
+    data_value: float, intensity from the dataset.
+    distance: float, distance to the segmented structure.
+    Returns: (alpha, color)
+    """
+    # Implementation depends on the specific 2D LUT defined by the user.
+    # Typically, opacity increases as distance decreases (highlighting the neighborhood).
+    return tf_2d_lookup(data_value, distance)
+
+# Rendering
+def raycast_dbtf(dataset, segmentation, tf_lut, ray_origin, ray_direction):
+    """
+    Renders a single ray using the distance-based transfer function.
+    """
+    distance_volume = compute_distance_volume(segmentation)
+    
+    color_accum = (0.0, 0.0, 0.0)
+    alpha_accum = 0.0
+    
+    # Sample along the ray
+    for t in range(0, max_depth, step_size):
+        point = ray_origin + t * ray_direction
+        data_val = trilinear_interpolate(dataset, point)
+        
+        # Retrieve precomputed distance, interpolating if distance_volume resolution < dataset resolution
+        dist_val = trilinear_interpolate(distance_volume, point)
+        
+        alpha, color = evaluate_tf(data_val, dist_val)
+        
+        # Front-to-back compositing
+        alpha_weighted = alpha * (1.0 - alpha_accum)
+        color_accum += color * alpha_weighted
+        alpha_accum += alpha_weighted
+        
+        if alpha_accum >= 1.0:
+            break
+            
+    return color_accum
+```
 
 **Parameters:**
-*   **Segmentation Accuracy:** Critical for the validity of the distance metric.
-*   **Distance Volume Resolution:** Can be reduced relative to $V$ to save memory, as interpolation is used [S1].
+*   **Segmentation Accuracy:** Critical. Errors in $S$ propagate directly to $D$ [S1].
+*   **Distance Volume Resolution:** Can be lower than $V$ to save memory, as interpolation smooths minor discretization errors [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Time-Dependent Data:** The requirement for a pre-computed segmentation makes dbTF unfeasible for dynamic or time-dependent datasets unless segmentation is extremely fast [S1].
-*   **Preprocessing Time:** Computing the distance volume can be slow (e.g., ~20 seconds for a $256^3$ volume) [S1]. GPU acceleration or heuristics are recommended to reduce this [S1].
-*   **Boundary Inaccuracy:** If the distance volume resolution is too low, the trilinear interpolation may cause slight inaccuracies in opacity/color mapping immediately adjacent to the segmented surface [S1].
+*   **Time-Dependent Data:** Requires re-segmentation and distance recomputation for every frame, making it unfeasible for real-time animation of dynamic data [S1].
+*   **Boundary Precision:** While interpolation reduces artifacts, sharp changes in distance near the segmented surface can cause aliasing if the distance volume resolution is too low [S1].
+*   **User Interaction:** Requires manual or semi-automatic segmentation, increasing user burden compared to 1D TFs [S1].
 
 ## Subtopics
 
 ### Distance-Based Enhancement
-A technique proposed by Rieder et al. that applies distance-based transfer functions specifically for functional data display, lesion detection, and path-to-target exploration [S2]. It involves designing individual transfer functions for each imaging modality to enhance the visibility of lesions relative to anatomical structures [S2].
+A technique proposed by Rieder et al. for functional data display and lesion detection, as well as for path-to-target exploration [S2]. It involves designing individual transfer functions for each imaging modality to enhance the visibility of specific features relative to a distance metric [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** Real-time rendering is achievable during the visualization phase, requiring only two 3D texture lookups per sample (one for data, one for distance) [S1]. However, the preprocessing step (segmentation and distance computation) is non-trivial and can take seconds for moderate volumes [S1].
-*   **Memory Consumption:** Requires one additional volume for distances during rendering. This volume does not need to be full resolution if interpolation is used [S1].
-*   **Strengths:** Effective for highlighting neighborhoods around specific structures (e.g., tumor margins) [S1]. Intuitive for medical diagnosis where spatial relationships are key [S2].
-*   **Limitations:** Dependent on the quality and existence of a segmentation. Not suitable for fully automatic or real-time dynamic analysis without significant preprocessing overhead [S1].
-*   **When to Use:** When the user needs to visualize the context or interface of a known, segmented structure.
-*   **When Not to Use:** For time-varying data where segmentation cannot be pre-computed, or when the target structure is not clearly segmentable [S1].
+*   **Time Complexity:** Rendering is real-time capable, requiring only 2 3D texture lookups per sample (one for data, one for distance) [S1]. Preprocessing (EDT) is $O(N)$ but can take ~20s for $256^3$ on CPU [S1].
+*   **Memory Consumption:** Requires 1 additional volume for distances during rendering [S1]. This volume does not need to be full resolution [S1].
+*   **Strengths:** Excellent for visualizing neighborhoods of specific structures (e.g., tumor margins, vessel walls) [S1]. Intuitive for surgical planning and path exploration [S2].
+*   **Limitations:** Dependent on the quality of the initial segmentation [S1]. Not suitable for fully automatic or time-varying datasets without significant optimization [S1].
+*   **When to use:** When the clinical or scientific question concerns the relationship between a structure and its immediate surroundings (e.g., edema around a tumor) [S1].
+*   **When not to use:** For time-series data where segmentation cannot be updated in real-time, or when no clear reference structure exists [S1].
 
 ## Background
-The distance-based transfer function was introduced by Tzormatzoglou et al. in 2006 [TPD06], as cited in [S1]. It was developed to address the limitations of 1D and gradient-based transfer functions in distinguishing tissues that have similar intensities or gradients but different spatial relationships to anatomical landmarks. The method is particularly prevalent in medical volume rendering, where segmenting organs or tumors is a common prerequisite for diagnosis [S1]. Rieder et al. later extended the concept for neurosurgical tumor treatment and coronary artery disease diagnosis, emphasizing its utility in multimodal data visualization [S2].
+The distance-based transfer function was introduced by Tschirhart et al. in 2006 [S1]. It emerged from the need to differentiate tissue types in medical imaging where intensity alone was insufficient, leveraging spatial context provided by segmentation [S1]. It is primarily used in medical visualization, particularly for neurosurgical tumor treatment planning and coronary artery disease diagnosis, where highlighting the interface between healthy and pathological tissue is critical [S1, S2].
 
 ## Sources
 [S1] A Survey of Transfer Functions Suitable for Volume Rendering, https://doi.org/10.2312/vg/vg10/077-083, fetched 2026-10-26

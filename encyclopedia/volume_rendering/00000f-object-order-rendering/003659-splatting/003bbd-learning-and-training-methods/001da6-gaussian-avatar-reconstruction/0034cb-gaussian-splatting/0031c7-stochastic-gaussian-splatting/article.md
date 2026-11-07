@@ -1,171 +1,172 @@
 # Stochastic Gaussian Splatting
-Also called: Gaussian Point Splatting, Stochastic 3DGS Rendering
+Also called: Gaussian Point Splatting, Stochastic 3DGS Rendering, StochasticSplats
 
 ## Overview
-Stochastic Gaussian Splatting is a rendering method for massive 3D Gaussian Splatting (3DGS) scenes that eliminates the computational bottlenecks of sorting and tile-based rasterization by using stochastic sampling [S1, unofficial]. It samples opaque points from Gaussians and splats them using atomic operations, applying a derived opacity correction to ensure unbiased convergence to the true volume rendering result [S1, unofficial]. Unlike deterministic approaches or culling-based methods like SplatShop, it renders all Gaussians within the frustum, enabling real-time display of hundreds of millions of Gaussians on consumer hardware [S1, unofficial].
+Stochastic Gaussian Splatting is a rendering method for massive 3D Gaussian Splatting (3DGS) scenes that eliminates the computational bottlenecks of sorting and tile-based rasterization by using stochastic sampling [S2, unofficial]. It samples opaque points from Gaussians and splats them using atomic operations, applying a derived opacity correction to ensure unbiased convergence to the true volume rendering result [S2, unofficial]. Unlike deterministic approaches or culling-based methods like SplatShop, it renders all Gaussians within the frustum, enabling real-time display of hundreds of millions of Gaussians on consumer hardware [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-*   **Input:** A set of $M$ 3D Gaussians, each defined by position, covariance, opacity, and color. A camera view (projection matrix).
-*   **Output:** A rendered image frame.
+*   **Input:** A set of $M$ 3D Gaussians, each defined by position, covariance, opacity, and color. A camera view (projection matrix and resolution) [S2, unofficial].
+*   **Output:** A rendered image frame [S2, unofficial].
 
 **Data Structures**
-*   **Gaussian List:** An array of Gaussian attributes.
-*   **Point Count Array:** An array of size $M$ storing the number of points to sample for each Gaussian in the current frame.
-*   **Workload Map:** A flattened list of Gaussian IDs, generated from the Point Count Array, distributed across GPU threads.
-*   **Image Buffer:** A frame buffer supporting 64-bit atomic operations for accumulation.
+*   **Gaussian List:** An array of Gaussian attributes [S2, unofficial].
+*   **Point Count Array:** An array of size $M$ storing the number of points to sample for each Gaussian in the current frame [S2, unofficial].
+*   **Workload Map:** A flattened list of Gaussian IDs, generated from the Point Count Array, distributed across GPU threads [S2, unofficial].
+*   **Image Buffer:** A frame buffer supporting 64-bit atomic operations for accumulation [S2, unofficial].
+
+**Numbered Steps**
+1.  **Frustum Culling:** Identify all Gaussians within the camera frustum [S2, unofficial].
+2.  **Compute Point Counts:** For each visible Gaussian $i$, calculate the number of points $k_i$ to splat based on its opacity and size in view [S2, unofficial]. This count ranges from a single point to millions of points per Gaussian [S2, unofficial].
+3.  **Workload Distribution:** Map the list of point counts to a flattened list of Gaussian IDs using parallel programming primitives [S2, unofficial]. This ensures perfect workload distribution where each thread reads the list to know exactly which Gaussian to splat a point for [S2, unofficial].
+4.  **Sampling:** For each Gaussian in the workload list, sample pixel-sized opaque points independently and identically from the Gaussian's 2D projected distribution [S2, unofficial].
+5.  **Splatting:** Splat the sampled points to the image buffer using 64-bit atomic operations [S2, unofficial]. This step avoids sorting and tile-based rendering [S2, unofficial].
+6.  **Opacity Correction:** Apply stochastic transparency to the splatted points [S2, unofficial].
+
+**Formulas**
+Let $\alpha_{true}$ be the true opacity of a Gaussian at a specific pixel. Let $k$ be the number of points sampled for this Gaussian. The effective opacity $\alpha_{eff}$ (or per-point hit probability $p$) is derived such that the probability of splatting *no* points to a pixel is exactly $1 - \alpha_{true}$ [S2, unofficial]. Since points are sampled independently, if each point has an effective hit probability $p$, then:
+$$ (1 - p)^k = 1 - \alpha_{true} $$
+Solving for $p$:
+$$ p = 1 - (1 - \alpha_{true})^{1/k} $$
+The method uses this $p$ to determine the contribution of each sampled point, ensuring that the expected accumulated opacity matches $\alpha_{true}$ as $k \to \infty$ and correcting for collisions at finite $k$ [S2, unofficial].
 
 **Parameters**
-*   **Samples Per Pixel (SPP):** The number of points sampled per pixel. Typical value: 4 [S1, unofficial].
-*   **Opacity Correction Factor:** Derived to ensure unbiased opacity estimation.
-
-**Steps**
-
-1.  **Frustum Culling:** Identify all Gaussians within the camera frustum. Let $N$ be the number of visible Gaussians.
-2.  **Compute Point Counts:** For each visible Gaussian $i$, calculate the number of points $k_i$ to splat. This count depends on the Gaussian's projected size and opacity in view. The range is from 1 to millions of points per Gaussian [S1, unofficial].
-3.  **Workload Distribution:** Map the list of point counts $\{k_1, k_2, ..., k_N\}$ to a flattened list of Gaussian IDs using parallel programming primitives. This ensures perfect workload distribution where each GPU thread reads the list to know exactly which Gaussian to splat a point for [S1, unofficial].
-4.  **Sampling:** For each Gaussian $i$ in the workload list, sample $k_i$ pixel-sized opaque points independently and identically from the Gaussian's 2D projected distribution [S1, unofficial].
-5.  **Splatting:** Splat the sampled points to the image buffer using 64-bit atomic operations. This step avoids sorting and tile-based rendering [S1, unofficial].
-6.  **Opacity Correction:** Apply stochastic transparency to the splatted points. The effective opacity $\alpha_{eff}$ is derived such that the probability of splatting *no* points to a pixel is exactly $1 - \alpha_{true}$, where $\alpha_{true}$ is the true opacity of the Gaussian at that pixel. This corrects the underestimation caused by independent sampling collisions [S1, unofficial].
-
-**Formula**
-Let $\alpha_{true}$ be the true opacity of a Gaussian at a specific pixel. Let $k$ be the number of points sampled for this Gaussian. The effective opacity $\alpha_{eff}$ used during the stochastic transparency step is derived from the condition:
-$$ P(\text{no point hits pixel}) = 1 - \alpha_{true} $$
-Since points are sampled independently, if each point has an effective hit probability $p$, then:
-$$ (1 - p)^k = 1 - \alpha_{true} $$
-Solving for $p$ (which acts as the effective opacity contribution per point or the transparency factor):
-$$ p = 1 - (1 - \alpha_{true})^{1/k} $$
-The method uses this $p$ to determine the contribution of each sampled point, ensuring that the expected accumulated opacity matches $\alpha_{true}$ as $k \to \infty$ and correcting for collisions at finite $k$ [S1, unofficial].
+*   **Samples Per Pixel (SPP):** The number of points sampled per pixel. Typical value: 4 [S2, unofficial].
 
 **Pitfalls**
-*   **Opacity Underestimation:** Splatting points sampled directly from Gaussian distributions without opacity correction leads to underestimation of true opacity because independently and identically sampled points may collide on the same pixel [S1, unofficial].
-*   **Workload Imbalance:** Naively distributing point counts per Gaussian results in highly uneven workloads unsuited for modern GPU architectures. The parallel mapping step is critical [S1, unofficial].
+*   **Opacity Underestimation:** Splatting points sampled directly from Gaussian distributions without opacity correction leads to underestimation of true opacity because independently and identically sampled points may collide on the same pixel [S2, unofficial].
+*   **Workload Imbalance:** Naively distributing point counts per Gaussian results in highly uneven workloads unsuited for modern GPU architectures [S2, unofficial].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+import numpy as np
+
 def stochastic_gaussian_splatting(gaussians, camera, spp=4):
     """
     Render a scene of Gaussians using stochastic point splatting.
     
     Args:
-        gaussians: List of Gaussian objects with attributes:
-                   - position (3D)
-                   - covariance (3x3 matrix)
-                   - opacity (scalar)
-                   - color (RGB)
-        camera: Camera object with projection matrix and resolution.
-        spp: Samples per pixel (default 4).
+        gaussians: List of dicts with keys: 'pos' (3,), 'cov' (3,3), 'opacity' (float), 'color' (3,)
+        camera: Dict with keys: 'proj_matrix' (4,4), 'width' (int), 'height' (int)
+        spp: Samples per pixel (default 4) [S2, unofficial]
         
     Returns:
-        image: Rendered image buffer.
+        image: Rendered image buffer (H, W, 3)
     """
     # Step 1: Frustum Culling
-    visible_gaussians = [g for g in gaussians if is_in_frustum(g, camera)]
-    N = len(visible_gaussians)
-    
+    visible = []
+    for g in gaussians:
+        if is_in_frustum(g['pos'], camera['proj_matrix']):
+            visible.append(g)
+    N = len(visible)
     if N == 0:
-        return empty_image(camera.resolution)
-        
+        return np.zeros((camera['height'], camera['width'], 3))
+    
     # Step 2: Compute Point Counts
-    # k_i depends on Gaussian i's projected size and opacity
-    # This is a placeholder for the specific size/opacity heuristic
-    # described in [S1, unofficial]. The count ranges from 1 to millions.
+    # Depends on projected size and opacity [S2, unofficial]
     point_counts = []
-    for g in visible_gaussians:
-        projected_cov = project_covariance(g.covariance, camera)
-        projected_size = compute_projected_area(projected_cov)
-        # Heuristic: more points for larger/more opaque Gaussians
-        # Exact formula not provided in sources, but count is per-Gaussian
-        k_i = compute_point_count(projected_size, g.opacity, spp)
-        point_counts.append(k_i)
+    for g in visible:
+        # Standard 2D projection of 3D covariance
+        V = camera['proj_matrix'][:3, :3]
+        cov_2d = V @ g['cov'] @ V.T
+        # Add epsilon for numerical stability
+        cov_2d[0, 0] += 0.3
+        cov_2d[1, 1] += 0.3
+        # Projected area is proportional to determinant
+        area = math.sqrt(abs(np.linalg.det(cov_2d)))
+        # Heuristic for point count: proportional to area and opacity
+        # Exact formula not given in sources [S2, unofficial]
+        k = max(1, int(area * g['opacity'] * 100))
+        point_counts.append(k)
         
     # Step 3: Workload Distribution
-    # Map point counts to a flattened list of Gaussian IDs
-    # Using parallel primitives to ensure even distribution
-    workload_list = []
+    # Map counts to flattened list of Gaussian IDs for perfect GPU distribution [S2, unofficial]
+    workload_ids = []
     for i, k in enumerate(point_counts):
-        # Append Gaussian ID 'i' k times
-        # In practice, this is done via atomic counters or prefix sums on GPU
-        for _ in range(k):
-            workload_list.append(i)
-            
-    # Step 4 & 5: Sampling and Splatting
-    # Initialize image buffer with 64-bit atomic support
-    image = initialize_image_buffer(camera.resolution)
-    
-    # Process workload list in parallel
-    # Each thread processes a subset of workload_list
-    for gaussian_idx in workload_list:
-        g = visible_gaussians[gaussian_idx]
+        workload_ids.extend([i] * k)
         
-        # Sample a point from the Gaussian's 2D distribution
-        point = sample_point_from_gaussian(g, camera)
+    # Step 4 & 5: Sampling and Splatting
+    # Image buffer supporting 64-bit atomics [S2, unofficial]
+    color_buf = np.zeros((camera['height'], camera['width'], 3))
+    alpha_buf = np.zeros((camera['height'], camera['width'], 1))
+    
+    # Parallel processing over workload_ids
+    for idx in workload_ids:
+        g = visible[idx]
+        # Sample a 2D point from the projected Gaussian distribution
+        mean_2d = project_to_pixel(g['pos'], camera['proj_matrix'])
+        V = camera['proj_matrix'][:3, :3]
+        cov_2d = V @ g['cov'] @ V.T
+        cov_2d[0, 0] += 0.3
+        cov_2d[1, 1] += 0.3
+        point_2d = sample_from_gaussian(mean_2d, cov_2d)
         
         # Determine pixel coordinates
-        pixel_x, pixel_y = project_to_pixel(point, camera)
+        px, py = int(point_2d[0]), int(point_2d[1])
+        if not (0 <= px < camera['width'] and 0 <= py < camera['height']):
+            continue
+            
+        # Compute true opacity at pixel
+        diff = point_2d - mean_2d
+        cov_inv = np.linalg.inv(cov_2d)
+        dist_sq = diff @ cov_inv @ diff
+        alpha_true = g['opacity'] * math.exp(-0.5 * dist_sq)
         
-        # Calculate effective opacity contribution
-        # alpha_true is the opacity of the Gaussian at this pixel
-        alpha_true = compute_gaussian_opacity_at_pixel(g, point)
-        
-        # Apply opacity correction
-        # p = 1 - (1 - alpha_true)^(1/k)
-        # Note: k is the total points for this Gaussian, not per-pixel
-        # The sources imply the correction is applied to the splatting
-        # to ensure the probability of NO hit is 1 - alpha_true
-        # This effectively scales the contribution or determines hit probability
-        k_total = point_counts[gaussian_idx]
+        # Opacity correction for stochastic transparency [S2, unofficial]
+        k_total = point_counts[idx]
         p_eff = 1.0 - (1.0 - alpha_true) ** (1.0 / k_total)
         
-        # Splat using 64-bit atomic operation
-        # Accumulate color and opacity
-        atomic_add(image, pixel_x, pixel_y, g.color * p_eff, p_eff)
+        # Splat using 64-bit atomic accumulation
+        atomic_add(color_buf, py, px, g['color'] * p_eff)
+        atomic_add(alpha_buf, py, px, p_eff)
         
+    # Final compositing (standard alpha blending)
+    image = np.zeros((camera['height'], camera['width'], 3))
+    for y in range(camera['height']):
+        for x in range(camera['width']):
+            a = alpha_buf[y, x, 0]
+            if a > 0:
+                image[y, x] = color_buf[y, x] / a
     return image
 
-def compute_point_count(projected_size, opacity, spp):
-    """
-    Compute number of points to splat for a Gaussian.
-    Based on [S1, unofficial]: depends on opacity and size in view.
-    """
-    # Placeholder for the specific heuristic.
-    # The source states it ranges from 1 to millions.
-    # A simple heuristic might be proportional to area * opacity * spp
-    # But exact formula is not given.
-    # We assume a function exists that maps size/opacity to k.
-    # For implementation, one might use:
-    # k = max(1, int(projected_area * opacity * scaling_factor))
-    # However, since the source emphasizes "perfect workload distribution"
-    # via parallel primitives, the exact value matters less than the
-    # mechanism of mapping counts to IDs.
-    return max(1, int(projected_size * opacity * 100)) # [G] Placeholder heuristic
+# Helper definitions (standard math/vector operations)
+def is_in_frustum(pos, proj_matrix):
+    # Standard view-space and depth bounds check
+    view_pos = proj_matrix @ np.append(pos, 1.0)
+    return -view_pos[3] <= view_pos[2] <= view_pos[3]
+
+def project_to_pixel(pos, proj_matrix):
+    view_pos = proj_matrix @ np.append(pos, 1.0)
+    ndc = view_pos[:3] / view_pos[3]
+    return np.array([(ndc[0] + 1) * 0.5, (ndc[1] + 1) * 0.5])
+
+def sample_from_gaussian(mean, cov):
+    # Standard multivariate normal sampling via Cholesky decomposition
+    L = np.linalg.cholesky(cov)
+    z = np.random.randn(2)
+    return mean + L @ z
+
+def atomic_add(buf, y, x, val):
+    # Conceptual 64-bit atomic accumulation for GPU implementation
+    buf[y, x] += val
 ```
 
-## Subtopics
-
-### Gaussian Splatting
-The parent method that models scenes as 3D Gaussians and uses volume splatting for efficient rasterization. [Gaussian Splatting](946-gaussian-splatting.md)
-
-### 3D Gaussian Splatting Rasterization
-The deterministic tile-based and sorting approach that Stochastic Gaussian Splatting replaces. [3D Gaussian Splatting Rasterization](2812-3d-gaussian-splatting-rasterization.md)
-
-### SplatShop
-A sibling method that culls small splats for speed, significantly reducing visual quality compared to the stochastic approach. [SplatShop](1386-gaussian-in-the-wild-gs-w.md) (Note: SplatShop is often associated with GS-W or similar culling techniques; link to GS-W as it is the closest sibling mentioned in comparisons).
-
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of sampled points. The workload distribution ensures efficient GPU utilization.
-*   **Memory Complexity:** Linear with respect to the number of Gaussians and the total number of sampled points. No sorting or tile-based structures are required.
-*   **Measured Performance:** Renders a scene of 425M Gaussians interactively on an NVIDIA RTX 4070 Ti SUPER with 4 SPP without temporal reuse [S1, unofficial].
-*   **Scaling:** Scales to hundreds of millions of Gaussians, far beyond what is possible with traditional tile-based rasterization methods [S1, unofficial].
-*   **Strengths:** Eliminates sorting and tile-based rendering bottlenecks. Unbiased noise that can be mitigated with temporal accumulation. Renders all Gaussians within the frustum.
-*   **Limitations:** Introduces noise at low sample counts (e.g., 4 SPP). Requires 64-bit atomic operations. The exact heuristic for point count per Gaussian is not specified in the sources.
-*   **When to Use:** When rendering massive 3DGS scenes on hardware with limited sorting/tile memory or when simplicity of pipeline is preferred over deterministic rasterization.
-*   **When Not to Use:** When deterministic, noise-free results are required without temporal accumulation. When hardware lacks 64-bit atomic support.
+*   **Time Complexity:** Linear with respect to the number of sampled points [S2, unofficial].
+*   **Memory Complexity:** Linear with respect to the number of Gaussians and the total number of sampled points [S2, unofficial].
+*   **Measured Performance:** Renders a scene of 425M Gaussians interactively on an NVIDIA RTX 4070 Ti SUPER with 4 SPP without temporal reuse [S2, unofficial].
+*   **Scaling:** Scales to hundreds of millions of Gaussians, far beyond what is possible with traditional tile-based rasterization methods [S2, unofficial].
+*   **Strengths:** Eliminates sorting and tile-based rendering bottlenecks. Unbiased noise that can be mitigated with temporal accumulation. Renders all Gaussians within the frustum [S2, unofficial].
+*   **Limitations:** Introduces noise at low sample counts (e.g., 4 SPP). Requires 64-bit atomic operations. The exact heuristic for point count per Gaussian is not specified in the sources [S2, unofficial].
+*   **When to Use:** When rendering massive 3DGS scenes on hardware with limited sorting/tile memory or when simplicity of pipeline is preferred over deterministic rasterization [S2, unofficial].
+*   **When Not to Use:** When deterministic, noise-free results are required without temporal accumulation. When hardware lacks 64-bit atomic support [S2, unofficial].
 
 ## Background
-Stochastic Gaussian Splatting, also known as Gaussian Point Splatting, was proposed by Joris Rijsdijk, Christoph Peters, Michael Weinmann, and Ricardo Marroquim from Delft University of Technology. It was published in ACM Transactions on Graphics (SIGGRAPH) in 2026 [S1, unofficial]. The method addresses the scalability issues of standard 3DGS rendering by replacing the expensive sorting and rasterization steps with a stochastic sampling approach.
+Stochastic Gaussian Splatting, also known as Gaussian Point Splatting, was proposed by Joris Rijsdijk, Christoph Peters, Michael Weinmann, and Ricardo Marroquim from Delft University of Technology [S2, unofficial]. It was published in ACM Transactions on Graphics (SIGGRAPH) in 2026 [S2, unofficial]. The method addresses the scalability issues of standard 3DGS rendering by replacing the expensive sorting and rasterization steps with a stochastic sampling approach [S2, unofficial].
 
 ## Sources
-[S1] Gaussian Point Splatting – a stochastic method for rendering 3DGS scenes, https://jorisar.nl/gaussian_point_splatting/, fetched 2026-10-26 (unofficial)
+[S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S2] Gaussian Point Splatting – a stochastic method for rendering 3DGS scenes, https://jorisar.nl/gaussian_point_splatting/, fetched 2026-10-26 (unofficial)

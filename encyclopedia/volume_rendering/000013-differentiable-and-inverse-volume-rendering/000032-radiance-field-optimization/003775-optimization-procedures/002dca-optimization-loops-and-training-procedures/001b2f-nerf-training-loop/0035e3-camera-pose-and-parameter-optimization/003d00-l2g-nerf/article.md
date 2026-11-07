@@ -3,72 +3,57 @@
 Also called: Local-to-Global Registration for Bundle-Adjusting Neural Radiance Fields
 
 ## Overview
-L2G-NeRF is a bundle-adjusting method that jointly optimizes neural 3D representations and camera poses by combining a local photometric alignment objective with a global geometric alignment objective [S1]. It solves the problem of recovering camera poses from poor initialization (e.g., identity matrices) where standard parametric methods diverge and non-parametric methods violate geometric constraints [S1]. Unlike its sibling [BARF](6872-barf-bundle-adjusting-neural-radiance-fields.md), which optimizes global poses directly, L2G-NeRF uses a differentiable local-to-global registration process that is more robust to large initial misalignments [S1].
+L2G-NeRF is a bundle-adjusting method that jointly optimizes neural 3D representations and camera poses by combining a local photometric alignment objective with a global geometric alignment objective [S1]. It differs from purely parametric methods (like BARF) by using a local-to-global process that is more robust to poor initialization, and from purely non-parametric methods by enforcing global geometric constraints via differentiable solvers [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A set of $M$ images $\{I_i\}_{i=1}^M$, initial camera poses $\{T_i\}_{i=1}^M$ (typically identity), and query pixel coordinates $\{x_j\}_{j=1}^N$.
-*   **Outputs:** Optimized neural field parameters $\Theta$, optimized global camera poses $\{T^*_i\}_{i=1}^M$, and local transformation fields.
+*   **Inputs:** A set of $M$ images $\{I_i\}_{i=1}^M$, initial camera poses (typically identity $T_i=I$), and neural field parameters $\Theta$.
+*   **Outputs:** Optimized neural field parameters $\Theta$, global camera poses $\{T_i\}_{i=1}^M$, and local transformation fields $\{T_{ji}\}$.
 
 **Data Structures:**
 1.  **Neural Field MLP ($f_R$):**
-    *   Input: 3D coordinate $z \in \mathbb{R}^3$ (or 2D for image alignment).
-    *   Output: 4D vector $[c; \sigma] \in \mathbb{R}^4$ (RGB color $c$ and volume density $\sigma$) for 3D NeRF, or 3D vector for 2D images [S1].
+    *   Input: 3D coordinate $x \in \mathbb{R}^3$ (for 3D NeRF) or 2D coordinate (for 2D alignment).
+    *   Output: 4D vector $[c; \sigma]$ (RGB color and volume density) for 3D NeRF, or 3D vector for 2D images [S1].
+    *   Parameters: $\Theta$ [S1].
 2.  **Warp Neural Field MLP ($f_W$):**
-    *   Input: 2D coordinate $x \in \mathbb{R}^2$ and frame-dependent embedding $\ell_i \in \mathbb{R}^k$.
-    *   Output: Lie algebra vector (se(2) or sl(3)) representing the local transformation generator [S1].
-3.  **Camera Pose ($T_i$):**
+    *   Input: 2D coordinate $x \in \mathbb{R}^2$ and frame-dependent embedding $\ell_i \in \mathbb{R}^d$.
+    *   Output: Lie algebra vector (se(2) or sl(3)) [S1].
+    *   Parameters: $\Phi$ [S1].
+3.  **Camera Pose:**
     *   Represented as $T = [R|t] \in SE(3)$, where $R \in SO(3)$ and $t \in \mathbb{R}^3$ [S1].
-    *   Rotation $R$ is parameterized via the exponential map from the Lie algebra $\mathfrak{so}(3)$: $R = \exp(r)$, where $r \in \mathbb{R}^3$ is the axis-angle vector [S1].
+    *   Rotation $R$ is computed via exponential map from Lie algebra $\mathfrak{so}(3)$: $R = \exp(r)$ [S1].
 
 **Numbered Steps:**
 
 1.  **Initialization:**
-    *   Initialize all global camera poses to the identity transformation: $T_i = I \quad \forall i$ [S1].
-    *   Perturb initial poses to alter viewing directions and distances. Additive noise is sampled from normal distributions:
-        $$ r \sim \mathcal{N}(0, n_r I), \quad t \sim \mathcal{N}(0, n_t I) $$
-        where $n_r$ and $n_t$ are base noise multipliers [S1].
-    *   Apply perturbation via right multiplication to the identity matrix to generate the initial $T_i$ [S1].
+    *   Initialize all camera poses to identity: $T_i = I \quad \forall i$ [S1].
+    *   Perturb initial poses using right multiplication to alter viewing directions and distances [S1].
+    *   Additive noise is applied in the Lie algebra: $r \sim \mathcal{N}(0, n_r I)$ and $t \sim \mathcal{N}(0, n_t I)$ [S1].
+    *   Base noise multipliers $n_r$ and $n_t$ are scene-dependent (e.g., $n_r \in [0.01, 0.09]$, $n_t \in [0.3, 0.7]$) [S1].
 
-2.  **Local Alignment (Non-Parametric Stage):**
-    *   For each image $i$ and pixel $j$, predict a local transformation $T_{ji}$ using the warp neural field:
+2.  **Local Alignment (Non-parametric Stage):**
+    *   Predict a local transformation field $T_{ji}$ for each pixel $x_j$ of camera frame $i$ using the warp neural field [S1]:
         $$ T_{ji} = W(x_j; \ell_i, \Phi) = \exp(f_W(x_j; \ell_i, \Phi)) $$
-        where $\exp(\cdot)$ maps the Lie algebra output to the Lie group $SE(2)$ or $SE(3)$ [S1].
-    *   Render the image using the current neural field $\Theta$ and the local transformation $T_{ji}$:
-        $$ \hat{C}_{i,j} = R(T_{ji} x_j; \Theta) $$
-        For 3D NeRF, $R(x)$ is computed via volume rendering discretized at $K$ points along the ray [S1]:
-        $$ R(x) = \int_{z_{near}}^{z_{far}} T(x, z) \sigma(zx) c(zx) dz \approx g(y_1, \dots, y_K) $$
-        where $y_k = f_R(z_k x; \Theta)$ and $g$ is the differentiable compositing function [S1].
-    *   Compute the local photometric loss:
-        $$ L_{local} = \sum_{i=1}^M \sum_{j=1}^N \| R(T_{ji} x_j; \Theta) - I_i(x_j) \|^2 $$
-    *   Update $\Theta$, $\Phi$, and $\{\ell_i\}$ to minimize $L_{local}$ [S1].
+        where $\exp(\cdot)$ maps the Lie algebra output to the Lie group (SE(2) or SL(3) for 2D, SE(3) for 3D) [S1].
+    *   This stage optimizes standard photometric reconstruction errors individually for pixels [S1].
 
 3.  **Global Alignment (Parametric Stage):**
-    *   Solve for the global transformation $T^*_i$ for each frame $i$ by minimizing the alignment error between the local transformations $T_{ji}$ and the global transformation $T_i$:
+    *   Solve for the global transformation $T^*_i$ for frame $i$ by minimizing the alignment error between local and global transformations using a differentiable parameter estimation solver (Orthogonal Procrustes) [S1]:
         $$ T^*_i = \arg \min_{T_i} \sum_{j=1}^N \| T_{ji} x_j - T_i x_j \|^2 $$
-    *   This is an orthogonal Procrustes problem. The optimal rigid transformation $T^* = [R^*|t^*]$ is computed in closed form using SVD [S1]:
-        1.  Compute centroids: $\bar{x} = \frac{1}{N}\sum x_j$ and $\overline{Tx} = \frac{1}{N}\sum T_{ji} x_j$.
-        2.  Compute covariance matrix $H$:
-            $$ H = \sum_{j=1}^N (x_j - \bar{x})(T_{ji} x_j - \overline{Tx})^T $$
-        3.  Perform SVD: $H = U S V^T$.
-        4.  Compute rotation: $R^* = V U^T$.
-        5.  Compute translation: $t^* = -R^* \bar{x} + \overline{Tx}$ [S1].
+    *   The closed-form solution for the optimal rigid transformation $T=[R|t]$ is computed via SVD of the covariance matrix $H = \sum_{j=1}^N (x_j - \bar{x})(T_{ji} x_j - T\bar{x})^T = U S V^T$ [S1]:
+        $$ R = V U^T, \quad t = -R\bar{x} + \overline{T_{ji}x_j} $$
+        where $\bar{x}$ and $\overline{T_{ji}x_j}$ are centroids of the points [S1].
 
 4.  **Joint Optimization:**
-    *   Minimize the combined relaxed objective function:
+    *   Minimize the combined local and global objectives using gradient descent [S1]:
         $$ \min_{\{T_{ji}\}, \Theta} \sum_{i=1}^M \sum_{j=1}^N \| R(T_{ji} x_j; \Theta) - I_i(x_j) \|^2 + \lambda \sum_{i=1}^M \sum_{j=1}^N \| T_{ji} x_j - T^*_i x_j \|^2 $$
-        where $\lambda$ is the weighting factor for the global constraint [S1].
-    *   Gradients flow from the global alignment loss through the differentiable Procrustes solver back to the local transformations and neural field parameters [S1].
-    *   Update $\Theta$, $\Phi$, $\{\ell_i\}$, and $\{T^*_i\}$ (implicitly via $T_{ji}$ updates) [S1].
+    *   Here, $R(\cdot; \Theta)$ is the NeRF rendering function [S1].
+    *   The rendering color $R(x)$ at pixel $x$ is computed via volume rendering discretized with $K$ points:
+        $$ R(x) = g(y_1, ..., y_K), \quad y_k = f_R(z_k T x; \Theta) $$
+        where $z_k$ are depths sampled along the ray [S1].
 
-**Parameters:**
-*   $\lambda$: Weighting factor for the global constraint.
-    *   Synthetic/object-centric scenes: $1 \times 10^2$ [S1].
-    *   Forward-facing LLFF scenes: Float between $1 \times 10^2$ and $1 \times 10^5$ [S1].
-*   $n_r$: Base rotation noise multiplier. Scene-dependent, typically $0.01$ to $0.09$ [S1].
-*   $n_t$: Base translation noise multiplier. Scene-dependent, typically $0.3$ to $0.7$ [S1].
-*   $K$: Number of points sampled along a ray for volume rendering discretization [S1].
-*   Convergence Schedule: Linearly increase noise multipliers by a common factor $\{n_c\}_{c=2}^9$ starting from base $n_r, n_t$ [S1].
+5.  **Convergence Schedule:**
+    *   Linearly increase noise multipliers by a common factor $\{n_c\}_{c=2}^9$ starting from base $n_r=0.01, n_t=0.1$ [S1].
 
 **Pseudocode:**
 
@@ -76,236 +61,250 @@ L2G-NeRF is a bundle-adjusting method that jointly optimizes neural 3D represent
 
 ```python
 import numpy as np
+import torch
+import torch.nn as nn
 from scipy.linalg import svd
 
-def exponential_map_so3(r):
-    """
-    Maps axis-angle vector r in so(3) to rotation matrix R in SO(3).
-    Uses Rodrigues' formula.
-    """
-    theta = np.linalg.norm(r)
-    if theta < 1e-8:
-        return np.eye(3)
-    k = r / theta
-    K = np.array([[0, -k[2], k[1]],
-                  [k[2], 0, -k[0]],
-                  [-k[1], k[0], 0]])
-    R = np.eye(3) + np.sin(theta) * K + (1 - np.cos(theta)) * np.dot(K, K)
-    return R
+class WarpNeuralField(nn.Module):
+    """MLP mapping 2D coord + embedding to Lie algebra vector."""
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim)
+        )
+    def forward(self, x, embedding):
+        # x: (N, 2), embedding: (N, d)
+        input_vec = torch.cat([x, embedding], dim=-1)
+        return self.net(input_vec)
 
-def solve_procrustes(points_source, points_target):
+def exp_so3(v):
+    """Exponential map from so(3) to SO(3)."""
+    # Implementation of Rodrigues' formula or similar
+    # Returns 3x3 rotation matrix
+    pass
+
+def exp_se3(v):
+    """Exponential map from se(3) to SE(3)."""
+    # Returns 4x4 transformation matrix
+    pass
+
+def orthogonal_procrustes(points_source, points_target):
     """
-    Solves the orthogonal Procrustes problem:
-    min || points_target - (R @ points_source + t) ||^2
-    Returns R, t.
+    Solve for R, t minimizing ||R x + t - y||^2.
+    points_source: (N, 3), points_target: (N, 3)
+    Returns R (3x3), t (3,)
     """
-    # Centroids
-    mean_src = np.mean(points_source, axis=0)
-    mean_tgt = np.mean(points_target, axis=0)
+    # Compute centroids
+    mean_s = points_source.mean(dim=0)
+    mean_t = points_target.mean(dim=0)
     
-    # Centered points
-    src_centered = points_source - mean_src
-    tgt_centered = points_target - mean_tgt
+    # Center points
+    X = points_source - mean_s
+    Y = points_target - mean_t
     
-    # Covariance matrix H
-    H = np.dot(src_centered.T, tgt_centered)
+    # Covariance matrix
+    H = X.T @ Y
     
     # SVD
     U, S, Vt = svd(H)
     V = Vt.T
     
     # Rotation
-    R = np.dot(V, U.T)
+    R = V @ U.T
     
     # Check for reflection
-    if np.linalg.det(R) < 0:
+    if torch.det(R) < 0:
         V[:, -1] *= -1
-        R = np.dot(V, U.T)
+        R = V @ U.T
         
     # Translation
-    t = mean_tgt - np.dot(R, mean_src)
-    
+    t = mean_t - R @ mean_s
     return R, t
 
-def volume_render(ray_origins, ray_directions, nerf_mlp, z_near, z_far, K):
+def volume_rendering(f_R, ray_origins, ray_directions, z_near, z_far, K):
     """
-    Renders color using volume rendering.
+    Standard NeRF volume rendering.
+    f_R: Neural field MLP
+    Returns color (N, 3)
     """
-    # Sample points along ray
-    t_vals = np.linspace(z_near, z_far, K)
-    points = ray_origins[:, np.newaxis, :] + ray_directions[:, np.newaxis, :] * t_vals[:, np.newaxis, np.newaxis]
+    # Sample depths
+    t_vals = torch.linspace(z_near, z_far, K)
+    # Add noise for anti-aliasing (optional, standard in NeRF)
+    # ...
+    
+    # Compute 3D points
+    pts = ray_origins.unsqueeze(1) + ray_directions.unsqueeze(1) * t_vals.unsqueeze(2)
     
     # Query MLP
-    # points shape: (num_rays, K, 3)
-    # nerf_mlp expects (N, 3) -> (N, 4)
-    points_flat = points.reshape(-1, 3)
-    outputs = nerf_mlp(points_flat) # Returns [c, sigma]
-    outputs = outputs.reshape(-1, K, 4)
+    # f_R expects (N, 3)
+    # pts shape: (N, K, 3)
+    # Reshape for batched query
+    pts_flat = pts.reshape(-1, 3)
+    outputs = f_R(pts_flat) # (N*K, 4) -> [c, sigma]
+    c = outputs[:, :3].reshape(-1, K, 3)
+    sigma = outputs[:, 3:].reshape(-1, K, 1)
     
-    c = outputs[:, :, :3] # (num_rays, K, 3)
-    sigma = outputs[:, :, 3] # (num_rays, K)
-    
-    # Compute deltas
+    # Compute weights
     deltas = t_vals[1:] - t_vals[:-1]
-    delta_infinity = 1e10
-    deltas = np.concatenate([deltas, delta_infinity], axis=0) # (K,)
+    alpha = 1.0 - torch.exp(-sigma * deltas)
+    T = torch.cumprod(torch.exp(-sigma * deltas), dim=1)
+    T = torch.cat([torch.ones_like(T[:, :1]), T[:, :-1]], dim=1)
     
-    # Alpha
-    alpha = 1 - np.exp(-sigma * deltas)
-    
-    # Transmittance
-    T = np.exp(-np.cumsum(sigma * deltas, axis=1))
-    T = np.concatenate([np.ones_like(T[:, :1]), T[:, :-1]], axis=1)
-    
-    # Weight
     weights = alpha * T
-    
-    # Composite
-    color = np.sum(weights[:, :, np.newaxis] * c, axis=1)
+    color = torch.sum(weights * c, dim=1)
     return color
 
-def l2g_nerf_step(images, initial_poses, nerf_mlp, warp_mlp, embeddings, lambda_global, K, z_near, z_far):
+def l2g_nerf_step(images, f_R, f_W, embeddings, poses, lambda_global, K, z_near, z_far):
     """
-    One iteration of L2G-NeRF optimization.
+    One step of L2G-NeRF optimization.
+    images: (M, H, W, 3)
+    poses: (M, 4, 4) initial poses
+    Returns: loss, updated poses, updated f_R, updated f_W
     """
-    M = len(images)
-    N = images[0].shape[0] * images[0].shape[1] # Number of pixels
+    M, H, W, _ = images.shape
+    N = H * W
     
-    # 1. Local Alignment: Predict local transformations
-    local_transforms = [] # List of M matrices of shape (N, 3, 4) or similar
+    # 1. Local Alignment: Compute local transformations T_ji
+    # Reshape images to pixels
+    img_pixels = images.reshape(M, N, 3)
+    
+    # Expand embeddings for each pixel
+    # embeddings: (M, d) -> (M, N, d)
+    emb_expanded = embeddings.unsqueeze(1).expand(-1, N, -1)
+    
+    # Pixel coords (u, v)
+    u, v = torch.meshgrid(torch.arange(W), torch.arange(H), indexing='ij')
+    x_coords = torch.stack([u.flatten(), v.flatten()], dim=-1).float() # (N, 2)
+    x_coords_expanded = x_coords.unsqueeze(0).expand(M, -1, -1) # (M, N, 2)
+    
+    # Get Lie algebra outputs from Warp Field
+    # f_W: (M, N, 2+d) -> (M, N, 6) for se(3) or similar
+    lie_algebra_outputs = f_W(x_coords_expanded, emb_expanded)
+    
+    # Exponentiate to get local transformations T_ji
+    # Note: For 3D NeRF, T_ji should be SE(3). 
+    # The source mentions se(2)/sl(3) for 2D, but for 3D NeRF bundle adjustment, 
+    # it implies local SE(3) perturbations or similar. 
+    # Assuming standard SE(3) exponential map for 3D case.
+    T_local = torch.zeros(M, N, 4, 4)
     for i in range(M):
-        # Get pixel coordinates x_j for image i
-        x_coords = get_pixel_coordinates(images[i]) # Shape (N, 2)
-        
-        # Predict Lie algebra vector from warp field
-        # f_W(x, l_i) -> r (3D vector for so(3) or 2D for so(2))
-        # Assuming 3D NeRF, output is 3D axis-angle
-        r_local = warp_mlp(x_coords, embeddings[i]) # Shape (N, 3)
-        
-        # Exponential map to SE(3)
-        # T_ji = [R_ji | t_ji]
-        # For local alignment in NeRF context, usually we treat T_ji as a perturbation
-        # or full transformation. The paper defines T_ji = W(x; l, Phi).
-        # If W outputs so(3), we get R. Translation is often assumed 0 or part of the field.
-        # Based on Eq 6 and 3, T_ji is the transformation applied to x_j.
-        # In 3D NeRF, x_j is homogeneous [u, v, 1].
-        
-        R_local = np.zeros((N, 3, 3))
-        t_local = np.zeros((N, 3))
-        
         for j in range(N):
-            R_local[j] = exponential_map_so3(r_local[j])
-            # Assuming local translation is zero or handled by the global T*
-            # The paper says T_ji = W(...). If W outputs se(3), it has 6 params.
-            # Note: The paper mentions se(2) or sl(3) for 2D, and SE(3) for 3D.
-            # For 3D NeRF, T_ji is likely a rigid transform.
-            # Let's assume the warp field outputs the generator for the full SE(3) or just R.
-            # Given the Procrustes step minimizes || T_ji x - T* x ||, T_ji must be a full transform.
-            # If the warp field only outputs R, t is 0.
-            # We will assume t_local is 0 for the local field, and the global T* provides the translation.
-            # Or the warp field outputs 6 params.
-            # Let's assume the warp field outputs 6 params (3 for R, 3 for t) in se(3).
-            # Exponential map of se(3) to SE(3).
-            pass 
+            # Convert Lie algebra vector to 4x4 matrix then exp
+            # Simplified: assume helper exists
+            T_local[i, j] = exp_se3(lie_algebra_outputs[i, j])
             
-        # Simplified: Assume Warp outputs R (3 params) and t is 0.
-        # T_ji = [R_ji, 0]
-        local_transforms.append((R_local, t_local))
-
-    # 2. Render with Local Transforms
-    # For each image i, for each pixel j, ray is defined by T_ji
-    # Ray origin: t_ji (0)
-    # Ray direction: R_ji * d_world? 
-    # Actually, T_ji transforms the point x_j from camera to world?
-    # Eq 8: R(Tx; Theta). T transforms the query point.
-    # So we transform x_j by T_ji to get world coordinates, then render.
+    # 2. Global Alignment: Solve for T*_i using Procrustes
+    # We need to map local transformations to world coordinates to compare?
+    # The source defines T*_i minimizing ||T_ji x_j - T_i x_j||^2.
+    # This implies T_ji and T_i act on the same coordinate system (camera view space?).
+    # In NeRF, x_j is pixel coordinate. T_ji transforms x_j.
+    # We treat T_ji x_j as points in a common space.
     
+    # Extract points from local transformations
+    # T_ji is 4x4. x_j is 3D (homogeneous [u, v, 1]).
+    # x_homo = (M, N, 3)
+    x_homo = torch.cat([x_coords_expanded, torch.ones(M, N, 1)], dim=-1)
+    
+    # Apply T_local to x_homo
+    # T_local: (M, N, 4, 4), x_homo: (M, N, 3, 1)
+    # Result: (M, N, 4, 1) -> take first 3 rows
+    points_local = torch.matmul(T_local, x_homo.unsqueeze(-1)).squeeze(-1)[..., :3]
+    
+    # Solve Procrustes for each image i
+    T_global = torch.zeros(M, 4, 4)
+    for i in range(M):
+        R_i, t_i = orthogonal_procrustes(points_local[i], points_local[i]) # Source says argmin ||T_ji x - T_i x||
+        # Note: The source formulation T*_i = argmin ||T_ji x_j - T_i x_j||^2 
+        # suggests T_i is the global transform that best fits the local transforms T_ji.
+        # Since T_ji are already transformations, we are finding a rigid body T_i 
+        # that best approximates the set of local transformations T_ji.
+        # However, Procrustes usually aligns point sets. 
+        # Here, the "points" are the transformed coordinates T_ji x_j.
+        # We want T_i such that T_i x_j approximates T_ji x_j.
+        # So source points are x_j, target points are T_ji x_j.
+        R_i, t_i = orthogonal_procrustes(x_homo[i][..., :3], points_local[i])
+        
+        T_global[i, :3, :3] = R_i
+        T_global[i, :3, 3] = t_i
+        T_global[i, 3, 3] = 1
+        
+    # 3. Joint Optimization Loss
+    # Render images using current global poses T_global
+    # Ray generation from T_global
+    # ... (Standard ray gen)
+    
+    # Render colors
     rendered_colors = []
     for i in range(M):
-        R_local, t_local = local_transforms[i]
-        x_coords = get_pixel_coordinates(images[i]) # (N, 2)
-        x_hom = np.hstack([x_coords, np.ones((N, 1))]) # (N, 3)
+        # Generate rays for image i using T_global[i]
+        # ...
+        # Render
+        c = volume_rendering(f_R, rays_o, rays_d, z_near, z_far, K)
+        rendered_colors.append(c)
         
-        # Transform points to world space
-        # P_world = R_local @ x_hom.T + t_local.T
-        # This gives 3D points. We need rays.
-        # In NeRF, rays are defined by origin and direction.
-        # If T_ji is the camera-to-world transform for pixel j:
-        # Origin = t_ji
-        # Direction = R_ji @ [0, 0, -1] (assuming camera looks down -z)
-        
-        origins = t_local # (N, 3)
-        directions = np.zeros((N, 3))
-        for j in range(N):
-            directions[j] = R_local[j] @ np.array([0, 0, -1])
-            
-        colors = volume_render(origins, directions, nerf_mlp, z_near, z_far, K)
-        rendered_colors.append(colors)
-        
-    # 3. Compute Local Loss
-    local_loss = 0
-    for i in range(M):
-        diff = rendered_colors[i] - images[i].reshape(-1, 3)
-        local_loss += np.sum(diff ** 2)
-        
-    # 4. Global Alignment: Solve Procrustes
-    global_poses = []
-    for i in range(M):
-        R_local, t_local = local_transforms[i]
-        x_coords = get_pixel_coordinates(images[i])
-        x_hom = np.hstack([x_coords, np.ones((N, 1))])
-        
-        # Points in world space from local transforms
-        # P_local = R_local @ x_hom.T + t_local.T
-        points_local = np.zeros((N, 3))
-        for j in range(N):
-            points_local[j] = R_local[j] @ x_hom[j] + t_local[j]
-            
-        # Solve for T* that maps x_hom to points_local
-        # min || points_local - (R* @ x_hom.T + t*) ||
-        # This is Procrustes between x_hom and points_local
-        R_star, t_star = solve_procrustes(x_hom, points_local)
-        global_poses.append((R_star, t_star))
-        
-    # 5. Compute Global Loss
-    global_loss = 0
-    for i in range(M):
-        R_local, t_local = local_transforms[i]
-        R_star, t_star = global_poses[i]
-        x_coords = get_pixel_coordinates(images[i])
-        x_hom = np.hstack([x_coords, np.ones((N, 1))])
-        
-        # Apply Global Transform
-        points_global = np.zeros((N, 3))
-        for j in range(N):
-            points_global[j] = R_star @ x_hom[j] + t_star
-            
-        # Apply Local Transform
-        points_local = np.zeros((N, 3))
-        for j in range(N):
-            points_local[j] = R_local[j] @ x_hom[j] + t_local[j]
-            
-        diff = points_local - points_global
-        global_loss += np.sum(diff ** 2)
-        
-    total_loss = local_loss + lambda_global * global_loss
+    rendered_images = torch.stack(rendered_colors).reshape(M, H, W, 3)
     
-    # 6. Backpropagate
-    # Update nerf_mlp, warp_mlp, embeddings based on total_loss gradients
-    pass
+    # Local Photometric Loss
+    loss_photo = torch.mean((rendered_images - images) ** 2)
+    
+    # Global Geometric Loss
+    # || T_ji x_j - T*_i x_j ||^2
+    # T*_i x_j is just applying global pose to pixel coords
+    points_global = torch.matmul(T_global, x_homo.unsqueeze(-1)).squeeze(-1)[..., :3]
+    loss_geo = torch.mean((points_local - points_global) ** 2)
+    
+    total_loss = loss_photo + lambda_global * loss_geo
+    
+    # Backpropagate and update f_R, f_W, embeddings, and poses?
+    # The source says "optimize Theta and T_i". 
+    # In the L2G formulation, T_i (global) is solved analytically (Procrustes) 
+    # and then used as a constraint. The gradients flow from the global loss 
+    # to the local transformations T_ji (via the warp field) and to the NeRF.
+    # The global pose T_i itself might be updated via the Procrustes solution 
+    # directly or via gradient if treated as a parameter. 
+    # The source says "differentiable parameter estimation solvers... play a crucial role 
+    # in calculating the gradient flow from the global alignment to the local alignment."
+    # This implies T_i is updated via the solver, and gradients flow back to f_W and f_R.
+    
+    total_loss.backward()
+    
+    # Update parameters
+    # ...
+    
+    return total_loss, T_global, f_R, f_W
 ```
 
+**Parameters:**
+*   $\lambda$: Weighting factor for the global constraint term. Set to $1 \times 10^2$ for synthetic/object-centric scenes; floated between $1 \times 10^2$ and $1 \times 10^5$ for forward-facing LLFF scenes [S1].
+*   $n_r$: Base rotation noise multiplier. Scene-dependent values range from 0.01 to 0.09 [S1].
+*   $n_t$: Base translation noise multiplier. Scene-dependent values range from 0.3 to 0.7 [S1].
+*   $K$: Number of points sampled along a ray for discretizing the volume rendering integral [S1].
+*   $\Theta$: Parameters of the neural field $f_R$ [S1].
+*   $\Phi$: Parameters of the warp neural field $f_W$ [S1].
+*   $\ell_i$: Frame-dependent embedding for frame $i$ [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Poor Initialization:** Parametric methods fall into suboptimal solutions if poorly initialized [S1]. L2G-NeRF mitigates this via the local-to-global process [S1].
+*   **Large Displacements:** Non-parametric methods struggle with large displacements as alignments may not obey geometric constraints [S1].
+*   **Inward-Facing 360° Scenes:** L2G-NeRF fails to recover camera poses from identity transformation for inward-facing 360° scenes with large rotation displacements [S1].
+*   **High $\lambda$:** Large $\lambda$ ($1 \times 10^5$) improves geometric accuracy but reduces robustness, causing divergence on difficult scenes like Flower [S1].
+*   **Divergence:** Removing the global alignment objective ($\lambda=0$) causes divergence to suboptimal poses and ghosting artifacts [S1].
+
 ## Operating characteristics
-*   **Time Complexity:** More efficient than global registration methods like BARF because gradients are computed with respect to local poses, which are smaller in dimensionality or structure [S1].
-*   **Memory Complexity:** Requires storing the warp neural field parameters $\Phi$ and embeddings $\ell_i$ in addition to the NeRF parameters $\Theta$ [S1].
-*   **Measured Performance:** On an NVIDIA GeForce RTX 2080 Ti, L2G-NeRF takes ~4.5 hours for synthetic objects and ~8 hours for real-world scenes, compared to ~8 and ~10.5 hours for BARF [S1].
-*   **Strengths:** Robust to poor initialization; tolerates larger noise perturbations before divergence ($n_c=8$ vs $n_c=4$ for BARF) [S1]. Combines the flexibility of non-parametric methods with the geometric consistency of parametric methods [S1].
-*   **Limitations:** Fails to recover camera poses from identity transformation for inward-facing 360° scenes with large rotation displacements [S1]. Large $\lambda$ ($1 \times 10^5$) improves geometric accuracy but reduces robustness, potentially causing divergence on complex scenes like "Flower" [S1].
-*   **When to use:** When camera poses are unknown or poorly initialized, and the scene is not a full 360° inward-facing capture.
-*   **When not to use:** For 360° inward-facing scenes with large initial rotation errors, or when computational resources are extremely limited and ground-truth poses are available.
+*   **Time Complexity:** Training time on NVIDIA GeForce RTX 2080 Ti is ~4.5 hours for synthetic objects and ~8 hours for real-world scenes [S1]. This is comparable to reference NeRF and faster than BARF (~8 and ~10.5 hours respectively) [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** More robust to poor initialization than parametric methods (BARF); tolerates larger noise perturbations before divergence ($n_c=8$ vs $n_c=4$ for BARF) [S1]. Computes gradients w.r.t. local pose, which is more efficient than global pose [S1].
+*   **Limitations:** Fails on inward-facing 360° scenes with large rotations [S1]. Sensitive to $\lambda$; too high reduces robustness [S1].
+*   **When to use:** When camera poses are unknown or poorly initialized, and standard NeRF fails to converge. Suitable for synthetic and real-world forward-facing scenes [S1].
+*   **When not to use:** For inward-facing 360° scenes with large rotation displacements [S1].
 
 ## Background
-L2G-NeRF was proposed in 2023 by authors who contributed equally, with a corresponding author [S1]. It addresses the limitations of existing bundle-adjusting NeRF methods, which are susceptible to suboptimal solutions if poorly initialized [S1]. The method builds on the concept of photometric bundle adjustment and integrates ideas from SLAM and SfM, specifically using differentiable parameter estimation solvers (Procrustes analysis) to bridge local and global alignment [S1]. It is applicable to both 2D neural images and 3D Neural Radiance Fields [S1].
+L2G-NeRF was proposed in the paper "Local-to-Global Registration for Bundle-Adjusting Neural Radiance Fields" [S1]. It addresses the limitations of existing bundle-adjusting NeRF methods, which are susceptible to suboptimal solutions if poorly initialized (parametric) or unable to handle large displacements (non-parametric) [S1]. The method combines pixel-wise flexible alignment with frame-wise constrained parametric alignment [S1].
 
 ## Sources
 [S1] Local-to-Global Registration for Bundle-Adjusting Neural Radiance Fields, https://doi.org/10.1109/cvpr52729.2023.00799, fetched 2026-10-29

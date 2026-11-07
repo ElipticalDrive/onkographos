@@ -1,0 +1,228 @@
+--- v004.md
++++ v005.md
+@@ -1,32 +1,39 @@
+ # Neural Volume Rendering Training (MSE)
+ 
+-Also called: Neural Volume Rendering Training Setup
++Also called: Standard Neural Volume Rendering Training, Photometric MSE Training
+ 
+ ## Overview
+-This method defines the specific training configuration and data preprocessing pipeline for optimizing a neural implicit representation of a 3D volume, specifically applied to medical imaging data. It solves the problem of reconstructing high-fidelity volumetric data from downsampled or compressed inputs by minimizing the reconstruction error between the predicted volume and the ground truth. It sets itself apart from general radiance field training by focusing on dense 3D volumetric reconstruction (often using CNNs or INRs) rather than sparse ray-based rendering, and by employing specific patch-based sampling strategies to handle large medical scans.
++Neural Volume Rendering Training (MSE) is the foundational optimization procedure for training implicit neural radiance fields (NeRFs) by minimizing the Mean Squared Error (MSE) between rendered and ground-truth images. It solves the inverse problem of recovering a continuous volumetric scene representation from discrete 2D observations. It sets itself apart from sibling methods by relying exclusively on a simple pixel-wise L2 loss without additional geometric priors (like Eikonal regularization) or complex scheduling strategies, serving as the baseline for more advanced techniques [S1, S2].
+ 
+ ## How it works
+-The method optimizes a neural network to map spatial coordinates to voxel intensities, minimizing a loss function between the reconstructed volume and the original input.
++**Inputs and Outputs:**
++- **Inputs:** A set of $N$ training images $\{I_i\}_{i=1}^N$, each with known camera poses $P_i$ and intrinsics. A neural network $\mathcal{N}_\theta$ parameterized by weights $\theta$ that maps 3D coordinates $\mathbf{x}$ and viewing directions $\mathbf{d}$ to color $\mathbf{c}$ and volume density $\sigma$.
++- **Outputs:** Optimized network parameters $\theta^*$.
+ 
+-**Inputs and Outputs:**
+-- Input: A 3D volume $x$ (e.g., medical scan).
+-- Output: A reconstructed volume $y$ predicted by the neural network.
++**Data Structures:**
++- **Ray Batch:** A tensor of shape $(B, 3)$ for origins $\mathbf{o}$ and $(B, 3)$ for directions $\mathbf{d}$, where $B$ is the batch size.
++- **Sample Points:** For each ray, $K$ points are sampled along the ray segment $[t_n, t_f]$. These points are stored as a tensor of shape $(B, K, 3)$.
++- **Network Output:** For each sample point, the network outputs a 4D vector: density $\sigma \in \mathbb{R}$ and color $\mathbf{c} \in \mathbb{R}^3$.
+ 
+-**Data Structures and Preprocessing:**
+-1.  **Normalization:** The input volume $x$ is normalized by scaling voxel values to the range $[0, 1]$ [S1].
+-2.  **Patch Segmentation:** The volume is segmented into smaller cubic patches of size $64 \times 64 \times 64$ [S1].
+-3.  **High-Resolution (HR) Patch Selection:** A patch is classified as High-Resolution if it contains 70% or more non-zero voxels. One such HR patch is selected as the input for training [S1].
++**Numbered Steps:**
++1. **Ray Sampling:** For each training image, generate a ray for each pixel (or a random subset for efficiency). Sample $K$ points along each ray using uniform or stratified sampling within the near/far planes.
++2. **Forward Pass:** Query the neural network $\mathcal{N}_\theta$ at each sample point $\mathbf{x}_k$ with direction $\mathbf{d}$ to obtain $\sigma_k$ and $\mathbf{c}_k$.
++3. **Volume Rendering:** Compute the expected color $\hat{C}(\mathbf{r})$ for each ray $\mathbf{r}$ using the differentiable volume rendering integral:
++   $$ \hat{C}(\mathbf{r}) = \sum_{k=1}^{K} T_k \left( 1 - \exp(-\sigma_k \delta_k) \right) \mathbf{c}_k $$
++   where $\delta_k$ is the distance between adjacent samples, and $T_k = \exp\left(-\sum_{j=1}^{k-1} \sigma_j \delta_j\right)$ is the accumulated transmittance.
++4. **Loss Computation:** Calculate the MSE loss between the rendered color $\hat{C}(\mathbf{r})$ and the ground-truth pixel color $C(\mathbf{r})$:
++   $$ \mathcal{L} = \frac{1}{N} \sum_{i=1}^{N} \| \hat{C}(\mathbf{r}_i) - C(\mathbf{r}_i) \|^2 $$
++5. **Backpropagation:** Compute gradients $\nabla_\theta \mathcal{L}$ using reverse-mode automatic differentiation.
++6. **Update:** Update parameters $\theta$ using an optimizer (typically Adam).
+ 
+-**Loss Function:**
+-The optimization minimizes the L1 loss between the reconstructed volume $y$ and the original volume $x$:
+-$$ \mathcal{L} = \| y - x \|_1 $$
+-where $y$ is the output of the neural network and $x$ is the ground truth [S1].
++**Parameters:**
++- **Number of Samples ($K$):** Typically 128–256 per ray [S1].
++- **Learning Rate:** Typically $10^{-4}$ to $5 \times 10^{-4}$ [S2].
++- **Batch Size:** Often 1–4 rays per iteration to manage memory [S1].
+ 
+-**Optimization Parameters:**
+-- Optimizer: Adam [S1].
+-- Learning Rate: $0.0015$ [S1].
+-- Training Duration: 5,000 epochs [S1].
+-- Hardware: NVIDIA A4000 16GB GPU with CUDA support [S1].
+-- Framework: PyTorch [S1].
++**Edge Cases and Pitfalls:**
++- **Precision:** Use float32 for stability; float64 may be needed for very large scenes but increases memory [G].
++- **Boundaries:** Ensure near/far planes tightly bound the scene to avoid sampling empty space, which wastes computation and can cause gradient vanishing [G].
++- **Degenerate Input:** If training images have inconsistent exposure or white balance, MSE loss may converge to a blurry average; preprocessing is required [G].
+ 
+ **Pseudocode:**
+@@ -34,80 +41,105 @@
+ import torch
+ import torch.nn as nn
+-import torch.optim as optim
+ 
+-def train_neural_volume_model(model, original_volume, device='cuda'):
++class NeuralVolumeRenderer(nn.Module):
++    def __init__(self, net):
++        super().__init__()
++        self.net = net  # Neural network taking (x, d) -> (sigma, color)
++
++    def forward(self, origins, directions, near, far, num_samples):
++        """
++        Renders images for a batch of rays.
++        origins: (B, 3)
++        directions: (B, 3)
++        near: (B,)
++        far: (B,)
++        num_samples: int
++        """
++        # 1. Sample points along rays
++        t_vals = torch.linspace(0., 1., num_samples, device=origins.device)
++        t_vals = t_vals.unsqueeze(0).expand(origins.shape[0], -1)
++        # Stratified sampling can be added here by jittering t_vals
++        t_samples = near.unsqueeze(1) + t_vals * (far.unsqueeze(1) - near.unsqueeze(1))
++        
++        # Interpolate 3D points
++        points = origins.unsqueeze(1) + directions.unsqueeze(1) * t_samples.unsqueeze(2)
++        points = points.reshape(-1, 3)
++        
++        # 2. Query network
++        # Repeat directions for each sample
++        dirs = directions.unsqueeze(1).expand(-1, num_samples, -1).reshape(-1, 3)
++        sigma, color = self.net(points, dirs)
++        
++        # 3. Volume Rendering
++        deltas = t_samples[:, 1:] - t_samples[:, :-1]
++        delta_inf = 1e10 * torch.ones_like(deltas[:, :1])
++        deltas = torch.cat([deltas, delta_inf], dim=1)
++        
++        # Alpha values
++        alpha = 1.0 - torch.exp(-sigma * deltas)
++        transmittance = torch.cumprod(torch.exp(-sigma * deltas), dim=1)
++        transmittance = torch.cat([torch.ones_like(transmittance[:, :1]), transmittance[:, :-1]], dim=1)
++        
++        # Weighted sum
++        weights = alpha * transmittance
++        rendered_color = torch.sum(weights.unsqueeze(2) * color.reshape(-1, num_samples, 3), dim=1)
++        
++        return rendered_color
++
++def train_step(model, optimizer, batch):
+     """
+-    Trains a neural network to reconstruct a 3D volume using L1 loss.
++    Single training step.
++    batch: dict with 'origins', 'directions', 'near', 'far', 'gt_colors'
++    """
++    optimizer.zero_grad()
+     
+-    Args:
+-        model: Neural network model (e.g., CNN or INR).
+-        original_volume: Ground truth 3D volume tensor.
+-        device: Device to run training on.
+-        
+-    Returns:
+-        Trained model.
+-    """
+-    # 1. Preprocessing: Normalize input to [0, 1]
+-    # Assuming original_volume is a tensor with raw voxel values
+-    min_val = original_volume.min()
+-    max_val = original_volume.max()
+-    normalized_volume = (original_volume - min_val) / (max_val - min_val)
++    # Forward pass
++    pred_colors = model(batch['origins'], batch['directions'], 
++                        batch['near'], batch['far'], 
++                        model.num_samples)
+     
+-    # 2. Preprocessing: Segment into patches and select HR patch
+-    # Note: The source describes selecting one HR patch. 
+-    # For a single-patch training example as described:
+-    patch_size = 64
+-    # Extract a patch (simplified; in practice, scan for HR patches)
+-    # Here we assume a specific patch is selected based on the 70% non-zero criterion
+-    # For implementation, one would iterate through patches and filter.
+-    # We assume 'selected_patch' is the tensor of the chosen HR patch.
+-    # selected_patch = select_hr_patch(normalized_volume, patch_size, threshold=0.7)
++    # Loss computation
++    gt_colors = batch['gt_colors']
++    loss = torch.mean((pred_colors - gt_colors) ** 2)
+     
+-    # Placeholder for the selected patch tensor
+-    input_patch = normalized_volume[..., :patch_size, :patch_size, :patch_size] 
++    # Backpropagation
++    loss.backward()
+     
+-    # 3. Initialize Optimizer
+-    optimizer = optim.Adam(model.parameters(), lr=0.0015)
++    # Update
++    optimizer.step()
+     
+-    # 4. Training Loop
+-    num_epochs = 5000
+-    for epoch in range(num_epochs):
+-        optimizer.zero_grad()
+-        
+-        # Forward pass: Reconstruct the volume/patch
+-        # The model takes coordinates or the downsampled input and outputs the reconstructed volume
+-        # Note: The source mentions a "3D Downsampling module" and "SR module".
+-        # If the model is an End-to-End architecture, the input might be the downsampled version.
+-        # However, the loss is defined on the reconstructed volume y vs original x.
+-        # Assuming the model takes the normalized input (or a downsampled version) and outputs y.
+-        reconstructed_patch = model(input_patch)
+-        
+-        # Loss Computation: L1 Loss
+-        loss = torch.nn.functional.l1_loss(reconstructed_patch, input_patch)
+-        
+-        # Backpropagation
+-        loss.backward()
+-        
+-        # Update
+-        optimizer.step()
+-        
+-    return model
++    return loss.item()
+ ```
+ 
+ ## Subtopics
+ 
+-### Neural Volume Rendering Training Setup
+-This variant refers to the specific experimental setup described in [S1], involving the normalization, patching, and specific hyperparameters (Adam, lr=0.0015, 5000 epochs) for medical volume reconstruction. It is distinguished by its focus on dense volumetric data (FLAIR 3D scans) and the use of L1 loss rather than photometric ray-based losses.
++### [Neural Surface Rendering Training (Eikonal & Boundary Regularization)](3430-neural-surface-rendering-training-eikonal-boundary-regulariz.md)
++Trains an SDF with geometric priors.
++
++### [Global Optimization](5436-global-optimization.md)
++Optimizes all pixels simultaneously.
++
++### [Neural Volume Rendering Training Setup](6559-neural-volume-rendering-training-setup.md)
++Details hyperparameters and hardware.
++
++### [Handpainted Reference Image Inversion](6686-handpainted-reference-image-inversion.md)
++Inverts hand-painted 2D edits.
++
++### [Coarse-to-fine Sparse Volume Training](6838-coarse-to-fine-sparse-volume-training.md)
++Refines sparse volumes with pruning.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not explicitly given, but training runs for 5,000 epochs [S1].
+-- **Memory Complexity:** Depends on the patch size ($64^3$) and the model architecture. The source mentions an NVIDIA A4000 16GB GPU [S1].
+-- **Strengths:** The patch-based approach allows handling large medical volumes (e.g., $155 \times 240 \times 240$) by breaking them into manageable chunks [S1]. Normalization and HR patch selection help focus computational resources on informative regions [S1].
+-- **Limitations:** The method relies on a fixed downsampling scale (1/2, 1/4, 1/8) which is set without consideration of final result quality, potentially limiting adaptability [S1].
+-- **When to use:** Suitable for medical volume reconstruction tasks where high-fidelity 3D data is required from compressed or downsampled inputs [S1].
++- **Time Complexity:** $O(N \cdot K \cdot D)$ per iteration, where $N$ is batch size, $K$ is samples per ray, and $D$ is network depth [S1].
++- **Memory Complexity:** $O(N \cdot K)$ to store intermediate gradients and activations [S1].
++- **Performance:** Converges slowly compared to methods with adaptive sampling or hierarchical structures. Requires many iterations (100k+) for high quality [S2].
++- **Strengths:** Simple to implement; robust to noise in ground truth due to L2 norm properties [G].
++- **Limitations:** Prone to overfitting to training views; struggles with high-frequency details without sufficient sampling [S1].
++- **When to Use:** Baseline training; scenes with smooth geometry and lighting.
++- **When Not to Use:** Scenes with high-frequency details or sparse views; use hierarchical or sparse variants instead.
+ 
+ ## Background
+-This method originates from research on end-to-end implicit neural representation architectures for medical volume data, specifically applied to FLAIR 3D scans [S1]. It addresses the challenges of processing large volumetric datasets by using normalization, patching, and specific neural network modules (Downsampling and Super-Resolution) [S1].
++Originated with the seminal NeRF paper by Mildenhall et al. (2020) [S1]. It established the standard pipeline for differentiable volume rendering. The MSE loss was chosen for its differentiability and simplicity, though it is known to produce blurry results compared to perceptual losses [S2].
+ 
+ ## Sources
+-[S1] An end-to-end implicit neural representation architecture for medical volume data., https://doi.org/10.1371/journal.pone.0314944, fetched 2026-10-26+[S1] Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R. and Ng, R., 2020. NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis. ECCV.
++[S2] Barron, J.T., Mildenhall, B., Tancik, M., Hedman, P., Martin-Brualla, R. and Srinivasan, P.P., 2021. Mip-NeRF: A Multiscale Representation for Anti-Aliasing Neural Radiance Fields. ICCV.

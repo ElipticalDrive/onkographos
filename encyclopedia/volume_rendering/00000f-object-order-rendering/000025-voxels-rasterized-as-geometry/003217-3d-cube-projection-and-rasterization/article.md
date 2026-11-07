@@ -1,0 +1,180 @@
+# 3D Cube Projection and Rasterization
+
+Also called: 3D Box Rasterization, 3D Cube Face Projection and Rasterization, Perspective Cube Drawing, Software 3D Cube Face Projection & Rasterization
+
+## Overview
+A software rendering technique that transforms the 8 corners of a 3D voxel box using sequential translation and rotation matrices, applies perspective projection to the 4 vertices of each visible face, checks visibility via z-coordinate culling, and rasterizes the face as a 2D filled polygon [S1, unofficial]. It differs from hardware-accelerated approaches by performing all matrix multiplications and polygon filling in software, typically using a library like Pygame, and relies on explicit face ordering (back-to-front) rather than a depth buffer for transparency [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `x, y, z`: World coordinates of the cube center.
+- `width, height, depth`: Dimensions of the cube along the X, Y, and Z axes.
+- `x_rad, y_rad, z_rad`: Rotation angles in radians around the X, Y, and Z axes (camera/view rotation).
+- `x_rad_translate, y_rad_translate, z_rad_translate`: Rotation angles in radians applied before translating to the world position (object orientation).
+- `window_width, window_height`: Screen dimensions in pixels.
+- `FOV`: Field of view scale factor.
+- `color`: Color of the face to be drawn.
+- `FAR`: Distance culling threshold.
+
+**Outputs:**
+- 2D screen coordinates for the vertices of visible faces, rendered as filled polygons.
+
+**Data Structures:**
+- Vertices are represented as 3D vectors $(x, y, z)$.
+- Faces are defined by 4 corner vertices in local object space relative to the cube center.
+- Rotation matrices are $3 \times 3$ matrices.
+
+**Steps:**
+
+1. **Distance Culling:** If the cube's position $(x, y, z)$ exceeds `FAR * VOXEL_WIDTH/HEIGHT/DEPTH`, return immediately without drawing [S1, unofficial].
+
+2. **Define Local Vertices:** For the specific face being drawn (e.g., front, back, top, bottom, left, right), define the 4 corner vertices in local object space relative to the cube center. For example, the front face corners are:
+   $$
+   V_1 = (-\frac{width}{2}, -\frac{height}{2}, -\frac{depth}{2}), \quad
+   V_2 = (\frac{width}{2}, -\frac{height}{2}, -\frac{depth}{2}), \quad
+   V_3 = (\frac{width}{2}, -\frac{height}{2}, \frac{depth}{2}), \quad
+   V_4 = (-\frac{width}{2}, -\frac{height}{2}, \frac{depth}{2})
+   $$
+   (Note: Specific coordinate signs depend on the face definition, e.g., back face uses $+depth/2$ for Z) [S1, unofficial].
+
+3. **Transform Each Vertex:** For each of the 4 vertices $V_i = (x_i, y_i, z_i)$, apply the following sequence of transformations to obtain world-space coordinates $(X_i, Y_i, Z_i)$:
+   
+   a. **Translate to Center:** Translate the vertex by half-dimensions to center the cube at the origin.
+   $$
+   P_{centered} = V_i + (\frac{width}{2}, \frac{height}{2}, \frac{depth}{2})
+   $$
+   *(Note: The source code applies this translation as a vector addition before rotation)* [S1, unofficial].
+
+   b. **Apply Translation Rotations:** Rotate $P_{centered}$ by $z_{rad\_translate}$, then $y_{rad\_translate}$, then $x_{rad\_translate}$.
+   $$
+   P_{rotated} = R_x(x_{rad\_translate}) \cdot R_y(y_{rad\_translate}) \cdot R_z(z_{rad\_translate}) \cdot P_{centered}
+   $$
+   *(Note: The source code applies these rotations in the order Z, then Y, then X, effectively multiplying the matrix from the right)* [S1, unofficial].
+
+   c. **Translate to World Position:** Translate the result by the cube's world position $(x, y, z)$.
+   $$
+   P_{world\_pos} = P_{rotated} + (x, y, z)
+   $$
+
+   d. **Apply View Rotations:** Rotate $P_{world\_pos}$ by $z_{rad}$, then $y_{rad}$, then $x_{rad}$.
+   $$
+   P_{final} = R_x(x_{rad}) \cdot R_y(y_{rad}) \cdot R_z(z_{rad}) \cdot P_{world\_pos}
+   $$
+   *(Note: The source code applies these rotations in the order Z, then Y, then X)* [S1, unofficial].
+
+   e. **Extract Coordinates:** Let $(X_i, Y_i, Z_i)$ be the components of $P_{final}$ [S1, unofficial].
+
+4. **Visibility Check:** Check if all 4 transformed vertices are in front of the camera. If $Z_1 > 0$ AND $Z_2 > 0$ AND $Z_3 > 0$ AND $Z_4 > 0$, the face is visible. Otherwise, skip drawing to avoid division by zero or incorrect projection [S1, unofficial].
+
+5. **Perspective Projection:** Project each vertex to 2D screen coordinates $(sx_i, sy_i)$:
+   $$
+   sx_i = \frac{X_i}{Z_i} \cdot \text{FOV} + \frac{\text{window\_width}}{2}
+   $$
+   $$
+   sy_i = \frac{Y_i}{Z_i} \cdot \text{FOV} + \frac{\text{window\_height}}{2}
+   $$
+   where $i \in \{1, 2, 3, 4\}$ [S1, unofficial].
+
+6. **Rasterization:** Draw the projected quadrilateral as a filled polygon using the screen coordinates $(sx_1, sy_1), \dots, (sx_4, sy_4)$ and the specified color [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def rotate_z(v, theta):
+    c, s = math.cos(theta), math.sin(theta)
+    return (v[0]*c - v[1]*s, v[0]*s + v[1]*c, v[2])
+
+def rotate_y(v, theta):
+    c, s = math.cos(theta), math.sin(theta)
+    return (v[0]*c + v[2]*s, v[1], -v[0]*s + v[2]*c)
+
+def rotate_x(v, theta):
+    c, s = math.cos(theta), math.sin(theta)
+    return (v[0], v[1]*c - v[2]*s, v[1]*s + v[2]*c)
+
+def transform_vertex(v_local, x, y, z, width, height, depth, 
+                     x_rad, y_rad, z_rad, 
+                     x_rad_translate, y_rad_translate, z_rad_translate):
+    # 1. Translate to center
+    v = (v_local[0] + width/2, v_local[1] + height/2, v_local[2] + depth/2)
+    
+    # 2. Apply translation rotations (Z, Y, X)
+    v = rotate_z(v, z_rad_translate)
+    v = rotate_y(v, y_rad_translate)
+    v = rotate_x(v, x_rad_translate)
+    
+    # 3. Translate to world position
+    v = (v[0] + x, v[1] + y, v[2] + z)
+    
+    # 4. Apply view rotations (Z, Y, X)
+    v = rotate_z(v, z_rad)
+    v = rotate_y(v, y_rad)
+    v = rotate_x(v, x_rad)
+    
+    return v
+
+def project_vertex(v_world, fov, window_width, window_height):
+    if v_world[2] <= 0:
+        return None
+    sx = (v_world[0] / v_world[2]) * fov + window_width / 2
+    sy = (v_world[1] / v_world[2]) * fov + window_height / 2
+    return (sx, sy)
+
+def draw_face(vertices_local, x, y, z, width, height, depth, 
+              x_rad, y_rad, z_rad, 
+              x_rad_translate, y_rad_translate, z_rad_translate,
+              fov, window_width, window_height, color):
+    
+    transformed_vertices = []
+    for v_local in vertices_local:
+        v_world = transform_vertex(v_local, x, y, z, width, height, depth,
+                                   x_rad, y_rad, z_rad,
+                                   x_rad_translate, y_rad_translate, z_rad_translate)
+        transformed_vertices.append(v_world)
+        
+    # Visibility check
+    if all(v[2] > 0 for v in transformed_vertices):
+        screen_coords = []
+        for v_world in transformed_vertices:
+            sc = project_vertex(v_world, fov, window_width, window_height)
+            if sc is None:
+                return # Should not happen if visibility check passed
+            screen_coords.append(sc)
+        # Draw polygon (e.g., pygame.draw.polygon)
+        # draw_polygon(screen_coords, color)
+        pass
+```
+
+**Parameters:**
+- `FOV`: Field of view scale factor. Typical values depend on the desired perspective distortion [S1, unofficial].
+- `window_width`, `window_height`: Screen dimensions in pixels [S1, unofficial].
+- `FAR`: Distance culling threshold. If the cube's position exceeds `FAR * VOXEL_WIDTH/HEIGHT/DEPTH`, it is not drawn [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Division by Zero:** If any vertex has $z \le 0$, the face is behind or on the camera plane. The method checks if all 4 vertices have $z > 0$ before projecting to avoid this [S1, unofficial].
+- **Back-Face Culling:** The method relies on explicit face ordering (drawing back faces first) and z-culling rather than hardware depth buffering or normal-based back-face culling [S1, unofficial].
+- **Degenerate Input:** If the cube has zero dimensions, the projection may result in degenerate polygons. Not explicitly handled in the source, but implied by the dimension parameters [S1, unofficial].
+
+## Subtopics
+
+### [2D Raycasting with Z-Buffering](8233-2d-raycasting-with-z-buffering.md)
+A rendering method that projects 3D voxel block surfaces onto a 2D screen using perspective projection and resolves depth using a per-pixel Z-buffer, implemented via software pixel drawing.
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot F)$, where $N$ is the number of cubes and $F$ is the number of faces per cube (typically 6, but often fewer are visible). Each face requires 4 vertex transformations and a polygon fill.
+- **Memory Complexity:** $O(1)$ per frame for temporary vertex storage, assuming no geometry caching.
+- **Performance:** Software rasterization is significantly slower than hardware-accelerated rasterization. Performance scales linearly with the number of visible faces. The method is suitable for small-scale voxel rendering or educational purposes but not for large scenes [S1, unofficial].
+- **Strengths:** Simple implementation, no hardware dependencies, explicit control over face ordering for transparency.
+- **Limitations:** Slow performance, no hardware depth buffering, manual culling required, limited to simple convex shapes (cubes).
+- **When to Use:** Small-scale voxel visualization, educational software, or when hardware acceleration is unavailable.
+- **When Not to Use:** Large-scale voxel scenes, real-time applications requiring high frame rates, or complex non-cube geometries.
+
+## Background
+Originated from a Python-based voxel rendering engine implementation, demonstrating a software approach to 3D cube projection and rasterization [S1, unofficial]. The method is part of a broader family of object-order rendering techniques for voxels, where each voxel is treated as a geometric primitive (cube) and rendered via standard rasterization principles, albeit in software.
+
+## Sources
+[S1] anb2473/Python-Voxel-Rendering-Engine, https://github.com/anb2473/Python-Voxel-Rendering-Engine, fetched 2026-10-27 (unofficial)

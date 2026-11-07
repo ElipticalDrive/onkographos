@@ -1,0 +1,145 @@
+# Free Space Skipping
+
+Also called: Coarse/Fine Density Threshold Skipping, Two-stage Free Space Skipping
+
+## Overview
+Free space skipping is an acceleration technique for volume rendering that avoids computing expensive view-dependent color models for points located in transparent or low-density regions of the scene [S1, S2]. It operates by querying a hierarchy of density representations—typically a coarse voxel grid followed by a fine voxel grid—and discarding samples where the accumulated alpha (opacity) falls below specific thresholds [S1, S2]. This method is distinct from sibling techniques like [Empty Space Skipping with Octree](1610-empty-space-skipping-with-octree.md) or [Spatial Skipping (Occupancy Grid)](1614-spatial-skipping-occupancy-grid.md) because it relies on learned, continuous density fields rather than binary occupancy or static bounding volumes, allowing it to sculpt the free space dynamically during training [S1].
+
+## How it works
+**Inputs:**
+*   Ray origin $\mathbf{x}_0$ and direction $\mathbf{d}$.
+*   Coarse density voxel grid $V^{(\text{density})}_{(c)}$ with resolution $N_c \times N_c \times N_c$ [S1].
+*   Fine density voxel grid $V^{(\text{density})}_{(f)}$ with resolution $N_f \times N_f \times N_f$ ($N_f > N_c$) [S1].
+*   Thresholds $\tau^{(c)}$ and $\tau^{(f)}$ [S1].
+*   Bounding box (BBox) of the scene [S2].
+
+**Outputs:**
+*   A set of valid sample points $\{\mathbf{x}_i\}$ for which the view-dependent color model must be evaluated [S1].
+
+**Data Structures:**
+*   $V^{(\text{density})}_{(c)}$: A 3D tensor storing density values. Access is performed via trilinear interpolation [S2].
+*   $V^{(\text{density})}_{(f)}$: A 3D tensor storing higher-resolution density values. Access is performed via trilinear interpolation [S2].
+
+**Parameters:**
+*   $\tau^{(c)}$: Coarse threshold. Typical value: $10^{-3}$ [S1].
+*   $\tau^{(f)}$: Fine threshold. Typical value: $10^{-4}$ [S1].
+
+**Algorithm:**
+1.  **Ray-BBox Intersection:** Determine the intersection interval $[t_{\text{near}}, t_{\text{far}}]$ of the ray with the scene BBox.
+    *   If the ray origin $\mathbf{x}_0$ is already inside the BBox, $t_{\text{near}}$ remains the distance to the origin (or 0), and $t_{\text{far}}$ is the exit distance [S2].
+    *   Otherwise, $t_{\text{near}}$ and $t_{\text{far}}$ are the entry and exit points of the ray-box intersection [S2].
+2.  **Ray Filtering:** If the ray does not intersect the known free space (i.e., the BBox or the region defined by the coarse grid), discard the ray entirely [S2].
+3.  **Sampling Loop:** For each sample point $\mathbf{x}$ along the ray within $[t_{\text{near}}, t_{\text{far}}]$:
+    a.  **Coarse Check:** Query the coarse density grid $V^{(\text{density})}_{(c)}$ at $\mathbf{x}$ to obtain density $\sigma_c$ [S1].
+    b.  **Coarse Skip:** If the activated alpha (opacity contribution) derived from $\sigma_c$ is less than $\tau^{(c)}$, skip this point and continue to the next sample [S1]. This treats the point as being in "known free space" [S1].
+    c.  **Fine Check:** If the coarse check passes, query the fine density grid $V^{(\text{density})}_{(f)}$ at $\mathbf{x}$ to obtain density $\sigma_f$ [S1].
+    d.  **Fine Skip:** If the activated alpha derived from $\sigma_f$ is less than $\tau^{(f)}$, skip this point [S1]. This filters points in "unknown space" with low activation [S2].
+    e.  **Color Evaluation:** If both checks pass, query the view-dependent color model (e.g., a small MLP or feature grid) for the color and opacity at $\mathbf{x}$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def free_space_skip_ray(x0, d, bbox, V_coarse, V_fine, tau_c, tau_f):
+    """
+    x0: Ray origin (3,)
+    d: Ray direction (3,)
+    bbox: Scene bounding box [min_point, max_point]
+    V_coarse: Coarse density grid (trilinear interpolation function)
+    V_fine: Fine density grid (trilinear interpolation function)
+    tau_c: Coarse threshold (e.g., 1e-3)
+    tau_f: Fine threshold (e.g., 1e-4)
+    """
+    # 1. Ray-BBox Intersection
+    t_min, t_max = intersect_ray_bbox(x0, d, bbox)
+    
+    # If no intersection, return empty
+    if t_min > t_max:
+        return []
+
+    # Adjust t_near if origin is inside bbox [S2]
+    # Note: Standard ray-box intersection usually returns t_min >= 0.
+    # If x0 is inside, t_min might be negative. We clamp t_near to 0 if x0 is inside.
+    if point_in_bbox(x0, bbox):
+        t_near = 0.0
+    else:
+        t_near = t_min
+    
+    t_far = t_max
+    
+    # 2. Ray Filtering (Implicit in step 1: if no bbox intersection, ray is skipped)
+    # [S2] "filter out rays that do not intersect with the known free space"
+    # Here, "known free space" refers to the scene volume defined by the BBox/Coarse Grid.
+    
+    valid_points = []
+    
+    # 3. Sampling Loop
+    # Assume a fixed step size or adaptive sampling strategy is handled externally.
+    # We iterate through candidate points along the ray.
+    t = t_near
+    while t <= t_far:
+        x = x0 + t * d
+        
+        # 3a. Coarse Check
+        # Query coarse density grid
+        sigma_c = V_coarse(x)
+        
+        # Calculate activated alpha from sigma_c. 
+        # In direct voxel optimization, alpha is often directly stored or derived.
+        # Assuming sigma_c represents the density/alpha value directly for skipping logic.
+        alpha_c = sigma_c 
+        
+        if alpha_c < tau_c:
+            # Skip point: known free space [S1]
+            t += step_size
+            continue
+            
+        # 3b. Fine Check
+        # Query fine density grid
+        sigma_f = V_fine(x)
+        alpha_f = sigma_f
+        
+        if alpha_f < tau_f:
+            # Skip point: unknown space with low activation [S2]
+            t += step_size
+            continue
+            
+        # 3c. Color Evaluation
+        # Only query view-dependent color if both thresholds pass [S1]
+        color = query_color_model(x)
+        valid_points.append((x, color))
+        
+        t += step_size
+        
+    return valid_points
+```
+
+**Edge Cases and Pitfalls:**
+*   **Zero Thresholds:** Setting $\tau^{(c)} = 0$ and $\tau^{(f)} = 0$ disables skipping, leading to out-of-memory (OOM) errors during the fine stage due to excessive memory usage [S1].
+*   **Quality Degradation:** Setting $\tau^{(c)} = 0$ while keeping $\tau^{(f)} > 0$ degrades rendering quality because the coarse stage's priors are ignored [S1].
+*   **Initialization Conflict:** Low-density initialization and free space skipping cannot be applied simultaneously [S1].
+*   **Precision:** The thresholds $\tau^{(c)}$ and $\tau^{(f)}$ must be chosen carefully; too high values may clip valid geometry, while too low values reduce acceleration benefits [S1].
+
+## Subtopics
+
+### Coarse/Fine Density Threshold Skipping
+The primary implementation of free space skipping using two distinct voxel grids. It is chosen when high-quality view-dependent rendering is required but computational resources are limited. It differs from [Empty Space Skipping with Octree](1610-empty-space-skipping-with-octree.md) by using continuous density values rather than binary occupancy. [Free Space Skipping](1005-free-space-skipping.md)
+
+### Two-stage Free Space Skipping
+Refers to the specific two-step filtering process (coarse then fine). It is chosen to balance memory usage and rendering speed. It differs from [Homogeneity Acceleration](5754-homogeneity-acceleration.md) by relying on learned density thresholds rather than spatial homogeneity assumptions. [Free Space Skipping](1005-free-space-skipping.md)
+
+## Operating characteristics
+*   **Time Complexity:** The coarse grid query is faster than the fine grid query, which is faster than querying the view-dependent color model [S1, S2]. Free space skipping improves fine-stage efficiency in both training and testing [S1].
+*   **Memory Complexity:** By skipping points in free space, the method reduces the number of points requiring color model evaluation, thereby lowering memory consumption during training and inference [S1].
+*   **Performance:** On synthetic datasets (e.g., Synthetic-NeRF), free space skipping allows for faster convergence and higher PSNR with reduced training time compared to methods without skipping [S1].
+*   **Strengths:** Effective at removing irrelevant samples in transparent regions; improves training efficiency through progressive scaling [S1].
+*   **Limitations:** Requires careful tuning of thresholds; ineffective if the density grids are not well-optimized [S1].
+*   **When to use:** When rendering scenes with significant transparent or empty space and using voxel-based representations (e.g., Direct Voxel Grid Optimization) [S1].
+*   **When not to use:** When the scene is fully opaque or when memory is not a constraint and simplicity is preferred [S1].
+
+## Background
+Free space skipping was introduced in the context of Direct Voxel Grid Optimization (DVG) by Sun et al. in 2022 [S1, S2]. The method was developed to address the computational bottleneck of querying view-dependent color models for every sample point along a ray [S1]. By leveraging the efficiency of voxel grid lookups, the technique allows for super-fast convergence in radiance field reconstruction [S1]. It is primarily used in neural rendering pipelines that utilize multi-resolution voxel grids [S1].
+
+## Sources
+[S1] Direct Voxel Grid Optimization: Super-fast Convergence for Radiance Fields Reconstruction, https://doi.org/10.1109/cvpr52688.2022.00538, fetched 2026-10-26
+[S2] Direct Voxel Grid Optimization: Super-Fast Convergence ..., https://openaccess.thecvf.com/content/CVPR2022/papers/Sun_Direct_Voxel_Grid_Optimization_Super-Fast_Convergence_for_Radiance_Fields_Reconstruction_CVPR_2022_paper.pdf, fetched 2026-10-29

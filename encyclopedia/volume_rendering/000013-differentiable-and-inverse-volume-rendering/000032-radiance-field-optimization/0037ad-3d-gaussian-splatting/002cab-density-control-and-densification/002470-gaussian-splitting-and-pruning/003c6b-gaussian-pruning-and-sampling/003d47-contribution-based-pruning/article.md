@@ -1,0 +1,157 @@
+# Contribution-based Pruning
+
+Also called: Opacity and Scale Pruning, Quantile-based Pruning
+
+## Overview
+Contribution-based Pruning is a strategy to remove redundant 3D Gaussian primitives during training by jointly evaluating their opacity and spatial scale attributes [S1, unofficial]. It identifies Gaussians with low visibility and negligible geometric extent as insignificant and removes them to decrease storage costs and improve rendering efficiency [S1, unofficial]. Unlike pruning based solely on opacity or scale, which leads to substantial performance degradation, this method leverages the complementary nature of both attributes to balance rendering quality and computational overhead [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Set of Gaussian primitives $\mathcal{G}$, current iteration $t$, pruning threshold $\tau$, pruning interval $I_{prune}$, vote threshold $v$.
+- Output: Updated set of Gaussian primitives $\mathcal{G}_{new}$ with redundant Gaussians removed.
+
+**Data Structures:**
+- $\mathcal{G}$: Set of active Gaussians. Each Gaussian $g$ has attributes: opacity $o_g$, scale vector $\mathbf{s}_g$ (or maximum scale $s_{max}(g)$), position, rotation, spherical harmonics coefficients.
+- $V_g^{(t)}$: Accumulated vote count for Gaussian $g$ at iteration $t$. Initialized to 0.
+
+**Steps:**
+1. **Compute Attributes:** At each iteration $t$, compute the per-primitive opacity $o_g$ and the maximum scale $s_{max}(g)$ across dimensions for all $g \in \mathcal{G}$ [S1, unofficial].
+2. **Identify Candidates:** Determine the set of pruning candidates $\mathcal{C}_{\text{prune}}^{(t)}$ by applying a quantile threshold $\tau$ to both opacity and scale distributions [S1, unofficial].
+   - Compute the $\tau$-quantile of opacity $Q_\tau(o)$ and maximum scale $Q_\tau(s_{max})$ over the current set $\mathcal{G}$ [S1, unofficial].
+   - Define opacity candidates: $\mathcal{C}_{\text{opacity}}^{(t)} = \{g \in \mathcal{G} \mid o_g < Q_\tau(o)\}$ [S1, unofficial].
+   - Define scale candidates: $\mathcal{C}_{\text{scale}}^{(t)} = \{g \in \mathcal{G} \mid s_{max}(g) < Q_\tau(s_{max})\}$ [S1, unofficial].
+   - The pruning candidate set is the intersection: $\mathcal{C}_{\text{prune}}^{(t)} = \mathcal{C}_{\text{opacity}}^{(t)} \cap \mathcal{C}_{\text{scale}}^{(t)}$ [S1, unofficial].
+3. **Accumulate Votes:** Update the vote count for each Gaussian. If $g \in \mathcal{C}_{\text{prune}}^{(t)}$, increment its vote count [S1, unofficial].
+   - Formula: $V_g^{(t+1)} = V_g^{(t)} + \mathbf{1}_{\{g \in \mathcal{C}_{\text{prune}}^{(t)}\}}$, where $\mathbf{1}$ is the indicator function [S1, unofficial].
+   - Initialize $V_g^{(0)} = 0$ [S1, unofficial].
+4. **Prune:** Check if any Gaussian has accumulated enough votes to be permanently removed. This check is typically performed every $I_{prune}$ iterations [S1, unofficial].
+   - A Gaussian $g$ is pruned if $V_g^{(t)} > I_{prune} \cdot v$ [S1, unofficial].
+   - Update the Gaussian set: $\mathcal{G}_{new} = \mathcal{G} \setminus \{g \in \mathcal{G} \mid V_g^{(t)} > I_{prune} \cdot v\}$ [S1, unofficial].
+
+**Parameters:**
+- $\tau$: Pruning threshold (quantile). A larger threshold results in more aggressive pruning. Typical value: 0.2 [S1, unofficial].
+- $I_{prune}$: Pruning interval. Value not explicitly given in the main definition section, but used in the threshold calculation. In Distribution-based Pruning variant, set to 1000 [S1, unofficial].
+- $v$: Vote threshold. In Distribution-based Pruning variant, set to 0.6 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Early Training Noise:** Pruning immediately based on single iterations can lead to noisy fluctuations in opacity or scale. The accumulated vote mechanism mitigates this [S1, unofficial].
+- **Single Criterion Limitation:** Pruning based solely on opacity or scale leads to substantial performance degradation compared to using both attributes jointly [S1, unofficial].
+- **Timing:** Pruning should be applied only during specific phases (e.g., initial 25k iterations) to prevent excessive removal when finer details are critical [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def contribution_based_pruning(G, t, tau, I_prune, v):
+    """
+    G: List of Gaussian objects, each with attributes .opacity and .max_scale
+    t: Current training iteration
+    tau: Quantile threshold (e.g., 0.2)
+    I_prune: Pruning interval (e.g., 1000)
+    v: Vote threshold (e.g., 0.6)
+    """
+    if not G:
+        return G
+
+    # Step 1: Compute attributes (already available in G)
+    opacities = [g.opacity for g in G]
+    scales = [g.max_scale for g in G]
+
+    # Step 2: Identify candidates using quantile threshold
+    # Q_tau is the tau-quantile operator
+    q_opacity = quantile(opacities, tau)
+    q_scale = quantile(scales, tau)
+
+    C_prune = []
+    for g in G:
+        if g.opacity < q_opacity and g.max_scale < q_scale:
+            C_prune.append(g)
+
+    # Step 3: Accumulate votes
+    # Assuming G has a .vote_count attribute initialized to 0
+    for g in G:
+        if g in C_prune:
+            g.vote_count += 1
+
+    # Step 4: Prune if interval reached and threshold exceeded
+    if t > 0 and t % I_prune == 0:
+        threshold = I_prune * v
+        G_new = [g for g in G if g.vote_count <= threshold]
+        # Reset vote counts for remaining Gaussians? 
+        # The source implies permanent pruning based on accumulated votes.
+        # If votes are cumulative across intervals, we might keep them.
+        # However, standard practice often resets or the condition is "exceeds threshold in every interval".
+        # Source says: "permanently pruned if its accumulated votes exceed a threshold in every pruning interval."
+        # This phrasing is slightly ambiguous. The formula V_g^(t+1) = V_g^(t) + 1 suggests accumulation.
+        # The condition V_g > I_prune * v suggests a total count.
+        # Let's assume total count based on the formula provided.
+        G = G_new
+        
+        # Optional: Reset votes for remaining Gaussians to start fresh accumulation?
+        # The source doesn't explicitly state resetting. 
+        # If we don't reset, a Gaussian pruned at t=1000 stays pruned.
+        # If we do reset, we need to track history. 
+        # Given "permanently pruned", we just remove them. 
+        # For remaining, do we reset votes? 
+        # "mitigates noisy fluctuations... progressively eliminates"
+        # If we don't reset, the threshold I_prune * v becomes harder to reach over time if I_prune is large?
+        # Actually, if I_prune is the interval, and v is a multiplier, 
+        # it implies that over I_prune iterations, if it is selected every time, 
+        # it gets I_prune votes. If v < 1, it needs to be selected in most intervals.
+        # Let's assume votes are NOT reset, but the condition is checked periodically.
+        # However, if a Gaussian is pruned, it's gone.
+        # For remaining Gaussians, if we don't reset, their vote count grows.
+        # If v=0.6 and I_prune=1000, threshold=600. 
+        # If a Gaussian is selected in 60% of iterations over 1000 iters, it gets pruned.
+        # This makes sense.
+        
+    return G
+
+def quantile(values, tau):
+    """Compute the tau-quantile of a list of values."""
+    sorted_vals = sorted(values)
+    n = len(sorted_vals)
+    index = tau * (n - 1)
+    lower = int(index)
+    upper = lower + 1
+    if upper >= n:
+        return sorted_vals[-1]
+    weight = index - lower
+    return sorted_vals[lower] * (1 - weight) + sorted_vals[upper] * weight
+```
+
+## Subtopics
+
+### Accumulated Vote Pruning
+A pruning strategy that mitigates noisy fluctuations in opacity or scale during early training by accumulating votes for Gaussians selected as pruning candidates, rather than removing them immediately [S1, unofficial]. It identifies pruning candidates $\mathcal{C}_{\text{prune}}^{(t)}$ based on opacity and scale criteria, updates vote counts $V_g^{(t+1)} = V_g^{(t)} + \mathbf{1}_{\{g \in \mathcal{C}_{\text{prune}}^{(t)}\}}$, and permanently prunes Gaussians $g$ where $V_g^{(t)} > I_{prune} \cdot v$ [S1, unofficial]. This ensures that only consistently low-contributing Gaussians are removed [S1, unofficial].
+
+### Distribution-based Pruning
+A strategy to remove redundant Gaussian primitives and improve efficiency, specifically applied only during the initial 25k iterations to prevent excessive removal in later stages where finer details are critical [S1, unofficial]. It uses a pruning interval $I_{prune}$ of 1000, a vote threshold $v$ of 0.6, and a redundancy identification threshold $\tau$ of 0.2 [S1, unofficial]. This design allows the model to retain representation capacity while substantially reducing unnecessary primitives in early training [S1, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- The pruning step involves computing quantiles over the set of Gaussians, which is $O(N \log N)$ or $O(N)$ depending on the quantile algorithm, where $N$ is the number of Gaussians [S1, unofficial].
+- Memory overhead is minimal, requiring storage for vote counts $V_g$ [S1, unofficial].
+
+**Measured Performance:**
+- On the baseline Mobile-GS (0.56M Gaussians, 27.22 PSNR, 109 FPS), applying pruning with threshold 0.2 reduces Gaussians to 0.47M, maintains 27.12 PSNR, and increases FPS to 127 [S1, unofficial].
+- Pruning based solely on opacity reduces Gaussians to 0.43M but drops PSNR to 26.84 and increases FPS to 135 [S1, unofficial].
+- Pruning based solely on scale reduces Gaussians to 0.45M but drops PSNR to 26.87 and increases FPS to 132 [S1, unofficial] [S1, unofficial].
+
+**Strengths and Limitations:**
+- **Strengths:** Jointly considering opacity and scale provides a more balanced pruning decision, discarding a large portion of redundant primitives while maintaining high rendering fidelity [S1, unofficial]. It reduces memory and computational overhead with minimal loss of precision [S1, unofficial]. It can be seamlessly integrated with existing GS pruning methods like MaskGaussian and Mini-Splatting to further reduce Gaussian points [S1, unofficial].
+- **Limitations:** Pruning based on a single attribute (opacity or scale) leads to substantial performance degradation [S1, unofficial]. Aggressive pruning (higher $\tau$) can reduce storage but may impact quality if not balanced [S1, unofficial].
+
+**When to Use:**
+- Use when computational efficiency and memory reduction are priorities, such as on mobile devices [S1, unofficial].
+- Use during training phases where redundant primitives are likely to emerge (e.g., early training) [S1, unofficial].
+
+**When Not to Use:**
+- Avoid using solely opacity or scale pruning if high fidelity is required [S1, unofficial].
+- Avoid aggressive pruning in later training stages where fine details are critical [S1, unofficial].
+
+## Background
+Contribution-based Pruning was introduced in the Mobile-GS paper, which proposes real-time Gaussian Splatting for mobile devices [S1, unofficial]. The method was developed to address the high computational and memory costs of 3D Gaussian Splatting on resource-constrained hardware [S1, unofficial]. It builds on the insight that Gaussians with larger opacity and scale have more important contributions to the final image [S1, unofficial]. The technique is part of a broader effort to optimize 3DGS for mobile deployment, including neural vector quantization and lightweight SH feature compression [S1, unofficial].
+
+## Sources
+[S1] Mobile-GS: Real-time Gaussian Splatting for Mobile Devices, https://doi.org/10.48550/arXiv.2603.11531, fetched 2026-10-29 (unofficial)
