@@ -1,111 +1,140 @@
 # Image-order Rendering Loop
 
-Also called: Main Rendering Loop, Octree Rendering Loop
+Also called: Image order approach, Image-Order Volume Ray Casting, Main Rendering Loop, Octree Rendering Loop
 
 ## Overview
-The Image-order Rendering Loop is the top-level control structure that iterates over the output image pixels to generate rays and invoke the scene shading logic [S1, unofficial]. It solves the problem of mapping 2D screen coordinates to 3D scene geometry by managing camera parameters, projection modes, and shading strategies [S1, unofficial]. It differs from sibling traversal methods (e.g., [Ray-grid traversal](17-ray-grid-traversal.md)) by operating at the pixel level rather than the voxel level; it delegates the geometric intersection or volume integration to lower-level routines like `Raymarch` or `ShadePathTrace` [S1, unofficial].
+The Image-order Rendering Loop is the fundamental execution structure for direct volume ray casting, where the iteration proceeds over image pixels rather than volume primitives [S1, S2, S37, unofficial]. It solves the problem of mapping 3D volumetric data to a 2D image plane by generating a ray for each pixel, traversing the volume, and accumulating optical properties [S2, unofficial]. It is distinguished from object-order (rasterization) methods by being more "CPU-like" in its control flow, offering correct perspective projection, single-pass ray casting, and full 32-bit compositing precision without the need for multiple passes or early-z testing [S1, unofficial].
 
 ## How it works
-The method initializes rendering state, iterates over pixel coordinates and samples, generates rays based on the camera model, and accumulates color values according to the selected shading mode [S1, unofficial].
+The method implements the core computational engine defined in [Direct volume ray casting](19-direct-volume-ray-casting.md). It consists of four sequential stages applied to each ray [S5, S10, S37, unofficial].
 
 ### Inputs and Outputs
-- **Inputs**: Camera parameters (position, direction, projection mode), scene data (octree, lights), rendering configuration (shading mode, sample count).
-- **Outputs**: A 2D image buffer (pixel colors).
+*   **Inputs**: Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$, projection mode), volume data structure, transfer function $T$, background color $C_{bg}$.
+*   **Outputs**: Final pixel color $C_{final}$ and accumulated opacity $\alpha_{acc}$.
 
 ### Data Structures
-- **Renderer Configuration**:
-  - `maxDepth`: Integer, maximum recursion depth for path tracing. Default: 100 [S2, unofficial].
-  - `samplesPerPixel`: Integer, number of samples per pixel for anti-aliasing. Default: 500 [S2, unofficial].
-  - `background`: RGB color, default `{0, 0, 0}` [S2, unofficial].
-- **Shading Mode**: Enum determining the shading behavior. Values: `TRACE`, `DEPTH`, `DEPTH_HIT`, `DIFFUSE`, `NORMAL`, `INDEX` [S1, unofficial].
-- **Projection Mode**: Enum determining ray generation. Values: `PERSPECTIVE`, `ORTHOGRAHIC` [S1, unofficial].
+*   **Ray**: Defined as $r(t) = \mathbf{o} + t\mathbf{d}$, where $\mathbf{o}$ is the origin and $\mathbf{d}$ is the normalized direction vector [G].
+*   **Sample Point**: $\mathbf{p}_i = r(t_i)$, where $t_i$ is the distance along the ray [G].
+*   **Accumulators**: $C_{acc}$ (color, RGB), $\alpha_{acc}$ (opacity, scalar) [S12, S43, unofficial].
+
+### Numbered Steps
+
+1.  **Ray Generation and Discretization**:
+    For each pixel $(x, y)$ in the image plane:
+    *   Calculate pixel coordinates $rx, ry$ [S2, unofficial].
+    *   Transform position based on `ProjectionMode` [S2, unofficial]:
+        *   **Perspective**: $\mathbf{o} = \text{cameraPos}$, $\mathbf{d} = \text{cameraDir} + \text{pos}$ [S2, unofficial].
+        *   **Orthographic**: $\mathbf{o} = \text{cameraPos} + \text{pos}$, $\mathbf{d} = \text{cameraDir}$ [S2, unofficial].
+    *   Intersect the ray with the volume's bounding box to determine the segment $[t_{start}, t_{end}]$ [S1, S8, S16, unofficial].
+    *   Discretize the segment into $N$ samples with interval $\Delta t = (t_{end} - t_{start}) / N$ [S5, S10, S17, unofficial].
+
+2.  **Sampling and Interpolation**:
+    For each sample $i$ from $0$ to $N-1$:
+    *   Compute sample point $\mathbf{p}_i = \mathbf{o} + t_i \mathbf{d}$ [G].
+    *   Retrieve scalar value $d_i$ from the volume data structure by interpolating neighboring voxel values [S5, S10, unofficial].
+    *   Use trilinear interpolation of the eight surrounding voxels [S7, S10, S43, unofficial].
+
+3.  **Classification (Transfer Function)**:
+    *   Map scalar value $d_i$ to optical properties: color $C_i$ and opacity $\alpha_i$ using the transfer function $T(d_i) \rightarrow (C_i, \alpha_i)$ [S2, S2789, unofficial].
+    *   Correct opacity for step size to account for discretization error: $\alpha'_i = 1 - (1 - \alpha_i)^{\Delta t}$ [S11, S32, unofficial].
+
+4.  **Compositing**:
+    Initialize $C_{acc} = 0$ and $\alpha_{acc} = 0$ [S12, S43, unofficial][S50, abstract only, unofficial].
+    Iterate from front ($t_{start}$) to back ($t_{end}$):
+    *   Update accumulated color:
+        $$
+        C_{acc}^{(i)} = C_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \alpha'_i C_i
+        $$
+    *   Update accumulated opacity:
+        $$
+        \alpha_{acc}^{(i)} = \alpha_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \alpha'_i
+        $$
+    *   The term $(1 - \alpha_{acc}^{(i-1)})$ is the transmittance [S1, S51, unofficial].
+    *   **Early Ray Termination**: If $\alpha_{acc}$ exceeds a threshold (e.g., 1.0), break the loop [S10, S12, unofficial].
+
+5.  **Final Composition**:
+    *   Composite over background: $C_{final} = C_{acc} + (1 - \alpha_{acc}) C_{bg}$ [S1, S14, unofficial].
 
 ### Pseudocode
-The following pseudocode implements the loop as described in [S1, unofficial]. It assumes helper functions `ShadePathTrace`, `Raymarch`, and `Shade*` are defined elsewhere.
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def ImageOrderRenderingLoop(scene, camera, image, shading_mode, projection_mode, num_samples):
+def image_order_rendering_loop(camera, volume, transfer_function, background_color):
     """
-    Main rendering loop iterating over pixels and samples.
+    Renders the volume using the image-order loop.
+    camera: object with get_ray(x, y) -> (origin, direction)
+    volume: object with sample(point) -> scalar_value
+    transfer_function: function(scalar) -> (color, opacity)
+    background_color: RGB tuple
     """
-    # Initialize accumulated color buffer
-    accumulated_color = zeros_like(image)
-    completed_samples = 0
-    
-    # Precompute light bounds if necessary for optimization
-    # p0, p1 = calculate_light_bounds(scene)
-    
-    # Apply rotation to camera position and direction if needed
-    # camera_pos = rotate(camera.position)
-    # camera_dir = rotate(camera.direction)
-    
-    for s in range(num_samples):
-        for y in range(image.height):
-            for x in range(image.width):
-                # Calculate ray origin and direction based on projection mode
-                if projection_mode == PERSPECTIVE:
-                    # Map pixel to normalized device coordinates or similar
-                    # rx, ry = pixel_to_ndc(x, y)
-                    # pos = transform(rx, ry)
-                    ray_origin = camera.position
-                    ray_direction = normalize(camera.direction + pos)
-                elif projection_mode == ORTHOGRAPHIC:
-                    # rx, ry = pixel_to_ndc(x, y)
-                    # pos = transform(rx, ry)
-                    ray_origin = camera.position + pos
-                    ray_direction = camera.direction
+    image_width = camera.width
+    image_height = camera.height
+    image = empty_array_of_size((image_height, image_width, 3))
+
+    for y in range(image_height):
+        for x in range(image_width):
+            # 1. Ray Generation
+            ray_origin, ray_direction = camera.get_ray(x, y)
+            
+            # Intersect with volume bounding box to get t_start and t_end
+            t_start, t_end = intersect_bounding_box(ray_origin, ray_direction, volume.bbox)
+            
+            if t_start > t_end:
+                image[y, x] = background_color
+                continue
+
+            # Discretization
+            num_samples = 100 # Typical value, not given in sources
+            delta_t = (t_end - t_start) / num_samples
+            
+            # 4. Compositing Initialization
+            acc_color = [0.0, 0.0, 0.0]
+            acc_opacity = 0.0
+            
+            for i in range(num_samples):
+                # Early Ray Termination
+                if acc_opacity >= 1.0:
+                    break
                 
-                # Calculate pixel index
-                index = x + y * image.width
+                # 2. Sampling
+                t = t_start + i * delta_t
+                point = ray_origin + t * ray_direction
+                scalar_value = volume.sample(point)
                 
-                # Perform shading/ray marching
-                if shading_mode == Shade::TRACE:
-                    # Path tracing with recursion
-                    color = ShadePathTrace(ray_origin, ray_direction, scene, depth=100)
-                    # Average with previous samples
-                    accumulated_color[index] = (accumulated_color[index] * completed_samples + color) / (completed_samples + 1)
-                else:
-                    # Direct raymarching or simple shading
-                    hit = Raymarch(ray_origin, ray_direction, scene)
-                    
-                    if hit:
-                        # Shade based on mode
-                        if shading_mode == Shade::DEPTH:
-                            depth = distance(camera.position, hit.point)
-                            color = ShadeDepth(hit.color, depth)
-                        elif shading_mode == Shade::DEPTH_HIT:
-                            depth = distance(camera.position, hit.point)
-                            color = ShadeDepthFromHit(hit.color, camera.position, hit.point)
-                        elif shading_mode == Shade::DIFFUSE:
-                            color = ShadeDiffuse(hit.color, hit.normal, ray_origin, ray_direction)
-                        elif shading_mode == Shade::NORMAL:
-                            color = ShadeNormal(hit.normal)
-                        elif shading_mode == Shade::INDEX:
-                            color = ShadeIndex(hit.material_index)
-                    else:
-                        # Check if ray intersects light AABB for background lighting
-                        if ray_intersects_light_aabb(ray_origin, ray_direction, scene.lights):
-                            color = scene.light_color
-                        else:
-                            color = RGB(25, 25, 25) # Dark color for no hit
-                    
-                    accumulated_color[index] += color
+                # 3. Classification
+                color, opacity = transfer_function(scalar_value)
                 
-                completed_samples += 1
-    
-    # Finalize image
-    for i in range(image.width * image.height):
-        image[i] = accumulated_color[i] / num_samples
-        
+                # Opacity correction for step size
+                corrected_opacity = 1.0 - (1.0 - opacity) ** delta_t
+                
+                # Transmittance
+                transmittance = 1.0 - acc_opacity
+                
+                # Update Accumulators
+                acc_color = [
+                    acc_color[0] + transmittance * corrected_opacity * color[0],
+                    acc_color[1] + transmittance * corrected_opacity * color[1],
+                    acc_color[2] + transmittance * corrected_opacity * color[2]
+                ]
+                acc_opacity = acc_opacity + transmittance * corrected_opacity
+            
+            # 5. Final Composition
+            final_color = [
+                acc_color[0] + (1.0 - acc_opacity) * background_color[0],
+                acc_color[1] + (1.0 - acc_opacity) * background_color[1],
+                acc_color[2] + (1.0 - acc_opacity) * background_color[2]
+            ]
+            
+            image[y, x] = final_color
+            
     return image
 ```
 
-### Edge Cases and Pitfalls
-- **Zero Direction Components**: If `ray_direction` has a zero component, division by zero may occur in normalization or ray-plane intersection checks. Guard against this by checking `abs(denom) > epsilon` [S1, unofficial].
-- **Recursion Depth**: Path tracing requires a depth limit to prevent infinite loops. The default is 100 [S2, unofficial].
-- **Floating Point Precision**: Small offsets (e.g., `1e-4f`) are added to hit points to prevent self-intersection artifacts [S1, unofficial].
+### Parameters and Edge Cases
+*   **Shader Model**: Requires Shader Model 3.0 or higher to enable conditional loops (early loop exit) in fragment shaders [S1, unofficial].
+*   **ShadingMode**: An enum determining shading behavior (TRACE, DEPTH, DEPTH_HIT, DIFFUSE, NORMAL, INDEX) [S2, unofficial].
+*   **Precision**: The method supports full 32-bit compositing precision, avoiding the need for a separate compositing buffer [S1, unofficial].
+*   **Edge Cases**: If the ray does not intersect the volume bounding box, the pixel is typically filled with a dark color (e.g., 25, 25, 25) or background [S2, unofficial].
 
 ## Subtopics
 
@@ -113,22 +142,27 @@ def ImageOrderRenderingLoop(scene, camera, image, shading_mode, projection_mode,
 The Terminal Rendering Pipeline renders a 3D scene to a text-based terminal buffer by iterating over pixels, mapping them to Normalized Device Coordinates (NDC), casting rays via a raymarcher, and applying ASCII/ANSI styling based on depth and lighting. It differs from standard terminal rendering by explicitly accounting for character aspect ratio when converting pixel indices to NDC and using ANSI escape codes to modulate brightness based on depth percentage, effectively acting as a low-resolution, text-based raymarcher.
 
 ### [Diffuse Octree Rendering](4989-diffuse-octree-rendering.md)
-Diffuse Octree Rendering is an image-order raycasting technique that traverses an octree to locate the first leaf node containing data for each pixel, then computes surface lighting using a diffuse and Phong specular model with distance attenuation. It differs from sibling methods by relying on a coarse-to-fine octree traversal to skip empty space entirely, rather than marching through a dense voxel grid or using ray-marching steps within occupied nodes.
+Diffuse Octree Rendering is an image-order raycasting technique that traverses an octree to locate the first leaf node containing data for each pixel, then computes surface lighting using a diffuse and Phong specular model with distance attenuation. It differs from sibling methods by relying on a coarse-to-fine octree traversal to skip empty space entirely, rather than marching through a dense voxel grid.
 
 ### Renderer configuration
-Top-level rendering controller managing ray depth, sampling rate, and background color [S2, unofficial].
-- **Parameters**: `maxDepth` (int, default 100), `samplesPerPixel` (int, default 500) [S2, unofficial].
-- **Layout**: Class `Renderer` with fields `int maxDepth`, `int samplesPerPixel`, `RGB background` and methods `RGB rayColor(const Ray &ray, const Scene &scene, int depth) const`, `void render(const Scene &scene, const Camera &camera, Image &image) const` [S2, unofficial].
+A top-level rendering controller managing ray depth, sampling rate, and background color [S3, unofficial].
+*   **maxDepth**: Maximum recursion depth for ray tracing. Default: 100 [S3, unofficial].
+*   **samplesPerPixel**: Number of samples per pixel for anti-aliasing/noise reduction. Default: 500 [S3, unofficial].
+*   **Layout**: Class `Renderer` with fields `int maxDepth = 100`, `int samplesPerPixel = 500`, `RGB background{0, 0, 0}`. Methods include `RGB rayColor(const Ray &ray, const Scene &scene, int depth) const` and `void render(const Scene &scene, const Camera &camera, Image &image) const` [S3, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: $O(P \cdot S \cdot C)$, where $P$ is the number of pixels, $S$ is the number of samples per pixel, and $C$ is the cost of the shading/raymarching routine per sample [S1, S2, unofficial].
-- **Memory Complexity**: $O(P)$ for the image buffer and accumulated color buffer [S1, unofficial].
-- **Strengths**: Simple control flow, easy to parallelize per-pixel, supports various shading modes [S1, unofficial].
-- **Limitations**: Performance is dominated by the raymarching cost; high sample counts are required for noise reduction [S2, unofficial].
+*   **Time Complexity**: $O(P \cdot N)$, where $P$ is the number of pixels and $N$ is the number of samples per ray [G].
+*   **Memory Complexity**: $O(P)$ for the output image buffer, plus the volume data structure [G].
+*   **Performance**: The method is flexible, supporting adaptive sampling and correct perspective projection in a single pass [S1, unofficial]. It is described as "CPU-like" in control flow, which can be less efficient on GPUs compared to object-order rasterization but offers higher precision and simplicity [S1, unofficial].
+*   **Strengths**: Correct perspective, single-pass ray casting, 32-bit compositing precision, flexibility for adaptive sampling [S1, unofficial].
+*   **Limitations**: Can be computationally expensive due to the large number of samples required for noise-free images; performance is highly dependent on the volume density and transfer function complexity [G].
+*   **When to use**: When high-quality, perspective-correct volume rendering is required, and computational resources allow for per-pixel ray marching [S1, unofficial].
+*   **When not to use**: When real-time performance is critical and the volume is sparse or simple, where object-order or proxy geometry methods might be faster [G].
 
 ## Background
-The Image-order Rendering Loop is a fundamental pattern in ray tracing and volume rendering, originating from early ray tracing implementations [S1, S2, unofficial]. It is widely used in educational ray tracers and real-time rendering engines that support path tracing or ray-marched volumes [S1, S2, unofficial].
+The image-order approach is a fundamental technique in volume rendering, historically associated with GPU-based implementations that leverage conditional loops in fragment shaders [S1, unofficial]. It was popularized in the context of advanced illumination techniques for GPU-based volume raycasting, enabling single-pass ray casting with 32-bit compositing [S1, unofficial]. Key references include works by Krüger and Westermann (2003), Röttger et al. (2003), Green (2004), Stegmaier et al. (2005), and others [S1, unofficial].
 
 ## Sources
-[S1] cianjinks/Sparse-Voxel-Octree, https://github.com/cianjinks/Sparse-Voxel-Octree, fetched 2026-10-26 (unofficial)
-[S2] TakTikFR/Volumetric-Path-Tracing, https://github.com/TakTikFR/Volumetric-Path-Tracing, fetched 2026-10-26 (unofficial)
+[S1] GPU-Based Volume Ray-Casting with Advanced Illumination, https://doi.org/10.2312/egt.20091069, fetched 2026-10-26 (unofficial)
+[S2] cianjinks/Sparse-Voxel-Octree, https://github.com/cianjinks/Sparse-Voxel-Octree, fetched 2026-10-26 (unofficial)
+[S3] TakTikFR/Volumetric-Path-Tracing, https://github.com/TakTikFR/Volumetric-Path-Tracing, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,139 @@
+# Cubic Shading
+
+Also called: 26 neighbour grey-level gradient shading, Cubic window shading, Neighbourhood grey-level gradient shading
+
+## Overview
+Cubic shading is a gradient estimation technique for volume rendering that calculates surface normals using all 26 neighbors of a center voxel within a 3x3x3 cubic window, rather than relying solely on the 6 immediate orthogonal neighbors [S1]. It produces images with smoother shading and normals closer to those of analytically defined spheres compared to standard grey-level gradient shading [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A stream of voxel data from a 3D volume grid.
+*   **Output:** A screen value (intensity) for each voxel, derived from lighting calculations indexed by the computed gradient.
+
+**Data Structures:**
+*   **Cubic Window:** A buffered set of 27 registers representing a 3x3x3 neighborhood. The registers are laid out in a horizontal line, subdivided into groups of 3 registers representing columns [S1].
+*   **Look-Up Table (LUT):** Stores precalculated shading values. The index size is typically 15 bits, requiring 32KB of memory ($2^{15}$ bytes) [S1].
+
+**Algorithm Steps:**
+1.  **Stream Data:** Volume data passes into the start of a column in the cubic window, through the column, and leaves at the other end [S1].
+2.  **Calculate Gradient:** Compute the gradient components ($G_x, G_y, G_z$) for the voxel at the center of the 26-connected neighborhood [S1].
+3.  **Index LUT:** Use the calculated gradient components to form an index for the LUT. Typically, the 5 most significant bits of each component are used [S1].
+4.  **Generate Value:** Retrieve the shading value from the LUT and output it as the final screen value [S1].
+
+**Gradient Calculation Details:**
+The gradient is calculated using a pipeline architecture involving Triple Input Adders (TIAs) and registers [S1]. The calculation involves summing voxels in 3x3 two-dimensional windows situated adjacent to the center surface voxel [S1]. There are six such windows representing the six sides of the 3D cubic window [S1].
+
+Let $S_{xyz}$ denote the summation of a side. The summation equations for the sides are derived from the voxel values $g_{ijz}$ at coordinates $(i,j,z)$ within the cubic window. For example, one side summation is defined as:
+$$ S_{xyz} = C_{20z} + C_{10z} + C_{00z} + C_{12z} + C_{02z} $$
+where $C_{ijz}$ represents the column where $z=i, y=j$ [S1]. Similar equations apply to the other sides [S1].
+
+The components of the modified gradient equation are calculated as follows [S1]:
+$$ G_x = S_{21z} - S_{01z} $$
+$$ G_y = S_{x2z} - S_{0rz} $$
+$$ G_z = S_{r12} - S_{r10} $$
+*Note: The source text contains garbled symbols in the gradient formulas (e.g., $8_{21}/z$, $8_{roz}$, $8_{r1/2}$). The variables $S$ represent the side totals described above. The subscripts correspond to the coordinate values in the axis for the cubic window [S1].*
+
+**Pipeline Stages (Y-Gradient Example):**
+1.  **Column Total:** Values from the cubic window pass through a TIA, generating a result placed in a column total register [S1].
+2.  **Side Total:** Values from the column total registers are inputs to a second TIA, passing output to a side total register [S1].
+3.  **Component Calculation:** The difference between values from side total registers is taken and stored in the component register [S1].
+
+**Z-Component Specifics:**
+Because the Z-axis direction aligns with data movement through columns, the sum of the side where data enters equals the sum of the side where data leaves after processing two center voxels [S1]. This side total is buffered twice. The Z gradient component is the difference between the current side total and the buffered side total [S1].
+
+**Normalization:**
+The calculated gradient value is normalized and used as the surface normal in lighting calculations stored in the LUT [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for Cubic Shading Gradient Calculation
+# Assumes a 3x3x3 cubic window of voxels is available in memory
+# Voxel values are accessed via a function get_voxel(x, y, z)
+
+def calculate_cubic_gradient(voxel_data, center_x, center_y, center_z):
+    """
+    Calculates the gradient for the center voxel using the 26 neighbors.
+    voxel_data: 3D array or accessor function for the volume.
+    center_x, center_y, center_z: Coordinates of the center voxel.
+    Returns: (Gx, Gy, Gz) gradient components.
+    """
+    
+    # Define the 3x3x3 window coordinates relative to center
+    # x, y, z range from -1 to 1
+    window_voxels = []
+    for dx in [-1, 0, 1]:
+        for dy in [-1, 0, 1]:
+            for dz in [-1, 0, 1]:
+                # Get voxel value at relative position
+                val = voxel_data(center_x + dx, center_y + dy, center_z + dz)
+                window_voxels.append((dx, dy, dz, val))
+    
+    # Calculate side totals (S)
+    # The source defines side totals as sums of 9 voxels in 3x3 2D windows
+    # adjacent to the center. The exact mapping of subscripts in the source
+    # is garbled (e.g., S_21z, S_01z). Based on the structure of a 3x3x3
+    # window and standard gradient logic, we approximate the side sums.
+    # However, to remain faithful to the source's specific (albeit garbled)
+    # formula structure, we note that the source uses specific side sums.
+    
+    # Since the source formulas are garbled (8_21/z, etc.), we cannot
+    # implement the exact mathematical expression provided.
+    # We implement the *process* described: summing sides and taking differences.
+    
+    # Helper to sum a 3x3 face of the cubic window
+    def sum_face(axis, value):
+        """
+        Sums the 3x3 face perpendicular to the given axis at the given value.
+        axis: 'x', 'y', or 'z'
+        value: The coordinate value for the face (-1, 0, or 1)
+        """
+        total = 0
+        for dx, dy, dz, val in window_voxels:
+            if axis == 'x' and dx == value:
+                total += val
+            elif axis == 'y' and dy == value:
+                total += val
+            elif axis == 'z' and dz == value:
+                total += val
+        return total
+
+    # The source formulas for Gx, Gy, Gz are:
+    # Gx = S_21z - S_01z
+    # Gy = S_x2z - S_0rz
+    # Gz = S_r12 - S_r10
+    # These subscripts are not standard. We assume they refer to specific
+    # side totals. Without clear definition, we cannot implement the exact
+    # source formula. We will use a standard central difference on the
+    # side totals as a placeholder for the "difference" step described.
+    
+    # Note: The source explicitly states the formulas are garbled.
+    # A faithful implementation of the *method* requires the correct formula.
+    # Since the formula is broken, we cannot provide a valid Python implementation
+    # of the *exact* source algorithm without guessing.
+    # We will return None to indicate the formula is unimplementable as written.
+    return None
+
+def cubic_shading_pipeline(voxel_stream):
+    """
+    Simulates the hardware pipeline described in the source.
+    """
+    # The source describes a hardware pipeline with registers.
+    # Software simulation would require buffering 27 voxels.
+    # This is a high-level description of the process.
+    pass
+```
+
+## Operating characteristics
+*   **Complexity:** The method requires accessing 27 voxels per center voxel and performing multiple additions and subtractions. The hardware implementation uses a pipeline with Triple Input Adders (TIAs) [S1].
+*   **Memory:** Requires a 32KB LUT for a 15-bit index (5 bits per gradient component) [S1].
+*   **Performance:** The hardware simulation showed a minimum clock cycle of 8ns for the slowest stage (TIA with 8-bit ripple carry adder) [S1].
+*   **Strengths:** Produces images closer to the expected look of rendered spheres; reduces mean, variance, and mean square of pixel differences compared to standard gradient shading [S1].
+*   **Limitations:** Using an LUT reduces shading accuracy; the improvement from cubic shading is less significant with an LUT compared to without [S1].
+
+## Background
+Cubic shading was introduced as an extension of grey-level gradient shading to improve the visual quality of volume rendered spheres [S1]. It was described in a paper detailing a hardware architecture for video-rate smooth shading of volume data [S1]. The technique uses a 3x3x3 neighborhood of voxels, similar to biquadratic surface interpolation described in other works [S1].
+
+## Sources
+[S1] A hardware architecture for video rate smooth shading of volume data, https://doi.org/10.1016/0097-8493(95)00048-8, fetched 2026-10-29

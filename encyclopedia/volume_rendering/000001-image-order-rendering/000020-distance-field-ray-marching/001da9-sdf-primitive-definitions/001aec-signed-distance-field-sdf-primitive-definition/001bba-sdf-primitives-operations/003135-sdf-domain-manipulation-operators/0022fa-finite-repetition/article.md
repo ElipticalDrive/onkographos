@@ -2,61 +2,56 @@
 Also called: Bounded Tiling, Finite Domain Repetition, Limited Repetition
 
 ## Overview
-Finite Repetition creates a bounded, finite array of an object by repeating a base Signed Distance Function (SDF) within a specified limit. Unlike infinite tiling operators, it restricts the replication count to a specific range, preventing geometry from extending to infinity. It differs from [Infinite Repetition](1730-sdf-domain-manipulation-operators.md) by clamping the cell index, and from [Mirrored Repetition](1730-sdf-domain-manipulation-operators.md) by not reflecting the object orientation.
+Finite Repetition creates a bounded array of an object by repeating a base Signed Distance Function (SDF) within a specified limit [S1, unofficial][S2, unofficial]. Unlike infinite tiling operators, it restricts the replication count to a specific range, preventing geometry from extending to infinity [G]. It differs from [Infinite Repetition](1730-sdf-domain-manipulation-operators.md) by clamping the cell index, and from [Mirrored Repetition](1730-sdf-domain-manipulation-operators.md) by not reflecting the object orientation [G].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Query point $\mathbf{p} \in \mathbb{R}^3$, period vector $\mathbf{c} \in \mathbb{R}^3$, limit vector $\mathbf{l} \in \mathbb{R}^3$.
-- Output: Transformed point $\mathbf{p}' \in \mathbb{R}^3$.
+- Input: Query point $\mathbf{p} \in \mathbb{R}^3$, period vector $\mathbf{c} \in \mathbb{R}^3$, limit vector $\mathbf{l} \in \mathbb{R}^3$ [S2, unofficial].
+- Output: Transformed point $\mathbf{p}' \in \mathbb{R}^3$ [S2, unofficial].
 
 **Data Structures:**
-- $\mathbf{p}, \mathbf{c}, \mathbf{l}$ are typically 3-component vectors (floats).
+- $\mathbf{p}, \mathbf{c}, \mathbf{l}$ are 3-component floating-point vectors [G].
 
-**Steps:**
+**Numbered Steps:**
 1. Compute the cell index $\mathbf{q}$ by dividing the query point by the period and rounding to the nearest integer:
-   $$ \mathbf{q} = \text{round}\left(\frac{\mathbf{p}}{\mathbf{c}}\right) $$
+   $$ \mathbf{q} = \text{round}\left(\frac{\mathbf{p}}{\mathbf{c}}\right) $$ [S2, unofficial]
 2. Clamp the cell index $\mathbf{q}$ to the range $[-\mathbf{l}, \mathbf{l}]$ component-wise:
-   $$ \mathbf{q}_{\text{clamped}} = \text{clamp}(\mathbf{q}, -\mathbf{l}, \mathbf{l}) $$
+   $$ \mathbf{q}_{\text{clamped}} = \text{clamp}(\mathbf{q}, -\mathbf{l}, \mathbf{l}) $$ [S2, unofficial]
 3. Transform the point by subtracting the offset of the clamped cell:
-   $$ \mathbf{p}' = \mathbf{p} - \mathbf{c} \cdot \mathbf{q}_{\text{clamped}} $$
+   $$ \mathbf{p}' = \mathbf{p} - \mathbf{c} \cdot \mathbf{q}_{\text{clamped}} $$ [S2, unofficial]
 
 **Parameters:**
-- $\mathbf{c}$: The period or spacing between repetitions. Must be non-zero.
-- $\mathbf{l}$: The maximum number of cells in each dimension from the origin.
+- $\mathbf{c}$: The period or spacing between repetitions. Must be non-zero [G].
+- $\mathbf{l}$: The maximum number of cells in each dimension from the origin [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
 - If $\mathbf{c}$ contains zero components, division is undefined. [G] Ensure $\mathbf{c}_i > 0$ or handle zero periods by skipping repetition in that dimension.
-- Points outside the bounded region $[-\mathbf{l}\mathbf{c}, \mathbf{l}\mathbf{c}]$ are mapped to the boundary cells, creating a "hard edge" where the object stops abruptly.
+- Points outside the bounded region $[-\mathbf{l}\mathbf{c}, \mathbf{l}\mathbf{c}]$ are mapped to the boundary cells, creating a "hard edge" where the object stops abruptly [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def repeat_finite(p: Vec3, c: Vec3, l: Vec3) -> Vec3:
-    # Step 1: Divide by period and round to nearest integer
+    # Component-wise operations
     q = p / c
     q = round(q)
-    
-    # Step 2: Clamp cell index to limit
     q = clamp(q, -l, l)
-    
-    # Step 3: Transform point
     p_prime = p - c * q
-    
     return p_prime
 ```
 
 ## Subtopics
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per query.
-- **Memory Complexity:** $O(1)$.
-- **Strengths:** Efficiently creates bounded arrays without infinite recursion or memory allocation. Simple arithmetic operations.
-- **Limitations:** Creates sharp boundaries at the limit. Not suitable for infinite scenes or seamless tiling beyond the limit.
-- **When to use:** When a finite, bounded grid of objects is required.
+- **Time Complexity:** $O(1)$ per query [G].
+- **Memory Complexity:** $O(1)$ [G].
+- **Strengths:** Efficiently creates bounded arrays without infinite recursion or memory allocation. Simple arithmetic operations [G].
+- **Limitations:** Creates sharp boundaries at the limit. Not suitable for infinite scenes or seamless tiling beyond the limit [G].
+- **When to use:** When a finite, bounded grid of objects is required [G].
 
 ## Background
-Finite Repetition is a standard domain manipulation operator in SDF-based rendering, popularized by Inigo Quilez's online articles on SDFs [S1, unofficial][S2, unofficial]. It is a variation of infinite tiling, adapted for bounded scenes.
+Finite Repetition is a standard domain manipulation operator in SDF-based rendering [S1, unofficial][S2, unofficial]. It is a variation of infinite tiling, adapted for bounded scenes [G].
 
 ## Sources
 [S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)

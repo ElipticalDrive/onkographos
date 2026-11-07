@@ -1,0 +1,164 @@
+# Analytic Normal Computation for SDF Grids
+Also called: Analytic Normal
+
+## Overview
+This method computes the surface normal vector for a Signed Distance Function (SDF) grid by evaluating the analytic derivatives of the cubic polynomial defining the implicit surface within a single voxel [S1, unofficial]. It solves the problem of obtaining smooth, high-quality normals for ray marching without the numerical instability or approximation errors inherent in finite difference methods [S1, unofficial]. Unlike its sibling [Analytic Normal Computation](3205-analytic-normal-computation.md), which provides the general framework for spline-based normal derivation, this specific implementation leverages the bilinear structure of the trilinearly interpolated SDF grid to compute gradients efficiently [S1, unofficial]. It differs from [Analytic Normal Interpolation for SDF Grids](9650-analytic-normal-interpolation-for-sdf-grids.md) by computing normals strictly within the bounds of the hit voxel, rather than interpolating normals from neighboring voxels to ensure continuity across voxel boundaries [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Signed distance values at the 8 corners of the current voxel: $s_{ijk}$ where $i,j,k \in \{0,1\}$. The index $0$ corresponds to the lower bound and $1$ to the upper bound of the voxel in each dimension.
+*   Local coordinates $(x, y, z)$ of the hit point within the voxel, normalized to the range $[0, 1]$.
+
+**Outputs:**
+*   The unnormalized normal vector $\mathbf{n} = (\frac{\partial f}{\partial x}, \frac{\partial f}{\partial y}, \frac{\partial f}{\partial z})$.
+
+**Data Structures:**
+*   The SDF grid is stored as a dense array of signed distances.
+*   Voxel corners are accessed via integer offsets relative to the voxel's base index.
+
+**Steps:**
+1.  Compute the partial derivative with respect to $x$ ($\frac{\partial f}{\partial x}$) by performing a bilinear interpolation of the distance differences along the x-axis.
+2.  Compute the partial derivative with respect to $y$ ($\frac{\partial f}{\partial y}$) by performing a bilinear interpolation of the distance differences along the y-axis.
+3.  Compute the partial derivative with respect to $z$ ($\frac{\partial f}{\partial z}$) by performing a bilinear interpolation of the distance differences along the z-axis.
+4.  Assemble the normal vector $\mathbf{n}$ from the three components.
+5.  Normalize $\mathbf{n}$ to obtain the unit normal (optional, depending on downstream usage).
+
+**Formulas:**
+The partial derivative with respect to $x$ is given by [S1, unofficial]:
+$$
+\frac{\partial f(x,y,z)}{\partial x} = (1-y)(1-z)(s_{100} - s_{000}) + y(1-z)(s_{110} - s_{010}) + (1-y)z(s_{101} - s_{001}) + yz(s_{111} - s_{011})
+$$
+This can be rewritten as a bilinear interpolation [S1, unofficial]:
+$$
+y_0 = \text{lerp}(y, s_{100} - s_{000}, s_{110} - s_{010})
+$$
+$$
+y_1 = \text{lerp}(y, s_{101} - s_{001}, s_{111} - s_{011})
+$$
+$$
+\frac{\partial f}{\partial x} = \text{lerp}(z, y_0, y_1)
+$$
+
+The partial derivative with respect to $y$ is given by [S1, unofficial]:
+$$
+\frac{\partial f(x,y,z)}{\partial y} = (1-x)(1-z)(s_{010} - s_{000}) + x(1-z)(s_{110} - s_{100}) + (1-x)z(s_{011} - s_{001}) + xz(s_{111} - s_{101})
+$$
+Rewritten as bilinear interpolation [S1, unofficial]:
+$$
+x_0 = \text{lerp}(x, s_{010} - s_{000}, s_{110} - s_{100})
+$$
+$$
+x_1 = \text{lerp}(x, s_{011} - s_{001}, s_{111} - s_{101})
+$$
+$$
+\frac{\partial f}{\partial y} = \text{lerp}(z, x_0, x_1)
+$$
+
+The partial derivative with respect to $z$ is given by [S1, unofficial]:
+$$
+\frac{\partial f(x,y,z)}{\partial z} = (1-x)(1-y)(s_{001} - s_{000}) + x(1-y)(s_{101} - s_{100}) + (1-x)y(s_{011} - s_{010}) + xy(s_{111} - s_{110})
+$$
+Rewritten as bilinear interpolation [S1, unofficial]:
+$$
+x_0 = \text{lerp}(x, s_{001} - s_{000}, s_{101} - s_{100})
+$$
+$$
+x_1 = \text{lerp}(x, s_{011} - s_{010}, s_{111} - s_{110})
+$$
+$$
+\frac{\partial f}{\partial z} = \text{lerp}(y, x_0, x_1)
+$$
+
+The linear interpolation function is defined as [S1, unofficial]:
+$$
+\text{lerp}(u, a, b) = a + u(b - a)
+$$
+This form is chosen to be FMA (Fused Multiply-Add) friendly.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_analytic_normal(s, x, y, z):
+    """
+    Computes the analytic normal for an SDF grid voxel.
+    
+    Args:
+        s: Array of 8 signed distance values at voxel corners.
+           s[i][j][k] corresponds to s_ijk.
+           Indices i, j, k are 0 or 1.
+        x, y, z: Local coordinates of the hit point within the voxel [0, 1].
+        
+    Returns:
+        Tuple (nx, ny, nz) representing the unnormalized normal vector.
+    """
+    # Helper for FMA-friendly linear interpolation
+    def lerp(u, a, b):
+        return a + u * (b - a)
+
+    # Compute x-component of the normal (partial derivative w.r.t x)
+    # Differences along x-axis for the two y-z planes
+    diff_y0 = s[1][0][0] - s[0][0][0] # s_100 - s_000
+    diff_y1 = s[1][1][0] - s[0][1][0] # s_110 - s_010
+    y0 = lerp(y, diff_y0, diff_y1)
+    
+    diff_y2 = s[1][0][1] - s[0][0][1] # s_101 - s_001
+    diff_y3 = s[1][1][1] - s[0][1][1] # s_111 - s_011
+    y1 = lerp(y, diff_y2, diff_y3)
+    
+    nx = lerp(z, y0, y1)
+
+    # Compute y-component of the normal (partial derivative w.r.t y)
+    # Differences along y-axis for the two x-z planes
+    diff_x0 = s[0][1][0] - s[0][0][0] # s_010 - s_000
+    diff_x1 = s[1][1][0] - s[1][0][0] # s_110 - s_100
+    x0 = lerp(x, diff_x0, diff_x1)
+    
+    diff_x2 = s[0][1][1] - s[0][0][1] # s_011 - s_001
+    diff_x3 = s[1][1][1] - s[1][0][1] # s_111 - s_101
+    x1 = lerp(x, diff_x2, diff_x3)
+    
+    ny = lerp(z, x0, x1)
+
+    # Compute z-component of the normal (partial derivative w.r.t z)
+    # Differences along z-axis for the two x-y planes
+    diff_z0 = s[0][0][1] - s[0][0][0] # s_001 - s_000
+    diff_z1 = s[1][0][1] - s[1][0][0] # s_101 - s_100
+    z0 = lerp(x, diff_z0, diff_z1)
+    
+    diff_z2 = s[0][1][1] - s[0][1][0] # s_011 - s_010
+    diff_z3 = s[1][1][1] - s[1][1][0] # s_111 - s_110
+    z1 = lerp(x, diff_z2, diff_z3)
+    
+    nz = lerp(y, z0, z1)
+
+    return (nx, ny, nz)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Continuity:** The resulting normal field is $C^2$ continuous *inside* each voxel because the underlying function is a cubic polynomial [S1, unofficial]. However, the normals are **not** continuous across voxel boundaries ($C^0$ discontinuity) because neighboring voxels define independent surfaces that only meet at $C^0$ continuity [S1, unofficial]. This can cause visible artifacts at voxel edges if not handled by a continuity-preserving variant.
+*   **Precision:** The use of the FMA-friendly `lerp` form helps maintain precision, but the subtraction of nearby distance values ($s_{100} - s_{000}$) can suffer from catastrophic cancellation if the voxel is very small or the SDF values are very close.
+*   **Boundaries:** The method assumes the hit point is strictly within $[0,1]^3$. If the hit point is outside the voxel (e.g., due to traversal errors or extrapolation), the bilinear interpolation weights become invalid.
+
+## Subtopics
+
+### [Analytic Normal Interpolation for SDF Grids](9650-analytic-normal-interpolation-for-sdf-grids.md)
+A method for computing interpolated normals in SDF grids that differs from standard trilinear interpolation by computing normalized analytic normals at the hit point rather than at voxel corners [9650-analytic-normal-interpolation-for-sdf-grids.md]. It aims to provide smoother normals across voxel boundaries compared to the single-voxel analytic method. Choose this when visual continuity across voxel edges is critical and the performance cost of sampling neighboring voxels is acceptable.
+
+### Analytic Normal Computation for SDF Grids — Single Voxel
+A variant that computes normals using only the distance values of the single voxel containing the hit point [S1, unofficial]. It is not $C^0$ continuous across voxels. It is chosen when traversal methods do not support easy access to neighboring voxels or when memory bandwidth is a constraint. It performs similarly to the baseline finite difference method in terms of visual quality but with different computational characteristics [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The method requires approximately 30 arithmetic operations (additions, subtractions, multiplications) to compute the unnormalized normal vector, excluding the final normalization step [S1, unofficial]. This is significantly faster than the finite difference method of Parker et al., which requires 54 operations [S1, unofficial].
+*   **Memory Complexity:** $O(1)$ additional memory per hit point, as it only accesses the 8 corner values of the current voxel.
+*   **Performance:** In benchmarks using GST-A, SVS-A, and SBS-A traversal methods, analytic normals performed consistently slightly worse than the baseline method (which also uses a single voxel) in terms of frame time, but the difference was minimal [S1, unofficial]. The baseline method was empirically found to have a visual quality comparable to analytic normals [S1, unofficial].
+*   **Strengths:** High continuity ($C^2$) within voxels; computationally efficient; no need for epsilon tuning or offset point calculations required by finite difference methods [S1, unofficial].
+*   **Limitations:** Discontinuous normals across voxel boundaries can lead to shading artifacts; does not account for the global surface shape beyond the local voxel [S1, unofficial].
+*   **When to use:** When high-quality normals within voxels are required and voxel boundary discontinuities are either mitigated by other means (e.g., small voxel size) or acceptable.
+*   **When not to use:** When strict $C^0$ or higher continuity across voxel boundaries is required for shading; in this case, [Analytic Normal Interpolation for SDF Grids](9650-analytic-normal-interpolation-for-sdf-grids.md) or Falcao normals should be considered [S1, unofficial].
+
+## Background
+The method was introduced by Falcao in the paper "Ray tracing of signed distance function grids" [S1, unofficial]. It is based on the analytic differentiation of the cubic polynomial that defines the implicit surface within a voxel, as described in Section 3.1 of the source. The approach contrasts with earlier numerical methods such as forward/backward differencing or the tetrahedral method, which rely on an epsilon value to determine offset points and are prone to numerical instability [S1, unofficial]. The analytic approach ensures $C^2$ continuity inside the voxel, addressing the limitations of finite difference approximations. The paper also discusses methods for achieving continuity across voxels, such as the "Falcao normals" method which samples neighboring voxels, but notes that the single-voxel analytic method is a robust baseline when neighbor sampling is not feasible [S1, unofficial].
+
+## Sources
+[S1] Ray tracing of signed distance function grids, https://www.jcgt.org/published/0011/03/06/paper-lowres.pdf, fetched 2026-10-25 (unofficial)

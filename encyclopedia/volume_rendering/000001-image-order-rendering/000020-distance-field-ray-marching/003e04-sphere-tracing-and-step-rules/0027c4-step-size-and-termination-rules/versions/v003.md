@@ -1,0 +1,61 @@
+# Step Size and Termination Rules
+
+Also called: Ray Marching Step Rules, Sphere Tracing Step Logic
+
+## Overview
+Step Size and Termination Rules define the logic for determining how far a ray advances along its direction $\mathbf{d}$ at each iteration and the conditions under which the marching loop halts. This family solves the trade-off between rendering accuracy (avoiding missed geometry or aliasing) and computational efficiency (reducing sample counts in empty regions) [Parent]. It sets itself apart from sibling methods by providing the foundational logic for step calculation and loop termination, which specific implementations like [Sphere Tracing](1674-sphere-tracing.md) or [Standard Constant Step Ray Marching](1080-standard-constant-step-ray-marching.md) instantiate with specific constraints.
+
+## Shared principles
+The method operates on the principle that a ray $r(t) = \mathbf{o} + t\mathbf{d}$ is advanced iteratively. At each step $i$, the current position $\mathbf{p}_i$ is evaluated to determine the next step size $\Delta t_i$ and the termination status.
+
+The general update rule is:
+$$ \mathbf{p}_{i+1} = \mathbf{p}_i + \Delta t_i \mathbf{d} $$
+$$ t_{i+1} = t_i + \Delta t_i $$
+
+The step size $\Delta t_i$ is determined by a function $f(\mathbf{p}_i, \mathbf{d}, \text{context})$ [Parent]. This function must satisfy safety constraints: it must not cause the ray to overshoot geometry or density features that require sampling. For Signed Distance Fields (SDFs), this typically implies $\Delta t_i \le f(\mathbf{p}_i)$ (assuming Lipschitz constant 1) [Parent]. For volumetric data, it implies sufficient sampling density to satisfy the Nyquist criterion or capture gradients [Parent].
+
+Termination occurs when one or more of the following conditions are met:
+1.  **Convergence/Hit:** The ray has reached the surface or sufficient density. For SDFs, this is often $f(\mathbf{p}_i) < \epsilon$ [Parent]. For volumes, this may be based on accumulated opacity or density thresholds [Parent].
+2.  **Escape/Miss:** The ray has exited the scene or bounding volume, typically when accumulated distance $t > t_{max}$ [Parent].
+3.  **Resource Limit:** A maximum number of iterations $N_{max}$ is reached to prevent infinite loops [Parent].
+4.  **Oscillation/Stagnation:** The step size or distance value fails to decrease significantly, indicating the ray is stuck or oscillating near a surface or in noise [Parent].
+
+## Subtopics
+
+### [Standard Constant Step Ray Marching](1080-standard-constant-step-ray-marching.md)
+Standard Constant Step Ray Marching uses a fixed, predefined distance $\Delta t$ for every iteration, regardless of the local geometry or density [1080-standard-constant-step-ray-marching.md]. It is distinguished by its simplicity and lack of dependency on local geometry estimates for step sizing, making it suitable for non-SDF height fields or when performance constraints favor fixed-loop unrolling [1080-standard-constant-step-ray-marching.md]. Unlike Sphere Tracing, it risks overshooting thin geometry if $\Delta t$ is not chosen conservatively smaller than the smallest scene feature [1080-standard-constant-step-ray-marching.md].
+
+### [Sphere Tracing](1674-sphere-tracing.md)
+Sphere Tracing dynamically calculates the step size equal to the SDF value $f(\mathbf{p})$ at the current position [1674-sphere-tracing.md]. This guarantees that the ray never penetrates the surface, ensuring robust convergence for pathological shapes with discontinuous derivatives [1674-sphere-tracing.md]. It sets itself apart from Standard Constant Step Ray Marching by adapting the step size to the local geometry, eliminating the risk of overshooting [1674-sphere-tracing.md].
+
+### [Step Size Optimization](2054-step-size-optimization.md)
+Step Size Optimization replaces the naive constant step with a function $\Delta s = f(\mathbf{p}, \mathbf{d}, \text{context})$ that varies based on local data properties [2054-step-size-optimization.md]. It sets itself apart from Standard Constant Step Ray Marching by varying $\Delta s$ to improve efficiency in empty regions, and from Sphere Tracing by not strictly relying on the SDF value as the sole upper bound, though it may use SDFs as a heuristic [2054-step-size-optimization.md].
+
+### [Sphere Tracing Termination and Clipping](2635-sphere-tracing-termination-and-clipping.md)
+Sphere Tracing Termination and Clipping focuses specifically on the stopping logic, including oscillation detection and far-plane clipping [2635-sphere-tracing-termination-and-clipping.md]. It sets itself apart from Step Size Optimization by focusing on the *stopping* logic rather than the *step size* calculation itself [2635-sphere-tracing-termination-and-clipping.md]. It relies on geometric properties like Lipschitz continuity to guarantee safety [2635-sphere-tracing-termination-and-clipping.md].
+
+### [SDF Scaling and Early Ray Termination for Fast Sphere Tracing](3807-sdf-scaling-and-early-ray-termination-for-fast-sphere-tracin.md)
+This method accelerates sphere tracing by using a low-resolution buffer to provide a "head start" for full-resolution rays, reducing the distance rays must travel to reach surfaces [3807-sdf-scaling-and-early-ray-termination-for-fast-sphere-tracin.md]. It differs from sibling methods by dynamically adjusting ray origins based on pre-computed distance approximations and using SDF scaling (inflation/deflation) to handle holes and overlaps in the low-res pass [3807-sdf-scaling-and-early-ray-termination-for-fast-sphere-tracin.md].
+
+### Adaptive Minimum Step Size
+#### definition
+- [S1, unofficial] Dynamic adjustment of the minimum step size based on distance from camera and accumulated density to reduce samples in less important areas.
+#### step
+- [S1, unofficial] Inside the cloud (distanceField <= 0), increase minStepSize by STEP_INSCREASE_OVER_DENSITY multiplied by the current sampleDensity.
+- [S1, unofficial] After advancing the ray, increase minStepSize by STEP_INCREASE_OVER_DISTANCE multiplied by the stepSize used.
+#### parameter
+- [S1, unofficial] STEP_INSCREASE_OVER_DENSITY: Constant controlling how much minStepSize increases per unit of sampleDensity.
+- [S1, unofficial] STEP_INCREASE_OVER_DISTANCE: Constant controlling how much minStepSize increases per unit of stepSize (distance traveled).
+#### comparison
+- [S1, unofficial] Increases step size further from camera (less detail needed) and behind dense areas (less light contribution), unlike fixed step sizes.
+
+### Cone Step Mapping
+#### definition
+- [S2, unofficial] Cone step mapping and relaxed cone step mapping are space leaping acceleration techniques used in ray marching.
+
+## Background
+Sphere tracing was introduced by John Hart as a space-leaping technique [S2, unofficial]. It is also used by William Donnelly in "Per-Pixel Displacement Mapping with Distance Functions" [S2, unofficial]. The concept of using a distance field to skip empty space is foundational to efficient ray marching [S2, unofficial].
+
+## Sources
+[S1] Volumetric Cloud Rendering - Jack Tollenaar, https://www.jacktollenaar.top/articles/clouds.html, fetched 2026-10-29 (unofficial)
+[S2] What is Ray Marching? Is Sphere Tracing the same thing?, https://computergraphics.stackexchange.com/questions/161, fetched 2026-10-29 (unofficial)

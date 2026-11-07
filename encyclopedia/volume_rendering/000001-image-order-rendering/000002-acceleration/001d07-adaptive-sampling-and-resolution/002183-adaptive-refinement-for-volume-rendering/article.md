@@ -3,7 +3,7 @@
 Also called: Adaptive Refinement Volume Rendering, Image-order adaptive refinement, Interactive Adaptive Refinement, Feedback-based Adaptive Refinement
 
 ## Overview
-Adaptive Refinement for Volume Rendering is an image-order technique that balances rendering quality and performance by iteratively refining the image resolution based on local visual error [S2, unofficial][S3]. It solves the problem of high computational cost in volume ray-casting by casting rays non-uniformly, focusing computational effort on regions with high color variation (edges, silhouettes) while interpolating homogeneous regions [S2, unofficial][S3]. Unlike brute-force ray tracing which casts rays from every pixel immediately, this method starts with a coarse approximation and incrementally adds rays, allowing for interactive frame rates during exploration [S3]. It distinguishes itself from [Two-stage NeRF Rendering](925-two-stage-nerf-rendering.md) by operating on explicit voxel grids with FEM-based error control rather than neural field approximations, and from [Adaptive Sampling](1385-adaptive-sampling.md) by using a hierarchical quadtree structure for screen-space subdivision rather than stochastic jittering [S2, unofficial][S3].
+Adaptive Refinement for Volume Rendering is an image-order technique that balances rendering quality and performance by iteratively refining the image resolution based on local visual error [S2, unofficial][S3]. It solves the problem of high computational cost in volume ray-casting by casting rays non-uniformly, focusing computational effort on regions with high color variation (edges, silhouettes) while interpolating homogeneous regions [S2, unofficial][S3]. Unlike brute-force ray tracing which casts rays from every pixel immediately, this method starts with a coarse approximation and incrementally adds rays, allowing for interactive frame rates during exploration [S3]. It uses h-adaptivity (subdividing image regions) rather than p-adaptivity, which is better suited for real volume data with discontinuities [S2, unofficial].
 
 ## How it works
 The method operates as a reactive control loop or an iterative convergence process [S1][S2, unofficial][S3]. Two primary implementations exist: a FEM-based GPU approach [S2, unofficial] and a hierarchical CPU-based approach [S3]. Both share the core logic of estimating error, marking regions for refinement, and reconstructing the image [S2, unofficial][S3].
@@ -83,10 +83,6 @@ G = [[0 for _ in range(R)] for _ in range(R)]
 # C: 2D array of colors, initialized to (0,0,0)
 C = [[(0.0, 0.0, 0.0) for _ in range(R)] for _ in range(R)]
 
-def Nextromax(r): return max(1, r // 2)
-def Nextromin(r): return max(1, r // 2)
-def Nexte(e): return max(1, e // 2)
-
 def AdaptiveRefinement(R, romax, romin, epsilon):
     while romax > 1:
         for v in range(0, R, romax):
@@ -99,20 +95,21 @@ def AdaptiveRefinement(R, romax, romin, epsilon):
                 if F[u][v] == 0:
                     C[u][v] = (0.0, 0.0, 0.0)
                     G[u][v] = 0
-        romax = Nextromax(romax)
-        romin = Nextromin(romin)
-        epsilon = Nexte(epsilon)
+        # User-defined sequence to increment parameters [S3]
+        romax = max(1, romax // 2)
+        romin = max(1, romin // 2)
+        epsilon = max(1, epsilon // 2)
 
 def RayTraceRegion(u, v, w, wmin, e):
-    for i in [0, w]:
-        for j in [0, w]:
+    for i in range(0, w + 1, w):
+        for j in range(0, w + 1, w):
             pu, pv = u + i, v + j
             if pu < R and pv < R and F[pu][pv] == 0:
                 RayTrace(pu, pv)
                 F[pu][pv] = 1
     if w > wmin and Difference(u, v, w, e):
-        for i in [0, w // 2]:
-            for j in [0, w // 2]:
+        for i in range(0, w // 2 + 1, w // 2):
+            for j in range(0, w // 2 + 1, w // 2):
                 RayTraceRegion(u + i, v + j, w // 2, wmin, e)
 
 def Difference(u, v, w, e):
@@ -129,23 +126,25 @@ def InterpolateImage(romax):
             InterpolateRegion(u, v, romax)
 
 def InterpolateRegion(u, v, w):
-    for i in [0, w // 2]:
-        for j in [0, w // 2]:
+    for i in range(0, w // 2 + 1, w // 2):
+        for j in range(0, w // 2 + 1, w // 2):
             pu, pv = u + i, v + j
             if pu < R and pv < R and F[pu][pv] == 0 and G[pu][pv] == 0:
                 Interpolate(u, v, w, pu, pv)
                 G[pu][pv] = 1
     if w // 2 > 1:
-        for i in [0, w // 2]:
-            for j in [0, w // 2]:
+        for i in range(0, w // 2 + 1, w // 2):
+            for j in range(0, w // 2 + 1, w // 2):
                 InterpolateRegion(u + i, v + j, w // 2)
 
 def Interpolate(u, v, w, target_u, target_v):
-    # Linear or bilinear interpolation based on position
+    # Computes color for a pixel using linear interpolation (for region boundary midpoints) or bi-linear interpolation (for region centers) [S3]
+    # Implementation details not provided in sources.
     pass
 
 def RayTrace(u, v):
-    # Cast ray, resample at W locations, tri-linear interpolate, composite
+    # Cast ray, resample at W locations, tri-linearly interpolate from colors/opacities in 8 surrounding voxels, composite with fully opaque background to yield C(u,v) [S3]
+    # Implementation details not provided in sources.
     pass
 ```
 

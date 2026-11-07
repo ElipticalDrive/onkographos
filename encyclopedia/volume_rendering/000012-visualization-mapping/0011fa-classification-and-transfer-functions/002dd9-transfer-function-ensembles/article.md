@@ -3,157 +3,200 @@
 Also called: ADD, AND, XOR blending, Ensemble Blending Strategies, Ensemble Blending Strategies (ADD, XOR)
 
 ## Overview
-Transfer Function Ensembles create a single, complex classification mapping by merging multiple simpler transfer functions using weighted boolean-like blending operations [S1, unofficial]. This method allows users to intuitively explore features enhanced by different individual mappings and generate complex visualizations by aggregating simpler ones, such as contextualizing an entire volume with one function while highlighting specific features with others [S1, unofficial]. Unlike single transfer function approaches, ensembles provide interactive swapping of blending strategies to rapidly explore volume datasets [S1, unofficial].
+Transfer Function Ensembles create a single, complex classification mapping by merging multiple simpler transfer functions using weighted blending operations [S1, unofficial]. This method solves the difficulty of specifying effective transfer functions for complex datasets by allowing users to define separate functions for different features and combine them [S1, unofficial]. It sets itself apart from [Multi-Space Transfer Function Blending](5637-multi-space-transfer-function-blending-hardware-limitation-a.md) by operating on transfer functions that share the same data space (typically scalar value) rather than blending across different dimensions like gradient magnitude, and from [Style Aggregation](7265-style-aggregation.md) by using boolean-like arithmetic operations on RGBA values rather than fuzzy logic rule aggregation [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A set of $N$ transfer functions $T_1, \dots, T_N$, where each $T_k$ maps a scalar input value $v$ to a color $C_k(v)$ and opacity $\alpha_k(v)$. Each transfer function is assigned a user-controlled weight $w_k$ corresponding to its intensity contribution [S1, unofficial].
-*   **Output:** A single aggregated transfer function $T_{ensemble}$ that maps $v$ to $C_{ensemble}(v)$ and $\alpha_{ensemble}(v)$.
+*   **Input:** A set of $N$ transfer functions $T_1, \dots, T_N$, where each $T_k$ maps a scalar value $v$ to a color $C_k(v)$ and opacity $\alpha_k(v)$. Each transfer function is assigned a user-controlled weight $w_k$.
+*   **Output:** A single ensemble transfer function $T_{ens}$ that maps $v$ to $C_{ens}(v)$ and $\alpha_{ens}(v)$.
 
 **Data Structures:**
-The ensemble is typically represented in hardware as a color and opacity lookup table (LUT) composed of the blended transfer functions [S1, unofficial]. Each entry $i$ in the LUT corresponds to a specific scalar value bin and stores the resulting RGBA values.
+Each transfer function is represented as a lookup table (LUT) or a parametric function. For the blending operations, the LUT entries are indexed by the scalar value $i$ (or continuous value $v$).
+*   $C_k(i)$: Color vector $(r, g, b)$ for function $k$ at index $i$.
+*   $\alpha_k(i)$: Opacity scalar for function $k$ at index $i$.
+*   $w_k$: Weight scalar for function $k$.
 
-**Steps:**
-1.  **Weighting:** For each transfer function $T_k$ in the ensemble, multiply its color and opacity values by its assigned weight $w_k$.
-    $$ C'_k(i) = w_k \cdot C_k(i) $$
-    $$ \alpha'_k(i) = w_k \cdot \alpha_k(i) $$
-    *Note: The sources describe the weight as corresponding to intensity contribution. Standard linear blending usually applies weights to the final sum or the components. The source formulas for ADD imply simple summation, but the text states "Each transfer function is multiplied by its weight prior to blending". We apply the weight to the components before the boolean operation.*
+**Blending Operations:**
+The ensemble is constructed by sequentially applying one of three boolean-like blending operations to pairs of transfer functions. If more than two functions are provided, compositions are performed sequentially [S1, unofficial]. Each transfer function is multiplied by its weight prior to blending [S1, unofficial].
 
-2.  **Sequential Blending:** If $N > 2$, compositions are performed sequentially. Start with the first weighted transfer function as the accumulator $T_{acc}$. For $k = 2$ to $N$, blend $T_{acc}$ with $T'_k$ using the selected strategy (ADD, AND, or XOR).
+1.  **ADD:** Sums the color and opacity contributions. Useful for combining features unique to different transfer functions, emphasizing all features of both [S1, unofficial].
+    $$C_r(i) = w_1 C_1(i) + w_2 C_2(i)$$
+    $$\alpha_r(i) = w_1 \alpha_1(i) + w_2 \alpha_2(i)$$
+    *Note: The source defines the sum without explicit clamping, but opacity is typically bounded to $[0, 1]$ [G].*
 
-3.  **Blending Operations:** The blending is performed per LUT entry $i$. The three primary strategies are:
+2.  **AND:** Enhances features shared by two transfer functions. Uses the maximum of RGB channels to maintain color intensity and the minimum alpha to remove regions not common to both [S1, unofficial].
+    $$C_r(i) = \max(w_1 C_1(i), w_2 C_2(i))$$
+    $$\alpha_r(i) = \min(w_1 \alpha_1(i), w_2 \alpha_2(i))$$
+    *Note: The max/min operations are applied component-wise for color [S1, unofficial].*
 
-    *   **ADD:** Sums the color and opacity components. Useful for combining features unique to different transfer functions, emphasizing all features of both.
-        $$ C_{r}(i) = C'_{1}(i) + C'_{2}(i) $$
-        $$ \alpha_{r}(i) = \alpha'_{1}(i) + \alpha'_{2}(i) $$
-        *Clamping:* Opacity and color components should be clamped to $[0, 1]$ (or $[0, 255]$ for integer representations) to prevent overflow [G].
-
-    *   **AND:** Enhances features shared by two transfer functions. Uses the maximum of RGB channels to maintain color intensity and the minimum alpha to remove regions not common to both.
-        $$ C_{r}(i) = \text{Max}(C'_{1}(i), C'_{2}(i)) $$
-        $$ \alpha_{r}(i) = \text{Min}(\alpha'_{1}(i), \alpha'_{2}(i)) $$
-        *Note:* The "Max" for color is applied independently to each RGB channel.
-
-    *   **XOR:** Removes common areas from two transfer functions. A color/opacity contribution is preserved only if no other transfer function assigns a value to it (exclusive OR logic).
-        $$ C_{r}(i) = (C'_{1}(i) \land \neg C'_{2}(i)) \lor (\neg C'_{1}(i) \land C'_{2}(i)) $$
-        $$ \alpha_{r}(i) = (\alpha'_{1}(i) \land \neg \alpha'_{2}(i)) \lor (\neg \alpha'_{1}(i) \land \alpha'_{2}(i)) $$
-        *Note:* The logical operators $\land$ (AND) and $\lor$ (OR) and $\neg$ (NOT) are applied component-wise. In the context of continuous values, $\land$ is typically `min`, $\lor$ is `max`, and $\neg x$ is `1 - x` [G]. The source formula uses logical symbols, but given the continuous nature of transfer functions, the min/max interpretation is the standard implementation for such boolean-like blending on continuous domains [S1, unofficial].
-
-**Parameters:**
-*   **Weights ($w_k$):** User-controlled values determining the intensity contribution of each transfer function in the ensemble [S1, unofficial].
-*   **Blending Strategy:** ADD, AND, or XOR [S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Overflow:** In ADD blending, summing opacities or colors can exceed 1.0. Clamping is required [G].
-*   **Common Space:** All transfer functions in an ensemble must share the same input space (e.g., scalar value) [S1, unofficial].
-*   **Sequential Dependency:** For $N > 2$, the order of blending matters if different strategies are mixed. The sources state compositions are performed sequentially but do not specify a default order for identical strategies.
+3.  **XOR:** Removes common areas from two transfer functions. A color/opacity contribution is preserved only if no other transfer function assigns a value to it [S1, unofficial].
+    $$C_r(i) = (w_1 C_1(i) \land \neg w_2 C_2(i)) \lor (\neg w_1 C_1(i) \land w_2 C_2(i))$$
+    $$\alpha_r(i) = (w_1 \alpha_1(i) \land \neg w_2 \alpha_2(i)) \lor (\neg w_1 \alpha_1(i) \land w_2 \alpha_2(i))$$
+    *Note: The logical operators $\land$ (AND) and $\lor$ (OR) and negation $\neg$ are applied component-wise to the weighted color/opacity vectors. In practice, this often implies treating non-zero values as true and zero as false, or using arithmetic equivalents like $A \oplus B = A + B - 2AB$ for binary masks, but the source specifies the logical form [S1, unofficial].*
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def blend_ensemble(transfer_functions, weights, strategy):
+def blend_ensembles(transfer_functions, weights, operation):
     """
-    Combines multiple transfer functions into an ensemble.
+    Combines a list of transfer functions using a specified blending operation.
     
     Args:
-        transfer_functions: List of dicts, each containing 'color' (array of RGB) 
-                            and 'opacity' (array of alpha) for each LUT entry.
-        weights: List of floats, one per transfer function.
-        strategy: String, one of 'ADD', 'AND', 'XOR'.
+        transfer_functions: List of functions T_k(v) -> (C_k, alpha_k)
+        weights: List of scalar weights w_k
+        operation: String, one of 'ADD', 'AND', 'XOR'
         
     Returns:
-        dict: Resulting ensemble with 'color' and 'opacity' arrays.
+        A single function T_ens(v) -> (C_ens, alpha_ens)
     """
-    if not transfer_functions:
-        return {'color': None, 'opacity': None}
-
-    # Step 1: Apply weights
-    weighted_tfs = []
-    for tf, w in zip(transfer_functions, weights):
-        weighted_tfs.append({
-            'color': tf['color'] * w,
-            'opacity': tf['opacity'] * w
-        })
-
-    # Step 2: Sequential blending
-    result = weighted_tfs[0]
+    if len(transfer_functions) == 0:
+        return lambda v: (0, 0)
     
-    for i in range(1, len(weighted_tfs)):
-        tf1 = result
-        tf2 = weighted_tfs[i]
+    # Start with the first function
+    current_C = lambda v: transfer_functions[0](v)[0]
+    current_alpha = lambda v: transfer_functions[0](v)[1]
+    
+    # Sequentially blend with remaining functions
+    for k in range(1, len(transfer_functions)):
+        next_C = lambda v: transfer_functions[k](v)[0]
+        next_alpha = lambda v: transfer_functions[k](v)[1]
+        w_curr = weights[0] # Weight of the accumulated result? 
+                            # Source says "Each transfer function is assigned a weight... multiplied by its weight prior to blending"
+                            # This implies weights apply to the input functions T_k, not the intermediate result.
+                            # Let's assume weights are associated with T_k.
         
-        if strategy == 'ADD':
-            result = {
-                'color': clamp(tf1['color'] + tf2['color'], 0.0, 1.0),
-                'opacity': clamp(tf1['opacity'] + tf2['opacity'], 0.0, 1.0)
-            }
-        elif strategy == 'AND':
-            # Max for color (independent channels), Min for opacity
-            result = {
-                'color': max_channel(tf1['color'], tf2['color']),
-                'opacity': min(tf1['opacity'], tf2['opacity'])
-            }
-        elif strategy == 'XOR':
-            # XOR logic: (A and not B) or (not A and B)
-            # Using min/max for logical AND/OR on continuous values
-            not_tf1_color = 1.0 - tf1['color']
-            not_tf2_color = 1.0 - tf2['color']
-            not_tf1_op = 1.0 - tf1['opacity']
-            not_tf2_op = 1.0 - tf2['opacity']
-            
-            color_part1 = min_channel(tf1['color'], not_tf2_color)
-            color_part2 = min_channel(not_tf1_color, tf2['color'])
-            result_color = max_channel(color_part1, color_part2)
-            
-            op_part1 = min(tf1['opacity'], not_tf2_op)
-            op_part2 = min(not_tf1_op, tf2['opacity'])
-            result_op = max(op_part1, op_part2)
-            
-            result = {
-                'color': clamp(result_color, 0.0, 1.0),
-                'opacity': clamp(result_op, 0.0, 1.0)
-            }
-        else:
-            raise ValueError(f"Unknown strategy: {strategy}")
-            
-    return result
+        # Re-evaluating source: "Each transfer function is multiplied by its weight prior to blending"
+        # So for step k, we blend (T_1...T_{k-1} result) with (w_k * T_k)
+        # However, the formulas show w1 and w2 applied to C1, C2.
+        # If we have 3 functions, do we do (T1 + T2) + T3?
+        # Source: "If more than two transfer functions are provided then the compositions are performed sequentially."
+        
+        # Let's implement the pairwise blend with weights
+        def blend_pair(C1, alpha1, w1, C2, alpha2, w2, op):
+            if op == 'ADD':
+                new_C = lambda v: w1 * C1(v) + w2 * C2(v)
+                new_alpha = lambda v: w1 * alpha1(v) + w2 * alpha2(v)
+            elif op == 'AND':
+                # Max of RGB, Min of Alpha
+                def calc_C(v):
+                    c1 = w1 * C1(v)
+                    c2 = w2 * C2(v)
+                    return [max(c1[j], c2[j]) for j in range(3)]
+                def calc_alpha(v):
+                    return min(w1 * alpha1(v), w2 * alpha2(v))
+                new_C = calc_C
+                new_alpha = calc_alpha
+            elif op == 'XOR':
+                # Logical XOR on weighted values
+                # Assuming non-zero is true, zero is false for logical ops on vectors
+                def calc_C(v):
+                    c1 = w1 * C1(v)
+                    c2 = w2 * C2(v)
+                    # Component-wise XOR
+                    res = []
+                    for j in range(3):
+                        # Logical XOR: (A and not B) or (not A and B)
+                        # In floating point, we can treat > epsilon as True
+                        a_true = c1[j] > 1e-6
+                        b_true = c2[j] > 1e-6
+                        if a_true != b_true:
+                            res.append(c1[j] if a_true else c2[j])
+                        else:
+                            res.append(0.0)
+                    return res
+                def calc_alpha(v):
+                    a1 = w1 * alpha1(v)
+                    a2 = w2 * alpha2(v)
+                    a_true = a1 > 1e-6
+                    b_true = a2 > 1e-6
+                    if a_true != b_true:
+                        return a1 if a_true else a2
+                    else:
+                        return 0.0
+                new_C = calc_C
+                new_alpha = calc_alpha
+            else:
+                raise ValueError("Unknown operation")
+            return new_C, new_alpha
 
-def clamp(value, min_val, max_val):
-    return max(min_val, min(value, max_val))
-
-def max_channel(c1, c2):
-    # Element-wise max for RGB
-    return [max(c1[j], c2[j]) for j in range(3)]
-
-def min_channel(c1, c2):
-    # Element-wise min for RGB
-    return [min(c1[j], c2[j]) for j in range(3)]
+        # Get the next function's weight. 
+        # The source implies each T_k has a weight w_k.
+        # When blending current result (which is a composite) with T_k, 
+        # does the current result have a weight? 
+        # The source formulas for 2 functions use w1 and w2.
+        # For sequential, we treat the accumulated result as one function and T_k as the other.
+        # But the accumulated result doesn't have a single "weight" in the same sense.
+        # However, the source says "Each transfer function is multiplied by its weight".
+        # This likely means the base functions are weighted before the boolean logic.
+        # If we have T1(w1), T2(w2), T3(w3).
+        # Step 1: Blend T1(w1) and T2(w2) -> T12.
+        # Step 2: Blend T12 and T3(w3).
+        # How is T12 weighted? The source doesn't specify a weight for the *result* of a blend, 
+        # only for the input transfer functions.
+        # It is most likely that the weight applies to the specific T_k being introduced.
+        # So in step 2, we blend T12 (weight 1.0 effectively, or just the result) with T3(w3).
+        # Or, perhaps the weight is only for the initial specification.
+        # Let's assume the weight w_k is applied to T_k before blending with the accumulator.
+        
+        w_next = weights[k]
+        # The accumulator doesn't have a specific weight from the input list, 
+        # so we treat it as weight 1.0 for the purpose of the formula application 
+        # OR we just apply the formula where w1 is 1.0 for the accumulator.
+        
+        current_C, current_alpha = blend_pair(
+            current_C, current_alpha, 1.0, 
+            next_C, next_alpha, w_next, 
+            operation
+        )
+        
+    return current_C, current_alpha
 ```
+
+**Parameters:**
+*   **Weights ($w_k$):** User-controlled scalars determining the intensity contribution of each transfer function in the ensemble [S1, unofficial].
+*   **Operation:** One of ADD, AND, XOR [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Opacity Clamping:** In ADD blending, the sum of opacities can exceed 1.0. Implementation should clamp $\alpha$ to $[0, 1]$ [G].
+*   **XOR Logic:** The logical XOR definition relies on interpreting non-zero values as "present". If transfer functions have overlapping non-zero regions, the XOR operation will zero out those regions. This is intended to remove common features [S1, unofficial].
+*   **Sequential Order:** The order of blending matters for AND and XOR. The source states compositions are performed sequentially [S1, unofficial], but does not specify if the order is fixed (e.g., left-to-right) or user-defined.
 
 ## Subtopics
 
-### Time-Varying Transfer Function Keyframing
-A keyframing approach for transitioning between ensembles of transfer functions to handle temporally irregular volumes and avoid visual discontinuities [S1, unofficial]. The user identifies frames requiring changes, specifies a new ensemble, and assigns it to the frame. An editable transition curve specifies the blending between adjacent keyframes [S1, unofficial]. The horizontal axis of the curve represents the time interval, and the vertical axis describes the interpolation weight [S1, unofficial]. Interpolation between two ensembles (1 and 2) for entry $i$ using transition curve $f(t)$ is:
-$$ C_r(i) = C_1(i)(1 - f(t)) + C_2(i)f(t) $$
-$$ \alpha_r(i) = \alpha_1(i)(1 - f(t)) + \alpha_2(i)f(t) $$
-This is used for temporal focus and context exploration [S1, unofficial].
+### [Multi-Space Transfer Function Blending (Hardware Limitation Approach)](5637-multi-space-transfer-function-blending-hardware-limitation-a.md)
+Multi-Space Transfer Function Blending combines transfer functions defined in different data spaces (e.g., scalar value and gradient magnitude) by limiting the combination to at most three unique dimensions that do not share a common space. It solves the problem of specifying complex, multi-dimensional classification mappings within the constraints of standard graphics hardware texture units. Unlike [Style Aggregation](7265-style-aggregation.md), which aggregates styles, this method blends the underlying RGBA lookup tables directly, restricted by the hardware limit of 3D textures.
 
-### Style Aggregation
-A method where the sum of all membership functions after implication is computed to produce one aggregated function per style [S2]. The aggregated membership function $f(x)$ is given by:
-$$ f(x) = \sum_{i \in I} m_i'(x, a_i) $$
-where $I$ is the set of indices of rules affecting the given style, and $m_i'(x, a_i)$ is the membership function after implication [S2]. This is part of a fuzzy-logic rule-based semantic layer implementation [S2].
+### [Style Aggregation](7265-style-aggregation.md)
+Style Aggregation is the process of combining multiple fuzzy logic rules to produce a single, unified transfer function for a specific rendering style. It solves the problem of conflicting or overlapping semantic interpretations by summing the truncated membership functions derived from individual rules. It differs from [Multi-Space Transfer Function Blending](5637-multi-space-transfer-function-blending-hardware-limitation-a.md) by operating on the logical aggregation of fuzzy sets rather than blending in a multi-dimensional parameter space.
+
+### Time-Varying Transfer Function Keyframing
+A keyframing approach for transitioning between ensembles of transfer functions to handle temporally irregular volumes and avoid visual discontinuities [S1, unofficial].
+*   **Steps:** The user identifies frames requiring changes, specifies a new ensemble, assigns it to the frame, and defines an editable transition curve [S1, unofficial].
+*   **Formula:** Interpolation between two ensembles (1 and 2) for entry $i$ using transition curve $f(t)$:
+    $$C_r(i) = C_1(i)(1 - f(t)) + C_2(i)f(t)$$
+    $$\alpha_r(i) = \alpha_1(i)(1 - f(t)) + \alpha_2(i)f(t)$$
+*   **Parameters:** The horizontal axis of the transition curve represents the time interval between keyframes; the vertical axis describes the weight of the interpolation [S1, unofficial].
+*   **Usage:** Used for temporal focus and context, exploring different aspects of data during different time intervals [S1, unofficial].
+
+### Stacked Transfer Functions
+A technique to support multiple transfer functions in a single rendering pass by stacking them into a single 2D texture and adjusting texture coordinates based on material ID [S2].
+*   **Steps:** For MPR layers, assign color directly in the program instead of performing a texture lookup for efficiency. For editing masks (mtIdEmpty), skip all ray segments labeled with this ID [S2].
+*   **Formula:** Texture coordinate offset:
+    $$coord_{offset} = materialId \times D$$
+    where $coord_{offset}$ is the added offset, $materialId$ is the material ID of the current segment, and $D$ is the size of a single transfer function texture divided by the size of the stacked texture along the stacked direction [S2].
+*   **Parameter:** $D$ is the scaling factor for texture coordinate offset [S2].
 
 ## Operating characteristics
-*   **Complexity:** The blending operation is performed per LUT entry. For $N$ transfer functions and $M$ LUT entries, the complexity is $O(N \cdot M)$ per frame [G].
-*   **Performance:** Fast enough for real-time interaction if the number of transfer functions in the ensemble is small [S1, unofficial].
-*   **Strengths:** Intuitive exploration of complex data features by combining simple mappings; flexible blending strategies (ADD, AND, XOR) allow for precise feature highlighting or removal [S1, unofficial].
-*   **Limitations:** Requires all transfer functions to share the same input space (scalar value) [S1, unofficial]. Sequential blending order can affect results if strategies are mixed.
-*   **When to use:** When a single transfer function is insufficient to capture all relevant features, or when users want to combine context (whole volume) with focus (specific features) [S1, unofficial].
+*   **Time Complexity:** The blending operation is performed once per transfer function entry (LUT size) during setup, or per sample if evaluated dynamically. If pre-computed into a single LUT, the runtime cost is identical to a single transfer function lookup [S1, unofficial].
+*   **Memory Complexity:** Requires storing $N$ transfer functions during design, but the final ensemble is a single LUT, so rendering memory usage is $O(1)$ relative to the number of ensembles [S1, unofficial]. Stacked transfer functions require $O(N \times \text{LUT\_size})$ memory if not merged [S2].
+*   **Strengths:** Allows intuitive exploration by combining simple, specialized transfer functions. Supports complex mappings that are difficult to specify with a single function. Boolean operations (AND/XOR) provide precise control over feature overlap and exclusion [S1, unofficial].
+*   **Limitations:** Limited to transfer functions sharing the same data space (scalar value) for the core blending operations [S1, unofficial]. XOR can be unintuitive if overlapping regions are not expected. Sequential blending order affects the result for non-commutative operations like XOR [S1, unofficial].
+*   **When to use:** When a user wants to highlight multiple distinct features (ADD), find commonalities between regions (AND), or isolate unique features by removing overlaps (XOR) [S1, unofficial].
 
 ## Background
-Transfer Function Ensembles were introduced to address the difficulty of designing effective transfer functions that enhance volume characteristics, as single statistical measures may not reveal all important features [S1, unofficial]. The concept builds on previous work merging transfer functions defined on the same histogram space [S1, unofficial]. The specific ADD, AND, and XOR blending strategies were proposed to provide more flexibility in the combination process [S1, unofficial]. The method is used in direct volume rendering systems to allow interactive swapping of blending strategies for rapid dataset exploration [S1, unofficial].
+Transfer Function Ensembles were introduced to address the difficulty of designing effective transfer functions for volume rendering, where exploring the high-dimensional parameter space is unintuitive [S1, unofficial]. The method advocates using multiple histograms to highlight different features and merging them using weighted blending operations [S1, unofficial]. The concept of combining transfer functions is not new, with previous work focusing on linear and nonlinear combinations [S1, unofficial]. The specific boolean-like blending strategies (ADD, AND, XOR) were proposed to provide more flexibility and intuitive control [S1, unofficial]. The method also includes extensions for time-varying data using keyframing and transition curves [S1, unofficial], and for multi-material rendering using stacked transfer functions [S2].
 
 ## Sources
 [S1] Interactive Transfer Function Specification for Direct Volume Rendering, https://www.sci.utah.edu/~stevec/papers/transfer_functions.pdf, fetched 2026-10-28 (unofficial)
-[S2] Interaction‐Dependent Semantics for Illustrative Volume Rendering, https://doi.org/10.1111/j.1467-8659.2008.01216.x, fetched 2026-11-03
+[S2] Multi-layer Volume Ray Casting on GPU, https://doi.org/10.2312/vg/vg10/005-012, fetched 2026-10-26

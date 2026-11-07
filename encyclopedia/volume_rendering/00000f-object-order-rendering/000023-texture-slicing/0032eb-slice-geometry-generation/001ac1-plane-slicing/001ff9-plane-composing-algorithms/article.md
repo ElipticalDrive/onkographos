@@ -3,14 +3,10 @@
 Also called: Slicing Method
 
 ## Overview
-Plane Composing Algorithms are a category of direct volume rendering methods that operate by compositing several slices which comprise a volumetric model [S1, S2, unofficial]. They tend to work best when the view-plane is fixed parallel to the model, so that each of the voxels being composed may be accessed on separate planes [S1, S2, unofficial]. This approach differs from ray casting by leveraging spatial coherence through slicing, often enhanced by texture-based rendering techniques [S1, S2, unofficial].
+Plane Composing Algorithms are a category of direct volume rendering methods that operate by compositing several slices which comprise a volumetric model [S1, unofficial][S2, unofficial]. They tend to work best when the view-plane is fixed parallel to the model, so that each of the voxels being composed may be accessed on separate planes [S1, unofficial][S2, unofficial]. This approach differs from ray casting by leveraging spatial coherence through slicing, often enhanced by texture-based rendering techniques [S1, unofficial][S2, unofficial].
 
 ## Shared principles
-The core mechanism involves decomposing the volumetric model into a series of planar slices and compositing these slices to form the final image. The computational complexity of these algorithms is relative to the volume size [S1, S2, unofficial].
-
-When the view-plane is fixed parallel to the model, the algorithm achieves optimal performance because the voxels being composed can be accessed on separate planes [S1, S2, unofficial]. This alignment minimizes the computational overhead associated with resampling or interpolation that would otherwise be required for arbitrary viewing angles.
-
-Texture-based rendering is identified as a key technique within this family, where slices of volumetric data are composited using texture mapping capabilities [S1, S2, unofficial]. To enhance performance for arbitrary viewing angles, Shear-Warp factorization can be applied. This technique applies a shearing transformation to exploit the spatial coherency of the model, thereby reducing the computational complexity of rendering volume slices from non-parallel viewpoints [S1, S2, unofficial].
+The core mechanism operates by compositing several slices which comprise a volumetric model [S2, unofficial]. The computational complexity of these algorithms is relative to the volume size [S1, unofficial][S2, unofficial]. When the view-plane is fixed parallel to the model, the algorithm achieves optimal performance because the voxels being composed can be accessed on separate planes [S1, unofficial][S2, unofficial]. Texture-based rendering is identified as a key technique within this family, where slices of volumetric data are composited using texture mapping capabilities [S1, unofficial][S2, unofficial]. Shear-Warp factorization can be used to enhance performance of rendering volume slices by applying a shearing transformation to exploit spatial coherency of the model, reducing computational complexity of rendering a volume from an arbitrary viewing angle [S1, unofficial][S2, unofficial].
 
 ## Subtopics
 
@@ -21,7 +17,7 @@ Uses GPU texture units to store and sample volume slices, compositing them via f
 Applies a shearing transformation to align the volume with the view plane, allowing efficient slicing and compositing, followed by a warping step to correct the perspective. Chosen for arbitrary viewing angles where performance is critical. See [Shear-Warp Factorization](847-shear-warp-factorization.md).
 
 ## Background
-Plane Composing Algorithms are one of the two main categories of direct volume rendering algorithms, the other being Ray Casting [S1, S2, unofficial]. They were developed as an alternative to ray casting to address computational complexity, particularly by exploiting spatial coherence [S1, S2, unofficial]. The approach is closely associated with texture-based rendering techniques and the Shear-Warp factorization method, which was introduced to handle arbitrary viewing angles efficiently [S1, S2, unofficial].
+Plane Composing Algorithms are one of the two main categories of direct volume rendering algorithms, the other being Ray Casting [S1, unofficial][S2, unofficial]. They were developed as an alternative to ray casting to address computational complexity, particularly by exploiting spatial coherence [S1, unofficial][S2, unofficial]. The approach is closely associated with texture-based rendering techniques and the Shear-Warp factorization method, which was introduced to handle arbitrary viewing angles efficiently [S1, unofficial][S2, unofficial].
 
 ## Sources
 [S1] Volume Ray Casting Techniques and Applications using ..., https://halogenica.net/bin/graphics/volume-rendering-using-gpgpu/Thesis.pdf, fetched 2026-10-27 (unofficial)

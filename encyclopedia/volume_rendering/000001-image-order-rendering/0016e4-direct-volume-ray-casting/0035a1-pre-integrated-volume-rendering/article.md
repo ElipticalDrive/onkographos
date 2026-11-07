@@ -3,213 +3,193 @@
 Also called: Hardware-Accelerated Pixel Shading for Volume Rendering, PIVR, Pre-integrated Classification
 
 ## Overview
-Pre-integrated Volume Rendering (PIVR) is a texture-based direct volume ray casting technique that improves image quality for low-resolution data and non-linear transfer functions by pre-computing the integration of optical properties over a ray segment [S4, unofficial]. Unlike standard point-by-point compositing, PIVR separates the volume rendering integral into a part for the continuous scalar field and a part for the transfer function parameters, storing the results in a lookup table or texture to be accessed during rasterization [S2][S3, unofficial]. This approach overcomes the high Nyquist frequencies and aliasing artifacts caused by non-linear transfer functions without requiring additional interpolated slices or adaptive sampling rates [S1, unofficial][S4, unofficial].
+Pre-integrated Volume Rendering is a technique that accelerates direct volume ray casting by pre-computing the optical integration results for a ray segment and storing them in a lookup table for runtime retrieval [S1, unofficial]. It solves the problem of high-frequency artifacts and performance bottlenecks caused by non-linear transfer functions in standard discrete ray casting [S4, unofficial]. Unlike standard methods that apply the transfer function to individual samples, this method separates the continuous scalar field integration from the transfer function parameters, allowing the volume to be rendered segment-by-segment rather than point-by-point [S2]. This approach achieves the image quality of post-shading techniques with significantly fewer slices, making it suitable for low-resolution data and hardware with limited memory bandwidth [S4, unofficial].
 
 ## How it works
-PIVR approximates the volume rendering integral by assuming a linear progression of scalar values between two sample points (or slices) along the viewing ray [S3, unofficial]. Instead of evaluating the transfer function at every sample point and compositing, the method pre-computes the color and opacity contributions for all possible combinations of scalar values and segment lengths, storing them in a 3D texture or lookup table [S1, unofficial][S3, unofficial].
+The method approximates the volume rendering integral by assuming a linear progression of scalar values between two sample points (slices) along the viewing ray [S3, unofficial]. Instead of evaluating the transfer function at every sample, it pre-computes the color and opacity contribution of a slab of thickness $\Delta t$ bounded by scalar values $s_f$ (front) and $s_b$ (back) [S4, unofficial].
 
 ### Inputs and Outputs
-**Inputs:**
-1.  **Scalar Volume Data:** A 3D grid of scalar values $V$.
-2.  **Transfer Function (TF):** A mapping $T: \mathbb{R} \to \mathbb{R}^4$ defining color $C$ and opacity $\alpha$ for scalar values.
-3.  **Ray Segment Geometry:** Defined by the scalar values at the start ($s_f$) and end ($s_b$) of the segment, and the distance/length $L$ between them [S4, unofficial].
-
-**Outputs:**
-1.  **Pre-integrated Lookup Table (LUT):** A 3D texture where the x and y axes correspond to the scalar values at the segment boundaries ($s_f, s_b$) and the z axis corresponds to the segment length $L$ [S3, unofficial]. The texture stores the accumulated color and opacity for that segment.
-2.  **Final Image:** Computed by sampling the LUT during rasterization and compositing the segment contributions [S3, unofficial].
+*   **Inputs:**
+    *   Scalar field values at the front and back of the ray segment: $s_f, s_b \in [0, 1]$ (normalized).
+    *   Gradient vectors at the front and back slices: $\mathbf{N}$ (front), $\mathbf{M}$ (back). These are used to estimate the scalar profile within the slab [S4, unofficial].
+    *   Transfer function $T(d) \rightarrow (C, \alpha)$ mapping scalar $d$ to color $C$ and opacity $\alpha$.
+    *   Extinction coefficient $\tau(\lambda)$ (often assumed constant or absorbed into opacity) [S2].
+    *   Ray segment length $\Delta t$ (or distance between slices) [S3, unofficial].
+*   **Outputs:**
+    *   Pre-integrated color $C_{seg}$ and opacity $\alpha_{seg}$ for the segment, retrieved from a 3D lookup texture [S3, unofficial].
 
 ### Data Structures
-**Pre-integration Table (3D Texture):**
-*   **Dimensions:** $N_s \times N_s \times N_L$, where $N_s$ is the resolution for scalar values and $N_L$ is the resolution for segment lengths.
-*   **Layout:** Each texel stores a 4-component vector $(R, G, B, \alpha)$ representing the pre-integrated color and opacity for the specific combination of $(s_f, s_b, L)$ [S3, unofficial].
-*   **Encoding:** The scalar values $s_f$ and $s_b$ are typically normalized to $[0, 1]$ to index the texture [S4, unofficial].
+The core data structure is a 3D lookup texture (LUT) [S3, unofficial].
+*   **Dimensions:** $W \times H \times D$.
+*   **Axes:**
+    *   $x$-axis: Normalized scalar value at the front of the segment, $s_f$.
+    *   $y$-axis: Normalized scalar value at the back of the segment, $s_b$.
+    *   $z$-axis: Normalized distance/length of the segment, $\Delta t$ (or a parameter derived from gradients and length) [S3, S4, unofficial].
+*   **Content:** Each texel stores the pre-computed color $(R, G, B)$ and opacity $\alpha$ for the segment defined by $(s_f, s_b, \Delta t)$ under the current transfer function [S1, S3, unofficial].
+*   **Update:** The LUT must be regenerated whenever the transfer function is modified by the user [S1, unofficial].
 
-### Numbered Steps
+### Algorithm Steps
 
-1.  **Pre-computation (Offline/Initialization):**
-    *   Define the transfer function $T(d)$ mapping scalar $d$ to color $C(d)$ and opacity $\alpha(d)$.
-    *   Discretize the scalar range into $N_s$ steps and the possible segment lengths into $N_L$ steps.
-    *   For each pair of scalar values $(s_f, s_b)$ and length $L$:
-        *   Assume a linear scalar field $d(t) = s_f + \frac{s_b - s_f}{L} t$ for $t \in [0, L]$.
-        *   Compute the pre-integrated color $C_{seg}$ and opacity $\alpha_{seg}$ by integrating the optical properties over the segment. The exact integration formula depends on the optical model (typically emission-absorption).
-        *   Store $(C_{seg}, \alpha_{seg})$ in the 3D texture at coordinates $(s_f, s_b, L)$ [S1, unofficial][S3, unofficial].
-    *   *Note:* This step is computationally expensive and must be redone if the transfer function changes [S1, unofficial][S2].
+1.  **Pre-computation (Offline/Update Phase):**
+    For a fixed transfer function and fixed segment length $\Delta t$ (or a set of lengths):
+    1.  Iterate over all possible normalized scalar pairs $(s_f, s_b)$ in the unit square.
+    2.  For each pair, define the scalar field $d(t)$ along the segment $t \in [0, \Delta t]$. The standard assumption is linear interpolation: $d(t) = s_f + \frac{s_b - s_f}{\Delta t} t$ [S3, unofficial]. *Note: Some implementations use gradient information $\mathbf{N}, \mathbf{M}$ to refine this profile, but the core Engel01 method assumes linear scalar progression* [S3, unofficial].
+    3.  Compute the optical properties for the segment by integrating the volume rendering equation over $[0, \Delta t]$:
+        $$
+        \alpha_{seg} = \int_0^{\Delta t} \alpha(d(t)) e^{-\int_0^t \alpha(d(u)) du} dt
+        $$
+        $$
+        C_{seg} = \int_0^{\Delta t} C(d(t)) \alpha(d(t)) e^{-\int_0^t \alpha(d(u)) du} dt
+        $$
+        *(Note: The sources describe this as splitting the DVR integral into a part for continuous scalar values and a part for TF parameters [S2]. The exact numerical integration method (e.g., Riemann sum) is implementation-dependent but must be consistent with the runtime lookup)* [S1, unofficial].
+    4.  Store $(C_{seg}, \alpha_{seg})$ in the 3D texture at coordinates $(s_f, s_b, \Delta t)$ [S3, unofficial].
 
-2.  **Ray Casting and Sampling:**
-    *   For each pixel, generate a ray and intersect it with the volume domain.
-    *   Discretize the ray into segments. For each segment, determine the scalar values at the entry and exit points, $s_f$ and $s_b$, by sampling the volume data [S1, unofficial].
-    *   Calculate the segment length $L$ (or distance along the ray) [S4, unofficial].
-
-3.  **Lookup:**
-    *   Use $s_f$, $s_b$, and $L$ as texture coordinates to sample the pre-integration 3D texture [S3, unofficial].
-    *   Retrieve the pre-computed color $C_{seg}$ and opacity $\alpha_{seg}$ for the segment [S1, unofficial].
-
-4.  **Compositing:**
-    *   Composite the retrieved segment contributions along the ray using the standard front-to-back over operator [S1, unofficial].
-    *   Update accumulated color $C'$ and opacity $\alpha'$:
-        $$ C'_{new} = C'_{old} + (1 - \alpha'_{old}) \alpha_{seg} C_{seg} $$
-        $$ \alpha'_{new} = \alpha'_{old} + (1 - \alpha'_{old}) \alpha_{seg} $$
-    *   Repeat for all segments until the ray exits the volume or $\alpha'$ reaches 1 [S1, unofficial].
-
-### Formulas
-The core assumption is a piecewise linear scalar field between samples. The pre-integration table effectively computes:
-$$ C_{seg}(s_f, s_b, L) = \int_0^L T_C(d(t)) e^{-\int_0^t T_\alpha(d(\tau)) d\tau} dt $$
-$$ \alpha_{seg}(s_f, s_b, L) = \int_0^L T_\alpha(d(t)) e^{-\int_0^t T_\alpha(d(\tau)) d\tau} dt $$
-where $d(t)$ is the linear interpolation between $s_f$ and $s_b$ [S3, unofficial].
-
-### Parameters
-*   **$s_f$**: Scalar value on the front slice/entry point of the segment [S4, unofficial].
-*   **$s_b$**: Scalar value on the back slice/exit point of the segment [S4, unofficial].
-*   **$L$**: Length of the ray segment [S4, unofficial].
-*   **$N_s, N_L$**: Resolutions of the pre-integration table. Higher resolutions improve accuracy but increase memory usage and pre-computation time [S3, unofficial].
-
-### Edge Cases and Pitfalls
-*   **Discretization Artifacts:** The method assumes a linear progression of scalar values between slices. This assumption can introduce artifacts, particularly in regions with high curvature or rapid changes in scalar values [S3, unofficial].
-*   **Table Construction Time:** Constructing the color lookup table is time-consuming, especially for high-resolution tables or complex transfer functions [S2].
-*   **Transfer Function Updates:** The lookup table must be refreshed whenever the transfer function is modified by the user, which can cause latency in interactive applications [S1, unofficial].
-*   **Interpolation Range:** In hardware implementations using Register Combiners, interpolation values may be stored in specific ranges (e.g., 0.5 to 1.0), requiring proper input/output mappings to ensure correct interpolation [S4, unofficial].
-*   **Off-center Pixels:** For off-center pixels, the path length through voxels differs, requiring careful handling of segment lengths $L$ [S1, unofficial].
+2.  **Rendering (Runtime Phase):**
+    For each pixel and each ray segment (slab) between two volume slices:
+    1.  **Sample Scalars:** Retrieve the scalar values $s_f$ and $s_b$ at the front and back intersection points of the ray with the current slab boundaries [S4, unofficial].
+    2.  **Lookup:** Perform a 3D texture lookup using $(s_f, s_b, \Delta t)$ as coordinates to retrieve $(C_{seg}, \alpha_{seg})$ [S3, unofficial].
+        *   If $\Delta t$ varies per ray (e.g., off-center pixels), interpolation in the $z$-axis of the LUT is required [S1, unofficial].
+    3.  **Compositing:** Accumulate the segment's contribution into the frame buffer using front-to-back compositing:
+        $$
+        C_{acc}^{new} = C_{acc}^{old} + (1 - \alpha_{acc}^{old}) C_{seg}
+        $$
+        $$
+        \alpha_{acc}^{new} = \alpha_{acc}^{old} + (1 - \alpha_{acc}^{old}) \alpha_{seg}
+        $$
+    4.  **Repeat:** Continue to the next slab until the ray exits the volume or $\alpha_{acc}$ reaches a threshold (early ray termination) [S10, S12].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def precompute_table(tf, scalar_range, length_range, n_s, n_l):
+def preintegrated_volume_rendering(volume_data, transfer_function, camera, screen_width, screen_height):
     """
-    Pre-compute the 3D lookup table for pre-integrated volume rendering.
-    
-    Args:
-        tf: Transfer function object with methods get_color(d) and get_opacity(d).
-        scalar_range: Tuple (min_val, max_val) for scalar values.
-        length_range: Tuple (min_len, max_len) for segment lengths.
-        n_s: Number of discretization steps for scalar values.
-        n_l: Number of discretization steps for segment lengths.
-        
-    Returns:
-        lut: 3D numpy array of shape (n_s, n_s, n_l) storing (R, G, B, alpha).
+    Renders a volume using pre-integrated lookup tables.
+    Assumes a 3D LUT has been pre-computed for the current transfer function.
     """
-    lut = np.zeros((n_s, n_s, n_l, 4))
-    
-    s_vals = np.linspace(scalar_range[0], scalar_range[1], n_s)
-    l_vals = np.linspace(length_range[0], length_range[1], n_l)
-    
-    for i, s_f in enumerate(s_vals):
-        for j, s_b in enumerate(s_vals):
-            for k, L in enumerate(l_vals):
-                # Assume linear scalar field d(t) from s_f to s_b over length L
-                # Integrate optical properties over the segment
-                # This is a numerical approximation of the integral
-                num_samples = 100 # High resolution for accurate pre-computation
-                dt = L / num_samples
-                accumulated_color = np.array([0.0, 0.0, 0.0])
-                accumulated_opacity = 0.0
-                transmittance = 1.0
+    # 1. Pre-compute LUT if transfer function changed
+    if transfer_function_changed:
+        lut = compute_preintegration_lut(transfer_function, num_slices=256, num_lengths=64)
+        transfer_function_changed = False
+
+    # Initialize frame buffer
+    final_color = np.zeros((screen_height, screen_width, 3))
+    final_alpha = np.zeros((screen_height, screen_width))
+
+    # 2. Ray Casting Loop
+    for y in range(screen_height):
+        for x in range(screen_width):
+            ray_origin, ray_direction = generate_ray(camera, x, y)
+            t_start, t_end = intersect_volume(ray_origin, ray_direction, volume_bounds)
+            
+            if t_start is None:
+                continue
+
+            # Discretize ray into slabs (slices)
+            # N is the number of slices in the volume texture along the ray
+            # In texture slicing, N is often fixed by the texture resolution
+            num_slabs = volume_texture_depth 
+            dt = (t_end - t_start) / num_slabs
+            
+            acc_color = np.array([0.0, 0.0, 0.0])
+            acc_alpha = 0.0
+            
+            for i in range(num_slabs):
+                t_front = t_start + i * dt
+                t_back = t_start + (i + 1) * dt
                 
-                for m in range(num_samples):
-                    t = (m + 0.5) * dt
-                    # Linear interpolation of scalar value
-                    d = s_f + (s_b - s_f) * (t / L)
-                    
-                    # Get optical properties from TF
-                    c_seg, a_seg = tf.get_color(d), tf.get_opacity(d)
-                    
-                    # Accumulate contribution
-                    # C_seg = C * alpha * transmittance
-                    # alpha_seg = alpha * transmittance
-                    # But we need to integrate over the segment length
-                    # Approximation: Riemann sum
-                    contribution_color = c_seg * a_seg * transmittance * dt
-                    contribution_opacity = a_seg * transmittance * dt
-                    
-                    accumulated_color += contribution_color
-                    accumulated_opacity += contribution_opacity
-                    
-                    # Update transmittance for next step
-                    transmittance *= (1.0 - a_seg * dt)
+                # Sample scalar values at slab boundaries
+                # Interpolate from volume texture
+                s_f = sample_volume(volume_data, ray_origin + t_front * ray_direction)
+                s_b = sample_volume(volume_data, ray_origin + t_back * ray_direction)
                 
-                lut[i, j, k] = [accumulated_color[0], accumulated_color[1], accumulated_color[2], accumulated_opacity]
+                # Normalize scalars to [0, 1] if necessary
+                s_f = normalize(s_f)
+                s_b = normalize(s_b)
+                
+                # Lookup pre-integrated segment properties
+                # z-coordinate corresponds to normalized slab thickness or distance
+                # Note: dt might need normalization based on max possible ray length
+                z_coord = normalize_length(dt, max_length)
+                
+                seg_color, seg_alpha = lookup_lut(lut, s_f, s_b, z_coord)
+                
+                # Front-to-back compositing
+                if acc_alpha >= 1.0:
+                    break # Early termination
+                    
+                weight = (1.0 - acc_alpha)
+                acc_color += weight * seg_color
+                acc_alpha += weight * seg_alpha
+                
+                if acc_alpha >= 1.0:
+                    acc_color += seg_color # Add full color if fully opaque
+                    acc_alpha = 1.0
+                    break
+
+            final_color[y, x] = acc_color
+            final_alpha[y, x] = acc_alpha
+
+    return final_color, final_alpha
+
+def compute_preintegration_lut(transfer_function, num_slices=256, num_lengths=64):
+    """
+    Pre-computes the 3D lookup table for color and opacity.
+    """
+    lut = np.zeros((num_slices, num_slices, num_lengths, 4)) # R, G, B, A
+    
+    # Pre-compute opacity and color integrals for all scalar pairs
+    # This is computationally expensive and done offline or on CPU
+    for i in range(num_slices):
+        s_f = i / (num_slices - 1)
+        for j in range(num_slices):
+            s_b = j / (num_slices - 1)
+            
+            # Define scalar profile d(t) for t in [0, 1] (normalized length)
+            # Linear interpolation between s_f and s_b
+            # d(t) = s_f + (s_b - s_f) * t
+            
+            # Integrate optical properties
+            # Using a fine Riemann sum for accuracy during LUT generation
+            num_steps = 100
+            integral_alpha = 0.0
+            integral_color = np.array([0.0, 0.0, 0.0])
+            transmittance = 1.0
+            
+            for k in range(num_steps):
+                t = (k + 0.5) / num_steps
+                d_t = s_f + (s_b - s_f) * t
+                
+                # Get TF properties
+                alpha_t, color_t = transfer_function(d_t)
+                
+                # Contribution of this infinitesimal segment
+                # d(alpha) = alpha_t * exp(-integral_alpha) * dt
+                # d(color) = color_t * alpha_t * exp(-integral_alpha) * dt
+                
+                contribution_alpha = alpha_t * transmittance / num_steps
+                contribution_color = color_t * alpha_t * transmittance / num_steps
+                
+                integral_alpha += contribution_alpha
+                integral_color += contribution_color
+                
+                transmittance *= (1.0 - contribution_alpha)
+            
+            # Store in LUT for all lengths (assuming constant length for simplicity, 
+            # or interpolate later)
+            # In Engel01, length is often fixed or interpolated in Z
+            for l in range(num_lengths):
+                lut[i, j, l] = [contribution_color[0], contribution_color[1], contribution_color[2], integral_alpha]
                 
     return lut
-
-def render_with_pivr(volume, tf, lut, camera, n_s, n_l, scalar_range, length_range):
-    """
-    Render volume using pre-integrated lookup table.
-    
-    Args:
-        volume: 3D array of scalar values.
-        tf: Transfer function.
-        lut: Pre-computed lookup table.
-        camera: Camera object with ray generation method.
-        n_s, n_l: Resolutions used for LUT.
-        scalar_range, length_range: Ranges used for LUT.
-        
-    Returns:
-        image: Rendered 2D image.
-    """
-    width, height = camera.resolution
-    image = np.zeros((height, width, 3))
-    
-    s_vals = np.linspace(scalar_range[0], scalar_range[1], n_s)
-    l_vals = np.linspace(length_range[0], length_range[1], n_l)
-    
-    for y in range(height):
-        for x in range(width):
-            ray = camera.get_ray(x, y)
-            t_start, t_end = ray.intersect_volume(volume.bbox)
-            
-            accumulated_color = np.array([0.0, 0.0, 0.0])
-            accumulated_opacity = 0.0
-            
-            # Discretize ray into segments
-            # For simplicity, assume fixed step size or voxel traversal
-            # In practice, this involves traversing the volume grid
-            current_t = t_start
-            while current_t < t_end and accumulated_opacity < 0.99:
-                # Determine segment endpoints
-                t_next = min(current_t + step_size, t_end)
-                
-                # Sample scalar values at segment boundaries
-                p_start = ray.origin + ray.direction * current_t
-                p_end = ray.origin + ray.direction * t_next
-                
-                s_f = volume.sample(p_start)
-                s_b = volume.sample(p_end)
-                
-                # Calculate segment length
-                L = t_next - current_t
-                
-                # Normalize coordinates for LUT lookup
-                s_f_norm = (s_f - scalar_range[0]) / (scalar_range[1] - scalar_range[0])
-                s_b_norm = (s_b - scalar_range[0]) / (scalar_range[1] - scalar_range[0])
-                L_norm = (L - length_range[0]) / (length_range[1] - length_range[0])
-                
-                # Clamp to [0, 1]
-                s_f_norm = np.clip(s_f_norm, 0, 1)
-                s_b_norm = np.clip(s_b_norm, 0, 1)
-                L_norm = np.clip(L_norm, 0, 1)
-                
-                # Map to LUT indices
-                i = int(s_f_norm * (n_s - 1))
-                j = int(s_b_norm * (n_s - 1))
-                k = int(L_norm * (n_l - 1))
-                
-                # Lookup pre-integrated color and opacity
-                seg_color, seg_opacity = lut[i, j, k, :3], lut[i, j, k, 3]
-                
-                # Composite
-                # C' = C' + (1 - alpha') * alpha_seg * C_seg
-                # alpha' = alpha' + (1 - alpha') * alpha_seg
-                weight = (1.0 - accumulated_opacity) * seg_opacity
-                accumulated_color += weight * seg_color
-                accumulated_opacity += weight
-                
-                current_t = t_next
-                
-            image[y, x] = accumulated_color
-            
-    return image
 ```
+
+### Parameters and Edge Cases
+*   **Transfer Function Updates:** The LUT is specific to the transfer function. Any change to the TF requires regenerating the entire 3D texture [S1, unofficial]. This is a major performance cost if interactive TF adjustment is required [S2].
+*   **Linear Assumption:** The method assumes scalar values change linearly between slices [S3, unofficial]. This can introduce artifacts if the scalar field has high curvature or if the transfer function has high-frequency features that are not captured by the linear interpolation [S3, S4, unofficial].
+*   **Gradient Information:** Some hardware implementations (e.g., Register Combiners) use gradients $\mathbf{N}$ and $\mathbf{M}$ to refine the interpolation, storing interpolation values in specific color channels (alpha or blue) [S4, unofficial]. This requires proper input/output mapping as values may be stored in the range [0.5, 1.0] [S4, unofficial].
+*   **Off-center Pixels:** For pixels where the ray does not pass through the center of voxels, the path length $\Delta t$ varies. The LUT must support interpolation along the distance axis (z-axis) [S1, unofficial].
 
 ## Subtopics
 
@@ -220,22 +200,17 @@ Adaptive Pre-integration is a technique applied to texture slicing that pre-comp
 Direct Volume Rendering with Pre-integration renders adapted tetrahedral meshes using direct volume ray casting, accelerated by pre-integration computed in shaders. It extends pre-integrated volume rendering, which allows for faster evaluation by pre-computing all possible results from the integral and storing them in a table for lookup [Parent], to unstructured volumetric data (tetrahedral meshes). Unlike methods limited to regular grids, this approach handles the geometric complexity of unstructured grids by storing the mesh data structure in textures and using barycentric interpolation for value estimation.
 
 ## Operating characteristics
-*   **Time Complexity:** The pre-computation step is $O(N_s^2 \cdot N_L \cdot K)$, where $K$ is the number of integration steps within each segment. This is done offline or when the TF changes. The rendering step is $O(N_{segments})$ per pixel, where each segment requires a 3D texture lookup and a compositing operation. This is significantly faster than point-by-point integration if the number of segments is small [S1, unofficial][S2].
-*   **Memory Complexity:** The lookup table requires $O(N_s^2 \cdot N_L)$ memory. For high-resolution tables, this can be substantial [S3, unofficial].
-*   **Measured Performance:** In early implementations using a 200 MHz CPU and an nVidia GeForce3, a performance of 4 fps was achieved for a 256x256 viewport [S1, unofficial].
-*   **Strengths:**
-    *   Improves image quality for low-resolution volume data and non-linear transfer functions with high frequencies [S4, unofficial].
-    *   Reduces under-sampling artifacts compared to pre- and post-classification [S2].
-    *   Avoids the need for additional interpolated slices, saving memory bandwidth [S4, unofficial].
+*   **Performance:** Significantly faster than standard ray casting for low-resolution data because it reduces the number of texture lookups and transfer function evaluations per pixel [S4, unofficial]. Engel et al. achieved 4 fps for a 256x256 viewport on a 200 MHz CPU and GeForce3 [S1, unofficial].
+*   **Memory:** Requires a 3D texture for the LUT. The size depends on the resolution of $s_f, s_b$ and $\Delta t$. For high precision, this can be large [S2].
+*   **Image Quality:** Reduces under-sampling artifacts compared to pre- and post-classification because the Nyquist frequency for the continuous signal is not increased by the TF's non-linear properties [S2]. It handles non-linear TFs with high frequencies better than standard slicing [S4, unofficial].
 *   **Limitations:**
-    *   Discretization artifacts due to the linear scalar assumption [S3, unofficial].
-    *   High cost of constructing the lookup table [S2].
-    *   Requires table refresh on TF change [S1, unofficial].
-*   **When to Use:** Suitable for applications with fixed or slowly changing transfer functions, low-resolution data, or where high image quality is required without the cost of adaptive sampling or high-resolution textures [S4, unofficial].
-*   **When Not to Use:** Not suitable for interactive applications with frequently changing transfer functions due to the cost of table regeneration [S1, unofficial]. Not ideal for highly heterogeneous volumes where the linear assumption breaks down significantly [S3, unofficial].
+    *   **Artifacts:** Discretization assumes linear scalar progression, which can cause artifacts if this assumption is violated [S3, unofficial].
+    *   **Update Cost:** Regenerating the LUT for every TF change is time-consuming [S2].
+    *   **Fixed Step Size:** Basic pre-integration assumes constant ray segment lengths, which may not hold for all viewing angles or off-center pixels without interpolation [S1, unofficial].
+*   **When to Use:** Suitable for real-time visualization of low-to-medium resolution volumes on hardware with limited bandwidth, especially when the transfer function is static or changes infrequently [S4, unofficial].
 
 ## Background
-Pre-integrated Volume Rendering was introduced by Klaus Engel et al. in 2001 [Engel01]. The method was developed to address the limitations of standard texture-based volume rendering, particularly the aliasing artifacts caused by non-linear transfer functions when rendering low-resolution data [S1, unofficial][S4, unofficial]. It builds on earlier work by Röttger et al. [Röttger00] and was later extended with hardware acceleration techniques [S2]. The approach was later combined with volumetric clipping and advanced lighting effects by Röttger et al. [Röttger03] [S1, unofficial].
+Pre-integrated volume rendering was introduced by Klaus Engel, Thomas Kraus, and Thomas Ertl in 2001 [Engel01]. The method was developed to overcome the limitations of texture-based volume rendering (slicing) which suffered from artifacts when using non-linear transfer functions or low-resolution data [S4, unofficial]. It builds on earlier ideas by Röttger et al. [Röttger00] and extends them for regular grids [S1, unofficial]. The technique was later combined with volumetric clipping and advanced lighting effects by Röttger et al. [Röttger03] [S1, unofficial]. It is a foundational technique for hardware-accelerated volume rendering on early GPUs [S2].
 
 ## Sources
 [S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)

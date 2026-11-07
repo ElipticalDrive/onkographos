@@ -1,1980 +1,596 @@
-arXiv:2412.03489v3 [cs.GR] 6 Aug 2025
-Stochastic Gradient Estimation for Higher-order Differentiable Rendering
-Zican Wang
-University College London
-Michael Fischer
-Adobe Research
-Tobias Ritschel
-University College London
+# Stochastic Gradient Estimation for Higher-order Differentiable Rendering
+
+Zican Wang University College London
+
 robert.wang.19@ucl.ac.uk
+
+Michael Fischer Adobe Research
+
 mifischer@adobe.com
-t.ritschel@ucl.ac.uk
-Abstract
-We derive methods to compute higher-order differentials
-(Hessians and Hessian-vector products) of the rendering
-operator. Our approach is based on importance sampling of
-a convolution that represents the differentials of rendering
-parameters and shows to be applicable to both rasterization
-and path tracing. We further suggest an aggregate sampling strategy to importance-sample multiple dimensions
-of one convolution kernel simultaneously. We demonstrate
-that this information improves convergence when used in
-higher-order optimizers such as Newton or Conjugate Gradient relative to a gradient descent baseline in several inverse rendering tasks.
-1. Introduction
-Inverse rendering is concerned with optimizing the parameters of a scene to minimize a loss. This can be a useful tool
-when the true parameters of the scene are unknown or nontrivial to set for a human expert, and therefore need to be
-inferred from observations or measurements. Examples for
-such scenarios are multi-view reconstruction [18] or the recovery of illumination and reflectance properties [38]. Differentiable rendering has recently become a popular tool for
-this optimization, as automatic differentiation (AD) frameworks have become more widespread.
-However, differentiating the rendering process is far
-from trivial, as the rendering function [12] has zero and/or
-undefined gradients and step edges. Moreover, as many rendering operations rely on integration, discontinuities in the
-rendering pipeline cause problems for AD-engines, as we
-can no longer naı̈vely exchange the integral- and derivativecomputations. Recent research therefore has designed a
-plethora of differentiable renderers [16], which compute
-gradients in various ways, typically incurring more [15, 20]
-or less [5, 7, 8] implementation and compute effort.
-A surprising insight is that, while these special renderers allow deriving gradients w.r.t. the scene parameters by
-differentiating (and back-propagating through) the rendering operator, virtually all of them are limited to first-order
-Gradients (Previous)
-Hessians (Ours)
-Figure 1. Our approach allows sampling the Hessian for inverse
-rendering, here for the task of rotating the cup around its horizontal
-(x0 ) and vertical axes (x1 ). The estimated positive and negative
-gradients are shown in blue and red, respectively.
-derivatives, and hence to expressing the gradient solely locally at a point in the parameter space. At the time of
-writing, no attempts to derive the Hessians required for
-higher-order inverse rendering methods have been published. However, decades of optimization research have
-shown the potential of higher-order methods in convergence
-and robustness [22].
-In this paper, we argue that these benefits are also applicable to inverse rendering scenarios and show that they
-translate to net-gains in optimization time and performance
-in differentiable rendering. We tackle the Achilles’ heel
-of higher-order optimizers – their increased per-iteration
-cost and computational / storage requirements – by developing efficient Monte Carlo (MC) estimators of the
-required higher-order quantities that can be importancesampled with established techniques [23].
-Our method leads to speedups of 2.71× over previous
-methods, and net-gains in optimization time, speed and robustness while only assuming the rendering operator to be
-a black box that can be point-sampled.
-2. Previous Work
-Gradient-based Optimization, the main workhorse of
-modern neural network training and inverse rendering, uses
-the gradient of the objective function to take iterative steps
-in the parameter space towards an improved solution until a
-(local) minimum is found. The exact nature of these steps
-varies with the optimizer that is being used [27].
-First-order optimizers are simple to implement and
-cheap to execute but disregard important higher-order information about the shape of the objective function that could
-aid optimization, such as the second-order derivative. This
-usually comes at the expense of higher iteration counts, as
-many small steps are needed to converge to the solution.
-In contrast, higher-order optimizers incorporate information
-about the shape of the objective function, which usually allows them to take bigger steps in parameter space, leading
-to fewer iterations until convergence.
-For the specific case of second-order optimization, this
-additional information is often provided via the Hessian H
-(or approximations thereof) and the Hessian-vector product (HVP). The Hessian contains the second-order derivatives of the objective function w.r.t. the optimization parameters, and can be interpreted as the curvature of the objective
-function. As such, it can be used to inform the optimizer
-about how quickly the current gradient is changing and thus,
-in turn, about how large the optimization step should be.
-Notation The following will use lowercase boldface to
-denote vectors and uppercase sans to denote matrices, respectively. Operators, formally defined as functions acting
-on functions, will be denoted in uppercase Roman lettering
-in order to avoid confusion with regular functions.
-Gradient descent should be familiar to most readers, so
-we here recall only its terminology: The first-order Taylor
-expansion of the cost function f at position θ is
+
+Tobias Ritschel University College London t.ritschel@ucl.ac.uk
+
+## Abstract
+
+We derive methods to compute higher-order differentials (Hessians and Hessian-vector products) of the rendering operator. Our approach is based on importance sampling of a convolution that represents the differentials of rendering parameters and shows to be applicable to both rasterization and path tracing. We further suggest an aggregate sampling strategy to importance-sample multiple dimensions of one convolution kernel simultaneously. We demonstrate that this information improves convergence when used in higher-order optimizers such as Newton or Conjugate Gradient relative to a gradient descent baseline in several inverse rendering tasks.
+
+## 1. Introduction
+
+Inverse rendering is concerned with optimizing the parameters of a scene to minimize a loss. This can be a useful tool when the true parameters of the scene are unknown or nontrivial to set for a human expert, and therefore need to be inferred from observations or measurements. Examples for such scenarios are multi-view reconstruction [18] or the recovery of illumination and reflectance properties [38]. Differentiable rendering has recently become a popular tool for this optimization, as automatic differentiation (AD) frameworks have become more widespread.
+
+However, differentiating the rendering process is far from trivial, as the rendering function [12] has zero and/or undefined gradients and step edges. Moreover, as many rendering operations rely on integration, discontinuities in the rendering pipeline cause problems for AD-engines, as we can no longer na¨ıvely exchange the integral- and derivativecomputations. Recent research therefore has designed a plethora of differentiable renderers [16], which compute gradients in various ways, typically incurring more [15, 20] or less [5, 7, 8] implementation and compute effort.
+
+A surprising insight is that, while these special renderers allow deriving gradients w.r.t. the scene parameters by differentiating (and back-propagating through) the rendering operator, virtually all of them are limited to first-order
+
+
+
+Figure 1. Our approach allows sampling the Hessian for inverse rendering, here for the task of rotating the cup around its horizontal (x0) and vertical axes (x1). The estimated positive and negative gradients are shown in blue and red, respectively.
+
+derivatives, and hence to expressing the gradient solely locally at a point in the parameter space. At the time of writing, no attempts to derive the Hessians required for higher-order inverse rendering methods have been published. However, decades of optimization research have shown the potential of higher-order methods in convergence and robustness [22].
+
+In this paper, we argue that these benefits are also applicable to inverse rendering scenarios and show that they translate to net-gains in optimization time and performance in differentiable rendering. We tackle the Achilles' heel of higher-order optimizers – their increased per-iteration cost and computational / storage requirements – by developing efficient Monte Carlo (MC) estimators of the required higher-order quantities that can be importancesampled with established techniques [23].
+
+Our method leads to speedups of 2.71× over previous methods, and net-gains in optimization time, speed and robustness while only assuming the rendering operator to be a black box that can be point-sampled.
+
+## 2. Previous Work
+
+Gradient-based Optimization, the main workhorse of modern neural network training and inverse rendering, uses the gradient of the objective function to take iterative steps in the parameter space towards an improved solution until a (local) minimum is found. The exact nature of these steps varies with the optimizer that is being used [27].
+
+First-order optimizers are simple to implement and cheap to execute but disregard important higher-order information about the shape of the objective function that could aid optimization, such as the second-order derivative. This usually comes at the expense of higher iteration counts, as many small steps are needed to converge to the solution. In contrast, higher-order optimizers incorporate information about the shape of the objective function, which usually allows them to take bigger steps in parameter space, leading to fewer iterations until convergence.
+
+For the specific case of second-order optimization, this additional information is often provided via the Hessian H (or approximations thereof) and the Hessian-vector product (HVP). The Hessian contains the second-order derivatives of the objective function w.r.t. the optimization parameters, and can be interpreted as the curvature of the objective function. As such, it can be used to inform the optimizer about how quickly the current gradient is changing and thus, in turn, about how large the optimization step should be.
+
+Notation The following will use lowercase boldface to denote vectors and uppercase sans to denote matrices, respectively. Operators, formally defined as functions acting on functions, will be denoted in uppercase Roman lettering in order to avoid confusion with regular functions.
+
+Gradient descent should be familiar to most readers, so we here recall only its terminology: The first-order Taylor expansion of the cost function f at position θ is
+
+$$f(\boldsymbol{\theta}) \approx f(\boldsymbol{\theta}^t) + g(\boldsymbol{\theta}^t)^T(\boldsymbol{\theta} - \boldsymbol{\theta}^t),$$
+
+where g is the gradient ∇f = df /dθ of f. The minimum is where the derivative is zero, which we can solve for as
+
+$$\frac{d}{d\theta} f(\theta) = 0 \approx g(\theta^t). \quad (1)$$
+
+As f is a linear function only locally, we only make small steps with step size γ, by an update direction −g(θ t ), as in
+
+$$\boldsymbol{\theta}^{t+1} = \boldsymbol{\theta}^t - \gamma g(\boldsymbol{\theta}^t).$$
+
+Newton's method is one of the most-used second-order optimizers. This term is derived from the second-order Taylor expansion of the objective f around a point θ:
+
+$$f(\boldsymbol{\theta}) \approx f(\boldsymbol{\theta}^t) + g(\boldsymbol{\theta}^t)^T(\boldsymbol{\theta} - \boldsymbol{\theta}^t) + \frac{1}{2}(\boldsymbol{\theta} - \boldsymbol{\theta}^t)^T \mathbf{H}(\boldsymbol{\theta}^t)(\boldsymbol{\theta} - \boldsymbol{\theta}^t)$$
+,
+
+where H is ∇2f = d2f /d 2θ, the Hessian of f.
+
+Ideally, we would like our update step to take us to an optimum. There, the derivative is necessarily zero:
+
+$$\frac{d}{d\theta} f(\theta) = 0 \approx g(\theta^t) + H(\theta^t)(\theta - \theta^t). \quad (2)$$
+
 Solving for θ then yields the update rule
-θ t+1 = θ t − γH−1 (θ t )g(θ t ),
-(3)
-where v = −H−1 (θ t )g(θ t ) is called the Newton direction.
-Newton’s method requires the computation, storage, and
-inversion of the full Hessian, which quickly becomes a
-bottleneck in higher dimensions, as the Hessian for an ndimensional optimization problem is in Rn×n .
-Newton Conjugate Gradient [31], upgrades Newton’s
-method in two ways. First, it solves for Newton’s direction iteratively as per the linear equation H(θ)v = −g(θ)
-using conjugate directions [31]. Second, instead of an arbitrary step length γ, it also decides the scalar α by which we
-move along this direction v. To derive α, first consider the
-Taylor expansion:
-d
-f (θ + αv) ≈ g(θ)T v + αvT H(θ)v = 0
-dα
-(4)
+
+$$\boldsymbol{\theta}^{t+1} = \boldsymbol{\theta}^t - \gamma \mathbf{H}^{-1}(\boldsymbol{\theta}^t) g(\boldsymbol{\theta}^t), \quad (3)$$
+
+where v = −H −1 (θ t )g(θ t ) is called the Newton direction.
+
+Newton's method requires the computation, storage, and inversion of the full Hessian, which quickly becomes a bottleneck in higher dimensions, as the Hessian for an ndimensional optimization problem is in R n×n.
+
+Newton Conjugate Gradient [31], upgrades Newton's method in two ways. First, it solves for Newton's direction iteratively as per the linear equation H(θ)v = −g(θ) using conjugate directions [31]. Second, instead of an arbitrary step length γ, it also decides the scalar α by which we move along this direction v. To derive α, first consider the Taylor expansion:
+
+$$\frac{d}{d\alpha} f(\boldsymbol{\theta} + \alpha \mathbf{v}) \approx g(\boldsymbol{\theta})^T \mathbf{v} + \alpha \mathbf{v}^T \mathbf{H}(\boldsymbol{\theta}) \mathbf{v} = 0 \quad (4)$$
+
 which can be re-arranged to
-α=−
-g T (θ)v
-.
-vT H(θ)v
-(5)
-The update rule for the Newton Conjugate Gradient is more
-involved: First, we maintain the direction v and a residual
-r, which are initialized to be the gradient at the initial positions:
-v0 = r0 = −g(θ t )
-(6)
-f (θ) ≈ f (θ t ) + g(θ t )T (θ − θ t ),
+
+
+$$\alpha = -\frac{g^T(\boldsymbol{\theta})\mathbf{v}}{\mathbf{v}^T\mathbf{H}(\boldsymbol{\theta})\mathbf{v}}. \quad (5)$$
+
+The update rule for the Newton Conjugate Gradient is more involved: First, we maintain the direction v and a residual r, which are initialized to be the gradient at the initial positions:
+
+$$\mathbf{v}^0 = \mathbf{r}^0 = -g(\boldsymbol{\theta}^t) \quad (6)$$
+
 We then find the α by equation Eq. 5 and update the point:
-where g is the gradient ∇f = df /dθ of f . The minimum
-is where the derivative is zero, which we can solve for as
-θ t+1 = θ t + αvt .
-d
-f (θ) = 0 ≈ g(θ t ).
-dθ
-(1)
-As f is a linear function only locally, we only make small
-steps with step size γ, by an update direction −g(θ t ), as in
-(7)
-The next direction is chosen by updating the residual r
-and computing a new conjugate search direction v with the
-Fletcher-Reeves formula [9]:
-rt+1 = rt − αH(θ t )vt
-rt+1,T rt+1
-rt,T rt
-t+1
-t+1
-v
-=r
-+ βvt .
-β=
-θ t+1 = θ t − γg(θ t ).
-Newton’s method is one of the most-used second-order
-optimizers. This term is derived from the second-order Taylor expansion of the objective f around a point θ:
-1
-f (θ) ≈ f (θ t )+g(θ t )T (θ−θ t )+ (θ−θ t )T H(θ t )(θ−θ t ),
-2
-where H is ∇2 f = d2 f /d2 θ, the Hessian of f .
-Ideally, we would like our update step to take us to an
-optimum. There, the derivative is necessarily zero:
-d
-f (θ) = 0 ≈ g(θ t ) + H(θ t )(θ − θ t ).
-dθ
-(2)
-Since Newton’s method is derived via second-order Taylor expansion (approximated by a hyper-parabola), the derived Hessian may lead to either a maximum or a minimum depending on the local curvature of the function
-being approximated. This is determined by the positivedefiniteness of the Hessian, and a negative-definite Hessian will diverge from the gradient’s descent direction. To
-avoid this, one can ensure that the Hessian is always positive semi-definite using the Hessian modification technique
-and ensure step truncation to a trust region [22], α =
-min(α, ∆∥v∥−1 ), where ∆ is the trust region radius (see
-Supplemental Sec. H).
-Hessian-vector product approximations go one step
-further by entirely avoiding to compute H when producing
-Hv. Pearlmutter [24] and Werbos [35] discuss different options to do so, but a simple option is central differences
-H(θ)v ≈ lim
-ε→0
-g(θ + εv) − g(θ − εv)
-.
-2ε
-(8)
-Hessians in vision and graphics have been applied to
-several optimization tasks, for instance, for total-variation
-denoising [3], texture parameterization and surface mappings with approximated Hessians [28], 3D shape manipulation [13], and image deconvolution tasks via (Hessianfree) Newton methods [14]. For optical flow estimation,
-both Zach et al. [39] and Werlberger et al. [36] use secondorder information. Additionally, several works have explored Hessian-based algorithms in machine learning for
-vision tasks. Yao et al. [37] introduces a Hessian-based
-pruning method for CNNs for image classification, while
-Ramesh et al. [26] utilizes Hessians to improve the training
-of image generation models and Desai et al. [6] introduces
-an algorithm that derives Hessians for C code.
-Hessians in inverse rendering, however, have received
-surprisingly little attention, potentially due to their additional implementation overhead and computational complexity. In addition to the fact that conventional AD systems
-are mostly designed for first-order gradient computations,
-calculating the second-order information requires storing
-the whole forward- and first-derivative–graph in memory,
-which can lead to exponential memory growth. Nicolet
-et al. [19] are the closest to our work by approximating
-second-order steps for mesh reconstruction. However, they
-set the Hessian to the identity to avoid computational expense and instead work with a Laplacian regularizer, which
-works for their formulation and the case of mesh optimization, but is unclear how to translate to general problems.
-For derivative-free gradient estimators, it is equally
-unclear how second-order information would be computed. The zeroth-order estimators simultaneous perturbation stochastic approximation (SPSA) [32] and finite differences (FD) estimate a first-order gradient, whose secondorder derivative naturally is zero. Extending these estimators to second-order information requires prohibitive
-amounts of function evaluations. ZeroGrads [8], which
-learns a neural network that fits the cost landscape,
-uses ReLU non-linearities, whose second-order derivative
-equally decays to zero. Covariance adaptation evolution
-strategy (CMA-ES) is often used when typical secondorder optimization fails to converge [10]. It ensures that
-the Hessian is always positive definite, but if second-order
-derivative-based methods are successful, they are usually
-faster than CMA-ES.
-3. Our approach
-We first describe the computation of gradients using importance sampling of a combined gradient-smoothing operator
-from previous work [4, 7] which we then extend to Hessians, and in a next step to Hessian-vector products.
-3.1. Background
-Rendering equation The rendering equation (RE) [12]
-describes the radiance L leaving a point x in the scene into
-the direction ωo as
-Z
-(9)
-L(x, ωo ; θ) =
-fr (ωi , ωo )L(y, ωi ; θ) dωi ,
-{z
-}
-Ω|
-R(ωi ;θ)
-where θ are the parameters of the scene we would like to optimize, such as object geometry, reflectance, or light emission. This integral over Ω, i.e., all incoming ωi directions
-that multiply the radiance field arriving from that direction
-from the closest other point y in direction ωi with the bidirectional reflectance distribution function (BRDF) fr , has
-no analytical closed-form solution, and hence usually is approximated – both in forward and inverse rendering – via
-MC methods. We will shorthand the entire integrand as R.
+
+$$\boldsymbol{\theta}^{t+1} = \boldsymbol{\theta}^t + \alpha \mathbf{v}^t. \quad (7)$$
+
+The next direction is chosen by updating the residual r and computing a new conjugate search direction v with the Fletcher-Reeves formula [9]:
+
+$$\begin{aligned} \mathbf{r}^{t+1} &= \mathbf{r}^t - \alpha \mathbf{H}(\boldsymbol{\theta}^t) \mathbf{v}^t \\ \beta &= \frac{\mathbf{r}^{t+1}, \mathbf{T} \mathbf{r}^{t+1}}{\mathbf{r}^t, \mathbf{T} \mathbf{r}^t} \\ \mathbf{v}^{t+1} &= \mathbf{r}^{t+1} + \beta \mathbf{v}^t. \end{aligned}$$
+
+Since Newton's method is derived via second-order Taylor expansion (approximated by a hyper-parabola), the derived Hessian may lead to either a maximum or a minimum depending on the local curvature of the function being approximated. This is determined by the positivedefiniteness of the Hessian, and a negative-definite Hessian will diverge from the gradient's descent direction. To avoid this, one can ensure that the Hessian is always positive semi-definite using the Hessian modification technique and ensure step truncation to a trust region [22], α = min(α, ∆∥v∥ −1 ), where ∆ is the trust region radius (see Supplemental Sec. H\).
+
+Hessian-vector product approximations go one step further by entirely avoiding to compute H when producing Hv. Pearlmutter [24] and Werbos [35] discuss different options to do so, but a simple option is central differences
+
+$$H(\boldsymbol{\theta})\mathbf{v} \approx \lim_{\varepsilon \rightarrow 0} \frac{g(\boldsymbol{\theta} + \varepsilon\mathbf{v}) - g(\boldsymbol{\theta} - \varepsilon\mathbf{v})}{2\varepsilon}. \quad (8)$$
+
+Hessians in vision and graphics have been applied to several optimization tasks, for instance, for total-variation denoising [3], texture parameterization and surface mappings with approximated Hessians [28], 3D shape manipulation [13], and image deconvolution tasks via (Hessianfree) Newton methods [14]. For optical flow estimation, both Zach et al. [39] and Werlberger et al. [36] use secondorder information. Additionally, several works have explored Hessian-based algorithms in machine learning for vision tasks. Yao et al. [37] introduces a Hessian-based pruning method for CNNs for image classification, while Ramesh et al. [26] utilizes Hessians to improve the training of image generation models and Desai et al. [6] introduces an algorithm that derives Hessians for C code.
+
+Hessians in inverse rendering, however, have received surprisingly little attention, potentially due to their additional implementation overhead and computational complexity. In addition to the fact that conventional AD systems are mostly designed for first-order gradient computations, calculating the second-order information requires storing the whole forward- and first-derivative–graph in memory, which can lead to exponential memory growth. Nicolet et al. [19] are the closest to our work by approximating second-order steps for mesh reconstruction. However, they set the Hessian to the identity to avoid computational expense and instead work with a Laplacian regularizer, which works for their formulation and the case of mesh optimization, but is unclear how to translate to general problems.
+
+For derivative-free gradient estimators, it is equally unclear how second-order information would be computed. The zeroth-order estimators simultaneous perturbation stochastic approximation (SPSA) [32] and finite differences (FD) estimate a first-order gradient, whose secondorder derivative naturally is zero. Extending these estimators to second-order information requires prohibitive amounts of function evaluations. ZeroGrads [8], which learns a neural network that fits the cost landscape, uses ReLU non-linearities, whose second-order derivative equally decays to zero. Covariance adaptation evolution strategy (CMA-ES) is often used when typical secondorder optimization fails to converge [10]. It ensures that the Hessian is always positive definite, but if second-order derivative-based methods are successful, they are usually faster than CMA-ES.
+
+### 3. Our approach
+
+We first describe the computation of gradients using importance sampling of a combined gradient-smoothing operator from previous work [4, 7] which we then extend to Hessians, and in a next step to Hessian-vector products.
+
+### 3.1. Background
+
+Rendering equation The rendering equation (RE) [12] describes the radiance L leaving a point x in the scene into the direction ωo as
+
+$$L(\mathbf{x}, \omega_0; \boldsymbol{\theta}) = \int_{\Omega} \underbrace{f_{\mathbf{r}}(\omega_1, \omega_0) L(\mathbf{y}, \omega_1; \boldsymbol{\theta})}_{R(\omega_1; \boldsymbol{\theta})} d\omega_1, \quad (9)$$
+
+where θ are the parameters of the scene we would like to optimize, such as object geometry, reflectance, or light emission. This integral over Ω, i.e., all incoming ωi directions that multiply the radiance field arriving from that direction from the closest other point y in direction ωi with the bidirectional reflectance distribution function (BRDF) fr, has no analytical closed-form solution, and hence usually is approximated – both in forward and inverse rendering – via MC methods. We will shorthand the entire integrand as R.
+
 Problem statement We would now like to apply a differential operator D to the RE, as in
-D L(x, ωi ; θ).
-(10)
+
+$$D L(\mathbf{x}, \omega_i; \boldsymbol{\theta}). \quad (10)$$
+
 If D was the gradient operator ∂L/∂θ, this would be differentiable rendering, for other operators, this becomes higherorder differentiable rendering.
-The trouble is that we cannot move D, be it gradient or
-higher-order, into the integral, as in many cases (e.g., for
-BRDF or spatial derivatives), the integrand is discontinuous
-in θ, so
-Z
-D L(x, ωi ; θ) ̸=
-D R(ωi ; θ)dωi .
-(11)
-Ω
-However, the right-hand side of the above expression is
-exactly the quantity that naı̈vely-applied AD computes
-[21, 34], leading to wrong gradients in (any-order) differentiable rendering.
-Solution The idea is to enforce the property that prevents
-differentiation – smoothness –, so that we actually can differentiate. To that end, assume a further linear operator S
-that is smoothing any function in θ. This provides a smooth
-rendering equation L̄
-Z
-L̄(x, ωo ; θ) =
-S R(ωi ; θ)dωi .
-(12)
-Ω
-∇
-et
-rg
-Ta
-ce
-ur
-So
-∇
-H
-θ∇
-θH
-θ
-θ∇
-Figure 2. Comparison of classic (yellow) and smooth (red) gradients, as well as our Hessians (blue) on an inverse rendering problem to
-change the initial parameter θ so that the left triangle overlaps the right one. Classic gradients are zero almost everywhere (plateaus) except
-where the triangles already overlap. These methods do not converge. Smooth gradients point into the right direction, but make steps far
-from the optimum (dotted line). An update taking into account the curvature of the loss landscape lands at a point very close to the target.
-We incorporate this curvature information via our Hessians.
-Differential
-Positivized
-CDF
-Sampling
-Gradient
-Smoothing can be achieved by convolution, so for any
-function f in any dimension
-Z
-S f (θ) =
-κ(τ )f (θ − τ )dτ ,
-(13)
-HVP
-Hessian
-Θ
-where κ is a smoothing kernel, such as a Gaussian, which
-we use in this work. This convolved integrand is now
-smooth, which, according to Leibniz’ rule, allows us to
-move the differential operator into the integral
-Z
-D L̄(x, ωo ; θ) =
-D S R(ωi ; θ)dωi ,
-(14)
-Ω
+
+The trouble is that we cannot move D, be it gradient or higher-order, into the integral, as in many cases (e.g., for BRDF or spatial derivatives), the integrand is discontinuous in θ, so
+
+$$D L(\mathbf{x}, \omega_i; \boldsymbol{\theta}) \neq \int_{\Omega} D R(\omega_i; \boldsymbol{\theta}) d\omega_i. \quad (11)$$
+
+However, the right-hand side of the above expression is exactly the quantity that na¨ıvely-applied AD computes [21, 34], leading to wrong gradients in (any-order) differentiable rendering.
+
+Solution The idea is to enforce the property that prevents differentiation – smoothness –, so that we actually can differentiate. To that end, assume a further linear operator S that is smoothing any function in θ. This provides a smooth rendering equation L¯
+
+$$\bar{L}(\mathbf{x}, \omega_0; \boldsymbol{\theta}) = \int_{\Omega} S R(\omega_i; \boldsymbol{\theta}) d\omega_i. \quad (12)$$
+
+
+
+Figure 2. Comparison of classic (yellow) and smooth (red) gradients, as well as our Hessians (blue) on an inverse rendering problem to change the initial parameter θ so that the left triangle overlaps the right one. Classic gradients are zero almost everywhere (plateaus) except where the triangles already overlap. These methods do not converge. Smooth gradients point into the right direction, but make steps far from the optimum (dotted line). An update taking into account the curvature of the loss landscape lands at a point very close to the target. We incorporate this curvature information via our Hessians.
+
+Smoothing can be achieved by convolution, so for any function f in any dimension
+
+$$S f(\boldsymbol{\theta}) = \int_{\boldsymbol{\theta}} \kappa(\boldsymbol{\tau}) f(\boldsymbol{\theta} - \boldsymbol{\tau}) d\boldsymbol{\tau}, \quad (13)$$
+
+where κ is a smoothing kernel, such as a Gaussian, which we use in this work. This convolved integrand is now smooth, which, according to Leibniz' rule, allows us to move the differential operator into the integral
+
+$$D \bar{L}(\mathbf{x}, \omega_0; \boldsymbol{\theta}) = \int_{\Omega} D S R(\omega_i; \boldsymbol{\theta}) d\omega_i, \quad (14)$$
+
 which, after rearranging and expanding, yields an integral that can be approximated via MC:
-Z Z
-D L̄(x, ωo ; θ) =
-D κ(τ )R(ωi ; θ − τ )dτ dωi . (15)
-Ω
-Θ
-MC here means to take random samples from the product space of light paths and scene parameters. This works
-best if we can importance-sample for the integrand. The integrand here is a product of four terms. Sampling for the
-incoming radiance and BRDF terms has been investigated
-in the rendering community [33] and is not our consideration here, so we simply adopt these strategies. Sampling for
-the application of the differential operator to the smoothing
-kernel is the essence of the problem at hand. Depending
-on the choice of differential operator, we will derive three
-sampling strategies for the three resulting estimators next.
-Conclusion In conclusion, to perform efficient and practical any-order differentiation of the RE, we would need
-to implement two functions: first, a convolution kernel
-that combines smoothing and the desired differentiation,
-and second, a function to sample from that kernel for importance sampling. We will now do so for the gradient
-(Sec. 3.2), Hessian (Sec. 3.3) and HVP (Sec. 3.4).
-3.2. Gradients
-Operator: For first-order gradient descent, Fischer and
-Ritschel [7] have differentiated using the gradient operator
-DG = ∇ = ∂/∂τi ∈ (Rn → R) → (Rn → Rn ),
-(16)
-Figure 3. Derivation of smooth differentiation by convolution for
-three differential operators (rows) involves three steps (columns):
-Defining the operator to combine smoothing and differentiation
-(1st col.), positivization and normalization to become a probability
-density function (PDF) (2nd col.), creating an inverse mapping
-(3rd col.), which finally allows sampling (4th col.).
+
+$$\mathbf{D} \bar{L}(\mathbf{x}, \omega_0; \boldsymbol{\theta}) = \int_{\Omega} \int_{\Theta} \mathbf{D} \kappa(\boldsymbol{\tau}) R(\omega_1; \boldsymbol{\theta} - \boldsymbol{\tau}) d\boldsymbol{\tau} d\omega_1. \quad (15)$$
+
+MC here means to take random samples from the product space of light paths and scene parameters. This works best if we can importance-sample for the integrand. The integrand here is a product of four terms. Sampling for the incoming radiance and BRDF terms has been investigated in the rendering community [33] and is not our consideration here, so we simply adopt these strategies. Sampling for the application of the differential operator to the smoothing kernel is the essence of the problem at hand. Depending on the choice of differential operator, we will derive three sampling strategies for the three resulting estimators next.
+
+Conclusion In conclusion, to perform efficient and practical any-order differentiation of the RE, we would need to implement two functions: first, a convolution kernel that combines smoothing and the desired differentiation, and second, a function to sample from that kernel for importance sampling. We will now do so for the gradient (Sec. 3.2\), Hessian (Sec. 3.3\) and HVP (Sec. 3.4\).
+
+## 3.2. Gradients
+
+Operator: For first-order gradient descent, Fischer and Ritschel [7] have differentiated using the gradient operator
+
+$$\mathbf{D}^{\mathbf{G}} = \nabla = \partial/\partial \tau_i \in (\mathbb{R}^n \rightarrow \mathbb{R}) \rightarrow (\mathbb{R}^n \rightarrow \mathbb{R}^n), \quad (16)$$
+
+
+
+Figure 3. Derivation of smooth differentiation by convolution for three differential operators (rows) involves three steps (columns): Defining the operator to combine smoothing and differentiation (1st col.), positivization and normalization to become a probability density function (PDF) (2nd col.), creating an inverse mapping (3rd col.), which finally allows sampling (4th col.).
+
 which maps a scalar function of n dimensions to an ndimensional gradient vector field.
+
 The combination of smoothing and differentiation is
-DG κ(τ ) = ∇i N (τ , σ) = −
-τi
-· N (τ , σ).
-σ2
-(17)
+
+
+$$D^G \kappa(\boldsymbol{\tau}) = \nabla_i \mathcal{N}(\boldsymbol{\tau}, \sigma) = -\frac{\tau_i}{\sigma^2} \cdot \mathcal{N}(\boldsymbol{\tau}, \sigma). \quad (17)$$
+
 For a derivation, please see the supplemental, Sec. A.
-Sampling:
-For sampling a one-dimensional Gaussian
-gradient, we can use inverse transform sampling via the
-Smirnov transform [7]. To this end, the integrand has to be a
-PDF, i.e., positive and integrating-to-1 [23]. Subsequently,
-we compute the integral of a positivized version of pG , the
-cumulative distribution function (CDF) P G , and invert it as
-( p
-if ξ ≤ 0.5,
-− 2σ 2 log(2ξ)
-G,−1
-P
-(ξ) =
-(18)
-p
-+ 2σ 2 log(1 − ξ) else.
-This derivation applies to the dimension which is being differentiated. The separability of multi-dimensional Gaussians ensures that the other dimensions remain a Gaussian
-distribution, and we can sample these dimensions independently. For a derivation of this, see Suppl. Sec. B.
-3.3. Hessians
-Operator:
-H
-The differential operator for Hessians is
-2
-D = ∇ = ∂ 2 /∂τi ∂τj ∈ (Rn → R) → (Rn → Rn×n ),
-(19)
-which maps a scalar function in n dimensions to its n × nelement Hessian field. The combination of second-order
-derivatives and Gaussian smoothing is
-
-
-τi2
-1
-
- − 2 + 4 · N (τ , σ) if i = j,
-σ
-σ
-DH κi,j (τ ) =
-
-τ
-τ
- i j · N (τ , σ)
-else.
-σ4
-(20)
+
+Sampling: For sampling a one-dimensional Gaussian gradient, we can use inverse transform sampling via the Smirnov transform [7]. To this end, the integrand has to be a PDF, i.e., positive and integrating-to-1 [23]. Subsequently, we compute the integral of a positivized version of p G, the cumulative distribution function (CDF) P G, and invert it as
+
+$$P^{G,-1}(\xi) = \begin{cases} -\sqrt{2\sigma^2 \log(2\xi)} & \text{if } \xi \leq 0.5, \\ +\sqrt{2\sigma^2 \log(1-\xi)} & \text{else.} \end{cases} \quad (18)$$
+
+This derivation applies to the dimension which is being differentiated. The separability of multi-dimensional Gaussians ensures that the other dimensions remain a Gaussian distribution, and we can sample these dimensions independently. For a derivation of this, see Suppl. Sec. B.
+
+### 3.3. Hessians
+
+Operator: The differential operator for Hessians is
+
+$$D^H = \nabla^2 = \partial^2 / \partial \tau_i \partial \tau_j \in (\mathbb{R}^n \rightarrow \mathbb{R}) \rightarrow (\mathbb{R}^n \rightarrow \mathbb{R}^{n \times n}), \quad (19)$$
+
+which maps a scalar function in n dimensions to its n × nelement Hessian field. The combination of second-order derivatives and Gaussian smoothing is
+
+$$D^H \kappa_{i,j}(\boldsymbol{\tau}) = \begin{cases} \left( -\frac{1}{\sigma^2} + \frac{\tau_i^2}{\sigma^4} \right) \cdot \mathcal{N}(\boldsymbol{\tau}, \sigma) & \text{if } i = j, \\ \frac{\tau_i \tau_j}{\sigma^4} \cdot \mathcal{N}(\boldsymbol{\tau}, \sigma) & \text{else.} \end{cases} \quad (20)$$
+
 For a derivation, see supplemental Sec. C.
-Sampling: We first need to positivize as the function is
-signed, then scale the function so that it is a valid distribution. This is done differently for diagonal and off-diagonal
-elements. For the diagonal case, we construct the CDF of a
-second-order derivative PiiH of the 2D Gaussian:
-
-
-
-u
-1
-u2
-
-
-−
-exp
-−
-if u < −σ,
-
-
-4σ
-2 2σ 2
-
-
-
-
-
-
-u
-1
-u2
-PiiH (τi = u) = 0.5 +
-exp
-− 2
-if u ∈ [−σ, σ]
-
-4σ
-2 2σ
-
-
-
-
-
-
-
-1
-u2
-u
-
- 1−
-exp
-− 2
-if u > σ.
-4σ
-2 2σ
-(21)
-See supplemental Sec. D for a derivation of this result. This
-is a transcendental equation whose inverse CDF cannot be
-expressed in closed form via elementary functions [2]. Instead, we 1D-tabulate its values on the range 10σ for every
-i. The inverse function is found by searching in that range,
-and storing the pre-sorted inverse indices for O(1) access.
-The off-diagonals are the product of two partial gradients
-that we have already derived in Eq. 17. Fortunately, the
-product of two independent distributions can be sampled by
-sampling each one independently. Thus, no extra derivation
-is required here. For sampling in higher dimensions, similar
-to the gradient sampler in Sec. B, the rest of the dimensions
-are sampled from a Gaussian distribution.
-In all methods, we exploit the symmetry in the Hessian
-matrix when sampling and estimating.
-3.4. Hessian-vector product
-Operator: As explained in Sec. 2, avoiding to store the
-full Hessian is possible by using HVPs:
-DHVP = ∇2 v = ∂ 2 /∂τi ∂τ · ∂/∂τ .
-(22)
-In essence, a HVP is the directional gradient of the gradient.
-As there is one direction and the gradient has n dimensions,
-the HVP is an n-dimensional vector, too. In contrast, a Hessian is the non-directional gradient of the gradient, i.e., the
-gradient along all n dimensions, and as such in Rn×n .
-Sampling: To sample the smooth HVP, we simply need
-the directional central differences of an estimator of gradients, which we already have. So the estimator is the difference of two first-order estimators, evaluated at positions
-shifted from the current solution along the gradient direction [24, 35]:
-DHVP κ(τ ) =
-DG κ(τ − εv) − DG κ(τ + εv)
-.
-2ε
-(23)
-3.5. Aggregate
-We summarize the key property of all samplers –
-the number of function evaluations required – in
-Tab. 1.
-Function evaluations require execution of
-the black-box rendering engine, the most costly part
-of the optimization, and hence should be minimized.
-Classic finite differences take opposing
-Table 1. Time complexity of difsamples in each diferent estimator variants. AIS:
-aggregated importance sampling.
-mension and hence,
-for an n-dimensional
-no IS IS AIS
-problem, require 2n
-function
-evaluations for
-Fin. Diff.
-n
-n
-n
-a single gradient samFR22 [7]
-1
-1
-1
-ple. All other methods
-Our Grad.
-1
-n
-1
-(second row in Tab. 1
-2
-Our Hess.
-1
-n
-1
-onward) are based on
-Our HVP
-1
-n
-1
-MC, so we can get a
-gradient estimate using
-a fixed number of M function evaluations. This, however,
-comes at the cost of variance, which can be reduced with
-importance sampling, but that is done in all dimensions
-of the differential quantity independently, so it requires as
-many evaluations as these have elements (second column
-in Tab. 1). For a Hessian, this can be substantial, n2 .
-As a compromise between low number of function evaluations and low variance, we propose “aggregate” importance sampling of the differential quantity (Fig. 4): instead
-of importance-sampling each dimension optimally but individually, we importance-sample w.r.t. the average of the
-convolution across all dimensions (combining several proposals by sampling from a mixture is similar to MIS using the balance heuristic [33]). This average convolution is
-a single function again, and with our combined sampling
-strategy can again be sampled with one function call per iteration (last column of Tab. 1). We implement this in two
-simple steps: first we randomly decide which element of
-the differential representation to choose (e.g., which matrix
-element out of n2 in the Hessian), and then we compute the
-convolution sample for all n2 but with the same function
-value that is only evaluated once. This increases variance,
-as the average kernel is not identical to the individual kernels but shares many properties, e.g., they are all zero in
-value at position 0. As a linear combination of unbiased es-
-Convolve with ...
-Aggregate
-Non-agg.
-Sample at ...
-Figure 4. Aggregate and non-aggregate sampling for a 2D optimization space and, consequentially, a 2 × 2 Hessian: Without aggregation, importance sampling is done for each element
-of the Hessian independently (four points at different positions
-in each kernel), leading to four rendering calls and four different
-mugs. Each value is then weighted by the kernel (blue and red
-colors denote positive and negative). In aggregate sampling, we
-importance-sample the average of all four stencils, resulting in a
-single sample location and, hence, four times the same mug that
-can be rendered in one call, weighted with four different kernels.
-timators, this is still unbiased. We show in Sec. J that this
-pays off. Note that Tab. 1 is both time and space complexity,
-except for the aggregate importance sampling of the HVP,
-where the space complexity stays O(n) while time complexity is reduced to O(1).
-4. Evaluation
-4.1. Methods
-Our evaluation compares the performance of gradients (input to gradient descent), Hessians and non-aggregate as well
-as aggregate Hessian-vector product (both input to higherorder optimizers).
-Baselines An established inverse rendering solution is
-Mitsuba with gradient descent. FR22 is using gradient descent with Fischer and Ritschel [7] MC gradients.
-OursG, OursH, OursHVP and OursHVPA are our approach for gradient, Hessians and Hessian-vector products,
-and aggregates, respectively. OursG is used with gradient descent (GD), the others in combination with conjugate
-gradient (CG). We have also experimented with LBFGS as
-detailed in the supplemental, but do not report it here as it
-almost never converges and never at competitive speed. All
-methods use the Adam optimizer.
-Tasks We tackle artificial problems with known analytic
-Hessians and Hessian-vector products as well as real inverse
-rendering tasks. As a simple first test case, we optimize the
-smooth, quadratic potential(Q UAD1 ) function ax20 + bx21 +
-cx0 x1 in R2 , with the fixed variables a = 5, b = 5, c = 7.5.
-Second, we optimize the classic plateau-demonstration
-task from [7]: the 2D position of some boxes is optimized
-to match a reference. This is already a much harder task, as
-there is a plateau in the cost landscape when the squares do
-not overlap (almost always the case in the initial configuration), as the image-space error does not change. We study
-the case of one (B OX 23 ) and five (B OX 105 ) squares, with
-two and ten dimensions to optimize, respectively.
-For real inverse problems, we study the optimization of
-reflectance, light, and geometry and render using Mitsuba.
-In the M UG7 task, we optimize the vertical rotation of a coffee cup such that it matches a reference. In the S HADOW9
-task, we optimize the position of a sphere that is unobserved
-in the rendered image, such that the shadow it casts matches
-a reference shadow. In the B UNNY11 task, the x and z position and the rotation around the z axis of the Stanford bunny
-are optimized. This task is set up specifically for Mitsuba
-to converge12 , with no plateaus in the loss function.
-To test the scaling with dimensionality, we also optimize
-the pixels of a 32×32 texture (TEXTURE13 ), with 1024 parameters. In addition, we have used our approach on a mesh
-optimization task, where we fit the 3D position of the vertices of a tessellated sphere to images of a target object. For
-S UZANNE, we fit 2,562 vertices, for BANANA, we fit the
-2,737 vertices and their RGB vertex colors, similar to the
-DTU setup [11]. For trajectories of the optimization and
-the outcome, see Fig. 5 top and bottom rows, respectively.
-Finally, we learn a CNN15 to predict scene parameters
-from images using inverse rendering without scene parameter labels. In this case, the optimization is learning in the
-stricter sense: we tune parameters of a deep architecture instead of scene parameters directly. The CNN takes as input
-an image of a mug and produces as output the orientation
-for a mug. As a loss, these parameters are inserted into
-a renderer, differentiated by different approaches and compared to a target. The CNN has 267 745 parameters, learned
-by differentiating through an image loss and rendering of
-the scene given the estimated parameters. Another CNN
-(CNN519 ) is trained to predict the rotation, position, and
-color of the mug with 268 773 parameters.
-Differentials of this function are computed as detailed
-in supplemental Sec. E, where we derive a grey-box approach that samples only the black-box part (the rendering)
-and combines its differentials with analytic differentials for
-the white-box part (the CNN). Importantly, this idea works
-for gradients, as well as for higher-order differentials.
-Metrics Our main measure of success is convergence
-speed in wall-clock and parameter difference to the true parameters (which we know in all inverse rendering tasks as
-we created the scenes). A secondary measure of success is
-the image difference, as during optimization, we consider
-the parameters hidden. All metrics are evaluated across an
-ensemble of 20 runs averaged across 10 steps in time. In
-convergence plots, the ensemble median is shown at every
-point in time, averaged across 20 time steps.
-Table 2. Quantitative results of different methods on different tasks (rows) and their convergence plots. We report convergence time in
-wall-clock units, in ratio to the overall best method, OurHVPA. In the numerical columns, .9 and .99 report the time taken to achieve 90
-and 99% error reduction from the initial starting configuration, respectively, while the bar plots graphically show these findings. The line
-plots report image- and parameter-space convergence in the left and right column, respectively, on a log-log scale.
-Parameter error
-Mitsu
-FR22
-CMA-ES
-OurG
-OurH
-OurHVP
-OurHVPA
-— 2
-1.80
-0.15
-3.98
-1.17
-0.76
-1.00
-—
-2.38
-0.13
-5.13
-1.17
-0.62
-1.00
-—
-2.98
-0.14
-6.02
-1.15
-0.62
-1.00
-—
-2.20
-0.13
-4.72
-1.18
-0.63
-1.00
-—
-3.17
-0.14
-6.42
-1.16
-0.59
-1.00
-—
-3.90
-0.23
-7.77
-1.17
-0.60
-1.00
-B OX 23
-Mitsu
-FR22
-CMA-ES
-OurG
-OurH
-OurHVP
-OurHVPA
-—
-3.24
-5.51
-2.88
-0.93
-0.81
-1.00
-—
-2.49
-3.45
-2.16
-0.95
-0.64
-1.00
-—
-2.57
-3.15
-2.21
-1.08
-0.70 4
-1.00
-—
-2.78
-8.13
-2.86
-0.76
-0.74
-1.00
-—
-2.89
-5.51
-2.65
-0.84
-0.72
-1.00
-—
-2.70
-4.13
-2.38
-1.84
-0.72
-1.00
-B OX 105
-Mitsu
-FR22
-CMA-ES
-OurG
-OurH
-OurHVP
-OurHVPA
-—
-1.49
-3.10
-2.18
-5.97
-1.51
-1.00
-—
-1.20
-2.27
-1.77
-5.33
-1.44
-1.00
-—
-1.71
-1.73
-1.53
-4.68
-1.696
-1.00
-—
-1.80
-4.52
-2.53
-5.48
-1.26
-1.00
-—
-1.54
-3.23
-2.26
-5.96
-1.50
-1.00
-—
-1.29
-2.48
-1.88
-5.45
-1.58
-1.00
-M UG7
-Mitsu
-FR22
-CMA-ES
-OurG
-OurH
-OurHVP
-OurHVPA8
-—
-5.92
-2.95
-3.99
-1.57
-1.15
-1.00
-—
-5.69
-1.97
-3.91
-1.09
-1.14
-1.00
-—
-5.46
-1.82
-3.74
-1.53
-1.18
-1.00
-—
-3.28
-3.32
-2.36
-1.00
-1.14
-1.00
-—
-6.53
-2.38
-4.42
-1.08
-0.87
-1.00
-—
-6.29
-2.20
-4.30
-1.20
-1.05
-1.00
-S HAD9
-Mitsu
-FR22
-CMA-ES
-OurG
-OurH
-OurHVP
-OurHVPA
-—
-1.94
-1.96
-1.37
-1.67
-1.14
-1.00
-—
-1.40
-1.15
-1.18
-1.44
-0.91
-1.00
-—
-1.55
-1.03
-1.13
-1.66
-0.96
-1.00
-—
-1.89
-4.38
-2.38
-2.32
-1.37
-1.00
-—
-1.14
-2.20
-1.47
-1.74
-1.13
-1.00
-—
-1.71
-1.66
-1.34
-1.46
-1.07
-1.0010
-B UNNY11
-Mitsu12
-FR22
-CMA-ES
-OurG
-OurH
-OurHVP
-OurHVPA
-0.90
-0.75
-1.16
-0.76
-1.29
-0.68
-1.00
-1.29
-0.75
-0.95
-0.89
-1.23
-0.68
-1.00
-1.46
-1.12
-0.85
-1.07
-1.29
-0.70
-1.00
-1.87
-0.78
-1.27
-0.69
-1.18
-0.63
-1.00
-1.38
-0.63
-0.91
-0.64
-0.80
-0.44
-1.00
-1.28
-0.71
-0.85
-0.76
-1.07
-0.58
-1.00
-T EXTURE13
-Mitsu
-FR22
-CMA-ES
-OurG
-OurH14
-OurHVP
-OurHVPA
-—
-4.04
-7.08
-3.03
-40.12
-4.01
-1.00
-—
-2.27
-4.60
-2.86
-39.78
-4.00
-1.00
-—
-1.80
-4.35
-2.82
-—
-4.00
-1.00
-—
-4.04
-11.16
-3.03
-40.12
-4.01
-1.00
-—
-2.27
-7.47
-2.86
-39.78
-4.00
-1.00
-—
-1.80
-7.44
-2.82
-—
-4.00
-1.00
-CNN15
-Mitsu
-FR22
-CMA-ES
-OurG
-OurH
-OurHVP
-OurHVPA
-—
-2.1116
-—
-1.14
-0.77
-0.87
-1.00
-—
-—
-—
-—
-0.77
-0.9317
-1.00
-—
-—
-—
-—
-—
-—
-—
-—
-1.45
-2.08
-0.96
-0.74
-0.88
-1.00
-—
-1.32
-—
-0.83
-0.77
-0.91
-1.00
-—
-2.71
-—
-2.28
-0.74
-0.87
-1.00
-Mitsu
-FR22
-CMA-ES
-OurG
-OurH
-OurHVP
-OurHVPA
-—
-—
-—
-18.68
-19.00
-3.6420
-1.00
-—
-—
-—
-—
-—
-1.46
-1.00
-—
-—
-—
-—
-—
-—
-—
-—
-—
-—
-3.70
-5.79
-1.49
-1.00
-—
-—
-—
-—
-—
-1.58
-1.00
-—
-—
-—
-—
-—
-—
-1.00
-CNN5
-19
-18
-CMA-ES
-OurG
-OurH
-OurHVP
-OurHVPA
-Error
-Log error
-Error
-Log error
-Error
-Q UAD1
-FR22
-Log error
-Mitsuba
-Error
-Log error
-.999
-Error
-Log error
-.99
-Error
-Log error
-.9
-Error
-Log error
-.999
-Error
-.99
-Log error
-Image error
-.9
-Log error
-Method
-Error
-Task
-.9
-.99
-.999
-.9
-.99
-.999
-Log time
-Log time
-Ours
-Target
-Hessians
-CMA-ES
-Log time
-Log time
-Log error
-Init
-Log error
-Gradients
+
+Sampling: We first need to positivize as the function is signed, then scale the function so that it is a valid distribution. This is done differently for diagonal and off-diagonal elements. For the diagonal case, we construct the CDF of a second-order derivative P H ii of the 2D Gaussian:
+
+$$P_{ii}^H(\tau_i = u) = \begin{cases} -\frac{u}{4\sigma} \exp\left(\frac{1}{2} - \frac{u^2}{2\sigma^2}\right) & \text{if } u < -\sigma, \\ 0.5 + \frac{u}{4\sigma} \exp\left(\frac{1}{2} - \frac{u^2}{2\sigma^2}\right) & \text{if } u \in [-\sigma, \sigma] \\ 1 - \frac{u}{4\sigma} \exp\left(\frac{1}{2} - \frac{u^2}{2\sigma^2}\right) & \text{if } u > \sigma. \end{cases} \quad (21)$$
+
+See supplemental Sec. D for a derivation of this result. This is a transcendental equation whose inverse CDF cannot be expressed in closed form via elementary functions [2]. Instead, we 1D-tabulate its values on the range 10σ for every i. The inverse function is found by searching in that range, and storing the pre-sorted inverse indices for O(1) access.
+
+The off-diagonals are the product of two partial gradients that we have already derived in Eq. 17. Fortunately, the product of two independent distributions can be sampled by sampling each one independently. Thus, no extra derivation is required here. For sampling in higher dimensions, similar to the gradient sampler in Sec. B, the rest of the dimensions are sampled from a Gaussian distribution.
+
+In all methods, we exploit the symmetry in the Hessian matrix when sampling and estimating.
+
+### 3.4. Hessian-vector product
+
+Operator: As explained in Sec. 2, avoiding to store the full Hessian is possible by using HVPs:
+
+$$D^{\text{HVP}} = \nabla^2 \mathbf{v} = \partial^2 / \partial \tau_i \partial \tau \cdot \partial / \partial \tau. \quad (22)$$
+
+In essence, a HVP is the directional gradient of the gradient. As there is one direction and the gradient has n dimensions, the HVP is an n-dimensional vector, too. In contrast, a Hessian is the non-directional gradient of the gradient, i.e., the gradient along all n dimensions, and as such in R n×n.
+
+Sampling: To sample the smooth HVP, we simply need the directional central differences of an estimator of gradients, which we already have. So the estimator is the difference of two first-order estimators, evaluated at positions shifted from the current solution along the gradient direction [24, 35]:
+
+$$D^{\text{HVP}} \kappa(\boldsymbol{\tau}) = \frac{D^G \kappa(\boldsymbol{\tau} - \boldsymbol{\varepsilon} \mathbf{v}) - D^G \kappa(\boldsymbol{\tau} + \boldsymbol{\varepsilon} \mathbf{v})}{2\varepsilon}. \quad (23)$$
+
+### 3.5. Aggregate
+
+We summarize the key property of all samplers – the number of function evaluations required – in Tab. 1. Function evaluations require execution of the black-box rendering engine, the most costly part of the optimization, and hence should be minimized.
+
+Table 1. Time complexity of different estimator variants. AIS: aggregated importance sampling.
+
+| Fin. | Diff. | no IS n | IS n | AIS n |
+|------|-------|---------|------|-------|
+| FR22 | [7]   | 1       | 1    | 1     |
+| Our  | Grad. | 1       | n    | 1     |
+| Our  | Hess. | 1       | n    |       |
+| Our  | HVP   | 1       | n    | 1     |
+
+Classic finite differences take opposing samples in each dimension and hence, for an n-dimensional problem, require 2n function evaluations for a single gradient sample. All other methods (second row in Tab. 1 onward) are based on MC, so we can get a gradient estimate using
+
+a fixed number of M function evaluations. This, however, comes at the cost of variance, which can be reduced with importance sampling, but that is done in all dimensions of the differential quantity independently, so it requires as many evaluations as these have elements (second column in Tab. 1\). For a Hessian, this can be substantial, n 2 .
+
+As a compromise between low number of function evaluations and low variance, we propose "aggregate" importance sampling of the differential quantity (Fig. 4\): instead of importance-sampling each dimension optimally but individually, we importance-sample w.r.t. the average of the convolution across all dimensions (combining several proposals by sampling from a mixture is similar to MIS using the balance heuristic [33]). This average convolution is a single function again, and with our combined sampling strategy can again be sampled with one function call per iteration (last column of Tab. 1\). We implement this in two simple steps: first we randomly decide which element of the differential representation to choose (e.g., which matrix element out of n 2 in the Hessian), and then we compute the convolution sample for all n 2 but with the same function value that is only evaluated once. This increases variance, as the average kernel is not identical to the individual kernels but shares many properties, e.g., they are all zero in value at position 0. As a linear combination of unbiased es-
+
+
+
+
+
+Figure 4. Aggregate and non-aggregate sampling for a 2D optimization space and, consequentially, a 2 × 2 Hessian: Without aggregation, importance sampling is done for each element of the Hessian independently (four points at different positions in each kernel), leading to four rendering calls and four different mugs. Each value is then weighted by the kernel (blue and red colors denote positive and negative). In aggregate sampling, we importance-sample the average of all four stencils, resulting in a single sample location and, hence, four times the same mug that can be rendered in one call, weighted with four different kernels. timators, this is still unbiased. We show in Sec. J that this pays off. Note that Tab. 1 is both time and space complexity, except for the aggregate importance sampling of the HVP, where the space complexity stays O(n) while time com-
+
+plexity is reduced to O(1).
+
+## 4. Evaluation
+
+### 4.1. Methods
+
+Our evaluation compares the performance of gradients (input to gradient descent), Hessians and non-aggregate as well as aggregate Hessian-vector product (both input to higherorder optimizers).
+
+Baselines An established inverse rendering solution is Mitsuba with gradient descent. FR22 is using gradient descent with Fischer and Ritschel [7] MC gradients. OursG, OursH, OursHVP and OursHVPA are our approach for gradient, Hessians and Hessian-vector products, and aggregates, respectively. OursG is used with gradient descent (GD), the others in combination with conjugate gradient (CG). We have also experimented with LBFGS as detailed in the supplemental, but do not report it here as it almost never converges and never at competitive speed. All methods use the Adam optimizer.
+
+Tasks We tackle artificial problems with known analytic Hessians and Hessian-vector products as well as real inverse rendering tasks. As a simple first test case, we optimize the smooth, quadratic potential(QUAD1 ) function ax2 0 + bx2 1 + cx0x1 in R 2 , with the fixed variables a = 5, b = 5, c = 7.5.
+
+Second, we optimize the classic plateau-demonstration task from [7]: the 2D position of some boxes is optimized to match a reference. This is already a much harder task, as there is a plateau in the cost landscape when the squares do not overlap (almost always the case in the initial configuration), as the image-space error does not change. We study the case of one (BOX2 ) and five (BOX105 ) squares, with two and ten dimensions to optimize, respectively.
+
+For real inverse problems, we study the optimization of reflectance, light, and geometry and render using Mitsuba. In the MUG7 task, we optimize the vertical rotation of a coffee cup such that it matches a reference. In the SHADOW9 task, we optimize the position of a sphere that is unobserved in the rendered image, such that the shadow it casts matches a reference shadow. In the BUNNY11 task, the x and z position and the rotation around the z axis of the Stanford bunny are optimized. This task is set up specifically for Mitsuba to converge12, with no plateaus in the loss function.
+
+To test the scaling with dimensionality, we also optimize the pixels of a 32×32 texture (TEXTURE13), with 1024 parameters. In addition, we have used our approach on a mesh optimization task, where we fit the 3D position of the vertices of a tessellated sphere to images of a target object. For SUZANNE, we fit 2,562 vertices, for BANANA, we fit the 2,737 vertices and their RGB vertex colors, similar to the DTU setup [11]. For trajectories of the optimization and the outcome, see Fig. 5 top and bottom rows, respectively.
+
+Finally, we learn a CNN15 to predict scene parameters from images using inverse rendering without scene parameter labels. In this case, the optimization is learning in the stricter sense: we tune parameters of a deep architecture instead of scene parameters directly. The CNN takes as input an image of a mug and produces as output the orientation for a mug. As a loss, these parameters are inserted into a renderer, differentiated by different approaches and compared to a target. The CNN has 267 745 parameters, learned by differentiating through an image loss and rendering of the scene given the estimated parameters. Another CNN (CNN519) is trained to predict the rotation, position, and color of the mug with 268 773 parameters.
+
+Differentials of this function are computed as detailed in supplemental Sec. E, where we derive a grey-box approach that samples only the black-box part (the rendering) and combines its differentials with analytic differentials for the white-box part (the CNN). Importantly, this idea works for gradients, as well as for higher-order differentials.
+
+Metrics Our main measure of success is convergence speed in wall-clock and parameter difference to the true parameters (which we know in all inverse rendering tasks as we created the scenes). A secondary measure of success is the image difference, as during optimization, we consider the parameters hidden. All metrics are evaluated across an ensemble of 20 runs averaged across 10 steps in time. In convergence plots, the ensemble median is shown at every point in time, averaged across 20 time steps.
+
+Table 2. Quantitative results of different methods on different tasks (rows) and their convergence plots. We report convergence time in wall-clock units, in ratio to the overall best method, OurHVPA. In the numerical columns, .9 and .99 report the time taken to achieve 90 and 99% error reduction from the initial starting configuration, respectively, while the bar plots graphically show these findings. The line plots report image- and parameter-space convergence in the left and right column, respectively, on a log-log scale.
+
+
+
+| Task        | Method    |         |   | Image error |        |       | Parameter error | Mitsuba FR22 CMA-ES OurG OurH OurHVP OurHVPA |
+|-------------|-----------|---------|---|-------------|--------|-------|-----------------|----------------------------------------------|
+|             |           |         |   |             |        |       |                 | .9 .99 .999 .9 .99 .999 Log time Log time    |
+|             |           | .9      |   | .99         | .999   | .9    | .99             | .999                                         |
+| Q UAD 1     | Mitsu     | —       | 2 | —           | —      | —     | —               | —                                            |
+|             | FR22      | 1.80    |   | 2.38        | 2.98   | 2.20  | 3.17            | 3.90                                         |
+|             | CMA-ES    | 0.15    |   | 0.13        | 0.14   | 0.13  | 0.14            | 0.23                                         |
+|             | OurG      | 3.98    |   | 5.13        | 6.02   | 4.72  | 6.42            | 7.77                                         |
+|             | OurH      | 1.17    |   | 1.17        | 1.15   | 1.18  | 1.16            | 1.17                                         |
+|             | OurHVP    | 0.76    |   | 0.62        | 0.62   | 0.63  | 0.59            | 0.60                                         |
+|             | OurHVPA   | 1.00    |   | 1.00        | 1.00   | 1.00  | 1.00            | 1.00                                         |
+| B OX 2      |           |         |   |             |        |       |                 |                                              |
+| 3           | Mitsu     | —       |   | —           | —      | —     | —               | —                                            |
+|             | FR22      | 3.24    |   | 2.49        | 2.57   | 2.78  | 2.89            | 2.70                                         |
+|             | CMA-ES    | 5.51    |   | 3.45        | 3.15   | 8.13  | 5.51            | 4.13                                         |
+|             | OurG      | 2.88    |   | 2.16        | 2.21   | 2.86  | 2.65            | 2.38                                         |
+|             | OurH      | 0.93    |   | 0.95        | 1.08   | 0.76  | 0.84            | 1.84                                         |
+|             | OurHVP    | 0.81    |   | 0.64        | 0.70 4 |       |                 |                                              |
+|             |           |         |   |             |        | 0.74  | 0.72            | 0.72                                         |
+|             | OurHVPA   | 1.00    |   | 1.00        | 1.00   | 1.00  | 1.00            | 1.00                                         |
+| B OX 10 5   | Mitsu     | —       |   | —           | —      | —     | —               | —                                            |
+|             | FR22      | 1.49    |   | 1.20        | 1.71   | 1.80  | 1.54            | 1.29                                         |
+|             | CMA-ES    | 3.10    |   | 2.27        | 1.73   | 4.52  | 3.23            | 2.48                                         |
+|             | OurG      | 2.18    |   | 1.77        | 1.53   | 2.53  | 2.26            | 1.88                                         |
+|             | OurH      | 5.97    |   | 5.33        | 4.68   | 5.48  | 5.96            | 5.45                                         |
+|             | OurHVP    | 1.51    |   | 1.44        | 1.69 6 |       |                 |                                              |
+|             |           |         |   |             |        | 1.26  | 1.50            | 1.58                                         |
+|             | OurHVPA   | 1.00    |   | 1.00        | 1.00   | 1.00  | 1.00            | 1.00                                         |
+| M UG 7      | Mitsu     | —       |   | —           | —      | —     | —               | —                                            |
+|             | FR22      | 5.92    |   | 5.69        | 5.46   | 3.28  | 6.53            | 6.29                                         |
+|             | CMA-ES    | 2.95    |   | 1.97        | 1.82   | 3.32  | 2.38            | 2.20                                         |
+|             | OurG      | 3.99    |   | 3.91        | 3.74   | 2.36  | 4.42            | 4.30                                         |
+|             | OurH      | 1.57    |   | 1.09        | 1.53   | 1.00  | 1.08            | 1.20                                         |
+|             | OurHVP    | 1.15    |   | 1.14        | 1.18   | 1.14  | 0.87            | 1.05                                         |
+|             | OurHVPA 8 |         |   |             |        |       |                 |                                              |
+|             |           | 1.00    |   | 1.00        | 1.00   | 1.00  | 1.00            | 1.00                                         |
+| S HAD 9     | Mitsu     | —       |   | —           | —      | —     | —               | —                                            |
+|             | FR22      | 1.94    |   | 1.40        | 1.55   | 1.89  | 1.14            | 1.71                                         |
+|             | CMA-ES    | 1.96    |   | 1.15        | 1.03   | 4.38  | 2.20            | 1.66                                         |
+|             | OurG      | 1.37    |   | 1.18        | 1.13   | 2.38  | 1.47            | 1.34                                         |
+|             | OurH      | 1.67    |   | 1.44        | 1.66   | 2.32  | 1.74            | 1.46                                         |
+|             | OurHVP    | 1.14    |   | 0.91        | 0.96   | 1.37  | 1.13            | 1.07                                         |
+|             | OurHVPA   | 1.00    |   | 1.00        | 1.00   | 1.00  | 1.00            | 1.00 10                                      |
+| B UNNY 11   | Mitsu 12  | 0.90    |   | 1.29        | 1.46   | 1.87  | 1.38            | 1.28                                         |
+|             | FR22      | 0.75    |   | 0.75        | 1.12   | 0.78  | 0.63            | 0.71                                         |
+|             | CMA-ES    | 1.16    |   | 0.95        | 0.85   | 1.27  | 0.91            | 0.85                                         |
+|             | OurG      | 0.76    |   | 0.89        | 1.07   | 0.69  | 0.64            | 0.76                                         |
+|             | OurH      | 1.29    |   | 1.23        | 1.29   | 1.18  | 0.80            | 1.07                                         |
+|             | OurHVP    | 0.68    |   | 0.68        | 0.70   | 0.63  | 0.44            | 0.58                                         |
+|             | OurHVPA   | 1.00    |   | 1.00        | 1.00   | 1.00  | 1.00            | 1.00                                         |
+| T EXTURE 13 | Mitsu     | —       |   | —           | —      | —     | —               | —                                            |
+|             | FR22      | 4.04    |   | 2.27        | 1.80   | 4.04  | 2.27            | 1.80                                         |
+|             | CMA-ES    | 7.08    |   | 4.60        | 4.35   | 11.16 | 7.47            | 7.44                                         |
+|             | OurG      | 3.03    |   | 2.86        | 2.82   | 3.03  | 2.86            | 2.82                                         |
+|             | OurH 14   | 40.12   |   | 39.78       | —      | 40.12 | 39.78           | —                                            |
+|             | OurHVP    | 4.01    |   | 4.00        | 4.00   | 4.01  | 4.00            | 4.00                                         |
+|             | OurHVPA   | 1.00    |   | 1.00        | 1.00   | 1.00  | 1.00            | 1.00                                         |
+| CNN 15      | Mitsu     | —       |   | —           | —      | —     | —               | —                                            |
+|             | FR22      | 2.11 16 |   | —           | —      | 1.45  | 1.32            | 2.71                                         |
+|             | CMA-ES    | —       |   | —           | —      | 2.08  | —               | —                                            |
+|             | OurG      | 1.14    |   | —           | —      | 0.96  | 0.83            | 2.28                                         |
+|             | OurH      | 0.77    |   | 0.77        | —      | 0.74  | 0.77            | 0.74                                         |
+|             | OurHVP    | 0.87    |   | 0.93 17     | —      | 0.88  | 0.91            | 0.87                                         |
+|             | OurHVPA   | 1.00    |   | 1.00        | — 18   | 1.00  | 1.00            | 1.00                                         |
+| CNN5 19     | Mitsu     | —       |   | —           | —      | —     | —               | —                                            |
+|             | FR22      | —       |   | —           | —      | —     | —               | —                                            |
+|             | CMA-ES    | —       |   | —           | —      | —     | —               | —                                            |
+|             | OurG      | 18.68   |   | —           | —      | 3.70  | —               | —                                            |
+|             | OurH      | 19.00   |   | —           | —      | 5.79  | —               | —                                            |
+|             | OurHVP    | 3.64 20 |   | 1.46        | —      | 1.49  | 1.58            | —                                            |
+|             | OurHVPA   | 1.00    |   | 1.00        | —      | 1.00  | 1.00            | 1.00                                         |
+
+
+
 Figure 5. Inverse mesh optimization from renderings. Gradients use FR22, Hessians use OursHVPA, CMA-ES uses the pycma package.
-4.2. Results
-The main results of our evaluation are summarize in Tab. 2
-where empty cells did not converge or the method is not
-applicable to that task. On average across tasks and methods, our premiere method oursHVPA speeds up the convergence by a factor of 2.71.
-In general, our methods, in particular OursHVP and
-OursHVPA, lead the level of error reduction across all time
-budgets, as seen by comparing the convergence curves vertically where they consistently decrease fastest.
-We benefit most in the artificial Q UAD task, but M UG
-and S HADOW are both real rendering problems, where we
-are around seven times and 60 % faster, respectively. We see
-that OurG typically cannot outperform FR22, which uses
-an approximation of the correct high-dimensional gradient
-kernel. Doing it “right” only pays off when going to higher
-order. We also note that OursHVP outperforms OursH due
-to less function evaluations (as the metric is wall-clock - the
-iteration count for both is close). The log-log plots confirm
-that the higher-order variants enabled by our approach are
-much faster, but also converge slightly less stable.
-While tasks like QUAD and B OX 2 are not applicable
-to inverse renderers like Mitsuba2 , our methods treat
-any loss function as a black-box and retrieve derivatives
-via sampling. Comparing the performance of OurHVP
-and OurHVPA across a task with two and ten dimensions,
-we find the expected relation: OurHVP is faster in low
-dimensions4 than in higher dimensions for a similar task6 .
-We notice that the OurHVPA is not out-performing the
-OurHVP and OurH in the M UG task8 . This is because there
-is a single scene parameter for this task, thus, the higher
-order derivative is all in order of one. With a higher variance
-for OurHVPA, it could be a little slower. The effect of using
-the aggregate starts to show from S HAD, where OurHVPA
-reaches the 1 : 1000 convergence the fastest10 .
-For all the rendering tasks, only the B UNNY task converges for Mitsuba12 . Since the other tasks have plateaus
-in the loss function, the analytical gradient from inverse rendering is effectively zero, so it would be hard to converge
-within a reasonable time. The log-log plot shows in addition that derivatives from the inverse rendering were slower
-than the sampled ones. On the contrary, our methods not
-only smooth out the plateaus, but also improve the speed of
-the derivative computation.
-The drawback of constructing full Hessians is seen in
-the T EXTURE task, where OurH is more than 40 times
-slower than the HVP due to the matrix size14 . For the
-most demanding task, CNN and CNN5, and even our best
-method18 is not able to reduce the error below 1 : 1000. At
-the 1 : 1000-level, the more elaborate differentials17 is not
-faster than the basic one, but faster than first-order16 . Finally, the advantage of our ability to compute HVPs is seen
-when comparing CNN and CNN5: while a CNN producing
-a single parameter is doable with Hessians17 , but if we go
-to higher dimensions, the aggregate strategy pays off again
-and is markedly faster20 .
-In conclusion, albeit convergence varies with problem
-characteristics and dimensionality, we find that our best
-method, OurHVPA converges most reliably, beating the
-other algorithms by an average factor of 2.71× in wallclock units. We show examples of task initialization and
-outcome, and additional evaluation in the supplemental.
-5. Limitations and Conclusion
-Limitations. From the above experiments, it becomes apparent that our method performs well on lower-dimensional
-examples, but that its performance delta lessens with increasing problem dimensionality (see e.g. T EXTURE). We
-hypothesize that this is due to sparser sampling in higher dimensions and exacerbated MC noise and acknowledge that
-further research in this direction is needed. We include an
-analysis on how our method degrades under MC rendering
-noise in the supplemental.
-Conclusion. The availability of second-order gradient information gives rise to an exciting avenue of future research
-in inverse rendering. While these algorithms are not new,
-their use in vision & graphics remains limited due to the
-convenience and widespread adoption of first-order gradient descent and the increased per-iteration cost that is usually associated with higher-order methods. In this work, our
-efficient estimators have shown the latter to be negligible in
-real-world optimization scenarios. We hope that this will inspire future research into unbiased, low-variance estimators
-of higher-order optimization methods.
-References
-[1] Albert S Berahas, Richard H Byrd, and Jorge Nocedal.
-Derivative-free optimization of noisy functions via quasinewton methods. SIAM Journal on Optimization, 29(2):965–
-993, 2019.
-[2] John P Boyd. Solving transcendental equations: the Chebyshev polynomial proxy and other numerical rootfinders, perturbation series, and oracles. SIAM, 2014.
-[3] Tony F Chan, Gene H Golub, and Pep Mulet. A nonlinear
-primal-dual method for total variation-based image restoration. SIAM Scient. Comput., 20(6):1964–1977, 1999.
-[4] Swarat Chaudhuri and Armando Solar-Lezama. Smooth interpretation. ACM Sigplan Notices, 45(6):279–291, 2010.
-[5] Thomas Deliot, Eric Heitz, and Laurent Belcour. Transforming a non-differentiable rasterizer into a differentiable one
-with stochastic gradient estimation. In ACM i3D, 2024.
-[6] Deshana Desai, Etai Shuchatowitz, Zhongshi Jiang, Teseo
-Schneider, and Daniele Panozzo. Acorns: An easy-to-use
-code generator for gradients and hessians. SoftwareX, 17:
-100901, 2022.
-[7] Michael Fischer and Tobias Ritschel. Plateau-reduced differentiable path tracing. In CVPR, pages 4285–4294, 2023.
-[8] Michael Fischer and Tobias Ritschel. Zerograds: Learning
-local surrogates for non-differentiable graphics. ACM Trans.
-Graph. (Proc. SIGGRAPH), 43(4):1–15, 2024.
-[9] Roger Fletcher and Michael JD Powell. A rapidly convergent
-descent method for minimization. The computer journal, 6
-(2):163–168, 1963.
-[10] Nikolaus Hansen and Andreas Ostermeier. Adapting arbitrary normal mutation distributions in evolution strategies:
-The covariance matrix adaptation. In Proc. IEEE Evolutionary Computation, pages 312–317, 1996.
-[11] Rasmus Jensen, Anders Dahl, George Vogiatzis, Engil Tola,
-and Henrik Aanæs. Large scale multi-view stereopsis evaluation. In CVPR, pages 406–413, 2014.
-[12] James T Kajiya. The rendering equation. In Proc. SIGGRAPH, 1986.
-[13] Martin Kilian, Niloy J Mitra, and Helmut Pottmann. Geometric modeling in shape space. In SIGGRAPH, pages 64–
-es, 2007.
-[14] Dilip Krishnan and Rob Fergus. Fast image deconvolution
-using hyper-Laplacian priors. Proc. NeurIPS, 22, 2009.
-[15] Shichen Liu, Tianye Li, Weikai Chen, and Hao Li. Soft rasterizer: A differentiable renderer for image-based 3d reasoning. In Proc. ICCV, 2019.
-[16] Matthew M Loper and Michael J Black. OpenDR: An approximate differentiable renderer. In Proc. ECCV, 2014.
-[17] James Martens. New insights and perspectives on the natural
-gradient method. J Machine Learning Res, 21(146):1–76,
-2020.
-[18] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik,
-Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
-Representing scenes as neural radiance fields for view synthesis. Comm ACM, 65(1), 2021.
-[19] Baptiste Nicolet, Alec Jacobson, and Wenzel Jakob. Large
-steps in inverse rendering of geometry. ACM Trans. Graph.
-(Proc. SIGGRAPH Asis), 40(6):1–13, 2021.
-[20] Merlin Nimier-David, Delio Vicini, Tizian Zeltner, and Wenzel Jakob. Mitsuba 2: A retargetable forward and inverse
-renderer. ACM Trans. Graph., 38(6), 2019.
-[21] Merlin Nimier-David, Sébastien Speierer, Benoı̂t Ruiz, and
-Wenzel Jakob. Radiative backpropagation: an adjoint
-method for lightning-fast differentiable rendering. ACM
-Trans Graph, 39(4), 2020.
-[22] Jorge Nocedal and Stephen J Wright. Numerical optimization. Springer, 1999.
-[23] Art Owen and Yi Zhou. Safe and effective importance sampling. J American Statistical Assoc., 95(449), 2000.
-[24] Barak A Pearlmutter. Fast exact multiplication by the hessian. Neural computation, 6(1):147–160, 1994.
-[25] Michael JD Powell. Algorithms for nonlinear constraints that
-use lagrangian functions. Math. Prog., 14:224–248, 1978.
-[26] Aditya Ramesh, Prafulla Dhariwal, Alex Nichol, Casey Chu,
-and Mark Chen. Hierarchical text-conditional image generation with clip latents. arXiv:2204.06125, 1(2):3, 2022.
-[27] Sebastian Ruder. An overview of gradient descent optimization algorithms. arXiv:1609.04747, 2016.
-[28] Pedro V Sander, John Snyder, Steven J Gortler, and Hugues
-Hoppe. Texture mapping progressive meshes. In Proc. SIGGRAPH, pages 409–416, 2001.
-[29] David F Shanno. Conditioning of quasi-newton methods
-for function minimization. Mathematics of computation, 24
-(111):647–656, 1970.
-[30] Jack Sherman. Adjustment of an inverse matrix corresponding to changes in the elements of a given column or row of
-the original matrix. Annu. Math. Statist., 20:621, 1949.
-[31] Jonathan Richard Shewchuk. An introduction to the conjugate gradient method without the agonizing pain. 1994.
-[32] James C Spall. Multivariate stochastic approximation using
-a simultaneous perturbation gradient approximation. IEEE
-Trans Automatic Control, 37(3):332–341, 1992.
-[33] Eric Veach and Leonidas J Guibas. Optimally combining
-sampling techniques for Monte Carlo rendering. In Proc.
-SIGGRAPH, pages 419–428, 1995.
-[34] Delio Vicini, Sébastien Speierer, and Wenzel Jakob. Path replay backpropagation: differentiating light paths using constant memory and linear time. ACM Trans Graph, 40(4),
-2021.
-[35] Werbos. Backpropagation: Past and future. In IEEE 1988
-Int Conf Neural Networks, pages 343–353. IEEE, 1988.
-[36] Manuel Werlberger, Werner Trobin, Thomas Pock, Andreas
-Wedel, Daniel Cremers, and Horst Bischof. Anisotropic
-huber-l1 optical flow. In BMVC, volume 1, 2009.
-[37] Zhewei Yao, Amir Gholami, Sheng Shen, Mustafa Mustafa,
-Kurt Keutzer, and Michael Mahoney. Adahessian: An adaptive second order optimizer for machine learning. In Proc.
-AAAI, volume 35, pages 10665–10673, 2021.
-[38] Yizhou Yu, Paul Debevec, Jitendra Malik, and Tim Hawkins.
-Inverse global illumination: Recovering reflectance models
-of real scenes from photographs. In Proc. SIGGRAPH, pages
-215–224, 1999.
-[39] Christopher Zach, Thomas Pock, and Horst Bischof. A duality based approach for realtime TV-L1 optical flow. In
-DAGM Pattern Recognition, pages 214–223, 2007.
-A. Gradient derivation
-C. Hessian derivation
+
+### 4.2. Results
+
+The main results of our evaluation are summarize in Tab. 2 where empty cells did not converge or the method is not applicable to that task. On average across tasks and methods, our premiere method oursHVPA speeds up the convergence by a factor of 2.71.
+
+In general, our methods, in particular OursHVP and OursHVPA, lead the level of error reduction across all time budgets, as seen by comparing the convergence curves vertically where they consistently decrease fastest.
+
+We benefit most in the artificial QUAD task, but MUG and SHADOW are both real rendering problems, where we are around seven times and 60 % faster, respectively. We see that OurG typically cannot outperform FR22, which uses an approximation of the correct high-dimensional gradient kernel. Doing it "right" only pays off when going to higher order. We also note that OursHVP outperforms OursH due to less function evaluations (as the metric is wall-clock - the iteration count for both is close). The log-log plots confirm that the higher-order variants enabled by our approach are much faster, but also converge slightly less stable.
+
+While tasks like QUAD and BOX2 are not applicable to inverse renderers like Mitsuba2 , our methods treat any loss function as a black-box and retrieve derivatives via sampling. Comparing the performance of OurHVP and OurHVPA across a task with two and ten dimensions, we find the expected relation: OurHVP is faster in low dimensions4 than in higher dimensions for a similar task6 .
+
+We notice that the OurHVPA is not out-performing the OurHVP and OurH in the MUG task8 . This is because there is a single scene parameter for this task, thus, the higher order derivative is all in order of one. With a higher variance for OurHVPA, it could be a little slower. The effect of using the aggregate starts to show from SHAD, where OurHVPA reaches the 1 : 1000 convergence the fastest10 .
+
+For all the rendering tasks, only the BUNNY task converges for Mitsuba12. Since the other tasks have plateaus in the loss function, the analytical gradient from inverse rendering is effectively zero, so it would be hard to converge within a reasonable time. The log-log plot shows in addition that derivatives from the inverse rendering were slower than the sampled ones. On the contrary, our methods not only smooth out the plateaus, but also improve the speed of the derivative computation.
+
+The drawback of constructing full Hessians is seen in the TEXTURE task, where OurH is more than 40 times slower than the HVP due to the matrix size14. For the most demanding task, CNN and CNN5, and even our best method18 is not able to reduce the error below 1 : 1000. At the 1 : 1000-level, the more elaborate differentials17 is not faster than the basic one, but faster than first-order16. Finally, the advantage of our ability to compute HVPs is seen when comparing CNN and CNN5: while a CNN producing a single parameter is doable with Hessians17, but if we go to higher dimensions, the aggregate strategy pays off again and is markedly faster20 .
+
+In conclusion, albeit convergence varies with problem characteristics and dimensionality, we find that our best method, OurHVPA converges most reliably, beating the other algorithms by an average factor of 2.71× in wallclock units. We show examples of task initialization and outcome, and additional evaluation in the supplemental.
+
+## 5. Limitations and Conclusion
+
+Limitations. From the above experiments, it becomes apparent that our method performs well on lower-dimensional examples, but that its performance delta lessens with increasing problem dimensionality (see e.g. TEXTURE). We hypothesize that this is due to sparser sampling in higher dimensions and exacerbated MC noise and acknowledge that further research in this direction is needed. We include an analysis on how our method degrades under MC rendering noise in the supplemental.
+
+Conclusion. The availability of second-order gradient information gives rise to an exciting avenue of future research in inverse rendering. While these algorithms are not new, their use in vision & graphics remains limited due to the convenience and widespread adoption of first-order gradient descent and the increased per-iteration cost that is usually associated with higher-order methods. In this work, our efficient estimators have shown the latter to be negligible in real-world optimization scenarios. We hope that this will inspire future research into unbiased, low-variance estimators of higher-order optimization methods.
+
+References [1] Albert S Berahas, Richard H Byrd, and Jorge Nocedal. Derivative-free optimization of noisy functions via quasinewton methods. SIAM Journal on Optimization, 29(2):965– 993, 2019. [2] John P Boyd. Solving transcendental equations: the Chebyshev polynomial proxy and other numerical rootfinders, perturbation series, and oracles. SIAM, 2014. [3] Tony F Chan, Gene H Golub, and Pep Mulet. A nonlinear primal-dual method for total variation-based image restoration. SIAM Scient. Comput., 20(6):1964–1977, 1999. [4] Swarat Chaudhuri and Armando Solar-Lezama. Smooth interpretation. ACM Sigplan Notices, 45(6):279–291, 2010. [5] Thomas Deliot, Eric Heitz, and Laurent Belcour. Transforming a non-differentiable rasterizer into a differentiable one with stochastic gradient estimation. In ACM i3D, 2024. [6] Deshana Desai, Etai Shuchatowitz, Zhongshi Jiang, Teseo Schneider, and Daniele Panozzo. Acorns: An easy-to-use code generator for gradients and hessians. SoftwareX, 17: 100901, 2022. [7] Michael Fischer and Tobias Ritschel. Plateau-reduced differentiable path tracing. In CVPR, pages 4285–4294, 2023. [8] Michael Fischer and Tobias Ritschel. Zerograds: Learning local surrogates for non-differentiable graphics. ACM Trans. Graph. (Proc. SIGGRAPH), 43(4):1–15, 2024. [9] Roger Fletcher and Michael JD Powell. A rapidly convergent descent method for minimization. The computer journal, 6 (2):163–168, 1963. [10] Nikolaus Hansen and Andreas Ostermeier. Adapting arbitrary normal mutation distributions in evolution strategies: The covariance matrix adaptation. In Proc. IEEE Evolutionary Computation, pages 312–317, 1996. [11] Rasmus Jensen, Anders Dahl, George Vogiatzis, Engil Tola, and Henrik Aanæs. Large scale multi-view stereopsis evaluation. In CVPR, pages 406–413, 2014. [12] James T Kajiya. The rendering equation. In Proc. SIG-GRAPH, 1986. [13] Martin Kilian, Niloy J Mitra, and Helmut Pottmann. Geometric modeling in shape space. In SIGGRAPH, pages 64– es, 2007. [14] Dilip Krishnan and Rob Fergus. Fast image deconvolution using hyper-Laplacian priors. Proc. NeurIPS, 22, 2009. [15] Shichen Liu, Tianye Li, Weikai Chen, and Hao Li. Soft rasterizer: A differentiable renderer for image-based 3d reasoning. In Proc. ICCV, 2019. [16] Matthew M Loper and Michael J Black. OpenDR: An approximate differentiable renderer. In Proc. ECCV, 2014. [17] James Martens. New insights and perspectives on the natural gradient method. J Machine Learning Res, 21(146):1–76, 2020. [18] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. Comm ACM, 65(1), 2021. [19] Baptiste Nicolet, Alec Jacobson, and Wenzel Jakob. Large steps in inverse rendering of geometry. ACM Trans. Graph. (Proc. SIGGRAPH Asis), 40(6):1–13, 2021. [20] Merlin Nimier-David, Delio Vicini, Tizian Zeltner, and Wenzel Jakob. Mitsuba 2: A retargetable forward and inverse renderer. ACM Trans. Graph., 38(6), 2019. [21] Merlin Nimier-David, Sebastien Speierer, Beno ´ ˆıt Ruiz, and Wenzel Jakob. Radiative backpropagation: an adjoint method for lightning-fast differentiable rendering. ACM Trans Graph, 39(4), 2020. [22] Jorge Nocedal and Stephen J Wright. Numerical optimization. Springer, 1999. [23] Art Owen and Yi Zhou. Safe and effective importance sampling. J American Statistical Assoc., 95(449), 2000. [24] Barak A Pearlmutter. Fast exact multiplication by the hessian. Neural computation, 6(1):147–160, 1994. [25] Michael JD Powell. Algorithms for nonlinear constraints that use lagrangian functions. Math. Prog., 14:224–248, 1978. [26] Aditya Ramesh, Prafulla Dhariwal, Alex Nichol, Casey Chu, and Mark Chen. Hierarchical text-conditional image generation with clip latents. arXiv:2204.06125, 1(2):3, 2022. [27] Sebastian Ruder. An overview of gradient descent optimization algorithms. arXiv:1609.04747, 2016. [28] Pedro V Sander, John Snyder, Steven J Gortler, and Hugues Hoppe. Texture mapping progressive meshes. In Proc. SIG-GRAPH, pages 409–416, 2001. [29] David F Shanno. Conditioning of quasi-newton methods for function minimization. Mathematics of computation, 24 (111):647–656, 1970. [30] Jack Sherman. Adjustment of an inverse matrix corresponding to changes in the elements of a given column or row of the original matrix. Annu. Math. Statist., 20:621, 1949. [31] Jonathan Richard Shewchuk. An introduction to the conjugate gradient method without the agonizing pain. 1994. [32] James C Spall. Multivariate stochastic approximation using a simultaneous perturbation gradient approximation. IEEE Trans Automatic Control, 37(3):332–341, 1992. [33] Eric Veach and Leonidas J Guibas. Optimally combining sampling techniques for Monte Carlo rendering. In Proc. SIGGRAPH, pages 419–428, 1995. [34] Delio Vicini, Sebastien Speierer, and Wenzel Jakob. Path re- ´ play backpropagation: differentiating light paths using constant memory and linear time. ACM Trans Graph, 40(4), 2021. [35] Werbos. Backpropagation: Past and future. In IEEE 1988 Int Conf Neural Networks, pages 343–353. IEEE, 1988. [36] Manuel Werlberger, Werner Trobin, Thomas Pock, Andreas Wedel, Daniel Cremers, and Horst Bischof. Anisotropic huber-l1 optical flow. In BMVC, volume 1, 2009. [37] Zhewei Yao, Amir Gholami, Sheng Shen, Mustafa Mustafa, Kurt Keutzer, and Michael Mahoney. Adahessian: An adaptive second order optimizer for machine learning. In Proc. AAAI, volume 35, pages 10665–10673, 2021. [38] Yizhou Yu, Paul Debevec, Jitendra Malik, and Tim Hawkins. Inverse global illumination: Recovering reflectance models of real scenes from photographs. In Proc. SIGGRAPH, pages 215–224, 1999. [39] Christopher Zach, Thomas Pock, and Horst Bischof. A duality based approach for realtime TV-L1 optical flow. In DAGM Pattern Recognition, pages 214–223, 2007.
+
+### A. Gradient derivation
+
 The i-th element of the gradient of the Gaussian, is
-The diagonal elements of the Hessian of the Gaussian are
-∇i N (τ ) =
-=
-∂i N (τ )
-∂τi
-(24)
-n
-Y
-dN (τi )
-N (τj )
-dτi j=1
-(25)
-=
-j̸=i
-=−
-n
-Y
-τi
-N (τi )
-N (τj )
-σ2
-j=1
-∇2 N (τ )ii =
-(26)
-j̸=i
-τi
-(27)
-= − 2 N (τ ),
-σ
-where we use the overloaded convention that N (τ ) takes a
-vector τ and N (τi ) the i-th element, a scalar τi , to produce
-the one or n-dimensional Gaussian.
-This differs from Fischer and Ritschel [7] who only blur
-in the direction in which they differentiate, as in
-τi
-∇i N (τi ) = 2 N (τi ),
-(28)
-σ
-while it is more consistent with higher-order differentials to
-blur all dimensions.
-τj̸=i
-Writing out the CDF, a positivized and scaled version of the
-PDF p, where 1/Z is the partition function, gives
-Z
-1
-1
-|∇i N (τ )|dτj̸=i =
-(30)
-Z τj̸=i 2
-Z
-1
-|∇i N (τ )|dτj̸=i .
-(31)
-Z τj̸=i
+
+$$\nabla_i \mathcal{N}(\boldsymbol{\tau}) = \frac{\partial_i \mathcal{N}(\boldsymbol{\tau})}{\partial \tau_i} \quad (24)$$
+
+$$= \frac{d\mathcal{N}(\tau_i)}{d\tau_i} \prod_{\substack{j=1 \\ j \neq i}}^n \mathcal{N}(\tau_j) \quad (25)$$
+
+$$= -\frac{\tau_i}{\sigma^2} \mathcal{N}(\tau_i) \prod_{\substack{j=1 \\ j \neq i}}^n \mathcal{N}(\tau_j) \quad (26)$$
+
+$$= -\frac{\tau_i}{\sigma^2} \mathcal{N}(\boldsymbol{\tau}), \quad (27)$$
+
+where we use the overloaded convention that N (τ ) takes a vector τ and N (τi) the i-th element, a scalar τi , to produce the one or n-dimensional Gaussian.
+
+This differs from Fischer and Ritschel [7] who only blur in the direction in which they differentiate, as in
+
+$$\nabla_i \mathcal{N}(\tau_i) = \frac{\tau_i}{\sigma^2} \mathcal{N}(\tau_i), \quad (28)$$
+
+while it is more consistent with higher-order differentials to blur all dimensions.
+
+## B. Smooth Gradient Marginalization
+
+The sampling of 1D Gaussian gradient was derived by Fischer and Ritschel [7] who constructed a PDF p G. For a ndimensional Gaussian gradient, we need to marginalize and sample the dimensions individually. Marginalization would be integration over all dimensions j ̸= i, except the one we look for i, so:
+
+$$\int_{\tau_{j \neq i}} p^G(\tau) d\tau_{j \neq i}. \quad (29)$$
+
+Writing out the CDF, a positivized and scaled version of the PDF p, where 1/Z is the partition function, gives
+
+$$\frac{1}{Z} \int_{\tau_j \neq i} \frac{1}{2} |\nabla_i \mathcal{N}(\boldsymbol{\tau})| d\tau_{j \neq i} = (30)$$
+
+$$\frac{1}{Z} \int_{\tau_j \neq i} |\nabla_i \mathcal{N}(\tau)| d\tau_j \neq i. \quad (31)$$
+
 Writing the n-D Gaussian as product of n 1D Gaussians
-Z
-N
-Y
-1
-|∇i
-N (τj )|dτj̸=i .
-(32)
-Z τj̸=i
-j=1
+
+$$\frac{1}{Z} \int_{\tau_{j \neq i}} |\nabla_i \prod_{j=1}^N \mathcal{N}(\tau_j)| d\tau_{j \neq i}. \quad (32)$$
+
 As we differentiate only by τi , all other factors are 1, so
-Z
-1
-|∇i N (τi )|dτj̸=i .
-(33)
-Z τj̸=i
-As we are integrating over all τj̸=1 , integration becomes
-multiplication with the domain’s measure, 1.
-|∇i N (τi )|.
-(34)
-(35)
-
-n
-Y
-
-∂ 
-− τi N (τi )
-N (τj )
-
-
-2
-∂τi
-σ
-j=1
-(36)
-j̸=i
-n
-Y
-∂  τi
-=
-− 2 N (τi )
-N (τj )
-∂τi
-σ
-j=1
-(37)
-j̸=i
-
-=
-τ2
-1
-− 2 + i4
-σ
-σ
-
-=
-−
-τi2
-1
-+
-σ2
-σ4
-Y
-n
-N (τj )
-(38)
-j=1
-j̸=i
-
-N (τ ).
-(39)
+
+$$\frac{1}{Z} \int_{\tau_j \neq i} |\nabla_i \mathcal{N}(\tau_i)| d\tau_j \neq i. \quad (33)$$
+
+As we are integrating over all τj̸=1, integration becomes multiplication with the domain's measure, 1.
+
+$$|\nabla_i \mathcal{N}(\tau_i)|. \quad (34)$$
+
+### C. Hessian derivation
+
+The diagonal elements of the Hessian of the Gaussian are
+
+$$\nabla^2 \mathcal{N}(\boldsymbol{\tau})_{ii} = \frac{\partial_i^2 \mathcal{N}(\boldsymbol{\tau})}{\partial^2 \tau_i} \quad (35)$$
+
+$$= \frac{\partial}{\partial \tau_i} \left( -\frac{\tau_i}{\sigma^2} \mathcal{N}(\tau_i) \prod_{\substack{j=1 \\ j \neq i}}^n \mathcal{N}(\tau_j) \right) \quad (36)$$
+
+$$= \frac{\partial}{\partial \tau_i} \left( -\frac{\tau_i}{\sigma^2} \mathcal{N}(\tau_i) \right) \prod_{\substack{j=1 \\ j \neq i}}^n \mathcal{N}(\tau_j) \quad (37)$$
+
+$$= \left( -\frac{1}{\sigma^2} + \frac{\tau_i^2}{\sigma^4} \right) \prod_{\substack{j=1 \\ j \neq i}}^n \mathcal{N}(\tau_j) \quad (38)$$
+
+$$= \left( -\frac{1}{\sigma^2} + \frac{\tau_i^2}{\sigma^4} \right) \mathcal{N}(\boldsymbol{\tau}). \quad (39)$$
+
 The non-diagonals of the Hessian of the Gaussian are
-∇2 N (τ )ij =
-B. Smooth Gradient Marginalization
-The sampling of 1D Gaussian gradient was derived by Fischer and Ritschel [7] who constructed a PDF pG . For a ndimensional Gaussian gradient, we need to marginalize and
-sample the dimensions individually. Marginalization would
-be integration over all dimensions j ̸= i, except the one we
-look for i, so:
-Z
-pG (τ )dτj̸=i .
-(29)
-∂i2 N (τ )
-∂ 2 τi
-
-=
-=
-=
-=
-∂ 2 N (τ )
-∂i τi ∂j τj
-
-∂  τi
-− 2 N (τi )
-∂τj
-σ
-(40)
-n
-Y
-
-
-N (τk )
-k=1
-k̸=i
-n
-Y
-τi
-τj
-N (τi ) 2 N (τj )
-2
-σ
-σ
-τi τj
-N (τi )N (τj )
-σ2 σ2
-k=1
-k̸=i,j
-n
-Y
-(41)
-N (τk )
-(42)
-N (τk )
-(43)
-k=1
-k̸=i,j
-τi τj
-N (τ ).
-σ4
-(44)
-A remark: It might appear, that diagonal is a special case
-of off-diagonal, but for differentiation, that is not true, as
-on the diagonal, the variable we differentiate in respect to
-appears twice, in the sense that duv/du = v and duv/dv =
-u, but duu/du = 2u.
-D. Sampling diagonal of Hessian
-Similar to Sec. B, for the diagonal of the Hessian, we
-can sample each dimension independently. Thus, we can
-first derive the valid distribution of the second-order derivative of the one-dimensional Gaussian by positivization and
-scaling, and it will apply to higher dimensions: The onedimensional Gaussian’s second-order derivative is
-
-
-1
-τi2
-(45)
-− 2 + 4 N (τi )
-σ
-σ
-Target
-Derivative
-Positivized
-1
-β/4
-0
-0
-σ
-σ
-σ
-σ
-0
-σ
-σ
-PDF
-1
-3/4
-3/4
-1/2
-1/2
-1/4
-1/4
-0
-σ
-0
-σ
-CDF
-σ
-σ
-2
-Figure 6. Detailed plots of the functions involved in the derivation of the CDF for the diagonal elements of ∇ N , extending Fig. 3.
-E. Grey-box differentials
+
+$$\nabla^2 \mathcal{N}(\boldsymbol{\tau})_{ij} = \frac{\partial^2 \mathcal{N}(\boldsymbol{\tau})}{\partial_i \tau_i \partial_j \tau_j} \quad (40)$$
+
+$$= \frac{\partial}{\partial \tau_j} \left( -\frac{\tau_i}{\sigma^2} \mathcal{N}(\tau_i) \prod_{\substack{k=1 \\ k \neq i}}^n \mathcal{N}(\tau_k) \right) \quad (41)$$
+
+$$= \frac{\tau_i}{\sigma^2} \mathcal{N}(\tau_i) \frac{\tau_j}{\sigma^2} \mathcal{N}(\tau_j) \prod_{\substack{k=1 \\ k \neq i, j}}^n \mathcal{N}(\tau_k) \quad (42)$$
+
+$$= \frac{\tau_i}{\sigma^2} \frac{\tau_j}{\sigma^2} \mathcal{N}(\tau_i) \mathcal{N}(\tau_j) \prod_{\substack{k=1 \\ k \neq i,j}}^n \mathcal{N}(\tau_k) \quad (43)$$
+
+$$= \frac{\tau_i \tau_j}{\sigma^4} \mathcal{N}(\tau). \quad (44)$$
+
+A remark: It might appear, that diagonal is a special case of off-diagonal, but for differentiation, that is not true, as on the diagonal, the variable we differentiate in respect to appears twice, in the sense that duv/du = v and duv/dv = u, but duu/du = 2u.
+
+### D. Sampling diagonal of Hessian
+
+Similar to Sec. B, for the diagonal of the Hessian, we can sample each dimension independently. Thus, we can first derive the valid distribution of the second-order derivative of the one-dimensional Gaussian by positivization and scaling, and it will apply to higher dimensions: The onedimensional Gaussian's second-order derivative is
+
+
+$$\left( -\frac{1}{\sigma^2} + \frac{\tau_i^2}{\sigma^4} \right) \mathcal{N}(\tau_i) \quad (45)$$
+
+
+
+Figure 6. Detailed plots of the functions involved in the derivation of the CDF for the diagonal elements of ∇2N , extending Fig. 3.
+
 The roots of Eq. 45 are the τi for which
-
-
-1
-τi2
-− 2 + 4 N (τi ) = 0.
-σ
-σ
-(46)
-As N (τi ) > 0 for all τi , the product can be 0 only if
-−
-1
-τ2
-+ i4 = 0
-and hence
-2
-σ
-σ
-τi = ±σ.
-β=
-∇z (z = f (g(x))) = (∇x g(x)) · ∇y f (y = g(x)),
-(48)
-which means to take the Jacobian (as both g and f in general
-are vector-valued) of the inner function g in respect to the
-inner argument x and vector-matrix multiply this with the
-gradient of the outer function f but in respect to the outer
-argument y. For the second order it is
-1
-4
-(49)
-1
-.
-4∇N (−σ)
-(50)
-So, for the positivised rescaled second-order derivative
-as a PDF of the distribution:
-2
-pH
-ii = |β∇ N (τi )|.
-(51)
-We can get the integrating constant by flipping and translating the scaled gradient of Gaussian to arrive at the CDF
-function for the intervals:
-β∇N (τi ) if τi < −σ,
-1
-PiiH (τi ) =
-+β∇N (τi ) if τi ∈ [−σ, σ]
-
-
-2
-1− β∇N (τi ) if τi > σ.
-
-
-
-
-T
-(47)
-The function value between −σ < τi ≤ σ is negative
-and hence needs to be positivised. Since the second-order
-derivative should integrate to the gradient of the Gaussian,
-we know that it reaches zero as τi reaches infinity. In conjunction with the fact that the second-order derivative is
-symmetric about the y-axis, we can conclude that the integral of the interval −σ < τi ≤ σ should be twice the size
-of the integral of τi ≤ −σ = τi > σ. Thus, after positivization, the CDF should be scaled, such that it is 41 at τi = −σ.
-Solving for these equalities, we can get:
-β∇N (−σ) =
-Sometimes, differentials are in respect to a function that
-is a composition z = f (y = g(x)) of an inner function
-with known analytic differentials g (white box) and an outer
-function f with differentials that need to be sampled (black
-box). For first order (gradient), this is
-(52)
-T
-∇2z f (g(x)) ≈ (∇x g(x)) · ∇2y f (g(x)) · ∇x g(x)
-which means again to take the gradient of the inner function,
-but multiply it with the Hessian, instead of the Jacobian of
-the composition in respect to the outer argument [17].
-The aim of this exercise is to have the sampled gradients
-handle only the black-box part and the analytic gradients
-handle the non-sampled parts. As the analytic parts are typically large (e.g., in the order of the size of a neural network)
-compared to the number of physical rendering parameters
-(placement of light, cameras or objects), this can provide
-substantial advantages.
-F. BFGS/LBFGS method
-Quasi-Newton methods are also a way to utilize the second
-order information for optimization, however, they approximate this information with zero or first order information.
-We tested the family of algorithms from the quasi-Newton
-methods that is known to be most effective, the BFGS algorithms [30]. For this family of algorithms, the vanilla
-BFGS algorithm [29], along with BFGS with Armijo-Wolfe
-line search [22], and LBFGS [22], were tested, but they
-only converge for the Q UAD task. This is probably due to
-the noisy nature of the derivative estimation. To this end,
-damped BFGS [25] and adaptive finite difference BFGS [1]
-were also added, but neither changed the convergence of
-other tasks.
-Target
-1st order sampled
-1st order analytic
-2nd order sampled
-2nd order analytic
-Analytic
-Sampled
-Log time
-Figure 8. Optimization on a problem with non-PSD Hessians.
-tion trajectories for both the analytic and sampled derivatives. This indicates that, for the right combination of estimator and optimizer, non-PSD is not necessarily a problem.
-Log error
-Ours
-Init
-To further validate our approach, we investigate a task
-where the analytic Hessians are available: the optimization of a sphere’s Phong BRDF (7 unknowns) under point
-illumination. We use this task to evaluate both analytical and sampled derivatives, as well as the corresponding
-first and second-order methods that employ them in Fig. 7.
-The dashed lines indicate the first-order methods, while the
-solid lines represent the second-order methods. We see that
-Log error
-G. Comparing to analytical Hessians
-I. Robustness analysis
-Log time
+
+$$\left( -\frac{1}{\sigma^2} + \frac{\tau_i^2}{\sigma^4} \right) \mathcal{N}(\tau_i) = 0. \quad (46)$$
+
+As N (τi) > 0 for all τi , the product can be 0 only if
+
+| $-\frac{1}{\sigma^2} + \frac{\tau_i^2}{\sigma^4} = 0$ | and hence | (47) |
+|-------------------------------------------------------|-----------|------|
+|-------------------------------------------------------|-----------|------|
+
+$$\tau_i = \pm\sigma. \quad (48)$$
+
+The function value between −σ < τi ≤ σ is negative and hence needs to be positivised. Since the second-order derivative should integrate to the gradient of the Gaussian, we know that it reaches zero as τi reaches infinity. In conjunction with the fact that the second-order derivative is symmetric about the y-axis, we can conclude that the integral of the interval −σ < τi ≤ σ should be twice the size of the integral of τi ≤ −σ = τi > σ. Thus, after positivization, the CDF should be scaled, such that it is 1 4 at τi = −σ. Solving for these equalities, we can get:
+
+$$\beta \nabla \mathcal{N}(-\sigma) = \frac{1}{4} \quad (49)$$
+
+$$\beta = \frac{1}{4\nabla \mathcal{N}(-\sigma)}. \quad (50)$$
+
+So, for the positivised rescaled second-order derivative as a PDF of the distribution:
+
+$$p_{ii}^{\text{H}} = |\beta \nabla^2 \mathcal{N}(\tau_i)|. \quad (51)$$
+
+We can get the integrating constant by flipping and translating the scaled gradient of Gaussian to arrive at the CDF function for the intervals:
+
+$$P_{ii}^{\text{H}}(\tau_i) = \begin{cases} \beta \nabla \mathcal{N}(\tau_i) & \text{if } \tau_i < -\sigma, \\ \frac{1}{2} + \beta \nabla \mathcal{N}(\tau_i) & \text{if } \tau_i \in [-\sigma, \sigma] \\ 1 - \beta \nabla \mathcal{N}(\tau_i) & \text{if } \tau_i > \sigma. \end{cases} \quad (52)$$
+
+## E. Grey-box differentials
+
+Sometimes, differentials are in respect to a function that is a composition z = f(y = g(x)) of an inner function with known analytic differentials g (white box) and an outer function f with differentials that need to be sampled (black box). For first order (gradient), this is
+
+$$\nabla_{\mathbf{z}}(\mathbf{z} = f(g(\mathbf{x}))) = (\nabla_{\mathbf{x}}g(\mathbf{x}))^T \cdot \nabla_{\mathbf{y}}f(\mathbf{y} = g(\mathbf{x})).$$
+
+which means to take the Jacobian (as both g and f in general are vector-valued) of the inner function g in respect to the inner argument x and vector-matrix multiply this with the gradient of the outer function f but in respect to the outer argument y. For the second order it is
+
+$$\nabla_{\mathbf{z}}^2 f(g(\mathbf{x})) \approx (\nabla_{\mathbf{x}} g(\mathbf{x}))^T \cdot \nabla_{\mathbf{y}}^2 f(g(\mathbf{x})) \cdot \nabla_{\mathbf{x}} g(\mathbf{x})$$
+
+which means again to take the gradient of the inner function, but multiply it with the Hessian, instead of the Jacobian of the composition in respect to the outer argument [17].
+
+The aim of this exercise is to have the sampled gradients handle only the black-box part and the analytic gradients handle the non-sampled parts. As the analytic parts are typically large (e.g., in the order of the size of a neural network) compared to the number of physical rendering parameters (placement of light, cameras or objects), this can provide substantial advantages.
+
+## F. BFGS/LBFGS method
+
+Quasi-Newton methods are also a way to utilize the second order information for optimization, however, they approximate this information with zero or first order information. We tested the family of algorithms from the quasi-Newton methods that is known to be most effective, the BFGS algorithms [30]. For this family of algorithms, the vanilla BFGS algorithm [29], along with BFGS with Armijo-Wolfe line search [22], and LBFGS [22], were tested, but they only converge for the QUAD task. This is probably due to the noisy nature of the derivative estimation. To this end, damped BFGS [25] and adaptive finite difference BFGS [1] were also added, but neither changed the convergence of other tasks.
+
+### G. Comparing to analytical Hessians
+
+To further validate our approach, we investigate a task where the analytic Hessians are available: the optimization of a sphere's Phong BRDF (7 unknowns) under point illumination. We use this task to evaluate both analytical and sampled derivatives, as well as the corresponding first and second-order methods that employ them in Fig. 7. The dashed lines indicate the first-order methods, while the solid lines represent the second-order methods. We see that
+
+
+
 Figure 7. BRDF optimization.
-the sampled method is less accurate and takes longer due
-to the sample size and the bandwidth of sampling. The
-second-order methods outperform the first-order ones in
-both respects. We show the outcome of our second-order
-optimization denoted as ’Ours’ in Fig. 7.
-H. Positive-Definite Hessians
-Naive Newton will fail for cases where the problem’s Hessian is not positive semi-definite (PSD). For a non-positive
-definite Hessian, there may exist a unbounded, negative
-eigenvalue. This means that when the Hessian is applied to
-a gradient vector, it may flip the gradient vector and cause
-opposite divergence from the gradient’s descent direction.
-Although optimization is separate from our contribution
-of stochastic gradient estimation, we demonstrate how our
-method deals with this issue with an example. To this end,
-consider a negated 2D Gaussian −N (0, σ1 ) whose Hessian is non-PSD everywhere. Its convolution with a second
-Gaussian −N (0, σ2 ) results in a third Gaussian −N (0, σ3 ),
-whose Hessian is also not PSD everywhere. In this example, we know the analytic expressions of all the Gaussians,
-so we can compute their Hessians and compare them to our
-estimates. The mean error of our method across the interval
-(−3, 3)2 is within 1 × 10−4 for 100 samples. With Hessian modification and trust region, running an optimization
-finds the correct minimum at (0,0) for any starting point in
-(−3, 3)2 . Fig. 8 shows the optimization error across an ensemble of 20 runs in addition to a top-view of the optimiza-
-We investigate our method’s robustness to:
-Initialization. All our experiments are performed over an
-ensemble of 20 random starting points. The reported numbers and findings are the average of these optimization outcomes.
-Hessian sample count. We repeated the M UG task with
-different numbers of samples used to estimate the Hessian
-during optimization (using multiples of two, due to antithetic sampling). Our overall findings are consistent with
-prior work and indicate that increasing the number of estimation samples does help convergence. However, the increase timed for higher sample counts is not offset by improved convergence for this task, as the per-iteration convergence gain does not sufficiently compensate for the slowdown (left subplot in Fig. 10). This indicates that the minimal number of antithetic samples (two) can be optimal for
-a relevant task.
-Rendering MC noise. We have repeated the M UG experiment with 0.25×, 0.5×, 1×, 2×, and 3× the number of
-rendering samples and did not observe significant change
-in optimization quality and convergence. However, as the
-sample count for rendering increased, the time taken to render each image is longer, leading to a slower convergence
-rate for higher sample counts (center subplot in Fig. 10).
-This provides us with a data point that noise from low-spp
-MC rendering is not a dominating limiting factor for our
-method, although a more in-depth investigation would be
-needed to reliably confirm this across all experiments.
-Real-world compression noise. We repeated the M UG task
-with JPEG compression at the 2%, 4%, 6%, 9%, and 14%
-levels and did not observe significant degradation in convergence (right subplot in Fig. 10). The difference in the final
-result is caused by the loss calculation between the rendered
-image and the noisy, compressed image.
-Init
-Ours
-Target
-MUG
-QUAD
-BOX2
-SHADOW
-BUNNY
-TEXTURE
-BOX10
-CNN5
-Figure 9. Overview of all tasks we study (columns): the first row shows the task initialization, the starting point of the optimization. The
-middle row shows the outcome of optimizing with our estimated Hessians with OursHVPA, while the bottom row shows the ground truth
-for each task.
-8
-10
-8
-Log time
-K. Additional Experiments
-16
-32
-96
-64
-Log error
-4
-2
-6
-Log time
-Log error
-Log error
-Log time
-4
-6 9 14
-2
-Hessian samples
-MC samples
-JPG noise
+
+the sampled method is less accurate and takes longer due to the sample size and the bandwidth of sampling. The second-order methods outperform the first-order ones in both respects. We show the outcome of our second-order optimization denoted as 'Ours' in Fig. 7.
+
+## H. Positive-Definite Hessians
+
+Naive Newton will fail for cases where the problem's Hessian is not positive semi-definite (PSD). For a non-positive definite Hessian, there may exist a unbounded, negative eigenvalue. This means that when the Hessian is applied to a gradient vector, it may flip the gradient vector and cause opposite divergence from the gradient's descent direction. Although optimization is separate from our contribution of stochastic gradient estimation, we demonstrate how our method deals with this issue with an example. To this end, consider a negated 2D Gaussian −N (0, σ1) whose Hessian is non-PSD everywhere. Its convolution with a second Gaussian −N (0, σ2) results in a third Gaussian −N (0, σ3), whose Hessian is also not PSD everywhere. In this example, we know the analytic expressions of all the Gaussians, so we can compute their Hessians and compare them to our estimates. The mean error of our method across the interval (−3, 3)2 is within 1 × 10−4 for 100 samples. With Hessian modification and trust region, running an optimization finds the correct minimum at (0,0) for any starting point in (−3, 3)2 . Fig. 8 shows the optimization error across an ensemble of 20 runs in addition to a top-view of the optimiza-
+
+
+
+Figure 8. Optimization on a problem with non-PSD Hessians.
+
+tion trajectories for both the analytic and sampled derivatives. This indicates that, for the right combination of estimator and optimizer, non-PSD is not necessarily a problem.
+
+## I. Robustness analysis
+
+We investigate our method's robustness to:
+
+Initialization. All our experiments are performed over an ensemble of 20 random starting points. The reported numbers and findings are the average of these optimization outcomes.
+
+Hessian sample count. We repeated the MUG task with different numbers of samples used to estimate the Hessian during optimization (using multiples of two, due to antithetic sampling). Our overall findings are consistent with prior work and indicate that increasing the number of estimation samples does help convergence. However, the increase timed for higher sample counts is not offset by improved convergence for this task, as the per-iteration convergence gain does not sufficiently compensate for the slowdown (left subplot in Fig. 10\). This indicates that the minimal number of antithetic samples (two) can be optimal for a relevant task.
+
+Rendering MC noise. We have repeated the MUG experiment with 0.25×, 0.5×, 1×, 2×, and 3× the number of rendering samples and did not observe significant change in optimization quality and convergence. However, as the sample count for rendering increased, the time taken to render each image is longer, leading to a slower convergence rate for higher sample counts (center subplot in Fig. 10\). This provides us with a data point that noise from low-spp MC rendering is not a dominating limiting factor for our method, although a more in-depth investigation would be needed to reliably confirm this across all experiments.
+
+Real-world compression noise. We repeated the MUG task with JPEG compression at the 2%, 4%, 6%, 9%, and 14% levels and did not observe significant degradation in convergence (right subplot in Fig. 10\). The difference in the final result is caused by the loss calculation between the rendered image and the noisy, compressed image.
+
+
+
+
+
+Figure 9. Overview of all tasks we study (columns): the first row shows the task initialization, the starting point of the optimization. The middle row shows the outcome of optimizing with our estimated Hessians with OursHVPA, while the bottom row shows the ground truth for each task.
+
+
+
 Figure 10. Robustness evaluation (see text). All plots are displayed on a log-error vs. log-time scale.
-We perform two additional experiments to show that our
-method can successfully differentiate diverse light transport
-scenarios: in Fig. 12 we have repeated the caustic example
-from ZeroGrads [8], where the goal is to optimize a heightfield, parametrized by a 1,024-dimensional B-spline, such
-that the caustic it creates matches a reference image. Our
-method performs well on this task, even thought the loss
-landscape is highly non-convex and the optimization variables exhibit highly non-local image-space interactions.
-J. How much variance is reduced?
-In Fig. 11, we perform a variance analysis of the different
-estimators on different differentiable quantities. We see that
-all estimators converge linearly in a log-log plot. The optimal estimator (dotted) has the lowest variance and hence
-would lead to the least noise in optimization, but at the expense of evaluating quadratically many elements for Hessians. Our aggregate sampling (solid line) performs slightly
-worse, but much, better than uniform sampling (thin line)
-would do.
-20
-1
-Log Variance
-HVPs
-106
-Reference
-Setup
-or
-irr
-Figure 11.
-(plots).
-Hessians
-Initialization
-Ours
-Reference
+
+## J. How much variance is reduced?
+
+In Fig. 11, we perform a variance analysis of the different estimators on different differentiable quantities. We see that all estimators converge linearly in a log-log plot. The optimal estimator (dotted) has the lowest variance and hence would lead to the least noise in optimization, but at the expense of evaluating quadratically many elements for Hessians. Our aggregate sampling (solid line) performs slightly worse, but much, better than uniform sampling (thin line) would do.
+
+
+
+Figure 11. Estimator variance (lines) for different operators (plots).
+
+### K. Additional Experiments
+
+We perform two additional experiments to show that our method can successfully differentiate diverse light transport scenarios: in Fig. 12 we have repeated the caustic example from ZeroGrads [8], where the goal is to optimize a heightfield, parametrized by a 1,024-dimensional B-spline, such that the caustic it creates matches a reference image. Our method performs well on this task, even thought the loss landscape is highly non-convex and the optimization variables exhibit highly non-local image-space interactions.
+
+
+
+
+
+Figure 12. Inverse optimization of a heightfield such that the caustic it creates when light shines through it matches a reference. CMA-ES does not converge on this task.
+
+
+
+
+
 Figure 13. Two-bounce mirror optimization experiment.
-102
-101
-1
-105
-OursHVPA
-M
-Gradient
-Optimal
-or
-irr
-103
-Uniform
-OursG
-Figure 12. Inverse optimization of a heightfield such that the caustic it creates when light shines through it matches a reference.
-CMA-ES does not converge on this task.
-M
-Aggregate
-Initialization
-103
-20
-Log Sample Count
-1
-20
-Estimator variance (lines) for different operators
-Additionally, we optimize a two-bounce experiment, where
-the rotation (around the up-axis) and translation (along x,y)
-of the Stanford bunny are optimized, while the bunny is only
-observed through two mirrors. The left subfigure in Fig. 13
-shows the experiment. We use our method OursHVPA and
-observe a successful optimization outcome.
-Method
-Parameter
-Q UAD
-B OX 2
-B OX 10
-M UG
-S HAD
-B UNNY
-T EXTURE
-CNN
-CNN5
-Samples
-Sigma (start)
-4
-1
-6
-1.5
-6
-0.6
-1
-3
-1
-0.5
-2
-1
-4
-0.5
-1
-0.5
-1
-0.5
-FR22
-Learning rate
-Sigma (end)
-0.5
-0.01
-0.3
-0.01
-0.05
-0.1
-0.1
-0.01
-0.02
-0.01
-0.02
-0.01
-0.05
-0.1
-1e-4
-0.01
-1e-4
-0.01
-OurG
-Learning rate
-Sigma (end)
-0.5
-0.01
-0.3
-0.01
-0.05
-0.1
-0.1
-0.01
-0.02
-0.01
-0.02
-0.01
-0.05
-0.1
-1e-4
-0.01
-1e-4
-0.01
-OurH
-Trust region
-Sigma (end)
-Line search iteration
-Line search tolerance
-Recompute
-50
-0.01
-5
-1e-3
-5
-2
-0.01
-10
-1e-3
-10
-10
-0.1
-3
-1e-3
-30
-3
-0.01
-1
-1e-3
-10
-3
-0.01
-1
-1e-3
-10
-2
-0.005
-1
-1e-3
-5
-10
-0.1
-5
-1e-3
-30
-1e-2
-0.01
-2
-1e-3
-20
-1e-2
-0.01
-2
-1e-3
-20
-OurHVP
-Trust region
-Sigma (end)
-Line search iteration
-Line search tolerance
-Recompute
-50
-0.05
-5
-1e-3
-5
-2
-0.01
-3
-1e-3
-10
-10
-0.1
-3
-1e-3
-30
-4
-0.01
-2
-1e-3
-2
-5
-0.01
-1
-1e-3
-5
-4
-0.01
-1
-1e-3
-10
-10
-0.1
-5
-1e-3
-30
-1e-2
-0.01
-2
-1e-3
-20
-1e-2
-0.01
-2
-1e-3
-20
-OurHVPA
-Trust region
-Sigma (end)
-Line search iteration
-Line search tolerance
-Recompute
-50
-0.05
-5
-1e-3
-5
-2
-0.01
-10
-1e-3
-10
-10
-0.1
-3
-1e-3
-30
-4
-0.01
-1
-1e-3
-5
-3
-0.01
-10
-1e-3
-5
-4
-0.01
-2
-1e-3
-2
-10
-0.1
-5
-1e-3
-30
-1e-2
-0.01
-2
-1e-3
-20
-1e-2
-0.01
-2
-1e-3
-20
-Table 3. Hyperparameters for our methods (rows) on the different tasks (columns). All parameters, including those of our competitors,
-have been optimally chosen.
-L. Hyperparameters
-In this section, we detail the hyperparameters of our experiments and show the initial-, output- and ground-truth
-images for each task. The hyperparameters are shown in
-Tab. 3, and the task images are shown in Fig. 9. The sample size, which is always antithetic and doubles the sample
-size, applies to our methods and FR22. All Sigma anneal-
-ing, which controls the bandwidth σ of the distribution [7],
-is scheduled linearly and has a start and end value. For firstorder methods, the tunable hyperparameter is the learning
-rate. For second-order ones, the trust region value shows
-the initial search bound, and recompute is the number of
-iterations until the line search is re-estimated.
+
+Additionally, we optimize a two-bounce experiment, where the rotation (around the up-axis) and translation (along x,y) of the Stanford bunny are optimized, while the bunny is only observed through two mirrors. The left subfigure in Fig. 13 shows the experiment. We use our method OursHVPA and observe a successful optimization outcome.
+
+
+
+| Method  | Parameter |                  | Q UAD | B OX | 2 B OX | 10 M UG | S HAD | B UNNY | T EXTURE | CNN  | CNN5 |
+|---------|-----------|------------------|-------|------|--------|---------|-------|--------|----------|------|------|
+|         | Samples   |                  | 4     | 6    | 6      | 1       | 1     | 2      | 4        | 1    | 1    |
+|         | Sigma     | (start)          | 1     | 1.5  | 0.6    | 3       | 0.5   | 1      | 0.5      | 0.5  | 0.5  |
+| FR22    | Learning  | rate             | 0.5   | 0.3  | 0.05   | 0.1     | 0.02  | 0.02   | 0.05     | 1e-4 | 1e-4 |
+|         | Sigma     | (end)            | 0.01  | 0.01 | 0.1    | 0.01    | 0.01  | 0.01   | 0.1      | 0.01 | 0.01 |
+| OurG    | Learning  | rate             | 0.5   | 0.3  | 0.05   | 0.1     | 0.02  | 0.02   | 0.05     | 1e-4 | 1e-4 |
+|         | Sigma     | (end)            | 0.01  | 0.01 | 0.1    | 0.01    | 0.01  | 0.01   | 0.1      | 0.01 | 0.01 |
+| OurH    | Trust     | region           | 50    | 2    | 10     | 3       | 3     | 2      | 10       | 1e-2 | 1e-2 |
+|         | Sigma     | (end)            | 0.01  | 0.01 | 0.1    | 0.01    | 0.01  | 0.005  | 0.1      | 0.01 | 0.01 |
+|         | Line      | search iteration | 5     | 10   | 3      | 1       | 1     | 1      | 5        | 2    | 2    |
+|         | Line      | search tolerance | 1e-3  | 1e-3 | 1e-3   | 1e-3    | 1e-3  | 1e-3   | 1e-3     | 1e-3 | 1e-3 |
+|         | Recompute |                  | 5     | 10   | 30     | 10      | 10    | 5      | 30       | 20   | 20   |
+| OurHVP  | Trust     | region           | 50    | 2    | 10     | 4       | 5     | 4      | 10       | 1e-2 | 1e-2 |
+|         | Sigma     | (end)            | 0.05  | 0.01 | 0.1    | 0.01    | 0.01  | 0.01   | 0.1      | 0.01 | 0.01 |
+|         | Line      | search iteration | 5     | 3    | 3      | 2       | 1     | 1      | 5        | 2    | 2    |
+|         | Line      | search tolerance | 1e-3  | 1e-3 | 1e-3   | 1e-3    | 1e-3  | 1e-3   | 1e-3     | 1e-3 | 1e-3 |
+|         | Recompute |                  | 5     | 10   | 30     | 2       | 5     | 10     | 30       | 20   | 20   |
+| OurHVPA | Trust     | region           | 50    | 2    | 10     | 4       | 3     | 4      | 10       | 1e-2 | 1e-2 |
+|         | Sigma     | (end)            | 0.05  | 0.01 | 0.1    | 0.01    | 0.01  | 0.01   | 0.1      | 0.01 | 0.01 |
+|         | Line      | search iteration | 5     | 1 0  | 3      | 1       | 10    | 2      | 5        | 2    | 2    |
+|         | Line      | search tolerance | 1e-3  | 1e-3 | 1e-3   | 1e-3    | 1e-3  | 1e-3   | 1e-3     | 1e-3 | 1e-3 |
+|         | Recompute |                  | 5     | 10   | 30     | 5       | 5     | 2      | 30       | 20   | 20   |
+
+Table 3. Hyperparameters for our methods (rows) on the different tasks (columns). All parameters, including those of our competitors, have been optimally chosen.
+
+## L. Hyperparameters
+
+In this section, we detail the hyperparameters of our experiments and show the initial-, output- and ground-truth images for each task. The hyperparameters are shown in Tab. 3, and the task images are shown in Fig. 9. The sample size, which is always antithetic and doubles the sample size, applies to our methods and FR22. All Sigma annealing, which controls the bandwidth σ of the distribution [7], is scheduled linearly and has a start and end value. For firstorder methods, the tunable hyperparameter is the learning rate. For second-order ones, the trust region value shows the initial search bound, and recompute is the number of iterations until the line search is re-estimated.

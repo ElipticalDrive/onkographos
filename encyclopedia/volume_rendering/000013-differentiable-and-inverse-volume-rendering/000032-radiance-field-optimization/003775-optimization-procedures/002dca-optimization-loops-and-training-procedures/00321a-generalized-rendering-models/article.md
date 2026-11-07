@@ -3,123 +3,112 @@
 Also called: Optimized Rendering Models for Clinical Data
 
 ## Overview
-Generalized Rendering Models are deep neural architectures trained to optimize volume rendering parameters end-to-end from image data, specifically designed to handle high inter-subject variations in clinical datasets where manual transfer function (TF) design is difficult [S1, unofficial]. Unlike traditional lookup tables that rely solely on scalar intensity, these models learn complex feature mappings (such as colorization and view-dependent shading) directly from ground-truth images, enabling consistent rendering across different patients [S1, unofficial]. They distinguish themselves from sibling methods like the [NeRF Training Loop](970-nerf-training-loop.md) by focusing on 3D medical volume data with explicit label-based or shading-based supervision rather than natural scene reconstruction, and from [Optimization Configuration (Adam + Exponential Decay + Selective L2)](2133-optimization-configuration-adam-exponential-decay-selective-.md) by utilizing specific architectural variants (VNet, DVRNet, RenderNet) tailored for volumetric feature extraction.
+Generalized Rendering Models are deep neural architectures trained to optimize volume rendering parameters end-to-end, enabling consistent visual output across subjects with high inter-patient variations in clinical data [S1, unofficial]. Unlike manual transfer functions or simple lookup tables, these models learn complex visual feature mappings (such as colorization and view-dependent shading) directly from image-space data, bypassing the need for explicit intensity-based feature engineering [S1, unofficial].
 
 ## How it works
+The method involves training specific neural network architectures (Lookup, VNet variants, DVRNet, RenderNet) to minimize the difference between rendered images and target images generated from clinical CT volumes [S1, unofficial].
+
 **Inputs and Outputs:**
-*   **Input:** 3D volumetric data (e.g., CT volumes) and corresponding 2D training images generated via a differentiable renderer. The 3D labels are used *only* to generate training images, not as network input [S1, unofficial].
-*   **Output:** Rendered 2D images that match the ground-truth training images in color, structure, and shading [S1, unofficial].
+*   **Input:** 3D volumetric data (e.g., abdominal angiographic CT volumes, resampled to isotropic resolution $192 \times 192 \times 192$) [S1, unofficial].
+*   **Output:** 2D rendered images (resolution $200 \times 200$) for fixed viewing directions [S1, unofficial].
+*   **Targets:** Ground truth images generated via a shader-based Differentiable Volume Rendering (DVR) implementation [S1, unofficial].
 
-**Data Structures:**
-*   **Volume Data:** Isotropic resolution $192 \times 192 \times 192$.
-*   **Training Images:** Resolution $200 \times 200$.
-*   **Label Volume:** Same size as volume data, containing discrete labels for structures (e.g., arteries, kidneys) [S1, unofficial].
+**Data Generation:**
+Two distinct datasets are created from the volumetric data to test different rendering capabilities [S1, unofficial]:
+1.  **Kidney Dataset:** Uses 3D label volumes (arteries and kidneys) to generate targets with distinct colors and boosted opacity for these structures [S1, unofficial].
+2.  **Shading Dataset:** Does not use labels. Instead, it uses an ambient and diffuse shading model with secondary shadow rays. The light source is fixed at the top-left of the camera (view-dependent illumination) [S1, unofficial].
 
-**Architectural Variants:**
-The method employs several deep architectures, each with distinct characteristics:
-1.  **Lookup TF:** Baseline using a 1D lookup table for intensity-to-color/opacity mapping [S1, unofficial].
-2.  **VNet* Variants:** 3D convolutional encoders (VNet) followed by Multi-Layer Perceptrons (MLPs) for TFs. Variants include `VNet4-4`, `VNetL16-4` (latent color space), and `VNetL16-17` (latent color space with additional decoder) [S1, unofficial].
-3.  **DVRNet:** Uses 3D convolutions in the encoder but shifts to 2D upconvolutions in the decoder, allowing reasoning in image space [S1, unofficial].
-4.  **RenderNet:** Transforms volume to view space before 3D convolutions to capture view-dependent effects [S1, unofficial].
+**Architectures:**
+1.  **Lookup Table (Baseline):** A simple parameterized transfer function [S1, unofficial].
+2.  **VNet Variants:** 3D convolutional encoders followed by Multi-Layer Perceptrons (MLPs) for transfer functions [S1, unofficial]. Variants include `VNet4-4`, `VNetL16-4` (latent color space), and `VNetL16-17` (latent color space with decoder) [S1, unofficial].
+3.  **DVRNet:** A multiscale architecture shifting 3D upconvolutions to 2D upconvolutions in the decoder, allowing reasoning in image space [S1, unofficial].
+4.  **RenderNet:** Transforms the volume to view space before applying 3D convolutions to better capture view-dependent effects [S1, unofficial].
 
 **Training Procedure:**
-1.  **Data Generation:**
-    *   For the 'Kidney' dataset: Use label volumes to emphasize specific structures (kidneys, arteries) with distinct colors and boosted opacity [S1, unofficial].
-    *   For the 'Shading' dataset: Use ambient/diffuse shading with secondary shadow rays and view-dependent illumination (light source fixed at top-left relative to camera) [S1, unofficial].
-    *   Generate 16 fixed viewing directions on a sphere around each volume [S1, unofficial].
-2.  **Optimization:**
-    *   Minimize a combined SSIM + MSE loss between rendered and ground-truth images [S1, unofficial].
-    *   Use the Adam optimizer with $\beta_1 = 0.9$, $\beta_2 = 0.99$ [S1, unofficial].
-    *   Apply stepsize annealing with parameters $s_l = 0.1$, $s_h = 1.0$ for all models except RenderNet [S1, unofficial].
-3.  **Evaluation:**
-    *   Split data by patient: 15 for training, 6 for validation, 6 for testing [S1, unofficial].
+1.  **Data Split:** Data is split by patient: 15 patients for training, 6 for validation, 6 for testing [S1, unofficial]. This results in 240 training images and 96 validation/test images per dataset [S1, unofficial].
+2.  **Loss Function:** Sum of Structural Similarity Index (SSIM) and Mean Squared Error (MSE) [S1, unofficial].
+3.  **Optimizer:** Adam optimizer with $\beta_1 = 0.9$, $\beta_2 = 0.99$ [S1, unofficial].
+4.  **Annealing:** Step size annealing is applied with parameters $s_l = 0.1$, $s_h = 1.0$ for all models except RenderNet [S1, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def train_generalized_rendering_model(model_type, volume_data, labels, num_patients_train=15, num_patients_val=6, num_patients_test=6):
-    """
-    Trains a generalized rendering model on clinical volume data.
-    """
-    # 1. Data Preparation
-    # Resample volumes to 192x192x192
-    volumes = resample_to_isotropic(volume_data, 192)
-    
-    # Split patients
-    train_patients, val_patients, test_patients = split_patients(volumes, num_patients_train, num_patients_val, num_patients_test)
-    
-    # Generate training images for 'Kidney' or 'Shading' dataset
-    # Kidney: Use labels for color/opacity boost
-    # Shading: Use ambient/diffuse shading with fixed light source (top-left)
-    train_images = generate_training_images(volumes[train_patients], labels[train_patients], dataset_type='Kidney')
-    val_images = generate_training_images(volumes[val_patients], labels[val_patients], dataset_type='Kidney')
-    
-    # 2. Model Initialization
-    if model_type == 'Lookup':
-        model = LookupTableModel()
-    elif model_type == 'VNet4-4':
-        model = VNetEncoderDecoder(channels=4)
-    elif model_type == 'VNetL16-4':
-        model = VNetLatentEncoderDecoder(channels=16, latent=True)
-    elif model_type == 'VNetL16-17':
-        model = VNetLatentEncoderDecoder(channels=16, latent=True, decoder_channels=17)
-    elif model_type == 'DVRNet':
-        model = DVRNet() # 3D encoder, 2D decoder
-    elif model_type == 'RenderNet':
-        model = RenderNet() # View-space transformation before 3D conv
-    
-    # 3. Optimization Loop
-    optimizer = Adam(model.parameters(), beta1=0.9, beta2=0.99)
-    loss_fn = CombinedLoss(loss_type='SSIM_MSE')
-    
-    # Step size annealing parameters (not used for RenderNet)
-    sl = 0.1
-    sh = 1.0
-    
-    for step in range(num_training_steps):
-        # Sample batch from training set
-        batch_volumes, batch_images = sample_batch(train_images, batch_size)
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+
+# Define the loss function: SSIM + MSE
+def ssim_mse_loss(rendered, target):
+    # Implementation of SSIM and MSE
+    # Note: SSIM is used as part of the loss, not just an independent metric
+    return ssim(rendered, target) + mse(rendered, target)
+
+# Define the model architecture (e.g., DVRNet or VNet variant)
+# The model takes 3D volume as input and outputs 2D image
+model = DVRNet() 
+# or model = VNetL16_17()
+# or model = RenderNet()
+
+# Optimizer setup
+optimizer = optim.Adam(model.parameters(), lr=learning_rate, betas=(0.9, 0.99))
+
+# Data loading
+# Training set: 15 patients, 16 views each, 200x200 resolution
+# Target generation: 
+# - Kidney: Label-based color/opacity boosting
+# - Shading: Ambient/diffuse shading, light top-left
+train_loader = DataLoader(clinical_ct_dataset, batch_size=batch_size, shuffle=True)
+
+# Training loop
+for epoch in range(num_epochs):
+    for volume_batch, target_batch in train_loader:
+        optimizer.zero_grad()
         
-        # Forward pass: Render volumes to images
-        rendered_images = model(batch_volumes)
+        # Forward pass: Render volume to image
+        # The rendering operator is differentiable
+        rendered_batch = model(volume_batch)
         
         # Compute loss
-        loss = loss_fn(rendered_images, batch_images)
+        loss = ssim_mse_loss(rendered_batch, target_batch)
         
-        # Backpropagation
-        optimizer.zero_grad()
+        # Backward pass
         loss.backward()
+        
+        # Update weights
         optimizer.step()
         
-        # Apply stepsize annealing if not RenderNet
-        if model_type != 'RenderNet':
-            current_lr = anneal_learning_rate(optimizer, step, sl, sh)
-            
-    return model
+        # Step size annealing (if not RenderNet)
+        # sl = 0.1, sh = 1.0
+        adjust_learning_rate(optimizer, epoch, sl=0.1, sh=1.0)
+
+# Evaluation
+# Split: 6 patients for validation, 6 for testing
+# Metrics: LPIPS, FID, SSIM
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Intensity Ambiguity:** Lookup tables fail to discriminate structures (bone, vessel, kidney) based on intensity alone and cannot represent shading [S1, unofficial].
-*   **Optimization Difficulty:** Models with more parameters (e.g., `VNetL16-17`) may be harder to optimize, potentially yielding worse results on simpler tasks like shading compared to `VNet16-4` [S1, unofficial].
-*   **3D vs 2D Reasoning:** DVRNet's 2D upsampling blocks allow it to learn view-dependent illumination better than VNet variants, which are restricted to learning average luminance [S1, unofficial].
-*   **Metric Limitations:** Perceptual metrics (LPIPS) may not capture subtle illumination differences; SSIM is more sensitive to these details [S1, unofficial].
+*   **Intensity Ambiguity:** Lookup tables fail to discriminate structures (bone, vessel, kidney) purely by intensity, leading to incorrect colorization [S1, unofficial].
+*   **View-Dependence:** Models restricted to 3D volume encoding (VNet*) without image-space reasoning (like DVRNet or RenderNet) struggle with view-dependent illumination, often learning only average luminance [S1, unofficial].
+*   **Optimization Difficulty:** Adding parameters (e.g., VNetL16-17 vs VNet16-4) can make optimization harder for certain tasks, potentially reducing performance on Shaded data [S1, unofficial].
+*   **Resolution:** Models are trained on low-resolution data ($200 \times 200$) but can generate high-resolution outputs [S1, unofficial].
 
 ## Operating characteristics
 *   **Training Time:**
-    *   Lookup TF: ~20 minutes [S1, unofficial].
-    *   DVRNet: ~2.5 hours (approx. 1/4 the time of VNet* variants) [S1, unofficial].
-    *   VNet* Variants: 8–10 hours [S1, unofficial].
-    *   RenderNet: 1.5 hours [S1, unofficial].
+    *   Lookup TF: ~20 minutes total [S1, unofficial].
+    *   DVRNet: Requires a quarter of the training time of VNet* variants [S1, unofficial].
+    *   VNet* Variants: Dominated by the deep encoder part; e.g., VNet4-4 takes ~8h 32m, VNetL16-17 takes ~9h 46m on the Bonsai3-H dataset (Table 2 in [S1, unofficial]).
 *   **Performance:**
-    *   **Kidney Dataset:** VNet* variants (especially `VNetL16-17`) perform best due to complex 3D feature requirements. DVRNet performs worse due to less effective 2D upsampling for 3D features [S1, unofficial].
-    *   **Shading Dataset:** DVRNet excels due to 2D convolutional upsampling enabling image-space reasoning for view-dependent illumination. VNet* variants perform worse as they learn average luminance [S1, unofficial]. RenderNet captures more illumination details than other models [S1, unofficial].
-*   **Scalability:** The method scales with the number of patients and views, but training time is dominated by the deep encoder part for VNet* variants [S1, unofficial].
-*   **Strengths:** End-to-end learning without manual TF design; handles inter-patient variations; captures complex visual features (color, shading) [S1, unofficial].
-*   **Limitations:** Requires significant training time for deep architectures; Lookup TFs are limited to intensity-based mapping; some architectures struggle with specific tasks due to optimization difficulty or architectural constraints [S1, unofficial].
+    *   **Kidney Data:** VNet* variants (especially with latent color space) perform better than DVRNet, which struggles with complex 3D features [S1, unofficial].
+    *   **Shading Data:** DVRNet excels due to 2D convolutional upsampling allowing image-space reasoning for view-dependent illumination [S1, unofficial]. RenderNet captures more illumination details by transforming volume to view space before 3D convolutions [S1, unofficial].
+*   **Metrics:** Evaluated using LPIPS (lower is better), FID (lower is better), and SSIM (higher is better) [S1, unofficial].
+*   **Strengths:** End-to-end learning of visual features without manual TF design; handles inter-patient variations; can learn view-dependent effects [S1, unofficial].
+*   **Limitations:** Lookup tables are limited to intensity-based features; VNet* variants may be restricted to ambient occlusion-like features; RenderNet can produce blurry results [S1, unofficial].
 
 ## Background
-Generalized Rendering Models were introduced in the context of Deep Direct Volume Rendering (DeepDVR) to address the challenge of creating robust transfer functions for clinical data with high inter-patient variations [S1, unofficial]. The work demonstrates that deep architectures can learn meaningful rendering features purely from image data, outperforming manual TFs in tasks like colorization and shading representation [S1, unofficial]. The method builds on the principles of differentiable volume rendering, extending them to clinical scenarios where ground-truth labels are unavailable for new patients but can be used to generate training data [S1, unofficial].
+Generalized Rendering Models were introduced in the context of Deep Direct Volume Rendering (DeepDVR) to address the difficulty of manually designing robust transfer functions for clinical data with high inter-patient variations [S1, unofficial]. The work demonstrates that deep architectures can learn meaningful rendering features purely from image-space data, outperforming traditional manual transfer functions in tasks like colorization and shading [S1, unofficial].
 
 ## Sources
 [S1] Deep Direct Volume Rendering: Learning Visual Feature Mappings From Exemplary Images, https://doi.org/10.48550/arxiv.2106.05429, fetched 2026-10-26 (unofficial)

@@ -1,30 +1,48 @@
 # Distributed computing and load balancing
 
+Also called: Parallel volume rendering distribution, Cluster-based volume rendering, MPI volume rendering
+
 ## Overview
-This family encompasses techniques for rendering volumetric datasets that exceed the memory or processing capacity of a single machine by distributing the workload across multiple nodes or processes. It solves the scalability bottleneck inherent in single-node rendering by partitioning data or computation. What sets this family apart from [Out-of-core, streaming and distributed data](8-out-of-core-streaming-and-distributed-data.md) is the explicit focus on simultaneous multi-node processing and load balancing, whereas out-of-core methods primarily address single-node memory limits via disk swapping.
+Distributed computing and load balancing in volume rendering addresses the problem of rendering datasets that exceed the memory capacity or processing power of a single machine by decomposing the data and workload across multiple nodes in a cluster [S1, unofficial][S2, unofficial]. What sets this family apart from [Out-of-core, streaming and distributed data](8-out-of-core-streaming-and-distributed-data.md) is the explicit focus on inter-node communication, spatial decomposition strategies, and dynamic load balancing to ensure that all processors finish their tasks simultaneously, thereby maximizing hardware utilization [S1, unofficial][S2, unofficial]. It differs from [Hardware-Assisted Volume Streaming](2119-hardware-assisted-volume-streaming.md) by relying on general-purpose cluster computing (often CPU-based or using MPI) rather than specialized hardware pipelines for data streaming [S1, unofficial][S2, unofficial].
 
 ## Shared principles
-This family inherits the core mechanisms of decomposition, distribution, local rendering, and compositing defined in [Out-of-core, streaming and distributed data](8-out-of-core-streaming-and-distributed-data.md).
+The core mechanism involves partitioning the volume dataset or the rendering task into discrete units (chunks, cells, or subvolumes) and assigning these units to $P$ processors (ranks) in a cluster. The general workflow consists of:
+1.  **Decomposition:** Splitting the data space or object space into partitions. Common strategies include spatial decomposition (1D, 2D, or 3D grids) and object-space decomposition (cells or bricks) [S1, unofficial][S2, unofficial].
+2.  **Distribution:** Assigning partitions to processors. This can be static (pre-calculated) or dynamic (using queues or trees) [S2, unofficial].
+3.  **Local Rendering:** Each processor renders its assigned data subset independently. This typically involves ray casting or slicing, applying transfer functions, and performing front-to-back compositing locally [S1, unofficial][S2, unofficial].
+4.  **Compositing/Assembly:** Combining the partial results from all processors into a final image. This may involve gathering sub-images to a root process or using a shared frame buffer with synchronization mechanisms [S1, unofficial][S2, unofficial].
+
+Key mathematical concepts include:
+*   **Load Balance:** The goal is to minimize the variance in computation time across processors. For spatial decomposition, this assumes uniform data density. For object-space, it requires estimating cell complexity [S1, unofficial][S2, unofficial].
+*   **Communication Overhead:** The cost of transferring data between nodes and compositing results. This often limits scalability, causing speed-up curves to level out as $P$ increases [S1, unofficial][S2, unofficial].
+*   **Early Ray Termination (ERT):** A local optimization where rays stop marching when accumulated opacity exceeds a threshold (e.g., 0.97), reducing computation time and potentially improving load balance if opacity distribution is uniform [S1, unofficial][S2, unofficial].
 
 ## Subtopics
 
 ### [Scalable Distributed Volume Rendering (SDVR)](863-scalable-distributed-volume-rendering-sdvr.md)
-Targets unstructured data using out-of-core k-d decomposition and OpenGL/MPI. It accumulates subimages over the interconnect. Choose when rendering large unstructured grids on a cluster where hardware acceleration is optional but beneficial.
+SDVR is a distributed rendering system for large unstructured datasets targeting PC clusters, using OpenGL and MPI. It solves the problem of rendering massive unstructured grids that exceed single-node memory by partitioning data into load-balanced, brick-shaped chunks using an out-of-core modified k-d decomposition. It differs from siblings by prioritizing scalability over peak performance, allowing it to run with or without graphics hardware, and by using a preprocessing step to create load-balanced chunks rather than relying on static spatial grids.
 
 ### [MPI Volume Rendering (1D/2D Decomposition)](2249-mpi-volume-rendering-1d-2d-decomposition.md)
-Uses static spatial decomposition of regular 3D scalar grids along X or X/Y axes. Processes send sub-images to a root for assembly. Choose for regular structured data where simple spatial partitioning suffices.
+This method partitions a 3D scalar dataset spatially along the X and/or Y axes (1D or 2D decomposition) to distribute the workload across MPI processes. Each process independently ray casts its subdomain using front-to-back compositing and early ray termination, then sends the sub-image to a root process for assembly. It differs from SDVR by using static spatial decomposition rather than dynamic object-space distribution, and from Round-Robin by assigning contiguous spatial blocks rather than interleaved slices.
 
 ### [Round-Robin Data Distribution](2667-round-robin-data-distribution.md)
-Assigns mesh cells cyclically to processors to average load based on cell count rather than spatial locality. Choose when mesh cell complexity varies significantly and spatial coherence is less critical than load balancing.
+A static load balancing strategy where data cells (or subvolumes) are assigned to processors in a cyclic order ($p_i = i \mod P$). It solves load imbalance caused by variations in cell size and opacity by dispersing connected cells widely among processors, thereby averaging out computational requirements. Unlike methods that group connected cells to exploit spatial coherence, this approach scatters them to avoid exacerbating imbalances, prioritizing computational balance over spatial locality.
 
 ### [Cell Count Algorithm for Adaptive-Resolution Load Balancing](6937-cell-count-algorithm-for-adaptive-resolution-load-balancing.md)
-Distributes blocks of varying resolutions among processors to balance workload. Choose when adaptive-resolution data requires equal cell counts per processor while maintaining consistent resolution within assigned blocks.
+A load-balancing strategy for distributed volume rendering of adaptive-resolution datasets, where data is partitioned into blocks of varying resolutions. It ensures each processor handles a roughly equal total number of cells by sorting blocks by cell count and using a "shuttle" assignment mechanism. Unlike siblings that rely on uniform spatial grids, this method explicitly accounts for resolution heterogeneity, preventing idle time caused by processors finishing low-resolution work early.
 
 ### Distributed Data Loader Creation
-Evaluates dataset strings, retrieves world size and rank, and attempts to create a dataset-specific sampler. If that fails, it falls back to a PyTorch distributed sampler, random sampler, or sequential sampler. It then creates and returns a `torch.utils.data.DataLoader` with the selected sampler, batch size, number of workers, pin memory, and drop last parameters [S1, unofficial].
+A software engineering pattern for initializing distributed training or rendering pipelines. The step involves evaluating the dataset string if it is a string, getting world size and rank from the distributed environment, and attempting to create a dataset-specific sampler. If that fails, it falls back to a torch distributed sampler if distributed is initialized, else a random or sequential sampler. Finally, it creates and returns a `torch.utils.data.DataLoader` with the selected sampler, batch size, num workers, pin memory, and drop last parameters [S1, unofficial].
+
+### Dynamic load balancing using kd-trees
+Uses a kd-tree to encode the decomposition of the data space, splitting data alternating along orthogonal axes at each level. Leaf nodes store effective partitions of work, while inner nodes encode load statistics. Kd-trees are traversed in specific orders to balance partitions with different strategies, or used for empty-space skipping, distributing uniform texture bricks in object space partitioning, or determining compositing order of partial rays. A pitfall is that replication of boundary data is necessary when using kd-trees for compositing order determination [S2, unofficial].
+
+### MapReduce Rendering
+Uses the MapReduce API to handle communication and computation in parallel. It utilizes an asynchronous streaming interface that allows network communication, CPU/GPU data transfers, disk access, and GPU kernel execution to happen concurrently [S2, unofficial].
 
 ## Background
-Not given in the sources.
+The need for distributed volume rendering arose with the growth of scientific datasets (e.g., from CT scans, CFD simulations) that exceeded the memory and processing capabilities of single workstations in the late 1990s and early 2000s. Early systems focused on static spatial decomposition using MPI [S1, unofficial][S2, unofficial]. As datasets became more complex (unstructured grids, adaptive resolution), static decomposition led to load imbalance, prompting the development of dynamic load balancing techniques using kd-trees and cell-count algorithms [S2, unofficial]. The introduction of GPU clusters and APIs like MapReduce further evolved the field towards asynchronous, hardware-accelerated distributed rendering [S2, unofficial].
 
 ## Sources
 [S1] NVlabs/InstantSplat, https://github.com/NVlabs/InstantSplat, fetched 2026-10-27 (unofficial)
+[S2] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)

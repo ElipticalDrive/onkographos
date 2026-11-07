@@ -1,146 +1,169 @@
 # Two-Stage Inverse Rendering Optimization
+
 Also called: Hybrid Differentiable Rendering for Inverse Rendering
 
 ## Overview
-Two-Stage Inverse Rendering Optimization is a pipeline that decouples the reconstruction of scene geometry from the estimation of material reflectance to solve the ill-posed inverse rendering problem. It first optimizes vertex positions using an approximate differentiable renderer (Silhouette-based) and subsequently optimizes diffuse and specular albedo textures using a physically-based differentiable renderer (Ray-tracing) [S1]. This approach differs from sibling methods like [NeRF Training Loop](970-nerf-training-loop.md) or [PhySG](6681-generalized-rendering-models.md) by utilizing explicit triangle meshes and Cook-Torrance PBR materials rather than SDFs or Spherical Gaussians, enabling direct deployment on graphics engines and superior handling of specular highlights [S1].
+Two-Stage Inverse Rendering Optimization is a pipeline that decouples the recovery of scene geometry from material reflectance by utilizing two distinct differentiable rendering backends. It solves the ill-posed nature of inverse rendering by first optimizing a triangle mesh using a fast, approximate differentiable renderer focused on silhouette consistency, and subsequently optimizing diffuse and specular albedo textures using a physically-based ray-tracing renderer. It differs from NeRF, IDR, and PhySG by explicitly reconstructing triangle meshes and Cook-Torrance PBR materials rather than implicit SDFs or Spherical Gaussians, enabling direct deployment in graphics engines and superior handling of specular highlights [S1].
 
 ## How it works
-**Inputs and Outputs**
-*   **Inputs:** A set of unstructured input images $\tilde{I}_{rgb}$ with known camera parameters; sparse feature points and dense point clouds derived from Structure-from-Motion (SfM) and Multi-View Stereo (MVS) [S1].
-*   **Outputs:** Optimized vertex positions $\theta_p$, diffuse albedo texture $\theta_d$, specular albedo texture $\theta_s$, and an environment map for lighting [S1].
+**Inputs and Outputs:**
+*   **Inputs:** A set of unstructured multi-view images $\tilde{I}_{rgb}$ of a static scene. No depth or normal maps are provided.
+*   **Outputs:** Optimized vertex positions $\theta_p$ defining the geometry, diffuse albedo texture $\theta_d$, specular albedo texture $\theta_s$, and an environment map $L_e$ representing illumination.
 
-**Data Structures**
-*   **Scene Parameters $\Theta$:** A tuple $(\theta_p, \theta_d, \theta_s)$ [S1].
-    *   $\theta_p$: Vertex positions defining the mesh geometry.
-    *   $\theta_d$: 2D texture map for diffuse albedo $\rho_d$.
-    *   $\theta_s$: 2D texture map for specular albedo $\rho_s$.
-*   **Lighting:** An environment map of resolution $512 \times 128$. Initial values are set to white light with channels $(0.5, 0.5, 0.5)$ [S1].
-*   **Mesh:** A dense mesh obtained from Poisson surface reconstruction [S1].
+**Data Structures:**
+*   **Geometry:** A triangle mesh defined by a vertex position matrix $V \in \mathbb{R}^{n \times 3}$ and an index buffer defining connectivity.
+*   **Materials:** Two 2D texture maps, $\theta_d$ and $\theta_s$, storing diffuse and specular albedo values $\rho_d$ and $\rho_s$ respectively.
+*   **Lighting:** An environment map $L_e$ with resolution $512 \times 128$.
+*   **Scene Parameters:** $\Theta = (\theta_p, \theta_d, \theta_s)$.
 
-**Pseudocode**
+**Initialization:**
+1.  **Geometry Initialization:** Use Structure-from-Motion (SfM) [Schonberger and Frahm, 2016] to generate sparse feature points and a rough mesh. Use Multi-View Stereo (MVS) [Schönberger et al., 2016] for dense matching, followed by Poisson surface reconstruction [Kazhdan et al., 2006] to obtain a dense mesh. Vertex colors are derived from input images.
+2.  **Lighting Initialization:** Set the environment map channels to $(0.5, 0.5, 0.5)$, representing white light.
+
+**Optimization Steps:**
+
+**Stage 1: Geometry Optimization**
+The goal is to refine vertex positions $\theta_p$ using an approximate differentiable renderer (similar to Soft Rasterizer [Liu et al., 2019]). This stage computes a silhouette image $I_{sil}(\theta_p)$ for each input view. The loss function is:
+
+$$
+L_{geo} = \lambda_{sil} L_{sil} + \lambda_{lap} L_{lap} + \lambda_{normal} L_{normal} + \lambda_{edge} L_{edge}
+$$
+
+Where:
+*   **Silhouette Loss ($L_{sil}$):** Measures consistency between computed silhouette $I_{sil}$ and ground truth $\tilde{I}_{sil}$:
+    $$
+    L_{sil} = \frac{1}{|\Omega|} \sum_{p \in \Omega} \left( 1 - \tilde{I}_{sil}[p] \otimes I_{sil}[p] \right)
+    $$
+    where $\otimes$ is element-wise product, $\oplus$ is element-wise sum, and $\Omega$ is the set of pixels.
+*   **Laplacian Loss ($L_{lap}$):** Enforces mesh smoothness:
+    $$
+    L_{lap} = \|LV\|_2
+    $$
+    where $L \in \mathbb{R}^{n \times n}$ is the Laplacian matrix of the mesh and $V$ is the vertex coordinate matrix.
+*   **Normal Consistency Loss ($L_{normal}$):** Ensures adjacent face normals vary slowly:
+    $$
+    L_{normal} = \sum_{i,j} \left[ 1 - (\mathbf{n}_i \cdot \mathbf{n}_j) \right]
+    $$
+    summed over all triangle pairs $(i,j)$ sharing a common edge, where $\mathbf{n}_i, \mathbf{n}_j$ are face normals.
+*   **Edge Length Loss ($L_{edge}$):** Prevents ill-shaped triangles:
+    $$
+    L_{edge} = \sum_i e_i
+    $$
+    where $e_i$ is the length of the $i$-th edge.
+
+**Stage 2: Reflectance Optimization**
+With geometry fixed, optimize $\theta_r = (\theta_d, \theta_s)$ and the environment map using a physically-based differentiable renderer (e.g., Mitsuba 2). The renderer uses the rendering equation [Kajiya, 1986]:
+
+$$
+L_o(\omega_o; x) = \int_{\Omega} L_i(\omega_i) f_r(\omega_o, \omega_i; x) (\omega_i \cdot \mathbf{n}) d\omega_i
+$$
+
+The reflectance model $f_r$ is a Cook-Torrance BRDF without refraction or Fresnel effects:
+
+$$
+f_r(\omega_o, \omega_i; x) = \theta_d(x) + \theta_s(\omega_o, \omega_i; x)
+$$
+
+Where:
+*   $\theta_d(x) = \rho_d(x)/\pi$ is the diffuse term.
+*   $\theta_s(\omega_o, \omega_i; x) = \rho_s(x) \frac{D(\mathbf{h}, \alpha) G(\omega_o, \omega_i, \mathbf{n}(x))}{(\mathbf{n}(x) \cdot \omega_i)(\mathbf{n}(x) \cdot \omega_o)\pi}$ is the specular term.
+*   $D(\mathbf{h}, \alpha)$ is the GGX microfacet distribution [Walter et al., 2007].
+*   $\mathbf{h}$ is the halfway vector, $\alpha$ is roughness, $\mathbf{n}(x)$ is the surface normal.
+
+The loss function is:
+
+$$
+L_{ref} = \lambda_{rgb} L_{rgb} + \lambda_{reg} R(\theta_r)
+$$
+
+Where:
+*   **RGB Loss ($L_{rgb}$):**
+    $$
+    L_{rgb} = \|\tilde{I}_{rgb} - I_{rgb}(\theta_r)\|_1
+    $$
+*   **Regularization ($R(\theta_r)$):** Encourages spatial smoothness and correlation between diffuse and specular albedos:
+    $$
+    R(\theta_r) = \sum_p \left( \theta_s[p] - \frac{\sum_q \theta_s[q] k_{p,q}}{\sum_q k_{p,q}} \right)^2 + \sum_p \frac{(\theta_d[p] - \theta_d[q])^2}{2\sigma_2^2}
+    $$
+    where $k_{p,q} = \exp\left(-\frac{\|p-q\|_2^2}{2\sigma_1^2}\right)$ is a Gaussian kernel between pixels/vertices $p$ and $q$.
+
+**Parameters:**
+*   **Ray Tracing:** Max bounce depth = 3 [S1].
+*   **Sampling:** Samples per pixel (spp) = 4 [S1].
+*   **Resolution:** Image downsampling factor = 4 [S1].
+*   **Lighting:** Environment map resolution = $512 \times 128$ [S1].
+*   **Iterations:** Geometry: 200 iterations per view. Reflectance: 400 iterations per view [S1].
+*   **Learning Rate:** 0.0001 [S1].
+
+**Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def two_stage_inverse_rendering(input_images, camera_params, initial_mesh):
-    """
-    Two-stage optimization pipeline for inverse rendering.
-    """
-    # Stage 1: Geometry Optimization
-    # Initialize vertex positions from Poisson reconstruction
-    theta_p = initial_mesh.vertices
+def two_stage_inverse_rendering(input_images, camera_params):
+    # 1. Initialization
+    # Use SfM/MVS/Poisson to get initial mesh V and textures
+    mesh = initialize_geometry(input_images)
+    theta_d = initialize_texture(input_images, channel='diffuse')
+    theta_s = initialize_texture(input_images, channel='specular')
+    env_map = initialize_environment_map(resolution=(512, 128), value=0.5)
     
-    # Define geometry loss components
-    # L_sil: Silhouette loss using Soft Rasterizer
-    # L_lap: Laplacian smoothness
-    # L_normal: Normal consistency
-    # L_edge: Edge length regularization
-    
-    optimizer_geo = Adam(theta_p, lr=0.0001)
-    
-    for step in range(200): # Iterations per view
-        # Render silhouette using approximate differentiable renderer
-        I_sil = soft_rasterize(theta_p, camera_params)
+    # 2. Geometry Optimization Stage
+    # Use approximate differentiable renderer (Soft Rasterizer-like)
+    for iteration in range(200):
+        # Compute silhouette for each view
+        silhouettes = []
+        for img, cam in zip(input_images, camera_params):
+            # Compute soft silhouette from mesh vertices theta_p
+            sil = compute_soft_silhouette(mesh.vertices, mesh.faces, cam)
+            silhouettes.append(sil)
+            
+        # Compute Loss
+        L_sil = compute_silhouette_loss(silhouettes, input_images)
+        L_lap = compute_laplacian_loss(mesh.vertices)
+        L_normal = compute_normal_consistency_loss(mesh.faces)
+        L_edge = compute_edge_length_loss(mesh.edges)
         
-        # Compute ground truth silhouette from input images
-        I_tilde_sil = compute_silhouette(input_images)
+        L_geo = lambda_sil * L_sil + lambda_lap * L_lap + \
+                lambda_normal * L_normal + lambda_edge * L_edge
         
-        # Calculate losses
-        L_sil = 1 - mean(I_tilde_sil * I_sil) / mean(I_tilde_sil + I_sil)
-        L_lap = norm(LaplacianMatrix * theta_p)
-        L_normal = sum(1 - dot(n_i, n_j) for adjacent_faces)
-        L_edge = sum(edge_length(e) for edges)
-        
-        L_geo = lambda_sil * L_sil + lambda_lap * L_lap + lambda_normal * L_normal + lambda_edge * L_edge
-        
-        # Update geometry
-        gradient = backward(L_geo, theta_p)
-        theta_p = optimizer_geo.update(theta_p, gradient)
+        # Backpropagate to update mesh vertices
+        L_geo.backward()
+        optimizer.step()
+        optimizer.zero_grad()
 
-    # Stage 2: Reflectance Optimization
-    # Initialize albedo textures and environment map
-    theta_d = initial_mesh.vertex_colors # or learned texture
-    theta_s = zeros_like(theta_d)
-    env_map = zeros((512, 128, 3)) + 0.5
-    
-    theta_r = (theta_d, theta_s, env_map)
-    optimizer_ref = Adam(theta_r, lr=0.0001)
-    
-    for step in range(400): # Iterations per view
-        # Render color using physically-based differentiable renderer (e.g., Mitsuba 2)
-        # Parameters: ray bounce depth=3, spp=4, image downsampling=4
-        I_rgb = ray_trace(theta_p, theta_r, camera_params)
+    # 3. Reflectance Optimization Stage
+    # Use physically-based differentiable renderer (Ray Tracing)
+    for iteration in range(400):
+        rendered_colors = []
+        for img, cam in zip(input_images, camera_params):
+            # Render using PBR model with current theta_d, theta_s, env_map
+            color = render_pbr(mesh, theta_d, theta_s, env_map, cam, 
+                               spp=4, max_bounces=3)
+            rendered_colors.append(color)
+            
+        # Compute Loss
+        L_rgb = compute_l1_loss(rendered_colors, input_images)
+        L_reg = compute_reflectance_regularization(theta_d, theta_s)
         
-        # Compute RGB loss
-        L_rgb = mean(abs(I_tilde_rgb - I_rgb))
+        L_ref = lambda_rgb * L_rgb + lambda_reg * L_reg
         
-        # Compute regularization R(theta_r)
-        # Assumes nearby pixels with similar diffuse albedos have similar specular albedos
-        R_theta_r = sum(
-            (theta_s[p] - weighted_avg(theta_s[q], k_pq))**2 + 
-            (theta_d[p] - theta_d[q])**2 / (2 * sigma_2**2)
-            for all pixels p, q
-        )
-        
-        L_ref = lambda_rgb * L_rgb + lambda_reg * R_theta_r
-        
-        # Update reflectance
-        gradient = backward(L_ref, theta_r)
-        theta_r = optimizer_ref.update(theta_r, gradient)
-        
-    return theta_p, theta_r
+        # Backpropagate to update textures and env_map
+        L_ref.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+    return mesh, theta_d, theta_s, env_map
 ```
-
-**Formulas**
-*   **Geometry Loss ($L_{geo}$):**
-    $$L_{geo} = \lambda_{sil} L_{sil} + \lambda_{lap} L_{lap} + \lambda_{normal} L_{normal} + \lambda_{edge} L_{edge} \quad (1)$$
-*   **Silhouette Loss ($L_{sil}$):**
-    $$L_{sil} = 1 - \frac{\tilde{I}_{sil} \otimes I_{sil}}{\tilde{I}_{sil} \oplus I_{sil}}$$
-    where $\otimes$ and $\oplus$ are element-wise product and sum, respectively [S1].
-*   **Laplacian Loss ($L_{lap}$):**
-    $$L_{lap} = \|LV\|_2$$
-    where $V$ is the $n \times 3$ vertex coordinates matrix and $L$ is the $n \times n$ Laplacian matrix [S1].
-*   **Normal Consistency Loss ($L_{normal}$):**
-    $$L_{normal} = \sum_{i,j} [1 - (n_i \cdot n_j)]$$
-    summed over all triangle pairs $(i,j)$ sharing a common edge, where $n_i, n_j$ are face normals [S1].
-*   **Edge Length Loss ($L_{edge}$):**
-    $$L_{edge} = \sum_i e_i$$
-    where $e_i$ is the length of the $i$-th edge [S1].
-*   **Reflectance Loss ($L_{ref}$):**
-    $$L_{ref} = \lambda_{rgb} L_{rgb} + \lambda_{reg} R(\theta_r) \quad (2)$$
-*   **RGB Loss ($L_{rgb}$):**
-    $$L_{rgb} = \|\tilde{I}_{rgb} - I_{rgb}(\theta_r)\|_1$$
-    where $\tilde{I}_{rgb}$ is ground truth and $I_{rgb}$ is rendered color [S1].
-*   **Regularization ($R(\theta_r)$):**
-    $$R(\theta_r) = \sum_p \left(\theta_s[p] - \frac{\sum_q \theta_s[q]k_{p,q}}{\sum_q k_{p,q}}\right)^2 + \sum_p \frac{(\theta_d[p] - \theta_d[q])^2}{2\sigma_2^2}$$
-    where $k_{p,q} = \exp\left(-\frac{\|p-q\|_2^2}{2\sigma_1^2}\right)$ and $p,q$ are specific mesh vertices/pixels [S1].
-*   **Reflectance Model:**
-    $$f_r(\omega_o, \omega_i; x) = \theta_d(x) + \theta_s(\omega_o, \omega_i; x)$$
-    $$\theta_d(x) = \frac{\rho_d(x)}{\pi}$$
-    $$\theta_s(\omega_o, \omega_i; x) = \rho_s(x) \frac{D(h, \alpha)G(\omega_o, \omega_i, n(x))}{(n(x) \cdot \omega_i)(n(x) \cdot \omega_o)\pi}$$
-    where $D(h, \alpha)$ is the GGX microfacet distribution [S1]. The Fresnel effect is ignored [S1].
-
-**Parameters**
-*   **Learning Rate:** 0.0001 [S1].
-*   **Geometry Optimization:** 200 iterations per view [S1].
-*   **Reflectance Optimization:** 400 iterations per view [S1].
-*   **Ray Tracing:** Max bounce depth 3, samples per pixel (spp) 4, image downsampling factor 4 [S1].
-*   **Environment Map:** Resolution $512 \times 128$ [S1].
-
-**Edge Cases and Pitfalls**
-*   **Memory Consumption:** Physically-based rendering is memory-intensive; the bounce depth and sampling rates are capped to avoid excessive consumption [S1].
-*   **Boundary Defects:** SfM/MVS initialization may have defects in boundary regions, necessitating the silhouette-based geometry optimization stage [S1].
-*   **Specular Highlights:** Methods ignoring specular handling (like standard NeRF) perform poorly on scenes with strong specular highlights; this method uses Cook-Torrance to address this [S1].
 
 ## Operating characteristics
 *   **Time Complexity:** Geometry optimization takes approximately 0.5 hours per example; Reflectance optimization takes 1.5–2.5 hours per example on an NVIDIA RTX 3090 [S1].
-*   **Memory:** High memory usage during the reflectance stage due to ray tracing; mitigated by downsampling and limiting bounce depth [S1].
-*   **Strengths:** Explicit mesh representation allows direct integration into graphics engines; physically-based material model handles specular highlights better than SDF-based inverse rendering methods [S1].
-*   **Limitations:** Requires initial geometry from SfM/MVS; computationally expensive compared to approximate methods; sensitive to initialization of the environment map [S1].
-*   **When to Use:** Scenes with complex specular materials where explicit geometry is required for downstream rendering tasks [S1].
-*   **When Not to Use:** Scenes lacking sufficient texture or where SfM fails to produce a dense mesh; real-time applications requiring faster convergence [S1].
+*   **Memory:** The physically-based stage is memory-intensive due to ray tracing. Mitigated by limiting ray bounce depth to 3, downsampling input images by a factor of 4, and using 4 samples per pixel [S1].
+*   **Strengths:** Produces explicit triangle meshes and PBR materials suitable for real-time engines. Handles specular highlights better than implicit methods like NeRF or PhySG [S1].
+*   **Limitations:** Relies on initial SfM/MVS reconstruction quality; defects in boundary regions of the initial mesh can persist if not corrected by the silhouette loss. Ignores Fresnel effects, which may limit accuracy for certain materials [S1].
 
 ## Background
-The method was introduced in "Efficient Multi-View Inverse Rendering Using a Hybrid Differentiable Rendering Method" (IJCAI-2023) [S1]. It builds upon traditional SfM and MVS pipelines for initialization and combines approximate differentiable rendering (Soft Rasterizer) with physically-based differentiable rendering (Mitsuba 2) to decouple geometry and material estimation. It addresses limitations in prior works like NeRF, IDR, and PhySG, which rely on implicit representations (occupancy/SDF) and simplified material models (Spherical Gaussians) that struggle with specular reflections and explicit mesh export [S1].
+The method was introduced in "Efficient Multi-View Inverse Rendering Using a Hybrid Differentiable Rendering Method" (IJCAI-2023) [S1]. It addresses limitations of prior inverse rendering works like NeRF [Mildenhall et al., 2020], IDR [Yariv et al., 2020], and PhySG [Zhang et al., 2021b], which use implicit representations (occupancy functions, SDFs) and simplified material models (Spherical Gaussians). By using explicit meshes and Cook-Torrance BRDFs, this method facilitates direct integration into standard graphics pipelines.
 
 ## Sources
 [S1] Efficient Multi-View Inverse Rendering Using a Hybrid Differentiable Rendering Method, https://doi.org/10.24963/ijcai.2023/205, fetched 2026-10-26

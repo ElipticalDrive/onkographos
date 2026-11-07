@@ -1,9 +1,9 @@
 # Debug and Visualization
 
-Also called: Debug Rendering, Debug Visualization, Bounding Box Debug, Voxel Debug
+Also called: Debug Rendering, Voxel Inspection, Bounding Box Overlay
 
 ## Overview
-This family provides auxiliary geometry to inspect voxel data spatially without contributing to the final volumetric appearance [S1, unofficial]. It differs from sibling methods like [Binary Volume Rendering](1015-binary-volume-rendering-opacity-thresholding.md) or [Naive Voxel Rendering](1103-naive-voxel-rendering.md) by rendering explicit debug primitives (boxes, lines, spheres) rather than the volume data itself, serving as a diagnostic tool for spatial extent and density [S1, S3, S4, unofficial].
+Debug and Visualization methods render explicit geometric primitives (boxes, lines, or spheres) derived from voxel data to inspect spatial distribution, verify data loading, and provide visual context for volume extents. Unlike ray-marched volume rendering, which integrates light transport for photorealism, this family prioritizes immediate visual feedback by submitting geometry to the graphics pipeline [G]. It sets itself apart from sibling methods like [Binary Volume Rendering](1015-binary-volume-rendering.md) or [Naive Voxel Rendering](1103-naive-voxel-rendering.md) by focusing on auxiliary debugging aids (wireframes, occupancy spheres) rather than the final volumetric appearance.
 
 ## Shared principles
 The family shares the fundamental mechanism of converting scalar field data into geometric primitives that are submitted to the graphics pipeline [G].
@@ -20,13 +20,13 @@ For unit voxels, this simplifies to $P_{world} = I_{voxel} \times V_{size}$, whe
 ## Subtopics
 
 ### [Axis-Aligned Bounding Box Geometry](1317-axis-aligned-bounding-box-geometry.md)
-This method renders the clipped axis-aligned bounding box (AABB) geometry of a voxel volume to the framebuffer, providing visual feedback about the volume's spatial extent without contributing to the final volumetric appearance. It differs from [Bounding Box Drawing](2733-bounding-box-drawing.md) by explicitly generating the 36-vertex triangle mesh for the full box surface rather than just drawing wireframe lines, and from [Debug Voxel Visualization](7095-debug-voxel-visualization.md) by operating on the aggregate volume bounds rather than individual voxel cells.
+This method renders the clipped bounding box geometry of a volume extent to the framebuffer, optionally including texture coordinates. It serves as a debug and visualization primitive in the Debug and Visualization family, converting scalar field data bounds into explicit geometric primitives for the graphics pipeline [G]. Unlike [Debug Voxel Visualization](7095-debug-voxel-visualization.md), which renders individual occupied voxels, this method renders a single wireframe or solid box representing the entire volume extent. It differs from [Bounding Box Drawing](2733-bounding-box-drawing.md) by specifically handling the update of vertex positions based on dynamic volume extents and supporting optional texture coordinate generation for mapping volume data onto the box faces.
 
 ### [Bounding Box Drawing](2733-bounding-box-drawing.md)
 Bounding Box Drawing renders the wireframe outline of an Axis-Aligned Bounding Box (AABB) to provide visual context for voxel data, such as highlighting a selected voxel or defining the volume's spatial extent. It differs from [Axis-Aligned Bounding Box Geometry](1317-axis-aligned-bounding-box-geometry.md) by explicitly using line primitives (edges) rather than filled geometry, and serves as a debug/visualization aid rather than contributing to the final volumetric appearance.
 
 ### [Debug Voxel Visualization](7095-debug-voxel-visualization.md)
-Debug Voxel Visualization renders auxiliary geometry (typically spheres) to provide visual feedback about the location and density of voxel data without contributing to the final volumetric appearance. It solves the problem of inspecting sparse or dense voxel grids by converting discrete volume data into recognizable 3D primitives. It differs from [Axis-Aligned Bounding Box Geometry](1317-axis-aligned-bounding-box-geometry.md) and [Bounding Box Drawing](2733-bounding-box-drawing.md) by representing individual occupied voxels rather than just the volume's extent.
+Debug Voxel Visualization renders occupied voxels as geometric primitives (typically spheres or cubes) to inspect the spatial distribution and density of scalar field data. It solves the problem of visualizing sparse or dense voxel grids by converting discrete volume data into visible geometry, allowing developers to verify data loading, normalization, and occupancy. It differs from ray-marched volume rendering by using explicit geometry submission to the graphics pipeline, prioritizing immediate visual feedback over photorealistic integration [G].
 
 ### Voxel Visualization
 #### definition
@@ -41,7 +41,7 @@ Debug Voxel Visualization renders auxiliary geometry (typically spheres) to prov
 - Set viewport to `viewportWidth` x `viewportHeight`, clear buffers, and render the quad [S1, unofficial].
 
 ## Background
-Origin: The techniques described herein are primarily derived from implementation details found in the `Friduric/voxel-cone-tracing` repository, which provides unofficial examples of voxel debugging and visualization in OpenGL [S1, unofficial]. These methods are commonly used in voxel-based game engines and scientific visualization tools to verify spatial alignment, culling correctness, and data density before committing to expensive ray-marching or ray-casting passes.
+The techniques described in this family are primarily found in custom graphics engines and research prototypes for real-time volume inspection. The specific implementations for AABB geometry and Voxel Visualization are documented in the [Friduric/voxel-cone-tracing](https://github.com/Friduric/voxel-cone-tracing) repository, which provides a framework for debugging voxel-based rendering pipelines [S1, unofficial]. These methods are essential for validating the correctness of voxelization, sparse storage, and ray-marching algorithms before integrating them into final rendering passes.
 
 ## Sources
 [S1] Friduric/voxel-cone-tracing, https://github.com/Friduric/voxel-cone-tracing, fetched 2026-10-26 (unofficial)

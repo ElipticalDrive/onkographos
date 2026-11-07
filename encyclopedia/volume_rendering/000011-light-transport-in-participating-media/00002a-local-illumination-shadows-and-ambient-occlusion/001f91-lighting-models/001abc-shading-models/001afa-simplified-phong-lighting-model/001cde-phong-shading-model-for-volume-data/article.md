@@ -1,19 +1,19 @@
 # Phong Shading Model for Volume Data
 
-Also called: Direct Volume Rendering using Textures, Engel, Kraus & Ertl technique, Gradient-based Phong Shading, Gradient-based Shading, Heidelberg Raytracing, Texture Mapping Based Volume Rendering with Phong Illumination, VolumeClassifier Lighting Model
+Also called: Direct Volume Rendering using Textures, Engel, Kraus & Ertl technique, Gradient-based Phong Shading, Heidelberg Raytracing, Texture Mapping Based Volume Rendering with Phong Illumination, VolumeClassifier Lighting Model
 
 ## Overview
-The Phong Shading Model for Volume Data applies local illumination calculations to volumetric scalar fields to provide 3-D shape cues without participating in the classification (opacity) operation [S2, unofficial]. It treats the volume gradient at each sample point as a pseudo-surface normal to compute ambient, diffuse, and specular lighting components, typically combined with Beer-Lambert absorption for transparency [S5, unofficial]. It sets itself apart from sibling methods like [Specular Reflections via Polynomial Expansion](1172-specular-reflections-via-polynomial-expansion.md) by using explicit gradient-based normals for standard Phong/Blinn-Phong terms rather than polynomial approximations of specular highlights, and differs from [Phong Shading](1853-phong-shading.md) by operating on volumetric samples rather than polygonal meshes.
+The Phong Shading Model for Volume Data applies local illumination calculations to volumetric scalar fields to provide 3-D shape cues without participating in the classification (opacity) operation [S2, unofficial]. It treats the volume gradient at each sample point as a pseudo-surface normal to compute ambient, diffuse, and specular lighting components, typically combined with Beer-Lambert absorption for transparency [S5]. It sets itself apart from sibling methods like [Specular Reflections via Polynomial Expansion](1172-specular-reflections-via-polynomial-expansion.md) by using explicit gradient-based normals for standard Phong/Blinn-Phong terms rather than polynomial approximations of specular highlights, and differs from [Phong Shading](1853-phong-shading.md) by operating on volumetric samples rather than polygonal meshes [S3, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D scalar volume dataset $V$, camera position $\mathbf{E}$, light source positions $\mathbf{L}_i$ (or directions for parallel lights), and rendering parameters (ambient/diffuse/specular coefficients, shininess, absorption coefficient).
-*   **Output:** A 2D image where each pixel color is the result of front-to-back compositing of shaded volume samples.
+*   **Input:** A 3D scalar volume dataset, camera position $\mathbf{E}$, light source positions or directions, and rendering parameters (ambient/diffuse/specular coefficients, shininess, absorption coefficient) [S5].
+*   **Output:** A 2D image where each pixel color is the result of front-to-back compositing of shaded volume samples [S5].
 
 **Data Structures:**
-*   **Volume Data:** Stored as a 3D texture or array. In texture-mapping variants, it may be stored in a `sampler3D` [S6, unofficial].
-*   **Light Structure:** Contains direction, ambient color, and diffuse color [S3, unofficial].
-*   **Gradient:** Precomputed or computed on-the-fly. In precomputed variants, a gradient vector is stored for each voxel [S4]. In texture-mapping variants, normals may be encoded in RGB channels or computed via finite differences [S6, unofficial].
+*   **Volume Data:** Stored as a 3D texture or array [S6, unofficial].
+*   **Light Structure:** Contains direction, ambient color, and diffuse color [S4, unofficial].
+*   **Gradient:** Precomputed or computed on-the-fly. In precomputed variants, a gradient vector is stored for each voxel [S4, unofficial]. In texture-mapping variants, normals may be encoded in RGB channels [S6, unofficial].
 
 **Numbered Steps:**
 
@@ -24,34 +24,34 @@ The Phong Shading Model for Volume Data applies local illumination calculations 
     [S2, unofficial]
 
 2.  **Ray Casting / Texture Mapping:**
-    *   **Ray Casting:** Cast rays from the camera through each pixel into the volume. Sample the volume at intervals $dt$ [S5, unofficial].
+    *   **Ray Casting:** Cast rays from the camera through each pixel into the volume. Sample the volume at intervals $dt$ [S5].
     *   **Texture Mapping:** Render polygonal planes (oriented to object or view) containing the volume data as 3D textures. The fragment shader samples the 3D texture at the plane's position [S6, unofficial].
 
 3.  **Lighting Calculation per Sample:**
     For each sample point $\mathbf{x}$ along the ray (or fragment):
-    a.  **Retrieve Data:** Get the scalar value $val$ and opacity/alpha $\alpha$ from the volume [S5, unofficial], [S6, unofficial].
-    b.  **Threshold Check:** If $val \le \Delta$ (a threshold, e.g., background), skip lighting and set emission to zero [S5, unofficial].
+    a.  **Retrieve Data:** Get the scalar value $val$ and opacity/alpha $\alpha$ from the volume [S6, unofficial].
+    b.  **Threshold Check:** If $val \le \Delta$ (a threshold, e.g., background), skip lighting and set emission to zero [S5].
     c.  **Compute Normals:**
-        *   If precomputed, use the stored gradient vector [S4].
+        *   If precomputed, use the stored gradient vector [S4, unofficial].
         *   If encoded in texture, expand RGB values from $[0,1]$ to $[-1,1]$: $\mathbf{N} = 2 \cdot \mathbf{v}_{rgb} - \mathbf{1}$ [S6, unofficial].
-        *   If computed on-the-fly, estimate gradients (e.g., using Sobel operators for X/Y in specific hardware implementations) [S7].
+        *   If computed on-the-fly, estimate gradients (e.g., using Sobel operators for X/Y in specific hardware implementations) [S7, unofficial].
     d.  **Compute Vectors:**
         *   View direction $\mathbf{V}$: From sample to camera. For orthographic projection, this is constant [S2, unofficial].
         *   Light direction $\mathbf{L}$: From sample to light source. For parallel lights, this is constant [S2, unofficial].
         *   Halfway vector $\mathbf{H}$: $\mathbf{H} = \frac{\mathbf{V} + \mathbf{L}}{|\mathbf{V} + \mathbf{L}|}$ [S2, unofficial].
     e.  **Compute Lighting Components:**
-        *   **Ambient:** $\mathbf{C}_a = k_a \cdot \mathbf{c}_p$ [S1, unofficial], where $k_a$ is the ambient reflection coefficient and $\mathbf{c}_p$ is the light color [S2, unofficial].
-        *   **Diffuse:** $\mathbf{C}_d = k_d \cdot (\mathbf{N} \cdot \mathbf{L}) \cdot \mathbf{c}_p \cdot \max(0, \mathbf{N} \cdot \mathbf{L})$ [S1, unofficial], [S2, unofficial]. Note: Some implementations use the light position directly in the dot product if not normalized correctly, but standard Phong uses normalized vectors [S6, unofficial].
-        *   **Specular:** $\mathbf{C}_s = k_s \cdot (\mathbf{N} \cdot \mathbf{H})^n \cdot \mathbf{c}_p$ [S1, unofficial], [S2, unofficial], where $k_s$ is the specular coefficient and $n$ is the shininess exponent [S1, unofficial].
-    f.  **Combine:** $\mathbf{C}_{light} = \mathbf{C}_a + \mathbf{C}_d + \mathbf{C}_s$ [S5, unofficial].
-    g.  **Apply Transfer Function:** Multiply the lighting color by the visualization color derived from the scalar value and normal [S5, unofficial].
+        *   **Ambient:** $\mathbf{C}_a = k_a \cdot \mathbf{c}_p$ [S1], where $k_a$ is the ambient reflection coefficient and $\mathbf{c}_p$ is the light color [S2, unofficial].
+        *   **Diffuse:** $\mathbf{C}_d = k_d \cdot (\mathbf{N} \cdot \mathbf{L}) \cdot \mathbf{c}_p \cdot \max(0, \mathbf{N} \cdot \mathbf{L})$ [S1], [S2, unofficial]. Note: Some implementations use the light position directly in the dot product if not normalized correctly, but standard Phong uses normalized vectors [S6, unofficial].
+        *   **Specular:** $\mathbf{C}_s = k_s \cdot (\mathbf{N} \cdot \mathbf{H})^n \cdot \mathbf{c}_p$ [S1], [S2, unofficial], where $k_s$ is the specular coefficient and $n$ is the shininess exponent [S1].
+    f.  **Combine:** $\mathbf{C}_{light} = \mathbf{C}_a + \mathbf{C}_d + \mathbf{C}_s$ [S5].
+    g.  **Apply Transfer Function:** Multiply the lighting color by the visualization color derived from the scalar value and normal [S5].
 
 4.  **Absorption and Compositing:**
-    a.  **Transparency:** Compute the transparency factor using the Beer-Lambert law: $T = e^{-\kappa \cdot val \cdot dt}$, where $\kappa$ is the absorption coefficient [S5, unofficial].
+    a.  **Transparency:** Compute the transparency factor using the Beer-Lambert law: $T = e^{-\kappa \cdot val \cdot dt}$, where $\kappa$ is the absorption coefficient [S5].
     b.  **Accumulate:** Update the accumulated color $\mathbf{C}_{out}$ and opacity $\alpha_{out}$ using front-to-back compositing:
         $$ \mathbf{C}_{out} = \mathbf{C}_{out} + \mathbf{C}_{light} \cdot (1 - \alpha_{out}) \cdot \alpha_{sample} $$
         $$ \alpha_{out} = \alpha_{out} + \alpha_{sample} \cdot (1 - \alpha_{out}) $$
-        [S5, unofficial], [S7]. Note: In some implementations, light is attenuated twice (once on the way in, once on the way out) [S7].
+        [S5], [S7, unofficial]. Note: In some implementations, light is attenuated twice (once on the way in, once on the way out) [S7, unofficial].
 
 **Pseudocode (Ray Casting Variant):**
 
@@ -66,79 +66,74 @@ def phong_shading_volume(volume_data, camera, lights, params):
     params: object with absorption_coeff (kappa), shininess, ambient/diffuse/specular coeffs (ka, kd, ks)
     """
     image_width, image_height = params.resolution
-    output_image = zeros((image_height, image_width, 3))
-    
-    # Precompute gradients if not precomputed
-    # gradients = compute_gradients(volume_data)
+    output_image = [[0.0, 0.0, 0.0] for _ in range(image_height)]
     
     for y in range(image_height):
         for x in range(image_width):
             ray_origin = camera.get_ray_origin(x, y)
             ray_direction = camera.get_ray_direction(x, y)
             
-            accumulated_color = vec3(0, 0, 0)
+            accumulated_color = [0.0, 0.0, 0.0]
             accumulated_alpha = 0.0
             
-            # Ray marching loop
             t = 0.0
             while t < params.max_distance and accumulated_alpha < 1.0:
-                sample_pos = ray_origin + t * ray_direction
-                val = trilinear_sample(volume_data, sample_pos)
+                sample_pos = [ray_origin[i] + t * ray_direction[i] for i in range(3)]
+                # Step: Sample volume at current position
+                val = sample_volume(volume_data, sample_pos)
                 
-                # Threshold check
                 if val <= params.delta_threshold:
                     t += params.step_size
                     continue
                 
-                # Compute Normal
-                # If precomputed: normal = gradients[sample_idx]
-                # If on-the-fly: normal = normalize(central_difference_gradient(volume_data, sample_pos))
+                # Step: Compute normal from gradient
                 normal = compute_normal(volume_data, sample_pos)
                 normal = normalize(normal)
                 
-                # Compute Lighting for each light
-                light_contribution = vec3(0, 0, 0)
+                light_contribution = [0.0, 0.0, 0.0]
                 for light in lights:
                     if light.is_parallel:
                         L = light.direction
                     else:
-                        L = normalize(light.position - sample_pos)
+                        L = normalize([light.position[i] - sample_pos[i] for i in range(3)])
                     
-                    V = normalize(camera.position - sample_pos)
-                    H = normalize(V + L)
+                    V = normalize([camera.position[i] - sample_pos[i] for i in range(3)])
+                    H = normalize([V[i] + L[i] for i in range(3)])
                     
-                    # Ambient
-                    Ca = params.ka * light.color
-                    
-                    # Diffuse
+                    Ca = [params.ka * light.color[i] for i in range(3)]
                     diff = max(dot(normal, L), 0.0)
-                    Cd = params.kd * diff * light.color
-                    
-                    # Specular
+                    Cd = [params.kd * diff * light.color[i] for i in range(3)]
                     spec = pow(max(dot(normal, H), 0.0), params.shininess)
-                    Cs = params.ks * spec * light.color
+                    Cs = [params.ks * spec * light.color[i] for i in range(3)]
                     
-                    light_contribution += Ca + Cd + Cs
+                    light_contribution = [light_contribution[i] + Ca[i] + Cd[i] + Cs[i] for i in range(3)]
                 
-                # Apply Transfer Function / Visualization Color
-                # This step maps scalar value to color, often modulating the lighting
+                # Step: Apply transfer function to get visualization color
                 vis_color = get_visualization_color(val, normal)
-                shaded_color = light_contribution * vis_color
+                shaded_color = [light_contribution[i] * vis_color[i] for i in range(3)]
                 
-                # Beer-Lambert Absorption
-                # alpha_sample is derived from val and kappa
                 alpha_sample = 1.0 - exp(-params.kappa * val * params.step_size)
-                
-                # Front-to-Back Compositing
                 weight = alpha_sample * (1.0 - accumulated_alpha)
-                accumulated_color += shaded_color * weight
+                accumulated_color = [accumulated_color[i] + shaded_color[i] * weight for i in range(3)]
                 accumulated_alpha += weight
                 
                 t += params.step_size
             
-            output_image[y, x] = accumulated_color
+            output_image[y][x] = accumulated_color
             
     return output_image
+
+def sample_volume(volume_data, pos):
+    # Standard trilinear interpolation of volume_data at pos
+    pass
+
+def compute_normal(volume_data, pos):
+    # Central difference gradient approximation
+    pass
+
+def get_visualization_color(val, normal):
+    # Maps scalar value and normal to RGB color
+    pass
 ```
 
 **Pseudocode (Texture Mapping Variant):**
@@ -183,15 +178,15 @@ def fragment_shader(texPos0, globalAmbient, lightColor, lightPosition, eyePositi
 ```
 
 **Parameters:**
-*   $k_a, k_d, k_s$: Ambient, diffuse, and specular reflection coefficients [S1, unofficial].
-*   $n$: Shininess exponent [S1, unofficial].
-*   $\kappa$: Absorption coefficient [S5, unofficial].
-*   $\Delta$: Threshold for volume sample value [S5, unofficial].
+*   $k_a, k_d, k_s$: Ambient, diffuse, and specular reflection coefficients [S1].
+*   $n$: Shininess exponent [S1].
+*   $\kappa$: Absorption coefficient [S5].
+*   $\Delta$: Threshold for volume sample value [S5].
 *   $L, V, H$: Normalized light, view, and halfway vectors [S2, unofficial].
 *   $d(x_i)$: Distance from picture plane (for depth cueing, if used) [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Gradient Noise:** The gradient operator is a high-pass filter. Raising it to a power (as in Gradient Shading variants) enhances high frequencies, causing aliasing if not filtered [S8, unofficial].
+*   **Gradient Noise:** The gradient operator is a high-pass filter. Raising it to a power (as in Gradient Shading variants) enhances high frequencies, causing aliasing if not filtered [S8].
 *   **Zero Gradient:** At flat regions or boundaries, the gradient may be zero, leading to undefined normals. [G] Handle by defaulting to a view-dependent normal or zeroing the lighting contribution.
 *   **Alpha Blending:** If `OUT.a` is 0 in texture mapping, the fragment remains white with alpha 0, which can cause visual artifacts if alpha testing is not used [S6, unofficial].
 *   **Performance:** 3D texture accesses are slower than 2D due to irregular memory access patterns [S6, unofficial]. Planes oriented to the view plane have lower performance than object-oriented planes [S6, unofficial].
@@ -205,26 +200,26 @@ A set of three shading strategies applied during volume ray marching to compute 
 The Blinn-Phong Lighting Model applies the Blinn-Phong shading approximation to volume rendering data, typically by computing surface normals from the scalar field gradient to simulate isosurface shading. It enhances the perception of depth and shape structure in volumetric data by combining ambient, diffuse, and specular lighting components, offering a computationally cheap alternative to full ray-traced shadows while providing stronger visual cues than unshaded volume rendering.
 
 ### Phong Shading (Gradient Shader)
-A shading technique that modulates intensity by the strength of the local gradient raised to a power, similar to Phong shading in polygon rendering [S8, unofficial]. It calculates the absolute value of the derivative (1D gradient) of the input signal, raises the gradient magnitude to a power to accentuate regions of rapid change, and multiplies the original input signal by the raised gradient result to select regions of rapid change [S8, unofficial]. The exponent controls highlight width; higher powers narrow the highlight and introduce more high frequencies [S8, unofficial]. A pitfall is that the gradient operator is a high-pass filter that enhances high frequencies; raising to a power further increases them, causing aliasing during resampling if not filtered [S8, unofficial].
+A shading technique that modulates intensity by the strength of the local gradient raised to a power, similar to Phong shading in polygon rendering [S8]. It calculates the absolute value of the derivative (1D gradient) of the input signal, raises the gradient magnitude to a power to accentuate regions of rapid change, and multiplies the original input signal by the raised gradient result to select regions of rapid change [S8]. The exponent controls highlight width; higher powers narrow the highlight and introduce more high frequencies [S8]. A pitfall is that the gradient operator is a high-pass filter that enhances high frequencies; raising to a power further increases them, causing aliasing during resampling if not filtered [S8].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot S \cdot L)$, where $N$ is the number of pixels, $S$ is the number of samples per ray, and $L$ is the number of light sources [S5, unofficial].
-*   **Memory Complexity:** $O(V)$ for storing the volume data, plus $O(V)$ if precomputing gradients [S4].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
 *   **Measured Performance:** In texture-mapping implementations, 3D texture accesses are slower than 2D due to irregular memory access patterns [S6, unofficial]. Planes oriented to the view plane have substantially lower performance than those oriented to the object plane [S6, unofficial]. Using fragment shaders (Cg) results in lower performance compared to the fixed-function pipeline of OpenGL [S6, unofficial].
 *   **Strengths:** Provides strong 3-D shape cues at a reasonable cost [S2, unofficial]. Computationally cheap alternative to full ray-traced shadows [S2, unofficial].
-*   **Limitations:** Does not participate in classification [S2, unofficial]. Shadows are approximated or absent unless specifically implemented (e.g., Heidelberg Raytracing) [S7]. Gradient-based normals can be noisy [S8, unofficial].
+*   **Limitations:** Does not participate in classification [S2, unofficial]. Shadows are approximated or absent unless specifically implemented (e.g., Heidelberg Raytracing) [S7, unofficial]. Gradient-based normals can be noisy [S8].
 *   **When to Use:** When visual clarity of internal structures is prioritized over physical accuracy of light transport.
 *   **When Not to Use:** When accurate shadowing or complex light transport effects are required.
 
 ## Background
-The Phong Shading Model for Volume Data originates from the work of Engel, Kraus, and Ertl, who applied the standard Phong shading equation to volume data using precomputed gradient vectors as pseudo surface normals [S4]. It was presented for completeness in early volume rendering papers to provide a satisfactory illusion of smooth surfaces at a reasonable cost [S2, unofficial]. The technique is used in systems like VolPack [S4] and VIRIM (Heidelberg Raytracing) [S7]. It builds on the original Phong shading model for polygonal surfaces [S2, unofficial].
+The technique is used in systems like VolPack [S4, unofficial] and VIRIM (Heidelberg Raytracing) [S7, unofficial]. It was presented for completeness in early volume rendering papers to provide a satisfactory illusion of smooth surfaces at a reasonable cost [S2, unofficial]. It builds on the original Phong shading model for polygonal surfaces [S2, unofficial].
 
 ## Sources
-[S1] DTIC ADA193649: Rendering of Surfaces from Volume Data,, https://archive.org/details/DTIC_ADA193649, fetched 2026-10-26 (unofficial)
+[S1] DTIC ADA193649: Rendering of Surfaces from Volume Data,, https://archive.org/details/DTIC_ADA193649, fetched 2026-10-26
 [S2] [PDF] Display of Surfaces from Volume Data, https://graphics.stanford.edu/papers/volume-cga88/volume.pdf, fetched 2026-10-26 (unofficial)
 [S3] jose-villegas/VolumeRendering, https://github.com/jose-villegas/VolumeRendering, fetched 2026-10-27 (unofficial)
-[S4] VolPack User's Guide, http://www-graphics.stanford.edu/software/volpack/vp_userguide.html, fetched 2026-10-28
-[S5] GitHub - yuehaowang/volume_renderer: CUDA-based interactive volume ..., https://github.com/yuehaowang/volume_renderer, fetched 2026-10-29 (unofficial)
+[S4] VolPack User's Guide, http://www-graphics.stanford.edu/software/volpack/vp_userguide.html, fetched 2026-10-28 (unofficial)
+[S5] GitHub - yuehaowang/volume_renderer: CUDA-based interactive volume ..., https://github.com/yuehaowang/volume_renderer, fetched 2026-10-29
 [S6] Texture Mapping Based Volume Rendering, https://www.ciroduran.com/files/Tesis.pdf, fetched 2026-10-29 (unofficial)
-[S7] Three Architectures for Volume Rendering, https://vcg.seas.harvard.edu/publications/19950801-three-architectures-for-volume-rendering/paper, fetched 2026-10-29
-[S8] A Parallel, Feed-Forward Volume Rendering Algorithm, https://www.cs.unc.edu/techreports/91-029.pdf, fetched 2026-10-27 (unofficial)
+[S7] Three Architectures for Volume Rendering, https://vcg.seas.harvard.edu/publications/19950801-three-architectures-for-volume-rendering/paper, fetched 2026-10-29 (unofficial)
+[S8] A Parallel, Feed-Forward Volume Rendering Algorithm, https://www.cs.unc.edu/techreports/91-029.pdf, fetched 2026-10-27

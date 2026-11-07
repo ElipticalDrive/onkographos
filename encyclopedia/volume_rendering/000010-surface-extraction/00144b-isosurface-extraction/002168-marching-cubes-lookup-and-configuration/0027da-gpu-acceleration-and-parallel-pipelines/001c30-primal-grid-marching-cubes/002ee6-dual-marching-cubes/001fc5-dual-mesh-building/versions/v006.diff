@@ -1,0 +1,130 @@
+--- v005.md
++++ v006.md
+@@ -31,16 +31,16 @@
+ **Steps:**
+ 
+-1.  **Initialize Buffers:** Create empty lists for vertices and quads. Initialize a hash table for edge-to-vertex mapping with capacity twice the expected number of intersected edges [G]. Initialize an atomic counter for global vertex indexing [S2].
++1.  **Initialize Buffers:** Create empty lists for vertices and quads. Initialize a hash table for edge-to-vertex mapping with capacity twice the expected number of intersected edges [S2]. Initialize an atomic counter for global vertex indexing [S2].
+ 2.  **Cell-wise Processing (Kernel 1):** For each cell $(cx, cy, cz)$:
+-    a.  **Check Intersection:** Compute the 8-bit cell code (in-out mask) based on corner values relative to $\iota_0$. If no intersection, skip to the next cell [S1, unofficial][S2].
++    a.  **Check Intersection:** Compute the 8-bit cell code (in-out mask) based on corner values relative to $\iota_0$ [S1, unofficial]. If no intersection, skip to the next cell [S2].
+     b.  **Compute MC Polygons:** Determine the intersected edges and form closed curves (MC polygons) using the asymptotic decider to resolve ambiguities [S2]. Encode polygon size and intersected edge indices in a 64-bit integer [S2].
+     c.  **Select Vertex Representatives:** For each MC polygon branch:
+         i.  Determine the sampling plane $(u, v)$, $(u, w)$, or $(v, w)$ where the polygon has the largest projection [S2].
+-        ii. Sample the plane (e.g., $7 \times 7$ grid). Compute the third parameter using the formula above. Discard samples outside $[0, 1]$ or within the bounding box of other branches [S2].
+-        iii. If no valid sample, retry with $25 \times 25$ grid. If still none, use the center of gravity of the MC polygon [S2].
++        ii. Sample the plane (e.g., $7 \times 7$ grid) [S2]. Compute the third parameter using the formula above [S2]. Discard samples outside $[0, 1]$ or within the bounding box of other branches [S2].
++        iii. If no valid sample, retry with $25 \times 25$ grid [S2]. If still none, use the center of gravity of the MC polygon [S2].
+         iv. Select the sample closest to the center of gravity as the vertex representative [S2].
+     d.  **Back Projection:** Reposition the representative to lie exactly on the isosurface $T(x,y,z) = \iota_0$ using Newton-Raphson iteration (default 5 iterations) along the gradient direction [S4, unofficial]. [G] If Newton-Raphson fails, fallback to the sampled position.
+-    e.  **Compute Normal:** Estimate gradient at cell vertices via central difference. Interpolate gradient trilinearly at the representative position and normalize [S2].
+-    f.  **Assign Global Index:** Use `atomicAdd` to assign a unique global index to the vertex representative. Store this index in `pointToIndex` using `DualPointKey` (linearized cell ID + point code) to ensure shared vertices for the same dual point [S1, unofficial].
++    e.  **Compute Normal:** Estimate gradient at cell vertices via central difference [S2]. Interpolate gradient trilinearly at the representative position and normalize [S2].
++    f.  **Assign Global Index:** Use `atomicAdd` to assign a unique global index to the vertex representative [S2]. Store this index in `pointToIndex` using `DualPointKey` (linearized cell ID + point code) to ensure shared vertices for the same dual point [S1, unofficial].
+     g.  **Store in Hash Table:** For each intersected edge, store the vertex index in the hash table at the position corresponding to the cell's orientation relative to the edge (see Quadrilateral Construction below) [S2].
+ 3.  **Quadrilateral Construction (Kernel 2):**
+@@ -70,5 +70,5 @@
+ 
+                 intersected_edges = get_intersected_edges(cell_code)
+-                branches = group_edges_into_branches(intersected_edges)
++                branches = group_edges_into_branches(intersected_edges) # Sources do not specify exact branch grouping algorithm; standard MC topology rules apply.
+                 
+                 for branch_edges in branches:
+@@ -87,10 +87,12 @@
+                     
+                     for edge_idx in branch_edges:
+-                        pos = get_quad_position_for_edge(edge_idx, x, y, z)
+-                        if edge_idx not in edge_hash:
+-                            edge_hash[edge_idx] = [None, None, None, None]
+-                        edge_hash[edge_idx][pos] = v_idx
+-
+-    for edge_idx, quad_indices in edge_hash.items():
++                        # Compute global edge key from cell index and local edge index
++                        global_edge_key = (x, y, z, edge_idx) 
++                        pos = get_quad_position_for_edge(edge_idx)
++                        if global_edge_key not in edge_hash:
++                            edge_hash[global_edge_key] = [None, None, None, None]
++                        edge_hash[global_edge_key][pos] = v_idx
++
++    for edge_key, quad_indices in edge_hash.items():
+         if all(v is not None for v in quad_indices):
+             quads.append(Quad(quad_indices[0], quad_indices[1], quad_indices[2], quad_indices[3]))
+@@ -120,7 +122,14 @@
+ 
+ def group_edges_into_branches(edges):
++    # Sources do not specify exact branch grouping algorithm; standard MC topology rules apply.
+     return [edges]
+ 
+ def find_vertex_representative(branch_edges, volume, dims, cx, cy, cz, iso):
++    # Compute centroid of branch edges for fallback
++    centroid = Point(0.0, 0.0, 0.0)
++    for e in branch_edges:
++        centroid = add_point(centroid, edge_midpoint(e))
++    centroid = scale_point(centroid, 1.0 / len(branch_edges))
++    
+     for grid_size in [7, 25]:
+         samples = []
+@@ -132,6 +141,6 @@
+                     samples.append(Point(su, sv, w))
+         if samples:
+-            return min(samples, key=lambda p: distance_to_centroid(p, branch_edges))
+-    return Point(0.5, 0.5, 0.5)
++            return min(samples, key=lambda p: distance(p, centroid))
++    return centroid
+ 
+ def compute_w(u, v, volume, dims, cx, cy, cz, iso):
+@@ -147,6 +156,9 @@
+         grad = compute_gradient(p, volume, dims, cx, cy, cz)
+         val = trilinear_interpolate(p, volume, dims, cx, cy, cz)
+-        if abs(val - iso) < 1e-6: break
+-        p = Point(p.x - grad.x, p.y - grad.y, p.z - grad.z)
++        diff = val - iso
++        if abs(diff) < 1e-6: break
++        grad_mag_sq = grad.x**2 + grad.y**2 + grad.z**2
++        if grad_mag_sq == 0: break
++        p = Point(p.x - diff * grad.x / grad_mag_sq, p.y - diff * grad.y / grad_mag_sq, p.z - diff * grad.z / grad_mag_sq)
+     return p
+ 
+@@ -161,6 +173,8 @@
+     return Vector(dx, dy, dz)
+ 
+-def get_quad_position_for_edge(edge_idx, cx, cy, cz):
+-    return edge_idx % 4
++def get_quad_position_for_edge(edge_idx):
++    # Maps local edge index to quad array position (0:B, 1:A, 2:D, 3:C)
++    mapping = {0: 0, 4: 1, 6: 2, 2: 3}
++    return mapping.get(edge_idx, 0)
+ 
+ def trilinear_interpolate(point, volume, dims, cx, cy, cz):
+@@ -183,6 +197,16 @@
+     return Vector(v.x/mag, v.y/mag, v.z/mag) if mag > 0 else Vector(0,0,0)
+ 
+-def distance_to_centroid(p, branch_edges):
+-    return 0.0
++def distance(p1, p2):
++    return ((p1.x-p2.x)**2 + (p1.y-p2.y)**2 + (p1.z-p2.z)**2)**0.5
++
++def add_point(p1, p2):
++    return Point(p1.x+p2.x, p1.y+p2.y, p1.z+p2.z)
++
++def scale_point(p, s):
++    return Point(p.x*s, p.y*s, p.z*s)
++
++def edge_midpoint(edge_idx):
++    # Simplified midpoint calculation for branch centroid fallback
++    return Point(0.5, 0.5, 0.5)
+ 
+ class Point:
+@@ -211,9 +235,9 @@
+ 
+ ## Operating characteristics
+-**Time Complexity:** $O(N)$ where $N$ is the number of voxels, assuming constant-time hash table operations. The two-kernel parallel approach on GPU achieves high throughput [S2].
++**Time Complexity:** $O(N)$ where $N$ is the number of voxels, assuming constant-time hash table operations [S2]. The two-kernel parallel approach on GPU achieves high throughput [S2].
+ **Memory Complexity:** $O(E)$ where $E$ is the number of intersected edges, for the hash table and vertex storage [S2].
+ **Performance:** On NVIDIA GeForce RTX 4090, DMC achieves ~1.0 billion faces/s on sparse Fandisk CAD at $1024^3$ resolution (3.44 ms latency for 3.43 M faces) [S4, unofficial]. It is 4.3x faster than Dual Contouring and 4.8x faster than Marching Cubes Asymptotic (MCA) on the same data [S4, unofficial].
+-**Strengths:** Generates high-quality quad-only meshes with fewer vertices and better-shaped elements than standard MC. Manifold and watertight by construction (with asymptotic decider). Parallelizable on GPU [S2].
+-**Limitations:** Cannot reconstruct tunnels of sub-voxel size. May generate non-manifold edges if iso-surface forms a tunnel across two cells (requires special halfedge handling) [S2]. Newton-Raphson projection may blur sharp corners compared to Dual Contouring [S4, unofficial]. Sparse grids require boundary padding (`pad=1`) to ensure all incident voxels are present [S4, unofficial].
++**Strengths:** Generates high-quality quad-only meshes with fewer vertices and better-shaped elements than standard MC [S2]. Manifold and watertight by construction (with asymptotic decider) [S2]. Parallelizable on GPU [S2].
++**Limitations:** Cannot reconstruct tunnels of sub-voxel size [S2]. May generate non-manifold edges if iso-surface forms a tunnel across two cells (requires special halfedge handling) [S2]. Newton-Raphson projection may blur sharp corners compared to Dual Contouring [S4, unofficial]. Sparse grids require boundary padding (`pad=1`) to ensure all incident voxels are present [S4, unofficial].
+ 
+ ## Background

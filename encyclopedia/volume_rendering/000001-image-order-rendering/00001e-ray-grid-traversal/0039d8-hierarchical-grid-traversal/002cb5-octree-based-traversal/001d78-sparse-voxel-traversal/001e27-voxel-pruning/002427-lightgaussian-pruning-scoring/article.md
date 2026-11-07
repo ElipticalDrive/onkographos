@@ -1,0 +1,115 @@
+# LightGaussian Pruning Scoring
+
+Also called: Projection-based primitive scoring
+
+## Overview
+LightGaussian Pruning Scoring is a 2D projection-based method for ranking 3D Gaussian primitives to determine which ones to prune, based on accumulated ray contributions across multiple synthesized views [S1, unofficial]. It differs from volume-based scoring methods by operating in image space rather than volumetric space, making it less accurate for volumetric data where intensity integration and anisotropy weighting are critical [S1, unofficial].
+
+## How it works
+**Inputs:** A trained 3D Gaussian Splatting model (or similar primitive-based representation); a set of uniformly sampled camera views.
+**Outputs:** A scalar importance score for each primitive; a binary mask indicating which primitives to retain or prune.
+
+**Data Structures:**
+*   `Primitive`: Contains position, covariance, opacity, and color attributes.
+*   `View`: Defined by camera pose (extrinsics) and intrinsics.
+*   `Score`: A float value associated with each primitive.
+
+**Steps:**
+1.  **View Generation:** Generate $N$ uniformly sampled views on a sphere surrounding the scene. The source specifies $N=360$ for experimental settings [S1, unofficial].
+2.  **Rendering:** Render the scene from each generated view using the current primitive parameters.
+3.  **Feature Extraction:** For each primitive, extract view-dependent features from the rendered views. Key features include:
+    *   **Ray Hits:** Whether the primitive contributes to the pixel color along the ray.
+    *   **Transmittance:** The accumulated transmittance along the ray up to the primitive.
+4.  **Accumulation:** Accumulate the ray contributions (e.g., color difference, opacity contribution) for each primitive across all $N$ views.
+5.  **Scoring:** Compute a final importance score for each primitive based on the accumulated contributions. Primitives with lower scores are considered less important.
+6.  **Pruning:** Remove primitives below a certain score threshold or keep the top $K$ primitives.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def lightgaussian_pruning_scoring(primitives, num_views=360):
+    """
+    Scores primitives based on accumulated ray contributions from multiple views.
+    
+    Args:
+        primitives: List of primitive objects with render() capability.
+        num_views: Number of uniformly sampled views on a sphere.
+        
+    Returns:
+        scores: Dictionary mapping primitive_id to importance score.
+    """
+    # Step 1: Generate uniformly sampled views on a sphere
+    views = generate_uniform_sphere_views(num_views)
+    
+    # Initialize scores
+    scores = {p.id: 0.0 for p in primitives}
+    
+    # Step 2 & 3: Render views and extract features
+    for view in views:
+        # Render scene from this view
+        # This typically involves rasterizing primitives onto the image plane
+        # and computing ray contributions.
+        contributions = render_view(primitives, view)
+        
+        # contributions is a mapping of primitive_id to its contribution
+        # in this specific view (e.g., color delta, opacity weight)
+        for p_id, contrib in contributions.items():
+            # Step 4: Accumulate contributions
+            scores[p_id] += contrib
+            
+    # Step 5: Normalize scores if necessary (not explicitly detailed in source)
+    # [G] Normalization is often applied to make scores comparable across datasets.
+    # For now, we return raw accumulated scores.
+    
+    return scores
+
+def generate_uniform_sphere_views(num_views):
+    """
+    Generates uniformly distributed camera poses on a unit sphere.
+    Uses a Fibonacci sphere or similar distribution for uniformity.
+    """
+    views = []
+    golden_angle = math.pi * (3 - math.sqrt(5))
+    for i in range(num_views):
+        y = 1 - (i / (num_views - 1)) * 2  # maps to [-1, 1]
+        radius = math.sqrt(1 - y * y)
+        theta = golden_angle * i
+        x = math.cos(theta) * radius
+        z = math.sin(theta) * radius
+        # Construct camera pose from (x, y, z)
+        # [G] Standard camera setup: look at origin, up vector adjusted.
+        view = create_camera_pose(position=(x, y, z), target=(0,0,0))
+        views.append(view)
+    return views
+```
+
+**Parameters:**
+*   `num_views`: Typically 360 [S1, unofficial].
+*   `threshold`: Not specified in sources.
+
+**Edge Cases and Pitfalls:**
+*   **Volumetric Accuracy:** Projection-based scoring yields lower accuracy in volumetric settings compared to volume-based scoring [S1, unofficial]. It fails to account for voxel intensities and fractional anisotropy, leading to unreliable ranking for complex volumetric data [S1, unofficial].
+*   **View Sampling:** Uniform sampling on a sphere may not capture all relevant viewing angles if the scene has strong directional dependencies, though 360 views is a standard baseline [S1, unofficial].
+
+## Subtopics
+
+### FA-based Pruning
+Uses Fisher Information to estimate parameter sensitivity. More computationally expensive but provides a first-order approximation of importance. [Link](3236-fa-based-pruning.md)
+
+### Importance-Driven Volume Rendering
+Integrates voxel intensities and anisotropy for scoring. More accurate for volumetric data than projection-based methods. [Link](7632-importance-driven-volume-rendering.md)
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of views and $P$ is the number of primitives. Rendering $N$ views is the dominant cost.
+*   **Memory Complexity:** $O(P)$ to store scores. Rendering requires temporary memory for intermediate buffers.
+*   **Performance:** The source notes that LightGaussian achieves comparable or smaller number of primitives with higher PSNR/SSIM in general 3D-GS settings, but lower accuracy in volumetric settings [S1, unofficial].
+*   **Strengths:** Simple to implement; leverages existing rendering pipelines; view-dependent features capture occlusion and visibility well.
+*   **Limitations:** Lower accuracy for volumetric data; does not account for volumetric properties like anisotropy; requires multiple renders.
+
+## Background
+LightGaussian was introduced as a pruning baseline for 3D Gaussian Splatting [S1, unofficial]. It was compared against other pruning methods like RAP and PUP 3D-GS [S2, unofficial]. The method was found to be less effective for volumetric data compared to volume-based scoring methods that integrate voxel intensities [S1, unofficial].
+
+## Sources
+[S1] ESVR: 3D Ellipsoid-based Sparse Volume Rendering via Structure-aware Primitive Learning and Per-primitive Ray Sampling, https://arxiv.org/abs/2608.05564v1, fetched 2026-10-26 (unofficial)
+[S2] Budgeted-GS: Real-Time Large-Scale Gaussian Splatting via Factoring LOD, https://arxiv.org/abs/2610.03162, fetched 2026-10-29 (unofficial)

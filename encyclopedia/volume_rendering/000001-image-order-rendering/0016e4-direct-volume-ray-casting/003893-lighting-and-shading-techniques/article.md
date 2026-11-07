@@ -1,46 +1,70 @@
 # Lighting and Shading Techniques
 
-Also called: Volume Shading, Gradient-based Shading, Illumination Models for DVR
+Also called: Volume Shading, Direct Volume Illumination
 
 ## Overview
-Lighting and shading techniques enhance the perceptibility of volume structures by simulating the interaction of light with the volume's internal density gradients, providing depth cues that flat color mapping lacks. Unlike unshaded direct volume rendering, which relies solely on opacity and color transfer functions, this family computes surface normals from scalar field gradients to apply illumination models (e.g., Phong) or pre-computed lighting approximations (e.g., shadows, ambient occlusion) during the compositing pass. It distinguishes itself from [Neural volume rendering](1576-neural-volume-rendering.md) by using explicit geometric gradient estimation rather than learned radiance fields, and from [Illumination Caching](7548-illumination-caching.md) by computing lighting on-the-fly per sample rather than relying on pre-aggregated textures.
+Lighting and Shading Techniques compute illumination models for direct volume ray casting to provide depth cues and enhance the perception of 3D structure [S1, S4, S3686, S8307, unofficial]. Unlike unshaded rendering, which relies solely on opacity and color transfer functions, these methods estimate surface normals from scalar gradients to calculate diffuse and specular highlights, or approximate complex lighting effects like shadows and ambient occlusion using pre-computed data structures [S1, S4, S9147, S9149, unofficial]. They set themselves apart from [Neural volume rendering](1576-neural-volume-rendering.md) by using explicit geometric or statistical approximations rather than learned radiance fields, and from [Pre-integrated Volume Rendering](5327-pre-integrated-volume-rendering.md) by focusing on lighting computation rather than texture interpolation artifacts.
 
 ## Shared principles
-The core mechanism integrates shading calculations into the front-to-back compositing loop defined in [Direct volume ray casting](19-direct-volume-ray-casting.md). For each sample point $\mathbf{p}_i$ along the ray, the following steps are common to all methods in this family:
+All lighting and shading techniques in direct volume ray casting operate within the standard ray casting loop defined in [Direct volume ray casting](19-direct-volume-ray-casting.md). The core mechanism involves modulating the base color $C_{base}$ derived from the transfer function with a lighting term $L(\mathbf{p})$ at each sample point $\mathbf{p}_i$ along the ray [S1, S4, S3686, S8307, unofficial].
 
-1.  **Gradient Estimation**: The local surface normal $\mathbf{n}_i$ is estimated from the scalar volume data $V(\mathbf{p})$. This is typically done by computing the gradient $\nabla V(\mathbf{p}_i)$ using central differences or Sobel operators on the interpolated scalar field [S14, S30, unofficial][S54]. The normal is normalized: $\hat{\mathbf{n}}_i = \nabla V(\mathbf{p}_i) / \|\nabla V(\mathbf{p}_i)\|$. If the gradient magnitude is below a threshold (e.g., $10^{-6}$), a default normal is used [G].
-2.  **Illumination Calculation**: A lighting model computes a color or intensity multiplier based on the normal $\hat{\mathbf{n}}_i$, the view direction $\mathbf{v}$, and the light direction $\mathbf{l}$. Common models include Phong or Blinn-Phong, which calculate ambient, diffuse, and specular components [S14, S15, S30, unofficial][S54].
-3.  **Color Modulation**: The base color $C_{base}$ derived from the transfer function is modulated by the lighting result to produce the shaded sample color $C_i$. The opacity $\alpha_i$ remains unchanged by the shading step in standard implementations [S1, S4, unofficial].
-4.  **Compositing**: The shaded color $C_i$ and opacity $\alpha_i$ are integrated into the accumulated ray color and opacity using the standard over operator [S12, S43, S50, unofficial].
+The general form of the shaded sample color $C_i$ is:
+$$
+C_i = C_{base}(\mathbf{p}_i) \cdot L(\mathbf{p}_i)
+$$
+or in component-wise form for RGB:
+$$
+C_i^\lambda = C_{base}^\lambda(\mathbf{p}_i) \cdot L^\lambda(\mathbf{p}_i)
+$$
+where $\lambda \in \{r, g, b\}$ [S1, S8307, unofficial].
+
+The opacity $\alpha_i$ is typically derived solely from the opacity transfer function (OTF) and is **not** modified by the shading model, preserving the physical interpretation of density [S1, S8307, unofficial].
+
+The lighting term $L(\mathbf{p}_i)$ is computed using one of the following approaches:
+1.  **Analytic Shading:** Uses local gradient estimation $\nabla V(\mathbf{p}_i)$ to approximate surface normals $\mathbf{n}_i$ and applies standard illumination models (e.g., Phong) [S4, S3686, S8307, unofficial].
+2.  **Pre-computed Caching:** Uses 3D textures (e.g., Summed Area Tables) to store pre-integrated lighting effects such as shadows and ambient occlusion, retrieved via texture lookup [S1, S7548, S9147, S9149, unofficial].
+3.  **Statistical Estimation:** Uses importance sampling (e.g., Next Event Estimation) to compute direct lighting contributions from emissive volumes or light sources [S1, S3557, unofficial].
 
 ## Subtopics
 
 ### [Hybrid Gradient Volume Raycasting with Lasso Masking](2059-hybrid-gradient-volume-raycasting-with-lasso-masking.md)
-A technique for medical CT data that decouples lighting direction from the sample gradient by using pre-computed Hounsfield Unit (HU) gradients for stability. It applies Phong lighting only when significant opacity changes are detected (threshold ~0.15), preventing artifacts on smooth structures like vessels. It also incorporates lasso-based voxel masking to selectively hide regions. Choose this for interactive medical visualization requiring selective occlusion and artifact-free shading on smooth anatomical structures.
+This method renders medical CT data by combining pre-computed Hounsfield Unit (HU) gradients for lighting direction with a hybrid shading model that applies Phong lighting only when significant opacity changes are detected along the gradient direction. It incorporates lasso-based voxel masking to selectively hide or reveal regions of the volume and uses cutting cube bounds to define the rendering region. It differs from standard direct volume rendering by decoupling the lighting direction from the sample gradient, using pre-computed gradients for stability, and by introducing conditional shading based on opacity thresholds to prevent artifacts on smooth structures like vessels. It builds on [Lighting and Shading Techniques](8281-lighting-and-shading-techniques.md) and is a sibling to [Next Event Estimation for Emissive Volumes](3557-next-event-estimation-for-emissive-volumes.md).
 
 ### [Next Event Estimation for Emissive Volumes](3557-next-event-estimation-for-emissive-volumes.md)
-A direct lighting estimation technique that reduces noise in scenes with volumetric light sources by explicitly sampling points on emissive volume boundaries or internal structures. It uses Multiple Importance Sampling (MIS) to balance volume sampling and light sampling PDFs. Choose this when rendering scenes with internal light sources where standard sparse sampling leads to high variance noise.
+Next Event Estimation (NEE) for Emissive Volumes is a direct lighting estimation technique used within the front-to-back compositing pipeline of [Direct volume ray casting](19-direct-volume-ray-casting.md) to reduce noise in scenes containing volumetric light sources. Unlike standard volume rendering which relies on sparse sampling of emission along the ray, NEE explicitly samples points on emissive volume boundaries or internal structures to compute direct illumination contributions. It sets itself apart from siblings like [Hybrid Gradient Volume Raycasting with Lasso Masking](2059-hybrid-gradient-volume-raycasting-with-lasso-masking.md) by focusing on statistical importance sampling of light sources rather than geometric masking, and from [Illumination Caching](7548-illumination-caching.md) by computing lighting on-the-fly rather than precomputing it.
 
 ### [Direct Volume Rendering with Phong Shading](3686-direct-volume-rendering-with-phong-shading.md)
-The standard application of the Phong illumination model to direct volume ray casting. It estimates normals from scalar gradients to compute specular highlights, providing strong depth cues. Choose this for general-purpose volume rendering where realistic plastic-like appearance and specular highlights are desired.
+Direct Volume Rendering with Phong Shading projects 3D scalar volume data onto a 2D image plane using front-to-back compositing, where scalar values are mapped to RGBA via user-defined transfer functions and shaded using the Phong illumination model to provide depth cues. It distinguishes itself from unshaded volume rendering by explicitly estimating surface normals from scalar gradients to compute specular highlights, and from isosurface extraction by visualizing the entire volume density rather than a single thresholded boundary.
 
 ### [Illumination Caching](7548-illumination-caching.md)
-A technique that pre-computes lighting distribution (shadows, ambient occlusion) into a 3D texture, assuming isotropic scattering. It replaces per-sample shadow ray traversal with single-texture lookups. Choose this for real-time rendering of complex lighting where performance is critical and lighting conditions are static or change infrequently.
+Illumination caching is a rendering technique that pre-computes the lighting distribution inside a volume and stores it in a 3D texture, allowing for real-time rendering of complex lighting. It assumes that volume material scatters light isotropically, enabling the attenuation factors (such as ambient occlusion and directional shadows) to be aggregated into a single lookup. This method distinguishes itself from standard ray-casting by replacing per-sample shadow ray traversal with single-texture lookups of pre-aggregated extinction coefficients, achieving significant performance speedups while maintaining visual quality.
 
 ### [Direct Volume Rendering with Phong Illumination](8307-direct-volume-rendering-with-phong-illumination.md)
-A specific implementation of Phong shading that integrates depth cueing (linear approximation) into the illumination model. It calculates ambient, diffuse, and specular intensities while leaving opacity unchanged. Choose this when depth perception needs to be enhanced by distance-based attenuation in addition to surface shading.
+Direct Volume Rendering with Phong Illumination is a shading technique applied within the Direct Volume Ray Casting pipeline to produce photo-realistic images with strong depth cues and a plastic appearance. It distinguishes itself from non-photorealistic methods (such as Tone or Contour Rendering) by calculating ambient, diffuse, and specular light intensities at each sample point, thereby enhancing the visual realism of the volume data. The method integrates the Phong lighting model into the standard front-to-back compositing loop, modulating the base color derived from transfer functions with lighting contributions while leaving the opacity values unchanged during the shading step.
 
 ### [Extinction-based Shading and Illumination](9147-extinction-based-shading-and-illumination.md)
-Computes ambient occlusion, soft shadows, and color bleeding by aggregating extinction coefficients using a 3D Summed Area Table (SAT). It approximates spherical and conical neighborhoods with cuboid shells. Choose this for interactive applications requiring dynamic lighting effects (shadows, AO) without the cost of ray tracing.
+This method computes ambient occlusion, soft shadows, and color bleeding in direct volume ray casting by aggregating extinction coefficients using a 3D Summed Area Table (SAT). Unlike traditional shadow ray sampling, it approximates spherical and conical neighborhoods with cuboid shells, enabling distance-based weighting and interactive transfer function updates. It is distinguished from sibling methods by its use of extinction coefficients (rather than opacity) and cuboid shell approximation (rather than octants or fixed cones).
 
 ### [Extinction-based Shadow and Scattering Approximation](9149-extinction-based-shadow-and-scattering-approximation.md)
-Approximates directional shadows and light scattering by computing voxel-wise extinction using a 3D SAT. It handles any light type and allows multiple light sources inside or on the border of the dataset. Choose this for efficient soft shadow and scattering approximation in volumes with complex lighting setups.
+This method approximates directional shadows and light scattering in volume rendering by computing the extinction of light intensity for voxels using a 3D Summed Area Table (SAT). It solves the problem of efficiently calculating soft shadows and ambient occlusion without propagating illumination from outside the volume, allowing for multiple light sources including those inside or on the border of the dataset. It differs from half-angle slicing by handling any light type and from propagation methods by computing voxel-wise extinction rather than external illumination propagation.
 
 ### Gradient Shading for Turbulent Flow Visualization
-A technique to obtain crisp images from volume-rendered turbulent flow data by applying gradient shading to solid-texture-mapped velocity components. It adds ambient, diffuse, specular, and glossiness contributions to reveal coherent structures like hairpin vortices. Choose this for visualizing space-filling 3-D fluid flow data where preserving dataset integrity is required while enhancing structural clarity.
+#### definition
+- [S1] A technique to obtain crisp and solid-looking images from volume-rendered turbulent flow data by applying additional gradient shading, solving the problem of 'cloud like or fuzzy' images characteristic of direct volume rendering of space filling 3-D data.
+#### step
+- [S1] Apply solid-texture-mapping to map one velocity component (e.g., vertical component) onto another (e.g., streamwise velocity component).
+- [S1] Apply gradient shading to the texture-mapped volume data.
+- [S1] Add lighting contributions including ambient, diffuse, specular, and glossiness to the image.
+#### parameter
+- [S1] Data source: Turbulent boundary layer over a flat plate simulation with 9.4 million grid points for 104 time steps, containing three velocity components, three vorticity components, and pressure.
+- [S1] Hardware: Stardent GS-1000.
+#### number
+- [S1] The resulting turbulence database contains 54 gigabytes of data.
+#### comparison
+- [S1] Unlike geometrical rendering techniques, this representation preserves the full integrity of the original dataset, making it more adaptable to analysis and extraction of quantitative information.
 
 ## Background
-The use of gradient-based shading in volume rendering originated in the late 1980s and early 1990s as a solution to the "cloud-like" or "fuzzy" appearance of direct volume rendering of space-filling data [S1]. Early implementations, such as those on the Stardent GS-1000, demonstrated that applying gradient shading to turbulent flow data could reveal coherent structures like hairpin vortices [S1]. The Phong illumination model, originally developed for surface rendering, was adapted to volume rendering by estimating normals from scalar field gradients [S14, S30, unofficial][S54]. Subsequent developments included illumination caching for performance [S1], extinction-based approximations for shadows and ambient occlusion using Summed Area Tables [S1], and advanced techniques like Next Event Estimation for emissive volumes to handle statistical noise in light transport [S1].
+The concept of applying shading to volume data emerged to address the "cloud-like" or "fuzzy" appearance of direct volume rendering, particularly for complex datasets like fluid flow [S1]. Early work demonstrated that gradient shading could reveal coherent structures, such as hairpin vortices, in turbulent flow data [S1]. The Phong illumination model was adapted for volume rendering to provide plastic-like depth cues, distinguishing it from isosurface extraction by visualizing the entire density field [S4, S8307, unofficial]. Later developments introduced caching techniques (SATs) to handle complex lighting effects like shadows and ambient occlusion efficiently, moving away from expensive per-sample shadow ray casting [S1, S9147, S9149, unofficial]. More recent approaches incorporate statistical methods like Next Event Estimation to handle emissive volumes and reduce noise in path-traced volume rendering [S1, S3557, unofficial].
 
 ## Sources
 [S1] Direct volume rendering of curvilinear volumes, https://doi.org/10.1145/99308.99318, fetched 2026-10-28

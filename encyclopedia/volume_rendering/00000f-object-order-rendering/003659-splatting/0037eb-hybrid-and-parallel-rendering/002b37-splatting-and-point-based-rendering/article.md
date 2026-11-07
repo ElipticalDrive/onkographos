@@ -3,96 +3,97 @@
 Also called: Accelerating Splatting Algorithm Based on Multi-Texture Mapping, Multi-Texture Volume Rendering, Texture Splatting with Hardware Blending
 
 ## Overview
-Splatting and Point-based Rendering is an object-order volume rendering method where 3D data voxels are projected onto a 2D screen or intermediate texture plane and blended using alpha compositing [S1, unofficial][S2]. It differs from its siblings, [Ray-Driven Splatting](1156-ray-driven-splatting.md) and [Splat/Mesh Blending with Transition Smoothing](2145-splat-mesh-blending-with-transition-smoothing.md), by explicitly leveraging hardware texture mapping and blending units to accelerate the accumulation step, often by projecting voxels to a texture plane parallel to the screen rather than directly to the screen [S2].
+Splatting and Point-based Rendering is an object-order volume rendering method where 3D data voxels are projected onto the 2D screen (or an intermediate texture plane) and blended to form the final image [S1, unofficial][S2]. It solves the problem of efficiently rendering large volumetric datasets by leveraging specialized texture hardware for fast composition, avoiding the need to project voxels directly to the screen plane in traditional immediate-mode splatting [S2]. Unlike its sibling [Ray-Driven Splatting](1156-ray-driven-splatting.md), which uses ray-order accumulation for robust occlusion, this method relies on hardware-accelerated alpha blending of projected primitives, often using multi-texture mapping to accelerate the process [S2].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** 3D scalar data volume (voxels with density values), viewing parameters (camera position, orientation, projection type).
-*   **Output:** 2D image with color and opacity.
+**Inputs:** Original sample densities and object coordinates of the volume data.
+**Outputs:** A 2D rendered image with translucent appearance.
 
 **Data Structures:**
-*   **Voxel Data:** Array of density values.
-*   **Texture Slice:** 2D texture map (RGBA mode) representing a region of the volume.
-*   **Footprint Lookup Table:** Stores filter weights for splatting [S2].
+*   **Volume Data:** A 3D grid of scalar values representing density.
+*   **Texture Slice:** A 2D texture map representing a region of the volume, stored in RGBA mode. The alpha channel stores opacity.
+*   **Footprint Lookup Table:** A table storing filter weights for splat footprints.
 
 **Steps:**
 1.  **Transformation:** Transform the data volume from object coordinates to world coordinates [S2].
-2.  **Color and Opacity Mapping:** Map sample values to color and opacity based on density [S2].
-3.  **Footprint Computation:** Compute filter weights using a specific formula (Formula 6 in source [S2]) and store them in a lookup table [S2].
-4.  **Initialization:** Set texture points to RGBA mode and initialize the original alpha value of every point to zero [S2].
-5.  **Data Division:** Divide the data volume using a specific formula (Formula 7 in source [S2]) [S2].
-6.  **Segmentation and Sorting:** For each segmented data set in the volume:
-    *   Perform depth sort in front-to-back order [S2].
-    *   Ensure the value of $z$ is large-to-small in the sorted data [S2].
-    *   Group points with the same $z$ into layers [S2].
-7.  **Projection to Texture Plane:** For each layer:
-    *   Calculate the contribution with footprint [S2].
-    *   Project points to the texture plane using a specific formula (Formula 12 in source [S2]) [S2].
-    *   Constraint: The texture plane must be parallel with the screen plane to avoid popping and splatting overlay [S2].
-    *   Constraint: Polygon vertex coordinates ($x$ and $y$) are equal for all vertices, except $z$, ensuring texture slices are parallel with the screen plane [S2].
-8.  **Texture Slice Creation:** After all layers in one region are projected to the texture plane, create one texture slice representing that region [S2].
-9.  **Blending:** For each texture slice:
-    *   Blend in front-to-back order [S2].
-    *   Turn on alpha blending [S2].
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def splatting_and_point_based_rendering(volume_data, view_params):
-    # 1. Transform volume
-    world_volume = transform_to_world(volume_data, view_params)
-    
-    # 2. Map color and opacity
-    mapped_data = map_density_to_rgba(world_volume)
-    
-    # 3. Compute footprint lookup table
-    # Formula 6 from [S2] is used here. 
-    # Implementation note: The exact formula is not provided in the text, 
-    # but it computes filter weights for the footprint.
-    footprint_table = compute_footprint_weights() 
-    
-    # 4. Initialize texture points
-    texture_points = initialize_rgba_points(alpha=0.0)
-    
-    # 5. Divide data volume
-    # Formula 7 from [S2] is used here.
-    segmented_sets = divide_volume(world_volume)
-    
-    texture_slices = []
-    
-    for seg_set in segmented_sets:
-        # 6. Depth sort front-to-back
-        sorted_points = sort_front_to_back(seg_set)
-        
-        # 7. Group by z-layer
-        layers = group_by_z(sorted_points)
-        
-        layer_textures = []
-        for layer in layers:
-            # 8. Project to texture plane
-            # Formula 12 from [S2] is used here.
-            projected_layer = project_to_texture_plane(layer, footprint_table)
-            layer_textures.append(projected_layer)
-            
-        # 9. Create texture slice
-        texture_slice = create_texture_slice(layer_textures)
-        texture_slices.append(texture_slice)
-        
-    # 10. Blend slices
-    final_image = blend_slices_front_to_back(texture_slices)
-    
-    return final_image
-```
+2.  **Color and Opacity Mapping:** Map sample values to color and opacity based on density. The texture points are initialized to RGBA mode, and the original alpha value of every point is set to zero [S2].
+3.  **Footprint Computation:** Compute filter weights using a specific formula (Formula 6 in source [S2]) and store them in a lookup table. This accounts for the Gaussian filter proportional to the distance from the plane [S1, unofficial][S2].
+4.  **Data Volume Division:** Divide the data volume using a specific formula (Formula 7 in source [S2]) [S2].
+5.  **Segmented Processing:** For each segmented data set in the volume data:
+    a.  **Depth Sort:** Sort the voxels in front-to-back order. The value of $z$ must be large-to-small in the sorted data [S2].
+    b.  **Layer Grouping:** Group points with the same $z$ into layers [S2].
+    c.  **Projection:** For each layer:
+        i.  Calculate the contribution with the footprint.
+        ii. Project the points to the texture plane using a specific formula (Formula 12 in source [S2]) [S2].
+    d.  **Texture Slice Creation:** After all layers in one region are projected to the texture plane, create one texture slice representing that region [S2].
+6.  **Blending:** For each texture slice:
+    a.  Blend in front-to-back order [S2].
+    b.  Turn on alpha blending during the texture slice blending step [S2].
 
 **Parameters:**
 *   **Texture Mode:** RGBA, required to include the opacity channel of every data sample for translucent image generation [S2].
 *   **Texture Plane Orientation:** Parallel with the screen plane to avoid popping and splatting overlay [S2].
 *   **Polygon Vertex Constraint:** $x$ and $y$ coordinates are equal for all vertices, except $z$, ensuring texture slices are paralleled with the screen plane [S2].
 
-**Edge Cases and Pitfalls:**
-*   **Holes:** The discrete process produces holes on the periphery or during extreme perspective projection [S1, unofficial]. This is countered by distributing energy across multiple pixels via a footprint table [S1, unofficial].
+**Pitfalls:**
+*   **Holes:** The discrete process of projecting voxels can produce holes on the periphery or during extreme perspective projection. This is countered by distributing energy across multiple pixels via a footprint table [S1, unofficial].
 *   **Popping/Overlay:** Avoided by ensuring the texture plane is parallel with the screen plane [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Inputs: volume_data (3D array), transform_matrix (4x4)
+# Outputs: rendered_image
+
+# 1. Transformation
+world_volume = apply_transform(volume_data, transform_matrix)
+
+# 2. Initialization
+# Texture points set to RGBA mode, alpha initialized to 0
+texture_slices = []
+
+# 3. Footprint Computation
+# Formula 6 from [S2] computes filter weights
+footprint_table = compute_footprint_weights()
+
+# 4. Data Volume Division
+# Formula 7 from [S2] divides the volume
+segmented_datasets = divide_volume(world_volume)
+
+for dataset in segmented_datasets:
+    # 5a. Depth Sort
+    # Sort voxels front-to-back (z large-to-small)
+    sorted_voxels = sort_front_to_back(dataset)
+    
+    # 5b. Layer Grouping
+    layers = group_by_z(sorted_voxels)
+    
+    current_texture_slice = create_empty_texture_slice()
+    
+    for layer in layers:
+        # 5c. Projection
+        for voxel in layer:
+            # Calculate contribution with footprint
+            weight = lookup_footprint(voxel)
+            
+            # Project to texture plane using Formula 12 from [S2]
+            projected_point = project_to_texture_plane(voxel)
+            
+            # Add to texture slice
+            current_texture_slice.add_point(projected_point, weight)
+            
+    # 5d. Texture Slice Creation
+    texture_slices.append(current_texture_slice)
+
+# 6. Blending
+final_image = create_empty_image()
+for texture_slice in texture_slices:
+    # Blend in front-to-back order with alpha blending enabled
+    final_image = blend_texture_slice(final_image, texture_slice)
+
+return final_image
+```
 
 ## Subtopics
 
@@ -106,7 +107,7 @@ Sparse Voxel Octree Rendering via Square Splats is a GPU-accelerated technique t
 Voxel Point Sprite Rendering is a technique that stores voxels as points (splatting) in a buffer and renders them using a geometry shader, allowing for mipmapped voxel data to be drawn as points with a specific scale. It addresses the performance bottleneck of slow fragment shaders in pure splatting methods when rendering voxels close to the camera, a problem inherent to its parent method, [Splatting and Point-based Rendering](4975-splatting-and-point-based-rendering.md).
 
 ### [Differentiable Point-Based Radiance Fields](7366-differentiable-point-based-radiance-fields.md)
-Differentiable Point-Based Radiance Fields (DPBF) is a scene representation that models radiance using a point cloud augmented with local spherical harmonic coefficients per point, enabling efficient view synthesis via differentiable splat rendering. Unlike NeRF which uses volumetric rendering and requires many evaluations per ray, this method uses forward mapping via splatting, allowing image synthesis via a single forward pass. It optimizes a learned point cloud directly for each scene to reconstruct geometry and radiance simultaneously, without requiring additional learned or explicit priors.
+Differentiable Point-Based Radiance Fields (DPBF) is a scene representation and rendering method that models radiance using a learned point cloud augmented with per-point spherical harmonic coefficients. It solves the problem of slow training and high memory usage in neural radiance fields by replacing volumetric ray-marching with a differentiable splat-based rasterizer, allowing for efficient view synthesis via a single forward pass. Unlike NeRF, which requires many evaluations per ray, DPBF uses forward mapping, resulting in training speeds up to 300x faster and memory usage under 10 MB for static scenes.
 
 ### [Adapted Splatting for Medical Applications](8546-adapted-splatting-for-medical-applications.md)
 Adapted Splatting is a volume rendering method that optimizes standard splatting by culling voxels invisible to the observer and using a compressed data format to reduce memory usage for free voxels. It solves the high computational cost of processing all voxels in a model and the large memory footprint of storing sparse volumetric data. It sets itself apart from standard splatting by introducing a two-pass optimization: a depth-buffer-based occlusion culling pass that identifies only visible voxels, followed by rendering only those selected voxels, while simultaneously employing a run-length-like encoding for storage that groups consecutive free voxels.
@@ -116,38 +117,17 @@ Using points to fill empty space in irregular grids, such as filling cells with 
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-*   The method accelerates rendering by projecting voxels to a texture plane instead of the screen plane, allowing hardware to perform blending, whereas the old method relies on traditional splatting [S2].
-*   Performance on Seismic data (128x128x64): Old method 9.672s, New method 1.917s, Accelerating ratio 5.045 [S2].
-*   Performance on CT Head data (256x256x255): Old method 3.198s, New method 0.518s [S2].
-
-**Measured Performance:**
-*   Hardware used for experiments: PC with 1.8 GHz Pentium 4 CPU and 512M DRAM [S2].
+The method accelerates rendering by projecting voxels to a texture plane instead of the screen plane, allowing hardware to perform blending [S2]. Performance on Seismic data (128x128x64) showed a reduction from 9.672s (old method) to 1.917s (new method), an accelerating ratio of 5.045. Performance on CT Head data (256x256x255) showed a reduction from 3.198s to 0.518s [S2].
 
 **Strengths and Limitations:**
-*   **Strengths:** Leverages specialized texture hardware for fast rendering and composing, avoiding the need to project voxels directly to the screen plane [S2]. Helps to zoom or un-zoom the image easily by controlling polygon size [S2].
-*   **Limitations:** Discrete process produces holes on the periphery or during extreme perspective projection [S1, unofficial]. Requires careful handling of texture plane orientation to avoid popping [S2].
+*   **Strengths:** Leverages specialized texture hardware for fast rendering and composing of squares, making it efficient for large-scale datasets [S2]. It also facilitates easy zooming or un-zooming by controlling polygon size [S2].
+*   **Limitations:** The discrete process can produce holes on the periphery or during extreme perspective projection, requiring footprint tables to mitigate [S1, unofficial]. It relies on object-order projection, which may lack the robust occlusion handling of ray-driven methods [S2].
 
 **When to Use:**
-*   When hardware-accelerated texture blending is available and the volume data can be effectively segmented and sorted [S2].
-*   When high rendering speed is prioritized over exact geometric precision in extreme perspectives [S2].
-
-**When Not to Use:**
-*   When extreme perspective projection causes significant holes that cannot be adequately filled by footprint tables [S1, unofficial].
-*   When the hardware does not support efficient texture blending or RGBA texture modes [S2].
+Use when hardware-accelerated blending is available and the dataset is large, requiring efficient texture-based composition. Avoid when extreme perspective distortion causes significant holes that cannot be corrected by footprint tables, or when robust occlusion is critical [S1, unofficial][S2].
 
 ## Background
-**Origin:**
-*   The method cites CRAWFIS, R. A. and MAX, N. 1993. Texture Splats for 3D Scalar and Vector Field Visualization, Proceedings of IEEE Conference on Visualization, pp. 261-266 [S2].
-*   The concept of using points to fill empty space in irregular grids is attributed to Mao '95 [S3, unofficial].
-
-**History and Development:**
-*   The method was developed to speed up the visualization of medium or large scale data sets by analyzing the time complexity of sorting segmented volume data and projecting voxels to a texture plane instead of the screen plane [S2].
-*   Future work includes parallelization of the algorithm for segmented data and optimization for next-generation hardware [S2].
-
-**Where it is used:**
-*   Volume rendering of scalar and vector fields [S2].
-*   Medical imaging (CT Head data) [S2].
-*   Seismic data visualization [S2].
+The method originates from the work of Crawfis and Max (1993) on "Texture Splats for 3D Scalar and Vector Field Visualization" [S2]. It was further developed to accelerate volume rendering by converting 3D data volumes into 2D texture maps to leverage specialized texture hardware [S2]. The approach is part of the broader family of hybrid and parallel rendering techniques that decouple geometric projection from final pixel accumulation [S1, unofficial][S2].
 
 ## Sources
 [S1] Direct Volume Rendering Direct Volume Rendering. What is volume rendering?. Accumulate information along 1 dimension line through volume. Volume rendering vs. isosurfaces. No intermediate geometry No , https://www.slideserve.com/lenci/direct-volume-rendering, fetched 2026-10-25 (unofficial)
