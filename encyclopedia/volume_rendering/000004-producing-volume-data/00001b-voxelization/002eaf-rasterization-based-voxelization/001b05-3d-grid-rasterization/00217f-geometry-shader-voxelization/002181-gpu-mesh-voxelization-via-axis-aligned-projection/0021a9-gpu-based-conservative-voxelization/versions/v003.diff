@@ -1,0 +1,182 @@
+--- v002.md
++++ v003.md
+@@ -4,22 +4,20 @@
+ 
+ ## Overview
+-GPU-based Conservative Voxelization is a two-pass rasterization technique that converts 3D triangle meshes into a sparse list of occupied voxels by leveraging conservative rasterization hardware features [S1, unofficial]. It differs from standard rasterization-based voxelization by ensuring that any voxel whose grid cell intersects the projected triangle is marked as occupied, thereby eliminating "missing voxel" artifacts common in non-conservative methods [S1, unofficial]. Unlike slicemap-based approaches that rely on bitwise blending of discrete depth slices, this method explicitly calculates geometric intersection bounds via the GPU's conservative rasterizer to determine voxel occupancy [S1, unofficial].
++GPU-based Conservative Voxelization is a two-pass GPU algorithm that converts 3D triangle meshes into a list of voxels using conservative rasterization, followed by an octree construction step [S1, unofficial]. It uses atomic counters to determine the voxel count for buffer allocation [S1, unofficial]. It differs from standard rasterization by ensuring any voxel intersecting the triangle is marked as occupied, and differs from slicemap-based approaches by explicitly calculating geometric intersection bounds rather than relying on bitwise blending of discrete depth slices [S1, unofficial].
+ 
+ ## How it works
+-The method operates in two distinct passes: a counting pass to determine the number of occupied voxels for buffer allocation, and a storage pass to write the voxel coordinates into a structured buffer.
+-
+ **Inputs and Outputs**
+-*   **Input:** A 3D triangle mesh (vertices, normals, UVs) and a target voxel grid resolution.
+-*   **Output:** A dynamic list of occupied voxel coordinates (typically 3D integer indices).
++*   **Input:** A 3D triangle mesh, `area_position`, `area_size`, and `voxels_on_y` [S1, unofficial].
++*   **Output:** A dynamic list of occupied voxel coordinates [S1, unofficial].
+ 
+ **Data Structures**
+ *   **Scene Normalization Matrix:** A $4 \times 4$ matrix mapping the model's bounding box to the unit cube $(0,0,0)$ to $(1,1,1)$ [S1, unofficial].
+-*   **Orthographic Projection Matrices:** Three $4 \times 4$ matrices for X, Y, and Z axes, configured for conservative rasterization [S1, unofficial].
+-*   **Atomic Counter Buffer:** A 1D buffer bound to a specific binding point (e.g., binding point 3) used to count occupied voxels [S1, unofficial].
+-*   **Voxel List Buffer:** A storage buffer (SSBO) bound to binding points 1 and 2, storing the final voxel coordinates [S1, unofficial].
+-*   **Grid Dimensions:** Uniform variables defining the voxel grid size, derived from the scene size and a target resolution on one axis [S1, unofficial].
++*   **Orthographic Projection Matrices:** Three $4 \times 4$ matrices for X, Y, and Z axes configured for conservative rasterization [S1, unofficial].
++*   **Atomic Counter Buffer:** A buffer bound to binding point 3 used to count occupied voxels [S1, unofficial].
++*   **Voxel List Buffer:** A storage buffer bound to binding points 1 and 2 storing the final voxel coordinates [S1, unofficial].
++*   **Grid Dimensions:** Uniform variables defining the voxel grid size, derived from `area_size` and `voxels_on_y` [S1, unofficial].
+ 
+ **Parameters**
+-*   **`u_can_store`:** A uniform integer flag. Set to `0` for Pass 1 (counting) and `1` for Pass 2 (storing) [S1, unofficial].
++*   **`u_can_store`:** A uniform integer flag set to `0` for Pass 1 (counting) and `1` for Pass 2 (storing) [S1, unofficial].
+ *   **`u_transform`:** The scene normalization matrix [S1, unofficial].
+ *   **`u_x_ortho_projection`, `u_y_ortho_projection`, `u_z_ortho_projection`:** The three orthogonal projection matrices [S1, unofficial].
+@@ -28,57 +26,44 @@
+ 
+ **Steps**
+-
+-1.  **Initialization:**
+-    *   Disable depth testing, alpha testing, and face culling: `glDisable(GL_DEPTH_TEST)`, `glDisable(GL_ALPHA_TEST)`, `glDisable(GL_CULL_FACE)` [S1, unofficial].
+-    *   Compute the scene normalization matrix using the mesh's bounding box position and size: `create_scene_normalization_matrix(area_position, area_size)` [S1, unofficial].
+-    *   Compute three orthogonal projection matrices for conservative rasterization: `create_projection_matrices(proj)` [S1, unofficial].
+-    *   Calculate proportional grid dimensions based on the scene size and a target resolution (e.g., `voxels_on_y`): `calc_proportional_grid` [S1, unofficial].
+-    *   Determine `max_side` as the maximum dimension of the grid.
+-    *   Set the viewport size to `max_side x max_side` [S1, unofficial].
+-
+-2.  **Pass 1 (Count):**
+-    *   Set uniform `u_can_store` to `0` [S1, unofficial].
+-    *   Reset the atomic counter buffer to `0` [S1, unofficial].
+-    *   Bind the atomic counter buffer to binding point 3 [S1, unofficial].
+-    *   Bind the mesh geometry (VAO/EBO) and upload the projection matrices and normalization matrix to uniforms [S1, unofficial].
+-    *   Invoke the shader program to rasterize the mesh. The shader uses conservative rasterization to identify all fragments corresponding to occupied voxels and atomically increments the counter for each unique voxel [S1, unofficial].
+-
+-3.  **Query Count:**
+-    *   Read the final value from the atomic counter buffer to determine the total number of occupied voxels [S1, unofficial].
+-
+-4.  **Pass 2 (Store):**
+-    *   Allocate the voxel list buffer based on the count from Pass 1 [S1, unofficial].
+-    *   Set uniform `u_can_store` to `1` [S1, unofficial].
+-    *   Reset the atomic counter buffer to `0` [S1, unofficial].
+-    *   Bind the atomic counter buffer to binding point 3 [S1, unofficial].
+-    *   Bind the voxel list buffer to binding points 1 and 2 [S1, unofficial].
+-    *   Invoke the shader program again. The shader uses conservative rasterization to identify occupied voxels, atomically increments the counter to get a unique index, and writes the voxel coordinates to the voxel list buffer at that index [S1, unofficial].
+-
+-5.  **Synchronization:**
+-    *   Execute `glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)` to ensure storage buffer writes are visible to subsequent reads [S1, unofficial].
++1.  Disable depth testing, alpha testing, and face culling [S1, unofficial].
++2.  Compute the scene normalization matrix using `create_scene_normalization_matrix(area_position, area_size)` and upload it to uniform `u_transform` [S1, unofficial].
++3.  Compute three orthogonal projection matrices using `create_projection_matrices(proj)` and upload them to uniforms `u_x_ortho_projection`, `u_y_ortho_projection`, `u_z_ortho_projection` [S1, unofficial].
++4.  Calculate proportional grid dimensions using `calc_proportional_grid`, determine `max_side` as the maximum dimension, set the viewport to `max_side x max_side`, and set grid dimensions via uniform `u_grid` [S1, unofficial].
++5.  **Pass 1 (Count):** Set uniform `u_can_store` to `0`, reset the atomic counter to `0`, bind it to binding point 3, bind the mesh geometry, and invoke the shader program [S1, unofficial].
++6.  **Pass 2 (Store):** Set uniform `u_can_store` to `1`, reset the atomic counter to `0`, bind it to binding point 3, bind the voxel list to binding points 1 and 2, and invoke the shader program [S1, unofficial].
++7.  Execute `glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)` to ensure storage buffer writes are visible [S1, unofficial].
+ 
+ **Pseudocode**
++```python
++def gpu_conservative_voxelization(mesh, area_position, area_size, voxels_on_y):
++    # Helper definitions for standard operations
++    def gl_disable(target): state[target] = False
++    def create_scene_normalization_matrix(pos, size): return glm.mat4(1.0) # Maps bbox to (0,0,0)-(1,1,1)
++    def create_projection_matrices(): return {'X': glm.mat4(1.0), 'Y': glm.mat4(1.0), 'Z': glm.mat4(1.0)}
++    def calc_proportional_grid(size, voxels_on_y): return type('Grid', (), {'x': size.x, 'y': size.y, 'z': size.z})()
++    def set_viewport(w, h): viewport.width, viewport.height = w, h
++    def set_uniform(name, val): uniforms[name] = val
++    def reset_atomic_counter(binding_point): atomic_counters[binding_point] = 0
++    def bind_atomic_counter(binding_point): active_buffers[binding_point] = atomic_counters
++    def bind_mesh(mesh): active_vao = mesh.vao
++    def draw_triangles(): rasterize(active_vao, uniforms, active_buffers)
++    def read_atomic_counter(binding_point): return atomic_counters[binding_point]
++    def bind_voxel_list_buffer(binding_points): 
++        for bp in binding_points: active_buffers[bp] = voxel_list_buffer
++    def gl_memory_barrier(flag): sync_storage(flag)
+ 
+-```python
+-def gpu_conservative_voxelization(mesh, target_voxels_on_y):
+     # 1. Initialization
+-    disable_depth_test()
+-    disable_alpha_test()
+-    disable_cull_face()
++    gl_disable(GL_DEPTH_TEST)
++    gl_disable(GL_ALPHA_TEST)
++    gl_disable(GL_CULL_FACE)
+ 
+-    # Compute normalization matrix mapping bounding box to (0,0,0)-(1,1,1)
+-    norm_matrix = create_scene_normalization_matrix(mesh.bounding_box.position, mesh.bounding_box.size)
+-
+-    # Compute orthogonal projection matrices for X, Y, Z axes
+-    proj_x = create_projection_matrix(axis='X', conservative=True)
+-    proj_y = create_projection_matrix(axis='Y', conservative=True)
+-    proj_z = create_projection_matrix(axis='Z', conservative=True)
+-
+-    # Calculate grid dimensions
+-    grid_dims = calc_proportional_grid(mesh.bounding_box.size, target_voxels_on_y)
++    norm_matrix = create_scene_normalization_matrix(area_position, area_size)
++    proj_matrices = create_projection_matrices()
++    grid_dims = calc_proportional_grid(area_size, voxels_on_y)
+     max_side = max(grid_dims.x, grid_dims.y, grid_dims.z)
+     set_viewport(max_side, max_side)
++    set_uniform('u_grid', grid_dims)
+ 
+-    # 2. Pass 1: Count
++    # 2. Pass 1 (Count)
+     set_uniform('u_can_store', 0)
+     reset_atomic_counter(binding_point=3)
+@@ -86,14 +71,12 @@
+     bind_mesh(mesh)
+     set_uniform('u_transform', norm_matrix)
+-    set_uniform('u_x_ortho_projection', proj_x)
+-    set_uniform('u_y_ortho_projection', proj_y)
+-    set_uniform('u_z_ortho_projection', proj_z)
++    set_uniform('u_x_ortho_projection', proj_matrices['X'])
++    set_uniform('u_y_ortho_projection', proj_matrices['Y'])
++    set_uniform('u_z_ortho_projection', proj_matrices['Z'])
+     draw_triangles()
+ 
+-    # Read count
+     voxel_count = read_atomic_counter(binding_point=3)
+ 
+-    # 3. Pass 2: Store
+-    allocate_voxel_list_buffer(voxel_count)
++    # 3. Pass 2 (Store)
+     set_uniform('u_can_store', 1)
+     reset_atomic_counter(binding_point=3)
+@@ -102,7 +85,7 @@
+     bind_mesh(mesh)
+     set_uniform('u_transform', norm_matrix)
+-    set_uniform('u_x_ortho_projection', proj_x)
+-    set_uniform('u_y_ortho_projection', proj_y)
+-    set_uniform('u_z_ortho_projection', proj_z)
++    set_uniform('u_x_ortho_projection', proj_matrices['X'])
++    set_uniform('u_y_ortho_projection', proj_matrices['Y'])
++    set_uniform('u_z_ortho_projection', proj_matrices['Z'])
+     draw_triangles()
+ 
+@@ -114,19 +97,19 @@
+ 
+ **Edge Cases and Pitfalls**
+-*   **Precision:** Conservative rasterization behavior depends on GPU driver implementation. Degenerate triangles or vertices exactly on grid boundaries may yield inconsistent results across hardware [S1, unofficial].
+-*   **Buffer Allocation:** The atomic counter must be read back to the CPU to allocate the voxel list buffer. This introduces a synchronization stall. [G] Ensure the atomic counter buffer is mapped or read back using `glGetBufferSubData` or a query object.
+-*   **Duplicate Voxels:** Conservative rasterization may generate multiple fragments for the same voxel if the triangle covers multiple pixels within the same grid cell. The shader must deduplicate voxels per fragment or use a unique identifier per voxel to avoid overwriting. [G] The atomic counter approach assumes each fragment corresponds to a unique voxel or that the shader logic handles deduplication (e.g., by checking if the voxel was already written).
++*   **Precision:** Conservative rasterization behavior depends on GPU driver implementation [G].
++*   **Buffer Allocation:** The atomic counter must be read back to the CPU to allocate the voxel list buffer, introducing a synchronization stall [G].
++*   **Duplicate Voxels:** Conservative rasterization may generate multiple fragments for the same voxel if the triangle covers multiple pixels within the same grid cell [G].
+ 
+ ## Subtopics
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(V \cdot F)$, where $V$ is the number of voxels covered by the triangle and $F$ is the number of fragments generated by conservative rasterization. The two-pass nature doubles the rasterization cost but avoids buffer reallocation.
+-*   **Memory Complexity:** $O(N)$, where $N$ is the number of occupied voxels. The atomic counter buffer is small (1 integer). The voxel list buffer scales with output size.
+-*   **Performance:** Performance is heavily dependent on the GPU's conservative rasterization hardware support and the density of the mesh. High triangle counts with large coverage areas generate many fragments, increasing Pass 1 and Pass 2 costs.
+-*   **Strengths:** Guarantees no missing voxels for intersected cells. Simple implementation using standard OpenGL/Vulkan features. No need for complex CPU-side geometry processing.
+-*   **Limitations:** Requires two draw calls per mesh. Atomic operations can cause contention in the GPU. Conservative rasterization is not available on all hardware (e.g., some mobile GPUs). [S1, unofficial]
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Performance:** Not given in the sources.
++*   **Strengths:** Guarantees no missing voxels for intersected cells [S1, unofficial].
++*   **Limitations:** Requires two draw calls per mesh [S1, unofficial].
+ 
+ ## Background
+-The method is implemented in the open-source project `loryruta/voxelizer` [S1, unofficial]. It leverages OpenGL's conservative rasterization extensions to perform voxelization directly on the GPU, avoiding the need for CPU-side ray casting or marching cubes. The technique is part of a pipeline that may include subsequent octree construction steps [S1, unofficial].
++The method is implemented in the open-source project `loryruta/voxelizer` [S1, unofficial]. It leverages OpenGL's conservative rasterization extensions to perform voxelization directly on the GPU, avoiding the need for CPU-side ray casting or marching cubes [S1, unofficial]. The technique is part of a pipeline that may include subsequent octree construction steps [S1, unofficial].
+ 
+ ## Sources

@@ -17,9 +17,9 @@ Also called: 2D TF Volume Rendering, Intensity-Gradient Transfer Function, Joint
 **1. 2D Transfer Function Texture**
 The transfer function is stored in a 2D texture for efficient GPU lookup [S1][S2][S4, book].
 *   **Dimensions:** $W \times H \times 1$, where $W$ is the intensity resolution and $H$ is the gradient magnitude resolution [S3, S6, unofficial].
-    *   Typical resolutions: $W=256$ or $1024$, $H=256$ or $512$ [S1][S6, unofficial].
-    *   X-axis maps to normalized scalar data value $v \in [0, 1]$ [S3, unofficial].
-    *   Y-axis maps to normalized gradient magnitude $g \in [0, 1]$ [S3, unofficial].
+    *   Common resolutions: 256×256 [S1], or 1024×512 for the renderer texture and 512×256 for the histogram [S6, unofficial].
+    *   X-axis maps to normalized gradient magnitude $g \in [0, 1]$ [S6, unofficial].
+    *   Y-axis maps to normalized scalar data value $v \in [0, 1]$ [S6, unofficial].
 *   **Format:** 4 components per texel (RGBA) [S3, S6, unofficial].
     *   R, G, B: Color channels.
     *   A: Opacity (Alpha) channel [S3, S6, unofficial].
@@ -34,7 +34,7 @@ A 2D histogram of intensity vs. gradient magnitude can be computed to visualize 
 
 1.  **Preprocessing (Optional):**
     *   Load and orient the volume data (e.g., to LPS coordinate system) [S6, unofficial].
-    *   Compute the gradient magnitude for each voxel. Standard gradient computation requires 6 texture look-ups per sample (3 for each axis) [S2].
+    *   Compute the gradient magnitude for each voxel [S6, unofficial]. Standard gradient computation requires 6 texture look-ups per sample (3 for each axis) [S2].
     *   Alternatively, precompute the gradient magnitude volume to reduce runtime look-ups to 2 (data + precomputed gradient) [S2]. Note: Precomputation requires additional GPU memory and may reduce illumination smoothness [S2].
 
 2.  **Histogram Computation (Optional):**
@@ -130,71 +130,69 @@ def compute_2d_transfer_function(volume_data, bins_intensity=1024, bins_gradient
     Computes a 2D transfer function texture from volume data.
     
     Args:
-        volume_data: 3D numpy array of scalar values.
+        volume_data: 3D list of lists of lists of scalar values.
         bins_intensity: Resolution of the intensity axis.
         bins_gradient: Resolution of the gradient axis.
         grad_emphasis: Weight of gradient magnitude in opacity modulation (0.0 to 1.0).
         
     Returns:
-        tf_texture: 2D numpy array of shape (bins_intensity, bins_gradient, 4) with RGBA values.
+        tf_texture: 2D list of lists of 4 floats (RGBA).
     """
-    # 1. Compute gradient magnitude
-    # Using central differences for gradient components
-    gx = np.zeros_like(volume_data)
-    gy = np.zeros_like(volume_data)
-    gz = np.zeros_like(volume_data)
+    import math
+
+    def clamp(val, lo, hi):
+        return max(lo, min(hi, val))
+
+    def sqrt(x):
+        return x ** 0.5
+
+    # 1. Compute gradient magnitude using central differences
+    depth = len(volume_data)
+    height = len(volume_data[0])
+    width = len(volume_data[0][0])
     
-    gx[:, 1:-1, :] = (volume_data[:, 2:, :] - volume_data[:, :-2, :]) / 2.0
-    gy[1:-1, :, :] = (volume_data[2:, :, :] - volume_data[:-2, :, :]) / 2.0
-    gz[1:-1, :, 1:-1] = (volume_data[1:, 1:, :] - volume_data[:-1, :-1, :]) / 2.0
+    gradient_magnitude = [[[0.0 for _ in range(width)] for _ in range(height)] for _ in range(depth)]
     
-    # Gradient magnitude
-    gradient_magnitude = np.sqrt(gx**2 + gy**2 + gz**2)
-    
+    for z in range(1, depth - 1):
+        for y in range(1, height - 1):
+            for x in range(1, width - 1):
+                gx = (volume_data[z][y][x+1] - volume_data[z][y][x-1]) / 2.0
+                gy = (volume_data[z][y+1][x] - volume_data[z][y-1][x]) / 2.0
+                gz = (volume_data[z+1][y][x] - volume_data[z-1][y][x]) / 2.0
+                gradient_magnitude[z][y][x] = sqrt(gx**2 + gy**2 + gz**2)
+
     # 2. Normalize data to [0, 1]
-    v_min = np.min(volume_data)
-    v_max = np.max(volume_data)
-    g_min = np.min(gradient_magnitude)
-    g_max = np.max(gradient_magnitude)
+    v_min = min(min(min(row) for row in vol) for vol in volume_data)
+    v_max = max(max(max(row) for row in vol) for vol in volume_data)
+    g_min = min(min(min(row) for row in grad) for grad in gradient_magnitude)
+    g_max = max(max(max(row) for row in grad) for grad in gradient_magnitude)
     
-    # Avoid division by zero
-    if v_max == v_min:
-        v_norm = np.zeros_like(volume_data)
-    else:
-        v_norm = (volume_data - v_min) / (v_max - v_min)
-        
-    if g_max == g_min:
-        g_norm = np.zeros_like(gradient_magnitude)
-    else:
-        g_norm = (gradient_magnitude - g_min) / (g_max - g_min)
-        
-    # 3. Compute 2D histogram to identify regions (Optional, but useful for defining TF)
-    # Here we assume a simple modulation of a 1D TF based on value
-    # Define a simple 1D TF: opacity increases with value
+    v_norm = [[[(vol[z][y][x] - v_min) / max(v_max - v_min, 1e-8) for x in range(width)] for y in range(height)] for z in range(depth)]
+    g_norm = [[[(grad[z][y][x] - g_min) / max(g_max - g_min, 1e-8) for x in range(width)] for y in range(height)] for z in range(depth)]
+
+    # 3. Define 1D base opacity (example: linear ramp)
     def get_1d_opacity(v):
-        # Example: linear ramp from 0 to 1 over [0.2, 0.8]
-        return np.clip((v - 0.2) / 0.6, 0.0, 1.0)
-        
+        return clamp((v - 0.2) / 0.6, 0.0, 1.0)
+
     # 4. Populate 2D Transfer Function Texture
-    tf_texture = np.zeros((bins_intensity, bins_gradient, 4))
+    # Dimensions: (bins_intensity, bins_gradient, 4)
+    tf_texture = [[[0.0, 0.0, 0.0, 0.0] for _ in range(bins_gradient)] for _ in range(bins_intensity)]
     
     for i in range(bins_intensity):
-        v = i / (bins_intensity - 1)
+        v = i / max(bins_intensity - 1, 1)
         base_opacity = get_1d_opacity(v)
         
         for j in range(bins_gradient):
-            g = j / (bins_gradient - 1)
+            g = j / max(bins_gradient - 1, 1)
             
             # Apply gradient modulation
             final_opacity = base_opacity * ((1.0 - grad_emphasis) + grad_emphasis * g)
             
-            # Set color (e.g., grayscale proportional to opacity)
-            color = final_opacity
-            
-            tf_texture[i, j, 0] = color  # R
-            tf_texture[i, j, 1] = color  # G
-            tf_texture[i, j, 2] = color  # B
-            tf_texture[i, j, 3] = final_opacity  # A
+            # Set color (grayscale proportional to opacity)
+            tf_texture[i][j][0] = final_opacity
+            tf_texture[i][j][1] = final_opacity
+            tf_texture[i][j][2] = final_opacity
+            tf_texture[i][j][3] = final_opacity
             
     return tf_texture
 
@@ -203,61 +201,64 @@ def render_with_2d_tf(volume_data, gradient_data, tf_texture, bins_intensity, bi
     Renders a volume using a 2D transfer function.
     
     Args:
-        volume_data: 3D numpy array of scalar values.
-        gradient_data: 3D numpy array of gradient magnitudes.
-        tf_texture: 2D numpy array of shape (bins_intensity, bins_gradient, 4).
+        volume_data: 3D list of lists of lists of scalar values.
+        gradient_data: 3D list of lists of lists of gradient magnitudes.
+        tf_texture: 2D list of lists of 4 floats (RGBA).
         bins_intensity: Resolution of the intensity axis.
         bins_gradient: Resolution of the gradient axis.
         
     Returns:
-        image: 2D numpy array of rendered image.
+        image: 2D list of lists of 3 floats (RGB).
     """
-    # Normalize data
-    v_min = np.min(volume_data)
-    v_max = np.max(volume_data)
-    g_min = np.min(gradient_data)
-    g_max = np.max(gradient_data)
+    import math
+
+    def clamp(val, lo, hi):
+        return max(lo, min(hi, val))
+
+    depth = len(volume_data)
+    height = len(volume_data[0])
+    width = len(volume_data[0][0])
     
-    v_norm = (volume_data - v_min) / (v_max - v_min)
-    g_norm = (gradient_data - g_min) / (g_max - g_min)
+    v_min = min(min(min(row) for row in vol) for vol in volume_data)
+    v_max = max(max(max(row) for row in vol) for vol in volume_data)
+    g_min = min(min(min(row) for row in grad) for grad in gradient_data)
+    g_max = max(max(max(row) for row in grad) for grad in gradient_data)
     
-    # Initialize output image
-    height, width, depth = volume_data.shape
-    image = np.zeros((height, width, 3))
+    v_norm = [[[(vol[z][y][x] - v_min) / max(v_max - v_min, 1e-8) for x in range(width)] for y in range(height)] for z in range(depth)]
+    g_norm = [[[(grad[z][y][x] - g_min) / max(g_max - g_min, 1e-8) for x in range(width)] for y in range(height)] for z in range(depth)]
     
-    # Simple ray casting (for demonstration, not optimized)
+    image = [[[0.0, 0.0, 0.0] for _ in range(width)] for _ in range(height)]
+    
     for y in range(height):
         for x in range(width):
-            # Cast ray along z-axis
-            color = np.array([0.0, 0.0, 0.0])
+            color = [0.0, 0.0, 0.0]
             alpha_accum = 0.0
             
             for z in range(depth):
-                v = v_norm[y, x, z]
-                g = g_norm[y, x, z]
+                v = v_norm[z][y][x]
+                g = g_norm[z][y][x]
                 
                 # Map to texture coordinates
-                tx = int(v * (bins_intensity - 1))
-                ty = int(g * (bins_gradient - 1))
-                
-                # Clamp coordinates
-                tx = max(0, min(tx, bins_intensity - 1))
-                ty = max(0, min(ty, bins_gradient - 1))
+                # X-axis = gradient, Y-axis = intensity per source comment
+                tx = int(clamp(g * (bins_gradient - 1), 0, bins_gradient - 1))
+                ty = int(clamp(v * (bins_intensity - 1), 0, bins_intensity - 1))
                 
                 # Lookup color and opacity
-                rgba = tf_texture[tx, ty]
+                rgba = tf_texture[ty][tx]
                 c = rgba[:3]
                 a = rgba[3]
                 
                 # Composite
                 weight = a * (1.0 - alpha_accum)
-                color += weight * c
+                color[0] += weight * c[0]
+                color[1] += weight * c[1]
+                color[2] += weight * c[2]
                 alpha_accum += weight
                 
                 if alpha_accum > 0.99:
                     break
                     
-            image[y, x] = color
+            image[y][x] = color
             
     return image
 ```
@@ -270,9 +271,14 @@ def render_with_2d_tf(volume_data, gradient_data, tf_texture, bins_intensity, bi
 *   **Boundary Conditions:** Gradient computation at volume boundaries requires handling edge cases (e.g., zero-padding or clamping) [G].
 *   **Overlapping Values:** If $g_0$ and $g_1$ are not specified, the transfer function defaults to 1D behavior ($a_{\text{gradient}} = 1$) [S1].
 
+## Subtopics
+
+### Combined Intensity and Gradient Transfer Function
+A method to generate final volume renderings by simultaneously using selected intensity-based and gradient-based transfer functions [S7]. It constructs visualizations by combining three intensity-based TFs (e.g., one preserving all tissue information, one intermediate, one emphasizing calcifications) with three gradient-based TFs (e.g., linear ramp, triangular-shaped centered on peak 2, triangular-shaped centered on peak 3), producing 9 distinct final renderings [S7]. This approach allows automatic generation of opacity/color TFs based on scalar intensity and gradient magnitude histograms, improving visualization of complex structures like those in digital breast tomosynthesis data [S7].
+
 ## Operating characteristics
 
-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels sampled per frame. Real-time capability is Yes [S2].
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels sampled per frame [S2]. Real-time capability is Yes [S2].
 *   **Memory Complexity:** $O(V + W \cdot H)$ where $V$ is the volume size, and $W \cdot H$ is the 2D TF texture size [S2][S4, book].
 *   **Texture Look-ups:** 7 per sample (1 for data + 6 for gradient components, which are also needed for illumination) [S2]. If gradient is precomputed, 2 look-ups (data + precomputed gradient) [S2].
 *   **Strengths:**
@@ -304,3 +310,4 @@ def render_with_2d_tf(volume_data, gradient_data, tf_texture, bins_intensity, bi
 [S4] PDF 9 Multi-Dimensional Transfer Functions for Volume Rendering, https://people.cs.uchicago.edu/~glk/pubs/pdf/Kniss-MultidimensionalTransferFunctions-VH-2005.pdf, fetched 2026-10-27 (book)
 [S5] PDF Transfer Functions for Direct Volume Rendering, https://www.cs.purdue.edu/homes/xmt/classes/slides/CS530/Transfer_Functions.pdf, fetched 2026-10-28 (unofficial)
 [S6] Building a 3D Volume Rendering App with 2D Transfer ..., https://www.chimaera.de/services/web-development/3d-volume-rendering-app, fetched 2026-10-29 (unofficial)
+[S7] Calculation of transfer functions for volume rendering of breast tomosynthesis imaging, https://doi.org/10.1117/12.2559932, fetched 2026-10-26

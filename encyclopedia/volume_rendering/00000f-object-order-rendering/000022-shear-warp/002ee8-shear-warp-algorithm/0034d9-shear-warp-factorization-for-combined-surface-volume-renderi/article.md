@@ -3,172 +3,238 @@
 Also called: Fast Surface and Volume Rendering Based on Shear-Warp Factorization, Fast combination of volume-rendered and surface-rendered images, Shear-warp based surgical simulator rendering
 
 ## Overview
-This method enables real-time visualization in surgical simulators by combining volume-rendered 3D medical images (organs) with surface-rendered medical instruments (e.g., needles) using shear-warp factorization [S1, S2]. It solves the performance bottleneck of rendering complex, fuzzy volumetric data alongside fast-moving, simple geometric instruments by leveraging the speed of surface rendering for instruments and the segmentation-free realism of volume rendering for organs [S1, S2]. Unlike standard shear-warp which renders only volume data, this approach integrates a Z-buffer-based depth comparison in the intermediate sheared space to correctly composite the two modalities, using early ray termination and instrument-region masking to minimize redundant computation [S1, S2].
+This method enables real-time visualization in surgical simulators by combining volume-rendered 3D medical images (organs) with surface-rendered medical instruments (e.g., needles) using shear-warp factorization, Z-buffer depth comparison, early ray termination, and instrument-region masking to reduce computation [S1, S2]. It sets itself apart from pure volume rendering by offloading the frequent motion of simple, rigid instruments to fast surface rendering, while retaining the segmentation-free realism of volume rendering for complex, fuzzy anatomical structures [S1, S2]. Unlike [Parallel Perspective Shear-Warp Rendering](802-parallel-perspective-shear-warp-rendering.md) which focuses on parallel projection optimization, this method specifically addresses the hybrid compositing of distinct rendering pipelines (surface vs. volume) within the sheared intermediate space [S1, S2].
 
 ## How it works
-The method extends the standard shear-warp pipeline [24-shear-warp.md] by introducing a hybrid rendering phase where surface and volume data are composited in the intermediate 2D sheared image space before the final 2D warp.
+**Inputs and Outputs:**
+*   **Inputs:** 3D volume data (organs), surface model of the instrument (mesh/primitives), view matrix (defining viewer position/orientation), and instrument state (position/rotation).
+*   **Outputs:** A final 2D image combining the organ and instrument, and associated Z-buffer information for depth cueing.
 
-### Inputs and Outputs
-**Inputs:**
-*   3D volume dataset (e.g., CT/MRI) representing organs.
-*   Surface model of the medical instrument (polygons or primitives).
-*   View matrix $M_{view}$ defining the camera position and orientation.
-*   Instrument state (position, orientation, motion).
+**Data Structures:**
+*   **Volume Data:** 3D grid of voxels with color and opacity values.
+*   **Instrument Model:** Surface primitives (polygons) with associated Z-buffer values.
+*   **Intermediate Plane Z-Buffer:** Two Z-buffers are maintained on the sheared image space $(u, v)$:
+    *   $Z_{B,v}(u, v)$: Stores the terminated depth for volume rendering.
+    *   $Z_{B,m}(u, v)$: Stores the depth for surface rendering of the instrument.
+*   **Mask:** A 2D binary mask on the sheared image space $(u, v)$ indicating the region occupied by the instrument to limit volume rendering updates.
 
-**Outputs:**
-*   Final 2D image combining the organ volume and instrument surface.
+**Parameters:**
+*   **Early Ray Termination Threshold:** $0.95$. Ray traversal terminates when accumulated opacity exceeds this value [S1, S2].
+*   **Instrument Opacity:** Assumed to be $1.0$ (opaque). This ensures that once the instrument surface is hit, no further volume contribution is possible [S1, S2].
 
-### Data Structures
-Two Z-buffers are maintained on the intermediate sheared image plane $(u, v)$:
-1.  $Z_{B,v}(u, v)$: Stores the terminated depth for volume rendering. This is the distance from the ray origin to the voxel $x_N$ where the ray traversal stopped.
-2.  $Z_{B,m}(u, v)$: Stores the depth of the surface-rendered instrument.
+**Numbered Steps:**
 
-### Numbered Steps
+1.  **Initialization:**
+    *   Get instrument information (position, rotation).
+    *   Initialize the view-matrix corresponding to the viewer's position.
 
-**1. Initialization**
-*   Get instrument information (geometry, current pose).
-*   Initialize the view matrix $M_{view}$ corresponding to the viewer's position.
-*   Model the instrument image and its Z-buffer ($Z_{B,m}$) on the intermediate plane according to $M_{view}$ and instrument information. This involves projecting the instrument polygons into the sheared space.
+2.  **Surface Rendering (Instrument):**
+    *   Model the instrument image and its Z-buffer on the intermediate (sheared) plane according to the view-matrix and instrument information. This produces $Z_{B,m}(u, v)$ and the 2D instrument image $f_m(u, v)$ [S1, S2].
 
-**2. Volume Rendering with Early Ray Termination**
-*   Produce the volume-rendered intermediate image and its Z-buffer ($Z_{B,v}$) according to $M_{view}$.
-*   Perform ray casting through the volume data in the sheared space.
-*   **Early Ray Termination Logic:** The ray traversal for a pixel $(u, v)$ is terminated when either:
-    *   The accumulated opacity $\alpha_{acc}$ exceeds a threshold (typically 0.95) [S1, S2].
-    *   The ray intersects the surface of the instrument (detected via $Z_{B,m}$).
-*   The terminated depth $Z_{B,v}(u, v)$ is stored. If the ray hits the instrument, the traversal stops at the instrument surface. If it hits the opacity threshold, it stops at the last contributing voxel.
+3.  **Volume Rendering (Organs) with Early Termination:**
+    *   Produce the volume-rendered intermediate image $I_v(u, v)$ and its Z-buffer $Z_{B,v}(u, v)$ according to the view-matrix [S1, S2].
+    *   Perform ray traversal for each pixel $(u, v)$ in the sheared space.
+    *   **Termination Logic:** The ray traversal is terminated at depth $d(x_N)$ for the smallest $N$ satisfying either of the following conditions [S1, S2]:
+        $$ 1 - \prod_{i=1}^{N} (1 - \alpha(x_i)) \ge 0.95 $$
+        OR
+        $$ d(x_N) \ge Z_{B,m}(u, v) $$
+        Here, $\alpha(x_i)$ is the opacity at voxel $x_i$, and $d(x_N)$ is the distance from voxel $x_N$ to the pixel on the sheared image space. If the ray meets the instrument surface (depth $Z_{B,m}$), traversal stops to save computation, assuming the instrument is opaque [S1, S2].
+    *   Store the terminated depth in $Z_{B,v}(u, v)$. If the accumulated opacity threshold is not reached but the instrument is behind the current ray depth, the volume rendering continues until the threshold is met or the ray exits the volume. Note: The sources specify that $Z_{B,v}$ is updated if the current ray's depth $d(x_N)$ is greater than the existing $Z_{B,v}$, OR if the accumulated opacity threshold is reached [S2].
 
-**3. Combination (Alpha Blending)**
-*   Compare $Z_{B,v}(u, v)$ and $Z_{B,m}(u, v)$ to determine the spatial relationship between the instrument and the organ.
-*   **Masking:** To reduce computation, only the region where the instrument overlaps with the organs (the "mask region") is processed for combination. If the viewer's position changes, the entire image is processed; otherwise, only the mask is updated [S1, S2].
-*   **Blending Formula:** The combined image $C(u, v)$ is calculated using alpha blending. This blending is applied only when the instrument is *inside* the organ (i.e., the instrument surface is behind the volume rendering termination point but in front of the ray origin, or specifically, when the instrument overlaps the volume data rendered up to $Z_{B,v}$) [S1, S2].
-    $$ C(u, v) = \alpha_{acc}(u, v) \cdot f_m(u, v) + (1 - \alpha_{acc}(u, v)) \cdot I_v(u, v) $$
-    Where:
-    *   $f_m(u, v)$ is the pixel color of the 2D instrument image.
-    *   $I_v(u, v)$ is the pixel color of the volume-rendered organ image from ray traversal up to $Z_{B,v}(u, v)$.
-    *   $\alpha_{acc}(u, v)$ is the accumulated opacity of the organs at the termination point.
-*   If the instrument is in front of the organ without contact, the instrument image simply overwrites the volume image (or is composited with $\alpha_{acc}=0$ effectively). If the instrument is behind the organ, the volume image remains unchanged.
+4.  **Combination (Alpha Blending):**
+    *   Compare $Z_{B,v}(u, v)$ and $Z_{B,m}(u, v)$ to determine overlap.
+    *   **Overlap Cases:**
+        *   *Instrument in front of organ without contact:* No blending required; instrument occludes organ.
+        *   *Instrument inside organ:* Apply $\alpha$-blending [S1].
+    *   **Blending Formula:**
+        $$ C(u, v) = \alpha_{acc}(u, v) \cdot f_m(u, v) + (1 - \alpha_{acc}(u, v)) \cdot I_v(u, v) $$
+        Where:
+        *   $C(u, v)$ is the combined image pixel.
+        *   $f_m(u, v)$ is the pixel of the 2D instrument image.
+        *   $I_v(u, v)$ is the pixel of the volume-rendered organ image from ray traversal up to $Z_{B,v}(u, v)$.
+        *   $\alpha_{acc}(u, v)$ is the accumulated opacity of the organs up to the termination point.
+    *   As the accumulated opacity of the organs increases, the weight of the instrument decreases [S1, S2].
 
-**4. Warping**
-*   Warp the combined intermediate image according to $M_{view}$ to restore the correct perspective and produce the final image.
+5.  **Warping:**
+    *   Warp the combined image $C(u, v)$ according to the view-matrix to restore the correct perspective from the distorted sheared image space to the final image plane [S1, S2].
 
-### Pseudocode
+6.  **Update Phase (Motion Handling):**
+    *   **Instrument Motion:** If the instrument moves (rotation/translation):
+        *   Model the new instrument image and Z-buffer on the intermediate plane.
+        *   Create a mask of the instrument region before and after motion.
+        *   Produce the volume-rendered intermediate image and Z-buffer *only* on the mask region.
+        *   Get accumulated opacity up to the surface of the instrument just on the mask region.
+        *   Combine the surface-rendered instrument image and volume-rendered intermediate image only on the mask region.
+        *   Warp the combined image.
+        *   Clear the mask [S1, S2].
+    *   **Viewer Position Change:** If the viewer moves (rotation/translation):
+        *   Modify the view-matrix.
+        *   Repeat the Initialization, Surface Rendering, Volume Rendering, Combination, and Warping steps for the entire image [S1, S2].
+
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def combine_surface_and_volume(instrument, volume_data, view_matrix):
+def combine_surface_and_volume(instrument_info, view_matrix, volume_data):
     """
-    Combines surface-rendered instrument and volume-rendered organs
-    using shear-warp factorization in the intermediate space.
+    Combines surface-rendered instrument and volume-rendered organs using shear-warp factorization.
     """
     # 1. Initialization
-    # Project instrument to intermediate sheared space
-    instrument_image, Z_Bm = project_instrument_to_sheared_space(instrument, view_matrix)
+    # Get instrument information and initialize view-matrix
+    instrument_model = instrument_info.get_model()
     
-    # 2. Volume Rendering with Early Ray Termination
-    # Render volume to intermediate space, stopping early if instrument is hit or opacity threshold reached
-    volume_image, Z_Bv, alpha_acc = render_volume_with_early_termination(
+    # 2. Surface Rendering (Instrument)
+    # Model instrument image and Z-buffer on intermediate plane
+    instrument_image, Z_Bm = render_surface_on_sheared_plane(instrument_model, view_matrix)
+    
+    # 3. Volume Rendering (Organs) with Early Termination
+    # Produce volume-rendered intermediate image and Z-buffer
+    volume_image, Z_Bv, alpha_acc = render_volume_on_sheared_plane(
         volume_data, view_matrix, Z_Bm, threshold=0.95
     )
     
-    # 3. Combination
-    # Determine mask region where instrument overlaps with rendered volume
-    # Optimization: If viewer position hasn't changed, only update mask region
-    mask = compute_overlap_mask(Z_Bv, Z_Bm)
+    # 4. Combination
+    # Combine images using accumulated opacity by comparing Z-buffers
+    combined_image = alpha_blend(volume_image, instrument_image, alpha_acc, Z_Bv, Z_Bm)
     
-    combined_image = volume_image.copy()
-    
-    for (u, v) in mask:
-        # Check if instrument is in front of or inside the volume rendering
-        # If Z_Bm < Z_Bv, instrument is closer (in front or inside)
-        if Z_Bm[u, v] < Z_Bv[u, v]:
-            # Alpha blend instrument over volume based on accumulated opacity
-            # f_m is instrument color, I_v is volume color
-            f_m = instrument_image[u, v]
-            I_v = volume_image[u, v]
-            alpha = alpha_acc[u, v]
-            
-            # C = alpha * f_m + (1 - alpha) * I_v
-            combined_image[u, v] = alpha * f_m + (1 - alpha) * I_v
-            
-    # 4. Warping
-    final_image = warp_to_final_space(combined_image, view_matrix)
+    # 5. Warping
+    # Warp combined image according to view-matrix
+    final_image = warp_image(combined_image, view_matrix)
     
     return final_image
 
-def render_volume_with_early_termination(volume_data, view_matrix, Z_Bm, threshold):
+def render_volume_on_sheared_plane(volume_data, view_matrix, Z_Bm, threshold=0.95):
     """
-    Renders volume data in sheared space.
-    Terminates ray if accumulated opacity >= threshold OR if ray hits instrument (Z_Bm).
-    Returns volume image, Z-buffer (terminated depth), and accumulated opacity.
+    Renders volume data on the sheared plane, terminating rays early based on opacity or instrument depth.
     """
-    volume_image = zeros_like(Z_Bm)
-    Z_Bv = zeros_like(Z_Bm)
-    alpha_acc = zeros_like(Z_Bm)
+    volume_image = create_empty_image()
+    Z_Bv = create_empty_image()
+    alpha_acc = create_empty_image()
     
-    for each pixel (u, v) in intermediate image:
-        ray = cast_ray_through_volume(u, v, view_matrix)
-        acc_alpha = 0.0
-        terminated_depth = infinity
+    for u, v in image_coordinates():
+        accumulated_opacity = 0.0
+        terminated_depth = None
+        ray_color = (0, 0, 0)
         
-        for voxel x along ray:
-            # Calculate distance from ray origin to voxel x
-            d_x = distance(ray.origin, x.position)
+        # Traverse ray in sheared space
+        for voxel in ray_traversal(volume_data, u, v):
+            alpha = voxel.opacity
+            color = voxel.color
+            depth = voxel.distance
             
-            # Check if instrument is closer than this voxel
-            if Z_Bm[u, v] < d_x:
-                # Instrument is in front of this voxel. 
-                # Terminate ray at instrument surface.
-                terminated_depth = Z_Bm[u, v]
+            # Update accumulated opacity and color
+            weight = (1.0 - accumulated_opacity) * alpha
+            ray_color = ray_color + weight * color
+            accumulated_opacity += weight
+            
+            # Check termination conditions
+            # Condition 1: Accumulated opacity threshold
+            if accumulated_opacity >= threshold:
+                terminated_depth = depth
                 break
             
-            # Sample opacity alpha(x)
-            a_x = sample_opacity(volume_data, x)
-            
-            # Update accumulated opacity
-            acc_alpha = acc_alpha + a_x * (1 - acc_alpha)
-            
-            # Check early termination threshold
-            if acc_alpha >= threshold:
-                terminated_depth = d_x
+            # Condition 2: Instrument occlusion (Instrument is opaque, opacity=1.0)
+            # If current ray depth is greater than or equal to instrument depth, stop
+            # Note: Z_Bm[u,v] is the depth of the instrument surface
+            if Z_Bm[u, v] is not None and depth >= Z_Bm[u, v]:
+                terminated_depth = depth
                 break
         
-        # If ray didn't terminate early, terminated_depth remains infinity (or max depth)
         # Store results
-        Z_Bv[u, v] = terminated_depth
-        alpha_acc[u, v] = acc_alpha
-        
-        # If terminated by instrument, volume color is not updated for this pixel 
-        # (or updated only up to the instrument). 
-        # If terminated by threshold, volume color is accumulated up to that point.
-        # Note: The pseudocode above assumes volume_image is filled up to termination.
-        # In practice, volume_image[u,v] holds the color accumulated up to terminated_depth.
-        
+        # Z_Bv is updated if the current ray's depth is greater than existing Z_Bv, 
+        # OR if threshold is reached.
+        if terminated_depth is not None:
+            if Z_Bv[u, v] is None or terminated_depth > Z_Bv[u, v]:
+                Z_Bv[u, v] = terminated_depth
+            volume_image[u, v] = ray_color
+            alpha_acc[u, v] = accumulated_opacity
+            
     return volume_image, Z_Bv, alpha_acc
+
+def alpha_blend(volume_image, instrument_image, alpha_acc, Z_Bv, Z_Bm):
+    """
+    Combines volume and instrument images based on depth comparison.
+    """
+    combined_image = create_empty_image()
+    
+    for u, v in image_coordinates():
+        # Case: Instrument inside organ (overlap)
+        # Alpha blending is applied only in this case
+        if Z_Bv[u, v] is not None and Z_Bm[u, v] is not None:
+            # Check if instrument is in front of the volume termination point
+            # If instrument depth is less than volume termination depth, it is in front
+            # However, the source specifies blending occurs when instrument is INSIDE organ
+            # This implies the instrument is between the ray origin and the volume termination point
+            # or the volume rendering stopped because of the instrument.
+            
+            # According to source: "only the part where the instrument overlaps with the organs is rendered"
+            # and "In the second case only [instrument in organ], the surface-rendered image and 
+            # the volume-rendered image are combined together according to the accumulated opacity"
+            
+            # We assume overlap exists if both Z-buffers have valid values and the instrument 
+            # is not completely in front of the volume's visible surface.
+            # A simple heuristic for "inside" vs "in front" based on source logic:
+            # If the ray terminated due to the instrument (depth == Z_Bm), then it is inside/in front.
+            # The source formula uses alpha_acc of the organs.
+            
+            # Apply blending formula: C = alpha_acc * f_m + (1 - alpha_acc) * I_v
+            f_m = instrument_image[u, v]
+            I_v = volume_image[u, v]
+            a_acc = alpha_acc[u, v]
+            
+            combined_image[u, v] = a_acc * f_m + (1.0 - a_acc) * I_v
+        else:
+            # No overlap or one is missing
+            # If instrument is in front, it occludes. If volume is in front, it occludes.
+            # Simplified: If instrument Z is closer, use instrument. Else use volume.
+            if Z_Bm[u, v] is not None and (Z_Bv[u, v] is None or Z_Bm[u, v] < Z_Bv[u, v]):
+                combined_image[u, v] = instrument_image[u, v]
+            else:
+                combined_image[u, v] = volume_image[u, v]
+                
+    return combined_image
+
+def update_with_instrument_motion(instrument_info, view_matrix, volume_data, previous_mask):
+    """
+    Updates the image when only the instrument moves, using masking.
+    """
+    # 1. Model new instrument image and Z-buffer
+    instrument_image, Z_Bm = render_surface_on_sheared_plane(instrument_info.get_model(), view_matrix)
+    
+    # 2. Create mask of instrument region before and after motion
+    mask = create_mask_from_instrument(instrument_image, Z_Bm)
+    
+    # 3. Produce volume-rendered intermediate image and Z-buffer only on mask region
+    volume_image, Z_Bv, alpha_acc = render_volume_on_sheared_plane_masked(
+        volume_data, view_matrix, Z_Bm, mask, threshold=0.95
+    )
+    
+    # 4. Combine on mask region
+    combined_image = alpha_blend_masked(volume_image, instrument_image, alpha_acc, Z_Bv, Z_Bm, mask)
+    
+    # 5. Warp combined image
+    final_image = warp_image(combined_image, view_matrix)
+    
+    # 6. Clear mask
+    clear_mask(mask)
+    
+    return final_image
 ```
 
-### Parameters
-*   **Early Ray Termination Threshold:** 0.95 [S1, S2].
-*   **Instrument Opacity Assumption:** 1.0 (opaque) [S1, S2]. This ensures that once the instrument surface is hit, no further volume contribution is possible.
-
-### Edge Cases and Pitfalls
-*   **Overlapping Cases:** There are two distinct cases of overlapping:
-    1.  Instrument in front of the organ without contact: The instrument overwrites the volume.
-    2.  Instrument inside the organ: Alpha blending is applied [S1, S2].
-*   **Depth Comparison Logic:** The Z-buffer for volume rendering ($Z_{Bv}$) is updated if the current ray's depth $d(x_N)$ is greater than the existing $Z_{Bv}$, OR if the accumulated opacity threshold (0.95) is reached. This ensures the closest surface or opaque region is stored [S2].
-*   **Masking:** If the viewer's position changes, the mask must be recomputed for the entire image. If only the instrument moves, only the mask region needs updating [S1, S2].
-
 ## Operating characteristics
-*   **Time Complexity:** Faster than pure volume rendering because surface rendering is used for instruments (which have simple structures and require fast motion updates) [S2]. The use of masking reduces computation for instrument motion updates to only the overlapping region [S1, S2].
-*   **Memory Complexity:** Requires storage for two Z-buffers ($Z_{B,v}$ and $Z_{B,m}$) in the intermediate space [S1].
-*   **Strengths:** Real-time performance in surgical simulators; combines the realism of volume rendering for organs with the speed of surface rendering for instruments; avoids segmentation of complex organ data [S1, S2].
-*   **Limitations:** Requires pre-segmentation or modeling of instruments; relies on the assumption that instruments are opaque; distortion from shear-warp requires 2D warping [S2].
-*   **When to Use:** Surgical simulators, image-guided therapy visualization where real-time feedback of instrument position relative to fuzzy anatomical structures is required [S1, S2].
-*   **When Not to Use:** Scenes with transparent instruments or complex non-medical objects that cannot be easily modeled as surfaces; scenes where segmentation of organs is not feasible and surface rendering is required for them.
+*   **Time Complexity:** The method reduces computation by using early ray termination and masking. Volume rendering is only performed in the mask region when the instrument moves, avoiding full volume traversal [S1, S2]. Surface rendering is faster than volume rendering because it only traverses the 3D volume data once in a preprocessing step to extract surface primitives, whereas volume rendering must traverse the entire 3D data set whenever the view direction is changed [S1, S2].
+*   **Memory Complexity:** Requires storage for the volume data, instrument model, two Z-buffers on the sheared plane, and the mask.
+*   **Measured Performance:** Applied to a spine biopsy simulator and image-guided therapy surgical simulators for real-time visualization [S1, S2]. Specific frame rates or hardware details are not given in the sources.
+*   **Strengths:** Real-time performance for surgical simulators; combines the realism of volume rendering for organs with the speed of surface rendering for instruments; reduces computation via early ray termination and masking [S1, S2].
+*   **Limitations:** Quality of surface-rendered images depends on segmentation (though instruments are simple, so this is less of an issue than for organs); assumes instrument opacity is 1.0; requires shear-warp factorization which results in a distorted intermediate image requiring warping [S1, S2].
+*   **When to Use:** Surgical simulators requiring real-time visualization of 3D medical images and medical instrument motion [S1, S2].
+*   **When Not to Use:** Scenes with transparent instruments (opacity assumption of 1.0 breaks); scenes where segmentation of organs is required for surface rendering (volume rendering is preferred for fuzzy/complex structures) [S1, S2].
 
 ## Background
-This method was developed for use in a spine biopsy simulator and image-guided therapy surgical simulators [S1, S2]. It addresses the limitation that volume rendering is computationally expensive for real-time visualization of moving instruments, while surface rendering requires segmentation which is difficult for medical images [S1]. The approach was presented at the SPIE International Symposium on Medical Imaging in San Diego, CA, in February 2000, and published in *Intelligent Systems in Medical Imaging* [S1].
+*   **Origin:** Developed by Kim et al. for surgical simulators [S1, S2].
+*   **History:** Presented at the SPIE International Symposium on Medical Imaging in San Diego, CA, February 2000. Published online in Wiley Interscience in 2002/2003 [S1].
+*   **Usage:** Applied to a spine biopsy simulator and image-guided therapy surgical simulators [S1, S2].
 
 ## Sources
 [S1] Fast Surface and Volume Rendering Based on Shear-Warp Factorization for a Surgical Simulator, https://doi.org/10.1002/igs.10050, fetched 2026-10-26

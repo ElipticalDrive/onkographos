@@ -3,16 +3,16 @@
 Also called: Segment SDF, sdSegment, Distance to line segment
 
 ## Overview
-The Segment Signed Distance Function computes the Euclidean distance from a query point $p$ to the finite line segment defined by endpoints $a$ and $b$ [S1, S3, S4, unofficial]. It solves the problem of determining proximity to bounded linear geometry, distinguishing itself from infinite line distance methods by clamping the projection parameter to the segment bounds $[0, 1]$ [S1, S3, S4, unofficial]. This ensures the result is zero if the point lies on the segment and correctly handles proximity to the endpoints [S1, unofficial]. It builds on [Basic Primitive Definitions](5346-basic-primitive-definitions.md).
+The Segment Signed Distance Function computes the distance from a query point $p$ to the finite line segment defined by endpoints $a$ and $b$ [S1, S3, S4, unofficial]. It solves the problem of determining proximity to bounded linear geometry, distinguishing itself from infinite line distance methods by clamping the projection parameter to the segment bounds $[0, 1]$ [S1, S3, S4, unofficial]. This ensures the result is zero if the point lies on the segment and correctly handles proximity to the endpoints [S1, unofficial]. It builds on [Basic Primitive Definitions](5346-basic-primitive-definitions.md) [G].
 
 ## How it works
 **Inputs:**
-*   $p$: Query point (vector, typically 2D or 3D).
+*   $p$: Query point (vector, typically 2D or 3D) [S2, S3, unofficial][S5].
 *   $a$: First endpoint of the segment.
 *   $b$: Second endpoint of the segment.
 
 **Outputs:**
-*   $d$: The signed distance. For a segment, the "signed" aspect is often implicit in the context of SDF primitives where $d < 0$ is inside (though a 1D segment has no interior volume in standard Euclidean space, SDF libraries often return the absolute distance or treat the segment as the boundary of a capsule/solid) [S3, unofficial]. However, the core geometric operation returns the non-negative Euclidean distance to the closest point on the segment. In the context of SDF primitives, this value is used directly or offset by a radius [S3, unofficial].
+*   $d$: The distance. Sources differ on the output type: some return the squared Euclidean distance [S1, unofficial], while others return the Euclidean distance [S2, S3, unofficial][S5]. In the context of SDF primitives, this value is used directly or offset by a radius [S3, unofficial]. The core geometric operation returns the non-negative distance to the closest point on the segment [G].
 
 **Data Structures:**
 *   Vectors $p, a, b$ are stored as standard floating-point arrays (e.g., `vec2` or `vec3`) [S2, S3, unofficial][S5].
@@ -21,7 +21,7 @@ The Segment Signed Distance Function computes the Euclidean distance from a quer
 1.  Compute the segment vector: $ab = b - a$ [S1, S3, unofficial].
 2.  Compute the vector from the first endpoint to the query point: $ap = p - a$ [S1, S3, unofficial].
 3.  Compute the squared length of the segment: $len\_sq = ab \cdot ab$ [S1, S3, S4, unofficial].
-4.  Handle degenerate segments: If $len\_sq$ is near zero (e.g., $< 10^{-12}$ or component-wise $< 10^{-8}$), the segment is effectively a point. The closest point is $a$ (or $b$) [S3, S4, unofficial]. Return the distance $\|p - a\|$ (or squared distance if the variant requires it) [S3, S4, unofficial].
+4.  Handle degenerate segments: If $len\_sq$ is near zero (e.g., $< 10^{-12}$) or component-wise $< 10^{-8}$, the segment is effectively a point [S3, S4, unofficial]. The closest point is $a$ (or $b$) [S4, unofficial]. Return the distance $\|p - a\|$ (or squared distance if the variant requires it) [S3, S4, unofficial].
 5.  Compute the projection parameter $t$ (or $h$):
     $$ t = \frac{ap \cdot ab}{len\_sq} $$
     Clamp $t$ to the range $[0, 1]$:
@@ -35,13 +35,13 @@ The Segment Signed Distance Function computes the Euclidean distance from a quer
     [S1, S3, unofficial].
 8.  Return the distance:
     *   For squared distance: $d = dist\_vec \cdot dist\_vec$ [S1, unofficial].
-    *   For Euclidean distance: $d = \|dist\_vec\| = \sqrt{dist\_vec \cdot dist\_vec}$ [S3, S4, unofficial].
+    *   For Euclidean distance: $d = \|dist\_vec\| = \sqrt{dist\_vec \cdot dist\_vec}$ [G].
 
 **Formula (Normalized Variant):**
 An alternative formulation normalizes the segment direction first [S2, unofficial]:
 1.  $v = \frac{b - a}{\|b - a\|}$
-2.  $l = \text{clamp}(v \cdot (p - a), 0, \|b - a\|)$
-3.  $d = \|p - a - l \cdot v\|$
+2.  $l = \text{clamp}(v \cdot (p - a), 0, \|b - a\|)$ [S2, unofficial].
+3.  $d = \|p - a - l \cdot v\|$ [S2, unofficial].
 
 **Parameters:**
 *   Epsilon for degenerate checks: $10^{-12}$ [S3, unofficial] or $10^{-8}$ [S4, unofficial].
@@ -57,7 +57,7 @@ An alternative formulation normalizes the segment direction first [S2, unofficia
 ```python
 def sdSegment(p, a, b):
     """
-    Computes the Euclidean distance from point p to the segment [a, b].
+    Computes the distance from point p to the segment [a, b].
     
     Args:
         p: Query point (vec2 or vec3)
@@ -65,7 +65,7 @@ def sdSegment(p, a, b):
         b: Second endpoint (vec2 or vec3)
         
     Returns:
-        float: Euclidean distance from p to the closest point on segment [a, b]
+        tuple: (closest_point, distance)
     """
     # 1. Segment vector
     ab = b - a
@@ -75,7 +75,7 @@ def sdSegment(p, a, b):
     
     # 3. Handle degenerate segment (point)
     if len_sq < 1e-12:
-        return length(p - a)
+        return a, length(p - a)
     
     # 4. Projection parameter
     ap = p - a
@@ -88,7 +88,9 @@ def sdSegment(p, a, b):
     closest = a + ab * t
     
     # 7. Distance
-    return length(p - closest)
+    dist = length(p - closest)
+    
+    return closest, dist
 ```
 
 ## Subtopics
@@ -98,29 +100,25 @@ Checks if a query point $Q$ lies on the line segment between endpoints $P_i$ and
 *   **Definition:** Returns true if $Q$ is on the segment, false otherwise [S4, unofficial].
 *   **Method:** Calculate distances $dis1 = \|P_i - Q\|$, $dis2 = \|P_j - Q\|$, and $dis3 = \|P_i - P_j\|$ [S4, unofficial]. If $dis3 + \epsilon < dis1 + dis2$, return false; otherwise, return true [S4, unofficial].
 *   **Parameters:** $\epsilon = 10^{-8}$ [S4, unofficial].
-*   **When to choose:** Use when exact geometric containment is required rather than proximity [S4, unofficial].
 
 ### Point-to-Segment Distance
 Computes the closest point on a line segment $[v_0, v_1]$ to a query point $p$ [S5].
 *   **Definition:** Returns the 3D coordinate of the closest point on the segment [S5].
 *   **Method:** The result lies on the closed segment by clamping the parameter $t$ to $[0, 1]$ [S5].
 *   **Parameters:** Supports any `Vec3` type with arithmetic and `dot()` operations [S5].
-*   **When to choose:** Use when the closest point coordinate is needed for further geometric operations (e.g., normal calculation, ray intersection) rather than just the distance value [S5].
 
 ### Capsule Signed Distance Function — 2D Capsule SDF
 Computes the signed distance to a 2D capsule (stadium shape) defined by endpoints $a$ and $b$ with radius $r$ [S3, unofficial].
 *   **Definition:** The SDF of a capsule is the segment SDF minus the radius [S3, unofficial].
 *   **Formula:** $d = \text{segment}(p, a, b) - r$ [S3, unofficial].
 *   **Code:** `pub fn capsule2d(p: Vec2, a: Vec2, b: Vec2, r: f32) -> f32 { segment(p, a, b) - r }` [S3, unofficial].
-*   **When to choose:** Use for rendering or collision detection of thick lines or capsules in 2D [S3, unofficial].
 
 ## Operating characteristics
 *   **Time Complexity:** $O(1)$ constant time. Requires a few vector subtractions, dot products, and a square root [S1, S3, S4, unofficial].
 *   **Memory Complexity:** $O(1)$ auxiliary space [S1, S3, unofficial].
 *   **Strengths:** Simple, robust, and fast. Handles degenerate cases (points) gracefully [S3, S4, unofficial].
-*   **Limitations:** Only applies to linear segments. Not suitable for complex curves without tessellation [S1, unofficial].
+*   **Limitations:** Only applies to linear segments [S1, S3, S4, unofficial].
 *   **When to use:** Ray marching for thin objects, collision detection for linear features, or as a building block for composite shapes like capsules [S2, S3, unofficial].
-*   **When not to use:** When the geometry is an infinite line (use infinite line SDF) or a curve (use spline SDF) [S1, S3, unofficial].
 
 ## Background
 The segment SDF is a fundamental primitive in Signed Distance Field rendering, popularized by Inigo Quilez's work on distance functions for ray marching [S2, S3, unofficial]. It is widely used in real-time graphics for rendering thin structures and as a component in more complex SDFs like capsules and cylinders [S2, S3, unofficial]. The algorithm is derived from basic vector projection and clamping logic [S1, S4, unofficial].

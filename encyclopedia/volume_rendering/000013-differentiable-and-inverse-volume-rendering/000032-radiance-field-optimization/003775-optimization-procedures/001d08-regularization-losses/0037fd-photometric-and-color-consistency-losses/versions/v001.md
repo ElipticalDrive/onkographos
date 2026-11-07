@@ -1,0 +1,48 @@
+# Photometric and Color Consistency Losses
+
+
+## Overview
+This family encompasses loss functions that enforce photometric fidelity between rendered images and ground-truth observations, often augmented with structural or temporal consistency constraints to improve reconstruction quality. Unlike generic regularization methods that penalize parameter norms or geometric smoothness, these losses operate directly on the pixel-space residuals of the radiance field, ensuring the rendered output matches the input data distribution. They are distinguished from sibling methods like [Total Variation Regularization](860-total-variation-regularization.md) by their focus on color/intensity accuracy rather than spatial gradient sparsity, and from [Perceptual Loss Training](2000-perceptual-loss-training.md) by their reliance on pixel-wise or structural metrics rather than deep feature space distances.
+
+## Shared principles
+All methods in this family rely on the differentiability of the forward rendering operator and the propagation of gradients through the integration steps. The core mechanism is the evaluation of the volume rendering equation and the computation of gradients with respect to scene parameters (density, geometry, transfer functions, camera poses).
+
+The standard emission-absorption model computes the color $\hat{C}(\mathbf{r})$ for a ray $\mathbf{r}$ as [S1][S5, unofficial]:
+
+$$
+\hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
+$$
+
+where $\sigma_i$ is the density, $\delta_i$ is the step size, $\mathbf{c}_i$ is the color, and $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the transmittance [S1][S5, unofficial].
+
+Differentiation strategies fall into three main categories:
+1.  **Reverse-Mode Automatic Differentiation (AD):** Standard backpropagation through the computational graph. This requires storing $O(kn)$ intermediate states (where $n$ is pixels and $k$ is samples), leading to high memory usage [S5, unofficial].
+2.  **Adjoint Method:** Computes gradients by propagating adjoint variables backward through the rendering algorithm, evaluating the chain rule from output to input. This has computational complexity largely constant in the number of parameters, making it preferable for optimizing many parameters like the transfer function [S1][S3, unofficial].
+3.  **Analytic Inversion / Explicit Gradients:** Uses a-priori knowledge of the DVR operations to invert the order of operations or derive closed-form gradients, reducing memory consumption to $O(n)$ by avoiding the storage of intermediate results [S5, unofficial].
+
+## Subtopics
+
+### [MSE Loss and PSNR Conversion](1651-mse-loss-and-psnr-conversion.md)
+The Mean Squared Error (MSE) loss computes the average of the squared differences between predicted and target RGB values, serving as the primary photometric optimization objective in radiance-field training. It is often accompanied by the Peak Signal-to-Noise Ratio (PSNR), a logarithmic metric derived from MSE that quantifies reconstruction fidelity for logging and evaluation. Unlike structural metrics such as SSIM, MSE is sensitive to pixel-level intensity errors and large smooth regions, making it a standard baseline for differentiable volume rendering.
+
+### [L1+SSIM Loss](2890-l1-ssim-loss.md)
+L1+SSIM Loss is a composite photometric objective used to optimize radiance fields and 3D Gaussian splats by minimizing the difference between rendered images and ground-truth photographs. It combines a pixel-wise L1 error term with a structural similarity (SSIM) term to balance color accuracy with perceptual sharpness. Unlike pure MSE losses which can produce blurry results, this method explicitly rewards matching local structures such as edges and textures.
+
+### [Visibility-Based Photometric Loss](2917-visibility-based-photometric-loss.md)
+Visibility-Based Photometric Loss computes photometric error only on pixels identified as visible across source and target views. It differs from standard photometric losses by filtering out pixels where the squared difference between reprojected source depth and directly rendered target depth exceeds a threshold, preventing the model from fitting to occluded or transient geometry.
+
+### Consistency Filter Function
+- **Definition:** A filtering function applied during training to maintain consistency, removed in ablation experiments [S1].
+- **Performance:** On the Blender dataset, removing the consistency filter ('w/o filter') reduces PSNR from 30.3 dB to 29.1 dB, SSIM from 0.945 to 0.941, and increases LPIPS from 0.078 to 0.103 [S1].
+- **Comparison:** Using the consistency filter function yields better rendering quality than not using it [S1].
+
+### Temporal Consistency Loss
+- **Formula:** $\mathcal{L}_{time} = \frac{1}{T-1} \sum_{t=1}^{T-1} |F(x, t+1) - F(x, t)|_1$, where $T$ is the length of the dynamic sequence (e.g., 30 frames), $F(x,t)$ is the radiation field at time $t$, and $|\cdot|_1$ denotes L1 norm [S2].
+- **Performance:** After adding temporal consistency loss, SSIM of dynamic scene increases by 0.04, with no obvious jump in subjective vision [S2].
+
+## Background
+The use of photometric losses is foundational to neural rendering, originating with the introduction of NeRF [S1]. Early works relied heavily on MSE loss for its simplicity and differentiability. Subsequent research introduced structural losses (SSIM) to address the blurriness associated with MSE [S2]. More recent approaches, particularly in dynamic scenes and multi-view consistency, have incorporated visibility checks and temporal consistency terms to handle occlusions and temporal flickering [S1, S2]. The specific "Consistency Filter" mentioned in [S1] is part of a point-based radiance field method that uses spherical harmonics and a coarse-to-fine strategy, distinguishing it from dense voxel or grid-based NeRFs.
+
+## Sources
+[S1] Differentiable Point-Based Radiance Fields for Efficient View Synthesis, https://doi.org/10.1145/3550469.3555413, fetched 2026-10-26
+[S2] Efficient Sparse Input Scene Reconstruction and Real-Time Rendering for VR Advertising Using Optimized NeRF Framework, https://www.informatica.si/index.php/informatica/article/download/12804/6562, fetched 2026-10-29

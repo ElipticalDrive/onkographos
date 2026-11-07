@@ -1,0 +1,199 @@
+# DCx Face Generation Priority Rules
+
+Also called: Direction-dependent face generation, Duplicate face prevention in DCx
+
+## Overview
+DCx Face Generation Priority Rules are a set of directional constraints used in Dual Contouring over Expanded Cubes (DCx) to prevent the generation of duplicate faces when adjacent expanded cubes overlap [S1]. They solve the ambiguity of shared face ownership by assigning responsibility for generating specific mesh faces based on the case ID of the current cube, the case ID of the neighbor, and a predefined directional priority [S1]. Unlike context-unaware methods, these rules ensure topological consistency across the boundary of overlapping expanded cubes without requiring post-processing duplicate removal [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** The case ID of the current expanded cube, the case ID of the adjacent expanded cube in a specific direction, and the direction of adjacency.
+*   **Output:** A boolean indicating whether the current cube is responsible for generating the shared face.
+
+**Data Structures:**
+The method relies on predefined directional sets and case ID classifications.
+*   **Directional Sets:** Two mutually exclusive sets define the priority hierarchy:
+    *   Set A: `{right, front, bottom}`
+    *   Set B: `{left, back, top}`
+    *   [S1]
+*   **Invalid Cube Definition:** An expanded cube is defined as "invalid" if it contains fewer than 3 active voxels [S1]. Additional invalid cube definitions are specified in the rule tables (Tables 7, 8, 9 in the source) [S1].
+*   **Case IDs:** Cases are identified by a group number and a variant number (e.g., 3-1, 6-2). Group 1 cases are context-unaware; Group 2 cases are context-aware [S1].
+
+**Steps:**
+1.  **Determine Directional Set:** Identify which directional set the adjacency direction belongs to. If the neighbor is to the right, front, or bottom, the current cube is in the "lower priority" position relative to the neighbor in the opposite direction. If the neighbor is to the left, back, or top, the current cube is in the "higher priority" position. [S1]
+2.  **Check Manifold Status:** Determine if the current cube is manifold or non-manifold based on its active voxel configuration. [S1]
+3.  **Apply Priority Rules:** Consult the specific rule for the current cube's case ID and the neighbor's case ID. The rules are categorized into Manifold and Non-Manifold cases.
+
+**Formulas and Rules:**
+The generation decision $G$ is determined by the following logic derived from the source tables [S1]:
+
+**For Non-Manifold Cubes (Table 8):**
+1.  **Special Case:** Generate if the adjacent cube is valid.
+2.  **All Faces:** If the non-manifold cube has all faces, generate all faces directly.
+3.  **4-Voxel Faces (Set A):** If the face is in `{right, front, bottom}`, never generate.
+4.  **4-Voxel Faces (Set B):** If the face is in `{left, back, top}`, generate unless the adjacent cube is Case 6-2.
+5.  **3-Voxel Faces (Set A):** If the face is in `{right, front, bottom}`, generate unless the adjacent cube is Case 4-1, 5-1, or 6-3.
+6.  **3-Voxel Faces (Set B):** If the face is in `{left, back, top}`, always generate.
+
+**For Manifold Cubes (Table 7/8 context):**
+7.  **3-Voxel Faces (Set A):** If the face is in `{right, front, bottom}`, generate only when the adjacent cube is Case 3-1.
+8.  **3-Voxel Faces (Set B):** If the face is in `{left, back, top}`, generate when the adjacent cube is invalid.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def should_generate_face(current_case_id, neighbor_case_id, direction):
+    """
+    Determines if the current expanded cube should generate a face shared with a neighbor.
+    
+    Args:
+        current_case_id (str): The case ID of the current cube (e.g., "3-1", "6-2").
+        neighbor_case_id (str): The case ID of the adjacent cube.
+        direction (str): The direction from current to neighbor. One of 
+                         {'right', 'left', 'front', 'back', 'bottom', 'top'}.
+    
+    Returns:
+        bool: True if the current cube should generate the face, False otherwise.
+    """
+    
+    # Define directional sets
+    set_a = {'right', 'front', 'bottom'}
+    set_b = {'left', 'back', 'top'}
+    
+    # Determine if current cube is in Set A or Set B relative to the neighbor
+    # If direction is in set_a, the neighbor is in the "positive" direction.
+    # The rules in the source define behavior for faces in set_a vs set_b.
+    is_set_a = direction in set_a
+    is_set_b = direction in set_b
+    
+    # Helper to check if a cube is invalid (< 3 active voxels)
+    # Note: Specific invalid definitions for complex cases are in Tables 7-9.
+    # For this implementation, we assume a generic check or pass a flag.
+    # [G] In a full implementation, `is_invalid` would check voxel count 
+    # and specific table entries for complex invalid states.
+    if is_cube_invalid(current_case_id):
+        return False # Invalid cubes do not generate faces
+    
+    # Parse case ID to determine group and variant
+    # Format is "Group-Variant"
+    current_group, current_variant = parse_case_id(current_case_id)
+    neighbor_group, neighbor_variant = parse_case_id(neighbor_case_id)
+    
+    # Rule Application based on Source Tables 7 and 8
+    
+    # --- Non-Manifold Rules (Table 8) ---
+    if is_non_manifold(current_case_id):
+        # 1. Special case: Generate when adjacent cube is valid
+        if is_special_case(current_case_id):
+            return not is_cube_invalid(neighbor_case_id)
+        
+        # 2. Non-manifold, all faces: Generate all
+        if has_all_faces(current_case_id):
+            return True
+            
+        # 3. Non-manifold, 4-voxel faces (Set A): Never generate
+        if is_4_voxel_face(current_case_id) and is_set_a:
+            return False
+            
+        # 4. Non-manifold, 4-voxel faces (Set B): Generate except if neighbor is 6-2
+        if is_4_voxel_face(current_case_id) and is_set_b:
+            if neighbor_case_id == "6-2":
+                return False
+            return True
+            
+        # 5. Non-manifold, 3-voxel faces (Set A): Generate except if neighbor is 4-1, 5-1, 6-3
+        if is_3_voxel_face(current_case_id) and is_set_a:
+            if neighbor_case_id in ["4-1", "5-1", "6-3"]:
+                return False
+            return True
+            
+        # 6. Non-manifold, 3-voxel faces (Set B): Generate
+        if is_3_voxel_face(current_case_id) and is_set_b:
+            return True
+
+    # --- Manifold Rules (Table 7/8 context) ---
+    else:
+        # 7. Manifold, 3-voxel faces (Set A): Generate when neighbor is 3-1
+        if is_3_voxel_face(current_case_id) and is_set_a:
+            return neighbor_case_id == "3-1"
+            
+        # 8. Manifold, 3-voxel faces (Set B): Generate when neighbor is invalid
+        if is_3_voxel_face(current_case_id) and is_set_b:
+            return is_cube_invalid(neighbor_case_id)
+            
+    # Default fallback for other cases not explicitly listed in the summary rules
+    # [G] In a complete implementation, all cases from Tables 7, 8, and 9 must be covered.
+    # If not covered by the simplified rules above, refer to the full tables.
+    return False
+
+def is_cube_invalid(case_id):
+    """
+    Checks if a cube is invalid.
+    Definition: < 3 active voxels.
+    [G] This is a placeholder for the specific logic defined in Tables 7, 8, 9.
+    """
+    # Simplified check for demonstration
+    # Actual implementation requires counting active voxels or checking specific table entries
+    return False 
+
+def parse_case_id(case_id):
+    parts = case_id.split('-')
+    return int(parts[0]), int(parts[1])
+
+def is_non_manifold(case_id):
+    # [G] Logic to determine manifold status based on case ID
+    return False
+
+def is_special_case(case_id):
+    # [G] Logic to identify special cases
+    return False
+
+def has_all_faces(case_id):
+    # [G] Logic to identify if all faces are present
+    return False
+
+def is_4_voxel_face(case_id):
+    # [G] Logic to identify 4-voxel face configurations
+    return False
+
+def is_3_voxel_face(case_id):
+    # [G] Logic to identify 3-voxel face configurations
+    return False
+```
+
+**Parameters:**
+*   **Directional Sets:** `{right, front, bottom}` and `{left, back, top}`. These can be freely interchanged (e.g., reversing left-right) without changing the final mesh topology, only altering which cube generates the shared face [S1].
+*   **Invalid Cube Threshold:** Less than 3 active voxels [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Duplicate Faces:** Occur if both adjacent cubes generate the same shared face. The priority rules prevent this by ensuring only one cube generates the face based on the directional sets and neighbor case IDs [S1].
+*   **Redundant Non-Manifold Faces:** Case 3-3 (Subgroup 2.1) produces a redundant non-manifold face if considered in isolation. It must be omitted if the adjacent cube (e.g., Case 6-1) indicates the face should not exist [S1].
+*   **Context Dependency:** Case 4-3 (coplanar 4-voxel) produces no faces if its neighboring expanded cube falls into Case 8 (Subgroup 2.2) [S1].
+
+## Subtopics
+
+### DCx Subgroup 2.1: Anchor Free Adjacency Check
+A subgroup of 5 categories where face generation requires checking the case ID of neighboring expanded cubes to ensure consistency, but does not require an anchor point [S1]. All candidate flat faces lie on cube surfaces. For each candidate face, the face is generated only if it is also present in the neighboring expanded cube's configuration; otherwise, it is omitted. For Case 5-3, the three coplanar flat surfaces are examined in the same way as Case 4-4 [S1]. Pitfalls include Case 3-3 producing a redundant non-manifold face if the adjacent yellow expanded cube (Case 6-1) indicates the face should not exist, and Case 4-3 producing no faces if the neighbor is Case 8 [S1].
+
+### DCx Group 1: Context-Unaware Mesh Patterns
+A set of 9 LUT categories where mesh construction is determined solely by the active cube patterns within the expanded cube, independent of neighboring cubes [S1]. Categories 3-1, 3-2, 4-1, and 4-2 generate manifold mesh patches representing one-voxel thickness configurations. Categories 5-1, 5-2, 6-1, 6-2, and 7 generate mesh patches that may contain non-manifold structures; specifically, 5-2 and 6-2 produce explicit non-manifold elements, while others may become non-manifold depending on adjacency [S1]. A pitfall is that coplanarity does not always produce a face; in category 5-1, a coplanar configuration of three voxels forms a facet on the bottom face but not on the front face [S1].
+
+### DCx Group 2: Context-Aware Mesh Patterns
+A set of LUT categories where face generation relies on the categories of neighboring expanded cubes to maintain mesh continuity [S1]. These are subdivided into Subgroup 2.1 (Anchor Free) and Subgroup 2.2 (Anchor Group). Generation priority is defined to prevent duplicate faces in overlapping expanded cubes during parallel execution. Alternatively, duplicates can be removed in post-processing, but this is inefficient [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The rules are evaluated per face per cube. For Group 1, evaluation is $O(1)$ per face as it is context-unaware. For Group 2, evaluation is $O(1)$ per face but requires accessing neighbor case IDs, which may involve memory lookups or synchronization in parallel implementations.
+*   **Memory Complexity:** Requires storing the case ID for each expanded cube and potentially neighbor case IDs for Group 2 processing. The rule tables (Tables 7, 8, 9) are small and constant size.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** The method allows for efficient parallel execution because the dependency only relies on the case IDs of adjacent cubes [S1].
+*   **Strengths:** Prevents duplicate faces without post-processing; maintains topological consistency across overlapping expanded cubes; allows free interchange of directional sets without affecting final topology [S1].
+*   **Limitations:** Requires checking neighbor case IDs for Group 2 cases, which adds complexity compared to purely local methods.
+*   **When to use:** When using DCx for zero-level set extraction from neural unsigned distance functions, specifically when overlapping expanded cubes are used to ensure coverage.
+*   **When not to use:** When post-processing duplicate removal is acceptable and simpler logic is preferred, though this is noted as inefficient [S1].
+
+## Background
+The DCx Face Generation Priority Rules originate from the Dual Contouring over Expanded Cubes (DCx) method for zero-level set extraction from neural unsigned distance functions [S1]. The method was developed to address the ambiguity in mesh generation when using overlapping expanded cubes, ensuring that shared faces are generated exactly once. The rules are detailed in Appendix B of the source paper, with specific cases listed in Tables 7, 8, and 9 [S1].
+
+## Sources
+[S1] Dual Contouring over Expanded Cubes (DCx) for Zero-Level Set Extraction from Neural Unsigned Distance Functions, https://doi.org/10.1145/3811388, fetched 2026-11-06

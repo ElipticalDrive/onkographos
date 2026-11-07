@@ -1,0 +1,132 @@
+# Variance Regularization
+
+Also called: Variance-based Regularization, Weight and Color Variance Loss
+
+## Overview
+Variance Regularization reduces ambiguity in low-texture and few-shot regions of indoor scenes by constraining the variance of the weight distribution $w(\mathbf{r})$ and color distribution $c(\mathbf{r}, d)$ along rays [S1]. Unlike standard photometric losses which may allow identical rendered colors from vastly different weight distributions, this method penalizes deviations in depth expectation and color consistency relative to the rendered pixel values [S1]. It serves as a supplement to photometric loss, particularly effective where geometric cues are sparse [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Ray $\mathbf{r}$, near/far bounds $t_n, t_f$, sample points $t$ along the ray, weight $w(\mathbf{r}(t))$, color $\mathbf{c}(\mathbf{r}(t), \mathbf{d})$, rendered depth expectation $\hat{D}(\mathbf{r})$, rendered pixel color $\hat{\mathbf{C}}(\mathbf{r})$, loss weights $\lambda_d, \lambda_w, \lambda_c$, view coverage factor $\lambda(\mathbf{r})$, and base color loss $\mathcal{L}_{\text{color}}(\mathbf{r})$ and depth loss $\mathcal{L}_{\text{depth}}(\mathbf{r})$.
+*   **Outputs:** Total regularization loss component $\mathcal{L}_{\text{var}}$ and the final combined loss $\mathcal{L}(\mathbf{r})$.
+
+**Data Structures:**
+The method operates on scalar values (depth, weights) and vectors (colors) sampled along a ray. No specific complex data structures are required beyond standard ray marching buffers.
+
+**Formulas:**
+The weight variance loss $\mathcal{L}^{\text{w}}_{\text{var}}(\mathbf{r})$ is defined as [S1]:
+$$
+\mathcal {L}^{\text {w}}_{\text {var}}(\mathbf {r}) = \int _{t_{n}}^{t_{f}} w(\mathbf {r}(t))\left (t-\hat {D}(\mathbf {r})\right )^{2} dt
+$$
+where $\hat{D}(\mathbf{r})$ is the rendered depth expectation (weighted sum of sample distances) [S1].
+
+The color variance loss $\mathcal{L}^{\text{c}}_{\text{var}}(\mathbf{r})$ is defined as [S1]:
+$$
+\mathcal {L}^{\text {c}}_{\text {var}}(\mathbf {r}) = \int _{t_{n}}^{t_{f}} \mathcal {K}(w(\mathbf {r}(t)))\left (\mathbf {c}(\mathbf {r}(t),\mathbf {d})-\hat {\mathbf {C}}(\mathbf {r})\right )^{2} dt
+$$
+where $\mathcal{K}(\cdot)$ denotes the stop-gradient operator, preventing gradients from flowing through the weight term [S1].
+
+The total loss for a ray combines these with other terms [S1]:
+$$
+\mathcal {L}(\mathbf {r}) = \mathcal {L}_{\text {color}}(\mathbf {r}) + \lambda (\mathbf {r})\left(\lambda _{\text {d}}\mathcal {L}_{\text {depth}}(\mathbf {r})+\lambda _{\text {w}}\mathcal {L}_{\text {var}}^{\text {w}}(\mathbf {r})+\lambda _{\text {c}}\mathcal {L}_{\text {var}}^{\text {c}}(\mathbf {r})\right)
+$$
+where $\lambda(\mathbf{r})$ is a view coverage adjustment factor [S1].
+
+**Parameters:**
+*   $\lambda_d, \lambda_w, \lambda_c$: Loss weights for depth, weight variance, and color variance respectively. Typical values are not explicitly given in the sources, but they are tuned hyperparameters [S1].
+*   $\alpha$: Threshold for view coverage adjustment (regions with observations $< \alpha$ are strongly regularized) [S1].
+
+**Pseudocode:**
+The integral is approximated by a sum over discrete samples $i=1 \dots N$ with step size $\Delta t_i$.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def variance_regularization(rays, samples, rendered_depth, rendered_color, 
+                            lambda_d, lambda_w, lambda_c, lambda_view, 
+                            base_color_loss, base_depth_loss):
+    """
+    Computes the variance regularization loss for a batch of rays.
+    
+    Args:
+        rays: Ray origins and directions.
+        samples: Struct containing t (depths), w (weights), c (colors) for each sample point.
+        rendered_depth: Rendered depth expectation D_hat(r) for each ray.
+        rendered_color: Rendered pixel color C_hat(r) for each ray.
+        lambda_d, lambda_w, lambda_c: Scalar loss weights.
+        lambda_view: View coverage adjustment factor lambda(r) for each ray.
+        base_color_loss: Pre-computed photometric color loss L_color(r).
+        base_depth_loss: Pre-computed depth loss L_depth(r).
+        
+    Returns:
+        total_loss: Combined loss value.
+    """
+    # Initialize accumulators
+    loss_w_var = 0.0
+    loss_c_var = 0.0
+    
+    # Iterate over samples for each ray
+    # Note: In practice, this is vectorized over rays and samples
+    for ray_idx in range(num_rays):
+        ray_samples = samples[ray_idx] # List of (t, w, c)
+        
+        # Approximate integrals using summation
+        # Integral from t_n to t_f
+        for sample in ray_samples:
+            t = sample.t
+            w = sample.w
+            c = sample.c
+            
+            # Weight Variance Loss term: w(t) * (t - D_hat)^2
+            # Gradient flows through w and t
+            term_w = w * (t - rendered_depth[ray_idx]) ** 2
+            loss_w_var += term_w
+            
+            # Color Variance Loss term: K(w) * (c - C_hat)^2
+            # Gradient flows through c, but NOT through w (stop gradient)
+            # K(w) is treated as a constant multiplier for gradient purposes
+            term_c = w * (c - rendered_color[ray_idx]) ** 2
+            loss_c_var += term_c
+            
+        # Note: The integral approximation requires multiplying by sample spacing dt.
+        # If samples are uniformly spaced with step dt, multiply sums by dt.
+        # If not uniform, use appropriate quadrature.
+        # Sources do not specify the exact discretization scheme (e.g., simple sum vs weighted sum).
+        # We assume a simple Riemann sum approximation here [G].
+        
+    # Apply view coverage adjustment and loss weights
+    # lambda_view is applied to the bracketed term
+    adjusted_loss = lambda_view * (lambda_d * base_depth_loss + 
+                                   lambda_w * loss_w_var + 
+                                   lambda_c * loss_c_var)
+                                   
+    total_loss = base_color_loss + adjusted_loss
+    
+    return total_loss
+```
+
+**Edge Cases and Pitfalls:**
+*   **Stop Gradient:** The color variance loss uses $\mathcal{K}(w)$ to stop gradients through the weight. Failing to implement this stop-gradient operation will cause incorrect gradient flow [S1].
+*   **Low Texture/Few-Shot:** The method is specifically designed for regions with low texture and few observations. Applying it uniformly without the view coverage adjustment $\lambda(\mathbf{r})$ may over-constrain well-observed regions [S1].
+*   **Depth Expectation:** $\hat{D}(\mathbf{r})$ must be computed consistently with the weight distribution used in the loss [S1].
+
+## Subtopics
+
+### Variance Loss
+Adds a variance-based loss term to the scene optimization, either total variance loss or voxel disparity loss. [Variance Loss](5449-variance-loss.md)
+
+### F2-NeRF Training Loss
+A sibling method for training NeRFs. [F2-NeRF Training Loss](7645-f2-nerf-training-loss.md)
+
+## Operating characteristics
+*   **Time Complexity:** Adds an $O(N)$ pass over samples per ray for the variance terms, where $N$ is the number of samples per ray. This is comparable to the cost of the color loss itself.
+*   **Memory Complexity:** No additional memory beyond storing intermediate sample values (weights, colors, depths) which are already required for rendering.
+*   **Strengths:** Effectively reduces ambiguity in low-texture and few-shot regions common in indoor scenes, leading to better free view synthesis (FVS) performance [S1].
+*   **Limitations:** Requires tuning of multiple loss weights ($\lambda_d, \lambda_w, \lambda_c$) and the view coverage adjustment factor $\lambda(\mathbf{r})$ [S1].
+*   **When to use:** Indoor scene reconstruction with free view synthesis requirements, especially where training views are sparse or textures are uniform [S1].
+
+## Background
+Variance Regularization was introduced in the NeRFVS paper (NeRF: Neural Radiance Fields for Free View Synthesis via Geometry Scaffolds) by the authors of [S1]. It addresses the issue that identical rendered colors and depths can result from significantly different weight distributions, particularly in low-texture indoor environments [S1]. The method was developed to improve FVS performance by regularizing the variance of weight and color distributions [S1].
+
+## Sources
+[S1] NeRFVS: Neural Radiance Fields for Free View Synthesis via Geometry Scaffolds, https://doi.org/10.1109/cvpr52729.2023.01588, fetched 2026-10-26

@@ -1,0 +1,237 @@
+# PDDF Shape-Fitting Loss
+
+Also called: PDDF loss
+
+## Overview
+The PDDF Shape-Fitting Loss ($\mathcal{L}_S$) is the primary training objective for Probabilistic Directed Distance Fields, designed to supervise the network's prediction of visibility, surface normals, and a mixture of depth components. It solves the problem of learning accurate implicit surface representations from oriented point clouds by combining geometric consistency, visibility prediction, and regularization of the probabilistic weight fields. It distinguishes itself from standard SDF training by explicitly modeling depth as a discrete mixture of delta functions (PDDF) and enforcing transitions between these components at surface discontinuities via a dedicated weight transition loss.
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   Oriented points $(p, v)$, where $p$ is the 3D position and $v$ is the viewing direction.
+*   Ground truth data: visibility $\xi$, surface normal $n$, and depth $d$.
+*   Network predictions: visibility $\hat{\xi}$, depth components $\hat{d}_i$, and weights $w_i$ for $i \in \{1, \dots, K\}$.
+*   Hyperparameters: $\gamma_d, \gamma_\xi, \gamma_n, \gamma_{E,d}, \gamma_{E,\xi}, \gamma_V, \gamma_T, \varepsilon_T$.
+*   $K=2$: The number of delta components.
+
+**Outputs:**
+*   Scalar loss value $\mathcal{L}_S$.
+
+### Data Structures
+The PDDF representation at a point consists of:
+*   $w_i$: Scalar weight for the $i$-th depth component.
+*   $\hat{d}_i$: Scalar predicted depth for the $i$-th component.
+*   $\hat{\xi}$: Scalar predicted visibility.
+
+The maximum likelihood index is defined as:
+$$ i^* = \arg \max_j w_j $$
+
+### Formulas
+The total loss is a weighted sum of five components:
+
+$$ \mathcal{L}_S = \gamma_d \mathcal{L}_d + \gamma_\xi \mathcal{L}_\xi + \gamma_n \mathcal{L}_n + \mathcal{L}_{\text{DE}} + \mathcal{L}_{W} \quad (2) $$
+
+1.  **Minimum Distance Loss ($\mathcal{L}_d$):** Trains the highest probability depth component to match the ground truth depth.
+    $$ \mathcal{L}_d = \xi | \hat{d}_{b_{i^*}} - d | $$
+    *Note: The source notation $\hat{d}_{b_{i^*}}$ refers to the predicted depth of the maximum likelihood component.*
+
+2.  **Visibility Objective ($\mathcal{L}_\xi$):** Binary cross-entropy between predicted and ground truth visibility.
+    $$ \mathcal{L}_\xi = \text{BCE}(\hat{\xi}, \xi_b) $$
+    *Note: Source uses $\xi_b$ for ground truth visibility in the formula context, while $\xi$ is used in other terms. We assume $\xi_b$ and $\xi$ refer to the same ground truth visibility value.*
+
+3.  **Normals Loss ($\mathcal{L}_n$):** Matches surface normals using the gradient of the predicted depth of the maximum likelihood component.
+    $$ \mathcal{L}_n = -\xi | n^T n_{b_{i^*}}(p, v) | $$
+    Where $n_{b_{i^*}}(p, v)$ is the normal derived from $\nabla_p \hat{d}_{b_{i^*}}$.
+
+4.  **Directed Eikonal Regularization ($\mathcal{L}_{\text{DE}}$):** Enforces the Eikonal equation on visibility and depth components.
+    $$ \mathcal{L}_{\text{DE}} = \gamma_{\text{E},d} \sum_i \xi \left[ \nabla_i \hat{d}_i \cdot v + 1 \right]^2 + \gamma_{\text{E},\xi} \left[ \nabla_\xi \hat{\xi} \cdot v \right]^2 \quad (1) $$
+    *Note: $\nabla_i$ denotes the gradient with respect to the input coordinates for the $i$-th component.*
+
+5.  **Weight Field Regularization ($\mathcal{L}_{W}$):** Encourages low entropy and controlled transitions.
+    $$ \mathcal{L}_{W} = \gamma_V \mathcal{L}_V + \gamma_T \mathcal{L}_T $$
+
+    *   **Weight Variance Loss ($\mathcal{L}_V$):** Encourages low entropy (sharp peaks) in the weight distribution to prevent $i^*$ from switching unnecessarily.
+        $$ \mathcal{L}_V = \sum_i w_i $$
+        *Note: The source formula $\sum_i w_i$ is unusual for a variance/entropy loss (as weights typically sum to 1). However, the text explicitly states this is the formula for $\mathcal{L}_V$. We retain the source's explicit formula.*
+
+    *   **Weight Transition Loss ($\mathcal{L}_T$):** Encourages the maximum likelihood component to change $i^*$ when a discontinuity is required.
+        $$ \mathcal{L}_T = \max(0, \varepsilon_T - |\nabla_p w_{1n}|)^2 $$
+        *Note: $\nabla_p w_{1n}$ refers to the gradient of the first weight component along the normal direction. Since $K=2$, using $w_1$ alone is sufficient to enforce changes along the normal.*
+
+### Parameters
+*   $\gamma_d, \gamma_\xi, \gamma_n$: Weights for distance, visibility, and normals losses. Values not given in the sources.
+*   $\gamma_{E,d}, \gamma_{E,\xi}$: Weights for Directed Eikonal terms. Values not given in the sources.
+*   $\gamma_V, \gamma_T$: Weights for weight regularization terms. Values not given in the sources.
+*   $\varepsilon_T$: Hyper-parameter controlling the desired transition speed. Value not given in the sources.
+*   $K=2$: Number of delta components.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def pddf_shape_fitting_loss(p, v, xi_gt, n_gt, d_gt, xi_pred, d_pred, w_pred, 
+                            gamma_d, gamma_xi, gamma_n, gamma_E_d, gamma_E_xi, 
+                            gamma_V, gamma_T, epsilon_T):
+    """
+    Computes the PDDF Shape-Fitting Loss.
+    
+    Args:
+        p: (N, 3) Point positions.
+        v: (N, 3) Viewing directions.
+        xi_gt: (N,) Ground truth visibility.
+        n_gt: (N, 3) Ground truth normals.
+        d_gt: (N,) Ground truth depth.
+        xi_pred: (N,) Predicted visibility.
+        d_pred: (N, K) Predicted depth components.
+        w_pred: (N, K) Predicted weights.
+        
+    Returns:
+        loss: Scalar loss value.
+    """
+    K = d_pred.shape[1]
+    
+    # 1. Identify maximum likelihood index
+    # i_star = argmax_j w_j
+    i_star = torch.argmax(w_pred, dim=1)  # Shape (N,)
+    
+    # Gather the depth component corresponding to i_star
+    # d_b_i_star: (N,)
+    d_b_i_star = d_pred[torch.arange(d_pred.shape[0]), i_star]
+    
+    # 2. Minimum Distance Loss
+    # L_d = xi * |d_b_i_star - d|
+    # Note: xi_gt is used as the mask. If xi_gt is 0, loss is 0.
+    L_d = xi_gt * torch.abs(d_b_i_star - d_gt)
+    L_d = torch.mean(L_d)
+    
+    # 3. Visibility Objective
+    # L_xi = BCE(xi_pred, xi_gt)
+    # BCE(y_true, y_pred) = -mean(y_true * log(y_pred) + (1 - y_true) * log(1 - y_pred))
+    # Add epsilon for numerical stability
+    eps = 1e-7
+    xi_pred_clipped = torch.clamp(xi_pred, eps, 1 - eps)
+    L_xi = -torch.mean(xi_gt * torch.log(xi_pred_clipped) + (1 - xi_gt) * torch.log(1 - xi_pred_clipped))
+    
+    # 4. Normals Loss
+    # L_n = -xi * |n^T n_b_i_star|
+    # n_b_i_star is derived from grad_p(d_b_i_star)
+    # Compute gradient of d_b_i_star w.r.t p
+    # d_b_i_star is a scalar field per point, but we need spatial gradient.
+    # In practice, this requires autograd through the network that produced d_pred.
+    # Assuming d_b_i_star is a tensor requiring grad:
+    d_b_i_star.requires_grad_(True)
+    grad_d_b_i_star = torch.autograd.grad(
+        d_b_i_star.sum(), p, create_graph=True, retain_graph=True
+    )[0]  # Shape (N, 3)
+    
+    # Normalize gradient to get normal
+    # n_b_i_star = grad_d / |grad_d|
+    norm_grad = torch.norm(grad_d_b_i_star, dim=1, keepdim=True) + 1e-7
+    n_b_i_star = grad_d_b_i_star / norm_grad
+    
+    # L_n = -xi * |n^T n_b_i_star|
+    # Dot product
+    dot_prod = torch.sum(n_gt * n_b_i_star, dim=1)
+    L_n = -torch.mean(xi_gt * torch.abs(dot_prod))
+    
+    # 5. Directed Eikonal Regularization
+    # L_DE = gamma_E_d * sum_i [ xi * (grad_i(d_i) . v + 1)^2 ] + gamma_E_xi * [ (grad_xi(xi) . v)^2 ]
+    
+    # Part 1: Depth components
+    L_DE_d = 0.0
+    for i in range(K):
+        d_i = d_pred[:, i]
+        d_i.requires_grad_(True)
+        grad_d_i = torch.autograd.grad(
+            d_i.sum(), p, create_graph=True, retain_graph=True
+        )[0]  # Shape (N, 3)
+        
+        # grad_d_i . v
+        dot_d_v = torch.sum(grad_d_i * v, dim=1)
+        term = dot_d_v + 1.0
+        L_DE_d += torch.mean(xi_gt * (term ** 2))
+    
+    # Part 2: Visibility
+    xi_pred.requires_grad_(True)
+    grad_xi = torch.autograd.grad(
+        xi_pred.sum(), p, create_graph=True
+    )[0]  # Shape (N, 3)
+    
+    dot_xi_v = torch.sum(grad_xi * v, dim=1)
+    L_DE_xi = torch.mean((dot_xi_v ** 2))
+    
+    L_DE = gamma_E_d * L_DE_d + gamma_E_xi * L_DE_xi
+    
+    # 6. Weight Field Regularization
+    # L_W = gamma_V * L_V + gamma_T * L_T
+    
+    # L_V = sum_i w_i
+    # Note: Source formula is sum(w_i). If weights are normalized, this is K.
+    # Assuming the source intends a specific regularization, we follow the formula.
+    L_V = torch.mean(torch.sum(w_pred, dim=1))
+    
+    # L_T = max(0, epsilon_T - |grad_p(w_1n)|)^2
+    # w_1n refers to w_1 gradient along normal.
+    # Since K=2, we use w_1 (index 0).
+    w_1 = w_pred[:, 0]
+    w_1.requires_grad_(True)
+    grad_w_1 = torch.autograd.grad(
+        w_1.sum(), p, create_graph=True
+    )[0]  # Shape (N, 3)
+    
+    # Gradient along normal n_gt
+    # grad_w_1 . n_gt
+    dot_w_n = torch.sum(grad_w_1 * n_gt, dim=1)
+    abs_dot_w_n = torch.abs(dot_w_n)
+    
+    # max(0, epsilon_T - abs_dot_w_n)^2
+    L_T = torch.mean(torch.clamp(epsilon_T - abs_dot_w_n, min=0.0) ** 2)
+    
+    L_W = gamma_V * L_V + gamma_T * L_T
+    
+    # 7. Total Loss
+    L_S = gamma_d * L_d + gamma_xi * L_xi + gamma_n * L_n + L_DE + L_W
+    
+    return L_S
+```
+
+### Edge Cases and Pitfalls
+*   **Gradient Computation:** The normals loss and Eikonal loss require gradients of the network outputs with respect to the input positions $p$. This requires `create_graph=True` in autograd to allow second-order derivatives if needed, or at least first-order derivatives for the Eikonal term.
+*   **Weight Transition Loss Application:** $\mathcal{L}_T$ is only applied to oriented points that are surface (S) and tangent (T) data, where a discontinuity is desired. It should not be applied to all points indiscriminately. The pseudocode above applies it to all points; in implementation, a mask for S/T points should be used.
+*   **K=2 Assumption:** The transition loss uses $w_1$ alone. This is valid because $K=2$, so $w_1$ determines the switch between the two components.
+*   **L_V Formula:** The formula $\mathcal{L}_V = \sum_i w_i$ is unusual. If weights are normalized to sum to 1, this term is constant ($K$). The source text says it encourages "low entropy", which usually involves $\sum w_i \log w_i$. However, the explicit formula is $\sum w_i$. We follow the explicit formula.
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Time:** The loss computation involves forward passes for gradients, which doubles the computational cost of the forward pass for the depth and visibility predictions. The Eikonal term sums over $K$ components.
+*   **Memory:** Requires storing gradients for $p$ for each output ($d_i, \xi$). This increases memory usage proportional to the number of components $K$.
+
+### Strengths and Limitations
+*   **Strengths:** Explicitly handles visibility and depth as a mixture, allowing for multi-modal depth distributions. The transition loss helps in learning sharp discontinuities.
+*   **Limitations:** The weight variance loss formula is non-standard. The method relies on oriented point cloud data, which may not be available for all scenes.
+
+### When to Use
+*   Use when training PDDF models from oriented point clouds.
+*   Use when accurate surface normals and visibility prediction are required.
+
+### When Not to Use
+*   Do not use for standard SDF training without the probabilistic depth mixture.
+*   Do not use if oriented point cloud data is not available.
+
+## Background
+
+### Origin
+The PDDF Shape-Fitting Loss was introduced in "Probabilistic Directed Distance Fields for Ray-Based Shape Representations" [S1].
+
+### History
+The method builds on prior SDF work [60]-[64] and extends it by incorporating a probabilistic mixture of depth components.
+
+### Usage
+Used in ray-based shape representations for rendering and reconstruction.
+
+## Sources
+
+[S1] Probabilistic Directed Distance Fields for Ray-Based Shape Representations, https://doi.org/10.1109/tpami.2025.3594225, fetched 2026-10-29

@@ -18,7 +18,6 @@ This method converts a triangulated surface mesh (typically from 3D scanning) in
     *   `textureShell`: A small value (e.g., $0.05$) defining a boundary region around the texture where distance values might be invalid [S3, unofficial].
 
 **Algorithm Steps:**
-
 1.  **Pre-processing:** Close any holes in the input mesh (e.g., the 5 holes in the Stanford Bunny) to ensure correct distance representation from the conversion tool [S3, unofficial].
 2.  **Grid Initialization:** For each grid point (voxel center) in the 3D texture:
     a.  Map UV coordinates to 3D grid coordinates: $co = texCoord \times vec2(res, res^2)$, where $res$ is the resolution [S2, unofficial].
@@ -140,7 +139,7 @@ def ray_casting_parity(point, mesh):
         a, b, c = tri[0], tri[1], tri[2]
         # Ray from point along +X axis
         # Check intersection with triangle plane
-        n = cross(ab, ac)
+        n = cross((b[0]-a[0], b[1]-a[1], b[2]-a[2]), (c[0]-a[0], c[1]-a[1], c[2]-a[2]))
         denom = n[0]
         if denom == 0.0: continue
         t = (a[0] - point[0]) / denom
@@ -167,6 +166,25 @@ def ray_casting_parity(point, mesh):
 
 def cross(u, v):
     return (u[1]*v[2] - u[2]*v[1], u[2]*v[0] - u[0]*v[2], u[0]*v[1] - u[1]*v[0])
+
+def query_sdf_boundary(x, texture, texture_boundary, texture_shell):
+    """Boundary handling for SDF texture lookup [S3, unofficial]"""
+    di = (abs(x[0]), abs(x[1]), abs(x[2])) - texture_boundary + texture_shell
+    # Check if outside 3D texture space
+    if di[0] > 0 or di[1] > 0 or di[2] > 0:
+        res = math.sqrt(max(di[0] + texture_shell[0], 0)**2 + max(di[1] + texture_shell[1], 0)**2 + max(di[2] + texture_shell[2], 0)**2)
+        return res
+    c = max(di[0], max(di[1], di[2]))
+    if c < 0:
+        x_adj = (x[0] + texture_boundary[0], x[1] + texture_boundary[1], x[2] + texture_boundary[2])
+        res = lookup_texture_3d(texture, x_adj)
+        return res
+    return 0.0 # Fallback
+
+def lookup_texture_3d(texture, coord):
+    """Standard 3D texture lookup [G]"""
+    # Implementation depends on specific graphics API or grid storage format
+    pass
 ```
 
 **Edge Cases and Pitfalls:**
@@ -184,7 +202,7 @@ Converts a triangulated surface mesh into a 3D SDF texture or implicit function,
 Computes an SDF by iterating over a 3D grid, determining inside/outside status via ray-casting parity on 2D slices, and sampling the exact mesh distance at each voxel center, explicitly using 2D slice intersections for topological containment.
 
 ### Shell SDF
-An unsigned distance field minus a shell half-thickness. Negative within `shell_voxels` of any triangle, positive beyond. Works on open, non-manifold, self-intersecting, and inconsistently wound meshes. Extracts a thin solid around every triangle: two walls around an open sheet, and an outer surface plus an inner one for a closed solid [S4, unofficial]. Parameter `shell_voxels` is the shell half-thickness in voxels, default 1.5f, must be $\ge \sqrt{3}/2$ (0.866) to prevent holes between voxels, and must be $<$ `trunc_dist` [S4, unofficial]. This is the unsigned offset field from Xu & Barbic, 'Signed Distance Fields for Polygon Soup Meshes' (GI 2014), before their interior-component removal step [S4, unofficial].
+An unsigned distance field minus a shell half-thickness [S4, unofficial]. Negative within `shell_voxels` of any triangle, positive beyond [S4, unofficial]. Works on open, non-manifold, self-intersecting, and inconsistently wound meshes [S4, unofficial]. Extracts a thin solid around every triangle: two walls around an open sheet, and an outer surface plus an inner one for a closed solid [S4, unofficial]. Parameter `shell_voxels` is the shell half-thickness in voxels, default 1.5f, must be $\ge \sqrt{3}/2$ (0.866) to prevent holes between voxels, and must be $<$ `trunc_dist` [S4, unofficial]. This is the unsigned offset field from Xu & Barbic, 'Signed Distance Fields for Polygon Soup Meshes' (GI 2014), before their interior-component removal step [S4, unofficial].
 
 ## Operating characteristics
 *   **Time Complexity:** Not given in the sources.

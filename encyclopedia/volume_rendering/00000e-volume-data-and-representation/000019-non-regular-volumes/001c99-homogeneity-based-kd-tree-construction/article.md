@@ -1,0 +1,115 @@
+# Homogeneity-Based KD-Tree Construction
+
+Also called: AMR Mesh Construction via Homogeneity-Based KD-Tree
+
+## Overview
+Homogeneity-Based KD-Tree Construction is a hierarchical data structure for Adaptive Mesh Refinement (AMR) datasets that avoids the memory waste and performance penalties associated with homogeneous page tables by grouping same-level cells into patches and building a KD-tree based on level homogeneity [S1]. It solves the problem of inefficient rendering of AMR data by creating a structure where patches are sorted and rendered completely on the GPU, leveraging their regularity, while the hierarchy traversal occurs on the CPU [S1]. It differs from sibling methods like [Adaptive Octree Construction with 2:1 Balance and Surface Propagation](830-adaptive-octree-construction-with-2-1-balance-and-surface-pr.md) by explicitly optimizing for cell-level homogeneity to form axis-aligned patches rather than balancing spatial occupancy or surface proximity.
+
+## How it works
+**Inputs:** An AMR dataset consisting of cells at various refinement levels.
+**Outputs:** A KD-tree where leaf nodes contain homogeneous patches (axis-aligned boxes of same-level cells) and internal nodes contain split information.
+
+**Data Structures:**
+*   **Box:** An axis-aligned bounding box defined by minimum and maximum coordinates.
+*   **Node:** Represents a region in the KD-tree.
+    *   `is_leaf`: Boolean flag.
+    *   `data`: If leaf, contains the list of cells in the patch.
+    *   `children`: If internal, a tuple of two child nodes.
+    *   `split_axis`: The axis along which the box was split (implied by the split process).
+
+**Parameters:**
+*   `homogeneity(box)`: A function returning the ratio of homogeneity of cell levels inside a given box. It returns 1 if all cells share the same level, and 0 if all have different levels [S1].
+
+**Algorithm Steps:**
+1.  **Initialization:** Start with the root node containing the entire dataset box.
+2.  **Recursive Construction:** For a given box $b$ and node $n$:
+    a.  Evaluate $h = \text{homogeneity}(b)$.
+    b.  If $h = 1$, mark $n$ as a leaf node and copy the data (cells) from $b$ to $n$. Terminate recursion for this branch.
+    c.  If $h < 1$, create two child nodes.
+    d.  Determine the optimal split by calling `split(b)`.
+    e.  Assign the resulting child boxes to the children.
+    f.  Recursively call the construction procedure on each child box and node.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def homogeneity(box):
+    """
+    Returns the ratio of homogeneity of cell levels inside a given box.
+    Returns 1 if all cells share the same level.
+    Returns 0 if all cells have different levels.
+    """
+    # Implementation depends on specific AMR data layout.
+    # Logic: Check if all cells in box have identical refinement level.
+    # Not given in the sources. [G]
+    pass
+
+def split(box):
+    """
+    Finds the best cut plane to maximize homogeneity of the resulting sub-boxes.
+    Returns the box split by the best cut.
+    """
+    best_score = 0
+    best_cut = None
+    
+    # Iterate through each axis direction (x, y, z)
+    for d in [0, 1, 2]:
+        # Iterate through each possible cut plane p in direction d
+        # Note: The sources do not specify the granularity of cut planes.
+        # Typically, this involves testing cuts at cell boundaries. [G]
+        for p in get_possible_cuts(box, d):
+            # Calculate homogeneity of the box cut by p
+            # This likely implies evaluating the homogeneity of the resulting
+            # sub-regions or the distribution of levels across the cut.
+            current_score = homogeneity(box_cut_by_p(box, p))
+            
+            if current_score > best_score:
+                best_score = current_score
+                best_cut = p
+                
+    return box_split_by_cut(box, best_cut)
+
+def build_mesh(box, node):
+    """
+    Recursively builds the KD-tree.
+    """
+    if homogeneity(box) == 1:
+        node.is_leaf = True
+        node.data = copy_data(box)
+    else:
+        node.is_leaf = False
+        child_node_1 = Node()
+        child_node_2 = Node()
+        
+        # Split the box
+        child_box_1, child_box_2 = split(box)
+        
+        node.children = (child_node_1, child_node_2)
+        
+        # Recurse
+        build_mesh(child_box_1, child_node_1)
+        build_mesh(child_box_2, child_node_2)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The definition of `homogeneity` returning a ratio implies floating-point arithmetic. However, the threshold for leaf creation is exactly 1. Degenerate cases where cells have mixed levels but high homogeneity ratios must be handled by the specific implementation of `homogeneity` [S1].
+*   **Boundary Conditions:** The `split` function iterates through "possible cut planes." If no valid cut exists that improves homogeneity, the algorithm may fail to terminate or produce empty nodes. The sources do not specify a base case for non-splitable non-homogeneous boxes [S1].
+
+## Subtopics
+
+### [AMR KD-Tree Construction](6768-amr-kd-tree-construction.md)
+A spatial data structure built over unique block regions to enable efficient cell location kernels without reformatting input data or replicating voxels. It focuses on the resulting structure's utility for GPU rendering rather than the specific homogeneity-based splitting heuristic.
+
+## Operating characteristics
+*   **Time Complexity:** The construction involves a recursive split. In the worst case, if no homogeneous patches are found, it behaves like a standard KD-tree construction, but the cost of evaluating `homogeneity` at each step is significant. The sources do not provide a formal Big-O complexity [S1].
+*   **Memory Complexity:** The structure avoids the memory waste of homogeneous page tables by grouping cells into patches. It does not require additional cells, reducing memory overhead compared to naive AMR representations [S1].
+*   **Performance:** The hybrid CPU-GPU approach allows the CPU to handle the hierarchical traversal (back-to-front order) while the GPU handles the trivial traversal within homogeneous patches. This separation leverages the regularity of patches for efficient GPU rendering [S1].
+*   **Strengths:** Eliminates the performance penalty of high-quality cell rendering methods on unstructured AMR data by converting irregular regions into regular patches.
+*   **Limitations:** The construction algorithm's efficiency depends heavily on the definition and cost of the `homogeneity` function. The sources do not provide measured performance metrics or hardware specifics [S1].
+
+## Background
+This method was presented in a 2009 paper by Marchesin et al. [S1]. It addresses the difficulty of handling hierarchical AMR structures efficiently on the GPU. The technique was developed to overcome the slowdowns caused by adding additional cells in previous methods, particularly when high-quality rendering was required. It utilizes a hybrid CPU-GPU sorting approach, where the hierarchical structure is traversed on the CPU, but the sorted patches are rendered on the GPU [S1].
+
+## Sources
+[S1] High-Quality, Semi-Analytical Volume Rendering for AMR ..., https://people.freedesktop.org/~marcheu/vis09-amr.pdf, fetched 2026-10-26

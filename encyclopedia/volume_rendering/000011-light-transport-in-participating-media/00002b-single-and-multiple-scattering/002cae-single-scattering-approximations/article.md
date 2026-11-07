@@ -1,21 +1,21 @@
 # Single Scattering Approximations
 
-Also called: Single-scattering volume rendering, Single-scattering atmosphere rendering
+Also called: Single-scattering
 
 ## Overview
-Single scattering approximations solve the Radiative Transfer Equation (RTE) by assuming that light undergoes at most one scattering event within the participating medium before reaching the camera [S2, S5, unofficial]. This simplification ignores multiple bounces (glow) and secondary in-scattering, reducing the computational cost significantly compared to full path tracing [S5, unofficial]. It is distinguished from multiple scattering methods by its inability to model light trapped within dense media, and from heterogeneous methods by often assuming constant coefficients (though atmospheric variants handle density falloff) [S2, S5, unofficial].
+Single scattering approximations compute the radiance contribution of light that scatters exactly once within a participating medium before reaching the camera [S2, unofficial][S3, book]. This method solves the problem of efficient volumetric lighting by ignoring the computationally expensive multiple scattering terms (glow) and assuming that in-scattered light originates directly from light sources [S1, unofficial]. It sets itself apart from full path tracing and multiple scattering methods by precomputing shadowing effects to determine incident radiance, retaining directional scattering properties rather than assuming isotropic diffuse light [S1, unofficial].
 
 ## Shared principles
-All methods in this family rely on the conservation of energy for a differential cylinder of light passing through a medium [S1, unofficial]. They share the following core definitions and mechanisms:
+All methods in this family are derived from the conservation of energy for a differential cylinder of light passing through a medium [G]. They share the following core definitions and mechanisms:
 
 **1. Fundamental Interactions**
-Any volumetric effect is composed of three fundamental characteristics [S1, unofficial]:
-*   **Absorption:** The loss of radiant energy along a ray due to energy conversion (e.g., to heat). It is described by the absorption coefficient $\sigma_a$ (units: $m^{-1}$) [S1, unofficial].
-*   **Emission:** The addition of radiant energy where the medium is luminous (e.g., flames). It is described by the emissive term $L_e(\mathbf{p}, \boldsymbol{\omega})$, representing radiance emitted per unit length [S1, unofficial].
+Any volumetric effect is composed of three fundamental characteristics [G]:
+*   **Absorption:** The loss of radiant energy along a ray due to energy conversion (e.g., to heat). It is described by the absorption coefficient $\sigma_a$ (units: $m^{-1}$) [G].
+*   **Emission:** The addition of radiant energy where the medium is luminous (e.g., flames). It is described by the emissive term $L_e(\mathbf{p}, \boldsymbol{\omega})$, representing radiance emitted per unit length [G].
 *   **Scattering:** The redirection of light rays upon collision with particles. It is split into:
-    *   *In-scattering:* Light from other directions reflected into the view ray.
-    *   *Out-scattering:* Light from the view ray reflected away.
-In most lighting calculations, out-scattering is folded into the **extinction** term because its net effect on the view ray is identical to absorption [S1, unofficial].
+    *   *In-scattering:* Light from other directions reflected into the view ray [G].
+    *   *Out-scattering:* Light from the view ray reflected away [G].
+In most lighting calculations, out-scattering is folded into the **extinction** term because its net effect on the view ray is identical to absorption [G].
 
 **2. Notation**
 *   $\mathbf{p}$: Position of interaction.
@@ -23,58 +23,82 @@ In most lighting calculations, out-scattering is folded into the **extinction** 
 *   $L$: Radiance quantity.
 *   $L_i$: Incoming radiance.
 *   $L_o$: Outgoing radiance.
-*   $\sigma_t$: Total extinction coefficient, $\sigma_t = \sigma_a + \sigma_s$ [S1, unofficial].
+*   $\sigma_t$: Total extinction coefficient, $\sigma_t = \sigma_a + \sigma_s$ [G].
 
 **3. Differential Forms**
-The change in radiance $dL$ over a differential path length $dt$ is governed by the balance of loss and gain terms [S1, unofficial]:
-*   **Absorption Model:** $dL = -\sigma_a L_i dt$ [S1, unofficial].
-*   **Emission Model:** $dL = \sigma_e dt$ (where $\sigma_e$ is the emission coefficient) [S1, unofficial].
-*   **General RTE:** Combines extinction (loss) and source terms (gain from emission and in-scattering) [S1, unofficial].
+The change in radiance $dL$ over a differential path length $dt$ is governed by the balance of loss and gain terms [G]:
+*   **Absorption Model:** $dL = -\sigma_a L_i dt$ [G].
+*   **Emission Model:** $dL = \sigma_e dt$ (where $\sigma_e$ is the emission coefficient) [G].
+*   **General RTE:** Combines extinction (loss) and source terms (gain from emission and in-scattering) [G].
 
 **4. Transmittance**
-The fraction of light surviving transmission through a medium is defined by the Beer-Lambert law [S1, unofficial]:
+The fraction of light surviving transmission through a medium is defined by the Beer-Lambert law [S3, book]:
 $$ T = e^{-\tau} $$
-where $\tau$ is the optical depth (integrated extinction) [S1, unofficial].
-
-**5. Phase Functions**
-Scattering directionality is modeled by a phase function $p(\omega_i, \omega_o)$, defined in terms of $a = \cos(\theta)$, where $\theta$ is the angle between the incident direction $\omega_i$ and the scattered direction $\omega_o$ [S1, unofficial]. The choice of phase function depends on the ratio of particle radius $r$ to wavelength $\lambda$ [S1, unofficial]:
-*   **Rayleigh Scattering:** Used when $r \ll \lambda$ (e.g., smoke, dust, water molecules).
-    $$ P_R(a) = \frac{3}{4}(1+a)^2 $$
-*   **Mie Scattering:** Used when $r \approx \lambda$ (e.g., fog, water droplets). Common variants include:
-    *   Haziness: $P_{HM}(a) = 1 + 9 \left( \frac{1+a}{2} \right)^8$
-    *   Murkiness: $P_{MM}(a) = 1 + 50 \left( \frac{1+a}{2} \right)^{32}$
-*   **Henyey-Greenstein (HG):** An approximation to Mie scattering, widely used in graphics for its efficiency and asymmetry parameter $g$:
-    $$ P_{HG}(a) = \frac{1 - g^2}{(1 + g^2 - 2ga)^{\frac{3}{2}}} $$
-*   **Schlick's Approximation:** A computationally cheaper approximation to HG that avoids fractional exponentiation:
-    $$ P_S(a) = \frac{1-g^2}{(1-ga)^2} $$
+where $\tau$ is the optical depth (integrated extinction) [S3, book].
 
 ## Subtopics
 
 ### [Single-scattering homogeneous volume rendering](1135-single-scattering-homogeneous-volume-rendering.md)
-This method renders participating media by solving the radiative transfer equation under the assumption that light scatters exactly once within a single, homogeneous volume before reaching the camera. It extends an absorption-only model by adding in-scattering from surface-emitting geometry, assuming monochromatic coefficients and surfaces that do not reflect or transmit light. It is distinguished from multiple scattering methods by ignoring secondary bounces within the medium and from heterogeneous methods by assuming constant extinction and scattering coefficients throughout the volume.
+This method renders a participating medium by solving the radiative transfer equation (RTE) under the assumption that light scatters exactly once within a homogeneous volume before reaching the camera. It extends a basic absorption-only model by adding in-scattering from surface-emitting geometry, assuming the surfaces do not reflect or transmit light. It is distinguished from [Single-scattering atmosphere rendering](3289-single-scattering-atmosphere-rendering.md) by its general applicability to arbitrary scene manifolds rather than specific atmospheric layers, and from [Volume Single Scattering (Monte Carlo with Point Light)](2293-volume-single-scattering-monte-carlo-with-point-light.md) by its integration over the entire scene manifold $\mathcal{M}$ rather than discrete point lights.
 
 ### [Volume Single Scattering (Monte Carlo with Point Light)](2293-volume-single-scattering-monte-carlo-with-point-light.md)
-Computes the radiance contribution of a single scattering event in a homogeneous participating medium by integrating in-scattered light from a point light source along a view ray. It differs from uniform ray marching variants by using Monte Carlo distance sampling to select scattering positions, which reduces bias from fixed step discretization. It is a specific instance of single scattering approximations [5340-single-scattering-approximations.md] tailored for point lights and homogeneous media.
+Computes the radiance contribution of a single scattering event in a homogeneous participating medium by integrating in-scattered light from a point light source along a view ray. It differs from uniform ray marching variants by using Monte Carlo distance sampling to select scattering positions. It is a specific instance of single scattering approximations [5340-single-scattering-approximations.md] tailored for point lights and homogeneous media.
 
 ### [Single-Scattering Atmosphere Rendering](3289-single-scattering-atmosphere-rendering.md)
-Single-scattering atmosphere rendering computes the color of the sky by numerically integrating the in-scattered light from a single distant light source (the sun) along a view ray through a spherical atmosphere shell. It solves the Radiative Transfer Equation (RTE) under the assumption that light is scattered only once before reaching the camera, accounting for Rayleigh (gas) and Mie (aerosol) scattering, as well as ozone absorption. Unlike full multiple-scattering solvers, this method is computationally efficient and suitable for real-time rendering, though it ignores light scattered between atmospheric particles. It sets itself apart from homogeneous volume methods by modeling the exponential density falloff of a planetary atmosphere and from Monte Carlo methods by using deterministic numerical integration.
+Renders the sky and atmospheric scattering by numerically integrating single scattering along a ray through a spherical atmosphere shell, accumulating Rayleigh and Mie contributions weighted by view and light transmittance. It solves the Radiative Transfer Equation (RTE) for a single distant light source (the sun), accounting for Rayleigh scattering (gas molecules), Mie scattering (aerosols), and Ozone absorption. Unlike [Single-scattering homogeneous volume rendering](1135-single-scattering-homogeneous-volume-rendering.md) which assumes constant density, this method models the exponential density decay of a planetary atmosphere and the resulting wavelength-dependent color shifts (e.g., red sunsets).
 
-### Single Scattering
-#### definition
+### [Microflake Model](4739-microflake-model.md)
+The Microflake Model is a physically-based participating medium model that represents a medium as a homogeneous cloud of microscopic, specular flakes. It solves the problem of accurately rendering anisotropic media (such as fur, hair, or certain fabrics) by deriving direction-dependent attenuation and phase functions from a statistical distribution of microflake normals. It differs from isotropic single-scattering approximations by explicitly accounting for the orientation of scattering particles, ensuring that the model satisfies Helmholtz's reciprocity principle by construction, which arbitrary anisotropic phase functions often violate.
+
+### [Heterogeneous In-scattering with Multiple Scattering](4934-heterogeneous-in-scattering-with-multiple-scattering.md)
+This method computes the total radiance contribution from light scattering within a heterogeneous participating medium by combining direct illumination from light sources with recursively computed indirect illumination (multiple scattering) up to a fixed maximum depth. It differs from single-scattering approximations by accounting for light that scatters more than once before reaching the viewer, and from full path tracing by using a truncated recursion depth rather than a probabilistic path termination. It builds on [Single and multiple scattering](35-single-and-multiple-scattering.md) by implementing the recursive solution to the radiative transfer equation for heterogeneous media.
+
+### [Single Scattering Approximation](5264-single-scattering-approximation.md)
+The Single Scattering Approximation is a simplification of the volume rendering integral that assumes low albedo and/or low density, such that the probability of light scattering more than once is negligible. It solves the problem of computing volumetric lighting by considering only single scattering events, ignoring glow and multiple scattering contributions. It sets itself apart from multiple scattering methods by precomputing shadowing effects to determine incident radiance, and from diffusion approximations by retaining directional scattering properties rather than assuming isotropic diffuse light.
+
+#### Single Scattering
+
+### definition
 - [S1, unofficial] An approximation where in-scattered radiance is assumed to come from lights directly, similar to direct lighting, requiring integration over the spherical domain.
-#### step
+
+### step
 - [S1, unofficial] Substitute spherical integration using Next Event Estimation (directly enumerating all lights).
-#### formula
+
+### formula
 - [S1, unofficial] $$ L_s(x_t, \vec w) = \int_{S^2} phase(x_t, \vec w', \vec w) L_i(x_t, \vec w') d\vec w' $$ where $L_s$ is in-scattered radiance, $phase$ is the phase function, $L_i$ is incident radiance from lights (or 0).
 
+#### Multiple Scattering (Max/Kajiya)
+
+### definition
+- [S2, unofficial] Extension of Blinn's model to arbitrary shapes via analytical functions, accounting for multiple reflections.
+
+### step
+- [S2, unofficial] Kajiya's two-pass method: Pass 1 pre-calculates reflected light proportion per voxel considering attenuation. Pass 2 renders image via ray casting using pre-calculated intensity info.
+
+### history
+- [S2, unofficial] First scattering rendering model by Kajiya [KH84]. Extended by Max [Max94] to include anisotropic light dispersion (e.g., halo effect).
+
 #### Multiple Forward/Backward Scattering Approximation
-#### step
-- [S2, book] Kniss et al. [30] generalized single-pass shadow algorithms to multiple forward scattering by gathering accumulated light from several sampled directions in the previous sampling plane.
-- [S2, book] Zhang et al. [62] added backward scattering from the next couple of sampling planes.
+
+### step
+- [S3, book] Kniss et al. [30] generalized single-pass shadow algorithms to multiple forward scattering by gathering accumulated light from several sampled directions in the previous sampling plane.
+- [S3, book] Zhang et al. [62] added backward scattering from the next couple of sampling planes.
+
+#### Analytical Single Scattering without Boundaries
+
+### definition
+- [S4] Proposes an analytical solution for single scattering by participating media without boundaries under a point light.
+
+### number
+- [S4] Can achieve a real-time frame rate.
 
 ## Background
-Single scattering approximations originate from the fundamental solution to the Radiative Transfer Equation (RTE) in participating media [S1, unofficial]. The method is widely used in real-time rendering for atmospheric effects (sky, fog) and in offline rendering for quick previews or low-density media where multiple bounces are negligible [S5, unofficial]. The homogeneous volume variant is often taught as the first step in volumetric path tracing, providing a baseline for understanding free-path sampling and in-scattering estimation [S2, book]. Atmospheric single scattering is a staple in computer graphics for rendering realistic skies, leveraging the specific physical properties of Earth's atmosphere (Rayleigh and Mie scattering) [S5, unofficial].
+The concept of single scattering was first introduced by Kajiya [KH84] as the first scattering rendering model, utilizing a two-pass method where the first pass pre-calculates reflected light proportions per voxel considering attenuation, and the second pass renders the image via ray casting [S2, unofficial]. Max [Max86] extended Blinn's model to arbitrary shapes via analytical functions and introduced the handling of multiple reflections [S2, unofficial]. Max [Max94] further extended this to include anisotropic light dispersion, allowing for effects such as the illuminated halo when the light source is behind the volume [S2, unofficial].
+
+In the context of spectral volume rendering, single scattering approximations are often applied to homogeneous media where the transmission of light is modeled as a function of wavelength [S3, book]. For heterogeneous media, methods like those by Kniss et al. [30] generalized single-pass shadow algorithms to multiple forward scattering by gathering accumulated light from several sampled directions in the previous sampling plane, while Zhang et al. [62] added backward scattering from subsequent sampling planes [S3, book]. More recently, Sun et al. [63] proposed an analytical solution for single scattering by participating media without boundaries under a point light, achieving real-time frame rates [S4].
 
 ## Sources
 [S1] l0exy1h/VolumetricPathTracing-public, https://github.com/l0exy1h/VolumetricPathTracing-public, fetched 2026-10-26 (unofficial)
-[S2] Local and Global Illumination in the Volume Rendering Integral, https://avishek.net/assets/papers/nerfs/local-and-global-illumination-rendering-integral.pdf, fetched 2026-10-27 (book)
+[S2] Représentation et algorithmes pour l'exploration interactive de volumes procéduraux étendus et détaillés, https://inria.hal.science/inria-00598406v1, fetched 2026-10-26 (unofficial)
+[S3] Local and Global Illumination in the Volume Rendering Integral, https://avishek.net/assets/papers/nerfs/local-and-global-illumination-rendering-integral.pdf, fetched 2026-10-27 (book)
+[S4] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26

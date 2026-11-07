@@ -3,49 +3,48 @@
 Also called: AMR Basis Function Interpolation, Basis Function Reconstruction, Basis function interpolation, Basis interpolation method, Reconstruction via Basis Functions, basis function approach, basis method
 
 ## Overview
-The AMR Basis Reconstruction Filter is a volume rendering interpolation strategy for block-structured Adaptive Mesh Refinement (AMR) data that computes a continuous, smooth scalar field by blending contributions from all AMR levels simultaneously [S1, unofficial]. It remedies stitching artifacts at level boundaries without relying on non-rectilinear grid interpolation or cell subdivision, distinguishing it from methods that use stitch cells or simplicial elements [S1, unofficial]. Unlike the "Finest" method, which produces high-frequency transition artifacts at coarse boundaries, the Basis method yields smoother, continuous images at the cost of higher computational expense [S1, unofficial].
+The AMR Basis Reconstruction Filter is a volume rendering interpolation strategy for Berger-Colella (BC) Adaptive Mesh Refinement (AMR) data that computes a continuous scalar field by blending contributions from all AMR levels simultaneously [S1, unofficial]. It remedies stitching artifacts at resolution boundaries without subdividing coarse cells into stitch elements or relying on non-rectilinear grid interpolation [S1, unofficial]. Unlike the "Finest" method, which produces high-frequency transition artifacts at coarse cell boundaries, the Basis method yields smooth, continuous images by using a weighted, renormalized sum of hat-shaped basis functions centered at dual cell corners [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs**
-*   **Input:** A query point $\vec{P}$ in 3D space; the AMR dataset consisting of bricks, each containing cell-centered values $C.v$ and geometric metadata (level, refinement factor $R$, cell width $C.w$).
+**Inputs and Outputs:**
+*   **Input:** A query point $\vec{P}$ in 3D space; the AMR dataset consisting of bricks $B^{(i)}$ at various levels $L^{(i)}$, where each brick contains cell-centered scalar values $C.v$.
 *   **Output:** A single interpolated scalar value $V(\vec{P})$.
 
-**Data Structures**
-The method relies on the Berger-Colella AMR data structure [S1, unofficial].
-*   **Brick:** A block of $N \times N \times N$ cells (typically $16^3$).
-*   **Cell:** Defined by its center $\vec{C_p}$, its scalar value $C.v$, and its width $C.w$.
-*   **Dual Cell:** For a query point $\vec{P}$ at a specific AMR level $l$, the dual cell $D$ is the coarsest cell at that level containing $\vec{P}$. It has 8 corners.
-*   **Leaf vs. Inner Node:** A cell is a "leaf" if it is not subdivided further (i.e., it is the finest representation at that location). It is an "inner" node if it has finer children.
+**Data Structures:**
+The method relies on the spatial hierarchy of the AMR data.
+*   **Bricks:** Blocks of typically $16 \times 16 \times 16$ cells [S1, unofficial].
+*   **Levels:** Hierarchical refinement levels. Finer bricks align with cell boundaries of coarser levels, such that each coarser cell is covered by exactly $R \times R \times R$ finer cells, where $R$ is the refinement factor [S1, unofficial].
+*   **Dual Cell $D$:** For a query point $\vec{P}$ at a specific level $l$, the dual cell is the coarsest cell at that level containing $\vec{P}$. Its corners are defined by the vertices of the cell enclosing $\vec{P}$ [S1, unofficial].
+*   **Leaf vs. Inner Nodes:** Cells are classified as "leaf" (finest resolution present at that location) or "inner" (coarser cells that are subdivided by finer levels) [S1, unofficial].
 
-**Formulas**
-The reconstruction uses hat-shaped basis functions $\hat{H}_C(\vec{P})$ centered at the corners of the dual cells.
+**Formulas:**
+The reconstruction uses hat-shaped basis functions $\hat{H}_C(\vec{P})$ centered at the corners of the dual cell.
 
-The 1D hat function is defined as [S1, unofficial]:
+The 1D hat function is defined as:
 $$ \hat{h}(t) = \max(1 - t, 0) $$
 
-The 3D basis function for a corner cell $C$ at query point $\vec{P}$ is [S1, unofficial]:
-$$ \hat{H}_C(\vec{P}) = \hat{h}\left(\frac{|\vec{C_p}_x - \vec{P}_x|}{C.w}\right) \hat{h}\left(\frac{|\vec{C_p}_y - \vec{P}_y|}{C.w}\right) \hat{h}\left(\frac{|\vec{C_p}_z - \vec{P}_z|}{C.w}\right) $$
+The 3D basis function for a corner cell $C$ at query point $\vec{P}$ is:
+$$ \hat{H}_C(\vec{P}) = \hat{h}\left(\frac{|\vec{C}_p.x - \vec{P}_x|}{\vec{C}_w}\right) \hat{h}\left(\frac{|\vec{C}_p.y - \vec{P}_y|}{\vec{C}_w}\right) \hat{h}\left(\frac{|\vec{C}_p.z - \vec{P}_z|}{\vec{C}_w}\right) $$
+where $\vec{C}_p$ is the position of the corner and $\vec{C}_w$ is the support width (half-width) of the cell [S1, unofficial].
 
-The final interpolated value is a weighted, renormalized sum [S1, unofficial]:
-$$ \text{AMR}_{\text{basis}}(\vec{P}) = \frac{\sum_{C_i} \hat{H}_{C_i}(\vec{P}) C_{i}.v}{\sum_{C_i} \hat{H}_{C_i}(\vec{P})} $$
-where the sum iterates over all leaf cells $C_i$ that contribute to the query point.
+The final interpolated value is the weighted sum normalized by the total weight:
+$$ \text{AMR}_{\text{basis}}(\vec{P}) = \frac{\sum_{C_i} \hat{H}_{C_i}(\vec{P}) C_{v_i}}{\sum_{C_i} \hat{H}_{C_i}(\vec{P})} $$
+where the sum iterates over all leaf cells $C_i$ that contribute to the query [S1, unofficial].
 
-**Algorithm Steps**
+**Algorithm Steps:**
 1.  Initialize `sum_weights` = 0 and `sum_weightedValues` = 0.
-2.  Iterate through AMR levels $l$ starting from level 0 (coarsest) upwards.
-3.  Find the dual cell $D$ for point $\vec{P}$ at level $l$.
-4.  For each corner cell $C$ of the dual cell $D$:
-    a. Determine if $C$ is a leaf cell.
-    b. If $C$ is a leaf cell:
-        i. Compute weight $w = \hat{H}_C(\vec{P})$.
-        ii. Add $w$ to `sum_weights`.
-        iii. Add $w \times C.v$ to `sum_weightedValues`.
-5.  Check if any of the corner cells $C$ in the current dual cell $D$ are inner nodes (i.e., have finer children).
-    a. If **none** of the corner cells are inner nodes, break the loop (no finer levels will contribute).
-    b. If any are inner nodes, continue to the next level $l+1$.
-6.  Return `sum_weightedValues` / `sum_weights`.
+2.  Iterate through levels $l$ starting from the coarsest level (level 0) upwards.
+    *   Find the dual cell $D$ for point $\vec{P}$ at level $l$.
+    *   For each corner cell $C$ of the dual cell $D$:
+        *   If $C$ is a leaf cell:
+            *   Compute $\hat{H}_C(\vec{P})$.
+            *   `sum_weights` += $\hat{H}_C(\vec{P})$
+            *   `sum_weightedValues` += $\hat{H}_C(\vec{P}) \times C.v$
+        *   Check if any corner cell $C$ in $D$ is an inner node.
+            *   If **none** of the corner cells in $D$ are inner nodes, break the loop (no finer levels will contribute to this location) [S1, unofficial].
+3.  Return `sum_weightedValues` / `sum_weights` [S1, unofficial].
 
-**Pseudocode**
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
@@ -53,70 +52,76 @@ def AMR_basis(P, amr_data):
     sum_weights = 0.0
     sum_weighted_values = 0.0
     
-    # Iterate from coarsest level (0) upwards
+    # Iterate from coarsest level (0) to finest
     for level in amr_data.levels:
-        # Find the dual cell D at this level containing P
-        D = find_dual_cell(P, level)
+        # Find the dual cell D for point P at the current level
+        D = find_dual_cell(P, level, amr_data)
         
-        if D is None:
-            continue
-            
-        has_inner_node = False
-        level_contribution = False
-        
+        # Check if this level has any finer children (inner nodes)
+        has_inner_nodes = False
         for corner_cell in D.corners:
-            # Check if this corner cell is a leaf (finest available at this location)
-            if corner_cell.is_leaf:
-                # Calculate basis function weight
-                # h(t) = max(1 - t, 0)
-                # H_C(P) = h(|Cx - Px|/Cw) * h(|Cy - Py|/Cw) * h(|Cz - Pz|/Cw)
-                dx = abs(corner_cell.center.x - P.x) / corner_cell.width
-                dy = abs(corner_cell.center.y - P.y) / corner_cell.width
-                dz = abs(corner_cell.center.z - P.z) / corner_cell.width
-                
-                weight = max(1.0 - dx, 0.0) * max(1.0 - dy, 0.0) * max(1.0 - dz, 0.0)
-                
-                if weight > 0:
-                    sum_weights += weight
-                    sum_weighted_values += weight * corner_cell.value
-                    level_contribution = True
-            
-            # Check if this corner cell has finer children (is an inner node)
-            if corner_cell.has_children:
-                has_inner_node = True
+            if corner_cell.is_inner:
+                has_inner_nodes = True
+                break
         
-        # If no corners in this dual cell are inner nodes, 
-        # no finer level will contribute to this point.
-        if not has_inner_node:
+        # Process corner cells
+        for corner_cell in D.corners:
+            if corner_cell.is_leaf:
+                # Calculate basis function value
+                # C_p is corner position, C_w is cell half-width
+                dx = abs(corner_cell.pos.x - P.x) / corner_cell.half_width
+                dy = abs(corner_cell.pos.y - P.y) / corner_cell.half_width
+                dz = abs(corner_cell.pos.z - P.z) / corner_cell.half_width
+                
+                h_x = max(1.0 - dx, 0.0)
+                h_y = max(1.0 - dy, 0.0)
+                h_z = max(1.0 - dz, 0.0)
+                
+                H_hat = h_x * h_y * h_z
+                
+                sum_weights += H_hat
+                sum_weighted_values += H_hat * corner_cell.value
+        
+        # If no inner nodes, we are at the finest contributing level
+        if not has_inner_nodes:
             break
             
     if sum_weights == 0:
-        # Fallback if no leaf cells found (e.g., point outside all bricks)
-        return 0.0
+        return 0.0 # Or handle error appropriately
         
     return sum_weighted_values / sum_weights
 ```
 
-**Parameters and Edge Cases**
-*   **Refinement Factor ($R$):** Typically 2. Cells on finer levels align with boundaries of coarser levels such that one coarse cell is covered by $R \times R \times R$ fine cells [S1, unofficial].
-*   **Non-Interpolating Nature:** The method is not strictly interpolating; the basis functions from different levels may overlap and sum to more or less than 1, and the value at a cell center is not guaranteed to equal the cell's stored value if other levels contribute [S1, unofficial].
-*   **Coarsest Level Determination:** It is not obvious how to determine the coarsest level that contributes. In deeply refined regions, the algorithm may perform many dual-cell look-ups up to the root level, which is costly [S1, unofficial].
-*   **Support Overlap:** The basis function support is not truncated at the first sample on the neighboring side, leading to larger support overlap between cells from neighboring blocks compared to methods like Ljung et al. [S2].
+**Parameters and Edge Cases:**
+*   **Refinement Factor $R$:** Typically determines the grid alignment. The method assumes finer bricks align with coarser cell boundaries [S1, unofficial].
+*   **Non-Interpolating Nature:** The method is not strictly interpolating; values at cell centers are not guaranteed to equal the stored cell values because basis functions from different levels overlap and do not sum to 1 in a partition-of-unity sense across all levels simultaneously [S1, unofficial].
+*   **Ray-Isosurface Intersection:** Because the field is not strictly interpolating, implicit ray-isosurface intersection (e.g., Newton-Raphson) is non-trivial and may not converge reliably [S1, unofficial].
+*   **Deep Refinement Cost:** In deeply refined regions, determining the coarsest level that contributes is not obvious. The algorithm may perform many dual-cell look-ups up to the coarsest level before finding the first leaf contributions, which is costly [S1, unofficial].
 
 ## Subtopics
 
 ### AMR Blend Method
-A reconstruction strategy for AMR data that renders different AMR levels (e.g., Level 0-1, 0-2) as distinct layers or blended regions, as opposed to the single continuous field produced by the Basis method [S1, unofficial]. It is used in the OSPRay implementation to visualize data at varying levels of refinement [S1, unofficial].
+A reconstruction strategy for AMR data that renders different AMR levels (e.g., Level 0-1, 0-2) by blending them, as opposed to the basis method which blends across all levels simultaneously. It is used to visualize specific subsets of the hierarchy. It is implemented in OSPRay for rendering AMR data at varying levels [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The cost depends on the depth of refinement. In deeply refined regions, the algorithm may need to traverse from the finest level up to the coarsest level to determine contributions, potentially requiring many dual-cell look-ups [S1, unofficial]. Determining the finest contributing level is easy, but the coarsest is not [S1, unofficial].
-*   **Memory Complexity:** Requires efficient access to the AMR hierarchy (e.g., via a kd-tree or multi-octree) to locate dual cells and determine leaf/inner status [S1, unofficial].
-*   **Performance:** The Basis method is the most expensive of the four reconstruction strategies provided in the source paper, while "Finest" achieves the highest performance [S1, unofficial].
-*   **Quality:** Produces smooth, continuous images without the high-frequency transition artifacts at coarse cell boundaries seen in the "Finest" method [S1, unofficial]. It avoids ghosting artifacts by not using virtual or inner cells [S1, unofficial].
-*   **Limitations:** The non-strictly interpolating nature makes implicit ray-isosurface intersection non-obvious [S1, unofficial]. The large support overlap can lead to increased computational load in regions with many neighboring blocks [S2].
+**Time and Memory Complexity:**
+*   **Time:** The Basis method is the most expensive of the four reconstruction strategies provided in the source implementation [S1, unofficial]. In deeply refined regions, performance degrades because the algorithm may need to traverse many levels to find the coarsest contributing level, requiring numerous dual-cell look-ups [S1, unofficial].
+*   **Memory:** Requires efficient access to the AMR hierarchy (e.g., via a kd-tree) to locate dual cells and determine leaf/inner status [S1, unofficial].
+
+**Measured Performance:**
+*   In benchmarks on a KNL node and dual-Xeon systems, the Basis method produced the highest quality images but had the lowest performance compared to "Finest" and other strategies [S1, unofficial].
+*   Performance is largely oblivious to the maximum refinement level if the majority of waves are at coarser levels, as finer levels affect only a small portion of rays [S1, unofficial].
+*   The SPMD implementation on many-core architectures suffered from code- and data-divergence in the reconstruction kernels [S1, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Smooth, continuous interpolation; avoids ghosting artifacts associated with virtual/inner cells; does not require subdividing cells into stitch elements or simplicial meshes [S1, unofficial].
+*   **Limitations:** Not strictly interpolating; difficult to use for implicit ray-isosurface intersection; computationally expensive in deep refinement due to level traversal overhead; larger support overlap between cells from neighboring blocks compared to truncated methods [S1, unofficial][S2].
+
+**When to Use:**
+Use when image quality and continuity across AMR boundaries are prioritized over performance, and when implicit ray marching is not required. Suitable for CPU-based interactive ray tracing where smoothness is critical [S1, unofficial].
 
 ## Background
-The method was introduced by Ingo Wald, Carson Brownlee, Will Usher, and Aaron Knoll in 2017 as part of a CPU-based volume rendering framework for block-structured (Berger-Colella) AMR data, implemented in OSPRay and ParaView [S1, unofficial]. It was novel compared to existing methods like those by Weber et al. and Moran and Ellsworth, which required subdividing lower-resolution cells into stitch cells or simplicial elements to handle boundaries [S1, unofficial]. The approach borrows concepts from scattered data interpolation techniques, specifically Franke-style interpolation, using hat-shaped basis functions [S1, unofficial].
+The AMR Basis Reconstruction Filter was introduced by Ingo Wald, Carson Brownlee, Will Usher, and Aaron Knoll in 2017 as part of a general method for CPU volume rendering of Berger-Colella AMR data using a kd-tree structure [S1, unofficial]. It was implemented in the OSPRay framework and integrated into ParaView [S1, unofficial]. The method draws inspiration from scattered data interpolation techniques, specifically Franke-style interpolation, adapting hat-shaped basis functions to the AMR context to solve the "stitching" problem between adjacent cells of different resolutions [S1, unofficial]. It contrasts with earlier methods by Weber et al. and Moran and Ellsworth, which relied on subdividing coarse cells, and Leaf et al. and Ljung et al., which used truncated support functions [S1, unofficial][S2].
 
 ## Sources
 [S1] CPU volume rendering of adaptive mesh refinement data, https://www.researchgate.net/publication/321321949_CPU_volume_rendering_of_adaptive_mesh_refinement_data, fetched 2026-10-26 (unofficial)

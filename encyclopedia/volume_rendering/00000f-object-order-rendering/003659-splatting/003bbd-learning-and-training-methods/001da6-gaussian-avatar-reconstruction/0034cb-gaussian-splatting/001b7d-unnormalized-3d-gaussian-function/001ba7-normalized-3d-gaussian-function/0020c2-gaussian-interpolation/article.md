@@ -3,56 +3,88 @@
 Also called: Gaussian Filter, Gaussian Kernel Interpolation
 
 ## Overview
-Gaussian Interpolation uses a Gaussian function as an interpolation kernel to reconstruct signals from discrete samples [S1, unofficial]. It builds on the [Normalized 3D Gaussian Function](1064-normalized-3d-gaussian-function.md) and is distinguished from other filters by being the only filter that is both separable and rotationally symmetric [S1, unofficial]. This unique property allows it to integrate one dimension out of the kernel, enabling 2D reconstruction instead of 3D, which is particularly advantageous in point-tossing approaches like splatting [S1, unofficial].
+Gaussian Interpolation uses a Gaussian function as an interpolation kernel to reconstruct continuous signals from discrete samples [S1, unofficial]. It is distinguished from other filters by being the only one that is both separable and rotationally symmetric, a property that allows it to integrate one dimension out of the kernel to perform 2D reconstruction instead of 3D, making it suitable for point-tossing approaches like splatting [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Discrete sample values and their spatial coordinates [G].
-- Output: The interpolated value at the target reconstruction point [G].
+*   **Input:** Sample positions and values; a width parameter $\sigma$.
+*   **Output:** Interpolated value at a query point.
 
 **Data Structures:**
-Exact layouts are not given in the sources [S1, S2, unofficial]. The method operates on a list of sample values and their positions [G]. The kernel itself is defined by a single scalar parameter [S1, unofficial].
+Not given in the sources.
 
-**Numbered Steps:**
-1. For each sample contributing to the reconstruction point, calculate the distance $z$ between the sample's position and the target position [G].
-2. Compute the kernel weight $w$ using the formula $w = e^{-\frac{z^2}{2\sigma^2}}$ [S1, unofficial].
-3. Multiply the sample's value by its corresponding weight $w$ [G].
-4. Sum the weighted values of all contributing samples [G].
-5. Normalize the result by dividing by the sum of the weights if the truncated kernel does not integrate to unity [G].
-
-**Formulas:**
-The one-dimensional Gaussian interpolation kernel is defined as [S1, unofficial]:
-$$f_{\text{Gaussian}}(z) = e^{-\frac{z^2}{2\sigma^2}}$$
-where:
-- $z$ is the distance from the sample to the reconstruction point [G].
-- $\sigma$ is the standard deviation controlling the width [S1, unofficial].
+**Steps:**
+1.  Calculate the distance $z$ between the query point and the sample point.
+2.  Compute the weight using the Gaussian function:
+    $$f_{\text{Gaussian}}(z) = e^{-\frac{z^2}{2\sigma^2}}$$
+    where $\sigma$ controls the width of the Gaussian [S1, unofficial].
+3.  Aggregate the weighted sample values to produce the interpolated result.
 
 **Parameters:**
-- $\sigma$ (Sigma): Controls the width of the Gaussian kernel [S1, unofficial]. Typical values are not given in the sources [S1, S2, unofficial].
+*   $\sigma$: Controls the width of the Gaussian [S1, unofficial].
 
-**Pitfalls and Edge Cases:**
-- **Infinite Extent:** The Gaussian kernel has infinite extent in both spatial and frequency domains [S1, unofficial]. In practice, it must be truncated [S1, unofficial]. Because it asymptotically falls to zero quickly, truncation can be performed in the near-zero area without causing significant ringing artifacts [S1, unofficial].
-- **Blurring:** The filter distorts the passband by attenuating high-frequency components of the main replica, which causes blurring in the output [S1, unofficial]. This makes it less suitable for applications requiring sharp edge preservation compared to filters with sharper cutoffs [G].
-- **Truncation:** While truncation is safe due to the rapid decay, the truncation radius must be chosen carefully to balance performance and accuracy [G]. A common heuristic is to truncate at $3\sigma$ or $4\sigma$, where the value is negligible [G].
+**Pitfalls:**
+*   The kernel has infinite extent in both spatial and frequency domains [S1, unofficial].
+*   It asymptotically falls toward zero quickly, allowing truncation without significant ringing, but this truncation requires careful handling of the near-zero area [S1, unofficial].
+*   The filter distorts the passband by attenuating high-frequency components of the main replica, causing blurring in the output [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gaussian_interpolation(samples, query_point, sigma):
+    """
+    Interpolate value at query_point using Gaussian kernel.
+    samples: list of (position, value) tuples.
+    sigma: width parameter.
+    """
+    total_weight = 0.0
+    total_value = 0.0
+    
+    for pos, val in samples:
+        # Calculate distance z
+        z = distance(pos, query_point)
+        
+        # Compute Gaussian weight
+        # f(z) = exp(-z^2 / (2 * sigma^2))
+        weight = math.exp(-(z ** 2) / (2 * sigma ** 2))
+        
+        total_weight += weight
+        total_value += val * weight
+        
+    if total_weight == 0:
+        return 0.0
+        
+    return total_value / total_weight
+```
 
 ## Subtopics
 
+### [Gaussian Kernel Volumetric Primitive](4010-gaussian-kernel-volumetric-primitive.md)
+A method for volumetric rendering that represents a scene as a set of 3D Gaussian distributions, parameterized by mean (position), covariance (shape/direction), and color, allowing for efficient simulation of 3D structure details without meshing. It differs from traditional mesh-based reconstruction by avoiding meshing processes and from NeRF by offering faster training and rendering speeds while maintaining comparable quality. Unlike other kernel methods like Epanechnikov, Gaussian kernels have infinite support, which requires clipping to maintain efficiency.
+
 ### Gaussian Reconstruction Filter
-A specific application of Gaussian interpolation used in volumetric rendering, particularly in temporal anti-aliasing (TAA) for froxel-based rendering [S2, unofficial]. It is applied to jittered sub-froxel samples to improve edge quality and stability compared to a box filter [S2, unofficial]. The weight $W(x)$ for a sample at distance $x$ from the center of the froxel is given by [S2, unofficial]:
+A weighting filter applied to jittered sub-froxel samples to improve edge quality and stability compared to a box filter, based on distance from the froxel center [S2, unofficial]. The weight $W(x)$ for a sample at distance $x$ from the center of the froxel is calculated as:
 $$W(x) = e^{-2.29x^2}$$
-This specific form is a Gaussian fit to the Blackman-Harris 3.3 window function [S2, unofficial]. It provides better edge quality and stability under motion than a spatiotemporal box filter, which suffers from poor edge quality and instability due to sharp edges [S2, unofficial].
+[S2, unofficial].
+
+### Gaussian Perturbation Kernel
+Used in differentiable path tracing to compute the Cumulative Distribution Function (CDF) by integrating the Probability Density Function (PDF), treating each halfspace separately and normalizing the PDF on the positive halfspace to integrate to 0.5 [S3]. The derivative of the kernel with respect to parameters is given by:
+$$\frac{\partial \kernel}{\partial \parameters}(\offset) = \frac{-\offset}{\bandwidth^3\sqrt{2\pi}}\exp\left(\frac{-\offset^2}{2\bandwidth^2}\right)$$
+[S3].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources [S1, S2, unofficial]. The method's separability allows decomposing $N$-dimensional interpolation into $N$ one-dimensional passes, reducing computational cost compared to full 3D reconstruction [S1, unofficial].
-- **Memory Complexity:** Not given in the sources [S1, S2, unofficial].
-- **Strengths:** Separability and rotational symmetry allow for efficient 2D reconstruction from 3D data in splatting methods [S1, unofficial]. Smooth decay reduces ringing artifacts upon truncation [S1, unofficial].
-- **Limitations:** Causes blurring due to high-frequency attenuation [S1, unofficial]. Infinite extent requires truncation, which may introduce slight inaccuracies if the truncation radius is too small [S1, unofficial].
-- **When to Use:** Suitable for applications where smoothness is preferred over sharpness, such as in splatting-based volume rendering or temporal anti-aliasing where stability is key [S1, S2, unofficial].
-- **When Not to Use:** Not ideal for applications requiring sharp edge preservation or high-frequency detail retention due to inherent blurring [S1, unofficial].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Separability and rotational symmetry allow for computational savings by reducing 3D reconstruction to 2D reconstruction in splatting methods [S1, unofficial]. Truncation is possible without significant ringing due to rapid asymptotic decay [S1, unofficial].
+*   **Limitations:** Infinite extent requires clipping or truncation. Attenuation of high frequencies causes blurring [S1, unofficial].
+*   **When to use:** Point-tossing approaches like splatting where separability and rotational symmetry are beneficial [S1, unofficial].
+*   **When not to use:** When high-frequency preservation is critical due to blurring artifacts [S1, unofficial].
 
 ## Background
-Gaussian interpolation is notably used in point-tossing approaches like splatting [Westover 90] because of its separability and rotational symmetry, which allow for efficient 2D reconstruction [S1, unofficial]. In the context of volumetric rendering, it has been applied in temporal anti-aliasing methods for froxel-based rendering to improve edge quality and stability [S2, unofficial]. The specific Gaussian fit to Blackman-Harris 3.3 was introduced by Karis for use in TAA [S2, unofficial].
+Gaussian interpolation has been used in research for volume rendering, particularly in parallel, feed-forward algorithms [S1, unofficial]. It is applied in point-tossing approaches such as splatting [Westover 90] cited in [S1, unofficial]. In temporal anti-aliasing for volumetric rendering, a Gaussian filter fit to Blackman-Harris 3.3 is used for jittered samples [S2, unofficial]. In differentiable path tracing, Gaussian kernels are used for plateau reduction [S3].
 
 ## Sources
 [S1] A Parallel, Feed-Forward Volume Rendering Algorithm, https://www.cs.unc.edu/techreports/91-029.pdf, fetched 2026-10-27 (unofficial)
 [S2] Temporal Anti-Aliasing for Real-Time Froxel-Based Volumetric Rendering - Advances in volumetric temporal anti-aliasing for real-time ren dering of participating media, https://openalex.org/W7218067689, fetched 2026-11-01 (unofficial)
+[S3] Plateau-Reduced Differentiable Path Tracing, https://doi.org/10.1109/cvpr52729.2023.00417, fetched 2026-10-26

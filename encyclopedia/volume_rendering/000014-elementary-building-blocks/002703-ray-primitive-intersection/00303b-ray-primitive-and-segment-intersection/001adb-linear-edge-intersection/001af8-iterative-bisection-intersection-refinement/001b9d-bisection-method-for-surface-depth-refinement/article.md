@@ -3,85 +3,54 @@
 Also called: Bisection Method, Iterative Bisection, Midpoint (Bisection) Algorithm
 
 ## Overview
-The Bisection Method for Surface Depth Refinement is an iterative root-finding algorithm used to determine the exact intersection point of a ray with an implicit surface (contour) within a segment known to contain an intersection [S2, unofficial]. It serves as an alternative to the Secant method in ray marching pipelines, refining the coarse intersection estimate provided by adaptive sampling [S1, unofficial]. Unlike linear interpolation techniques (e.g., Secant or False Position) that assume linearity, bisection relies on the Intermediate Value Theorem, guaranteeing convergence for continuous functions by systematically halving the search interval [S2, unofficial].
+The Bisection Method for Surface Depth Refinement is an iterative root-finding algorithm that determines the exact intersection point of a ray with an implicit surface within a segment known to contain an intersection [S2, unofficial]. It serves as an alternative to the Secant method in ray marching pipelines [S1, unofficial]. The method systematically halves the search interval at each step until the midpoint evaluates to zero [S1, S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Two endpoints of a line segment, $P_{low}$ and $P_{high}$, such that the implicit field function $f(P)$ has opposite signs at these points (i.e., $f(P_{low}) \cdot f(P_{high}) < 0$) [S2, unofficial].
-*   **Output:** A point $P_{hit}$ on the segment where $f(P_{hit}) \approx 0$, representing the surface intersection [S2, unofficial].
+*   **Input:** Two endpoints of a line segment, $P_{low}$ and $P_{high}$, bracketing the intersection [S2, unofficial].
+*   **Output:** A point $P_{hit}$ on the segment where the field function evaluates to zero [S2, unofficial].
 
 **Data Structures:**
-*   **Endpoints:** Represented as 3D vectors (or 1D coordinates if projected onto an axis-aligned edge).
-*   **Field Values:** Scalar values $f(P_{low})$ and $f(P_{high})$ indicating the signed distance or occupancy status relative to the isosurface threshold (typically 0) [S2, unofficial].
+*   **Endpoints:** 3D vectors or 1D coordinates along an axis-aligned edge [S2, unofficial].
+*   **Field Values:** Scalars $f(P_{low})$ and $f(P_{high})$ indicating signed distance or occupancy relative to the isosurface threshold [S2, unofficial].
 
 **Algorithm Steps:**
-1.  **Initialization:** Set $P_{low}$ and $P_{high}$ to the segment endpoints. Evaluate $f_{low} = f(P_{low})$ and $f_{high} = f(P_{high})$ [S2, unofficial].
-2.  **Midpoint Calculation:** Compute the midpoint $P_{mid} = \frac{P_{low} + P_{high}}{2}$ [S2, unofficial].
+1.  **Initialization:** Set $P_{low}$ and $P_{high}$ to the segment endpoints and evaluate $f_{low} = f(P_{low})$ and $f_{high} = f(P_{high})$ [S2, unofficial].
+2.  **Midpoint Calculation:** Compute $P_{mid} = (P_{low} + P_{high}) / 2$ [S2, unofficial].
 3.  **Evaluation:** Evaluate the field function at the midpoint: $f_{mid} = f(P_{mid})$ [S2, unofficial].
-4.  **Convergence Check:** If $|f_{mid}| < \epsilon$ (where $\epsilon$ is a small tolerance) or the segment length $|P_{high} - P_{low}| < \delta$, terminate and return $P_{mid}$ as the intersection point [S2, unofficial].
-5.  **Interval Update:**
-    *   If $f_{mid}$ has the same sign as $f_{low}$ (i.e., $f_{mid} \cdot f_{low} > 0$), the root lies in the upper half. Set $P_{low} = P_{mid}$ and $f_{low} = f_{mid}$ [S2, unofficial].
-    *   Otherwise, the root lies in the lower half. Set $P_{high} = P_{mid}$ and $f_{high} = f_{mid}$ [S2, unofficial].
+4.  **Convergence Check:** If $f_{mid} = 0$, the exact intersection point is found [S2, unofficial].
+5.  **Interval Update:** Replace the endpoint whose field value has the same sign as $f_{mid}$ with the midpoint [S2, unofficial].
 6.  **Iteration:** Repeat from Step 2 until convergence [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def bisection_intersection(P_low, P_high, field_function, tolerance=1e-6, max_iterations=100):
-    """
-    Refines the intersection point on a segment using the bisection method.
-    
-    Args:
-        P_low: Vector, start point of the segment.
-        P_high: Vector, end point of the segment.
-        field_function: Callable, returns scalar value f(P).
-        tolerance: Float, convergence threshold for |f(P_mid)|.
-        max_iterations: Int, maximum number of bisection steps.
-        
-    Returns:
-        P_hit: Vector, the estimated intersection point.
-    """
+def bisection_intersection(P_low, P_high, field_function):
+    """Refines the intersection point on a segment using the bisection method."""
     f_low = field_function(P_low)
     f_high = field_function(P_high)
-    
-    # Ensure the segment brackets a root
-    if f_low * f_high > 0:
-        raise ValueError("Endpoints must have opposite signs to bracket a root.")
-        
-    for _ in range(max_iterations):
-        # Calculate midpoint
+    while True:
         P_mid = (P_low + P_high) / 2.0
-        
-        # Evaluate field at midpoint
         f_mid = field_function(P_mid)
-        
-        # Check for convergence
-        if abs(f_mid) < tolerance:
+        if f_mid == 0:
             return P_mid
-            
-        # Update interval based on sign
         if f_mid * f_low > 0:
-            # Root is in the upper half [P_mid, P_high]
             P_low = P_mid
             f_low = f_mid
         else:
-            # Root is in the lower half [P_low, P_mid]
             P_high = P_mid
             f_high = f_mid
-            
-    # Return best estimate if max iterations reached
-    return (P_low + P_high) / 2.0
 ```
 
 **Parameters:**
-*   **Tolerance ($\epsilon$):** Not given in the sources. Typical values range from $10^{-6}$ to $10^{-4}$ depending on required precision.
-*   **Max Iterations:** Not given in the sources. Typically 10–20 iterations suffice for high precision due to exponential convergence.
+*   **Tolerance:** Not given in the sources.
+*   **Max Iterations:** Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-*   **Non-Bracketing Segments:** The method fails if $f(P_{low})$ and $f(P_{high})$ have the same sign. The parent algorithm must guarantee a sign change [S2, unofficial].
-*   **Discontinuous Functions:** Bisection requires continuity. If the field function is discontinuous, the method may converge to a point that is not a true root or fail to converge [S2, unofficial].
-*   **Multiple Roots:** If multiple roots exist within the segment, bisection finds only one, determined by the initial bracketing [S2, unofficial].
+*   **Non-Bracketing Segments:** The method requires the initial segment to bracket a root [S2, unofficial].
+*   **Discontinuous Functions:** The method requires continuity [S2, unofficial].
+*   **Multiple Roots:** Not given in the sources.
 
 ## Subtopics
 
@@ -89,16 +58,16 @@ def bisection_intersection(P_low, P_high, field_function, tolerance=1e-6, max_it
 Combines bisection with Newton’s method for high-degree polynomials, ensuring all real roots are found by isolating them in monotonic intervals. Choose when dealing with complex implicit surfaces defined by high-degree polynomials where simple bisection might miss roots or converge slowly.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(\log_2(\frac{L_0}{\epsilon}))$, where $L_0$ is the initial segment length and $\epsilon$ is the desired precision. Each iteration halves the error [S2, unofficial].
-*   **Memory Complexity:** $O(1)$, requiring only storage for the current endpoints and field values [S2, unofficial].
-*   **Performance:** Generally slower than the Secant method for smooth functions because it does not utilize slope information, but more robust [S2, unofficial]. It is "no worse than the midpoint algorithm" (which is itself) and usually better than false position in terms of iteration count for linear-like functions, but false position can be faster for highly non-linear functions [S2, unofficial].
-*   **Strengths:** Guaranteed convergence for continuous functions; robust against noise in field evaluation [S2, unofficial].
-*   **Limitations:** Does not converge as fast as Newton-based methods for smooth functions; requires sign change [S2, unofficial].
-*   **When to Use:** When robustness is prioritized over speed, or when the field function is not differentiable [S2, unofficial].
-*   **When Not to Use:** When the field function is smooth and differentiable, and speed is critical (use Secant or Newton); when the function is discontinuous [S2, unofficial].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** The false position algorithm is "no worse than the midpoint algorithm, and usually better" in terms of iteration count [S2, unofficial].
+*   **Strengths:** Guaranteed convergence for continuous functions by systematically halving the search interval [S1, S2, unofficial].
+*   **Limitations:** Requires the field function to be continuous and the initial segment to bracket a root [S2, unofficial].
+*   **When to Use:** Not given in the sources.
+*   **When Not to Use:** Not given in the sources.
 
 ## Background
-The bisection method is a classic root-finding algorithm. In the context of isosurface extraction, it is cited as a "far better choice" than simple linear interpolation for finding exact intersection points on edges [S2, unofficial]. It is implemented in the `IsoMesher` class, specifically in methods like `intersect_xaxis`, `intersect_yaxis`, and `intersect_zaxis`, controlled by the preprocessor symbol `BISECTION` [S2, unofficial]. It is also used in differentiable volumetric rendering pipelines as an alternative to the Secant method [S1, unofficial].
+The bisection method is a classic root-finding algorithm [S1, unofficial]. In isosurface extraction, it is cited as a "far better choice" than simple linear interpolation for finding exact intersection points on edges [S2, unofficial]. It is implemented in the `IsoMesher` class methods `intersect_xaxis()`, `intersect_yaxis()`, and `intersect_zaxis()`, controlled by the preprocessor symbol `BISECTION` [S2, unofficial]. It is also used in differentiable volumetric rendering pipelines as an alternative to the Secant method [S1, unofficial].
 
 ## Sources
 [S1] autonomousvision/differentiable_volumetric_rendering, https://github.com/autonomousvision/differentiable_volumetric_rendering, fetched 2026-10-26 (unofficial)

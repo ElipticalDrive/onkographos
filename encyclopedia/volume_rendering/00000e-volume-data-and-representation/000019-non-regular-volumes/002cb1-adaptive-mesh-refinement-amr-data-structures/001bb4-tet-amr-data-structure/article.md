@@ -2,67 +2,140 @@
 Also called: Tetrahedral Adaptive Mesh Refinement Data Structure
 
 ## Overview
-The TET-AMR data structure is a forest of tetrahedral refinement trees designed to store volumetric data for elements at all refinement levels, including child counts, direct face neighbors, and associated scalars [S1, unofficial]. It solves the problem of efficiently identifying which refinement trees to sample during volume rendering by organizing the data to support fast point location queries and bounding volume hierarchy (BVH) construction over the coarse mesh [S1, unofficial]. It sets itself apart from general AMR structures by explicitly storing direct face neighbors and child counts within the element data to avoid runtime index lookups, building on [Non-regular volumes](9-non-regular-volumes.md).
+The TET-AMR data structure is a forest of tetrahedral refinement trees designed to store unstructured volume data at all refinement levels, enabling efficient point location and ray traversal during direct volume rendering [S1, unofficial]. It distinguishes itself from general AMR structures by enforcing a strict preorder traversal ID scheme and storing four vertex-centered scalars per element to avoid runtime index lookups, building on the [TET-AMR Data Structure](1094-tet-amr-data-structure.md) layout [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A set of tetrahedral elements generated via red-refinement rules, coarse mesh geometry, and scalar field values.
-*   **Output:** A `TET_AMR` structure containing the forest of trees, coarse mesh indices, and scalar data.
+*   **Input:** A coarse tetrahedral mesh (defined by vertices and indices) and scalar field data associated with these elements.
+*   **Output:** A `TET_AMR` structure containing a forest of refinement trees, where each tree corresponds to a coarse element and contains all its descendants.
 
 **Data Structures:**
-The core structure is defined as [S1, unofficial]:
+The core layout is defined by the `TET_AMR` struct [S1, unofficial]:
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```cpp
 struct TET_AMR {
-    uint64_t num_coarse_elements; // Number of coarse tetrahedra
-    uint64_t num_elements;        // Total number of refined elements
-    vec3i* coarse_index;          // Array of size num_coarse_elements, storing vertex indices for coarse mesh
+    uint64_t num_coarse_elements; // Count of root elements in the forest
+    uint64_t num_elements;        // Total number of tetrahedra in the forest
+    vec3i* coarse_index;          // Array of size num_coarse_elements, storing vertex indices for coarse tetrahedra
     vec3f* coarse_vertex;         // Array of vertex positions for the coarse mesh
-    uint64_t* tree_root_ids;      // Indices of the root elements for each refinement tree
-    vec2f* macrocell_values;      // Values for coarse structured grid macrocells (min/max densities)
-    uint64_t* child_counts;       // Array of size num_elements, storing number of children for each element
-    uint64_t* neighbors;          // Array of size num_elements, storing direct face neighbors
-    float* cell_data;             // Scalar values associated with each element
-    float* vertex_data;           // Scalar values associated with each vertex
+    uint64_t* tree_root_ids;      // Array of size num_coarse_elements, storing the index of the root node for each tree in the flat arrays
+    vec2f* macrocell_values;      // Array of size num_coarse_elements, storing min/max densities for bounding volume hierarchy majorants
+    uint64_t* child_counts;       // Array of size num_elements, storing the number of children for each element
+    uint64_t* neighbors;          // Array of size num_elements, storing direct face neighbors for each element
+    float* cell_data;             // Array of size num_elements, storing cell-centered scalar values
+    float* vertex_data;           // Array of size num_elements, storing vertex-centered scalar values (4 per element)
 };
 ```
 
-**Tetrahedron Representation:**
-Each tetrahedron is identified by four unique vertices: Top (T), Left (L), Right (R), and Back (B) [S1, unofficial]. Midpoints are defined as:
-$$ TL = \frac{T + L}{2}, \quad TR = \frac{T + R}{2}, \quad TB = \frac{T + B}{2} $$
-$$ LB = \frac{L + B}{2}, \quad LR = \frac{L + R}{2}, \quad RB = \frac{R + B}{2} $$
-Refinement follows Bey's red-refinement rule, dividing a tetrahedron into eight child tetrahedra [S1, unofficial].
+**Refinement Rules:**
+Tetrahedra are subdivided using Bey's red-refinement rule [S1, unofficial]. Each tetrahedron is identified by four unique vertices: Top (T), Left (L), Right (R), and Back (B). Midpoints are calculated as:
+$$
+\begin{aligned}
+TL &= (T + L) / 2 \\
+TR &= (T + R) / 2 \\
+TB &= (T + B) / 2 \\
+LB &= (L + B) / 2 \\
+LR &= (L + R) / 2 \\
+RB &= (R + B) / 2
+\end{aligned}
+$$
+A tetrahedron is divided into eight child tetrahedra. Four are "outer" tetrahedra that share a vertex with the parent, and four are "inner" tetrahedra formed by the midpoints [S1, unofficial].
 
-**Algorithm:**
-1.  **Store Coarse Mesh:** Populate `coarse_index` and `coarse_vertex` with the initial unrefined tetrahedra.
-2.  **Build Forest:** Organize refined elements into a forest of trees. Each tree corresponds to a coarse element that was refined.
-3.  **Populate Element Data:** For each element in the forest:
-    *   Store the number of children in `child_counts` [S1, unofficial].
-    *   Store direct face neighbors in `neighbors` [S1, unofficial].
-    *   Store scalar values in `cell_data` and `vertex_data` [S1, unofficial].
-4.  **Compute Macrocell Values:** Calculate minimum and maximum densities for each coarse element and store them in `macrocell_values` to enable tighter majorants during rendering [S1, unofficial].
-5.  **Identify Roots:** Store the indices of the root elements of each tree in `tree_root_ids` [S1, unofficial].
+**Construction Steps:**
+1.  **Initialize Forest:** Create the `TET_AMR` structure. Set `num_coarse_elements` to the number of coarse tetrahedra.
+2.  **Store Coarse Data:** Populate `coarse_index` and `coarse_vertex` with the initial mesh geometry.
+3.  **Build Trees:** For each coarse element, generate its refinement tree.
+    *   Assign a unique preorder traversal ID to each node in the tree.
+    *   Store the root ID of each tree in `tree_root_ids`.
+    *   Calculate `child_counts` for each element. If an element is a leaf, the count is 0. If refined, the count is 8.
+    *   Compute `neighbors` by identifying shared faces between adjacent elements at all levels.
+4.  **Sample Data:**
+    *   Store cell-centered data in `cell_data`.
+    *   Store vertex-centered data in `vertex_data`. The structure stores four scalars per element corresponding to its vertices to facilitate efficient interpolation without runtime index lookups [S1, unofficial].
+5.  **Compute Bounds:** Calculate the minimum and maximum density values for each coarse element and store them in `macrocell_values` to support tight majorants for the bounding volume hierarchy [S1, unofficial].
 
-**Edge Cases and Pitfalls:**
-*   **Point Location:** Efficient point location queries are required to find the child element containing a query point within each refinement tree [S1, unofficial].
-*   **Neighbor Consistency:** Direct face neighbors must be correctly identified to ensure proper traversal and neighbor lookups during rendering [S1, unofficial].
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def build_tet_amr(coarse_mesh, scalar_field):
+    """
+    coarse_mesh: list of tetrahedra, each defined by 4 vertex indices
+    scalar_field: dict mapping (vertex_index) -> scalar_value
+    """
+    num_coarse = len(coarse_mesh)
+    tet_amr = TET_AMR()
+    tet_amr.num_coarse_elements = num_coarse
+    
+    # Initialize coarse data
+    tet_amr.coarse_vertex = [v for v in coarse_mesh.vertices]
+    tet_amr.coarse_index = [t.vertices for t in coarse_mesh.tetrahedra]
+    
+    # Initialize arrays for all elements (size determined after tree construction)
+    # Note: In practice, sizes are determined dynamically or via a two-pass algorithm
+    # Here we assume a pre-allocated or dynamically resized structure for clarity
+    all_elements = []
+    
+    for i, coarse_tet in enumerate(coarse_mesh.tetrahedra):
+        root = build_refinement_tree(coarse_tet, scalar_field, all_elements)
+        tet_amr.tree_root_ids.append(root.index_in_all_elements)
+        
+    # Flatten and populate arrays
+    tet_amr.num_elements = len(all_elements)
+    tet_amr.child_counts = [e.child_count for e in all_elements]
+    tet_amr.neighbors = [e.neighbors for e in all_elements]
+    tet_amr.cell_data = [e.cell_scalar for e in all_elements]
+    tet_amr.vertex_data = [e.vertex_scalars for e in all_elements] # 4 scalars per element
+    
+    # Compute macrocell bounds
+    tet_amr.macrocell_values = compute_bounds(coarse_mesh, scalar_field)
+    
+    return tet_amr
+
+def build_refinement_tree(tet, scalar_field, element_list):
+    """
+    Recursively builds the refinement tree using Bey's rule.
+    """
+    # Create node for current tetrahedron
+    node = Element()
+    node.vertices = tet.vertices
+    node.cell_scalar = interpolate_cell_scalar(tet, scalar_field)
+    node.vertex_scalars = [scalar_field[v] for v in tet.vertices]
+    
+    # Determine if refinement is needed (e.g., based on error metric)
+    # For this structure, we assume all coarse elements are roots of trees
+    # and may be refined. If not refined, child_count = 0.
+    if should_refine(tet):
+        midpoints = compute_midpoints(tet.vertices)
+        children = generate_children(tet.vertices, midpoints)
+        node.child_count = 8
+        for child_tet in children:
+            child_node = build_refinement_tree(child_tet, scalar_field, element_list)
+            # Link parent-child relationships if necessary
+            # For flat array storage, indices are used
+    else:
+        node.child_count = 0
+        
+    element_list.append(node)
+    return node
+```
 
 ## Subtopics
 
 ### [TET-AMR Construction Process](1403-tet-amr-construction-process.md)
-Transforms leaf-level tetrahedral elements into a forest of complete, ordered refinement trees via bottom-up parent creation and preorder reordering. Sets itself apart by enforcing a strict preorder traversal ID scheme and storing four vertex-centered scalars per element.
+The TET-AMR Construction Process transforms leaf-level tetrahedral elements into a forest of complete, ordered refinement trees for efficient volume rendering. It addresses irregular memory layout and missing parent data through bottom-up parent creation, preorder reordering, and vertex data sampling. It differs from general AMR structures by enforcing a strict preorder traversal ID scheme and storing four vertex-centered scalars per element to avoid runtime index lookups, building on the [TET-AMR Data Structure](1094-tet-amr-data-structure.md) layout.
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Performance:** Enables efficient identification of refinement trees to sample from via a BVH over the coarse mesh [S1, unofficial].
-*   **Strengths:** Direct face neighbors and child counts are stored to avoid runtime index lookups [S1, unofficial].
-*   **Limitations:** Requires efficient point location queries within refinement trees [S1, unofficial].
+*   **Time Complexity:** Point location queries within a refinement tree are efficient due to the preorder traversal ID scheme, allowing for fast descent to the leaf element containing a query point [S1, unofficial].
+*   **Memory Complexity:** The structure stores data for all elements in a flat array, which can be memory-intensive for highly refined meshes. However, the storage of vertex-centered scalars per element avoids the need for separate vertex lists and index lookups, potentially reducing overhead in rendering loops [S1, unofficial].
+*   **Performance:** The use of a bounding volume hierarchy (BVH) over the coarse mesh allows for efficient identification of refinement trees to sample from, reducing the number of ray-element intersections required [S1, unofficial].
+*   **Strengths:** Efficient point location, reduced runtime index lookups, and support for tight majorants via macrocell values.
+*   **Limitations:** Memory usage scales with the total number of elements, including all refinement levels. Construction complexity involves managing neighbor relationships across refinement levels.
 
 ## Background
-The TET-AMR data structure was introduced in the context of direct volume rendering of tree-based tetrahedral adaptive mesh refinement data [S1, unofficial]. It utilizes Bey's red-refinement rule for tetrahedron subdivision [S1, unofficial].
+The TET-AMR data structure was introduced in the context of direct volume rendering of tree-based tetrahedral adaptive mesh refinement data [S1, unofficial]. It builds upon Bey's red-refinement rule for tetrahedral subdivision [S1, unofficial]. The structure is designed to address the challenges of rendering unstructured, adaptively refined volumetric data efficiently.
 
 ## Sources
 [S1] Direct volume rendering of tree-based tetrahedral adaptive mesh refinement data, https://repository.bilkent.edu.tr/items/fcbc592a-2646-49af-8b84-67308b6fd3e9, fetched 2026-10-27 (unofficial)

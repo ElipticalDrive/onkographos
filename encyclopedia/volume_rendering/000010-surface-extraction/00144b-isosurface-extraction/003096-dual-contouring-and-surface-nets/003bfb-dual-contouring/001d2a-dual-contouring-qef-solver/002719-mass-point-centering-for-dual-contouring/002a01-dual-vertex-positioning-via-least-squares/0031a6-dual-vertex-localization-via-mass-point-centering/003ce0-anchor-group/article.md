@@ -1,0 +1,137 @@
+# Anchor Group
+
+Also called: DCx Subgroup 2.2, DCx Subgroup 2.2: Anchor Group
+
+## Overview
+The Anchor Group is a specific subgroup within the Dual Contouring over Expanded Cubes (DCx) method [S1]. It addresses the complexity of determining face patterns for three isotropic cases (4-6, 6-3, and 8) where the mesh configuration depends on the simultaneous evaluation of all neighboring expanded cubes [S1]. Unlike simpler cases that can be resolved by examining a single neighbor, the Anchor Group introduces an anchor point to decouple these interactions, thereby lowering implementation complexity and preventing the generation of intricate non-manifold structures [S1].
+
+## How it works
+### Inputs and Outputs
+*   **Input:** The current expanded cube $C$ belonging to one of the three Anchor Group cases (4-6, 6-3, or 8); the set of all neighboring expanded cubes adjacent to $C$; the implicit function values defining the voxel topology.
+*   **Output:** A set of planar faces and mesh primitives connecting the anchor point to vertices on the cube faces, forming the local surface representation for $C$.
+
+### Data Structures
+*   **Anchor Point ($A$):** A single 3D vector representing the position of the anchor.
+*   **Dual Vertices ($D_i$):** The set of dual vertices located inside the expanded cube $C$.
+*   **External Voxels:** Voxels adjacent to a voxel in $C$ but not belonging to $C$. Classified as face-adjacent or edge-adjacent.
+
+### Steps
+1.  **Compute Anchor Point:** Calculate the anchor point $A$ as the arithmetic mean of all dual vertices $D_i$ contained within the current expanded cube $C$ [S1].
+    $$ A = \frac{1}{N} \sum_{i=1}^{N} D_i $$
+    where $N$ is the number of dual vertices in $C$.
+
+2.  **Iterative Neighbor Evaluation:** Instead of evaluating all neighbors simultaneously, iteratively examine each adjacent expanded cube $C_{adj}$ [S1]. For each $C_{adj}$, determine the connection between the anchor $A$ and the vertices on the shared face of $C$ [S1].
+
+3.  **Case-Specific Primitive Generation:**
+    *   **Case 4-6:** Generate planar faces only if the adjacent expanded cube $C_{adj}$ is "valid" [S1]. A cube is valid if it contains more than 2 voxels [S1]. If $C_{adj}$ is invalid, the face is not generated [S1].
+    *   **Case 6-3:** Identify the coplanar 3-voxel configuration in the adjacent expanded cube $C_{adj}$ [S1].
+        *   If this configuration does *not* produce a triangle, apply the first primitive (connecting $A$ to specific face vertices) [S1].
+        *   Otherwise, apply the second primitive [S1].
+    *   **Case 8:** Perform a thinning process to remove redundant voxels before generating faces [S1].
+        *   Define external voxels as those adjacent to a voxel in $C$ but not in $C$ [S1].
+        *   Evaluate each voxel $v$ in $C$:
+            *   If $v$ has an edge-adjacent external voxel AND lacks any face-adjacent external voxel that does *not* belong to Case 8, mark $v$ as valid [S1].
+            *   Otherwise, mark $v$ for thinning (removal) [S1].
+        *   Perform thinning sequentially to prevent the complete deletion of all voxels in $C$ [S1]. When a voxel is thinned, its adjacent voxels no longer need evaluation for removal unless they belong to other Case 8 cubes [S1].
+        *   After thinning, generate faces based on the remaining valid structure [S1].
+
+4.  **Finalize Mesh:** Combine the primitives generated from all adjacent expanded cubes to form the final mesh for $C$ [S1].
+
+### Parameters
+*   **Anchor Point Definition:** Average of all dual vertices inside the expanded cube [S1].
+
+### Edge Cases and Pitfalls
+*   **Non-Manifold Structures:** The Anchor Group cases frequently produce intricate non-manifold structures [S1]. The anchor point strategy is specifically designed to handle these, but incorrect handling of adjacency can lead to invalid geometry [S1].
+*   **Case 8 Thinning:** Sequential thinning is required. If all voxels in a Case 8 cube are evaluated and removed simultaneously without sequential dependency checks, the entire cube may be deleted incorrectly [S1].
+*   **Case 4-3 Interaction:** The coplanar 4-voxel case (Case 4-3) does not produce faces if its neighboring expanded cube falls into Case 8 [S1]. This dependency must be checked during the neighbor evaluation step.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_anchor_group_faces(expanded_cube, neighbors):
+    """
+    Computes the mesh faces for an expanded cube belonging to the Anchor Group (4-6, 6-3, or 8).
+    Uses an anchor point to decouple neighbor interactions.
+    """
+    # Step 1: Compute Anchor Point
+    dual_vertices = get_dual_vertices(expanded_cube)
+    if not dual_vertices:
+        return []
+    
+    anchor = Vector3(0, 0, 0)
+    for dv in dual_vertices:
+        anchor += dv
+    anchor /= len(dual_vertices)
+    
+    faces = []
+    
+    # Step 2 & 3: Iterate over neighbors and generate primitives
+    for neighbor in neighbors:
+        neighbor_case = get_case_type(neighbor)
+        shared_face_vertices = get_shared_face_vertices(expanded_cube, neighbor)
+        
+        if expanded_cube.case_type == "4-6":
+            # Case 4-6: Check validity of neighbor
+            if is_valid_cube(neighbor): # Valid if > 2 voxels
+                faces.extend(generate_planar_face(anchor, shared_face_vertices))
+                
+        elif expanded_cube.case_type == "6-3":
+            # Case 6-3: Check coplanar 3-voxel in neighbor
+            coplanar_3_voxel = get_coplanar_3_voxel(neighbor)
+            if not produces_triangle(coplanar_3_voxel):
+                faces.extend(generate_primitive_1(anchor, shared_face_vertices))
+            else:
+                faces.extend(generate_primitive_2(anchor, shared_face_vertices))
+                
+        elif expanded_cube.case_type == "8":
+            # Case 8: Thinning process
+            valid_voxels = thin_case_8(expanded_cube)
+            if valid_voxels:
+                # Generate faces based on remaining valid structure
+                faces.extend(generate_case_8_faces(anchor, valid_voxels, shared_face_vertices))
+                
+    return faces
+
+def is_valid_cube(cube):
+    """Returns True if cube contains more than 2 voxels."""
+    return cube.voxel_count > 2
+
+def thin_case_8(expanded_cube):
+    """
+    Performs sequential thinning on Case 8 cube.
+    Returns list of valid voxels.
+    """
+    voxels = get_voxels(expanded_cube)
+    valid_voxels = []
+    
+    # Note: Sequential evaluation is critical to prevent total deletion
+    for voxel in voxels:
+        external_face_adj = get_face_adjacent_external_voxels(voxel)
+        external_edge_adj = get_edge_adjacent_external_voxels(voxel)
+        
+        # Check if any face-adjacent external voxel is NOT Case 8
+        has_invalid_face_neighbor = False
+        for ext_v in external_face_adj:
+            if get_case_type(ext_v) != "8":
+                has_invalid_face_neighbor = True
+                break
+        
+        # Valid if has edge-adjacent external AND lacks invalid face-adjacent external
+        if external_edge_adj and not has_invalid_face_neighbor:
+            valid_voxels.append(voxel)
+        # Else: voxel is thinned (removed)
+        
+    return valid_voxels
+```
+
+## Operating characteristics
+*   **Complexity:** The method reduces complexity from "prohibitively high" (simultaneous evaluation of all neighbors) to a manageable iterative process [S1].
+*   **Strengths:** Decouples adjacency relationships, allowing for the construction of fine-grained features and non-manifold structures that cannot be built from original vertices alone [S1].
+*   **Limitations:** The generated meshes may be anisotropic despite the isotropic nature of the input cases [S1]. Requires careful handling of Case 8 thinning to avoid data loss.
+
+## Background
+The Anchor Group is part of the Dual Contouring over Expanded Cubes (DCx) method for zero-level set extraction from Neural Unsigned Distance Functions [S1]. It was introduced to handle complex topological configurations (subgroup 2.2) that arise in DCx, specifically cases 4-6, 6-3, and 8 [S1]. The method relies on the concept of expanded cubes and dual vertices, building upon the mass point centering approach for dual vertex positioning [S1].
+
+## Sources
+[S1] Dual Contouring over Expanded Cubes (DCx) for Zero-Level Set Extraction from Neural Unsigned Distance Functions, https://doi.org/10.1145/3811388, fetched 2026-11-06

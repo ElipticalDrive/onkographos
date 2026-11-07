@@ -7,33 +7,33 @@ Marmitt's Ray-Cell Intersection is a method for computing the intersection of a 
 
 ## How it works
 **Inputs:**
-*   Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ (normalized).
-*   Cell corner scalar values $v_{ijk}$ for $i,j,k \in \{0,1\}$.
-*   Isosurface threshold $T$.
-*   Ray parameter interval $[t_{in}, t_{out}]$ representing the ray's overlap with the cell.
+*   Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ (normalized) [S4, unofficial].
+*   Cell corner scalar values $v_{ijk}$ for $i,j,k \in \{0,1\}$ [S1][S2, unofficial].
+*   Isosurface threshold $T$ [S4, unofficial].
+*   Ray parameter interval $[t_{in}, t_{out}]$ representing the ray's overlap with the cell [S1].
 
 **Outputs:**
 *   Boolean indicating intersection.
-*   If true, the hit parameter $t_{hit}$ along the original ray.
+*   If true, the hit parameter $t_{hit}$ along the original ray [S4, unofficial].
 
 **Data Structures:**
-*   The scalar field is sampled at the 8 corners of the cell. The standard ordering for trilinear interpolation is $[v_{000}, v_{100}, v_{010}, v_{110}, v_{001}, v_{101}, v_{011}, v_{111}]$ [S4, unofficial].
+*   The scalar field is sampled at the 8 corners of the cell [S1][S2, unofficial]. The implementation in [S4, unofficial] uses the ordering $[v_{000}, v_{100}, v_{010}, v_{110}, v_{001}, v_{101}, v_{011}, v_{111}]$.
 
 **Algorithm Steps:**
 
 1.  **Preconditioning:**
     If $t_{out} \le t_{in}$, return false [S4, unofficial].
-    To avoid numerical precision issues when the ray origin is near a cell boundary, re-center the local coordinate system. Let $\mathbf{p}_{cell}$ be the midpoint of the ray's overlap with the cell:
+    To avoid numerical precision issues when the ray origin is near a cell boundary, re-center the local coordinate system [S4, unofficial]. Let $\mathbf{p}_{cell}$ be the midpoint of the ray's overlap with the cell:
     $$ \mathbf{p}_{cell} = \mathbf{o} + \mathbf{d} \cdot \frac{t_{in} + t_{out}}{2} $$
-    Define the local ray direction $\mathbf{d}_{local} = \mathbf{d}$ (normalized).
+    Define the local ray direction $\mathbf{d}_{local} = \mathbf{d}$ (normalized) [S4, unofficial].
     Calculate the local parameter bounds relative to $\mathbf{p}_{cell}$:
     $$ t'_{in} = -\frac{t_{out} - t_{in}}{2} \|\mathbf{d}\| $$
     $$ t'_{out} = \frac{t_{out} - t_{in}}{2} \|\mathbf{d}\| $$
     [G] Note: Since $\mathbf{d}$ is normalized, $\|\mathbf{d}\|=1$, simplifying the bounds to $\pm \frac{t_{out} - t_{in}}{2}$.
 
 2.  **Polynomial Construction:**
-    Construct the cubic polynomial $P(t)$ such that $P(t) = 0$ corresponds to the isosurface. The polynomial coefficients are derived from the trilinear interpolation of the corner values along the ray.
-    Let the ray in local cell coordinates be $\mathbf{r}(t) = \mathbf{p}_{cell} + t \cdot \mathbf{d}_{local}$.
+    Construct the cubic polynomial $P(t)$ such that $P(t) = 0$ corresponds to the isosurface [S1][S2, unofficial]. The polynomial coefficients are derived from the trilinear interpolation of the corner values along the ray [S1][S2, unofficial].
+    Let the ray in local cell coordinates be $\mathbf{r}(t) = \mathbf{p}_{cell} + t \cdot \mathbf{d}_{local}$ [S4, unofficial].
     The trilinear interpolation of the scalar field $S(\mathbf{r})$ can be expressed as a cubic polynomial in $t$:
     $$ P(t) = A t^3 + B t^2 + C t + D $$
     The coefficients $A, B, C, D$ are computed from the 8 corner values $v_{ijk}$ and the geometry of the cell relative to $\mathbf{p}_{cell}$ [S1][S2, unofficial][S4, unofficial]. Specifically, the implementation in [S4, unofficial] computes these via a helper function `compute_polynomial` which maps the cell geometry and values to the cubic coefficients. The constant term is adjusted for the isovalue:
@@ -41,30 +41,30 @@ Marmitt's Ray-Cell Intersection is a method for computing the intersection of a 
     So, $P(t) = A t^3 + B t^2 + C t + D'$.
 
 3.  **Critical Point Analysis:**
-    Evaluate $P(t)$ at the boundaries: $f_{in} = P(t'_{in})$ and $f_{out} = P(t'_{out})$.
-    Solve for the critical points (roots of the derivative $P'(t) = 3At^2 + 2Bt + C = 0$).
+    Evaluate $P(t)$ at the boundaries: $f_{in} = P(t'_{in})$ and $f_{out} = P(t'_{out})$ [S4, unofficial].
+    Solve for the critical points (roots of the derivative $P'(t) = 3At^2 + 2Bt + C = 0$) [S4, unofficial].
     Use the quadratic formula to find roots $t_{c1}, t_{c2}$:
     $$ t_{c} = \frac{-2B \pm \sqrt{4B^2 - 12AC}}{6A} $$
-    Filter roots that lie within $[t'_{in}, t'_{out}]$.
-    If a root exists within the interval, evaluate $P(t)$ at that root. If the sign of $P(t_{root})$ differs from the sign of the adjacent boundary ($f_{in}$ or $f_{out}$), update the search interval $[t'_{in}, t'_{out}]$ to exclude the region where the sign does not change, effectively isolating the root [S4, unofficial].
+    Filter roots that lie within $[t'_{in}, t'_{out}]$ [S4, unofficial].
+    If a root exists within the interval, evaluate $P(t)$ at that root [S4, unofficial]. If the sign of $P(t_{root})$ differs from the sign of the adjacent boundary ($f_{in}$ or $f_{out}$), update the search interval $[t'_{in}, t'_{out}]$ to exclude the region where the sign does not change, effectively isolating the root [S4, unofficial].
 
 4.  **Iterative Bisection Refinement:**
-    If $sign(f_{in}) \neq sign(f_{out})$, a root exists in $[t'_{in}, t'_{out}]$.
-    Perform iterative bisection (linear interpolation refinement) to find the root.
+    If $sign(f_{in}) \neq sign(f_{out})$, a root exists in $[t'_{in}, t'_{out}]$ [S4, unofficial].
+    Perform iterative bisection (linear interpolation refinement) to find the root [S2, unofficial].
     While the interval width is above a tolerance or for a fixed number of iterations (e.g., 3 iterations as noted in [S4, unofficial]):
     $$ t_{mid} = \frac{t'_{in} + t'_{out}}{2} $$
     $$ f_{mid} = P(t_{mid}) $$
-    If $sign(f_{mid}) == sign(f_{in})$, set $t'_{in} = t_{mid}$.
+    If $sign(f_{mid}) == sign(f_{in})$, set $t'_{in} = t_{mid}$ [S4, unofficial].
     Else, set $t'_{out} = t_{mid}$.
     [G] Standard bisection logic applies. The source [S4, unofficial] mentions "3 iterations of linear interpolation (bisection)", implying a fixed-depth refinement for performance.
 
 5.  **Result Mapping:**
-    The refined local parameter is $t'_{hit} = \frac{t'_{in} + t'_{out}}{2}$.
+    The refined local parameter is $t'_{hit} = \frac{t'_{in} + t'_{out}}{2}$ [S4, unofficial].
     The hit position in world space is:
     $$ \mathbf{p}_{hit} = \mathbf{p}_{cell} + t'_{hit} \cdot \mathbf{d}_{local} $$
     The final ray parameter $t_{hit}$ is:
     $$ t_{hit} = \|\mathbf{p}_{hit} - \mathbf{o}\| $$
-    [G] Since $\mathbf{d}$ is normalized and points in the direction of the ray, and $t'_{hit}$ is relative to the midpoint, the distance calculation holds. More precisely, $t_{hit} = \frac{t_{in} + t_{out}}{2} + t'_{hit}$ if $\mathbf{d}$ is normalized. The source [S4, unofficial] uses `length(hit_p - ray_org) / length(ray_dir)`.
+    [G] Since $\mathbf{d}$ is normalized and points in the direction of the ray, and $t'_{hit}$ is relative to the midpoint, the distance calculation holds. More precisely, $t_{hit} = \frac{t_{in} + t_{out}}{2} + t'_{hit}$ if $\mathbf{d}$ is normalized [S4, unofficial]. The source [S4, unofficial] uses `length(hit_p - ray_org) / length(ray_dir)`.
 
 **Pseudocode:**
 
@@ -116,13 +116,8 @@ def marmitt_ray_cell_intersection(ray_org, ray_dir, cell_corners, isovalue, t_in
     valid_roots = [r for r in roots if t_prime_in <= r <= t_prime_out]
     
     # Update bounds if critical points indicate sign changes
-    # This step isolates the root if multiple exist or if the function turns
     for r in valid_roots:
         f_r = eval_poly(r)
-        # If the critical point is a local extremum that crosses the isovalue,
-        # we might need to split the interval. However, standard bisection
-        # works if we ensure the interval contains a sign change.
-        # The source [S4, unofficial] updates t_in/t_out based on sign changes.
         if sign(f_r) == sign(f_in):
             t_prime_in = r
             f_in = f_r
@@ -155,8 +150,7 @@ def compute_trilinear_polynomial(cell_p, d, corners):
     """
     Computes the cubic polynomial coefficients for the trilinear field
     along the ray passing through cell_p with direction d.
-    The cell is assumed to be unit-sized and aligned with axes,
-    with corner v000 at cell_p - 0.5*d_cell? 
+    Assumes a unit cell aligned with axes, with corner v000 at cell_p - 0.5*d_cell? 
     Note: The exact mapping of cell_p to the trilinear basis depends on 
     the coordinate system. In [S4, unofficial], cell_p is the midpoint 
     of the ray overlap, and the polynomial is computed relative to the 
@@ -199,12 +193,12 @@ def solve_quadratic(a, b, c):
 *   **Memory Complexity:** $O(1)$ auxiliary memory per ray-cell intersection.
 *   **Performance:** It is slightly faster than analytical cubic solvers like Schwarze’s method [S1][S2, unofficial].
 *   **Precision:** Yields single-precision, numerically stable results [S1][S2, unofficial].
-*   **Strengths:** Fast, stable, suitable for real-time rendering (e.g., WebGPU) [S4, unofficial].
+*   **Strengths:** Suitable for real-time rendering (e.g., WebGPU) [S4, unofficial].
 *   **Limitations:** Approximate due to fixed bisection iterations; may miss roots if the function is highly oscillatory within the cell (though trilinear interpolation is generally well-behaved) [G].
 
 ## Background
 *   **Origin:** Proposed by Marmitt et al. in 2003/2004 [S1][S2, unofficial][S4, unofficial]. The method is described in "Fast and Accurate Ray-Voxel Intersection Techniques for Iso-Surface Ray Tracing" [S4, unofficial].
-*   **History:** It was used in the context of interactive isosurface ray tracing of large octree volumes [S1][S2, unofficial]. It is often compared to Parker et al.'s use of Schwarze’s cubic solver [S1][S2, unofficial].
+*   **History:** It is often compared to Parker et al.'s use of Schwarze’s cubic solver [S1][S2, unofficial].
 *   **Usage:** Used in WebGPU implicit isosurface raycasters [S4, unofficial].
 
 ## Sources

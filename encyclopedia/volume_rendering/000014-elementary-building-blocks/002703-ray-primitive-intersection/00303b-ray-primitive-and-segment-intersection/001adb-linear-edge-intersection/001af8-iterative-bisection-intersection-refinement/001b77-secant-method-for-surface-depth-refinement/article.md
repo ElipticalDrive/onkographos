@@ -3,12 +3,12 @@
 Also called: Linear Interpolation Root Finding for SDF, Secant Refinement
 
 ## Overview
-The Secant Method for Surface Depth Refinement is an iterative root-finding algorithm used to refine the depth value $d$ along a ray where a signed distance function (SDF) or occupancy logit crosses a specific threshold [S1, unofficial]. It distinguishes itself from its sibling [Bisection Method for Surface Depth Refinement](1033-bisection-method-for-surface-depth-refinement.md) by using linear interpolation between two bracketing points to estimate the next probe point, rather than simply halving the interval [S1, unofficial]. This approach generally converges faster than bisection for smooth functions but requires maintaining two bracketing values rather than one [S2, unofficial].
+The Secant Method for Surface Depth Refinement is an iterative root-finding algorithm used to refine the depth value $d$ along a ray where a signed distance function (SDF) or occupancy logit crosses a specific threshold [S1, unofficial]. It distinguishes itself from its sibling [Bisection Method for Surface Depth Refinement](1033-bisection-method-for-surface-depth-refinement.md) by using linear interpolation between two bracketing points to estimate the next probe point, rather than simply halving the interval [S1, unofficial].
 
 ## How it works
 **Inputs:**
 - Ray origin $ray0$ and direction $ray\_direction$ [S1, unofficial].
-- Initial bracketing depths $d_{low}$ and $d_{high}$ such that the function values $f_{low}$ and $f_{high}$ have opposite signs (or satisfy the bracketing condition for the specific threshold) [S1, unofficial].
+- Initial bracketing depths $d_{low}$ and $d_{high}$ with corresponding function values $f_{low}$ and $f_{high}$ [S1, unofficial].
 - Function $f(d)$ representing the signed distance or occupancy logit minus a threshold $logit\_tau$ [S1, unofficial].
 - Number of refinement iterations $n_{secant\_steps}$ [S1, unofficial].
 
@@ -16,8 +16,8 @@ The Secant Method for Surface Depth Refinement is an iterative root-finding algo
 - Refined depth $d_{pred}$ [S1, unofficial].
 
 **Data Structures:**
-- Vectors/Scalars for $d_{low}, d_{high}, f_{low}, f_{high}, d_{pred}$ [S1, unofficial].
-- 3D point $p_{mid}$ computed from ray equation [S1, unofficial].
+- Vectors or scalars for $d_{low}, d_{high}, f_{low}, f_{high}, d_{pred}$ [S1, unofficial].
+- 3D point $p_{mid}$ computed from the ray equation [S1, unofficial].
 
 **Steps:**
 1. **Initialization**: Compute the initial prediction $d_{pred}$ using linear interpolation between the bracketing points:
@@ -28,9 +28,9 @@ The Secant Method for Surface Depth Refinement is an iterative root-finding algo
    a. Compute the 3D point at the predicted depth:
       $$p_{mid} = ray0 + d_{pred} \cdot ray\_direction$$
       [S1, unofficial]
-   b. Evaluate the function at $p_{mid}$. For neural implicit surfaces, this involves querying the decoder:
+   b. Evaluate the function at $p_{mid}$. For neural implicit surfaces, this involves querying the decoder without gradient tracking:
       $$f_{mid} = decoder(p_{mid}, c, only\_occupancy=True) - logit\_tau$$
-      where gradient tracking is disabled to prevent differentiability issues during the iterative search [S1, unofficial][S3, unofficial].
+      [S1, unofficial]
    c. Update the bracketing interval based on the sign of $f_{mid}$:
       - Identify indices where $f_{mid} < 0$ as $ind_{low}$ [S1, unofficial].
       - If $ind_{low}$ has any true values, update the lower bound:
@@ -52,29 +52,31 @@ The Secant Method for Surface Depth Refinement is an iterative root-finding algo
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def secant_refine(ray0, ray_direction, d_low, d_high, f_low, f_high, decoder, logit_tau, n_secant_steps):
+import numpy as np
+
+def secant_refine(ray0, ray_direction, d_low, d_high, f_low, f_high, decoder, logit_tau, n_secant_steps, c=None):
     """
     Refine surface depth using the Secant Method.
     
     Args:
-        ray0: Tensor of ray origins.
-        ray_direction: Tensor of ray directions.
-        d_low: Tensor of lower bound depths.
-        d_high: Tensor of upper bound depths.
-        f_low: Tensor of function values at d_low.
-        f_high: Tensor of function values at d_high.
+        ray0: Array of ray origins.
+        ray_direction: Array of ray directions.
+        d_low: Array of lower bound depths.
+        d_high: Array of upper bound depths.
+        f_low: Array of function values at d_low.
+        f_high: Array of function values at d_high.
         decoder: Function to evaluate occupancy/logits.
         logit_tau: Threshold for occupancy.
         n_secant_steps: Number of refinement iterations.
+        c: Optional context parameter passed to the decoder.
         
     Returns:
-        d_pred: Refined depth tensor.
+        d_pred: Refined depth array.
     """
     # Step 1: Initialize prediction
-    # Avoid division by zero if f_high == f_low
     denom = f_high - f_low
     # Guard against zero denominator [G]
-    denom = torch.where(denom == 0, torch.ones_like(denom), denom)
+    denom = np.where(denom == 0, 1.0, denom)
     d_pred = -f_low * (d_high - d_low) / denom + d_low
     
     for _ in range(n_secant_steps):
@@ -82,9 +84,10 @@ def secant_refine(ray0, ray_direction, d_low, d_high, f_low, f_high, decoder, lo
         p_mid = ray0 + d_pred * ray_direction
         
         # Step 2b: Evaluate function without gradients
-        # Note: decoder(p_mid, c, only_occupancy=True) returns logits
-        with torch.no_grad():
+        if c is not None:
             f_mid = decoder(p_mid, c, only_occupancy=True) - logit_tau
+        else:
+            f_mid = decoder(p_mid, only_occupancy=True) - logit_tau
             
         # Step 2c: Update brackets
         ind_low = f_mid < 0
@@ -101,7 +104,7 @@ def secant_refine(ray0, ray_direction, d_low, d_high, f_low, f_high, decoder, lo
         # Step 2d: Recalculate prediction
         denom = f_high - f_low
         # Guard against zero denominator [G]
-        denom = torch.where(denom == 0, torch.ones_like(denom), denom)
+        denom = np.where(denom == 0, 1.0, denom)
         d_pred = -f_low * (d_high - d_low) / denom + d_low
         
     return d_pred
@@ -112,8 +115,6 @@ def secant_refine(ray0, ray_direction, d_low, d_high, f_low, f_high, decoder, lo
 
 **Edge Cases and Pitfalls:**
 - **Division by Zero**: If $f_{high} == f_{low}$, the denominator in the linear interpolation formula becomes zero. A guard must be implemented to handle this case, typically by falling back to the midpoint or keeping the current estimate [G].
-- **Non-continuous Functions**: The standard secant method assumes continuity. If the field function is not continuous, the algorithm may fail to converge or find the exact intersection point. In such cases, the False Position Algorithm is preferred as it finds the exact intersection point even if the field function is not continuous [S2, unofficial].
-- **Gradient Tracking**: Gradient computation should be suspended during the grazing point search or iterative root-finding process to prevent differentiability issues [S3, unofficial].
 
 ## Subtopics
 
@@ -121,26 +122,25 @@ def secant_refine(ray0, ray_direction, d_low, d_high, f_low, f_high, decoder, lo
 A procedure to detect surface points along rays by evaluating a neural decoder at proposal points, identifying sign changes in occupancy logits, and refining the depth using a root-finding method. It distinguishes itself from its siblings by combining coarse uniform sampling with a specific sign-change detection logic to locate the first entry into the volume, followed by secant refinement. It builds on [Secant Method for Surface Depth Refinement](996-secant-method-for-surface-depth-refinement.md).
 
 ### False Position Algorithm
-A root-finding algorithm combining linear interpolation and the midpoint algorithm. It finds the exact intersection point even if the field function is not continuous [S2, unofficial]. Implementation is in `IsoMesher::intersect_xaxis()`, `IsoMesher::intersect_yaxis()`, and `IsoMesher::intersect_zaxis()`. The algorithm used is determined by the preprocessor symbol `FALSE_POSITION` [S2, unofficial]. It is no worse than the midpoint algorithm in terms of iterations and usually better, making it the preferred choice for finding exact intersection points [S2, unofficial].
+A root-finding algorithm combining linear interpolation and the midpoint algorithm [S2, unofficial]. It finds the exact intersection point even if the field function is not continuous [S2, unofficial]. Implementation is in `IsoMesher::intersect_xaxis()`, `IsoMesher::intersect_yaxis()`, and `IsoMesher::intersect_zaxis()` [S2, unofficial]. The algorithm used is determined by the preprocessor symbol `FALSE_POSITION` [S2, unofficial]. It is no worse than the midpoint algorithm in terms of iterations and usually better, making it the preferred choice for finding exact intersection points [S2, unofficial].
 
 ### Secant Method for Grazing Point
 Methods to find the grazing point (where the ray is tangent to the SDF surface) along a ray segment `[t_min, t_max]` using secant or bisection iteration on the directional derivative [S3, unofficial].
-- **Secant method**: Initialize `L = ray(t_min)`, `R = ray(t_max)`. Loop up to `utils.NUM_GRZ` iterations: compute directional derivatives `dL = dir_deriv(L, d)`, `dR = dir_deriv(R, d)`. Compute midpoint `M = R - dR * (R - L) / (dR - dL)`. Compute `dM = dir_deriv(M, d)`. Update `L[dM < 0] = M`, `R[dM > 0] = M`. Return `dr.detach(L)` [S3, unofficial].
-- **Bisection method**: Initialize `L = ray(t_min)`, `R = ray(t_max)`. Loop up to `utils.NUM_GRZ` iterations: compute `M = (L + R) / 2`. Compute `dM = dir_deriv(M, d)`. Update `L[dM < 0] = M[dM < 0]`, `R[dM > 0] = M[dM > 0]`. Return `dr.detach(L)` [S3, unofficial].
+- **Secant method**: Initialize `L = ray(t_min)`, `R = ray(t_max)` [S3, unofficial]. Loop up to `utils.NUM_GRZ` iterations: compute directional derivatives `dL = dir_deriv(L, d)`, `dR = dir_deriv(R, d)` [S3, unofficial]. Compute midpoint `M = R - dR * (R - L) / (dR - dL)` [S3, unofficial]. Compute `dM = dir_deriv(M, d)` [S3, unofficial]. Update `L[dM < 0] = M`, `R[dM > 0] = M` [S3, unofficial]. Return `dr.detach(L)` [S3, unofficial].
+- **Bisection method**: Initialize `L = ray(t_min)`, `R = ray(t_max)` [S3, unofficial]. Loop up to `utils.NUM_GRZ` iterations: compute `M = (L + R) / 2` [S3, unofficial]. Compute `dM = dir_deriv(M, d)` [S3, unofficial]. Update `L[dM < 0] = M[dM < 0]`, `R[dM > 0] = M[dM > 0]` [S3, unofficial]. Return `dr.detach(L)` [S3, unofficial].
 - Select method based on `utils.GRZ_MODE`: 'secant' or 'bisection' [S3, unofficial].
 - **Pitfall**: Gradient computation is suspended during grazing point search using `dr.suspend_grad()` to prevent differentiability issues in the iterative root-finding process [S3, unofficial].
 
 ## Operating characteristics
 - **Time Complexity**: $O(n_{secant\_steps})$ function evaluations per ray [S1, unofficial].
 - **Memory Complexity**: $O(1)$ additional memory per ray for storing bracketing values [S1, unofficial].
-- **Performance**: The secant method generally converges faster than the bisection method for smooth functions, requiring fewer iterations to achieve the same precision [S2, unofficial]. However, it may fail to converge for non-continuous functions or if the initial bracketing is poor [S2, unofficial].
 - **Strengths**: Fast convergence for smooth SDFs; simple implementation [S1, unofficial].
-- **Limitations**: Requires two bracketing values; sensitive to non-continuous functions; potential for division by zero if function values are equal [S1, unofficial][S2, unofficial].
+- **Limitations**: Requires two bracketing values; potential for division by zero if function values are equal [S1, unofficial].
 - **When to Use**: When the SDF is smooth and continuous, and fast convergence is desired [S1, unofficial].
 - **When Not to Use**: When the field function is discontinuous; in this case, the False Position Algorithm is preferred [S2, unofficial].
 
 ## Background
-The Secant Method is a classic root-finding algorithm that approximates the root of a function by using linear interpolation between two points [S1, unofficial]. It is widely used in computer graphics for surface intersection refinement, particularly in differentiable rendering and neural implicit surface reconstruction [S1, unofficial][S3, unofficial]. The method is often compared to the Bisection Method and the False Position Algorithm, with the latter being preferred for non-continuous functions [S2, unofficial].
+The Secant Method is a classic root-finding algorithm that approximates the root of a function by using linear interpolation between two points [S1, unofficial]. It is widely used in computer graphics for surface intersection refinement, particularly in differentiable rendering and neural implicit surface reconstruction [S1, unofficial][S3, unofficial].
 
 ## Sources
 [S1] autonomousvision/differentiable_volumetric_rendering, https://github.com/autonomousvision/differentiable_volumetric_rendering, fetched 2026-10-26 (unofficial)

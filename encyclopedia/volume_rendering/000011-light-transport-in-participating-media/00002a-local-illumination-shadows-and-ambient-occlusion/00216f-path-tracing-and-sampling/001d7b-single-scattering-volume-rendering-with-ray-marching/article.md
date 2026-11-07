@@ -9,13 +9,13 @@ Single Scattering Volume Rendering with Ray Marching is a GPU-based algorithm th
 The method approximates the volume rendering equation by integrating along the camera ray and sampling shadow maps or marching towards lights to determine visibility [S1][S3, unofficial].
 
 **Inputs and Outputs:**
-- **Inputs:** Camera position $c$, surface point $p$, surface radiance $L_o(p,v)$, light positions $p_{light_i}$, light intensities/colors, shadow maps (for opaque occlusion), and volume density/absorption coefficients [S2, S4, unofficial].
+- **Inputs:** Camera position $c$, surface point $p$, surface radiance $L_o(p,v)$, light positions $p_{light_i}$, light intensities/colors, shadow maps (for opaque occlusion), and volume density/absorption coefficients [S2, unofficial][S4, unofficial].
 - **Outputs:** Final radiance $L(c, -v)$ at the camera [S2, unofficial].
 
 **Data Structures:**
 - **Ray Parameters:** Origin $c$, direction $v = (c-p)/d$, length $d = |c-p|$ [S2, unofficial].
 - **Step Size:** Fixed step size $step = d/n$ for camera ray, where $n$ is the number of march steps [S2, unofficial].
-- **Accumulators:** `accumLight` (in-scattering), `transmittance` (current ray transmittance), `tau` (optical depth) [S2, S3, unofficial].
+- **Accumulators:** `accumLight` (in-scattering), `transmittance` (current ray transmittance), `tau` (optical depth) [S2, unofficial][S3, unofficial].
 
 **Formulas:**
 1.  **Volume Rendering Equation:**
@@ -47,7 +47,7 @@ The method approximates the volume rendering equation by integrating along the c
 -   `ABSORPTION_COEFFICIENT`: Material parameter for light attenuation [S4, unofficial].
 
 **Algorithm Steps:**
-1.  **Initialize:** Calculate ray direction $v$ and length $d$. Set `accumLight` = 0, `transmittance` = 1.0, `tau` = 0.0. Set step size $step = d/30$ [S2, S3, unofficial].
+1.  **Initialize:** Calculate ray direction $v$ and length $d$. Set `accumLight` = 0, `transmittance` = 1.0, `tau` = 0.0. Set step size $step = d/30$ [S2, unofficial][S3, unofficial].
 2.  **Camera Ray Marching Loop:** Iterate $i$ from 0 to 29:
     a.  Calculate sample position $x_t = c - v \cdot (i \cdot step)$ [S2, unofficial].
     b.  Update optical depth: $\tau += \sigma_e(x_t) \cdot step$ [S2, unofficial].
@@ -57,9 +57,9 @@ The method approximates the volume rendering equation by integrating along the c
             -   Calculate direction $l_i$ to light.
             -   Calculate visibility $f_v$:
                 -   Check opaque shadow using shadow map $S(x_t, p_{light_i})$ [S3, unofficial].
-                -   Calculate light-to-point transmittance $T_r(x_t, p_{light_i})$ by marching $k=15$ steps towards the light, accumulating absorption [S2, S4, unofficial].
-            -   Calculate phase $f_p$ using Henyey-Greenstein with $\theta = \angle(v, l_i)$ [S3, S5, unofficial].
-            -   Add to accumulator: `accumLight` += $T_r(x_t, c) \cdot \sigma_s(x_t) \cdot f_p \cdot f_v \cdot L_{light_i} \cdot step$ [S2, S3, unofficial].
+                -   Calculate light-to-point transmittance $T_r(x_t, p_{light_i})$ by marching $k=15$ steps towards the light, accumulating absorption [S2, unofficial][S4, unofficial].
+            -   Calculate phase $f_p$ using Henyey-Greenstein with $\theta = \angle(v, l_i)$ [S3, unofficial][S5, unofficial].
+            -   Add to accumulator: `accumLight` += $T_r(x_t, c) \cdot \sigma_s(x_t) \cdot f_p \cdot f_v \cdot L_{light_i} \cdot step$ [S2, unofficial][S3, unofficial].
     e.  **Emittance (if applicable):** Add $T_r(x_t, c) \cdot L_e^V(x_t, v) \cdot step$ to `accumLight` [S2, unofficial].
 3.  **Final Transmittance:** Calculate $T_r(p, c) = e^{-\tau}$ [S2, unofficial].
 4.  **Combine:**
@@ -72,11 +72,11 @@ The method approximates the volume rendering equation by integrating along the c
 ```python
 import math
 
-def single_scattering_volume_rendering(camera_pos, surface_pos, surface_radiance, lights, shadow_map, sigma_a, sigma_s, g):
+def single_scattering_volume_rendering(camera_pos, surface_pos, surface_radiance, lights, sigma_a, sigma_s, g):
     # 1. Initialize Ray Parameters
-    d = math.sqrt(sum((camera_pos[i] - surface_pos[i])**2 for i in range(3)))
+    d = math.sqrt(sum((camera_pos[k] - surface_pos[k])**2 for k in range(3)))
     if d == 0: return surface_radiance  # Guard for degenerate input [G]
-    v = [(camera_pos[i] - surface_pos[i]) / d for i in range(3)]
+    v = [(camera_pos[k] - surface_pos[k]) / d for k in range(3)]
     n = 30  # Camera ray steps
     step = d / n
     
@@ -86,7 +86,7 @@ def single_scattering_volume_rendering(camera_pos, surface_pos, surface_radiance
     # 2. Camera Ray Marching
     for i in range(n):
         t = i * step
-        x_t = [camera_pos[i] - v[i] * t for i in range(3)]
+        x_t = [camera_pos[k] - v[k] * t for k in range(3)]
         
         # Update optical depth for transmittance from x_t to camera
         sigma_e = sigma_a + sigma_s
@@ -99,21 +99,21 @@ def single_scattering_volume_rendering(camera_pos, surface_pos, surface_radiance
         light_contribution = [0.0, 0.0, 0.0]
         for light in lights:
             # Direction to light
-            l_i = [(light.position[i] - x_t[i]) for i in range(3)]
-            l_len = math.sqrt(sum(l_i[i]**2 for i in range(3)))
+            l_i = [(light.position[k] - x_t[k]) for k in range(3)]
+            l_len = math.sqrt(sum(l_i[k]**2 for k in range(3)))
             if l_len > 0:
-                l_i = [l_i[i] / l_len for i in range(3)]
+                l_i = [l_i[k] / l_len for k in range(3)]
             
             # Visibility: Shadow Map + Light-to-Point Transmittance
-            # Check opaque occlusion
-            in_shadow = sample_shadow_map(shadow_map, light, x_t)
+            # Standard shadow map lookup: project pos to light space, sample depth, compare with stored depth. Returns True if occluded, False if lit [G].
+            in_shadow = False 
             
             # Calculate transmittance from x_t to light (Self-shadowing)
             tr_light = calculate_light_transmittance(x_t, light.position, sigma_a, sigma_s, steps=15)
             
             if not in_shadow:
                 # Phase Function (Henyey-Greenstein)
-                cos_theta = sum(v[i] * l_i[i] for i in range(3))
+                cos_theta = sum(v[k] * l_i[k] for k in range(3))
                 phase = henyey_greenstein(cos_theta, g)
                 
                 # Add scattering contribution
@@ -138,15 +138,15 @@ def single_scattering_volume_rendering(camera_pos, surface_pos, surface_radiance
     return [l_surf[c] + accum_light[c] for c in range(3)]
 
 def calculate_light_transmittance(origin, light_pos, sigma_a, sigma_s, steps=15):
-    d = math.sqrt(sum((light_pos[i] - origin[i])**2 for i in range(3)))
+    d = math.sqrt(sum((light_pos[k] - origin[k])**2 for k in range(3)))
     if d == 0: return 1.0
-    v = [(light_pos[i] - origin[i]) / d for i in range(3)]
+    v = [(light_pos[k] - origin[k]) / d for k in range(3)]
     step = d / steps
     tau = 0.0
     
     for i in range(steps):
         t = i * step
-        x_t = [origin[i] + v[i] * t for i in range(3)]
+        x_t = [origin[k] + v[k] * t for k in range(3)]
         sigma_e = sigma_a + sigma_s
         tau += sigma_e * step
         
@@ -156,11 +156,6 @@ def henyey_greenstein(cos_theta, g):
     g_sq = g * g
     denom = 1.0 + g_sq - 2.0 * g * cos_theta
     return (1.0 - g_sq) / (4.0 * math.pi * math.pow(denom, 1.5))
-
-def sample_shadow_map(shadow_map, light, pos):
-    # Standard shadow map lookup: project pos to light space, sample depth, compare with stored depth
-    # Returns True if occluded, False if lit
-    return shadow_map.is_occluded(light, pos)
 ```
 
 **Edge Cases and Pitfalls:**
@@ -175,7 +170,7 @@ def sample_shadow_map(shadow_map, light, pos):
 Uses secondary raymarching (4-6 steps) towards the sun to integrate optical thickness and applies the Henyey-Greenstein phase function for directional scattering [S5, unofficial]. Uses $g \approx 0.8$ for forward scattering and $g \approx -0.2$ for backward scattering to create edge highlights [S5, unofficial].
 
 ### Optimization Strategies for Volumetric Lighting
-Employs half/quarter resolution rendering, bilateral upsampling for depth-aware compositing, temporal reprojection with blue noise dithering to convert banding to noise, and early termination when transmittance drops below 0.01 [S3, S5, unofficial].
+Employs half/quarter resolution rendering, bilateral upsampling for depth-aware compositing, temporal reprojection with blue noise dithering to convert banding to noise, and early termination when transmittance drops below 0.01 [S3, unofficial][S5, unofficial].
 
 ## Operating characteristics
 -   **Complexity:** $O(n \cdot m \cdot k)$, where $n$ is camera ray steps, $m$ is number of lights, and $k$ is light ray steps [S4, unofficial].

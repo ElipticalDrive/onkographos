@@ -3,128 +3,115 @@
 Also called: Modified Resampling, Proposal Sampling, midpoint resampling
 
 ## Overview
-Mip-NeRF 360 Proposal Sampling is a hierarchical sampling strategy used during the training of neural radiance fields to allocate samples efficiently in space. It solves the problem of aliasing and inefficient sampling by generating a second, finer set of sample intervals based on the opacity distribution of a coarse network [S1]. It sets itself apart from standard hierarchical sampling by using a "modified resampling" procedure that employs midpoints of adjacent samples as interval boundaries, which qualitatively reduces aliasing artifacts compared to using sampled points directly as endpoints [S1].
+Mip-NeRF 360 Proposal Sampling is a hierarchical ray sampling strategy used to refine the spatial distribution of sample points along a ray during neural radiance field optimization. It addresses the problem of aliasing and inefficient sampling in unbounded scenes by generating a "fine" set of intervals from a "coarse" histogram of opacity weights. It sets itself apart from standard NeRF hierarchical sampling by using midpoints of adjacent coarse samples as interval boundaries and reflecting boundary samples to ensure coverage, thereby reducing high-frequency artifacts [S1]. It builds on [Coarse-to-Fine NeRF](3406-coarse-to-fine-nerf.md) by introducing specific boundary handling and midpoint logic to improve anti-aliasing [S1].
 
 ## How it works
-The method consists of two main phases: the generation of proposal intervals via modified resampling, and the configuration of the proposal networks.
+**Inputs and Outputs:**
+- Input: A coarse histogram representing the opacity distribution along a ray, derived from a coarse network pass. The histogram consists of $N$ bins with associated weights (opacity contributions).
+- Output: A set of $n$ fine intervals (defined by their endpoints) for the fine network pass.
 
-### Inputs and Outputs
-*   **Input:** A set of $n$ sorted sample positions $\{t_1, t_2, \dots, t_n\}$ drawn from a coarse histogram, along with the coarse histogram's bin boundaries.
-*   **Output:** A set of $n-1$ fine intervals defined by their endpoints, which are used to sample a fine network.
+**Data Structures:**
+- **Coarse Histogram:** An array of $N$ weights $w_i$ corresponding to spatial bins along the ray. The bins are sorted by depth.
+- **Sample Indices:** An array of $n$ indices sampled from the coarse histogram.
+- **Fine Intervals:** A list of $n-1$ intervals, each defined by a start and end depth coordinate.
 
-### Data Structures
-The proposal networks use a Hash Grid (NGP) structure.
-*   **Hierarchy:** Truncated at maximum grid sizes of 512 and 2048 [S2].
-*   **Channels:** Single channel of features is used for proposal networks, as they only predict density, not color [S2].
-*   **MLP:** A view-dependent bottleneck of size 256 processed by a 3-layer MLP is used for the final round, though proposal rounds may use simpler structures [S2].
+**Steps:**
+1. **Sample from Coarse Histogram:** Draw $n$ sorted values (indices or depth positions) from the coarse histogram based on the bin weights. Let these sorted sample positions be $s_1, s_2, \dots, s_n$. [S1]
+2. **Compute Midpoints:** Calculate the midpoints between adjacent sampled positions. For each pair $(s_i, s_{i+1})$, the midpoint is $m_i = \frac{s_i + s_{i+1}}{2}$. [S1]
+3. **Define Fine Intervals:** Use these midpoints as the boundaries for the new fine intervals. The $i$-th fine interval is bounded by $m_{i-1}$ and $m_i$ (with appropriate handling for the first and last intervals). [S1]
+4. **Handle Boundaries:** To ensure the first and last fine intervals cover the full extent of the ray segment of interest, reflect the first sample $s_1$ around the first endpoint of the ray segment, and reflect the last sample $s_n$ around the last endpoint. This prevents the "erosion" of the histogram where samples fail to span the full extent of coarse bins. [S1]
 
-### Steps
-1.  **Sample from Coarse Histogram:** Draw $n$ sorted values from the coarse histogram weights [S1]. Let these sorted values be $t_1, t_2, \dots, t_n$.
-2.  **Define Fine Intervals via Midpoints:** Use the midpoints of adjacent sample pairs as the endpoints for the new set of $n-1$ fine intervals [S1]. For adjacent samples $t_i$ and $t_{i+1}$, the midpoint is $m_i = \frac{t_i + t_{i+1}}{2}$.
-3.  **Handle Boundaries:** Reflect the first sample $t_1$ around the first endpoint and the last sample $t_n$ around the last endpoint to handle boundary conditions [S1]. This ensures the first and last fine intervals are properly bounded by the scene extent.
-4.  **Proposal Rounds:** Perform two rounds of proposal sampling to bound scene geometry and recursively generate new sample intervals [S2].
-5.  **Final Rendering:** Perform one final NeRF round to render the final set of intervals into an image [S2].
-
-### Pseudocode
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def modified_resampling(coarse_samples, first_endpoint, last_endpoint):
+def mip_nerf_360_proposal_sampling(coarse_histogram, num_fine_samples, ray_start, ray_end):
     """
-    Generates fine intervals from coarse samples using midpoint resampling.
-    
-    Args:
-        coarse_samples: List of n sorted sample positions from coarse histogram.
-        first_endpoint: The start of the first coarse bin.
-        last_endpoint: The end of the last coarse bin.
-        
-    Returns:
-        List of n-1 fine intervals, where each interval is (start, end).
+    coarse_histogram: List of weights for N coarse bins.
+    num_fine_samples: Number of fine intervals to generate (n).
+    ray_start: Depth of the first endpoint of the ray segment.
+    ray_end: Depth of the last endpoint of the ray segment.
     """
-    n = len(coarse_samples)
-    fine_intervals = []
+    # Step 1: Sample n sorted values from the coarse histogram
+    # Note: The source describes sampling "n sorted values". 
+    # In practice, this implies drawing n indices from the CDF of the coarse histogram.
+    # Let's assume we have a function to sample indices based on weights.
+    sample_indices = sample_sorted_indices(coarse_histogram, num_fine_samples)
     
-    # Step 1 & 2: Use midpoints of adjacent sample pairs as endpoints
-    # We need n-1 intervals, so we compute n-1 midpoints
+    # Map indices to depth positions along the ray
+    # Assuming uniform coarse bin distribution for simplicity in mapping
+    bin_width = (ray_end - ray_start) / len(coarse_histogram)
+    sample_positions = [ray_start + (idx + 0.5) * bin_width for idx in sample_indices]
+    
+    # Step 2 & 3: Use midpoints of adjacent sample pairs as endpoints
+    # We need n-1 intervals, so we need n-1 midpoints? 
+    # The source says "use the midpoints of each adjacent sample pair as the endpoints 
+    # of our new set of 'fine' intervals". 
+    # If we have n samples, we have n-1 pairs. This creates n-1 intervals.
+    # However, typically we want n intervals. The source implies the samples themselves 
+    # are the "values" from which midpoints are derived.
+    # Let's re-read carefully: "sample n sorted values... use midpoints of each adjacent 
+    # sample pair as the endpoints of our new set of 'fine' intervals".
+    # If we have n samples s1...sn, we have n-1 midpoints. This defines n-1 intervals.
+    # But we usually want n intervals. The source might imply n samples define n-1 intervals 
+    # plus boundary handling. Or perhaps n samples are used to define n intervals via 
+    # reflection.
+    
+    # Let's follow the boundary reflection logic strictly.
+    # First interval start: Reflect s1 around ray_start
+    # Last interval end: Reflect sn around ray_end
+    
+    # Midpoints between adjacent samples
     midpoints = []
-    for i in range(n - 1):
-        t_i = coarse_samples[i]
-        t_next = coarse_samples[i+1]
-        midpoint = (t_i + t_next) / 2.0
-        midpoints.append(midpoint)
+    for i in range(len(sample_positions) - 1):
+        m = (sample_positions[i] + sample_positions[i+1]) / 2.0
+        midpoints.append(m)
         
-    # Step 3: Handle boundaries by reflecting first and last samples
+    # Boundary handling
     # Reflect first sample around first endpoint
-    reflected_first = 2 * first_endpoint - coarse_samples[0]
+    first_reflected = ray_start - (sample_positions[0] - ray_start)
     
     # Reflect last sample around last endpoint
-    reflected_last = 2 * last_endpoint - coarse_samples[-1]
+    last_reflected = ray_end + (ray_end - sample_positions[-1])
     
     # Construct intervals
-    # The first interval starts at the reflected first sample and ends at the first midpoint
-    fine_intervals.append((reflected_first, midpoints[0]))
+    # Interval 0: [first_reflected, midpoints[0]]
+    # Interval i: [midpoints[i-1], midpoints[i]]
+    # Interval n-1: [midpoints[-1], last_reflected]
     
-    # Intermediate intervals start at previous midpoint and end at current midpoint
+    fine_intervals = []
+    fine_intervals.append((first_reflected, midpoints[0]))
     for i in range(1, len(midpoints)):
         fine_intervals.append((midpoints[i-1], midpoints[i]))
-        
-    # The last interval starts at the last midpoint and ends at the reflected last sample
-    fine_intervals.append((midpoints[-1], reflected_last))
+    fine_intervals.append((midpoints[-1], last_reflected))
     
     return fine_intervals
-
-def proposal_sampling_pipeline(coarse_histogram, num_samples=64):
-    """
-    Executes the two-round proposal sampling process.
-    """
-    # Round 1: Coarse sampling
-    # Sample n values from coarse histogram weights
-    coarse_samples = sample_from_histogram(coarse_histogram, num_samples)
-    coarse_samples.sort()
-    
-    # Generate fine intervals for Round 2
-    # Assuming first_endpoint and last_endpoint are known from scene bounds
-    first_endpoint = coarse_histogram.bins[0].start
-    last_endpoint = coarse_histogram.bins[-1].end
-    
-    fine_intervals_round1 = modified_resampling(coarse_samples, first_endpoint, last_endpoint)
-    
-    # Round 2: Recursive proposal
-    # Sample from the fine intervals generated in Round 1 to create Round 2 intervals
-    # This step is described as "recursively generate new sample intervals" [S2]
-    # Implementation detail: Sample from the distribution defined by fine_intervals_round1
-    round2_samples = sample_from_intervals(fine_intervals_round1, num_samples)
-    round2_samples.sort()
-    
-    # Generate final intervals for the fine network
-    final_intervals = modified_resampling(round2_samples, first_endpoint, last_endpoint)
-    
-    # Final Round: Render using the final intervals
-    # Render the final set of intervals into an image [S2]
-    image = render_neRF(final_intervals)
-    
-    return image
 ```
 
-### Parameters
-*   **Number of samples ($n$):** Not explicitly fixed in the notes, but typical values in NeRF literature are 64 or 128. The sources mention sampling $n$ values [S1].
-*   **Grid Sizes:** Proposal NGP hierarchy truncated at maximum grid sizes of 512 and 2048 [S2].
-*   **Channels:** Single channel for proposal NGP [S2].
+**Parameters:**
+- $n$: Number of fine samples/intervals. Typical values are not explicitly given in the sources for this specific method, but standard NeRF uses 64-128. [S1]
+- Coarse histogram resolution: Not given in the sources. [S1]
 
-### Edge Cases and Pitfalls
-*   **Aliasing:** Using sampled points directly as endpoints can "erode" the coarse histogram because samples are unlikely to span the extent of each coarse bin, leading to aliasing [S1]. The midpoint resampling method mitigates this [S1].
-*   **Boundary Conditions:** Without reflecting samples, the first and last intervals may not be properly bounded, leading to artifacts at the scene edges [S1].
+**Edge Cases and Pitfalls:**
+- **Boundary Erosion:** Without reflection, samples are unlikely to span the full extent of coarse histogram bins, leading to "erosion" of the scene representation and aliasing. [S1]
+- **Precision:** Midpoint calculation should use floating-point arithmetic to avoid quantization errors at boundaries. [G]
+
+## Subtopics
+
+### [Dynamic Optimal Sampling Layer](8681-dynamic-optimal-sampling-layer.md)
+The Dynamic Optimal Sampling Layer is a three-stage sampling strategy (coarse, optimal, fine) that inserts an optimal sampling layer between coarse and fine sampling to adaptively adjust the number and locations of new sample points based on priorities from the previous stage, targeting high-weight regions. It builds on [Mip-NeRF 360 Proposal Sampling](5408-mip-nerf-360-proposal-sampling.md) by replacing uniform or fixed-density refinement with a priority-driven allocation mechanism that uses dilation to expand coverage in high-density areas, thereby improving sampling efficiency and rendering quality in sparse reconstruction scenarios.
 
 ## Operating characteristics
-*   **Time Complexity:** The resampling step is $O(n \log n)$ due to sorting, where $n$ is the number of samples. The subsequent rendering is proportional to the number of fine intervals.
-*   **Memory Complexity:** The proposal networks use truncated hash grids (max sizes 512 and 2048) and single-channel features, reducing memory usage compared to full-resolution NGP [S2].
-*   **Strengths:** Qualitatively reduces aliasing artifacts [S1]. Efficiently bounds scene geometry through recursive proposal sampling [S2].
-*   **Limitations:** Requires two rounds of proposal sampling before the final render, increasing training time per iteration [S2].
-*   **When to use:** When training unbounded, anti-aliased neural radiance fields where aliasing is a concern [S1].
+- **Time Complexity:** Proportional to the number of rays and the number of samples. The resampling step is $O(n \log n)$ due to sorting, where $n$ is the number of fine samples. [S1]
+- **Memory Complexity:** Requires storing the coarse histogram and the sampled indices. [S1]
+- **Performance:** Qualitatively reduces aliasing compared to using sampled points directly as endpoints. [S1]
+- **Strengths:** Reduces aliasing in unbounded scenes by ensuring boundary coverage. [S1]
+- **Limitations:** The source notes little quantitative effect on rendering quality, suggesting the benefit is primarily visual/qualitative. [S1]
 
 ## Background
-Mip-NeRF 360 Proposal Sampling was introduced in the Mip-NeRF 360 paper [S1]. It was later adopted and adapted in Zip-NeRF, which uses two rounds of proposal sampling to bound scene geometry and recursively generate new sample intervals [S2]. The method addresses the limitations of standard hierarchical sampling by modifying the resampling procedure to reduce aliasing [S1].
+Mip-NeRF 360 Proposal Sampling was introduced in the paper "Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields" [S1]. It was developed to handle unbounded scenes and reduce aliasing artifacts that occur when resampling histograms in neural radiance fields. The method modifies the standard resampling procedure to use midpoints and boundary reflection.
 
 ## Sources
 [S1] Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00539, fetched 2026-10-26
 [S2] Zip-NeRF: Anti-Aliased Grid-Based Neural Radiance Fields, https://doi.org/10.1109/iccv51070.2023.01804, fetched 2026-10-26
+[S3] DBARF: Deep Bundle-Adjusting Generalizable Neural Radiance Fields, https://doi.org/10.1109/cvpr52729.2023.00011, fetched 2026-10-29

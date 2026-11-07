@@ -3,63 +3,58 @@
 Also called: Octree-based sphere tracing, Spatial partitioning with Lipschitz bounds
 
 ## Overview
-Octree partitioning for sphere tracing divides the spatial domain into hierarchical octree cells to impose local bounds on Lipschitz constants, yielding tighter signed distance estimates and enabling the culling of nodes that cannot intersect the implicit surface [S1]. Unlike [Sparse Voxel Traversal](1525-sparse-voxel-traversal.md) which typically relies on uniform or fixed-resolution voxel grids for density accumulation, this method leverages the geometric properties of signed distance fields (SDFs) to skip large empty regions more aggressively by using gradient-based bounds [S1].
+Octree partitioning for sphere tracing accelerates the rendering of implicit surfaces by dividing the domain into an octree where each cell stores a local Lipschitz bound of the field function [S1]. This method allows the ray tracer to cull empty or fully interior nodes without evaluating the implicit surface, solving the problem of slow convergence in regions with high gradient magnitudes [S1]. It differs from [Sparse Voxel Traversal](1525-sparse-voxel-traversal.md) by using static cell bounds rather than dynamic segment-specific bounds, making it susceptible to field function queries at every cell intersection [S1].
 
 ## How it works
-**Inputs:** A ray $r(t) = o + td$, a maximum traversal distance $t_{max}$, and a collection of implicit objects defining the scene.
-**Outputs:** The intersection distance $t_{hit}$ or null if no intersection is found within $t_{max}$.
+**Inputs:** A signed distance field (SDF) function $f(\mathbf{x})$, a ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, and an octree structure where each node stores a local Lipschitz constant $L$ and potentially an index to the closest object.
+**Outputs:** The intersection distance $t$ to the implicit surface, or a failure state if no intersection is found within the maximum distance.
 
 **Data Structures:**
-*   **Octree:** A hierarchical structure where each node represents a cubic cell in 3D space.
-*   **Cell Metadata:** Each leaf node stores:
-    *   `centroid`: The 3D center of the cell.
-    *   `corner`: The 3D coordinates of a corner of the cell (typically the one furthest from the centroid or a specific reference corner).
-    *   `closest_object_index`: An optional integer index pointing to the object in the scene collection that is closest to this cell. If no single object satisfies the "closest to every point" condition, this may be undefined or marked as empty [S1].
+*   **Octree Node:**
+    *   `type`: Enum {Empty, Leaf, Branch}.
+    *   `bbox`: Axis-aligned bounding box in world space.
+    *   `L`: Local Lipschitz constant (bound on the gradient magnitude $\|\nabla f\|$) for the cell.
+    *   `closest_obj_idx`: Optional integer index to the object closest to the cell [S1].
 
-**Algorithm Steps:**
+**Steps:**
+1.  **Initialization:** Set current traversal distance $t_{curr} = 0$. Start at the root of the octree.
+2.  **Ray-Node Intersection:** For the current node, calculate the intersection interval $[t_{enter}, t_{exit}]$ of the ray with the node's bounding box. If the ray misses the node, terminate traversal for this branch.
+3.  **Culling Check:**
+    *   If the node is `Empty`, skip to the next candidate node.
+    *   If the node is `Leaf`, evaluate the SDF at the ray position $\mathbf{x} = \mathbf{o} + t_{curr}\mathbf{d}$.
+    *   If the node is `Branch`, determine which child octant the ray enters next. The child coordinates are determined by comparing the intersection point $\mathbf{intersect}$ at the current entry time to the node's midpoint $\mathbf{mid}$:
+        $$ \text{coords}[i] = 1 \text{ if } \mathbf{intersect}[i] \ge \text{mid}[i], \text{ else } 0 $$
+        Recursively traverse the selected child.
+4.  **Sphere Tracing Step with Lipschitz Bound:**
+    *   At the current ray position $\mathbf{x}$, compute the SDF value $f(\mathbf{x})$.
+    *   Calculate the step size $\Delta t$ using the local Lipschitz constant $L$ of the current node. The step size is bounded by the condition that the function value cannot change faster than $L \cdot \Delta t$. To ensure we do not overshoot the surface, the step is:
+        $$ \Delta t = \frac{|f(\mathbf{x})|}{L} $$
+        [G] In practice, a small epsilon $\epsilon$ is often added to prevent division by zero or infinite steps if $L=0$ in empty space, though strict adherence to the Lipschitz bound implies $L > 0$ for non-empty regions.
+    *   Update $t_{curr} \leftarrow t_{curr} + \Delta t$.
+5.  **Convergence Check:**
+    *   If $|f(\mathbf{x})| < \epsilon_{surface}$, the surface is hit. Return $t_{curr}$.
+    *   If $t_{curr} > t_{max}$, no intersection. Return failure.
+    *   If the ray has exited the current node's bounding box, update the current node to the next intersected node in the octree and repeat from Step 2.
 
-1.  **Initialization:**
-    *   Set current ray parameter $t = 0$.
-    *   Set $t_{min} = 0$ and $t_{last} = 0$.
-    *   Initialize a list or stack for octree traversal.
-
-2.  **Traversal Loop:**
-    *   While $t < t_{max}$:
-        *   Identify the current octree cell containing the point $r(t)$.
-        *   If the cell is empty or culled, advance $t$ to the exit distance of the cell along the ray.
-        *   If the cell is not culled:
-            *   Compute the local Lipschitz bound $L_{cell}$ for the signed distance function within this cell. This is determined by the maximum gradient magnitude of the implicit function within the cell bounds [S1].
-            *   Compute the local signed distance bound $d_{bound}$ using the Lipschitz constant and the distance from the ray origin (or current step) to the cell [S1].
-            *   If $d_{bound} > t_{max} - t$, cull the cell and advance $t$ to the exit distance.
-            *   Otherwise, perform a sphere trace step within the cell using the local bound. Let the step size be $\Delta t = d_{bound}$.
-            *   Update $t \leftarrow t + \Delta t$.
-            *   If the distance to the surface is below a threshold $\epsilon$, return $t$ as the hit.
-
-3.  **Closest Object Indexing (Optional Optimization):**
-    *   For each octree cell, determine if there is an object closest to the cell. An object $O_i$ is considered closest to a cell $C$ if it is the closest object to *every* point in $C$ [S1].
-    *   To check this efficiently, use the triangle inequality. Let $c$ be the centroid of the cell and $v$ be a corner of the cell. Let $d(c, O_i)$ be the distance from the centroid to object $O_i$.
-    *   Object $O_i$ is the closest to cell $C$ if:
-        $$ d(c, O_i) + d(c, v) < d(c, O_j) \quad \forall j \neq i $$
-        where $d(c, v)$ is the distance from the centroid to the cell corner [S1].
-    *   Store the index of such an object in the cell metadata. If no such object exists (which can happen under the strict definition), the cell is treated as potentially containing multiple interacting objects or empty space, requiring full evaluation [S1].
-
-**Pitfalls:**
-*   **Strict Closest Object Definition:** Some cells may not have a single closest object under the strict definition ("closest to every point in the cell"). In these cases, the optimization of storing a single index fails, and the renderer must handle multiple objects or fall back to general evaluation [S1].
-*   **Lipschitz Bound Accuracy:** The effectiveness depends on tight bounds on the gradient magnitude. Loose bounds reduce culling efficiency.
+**Edge Cases and Pitfalls:**
+*   **Closest Object Definition:** When storing an index to the closest object, an object is considered closest to a cell if it is the closest object to every point in the cell. This is verified by the triangle inequality: an object is closest to a cell if the distance from the cell’s centroid to the object, plus the distance from the centroid to the cell corner, is still less than the distance from the centroid to any other object [S1]:
+    $$ d(\text{centroid}, \text{object}) + d(\text{centroid}, \text{corner}) < d(\text{centroid}, \text{any\_other\_object}) $$
+*   **No Closest Object:** Some cells may not have a closest object under this strict definition, requiring fallback logic or larger bounding volumes [S1].
+*   **Precision:** To prevent precision errors when subdivision levels approach floating-point limits, interval arithmetic with correct rounding modes is often employed to guarantee that no octant is missed [S5].
 
 ## Subtopics
 
 ### [Lipschitz Constant Based Ray Tracing](4065-lipschitz-constant-based-ray-tracing.md)
-Uses Lipschitz bounds of the field function and its gradient to build an octree space partitioning for pruning empty areas and isolating roots. It is chosen when tight gradient bounds are available and the scene consists of implicit surfaces where sphere tracing is applicable.
+Accelerates sphere tracing by partitioning the domain into an octree where each cell stores a local Lipschitz bound. It differs from Segment Tracing by using static cell bounds rather than dynamic segment-specific bounds, making it susceptible to field function queries at every cell intersection.
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the depth of the octree and the distribution of objects. In sparse scenes, it offers significant speedups over uniform grid traversal by skipping empty nodes. Worst-case complexity approaches that of uniform sphere tracing if the octree is fully expanded or bounds are loose.
-*   **Memory Complexity:** Proportional to the number of octree nodes. Sparse scenes benefit from lower memory usage compared to dense uniform grids.
-*   **Strengths:** Allows tighter signed distance bounds by localizing Lipschitz constants; effectively culls empty space; compatible with any implicit function for which a Lipschitz bound can be computed [S1].
-*   **Limitations:** Requires preprocessing to build the octree and compute bounds; handling cells without a unique closest object adds complexity; performance degrades if the Lipschitz bounds are not tight.
+*   **Time Complexity:** Depends on the depth of the octree and the distribution of the Lipschitz constants. In regions with high gradient magnitudes, it significantly reduces the number of SDF evaluations compared to uniform sphere tracing [S1].
+*   **Memory Complexity:** $O(N)$ where $N$ is the number of octree nodes. Each node stores a Lipschitz constant and potentially an object index [S1].
+*   **Strengths:** Eliminates empty space and imposes local bounds on Lipschitz constants, yielding tighter signed distance bounds and culling of nodes that cannot intersect the implicit surface [S1]. It allows each chunk of the object to be treated individually, penalized only by the largest gradient within its bounds [S1].
+*   **Limitations:** Requires pre-computation of Lipschitz constants for each cell. The static nature of the bounds means it may not adapt as dynamically as segment-based methods [S1].
 
 ## Background
-Octree partitioning was originally used in polygonization [Bloomenthal, 1989] and ray tracing [Kalra & Barr, 1989] of implicit surfaces. Kalra and Barr (1989) used the Lipschitz constant to cull octree nodes guaranteed not to intersect the implicit surface. Sphere tracing reaps the same benefits from this spatial partitioning [S1]. The method imposes local bounds on Lipschitz constants, allowing each chunk of the object to be treated individually and penalized only by the largest gradient within its bounds [S1].
+Octree partitioning was originally used in the polygonization [Bloomenthal, 1989] and ray tracing [Kalra & Barr, 1989] of implicit surfaces. Kalra and Barr used the Lipschitz constant to cull octree nodes guaranteed not to intersect the implicit surface. Sphere tracing reaps the same benefits from spatial partitioning as did the root finding method in [Kalra & Barr, 1989] [S1].
 
 ## Sources
 [S1] Sphere Tracing: A Geometric Method for the Antialiased Ray Tracing of Implicit Surfaces, https://www.researchgate.net/publication/2792108_Sphere_Tracing_A_Geometric_Method_for_the_Antialiased_Ray_Tracing_of_Implicit_Surfaces, fetched 2026-10-27
