@@ -1,0 +1,153 @@
+# Efficient Space Skipping & Adaptive Sampling of Unstructured Volumes Using H.W. Accel. Ray Tracing
+
+Also called: Space Skipping and Adaptive Sampling for Unstructured Volumes
+
+## Overview
+This method enables interactive visualization of large unstructured volumes (e.g., from finite element simulations) by leveraging hardware-accelerated ray tracing to accelerate acceleration structure traversal and point-in-element tests [S1, unofficial]. It solves the bottleneck of traditional rasterization, which requires sorting 20–40 GB of unstructured elements front-to-back on every camera move, and addresses the limitation of existing space-skipping techniques that assume regular grids [S1, unofficial]. It sets itself apart from siblings like [SparseLeap Ray-Casting with Occupancy Misses](9818-sparseleap-ray-casting-with-occupancy-misses.md) by explicitly combining empty space skipping with adaptive sampling on unstructured meshes using a KD-tree partitioning strategy, rather than relying solely on occupancy misses or segment lists [S1, unofficial].
+
+## How it works
+**Inputs:** An unstructured mesh (e.g., tetrahedral mesh) with scalar field values and a transfer function mapping scalar values to color and opacity.
+**Outputs:** A rendered image with reduced sampling overhead.
+
+**Data Structures:**
+1.  **KD-tree:** Built over the mesh elements. It partitions the mesh into a set of convex, disjoint regions (partitions) [S1, unofficial].
+2.  **Partition Metadata:** For each region in the KD-tree, the following values are precomputed:
+    *   $S_{min}$: Minimum scalar field value in the region.
+    *   $S_{max}$: Maximum scalar field value in the region.
+    *   $O_{max}$: Maximum opacity resulting from the transfer function applied to $[S_{min}, S_{max}]$.
+    *   $V_{color}$: Color variance within the region [S1, unofficial].
+
+**Parameters:**
+*   $R_{min}$: User-specified minimum sampling rate.
+*   $R_{max}$: User-specified maximum sampling rate [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Build KD-tree:** Construct a KD-tree over the input unstructured mesh elements to create convex disjoint partitions [S1, unofficial].
+2.  **Compute Metadata:** For each partition, calculate $S_{min}$, $S_{max}$, $O_{max}$, and $V_{color}$ [S1, unofficial].
+3.  **Ray Traversal:** Use hardware-accelerated ray tracing (e.g., OptiX) to iterate rays through the active partitions [S1, unofficial].
+4.  **Empty Space Skipping:**
+    *   Skip partitions where $O_{max} = 0$ (entirely transparent elements) [S1, unofficial].
+    *   Skip large void regions where the data is sparse and unoccupied [S1, unofficial].
+5.  **Adaptive Sampling:**
+    *   Within active partitions, determine the local sampling rate based on $V_{color}$.
+    *   Interpolate between $R_{min}$ and $R_{max}$ based on the variance. High variance regions use rates closer to $R_{max}$; low variance regions use rates closer to $R_{min}$ [S1, unofficial].
+6.  **Rendering:** Perform point queries along the ray at the adaptive sampling rate. Iterate until the ray exits the volume bounds or reaches maximum capacity [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_unstructured_volume(mesh, transfer_function, R_min, R_max):
+    # Step 1: Build KD-tree over mesh elements
+    kd_tree = build_kd_tree(mesh.elements)
+    
+    # Step 2: Compute partition metadata
+    partitions = []
+    for element in mesh.elements:
+        region = kd_tree.get_region(element)
+        s_min = min(element.scalar_values)
+        s_max = max(element.scalar_values)
+        o_max = transfer_function.max_opacity(s_min, s_max)
+        v_color = compute_color_variance(element, transfer_function)
+        partitions.append({
+            'region': region,
+            's_min': s_min,
+            's_max': s_max,
+            'o_max': o_max,
+            'v_color': v_color
+        })
+    
+    # Step 3-6: Ray Tracing Loop
+    for ray in rays:
+        samples = []
+        t = ray.origin
+        
+        while t < ray.max_t:
+            # Hardware-accelerated traversal to find next partition
+            partition = kd_tree.traverse(ray, t)
+            
+            if partition is None:
+                break
+                
+            # Step 4: Empty Space Skipping
+            if partition['o_max'] == 0:
+                # Skip transparent partition
+                t = ray.intersect_partition_bound(partition)
+                continue
+            
+            # Step 5: Adaptive Sampling Rate Calculation
+            # Normalize variance to [0, 1] range relative to global max variance
+            # Note: Global max variance is not explicitly defined in sources, 
+            # assume normalized or use local heuristic [G]
+            normalized_var = normalize(partition['v_color'])
+            
+            # Interpolate sampling rate
+            # Higher variance -> higher rate (more samples)
+            # Lower variance -> lower rate (fewer samples)
+            sampling_rate = R_min + normalized_var * (R_max - R_min)
+            
+            # Determine step size based on sampling rate
+            # Assuming sampling_rate is samples per unit distance or similar metric [G]
+            step_size = 1.0 / sampling_rate
+            
+            # Sample within the partition
+            while t < partition.bound_max and t < ray.max_t:
+                point = ray.point_at(t)
+                scalar = query_scalar_field(point, mesh)
+                color = transfer_function.color(scalar)
+                opacity = transfer_function.opacity(scalar)
+                
+                samples.append((point, color, opacity))
+                
+                # Advance by step size
+                t += step_size
+            
+            # Advance ray to next partition
+            t = ray.intersect_partition_bound(partition)
+            
+        # Composite samples for the pixel
+        composite_image(ray.pixel_id, samples)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Overhead:** The overhead introduced by the technique must be low; otherwise, it overshadows the performance benefits gained from reduced sampling [S1, unofficial].
+*   **Data Sparsity:** Two forms of empty space exist: entirely transparent elements and large void regions due to data sparsity. Both must be handled [S1, unofficial].
+*   **Regular Grid Assumption:** Existing techniques often assume a regular grid, which does not apply to unstructured data. This method explicitly avoids that assumption [S1, unofficial].
+
+## Subtopics
+
+### Parallel Ray Casting with Segment Lists
+Uses segment lists to parallelize ray casting on regular grids. Does not handle unstructured meshes natively. [Link](2565-parallel-ray-casting-with-segment-lists.md)
+
+### Visibility Culling
+Focuses on culling entire objects or regions based on visibility. Does not perform adaptive sampling within volumes. [Link](6226-visibility-culling.md)
+
+### SparseLeap Ray-Casting with Occupancy Misses
+Uses occupancy misses to skip empty space in sparse volumes. Does not explicitly combine with adaptive sampling based on local variance in the same manner. [Link](9818-sparseleap-ray-casting-with-occupancy-misses.md)
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   Memory: The method requires fitting the entire dataset into GPU memory. The RTX 8000 (48 GB) was used to accommodate datasets up to 37 GB [S1, unofficial].
+*   Time: Performance improvements are significant on datasets with high variance or large empty spaces.
+
+**Measured Performance:**
+*   **Segel Haas Dataset:** ~3.5x performance improvement by adaptively sampling and empty space skipping, preserving details in high variance regions [S1, unofficial].
+*   **Japan Earthquake Dataset:** ~7x performance improvement, largely because a large portion of the volume has very similar data values, allowing for aggressive adaptive sampling [S1, unofficial].
+*   **Small Dataset with Empty Space:** Performance increased from 4 to 20 frames per second using space skipping [S1, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Handles large unstructured volumes (up to 37 GB) interactively. Preserves details in high-variance regions. Works without assuming a regular grid.
+*   **Limitations:** Performance gain depends on data type. On datasets with little empty space but high variance, adaptive sampling works better than space skipping alone. On datasets with little empty space and low variance, adaptive sampling may not provide as much benefit as space skipping [S1, unofficial].
+*   **When to Use:** Interactive visualization of large unstructured volumes where traditional rasterization sorting is a bottleneck.
+*   **When Not to Use:** When the dataset is small enough for efficient rasterization sorting, or when the overhead of building the KD-tree and managing partitions outweighs the sampling benefits (e.g., very small datasets with low variance and no empty space).
+
+**Hardware and Software:**
+*   Hardware: RTX 8000 GPU (48 GB memory) [S1, unofficial].
+*   Software: OptiX 6 with CUDA 10 [S1, unofficial].
+
+## Background
+This method was presented in a video presentation [S1, unofficial]. It addresses the limitations of traditional rasterization for unstructured volumes, which requires front-to-back sorting of elements on every camera movement, becoming a bottleneck for datasets of 20–40 GB [S1, unofficial]. It builds on prior work published at HPG (High Performance Graphics) which demonstrated the potential of leveraging hardware-accelerated ray tracing for unstructured volumes [S1, unofficial]. The method specifically targets the challenge of implementing space skipping and adaptive sampling on unstructured data without the assumption of a regular grid [S1, unofficial].
+
+## Sources
+[S1] Efficient Space Skipping & Adaptive Sampling of Unstructured Volumes Using H.W. Accel. Ray Tracing, https://www.youtube.com/watch?v=205EtIX3H6k, fetched 2026-10-26 (unofficial)

@@ -3,123 +3,119 @@
 Also called: Void Check with Boundary Handling
 
 ## Overview
-Solidity Check determines if a specific voxel coordinate in a 3D world is occupied by solid geometry or is void (empty). It solves the problem of boundary condition handling during voxel traversal, ensuring that out-of-bounds regions are treated consistently to prevent rendering artifacts. It differs from its sibling [Point-in-Box Inclusion Test](1400-point-in-box-inclusion-test.md) by explicitly managing chunk-based spatial indexing and asymmetric boundary wrapping for X/Y versus Z axes, rather than simple AABB containment.
+Solidity Check determines whether a specific voxel coordinate in a 3D world is occupied by solid geometry or is empty space (void). It serves as the final step in voxel occupancy testing, resolving whether a point lies within a solid volume. It differs from general occupancy tests by explicitly handling boundary conditions, coordinate wrapping, and chunk-based data structures to prevent rendering artifacts at world edges.
 
 ## How it works
 **Inputs:**
 - `x, y, z`: Integer world voxel coordinates.
-- `map`: A pointer or reference to a `libvxl_map` structure containing world dimensions and chunk data.
+- `map`: A reference to the voxel map structure containing dimensions and chunk data.
 
 **Outputs:**
 - `bool`: `True` if the voxel is solid (occupied), `False` if it is void (empty).
 
 **Data Structures:**
-The implementation relies on the `libvxl_map` structure [S2, unofficial]:
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+The implementation relies on a chunked map structure.
+- `libvxl_map`: Contains `width`, `height`, `depth` (dimensions), `chunks` (array of chunk pointers), `geometry` (lookup table), and `streamed` (streaming state).
+- `libvxl_chunk`: Contains `blocks` (pointer to block data), `length`, and `index`.
+- `libvxl_block`: Contains `position` and `color` (uint32_t).
+- `libvxl_span`: Packed struct with `length`, `color_start`, `color_end`, `air_start` (uint8_t each).
+- Coordinate key packing (libvxl): `pos_key(x,y,z) = ((y)<<20) | ((x)<<8) | (z)`. This assumes 12 bits for X, 12 bits for Y, and 8 bits for Z.
 
-```python
-struct libvxl_map {
-    size_t width, height, depth;  // World dimensions
-    struct libvxl_chunk* chunks;  // Array of chunks
-    size_t* geometry;             // Geometry lookup table
-    size_t streamed;              // Streamed data offset
-};
+**Algorithm Steps:**
+1. **Boundary Check (Z-axis):**
+   - If `z < 0`, return `False` (void).
+   - If `map` is null or `z >= map->depth`, return `True` (solid). This treats out-of-bounds Z as solid to prevent holes.
 
-struct libvxl_chunk {
-    struct libvxl_block* blocks;  // Pointer to block data
-    size_t length, index;         // Chunk metadata
-};
+2. **Chunk Index Calculation:**
+   - Calculate the chunk index for the world position using a helper function `get_chunk_index(x, y, z)`.
+   - If `chunk_index == -1` (out of bounds in X/Y), return `False` (void). *Note: Source [S1, unofficial] treats out-of-bounds chunks as non-void (solid) in one context, but [S2, unofficial] implies boundary handling. We follow [S2, unofficial] for the primary logic where `z<0` is void, but [S1, unofficial] explicitly states "Out-of-bounds chunks are treated as non-void (solid)". However, [S1, unofficial] also says "If chunk_index is -1 ... return False (not void)". This is a contradiction in [S1, unofficial]. We prioritize [S2, unofficial] for the boundary logic consistency: Z bounds are solid, X/Y bounds are handled by chunk lookup. If chunk lookup fails, it is typically void or solid depending on implementation. [S1, unofficial] says return False (void). [S2, unofficial] does not explicitly state the X/Y out-of-bounds return value in the snippet, but implies wrapping or bounds checking. We will follow [S1, unofficial]'s explicit step: return False.*
 
-struct libvxl_block {
-    uint32_t position;            // Encoded position key
-    uint32_t color;               // Color/Type data
-};
-```
-Position keys are encoded as 32-bit integers [S2, unofficial]:
-$$ \text{pos\_key}(x,y,z) = (y \ll 20) \mid (x \ll 8) \mid z $$
-Where $x, y$ use 12 bits (0-4095) and $z$ uses 8 bits (0-255).
+3. **Coordinate Wrapping and Local Index:**
+   - For valid chunks, calculate the local voxel index within the chunk.
+   - X and Y coordinates wrap around the map dimensions using modulo: `x_wrapped = x % map->width`, `y_wrapped = y % map->height`.
+   - Z coordinate does **not** wrap.
+   - Calculate local index: `local_index = (x_wrapped % CHUNK_SIZE) + (z % CHUNK_SIZE) * CHUNK_SIZE + (y_wrapped % CHUNK_SIZE) * (CHUNK_SIZE * CHUNK_SIZE)`.
+   - *Note: [S2, unofficial] uses `key_discardz` and bit shifts for lookup in some contexts, but the step description in [S1, unofficial] uses modulo arithmetic for local index. We follow [S1, unofficial]'s step description for the local index calculation.*
 
-**Steps:**
-1.  **Calculate Chunk Index:** Determine the chunk index for the world position $(x, y, z)$ using a helper function `get_chunk_index`. The exact formula for `get_chunk_index` is not provided in the sources, but it maps world coordinates to a chunk ID [S1, unofficial].
-2.  **Boundary Check (Z-axis):**
-    - If $z < 0$, return `False` (void).
-    - If `map` is `null` or $z \ge \text{map->depth}$, return `True` (solid) [S2, unofficial].
-3.  **Boundary Check (Chunk Bounds):**
-    - If `chunk_index` is $-1$ (indicating out-of-bounds chunk), return `False` (void). *Note: Source [S1, unofficial] states "return False (not void)" which implies void, but Source [S1, unofficial] also states "Out-of-bounds chunks are treated as non-void (solid)". This is a contradiction. Source [S2, unofficial] does not mention chunk_index -1. Given the context of "preventing rendering holes", treating out-of-bounds as solid is the standard practice. However, the specific code snippet in [S1, unofficial] says `return False`. We must cite the discrepancy.*
-    - *Correction based on [S1, unofficial] code snippet:* The code explicitly returns `False` for `chunk_index == -1`.
-    - *Correction based on [S1, unofficial] text:* The text says "Out-of-bounds chunks are treated as non-void (solid)".
-    - *Resolution:* The code snippet is the implementation detail. The text describes the intent. The code returns `False` (void). This might be a bug or specific design choice in the unofficial repo. We will follow the code snippet for implementation but note the text contradiction [S1, unofficial].
-4.  **Coordinate Wrapping:**
-    - Calculate wrapped coordinates:
-      $$ x' = x \pmod{\text{map->width}} $$
-      $$ y' = y \pmod{\text{map->height}} $$
-      $$ z' = z $$
-    - $x$ and $y$ wrap around the map dimensions. $z$ does not wrap [S2, unofficial].
-5.  **Retrieve Voxel Data:**
-    - Call `libvxl_geometry_get(x', y', z')` to retrieve the voxel data. This function likely accesses the `geometry` array or chunk blocks to find the voxel at the wrapped position [S2, unofficial].
-6.  **Determine Solidity:**
-    - If the retrieved voxel data is non-zero, return `True` (solid).
-    - If the retrieved voxel data is zero, return `False` (void) [S1, unofficial].
+4. **Occupancy Test:**
+   - Access the voxel data at `local_index` within the chunk's voxel array (or block structure).
+   - If `chunk_voxels[local_index]` is non-zero, return `True` (solid).
+   - Else, return `False` (void).
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def solidity_check(x: int, y: int, z: int, map: Map) -> bool:
-    # Step 1: Calculate chunk index
-    chunk_index = get_chunk_index(x, y, z)
-    
-    # Step 2: Z-axis boundary check
+def solidity_check(x, y, z, map):
+    # Step 1: Z-axis boundary check
     if z < 0:
         return False  # Void
     if map is None or z >= map.depth:
-        return True   # Solid
+        return True   # Solid (boundary)
+
+    # Step 2: Chunk index calculation
+    chunk_index = get_chunk_index(x, y, z)
     
-    # Step 3: Chunk bounds check
-    # Contradiction in sources: Code returns False (void), text says solid.
-    # Following code snippet from [S1, unofficial]
+    # Step 3: Out-of-bounds chunk check
     if chunk_index == -1:
-        return False  # Void (per code snippet)
-    
+        return False  # Void (based on [S1, unofficial] step 3)
+
     # Step 4: Coordinate wrapping
+    # X and Y wrap around map dimensions
     x_wrapped = x % map.width
     y_wrapped = y % map.height
-    z_wrapped = z
+    # Z does not wrap, but is already validated against depth
+
+    # Step 5: Local voxel index calculation
+    # Assuming CHUNK_SIZE is a constant or defined in map
+    CHUNK_SIZE = 16  # Typical value, not given in sources. [G]
+    CHUNK_AREA = CHUNK_SIZE * CHUNK_SIZE
     
-    # Step 5: Retrieve voxel data
-    # libvxl_geometry_get is assumed to return a value representing the voxel
-    voxel_data = libvxl_geometry_get(x_wrapped, y_wrapped, z_wrapped)
+    local_x = x_wrapped % CHUNK_SIZE
+    local_y = y_wrapped % CHUNK_SIZE
+    local_z = z % CHUNK_SIZE
     
-    # Step 6: Determine solidity
-    if voxel_data != 0:
+    voxel_index = local_x + (local_z * CHUNK_SIZE) + (local_y * CHUNK_AREA)
+    
+    # Step 6: Access chunk data
+    chunk = map.chunks[chunk_index]
+    
+    # Access voxel data. The structure of chunk_voxels depends on the implementation.
+    # [S1, unofficial] implies a direct array access. [S2, unofficial] uses blocks and spans.
+    # We assume a simplified voxel array for the check as per [S1, unofficial]'s step.
+    # If using [S2, unofficial]'s block structure, we would need to decode the span.
+    # For this implementation, we follow [S1, unofficial]'s direct check.
+    
+    if chunk.voxels[voxel_index] != 0:
         return True   # Solid
     else:
         return False  # Void
 ```
 
 **Parameters:**
-- `MOUSE_SENSITIVITY`: Not relevant to this method, but present in source context [S1, unofficial].
-- `CHUNK_SIZE`, `CHUNK_AREA`: Used in local index calculation in [S1, unofficial], but the primary method uses `libvxl_geometry_get`. The local index calculation `x % CHUNK_SIZE + z % CHUNK_SIZE * CHUNK_SIZE + y % CHUNK_SIZE * CHUNK_AREA` is an alternative implementation detail found in [S1, unofficial] for accessing `chunk_voxels`.
+- `CHUNK_SIZE`: Not given in the sources. [G] Typical value is 16.
 
 **Edge Cases:**
-- **Out-of-bounds X/Y:** Wrapped using modulo.
-- **Out-of-bounds Z:** Treated as solid if $z \ge \text{depth}$, void if $z < 0$ [S2, unofficial].
-- **Out-of-bounds Chunk:** Treated as void by code, solid by text description [S1, unofficial].
+- `z < 0`: Always void.
+- `z >= depth`: Always solid.
+- `chunk_index == -1`: Void (based on [S1, unofficial]).
+- Coordinate wrapping: X and Y wrap, Z does not.
 
 ## Subtopics
 
 ### [Surface Detection](5803-surface-detection.md)
-Determines if a voxel is on the boundary by checking 6-connected neighbors. It inverts the logic of Solidity Check, confirming exposure to air rather than solidity.
+Surface detection determines whether a voxel or particle lies on the boundary of a solid or fluid volume. In voxel-based representations, it identifies voxels that have at least one non-solid neighbor in the 6-connected neighborhood. In particle-based fluid simulations, it identifies boundary particles by estimating occlusion on a spherical screen cover, distinguishing interior particles (shadowed by neighbors) from boundary particles (with unshadowed screen areas). It differs from general solidity checks by specifically evaluating the *neighborhood* state rather than the local occupancy, serving as a prerequisite for surface tension, boundary rendering, or collision detection.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ assuming constant-time chunk lookup and modulo operations.
-- **Memory Complexity:** $O(1)$ auxiliary space.
-- **Strengths:** Handles asymmetric boundary conditions (wrapping X/Y, clamping Z) efficiently. Prevents rendering holes at world edges.
-- **Limitations:** Contradiction in source regarding out-of-bounds chunk handling. Relies on specific `libvxl` data structures.
-- **When to use:** When voxelizing or rendering volumes with wrapped horizontal boundaries and vertical limits.
+- **Time Complexity:** O(1) for chunk lookup and local index calculation, assuming constant-time array access.
+- **Memory Complexity:** O(1) additional memory.
+- **Strengths:** Efficient boundary handling prevents rendering holes. Chunk-based structure allows for sparse world representation.
+- **Limitations:** Coordinate wrapping for X/Y may cause unexpected behavior at world edges if not intended. Z-axis is not wrapped, requiring explicit depth management.
+- **When to use:** When determining if a specific voxel is occupied for rendering or collision.
+- **When not to use:** When surface properties or neighborhood information is required (use Surface Detection).
 
 ## Background
-The method originates from the `libvxl` library by xtreme8000 [S2, unofficial] and is also implemented in the `StanislavPetrovV/Minecraft` project [S1, unofficial]. It is used in voxel-based game engines and volume rendering systems to efficiently query voxel occupancy while managing world boundaries.
+The method originates from voxel-based rendering systems, specifically those used in Minecraft-like games and the libvxl library. It is used to efficiently determine voxel occupancy in large, chunked 3D worlds.
 
 ## Sources
 [S1] StanislavPetrovV/Minecraft, https://github.com/StanislavPetrovV/Minecraft, fetched 2026-10-26 (unofficial)

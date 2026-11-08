@@ -10,7 +10,7 @@ Sparse coding decompresses volume data by reconstructing voxel blocks as linear 
 - Output: Reconstructed 3D volume data.
 
 **Data Structures:**
-- Dictionary $D$: A matrix where columns are codewords.
+- Dictionary $D$: A matrix where columns are codewords [S1][S2].
 - Sparse Representation: For each block, a set of $S$ indices into the dictionary and $S$ corresponding scalar weights [S1][S2].
 
 **Steps:**
@@ -18,7 +18,7 @@ Sparse coding decompresses volume data by reconstructing voxel blocks as linear 
    a. Access the $S$ indices identifying the relevant codewords from the dictionary [S1][S2].
    b. Access the $S$ weighting coefficients associated with those indices [S1][S2].
    c. Compute the reconstructed voxel values by calculating the linear combination of the selected codewords weighted by their coefficients [S1][S2].
-   d. Store or stream the reconstructed voxels.
+   d. Output the reconstructed voxels for parallel rendering [S1][S2].
 
 **Formulas:**
 The reconstruction of a voxel block $V$ is given by:
@@ -73,11 +73,11 @@ def decompress_sparse_coding(volume_blocks, dictionary, sparse_data):
 ## Subtopics
 
 ### Sparse Representation Modeling
-Focuses on the statistical modeling of sparse coefficients rather than just the decomposition mechanics [G]. Choose when the goal is to model the distribution of sparse codes for better compression or denoising. [Link](5392-sparse-representation-modeling.md)
+Focuses on the statistical modeling of sparse coefficients rather than just the decomposition mechanics [G]. Choose when the goal is to model the distribution of sparse codes for better compression or denoising [G]. [Link](5392-sparse-representation-modeling.md)
 
 ## Operating characteristics
 - **Time Complexity**: $O(N \times S)$, where $N$ is the number of blocks and $S$ is the sparsity [S1][S2]. This is linear with respect to the number of blocks and sparsity [S1][S2].
-- **Memory Complexity**: Not given in the sources.
+- **Memory Complexity**: Not given in the sources [S1][S2].
 - **Measured Performance**: The computational complexity is very similar to Hierarchical Vector Quantization (HVQ) [S1][S2].
 - **Scaling**: Scales linearly with the number of blocks and the sparsity level [S1][S2].
 - **Strengths**: Allows parallel decompression of voxels by accessing codewords and coefficients [S1][S2].

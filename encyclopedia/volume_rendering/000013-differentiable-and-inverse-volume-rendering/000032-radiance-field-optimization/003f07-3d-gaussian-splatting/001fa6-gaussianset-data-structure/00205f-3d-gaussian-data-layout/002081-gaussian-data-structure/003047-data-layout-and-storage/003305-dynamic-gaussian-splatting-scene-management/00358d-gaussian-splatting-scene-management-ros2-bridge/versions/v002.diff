@@ -1,0 +1,516 @@
+--- v001.md
++++ v002.md
+@@ -1,260 +1,276 @@
+ # Gaussian Splatting Scene Management & ROS2 Bridge
+ 
+-Also called: ROSplat, ROSplat Spirula
++Also called: ROSplat, ROSplat Scene Manager, Spirula Bridge
+ 
+ ## Overview
+-This method manages the dynamic lifecycle of 3D Gaussian splats in a ROS2-enabled environment, handling the ingestion of Gaussian attributes from ROS messages, queuing batch updates for the renderer, and exposing a C++ API for real-time rendering. It solves the problem of synchronizing asynchronous ROS2 topic data with a GPU-accelerated differentiable renderer, ensuring thread-safe updates and efficient memory management for scenes with up to 50 million splats. It differs from static Gaussian Splatting implementations by introducing a pending batch queue system and a direct bridge between ROS2 message types and the renderer's internal device memory layout.
++This method manages the dynamic lifecycle of 3D Gaussian splats within a ROS2-enabled rendering pipeline, bridging sensor or simulation data to the GPU renderer. It solves the problem of real-time scene updates by queuing incoming Gaussian batches and efficiently draining them to the renderer state. It differs from static loading by enabling continuous, batched updates via ROS2 communication, allowing the scene to grow or refresh without full re-initialization [S1, unofficial].
+ 
+ ## How it works
+-
+-### Inputs and Outputs
+-**Inputs:**
+-- ROS2 messages: `SingleGaussian` (single splat) or `GaussianArray` (batch of splats).
+-- Configuration parameters: `MAX_GAUSSIANS`, `time_scale`, `model_transform_speed`, `scale_modifier`, `render_output_mode`, `sh_degree`.
+-- Camera and model transforms: Translation vectors and rotation quaterners.
+-
+-**Outputs:**
+-- Rendered images: Color (RGB), Depth, or Opacity buffers.
+-- Updated GPU memory state: `DeviceScene` with modified Gaussian attributes.
+-
+-### Data Structures
+-
+-**DeviceScene**
+-Holds device pointers to Gaussian splatting attributes and metadata.
+-- `float3* means`: Position of each Gaussian. Size: `capacity * 3` floats.
+-- `float4* quats`: Rotation (quaternion) of each Gaussian. Size: `capacity * 4` floats.
+-- `float3* scales`: Scaling factors. Size: `capacity * 3` floats.
+-- `float* opacities`: Opacity values. Size: `capacity * 1` floats.
+-- `float3* features_dc`: DC spherical harmonic coefficients. Size: `capacity * 3` floats.
+-- `float3* features_sh`: Higher-order SH coefficients. Size: `capacity * num_sh * 3` floats.
++**Inputs and Outputs:**
++- **Input:** ROS2 messages (`SingleGaussian`, `GaussianArray`) containing Gaussian attributes; configuration parameters for scene capacity and rendering options.
++- **Output:** Updated GPU device memory (`DeviceScene`) containing Gaussian attributes; rendered images (color, depth, opacity) based on current camera and scene state.
++
++**Data Structures:**
++The core state is held in `DeviceScene` (C++ struct) and managed via `TorchTensorView` wrappers.
++
++`DeviceScene` layout:
++- `float3* means`: Device pointer to position data. Size: `capacity * 3` floats.
++- `float4* quats`: Device pointer to rotation quaternions. Size: `capacity * 4` floats.
++- `float3* scales`: Device pointer to scale vectors. Size: `capacity * 3` floats.
++- `float* opacities`: Device pointer to opacity values. Size: `capacity` floats.
++- `float3* features_dc`: Device pointer to DC spherical harmonic coefficients. Size: `capacity * 3` floats.
++- `float3* features_sh`: Device pointer to higher-order SH coefficients. Size: `capacity * num_sh * 3` floats (if `num_sh > 0`).
+ - `int64_t count`: Current number of active Gaussians.
+-- `int64_t capacity`: Maximum number of Gaussians the scene can hold.
++- `int64_t capacity`: Maximum allocated Gaussians.
+ - `int sh_degree`: Active SH degree.
+ - `int num_sh`: Number of SH coefficients per Gaussian.
+ 
+-**TorchTensorView**
+-A lightweight view structure for accessing device memory as tensors.
+-- `uint64_t pointer`: Base address of the data.
+-- `int itemsize`: Size of each element in bytes (typically `sizeof(float)`).
++`TorchTensorView` layout (C++ struct):
++- `uint64_t pointer`: Raw device pointer address.
++- `int itemsize`: Element size in bytes (always `sizeof(float)`).
+ - `std::vector<int64_t> shape`: Dimensions of the tensor.
+ 
+-**Pending Batch Queue**
+-- `_pending_batches`: A deque of pairs `(batch, refresh)`.
+-- `_pending_lock`: Mutex for thread-safe access to the queue.
+-- `_gaussian_count`: Current number of Gaussians in the scene.
+-- `_full_scene_dirty`: Flag indicating if a full scene update is required.
+-
+-### Numbered Steps
+-
+-1.  **ROS Message Conversion**:
+-    - For `SingleGaussian`: Extract `xyz` (1x3), `rotation` (1x4), `scale` (1x3), `opacity` (1x1, divided by 255.0), and `spherical_harmonics` (1xN).
+-    - For `GaussianArray`: Validate all messages have identical SH dimension `sh_dim`. Allocate arrays of shape `(count, 3)`, `(count, 4)`, `(count, 3)`, `(count, 1)`, `(count, sh_dim)`. Fill arrays by iterating messages. If `sh_dim == 0`, raise `ValueError`.
+-
+-2.  **Batch Queuing**:
+-    - Acquire `_pending_lock`.
+-    - If `refresh` is true: Clear `_pending_batches`, set `_gaussian_count` to `batch_count`, and assign `batch` to `gaussian_set`.
+-    - Otherwise: Calculate `available = MAX_GAUSSIANS - _gaussian_count`. If `available <= 0`, return. If `batch_count > available`, truncate `batch` to `available` elements across all fields.
+-    - Increment `_gaussian_count` by `batch_count`.
+-    - Append `(batch, refresh)` to `_pending_batches`.
+-    - Set `_full_scene_dirty = False` and `have_new_gaussians = True`.
+-
+-3.  **Renderer State Update**:
+-    - Call `_drain_pending()` to get a list of pending batches and clear the deque.
+-    - For each `(batch, refresh)` pair:
+-        - If `batch` is `None` and `refresh` is true, call `gauss_renderer.reset_gaussians()`.
+-        - Otherwise, call `gauss_renderer.append_gaussians(batch, refresh=refresh)`.
+-    - If no pending batches but `full_update` or `_full_scene_dirty` is true:
+-        - If `gaussian_set` is `None` or empty, call `reset_gaussians()`.
+-        - Else, call `update_gaussian_data(gaussian_set, full_update=True)`.
+-    - Apply `scale_modifier`, `render_output`, `sh_degree`, `model_transform`, `camera_pose`, `camera_intrin`, and `render_resolution` to the renderer.
+-    - Set `_full_scene_dirty = False` and `have_new_gaussians = bool(_pending_batches)`.
+-
+-4.  **Rendering**:
+-    - Validate output buffer size: `output_bytes >= width * height * 4`.
+-    - If `scene.count == 0`, fill output with zeros (alpha=255).
+-    - Determine `render_sh_degree`: `min(requested_sh_degree, scene.sh_degree)` if `requested_sh_degree >= 0`, else `scene.sh_degree`.
+-    - Call `forward_3dgs("3dgs", render_sh_degree, true)`.
+-    - Based on `output_mode`:
+-        - **Color**: Copy RGB data from `state.fwd.renders[0]`.
+-        - **Depth**: Copy depth data from `state.fwd.renders[1]`.
+-        - **Opacity**: Copy transmittance from `state.fwd.render_Ts`, compute `opacity = 1.0 - transmittance`, and write to output.
+-
+-### Formulas
+-
+-- **Available Capacity**:
+-  $$ \text{available} = \text{MAX\_GAUSSIANS} - \text{\_gaussian\_count} $$
+-
+-- **Opacity Normalization**:
+-  $$ \text{opacity}_{\text{normalized}} = \frac{\text{opacity}_{\text{msg}}}{255.0} $$
+-
+-- **Scale Modifier Application**:
+-  $$ \log_{\delta} = \log\left(\frac{\text{requested\_modifier}}{\text{scale\_modifier}}\right) $$
+-  $$ \text{scales}_{\text{new}} = \text{scales}_{\text{old}} \times e^{\log_{\delta}} $$
+-  (Applied in chunks of $2^{20}$ elements for memory efficiency).
+-
+-- **Render SH Degree**:
+-  $$ \text{render\_sh\_degree} = \begin{cases} \text{scene.sh\_degree} & \text{if } \text{requested\_sh\_degree} < 0 \\ \min(\text{requested\_sh\_degree}, \text{scene.sh\_degree}) & \text{otherwise} \end{cases} $$
+-
+-- **Opacity from Transmittance**:
+-  $$ \text{opacity} = 1.0 - \text{transmittance} $$
+-
+-### Parameters
+-
+-- **MAX_GAUSSIANS**: 50,000,000. Maximum number of splats the scene can hold [S1, unofficial].
+-- **time_scale**: 5.0. Multiplier for camera translation speed [S1, unofficial].
+-- **model_transform_speed**: 100.0. Multiplier for model translation speed [S1, unofficial].
+-- **scale_modifier**: 1.0. Initial scale modifier [S1, unofficial].
+-- **sh_degree**: -1 to 4. Active SH degree. -1 uses scene default [S1, unofficial].
+-- **output_mode**: ROSPLAT_SPIRULA_OUTPUT_COLOR, ROSPLAT_SPIRULA_OUTPUT_DEPTH, or ROSPLAT_SPIRULA_OUTPUT_OPACITY [S1, unofficial].
+-
+-### Edge Cases and Pitfalls
+-
+-- **Null Arrays**: `append` throws `std::invalid_argument` if any required array (`means`, `quats`, `scales`, `opacities`, `dc`) is null [S1, unofficial].
+-- **Negative Batch Count**: `append` throws `std::invalid_argument` if `batch_count < 0` [S1, unofficial].
+-- **Buffer Overflow**: Rendering throws `std::invalid_argument` if `output_bytes < pixel_count * 4` [S1, unofficial].
+-- **Invalid SH Degree**: `set_render_options` throws `std::invalid_argument` if `requested_degree` is not -1 or in [0, 4] [S1, unofficial].
+-- **Invalid Scale Modifier**: `set_scale_modifier` throws `std::invalid_argument` if `requested_modifier` is not positive and finite [S1, unofficial].
+-- **Empty Scene**: If `scene.count == 0`, rendering returns a black image with full alpha [S1, unofficial].
+-- **Missing Transmittance**: If `state.fwd.render_Ts` is null during opacity rendering, a `std::runtime_error` is thrown [S1, unofficial].
+-
+-### Pseudocode
++**Numbered Steps:**
++
++1. **ROS Message Conversion:**
++   - If input is `SingleGaussian`: Extract `xyz` (1x3), `rotation` (1x4), `scale` (1x3), `opacity` (1x1, normalized by dividing by 255.0), and `spherical_harmonics` (1xN).
++   - If input is `GaussianArray`: Validate all messages have identical SH dimension `sh_dim`. If `sh_dim == 0`, raise `ValueError`. Allocate arrays of shape `(count, 3)`, `(count, 4)`, `(count, 3)`, `(count, 1)`, `(count, sh_dim)`. Fill arrays by iterating messages.
++   - Pack data into a `batch` structure compatible with `append_gaussians`.
++
++2. **Batch Queuing:**
++   - Acquire `_pending_lock`.
++   - If `refresh` flag is true:
++     - Clear `_pending_batches`.
++     - Set `_gaussian_count` to `batch_count`.
++     - Assign `batch` to `gaussian_set`.
++   - Else (append mode):
++     - Calculate `available = MAX_GAUSSIANS - _gaussian_count`.
++     - If `available <= 0`, return (drop batch).
++     - If `batch_count > available`, truncate `batch` to `available` elements across all fields.
++     - Increment `_gaussian_count` by `batch_count`.
++     - Append `(batch, refresh)` to `_pending_batches`.
++     - Set `_full_scene_dirty = False`.
++     - Set `have_new_gaussians = True`.
++
++3. **Renderer State Update (`_drain_pending`):**
++   - Get list of pending batches and clear deque.
++   - For each `(batch, refresh)` pair:
++     - If `batch` is `None` and `refresh` is true: Call `gauss_renderer.reset_gaussians()`.
++     - Else: Call `gauss_renderer.append_gaussians(batch, refresh=refresh)`.
++   - If no pending batches but `full_update` or `_full_scene_dirty` is true:
++     - If `gaussian_set` is `None` or empty: Call `reset_gaussians()`.
++     - Else: Call `update_gaussian_data(gaussian_set, full_update=True)`.
++   - Apply `scale_modifier`, `render_output`, `sh_degree`, `model_transform`, `camera_pose`, `camera_intrin`, and `render_resolution` to the renderer.
++   - Set `_full_scene_dirty = False`.
++   - Set `have_new_gaussians = bool(_pending_batches)`.
++
++4. **Scene Binding (`bind_scene`):**
++   - Update engine state with `scene.count`, `scene.capacity`, `scene.num_sh`, `scene.sh_degree`.
++   - Bind device pointers to `state.world` using `TorchTensorView`:
++     - `means`: `view_1d(scene.means, scene.capacity, 3)`
++     - `quats`: `view_1d(scene.quats, scene.capacity, 4)`
++     - `scales`: `view_1d(scene.scales, scene.capacity, 3)`
++     - `opacities`: `view_1d(scene.opacities, scene.capacity, 1)`
++     - `features_dc`: `view_1d(scene.features_dc, scene.capacity, 3)`
++     - `features_sh`: `view_2d(scene.features_sh, scene.capacity, scene.num_sh, 3)` (if `num_sh > 0`, else empty tensor).
++   - Set `state.world.initialized = scene.capacity > 0`.
++
++5. **Rendering:**
++   - Validate output buffer size (`pixel_count * 4`).
++   - If `scene.count == 0`: Fill output with black (RGB=0, A=255).
++   - Determine `render_sh_degree`: `min(requested_sh_degree, scene.sh_degree)` if `requested_sh_degree >= 0`, else `scene.sh_degree`.
++   - Call `forward_3dgs("3dgs", render_sh_degree, true)`.
++   - Based on `output_mode`:
++     - Color: Copy RGB from render buffer.
++     - Depth: Copy depth buffer.
++     - Opacity: Compute `opacity = 1.0 - transmittance`, write as grayscale or RGB.
++
++**Parameters:**
++- `MAX_GAUSSIANS`: 50,000,000 [S1, unofficial].
++- `time_scale`: 5.0 (camera translation speed multiplier) [S1, unofficial].
++- `model_transform_speed`: 100.0 (model translation speed multiplier) [S1, unofficial].
++- `scale_modifier`: Positive finite float, default 1.0 [S1, unofficial].
++- `requested_sh_degree`: -1 or in [0, 4] [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++- **Null Pointers:** `append` throws if any required array (`means`, `quats`, etc.) is null [S1, unofficial].
++- **Buffer Overflow:** Output buffer must be at least `pixel_count * 4` bytes [S1, unofficial].
++- **SH Dimension:** `sh_dim == 0` raises `ValueError` during batch validation [S1, unofficial].
++- **Scale Modifier:** Must be positive and finite; uses chunked memory updates (max chunk `1 << 20`) for efficiency [S1, unofficial].
++
++**Pseudocode:**
+ 
+ ```python
+-def process_ros_message(msg):
+-    """Convert ROS2 message to Gaussian batch."""
+-    if msg.type == 'SingleGaussian':
+-        xyz = msg.xyz.reshape(1, 3)
+-        rotation = msg.rotation.reshape(1, 4)
+-        scale = msg.scale.reshape(1, 3)
+-        opacity = msg.opacity.reshape(1, 1) / 255.0
+-        sh = msg.spherical_harmonics.reshape(1, -1)
+-        return [xyz, rotation, scale, opacity, sh]
+-    elif msg.type == 'GaussianArray':
+-        sh_dim = msg[0].spherical_harmonics.shape[0]
+-        if sh_dim == 0:
+-            raise ValueError("SH dimension cannot be 0")
+-        count = len(msg)
+-        xyz = np.zeros((count, 3))
+-        rotation = np.zeros((count, 4))
+-        scale = np.zeros((count, 3))
+-        opacity = np.zeros((count, 1))
+-        sh = np.zeros((count, sh_dim))
+-        for i, m in enumerate(msg):
+-            xyz[i] = m.xyz
+-            rotation[i] = m.rotation
+-            scale[i] = m.scale
+-            opacity[i] = m.opacity / 255.0
+-            sh[i] = m.spherical_harmonics
+-        return [xyz, rotation, scale, opacity, sh]
+-    else:
+-        raise ValueError("Unknown message type")
+-
+-def queue_batch(batch, refresh=False):
+-    """Add batch to pending queue."""
+-    with _pending_lock:
+-        if refresh:
+-            _pending_batches.clear()
+-            _gaussian_count = len(batch[0])
+-            gaussian_set = batch
++class GaussianSceneManager:
++    def __init__(self, max_gaussians=50000000):
++        self.max_gaussians = max_gaussians
++        self.gaussian_count = 0
++        self.pending_batches = []
++        self.full_scene_dirty = False
++        self.have_new_gaussians = False
++        self.gaussian_set = None
++        self.lock = Lock()  # Pseudo-lock for thread safety
++
++    def process_ros_message(self, message):
++        """Convert ROS message to batch format."""
++        if isinstance(message, SingleGaussian):
++            xyz = message.xyz.reshape(1, 3)
++            rotation = message.rotation.reshape(1, 4)
++            scale = message.scale.reshape(1, 3)
++            opacity = message.opacity.reshape(1, 1) / 255.0
++            sh = message.spherical_harmonics.reshape(1, -1)
++            return {
++                'means': xyz,
++                'quats': rotation,
++                'scales': scale,
++                'opacities': opacity,
++                'features_sh': sh
++            }
++        elif isinstance(message, GaussianArray):
++            sh_dim = message[0].spherical_harmonics.shape[0]
++            if sh_dim == 0:
++                raise ValueError("SH dimension cannot be 0")
++            count = len(message)
++            means = np.zeros((count, 3))
++            quats = np.zeros((count, 4))
++            scales = np.zeros((count, 3))
++            opacities = np.zeros((count, 1))
++            features_sh = np.zeros((count, sh_dim))
++            for i, msg in enumerate(message):
++                means[i] = msg.xyz
++                quats[i] = msg.rotation
++                scales[i] = msg.scale
++                opacities[i] = msg.opacity / 255.0
++                features_sh[i] = msg.spherical_harmonics
++            return {
++                'means': means,
++                'quats': quats,
++                'scales': scales,
++                'opacities': opacities,
++                'features_sh': features_sh
++            }
++        return None
++
++    def queue_batch(self, batch, refresh=False):
++        """Add batch to pending queue."""
++        with self.lock:
++            if refresh:
++                self.pending_batches.clear()
++                self.gaussian_count = batch['means'].shape[0]
++                self.gaussian_set = batch
++            else:
++                available = self.max_gaussians - self.gaussian_count
++                if available <= 0:
++                    return
++                batch_count = batch['means'].shape[0]
++                if batch_count > available:
++                    # Truncate batch
++                    for key in batch:
++                        batch[key] = batch[key][:available]
++                    batch_count = available
++                self.gaussian_count += batch_count
++                self.pending_batches.append((batch, refresh))
++                self.full_scene_dirty = False
++                self.have_new_gaussians = True
++
++    def drain_pending(self):
++        """Update renderer with pending batches."""
++        with self.lock:
++            batches = self.pending_batches
++            self.pending_batches = []
++        
++        for batch, refresh in batches:
++            if batch is None and refresh:
++                self.renderer.reset_gaussians()
++            else:
++                self.renderer.append_gaussians(batch, refresh=refresh)
++        
++        if not batches and (self.full_scene_dirty or self.full_update):
++            if self.gaussian_set is None or self.gaussian_set['means'].shape[0] == 0:
++                self.renderer.reset_gaussians()
++            else:
++                self.renderer.update_gaussian_data(self.gaussian_set, full_update=True)
++        
++        self.renderer.apply_settings(
++            scale_modifier=self.scale_modifier,
++            render_output=self.render_output,
++            sh_degree=self.sh_degree,
++            model_transform=self.model_transform,
++            camera_pose=self.camera_pose,
++            camera_intrin=self.camera_intrin,
++            render_resolution=self.render_resolution
++        )
++        self.full_scene_dirty = False
++        self.have_new_gaussians = bool(self.pending_batches)
++
++    def bind_scene(self, scene):
++        """Bind device pointers to engine state."""
++        self.engine.state.cur_num_splats = scene.count
++        self.engine.state.max_num_splats = scene.capacity
++        self.engine.state.num_sh = scene.num_sh
++        self.engine.state.sh_degree = scene.sh_degree
++        
++        self.engine.state.world.means = TorchTensorView(scene.means, scene.capacity, 3)
++        self.engine.state.world.quats = TorchTensorView(scene.quats, scene.capacity, 4)
++        self.engine.state.world.scales = TorchTensorView(scene.scales, scene.capacity, 3)
++        self.engine.state.world.opacities = TorchTensorView(scene.opacities, scene.capacity, 1)
++        self.engine.state.world.features_dc = TorchTensorView(scene.features_dc, scene.capacity, 3)
++        
++        if scene.num_sh > 0:
++            self.engine.state.world.features_sh = TorchTensorView2D(scene.features_sh, scene.capacity, scene.num_sh, 3)
+         else:
+-            available = MAX_GAUSSIANS - _gaussian_count
+-            if available <= 0:
+-                return
+-            batch_count = len(batch[0])
+-            if batch_count > available:
+-                # Truncate batch across all fields
+-                for i in range(len(batch)):
+-                    batch[i] = batch[i][:available]
+-                batch_count = available
+-            _gaussian_count += batch_count
+-            _pending_batches.append((batch, refresh))
+-            _full_scene_dirty = False
+-            have_new_gaussians = True
+-
+-def update_renderer():
+-    """Drain pending batches and update renderer."""
+-    pending = _drain_pending()
+-    for batch, refresh in pending:
+-        if batch is None and refresh:
+-            gauss_renderer.reset_gaussians()
+-        else:
+-            gauss_renderer.append_gaussians(batch, refresh=refresh)
+-    
+-    if not pending and (full_update or _full_scene_dirty):
+-        if gaussian_set is None or len(gaussian_set[0]) == 0:
+-            gauss_renderer.reset_gaussians()
+-        else:
+-            update_gaussian_data(gaussian_set, full_update=True)
+-    
+-    gauss_renderer.set_scale_modifier(scale_modifier)
+-    gauss_renderer.set_render_options(render_output_mode, sh_degree)
+-    gauss_renderer.set_model_transform(model_transform)
+-    gauss_renderer.set_camera_pose(camera_pose)
+-    gauss_renderer.set_camera_intrin(camera_intrin)
+-    gauss_renderer.set_render_resolution(render_resolution)
+-    
+-    _full_scene_dirty = False
+-    have_new_gaussians = bool(_pending_batches)
+-
+-def render(width, height, output_buffer):
+-    """Render current scene to output buffer."""
+-    pixel_count = width * height
+-    if output_buffer.size < pixel_count * 4:
+-        raise ValueError("Output buffer too small")
+-    
+-    if scene.count == 0:
+-        output_buffer[:] = 0
+-        output_buffer[3::4] = 255
+-        return
+-    
+-    render_sh_degree = scene.sh_degree if requested_sh_degree < 0 else min(requested_sh_degree, scene.sh_degree)
+-    forward_3dgs("3dgs", render_sh_degree, True)
+-    
+-    state = engine()
+-    if output_mode == ROSPLAT_SPIRULA_OUTPUT_COLOR:
+-        rgb = state.fwd.renders[0]
+-        if not rgb.data_ptr():
+-            raise RuntimeError("No RGB data")
+-        backend.memcpy_sync(output_buffer, rgb.data_ptr(), pixel_count * 4, MemcpyKind.DeviceToHost)
+-    elif output_mode == ROSPLAT_SPIRULA_OUTPUT_DEPTH:
+-        depth = state.fwd.renders[1]
+-        backend.memcpy_sync(output_buffer, depth.data_ptr(), pixel_count * 4, MemcpyKind.DeviceToHost)
+-        write_depth(output_buffer, pixel_count)
+-    elif output_mode == ROSPLAT_SPIRULA_OUTPUT_OPACITY:
+-        transmittance = state.fwd.render_Ts
+-        if not transmittance.data_ptr():
+-            raise RuntimeError("No transmittance data")
+-        host_scalar = backend.memcpy_sync(transmittance.data_ptr(), pixel_count * 4, MemcpyKind.DeviceToHost)
+-        for i in range(pixel_count):
+-            opacity = 1.0 - host_scalar[i]
+-            write_gray_or_rgb(output_buffer, i, opacity, opacity, opacity)
+-
+-def write_gray_or_rgb(output, index, r, g, b):
+-    """Write grayscale or RGB value to output buffer."""
+-    output[index * 4 + 0] = to_u8(r)
+-    output[index * 4 + 1] = to_u8(g)
+-    output[index * 4 + 2] = to_u8(b)
+-    output[index * 4 + 3] = 255
+-
+-def to_u8(val):
+-    """Convert float to uint8."""
+-    return max(0, min(255, int(val * 255)))
++            self.engine.state.world.features_sh = TorchTensorView2D()
++        
++        self.engine.state.world.initialized = scene.capacity > 0
++
++    def render(self, width, height, output_buffer):
++        """Render current scene."""
++        pixel_count = width * height
++        if len(output_buffer) < pixel_count * 4:
++            raise ValueError("Output buffer too small")
++        
++        if self.gaussian_count == 0:
++            output_buffer[:] = 0
++            output_buffer[3::4] = 255  # Alpha
++            return
++        
++        render_sh_degree = self.sh_degree if self.requested_sh_degree < 0 else min(self.requested_sh_degree, self.sh_degree)
++        self.renderer.forward_3dgs("3dgs", render_sh_degree, True)
++        
++        if self.output_mode == ROSPLAT_SPIRULA_OUTPUT_COLOR:
++            # Copy RGB from render buffer
++            pass
++        elif self.output_mode == ROSPLAT_SPIRULA_OUTPUT_DEPTH:
++            # Copy depth buffer
++            pass
++        elif self.output_mode == ROSPLAT_SPIRULA_OUTPUT_OPACITY:
++            # Compute opacity from transmittance
++            transmittance = self.renderer.get_transmittance()
++            for i in range(pixel_count):
++                opacity = 1.0 - transmittance[i]
++                output_buffer[i*4] = opacity * 255
++                output_buffer[i*4+1] = opacity * 255
++                output_buffer[i*4+2] = opacity * 255
++                output_buffer[i*4+3] = 255
+ ```
+ 
++## Subtopics
++
++### [ROS Topic Splat Loading](10282-ros-topic-splat-loading.md)
++A method to load 3D Gaussian splats from a ROS topic by subscribing to a `SplatArray` message, converting the wire format into a GPU-ready `SplatGPU` struct layout. It differs from static loading by enabling real-time scene updates via ROS2 communication, bridging simulation or sensor data directly into the Gaussian Splatting renderer.
++
+ ## Operating characteristics
+-
+-- **Time Complexity**: Batch queuing is $O(1)$ amortized. Renderer update is $O(N)$ where $N$ is the number of pending batches. Rendering is $O(P \cdot G)$ where $P$ is pixel count and $G$ is Gaussian count, dominated by rasterization.
+-- **Memory Complexity**: $O(C \cdot D)$ where $C$ is capacity (50M) and $D$ is dimensionality of Gaussian attributes (3+4+3+1+3+3*SH_coeffs).
+-- **Performance**: Measured on GPU with 50M splats. Rendering speed depends on resolution and SH degree. Scale modifier application is chunked to $2^{20}$ elements to avoid large memory allocations.
+-- **Strengths**: Thread-safe batch queuing, efficient memory management, direct ROS2 integration.
+-- **Limitations**: Fixed maximum capacity (50M), potential truncation if queue overflows, SH degree validation required.
+-- **When to Use**: Real-time ROS2-based Gaussian Splatting applications requiring dynamic scene updates.
+-- **When Not to Use**: Static scenes without ROS2 integration, or scenes exceeding 50M splats.
++- **Time Complexity:** Batch queuing is O(1) amortized. Draining pending batches is O(N) where N is the number of pending batches. Rendering is O(P * G) where P is pixel count and G is Gaussian count, dominated by rasterization.
++- **Memory Complexity:** O(MAX_GAUSSIANS * (3 + 4 + 3 + 1 + 3 + 3*SH_coeffs)) floats. With MAX_GAUSSIANS=50M and SH degree 0, this is ~50M * 14 * 4 bytes ≈ 2.8 GB. Higher SH degrees increase memory linearly.
++- **Measured Performance:** Not given in the sources.
++- **Scaling:** Scales linearly with Gaussian count for memory. Rendering performance depends on rasterization backend efficiency.
++- **Strengths:** Real-time updates via ROS2; efficient batch queuing; flexible SH degree support.
++- **Limitations:** Fixed maximum capacity (50M); potential truncation if queue overflows; requires careful memory management for large scenes.
++- **When to use:** Real-time dynamic scene visualization in ROS2 environments.
++- **When not to use:** Static scenes with no updates; scenes exceeding 50M Gaussians without capacity expansion.
+ 
+ ## Background
+-
+-This method originates from the ROSplat project, which integrates 3D Gaussian Splatting with ROS2 for robotic applications. It was developed to enable real-time rendering and scene management in dynamic environments using ROS2 topics. The project provides a C++ API for efficient GPU memory management and a Python bridge for ROS2 message handling.
++Originated from the ROSplat project [S1, unofficial], integrating 3D Gaussian Splatting with ROS2 for robotics and simulation applications. Developed by shadygm [S1, unofficial].
+ 
+ ## Sources
+-
+ [S1] Gaussian Splatting Meets ROS2, https://github.com/shadygm/ROSplat, fetched 2026-10-26 (unofficial)

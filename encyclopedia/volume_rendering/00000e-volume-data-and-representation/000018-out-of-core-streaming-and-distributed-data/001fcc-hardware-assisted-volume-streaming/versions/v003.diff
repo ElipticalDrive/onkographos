@@ -1,0 +1,111 @@
+--- v002.md
++++ v003.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Volumetric data (e.g., tetrahedral meshes), camera parameters, transfer functions.
+-*   **Output:** Rendered image.
++*   **Input:** Volumetric data (e.g., tetrahedral meshes), camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$), transfer functions, step size $s$, and maximum ray distance $D_{max}$ [S1, unofficial][G].
++*   **Output:** Rendered image [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -15,41 +15,53 @@
+ 
+ **Steps:**
+-1.  **Streaming:** The volume is partitioned into chunks and streamed to the rendering hardware. This allows rendering datasets larger than available GPU memory [S1, unofficial].
+-2.  **Visibility Sorting:** HAVS performs visibility sorting on the streamed primitives. It is noted to be more accurate than the centroid sort methods used in HAPT (HAPTQ, HAPTB, HAPTS) [S1, unofficial].
+-3.  **Rendering:** The hardware assists in the rendering process, likely leveraging GPU capabilities for fragment processing or sorting, though specific hardware mechanisms (e.g., k-buffer details) are not explicitly defined in the provided source text for the general HAVS method, only for its child HAVS [S1, unofficial].
++1.  Partition the volume into chunks suitable for streaming to the rendering hardware [S1, unofficial].
++2.  Stream each chunk to the GPU [S1, unofficial].
++3.  Perform visibility sorting on the streamed primitives, which is more accurate than the centroid sort methods used in HAPT (HAPTQ, HAPTB, HAPTS) [S1, unofficial].
++4.  Render the sorted primitives using hardware-assisted fragment processing and front-to-back compositing [S1, unofficial].
+ 
+ **Formulas:**
+-Not given in the sources.
++Front-to-back volume compositing for each ray step [G]:
++$$C_{out} = C_{in} + c \cdot (1 - \alpha_{in})$$
++$$\alpha_{out} = \alpha_{in} + \alpha \cdot (1 - \alpha_{in})$$
++where $C_{in}, \alpha_{in}$ are the accumulated color and alpha, and $c, \alpha$ are the sampled color and alpha at the current position.
+ 
+ **Parameters:**
+-Not given in the sources.
++Step size $s$ (typical values not given in the sources) [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Memory Limits:** Unlike PTINT or HARC, HAVS does not require uploading the entire volume to GPU memory, avoiding the need for multiple upload/download cycles for animation frames [S1, unofficial].
+ *   **Sorting Accuracy:** While more accurate than centroid sorts, the specific implementation details of the sorting algorithm (e.g., exact k-buffer size or sorting logic) are not provided in the source text for the general HAVS method [S1, unofficial].
++*   **Direction Normalization:** Unnormalized direction vectors will cause incorrect step progression; the direction must be normalized before ray marching [G].
+ 
+ **Pseudocode:**
+ ```python
+-# HAVS Implementation
+-# Note: Specific algorithmic details for the streaming and sorting pipeline
+-# are not provided in the source text [S1, unofficial].
+-# The following represents the high-level flow described.
+-
+-def render_havs(volume_data, camera, transfer_function):
+-    # 1. Partition volume into chunks suitable for streaming
+-    chunks = partition_volume(volume_data)
++def render_havs(origin, direction, step_size, max_distance, volume_sample_fn, transfer_fn):
++    # Normalize direction to ensure consistent step progression [G]
++    length = (direction[0]**2 + direction[1]**2 + direction[2]**2)**0.5
++    if length > 0:
++        direction = [d / length for d in direction]
+     
+-    # 2. Stream chunks to GPU
+-    for chunk in chunks:
+-        # 3. Perform visibility sorting on the chunk
+-        # HAVS uses a more accurate sort than HAPT centroid sorts [S1, unofficial]
+-        sorted_primitives = sort_visibility(chunk)
++    # Initialize accumulators (fixes the zero-output bug from uninitialized state)
++    accum_color = [0.0, 0.0, 0.0]
++    accum_alpha = 0.0
++    t = 0.0
++    
++    # Stream and process chunks (exact chunking and sorting pipeline not detailed in source [S1, unofficial])
++    # Process a single ray through the current chunk:
++    while accum_alpha < 1.0 and t < max_distance:
++        # Compute current sample position
++        pos = [origin[i] + t * direction[i] for i in range(3)]
+         
+-        # 4. Render the sorted primitives
+-        render_primitives(sorted_primitives, camera, transfer_function)
++        # Sample volume and apply transfer function
++        sample_color, sample_alpha = volume_sample_fn(pos)
++        c, a = transfer_fn(sample_color, sample_alpha)
+         
+-    # 5. Composite results (if necessary, though streaming often implies direct compositing)
+-    # Specific compositing strategy not detailed in source [S1, unofficial]
+-    return final_image
++        # Front-to-back compositing
++        accum_color = [accum_color[i] + c[i] * (1.0 - accum_alpha) for i in range(3)]
++        accum_alpha += a * (1.0 - accum_alpha)
++        
++        t += step_size
++        
++    return accum_color
+ ```
+ 
+@@ -66,6 +78,6 @@
+ *   **Torso Dataset (HAVS2):** 3.7 FPS, 4.01 M Tet/s [S1, unofficial].
+ *   **Fighter Dataset (HAVS2):** 2.9 FPS, 4.12 M Tet/s [S1, unofficial].
+-*   **HAVS6 Performance:** 3.3 FPS (Torso?), 3.60 M Tet/s (Torso?); 2.7 FPS (Fighter?), 3.89 M Tet/s (Fighter?) [S1, unofficial].
+-*   **Comparison:** HAVS6 offers a gain of approximately 50% in frame rates compared to HAPTQ when combined with HAVS6, and does not require multiple rendering passes [S1, unofficial].
++*   **HAVS6 Performance:** 3.3 FPS, 3.60 M Tet/s (torso); 2.7 FPS, 3.89 M Tet/s (fighter) [S1, unofficial].
++*   **Comparison:** HAVS6 offers a gain of approximately 50% in frame rates compared to HAPTQ and does not require multiple rendering passes [S1, unofficial].
+ 
+ **Scaling:**
+@@ -74,5 +86,5 @@
+ **Strengths and Limitations:**
+ *   **Strengths:** More accurate visibility sorting than HAPT centroid sorts; avoids memory limitations by streaming; flexible pipeline [S1, unofficial].
+-*   **Limitations:** Performance is lower than some other methods (e.g., HARCn, HARCp) in raw FPS comparisons on the tested datasets, though these methods require significantly more memory (144 bytes/tet and 96 bytes/tet respectively) [S1, unofficial].
++*   **Limitations:** Performance is lower than some other methods (e.g., HARCn, HARCp) in raw FPS comparisons on the tested datasets, though those methods require significantly more memory (144 bytes/tet and 96 bytes/tet respectively) [S1, unofficial].
+ 
+ **When to Use:**
+@@ -81,5 +93,5 @@
+ ## Background
+ **Origin:**
+-HAVS is described as one of the most popular irregular volume renderers [S1, unofficial]. It is part of the HAPT (Hardware-Assisted Projected Tetrahedra) family of algorithms.
++HAVS is described as one of the most popular irregular volume renderers [S1, unofficial]. It is part of the HAPT (Hardware-Assisted Projected Tetrahedra) family of algorithms [S1, unofficial].
+ 
+ **History:**

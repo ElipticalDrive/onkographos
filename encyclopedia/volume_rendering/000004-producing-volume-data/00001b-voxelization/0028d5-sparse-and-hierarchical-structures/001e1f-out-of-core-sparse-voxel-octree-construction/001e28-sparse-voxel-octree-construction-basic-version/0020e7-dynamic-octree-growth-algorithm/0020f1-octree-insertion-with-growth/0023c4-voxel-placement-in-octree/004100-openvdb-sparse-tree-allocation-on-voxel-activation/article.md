@@ -1,0 +1,83 @@
+# OpenVDB Sparse Tree Allocation on Voxel Activation
+
+Also called: VDB node initialization, VDB tile instantiation
+
+## Overview
+This method describes the memory allocation and node initialization behavior of the OpenVDB sparse tree when a new voxel is activated at a specific coordinate. It solves the problem of understanding why activating a single sparse voxel can result in a disproportionately large memory footprint due to the bulk initialization of sibling tiles along the path to the leaf. It is distinct from standard dense voxelization because it allocates full tile structures for inactive siblings at every level of the octree hierarchy, rather than leaving them as null pointers or compact bitfields.
+
+## How it works
+
+### Inputs and Outputs
+*   **Input**: A 3D integer coordinate `ptIndexCoordinates` (e.g., `{1, 1, 1}`) representing the voxel to activate.
+*   **Input**: A `DataContainer` object containing the voxel's data. In the reference implementation, this is a custom type extending `Vec3i` with space for normals, sized at $0.000032$ MB per instance [S1, unofficial].
+*   **Output**: An updated OpenVDB grid where the tree structure is modified to include the path to the target leaf, and all sibling nodes at each level are instantiated as tiles holding the background value.
+
+### Data Structures and Layout
+The OpenVDB tree uses a hierarchical structure where nodes are allocated in powers of 8 per dimension. The allocation follows this layout for the levels involved in the reference experiment:
+*   **Level 1**: Allocates $8^3 = 512$ nodes.
+*   **Level 2**: Allocates $16^3 = 4096$ nodes.
+*   **Level 3**: Allocates $32^3 = 32768$ nodes [S1, unofficial].
+
+When a path is created, the tree does not just allocate the specific nodes on the path. Instead, at each level traversed, **all direct children** of the current node are instantiated as tiles. These tiles hold the grid's background value for inactive voxels.
+
+### Numbered Steps
+1.  **Set Value**: Call `acc.setValue(ptIndexCoordinates, std::move(data))` to assign the data to the coordinate [S1, unofficial].
+2.  **Mark Active**: Call `acc.setActiveState(ptIndexCoordinates, true)` to mark the voxel as active [S1, unofficial].
+3.  **Traverse and Create**: The tree traverses from the root to the leaf node containing `ptIndexCoordinates`.
+4.  **Initialize Siblings**: At each level of the traversal, all sibling nodes (children of the current node that are not on the path to the target) are instantiated as tiles. These tiles are initialized with the grid's background value [S1, unofficial].
+
+### Pseudocode
+The following pseudocode illustrates the allocation logic derived from the source analysis. It assumes a standard OpenVDB-like tree structure.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def activate_voxel(grid, pt_index_coords, data):
+    """
+    Activates a voxel at pt_index_coords, triggering sparse tree allocation.
+    """
+    # Step 1 & 2: Set value and active state (internal to OpenVDB API)
+    # The API handles the traversal and allocation described below.
+    grid.set_value(pt_index_coords, data)
+    grid.set_active_state(pt_index_coords, True)
+
+    # Internal allocation logic (derived from source analysis):
+    # 1. Traverse from root to leaf for pt_index_coords.
+    # 2. For each node on the path:
+    #    a. If the node does not exist, create it.
+    #    b. Instantiate all 8 children of this node as Tile nodes.
+    #    c. Initialize the Tile nodes with the grid's background value.
+    #    d. Keep the child on the path as a non-tile node (or recurse).
+    pass
+```
+
+### Parameters and Typical Values
+*   **`ptIndexCoordinates`**: 3D integer coordinate. Example: `{1, 1, 1}` [S1, unofficial].
+*   **`DataContainer`**: Custom data type. Size: $0.000032$ MB per instance [S1, unofficial].
+*   **Background Value**: The default value stored in the instantiated sibling tiles. Not explicitly defined in sources, but implied to be the grid's background [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Memory Bloat**: Inserting points far from existing allocated regions triggers a broad initialization of sibling tiles. This causes a disproportionate memory increase relative to the number of active voxels [S1, unofficial].
+*   **Custom Data Types**: Using custom datatypes increases the memory footprint by approximately 5x compared to native types (e.g., `FloatGrid`) for the same single-voxel activation [S1, unofficial].
+*   **Leaf Node Reuse**: Adding additional points within the same leaf node (e.g., coordinates below `(8,8,8)`) does not increase the memory footprint, as the tiles are already allocated [S1, unofficial].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Memory Complexity**: The memory cost is not linear with the number of active voxels. It depends on the depth of the octree and the sparsity of the activation. Activating a single voxel at `(1,1,1)` with a custom datatype results in a total memory footprint of $1.50162$ MB [S1, unofficial]. For a native `FloatGrid`, the same activation results in $0.307584$ MB [S1, unofficial].
+*   **Scaling**: The memory increase scales with the distance of the new point from the root/allocated regions.
+    *   Adding `(0,0,7)` (same leaf): $+0$ MB [S1, unofficial].
+    *   Adding `(0,0,8)` (Level 1): $+0.01648$ MB [S1, unofficial].
+    *   Adding `(0,0,16)` (Level 1): $+0.01648$ MB [S1, unofficial].
+    *   Adding `(0,0,128)` (Level 2): $+0.181356$ MB [S1, unofficial].
+    *   Adding `(0,0,4096)` (Level 3): $+1.50028$ MB [S1, unofficial].
+
+### Strengths and Limitations
+*   **Strengths**: Provides a consistent interface for sparse data access; tiles allow for efficient storage of homogeneous regions (background values).
+*   **Limitations**: High memory overhead for sparse datasets with points distributed across different octree levels. The initialization of sibling tiles can lead to significant memory waste if points are widely scattered [S1, unofficial].
+
+## Background
+This behavior was documented in a GitHub issue discussion regarding the `vdb_mapping` package, where a user observed unexpected memory usage when activating a single voxel with a custom data type [S1, unofficial]. The analysis was provided by a contributor who replicated the results and explained the underlying OpenVDB allocation strategy.
+
+## Sources
+[S1] Question/doubt about VDB allocation, https://github.com/fzi-forschungszentrum-informatik/vdb_mapping/issues/2, fetched 2026-10-27 (unofficial)

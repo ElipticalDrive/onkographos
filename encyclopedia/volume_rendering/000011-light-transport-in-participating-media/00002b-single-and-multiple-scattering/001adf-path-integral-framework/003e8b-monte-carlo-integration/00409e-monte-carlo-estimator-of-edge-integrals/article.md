@@ -1,0 +1,143 @@
+# Monte Carlo Estimator of Edge Integrals
+
+Also called: EdgeIntegral
+
+## Overview
+This method estimates the edge integrals that arise from discontinuities in radiance across boundary curves in participating media [S1, unofficial]. It solves the problem of accurately capturing light transport contributions from geometric discontinuities (such as surface boundaries or sharp edges) which standard volumetric path tracing misses. It distinguishes itself from standard volumetric path tracing by explicitly handling the discontinuities in surface emission and scattering that occur when a ray intersects a boundary curve or sharp edge, ensuring unbiased estimation of the radiance jump [S1, unofficial][10299-monte-carlo-estimator-of-radiance-change.md].
+
+## How it works
+**Inputs:**
+- $x$: The current path vertex position.
+- $\hat{x}$: A perturbed position (used for derivative estimation).
+- $\omega$: The incoming direction at $x$.
+- $f$: The scattering phase function.
+
+**Outputs:**
+- An unbiased estimate of the edge integral contribution.
+
+**Data Structures:**
+- $\partial \Omega(x)$: The boundary curve associated with vertex $x$.
+- $p(y)$: The probability density function for sampling a point $y$ on the boundary.
+
+**Steps:**
+1. Draw a point $y$ from the boundary $\partial \Omega(x)$ with probability $p(y)$ [S1, unofficial].
+2. Calculate the direction $\omega'$ from $y$ to $x$:
+   $$ \omega' = \frac{x - y}{\|x - y\|} $$
+   [S1, unofficial]
+3. Calculate the normal component $n_\perp$ and the derivative direction $\hat{\omega}'$ using Equations (24) and (25) from the source [S1, unofficial].
+   - *Note: The exact formulas for Eqs. (24) and (25) are not provided in the available text snippets. [G]*
+4. Compute the radiance difference $\Delta L$ using the `deltaRadiance` function with arguments $x$, $\hat{x}$, $\omega'$, and $\hat{\omega}'$ [S1, unofficial].
+   - *Note: The implementation of `deltaRadiance` is referenced as being in Appendix B of the source, which is not included. [G]*
+5. Return the edge integral estimate:
+   $$ \frac{\langle n_\perp, \hat{\omega} \rangle f(x, -\omega', \omega) \Delta L \|y - x\|}{p(y)} $$
+   [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def edge_integral(x, x_hat, omega, f, boundary, p_y, delta_radiance):
+    """
+    Estimates the edge integral contribution for a path vertex x.
+    
+    Args:
+        x: Current vertex position.
+        x_hat: Perturbed vertex position.
+        omega: Incoming direction.
+        f: Scattering phase function.
+        boundary: Object providing the boundary curve partial derivative and sampling.
+        p_y: Probability density function for sampling y on the boundary.
+        delta_radiance: Function computing radiance difference.
+        
+    Returns:
+        Estimate of the edge integral.
+    """
+    # Step 1: Draw y from boundary with probability p(y)
+    y = boundary.sample(p_y)
+    
+    # Step 2: Calculate direction omega' from y to x
+    vec_yx = x - y
+    dist_yx = norm(vec_yx)
+    omega_prime = vec_yx / dist_yx
+    
+    # Step 3: Calculate n_perp and omega_hat_prime
+    # Equations (24) and (25) from source are not fully detailed in snippets.
+    # [G] Assuming boundary provides normal and derivative direction calculation.
+    n_perp, omega_hat_prime = boundary.compute_normal_and_derivative(x, y, omega_prime)
+    
+    # Step 4: Compute radiance difference Delta L
+    delta_L = delta_radiance(x, x_hat, omega_prime, omega_hat_prime)
+    
+    # Step 5: Return estimate
+    # Formula: <n_perp, omega_hat> * f(x, -omega', omega) * Delta_L * ||y-x|| / p(y)
+    # Note: The formula in source uses omega_hat in the dot product, but input is omega.
+    # The pseudocode in source uses omega_hat in the dot product <n_perp, omega_hat>.
+    # However, the input argument is omega. The source formula says <n_perp, omega_hat>.
+    # We assume omega_hat is derived or is omega itself in some contexts, but source distinguishes them.
+    # The source formula: <n_perp, omega_hat> f(x, -omega', omega) Delta_L ||y-x|| / p(y)
+    # The source algorithm line 6: return <n_perp, omega_hat> f(x, -omega', omega) Delta_L ||y-x|| / p(y)
+    # But input is omega. Is omega_hat = omega? Or is omega_hat a separate input?
+    # Algorithm 2 signature: edgeIntegral(x, x_hat, omega, f)
+    # Formula uses omega_hat. This is a discrepancy or implicit definition.
+    # [G] Assuming omega_hat is the direction used for the normal projection, possibly related to omega.
+    # Given the ambiguity, we use omega as provided in the input for the dot product if omega_hat is not distinct,
+    # but the formula explicitly says omega_hat.
+    # Let's stick to the formula's variable name. If omega_hat is not an input, it must be derived.
+    # Since Eq 25 calculates omega_hat_prime, maybe omega_hat is related?
+    # Without Eq 24/25, we cannot define omega_hat.
+    # [G] Placeholder for omega_hat calculation or assumption.
+    # For the purpose of a complete implementation, if omega_hat is not provided, it might be a typo for omega.
+    # However, in differential radiative transfer, hat often denotes a derivative direction.
+    # We will use omega for the dot product as a best guess for a self-contained function, 
+    # noting the source formula uses omega_hat.
+    
+    # Re-reading source: "Calculate n_perp, omega_hat_prime using Eqs (24, 25)"
+    # Formula: <n_perp, omega_hat> ...
+    # It is highly likely omega_hat is a specific direction derived from the geometry.
+    # Since we cannot implement Eq 24/25, we cannot compute omega_hat.
+    # [G] We will assume omega_hat is passed or derived. If not, the code is incomplete.
+    # To make it runnable, we assume omega_hat is the same as omega for the dot product if no other info.
+    # But this contradicts the "hat" notation.
+    # Let's assume the source meant <n_perp, omega> in the dot product if omega_hat is not defined.
+    # Or, omega_hat is the direction of the derivative.
+    
+    # Given the constraint "no placeholders", and missing Eq 24/25, we must state the limitation.
+    # However, the prompt asks for a complete implementation.
+    # We will use omega in the dot product, noting the source formula's potential typo or implicit definition.
+    
+    term1 = dot(n_perp, omega) # Using omega as proxy for omega_hat due to missing definition
+    term2 = f(x, -omega_prime, omega)
+    term3 = delta_L
+    term4 = dist_yx
+    term5 = p_y(y) # Evaluate PDF at y
+    
+    return (term1 * term2 * term3 * term4) / term5
+```
+
+**Parameters:**
+- $p(y)$: Sampling distribution for the boundary point. Typical values depend on the boundary geometry. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- Precision issues may arise when $y$ is very close to $x$, causing $\|y-x\|$ to be small and $p(y)$ to be large or small depending on the distribution.
+- Degenerate input occurs if the boundary $\partial \Omega(x)$ is undefined or empty.
+- The `deltaRadiance` function requires careful handling of discontinuities.
+
+## Subtopics
+
+### [Monte Carlo Estimator of Radiance Change](10299-monte-carlo-estimator-of-radiance-change.md)
+This method estimates the change in radiance $\Delta L$ across geometric discontinuities (boundary, silhouette, and sharp edges) to compute edge integrals in the path integral framework. It distinguishes itself from standard volumetric path tracing by explicitly handling the discontinuities in surface emission and scattering that occur when a ray intersects a boundary curve or sharp edge, ensuring unbiased estimation of the radiance jump.
+
+## Operating characteristics
+- **Time Complexity:** Depends on the cost of sampling $y$, computing the normal/derivative, and evaluating `deltaRadiance`. Not given in the sources.
+- **Memory Complexity:** Low, as it primarily requires storing the current path vertex and boundary information. Not given in the sources.
+- **Measured Performance:** Not given in the sources.
+- **Strengths:** Provides an unbiased estimate of edge contributions, which are otherwise missed by standard volumetric path tracing.
+- **Limitations:** Requires tracing additional side paths and computing radiance differences, which can be computationally expensive. Relies on accurate boundary representation and derivative calculations.
+- **When to use:** When rendering scenes with participating media and sharp geometric discontinuities where edge effects are significant.
+- **When not to use:** For simple homogeneous media without boundaries or when computational resources are limited and edge effects are negligible.
+
+## Background
+The method originates from the "Differential Theory of Radiative Transfer" [S1, unofficial]. It is part of the path integral framework for light transport in participating media, specifically addressing the integrals involving radiance differences across boundary curves. The approach was introduced to jointly estimate direct and indirect illumination components in the presence of geometric discontinuities.
+
+## Sources
+[S1] PDF A Differential Theory of Radiative Transfer, https://cseweb.ucsd.edu/~ravir/diff_rendering.pdf, fetched 2026-10-29 (unofficial)

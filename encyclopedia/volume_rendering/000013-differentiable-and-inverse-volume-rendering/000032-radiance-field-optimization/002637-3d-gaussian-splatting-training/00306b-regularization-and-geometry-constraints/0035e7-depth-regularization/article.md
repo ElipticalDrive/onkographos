@@ -1,51 +1,49 @@
 # Depth Regularization
-
-Also called: Depth constraints, Depth supervision, Depth priors
+Also called: Depth Consistency, Depth Supervision, Depth Priors
 
 ## Overview
-Depth regularization augments the standard photometric loss with terms that enforce geometric consistency between rendered depth maps and external depth estimates (e.g., monocular predictions or stereo disparities). It solves the ambiguity of scale and structure in sparse-view or unposed reconstruction by anchoring the Gaussian primitives to explicit surface geometry. It sets itself apart from [Frequency Regularization](6130-frequency-regularization.md) by operating on spatial depth structures rather than spectral frequency bands, and from [Smoothed 2D Supervision](7213-smoothed-2d-supervision.md) by explicitly modeling the depth accumulation process rather than smoothing image-space features.
+Depth regularization methods enforce geometric plausibility in differentiable volume rendering by minimizing the discrepancy between rendered depth maps and external depth targets (monocular estimates, stereo matches, or LiDAR). This family addresses the inherent ambiguity of single-view or sparse-view reconstruction, where color-only supervision often leads to incorrect Gaussian positioning, floating artifacts, or collapsed geometry. It sets itself apart from sibling methods like [Frequency Regularization](6130-frequency-regularization.md) or [Smoothed 2D Supervision](7213-smoothed-2d-supervision.md) by operating directly on the geometric depth channel rather than color space or frequency domains, providing explicit metric or relative depth constraints.
 
 ## Shared principles
-The family shares the mechanism of computing a differentiable rendered depth map $D_{rendered}$ from the Gaussian primitives and comparing it to a target depth map $D_{target}$ (monocular, stereo, or LiDAR). The core loss is typically an L1 or L2 norm:
-$$ \mathcal{L}_{depth} = \| D_{rendered} - D_{target} \|_1 \quad \text{or} \quad \| D_{rendered} - D_{target} \|_2 $$
-The rendered depth $D_{rendered}$ is computed via alpha-compositing along each ray, weighted by the Gaussian centers' distances to the camera. Gradients flow through the depth accumulation to update Gaussian centers $\mu$, opacities $\alpha$, and potentially scales $s$ or rotations $q$, depending on the specific variant's freezing strategy.
+All methods in this family compute a differentiable auxiliary loss term $\mathcal{L}_{reg}$ that is added to the total training loss:
+$$ \mathcal{L}_{total} = \mathcal{L}_{rgb} + \lambda_{reg} \mathcal{L}_{reg} $$
+where $\lambda_{reg}$ is a scalar weight. The core mechanism involves extracting a geometric or spectral property from the rendered output (or the input data) and comparing it against a target or constraint. The gradients of $\mathcal{L}_{reg}$ flow back through the differentiable rasterizer to update the Gaussian parameters $\theta$ (centers $\mu$, scales $s$, rotations $q$, opacities $\alpha$, and colors $c$).
 
 ## Subtopics
 
 ### [DNGaussian](7399-dngaussian.md)
-A framework for few-shot novel view synthesis that combines Hard and Soft Depth Regularization with Global-Local Depth Normalization. It sets itself apart by replacing spherical harmonics with a Neural Color Renderer to prevent overfitting on sparse views and by introducing explicit depth constraints that freeze specific Gaussian parameters to guide geometry reconstruction. Unlike NeRF-based methods, it exposes black backgrounds on empty spaces.
+DNGaussian is a depth-regularized framework for few-shot novel view synthesis that combines Hard and Soft Depth Regularization with Global-Local Depth Normalization to restore accurate scene geometry under coarse monocular depth supervision while preserving fine-grained color appearance. It addresses the significant geometry degradation in 3D Gaussian Splatting (3DGS) caused by sparse input views, where Gaussian primitive positioning becomes incorrectly learned. Unlike NeRF-based methods that interpolate colors to invisible areas, 3DGS-based methods expose black background on empty spaces, allowing DNGaussian to focus on visible geometry reconstruction. See [DNGaussian](7399-dngaussian.md) for implementation details.
 
 ### SparseGS
-Uses monocular depth and diffusion priors for ~3-view input [S1, unofficial].
+SparseGS uses monocular depth and diffusion priors for ~3-view input scenarios [S1, unofficial]. It leverages generative priors to fill geometric gaps where sparse observations fail, complementing the depth regularization by providing structural context.
 
 ### PixelSplat Training and Depth Regularization
-Trains the model for 300,000 steps using a batch size of 7 [S2]. Uses an MSE loss for the first 150,000 iterations, supplemented with an LPIPS loss (weight 0.05) starting at 150,000 steps [S2]. For each batch element, it renders 4 target views [S2]. To allow gradients for multiple estimated depths, it places 3 Gaussians along each ray, determined by independently sampling from the ray's probability distribution 3 times [S2]. Each Gaussian's alpha is divided by 3 ($\alpha = \phi_z / 3$) to ensure total opacity of roughly 1 for Gaussians on a ray [S2]. It fine-tunes the model for 50,000 steps with a depth regularization loss $L_{reg\_depth}$ to generate point clouds [S2]. For each rendered view, it generates a corresponding depth map $D$ [S2].
-
-**Formula:**
-Compute horizontal depth difference:
-$$ D_x^{\Delta}[\mathbf{u}] = D[\mathbf{u}_{x-1}, \mathbf{u}_y] - 2D[\mathbf{u}_x, \mathbf{u}_y] + D[\mathbf{u}_{x+1}, \mathbf{u}_y] $$
-Compute vertical depth difference:
-$$ D_y^{\Delta}[\mathbf{u}] = D[\mathbf{u}_x, \mathbf{u}_{y-1}] - 2D[\mathbf{u}_x, \mathbf{u}_y] + D[\mathbf{u}_x, \mathbf{u}_{y+1}] $$
-Where $D$ is the depth map and $\mathbf{u}$ represents pixel coordinates $(u_x, u_y)$ [S2].
-
-**Parameter:**
-VRAM requirement is approximately 80 GB on a single GPU [S2].
+PixelSplat employs a specific depth regularization strategy during fine-tuning to generate high-quality point clouds from generalizable 3D Gaussian splats [S2].
+- **Training Schedule:** The model is trained for 300,000 steps with a batch size of 7, requiring approximately 80 GB of VRAM on a single GPU [S2]. An MSE loss is used for the first 150,000 iterations, supplemented by an LPIPS loss with weight 0.05 starting at 150,000 steps [S2].
+- **Multi-Depth Rendering:** To allow gradients for multiple estimated depths, 3 Gaussians are placed along each ray by independently sampling from the ray's probability distribution 3 times [S2]. Each Gaussian's alpha value is divided by 3 ($\alpha = \phi_z / 3$) to ensure total opacity is roughly 1 [S2].
+- **Depth Regularization Loss:** After the initial training, the model is fine-tuned for 50,000 steps with a depth regularization loss $L_{reg\_depth}$ [S2]. For each rendered view, a depth map $D$ is generated. The loss computes horizontal and vertical depth differences using second-order derivatives:
+  $$ D_x^{\Delta}[\mathbf{u}] = D[\mathbf{u}_{x-1}, \mathbf{u}_y] - 2D[\mathbf{u}_x, \mathbf{u}_y] + D[\mathbf{u}_{x+1}, \mathbf{u}_y] $$
+  $$ D_y^{\Delta}[\mathbf{u}] = D[\mathbf{u}_x, \mathbf{u}_{y-1}] - 2D[\mathbf{u}_x, \mathbf{u}_y] + D[\mathbf{u}_x, \mathbf{u}_{y+1}] $$
+  where $\mathbf{u} = (u_x, u_y)$ represents pixel coordinates [S2].
 
 ### Edge-Aware Disparity Regularization
-A regularization term $L_{reg}$ that encourages local depth smoothness while preserving depth discontinuities aligned with image edges [S3, unofficial].
+Edge-Aware Disparity Regularization is a technique used in NeRF-based frameworks (e.g., GeCoNeRF) to encourage local depth smoothness while preserving depth discontinuities aligned with image edges [S3, unofficial].
+- **Loss Formulation:** The regularization loss $L_{reg}$ is defined as:
+  $$ L_{reg} = |\partial_x D^*_i| e^{-|\partial_x I_i|} + |\partial_y D^*_i| e^{-|\partial_y I_i|} $$
+  where $D^*_i$ is the mean-normalized inverse depth and $I_i$ is the input image [S3, unofficial].
+- **Normalization:** The mean-normalized inverse depth is calculated as $D^*_i = D_i / \bar{D}_i$, following Godard et al. (2017), to discourage the shrinking of estimated depth [S3, unofficial].
+- **Edge Awareness:** The exponential term $e^{-|\partial I|}$ weights the disparity gradient, ensuring that depth changes are preserved where image intensity gradients are high (edges) [S3, unofficial].
 
-**Formula:**
-Regularization loss:
-$$ L_{reg} = |\partial_x D^*_i| e^{-|\partial_x I_i|} + |\partial_y D^*_i| e^{-|\partial_y I_i|} $$
-Where $D^*_i$ is mean-normalized inverse depth and $I_i$ is the input image [S3, unofficial].
-
-**Parameter:**
-Mean-normalized inverse depth $D^*_i = D_i / \bar{D}_i$ is used to discourage shrinking of the estimated depth, following Godard et al. (2017) [S3, unofficial].
+### Opacity-Depth Regularization
+Opacity-Depth Regularization is a method applied during novel-view synthesis optimization to encourage spheres (or Gaussians) to move to the correct scene depth based on their opacity [S4].
+- **Mechanism:** The method uses an energy term defined as $E = -z_i \cdot O_i$, where $z_i$ is the depth of sphere $i$ and $O_i$ is its opacity [S4].
+- **Thresholding:** Spheres with low opacity are thresholded and removed, which helps in cleaning up the geometry and focusing optimization on significant structures [S4].
 
 ## Background
-Depth regularization in the context of 3D Gaussian Splatting and radiance fields emerged as a solution to the instability of Gaussian positioning under sparse-view constraints. Standard 3DGS relies on dense input for stable geometry; when views are sparse, Gaussian centers drift, causing geometry degradation [S1, unofficial]. Methods like DNGaussian introduced hard and soft depth constraints to anchor these centers to monocular depth estimates [S1, unofficial]. Earlier work in NeRF-based reconstruction, such as GeCoNeRF, utilized edge-aware disparity regularization to enforce smoothness while preserving edges, leveraging image gradients to weight the depth smoothness penalty [S3, unofficial]. The technique has evolved to include multi-Gaussian sampling along rays (as in PixelSplat) to handle depth ambiguity and multi-modal depth distributions [S2].
+Depth regularization in volume rendering emerged as a critical component for addressing the "sliding scale" ambiguity and floating artifacts common in sparse-view reconstruction. Early work in NeRF regularization, such as GeCoNeRF [S3, unofficial], introduced edge-aware disparity losses to improve depth consistency in few-shot settings. Concurrently, sphere-based methods like Pulsar [S4] explored opacity-depth coupling to refine geometry. With the advent of 3D Gaussian Splatting [S19 in S2], the challenge shifted to preventing Gaussian centers from drifting incorrectly when supervision is sparse. DNGaussian [S1, unofficial] formalized this by introducing hard and soft depth regularization specifically for 3DGS, while generalizable models like PixelSplat [S2] integrated depth consistency into their fine-tuning pipelines to produce accurate point clouds. The family continues to evolve with methods like SparseGS [S1, unofficial] incorporating diffusion priors to enhance depth estimation in extremely sparse regimes.
 
 ## Sources
 [S1] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
 [S2] PixelSplat: 3D Gaussian Splats from Image Pairs for Scalable Generalizable 3D Reconstruction, https://doi.org/10.1109/cvpr52733.2024.01840, fetched 2026-10-26
 [S3] GeCoNeRF: Few-Shot Neural Radiance Fields via Geometric Consistency, https://core.ac.uk/works/309257742, fetched 2026-11-01 (unofficial)
+[S4] Pulsar: Efficient Sphere-based Neural Rendering, https://doi.org/10.1109/cvpr46437.2021.00149, fetched 2026-10-26

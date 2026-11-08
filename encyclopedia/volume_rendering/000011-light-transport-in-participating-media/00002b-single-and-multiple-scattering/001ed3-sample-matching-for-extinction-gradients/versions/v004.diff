@@ -1,0 +1,167 @@
+--- v003.md
++++ v004.md
+@@ -26,6 +26,6 @@
+ 
+ ### Formulas
+-*   **Transmittance:** $T = e^{-\tau}$, where $\tau = \sigma_t \Delta t$ is the optical depth over path length $\Delta t$ [S3, G].
+-*   **Gradient Estimation:** $\nabla_{\sigma_t} L \approx \frac{1}{N} \sum_{i=1}^{N} \left( \frac{\partial L_{\text{scat}}}{\partial \sigma_t} - \frac{\partial L_{\text{trans}}}{\partial \sigma_t} \right)$, where both partial derivatives are evaluated at the same spatial point $\mathbf{p}$ on the segment [S1, unofficial][S2, unofficial].
++*   **Transmittance:** $T = e^{-\tau}$, where $\tau = \sigma_t \Delta t$ is the optical depth over path length $\Delta t$ [G].
++*   **Gradient Estimation:** The gradient is computed as the difference between the scattering and transmittance partial derivatives, both evaluated at the same spatial point $\mathbf{p}$ on the segment [G].
+ 
+ ### Parameters
+@@ -50,85 +50,69 @@
+     return phase_func.sample(dir)
+ 
+-def write_segment_record(record, buffer):
+-    buffer.append(record)
+-
+-def trace_sub_path(pos, dir, medium, rng):
++def trace_scattering_gradient(pos, dir, medium, rng):
+     return medium.trace_scattering_gradient(pos, dir, rng)
+ 
+-def trace_sub_path_transmittance(pos, dir, medium, rng):
++def trace_transmittance_gradient(pos, dir, medium, rng):
+     return medium.trace_transmittance_gradient(pos, dir, rng)
+ 
+-def accumulate_gradient(grad, output_buffer):
+-    output_buffer += grad
+-
+ # Primal Pass
+-def primal_pass(scene, camera, rng):
+-    segment_buffer = []
++def primal_pass(scene, camera, rng, segment_slots, max_depth):
++    buffer = []
+     reservoir_weight = 0.0
+-    selected_record = None
++    reservoir_record = None
+ 
+     for pixel in camera.rays:
+-        path_radiance = 0.0
+         throughput = 1.0
+-        current_pos = pixel.origin
+-        current_dir = pixel.direction
++        pos = pixel.origin
++        dir = pixel.direction
++        wavelengths = pixel.wavelengths
+ 
+-        for depth in range(MAX_DEPTH):
+-            dist = sample_distance(current_pos, current_dir, scene.medium)
+-            next_pos = current_pos + dist * current_dir
+-
++        for depth in range(max_depth):
++            dist = sample_distance(pos, dir, scene.medium)
++            next_pos = pos + dist * dir
+             sigma_t = scene.medium.extinction(next_pos)
+             sigma_s = scene.medium.scattering(next_pos)
+             sigma_e = scene.medium.emission(next_pos)
+ 
+-            tau = sigma_t * dist
+-            T = exp(-tau)
+-
+-            path_radiance += throughput * sigma_e * T * dist
+-
+             record = {
+                 'pos': next_pos,
+-                'dir': current_dir,
++                'dir': dir,
+                 'throughput': throughput,
+-                'wavelengths': pixel.wavelengths,
++                'wavelengths': wavelengths,
+                 'depth': depth
+             }
+ 
+-            if SEGMENT_SLOTS == 1:
+-                current_weight = throughput * sigma_s / sigma_t
+-                reservoir_weight += current_weight
+-                if rng.uniform() < current_weight / reservoir_weight:
+-                    selected_record = record
+-            elif SEGMENT_SLOTS > 1:
+-                slot_idx = min(depth, SEGMENT_SLOTS - 1)
+-                if slot_idx < SEGMENT_SLOTS - 1:
+-                    write_segment_record(record, segment_buffer)
++            if segment_slots == 1:
++                weight = throughput * sigma_s / sigma_t
++                reservoir_weight += weight
++                if rng.uniform() < weight / reservoir_weight:
++                    reservoir_record = record
++            else:
++                slot = min(depth, segment_slots - 1)
++                if slot < segment_slots - 1:
++                    buffer.append(record)
+                 else:
+-                    current_weight = throughput * sigma_s / sigma_t
+-                    reservoir_weight += current_weight
+-                    if rng.uniform() < current_weight / reservoir_weight:
+-                        write_segment_record(record, segment_buffer)
+-                        segment_buffer[-1] = record
++                    weight = throughput * sigma_s / sigma_t
++                    reservoir_weight += weight
++                    if rng.uniform() < weight / reservoir_weight:
++                        buffer.append(record)
++                        buffer[-1] = record
+ 
+             if sigma_s == 0:
+                 break
+ 
+-            new_dir = sample_phase(current_dir, scene.phase)
+-            throughput *= (sigma_s / sigma_t) * T * scene.phase(current_dir, new_dir)
+-            current_pos = next_pos
+-            current_dir = new_dir
++            new_dir = sample_phase(dir, scene.phase)
++            throughput *= (sigma_s / sigma_t) * exp(-sigma_t * dist) * scene.phase(dir, new_dir)
++            pos = next_pos
++            dir = new_dir
+ 
+-        if SEGMENT_SLOTS == 1 and selected_record is not None:
+-            write_segment_record(selected_record, segment_buffer)
++        if segment_slots == 1 and reservoir_record is not None:
++            buffer.append(reservoir_record)
+ 
+-    return segment_buffer
+-
+-# Adjoint Pass Kernel 1: Path Replay
+-def adjoint_kernel_1(scene, camera, rng):
+-    return primal_pass(scene, camera, rng)
++    return buffer
+ 
+ # Adjoint Pass Kernel 2: Gradient Sampling
+-def adjoint_kernel_2(scene, segment_records, rng):
+-    output_buffer = 0.0
++def adjoint_kernel_2(scene, segment_records, rng, gradient_samples_per_segment):
++    total_grad = 0.0
+     for record in segment_records:
+         pos = record['pos']
+@@ -136,18 +120,21 @@
+         throughput = record['throughput']
+ 
+-        scattering_grad = 0.0
+-        for _ in range(GRADIENT_SAMPLES_PER_SEGMENT):
+-            scattering_grad += trace_sub_path(pos, dir, scene.medium, rng)
+-        scattering_grad /= GRADIENT_SAMPLES_PER_SEGMENT
++        scat_grad = 0.0
++        for _ in range(gradient_samples_per_segment):
++            scat_grad += trace_scattering_gradient(pos, dir, scene.medium, rng)
++        scat_grad /= gradient_samples_per_segment
+ 
+-        transmittance_grad = 0.0
+-        for _ in range(GRADIENT_SAMPLES_PER_SEGMENT):
+-            transmittance_grad += trace_sub_path_transmittance(pos, dir, scene.medium, rng)
+-        transmittance_grad /= GRADIENT_SAMPLES_PER_SEGMENT
++        trans_grad = 0.0
++        for _ in range(gradient_samples_per_segment):
++            trans_grad += trace_transmittance_gradient(pos, dir, scene.medium, rng)
++        trans_grad /= gradient_samples_per_segment
+ 
+-        gradient = throughput * (scattering_grad - transmittance_grad)
+-        accumulate_gradient(gradient, output_buffer)
+-
+-    return output_buffer
++        # Apply inverse selection probability weight for reservoir-sampled slots [G]
++        weight = 1.0
++        if segment_slots == 1:
++            weight = reservoir_weight / (depth + 1) # Approximation; exact weight depends on path length distribution [G]
++        
++        total_grad += throughput * weight * (scat_grad - trans_grad)
++    return total_grad
+ ```
+ 

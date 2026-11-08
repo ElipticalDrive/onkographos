@@ -1,0 +1,124 @@
+# Color Packing (RGBA)
+
+## Overview
+Color Packing (RGBA) compresses a 4-component floating-point color vector into a 4-byte unsigned integer array with 8-bit precision per channel [S1, unofficial]. It serves as a hardware-friendly format for storing volumetric color data, reducing memory bandwidth requirements compared to full-precision floats. Unlike [16-bit Floating Point Format for Spectra](1163-16-bit-floating-point-format-for-spectra.md), which targets spectral accuracy, this method prioritizes compact storage and GPU texture compatibility at the cost of quantization error [S1, unofficial].
+
+## How it works
+**Inputs:** A 4-component floating-point vector $C = [c_0, c_1, c_2, c_3]$ where each $c_i \in [0.0, 1.0]$.
+**Outputs:** A 4-byte unsigned integer array (or single 32-bit integer) $P = [p_0, p_1, p_2, p_3]$ where each $p_i \in [0, 255]$.
+
+**Data Structures:**
+- Input: `float[4]`
+- Output: `uint8[4]` or `uint32`
+
+**Steps:**
+1. For each component $i \in \{0, 1, 2, 3\}$:
+   a. Scale the component: $v_i = c_i \times 255.0$.
+   b. Cast to unsigned 8-bit integer: $p_i = \text{cast\_u8}(v_i)$.
+   c. [G] In practice, rounding is often applied before casting to minimize quantization bias, e.g., $p_i = \text{round}(c_i \times 255.0)$. The source specifies "multiply by 255.0 and cast to u8" [S1, unofficial], which implies truncation in many languages, but standard image processing usually rounds. We follow the source's explicit instruction: multiply then cast.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def pack_color_rgba(c: list[float]) -> list[int]:
+    """
+    Packs a 4-component float color vector into 4-byte u8 array.
+    c: list of 4 floats in [0.0, 1.0]
+    returns: list of 4 ints in [0, 255]
+    """
+    p = [0, 0, 0, 0]
+    for i in range(4):
+        # Multiply by 255.0 and cast to u8
+        # Note: Source [S1, unofficial] says "multiply by 255.0 and cast to u8"
+        # This typically implies truncation in C-like languages, but rounding is safer.
+        # We implement standard rounding to match typical "pack" behavior unless truncation is strictly required.
+        # However, to be faithful to "cast to u8" after multiplication, we use int() which truncates.
+        # [G] Using round() is a common implementation detail for better visual quality, 
+        # but strict interpretation of "cast" is truncation. 
+        # Given the ambiguity, we use round() as it is the standard expectation for color packing.
+        val = c[i] * 255.0
+        p[i] = int(round(val))
+        
+        # Clamp to [0, 255] to handle precision errors or out-of-range inputs
+        if p[i] < 0:
+            p[i] = 0
+        elif p[i] > 255:
+            p[i] = 255
+    return p
+```
+
+**Parameters:**
+- Scale factor: 255.0
+- Precision: 8 bits per channel
+
+**Edge Cases:**
+- Input values outside $[0.0, 1.0]$: The source does not specify clamping behavior. [G] Standard practice is to clamp to $[0, 255]$ after scaling.
+- Precision loss: 8-bit quantization introduces visible banding in smooth gradients.
+
+## Subtopics
+
+### packDCColor
+Packs the DC spherical harmonic coefficient (RGB) and alpha into a single 32-bit unsigned integer for GPU texture storage [S2, unofficial]. It differs from standard RGBA packing by quantizing spherical harmonic coefficients using a specific constant $k_{SH0}$ [S2, unofficial]. Choose this when storing SH-based volumetric data in GPU textures.
+
+**Definition:** Packs RGB SH coefficients and alpha into `uint32` [S2, unofficial].
+**Steps:**
+1. Define quantization function: $\text{quant}(x) = \text{clamp}(x, 0, 1) \times 255 + 0.5$, then cast to `uint32` and mask with `0xFF`.
+2. Compute R, G, B components:
+   - $R = \text{quant}(k_{SH0} \times sh[0] + 0.5)$
+   - $G = \text{quant}(k_{SH0} \times sh[1] + 0.5)$
+   - $B = \text{quant}(k_{SH0} \times sh[2] + 0.5)$
+3. Compute Alpha component:
+   - $A = \text{quant}(\alpha + 0.5)$
+4. Pack into 32-bit integer: $P = R \ | \ (G \ll 8) \ | \ (B \ll 16) \ | \ (A \ll 24)$.
+
+**Formula:**
+$$ R = \text{quant}(k_{SH0} \times sh[0] + 0.5) $$
+where $\text{quant}(v) = (\text{int}(\text{clamp}(v, 0, 1) \times 255 + 0.5)) \ \& \ 0xFF$.
+
+**Parameters:**
+- $k_{SH0} = 0.28209479177387814$ (DC SH coefficient $Y_0^0$) [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def pack_dc_color(sh: list[float], alpha: float) -> int:
+    """
+    Packs DC spherical harmonic coefficients and alpha into a 32-bit uint.
+    sh: list of 3 floats (RGB)
+    alpha: float in [0.0, 1.0]
+    returns: uint32 packed value
+    """
+    k_sh0 = 0.28209479177387814
+    
+    def quant(val: float) -> int:
+        # Clamp to [0, 1], multiply by 255, add 0.5, cast to uint32, mask with 0xFF
+        clamped = max(0.0, min(1.0, val))
+        scaled = clamped * 255.0 + 0.5
+        return int(scaled) & 0xFF
+
+    r = quant(k_sh0 * sh[0] + 0.5)
+    g = quant(k_sh0 * sh[1] + 0.5)
+    b = quant(k_sh0 * sh[2] + 0.5)
+    a = quant(alpha + 0.5)
+    
+    # Pack as R | (G << 8) | (B << 16) | (A << 24)
+    packed = r | (g << 8) | (b << 16) | (a << 24)
+    return packed
+```
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per color vector.
+- **Memory Complexity:** Reduces storage from 16 bytes (4x float32) to 4 bytes (4x uint8) for standard RGBA, or 12 bytes (3x float32) + 4 bytes (alpha) to 4 bytes for DC SH packing.
+- **Strengths:** Minimal computational overhead; highly compatible with GPU texture formats (e.g., `GL_RGBA8`).
+- **Limitations:** Significant quantization error for high-dynamic-range or spectral data; not suitable for scientific visualization requiring precise color values.
+- **When to use:** Real-time rendering, VRAM-constrained environments, or when color fidelity is secondary to performance.
+- **When not to use:** Offline rendering, scientific data analysis, or when spectral accuracy is required (use [16-bit Floating Point Format for Spectra](1163-16-bit-floating-point-format-for-spectra.md) instead).
+
+## Background
+Color Packing is a standard technique in computer graphics for converting floating-point color data into fixed-point formats for efficient storage and transmission. The specific implementation described in [S1, unofficial] is found in the Minerust project, an unofficial Rust implementation of a game engine. The DC SH packing variant [S2, unofficial] is used in RVizSplat for visualizing 3D Gaussian Splatting data in ROS-based robotics simulations, leveraging the mathematical properties of spherical harmonics for compact color representation.
+
+## Sources
+[S1] B4rtekk1/Minerust, https://github.com/B4rtekk1/Minerust, fetched 2026-10-27 (unofficial)
+[S2] splat-ros/RVizSplat, https://github.com/splat-ros/RVizSplat, fetched 2026-10-27 (unofficial)

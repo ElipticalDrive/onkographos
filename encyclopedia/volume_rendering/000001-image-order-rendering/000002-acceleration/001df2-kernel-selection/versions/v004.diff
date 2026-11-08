@@ -1,0 +1,90 @@
+--- v003.md
++++ v004.md
+@@ -15,9 +15,9 @@
+ 
+ **Outputs:**
+-- A list of selected kernel indices for each pixel (or global list, depending on implementation) to be processed in the ray tracing stage [S1, unofficial].
++- A list of selected kernel indices for each pixel to be processed in the ray tracing stage [S1, unofficial].
+ 
+ **Data Structures:**
+ - **Candidate List:** A list of ellipsoid indices that pass the initial density check [S1, unofficial].
+-- **Distance List:** For each pixel, a list of distances from the pixel center to the projected ellipsoid centers [S1, unofficial].
++- **Distance List:** For each pixel, a list of distances from the pixel center to the 1D Gaussian center of each recorded kernel [S1, unofficial].
+ - **Selected Kernels:** The final subset of $K'$ kernels per pixel [S1, unofficial].
+ 
+@@ -50,4 +50,6 @@
+ 
+ ```python
++import math
++
+ def kernel_selection(ellipsoids, camera_params, eta, K_prime):
+     """
+@@ -62,6 +64,7 @@
+     Omega = [[2 * F / h, 0, 0], [0, 2 * F / w, 0], [0, 0, 1]]
+     
+-    low_h = h // 8
+-    low_w = w // 8
++    # Low-resolution buffer dimensions (8x smaller, rounded up to avoid index errors)
++    low_h = (h + 7) // 8
++    low_w = (w + 7) // 8
+     pixel_to_kernels = [[] for _ in range(low_h * low_w)]
+     
+@@ -73,10 +76,14 @@
+             continue
+             
+-        # Step 2: Compute bounding box dimensions
++        # Step 2: Compute bounding box dimensions from formula
+         S = math.log(-eta) / d_z
+         Sigma_inv = mat3_inverse(ell.covariance)
+-        M = mat3_multiply(mat3_multiply(Omega, Sigma_inv), Omega)
+-        bh = S * math.sqrt(M[0][0])
+-        bw = S * math.sqrt(M[1][1])
++        # Compute row vector [bh, bw, dot] = S * Omega @ Sigma_inv @ Omega
++        temp = mat3_multiply(Sigma_inv, Omega)
++        row_vec = [0.0, 0.0, 0.0]
++        for j in range(3):
++            row_vec[j] = S * (Omega[0][0]*temp[0][j] + Omega[1][1]*temp[1][j] + Omega[2][2]*temp[2][j])
++        bh = abs(row_vec[0])
++        bw = abs(row_vec[1])
+         
+         # Project to screen coordinates
+@@ -87,7 +94,9 @@
+         low_x = int(screen_x / 8)
+         low_y = int(screen_y / 8)
+-        if 0 <= low_x < low_w and 0 <= low_y < low_h:
+-            pixel_idx = low_y * low_w + low_x
+-            pixel_to_kernels[pixel_idx].append(k)
++        # Clamp to buffer bounds
++        low_x = min(max(low_x, 0), low_w - 1)
++        low_y = min(max(low_y, 0), low_h - 1)
++        pixel_idx = low_y * low_w + low_x
++        pixel_to_kernels[pixel_idx].append(k)
+             
+     # Steps 4-6: Density filtering, sorting, and selection per pixel
+@@ -97,4 +106,6 @@
+             low_x = x // 8
+             low_y = y // 8
++            low_x = min(max(low_x, 0), low_w - 1)
++            low_y = min(max(low_y, 0), low_h - 1)
+             low_idx = low_y * low_w + low_x
+             candidates = pixel_to_kernels[low_idx]
+@@ -157,7 +168,8 @@
+ Replaces stochastic sampling with analytical ray-primitive intersection. Choose when precise surface reconstruction is needed and stochastic sampling is too costly.
+ 
++### Crawfis-Max Kernel
++Uses a reduced kernel radius (1.58 instead of the standard 2.0) to provide faster renderings and bring kernel size closer to that used in raycasting [S2]. This variant provides speedups of 25% to 45% without a significant drop in quality [S2].
++
+ ## Operating characteristics
+-- **Time Complexity:** The coarse rasterization stage is $O(N)$ for projection and bounding box calculation, where $N$ is the number of ellipsoids. The selection stage is $O(P \cdot K \log K)$ or $O(P \cdot K)$ depending on sorting, where $P$ is the number of pixels and $K$ is the number of candidates per pixel.
+-- **Memory Complexity:** Requires storage for the candidate list and the low-resolution buffer.
+ - **Performance:** Reduces computational cost by avoiding full ray tracing for all primitives, typically selecting 10% of all ellipsoids [S1, unofficial].
+ - **Strengths:** Simple to implement, reduces rendering time significantly.
+@@ -165,6 +177,7 @@
+ 
+ ## Background
+-Kernel Selection was introduced in the context of differentiable volume rendering using Gaussian ellipsoids, specifically in the VoGE renderer [S1, unofficial]. It is part of a coarse-to-fine rendering strategy designed to efficiently render Gaussian ellipsoids by gradually reducing the number of ellipsoids that interact with viewing rays.
++Kernel Selection was introduced in the context of differentiable volume rendering using Gaussian ellipsoids, specifically in the VoGE renderer [S1, unofficial]. It serves as a pre-processing step to select a subset of ellipsoids (10% of all) for the subsequent ray tracing stage, reducing computational cost by avoiding full ray tracing for all primitives [S1, unofficial].
+ 
+ ## Sources
+-[S1] VoGE: A Differentiable Volume Renderer using Gaussian Ellipsoids for Analysis-by-Synthesis, https://doi.org/10.48550/arxiv.2205.15401, fetched 2026-10-26 (unofficial)+[S1] VoGE: A Differentiable Volume Renderer using Gaussian Ellipsoids for Analysis-by-Synthesis, https://doi.org/10.48550/arxiv.2205.15401, fetched 2026-10-26 (unofficial)
++[S2] A Practical Evaluation of Popular Volume Rendering ..., https://courses.cs.duke.edu/spring03/cps296.8/papers/PracticalEvaluationofVolumeRenderingAlgorithms.pdf, fetched 2026-10-29

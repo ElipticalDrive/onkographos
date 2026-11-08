@@ -1,0 +1,26 @@
+# Hardware-Assisted Projection
+## Overview
+Hardware-Assisted Projection is a family of volume rendering techniques that project 3D geometric primitives (tetrahedra, polyhedra, or hexahedra) onto the 2D screen space to leverage GPU rasterization pipelines for scan conversion and compositing [S1, unofficial][S2, unofficial][S3, unofficial]. It solves the performance bottleneck of explicit isosurface extraction and the data transfer overhead of CPU-side raycasting by performing the core rendering pipeline on the GPU [S1, unofficial][S2, unofficial]. Unlike [Projected Tetrahedra](877-projected-tetrahedra.md), which requires explicit triangle generation and sorting, this family generally relies on hardware compositing, global sorting, or commutative accumulation to handle depth ordering [S3, unofficial].
+## Shared principles
+The family shares a common object-order approach where 3D cells are projected to 2D screen space, and the volume integral is approximated per pixel or fragment using hardware acceleration [S1, unofficial][S2, unofficial][S3, unofficial].
+1.  **Projection**: 3D vertices of the unstructured grid cells are transformed into screen coordinates using view-projection matrices [S1, unofficial][S2, unofficial].
+2.  **Scan Conversion**: The projected cells are rasterized or scanned to determine ray-cell intersections ($z_{front}, z_{back}$) and attribute contributions (color, opacity, optical thickness) for each pixel or fragment [S1, unofficial][S2, unofficial][S3, unofficial].
+3.  **Compositing**: Depth-sorted segments or accumulated values are combined to produce the final image. Methods vary from explicit alpha blending [S1, unofficial] to additive accumulation for absorption-only regimes [S1, unofficial].
+## Subtopics
+
+### [Hardware-Assisted Polyhedron Projection](1453-hardware-assisted-polyhedron-projection.md)
+Projects arbitrary convex polyhedral cells to 2D, performs scan conversion to generate depth-sorted ray segments, and composites them using hardware acceleration. It differs from raycasting by operating in image space with object-order projection, allowing flexible data distribution on distributed-memory systems and leveraging standard polygon pipelines for scan conversion. Unlike [Projected Tetrahedra](877-projected-tetrahedra.md), which requires explicit triangle generation and sorting, this method projects cells directly as polygons and relies on hardware compositing or global sorting for depth ordering.
+
+### [Hardware-Assisted Projected Tetrahedra](1729-hardware-assisted-projected-tetrahedra.md)
+Projects tetrahedra onto the screen and rasterizes them as triangles, evaluating the volume ray integral per fragment in the fragment shader. It solves the performance bottleneck of explicit isosurface extraction and the data transfer overhead of previous hybrid methods by performing the entire rendering pipeline on the GPU in a single pass. Unlike its sibling [Projected Tetrahedra](877-projected-tetrahedra.md), which requires CPU-side sorting and triangle generation, HAPT streams sorted tetrahedra as point primitives and uses the GPU geometry shader to decompose them into triangles. It differs from [Tetrahedral Projection with Partial Pre-integration](1861-tetrahedral-projection-with-partial-pre-integration.md) (PTINT) by eliminating the need to read data back from the GPU, allowing rendering of volumes with several million tetrahedra that would exceed GPU memory limits.
+
+### [Absorption-Only Radiography via Unsorted Hexahedron Projection](10255-absorption-only-radiography-via-unsorted-hexahedron-projecti.md)
+A hardware-accelerated technique to simulate radiographs in the absorption-only regime (emissivity $J=0$) for curvilinear hexahedral meshes, avoiding the need for a global back-to-front visibility sort by accumulating optical thickness additively. Unlike its siblings [Hardware-Assisted Polyhedron Projection](1453-hardware-assisted-polyhedron-projection.md) and [Hardware-Assisted Projected Tetrahedra](1729-hardware-assisted-projected-tetrahedra.md), which generally require depth sorting to correctly composite transparent volumes using alpha blending, this method exploits the commutative property of addition in the absorption-only recurrence to render cells in any order.
+#### Röttger 3D Texture Mapping
+- **Definition**: An extension of the projected tetrahedra algorithm for hardware-accelerated rendering of volumetric data using 3D texture mapping [S1, unofficial].
+- **Steps**: Linearly approximate parts of the volume integral depending on segment length by modulating vertex colors. Tabulate remaining parts that depend only on textural coordinates in a 2D texture map [S1, unofficial].
+
+## Background
+The concept of hardware-assisted projection builds upon the projected tetrahedra algorithm [ST90], extending it for hardware-accelerated and accurate rendering of volumetric data using 3D texture mapping [S1, unofficial]. Röttger et al. [RKE00] were able to extend the projected tetrahedra algorithm for hardware-accelerated rendering [S1, unofficial].
+## Sources
+[S1] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)

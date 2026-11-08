@@ -1,0 +1,57 @@
+# Custom Hardware Rendering
+
+## Overview
+Custom Hardware Rendering refers to direct volume rendering techniques implemented via dedicated, application-specific integrated circuits (ASICs) or field-programmable gate arrays (FPGAs) rather than general-purpose GPUs or CPUs [S2, unofficial]. It solves the problem of achieving real-time interactive frame rates for large, regular volumetric datasets at a time when general-purpose graphics hardware lacked sufficient throughput [S1, unofficial]. Unlike GPU-based methods which rely on programmable fragment shaders, custom hardware units utilize fixed-function pipelines optimized for the highly regular computation patterns of volume rendering, such as shear-warp or ray-marching [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A regular 3D scalar volume dataset (e.g., $256^3$ voxels).
+*   **Output:** A 2D image rendered at a specific resolution (e.g., screen resolution).
+
+**Data Structures:**
+*   **Volume Data:** Stored in on-chip memory or high-bandwidth external memory. The data is typically accessed in memory order to maximize bandwidth efficiency [S1, unofficial].
+*   **On-Chip Buffers:** Used to store intermediate voxel slices or sample results before compositing [S1, unofficial].
+
+**Method:**
+Custom hardware systems are designed with parallel processing pipelines tailored to specific rendering algorithms. The most prominent example is the Cube architecture and its successor, VolumePro, which utilize a hybrid-order approach based on the Shear-Warp algorithm [S1, unofficial].
+
+1.  **Pipeline Architecture:** The hardware consists of multiple identical rendering pipelines or distinct processing stages. For instance, the Cube system utilized eight identical rendering pipelines [S1, unofficial]. Later generations, such as VolumePro, separated the processing into distinct "voxel processors" and "sample processors" [S1, unofficial].
+2.  **Voxel Processing (Shear Step):** Voxel processors traverse the volume data slice-by-slice in memory order. They perform the shear transformation required to align the volume with the view direction. In the Cube design, this shear step was computed on-board [S1, unofficial].
+3.  **Sample Processing (Warp and Compositing):** The transformed data is passed to sample processors. These units are responsible for illumination, filtering, and front-to-back compositing. The warp step and final image rendering were handled by the graphics board in the Cube design, while VolumePro integrated these functions into the sample processors [S1, unofficial].
+4.  **Compositing:** The hardware applies the standard front-to-back compositing equation for each sample along the ray:
+    $$
+    C'_{i} = C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i C_i
+    $$
+    $$
+    \alpha'_{i} = \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i
+    $$
+    where $C_i$ and $\alpha_i$ are the color and opacity of the current sample, and $C'_{i}$ and $\alpha'_{i}$ are the accumulated color and opacity [S1, unofficial][S2, unofficial].
+
+**Parameters:**
+*   **Throughput:** Eight identical rendering pipelines in the Cube system were capable of rendering a $256^3$ volume at 30 fps [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Memory Limitations:** Like GPUs, custom hardware units suffer from limited on-chip memory. Out-of-core solutions are generally not viable due to the extremely high memory bandwidth required for real-time rendering [S1, unofficial].
+*   **Rigidity:** Changing or extending the functionality of custom hardware is tedious and costly compared to software or GPU-based approaches [S1, unofficial].
+*   **Perspective Limitations:** Early custom hardware like Cube and VolumePro struggled with perspective rendering, often relying on orthographic projections or approximations [S1, unofficial].
+
+## Subtopics
+
+### Cube Architecture
+A predecessor to VolumePro, based on a hybrid-order Shear-Warp algorithm. It used eight pipelines to render $256^3$ volumes at 30 fps. It planned to compute only the shear step on-board, offloading warping to the graphics board [S1, unofficial].
+
+### VolumePro
+An enhanced successor to Cube. It introduced separate sample and voxel processing pipelines. Voxel processors traverse data in memory order, storing results in on-chip buffers for sample processors to handle illumination and compositing. It improved scalability but still lacked native perspective rendering in early generations [S1, unofficial].
+
+## Operating characteristics
+*   **Performance:** Custom hardware achieved real-time frame rates for interactive rendering due to the highly regular nature of the computation [S1, unofficial]. For example, Cube rendered $256^3$ volumes at 30 fps [S1, unofficial].
+*   **Memory:** Limited by on-chip memory capacity. High bandwidth requirements make out-of-core rendering impractical [S1, unofficial].
+*   **Flexibility:** Low. Hardware is fixed-function, making updates or extensions costly and difficult [S1, unofficial].
+*   **Use Case:** Best suited for applications requiring deterministic, high-throughput rendering of regular, static volumetric data where perspective accuracy was secondary or handled via approximation. Not suitable for dynamic or irregular data structures.
+
+## Background
+The development of custom hardware rendering was driven by the demand for real-time volume rendering systems in the late 1990s, a period when neither CPUs nor general-purpose GPUs possessed sufficient computational power [S1, unofficial]. Key systems include Cube [KK99], Vizard [KS97], and VolumePro [PHK* 99]. Cube was the direct predecessor to VolumePro. While Cube was never commercially realized, VolumePro became a well-known hardware solution. The field has largely been superseded by GPU-based implementations, which offer greater flexibility and comparable performance for most use cases [S1, unofficial][S2, unofficial].
+
+## Sources
+[S1] Interactive Volume Rendering with Ray Tracing, https://doi.org/10.2312/egst.20061055, fetched 2026-10-24 (unofficial)
+[S2] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)

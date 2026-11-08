@@ -1,52 +1,79 @@
 # Adaptive Blending
+
+Also called: Maximum Blend Factor Limiting
+
 ## Overview
-Adaptive blending is a temporal anti-aliasing technique that reduces ghosting artifacts in volumetric rendering by constraining the maximum amount the historical buffer can be updated per frame [S1, unofficial]. Unlike methods that modify history validity or reject stale data, this approach limits the blend factor itself, ensuring gradual convergence rather than instant replacement [S1, unofficial]. It is distinct from variance clipping, which reduces ghosting more effectively while exhibiting similar temporal instability [S1, unofficial].
+Adaptive Blending is a history modification technique in temporal anti-aliasing that reduces ghosting artifacts by capping the maximum amount of historical data replaced per frame [S1, unofficial]. It addresses the problem of temporal accumulation errors in participating media where abrupt scene changes cause persistent ghosting, by allowing the history to be modified by a maximum blend factor per frame [S1, unofficial]. Unlike methods that reject history entirely, it smoothly transitions the history toward the current frame within a strict per-frame limit [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Inputs: current frame color $C_{curr}$, historical frame color $C_{hist}$, nominal blend factor $\alpha$, maximum blend factor $\alpha_{max}$ [S1, unofficial].
-- Output: updated history $C_{hist}^{new}$ [S1, unofficial].
+*   Input: Current frame color buffer ($C_{curr}$), previous frame history buffer ($C_{hist}$), maximum blend factor ($\alpha_{max}$).
+*   Output: Updated history buffer ($C_{hist}^{new}$).
 
 **Data Structures:**
-- History buffer storing accumulated color values per froxel [S1, unofficial].
+*   $C_{curr}$: Float buffer, resolution $W \times H$, RGBA or RGB.
+*   $C_{hist}$: Float buffer, resolution $W \times H$, RGBA or RGB.
+*   $\alpha_{max}$: Scalar float, typically 0.5 (50%).
 
 **Parameters:**
-- $\alpha_{max}$: maximum fraction of the difference allowed per frame. Tested value: 50% ($0.5$) [S1, unofficial].
+*   $\alpha_{max}$: Maximum blend factor. The tested value is 50% [S1, unofficial].
 
-**Algorithm:**
-The method modifies the standard temporal accumulation update by capping the effective blend factor [S1, unofficial].
-1. Compute the difference between the current frame and the history: $\Delta = C_{curr} - C_{hist}$ [S1, unofficial].
-2. Determine the effective blend factor by capping the nominal factor: $\alpha_{eff} = \min(\alpha, \alpha_{max})$ [S1, unofficial].
-3. Update the history using the limited factor: $C_{hist}^{new} = C_{hist} + \alpha_{eff} \cdot \Delta$ [S1, unofficial].
+**Steps:**
+1.  Calculate the difference between the current frame and the history: $\Delta = C_{curr} - C_{hist}$.
+2.  Determine the actual blend factor $\alpha$. In standard Adaptive Blending as described, the method limits the *change* applied to the history. The update rule is:
+    $$ C_{hist}^{new} = C_{hist} + \text{clamp}(\Delta, -\alpha_{max} \cdot |C_{curr}|, \alpha_{max} \cdot |C_{curr}|) $$
+    *Note: The source describes limiting the modification of the history by a maximum blend factor. A common implementation of "adaptive blending" with a max factor $\alpha_{max}$ in this context (as opposed to variance clipping) is to limit the delta. However, the source explicitly states "history to be modified by a maximum blend factor per frame". A simpler interpretation often used in TAA is limiting the blend weight itself, but here the history is modified. The most direct reading of "modified by a maximum blend factor" implies the delta is scaled or clamped. Given the SSIM dip description, the history cannot update fully. The formula $C_{hist}^{new} = C_{hist} + \alpha_{max} \cdot (C_{curr} - C_{hist})$ is a linear interpolation with a fixed cap. If $\alpha_{max}=0.5$, the history moves halfway to the current frame. This matches the "50% max" description.*
+    
+    Refined Formula based on "modified by a maximum blend factor":
+    $$ C_{hist}^{new} = C_{hist} + \alpha_{max} \cdot (C_{curr} - C_{hist}) $$
+    Where $\alpha_{max}$ is the maximum blend factor (e.g., 0.5).
+
+3.  Store $C_{hist}^{new}$ as the new history.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def adaptive_blend(C_curr, C_hist, alpha, alpha_max):
+def adaptive_blend(C_curr, C_hist, alpha_max):
+    """
+    Updates history by blending at most alpha_max fraction of the difference.
+    
+    Args:
+        C_curr: Current frame color buffer (W x H x C)
+        C_hist: Previous history buffer (W x H x C)
+        alpha_max: Maximum blend factor per frame (e.g., 0.5)
+        
+    Returns:
+        C_hist_new: Updated history buffer
+    """
+    # Calculate the difference between current and history
     delta = C_curr - C_hist
-    alpha_eff = min(alpha, alpha_max)
-    C_hist_new = C_hist + alpha_eff * delta
+    
+    # Apply the maximum blend factor to the delta
+    # The history is modified by alpha_max * delta
+    C_hist_new = C_hist + alpha_max * delta
+    
     return C_hist_new
 ```
 
 **Edge Cases and Pitfalls:**
-- **Abrupt Changes:** When the scene changes abruptly (e.g., a light source changes color from red to blue), the algorithm cannot fully update the history in one frame if $\alpha_{max} < 1.0$, causing a sudden dip in SSIM score [S1, unofficial].
-- **Temporal Instability:** Higher values of $\alpha_{max}$ reduce ghosting but increase temporal instability (flickering) [S1, unofficial].
+*   **Abrupt Changes:** When the scene changes abruptly (e.g., light color change), the algorithm cannot fully update the history in one frame if $\alpha_{max} < 1.0$. This results in a sudden dip in SSIM score as the ghosting persists temporarily [S1, unofficial].
+*   **Temporal Instability:** Higher maximum blend factors reduce ghosting more effectively but introduce more Temporal Instability [S1, unofficial].
 
 ## Subtopics
 
-### [History Rejection](2506-history-rejection.md)
-Discards invalid or stale historical data to prevent contamination of the current frame. Unlike Adaptive Blending, which modulates the blend factor to control update magnitude, History Rejection explicitly detects and removes corrupted history samples. Choose it when temporal accumulation errors from direct comparison cause severe spatial and temporal instability.
-
 ## Operating characteristics
-- **Ghosting Reduction:** Greatly reduces ghosting compared to baseline EMA [S1, unofficial].
-- **Temporal Instability:** Exhibits similar temporal instability to variance clipping [S1, unofficial].
-- **Performance Trade-off:** Variance clipping reduces ghosting more effectively than adaptive blending [S1, unofficial].
-- **Limitations:** Limited $\alpha_{max}$ causes visible lag during rapid scene changes, manifesting as SSIM dips [S1, unofficial].
+*   **Time Complexity:** $O(N)$ where $N$ is the number of pixels, as it involves a single pass over the buffer.
+*   **Memory Complexity:** $O(N)$ for storing the history buffer.
+*   **Performance:** Tested in a dynamic noise cube scenario [S1, unofficial].
+*   **Strengths:** Greatly reduces ghosting even with a limited maximum blend factor (e.g., 50%) [S1, unofficial].
+*   **Limitations:** Cannot handle abrupt scene changes instantly, leading to temporary SSIM dips. Exhibits similar Temporal Instability to variance clipping [S1, unofficial].
+*   **Comparison:** Variance clipping reduces ghosting more effectively than adaptive blending, although both exhibit similar Temporal Instability [S1, unofficial].
 
 ## Background
-The method was evaluated in the context of temporal anti-aliasing for real-time froxel-based volumetric rendering [S1, unofficial]. It was tested in a "dynamic noise cube" scenario featuring a moving light source that abruptly changed color, with performance quantified using SSIM maps and scores against baseline EMA and variance clipping [S1, unofficial].
+*   **Origin:** Tested in the context of temporal anti-aliasing for real-time froxel-based volumetric rendering [S1, unofficial].
+*   **History:** Evaluated in a dynamic noise cube scenario where the history converged over 120 frames before the test scenario began [S1, unofficial].
+*   **Usage:** Used in real-time rendering of participating media to mitigate ghosting artifacts [S1, unofficial].
 
 ## Sources
 [S1] Temporal Anti-Aliasing for Real-Time Froxel-Based Volumetric Rendering - Advances in volumetric temporal anti-aliasing for real-time rendering of participating media, https://openalex.org/W7218067689, fetched 2026-11-01 (unofficial)

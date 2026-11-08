@@ -1,0 +1,118 @@
+# Gradient-Aware ResNet Reconstruction
+
+Also called: Gradient-Conditioned Reconstruction
+
+## Overview
+Gradient-Aware ResNet Reconstruction extends standard ResNet-based CT reconstruction by conditioning the neural network on the explicit Radon matrix $A$ (the forward projection operator) [S1, unofficial]. This allows the network to incorporate geometric projection constraints directly during the reconstruction process, rather than treating the input as a static noisy image [S1, unofficial]. It differs from pure post-processing methods by using the physics of the acquisition geometry to guide the denoising and artifact suppression [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A tuple $(x) = (f, g)$, where $f$ is the current image estimate (initially the noisy filtered backprojection) and $g$ is the Radon matrix (forward projection operator) [S1, unofficial].
+*   **Output:** The refined image estimate [S1, unofficial].
+
+**Data Structures:**
+*   The Radon matrix $A$ is stored explicitly. The source code indicates a boolean flag `sparse_svd` within an `explicit_radon` context, defaulting to `True` [S1, unofficial].
+*   The gradient computation involves tensor operations on the image $f$ and the Radon matrix $g$ (representing $A$) [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Gradient Computation:** Compute the gradient of the data fidelity term. The source code shows a `gradient` method that calculates:
+    $$ \text{grad} = \text{gradient}(f, g) $$
+    Specifically, the implementation computes:
+    $$ \text{ATAf\_g} = (A^T \cdot (A \cdot f)) $$
+    followed by a backward pass to extract the gradient with respect to $f$ [S1, unofficial]. The code snippet `ATAf_g.mean().backward()` suggests the gradient is derived from the mean of the residual or a related scalar loss term involving the projection [S1, unofficial]. The output `out` is reshaped to match `f_cur.shape` [S1, unofficial].
+2.  **Concatenation:** Concatenate the image $f$ and the computed gradient `grad` along the channel dimension:
+    $$ x_{new} = \text{cat}(f, \text{grad}, \text{dim}=1) $$
+    This combined tensor is passed to the ResNet [S1, unofficial].
+3.  **ResNet Forward Pass:** The ResNet processes the concatenated input to produce the refined image [S1, unofficial].
+4.  **Training Loop:** The model is trained using standard supervised learning. Given inputs and targets, the optimizer computes the loss (e.g., MSE) and updates weights [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+
+class GradientAwareResNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Placeholder for ResNet layers
+        self.resnet = nn.Sequential(
+            nn.Conv2d(2, 64, 3, padding=1), # Input channels: 1 (image) + 1 (gradient)
+            nn.ReLU(),
+            # ... additional layers ...
+            nn.Conv2d(64, 1, 3, padding=1)  # Output: 1 channel (image)
+        )
+
+    def gradient(self, f, g):
+        """
+        Computes the gradient of the data fidelity term.
+        f: current image estimate [B, 1, H, W]
+        g: Radon matrix A [B, N_proj, N_det] or similar structure
+        """
+        # Note: The exact shape handling for A and A^T depends on the specific
+        # implementation of the forward/backward projection in the library.
+        # Based on [S1, unofficial]:
+        # 1. Project f: Af = A @ f
+        # 2. Compute residual or loss term
+        # 3. Backpropagate to get gradient w.r.t f
+        
+        # Simplified representation of the code logic:
+        # Af_g = forward_projection(f, g)
+        # ATAf_g = (g.T @ Af_g) # Matrix multiplication
+        # ATAf_g = ATAf_g.permute(0, 2, 1) # Shape adjustment
+        
+        # The source uses .backward() on a mean value to get f.grad
+        # We simulate this by returning the computed gradient tensor
+        # In a real PyTorch implementation, this would be part of the autograd graph
+        
+        # Placeholder for the actual gradient calculation logic from [S1, unofficial]
+        # The code snippet shows:
+        # ATAf_g = (self.A.T.squeeze(0) @ Af_g).permute(0, 2, 1)
+        # ATAf_g.mean().backward()
+        # out = f.grad.permute(0, 2, 1).reshape(f_cur.shape)
+        
+        # Since we cannot execute .backward() in a pure forward function without
+        # a loss tensor, we assume this method returns the gradient tensor
+        # derived from the physics model.
+        return compute_gradient_from_radon(f, g) # [G] Helper function implementing the specific matrix ops
+
+    def forward(self, x):
+        f, g = x
+        grad = self.gradient(f, g)
+        # Concatenate image and gradient along channel dimension
+        x_cat = torch.cat((f, grad), dim=1)
+        return self.resnet(x_cat)
+
+# Training loop structure from [S1, unofficial]
+def train_step(model, inputs, targets, optimizer, criterion):
+    optimizer.zero_grad()
+    outputs = model(inputs)
+    loss = criterion(outputs, targets.float())
+    loss.backward()
+    optimizer.step()
+```
+
+**Parameters:**
+*   `sparse_svd`: Boolean flag in `explicit_radon` to control sparse SVD computation. Default: `True` [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The gradient computation involves matrix multiplications with the Radon matrix. If the matrix is large, memory usage can be significant. The use of `sparse_svd` suggests an optimization for this [S1, unofficial].
+*   **Boundaries:** The gradient computation uses finite differences (implied by the `derivatives.py` utilities in the source, though not explicitly used in the main ResNet forward pass shown, they are part of the project's utility for similar tasks) [S1, unofficial]. Boundary conditions (e.g., zero-padding) must be consistent with the projection geometry.
+
+## Subtopics
+
+### Learned Model-Based Reconstruction
+Incorporates the Radon transform and its gradient directly into a learned iterative framework. At each step, the gradient of the data fidelity term is computed and passed through a residual block alongside the image to refine the reconstruction [S1, unofficial]. It merges traditional optimization with neural network flexibility, allowing the model to adaptively learn prior constraints from inverse problems theory, unlike pure post-processing which only corrects final images [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the size of the Radon matrix $A$ and the ResNet depth. The gradient computation involves matrix-vector multiplications ($A$ and $A^T$), which can be expensive for high-resolution images and many projection angles. The use of `sparse_svd` may reduce this cost [S1, unofficial].
+*   **Memory Complexity:** Requires storing the explicit Radon matrix $A$ and the intermediate gradient tensors. The concatenation of $f$ and `grad` doubles the channel dimension input to the ResNet [S1, unofficial].
+*   **Strengths:** Incorporates physical constraints (geometry) directly into the learning process, potentially leading to more accurate reconstructions than methods ignoring the projection model [S1, unofficial].
+*   **Limitations:** Requires explicit access to the Radon matrix, which may not be available or feasible to store for very large datasets. The training loop is more complex than standard image-to-image translation [S1, unofficial].
+
+## Background
+This method is part of the `inverse-problems-CT-scans` repository by imanfs [S1, unofficial]. It builds on the concept of using ResNets for CT reconstruction [8264-resnet-based-ct-reconstruction.md] but enhances it by conditioning on the forward projection operator. The source code includes utilities for wavelet thresholding and iterative thresholding, indicating a broader context of inverse problem solving in CT [S1, unofficial].
+
+## Sources
+[S1] imanfs/inverse-problems-CT-scans - GitHub, https://github.com/imanfs/inverse-problems-CT-scans, fetched 2026-10-27 (unofficial)

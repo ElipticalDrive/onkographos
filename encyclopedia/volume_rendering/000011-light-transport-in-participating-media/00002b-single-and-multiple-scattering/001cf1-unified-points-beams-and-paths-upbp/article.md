@@ -1,191 +1,176 @@
 # Unified Points, Beams, and Paths (UPBP)
 ## Overview
-Unified Points, Beams, and Paths (UPBP) is a combined rendering algorithm that fuses volumetric radiance estimators (Point-Point, Point-Beam, Beam-Beam) with unbiased bidirectional path tracing (BPT) techniques [S1]. It solves the problem of efficiently simulating light transport in participating media by leveraging the strengths of both biased photon-based methods (for dense, complex scattering) and unbiased path tracing (for long-distance connections) [S1]. Unlike its siblings, UPBP subsumes earlier methods like Volumetric Connection Mapping (VCM) by unifying surface and medium photon mapping with beam-based estimators in a single framework [S1].
+Unified Points, Beams, and Paths (UPBP) is a combined rendering algorithm that fuses volumetric density estimators (Point-Point, Point-Beam, Beam-Beam) with unbiased bidirectional path tracing (BPT) techniques using the extended balance heuristic [S2]. It solves the problem of efficiently simulating light transport in participating media by automatically selecting the most suitable representation (points, beams, or paths) for different scattering orders and media densities [S1]. Unlike sibling methods that specialize in either biased photon mapping or unbiased path tracing, UPBP subsumes earlier techniques like Volumetric Connection Mapping (VCM) and photon beam methods by unifying surface and medium photon mapping with beam-based estimators in a single framework [S2].
 
 ## How it works
-UPBP operates in two distinct stages: a light subpath tracing stage (Stage 1) and an eye subpath estimation stage (Stage 2) [S1]. The algorithm uses the extended balance heuristic to combine these estimators [S1].
+UPBP operates in two distinct stages: a light subpath tracing stage (Stage 1) and an eye subpath estimation stage (Stage 2) [S2]. The algorithm uses the extended balance heuristic to combine these estimators [S2].
 
 ### Inputs and Outputs
-*   **Inputs:** Scene geometry, participating media properties (extinction $\sigma_t$, phase function $p$), light sources, camera parameters.
-*   **Outputs:** Radiance estimate $L_o$ for each pixel.
+*   **Inputs:** Scene geometry, participating media properties (extinction $\sigma_t$, phase function $p$), light sources, camera parameters [G].
+*   **Outputs:** Radiance estimate $L_o$ for each pixel [G].
 
 ### Data Structures
-The implementation stores light subpath information in specific acceleration structures for efficient lookup during Stage 2 [S1]:
-1.  **Hashed Grids:** Separate hashed grids are built for surface vertices and medium vertices. These store "photon points" and are used for Point-Point (P-P) estimators [S1].
-2.  **Bounding Volume Hierarchy (BVH):** A BVH is built over medium vertices. This is used for Point-Beam (P-B) estimators [S1].
-3.  **Uniform Grid:** Photon beams (segments of light subpaths passing through media) are organized in a uniform grid. This is used for Beam-Beam (B-B) estimators [S1]. The uniform grid is chosen over a BVH for beams because it is faster to build, although query performance is noted as suboptimal [S1].
+The implementation stores light subpath information in specific acceleration structures for efficient lookup during Stage 2 [S2]:
+1.  **Hashed Grids:** Separate hashed grids are built for surface vertices and medium vertices. These store "photon points" and are used for Point-Point (P-P) estimators [S2].
+2.  **Bounding Volume Hierarchy (BVH):** A BVH is built over medium vertices. This is used for Point-Beam (P-B) estimators [S2].
+3.  **Uniform Grid:** Photon beams (segments of light subpaths passing through media) are organized in a uniform grid. This is used for Beam-Beam (B-B) estimators [S2]. The uniform grid is chosen over a BVH for beams because it is faster to build, although query performance is noted as suboptimal [S2].
 
 ### Estimators Used
-To balance bias and computational cost, the implementation uses only the **minimum-blur** volumetric estimators [S1]:
-*   **P-P3D:** Point-Point 3D estimator for medium vertices.
-*   **P-Bl2D:** Point-Beam 2D estimator (using long query beams) for eye subpath segments.
-*   **Bs-Bl1D:** Short-Beam Beam-Beam 1D estimator (using short photon beams) for eye subpath segments [S1].
-
-Long-beam variants are excluded because their construction and query costs are high and rarely compensated by variance reduction [S1]. The P-B2D estimator is excluded in favor of P-Bl2D for efficiency [S1].
+To balance bias and computational cost, the implementation uses the minimum-blur volumetric estimators: P-P3D, P-B2D, and B-B1D [S2]. Practically, the algorithm selects short photon beams and long query beams, implementing the P-P3D, P-Bl2D, and Bs-Bl1D variants to optimize the time budget, as long photon beams incur high construction and query costs that rarely justify their variance reduction [S2]. The implementation only uses P-B2D (photon points and query beams) rather than B-P2D for efficiency [S2].
 
 ### Stage 1: Light Subpath Tracing and Storage
-1.  Trace a number of light subpaths from light sources.
-2.  For each vertex on the light subpath, connect to the eye (light tracing) to generate initial estimates.
-3.  Store vertices as "photon points" and segments as "photon beams" [S1].
-4.  Build the hashed grids for surface and medium vertices.
-5.  Build the BVH for medium vertices.
-6.  Build the uniform grid for photon beams.
-7.  Store fewer photon beams than points due to higher memory and computational costs per beam [S1].
+1.  Trace a number of light subpaths from light sources [S2].
+2.  For each vertex on the light subpath, connect to the eye (light tracing) to generate initial estimates [S2].
+3.  Store vertices as "photon points" and segments as "photon beams" [S2].
+4.  Build the hashed grids for surface and medium vertices [S2].
+5.  Build the BVH for medium vertices [S2].
+6.  Build the uniform grid for photon beams [S2].
+7.  Store fewer photon beams than points due to higher computational and memory costs per beam [S2].
 
 ### Stage 2: Eye Subpath Tracing and Estimation
-For each pixel, trace one eye subpath. At each vertex and segment of the eye subpath, evaluate the following estimators [S1]:
+For each pixel, trace one eye subpath [S2]. At each vertex and segment of the eye subpath, evaluate the following estimators [S2]:
 
 1.  **Unbiased BPT Estimators:**
-    *   For each vertex (surface or medium), connect to a light source and to vertices of the light subpath to evaluate unbiased BPT estimators [S1].
+    *   For each vertex (surface or medium), connect to a light source and to vertices of the light subpath to evaluate unbiased BPT estimators [S2].
 
 2.  **Point-Point (P-P) Estimators:**
-    *   At each eye subpath vertex, look up photons from the corresponding hashed grid.
-    *   Evaluate **P-P2D** if the vertex is on a surface.
-    *   Evaluate **P-P3D** if the vertex is in the medium [S1].
+    *   At each eye subpath vertex, look up photons from the corresponding hashed grid [S2].
+    *   Evaluate **P-P2D** if the vertex is on a surface [S2].
+    *   Evaluate **P-P3D** if the vertex is in the medium [S2].
 
 3.  **Point-Beam (P-B) and Beam-Beam (B-B) Estimators:**
     *   For each eye subpath segment passing through a medium:
-        *   Evaluate **P-Bl2D** (using the BVH for points and long query beams).
-        *   Evaluate **Bs-Bl1D** (using the uniform grid for short photon beams) [S1].
+        *   Evaluate **P-Bl2D** (using the BVH for points and long query beams) [S2].
+        *   Evaluate **Bs-Bl1D** (using the uniform grid for short photon beams) [S2].
 
 ### Pseudocode
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def unified_points_beams_and_paths(scene, camera, num_light_subpaths):
-    """
-    Main entry point for the UPBP algorithm.
-    """
-    # Stage 1: Light Subpath Tracing
-    light_subpaths = trace_light_subpaths(scene, num_light_subpaths)
-    
-    # Store vertices and beams
+    # Stage 1: Light Subpath Tracing and Storage
+    light_subpaths = []
+    for _ in range(num_light_subpaths):
+        light_subpaths.append(trace_light_subpath(scene))
+
     surface_vertices = []
     medium_vertices = []
     photon_beams = []
-    
+
     for subpath in light_subpaths:
         for vertex in subpath.vertices:
             if vertex.is_surface:
                 surface_vertices.append(vertex)
             else:
                 medium_vertices.append(vertex)
-        
         for segment in subpath.segments:
             if segment.is_in_medium:
                 photon_beams.append(segment)
-                
-    # Build Acceleration Structures
+
     surface_grid = build_hashed_grid(surface_vertices)
     medium_grid = build_hashed_grid(medium_vertices)
     medium_bvh = build_bvh(medium_vertices)
     beam_grid = build_uniform_grid(photon_beams)
-    
+
     # Stage 2: Eye Subpath Tracing and Estimation
-    image = zeros_like(camera.resolution)
-    
+    image = [0.0] * (camera.height * camera.width * 3)
+
     for pixel in camera.pixels:
         eye_subpath = trace_eye_subpath(scene, camera, pixel)
-        radiance_estimate = 0.0
-        
+        radiance = 0.0
+
         for vertex in eye_subpath.vertices:
             # Unbiased BPT connections
-            radiance_estimate += evaluate_bpt_estimators(vertex, light_subpaths, scene)
-            
+            radiance += evaluate_bpt(vertex, light_subpaths, scene)
+
             # Point-Point Estimators
             if vertex.is_surface:
-                # Look up in surface_grid
-                radiance_estimate += evaluate_pp2d(vertex, surface_grid, scene)
+                radiance += evaluate_pp2d(vertex, surface_grid, scene)
             else:
-                # Look up in medium_grid
-                radiance_estimate += evaluate_pp3d(vertex, medium_grid, scene)
-                
+                radiance += evaluate_pp3d(vertex, medium_grid, scene)
+
         for segment in eye_subpath.segments:
             if segment.is_in_medium:
-                # Point-Beam Estimator (Long Query Beam)
-                radiance_estimate += evaluate_p_bl2d(segment, medium_bvh, scene)
-                
-                # Short-Beam Beam-Beam Estimator
-                radiance_estimate += evaluate_bs_bl1d(segment, beam_grid, scene)
-                
-        image[pixel] = radiance_estimate
-        
+                radiance += evaluate_p_bl2d(segment, medium_bvh, scene)
+                radiance += evaluate_bs_bl1d(segment, beam_grid, scene)
+
+        image[pixel * 3 : pixel * 3 + 3] = radiance
+
     return image
 
-def trace_light_subpaths(scene, num_subpaths):
-    """
-    Traces light subpaths from light sources.
-    Returns a list of subpaths, each containing vertices and segments.
-    """
-    subpaths = []
-    for _ in range(num_subpaths):
-        subpath = []
-        current_pos = sample_light_source(scene)
-        current_dir = sample_light_direction(scene, current_pos)
-        
-        # Trace path... (Implementation details omitted for brevity, assumes standard path tracing)
-        # Vertices and segments are collected.
-        pass 
-    return subpaths
+def trace_light_subpath(scene):
+    # Standard light subpath tracing [G]
+    subpath = Subpath()
+    origin = sample_light_source(scene)
+    direction = sample_light_direction(scene, origin)
+    # Trace segments until termination or max depth
+    # Collect vertices and medium segments
+    return subpath
 
 def trace_eye_subpath(scene, camera, pixel):
-    """
-    Traces one eye subpath for a given pixel.
-    Returns an eye subpath object with vertices and segments.
-    """
-    # Implementation details omitted for brevity
-    pass
+    # Standard eye subpath tracing [G]
+    subpath = Subpath()
+    ray = camera.ray_through_pixel(pixel)
+    origin = ray.origin
+    direction = ray.direction
+    # Trace segments until termination or max depth
+    return subpath
 
-def evaluate_bpt_estimators(vertex, light_subpaths, scene):
-    """
-    Evaluates unbiased BPT estimators by connecting vertex to light sources
-    and light subpath vertices.
-    """
-    # Implementation details omitted for brevity
-    pass
+def build_hashed_grid(vertices):
+    # Standard spatial hashing [G]
+    grid = {}
+    for v in vertices:
+        key = spatial_hash(v.position)
+        grid.setdefault(key, []).append(v)
+    return grid
+
+def build_bvh(vertices):
+    # Standard BVH construction [G]
+    bvh = BVH()
+    bvh.build(vertices)
+    return bvh
+
+def build_uniform_grid(beams):
+    # Standard uniform grid construction [G]
+    grid = UniformGrid()
+    for beam in beams:
+        grid.insert(beam)
+    return grid
+
+def evaluate_bpt(vertex, light_subpaths, scene):
+    # Connect to light source and light subpath vertices [S2]
+    estimate = 0.0
+    for light_subpath in light_subpaths:
+        for lv in light_subpath.vertices:
+            estimate += compute_bpt_term(vertex, lv, scene)
+    return estimate
 
 def evaluate_pp2d(vertex, grid, scene):
-    """
-    Evaluates P-P2D estimator for surface vertices.
-    Looks up photons in the surface hashed grid.
-    """
-    # Implementation details omitted for brevity
-    pass
+    # Lookup photons in surface grid [S2]
+    return compute_pp_estimator(vertex, grid, scene, dimension=2)
 
 def evaluate_pp3d(vertex, grid, scene):
-    """
-    Evaluates P-P3D estimator for medium vertices.
-    Looks up photons in the medium hashed grid.
-    """
-    # Implementation details omitted for brevity
-    pass
+    # Lookup photons in medium grid [S2]
+    return compute_pp_estimator(vertex, grid, scene, dimension=3)
 
 def evaluate_p_bl2d(segment, bvh, scene):
-    """
-    Evaluates P-Bl2D estimator for medium segments.
-    Uses long query beams and medium BVH.
-    """
-    # Implementation details omitted for brevity
-    pass
+    # Query BVH with long beam [S2]
+    return compute_pb_estimator(segment, bvh, scene, dimension=2)
 
 def evaluate_bs_bl1d(segment, grid, scene):
-    """
-    Evaluates Bs-Bl1D estimator for medium segments.
-    Uses short photon beams and uniform grid.
-    """
-    # Implementation details omitted for brevity
-    pass
+    # Query uniform grid with short beam [S2]
+    return compute_bb_estimator(segment, grid, scene, dimension=1)
 ```
 
 ## Operating characteristics
-*   **Complexity:** The construction of acceleration structures (hashed grids, BVH, uniform grid) depends on the number of light subpaths and vertices/beams. Query performance for the uniform grid (beams) is noted as suboptimal compared to BVH, but the uniform grid is faster to build [S1].
-*   **Performance:** The use of short photon beams and long query beams (P-P3D, P-Bl2D, Bs-Bl1D) provides the best performance for a given time budget [S1]. Long photon beams are avoided due to high construction and query costs [S1].
-*   **Strengths:** Subsumes previous methods (VCM, photon mapping) and handles both surface and medium transport efficiently. BPT components excel at connecting subpaths over long distances [S1].
-*   **Limitations:** Does not use joint path importance sampling techniques, which could further reduce variance in scenes with highly anisotropically scattering media [S1]. The uniform grid for beams has suboptimal query performance [S1].
+*   **Complexity:** The construction of acceleration structures (hashed grids, BVH, uniform grid) depends on the number of light subpaths and stored vertices/beams [S2]. Query performance for the uniform grid (beams) is suboptimal compared to a BVH, but the uniform grid is faster to construct [S2].
+*   **Performance:** Using short photon beams and long query beams (P-P3D, P-Bl2D, Bs-Bl1D) yields the best performance for a fixed time budget [S2]. Long photon beams are avoided due to high construction and query overhead that rarely justifies the variance reduction [S2].
+*   **Strengths:** Subsumes previous methods (VCM, photon mapping) and handles both surface and medium transport efficiently [S2]. BPT components excel at connecting subpaths over long distances, such as direct illumination in media far from light sources [S2].
+*   **Limitations:** Does not incorporate joint path importance sampling techniques, which could further reduce variance in scenes with highly anisotropically scattering media [S2]. The uniform grid for beams exhibits suboptimal query performance [S2].
 
 ## Background
-UPBP was introduced by Jarosz et al. in 2011/2012 [S1]. It builds upon the Volumetric Connection Mapping (VCM) algorithm by Georgiev et al. [2012] and photon beam methods by Jarosz et al. [2011b] [S1]. The implementation builds on the publicly available SmallVCM framework [S1].
+UPBP was introduced by Jarosz et al. [S2]. It builds upon the Volumetric Connection Mapping (VCM) algorithm by Georgiev et al. [2012] and photon beam methods by Jarosz et al. [2011b] [S2]. The reference implementation builds on the publicly available SmallVCM framework [S2].
 
 ## Sources
-[S1] Unifying points, beams, and paths in volumetric light transport simulation, https://doi.org/10.1145/2601097.2601219, fetched 2026-10-30
+[S1] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26
+[S2] Unifying points, beams, and paths in volumetric light transport simulation, https://doi.org/10.1145/2601097.2601219, fetched 2026-10-30

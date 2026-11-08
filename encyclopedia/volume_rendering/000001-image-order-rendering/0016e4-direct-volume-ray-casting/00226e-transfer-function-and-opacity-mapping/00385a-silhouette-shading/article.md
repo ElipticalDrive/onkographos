@@ -1,0 +1,98 @@
+# Silhouette Shading
+
+Also called: Bubble-like shading, PTF Silhouette Shading
+
+## Overview
+Silhouette Shading is a technique used in volume rendering to accentuate the boundaries of isosurfaces by modifying color and opacity based on the alignment between the isosurface normal vector and the view direction [S1]. It solves the problem of ambiguous volume boundaries where it is difficult for an analyst to discern where features end, producing a "bubble-like" shading effect that makes flat regions and edges more distinct [S1]. Unlike traditional methods that may require multi-dimensional transfer functions, this approach can be implemented efficiently within a Programmable Transfer Function (PTF) without additional storage costs [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   `FrontHit`: The 3D position where the ray enters the volume/isosurface.
+    *   `BackHit`: The 3D position where the ray exits the volume/isosurface.
+    *   `viewDir`: The normalized view direction vector.
+    *   `normal`: The surface normal vector at the current sample point.
+    *   `color_base`: The base color of the sample.
+    *   `alpha_base`: The base opacity of the sample.
+    *   `silhmin`: Lower bound of the silhouette augmentation band thickness.
+    *   `silhmax`: Upper bound of the silhouette augmentation band thickness.
+    *   `alpha_min`: Lower bound of the silhouette opacity augmentation range.
+    *   `alpha_max`: Upper bound of the silhouette opacity augmentation range.
+*   **Outputs:**
+    *   `color_sample`: The final shaded color.
+    *   `alpha_sample`: The final shaded opacity.
+
+**Data Structures:**
+No specific complex data structures are required beyond standard vectors and scalars. The method operates per-sample along the ray.
+
+**Parameters:**
+*   `silhmin`: Lower bound of the silhouette augmentation band thickness. [S1]
+*   `silhmax`: Upper bound of the silhouette augmentation band thickness; typically set to 1.0 to define the absolute edge. [S1]
+*   `alpha_min`: Lower bound of the silhouette opacity augmentation range. [S1]
+*   `alpha_max`: Upper bound of the silhouette opacity augmentation range. [S1]
+
+**Steps:**
+1.  For each pixel, calculate the ray direction vector `RayDir` as the difference between `FrontHit` and `BackHit`.
+2.  For each sample along `RayDir`:
+    a.  Calculate the raw silhouette coefficient $\mu$ as $1 - \text{DOT}(\text{viewDir}, \text{normal})$.
+    b.  Clamp $\mu$ to the range $[\text{silhmin}, \text{silhmax}]$. If $\mu \le \text{silhmin}$, set $\mu \leftarrow \text{silhmin}$. If $\mu \ge \text{silhmax}$, set $\mu \leftarrow \text{silhmax}$.
+    c.  Calculate the normalized silhouette coefficient $\mu_0$:
+        $$ \mu_0 = \frac{\mu - \text{silhmin}}{\text{silhmax} - \text{silhmin}} $$
+    d.  Calculate the sample opacity $\alpha_{\text{sample}}$:
+        $$ \alpha_{\text{sample}} = \alpha_{\text{base}} + \mu_0 \times (\alpha_{\text{max}} - \alpha_{\text{min}}) + \alpha_{\text{min}} $$
+    e.  Calculate the sample color $\text{color}_{\text{sample}}$:
+        $$ \text{color}_{\text{sample}} = \text{color}_{\text{base}} + \mu \times (1, 1, 1) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def silhouette_shading(front_hit, back_hit, view_dir, normal, color_base, alpha_base, 
+                       silhmin, silhmax, alpha_min, alpha_max):
+    # Calculate ray direction
+    ray_dir = back_hit - front_hit
+    
+    # Calculate raw silhouette coefficient
+    # Note: view_dir and normal should be normalized
+    mu = 1.0 - dot(view_dir, normal)
+    
+    # Clamp mu to the silhouette band
+    if mu <= silhmin:
+        mu = silhmin
+    elif mu >= silhmax:
+        mu = silhmax
+        
+    # Calculate normalized silhouette coefficient
+    # Guard against division by zero if silhmin == silhmax
+    if silhmax == silhmin:
+        mu0 = 0.0
+    else:
+        mu0 = (mu - silhmin) / (silhmax - silhmin)
+        
+    # Calculate final opacity
+    alpha_sample = alpha_base + mu0 * (alpha_max - alpha_min) + alpha_min
+    
+    # Calculate final color
+    # Adding mu to each RGB channel creates a white highlight based on silhouette strength
+    color_sample = color_base + mu * vector(1.0, 1.0, 1.0)
+    
+    return color_sample, alpha_sample
+```
+
+**Edge Cases and Pitfalls:**
+*   **Division by Zero:** If `silhmin` equals `silhmax`, the denominator in the calculation of $\mu_0$ becomes zero. The implementation must handle this case, typically by setting $\mu_0$ to 0 or a default value [G].
+*   **Normal Accuracy:** The method relies on accurate surface normals. In volume rendering, normals are often derived from the gradient of the scalar field. Noise in the data can lead to noisy normals, resulting in flickering or incorrect silhouette shading.
+*   **View Direction Alignment:** The effect is most pronounced when the view direction is perpendicular to the surface normal (silhouette). When aligned, $\mu$ approaches 0, and the shading effect diminishes.
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per sample, as it involves a constant number of arithmetic operations and dot products.
+*   **Memory Complexity:** $O(1)$, requiring only a few scalar variables for intermediate calculations.
+*   **Performance:** The method is computationally inexpensive and can be executed in real-time within a programmable transfer function shader [S1].
+*   **Strengths:** Enhances visual perception of boundaries and flat features without significant performance overhead or increased storage requirements for transfer functions [S1].
+*   **Limitations:** Relies on the availability of surface normals, which may not always be straightforward to compute accurately in noisy volume data. The effect is purely visual and does not alter the underlying data representation.
+
+## Background
+Silhouette shading was introduced to address the difficulty analysts face in discerning volume boundaries and features, particularly flat regions [S1]. The technique is described in Demir et al. [30] and is implemented here using Programmable Transfer Functions (PTF) [S1]. PTFs allow for flexible manipulation of color and opacity based on geometric properties like normals, enabling this effect without the storage costs associated with traditional multi-dimensional transfer functions [S1]. The method was notably applied in the visualization of WiFi signals to help analysts distinguish signal strength regions [S1].
+
+## Sources
+[S1] Visualization of WiFi Signals Using Programmable Transfer Functions, https://doi.org/10.3390/info13050224, fetched 2026-10-27

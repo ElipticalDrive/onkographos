@@ -1,0 +1,223 @@
+# Tile-Based Solid Voxelization
+Also called: Advanced Tile-Based Solid Voxelization
+
+## Overview
+Tile-Based Solid Voxelization is a data-parallel algorithm for solid voxelization that assigns triangles to pixel tiles in the $yz$ plane, then processes these tiles in parallel to determine interior voxels [S1, S2]. It solves the memory bandwidth bottlenecks and atomic operation serialization inherent in triangle-parallel methods by keeping tile data in fast memory and avoiding conflicting writes from multiple triangles overlapping the same pixel [S1, S2]. It differs from its sibling [Direct, triangle-parallel solid voxelization](9073-direct-triangle-parallel-solid-voxelization.md) by grouping work by spatial location (tiles) rather than by input primitive (triangles) [S2].
+
+## How it works
+The method operates on a GPU, utilizing warps of 32 threads. It consists of a pre-processing phase to build a sorted work queue of tile-triangle pairs, and a processing phase that computes the solid voxelization for each tile.
+
+### Inputs and Outputs
+*   **Input:** A set of triangles defining a closed, watertight object; a voxel grid resolution; tile dimensions ($4 \times 4$ voxel columns).
+*   **Output:** A solid voxel grid where each voxel is marked as inside or outside the object.
+
+### Data Structures
+1.  **Work Queue:** A dynamic array of tile/triangle pairs.
+2.  **Tile List:** A compacted list of unique tiles present in the work queue, along with offsets into the work queue where each tile's triangle list begins.
+3.  **Thread State (per thread):**
+    *   `active_segment`: A 32-bit integer representing the current 32-voxel segment of the voxel column being processed.
+    *   `flip_bitmask`: A bitmask where each bit corresponds to a 32-bit segment; if a bit is set, all voxels in that segment must be flipped.
+4.  **Shared Memory:** Used to store setup data for up to 14 triangles simultaneously [S1].
+
+### Algorithm Steps
+
+#### Phase 1: Tile Assignment and Queue Construction
+1.  **Triangle Tile Counting:** For each triangle, determine the number of tiles it overlaps.
+    *   Compute the triangle's bounding box.
+    *   Check if any voxel column center lies within the bounding box.
+    *   If yes, test all tiles containing those voxel centers against the triangle using edge functions evaluated at the critical voxel column center within the tile [S1].
+    *   *Note:* This precise testing is more expensive than bounding box enumeration but yields a shorter queue, saving memory and sorting time [S1]. Caching results for the first 32 tiles did not improve performance [S1].
+2.  **Exclusive Scan:** Perform an exclusive scan on the buffer of tile counts. This yields:
+    *   The total size of the work queue.
+    *   An offset into the work queue for each triangle [S1].
+3.  **Queue Population:** Visit all triangles in parallel again. Each triangle determines the specific tiles it overlaps and writes the corresponding tile/triangle pairs into the work queue at its calculated offset [S1].
+4.  **Sorting:** Sort the work queue by tile identifier [S1].
+5.  **Compaction:** Derive a list of all unique tiles in the queue. For each tile, record the offset in the work queue where its associated triangle list begins [S1].
+
+#### Phase 2: Tile Processing
+Tiles are processed in parallel, with one warp (32 threads) assigned per tile. The triangles assigned to a tile are processed sequentially within the warp.
+
+1.  **Thread Allocation Strategy:** To utilize all 32 threads in a warp, the algorithm processes two triangles per warp. This causes two threads (twin threads) to process the same voxel column simultaneously. If the number of triangles is odd, the second half-warp is left idle [S1].
+2.  **Parallel Triangle Setup:** To avoid redundant data fetching, the algorithm interleaves voxel column processing with a parallel triangle setup stage. Each thread fetches and sets up one triangle, storing the setup data in shared memory. The system is limited to preparing 14 triangles at once due to shared memory constraints [S1].
+3.  **Voxel Column Processing:**
+    *   Allocate one thread per voxel column in the tile.
+    *   Test the voxel column center for overlap with the current triangle.
+    *   Determine the range of affected voxels in the column, analogous to the method in [Direct, triangle-parallel solid voxelization](9073-direct-triangle-parallel-solid-voxelization.md) [S1].
+4.  **Bitmask Flipping Logic:**
+    *   When an overlapping triangle triggers a flip for all voxels with $x$ index $\ge \bar{q}$:
+        1.  Check if $\bar{q}$ is within the thread's current `active_segment`.
+        2.  If $\bar{q}$ is **not** in the active segment:
+            *   Flush the `active_segment` value to global memory via bitwise XOR.
+            *   Select $\lfloor \bar{q}/32 \rfloor$ as the new `active_segment`.
+            *   Initialize the new `active_segment` value to zero.
+        3.  Flip all bits for voxels $\ge \bar{q}$ in the current `active_segment`.
+        4.  Set the corresponding bits in the `flip_bitmask` for all segments succeeding the active one [S1].
+5.  **Twin Thread Synchronization:**
+    *   Since two threads process the same voxel column, they must avoid conflicting writes.
+    *   If one thread flushes an `active_segment` but its twin thread has the same segment active, the twin thread incorporates the value into its own `active_segment` instead of writing to global memory [S1].
+6.  **Final Flush:**
+    *   Once all triangles in the tile are processed:
+        *   Flush the final `active_segment` to global memory.
+        *   Flip the bits of all segments whose bit is set in the `flip_bitmask` [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Phase 1: Tile Assignment
+
+def count_tiles_for_triangle(triangle):
+    """
+    Determines the number of tiles overlapped by a triangle.
+    Returns an integer count.
+    """
+    bbox = compute_bounding_box(triangle)
+    tile_count = 0
+    
+    # Check if any voxel column center is overlapped by the bounding box
+    if bounding_box_contains_voxel_column_centers(bbox):
+        # Test all tiles containing those voxel centers
+        for tile in tiles_containing_voxel_column_centers(bbox):
+            # Evaluate edge functions at the critical voxel column center within the tile
+            if triangle_overlaps_tile_edge_functions(triangle, tile):
+                tile_count += 1
+    return tile_count
+
+def build_work_queue(triangles):
+    """
+    Builds a sorted work queue of tile/triangle pairs.
+    """
+    # Step 1: Count tiles for all triangles in parallel
+    tile_counts = parallel_map(count_tiles_for_triangle, triangles)
+    
+    # Step 2: Exclusive scan to get offsets
+    offsets = exclusive_scan(tile_counts)
+    total_queue_size = sum(tile_counts)
+    
+    # Step 3: Populate queue
+    work_queue = []
+    for i, triangle in enumerate(triangles):
+        offset = offsets[i]
+        # Determine specific tiles overlapped by this triangle
+        tiles = get_overlapped_tiles(triangle)
+        for tile in tiles:
+            work_queue.append((tile, triangle))
+            
+    # Step 4: Sort queue by tile
+    work_queue.sort(key=lambda pair: pair[0])
+    
+    # Step 5: Compaction to get tile list and offsets
+    tile_list = []
+    current_tile = None
+    for pair in work_queue:
+        tile, triangle = pair
+        if tile != current_tile:
+            tile_list.append({
+                'tile': tile,
+                'offset': len(tile_list) # Simplified offset tracking
+            })
+            current_tile = tile
+            
+    return work_queue, tile_list
+
+# Phase 2: Tile Processing
+
+def process_tile(tile, triangles, global_voxel_grid):
+    """
+    Processes a single tile using a warp of 32 threads.
+    """
+    # Shared memory for triangle setup data (max 14 triangles)
+    shared_tri_data = allocate_shared_memory(14)
+    
+    # Twin thread logic: threads 0-15 and 16-31 process pairs
+    # We assume a warp-level sync mechanism exists
+    
+    for triangle in triangles:
+        # Parallel triangle setup stage
+        # Each thread fetches and sets up one triangle into shared memory
+        setup_triangle_in_shared_memory(triangle, shared_tri_data)
+        sync_threads()
+        
+        # Process voxel columns
+        # One thread per voxel column in the tile
+        for col_idx in range(tile.width * tile.height):
+            # Twin threads (e.g., thread i and thread i+16) handle the same column
+            twin_id = get_twin_thread_id(thread_id)
+            
+            # Test voxel column center for overlap
+            if triangle_overlaps_column_center(triangle, col_idx):
+                # Determine range of affected voxels
+                q_bar = compute_flip_threshold(triangle, col_idx)
+                
+                # Bitmask logic
+                if not is_in_active_segment(q_bar, active_segment):
+                    # Flush active segment
+                    if thread_is_leader:
+                        global_voxel_grid[col_idx] ^= active_segment
+                    
+                    # Switch to new segment
+                    new_segment_index = floor(q_bar / 32)
+                    active_segment = 0
+                    # Update flip bitmask for succeeding segments
+                    flip_bitmask |= mask_for_segments_after(new_segment_index)
+                
+                # Flip bits in active segment
+                active_segment ^= mask_for_voxels_ge(q_bar, 32)
+                
+                # Twin thread synchronization
+                if twin_thread_has_active_segment(twin_id, new_segment_index):
+                    # Incorporate twin's value instead of writing
+                    active_segment |= get_twin_active_segment(twin_id)
+    
+    # Final flush for the tile
+    if thread_is_leader:
+        global_voxel_grid[col_idx] ^= active_segment
+        # Flip bits for all segments in flip_bitmask
+        for seg_idx in set_bits(flip_bitmask):
+            global_voxel_grid[seg_idx] ^= 0xFFFFFFFF # Flip all 32 bits
+
+def voxelize(triangles, grid_dimensions):
+    """
+    Main entry point.
+    """
+    work_queue, tile_list = build_work_queue(triangles)
+    
+    # Initialize global voxel grid
+    global_voxel_grid = zeros(grid_dimensions)
+    
+    # Process tiles in parallel
+    for tile_info in tile_list:
+        tile = tile_info['tile']
+        # Extract triangles for this tile from work_queue using offset
+        triangles_for_tile = get_triangles_from_queue(work_queue, tile_info['offset'])
+        
+        # Launch warp per tile
+        process_tile(tile, triangles_for_tile, global_voxel_grid)
+        
+    return global_voxel_grid
+```
+
+### Parameters and Edge Cases
+*   **Tile Size:** Fixed at $4 \times 4$ voxel columns [S1]. Larger tiles reduce sample test efficiency [S1].
+*   **Warp Size:** 32 threads [S1].
+*   **Shared Memory Limit:** Limits triangle setup to 14 triangles at once [S1].
+*   **Edge Case (Odd Triangle Count):** If a tile has an odd number of triangles, the second half-warp is idle [S1].
+*   **Pitfall:** Caching binary results for the first 32 visited tiles per triangle in a buffer did not pay off [S1].
+*   **Pitfall:** Testing tiles via edge functions is more expensive than bounding box enumeration, but necessary for queue shortening [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the sorting of the work queue and the sequential processing of triangles within tiles. The initial counting and scanning are linear with respect to the number of triangles.
+*   **Memory Complexity:** Requires storage for the work queue (tile/triangle pairs) and the voxel grid. The queue size is proportional to the number of triangle-tile overlaps.
+*   **Performance:** Avoids atomic memory operations, which can be sequentialized and costly on GPUs [S1]. By keeping tile data in fast memory (shared/local) and minimizing global memory writes via the bitmask strategy, it reduces memory bandwidth requirements [S1].
+*   **Strengths:** No atomic operations required; efficient memory usage due to queue compaction; avoids conflicting writes [S1, S2].
+*   **Limitations:** Limited by shared memory size (14 triangles); warp utilization issues with odd triangle counts per tile; precise tile testing is computationally expensive [S1].
+*   **When to Use:** Suitable for solid voxelization on GPUs where memory bandwidth and atomic contention are bottlenecks, particularly for larger voxel grids [S1].
+*   **When Not to Use:** When the number of triangles is very small, or when the overhead of queue construction and sorting outweighs the benefits of tile-based processing.
+
+## Background
+The method was introduced by Michael Schwarz et al. in 2010 as part of the paper "Fast Parallel Surface and Solid Voxelization on GPUs" [S1, S2]. It was developed to address the shortcomings of triangle-parallel solid voxelization, specifically the high memory bandwidth requirements and atomic operation serialization issues that arise when flipping voxels in large grids [S1]. The algorithm builds upon earlier work in real-time voxelization and parallel data structure construction [S2].
+
+## Sources
+[S1] Fast parallel surface and solid voxelization on GPUs, https://doi.org/10.1145/1882261.1866201, fetched 2026-11-03
+[S2] PDF Fast Parallel Surface and Solid Voxelization on GPUs, https://www.michael-schwarz.com/research/publ/files/vox-siga10.pdf, fetched 2026-10-27

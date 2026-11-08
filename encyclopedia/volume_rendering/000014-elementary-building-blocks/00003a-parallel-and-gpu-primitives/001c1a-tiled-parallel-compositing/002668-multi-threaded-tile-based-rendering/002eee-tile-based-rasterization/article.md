@@ -1,0 +1,108 @@
+# Tile-Based Rasterization
+
+Also called: CUDA tile rasterization
+
+## Overview
+Tile-Based Rasterization is a GPU-accelerated rendering primitive that divides the image plane into fixed-size tiles, assigning one CUDA thread block to each tile to process all fragments within that region [S1]. It solves the parallelization bottleneck of global rasterization by localizing the workload, allowing threads within a block to share splat data in fast shared memory and blend them in front-to-back order [S1]. Unlike Screen Parallel Rendering, which assigns individual threads to pixels without explicit tile-level coordination, this method leverages the spatial coherence of tiles to optimize memory access patterns for splat blending [S1, 5725-screen-parallel-rendering.md].
+
+## How it works
+**Inputs:**
+- A list of splats (e.g., 3D Gaussians) projected to screen space.
+- A tile grid covering the resolution (e.g., 16×16 pixel tiles).
+- For each tile, a sorted list of splat indices assigned to that tile.
+
+**Outputs:**
+- Final color and opacity values for each pixel in the tile.
+
+**Data Structures:**
+- **Shared Memory Buffer:** A 1D array of size $N_{splat}$ (typically 128) storing the attributes of splats assigned to the current tile. Each element contains the splat's screen-space position, covariance, color, and opacity.
+- **Thread Block:** A CUDA thread block of size $T_{block}$ (typically 256 threads).
+- **Thread Mapping:** $T_{block}$ threads are mapped to pixels in the tile. For a 16×16 tile, 256 threads correspond exactly to the 256 pixels.
+
+**Parameters:**
+- Tile size: $16 \times 16$ pixels [S1].
+- Threads per block: 256 [S1].
+- Splat load count: 128 splats loaded per iteration [S1].
+
+**Steps:**
+1. **Tile Assignment:** Determine the tile ID for the current thread block based on its block index. Identify the range of splat indices assigned to this tile.
+2. **Initialization:** Initialize pixel buffers (color and accumulated opacity) to zero or background values.
+3. **Ping-Pong Blending Loop:**
+   - **Phase 1 (Load):** A subset of threads (128 threads) loads the next batch of splats (up to 128) from global memory into the shared memory buffer. If fewer than 128 splats remain, load the remainder and mark the end.
+   - **Phase 2 (Blend):** All 256 threads iterate through the splats currently in shared memory. For each splat, each thread checks if its assigned pixel falls within the splat's screen-space footprint. If so, it computes the splat's contribution (color and opacity) at that pixel and blends it into the pixel's buffer using front-to-back compositing.
+   - **Repeat:** Continue until all splats assigned to the tile are processed.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Assumptions:
+# - tile_splats: list of splat indices for the current tile
+# - shared_splats: shared memory array of size 128
+# - pixel_color, pixel_alpha: shared or local buffers for each thread (pixel)
+# - num_threads = 256
+# - load_threads = 128
+
+def tile_rasterize(tile_splats):
+    # Initialize pixel buffers for this thread's pixel
+    pixel_color = (0.0, 0.0, 0.0)
+    pixel_alpha = 0.0
+    
+    splat_idx = 0
+    num_splats = len(tile_splats)
+    
+    while splat_idx < num_splats:
+        # Phase 1: Load splats into shared memory
+        # Only 128 threads participate in loading
+        load_count = 0
+        if thread_id < 128:
+            end_load = min(splat_idx + 128, num_splats)
+            for i in range(splat_idx, end_load):
+                shared_splats[load_count] = tile_splats[i]
+                load_count += 1
+            splat_idx = end_load
+        
+        # Synchronize to ensure all splats are loaded
+        sync_threads()
+        
+        # Phase 2: All threads blend loaded splats
+        num_loaded = load_count if thread_id < 128 else 0
+        # Note: In practice, num_loaded must be broadcast or computed by all threads
+        # Here we assume a mechanism to determine num_loaded for all threads
+        # [G] Typically, thread 0 computes num_loaded and broadcasts it, 
+        # or the loop bound is determined by the last load operation.
+        
+        for s in range(num_loaded):
+            splat = shared_splats[s]
+            if pixel_in_splat_footprint(splat, pixel_coords):
+                contribution = compute_splat_contribution(splat, pixel_coords)
+                pixel_color, pixel_alpha = front_to_back_blend(
+                    pixel_color, pixel_alpha, 
+                    contribution.color, contribution.alpha
+                )
+        
+        sync_threads()
+```
+
+**Edge Cases:**
+- **Fewer than 128 splats:** The load phase handles partial batches. The blend phase must correctly determine the number of valid splats in shared memory to avoid reading garbage data [S1].
+- **Empty Tile:** If no splats are assigned to a tile, the loop does not execute, and the pixel retains its background value.
+- **Precision:** Front-to-back blending requires careful handling of floating-point precision to avoid artifacts, especially with many transparent splats [S1].
+
+## Subtopics
+
+### [Binned Raster Traversal](10295-binned-raster-traversal.md)
+A variant that replaces global sorting with tile-local depth bins to improve performance for Gaussian Splatting.
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of splats assigned to the tile and the number of pixels in the tile. The ping-pong approach amortizes memory loads across threads.
+- **Memory Complexity:** $O(N_{splat\_per\_tile})$ for shared memory, where $N_{splat\_per\_tile}$ is typically capped at 128.
+- **Performance:** High throughput on GPUs due to efficient shared memory usage and coalesced memory accesses. The 16×16 tile size balances occupancy and shared memory usage [S1].
+- **Strengths:** Reduces global memory bandwidth pressure by reusing splat data in shared memory. Scales well with tile size and splat density.
+- **Limitations:** Requires efficient binning of splats to tiles beforehand. Performance may degrade if splat distribution is highly uneven across tiles.
+
+## Background
+Tile-Based Rasterization for Gaussian Splatting was introduced in the context of efficient editing and rendering of large Gaussian Splat models, specifically in the "Splatshop" paper [S1]. It adapts the standard 3DGS rasterization approach to a tile-based parallel model on CUDA, leveraging the hardware's thread block architecture to optimize the blending process.
+
+## Sources
+[S1] Splatshop: Efficiently Editing Large Gaussian Splat Models, https://doi.org/10.1111/cgf.70214, fetched 2026-10-31

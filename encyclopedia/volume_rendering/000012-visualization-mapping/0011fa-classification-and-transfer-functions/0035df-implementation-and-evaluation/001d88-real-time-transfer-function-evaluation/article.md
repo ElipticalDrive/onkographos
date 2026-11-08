@@ -3,42 +3,52 @@
 Also called: Engel, Kraus & Ertl Technique, Texture-based volume rendering with GPU illumination
 
 ## Overview
-This method evaluates and modifies the transfer function in real-time by storing pre-evaluated classification results (color and opacity) in 2D textures, allowing for dynamic GPU-based illumination. It distinguishes itself from CPU-based illumination techniques (such as Westermann & Sevenich) by performing lighting calculations dynamically on the GPU, enabling interactive modification of lighting parameters during rendering [S1, unofficial].
+This method evaluates and modifies the transfer function in real-time by storing pre-evaluated classification results (color and opacity) in 2D textures, allowing for dynamic GPU-based illumination [S1, unofficial]. It distinguishes itself from CPU-based illumination techniques (such as Westermann & Sevenich) by performing lighting calculations dynamically on the GPU, enabling interactive modification of lighting parameters during rendering [S1, unofficial].
 
 ## How it works
 **Inputs:**
-*   Volume data grid.
-*   Transfer function parameters (uniforms modifiable from the application).
-*   Illumination parameters (light positions, material properties).
+* Volume data grid [S1, unofficial].
+* Transfer function parameters (uniforms modifiable from the application) [S1, unofficial].
+* Illumination parameters (light positions, material properties) [S1, unofficial].
 
 **Outputs:**
-*   Rendered image with primary color and opacity for constituent voxels.
+* Rendered image with primary color and opacity for constituent voxels [S1, unofficial].
 
 **Data Structures:**
-1.  **2D Texture (Transfer Function Lookup):** Stores the result of the transfer function evaluated for a range of input values. The texture maps input scalar values to RGBA output values (primary color and opacity) [S1, unofficial].
-2.  **Compressed RGB Texture (Gradient Storage):** Stores the pre-calculated gradient for each volume element. The gradient is compressed into an RGB texture format [S1, unofficial].
+1. **2D Texture (Transfer Function Lookup):** Stores the result of the transfer function evaluated for a range of input values, mapping input scalar values to RGBA output values (primary color and opacity) [S1, unofficial].
+2. **Compressed RGB Texture (Gradient Storage):** Stores the pre-calculated gradient for each volume element, compressed into an RGB texture format [S1, unofficial].
 
 **Steps:**
-1.  **Pre-compute Gradients:** Calculate the gradient for each volume element beforehand. Store these gradients in a compressed RGB texture format [S1, unofficial].
-2.  **Build Transfer Function Texture:** Evaluate the transfer function for a range of input values. Store the resulting color and opacity pairs in a 2D texture [S1, unofficial].
-3.  **Ray Casting with Classification:** Perform ray casting. For each sample point, use the 2D texture to classify the volume data, retrieving the primary color and opacity for the constituent voxels [S1, unofficial].
-4.  **GPU Illumination:** Use a fragment program (e.g., Cg) to calculate the final color value for each volume element. This calculation takes into account diffuse and specular contributions based on the pre-computed gradients and uniform parameters modifiable interactively from the C application [S1, unofficial].
+1. **Pre-compute Gradients:** Calculate the gradient for each volume element beforehand and store these gradients in a compressed RGB texture format [S1, unofficial].
+2. **Build Transfer Function Texture:** Evaluate the transfer function for a range of input values and store the resulting color and opacity pairs in a 2D texture [S1, unofficial].
+3. **Ray Casting with Classification:** Perform ray casting and, for each sample point, use the 2D texture to classify the volume data, retrieving the primary color and opacity for the constituent voxels [S1, unofficial].
+4. **GPU Illumination:** Use a fragment program (e.g., Cg) to calculate the final color value for each volume element, taking into account diffuse and specular contributions based on the pre-computed gradients and uniform parameters modifiable interactively from the C application [S1, unofficial].
+
+**Formulas:** Not given in the sources.
 
 **Parameters:**
-*   **Gradient Storage:** Compressed into an RGB texture [S1, unofficial].
-*   **Illumination:** Dynamic, performed on the GPU using Cg [S1, unofficial].
+* Gradient Storage: Compressed into an RGB texture [S1, unofficial].
+* Illumination: Dynamic, performed on the GPU using Cg [S1, unofficial].
 
-**Pitfalls:**
-*   The original work's results could not be reproduced because the plane reduction optimization was not implemented due to the complexity of their approximation towards two-texture interpolation [S1, unofficial].
+**Edge cases and pitfalls:**
+* The original work's results could not be reproduced because the plane reduction optimization was not implemented due to the complexity of their approximation towards two-texture interpolation [S1, unofficial].
 
 ## Subtopics
+
+### [List-based Pre-classification](1930-list-based-pre-classification.md)
+List-based pre-classification is an optimization for interactive transfer function changes in volume rendering that avoids rebuilding index buffers on the CPU by pre-sorting voxel indices into iso-value buckets, allowing fast pointer merging. Unlike naive pre-classification which requires rebuilding and reloading the index buffer on every transfer function change (causing CPU-GPU bandwidth bottlenecks), this method uses pre-sorted buffers and pointer merging for interactive rates.
+
+### GPU-Accelerated Volume Rendering with PCbTF
+A rendering implementation that accelerates volume rendering and transfer function specification using graphics hardware, treating TF design as a mapping from nD vectors to color and opacity values [S2]. The classification of each voxel forms a 3D texture stored in the frame buffer, and a separate 3D RGB texture stores the colors and opacities picked by the user [S2]. New textures are recomputed and redrawn on the screen via the GPU whenever the transfer function changes [S2]. The interface uses OpenGL and FLTK for display and interaction, with Cg for rendering, tested on an Intel Xeon CPU 3.60GHz, 3GB memory, and Nvidia GeForce GTX 285 graphic card [S2].
+
 ## Operating characteristics
-*   **Performance:** Achieves 4 to 6 frames per second with GPU-based illumination and shading [S1, unofficial].
-*   **Strengths:** Enables dynamic lighting on the volume, which is an advantage over techniques that calculate illumination once on the CPU [S1, unofficial].
-*   **Limitations:** The original plane reduction optimization was not implemented, potentially impacting performance or complexity [S1, unofficial].
+* **Performance:** Achieves 4 to 6 frames per second with GPU-based illumination and shading [S1, unofficial].
+* **Strengths:** Enables dynamic lighting on the volume, which is an advantage over techniques that calculate illumination once on the CPU [S1, unofficial].
+* **Limitations:** The original plane reduction optimization was not implemented, potentially impacting performance or complexity [S1, unofficial].
 
 ## Background
-The technique was proposed by Engel, Kraus, and Ertl. It is discussed in the context of texture mapping based volume rendering [S1, unofficial].
+The technique was proposed by Engel, Kraus, and Ertl [S1, unofficial]. It is discussed in the context of texture mapping based volume rendering [S1, unofficial].
 
 ## Sources
 [S1] Texture Mapping Based Volume Rendering, https://www.ciroduran.com/files/Tesis.pdf, fetched 2026-10-29 (unofficial)
+[S2] Multi-dimensional Reduction and Transfer Function Design using Parallel ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC4536824/, fetched 2026-10-27
