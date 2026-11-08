@@ -1,0 +1,186 @@
+Contribute to fesoliveira014/c3d.c3l development by creating an account on GitHub.
+
+feat: temporal anti-aliasing per view by fesoliveira014 · Pull Request #90 · fesoliveira014/c3d.c3l · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+fesoliveira014
+commented
+Sep 23, 2026
+Copy link
+Copy Markdown
+Owner
+What changed
+Temporal anti-aliasing, per view.
+Selection. PostStack.fxaa becomes AntiAliasing anti_aliasing { NONE, FXAA, TAA }, plus TaaParams: current weight, clip gamma, depth tolerance, velocity threshold, mip bias and a debug output. FXAA stays the default. Invalid parameters fault INVALID_ARGUMENT at configure_view, and only while TAA is selected.
+Jitter.
+maths::halton, post::taa_jitter (8 Halton(2,3) points) and camera::jitter_matrices offset only the rasterized projection.
+Culling, picking, lights, shadows and the cluster grid keep the unjittered matrices. Camera.lens_shift is untouched.
+FrameRoot.jitter_time.xy carries the offset in NDC.
+Motion vectors for everything drawn opaque. A temporal view (TAA or motion blur) keeps each node's previous skin palette, morph block and instance matrices in its ViewHistory (PoseRecord). The VELOCITY vertex stage deforms twice through DrawRoot.previous_pose (PreviousPoseGpu). Skinned, morphed and individually moving instances now get correct velocity, for motion blur as well.
+Velocity. Velocity stays unjittered. On a TAA view, velocity is RGBA16F and its z channel holds each surface's expected previous depth.
+Resolve (taa_resolve.comp, timed as Pass.TEMPORAL_AA). It runs after the scene passes and before motion blur, depth of field, bloom and grading:
+the current sample is filtered back to the pixel center from its 3x3 jittered taps;
+velocity is dilated to the nearest depth in the 3x3 neighborhood;
+history is read with a 5-tap Catmull-Rom filter at uv - velocity;
+history is rejected by expected previous depth (2x2 footprint, relative tolerance) and by the difference between current and previous velocity;
+history is clipped to the neighborhood's YCoCg variance box and blended with luma weights.
+History images. Color, depth and velocity histories are ping-ponged per view. configure_view, a resize and reset_view_history reset one view only; two views of the same camera never share history.
+Material mip bias. TAA views bias built-in material texture sampling through FrameRoot.mip_bias. Custom materials opt in with a sample_custom_map overload that takes a bias.
+Debug outputs. Velocity, rejection and history weight replace color on the view's output.
+Custom dispatches. A dispatch that writes a TAA view's color first moves the resolved image into hdr_color, so an application effect never feeds the next resolve.
+Benchmarks. examples/taa is new. The benchmark loop and benchmark.py take --anti-aliasing none|fxaa|taa, and the CSV gains gpu_velocity_ms and gpu_taa_ms.
+Docs. docs/post.md (new temporal anti-aliasing section, updated motion-blur text), docs/views.md, docs/instancing.md, docs/custom_shaders.md, docs/benchmarking.md and the README.
+Divergences from the design and why
+History lookup. History is read at uv - velocity with no jitter terms. The written design added previous_jitter - current_jitter. Accumulated history is pixel-centered, and shifting its lookup by the jitter each frame would cancel the anti-aliasing.
+Resolve order. The resolve runs before motion blur and depth of field, as the post-processing architecture states, rather than after them.
+Mip bias plumbing. Built-in fragments set one material_mip_bias value from FrameRoot.mip_bias, instead of passing a bias argument through every sampling call.
+Vertex helper signature. write_mesh_outputs keeps its four-argument signature, because custom vertex stages call it.
+Resize resets. A resize frees the history tables, so the sample index and slot restart with the recreated images.
+Added to scope. The detached view-color write, the benchmark anti-aliasing option and command-line states for the example were added; none were in the plan.
+Verification
+CPU. python3 scripts/build.py --test is green: 444 unit tests (up from 434); add-on suites unchanged; 65 example programs build.
+Real Vulkan acceptance (WSL, llvmpipe, validation on). c3c test acceptance --path test/gpu/render: 23/23 pass (7 new), with no validation messages. The new tests cover:
+jitter advance on submit only;
+independent reset;
+still-scene color;
+deformed and instanced motion under every debug output;
+a display view;
+the detached view-color write;
+reconfiguring between motion blur, TAA and FXAA;
+background history under a finite far plane. This is a regression test for a bug found in review; it fails without the fix.
+Example (WSL, validation on). No AA, FXAA and TAA still frames were compared: TAA removes the checker moire and the stair steps on thin diagonal bars. The debug views show rejection on silhouettes and on the incoming edge during a camera sweep. Observed limit: distant checker detail keeps visible moire under camera motion at the default weight.
+RTX 4090, native Windows. Many-light hall, 1024 clustered lights, static camera; medians of three processes of 300 frames:
+Extent
+TAA resolve
+Camera velocity
+FXAA post
+Wall FXAA → TAA
+1280x720
+0.028 ms
+0.008 ms
+0.012 ms
+1.919 → 1.930 ms
+1920x1080
+0.069 ms
+0.220 ms *
+0.229 ms *
+3.779 → 3.846 ms
+2560x1440
+0.129 ms
+0.021 ms
+0.034 ms
+6.257 → 6.435 ms
+* At 1080p, whichever pass follows the forward pass absorbs about 0.21 ms, in both configurations.
+Remaining work
+Transparent surfaces carry the velocity of whatever is behind them. There is no reactive mask.
+Custom vertex deformation is not captured in velocity.
+There is no temporal upscaler.
+G-buffer normals are not used for history rejection.
+fesoliveira014
+added 7 commits
+September 23, 2026 03:04
+feat: select a view's anti-aliasing filter and add temporal jitter he…
+…
+172a98a
+```
+…lpers
+
+PostStack.fxaa becomes an AntiAliasing selector with TAA parameters,
+validated only while TAA is selected. Add the Halton sequence, the
+per-sample NDC jitter and jittered camera matrices that keep culling
+data unjittered. The post panel and the views example select the filter
+through a combo.
+```
+feat: resolve temporal anti-aliasing per view with full motion vectors
+…
+82b75ec
+```
+A TAA view renders with a Halton jitter on its rasterized projection
+only, keeps color, depth and velocity histories, and resolves before
+motion blur and depth of field: dilated velocity reprojection, rejection
+by expected previous depth and velocity difference, Catmull-Rom history,
+variance clipping in YCoCg and luma-weighted blending.
+
+Temporal views retain previous skin palettes, morph blocks and instance
+matrices, so skinned, morphed and individually moving instances get
+correct velocity for TAA and motion blur alike. TAA views bias material
+texture level of detail and can show velocity, rejection or history
+weight instead of color.
+```
+fix: keep a dispatch that writes a TAA view's color out of its history
+…
+4957268
+```
+A write_view_color dispatch on a TAA view moves the resolved image into
+hdr_color first, so an application effect never reaches the next
+resolve. Real-Vulkan acceptance covers jitter advance, independent
+resets, still-scene color, deformed and instanced motion with every
+debug output, a display view, and the detached write.
+```
+feat: add the temporal anti-aliasing example and documentation
+…
+7e5cdc0
+```
+The taa example shows fine checker texture, a thin fence, a spinner,
+the skinned Fox, a morphing cube and individually orbiting instances
+through a full-window view and an inset of the same camera, with
+freeze, sweep, cut and inset resize controls and command-line states
+for comparisons and debug outputs.
+```
+feat: select anti-aliasing in the rendering benchmarks
+…
+6f39ef8
+```
+The benchmark loop takes --anti-aliasing none|fxaa|taa, benchmark.py
+passes it through, and the CSV gains the velocity and temporal resolve
+pass timings.
+```
+fix: keep background history under a finite far plane
+…
+fef2723
+```
+The camera velocity pass wrote -m22 as the expected previous depth of
+background pixels, which is not zero under a finite far plane, so the
+resolve rejected every sky pixel every frame. Background now carries
+depth zero. A real-Vulkan test reads the history weight of a background
+pixel, and another reconfigures a view between motion blur, TAA and FXAA.
+
+Also names the history slot count, covers history growth and palette
+reallocation in CPU tests, and follows the call and signature format
+rules in the new code.
+```
+fix: resolve from the current sample after a scene switch
+…
+dc06e39
+```
+A TAA view that renders a different scene than its last rendering no
+longer reprojects the other scene's color history. Acceptance tests cover
+the switch and that a camera cut keeps the jitter sequence. The post docs
+state the one-pixel rim outside moving silhouettes, and the custom shader
+docs say a masked custom material keeps its alpha sample unbiased.
+```
+Hide details
+View details
+fesoliveira014
+merged commit 7e75ef7
+into
+main
+Sep 23, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

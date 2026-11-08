@@ -1,74 +1,37 @@
 # Mipmapped Smooth Transitions
 
-Also called: Smooth mipmapping transitions, Mipmapped style transitions
 
 ## Overview
-Mipmapped Smooth Transitions is a technique that applies mipmapping to style transfer functions to ensure temporal coherence and anti-aliasing during interactive volume rendering [S1, unofficial]. It distinguishes itself from standard mipmapping by specifically targeting the visual artifacts caused by rapid changes in style parameters, allowing for smooth interpolation between different visual representations (such as DVR and MIP) without the mixing of distinct styles at higher mip levels [S1, unofficial][782-mip-mapping-for-style-functions.md].
+Mipmapped Smooth Transitions applies mipmapping to style transfer functions to ensure temporal coherence and anti-aliasing during interactive volume rendering [S1, unofficial]. It builds on [Mip-Mapping for Style Functions](782-mip-mapping-for-style-functions.md) by smoothing high-frequency variations in style parameters without mixing distinct visual representations at higher resolution levels [S1, unofficial][782-mip-mapping-for-style-functions.md].
 
 ## How it works
-The method integrates mipmapping into the lookup of style functions (such as opacity or color transfer functions) to handle high-frequency variations in input parameters or view direction.
-
-**Inputs and Outputs:**
-- Input: Volume data, style function parameters (e.g., user interaction state), current mip level index.
-- Output: Smoothed style function value (opacity/color) for the current ray step.
-
-**Data Structures:**
-- Mipmap chain for style functions: A set of precomputed or on-the-fly generated style function samples at decreasing resolutions. Each level $i$ contains $N/2^i$ samples.
-- [G] Standard 1D texture or array structure for storing style values.
-
-**Steps:**
-1. **Determine Mip Level:** Calculate the appropriate mip level based on the rate of change of the style parameter or view direction. If the derivative of the style parameter with respect to screen space or time exceeds a threshold, select a higher mip level (lower resolution) to average out high-frequency noise.
-2. **Sample Mipmap:** Retrieve the style function value from the selected mip level. This involves interpolating between the samples available at that resolution.
-3. **Apply Style Function:** Use the sampled value to determine the final opacity or color contribution for the current voxel/ray step.
-
-**Formula:**
-Let $S(t)$ be the style function value at parameter $t$. When using mipmapping, the effective style value $S_{eff}(t)$ is derived from the mipmapped lookup:
-$$ S_{eff}(t) = \text{MipmapLookup}(t, \text{mip\_level}) $$
-where $\text{mip\_level}$ is determined by the local frequency of change in $t$.
-
-**Parameters:**
-- Mip level selection threshold: Not given in the sources.
-- Number of mip levels: Not given in the sources.
-
-**Edge Cases and Pitfalls:**
-- **Precision:** Low mip levels may lose fine detail in the style function.
-- **Boundaries:** Ensure mip levels are precomputed or generated correctly to avoid artifacts at boundaries.
-- **Degenerate Input:** If the style parameter does not change, the lowest mip level (highest resolution) should be used.
-
+**Inputs and Outputs:** Not given in the sources. [G]
+**Data Structures:** Not given in the sources. [G]
+**Steps:** Not given in the sources. [G]
+**Formula:** For the DVR-MIP interpolation variant, the style function value $S(t)$ is mapped to a parameter domain $C(t)$ using $S(t) = \frac{C(t) + 1}{2}$ [S2, unofficial]. The exact formula for the general method is not given in the sources. [G]
+**Parameters:** Mip level selection threshold: Not given in the sources. [G] Number of mip levels: Not given in the sources. [G] (Example parameters in [S1, unofficial] use $N=2$ and $M=16$ for a specific trabecular bone volume).
+**Edge Cases and Pitfalls:** Not given in the sources. [G]
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def get_mipmapped_style(style_param, view_direction, mip_levels):
-    # Calculate the rate of change of the style parameter
-    # This is a placeholder for the specific derivative calculation
-    # based on the rendering context (e.g., screen-space derivative)
-    rate_of_change = calculate_rate_of_change(style_param, view_direction)
-    
-    # Determine the mip level based on the rate of change
-    # Higher rate of change -> higher mip level (lower resolution)
-    mip_level = determine_mip_level(rate_of_change, mip_levels)
-    
-    # Sample the style function from the selected mip level
-    # This involves interpolating between samples at the chosen resolution
-    style_value = sample_mip_level(style_param, mip_level, mip_levels)
-    
-    return style_value
+# The exact algorithm is not provided in the sources.
+# Standard implementation selects a mip level based on the local rate of change of the style parameter, then samples the precomputed style function at that resolution [G].
 ```
 
 ## Subtopics
 
 ### DVR-MIP Interpolation
-A visual representation technique that transitions between Direct Volume Rendering (DVR) and Maximum Intensity Projection (MIP) to reveal inner details during interaction [S2, unofficial]. It uses a parameter $C$ changing from -1 to 1, where -1 corresponds to DVR, 0 to Maximum Intensity Difference Accumulation (MIDA), and 1 to MIP [S2, unofficial]. The style function $S(t)$ is mapped to this domain using the formula $S(t) = \frac{C(t) + 1}{2}$ [S2, unofficial]. This differs from standard DVR/MIP by interpolating between them based on user interaction, allowing dynamic revelation of inner details [S2, unofficial].
+A visual representation technique transitioning between Direct Volume Rendering (DVR) and Maximum Intensity Projection (MIP) to reveal inner details during interaction [S2, unofficial]. It uses a parameter $C$ changing from -1 to 1, where -1 corresponds to DVR, 0 to Maximum Intensity Difference Accumulation (MIDA), and 1 to MIP [S2, unofficial]. The style function $S(t)$ is mapped to this domain using $S(t) = \frac{C(t) + 1}{2}$ [S2, unofficial]. This differs from standard DVR/MIP by interpolating between them based on user interaction, allowing dynamic revelation of inner details [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Depends on the number of mip levels and the cost of determining the mip level. Precomputed mipmaps reduce runtime cost.
-- **Memory Complexity:** Additional memory required for storing mipmaps of the style function.
-- **Measured Performance:** In a test with a $1024^3$ trabecular bone volume, using smooth mipmapping achieved 2040 Hz, compared to 60 fps without it [S1, unofficial].
-- **Strengths:** Provides temporal coherence and anti-aliasing, improving visual quality during interaction.
-- **Limitations:** Requires additional memory for mipmaps and computation for mip level selection.
-- **When to Use:** Interactive volume rendering where smooth transitions between styles are needed.
-- **When Not to Use:** Static rendering or when high-frequency detail in the style function is critical and cannot be averaged out.
+- Time Complexity: Not given in the sources. [G]
+- Memory Complexity: Not given in the sources. [G]
+- Measured Performance: In a test with a $1024^3$ trabecular bone volume, using smooth mipmapping achieved 2040 Hz, compared to 60 fps without it [S1, unofficial].
+- Strengths: Provides temporal coherence and anti-aliasing [S1, unofficial].
+- Limitations: Not given in the sources. [G]
+- When to Use: Not given in the sources. [G]
+- When Not to Use: Not given in the sources. [G]
 
 ## Background
 The concept of smooth transitions based on mipmapping for temporal coherence and anti-aliasing was introduced in the context of real-time volume rendering [S1, unofficial]. The specific application to DVR-MIP interpolation was proposed by Bruckner and Gröller [BG09] and further detailed in research on dynamic focus+context for volume rendering [S2, unofficial].

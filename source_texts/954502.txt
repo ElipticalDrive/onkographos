@@ -1,0 +1,300 @@
+Summary On the GL backend, copying a 2D array texture (texture_2d_array, e.g. a cubemap stored as 6 layers) to a buffer via copy_texture_to_buffer returns all zeros, even though the texture contains valid data. The same copy from a singl...
+
+GL backend: `copy_texture_to_buffer` from a 2D array texture returns all zeros · Issue #10015 · gfx-rs/wgpu · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+GL backend: copy_texture_to_buffer from a 2D array texture returns all zeros #10015
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+GL backend: copy_texture_to_buffer from a 2D array texture returns all zeros#10015
+Copy link
+Description
+UntilMarsAgain
+opened on Aug 5, 2026
+Issue body actions
+Summary
+On the GL backend, copying a 2D array texture (texture_2d_array, e.g. a cubemap stored as 6 layers) to a buffer via copy_texture_to_buffer returns all zeros, even though the texture contains valid data. The same copy from a single-layer 2D texture works correctly. This affects both whole-array copies (depth_or_array_layers: N) and per-layer copies (origin.z = layer, depth_or_array_layers: 1).
+Upload (write_texture) into the array texture, sampling it in shaders, and compute textureStore into an array storage texture all work. Only the texture-to-buffer copy path is broken.
+Environment
+Item
+Value
+OS
+Arch Linux (rolling), kernel 7.1.5-zen1-2-zen, x86_64, headless (EGL surfaceless, no X display)
+Mesa
+26.1.6-1
+LLVM
+22.1.8-2
+libglvnd
+1.7.0-3
+Adapter
+llvmpipe (LLVM 22.1.8, 256 bits), backend GL, device type Cpu
+wgpu / wgpu-core / wgpu-hal
+30.0.0
+Rust
+1.94.0
+Rgba32Float format features on this adapter:
+allowed_usages = COPY_SRC | COPY_DST | TEXTURE_BINDING | STORAGE_BINDING,
+flags = STORAGE_READ_ONLY | STORAGE_WRITE_ONLY | STORAGE_READ_WRITE.
+Reproduction
+Standalone reproduction attached to this issue (main.rs + Cargo.toml). Verified on the environment above. Cargo.toml:
+```
+[package]
+name = "wgpu-array-readback-repro"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wgpu = "30"
+pollster = "1"
+bytemuck = "1"
+```
+main.rs:
+```
+//! Minimal repro: GL backend copy_texture_to_buffer from a 2D array texture
+//! returns all zeros; single-layer copy works.
+
+use std::sync::mpsc;
+
+const SIZE: u32 = 4;
+const LAYERS: u32 = 6;
+const VALUE: f32 = 0.8;
+
+fn main() {
+    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+    desc.backends = wgpu::Backends::GL;
+    let instance = wgpu::Instance::new(desc);
+
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        force_fallback_adapter: false,
+        compatible_surface: None,
+        apply_limit_buckets: false,
+    }))
+    .expect("no GL adapter");
+    let info = adapter.get_info();
+    println!("Adapter: {} | {:?} | {:?}", info.name, info.backend, info.device_type);
+
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("repro device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            ..Default::default()
+        }))
+        .expect("device");
+
+    // Control: single-layer texture, upload + readback.
+    let single = create_texture(&device, 1);
+    upload_layer(&queue, &single, 0);
+    let single_max = readback_max(&device, &queue, &single, SIZE, 1, false);
+
+    // 2D array texture, per-layer upload, whole-array readback.
+    let array = create_texture(&device, LAYERS);
+    for layer in 0..LAYERS {
+        upload_layer(&queue, &array, layer);
+    }
+    let whole_max = readback_max(&device, &queue, &array, SIZE, LAYERS, false);
+
+    // Same array texture, per-layer readback (origin.z = layer, depth = 1).
+    let per_layer_max = readback_max(&device, &queue, &array, SIZE, LAYERS, true);
+
+    println!(
+        "single-layer readback:    max = {single_max:.3} -> {}",
+        if single_max > 0.0 { "OK" } else { "ALL ZEROS" }
+    );
+    println!(
+        "array whole readback:     max = {whole_max:.3} -> {}",
+        if whole_max > 0.0 { "OK" } else { "ALL ZEROS" }
+    );
+    println!(
+        "array per-layer readback: max = {per_layer_max:.3} -> {}",
+        if per_layer_max > 0.0 { "OK" } else { "ALL ZEROS" }
+    );
+}
+
+fn create_texture(device: &wgpu::Device, layers: u32) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("probe texture"),
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: layers,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba32Float,
+        usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    })
+}
+
+fn upload_layer(queue: &wgpu::Queue, texture: &wgpu::Texture, layer: u32) {
+    let data: Vec<f32> = vec![VALUE, 0.0, 0.0, 1.0].repeat((SIZE * SIZE) as usize);
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytemuck::cast_slice(&data),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(SIZE * 16),
+            rows_per_image: Some(SIZE),
+        },
+        wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
+    );
+}
+
+fn readback_max(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    size: u32,
+    layers: u32,
+    per_layer: bool,
+) -> f32 {
+    let mut max = 0.0f32;
+    for layer in 0..layers {
+        let (layer_count, origin_z) = if per_layer { (1, layer) } else { (layers, 0) };
+        let row_bytes = size * 16;
+        let aligned = row_bytes.div_ceil(256) * 256;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: (aligned * size * layer_count) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("readback encoder"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: 0, y: 0, z: origin_z },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(aligned),
+                    rows_per_image: Some(size),
+                },
+            },
+            wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: layer_count,
+            },
+        );
+        queue.submit([encoder.finish()]);
+
+        let slice = buffer.slice(..);
+        let (tx, rx) = mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll");
+        rx.recv().expect("map callback").expect("map");
+        let data = slice.get_mapped_range().expect("range");
+        max = data
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .fold(max, f32::max);
+    }
+    max
+}
+```
+Expected vs actual
+Expected: the buffer contains the uploaded texel data (0.8, 0.0, 0.0, 1.0) for both the whole-array and per-layer copies.
+Actual:
+```
+single-layer readback:    max = 1.000 -> OK
+array whole readback:     max = 0.000 -> ALL ZEROS
+array per-layer readback: max = 0.000 -> ALL ZEROS
+```
+No validation error is reported; the copies silently produce zeros.
+Additional observations
+Additionally verified in the same environment:
+compute textureStore into an array storage texture works (data is intact when sampled afterwards);
+sampling a 2D array texture in a shader works;
+per-layer write_texture upload into an array texture works;
+only copy_texture_to_buffer from a 2D array texture returns zeros — both whole-array (depth_or_array_layers: N) and per-layer (origin.z = layer, depth_or_array_layers: 1) forms.
+Since even a per-layer copy (origin.z = layer, depth 1) of an array texture returns zeros while the identical copy from a plain 2D texture works, the issue appears to be in how the GL backend sets up the texture-to-buffer copy for 2D-array textures specifically, rather than a generic copy issue.
+Related issues
+#3644
+#3197
+#2809
+#9082
+Workaround
+Avoid copy_texture_to_buffer from 2D array textures on the GL backend: convert on the CPU and upload per layer with write_texture, which works.
+Activity
+github-project-automation
+added this to WebGPU for Firefoxon Aug 5, 2026
+github-project-automation
+moved this to Todo in WebGPU for Firefoxon Aug 5, 2026
+sagudev commented on Aug 5, 2026
+sagudev
+on Aug 5, 2026
+Collaborator
+More actions
+Is this not duplicate of #9992?
+UntilMarsAgain commented on Aug 6, 2026
+UntilMarsAgain
+on Aug 6, 2026
+Author
+More actions
+Thanks for the pointer. I checked #9992 and #10004, and also ran my repro against the PR branch (fix-gles-3d-texture-copy, commit f1e3db0) — it's not a duplicate, and the PR doesn't fix this.
+```
+single-layer readback:    max = 1.000 -> OK
+array whole readback:     max = 0.000 -> ALL ZEROS
+array per-layer readback: max = 0.000 -> ALL ZEROS
+```
+#9992 is copy_texture_to_texture on 3D textures copying only one depth slice. This issue is copy_texture_to_buffer from a 2D array texture returning all zeros.
+👀React with 👀1Reacted by Sam
+teoxoy
+removed this from WebGPU for Firefoxon Aug 12, 2026
+inner-daemons commented on Aug 14, 2026
+inner-daemons
+on Aug 14, 2026
+Collaborator
+More actions
+OpenGL texture copies are notorious because you need to use different methods for every texture setup. I am sure we have 10 more bugs just like this, waiting to be hit.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,620 @@
+Notes on 2D FFT for Images
+Dan Vassilev
+·
+November, 2026
+Abstract
+These notes revisit the two-dimensional Discrete Fourier Transform (DFT) of an image
+through the group-theoretic lens emphasised by Maslen and Rockmore, tracing it from the
+theory to the libraries. The DFT of an image is the Fourier transform on the group ZN ×ZM
+and a few facts about that group do most of the work: its direct-product form is why the
+2D transform separates into one-dimensional transforms, and the way a transform length
+factors into smaller pieces is what the Cooley–Tukey algorithm exploits. When a length
+resists such factoring, libraries fall back on Bluestein’s algorithm. These are the choices that
+cuFFT, FFTW (and hence MATLAB’s fft2) and OpenCV make in practice.
+1
+Introduction and Motivation
+The two-dimensional Discrete Fourier Transform of an N × M image f (x, y) is given by
+F (u, v) =
+N
+−1 M
+−1
+X
+X
+f (x, y) e−2πi(ux/N +vy/M ) .
+x=0 y=0
+This is the Fourier transform on the finite abelian group ZN ×ZM . Adopting the group-theoretic
+view, as emphasised by Maslen and Rockmore [1], is not abstraction for its own sake. Three
+structural facts run through what follows: the direct-product structure of the group explains why
+the transform separates into independent one-dimensional transforms (Section 2); the subgroup
+and coset structure of ZN is what the Cooley–Tukey recursion exploits to reach O(N M log N M )
+cost (Section 2.1); and the failure of that structure for sizes with large prime factors is exactly
+what makes a fallback such as Bluestein’s algorithm necessary (Section 2.2). These facts are,
+in turn, what production libraries encode in their planners and kernels (Section 3). Short code
+excerpts make them concrete (Section 4), and a comparison and conclusion close the notes.
+2
+Group-Theoretic Foundations
+The Fourier transform is best thought of as re-expressing a signal in terms of pure oscillations.
+For a finite abelian group G, those pure oscillations are the characters: the group homomorphisms χ : G → C× , each a complex exponential that winds around the unit circle at a fixed
+rate. The transform simply records how strongly each character is present in f ,
+X
+χ ∈ Ĝ,
+fˆ(χ) =
+f (g) χ(g),
+g∈G
+where Ĝ is the group of all characters. For a finite abelian group the characters form an
+orthogonal basis and G ∼
+= Ĝ, so nothing is lost: the transform is invertible and, up to scaling,
+unitary [7]. Much of what follows grows from a single observation — when the group factors,
+its characters factor too.
+For images, G = ZN × ZM . Its character group factors as Ĝ ∼
+= ZN × ZM , and each character
+is itself a product of a character of ZN with one of ZM :
+χ(u,v) (x, y) = e−2πi ux/N e−2πi vy/M .
+Because the character factorises, so does the transform:
+
+
+N
+−1 M
+−1
+X
+X
+
+F (u, v) =
+f (x, y) e−2πi vy/M  e−2πi ux/N .
+x=0
+y=0
+1
+The inner sum is a length-M transform along each row; the outer sum is a length-N transform
+down each column. This separability is a direct consequence of the direct-product structure of
+the group, and it is why every library computes the 2D transform as a sequence of 1D transforms
+(“rows then columns”): a fast one-dimensional FFT immediately yields a fast two-dimensional
+FFT.
+2.1
+The Cooley–Tukey Algorithm
+Separability reduces the 2D problem to a one-dimensional transform on ZN . The Cooley–Tukey
+algorithm speeds that up by applying, inside a single ZN , the very idea separability used across
+the two factors of ZN × ZM : when the group factors, the transform factors.
+Where Cooley–Tukey comes from. Suppose N = rs. When r and s are coprime, the
+Chinese Remainder Theorem gives a genuine direct product
+ZN ∼
+= Zr × Zs ,
+∼
+and, exactly as in the separability argument above, the character group then factors as Z\
+r × Zs =
+c
+c
+Zr × Zs . Since a character of the product is a product of characters, the N -point Fourier matrix
+becomes — after only a reindexing of inputs and outputs — the Kronecker product of the two
+smaller Fourier matrices,
+FN = P1 (Fr ⊗ Fs ) P2 ,
+with P1 , P2 permutation matrices. This is the especially clean prime-factor (Good–Thomas)
+case: no correction terms appear at all.
+For a general factorisation N = rs the split is no longer a direct product but a subgroup together with its cosets, and the coset bookkeeping contributes one diagonal matrix of corrections.
+Schematically,
+FN = (Fr ⊗ Is ) D (Ir ⊗ Fs ) P,
+where P is a permutation and D is the diagonal matrix of twiddle factors. This is the
+representation-theoretic origin of the Cooley–Tukey factorisation: a large transform is broken into smaller transforms on a subgroup and itsQquotient, glued together by twiddle factors.
+Applied recursively along a subgroup chain N = i pi , it gives the O(N log N ) algorithm. In
+short, the FFT decomposes one large representation problem into many small ones.
+The coset picture and the butterfly. Concretely, if N = N1 N2 then ZN contains a subgroup H ∼
+= ZN1 (the multiples of N2 ), splitting the indices into N2 cosets. Decomposing each
+index through its coset representative turns the length-N sum into N2 inner transforms of length
+N1 , recombined by an outer transform of length N2 ; the twiddle factors W k that couple the two
+stages are exactly the values the characters take on the coset representatives — the entries of D
+above. The smallest non-trivial case, N2 = 2, is the radix-2 butterfly (Figure 1), the two-point
+transform from which radix-2 FFTs are built.
+Reading the diagram: x0 and x1 are the two values arriving from the previous stage — in a
+radix-2 step, the outputs of the even- and odd-indexed sub-transforms. The butterfly combines
+them into two new values,
+X0 = x0 + W k x1 ,
+X1 = x0 − W k x1 ,
+W k = e−2πik/N .
+The twiddle factor is applied once, to x1 , and both outputs share the product (it is one entry
+of the diagonal D from the factorisation above, applied in place). A full FFT is just many such
+butterflies tiled across log2 N stages: each stage halves the remaining transform length, and the
+twiddle factors thread the stages together. Those same two additions and one multiplication,
+repeated, are what replace the O(N 2 ) direct sum with O(N log N ) work.
+2
+x0
+x1
+×Wk
+−1
++
+X0
++
+X1
+Key:
+Blue: from x0
+Orange: from x1
++: complex addition
+×W k : twiddle factor
+−1: subtraction
+W k = e−2πik/N
+Figure 1: Radix-2 decimation-in-time butterfly as a signal-flow graph. The twiddle factor W k
+multiplies x1 once; the product is added to x0 to give X0 and subtracted from it to give X1 .
+2.2
+Bluestein’s Algorithm
+The Cooley–Tukey recursion helps only to the extent that N factors into small primes —
+equivalently, only when ZN possesses a chain of small-index subgroups to recurse through.
+When N is prime, or carries a large prime factor, no such useful chain exists and the recursion
+degenerates. Libraries therefore fall back to Bluestein’s algorithm [2], which side-steps the
+missing subgroup structure by re-expressing the DFT as a convolution. Starting from the chirp
+identity 2kn = k 2 + n2 − (k − n)2 , the kernel factorises as
+2
+2
+2
+e−2πikn/N = e−πik /N · e−πin /N · eπi(k−n) /N ,
+so that
+2
+F (k) = e−πik /N
+N
+−1 
+X
+
+2
+2
+f (n) e−πin /N eπi(k−n) /N .
+n=0
+2
+2
+The sum is the convolution of the modulated signal f (n) e−πin /N with the chirp eπim /N . That
+convolution is evaluated by embedding it into a cyclic group of convenient (power-of-two) order
+L ≥ 2N − 1 and applying ordinary radix-2 FFTs, which restores O(N log N ) complexity for any
+positive integer N . Group-theoretically, the trick is to stop recursing inside ZN and instead
+embed the computation into a larger, highly factorable cyclic group where Cooley–Tukey does
+apply.
+3
+Implementation
+Each library below is a concrete realisation of the same two ideas: separable 1D transforms (Section 2) accelerated by Cooley–Tukey (Section 2.1), with a Bluestein-type fallback (Section 2.2).
+They differ mainly in how aggressively they tune the factorisation, how they cope with awkward
+lengths and which hardware they target.
+3.1
+cuFFT (NVIDIA)
+cuFFT [3] implements a highly optimised mixed-radix Cooley–Tukey algorithm with automatic
+fallback to Bluestein’s algorithm for difficult sizes. It excels at batched 2D/3D transforms
+and real-to-complex operations on NVIDIA GPUs, and is typically the fastest choice for large
+batched image transforms, because the data stays on the GPU and plans are reused across
+transforms.
+3.2
+MATLAB fft2 (FFTW-based)
+MATLAB’s fft2 [5] is powered by the FFTW library [4], which pairs a planner with machinetuned codelets and performs the transform separably (rows then columns) with excellent numerical accuracy. It is mentioned here for completeness as a widely used reference implementation;
+it is not benchmarked in these notes.
+3
+3.3
+OpenCV: cv::dft and cv::cuda::dft
+OpenCV [6] exposes two entry points relevant to images. The CPU routine cv::dft is always
+available and, on x86, frequently dispatches to Intel IPP kernels; it is used in one of the accompanying examples. The GPU routine cv::cuda::dft lives in the cudaarithm module of the
+opencv contrib repository and is, under the hood, a thin wrapper around cuFFT: the transform itself is the very cuFFT kernel of Section 3, with OpenCV managing the GpuMat operands
+and the cuFFT plan.
+3.3.1
+Enabling the CUDA path
+Because cv::cuda::dft wraps cuFFT, it is present only when OpenCV is compiled against the
+CUDA toolkit. Concretely, OpenCV must be built from source with CUDA enabled and with the
+contrib module cudaarithm included (e.g. -DWITH CUDA=ON, -DBUILD opencv cudaarithm=ON).
+The CUDA toolkit, which supplies cuFFT, must be installed at build time. Crucially, the
+pre-built distributions do not include CUDA: neither the Python wheels (opencv-python,
+opencv-contrib-python) nor the Linux system-package-manager builds — for example the
+Debian/Ubuntu packages libopencv-contrib-dev and libopencv-contrib4.6 — are compiled with WITH CUDA. The -contrib packages add the contrib modules’ CPU code, but not
+GPU support. The build configuration — including the line reporting NVIDIA CUDA support —
+can be inspected at run time via cv::getBuildInformation().
+3.3.2
+Practical limitations of cv::cuda::dft
+Even when present, the wrapper is more constrained than cuFFT itself. It operates only in single
+precision (CV 32F / CV 32FC2); it incurs host-to-device and device-to-host transfer costs for the
+GpuMat operands; and it manages the cuFFT plan per call rather than exposing the fine-grained
+plan reuse and batched real-to-complex control of the native API. The arithmetic is identical to
+cuFFT — the overhead lies in this surrounding management, not in the transform kernel. For
+heavy batched image workloads, calling cuFFT directly therefore remains preferable, whereas
+cv::cuda::dft is convenient when one is already inside an OpenCV pipeline and working in
+single precision.
+Section 4 shows the core of three small programs that compute the same centred logmagnitude spectrum of an image, routing only the transform and magnitude through three different engines: cv::dft on the CPU, cv::cuda::dft (OpenCV’s cuFFT wrapper) and cuFFT
+called directly.
+4
+Worked Examples
+4.1
+Concrete 2D Example on Z8 × Z8 (Wrapped Signal)
+To illustrate both separability and the Cooley–Tukey algorithm in action, consider the signal
+on G = Z8 × Z8 defined by
+f (x, y) = (x + y) mod 8.
+This produces a diagonal ramp that wraps around at the edges, perfectly demonstrating the
+cyclic (toroidal) nature of the group.
+4.1.1
+Input Signal
+Let ω = e−2πi/8 be a primitive 8th root of unity.
+4
+y\x
+0
+1
+2
+3
+4
+5
+6
+7
+0
+0
+1
+2
+3
+4
+5
+6
+7
+1
+1
+2
+3
+4
+5
+6
+7
+0
+2
+2
+3
+4
+5
+6
+7
+0
+1
+3
+3
+4
+5
+6
+7
+0
+1
+2
+4
+4
+5
+6
+7
+0
+1
+2
+3
+5
+5
+6
+7
+0
+1
+2
+3
+4
+6
+6
+7
+0
+1
+2
+3
+4
+5
+7
+7
+0
+1
+2
+3
+4
+5
+6
+Table 1: Input f (x, y) = (x + y) mod 8 on Z8 × Z8 .
+4.1.2
+Full Radix-2 Cooley–Tukey on Length 8 (Detailed Example)
+The 2D transform separates into independent 1D FFTs. Below is the complete iterative
+(decimation-in-time) radix-2 Cooley–Tukey computation for the first row [0, 1, 2, 3, 4, 5, 6, 7].
+The other rows follow the same process (they are circular shifts of this sequence).
+Input (bit-reversed order). The decimation-in-time algorithm first reorders the input
+by reversing the three bits of each index: [0, 4, 2, 6, 1, 5, 3, 7].
+Stage 1 (4 two-point butterflies, twiddle factor ω 0 = 1):
+0 ↔ 4:
+0 + 4 = 4,
+0 − 4 = −4
+2 ↔ 6:
+2 + 6 = 8,
+2 − 6 = −4
+1 ↔ 5:
+1 + 5 = 6,
+1 − 5 = −4
+3 ↔ 7:
+3 + 7 = 10,
+3 − 7 = −4
+Array now: [4, −4, 8, −4, 6, −4, 10, −4]
+Stage 2 (two 4-point transforms, twiddle factors 1 and ω 2 = −i): in each group of four,
+entries 0 and 2 are combined with twiddle 1, entries 1 and 3 with twiddle −i:
+4 ↔ 8:
+4 + 8 = 12,
+4 − 8 = −4
+− 4 + (−i)(−4) = −4 + 4i,
+− 4 − (−i)(−4) = −4 − 4i
+6 ↔ 10 :
+6 + 10 = 16,
+6 − 10 = −4
+−4 ↔ −4 :
+− 4 + 4i,
+− 4 − 4i
+−4 ↔ −4 :
+Array now: [12, −4 + 4i, −4, −4 − 4i, 16, −4 + 4i, −4, −4 − 4i]. The first half is the
+4-point DFT E of the even-indexed inputs [0, 2, 4, 6], the second half the 4-point DFT O of the
+odd-indexed inputs [1, 3, 5, 7].
+Stage 3 (4 butterflies, twiddle factors ω 0 , ω 1 , ω 2 , ω 3 ):
+Xk = Ek + ω k Ok ,
+Xk+4 = Ek − ω k Ok ,
+k = 0, 1, 2, 3.
+√
+√
+√
+√ (−4 + 4i) = 4 2 i, so X1 = −4 + 4(1 + 2)i and X5 = −4 − 4( 2 − 1)i.
+For example, ω O1 = 1−i
+2
+Final 1D DFT (exact values, natural order):
+√
+√
+28, − 4 + 4(1 + 2)i, −4 + 4i, − 4 + 4( 2 − 1)i,
+√
+√
+−4, − 4 − 4( 2 − 1)i, −4 − 4i, − 4 − 4(1 + 2)i
+This full three-stage radix-2 procedure (total of 12 butterflies) is applied to all eight rows,
+then repeated on all eight columns of the resulting intermediate array.
+5
+4.1.3
+Final 2D DFT
+√
+√
+For brevity, let α = 2 + 1 and β = 2 − 1.
+k\l
+0
+1
+2
+3
+4
+5
+6
+7
+0
+224
+0
+0
+0
+0
+0
+0
+0
+1
+0
+−32 + 32α i
+0
+0
+0
+0
+0
+0
+2
+0
+0
+−32 + 32i
+0
+0
+0
+0
+0
+3
+0
+0
+0
+−32 + 32β i
+0
+0
+0
+0
+4
+0
+0
+0
+0
+-32
+0
+0
+0
+5
+0
+0
+0
+0
+0
+−32 − 32β i
+0
+0
+6
+0
+0
+0
+0
+0
+0
+−32 − 32i
+0
+7
+0
+0
+0
+0
+0
+0
+0
+−32 − 32α i
+Table 2: 2D DFT fˆ(k, l). All off-diagonal entries are exactly zero.
+Key observations:
+ fˆ(0, 0) = 224 = 8 × 28 is the total sum of all entries.
+ The spectrum is supported only on the diagonal k = l.
+ The entire 2D FFT is built from exactly sixteen independent length-8 radix-2 Cooley–
+Tukey transforms.
+ Even in the 2D case, everything reduces to 1D butterflies under the hood.
+This detailed walk-through makes the connection between the group-theoretic separability
+and the practical Cooley–Tukey implementation completely concrete. The same row-thencolumn strategy (using many 1D FFTs) is what production libraries such as cuFFT and FFTW
+use on real images.
+4.2
+Libraries
+The following excerpts show the core of three small programs that all produce the same result —
+the centred log-magnitude spectrum of a greyscale image — but route the transform through
+three different engines. In every case the image has already been zero-padded to an FFTfriendly size with getOptimalDFTSize, keeping the length a product of small primes so the
+Cooley–Tukey factorisation of Section 2.1 applies directly; cuFFT additionally falls back to
+Bluestein (Section 2.2) for awkward sizes. Only the transform and magnitude differ between
+the three; the quadrant shift, normalisation and display are shared.
+4.2.1
+CPU — cv::dft
+The baseline performs the whole computation on the host. A real image is widened to a twochannel complex array so the result is a full complex spectrum.
+// padded: greyscale image already zero-padded to getOptimalDFTSize()
+Mat planes[] = { Mat_<float>(padded),
+Mat::zeros(padded.size(), CV_32F) };
+Mat complexI;
+merge(planes, 2, complexI); // real + imaginary (= 0)
+dft(complexI, complexI); // in-place 2D DFT on the CPU
+split(complexI, planes); // planes[0] = Re, planes[1] = Im
+magnitude(planes[0], planes[1], planes[0]); // |F| = sqrt(Re^2 + Im^2)
+// ... log(1 + |F|), fftshift, normalise, imshow (shared) ...
+Listing 1: CPU transform with cv::dft.
+6
+4.2.2
+OpenCV on the GPU — cv::cuda::dft
+Moving to the GPU through OpenCV changes almost nothing in the source: one dft call
+becomes one cuda::dft call. The convenience, however, hides the costs noted in Section 3.
+cv::cuda::GpuMat dIn, dFreq, dMag, planes[2];
+dIn.upload(complexHost); // host -> device (transfer hidden)
+cv::cuda::dft(dIn, dFreq, padded.size());// wraps cuFFT; builds AND destroys a
+// cuFFT plan on every call; CV_32F only
+cv::cuda::split(dFreq, planes);
+cv::cuda::magnitude(planes[0], planes[1], dMag);
+Mat mag;
+dMag.download(mag); // device -> host (transfer hidden)
+// ... shared log / fftshift / normalise / imshow tail ...
+Listing 2: GPU transform through OpenCV’s wrapper.
+4.2.3
+Raw cuFFT
+Calling cuFFT directly is a few lines longer, but each line exposes a control point. The plan is
+created once and reused, the data stays resident on the device and the magnitude is fused into
+a single kernel so only the finished result returns to the host.
+__global__ void logMagnitude(const cufftComplex* in, float* out, int n) {
+for (int i = blockIdx.x*blockDim.x + threadIdx.x; i < n;
+i += blockDim.x*gridDim.x)
+out[i] = logf(1.f + sqrtf(in[i].x*in[i].x + in[i].y*in[i].y));
+}
+// ---cufftHandle plan;
+cufftPlan2d(&plan, rows, cols, CUFFT_C2C); // create the plan ONCE ...
+cufftExecC2C(plan, dData, dData, CUFFT_FORWARD);// ... reuse across images/batches
+logMagnitude<<<blocks, threads>>>(dData, dMag, count); // post-process ON device
+// data stays resident; precision, plan reuse and cufftPlanMany batching are yours
+Listing 3: Direct cuFFT transform with an on-device magnitude kernel.
+The trade-off is now concrete. The CPU and cv::cuda::dft versions are the shortest,
+because a single dft call hides everything — and that same hiding is the limitation: the wrapper
+transfers data around every call, rebuilds the cuFFT plan each time, is fixed to single precision
+and offers no handle on batching or residency. The raw-cuFFT version trades brevity for those
+handles. The plan is created once (or replaced by cufftPlanMany for a batch); the data stays
+on the device between transform and post-processing; and the magnitude is computed in a
+fused kernel. These are precisely the levers that convert into throughput once images are large
+or numerous. The wrapper is the right tool inside an existing OpenCV–CUDA pipeline; raw
+cuFFT is the right tool for a deployable image-FFT component — and, as Section 3 noted, it
+needs only the stock OpenCV plus the CUDA toolkit, rather than a custom contrib build.
+4.3
+Reading a Spectrum: Orientation
+A practical use of the transform is reading geometry straight off the magnitude. A straight edge
+at orientation θ is a one-dimensional structure in the plane, and its energy concentrates on the
+line through the origin perpendicular to it, at θ + 90◦ . Figure 2 demonstrates this on a binary
+edge map: line segments recovered by a Hough transform are coloured by orientation (left),
+and each family’s predicted spoke — rotated 90◦ — is drawn in the matching colour on the
+log-magnitude spectrum (right). The near-horizontal courses (red) map to the vertical ridge;
+7
+the diagonal families map to the arms of the fan, whose angular spread reflects the perspective
+convergence of the lines.
+Figure 2: Spoke–edge correspondence. Left: detected line segments coloured by orientation.
+Right: FFT spectrum with each family’s predicted spoke (rotated 90◦ ) drawn in the matching
+colour. Near-horizontal courses (red) map to the vertical ridge; the diagonal families map to
+the arms of the fan.
+8
+5
+Comparison
+Feature
+cuFFT
+MATLAB fft2
+(FFTW)
+OpenCV (cv::dft /
+cv::cuda::dft)
+Primary platform
+NVIDIA GPU
+CPU
+CPU (dft); NVIDIA
+GPU (cuda::dft)
+Core algorithm
+Mixed-radix Cooley–
+Tukey + Bluestein
+FFTW planner +
+codelets
+CPU routines / IPP;
+GPU path wraps
+cuFFT
+Performance (large batched)
+Typically fastest:
+device-resident data,
+plan reuse, batching
+Fast on the CPU:
+tuned plans and
+codelets
+CPU: IPP kernels
+where available;
+GPU: the cuFFT
+kernel plus per-call
+plan and transfer
+overhead
+Precision
+Single and double
+Double (default)
+Single and double
+(CPU); single only
+(GPU)
+GPU availability
+Native
+None
+Requires source
+build (WITH CUDA
++ cudaarithm); absent from wheels and
+distro packages
+Image convenience
+Excellent batched
+R2C
+Seamless matrix ops
+Strong CV-pipeline
+integration
+Table 3: Comparison of 2D FFT implementations for image processing. Performance is described qualitatively and was not measured in these notes; at matched precision the mixed-radix
+engines have comparable accuracy.
+6
+Conclusion
+The group-theoretic perspective emphasised by Maslen and Rockmore [1] connects these pieces:
+the direct-product structure of ZN × ZM gives separability, the subgroup and coset structure
+of ZN gives Cooley–Tukey and the breakdown of that structure for awkward sizes gives the
+Bluestein fallback. The production libraries implement these same choices, differing mainly in
+tuning, size handling and target hardware. Section 4 showed the same image transform three
+ways: cv::dft on the CPU, cv::cuda::dft as a convenient but constrained GPU wrapper
+and cuFFT called directly. The wrapper requires a custom OpenCV build (WITH CUDA plus the
+cudaarithm contrib module) yet exposes none of the plan-reuse, residency or batching control
+that turns the GPU into a throughput win; for a deployable image-FFT component, calling
+cuFFT directly — with stock OpenCV reserved for input and display — is the more practical
+and more portable choice.
+9
+References
+[1] D.K. Maslen and D.N. Rockmore, “The Cooley–Tukey FFT and Group Theory,” Notices
+of the AMS 48(10), 1151–1160, 2001.
+[2] L.I. Bluestein, “A linear filtering approach to the computation of discrete Fourier transform,” IEEE Transactions on Audio and Electroacoustics 18(4), 451–455, 1970.
+[3] NVIDIA Corporation, cuFFT Library User’s Guide, https://docs.nvidia.com/cuda/
+cufft/.
+[4] M. Frigo and S.G. Johnson, “The Design and Implementation of FFTW3,” Proceedings of
+the IEEE, 2005.
+[5] The MathWorks, Inc., MATLAB, Natick, Massachusetts, United States.
+[6] OpenCV: Open Source Computer Vision Library, https://opencv.org.
+[7] A. Terras, Fourier Analysis on Finite Groups and Applications, Cambridge University
+Press, 1999.
+10

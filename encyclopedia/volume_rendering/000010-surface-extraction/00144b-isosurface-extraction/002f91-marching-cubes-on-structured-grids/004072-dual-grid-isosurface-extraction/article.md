@@ -1,67 +1,33 @@
 # Dual Grid Isosurface Extraction
 Also called: Dual Grid Marching Cubes
 ## Overview
-Dual Grid Isosurface Extraction is a method for extracting crack-free isosurfaces from Adaptive Mesh Refinement (AMR) data by constructing a dual grid where cell centers serve as vertices [S1]. It solves the "dangling node" problem inherent in resampling AMR data to vertex-centered formats, which causes discontinuities when standard Marching Cubes is applied [S1]. Unlike standard structured grid methods, it leverages the geometric gap created by the dual grid transformation to naturally separate coarse and fine levels, preventing cracks without requiring explicit boundary stitching for the core extraction [S1].
+Dual Grid Isosurface Extraction extracts continuous, crack-free isosurfaces from cell-centered Adaptive Mesh Refinement (AMR) data by treating cell centers as vertices of a new grid, thereby avoiding the dangling nodes inherent in standard Marching Cubes on vertex-centered resampled data [S1]. It differs from previous crack-fixing solutions that create polygons, collapse polylines, or use triangle fans by using a dual grid and tessellated "stitch cells" to maintain topological consistency without interpolation artifacts [S1].
 ## How it works
-**Inputs and Outputs:**
-- Input: AMR grid hierarchy with cell-centered scalar field values.
-- Output: Triangle mesh representing the isosurface.
+**Inputs:** AMR grid hierarchy with cell-centered scalar field values.
+**Outputs:** Triangle mesh representing the isosurface.
 
 **Data Structures:**
-- **Dual Grid:** A vertex-centered grid. The vertices are located at the centers of the original AMR cells.
-- **Field Values:** Scalar values associated with each dual grid vertex, taken directly from the original cell-centered values.
+- **Dual Grid:** A vertex-centered grid where each vertex corresponds to the center of a cell in the original AMR grid.
+- **Stitch Cells:** Tessellated polygons used to bridge gaps between coarse and fine dual grids.
 
 **Steps:**
-1. **Construct Dual Grid:** Map each cell center of the AMR grid to a vertex in the dual grid. The scalar value at each dual vertex is the value of the corresponding original cell [S1].
-2. **Identify Gap:** Recognize that the dual grid shrinks by one cell in each axial direction relative to the original grid boundaries. This creates a geometric gap between the coarse grid's dual representation and the embedded fine grid's dual representation [S1].
-3. **Extract Isosurface:** Apply the Marching Cubes algorithm on the dual grid vertices and their associated values. The gap ensures that no vertex is shared between different hierarchy levels in a way that creates dangling nodes, thus preventing cracks [S1].
+1. **Construct Dual Grid:** Map each cell center of the AMR grid to a vertex in the dual grid. The scalar value at each dual vertex is the cell-centered value from the original grid [S1].
+2. **Identify Gap:** Recognize that the dual grid shrinks by one cell in each axial direction relative to the original grid boundaries. This creates a geometric gap between coarse and fine grid levels [S1].
+3. **Extract Isosurface:** Apply the Marching Cubes algorithm on the dual grid vertices. The existence of the gap prevents dangling nodes, which are the primary cause of cracks in standard MC on resampled data [S1].
+4. **Stitch Levels:** Use a tessellation scheme to "stitch" grids of different hierarchy levels across the gap. The stitch mesh is constrained by the boundaries of the coarse and fine grids to merge levels seamlessly [S1].
 
-**Formulas:**
-Let $C$ be a cell in the original AMR grid with center $c$ and value $v$.
-The dual grid vertex $v_d$ is defined as:
-$$ v_d = c $$
-The value at $v_d$ is:
-$$ val(v_d) = v $$
+**Edge Cases:**
+- **Dangling Nodes:** Standard MC on vertex-centered resampled data suffers from dangling nodes where fine-level vertices lack coarse-level support. The dual grid approach eliminates this by design [S1].
+- **Gap Management:** The gap between coarse and fine dual grids must be explicitly handled via stitching to ensure topological continuity [S1].
 
-**Edge Cases and Pitfalls:**
-- **Gap Handling:** The gap between coarse and fine dual grids means the isosurface is not continuous across levels. Additional stitching (e.g., using stitch cells) is required to close these gaps for a watertight mesh [S1].
-- **Boundary Conditions:** The shrinking nature of the dual grid means the dual grid has fewer cells than the original grid in each dimension. Boundary handling must account for this reduction [S1].
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def dual_grid_extraction(AMR_grid):
-    # Step 1: Construct dual grid
-    dual_vertices = []
-    dual_values = []
-    for cell in AMR_grid.cells:
-        dual_vertices.append(cell.center)
-        dual_values.append(cell.value)
-    
-    # Step 2: Identify gap (implicit in structure)
-    # The dual grid naturally shrinks by one cell in each axial direction
-    
-    # Step 3: Extract isosurface using Marching Cubes
-    # Note: This extracts the surface within each level's dual grid
-    # Stitching between levels is not performed here
-    mesh = marching_cubes(dual_vertices, dual_values, isovalue)
-    
-    return mesh
-```
 ## Subtopics
 
 ### [Dual Grid Isosurface Extraction with Stitch Cells](10500-dual-grid-isosurface-extraction-with-stitch-cells.md)
-A method for extracting continuous, crack-free isosurfaces from cell-centered AMR data by constructing a dual grid (connecting cell centers) to avoid dangling nodes, and filling gaps between hierarchy levels with tessellated 'stitch cells'.
+This method extracts continuous, crack-free isosurfaces from cell-centered AMR data by constructing a dual grid that connects cell centers, thereby eliminating dangling nodes inherent in standard Marching Cubes on vertex-centered resampled data. It differs from previous crack-fixing solutions that create polygons, collapse polylines, or use triangle fans by using a dual grid and tessellated "stitch cells" to maintain topological consistency without interpolation artifacts.
 
 ## Operating characteristics
-- **Time Complexity:** Depends on the number of dual grid cells and the efficiency of the Marching Cubes implementation. The dual grid has fewer cells than the original grid, potentially reducing computation [S1].
-- **Memory Complexity:** Requires storing the dual grid structure and values. The dual grid is smaller than the original grid [S1].
-- **Strengths:** Eliminates dangling nodes and cracks caused by resampling AMR data to vertex-centered formats [S1].
-- **Limitations:** The dual grid approach creates gaps between hierarchy levels, requiring additional stitching for a watertight mesh [S1].
-- **When to Use:** When extracting isosurfaces from cell-centered AMR data and avoiding dangling node artifacts is critical [S1].
-- **When Not to Use:** When a watertight mesh is required without additional stitching steps [S1].
+Not given in the sources.
 ## Background
-Originated in the context of AMR data visualization to address the limitations of resampling cell-centered data to vertex-centered formats for isosurface extraction [S1]. The method was proposed to solve the problem of dangling nodes causing cracks in the extracted isosurface [S1].
+Originated in the context of extracting isosurfaces from Adaptive Mesh Refinement (AMR) data, where standard resampling to vertex-centered formats introduces dangling nodes that cause cracks in Marching Cubes outputs [S1]. The method was developed to solve these discontinuities by leveraging the natural cell-center structure of AMR data [S1].
 ## Sources
 [S1] Extraction of Crack-free Isosurfaces from Adaptive Mesh Refinement Data, https://doi.org/10.2312/vissym/vissym01/025-034, fetched 2026-10-26

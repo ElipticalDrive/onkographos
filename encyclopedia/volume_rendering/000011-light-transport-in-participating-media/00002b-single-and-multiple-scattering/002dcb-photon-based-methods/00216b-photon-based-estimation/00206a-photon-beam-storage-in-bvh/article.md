@@ -1,0 +1,125 @@
+# Photon Beam Storage in BVH
+
+Also called: BVH Photon Beam Storage
+
+## Overview
+Photon Beam Storage in BVH accelerates the spatial query phase of photon-based radiance estimation by organizing photon beams into a Bounding Volume Hierarchy (BVH). It solves the problem of efficiently retrieving all beams that intersect a specific eye ray during rendering, which is a bottleneck in methods like [Volumetric Photon Mapping](2190-volumetric-photon-mapping.md). Unlike brute-force linear scans or static grids, this method leverages the Surface Area Heuristic (SAH) to partition overlapping beam data, trading construction overhead for significant query speedups in scenes with high photon densities [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A set of photon beams generated during the photon tracing phase. Each beam is defined by its origin, direction, length, and associated radiance/weight data.
+*   **Output:** A BVH data structure containing the photon beams, ready for runtime intersection queries.
+
+**Data Structures**
+The core data structure is a BVH where each leaf node contains a list of photon beams. To handle the high degree of overlap inherent in photon beams (especially those emanating from point sources), the beams are pre-processed into sub-beams before insertion into the tree [S1].
+
+**Steps**
+1.  **Beam Splitting:** During construction, each photon beam is split into multiple sub-beams. The splitting length is determined automatically by the construction algorithm to ensure that each resulting sub-beam has an approximately unit aspect ratio. This improves the partitioning efficiency of the BVH by reducing the spatial extent of individual bounding volumes [S1].
+2.  **BVH Construction:** The sub-beams are inserted into a BVH using the Surface Area Heuristic (SAH) for node splitting. The SAH minimizes the expected cost of ray intersection by balancing the number of primitives in child nodes against the surface area of their bounding volumes [S1].
+3.  **Runtime Query:** At render time, for each pixel, an eye ray is cast. The BVH is traversed to quickly identify all sub-beams (and thus their parent beams) that intersect this ray.
+4.  **Radiance Estimation:** The intersected beams are used to estimate the radiance at the intersection point, typically via density estimation or direct contribution summation, as defined by the parent method [Parent](2521-photon-based-estimation.md).
+
+**Parameters**
+*   **Splitting Length:** Set automatically to achieve unit aspect ratio for sub-beams. No fixed constant is provided in the sources [S1].
+
+**Edge Cases and Pitfalls**
+*   **Overlap:** Many beams may overlap the same region of space or share common vertices (e.g., from a point light source). A naive BVH application is inefficient in these cases; the sub-beam splitting strategy is critical to mitigate this [S1].
+*   **Precision:** Standard floating-point precision is assumed for ray-beam intersection tests. Degenerate beams (zero length) should be handled or filtered during the splitting phase.
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class PhotonBeam:
+    def __init__(self, origin, direction, length, radiance):
+        self.origin = origin
+        self.direction = direction
+        self.length = length
+        self.radiance = radiance
+        self.sub_beams = []
+
+    def split(self):
+        """
+        Splits the beam into sub-beams with approximately unit aspect ratio.
+        The exact splitting logic is implementation-specific but aims to
+        normalize the bounding box dimensions of the sub-beams.
+        """
+        # [G] Implementation detail: Calculate optimal split count based on
+        # beam length and desired aspect ratio. Create sub-beams along the
+        # beam's axis.
+        pass
+
+class BVHNode:
+    def __init__(self, bounding_box):
+        self.bbox = bounding_box
+        self.children = []
+        self.beams = [] # List of PhotonBeam references
+
+    def is_leaf(self):
+        return len(self.children) == 0
+
+def build_bvh(beams):
+    """
+    Constructs a BVH from a list of PhotonBeams using SAH.
+    """
+    # 1. Pre-process beams: split into sub-beams
+    sub_beams = []
+    for beam in beams:
+        beam.split()
+        sub_beams.extend(beam.sub_beams)
+
+    # 2. Build BVH using SAH
+    # [G] Standard SAH BVH construction algorithm:
+    # - Compute bounding box for all sub-beams.
+    # - Recursively split nodes along the axis with the largest surface area
+    #   difference, minimizing the cost function:
+    #   Cost = p_trav * (Cost_left + Cost_right) + p_intersect * N
+    # - Stop when leaf nodes contain a small number of sub-beams.
+    root = _build_bvh_recursive(sub_beams)
+    return root
+
+def query_bvh(root, ray_origin, ray_direction):
+    """
+    Intersects an eye ray with the BVH to find all intersected beams.
+    """
+    intersected_beams = []
+    stack = [root]
+    
+    while stack:
+        node = stack.pop()
+        
+        # Check intersection with node bounding box
+        if not ray_intersects_bbox(ray_origin, ray_direction, node.bbox):
+            continue
+            
+        if node.is_leaf():
+            # Check intersection with individual sub-beams in the leaf
+            for sub_beam in node.beams:
+                if ray_intersects_beam(ray_origin, ray_direction, sub_beam):
+                    intersected_beams.append(sub_beam.parent_beam)
+        else:
+            # Push children to stack (order may affect performance)
+            stack.extend(node.children)
+            
+    return intersected_beams
+```
+
+## Subtopics
+
+### [Photon Query Using Ray Tracing (BVH Acceleration)](10614-photon-query-using-ray-tracing-bvh-acceleration.md)
+This method accelerates photon queries for Photon Density Estimation (PDE) estimators by formulating the spatial search as a ray-tracing problem using hardware-accelerated Bounding Volume Hierarchies (BVH), such as those provided by NVIDIA OptiX. It stores geometric bounding volumes (cylinders or spheres) representing the kernel support of photon points and beams, allowing the GPU's ray-tracing cores to efficiently cull non-interacting photons before executing software-based intersection tests. Unlike brute-force linear scans, this approach leverages the BVH structure to reduce query complexity, trading off the overhead of ray-tracing setup for significant speedups in scenes with high photon densities.
+
+## Operating characteristics
+*   **Time Complexity:** Construction is $O(N \log N)$ on average due to SAH-based partitioning, where $N$ is the number of sub-beams. Query time is $O(\log N + k)$, where $k$ is the number of intersected beams, significantly faster than the $O(N)$ linear scan [S1].
+*   **Memory Complexity:** $O(N)$ to store the BVH nodes and beam data. The splitting of beams into sub-beams increases the memory footprint compared to storing raw beams, but this is necessary for efficient partitioning [S1].
+*   **Performance:** Measured on a MacBook Pro with a 3.06 GHz Intel Core 2 Duo processor and 4 GB of RAM. The implementation uses a single core, but the read-only nature of radiance estimation allows for easy parallelization [S1].
+*   **Strengths:** Efficient handling of overlapping beams; fast query times for eye rays; scalable to high photon densities.
+*   **Limitations:** Construction overhead can be significant for very large photon counts; requires careful tuning of the splitting length to avoid excessive sub-beams.
+*   **When to Use:** Scenes with high photon densities where query time dominates; when hardware ray-tracing acceleration is not available or when software BVH traversal is preferred for flexibility.
+*   **When Not to Use:** Scenes with very few photons where the overhead of BVH construction outweighs the query benefits; when memory is extremely constrained.
+
+## Background
+The method was developed by researchers exploring acceleration schemes for volumetric radiance estimation using photon points and beams. After experimenting with KD-Trees, BVHs, and grids, they found that a BVH with modifications (specifically beam splitting) performed best for their problem domain [S1]. The work is part of a broader effort to make photon-based methods practical for real-time or near-real-time volumetric rendering.
+
+## Sources
+[S1] A comprehensive theory of volumetric radiance estimation using photon points and beams, https://doi.org/10.1145/1899404.1899409, fetched 2026-10-26

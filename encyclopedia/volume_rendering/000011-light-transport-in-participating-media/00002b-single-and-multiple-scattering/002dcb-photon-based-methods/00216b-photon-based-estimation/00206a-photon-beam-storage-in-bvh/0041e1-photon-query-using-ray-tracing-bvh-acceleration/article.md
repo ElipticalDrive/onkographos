@@ -1,0 +1,219 @@
+# Photon Query Using Ray Tracing (BVH Acceleration)
+Also called: OptiX Photon Query, Ray Tracing Photon Query
+
+## Overview
+This method accelerates photon queries for Photon Density Estimation (PDE) estimators by formulating the spatial search as a ray-tracing problem using hardware-accelerated Bounding Volume Hierarchies (BVH), such as those provided by NVIDIA OptiX [S1]. It stores geometric bounding volumes (cylinders or spheres) representing the kernel support of photon points and beams, allowing the GPU's ray-tracing cores to efficiently cull non-interacting photons before executing software-based intersection tests [S1]. Unlike brute-force linear scans, this approach leverages the BVH structure to reduce query complexity, trading off the overhead of ray-tracing setup for significant speedups in scenes with high photon densities [S1].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- A set of stored photons (points or beams) with associated kernel radii $r$.
+- A query entity: either a camera beam (ray) or a camera point.
+- A ray-tracing framework (e.g., OptiX) with hardware-accelerated BVH support [S1].
+- The specific PDE estimator type (B-B1D, P-B2D, P-P3D, or P-P2D) [S1].
+
+**Outputs:**
+- A list of interacting photons (those within the kernel radius) and their geometric intersection details required for density estimation [S1].
+
+### Data Structures
+The BVH stores instances of bounding volumes. The layout depends on the estimator type:
+
+1.  **B-B1D (Beam-Beam, 1D blur):**
+    -   **Volume:** A cylinder centered on the photon beam axis.
+    -   **Radius:** Equal to the 1D kernel width $r$ [S1].
+    -   **Storage:** The BVH stores an Axis-Aligned Bounding Box (AABB) of this cylinder. To reduce empty space, an instance transform of a unit cylinder is used for an initial Oriented Bounding Box (OBB) rejection test in hardware, followed by a software test [S1].
+
+2.  **P-B2D (Point-Beam, 2D blur):**
+    -   **Volume:** A sphere centered on the photon point.
+    -   **Radius:** Equal to the kernel width $r$ [S1].
+    -   **Storage:** The BVH stores the AABB of this sphere [S1].
+
+3.  **P-P3D / P-P2D (Point-Point, 3D/2D blur):**
+    -   **Volume:** A sphere centered on the photon point.
+    -   **Radius:** Equal to the kernel width $r$ [S1].
+    -   **Storage:** The BVH stores the AABB of this sphere [S1].
+
+### Parameters
+-   **Kernel Width ($r$):** The maximum distance between points or beams considered by the estimator. This value is set according to Vévoda [Vév14] [S1].
+
+### Numbered Steps
+
+1.  **BVH Construction:**
+    For each photon (point or beam), compute the bounding volume (cylinder or sphere) with radius $r$. Insert the AABB of this volume into the hardware-accelerated BVH. For B-B1D, also store the instance transform for the unit cylinder OBB test [S1].
+
+2.  **Query Formulation:**
+    -   If the query is a **camera beam**, define a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ corresponding to the beam direction [S1].
+    -   If the query is a **camera point** (P-P3D/P-P2D), define a ray with origin at the camera point, an arbitrary direction, and a very small extent (effectively a point query) [S1].
+
+3.  **BVH Traversal (Hardware):**
+    Trace the query ray against the BVH. The hardware checks for intersections with the stored AABBs (and OBBs for B-B1D).
+    -   If no intersection is found, the photon is outside the kernel radius. Skip evaluation [S1].
+    -   If an intersection is found, invoke the software **Intersection Program** [S1].
+
+4.  **Intersection Program (Software):**
+    Perform a precise geometric test to confirm if the query entity interacts with the photon's kernel support. The test depends on the estimator:
+    -   **B-B1D:** Check if the camera beam ray intersects the plane perpendicular to the photon beam. Reject if the ray is parallel to the photon beam or does not intersect the specific perpendicular plane segment [S1].
+    -   **P-B2D:** Check if the camera beam ray intersects the disk centered at the photon point and perpendicular to the ray. Reject if the ray origin/endpoint is inside the sphere but does not intersect the disk [S1].
+    -   **P-P3D/P-P2D:** Check if the camera point lies within the sphere (distance $\le r$). Since the query is a ray with small extent, this effectively checks point inclusion [S1].
+
+5.  **Estimator Evaluation:**
+    If the intersection program confirms a valid geometric interaction, evaluate the PDE estimator using the photon data and the intersection geometry (e.g., finding points $\mathbf{b}$ and $\mathbf{c}$ for B-B1D) [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def photon_query_ray_tracing(estimator_type, query_entity, kernel_radius, bvh):
+    """
+    Accelerates photon query using BVH ray tracing.
+    
+    Args:
+        estimator_type: 'B-B1D', 'P-B2D', 'P-P3D', or 'P-P2D'
+        query_entity: 
+            For B-B1D/P-B2D: A ray (origin, direction) representing the camera beam.
+            For P-P3D/P-P2D: A point (origin).
+        kernel_radius: float, r
+        bvh: BVH structure containing photon bounding volumes
+        
+    Returns:
+        List of interacting photons with intersection details.
+    """
+    interacting_photons = []
+    
+    # Step 2: Formulate Query Ray
+    if estimator_type in ['P-P3D', 'P-P2D']:
+        # Point query requires a ray with small extent
+        query_origin = query_entity
+        query_direction = Vector3(1.0, 0.0, 0.0) # Arbitrary direction [G]
+        query_extent = 1e-6 # Very small extent [S1]
+        query_ray = Ray(query_origin, query_direction, query_extent)
+    else:
+        # Beam query uses the camera beam directly
+        query_ray = query_entity
+
+    # Step 3: BVH Traversal
+    # Hardware checks AABB (and OBB for B-B1D)
+    # Returns list of candidate photon indices that intersect the bounding volume
+    candidate_indices = bvh.intersect(query_ray)
+
+    for idx in candidate_indices:
+        photon = bvh.get_photon(idx)
+        
+        # Step 4: Intersection Program (Software)
+        is_valid = False
+        
+        if estimator_type == 'B-B1D':
+            # Cylinder center is photon beam axis
+            # Check if query_ray intersects the plane perpendicular to photon beam
+            # at the appropriate location.
+            # Reject if parallel or outside the perpendicular plane segment.
+            is_valid = check_b_b1d_intersection(query_ray, photon, kernel_radius)
+            
+        elif estimator_type == 'P-B2D':
+            # Sphere center is photon point
+            # Check if query_ray intersects the disk centered at photon point
+            # perpendicular to query_ray direction.
+            # Reject if ray origin/endpoint is in sphere but not disk.
+            is_valid = check_p_b2d_intersection(query_ray, photon, kernel_radius)
+            
+        elif estimator_type in ['P-P3D', 'P-P2D']:
+            # Sphere center is photon point
+            # Check if query_origin (camera point) is inside the sphere.
+            # Distance <= radius.
+            dist = length(query_origin - photon.position)
+            is_valid = (dist <= kernel_radius)
+
+        # Step 5: Evaluate Estimator
+        if is_valid:
+            # Evaluate PDE estimator using photon and query data
+            result = evaluate_pde_estimator(estimator_type, query_entity, photon, kernel_radius)
+            interacting_photons.append(result)
+
+    return interacting_photons
+
+def check_b_b1d_intersection(ray, photon, radius):
+    """
+    Checks if ray intersects the perpendicular plane of the photon beam.
+    Photon beam is defined by origin and direction.
+    """
+    # The plane is perpendicular to the photon beam direction.
+    # The intersection point on the plane must be within radius of the photon beam axis.
+    # Also handle parallel case.
+    photon_dir = photon.direction
+    ray_dir = ray.direction
+    
+    # Check parallelism
+    if abs(dot(ray_dir, photon_dir)) > 0.9999: # Near parallel [G]
+        return False
+        
+    # Calculate intersection of ray with the plane passing through photon origin
+    # perpendicular to photon_dir.
+    # Plane equation: dot(p - photon_origin, photon_dir) = 0
+    # Ray: p = ray_origin + t * ray_dir
+    # dot(ray_origin + t * ray_dir - photon_origin, photon_dir) = 0
+    # t = dot(photon_origin - ray_origin, photon_dir) / dot(ray_dir, photon_dir)
+    
+    t = dot(photon.origin - ray.origin, photon_dir) / dot(ray_dir, photon_dir)
+    
+    if t < 0 or t > ray.max_t: # Out of ray extent
+        return False
+        
+    intersection_point = ray.origin + t * ray_dir
+    
+    # Check if intersection point is within radius of photon beam axis
+    # Distance from point to line (photon beam)
+    vec_to_point = intersection_point - photon.origin
+    proj = dot(vec_to_point, photon_dir) * photon_dir
+    perp_dist_sq = length_sq(vec_to_point - proj)
+    
+    return perp_dist_sq <= radius * radius
+
+def check_p_b2d_intersection(ray, photon, radius):
+    """
+    Checks if ray intersects the disk centered at photon point,
+    perpendicular to ray direction.
+    """
+    # Disk center: photon.origin
+    # Disk normal: ray.direction
+    # Ray: p = ray.origin + t * ray.direction
+    
+    # Intersection of ray with plane perpendicular to ray at photon.origin?
+    # No, the disk is perpendicular to the RAY, centered at PHOTON.
+    # So the plane is perpendicular to ray.direction and passes through photon.origin.
+    
+    # Plane equation: dot(p - photon.origin, ray.direction) = 0
+    # dot(ray.origin + t * ray.direction - photon.origin, ray.direction) = 0
+    # dot(ray.origin - photon.origin, ray.direction) + t * dot(ray.direction, ray.direction) = 0
+    # t = -dot(ray.origin - photon.origin, ray.direction) / 1.0 (assuming normalized ray dir)
+    
+    t = dot(photon.origin - ray.origin, ray.direction)
+    
+    if t < 0 or t > ray.max_t:
+        return False
+        
+    intersection_point = ray.origin + t * ray.direction
+    
+    # Check if intersection point is within radius of photon.origin
+    dist_sq = length_sq(intersection_point - photon.origin)
+    
+    return dist_sq <= radius * radius
+```
+
+### Edge Cases and Pitfalls
+-   **B-B1D Parallel Beams:** The camera beam may be parallel to the photon beam. In this case, the ray intersects the cylinder but not the perpendicular plane. The intersection program must explicitly reject this case [S1].
+-   **P-B2D Ray Origin/Endpoint in Sphere:** The ray origin or endpoint may lie inside the sphere (bounding volume) without intersecting the actual disk (kernel support). The intersection program must verify disk intersection, not just sphere intersection [S1].
+-   **P-P3D/P-P2D Point Query:** Ray tracing frameworks require a ray, but the query is a point. The remedy is to trace a ray with origin at the camera point, arbitrary direction, and very small extent [S1].
+
+## Operating characteristics
+-   **Time Complexity:** The BVH traversal reduces the search from $O(N)$ to $O(\log N)$ on average for the culling phase, with the final intersection test being $O(1)$ per candidate [S1].
+-   **Memory Complexity:** Requires storing the BVH structure and the bounding volumes (AABBs/OBBs) for all photons. The memory overhead is proportional to the number of photons [S1].
+-   **Strengths:** Leverages hardware-accelerated ray tracing (RTX) for efficient culling. Reduces the number of expensive software-based geometric tests [S1].
+-   **Limitations:** Requires a ray-tracing capable GPU and framework (e.g., OptiX). The bounding volumes (especially cylinders for B-B1D) may have empty space, requiring additional OBB tests or software checks [S1].
+-   **When to Use:** When simulating participating media with high photon densities and using PDE estimators (B-B1D, P-B2D, P-P3D, P-P2D) where hardware acceleration is available [S1].
+
+## Background
+This method was introduced in the context of the Unified Photon Beam Path (UPBP) estimator for volumetric light transport simulation [S1]. It builds on the concept of photon beam storage in BVH [Parent] and adapts it for hardware ray tracing. The approach was selected to utilize the RTX GPU's hardware-accelerated BVH, as described in the OptiX programming guide and Turing whitepaper [S1]. The kernel radii are set according to Vévoda [Vév14] [S1].
+
+## Sources
+[S1] Efficient Hardware Acceleration of Robust Volumetric Light Transport Simulation, https://doi.org/10.1111/cgf.14802, fetched 2026-10-27

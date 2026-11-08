@@ -1,0 +1,201 @@
+Good morning, 
+This may be a stupid question, but here goes. Suppose I have a set of custom primitives say 12 quadrilaterals, and I have created an __intersection__ shader program that is passed an SBT with these geometr…
+
+AABB for multiple custom primitives - OptiX - NVIDIA Developer Forums
+AABB for multiple custom primitives
+Gaming and Visualization Technologies
+Visualization
+OptiX
+picard1969
+May 28, 2021, 12:51pm
+1
+Good morning,
+This may be a stupid question, but here goes. Suppose I have a set of custom primitives say 12 quadrilaterals, and I have created an __intersection__ shader program that is passed an SBT with these geometries. Do I have to build an AABB for each of the quadrilateral primitives or is it sufficient to create a single AABB that encompasses the entire structure the custom primitives make up?
+Many thanks in advance for any assist.
+Edit: Never mind. I believe I found the answer - I DO need a single AABB per custom primitive. Please correct if I am wrong.
+Thanks.
+picard1969
+May 28, 2021, 3:59pm
+2
+Question regarding the SBT count when using custom primitives, if that is okay. If I have something like 12 quads (custom primitives), do I need to set the OptixBuildInput.numSbtRecords to 12 as well or is 1 okay ?
+I am assuming that the custom primitives are all employed to render a single object - e.g. the object geometry is made up of a set of custom primitives.
+Thanks for any help.
+dhart
+May 28, 2021, 4:08pm
+3
+The OptiX interface for custom primitives always needs to have exactly 1 AABB per “primitive”. What you do inside that AABB is up to you. You have complete and total control over what a “primitive” means when it comes to custom primitives.
+You want to create a bounding box for each and every “primitive”, and then pass those bounding boxes to optixAccelBuild() in order to create your acceleration structure. When you trace, OptiX is going to call __intersection__ every time a ray hits one of those boxes you provided, and in the intersection program, OptiX will tell you that the primitive ID is the index of the corresponding box you created.
+This means you almost certainly want to give 1 box per quadrilateral, which implies that your intersection program will only lookup the data for a single quadrilateral, and the calculate the ray intersection for only that quad.
+This also means that you could, if you wanted, define a primitive to be a group of quads. Suppose you want to save memory by grouping 4 quads at a time, and suppose it’s acceptable to you if intersection goes slower. Then you could provide a bounding box for every group of 4 quads. You would have four times as many quads as AABBs. Your intersection program would need to iterate through all four quads in your 4-quad “primitive” and calculate the intersection correctly. You would have to make sure that in your intersection program, you can map the OptiX primitive ID to the 4 quads that were used to create the original AABB. (The old OptiX 6 SDK sampled called “optixMDLDisplacement” is an example of doing exactly this, of bounding and intersecting multiple sub-primitives within a single “primitive”. The same could be done with OptiX 7.)
+–
+David.
+When is the Intersection Shader called for various primitive types
+dhart
+May 28, 2021, 4:13pm
+4
+You could use any number of SBT records from 1 up to 12. With only 1 mesh in the scene, you could think of the SBT as a table of materials. If you want the same material across the mesh, you’d use 1 SBT entry. If you want a different material on each triangle, you’d use 12 SBT entries.
+Read through this, and skip over the DirectX and Vulkan parts: The RTX Shader Binding Table Three Ways
+–
+David.
+picard1969
+May 28, 2021, 6:32pm
+5
+Great information. Thanks.
+picard1969
+May 28, 2021, 7:40pm
+6
+Continuing with my example of custom primitives (e.g. quads) whereby each structure would contain geometries I want to pass to my __intersection__ shader. During the creation of my SBT would something along the lines of the following make sense?
+```
+std::vector<Quads> quads; 
+OptixShaderBindingTable sbt;
+sbt = {};
+
+// Assume:
+// 1. Geometries are stored as vector values in Quads (e.g. vertices)
+// 2. SbtRecordIntersect has properly formatted data (e.g. vertices)
+// 3. HitGroupPGs_ is vector of length 1 of OptixProgramGroup type
+
+int cnt = quads.size();    // Total length of quad vector
+CUdeviceptr isRecord;
+const size_t isRecordSize = sizeof(SbtRecordIntersect);
+CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&isRecord), cnt*isRecordSize));
+
+SbtRecordIntersect* isSbt = new SbtRecordIntersect[cnt];
+  for (int i = 0; i < cnt; ++i) {
+      isSbt[i] = {};
+      // Populate HOST-side copy of record with data from argument Quad
+      // structure at this index i
+      isSbt[i].vertices= quads[i].vertices.data();
+  }
+
+OPTIX_CHECK(optixSbtRecordPackHeader(hitgroupPGs_[0], isSbt));
+CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(isRecord), isSbt, cnt*isRecordSize, cudaMemcpyHostToDevice));
+...
+// Store raygen and miss records in sbt variable
+...
+// Now store intersection record (hit-group) in sbt variable
+sbt.hitgroupRecordBase = isRecord;
+sbt.hitgroupRecordCount = cnt;
+sbt.hitgroupRecordStrideInBytes = static_cast<uint32_t>(isRecordSize); 
+```
+I think the above code works for what I would like to accomplish, but am open to suggestion(s).
+Thanks again for any assit.
+dhart
+May 28, 2021, 10:38pm
+7
+Looks reasonable. Two notes:
+1- Calling the record “isRecord” implies the record is just for intersection, but you should think of one entry in the hitGroup portion of the SBT to mean the collection of programs needed to handle the specific combination of one type of geometry along with it’s hit shaders (e.g. it’s material). So there’s an automatic connection between your intersection program and closest-hit and any-hit programs, they all go together. There’s nothing wrong with calling it an isRecord, but hopefully that makes it more clear that if you do have materials or hit shaders down the road, the name could cause a little confusion.
+2- your cudaMalloc and your cudaMemcpy are passing in different byte totals. Looks like cudaMalloc should get cnt*isRecordSize, rather than isRecordSize, right?
+–
+David.
+picard1969
+May 29, 2021, 3:07am
+8
+Thanks a million @dhart.
+You are correct maybe calling the record “isRecord” is probably a bad idea
+Right again, I meant cnt*isRecordSize rather than just isRecordSize. I made the changes in the above example code snippet
+I apologize for bothering you so much, still trying to fully understand. A follow up and related question.
+Given that I have “cnt” number of records defined for intersection Sbt in above code snippet, should I also change the value OptixBuildInput.numSbtRecords to the value of “cnt” (i.e. the total number of Quad structs being loaded as a SBT in above code snippet) ?
+Example done during building of AS for custom primitives related to above code snippet:
+OptixBuildInput aabb_input = {};
+aabb_input.type = OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVE;
+…
+aabb_input.numSbtRecords = cnt; // Should this be 1 or cnt?
+…
+Thanks again.
+dhart
+June 2, 2021, 3:12pm
+9
+The total number of SBT records in your SBT should equal the sum of all OptixBuildInput.numSbtRecords. The numbers should match if you have only one build input, but they will be different if you have multiple build inputs.
+Check out section on SBT vs AS index in the programming guide for several visual examples: https://raytracing-docs.nvidia.com/optix7/guide/index.html#shader_binding_table#sbt-gasa-index
+Hopefully you’re also following the neighbor thread on the SBT with Detlef’s excellent explanations: SBT Theoretical quesions?
+–
+David.
+picard1969
+June 2, 2021, 3:26pm
+10
+Cool. Thanks @dhart
+Given that I have a SBT record for each custom primitive which is the only SBT I am actually accessing on DEVICE side then I suppose cnt is the correct setting (where cnt is total number of custom primitives).
+I am also following the SBT Theoretical questions link which has a lot of great information.
+Thanks again.
+picard1969
+June 3, 2021, 5:37pm
+11
+Thanks again @dhart.
+I suppose I am confused about the OptixBuildInput.numSbtRecords with regards to my custom primitives (e.g. quads). Please forgive if I seem a little dense with regards to SBT.
+Suppose I have 2 primitives each with a SBT record because I am passing geometries via SBT and I also have a miss SBT - the resulting value of OptixBuildInput.numSbtRecords would be 3?
+dhart
+June 3, 2021, 5:55pm
+12
+No, the miss records section of the SBT is indexed differently from the hit records. Build inputs are only referring to hit group records. Think about how it doesn’t make sense to index into the material that you didn’t hit; this is why miss shaders are indexed differently from hit shaders.
+So in your case, numSbtRecords would be 2, because you have 2 total combinations of geometry + material + ray type. Separately you will have 1 miss record in your Miss Group to deal with your 1 ray type.
+The Shader Binding Table is really 5 separate tables (called “sections” in the OptiX Programming Guide), and the indexing is different for each section. Ray gen and Exception are sections that have only 1 entry. Miss is a section that has an entry for each ray type. Hit groups is a section that might have an entry for each combination of ray type and geometry type and material - hit groups is the section of the SBT that is associated with geometry and GAS build inputs. The Callables section is indexed manually/directly. Each one of these sections is independent and indexed differently
+Make sure to re-read the entire SBT section of the programming guide slowly and repeatedly until it sinks in. I still have to do that routinely. ;) https://raytracing-docs.nvidia.com/optix7/guide/index.html#shader_binding_table#shader-binding-table
+–
+David.
+picard1969
+June 3, 2021, 5:58pm
+13
+Thank you a million times @dhart
+That is exactly what was confusing me. The OptixBuildInput.numSbtRecords is only referring to hit group records. I am good to go now.
+Thanks again. I will re-read the SBT section for good measure.
+Related topics
+Topic
+Replies
+Views
+Activity
+Render Quads
+OptiX
+14
+1894
+April 26, 2021
+optix::Aabb for Optix 7
+OptiX
+12
+2164
+November 25, 2020
+SBT Theoretical quesions?
+OptiX
+11
+3109
+September 19, 2022
+How to index STB record in each OptixBuildInput in Optix7?
+OptiX
+2
+1287
+June 21, 2021
+AABB for mesh of custom primitives - example(s)?
+OptiX
+4
+812
+May 26, 2021
+Tracing Works As Expected With `optixBuildAccel` With Only One OptixBuildInput But Fails With Two
+OptiX
+ubuntu
+,
+lidar
+,
+ray-tracing
+5
+1253
+April 21, 2023
+AABBs for custom primitives in OptiX 7
+OptiX
+4
+1439
+February 4, 2020
+Keep getting [ 2][ ERROR]: Validation mode caught builtin exception OPTIX_EXCEPTION_CODE_BUILTIN_IS_MISMATCH
+OptiX
+3
+570
+October 30, 2023
+[OptiX] Is it possible to get the all primitive IDs contained by an hit AABB of a ray?
+OptiX
+4
+1009
+November 28, 2022
+Question about SBTs
+OptiX
+4
+1250
+November 2, 2020

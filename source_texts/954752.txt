@@ -1,0 +1,914 @@
+Gaussian Splat Renderer for the Godot Engine. Contribute to klausi3D/godotGS development by creating an account on GitHub.
+
+gaussian_splatting: opacity import fix + alpha pipeline + sort flexibility + perf-capture by klausi3D · Pull Request #325 · klausi3D/godotGS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+klausi3D
+commented
+May 5, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+5 commits split across cleanly-bounded concerns. Mixed bugfix + feature work; the first commit is the critical fix.
+Commits
+gaussian_splatting/io: PLY + SPZ importers populate opacity_logits — CRITICAL bugfix. Both importers populated colors[i].a from sigmoid-decoded opacity but never called set_opacity_logits(...). _ensure_buffer_sizes zero-fills logits to splat_count as a defense, so .tres saved with all-zero logits + correct color.a. At runtime get_opacities() prefers logits → returns sigmoid(0)=0.5 for every splat regardless of the actual stored alpha. Symptom: every splat rendered at ~50% opacity producing fuzzy/over-opaque output, with an alpha_clip cull cliff at exactly 0.5. Fix populates logits with Math::log(p/(1-p)) per splat in lockstep with color.a writes. Pre-existing assets need a forced re-import (delete the cached .tres).
+gaussian_splatting: alpha pipeline overhaul + sort flexibility + perf-capture infra — bundles the threshold contract + per-splat alpha cull + GPU-pass timing. Major pieces: new gs_alpha_threshold.glsl pinning RASTER_ALPHA_THRESHOLD = 1/255 with derived Q and MAX_SIGMA; raster 1e-4 cutoffs replaced with the shared constant; GS_TIGHTER_BOUNDS * 0.85 silent shrink removed (was binning iso < raster iso → tile-aligned bands); Mip-Splatting alpha_rescale = sqrt(det_raw/det) companion to the low-pass dilation; new culling/alpha_clip project setting (default 0.3, PlayCanvas parity) plumbed end-to-end; alpha_clip added to _compute_cull_config_signature so OutputCompositor cache invalidates on changes; gpu_sorting/key_bits|tile_bits|depth_bits settings now actually control the sort path; deterministic 32-bit tie-break in gs_pack_sort_key; max_raster_splats_per_tile default 8192→65536; full per-pass GPU timing breakdown with explicit *_valid flags.
+tests/runtime: benchmark perf-capture harness + lanes + test_project lock — --require-gpu-timestamps, dense_resident_2m lane (14×14 grid of synthetic_spiral, ~2M splats), four sort32_* lanes, synthetic asset fixtures, manifest. Pinned test_project/project.godot to known-good A/B baseline.
+gaussian_splatting/renderer: allow opacity_multiplier > 1 for SuperSplat-style overfill — setter clamp [0, 1] → [0, 8] + inspector hint range "0,1,0.01" → "0,8,0.01". Per-splat alpha still capped at 0.99 in shader so back-to-front compositing stays well-defined.
+gaussian_splatting/nodes: extend GaussianSplatNode3D opacity range to 8.0 for overfill — companion to tests: update projection validation for Godot 4.5 APIs #4 for the per-node rendering/opacity slider.
+Known issue (commits 4 + 5)
+Slider behavior in the editor isn't perceptibly different between value 1 and value 8 in initial visual testing — under investigation. Most likely either editor metadata cache staleness or shader 0.99 ceiling being already-saturated at multiplier=1 for typical splats. Math through the shader appears correct (base_opacity = clamp(opacity * multiplier * fades * rescale, 0, 0.99)), so this is likely a verification gap rather than a wiring break, but flagged here in case reviewer wants to drop those commits before merge.
+Verification
+tischgruppe.ply rendered correctly post-fix (visually validated against the original fuzzy state).
+Windows editor build clean (3:35 link).
+5 commits cherry-picked onto origin/master with one resolved conflict in tile_renderer.cpp tie_bits block (kept master's dynamic GS_SORT_TIE_BITS define logic).
+Test plan
+Editor opens without errors on a project that had pre-fix .tres caches (tests reimport path)
+tischgruppe.ply (or other real-scan PLY) visibly cleaner / less fuzzy than before
+dense_resident_2m benchmark runs with new perf-capture metrics
+gaussian_splatting/culling/alpha_clip project setting actually culls splats (try 0.0 vs 0.3 vs 0.99)
+Confirm or reject the opacity_multiplier overfill commits 4+5 visible behavior
+klausi3D
+and others
+added 5 commits
+May 5, 2026 10:06
+gaussian_splatting/io: PLY + SPZ importers populate opacity_logits
+…
+2466a3f
+```
+GaussianSplatAsset::_ensure_buffer_sizes zero-fills opacity_logits to
+splat_count as a defense against the 0xC0C0C0C0 poison pattern. Both PLY
+and SPZ importers populated colors[i].a from sigmoid-decoded opacity but
+never called set_opacity_logits(...). Net: .tres saved with all-zero
+opacity_logits + correct color.a values.
+
+At runtime, GaussianSplatAsset::get_opacities() (asset.cpp:549) prefers
+opacity_logits whenever sized — applying sigmoid(0)=0.5 to every splat
+regardless of color.a. Visible symptom: every splat rendered at ~50%
+opacity producing fuzzy/over-opaque output, with an alpha_clip cull
+cliff at exactly 0.5 (since g.opacity == 0.5 for every splat).
+
+Fix populates opacity_logits with Math::log(p/(1-p)) per splat in
+lockstep with color.a writes, then calls asset->set_opacity_logits()
+before save. Pre-existing assets need a forced re-import (delete the
+.godot/imported/<asset>.ply-*.tres cache).
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+gaussian_splatting: alpha pipeline overhaul + sort flexibility + perf…
+…
+8bce9eb
+```
+…-capture infra
+
+Bundles multiple correctness/quality fixes for the renderer that share
+files (tile_binning.glsl, tile_renderer.cpp, render_pipeline_stages.cpp).
+Each is internally isolated; bundling avoids cross-cutting splits.
+
+Alpha pipeline contract (closes the binning/raster mismatch that produced
+tile-aligned bands and fuzzy halos):
+- New shaders/includes/gs_alpha_threshold.glsl pins
+  GS_RASTER_ALPHA_THRESHOLD = 1/255, GS_RASTER_ALPHA_REJECT_Q = -2*ln(t),
+  GS_RASTER_MAX_SIGMA = sqrt(Q). Matches gsplat / Brush / PlayCanvas.
+- tile_raster_common.glsl: replace hardcoded 1e-4 alpha cutoffs with
+  GS_RASTER_ALPHA_THRESHOLD, derive Q from same constant.
+- tile_binning.glsl: MAX_SIGMA derived from header; remove the silent
+  GS_TIGHTER_BOUNDS * 0.85 multiplier (was binning iso < raster iso ->
+  bands); add Mip-Splatting alpha_rescale = sqrt(det_raw/det) companion
+  to the low-pass filter dilation; lift det_raw out of inner scope so
+  both subpixel cull and the rescale share it.
+- C++ visibility_threshold defaults bumped to 1.0/255.0 across
+  rasterizer_interfaces.h, gpu_culler.h, tile_render_types.h,
+  tile_renderer.cpp, gaussian_splat_manager.cpp.
+- Quality orchestrator + bindings allow setting visibility_threshold
+  down to 1e-4 (range widened from [0.001, 0.1] to [0.0001, 0.1]).
+
+Per-splat alpha_clip cull (PlayCanvas alphaClip parity, default 0.3):
+- New rendering/gaussian_splatting/culling/alpha_clip project setting.
+- GPUCuller::CullingConfig + RenderParams field, plumbed through
+  TileRenderParamsGPU.opacity_culling_config[2] (slot was reserved).
+- gs_get_alpha_clip() accessor + cull at tile_binning.glsl: every splat
+  with g.opacity <= alpha_clip is dropped before projection.
+- alpha_clip added to _compute_cull_config_signature so OutputCompositor
+  cache invalidates when the value changes (else cache hit silently
+  masks the cull). Documented as feedback memory for future cull knobs.
+- gpu_sorting/max_raster_splats_per_tile cap default 8192 -> 65536 in
+  three places (load fallback, reset_to_defaults, GLOBAL_DEF) to match
+  the header intent and avoid silent splat-list truncation in dense
+  tiles.
+
+Sort flexibility + 32-bit support:
+- gpu_sorting_pipeline.cpp: project key_bits/tile_bits/depth_bits
+  settings actually control the GPU sort path (was hardcoded 32-bit).
+- gpu_sorter.cpp/.h: 32-bit factory acceptance + sort metadata fields
+  (last_key_bits, last_pass_count) + GPU timestamp capture.
+- tile_binning.glsl: deterministic tie-break in the 32-bit quantized
+  depth packing (8/8 split) so dense overlapping splats sort stably.
+
+GPU pass timing breakdown + perf-capture infrastructure:
+- render_pipeline_stages, render_diagnostics_orchestrator,
+  render_resource_orchestrator, render_streaming_orchestrator gain
+  per-pass GPU time accumulators with explicit *_valid flags.
+- TileRenderer exposes timing accessors + perf_capture toggles for
+  raster shader counters and force-runtime-statistics modes.
+- New SSBO counter slots in tile_binning / tile_rasterizer /
+  tile_rasterizer_compute for raster_reject_quadratic /
+  raster_reject_lod_opacity / raster_reject_blend_alpha.
+- docs/timing_metrics_reference.md updated with the new metric keys.
+- Disable hotspot pre-raster cull defaults (was a closed-loop oscillator
+  between visible-splats fade and hotspot detection).
+
+Pre-existing assets imported before the io/ commit need a forced
+re-import to pick up the opacity_logits fix.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+tests/runtime: benchmark perf-capture harness + lanes + test_project …
+…
+8164607
+```
+…lock
+
+Benchmark infrastructure for the renderer perf-capture work in the
+preceding commit. Adds:
+
+- run_benchmark.py: per-lane runtime statistics + raster shader
+  counter capture, --require-gpu-timestamps, --timeout-scale.
+- benchmark_suite_lane.gd: dense_resident_2m preset (14x14 grid of
+  synthetic_spiral instances at 10000 splats each, ~2M total) +
+  perf-capture renderer toggles.
+- benchmark_metrics.gd / benchmark_scene_contract.gd: per-stage GPU
+  time fields, raster shader counter readback.
+- Four sort32_* lanes targeting 32-bit sort key edge cases:
+  coplanar_alpha, depth_range, near_camera_large, tile_bit_pressure.
+- Synthetic asset fixtures (gsplatcache + ply.import) for the new
+  lanes plus existing test_splats / synthetic_cloud / cube / spiral /
+  flower_field / mandelbulb / plane / sphere / torus.
+- benchmark_asset_manifest.json: maps lanes to asset paths.
+
+test_project/project.godot pinned to a known-good A/B baseline:
+gpu_sorting/key_bits=64 + tile_bits=32 + depth_bits=32 (matches the
+new gpu_sorting flexibility); enable_tie_breaker=true;
+max_overlap_records=5000000; visibility_threshold=0.0001;
+low_pass_filter=0.05; max_raster_splats_per_tile=65536. These match
+the renderer defaults so the bench measures the contract rather than
+any per-project override drift.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+gaussian_splatting/renderer: allow opacity_multiplier > 1 for SuperSp…
+…
+8f0907c
+```
+…lat-style overfill
+
+Setter (render_config_orchestrator.cpp:32) and inspector hint range
+(gaussian_splat_renderer_bindings.cpp:196) clamped opacity_multiplier
+to [0.0, 1.0], silently capping any "boost" use case. Lifted both to
+[0.0, 8.0] so the per-node render/opacity_multiplier can push weak
+splats up toward saturation in dense regions.
+
+The shader-side per-splat alpha clamp at tile_binning.glsl:1121
+(clamp ..., 0.0, 0.99) is intentionally retained — alpha == 1.0 means
+zero transmittance and breaks back-to-front compositing. With
+multiplier > 1 the math is exactly SuperSplat's:
+  base_opacity = clamp(orig_opacity * multiplier, 0, 0.99)
+saturating more splats toward 0.99 rather than pushing alpha past 1.0.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+gaussian_splatting/nodes: extend GaussianSplatNode3D opacity range to…
+…
+98904c8
+```
+… 8.0 for overfill
+
+Companion to the previous renderer-level opacity_multiplier extension.
+GaussianSplatNode3D::set_opacity (line 1086) clamped to [0.0, 1.0] and
+the inspector hint for "rendering/opacity" was "0.0,1.0,0.01", silently
+capping the per-node multiplier path that flows into instance.params.x
+(read by tile_binning.glsl:886/1121).
+
+Both raised to [0.0, 8.0] so the node's Rendering/Opacity slider now
+exposes the SuperSplat-style overfill from the inspector. Per-splat
+alpha remains capped at 0.99 in tile_binning.glsl:1121 — multiplier > 1
+saturates more splats toward 0.99 instead of pushing alpha past 1.0.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+chatgpt-codex-connector
+Bot
+reviewed
+May 5, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 98904c8912
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+modules/gaussian_splatting/shaders/tile_binning.glsl
+Comment on lines
++315
+to
++316
+uint depth_quant = uint(clamped_depth * float((1u << (GS_SORT_DEPTH_BITS - 8u)) - 1u));
+uint depth_key = (depth_quant << 8u) | (global_idx & 0xFFu);
+chatgpt-codex-connector
+Bot
+May 5, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Preserve depth ordering when depth_bits is 8 or less
+In the 32-bit key path, this code always steals 8 bits for tie-break (GS_SORT_DEPTH_BITS - 8u), which breaks valid low-bit configurations from project settings: with depth_bits == 8, depth_quant is always zero so per-tile ordering no longer uses depth at all (blending order becomes effectively index-driven), and with depth_bits < 8 the shift underflows to an invalid/undefined shift count. This introduces visible ordering artifacts or unstable behavior for the very sort-layout tuning this commit enables; tie bits should be clamped to available depth bits or these configs should be rejected/fallback to 64-bit keys.
+Useful? React with 👍 / 👎.
+klausi3D
+and others
+added 2 commits
+May 5, 2026 19:18
+gaussian_splatting: speed imported splat asset loads
+afbf5b2
+gaussian_splatting: address PR #325 CI failure + Codex P2 on 32-bit t…
+…
+bed732b
+```
+…ie-break
+
+Two fixes for review feedback on the opacity_multiplier overfill commits.
+
+CI failure (test_gaussian_splat_node.h:1405): the existing test asserted
+GaussianSplatNode3D::set_opacity(1.75) clamps to 1.0, encoding the prior
+[0, 1] range. The opacity range bump to [0, 8] for SuperSplat-style
+overfill broke this. Update the assertion to match the new clamp:
+1.75 stays 1.75 (in range), 8.5 clamps to 8.0, NaN still resets to 1.0.
+
+Codex P2 on tile_binning.glsl:316: the 32-bit quantized-depth path
+unconditionally subtracts 8 bits for the tie-break (depth_quant masked
+to GS_SORT_DEPTH_BITS - 8). With GS_SORT_DEPTH_BITS == 8 this collapses
+depth_quant to zero (no per-tile depth ordering); with < 8 the unsigned
+subtract underflows. Guard the 8/8 split with #if GS_SORT_DEPTH_BITS > 8
+and fall back to full-precision depth without tie-break otherwise.
+Configs with depth_bits <= 8 are tile-budget constrained and trade off
+determinism for bit count by definition.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+chatgpt-codex-connector
+Bot
+reviewed
+May 5, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: bed732bf35
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+modules/gaussian_splatting/renderer/gpu_sorting_config.cpp
+Outdated
+Comment on lines
++55
+to
++57
+key_bits = ps->get_setting(KEY_BITS_PATH, key_bits);
+tile_bits = ps->get_setting(TILE_BITS_PATH, tile_bits);
+depth_bits = ps->get_setting(DEPTH_BITS_PATH, depth_bits);
+chatgpt-codex-connector
+Bot
+May 5, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Preserve preset key layout for non-custom GPU presets
+After apply_preset(preset_name) this branch unconditionally reloads key_bits/tile_bits/depth_bits from project settings, which effectively overrides the preset values every time. Because these paths are registered with GLOBAL_DEF defaults (64/32/32), selecting a preset like low (which defines 32-bit keys in preset_low()) is silently promoted back to 64-bit keys unless users also manually edit the key-layout settings, defeating the preset’s intended bandwidth/perf behavior.
+Useful? React with 👍 / 👎.
+gaussian_splatting/gpu_sorting: stop GLOBAL_DEF defaults from overrid…
+…
+ad84743
+```
+…ing preset key layout
+
+Codex P2 review on PR #325: after `apply_preset(preset_name)` succeeded,
+load_from_project_settings() unconditionally re-read max_raster_splats_per_tile,
+key_bits, tile_bits, depth_bits, and enable_tie_breaker via ps->get_setting(...).
+Because every one of those paths is registered with GLOBAL_DEF defaults
+(65536/64/32/32/false), selecting any preset that defines a different layout
+(notably preset_low() with 32-bit keys at 16/16) would be silently promoted
+back to the GLOBAL_DEF defaults, defeating the preset's intended bandwidth
+and tie-budget choices.
+
+Drop those five layout reads from the preset path. Users who want a custom
+layout (or want to override one preset knob) should select
+gpu_sorting/preset = "custom", which falls through to the manual-config
+block at the function tail and reads every knob individually with the
+intended fallback chain. Debug/logging/profiling reads remain since they're
+orthogonal to the sort-key layout.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+klausi3D
+commented
+May 6, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Codex P2 review comments addressed:
+tile_binning.glsl:325 — "Preserve depth ordering when depth_bits is 8 or less" → fixed in bed732bf35. Wrapped the 8-bit tie-break in #if GS_SORT_DEPTH_BITS > 8. Configs with depth_bits ≤ 8 fall back to full-precision depth without the tie-break (these configs are tile-budget constrained and trade off determinism for bit count by definition).
+gpu_sorting_config.cpp:57 — "Preserve preset key layout for non-custom GPU presets" → fixed in ad84743a65. Dropped the unconditional re-reads of max_raster_splats_per_tile, key_bits, tile_bits, depth_bits, enable_tie_breaker from the preset path so GLOBAL_DEF defaults (65536/64/32/32/false) no longer silently promote preset_low()'s 32-bit/16/16 layout back to 64/32/32. Users wanting a custom layout should select gpu_sorting/preset = "custom" (falls through to the manual-config block which reads every knob individually).
+CI failure addressed: test_gaussian_splat_node.h:1405 updated in bed732bf35 — the test asserted the prior [0, 1] clamp on set_opacity(); new clamp is [0, 8] so 1.75 stays 1.75, 8.5 clamps to 8.0, NaN still resets to 1.0.
+chatgpt-codex-connector
+Bot
+commented
+May 6, 2026
+Copy link
+Copy Markdown
+💡 Codex Review
+godotGS/modules/gaussian_splatting/interfaces/gpu_culler.cpp
+Lines 231 to 237
+in
+ad84743
+culling_config.opacity_aware_culling = _get_bool_setting(ps,
+"rendering/gaussian_splatting/culling/opacity_aware_bounds",
+culling_config.opacity_aware_culling);
+const float visibility_setting = _get_float_setting(ps,
+"rendering/gaussian_splatting/culling/visibility_threshold",
+culling_config.visibility_threshold);
+culling_config.visibility_threshold = CLAMP(visibility_setting, 0.0001f, 0.1f);
+Stop clobbering runtime culling overrides each frame
+update_culling_settings() now unconditionally reloads opacity_aware_culling and visibility_threshold from ProjectSettings on every cull_for_view() call, which overwrites values set via runtime APIs like set_opacity_aware_culling() / set_visibility_threshold() on the next frame. This makes renderer/script/inspector runtime tuning effectively non-persistent and can silently revert scene-level overrides back to project defaults during playback.
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+klausi3D
+commented
+May 6, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+@codex fix comments
+chatgpt-codex-connector
+Bot
+commented
+May 6, 2026
+Copy link
+Copy Markdown
+Summary
+Addressed the P1 review feedback by stopping GPUCuller::update_culling_settings() from reloading opacity_aware_culling and visibility_threshold from ProjectSettings every frame, so runtime/API overrides remain persistent.
+Kept per-frame project-driven refresh for alpha_clip, so the project setting for hard alpha culling still updates at runtime as intended.
+Added a clarifying inline comment documenting the runtime-override intent for these two knobs.
+Testing
+✅ find .. -name AGENTS.md -print
+✅ rg -n "update_culling_settings|opacity_aware_culling|visibility_threshold" modules/gaussian_splatting/interfaces/gpu_culler.cpp
+✅ git status --short && git diff -- modules/gaussian_splatting/interfaces/gpu_culler.cpp | sed -n '1,120p'
+✅ git add modules/gaussian_splatting/interfaces/gpu_culler.cpp && git commit -m "gaussian_splatting: preserve runtime opacity-aware culling overrides"
+Also completed required follow-up actions:
+Committed change: 4a0212ad
+Created follow-up PR via make_pr with title “Follow-up: preserve GPU culler runtime culling overrides”.
+View task →
+gaussian_splatting: preserve runtime opacity-aware culling overrides
+e6cbbfc
+chatgpt-codex-connector
+Bot
+reviewed
+May 7, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: e6cbbfc05e
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+modules/gaussian_splatting/shaders/tile_binning.glsl
+Outdated
+Comment on lines
++323
+to
++325
+#if GS_SORT_DEPTH_BITS > 8
+uint depth_quant = uint(clamped_depth * float((1u << (GS_SORT_DEPTH_BITS - 8u)) - 1u));
+uint depth_key = (depth_quant << 8u) | (global_idx & 0xFFu);
+chatgpt-codex-connector
+Bot
+May 7, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Honor tie-breaker toggle in 32-bit key packing
+The 32-bit packing branch now always burns 8 depth bits for global_idx tie data, even when enable_tie_breaker is disabled in project settings. That means users who configure 32-bit keys with tie-breaker off still lose depth precision (e.g. depth_bits=16 effectively behaves like 8 depth + 8 tie), which can change depth ordering and produce avoidable blending artifacts in dense overlap scenes. Please gate this split on the tie-breaker setting (or a shader define derived from it) so depth_bits behaves as configured when tie-break is off.
+Useful? React with 👍 / 👎.
+Comment thread
+modules/gaussian_splatting/tests/test_config_validation.h
+Outdated
+Comment on lines
++359
+to
++364
+const char *preset_names[] = { "low", "medium", "high", "ultra" };
+for (const char *preset_name : preset_names) {
+project_settings->set_setting(preset_path, preset_name);
+apply_explicit_32bit_layout();
+check_loaded_32bit_layout();
+}
+chatgpt-codex-connector
+Bot
+May 7, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Fix preset override test expectation for non-custom presets
+This subcase asserts that explicit key_bits/tile_bits/depth_bits values override all named presets, but load_from_project_settings() now intentionally preserves preset layouts unless gpu_sorting/preset is custom. As written, the loop over medium/high/ultra expects 32/16/16 even though those presets define 64-bit layouts, so this test will fail despite correct runtime behavior and can block CI.
+Useful? React with 👍 / 👎.
+klausi3D
+commented
+May 7, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+@codex fix comments
+chatgpt-codex-connector
+Bot
+commented
+May 7, 2026
+Copy link
+Copy Markdown
+Summary
+Updated 32-bit GPU sort-key packing so the 8-bit global_idx tie-break split is only applied when tie-breaking is actually enabled (GS_SORT_TIE_BITS > 0) and depth has enough bits (GS_SORT_DEPTH_BITS > 8), preserving full configured depth precision when tie-breaker is disabled. modules/gaussian_splatting/shaders/tile_binning.glslL323-L329
+Updated the config test to match the current intended behavior: named presets (low/medium/high/ultra) keep their own key layout, while explicit key-layout overrides are validated under preset=custom behavior instead of overriding named presets. modules/gaussian_splatting/tests/test_config_validation.hL319-L394 modules/gaussian_splatting/tests/test_config_validation.hL358-L388
+Committed the fix as 2edd90ad and created a follow-up PR message via make_pr titled “Follow-up: honor GPU sort tie-breaker toggle and preset-layout test behavior”.
+Testing
+✅ find .. -name AGENTS.md -print
+✅ rg -n "tie_break|GS_SORT_DEPTH_BITS|global_idx|32-bit|preset" modules/gaussian_splatting/shaders/tile_binning.glsl modules/gaussian_splatting/tests/test_config_validation.h modules/gaussian_splatting/renderer/gpu_sorting_config.cpp
+✅ sed -n '280,380p' modules/gaussian_splatting/shaders/tile_binning.glsl && sed -n '300,420p' modules/gaussian_splatting/tests/test_config_validation.h
+✅ rg -n "GS_SORT_TIE_BITS > 0 && GS_SORT_DEPTH_BITS > 8|Project settings apply preset layouts|Named presets keep their own key layout|PresetExpectation" modules/gaussian_splatting/shaders/tile_binning.glsl modules/gaussian_splatting/tests/test_config_validation.h
+✅ git diff -- modules/gaussian_splatting/shaders/tile_binning.glsl modules/gaussian_splatting/tests/test_config_validation.h
+✅ git add modules/gaussian_splatting/shaders/tile_binning.glsl modules/gaussian_splatting/tests/test_config_validation.h && git commit -m "gaussian_splatting: honor tie-breaker toggle and preset layout expectations"
+View task →
+gaussian_splatting: honor tie-breaker toggle and preset layout expect…
+…
+080cea0
+```
+…ations
+```
+chatgpt-codex-connector
+Bot
+reviewed
+May 7, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 080cea0219
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+modules/gaussian_splatting/shaders/tile_binning.glsl
+// shift underflows in unsigned arithmetic. Below 9 bits, fall back to
+// full-precision depth without tie-break — these configs are tile-budget
+// constrained and trade off determinism for bit count by definition.
+#if GS_SORT_TIE_BITS > 0 && GS_SORT_DEPTH_BITS > 8
+chatgpt-codex-connector
+Bot
+May 7, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Wire 32-bit tie-break path to an actual tie-bit define
+The new 32-bit packing logic only enables deterministic tie-breaking when GS_SORT_TIE_BITS > 0, but GS_SORT_TIE_BITS is still emitted only for key_bits > 32 in _build_binning_shader_defines, so this branch is never taken for any 32-bit layout. Since this commit also re-enables 32-bit sort configurations, equal-depth/copanar splats in 32-bit mode still sort depth-only and can reorder non-deterministically across frames, causing the shimmer this change was meant to address.
+Useful? React with 👍 / 👎.
+klausi3D
+added a commit
+that referenced
+this pull request
+May 12, 2026
+Harden Gaussian renderer streaming and diagnostics pipeline (#326)
+…
+b153169
+```
+* gaussian_splatting/io: PLY + SPZ importers populate opacity_logits
+
+GaussianSplatAsset::_ensure_buffer_sizes zero-fills opacity_logits to
+splat_count as a defense against the 0xC0C0C0C0 poison pattern. Both PLY
+and SPZ importers populated colors[i].a from sigmoid-decoded opacity but
+never called set_opacity_logits(...). Net: .tres saved with all-zero
+opacity_logits + correct color.a values.
+
+At runtime, GaussianSplatAsset::get_opacities() (asset.cpp:549) prefers
+opacity_logits whenever sized — applying sigmoid(0)=0.5 to every splat
+regardless of color.a. Visible symptom: every splat rendered at ~50%
+opacity producing fuzzy/over-opaque output, with an alpha_clip cull
+cliff at exactly 0.5 (since g.opacity == 0.5 for every splat).
+
+Fix populates opacity_logits with Math::log(p/(1-p)) per splat in
+lockstep with color.a writes, then calls asset->set_opacity_logits()
+before save. Pre-existing assets need a forced re-import (delete the
+.godot/imported/<asset>.ply-*.tres cache).
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+* gaussian_splatting: alpha pipeline overhaul + sort flexibility + perf-capture infra
+
+Bundles multiple correctness/quality fixes for the renderer that share
+files (tile_binning.glsl, tile_renderer.cpp, render_pipeline_stages.cpp).
+Each is internally isolated; bundling avoids cross-cutting splits.
+
+Alpha pipeline contract (closes the binning/raster mismatch that produced
+tile-aligned bands and fuzzy halos):
+- New shaders/includes/gs_alpha_threshold.glsl pins
+  GS_RASTER_ALPHA_THRESHOLD = 1/255, GS_RASTER_ALPHA_REJECT_Q = -2*ln(t),
+  GS_RASTER_MAX_SIGMA = sqrt(Q). Matches gsplat / Brush / PlayCanvas.
+- tile_raster_common.glsl: replace hardcoded 1e-4 alpha cutoffs with
+  GS_RASTER_ALPHA_THRESHOLD, derive Q from same constant.
+- tile_binning.glsl: MAX_SIGMA derived from header; remove the silent
+  GS_TIGHTER_BOUNDS * 0.85 multiplier (was binning iso < raster iso ->
+  bands); add Mip-Splatting alpha_rescale = sqrt(det_raw/det) companion
+  to the low-pass filter dilation; lift det_raw out of inner scope so
+  both subpixel cull and the rescale share it.
+- C++ visibility_threshold defaults bumped to 1.0/255.0 across
+  rasterizer_interfaces.h, gpu_culler.h, tile_render_types.h,
+  tile_renderer.cpp, gaussian_splat_manager.cpp.
+- Quality orchestrator + bindings allow setting visibility_threshold
+  down to 1e-4 (range widened from [0.001, 0.1] to [0.0001, 0.1]).
+
+Per-splat alpha_clip cull (PlayCanvas alphaClip parity, default 0.3):
+- New rendering/gaussian_splatting/culling/alpha_clip project setting.
+- GPUCuller::CullingConfig + RenderParams field, plumbed through
+  TileRenderParamsGPU.opacity_culling_config[2] (slot was reserved).
+- gs_get_alpha_clip() accessor + cull at tile_binning.glsl: every splat
+  with g.opacity <= alpha_clip is dropped before projection.
+- alpha_clip added to _compute_cull_config_signature so OutputCompositor
+  cache invalidates when the value changes (else cache hit silently
+  masks the cull). Documented as feedback memory for future cull knobs.
+- gpu_sorting/max_raster_splats_per_tile cap default 8192 -> 65536 in
+  three places (load fallback, reset_to_defaults, GLOBAL_DEF) to match
+  the header intent and avoid silent splat-list truncation in dense
+  tiles.
+
+Sort flexibility + 32-bit support:
+- gpu_sorting_pipeline.cpp: project key_bits/tile_bits/depth_bits
+  settings actually control the GPU sort path (was hardcoded 32-bit).
+- gpu_sorter.cpp/.h: 32-bit factory acceptance + sort metadata fields
+  (last_key_bits, last_pass_count) + GPU timestamp capture.
+- tile_binning.glsl: deterministic tie-break in the 32-bit quantized
+  depth packing (8/8 split) so dense overlapping splats sort stably.
+
+GPU pass timing breakdown + perf-capture infrastructure:
+- render_pipeline_stages, render_diagnostics_orchestrator,
+  render_resource_orchestrator, render_streaming_orchestrator gain
+  per-pass GPU time accumulators with explicit *_valid flags.
+- TileRenderer exposes timing accessors + perf_capture toggles for
+  raster shader counters and force-runtime-statistics modes.
+- New SSBO counter slots in tile_binning / tile_rasterizer /
+  tile_rasterizer_compute for raster_reject_quadratic /
+  raster_reject_lod_opacity / raster_reject_blend_alpha.
+- docs/timing_metrics_reference.md updated with the new metric keys.
+- Disable hotspot pre-raster cull defaults (was a closed-loop oscillator
+  between visible-splats fade and hotspot detection).
+
+Pre-existing assets imported before the io/ commit need a forced
+re-import to pick up the opacity_logits fix.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+* tests/runtime: benchmark perf-capture harness + lanes + test_project lock
+
+Benchmark infrastructure for the renderer perf-capture work in the
+preceding commit. Adds:
+
+- run_benchmark.py: per-lane runtime statistics + raster shader
+  counter capture, --require-gpu-timestamps, --timeout-scale.
+- benchmark_suite_lane.gd: dense_resident_2m preset (14x14 grid of
+  synthetic_spiral instances at 10000 splats each, ~2M total) +
+  perf-capture renderer toggles.
+- benchmark_metrics.gd / benchmark_scene_contract.gd: per-stage GPU
+  time fields, raster shader counter readback.
+- Four sort32_* lanes targeting 32-bit sort key edge cases:
+  coplanar_alpha, depth_range, near_camera_large, tile_bit_pressure.
+- Synthetic asset fixtures (gsplatcache + ply.import) for the new
+  lanes plus existing test_splats / synthetic_cloud / cube / spiral /
+  flower_field / mandelbulb / plane / sphere / torus.
+- benchmark_asset_manifest.json: maps lanes to asset paths.
+
+test_project/project.godot pinned to a known-good A/B baseline:
+gpu_sorting/key_bits=64 + tile_bits=32 + depth_bits=32 (matches the
+new gpu_sorting flexibility); enable_tie_breaker=true;
+max_overlap_records=5000000; visibility_threshold=0.0001;
+low_pass_filter=0.05; max_raster_splats_per_tile=65536. These match
+the renderer defaults so the bench measures the contract rather than
+any per-project override drift.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+* gaussian_splatting/renderer: allow opacity_multiplier > 1 for SuperSplat-style overfill
+
+Setter (render_config_orchestrator.cpp:32) and inspector hint range
+(gaussian_splat_renderer_bindings.cpp:196) clamped opacity_multiplier
+to [0.0, 1.0], silently capping any "boost" use case. Lifted both to
+[0.0, 8.0] so the per-node render/opacity_multiplier can push weak
+splats up toward saturation in dense regions.
+
+The shader-side per-splat alpha clamp at tile_binning.glsl:1121
+(clamp ..., 0.0, 0.99) is intentionally retained — alpha == 1.0 means
+zero transmittance and breaks back-to-front compositing. With
+multiplier > 1 the math is exactly SuperSplat's:
+  base_opacity = clamp(orig_opacity * multiplier, 0, 0.99)
+saturating more splats toward 0.99 rather than pushing alpha past 1.0.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+* gaussian_splatting/nodes: extend GaussianSplatNode3D opacity range to 8.0 for overfill
+
+Companion to the previous renderer-level opacity_multiplier extension.
+GaussianSplatNode3D::set_opacity (line 1086) clamped to [0.0, 1.0] and
+the inspector hint for "rendering/opacity" was "0.0,1.0,0.01", silently
+capping the per-node multiplier path that flows into instance.params.x
+(read by tile_binning.glsl:886/1121).
+
+Both raised to [0.0, 8.0] so the node's Rendering/Opacity slider now
+exposes the SuperSplat-style overfill from the inspector. Per-splat
+alpha remains capped at 0.99 in tile_binning.glsl:1121 — multiplier > 1
+saturates more splats toward 0.99 instead of pushing alpha past 1.0.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+* gaussian_splatting: speed imported splat asset loads
+
+* gaussian_splatting: address PR #325 CI failure + Codex P2 on 32-bit tie-break
+
+Two fixes for review feedback on the opacity_multiplier overfill commits.
+
+CI failure (test_gaussian_splat_node.h:1405): the existing test asserted
+GaussianSplatNode3D::set_opacity(1.75) clamps to 1.0, encoding the prior
+[0, 1] range. The opacity range bump to [0, 8] for SuperSplat-style
+overfill broke this. Update the assertion to match the new clamp:
+1.75 stays 1.75 (in range), 8.5 clamps to 8.0, NaN still resets to 1.0.
+
+Codex P2 on tile_binning.glsl:316: the 32-bit quantized-depth path
+unconditionally subtracts 8 bits for the tie-break (depth_quant masked
+to GS_SORT_DEPTH_BITS - 8). With GS_SORT_DEPTH_BITS == 8 this collapses
+depth_quant to zero (no per-tile depth ordering); with < 8 the unsigned
+subtract underflows. Guard the 8/8 split with #if GS_SORT_DEPTH_BITS > 8
+and fall back to full-precision depth without tie-break otherwise.
+Configs with depth_bits <= 8 are tile-budget constrained and trade off
+determinism for bit count by definition.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+* gaussian_splatting/gpu_sorting: stop GLOBAL_DEF defaults from overriding preset key layout
+
+Codex P2 review on PR #325: after `apply_preset(preset_name)` succeeded,
+load_from_project_settings() unconditionally re-read max_raster_splats_per_tile,
+key_bits, tile_bits, depth_bits, and enable_tie_breaker via ps->get_setting(...).
+Because every one of those paths is registered with GLOBAL_DEF defaults
+(65536/64/32/32/false), selecting any preset that defines a different layout
+(notably preset_low() with 32-bit keys at 16/16) would be silently promoted
+back to the GLOBAL_DEF defaults, defeating the preset's intended bandwidth
+and tie-budget choices.
+
+Drop those five layout reads from the preset path. Users who want a custom
+layout (or want to override one preset knob) should select
+gpu_sorting/preset = "custom", which falls through to the manual-config
+block at the function tail and reads every knob individually with the
+intended fallback chain. Debug/logging/profiling reads remain since they're
+orthogonal to the sort-key layout.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+* gaussian_splatting: preserve runtime opacity-aware culling overrides
+
+* gaussian_splatting: honor tie-breaker toggle and preset layout expectations
+
+* gaussian_splatting: clamp raster indirect record count
+
+* gaussian_splatting: use safe VRAM budget without capacity data
+
+* gaussian_splatting: lock animated GaussianData accessors
+
+* gaussian_splatting: debug-gate streaming payload rehashes
+
+* gaussian_splatting: serialize animation resize updates
+
+* gaussian_splatting: review safe vram budget diagnostics
+
+* gaussian_splatting: harden checksum validation toggles
+
+* gaussian_splatting: link streaming lifecycle doctests
+
+* gaussian_splatting: stream uncompressed gsplatworld payloads
+
+* gaussian_splatting: fix file-backed world review issues
+
+* gaussian_splatting: optimize staged chunk reads
+
+* gaussian_splatting: avoid full visibility flag clears
+
+* gaussian_splatting: harden visibility scan optimization
+
+* gaussian_splatting: bound streaming LOD update scans
+
+* gaussian_splatting: track resident eviction candidates
+
+* gaussian_splatting: document tile lighting ABI
+
+* gaussian_splatting: size tile lighting cluster fallback
+
+* Optimize sparse atlas chunk meta dirty sync
+
+* gaussian_splatting: clear debug HUD target on teardown
+
+* gaussian_splatting: preserve debug HUD process ownership
+
+* gaussian_splatting: report full chunk meta atlas syncs
+
+* gaussian_splatting: release resident contract buffers
+
+* gaussian_splatting: invalidate tile descriptors on instance buffer changes
+
+* gaussian_splatting: test tracked resident contract buffer release
+
+* gaussian_splatting: keep tile descriptor test surface private
+
+* gaussian_splatting: hide and warn on silently-dropped peer renderer settings
+
+When a GaussianSplatNode3D shares a renderer with another node, the
+non-owner peer's quality/lod_bias and quality/max_splat_count writes
+are dropped by the ownership check at gaussian_splat_node_helpers.cpp:
+1284-1313 + 1376-1378. Two changes:
+
+- _validate_property now hides quality/lod_bias and quality/max_splat_count
+  in the inspector for non-owner peers (mirroring the existing painterly +
+  debug-overlay hide).
+- apply_renderer_settings now WARN_PRINT_ONCE when set_max_splats is
+  skipped on a non-owner peer, instead of silently no-op'ing.
+
+This fixes the worst-case "I changed max_splat_count and nothing happened
+and there's no log" UX. Color grading remains visible because it has a
+real per-instance dispatch path through the scene director.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+* gaussian_splatting: document tier-vs-pipeline precedence; hide pipeline knobs from default inspector
+
+The pipeline/enable_* project settings registered in pipeline_feature_set.cpp
+are read first from project.godot but then OVERWRITTEN by the active
+quality tier when quality/tier_apply_pipeline_toggles=true. This was
+undocumented; users setting these directly were surprised when the tier
+silently overrode them.
+
+- Add a precedence comment at the top of the project-settings load
+  function explaining the three layers (code default -> project.godot
+  -> tier overwrite when tier_apply_pipeline_toggles=true).
+- Mark the 6 alive pipeline/* GLOBAL_DEFs as PROPERTY_USAGE_NO_EDITOR |
+  PROPERTY_USAGE_STORAGE so they hide from the default editor inspector
+  tree while remaining readable/writable via ProjectSettings. The
+  user-facing surface for pipeline behavior is quality/tier_preset; the
+  individual flags are advanced/internal.
+
+Three dead flags (enable_two_stage_sort, sh_amortization_visibility*)
+are intentionally NOT touched here — a separate PR removes their
+plumbing entirely.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+* gaussian_splatting: world3d tier MIN-cap + opacity range alignment
+
+- _build_desired_renderer_overrides: tier preset now caps max_splats via
+  MIN instead of overwriting, matching the Node3D path at
+  gaussian_splat_node_helpers.cpp:1008. User-set max_splat_count below
+  the tier ceiling now takes effect; previously it was silently discarded.
+- rendering/opacity: widen range to 0..8 to match Node3D and renderer
+  (SuperSplat overfill); the 0..1 cap was silently truncating values
+  that the renderer accepts up to 8.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+* gaussian_splatting: update preset key-layout test for ad84743
+
+The "Preset loading honors explicit key-layout overrides" subcase
+asserted the pre-fix behavior where post-apply_preset() reads of
+KEY_BITS_PATH / TILE_BITS_PATH / DEPTH_BITS_PATH / ENABLE_TIE_BREAKER_PATH
+let project.godot silently override preset_low()'s 32-bit layout. That
+behavior was removed in ad84743 (Codex P2 fix on PR #325) so named
+presets now win over explicit overrides; users wanting custom bit
+allocation must select preset='custom'.
+
+Rewrite the subcase to document the new contract:
+- preset='low'    -> 32/16/16, tie_breaker=false (explicit tie_breaker=true
+                    is overridden)
+- preset='medium' -> 64/32/32, tie_breaker=false
+- preset='high'   -> 64/32/32, tie_breaker=false
+- preset='ultra'  -> 64/32/32, tie_breaker=true
+
+The "Custom loading honors explicit key-layout settings" and
+"Stale boolean key-width setting" subcases are unchanged — they exercise
+the preset='custom' path which still reads explicit overrides.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+* gaussian_splatting: address PR review safety issues
+
+* tests: stabilize gaussian QA gates
+
+* gaussian_splatting: address source-backed world review
+
+---------
+
+Co-authored-by: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+Merge master into opacity alpha pipeline PR
+9f660a1
+klausi3D
+commented
+May 14, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Closing as superseded by #326. After merging current master into this branch, PR #325 has a zero-file diff against master (0 changed files, 0 additions, 0 deletions). The conflict resolution intentionally kept the reviewed master/#326 versions, so there is no remaining code delta to merge here.
+klausi3D
+closed this
+May 14, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

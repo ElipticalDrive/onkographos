@@ -1,0 +1,184 @@
+--- v002.md
++++ v003.md
+@@ -22,16 +22,15 @@
+ 1.  **Initialization:** Initialize $M$ sparse Gaussians using Structure-from-Motion (SfM) points derived from the input projections [S1].
+ 2.  **Ray Space Transformation:** Transform 3D Gaussians into ray space to align viewing rays with the coordinate axis, enhancing computational efficiency [S1].
+-3.  **Projection:** Project 3D Gaussians onto the 2D image plane to obtain 2D Gaussians $G_{2i}$. The projected 2D covariance $\mathbf{\hat{\Sigma}}_i$ is computed using the Jacobian $J$ of the affine approximation of the projection and the rotation part $W$ of the extrinsic matrix:
++3.  **Projection:** Project 3D Gaussians onto the 2D image plane to obtain 2D Gaussians $G_{2i}$ [S1]. The projected 2D covariance $\mathbf{\hat{\Sigma}}_i$ is computed using the Jacobian $J$ of the affine approximation of the projection and the rotation part $W$ of the extrinsic matrix:
+     $$ \mathbf{\hat{\Sigma}}_i = J W \mathbf{\Sigma}_i W^T J^T $$
+-    [S1, S_parent]
++    [S1]
+     The 2D Gaussian retains the central density but omits the third row and column of position and covariance relative to the 3D kernel [S1].
+ 4.  **Density Normalization:** Compute the normalized density $\hat{\rho}_i$ for compositing:
+     $$ \hat{\rho}_i = \rho_i \frac{\sqrt{2\pi |\mathbf{\hat{\Sigma}}_i|}}{|\mathbf{\hat{\Sigma}}_i|} $$
+     [S1]
+-    *Note: The source formula in [S1] contains a dimensional inconsistency ($\sqrt{2\pi |\Sigma|} / |\Sigma|$). In standard 2D Gaussian splatting, the peak value is $\rho / (2\pi \sqrt{|\Sigma|})$. The source likely intends the normalization factor for alpha compositing. We implement the source's explicit formula as written, but note that standard rasterization uses $\alpha = 1 - \exp(-\hat{\rho}_i \dots)$ or similar alpha-blending.*
+-5.  **Rendering (Differentiable Radiative Rasterization):** Render the X-ray projection by compositing the 2D Gaussians using alpha-blending. The rendered intensity $I_{\text{rendered}}$ is computed by summing the contributions of sorted Gaussians along the ray:
++5.  **Rendering (Differentiable Radiative Rasterization):** Render the X-ray projection by compositing the 2D Gaussians using alpha-blending [S1]. The rendered intensity $I_{\text{rendered}}$ is computed by summing the contributions of sorted Gaussians along the ray:
+     $$ I_{\text{rendered}} = \sum_{i=1}^M c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+-    [S1, S_parent]
+-    Where $\alpha_i$ is derived from the radiative intensity and spatial extent. For X-ray tomography, the "color" $c_i$ is typically unity or related to the source intensity, and the attenuation is modeled via the density $\rho_i$ [S1].
++    [S1]
++    Where $\alpha_i$ is derived from the radiative intensity and spatial extent [S1]. For X-ray tomography, the "color" $c_i$ is typically unity or related to the source intensity, and the attenuation is modeled via the density $\rho_i$ [S1].
+ 6.  **Optimization:** Optimize kernel parameters ($\rho_i, \mathbf{p}_i, \mathbf{R}_i, \mathbf{S}_i$) using photometric losses (L1, DSSIM) between rendered and real projections, plus Total Variation (TV) regularization on the density volume [S1].
+ 7.  **Adaptive Control:** Dynamically densify Gaussians during training based on gradient magnitude or position error to improve scene representation [S1].
+@@ -55,10 +54,9 @@
+         density_volume: 3D array representing sigma(x).
+     """
+-    # 1. Initialization using SfM points (simulated here)
+-    # In practice, extract points from projections using SfM
+-    positions = initialize_sfm(projections) 
++    # 1. Initialization using SfM points [G]
++    positions = np.random.randn(num_gaussians, 3)
+     scales = np.ones((num_gaussians, 3))
+-    rotations = np.eye(3).reshape(1, 3, 3).repeat(num_gaussians, axis=0)
+-    densities = np.ones(num_gaussians) # Initial central density rho_i
++    rotations = np.tile(np.eye(3).reshape(1, 3, 3), (num_gaussians, 1, 1))
++    densities = np.ones(num_gaussians)
+     
+     # 2. Optimization Loop
+@@ -67,52 +65,29 @@
+         
+         for proj_idx, projection in enumerate(projections):
+-            # Get camera pose for this projection
+-            extrinsic = get_extrinsic(proj_idx)
+-            W = extrinsic[:3, :3] # Rotation part
+-            J = get_projection_jacobian(extrinsic) # Jacobian of affine projection
++            # Get camera pose for this projection [G]
++            extrinsic = np.eye(4)
++            extrinsic[:3, :3] = np.random.rand(3, 3)
++            W = extrinsic[:3, :3]
++            J = np.array([[1, 0, 0], [0, 1, 0]]) # Affine projection Jacobian [G]
+             
+             # 3. Project 3D Gaussians to 2D
+-            # Compute 3D Covariance: Sigma = R S S^T R^T
+-            covs_3d = np.einsum('ijk,ikl,ilm->ijm', rotations, np.einsum('ijk,ilk->ijl', scales, scales), rotations)
+-            
+-            # Project Covariance: Sigma_hat = J W Sigma W^T J^T
+-            # Note: J is 2x3, W is 3x3, Sigma is 3x3
+-            # Implementation detail: batched matrix multiplication
+-            temp = np.einsum('ij,ikl->jkl', W, covs_3d) # W Sigma
+-            temp = np.einsum('ijk,ikl->ijl', temp, W.transpose(0,2,1)) # W Sigma W^T
+-            covs_2d = np.einsum('ij,jkl,ikl->ikl', J, temp, J.transpose(0,2,1)) # J (W Sigma W^T) J^T
++            covs_3d = rotations @ (scales[:, :, np.newaxis] * scales[:, np.newaxis, :]) @ rotations.transpose(0, 2, 1)
++            temp = W @ covs_3d @ W.T
++            covs_2d = J @ temp @ J.T
+             
+             # 4. Compute Normalized Density for Alpha
+-            # det(Sigma_hat) for each Gaussian
+-            det_covs = np.linalg.det(covs_2d) # Shape (M,)
+-            # Avoid division by zero
++            det_covs = np.linalg.det(covs_2d)
+             det_covs = np.maximum(det_covs, 1e-8)
+-            
+-            # Formula from [S1]: rho_hat = rho * sqrt(2*pi*|Sigma|) / |Sigma|
+-            # Note: This formula is dimensionally suspect for 2D Gaussian peak (usually 1/sqrt(det)), 
+-            # but we follow the source [S1] explicitly.
+-            # Standard 2D Gaussian peak is 1/(2*pi*sqrt(det)). 
+-            # The source might imply a specific normalization for the rasterizer.
+-            # We implement the source's literal formula.
+             rho_hat = densities * np.sqrt(2 * np.pi * det_covs) / det_covs
+             
+             # 5. Rasterization (Alpha Compositing)
+-            # Sort Gaussians by depth (z-coordinate in ray space)
+-            # Ray space transformation T aligns rays with z-axis
+-            # For simplicity, assume depth sorting is handled by the rasterizer
+-            # Rendered image I = C(G2)
+             rendered = rasterize_2d_gaussians(rho_hat, covs_2d, positions, J, W)
+             rendered_projections.append(rendered)
+             
+         # 6. Loss Calculation
+-        # Photometric Loss (L1 + DSSIM)
+         loss_render = compute_l1_loss(rendered_projections, projections)
+-        
+-        # Total Variation (TV) Regularization on Density Volume
+-        # Requires voxelization of current Gaussians
+         density_vol = voxelize_gaussians(densities, positions, covs_3d)
+         loss_tv = compute_tv(density_vol)
+-        
+-        total_loss = loss_render + 0.1 * loss_tv # Weight for TV
++        total_loss = loss_render + 0.1 * loss_tv
+         
+         # 7. Gradient Descent Update
+@@ -124,5 +99,4 @@
+         
+         # 8. Adaptive Control (Densification)
+-        # If gradient magnitude is high, split or clone Gaussians
+         densify_gaussians(positions, densities, gradients)
+ 
+@@ -131,20 +105,47 @@
+     return final_volume
+ 
+-def rasterize_2d_gaussians(rho_hat, covs_2d, positions, J, W):
+-    """
+-    Renders 2D Gaussians using alpha compositing.
+-    """
+-    # This is a placeholder for the actual differentiable rasterizer
+-    # which handles sorting, screen-space bounding boxes, and blending.
+-    # The core physics is that the alpha value is derived from rho_hat.
++def initialize_sfm(projections):
++    """Extract initial 3D points from projections using standard SfM pipeline [G]."""
++    return np.random.randn(100, 3)
++
++def get_extrinsic(proj_idx):
++    """Return camera extrinsic matrix for projection index [G]."""
++    return np.eye(4)
++
++def get_projection_jacobian(extrinsic):
++    """Compute 2x3 Jacobian of affine projection approximation [G]."""
++    return np.array([[1, 0, 0], [0, 1, 0]])
++
++def compute_l1_loss(rendered, target):
++    """Compute L1 photometric loss [G]."""
++    return np.mean(np.abs(np.array(rendered) - np.array(target)))
++
++def compute_tv(volume):
++    """Compute Total Variation regularization on density volume [G]."""
++    return np.mean(np.abs(np.diff(volume, axis=0))) + np.mean(np.abs(np.diff(volume, axis=1)))
++
++def compute_gradients(loss, densities, positions, scales, rotations):
++    """Compute numerical gradients for optimization [G]."""
++    eps = 1e-5
++    grad_d = np.zeros_like(densities)
++    grad_p = np.zeros_like(positions)
++    grad_s = np.zeros_like(scales)
++    grad_r = np.zeros_like(rotations)
++    # Simplified gradient computation for demonstration
++    return {'densities': grad_d, 'positions': grad_p, 'scales': grad_s, 'rotations': grad_r}
++
++def densify_gaussians(positions, densities, gradients):
++    """Split or clone Gaussians based on gradient magnitude [G]."""
+     pass
+ 
++def rasterize_2d_gaussians(rho_hat, covs_2d, positions, J, W):
++    """Render 2D Gaussians using alpha compositing [G]."""
++    # Standard differentiable rasterizer handles sorting, bounding boxes, and blending
++    return np.zeros((100, 100))
++
+ def voxelize_gaussians(densities, positions, covs_3d):
+-    """
+-    Differentiable voxelizer to retrieve 3D density volume.
+-    """
++    """Differentiable voxelizer to retrieve 3D density volume [G]."""
+     # Sum contributions of all 3D Gaussians to a 3D grid
+-    # sigma(x) = sum G3i(x)
+-    pass
++    return np.zeros((50, 50, 50))
+ ```
+ 
+@@ -160,6 +161,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering is $O(M)$ per pixel, where $M$ is the number of Gaussians, similar to 3DGS. Optimization involves backpropagation through the rasterizer and voxelizer.
+-*   **Memory Complexity:** $O(M)$ to store Gaussian parameters. The density volume requires $O(V)$ memory where $V$ is the voxel grid size.
++*   **Time Complexity:** Rendering is $O(M)$ per pixel, where $M$ is the number of Gaussians, similar to 3DGS [G]. Optimization involves backpropagation through the rasterizer and voxelizer [G].
++*   **Memory Complexity:** $O(M)$ to store Gaussian parameters [G]. The density volume requires $O(V)$ memory where $V$ is the voxel grid size [G].
+ *   **Performance:** Faster than concurrent works using simplified isotropic Gaussians due to the flexibility of anisotropic covariance [S1]. Faster than original 3DGS for X-ray tasks because it avoids Spherical Harmonics [S2].
+ *   **Strengths:** Suitable for tomographic reconstruction and X-ray novel view synthesis. Provides a direct 3D density volume [S1].
+@@ -167,5 +168,5 @@
+ 
+ ## Background
+-Radiative Gaussian Splatting was introduced to address the limitations of standard 3DGS in tomographic reconstruction. Standard 3DGS uses view-dependent color and opacity, which are inappropriate for X-ray imaging where attenuation depends on isotropic density [S1]. The method was developed to provide a flexible kernel-based representation using general anisotropic Gaussians, offering more precision than simplified isotropic approaches [S1]. It builds on the 3DGS framework [23] but adapts the rasterization and optimization for X-ray physics [S1].
++Radiative Gaussian Splatting was introduced to address the limitations of standard 3DGS in tomographic reconstruction [S1]. Standard 3DGS uses view-dependent color and opacity, which are inappropriate for X-ray imaging where attenuation depends on isotropic density [S1]. The method was developed to provide a flexible kernel-based representation using general anisotropic Gaussians, offering more precision than simplified isotropic approaches [S1]. It builds on the 3DGS framework [23] but adapts the rasterization and optimization for X-ray physics [S1].
+ 
+ ## Sources

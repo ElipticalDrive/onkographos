@@ -1,0 +1,434 @@
+A pure, standalone geometric kernel for curves and surfaces in Rust — parametric evaluation, transformations, and curve-on-surface parametrization, with Python bindings. - Split marching into a surface pair, a tracer and a seeding policy by GabrielJMS · Pull Request #133 · geomcore/geomcore
+
+Split marching into a surface pair, a tracer and a seeding policy by GabrielJMS · Pull Request #133 · geomcore/geomcore · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+GabrielJMS
+commented
+Oct 30, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Summary
+Part of the third-pass depth stack, #3 of 7: main ← #135 ← #134 ← #133 ← #137 ← #136 ← #143 ← #132. It builds on #134 (depth3/2-transform-reversal-traits); merge the stack bottom up.
+```
+intersect/numeric/
+├── marching.rs          marching_intersection = coincidence? → seeds → trace each → fit
+└── marching/
+    ├── pair.rs          SurfacePair: meet · meet_touching · land · clamp · leaving · predict
+    │                    · tangent · contact_direction · crossing_branches · grazes
+    │                    · osculates · trace_box · swap/swapped
+    ├── tracer.rs        Tracer::trace(seed) → Trace::{Curve { points, tangents, stalls,
+    │                    touching }, Touch, Lost}; step loop sized by step_error (Hermite);
+    │                    Contact::{Crossing, Touching} is its own per-step state
+    ├── seeding.rs       seeds(pair) → Vec<Seed>: patch pairs, iso-curve families, grids;
+    │                    branch_seeds(pair, stall) for the branches crossing at a stall
+    └── coincidence.rs   lies-on check before marching, region around coincident seeds
+```
+Surface pair. The 28 functions generic over <A, B>(a, b, x: [f64; 4], …), each with its own where block, become methods of one SurfacePair<'s, A, B> (two references, Copy). The swap [x[2], x[3], x[0], x[1]], written out three times, is now swap and SurfacePair::swapped. The pair knows nothing of steps or seeds.
+Tracer. trace, step_error, crosses_one_knot_at_most, box_exit and the knot arithmetic move into Tracer. The touching: bool that was decided once in Traced::follow and threaded through trace, direction, correct and step_error is now a private Contact value. The tracer decides it from the seed, reads it at every step to pick the direction and the corrector, and reports it in Trace::Curve { touching }. The "a touching trace shorter than a first step is a contact" rule moves into the tracer too, as Trace::Touch. How tangent tracing changes only the tracer: a step that fails in one mode re-reads pair.grazes and assigns a new Contact in the step loop. The pair already answers both correctors and both directions, and the caller only sees Trace.
+Seeding policy. seeds(pair) holds the whole policy: patch pairs on two B-splines, then both grids if that search runs out of budget; the iso-curve families plus grids, with the early exit when the grid seeds only graze; otherwise both grids. It returns the seeds in trace order. A patch-pair seed stays unconverged and carries the box that skips it once an earlier curve crosses it (Seed::PatchPair { centre, skip_if_crossed }). It is converged only when its turn comes, exactly as before, so no Newton runs are added. A new seed source (roadmap 1(b)) only edits this file.
+Rebased on End marching traces on the box of a bounded side #145, Trace every branch through crossings at any confusion #146, Keep marched curves within confusion between the traced points (#140) #148, Unroll B-spline first derivatives for degrees 1 to 3 #144 and Accept converging Newton steps hidden by rounding in newton_min_1d (#142) #149 (main at 9f2e26c). Each piece went where ADR 0025 puts its concept:
+Tracer: the tangents and stalls of a trace (Trace::Curve { points, tangents, stalls, touching }), step_error with HERMITE_SLACK in place of bulges, the oriented boundary and cube-exit tangents, and the step size from the Hermite error.
+Pair: crossing_branches, a question about the two surfaces at a point.
+Seeding policy: branch_seeds, a new seed source, from the stall the tracer reports.
+Fitting: hermite_curve, segment_length and without_confused go to curves/fitting.rs, next to CONFUSED_CHORD.
+Root: Traced::follow keeps main's loop over follow_one, which fits each trace and returns its stalls.
+End marching traces on the box of a bounded side #145's trace box: SurfacePair::trace_box (the smaller bounded side's box grown by a tenth, else the model-size cube) and own_box, shared with the coincidence check's surface_corners. The tracer holds the box from Tracer::new, ends a trace on it with box_exit, and answers encloses for the seed check in Traced::follow_one. outside_model and model_exit are gone.
+Derivative cones as plain loops. Rebased on Trace every branch through crossings at any confusion #146 and Keep marched curves within confusion between the traced points (#140) #148, the release build left the iterator adapters of bezier_pieces::derivative_cones out of line (+2.3 % on bspline_surface_pair, all in that function; marching's own functions moved by −33 K). That function is untouched by this PR. The last commit writes its two spreads as nested loops in the same order. Results are unchanged.
+Generic, not dyn. The pair stays monomorphized for each pair of surface types, so the evaluations inside the Newton loops still inline. The two &dyn uses that were already there (predict, bounds) are unchanged.
+circles_meet_exactly (which lane A replaces with a closed-form-table query) moves verbatim to marching/seeding.rs, in seeding_iso_values.
+Tests. 18 new direct tests: 12 on the pair (meet with and without a plane, a miss, land, clamp/leaving, predict, tangent, swap, grazing and contact direction on a plane tangent to a cylinder, the confusion threshold of grazes, meet_touching onto the ruling, a surface osculating itself) and 6 on the tracer (a closed plane × sphere loop with the step count the curvature predicts and one unit tangent per point along the trace, a trace ending on both parameter bounds, a touching ruling traced to the model-size cube, a point touch of a plane and a torus, a lost seed at a sphere's pole, knot counting across periods), plus one on the trace box (the smaller bounded side, either order, else the model-size cube). None of them runs a full march.
+ADR 0025 records the split, where the two roadmap items go, and why the mode is on the tracer, why the pair is not dyn, and why patch-pair seeds stay lazy. ARCHITECTURE.md gets the folder and a "A change to marching" entry under Where to start.
+Evidence
+After the rebase: cargo test 2171 passed, 0 failed (PR 2: 2152; +19 direct tests), main's marching tests included unchanged (traces beyond the model-size cube, crossings at any confusion, curves within confusion of both surfaces, without_confused keeping the ends). cargo clippy --all-targets -D warnings, cargo doc -D warnings and cargo fmt --check are clean. Python is left to CI.
+Same results, bit for bit: a scratch program printed {:?} of the routed intersect on 18 numeric pairs: the bench pairs, torus × torus, sphere/torus × B-spline, a plane touching a cylinder patch, a sphere inside a cylinder patch, revolution and extrusion pairs, a B-spline revolution patch cut by planes. The output on the base (main + PR 1 + PR 2, 31ffb36) and on this branch is byte-identical (md5 e37223a9…). It differs from the first dump (3a28d15b…) because Keep marched curves within confusion between the traced points (#140) #148's Hermite fits change every crossing curve on main itself.
+Public interface: everything here is crate-private.
+Instruction counts, in-loop (callgrind toggled on criterion's Bencher::iter, one --test run, so the setup that runs every pair once drops out), against main (9f2e26c) and PR 2 (31ffb36):
+Bench (in-loop instructions)
+main
+PR 2
+PR 3
+vs main
+vs PR 2
+intersect_curve_surface/bspline_curve_bspline_surface
+21,355,331
+21,207,211
+21,345,830
+-0.0 %
++0.7 %
+intersect_curve_surface/bspline_curve_cylinder
+26,372,444
+26,072,947
+26,237,187
+-0.5 %
++0.6 %
+intersect_curve_surface/circle_bspline_surface
+36,234,891
+36,050,360
+36,347,261
++0.3 %
++0.8 %
+marching_intersection/bspline_sphere_itself
+16,225,868
+16,063,484
+16,112,308
+-0.7 %
++0.3 %
+marching_intersection/bspline_surface_pair
+44,711,908
+44,377,098
+44,607,218
+-0.2 %
++0.5 %
+marching_intersection/cone_cylinder_unbounded
+14,281,613
+14,281,406
+14,231,536
+-0.4 %
+-0.3 %
+marching_intersection/cylinder_extruded_wall
+5,521,957
+5,499,956
+5,555,912
++0.6 %
++1.0 %
+marching_intersection/cylinder_own_patch
+237,826
+235,106
+234,990
+-1.2 %
+-0.0 %
+marching_intersection/plane_own_patch
+101,519
+98,544
+98,661
+-2.8 %
++0.1 %
+marching_intersection/plane_tangent_to_cylinder_patch
+1,284,246
+1,277,138
+1,280,483
+-0.3 %
++0.3 %
+marching_intersection/sphere_bspline_copy
+9,098,115
+9,008,803
+9,013,444
+-0.9 %
++0.1 %
+marching_intersection/sphere_torus
+12,459,664
+12,516,845
+12,421,426
+-0.3 %
+-0.8 %
+marching_intersection/torus_plane_oblique
+8,126,187
+8,185,264
+8,160,371
++0.4 %
+-0.3 %
+swept_plane_cut/cylinder_parallel/bspline_patch
+4,976,134
+4,937,941
+4,981,740
++0.1 %
++0.9 %
+swept_plane_cut/cylinder_parallel/elementary
+1,151
+1,176
+1,183
++2.8 %
++0.6 %
+swept_plane_cut/cylinder_parallel/swept
+3,412
+3,478
+3,504
++2.7 %
++0.7 %
+swept_plane_cut/extrusion_bspline_oblique/bspline_patch
+6,394,994
+6,324,761
+6,361,416
+-0.5 %
++0.6 %
+swept_plane_cut/extrusion_bspline_oblique/swept
+3,062
+3,110
+3,117
++1.8 %
++0.2 %
+swept_plane_cut/revolution_bspline_perpendicular/bspline_patch
+18,953,482
+18,765,133
+18,815,007
+-0.7 %
++0.3 %
+swept_plane_cut/revolution_bspline_perpendicular/swept
+39,301
+39,176
+39,181
+-0.3 %
++0.0 %
+swept_plane_cut/torus_perpendicular/bspline_patch
+47,273,811
+46,734,608
+46,945,200
+-0.7 %
++0.5 %
+swept_plane_cut/torus_perpendicular/elementary
+1,664
+1,694
+1,698
++2.0 %
++0.2 %
+swept_plane_cut/torus_perpendicular/swept
+4,002
+4,080
+4,107
++2.6 %
++0.7 %
+swept_plane_cut/torus_tangent/bspline_patch
+18,358,459
+18,221,034
+18,177,470
+-1.0 %
+-0.2 %
+swept_plane_cut/torus_tangent/elementary
+1,061
+1,091
+1,095
++3.2 %
++0.4 %
+swept_plane_cut/torus_tangent/swept
+3,144
+3,221
+3,251
++3.4 %
++0.9 %
+swept_plane_cut/torus_through_axis/bspline_patch
+34,414,501
+34,009,898
+34,192,783
+-0.6 %
++0.5 %
+swept_plane_cut/torus_through_axis/elementary
+1,578
+1,608
+1,612
++2.2 %
++0.2 %
+swept_plane_cut/torus_through_axis/swept
+3,540
+3,520
+3,522
+-0.5 %
++0.1 %
+Against PR 2, every marching and B-spline-patch bench is within +1.0 % (cylinder_extruded_wall), and bspline_surface_pair is +0.5 % with the derivative-cone loops. intersect_curve_surface never reaches marching, and it moves by +0.6 to +0.8 %, which is the layout noise floor. The closed-form …/elementary and …/swept rows are a few thousand instructions. On those, PR 1's routing and PR 2's traits account for most of the gap to main, and the rest is tens of instructions.
+Merge Danger
+Door: two-way
+Blast Radius: internal
+Nothing public changes; the item list and the results are identical. The risk is a behaviour change in marching that the 18 compared pairs and the marching tests do not cover. The functions moved verbatim, #145, #146 and #148 included, and the only reordering is that grid seeds for an incomplete patch-pair search are now computed before tracing starts rather than after. They are pure functions of the two surfaces, so the seeds and the trace order are the same.
+🤖 Generated with Claude Code
+GabrielJMS
+mentioned this pull request
+Oct 30, 2026
+Turn any surface into patches and seed marching from their pairs
+#137
+Merged
+GabrielJMS
+force-pushed
+the
+depth3/3-marching-split
+branch
+from
+018092d to
+c0cdfec
+Compare
+October 30, 2026 12:36
+GabrielJMS
+changed the base branch from
+main
+to
+depth3/2-transform-reversal-traits
+October 30, 2026 12:36
+This was referenced Oct 30, 2026
+Route every intersection pair through one closed-form pair table
+#135
+Merged
+Move transform and reversal onto the shape traits
+#134
+Merged
+One test sample list per shape enum
+#136
+Merged
+Write the curve-curve intersection and fitting once for both tiers
+#143
+Merged
+Write each Python method set once in the stubs, with docstrings
+#132
+Merged
+GabrielJMS
+force-pushed
+the
+depth3/3-marching-split
+branch
+from
+c0cdfec to
+d506f3a
+Compare
+October 30, 2026 13:19
+GabrielJMS
+force-pushed
+the
+depth3/2-transform-reversal-traits
+branch
+from
+bec6073 to
+262ccac
+Compare
+October 30, 2026 13:34
+GabrielJMS
+force-pushed
+the
+depth3/3-marching-split
+branch
+from
+d506f3a to
+c68a7c4
+Compare
+October 30, 2026 13:43
+GabrielJMS
+force-pushed
+the
+depth3/2-transform-reversal-traits
+branch
+from
+262ccac to
+31ffb36
+Compare
+October 30, 2026 13:59
+GabrielJMS
+and others
+added 6 commits
+October 30, 2026 15:01
+Split marching into a surface pair, a tracer and a seeding policy
+…
+080dcb5
+```
+marching.rs held six concepts as 28 free functions over (a, b, x). It
+now composes four submodules: pair.rs (the two surfaces and the point
+on both: correctors, bounds, prediction, contact geometry), tracer.rs
+(the step loop, with the touching mode as its own per-step state),
+seeding.rs (which seed sources run, and when one is left out) and
+coincidence.rs (the check run before marching). Every result is bit
+for bit what it was.
+
+The surface pair and the tracer get direct tests on plane x sphere,
+plane x cylinder and plane x torus, without a full march.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Record the marching split in ADR 0025 and ARCHITECTURE.md
+…
+194305a
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Keep the coincidence check and unit normal inlined into marching
+…
+a9fb4d7
+```
+Splitting marching into modules left both as separate calls, adding
+4.5% to the own-patch benches. Inlined, they are within 0.3% of main.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Record branch seeds and Hermite steps in the marching split (ADR 0025)
+…
+24205a1
+```
+The tracer now returns the tangents and stalls of each trace and sizes
+its steps by the Hermite error, the seeding policy seeds the branches
+crossing at a stall, and the fit helpers live in curves/fitting.rs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Keep the derivative cones' loops inlined whatever the module layout
+…
+ceacae9
+```
+Rebased on the Hermite marching, the split left the iterator adapters
+of derivative_cones out of line: +2.3 % on bspline_surface_pair against
+PR 2, all in that function. As plain loops, in the same order, it is
++0.5 %. Results are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Record the trace box in the marching split (ADR 0025)
+…
+2016594
+```
+The pair answers the box where traces end; the tracer holds it, ends a
+trace on it and says whether a seed lies in it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+GabrielJMS
+force-pushed
+the
+depth3/3-marching-split
+branch
+from
+f4c947c to
+2016594
+Compare
+October 30, 2026 14:04
+GabrielJMS
+changed the base branch from
+depth3/2-transform-reversal-traits
+to
+main
+October 30, 2026 14:31
+Hide details
+View details
+GabrielJMS
+merged commit 11b56b6
+into
+main
+Oct 30, 2026
+3 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+GabrielJMS
+mentioned this pull request
+Oct 30, 2026
+Release v0.41.0
+#150
+Merged
+GabrielJMS
+deleted the
+depth3/3-marching-split
+branch
+November 5, 2026 11:06
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

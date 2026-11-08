@@ -1,0 +1,286 @@
+Tr2VoxelTexture: expose a voxel data channel as a 3D texture
+Adds Tr2VoxelTexture, an ITr2TextureProvider that turns one payload channel of a Tr2VoxelData into a 3D texture. Shaders index it with tex[uint3(x, y, z)], and it can be bound with e.g. Tr2RuntimeTextureParameter.
+
+Formats: each voxel type maps to the matching 1/2/4-component format (*_FLOAT, *_UINT, *_SINT), and normalized 8/16-bit channels use *_UNORM/*_SNORM. Boolean channels are unpacked to one byte per element (R8*_UINT).
+Unsupported: 3-element channels and normalized 32-bit integer channels. These log an error, and bound parameters fall back to the default 3D texture.
+Updates: setting voxelData or channel rebuilds the texture. Edits through SetVoxels to the selected channel are re-uploaded in place.
+Tr2VoxelData: adds Tr2VoxelDataTypeName() for logging, plus GetPackedBit/SetPackedBit so the Boolean bit layout is defined in one place.
+
+AI assistance
+AI assisted with code review and some small code tweaks
+
+New texture views by CCPNobody · Pull Request #138 · carbonengine/trinity · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+New texture views
+#138
+New issue
+Have a question about this project? Sign up for a free GitHub account to open an issue and contact its maintainers and the community.
+Sign up for GitHub
+By clicking “Sign up for GitHub”, you agree to our terms of service and
+privacy statement. We’ll occasionally send you account related emails.
+Already on GitHub?
+Sign in
+to your account
+Closed
+CCPNobody
+wants to merge
+6
+commits into
+main
+from
+new-texture-views
+Uh oh!
+There was an error while loading. Please reload this page.
+Closed
+New texture views
+#138
+Show file tree
+Hide file tree
+Changes from 1 commit
+Commits
+Show all changes
+6 commits
+Select commit
+Hold shift + click to select a range
+4c28f0b
+Plat 12257 procedural meshes (#132)
+ccp-intern Oct 26, 2026
+2d3b59f
+Plat 12257 procedural meshes (#132)
+ccp-intern Oct 26, 2026
+569735b
+Merge branch 'feature/voxels' of https://github.com/carbonengine/trin…
+filipppavlov Oct 26, 2026
+c32ae01
+Add a voxel data container (#133)
+filipppavlov Oct 27, 2026
+50b1afe
+Tr2VoxelTexture
+CCPNobody Nov 3, 2026
+951e4e5
+Merge branch 'main' into new-texture-views
+CCPNobody Nov 3, 2026
+File filter
+Clear filters
+Conversations
+Failed to load comments. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Jump to
+Jump to file
+Failed to load files. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Diff view
+Diff view
+Prev
+Previous commit
+Next
+Next commit
+Tr2VoxelTexture
+```
+Implementation of a texture that converts a voxeldata channel to a 3d texture.
+It implements ITr2TextureProvider so it can be used in Tr2RuntimeTextureProvider shader resource.
+```
+Loading branch information
+Uh oh!
+There was an error while loading. Please reload this page.
+CCPNobody
+committed
+Nov 3, 2026
+commit 50b1afede2a1469346409adbc64cd57a9a17bd75
+Some comments aren't visible on the classic Files Changed page.
+There are no files selected for viewing
+3 changes: 3 additions & 0 deletions
+3
+trinity/CMakeLists.txt
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -1760,6 +1760,9 @@ set(_SOURCES
+Tr2VoxelData.cpp
+Tr2VoxelData.h
+Tr2VoxelData_Blue.cpp
+Tr2VoxelTexture.cpp
+Tr2VoxelTexture.h
+Tr2VoxelTexture_Blue.cpp
+TriColor.cpp
+TriColor_Blue.cpp
+TriConstants.cpp
+Expand Down
+38 changes: 25 additions & 13 deletions
+38
+trinity/Tr2VoxelData.cpp
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -106,8 +106,7 @@ BluePy WrapPayloadElement( const Tr2VoxelData::Dimensions& dimensions, const Tr2
+{
+if constexpr( std::is_same_v<T, bool> )
+{
+auto byte = reinterpret_cast<const uint8_t*>( payloadData + ( index * payloadType.elementCount + j ) / 8 );
+p[j] = ( *byte & ( 1 << ( ( index * payloadType.elementCount + j ) % 8 ) ) ) != 0;
+p[j] = Tr2VoxelData::GetPackedBit( payloadData, index * payloadType.elementCount + j );
+}
+else
+{
+Expand Down
+Expand Up
+@@ -332,6 +331,29 @@ Tr2VoxelData::PayloadSnapshot Tr2VoxelData::GetPayloadSnapshot( size_t index )
+}
+bool Tr2VoxelData::GetPackedBit( const uint8_t* data, size_t bitIndex )
+{
+return ( data[bitIndex / 8] >> ( bitIndex % 8 ) ) & 1;
+}
+bool Tr2VoxelData::SetPackedBit( uint8_t* data, size_t bitIndex, bool value )
+{
+uint8_t& byte = data[bitIndex / 8];
+uint8_t oldByte = byte;
+uint8_t mask = uint8_t( 1 << ( bitIndex % 8 ) );
+if( value )
+{
+byte |= mask;
+}
+else
+{
+byte &= ~mask;
+}
+return byte != oldByte;
+}
+BluePy Tr2VoxelData::SetVoxels( PyObject* set )
+{
+auto setIter = BluePy( PyObject_GetIter( set ), true );
+Comment thread
+Expand Down
+Expand Up
+@@ -448,17 +470,7 @@ bool Tr2VoxelData::ExtractPayloadElement( PyObject* element, size_t index, const
+{
+if constexpr( std::is_same_v<Dst, bool> )
+{
+auto& byte = *reinterpret_cast<uint8_t*>( dest.current.data.data() + ( coordIndex * payloadType.elementCount + j ) / 8 );
+auto oldByte = byte;
+if( p[j] )
+{
+byte |= 1 << ( ( coordIndex * payloadType.elementCount + j ) % 8 );
+}
+else
+{
+byte &= ~( 1 << ( ( coordIndex * payloadType.elementCount + j ) % 8 ) );
+}
+if( oldByte != byte )
+if( SetPackedBit( dest.current.data.data(), coordIndex * payloadType.elementCount + j, p[j] ) )
+{
+modifiedChannels.MarkChannelModified( index );
+}
+Expand Down
+49 changes: 49 additions & 0 deletions
+49
+trinity/Tr2VoxelData.h
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -21,6 +21,37 @@ enum class Tr2VoxelDataType : uint8_t
+Int32
+};
+/**
+* @brief Returns the name of the given Tr2VoxelDataType as a string.
+* Useful for debugging and logging purposes.
+*/
+constexpr const char* Tr2VoxelDataTypeName( Tr2VoxelDataType type )
+{
+switch( type )
+{
+case Tr2VoxelDataType::Boolean:
+return "Boolean";
+case Tr2VoxelDataType::Float:
+return "Float";
+case Tr2VoxelDataType::Float16:
+return "Float16";
+case Tr2VoxelDataType::UInt8:
+return "UInt8";
+case Tr2VoxelDataType::UInt16:
+return "UInt16";
+case Tr2VoxelDataType::UInt32:
+return "UInt32";
+case Tr2VoxelDataType::Int8:
+return "Int8";
+case Tr2VoxelDataType::Int16:
+return "Int16";
+case Tr2VoxelDataType::Int32:
+return "Int32";
+default:
+return "Unknown";
+}
+}
+BLUE_CLASS_IMPL( Tr2VoxelData );
+Expand Down
+Expand Up
+@@ -146,6 +177,24 @@ class Tr2VoxelData : public ICustomPersist
+*/
+PayloadSnapshot GetPayloadSnapshot( size_t index );
+/**
+* @brief Reads one element of a Boolean payload. Boolean payloads store one bit per element, least significant bit first:
+* element j of voxel i is bit ( i * elementCount + j ) of the payload data.
+* @param data The payload data.
+* @param bitIndex The index of the element's bit.
+* @return The value of the element.
+*/
+static bool GetPackedBit( const uint8_t* data, size_t bitIndex );
+/**
+* @brief Writes one element of a Boolean payload (see GetPackedBit for the layout).
+* @param data The payload data.
+* @param bitIndex The index of the element's bit.
+* @param value The value to write.
+* @return True if the stored value changed.
+*/
+static bool SetPackedBit( uint8_t* data, size_t bitIndex, bool value );
+// ICustomPersist interface for persisting m_payload as a custom binary block
+void GetWriteBufferAndSize( const char* memberName, unsigned char** buffer, size_t* bufferSize ) override;
+void ReleaseWriteBuffer( unsigned char* buffer ) override;
+Expand Down
+Loading
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+Toggle all file notes
+Toggle all file annotations
+Add this suggestion to a batch that can be applied as a single commit.
+This suggestion is invalid because no changes were made to the code.
+Suggestions cannot be applied while the pull request is closed.
+Suggestions cannot be applied while viewing a subset of changes.
+Only one suggestion per line can be applied in a batch.
+Add this suggestion to a batch that can be applied as a single commit.
+Applying suggestions on deleted lines is not supported.
+You must change the existing code in this line in order to create a valid suggestion.
+Outdated suggestions cannot be applied.
+This suggestion has been applied or marked resolved.
+Suggestions cannot be applied from pending reviews.
+Suggestions cannot be applied on multi-line comments.
+Suggestions cannot be applied while the pull request is queued to merge.
+Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

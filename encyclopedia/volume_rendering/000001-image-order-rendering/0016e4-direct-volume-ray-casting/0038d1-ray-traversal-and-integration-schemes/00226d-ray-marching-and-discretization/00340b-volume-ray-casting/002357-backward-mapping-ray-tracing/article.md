@@ -1,96 +1,99 @@
 # Backward Mapping (Ray Tracing)
-Also called: Image-order volume rendering, Ray-tracing volume rendering
+
+Also called: Image-order volume rendering, Ray-tracing volume rendering, Volume Rendering (General)
+
 ## Overview
-Backward mapping is a volume rendering technique that forms the image by iterating over output pixels and projecting rays through the data volume, where intersecting voxels influence the pixel value [S1, unofficial]. It is distinguished from forward mapping (object-order) methods, which project voxels directly onto the image plane, by its natural handling of hidden surface removal and consistent sampling density relative to the screen [S1, unofficial]. It builds on [Volume Ray Casting](3161-volume-ray-casting.md) by defining the specific image-order traversal strategy.
+Backward mapping is a volume rendering technique that uses computer graphics ray-tracing to form the image by projecting a ray from each pixel through the data volume, where intersecting voxels influence the pixel value [S2, unofficial]. It is an image-space method that considers all voxels in an object for one view, producing 'fuzzy' images from sampled data rather than 'crisp' surface renderings [S1, unofficial]. This approach helps overcome misinterpretations (false negatives/positives) inherent in surface renderings, albeit at a slower speed [S1, unofficial].
+
 ## How it works
 **Inputs and Outputs:**
-- Input: Volumetric dataset $V$ (scalar/vector fields), camera parameters (view direction, up vector, position), image dimensions ($W \times H$).
-- Output: Image buffer $I$ of size $W \times H$.
+- Input: A volumetric dataset (voxels), a camera/viewing parameters defining the image plane and ray origins/directions.
+- Output: A 2D image where each pixel value is accumulated from the voxels intersected by the corresponding ray.
 
 **Data Structures:**
-- Volume $V$: Stored in its native coordinate system (e.g., voxel grid). No explicit surface representation is required [S1, unofficial].
-- Ray: Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
+- The volume is stored in its natural voxel format, intrinsically spatially presorted [S2, unofficial].
+- No explicit geometric representations (surfaces) are used [S1, unofficial].
 
 **Steps:**
-1. **Ray Generation:** For each pixel $(u, v)$ in the image plane, compute the corresponding ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ that passes through the pixel center [S1, unofficial].
-2. **Intersection:** Determine the entry and exit points of the ray with the volume bounding box.
-3. **Sampling:** Discretize the ray segment within the volume into $N$ sample points. At each sample point $x_l$, sample the volume data $c(x_l)$ (color/density) and opacity $\alpha_l$ [S2, unofficial].
-4. **Integration:** Accumulate the contribution of each sample to the pixel color using the volume rendering integral approximation [S2, unofficial]:
-   $$ I(\hat{x}) = \sum_{l=0}^{L-1} c(x_l) \alpha_l \prod_{j=0}^{l-1} (1 - \alpha_j) $$
-   where $L$ is the number of samples along the ray, $c(x_l)$ is the color at sample $l$, and $\alpha_l$ is the opacity [S2, unofficial]. The term $\prod_{j=0}^{l-1} (1 - \alpha_j)$ represents the transmittance from the ray origin to sample $l$.
-5. **Blending:** The result for each pixel is the accumulated color.
+1. For each pixel in the image plane, define a ray originating from the camera center and passing through the pixel [S2, unofficial].
+2. Project this ray through the data volume [S2, unofficial].
+3. Identify all voxels intersected by the ray [S2, unofficial].
+4. Accumulate the contribution of each intersecting voxel to the pixel value [S2, unofficial].
+5. The accumulation can be achieved using either "front-to-back" or "back-to-front" ordering [S1, unofficial].
+
+**Formulas:**
+Not given in the sources.
+
+**Parameters:**
+Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- The rendering is created from sampled 'fuzzy' data, which requires the user to remember this nature when interpreting the image [S1, unofficial].
+- The method is slower than surface type renderings [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def backward_mapping_volume_rendering(volume, camera, width, height):
-    image = zeros((height, width, 3))
+def backward_mapping_volume_rendering(volume, camera, image_width, image_height):
+    """
+    Renders a volume using backward mapping (ray tracing).
     
-    # Precompute ray directions for all pixels based on camera parameters
-    ray_directions = compute_ray_directions(camera, width, height)
+    Args:
+        volume: 3D array of voxel values.
+        camera: Object containing camera position and orientation.
+        image_width: Width of the output image.
+        image_height: Height of the output image.
+        
+    Returns:
+        2D array representing the rendered image.
+    """
+    image = zeros((image_height, image_width))
     
-    for y in range(height):
-        for x in range(width):
+    for y in range(image_height):
+        for x in range(image_width):
+            # Define ray for current pixel
             ray_origin = camera.position
-            ray_direction = ray_directions[y, x]
+            ray_direction = compute_ray_direction(camera, x, y, image_width, image_height)
             
-            # Determine intersection with volume bounding box
-            t_min, t_max = intersect_volume(ray_origin, ray_direction, volume.bounds)
+            # Initialize pixel value
+            pixel_value = 0.0
             
-            if t_max < t_min:
-                continue # Ray misses volume
-                
-            # Discretize ray
-            num_samples = compute_num_samples(t_max - t_min, volume.spacing)
-            dt = (t_max - t_min) / num_samples
+            # Trace ray through volume
+            # Determine intersection with volume bounds
+            t_min, t_max = compute_ray_volume_intersection(ray_origin, ray_direction, volume_bounds)
             
-            accumulated_color = zeros(3)
-            transmittance = 1.0
-            
-            for i in range(num_samples):
-                t = t_min + i * dt
-                sample_pos = ray_origin + t * ray_direction
+            # Sample along the ray
+            t = t_min
+            while t <= t_max:
+                # Get sample point in world space
+                sample_point = ray_origin + t * ray_direction
                 
-                # Sample volume data at sample_pos
-                # Returns color c and opacity alpha
-                c, alpha = sample_volume(volume, sample_pos)
+                # Sample voxel value at sample_point
+                # This involves trilinear interpolation or similar resampling
+                voxel_value = sample_volume(volume, sample_point)
                 
-                # Apply volume rendering equation
-                # Contribution = color * opacity * transmittance
-                contribution = c * alpha * transmittance
-                accumulated_color += contribution
+                # Accumulate contribution
+                # Specific accumulation function (e.g., front-to-back compositing) is not detailed in sources
+                pixel_value = accumulate(pixel_value, voxel_value)
                 
-                # Update transmittance
-                transmittance *= (1.0 - alpha)
+                # Advance along ray
+                t += step_size
                 
-                # Early ray marching termination if fully opaque
-                if transmittance < epsilon:
-                    break
-            
-            image[y, x] = accumulated_color
+            image[y, x] = pixel_value
             
     return image
 ```
 
-**Parameters:**
-- `num_samples`: Number of samples per ray. Depends on volume resolution and view distance.
-- `epsilon`: Small threshold for early ray termination.
-
-**Edge Cases:**
-- Ray misses volume: Skip pixel or assign background color.
-- Degenerate volume: Empty volume results in transparent image.
-
 ## Operating characteristics
-- **Time Complexity:** $O(W \cdot H \cdot N)$, where $W, H$ are image dimensions and $N$ is samples per ray.
-- **Memory Complexity:** $O(W \cdot H)$ for the image buffer, plus storage for the volume.
-- **Strengths:** Natural handling of occlusion; consistent visual quality across view angles; simple implementation [S1, unofficial].
-- **Limitations:** Can be slow for high-resolution volumes due to per-pixel ray casting; sampling artifacts if $N$ is insufficient [S2, unofficial].
-- **When to use:** When visual accuracy and simplicity are prioritized over performance, or when hardware acceleration is available.
+- **Speed:** Slower than surface type renderings [S1, unofficial].
+- **Quality:** Produces higher quality images than surface renderings [S1, unofficial].
+- **Data Handling:** Uses no geometric representations; considers all voxels [S1, unofficial].
+- **Interpretation:** Produces 'fuzzy' images from sampled data, reducing misinterpretations compared to 'crisp' surface renderings [S1, unofficial].
 
 ## Background
-Backward mapping was introduced in the late 1980s as a fundamental approach to volume rendering, allowing direct examination of data in its native voxel format without surface simplification [S1, unofficial]. It is widely used in medical imaging and scientific visualization [S1, unofficial].
+Volume rendering was developed as an alternative to surface rendering to avoid the ambiguities and misinterpretations (false negatives/positives) that can arise when creating surfaces from neighbor data points [S1, unofficial]. The technique is divided into two main subsections: Backward projection methods (image space/ray casting) and Forward projection methods (object space) [S1, unofficial]. Backward mapping is specifically identified as an image-space method using ray-tracing [S1, S2, unofficial]. The feasibility of volume rendering relies on the intrinsic spatial presorting of volumetric data sets [S2, unofficial].
 
 ## Sources
-[S1] Volumetric rendering of medical data : applications to stereotactic neurosurgery planning, https://doi.org/10.82308/10070, fetched 2026-10-26 (unofficial)
-[S2] Hardware-Accelerated Volume Rendering, https://vcg.seas.harvard.edu/publications/20040101-hardware-accelerated-volume-rendering/paper, fetched 2026-10-27 (unofficial)
+[S1] An Overview of Rendering from Volume Data --- including Surface and Volume Rendering, https://core.ac.uk/download/63614.pdf, fetched 2026-10-30 (unofficial)
+[S2] Volumetric rendering of medical data : applications to stereotactic neurosurgery planning, https://doi.org/10.82308/10070, fetched 2026-10-26 (unofficial)

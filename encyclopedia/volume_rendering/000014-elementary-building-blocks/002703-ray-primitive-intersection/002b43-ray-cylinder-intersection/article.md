@@ -1,14 +1,13 @@
 # Ray-Cylinder Intersection
-Also called: Cylinder Ray Intersection, Ray-Cylinder Hit Test
 
 ## Overview
-Computes the entry and exit distances for a ray intersecting a cylinder defined by `geomSize`, composed of front/back rectangles, top/bottom faces, and a lateral curved surface. It differs from [Ray-box intersection](776-ray-box-intersection.md) by handling the curved lateral surface via quadratic solving and cylindrical coordinate checks, and from [Ray-box Intersection via OpenGL Geometry Shaders](1768-ray-box-intersection-via-opengl-geometry-shaders.md) by being a general-purpose CPU/GPU kernel implementation rather than a shader-specific primitive assembly.
+Computes the entry and exit distances for a ray intersecting a cylinder defined by `geomSize`, composed of front/back rectangles, top/bottom faces, and a lateral curved surface [S1, unofficial]. It differs from [Ray-box intersection](776-ray-box-intersection.md) by handling the curved lateral surface via quadratic solving and cylindrical coordinate checks [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs**
 - `rayOrig`: Ray origin $\mathbf{o}$ (float3).
-- `rayVect`: Ray direction $\mathbf{d}$ (float3). Note: The source implementation uses the unnormalized direction vector for distance calculations, where the parameter $s$ represents the magnitude along $\mathbf{d}$.
-- `geomSize`: Cylinder dimensions (float3). $x$ is the radius $R$, $y$ is the height $H$ (or length along the cylinder axis), $z$ is the width of the rectangular cross-section faces.
+- `rayVect`: Ray direction $\mathbf{d}$ (float3). The source implementation uses the unnormalized direction vector for distance calculations, where the parameter $s$ represents the magnitude along $\mathbf{d}$ [S1, unofficial].
+- `geomSize`: Cylinder dimensions (float3). $x$ is the radius $R$, $y$ is the height $H$, $z$ is the width of the rectangular cross-section faces [S1, unofficial].
 - `inAbs`: Output entry distance $s_{in}$.
 - `outAbs`: Output exit distance $s_{out}$.
 
@@ -16,304 +15,140 @@ Computes the entry and exit distances for a ray intersecting a cylinder defined 
 The geometry is defined by a bounding box-like structure `geomSize` where:
 - `geomSize.x`: Radius $R$ of the cylinder.
 - `geomSize.y`: Height $H$ of the cylinder (extent along the Y-axis).
-- `geomSize.z`: Width $W$ of the front/back rectangular faces.
+- `geomSize.z`: Width $W$ of the front/back rectangular faces [S1, unofficial].
 
 **Coordinate Systems**
-The method uses Cartesian coordinates for ray intersection tests and converts to cylindrical coordinates for boundary checks on the top/bottom faces and lateral surface.
+The method uses Cartesian coordinates for ray intersection tests and converts to cylindrical coordinates for boundary checks on the top/bottom faces and lateral surface [S1, unofficial].
 - Cartesian: $(x, y, z)$
-- Cylindrical: $(r, \theta, h)$ or as used in source: $(x_{cyl}, y_{cyl}, z_{cyl})$ where $x_{cyl}$ is radius, $y_{cyl}$ is height, $z_{cyl}$ is angular/width component. The source code `cartToCyl` and `cylToCart` imply a specific mapping. Based on the face definitions:
-    - The cylinder axis is aligned with the Y-axis.
-    - The lateral surface is defined by $x^2 + z^2 = R^2$.
-    - The top face is at $y = H$.
-    - The bottom face is at $y = 0$.
-    - The front/back faces are rectangles in the XZ plane? No, the source defines Front/Back rectangles in the XY plane? Let's trace the source carefully.
-
-**Source Analysis of Geometry Definition:**
-1.  **Front Rectangle**: Points $P0=(0,0,0)$, $P1=(R,0,0)$, $P2=(0,W,0)$. This lies in the $z=0$ plane (XY plane). Normal is along Z.
-2.  **Back Rectangle**: Points $P0=(R,0,W)$? No, `lastPoint = cylToCart(geomSize)`. If `cylToCart` maps $(R, H, W)$ to Cartesian, we need to infer. The source uses `lastPoint.x` for the back face X coordinate.
-    - Actually, looking at `P0 = make_float3(lastPoint.x, 0, lastPoint.z)`, `P1 = (0,0,0)`, `P2 = (0, geomSize.z, 0)`.
-    - This implies the cylinder is oriented such that its axis is along the Y-axis, but the "front" and "back" are flat rectangular caps?
-    - Wait, a standard cylinder has circular caps. The source mentions "front/back rectangles". This suggests a **cylindrical wedge** or a **partial cylinder** or a **cylinder approximated by rectangular faces**?
-    - Re-reading S1: "cylinder defined by `geomSize`, composed of front/back rectangles, top/bottom faces, and a lateral curved surface."
-    - This description is geometrically contradictory for a standard right circular cylinder unless "front/back" refers to the flat ends of a cylinder whose axis is along the Z-axis?
-    - Let's look at the normals.
-        - Front: $P0=(0,0,0), P1=(R,0,0), P2=(0,W,0)$. Normal $n = P1 \times P2 = (0,0,RW)$. This is the XY plane ($z=0$).
-        - Back: $P0=(lastPoint.x, 0, lastPoint.z)$. If this is the opposite face, and it's a rectangle, the cylinder axis must be perpendicular to the XY plane? No, the lateral surface check uses $u=\{rayVect.x, rayVect.z\}$ and $v=\{rayOrig.x, rayOrig.z\}$ with radius `geomSize.x`. This implies the cylinder axis is the **Y-axis**.
-        - If the axis is Y, the caps are at $y=0$ and $y=H$. These are circles.
-        - Why does the source intersect "Front Rectangle" and "Back Rectangle"?
-        - The source code for Front/Back intersects planes $z=0$ and $z=W$?
-        - `P2 = (0, geomSize.z, 0)`. This vector is along Y. `P1-P0` is along X. The normal is along Z.
-        - So the "Front" and "Back" are actually the **side walls** of a bounding box?
-        - But the lateral surface is also checked.
-        - **Conclusion**: The source implements a **Cylindrical Segment** or a **Cylinder clipped by two parallel planes** (Front/Back) and capped by Top/Bottom?
-        - Or, more likely, the source describes a **Cylinder** where the "Front/Back" are the flat rectangular faces of a **cylindrical wedge** (like a pipe segment cut by radial planes)?
-        - Let's look at the bounds check for Front: `P.x >= 0 && P.x <= geomSize.x && P.y >= 0 && P.y <= geomSize.z`.
-        - And Back: `x >= 0 && x <= geomSize.x && P.y >= 0 && P.y <= geomSize.z`.
-        - And Top/Bottom: `P.x <= geomSize.x && P.y <= geomSize.y`. Here `P` is cylindrical. `P.x` is radius. `P.y` is height?
-        - If Top/Bottom check uses `geomSize.y` as the limit for `P.y` (cylindrical height), then the cylinder height is `geomSize.y`.
-        - The Front/Back checks use `geomSize.z` as the limit for `P.y` (Cartesian Y).
-        - This implies the geometry is a cylinder of radius `geomSize.x` and height `geomSize.y`, but also bounded by two planes?
-        - Actually, the most consistent interpretation of the code `rayIntersectCyl` is that it intersects a **Cylinder** (axis Y, radius R, height H) AND two **Rectangular Planes** (Front/Back) that act as clipping planes?
-        - No, the return condition is `outAbsVal >= inAbsVal && outAbsFound && inAbsFound`. It requires hits on ALL components? No, it updates min/max.
-        - The degenerate case `outAbsVal = inAbsVal + 2 * geomSize.x / length(rayVect)` suggests a full traversal.
-        - **Crucial Insight**: The source code appears to implement a **Cylinder** where the "Front" and "Back" are actually the **Circular Caps** approximated or defined as rectangles? No, the normal is Z.
-        - Let's look at the Lateral Face check: `u={rayVect.x, rayVect.z}`, `v={rayOrig.x, rayOrig.z}`. This is the standard infinite cylinder along Y.
-        - The Top/Bottom checks: `n={0,1,0}` and `n={0,-1,0}`. These are the caps at $y=H$ and $y=0$.
-        - The Front/Back checks: Normals along Z. These are planes at $z=0$ and $z=W$.
-        - **Geometry**: A cylinder of radius $R$ along Y, capped at $y=0$ and $y=H$, **AND** clipped by planes $z=0$ and $z=W$?
-        - This creates a shape that is a cylinder segment.
-        - However, the prompt says "cylinder defined by `geomSize`".
-        - I will describe the method exactly as the code executes: it tests intersection with 5 surfaces:
-            1.  Front Plane ($z=0$)
-            2.  Back Plane ($z=W$)
-            3.  Top Cap ($y=H$)
-            4.  Bottom Cap ($y=0$)
-            5.  Lateral Surface ($x^2+z^2=R^2$)
-        - The "Cylinder" is effectively a **Cylindrical Wedge** or **Segment** bounded by radial planes? No, $z=0$ and $z=W$ are parallel planes, not radial. This creates a "slab" cut through the cylinder.
+- Cylindrical: $(r, h, z)$ where $r$ is radius, $h$ is height, and $z$ is the width component [G]. The source code `cartToCyl` and `cylToCart` imply a specific mapping where the Cartesian $z$ coordinate is preserved as the third cylindrical component for slab checks [S1, unofficial].
 
 **Numbered Steps**
 
-1.  **Initialization**:
-    - Set `inAbsVal = 0`, `outAbsVal = 0`.
-    - Set `inAbsFound = false`, `outAbsFound = false`.
-
-2.  **Intersect Front Rectangle (Plane $z=0$)**:
-    - Define points: $P0 = (0, 0, 0)$, $P1 = (R, 0, 0)$, $P2 = (0, W, 0)$.
-    - Compute normal: $\mathbf{n} = (P1 - P0) \times (P2 - P0) = (0, 0, R \cdot W)$.
-    - Compute dot: $d = \mathbf{n} \cdot \mathbf{d}$.
-    - If $d \neq 0$:
-        - Compute parameter: $s = \frac{\mathbf{n} \cdot (P0 - \mathbf{o})}{d}$.
-        - Compute intersection point: $P = \mathbf{o} + s \mathbf{d}$.
-        - Check bounds: $0 \le P.x \le R$ and $0 \le P.y \le W$.
-        - If inside bounds:
-            - If $d > 0$ (ray entering from negative Z side? No, normal is +Z. If $d>0$, ray is moving in direction of normal, so it's exiting the volume if the volume is "inside" the normal? The code sets `outAbsVal` if $d>0$. This implies the volume is on the side of the normal? Or is it treating the plane as a boundary where $d>0$ means leaving?
-            - Standard ray-plane: $P = O + sD$. $n \cdot (P - P0) = 0 \Rightarrow s = \frac{n \cdot (P0 - O)}{n \cdot D}$.
-            - If $n \cdot D > 0$, the ray is moving in the direction of the normal. If the interior is behind the normal (negative side), this is an exit. If the interior is in front, it's an entry.
-            - The code sets `outAbsVal` if $d > 0$. This implies the "interior" is on the side of the normal? Or is it a specific convention?
-            - Let's assume the code's logic: $d>0 \rightarrow$ Exit candidate. $d<0 \rightarrow$ Entry candidate.
-
-3.  **Intersect Back Rectangle (Plane $z=W$)**:
-    - Define points: $P0 = (R, 0, W)$, $P1 = (0, 0, 0)$, $P2 = (0, W, 0)$.
-    - Compute normal: $\mathbf{n} = (P1 - P0) \times (P2 - P0)$.
-        - $P1-P0 = (-R, 0, -W)$.
-        - $P2-P0 = (-R, W, -W)$.
-        - $\mathbf{n} = \det \begin{vmatrix} i & j & k \\ -R & 0 & -W \\ -R & W & -W \end{vmatrix} = i(0 - (-W^2)) - j(RW - RW) + k(-RW - 0) = (W^2, 0, -RW)$.
-    - Compute dot: $d = \mathbf{n} \cdot \mathbf{d}$.
-    - If $d \neq 0$:
-        - Compute $s = \frac{\mathbf{n} \cdot (P0 - \mathbf{o})}{d}$.
-        - Compute $P = \mathbf{o} + s \mathbf{d}$.
-        - Check bounds:
-            - Projected X: $x = \frac{P \cdot (P0 - P1)}{|P0 - P1|}$.
-            - $0 \le x \le R$ and $0 \le P.y \le W$.
-        - Update `inAbsVal`/`outAbsVal` based on sign of $d$.
-
-4.  **Intersect Top Face (Plane $y=H$)**:
-    - Define $P0 = (0, H, 0)$, $\mathbf{n} = (0, 1, 0)$.
-    - Compute $d = \mathbf{n} \cdot \mathbf{d}$.
-    - If $d \neq 0$:
-        - Compute $s = \frac{\mathbf{n} \cdot (P0 - \mathbf{o})}{d}$.
-        - Compute $P = \mathbf{o} + s \mathbf{d}$.
-        - Convert $P$ to cylindrical coordinates: $P_{cyl} = \text{cartToCyl}(P)$.
-            - Implied mapping: $r = \sqrt{P.x^2 + P.z^2}$, $h = P.y$, $\theta = \text{atan2}(P.z, P.x)$.
-            - Source checks: $P_{cyl}.x \le R$ and $P_{cyl}.y \le H$?
-            - Wait, `P.y <= geomSize.y`. If `P` is already on the plane $y=H$, then `P.y` is $H$. The check `P.y <= geomSize.y` is trivially true or false?
-            - The source says: `if (P.x <= geomSize.x && P.y <= geomSize.y)`.
-            - If `P` is the intersection point, `P.y` is exactly $H$ (if `geomSize.y` is H).
-            - This check seems to verify if the point is within the radial bounds ($P.x$ in cyl coords is radius) and height bounds?
-            - Actually, `cartToCyl` likely returns $(r, \theta, h)$ or $(r, h, \theta)$.
-            - Given `P.x <= geomSize.x` (Radius check) and `P.y <= geomSize.y` (Height check?), this implies the cylindrical output has radius in x and height in y.
-            - So `cartToCyl` maps $(x,y,z) \to (r, h, \theta)$?
-            - Let's assume `P_cyl.x` is radius and `P_cyl.y` is height.
-        - Update `inAbsVal`/`outAbsVal`.
-
-5.  **Intersect Bottom Face (Plane $y=0$)**:
-    - Define $P0 = (0, 0, 0)$, $\mathbf{n} = (0, -1, 0)$.
-    - Compute $d = \mathbf{n} \cdot \mathbf{d}$.
-    - If $d \neq 0$:
-        - Compute $s = \frac{\mathbf{n} \cdot (P0 - \mathbf{o})}{d}$.
-        - Compute $P = \mathbf{o} + s \mathbf{d}$.
-        - Convert to cylindrical.
-        - Check bounds: $P_{cyl}.x \le R$ and $P_{cyl}.y \le H$? (Same as top).
-        - Update `inAbsVal`/`outAbsVal`.
-
-6.  **Intersect Lateral Face (Cylinder $x^2 + z^2 = R^2$)**:
-    - Define vectors in XZ plane: $\mathbf{u} = (d.x, d.z)$, $\mathbf{v} = (o.x, o.z)$.
-    - Solve quadratic equation for $s$:
-        - $a = \mathbf{u} \cdot \mathbf{u}$
-        - $b = 2 (\mathbf{u} \cdot \mathbf{v})$
-        - $c = \mathbf{v} \cdot \mathbf{v} - R^2$
-    - Discriminant $\Delta = b^2 - 4ac$.
-    - If $\Delta \ge 0$:
-        - Roots: $s_0 = \frac{-b - \sqrt{\Delta}}{2a}$, $s_1 = \frac{-b + \sqrt{\Delta}}{2a}$.
-        - For each root $s_i$:
-            - Compute $P = \mathbf{o} + s_i \mathbf{d}$.
-            - Convert to cylindrical: $P_{cyl} = \text{cartToCyl}(P)$.
-            - Check bounds: $P_{cyl}.y \le H$ and $P_{cyl}.z \ge 0$ and $P_{cyl}.z \le W$?
-            - Source: `PCyl.y <= geomSize.y && PCyl.z >= 0 && PCyl.z <= geomSize.z`.
-            - This confirms `PCyl.z` corresponds to the Z-coordinate in Cartesian? Or the angular width?
-            - Given the Front/Back planes were at $z=0$ and $z=W$, and the check is `PCyl.z >= 0 && PCyl.z <= geomSize.z`, it implies the cylindrical coordinate system maps the Cartesian Z to the third cylindrical component.
-            - So `cartToCyl` likely returns $(r, h, z)$? Or $(r, \theta, z)$?
-            - If it returns $(r, h, z)$, then the check `PCyl.z >= 0` ensures the point is within the Z-slab.
-            - Update `inAbsVal`/`outAbsVal` based on the dot product of the normal and ray direction? The source says "based on the dot product d[i]". This likely refers to the surface normal at the intersection point.
-            - Normal at $(x,z)$ on cylinder is $(x, 0, z)$.
-            - If $\mathbf{n} \cdot \mathbf{d} > 0$, it's an exit? The source logic for planes used $d>0$ for exit.
-
-7.  **Handle Degenerate Cases**:
-    - If only entry found (`inAbsFound` true, `outAbsFound` false):
-        - `outAbsVal = inAbsVal + 2 * R / |\mathbf{d}|`.
-        - Note: The source uses `geomSize.x` for R.
-    - If only exit found (`outAbsFound` true, `inAbsFound` false):
-        - `inAbsVal = outAbsVal - 2 * R / |\mathbf{d}|`.
-
-8.  **Return**:
-    - Return `true` if `outAbsVal >= inAbsVal` and `outAbsFound` and `inAbsFound` are both true.
+1. **Initialization**: Set `inAbsVal = 0`, `outAbsVal = 0`. Set `inAbsFound = false`, `outAbsFound = false` [S1, unofficial].
+2. **Intersect Front Rectangle**: Define $P_0=(0,0,0)$, $P_1=(\text{geomSize}.x, 0, 0)$, $P_2=(0, \text{geomSize}.z, 0)$. Compute normal $\mathbf{n} = (P_1 - P_0) \times (P_2 - P_0)$. Compute dot $d = \mathbf{n} \cdot \mathbf{d}$. If $d \neq 0$, compute $s = \mathbf{n} \cdot (P_0 - \mathbf{o}) / d$. Compute intersection point $P = \mathbf{o} + s\mathbf{d}$. Check if $P.x \ge 0$ and $P.x \le \text{geomSize}.x$ and $P.y \ge 0$ and $P.y \le \text{geomSize}.z$. Update `inAbsVal` or `outAbsVal` based on the sign of $d$ ($d > 0 \rightarrow$ exit, $d < 0 \rightarrow$ entry) [S1, unofficial].
+3. **Intersect Back Rectangle**: Define $P_0=(\text{lastPoint}.x, 0, \text{lastPoint}.z)$, $P_1=(0,0,0)$, $P_2=(0, \text{geomSize}.z, 0)$, where `lastPoint = cylToCart(geomSize)`. Compute normal $\mathbf{n} = (P_1 - P_0) \times (P_2 - P_0)$. Compute dot $d = \mathbf{n} \cdot \mathbf{d}$. If $d \neq 0$, compute $s = \mathbf{n} \cdot (P_0 - \mathbf{o}) / d$. Compute $P = \mathbf{o} + s\mathbf{d}$. Check bounds using projected coordinate $x = \mathbf{P} \cdot (P_0 - P_1) / \|P_0 - P_1\|$. If $0 \le x \le \text{geomSize}.x$ and $0 \le P.y \le \text{geomSize}.z$, update `inAbsVal`/`outAbsVal` [S1, unofficial].
+4. **Intersect Top Face**: Define $P_0=(0, \text{geomSize}.z, 0)$, $\mathbf{n}=(0,1,0)$. Compute $d = \mathbf{n} \cdot \mathbf{d}$. If $d \neq 0$, compute $s = \mathbf{n} \cdot (P_0 - \mathbf{o}) / d$. Compute $P = \mathbf{o} + s\mathbf{d}$. Convert intersection point to cylindrical coordinates $P_{\text{cyl}} = \text{cartToCyl}(P)$. Check if $P_{\text{cyl}}.x \le \text{geomSize}.x$ and $P_{\text{cyl}}.y \le \text{geomSize}.y$. Update `inAbsVal`/`outAbsVal` [S1, unofficial].
+5. **Intersect Bottom Face**: Define $P_0=(0,0,0)$, $\mathbf{n}=(0,-1,0)$. Compute $d = \mathbf{n} \cdot \mathbf{d}$. If $d \neq 0$, compute $s = \mathbf{n} \cdot (P_0 - \mathbf{o}) / d$. Compute $P = \mathbf{o} + s\mathbf{d}$. Convert to cylindrical. Check bounds. Update `inAbsVal`/`outAbsVal` [S1, unofficial].
+6. **Intersect Lateral Face**: Solve quadratic equation for cylinder radius $\text{geomSize}.x$. Compute $a = \mathbf{u} \cdot \mathbf{u}$, $b = 2 \mathbf{u} \cdot \mathbf{v}$, $c = \mathbf{v} \cdot \mathbf{v} - (\text{geomSize}.x)^2$ where $\mathbf{u}=(\mathbf{d}.x, \mathbf{d}.z)$ and $\mathbf{v}=(\mathbf{o}.x, \mathbf{o}.z)$. If discriminant $\Delta \ge 0$, compute roots $s_0, s_1$. For each root, compute $P = \mathbf{o} + s_i\mathbf{d}$. Convert to cylindrical $P_{\text{cyl}}$. Check if $P_{\text{cyl}}.y \le \text{geomSize}.y$ and $0 \le P_{\text{cyl}}.z \le \text{geomSize}.z$. Update `inAbsVal`/`outAbsVal` based on the dot product of the surface normal and $\mathbf{d}$ [S1, unofficial].
+7. **Handle Degenerate Cases**: If only entry found, set `outAbsVal = inAbsVal + 2 * geomSize.x / length(rayVect)`. If only exit found, set `inAbsVal = outAbsVal - 2 * geomSize.x / length(rayVect)` [S1, unofficial].
+8. **Return**: Return `true` if `outAbsVal >= inAbsVal` and both `outAbsFound` and `inAbsFound` are true [S1, unofficial].
 
 **Pseudocode**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def ray_intersect_cyl(ray_orig, ray_vect, geom_size):
-    """
-    ray_orig: (x, y, z)
-    ray_vect: (dx, dy, dz)
-    geom_size: (R, H, W) -> Radius, Height, Width (Z-slab)
-    """
-    R = geom_size.x
-    H = geom_size.y
-    W = geom_size.z
-    
     in_abs_val = 0.0
     out_abs_val = 0.0
     in_abs_found = False
     out_abs_found = False
-    
-    # Helper to update min/max
-    def update(s, is_entry):
+
+    def update(s, is_exit):
         nonlocal in_abs_val, out_abs_val, in_abs_found, out_abs_found
-        if is_entry:
-            if in_abs_found:
-                in_abs_val = min(in_abs_val, s)
-            else:
-                in_abs_val = s
-                in_abs_found = True
+        if is_exit:
+            out_abs_val = s if not out_abs_found else max(out_abs_val, s)
+            out_abs_found = True
         else:
-            if out_abs_found:
-                out_abs_val = max(out_abs_val, s)
-            else:
-                out_abs_val = s
-                out_abs_found = True
+            in_abs_val = s if not in_abs_found else min(in_abs_val, s)
+            in_abs_found = True
 
-    # 1. Front Rectangle (Plane z=0)
-    # P0=(0,0,0), P1=(R,0,0), P2=(0,W,0)
-    # Normal n = (0, 0, R*W) -> direction (0,0,1)
-    n = (0, 0, 1)
-    d = n[0]*ray_vect[0] + n[1]*ray_vect[1] + n[2]*ray_vect[2]
+    def cart_to_cyl(p):
+        return (sqrt(p[0]**2 + p[2]**2), p[1], p[2])
+
+    # Front Rectangle
+    P0 = (0.0, 0.0, 0.0)
+    P1 = (geom_size.x, 0.0, 0.0)
+    P2 = (0.0, geom_size.z, 0.0)
+    n = cross(P1 - P0, P2 - P0)
+    d = dot(n, ray_vect)
     if d != 0:
-        s = (n[0]*(0 - ray_orig[0]) + n[1]*(0 - ray_orig[1]) + n[2]*(0 - ray_orig[2])) / d
+        s = dot(n, (P0[0]-ray_orig[0], P0[1]-ray_orig[1], P0[2]-ray_orig[2])) / d
         P = (ray_orig[0] + s*ray_vect[0], ray_orig[1] + s*ray_vect[1], ray_orig[2] + s*ray_vect[2])
-        if 0 <= P[0] <= R and 0 <= P[1] <= W:
-            if d > 0:
-                update(s, False) # Exit
-            else:
-                update(s, True)  # Entry
+        if 0 <= P[0] <= geom_size.x and 0 <= P[1] <= geom_size.z:
+            update(s, d > 0)
 
-    # 2. Back Rectangle (Plane z=W)
-    # P0=(R,0,W), P1=(0,0,0), P2=(0,W,0)
-    # n = (W^2, 0, -R*W)
-    n = (W*W, 0, -R*W)
-    d = n[0]*ray_vect[0] + n[1]*ray_vect[1] + n[2]*ray_vect[2]
+    # Back Rectangle
+    last_point = (geom_size.x, geom_size.y, geom_size.z)
+    P0 = (last_point[0], 0.0, last_point[2])
+    P1 = (0.0, 0.0, 0.0)
+    P2 = (0.0, geom_size.z, 0.0)
+    n = cross(P1 - P0, P2 - P0)
+    d = dot(n, ray_vect)
     if d != 0:
-        s = (n[0]*(R - ray_orig[0]) + n[1]*(0 - ray_orig[1]) + n[2]*(W - ray_orig[2])) / d
+        s = dot(n, (P0[0]-ray_orig[0], P0[1]-ray_orig[1], P0[2]-ray_orig[2])) / d
         P = (ray_orig[0] + s*ray_vect[0], ray_orig[1] + s*ray_vect[1], ray_orig[2] + s*ray_vect[2])
-        # Projected X check
-        P0_minus_P1 = (R, 0, W)
-        len_P0_P1 = sqrt(R*R + W*W)
-        x_proj = (P[0]*R + P[2]*W) / len_P0_P1
-        if 0 <= x_proj <= R and 0 <= P[1] <= W:
-            if d > 0:
-                update(s, False)
-            else:
-                update(s, True)
+        x_proj = dot(P, (P0[0]-P1[0], P0[1]-P1[1], P0[2]-P1[2])) / length(P0 - P1)
+        if 0 <= x_proj <= geom_size.x and 0 <= P[1] <= geom_size.z:
+            update(s, d > 0)
 
-    # 3. Top Face (Plane y=H)
-    n = (0, 1, 0)
-    d = n[1]*ray_vect[1]
+    # Top Face
+    P0 = (0.0, geom_size.z, 0.0)
+    n = (0.0, 1.0, 0.0)
+    d = dot(n, ray_vect)
     if d != 0:
-        s = (H - ray_orig[1]) / d
-        P = (ray_orig[0] + s*ray_vect[0], H, ray_orig[2] + s*ray_vect[2])
-        # Cylindrical check: r <= R
-        r = sqrt(P[0]**2 + P[2]**2)
-        if r <= R:
-            if d > 0:
-                update(s, False)
-            else:
-                update(s, True)
+        s = dot(n, (P0[0]-ray_orig[0], P0[1]-ray_orig[1], P0[2]-ray_orig[2])) / d
+        P = (ray_orig[0] + s*ray_vect[0], ray_orig[1] + s*ray_vect[1], ray_orig[2] + s*ray_vect[2])
+        P_cyl = cart_to_cyl(P)
+        if P_cyl[0] <= geom_size.x and P_cyl[1] <= geom_size.y:
+            update(s, d > 0)
 
-    # 4. Bottom Face (Plane y=0)
-    n = (0, -1, 0)
-    d = -ray_vect[1]
+    # Bottom Face
+    P0 = (0.0, 0.0, 0.0)
+    n = (0.0, -1.0, 0.0)
+    d = dot(n, ray_vect)
     if d != 0:
-        s = (0 - ray_orig[1]) / d
-        P = (ray_orig[0] + s*ray_vect[0], 0, ray_orig[2] + s*ray_vect[2])
-        r = sqrt(P[0]**2 + P[2]**2)
-        if r <= R:
-            if d > 0:
-                update(s, False)
-            else:
-                update(s, True)
+        s = dot(n, (P0[0]-ray_orig[0], P0[1]-ray_orig[1], P0[2]-ray_orig[2])) / d
+        P = (ray_orig[0] + s*ray_vect[0], ray_orig[1] + s*ray_vect[1], ray_orig[2] + s*ray_vect[2])
+        P_cyl = cart_to_cyl(P)
+        if P_cyl[0] <= geom_size.x and P_cyl[1] <= geom_size.y:
+            update(s, d > 0)
 
-    # 5. Lateral Face (x^2 + z^2 = R^2)
-    u = (ray_vect[0], ray_vect[2])
-    v = (ray_orig[0], ray_orig[2])
-    a = u[0]**2 + u[1]**2
-    b = 2 * (u[0]*v[0] + u[1]*v[1])
-    c = v[0]**2 + v[1]**2 - R**2
-    
+    # Lateral Face
+    u = (ray_vect.x, ray_vect.z)
+    v = (ray_orig.x, ray_orig.z)
+    a = dot(u, u)
+    b = 2 * dot(u, v)
+    c = dot(v, v) - (geom_size.x * geom_size.x)
     delta = b*b - 4*a*c
     if delta >= 0:
         sqrt_delta = sqrt(delta)
         s0 = (-b - sqrt_delta) / (2*a)
         s1 = (-b + sqrt_delta) / (2*a)
-        
-        for s in [s0, s1]:
+        for s in (s0, s1):
             P = (ray_orig[0] + s*ray_vect[0], ray_orig[1] + s*ray_vect[1], ray_orig[2] + s*ray_vect[2])
-            # Check Y bounds and Z bounds
-            if 0 <= P[1] <= H and 0 <= P[2] <= W:
-                # Determine entry/exit based on normal
-                # Normal at P is (P.x, 0, P.z)
-                normal = (P[0], 0, P[2])
-                dot_n_d = normal[0]*ray_vect[0] + normal[2]*ray_vect[2]
-                if dot_n_d > 0:
-                    update(s, False)
-                else:
+            P_cyl = cart_to_cyl(P)
+            if P_cyl[1] <= geom_size.y and 0 <= P_cyl[2] <= geom_size.z:
+                normal = (P.x, 0.0, P.z)
+                if dot(normal, ray_vect) > 0:
                     update(s, True)
+                else:
+                    update(s, False)
 
     # Degenerate cases
     if in_abs_found and not out_abs_found:
-        out_abs_val = in_abs_val + 2 * R / sqrt(ray_vect[0]**2 + ray_vect[1]**2 + ray_vect[2]**2)
+        out_abs_val = in_abs_val + 2 * geom_size.x / length(ray_vect)
     if out_abs_found and not in_abs_found:
-        in_abs_val = out_abs_val - 2 * R / sqrt(ray_vect[0]**2 + ray_vect[1]**2 + ray_vect[2]**2)
+        in_abs_val = out_abs_val - 2 * geom_size.x / length(ray_vect)
 
-    return (out_abs_val >= in_abs_val and out_abs_found and in_abs_found), in_abs_val, out_abs_val
+    return out_abs_val >= in_abs_val and out_abs_found and in_abs_found, in_abs_val, out_abs_val
 ```
 
 **Parameters**
 - `geomType`: Character indicating geometry type. If `geomType == 'c'`, this method is used [S1, unofficial].
 
 **Edge Cases and Pitfalls**
-- **Precision**: Division by zero if ray is parallel to a face ($d=0$).
-- **Degenerate Input**: If the ray passes exactly through an edge or vertex, multiple faces may report the same $s$. The min/max logic handles this, but floating point errors may cause `inAbsVal > outAbsVal`.
-- **Cylindrical Conversion**: The source uses `cartToCyl` and `cylToCart` which are not defined in the snippet. The implementation assumes a specific mapping where the Z-coordinate is preserved or mapped to the third cylindrical component for the slab check.
+- **Precision**: Division by zero occurs if the ray is parallel to a face ($d=0$) [S1, unofficial].
+- **Degenerate Input**: If the ray passes exactly through an edge or vertex, multiple faces may report the same $s$. The min/max logic handles this, but floating point errors may cause `inAbsVal > outAbsVal` [S1, unofficial].
+- **Cylindrical Conversion**: The source uses `cartToCyl` and `cylToCart` which are not defined in the snippet. The implementation assumes a specific mapping where the Z-coordinate is preserved for the slab check [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: Constant time $O(1)$ as it performs a fixed number of intersection tests (5 surfaces).
-- **Memory Complexity**: $O(1)$ auxiliary space.
-- **Strengths**: Handles the curved surface exactly via quadratic formula. Handles clipping planes efficiently.
-- **Limitations**: The geometry is a complex segment (cylinder + slab), not a pure infinite cylinder. The "degenerate" fallback assumes a straight path through the center, which may be inaccurate for oblique rays.
+- **Time Complexity**: Constant time $O(1)$ as it performs a fixed number of intersection tests (5 surfaces) [S1, unofficial].
+- **Memory Complexity**: $O(1)$ auxiliary space [S1, unofficial].
+- **Strengths**: Handles the curved surface exactly via quadratic formula. Handles clipping planes efficiently [S1, unofficial].
+- **Limitations**: The geometry is a complex segment (cylinder + slab), not a pure infinite cylinder. The "degenerate" fallback assumes a straight path through the center, which may be inaccurate for oblique rays [S1, unofficial].
 
 ## Background
-This method is derived from a CUDA volume rendering implementation [S1, unofficial]. It is used in the context of ray casting through volume data where the geometry is defined by a combination of cylindrical and planar primitives.
+This method is derived from a CUDA volume rendering implementation [S1, unofficial]. It is used in the context of ray casting through volume data where the geometry is defined by a combination of cylindrical and planar primitives [S1, unofficial].
 
 ## Sources
 [S1] ojaisnielsen/dtu-2010-cuda-volume-rendering, https://github.com/ojaisnielsen/dtu-2010-cuda-volume-rendering, fetched 2026-10-27 (unofficial)

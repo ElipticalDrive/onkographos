@@ -1,0 +1,749 @@
+A unified multimedia processing architecture treating audio, video, and algorithmic composition as interchangeable computational material. - feat(io): write Alembic spatial data and mesh diffuse textures, closing the IO write-path gap by ranjithshegde · Pull Request #171 · MayaFlux/MayaFlux
+
+feat(io): write Alembic spatial data and mesh diffuse textures, closing the IO write-path gap by ranjithshegde · Pull Request #171 · MayaFlux/MayaFlux · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ranjithshegde
+commented
+Sep 12, 2026
+Copy link
+Copy Markdown
+Member
+MayaFlux's IO namespace has always been able to read industry-standard 3D formats (glTF, FBX,
+OBJ, PLY, Alembic-adjacent volume formats via VDB) into live buffers, but writing them back out
+was a much narrower door. This PR closes that asymmetry for spatial data: geometry with
+materials, and time-varying particles, curves, and grid state.
+Two tracks:
+Mesh export (ModelWriter/AssimpModelWriter) now carries bound diffuse textures out to
+disk, not just vertex data. A MeshBuffer, MeshNetworkBuffer, or ComputeMeshBuffer with a
+texture bound via bind_diffuse_texture()/set_texture() gets that texture downloaded and
+written as a sibling image, with the material pointed at it, whether the texture came from a
+loaded file, a procedurally generated image, or a live GPU render target.
+Spatial export (new SpatialCache/SpatialExport/SpatialTransfer) writes time-sampled
+Alembic archives from particle networks, path/graph geometry, and
+cellular-automaton/reaction-diffusion grid state, with full per-vertex color/normal/uv/tangent
+data, correct point-vs-curve topology, and either a one-shot snapshot or a live, ticking capture.
+Relevance
+MayaFlux is a real-time engine: interactive, GPU-resident, built for things changing every frame.
+Professional DCC tools (Blender, Houdini, Maya) are built for the opposite: offline lighting,
+look-dev, compositing, and render farms. Neither replaces the other, and until now MayaFlux
+couldn't hand its work to them at all.
+This closes that gap in both directions the write side needs:
+MayaFlux as a simulation backend. Run a Conway's Game of Life, a reaction-diffusion system,
+a spring network, or a spatial-hash particle swarm live in MayaFlux, where it's cheap to iterate
+on the rule and watch it evolve interactively, then capture the entire time-sampled evolution as
+a single Alembic archive and hand it to Houdini or Blender for lighting, shading, and a real
+render. The simulation logic lives where it's fast to develop; the pixels come from where the
+renderer is.
+Round-tripping geometry with its look intact. A mesh authored in Blender already loads into
+a MeshBuffer with ModelReader, gets deformed, procedurally textured, or driven by a live
+compute shader inside MayaFlux, and can now go back out with its diffuse texture attached rather
+than as an untextured shell. What comes back into the professional tool actually looks like
+something, not a lookdev restart.
+Grid and particle state as a shared interchange format. Alembic is the format Houdini,
+Blender, Maya, and Katana already agree on for cached simulation data. A RelaxationGridBuffer
+automaton or a PhysicsOperator particle network now speaks that format directly, so MayaFlux
+slots into an existing pipeline instead of requiring one to be built around it.
+The read side of this stays deliberately asymmetric for now: SpatialCache is write-only, there
+is no SpatialReader. Bringing an externally-authored Alembic cache into MayaFlux is a real
+gap, tracked, not addressed here.
+Features
+SpatialCache (Alembic-backed, Ogawa archive): points, curves, arbitrary per-vertex attributes
+as native Alembic GeomParams, with color and normal getting Alembic's own dedicated
+OC3fGeomParam/ON3fGeomParam types rather than a generic vector, so an importer knows what
+it's looking at.
+SpatialExport: reads any GraphicsOperator's live vertex buffer directly as
+Kakshya::Vertex records, no separate attribute-description machinery, so a stream never has
+more or less than what the buffer actually holds. Topology-aware: a PathOperator writes one
+curve per continuous strip, a TopologyOperator writes fixed-length graph edges, and everything
+else writes points.
+SpatialTransfer: SpatialCapture for a live, ticking recording of one or more sources into a
+single archive; RelaxationGridCapture for grid/automaton state, deliberately built as a
+passive sink so it never fights the grid buffer's own single-consumer snapshot signal;
+save_spatial_snapshot() for a one-shot "what does this look like right now" export.
+IOManager::capture_spatial()/stop_spatial_capture(): reference-counted so several
+independent captures can share one open archive, and the archive is always finalized, either
+an explicit stop or by IOManager's destructor as a safety net.
+Depot::save_spatial(): the dialog-backed one-shot counterpart to save_mesh/`save_volume
+Diffuse texture packing for MeshBuffer, MeshNetworkBuffer (including its own network-wi
+shared texture, independent of any per-slot override), and ComputeMeshBuffer, feeding
+everything else writes points.
+SpatialTransfer: SpatialCapture for a live, ticking recording of one or more sources
+into a single archive; RelaxationGridCapture for grid/automaton state, deliberately built
+as a passive sink so it never fights the grid buffer's own single-consumer snapshot signal;
+save_spatial_snapshot() for a one-shot "what does this look like right now" export.
+IOManager::capture_spatial()/stop_spatial_capture(): reference-counted so several
+independent captures can share one open archive, and the archive is always finalized, either
+by an explicit stop or by IOManager's destructor as a safety net.
+Depot::save_spatial(): the dialog-backed one-shot counterpart to
+save_mesh/save_volume.
+Diffuse texture packing for MeshBuffer, MeshNetworkBuffer (including its own
+network-wide shared texture, independent of any per-slot override), and ComputeMeshBuffer,
+feeding AssimpModelWriter's existing (previously unreachable) material path.
+Static mesh export, with texture
+```
+auto mesh_buffer = std::make_shared<Buffers::MeshBuffer>(mesh_data);
+mesh_buffer->bind_diffuse_texture(procedural_texture);
+mesh_buffer->setup_processors(Vruta::ProcessingToken::GRAPHICS_BACKEND);
+
+// Downloads procedural_texture, writes mesh.gltf + mesh_diffuse.png,
+// and points the glTF material at it.
+IO::save_mesh(mesh_buffer, "mesh.gltf");
+
+// Or via the dialog-backed one-shot API:
+Depot::save_mesh(mesh_buffer, "creature.gltf");
+```
+A MeshNetwork with distinct textures per slot (e.g. one Blender-imported network with several
+materials) keeps each slot's own texture on export; a MeshNetworkBuffer with one texture
+shared across all slots writes it once and reuses the path:
+```
+auto net_buffer = std::make_shared<Buffers::MeshNetworkBuffer>(network);
+net_buffer->bind_diffuse_texture(shared_texture);
+// -> colony.gltf + colony_diffuse.png, referenced by every slot lacking
+//    its own MeshSlot::diffuse_texture.
+IO::save_mesh(net_buffer, "colony.gltf");
+```
+Alembic: one-shot snapshot of a particle network
+```
+auto sources = std::vector<IO::SpatialCaptureSource> {
+    IO::make_network_geometry_source("swarm", network_buffer)
+};
+
+// Fire-and-forget: opens an archive, writes one time sample, closes it.
+io_manager->save_spatial_snapshot(sources, "swarm_{}.abc");
+
+// Or with a native save dialog:
+Depot::save_spatial(sources, "swarm.abc");
+```
+Alembic: recording a live simulation
+```
+auto sources = std::vector<IO::SpatialCaptureSource> {
+Depot::save_spatial(sources, "swarm.abc");
+```
+Alembic: recording a live simulation
+```
+auto sources = std::vector<IO::SpatialCaptureSource> {
+    IO::make_network_geometry_source("gravity_wells", physics_network_buffer)
+io_manager->save_spatial_snapshot(sources, "swarm_{}.abc");
+
+// Or with a native save dialog:
+Depot::save_spatial(sources, "swarm.abc");
+```
+Alembic: recording a live simulation
+```
+auto sources = std::vector<IO::SpatialCaptureSource> {
+auto sources = std::vector<IO::SpatialCaptureSource> {
+    IO::make_network_geometry_source("gravity_wells", physics_network_buffer)
+};
+
+// Ticks every source on the frame clock until stopped; several independent
+// capture_spatial() calls against the same path share one open archive.
+uint32_t capture_id = io_manager->capture_spatial("simulation.abc", sources);
+
+on_key_pressed(window, IO::Keys::S, [io_manager, capture_id]() {
+
+auto sources = std::vector<IO::SpatialCaptureSource> {
+    IO::make_network_geometry_source("gravity_wells", physics_network_buffer)
+};
+};
+
+// Ticks every source on the frame clock until stopped; several independent
+// capture_spatial() calls against the same path share one open archive.
+uint32_t capture_id = io_manager->capture_spatial("simulation.abc", sources);
+
+on_key_pressed(window, IO::Keys::S, [io_manager, capture_id]() {
+
+auto sources = std::vector<IO::SpatialCaptureSource> {
+    IO::make_network_geometry_source("gravity_wells", physics_network_buffer)
+};
+};
+
+// Ticks every source on the frame clock until stopped; several independent
+// capture_spatial() calls against the same path share one open archive.
+uint32_t capture_id = io_manager->capture_spatial("simulation.abc", sources);
+
+on_key_pressed(window, IO::Keys::S, [io_manager, capture_id]() {
+
+auto sources = std::vector<IO::SpatialCaptureSource> {
+    IO::make_network_geometry_source("gravity_wells", physics_network_buffer)
+};
+};
+
+// Ticks every source on the frame clock until stopped; several independent
+// capture_spatial() calls against the same path share one open archive.
+uint32_t capture_id = io_manager->capture_spatial("simulation.abc", sources);
+
+on_key_pressed(window, IO::Keys::S, [io_manager, capture_id]() {
+
+auto sources = std::vector<IO::SpatialCaptureSource> {
+    IO::make_network_geometry_source("gravity_wells", physics_network_buffer)
+};
+
+// Ticks every source on the frame clock until stopped; several independent
+// capture_spatial() calls against the same path share one open archive.
+uint32_t capture_id = io_manager->capture_spatial("simulation.abc", sources);
+
+on_key_pressed(window, IO::Keys::S, [io_manager, capture_id]() {
+    io_manager->stop_spatial_capture(capture_id); // finalizes the archive
+});
+```
+The whole recorded evolution, every particle's position, color, and cluster id, sample by sample, lands in one .abc file
+Houdini or Blender opens as a native point cache.
+Alembic: grid/automaton state (Conway's Game of Life)
+RelaxationGridBuffer's snapshot signal only supports one listener, so RelaxationGridCapture never subscribes itself; it's
+fed from inside the caller's own existing listener:
+```
+auto grid = std::make_shared<Buffers::RelaxationGridBuffer>(
+    GRID_W, GRID_H, sizeof(uint32_t),
+    "relax_conway_rule.comp", "relax_vertex_emit.comp") | Graphics;
+
+auto grid_capture = make_persistent_shared<IO::RelaxationGridCapture>(
+    grid, "conway", 1.0F,
+    [](std::span<const uint8_t> bytes) {
+        const auto* cells = reinterpret_cast<const uint32_t*>(bytes.data());
+        std::vector<uint32_t> alive(cells, cells + (bytes.size() / sizeof(uint32_t)));
+        return std::vector<IO::SpatialAttribute> { IO::SpatialAttribute {
+            .name = "alive",
+            .scope = IO::SpatialScope::Varying,
+            .values = Kakshya::DataVariant { std::move(alive) } } };
+    });
+
+Kriya::on_signal(grid->snapshot_source(), [grid_capture](const std::vector<uint8_t>& bytes) {
+    // whatever this listener already did with the snapshot, unchanged, plus:
+    grid_capture->write_snapshot(bytes);
+});
+
+on_key_pressed(window, IO::Keys::C, [grid_capture]() {
+    if (grid_capture->is_capturing()) {
+        grid_capture->stop();
+        return;
+    }
+    grid_capture->start("conway.abc");
+});
+```
+Every generation of the automaton becomes one Alembic time sample carrying live/dead state as a named per-point attribute,
+alongside the fixed grid positions. Opened in Blender, the whole run scrubs like any other point cache.
+Testing
+Exercised directly through the example scenes rather than unit tests, since this is fundamentally an "does the file mean
+anything to another tool" concern:
+CPU-only particle producer, time-sampled physics network capture, and GPU-authoritative readback capture, each verified by
+loading the resulting .abc in Blender.
+Color/normal/uv correctness verified independently by compiling a small standalone reader against libAlembic/libImath and
+inspecting actual sample values rather than trusting the writer's own success return.
+Curve topology (paths vs. graph edges) verified against a filament/web network that previously exported as a flat point
+cloud.
+Conway automaton capture verified end-to-end: archive finalization (an Ogawa file left open throws on read),
+per-generation attribute variation, and the DX of feeding a capture from an already-existing snapshot listener without
+touching RelaxationGridBuffer itself.
+Mesh diffuse texture export verified against MeshBuffer, MeshNetworkBuffer (shared and per-slot), and ComputeMeshBuffer.
+ranjithshegde
+added 18 commits
+September 12, 2026 02:03
+feat(buffers): expose MeshBuffer::get_mesh_data() accessor
+…
+8aea292
+```
+MeshData is always the CPU-authoritative copy for MeshBuffer, every
+mutation path writes it before marking the GPU side dirty, but nothing
+outside the class could read it back as an owning struct, only as a
+non-owning MeshAccess view via access(). IO::save_mesh(MeshBuffer)
+needs an owning copy to hand to ModelWriter::write(), which packs it
+into an aiScene and takes ownership of what it copies.
+```
+feat(io): add ModelWriter and AssimpModelWriter for mesh export
+…
+b9c68b0
+```
+IO has read/write pairs for images, video, audio, JSON, EXR, and VDB,
+but only a reader for models. ModelWriter/ModelWriterRegistry mirror
+ImageWriter/VolumeWriter exactly. AssimpModelWriter packs one or more
+Kakshya::MeshData into an aiScene and writes it via Assimp::Exporter,
+with a per-extension default format_id table since several extensions
+are genuinely ambiguous to Assimp (.obj with or without a material
+sidecar, .fbx binary vs ascii).
+
+Scoped to triangle mesh data only. Assimp's own topology support for
+points/lines is format-dependent and silently drops geometry for at
+least two formats (STL, Collada), so that case is deliberately out of
+scope here rather than papered over.
+```
+feat(io): add ModelExport save_mesh/save_mesh_snapshot free functions
+…
+ab1dfba
+```
+Closes the gap between "a ModelWriter exists" and a caller actually
+being able to save a MeshBuffer, MeshNetworkBuffer, or bare
+MeshWriterNode without hand-rolling MeshInsertion and a registry
+lookup every time. Follows the same shape every other buffer-to-disk
+save in this codebase already uses (save_image/save_texture_buffer,
+save_volume): free functions in IO:: taking a Buffers:: type, not a
+member on the buffer itself.
+
+The MeshNetworkBuffer overload bakes each slot's world_transform into
+its exported vertices, so an exploded or rotated network exports in
+its actual current pose rather than local rest pose. save_mesh_snapshot
+splices a millisecond timestamp into the path so repeated calls each
+land in their own file instead of overwriting the last one, with no
+counter state for the caller to own.
+```
+feat(io): wire mesh export into IOManager
+…
+2c1ff5f
+```
+Registers AssimpModelWriter alongside the existing
+STBImageWriter/EXRWriter/VDBWriter registrations, and adds
+IOManager::save_mesh for both a MeshBuffer and a raw
+vector<Kakshya::MeshData>, the latter for producers without a
+MeshBuffer to hand, such as a future ComputeMeshBuffer readback. The
+MeshBuffer overload forwards to IO::save_mesh rather than duplicating
+the registry lookup, so there is one source of truth for how a
+MeshBuffer becomes a file.
+```
+feat(io): add ComputeMeshBuffer readback for mesh export
+…
+340fd53
+```
+ComputeMeshBuffer's live rendering path never reads its own vertex
+data back by design, and nothing exposed a way to reach the atomic
+vertex counter needed to size a one-off readback correctly: neither
+SDFMeshProcessor nor ComputeMeshBuffer had a public accessor for it in
+either construction mode. Added SDFMeshProcessor::counter_buf() and
+ComputeMeshBuffer::get_mesh_processor() to close that.
+
+IO::download_compute_mesh is the deliberate, one-shot exception to the
+no-readback rule: reads the true live vertex count off the counter's
+mapped pointer (host-visible, no transfer), downloads exactly that
+many vertices via download_from_gpu_async (safe off the graphics
+thread, unlike the synchronous form), and synthesizes a sequential
+index array since the result is non-indexed triangle soup. save_mesh/
+save_mesh_snapshot(ComputeMeshBuffer) wrap it, completing the fourth
+member of the save_mesh family alongside MeshBuffer, MeshNetworkBuffer,
+and bare MeshWriterNode.
+
+IOManager::save_compute_mesh/save_compute_mesh_snapshot are the one
+mesh-save path that genuinely needs the async task pool, since the
+readback is a real device-to-host transfer rather than a copy of data
+already resident on the CPU. Mirrors save_volume's shape exactly:
+returns once queued, failure logged from the task itself.
+
+gpu_test_3 (test_9.hpp) wires F to export the live gyroid isosurface,
+exercising the full path end to end: counter readback, async transfer,
+index synthesis, Assimp export. Confirmed working.
+```
+feat(io): add dialog-backed mesh save to Depot
+…
+3a3e9e4
+```
+Every other loadable type in Depot (audio, image, volume) has both a
+choose_* and a save_* counterpart; choose_mesh/choose_mesh_network had
+no save side at all. Closes that asymmetry at every layer: Depot ->
+IOManager -> IO::ModelExport.
+
+IO::save_mesh/save_mesh_snapshot gain a MeshNetwork overload alongside
+the existing MeshNetworkBuffer one. Necessary because choose_mesh_network()
+returns a bare MeshNetwork, not a buffer, and slot data (world_transform,
+MeshWriterNode) lives on the network itself, not on the GPU wrapper, so
+requiring one just to export would be a pass-through with no informational
+value. save_mesh(MeshNetworkBuffer) now forwards to save_mesh(MeshNetwork)
+via get_network() rather than duplicating the slot-iteration logic.
+
+IOManager::save_mesh_network is synchronous, same reasoning as
+save_mesh(MeshBuffer): nothing here is GPU-only, so there's no download
+to queue.
+
+Depot::save_mesh(MeshBuffer) and save_mesh_network(MeshNetwork), two
+overloads each (default options / explicit options), dialog-backed via
+a new k_mesh_save_filters list scoped to what AssimpModelWriter can
+actually write (drops assjson, which k_mesh_filters allows for reading
+but which the writer's own doc calls Assimp's internal scene dump, not
+a real DCC target) — the same read/write filter split k_image_save_filters
+already has against k_image_filters.
+```
+refactor(io): unify IOManager mesh-save naming and make it fully async
+…
+4b51b00
+```
+Every IOManager::save_mesh/save_mesh_snapshot overload (MeshBuffer,
+vector<MeshData>, MeshNetwork, ComputeMeshBuffer x2) now dispatches via
+std::async and returns once queued, matching save_image/save_volume's
+contract. The MeshBuffer/MeshNetwork cases don't need a GPU download,
+but the write itself (AssimpModelWriter -> Assimp::Exporter -> disk)
+is still blocking I/O; IOManager's actual job is keeping that off the
+caller's thread regardless of whether a download precedes it, so the
+previous split between synchronous and async overloads was arbitrary.
+
+Extracted IOManager::track_save_task(std::future<bool>), a single
+private helper holding m_save_tasks_mutex for exactly the push_back
+and erase_if prune against m_save_tasks, nothing else. All five
+overloads call it instead of each repeating the lock/push/prune inline.
+Pre-existing call sites (save_image, save_volume, write, capture_output,
+stop_capture) are untouched.
+
+Renamed save_compute_mesh/save_compute_mesh_snapshot to save_mesh/
+save_mesh_snapshot, and save_mesh_network to a save_mesh overload, at
+both the IOManager and Depot layers. IO::ModelExport was already
+correctly overloaded under one name per operation; the inconsistency
+was introduced only when the IOManager/Depot wrappers were added.
+```
+build(deps): add Alembic dependency across build and packaging surfaces
+…
+79baefc
+```
+- Add Alembic CMake detection via find_package/find_dependency
+- Link Alembic::Alembic to MayaFluxLib and MayaFluxConfig
+- Wire package dependencies in CI workflows (Linux, Arch, macOS, Windows)
+- Update setup scripts for Arch, Fedora, openSUSE, Ubuntu, macOS, and Windows
+- Add libalembic-graphics-dev and alembic-devel to edge/dev packaging specs
+```
+feat(nodes): add extract_vertex_attributes/velocities to GraphicsOper…
+…
+033f963
+```
+…ator
+
+GraphicsOperator gains two virtuals returning plain named
+Kakshya::DataVariant channels and per-vertex glm::vec3 velocity,
+deliberately IO-agnostic so the base class carries no dependency on
+IO/Alembic types; an external producer (a SpatialCache packer) wraps
+each entry itself. Both default to empty.
+```
+feat(nodes): add extract_vertex_attributes/velocities to GraphicsOper…
+…
+db1917c
+```
+…ator
+
+GraphicsOperator gains two virtuals returning plain named
+Kakshya::DataVariant channels and per-vertex glm::vec3 velocity,
+deliberately IO-agnostic so the base class carries no dependency on
+IO/Alembic types; an external producer (a SpatialCache packer) wraps
+each entry itself. Both default to empty.
+
+PhysicsOperator overrides both: extract_vertex_attributes() adds
+"mass" (PhysicsState::mass) and "accreted_mass"
+(get_accreted_mass_span(), replicated inline rather than called since
+that method is non-const and this override must stay const) in the
+same global vertex-index order get_vertex_data() produces;
+extract_vertex_velocities() adds per-particle PhysicsState::velocity.
+Cluster/collection membership is not repeated here since
+"mass" (PhysicsState::mass) and "accreted_mass"
+(get_accreted_mass_span(), replicated inline rather than called since
+that method is non-const and this override must stay const) in the
+same global vertex-index order get_vertex_data() produces;
+extract_vertex_velocities() adds per-particle PhysicsState::velocity.
+Cluster/collection membership is not repeated here since
+build_cluster_ids() already covers it.
+```
+feat(buffers): expose RelaxationGridBuffer cell stride and rule/emit …
+…
+894f095
+```
+…source
+
+get_cell_stride_bytes() lets a caller correctly slice
+request_snapshot()/snapshot_source()'s raw per-cell bytes; state format
+is rule-defined (a float, a uint32 automaton state, a vec2
+reaction-diffusion pair, or anything else a rule shader declares), so
+nothing here can infer it and the caller needs the stride to do it
+itself.
+
+rule_source()/emit_source() expose the ShaderSource the buffer was
+constructed with, for a caller building descriptive metadata (a rule
+name/identity tag) about a capture rather than for driving the
+pipeline, which still goes through setup_processors().
+```
+feat(io): add SpatialCache for time-sampled Alembic-backed spatial data
+…
+d347a00
+```
+Closes the read/write asymmetry IO has for non-mesh spatial data:
+particles, point clouds, and curve/edge topology that ModelWriter's
+Assimp backend cannot carry meaningfully (confirmed empirically —
+Assimp silently drops custom attribute names, node metadata, and
+point/line topology on export). Alembic natively supports named
+per-vertex attributes, time sampling, and object metadata, so it is
+the backend for this data instead.
+
+SpatialSample/SpatialAttribute deliberately reuse existing MayaFlux
+vocabulary rather than inventing new type surface: attribute values
+are Kakshya::DataVariant (float/vec2/vec3/uint32_t), and topology is
+Portal::Graphics::PrimitiveTopology, scoped to reject the TRIANGLE_*
+values ModelWriter already owns. SpatialCache::write() picks Alembic's
+Points or Curves schema from the sample's topology, so the caller
+never discusses Vulkan primitive topology at this level beyond setting
+that one field.
+
+A vec3 attribute named exactly "color" or "normal" is declared through
+Alembic's dedicated OC3fGeomParam/ON3fGeomParam rather than a plain
+OV3fGeomParam: those are MayaFlux's own fixed vertex field names, and
+the dedicated type — not the value's shape, three floats either way —
+is what tells an importer this is actually color or normal data.
+Confirmed against Blender: it now lists "color" as a recognized color
+attribute rather than a generic vector, though wiring a recognized
+attribute into the viewport/shader is a separate Blender-side step
+this doesn't touch.
+```
+feat(io): add SpatialCache producers and time-sampled capture
+…
+9b7437d
+```
+SpatialExport packs a MayaFlux source's current state into one
+SpatialCache::write() call. write_operator_sample() reads a
+GraphicsOperator's raw vertex buffer as Kakshya::Vertex records
+(PointVertex/LineVertex/MeshVertex all share its exact 60-byte
+layout): position becomes SpatialSample::positions, and color, scalar,
+uv, normal, tangent each become their own SpatialAttribute — a vertex
+reaches the archive whole, not reduced to a coordinate. Adds a
+"cluster" attribute from build_cluster_ids() and whatever
+extract_vertex_attributes()/extract_vertex_velocities() report.
+
+write_network_geometry_buffer_sample() resolves a NetworkGeometryBuffer's
+driving network and picks CPU or GPU readback: a GpuFieldOperator
+anywhere in the operator chain means the CPU-side GraphicsOperator
+buffer is stale, so instead it downloads the live vertex bytes
+straight off the buffer itself (it is a VKBuffer, same
+download_from_gpu_async() pattern download_compute_mesh() uses for
+ComputeMeshBuffer) and reads the same Kakshya::Vertex columns from
+there, plus the declared hash_cluster_id state field as "cluster" when
+present. Without a GpuFieldOperator, every GraphicsOperator on the
+network (primary plus any chained) is CPU-readable and each is written
+as its own set — one plain stream_name for a single operator, one
+child stream per operator (named "<stream_name>_<get_type_name()>")
+for a network chaining several, the same role multiple named aiMesh
+entries play for a multi-submesh ModelWriter export.
+
+relaxation_grid_positions() generates the fixed grid positions/ids a
+RelaxationGridBuffer's cells occupy, matched against its own emit
+shaders, for feeding a POINT_LIST sample; cell state itself stays the
+caller's problem since its format is rule-defined.
+
+SpatialTransfer adds the session-level layer on top: SpatialCapture
+records one or more SpatialCaptureSource entries into a shared
+SpatialCache on the frame clock, the same GraphicsRoutine/FrameDelay
+shape VolumeCapture uses, except every sample lands in one archive
+Alembic keeps open rather than a numbered file per frame. Its stop()
+only flags a stop_requested atomic and asks the scheduler to drop the
+task without waiting for the coroutine to actually exit; everything
+the coroutine touches lives in a separately reference-counted
+CaptureState the coroutine holds its own copy of, so a SpatialCapture
+destroyed the instant stop() returns never leaves a still-resuming
+coroutine dereferencing freed memory. save_spatial_snapshot() is the
+single-sample counterpart: open, write every source once, close.
+
+Known gap: every sample writes PrimitiveTopology::POINT_LIST
+regardless of source. PathOperator/TopologyOperator producers (real
+curves, graph edges) are not implemented yet — GraphicsOperator has no
+way to report its own render topology today, and neither operator's
+vertex grouping (per-path contiguous runs vs. per-edge fixed pairs)
+reduces to the same chunking rule, so this needs its own follow-up
+rather than a quick branch here.
+```
+feat(nodes): topology-aware curve export for PathOperator/TopologyOpe…
+…
+c5452f2
+```
+…rator
+
+SpatialCache producers previously wrote every sample as POINT_LIST
+regardless of source, silently flattening PathOperator's interpolated
+strips and TopologyOperator's graph edges into unstructured point
+clouds. Fixing this needed a way to ask "what primitive topology is
+this vertex data actually for" that distinguishes a real answer from
+silence, since GeometryWriterNode::get_primitive_topology() previously
+had no way to tell "POINT_LIST because nobody said otherwise" from
+"POINT_LIST because that is what this geometry is".
+
+GeometryWriterNode::get_primitive_topology() is now backed by a real,
+settable m_primitive_topology member (default POINT_LIST) with a
+matching set_primitive_topology(), rather than a hardcoded literal in
+the base class: a node's topology is now always a genuine answer, not
+a silent fallback. PathGeneratorNode and TopologyGeneratorNode already
+carried this exact pattern themselves (their own private member, getter,
+and setter, defaulting to LINE_STRIP and LINE_LIST respectively); both
+now set the inherited member in their constructors instead of
+duplicating the mechanism. LineSegmentsNode and MeshWriterNode are
+unchanged, still overriding get_primitive_topology() to a fixed value,
+since nothing should be able to reconfigure what those two produce.
+
+GraphicsOperator gains declared_topology(), returning nullopt only
+when the operator holds no underlying node at all (a real ambiguity:
+an operator with zero paths/topologies/collections genuinely has no
+topology opinion) and otherwise the first node's own
+get_primitive_topology(). PathOperator, TopologyOperator, and
+PhysicsOperator each forward to their first path/topology/collection,
+the same first-element choice get_vertex_layout() already makes for
+the aggregate.
+
+SpatialExport's write_operator_sample() and the GPU-authoritative
+write_network_geometry_buffer_sample() path both branch on this: a
+LINE_STRIP operator (PathOperator) run-length-encodes
+build_cluster_ids() into one curve per contiguous path run; a
+LINE_LIST operator (TopologyOperator) chunks into fixed 2-vertex
+curves, one per expanded edge, since a graph's edges are independent
+segments rather than one connected strip; anything else keeps the
+original POINT_LIST behavior unchanged. Curve samples correctly carry
+no ids/velocities (Alembic's Curves schema has neither) and fail
+outright rather than guess if a LINE_LIST operator ever reports an odd
+vertex count. write_operator_sample()/the GPU path also now read a
+GraphicsOperator's raw vertex buffer as whole Kakshya::Vertex records
+(position, color, scalar, uv, normal, tangent) instead of position
+alone, since PointVertex/LineVertex/MeshVertex all share its exact
+60-byte layout and Vertex's own doc already calls it pipeline-ready
+for this.
+
+SpatialCache gains glm::vec2 (OV2fGeomParam, for uv) and dedicated
+color/normal GeomParam types (OC3fGeomParam/ON3fGeomParam, selected by
+attribute name rather than a new type) alongside the existing
+float/vec3/uint32_t support, since Alembic distinguishes a color or a
+normal from a plain vector at the property type level, not by a
+value's shape — without this, an importer had no signal that a "color"
+attribute was actually color data rather than an arbitrary direction.
+Confirmed against Blender: color now shows as a recognized color
+attribute, and PathOperator/TopologyOperator sources now import as
+actual curves rather than points.
+```
+feat(io): add RelaxationGridCapture, a single-consumer-safe grid capture
+…
+6b332b4
+```
+RelaxationGridBuffer::snapshot_source() is a single-consumer
+BroadcastSource by its own documented contract: register_waiter()
+unconditionally overwrites the waiter slot, so a second
+Kriya::on_signal() listener on the same source silently orphans
+whichever one registered first. A capture helper shaped like
+SpatialCapture (subscribing itself) would have made that mistake
+inevitable for any caller who also wants their own listener on the
+same grid, which is the common case.
+
+RelaxationGridCapture is a pure sink instead: start()/stop()/
+is_capturing() manage a SpatialCache the same way, but write_snapshot()
+is called by the caller from inside whatever snapshot_source() listener
+they already own, rather than the class subscribing on its own.
+Positions and ids come from the existing relaxation_grid_positions(),
+computed once at construction and reused for every sample. The one
+piece that can't be generic (turning a snapshot's raw bytes into
+named attributes, since cell state format is rule-defined) is the
+constructor's one caller-supplied callback. No changes to
+RelaxationGridBuffer itself: everything here is built from its
+existing public accessors.
+```
+feat(io): wire SpatialCache into IOManager and Depot
+…
+f8b32c8
+```
+IOManager::capture_spatial()/stop_spatial_capture() mirror
+capture_volume/VolumeCapture: resolve a filepath to a shared
+SpatialCache (opening it on first use, reusing it if another capture
+already targets the same path), spawn a SpatialCapture, and track it
+by id. save_spatial_snapshot() is the one-shot counterpart, queued via
+std::async like every other IOManager save.
+
+Unlike VolumeCapture, stopping a capture is not enough to leave a
+valid file behind: an Ogawa archive left open is not a valid file,
+only a growing one. stop_spatial_capture() now reference-counts
+writers per archive path and closes+erases the cache only once the
+last one stops, so an archive several captures still share stays open
+for the others. IOManager::~IOManager() drains any still-running
+spatial captures the same way it already drains audio captures, so
+closing the app without stopping a capture first still finalizes the
+archive.
+
+That reference-counted close introduced a real cross-thread hazard:
+close() can now run on whatever thread calls stop_spatial_capture(),
+while write() keeps running from the capturing coroutine until it
+notices the stop request. SpatialCache gains a mutex (inside Impl, not
+directly on the class, so its defaulted move constructor keeps
+working) guarding write()/write_metadata()/close() against exactly
+that race.
+
+Depot::save_spatial() adds the same dialog-backed one-shot wrapper
+save_volume() already has, since save_spatial_snapshot() is Spatial's
+one-shot counterpart. capture_spatial() and RelaxationGridCapture
+deliberately get no Depot entry, matching capture_volume's own
+precedent: a start/stop session doesn't fit a "pick a file, save
+once" dialog.
+```
+fix(io): export bound diffuse textures alongside mesh saves
+…
+3228389
+```
+MeshBuffer, MeshNetworkBuffer, and ComputeMeshBuffer each carry a bound
+diffuse VKImage, but save_mesh() never looked at it: AssimpModelWriter
+only ever wrote a diffuse_path material property when one was already
+present as a submesh attribute, true only for meshes round tripped
+through ModelReader from a file. A texture bound programmatically or
+produced on the GPU had nowhere to go.
+
+save_mesh() for all three buffer types now downloads a bound texture
+via the existing IO::save_image() and writes it next to the model file
+as <model-stem>_diffuse.png, then sets that path as the diffuse_path
+submesh attribute AssimpModelWriter already reads. A mesh with no
+pre-existing submesh region gets one synthesized covering the whole
+mesh, so the attribute has somewhere to live.
+
+MeshNetworkBuffer additionally carries its own shared diffuse texture
+independent of any per-slot MeshSlot::diffuse_texture. Its save_mesh()
+overload packs that texture once and reuses the path across every slot
+that has no distinct texture of its own; a slot's own texture still
+takes precedence and gets its own sibling file.
+
+ComputeMeshBuffer gained has_diffuse_texture()/get_diffuse_texture()
+getters mirroring MeshBuffer's, since the field already existed but
+had no reader.
+
+The Alembic/SpatialCache export path is unaffected: the particle,
+point cloud, curve, and grid data it reads from carries no bound
+texture anywhere in the codebase, so there is nothing analogous to
+pack there.
+```
+chore(examples): Update to export modelwriter-spatialcache example
+f94acfd
+ranjithshegde
+added
+enhancement
+New feature or request
+Architecture
+Concerning new managers, subsystems, backends
+labels
+Sep 12, 2026
+fix(IO): resolve Windows build issues for spatial capture
+…
+cd7d5e5
+```
+- guard Windows headers against macro and min/max pollution
+- undefine ERROR before Alembic integration
+- export make_network_geometry_source for Windows linking
+```
+Hide details
+View details
+ranjithshegde
+merged commit ec00911
+into
+main
+Sep 12, 2026
+7 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+ranjithshegde
+deleted the
+feature/alembic
+branch
+September 17, 2026 09:12
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+Architecture
+Concerning new managers, subsystems, backends
+enhancement
+New feature or request
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

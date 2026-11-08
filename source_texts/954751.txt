@@ -1,0 +1,428 @@
+Babylon.js is a powerful, beautiful, simple, and open game and rendering engine packed into a friendly JavaScript framework. - Feat: Stream Gaussian Splatting LOD as a part of a compound mesh by raymondyfei · Pull Request #18774 · BabylonJS/Babylon.js
+
+Feat: Stream Gaussian Splatting LOD as a part of a compound mesh by raymondyfei · Pull Request #18774 · BabylonJS/Babylon.js · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+raymondyfei
+commented
+Aug 6, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+This PR lets a PlayCanvas-style SOG LOD stream (GaussianSplattingStream) live as a part of a GaussianSplattingCompoundMesh, so streamed splats are depth-sorted and drawn together with the compound's static parts in a single interleaved pass — instead of as a separate mesh, worker, and draw call. The streaming engine keeps running its own LOD/eviction/relayout loop against a reserved region of the compound's shared atlas.
+What's included
+Hosted streaming — compound.reserveStreamingPart(...) reserves a row-aligned region of the shared atlas; the stream GPU-decodes into it at a base offset. Added via AddGaussianSplattingStreamPart(Async), returning the same GaussianSplattingPartProxyMesh as a static part (place / frame / gizmo / removePart all work identically).
+Single sort/draw — per-part active-LOD ranges feed one global interval union; no sort-worker or render-shader changes were needed.
+Full parity — multiple streaming parts, in-atlas memory-budgeted eviction, GPU defrag/relayout, and coexistence with static parts, all row-band-scoped so a shared static part is byte-identical across a relayout.
+Voxel-IBL shadows for streamed splats (rotation/scale decoded into a shared half-float MRT).
+Higher-order SH for streamed splats (baked into a shared packed-u32 SH atlas; reuses the existing draw path). Includes a WGSL processor fix to allow integer render targets on WebGPU.
+Memory reclamation — removePart tombstones a streaming region (cheap); compactAtlas()
+relocates survivors and frees the reclaimed rows.
+Implementation highlights
+Shared MRT atlas is simultaneously an FBO attachment and CPU-sub-uploadable on WebGL2 + WebGPU (no engine usage-flag change needed).
+SOG up-axis lives on the part proxy's world matrix, so it composes with the compound transform.
+Streaming regions are GPU-authoritative: atlas grow/compaction backs up and restores their texels and CPU sort positions via the work buffer's copy shaders.
+Testing
+Unit (NullEngine): reservation/row-alignment, interval-union math, capacity + SH validation, tombstone/compaction (incl. stale-range regression), removed-handle invalidation, WGSL integer detection.
+Visualization (WebGL2 + WebGPU): Gaussian Splatting LOD COMPOUND, Gaussian Splatting LOD SH and IBL Shadows with committed reference images.
+Cross-backend GPU spikes for Sigma reconstruction, relayout/compaction byte-consistency, IBL shadows, and SH; downstream viewer Playwright suite green.
+Notes
+GaussianSplattingStream remains usable standalone (unchanged public API); hosted mode is the new path. Requires WebGL2/WebGPU (float/integer render targets).
+Raymond Fei
+added 25 commits
+July 30, 2026 10:49
+phase 3
+430faf2
+end to end test passes for single model
+41b0696
+fix sorting
+186e304
+fix bounding box
+fd1bd59
+Merge branch 'master' into yfei/stream_compound
+14fddda
+reclame tombstoned memory
+033b230
+Merge branch 'master' into yfei/stream_compound
+3a92bca
+Add stream SH loader
+326b5c8
+add rotation-scale decoding for stream IBL shadows
+3161052
+Doc changes
+c0161ac
+perf improve
+33a3ed5
+incorproate fix from other comments
+5897cce
+simplify ut
+6ea4934
+Merge branch 'master' into yfei/stream_compound
+9fdd8e4
+fix stalling issue
+bf9166a
+Fix according to comments
+d034580
+clean up
+e01f51f
+fix worker error
+6c21515
+fix according to comments
+61dfe59
+Fix according to comments
+c6613b1
+Merge branch 'master' into yfei/stream_compound
+832655c
+fix according to comments
+19d9a28
+Merge branch 'master' into yfei/stream_compound
+4e7261f
+fix test
+78f4de7
+revert bad fix
+bd7da5d
+RaananW
+requested a review
+from CedricGuillemet
+August 7, 2026 11:39
+RaananW
+commented
+Aug 7, 2026
+Copy link
+Copy Markdown
+Member
+Thank you so much for that. @CedricGuillemet is unavailable at the moment. He will review it when he is back.
+sebavan
+requested a review
+from ryantrem
+August 7, 2026 17:40
+ryantrem
+reviewed
+Aug 7, 2026
+View reviewed changes
+ryantrem
+left a comment
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Independent review focused on correctness, regressions, and performance. Five findings below — two I'd consider blocking. Each is newly introduced by this PR (verified against master).
+The first three share a root cause worth calling out: the streaming/compaction lifecycle skips post-conditions that the normal add/remove path performs — bound uniforms aren't revalidated, bounds aren't recomputed, and cached atlas-sizing state isn't refreshed. Great feature overall; these are narrow gaps in an otherwise very carefully built change.
+Comment thread
+packages/dev/loaders/src/SPLAT/gaussianSplattingWorkBuffer.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+packages/dev/core/src/Meshes/GaussianSplatting/gaussianSplattingMesh.pure.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+packages/dev/core/src/Meshes/GaussianSplatting/gaussianSplattingMeshBase.pure.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+packages/dev/core/src/Engines/WebGPU/webgpuShaderProcessorsWGSL.pure.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+packages/dev/core/src/Meshes/GaussianSplatting/gaussianSplattingMeshBase.pure.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Fix stale uOffset in GS work buffer decode after compactAtlas
+…
+54bc658
+```
+Bind uOffset at render time from the live _baseOffset (alongside the
+scissor) instead of in _apply*Pack at call time. compactAtlas() can
+relocate a region during the deferred-decode window via setBaseOffset;
+binding at call time left uOffset pointing at the old rows while the
+scissor covered the new ones, so every fragment failed the shader range
+test and the region was silently dropped despite decode reporting
+success.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+Raymond Fei
+and others
+added 5 commits
+August 7, 2026 12:31
+Recompute compound bounds after compactAtlas rebuild
+…
+12761d8
+```
+compactAtlas() rebuilds via _addPartsInternal, which computes bounds from
+the zero-box placeholder sources it builds for reserved streaming parts,
+then swaps the real proxies back — but nothing recomputed bounds after
+the swap. A static-transform compound never flags bounds dirty, so the
+stale (degenerate) bounds persisted and isInFrustum could cull the whole
+mesh; a stream-only compound collapsed to a point. Mirrors the recompute
+_tombstonePart already does. Placed after the tombstone set is cleared so
+a survivor reusing a tombstoned index isn't skipped by the filter.
+
+Adds a regression test asserting the cached bounds (the frustum-culling
+path, which getBoundingInfo would otherwise lazily mask) reflect the
+surviving stream after compaction.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+Fix SH reuse guard reading stale _shMrtAtlasTextureCount
+…
+3657272
+```
+_canReuseCachedData compared _shMrtAtlas.length against
+_shMrtAtlasTextureCount, but that field is only refreshed inside
+_updateTextures — which the incremental path never runs. So reserving a
+degree-1 SH stream then addPart-ing a higher-degree static part passed
+the guard on a stale count, skipped growing the SH atlas, and appended
+plain RawTextures into _shTextures (which then leaked). Pass the required
+(merged sh.length) count into the guard and compare against that,
+removing the write-after-read ordering dependency.
+
+Also frees, as defence in depth, any _shTextures entries beyond the
+MRT-backed set in both disposal paths (the _shMrtAtlas branch otherwise
+skips the else-if that frees them).
+
+Adds a white-box guard test (the real incremental path needs sub-texture
+uploads NullEngine can't do).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+Harden WGSL fragData output-type inference against false positives
+…
+7da3293
+```
+The inference scanned the raw fragment source with comments intact and
+searched the whole file for the RHS identifier's declaration. So a
+commented-out `// fragData0 = vec4<u32>(...)` above a real float write,
+or a same-named integer local in any helper function, could flip a valid
+float output to vec4<u32> and produce a WGSL compile error on a shader
+that builds fine today — and this path runs for every WGSL fragment
+shader that writes fragData.
+
+Scan a comment-stripped copy and scope the declaration lookup to `fn
+main`'s body up to the write (WGSL requires a local be declared before
+use in its own scope). Sentinel checks (MRT_AND_COLOR, dual-source,
+oitDepthSampler) intentionally stay on the raw source.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+Size streaming write transients by count, not global atlas offset
+…
+1ceef0e
+```
+_writeStreamingSplats allocated covA/covB/colorArray sized to `end`
+(globalOffset + count), so a small write near a large atlas's tail
+allocated and zero-filled tens of MB per call (a 1M-splat model streamed
+in 4k chunks churned ~19.5 GB) — imposed on the public writeSplats CPU
+fallback with no opt-out.
+
+Decouple the transient index from the atlas index: _makeSplat gains an
+optional dstArrayIndex (default dstIndex) used for covA/covB/colorArray,
+while dstIndex still addresses _splatPositions and the rotation arrays.
+_writeStreamingSplats now allocates count-sized transients, fills them
+from 0, and rebases the per-row upload offset by globalOffset. The
+persistent rotation arrays are sized to the atlas (_splatPositions),
+independent of the now-smaller covA. ~80 MB/call -> ~128 KB.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+Tighten comments around the review-fix changes
+…
+367f7f7
+```
+Comment-only: make the comments added for the five review fixes more
+concise. No behavior change.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+raymondyfei
+commented
+Aug 7, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Thanks @ryantrem for the quick review! I've fixed all these issues mentioned in the comments! Please let me know if they look good to you!
+Merge branch 'master' into yfei/stream_compound
+ea51a61
+ryantrem
+reviewed
+Aug 7, 2026
+View reviewed changes
+ryantrem
+left a comment
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Re-reviewed the fixes. Four of the five are verified fixed — thanks, and nice catch on re-keying the rotation array sizing to _splatPositions.length in _makeSplat; that trap wasn't in my original comment and would have corrupted neighbouring parts. I also confirmed the new tests are load-bearing (restoring the pre-fix source while keeping the new tests fails exactly those tests).
+One residual on the WGSL output-type inference — details inline.
+Comment thread
+packages/dev/core/src/Engines/WebGPU/webgpuShaderProcessorsWGSL.pure.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ryantrem
+approved these changes
+Aug 7, 2026
+View reviewed changes
+Raymond Fei
+and others
+added 2 commits
+August 7, 2026 17:04
+Merge branch 'master' into yfei/stream_compound
+f40ff31
+Match WGSL entry point exactly when scoping fragData inference
+…
+4f92656
+```
+The scope boundary used indexOf("fn main"), a substring match that
+`fn mainHelper()` / `fn mainLighting()` declared before the entry point
+also satisfy — setting mainBodyStart to 0 so the helper's integer local
+is pulled into scope and flips a valid float output to vec4<u32>. And
+Math.max(0, ...) silently turned a no-match into a whole-source scan (the
+behaviour the scoping removed).
+
+Match `\bfn\s+main\s*\(` exactly and gate the lookup on mainBodyStart >=
+0, bailing to the vec4<f32> default on no-match. Adds regression tests
+for a `main`-prefixed helper before main and a helper after main.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+Popov72
+commented
+Aug 8, 2026
+Copy link
+Copy Markdown
+Contributor
+/azp run
+azure-pipelines
+Bot
+commented
+Aug 8, 2026
+Copy link
+Copy Markdown
+Azure Pipelines successfully started running 1 pipeline(s).
+bjsplat
+commented
+Aug 8, 2026
+Copy link
+Copy Markdown
+Collaborator
+Please make sure to label your PR with "bug", "new feature" or "breaking change" label(s).
+To prevent this PR from going to the changelog marked it with the "skip changelog" label.
+bjsplat
+commented
+Aug 8, 2026
+Copy link
+Copy Markdown
+Collaborator
+Snapshot stored with reference name:
+refs/pull/18774/merge
+Test environment:
+https://snapshots-cvgtc2eugrd3cgfd.z01.azurefd.net/refs/pull/18774/merge/index.html
+To test a playground add it to the URL, for example:
+https://snapshots-cvgtc2eugrd3cgfd.z01.azurefd.net/refs/pull/18774/merge/index.html#WGZLGJ#4600
+Links to test your changes to core in the published versions of the Babylon tools (does not contain changes you made to the tools themselves):
+https://playground.babylonjs.com/?snapshot=refs/pull/18774/merge
+https://sandbox.babylonjs.com/?snapshot=refs/pull/18774/merge
+https://gui.babylonjs.com/?snapshot=refs/pull/18774/merge
+https://nme.babylonjs.com/?snapshot=refs/pull/18774/merge
+To test the snapshot in the playground with a playground ID add it after the snapshot query string:
+https://playground.babylonjs.com/?snapshot=refs/pull/18774/merge#BCU1XR#0
+If you made changes to the sandbox or playground in this PR, additional comments will be generated soon containing links to the dev versions of those tools.
+bjsplat
+commented
+Aug 8, 2026
+Copy link
+Copy Markdown
+Collaborator
+Interaction tests
+https://snapshots-cvgtc2eugrd3cgfd.z01.azurefd.net/refs/pull/18774/merge/testResults/interactionplaywright/index.html
+bjsplat
+commented
+Aug 8, 2026
+Copy link
+Copy Markdown
+Collaborator
+🟢 Memory Leak Test Results
+4 passed, 0 leaked out of 4 scenarios
+🟢 All memory leak tests passed — no leaks detected.
+Passed Scenarios (4)
+Scenario
+Package
+Core Playground #2FDQT5#1508
+@babylonjs/core
+Core Playground #T90MQ4#14
+@babylonjs/core
+Core Playground #8EDB5N#2
+@babylonjs/core
+Core Playground #LL5BIQ#636
+@babylonjs/core
+bjsplat
+commented
+Aug 8, 2026
+Copy link
+Copy Markdown
+Collaborator
+Visualization tests for WebGPU
+https://snapshots-cvgtc2eugrd3cgfd.z01.azurefd.net/refs/pull/18774/merge/testResults/webgpuplaywright/index.html
+bjsplat
+commented
+Aug 8, 2026
+Copy link
+Copy Markdown
+Collaborator
+WebGL2 visualization test reporter:
+https://snapshots-cvgtc2eugrd3cgfd.z01.azurefd.net/refs/pull/18774/merge/testResults/webgl2playwright/index.html
+bjsplat
+commented
+Aug 8, 2026
+Copy link
+Copy Markdown
+Collaborator
+⚡ Performance Test Results
+❌ Failed Tests (1)
+Test
+Error
+SSAO2 [#XT1HAS#1] (webgl2)
+Error: page.evaluate: Execution context was destroyed, most likely because of a navigation.
+Hide details
+View details
+ryantrem
+merged commit 0770799
+into
+BabylonJS:master
+Aug 9, 2026
+22 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+5 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

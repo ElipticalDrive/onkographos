@@ -3,38 +3,37 @@
 Also called: VCCNF Training Procedure
 
 ## Overview
-The VCCNF Training Loop is a supervised optimization procedure for a Voxelized Continuous Coordinate Normalizing Flow (VCCNF) [S1, unofficial]. It learns to map Gaussian noise to shape latent codes conditioned on voxel data by minimizing the Mean Squared Error (MSE) between predicted and target latent codes [S1, unofficial]. It differs from its sibling [MVDream Multi-View Diffusion Guidance](6345-mvdream-multi-view-diffusion-guidance.md), which uses multi-view diffusion guidance, by relying on direct voxel-to-latent regression without diffusion-based sampling [S1, unofficial].
+The VCCNF Training Loop is a supervised optimization procedure for a Voxelized Continuous Coordinate Normalizing Flow (VCCNF) [S1, unofficial]. It learns to map Gaussian noise to shape latent codes conditioned on voxel data by minimizing the Mean Squared Error (MSE) between predicted and target latent codes [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** A dataset of voxel grids (SDFs) and corresponding shape indices. Pre-trained embeddings are loaded from `embedding_dir/embeddings_epoch_{embedding_epoch}.param` [S1, unofficial].
+- **Input:** A dataset of voxel grids and corresponding shape indices, along with pre-trained embeddings loaded from `embedding_dir/embeddings_epoch_{embedding_epoch}.param` [S1, unofficial].
 - **Output:** A trained VCCNF model checkpoint (`vccnf_epoch_{e}.param`) and a loss history array (`losses_vccnf.npy`) [S1, unofficial].
 
 **Data Structures:**
 - **Voxel Data:** Loaded from `.npz` files as `torch.from_numpy(data["voxel_data"]).float()` [S1, unofficial].
 - **Latent Codes:** Retrieved via `embeddings(indices)` [S1, unofficial].
-- **Gaussian Latents:** `torch.randn_like(latent_codes)` [S1, unofficial].
+- **Gaussian Latents:** Generated as `torch.randn_like(latent_codes)` [S1, unofficial].
 
 **Parameters:**
-- **Loss Function:** `nn.MSELoss` [S1, unofficial].
+- **Loss Function:** `nn.MSELoss`, computed between predicted and target latent codes [S1, unofficial].
 - **Scheduler:** `StepLR` with `step_size=100` and `gamma=0.5`, applied after each epoch [S1, unofficial].
-- **Dataset Split:** 0.8 train / 0.2 validation, seeded with `manual_seed(42)` [S1, unofficial].
+- **Dataset Split:** 0.8 train / 0.2 validation, initialized with `manual_seed(42)` [S1, unofficial].
 
 **Steps:**
-1. Initialize the dataset split and load pre-trained embeddings.
+1. Split the dataset into 0.8 train / 0.2 validation using `manual_seed(42)` and load pre-trained embeddings from `embedding_dir/embeddings_epoch_{embedding_epoch}.param` [S1, unofficial].
 2. For each epoch $e$ from `start_epoch` to `epochs`:
-   a. Set model to training mode (`model.train()`).
-   b. Iterate over batches `(voxel_data, indices)`.
-   c. Move `indices` to the target device.
-   d. Retrieve target latent codes: $L_{target} = \text{embeddings}(indices)$.
-   e. Generate Gaussian noise: $L_{noise} = \mathcal{N}(0, I)$ with the same shape as $L_{target}$.
-   f. Compute predicted latent codes: $L_{pred} = \text{VCCNF}(voxel\_data, L_{noise})$.
-   g. Compute loss: $\mathcal{L} = \text{MSE}(L_{pred}, L_{target})$.
-   h. Zero gradients, perform backward pass, and step the optimizer.
-   i. Accumulate loss and step the scheduler.
-   j. Append epoch loss to the history list.
-   k. If $(e+1)$ is divisible by 100, print progress, save `losses_vccnf.npy`, and save `vccnf_epoch_{e+1}.param`.
-   l. Yield $e$ and losses.
+   a. Set `model.train()` [S1, unofficial].
+   b. Iterate over batches `(voxel_data, indices)` [S1, unofficial].
+   c. Move `indices` to the target device [S1, unofficial].
+   d. Retrieve target latent codes: $L_{\text{target}} = \text{embeddings}(\text{indices})$ [S1, unofficial].
+   e. Generate Gaussian noise: $L_{\text{noise}} = \mathcal{N}(0, I)$ with the same shape as $L_{\text{target}}$ [S1, unofficial].
+   f. Compute predicted latent codes: $L_{\text{pred}} = \text{VCCNF}(voxel\_data, L_{\text{noise}})$ [S1, unofficial].
+   g. Compute loss: $\mathcal{L} = \text{MSE}(L_{\text{pred}}, L_{\text{target}})$ [S1, unofficial].
+   h. Zero gradients, perform backward pass, and step the optimizer [S1, unofficial].
+   i. Accumulate loss, step the scheduler, and append the epoch loss to the losses list [S1, unofficial].
+   j. If $(e+1) \pmod{100} == 0$, print progress, save `losses_vccnf.npy`, and save `vccnf_epoch_{e+1}.param` [S1, unofficial].
+   k. Yield $e$ and losses [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -45,11 +44,9 @@ import torch.nn as nn
 import numpy as np
 
 def train_vccnf(model, embeddings, dataloader, start_epoch, epochs, embedding_epoch, device):
-    # Load pre-trained embeddings
-    # Note: Exact loading mechanism for embeddings_epoch_{embedding_epoch}.param is not specified in source [S1, unofficial]
-    # Assuming embeddings is a callable or tensor lookup based on indices
+    # Load pre-trained embeddings from embedding_dir/embeddings_epoch_{embedding_epoch}.param [S1, unofficial]
     loss_fn = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters())
+    optimizer = torch.optim.Adam(model.parameters())  # [G] Optimizer not specified in sources; using standard Adam
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.5)
     
     losses = []
@@ -62,19 +59,12 @@ def train_vccnf(model, embeddings, dataloader, start_epoch, epochs, embedding_ep
             indices = indices.to(device)
             voxel_data = voxel_data.to(device)
             
-            # Retrieve target latent codes
             latent_codes = embeddings(indices)
-            
-            # Generate Gaussian noise
             gaussian_latents = torch.randn_like(latent_codes)
             
-            # Forward pass
             latent_pred = model(voxel_data, gaussian_latents)
-            
-            # Compute loss
             loss = loss_fn(latent_pred, latent_codes)
             
-            # Backward pass
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -93,19 +83,19 @@ def train_vccnf(model, embeddings, dataloader, start_epoch, epochs, embedding_ep
 ```
 
 **Edge Cases and Pitfalls:**
-- **Resuming Training:** The function `latest_epoch()` computes the epoch as `len(losses)//100*100`. There is no existence check for the weight file before loading, which can cause crashes if the file is missing [S1, unofficial]. This differs from `DeepSDFTraining` which performs such checks [S1, unofficial].
+- **Resuming Training:** The function `latest_epoch()` computes the epoch as `len(losses)//100*100`. No existence check for the weight file is performed before loading, unlike `DeepSDFTraining` [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Linear with respect to the number of epochs and batch size. The scheduler steps every epoch.
-- **Memory Complexity:** Depends on the voxel grid size and latent dimension. Gaussian noise and latent codes are stored in memory per batch.
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
 - **Performance:** Not given in the sources.
-- **Strengths:** Simple MSE-based supervision; leverages pre-trained embeddings.
-- **Limitations:** No validation loss tracking mentioned; potential crash on resume if weights are missing.
-- **When to use:** When voxel data is available and a direct mapping to latent codes is desired.
-- **When not to use:** When diffusion-based guidance is required (use [MVDream Multi-View Diffusion Guidance](6345-mvdream-multi-view-diffusion-guidance.md) instead).
+- **Strengths:** Simple MSE-based supervision; leverages pre-trained embeddings [S1, unofficial].
+- **Limitations:** No validation loss tracking mentioned; potential crash on resume if weights are missing [S1, unofficial].
+- **When to use:** Not given in the sources.
+- **When not to use:** Not given in the sources.
 
 ## Background
-The VCCNF Training Loop is part of the VC-SDFGen project, which combines Voxelized Continuous Coordinate Normalizing Flows with SDF generation [S1, unofficial]. It builds on [Training Loop](4290-training-loop.md) and is distinct from [MVDream Multi-View Diffusion Guidance](6345-mvdream-multi-view-diffusion-guidance.md) in its use of direct regression rather than diffusion guidance.
+The VCCNF Training Loop is a training procedure for a Voxelized Continuous Coordinate Normalizing Flow (VCCNF) that learns to map Gaussian noise to shape latent codes conditioned on voxel data [S1, unofficial]. It builds on [Training Loop](4290-training-loop.md) [S1, unofficial].
 
 ## Sources
 [S1] TurtleJayWang/VC-SDFGen, https://github.com/TurtleJayWang/VC-SDFGen, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,212 @@
+Metal-native differentiable 3D Gaussian Splatting for Apple Silicon: fused forward+backward rasterizer on PyTorch MPS, no CUDA anywhere. - Make --selective-adam one Metal pass, and skip only what is safe to skip by nandometzger · Pull Request #44 · nandometzger/metal-gauss
+
+Make --selective-adam one Metal pass, and skip only what is safe to skip by nandometzger · Pull Request #44 · nandometzger/metal-gauss · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+nandometzger
+commented
+Nov 4, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+Dense Adam is the largest phase of a room1 training step after the backward: 9.60 ms at 600k gaussians. Each view sees only part of the scene, and a hidden gaussian's colour gets no gradient from it. This PR makes --selective-adam fast and quality-neutral:
+adam_step_rows: SelectiveAdam's update as one Metal kernel per parameter. A hidden row costs one mask byte, with no host sync and no gather/scatter. The torch paths stay as the CPU fallback and as the test oracle.
+New defaults for --selective-adam: skip only sh_dc/sh_rest (48 of 59 floats per gaussian), bias-corrected with the global step count, as gsplat does. Geometry and opacity stay dense, through FusedAdam's kernel.
+Separate commit: adam_step computed 1 - b2 in float, which put the second moment 1.3e-5 off torch. The host now rounds it from double, and the test checks both moments.
+Still opt-in. The default stays dense Adam, because flipping it changes every published table. That decision is yours.
+Quality: what is skipped decides it
+NeRF-synthetic, all 8 scenes, 7k steps, one evaluator, against a dense control run the same day:
+skip
+bias correction
+result vs dense
+every group
+per gaussian (the old SelectiveAdam)
+−0.86 dB, worse on 8/8
+SH only
+per gaussian
+probe: chair +0.08, hotdog −1.14
+every group
+global step
+probe: chair −0.47, hotdog −0.43
+SH only
+global step
++0.03 dB, 95% CI [−0.04, +0.10], 5/8 better
+scene
+dense
+SH + global
+Δ
+chair
+32.50
+32.56
++0.06
+drums
+24.94
+24.92
+−0.02
+ficus
+28.49
+28.59
++0.10
+hotdog
+36.51
+36.40
+−0.11
+lego
+30.53
+30.68
++0.16
+materials
+27.92
+27.93
++0.00
+mic
+32.32
+32.38
++0.07
+ship
+29.42
+29.39
+−0.03
+Two things explain the losses:
+Per-gaussian bias correction. MCMC resets a relocated gaussian's step count to 0, so its first steps come out ~3× smaller than dense Adam's. Dense Adam keeps the global count over freshly zeroed moments.
+Skipping geometry. It freezes momentum and the MCMC opacity/scale regularisers while a gaussian is hidden.
+The dense control reproduces the README table: mean 30.33 vs 30.37. All three sweeps are committed under bench/results/. NEGATIVE_RESULTS.md records the variants that lost.
+room1: where the speed win is
+NeRF-synthetic sees most gaussians in every view, so selective Adam barely changes anything there. room1 hides ~77% per view, which is exactly where freezing a hidden gaussian's SH could matter. Both arms use the README's room1 protocol (10k steps, 600k splats, 1600 px), held-out PSNR, run back to back:
+dense
+selective
+held-out PSNR
+27.09 dB
+27.32 dB
++0.23 (single run per arm)
+wall
+18.0 min
+14.3 min
+−21%
+per step
+108 ms
+86 ms
+Quality holds on room1 too. Treat the +0.23 dB as "not worse" rather than as a gain: it's one run per arm. The absolute numbers sit below the README's 27.62 dB / 11.9 min because this capture is the distorted one, not the undistorted PINHOLE copy, and two 6K displays shared the GPU. Both arms ran under the same conditions.
+Speed
+bench/step_profile.py, room1, 600k, 5 interleaved rounds:
+ms
+dense
+selective
+paired diff
+faster
+adam
+9.60
+4.75
+−4.73 (−51%)
+5/5
+total
+48.07
+33.61
+−3.62
+5/5
+The totals ran with two 6K displays compositing on the same GPU, so the other phases flip sign between rounds; Adam is the clean number. On an idle machine (27.8 ms/step this morning), that is ~17% of a training step. NeRF-synthetic gains nothing: 100k gaussians, most of them visible.
+Test plan
+pytest tests: 390 passed
+Fused path vs the torch path over 40 steps: visibility 10–100% (both torch branches), active < capacity, an MCMC reset mid-run, a dense auxiliary group, for both row_steps settings. Parameters, both moments and step counts all match.
+Global-step mode against a reference written out in torch; hidden and capacity rows stay bit-identical
+Dense groups under selective mode are torch.optim.Adam (rel < 1e-5)
+make_optimizer(selective=True) defaults pinned: SH rowwise, everything else dense, global steps
+Mutation checks, all caught: hidden-row guard removed; per-row k → steps[0]; 1 - b2 in float (both kernels); eps placement; k_global ignored
+The 1 - b2 fix fails on the old kernel (exp_avg_sq rel 1.29e-5) and passes with it
+🤖 Generated with Claude Code
+nandometzger
+and others
+added 2 commits
+November 4, 2026 09:45
+Round Adam's 1 - beta in double, as torch does
+…
+8c85a52
+```
+adam_step computed (1.0f - b2) in float: 1.0f - 0.999f is 0.00099998713,
+1.3e-5 below the 0.001 torch gets by rounding 1 - 0.999 from double. The
+second moment inherited it -- measured 1.29e-5 relative against
+torch.optim.Adam after 30 steps. The test compared only the parameters,
+which see sqrt(v), and that halves the error to 6e-6, under its 1e-5
+tolerance. The kernel's own comment says the formula is torch's exactly.
+
+The host now passes 1 - b1 and 1 - b2 rounded from double, and the test
+compares both moments as well.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Make --selective-adam one Metal pass, and skip only what is safe to skip
+…
+b90685c
+```
+Dense Adam streams every parameter and both moments through memory each
+step: 9.60 ms of a room1 training step at 600k gaussians, the largest phase
+after the backward. A training view sees only part of the scene, and a
+hidden gaussian's colour gets no gradient from that view.
+
+adam_step_rows is SelectiveAdam's update as one Metal kernel per parameter:
+a hidden row costs one mask byte, with no host sync and no gather. The torch
+paths stay as the CPU path and as the reference the kernel is tested against.
+
+What the optimiser skips decides the quality. NeRF-synthetic, all 8 scenes,
+7k steps, against a dense control run on the same day (PSNR, dB):
+
+  skip                bias correction   mean delta             scenes worse
+  every group         per gaussian      -0.86                  8/8
+  SH only             per gaussian      chair +0.08, hotdog -1.14 (probe)
+  every group         global step       chair -0.47, hotdog -0.43 (probe)
+  SH only             global step       +0.03 [-0.04, +0.10]   3/8
+
+Per-gaussian bias correction is the old SelectiveAdam's choice. MCMC resets
+a relocated gaussian's count to 0, so its first steps come out ~3x smaller
+than dense Adam's, which keeps the global count over freshly zeroed moments.
+Skipping geometry also freezes its momentum and the MCMC opacity/scale
+regularisers while a gaussian is hidden. So --selective-adam now skips only
+sh_dc and sh_rest (48 of 59 floats per gaussian) and bias-corrects with the
+global step count, as gsplat does. Geometry and opacity stay dense, through
+FusedAdam's kernel. The other combinations remain behind
+--selective-adam-groups and --selective-adam-steps to reproduce the above.
+
+bench/step_profile.py, room1, 600k, 5 interleaved rounds (ms):
+
+             dense   selective   paired diff
+  adam        9.60     4.75      -4.73 (-51%)   5/5 faster
+  total      48.07    33.61      -3.62          5/5
+
+The totals ran with two 6K displays on the same GPU, which is why the other
+phases flip sign between rounds. Adam is the clean number: on an idle
+machine, where a step measured 27.8 ms, it is ~17% of the step.
+
+Opt-in for now: the default stays dense Adam, since changing it changes
+every published table. bench/results gains the three sweeps, and
+NEGATIVE_RESULTS.md records the variants that lost.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+This was referenced Nov 4, 2026
+Turn selective Adam on by default
+#45
+Open
+Benchmark on Mip-NeRF 360, against 3DGS at the same 7k steps
+#46
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

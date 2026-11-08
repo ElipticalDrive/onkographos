@@ -1,0 +1,213 @@
+Contribute to ZihanWG/VulkanEngine development by creating an account on GitHub.
+
+Reject disoccluded TAA history by depth by ZihanWG · Pull Request #37 · ZihanWG/VulkanEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ZihanWG
+commented
+Sep 27, 2026
+Copy link
+Copy Markdown
+Owner
+The TAA resolve rejected history by colour alone. When an occluder moved off a surface, its ghost survived wherever the occluder's colour fell inside the current neighbourhood. The resolve now rejects by depth as well.
+How it works
+Previous depth lives in the history's alpha. The Hi-Z pyramid can't provide it: by the time the resolve runs, the two-phase rebuild and the end-of-frame build have refilled it from the current frame. The resolve writes 1 + view depth of each output pixel's dominant reconstruction tap into the history's alpha. That channel used to hold a constant 1, and nothing downstream reads it.
+Expected depth comes from two rows. For each of the nine source taps, the resolve computes the view depth that surface would have had last frame if it had stood still. The CPU folds this into two rows once a frame (TaaDisocclusion.h), so the shader does no matrix inverse. The rows come from the jittered view-projection, which is what rasterised the depth.
+The test. The resolve gathers the four history alphas at the reprojected position. It rejects the history when none of them falls inside the 3x3's expected range, widened by a relative tolerance. If the neighbourhood contains sky, the range stays open above. A history written without depth (alpha 1) decodes as "unknown" and is kept.
+Contracts
+TaaResolvePushConstants grows to 100 bytes: flags @60, rows @64/@80, tolerance @96. Offsets are pinned by static_assert and the shader interface golden.
+Binding 3 (main depth) gets a second reader inside the same pass. There is no new resource, barrier or descriptor.
+The test needs a samplable main depth and reprojection. When it's off, the resolve reads no depth for it and writes alpha 1.
+New settings: taa.disocclusionRejection (on), taa.disocclusionTolerance (0.05, clamped 0.005–0.5) and taa.debugDisocclusion (paints rejected pixels red). Each has its field, clamp, JSON read/write, ImGui control and a history reset on change. The taa-history-plain leg turns the test off and debug-views turns the debug paint on.
+Separate commit: the rejection-feedback tooltip was attached to the Catmull-Rom checkbox, so hovering Catmull-Rom showed both tooltips. Each tooltip now follows its own item.
+Verification
+tools/dev/verify_renderer.sh fast: 624/624 tests, no warnings. The new cases cover the depth reconstruction against direct reprojection (still camera, dolly, rotation with jitter), the encoding, and the keep/reject cases. A row/column mutation fails 10 assertions.
+tools/dev/verify_renderer.sh sync: passes. It runs the default settings, where TAA is off, so I also ran the renderer under --sync-validation with TAA, rejection and debug on (default and sunlit scenes): 0 errors, 0 hazards.
+check_shader_constants.py (39), check_shader_interface.py, check_ci_settings_coverage.py and check_settings_capture.py all pass.
+RTX 3080 Ti Laptop, 1280x720, --deterministic, frame 30:
+TAA off: bit-identical to main. The CI golden runs with TAA off, so it is unaffected.
+Still camera: rejection changes only pixels around the animated skinned mesh (20 px default, 117 px sunlit).
+Orbiting camera: there is no headless flag for this, so I patched an orbit in locally for the check and didn't commit it. Rejection changed 0.29% (default) and 0.14% (sunlit) of the frame. The debug view shows single-pixel lines along trailing silhouettes and nothing on flat surfaces.
+Rejection off is not bit-identical to the old resolve. It differs on 941 of 921600 pixels, almost all by at most one level. The cause is the compiled shader, not the logic: compiling the depth path out restores the old output exactly, and writing a constant alpha with the path left in reproduces the drift. taa.md records this.
+Not done
+GPU cost is not measured. I couldn't pin clocks in this session. Per pixel the test adds nine depth fetches (velocity dilation already makes nine) and one gather. A pinned A/B/A/B of TAAResolvePass with rejection on vs off is still to do.
+Known limits (in taa.md): the expected depth assumes the surface stood still, so an object moving along the view direction faster than the tolerance rejects its own history. The tolerance is relative. Blended surfaces write no depth.
+ZihanWG
+added 4 commits
+September 27, 2026 09:45
+Attach the rejection-feedback tooltip to its own checkbox
+…
+11f95a6
+```
+The Catmull-Rom checkbox was inserted between "Rejection feedback" and
+the SetItemTooltip call that describes it, so hovering Catmull-Rom showed
+both tooltips and hovering rejection feedback showed none. Each tooltip
+now follows its own item, and Catmull-Rom uses SetItemTooltip like its
+neighbours.
+```
+Derive the depth a surface had last frame from two rows
+…
+1afae81
+```
+The GPU-free half of TAA disocclusion rejection. For a point of this
+frame's depth buffer, the view depth that surface had last frame is the
+previous view-projection's clip w at its world position, and its current
+view depth is the reciprocal of the inverse's w row. Both reduce to two
+rows the CPU folds once a frame, so the resolve needs no matrix inverse
+per pixel. The rows are built from the jittered view-projection, which is
+what rasterised the depth; jitter shears only x and y and leaves depth
+alone.
+
+The history encodes view depth as 1 + depth, clamped to a far sky value
+that still fits in 16-bit float, so a history written without it (alpha
+exactly 1) decodes as unknown. The test keeps history when any of the
+four gathered texels falls inside the current neighbourhood's expected
+range widened by a relative tolerance, and leaves the range open above
+when the neighbourhood contains sky.
+
+Eight cases pin the reconstruction against direct reprojection under a
+still camera, a dolly, and rotation with jitter, plus the encoding and
+the keep and reject cases. Building the denominator from the wrong index
+of the inverse fails ten assertions.
+```
+Reject disoccluded TAA history by depth
+…
+a3c1c63
+```
+The resolve rejected history by colour alone, so an occluder that moved
+off a surface left a ghost wherever its colour fell inside the current
+neighbourhood. It now rejects by depth as well.
+
+The previous frame's depth cannot come from the Hi-Z pyramid: the
+two-phase mid-frame rebuild and the end-of-frame build both refill it
+from the current frame before the resolve runs. The history carries it
+instead. The resolve writes the view depth of each output pixel's
+dominant reconstruction tap into the history's alpha, which held a
+constant 1 that no consumer read. The next frame gathers the four alphas
+at the reprojected position and drops the history when none of them
+lies in the range the current 3x3 would have had last frame. A rejected
+pixel takes the current reconstruction alone.
+
+Contracts:
+- TaaResolvePushConstants grows to 100 bytes: disocclusionFlags at 60,
+  the two depth rows at 64 and 80, the tolerance at 96, pinned by
+  static_assert and the shader interface golden. Frame prep sets the
+  rows after the previous view-projection is settled, so a history reset
+  reads as no camera motion.
+- Binding 3 (main depth) gains a second reader in the same pass; no new
+  resource, barrier or descriptor.
+- The test needs a samplable main depth and reprojection. Off, the
+  resolve reads no depth for it and writes alpha 1, which decodes as
+  unknown and is kept.
+
+Settings: taa.disocclusionRejection (on), taa.disocclusionTolerance
+(0.05 relative, clamped 0.005-0.5) and taa.debugDisocclusion, which
+paints rejected pixels red, each with JSON, clamp, control and history
+reset on change. The taa-history-plain leg turns the test off and
+debug-views turns the debug paint on, so the sweep covers both paths.
+The flag values and the history encoding constants are paired with
+the shader by check_shader_constants.py.
+```
+Document TAA disocclusion rejection
+…
+ddbf2ce
+```
+taa.md gains the settings, what the history's alpha now carries, and a
+section on where the previous depth comes from, what it is compared
+with, and why the test takes four texels and a range. It records what
+the test did on the scenes here: with a still camera it changes only the
+pixels around the animated skinned mesh, and under a camera orbit
+patched in for the check it draws lines along trailing silhouettes and
+nothing on flat surfaces. Its GPU cost is not measured yet, and the
+document says so.
+
+It also records that turning the test off does not reproduce the old
+resolve bit for bit. The difference is in the compiled shader, not the
+logic: compiling the depth path out restores the old output exactly.
+
+"No disocclusion detection" came out of every limitation list that
+carried it, replaced by the test's real limits: the expected depth
+assumes the surface stood still, the tolerance is relative, and blended
+surfaces write no depth. Milestone 94 summarises the change.
+```
+chatgpt-codex-connector
+Bot
+reviewed
+Sep 27, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: ddbf2ce304
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+src/shaders/taa_disocclusion.glsl
+Comment on lines
++45
+to
++49
+if (expectedMin > expectedMax) {
+return false;
+}
+const float lower = expectedMin * (1.0 - tolerance);
+const float upper = neighbourhoodHasSky ? 3.0e38 : expectedMax * (1.0 + tolerance);
+chatgpt-codex-connector
+Bot
+Sep 27, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Treat sky as a distinct expected depth
+When an opaque object moves away to reveal only sky, every current tap sets neighbourhoodHasSky but leaves expectedMin > expectedMax, so this early return keeps the object's history instead of rejecting or debug-painting it. A mixed geometry/sky neighborhood is also overly permissive because the infinite upper bound accepts every finite history depth, not just the encoded sky sentinel. This leaves the new depth rejection ineffective for disocclusions against sky, especially when neighborhood color clamping is disabled; include the encoded sky depth as a distinct expected candidate rather than treating the range as empty or unbounded.
+Useful? React with 👍 / 👎.
+Hide details
+View details
+ZihanWG
+merged commit dc79b25
+into
+main
+Sep 27, 2026
+6 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+ZihanWG
+deleted the
+feature/taa-disocclusion
+branch
+September 27, 2026 02:06
+ZihanWG
+mentioned this pull request
+Sep 27, 2026
+Record what LOD error selection and disocclusion rejection cost
+#39
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

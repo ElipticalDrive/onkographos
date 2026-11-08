@@ -1,0 +1,243 @@
+Make the Robots fighting again! Contribute to pozitronik/MatrixGame development by creating an account on GitHub.
+
+Gameplay: Trace objects along rays without X travel by pozitronik · Pull Request #151 · pozitronik/MatrixGame · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+pozitronik
+commented
+Oct 13, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Issue
+Issue: #129
+Summary
+CMatrixMap::ScanLandscapeGroup clips each map group's ray interval to [t0, t1] before accepting object hits with t > t0 && t < t1. Both bounds started at zero, and only the nonzero-X branch could raise t1; the Y branch only lowers it. A ray with exactly zero X travel therefore rejected every object hit, through both sphere intersection and mesh Pick. For such rays t1 now starts at the current nearest-hit distance (last_t), and the Y slab clips it as before.
+Design and compatibility
+One initialization. Rays with nonzero X travel are unchanged, and so is the separate path for rays with neither X nor Y travel. Hit acceptance still requires t < last_t, so using last_t as the bound does not change nearest-hit selection. The same interval provides the group's minimum ray height used to cull terrain. A zero-X ray previously used t1 = 0 there as well, so its culling height could exceed the ray's true minimum; it now covers the full span. No layout, serialization or interface changes.
+Gameplay disposition: rays with exactly zero X travel (start and end X exactly equal, Y different) now hit objects in their path. The affected consumers are:
+AI visibility and line of fire: IsLogicVisible, turret acquisition, place evaluation and fire-line obstruction by map objects. These previously reported "not visible" or ignored map objects on such lines. Place centres lie on the move grid, so this is the most plausible source of an observable AI difference.
+Weapon, projectile and debris hits whose shot or per-tick segment has zero X travel.
+Cursor picking with an exactly zero X pick direction.
+Landscape-only traces (hit-point bar occlusion, the camera check), through the terrain-culling bound only.
+Exactly vertical traces and the shadow bounds are unaffected. No registered battle scenario, recorded trace or replay comparison changed, so no reference update is needed. Native occurrence frequency and gameplay impact remain unmeasured.
+ScanLandscapeGroupForLand contains the same interval code but is reached only through TraceLand and CatchPoint, neither of which has a live caller, so it is left unchanged.
+Validation
+probe.combat.axis_aligned_trace becomes the registered game.combat.axis_aligned_trace, run in both RNG modes through sphere and mesh masks. It covers:
+oblique and descending zero-X controls;
+zero-X and zero-Y rays in both directions, including crossings of the y = 200 group boundary on which a robot stands;
+nearest-hit selection from both ends of x = 100, which holds two robots, plus skip returning the farther one;
+a segment that stops short, a parallel ray and a robot-free mask, all returning nothing;
+a descending zero-X terrain trace meeting the ground where a near-parallel oblique ray does.
+The regression fails without the change at the original zero-X assertion and passes with it.
+Local MinGW Debug x86 build: the full registered engine suite passes apart from cases that cannot run in its non-Windows environment.
+CI on 02df9ff: all eleven jobs pass on the latest run, including Required checks, MinGW/MSVC Debug and Release EXE, both Release DLL cheat builds, MinGW Debug EXE with cheats and coverage. The first run's MSVC Debug EXE failure was the zlib download issue described in the PR comment. CI on the documentation follow-up 9e63b7b: pending.
+Documentation
+docs/testing/82-combat.md and docs/testing/armed-fixtures.md replace the defect probe description with the correction and the registered regression. docs/testing/84-ai-decisions.md no longer describes axis-aligned tracing as an open defect.
+pozitronik
+added
+area:gameplay
+Robot construction, commands and combat
+area:tests
+Regression coverage, synthetic fixtures and playtest tools
+labels
+Oct 13, 2026
+— with
+Claude
+pozitronik
+commented
+Oct 13, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Author
+MSVC Debug EXE failed on 6734023 before any compilation: every zlib download attempt from zlib.net failed the pinned SHA256 check, so the ExternalProject download step aborted. This is the same infrastructure failure seen on #148; the diff does not touch dependencies or build tooling, and caching verified downloads in CI is tracked in #128. A direct re-run is refused for this integration (403). The PR stays in draft until this job passes on a fresh run.
+pozitronik
+marked this pull request as ready for review
+October 13, 2026 22:14
+pozitronik
+requested a review
+from TFlavius
+October 13, 2026 22:14
+Gameplay: Trace objects along rays without horizontal travel
+…
+02df9ff
+```
+ScanLandscapeGroup started the per-group ray interval at [0, 0]. Only the nonzero-X branch could raise its upper bound, so a ray with exactly zero X travel rejected every object hit through both sphere intersection and mesh picking. Such rays now start with the current nearest-hit distance as the upper bound, and the Y slab clips it as before. The same interval sets the group's minimum ray height for terrain culling, so these rays also scan terrain over their full span.
+
+The axis-aligned trace probe becomes the registered game.combat.axis_aligned_trace regression, extended to zero-Y and reversed rays, group-boundary crossings, nearest-hit selection, skip and mask handling, missing targets and terrain.
+
+Issue: #129
+```
+pozitronik
+force-pushed
+the
+fix/129-axis-aligned-trace
+branch
+from
+6734023 to
+02df9ff
+Compare
+October 14, 2026 01:38
+TFlavius
+mentioned this pull request
+Oct 14, 2026
+AI: Reset cached distance when reusing route storage
+#146
+Merged
+TFlavius
+approved these changes
+Oct 14, 2026
+View reviewed changes
+TFlavius
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Reviewed 02df9ff against its merge base, 286b0ec (the current dev is 0f1b109). All 11 checks pass.
+The production change is correct and limited to rays with exactly zero X travel (MatrixMapTrace.cpp:55).
+The defect exists at the merge base. t1 started at 0, only the X branch (:56-71) can raise it, and the Y branch (:72-87) only lowers it. With dx == 0, t < t1 && t > t0 at :137 therefore rejected every object in every group. The same t1 fed the group's minimum ray height at :91, so a descending zero-X ray got the height at its group entry point, which is above its true minimum. Through GetMaxZObjRobots() >= minz at :95 that also skipped whole groups of objects, and through GetMaxZLand() < minz at :150 it skipped their terrain.
+The fix applies only when dx == 0. The non-degenerate path reaches this line only when dy != 0, because dx == dy == 0 (including signed zeros) returns earlier at :454. So the Y slab always runs and clips t1 to min(last_t, far Y boundary). That bound never exceeds the segment, so minz stays within it, and the existing t < last_t check keeps nearest-hit selection unchanged.
+For dx != 0 the initializer still evaluates to 0.0f and nothing else changed, so these traces are bit-identical. That covers nearly vertical rays: a tiny nonzero dx still takes the X-slab path, where ddx = 1/dir.x (:548) is large but finite for map-range coordinates. It also covers zero-Y rays: dx != 0, X slab only, which were already correct and are unchanged.
+Rays with no horizontal travel at all (dx == dy == 0) use the separate vertical branch at :454-529, which this PR does not touch. No division by zero was involved: ddx/ddy are computed only for nonzero travel (:547-554) and read only in the matching branch. The title's "without horizontal travel" is therefore misleading (Nit 1).
+I found no new out-of-bounds access, uninitialized read or lifetime issue. last_t is always initialized before the scan (:400), possibly lowered by the flyer pre-pass (:405-450).
+Gameplay disposition. Only Trace changes. Behavior differs only when a segment's endpoints have exactly equal X and different Y:
+AI visibility and line of fire now see targets at the same X, and obstacles between them. This covers IsLogicVisible (MatrixLogic.cpp:3448-3480), turret acquisition (MatrixObjectCannon.cpp:769-776), place evaluation (MatrixSide.cpp:5585, :8636) and fire-line obstruction by map objects (MatrixSide.cpp:5764, :8128, :8815). Previously the visibility checks returned "not visible", and the obstruction checks ignored map objects on such lines. Place centres lie on the move grid (MatrixSide.cpp:5533), so exact X alignment there is the most plausible source of an observable AI difference.
+Weapon and projectile hits can now land on objects whose shot or per-tick segment has zero X travel: instant weapons (MatrixEffectWeapon.cpp:248, :255, :311, :509, :556), the robot aim check (MatrixRobot.cpp:5481), turret fire (MatrixObjectCannon.cpp:1193), moving projectiles (MatrixEffectMovingObject.cpp:178, :302, :415, :489, :566), plasma (MatrixEffectFirePlasma.cpp:80) and falling debris (MatrixRobot.cpp:230, MatrixObjectCannon.cpp:693). A bomb or shot falling exactly vertically is unaffected. A flyer shot or bomb is affected only if its horizontal motion is purely along Y.
+Cursor picking (MatrixMap.cpp:1123, MatrixSide.cpp:554) changes only when the pick direction's X component is exactly zero.
+Landscape-only traces change only through the terrain-culling bound. These are the hit-point bar occlusion traces (MatrixObject.cpp:763, :780, :798, MatrixObjectBuilding.cpp:918, MatrixObjectCannon.cpp:506, MatrixObjectRobot.cpp:963) and the camera check (MatrixCamera.cpp:337).
+Unaffected: the building drop trace (MatrixObjectBuilding.cpp:998, exactly vertical) and shadow bounds (MatrixMapStatic.cpp:165, light X is 250 at MatrixMap.cpp:78). MatrixRobot.cpp:4486, :4563, MatrixMap.cpp:1322 and MatrixWater.cpp:22 are commented out.
+This is the intended correction, and the PR states that native frequency is unmeasured. The maintainer disposition should cover the AI visibility and fire-line consequences above, not only weapon hits.
+ScanLandscapeGroupForLand is dead code, as claimed, but has two entry points. It has the same zero-X interval (MatrixMapTrace.cpp:763). Besides TraceLand it is called from CatchPoint (:1243). Neither has a live caller (MatrixFormGame.cpp:1634 and MatrixMap.cpp:1261 are comments), so leaving it unchanged is fine (Nit 2).
+The tests drive production Trace through sphere intersection and mesh Pick in both RNG modes. They check zero-X and zero-Y rays in both directions, the y = 200 group boundary, nearest-hit selection and skip along x = 100, short and parallel misses, a mask without robots, and the terrain intersection. MG_CHECK stays active in Release, the case runs inside the existing Session fixture, and it is registered with sensible labels (tests/CMakeLists.txt:278). ctest -N -R probe reports 0 tests.
+Documentation. The armed-fixtures.md rewrite removes only material about this defect: the open-defect wording, the probe's expected-failure description and its direct-run commands. The new section accurately describes the correction and its terrain side effect. The 82-combat.md row matches the test. One stale reference remains elsewhere (Should-fix 1).
+Local validation with the pinned MinGW toolchain
+Debug 504/504 and Release 504/504; tools/check-repository.ps1 passes.
+With only the production hunk reverted, game.combat.axis_aligned_trace fails at combat_scenario_tests.cpp:295, the original descending zero-X ray. With the fix it passes.
+Plausible wrong fixes:
+Applying the condition to the wrong axis (dy instead of dx) fails at :295.
+Keeping the object interval fix but computing the culling height with the old zero bound also fails at :295. This confirms that the descending case depends on the minz correction, not only on the acceptance interval.
+Raising t1 to last_t after the Y slab (skipping the Y clip) passes. So does an unconditional t1 = last_t, and so does t1 = len for zero X. The last two are behaviorally equivalent along the visited groups. The first is not (Nit 3).
+Integration. The branch merges cleanly with the current dev 0f1b109 and with each of #146-#150, #153, #155 and #156. #150 and #155 also touch combat_scenario_tests.cpp and 82-combat.md, but in separate hunks: the delayed-damage cases near line 1648, the case-table rows below this PR's row, and 82-combat.md line 123 instead of 51. The three-way combination of #150, #155 and this PR also merges cleanly.
+Should-fix
+docs/testing/84-ai-decisions.md:54 still says "Their diagonal rays avoid the separately tracked axis-aligned tracing defect." After this PR, nothing should describe that defect as open. Drop the sentence, or replace it with "Their rays are diagonal; axis-aligned visibility is covered by game.combat.axis_aligned_trace." #146, #147 and #148 change line 56 of the same file, so check that merge after the edit.
+Nits:
+The commit subject and PR title say "without horizontal travel", but exactly vertical rays take the unchanged branch at MatrixMapTrace.cpp:454. The fix is for zero X travel, as issue #129 is titled. Suggest Gameplay: Trace objects along rays without X travel.
+docs/testing/armed-fixtures.md:40 and the PR body say ScanLandscapeGroupForLand "is reached only through TraceLand". CatchPoint (MatrixMapTrace.cpp:1243) also calls it. Suggest "is reached only through TraceLand and CatchPoint, neither of which has a live caller".
+No case pins the Y-slab clip that the design relies on: the variant that skips it passes. It matters when an object registered in several groups is hit beyond the current group's span while a nearer object lies only in the next group. In that case the unclipped variant returns the farther object, because traversal stops at the first group that reports a hit. Examples are a grazing ray past a sphere that straddles a group boundary, or a mesh whose picked surface lies past the boundary. Optional: add such a zero-X case if the fixture allows it.
+Approving.
+This was referenced Oct 14, 2026
+AI: Keep cached group counts consistent after regrouping
+#148
+Merged
+AI: Keep formation speed finite at the slowdown threshold
+#149
+Merged
+Gameplay: Keep the attacking side across delayed status damage
+#150
+Merged
+Gameplay: Keep turret status attribution and make the original selectable
+#155
+Merged
+Documentation: Retire the remaining open axis-aligned trace note
+…
+9e63b7b
+```
+The AI decision guide still described axis-aligned tracing as a separately tracked defect; it now points to game.combat.axis_aligned_trace. The armed-fixture guide names CatchPoint as the second unused entry to ScanLandscapeGroupForLand.
+
+Issue: #129
+```
+pozitronik
+changed the title
+Gameplay: Trace objects along rays without horizontal travel
+Gameplay: Trace objects along rays without X travel
+Oct 14, 2026
+pozitronik
+commented
+Oct 14, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Author
+Thanks. Addressed in 9e63b7b and the PR description:
+Should-fix 1: 84-ai-decisions.md now reads "Their rays are diagonal; axis-aligned visibility is covered by game.combat.axis_aligned_trace."
+Nit 1: the PR title is now "Trace objects along rays without X travel". The first commit's subject still says "horizontal", because changing it would rewrite pushed history.
+Nit 2: armed-fixtures.md and the PR body name both TraceLand and CatchPoint, neither with a live caller.
+Gameplay disposition: the PR body now lists the AI visibility, fire-line, weapon, picking and landscape-only consequences from your review, for the maintainer decision.
+Nit 3: not added here. Every robot in this shared fixture has a fixed position. A sphere straddling the y = 200 boundary, grazed beyond the group span, with a nearer object only in the next group, needs dedicated object placement and group re-registration. I can add that fixture as a follow-up if wanted.
+Hide details
+View details
+pozitronik
+merged commit 8c4bd22
+into
+dev
+Oct 14, 2026
+11 of 22 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+pozitronik
+deleted the
+fix/129-axis-aligned-trace
+branch
+October 14, 2026 08:28
+pozitronik
+mentioned this pull request
+Oct 14, 2026
+Tests: Pin the Y-slab clip for zero-X traces across group boundaries
+#157
+Closed
+TFlavius
+mentioned this pull request
+Oct 14, 2026
+Gameplay: Keep the original zero-X ray tracing selectable
+#159
+Closed
+This was referenced Oct 14, 2026
+Gameplay: Rays with zero X travel miss objects
+#129
+Closed
+Gameplay: Keep the original zero-X ray tracing selectable
+#163
+Merged
+Tests: Pin the Y-slab clip for zero-X traces across group boundaries
+#164
+Closed
+Tests: Pin the Y-slab clip for zero-X traces across group boundaries
+#165
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+area:gameplay
+Robot construction, commands and combat
+area:tests
+Regression coverage, synthetic fixtures and playtest tools
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

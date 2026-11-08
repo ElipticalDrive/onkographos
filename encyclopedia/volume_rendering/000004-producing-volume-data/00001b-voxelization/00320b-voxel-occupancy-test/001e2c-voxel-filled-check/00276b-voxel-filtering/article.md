@@ -3,30 +3,28 @@
 Also called: Voxel Predicate Filter
 
 ## Overview
-Voxel Filtering iterates over a voxel grid to identify and return the linear indices of voxels that satisfy a specific user-defined condition [S1, unofficial]. It serves as a general-purpose selection mechanism within the voxelization pipeline, acting as a post-processing step for [Voxel Filled Check](1705-voxel-filled-check.md) to refine occupancy data [S1, unofficial]. Unlike [Voxel Material Classification](3645-voxel-material-classification.md), which categorizes voxels by material type, Voxel Filtering selects voxels based on arbitrary boolean predicates, enabling tasks such as density thresholding or invalid value exclusion [S1, unofficial].
+Voxel Filtering iterates over a voxel grid to identify and return the linear indices of voxels that satisfy a specific user-defined condition [S1, unofficial]. It acts as a general selection mechanism within the voxelization pipeline, refining occupancy data after [Voxel Filled Check](1705-voxel-filled-check.md) [S1, unofficial]. Unlike [Voxel Material Classification](3645-voxel-material-classification.md), which categorizes voxels by material type, Voxel Filtering selects voxels based on arbitrary boolean predicates [S1, unofficial].
 
 ## How it works
-**Inputs:**
-- A voxel data array (linear or multi-dimensional) of size $N$.
-- A predicate function $P(v)$ that accepts a voxel value $v$ and returns a boolean.
+**Inputs:** A voxel data array of size $N$ [S1, unofficial]. A callable predicate function `func` that takes a single voxel (CellType) as input and returns a boolean indicating whether the voxel satisfies the condition [S1, unofficial].
 
-**Outputs:**
-- A list (or vector) of linear indices $i$ where $P(v_i)$ is true.
+**Outputs:** A list of linear indices $i$ where the predicate evaluates to true [S1, unofficial].
 
-**Data Structures:**
-- **Input Array:** A contiguous memory block of voxel values. The layout is assumed to be linearized (e.g., row-major or column-major) such that index $i$ corresponds to a unique voxel.
-- **Output Vector:** A dynamic array of integers storing the valid linear indices.
+**Data Structures:** The input is a contiguous array of voxel values, linearized such that index $i$ maps to a unique voxel [G]. The output is a dynamic array/vector storing the valid linear indices [G]. Exact field layouts, sizes, and bit packing are Not given in the sources.
 
 **Steps:**
 1. Initialize an empty output vector $L$.
-2. Iterate through the input data array from index $i = 0$ to $N-1$.
+2. Loop over all elements in the data array from index $0$ to $N-1$.
 3. For each index $i$, retrieve the voxel value $v_i$.
-4. Evaluate the predicate function: $result = P(v_i)$.
-5. If $result$ is true, append $i$ to $L$.
-6. After the loop completes, return $L$.
+4. Evaluate the predicate function: `result = func(v_i)`.
+5. If `result` is true, append $i$ to $L$.
+6. Return $L$ after the loop completes [S1, unofficial].
 
-**Parameters:**
-- `func`: A callable predicate that takes a single voxel (CellType) as input and returns a boolean indicating whether the voxel satisfies the condition [S1, unofficial].
+**Formulas:** None given in the sources for the core method. (See Subtopics for $t = F(V, p)$ [S2, unofficial]).
+
+**Parameters:** `func` (callable predicate) [S1, unofficial]. Typical values are Not given in the sources.
+
+**Edge Cases and Pitfalls:** If no voxels satisfy the predicate, the output list is empty [S1, unofficial]. The caller must handle this to avoid rendering errors or division by zero in subsequent steps [G]. The method assumes the input array is fully populated [G]. If the grid has padding or sparse regions, the linear index mapping must be consistent with the coordinate system used by the predicate [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -54,29 +52,31 @@ def voxel_filter(data_array, predicate_func):
     return output_indices
 ```
 
-**Edge Cases and Pitfalls:**
-- **Empty Result:** If no voxels satisfy the predicate, the output list is empty. The caller must handle this to avoid rendering errors or division by zero in subsequent steps.
-- **Predicate Cost:** If the predicate function is computationally expensive, this linear scan becomes a bottleneck. [G] Consider caching predicate results if the voxel data does not change between frames.
-- **Boundary Conditions:** The method assumes the input array is fully populated. If the grid has padding or sparse regions, the linear index mapping must be consistent with the coordinate system used by the predicate.
-
 ## Subtopics
 
 ### [Sample Uniform and Occupied Cells](4651-sample-uniform-and-occupied-cells.md)
-This variant generates a mixed set of voxel indices for volume rendering by combining uniformly sampled cells with cells known to be occupied by geometry. It specifically filters out cells with invalid density values (such as -1) to ensure valid rendering data. This approach balances coverage of empty space with detail in occupied regions.
+This variant generates a mixed set of voxel indices for volume rendering by combining uniformly sampled cells with cells known to be occupied by geometry. It filters out cells with invalid density values (specifically -1).
 
 ### Volume Subset Extraction
-This method extracts a subset of voxels based on a transfer function evaluation. For each voxel, it computes a transfer value $t = F(V, p)$, where $V$ is the gradient and $p$ is the density of the voxel [S2, unofficial]. The voxel is included in the subset if $t$ exceeds a user-defined threshold [S2, unofficial]. The extracted subset is stored as a 2D array of splat rows, where each row contains the extracted voxels [S2, unofficial]. Each voxel in the subset stores its location and normal vector, as rows may contain different numbers of voxels and voxels are not necessarily contiguous [S2, unofficial]. The data structure supports traversal in either back-to-front or front-to-back order [S2, unofficial].
+This method extracts a subset of voxels based on a transfer function evaluation [S2, unofficial]. For each voxel, it computes a transfer value $t = F(V, p)$, where $V$ is the gradient and $p$ is the density of the voxel [S2, unofficial]. The voxel is included in the subset if $t$ exceeds a user-defined threshold [S2, unofficial]. The extracted subset is stored as a 2D array of splat rows, where each row contains the extracted voxels [S2, unofficial]. Each voxel in the subset stores its location and normal vector, as rows may contain different numbers of voxels and voxels are not necessarily contiguous [S2, unofficial]. The data structure supports traversal in either back-to-front or front-to-back order [S2, unofficial].
+
+### Empty-Brick Threshold Calculation
+This method computes the voxel intensity threshold below which a volume brick is considered empty and can be skipped during streaming [S3, unofficial]. It calls `emptyBrickThresholdFor` with `metadata.bitDepth`, channel windows (or a single window), and an `isFloat` flag [S3, unofficial]. The `bitDepth` parameter is 8 or 16, determining intensity range scaling [S3, unofficial]. The `channelWindows` parameter is an array of window/level pairs per channel, or undefined [S3, unofficial]. The `isFloat` parameter is a boolean indicating if the data is floating-point [S3, unofficial].
+
+### Grid Homogenization
+This method sets all non-empty voxels to `VOXEL_FREE`, effectively removing fragment IDs and marking all occupied space as free [S4, unofficial]. It iterates over all voxels and, if a voxel is not `VOXEL_EMPTY`, sets its value to `VOXEL_FREE` [S4, unofficial].
 
 ## Operating characteristics
 **Time Complexity:** $O(N)$, where $N$ is the total number of voxels in the grid, as every voxel must be visited to evaluate the predicate [S1, unofficial].
-**Memory Complexity:** $O(K)$, where $K$ is the number of voxels satisfying the predicate. In the worst case ($K=N$), this is $O(N)$.
-**Performance:** Performance is dominated by the cost of the predicate function and memory bandwidth for reading the input array. [G] For large grids, parallelization (e.g., using GPU kernels or multi-threading) is recommended to reduce latency.
-**Strengths:** Simple implementation, flexible predicate definition, and efficient linear scan.
-**Limitations:** Requires full traversal of the grid; does not exploit spatial coherence or hierarchical structures (like octrees) for early culling.
+**Memory Complexity:** $O(K)$, where $K$ is the number of voxels satisfying the predicate [G]. In the worst case ($K=N$), this is $O(N)$ [G].
+**Strengths:** Simple implementation, flexible predicate definition, and efficient linear scan [G].
+**Limitations:** Requires full traversal of the grid; does not exploit spatial coherence or hierarchical structures (like octrees) for early culling [G].
 
 ## Background
-Voxel Filtering is a fundamental operation in voxel-based rendering pipelines, often used in conjunction with densification and pruning strategies in 3D Gaussian Splatting variants [S1, unofficial]. It allows for dynamic adjustment of voxel sets based on optimization iterations or user-defined criteria [S1, unofficial]. The concept of extracting subsets based on transfer functions is also found in volume splatting techniques, where antialiasing and detail preservation are managed by filtering voxels based on gradient and density properties [S2, unofficial].
+The method is defined as iterating over a voxel grid to return linear indices for voxels satisfying a user-defined predicate [S1, unofficial]. Its application in extracting subsets based on transfer functions is also found in volume splatting techniques, where antialiasing and detail preservation are managed by filtering voxels based on gradient and density properties [S2, unofficial].
 
 ## Sources
 [S1] 3DGS-FLoD/flod, https://github.com/3DGS-FLoD/flod, fetched 2026-10-27 (unofficial)
 [S2] DTIC ADA606764: Splatting Errors and Antialiasing, https://archive.org/details/DTIC_ADA606764, fetched 2026-10-26 (unofficial)
+[S3] Show HN: Kiln – WebGPU-native out-of-core volume rendering for multi-GB datasets, https://github.com/MPanknin/kiln-render, fetched 2026-10-26 (unofficial)
+[S4] AlfonsoLRz/VoxelFragmentML, https://github.com/AlfonsoLRz/VoxelFragmentML, fetched 2026-10-26 (unofficial)

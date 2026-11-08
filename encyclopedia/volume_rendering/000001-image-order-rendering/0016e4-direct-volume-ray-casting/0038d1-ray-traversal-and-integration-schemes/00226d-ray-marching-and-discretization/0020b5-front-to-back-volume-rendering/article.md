@@ -1,175 +1,169 @@
 # Front-to-Back Volume Rendering
 
-Also called: Front-to-back additive blending, Front-to-Back Ray Casting, Front-to-Back Volume Ray Casting, Levoy's Front-to-Back Ray Casting
+Also called: Front-to-Back Ray Casting, Front-to-Back Volume Ray Casting, Levoy's Front-to-Back Ray Casting, Levoy's front-to-back method, Semi-transparent Rendering, front-to-back image-order volume rendering
 
 ## Overview
 
-Front-to-Back Volume Rendering is a direct volume rendering technique that generates images of 3D volumetric data sets by casting rays from the eye through the volume and accumulating color and opacity from front to back [S3, book][S4, unofficial][S7]. It solves the problem of visualizing semi-transparent scalar fields without explicitly extracting geometric surfaces, mapping data values to optical properties via a transfer function and integrating them along viewing rays [S3, book][S4, unofficial]. What sets it apart from its siblings, such as the Exponential Approximation Method or fixed-step marching, is its explicit adherence to the physical emission-absorption model using iterative front-to-back compositing, which allows for accurate handling of varying densities and early ray termination optimizations [S2, S6, unofficial].
+Front-to-Back Volume Rendering is a direct volume rendering technique that generates images of 3D scalar fields by casting rays from the camera through each pixel, sampling the volume along the ray, and accumulating color and opacity from front to back [S5, S9, unofficial]. It solves the problem of visualizing semi-transparent volumetric data without explicitly extracting geometric surfaces, mapping scalar voxel values to optical properties (color and opacity) via a transfer function [S1][S4, book]. Unlike back-to-front methods, it allows for early ray termination when the accumulated opacity is sufficiently high, ignoring light contributions from behind opaque regions [S1][S7, unofficial]. It differs from [Exponential Approximation Method](2079-exponential-approximation-method.md) by using discrete alpha compositing rather than exponential transmittance approximations, and from [Ray Marching Volume Rendering with Henyey-Greenstein Scattering](2545-ray-marching-volume-rendering-with-henyey-greenstein-scatter.md) by typically neglecting scattering effects in its standard form [S1][S12, unofficial].
 
 ## How it works
 
 **Inputs and Outputs:**
-*   **Input:** A 3D scalar field (volume data), a camera position and direction (or view matrix), a transfer function mapping scalar values to color ($c$) and opacity ($\alpha$), and ray marching parameters (step size, bounds).
-*   **Output:** A 2D image where each pixel contains an accumulated color and opacity value.
+*   **Input:** A 3D scalar volume dataset (voxels), a camera position and direction (or view matrix), a transfer function mapping scalar values to color $c$ and opacity $\alpha$, and a step size $dt$ or number of steps.
+*   **Output:** A 2D image where each pixel contains an accumulated color $C$ and opacity $A$.
 
 **Data Structures:**
-*   **Volume Data:** Stored as a 3D texture (`GL_TEXTURE_3D`) with internal format `GL_R32F` (32-bit float, single channel) or a 3D array of voxels [S3, book][S8, unofficial]. Dimensions are width, height, and depth. Wrap modes are `GL_CLAMP_TO_EDGE` [S8, unofficial].
-*   **Accumulators:** Per-pixel variables for accumulated color $C$ (RGB vector) and accumulated opacity/transparency. Two common formulations exist:
-    1.  **Levoy’s Formulation:** Tracks remaining opacity $d_{in}$ (initially 0) and computes $(1-d_{in})$ for scaling [S2, unofficial].
-    2.  **apE/DVR Formulation:** Tracks remaining opacity $d_{in}$ directly (initially 1), saving subtractions [S2, unofficial].
-*   **Ray Parameters:** Ray origin, normalized ray direction, entry distance $t_0$, and exit distance $t_1$ relative to the volume bounding box [S4, unofficial].
+*   **Volume Data:** Stored as a 3D texture object (`GL_TEXTURE_3D`) or a stack of 2D slices. The internal format is typically `GL_R32F` (32-bit float, single channel) with `GL_LINEAR` filtering for trilinear interpolation [S4, book][S9, unofficial]. Dimensions are width, height, depth. Wrap mode is `GL_CLAMP_TO_EDGE` [S9, unofficial].
+*   **Ray State:** For each pixel, maintain accumulated color $C_{acc}$ (vec3) and accumulated opacity $A_{acc}$ (float), initialized to 0. Alternatively, maintain remaining transparency $T$ initialized to 1.0 [S6, S9, unofficial].
+*   **Transfer Function:** A 1D lookup table or shader function mapping normalized scalar values to RGBA [S9, unofficial].
 
-**Numbered Steps:**
+**Algorithm Steps:**
 
-1.  **Preprocessing (Shading and Classification):** For each voxel in the volume, compute shading (e.g., Phong) and classify the value into color and opacity using a transfer function. This can be done jointly to share gradient calculations [S2, unofficial].
-2.  **Ray Initialization:** For each pixel, transform from image space to object space. Calculate the ray origin and direction. Intersect the ray with the volume bounding box to find entry $t_0$ and exit $t_1$ distances [S2, S4, unofficial].
-3.  **Ray Marching Loop:** Iterate from $t = t_0$ to $t_1$ with a step size $\Delta t$ (or uniform `u_dt`) [S4, unofficial].
-    *   **Sample:** Interpolate the scalar value $v$ from the surrounding 8 voxels at the current position using trilinear interpolation [S5, S6, unofficial].
-    *   **Transfer Function:** Map $v$ to color $c_s$ and opacity $\alpha_s$ using the transfer function [S6, S8, unofficial].
-    *   **Shading (Optional):** If shading is enabled, compute gradients from surrounding voxels to calculate lighting (e.g., Blinn-Phong) [S4, S6, unofficial].
-    *   **Composite:** Update accumulated color and opacity using the front-to-back compositing equations [S2, S6, unofficial].
-    *   **Early Termination:** If accumulated opacity reaches a threshold (e.g., 0.95 or 1.0), break the loop [S4, S6, S8, unofficial].
-4.  **Final Composition:** Composite the result with a background color (typically fully opaque white or black) if using Levoy’s initialization [S2, unofficial].
-
-**Formulas:**
-
-The discrete volume rendering equation for accumulated color $C$ and opacity $A$ is [S3, book]:
-
-$$ C = \sum_{i=0}^{N-1} C_i A_i \prod_{j=0}^{i-1} (1 - A_j) $$
-
-$$ A = 1 - \prod_{i=0}^{N-1} (1 - A_i) $$
-
-Where $C_i$ and $A_i$ are the color and opacity of the $i$-th sample.
-
-**Iterative Update (Levoy’s Formulation):**
-Initialize $C_{in} = 0$, $d_{in} = 0$ [S2, unofficial]. For each sample $s$ with color $C_s$ and opacity $d_s$:
-
-$$ C_{out} = C_{in} + (1 - d_{in}) d_s C_s $$
-$$ d_{out} = d_{in} + (1 - d_{in}) d_s $$
-
-**Iterative Update (apE/DVR Formulation):**
-Initialize $C_{in} = 0$, $d_{in} = 1$ [S2, unofficial]. For each sample $s$ with color $C_s$ and opacity $d_s$:
-
-$$ C_{out} = C_{in} + d_{in} d_s C_s $$
-$$ d_{out} = d_{in} (1 - d_s) $$
+1.  **Ray Initialization:** For each pixel, compute the ray origin $O$ and direction $D$. In parallel orthographic projection, rays originate from image-space pixels with a constant direction perpendicular to the view plane [S3, unofficial]. Intersect the ray with the volume bounding box to find entry $t_0$ and exit $t_1$ distances using the slab method [S5, unofficial]. If $t_0 > t_1$, the ray misses the volume; render background color [S3, unofficial].
+2.  **Clamping:** If the ray origin is inside the volume, clamp the start distance $t_{start} = \max(t_0, 0.0)$ to prevent sampling behind the eye [S5, unofficial]. Add a 0.5 offset to the initial position to center sampling on the voxel grid if using texture coordinates [S5, S7, unofficial].
+3.  **Marching Loop:** Iterate from $t = t_{start}$ to $t_1$ with step size $dt$ (or fixed number of steps $N$) [S5, S12, unofficial].
+    *   **Sampling:** Compute sample position $P = O + D \cdot t$. Sample the volume at $P$ using trilinear interpolation to get scalar value $v$ [S7, S9, unofficial].
+    *   **Classification:** Apply the transfer function to $v$ to get color $c_s$ and opacity $\alpha_s$ [S4, book][S9, unofficial].
+    *   **Compositing:** Update accumulated color and opacity using front-to-back blending. Two common formulations exist:
+        *   **Levoy's Formulation:** Initialize $C_{in} = 0, d_{in} = 0$ (where $d$ is opacity).
+            $$C_{out} = C_{in} + (1 - d_{in}) d_s C_s$$
+            $$d_{out} = d_{in} + (1 - d_{in}) d_s$$
+            [S3, unofficial]
+        *   **Remaining Transparency Formulation (apE/DVR):** Initialize $C_{acc} = 0, T = 1$ (where $T$ is remaining transparency).
+            $$C_{acc} = C_{acc} + T \cdot \alpha_s \cdot c_s$$
+            $$T = T \cdot (1 - \alpha_s)$$
+            [S6, S9, unofficial]
+            *Note: apE/DVR saves two subtractions per step compared to Levoy's by tracking remaining opacity directly [S3, unofficial].*
+    *   **Early Termination:** If $T < \epsilon$ (or $d_{out} > 1 - \epsilon$) for a small threshold $\epsilon$ (e.g., 0.01 or 0.02), break the loop. This ignores light from behind the now-opaque region [S1][S9, unofficial].
+    *   **Shading (Optional):** If shading is enabled, compute the gradient $\nabla v$ from surrounding voxels and apply a lighting model (e.g., Blinn-Phong) to modulate $c_s$ [S5, S7, unofficial].
+4.  **Finalization:** If using Levoy's formulation, composite a fully opaque background color ($d=1$) to normalize the result [S3, unofficial]. If using transparency formulation, the result is $C_{acc}$ with final opacity $1 - T$. Discard pixels where final opacity is negligible (e.g., $< 0.01$) to avoid rendering transparent fragments [S9, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def front_to_back_render(volume_texture, camera_pos, ray_dir, transfer_function, step_size, bounds_min, bounds_max):
-    # 1. Intersect ray with bounding box
-    t0, t1 = intersect_box(camera_pos, ray_dir, bounds_min, bounds_max)
+def front_to_back_render(volume_texture, camera_pos, ray_dir, transfer_function, step_size, max_steps):
+    """
+    Renders a single ray using front-to-back compositing.
     
-    # If no intersection, return background
+    Args:
+        volume_texture: 3D texture object supporting trilinear sampling.
+        camera_pos: vec3, origin of the ray.
+        ray_dir: vec3, normalized direction of the ray.
+        transfer_function: function(val) -> (color: vec3, alpha: float).
+        step_size: float, distance between samples.
+        max_steps: int, maximum number of samples.
+        
+    Returns:
+        (final_color: vec3, final_alpha: float)
+    """
+    # 1. Intersect ray with volume bounding box
+    # Assuming box_min and box_max are known
+    inv_dir = 1.0 / ray_dir
+    t_min = (box_min - camera_pos) * inv_dir
+    t_max = (box_max - camera_pos) * inv_dir
+    t0 = max(min(t_min.x, t_max.x), min(t_min.y, t_max.y), min(t_min.z, t_max.z))
+    t1 = min(max(t_min.x, t_max.x), max(t_min.y, t_max.y), max(t_min.z, t_max.z))
+    
+    # If ray misses volume
     if t0 > t1:
-        return background_color, 0.0
-
-    # Clamp start to 0 to avoid sampling behind eye if inside volume
-    t0 = max(t0, 0.0)
+        return (vec3(0.0), 0.0)
     
-    # 2. Initialize accumulators (Levoy's formulation)
+    # Clamp start to avoid sampling behind eye
+    t_start = max(t0, 0.0)
+    
+    # 2. Initialize accumulators (Remaining Transparency Formulation)
     acc_color = vec3(0.0)
-    remaining_opacity = 0.0
+    remaining_transparency = 1.0
     
     # 3. March along ray
-    t = t0
-    while t < t1:
-        # Sample position
-        pos = camera_pos + ray_dir * t
-        
-        # Check if inside volume bounds (optional optimization)
-        if not is_inside(pos, bounds_min, bounds_max):
+    current_t = t_start
+    for i in range(max_steps):
+        # Check if we've exited the volume
+        if current_t > t1:
             break
             
-        # Sample volume value
-        raw_val = texture(volume_texture, pos).r
-        
-        # Transfer function: map raw value to color and opacity
-        sample_color, sample_alpha = transfer_function(raw_val)
-        
-        # Calculate contribution
-        # (1 - remaining_opacity) is the transparency of the ray so far
-        contribution = (1.0 - remaining_opacity) * sample_alpha * sample_color
-        
-        # Update accumulators
-        acc_color += contribution
-        remaining_opacity += (1.0 - remaining_opacity) * sample_alpha
-        
         # Early termination if fully opaque
-        if remaining_opacity >= 0.99:
+        if remaining_transparency < 0.01:
             break
             
-        # Advance step
-        t += step_size
+        # Sample position
+        sample_pos = camera_pos + ray_dir * current_t
         
-    # 4. Composite with background (Levoy's init requires this)
-    # Background is typically fully opaque (d=1)
-    # Final Color = acc_color + (1 - remaining_opacity) * background_color
-    # Since remaining_opacity tracks accumulated opacity, 
-    # (1 - remaining_opacity) is the transparency left for background.
-    # However, Levoy's formula initializes din=0, so din_out is total opacity.
-    # The background is composited as: C_final = C_acc + (1 - d_acc) * C_bg
-    # Note: In Levoy's code, d_acc is accumulated opacity.
+        # Sample volume (trilinear interpolation)
+        # Note: sample_pos should be in texture coordinates [0,1] or scaled appropriately
+        raw_val = volume_texture.sample(sample_pos).r
+        
+        # Classify: get color and opacity
+        color_sample, alpha_sample = transfer_function(raw_val)
+        
+        # Composite
+        # Contribution = remaining_transparency * sample_alpha * sample_color
+        contribution = remaining_transparency * alpha_sample * color_sample
+        acc_color += contribution
+        
+        # Update remaining transparency
+        remaining_transparency *= (1.0 - alpha_sample)
+        
+        # Advance
+        current_t += step_size
+        
+    # Final alpha is 1 - remaining_transparency
+    final_alpha = 1.0 - remaining_transparency
     
-    final_color = acc_color + (1.0 - remaining_opacity) * vec3(1.0, 1.0, 1.0) # White background
-    
-    return final_color, remaining_opacity
-
-def intersect_box(orig, dir, box_min, box_max):
-    inv_dir = 1.0 / dir
-    tmin = (box_min - orig) * inv_dir
-    tmax = (box_max - orig) * inv_dir
-    t_enter = max(min(tmin.x, tmax.x), min(tmin.y, tmax.y), min(tmin.z, tmax.z))
-    t_exit = min(max(tmin.x, tmax.x), max(tmin.y, tmax.y), max(tmin.z, tmax.z))
-    return t_enter, t_exit
+    return (acc_color, final_alpha)
 ```
 
 **Parameters:**
-*   **Step Size ($\Delta t$):** Typically $1.0$ or $1/128$th the size of the volume [S5, unofficial][S7]. Smaller steps increase accuracy but reduce performance [S3, book].
-*   **Transfer Function:** Maps scalar values to color/opacity. Can be simple (smoothstep) or complex (Gaussian sums, CT-specific presets) [S8, S10, unofficial].
-*   **Bounding Box:** Defined by `box_min` and `box_max` [S4, unofficial].
+*   **Step Size ($dt$):** Inversely proportional to sampling rate. Smaller steps increase accuracy but reduce performance. Typical values depend on volume resolution; e.g., $1/128$th of volume size [S8].
+*   **Early Termination Threshold:** Typically 0.01 to 0.02 for remaining transparency [S9, unofficial].
+*   **Transfer Function:** Maps scalar values to RGBA. Can be simple (e.g., `smoothstep`) or complex (e.g., Gaussian sums for specific tissues like bone or lung) [S9, S11, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Ray Origin Inside Volume:** If the camera is inside the volume, $t_0$ can be negative. Clamp $t_0$ to $0.0$ to prevent sampling behind the eye [S4, unofficial].
-*   **No Intersection:** If the ray does not intersect the volume, bypass sampling and render background color [S2, unofficial].
-*   **Precision/Overflow:** Clamp transparency $T$ to 0 if it drops below 0 to prevent negative values [S5, unofficial]. Clamp accumulated color to 255 if using 8-bit output [S5, unofficial].
-*   **Aliasing:** Low sampling rates cause inaccurate approximation of the optical model [S3, book].
-*   **Slice Continuity:** Input data must consist of consecutive slices; gaps cause interpolation errors [S2, unofficial].
-*   **Voxel Grid Alignment:** Texture coordinates are 0-1, but ray space might be centered. Add a 0.5 offset to initial position to center sampling on the voxel grid [S4, unofficial].
+*   **Aliasing:** Low sampling rates cause inaccurate approximation of the optical model, leading to visual artifacts [S4, book].
+*   **Inside Volume:** If the camera is inside the volume, negative $t$ values must be clamped to 0 to prevent backward sampling [S5, unofficial].
+*   **Precision:** Accumulated color and transparency must be clamped to valid ranges (e.g., 0–255 or 0–1) to prevent overflow/underflow [S6, unofficial].
+*   **Texture Limits:** If volume dimensions exceed `GL_MAX_3D_TEXTURE_SIZE`, upload fails [S9, unofficial].
+*   **Non-consecutive Slices:** Gaps in input data lead to inaccurate interpolation [S3, unofficial].
+*   **Log Transform:** If using logarithmic transfer functions, non-positive inputs cause NaN/Inf [S11, unofficial].
 
 ## Subtopics
 
-### [Front-to-Back Rendering with Dynamic Screen](2637-front-to-back-rendering-with-dynamic-screen.md)
-An algorithm that merges front-to-back traversal of data, use of a dynamic screen data structure, and choice of rotational transformations to produce images quickly.
+### Front-to-Back Rendering with Dynamic Screen
+An algorithm that merges front-to-back traversal with a dynamic screen data structure to produce images quickly [S14, unofficial]. It manipulates only voxels projecting to free areas of the screen, utilizing object and scan-line coherence. Gradient and depth shading are applied, storing depth with each pixel. Implemented by Goldwasser et al. on a special multiprocessor for real-time rotation, scaling, and slice plane transformations on grayscale data [S14, unofficial].
+
+### Front-to-Back Rendering via Volume Rotation
+A technique to achieve front-to-back or back-to-front rendering by rotating the volume perpendicularly to the viewer, allowing a sweep in the desired direction [S15]. Particles are rotated oppositely to remain world-fixed. Block subdivision routines are modified to render blocks in distance order. For perfect back-to-front sorting, separate index buffers per slab are flushed in order. Polygons are output with consistent winding for back-face culling. If the volume must remain aligned, the sweep is performed along the axis most aligned to the viewer. For wide FOV, cubes within slices are cached and sorted by distance [S15].
 
 ## Operating characteristics
 
-*   **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of pixels and $P$ is the number of samples per ray (determined by volume depth and step size).
-*   **Memory Complexity:** $O(V)$ for the volume data, where $V$ is the number of voxels.
-*   **Performance:** Can run at interactive frame rates (e.g., 90Hz at 512x600) with optimized shaders and early termination [S7]. Raycasting provides high quality and allows exploitation of parallel computing [S6, unofficial].
-*   **Strengths:** Physically accurate emission-absorption model; supports early ray termination and space leaping for speedup; high quality compared to splatting [S6, unofficial].
-*   **Limitations:** Computationally expensive for large volumes or small step sizes; sensitive to sampling rate for quality [S3, book]; requires careful handling of transfer functions and shading [S2, unofficial].
-*   **When to Use:** When high-quality visualization of semi-transparent volumes is required, and performance allows for per-pixel ray marching.
-*   **When Not to Use:** For real-time rendering of very large volumes where performance is critical and lower quality approximations (like splatting or exponential approximation) are acceptable.
+*   **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of pixels and $P$ is the average number of samples per ray. Early ray termination reduces $P$ for opaque regions.
+*   **Memory Complexity:** $O(V)$ for the volume data, where $V$ is the number of voxels. Additional memory for image buffers and transfer functions is minimal.
+*   **Performance:** Can achieve real-time frame rates (e.g., 90Hz) on modern GPUs at resolutions like 512×600 using optimized shaders [S8].
+*   **Strengths:** High quality due to accurate integration of the volume rendering integral; supports early ray termination for performance; parallelizable across pixels [S7, unofficial].
+*   **Limitations:** Sensitive to sampling rate (aliasing); requires 3D texture support; performance degrades with large step sizes or highly transparent volumes (no early termination).
+*   **When to Use:** Ideal for direct volume rendering of medical or scientific data where transparency and internal structure visualization are required.
+*   **When Not to Use:** When surface extraction is sufficient (use [Ray Tracing (Binary Objects)](3002-ray-tracing-binary-objects.md) or isosurface methods); when scattering effects are critical (use [Ray Marching Volume Rendering with Henyey-Greenstein Scattering](2545-ray-marching-volume-rendering-with-henyey-greenstein-scatter.md)).
 
 ## Background
 
-Front-to-Back Volume Rendering was introduced by Marc Levoy in his 1990 paper "Display of Images from Three-Dimensional Medical Data" and his 1988 dissertation [S2, unofficial]. It is based on the emission-absorption optical model. The method became a standard in direct volume rendering due to its physical accuracy and flexibility [S3, book]. It is widely used in medical imaging (CT, MRI) and scientific visualization [S12]. Variants like apE/DVR optimized the compositing equations for performance [S2, unofficial].
+Front-to-back volume rendering was pioneered by Marc Levoy in the late 1980s and early 1990s [S3, unofficial]. Levoy's 1990 paper "Display of Images from Three-Dimensional Medical Data Using Texture Mapping on a RISC Workstation" formalized the front-to-back image-order method, which became the standard for direct volume rendering [S3, unofficial]. The method is based on the volume rendering integral, which describes the accumulation of light emission and absorption along a ray [S1][S12, unofficial]. Early implementations used software ray casting on RISC workstations, leveraging parallel orthographic projections and Phong shading [S3, unofficial]. The technique has since been optimized for GPU hardware using fragment shaders and 3D textures, becoming a cornerstone of medical imaging visualization [S4, book][S9, unofficial].
 
 ## Sources
 
-[S1] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)
-[S2] DTIC ADA248167: Distributed Ray Casting for High-Speed Volume Rendering, https://archive.org/details/DTIC_ADA248167, fetched 2026-10-26 (unofficial)
-[S3] Chapter 39. Volume Rendering Techniques | NVIDIA Developer, https://developer.nvidia.com/gpugems/gpugems/part-vi-beyond-triangles/chapter-39-volume-rendering-techniques, fetched 2026-10-26 (book)
-[S4] Show HN: Volume rendering 3D data in Three.js and GLSL, https://github.com/SuboptimalEng/volume-rendering, fetched 2026-10-26 (unofficial)
-[S5] kkhese/Volume-Rendering, https://github.com/kkhese/Volume-Rendering, fetched 2026-10-26 (unofficial)
-[S6] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26 (unofficial)
-[S7] Neural Volumes: Learning Dynamic Renderable Volumes from Images, https://arxiv.org/abs/1906.07751, fetched 2026-10-26
-[S8] wpop/qt-viewer-pro, https://github.com/wpop/qt-viewer-pro, fetched 2026-10-27 (unofficial)
-[S9] hopexn/VolumeRenderingParallel, https://github.com/hopexn/VolumeRenderingParallel, fetched 2026-10-27 (unofficial)
-[S10] overhaul88/Parallel_Volume_Rendering, https://github.com/overhaul88/Parallel_Volume_Rendering, fetched 2026-10-27 (unofficial)
-[S11] PDF Tech-Paper: Volume Rendering Integral - cs.cit.tum.de, https://www.cs.cit.tum.de/fileadmin/w00cfj/cg/2.Persons/Weiss/TechPaper_Volume_Rendering_Integral.pdf, fetched 2026-10-28 (unofficial)
-[S12] PDF A Multidirectional Occlusion Shading Model for Direct Volume Rendering, https://vis.uib.no/wp-content/papercite-data/pdfs/Solteszova-2010-MOS.pdf, fetched 2026-10-29
+[S1] Interactive Volume Rendering with Ray Tracing, https://doi.org/10.2312/egst.20061055, fetched 2026-10-24
+[S2] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)
+[S3] DTIC ADA248167: Distributed Ray Casting for High-Speed Volume Rendering, https://archive.org/details/DTIC_ADA248167, fetched 2026-10-26 (unofficial)
+[S4] Chapter 39. Volume Rendering Techniques | NVIDIA Developer, https://developer.nvidia.com/gpugems/gpugems/part-vi-beyond-triangles/chapter-39-volume-rendering-techniques, fetched 2026-10-26 (book)
+[S5] Show HN: Volume rendering 3D data in Three.js and GLSL, https://github.com/SuboptimalEng/volume-rendering, fetched 2026-10-26 (unofficial)
+[S6] kkhese/Volume-Rendering, https://github.com/kkhese/Volume-Rendering, fetched 2026-10-26 (unofficial)
+[S7] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26 (unofficial)
+[S8] Neural Volumes: Learning Dynamic Renderable Volumes from Images, https://arxiv.org/abs/1906.07751, fetched 2026-10-26
+[S9] wpop/qt-viewer-pro, https://github.com/wpop/qt-viewer-pro, fetched 2026-10-27 (unofficial)
+[S10] hopexn/VolumeRenderingParallel, https://github.com/hopexn/VolumeRenderingParallel, fetched 2026-10-27 (unofficial)
+[S11] overhaul88/Parallel_Volume_Rendering, https://github.com/overhaul88/Parallel_Volume_Rendering, fetched 2026-10-27 (unofficial)
+[S12] PDF Tech-Paper: Volume Rendering Integral - cs.cit.tum.de, https://www.cs.cit.tum.de/fileadmin/w00cfj/cg/2.Persons/Weiss/TechPaper_Volume_Rendering_Integral.pdf, fetched 2026-10-28 (unofficial)
 [S13] GPU Gems ch39, Volume rendering techniques, https://developer.nvidia.com/sites/all/modules/custom/gpugems/books/GPUGems/gpugems_ch39.html, fetched 2026-10-29
+[S14] Volumetric rendering of medical data : applications to stereotactic neurosurgery planning, https://doi.org/10.82308/10070, fetched 2026-10-26 (unofficial)
+[S15] Real-time particle isosurface extraction, https://doi.org/10.1145/1342250.1342256, fetched 2026-11-04

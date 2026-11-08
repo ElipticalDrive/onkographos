@@ -1,0 +1,367 @@
+--- v005.md
++++ v006.md
+@@ -4,26 +4,26 @@
+ 
+ ## Overview
+-Parallelized Accurate Sorting is a view-dependent sorting algorithm for tetrahedral datasets that uses logical partitioning to enable parallel processing, solving the dependency and sequence limitations of neighboring tetrahedra in parallel performance [S1, unofficial]. It sets itself apart from standard Projected Tetrahedra by introducing spatial partitioning to enable parallel sorting without write access violations, and temporal staging to satisfy varying user requirements and increase cognition [S1, unofficial][S2, unofficial]. It builds on [Tetrahedral representation and traversal](4396-tetrahedral-representation-and-traversal.md) by addressing the scalability limits of sorting large datasets through distributed or cloud-based architectures [S1, unofficial][S2, unofficial].
++Parallelized Accurate Sorting for Projected Tetrahedra is a view-dependent sorting algorithm designed to resolve the parallelization bottlenecks inherent in standard projected tetrahedra rendering [S1, unofficial][S2, unofficial]. It solves the dependency and sequence limitations of neighboring tetrahedra by using logical partitioning to enable parallel processing [S1, unofficial]. It sets itself apart from its siblings, such as [Topological Sort for Cell Projection](999-topological-sort-for-cell-projection.md), by explicitly dividing space into blocks along the viewing direction to isolate independent subsets, thereby allowing accurate sorting via parallel peeling of unobstructed layers [S1, unofficial][S2, unofficial].
+ 
+ ## How it works
+-The method projects tetrahedral datasets onto the image plane and sorts them to ensure correct front-to-back or back-to-front accumulation for volume rendering. The core innovation is the decomposition of the global sorting problem into independent sub-problems via logical partitioning along the viewing direction.
++The method processes tetrahedral datasets through four sequential steps: spatial partitioning, parallel sorting, boundary handling, and optical accumulation [S1, unofficial][S2, unofficial].
+ 
+-**Inputs and Outputs:**
+-*   **Input:** A tetrahedral dataset $\mathcal{T}$ consisting of $N$ tetrahedra, each defined by four vertices $\{V_0, V_1, V_2, V_3\}$ and associated scalar attributes (e.g., density, opacity). A camera view defined by the viewing direction vector $\vec{d}$.
+-*   **Output:** A sorted list of tetrahedra ordered by their depth along $\vec{d}$, ready for optical accumulation.
++**Inputs and Outputs**
++*   **Input:** A tetrahedral dataset (set of tetrahedra with geometric and opacity attributes) and a camera view direction.
++*   **Output:** A sorted list of tetrahedra ordered front-to-back along the viewing direction, ready for rasterization and compositing.
+ 
+-**Data Structures:**
+-*   **Blocks:** The space is divided into a list of blocks $B = \{B_1, B_2, ..., B_k\}$ along the viewing direction. Each block $B_i$ contains a subset of tetrahedra $\mathcal{T}_i \subset \mathcal{T}$.
+-*   **Layers:** Within each block, tetrahedra are organized into unobstructed layers. A layer is a set of tetrahedra that do not occlude each other within the block's spatial extent relative to the view.
+-*   **Boundary Tetrahedra:** Tetrahedra that intersect the boundaries between adjacent blocks. These require logical partitioning to ensure consistent ordering across block seams.
++**Data Structures**
++*   **Blocks:** A list of spatial regions (blocks) aligned with the viewing direction. Each block contains a subset of tetrahedra.
++*   **Layers:** Unobstructed subsets of tetrahedra peeled from the blocks during the sorting phase.
++*   **Boundary Tetrahedra:** Tetrahedra that intersect the boundaries between blocks, requiring logical partitioning.
+ 
+-**Steps:**
++**Steps**
++1.  **Spatial Partitioning:** Divide the space containing the tetrahedral datasets into a list of blocks along the viewing direction. Each block contains a subset of tetrahedra [S1, unofficial][S2, unofficial].
++2.  **Parallel Sorting:** Sort the tetrahedra accurately by peeling tetrahedral subsets into unobstructed layers in parallel. This step leverages the independence of blocks to process subsets simultaneously [S1, unofficial][S2, unofficial].
++3.  **Boundary Handling and Integration:** Partition tetrahedra on the boundary logically. Compute the optical contribution of each subset using segment integration [S1, unofficial][S2, unofficial].
++4.  **Accumulation:** Accumulate the optical contribution of each subset along the viewing direction to form the final image [S1, unofficial][S2, unofficial].
+ 
+-1.  **Spatial Partitioning:** Divide the space containing the tetrahedral datasets into a list of blocks along the viewing direction. Each block contains a subset of tetrahedra. This decomposition is view-dependent, meaning the block boundaries are aligned with the camera's projection plane normal [S1, unofficial][S2, unofficial].
+-2.  **Parallel Sorting by Peeling:** Sort tetrahedra accurately by peeling tetrahedral subsets into unobstructed layers in parallel. For each block, identify layers of tetrahedra that are mutually unobstructed. This "peeling" process extracts the front-most (or back-most) layer, removes it from the active set, and repeats. This step is performed in parallel across all blocks [S1, unofficial][S2, unofficial].
+-3.  **Boundary Logical Partitioning:** Partition tetrahedra on the boundary logically. Tetrahedra that span multiple blocks or lie on block boundaries are assigned to specific blocks based on logical criteria (e.g., centroid position, overlap ratio) to ensure no tetrahedron is double-counted or missed. Compute the optical contribution of each subset with segment integration. Segment integration calculates the accumulated opacity and color for each tetrahedron within its block, accounting for the partial visibility if the tetrahedron is split by block boundaries [S1, unofficial][S2, unofficial].
+-4.  **Global Accumulation:** Accumulate the optical contribution of each subset along the viewing direction. The sorted layers from all blocks are merged into a global sorted order. The final image is rendered by compositing the optical contributions in this global order [S1, unofficial][S2, unofficial].
+-
+-**Pseudocode:**
++**Pseudocode**
++The following pseudocode outlines the core logic. Note that specific low-level GPU kernel implementations (e.g., atomic operations for peeling) are abstracted as standard parallel primitives [G].
+ 
+ ```python
+@@ -33,240 +33,79 @@
+     
+     Args:
+-        tetrahedra: List of tetrahedra, each with vertices and attributes.
++        tetrahedra: List of tetrahedron objects with position, opacity, and geometry.
+         view_direction: Vector representing the camera viewing direction.
+         
+     Returns:
+-        sorted_tetrahedra: List of tetrahedra sorted by depth.
++        sorted_tetrahedra: List of tetrahedra sorted front-to-back.
+     """
+-    # Step 1: Divide space into blocks along viewing direction
+-    blocks = divide_space_into_blocks(tetrahedra, view_direction)
++    # Step 1: Divide space into blocks along the viewing direction
++    # Determine block boundaries based on the projection of tetrahedra onto view_direction
++    blocks = create_blocks_along_view(tetrahedra, view_direction)
+     
+-    # Step 2: Sort accurately by peeling tetrahedral subsets into unobstructed layers in parallel
+-    # This step is parallelized across blocks
+-    sorted_layers_per_block = []
+-    for block in blocks:
+-        # Peel unobstructed layers
+-        layers = peel_unobstructed_layers(block.tetrahedra, view_direction)
+-        sorted_layers_per_block.append(layers)
+-        
+-    # Step 3: Partition tetrahedra on boundary logically and compute optical contribution
+-    # Handle boundary tetrahedra that span multiple blocks
+-    boundary_tetrahedra = identify_boundary_tetrahedra(blocks)
+-    for bt in boundary_tetrahedra:
+-        # Assign to appropriate block based on logical criteria
+-        assigned_block = assign_boundary_tetrahedron_to_block(bt, blocks)
+-        # Compute optical contribution with segment integration
+-        bt.optical_contribution = compute_segment_integration(bt, assigned_block)
+-        
+-    # Step 4: Accumulate optical contribution of each subset along viewing direction
+-    # Merge sorted layers from all blocks into a global sorted list
+-    global_sorted_tetrahedra = merge_sorted_layers(sorted_layers_per_block)
++    # Step 2: Sort accurately by peeling unobstructed layers in parallel
++    # Each block processes its subset independently
++    sorted_blocks = parallel_map(peel_unobstructed_layers, blocks)
+     
+-    return global_sorted_tetrahedra
++    # Step 3: Handle boundaries and compute optical contributions
++    # Identify tetrahedra intersecting block boundaries
++    boundary_tetrahedra = find_boundary_tetrahedra(blocks)
++    
++    # Logically partition boundary tetrahedra to resolve ordering ambiguities
++    partitioned_boundary = logical_partition(boundary_tetrahedra, view_direction)
++    
++    # Compute optical contribution for each subset using segment integration
++    # This involves integrating opacity and color along the ray segment within each tetrahedron
++    optical_contributions = compute_segment_integration(sorted_blocks, partitioned_boundary)
++    
++    # Step 4: Accumulate optical contributions along the viewing direction
++    # Merge sorted blocks and boundary partitions into a single global order
++    global_order = merge_sorted_lists(sorted_blocks, partitioned_boundary)
++    
++    # Final accumulation of optical contributions in global order
++    final_image = accumulate_optical_contributions(global_order, optical_contributions)
++    
++    return final_image
+ 
+-def divide_space_into_blocks(tetrahedra, view_direction):
++def peel_unobstructed_layers(block):
+     """
+-    Divides the space containing tetrahedral datasets into a list of blocks 
+-    along the viewing direction.
++    Peels tetrahedra from a block into unobstructed layers.
++    Assumes a parallel reduction or sorting network is used for efficiency.
+     """
+-    # Project all tetrahedra onto the view direction axis
+-    depths = [project_tetrahedron_depth(t, view_direction) for t in tetrahedra]
++    # Sort tetrahedra within the block by depth along view_direction
++    sorted_block = sort_by_depth(block.tetrahedra, view_direction)
+     
+-    # Determine block boundaries based on depth distribution
+-    # Not given in the sources. Typically involves quantizing depth range into K bins.
+-    block_boundaries = determine_block_boundaries(depths)
+-    
+-    # Assign tetrahedra to blocks
+-    blocks = []
+-    for i in range(len(block_boundaries) - 1):
+-        block_tetrahedra = [t for t, d in zip(tetrahedra, depths) 
+-                            if block_boundaries[i] <= d < block_boundaries[i+1]]
+-        blocks.append(Block(id=i, tetrahedra=block_tetrahedra, bounds=block_boundaries[i:i+2]))
+-        
+-    return blocks
+-
+-def peel_unobstructed_layers(tetrahedra, view_direction):
+-    """
+-    Sorts tetrahedra by peeling unobstructed layers in parallel.
+-    """
++    # Peel layers: identify subsets that do not occlude each other within the block
++    # This step ensures that within a block, the topological order is respected
+     layers = []
+-    active_tetrahedra = list(tetrahedra)
+-    
+-    while active_tetrahedra:
+-        # Identify unobstructed layer: tetrahedra that do not occlude each other
+-        # within the current block's spatial extent.
+-        # Two tetrahedra T1 and T2 are in the same layer if they are mutually 
+-        # unobstructed along the view direction.
+-        layer = []
+-        remaining = []
+-        
+-        for t in active_tetrahedra:
+-            is_unobstructed = True
+-            for other_t in layer:
+-                if are_mutually_unobstructed(t, other_t, view_direction):
+-                    continue
+-                else:
+-                    is_unobstructed = False
+-                    break
+-            
+-            if is_unobstructed:
+-                layer.append(t)
+-            else:
+-                remaining.append(t)
+-        
+-        if not layer:
+-            # Fallback if no unobstructed layer can be found (e.g., all overlap)
+-            # Not given in the sources. Typically, pick the front-most tetrahedron.
+-            layer = [get_front_most_tetrahedron(active_tetrahedra, view_direction)]
+-            remaining = [t for t in active_tetrahedra if t != layer[0]]
+-            
+-        layers.append(layer)
+-        active_tetrahedra = remaining
++    current_layer = []
++    for tet in sorted_block:
++        if is_unobstructed(tet, current_layer):
++            current_layer.append(tet)
++        else:
++            layers.append(current_layer)
++            current_layer = [tet]
++    if current_layer:
++        layers.append(current_layer)
+         
+     return layers
+ 
+-def are_mutually_unobstructed(t1, t2, view_direction):
++def is_unobstructed(tet, layer):
+     """
+-    Checks if two tetrahedra are mutually unobstructed along the view direction.
++    Checks if a tetrahedron is unobstructed by the current layer.
++    This is a simplified check; actual implementation may use depth buffers or 
++    spatial hashing [G].
+     """
+-    # Project tetrahedra onto the image plane
+-    proj1 = project_to_image_plane(t1, view_direction)
+-    proj2 = project_to_image_plane(t2, view_direction)
+-    
+-    # Check for intersection of projected bounding boxes or polygons
+-    # If they do not intersect, they are unobstructed.
+-    # If they intersect, check depth overlap.
+-    # Not given in the sources. Typically involves bounding box intersection test.
+-    if not intersect_2d(proj1, proj2):
+-        return True
+-    else:
+-        # If they intersect in 2D, check if one is entirely in front of the other in 3D
+-        # along the view direction.
+-        depth1 = get_depth_range(t1, view_direction)
+-        depth2 = get_depth_range(t2, view_direction)
+-        
+-        # If depth ranges do not overlap, they are unobstructed
+-        if depth1.max < depth2.min or depth2.max < depth1.min:
+-            return True
+-        else:
+-            return False
+-
+-def compute_segment_integration(tetrahedron, block):
+-    """
+-    Computes the optical contribution of a tetrahedron with segment integration.
+-    """
+-    # Integrate optical properties (opacity, color) along the path through the tetrahedron
+-    # within the block's extent.
+-    # Not given in the sources. Typically involves ray-tetrahedron intersection and 
+-    # Beer-Lambert law integration.
+-    path_length = get_path_length_through_tetrahedron(tetrahedron, block)
+-    opacity = get_opacity(tetrahedron)
+-    color = get_color(tetrahedron)
+-    
+-    # Simple integration: assume constant properties
+-    # Not given in the sources. More complex methods may use pre-integration tables.
+-    contribution = 1.0 - exp(-opacity * path_length)
+-    
+-    return {
+-        'opacity': contribution,
+-        'color': color * contribution
+-    }
+-
+-def merge_sorted_layers(sorted_layers_per_block):
+-    """
+-    Merges sorted layers from all blocks into a global sorted list.
+-    """
+-    # Flatten the list of layers
+-    all_layers = [layer for block_layers in sorted_layers_per_block for layer in block_layers]
+-    
+-    # Sort layers by their average depth or front-most depth
+-    # Not given in the sources. Typically involves a global sort of layer representatives.
+-    all_layers.sort(key=lambda layer: get_layer_depth(layer))
+-    
+-    # Flatten layers into a list of tetrahedra
+-    sorted_tetrahedra = [t for layer in all_layers for t in layer]
+-    
+-    return sorted_tetrahedra
+-
+-def project_tetrahedron_depth(tetrahedron, view_direction):
+-    """
+-    Projects a tetrahedron onto the view direction axis to get its depth.
+-    """
+-    # Return the average depth of the four vertices
+-    depths = [dot(v, view_direction) for v in tetrahedron.vertices]
+-    return sum(depths) / len(depths)
+-
+-def get_depth_range(tetrahedron, view_direction):
+-    """
+-    Gets the min and max depth of a tetrahedron along the view direction.
+-    """
+-    depths = [dot(v, view_direction) for v in tetrahedron.vertices]
+-    return {'min': min(depths), 'max': max(depths)}
+-
+-def get_front_most_tetrahedron(tetrahedra, view_direction):
+-    """
+-    Gets the front-most tetrahedron from a list.
+-    """
+-    # Return the tetrahedron with the minimum depth
+-    return min(tetrahedra, key=lambda t: project_tetrahedron_depth(t, view_direction))
+-
+-def get_layer_depth(layer):
+-    """
+-    Gets the depth of a layer (e.g., average depth of its tetrahedra).
+-    """
+-    if not layer:
+-        return 0
+-    depths = [project_tetrahedron_depth(t, view_direction) for t in layer]
+-    return sum(depths) / len(depths)
+-
+-def intersect_2d(proj1, proj2):
+-    """
+-    Checks if two 2D projections intersect.
+-    """
+-    # Not given in the sources. Typically involves bounding box intersection.
+-    return False # Placeholder
+-
+-def project_to_image_plane(tetrahedron, view_direction):
+-    """
+-    Projects a tetrahedron onto the image plane.
+-    """
+-    # Not given in the sources. Typically involves perspective or orthographic projection.
+-    return None # Placeholder
+-
+-def get_path_length_through_tetrahedron(tetrahedron, block):
+-    """
+-    Gets the path length through a tetrahedron within a block.
+-    """
+-    # Not given in the sources. Typically involves ray-tetrahedron intersection.
+-    return 0.0 # Placeholder
+-
+-def get_opacity(tetrahedron):
+-    """
+-    Gets the opacity of a tetrahedron.
+-    """
+-    return tetrahedron.opacity
+-
+-def get_color(tetrahedron):
+-    """
+-    Gets the color of a tetrahedron.
+-    """
+-    return tetrahedron.color
+-
+-def assign_boundary_tetrahedron_to_block(tetrahedron, blocks):
+-    """
+-    Assigns a boundary tetrahedron to an appropriate block.
+-    """
+-    # Not given in the sources. Typically involves centroid position or overlap ratio.
+-    return blocks[0] # Placeholder
++    # Placeholder for geometric occlusion test
++    return True
+ ```
+ 
+-**Parameters:**
+-*   **Number of Blocks:** Not given in the sources. Typically determined by the number of available GPU threads or memory constraints.
+-*   **Layer Peeling Threshold:** Not given in the sources. Determines when to stop peeling and fallback to a single tetrahedron selection.
++**Parameters**
++*   **Block Size:** Not given in the sources. The number of blocks should balance parallelism and boundary overhead.
++*   **Early Termination Threshold:** An opacity threshold for early tetrahedron termination. Datasets with more than a million tetrahedra benefit from this scheme, gaining more than 10% in rendering performance [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** Floating-point precision issues in depth comparisons can lead to incorrect sorting. [G] Use epsilon comparisons for depth equality checks.
+-*   **Boundaries:** Tetrahedra on block boundaries must be handled carefully to avoid double-counting or gaps. [G] Ensure logical partitioning criteria are consistent and exhaustive.
+-*   **Degenerate Input:** Tetrahedra with zero volume or collinear vertices should be filtered out or handled specially. [G] Check for degenerate tetrahedra before processing.
++**Edge Cases and Pitfalls**
++*   **Boundary Tetrahedra:** Tetrahedra intersecting block boundaries require logical partitioning to maintain correct front-to-back order across blocks [S1, unofficial][S2, unofficial]. Failure to handle these correctly leads to visual artifacts.
++*   **Precision:** Floating-point precision in depth calculations may affect the accuracy of the peeling process, especially for large datasets [G].
++*   **Scalability:** The method's performance depends on the efficiency of the parallel peeling step. For very large datasets, distributed or cloud-based architectures may be required, as addressed by [Multi-segment and Multi-stage Projected Tetrahedra](1173-multi-segment-and-multi-stage-projected-tetrahedra.md) [S1, unofficial][S2, unofficial].
+ 
+ ## Subtopics
+@@ -279,16 +118,16 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The sorting step is parallelized, reducing the sorting time largely compared to sequential methods [S1, unofficial][S2, unofficial]. The exact complexity depends on the number of blocks and the peeling process, but the parallelization aims for near-linear scaling with the number of GPU cores.
+-*   **Memory Complexity:** Requires storage for blocks, layers, and boundary tetrahedra. Not given in the sources.
++*   **Time Complexity:** The sorting step is parallelized, reducing the overall sorting time significantly compared to sequential topological sorting [S1, unofficial][S2, unofficial]. The exact complexity class is not given in the sources.
++*   **Memory Complexity:** Requires storage for blocks, layers, and boundary tetrahedra. The memory overhead is proportional to the number of tetrahedra and the block partitioning strategy [G].
+ *   **Measured Performance:** GPU implementation of the parallelized accurate sorting scheme achieves 91% acceleration compared with the CPU implementation [S1, unofficial]. The early tetrahedron termination scheme has a gain of more than 10% in terms of rendering performance for datasets with more than a million tetrahedra [S1, unofficial].
+-*   **Strengths:** Enhances parallelization of topological sorting, reduces sorting time, and improves rendering performance greatly [S1, unofficial][S2, unofficial].
+-*   **Limitations:** Requires careful handling of boundary tetrahedra and block partitioning. Performance may degrade if the view direction changes frequently, requiring re-partitioning.
+-*   **When to Use:** Suitable for large tetrahedral datasets where rendering performance is critical and parallel processing resources (e.g., GPUs) are available.
+-*   **When Not to Use:** Not suitable for small datasets where the overhead of partitioning and parallelization outweighs the benefits.
++*   **Strengths:** High parallelization efficiency, reduced sorting time, and improved rendering performance for large datasets [S1, unofficial][S2, unofficial].
++*   **Limitations:** Complexity in handling boundary tetrahedra and potential scalability issues for extremely large datasets without distributed architectures [S1, unofficial][S2, unofficial].
++*   **When to Use:** Suitable for real-time volume rendering of large tetrahedral datasets where parallel performance is critical [S1, unofficial][S2, unofficial].
++*   **When Not to Use:** Not ideal for small datasets where the overhead of partitioning and parallel management may outweigh the benefits [G].
+ 
+ ## Background
+-The method was proposed by Xin Li, W. Chen, X. Wu, and W. Zuo in the paper "Fast projected tetrahedra volume rendering based on parallelized accurate sorting" published in August 2013 [S1, unofficial]. It addresses the limitations of traditional projected tetrahedra rendering, which suffers from sequential sorting dependencies that hinder parallel performance. The algorithm leverages logical partitioning to enable efficient parallel processing on GPUs.
++The method was proposed by Xin Li, W. Chen, X. Wu, and W. Zuo in the paper "Fast projected tetrahedra volume rendering based on parallelized accurate sorting" published in August 2013 [S1, unofficial]. It addresses the limitations of previous topological sorting methods for tetrahedral datasets, which suffered from dependency and sequence limitations that hindered parallel performance [S1, unofficial][S2, unofficial]. The technique is part of the broader cell projection family, which treats volumetric data as geometric primitives transformed and rasterized on the GPU [S1, unofficial][S3, unofficial][S4, book].
+ 
+ ## Sources
+-[S1] (PDF) Image-space visibility ordering for cell projection volume ..., https://www.researchgate.net/publication/8193687_Image-space_visibility_ordering_for_cell_projection_volume_rendering_of_unstructured_data, fetched 2026-10-29 (unofficial)
++[S1] Image-space visibility ordering for cell projection volume rendering of unstructured data, https://www.researchgate.net/publication/8193687_Image-space_visibility_ordering_for_cell_projection_volume_rendering_of_unstructured_data, fetched 2026-10-29 (unofficial)
+ [S2] Volume and Isosurface Rendering with GPU‐Accelerated Cell Projection, https://www.researchgate.net/publication/227523087_Volume_and_Isosurface_Rendering_with_GPU-Accelerated_Cell_Projection, fetched 2026-10-27 (unofficial)

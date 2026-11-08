@@ -1,0 +1,78 @@
+LUPINE is a GPU over IP bridge allowing GPUs on remote machines to be attached to CPU-only machines. - Stage CUDA/OpenGL interop on the client for remote routes by kevmo314 · Pull Request #1047 · lupinemachines/lupine
+
+Stage CUDA/OpenGL interop on the client for remote routes by kevmo314 · Pull Request #1047 · lupinemachines/lupine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+kevmo314
+commented
+Nov 7, 2026
+Copy link
+Copy Markdown
+Collaborator
+Fixes #1039.
+Problem
+A GL texture or buffer name means something only inside the client's GL context. A server process can't reach it. So plain forwarding can't make cuGraphicsGLRegisterImage work: run on the server with no current GL context, the real driver returns CUDA_ERROR_INVALID_GRAPHICS_CONTEXT, which test_graphics_apis.py also rejects. Until now the call didn't reach codegen at all and fell through to the missing-API path (CUDA_ERROR_NOT_SUPPORTED).
+Change
+Codegen: @remoteclient <helper>. The generated wrapper still routes, and still calls the driver on a local route. On a remote route it returns <helper>(args...) instead of sending an RPC, and no RPC id, server handler, or registration is generated. These use it:
+cuGraphicsGLRegisterImage, cuGraphicsGLRegisterBuffer, cuGLGetDevices_v2 (new)
+the existing cuGraphicsUnregisterResource, SubResourceGetMappedArray, ResourceGetMappedMipmappedArray, ResourceGetMappedPointer_v2, ResourceSetMapFlags_v2, MapResources, UnmapResources. Their RPCs were unreachable, since nothing could ever create a CUgraphicsResource on a server, so they're removed.
+cudaGL.h includes GL/gl.h, which neither the codegen image nor every client build has. So these three declarations come from the annotations, the same way the legacy ABI entry points do (CUDA_GL_FUNCTIONS). cuda_compat.h gets GLuint/GLenum/CUGLDeviceList. The unversioned cuGLGetDevices, cuGraphicsResourceGetMappedPointer and cuGraphicsResourceSetMapFlags names (what cuda-bindings resolves) now map to their _v2 entry points. They were previously missing.
+Client staging (cuda_client_graphics.cpp). A remote registration keeps a CUDA copy on the server:
+Textures get one CUmipmappedArray per layer or cube face, covering the full mip chain of the base level, as the driver does. Buffers get one cuMemAlloc.
+Map uploads the GL contents (glGetTexImage / glGetBufferSubData), skipped for write-discard. Unmap writes CUDA's changes back (glTexSubImage* / glBufferSubData), skipped for read-only. Both copies are ordered on the mapping stream and synchronized.
+Supported: 2D, rectangle, cube map, 3D and 2D-array textures in the 8/16/32-bit normalized, integer and float formats (RGB formats padded to 4 channels, as the driver does), and buffers.
+The application's texture/buffer bindings, PBO bindings and pixel-store state are saved and restored around each transfer.
+Error codes match what the native driver returned for the same calls. No current GL context → INVALID_GRAPHICS_CONTEXT; unknown GL name → INVALID_HANDLE; texture without storage → INVALID_VALUE; and NOT_MAPPED, ALREADY_MAPPED, NOT_MAPPED_AS_ARRAY and NOT_MAPPED_AS_POINTER where the driver returns them.
+GL entry points are resolved at runtime (libOpenGL.so.0 / libGL.so.1, then eglGetProcAddress / glXGetProcAddressARB), so the client doesn't link GL. Any GL implementation works, Mesa included, since nothing needs the GL context to be on the server's GPU.
+The CUDA_PYTHON_SKIP_LIST=test_graphics_apis.py skip is dropped from the integration suite.
+Limitations
+Linux clients only; other platforms return CUDA_ERROR_NOT_SUPPORTED from the staged registration.
+Renderbuffers return CUDA_ERROR_NOT_SUPPORTED.
+cuGraphicsResourceGetMappedMipmappedArray works for 2D/rectangle/3D textures, but returns NOT_SUPPORTED for cube maps and 2D arrays, which are staged a face or layer at a time.
+Each map/unmap copies the whole object through the client, so it costs bandwidth that native interop doesn't.
+Testing
+All runs on a GH200 against a local lupine_driver_server. The client ran under bwrap with the host libcuda.so.1 hidden, so every device was remote, and with a Mesa llvmpipe GL context via Xvfb. That mirrors the CI client container, which has no NVIDIA GPU.
+test_graphics_apis.py (cuda-bindings 13.4.4 tests):
+before: AssertionError: cudaGraphicsGLRegisterImage returned cudaErrorNotSupported, plus LUPINE missing Driver API called: cuGraphicsGLRegisterImage, matching the issue
+after: 3 passed
+Round-trip script (not checked in): checks that GL data reaches CUDA on map and CUDA writes reach GL on unmap. It covers 2D with 3 mip levels (per level, and through the mipmapped array), R32F rectangle, all 6 cube faces, RG16F 3D, RGBA32UI 2D array, buffers, read-only and write-discard flags, restored GL state, and every error case above.
+through Lupine: 60/60
+natively on the real driver with NVIDIA EGL: 54/54. That run skips three cases that crash the native driver: unregistering twice, unregistering while mapped and then again, and unregistering after GetMappedMipmappedArray. The staged path returns the documented error for all three.
+./codegen/run.sh leaves no diff; test/run_unit_tests.sh passes (20/20); clang-format 18 is clean on the changed files.
+I couldn't run the GPU integration lane itself here.
+Stage CUDA/OpenGL interop on the client for remote routes
+…
+f197eb3
+```
+A registered GL object lives in the client's GL context, which no server
+process can reach: forwarded, cuGraphicsGLRegisterImage runs without a
+current GL context and the driver answers INVALID_GRAPHICS_CONTEXT. Remote
+routes now keep a CUDA copy of the object instead. Mapping uploads the GL
+contents into it (unless write-discard) and unmapping writes CUDA's changes
+back (unless read-only), both ordered on the mapping stream.
+
+Codegen gains @remoteclient <helper>: the generated wrapper still calls the
+driver on a local route, but serves a remote route with a client helper and
+generates no RPC. The cuGraphicsGL* registrations, cuGLGetDevices and the
+existing cuGraphics* map/unmap family use it. cudaGL.h needs GL/gl.h, so its
+declarations come from the annotations, like the legacy ABI entry points.
+
+Fixes #1039.
+```
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

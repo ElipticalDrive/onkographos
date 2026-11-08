@@ -1,0 +1,121 @@
+The gap Celerity.Primitives ships the bit-level toolkit — SpanBits, Branchless, VarInt, BitReader / BitWriter — and none of it can answer the one question that makes every other structure spatially useful: how do I map a 2-D coordinate t...
+
+No space-filling-curve primitive: mapping 2-D to 1-D without losing locality has no answer in the BCL · Issue #369 · marius-bughiu/Celerity · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+No space-filling-curve primitive: mapping 2-D to 1-D without losing locality has no answer in the BCL #369
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#373
+Closed
+No space-filling-curve primitive: mapping 2-D to 1-D without losing locality has no answer in the BCL#369
+#373
+Copy link
+Labels
+enhancementNew feature or requestNew feature or request
+Milestone
+2.4.0
+Description
+marius-bughiu
+opened on Aug 15, 2026
+Issue body actions
+The gap
+Celerity.Primitives ships the bit-level toolkit — SpanBits, Branchless, VarInt, BitReader / BitWriter — and none of it can answer the one question that makes every other structure spatially useful:
+how do I map a 2-D coordinate to a single integer so that points close in the plane are close in the ordering?
+Neither can .NET. BitOperations has no bit-interleave. The BCL does expose Bmi2.ParallelBitDeposit / ParallelBitExtract, which computes a Morton code in two instructions — but ships nothing built on it, so a caller who wants the primitive has to know the intrinsic exists, know the magic-number fallback for machines without BMI2, and get the portable path right themselves.
+Why it is load-bearing rather than a bit trick
+A space-filling curve is what lets a one-dimensional structure answer spatially local questions. That matters here specifically, because this library is now full of excellent one-dimensional structures:
+Sort points by Morton code and BTreeSet<T>, SortedSpan or a plain sorted array become cache-coherent spatial containers — the "sorting by x" hand-roll that KdTree (No spatial index: 'which points are near this one' is a linear scan #366) is measured against, but on a curve that bounds both axes instead of one.
+It is the standard packing order for bulk-loading a bounding-volume index.
+Tile and cell identifiers, geohash-style keys, and any scheme that wants a spatial key to survive a sort or a hash-partition.
+Cache-friendly traversal of grids and matrices, where Morton order beats row-major on a blocked sweep.
+Proposal
+MortonCurve and HilbertCurve in Celerity.Primitives, static and allocation-free:
+MortonCurve — interleave / de-interleave. 2-D (uint, uint) ↔ ulong and 3-D (uint, uint, uint) ↔ ulong at reduced precision. Cheap, and the right default when the consumer only needs a locality-preserving order.
+HilbertCurve — the same conversions on the Hilbert order, which has strictly better locality (no long jumps at quadrant boundaries) and is the one that actually matters when the order backs a range query.
+Hardware path via Bmi2 where available with a portable magic-number fallback, selected once behind an IsSupported check the JIT folds — the same shape SimdReductions already uses, so there is one way this library does hardware dispatch rather than two.
+Kill criterion — measured after implementation, not assumed
+A primitive is held to "genuine BCL gap and demonstrably load-bearing". Both, because a bit trick nobody builds on does not belong here:
+The Bmi2 path must beat the portable fallback measurably, or it ships portable-only and the intrinsic is dropped rather than carried for decoration.
+A benchmark must show the curve earning its place: Morton- or Hilbert-ordered iteration over a point set beating unordered iteration on a cache-bound sweep, at a size where the working set exceeds L2.
+If (2) cannot be shown, this is a bit trick and it does not ship.
+Correctness bar
+Round-trip property tests (Decode(Encode(x, y)) == (x, y)) across the full coordinate domain rather than a sample, plus the ordering property each curve actually promises — for Hilbert, that consecutive codes are always adjacent cells, which is the property distinguishing it from Morton and the only reason to pay for it.
+Parity rollout
+Dedicated + property tests, a Celerity.Fuzz target reconciled against a naive bit-by-bit oracle, Native AOT smoke coverage, a benchmark in the extended suite, docs/api/utilities.md, README.md's primitives section, CHANGELOG.md, ROADMAP.md.
+Two parity items do not apply and should be recorded as such rather than silently skipped: there is no web/dev/bench COLLECTIONS entry (this is not a collection, so it has no dashboard card), and none of the cross-collection shared test suites are relevant.
+Activity
+marius-bughiu
+added this to the 2.4.0 milestone on Aug 15, 2026
+marius-bughiu
+added
+enhancementNew feature or requestNew feature or request
+on Aug 15, 2026
+marius-bughiu commented on Aug 15, 2026
+marius-bughiu
+on Aug 15, 2026
+OwnerAuthor
+More actions
+Part of the spatial lane opened by #366 (KdTree, merged in #367):
+KdTree is build-once, so nothing indexes points that move — the per-frame case has no answer #371 — SpatialGrid<TValue>, the mutable/moving-points case KdTree's own docs name as uncovered.
+Nothing indexes extents: 'which rectangles overlap this one' is a linear scan #370 — RTree<TValue> over extents rather than points, whose STR bulk-load is one of the two consumers of this primitive.
+This one is the smallest and has no dependencies, so it is the natural first pick of the three — but it is also the one whose kill criterion is hardest to clear, since a curve that nothing builds on is a bit trick rather than a primitive.
+marius-bughiu commented on Aug 15, 2026
+marius-bughiu
+on Aug 15, 2026
+OwnerAuthor
+More actions
+Implemented in #373. Recording one deviation from this issue's first kill criterion here rather than only in the PR body, so the decision lives with the requirement it departs from.
+The criterion: "The Bmi2 path must beat the portable fallback measurably, or it ships portable-only and the intrinsic is dropped rather than carried for decoration."
+The measurement (SpaceFillingCurveBenchmark, 4096 points/op, Intel Core Ultra 7 265KF):
+portable spread
+PDEP/PEXT
+intrinsic wins by
+Encode2D
+7.57 µs
+1.99 µs
+3.8×
+Decode2D
+7.31 µs
+1.96 µs
+3.7×
+Encode3D
+13.29 µs
+3.15 µs
+4.2×
+Decode3D
+11.72 µs
+2.84 µs
+4.1×
+So the intrinsic clears the bar, and by the letter of the criterion it should ship. It does not, for two reasons the criterion did not anticipate:
+There is no safe way to dispatch on it. Bmi2.IsSupported is true on AMD Zen 1 and Zen 2, where PDEP/PEXT are microcoded and roughly an order of magnitude slower than the ten-instruction portable sequence. .NET exposes no vendor or microarchitecture predicate that separates those parts from the ones where the intrinsic wins, so dispatching on IsSupported alone trades a ~4× win on one vendor for a large regression on another.
+A hardware dispatch cannot be held to this repo's coverage gate. Coverage is enforced at 100% line and branch across the shipping packages, and exactly one arm of an IsSupported branch is reachable on any given runner — so the other ships unexecuted by the suite. [ExcludeFromCodeCoverage] would be excluding the spread arithmetic itself rather than a guard, which is not what that attribute is for here.
+There is also a proportionality argument: the portable spread is already 9.8× the bit-by-bit loop it replaces, at ~1.9 ns per conversion. In the workload this primitive actually exists for, the memory traffic dominates — the locality benchmark moves by 1.15–1.19× over a row-major cell key while the codec is a rounding error in it.
+The intrinsic is kept as its own arm in SpaceFillingCurveBenchmark, so this stays a measurement rather than an assumption and can be reversed cheaply if you disagree — either because you weigh the Intel/Zen 3+ majority more heavily than the Zen 1/2 regression, or because you'd rather relax the coverage gate for a hardware dispatch than forgo the path.
+Flagging it as a maintainer decision rather than closing it silently.
+marius-bughiu
+closed this as completedin #373on Aug 15, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or request
+Projects
+No projects
+Milestone
+2.4.0
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

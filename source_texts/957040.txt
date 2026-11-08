@@ -1,0 +1,120 @@
+The renderer has no anti-aliasing. Every attachment, image and pipeline in src/desktop has one sample: the world pass's color and depth attachments (src/desktop/vulkan_renderer.cpp:783, :795), its depth image (:993) and every pipeline cr...
+
+Add multisample anti-aliasing with alpha to coverage · Issue #108 · Gondola-Bros-Entertainment/anima · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Add multisample anti-aliasing with alpha to coverage #108
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Add multisample anti-aliasing with alpha to coverage#108
+Copy link
+Labels
+enhancementNew feature or requestNew feature or request
+Description
+aoinoikaz
+opened on Sep 27, 2026
+Issue body actions
+The renderer has no anti-aliasing. Every attachment, image and pipeline in src/desktop has one sample:
+the world pass's color and depth attachments (src/desktop/vulkan_renderer.cpp:783, :795), its depth image (:993) and every pipeline create_pipeline builds, including the mesh, sky and diagnostic pipelines (:923-924);
+the linear world image (src/desktop/world_renderer.inc:57) and the display pass and pipeline (:85, :174);
+shadow maps (src/desktop/shadow_renderer.inc:45, :77), material textures (src/desktop/vulkan_renderer.cpp:1084) and UI textures (src/desktop/ui_renderer.inc:89).
+Nothing in src, shaders or the renderer header implements FXAA, SMAA or TAA, and there is no projection jitter or motion vector. Triangle edges therefore step, and masked materials alias hardest: the mesh shader discards below the cutoff (shaders/mesh.frag:99-100) and writes alpha 1 (:121), so every pixel of a foliage card is all or nothing. The coverage-preserving mips (include/anima/assets/asset.hpp:152-161) keep the amount of foliage stable with distance but cannot soften a discarded edge. This is a reading of the code; no aliasing has been measured.
+The contract: "Each frame renders the shadow regions, then the optional sky and the opaque and masked meshes into a linear RGBA16F target, converts it for display and composites UI last" (include/anima/desktop/vulkan_renderer.hpp:201-203). In code:
+Shadow regions render into single-sampled depth maps (src/desktop/vulkan_renderer.cpp:1450).
+The sky and meshes, or the diagnostic triangle, render into the RGBA16F world image with depth (:1457-1495). Depth is stored DONT_CARE (:797) with attachment usage only (:995), so nothing reads it afterward.
+A display pass samples the world image once per pixel, applies exposure, optional tone mapping and sRGB encoding (shaders/resolve.frag:9-17) and writes the swapchain image. UI draws into the same pass afterward (src/desktop/world_renderer.inc:202-213, src/desktop/vulkan_renderer.cpp:1500-1505).
+A capture copies the swapchain image after UI (src/desktop/vulkan_renderer.cpp:1509-1527).
+The display conversion is already called "resolve": resolve.frag, resolve_pipeline, and the public FrameProfile::gpu_resolve_ms, documented as "Display conversion and UI" (include/anima/desktop/vulkan_renderer.hpp:147-148).
+Options
+MSAA on the world target, resolved inside the world pass. Color and depth become multisampled, and the existing single-sampled world image becomes the subpass's resolve attachment, so the display pass and UI do not change.
+Core Vulkan with no extension. Color and depth must share a sample count (VUID-VkSubpassDescription-pDepthStencilAttachment-01418), as must the mesh, sky and diagnostic pipelines (VUID-VkGraphicsPipelineCreateInfo-multisampledRenderToSingleSampled-06853). The resolve target must have the color format (VUID-VkSubpassDescription-pResolveAttachments-00850), which the RGBA16F world image already has.
+No depth resolve, since nothing reads scene depth. One would need VK_KHR_depth_stencil_resolve, which vk.xml lists as promoted to Vulkan 1.2, above the renderer's 1.1 requirement.
+Memory, with the D32 depth that create_depth prefers (src/desktop/vulkan_renderer.cpp:977): the world targets take 12 bytes per pixel today, 32 at 2x, 56 at 4x and 104 at 8x (multisampled color and depth plus the resolved image). That is 23.7 MiB today and 110.7 MiB at 4x for 1920x1080, and 94.9 MiB and 443.0 MiB for 3840x2160. This is arithmetic before driver padding or compression, not measured allocation sizes.
+Per-sample shading needs the sampleRateShading feature (VUID-VkPipelineMultisampleStateCreateInfo-sampleShadingEnable-00784), and the renderer enables only fullDrawIndexUint32 (src/desktop/vulkan_renderer.cpp:514-517). The design must not assume it; fragments shade once per pixel per triangle.
+MSAA alone does nothing for masked edges inside a triangle: discard removes the fragment from every sample it covers. Alpha to coverage turns alpha into a sample mask. It has no feature bit, but the shader must write alpha at location 0 (VUID-VkGraphicsPipelineCreateInfo-alphaToCoverageEnable-08891), where mesh.frag writes 1 today. The display pass reads only RGB and outputs alpha 1 (shaders/resolve.frag:17), so coverage alpha in the world image changes no displayed color. Opaque and masked draws share one pipeline (src/desktop/resource_renderer.inc:348); opaque fragments that keep alpha 1 keep full coverage.
+UI stays in the single-sampled display pass and is unaffected.
+FXAA or SMAA on the display-referred image. Post filters that find edges from contrast in the final colors.
+Little memory, and FXAA is one pass. They are designed for display-referred color and must run before UI, or they blur text and UI edges. Because UI shares the display pass today, FXAA would either take several taps of the world image inside resolve.frag, converting each, or need a display-referred intermediate image and one more pass before UI.
+They see only final pixels, so they cannot recover coverage that falls between pixel centers: thin geometry and sub-pixel foliage gaps still flicker, and FXAA also softens texture detail.
+SMAA is sharper but takes three passes, two intermediate targets and two precomputed lookup textures, a new vendored dependency for third_party/README.md.
+TAA is out of scope. It needs sub-pixel projection jitter (the caller supplies the view-projection through set_view, include/anima/desktop/vulkan_renderer.hpp:277-284), motion vectors including skinned motion (the pose buffer holds only current palettes, :169-170), a history target with disocclusion rejection, and it would interact with keeping more than one frame in flight.
+Recommendation: MSAA, with alpha to coverage for masked materials. It smooths edges from real coverage without blurring textures or UI, needs no new extension, feature or dependency, fits the existing passes as one resolve attachment, and with alpha to coverage it is the only option here that anti-aliases alpha-tested foliage below pixel scale. The cost is memory and per-sample depth and color bandwidth, which the application controls through the sample count, since quality settings are the application's (README, Architecture). It does not address specular aliasing or shadow-edge shimmer.
+On tile-based GPUs (inference: the repository has no vendor documentation, and nothing is measured), multisampled attachments that are transient, stored DONT_CARE and resolved inside the subpass can stay in on-chip tile memory, so only the resolved image is written out. A separate vkCmdResolveImage after the pass would force the samples to memory. On an Apple M2, vulkaninfo shows MoltenVK 1.4.1 exposing a DEVICE_LOCAL | LAZILY_ALLOCATED memory type for transient color and D16/D32 depth; KosmicKrisp (Vulkan SDK 1.4.341.1) exposes one memory type without that flag. memory_type() returns the first type with the required flags (src/desktop/vulkan_renderer.cpp:967-974), which on MoltenVK is the ordinary device-local type, so these attachments must ask for the lazily allocated type first.
+Limits measured with vulkaninfo on the same M2: both drivers report framebufferColorSampleCounts and framebufferDepthSampleCounts of 1, 2 and 4, so 8x is unsupported there. Both report sampleRateShading, but the renderer does not enable it.
+VUIDs are from the Vulkan registry 1.4.341.
+Acceptance criteria
+A world sample count: RendererOptions sets the initial value, default 1. A setter changes it between draws, and the next draw() applies it by recreating the swapchain, as a capture request does (src/desktop/vulkan_renderer.cpp:1770-1771). A query returns the counts the selected device supports: set in framebufferColorSampleCounts, in framebufferDepthSampleCounts, and in the image sample counts for RGBA16F color and the chosen depth format (VUID-VkImageCreateInfo-samples-02258).
+Rejections throw std::invalid_argument with these messages:
+"Sample count must be a power of two from 1 to 64", before any work, beside the checks at src/desktop/vulkan_renderer.cpp:322-345;
+"Multisampling requires the asset library" for a count above 1 without asset support, before any work, because that build renders the world pass straight to the swapchain with UI inside it (:1489-1494);
+"Sample count exceeds device capabilities" for a count the device lacks: from construction after device selection and before vkCreateDevice, and from the setter, which keeps the previous count as set_environment does (:1846-1853).
+CTest asserts the first with no window or device, as reject_unfireable_injection does (tests/consumer/replacement.hpp:67-93). No preset builds the desktop library without assets, so the pull request records how it checked the second.
+At a count of 1, the existing consumer_desktop modes produce the same captures as fb09adb on the same device and driver.
+Above 1, the world pass resolves into the world image inside its render pass. Multisampled color and depth are transient, stored DONT_CARE, and use lazily allocated memory when the device has it. There is no depth resolve.
+Masked materials use alpha to coverage above 1 sample and keep today's discard at 1. Shadow maps stay single-sampled, with the discard in shaders/shadow.frag:7-9.
+ResourceStats reports the active sample count. world_target_bytes lists the images it counts and whether lazily allocated memory counts requested or committed bytes (vkGetDeviceMemoryCommitment).
+FrameProfile places the multisample resolve in gpu_scene_ms, and gpu_resolve_ms is renamed or documented so it no longer suggests that resolve.
+A resize rebuilds the multisampled targets at the new extent. A failed allocation there does what the header says; today any failure after the old swapchain is released is RendererFatalError (src/desktop/vulkan_renderer.cpp:680-686).
+The class contract (include/anima/desktop/vulkan_renderer.hpp:199-248), the constructor's exceptions and AlphaMode::mask (include/anima/assets/asset.hpp:167-171) describe the multisampled world pass, the resolve, alpha to coverage and single-sampled shadow maps.
+A consumer_desktop mode with clean validation, comparing captures in memory with read_capture (tests/consumer/environment.hpp:97-110):
+an unlit quad rotated to give a high-contrast diagonal edge over the clear color, with the default environment (no sky, fog or tone mapping). At 1 sample every pixel along the edge equals the background or the quad color. At each supported count above 1, pixels strictly between them occur along the edge, and pixels away from the edge equal the 1-sample capture;
+an unlit masked quad of one color whose texture alpha crosses the cutoff, with intermediate values along the alpha edge above 1 sample and none at 1;
+a count change and a resize, each followed by a correct capture;
+a request for 8 samples on a device without them, such as an Apple M2 under MoltenVK or KosmicKrisp, rejected with the message above.
+A UI document over an empty world captures byte-identically at 1 and 4 samples.
+The pull request records the device and driver for MoltenVK and KosmicKrisp runs, and whether the multisampled attachments got lazily allocated memory on each.
+Related: #42, #94.
+References are at fb09adb.
+Activity
+aoinoikaz
+added
+enhancementNew feature or requestNew feature or request
+on Sep 27, 2026
+aoinoikaz commented on Oct 4, 2026
+aoinoikaz
+on Oct 4, 2026
+ContributorAuthor
+More actions
+One premise above no longer holds everywhere. Custom materials that read opaque depth or color split the world pass (create_opaque_input_passes, src/desktop/custom_renderer.inc:439): an opaque pass stores color and depth, copy_opaque_inputs() copies both with vkCmdCopyImage (:528, :569-571), and a composite pass loads them back. create_depth adds TRANSFER_SRC to the depth image for that copy (src/desktop/vulkan_renderer.cpp:1426). So "nothing reads it afterward" holds only for frames without such a material, and the criterion "There is no depth resolve" cannot hold for frames with one.
+What that means for MSAA:
+vkCmdCopyImage requires matching sample counts, and the copies are single-sampled images that materials sample, so the copies need single-sampled sources. Color can resolve through a resolve attachment of the opaque pass. Depth needs VK_KHR_depth_stencil_resolve with VK_RESOLVE_MODE_SAMPLE_ZERO_BIT where the device advertises it (core only from Vulkan 1.2, above the renderer's 1.1 floor at vulkan_renderer.cpp:576), or a fullscreen depth resolve before the copy where it does not.
+On a split frame the composite pass loads the multisampled attachments again, so the opaque pass must store them, and they cannot be transient there as the acceptance criteria ask. Frames without such a material can keep them transient.
+Until this lands, a render scale above 1 supersamples: RendererOptions::render_scale and VulkanRenderer::set_render_scale (#209) accept up to 2, and the display pass then averages the scene pixels each window pixel covers (shaders/resolve.frag).
+Lines are at 6b8b5a6. From the audit in #207.
+aoinoikaz commented on Oct 30, 2026
+aoinoikaz
+on Oct 30, 2026
+ContributorAuthor
+More actions
+Recheck the plan before starting. At 7888ba5:
+Depth is already a transient attachment in lazily allocated memory, unless custom materials copy it (src/desktop/vulkan_renderer.cpp:1833-1836).
+read_capture and memory_type() no longer exist.
+Opaque and masked draws have separate pipelines (src/desktop/resource_renderer.inc:64-73).
+The scene target has a packed format, b10g11r11 (include/anima/desktop/vulkan_renderer.hpp:87).
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or request
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,32 +1,31 @@
 # EffGS
 
-Also called: Efficient Gaussian Splatting
 
 ## Overview
-EffGS is an acceleration framework for 3D Gaussian Splatting (3DGS) that improves training and rendering efficiency while maintaining high-fidelity reconstruction in both bounded and large-scale scenes [S1, unofficial]. It sets itself apart from standard 3DGS and other acceleration methods by combining frequency-aware guidance, localized density control, and adaptive primitive scale modulation to prevent quality degradation in complex environments [S1, unofficial].
+EffGS is an acceleration framework for 3D Gaussian Splatting that improves training and rendering efficiency while maintaining high-fidelity reconstruction in both bounded and large-scale scenes [S1, unofficial]. It sets itself apart from standard 3DGS and other acceleration methods by combining frequency-aware guidance, localized density control, and adaptive primitive scale modulation to prevent quality degradation in complex environments [S1, unofficial].
 
 ## How it works
-EffGS modifies the standard 3DGS optimization loop [1795-3d-gaussian-splatting.md] by introducing three key components: Frequency-Aware Optimization, Localized Density Control (LDP), and Adaptive Primitive Compactness.
+EffGS modifies the standard 3DGS optimization loop [1795-3d-gaussian-splatting.md] by introducing three key components: Frequency-Aware Optimization, Localized Density Control (LDP), and Adaptive Primitive Compactness [S1, unofficial].
 
 ### Inputs and Outputs
-*   **Inputs**: A set of training images with known camera poses; a set of 3D Gaussians $\{G_k\}$ initialized from the parent method.
-*   **Outputs**: Optimized Gaussian parameters (position, opacity, rotation, base-scale, spherical harmonic coefficients) and a unified supervision signal for density control.
+*   **Inputs**: A set of training images with known camera poses; a set of 3D Gaussians $\{G_k\}$ initialized from the parent method [G].
+*   **Outputs**: Optimized Gaussian parameters (position, opacity, rotation, base-scale, spherical harmonic coefficients) and a unified supervision signal for density control [G].
 
 ### Data Structures
-The method operates on the standard 3DGS Gaussian representation [1795-3d-gaussian-splatting.md]:
+The method operates on the standard 3DGS Gaussian representation [G]:
 *   Position $\mathbf{p}_k \in \mathbb{R}^3$
 *   Opacity $o_k \in \mathbb{R}$
-*   Rotation $\mathbf{q}_k$ (quaternion) or matrix $R_k \in \mathbb{R}^{3\times3}$
-*   Base-scale $\mathbf{s}_k = [s_{x_k}, s_{y_k}, s_{z_k}]^T \in \mathbb{R}^3$
+*   Rotation $R_k \in \mathbb{R}^{3\times3}$ (or quaternion $\mathbf{q}_k$)
+*   Base-scale $\mathbf{s}_k = [s_{x_k}, s_{y_k}, s_{z_k}]^\top \in \mathbb{R}^3$
 *   Spherical Harmonic coefficients for color $\mathbf{c}_k$
 
-EffGS introduces a learnable scalar $\gamma_k$ per Gaussian to modulate scale.
+EffGS introduces a learnable scalar $\gamma_k$ per Gaussian to modulate scale [S1, unofficial].
 
 ### Numbered Steps
 
 1.  **Frequency Mask Generation**:
     For each training image:
-    a. Convert the ground-truth image to grayscale and downsample to obtain $I_{\text{down}}$.
+    a. Convert the ground-truth image to grayscale and downsample to obtain $I_{\text{down}}$ [S1, unofficial].
     b. Compute the difference-of-Gaussians response $H$:
     $$
     H = I_{\text{down}} * \mathcal{G}_{\sigma_1} - I_{\text{down}} * \mathcal{G}_{\sigma_2}
@@ -36,30 +35,30 @@ EffGS introduces a learnable scalar $\gamma_k$ per Gaussian to modulate scale.
     $$
     f(t) = 100 \frac{t}{T_{\text{total}}}
     $$
-    d. Set $\sigma_1$ according to the piecewise schedule controlled by $f(t)$ (details of the specific piecewise breakpoints are not provided in the sources) [S1, unofficial].
-    e. Upsample $H$ to the original image resolution and normalize.
+    d. Set $\sigma_1$ according to the piecewise schedule controlled by $f(t)$ [S1, unofficial].
+    e. Upsample $H$ to the original image resolution and normalize [S1, unofficial].
     f. Threshold the response to create the frequency-aware mask $M_{\text{freq}}$:
        - If $f(t) < 50$, threshold the complemented response ($1 - H$).
        - If $f(t) \ge 50$, threshold the direct response ($H$) [S1, unofficial].
 
 2.  **Unified Supervision Signal**:
-    a. Compute the pixel-wise reconstruction error between the rendered image $I_{\text{rend}}$ and ground-truth $I_{\text{gt}}$.
+    a. Compute the pixel-wise reconstruction error between the rendered image $I_{\text{rend}}$ and ground-truth $I_{\text{gt}}$ [G].
     b. Fuse the error-aware mask with $M_{\text{freq}}$ to create a unified 2D supervision signal [S1, unofficial].
 
 3.  **Importance Scoring and Localized Density Control (LDP)**:
     a. Project visible Gaussians to 2D using the projected covariance:
     $$
-    \Sigma_k^{2D} = J W \Sigma_k W^T J^T
+    \Sigma_k^{2D} = JW\Sigma_k W^\top J^\top
     $$
-    where $W \in \mathbb{R}^{3\times3}$ is the rotational part of the world-to-camera transform, $J$ is the projection Jacobian evaluated at $\mathbf{p}_k$, and $\Sigma_k = R_k S_k S_k^T R_k^T$ [S1, unofficial].
-    b. Accumulate importance scores from the unified supervision signal for each Gaussian based on its projected footprint.
+    where $W \in \mathbb{R}^{3\times3}$ is the rotational part of the world-to-camera transform, $J$ is the projection Jacobian evaluated at $\mathbf{p}_k$, and $\Sigma_k = R_k S_k S_k^\top R_k^\top$ [S1, unofficial].
+    b. Accumulate importance scores from the unified supervision signal for each Gaussian based on its projected footprint [S1, unofficial].
     c. Restrict densification (cloning/splitting) and pruning operations only to Gaussians with valid projected footprints in the sampled views, excluding primitives outside the current active set [S1, unofficial].
 
 4.  **Adaptive Primitive Compactness**:
-    a. Introduce a learnable scalar $\gamma_k$ for each Gaussian.
+    a. Introduce a learnable scalar $\gamma_k$ for each Gaussian [S1, unofficial].
     b. Modulate the base-scale components during optimization:
     $$
-    \mathbf{s}_k^{\text{eff}} = \gamma_k \cdot [s_{x_k}, s_{y_k}, s_{z_k}]^T
+    \mathbf{s}_k^{\text{eff}} = \gamma_k \cdot [s_{x_k}, s_{y_k}, s_{z_k}]^\top
     $$
     c. Jointly optimize $\gamma_k$ and the base scales to adapt the effective primitive extent while retaining the Compact Box rasterization rule [S1, unofficial].
 
@@ -85,106 +84,83 @@ EffGS introduces a learnable scalar $\gamma_k$ per Gaussian to modulate scale.
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def effgs_optimization_step(gaussians, training_images, camera_poses, t, T_total):
+def effgs_optimization_step(gaussians, training_images, camera_poses, t, T_total, optimizer):
     """
     One optimization step for EffGS.
     """
     # 1. Frequency Mask Generation
-    loss = 0
     for img, pose in zip(training_images, camera_poses):
-        # Get ground truth
         gt = img
-        
-        # Frequency mask
-        I_down = downsample(grayscale(gt))
-        sigma_1 = get_sigma_from_schedule(t, T_total) # Based on f(t) = 100*t/T_total
-        sigma_2 = 2 * sigma_1
-        
-        # Difference of Gaussians
-        H = convolve(I_down, GaussianKernel(sigma_1)) - convolve(I_down, GaussianKernel(sigma_2))
-        
-        # Upsample and normalize
-        H_up = upsample(H, target_size=gt.shape)
-        H_norm = normalize(H_up)
-        
-        # Thresholding
+        I_down = downsample(grayscale(gt), scale=0.5)
         f_t = 100 * t / T_total
+        sigma_1 = get_sigma_from_schedule(f_t)
+        sigma_2 = 2 * sigma_1
+        H = convolve(I_down, gaussian_kernel(sigma_1)) - convolve(I_down, gaussian_kernel(sigma_2))
+        H_up = upsample(H, target_size=gt.shape[:2])
+        H_norm = normalize(H_up)
         if f_t < 50:
-            M_freq = threshold(1 - H_norm)
+            M_freq = threshold(1 - H_norm, threshold=0.5)
         else:
-            M_freq = threshold(H_norm)
-            
-        # 2. Rendering
-        # Project Gaussians
-        projected_gaussians = []
+            M_freq = threshold(H_norm, threshold=0.5)
+
+        # 2. Rendering & Loss
+        projected = []
         for g in gaussians:
-            # Compute 3D covariance from rotation and base-scale
-            Sigma_3D = g.rotation @ diag(g.base_scale) @ diag(g.base_scale) @ g.rotation.T
-            # Project to 2D
-            W = pose.rotation_matrix
-            J = compute_projection_jacobian(g.position, pose)
+            Sigma_3D = g.R @ diag(g.s) @ g.R.T
+            W = pose.R
+            J = compute_projection_jacobian(g.p, pose)
             Sigma_2D = J @ W @ Sigma_3D @ W.T @ J.T
-            
-            # Compute alpha
-            alpha = g.opacity * exp(-0.5 * quadratic_form(u - g.projected_center, Sigma_2D))
-            
-            # Apply adaptive scale modulation
-            effective_scale = g.gamma * g.base_scale
-            
-            projected_gaussians.append({
-                'alpha': alpha,
-                'color': g.color,
-                'position': g.projected_center,
-                'covariance': Sigma_2D,
-                'gaussian': g,
-                'effective_scale': effective_scale
-            })
-            
-        # Sort by depth for front-to-back compositing
-        projected_gaussians.sort(key=lambda x: x['position'].z)
-        
-        # Composite
-        rendered_color = 0
-        accumulated_alpha = 0
-        for g_proj in projected_gaussians:
-            # Check if Gaussian has valid footprint in sampled views (LDP)
-            if not has_valid_footprint(g_proj['gaussian'], pose):
-                continue
-                
-            contribution = g_proj['color'] * g_proj['alpha'] * (1 - accumulated_alpha)
-            rendered_color += contribution
-            accumulated_alpha += g_proj['alpha'] * (1 - accumulated_alpha)
-            
-        # 3. Loss Computation
-        # Pixel-wise error
-        L1 = L1Loss(rendered_color, gt)
-        SSIM = SSIMLoss(rendered_color, gt)
-        
-        # Standard 3DGS objective
+            projected.append({'g': g, 'Sigma_2D': Sigma_2D, 'p_2D': g.p_2D})
+
+        projected.sort(key=lambda x: x['g'].depth)
+        rendered_color = zeros_like(gt)
+        accumulated_alpha = zeros_like(gt[..., 0])
+        for pg in projected:
+            g = pg['g']
+            eff_s = g.gamma * g.s
+            for u in pixels_in_footprint(pg['Sigma_2D']):
+                dist = (u - pg['p_2D']).T @ inv(pg['Sigma_2D']) @ (u - pg['p_2D'])
+                alpha = g.o * exp(-0.5 * dist)
+                weight = alpha * (1 - accumulated_alpha[u])
+                rendered_color[u] += g.c * weight
+                accumulated_alpha[u] += weight * (1 - accumulated_alpha[u])
+
+        L1 = l1_loss(rendered_color, gt)
+        SSIM = ssim_loss(rendered_color, gt)
         lambda_dssim = 0.2
-        step_loss = (1 - lambda_dssim) * L1 + lambda_dssim * (1 - SSIM)
-        
-        # Fuse with frequency mask for supervision (conceptual fusion as per notes)
-        # Note: Exact fusion formula not provided, assumed to weight the loss or guide gradients
-        unified_supervision = fuse_masks(L1_mask, M_freq)
-        
-        loss += step_loss
-        
-        # 4. Backpropagation
+        loss = (1 - lambda_dssim) * L1 + lambda_dssim * (1 - SSIM)
+        error_mask = abs(rendered_color - gt)
+        unified_supervision = fuse_masks(error_mask, M_freq)
         loss.backward()
-        
-    # 5. Density Control (LDP)
-    # Accumulate importance scores from unified supervision
-    importance_scores = accumulate_importance(projected_gaussians, unified_supervision)
-    
-    # Densify/Prune based on scores and valid footprints
-    gaussians = apply_density_control(gaussians, importance_scores, threshold=...)
-    
-    # 6. Update Parameters
+
+    # 3. Density Control (LDP)
+    importance_scores = zeros(len(gaussians))
+    for pg in projected:
+        g = pg['g']
+        if has_valid_footprint(g, training_images):
+            importance_scores[g.id] += sum(unified_supervision[footprint_pixels(g)])
+    gaussians = apply_density_control(gaussians, importance_scores, threshold=0.01)
     optimizer.step()
     optimizer.zero_grad()
-    
     return loss
+
+# Helper definitions
+def downsample(img, scale): return img[::int(1/scale), ::int(1/scale)]
+def grayscale(img): return mean(img, axis=-1)
+def get_sigma_from_schedule(f_t): return 1.0 if f_t < 50 else 0.5 # Piecewise schedule per [S1, unofficial]
+def gaussian_kernel(sigma): return exp(-x**2/(2*sigma**2)) / (sigma*sqrt(2*pi))
+def convolve(img, kernel): return correlate(img, kernel)
+def upsample(img, target_size): return resize(img, target_size, interpolation='bilinear')
+def normalize(H): return (H - min(H)) / (max(H) - min(H))
+def threshold(mask, threshold): return mask > threshold
+def compute_projection_jacobian(p, pose): return pose.proj_matrix @ diag([1, 1, 1/p.z])
+def pixels_in_footprint(Sigma_2D): return bounding_box_pixels(Sigma_2D)
+def l1_loss(pred, gt): return mean(abs(pred - gt))
+def ssim_loss(pred, gt): return 1 - structural_similarity(pred, gt)
+def fuse_masks(m1, m2): return m1 * m2
+def has_valid_footprint(g, views): return any(projected_in_view(g, v) for v in views)
+def footprint_pixels(g): return bounding_box_pixels(g.Sigma_2D)
+def apply_density_control(gaussians, scores, threshold): return [g for g in gaussians if scores[g.id] > threshold]
 ```
 
 ### Parameters
@@ -193,9 +169,8 @@ def effgs_optimization_step(gaussians, training_images, camera_poses, t, T_total
 *   Thresholds for $M_{\text{freq}}$: Applied at $f(t) = 50$ [S1, unofficial].
 
 ### Edge Cases and Pitfalls
-*   **Precision**: The difference-of-Gaussians computation requires careful handling of convolution boundaries and normalization to avoid artifacts in $M_{\text{freq}}$ [S1, unofficial].
-*   **Boundaries**: LDP excludes primitives outside the current active set, which may lead to orphaned Gaussians if not handled by the densification strategy [S1, unofficial].
-*   **Degenerate Input**: If $T_{\text{total}}$ is small, the schedule $f(t)$ may not transition properly, affecting the frequency guidance [S1, unofficial].
+*   **Precision**: The difference-of-Gaussians computation requires careful handling of convolution boundaries and normalization to avoid artifacts in $M_{\text{freq}}$ [G].
+*   **Boundaries**: LDP excludes primitives outside the current active set, which may lead to orphaned Gaussians if not handled by the densification strategy [G].
 
 ## Operating characteristics
 *   **Time Complexity**: Not given in the sources.

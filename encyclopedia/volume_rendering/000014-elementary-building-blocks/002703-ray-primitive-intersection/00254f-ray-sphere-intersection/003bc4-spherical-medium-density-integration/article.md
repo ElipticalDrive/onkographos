@@ -1,0 +1,116 @@
+# Spherical Medium Density Integration
+
+Also called: Quadratic Spherical Density, Spherical Density Integration
+
+## Overview
+Spherical Medium Density Integration computes the optical depth (integrated density) along a ray segment passing through a sphere where the density decreases quadratically from the center to the edge. It solves the problem of analytically integrating a spatially varying density function within a spherical volume, avoiding numerical sampling. It differs from its parent [Ray-Sphere Intersection](3539-ray-sphere-intersection.md) by providing the accumulated density value rather than just geometric hit points, and from siblings like [Ray-Splat Intersection](7123-ray-splat-intersection-sphere-approximation.md) by using an exact quadratic falloff rather than a Gaussian or constant approximation.
+
+## How it works
+**Inputs:**
+- Ray origin $\mathbf{c} \in \mathbb{R}^3$.
+- Ray direction $\boldsymbol{\omega} \in \mathbb{R}^3$ (normalized).
+- Ray maximum distance $D > 0$.
+- Sphere center $\mathbf{o} \in \mathbb{R}^3$.
+- Sphere radius $R > 0$.
+- Density factor $\varrho' \ge 0$.
+
+**Outputs:**
+- Integrated density (optical depth) $P(\mathbf{x}_{2D})$.
+
+**Data Structures:**
+No complex structures are required. The method relies on scalar arithmetic and vector dot products.
+
+**Steps:**
+1. **Compute Intersection Parameters:**
+   Calculate the coefficients for the quadratic ray-sphere intersection equation:
+   $$ B = \langle \boldsymbol{\omega}, \mathbf{o} - \mathbf{c} \rangle $$
+   $$ C = \|\mathbf{o} - \mathbf{c}\|^2 - R^2 $$
+   Calculate the discriminant:
+   $$ \Delta = B^2 - C $$
+   
+   *Edge Case:* If $\Delta < 0$, the ray does not intersect the sphere. Return $P = 0$.
+
+   Calculate the intersection bounds $t_1$ and $t_2$:
+   $$ t_1 = \max(0, -B - \sqrt{\Delta}) $$
+   $$ t_2 = \min(D, -B + \sqrt{\Delta}) $$
+   
+   *Edge Case:* If $t_1 \ge t_2$, the ray misses the sphere or is tangent. Return $P = 0$.
+
+2. **Integrate Density:**
+   The density function is defined as:
+   $$ \varrho(\mathbf{x}') = \begin{cases} \varrho' \cdot \left(1 - \frac{\|\mathbf{x}' - \mathbf{o}\|^2}{R^2}\right) & \text{if } \|\mathbf{x}' - \mathbf{o}\| \leq R \\ 0 & \text{otherwise} \end{cases} $$
+   
+   The integrated density $P$ along the ray segment $[t_1, t_2]$ is given by the closed-form formula [S1, unofficial]:
+   $$ P(\mathbf{x}_{2D}) = -\varrho' \cdot R^{-2} \cdot \left( \frac{t_2^3 - t_1^3}{3} + B(t_2^2 - t_1^2) + C(t_2 - t_1) \right) $$
+   
+   Note: The term $B$ in the integration formula corresponds to $\langle \boldsymbol{\omega}, \mathbf{o} - \mathbf{c} \rangle$. Some derivations define $B$ as $\langle \boldsymbol{\omega}, \mathbf{c} - \mathbf{o} \rangle$, which changes the sign of the linear term in the quadratic solution but must be consistent with the integration formula. The formula above assumes $B = \langle \boldsymbol{\omega}, \mathbf{o} - \mathbf{c} \rangle$ as derived in [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def spherical_medium_density_integration(c, omega, D, o, R, rho_prime):
+    # 1. Compute intersection parameters
+    # B = <omega, o - c>
+    B = dot(omega, subtract(o, c))
+    # C = ||o - c||^2 - R^2
+    C = dot(subtract(o, c), subtract(o, c)) - R * R
+    
+    # Discriminant
+    delta = B * B - C
+    
+    # No intersection
+    if delta < 0:
+        return 0.0
+    
+    sqrt_delta = sqrt(delta)
+    
+    # Intersection bounds
+    t1 = max(0.0, -B - sqrt_delta)
+    t2 = min(D, -B + sqrt_delta)
+    
+    # No valid segment inside sphere
+    if t1 >= t2:
+        return 0.0
+    
+    # 2. Integrate density
+    # Formula: P = -rho' * R^-2 * ( (t2^3 - t1^3)/3 + B*(t2^2 - t1^2) + C*(t2 - t1) )
+    term1 = (t2**3 - t1**3) / 3.0
+    term2 = B * (t2**2 - t1**2)
+    term3 = C * (t2 - t1)
+    
+    P = -rho_prime * (1.0 / (R * R)) * (term1 + term2 + term3)
+    
+    return P
+```
+
+**Parameters:**
+- $R$: Radius of the sphere. Must be $> 0$. [S1, unofficial]
+- $\mathbf{o}$: Center of the sphere. [S1, unofficial]
+- $\varrho'$: Density factor. Must be $\ge 0$. [S1, unofficial]
+
+**Edge Cases and Pitfalls:**
+- **Precision:** When the ray is tangent to the sphere, $\Delta \approx 0$. Floating point errors might result in a tiny negative discriminant. Clamp $\Delta$ to $0$ if it is slightly negative (e.g., $< -10^{-9}$) before taking the square root [G].
+- **Boundary:** The formula assumes the ray segment is clipped to $[0, D]$. If the sphere is entirely behind the camera ($t_2 < 0$), the logic handles it via $t_1 = \max(0, \dots)$.
+- **Sign Consistency:** Ensure $B$ is defined consistently between the intersection step and the integration step. In [S1, unofficial], $B = \langle \boldsymbol{\omega}, \mathbf{o} - \mathbf{c} \rangle$.
+
+## Subtopics
+
+### Soft White Sphere Density
+A variant where the density function is defined as $\rho(x) = \frac{1 - r^2}{|x|^2}$ if $1 - r^2 > 0$, else $0$, where $r = |x|$ is the distance from the center. This creates a sphere with soft edges where density tapers at the edges. The color is constant white $\mathbf{c}(x) = (1, 1, 1)$. This formulation differs from the standard quadratic spherical density by including a $1/|x|^2$ scaling factor, which alters the singularity behavior at the center and the falloff profile [S2, unofficial].
+
+## Operating characteristics
+**Time Complexity:** $O(1)$. The method involves a constant number of arithmetic operations (dot products, square root, polynomial evaluation).
+**Memory Complexity:** $O(1)$. No additional memory is allocated.
+**Performance:** Significantly faster than numerical integration (e.g., quadrature) or ray marching, as it provides an exact analytical solution.
+**Strengths:** Exact result; no aliasing artifacts from sampling; efficient for real-time rendering.
+**Limitations:** Only applicable to spherical volumes with quadratic density falloff. Cannot handle complex shapes or non-quadratic density functions.
+**When to use:** When rendering participating media confined to spherical volumes with smooth, quadratic density gradients.
+**When not to use:** For non-spherical volumes, or when the density function does not match the quadratic model.
+
+## Background
+The method is derived from the analytical integration of participating media, specifically for spherical volumes with quadratic density falloff. It was presented by Tomás Ize in his thesis "Real-Time Light Transport in Analytically Integrable Participating Media" (2015) [S1, unofficial]. The concept of integrating density along a ray is foundational in volume rendering, with earlier work by Quílez (2010, 2015) cited in the thesis. The "Soft White Sphere" variant appears in production volume rendering contexts, such as Clemson University's production volume rendering reports [S2, unofficial].
+
+## Sources
+[S1] Real-Time Light Transport in Analytically Integrable Participating Media, https://cgg.mff.cuni.cz/~tomas/publications/pub-thesis-real-time-scattering/thesis.pdf, fetched 2026-10-29 (unofficial)
+[S2] Production Volume Rendering - Clemson University, https://jtessen.people.clemson.edu/reports/papers_files/ProdVolRender.pdf, fetched 2026-10-27 (unofficial)

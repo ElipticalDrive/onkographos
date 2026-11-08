@@ -1,0 +1,89 @@
+Summary Add a spatial index sort key: order documents within merged (and, with #69, flushed) segments by the Hilbert or Morton key of a GEO_POINT field. BKD leaves then hold mostly contiguous docids, so INSIDE leaves emit a run or a few ...
+
+index: spatial (Hilbert/Morton) index sort at merge · Issue #128 · luxir-search/luxir · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+index: spatial (Hilbert/Morton) index sort at merge #128
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+index: spatial (Hilbert/Morton) index sort at merge#128
+Copy link
+Labels
+enhancementNew feature or requestNew feature or request
+Description
+synhershko
+opened on Oct 21, 2026
+Issue body actions
+Summary
+Add a spatial index sort key: order documents within merged (and, with #69, flushed) segments by the Hilbert or Morton key of a GEO_POINT field. BKD leaves then hold mostly contiguous docids, so INSIDE leaves emit a run or a few bitset words instead of 512 individual docs, and #86's column zones become tight 2-D bounds. Opt-in, as a sort key on the #68 machinery.
+Problem
+A BKD leaf groups up to 512 nearby points, but their docids are in arrival order, so they are scattered across the segment. The writer then stores them as FOR-packed residuals (DOC_FOR); DOC_CONTIG and DOC_BITSET only trigger when the docids happen to be dense (src/luxir/index/BKDWriter.h:199-252). Every INSIDE leaf therefore decodes and emits each doc one by one (src/luxir/reader/BKDReader.h:417-436, the DOC_FOR path at :434-435).
+Measured on a prototype (clustered corpus, 5M points, continent-sized circle, 1.95M matches): a count takes 355 µs, and materializing the same matches into a bitset takes 2,125 µs. The difference, about 0.9 ns per matched doc, is the per-doc emit. For large-match geo filters it is most of the query.
+The same scattering limits other paths:
+geo: Morton-interleaved points, zone-pruned scans, polygon queries, [lon, lat] projection #86's zone-pruned SCAN arm skips or accepts 512-value column zones by their Morton range. With arrival-order docs, a zone's values span the whole map, so almost no zone is skipped or fully inside.
+Geo columns compress by the value spread inside a FOR block; spatially ordered docs make that spread small (geo: Morton-interleaved points, zone-pruned scans, polygon queries, [lon, lat] projection #86 expects better compression of clustered geo columns from Morton packing, which also depends on doc order).
+Filter-cache entries for geo filters (FilterCache: store clustered filters as runs (12-645x smaller for time-range and tenant filters) #44 stores clustered filters as runs) become runs only when matching docs are contiguous.
+Current code (origin/main)
+src/luxir/index/BKDWriter.h:199-252 encodeDocids: CONTIG when docids are exactly consecutive, BITSET when the bitset is smaller than FOR, else FOR.
+src/luxir/reader/BKDReader.h:417-436 emitLeafDocids: CONTIG emits one run (emitRun), BITSET ORs words (emitWord), FOR decodes and emits per doc.
+src/luxir/query/GeoQuery.h:154-197 materialize: setRun and word OR into a bitset, or per-doc appends and a final integer_sort for the array form.
+src/luxir/index/SegmentMerger.h:1581-1595 and :2179-2198: a merge collects (lat, lon, mappedDoc) for every value in merged-docid order and rebuilds the BKD from scratch, so the BKD inherits whatever doc order the merge produces.
+Index sort: reorder documents by the sort field during merge (non-monotone doc id map) #68 (open): reorder documents by a sort field during merge; Index sort: sort documents at flush so new segments are time-ordered #69: sort at flush; index: order merge sources by a schema index sort field #15 (open PR): order merge sources by an index sort field.
+Proposed implementation
+Sort key. Extend the index sort definition from Index sort: reorder documents by the sort field during merge (non-monotone doc id map) #68 with a geo key: {"field": "location", "order": "hilbert"} (or "morton"). The key per doc is the Hilbert (or Morton) index of its quantized point; with geo: Morton-interleaved points, zone-pruned scans, polygon queries, [lon, lat] projection #86, the Morton key is the packed column value itself, so Morton costs nothing extra. Hilbert has better locality (no long jumps between quadrants) for a few ns per doc at merge time.
+Multi-valued fields. Use the first value, or the minimum key. Docs without a value go last, as in Index sort: reorder documents by the sort field during merge (non-monotone doc id map) #68.
+Composite keys. Allow the geo key as a secondary key after a tenant or category key (the Index sort: reorder documents by the sort field during merge (non-monotone doc id map) #68 follow-up on composite keys), so multi-tenant collections keep tenant locality first.
+Merge. Everything else is Index sort: reorder documents by the sort field during merge (non-monotone doc id map) #68: the permutation, per-structure remapping and the monotone fast path. The BKD rebuild already happens per merge, so it needs no change: with spatially ordered docids, most leaves come out BITSET (or CONTIG) by themselves.
+Flush. With Index sort: sort documents at flush so new segments are time-ordered #69, flushed segments are sorted too; without it, only merged segments benefit.
+No new format kind: CONTIG and BITSET leaves already exist.
+Risks and correctness pitfalls
+Conflicts with time order. Log and metrics collections want time-sorted segments (Index sort: reorder documents by the sort field during merge (non-monotone doc id map) #68's motivation). A spatial sort destroys time locality inside a segment. This must stay opt-in and per collection; for mixed workloads, a composite (time bucket, geo) key keeps coarse time locality.
+Deletes and updates are handled by Index sort: reorder documents by the sort field during merge (non-monotone doc id map) #68's permutation; nothing geo-specific.
+Merge cost. Computing Hilbert keys is cheap; the cost is Index sort: reorder documents by the sort field during merge (non-monotone doc id map) #68's general reordering cost.
+Results must not change, only doc order: the Index sort: reorder documents by the sort field during merge (non-monotone doc id map) #68 equivalence suite applies, compared by _id.
+Tests
+Index sort: reorder documents by the sort field during merge (non-monotone doc id map) #68's equivalence suite with a geo sort key: identical hits, counts, facets and stored fields compared by _id.
+After a sorted merge, the fraction of CONTIG/BITSET BKD leaves and the mean docid span per leaf are reported. BKD leaves are cut by the BKD's own median splits, not by the sort key, so expect mostly BITSET leaves with short docid spans rather than exact CONTIG runs; the test asserts a high BITSET/CONTIG fraction on clustered data.
+Hilbert key function: locality and round-trip tests.
+How to measure
+GeoBM corpora (uniform, clustered, uniform_multi) at 0.5M and 5M points, built once in arrival order and once spatially sorted. Report BM_GeoDistance/*/query/* and BM_Geo/*/query/* (materialization), count, the SCAN arm with geo: Morton-interleaved points, zone-pruned scans, polygon queries, [lon, lat] projection #86 zones, geo column bytes per value, and BKD bytes.
+Measured above: the 0.9 ns per matched doc emit cost (prototype on GeoBM's synthetic clustered corpus, 5M points, one segment, single thread, release build, one i7-14700KF P-core, host load average 1.6-1.8).
+Expected impact (estimate): -60..-80% of materialization time for large-match geo queries (the per-doc emit becomes word ORs and runs), large gains in geo: Morton-interleaved points, zone-pruned scans, polygon queries, [lon, lat] projection #86's zone pruning, and smaller geo columns. Small-match queries change little.
+Related
+Index sort: reorder documents by the sort field during merge (non-monotone doc id map) #68, Index sort: sort documents at flush so new segments are time-ordered #69 (index sort machinery), facets: geo aggregations (geotile_grid, geohash_grid, geohex_grid, geo_bounds, geo_centroid, distance rings) #126 and geo: precomputed grid-cell columns and a geo_grid query #127 (geo aggregations and grid columns benefit from spatial doc order), index: order merge sources by a schema index sort field #15 (merge source order), FilterCache: store clustered filters as runs (12-645x smaller for time-range and tenant filters) #44 (clustered filters as runs), geo: Morton-interleaved points, zone-pruned scans, polygon queries, [lon, lat] projection #86 (Morton column and zones)
+Elasticsearch/Lucene index sorting: https://www.elastic.co/guide/en/elasticsearch/reference/current/index-modules-index-sorting.html
+Activity
+synhershko
+added
+enhancementNew feature or requestNew feature or request
+on Oct 21, 2026
+synhershko
+added a parent issue on Oct 21, 2026
+geo: tracking issue for geo search features and performance #133
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or request
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

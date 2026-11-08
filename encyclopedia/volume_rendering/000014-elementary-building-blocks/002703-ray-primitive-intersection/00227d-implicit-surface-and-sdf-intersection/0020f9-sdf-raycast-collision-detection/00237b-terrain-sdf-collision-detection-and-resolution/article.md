@@ -3,7 +3,7 @@
 Also called: SDF Collision Detection, SDF Sign Change Collision
 
 ## Overview
-This method detects collisions between a moving object and a terrain defined by a Signed Distance Field (SDF) by evaluating the SDF at the object's previous and current positions. It identifies collisions via sign changes in the distance values and estimates the surface normal to resolve penetration. It differs from parent [SDF Raycast Collision Detection](2417-sdf-raycast-collision-detection.md) by explicitly handling the resolution step (velocity modification) and normal estimation, rather than just reporting intersection.
+This method performs collision detection and resolution for terrain using a Signed Distance Field (SDF) by evaluating the distance at an object's previous and current positions [S1, unofficial]. It identifies collisions via sign changes in the distance values and estimates the surface normal to resolve penetration [S1, unofficial]. It differs from its parent [SDF Raycast Collision Detection](2417-sdf-raycast-collision-detection.md) by explicitly handling the resolution step and normal estimation rather than just reporting intersection [S1, unofficial].
 
 ## How it works
 **Inputs:**
@@ -13,12 +13,12 @@ This method detects collisions between a moving object and a terrain defined by 
 - `currentVelocity`: The object's velocity vector.
 
 **Outputs:**
-- `resolution`: A velocity vector correction (typically negative of current velocity if collision detected).
+- `resolution`: A velocity vector correction (negative of current velocity if collision detected).
 - `justCollided`: A boolean flag indicating if a collision occurred.
 
 **Data Structures:**
 - `float`: Signed distance value.
-- `Vector3`: Position and normal vectors.
+- 3D vector: Position, normal, and velocity components.
 
 **Parameters:**
 - `beta`: Damping factor for collision resolution. Typical value: 0.1–0.3 [S1, unofficial].
@@ -28,22 +28,22 @@ This method detects collisions between a moving object and a terrain defined by 
 
 **Steps:**
 1. Evaluate the signed distance at the old position:
-   $$ d_{old} = \text{terrainSFS}.EvaluateDistanceAt(\text{oldPosition}) $$
+   $$ d_{\text{old}} = \text{terrainSFS}.\text{EvaluateDistanceAt}(\text{oldPosition}) $$
 2. Evaluate the signed distance at the current position:
-   $$ d_{new} = \text{terrainSFS}.EvaluateDistanceAt(\text{currentPosition}) $$
+   $$ d_{\text{new}} = \text{terrainSFS}.\text{EvaluateDistanceAt}(\text{currentPosition}) $$
 3. Check for collision by detecting a sign change:
-   $$ \text{collision} = (d_{old} > 0 \land d_{new} < 0) \lor (d_{old} < 0 \land d_{new} > 0) $$
+   $$ \text{collision} = (d_{\text{old}} > 0 \land d_{\text{new}} < 0) \lor (d_{\text{old}} < 0 \land d_{\text{new}} > 0) $$
 4. If a collision is detected:
    a. Estimate the surface normal at the old position:
       $$ \mathbf{n} = \text{EstimateGradient}(\text{terrainSFS}, \text{oldPosition}) $$
    b. If the new distance is positive (outside), invert the normal:
-      $$ \text{if } d_{new} > 0: \mathbf{n} = -\mathbf{n} $$
+      $$ \text{if } d_{\text{new}} > 0: \mathbf{n} = -\mathbf{n} $$
    c. Set `justCollided = true`.
    d. Return the resolution result:
       $$ \text{resolution} = -1 \times \text{currentVelocity} $$
 5. If no collision is detected:
    a. Set `justCollided = false`.
-   b. Return `Vector3.zero`.
+   b. Return `zero`.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -53,41 +53,33 @@ def terrain_sdf_collision_detection_resolution(terrain_sdfs, old_position, curre
     old_distance = terrain_sdfs.evaluate_distance_at(old_position)
     new_distance = terrain_sdfs.evaluate_distance_at(current_position)
     
-    # Check for sign change
     collision = (old_distance > 0 and new_distance < 0) or (old_distance < 0 and new_distance > 0)
     
     if collision:
-        # Estimate surface normal at old position
         surface_normal = estimate_gradient(terrain_sdfs, old_position)
-        
-        # Invert normal if moving from inside to outside
         if new_distance > 0:
-            surface_normal = -surface_normal
-            
+            surface_normal = [-x for x in surface_normal]
         just_collided = True
-        # Return negative of current velocity as resolution
-        resolution = -1 * current_velocity
+        resolution = [-v for v in current_velocity]
     else:
         just_collided = False
-        resolution = Vector3.zero
+        resolution = [0.0, 0.0, 0.0]
         
     return resolution, just_collided
 
 def estimate_gradient(sdfs, position):
-    # [G] Numerical gradient estimation using central differences
     epsilon = 1e-4
-    dx = sdfs.evaluate_distance_at(position + Vector3(epsilon, 0, 0)) - sdfs.evaluate_distance_at(position - Vector3(epsilon, 0, 0))
-    dy = sdfs.evaluate_distance_at(position + Vector3(0, epsilon, 0)) - sdfs.evaluate_distance_at(position - Vector3(0, epsilon, 0))
-    dz = sdfs.evaluate_distance_at(position + Vector3(0, 0, epsilon)) - sdfs.evaluate_distance_at(position - Vector3(0, 0, epsilon))
-    
-    gradient = Vector3(dx, dy, dz) / (2 * epsilon)
-    return gradient.normalized()
+    dx = sdfs.evaluate_distance_at([position[0] + epsilon, position[1], position[2]]) - sdfs.evaluate_distance_at([position[0] - epsilon, position[1], position[2]])
+    dy = sdfs.evaluate_distance_at([position[0], position[1] + epsilon, position[2]]) - sdfs.evaluate_distance_at([position[0], position[1] - epsilon, position[2]])
+    dz = sdfs.evaluate_distance_at([position[0], position[1], position[2] + epsilon]) - sdfs.evaluate_distance_at([position[0], position[1], position[2] - epsilon])
+    magnitude = (dx*dx + dy*dy + dz*dz)**0.5
+    if magnitude == 0:
+        return [0.0, 0.0, 0.0]
+    return [dx/magnitude, dy/magnitude, dz/magnitude]
 ```
 
 **Edge Cases and Pitfalls:**
-- Precision issues with floating-point comparisons near zero distance.
-- Degenerate input where `oldPosition` and `currentPosition` are identical.
-- The method assumes a single collision per time step.
+Not given in the sources.
 
 ## Subtopics
 
@@ -95,15 +87,10 @@ def estimate_gradient(sdfs, position):
 Uses SDF for depth and normal, applies Baumgarte stabilization for penetration correction and inward velocity damping. Choose when smoother resolution is needed.
 
 ## Operating characteristics
-- **Time Complexity:** O(1) per object per time step, assuming constant-time SDF evaluation.
-- **Memory Complexity:** O(1) auxiliary space.
-- **Strengths:** Simple to implement, efficient for simple terrain.
-- **Limitations:** May miss collisions if the time step is too large (tunneling). Does not handle multiple collisions or complex terrain features well.
-- **When to use:** Simple games or simulations with small time steps and simple terrain.
-- **When not to use:** Complex scenes with high-speed objects or detailed terrain where tunneling is likely.
+Not given in the sources.
 
 ## Background
-Originated from the Marching Cubes terrain implementation by 2JacT [S1, unofficial]. Used in real-time terrain collision detection for games.
+Not given in the sources.
 
 ## Sources
 [S1] 2JacT/Marching-Cubes-Terrain, https://github.com/2JacT/Marching-Cubes-Terrain, fetched 2026-10-27 (unofficial)

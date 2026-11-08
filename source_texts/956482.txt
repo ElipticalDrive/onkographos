@@ -1,0 +1,222 @@
+Voxel game set in a world of floating islands. Contribute to generatives/clear_skies development by creating an account on GitHub.
+
+Add transparent blocks (Glass, see-through Water); replace Opacity with BlocksLight by generatives · Pull Request #30 · generatives/clear_skies · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+generatives
+commented
+Oct 1, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+Adds support for see-through blocks: a new Glass block (cut out, like Minecraft's) and see-through Water (blended). Also replaces BlockDef.Opacity with a derived BlocksLight, and adds OpaqueModel for model blocks that fill their cell (the Fan).
+Render layers
+BlockDef.Layer decides how a full-cube block is drawn, and GreedyMesher builds one mesh per layer for each chunk:
+Layer
+Blocks
+Drawn
+Opaque
+stone, dirt, …
+fs_main, with the world, nearest chunk first
+Cutout
+glass
+fs_cutout, after the opaque meshes. Texels under half alpha are discarded; the rest write depth like stone, so no sorting is needed. Back faces are culled. It's a separate entry point and draw so fs_main has no discard and keeps the early depth test.
+Translucent
+water
+Alpha-blended in a new RenderTransparent stage after the sky and overlays. A depth pre-pass (fs_chunk_transparent_depth) lays down the nearest translucent face at each pixel, and the colour pass (fs_chunk_transparent) draws only that one. So every pixel blends exactly one translucent layer, whatever the draw order. Both sides are drawn, so the surface is seen from underneath too.
+Transparent (any layer but Opaque) drives culling and light: a transparent block never hides a neighbour's face. Its own faces are hidden by an opaque cube, an opaque model (Fan), or another block of its own type.
+Translucent face opacity is the texture's alpha × BlockDef.Alpha, packed into the spare byte of ChunkVertex.
+The streamed world still meshes chunks without their neighbours, except for transparent faces, which are culled against their real neighbour across chunk borders. A chunk remeshes when the cell beside one of its border transparent blocks changes, or when that neighbour loads or unloads.
+Blocks
+Glass (new, BlockId.Glass = 17): the spritesheet's glass texture, Cutout. It collides and lets light through.
+Water: Translucent at 60% opacity, and lets light through. It is now Passable: raycasts still hit it, but bodies sink through it. There's no swimming yet.
+Both are on the hotbar.
+Lighting and opaque models
+Opacity was only ever read as >= 15. It's replaced by a derived BlocksLight: true for full cubes unless they're Transparent, and for OpaqueModel model blocks.
+OpaqueModel (set on the Fan, whose housing fills its cell) also hides the faces of blocks against it, like an opaque cube does. Otherwise those faces sat on the model's sides and flickered.
+A light-blocking cell holds no real light of its own (the light pass gives it flat ambient and full sun). So fs_model now lights a model block in such a cell from the brightest of its open neighbouring cells.
+Physics
+A grid owned here gets its body only once CollidersReady says every nearby terrain chunk with blocks has its collider.
+A chunk whose blocks don't collide (only water, now that water is passable) builds an empty collider. That was never recorded, so every grid within 64 blocks of such a chunk waited forever: drawn, but with no body to stand on.
+PhysicsBodySystem now records empty colliders, and CollidersReady counts them as done.
+The same latent bug was already possible on main for a chunk containing only levers or wheels.
+Known limitations
+Glass's half-transparent streak pixels are cut to fully clear or fully solid. As in Minecraft, you see only the near side of a glass block.
+Only the nearest translucent (water) layer shows. Glass doesn't count as a layer, so water is visible through glass.
+Light isn't dimmed or tinted by water or glass: light is either fully blocked or fully passed.
+Glass and water faces get flat rather than smooth lighting.
+A transparent face against a model that only partly fills its cell (lever or wheel base) can still z-fight where the two touch.
+Testing
+dotnet build is clean, and all 181 tests pass:
+TransparentBlockTests covers registration, render layers and the BlocksLight categories; per-layer meshing and culling; chunk-border culling and the remesh triggers; and alpha packing.
+TerrainGatingTests.TerrainWhoseBlocksDontCollideCountsAsReady covers the physics fix; it fails without it.
+The generated WGSL passes naga validation.
+Run in-game under lavapipe (software Vulkan), using temporary, uncommitted debug hooks:
+Rendering: a 6×6×6 box straddling a chunk corner in the streamed world, placed one block at a time. With all water, the mesher emitted no faces on any chunk border, and the depth pre-pass removed the shading seams that out-of-order blending had caused along the borders. With the box half glass, the glass draws as a cutout with the water visible through it.
+Physics, on a real save with several ships: before the fix, four ships near placed water never got a body and the player fell through them. After it, every ship gets a body on load and the player stands on the 569-block ship.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01BN4GwWV4k3sczNYejHPdm9
+claude
+added 6 commits
+October 1, 2026 04:20
+Add transparent blocks: Glass and see-through Water
+…
+f329587
+```
+BlockDef gains Transparent and Alpha. GreedyMesher puts transparent faces in
+a separate mesh, which never hides a neighbour's face (only another block of
+its own type), and packs each face's opacity into the spare ChunkVertex byte.
+The renderer draws those meshes in a new RenderTransparent stage after the
+sky: alpha-blended, depth-tested without depth writes, both sides, farthest
+chunk first, lit like the opaque world (fs_chunk_transparent).
+
+The streamed world still meshes without its neighbours, except that a
+transparent face is hidden against the same block across a chunk border, so
+chunks with transparent blocks on a border remesh with that neighbour.
+
+New Glass block (the sheet's glass texture, collides, lets light through);
+Water is now transparent (alpha 0.6), lets light through and is passable.
+Both are on the hotbar.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BN4GwWV4k3sczNYejHPdm9
+```
+Replace BlockDef.Opacity with BlocksLight; the Fan blocks light
+…
+66843c1
+```
+Opacity was only ever read as >= 15, so it becomes a derived BlocksLight:
+full cubes block light unless Transparent, model blocks don't unless they
+set ModelBlocksLight. The Fan now does.
+
+A light-blocking cell holds no real light of its own (the light pass gives
+it flat ambient and full sun), so fs_model lights such a model block from
+the brightest of its open neighbours instead.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BN4GwWV4k3sczNYejHPdm9
+```
+Stop transparent faces flickering against Fans and at chunk borders
+…
+d62e063
+```
+Both were coplanar faces z-fighting. A glass face against a Fan sat on the
+model's side, which fills its cell; and in the streamed world a transparent
+face at a chunk border was only culled against its own block, so water
+beside stone across a border drew a face on top of the stone's.
+
+ModelBlocksLight becomes OpaqueModel: a model that fills its cell, which
+blocks light and hides faces against it like an opaque cube. In the
+streamed world transparent faces now cull against their real neighbours
+across borders, and a chunk remeshes when the cell beside one of its
+border transparent blocks changes, or that neighbour loads or unloads.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BN4GwWV4k3sczNYejHPdm9
+```
+Draw one transparent layer per pixel, so chunk borders don't show in …
+…
+8396300
+```
+…water
+
+Transparent faces were blended without depth in chunk order, both sides
+drawn. Where a near and a far face of a water body overlapped, the result
+depended on which chunk drew last, and since each face is lit differently
+the shading changed in patches along chunk borders.
+
+A depth pre-pass now lays down the nearest transparent face at each pixel
+(fully clear texels cut out), and the colour pass draws only where a face is
+that nearest one. Every pixel blends exactly one transparent layer, whatever
+the draw order. The transparent stage moves after the overlays, so the
+targeted-block wireframe shows through water instead of behind its depth.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BN4GwWV4k3sczNYejHPdm9
+```
+Draw glass as a cutout, like Minecraft
+…
+4e6290d
+```
+BlockDef.Transparent becomes a derived property of a new BlockDef.Layer:
+Opaque, Cutout or Translucent. Cutout faces get their own chunk mesh, drawn
+with the opaque world by fs_cutout, which discards texels under half alpha
+and otherwise writes depth like stone; it is a separate entry point and
+draw after the opaque meshes so the opaque shader keeps the early depth
+test. Glass is Cutout, so it needs no sorting and water behind it shows
+through its clear texels; only water stays in the blended pass.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BN4GwWV4k3sczNYejHPdm9
+```
+Count terrain chunks with no colliding blocks as ready for nearby grids
+…
+8ed9f4c
+```
+A grid owned here gets its body only once CollidersReady says every nearby
+terrain chunk with blocks has its collider. A chunk whose blocks don't
+collide (now that water is passable: a lake, or a chunk of placed water)
+builds an empty collider and was never recorded, so every grid within 64
+blocks of one waited forever: drawn, but with no body to stand on.
+PhysicsBodySystem now records empty colliders too, and CollidersReady
+counts them as done.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BN4GwWV4k3sczNYejHPdm9
+```
+This was referenced Oct 5, 2026
+Count non-air and colliding blocks per chunk; gate terrain colliders on HasAnyColliding
+#39
+Merged
+Replace BlockDef.Opacity with BlocksLight; the Fan blocks light and hides faces
+#40
+Merged
+Add render layers and a cut-out Glass block
+#41
+Merged
+Add a translucent render layer; Water becomes see-through and passable
+#42
+Merged
+generatives
+commented
+Oct 5, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Split into four stacked PRs, rebuilt on current main:
+Count non-air and colliding blocks per chunk; gate terrain colliders on HasAnyColliding #39: count terrain chunks with no colliding blocks as ready for nearby grids (independent; base main)
+Replace BlockDef.Opacity with BlocksLight; the Fan blocks light and hides faces #40: replace BlockDef.Opacity with BlocksLight; the Fan blocks light and hides faces
+Add render layers and a cut-out Glass block #41: render layers and a cut-out Glass block
+Add a translucent render layer; Water becomes see-through and passable #42: translucent render layer; Water becomes see-through and passable
+The final code in #42 matches this PR's, apart from comment tidying. Closing this one in favour of them.
+Generated by Claude Code
+generatives
+closed this
+Oct 5, 2026
+generatives
+deleted the
+ccr-ee9c920f-4lp9ma
+branch
+October 5, 2026 21:57
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

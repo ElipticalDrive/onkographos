@@ -1,0 +1,386 @@
+Graph database implementing the RDF and SPARQL standards. Very fast and scales to more than a trillion triples on a single commodity machine - Encode the IDs of geo points in Z-order by hannahbast · Pull Request #3432 · ad-freiburg/qlever
+
+Encode the IDs of geo points in Z-order by hannahbast · Pull Request #3432 · ad-freiburg/qlever · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+hannahbast
+commented
+Sep 21, 2026
+Copy link
+Copy Markdown
+Member
+The ID of a geo point stored the quantized latitude in the upper 30 and the quantized longitude in the lower 30 of its value bits. The only interval of IDs that a query rectangle could be mapped to was therefore a latitude band around the globe, which makes a prefilter on the IDs useless for points: for all streets in Freiburg on osm-planet it keeps every OSM node between 47.9 and 48.1 degrees, 54 million rows. The two coordinates are now bit-interleaved (a Morton or Z-order code), so that the points of every quadtree cell form one contiguous range of IDs and a geographic rectangle maps to a small number of such ranges. The quantization and the precision of a point are unchanged, encoding and decoding cost a few more bit operations.
+The first commit is that change and nothing else, and it is the one worth reviewing closely. On osm-switzerland, the operations on points that use no grid at all (encoding at index build, geof:latitude, distances, export, point spatial joins) show no measurable difference, while a block prefilter reads 2.9 times fewer rows for a rectangle around Zurich. The function that turns a rectangle into those ranges is deliberately not here, it comes with the prefilter that calls it.
+The second commit lets qlever-upgrade-index bring an index in the previous format into the new one, which is much faster than rebuilding it. The IDs of all points are rewritten, and only the parts of the permutations whose order actually changes are sorted again: inside the runs of consecutive rows that agree on all columns before their first point. A run is a single row unless a subject or a predicate has several points, so for osm-planet this means one sort of the point section of POS, OSP and OPS each, and nothing at all for the other three permutations. A run is sorted in memory, or beyond the budget of --memory-for-sorting by the external sorter of the index builder. The precomputed information of every geometry holds its bounding box and its centroid as encoded points as well, so the geometry vocabulary is converted too, whether its geometries are points or not.
+An index without a single encoded point needs no conversion, and a server simply accepts such an index in the previous format, because the two formats do not differ for it. The materialized views of an index with points are deliberately not converted but retired together with the index in the old format, since creating them again costs no more than converting them would. The conversion refuses to start when the filesystem has less free space than the second copy of the index that it writes, which for a large index is several terabytes.
+Verified on real data. The osm-planet index (214 billion triples, 2.4 TB) was converted in three and a half hours, writing 1.36 trillion rows at 106 M/s, and is now served in the new format. On osm-switzerland, the converted index answers the four spatial-join queries and the export of five million points exactly as the index built from scratch by master does.
+Copilot
+AI
+lite review requested due to automatic review settings
+September 21, 2026 08:36
+Copilot started reviewing on behalf of
+hannahbast
+September 21, 2026 08:36
+View session
+Copilot
+AI
+reviewed
+Sep 21, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Copilot review overview
+🟡 Changes recommended
+The converter can silently preserve invalid IDs, accept point-bearing materialized views without conversion, and undercount copied view storage during the free-space check.
+Get a fresh assessment by requesting another Copilot review.
+Review effort: Lite
+Findings: 1 · 2
+Open (3)
+Check materialized views before accepting no-conversion path · New
+Include materialized views in free-space calculation · New
+Restore datatype-range validation before identity conversion · New
+What changed in this PR
+This PR switches geo-point IDs to Morton/Z-order encoding and adds migration support for indexes in the previous format.
+Changes:
+Interleaves latitude/longitude bits and updates geometry metadata conversion.
+Adds partial permutation re-sorting, external sorting, free-space checks, and upgrade CLI support.
+Expands conversion, compatibility, and geo-point tests with updated fixture data.
+File
+Description
+test/​IndexTest.cpp
+Tests compatibility of previous-format indexes.
+test/​index/​IndexFormatConverterTest.cpp
+Tests ID, permutation, geometry, view, and upgrade conversion.
+test/​GeoPointTest.cpp
+Tests interleaved encoding and round trips.
+test/​data/​oldIndexFormat/​README.md
+Documents the updated fixture format.
+test/​data/​oldIndexFormat/​oldFormat.vocabulary.geometry.words.external
+Updates geometry vocabulary fixture data.
+test/​data/​oldIndexFormat/​oldFormat.view.testview.viewinfo.json
+Updates view metadata version.
+test/​data/​oldIndexFormat/​oldFormat.meta-data.json
+Updates fixture index metadata.
+test/​data/​oldIndexFormat/​input.ttl
+Adds point and geometry test data.
+test/​data/​oldIndexFormat/​generate.sh
+Generates a geo-split vocabulary fixture.
+src/​rdfTypes/​GeoPoint.h
+Defines Morton encoding helpers.
+src/​rdfTypes/​GeoPoint.cpp
+Implements quantization and interleaved encoding.
+src/​rdfTypes/​GeometryInfo.h
+Adds encoded-point mapping API.
+src/​rdfTypes/​GeometryInfo.cpp
+Maps geometry point encodings.
+src/​IndexUpgraderMain.cpp
+Adds sorting-memory configuration.
+src/​index/​IndexImpl.h
+Declares previous-format version recording.
+src/​index/​IndexImpl.cpp
+Accepts and records compatible old indexes.
+src/​index/​IndexFormatVersion.h
+Advances the index format versions.
+src/​index/​IndexFormatConverter.h
+Defines conversion and sorting interfaces.
+src/​index/​IndexFormatConverter.cpp
+Implements ID, permutation, geometry, and index upgrades.
+src/​global/​ValueId.h
+Adds direct geo-point ID construction from bits.
+💡 Add a code-review agent skill or configure MCP servers for context-aware, tailored reviews. Learn more in the docs.
+Comment thread
+src/index/IndexFormatConverter.cpp
+Comment on lines
++1415
+to
++1416
+bool indexNeedsNoConversion(const std::string& basename) {
+return !hasPersistedUpdates(basename) && !indexContainsGeoPoints(basename);
+Comment thread
+src/index/IndexFormatConverter.cpp
+Comment on lines
++1243
+to
++1248
+uint64_t bytesToWrite = 0;
+std::vector<uint64_t> permutationSizes;
+for (const auto& file : IndexImpl::allIndexFiles(oldBasename)) {
+auto size = fs::file_size(file);
+bytesToWrite += size;
+if (file.native().find(PERMUTATION_FILE_INFIX) != std::string::npos &&
+Comment thread
+src/index/IndexFormatConverter.cpp
+Comment on lines
++1353
+to
++1359
+if (id.getDatatype() == Datatype::LocalVocabIndex) {
+throw std::runtime_error{
+"Encountered an `Id` of type `LocalVocabIndex`, which must never be "
+"stored on disk (it holds a pointer into the memory of the process "
+"that created it), so the index that is converted is corrupted"};
+}
+if (!isGeoPoint(id)) {
+hannahbast
+mentioned this pull request
+Sep 21, 2026
+Decode geo points that are encoded in Z-order
+ad-freiburg/qlever-petrimaps#55
+Merged
+codecov
+Bot
+commented
+Sep 21, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codecov Report
+❌ Patch coverage is 91.81970% with 49 lines in your changes missing coverage. Please review.
+✅ Project coverage is 96.13%. Comparing base (de5458a) to head (624071e).
+⚠️ Report is 1 commits behind head on master.
+Files with missing lines
+Patch %
+Lines
+src/index/IndexFormatConverter.cpp
+92.04%
+22 Missing and 17 partials ⚠️
+src/index/IndexImpl.cpp
+78.04%
+5 Missing and 4 partials ⚠️
+src/rdfTypes/GeoPoint.cpp
+96.29%
+0 Missing and 1 partial ⚠️
+Additional details and impacted files
+```
+@@            Coverage Diff             @@
+##           master    #3432      +/-   ##
+==========================================
+- Coverage   96.17%   96.13%   -0.05%     
+==========================================
+  Files         632      637       +5     
+  Lines       52450    52886     +436     
+  Branches     7136     7224      +88     
+==========================================
++ Hits        50443    50841     +398     
+- Misses       1167     1189      +22     
+- Partials      840      856      +16     
+```
+☔ View full report in Codecov by Harness.
+📢 Have feedback on the report? Share it here.
+🚀 New features to boost your workflow:
+❄️ Test Analytics: Detect flaky tests, report on failures, and find test suite problems.
+patrickbr
+pushed a commit
+to ad-freiburg/qlever-petrimaps
+that referenced
+this pull request
+Sep 21, 2026
+Decode geo points that are encoded in Z-order (#55)
+…
+287d1cb
+```
+QLever changed how it encodes the two coordinates of a geo point in the value bits of an ID. Before ad-freiburg/qlever#3432 the quantized latitude occupied the upper 30 of those bits and the quantized longitude the lower 30; since then the bits of the two are interleaved (a Morton or Z-order code), so that the points of a geographic rectangle have IDs in few contiguous ranges, which is what makes QLever's prefilter for spatial joins work for points. Points that a query computes are not in the geometry cache but read from their ID, so with the old decoding they were drawn somewhere else on the map entirely.
+
+Which of the two encodings a backend uses cannot be told from an ID, and petrimaps serves backends of both kinds at the same time: osm-planet has been converted, while other indexes still have the previous encoding. The question is therefore asked in the same way as the datatype value of a point already was, and from the same answer: the backend computes a point with known coordinates, and the encoding is the one whose decoding reproduces them. This is correct by construction, because a QLever server refuses an index whose format does not match its own, so the encoder compiled into the server always agrees with the index it serves. A backend that cannot be asked keeps the previous behavior, which is right for every index that was not rebuilt or converted since the change.
+```
+hannahbast
+force-pushed
+the
+geo-points-z-order
+branch
+from
+ae4b1d5 to
+7c9ed74
+Compare
+September 24, 2026 20:43
+Extract the quantization of a GeoPoint coordinate into functions
+…
+49022fb
+```
+The conversion of a coordinate to its 30-bit integer and back was done by two
+lambdas inside `toBitRepresentation` and `fromBitRepresentation`. They are now
+the static functions `quantizeCoordinate` and `dequantizeCoordinate`, so that
+the quantization can be used separately from the bit layout of a point, and
+`maxCoordinateEncoded` is an integer. The encoding is unchanged.
+```
+hannahbast
+mentioned this pull request
+Sep 24, 2026
+Extract the quantization of a GeoPoint coordinate into functions
+#3456
+Merged
+hannahbast
+force-pushed
+the
+geo-points-z-order
+branch
+from
+7c9ed74 to
+624071e
+Compare
+September 24, 2026 22:03
+sparql-conformance
+Bot
+commented
+Sep 25, 2026
+Copy link
+Copy Markdown
+Overview
+Number of Tests
+Passed ✅
+Intended ✅
+Failed ❌
+Not tested
+498
+418
+74
+6
+0
+Conformance check passed ✅
+No test result changes.
+Details: https://qlever.dev/sparql-conformance-ui?cur=624071efb65875abb5b046018c7d08fc25c5eff9&prev=60f700c6db2c907b297d21ccdc00ca522160728a
+sonarqubecloud
+Bot
+commented
+Sep 25, 2026
+Copy link
+Copy Markdown
+Quality Gate passed
+Issues
+22 New issues
+0 Accepted issues
+Measures
+0 Security Hotspots
+0.0% Coverage on New Code
+0.0% Duplication on New Code
+See analysis details on SonarQube Cloud
+Pass the messages of two checks directly and assert that `GeoPoint::T…
+…
+f9d6597
+```
+…` is unsigned
+```
+hannahbast
+force-pushed
+the
+geo-points-z-order
+branch
+from
+624071e to
+64b8776
+Compare
+September 25, 2026 10:59
+hannahbast
+added 3 commits
+September 25, 2026 16:17
+Test quantizeCoordinate and dequantizeCoordinate directly, includ…
+…
+c5c33ef
+```
+…ing values out of range
+```
+Encode the IDs of geo points in Z-order
+…
+42c1f58
+```
+The ID of a point stored the quantized latitude in the upper 30 and the
+quantized longitude in the lower 30 of its value bits. The only ID interval
+that a query rectangle could be mapped to was therefore a latitude band around
+the globe, which makes a prefilter on the IDs useless for points: for all
+streets in Freiburg on osm-planet, it keeps every OSM node between 47.9 and
+48.1 degrees, 54 million rows.
+
+The two coordinates are now bit-interleaved (a Morton or Z-order code), so
+that the points of every quadtree cell form one contiguous range of IDs and a
+geographic rectangle maps to a small number of such ranges. The quantization
+and the precision of a point are unchanged, encoding and decoding cost a few
+more bit operations. On osm-switzerland, point operations without a grid
+(encoding at index build, `geof:latitude`, distances, export, point spatial
+joins) show no measurable difference, while a block prefilter reads 2.9 times
+fewer rows for a rectangle around Zurich.
+
+This changes the order of the points in the permutations, so the index format
+version is raised. The next commit converts an index in the previous format.
+```
+Convert an index to the new encoding of geo points
+…
+d119de4
+```
+An index in the previous format can be brought into the new one with
+`qlever-upgrade-index`, which is faster than rebuilding it. The IDs of all
+points are rewritten, and the parts of the permutations whose order changes
+are sorted again: only inside the runs of consecutive rows that agree on all
+columns before their first point, so a run is a single row unless a subject or
+a predicate has several points. A run is sorted in memory, or, beyond the
+budget of `--memory-for-sorting`, by the external sorter of the index builder.
+For osm-planet that means one sort of the point section of `POS`, `OSP` and
+`OPS` each, and nothing at all for the other three permutations.
+
+The points of the geometry vocabulary are converted as well: the precomputed
+information of every geometry (see `GeometryInfo`) holds its bounding box and
+its centroid as encoded points, whether the geometry is a point or not.
+
+An index without a single encoded point needs no conversion. The upgrade of
+such an index only writes its format version, and a server accepts it as it
+is, because the two formats do not differ for it.
+
+The materialized views of an index with points are deliberately not converted.
+They are retired with the index in the old format, and the upgrade says that
+they have to be created again, which costs no more than converting them would.
+
+The conversion also refuses to start when the filesystem has less free space
+than the second copy of the index that it writes, which for a large index is
+several terabytes.
+```
+hannahbast
+force-pushed
+the
+geo-points-z-order
+branch
+from
+64b8776 to
+d119de4
+Compare
+September 25, 2026 14:34
+hannahbast
+added a commit
+that referenced
+this pull request
+Sep 25, 2026
+Extract the quantization of a GeoPoint coordinate into functions (#…
+…
+19190c4
+```
+…3456)
+
+The conversion of a coordinate to its 30-bit integer and back was done by two lambdas inside `GeoPoint::toBitRepresentation` and `GeoPoint::fromBitRepresentation`. They are now the static functions `quantizeCoordinate` and `dequantizeCoordinate`, so that the quantization can be used separately from the bit layout of a point, and `maxCoordinateEncoded` is an integer. The encoding is unchanged.
+
+NOTE: This is preparation for #3432, which changes the bit layout of a point to Z-order and converts existing indexes. That PR uses the quantization independently of the layout.
+```
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

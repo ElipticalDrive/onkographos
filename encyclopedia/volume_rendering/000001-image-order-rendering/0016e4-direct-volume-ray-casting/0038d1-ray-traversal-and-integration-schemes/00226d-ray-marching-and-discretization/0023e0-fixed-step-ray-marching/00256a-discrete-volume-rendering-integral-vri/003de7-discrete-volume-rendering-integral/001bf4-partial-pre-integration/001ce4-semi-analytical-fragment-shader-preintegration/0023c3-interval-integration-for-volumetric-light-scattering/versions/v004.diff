@@ -1,0 +1,261 @@
+--- v003.md
++++ v004.md
+@@ -4,209 +4,75 @@
+ 
+ ## Overview
+-Interval Integration is a fragment shader technique for computing in-scattered radiance by decomposing the integration path into intervals defined by the front and back faces of a light volume [S2, unofficial]. It solves the problem of efficiently evaluating the scattering integral for directional, omnidirectional, and spot lights by leveraging geometric intersections and analytical or numerical solvers tailored to the light type [S2, unofficial]. Unlike its parent method, Semi-Analytical Fragment Shader Preintegration, which relies on adaptive preintegration over extrema of scalar polynomials, Interval Integration explicitly uses the light volume's entry and exit points to form integration bounds, allowing for closed-form solutions for directional lights and lookup-based or numerical integration for complex light sources [S2, unofficial].
++Interval Integration computes in-scattered radiance by decomposing the ray path into intervals defined by the front and back faces of a light volume, allowing analytical evaluation for directional lights and numerical or lookup-based evaluation for point and spot lights [S1, unofficial]. It differs from its parent, Semi-Analytical Fragment Shader Preintegration, by explicitly using the geometric boundaries of the light volume (front/back faces) to determine integration limits, rather than relying solely on local extrema of scalar polynomials within a fragment [S1, unofficial].
+ 
+ ## How it works
+-
+-### Inputs and Outputs
+ **Inputs:**
+-*   Camera ray origin and direction.
+-*   Light volume geometry (front and back faces) or beam parameters.
+-*   Light type (Directional, Omnidirectional, Spot).
+-*   Medium properties: Extinction coefficient $\sigma_t$, scattering coefficient $\sigma_s(x)$, phase function $p(\cdot)$.
+-*   Incident radiance $L_{in}(\omega')$ from the light source.
++- Ray origin and direction.
++- Light volume geometry (front and back faces).
++- Light type (Directional, Omnidirectional, Spot).
++- Medium properties (extinction coefficient $\tau_{ex}$, density $\rho_m$, phase function).
++- Shadow map data.
+ 
+ **Outputs:**
+-*   Scattered radiance $L(\omega)$ towards the viewer.
++- In-scattered radiance $L_S$ for the pixel.
+ 
+-### Data Structures
+-*   **Light Volume Bounds:** Defined by front face intersection distance $t_n$ and back face intersection distance $t_m$ along the ray [S2, unofficial].
+-*   **Lookup Texture:** For omnidirectional lights, a 2D texture mapping $\cos^{-1}(\mathbf{v} \cdot \mathbf{l})$ to precomputed differential values [S2, unofficial].
+-*   **Integration Intervals:** A set of intervals $[t_n, t_m]$ derived from the intersection of the viewing ray with the light volume's front and back faces [S2, unofficial].
++**Data Structures:**
++- **Light Volume Mesh:** Defined by front-face geometry $G_f$ and back-face geometry $G_b$.
++- **Lookup Texture (Omnidirectional):** Maps $\cos^{-1}(v \cdot l)$ to 2D space.
++- **Shadow Map:** Depth buffer for occlusion testing.
+ 
+-### Steps
+-1.  **Ray-Volume Intersection:** Determine the intersection of the viewing ray with the light volume (or beam). For directional lights, this defines the integration interval $[t_n, t_m]$ where $t_n$ is the distance to the front face and $t_m$ is the distance to the back face [S2, unofficial]. For beams, compute the intersection of the beam (not just the bounding volume) with the viewing ray [S1].
+-2.  **Interval Definition:** Identify the integration bounds. The contribution is computed as the sum over front faces ($G_f$) minus the sum over back faces ($G_b$) [S2, unofficial]:
+-    $$ L_S = \sum_{n \in G_f} L'_S(t_n) - \sum_{m \in G_b} L'_S(t_m) $$
+-    where $L'_S(t)$ is the indefinite integral of the scattering term [S2, unofficial].
+-3.  **Light-Specific Evaluation:**
+-    *   **Directional Lights:** Evaluate the analytic solution $L'_S(d)$ in the pixel shader. This assumes constant direction and constant power (light distance >> medium depth) [S2, unofficial].
+-    *   **Omnidirectional Lights:** Create a lookup texture mapping $\cos^{-1}(\mathbf{v} \cdot \mathbf{l})$ to 2D space. Evaluate the differential and numerically integrate using a Compute Shader [S2, unofficial].
+-    *   **Spot Lights:** Perform cone intersection to clamp the integration interval. For variable falloff, numerically integrate using Newton-Cotes methods in the pixel shader [S2, unofficial].
+-4.  **Radiance Computation:** Compute the incident radiance at the sample on the ray and the scattered fraction thereof towards the camera [S1].
++**Formulas:**
++The in-scattered radiance $L_S$ is computed as the sum of contributions from front-face intervals minus the sum of contributions from back-face intervals [S1, unofficial]:
++$$ L_S = \sum_{n \in G_f} L'_S(t_n) - \sum_{m \in G_b} L'_S(t_m) $$
++where $L'_S(t)$ is the indefinite integral of the scattering term evaluated at distance $t$ along the ray [S1, unofficial].
+ 
+-### Formulas
+-The general integral for scattered radiance is:
+-$$ L(\omega) = \int e^{-\sigma_t(s_1+s_2)} \sigma_s(x) p(\omega \cdot \omega') L_{in}(\omega') ds $$
+-where:
+-*   $L(\omega)$ is the radiance scattered towards the viewer [S1].
+-*   $\Delta x$ is the interval of the ray-beam intersection [S1].
+-*   $\sigma_t$ is the extinction coefficient [S1].
+-*   $\sigma_s(x)$ is the scattering coefficient at point $x$ [S1].
+-*   $p(\cdot)$ is the phase function [S1].
+-*   $s_1 + s_2$ is the length of the light's path from the caustic triangle to the camera [S1].
++For a directional light, assuming constant direction and power (light distance $\gg$ medium depth), the analytic solution is [S1, unofficial]:
++$$ L'_S(d) = L(d, l) \rho_m(x_l, \omega_x) \frac{1 - e^{-\tau_{ex} d}}{\tau_{ex}} $$
++where $d$ is the distance along the ray, $L$ is the light intensity, $\rho_m$ is the medium density/scattering, and $\tau_{ex}$ is the extinction coefficient [S1, unofficial].
+ 
+-For directional lights, assuming constant direction and power, the integral simplifies to an analytic function [S2, unofficial]:
+-$$ L'_S(d) = \frac{1 - e^{-\tau_{ex} d}}{\tau_{ex}} L(d, \mathbf{l}) \rho_m(x_l, \omega_x) $$
+-where $\tau_{ex}$ is the optical depth [S2, unofficial].
++**Steps:**
+ 
+-For narrow beams, a single sample approximation can be used [S1]:
+-$$ L(\omega) \approx \Delta x e^{-\sigma_t(s_1+s_2)} \sigma_s p(\omega \cdot \omega') L_{in}(\omega') $$
+-where $\Delta x$ is obtained by a cheap 2D ray-triangle edge intersection [S1].
++1. **Determine Light Volume Intersections:**
++   Calculate the intersection distances of the view ray with the front faces ($G_f$) and back faces ($G_b$) of the light volume. Let these distances be $t_n$ for $n \in G_f$ and $t_m$ for $m \in G_b$ [S1, unofficial].
+ 
+-### Parameters
+-*   $\sigma_t$: Extinction coefficient [S1].
+-*   $\sigma_s(x)$: Scattering coefficient at point $x$ [S1].
+-*   $p(\cdot)$: Phase function [S1].
++2. **Evaluate Integral Based on Light Type:**
+ 
+-### Edge Cases and Pitfalls
+-*   **Shadow Map Inconsistencies:** Shadow map contents must be consistent with scene geometry. Render both front and back faces if needed, and include distant occluders [S2, unofficial].
+-*   **Temporal AA Jitter:** Temporal AA jitter causes flickering in down-sampled buffers. Add a separate TAA resolve to down-sampled buffers before compositing [S2, unofficial].
+-*   **High-Frequency Occluders:** Performance drops at low angles due to high pixel coverage. Adjust tessellation factor based on view angle and pre-filter shadow maps [S2, unofficial].
++   - **Directional Lights:**
++     Use the analytic solution $L'_S(d)$ defined above. Evaluate this function in the pixel shader for each interval endpoint $t_n$ and $t_m$ [S1, unofficial].
+ 
+-### Pseudocode
++   - **Omnidirectional Lights:**
++     The integral is too complex for an analytic solution.
++     1. Create a lookup texture mapping $\cos^{-1}(v \cdot l)$ to 2D space [S1, unofficial].
++     2. Evaluate the differential term using the texture.
++     3. Numerically integrate using a Compute Shader (CS) [S1, unofficial].
+ 
+-```python
+-def interval_integration(ray_origin, ray_direction, light_volume, light_type, sigma_t, sigma_s, phase_func, L_in):
+-    """
+-    Computes scattered radiance using interval integration.
+-    
+-    Args:
+-        ray_origin: vec3, origin of the camera ray.
+-        ray_direction: vec3, direction of the camera ray.
+-        light_volume: Object containing front and back face intersection functions.
+-        light_type: Enum (DIRECTIONAL, OMNIDIRECTIONAL, SPOT).
+-        sigma_t: float, extinction coefficient.
+-        sigma_s: float, scattering coefficient.
+-        phase_func: function, phase function p(omega . omega').
+-        L_in: function, incident radiance L_in(omega').
+-        
+-    Returns:
+-        float, scattered radiance L(omega).
+-    """
+-    
+-    # Step 1: Ray-Volume Intersection
+-    # Determine intersection distances with front and back faces
+-    t_front = light_volume.intersect_front(ray_origin, ray_direction)
+-    t_back = light_volume.intersect_back(ray_origin, ray_direction)
+-    
+-    # If no intersection, return 0
+-    if t_front is None or t_back is None:
+-        return 0.0
+-    
+-    # Step 2: Interval Definition
+-    # The integration interval is [t_front, t_back]
+-    # Contribution is L'_S(t_front) - L'_S(t_back)
+-    
+-    if light_type == DIRECTIONAL:
+-        # Step 3a: Directional Light - Analytic Solution
+-        # Assumes constant direction and power
+-        L_front = analytic_directional_integral(t_front, sigma_t, sigma_s, phase_func, L_in)
+-        L_back = analytic_directional_integral(t_back, sigma_t, sigma_s, phase_func, L_in)
+-        return L_front - L_back
+-        
+-    elif light_type == OMNIDIRECTIONAL:
+-        # Step 3b: Omnidirectional Light - Lookup Texture + Numerical Integration
+-        # Create lookup texture mapping cos^-1(v . l) to 2D space
+-        # Evaluate differential and numerically integrate using Compute Shader
+-        # Note: This step typically involves a pre-pass or texture lookup
+-        L_front = lookup_and_integrate_omni(t_front, sigma_t, sigma_s, phase_func, L_in)
+-        L_back = lookup_and_integrate_omni(t_back, sigma_t, sigma_s, phase_func, L_in)
+-        return L_front - L_back
+-        
+-    elif light_type == SPOT:
+-        # Step 3c: Spot Light - Cone Intersection + Numerical Integration
+-        # Perform cone intersection to clamp the interval
+-        t_clamped_front = clamp_to_spot_cone(t_front, ray_origin, ray_direction, light_volume.spot_params)
+-        t_clamped_back = clamp_to_spot_cone(t_back, ray_origin, ray_direction, light_volume.spot_params)
+-        
+-        # Numerically integrate using Newton-Cotes methods in the pixel shader
+-        L_front = numerical_integration_spot(t_clamped_front, sigma_t, sigma_s, phase_func, L_in)
+-        L_back = numerical_integration_spot(t_clamped_back, sigma_t, sigma_s, phase_func, L_in)
+-        return L_front - L_back
++   - **Spot Lights:**
++     1. Perform cone intersection to clamp the integration interval to the light cone [S1, unofficial].
++     2. If the spot light has variable angular falloff, perform numerical integration using Newton-Cotes methods in the pixel shader [S1, unofficial].
++     3. If the spot light has no falloff, treat it as a point light. If it has fixed falloff, use a modified point light lookup texture [S1, unofficial].
+ 
+-def analytic_directional_integral(t, sigma_t, sigma_s, phase_func, L_in):
+-    """
+-    Computes the analytic integral for directional lights.
+-    L'_S(d) = (1 - exp(-tau_ex * d)) / tau_ex * L(d, l) * rho_m(x_l, omega_x)
+-    """
+-    # tau_ex is optical depth, assumed constant for this simplification
+-    tau_ex = sigma_t 
+-    # L(d, l) is incident radiance at distance d
+-    # rho_m is medium reflectance/scattering term
+-    # For simplicity, assuming L_in and rho_m are constant or pre-evaluated
+-    L_incident = L_in(t)
+-    rho_m = 1.0 # Placeholder for medium property
+-    
+-    term = (1.0 - exp(-tau_ex * t)) / tau_ex
+-    return term * L_incident * rho_m
++3. **Compute Final Radiance:**
++   Apply the sum and difference formula:
++   $$ L_S = \sum_{n \in G_f} L'_S(t_n) - \sum_{m \in G_b} L'_S(t_m) $$
++   [S1, unofficial].
+ 
+-def lookup_and_integrate_omni(t, sigma_t, sigma_s, phase_func, L_in):
+-    """
+-    Placeholder for omnidirectional light integration using lookup texture.
+-    In practice, this involves sampling a precomputed texture based on view-light angle.
+-    """
+-    # This step is complex and typically handled by a compute shader pre-pass
+-    # or a texture lookup in the pixel shader.
+-    # For the purpose of this pseudocode, we assume a helper function exists.
+-    return 0.0 # Not given in the sources.
++4. **Composite:**
++   Additively blend the resolved/filtered output with the scene. Use dual-source blending to attenuate based on medium and depth [S1, unofficial].
+ 
+-def numerical_integration_spot(t, sigma_t, sigma_s, phase_func, L_in):
+-    """
+-    Placeholder for spot light integration using Newton-Cotes methods.
+-    """
+-    # This step involves numerical integration in the pixel shader.
+-    # For the purpose of this pseudocode, we assume a helper function exists.
+-    return 0.0 # Not given in the sources.
+-
+-def clamp_to_spot_cone(t, ray_origin, ray_direction, spot_params):
+-    """
+-    Clamps the intersection distance to the spot light cone.
+-    """
+-    # Check if the ray intersects the spot cone
+-    # If not, return None or a clamped value
+-    # This is a geometric check
+-    return t # Simplified
+-```
+-
+-## Subtopics
+-
+-### Directional Light Interval Integration
+-*   **What it is:** A specialized case of interval integration where the light source is at infinity, allowing for an analytic solution.
+-*   **What sets it apart:** It uses a closed-form formula evaluated in the pixel shader, avoiding numerical integration or lookups.
+-*   **When to choose it:** Use for sun or moon lighting where the light direction is constant and the light distance is much larger than the medium depth.
+-*   **Link:** [Directional Light Interval Integration](#)
+-
+-### Omnidirectional Light Interval Integration
+-*   **What it is:** A case where the light source is a point, requiring a lookup texture and numerical integration.
+-*   **What sets it apart:** It uses a precomputed lookup texture mapping $\cos^{-1}(\mathbf{v} \cdot \mathbf{l})$ to handle the complexity of the angular dependence.
+-*   **When to choose it:** Use for point lights or lamps where the light direction varies significantly across the medium.
+-*   **Link:** [Omnidirectional Light Interval Integration](#)
+-
+-### Spot Light Interval Integration
+-*   **What it is:** A case where the light source is a cone, requiring cone intersection and numerical integration.
+-*   **What sets it apart:** It involves clamping the integration interval to the spot cone and using Newton-Cotes methods for variable falloff.
+-*   **When to choose it:** Use for spotlights with complex falloff profiles.
+-*   **Link:** [Spot Light Interval Integration](#)
++**Pitfalls:**
++- **Shadow Map Inconsistencies:** If the shadow map does not include both front and back faces of occluders, or if distant occluders are missing, artifacts appear. Ensure shadow map contents are consistent with scene geometry [S1, unofficial].
++- **Temporal AA Jitter:** Temporal AA jitter causes flickering in down-sampled buffers because a 1px flicker at full resolution becomes a 4x4px artifact in a 1/4 resolution buffer. Add a separate TAA resolve to down-sampled buffers before compositing [S1, unofficial].
++- **High-Frequency Occluders:** Performance drops at low angles due to high pixel coverage. Adjust tessellation factor based on view angle and pre-filter shadow maps [S1, unofficial].
+ 
+ ## Operating characteristics
+-
+-*   **Time Complexity:** Depends on the light type. Directional lights are $O(1)$ per fragment due to the analytic solution. Omnidirectional and spot lights require numerical integration or texture lookups, which are more expensive but still constant per fragment.
+-*   **Memory Complexity:** Requires storage for the light volume geometry and lookup textures for omnidirectional and spot lights.
+-*   **Measured Performance:** The method is fast enough for real-time rendering on modern hardware. For example, rendering 90 beams took 4.2 ms in one implementation [S1].
+-*   **Scaling:** Performance scales with the number of fragments rasterized and the complexity of the light volume. High-frequency occluders can cause performance drops at low angles [S2, unofficial].
+-*   **Strengths:** Efficient for directional lights; flexible for other light types; compatible with physically-based engines.
+-*   **Limitations:** Requires consistent shadow maps; sensitive to temporal AA jitter; performance can drop with high-frequency occluders.
+-*   **When to use it:** Use for real-time volumetric light scattering in games and interactive applications.
+-*   **When not:** Avoid for offline rendering where higher accuracy is required, or for scenes with extremely complex light volumes that exceed memory limits.
++- **Time Complexity:** Depends on light type. Directional lights are $O(1)$ per interval in the pixel shader. Omnidirectional and Spot lights require numerical integration or texture lookups, which are more expensive [S1, unofficial].
++- **Memory Complexity:** Requires storage for light volume geometry, shadow maps, and potentially lookup textures for omnidirectional lights [S1, unofficial].
++- **Performance:** Fast enough for entire spec range on DirectX 11 hardware. Performance is proportional to total pixel coverage. High-frequency occluders at low angles can cause significant overhead [S1, unofficial].
++- **Strengths:** Physically-based, flexible, compatible with real-time engines. Analytic solution for directional lights is very efficient [S1, unofficial].
++- **Limitations:** Complex for omnidirectional and spot lights. Requires careful handling of shadow maps and temporal filtering to avoid artifacts [S1, unofficial].
+ 
+ ## Background
+-
+-*   **Origin:** The method was developed for use in *Fallout 4* by Bethesda Game Studios [S2, unofficial].
+-*   **History:** It was presented in a GDC talk titled "Volumetric Light Scattering in Fallout 4" [S2, unofficial].
+-*   **Development:** The method was integrated into the Creation Engine and has been used in *Fallout 4* and potentially other Bethesda games.
+-*   **Usage:** It is used in real-time rendering of volumetric light scattering in games, particularly for simulating light beams in foggy or dusty environments.
++This method was developed by NVIDIA for use in *Fallout 4* [S1, unofficial]. Development began in February 2014, with artists authoring environments in March [S1, unofficial]. It is part of the Gameworks Volumetric Lighting system, which is compatible with physically-based engines and available on DirectX 11 [S1, unofficial]. The approach builds on earlier work such as Hoffman and Preetham (2002) and Sun et al. (2005) [S1, unofficial].
+ 
+ ## Sources
+-
+-[S1] Real-time volume caustics with adaptive beam tracing, https://doi.org/10.1145/1944745.1944753, fetched 2026-10-28
+-[S2] Volumetric Light Scattering in Fallout 4, https://www.scribd.com/document/748135006/Fast-Flexible-Physically-Based-Volumetric-Light-Scattering, fetched 2026-10-29 (unofficial)+[S1] Volumetric Light Scattering in Fallout 4, https://www.scribd.com/document/748135006/Fast-Flexible-Physically-Based-Volumetric-Light-Scattering, fetched 2026-10-29 (unofficial)

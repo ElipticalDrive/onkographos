@@ -1,24 +1,24 @@
 # LevelSetHDDA
 
-Also called: Hierarchical DDA for Level Sets, Hierarchical Digital Differential Analyzer for Level Set trees, LevelSet Hierarchical DDA
+Also called: Hierarchical DDA for Level Sets, Hierarchical Digital Differential Analyzer for Level Set trees, LevelSet Hierarchical DDA, LevelSetHDDA (Hierarchical DDA for Level Sets)
 
 ## Overview
 LevelSetHDDA is a specialized Hierarchical Digital Differential Analyzer (HDDA) designed for static intersection testing against level set trees [S1, S2, unofficial]. It recursively traverses a VDB tree hierarchy from a specified node level down to the leaf level (-1) to determine if a ray intersects the implicit surface [S1, S2, unofficial]. It sets itself apart from generic volume traversal methods like [VolumeHDDA](2815-volume-hdda.md) by targeting the specific structure of level sets, where the traversal terminates at the voxel level rather than the leaf node level, allowing for precise surface intersection checks via a provided tester object [S1, S2, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-*   **Input:** A ray $\mathbf{r}$, a tester object `TesterT` that defines the intersection logic, and a tree type `TreeT` representing the level set structure.
-*   **Output:** A boolean indicating whether the ray intersects the level set surface within the tested range.
+*   **Input:** A ray $\mathbf{r}$, a tester object `TesterT` that defines the intersection logic, and a tree type `TreeT` representing the level set structure [S1, unofficial].
+*   **Output:** A boolean indicating whether the ray intersects the level set surface within the tested range [S1, unofficial].
 
 **Data Structures**
-The method relies on the OpenVDB tree hierarchy.
-*   `TreeT`: The VDB tree type.
+The method relies on the OpenVDB tree hierarchy [S2, unofficial].
+*   `TreeT`: The VDB tree type [S2, unofficial].
 *   `ChainT`: Defined as `typename TreeT::RootNodeType::NodeChainType` [S1, S2, unofficial].
 *   `NodeT`: The node type at the current `NodeLevel`, defined as `typename ChainT::template Get<NodeLevel>` [S1, S2, unofficial].
-*   `math::DDA`: A Digital Differential Analyzer instance. For non-leaf levels, it is instantiated with `NodeT::TOTAL` (the number of voxels along one dimension of the node). For the leaf level (-1), it is instantiated with `0` (representing voxel-level traversal) [S1, S2, unofficial].
+*   `math::DDA`: A Digital Differential Analyzer instance. For non-leaf levels, it is instantiated with `NodeT::TOTAL` (the number of voxels along one dimension of the node) [S1, S2, unofficial]. For the leaf level (-1), it is instantiated with `0` (representing voxel-level traversal) [S1, S2, unofficial].
 
 **Parameters**
-*   `TreeT`: The template parameter specifying the tree structure.
+*   `TreeT`: The template parameter specifying the tree structure [S2, unofficial].
 *   `NodeLevel`: The integer template parameter specifying the current node level in the hierarchy being tested. The recursion proceeds from this level down to `-1` [S1, S2, unofficial].
 
 **Algorithm Steps**
@@ -46,63 +46,42 @@ The algorithm is implemented as a template struct `LevelSetHDDA<TreeT, int NodeL
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Template struct LevelSetHDDA<TreeT, NodeLevel>
-# NodeLevel is an integer > -1
-
-struct LevelSetHDDA:
-    # Type aliases derived from TreeT
-    ChainT = TreeT.RootNodeType.NodeChainType
-    NodeT = ChainT.Get[NodeLevel]
-
-    static function test(TesterT tester):
-        # Initialize DDA for the current node size
-        # NodeT::TOTAL is the dimension of the node
-        dda = math.DDA(tester.ray(), NodeT::TOTAL)
-        
+def test_level_set_hdda(tester, node_level):
+    """Recursive traversal for LevelSetHDDA."""
+    if node_level == -1:
+        # Base case: voxel level traversal
+        dda = DDA(tester.ray(), 0)
+        tester.init(dda.time)
         while dda.step():
-            # Check if the current voxel contains a node of the expected type
-            if tester.hasNode[NodeT](dda.voxel()):
-                # Set the time range for the recursive step
-                tester.setRange(dda.time(), dda.next())
-                
-                # Recurse to the next lower level
-                if LevelSetHDDA<TreeT, NodeLevel-1>.test(tester):
-                    return True
-        
-        return False
-
-# Specialization for NodeLevel = -1 (Voxel level)
-struct LevelSetHDDA_Voxel:
-    static function test(TesterT tester):
-        # Initialize DDA for voxel-level traversal
-        dda = math.DDA(tester.ray(), 0)
-        
-        # Initialize tester with start time
-        tester.init(dda.time())
-        
-        while dda.step():
-            # Test the specific voxel and time interval
-            if tester(dda.voxel(), dda.next()):
+            if tester(dda.voxel, dda.next):
                 return True
-        
+        return False
+    else:
+        # General case: hierarchical node traversal
+        node_total = tester.tree_type.root_node_type.node_chain_type.get(node_level).TOTAL
+        dda = DDA(tester.ray(), node_total)
+        while dda.step():
+            if tester.has_node(node_level, dda.voxel):
+                tester.set_range(dda.time, dda.next)
+                if test_level_set_hdda(tester, node_level - 1):
+                    return True
         return False
 ```
 
 **Edge Cases and Pitfalls**
-*   **Precision:** The DDA uses floating-point arithmetic for ray traversal. Precision issues may arise with very long rays or very small features, potentially causing missed intersections or false positives depending on the tester's tolerance [S1, S2, unofficial].
+*   **Precision:** The DDA uses floating-point arithmetic for ray traversal. Precision issues may arise with very long rays or very small features, potentially causing missed intersections or false positives depending on the tester's tolerance [G].
 *   **Empty Trees:** If the tree is empty or the ray does not intersect any active nodes, the traversal will complete without triggering the tester's intersection logic, correctly returning false [S1, S2, unofficial].
-*   **Tester Implementation:** The correctness of the intersection depends entirely on the `TesterT` implementation. The tester must correctly interpret `dda.voxel()` and `dda.next()` to determine surface intersection [S1, S2, unofficial].
+*   **Tester Implementation:** The correctness of the intersection depends entirely on the `TesterT` implementation. The tester must correctly interpret `dda.voxel()` and `dda.next()` to determine surface intersection [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Proportional to the number of nodes and voxels traversed by the ray. In sparse level sets, this is significantly faster than linear voxel traversal because inactive nodes are skipped [S1, S2, unofficial].
-*   **Memory Complexity:** Minimal additional memory usage, primarily for the recursion stack and DDA state. The tree structure itself is read-only during traversal [S1, S2, unofficial].
+*   **Time Complexity:** Proportional to the number of nodes and voxels traversed by the ray [S1, S2, unofficial].
+*   **Memory Complexity:** Minimal additional memory usage, primarily for the recursion stack and DDA state [S1, S2, unofficial].
 *   **Strengths:** Efficient for sparse data; leverages the hierarchical structure of VDB trees; precise surface intersection testing [S1, S2, unofficial].
 *   **Limitations:** Requires a properly implemented tester; recursion depth is limited by the tree depth [S1, S2, unofficial].
 *   **When to use:** When performing static intersection tests against level set surfaces in OpenVDB [S1, S2, unofficial].
-*   **When not to use:** For dense volumes where leaf-node traversal is sufficient, or when dynamic updates to the tree structure occur concurrently with traversal [S1, S2, unofficial].
 
 ## Background
-LevelSetHDDA is part of the OpenVDB library, developed by DreamWorks Animation and later maintained by the Academy Software Foundation. It is defined in `openvdb/math/DDA.h` [S1, S2, unofficial]. The method was introduced to provide efficient ray-casting capabilities for level set data, which is commonly used in visual effects for fluid simulation and surface representation [S1, S2, unofficial].
+LevelSetHDDA is defined in `openvdb/math/DDA.h` [S1, S2, unofficial]. The method was introduced to provide efficient ray-casting capabilities for level set data, which is commonly used in visual effects for fluid simulation and surface representation [S1, S2, unofficial].
 
 ## Sources
 [S1] OpenVDB: openvdb/math/DDA.h Source File, https://academysoftwarefoundation.github.io/openvdb/DDA_8h_source.html, fetched 2026-10-24 (unofficial)

@@ -1,0 +1,81 @@
+# Radiance-Predicting Neural Networks (RPNN)
+Also called: Radiance-Predicting Neural Networks (RPNN) for clouds
+
+## Overview
+Radiance-Predicting Neural Networks (RPNN) is a neural volume rendering technique that uses a multilayer perceptron (MLP) to predict radiance for multiple scattering events in high-order scattering media, such as atmospheric clouds [S1]. Unlike its sibling [In-Shader Neural Volume Ray Marching](1495-in-shader-neural-volume-ray-marching.md), which evaluates the network per sample point during ray marching, RPNN queries the network for the accumulated multiple scattering contribution based on a global shading configuration, enabling results nearly identical to path tracing but approximately a thousand times faster [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A shading configuration consisting of the sample location, view direction, light source position/direction, and the density structure of the cloud [S1].
+*   **Output:** The predicted radiance contribution from multiple scattering [S1].
+
+**Data Structures:**
+*   **Hierarchical Point Stencils:** A hierarchy of point stencils is used to represent cloud density at varying scales [S1]. This hierarchy serves as the input descriptor for the network.
+*   **Multilayer Perceptron (MLP):** The network structure is an MLP [S1]. The hierarchical descriptor is fed progressively into the network [S1].
+
+**Algorithm Steps:**
+1.  **Preprocessing (Training):** Construct a hierarchy of point stencils to represent the cloud density at various scales [S1]. Train the MLP to map the shading configuration (location, direction, light source, density structure) to the multiple scattering radiance [S1].
+2.  **Rendering - Direct/Single Scattering:** Perform Monte Carlo rendering to calculate direct lighting and single scattering contributions [S1].
+3.  **Rendering - Multiple Scattering:** For each pixel or sample, construct the shading configuration [S1]. Query the trained RPNN with this configuration to obtain the multiple scattering radiance [S1].
+4.  **Compositing:** Combine the Monte Carlo results (direct + single scattering) with the RPNN prediction (multiple scattering) to form the final image [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for RPNN rendering
+# Note: Training phase is assumed to have produced a trained MLP model.
+
+def render_rpnn(scene, camera, trained_mlp):
+    """
+    Renders a scene using RPNN for multiple scattering.
+    """
+    image = empty_image(scene.width, scene.height)
+    
+    for y in range(scene.height):
+        for x in range(scene.width):
+            # 1. Cast ray and gather basic shading configuration
+            ray = camera.get_ray(x, y)
+            shading_config = {
+                'location': ray.origin, # Placeholder for specific location logic
+                'direction': ray.direction,
+                'light_source': scene.light_position,
+                'density_structure': scene.get_density_hierarchy(ray) # Hierarchical point stencils
+            }
+            
+            # 2. Monte Carlo for Direct and Single Scattering
+            mc_radiance = monte_carlo_direct_and_single_scattering(ray, scene)
+            
+            # 3. Query RPNN for Multiple Scattering
+            # The MLP takes the shading configuration as input
+            # The exact input vectorization of 'density_structure' depends on the 
+            # specific hierarchical descriptor implementation [S1].
+            ms_radiance = trained_mlp.predict(shading_config)
+            
+            # 4. Composite
+            final_radiance = mc_radiance + ms_radiance
+            image[y, x] = final_radiance
+            
+    return image
+```
+
+**Edge Cases and Pitfalls:**
+*   **Density Structure Representation:** The method relies on a "hierarchy of point stencils" [S1]. The exact method for encoding this hierarchy into the MLP input vector is not detailed in the provided sources [S1].
+*   **Training Data:** The sources do not specify how the training data for the RPNN is generated (e.g., via path tracing) or the loss function used [S1].
+
+## Subtopics
+
+## Operating characteristics
+*   **Performance:** The method is reported to be approximately a thousand times faster than path tracing while producing nearly identical results [S1].
+*   **Accuracy:** Rendering results are described as "almost identical" to path tracing [S1].
+*   **Complexity:** The complexity depends on the MLP inference time and the Monte Carlo sampling for direct/single scattering. The hierarchical stencil construction adds preprocessing cost [S1].
+*   **Limitations:** The method is specifically designed for high-order scattering media like atmospheric clouds [S1]. The reliance on a pre-trained network means it may not generalize well to unseen cloud structures without retraining [G].
+
+## Background
+*   **Origin:** Proposed by Kallweit et al. [S1].
+*   **Paper:** The method is discussed in the context of atmospheric cloud rendering in "Participating media rendering based on neural networks" [S1].
+*   **Citation:** The specific reference for the RPNN method is Kallweit et al. [64] [S1].
+*   **Application:** Primarily used for rendering atmospheric clouds, which are high-order scattering media requiring long computation times for multiple scattering simulation [S1].
+
+## Sources
+[S1] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26

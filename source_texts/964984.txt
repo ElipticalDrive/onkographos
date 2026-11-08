@@ -1,0 +1,205 @@
+The Persistence of Vision Raytracer (POV-Ray). Contribute to randomdevltd/povray development by creating an account on GitHub.
+
+Light samples by contribution: finish { light_samples M [full | by_contribution] }, by_contribution the default from #version 4.0 by randomdevpete · Pull Request #124 · randomdevltd/povray · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+randomdevpete
+commented
+Nov 8, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Adds a mode to the finish's light_samples. It is the default from #version 4.0 (and in .pov4 scenes); older versions keep classic full sampling:
+```
+finish { light_samples M [full | by_contribution] }
+#default { finish { light_samples 1 full } }   // classic sampling for a whole 4.0 scene (default { ... } in .pov4)
+```
+With by_contribution, a lit hit takes light samples in proportion to its contribution to the pixel. A hit seen through a faint reflection or through several clear layers takes few samples. Every surface the camera sees directly, clear ones included, takes them all. full is the classic sampling.
+Syntax and naming
+Per finish, extending light_samples M. The mode belongs to the receiving surface, like the multiplier it modifies. light_samples M alone keeps the finish's mode, so raising the multiplier never changes the mode.
+Version default, no global setting. A finish that states no mode samples by contribution from #version 4.0 and in full before it, resolved when parsing ends, as interface_texture is. #default { finish { light_samples 1 full } } (default { } in .pov4) restores classic sampling for a scene, and an explicit mode in a finish overrides either default. No new keyword was needed beyond the two values.
+Name: by_contribution. Alternatives considered:
+by_contribution (chosen): says what the sample count follows, the hit's contribution to the pixel. It reads naturally after the multiplier: light_samples 1 by_contribution.
+throughput: names the quantity used, but it is renderer jargon, and the weight also includes the light reaching the layer through the layers above.
+importance: conventional in rendering, but "importance sampling" usually means where samples go on a light, not how many a hit takes, so it would mislead.
+The word is easy to change if the owner prefers another. It appears in one table in parser_materials.cpp and one comparison in pov4.cpp, plus the docs and tests.
+full and by_contribution are values of light_samples, not finish items. The classic parser reads it from a table, so it is not mined into the 4.0 block schema. The 4.0 evaluator takes it only right after light_samples' value; a bare finish { by_contribution } is an unknown name. Both words stay free as identifiers.
+Definition
+Contribution w: the weight of the ray that found the hit (the product of reflection and transmission factors from the camera, the same weight adc_bailout tests) times the largest channel of the light reaching the texture layer through the layers above it, capped at 1.
+No opacity factor. The layer's own opacity is deliberately left out, so a clear surface the camera sees directly has w = 1. An earlier revision multiplied by opacity: clear sheets seen directly fell to one or two samples, and their lighting noise showed even though it is a small share of the pixel (see Evidence).
+Surface and volume lights: round(N x M x w) draws, at least 1.
+Classic area lights: a grid of 1 + round((n - 1) x sqrt(w)) points per side, at least 2; sides of 1 or 2 are unchanged. Applies to adaptive, jitter, circular, orient and area_illumination alike.
+Ceiling: never more samples than full.
+Layered textures: each layer has its own mode and weight. A classic area light's shadow is cached per hit and shared by its layers. It is sampled again when a later layer weighs more than the one it was sampled for, so the heaviest layer sets the grid.
+Unbiased: fewer samples add noise, not a brightness change.
+Deterministic: the weight depends only on the ray's path, so images are identical for any thread count.
+Anti-aliasing: every camera ray starts at w = 1. Judge the mode at -A, because adaptive AA reacts to noise.
+Only surface lighting is scaled, which is deliberately conservative. Media lighting (every method), subsurface scattering (both methods), photons and radiosity gather rays never read the weight and keep their full counts. Subsurface runs after the weight is restored, and the media sample counts don't see it.
+Deferred
+Media light sampling: the weight would have to be passed into MediaFunction, with a per-path decision for the classic, fixed-path and prepared method 4 counts.
+Subsurface: method 2 irradiance is cached and shared across pixels. Method 1's per-hit budget could be weighted.
+Radiosity gathers (radiosityShare): the cached results are reused across pixels, so this needs its own evaluation.
+Evidence
+Scenes: generic, 320x240, every render -A. Cost is user-space instructions (perf counters, all threads). RMSE is on the 0-255 scale, against a full-sampling reference at S256/G33 (S = surface/volume light samples, G = classic area light grid side).
+Scene
+full S16 (performance)
+by_contribution S16
+by_contribution S32
+full at matched cost
+Clear filtering slabs, surface light
+195.6G · 4.93
+85.4G (2.3x fewer) · 5.27
+145.7G (1.34x fewer) · 3.71
+S12: 151.4G · 5.93
+Glossy/mirror/glass spheres, volume + classic area light
+50.9G · 0.513
+30.7G (1.66x fewer) · 0.589
+49.2G · 0.455
+(full S16 is the match for S32)
+12 surface + 3 classic area lights, reflective floor, glass
+325.1G · 0.819
+223.4G (1.46x fewer) · 0.841
+400.7G · 0.574
+S10: 220.7G · 1.081
+Plain opaque, surface + classic area light
+17.27G · 3.576
+17.29G · identical pixels
+Top clear sheet (slabs scene, S16): the earlier revision multiplied by the sheet's opacity (0.07), leaving a directly seen sheet 1 of 16 samples.
+Region
+full
+with opacity factor (earlier)
+by_contribution
+Over the dark background
+0.34
+1.89
+0.45
+Over the floor
+4.59
+5.47
+4.68
+At matched cost, the top sheet's RMSE is 5.21 for full S12 and 3.43 for by_contribution S32. Shadows cast through the sheet were not the cause: the floor beneath keeps about 15 of 16 samples in both revisions.
+Version default (no mode stated, S16, against performance):
+#version 3.8 slabs keep classic sampling: 0 of 76,800 px differ (195.6G vs 195.7G).
+#version 4.0 opaque area-lit scene: 0 of 76,800 px differ (17.29G vs 17.29G).
+#version 4.0 slabs sample by contribution: 90.9G against 207.2G (2.3x fewer).
+With full, this branch is pixel-identical to performance. With by_contribution, images are identical at 1 thread and the default thread count.
+Tests
+tests/render/light_samples_by_contribution.sh (in check-quick) checks:
+A #version 3.8 scene with no mode samples in full (identical to explicit full and to plain light_samples 1).
+A #version 4.0 scene with no mode samples by contribution (identical image and draw count to explicit by_contribution, and fewer draws than explicit full); plain light_samples 1 keeps that default.
+The mode takes fewer surface draws and fewer classic shadow rays.
+A finish's own light_samples 1 full opts out of a default that has the mode.
+Images are identical at 1, 2 and 4 threads.
+A directly seen floor gives an identical image with identical counts.
+A directly seen clear slab draws exactly what full sampling draws.
+A layered floor (a light clear layer over an opaque one) traces at least the opaque floor's shadow rays.
+Means agree within 0.5% at 2048 samples.
+A .pov4 scene with no mode samples by contribution and lowers to the same render.
+A bare by_contribution and an unknown word after light_samples are refused.
+Also in this PR:
+Docs: r3_6 Finish (syntax, what M means, the 4.0 default, when to choose full, an example), the r3_3 keyword index, contextual words and version-defaults table, changes.txt, tools/language/reference/SKILL.md, reference cards for full and by_contribution, and a #version 4.0 example scene distribution/scenes/lights/light_samples_by_contribution.pov.
+The derived language tables are regenerated (blocks.json, pov4schema.h, the grammar doc, keywords.json, the VS Code tables and the reference descriptions). The grammar needs no change.
+Affected suites (4.0 scenes with area or object lights) pass locally under the new default: light_emission, surface_light, look_at_framing, interior_axis_media, physical_media_phase, refraction_frontend, split_union_media, progressive_volume and progressive_media_light.
+🤖 Generated with Claude Code
+randomdevpete
+force-pushed
+the
+perf/weighted-light-samples
+branch
+from
+6081fac to
+ffef07d
+Compare
+November 8, 2026 01:34
+randomdevpete
+changed the title
+Weighted light sampling: light_sampling weighted scales a hit's light samples by its share of the pixel
+Light samples by contribution: finish { light_samples M by_contribution } scales a hit's light samples by its contribution to the pixel
+Nov 8, 2026
+Light samples by contribution: a finish's light samples scale with ea…
+…
+24e58aa
+```
+…ch hit's contribution to the pixel
+
+finish { light_samples M [full | by_contribution] }. M multiplies every
+surface and volume light's samples, as before. by_contribution scales each
+lit hit's samples by its contribution to the pixel: the ray's weight (the
+one adc_bailout tests) times the largest channel of the light reaching the
+texture layer through the layers above, capped at 1. Surface and volume
+lights draw round(N x M x w) points, at least 1. Classic area lights sample
+a grid whose sides shrink to 1 + round((n - 1) x sqrt(w)) points, at least
+2, for shadows and area_illumination alike. A layer's own opacity is not
+part of w, so every surface the camera sees directly, clear or not, keeps
+full samples. full is the classic sampling.
+
+by_contribution is the default from #version 4.0 and in .pov4 scenes; full
+is the default before. light_samples M alone keeps the finish's mode, and
+a whole scene.
+
+A hit's layers share a classic area light's cached shadow, so the cache
+records the weight a shadow was sampled at and samples it again for a
+heavier layer. Radiosity gather rays, media, subsurface and photons keep
+their full counts. The weight follows the ray's path, so images do not
+depend on the thread count.
+
+full and by_contribution are values of light_samples, read from a table so
+they are not finish items in the 4.0 block schema; the 4.0 evaluator takes
+them only right after light_samples' value. Documented in r3_6 (Finish),
+the r3_3 keyword index, contextual words and version defaults,
+changes.txt, the language reference cards and SKILL.md, with an example
+scene. The light_samples_by_contribution render suite, in check-quick,
+covers both version defaults, explicit modes and opt-out, fewer draws and
+shadow rays, thread identity, an unchanged directly seen floor and clear
+slab, layered textures, many-sample means, the 4.0 language and refused
+values.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+randomdevpete
+force-pushed
+the
+perf/weighted-light-samples
+branch
+from
+ee96fa7 to
+24e58aa
+Compare
+November 8, 2026 12:43
+randomdevpete
+changed the title
+Light samples by contribution: finish { light_samples M by_contribution } scales a hit's light samples by its contribution to the pixel
+Light samples by contribution: finish { light_samples M [full | by_contribution] }, by_contribution the default from #version 4.0
+Nov 8, 2026
+randomdevpete
+marked this pull request as ready for review
+November 8, 2026 13:22
+Hide details
+View details
+randomdevpete
+merged commit abf3826
+into
+performance
+Nov 8, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

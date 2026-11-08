@@ -1,0 +1,341 @@
+Hi, I'm using Magnum for an OpenGL / CUDA (10.1) application. I've extended the buffer and texture classes to allow for interop with CUDA. I use GLM vector/matrix types in CUDA kernel code because then I can use the same type of logic in...
+
+CUDA support, testing and interop · Issue #345 · mosra/magnum · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+CUDA support, testing and interop #345
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+CUDA support, testing and interop#345
+Copy link
+Description
+carsonswope
+opened on Jun 2, 2019
+Issue body actions
+Hi,
+I'm using Magnum for an OpenGL / CUDA (10.1) application. I've extended the buffer and texture classes to allow for interop with CUDA. I use GLM vector/matrix types in CUDA kernel code because then I can use the same type of logic in OpenGL shaders as well as CUDA kernels.
+Not sure if you're familiar with how CUDA compilation works, but CUDA basically provides it's own compiler (NVCC) which is essentially a wrapper around whichever C++ compiler you are using (in this case MSVC is the only compiler CUDA supports on Windows, I'm using visual studio 2017), so that 'host' code can be compiled using MSVC and 'device' code can be compiled using the extended CUDA features in the NVCC compiler, all packaged as a nice .dll or .lib or .exe depending on what you are trying to compiler.
+In short, NVCC fails to compile Magnum presumably due to a bug in NVCC failing to fully support C++ features. I've traced the issue to the 'Magnum/Math/RectangularMatrix.h` file, to this line:
+```
+template<std::size_t cols, std::size_t rows, class T> constexpr auto RectangularMatrix<cols, rows, T>::diagonal() const -> Vector<DiagonalSize, T> { return diagonalInternal(typename Implementation::GenerateSequence<DiagonalSize>::Type()); }
+```
+And here is the error:
+```
+C:\code\projects\3d_bz\third_party\magnum\src\Magnum\Math\RectangularMatrix.h(750): error C2244: 'Magnum::Math::RectangularMatrix<cols,rows,T>::diagonal': unable to match function definition to an existing declaration
+```
+I replace DiagonalSize in the function declaration and the implementation with the same expression used to declare the original enum value DiagonalSize, it compiles sucessfully:
+```
+constexpr Vector<(cols < rows ? cols : rows), T> diagonal() const;
+...
+template<std::size_t cols, std::size_t rows, class T> constexpr auto RectangularMatrix<cols, rows, T>::diagonal() const -> Vector<(cols < rows ? cols : rows), T> { return diagonalInternal(typename Implementation::GenerateSequence<DiagonalSize>::Type()); }
+```
+As a quick workaround, this also worked (original implementation declaration):
+```
+#ifndef __NVCC__
+template<std::size_t cols, std::size_t rows, class T> constexpr auto RectangularMatrix<cols, rows, T>::diagonal() const -> Vector<DiagonalSize, T> { return diagonalInternal(typename Implementation::GenerateSequence<DiagonalSize>::Type()); }
+#endif
+```
+What do you think the best way forward for me is? I would prefer pushing my changes to your repo over maintaining my own fork, but I realize (a) you may not want to officially support the NVCC compiler (this doesn't necessarily entail supporting being used in CUDA kernels, note) and (b) hopefully NVIDIA will fix this bug at some point. (I plan to file a bug report, but somehow I think they operate a fair bit slower). My first solution doesn't explicitly mention NVCC in the code, but it would probably be easy to forget about this and simplify the code back to the way you had it, re-breaking my use case in the process. And I don't know how hard a test case would be to generate for this - I would be happy to do so myself but would need some direction.
+Thanks!
+👍React with 👍1Reacted by bobluoluo
+Activity
+mosra commented on Jun 16, 2019
+mosra
+on Jun 16, 2019
+Owner
+More actions
+Hi,
+sorry for the late reply, past weeks were quite busy for me. Yes, having the core repo CUDA-compatible is definitely a good idea, much better than maintaining a fork. Two questions:
+Is there an easy way for me to test this? (I'm primarily on Linux and I don't have a NV GPU.)
+Do you have an idea if this could be tested for regressions using the CIs (Travis, AppVeyor...)? Because just fixing this one particular case won't ensure there won't be other breakages in the future.
+Thank you!
+carsonswope commented on Jun 24, 2019
+carsonswope
+on Jun 24, 2019
+Author
+More actions
+Thanks for getting back to me..
+For you to test this, you should be able to download the CUDA SDK on Linux and at least use it for compilation, even if you don't have an NV GPU to actually run the output. Note that the CUDA compiler is very picky on Linux about what Linux kernel, GCC and even std library versions you are using: https://docs.nvidia.com/cuda/cuda-installation-guide-linux/index.html
+(I understand if that sounds like too much work for you... at some point I may be able to test this out myself on Linux, it's just going to be a bit of work to reconfigure my dual boot, so not high on my priority list)
+If you've set up the sdk, I managed to set up a minimal reproduction of the issue you could try. Clone magnum and corrade into a directory, and add the following two files (MSVC2017_COMPAT flag is probably not necessary for you...):
+```
+#CMakeLists.txt
+
+cmake_minimum_required(VERSION 3.8)
+project(Project LANGUAGES CXX CUDA)
+find_package(CUDA 10.1 EXACT REQUIRED)
+
+set(MSVC2017_COMPATIBILITY ON CACHE BOOL "" FORCE)
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/magnum/modules/")
+add_subdirectory(corrade)
+add_subdirectory(magnum)
+
+add_executable(Main main.cu)
+target_link_libraries(Main PRIVATE Magnum::Magnum Magnum::GL)
+```
+```
+//main.cu
+
+#include <iostream>
+#include <Magnum/Math/RectangularMatrix.h>
+
+__global__ void run() { printf("hi from cuda"); }
+
+int main() {
+	run<<<1, 1>>>();
+	printf("cuda, meet magnum\n");
+	return 0;
+}
+```
+to test build from command line (make it's a 64 bit build, I think CUDA doesn't work on 32 bit):
+```
+mkdir build
+cd build
+cmake ..
+cmake --build . --target Main
+```
+As far as CI testing goes, there's no reason that the CUDA compiler can't be loaded into something like AppVeyor. I assume your CI builds use cmake?
+I found this https://www.olegtarasov.me/build-cuda-projects-with-appveyor/ walking through how to install the CUDA SDK on a cloud CI system with only the important stuff - I think that would be step 1, and step 2 would be add a cmake build target to whatever gets executed in the CI pipeline that uses the CUDA compiler
+mosra commented on Jun 24, 2019
+mosra
+on Jun 24, 2019
+Owner
+More actions
+Wonderful, thanks a lot for the detailed info. So if I understand correctly:
+doing just a compile test would be adding #include of everything math-related into main.cu and then building that (or ... everything? does the CUDA compiler support running general C++ code?)
+running also all unit tests with the CUDA compiler (because if there are differences in their parser I assume their codegen might be different too) would mean simply compiling them with LANGUAGE set to CUDA instead of CXX, and then executing them as native binaries? Or does it need to have some __global__ void run() as well to make their compiler happy?
+I'm actually looking mainly into automated testing on the CIs to ensure things work and continue to work for CUDA users, since I'm not using CUDA for anything myself right now. AppVeyor is dead slow so I'm trying to not use it unless absolutely necessary and for Travis I found this: https://github.com/jeremad/cuda-travis. It unfortunately involves downloading a 1.7 GB file each time, not a fan of that, so I guess I would need to do some pre-extraction like in the blog post you linked.
+mosra commented on Jun 24, 2019
+mosra
+on Jun 24, 2019
+Last edited by mosra
+Owner
+More actions
+So, I just tried on Arch and ... somehow I am not hitting the error you have there 😅 ... could it be just Windows-specific? Is CUDA shipping a different compiler frontend for Windows and Linux? That would be unfortunate ... Actually, reading your original post above -- yes, it's different. Not sure what I should do now.
+Your example just worked, I only had to add
+```
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -ccbin=gcc-6")
+```
+to work around CUDA's incompatibility with GCC 9.
+carsonswope commented on Jun 24, 2019
+carsonswope
+on Jun 24, 2019
+Author
+More actions
+Yes, it's definitely possible that this is a Windows-specific issue. And honestly, it really is more of a bug in the (just for windows, maybe) CUDA compiler than anything else.
+I'm assuming your CI setup only runs Linux builds and tests?
+mosra commented on Jun 24, 2019
+mosra
+on Jun 24, 2019
+Owner
+More actions
+No, the CI builds & tests for all the systems, as I said I'm trying to not use AppVeyor unless I absolutely have to, as all builds there take ages. Having a CUDA build running on Windows is possible, but then I wonder what Linux-specific bugs it would miss :)
+Now, to actually fix your issue and unblock you:
+The #ifndef __NVCC__ trick you had above was hiding just the declaration or the definition as well? If just the declaration, I wonder how MSVC was able to accept such code, since that's not standard at all.
+Does the following (applied on unmodified master) fix it as well?
+```
+diff --git a/src/Magnum/Math/RectangularMatrix.h b/src/Magnum/Math/RectangularMatrix.h
+index a0295d68e..f3efeb7e1 100644
+--- a/src/Magnum/Math/RectangularMatrix.h
++++ b/src/Magnum/Math/RectangularMatrix.h
+@@ -754,7 +754,7 @@ template<std::size_t cols, std::size_t rows, class T> inline RectangularMatrix<r
+     return out;
+ }
+ 
+-template<std::size_t cols, std::size_t rows, class T> constexpr auto RectangularMatrix<cols, rows, T>::diagonal() const -> Vector<DiagonalSize, T> { return diagonalInternal(typename Implementation::GenerateSequence<DiagonalSize>::Type()); }
++template<std::size_t cols, std::size_t rows, class T> constexpr Vector<RectangularMatrix<cols, rows, T>::DiagonalSize, T> RectangularMatrix<cols, rows, T>::diagonal() const { return diagonalInternal(typename Implementation::GenerateSequence<DiagonalSize>::Type()); }
+ 
+ #ifndef DOXYGEN_GENERATING_OUTPUT
+ template<std::size_t cols, std::size_t rows, class T> template<std::size_t ...sequence> constexpr auto RectangularMatrix<cols, rows, T>::diagonalInternal(Implementation::Sequence<sequence...>) const -> Vector<DiagonalSize, T> {
+```
+Or, possibly, this?
+```
+diff --git a/src/Magnum/Math/RectangularMatrix.h b/src/Magnum/Math/RectangularMatrix.h
+index a0295d68e..ea2ef03ea 100644
+--- a/src/Magnum/Math/RectangularMatrix.h
++++ b/src/Magnum/Math/RectangularMatrix.h
+@@ -407,7 +407,9 @@ template<std::size_t cols, std::size_t rows, class T> class RectangularMatrix {
+          *
+          * @see @ref fromDiagonal()
+          */
+-        constexpr Vector<DiagonalSize, T> diagonal() const;
++        constexpr Vector<DiagonalSize, T> diagonal() const {
++            return diagonalInternal(typename Implementation::GenerateSequence<DiagonalSize>::Type());
++        }
+ 
+         /**
+          * @brief Convert matrix to vector
+@@ -754,8 +756,6 @@ template<std::size_t cols, std::size_t rows, class T> inline RectangularMatrix<r
+     return out;
+ }
+ 
+-template<std::size_t cols, std::size_t rows, class T> constexpr auto RectangularMatrix<cols, rows, T>::diagonal() const -> Vector<DiagonalSize, T> { return diagonalInternal(typename Implementation::GenerateSequence<DiagonalSize>::Type()); }
+-
+ #ifndef DOXYGEN_GENERATING_OUTPUT
+ template<std::size_t cols, std::size_t rows, class T> template<std::size_t ...sequence> constexpr auto RectangularMatrix<cols, rows, T>::diagonalInternal(Implementation::Sequence<sequence...>) const -> Vector<DiagonalSize, T> {
+     return {_data[sequence][sequence]...};
+```
+I'm more in favor of the second one. If that does the trick, I'll apply this on master so you can continue doing your thing, and after that we can continue on getting general CUDA testing working -- if I understand correctly, Magnum math code should be runnable inside CUDA kernels as well, right?
+carsonswope commented on Jun 24, 2019
+carsonswope
+on Jun 24, 2019
+Last edited by carsonswope
+Author
+More actions
+That's a lot of test coverage! I actually used the #ifndef __NVCC__ flag on the definition - seems I'm not using any magnum functionality that actually calls that function, and the compiler didn't seem to have a problem with the declaration.
+Indeed, your 2nd fix works for me. Thanks for looking into this - I'm still pretty new to C++, and really had no idea how to rewrite the function any other way.
+Yes, the magnum math code would ideally be runnable inside CUDA kernels as well. I'm using GLM for that now, if you're looking for a reference implementation of extending functions for CUDA.
+Additionally, it would be great to be able to use the magnum buffer & texture object types for openGL/CUDA interop. This typically entails 1) register the resource (buffer/texture) with CUDA after the openGL version has been created, and then 2) bind the resource to CUDA before using it and then unbind it before using in openGL again. I've added this functionality to my project by just extending the Buffer and Texture classes - and probably anyone who wants to use magnum in CUDA kernels will have to do the same, so maybe it makes sense to just add that functionality to magnum? Maybe magnum-integration? Anyway, thanks again for all the help.
+mosra commented on Jun 25, 2019
+mosra
+on Jun 25, 2019
+Owner
+More actions
+I actually used the #ifndef __NVCC__ flag on the definition
+Right, sorry, not sure why I thought it was the declaration :)
+your 2nd fix works for me
+Pushed as b83c436 to master (but keeping this issue open because there's more left to do).
+Additionally, it would be great to be able to use the magnum buffer & texture object types for openGL/CUDA interop.
+Yes, I think doing some magnum-integration lib for this could make sense. Not sure about putting that into the GL wrapper directly (because there's also OpenCL and RenderScript on Android and having it all together would clutter the APIs quite a lot I think).
+I've added this functionality to my project by just extending the Buffer and Texture classes
+Can you share the diff? Or push it into a fork? Thank you!
+@xqms you said you have CUDA interop implemented on your side as well, how do you do that? Or was it just a side-effect of the PyTorch integration? :)
+mosra
+changed the title [-]Compilation failure with CUDA compiler[/-] [+]CUDA support, testing and interop[/+] on Jun 25, 2019
+xqms commented on Jun 25, 2019
+xqms
+on Jun 25, 2019
+Contributor
+More actions
+@xqms you said you have CUDA interop implemented on your side as well, how do you do that? Or was it just a side-effect of the PyTorch integration? :)
+I don't know if my way is the best way, but I'll quickly outline it:
+Add a CUDAMapper class which keeps track of textures/buffers that are currently CUDA-mappable (i.e. registered with CUDA, see cudaGraphicsGLRegisterImage()). Registering is pretty costly, so keep your textures around!
+Subclass Magnum::GL::RectangleTexture. The subclass has modified constructors that require a CUDAMapper instance. It also deletes setStorage() and adds its own variant which performs the registration.
+CUDAMapper provides methods mapAll() and unmapAll() which map/unmap all textures controlled by this instance (see cudaGraphicsMapResources()). Batching as many textures as possible together in one map call is highly beneficial in terms of perfomance. I suspect that each map call involves an OpenGL flush and a CUDA synchronization.
+Finally, the texture subclass also provides a readIntoCUDA() method which performs a cudaMemcpy into a provided CUDA array (I'm fine with one copy in my application, zero-copy is also possible).
+Open issues / ugliness:
+The data layout inside the GPU is mostly unspecified. For example, if you request an RGB32F texture, the memory will actually contain RGBA32F on most GPUs, but not all. Normal access via OpenGL hides this, but with CUDA you get the raw device memory. I didn't find a clean solution so far on how to query the actual layout, so I'm currently expecting the user of the API to specify the size of each pixel in GPU memory in bytes.
+I only support GL::RectangleTexture so far, but I think other types can be easily added.
+If there's interest right now, I can tidy up my solution a bit and contribute it somewhere - it's mostly self-contained already anyway.
+❤️React with ❤️1Reacted by Vladimír Vondruš
+carsonswope commented on Jun 25, 2019
+carsonswope
+on Jun 25, 2019
+Last edited by mosra
+Author
+More actions
+My implementation is slightly different than @xqms - mainly that I haven't implemented the CUDAMapper to intelligently batch map/unmap operations. It is indeed more expensive to issue multiple map/unmap commands than to batch them, but so far it hasn't affected my application probably due to not having that many resources used by both CUDA and OpenGL.
+My buffer class just keeps track of whether it is currently bound to CUDA or OpenGL. When you want the CUDA-provided pointer to use the buffer in CUDA kernels, the getter for that pointer will ensure that the buffer is bound to CUDA. Similarly, when you want to use the buffer in OpenGL context, the getter for the Magnum::GL::Buffer will ensure the buffer is mapped to OpenGL before returning the object.
+One issue:
+doesn't work nicely with GL::Mesh class, if you specify the buffers comprising the mesh at initialization - because the buffers could be mapped to CUDA and not automatically re-mapped to OpenGL at draw time. To work around this, I re-specify the buffers for a mesh every time before drawing the mesh, and via calling the GL::Buffer getter, this makes sure the buffers are bound to OpenGL.
+Anyway, here are the main parts of how I extended the buffer class. Apologies if this is too much code..
+```
+template <typename T>
+class Buff : Magnum::GL::Buffer {
+public:
+  
+  // not possible to NoCreate the buffer..
+  Buff(const int num_elements = 1) { set_storage(num_elements); }
+  Buff<vector<T>& data) { set_data(data); }
+
+  void set_data(vector<T>& data) {
+    unmap_cuda();
+    if (data.size() != length) unregister_cuda();
+    // cudaMemcpy could be used too if the buffer is already allocated. But if it is the first time,
+    // then OpenGL must be the one to allocate the buffer size, not CUDA.
+    setData(ArrayView<T>(data.data(), data.size()), BufferUsage::DynamicDraw);
+    length = data.size();
+  }
+
+  void set_storage(const int num_elements) {
+    unmap_cuda();
+    if (data.size() != length) unregister_cuda();
+    setData(ArrayView<T>(nullptr, num_elements), BufferUsage::DynamicDraw);
+    length = num_elements;
+  }
+
+  // when needing to call GL::Buffer functions, this getter will ensure that the resource is bound to GL
+  // when the object is returned. 
+  Magnum::GL::Buffer& get_gl() {
+    unmap_cuda();
+    return (Magnum::GL::Buffer&)(*this);
+  }
+
+private:
+
+  int length;
+
+  // if nullptr, then resource is not registered with CUDA (1-time setup operation)
+  cudaGraphicsResource* cuda_resource = nullptr;
+
+  // pointer that can be used in CUDA kernels to access the contents of the buffer.
+  // if nullptr, then resource is not currently mapped to CUDA context. The buffer cannot be used
+  // in OpenGL until it is unmapped.
+  T* cuda_dev_ptr = nullptr;
+  size_t cuda_dev_ptr_size;
+
+  T* map_cuda() {
+    if (cuda_resource == nullptr) {
+      cudaGraphicsGLRegisterBuffer(&cuda_resource, id(), cudaGraphicsRegisterFlagsNone);
+    }
+
+    if (cuda_dev_ptr == nullptr) {
+      cudaGraphicsMapResources(1, &cuda_resource, NULL);
+      cudaGraphicsResourceGetMappedPointer((void**)&cuda_dev_ptr, &cuda_dev_ptr_size, cuda_resource);
+    }
+
+    return cuda_dev_ptr;
+  }
+
+  void unmap_cuda() {
+    if (cuda_dev_ptr != nullptr) {
+      cudaGraphicsUnmapResources(1, &cuda_resource, NULL);
+      cuda_dev_ptr = nullptr;
+    }
+  }
+
+  // need to do this when changing buffer size, will need to re-register with CUDA before use
+  void unregister_cuda() {
+    unmap_cuda();
+    if (cuda_resource != nullptr) {
+        unmap_from_cuda();
+        cudaGraphicsUnregisterResource(cuda_resource);
+        cuda_resource = nullptr;
+    }
+  }
+}
+```
+❤️React with ❤️4Reacted by Vladimír Vondruš, bobluoluo, Tao Mario and Mirek Kratochvil
+mosra
+added this to Magnum / Platformson Jul 17, 2024
+mosra
+moved this to TODO in Magnum / Platformson Jul 17, 2024
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+Magnum / Platforms
+Status
+TODO
+Show more project fields
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

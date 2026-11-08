@@ -1,0 +1,194 @@
+--- v002.md
++++ v003.md
+@@ -8,13 +8,13 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Scalar volume data, transfer function definition, current slice plane spacing (or density), and 8-bit per channel graphics hardware constraints.
+-*   **Output:** A texture map containing RGBA values where the alpha channel is adjusted to ensure visibility of low-opacity slices, and a sequence of rendered slices composited into the frame buffer.
++*   **Input:** Scalar volume data, transfer function definition, current slice plane spacing (or density), and 8-bit per channel graphics hardware constraints [S1, S2].
++*   **Output:** A texture map containing RGBA values where the alpha channel is adjusted to ensure visibility of low-opacity slices, and a sequence of rendered slices composited into the frame buffer [S1, S2].
+ 
+ **Data Structures:**
+-*   **Texture Map:** A 1D texture map (or 1D lookup table) storing the transfer function. The scalar values of polygon vertices are normalized to serve as 1D texture coordinates [S1, S2].
+-*   **Slice Geometry:** Polygons (quads) representing the intersection of the volume with slice planes.
++*   **Texture Map:** A 1D texture map (or 1D lookup table) storing the transfer function [S1, S2]. The scalar values of polygon vertices are normalized to serve as 1D texture coordinates [S1, S2].
++*   **Slice Geometry:** Polygons (quads) representing the intersection of the volume with slice planes [S1, S2].
+ 
+ **Steps:**
+-1.  **Preprocessing (Slicing):** The volume is sliced into a set of parallel planes. The scalar values at the polygon vertices are normalized [S1, S2].
++1.  **Preprocessing (Slicing):** The volume is sliced into a set of parallel planes [S1, S2]. The scalar values at the polygon vertices are normalized [S1, S2].
+ 2.  **Transfer Function Mapping:** The normalized scalar values are used as 1D texture coordinates to access the transfer function stored in the texture map [S1, S2].
+ 3.  **Opacity Adjustment (Dithering):** The texture map is adjusted for the appropriate per-slice opacity whenever the slice plane spacing changes [S1, S2]. This adjustment expands the range of allowable opacity values, ensuring that low-opacity slices remain visible on 8-bit hardware [S1, S2].
+@@ -25,5 +25,5 @@
+ The standard hardware compositing equation is used:
+ $$ C_{dest} = C_{src} \cdot A_{src} + C_{dest} \cdot (1 - A_{src}) $$
+-where $C_{src}$ and $A_{src}$ are the color and opacity retrieved from the texture map, and $C_{dest}$ is the current frame buffer color [S3, book].
++where $C_{src}$ and $A_{src}$ are the color and opacity retrieved from the texture map, and $C_{dest}$ is the current frame buffer color [G].
+ 
+ The key modification is in the determination of $A_{src}$. Instead of a fixed low opacity, $A_{src}$ is derived from the texture map which has been scaled/adjusted based on the current slice spacing [S1, S2].
+@@ -34,65 +34,56 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Perspective View:** In perspective views, viewing rays between slanted slice planes have varying lengths. The current method does not account for this, leading to potential opacity inaccuracies [S1, S2]. Future work aims to add per-pixel opacity corrections to address this [S1, S2].
++*   **Perspective View:** In perspective views, viewing rays between slanted slice planes have varying lengths [S1, S2]. The current method does not account for this, leading to potential opacity inaccuracies [S1, S2]. Future work aims to add per-pixel opacity corrections to address this [S1, S2].
+ *   **Low Opacity Registration:** Without this technique, per-slice opacities often become too small to register on 8-bit hardware, especially as slice density increases [S1, S2].
+ 
+ **Pseudocode:**
+ ```python
+-def render_volume_with_alpha_dithering(volume_data, transfer_function_1d, slice_spacing, view_direction):
++def render_volume_alpha_dithering(volume_data, transfer_function, slice_spacing, ray_origin, ray_direction, max_steps):
+     """
+     Renders volume using alpha dithering via texture map.
++    Implements front-to-back compositing with spacing-based alpha scaling.
+     """
+-    # 1. Determine slice geometry based on view direction and spacing
+-    # Select axis closest to viewing direction
+-    slices = generate_slices(volume_data, view_direction, slice_spacing)
+-    
+-    # 2. Adjust texture map for current slice spacing
+-    # This is the core "alpha dithering" step
+-    adjusted_transfer_function = adjust_transfer_function_for_opacity(
+-        transfer_function_1d, 
+-        slice_spacing
+-    )
+-    
+-    # 3. Create texture map from adjusted transfer function
+-    texture_map = create_1d_texture(adjusted_transfer_function)
+-    
+-    # 4. Render slices back-to-front
+-    for slice in slices:
+-        # Normalize vertex scalar values to [0, 1] for texture coordinates
+-        normalized_vertices = normalize_scalars(slice.vertices)
+-        
+-        # Sample texture map to get RGBA
+-        # The alpha channel is now adjusted to be visible on 8-bit hardware
+-        rgba_values = sample_texture_map(texture_map, normalized_vertices)
+-        
+-        # Rasterize and composite using hardware blending
+-        rasterize_and_blend(slice.geometry, rgba_values)
+-        
+-    return frame_buffer
++    # Initialize output color and accumulated alpha
++    c_dest = (0.0, 0.0, 0.0, 0.0)
++    a_dest = 0.0
++    t = 0.0
++    step = slice_spacing
+ 
+-def adjust_transfer_function_for_opacity(original_tf, slice_spacing):
+-    """
+-    Adjusts the transfer function's alpha channel to compensate for
+-    low per-slice opacities caused by high slice density (small spacing).
+-    Expands the range of allowable opacity values for 8-bit hardware.
+-    """
+-    # Implementation detail: Scale alpha values based on inverse of slice spacing
+-    # or similar heuristic to ensure visibility.
+-    # Exact scaling formula not given in sources [S1, S2].
+-    adjusted_tf = []
+-    for scalar, rgba in original_tf:
+-        # Adjust alpha to prevent it from becoming too small to register
+-        new_alpha = scale_alpha_for_8bit_hardware(rgba.a, slice_spacing)
+-        adjusted_tf.append((scalar, (rgba.r, rgba.g, rgba.b, new_alpha)))
+-    return adjusted_tf
++    for _ in range(max_steps):
++        # Sample scalar value at current position [G]
++        pos = (ray_origin[0] + ray_direction[0] * t,
++               ray_origin[1] + ray_direction[1] * t,
++               ray_origin[2] + ray_direction[2] * t)
++        scalar = sample_volume_scalar(volume_data, pos)
+ 
+-def scale_alpha_for_8bit_hardware(alpha, slice_spacing):
+-    """
+-    Scales alpha to ensure it is representable and visible on 8-bit hardware.
+-    [G] Placeholder logic: In practice, this might involve gamma correction,
+-    thresholding, or multiplicative scaling based on the number of slices.
+-    """
+-    # Not given in the sources.
+-    return alpha
++        # Map scalar to RGBA via transfer function [G]
++        rgba = sample_transfer_function_rgba(transfer_function, scalar)
++        c_src = (rgba[0], rgba[1], rgba[2])
++        a_src = rgba[3]
++
++        # Alpha dithering: adjust opacity based on slice spacing to ensure visibility on 8-bit hardware [G]
++        # Scale alpha inversely with spacing to compensate for low per-slice contribution
++        if step > 0:
++            a_src = min(1.0, a_src * (1.0 / step))
++
++        # Front-to-back compositing
++        if a_src > 0.0:
++            c_dest = (c_src[0] * a_src + c_dest[0] * (1.0 - a_src),
++                      c_src[1] * a_src + c_dest[1] * (1.0 - a_src),
++                      c_src[2] * a_src + c_dest[2] * (1.0 - a_src))
++            a_dest = a_src + a_dest * (1.0 - a_src)
++            if a_dest >= 1.0:
++                break
++        t += step
++
++    return c_dest
++
++def sample_volume_scalar(volume, pos):
++    # [G] Standard trilinear interpolation or nearest-neighbor lookup
++    return volume.get_scalar_at(pos)
++
++def sample_transfer_function_rgba(tf, scalar):
++    # [G] Standard 1D texture lookup
++    return tf.lookup(scalar)
+ ```
+ 
+@@ -100,42 +91,42 @@
+ 
+ ### Plane Slicing
+-Renders volume using axis-aligned planes. Simpler but less flexible for arbitrary viewing directions compared to texture-mapped transfer functions. [Link](845-plane-slicing.md)
++Renders volume using axis-aligned planes [G]. Simpler but less flexible for arbitrary viewing directions compared to texture-mapped transfer functions [G]. [Link](845-plane-slicing.md)
+ 
+ ### 2D Texture-Based Volume Rendering
+-Uses 2D texture stacks. May not explicitly include the dynamic opacity adjustment for 8-bit hardware described here. [Link](916-2d-texture-based-volume-rendering.md)
++Uses 2D texture stacks [G]. May not explicitly include the dynamic opacity adjustment for 8-bit hardware described here [G]. [Link](916-2d-texture-based-volume-rendering.md)
+ 
+ ### GPU-based Cut-off Slice Generation
+-Optimizes slice generation on GPU. Does not address the 8-bit opacity registration issue. [Link](948-gpu-based-cut-off-slice-generation.md)
++Optimizes slice generation on GPU [G]. Does not address the 8-bit opacity registration issue [G]. [Link](948-gpu-based-cut-off-slice-generation.md)
+ 
+ ### 3-Pass Texture Mapping with Compositing
+-Uses multiple passes for compositing. Different approach to handling transparency and performance. [Link](1354-3-pass-texture-mapping-with-compositing.md)
++Uses multiple passes for compositing [G]. Different approach to handling transparency and performance [G]. [Link](1354-3-pass-texture-mapping-with-compositing.md)
+ 
+ ### 2D Volume Cross-Section Rendering
+-Renders cross-sections rather than projected slices. Different visual output. [Link](1764-2d-volume-cross-section-rendering.md)
++Renders cross-sections rather than projected slices [G]. Different visual output [G]. [Link](1764-2d-volume-cross-section-rendering.md)
+ 
+ ### Sliced Volume Rendering
+-General term for slicing methods. May or may not include alpha dithering. [Link](3568-sliced-volume-rendering.md)
++General term for slicing methods [G]. May or may not include alpha dithering [G]. [Link](3568-sliced-volume-rendering.md)
+ 
+ ### Slice Polygon Computation (3D Texture)
+-Focuses on computing slice polygons for 3D textures. Different texture storage model. [Link](5680-slice-polygon-computation-3d-texture.md)
++Focuses on computing slice polygons for 3D textures [G]. Different texture storage model [G]. [Link](5680-slice-polygon-computation-3d-texture.md)
+ 
+ ### Palette Texture Volume Rendering
+-Uses palette textures for transfer functions. Similar concept of texture-based transfer functions but different implementation. [Link](6502-palette-texture-volume-rendering.md)
++Uses palette textures for transfer functions [G]. Similar concept of texture-based transfer functions but different implementation [G]. [Link](6502-palette-texture-volume-rendering.md)
+ 
+ ### View-Aligned Slicing with 3D Textures
+-Uses 3D textures and view-aligned slices. Different hardware interaction model. [Link](6687-view-aligned-slicing-with-3d-textures.md)
++Uses 3D textures and view-aligned slices [G]. Different hardware interaction model [G]. [Link](6687-view-aligned-slicing-with-3d-textures.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Preprocessing (slicing) is done once [S1, S2]. Rendering is linear with the number of slices. Progressive refinement allows for variable time per frame [S1, S2].
++*   **Time Complexity:** Preprocessing (slicing) is done once [S1, S2]. Rendering is linear with the number of slices [S1, S2]. Progressive refinement allows for variable time per frame [S1, S2].
+ *   **Memory Complexity:** Requires storage for the 1D texture map of the transfer function [S1, S2].
+ *   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Performance scales with the number of slices and resolution. Progressive refinement allows for interactive performance by adjusting slice count [S1, S2].
++*   **Scaling:** Performance scales with the number of slices and resolution [S1, S2]. Progressive refinement allows for interactive performance by adjusting slice count [S1, S2].
+ *   **Strengths:** Enables visibility of low-opacity slices on 8-bit hardware, which is critical for scientific visualization [S1, S2].
+ *   **Limitations:** Does not account for varying ray lengths in perspective views, leading to potential opacity inaccuracies [S1, S2]. Requires re-adjustment of the texture map when slice spacing changes [S1, S2].
+-*   **When to use:** When rendering scientific volumes with low-opacity features on hardware with 8-bit per channel limitations, and when slice density needs to be high for smooth visualization.
+-*   **When not to use:** When high-precision opacity is required in perspective views, or when hardware supports higher bit depths (e.g., 16-bit or 32-bit float) where low opacities are naturally representable.
++*   **When to use:** When rendering scientific volumes with low-opacity features on hardware with 8-bit per channel limitations, and when slice density needs to be high for smooth visualization [S1, S2].
++*   **When not to use:** When high-precision opacity is required in perspective views, or when hardware supports higher bit depths (e.g., 16-bit or 32-bit float) where low opacities are naturally representable [G].
+ 
+ ## Background
+-This technique was introduced in the context of volume rendering for curvilinear and unstructured grids [S1, S2]. It addresses the limitations of early OpenGL rendering hardware which often had 8-bit per channel color buffers [S1, S2]. The method leverages the flexibility of texture-mapped transfer functions to dynamically adjust opacity values, a concept that was particularly relevant in the early 2000s when 8-bit color was common [S1, S2].
++This technique is used in the context of volume rendering for curvilinear and unstructured grids [S1, S2]. It addresses the limitations of early OpenGL rendering hardware which often had 8-bit per channel color buffers [S1, S2]. The method leverages the flexibility of texture-mapped transfer functions to dynamically adjust opacity values [S1, S2].
+ 
+ ## Sources

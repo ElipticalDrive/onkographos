@@ -1,0 +1,689 @@
+Gaussian Splat Renderer for the Godot Engine. Contribute to klausi3D/godotGS development by creating an account on GitHub.
+
+gaussian_splatting: reject the frame instead of compositing translucent splats unsorted (refs #586, PR 1 of 3) by klausi3D · Pull Request #976 · klausi3D/godotGS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+klausi3D
+commented
+Sep 5, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+Refs #586. PR 1 of 3: stop the unsorted fall-through.
+When the global-composite (tile-overlap) sorter does not exist, TileRenderer::render() used to run binning, emit, raster and resolve anyway and present tiles in atomic-append order, i.e. mathematically incorrect alpha compositing dressed up as a normal render, owned only by a counter and a throttled WARN (renderer/tile_renderer.cpp:1074-1092 at base). This PR makes that frame a publish reject: the choke point returns false, run() returns an invalid RID, TileRasterizer reports success=false and nothing is presented for that frame. Presenting nothing is honest; presenting wrong ordering that looks like a render is not. The transient reasons (sorter exists, one dispatch failed) keep the previous counter + WARN behaviour and are still presented.
+This carries forward the design intent of the parked PR #852 (reject the frame, not composite unsorted) and the review findings there that concern this step (count the pre-binning reject; do not let a rejected frame report stages that did not run as if they had). It deliberately does not carry #852's static guards, lane promotion, or retry machinery. What this PR does not do, stated plainly: the sorter-unavailable state still latches for the session (renderer/tile_render_resources.cpp:1299-1319), so after this PR a latched renderer presents nothing instead of wrong pixels until teardown. Making the latch retry is PR 2; keeping a failed grow from destroying a working sorter is PR 3. Both are sequenced after this one on purpose.
+What lands
+renderer/sort_fallback_policy.h: unsorted_composite_must_reject_frame() — the whole correctness decision as one pure function (no default label; fall-through fails closed). SORTER_UNAVAILABLE rejects; SORT_DISPATCH_FAILED / ASYNC_SORT_NOT_SUBMITTED do not. New GLOBAL_SORT_RESOURCES_UNAVAILABLE reason for the pre-binning exit.
+renderer/tile_renderer.cpp: at the existing single choke point a fatal reason returns through _reject_global_composite_frame(), which counts the reject, records the reason, WARNs on the same throttle as the unsorted counter, keeps the measured assignment-stage CPU cost (the stage ran up to the exit; hiding it would report the degraded path as free — review round 1), and zeroes only the stages that did not run: rasterization on both exits, plus the prefix/sort CPU pairs on the pre-binning exit (at the choke point those already hold this frame's values). The pre-binning resource exit (which already rejected, uncounted) goes through the same helper. Its scope is stated in the code: the two sorted-path-unavailable exits, not every return false in run().
+renderer/tile_render_types.h, tile_renderer.h, render_debug_state_orchestrator.cpp: global_composite_rejected_frames / global_composite_last_reject_reason, exposed through get_binning_debug_counters(). They partition with unsorted_composite_frames: a degraded frame lands in exactly one.
+renderer/tile_render_resources.cpp, gpu_sorting_config.cpp: the three disable_sorter() messages and the gpu_sorting: radix_bits x workgroup_size product is never clamped (18KB > 16KB shared memory) -> sorter unavailable -> silently unsorted output #634 portability warning no longer promise "rendering unsorted tiles"; they say translucent frames are rejected (§8 of the acceptance bar: a message the code contradicts is a defect).
+Tests: two pure-function cases in tests/test_sort_fallback_policy.h; one [GaussianSplatting][TileRenderer][RequiresGPU] case in tests/tile_renderer_regression_test.cpp that provokes the real disable_sorter() path (below) and asserts the observable consequence.
+docs/reference/renderer_release_gate_manifest.json: RequiresGPU snapshot re-pinned 156 → 157 with the repo's own functions (sha256_last_changed_by records the derivation).
+Linked task / issue
+Refs #586 (PR 1 of 3). Design intent and findings mined from closed PR #852. Related: #925 (GPU-003) fixed the instance sorter's latch in render_sorting_orchestrator.cpp; it does not touch TileGlobalSortResources, which is what this series is about.
+Risk class
+Declared risk class: R3 by path (docs/reference/renderer_release_gate_manifest.json is in the R3 "release-gate machinery" glob); the code change itself is R2 (renderer/**). The manifest re-pin is unavoidable when a [RequiresGPU] case is added and the gate re-derives the class from the diff, so the higher class is declared rather than the test dropped.
+Base / head
+Base SHA: de2cb8007bafc714046412a2b6403a65e69f87ee (origin/master at branch time)
+Head SHA: ff1b1e1ba1c8c3c0fe9c1c6f66e568d2976c806e (round 1; first head was 65db9eb2aa8)
+Stacked on: none (branched directly off origin/master)
+Scope
+Owned paths touched: modules/gaussian_splatting/renderer/{sort_fallback_policy.h, tile_renderer.cpp, tile_renderer.h, tile_render_types.h, tile_render_resources.cpp, gpu_sorting_config.cpp, render_debug_state_orchestrator.cpp}, modules/gaussian_splatting/tests/{test_sort_fallback_policy.h, tile_renderer_regression_test.cpp}, docs/reference/renderer_release_gate_manifest.json.
+Explicit non-goals: no retry/backoff of the tile sorter latch (PR 2); no build-before-retire on grow (PR 3); no re-probe on config change; no [SortFallback] strict-lane promotion (R3 CI change; the pure cases run in the advisory [untagged] lane at this base, the blocking coverage is the GPU harness case); no new tests/ci/check_*.py guards; no change to the transient reasons' behaviour; no accounting for run() exits unrelated to the sorted path (null device, uniform-set acquisition, tile-range build); no config validation of max_overlap_records against the buffer-size formula (a new finding, see below — needs its own issue).
+Invariants
+A frame that reaches the choke point with translucent work and no sorter is never published (asserted on GPU, mutation-proven below).
+A frame with a working sorter publishes exactly as before: base vs head are pixel-identical on real-scan content (below).
+unsorted_composite_frames and global_composite_rejected_frames partition degraded frames; a rejected frame never raises the unsorted counter (asserted).
+No new GPU state; no resource is created or freed on the reject path (_reject_global_composite_frame touches renderer-side POD only). RID-leak accounting of the GPU harness batch is unchanged (total_rid_leak_bytes=0).
+Compute lists are closed inside the binning dispatch; an early return false after a queued binning submission is an established pattern in this function (tile-range failures at base :845/:929/:938), so the reject after emit adds no new state shape.
+User-visible behavior
+Before: with the tile sorter unavailable, splats are drawn with wrong alpha ordering for the rest of the session, silently apart from a WARN every 300 frames.
+After: with the tile sorter unavailable, the splat layer is not drawn (the scene behind it shows), a WARN names the reason on the same throttle, and get_binning_debug_counters() reports global_composite_rejected_frames / global_composite_last_reject_reason. Until PR 2 lands the condition persists for the session. Healthy configurations are unaffected (pixel-identical).
+Cost in the degraded state: every frame re-runs count/emit and is rejected (the cached-raster reuse cannot engage because nothing is published), which is one wasted dispatch per frame only while degraded. Measured below as 118 rejects over 120 frames vs 1 unsorted frame + cache reuse at base.
+Godot upstream delta
+None. servers/, scene/, core/, editor/, platform/, drivers/, main/ untouched.
+Validation
+All on this machine (Windows 11, RTX 3090, Vulkan, NVIDIA), binary bin/godot.windows.editor.dev.x86_64.exe built from the head tree with platform=windows target=editor dev_build=yes optimize=speed_trace tests=yes (dev_build alone is -O0 and every timing would be void). Base binary preserved from the same recipe at de2cb8007ba for the A/B runs.
+Reproduced on base, config only, default route (INSTANCE.RASTER.COMPUTE / INSTANCE.SORT.GPU). override.cfg in the QA project: radix_bits=8 workgroup_size=256 max_overlap_records=200000000 adaptive_overlap_budget_enabled=true max_overlap_records_adaptive_min=140000000. The adaptive floor makes the first ensure_resources() request 140M records; at radix 8 × wg 256 × 64-bit keys the histogram buffer is 32 B/record, so RadixSort::initialize refuses above ~134M, create_sorter() returns invalid, and disable_sorter() latches. Scene qa_sort_depth_order.tscn, base binary:
+```
+ERROR: RadixSort: refusing to initialize for 140000000 elements (radix_bits=8, workgroup_size=256, key_bits=64): largest required buffer is 4480000000 bytes, above the RenderingDevice 4294967295-byte size limit.
+WARNING: [TileRenderer] Failed to create global composite GPU sorter; rendering unsorted tiles
+WARNING: [TileRenderer] Global composite rasterizing UNSORTED tiles (INCORRECT alpha order): sorter unavailable (capability-gated) (policy=async_with_sync_bootstrap) — 1 frame(s) so far
+[QA:Sort Depth Order] PASS: center_color r=1.000 g=0.498 b=0.560 red_minus_blue=0.440
+counter unsorted_composite_frames = 6, unsorted_composite_last_reason = 1 ; frames PUBLISHED
+```
+(The two-splat pixel oracle happens to match the sorted order here; the counter and the WARN are the discriminators for that scene, the real-scan capture below is the visual one.)
+Same recipe, head binary:
+```
+WARNING: [TileRenderer] Failed to create global composite GPU sorter; translucent frames will be REJECTED (nothing presented) until a sorter exists (#586)
+WARNING: [TileRenderer] Global composite frame REJECTED (nothing presented) rather than compositing translucent splats UNSORTED: sorter unavailable (capability-gated) (err=0) — 1 frame(s) so far
+[QA:Sort Depth Order] FAIL: center_color r=0.298 g=0.298 b=0.298 red_minus_blue=0.000   <- background only; nothing drawn, as intended
+counter global_composite_rejected_frames = 6, global_composite_last_reject_reason = 1, unsorted_composite_frames = 0
+```
+Healthy configuration, head binary: [QA:Sort Depth Order] PASS: center_color r=1.000 g=0.498 b=0.560, all four counters 0.
+Deterministic checks (head tree):
+```
+python tests/ci/run_module_tests.py --guard-only            -> Guard-only mode complete, exit 0
+python -m unittest discover -s tests/agentic                -> Ran 132 tests, OK
+python tests/ci/check_renderer_release_gates.py --mode contract -> Renderer release gate contract check passed
+python tests/ci/test_gpu_harness_deferred_contract.py      -> Ran 25 tests, OK
+bin/...console.exe --headless --test --test-case="*SortFallback*"
+  [doctest] test cases: 14 | 14 passed | 0 failed   assertions: 265 | 265 passed   (12 at base + 2 new)
+python tests/ci/run_gpu_harness.py --batch TileRenderer --godot bin/...console.exe
+  base: batch=TileRenderer rc=0 cases=8/8 asserts=72/72
+  head: batch=TileRenderer rc=0 cases=9/9 asserts=73/73 status=SUCCESS, DONE max_rc=0 failures=0
+python tests/runtime/run_runtime_validation.py --profile streaming-gpu-ci --skip-cpp --fail-on-skip
+  [runtime] total=3 passed=3 failed=0 skipped=0 no_completion_marker=0 duration=38.1s   exit=0
+  GPU Streaming Stress ok 30.8s | World Streaming Gate ok 5.4s | Streaming Residency API ok 1.9s
+```
+Mutation proof (the new GPU case must be able to fail).
+Each mutation was applied to the head tree, rebuilt with the same recipe, run, and reverted; the final head binary was rebuilt from the restored sources and re-run green (batch line above).
+M1 — logic reverted: unsorted_composite_must_reject_frame(SORTER_UNAVAILABLE) returns false (the pre-fix behaviour: present the frame).
+```
+--gs-gpu-test --test-case="*Sorter-unavailable global composite*"
+  MESSAGE: #586 REGRESSION: with the global-composite sorter unavailable and splat_count=4096, render() PUBLISHED a frame (valid output RID). That frame rasterizes tiles in unsorted atomic-append order, i.e. mathematically incorrect alpha compositing presented as a normal render. It must be rejected instead. (global_composite_rejected_frames=0, unsorted_composite_frames 0 -> 1)
+  [doctest] test cases: 1 | 0 passed | 1 failed      Status: FAILURE!
+--headless --test --test-case="*SortFallback*"
+  test_sort_fallback_policy.h(247): CHECK( unsorted_composite_must_reject_frame(SORTER_UNAVAILABLE) ) is NOT correct!
+  test_sort_fallback_policy.h(274): CHECK_EQ( rejects_with_work, outcome == NOT_ATTEMPTED ) is NOT correct!
+  test_sort_fallback_policy.h(281): CHECK( ...classify_unsorted_composite(indirect_work, NOT_ATTEMPTED) ) is NOT correct!
+  [doctest] test cases: 14 | 12 passed | 2 failed   assertions: 265 | 262 passed | 3 failed
+```
+The GPU message is the evidence that every premise held on the mutated build: the healthy control published, the real create_sorter() refusal latched the sorter, no sorter was rebuilt across ensure_resources(), the key/value buffers were live, and the frame carried work — and then the frame was published with unsorted_composite_frames 0 -> 1, which is exactly the base defect.
+M2 — wiring deleted: the if (unsorted_composite_must_reject_frame(...)) return _reject_global_composite_frame(...) block at the choke point removed; the pure function is intact.
+```
+--gs-gpu-test --test-case="*Sorter-unavailable global composite*"
+  MESSAGE: #586 REGRESSION: with the global-composite sorter unavailable and splat_count=4096, render() PUBLISHED a frame (valid output RID). ... (global_composite_rejected_frames=0, unsorted_composite_frames 0 -> 1)
+  [doctest] test cases: 1 | 0 passed | 1 failed      Status: FAILURE!
+--headless --test --test-case="*SortFallback*"
+  [doctest] test cases: 14 | 14 passed | 0 failed    (the pure lane stays green: only the GPU case sees deleted wiring)
+```
+GPU / performance evidence (R2+)
+Real-scan visual validation (Z:/GS-Aufnahmen/holzbank.ply, imported at the default import preset, 300,000 splats resident, 258,220 visible; camera pose derived from the asset bounds, lighting pinned as in the QA depth-order scene; capture at frame 120):
+healthy path, base vs head: 0 of 2,073,600 pixels differ (max abs diff 0) — the fix does not touch the working path.
+base under the recipe: the frame is presented unsorted; 1,910,940 pixels differ from the healthy capture (mean abs 9.7 / 255). Visually, foreground occluders lose their dominance and the ground/bench structure bleeds through them.
+head under the recipe: 1 unique colour in the capture (background), global_composite_rejected_frames=118, unsorted_composite_frames=0.
+VRAM: no new allocations on any path; the reject path allocates nothing. No frame-time claim is made for the healthy path (the reject code runs only after the sort decision, and only in the degraded state). Degraded-state cost stated under "User-visible behavior".
+Vendor coverage: NVIDIA only (see blind spots).
+Review artifacts
+Round 1 (Codex, on 65db9eb2aa8): 1 finding, P2 "Preserve the assignment timing on rejected frames" — confirmed and fixed in ff1b1e1ba1c (the assignment stage had run up to the exit; its measured cost is now kept, only stages that did not run are zeroed). Thread answered, left open for the maintainer. Re-verified on the RTX 3090 after the fix: TileRenderer batch 9/9 cases, 73/73 assertions, rc=0; *SortFallback* 14/14; guard lane exit 0.
+Known blind spots
+The capability-probe-false cause is not exercised on hardware. No supported desktop GPU fails RadixSort::is_supported(). I did simulate it (Khronos profiles layer capping maxComputeSharedMemorySize at 16 KB + radix 8 × wg 512): on the default route the instance sorter fails first, the instance route fails closed (gaussian_splatting: sorter-init failures back off and recover instead of permanently disabling GPU sorting (GPU-003, refs #922) #925 backoff), and no frame reaches the tile composite — unsorted_composite_frames stays 0. So for that cause the tile-side reject is not what the user sees; the reject here covers the causes that do reach the composite (creation refused/failed while the instance sorter survives).
+The VRAM-pressure allocation-failure cause is not reproduced. NVIDIA spills device allocations to host memory before failing them; I did not exhaust the machine to force it. The pre-binning reject accounting for that shape is by reading, not by observation.
+Vendor: NVIDIA/Vulkan only. No AMD or Intel evidence.
+The pure-function cases run in the advisory [untagged] headless lane ([SortFallback] is not a strict lane at this base). The blocking coverage is the GPU harness TileRenderer batch, which is not in REQUIRED_BATCHES but does fail the harness on a red case (max_rc != 0 flips gate_failed); the harness runs on the self-hosted lane for modules/gaussian_splatting/** changes.
+The per-frame telemetry invalidation list in _reject_global_composite_frame is hand-maintained; no guard derives it from RasterPerformance. I chose not to add one: gaussian_splatting: reject the frame instead of compositing translucent splats unsorted (#586) #852's equivalent guard drew four review findings of its own.
+Pixel identity was measured on one asset, one pose, one frame, with the cached-raster route engaged (INSTANCE.RASTER.CACHED). The QA depth-order scene covers the compute raster route with a pixel oracle.
+New finding, not fixed here: GPUSortingConfig::validate() bounds max_sort_elements by the buffer-size formula but not max_overlap_records / max_overlap_records_adaptive_min, so a valid project configuration can deterministically refuse the tile sorter (the recipe above). gpu_sorting: radix_bits x workgroup_size product is never clamped (18KB > 16KB shared memory) -> sorter unavailable -> silently unsorted output #634's warning covers only the shared-memory product. Needs its own issue; it also makes PR 2's "transient vs deterministic" classification matter.
+CodeFactor (non-required) reports one notice, "Complex Method", on the new GPU test body (tile_renderer_regression_test.cpp L1661-L1941). The three phases and their premise checks are one linear proof and are kept in one function on purpose, matching the shape of the existing test_overflow_drop_telemetry in the same file; splitting it would spread the premise/consequence pairs across helpers and make a RED run harder to read.
+qlty check reports "Build errored" on both heads of this PR (65db9eb2aa8, ff1b1e1ba1c), while the heads of Scope baseline_mode to the harness instead of wiring it into the QA lane (#972) #974 and docs/governance: define the two-stage release acceptance bar (#360) #975 got "No blocking issues". It is an external, non-required, documented-as-advisory check (docs/reference/build-test-ci.md: no tracked qlty configuration, treat as non-blocking); its log is behind a qlty.sh login I do not have, and there is no local CLI/config to reproduce it. "Build errored" is the analyzer failing to run, not a finding against the code — but I cannot show that from here, so it is listed rather than waved away.
+Rollback plan
+Revert the commit. The change is additive on the reject path and touches no persisted format, no setting, and no shader; reverting restores the base fall-through and its counters, and the manifest pin returns to 156. No data migration.
+Checklist
+Scope is focused and justified; no unrelated changes.
+No secrets or tokens added.
+No generated artifacts, transcripts, or session IDs committed.
+No baseline/threshold/gate weakened to make a check pass (the manifest re-pin adds coverage; counts derived, not hand-edited).
+Validation commands and results included above.
+Canonical docs updated if behavior changed (the code's own user-facing messages; no canonical doc describes the unsorted fallback — renderer/AGENTS.md already forbids it).
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01UA1aX2xX8cajR4uKaMeLN6
+gaussian_splatting: reject the frame instead of compositing transluce…
+…
+65db9eb
+```
+…nt splats unsorted (refs #586, PR 1 of 3)
+
+When the global-composite (tile-overlap) sorter does not exist, the tile
+renderer used to run binning/emit/raster/resolve anyway and PRESENT tiles in
+atomic-append order -- mathematically incorrect alpha compositing -- owned only
+by unsorted_composite_frames and a throttled WARN. The choke point now turns
+that class into a publish reject: unsorted_composite_must_reject_frame()
+(sort_fallback_policy.h, pure, no default label, fail-closed fall-through)
+returns true for SORTER_UNAVAILABLE, the frame executor returns false, run()
+returns an invalid RID and TileRasterizer presents nothing. The transient
+reasons (sorter exists, one dispatch failed) are unchanged: counted, warned,
+presented.
+
+The pre-binning resource exit -- the exit a VRAM-pressure sorter failure takes,
+because disable_sorter() frees the key/value buffers and the same pressure then
+fails their reallocation -- already rejected the frame uncounted; it now goes
+through the same helper with the new GLOBAL_SORT_RESOURCES_UNAVAILABLE reason.
+Both exits count into global_composite_rejected_frames /
+global_composite_last_reject_reason (partitioned with unsorted_composite_frames:
+a degraded frame lands in exactly one), WARN on the existing throttle, and
+zero this frame's per-frame timings and raster-choice fields so a rejected
+frame stops describing the last successful one. Exposed through
+get_binning_debug_counters(). The disable_sorter() messages and the #634
+portability warning no longer promise "rendering unsorted tiles".
+
+Not in this change, by design: the sorter-unavailable state still latches for
+the session (tile_render_resources.cpp ensure_resources), so a latched renderer
+now presents nothing instead of wrong pixels until teardown -- PR 2 makes it
+retry, PR 3 keeps a failed grow from destroying a working sorter.
+
+Evidence (RTX 3090, Vulkan, dev_build + speed_trace): reproduced on base from
+project settings alone on the default route (radix_bits=8 x workgroup_size=256
+x max_overlap_records_adaptive_min=140M makes RadixSort::initialize refuse the
+tile sorter's histogram buffer, so create_sorter() fails and disable_sorter()
+latches while the instance sorter survives): unsorted_composite_frames=6,
+frames published. Head: global_composite_rejected_frames=6, unsorted=0,
+nothing drawn. Real-scan A/B (holzbank.ply, 258,220 visible): healthy path
+base vs head pixel-identical (0/2,073,600 differ); base under the recipe
+presents a wrong image (1,910,940 px differ); head presents background only.
+
+Tests: two pure cases in test_sort_fallback_policy.h; one
+[GaussianSplatting][TileRenderer][RequiresGPU] case that provokes the REAL
+create_sorter() refusal through _test_ensure_global_sort_resources(34M) at
+radix 8 x wg 64, then asserts render() publishes nothing, the reject counter
+moves with reason SORTER_UNAVAILABLE, the unsorted counter does not, stage
+timings are zeroed, and a cleared latch publishes again with a rebuilt sorter.
+Mutation-proven: reverting the verdict (M1) and deleting the choke-point
+wiring (M2) each turn the GPU case RED with all premise assertions passing.
+GPU harness TileRenderer batch 8/8 -> 9/9; release-gate RequiresGPU snapshot
+re-pinned 156 -> 157 with the repo's own functions.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UA1aX2xX8cajR4uKaMeLN6
+```
+chatgpt-codex-connector
+Bot
+reviewed
+Sep 5, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 65db9eb2aa
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+modules/gaussian_splatting/renderer/tile_renderer.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+gaussian_splatting: keep the measured assignment cost on rejected fra…
+…
+ff1b1e1
+```
+…mes (#976 review round 1, refs #586)
+
+At the choke point the assignment stage has already run count, prefix/range
+and emit for the frame, so zeroing tile_assignment_ms / last_setup_cpu_ms on
+a reject reported the degraded path -- which re-bins and re-emits every frame
+-- as free (TileRasterizer::get_performance() copies tile_assignment_ms
+straight into the perf surface). _reject_global_composite_frame() now measures
+the assignment cost from the same start finish_assignment_metrics() uses, on
+both reject exits, and zeroes only what did not run: rasterization on both
+exits, and the prefix/sort CPU pairs on the pre-binning exit only (at the
+choke point they already hold this frame's values). The GPU case asserts the
+rejected frame reports assignment > 0 and rasterization == 0; the recovery
+control still requires both > 0 on a published frame.
+
+RTX 3090: TileRenderer batch 9/9 cases 73/73 assertions rc=0; *SortFallback*
+14/14 cases 265/265 assertions.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UA1aX2xX8cajR4uKaMeLN6
+```
+Hide details
+View details
+klausi3D
+merged commit af178fe
+into
+master
+Sep 5, 2026
+18 of 20 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+klausi3D
+deleted the
+gs/586-p1-reject-unsorted
+branch
+September 5, 2026 17:21
+This was referenced Sep 5, 2026
+gaussian_splatting: retry tile-sorter creation on the shared GPU-003 backoff instead of latching (refs #586, PR 2 of 3)
+#977
+Merged
+GPUSortingConfig::validate() bounds max_sort_elements by the sort buffer-size formula but not max_overlap_records / max_overlap_records_adaptive_min, so a valid project config can deterministically refuse the tile sorter
+#978
+Open
+v1.0: classify tile-sorter creation failures (transient vs deterministic) and lift the retry latch on config change, instead of the rate-capped re-probe adopted for alpha
+#979
+Open
+GaussianSplatRenderer.reload_gpu_sorting_config_from_project_settings() at runtime leaves the instance depth-sort pipeline unable to build its uniform set (binding 6 invalid) every frame afterwards; visible splats drop to 0 for the rest of the session
+#980
+Closed
+Compute raster dispatch failures are silent: dispatch_tile_rasterizer_compute() returns 0 on success and on failure, _dispatch_rasterization() discards it, and the frame publishes a cleared texture as a rendered one
+#981
+Open
+gaussian_splatting: build the replacement before retiring the working tile sorter on a grow, and back the grow off (refs #586, PR 3 of 3)
+#982
+Merged
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 6, 2026
+gaussian_splatting: build the replacement before retiring the working…
+…
+7dd6f9e
+```
+… tile sorter on a grow, and back the grow off (refs #586, PR 3 of 3) (#982)
+
+* gaussian_splatting: build the replacement before retiring the working tile sorter on a grow, and back the grow off (refs #586, PR 3 of 3)
+
+ensure_resources() shut down and unref'd the live tile sorter BEFORE the
+preflights and create_sorter() ran for a grow or key-layout change, so a
+grow that failed at the one moment it is likely to fail (VRAM pressure)
+traded a working, slightly-too-small sorter for no sorter at all -- since
+#976 every translucent frame rejected, since #977 until the no-sorter retry.
+The optional shrink already built before retiring; the grow now does too.
+
+On a failed grow the working sorter, its capacity and its buffers stay and
+the frame renders sorted at the old budget: records above it are clamped by
+the prefix pass (_get_effective_overlap_capacity) and counted by the
+existing overflow-drop telemetry. The grow is re-attempted on the shared
+GPU-003 backoff with its OWN counter (sorter_grow_failure_count /
+last_sorter_grow_failure_frame): frames keep publishing meanwhile, so PR 2's
+published-frame episode close would otherwise reset a shared counter every
+frame and turn the backoff into a per-frame re-attempt. A grow in backoff is
+a no-op branch; a successful grow retires the old sorter, reallocates the
+buffers and closes the grow episode (sorter_grow_recoveries). Missing-sorter
+failures still go through disable_sorter() exactly as in #977.
+
+Telemetry: global_sort_sorter_grow_failures / global_sort_sorter_grow_recoveries
+in get_binning_debug_counters(). Test: one [GaussianSplatting][TileRenderer]
+[RequiresGPU] case provokes the real refused grow and asserts the same sorter
+object, capacity and key buffer survive, frames keep publishing, the grow is
+not re-attempted inside the window, and succeeds at failure+backoff with the
+episode closed. Mutations: retire-before-build (base behaviour), grow gate
+deleted, grow episode never closed -- each RED. The #977 retry case's
+second-episode phase now drops the live sorter through the accessor first,
+because a refused grow no longer produces a missing sorter. Release-gate
+RequiresGPU snapshot re-pinned 158 -> 159 with the repo's own functions.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UA1aX2xX8cajR4uKaMeLN6
+
+* gaussian_splatting: a failed key-layout change retires the tile sorter; failed grows report their own consequence (refs #586, #982 round 1)
+
+Codex round 1 on #982 found two defects in the first cut of PR 3; both confirmed
+against the head.
+
+P1: ensure_resources() treated a key-layout change like a capacity grow and kept
+the old sorter and buffers when the replacement could not be built. TileRenderer
+already recompiles the binning/raster shaders from _get_effective_sort_key_config()
+before the sort stages run (_check_pipeline_validity folds it into the
+shader-defines hash; _ensure_resources() precedes the sort stages), and the key
+buffer's stride follows TileGlobalSortResources::key_config, so the next frame
+would have written keys in the new layout into buffers sized for the old one
+(32 -> 64-bit: two words per record into a one-word buffer). Now only a
+same-layout capacity grow keeps the working sorter. A layout change is attempted
+at once, never held in the grow backoff, and its failure goes through
+disable_sorter(): no sorter, buffers re-laid out for the new layout, rejected
+frames and the no-sorter retry, exactly as at the base. A pending grow episode is
+abandoned (not counted as a recovery) when the sorter it belonged to goes away.
+
+P2: the failed-grow path logged the no-sorter root-cause strings, which promise
+rejected frames, right before "keeping the working sorter". The preflight and
+create sites now pass the root cause only; each outcome states its own
+consequence in its own line.
+
+Test: one new [GaussianSplatting][TileRenderer][RequiresGPU] case drives a
+32 -> 64-bit layout change through the production refusal with a grow episode
+pending and asserts that the old sorter is gone, the buffers follow the new
+layout, the next frame is rejected and the retry rebuilds at the new layout.
+RED on the previous head (the sorter was kept), RED with the abandon step
+deleted, GREEN with the fix. RequiresGPU manifest re-pinned 159 -> 160 with the
+repo's own functions.
+
+Refs #586.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UA1aX2xX8cajR4uKaMeLN6
+
+* gaussian_splatting: close the tile-sorter grow episode only after a published frame, and never on a layout change (refs #586, #982 round 2)
+
+Codex round 2 on #982 found two defects in the grow-episode close; both
+confirmed against the head.
+
+(a) The close condition (replacing_live_sorter && !wants_shrink) was also true
+for a successful key-layout change, so a pending grow episode was counted as a
+grow recovery even when the replacement was no larger than the retired sorter,
+clearing the grow backoff. Now only a same-layout capacity grow can close the
+episode; every other replacement (layout change, shrink, first creation)
+abandons it through abandon_grow_episode() -- no recovery, no WARN.
+
+(b) The episode was closed as soon as the replacement sorter was built, before
+its enlarged key/value/tile buffers were allocated; a buffer failure after the
+build would have been reported as a recovery with the accumulated backoff lost.
+The build now sets sorter_grow_awaiting_publish and the episode closes in
+note_sorted_frame_published(), once a sorted frame has gone through the
+replacement and its buffers -- the same rule the no-sorter episode follows
+since #977 round 3. A later grow failure or an abandoned episode clears the
+flag.
+
+Tests: the grow case asserts the episode is still open right after the build
+and closes only after the next published frame (RED on the round-1 head, RED
+with the close deleted, GREEN); the layout-change case gained a successful
+64 -> 32-bit change with an episode pending, which must be abandoned and not
+counted (RED on the round-1 head, GREEN). No new TEST_CASE; manifest unchanged.
+
+Refs #586.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UA1aX2xX8cajR4uKaMeLN6
+
+---------
+
+Co-authored-by: Claude Fable 5.1 <noreply@anthropic.com>
+```
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 6, 2026
+docs/governance: rank #980 first and record #586 as fixed with its re…
+…
+849fe6c
+```
+…sidual
+
+#586's three-PR slice landed: #976 (af178fe), #977 (54d4989), #982
+(7dd6f9e). The ranked alpha blocker set is updated against that outcome.
+
+#980 enters at rank 1. Calling the GDScript-bound method
+reload_gpu_sorting_config_from_project_settings() at runtime, with no
+configuration change at all, leaves the instance depth-sort pipeline unable to
+build its uniform set on every subsequent frame; visible_splats drops to 0 and
+stays there for the session. Reproduced on RTX 3090 / Vulkan. It outranks #586
+because it needs only a call to a public bound API -- a lower bar to reach than
+any other entry -- and because total absence of rendering is the same symptom
+class as GPU-001. It was found by the tooling built to demonstrate #586's
+reload path, which is the argument for runtime demonstration paying for itself.
+
+#586 stays in the list as fixed-with-residual rather than being deleted. The
+grow still retires the old sorter before the enlarged buffers are allocated, so
+a buffer-allocation failure during a grow still loses both and the
+reduced-capacity fallback then churns per frame. That residual is pre-existing,
+strictly narrower than what the slice fixed, and is a code-reading finding not
+reproduced on NVIDIA -- unproven, not absent. Recorded as disclosed under
+section 8 rather than blocking, and stated as unproven so the tracker does not
+carry a confirmed-live claim that nobody has demonstrated.
+
+Refs #360
+Refs #586
+Refs #980
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01XetKXwgSYSCQoc7eyxB5b4
+```
+This was referenced Sep 6, 2026
+Tile sorter grow retires the old sorter before the enlarged buffers are allocated; a buffer-allocation failure then falls back per frame (unproven, pre-existing)
+#983
+Open
+Sort-failure fallback knowingly renders unsorted translucent output (global-composite sorter absent / indirect unsupported)
+#586
+Closed
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 8, 2026
+docs/governance: define the two-stage release acceptance bar (#360) (#…
+…
+2efc7b5
+```
+…975)
+
+* docs/governance: define the two-stage release acceptance bar (#360)
+
+Records the maintainer's decisions on what GodotGS must satisfy before it
+ships, and how each claim is verified. Defines the bar only; enforcing it is
+follow-up work, so this refs #360 rather than closing it.
+
+Two stages. The Public Alpha ships earlier on a reduced bar (single resident
+scene, correctness blockers only, no API promise) and must say "alpha" on the
+tin. v1.0 carries the production promise: full envelope including multi-node
+and streaming, evidence-integrity gaps blocking, a bounded public settings
+surface, and a peer-relative performance comparison run out-of-band.
+
+Design notes:
+
+- The blocking criterion is stated as a RULE, not a pinned issue list, so the
+  release checklist regenerates by query and cannot go stale. Internal
+  refactors deliberately do not block: a bar that gates on "decompose
+  publish()" ends with P1s relabelled P2 to unblock, which is the same shape
+  as weakening a gate to make a check pass.
+- The verification gate must assert that required lanes RAN, not merely that
+  they did not fail. A job-level `if:` yields conclusion: skipped, which counts
+  as SUCCESS against a required check.
+- The performance section records that lighting/shadow/effector cost is driven
+  by scene composition, not by a feature switch, and flags that
+  direct_light_scale and indirect_sh_scale are post-multiplies applied after
+  the accumulation work -- zeroing them blanks the image while paying the full
+  cost, so a parity number produced that way would be false.
+
+Code citations were read at base de2cb80 and carry file:line.
+
+Refs #360
+Refs #921
+Refs #596
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01XetKXwgSYSCQoc7eyxB5b4
+
+* docs/governance: correct the alpha envelope and the derived alpha blocker set
+
+Triage applied the section 4 rule to the open-issue set scoped to the alpha
+envelope, and two claims in the first revision did not survive verification at
+this base. Both are corrected here rather than quietly dropped, since section 8
+of this very document makes a doc that asserts behaviour the code no longer has
+a blocking defect.
+
+1. #921 / GPU-001 was described as a live "splats absent" defect. It is not.
+   The code fix landed in #924 (873025f), an ancestor of this base: the
+   composite now runs at the pre-upscale seam ahead of the FSR2/TAA block
+   (render_forward_clustered.cpp:2658-2683), single-view only, with multiview
+   and reflection probes documented as legacy-hook fallbacks. #965 added a
+   blocking QA scene covering depth-test-on at scale 1.0 and 0.75. What remains
+   open is the human visual disposition requested 2026-08-23, plus one real
+   coverage gap: FSR2 has a source-order guard but no pixel lane.
+
+2. The alpha envelope said "~2M splats", which the defaults do not produce.
+   The import dialog's balanced fallback is the desktop preset at
+   max_splats = 750000 and density_multiplier = 0.7
+   (io/gaussian_import_preset.cpp:56-57), and the node then caps rendering at
+   max_splats_per_frame = 500000 (core/gaussian_splat_quality_config.h:17).
+   A visual pass run at defaults would sign off a scene thinned roughly
+   fourfold. New section 10.1 states the envelope precisely -- Forward+ single
+   view, GaussianSplatNode3D with an imported asset, import preset and node
+   quality pinned rather than defaulted -- and records the open maintainer
+   decision on whether GaussianSplatWorld3D is admitted, which is what
+   determines whether #862 is an alpha blocker.
+
+Section 11 now carries the derived and ranked in-envelope blocker set
+(#586, #929, #851, #930, #928, #833, #54) in place of the two hand-named items.
+
+Citations added here were read at de2cb80. Where a claim comes from triage
+and was not independently re-read, the text says so explicitly.
+
+Refs #360
+Refs #921
+Refs #586
+Refs #862
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01XetKXwgSYSCQoc7eyxB5b4
+
+* docs/governance: admit GaussianSplatWorld3D into the alpha envelope
+
+Maintainer decision on the open question left by the previous commit. The alpha
+envelope now covers GaussianSplatWorld3D alongside GaussianSplatNode3D, so #862
+(the world never resubmits when the assigned world's parameters change) is an
+alpha blocker and enters the ranked set at rank 2.
+
+Admitting the world node is deliberately NOT admitting streaming open worlds:
+the 50M chunked ladder stays a v1.0 concern.
+
+Recorded explicitly that #862 enters the set by this envelope decision and not
+by a change in its severity -- triage had classified it out-of-envelope under
+the opposite assumption, and that reasoning should stay legible to anyone
+re-reading the derivation later.
+
+Refs #360
+Refs #862
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01XetKXwgSYSCQoc7eyxB5b4
+
+* docs/governance: rank #980 first and record #586 as fixed with its residual
+
+#586's three-PR slice landed: #976 (af178fe), #977 (54d4989), #982
+(7dd6f9e). The ranked alpha blocker set is updated against that outcome.
+
+#980 enters at rank 1. Calling the GDScript-bound method
+reload_gpu_sorting_config_from_project_settings() at runtime, with no
+configuration change at all, leaves the instance depth-sort pipeline unable to
+build its uniform set on every subsequent frame; visible_splats drops to 0 and
+stays there for the session. Reproduced on RTX 3090 / Vulkan. It outranks #586
+because it needs only a call to a public bound API -- a lower bar to reach than
+any other entry -- and because total absence of rendering is the same symptom
+class as GPU-001. It was found by the tooling built to demonstrate #586's
+reload path, which is the argument for runtime demonstration paying for itself.
+
+#586 stays in the list as fixed-with-residual rather than being deleted. The
+grow still retires the old sorter before the enlarged buffers are allocated, so
+a buffer-allocation failure during a grow still loses both and the
+reduced-capacity fallback then churns per frame. That residual is pre-existing,
+strictly narrower than what the slice fixed, and is a code-reading finding not
+reproduced on NVIDIA -- unproven, not absent. Recorded as disclosed under
+section 8 rather than blocking, and stated as unproven so the tracker does not
+carry a confirmed-live claim that nobody has demonstrated.
+
+Refs #360
+Refs #586
+Refs #980
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01XetKXwgSYSCQoc7eyxB5b4
+
+* docs/governance: record 3 of 10 alpha blockers fixed, and how two were found
+
+#984 (330a764) closed #980 and #985. With #586's three-PR slice that is
+three of the ten identified alpha blockers fixed on master, seven open.
+
+#985 is added to the ranked set as a blocker in its own right. Deferred rebuild
+triggers only armed a flag and the refresh site sat below the branches gated on
+it, so on the node route a preset change was never serviced and the sort
+reported no visible splats for the session -- silently, with no binding error.
+It is recorded separately from #980 because it is an independent pre-existing
+defect with its own pre-fix symptom, not a hazard introduced by #980's fix.
+
+The status line now records that two of the ten were found by verification
+conditions attached to a fix in flight rather than by triage: #980 by the
+tooling built to demonstrate #586's reload path, #985 by the condition
+requiring #980's deferred triggers to be covered. Neither was reachable by
+reading issues. That is why the list is treated as a floor and not a ceiling,
+and it is the argument for keeping such conditions on the remaining tracks.
+
+Refs #360
+Refs #980
+Refs #985
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01XetKXwgSYSCQoc7eyxB5b4
+
+* docs/governance: add the disclosed-not-blocking table, and record painterly as one defect class
+
+Adds section 8.1, the disclosed-not-blocking table the disclosure rule implied
+but never carried, seeded with the two decided so far: #989 (transparent_bg is
+fully opaque under TAA/FSR2 -- upstream Godot, proven not splat-specific by a
+mesh-only control) and #983 (the tile-sorter grow residual, unproven on NVIDIA).
+Each carries its reason and a workaround. Records why #928 was closed rather
+than held open for #989: an issue kept open for a defect we do not own would sit
+in the section 4 blocker query and block our release on someone else's
+repository.
+
+Updates the ranked set for the painterly investigation:
+
+- #986 is the root cause. Painterly's own viewport composite can never load, so
+  painterly falls through to the standard composite.
+- #987 is DOWNSTREAM of #986, not independent -- the standard composite demands
+  raster_output.depth, which render_painterly_stage never assigns. It must not
+  be fixed separately.
+- #930's refutation is CONDITIONAL on #986. Painterly is decoded today only
+  because the standard composite it falls through to does the decode its own
+  shader lacks. Repairing #986 makes #930 live, so the decode must land with it.
+- #851's premise held only because the QA pin sets depth_test=false; it needs
+  re-testing at the shipped default once #986 lands.
+- #928 is closed by #988; its residual symptom is upstream and now disclosed.
+
+Two findings recorded that no single issue carries:
+
+Painterly's defects are ONE CLASS. render_painterly_stage does not populate
+fields render_baseline_stage does; raster_output.depth (#987) and lighting_mode
+(#851) are the two found so far and there is no reason to think they are the
+only two. The #986 repair must enumerate every field the baseline stage assigns
+rather than discovering them one at a time. A secondary consequence: invalid
+raster_output.depth invalidates the cached render every frame, so painterly
+permanently defeats cached-render reuse.
+
+Do NOT constrain painterly to depth_test=false. It appears to work there only
+because two defects cancel -- #986 removes painterly's composite, and at that
+setting the missing-scene-depth check collapses so the fallthrough proceeds.
+Enshrining it would bake in an accident that breaks when either is repaired.
+This option was on the table and is ruled out explicitly.
+
+Refs #360
+Refs #986
+Refs #987
+Refs #989
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0184mXuE7CECj6KeneavAKxj
+
+---------
+
+Co-authored-by: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+klausi3D
+mentioned this pull request
+Sep 17, 2026
+Overlap-record overflow recovery and persistent truncation (accepted alpha limitation)
+#54
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

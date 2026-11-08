@@ -1,0 +1,126 @@
+CUDA-OpenGL interop is explicitly not "yet" supported As this has still not "yet" been implemented, if we want to support this an alternate render path will be required. This could be: Copy agent data for vis via d2h from cuda, then into...
+
+WSL2 visualisation support · Issue #154 · FLAMEGPU/FLAMEGPU2-visualiser · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+WSL2 visualisation support #154
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+WSL2 visualisation support#154
+Copy link
+Description
+ptheywood
+opened on Aug 6, 2026
+Issue body actions
+CUDA-OpenGL interop is explicitly not "yet" supported
+As this has still not "yet" been implemented, if we want to support this an alternate render path will be required.
+This could be:
+Copy agent data for vis via d2h from cuda, then into the opengl context explicitly. This will have a measurable performance cost, and if the async copying will neend some extra effort if done propperly.
+Use vulkan interop (which is supported in WSL) then use soem vulkan/opengl interop to access the data in opengl
+More significant vis changes (i.e. not opengl, or fully separate visualiser with IPC (that would likely have all the performance disadvantegs too).
+For now, windows users who requrie vis must just use native windows builds.
+Activity
+ptheywood commented on Oct 28, 2026
+ptheywood
+on Oct 28, 2026
+MemberAuthor
+More actions
+Mulitple attendees at a tutorial/hackathon using WSL for development purposes now on their work machines, so probably worth adding the slow render path seeing as opengl interop is still not supported in WSL.
+ptheywood commented on Oct 30, 2026
+ptheywood
+on Oct 30, 2026
+Last edited by ptheywood
+MemberAuthor
+More actions
+WSL builds of FLAMEGPU2/the visualser are just regular linux builds, so we can only detect the need for the fallback route at runtime (rather than doing anything build specific).
+This could be done by checking for files that only exist for WSL, checking the kernel name, or checking env variables (which I would lean towards).
+As we also need WSL with graphics enabled (i.e WSLg) the WSL2_GUI_APPS_ENABLED env variable (which exists and is set to 1, and will probably not exist outside of WSL installs) seems appropraite for this.
+We may also want an extra env var to allow opt-in to the WSL-compatible render route for native builds (for testing mostly), e.g. FLAMEGPU_VISUALSIER_ALT_RENDER_PATH (or simialr, depending on what render path gets implemented).
+I'm leaning towards smuggling the data from CUDA to openGL via Vulkan first, as (assuming it is actually viable) this should be significantly cheaper than taking the data via the host (and should actually require fewer changes to our render loop, but prolly more total lines).
+This could become the only implementation, assuming vulkan is available everywhere (it should be for CUDA 12+ compatible drivers) but would be doing unneccsary extra ops outside of WSL.
+Very roughly:
+Create a vulkan context on the same Device as the visualiseation (and CUDA)
+Allocate the interop buffer with vulkan, memset
+Map the vulkan buffer into CUDA
+Map the vulkan buffer into opengl
+Copy data from the agent memory into the Vulkan buffer via cuda, with some synchronisation as appropraite (vulkan sempahores)
+Render in OpenGL
+This should fit (mostly) within the current methods of cuda.h/cu, with a little bit of extra stuff during window creation.
+This may require openGL 4.5 (should be fine, but I should check this is available in WSL)
+WIP Notes tracing our use of OpenGL interop
+(becaue its' been a long time since I looked at this)
+In src/flamegpu/visualiser/util/cuda.h we include cuda_gl_interop.h & cuda_runtime.h.
+We define the templated CUDATextureBuffer struct, which contains a cudaGraphicsResource_t cuGraphicsRes & cudaTextureObject_t cuTextureObj, and then define 3 functions:
+mallocGLInteropTextureBuffer which allocates the GL interop buffer, returning a CUDATextureBuffer
+freeGLInteropTextureBuffer which deallocates structures for the above
+_cudaMemcpyDeviceToDevice which moves data.
+Visualser::render contains the render loop, in which Visualiser::renderAgentStates() is called.
+renderAgentStates (if not paused), for each agent state being rendered:
+the size of render buffers are checked if it needs to be rezied:
+For both the core_texture_buffers and the custom_texture_buffers:
+mallocGLInteropTextureBuffer is called for each buffer with the new buffer beign made active and bound
+_cudaMemcpyDeviceToDevice is called to copy the data from the old to the new buffer
+The new GL buffer is made active
+The old buffers (GL and CUDA) are free'd via freeGLInteropTextureBuffer
+If the splash scren is closed,
+for each agent state being rendered
+For both the core_texture_buffers & custom_texture_buffers
+updateMapped is called on the CUDATextureBuffers, which calls:
+cudaGraphicsMapResources, cudaGraphicsResourceGetMappedPointer, cudaMemcpy, cudaGraphicsUnmapResources
+for each agent state being rendered
+If there is data in the buffer, call renderInstances
+Visualiser::updateAgentStateBuffer aslo calls _cudaMemcpyDeviceToDevice for each core and custom texture bugger for the agent state being updated.
+mallocGLInteropTextureBuffer
+calls various gl methods to create and bind texture buffers (e.g. glGenTextures, glGenBuffers etc)
+calls cudaGraphicsGLRegisterBuffer, with cuGraphicsRes & the gl buffer from from glGenBuffers
+calls cudaGraphicsMapResources with cuGraphicsRes
+calls cudaGraphicsResourceGetMappedPointer with d_MappedPointer & cuGraphicsRes
+calls cudaGraphicsUnmapResources with cuGraphicsRes
+calls _getCUDAResourceDesc
+Returns a cudaResourceDesc for a specific d_TexPointer (the d_MappedPointer)
+calls cudaCreateTextureObject
+Returns the CUDATextureBufferObject
+freeGLInteropTextureBuffer calls:
+cudaDestroyTextureObject
+cudaGraphicsUnregisterResource
+glDeleteBuffers
+glDeleteTextures
+updateMappedcalls:
+cudaGraphicsMapResources
+cudaGraphicsResourceGetMappedPointer
+cudaMemcpy
+cudaGraphicsUnmapResources
+_cudaMemcpyDeviceToDevice calls
+cudamemcpy (in the default stream, blocking)
+There will likely also need to be changes to SDL2 window handling to enable Vulkan support, and some opengl extensions (e.g. https://registry.khronos.org/OpenGL/extensions/EXT/EXT_external_objects.txt). This may then require opengl >= 4.5 (which may cause issues). Current shaders are 4.3.
+Before mapping this out any further, I'll check what opengl version is available on a WSL + CUDA system.
+The following repo looks like it will be useuful: https://github.com/nvpro-samples/gl_vk_simple_interop
+CUDA 12.4 requires Driver R550 on linux and R551 on Windows, which supports OpenGL 4.6 but I should still check a 4.5 context can be created from WSL before going further with this.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

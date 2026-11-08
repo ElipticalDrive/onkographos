@@ -1,0 +1,124 @@
+While running down some issues reported for my mod (Dynmap), I've found the following concerns: after running '/wb fill' on 1.13.x, an approximately 2 chunk radius around the existing chunks has not been fully cooked: specifically, those...
+
+1.13 fill logic leaving 2 chunk border of 'uncooked' chunks · Issue #101 · Brettflan/WorldBorder · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+1.13 fill logic leaving 2 chunk border of 'uncooked' chunks #101
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+1.13 fill logic leaving 2 chunk border of 'uncooked' chunks#101
+Copy link
+Description
+mikeprimm
+opened on Sep 3, 2018
+Issue body actions
+While running down some issues reported for my mod (Dynmap), I've found the following concerns:
+after running '/wb fill' on 1.13.x, an approximately 2 chunk radius around the existing chunks has not been fully cooked: specifically, those chunk still cannot be loaded without generate being drive (e.g. World.loadChunk(x, y, false)).
+further support for this is that flying a player over those chunks 'fixes' them - loadChunk(x, y, false) will now work (which is basically what Dynmap counts on to avoid driving chunk generation while 'flood filling' its map)
+Looking at your code, I believe the issue is that 1.13 world generation has altered/compromised the assertion in isChunkFullyGenerated() - https://github.com/Brettflan/WorldBorder/blob/master/src/main/java/com/wimbli/WorldBorder/WorldFileData.java#L135 - that a chunk will be fully generated (aka 'populated' in MC internals terms) when it is the case that it and all 8 of its neighbors have been at least generated (and stored in the MCA files). I plan to crawl into the internals to 'prove' this, but based on my observations, I will wager that chunk generation (vs population) is now a broader radius - I'm betting 3 chunks - and that the 'buffer' I'm seeing in /wb fill is due to this. Ultimately, the isChunkFullyGenerated() heuristic needs to be logically equivalent to the notion that World.loadChunk(x, y, false) for the same chunk would return success (since both of these returning false implies the need for loadChunk(x, y, true) in order for 'fill' to do its job).
+In any case, I'll try to follow up with some additional data, but I wanted to close loop with you in the mean time so that we're both thinking about this problem. Thanks!!
+👍React with 👍1Reacted by Shi-Ken Don
+Activity
+mikeprimm commented on Sep 3, 2018
+mikeprimm
+on Sep 3, 2018
+Last edited by mikeprimm
+ContributorAuthor
+More actions
+Looking at the net.minecraft.server.ChunkStatus code in the Spigot buildtools work directory, it LOOKS like 'ProtoChunks' (which are uncooked chunks in various stages of world generation processing) have 3 stages which depend upon their neighbors being at least up to one stage behind them before they can proceed: LIQUID_CARVED (1 chunk radius), DECORATED (1 chunk radius), and LIGHTED (1 chunk radius). These all are for states before the chunk is loadable without requiring a generate (which looks to be the case based on the code for ChunkRegionLoader.a(GeneratorAccess,, int, int NBTTagCompound), which aborts the load of a 'Chunk' if it is still a PROTOCHUNK vs a LEVELCHUNK (which seems to tie back to the ChunkStatus progression).
+I think this gets us the 3 chunk radius I observed: I will write up some code to support the assertion, but I believe that the chunk status winds up as:
+'cooked' chunks are LEVELCHUNK chunks that are either FULLCHUNK or POSTPROCESSED status (both of which can proceed to be processed to the next status without needing neighbors)
+the first layer of neighbors at the edge of the cooked world are DECORATED ProtoChunks trying to get to LIGHTED but are waiting for all their neighbors to be, at least, DECORATED
+the next layer at the edge are ProtoChunks in LIQUID_CARVED state trying to get to DECORATED while waiting for their neighbors to get to LIQUID_CARVED or higher
+the 3rd layer at the edge are ProtoChunks in CARVED state trying to get to LIQUID_CARVED while waiting for their neighbors to all get to CARVED or higher
+I believe loadChunk(x, y, true), when needed, drives itself, and recursively, any needed neighbors to be generated to at least the state needed to allow the chunk loaded to be a LEVELCHUNK (FULLCHUNK or POSTPROCESSED state), so I suspect the 2 chunk rift after doing a /wb fill are cases of protochunks that were 1st or 2nd layer (DECORATED or LIGHTED) that were not 'edge' (CARVED - first protochunk state that needs to 'wait' for neighbors before advancing). The /wb fill algorithm sees those 3rd layer protochunk (CARVED) as needing to be generated due to being neighbors of at least one ungenerated (EMPTY) chunk: the loadChunk(true) drives them up to FULLCHUNK, drives the 2nd layer neighbors from DECORATED to LIGHTED, but leaves them (and the first layer LIGHTED protochunks) as still protochunks vs being fully generated themselves.
+mikeprimm commented on Sep 3, 2018
+mikeprimm
+on Sep 3, 2018
+Last edited by mikeprimm
+ContributorAuthor
+More actions
+OK - confirmed on the radius thing, but I think there will be more to the fix than what I put in the first PR. Specifically, since the radius is now 3 chunks, and loading-with-generate on a chunk 'pulls' the state of the chunks in a 3 chunk radius around it to a minimum protoblock state (DECORATE, then LIQUID_CARVED, then CARVED), the order of generating the chunks becomes a lot more critical. If a chunk is pulled in away from the already generated chunks (but in a different region from what was previously processed, for example, which seems to be the processing order), it can result in the chunks between the now-generated chunk and previously generated chunks having all chunks around them for the 3 chunk radius existing (as protochunks or as chunks), even though they themselves are not fully generated. I think the solution choices are:
+Load the chunk existence map once at the start of the fill process so that it reflects the pre-fill state of affairs for the whole map, and don't update it as chunks are generated: then, the 3 chunk radius check will be insensitive to the order the chunks are generated during the fill. Right now, the WorldFileData faults in on request, which means it can reflect new chunks generated in adjacent regions prior to the region being processed. Probably easiest fix, and only slightly worse than what already happens, since the data faults in during the traversal anyway....
+When faulting in the regionFiles for a given region, fault in the adjacent regions too : I think this will force the existence test for two adjacent regions (A and B) to be loaded, at worst, before either of them has had any chunks generated by the fill. Since the radius is 3 chunks, and regions are 32 on a side, I believe this would force the state of the resulting maps to be, at worst, before either A or B was changed, whether A or B goes first.
+The 'chunkExistsNow()' updating kind of makes things worse, since the 'filling in' of those generated chunks can complete the existence grid for chunks that, themselves, are not yet generated...
+Unfortunately, the more I think about it, the more convinced I am that a new test is needed. If, for example, a player makes a loop around some chunks while moving, you could wind up with the resulting state map (E = empty (no chunk), C=carved, D=decorated, L=lighted, F=fullchunk):
+FFFFFFFFF
+FLLLLLLLF
+FLDDDDDLF
+FLDCCCDLF
+FLDCECDLF
+FLDCCCDLF
+FLDDDDDLF
+FLLLLLLLF
+FFFFFFFFF
+In this case, the 3 block radius test fails so long as the E block isn't generated : if it IS updated before some of the C blocks, those C blocks will 'see' chunks in every direction for 3 chunks (and incorrectly be assumed to be complete F state blocks, even though pulling in and generating the E block only 'pulled' them to L state. Worse, if the loop made by the player is a little smaller:
+FFFFFFFF
+FLLLLLLF
+FLDDDDLF
+FLDCCDLF
+FLDCCDLF
+FLDDDDLF
+FLLLLLLF
+FFFFFFFF
+Then all the C blocks see 3 existing chunks in every direction, and the '3 radius existence' algorithm fails.
+Real problem is the need for a fast, efficient test for 'is this chunk type a LEVELCHUNK vs either empty or a PROTOCHUNK)?' question that is less expensive than trying to load the chunk data...
+mikeprimm commented on Sep 3, 2018
+mikeprimm
+on Sep 3, 2018
+ContributorAuthor
+More actions
+OK - I think I've got a good fix : at least a pretty good one. I've added a check to screen out chunk records that exist, but lack a non-zero lastSaveTime value, which seems to further improve the accuracy of the test. Not sure if it is 100% - I'm still concerned about the 'loops' scenario above - but I think it'll work as well as previously. I'll try to get PR over shortly.
+Brettflan commented on Sep 4, 2018
+Brettflan
+on Sep 4, 2018
+Owner
+More actions
+Thanks for looking into this. It might be a while before I can review it, but do keep me updated if you find out anything further.
+Brettflan commented on Sep 16, 2018
+Brettflan
+on Sep 16, 2018
+Owner
+More actions
+OK, pull request has been merged.
+Glitchfinder commented on Sep 16, 2018
+Glitchfinder
+on Sep 16, 2018
+Last edited by Glitchfinder
+More actions
+All right, so this addresses the issue in many cases, but I have confirmation that it does not fully address the issue. I'm currently running this commit and have a map here. The commit is enough for WorldBorder to detect the ungenerated chunks, but upon iterating through them, they do not generate, A new fill task will detect the same number of ungenerated chunks, and run through them again.
+If you look at the map here, that was the result I got when I started a generation task with force-load set to true, paused it, moved the task to that corner, and then reloaded the task from the configuration file.
+Somehow, the new check is still allowing chunks to slip through without being generated.
+mikeprimm commented on Oct 1, 2018
+mikeprimm
+on Oct 1, 2018
+ContributorAuthor
+More actions
+Right - as I details earlier, this will not cover 100% of cases, as it is possible to generate loops of generated chunks with 'islands' partially generated chunks within - these chunks can wind up 'existing' (along with all chunks within a 3 chunk radius) while themselves not having become fully generated. This is also why, if you already tried to use the fill option before the fix, it will not fully work, as the previous code specifically creates the scenario of such islands of partially generate chunks on the world border.
+From what I can see, the only assured way to know that a chunk is fully generated would involve the expensive action of loading the NBT data for the chunk to check the chunk's state - at that point, you might as well just use 'force' and get the job done reliably, since loading and decompressing the NBT is most of the cost of loading the chunk. The WB algorithm attempts to predict that a chunk is (or is not) fully generated using data that no longer is sufficient to do so - the change here is an improved heuristic that doesn't fail as consistently as the older one did on 1.13 (given the world generation method changes), but is still limited on the fact that the data being used is insufficient to be truly reliable.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

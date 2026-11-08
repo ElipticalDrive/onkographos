@@ -1,0 +1,153 @@
+Building Loam: real-time physics and rendering for curved, higher-dimensional, and exotic geometry. - fix(rye-render): hyperslice marcher correctness; eliminate silhouette dimples (issue #17) by throgsoft · Pull Request #46 · throgsoft/loam
+
+fix(rye-render): hyperslice marcher correctness; eliminate silhouette dimples (issue #17) by throgsoft · Pull Request #46 · throgsoft/loam · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+throgsoft
+commented
+May 2, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Fixes #17.
+Bugs fixed (all in the hyperslice4d kernel)
+min_step (0.005) > hit_eps (0.001) in the marcher. When an SDF dipped into the (0.001, 0.005) range — which is what every approach to a polytope silhouette looks like — the marcher was forced to step past its actual clearance.
+No under-step factor. The march used step = max(d, 0.005) directly. Polytope SDFs in the kernel (pentatope_sdf_local, cell16_sdf_local, cell24_sdf_local) are Lipschitz-1 lower bounds but not tight; without an under-step factor, near-tangent rays can overshoot.
+estimate_normal sampled the combined SDF. Central-difference samples near a polytope's silhouette blended gradients between the polytope and the floor, yielding contaminated normals at every silhouette edge.
+Iteration cap of 192 too low. Tangent-grazing rays at silhouettes converge geometrically by ~15% per iteration; 192 iters runs out before convergence at typical scene depths.
+Floor classification by n.y > 0.95 heuristic. Sphere tops also have n.y > 0.95, so they were being painted with the floor checker, producing a dark cap regression.
+Horizon banding. Rays with very small rd.y (near-horizontal) take ~900+ iters to reach a y=0 floor; even 384 iters returns sky at the horizon line.
+Changes
+crates/rye-render/src/raymarch/hyperslice4d.rs (kernel):
+min_step lowered to 0.0001 (1/10 of hit_eps).
+Step uses max(d * 0.85, min_step).
+Iteration cap raised to 384.
+New rye_body_sdf_at(p3, body_idx) — single-body SDF for normal sampling.
+estimate_normal(p, body_idx) dispatches: static-scene hits sample only rye_scene_sdf; body hits sample only rye_body_sdf_at(_, body_idx).
+Floor classification: rye_scene_at(p_hit).kind == RYE_PRIM_HALFSPACE4D instead of normal/y heuristic.
+Marcher far-clip now min(60.0, rye_scene_max_t(ro, rd) + 1.0), capping shallow rays.
+crates/rye-sdf/src/scene4.rs (Scene4 emit):
+Emits RyeSceneHit { dist, kind } and primitive-kind constants alongside the existing scene SDF.
+rye_scene_at(p3) -> RyeSceneHit walks the tree carrying both distance and the closest leaf's kind.
+rye_scene_sdf(p3) is now a thin wrapper around rye_scene_at(p3).dist (call sites unchanged).
+New rye_scene_max_t(ro, rd) walks HalfSpace4D leaves and returns the analytical ray-plane intersection bound.
+Kind tracking: union picks the closer leaf, intersection picks the farther (boundary) leaf, difference returns RYE_PRIM_OTHER.
+New tests
+rye-sdf (9 new):
+Sphere, Box3, HalfSpace, HyperSphere4D, HalfSpace4D: distance correctness (sign + surface zero + known-point distance).
+Sphere, Box3, HalfSpace, union(min): Lipschitz-1 spot check across 256 deterministic point pairs.
+HyperSphere4D, HalfSpace4D: Lipschitz-1 spot check.
+Scene4 emit: per-primitive identity layer (kind constants, RyeSceneHit, kind walker output).
+Scene4 emit: difference returns RYE_PRIM_OTHER sentinel.
+rye-render/raymarch/hyperslice4d (6 new):
+CPU port of fs_main's march loop (march_hyperslice_cpu) for headless integration testing.
+Five integration tests against the CPU port: solo-sphere top hit, floor hit between spheres, twin-overlap hits sphere not floor, shallow ray converges, ray into sky misses.
+kernel_validates_with_real_scene_union: end-to-end naga validation of the kernel against a real Scene4 emit.
+String-presence pins for the three new kernel symbols (rye_body_sdf_at, rye_scene_at(...).kind == ..., rye_scene_max_t(ro, rd)).
+cargo test --workspace --lib, cargo clippy --workspace --examples -- -D warnings, cargo fmt --check all green.
+Visual verification
+Run cargo run --release --example polytope_smoke and scrub w + rotate planes:
+No silhouette dimples on the floor at polytope footprints.
+No background bleed-through at silhouette edges between overlapping shapes.
+No floor-checker dark caps on sphere tops.
+Horizon line is clean (no banding).
+throgsoft
+added 11 commits
+May 2, 2026 00:58
+fix(rye-render): hyperslice marcher correctness; eliminate silhouette…
+…
+acd411e
+```
+… dimples (issue #17)
+```
+fix(rye-render): bump hyperslice march iteration cap 192 -> 384 (issue …
+…
+fd8d2d2
+```
+…#17 follow-up)
+```
+chore: drop accidentally-committed issue17 screenshot artifact
+67c20c9
+examples(overlapping_sdfs): minimal static scene to visually verify t…
+…
+20d7182
+```
+…he hyperslice marcher fix
+```
+fix(rye-render): floor checker no longer paints static-sphere tops (i…
+…
+b4af907
+```
+…ssue #17 follow-up)
+```
+test(rye-render): pin floor y-gate presence + Scene4 emit naga valida…
+…
+7eff7e8
+```
+…tion (issue #17 regression guards)
+```
+test(rye-render): CPU port of hyperslice marcher + 5 integration test…
+…
+c1bdcd5
+```
+…s pinning the issue #17 visual fix
+```
+test(rye-sdf): distance-correctness + Lipschitz-1 tests for Sphere, B…
+…
+fe594fe
+```
+…ox3, HalfSpace, HyperSphere4D, HalfSpace4D, and combinators (issue #17 follow-up)
+```
+feat(rye-sdf, rye-render): per-primitive identity in static SDF repla…
+…
+4afc27e
+```
+…ces floor classification heuristic (issue #17 follow-up)
+```
+feat(rye-sdf, rye-render): analytical floor intersection caps marcher…
+…
+2f1a7ed
+```
+… far-clip; eliminates horizon banding (issue #17 follow-up)
+```
+chore: drop overlapping_sdfs example; trim verbose comments and docst…
+…
+215c09b
+```
+…rings across hyperslice fix
+```
+Hide details
+View details
+throgsoft
+merged commit e82ce01
+into
+main
+May 2, 2026
+4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+throgsoft
+deleted the
+fix/hyperslice-marcher-lensing
+branch
+May 2, 2026 08:04
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

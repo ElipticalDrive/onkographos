@@ -1,0 +1,2203 @@
+# Volume Rendering
+
+Renderowanie volumetryczne w czasie rzeczywistym z wykorzystaniem technik ray marching oraz ray casting. Implementacja w TypeScript z użyciem WebGL.
+
+[Harmonogram](./doc/Harmonogram.md)
+
+## Żródła
+
+- [Volume Rendering Techniques](https://developer.nvidia.com/gpugems/gpugems/part-vi-beyond-triangles/chapter-39-volume-rendering-techniques) - Volume Rendering Techniques, GPU Gems
+- [Dane volumetryczne](http://klacansky.com/open-scivis-datasets/) - przykładowe dane do testów
+- [Example 1](https://www.willusher.io/webgl/2019/01/13/volume-rendering-with-webgl/) - Przykład implementacji w WebGL
+- [WebGL tutorial](https://webglfundamentals.org/) - Podstawy WebGL2
+- [Marching Cubes LUT](https://gist.github.com/dwilliamson/c041e3454a713e58baf6e4f8e5fffecd) - Tablice do algorytmu Marching Cubes
+
+## Uruchomienie
+
+1. Zainstaluj zależności:
+
+   ```
+   pnpm i
+   ```
+
+2. Uruchom serwer deweloperski:
+   ```
+   pnpm run dev
+   ```
+
+### vite.config.ts
+```
+import { defineConfig, loadEnv } from "vite";
+
+// https://vitejs.dev/config/
+
+export default defineConfig(({ command, mode }) => {
+    if (command === "build") {
+        const env = loadEnv(mode, process.cwd(), "");
+        return {
+            base: env.BASE_URL,
+        };
+    }
+    return {};
+});
+```
+
+### src/camera.ts
+```
+import Vector3 from "3d-game-engine-canvas/src/utilities/math/Vector3";
+import { Camera } from "./utils/camera";
+
+document.onkeydown = (e) => {
+    const amount = 0.1;
+    switch (e.key) {
+        case "w":
+            Camera.camera.move(new Vector3(0, 0, -amount));
+            break;
+        case "s":
+            Camera.camera.move(new Vector3(0, 0, amount));
+            break;
+        case "a":
+            Camera.camera.move(new Vector3(-amount, 0, 0));
+            break;
+        case "d":
+            Camera.camera.move(new Vector3(amount, 0, 0));
+            break;
+        case " ":
+            Camera.camera.move(new Vector3(0, amount, 0));
+            break;
+        case "Control":
+            Camera.camera.move(new Vector3(0, -amount, 0));
+            break;
+    }
+};
+
+document.getElementById("root")!.onmousemove = (e) => {
+    if (e.buttons !== 1) return;
+    const amount = 0.01;
+    Camera.camera.rotate(
+        new Vector3(-e.movementY * amount, -e.movementX * amount, 0)
+    );
+};
+```
+
+### src/gui.ts
+```
+import { ColorMaps } from "./models/colorMaps.ts";
+import { bonsai, fuel, backpack, skull } from "./models/models.ts";
+import { updateRenderer } from "./scene.ts";
+
+const models = {
+    bonsai,
+    fuel,
+    backpack,
+    skull,
+};
+
+const colorMaps = {
+    gray: ColorMaps.gray,
+    viridis: ColorMaps.viridis,
+    hot: ColorMaps.hot,
+};
+
+let values = {
+    threshold: 0.5,
+    model: "fuel",
+    colorMap: "gray",
+    numberOfSlices: 64,
+};
+
+const convertValues = () => {
+    return {
+        threshold: values.threshold,
+        model: models[values.model as keyof typeof models],
+        colorMap: colorMaps[values.colorMap as keyof typeof colorMaps],
+        numberOfSlices: values.numberOfSlices,
+    };
+};
+
+const modelEle = document.getElementById("model");
+Object.keys(models).map((key) => {
+    const option = document.createElement("option");
+    option.value = key;
+    option.text = key;
+    if (key === values.model) option.selected = true;
+    modelEle?.appendChild(option);
+});
+modelEle?.addEventListener("change", (e) => {
+    const selectedModel = (e.target as HTMLSelectElement).value;
+    values.model = selectedModel;
+    updateRenderer(convertValues());
+});
+
+const colorMapEle = document.getElementById("colorMap");
+Object.keys(colorMaps).forEach((key) => {
+    const option = document.createElement("option");
+    option.value = key;
+    option.text = key;
+    if (key === values.colorMap) option.selected = true;
+    colorMapEle?.appendChild(option);
+});
+colorMapEle?.addEventListener("change", (e) => {
+    const selectedColorMap = (e.target as HTMLSelectElement).value;
+    values.colorMap = selectedColorMap;
+    updateRenderer(convertValues());
+});
+
+const thresholdEle = document.getElementById("threshold") as HTMLInputElement;
+thresholdEle.value = values.threshold.toString();
+thresholdEle?.addEventListener("input", (e) => {
+    const threshold = parseFloat((e.target as HTMLInputElement).value);
+    values.threshold = threshold;
+    updateRenderer(convertValues());
+});
+
+const slicesEle = document.getElementById("slices") as HTMLInputElement;
+slicesEle.value = values.numberOfSlices.toString();
+slicesEle?.addEventListener("input", (e) => {
+    const numberOfSlices = parseInt((e.target as HTMLInputElement).value);
+    values.numberOfSlices = numberOfSlices;
+    updateRenderer(convertValues());
+});
+
+updateRenderer(convertValues());
+```
+
+### src/main.ts
+```
+import "./camera.ts";
+import "./gui.ts";
+import "./style.css";
+```
+
+### src/scene.ts
+```
+import Vector3 from "3d-game-engine-canvas/src/utilities/math/Vector3.ts";
+import { ColorMaps, Texture } from "./models/colorMaps.ts";
+import { cube, Volume } from "./models/models.ts";
+import {
+    makeBasicObject,
+    makeRaymarchingObject,
+    makeTextureBasedObject,
+} from "./utils/creator.ts";
+import { MarchingCubes } from "./utils/marchingCubes.ts";
+import Renderer from "./webgl/renderer.ts";
+import { ShaderProgram } from "./webgl/shaderProgram.ts";
+import Color from "3d-game-engine-canvas/src/utilities/math/Color.ts";
+
+let currentRenderer: Renderer | null = null;
+
+const makeRenderer = async (programs: Array<ShaderProgram>) => {
+    if (currentRenderer) {
+        currentRenderer.destroy();
+    }
+    currentRenderer = new Renderer(programs);
+    currentRenderer.run();
+};
+
+export interface UpdateValues {
+    threshold: number;
+    numberOfSlices: number;
+    model: Volume;
+    colorMap: Texture;
+}
+
+export const updateRenderer = ({
+    threshold,
+    numberOfSlices,
+    model,
+    colorMap,
+}: UpdateValues) => {
+    const programs: Array<ShaderProgram> = [
+        makeBasicObject({
+            mesh: cube,
+            scale: new Vector3(10, 0.1, 10),
+            position: new Vector3(0, -1, 0),
+            color: new Color(150, 150, 150, 255),
+        }),
+    ];
+    if (model.size.x * model.size.y * model.size.z < 65 * 64 * 64) {
+        programs.push(
+            makeBasicObject({
+                mesh: new MarchingCubes(model).march(threshold),
+                scale: new Vector3(
+                    1 / model.size.x,
+                    1 / model.size.y,
+                    1 / model.size.z
+                ),
+                position: new Vector3(1.5, -0.5, -1.5),
+                rotation: new Vector3(0, Math.PI / 2, 0),
+                color: new Color(255, 0, 0, 255),
+            })
+        );
+    }
+    programs.push(
+        makeRaymarchingObject({
+            volume: model,
+            colorMap,
+            position: new Vector3(-2, 0, -2),
+            rotation: new Vector3(-Math.PI / 2, 0, Math.PI / 2),
+            enableMaxValueSampling: false,
+        })
+    );
+    programs.push(
+        makeTextureBasedObject({
+            volume: model,
+            colorMap: colorMap,
+            position: new Vector3(0, 0, -2),
+            rotation: new Vector3(-Math.PI / 2, 0, Math.PI / 2),
+            scale: new Vector3(1, 1, 1),
+            numberOfSlices,
+        })
+    );
+
+    makeRenderer(programs);
+};
+```
+
+### src/models/colorMaps.ts
+```
+export class ColorMaps {
+    static gray: Texture = {
+        size: { x: 256, y: 1 },
+        data: new Uint8Array(
+            Array.from({ length: 256 }, (_, i) => [i, i, i, 255]).flat()
+        ),
+    };
+
+    static hot: Texture = {
+        size: { x: 256, y: 1 },
+        data: new Uint8Array(
+            Array.from({ length: 256 }, (_, i) => {
+                const r = Math.min(255, i * 3);
+                const g = Math.min(255, Math.max(0, (i - 85) * 3));
+                const b = Math.min(255, Math.max(0, (i - 170) * 3));
+                return [r, g, b, 255];
+            }).flat()
+        ),
+    };
+
+    static viridis: Texture = {
+        size: { x: 256, y: 1 },
+        data: new Uint8Array(
+            Array.from({ length: 256 }, (_, i) => {
+                const t = i / 255;
+                const r = Math.floor(68 + 187 * t);
+                const g = Math.floor(1 + 231 * t);
+                const b = Math.floor(84 - 82 * t);
+                return [r, g, b, 255];
+            }).flat()
+        ),
+    };
+
+    static red: Texture = {
+        size: { x: 256, y: 1 },
+        data: new Uint8Array(
+            Array.from({ length: 256 }, (_) => [255, 0, 0, 255]).flat()
+        ),
+    };
+
+    static fadeOpacity(t: Texture) {
+        t = ColorMaps.clone(t);
+        for (let i = 0; i < t.size.x; i++) {
+            t.data[i * 4 + 3] = Math.floor((i / (t.size.x - 1)) * 255);
+        }
+        return t;
+    }
+
+    static clampOpacity(t: Texture, minAlpha: number, maxAlpha: number) {
+        t = ColorMaps.clone(t);
+        for (let i = 0; i < t.size.x; i++) {
+            t.data[i * 4 + 3] =
+                i > minAlpha && i < maxAlpha ? t.data[i * 4 + 3] : 0;
+        }
+        return t;
+    }
+
+    static clone(t: Texture): Texture {
+        return {
+            size: { x: t.size.x, y: t.size.y },
+            data: new Uint8Array(t.data),
+        };
+    }
+}
+
+export type Texture = {
+    size: { x: number; y: number };
+    data: Uint8Array;
+};
+```
+
+### src/models/models.ts
+```
+import ObjLoader from "3d-game-engine-canvas/src/tools/ObjLoader.ts";
+import cubeSrc from "./cube.obj?raw";
+import teapotSrc from "./teapot.obj?raw";
+import Mesh from "3d-game-engine-canvas/src/utilities/Mesh";
+import Vector3 from "3d-game-engine-canvas/src/utilities/math/Vector3";
+import fuelUrl from "../assets/fuel_64x64x64_uint8.raw?url";
+import backpackUrl from "../assets/backpack_512x512x373_uint16.raw?url";
+import bonsaiUrl from "../assets/bonsai_256x256x256_uint8.raw?url";
+import skullUrl from "../assets/skull_256x256x256_uint8.raw?url";
+
+export const cube = new ObjLoader(cubeSrc).parse();
+export const teapot = new ObjLoader(teapotSrc).parse();
+export const fuel = {
+    size: new Vector3(64, 64, 64),
+    data: await importUint8Volume(fuelUrl),
+};
+export const backpack = {
+    size: new Vector3(512, 512, 373),
+    data: uint16ToUint8Volume(await importUint16Volume(backpackUrl)),
+};
+export const bonsai = {
+    size: new Vector3(256, 256, 256),
+    data: await importUint8Volume(bonsaiUrl),
+};
+export const skull = {
+    size: new Vector3(256, 256, 256),
+    data: await importUint8Volume(skullUrl),
+};
+export async function importUint8Volume(url: string): Promise<Uint8Array> {
+    const res = await fetch(url);
+    const buf = await res.arrayBuffer();
+    return new Uint8Array(buf);
+}
+
+export async function importUint16Volume(url: string): Promise<Uint16Array> {
+    const res = await fetch(url);
+    const buf = await res.arrayBuffer();
+    return new Uint16Array(buf);
+}
+
+export function uint16ToUint8Volume(data: Uint16Array): Uint8Array {
+    const uint8Data = new Uint8Array(data.length);
+    for (let i = 0; i < data.length; i++) {
+        uint8Data[i] = data[i];
+    }
+    return uint8Data;
+}
+
+export function toVertexArray(
+    model: Mesh
+): [Float32Array<ArrayBuffer>, Float32Array<ArrayBuffer>] {
+    const vert = model.triangles.flatMap((t) =>
+        t.vertices.flatMap((v) => [v.x, v.y, v.z])
+    );
+    const norm = model.triangles.flatMap((t) =>
+        t.verticesNormals.flatMap((v) => [v.x, v.y, v.z])
+    );
+    return [new Float32Array(vert), new Float32Array(norm)];
+}
+
+export type Volume = {
+    size: { x: number; y: number; z: number };
+    data: Uint8Array;
+};
+```
+
+### src/models/test.ts
+```
+import { Volume } from "./models";
+
+export const testVolume1: Volume = {
+    size: { x: 3, y: 3, z: 3 },
+    /* prettier-ignore */
+    data: new Uint8Array([
+        0, 0, 0, //
+        0, 255, 0, //
+        0, 0, 0, //
+
+        0, 255, 0, //
+        255, 255, 255, //
+        0, 255, 0, //
+
+        0, 0, 0, //
+        0, 255, 0, //
+        0, 0, 0, //
+    ]),
+};
+
+export const testVolume2: Volume = {
+    size: { x: 2, y: 2, z: 2 },
+    /* prettier-ignore */
+    data: new Uint8Array([
+        0, 255, //
+        0, 0, //
+
+        0, 0, //
+        0, 0, //
+    ]),
+};
+
+/* all posible cube configurations for marching cubes separated by 1 space of void*/
+export const testAll: Volume = {
+    size: { x: 8, y: 8, z: 8 },
+    /* prettier-ignore */
+    data: new Uint8Array([
+        0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,
+
+        0,0,0,0,0,0,0,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,0,0,0,0,0,0,0,
+
+        0,0,0,0,0,0,0,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,0,0,0,0,0,0,0,
+
+        0,0,0,0,0,0,0,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,0,0,0,0,0,0,0,
+
+        0,0,0,0,0,0,0,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,0,0,0,0,0,0,0,
+
+        0,0,0,0,0,0,0,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,0,0,0,0,0,0,0,
+
+        0,0,0,0,0,0,0,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,255,255,255,255,255,255,0,
+        0,0,0,0,0,0,0,0,
+
+        0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,]),
+};
+```
+
+### src/programs/basicProgram.ts
+```
+import { basicProgram } from "../shaders/shaders";
+import { gl } from "../webgl/context";
+import { ShaderProgram } from "../webgl/shaderProgram";
+import { Transform } from "../utils/transform";
+import { colorToFloat32Array, transform } from "../utils/vec";
+import Color from "3d-game-engine-canvas/src/utilities/math/Color";
+import Mesh from "3d-game-engine-canvas/src/utilities/Mesh";
+import { toVertexArray } from "../models/models";
+
+export class BasicProgram extends ShaderProgram {
+    constructor(
+        public transform: Transform,
+        public mesh: Mesh,
+        public color: Color = Color.random()
+    ) {
+        super(basicProgram);
+    }
+
+    init() {
+        const [vertexArray, normalArray] = toVertexArray(this.mesh);
+        this.makeAttribute("a_position", vertexArray, gl.STATIC_DRAW);
+        this.makeAttribute("a_normal", normalArray, gl.STATIC_DRAW);
+        this.makeUniform("u_matrix");
+        this.makeUniform("u_color");
+        this.makeUniform("u_lightPos");
+        this.makeUniform("u_ambientLight");
+        this.makeUniform("u_lightColor");
+        this.makeUniform("u_ambientColor");
+    }
+
+    draw() {
+        gl.useProgram(this.program);
+
+        const a_vertex = this.attributes["a_position"];
+        gl.enableVertexAttribArray(a_vertex.location);
+        gl.bindBuffer(gl.ARRAY_BUFFER, a_vertex.buffer);
+
+        const size = 3;
+        const type = gl.FLOAT;
+        const normalize = false;
+        const stride = 0;
+        const offset = 0;
+        gl.vertexAttribPointer(
+            a_vertex.location,
+            size,
+            type,
+            normalize,
+            stride,
+            offset
+        );
+
+        const a_normal = this.attributes["a_normal"];
+        gl.enableVertexAttribArray(a_normal.location);
+        gl.bindBuffer(gl.ARRAY_BUFFER, a_normal.buffer);
+        gl.vertexAttribPointer(
+            a_normal.location,
+            size,
+            type,
+            normalize,
+            stride,
+            offset
+        );
+
+        const { uniformMatrix } = transform(this.transform);
+
+        gl.uniformMatrix4fv(
+            this.uniformsLocations["u_matrix"],
+            false,
+            uniformMatrix
+        );
+
+        gl.uniform4fv(
+            this.uniformsLocations["u_color"],
+            colorToFloat32Array(this.color.copy().normalize())
+        );
+
+        gl.uniform3fv(
+            this.uniformsLocations["u_lightPos"],
+            new Float32Array([5, 10, 5])
+        );
+
+        gl.uniform1fv(
+            this.uniformsLocations["u_ambientLight"],
+            new Float32Array([0.2])
+        );
+
+        gl.uniform4fv(
+            this.uniformsLocations["u_lightColor"],
+            colorToFloat32Array(Color.white.copy().normalize())
+        );
+
+        gl.uniform4fv(
+            this.uniformsLocations["u_ambientColor"],
+            colorToFloat32Array(Color.white.copy().normalize())
+        );
+
+        const primitiveType = gl.TRIANGLES;
+        const count = this.mesh.triangles.length * 3;
+        gl.drawArrays(primitiveType, offset, count);
+    }
+}
+```
+
+### src/programs/raymarchingProgram.ts
+```
+import { raymarchingProgram } from "../shaders/shaders";
+import { gl } from "../webgl/context";
+import { ShaderProgram } from "../webgl/shaderProgram";
+import { Transform } from "../utils/transform";
+import { transform } from "../utils/vec";
+import { cube, toVertexArray, Volume } from "../models/models";
+import { ColorMaps, Texture } from "../models/colorMaps";
+import { Camera } from "../utils/camera";
+
+export class RaymarchingProgram extends ShaderProgram {
+    mesh: Float32Array<ArrayBuffer>;
+    transparent: boolean = true;
+
+    constructor(
+        public transform: Transform,
+        public volume: Volume,
+        public colorMap: Texture = ColorMaps.hot,
+        public enableMaxValueSampling: boolean = true
+    ) {
+        super(raymarchingProgram);
+        this.mesh = toVertexArray(cube)[0];
+    }
+
+    getDistanceToCamera(): number {
+        const dx = this.transform._position.x - Camera.camera.position.x;
+        const dy = this.transform._position.y - Camera.camera.position.y;
+        const dz = this.transform._position.z - Camera.camera.position.z;
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    init() {
+        this.makeAttribute("a_position", this.mesh, gl.STATIC_DRAW);
+        this.makeUniform("u_matrix_projection");
+        this.makeUniform("u_matrix_camera_translation");
+        this.makeUniform("u_matrix_translation");
+        this.makeUniform("u_volume_size");
+        this.makeTexture2D("transfer_fn", this.colorMap);
+        this.makeTexture3D("volume", this.volume);
+    }
+
+    draw() {
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.cullFace(gl.FRONT);
+        gl.useProgram(this.program);
+
+        const a_vertex = this.attributes["a_position"];
+        gl.enableVertexAttribArray(a_vertex.location);
+        gl.bindBuffer(gl.ARRAY_BUFFER, a_vertex.buffer);
+
+        const size = 3;
+        const type = gl.FLOAT;
+        const normalize = false;
+        const stride = 0;
+        const offset = 0;
+        gl.vertexAttribPointer(
+            a_vertex.location,
+            size,
+            type,
+            normalize,
+            stride,
+            offset
+        );
+
+        const { lookAtMatrix, perspectiveMatrix, translationMatrix } =
+            transform(this.transform);
+
+        gl.uniformMatrix4fv(
+            this.uniformsLocations["u_matrix_projection"],
+            false,
+            perspectiveMatrix
+        );
+
+        gl.uniformMatrix4fv(
+            this.uniformsLocations["u_matrix_camera_translation"],
+            false,
+            lookAtMatrix
+        );
+
+        gl.uniformMatrix4fv(
+            this.uniformsLocations["u_matrix_translation"],
+            false,
+            translationMatrix
+        );
+
+        gl.uniform3iv(
+            this.uniformsLocations["u_volume_size"],
+            new Int32Array([
+                this.volume.size.x,
+                this.volume.size.y,
+                this.volume.size.z,
+            ])
+        );
+
+        gl.uniform1i(
+            this.textures["volume"].location,
+            this.textures["volume"].unit
+        );
+        gl.uniform1i(
+            this.textures["transfer_fn"].location,
+            this.textures["transfer_fn"].unit
+        );
+
+        gl.activeTexture(gl.TEXTURE0 + this.textures["volume"].unit);
+        gl.bindTexture(gl.TEXTURE_3D, this.textures["volume"].texture);
+
+        gl.activeTexture(gl.TEXTURE0 + this.textures["transfer_fn"].unit);
+        gl.bindTexture(gl.TEXTURE_2D, this.textures["transfer_fn"].texture);
+
+        const primitiveType = gl.TRIANGLES;
+        const count = this.mesh.length;
+        gl.drawArrays(primitiveType, offset, count);
+        gl.cullFace(gl.BACK);
+    }
+}
+```
+
+### src/programs/textureBasedProgram.ts
+```
+import { textureBasedProgram } from "../shaders/shaders";
+import { gl } from "../webgl/context";
+import { ShaderProgram } from "../webgl/shaderProgram";
+import { Transform } from "../utils/transform";
+import { transform, vector3ToVec3 } from "../utils/vec";
+import { cube, Volume } from "../models/models";
+import { ColorMaps, Texture } from "../models/colorMaps";
+import { Camera } from "../utils/camera";
+import { vec3 } from "gl-matrix";
+import Mesh from "3d-game-engine-canvas/src/utilities/Mesh";
+import ClippingPlane from "3d-game-engine-canvas/src/utilities/ClippingPlane";
+import Vector3 from "3d-game-engine-canvas/src/utilities/math/Vector3";
+
+export class TextureBasedProgram extends ShaderProgram {
+    mesh: Mesh;
+    transparent: boolean = true;
+
+    constructor(
+        public transform: Transform,
+        public volume: Volume,
+        public colorMap: Texture = ColorMaps.hot,
+        public numberOfSlices: number = 64
+    ) {
+        super(textureBasedProgram);
+        this.mesh = cube;
+    }
+
+    getDistanceToCamera(): number {
+        const dx = this.transform._position.x - Camera.camera.position.x;
+        const dy = this.transform._position.y - Camera.camera.position.y;
+        const dz = this.transform._position.z - Camera.camera.position.z;
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    private generateViewAlignedSlices(
+        numSlices: number,
+        lookAtMatrix: Float32Array<ArrayBufferLike>,
+        translationMatrix: Float32Array<ArrayBufferLike>
+    ): [Float32Array, Array<[number, number]>] {
+        const slices: Array<Array<number>> = [];
+
+        const vertexes = this.mesh.getVertices().map((pos) => {
+            const vec = vector3ToVec3(pos);
+            vec3.transformMat4(vec, vec, translationMatrix);
+            vec3.transformMat4(vec, vec, lookAtMatrix);
+            return vec;
+        });
+
+        const [minZ, maxZ] = vertexes.reduce(
+            (acc, v) => {
+                if (v[2] < acc[0]) acc[0] = v[2];
+                if (v[2] > acc[1]) acc[1] = v[2];
+                return acc;
+            },
+            [Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]
+        );
+
+        for (let i = 0; i < numSlices; i++) {
+            const z = minZ + ((maxZ - minZ) * (i + 0.5)) / numSlices; // +0.5 to center the slice
+
+            const sliceVertices: Vector3[] = [];
+
+            const plane = new ClippingPlane(Vector3.forward, -z);
+
+            for (let j = 0; j < vertexes.length; j += 3) {
+                const v0 = new Vector3(
+                    vertexes[j][0],
+                    vertexes[j][1],
+                    vertexes[j][2]
+                );
+                const v1 = new Vector3(
+                    vertexes[j + 1][0],
+                    vertexes[j + 1][1],
+                    vertexes[j + 1][2]
+                );
+                const v2 = new Vector3(
+                    vertexes[j + 2][0],
+                    vertexes[j + 2][1],
+                    vertexes[j + 2][2]
+                );
+
+                const d0 = plane.distance(v0);
+                const d1 = plane.distance(v1);
+                const d2 = plane.distance(v2);
+                if (
+                    (d0 >= 0 && d1 >= 0 && d2 < 0) ||
+                    (d0 < 0 && d1 < 0 && d2 >= 0)
+                ) {
+                    const t02 = plane.computeT(v0, v2);
+                    const t12 = plane.computeT(v1, v2);
+                    const v02 = plane.intersection(v0, v2, t02);
+                    const v12 = plane.intersection(v1, v2, t12);
+                    sliceVertices.push(v02, v12);
+                } else if (
+                    (d0 >= 0 && d1 < 0 && d2 >= 0) ||
+                    (d0 < 0 && d1 >= 0 && d2 < 0)
+                ) {
+                    const t01 = plane.computeT(v0, v1);
+                    const t12 = plane.computeT(v1, v2);
+                    const v01 = plane.intersection(v0, v1, t01);
+                    const v12 = plane.intersection(v1, v2, t12);
+                    sliceVertices.push(v01, v12);
+                } else if (
+                    (d0 < 0 && d1 >= 0 && d2 >= 0) ||
+                    (d0 >= 0 && d1 < 0 && d2 < 0)
+                ) {
+                    const t01 = plane.computeT(v0, v1);
+                    const t02 = plane.computeT(v0, v2);
+                    const v01 = plane.intersection(v0, v1, t01);
+                    const v02 = plane.intersection(v0, v2, t02);
+                    sliceVertices.push(v01, v02);
+                }
+            }
+            const origin = sliceVertices[0];
+            const triangles = [];
+            for (let k = 1; k < sliceVertices.length; k++) {
+                triangles.push(
+                    origin,
+                    sliceVertices[k],
+                    sliceVertices[k + 1 >= sliceVertices.length ? 1 : k + 1]
+                );
+            }
+            slices.push(triangles.map((v) => [v.x, v.y, v.z]).flat());
+        }
+        const length = slices.map((ele) => ele.length);
+        const offsets_length: Array<[number, number]> = [];
+        let offset = 0;
+        for (let i = 0; i < length.length; i++) {
+            offsets_length.push([offset, length[i]]);
+            offset += length[i];
+        }
+
+        return [new Float32Array(slices.flat()), offsets_length];
+    }
+
+    init() {
+        const { lookAtMatrix, translationMatrix } = transform(this.transform);
+        const [data, _offset] = this.generateViewAlignedSlices(
+            this.numberOfSlices * 2,
+            lookAtMatrix,
+            translationMatrix
+        );
+        this.makeAttribute("a_position", data, gl.DYNAMIC_DRAW);
+        this.makeUniform("u_matrix_projection");
+        this.makeUniform("u_matrix_camera_translation");
+        this.makeUniform("u_matrix_translation");
+        this.makeUniform("u_volume_size");
+        this.makeTexture2D("transfer_fn", this.colorMap);
+        this.makeTexture3D("volume", this.volume);
+    }
+
+    draw() {
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.disable(gl.CULL_FACE);
+        gl.useProgram(this.program);
+
+        const { lookAtMatrix, perspectiveMatrix, translationMatrix } =
+            transform(this.transform);
+
+        gl.uniformMatrix4fv(
+            this.uniformsLocations["u_matrix_projection"],
+            false,
+            perspectiveMatrix
+        );
+
+        gl.uniformMatrix4fv(
+            this.uniformsLocations["u_matrix_camera_translation"],
+            false,
+            lookAtMatrix
+        );
+
+        gl.uniformMatrix4fv(
+            this.uniformsLocations["u_matrix_translation"],
+            false,
+            translationMatrix
+        );
+
+        gl.uniform3iv(
+            this.uniformsLocations["u_volume_size"],
+            new Int32Array([
+                this.volume.size.x,
+                this.volume.size.y,
+                this.volume.size.z,
+            ])
+        );
+
+        gl.uniform1i(
+            this.textures["volume"].location,
+            this.textures["volume"].unit
+        );
+        gl.uniform1i(
+            this.textures["transfer_fn"].location,
+            this.textures["transfer_fn"].unit
+        );
+
+        gl.activeTexture(gl.TEXTURE0 + this.textures["volume"].unit);
+        gl.bindTexture(gl.TEXTURE_3D, this.textures["volume"].texture);
+
+        gl.activeTexture(gl.TEXTURE0 + this.textures["transfer_fn"].unit);
+        gl.bindTexture(gl.TEXTURE_2D, this.textures["transfer_fn"].texture);
+
+        const [data, offsets] = this.generateViewAlignedSlices(
+            this.numberOfSlices,
+            lookAtMatrix,
+            translationMatrix
+        );
+        this.updateAttribute("a_position", data);
+        const a_vertex = this.attributes["a_position"];
+        gl.enableVertexAttribArray(a_vertex.location);
+        gl.bindBuffer(gl.ARRAY_BUFFER, a_vertex.buffer);
+
+        offsets.forEach(([offset, length]) => {
+            const size = 3;
+            const type = gl.FLOAT;
+            const normalize = false;
+            const stride = 0;
+            gl.vertexAttribPointer(
+                a_vertex.location,
+                size,
+                type,
+                normalize,
+                stride,
+                offset * 4 //for Float32
+            );
+
+            const primitiveType = gl.TRIANGLES;
+            gl.drawArrays(primitiveType, 0, length);
+        });
+        gl.enable(gl.CULL_FACE);
+    }
+}
+```
+
+### src/shaders/shaders.ts
+```
+import { gl } from "../webgl/context";
+
+import { makeProgram } from "../webgl/program";
+import { makeShader } from "../webgl/shader";
+import basicFragSrc from "./basic/frag.glsl?raw";
+import basicVertSrc from "./basic/vert.glsl?raw";
+import raymarchingFragSrc from "./raymarching/frag.glsl?raw";
+import raymarchingVertSrc from "./raymarching/vert.glsl?raw";
+import textureBasedFragSrc from "./textureBased/frag.glsl?raw";
+import textureBasedVertSrc from "./textureBased/vert.glsl?raw";
+
+export const basicFrag = makeShader(gl.FRAGMENT_SHADER, basicFragSrc);
+export const basicVert = makeShader(gl.VERTEX_SHADER, basicVertSrc);
+export const basicProgram = makeProgram(basicFrag, basicVert);
+
+export const raymarchingFrag = makeShader(
+    gl.FRAGMENT_SHADER,
+    raymarchingFragSrc
+);
+export const raymarchingVert = makeShader(gl.VERTEX_SHADER, raymarchingVertSrc);
+export const raymarchingProgram = makeProgram(raymarchingFrag, raymarchingVert);
+
+export const textureBasedFrag = makeShader(
+    gl.FRAGMENT_SHADER,
+    textureBasedFragSrc
+);
+export const textureBasedVert = makeShader(
+    gl.VERTEX_SHADER,
+    textureBasedVertSrc
+);
+export const textureBasedProgram = makeProgram(
+    textureBasedFrag,
+    textureBasedVert
+);
+```
+
+### src/utils/camera.ts
+```
+import Vector3 from "3d-game-engine-canvas/src/utilities/math/Vector3";
+import { Transform } from "./transform";
+import Quaternion from "3d-game-engine-canvas/src/utilities/Quaternion";
+
+export class Camera {
+    private static _camera: Camera;
+    static get camera(): Camera {
+        if (!this._camera) {
+            Camera._camera = new Camera();
+        }
+        return Camera._camera;
+    }
+
+    public fovy: number = Math.PI / 2;
+    public far: number = 100;
+    public near: number = 0.001;
+    public transform: Transform;
+    constructor() {
+        this.transform = new Transform(
+            new Vector3(1, 1, 1),
+            Quaternion.euler(Vector3.zero),
+            new Vector3(0, 0, 0)
+        );
+        Camera._camera = this;
+    }
+
+    public move(v: Vector3) {
+        this.transform.move(this.transform._rotation.multiply(v));
+        return this;
+    }
+
+    public rotate(v: Vector3) {
+        this.transform.rotate(
+            Quaternion.euler(this.transform._rotation.multiply(v))
+        );
+        return this;
+    }
+
+    public get position() {
+        return this.transform._position;
+    }
+
+    public get rotation() {
+        return this.transform._rotation;
+    }
+    public get inv_position() {
+        return this.transform._position.invert();
+    }
+
+    public get inv_rotation() {
+        return this.transform._rotation.invert();
+    }
+}
+```
+
+### src/utils/creator.ts
+```
+import Vector3 from "3d-game-engine-canvas/src/utilities/math/Vector3";
+import { RaymarchingProgram } from "../programs/raymarchingProgram";
+import { Transform } from "./transform";
+import Quaternion from "3d-game-engine-canvas/src/utilities/Quaternion";
+import { toVertexArray, Volume } from "../models/models";
+import { ColorMaps, Texture } from "../models/colorMaps";
+import Color from "3d-game-engine-canvas/src/utilities/math/Color";
+import { BasicProgram } from "../programs/basicProgram";
+import Mesh from "3d-game-engine-canvas/src/utilities/Mesh";
+import { TextureBasedProgram } from "../programs/textureBasedProgram";
+
+interface makeRaymarchingObjectProps {
+    volume: Volume;
+    colorMap?: Texture;
+    position?: Vector3;
+    rotation?: Vector3;
+    scale?: Vector3;
+    enableMaxValueSampling?: boolean;
+}
+
+export function makeRaymarchingObject({
+    volume,
+    colorMap = ColorMaps.hot,
+    position = Vector3.zero,
+    rotation = Vector3.zero,
+    scale = Vector3.one,
+    enableMaxValueSampling = false,
+}: makeRaymarchingObjectProps): RaymarchingProgram {
+    const rm = new RaymarchingProgram(
+        Transform.zero()
+            .move(position)
+            .rotate(Quaternion.euler(rotation))
+            .scale(scale),
+        volume,
+        colorMap,
+        enableMaxValueSampling
+    );
+    return rm;
+}
+
+interface makeBasicObjectProps {
+    mesh: Mesh;
+    color?: Color;
+    position?: Vector3;
+    rotation?: Vector3;
+    scale?: Vector3;
+}
+
+export function makeBasicObject({
+    mesh,
+    color = Color.random(),
+    position = Vector3.zero,
+    rotation = Vector3.zero,
+    scale = Vector3.one,
+}: makeBasicObjectProps): BasicProgram {
+    const b = new BasicProgram(
+        Transform.zero()
+            .move(position)
+            .rotate(Quaternion.euler(rotation))
+            .scale(scale),
+        mesh,
+        color
+    );
+    return b;
+}
+
+interface makeTextureBasedObjectProps {
+    volume: Volume;
+    colorMap?: Texture;
+    position?: Vector3;
+    rotation?: Vector3;
+    scale?: Vector3;
+    numberOfSlices?: number;
+}
+
+export function makeTextureBasedObject({
+    volume,
+    colorMap = ColorMaps.hot,
+    position = Vector3.zero,
+    rotation = Vector3.zero,
+    scale = Vector3.one,
+    numberOfSlices = 64,
+}: makeTextureBasedObjectProps) {
+    const tb = new TextureBasedProgram(
+        Transform.zero()
+            .move(position)
+            .rotate(Quaternion.euler(rotation))
+            .scale(scale),
+        volume,
+        colorMap,
+        numberOfSlices
+    );
+    return tb;
+}
+```
+
+### src/utils/lut.ts
+```
+//
+// Lookup Tables for Marching Cubes
+//
+// These tables differ from the original paper (Marching Cubes: A High Resolution 3D Surface Construction Algorithm)
+//
+// The co-ordinate system has the more convenient properties:
+//
+//    i = cube index [0, 7]
+//    x = (i & 1) >> 0
+//    y = (i & 2) >> 1
+//    z = (i & 4) >> 2
+//
+// Axes are:
+//
+//      y
+//      |     z
+//      |   /
+//      | /
+//      +----- x
+//
+// Vertex and edge layout:
+//
+//            6             7
+//            +-------------+               +-----6-------+   
+//          / |           / |             / |            /|   
+//        /   |         /   |          11   7         10   5
+//    2 +-----+-------+  3  |         +-----+2------+     |   
+//      |   4 +-------+-----+ 5       |     +-----4-+-----+   
+//      |   /         |   /           3   8         1   9
+//      | /           | /             | /           | /       
+//    0 +-------------+ 1             +------0------+         
+//
+// Triangulation cases are generated prioritising rotations over inversions, which can introduce non-manifold geometry.
+//
+
+
+// Pair of vertex indices for each edge on the cube
+export const EdgeVertexIndices = [
+	[0, 1],
+	[1, 3],
+	[3, 2],
+	[2, 0],
+	[4, 5],
+	[5, 7],
+	[7, 6],
+	[6, 4],
+	[0, 4],
+	[1, 5],
+	[3, 7],
+	[2, 6],
+];
+
+// For each MC case, a mask of edge indices that need to be split
+export const EdgeMasks = [
+	0x0, 0x109, 0x203, 0x30a, 0x80c, 0x905, 0xa0f, 0xb06, 
+	0x406, 0x50f, 0x605, 0x70c, 0xc0a, 0xd03, 0xe09, 0xf00, 
+	0x190, 0x99, 0x393, 0x29a, 0x99c, 0x895, 0xb9f, 0xa96, 
+	0x596, 0x49f, 0x795, 0x69c, 0xd9a, 0xc93, 0xf99, 0xe90, 
+	0x230, 0x339, 0x33, 0x13a, 0xa3c, 0xb35, 0x83f, 0x936, 
+	0x636, 0x73f, 0x435, 0x53c, 0xe3a, 0xf33, 0xc39, 0xd30, 
+	0x3a0, 0x2a9, 0x1a3, 0xaa, 0xbac, 0xaa5, 0x9af, 0x8a6, 
+	0x7a6, 0x6af, 0x5a5, 0x4ac, 0xfaa, 0xea3, 0xda9, 0xca0, 
+	0x8c0, 0x9c9, 0xac3, 0xbca, 0xcc, 0x1c5, 0x2cf, 0x3c6, 
+	0xcc6, 0xdcf, 0xec5, 0xfcc, 0x4ca, 0x5c3, 0x6c9, 0x7c0, 
+	0x950, 0x859, 0xb53, 0xa5a, 0x15c, 0x55, 0x35f, 0x256, 
+	0xd56, 0xc5f, 0xf55, 0xe5c, 0x55a, 0x453, 0x759, 0x650, 
+	0xaf0, 0xbf9, 0x8f3, 0x9fa, 0x2fc, 0x3f5, 0xff, 0x1f6, 
+	0xef6, 0xfff, 0xcf5, 0xdfc, 0x6fa, 0x7f3, 0x4f9, 0x5f0, 
+	0xb60, 0xa69, 0x963, 0x86a, 0x36c, 0x265, 0x16f, 0x66, 
+	0xf66, 0xe6f, 0xd65, 0xc6c, 0x76a, 0x663, 0x569, 0x460, 
+	0x460, 0x569, 0x663, 0x76a, 0xc6c, 0xd65, 0xe6f, 0xf66, 
+	0x66, 0x16f, 0x265, 0x36c, 0x86a, 0x963, 0xa69, 0xb60, 
+	0x5f0, 0x4f9, 0x7f3, 0x6fa, 0xdfc, 0xcf5, 0xfff, 0xef6, 
+	0x1f6, 0xff, 0x3f5, 0x2fc, 0x9fa, 0x8f3, 0xbf9, 0xaf0, 
+	0x650, 0x759, 0x453, 0x55a, 0xe5c, 0xf55, 0xc5f, 0xd56, 
+	0x256, 0x35f, 0x55, 0x15c, 0xa5a, 0xb53, 0x859, 0x950, 
+	0x7c0, 0x6c9, 0x5c3, 0x4ca, 0xfcc, 0xec5, 0xdcf, 0xcc6, 
+	0x3c6, 0x2cf, 0x1c5, 0xcc, 0xbca, 0xac3, 0x9c9, 0x8c0, 
+	0xca0, 0xda9, 0xea3, 0xfaa, 0x4ac, 0x5a5, 0x6af, 0x7a6, 
+	0x8a6, 0x9af, 0xaa5, 0xbac, 0xaa, 0x1a3, 0x2a9, 0x3a0, 
+	0xd30, 0xc39, 0xf33, 0xe3a, 0x53c, 0x435, 0x73f, 0x636, 
+	0x936, 0x83f, 0xb35, 0xa3c, 0x13a, 0x33, 0x339, 0x230, 
+	0xe90, 0xf99, 0xc93, 0xd9a, 0x69c, 0x795, 0x49f, 0x596, 
+	0xa96, 0xb9f, 0x895, 0x99c, 0x29a, 0x393, 0x99, 0x190, 
+	0xf00, 0xe09, 0xd03, 0xc0a, 0x70c, 0x605, 0x50f, 0x406, 
+	0xb06, 0xa0f, 0x905, 0x80c, 0x30a, 0x203, 0x109, 0x0, 
+];
+
+// For each MC case, a list of triangles, specified as triples of edge indices, terminated by -1
+export const TriangleTable = [
+	[ -1 ],
+	[ 0, 3, 8, -1 ],
+	[ 0, 9, 1, -1 ],
+	[ 3, 8, 1, 1, 8, 9, -1 ],
+	[ 2, 11, 3, -1 ],
+	[ 8, 0, 11, 11, 0, 2, -1 ],
+	[ 3, 2, 11, 1, 0, 9, -1 ],
+	[ 11, 1, 2, 11, 9, 1, 11, 8, 9, -1 ],
+	[ 1, 10, 2, -1 ],
+	[ 0, 3, 8, 2, 1, 10, -1 ],
+	[ 10, 2, 9, 9, 2, 0, -1 ],
+	[ 8, 2, 3, 8, 10, 2, 8, 9, 10, -1 ],
+	[ 11, 3, 10, 10, 3, 1, -1 ],
+	[ 10, 0, 1, 10, 8, 0, 10, 11, 8, -1 ],
+	[ 9, 3, 0, 9, 11, 3, 9, 10, 11, -1 ],
+	[ 8, 9, 11, 11, 9, 10, -1 ],
+	[ 4, 8, 7, -1 ],
+	[ 7, 4, 3, 3, 4, 0, -1 ],
+	[ 4, 8, 7, 0, 9, 1, -1 ],
+	[ 1, 4, 9, 1, 7, 4, 1, 3, 7, -1 ],
+	[ 8, 7, 4, 11, 3, 2, -1 ],
+	[ 4, 11, 7, 4, 2, 11, 4, 0, 2, -1 ],
+	[ 0, 9, 1, 8, 7, 4, 11, 3, 2, -1 ],
+	[ 7, 4, 11, 11, 4, 2, 2, 4, 9, 2, 9, 1, -1 ],
+	[ 4, 8, 7, 2, 1, 10, -1 ],
+	[ 7, 4, 3, 3, 4, 0, 10, 2, 1, -1 ],
+	[ 10, 2, 9, 9, 2, 0, 7, 4, 8, -1 ],
+	[ 10, 2, 3, 10, 3, 4, 3, 7, 4, 9, 10, 4, -1 ],
+	[ 1, 10, 3, 3, 10, 11, 4, 8, 7, -1 ],
+	[ 10, 11, 1, 11, 7, 4, 1, 11, 4, 1, 4, 0, -1 ],
+	[ 7, 4, 8, 9, 3, 0, 9, 11, 3, 9, 10, 11, -1 ],
+	[ 7, 4, 11, 4, 9, 11, 9, 10, 11, -1 ],
+	[ 9, 4, 5, -1 ],
+	[ 9, 4, 5, 8, 0, 3, -1 ],
+	[ 4, 5, 0, 0, 5, 1, -1 ],
+	[ 5, 8, 4, 5, 3, 8, 5, 1, 3, -1 ],
+	[ 9, 4, 5, 11, 3, 2, -1 ],
+	[ 2, 11, 0, 0, 11, 8, 5, 9, 4, -1 ],
+	[ 4, 5, 0, 0, 5, 1, 11, 3, 2, -1 ],
+	[ 5, 1, 4, 1, 2, 11, 4, 1, 11, 4, 11, 8, -1 ],
+	[ 1, 10, 2, 5, 9, 4, -1 ],
+	[ 9, 4, 5, 0, 3, 8, 2, 1, 10, -1 ],
+	[ 2, 5, 10, 2, 4, 5, 2, 0, 4, -1 ],
+	[ 10, 2, 5, 5, 2, 4, 4, 2, 3, 4, 3, 8, -1 ],
+	[ 11, 3, 10, 10, 3, 1, 4, 5, 9, -1 ],
+	[ 4, 5, 9, 10, 0, 1, 10, 8, 0, 10, 11, 8, -1 ],
+	[ 11, 3, 0, 11, 0, 5, 0, 4, 5, 10, 11, 5, -1 ],
+	[ 4, 5, 8, 5, 10, 8, 10, 11, 8, -1 ],
+	[ 8, 7, 9, 9, 7, 5, -1 ],
+	[ 3, 9, 0, 3, 5, 9, 3, 7, 5, -1 ],
+	[ 7, 0, 8, 7, 1, 0, 7, 5, 1, -1 ],
+	[ 7, 5, 3, 3, 5, 1, -1 ],
+	[ 5, 9, 7, 7, 9, 8, 2, 11, 3, -1 ],
+	[ 2, 11, 7, 2, 7, 9, 7, 5, 9, 0, 2, 9, -1 ],
+	[ 2, 11, 3, 7, 0, 8, 7, 1, 0, 7, 5, 1, -1 ],
+	[ 2, 11, 1, 11, 7, 1, 7, 5, 1, -1 ],
+	[ 8, 7, 9, 9, 7, 5, 2, 1, 10, -1 ],
+	[ 10, 2, 1, 3, 9, 0, 3, 5, 9, 3, 7, 5, -1 ],
+	[ 7, 5, 8, 5, 10, 2, 8, 5, 2, 8, 2, 0, -1 ],
+	[ 10, 2, 5, 2, 3, 5, 3, 7, 5, -1 ],
+	[ 8, 7, 5, 8, 5, 9, 11, 3, 10, 3, 1, 10, -1 ],
+	[ 5, 11, 7, 10, 11, 5, 1, 9, 0, -1 ],
+	[ 11, 5, 10, 7, 5, 11, 8, 3, 0, -1 ],
+	[ 5, 11, 7, 10, 11, 5, -1 ],
+	[ 6, 7, 11, -1 ],
+	[ 7, 11, 6, 3, 8, 0, -1 ],
+	[ 6, 7, 11, 0, 9, 1, -1 ],
+	[ 9, 1, 8, 8, 1, 3, 6, 7, 11, -1 ],
+	[ 3, 2, 7, 7, 2, 6, -1 ],
+	[ 0, 7, 8, 0, 6, 7, 0, 2, 6, -1 ],
+	[ 6, 7, 2, 2, 7, 3, 9, 1, 0, -1 ],
+	[ 6, 7, 8, 6, 8, 1, 8, 9, 1, 2, 6, 1, -1 ],
+	[ 11, 6, 7, 10, 2, 1, -1 ],
+	[ 3, 8, 0, 11, 6, 7, 10, 2, 1, -1 ],
+	[ 0, 9, 2, 2, 9, 10, 7, 11, 6, -1 ],
+	[ 6, 7, 11, 8, 2, 3, 8, 10, 2, 8, 9, 10, -1 ],
+	[ 7, 10, 6, 7, 1, 10, 7, 3, 1, -1 ],
+	[ 8, 0, 7, 7, 0, 6, 6, 0, 1, 6, 1, 10, -1 ],
+	[ 7, 3, 6, 3, 0, 9, 6, 3, 9, 6, 9, 10, -1 ],
+	[ 6, 7, 10, 7, 8, 10, 8, 9, 10, -1 ],
+	[ 11, 6, 8, 8, 6, 4, -1 ],
+	[ 6, 3, 11, 6, 0, 3, 6, 4, 0, -1 ],
+	[ 11, 6, 8, 8, 6, 4, 1, 0, 9, -1 ],
+	[ 1, 3, 9, 3, 11, 6, 9, 3, 6, 9, 6, 4, -1 ],
+	[ 2, 8, 3, 2, 4, 8, 2, 6, 4, -1 ],
+	[ 4, 0, 6, 6, 0, 2, -1 ],
+	[ 9, 1, 0, 2, 8, 3, 2, 4, 8, 2, 6, 4, -1 ],
+	[ 9, 1, 4, 1, 2, 4, 2, 6, 4, -1 ],
+	[ 4, 8, 6, 6, 8, 11, 1, 10, 2, -1 ],
+	[ 1, 10, 2, 6, 3, 11, 6, 0, 3, 6, 4, 0, -1 ],
+	[ 11, 6, 4, 11, 4, 8, 10, 2, 9, 2, 0, 9, -1 ],
+	[ 10, 4, 9, 6, 4, 10, 11, 2, 3, -1 ],
+	[ 4, 8, 3, 4, 3, 10, 3, 1, 10, 6, 4, 10, -1 ],
+	[ 1, 10, 0, 10, 6, 0, 6, 4, 0, -1 ],
+	[ 4, 10, 6, 9, 10, 4, 0, 8, 3, -1 ],
+	[ 4, 10, 6, 9, 10, 4, -1 ],
+	[ 6, 7, 11, 4, 5, 9, -1 ],
+	[ 4, 5, 9, 7, 11, 6, 3, 8, 0, -1 ],
+	[ 1, 0, 5, 5, 0, 4, 11, 6, 7, -1 ],
+	[ 11, 6, 7, 5, 8, 4, 5, 3, 8, 5, 1, 3, -1 ],
+	[ 3, 2, 7, 7, 2, 6, 9, 4, 5, -1 ],
+	[ 5, 9, 4, 0, 7, 8, 0, 6, 7, 0, 2, 6, -1 ],
+	[ 3, 2, 6, 3, 6, 7, 1, 0, 5, 0, 4, 5, -1 ],
+	[ 6, 1, 2, 5, 1, 6, 4, 7, 8, -1 ],
+	[ 10, 2, 1, 6, 7, 11, 4, 5, 9, -1 ],
+	[ 0, 3, 8, 4, 5, 9, 11, 6, 7, 10, 2, 1, -1 ],
+	[ 7, 11, 6, 2, 5, 10, 2, 4, 5, 2, 0, 4, -1 ],
+	[ 8, 4, 7, 5, 10, 6, 3, 11, 2, -1 ],
+	[ 9, 4, 5, 7, 10, 6, 7, 1, 10, 7, 3, 1, -1 ],
+	[ 10, 6, 5, 7, 8, 4, 1, 9, 0, -1 ],
+	[ 4, 3, 0, 7, 3, 4, 6, 5, 10, -1 ],
+	[ 10, 6, 5, 8, 4, 7, -1 ],
+	[ 9, 6, 5, 9, 11, 6, 9, 8, 11, -1 ],
+	[ 11, 6, 3, 3, 6, 0, 0, 6, 5, 0, 5, 9, -1 ],
+	[ 11, 6, 5, 11, 5, 0, 5, 1, 0, 8, 11, 0, -1 ],
+	[ 11, 6, 3, 6, 5, 3, 5, 1, 3, -1 ],
+	[ 9, 8, 5, 8, 3, 2, 5, 8, 2, 5, 2, 6, -1 ],
+	[ 5, 9, 6, 9, 0, 6, 0, 2, 6, -1 ],
+	[ 1, 6, 5, 2, 6, 1, 3, 0, 8, -1 ],
+	[ 1, 6, 5, 2, 6, 1, -1 ],
+	[ 2, 1, 10, 9, 6, 5, 9, 11, 6, 9, 8, 11, -1 ],
+	[ 9, 0, 1, 3, 11, 2, 5, 10, 6, -1 ],
+	[ 11, 0, 8, 2, 0, 11, 10, 6, 5, -1 ],
+	[ 3, 11, 2, 5, 10, 6, -1 ],
+	[ 1, 8, 3, 9, 8, 1, 5, 10, 6, -1 ],
+	[ 6, 5, 10, 0, 1, 9, -1 ],
+	[ 8, 3, 0, 5, 10, 6, -1 ],
+	[ 6, 5, 10, -1 ],
+	[ 10, 5, 6, -1 ],
+	[ 0, 3, 8, 6, 10, 5, -1 ],
+	[ 10, 5, 6, 9, 1, 0, -1 ],
+	[ 3, 8, 1, 1, 8, 9, 6, 10, 5, -1 ],
+	[ 2, 11, 3, 6, 10, 5, -1 ],
+	[ 8, 0, 11, 11, 0, 2, 5, 6, 10, -1 ],
+	[ 1, 0, 9, 2, 11, 3, 6, 10, 5, -1 ],
+	[ 5, 6, 10, 11, 1, 2, 11, 9, 1, 11, 8, 9, -1 ],
+	[ 5, 6, 1, 1, 6, 2, -1 ],
+	[ 5, 6, 1, 1, 6, 2, 8, 0, 3, -1 ],
+	[ 6, 9, 5, 6, 0, 9, 6, 2, 0, -1 ],
+	[ 6, 2, 5, 2, 3, 8, 5, 2, 8, 5, 8, 9, -1 ],
+	[ 3, 6, 11, 3, 5, 6, 3, 1, 5, -1 ],
+	[ 8, 0, 1, 8, 1, 6, 1, 5, 6, 11, 8, 6, -1 ],
+	[ 11, 3, 6, 6, 3, 5, 5, 3, 0, 5, 0, 9, -1 ],
+	[ 5, 6, 9, 6, 11, 9, 11, 8, 9, -1 ],
+	[ 5, 6, 10, 7, 4, 8, -1 ],
+	[ 0, 3, 4, 4, 3, 7, 10, 5, 6, -1 ],
+	[ 5, 6, 10, 4, 8, 7, 0, 9, 1, -1 ],
+	[ 6, 10, 5, 1, 4, 9, 1, 7, 4, 1, 3, 7, -1 ],
+	[ 7, 4, 8, 6, 10, 5, 2, 11, 3, -1 ],
+	[ 10, 5, 6, 4, 11, 7, 4, 2, 11, 4, 0, 2, -1 ],
+	[ 4, 8, 7, 6, 10, 5, 3, 2, 11, 1, 0, 9, -1 ],
+	[ 1, 2, 10, 11, 7, 6, 9, 5, 4, -1 ],
+	[ 2, 1, 6, 6, 1, 5, 8, 7, 4, -1 ],
+	[ 0, 3, 7, 0, 7, 4, 2, 1, 6, 1, 5, 6, -1 ],
+	[ 8, 7, 4, 6, 9, 5, 6, 0, 9, 6, 2, 0, -1 ],
+	[ 7, 2, 3, 6, 2, 7, 5, 4, 9, -1 ],
+	[ 4, 8, 7, 3, 6, 11, 3, 5, 6, 3, 1, 5, -1 ],
+	[ 5, 0, 1, 4, 0, 5, 7, 6, 11, -1 ],
+	[ 9, 5, 4, 6, 11, 7, 0, 8, 3, -1 ],
+	[ 11, 7, 6, 9, 5, 4, -1 ],
+	[ 6, 10, 4, 4, 10, 9, -1 ],
+	[ 6, 10, 4, 4, 10, 9, 3, 8, 0, -1 ],
+	[ 0, 10, 1, 0, 6, 10, 0, 4, 6, -1 ],
+	[ 6, 10, 1, 6, 1, 8, 1, 3, 8, 4, 6, 8, -1 ],
+	[ 9, 4, 10, 10, 4, 6, 3, 2, 11, -1 ],
+	[ 2, 11, 8, 2, 8, 0, 6, 10, 4, 10, 9, 4, -1 ],
+	[ 11, 3, 2, 0, 10, 1, 0, 6, 10, 0, 4, 6, -1 ],
+	[ 6, 8, 4, 11, 8, 6, 2, 10, 1, -1 ],
+	[ 4, 1, 9, 4, 2, 1, 4, 6, 2, -1 ],
+	[ 3, 8, 0, 4, 1, 9, 4, 2, 1, 4, 6, 2, -1 ],
+	[ 6, 2, 4, 4, 2, 0, -1 ],
+	[ 3, 8, 2, 8, 4, 2, 4, 6, 2, -1 ],
+	[ 4, 6, 9, 6, 11, 3, 9, 6, 3, 9, 3, 1, -1 ],
+	[ 8, 6, 11, 4, 6, 8, 9, 0, 1, -1 ],
+	[ 11, 3, 6, 3, 0, 6, 0, 4, 6, -1 ],
+	[ 8, 6, 11, 4, 6, 8, -1 ],
+	[ 10, 7, 6, 10, 8, 7, 10, 9, 8, -1 ],
+	[ 3, 7, 0, 7, 6, 10, 0, 7, 10, 0, 10, 9, -1 ],
+	[ 6, 10, 7, 7, 10, 8, 8, 10, 1, 8, 1, 0, -1 ],
+	[ 6, 10, 7, 10, 1, 7, 1, 3, 7, -1 ],
+	[ 3, 2, 11, 10, 7, 6, 10, 8, 7, 10, 9, 8, -1 ],
+	[ 2, 9, 0, 10, 9, 2, 6, 11, 7, -1 ],
+	[ 0, 8, 3, 7, 6, 11, 1, 2, 10, -1 ],
+	[ 7, 6, 11, 1, 2, 10, -1 ],
+	[ 2, 1, 9, 2, 9, 7, 9, 8, 7, 6, 2, 7, -1 ],
+	[ 2, 7, 6, 3, 7, 2, 0, 1, 9, -1 ],
+	[ 8, 7, 0, 7, 6, 0, 6, 2, 0, -1 ],
+	[ 7, 2, 3, 6, 2, 7, -1 ],
+	[ 8, 1, 9, 3, 1, 8, 11, 7, 6, -1 ],
+	[ 11, 7, 6, 1, 9, 0, -1 ],
+	[ 6, 11, 7, 0, 8, 3, -1 ],
+	[ 11, 7, 6, -1 ],
+	[ 7, 11, 5, 5, 11, 10, -1 ],
+	[ 10, 5, 11, 11, 5, 7, 0, 3, 8, -1 ],
+	[ 7, 11, 5, 5, 11, 10, 0, 9, 1, -1 ],
+	[ 7, 11, 10, 7, 10, 5, 3, 8, 1, 8, 9, 1, -1 ],
+	[ 5, 2, 10, 5, 3, 2, 5, 7, 3, -1 ],
+	[ 5, 7, 10, 7, 8, 0, 10, 7, 0, 10, 0, 2, -1 ],
+	[ 0, 9, 1, 5, 2, 10, 5, 3, 2, 5, 7, 3, -1 ],
+	[ 9, 7, 8, 5, 7, 9, 10, 1, 2, -1 ],
+	[ 1, 11, 2, 1, 7, 11, 1, 5, 7, -1 ],
+	[ 8, 0, 3, 1, 11, 2, 1, 7, 11, 1, 5, 7, -1 ],
+	[ 7, 11, 2, 7, 2, 9, 2, 0, 9, 5, 7, 9, -1 ],
+	[ 7, 9, 5, 8, 9, 7, 3, 11, 2, -1 ],
+	[ 3, 1, 7, 7, 1, 5, -1 ],
+	[ 8, 0, 7, 0, 1, 7, 1, 5, 7, -1 ],
+	[ 0, 9, 3, 9, 5, 3, 5, 7, 3, -1 ],
+	[ 9, 7, 8, 5, 7, 9, -1 ],
+	[ 8, 5, 4, 8, 10, 5, 8, 11, 10, -1 ],
+	[ 0, 3, 11, 0, 11, 5, 11, 10, 5, 4, 0, 5, -1 ],
+	[ 1, 0, 9, 8, 5, 4, 8, 10, 5, 8, 11, 10, -1 ],
+	[ 10, 3, 11, 1, 3, 10, 9, 5, 4, -1 ],
+	[ 3, 2, 8, 8, 2, 4, 4, 2, 10, 4, 10, 5, -1 ],
+	[ 10, 5, 2, 5, 4, 2, 4, 0, 2, -1 ],
+	[ 5, 4, 9, 8, 3, 0, 10, 1, 2, -1 ],
+	[ 2, 10, 1, 4, 9, 5, -1 ],
+	[ 8, 11, 4, 11, 2, 1, 4, 11, 1, 4, 1, 5, -1 ],
+	[ 0, 5, 4, 1, 5, 0, 2, 3, 11, -1 ],
+	[ 0, 11, 2, 8, 11, 0, 4, 9, 5, -1 ],
+	[ 5, 4, 9, 2, 3, 11, -1 ],
+	[ 4, 8, 5, 8, 3, 5, 3, 1, 5, -1 ],
+	[ 0, 5, 4, 1, 5, 0, -1 ],
+	[ 5, 4, 9, 3, 0, 8, -1 ],
+	[ 5, 4, 9, -1 ],
+	[ 11, 4, 7, 11, 9, 4, 11, 10, 9, -1 ],
+	[ 0, 3, 8, 11, 4, 7, 11, 9, 4, 11, 10, 9, -1 ],
+	[ 11, 10, 7, 10, 1, 0, 7, 10, 0, 7, 0, 4, -1 ],
+	[ 3, 10, 1, 11, 10, 3, 7, 8, 4, -1 ],
+	[ 3, 2, 10, 3, 10, 4, 10, 9, 4, 7, 3, 4, -1 ],
+	[ 9, 2, 10, 0, 2, 9, 8, 4, 7, -1 ],
+	[ 3, 4, 7, 0, 4, 3, 1, 2, 10, -1 ],
+	[ 7, 8, 4, 10, 1, 2, -1 ],
+	[ 7, 11, 4, 4, 11, 9, 9, 11, 2, 9, 2, 1, -1 ],
+	[ 1, 9, 0, 4, 7, 8, 2, 3, 11, -1 ],
+	[ 7, 11, 4, 11, 2, 4, 2, 0, 4, -1 ],
+	[ 4, 7, 8, 2, 3, 11, -1 ],
+	[ 9, 4, 1, 4, 7, 1, 7, 3, 1, -1 ],
+	[ 7, 8, 4, 1, 9, 0, -1 ],
+	[ 3, 4, 7, 0, 4, 3, -1 ],
+	[ 7, 8, 4, -1 ],
+	[ 11, 10, 8, 8, 10, 9, -1 ],
+	[ 0, 3, 9, 3, 11, 9, 11, 10, 9, -1 ],
+	[ 1, 0, 10, 0, 8, 10, 8, 11, 10, -1 ],
+	[ 10, 3, 11, 1, 3, 10, -1 ],
+	[ 3, 2, 8, 2, 10, 8, 10, 9, 8, -1 ],
+	[ 9, 2, 10, 0, 2, 9, -1 ],
+	[ 8, 3, 0, 10, 1, 2, -1 ],
+	[ 2, 10, 1, -1 ],
+	[ 2, 1, 11, 1, 9, 11, 9, 8, 11, -1 ],
+	[ 11, 2, 3, 9, 0, 1, -1 ],
+	[ 11, 0, 8, 2, 0, 11, -1 ],
+	[ 3, 11, 2, -1 ],
+	[ 1, 8, 3, 9, 8, 1, -1 ],
+	[ 1, 9, 0, -1 ],
+	[ 8, 3, 0, -1 ],
+	[ -1 ],
+];
+```
+
+### src/utils/marchingCubes.ts
+```
+import Mesh from "3d-game-engine-canvas/src/utilities/Mesh";
+import { Volume } from "../models/models";
+import Triangle from "3d-game-engine-canvas/src/utilities/Triangle";
+import Vector3 from "3d-game-engine-canvas/src/utilities/math/Vector3";
+import { EdgeVertexIndices, TriangleTable } from "./lut";
+
+type CubeValues = [
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number
+];
+
+const MIN = 0;
+const MAX = 255;
+
+export class MarchingCubes {
+    constructor(public volume: Volume) {}
+
+    makeTriangles(
+        position: Vector3,
+        values: CubeValues,
+        threshold: number
+    ): Array<Triangle> {
+        const idx = values
+            .map((v) => (v > threshold ? 1 : 0))
+            .reduce((p: number, c: 1 | 0, i) => p + (c << i), 0);
+        const listOfTrianglesEdges = TriangleTable[idx]
+            .slice(0, -1)
+            .reduce(
+                (p: Array<any>, c: number, i: number) =>
+                    (i % 3 ? p[p.length - 1].push(c) : p.push([c])) && p,
+                []
+            ) as Array<[number, number, number]>;
+
+        return listOfTrianglesEdges.map(
+            (t) =>
+                new Triangle(
+                    t.map((e) =>
+                        this.positionFromEdge(e, values, position, threshold)
+                    ) as [Vector3, Vector3, Vector3]
+                )
+        );
+    }
+
+    positionFromEdge(
+        idx: number,
+        values: CubeValues,
+        position: Vector3,
+        threshold: number
+    ): Vector3 {
+        const [ia, ib] = EdgeVertexIndices[idx];
+        const [a, b] = [ia, ib].map((v) => values[v]);
+        const v = (threshold - b) / (a - b);
+        const [posA, posB] = [ia, ib].map((i) =>
+            position.add(new Vector3(i & 1, (i >> 1) & 1, (i >> 2) & 1))
+        );
+        // return posA.subtract(posB).divide(2).add(posB);
+        return posA.subtract(posB).multiply(v).add(posB);
+    }
+
+    convertThreshold(value: number): number {
+        return MIN + (MAX - MIN) * value;
+    }
+
+    march(threshold: number): Mesh {
+        const triangles: Array<Triangle> = [];
+        for (let z = -1; z < this.volume.size.z; z++) {
+            for (let y = -1; y < this.volume.size.y; y++) {
+                for (let x = -1; x < this.volume.size.x; x++) {
+                    const values: CubeValues = [
+                        this.sampleVolume(x, y, z),
+                        this.sampleVolume(x + 1, y, z),
+                        this.sampleVolume(x, y + 1, z),
+                        this.sampleVolume(x + 1, y + 1, z),
+                        this.sampleVolume(x, y, z + 1),
+                        this.sampleVolume(x + 1, y, z + 1),
+                        this.sampleVolume(x, y + 1, z + 1),
+                        this.sampleVolume(x + 1, y + 1, z + 1),
+                    ];
+                    const t = this.makeTriangles(
+                        new Vector3(x, y, z),
+                        values,
+                        this.convertThreshold(threshold)
+                    );
+                    triangles.push(...t);
+                }
+            }
+        }
+        return new Mesh(triangles);
+    }
+
+    sampleVolume(x: number, y: number, z: number): number {
+        if (
+            x < 0 ||
+            y < 0 ||
+            z < 0 ||
+            x >= this.volume.size.x ||
+            y >= this.volume.size.y ||
+            z >= this.volume.size.z
+        ) {
+            return 0;
+        }
+        const index = x + this.volume.size.x * (y + this.volume.size.y * z);
+        return this.volume.data[index];
+    }
+}
+```
+
+### src/utils/transform.ts
+```
+import Vector3 from "3d-game-engine-canvas/src/utilities/math/Vector3";
+import Quaternion from "3d-game-engine-canvas/src/utilities/Quaternion";
+
+export class Transform {
+    public _scale: Vector3;
+    public _rotation: Quaternion;
+    public _position: Vector3;
+
+    constructor(scale: Vector3, rotation: Quaternion, position: Vector3) {
+        this._scale = scale;
+        this._rotation = rotation;
+        this._position = position;
+    }
+
+    static zero() {
+        return new Transform(
+            new Vector3(1, 1, 1),
+            Quaternion.euler(Vector3.zero),
+            new Vector3(0, 0, 0)
+        );
+    }
+
+    move(v: Vector3) {
+        this._position = this._position.add(v);
+        return this;
+    }
+
+    rotate(v: Quaternion) {
+        this._rotation = v.multiply(this._rotation);
+        return this;
+    }
+
+    scale(v: Vector3) {
+        this._scale = this._scale.multiply(v);
+        return this;
+    }
+}
+```
+
+### src/utils/vec.ts
+```
+import { mat4, quat, vec3, vec4 } from "gl-matrix";
+import { gl } from "../webgl/context";
+import Vector3 from "3d-game-engine-canvas/src/utilities/math/Vector3";
+import type { Transform } from "./transform";
+import { Camera } from "./camera";
+import Color from "3d-game-engine-canvas/src/utilities/math/Color";
+
+export function vector3ToVec3(v: Vector3): vec3 {
+    return [v.x, v.y, v.z] as vec3;
+}
+
+export function colorToVec4(c: Color): vec4 {
+    return [c.r, c.g, c.b, c.a] as vec4;
+}
+
+export function colorToFloat32Array(c: Color): Float32Array {
+    return new Float32Array([c.r, c.g, c.b, c.a]);
+}
+
+export interface TransformMatrices {
+    uniformMatrix: Float32Array;
+    lookAtMatrix: Float32Array;
+    perspectiveMatrix: Float32Array;
+    translationMatrix: Float32Array;
+}
+
+export function transform(t: Transform) {
+    const m = mat4.create();
+    const q = quat.fromValues(
+        t._rotation.x,
+        t._rotation.y,
+        t._rotation.z,
+        t._rotation.w
+    );
+    mat4.fromRotationTranslationScale(
+        m,
+        q,
+        vector3ToVec3(t._position),
+        vector3ToVec3(t._scale)
+    );
+
+    const lookAtMatrix = mat4.create();
+    const perspectiveMatrix = mat4.create();
+    const uniformMatrix = mat4.create();
+
+    const camera = Camera.camera;
+    const qc = quat.fromValues(
+        camera.inv_rotation.x,
+        camera.inv_rotation.y,
+        camera.inv_rotation.z,
+        camera.inv_rotation.w
+    );
+    mat4.identity(lookAtMatrix);
+    let quatMat = mat4.create();
+    mat4.fromQuat(quatMat, qc);
+    mat4.multiply(lookAtMatrix, lookAtMatrix, quatMat);
+    mat4.translate(
+        lookAtMatrix,
+        lookAtMatrix,
+        vector3ToVec3(camera.inv_position)
+    );
+
+    const aspectRatio = gl.canvas.width / gl.canvas.height;
+    mat4.perspective(
+        perspectiveMatrix,
+        camera.fovy,
+        aspectRatio,
+        camera.near,
+        camera.far
+    );
+
+    mat4.multiply(uniformMatrix, m, uniformMatrix);
+    mat4.multiply(uniformMatrix, lookAtMatrix, uniformMatrix);
+    mat4.multiply(uniformMatrix, perspectiveMatrix, uniformMatrix);
+    return {
+        uniformMatrix: uniformMatrix as Float32Array,
+        lookAtMatrix: lookAtMatrix as Float32Array,
+        perspectiveMatrix: perspectiveMatrix as Float32Array,
+        translationMatrix: m as Float32Array,
+    };
+}
+```
+
+### src/webgl/context.ts
+```
+class Context {
+    public gl: WebGL2RenderingContext;
+
+    constructor() {
+        const canvas = document.getElementById("root") as HTMLCanvasElement;
+        const gl = canvas.getContext("webgl2");
+        this.gl = gl!;
+        if (gl === null) {
+            alert("Cannot get webgl2 context");
+            return;
+        }
+    }
+}
+
+const ctx = new Context();
+export default ctx;
+export const gl = ctx.gl;
+```
+
+### src/webgl/program.ts
+```
+import { gl } from "./context.ts";
+
+export function makeProgram(
+    fragmentShader: WebGLShader,
+    vertexShader: WebGLShader
+): WebGLProgram {
+    const program = gl.createProgram();
+    gl.attachShader(program, vertexShader);
+    gl.attachShader(program, fragmentShader);
+    gl.linkProgram(program);
+    const success = gl.getProgramParameter(program, gl.LINK_STATUS);
+    if (!success) {
+        const msg = gl.getProgramInfoLog(program);
+        gl.deleteProgram(program);
+        throw new Error(`${msg}`);
+    }
+    return program;
+}
+```
+
+### src/webgl/renderer.ts
+```
+import { gl } from "./context";
+import type { ShaderProgram } from "./shaderProgram";
+
+export default class Renderer {
+    static deltaTime: number = 1;
+    public opaqueShaderPrograms: Array<ShaderProgram>;
+    public transparentShaderPrograms: Array<ShaderProgram>;
+    public toDestroy: boolean = false;
+
+    public update: () => void;
+    public start: () => void;
+
+    constructor(shaderPrograms: Array<ShaderProgram>) {
+        this.update = () => {};
+        this.start = () => {};
+        this.opaqueShaderPrograms = shaderPrograms.filter(
+            (p) => !p.transparent
+        );
+        this.transparentShaderPrograms = shaderPrograms.filter(
+            (p) => p.transparent
+        );
+    }
+
+    setUpdate(update: () => void) {
+        this.update = update;
+        return this;
+    }
+
+    setStart(start: () => void) {
+        this.start = start;
+        return this;
+    }
+
+    run() {
+        this.opaqueShaderPrograms.forEach((p) => {
+            p.init();
+        });
+        this.transparentShaderPrograms.forEach((p) => {
+            p.init();
+        });
+        this.start();
+        this.draw();
+        return this;
+    }
+
+    draw() {
+        const start = performance.now();
+        this.update();
+
+        gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        gl.enable(gl.CULL_FACE);
+        gl.enable(gl.DEPTH_TEST);
+        gl.enable(gl.DITHER);
+
+        this.opaqueShaderPrograms.forEach((p) => {
+            p.draw();
+        });
+        this.transparentShaderPrograms
+            .sort((a, b) => {
+                return b.getDistanceToCamera() - a.getDistanceToCamera();
+            })
+            .forEach((p) => {
+                p.draw();
+            });
+
+        Renderer.deltaTime = performance.now() - start;
+
+        requestAnimationFrame(() => {
+            if (!this.toDestroy) {
+                this.draw();
+            } else {
+                this.finishDestroy();
+            }
+        });
+    }
+
+    destroy() {
+        this.toDestroy = true;
+    }
+
+    finishDestroy() {
+        this.update = () => {};
+        this.start = () => {};
+    }
+}
+```
+
+### src/webgl/shader.ts
+```
+import { gl } from "./context.ts";
+
+export function makeShader(type: GLenum, source: string): WebGLShader {
+    const shader = gl.createShader(type);
+    if (!shader) {
+        throw new Error(`Cannot create shader of type ${type}`);
+    }
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    const success = gl.getShaderParameter(shader, gl.COMPILE_STATUS);
+    if (!success) {
+        const msg = gl.getShaderInfoLog(shader);
+        gl.deleteShader(shader);
+        throw new Error(`${msg}`);
+    }
+    return shader;
+}
+```
+
+### src/webgl/shaderProgram.ts
+```
+import { Texture } from "../models/colorMaps";
+import { Volume } from "../models/models";
+import { gl } from "./context";
+
+export class ShaderProgram {
+    program: WebGLProgram;
+    attributes: { [key: string]: { location: number; buffer: WebGLBuffer } };
+    uniformsLocations: { [key: string]: WebGLUniformLocation | null };
+    transparent: boolean = false;
+    textures: {
+        [key: string]: {
+            texture: WebGLTexture | null;
+            location: WebGLUniformLocation | null;
+            unit: number;
+        };
+    };
+
+    makeAttribute(name: string, data: Float32Array, usage: GLenum) {
+        const location = gl.getAttribLocation(this.program, name);
+        const buffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, data, usage);
+        this.attributes[name] = {
+            location,
+            buffer,
+        };
+    }
+
+    updateAttribute(name: string, data: Float32Array, offset: number = 0) {
+        const attribute = this.attributes[name];
+        gl.bindBuffer(gl.ARRAY_BUFFER, attribute.buffer);
+        gl.bufferSubData(gl.ARRAY_BUFFER, offset, data);
+    }
+
+    makeUniform(name: string) {
+        this.uniformsLocations[name] = gl.getUniformLocation(
+            this.program,
+            name
+        );
+    }
+    makeTexture3D(name: string, volume: Volume) {
+        this.textures[name] = {
+            texture: gl.createTexture(),
+            location: gl.getUniformLocation(this.program, name),
+            unit: Object.keys(this.textures).length,
+        };
+        gl.activeTexture(gl.TEXTURE0 + this.textures[name].unit);
+        gl.bindTexture(gl.TEXTURE_3D, this.textures[name].texture);
+        gl.texImage3D(
+            gl.TEXTURE_3D,
+            0,
+            gl.R8,
+            volume.size.x,
+            volume.size.y,
+            volume.size.z,
+            0,
+            gl.RED,
+            gl.UNSIGNED_BYTE,
+            volume.data
+        );
+
+        gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+        gl.uniform1i(this.uniformsLocations[name], this.textures[name].unit);
+    }
+
+    makeTexture2D(name: string, t: Texture) {
+        this.textures[name] = {
+            texture: gl.createTexture(),
+            location: gl.getUniformLocation(this.program, name),
+            unit: Object.keys(this.textures).length,
+        };
+        gl.activeTexture(gl.TEXTURE0 + this.textures[name].unit);
+        gl.bindTexture(gl.TEXTURE_2D, this.textures[name].texture);
+        gl.texImage2D(
+            gl.TEXTURE_2D,
+            0,
+            gl.RGBA,
+            t.size.x,
+            t.size.y,
+            0,
+            gl.RGBA,
+            gl.UNSIGNED_BYTE,
+            t.data
+        );
+
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+        gl.uniform1i(this.uniformsLocations[name], this.textures[name].unit);
+    }
+
+    constructor(program: WebGLProgram) {
+        this.program = program;
+        this.attributes = {};
+        this.uniformsLocations = {};
+        this.textures = {};
+    }
+
+    getDistanceToCamera(): number {
+        return NaN;
+    }
+
+    init(): void {}
+
+    draw(): void {}
+}
+```
+
+### src/shaders/basic/frag.glsl
+```
+precision mediump float;
+
+uniform vec4 u_color;
+uniform vec3 u_lightPos;
+uniform vec4 u_lightColor;
+uniform float u_ambientLight;
+uniform vec4 u_ambientColor;
+varying vec3 normal;
+varying vec4 pos;
+
+
+void main() {
+  vec3 norm = normalize(normal);
+  vec3 lightDir = normalize(u_lightPos - pos.xyz);
+  float diff = max(dot(norm, lightDir), 0.0);
+  vec3 diffuse = diff * u_lightColor.rgb;
+  vec3 ambient =  u_ambientLight * u_ambientColor.rgb;
+  gl_FragColor = vec4(diffuse + ambient,1.0) * u_color;
+}
+```
+
+### src/shaders/basic/vert.glsl
+```
+// an attribute will receive data from a buffer
+attribute vec4 a_position;
+attribute vec3 a_normal;
+uniform mat4 u_matrix;
+varying vec3 normal;
+varying vec4 pos;
+
+void main() {
+  pos = u_matrix * a_position;
+  normal = a_normal;
+  gl_Position = pos;
+}
+```
+
+### src/shaders/raymarching/frag.glsl
+```
+#version 300 es
+precision highp int;
+precision highp float;
+
+uniform highp sampler3D volume;
+uniform highp sampler2D transfer_fn;
+
+uniform ivec3 u_volume_size;
+
+uniform mat4 u_matrix_translation;
+uniform mat4 u_matrix_camera_translation;
+
+uniform int u_enable_max_value_sampling;
+
+in vec4 cam_rel_pos;
+out vec4 color;
+
+
+vec2 rayBoxIntersect(vec3 rayOrigin, vec3 rayDir) {
+    vec3 invDir = 1.0 / (rayDir + 0.0000001);
+    vec3 t0 = (vec3(-0.5, -0.5, -0.5) - rayOrigin) * invDir;
+    vec3 t1 = (vec3(0.5, 0.5, 0.5) - rayOrigin) * invDir;
+
+    vec3 tMin = min(t0, t1);
+    vec3 tMax = max(t0, t1);
+
+    float tNear = max(max(tMin.x, tMin.y), tMin.z);
+    float tFar = min(min(tMax.x, tMax.y), tMax.z);
+
+    return vec2(tNear, tFar);
+}
+
+
+void main() {
+    vec3 rayDir_cam = normalize(cam_rel_pos.xyz);
+
+    mat4 worldToLocal = inverse(u_matrix_translation);
+    mat4 camToWorld = inverse(u_matrix_camera_translation);
+    mat4 camToLocal = worldToLocal * camToWorld;
+
+    vec3 rayOrigin_local = (camToLocal * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+    vec3 rayDir_local = normalize((camToLocal * vec4(rayDir_cam, 0.0)).xyz);
+
+	vec2 t_hit = rayBoxIntersect(rayOrigin_local, rayDir_local);
+
+	color = vec4(0.0);
+	if (t_hit.x > t_hit.y) {
+		discard;
+	}
+	t_hit.x = max(t_hit.x, 0.0);
+	float travelDistance = t_hit.y - t_hit.x ;
+
+	vec3 size = vec3(u_volume_size) * abs(rayDir_local);
+	vec3 dt_vec = 1.0 / size;
+	float dt = min(dt_vec.x, min(dt_vec.y, dt_vec.z));
+
+	for (float t = t_hit.x; t < t_hit.y; t += dt) {
+       	vec3 samplePos = rayOrigin_local + rayDir_local * t + vec3(0.5);
+		float val = texture(volume, samplePos).r;
+		vec4 voxel_color = texture(transfer_fn, vec2(val, 0.5));
+		// voxel_color = vec3(1,0,1); // debug
+		float a = val * voxel_color.a;
+		if (u_enable_max_value_sampling == 1) {
+			if (a > color.a) {
+				color.rgb = voxel_color.rgb * a;
+				color.a = max(a, color.a);
+			}
+		} else {
+			color.rgb += (1.0 - color.a) * a * voxel_color.rgb;
+			color.a += (1.0 - color.a) * a;
+			if (color.a >= 0.95) {
+				break;
+			}
+		}
+	}
+}
+```
+
+### src/shaders/raymarching/vert.glsl
+```
+#version 300 es
+
+layout(location=0) in vec4 a_position;
+uniform mat4 u_matrix_projection;
+uniform mat4 u_matrix_camera_translation;
+uniform mat4 u_matrix_translation;
+
+out vec4 cam_rel_pos;
+
+void main() {
+  cam_rel_pos = u_matrix_camera_translation * u_matrix_translation * a_position;
+  gl_Position = u_matrix_projection * cam_rel_pos;
+}
+```
+
+### src/shaders/textureBased/frag.glsl
+```
+#version 300 es
+precision highp int;
+precision highp float;
+
+out vec4 color;
+in vec4 cam_rel_pos;
+
+uniform highp sampler3D volume;
+uniform highp sampler2D transfer_fn;
+
+void main() {
+    float val = texture(volume, cam_rel_pos.xyz + vec3(0.5)).r;
+		color = texture(transfer_fn, vec2(val, 0.5));
+    color.a = val;
+}
+```
+
+### src/shaders/textureBased/vert.glsl
+```
+#version 300 es
+
+layout(location=0) in vec4 a_position;
+uniform mat4 u_matrix_projection;
+uniform mat4 u_matrix_camera_translation;
+uniform mat4 u_matrix_translation;
+
+
+out vec4 cam_rel_pos;
+
+void main() {
+  mat4 worldToLocal = inverse(u_matrix_translation);
+  mat4 camToWorld = inverse(u_matrix_camera_translation);
+  mat4 camToLocal = worldToLocal * camToWorld;
+
+  cam_rel_pos = camToLocal * a_position;
+  gl_Position = u_matrix_projection * a_position;
+}
+```

@@ -1,0 +1,1353 @@
+Conceptually, this should not bee to difficult: define a format for the meshes (either a standard or a delta-encoded + quantized + zip) add it to the spec as a new type of object state extract the mesh from python, serialize, send to js ...
+
+Support 3d meshes · Issue #12 · rambip/manim-widget · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Support 3d meshes #12
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Support 3d meshes#12
+Copy link
+Description
+rambip
+opened on Apr 10, 2026
+Issue body actions
+Conceptually, this should not bee to difficult:
+define a format for the meshes (either a standard or a delta-encoded + quantized + zip)
+add it to the spec as a new type of object state
+extract the mesh from python, serialize, send to js
+A few more difficult points:
+========= We need to intercept meshes at the right time, or generate them ourselves ==============
+OpenGL Rendering Path for Parametric Functions
+Starting from renderer.render(), here's the execution flow for a parametric function in OpenGL:
+1. Entry Point: OpenGLRenderer.render()
+```
+def render(self, scene: Scene, frame_offset: float, moving_mobjects: list[Mobject]) -> None:
+    self.update_frame(scene)
+    # ... frame writing logic
+``` [1](#4-0) 
+
+### 2. Frame Update
+
+`update_frame()` clears the framebuffer and renders all mobjects:
+
+```python
+def update_frame(self, scene: Scene) -> None:
+    self.frame_buffer_object.clear(*self.background_color)
+    cam = typing.cast("OpenGLCamera", scene.camera)
+    self.refresh_perspective_uniforms(cam)
+    
+    for mobject in scene.mobjects:
+        if not mobject.should_render:
+            continue
+        mobj = typing.cast("OpenGLMobject | OpenGLVMobject", mobject)
+        self.render_mobject(mobj)
+``` [2](#4-1) 
+
+### 3. Mobject Rendering
+
+`render_mobject()` handles the conversion from VMobject to Mesh:
+
+```python
+def render_mobject(self, mobject: OpenGLMobject | OpenGLVMobject) -> None:
+    if isinstance(mobject, OpenGLVMobject):
+        if config["use_projection_fill_shaders"]:
+            render_opengl_vectorized_mobject_fill(self, mobject)
+        if config["use_projection_stroke_shaders"]:
+            render_opengl_vectorized_mobject_stroke(self, mobject)
+    
+    shader_wrapper_list = mobject.get_shader_wrapper_list()
+    for shader_wrapper in shader_wrapper_list:
+        # Create Mesh from triangulated data
+        mesh = Mesh(
+            shader,
+            shader_wrapper.vert_data,
+            indices=np.asarray(vert_indices) if vert_indices is not None else None,
+            use_depth_test=shader_wrapper.depth_test,
+            primitive=mobject.render_primitive,
+        )
+        mesh.set_uniforms(self)
+        mesh.render()
+``` [3](#4-2) 
+
+### 4. Triangulation Process
+
+For parametric functions (which are OpenGLVMobjects), the triangulation happens in `triangulate_mobject()`:
+
+```python
+def triangulate_mobject(mob: OpenGLVMobject) -> np.ndarray:
+    if not mob.needs_new_triangulation:
+        return mob.triangulation
+    
+    points = mob.points
+    # Extract Bézier control points
+    b0s = points[0::3]
+    b1s = points[1::3]
+    b2s = points[2::3]
+    
+    # Determine convexity for triangulation
+    v01s = b1s - b0s
+    v12s = b2s - b1s
+    crosses = cross2d(v01s, v12s)
+    convexities = np.sign(crosses)
+    
+    # Triangulate interior using ear clipping
+    inner_verts = points[inner_vert_indices]
+    inner_tri_indices = inner_vert_indices[earclip_triangulation(inner_verts, rings)]
+    
+    # Combine all triangles
+    points = points[np.hstack([concave_triangle_indices, convex_triangle_indices, inner_tri_indices])]
+    
+    # Return structured array for GPU
+    attributes = np.zeros(points.shape[0], dtype=[
+        ("in_vert", np.float32, (3,)),
+        ("in_color", np.float32, (4,)),
+        ("texture_coords", np.float32, (2,)),
+        ("texture_mode", np.int32),
+    ])
+    attributes["in_vert"] = points
+    return attributes
+``` [4](#4-3) 
+
+### 5. Mesh Rendering
+
+The `Mesh` class handles the final GPU rendering:
+
+```python
+def render(self) -> None:
+    if self.use_depth_test:
+        self.shader.context.enable(moderngl.DEPTH_TEST)
+    
+    # Create vertex buffer from triangulated data
+    vertex_buffer_object = self.shader.context.buffer(
+        filtered_attributes.tobytes()
+    )
+    
+    # Create vertex array and render
+    vertex_array_object = self.shader.context.simple_vertex_array(
+        self.shader.shader_program,
+        vertex_buffer_object,
+        *filtered_attributes.dtype.names,
+        index_buffer=index_buffer_object,
+    )
+    vertex_array_object.render(self.primitive)
+``` [5](#4-4) 
+
+## Key Transformations
+
+1. **ParametricFunction** → **OpenGLVMobject** (via `ConvertToOpenGL` metaclass)
+2. **Bézier curves** → **Triangle vertices** (via triangulation)
+3. **Vertex data** → **GPU buffers** (via Mesh class)
+4. **GPU rendering** → **Framebuffer** (via OpenGL shaders)
+
+## Notes
+
+- The triangulation converts smooth Bézier curves into triangles, which is an approximation
+- Each parametric function generates its own vertex data that's uploaded to the GPU
+- The rendering preserves the mathematical form through the shader pipeline
+- Depth testing ensures proper 3D rendering when multiple objects overlap
+
+Wiki pages you might want to explore:
+- [Core Architecture (ManimCommunity/manim)](/wiki/ManimCommunity/manim#2)
+
+### Citations
+
+**File:** manim/renderer/opengl_renderer.py (L646-722)
+```python
+    def render_mobject(self, mobject: OpenGLMobject | OpenGLVMobject) -> None:
+        """
+        Render an OpenGL mobject (either OpenGLMobject or OpenGLVMobject)
+        using the appropriate shaders and rendering pipeline.
+
+        Parameters
+        ----------
+        mobject : OpenGLMobject | OpenGLVMobject
+            The mobject to render. Must be an instance of OpenGLMobject or OpenGLVMobject.
+
+        Raises
+        ------
+        TypeError
+            If a shader texture is not a moderngl.Uniform or moderngl.UniformBlock.
+        """
+        if isinstance(mobject, OpenGLVMobject):
+            if config["use_projection_fill_shaders"]:
+                render_opengl_vectorized_mobject_fill(self, mobject)
+
+            if config["use_projection_stroke_shaders"]:
+                render_opengl_vectorized_mobject_stroke(self, mobject)
+
+        shader_wrapper_list = mobject.get_shader_wrapper_list()
+        # Convert ShaderWrappers to Meshes.
+        for shader_wrapper in shader_wrapper_list:
+            folder = shader_wrapper.shader_folder
+            shader = Shader(
+                context=self.context, name=str(folder) if folder is not None else None
+            )
+
+            # Set textures.
+            for name, path in shader_wrapper.texture_paths.items():
+                tid = self.get_texture_id(str(path))
+                shader_texture = shader.shader_program[name]
+                if not isinstance(
+                    shader_texture, (moderngl.Uniform, moderngl.UniformBlock)
+                ):
+                    msg = (
+                        f"Shader texture must be a uniform, got {type(shader_texture)}"
+                    )
+                    raise TypeError(msg)
+                shader_texture.value = tid
+
+            # Set uniforms.
+            for name, value in it.chain(
+                shader_wrapper.uniforms.items(),
+                self.perspective_uniforms.items(),
+            ):
+                with contextlib.suppress(KeyError):
+                    shader.set_uniform(name, value)
+            try:
+                # TODO: make the type of 'camera' generic in the 'Scene' class
+                # to avoid the cast here
+                cam = typing.cast("OpenGLCamera", self.scene.camera)
+                shader.set_uniform("u_view_matrix", cam.formatted_view_matrix)
+                shader.set_uniform("u_projection_matrix", cam.projection_matrix)
+            except KeyError:
+                pass
+
+            # Set depth test.
+            if shader_wrapper.depth_test:
+                self.context.enable(moderngl.DEPTH_TEST)
+            else:
+                self.context.disable(moderngl.DEPTH_TEST)
+
+            # Render.
+            vert_indices = shader_wrapper.vert_indices
+            mesh = Mesh(
+                shader,
+                shader_wrapper.vert_data,
+                indices=np.asarray(vert_indices) if vert_indices is not None else None,
+                use_depth_test=shader_wrapper.depth_test,
+                primitive=mobject.render_primitive,
+            )
+            mesh.set_uniforms(self)
+            mesh.render()
+```
+File: manim/renderer/opengl_renderer.py (L878-904)
+```
+    def render(
+        self, scene: Scene, frame_offset: float, moving_mobjects: list[Mobject]
+    ) -> None:
+        """
+        Renders a single frame of the given scene using OpenGL.
+
+        Parameters
+        ----------
+        scene : Scene
+            The scene to render.
+        frame_offset : float
+            The time offset for the current frame in seconds. If no window is present,
+            this parameter is ignored, and a frame is a true snapshot of
+            the scene at the current time.
+        moving_mobjects : list[Mobject]
+            List of mobjects that are currently moving and need to be updated.
+            Not used at all, kept for compatibility with other renderers.
+
+        Notes
+        -----
+        - Updates the frame for the scene.
+        - If animations are skipped, the method returns early.
+        - Writes the current frame using the file writer.
+        - If a window is present, swaps buffers and continues
+          updating frames until the animation elapsed time reaches the frame offset.
+        """
+        self.update_frame(scene)
+```
+File: manim/renderer/opengl_renderer.py (L917-948)
+```
+    def update_frame(self, scene: Scene) -> None:
+        """
+        Update and render the current frame for the given scene.
+
+        Performs the following steps:
+        1. Clear the frame buffer with the background color.
+        2. Refresh camera perspective uniforms for rendering.
+        3. Iterate through all mobjects in the scene, rendering those marked for display.
+        4. Iterate through all mesh objects in the scene, setting their uniforms and rendering them.
+        5. Update the elapsed animation time.
+
+        Parameters
+        ----------
+        scene : Scene
+            The scene to render the frame for.
+        """
+        self.frame_buffer_object.clear(*self.background_color)
+
+        # TODO: make the type of 'camera' generic in the 'Scene' class
+        # to avoid the cast here
+        cam = typing.cast("OpenGLCamera", scene.camera)
+        self.refresh_perspective_uniforms(cam)
+
+        for mobject in scene.mobjects:
+            if not mobject.should_render:
+                continue
+
+            # TODO: make the type of 'mobject' generic in the 'Scene' class
+            # to avoid the cast here
+            mobj = typing.cast("OpenGLMobject | OpenGLVMobject", mobject)
+            self.render_mobject(mobj)
+```
+File: manim/renderer/vectorized_mobject_rendering.py (L118-209)
+```
+def triangulate_mobject(mob: OpenGLVMobject) -> np.ndarray:
+    if not mob.needs_new_triangulation:
+        return mob.triangulation
+
+    # Figure out how to triangulate the interior to know
+    # how to send the points as to the vertex shader.
+    # First triangles come directly from the points
+    # normal_vector = mob.get_unit_normal()
+    points = mob.points
+
+    b0s = points[0::3]
+    b1s = points[1::3]
+    b2s = points[2::3]
+    v01s = b1s - b0s
+    v12s = b2s - b1s
+
+    crosses = cross2d(v01s, v12s)
+    convexities = np.sign(crosses)
+    if mob.orientation == 1:
+        concave_parts = convexities > 0
+        convex_parts = convexities <= 0
+    else:
+        concave_parts = convexities < 0
+        convex_parts = convexities >= 0
+
+    # These are the vertices to which we'll apply a polygon triangulation
+    atol = mob.tolerance_for_point_equality
+    end_of_loop = np.zeros(len(b0s), dtype=bool)
+    end_of_loop[:-1] = (np.abs(b2s[:-1] - b0s[1:]) > atol).any(1)
+    end_of_loop[-1] = True
+
+    indices = np.arange(len(points), dtype=int)
+    inner_vert_indices = np.hstack(
+        [
+            indices[0::3],
+            indices[1::3][concave_parts],
+            indices[2::3][end_of_loop],
+        ],
+    )
+    inner_vert_indices.sort()
+    rings = np.arange(1, len(inner_vert_indices) + 1)[inner_vert_indices % 3 == 2]
+
+    # Triangulate
+    inner_verts = points[inner_vert_indices]
+    inner_tri_indices = inner_vert_indices[earclip_triangulation(inner_verts, rings)]
+
+    bezier_triangle_indices = np.reshape(indices, (-1, 3))
+    concave_triangle_indices = np.reshape(bezier_triangle_indices[concave_parts], (-1))
+    convex_triangle_indices = np.reshape(bezier_triangle_indices[convex_parts], (-1))
+
+    points = points[
+        np.hstack(
+            [
+                concave_triangle_indices,
+                convex_triangle_indices,
+                inner_tri_indices,
+            ],
+        )
+    ]
+    texture_coords = np.tile(
+        [
+            [0.0, 0.0],
+            [0.5, 0.0],
+            [1.0, 1.0],
+        ],
+        (points.shape[0] // 3, 1),
+    )
+    texture_mode = np.hstack(
+        (
+            np.ones(concave_triangle_indices.shape[0]),
+            -1 * np.ones(convex_triangle_indices.shape[0]),
+            np.zeros(inner_tri_indices.shape[0]),
+        ),
+    )
+
+    attributes = np.zeros(
+        points.shape[0],
+        dtype=[
+            ("in_vert", np.float32, (3,)),
+            ("in_color", np.float32, (4,)),
+            ("texture_coords", np.float32, (2,)),
+            ("texture_mode", np.int32),
+        ],
+    )
+    attributes["in_vert"] = points
+    attributes["texture_coords"] = texture_coords
+    attributes["texture_mode"] = texture_mode
+
+    mob.triangulation = attributes
+    mob.needs_new_triangulation = False
+
+    return attributes
+```
+File: manim/renderer/shader.py (L338-376)
+```
+    def render(self) -> None:
+        if self.skip_render:
+            return
+
+        if self.use_depth_test:
+            self.shader.context.enable(moderngl.DEPTH_TEST)
+        else:
+            self.shader.context.disable(moderngl.DEPTH_TEST)
+
+        shader_attribute_names: list[str] = []
+        for member_name, member in self.shader.shader_program._members.items():
+            if isinstance(member, moderngl.Attribute):
+                shader_attribute_names.append(member_name)
+        filtered_shader_attributes = filter_attributes(
+            self.attributes, shader_attribute_names
+        )
+
+        vertex_buffer_object = self.shader.context.buffer(
+            filtered_shader_attributes.tobytes()
+        )
+        if self.indices is None:
+            index_buffer_object = None
+        else:
+            vert_index_data = self.indices.astype("i4").tobytes()
+            if vert_index_data:
+                index_buffer_object = self.shader.context.buffer(vert_index_data)
+            else:
+                index_buffer_object = None
+        vertex_array_object = self.shader.context.simple_vertex_array(
+            self.shader.shader_program,
+            vertex_buffer_object,
+            *filtered_shader_attributes.dtype.names,
+            index_buffer=index_buffer_object,
+        )
+        vertex_array_object.render(self.primitive)
+        vertex_buffer_object.release()
+        vertex_array_object.release()
+        if index_buffer_object is not None:
+            index_buffer_object.release()
+```
+============
+========== How camera is handled =========
+Available Scene Types in Manim
+Manim provides several specialized scene classes for different use cases:
+Scene Type
+Purpose
+Key Features
+Scene
+Base class for all animations
+Core animation orchestration 1
+ThreeDScene
+3D animations
+3D camera controls, shading, ambient rotation 2
+SpecialThreeDScene
+Enhanced 3D
+Pre-configured 3D settings, axes, spheres 3
+MovingCameraScene
+2D camera movement
+Frame-based camera movement, zooming 4
+VectorSpaceScene
+Linear algebra
+Vector operations, transformations 5
+ZoomedScene
+Detailed views
+Zoomed display regions 6
+3D Scene with Moving Camera
+Yes, ThreeDScene provides comprehensive camera movement capabilities:
+Camera Movement Methods
+Ambient Rotation - Continuous camera rotation:
+```
+self.begin_ambient_camera_rotation(rate=0.1)  # Rotate around Z-axis
+self.stop_ambient_camera_rotation()
+``` [7](#5-6) 
+```
+Animated Movement - Smooth camera transitions:
+```
+self.move_camera(
+    phi=75*DEGREES,    # Polar angle
+    theta=-45*DEGREES,  # Azimuthal angle
+    zoom=2.0,          # Zoom factor
+    frame_center=[1,2,3]  # Center point
+)
+``` [8](#5-7) 
+```
+Direct Orientation - Immediate camera positioning:
+```
+self.set_camera_orientation(
+    phi=70*DEGREES,
+    theta=-135*DEGREES,
+    focal_distance=20.0
+)
+``` [9](#5-8) 
+```
+Example Usage
+```
+class My3DScene(ThreeDScene):
+    def construct(self):
+        # Set initial camera position
+        self.set_camera_orientation(phi=75*DEGREES, theta=-45*DEGREES)
+        
+        # Add 3D objects
+        sphere = Sphere()
+        self.add(sphere)
+        
+        # Start rotating camera
+        self.begin_ambient_camera_rotation(rate=0.1)
+        self.wait(2)
+        
+        # Move to new position
+        self.move_camera(phi=45*DEGREES, theta=30*DEGREES, zoom=1.5)
+        self.wait(1)
+        
+        # Stop rotation
+        self.stop_ambient_camera_rotation()
+```
+Notes
+ThreeDScene uses ThreeDCamera by default with spherical coordinate system 10
+Camera movement works differently in Cairo vs OpenGL renderers
+MovingCameraScene is for 2D scenes with frame-based camera movement
+Both scenes support adding fixed-in-frame mobjects that don't move with camera
+Wiki pages you might want to explore:
+Core Architecture (ManimCommunity/manim)
+Wiki pages you might want to explore:
+Core Architecture (ManimCommunity/manim)
+Citations
+File: manim/scene/three_d_scene.py (L31-35)
+```
+class ThreeDScene(Scene):
+    """
+    This is a Scene, with special configurations and properties that
+    make it suitable for Three Dimensional Scenes.
+    """
+```
+File: manim/scene/three_d_scene.py (L37-53)
+```
+    def __init__(
+        self,
+        camera_class=ThreeDCamera,
+        ambient_camera_rotation=None,
+        default_angled_camera_orientation_kwargs=None,
+        **kwargs,
+    ):
+        self.ambient_camera_rotation = ambient_camera_rotation
+        if default_angled_camera_orientation_kwargs is None:
+            default_angled_camera_orientation_kwargs = {
+                "phi": 70 * DEGREES,
+                "theta": -135 * DEGREES,
+            }
+        self.default_angled_camera_orientation_kwargs = (
+            default_angled_camera_orientation_kwargs
+        )
+        super().__init__(camera_class=camera_class, **kwargs)
+```
+File: manim/scene/three_d_scene.py (L55-101)
+```
+    def set_camera_orientation(
+        self,
+        phi: float | None = None,
+        theta: float | None = None,
+        gamma: float | None = None,
+        zoom: float | None = None,
+        focal_distance: float | None = None,
+        frame_center: Mobject | Sequence[float] | None = None,
+        **kwargs,
+    ):
+        """
+        This method sets the orientation of the camera in the scene.
+
+        Parameters
+        ----------
+        phi
+            The polar angle i.e the angle between Z_AXIS and Camera through ORIGIN in radians.
+
+        theta
+            The azimuthal angle i.e the angle that spins the camera around the Z_AXIS.
+
+        focal_distance
+            The focal_distance of the Camera.
+
+        gamma
+            The rotation of the camera about the vector from the ORIGIN to the Camera.
+
+        zoom
+            The zoom factor of the scene.
+
+        frame_center
+            The new center of the camera frame in cartesian coordinates.
+
+        """
+        if phi is not None:
+            self.renderer.camera.set_phi(phi)
+        if theta is not None:
+            self.renderer.camera.set_theta(theta)
+        if focal_distance is not None:
+            self.renderer.camera.set_focal_distance(focal_distance)
+        if gamma is not None:
+            self.renderer.camera.set_gamma(gamma)
+        if zoom is not None:
+            self.renderer.camera.set_zoom(zoom)
+        if frame_center is not None:
+            self.renderer.camera._frame_center.move_to(frame_center)
+```
+File: manim/scene/three_d_scene.py (L102-137)
+```
+    def begin_ambient_camera_rotation(self, rate: float = 0.02, about: str = "theta"):
+        """
+        This method begins an ambient rotation of the camera about the Z_AXIS,
+        in the anticlockwise direction
+
+        Parameters
+        ----------
+        rate
+            The rate at which the camera should rotate about the Z_AXIS.
+            Negative rate means clockwise rotation.
+        about
+            one of 3 options: ["theta", "phi", "gamma"]. defaults to theta.
+        """
+        # TODO, use a ValueTracker for rate, so that it
+        # can begin and end smoothly
+        about: str = about.lower()
+        try:
+            if config.renderer == RendererType.CAIRO:
+                trackers = {
+                    "theta": self.camera.theta_tracker,
+                    "phi": self.camera.phi_tracker,
+                    "gamma": self.camera.gamma_tracker,
+                }
+                x: ValueTracker = trackers[about]
+                x.add_updater(lambda m, dt: x.increment_value(rate * dt))
+                self.add(x)
+            elif config.renderer == RendererType.OPENGL:
+                cam: OpenGLCamera = self.camera
+                methods = {
+                    "theta": cam.increment_theta,
+                    "phi": cam.increment_phi,
+                    "gamma": cam.increment_gamma,
+                }
+                cam.add_updater(lambda m, dt: methods[about](rate * dt))
+                self.add(self.camera)
+        except Exception as e:
+```
+File: manim/scene/three_d_scene.py (L211-303)
+```
+    def move_camera(
+        self,
+        phi: float | None = None,
+        theta: float | None = None,
+        gamma: float | None = None,
+        zoom: float | None = None,
+        focal_distance: float | None = None,
+        frame_center: Mobject | Sequence[float] | None = None,
+        added_anims: Iterable[Animation] = [],
+        **kwargs,
+    ):
+        """
+        This method animates the movement of the camera
+        to the given spherical coordinates.
+
+        Parameters
+        ----------
+        phi
+            The polar angle i.e the angle between Z_AXIS and Camera through ORIGIN in radians.
+
+        theta
+            The azimuthal angle i.e the angle that spins the camera around the Z_AXIS.
+
+        focal_distance
+            The radial focal_distance between ORIGIN and Camera.
+
+        gamma
+            The rotation of the camera about the vector from the ORIGIN to the Camera.
+
+        zoom
+            The zoom factor of the camera.
+
+        frame_center
+            The new center of the camera frame in cartesian coordinates.
+
+        added_anims
+            Any other animations to be played at the same time.
+
+        """
+        anims = []
+
+        if config.renderer == RendererType.CAIRO:
+            self.camera: ThreeDCamera
+            value_tracker_pairs = [
+                (phi, self.camera.phi_tracker),
+                (theta, self.camera.theta_tracker),
+                (focal_distance, self.camera.focal_distance_tracker),
+                (gamma, self.camera.gamma_tracker),
+                (zoom, self.camera.zoom_tracker),
+            ]
+            for value, tracker in value_tracker_pairs:
+                if value is not None:
+                    anims.append(tracker.animate.set_value(value))
+            if frame_center is not None:
+                anims.append(self.camera._frame_center.animate.move_to(frame_center))
+        elif config.renderer == RendererType.OPENGL:
+            cam: OpenGLCamera = self.camera
+            cam2 = cam.copy()
+            methods = {
+                "theta": cam2.set_theta,
+                "phi": cam2.set_phi,
+                "gamma": cam2.set_gamma,
+                "zoom": cam2.scale,
+                "frame_center": cam2.move_to,
+            }
+            if frame_center is not None:
+                if isinstance(frame_center, OpenGLMobject):
+                    frame_center = frame_center.get_center()
+                frame_center = list(frame_center)
+
+            zoom_value = None
+            if zoom is not None:
+                zoom_value = config.frame_height / (zoom * cam.height)
+
+            for value, method in [
+                [theta, "theta"],
+                [phi, "phi"],
+                [gamma, "gamma"],
+                [zoom_value, "zoom"],
+                [frame_center, "frame_center"],
+            ]:
+                if value is not None:
+                    methods[method](value)
+
+            if focal_distance is not None:
+                warnings.warn(
+                    "focal distance of OpenGLCamera can not be adjusted.",
+                    stacklevel=2,
+                )
+
+            anims += [Transform(cam, cam2)]
+
+        self.play(*anims + added_anims, **kwargs)
+```
+File: manim/scene/three_d_scene.py (L437-448)
+```
+class SpecialThreeDScene(ThreeDScene):
+    """An extension of :class:`ThreeDScene` with more settings.
+
+    It has some extra configuration for axes, spheres,
+    and an override for low quality rendering. Further key differences
+    are:
+
+    * The camera shades applicable 3DMobjects by default,
+      except if rendering in low quality.
+    * Some default params for Spheres and Axes have been added.
+
+    """
+```
+File: manim/scene/moving_camera_scene.py (L1-86)
+```
+"""A scene whose camera can be moved around.
+
+.. SEEALSO::
+
+    :mod:`.moving_camera`
+
+
+Examples
+--------
+
+.. manim:: ChangingCameraWidthAndRestore
+
+    class ChangingCameraWidthAndRestore(MovingCameraScene):
+        def construct(self):
+            text = Text("Hello World").set_color(BLUE)
+            self.add(text)
+            self.camera.frame.save_state()
+            self.play(self.camera.frame.animate.set(width=text.width * 1.2))
+            self.wait(0.3)
+            self.play(Restore(self.camera.frame))
+
+
+.. manim:: MovingCameraCenter
+
+    class MovingCameraCenter(MovingCameraScene):
+        def construct(self):
+            s = Square(color=RED, fill_opacity=0.5).move_to(2 * LEFT)
+            t = Triangle(color=GREEN, fill_opacity=0.5).move_to(2 * RIGHT)
+            self.wait(0.3)
+            self.add(s, t)
+            self.play(self.camera.frame.animate.move_to(s))
+            self.wait(0.3)
+            self.play(self.camera.frame.animate.move_to(t))
+
+
+.. manim:: MovingAndZoomingCamera
+
+    class MovingAndZoomingCamera(MovingCameraScene):
+        def construct(self):
+            s = Square(color=BLUE, fill_opacity=0.5).move_to(2 * LEFT)
+            t = Triangle(color=YELLOW, fill_opacity=0.5).move_to(2 * RIGHT)
+            self.add(s, t)
+            self.play(self.camera.frame.animate.move_to(s).set(width=s.width*2))
+            self.wait(0.3)
+            self.play(self.camera.frame.animate.move_to(t).set(width=t.width*2))
+
+            self.play(self.camera.frame.animate.move_to(ORIGIN).set(width=14))
+
+.. manim:: MovingCameraOnGraph
+
+    class MovingCameraOnGraph(MovingCameraScene):
+        def construct(self):
+            self.camera.frame.save_state()
+
+            ax = Axes(x_range=[-1, 10], y_range=[-1, 10])
+            graph = ax.plot(lambda x: np.sin(x), color=WHITE, x_range=[0, 3 * PI])
+
+            dot_1 = Dot(ax.i2gp(graph.t_min, graph))
+            dot_2 = Dot(ax.i2gp(graph.t_max, graph))
+            self.add(ax, graph, dot_1, dot_2)
+
+            self.play(self.camera.frame.animate.scale(0.5).move_to(dot_1))
+            self.play(self.camera.frame.animate.move_to(dot_2))
+            self.play(Restore(self.camera.frame))
+            self.wait()
+
+.. manim:: SlidingMultipleScenes
+
+    class SlidingMultipleScenes(MovingCameraScene):
+        def construct(self):
+            def create_scene(number):
+                frame = Rectangle(width=16,height=9)
+                circ = Circle().shift(LEFT)
+                text = Tex(f"This is Scene {str(number)}").next_to(circ, RIGHT)
+                frame.add(circ,text)
+                return frame
+
+            group = VGroup(*(create_scene(i) for i in range(4))).arrange_in_grid(buff=4)
+            self.add(group)
+            self.camera.auto_zoom(group[0], animate=False)
+            for scene in group:
+                self.play(self.camera.auto_zoom(scene))
+                self.wait()
+
+            self.play(self.camera.auto_zoom(group, margin=2))
+"""
+```
+File: manim/scene/vector_space_scene.py (L1-46)
+```
+"""A scene suitable for vector spaces."""
+
+from __future__ import annotations
+
+__all__ = ["VectorScene", "LinearTransformationScene"]
+
+from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING, Any, cast
+
+import numpy as np
+
+from manim.animation.creation import DrawBorderThenFill, Group
+from manim.camera.camera import Camera
+from manim.mobject.geometry.arc import Dot
+from manim.mobject.geometry.line import Arrow, Line, Vector
+from manim.mobject.geometry.polygram import Rectangle
+from manim.mobject.graphing.coordinate_systems import Axes, NumberPlane
+from manim.mobject.opengl.opengl_mobject import OpenGLMobject
+from manim.mobject.text.tex_mobject import MathTex, Tex
+from manim.utils.config_ops import update_dict_recursively
+
+from .. import config
+from ..animation.animation import Animation
+from ..animation.creation import Create, Write
+from ..animation.fading import FadeOut
+from ..animation.growing import GrowArrow
+from ..animation.transform import ApplyFunction, ApplyPointwiseFunction, Transform
+from ..constants import *
+from ..mobject.matrix import Matrix
+from ..mobject.mobject import Mobject
+from ..mobject.types.vectorized_mobject import VGroup, VMobject
+from ..scene.scene import Scene
+from ..utils.color import (
+    BLACK,
+    BLUE_D,
+    GREEN_C,
+    GREY,
+    RED_C,
+    WHITE,
+    YELLOW,
+    ManimColor,
+    ParsableManimColor,
+)
+from ..utils.rate_functions import rush_from, rush_into
+from ..utils.space_ops import angle_of_vector
+```
+File: manim/init.py (L85-91)
+```
+from .scene.moving_camera_scene import *
+from .scene.scene import *
+from .scene.scene_file_writer import *
+from .scene.section import *
+from .scene.three_d_scene import *
+from .scene.vector_space_scene import *
+from .scene.zoomed_scene import *
+```
+============
+Remaining questions:
+do we have different ManimWidget classes or can a single one handle everything (one is probably ok)
+how do we handle camera / camera movement ?
+how do we handle "fix" objects in the json spec ? (see comment below)
+Activity
+rambip commented on Apr 10, 2026
+rambip
+on Apr 10, 2026
+OwnerAuthor
+More actions
+Methods in ThreeDScene but not in Scene
+ThreeDScene extends Scene with 3D-specific functionality, adding these unique methods:
+Camera Control Methods
+Method
+Purpose
+Key Parameters
+set_camera_orientation()
+Immediately positions camera in 3D space
+phi, theta, gamma, zoom, focal_distance 1
+move_camera()
+Animates camera movement to new position
+Same as above + frame_center, added_anims 2
+begin_ambient_camera_rotation()
+Starts continuous camera rotation
+rate, about (theta/phi/gamma) 3
+stop_ambient_camera_rotation()
+Stops the continuous rotation
+-
+begin_3dillusion_camera_rotation()
+Creates 3D rotation illusion
+rate
+stop_3dillusion_camera_rotation()
+Stops illusion rotation
+- 4
+Fixed Mobject Methods
+Method
+Purpose
+Effect
+add_fixed_orientation_mobjects()
+Mobjects don't rotate with camera
+Can still move in 3D space 5
+add_fixed_in_frame_mobjects()
+Mobjects fixed to screen overlay
+Unaffected by any camera movement 6
+remove_fixed_orientation_mobjects()
+Unfixes orientation
+Mobject rotates normally again 7
+remove_fixed_in_frame_mobjects()
+Unfixes from frame
+Mobject affected by camera again 8
+Utility Methods
+Method
+Purpose
+get_moving_mobjects()
+Overridden to track camera movement as "moving" 9
+set_to_default_angled_camera_orientation()
+Sets camera to predefined default angle 10
+Constructor Override
+The __init__ method is overridden to:
+Use ThreeDCamera by default instead of regular Camera 11
+Set default camera orientation parameters
+Configure ambient rotation settings
+Notes
+All camera methods work with spherical coordinates (phi, theta, gamma)
+Fixed mobject methods have different implementations for Cairo vs OpenGL renderers
+SpecialThreeDScene extends ThreeDScene with pre-configured settings for axes and spheres 12
+The ambient rotation methods use updaters for continuous animation
+Wiki pages you might want to explore:
+Core Architecture (ManimCommunity/manim)
+Citations
+File: manim/scene/three_d_scene.py (L37-53)
+```
+    def __init__(
+        self,
+        camera_class=ThreeDCamera,
+        ambient_camera_rotation=None,
+        default_angled_camera_orientation_kwargs=None,
+        **kwargs,
+    ):
+        self.ambient_camera_rotation = ambient_camera_rotation
+        if default_angled_camera_orientation_kwargs is None:
+            default_angled_camera_orientation_kwargs = {
+                "phi": 70 * DEGREES,
+                "theta": -135 * DEGREES,
+            }
+        self.default_angled_camera_orientation_kwargs = (
+            default_angled_camera_orientation_kwargs
+        )
+        super().__init__(camera_class=camera_class, **kwargs)
+```
+File: manim/scene/three_d_scene.py (L55-101)
+```
+    def set_camera_orientation(
+        self,
+        phi: float | None = None,
+        theta: float | None = None,
+        gamma: float | None = None,
+        zoom: float | None = None,
+        focal_distance: float | None = None,
+        frame_center: Mobject | Sequence[float] | None = None,
+        **kwargs,
+    ):
+        """
+        This method sets the orientation of the camera in the scene.
+
+        Parameters
+        ----------
+        phi
+            The polar angle i.e the angle between Z_AXIS and Camera through ORIGIN in radians.
+
+        theta
+            The azimuthal angle i.e the angle that spins the camera around the Z_AXIS.
+
+        focal_distance
+            The focal_distance of the Camera.
+
+        gamma
+            The rotation of the camera about the vector from the ORIGIN to the Camera.
+
+        zoom
+            The zoom factor of the scene.
+
+        frame_center
+            The new center of the camera frame in cartesian coordinates.
+
+        """
+        if phi is not None:
+            self.renderer.camera.set_phi(phi)
+        if theta is not None:
+            self.renderer.camera.set_theta(theta)
+        if focal_distance is not None:
+            self.renderer.camera.set_focal_distance(focal_distance)
+        if gamma is not None:
+            self.renderer.camera.set_gamma(gamma)
+        if zoom is not None:
+            self.renderer.camera.set_zoom(zoom)
+        if frame_center is not None:
+            self.renderer.camera._frame_center.move_to(frame_center)
+```
+File: manim/scene/three_d_scene.py (L102-137)
+```
+    def begin_ambient_camera_rotation(self, rate: float = 0.02, about: str = "theta"):
+        """
+        This method begins an ambient rotation of the camera about the Z_AXIS,
+        in the anticlockwise direction
+
+        Parameters
+        ----------
+        rate
+            The rate at which the camera should rotate about the Z_AXIS.
+            Negative rate means clockwise rotation.
+        about
+            one of 3 options: ["theta", "phi", "gamma"]. defaults to theta.
+        """
+        # TODO, use a ValueTracker for rate, so that it
+        # can begin and end smoothly
+        about: str = about.lower()
+        try:
+            if config.renderer == RendererType.CAIRO:
+                trackers = {
+                    "theta": self.camera.theta_tracker,
+                    "phi": self.camera.phi_tracker,
+                    "gamma": self.camera.gamma_tracker,
+                }
+                x: ValueTracker = trackers[about]
+                x.add_updater(lambda m, dt: x.increment_value(rate * dt))
+                self.add(x)
+            elif config.renderer == RendererType.OPENGL:
+                cam: OpenGLCamera = self.camera
+                methods = {
+                    "theta": cam.increment_theta,
+                    "phi": cam.increment_phi,
+                    "gamma": cam.increment_gamma,
+                }
+                cam.add_updater(lambda m, dt: methods[about](rate * dt))
+                self.add(self.camera)
+        except Exception as e:
+```
+File: manim/scene/three_d_scene.py (L204-209)
+```
+    def stop_3dillusion_camera_rotation(self):
+        """This method stops all illusion camera rotations."""
+        self.renderer.camera.theta_tracker.clear_updaters()
+        self.remove(self.renderer.camera.theta_tracker)
+        self.renderer.camera.phi_tracker.clear_updaters()
+        self.remove(self.renderer.camera.phi_tracker)
+```
+File: manim/scene/three_d_scene.py (L211-303)
+```
+    def move_camera(
+        self,
+        phi: float | None = None,
+        theta: float | None = None,
+        gamma: float | None = None,
+        zoom: float | None = None,
+        focal_distance: float | None = None,
+        frame_center: Mobject | Sequence[float] | None = None,
+        added_anims: Iterable[Animation] = [],
+        **kwargs,
+    ):
+        """
+        This method animates the movement of the camera
+        to the given spherical coordinates.
+
+        Parameters
+        ----------
+        phi
+            The polar angle i.e the angle between Z_AXIS and Camera through ORIGIN in radians.
+
+        theta
+            The azimuthal angle i.e the angle that spins the camera around the Z_AXIS.
+
+        focal_distance
+            The radial focal_distance between ORIGIN and Camera.
+
+        gamma
+            The rotation of the camera about the vector from the ORIGIN to the Camera.
+
+        zoom
+            The zoom factor of the camera.
+
+        frame_center
+            The new center of the camera frame in cartesian coordinates.
+
+        added_anims
+            Any other animations to be played at the same time.
+
+        """
+        anims = []
+
+        if config.renderer == RendererType.CAIRO:
+            self.camera: ThreeDCamera
+            value_tracker_pairs = [
+                (phi, self.camera.phi_tracker),
+                (theta, self.camera.theta_tracker),
+                (focal_distance, self.camera.focal_distance_tracker),
+                (gamma, self.camera.gamma_tracker),
+                (zoom, self.camera.zoom_tracker),
+            ]
+            for value, tracker in value_tracker_pairs:
+                if value is not None:
+                    anims.append(tracker.animate.set_value(value))
+            if frame_center is not None:
+                anims.append(self.camera._frame_center.animate.move_to(frame_center))
+        elif config.renderer == RendererType.OPENGL:
+            cam: OpenGLCamera = self.camera
+            cam2 = cam.copy()
+            methods = {
+                "theta": cam2.set_theta,
+                "phi": cam2.set_phi,
+                "gamma": cam2.set_gamma,
+                "zoom": cam2.scale,
+                "frame_center": cam2.move_to,
+            }
+            if frame_center is not None:
+                if isinstance(frame_center, OpenGLMobject):
+                    frame_center = frame_center.get_center()
+                frame_center = list(frame_center)
+
+            zoom_value = None
+            if zoom is not None:
+                zoom_value = config.frame_height / (zoom * cam.height)
+
+            for value, method in [
+                [theta, "theta"],
+                [phi, "phi"],
+                [gamma, "gamma"],
+                [zoom_value, "zoom"],
+                [frame_center, "frame_center"],
+            ]:
+                if value is not None:
+                    methods[method](value)
+
+            if focal_distance is not None:
+                warnings.warn(
+                    "focal distance of OpenGLCamera can not be adjusted.",
+                    stacklevel=2,
+                )
+
+            anims += [Transform(cam, cam2)]
+
+        self.play(*anims + added_anims, **kwargs)
+```
+File: manim/scene/three_d_scene.py (L312-328)
+```
+    def get_moving_mobjects(self, *animations: Animation):
+        """
+        This method returns a list of all of the Mobjects in the Scene that
+        are moving, that are also in the animations passed.
+
+        Parameters
+        ----------
+        *animations
+            The animations whose mobjects will be checked.
+        """
+        moving_mobjects = super().get_moving_mobjects(*animations)
+        camera_mobjects = self.renderer.camera.get_value_trackers() + [
+            self.renderer.camera._frame_center,
+        ]
+        if any(cm in moving_mobjects for cm in camera_mobjects):
+            return self.mobjects
+        return moving_mobjects
+```
+File: manim/scene/three_d_scene.py (L330-355)
+```
+    def add_fixed_orientation_mobjects(self, *mobjects: Mobject, **kwargs):
+        """
+        This method is used to prevent the rotation and tilting
+        of mobjects as the camera moves around. The mobject can
+        still move in the x,y,z directions, but will always be
+        at the angle (relative to the camera) that it was at
+        when it was passed through this method.)
+
+        Parameters
+        ----------
+        *mobjects
+            The Mobject(s) whose orientation must be fixed.
+
+        **kwargs
+            Some valid kwargs are
+                use_static_center_func : bool
+                center_func : function
+        """
+        if config.renderer == RendererType.CAIRO:
+            self.add(*mobjects)
+            self.renderer.camera.add_fixed_orientation_mobjects(*mobjects, **kwargs)
+        elif config.renderer == RendererType.OPENGL:
+            for mob in mobjects:
+                mob: OpenGLMobject
+                mob.fix_orientation()
+                self.add(mob)
+```
+File: manim/scene/three_d_scene.py (L357-377)
+```
+    def add_fixed_in_frame_mobjects(self, *mobjects: Mobject):
+        """
+        This method is used to prevent the rotation and movement
+        of mobjects as the camera moves around. The mobject is
+        essentially overlaid, and is not impacted by the camera's
+        movement in any way.
+
+        Parameters
+        ----------
+        *mobjects
+            The Mobjects whose orientation must be fixed.
+        """
+        if config.renderer == RendererType.CAIRO:
+            self.add(*mobjects)
+            self.camera: ThreeDCamera
+            self.camera.add_fixed_in_frame_mobjects(*mobjects)
+        elif config.renderer == RendererType.OPENGL:
+            for mob in mobjects:
+                mob: OpenGLMobject
+                mob.fix_in_frame()
+                self.add(mob)
+```
+File: manim/scene/three_d_scene.py (L379-397)
+```
+    def remove_fixed_orientation_mobjects(self, *mobjects: Mobject):
+        """
+        This method "unfixes" the orientation of the mobjects
+        passed, meaning they will no longer be at the same angle
+        relative to the camera. This only makes sense if the
+        mobject was passed through add_fixed_orientation_mobjects first.
+
+        Parameters
+        ----------
+        *mobjects
+            The Mobjects whose orientation must be unfixed.
+        """
+        if config.renderer == RendererType.CAIRO:
+            self.renderer.camera.remove_fixed_orientation_mobjects(*mobjects)
+        elif config.renderer == RendererType.OPENGL:
+            for mob in mobjects:
+                mob: OpenGLMobject
+                mob.unfix_orientation()
+                self.remove(mob)
+```
+File: manim/scene/three_d_scene.py (L399-416)
+```
+    def remove_fixed_in_frame_mobjects(self, *mobjects: Mobject):
+        """
+         This method undoes what add_fixed_in_frame_mobjects does.
+         It allows the mobject to be affected by the movement of
+         the camera.
+
+        Parameters
+        ----------
+        *mobjects
+            The Mobjects whose position and orientation must be unfixed.
+        """
+        if config.renderer == RendererType.CAIRO:
+            self.renderer.camera.remove_fixed_in_frame_mobjects(*mobjects)
+        elif config.renderer == RendererType.OPENGL:
+            for mob in mobjects:
+                mob: OpenGLMobject
+                mob.unfix_from_frame()
+                self.remove(mob)
+```
+File: manim/scene/three_d_scene.py (L419-434)
+```
+    def set_to_default_angled_camera_orientation(self, **kwargs):
+        """
+        This method sets the default_angled_camera_orientation to the
+        keyword arguments passed, and sets the camera to that orientation.
+
+        Parameters
+        ----------
+        **kwargs
+            Some recognised kwargs are phi, theta, focal_distance, gamma,
+            which have the same meaning as the parameters in set_camera_orientation.
+        """
+        config = dict(
+            self.default_camera_orientation_kwargs,
+        )  # Where doe this come from?
+        config.update(kwargs)
+        self.set_camera_orientation(**config)
+```
+File: manim/scene/three_d_scene.py (L437-448)
+```
+class SpecialThreeDScene(ThreeDScene):
+    """An extension of :class:`ThreeDScene` with more settings.
+
+    It has some extra configuration for axes, spheres,
+    and an override for low quality rendering. Further key differences
+    are:
+
+    * The camera shades applicable 3DMobjects by default,
+      except if rendering in low quality.
+    * Some default params for Spheres and Axes have been added.
+
+    """
+```
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

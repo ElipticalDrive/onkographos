@@ -1,0 +1,162 @@
+Contribute to cmilatinov/calyx-rust development by creating an account on GitHub.
+
+feat: Add distance fog by cmilatinov · Pull Request #500 · cmilatinov/calyx-rust · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+cmilatinov
+commented
+Nov 3, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Adds distance fog as a post-processing effect. The RPG Poly demo now turns fog on with the original Unity scene's settings, replacing the fog that was baked into its sky-dome texture.
+ComponentFog (component/post_process/fog.rs) has these fields:
+mode: Linear (uses start and end) or Exponential (uses density).
+color: sRGB.
+intensity: HDR scale of the colour.
+opacity: the largest share of the fog colour any pixel takes.
+The component's checkbox switches it on and off. It is a PostProcessEffect, so profiles pick it up from the type registry without any profile change. It also sits in PostProcessSettings, PostProcessEffects and the profile's effects() mapping, like the other effects.
+Blending (BlendEffect for ComponentFog): float fields interpolate, the colour interpolates in linear space, and the mode switches at 0.5. When the volume below has no fog, fog fades in from opacity 0.
+FogPass (render/postprocess/fog.rs, shaders/postprocess/fog.wgsl) is one full-screen Hdr pass that reads SceneInput::Depth. It runs after SSAO and before depth of field and bloom.
+Distance is the view depth stretched along each pixel's ray, so fog does not change as the camera turns.
+The output is mix(color, fog_color * intensity, amount * opacity), and alpha is kept.
+The pass owns no texture.
+Background: cleared depth and skybox depth both convert to the far-plane distance, so the sky takes the fog of the far plane with no special case.
+Linear fog that ends before the far plane covers the sky completely.
+Exponential fog covers it by 1 - exp(-density * far).
+Distant geometry and the sky therefore meet in the same colour at the horizon.
+RPG Poly demo:
+The importer reads m_Fog, m_FogColor, m_FogMode, m_FogDensity, m_LinearFogStart and m_LinearFogEnd from the pack scene's RenderSettings.
+It adds a Fog component to the demo's post-process volume: linear, 0 to 900 m, colour (190, 231, 242).
+The baked sky-dome fog is gone, along with the importer's whole texture-fog path (Pack::texture_fog, TextureJob::fog and the Blender blend).
+The regenerated rpg_poly.cxscene differs from main only by the new Fog component.
+To get the unfogged sky texture in vendor/, re-run cargo run --release -p calyx_unity_import.
+Docs: a new Fog section in docs/design/post-processing/architecture.md, with updates to its settings, blending, particles, shaders and testing sections, and to the overview.
+RPG Poly: Unity original next to the remake, with and without fog. Each remake shot is a calyx_ctl screenshot --target game taken from the Unity camera named in the alt text, in a paused play session with the camera path disabled. Fog off means the Fog component is disabled, so the sky dome shows its own unfogged texture.
+Unity original
+Calyx, fog on
+Calyx, fog off
+With fog on, the hills and mountains fade towards pale blue with distance, as in the original, and the sky dome at 490 m takes the fog colour. The remake's sky is still a little greyer than the original's cyan. Unity mixes fog in display space, while Calyx mixes it in linear HDR before ACES tone mapping. At intensity 1.5 and 2.0 the sky turned grey-white, so the demo keeps 1.0.
+Sandbox showcase: fog off changes nothing. I captured sandbox/assets/showcase/post_processing/post_processing.cxscene in release, paused, as game screenshots. The capture without a Fog component and the capture with one added but disabled are byte-identical PNGs (both MD5 e5b3cfeb90612ad768d6a2c5a4f6c549). For reference, the right column has exponential fog on:
+No Fog component (identical with Fog disabled)
+Exponential fog, density 0.08
+Frame time. I ran the release editor on the RPG Poly flythrough in play mode and computed wall-clock ms per frame from info's frame_index. There were 3 runs per state, alternating, each over a 6 s window of about 1,000 frames:
+Fog
+Run 1
+Run 2
+Run 3
+Off
+6.06 ms
+6.06 ms
+6.05 ms
+On
+6.07 ms
+6.06 ms
+6.06 ms
+The frame is presentation-bound at about 165 Hz in both states, so the fog pass adds no measurable time.
+Design Decisions
+An effect component on volumes, not a scene-wide component. Fog blends between local volumes and lives in profiles like every other effect, with no change to either.
+Position in the chain: after SSAO, before depth of field and bloom.
+After SSAO: SSAO darkens surfaces, but the light the fog scatters in front of them is not occluded, so occlusion must not darken the fog.
+Before depth of field: a fogged distant surface should blur to its fogged colour, as a lens sees it.
+Before bloom: bloom should spread the light that reaches the camera through the fog, so a bright light deep in fog is dimmed before it blooms.
+In the HDR stage, so the fog colour is radiance. Exposure and ACES apply to the fog as they do to the scene. A fog colour therefore shows darker than its swatch at 0 EV, and intensity scales it back up, as it does for a light. Fog after tone mapping would match a swatch exactly, but bright lights in fog would then not be tone mapped with it.
+Radial distance, not view depth. The fog on a surface does not change as the camera turns. Unity's built-in fog uses view depth.
+No special case for the background. Cleared and skybox depths convert to the far-plane distance, so the sky is fogged as a surface at the far plane. The sky above the horizon gets as much fog as the horizon. A height fade on the sky would need the camera's orientation in PassContext, which is a possible follow-up.
+Scene depth, not particle depth.
+Forward meshes and alpha particles past half coverage are fogged by their own distance.
+Additive particles and alpha fringes take the fog of the surface behind them, so a glow in front of distant fog fades with that fog.
+With the particle depth instead, the background behind every soft particle edge would get the particle's nearer, thinner fog, leaving an unfogged halo.
+opacity is the neutral value that a fading-in volume starts from (0). Interpolating start and end from infinity would not give a linear fade.
+MSAA: the pass gets the chain's single-sample depth (sample 0 above one sample), like SSAO.
+Demo intensity 1.0: I tried 1.5 and 2.0 against the store screenshots, and both washed the sky out to grey-white.
+Engineering Tasks
+Closes feat: Add distance fog #478 — feat: Add distance fog
+Tests Added
+render/postprocess/fog/tests.rs:
+the_far_surface_is_closer_to_the_fog_colour_than_the_near_one: renders a full SceneRenderer frame of two identical red emissive cubes, 5 and about 45 units away, through a global volume with blue linear fog, at one and four samples. The far cube is closer to the fog colour (the background pixel) than the near one, and is bluer and less red. Without fog, both cubes look the same and the background stays black.
+the_background_takes_the_fog_colour: with the scene depth at 1 (cleared) and at 0.9999999 (skybox), every pixel equals the fog colour under linear fog that ends before the far plane, and alpha is kept. Under exponential fog, the background takes the far plane's fog amount.
+a_surface_fades_to_the_fog_colour_by_its_distance_along_the_ray: puts a plane facing the camera at view depth 12 and checks every pixel against mix(color, fog, opacity * amount), using the distance along that pixel's ray, for linear and exponential fog.
+a_surface_before_linear_fog_starts_is_unchanged, the_renderer_runs_fog_after_ssao_and_before_depth_of_field_and_bloom and fog_is_off_by_default_and_a_partial_component_loads_with_defaults.
+local_volume_tests.rs:
+fog_blends_between_a_global_and_a_local_volume_by_camera_position: float fields interpolate, the colour interpolates in linear space, the mode switches at 0.5, and the global fog applies outside the blend distance.
+fog_off_below_fades_in_from_no_opacity.
+post_process_profile/tests.rs: a_fog_entry_round_trips_and_switches_fog_on. The entry is keyed by the fog type UUID, loads back equal, and a volume using the profile resolves to that fog. The registered effect types now include fog.
+Extended tests:
+The plan test switches the fog pass on and off with the component.
+The disabled-components opt-in list includes ComponentFog.
+The default settings have no fog.
+Mutation check:
+Replacing the ray distance with the view depth in fog.wgsl fails the along-the-ray test.
+Dropping the mix fails the background, along-the-ray and two-cube tests.
+Validation Performed
+Passed: cargo fmt --all -- --check
+Passed: cargo clippy --workspace --all-targets
+Passed: cargo test --workspace
+feat: Add distance fog
+65d9a7d
+chatgpt-codex-connector
+Bot
+commented
+Nov 3, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codex Review Summary
+This comment shows the latest Codex review activity on this pull request.
+Review
+Status
+Commit
+Review trigger
+📝 Code Review
+✅ Completed 2026-11-03T18:06:45.277748Z
+65d9a7d
+PR opened
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review" or "@codex security review".
+Codex reacts with 👀 while any review is running, comments if it has suggestions, and reacts with 👍 once all reviews finish with no findings.
+Hide details
+View details
+cmilatinov
+merged commit 31a7caf
+into
+main
+Nov 3, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+cmilatinov
+deleted the
+feat/478-add-distance-fog
+branch
+November 3, 2026 18:46
+This was referenced Nov 3, 2026
+feat: Apply SSAO to ambient light from the G-buffer normals
+#501
+Merged
+feat: Draw ink outlines with a screen-space post-processing pass
+#509
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.
