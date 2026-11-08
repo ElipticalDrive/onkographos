@@ -1,0 +1,614 @@
+# nvdiffrast_mesh_renderer
+
+## Installation
+
+This package assumes a CUDA-ready environment where `torch` is already installed.
+
+`nvdiffrast` is a required runtime dependency, but it is intentionally not declared in `pyproject.toml` because this project needs it installed from source with `--no-build-isolation`.
+
+Install `nvdiffrast` first:
+
+```bash
+git clone -b v0.4.0 https://github.com/NVlabs/nvdiffrast.git /tmp/extensions/nvdiffrast
+python -m pip install /tmp/extensions/nvdiffrast --no-build-isolation
+```
+
+Equivalent helper script:
+
+```bash
+bash scripts/install_nvdiffrast.sh
+```
+
+Install the package from this repository:
+
+```bash
+pip install .
+```
+
+For development, `pip install -e .` also works.
+
+Installed CLI entrypoints:
+
+- `nvdiffrast-mesh-render`
+- `nvdiffrast-mesh-render-all`
+- `nvdiffrast-mesh-render-multi-view`
+- `nvdiffrast-mesh-render-batch`
+
+You can also invoke the main CLI as a module:
+
+```bash
+python -m nvdiffrast_mesh_renderer --help
+```
+
+## Entrypoint Lifecycle
+
+- `nvdiffrast-mesh-render`: single render. One renderer/context is created for the invocation, used for one render, then discarded on exit or CUDA failure.
+- `nvdiffrast-mesh-render-all`: sequential multi-render. One renderer/context is reused across all render modes for the invocation.
+- `nvdiffrast-mesh-render-multi-view`: sequential multi-render. One renderer/context is reused across the whole multi-view run, with chunk-based view preparation and renderer recreation before retry after CUDA OOM.
+- `nvdiffrast-mesh-render-batch`: multi-process multi-GPU scheduling. One worker process runs per GPU, each worker keeps only one active renderer/context at a time, and mesh/material texture caches are cleared between jobs.
+
+CLI entrypoints print concise `Info/Progress/Done` status lines to stdout by default, including totals and ETA where applicable. Each run also writes a `.log` file next to its outputs, and `--print` enables raw stdout echo of the full progress/report text.
+
+## Usage
+
+Basic beauty render:
+
+```bash
+nvdiffrast-mesh-render example_meshes/c7fd79edb639400293683095caafff21_1024.glb \
+    --output outputs/render.png \
+    --resolution 1024
+```
+
+Beauty + wireframe overlay:
+
+```bash
+nvdiffrast-mesh-render example_meshes/c7fd79edb639400293683095caafff21_1024.glb \
+    --output outputs/beauty_wire.png \
+    --resolution 1024 \
+    --render-mode beauty_plus_wireframe \
+    --wireframe-color 0.2,1.0,0.25 \
+    --wireframe-opacity 0.8 \
+    --wireframe-thickness-px 0.5
+```
+
+Depth visualization:
+
+```bash
+nvdiffrast-mesh-render example_meshes/c7fd79edb639400293683095caafff21_1024.glb \
+    --output outputs/depth_linear.png \
+    --resolution 1024 \
+    --render-mode depth_linear \
+    --normalize-depth
+```
+
+Render every supported mode in one shot:
+
+```bash
+nvdiffrast-mesh-render example_meshes/c7fd79edb639400293683095caafff21_1024.glb \
+    --output outputs/all_modes.png \
+    --resolution 512 \
+    --render-all
+```
+
+This writes one image per mode under `outputs/all_modes/`, plus `render_all_report.txt` and `render_all.log`. If you pass `--benchmark-runs` and/or `--benchmark-warmup-runs`, the same report file also includes timing rows.
+Regular `--render-all` runs reuse one prepared scene and, by default, process up to 4 modes per shared geometry pass. Lower `--render-all-batch-size` if you need a smaller memory footprint; benchmark mode disables batching so per-mode timings stay comparable.
+
+Convenience wrapper for the same workflow:
+
+```bash
+nvdiffrast-mesh-render-all example_meshes/c7fd79edb639400293683095caafff21_1024.glb \
+    --output outputs/all_modes \
+    --resolution 512
+```
+
+If `--output` has an extension, `--render-all` uses the stem as a directory. If it has no extension, that path is treated as the output directory directly.
+
+Chunked multi-view render:
+
+```bash
+nvdiffrast-mesh-render-multi-view example_meshes/c7fd79edb639400293683095caafff21_1024.glb \
+    --output outputs/multiview \
+    --resolution 1024 \
+    --render-mode beauty \
+    --azim-start 0 \
+    --azim-end 330 \
+    --azim-step 30 \
+    --elev-start -15 \
+    --elev-end 15 \
+    --elev-step 15 \
+    --multi-view-chunk-size 4
+```
+
+This writes one image per view under `outputs/multiview/`, plus `multiview_report.txt` and `multiview.log`. The multi-view CLI reuses one `SceneRenderer` and one `nvdiffrast` CUDA rasterizer context sequentially for the whole run, stages up to `--multi-view-chunk-size` views per chunk, and recreates the renderer/context before retrying with a smaller chunk size after CUDA OOM. If `--output` has an extension, the stem is used as the output directory. If it has no extension, that path is treated as the output directory directly.
+
+Canonical six-view render:
+
+```bash
+nvdiffrast-mesh-render-multi-view example_meshes/c7fd79edb639400293683095caafff21_1024.glb \
+    --output outputs/canonical_views \
+    --resolution 1024 \
+    --render-mode beauty \
+    --canonical-six-views
+```
+
+This writes `front`, `back`, `left`, `right`, `top`, and `bottom` view images into the output directory. In this mode the renderer first tries one chunk of 6 views, and if that hits CUDA OOM it recreates the renderer/context and retries with chunk sizes 2 and then 1 if needed.
+
+Canonical six-view condition render:
+
+```bash
+nvdiffrast-mesh-render-multi-view example_meshes/c7fd79edb639400293683095caafff21_1024.glb \
+    --output outputs/canonical_mv_conditions \
+    --resolution 1024 \
+    --canonical-mv-conditions
+```
+
+This writes 24 images into the output directory: `normal_ogl` and `position_ogl` for each of 12 canonical views (`front/back/left/right/top/bottom` plus `front2/right2/back2/left2/top2/bottom2`). This mode uses a smaller initial chunk size of 8 views instead of trying all 12 at once.
+
+Canonical render_cond-inspired render:
+
+```bash
+nvdiffrast-mesh-render-multi-view example_meshes/c7fd79edb639400293683095caafff21_1024.glb \
+    --output outputs/canonical_render_cond \
+    --resolution 1024 \
+    --render-mode beauty \
+    --canonical-render-cond
+```
+
+This writes 16 render_cond-style views into the output directory. The preset uses mesh-seeded random offsets, FOV sampling, and view-seeded light randomness inspired by the original `render_cond.py`, rejects views above or below `|elev| > 60`, resamples to keep 16 outputs, and always starts with chunk size 8 before falling back to 4, 2, and 1 on CUDA OOM. Batch mode accepts the same flag and seeds the randomness from each row's `mesh_id`.
+
+Manifest-driven batch render:
+
+```bash
+nvdiffrast-mesh-render-batch \
+    --manifest example_meshes/test_manifest.jsonl \
+    --output-root outputs/batch \
+    --gpus 0 \
+    --view-chunk-sizes 24,8,4,2,1
+```
+
+Batch mode runs one long-lived worker process per GPU. Each worker reuses one active `SceneRenderer` and one `nvdiffrast` CUDA rasterizer context for sequential rendering, clears mesh/material texture caches between jobs, keeps environment-map/background helpers in separate bounded worker-local caches, recreates the renderer/context before retrying after CUDA OOM or other CUDA failures, and appends operational logs to `batch.log`.
+
+Double-sided meshes default to bounded depth peeling with up to 2 layers per winding bucket. Reduce or disable it with `--double-sided-depth-peels 1` if you need the older single-layer front/back behavior.
+
+## Render Modes
+
+Supported `--render-mode` values:
+
+- `beauty`
+- `albedo`
+- `normal_world`
+- `normal_view`
+- `face_normal`
+- `normal_ogl`
+- `depth_ndc`
+- `depth_linear`
+- `depth_ogl`
+- `position_ogl`
+- `confidence_ogl`
+- `mask`
+- `triangle_id`
+- `uv`
+- `roughness`
+- `metallic`
+- `ao`
+- `emissive`
+- `wireframe`
+- `beauty_plus_wireframe`
+
+Notes:
+
+- normal outputs are encoded from `[-1, 1]` to `[0, 1]`
+- `depth_ndc` comes from `rast[..., 2]`
+- `depth_linear` comes from `-view_pos.z`
+- `depth_ogl` remaps `rast[..., 2]` from `[-1, 1]` to OpenGL depth-buffer space `[0, 1]`
+- `normal_ogl`, `position_ogl`, and `confidence_ogl` match the axis-swizzle and dot-product logic
+- `--normalize-depth` is intended for visualization/export, not raw metric depth output
+- `wireframe` uses analytic barycentric coverage, not ad hoc edge drawing and not `dr.antialias()` for interior edges
+
+## Common Flags
+
+Input / output:
+
+- `input`
+- `--output`
+- `--resolution`
+- `--render-all`
+- `--canonical-six-views`
+- `--canonical-mv-conditions`
+- `--canonical-render-cond`
+- `--multi-view-chunk-size`
+- `--print`
+
+Camera:
+
+- `--elev`
+- `--azim`
+- `--elev-start`
+- `--elev-end`
+- `--elev-step`
+- `--azim-start`
+- `--azim-end`
+- `--azim-step`
+- `--camera {perspective,orthographic}`
+- `--fov`
+- `--distance`
+- `--distance-scale`
+
+`--camera orthographic` uses an orthographic projection, ignores `--fov`, and derives framing from camera distance instead.
+
+Environment / background:
+
+- `--env-map`
+- `--env-usage {light,background,both}`
+- `--env-light-intensity`
+- `--env-background-intensity`
+- `--env-diffuse-samples`
+- `--background`
+
+Shading / visualization:
+
+- `--render-mode`
+- `--wireframe-color`
+- `--wireframe-opacity`
+- `--wireframe-thickness-px`
+- `--double-sided-depth-peels`
+- `--normalize-depth`
+
+Quality / visibility:
+
+- `--cull-mode {auto,off,force}`
+- `--no-antialias`
+- `--display`
+
+Large-scale preprocessing:
+
+- `--geometry-preprocess-device {auto,cpu,cuda}`
+- `--geometry-cuda-threshold-faces`
+- `--geometry-cuda-threshold-vertices`
+
+## Project Overview
+
+This is a CUDA + `nvdiffrast` based GLB/GLTF renderer. The current implementation is organized around a shared geometry pass plus a multi-mode render dispatcher, while preserving the earlier projected-winding front/back classification and premultiplied-alpha compositing fixes.
+The installable package is `nvdiffrast_mesh_renderer`, exposed via `nvdiffrast-mesh-render`, `nvdiffrast-mesh-render-all`, `nvdiffrast-mesh-render-multi-view`, `nvdiffrast-mesh-render-batch`, and `python -m nvdiffrast_mesh_renderer`.
+
+## Current Features
+
+- Load `.glb` and `.gltf` assets
+- Handle PBR and diffuse materials
+- Support base color / metallic-roughness / normal / occlusion / emissive textures
+- Support vertex colors
+- Automatic orbit camera framing
+- Directional lights plus environment lighting / environment background
+- Transparent background output
+- Premultiplied alpha throughout internal compositing
+- Projected-winding based front/back classification
+- `auto`, `off`, and `force` cull modes
+- Edge antialiasing on/off
+- Multiple geometry-buffer and material visualization modes
+- Analytic barycentric wireframe rendering
+- `beauty_plus_wireframe` overlay composition
+- Single render, render-all, and multi-view CLI flows
+- Manifest-driven batch rendering with one worker process per GPU
+- Long-lived batch workers that reuse one `SceneRenderer` / CUDA rasterizer context per GPU
+- Per-job texture-cache cleanup and renderer recreation on CUDA OOM before retry
+- Chunked multi-view rendering across azimuth/elevation grids with sequential per-chunk rendering
+- Canonical six-view rendering with `front/back/left/right/top/bottom` presets and `6 -> 2 -> 1` CUDA OOM fallback
+- Faster scene loading by iterating scene graph instances directly instead of `scene.dump(concatenate=False)`
+- Automatic CUDA geometry preprocessing for large meshes to speed up face-normal and tangent generation
+
+## Batch Worker Model
+
+Batch rendering is intentionally conservative about CUDA context ownership:
+
+- one worker process owns one GPU
+- one worker keeps one active `SceneRenderer` and one `nvdiffrast` CUDA rasterizer context across many jobs
+- rendering inside a worker is sequential, not multithreaded, so one CUDA rasterizer context is never shared across concurrent threads
+- worker-local texture caches are cleared between jobs so mesh/material textures do not accumulate indefinitely across a long batch run
+- environment maps use a separate bounded worker-local GPU cache, keyed by file metadata instead of Python object identity
+- if a render attempt hits CUDA OOM, the worker drops the current renderer/context, releases cache state, and recreates the renderer before retrying with the next smaller chunk size
+
+This is the operating model to preserve when extending the batch path.
+
+## CUDA Context And Memory Notes
+
+`nvdiffrast`'s CUDA rasterizer is suitable for a long-lived per-GPU worker, but a few design details matter:
+
+- the internal rasterizer keeps reusable work buffers that grow to the largest workload seen so far; this is expected high-watermark memory, not necessarily a leak
+- those internal buffers belong to the live rasterizer context, so keeping one context alive can keep that peak allocation alive as well
+- one `RasterizeCudaContext` should be treated as single-owner state; do not share it across concurrent threads or unrelated render tasks
+- `torch.cuda.empty_cache()` only releases PyTorch allocator cache; it does not destroy `nvdiffrast` internal allocations that are still owned by a live rasterizer context
+- after CUDA OOM or other low-level CUDA failures, it is safer to recreate the renderer/context than to assume the old context is still healthy
+
+In practice, application-level caches are a more likely source of long-running memory growth than `nvdiffrast` itself. The main risk areas are:
+
+- texture caches that retain per-job GPU textures after the job has finished
+- environment-map GPU textures that should stay separate from mesh/material caches and use explicit eviction
+- persistent references to prepared scenes, meshes, mip stacks, or antialias topology hashes
+- retry paths that keep using a renderer/context after CUDA OOM instead of rebuilding it
+
+When adding new batch features, keep caches job-scoped unless there is a deliberate eviction strategy, prefer recreating worker-local renderer state after CUDA failures, and avoid config-keyed renderer pools that let multiple rasterizer contexts accumulate inside one worker.
+
+## Repository Layout
+
+```text
+nvdiffrast_renderer/
+├── scripts/
+│   └── install_nvdiffrast.sh       # Exact nvdiffrast source install helper
+├── nvdiffrast_mesh_renderer/
+│   ├── config.py                    # CLI parsing and RenderConfig
+│   ├── cli.py                       # Console entrypoints and multi-view orchestration
+│   ├── renderer.py                  # SceneRenderer and render-mode dispatch
+│   ├── scene_builder.py             # Mesh, camera, and light construction
+│   ├── geometry_pass.py             # Geometry pass, front/back split, wireframe topology
+│   ├── beauty.py                    # Multi-mode rendering and beauty shading
+│   ├── compositor.py                # Mesh-layer compositing and overlay composition
+│   ├── environment.py               # Environment maps and background rendering
+│   ├── ibl.py                       # Image-based lighting helpers
+│   ├── textures.py                  # Texture loading, caching, sampling
+│   ├── materials.py                 # Material extraction
+│   ├── geometry_utils.py            # Tangents, normals, bounds helpers
+│   ├── math_utils.py                # Shared math helpers
+│   ├── postprocess.py               # Tone mapping and image output
+│   ├── batch.py                     # Manifest-driven multi-GPU batch CLI
+│   └── types.py                     # Shared dataclass contracts
+├── example_meshes/                  # Sample GLBs used for validation
+├── envmaps/                         # Sample HDR/EXR environment maps
+└── outputs/                         # Render outputs and validation outputs
+```
+
+## Rendering Pipeline
+
+1. `SceneBuilder`
+   - loads GLB/GLTF assets
+   - extracts materials
+   - computes tangents and face normals
+   - builds a bounds-based camera
+   - builds directional lights
+2. `GeometryPassRenderer.render_geometry_pass(...)`
+   - splits triangles into front/back buckets using clip-space projected winding
+   - applies single-sided culling according to `--cull-mode`
+   - rasterizes and interpolates the shared geometry attributes
+   - samples material scalar/color channels needed by downstream modes
+3. `RenderModeRenderer.render_mode(...)`
+   - evaluates `beauty` shading or visualization outputs from the shared geometry buffer
+   - keeps premultiplied-alpha conventions intact
+   - applies analytic barycentric wireframe coverage where requested
+4. `LayerCompositor`
+   - composites mesh layers in depth-sorted order
+   - merges front/back passes for double-sided meshes
+   - composites wireframe over beauty in premultiplied form
+5. `ImagePostprocessor`
+   - unpremultiplies
+   - applies exposure and tone mapping where appropriate
+   - converts selected outputs to display-ready PNG/JPG images
+
+## Geometry Pass Contract
+
+`GeometryPassRenderer.render_geometry_pass(...)` currently produces:
+
+- `rast`
+- `rast_db`
+- `valid`
+- `triangle_id`
+- `uvw`
+- `barycentric`
+- `world_pos`
+- `view_pos`
+- `normal_world`
+- `normal_view`
+- `face_normal_world`
+- `face_normal_view`
+- `uv`
+- `uv_da`
+- `tangent`
+- `vertex_color`
+- `base_rgba`
+- `emissive`
+- `ao`
+- `roughness`
+- `metallic`
+- `clip_pos`
+- `tri`
+- `side`
+
+There is also a dedicated wireframe raster path that expands triangles into face-varying topology and interpolates per-corner barycentrics `(1,0,0)`, `(0,1,0)`, `(0,0,1)`.
+
+## Front/Back Classification
+
+This renderer does not use `dot(normal, view)` as the primary front/back signal. It uses clip-space projected winding.
+
+That means:
+
+- triangles are transformed into clip space
+- signed area is computed in NDC XY
+- the sign of that area determines front vs back
+
+That signal remains authoritative. Normal flipping, single-sided culling, and double-sided merging are downstream consequences of that classification.
+
+## Alpha and Compositing Rules
+
+Internal rendering and compositing use premultiplied alpha.
+
+Current rules:
+
+- shaded outputs are kept internally as `rgb * alpha`
+- edge antialiasing is applied in premultiplied form for the base geometry pass
+- inter-mesh compositing is performed in premultiplied alpha
+- double-sided `BLEND` materials merge front/back in premultiplied alpha
+- wireframe overlays are also composited as premultiplied overlays
+
+Right before saving, the renderer unpremultiplies and converts each mode into a display-oriented export image.
+
+## Wireframe Overlay
+
+Wireframe rendering is implemented as a dedicated pass on expanded face-varying topology.
+
+- per-corner barycentrics are interpolated explicitly
+- edge distance is computed from `min(barycentric)`
+- derivative-aware edge width is used to keep thickness roughly pixel-consistent
+- `dr.antialias()` is not used for interior wireframe edges
+- `beauty_plus_wireframe` composites the wireframe over beauty in premultiplied form
+
+Controls:
+
+- `--wireframe-color r,g,b`
+- `--wireframe-opacity`
+- `--wireframe-thickness-px`
+
+## Requirements
+
+Required:
+
+- Python 3.10+
+- NVIDIA GPU
+- CUDA-enabled PyTorch
+- `nvdiffrast`
+
+Additional Python packages:
+
+- `numpy`
+- `trimesh`
+- `imageio`
+- `Pillow`
+- `opencv-python`
+
+Optional:
+
+- `ffmpeg`, `ffprobe`
+  - preferred path for `.hdr` / `.exr` loading
+  - otherwise the code falls back to `imageio` / OpenCV
+- `glfw`, `PyOpenGL`
+  - needed only if you use `--display`
+
+## Installation Notes
+
+This repository is safest to use in an environment where CUDA, PyTorch, and `nvdiffrast` are already aligned correctly.
+
+At minimum, these two pieces must match:
+
+- a CUDA-enabled PyTorch build
+- a `nvdiffrast` build compatible with that CUDA environment
+
+Exact `nvdiffrast` install used by this repository:
+
+```bash
+git clone -b v0.4.0 https://github.com/NVlabs/nvdiffrast.git /tmp/extensions/nvdiffrast
+python -m pip install /tmp/extensions/nvdiffrast --no-build-isolation
+```
+
+Or use:
+
+```bash
+bash scripts/install_nvdiffrast.sh
+```
+
+A typical install for the auxiliary packages looks like this:
+
+```bash
+pip install numpy trimesh imageio pillow opencv-python
+```
+
+Install `torch`, then install `nvdiffrast` using the commands above, then install this repository with `pip install .` (or `pip install -e .` during development).
+
+## Validation
+
+All-mode inspection render:
+
+```bash
+nvdiffrast-mesh-render example_meshes/c7fd79edb639400293683095caafff21_1024.glb \
+    --output outputs/mode_check.png \
+    --resolution 256 \
+    --render-all
+```
+
+This is a smoke/inspection workflow, not a golden-image comparison.
+
+Benchmark-enabled render-all:
+
+```bash
+nvdiffrast-mesh-render-all example_meshes/c7fd79edb639400293683095caafff21_1024.glb \
+    --output outputs/mode_check \
+    --resolution 256 \
+    --benchmark-runs 5 \
+    --benchmark-warmup-runs 2
+```
+
+Multi-view inspection render:
+
+```bash
+nvdiffrast-mesh-render-multi-view example_meshes/c7fd79edb639400293683095caafff21_1024.glb \
+    --output outputs/mode_grid \
+    --resolution 256 \
+    --render-mode beauty \
+    --azim-start 0 \
+    --azim-end 180 \
+    --azim-step 45 \
+    --multi-view-chunk-size 4
+```
+
+Canonical six-view inspection render:
+
+```bash
+nvdiffrast-mesh-render-multi-view example_meshes/c7fd79edb639400293683095caafff21_1024.glb \
+    --output outputs/mode_grid_canonical \
+    --resolution 256 \
+    --render-mode beauty \
+    --canonical-six-views
+```
+
+## Programmatic Usage
+
+```python
+from argparse import Namespace
+
+from nvdiffrast_mesh_renderer.config import config_from_args
+from nvdiffrast_mesh_renderer.renderer import SceneRenderer
+
+args = Namespace(
+    input="example_meshes/c7fd79edb639400293683095caafff21_1024.glb",
+    output="outputs/from_code.png",
+    resolution=512,
+    elev=0.0,
+    azim=0.0,
+    camera="perspective",
+    fov=45.0,
+    distance=None,
+    distance_scale=1.15,
+    env_map="",
+    env_usage="light",
+    env_light_intensity=0.3,
+    env_background_intensity=1.0,
+    env_diffuse_samples=16,
+    background="transparent",
+    light_intensity=1.1,
+    exposure=1.0,
+    tonemap="reinhard",
+    cull_mode="auto",
+    no_antialias=False,
+    display=False,
+    render_mode="beauty",
+    wireframe_color="0.2,1.0,0.25",
+    wireframe_opacity=1.0,
+    wireframe_thickness_px=0.5,
+    normalize_depth=False,
+    render_all=False,
+    render_all_batch_size=4,
+)
+
+config = config_from_args(args)
+SceneRenderer(config).render_to_file()
+```
+
+## Current Limitations
+
+- CUDA is mandatory.
+- Only square output resolutions are currently supported.
+- `depth_*`, `triangle_id`, and similar outputs are exported as display-oriented images, not raw float buffers.
+- `--render-all` remains a validation/inspection workflow rather than the multi-GPU batch path. Normal runs batch a few modes per shared geometry pass for speed, while benchmark runs still re-render once per mode for timing fidelity.
+- Multi-view rendering currently cannot be combined with `--render-all`.
+- `--display` is not meaningful for multi-view rendering because the view grid is emitted as files.
+- `--canonical-six-views`, `--canonical-mv-conditions`, and `--canonical-render-cond` cannot be combined with explicit multi-view range flags such as `--azim-start` or `--elev-start`.
+- There is no support for animation, skinning, morph targets, or multi-camera scenes.
+- Hidden-line and multi-layer rendering are not implemented yet, though the raster path is structured so `nvdiffrast` DepthPeeler can be introduced later.
+
+## Troubleshooting

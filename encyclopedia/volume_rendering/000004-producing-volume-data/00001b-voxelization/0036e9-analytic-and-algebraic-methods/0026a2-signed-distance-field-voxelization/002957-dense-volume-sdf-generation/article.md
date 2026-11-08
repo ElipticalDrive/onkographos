@@ -3,55 +3,52 @@
 Also called: Dense Grid SDF, SDF Voxelization, meshToDistanceVolume
 
 ## Overview
-Dense Volume SDF Generation computes a scalar field $D(x)$ for every voxel center $x$ in a defined 3D grid, representing the signed Euclidean distance to the input surface [S1, unofficial][S2]. It solves the problem of creating a fully populated 3D array where every voxel contains a distance value, which is ideal for full data access, simulation, or marching cubes [S2]. It differs from its siblings [Signed Distance Field (SDF) Generation from Scanned Surfaces](854-signed-distance-field-sdf-generation-from-scanned-surfaces.md) and [SDF-based Binary Voxelization](2402-sdf-based-binary-voxelization.md) by explicitly storing the continuous distance value for every voxel in the grid rather than just binary occupancy or processed scan data [S2].
+Dense Volume SDF Generation computes a Signed Distance Field (SDF) for a triangle mesh by iterating over every voxel in a defined 3D grid, calculating the Euclidean distance from the voxel center to the mesh surface, and determining the inside/outside status via ray intersection parity or winding numbers [S1, unofficial][S2]. It differs from sparse methods by storing a value for every voxel in the bounding box, providing full data access suitable for simulation, marching cubes extraction, or machine learning inputs [S2]. Unlike [SDF-based Binary Voxelization](2402-sdf-based-binary-voxelization.md), which only stores occupancy, this method retains precise distance metrics [S2].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A triangle mesh defined by a list of vertices $V$ and faces $F$. Vertices are 3D points; faces are indices into $V$.
-*   **Output:** A 3D array (tensor) of signed distances, typically stored in row-major order with dimensions `height`, `width`, `depth` [S1, unofficial].
+*   **Input:** A triangle mesh defined by a list of vertices $V$ and faces $F$. Each face $f \in F$ is a triplet of vertex indices $(v_1, v_2, v_3)$ [S1, unofficial][S2].
+*   **Output:** A 3D array (tensor) of signed floating-point distances, indexed by voxel coordinates $(h, w, d)$ [S1, unofficial].
 
 **Data Structures:**
-*   **Grid Parameters:**
-    *   `voxelSize`: A scalar or vector defining the physical size of a voxel edge.
-    *   `origin`: The 3D coordinate of the grid's minimum corner $(x_{min}, y_{min}, z_{min})$.
-    *   `dimensions`: The integer resolution $(N_x, N_y, N_z)$ of the grid.
-*   **SDF Array:** `Eigen::Tensor<float, 3, Eigen::RowMajor> sdf` with shape `(height, width, depth)` [S1, unofficial].
+*   **Grid:** Defined by an origin $O$, dimensions $D = (H, W, Z)$, and voxel size $s$. The grid is typically stored as a 3D array `sdf[H][W][Z]` [S1, unofficial][S2].
+*   **Mesh:** Vertices are stored as 3D vectors. Faces store indices into the vertex array [S1, unofficial].
+
+**Parameters:**
+*   `voxelSize`: The physical size of a voxel. Often calculated automatically to target a specific voxel count (e.g., $10^7$ voxels) [S2].
+*   `maxDistSq`: The squared maximum distance to compute. Values beyond this are marked as null/empty. A typical value is $(3 \times \text{voxelSize})^2$, covering 3 voxel layers outside the mesh [S2].
+*   `signMode`: The method for determining the sign. `HoleWindingRule` is recommended for robustness against holes and self-intersections [S2].
+*   `nullOutsideMinMax`: Boolean flag. If true, voxels outside the bounding box expanded by `maxDist` are not computed [S2].
 
 **Algorithm Steps:**
 
 1.  **Grid Initialization:**
-    Calculate the voxel size, origin, and dimensions based on the mesh bounding box. A common heuristic sets the voxel size to achieve a target total voxel count (e.g., $10^7$) [S2].
-    $$ \text{voxelSize} = \text{suggestVoxelSize}(\text{mesh}, 10^7) $$
-    $$ (\text{origin}, \text{dimensions}) = \text{calcOriginAndDimensions}(\text{mesh.computeBoundingBox}(), \text{voxelSize}) $$
-    Define the bounds for each voxel index $(w, h, d)$ where $0 \le w < N_x$, $0 \le h < N_y$, $0 \le d < N_z$. The voxel center is calculated as:
-    $$ \text{center} = \text{origin} + (w + 0.5, h + 0.5, d + 0.5) \times \text{voxelSize} $$
-    *Note: If `VoxelizationMode::CORNER` is used, the center is $(w, h, d) \times \text{voxelSize}$ [S1, unofficial].*
+    Calculate the bounding box of the mesh. Determine the voxel size $s$ and grid dimensions $H, W, Z$ such that the grid covers the mesh with a margin [S2].
+    Define the voxel center for indices $(h, w, d)$:
+    $$ C_{h,w,d} = O + (w + 0.5, h + 0.5, d + 0.5) \times s $$
+    (Note: Coordinate mapping depends on implementation; some use corner sampling [S1, unofficial]).
 
-2.  **Distance Evaluation (Parallel Loop):**
-    Iterate over all voxels in parallel. For each voxel index $i$ from $0$ to $N_x \times N_y \times N_z - 1$:
-    1.  Decode indices:
-        $$ d = i \% N_z $$
-        $$ w = (i / N_z) \% N_x $$
-        $$ h = (i / N_z) / N_x $$
-    2.  Initialize the SDF value for this voxel to infinity:
-        $$ \text{sdf}(h, w, d) = \infty $$
-    3.  Iterate over all faces $f$ in the mesh. For each face with vertices $v_1, v_2, v_3$:
-        a. Calculate the closest point on the triangle to the voxel center.
-        b. Compute the Euclidean distance:
-        $$ \text{dist} = \| \text{center} - \text{closest\_point} \| $$
-        c. Update the minimum distance if closer:
-        $$ \text{if } (\text{dist} < \text{sdf}(h, w, d)) \text{ then } \text{sdf}(h, w, d) = \text{dist} $$
+2.  **Distance Calculation (Unsigned):**
+    For each voxel $(h, w, d)$:
+    a. Initialize $d_{min} = \infty$.
+    b. Iterate over all triangles $f$ in the mesh.
+    c. Retrieve vertices $v_1, v_2, v_3$ for triangle $f$.
+    d. Compute the Euclidean distance from $C_{h,w,d}$ to the triangle surface. Let $P_{closest}$ be the closest point on the triangle to $C_{h,w,d}$.
+       $$ d_{tri} = \| C_{h,w,d} - P_{closest} \| $$
+    e. Update minimum distance:
+       $$ d_{min} = \min(d_{min}, d_{tri}) $$
+    f. If $d_{min}^2 > \text{maxDistSq}$, terminate early for this voxel and mark as null [S2].
 
 3.  **Sign Determination:**
     Determine if the voxel center is inside or outside the mesh.
-    *   **Method A (Ray Casting):** Cast a ray from the voxel center to the origin $(0,0,0)$ (or a point far outside). Count intersections with the mesh triangles.
-        $$ \text{num\_intersect} = \sum_{f} \text{intersect}(\text{center}, \text{origin}, v_1, v_2, v_3) $$
-        If `num_intersect` is odd, the point is inside.
-        $$ \text{if } (\text{num\_intersect} \% 2 == 1) \text{ then } \text{sdf}(h, w, d) *= -1 $$
-    *   **Method B (Winding Number):** Use a robust winding number algorithm (e.g., `HoleWindingRule`) which is preferred for meshes with holes or self-intersections [S2]. If a GPU is available, a `FastWindingNumber` object can be used for acceleration [S2].
+    *   **Ray Casting (Parity):** Cast a ray from $C_{h,w,d}$ to a point outside the mesh (e.g., origin or infinity). Count intersections $N_{int}$ with the mesh triangles.
+        $$ \text{sign} = \begin{cases} -1 & \text{if } N_{int} \text{ is odd} \\ 1 & \text{if } N_{int} \text{ is even} \end{cases} $$
+        [S1, unofficial]
+    *   **Winding Number:** For robustness with non-manifold geometry or holes, use a Fast Winding Number (FWN) algorithm, which can be accelerated on GPU [S2].
 
-4.  **Clamping (Optional):**
-    If `nullOutsideMinMax` is true, voxels with distances greater than a threshold (e.g., $3 \times \text{voxelSize}$) may be set to null or infinity to save memory/computation [S2].
+4.  **Storage:**
+    Store the signed distance in the grid:
+    $$ \text{sdf}[h, w, d] = \text{sign} \times d_{min} $$
 
 **Pseudocode:**
 
@@ -59,237 +56,172 @@ Dense Volume SDF Generation computes a scalar field $D(x)$ for every voxel cente
 
 ```python
 import numpy as np
-from typing import Tuple, List
+from math import sqrt
 
-def dense_volume_sdf_generation(
-    vertices: List[List[float]], 
-    faces: List[List[int]], 
-    target_voxel_count: int = 10_000_000
-) -> Tuple[np.ndarray, dict]:
+def dense_volume_sdf(mesh_vertices, mesh_faces, target_voxel_count=1e7):
     """
-    Computes a dense Signed Distance Field for a mesh.
+    Computes a dense Signed Distance Field for a triangle mesh.
     
     Args:
-        vertices: List of [x, y, z] coordinates.
-        faces: List of [i, j, k] vertex indices.
-        target_voxel_count: Target resolution for grid size.
+        mesh_vertices: Nx3 array of vertex coordinates.
+        mesh_faces: Mx3 array of vertex indices.
+        target_voxel_count: Approximate number of voxels to target.
         
     Returns:
-        sdf: 3D numpy array of shape (depth, height, width) containing signed distances.
-        params: Dictionary with origin, dimensions, and voxel_size.
+        sdf_grid: 3D numpy array of signed distances.
+        origin: 3D vector grid origin.
+        voxel_size: Scalar voxel size.
+        dimensions: 3D tuple (H, W, Z).
     """
-    vertices = np.array(vertices)
-    faces = np.array(faces)
     
-    # 1. Grid Initialization
-    # Calculate bounding box
-    min_coords = vertices.min(axis=0)
-    max_coords = vertices.max(axis=0)
+    # 1. Calculate Grid Parameters
+    # Compute bounding box
+    min_coords = np.min(mesh_vertices, axis=0)
+    max_coords = np.max(mesh_vertices, axis=0)
     bbox_size = max_coords - min_coords
     bbox_volume = np.prod(bbox_size)
     
-    # Estimate voxel size to hit target count
-    # Assuming cubic voxels for simplicity in estimation
-    estimated_voxel_size = (bbox_volume / target_voxel_count) ** (1/3)
+    # Estimate voxel size to hit target voxel count
+    # Assuming cubic voxels
+    voxel_size = (bbox_volume / target_voxel_count) ** (1/3)
     
     # Calculate dimensions
-    dimensions = np.ceil(bbox_size / estimated_voxel_size).astype(int)
-    # Ensure at least 1 voxel per dimension
-    dimensions = np.maximum(dimensions, 1)
+    dimensions = np.ceil(bbox_size / voxel_size).astype(int)
+    H, W, Z = dimensions
     
-    # Recalculate exact voxel size based on integer dimensions
-    voxel_size = bbox_size / dimensions
-    
+    # Define origin (using min_coords as start)
     origin = min_coords
     
-    # Initialize SDF array (Row-major: depth, height, width)
-    # Shape: (depth, height, width)
-    sdf = np.full((dimensions[2], dimensions[1], dimensions[0]), np.inf)
+    # Initialize SDF grid with infinity
+    sdf_grid = np.full((H, W, Z), np.inf)
     
-    # Pre-calculate face vertices for speed
-    face_vertices = vertices[faces] # Shape: (num_faces, 3, 3)
+    # Pre-calculate triangle data for faster access
+    # Vertices for each face
+    tri_verts = mesh_vertices[mesh_faces] # Shape: (M, 3, 3)
     
-    # 2. Distance Evaluation
-    # Iterate over all voxels
-    # Note: In practice, this loop is parallelized on CPU/GPU.
-    # Here we show the sequential logic for clarity.
+    # 2. Iterate over Voxels
+    # Note: For performance, this loop is typically parallelized or vectorized.
+    # Here we show the logical structure.
     
-    for d in range(dimensions[2]):
-        for h in range(dimensions[1]):
-            for w in range(dimensions[0]):
-                # Calculate voxel center
-                center = origin + np.array([w, h, d]) * voxel_size + (voxel_size / 2.0)
+    for h in range(H):
+        for w in range(W):
+            for d in range(Z):
                 
-                # Find minimum distance to any triangle
+                # Calculate voxel center
+                # Using corner + 0.5 offset as per standard convention [S1, unofficial]
+                center = origin + np.array([w + 0.5, h + 0.5, d + 0.5]) * voxel_size
+                
+                # Optimization: Check if center is too far from bounding box
+                # If nullOutsideMinMax is true, skip if outside expanded bbox
+                # Expanded bbox max distance is sqrt(maxDistSq)
+                # maxDistSq = (3 * voxel_size)^2
+                max_dist = 3 * voxel_size
+                
+                # Simple bounding box check for early exit
+                if not np.all((center >= min_coords - max_dist) & (center <= max_coords + max_dist)):
+                    sdf_grid[h, w, d] = np.inf
+                    continue
+                
+                # Calculate minimum distance to any triangle
                 min_dist = np.inf
                 
-                # Vectorized distance calculation for all faces
-                # For each face, compute distance from center to triangle
-                # This is a simplified placeholder for the actual triangle-point distance function
-                # which involves projecting the point onto the triangle plane and clamping.
+                # Vectorized distance calculation for all triangles
+                # For each triangle, find closest point to center
+                # This is the most expensive part. 
+                # Pseudocode for single triangle distance:
                 
-                # Pseudocode for triangle distance:
-                # v1, v2, v3 = face_vertices[f]
-                # closest_point = closest_point_on_triangle(center, v1, v2, v3)
-                # dist = np.linalg.norm(center - closest_point)
+                # dist_sq = triangle_point_distance_sq(center, tri_verts)
+                # min_dist = np.sqrt(np.min(dist_sq))
                 
-                # Since we cannot implement full triangle distance in pure python without loops
-                # efficiently, we assume a helper function exists.
-                # In a real implementation, use a library or CUDA kernel.
+                # Since we cannot call external libraries in pure python pseudocode 
+                # without definition, we assume a helper function exists or 
+                # implement the logic inline for clarity.
                 
-                # Placeholder for the core loop over faces
-                for f in range(len(faces)):
-                    v1, v2, v3 = face_vertices[f]
-                    closest_point = _closest_point_on_triangle(center, v1, v2, v3)
-                    dist = np.linalg.norm(center - closest_point)
+                # Inline logic for distance to triangle (simplified for pseudocode structure)
+                # In practice, use a spatial acceleration structure (BVH) to skip empty triangles.
+                # Without BVH, we iterate all faces [S1, unofficial].
+                
+                for i in range(len(tri_verts)):
+                    v1, v2, v3 = tri_verts[i]
+                    dist = point_to_triangle_distance(center, v1, v2, v3)
                     if dist < min_dist:
                         min_dist = dist
                 
-                sdf[d, h, w] = min_dist
-
-    # 3. Sign Determination
-    # Using Ray Casting Parity Test
-    # Ray from center to origin (0,0,0)
-    ray_direction = -center # Vector from center to origin
-    
-    for d in range(dimensions[2]):
-        for h in range(dimensions[1]):
-            for w in range(dimensions[0]):
-                center = origin + np.array([w, h, d]) * voxel_size + (voxel_size / 2.0)
-                ray_direction = -center
+                # Check max distance threshold
+                if min_dist > max_dist:
+                    sdf_grid[h, w, d] = np.inf
+                    continue
                 
-                num_intersect = 0
-                for f in range(len(faces)):
-                    v1, v2, v3 = face_vertices[f]
-                    if _triangle_ray_intersection(center, ray_direction, v1, v2, v3):
-                        num_intersect += 1
+                # 3. Sign Determination
+                # Ray casting from center to origin (or outside)
+                # Count intersections
+                num_intersections = 0
                 
-                if num_intersect % 2 == 1:
-                    sdf[d, h, w] *= -1
+                # Ray direction: towards origin or a known outside point
+                # Using origin (0,0,0) if inside bbox, otherwise use a point far away
+                ray_origin = center
+                ray_target = np.array([0, 0, 0]) # Simplified target
+                
+                # Ensure ray goes outwards
+                if np.all(center == ray_target):
+                    ray_target = center + np.array([1, 1, 1])
+                    
+                ray_dir = ray_target - ray_origin
+                ray_len = np.linalg.norm(ray_dir)
+                ray_dir = ray_dir / ray_len
+                
+                for i in range(len(tri_verts)):
+                    v1, v2, v3 = tri_verts[i]
+                    if ray_triangle_intersection(ray_origin, ray_dir, v1, v2, v3):
+                        num_intersections += 1
+                
+                sign = -1 if (num_intersections % 2 == 1) else 1
+                
+                # 4. Store Result
+                sdf_grid[h, w, d] = sign * min_dist
+                
+    return sdf_grid, origin, voxel_size, dimensions
 
-    params = {
-        "origin": origin,
-        "dimensions": dimensions,
-        "voxel_size": voxel_size
-    }
-    
-    return sdf, params
+def point_to_triangle_distance(point, v1, v2, v3):
+    """
+    Computes Euclidean distance from point to triangle v1-v2-v3.
+    Returns the distance value.
+    """
+    # Vector math operations
+    # This function calculates the closest point on the triangle surface to the point
+    # and returns the norm of the difference.
+    # Implementation details omitted for brevity, but standard geometric primitive.
+    pass
 
-def _closest_point_on_triangle(p, v1, v2, v3):
+def ray_triangle_intersection(ray_origin, ray_dir, v1, v2, v3):
     """
-    Computes the closest point on triangle v1-v2-v3 to point p.
-    Returns the closest point coordinates.
+    Checks if ray intersects triangle.
+    Returns True if intersection occurs at t > 0.
     """
-    # Vector from v1 to v2, v1 to v3, v1 to p
-    edge1 = v2 - v1
-    edge2 = v3 - v1
-    v1p = p - v1
-    
-    # Dot products
-    dot1 = np.dot(v1p, edge1)
-    dot2 = np.dot(v1p, edge2)
-    dot3 = np.dot(edge1, edge2)
-    dot4 = np.dot(edge1, edge1)
-    dot5 = np.dot(edge2, edge2)
-    
-    # Barycentric coordinates
-    denom = dot1 * dot5 - dot2 * dot3
-    if denom == 0:
-        return v1 # Degenerate triangle or parallel
-    
-    u = (dot2 * dot4 - dot1 * dot5) / denom
-    v = (dot1 * dot3 - dot2 * dot4) / denom
-    
-    # Check if point is inside triangle
-    if u >= 0 and v >= 0 and (u + v) <= 1:
-        return v1 + u * edge1 + v * edge2
-    
-    # If outside, find closest point on edges
-    # Edge 1: v1-v2
-    t = np.dot(v1p, edge1) / dot4
-    t = max(0, min(1, t))
-    closest_edge1 = v1 + t * edge1
-    dist1 = np.linalg.norm(p - closest_edge1)
-    
-    # Edge 2: v1-v3
-    t = np.dot(v1p, edge2) / dot5
-    t = max(0, min(1, t))
-    closest_edge2 = v1 + t * edge2
-    dist2 = np.linalg.norm(p - closest_edge2)
-    
-    # Edge 3: v2-v3
-    edge3 = v3 - v2
-    v2p = p - v2
-    dot6 = np.dot(v2p, edge3)
-    dot7 = np.dot(edge3, edge3)
-    t = dot6 / dot7
-    t = max(0, min(1, t))
-    closest_edge3 = v2 + t * edge3
-    dist3 = np.linalg.norm(p - closest_edge3)
-    
-    # Return closest of the three
-    if dist1 <= dist2 and dist1 <= dist3:
-        return closest_edge1
-    elif dist2 <= dist1 and dist2 <= dist3:
-        return closest_edge2
-    else:
-        return closest_edge3
-
-def _triangle_ray_intersection(origin, direction, v1, v2, v3):
-    """
-    Checks if ray (origin, direction) intersects triangle v1-v2-v3.
-    Returns True if intersection occurs at distance >= 0.
-    """
-    # Möller–Trumbore algorithm
-    epsilon = 1e-8
-    edge1 = v2 - v1
-    edge2 = v3 - v1
-    h = np.cross(direction, edge2)
-    a = np.dot(edge1, h)
-    
-    if a > -epsilon and a < epsilon:
-        return False # Ray parallel to triangle
-    
-    f = 1.0 / a
-    s = origin - v1
-    u = f * np.dot(s, h)
-    
-    if u < 0.0 or u > 1.0:
-        return False
-    
-    q = np.cross(s, edge1)
-    v = f * np.dot(direction, q)
-    
-    if v < 0.0 or u + v > 1.0:
-        return False
-    
-    t = f * np.dot(edge2, q)
-    
-    if t > epsilon:
-        return True # Intersection found at positive distance
-    
-    return False
+    # Moller-Trumbore algorithm or similar
+    pass
 ```
 
 ## Subtopics
 
 ### [Cube SDF Grid Construction](4883-cube-sdf-grid-construction.md)
-Constructs a discrete Signed Distance Field (SDF) grid for a cube centered in the grid using analytical distance formulas for interior and exterior voxels. It differs from its sibling [Sphere SDF Grid Construction](4895-sphere-sdf-grid-construction.md) by using box-based min/max operations rather than spherical symmetry and Euclidean distance from the center.
+Constructs a discrete SDF grid for a cube using analytical box-based min/max operations. Choose this for simple primitives where analytical solutions are faster than mesh intersection.
 
 ### [Naive Jumping Farthest Away (JFA)](7621-naive-jumping-farthest-away-jfa.md)
-Naive Jumping Farthest Away (JFA) is a GPU-based algorithm for computing the Signed Distance Field (SDF) and the position of the closest surface point for a dense voxel grid. It solves the problem of efficiently propagating distance information from known surface voxels to empty space using a multi-pass approach where the search radius is halved in each iteration. It differs from its sibling, [Cube SDF Grid Construction](4883-cube-sdf-grid-construction.md), by using a parallel, multi-scale neighborhood search rather than a fixed local stencil, and from its child, [Sequential Jumping Farthest Away (JFA)](7637-sequential-jumping-farthest-away-jfa.md), by executing the propagation loop in parallel on the GPU rather than sequentially on the CPU.
+A GPU-based parallel propagation algorithm that halves the search radius $K$ in each iteration. Choose this for large dense grids where mesh intersection is too slow, assuming the mesh is already voxelized into a binary occupancy grid.
+
+### [General Mesh SDF and Occupancy Voxelization](10658-general-mesh-sdf-and-occupancy-voxelization.md)
+Converts B-rep CAD geometry into a dense grid. Choose this when working with exact CAD data that needs to be tessellated first, or when occupancy is required alongside SDF.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot F)$, where $N$ is the number of voxels and $F$ is the number of triangles in the mesh. This is computationally expensive for high-resolution grids and complex meshes [S1, unofficial].
-*   **Memory Complexity:** $O(N)$, storing one float per voxel [S1, unofficial].
-*   **Performance:** Suitable for small to medium-sized meshes where performance and memory use are not bottlenecks [S2]. Low resolution (e.g., $64^3$) results in poor reconstruction quality; higher resolutions significantly improve results but increase computation time linearly [S1, unofficial].
-*   **Strengths:** Provides exact voxel-by-voxel control; ideal for simulation, remeshing, or exporting to machine learning models [S2].
-*   **Limitations:** Slow for large meshes due to brute-force triangle iteration. Does not use spatial acceleration structures in its naive form [S1, unofficial].
-*   **When to use:** When full data access is required, or when using marching cubes directly on the volume [S2].
-*   **When not to use:** For very large meshes or real-time applications where performance is critical; consider [Naive Jumping Farthest Away (JFA)](7621-naive-jumping-farthest-away-jfa.md) or spatial acceleration techniques instead.
+*   **Time Complexity:** $O(N_{voxels} \times N_{faces})$ for the naive implementation [S1, unofficial]. This is computationally expensive for high-resolution grids and complex meshes. Using spatial acceleration structures (BVH) reduces the average case complexity significantly, but the worst case remains high [S1, unofficial].
+*   **Memory Complexity:** $O(N_{voxels})$ to store the dense grid [S2]. For a $10^7$ voxel grid, this requires ~40MB for float32 data, which is manageable, but scales linearly with resolution.
+*   **Performance:** Suitable for small to medium-sized meshes where performance is not the primary bottleneck [S2]. High resolution (e.g., $64^3$ or higher) is recommended to avoid poor reconstruction quality [S1, unofficial].
+*   **Strengths:** Provides exact voxel-by-voxel distance values; robust sign detection with winding numbers; ideal for downstream applications like marching cubes or simulation [S2].
+*   **Limitations:** Slow for large meshes without acceleration structures; memory intensive for very high resolutions; sensitive to mesh quality (non-manifold geometry requires robust sign detection) [S1, unofficial][S2].
 
 ## Background
-The method is implemented in libraries such as `meshlib` (MRMesh) and is often referred to as `meshToDistanceVolume` [S2]. It is a fundamental technique in computational geometry for converting polygonal meshes into volumetric representations. The approach of iterating over all voxels and all triangles is a direct application of the definition of the signed distance function, ensuring exactness at the cost of performance [S1, unofficial].
+The method originates from the need to convert continuous triangle meshes into discrete volumetric representations for computer graphics and simulation. It is implemented in libraries such as `meshlib` (MRMesh) and various GitHub repositories for mesh voxelization [S1, unofficial][S2]. The use of HDF5 for storage and marching cubes for extraction is a common workflow in modern 3D processing pipelines [S1, unofficial][S2].
 
 ## Sources
 [S1] Mesh Voxelization - GitHub, https://github.com/davidstutz/mesh-voxelization, fetched 2026-10-26 (unofficial)

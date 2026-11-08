@@ -1,0 +1,402 @@
+The F16<->float helpers used by avifGetRGBAPixel()/avifSetRGBAPixel() on avifRGBImage::isFloat data were adapted from libyuv's HalfFloatRow_C(), which converts unsigned integer samples to half floats. Reused as a general float<->half conversion, the bit trick misinterprets the sign bit as part of the exponent:
+
+-1.0h (0xBC00) decodes to +4294967296.0f (sign flip, 2^32 magnitude)
+-0.0h (0x8000) decodes to +131072.0f
++Inf (0x7C00) decodes to the finite 65536.0f
+-Inf (0xFC00) decodes to +2.81475e14f
+NaN (0x7E00) decodes to the finite 98304.0f and avifFloatToF16() silently drops the sign of negative values.
+
+Replace them with correct IEEE 754 binary16 conversions (signed zeros, subnormals, negatives, infinities, NaNs, round-to-nearest-even on the float-to-half direction). All 65536 half precision bit patterns now survive a decode/encode round trip bit exactly, matching NumPy's float16 behavior. Verified exhaustively against NumPy (65536 decode + round-trip cases and ~20k adversarial float encodings: 0 mismatches), covered by new F16Test cases in avifrgbtest.cc, and validated with the full test suite under ASan+UBSan (failure list identical to the unpatched baseline).
+The bulk unorm->F16 conversion in avifRGBImageToF16() is unchanged: it legitimately operates on non-negative integer samples and must stay bit-compatible with libyuv's HalfFloatPlane().
+
+Fix F16 half float conversions for the full IEEE 754 binary16 domain by krishna28238-arch · Pull Request #3395 · AOMediaCodec/libavif · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Fix F16 half float conversions for the full IEEE 754 binary16 domain
+#3395
+New issue
+Have a question about this project? Sign up for a free GitHub account to open an issue and contact its maintainers and the community.
+Sign up for GitHub
+By clicking “Sign up for GitHub”, you agree to our terms of service and
+privacy statement. We’ll occasionally send you account related emails.
+Already on GitHub?
+Sign in
+to your account
+Open
+krishna28238-arch
+wants to merge
+1
+commit into
+AOMediaCodec:main
+base:
+main
+Branches
+Tags
+Loading
+Loading
+from
+krishna28238-arch:fix-f16-half-float-conversion
+Uh oh!
+There was an error while loading. Please reload this page.
+Open
+Fix F16 half float conversions for the full IEEE 754 binary16 domain
+#3395
+Show file tree
+Hide file tree
+Changes from all commits
+Commits
+Show all changes
+1 commit
+Select commit
+4cf8d03
+Fix F16 half float conversions for the full IEEE 754 binary16 domain
+krishna28238-arch Sep 29, 2026
+File filter
+Clear filters
+Conversations
+Failed to load comments. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Jump to
+Jump to file
+Failed to load files. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Diff view
+Diff view
+Fix F16 half float conversions for the full IEEE 754 binary16 domain
+```
+The F16<->float helpers used by avifGetRGBAPixel()/avifSetRGBAPixel() on
+avifRGBImage::isFloat data were adapted from libyuv's HalfFloatRow_C(),
+which converts unsigned integer samples to half floats. Reused as a
+general float<->half conversion, the bit trick misinterprets the sign
+bit as part of the exponent:
+- -1.0h (0xBC00) decodes to +4294967296.0f (sign flip, 2^32 magnitude)
+- -0.0h (0x8000) decodes to +131072.0f
+- +Inf (0x7C00) decodes to the finite 65536.0f
+- -Inf (0xFC00) decodes to +2.81475e14f
+- NaN (0x7E00) decodes to the finite 98304.0f
+and avifFloatToF16() silently drops the sign of negative values.
+
+Replace them with correct IEEE 754 binary16 conversions (signed zeros,
+subnormals, negatives, infinities, NaNs, round-to-nearest-even on the
+float-to-half direction). All 65536 half precision bit patterns now
+survive a decode/encode round trip bit exactly, matching NumPy's
+float16 behavior. Verified exhaustively against NumPy (65536 decode +
+round-trip cases and ~20k adversarial float encodings: 0 mismatches),
+covered by new F16Test cases in avifrgbtest.cc, and validated with the
+full test suite under ASan+UBSan (failure list identical to the
+unpatched baseline).
+
+The bulk unorm->F16 conversion in avifRGBImageToF16() is unchanged:
+it legitimately operates on non-negative integer samples and must stay
+bit-compatible with libyuv's HalfFloatPlane().
+```
+Loading branch information
+Uh oh!
+There was an error while loading. Please reload this page.
+krishna28238-arch
+committed
+Sep 29, 2026
+commit 4cf8d0341c1e359225e6673da3a43033c781baae
+There are no files selected for viewing
+83 changes: 77 additions & 6 deletions
+83
+src/reformat.c
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -4,6 +4,7 @@
+#include "avif/internal.h"
+#include <assert.h>
+#include <math.h>
+#include <stdint.h>
+#include <string.h>
+Expand Down
+Expand Up
+@@ -1839,18 +1840,88 @@ int avifFullToLimitedUV(uint32_t depth, int v)
+return v;
+}
+static inline uint16_t avifFloatToF16(float v)
+// ---------------------------------------------------------------------------
+// IEEE 754 binary16 (half precision) <-> binary32 (float) conversions.
+//
+// The previous implementation reused the bit trick of libyuv's HalfFloatRow_C()
+// (see F16_MULTIPLIER above), which converts *unsigned integer samples* to half
+// floats. Reused as a general purpose conversion on arbitrary half precision
+// pixel data, it silently mishandled every value outside the non-negative
+// normal range: the sign bit landed inside the exponent field (decoding
+// 0xBC00, i.e. -1.0h, as +4294967296.0f, a 2^32 magnitude error), +Infinity
+// (0x7C00) decoded as the finite value 65536.0f, NaN (0x7E00) as 98304.0f,
+// and avifFloatToF16() dropped the sign of negative values entirely. The
+// implementations below convert the full binary16 domain faithfully: signed
+// zeros, subnormals, negatives, infinities and NaNs, with round-to-nearest-even
+// in the float-to-half direction. Every one of the 65536 half precision bit
+// patterns survives a decode/encode round trip bit exactly (covered by
+// F16Test in tests/gtest/avifrgbtest.cc).
+static inline float avifF16ToFloat(uint16_t v)
+{
+const uint32_t sign = (uint32_t)(v & 0x8000u) << 16;
+const uint32_t biasedExp = (v >> 10) & 0x1Fu;
+uint32_t mantissa = (uint32_t)(v & 0x3FFu) << 13;
+uint32_t bits;
+if (biasedExp == 0) {
+if (mantissa == 0) {
+bits = sign; // Signed zero.
+} else {
+// Subnormal half: renormalize into a normal float.
+uint32_t exponent = 113; // 127 - 15 + 1, decremented by the loop.
+do {
+--exponent;
+mantissa <<= 1;
+} while ((mantissa & 0x800000u) == 0);
+bits = sign | (exponent << 23) | (mantissa & 0x7FFFFFu);
+}
+} else if (biasedExp == 0x1Fu) {
+bits = sign | 0x7F800000u | mantissa; // Infinity or NaN.
+} else {
+bits = sign | ((biasedExp - 15 + 127) << 23) | mantissa;
+}
+avifF16 f16;
+f16.f = v * F16_MULTIPLIER;
+return (uint16_t)(f16.u32 >> 13);
+f16.u32 = bits;
+return f16.f;
+}
+static inline float avifF16ToFloat(uint16_t v)
+static inline uint16_t avifFloatToF16(float v)
+{
+avifF16 f16;
+f16.u32 = v << 13;
+return f16.f / F16_MULTIPLIER;
+f16.f = v;
+const uint32_t sign = (f16.u32 >> 16) & 0x8000u;
+const uint32_t abs = f16.u32 & 0x7FFFFFFFu;
+if (abs >= 0x7F800000u) {
+if (abs == 0x7F800000u) {
+return (uint16_t)(sign | 0x7C00u); // Infinity.
+}
+uint32_t payload = (abs >> 13) & 0x3FFu;
+if (payload == 0u) {
+payload = 0x0200u; // Keep it a quiet NaN.
+}
+return (uint16_t)(sign | 0x7C00u | payload); // NaN.
+}
+if (abs > 0x477FF000u) { // abs > 65520.0f: overflow rounds to infinity.
+return (uint16_t)(sign | 0x7C00u);
+}
+if (abs < 0x38800000u) {
+// Subnormal half or zero: round v to the nearest multiple of 2^-24
+// (ties to even). v * 2^24 is exact for any float, and the F16
+// subnormal mantissa is simply the nearest integer to it.
+const float scaled = v * 16777216.0f; // 2^24
+const float magnitude = fabsf(nearbyintf(scaled));
+if (magnitude >= 1024.0f) {
+return (uint16_t)(sign | 0x0400u); // Rounded up to the smallest normal half.
+}
+return (uint16_t)(sign | (uint32_t)magnitude);
+}
+// Normal half: round the significand from 24 to 11 bits, ties to even.
+// A rounding carry propagates into the exponent as needed; the largest
+// value (65520.0f, exactly halfway between 65504 and infinity) rounds to
+// infinity because 65504 has an odd significand.
+const uint32_t rounded = abs + 0x0FFFu + ((abs >> 13) & 1u);
+return (uint16_t)(sign | ((rounded - 0x38000000u) >> 13));
+}
+void avifGetRGBAPixel(const avifRGBImage * src, uint32_t x, uint32_t y, const avifRGBColorSpaceInfo * info, float rgbaPixel[4])
+Expand Down
+148 changes: 148 additions & 0 deletions
+148
+tests/gtest/avifrgbtest.cc
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -2,6 +2,9 @@
+// SPDX-License-Identifier: BSD-2-Clause
+#include <array>
+#include <cmath>
+#include <cstring>
+#include <limits>
+#include <tuple>
+#include "avif/internal.h"
+Expand Down
+Expand Up
+@@ -133,5 +136,150 @@ INSTANTIATE_TEST_SUITE_P(
+AVIF_RGB_FORMAT_BGRA, AVIF_RGB_FORMAT_ABGR),
+/*is_float=*/Values(true)));
+// -----------------------------------------------------------------------------
+// IEEE 754 binary16 (half precision) tests.
+//
+// Regression tests for the avifF16ToFloat()/avifFloatToF16() conversions used
+// by avifGetRGBAPixel()/avifSetRGBAPixel() on avifRGBImage::isFloat images.
+// The previous implementation misinterpreted the sign bit as part of the
+// exponent: -1.0h (0xBC00) decoded as +4294967296.0f, +Inf (0x7C00) as the
+// finite 65536.0f, NaN (0x7E00) as 98304.0f and -0.0h (0x8000) as +131072.0f.
+// Reference binary16 decoder, straight from the IEEE 754 format definition.
+float ReferenceF16ToFloat(uint16_t bits) {
+const float sign = (bits & 0x8000u) ? -1.0f : 1.0f;
+const uint32_t exponent = (bits >> 10) & 0x1Fu;
+const uint32_t mantissa = bits & 0x3FFu;
+if (exponent == 0x1Fu) {
+return (mantissa == 0) ? sign * std::numeric_limits<float>::infinity()
+: std::numeric_limits<float>::quiet_NaN();
+}
+if (exponent == 0) {
+// Subnormal: mantissa * 2^-24.
+return sign * std::ldexp(static_cast<float>(mantissa), -24);
+}
+return sign * std::ldexp(1.0f + static_cast<float>(mantissa) / 1024.0f,
+static_cast<int>(exponent) - 15);
+}
+class F16Test : public testing::Test {
+protected:
+void SetUp() override {
+// Unused yuv image, simply needed to initialize the rgb image.
+yuv_ = testutil::CreateImage(/*width=*/1, /*height=*/1, /*depth=*/10,
+AVIF_PIXEL_FORMAT_YUV444, AVIF_PLANES_ALL);
+rgb_ = std::make_unique<testutil::AvifRgbImage>(yuv_.get(), /*depth=*/16,
+AVIF_RGB_FORMAT_RGBA);
+rgb_->isFloat = true;
+ASSERT_TRUE(avifGetRGBColorSpaceInfo(&*rgb_, &color_space_));
+}
+uint16_t RawChannel(int channel) const {
+uint16_t value;
+std::memcpy(&value, rgb_->pixels + (size_t)channel * sizeof(uint16_t),
+sizeof(value));
+return value;
+}
+void SetRawChannel(int channel, uint16_t bits) {
+std::memcpy(rgb_->pixels + (size_t)channel * sizeof(uint16_t), &bits,
+sizeof(bits));
+}
+ImagePtr yuv_;
+std::unique_ptr<testutil::AvifRgbImage> rgb_;
+avifRGBColorSpaceInfo color_space_ = {};
+};
+TEST_F(F16Test, GetPixelDecodesAllHalfPrecisionPatterns) {
+// Exhaustive sweep: each of the 65536 binary16 bit patterns must decode to
+// its exact IEEE 754 value.
+for (uint32_t bits = 0; bits <= 0xFFFF; ++bits) {
+const uint16_t pattern = static_cast<uint16_t>(bits);
+SetRawChannel(0, pattern);
+std::array<float, 4> rgba;
+avifGetRGBAPixel(&*rgb_, 0, 0, &color_space_, rgba.data());
+const float reference = ReferenceF16ToFloat(pattern);
+if (std::isnan(reference)) {
+EXPECT_TRUE(std::isnan(rgba[0])) << std::hex << pattern;
+} else {
+// Bit exact comparison so that -0.0h and tiny subnormals are covered.
+EXPECT_EQ(std::memcmp(&rgba[0], &reference, sizeof(float)), 0)
+<< std::hex << pattern << " expected " << reference << ", got "
+<< rgba[0];
+}
+}
+}
+TEST_F(F16Test, PreviouslyMisdecodedValues) {
+const struct {
+uint16_t bits;
+float expected;
+} cases[] = {
+{0xBC00, -1.0f}, // Was decoded as +4294967296.0f.
+{0xA400, -0.015625f}, // Was decoded as +67108864.0f.
+{0x7C00, std::numeric_limits<float>::infinity()}, // Was 65536.0f.
+{0xFC00, -std::numeric_limits<float>::infinity()}, // Was +2.8e14f.
+{0x7E00, std::numeric_limits<float>::quiet_NaN()}, // Was 98304.0f.
+{0x8000, -0.0f}, // Was decoded as +131072.0f.
+{0x0001, 5.9604645e-08f}, // Smallest subnormal (already worked).
+};
+for (const auto& value : cases) {
+SetRawChannel(0, value.bits);
+std::array<float, 4> rgba;
+avifGetRGBAPixel(&*rgb_, 0, 0, &color_space_, rgba.data());
+if (std::isnan(value.expected)) {
+EXPECT_TRUE(std::isnan(rgba[0])) << std::hex << value.bits;
+} else {
+EXPECT_EQ(std::memcmp(&rgba[0], &value.expected, sizeof(float)), 0)
+<< std::hex << value.bits << " expected " << value.expected
+<< ", got " << rgba[0];
+}
+}
+}
+TEST_F(F16Test, SetPixelEncodesValuesWithinContractRange) {
+// avifSetRGBAPixel documents channel values in [0, 1] (see its assertions).
+// Every non-negative binary16 pattern whose value is <= 1.0f must encode back
+// to its original bits (round-to-nearest-even, subnormals included).
+for (uint32_t bits = 0; bits <= 0x7FFF; ++bits) {
+const uint16_t pattern = static_cast<uint16_t>(bits);
+const float value = ReferenceF16ToFloat(pattern);
+if (!(value >= 0.0f) || value > 1.0f) {
+continue; // Skip negatives and out-of-contract values.
+}
+const std::array<float, 4> rgba = {value, value, value, value};
+avifSetRGBAPixel(&*rgb_, 0, 0, &color_space_, rgba.data());
+EXPECT_EQ(RawChannel(0), pattern)
+<< std::hex << pattern << " (" << value << ")";
+}
+}
+TEST_F(F16Test, SetPixelHandlesSpecialValues) {
+const struct {
+float value;
+uint16_t expected;
+const char* description;
+} cases[] = {
+{0.0f, 0x0000, "zero"},
+{1.0f, 0x3C00, "one"},
+{0.5f, 0x3800, "half"},
+{0.25f, 0x3400, "quarter"},
+{5.9604645e-08f, 0x0001, "smallest subnormal"},
+{2.9802322e-08f, 0x0000, "half of it: tie, rounds to even (zero)"},
+{4.4703484e-08f, 0x0001, "three quarters of it: rounds to 0x0001"},
+{0.999755859f, 0x3C00, "halfway between 0x3BFF and 0x3C00: even"},
+{0.999267578f, 0x3BFE, "halfway between 0x3BFE and 0x3BFF: even"},
+};
+for (const auto& value : cases) {
+const std::array<float, 4> rgba = {value.value, value.value, value.value,
+value.value};
+avifSetRGBAPixel(&*rgb_, 0, 0, &color_space_, rgba.data());
+EXPECT_EQ(RawChannel(0), value.expected)
+<< value.description << " (" << value.value << ") -> " << std::hex
+<< RawChannel(0);
+}
+}
+} // namespace
+} // namespace avif
+Loading
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+Toggle all file notes
+Toggle all file annotations
+Add this suggestion to a batch that can be applied as a single commit.
+This suggestion is invalid because no changes were made to the code.
+Suggestions cannot be applied while the pull request is closed.
+Suggestions cannot be applied while viewing a subset of changes.
+Only one suggestion per line can be applied in a batch.
+Add this suggestion to a batch that can be applied as a single commit.
+Applying suggestions on deleted lines is not supported.
+You must change the existing code in this line in order to create a valid suggestion.
+Outdated suggestions cannot be applied.
+This suggestion has been applied or marked resolved.
+Suggestions cannot be applied from pending reviews.
+Suggestions cannot be applied on multi-line comments.
+Suggestions cannot be applied while the pull request is queued to merge.
+Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

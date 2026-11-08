@@ -23,7 +23,7 @@ WebGL Volume Rendering performs direct volume ray casting within a web browser u
 The volume data is stored in a flat `Uint8Array` [S1, unofficial]. The transfer function is stored in a 1D texture (`DataTexture`) of size $256 \times 1$ [S1, unofficial]. The camera state is managed by a Three.js `PerspectiveCamera` and `OrbitUnlimitedControls` instance [S1, unofficial].
 
 ### Steps
-1.  **Initialization**: Create a scene, camera, and WebGL renderer [S1, unofficial]. Initialize the `DataTexture` for the transfer function with the provided RGBA mapping [S1, unofficial].
+1.  **Initialization**: Create a Three.js scene, camera, and WebGL renderer [S1, unofficial]. Initialize the `DataTexture` for the transfer function with the provided RGBA mapping [S1, unofficial].
 2.  **Camera Setup**: Configure the camera using `cameraPosition`, `cameraTarget`, `cameraUp`, and `cameraFovDegrees` [S1, unofficial]. Set up orbit controls with `orbitZoomSpeed` [S1, unofficial].
 3.  **Ray Casting Loop**: For each pixel in the viewport:
     a.  Compute the ray origin and direction based on the camera matrix and pixel coordinates [S1, unofficial].
@@ -37,9 +37,9 @@ The volume data is stored in a flat `Uint8Array` [S1, unofficial]. The transfer 
         $$ \alpha_{out} = \alpha_{in} + \alpha_{sample} \cdot (1 - \alpha_{in}) $$
         where $C_{in}$ and $\alpha_{in}$ are the accumulated color and opacity from previous samples [S1, unofficial].
     h.  If `useLighting` is true, compute lighting based on gradients in the volume as surface normals [S1, unofficial].
-4.  **Post-Processing**: Apply the final gamma correction to the accumulated color components $c \in [0, 1]$:
-    $$ c_{final} = c^{(1.0 / \text{finalGamma})} $$
-    [S1, unofficial].
+4.  **Post-Processing**: Apply the final gamma correction to the accumulated color $C_{out}$:
+    $$ C_{final} = C_{out}^{(1.0 / \text{finalGamma})} $$
+    where $C_{out}$ components are normalized to $[0, 1]$ [S1, unofficial].
 5.  **Surface Rendering**: If `useSurface` is true and `surfaceMesh` is provided, render the mesh within the volume [S1, unofficial]. The mesh color is defined by `surfaceColor` and must be fully opaque (no alpha) [S1, unofficial].
 6.  **Mirroring**: If `useVolumeMirrorX` is true, mirror the volume data along the x-axis during sampling [S1, unofficial].
 7.  **Interaction Speedup**: If `interactionSpeedup` > 1, reduce the rendering resolution during camera manipulation to improve performance [S1, unofficial].
@@ -49,74 +49,95 @@ The volume data is stored in a flat `Uint8Array` [S1, unofficial]. The transfer 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def cast_ray(ray_origin, ray_direction, volume_data, volume_size, voxel_size, tf_data, dt_scale, alpha_scale, final_gamma, mirror_x):
-    # Volume bounds (centered at origin)
-    min_x, max_x = -volume_size[0] * voxel_size[0] / 2.0, volume_size[0] * voxel_size[0] / 2.0
-    min_y, max_y = -volume_size[1] * voxel_size[1] / 2.0, volume_size[1] * voxel_size[1] / 2.0
-    min_z, max_z = -volume_size[2] * voxel_size[2] / 2.0, volume_size[2] * voxel_size[2] / 2.0
+# Initialization
+scene = create_threejs_scene()
+camera = PerspectiveCamera(fov=cameraFovDegrees, aspect=width/height)
+camera.position = cameraPosition
+camera.lookAt(cameraTarget)
+camera.up = cameraUp
+renderer = WebGLRenderer()
+renderer.setSize(width, height)
 
-    # Ray-box intersection (slab method)
-    t_min = -float('inf')
-    t_max = float('inf')
+# Transfer Function
+tf_texture = DataTexture(width=256, height=1, format=RGBAFormat)
+tf_texture.data = transferFunctionTexData # Uint8Array of size 256*4
+tf_texture.needsUpdate = True
+
+# Volume Data
+volume_data = volumeDataUint8
+volume_size = volumeSize # [x, y, z]
+voxel_size = voxelSize   # [x, y, z]
+
+# Ray Casting Function
+def cast_ray(ray_origin, ray_direction):
+    # Compute intersection with volume bounding box
+    t_min, t_max = compute_box_intersection(ray_origin, ray_direction, volume_size, voxel_size)
     
-    bounds = [(min_x, max_x), (min_y, max_y), (min_z, max_z)]
-    for i in range(3):
-        d = ray_direction[i]
-        if abs(d) < 1e-8:
-            if ray_origin[i] < bounds[i][0] or ray_origin[i] > bounds[i][1]:
-                return [0.0, 0.0, 0.0]
-        else:
-            t1 = (bounds[i][0] - ray_origin[i]) / d
-            t2 = (bounds[i][1] - ray_origin[i]) / d
-            t_min = max(t_min, min(t1, t2))
-            t_max = min(t_max, max(t1, t2))
-            
-    if t_min > t_max or t_max < 0:
-        return [0.0, 0.0, 0.0]
-
-    step_size = dt_scale
+    accumulated_color = [0.0, 0.0, 0.0]
+    accumulated_alpha = 0.0
+    
+    # Step size scaled by dtScale
+    step_size = compute_step_size(t_max - t_min, volume_size, dtScale)
+    
     t = t_min
-    acc_color = [0.0, 0.0, 0.0]
-    acc_alpha = 0.0
-
     while t < t_max:
         # Sample position
-        p = [ray_origin[i] + ray_direction[i] * t for i in range(3)]
+        sample_pos = ray_origin + ray_direction * t
         
-        # Handle mirroring along X
-        if mirror_x:
-            p[0] = -p[0]
+        # Handle mirroring
+        if useVolumeMirrorX:
+            sample_pos.x = -sample_pos.x
             
-        # Convert to voxel indices
-        ix = int((p[0] - min_x) / voxel_size[0])
-        iy = int((p[1] - min_y) / voxel_size[1])
-        iz = int((p[2] - min_z) / voxel_size[2])
+        # Get scalar value
+        scalar = sample_volume_data(sample_pos, volume_data, volume_size, voxel_size)
         
-        # Boundary check
-        if 0 <= ix < volume_size[0] and 0 <= iy < volume_size[1] and 0 <= iz < volume_size[2]:
-            # Flat index calculation
-            idx = ix + iy * volume_size[0] + iz * volume_size[0] * volume_size[1]
-            scalar = volume_data[idx]
-            
-            # Transfer function lookup
-            tf_idx = max(0, min(255, int(scalar)))
-            r, g, b, a = tf_data[tf_idx * 4], tf_data[tf_idx * 4 + 1], tf_data[tf_idx * 4 + 2], tf_data[tf_idx * 4 + 3]
-            color = [r / 255.0, g / 255.0, b / 255.0]
-            alpha = a / 255.0
-            
-            # Scale opacity
-            alpha *= alpha_scale
-            
-            # Front-to-back compositing
-            weight = alpha * (1.0 - acc_alpha)
-            acc_color = [acc_color[i] + color[i] * weight for i in range(3)]
-            acc_alpha += weight
-            
+        # Get color and alpha from transfer function
+        tf_index = clamp(scalar, 0, 255)
+        color, alpha = sample_transfer_function(tf_index, tf_texture)
+        
+        # Scale alpha
+        alpha = alpha * alphaScale
+        
+        # Front-to-back compositing
+        weight = alpha * (1.0 - accumulated_alpha)
+        accumulated_color = accumulated_color + color * weight
+        accumulated_alpha = accumulated_alpha + weight
+        
         t += step_size
-
+        
     # Final gamma correction
-    final_color = [c ** (1.0 / final_gamma) for c in acc_color]
+    final_color = [c ** (1.0 / finalGamma) for c in accumulated_color]
+    
     return final_color
+
+# Render Loop
+def render():
+    # Interaction speedup
+    if interaction_speedup > 1:
+        render_width = width / interaction_speedup
+        render_height = height / interaction_speedup
+    else:
+        render_width = width
+        render_height = height
+        
+    for y in range(render_height):
+        for x in range(render_width):
+            # Compute ray for pixel (x, y)
+            ray_origin, ray_direction = compute_ray_from_pixel(x, y, camera, width, height)
+            color = cast_ray(ray_origin, ray_direction)
+            set_pixel_color(x, y, color)
+            
+    # Render surface mesh if enabled
+    if useSurface and surfaceMesh:
+        render_mesh(surfaceMesh, surfaceColor)
+        
+    renderer.render(scene, camera)
+    
+    # Callbacks
+    if onWebGLRender:
+        onWebGLRender()
+    if onRenderedImage:
+        onRenderedImage(get_pixel_data())
 ```
 
 ### Parameters
@@ -147,7 +168,7 @@ def cast_ray(ray_origin, ray_direction, volume_data, volume_size, voxel_size, tf
 *   **Strengths**: Runs in the browser, no plugin required, interactive camera controls [S1, unofficial].
 *   **Limitations**: Limited by WebGL capabilities and browser security restrictions (e.g., cross-origin isolation) [S1, unofficial].
 *   **When to Use**: Client-side visualization of scalar volumes in web applications [S1, unofficial].
-*   **When Not to Use**: When the browser environment cannot be configured for cross-origin isolation, which causes `SharedArrayBuffer` errors [S1, unofficial].
+*   **When Not to Use**: When high-performance rendering is required and server-side rendering is an option, or when the browser environment cannot be configured for cross-origin isolation [S1, unofficial].
 
 ## Background
 WebGL Volume Rendering is implemented in the `@janelia/web-vol-viewer` package by JaneliaSciComp [S1, unofficial]. It provides a reusable component for integrating volume rendering into web applications, including React functional components [S1, unofficial]. The package includes a basic UI for controlling rendering parameters and supports keyboard shortcuts for toggling surface visibility, lighting, and mirroring [S1, unofficial].

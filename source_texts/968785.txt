@@ -1,1 +1,247 @@
-One of the first things that many people get wrong with MIS of direct lighting is that you have to always consider the same light source for both light sampling and BSDF sampling. For example, if you sampled Light $L_i$ during light sampling...
+rendering - Multiple Importance Sampling in Path tracer produces Dark Images - Computer Graphics Stack Exchange
+Multiple Importance Sampling in Path tracer produces Dark Images
+Ask Question
+Asked
+7 years, 10 months ago
+Modified
+7 years, 8 months ago
+Viewed
+4k times
+Report this ad
+This question shows research effort; it is useful and clear
+6
+This question does not show any research effort; it is unclear or not useful
+Save this question.
+Show activity on this post.
+So I recently implemented Multiple Importance Sampling in my path tracer which was based on next event estimation.
+The problem is without MIS I get images like,
+This is obtained by setting
+light_sample *= 1/light_pdf; // Note no mis_weight
+and just returning this sample alone. No BRDF sampling.
+Where as with MIS as defined above I get darker images like,
+The reason is surely the mis_weight factor. From what I gathered over the internet my MIS code is ok but theoretically it doesn't seem right. For example suppose we performed Light Sampling first and obtained a mis_weight. After that when we tried BRDF sampling, the ray didn't intersect any light source resulting in light_pdf = 0. We neglected this estimate. Since we neglected this estimate isn't it wrong to weight our light sample by mis_weight when we didn't even use multiple estimators, plus how is the sum of weights equal to 1 when we didnt even estimate anything using the BRDF pdf?
+Imo, mis_weight factor in light_sample should only be used when BRDF sampling also results in a light ray that intersects the light source.
+Can anybody explain if these results are ok or there is something wrong with the code?
+EDIT:- There is another case which is a little confusing. I am currently using a heuristic (basically power/distance) to choose 1 light out of multiple lights. What if Light sampling and BRDF sampling choose different light sources. Is MIS still valid then? Since the PDF would change resulting the weights not being able to sum to 1 anymore
+EDIT2:- So Stefan pointed out a mistake here, that I was clamping radiance. And this solved that issue and changed the results I'm getting for MIS. I have double checked PBRT's implementation and it is similar to mine. I'm still getting darker images using MIS however now I'm getting more fireflies and I think I read that MIS reduces fireflies? Updated the images. It seems fireflies are less in MIS however, the reflection seems harder to converge.
+Note the reflection is harder to converge. Both images are 1000 spp. Top is without MIS.
+I'm removing the snippet and adding a link to github for the whole kernel. The core functions are evaluateDirectLighting, shading, sampleLights. Link to code is "here"
+--Found a mistake. I was using the direct lighting equation when calculating the brdf sample. (multiplying by cos(θ′)cos⁡(θ′) and dividing by r2r2). Removed it since we initially sampled through BSDF which is integral over solid angle not area. The image got a little brighter. Still don't know if MIS is working as intended. See answer.
+EDIT3:- Added a release as well. So if anybody wants, they can try changing the code in "*.cl" file and run the program to see the results. (You must have an OpenCL 1.1 supported GPU or CPU)
+EDIT4:- Here's an overview of what I'm doing now.
+First I choose a single light source out of multiple using simple heuristic scheme like the distance, intensity, area and the cosine falloff angles. I appropriately set the weights for the light like this
+light_pdf=weight/arealight_pdf=weight/area
+where weight is in range 0-1.
+Next I trace the ray to see if light source is visible. If it is I calculate the light_samplelight_sample using the direct lighting equation (integral over Area).
+Then I calculate the BRDF PDF for this given ray. However I use Lafortune's algorithm for it. If a random number falls under the specular color I sample through the modfied Phong PDF else through Cosine.
+The weights are computed using power heuristic,
+weight=light_pdf2/(light_pdf2+brdf_pdf2)weight=light_pdf2/(light_pdf2+brdf_pdf2)
+The MIS estimator is then calculated as
+light_sample=light_sample∗weight/light_pdflight_sample=light_sample∗weight/light_pdf
+After that I come to BRDF sampling. I again sample through either Phong/Cosine based on what I did earlier during light sample calculation. If the sampled ray doesn't hit any light source or not the same one. I set the brdf_samplebrdf_sample to zero. If it hits, I set the light_pdflight_pdf to same value as before. Calculate the weights like mentioned above and calculate brdf sample using the original equation (integral over solid angle).
+EDIT5:- After lightxbulb suggestions, I think the problem has resolved.
+Note the images might look a whole lot different but that's cause I implemented Tonemapping + Gamma Correction in the meantime :)
+With MIS 700spp
+Without MIS 700spp
+rendering
+pathtracing
+monte-carlo
+importance-sampling
+Share
+Short permalink to this question
+Improve this question
+Follow
+Follow this question to receive notifications
+edited Feb 24, 2019 at 19:47
+asked Jan 4, 2019 at 2:20
+gallickgunner
+2,56811 gold badge1616 silver badges3737 bronze badges
+13
+You shouldn't include the cosine foreshortening term in your brdf_pdf.
+Hubble
+–
+Hubble
+2019-01-07 06:26:54 +00:00
+Commented
+Jan 7, 2019 at 6:26
+Im using cosine weighted hemispherical sampling so the BRDF PDF is supposed to be cos(theta)/pi
+gallickgunner
+–
+gallickgunner
+2019-01-07 09:57:05 +00:00
+Commented
+Jan 7, 2019 at 9:57
+May be a coincidence but are your diffuse surfaces exactly PI times darker ?
+PaulHK
+–
+PaulHK
+2019-01-11 07:38:52 +00:00
+Commented
+Jan 11, 2019 at 7:38
+@PaulHK - What would that imply? I don't think it's actually PI times darker, its just mis_weight times darker/brighter. Because as I said as soon as i remove mis_wieght and just divide by light_pdf I get the brighter image.
+gallickgunner
+–
+gallickgunner
+2019-01-11 10:33:19 +00:00
+Commented
+Jan 11, 2019 at 10:33
+A shot in the dark really, I have seen other question on here were the solution was surprisingly that.
+PaulHK
+–
+PaulHK
+2019-01-14 02:07:38 +00:00
+Commented
+Jan 14, 2019 at 2:07
+|
+Show 8 more comments
+2 Answers 2
+Sorted by:
+Reset to default
+Highest score (default)
+Date modified (newest first)
+Date created (oldest first)
+This answer is useful
+4
+This answer is not useful
+Save this answer.
+Loading when this answer was accepted…
+Show activity on this post.
+Throughout my answer I'll sometimes refer to some results in https://sites.fas.harvard.edu/~cs278/papers/veach.pdf by using [MIS,section_number].
+You can skip the following derivation if you don't care about the mathematical explanation of why using MIS to combine estimators is valid.
+I'll have to start with what the purpose of MIS is. The general idea is that you want to estimate some integral I=∫Ωf(x)dμ(x)I=∫Ωf(x)dμ(x) through Monte Carlo, and you have various sampling pdfs (in our case a pdf for sampling points on the light, and a pdf for sampling directions from the brdf). Additionally you want to sample using more than one technique and then combine the contributions optimally (in some sense). For simplicity I will restrict myself to the case where you have only two pdfs: pL(x),pB(x)pL(x),pB(x) with respect to the same measure μ(x)μ(x).
+Assume that you also have the weighting functions w1(x),w2(x):Ω→[0,1],w1(x)+w2(x)=1w1(x),w2(x):Ω→[0,1],w1(x)+w2(x)=1 and also nn independently and identically distributed (i.i.d.) samples xpL,i:i=1,...,nxpL,i:i=1,...,n according to pLpL, and mm i.i.d. samples xpB,j:j=1,...,mxpB,j:j=1,...,m according to pBpB, we can use Monte Carlo with MIS to estimate the integral II:
+I=∫Ωf(x)dμ(x)=∫Ωf(x)(w1(x)+w2(x))dμ(x)=∫Ωw1(x)f(x)pL(x)pL(x)dμ(x)+∫Ωw2(x)f(x)pB(x)pB(x)dμ(x)=E[w1(XpL)f(XpL)pL(XpL)]+E[w2(XpB)f(XpB)pB(XpB)]=1n∑i=1nE[w1(XpL,i)f(XpL,i)pL(XpL,i)]+1m∑j=1mE[w2(XpB,j)f(XpB,j)pB(XpB,j)]=E[1n∑i=1nw1(XpL,i)f(XpL,i)pL(XpL,i)]+E[1m∑j=1mw2(XpB,j)f(XpB,j)pB(XpB,j)]≈1n∑i=1nw1(xpL,i)f(xpL,i)pL(xpL,i)+1m∑j=1mw2(xpB,j)f(xpB,j)pB(xpB,j)I=∫Ωf(x)dμ(x)=∫Ωf(x)(w1(x)+w2(x))dμ(x)=∫Ωw1(x)f(x)pL(x)pL(x)dμ(x)+∫Ωw2(x)f(x)pB(x)pB(x)dμ(x)=E[w1(XpL)f(XpL)pL(XpL)]+E[w2(XpB)f(XpB)pB(XpB)]=1n∑i=1nE[w1(XpL,i)f(XpL,i)pL(XpL,i)]+1m∑j=1mE[w2(XpB,j)f(XpB,j)pB(XpB,j)]=E[1n∑i=1nw1(XpL,i)f(XpL,i)pL(XpL,i)]+E[1m∑j=1mw2(XpB,j)f(XpB,j)pB(XpB,j)]≈1n∑i=1nw1(xpL,i)f(xpL,i)pL(xpL,i)+1m∑j=1mw2(xpB,j)f(xpB,j)pB(xpB,j)
+Where the second equality holds because w1(x)+w2(x)=1w1(x)+w2(x)=1, the fourth follows from the definition of expected value, the fifth holds since XpL,iXpL,i are independently and identically distributed (i.i.d.) according to pLpL and similarly XpB,iXpB,i are i.i.d. according to pBpB. The sixth holds because of the properties of the expectation (which follows from the fact that integration is a linear operator). The last approximate equality follows from the strong law of large numbers (the average of the samples converges almost surely to the expected value with the number of samples going to infinity).
+Having this result the first thing to note is that both pdfs are defined with respect to the same measure μ(x)μ(x). However I believe that in your code and overview you pdf for sampling the light pLpL is defined with respect to the area measure, whereas the pdf for sampling the brdf pBpB is defined with respect to the solid angle measure. The relationship between those being dσ(x→y)=cosθy||x−y||2dA(y)dσ(x→y)=cos⁡θy||x−y||2dA(y), where x∈R3x∈R3 is the current point for which you are computing the illumination (that is your intersection point), and y∈R3y∈R3 is a point on the surface of some light source. Additionally (x→y)=y−x||y−x||(x→y)=y−x||y−x|| is simply the unit direction vector from xx to yy, cosθy=ny⋅(y→x)cos⁡θy=ny⋅(y→x) is the cosine of the angle between the normal nyny (also unit length) of the light surface at yy and −(x→y)−(x→y). More specifically what you have produced as light pdf is really the probability of picking the light weights[i]/sumweights[i]/sum multiplied by the probability of picking uniformly a point on the light source that you have chosen 1/area1/area. The solid angle to area (or vice versa) conversion seems to be missing in your code and your overview, that is your pdf is with respect to the area measure, and you combine it with a pdf (the brdf's) that is with respect to the solid angle measure, which is clearly wrong as you can see from my derivation above. To get the brdf pdf with respect to the area measure and not the solid angle measure you can use: pω(ω)dσ(ω)=pA(y)dA(y)pω(ω)dσ(ω)=pA(y)dA(y) then using the relationship between the measures pA(y)=pω(ω)dσ(ω)/dA(y)=pω(ω)cosθy||x−y||2pA(y)=pω(ω)dσ(ω)/dA(y)=pω(ω)cos⁡θy||x−y||2. You can refer to [MIS, 2.3] equation (9). For a formal derivation of the relationship between the two measures you can refer to http://www.dgp.toronto.edu/~lessig/dissertation/files/area_formulation.pdf , another possible derivation of the same fact can be done through the divergence theorem.
+Now as far as the practical part goes - you need to know when to apply the mis weighting. There are a few cases which occur. Initially for the very first ray, you should not use MIS since you shouldn't sample any light directly. Additionally if the last bounce was fully deterministic (ideal reflection/refraction) then you also should not use MIS, since sampling the light is useless in that case. Finally if you hit a light through sampling the bsdf, you should use MIS to add this contribution, and convert the bsdf pdf wrt the area measure, and then combine it with the probability of sampling this point on this light by using the light pdf and use the area formulation estimator of the rendering equation. When you sample a light, you should also use MIS, once again computing the area formulation estimator. Finally if you have point lights, those can be sampled only through NEE, so you should not use MIS.
+Note that there may be more mistakes that you have. Also I didn't understand anything of your explanation past "After that I come to BRDF sampling.".
+Share
+Short permalink to this answer
+Improve this answer
+Follow
+Follow this answer to receive notifications
+answered Feb 24, 2019 at 17:59
+lightxbulb
+2,81611 gold badge1010 silver badges1919 bronze badges
+10
+Thanks for the detailed write-up. So in short (1) I need to compute both light and brdf samples using integral over area not solid angle. And (2) I also need to compute the BRDF PDF w.r.t to the area. I was actually doing (1) but changed it to integral over solid angle and noticed images getting brighter. Well anyways, will report back shortly.
+gallickgunner
+–
+gallickgunner
+2019-02-24 18:33:40 +00:00
+Commented
+Feb 24, 2019 at 18:33
+You can decide on one of the two formulations: either area or solid angle. That means that all of your pdfs (even outside of the weights) should match this formulation, as well the rendering equation formulation that you use and consequently the estimator that you will compute. The good thing is that nothing except for the pdfs in your weights needs to change. Since I think that most of your stuff is already in solid angle formulation (your brdf pdf and the estimators), then just convert the light pdf wrt solid angle (mult by r2/cosθyr2/cos⁡θy).
+lightxbulb
+–
+lightxbulb
+2019-02-24 18:47:44 +00:00
+Commented
+Feb 24, 2019 at 18:47
+Hey thanks for the answer. I think most of the problems have been resolved. Check the update images. The fireflies seem no less though or it's just that there are too many of them to make a difference. I'll try with different scene parameters. I also don't get what you said about the first ray should not use MIS. I think you meant for naive path tracing. I'm using NEE.
+gallickgunner
+–
+gallickgunner
+2019-02-24 19:43:53 +00:00
+Commented
+Feb 24, 2019 at 19:43
+The first ray (emanating from the camera) should not use NEE, since you will hit anything visible either way. The fact that the fireflies do not even diminish is strange (it's not impossible though), so I still have my doubts.
+lightxbulb
+–
+lightxbulb
+2019-02-24 20:02:04 +00:00
+Commented
+Feb 24, 2019 at 20:02
+About fireflies diminishing, I think the real reason for fireflies in my scene is because the reflective sphere shows an image of bright light source. This is very small as compared to the actual size of the light sources. Hence when the rays hitting the walls bounce, only a very few of them end up striking the light source image on the reflective sphere giving an incredibly high color in some samples. This just sounds like I am double dipping lights (1 from NEE, 2nd from reflective sphere) Sounds wrong but never seen such a case where people ignore the reflection of light in GI.
+gallickgunner
+–
+gallickgunner
+2019-02-24 21:07:54 +00:00
+Commented
+Feb 24, 2019 at 21:07
+|
+Show 5 more comments
+This answer is useful
+2
+This answer is not useful
+Save this answer.
+Loading when this answer was accepted…
+Show activity on this post.
+One of the first things that many people get wrong with MIS of direct lighting is that you have to always consider the same light source for both light sampling and BSDF sampling. For example, if you sampled Light LiLi during light sampling and the ray spawned from BSDF sampling hit LjLj, you cannot mix them together since the probabilities cannot be used together for weights.
+Share
+Short permalink to this answer
+Improve this answer
+Follow
+Follow this answer to receive notifications
+answered Jan 8, 2019 at 14:46
+sriravic
+13633 bronze badges
+1
+That answers my point mentioned in the edit portion. The main problem still remains though.
+gallickgunner
+–
+gallickgunner
+2019-01-08 16:08:54 +00:00
+Commented
+Jan 8, 2019 at 16:08
+Add a comment
+|
+Start asking to get answers
+Find the answer to your question by asking.
+Ask question
+Explore related questions
+rendering
+pathtracing
+monte-carlo
+importance-sampling
+See similar questions with these tags.
+The Overflow Blog
+Welcome to life in the chip age
+Linked
+2
+Naive Path tracer produces much darker images than Explicit light sampling
+1
+Path tracing - Better images without Gamma correction?
+Related
+6
+Multiple Importance Sampling with more than one light
+5
+Efficiently sampling specific surfaces using MIS in path tracing
+2
+Naive Path tracer produces much darker images than Explicit light sampling
+1
+BDPT - How to handle deterministic ray PDF?
+1
+Integrating BRDF using Importance Sampling
+2
+Cosine weighted hemisphere sampling is a little bit darker and arguably noisier than reference
+1
+Multiple Importance Sampling BSDF + Light - weights confusion with the number of emissive triangles
+Hot Network Questions
+Meaning of the line "I'm walking to John O'Groats for some spastics"?
+Stop furigana (ruby) from pushing down titles (with luatexja-ruby)
+Get user input and approximate it to a Fibonacci number
+Was there ever a name for "finger without name"?
+What is the shortest portmanteau? Is there one shorter than "bit"?
+Is it possible add separate wired components to a pcb?
+2001 space odyssey - where are Discovery's fuel tanks?
+Geometry Puzzle of the Week: What is the angle?
+Does Arm Weight Technique Apply to the Left Hand Too?
+Derivation of Population/Rate Equation for a Two-Level System
+Should a staccato quaver note and a staccato crotchet note be of different duration?
+How does this bound on logarithmic height imply effective Mordell in the sense of a bound on the number of rational points?
+Defective vs non-diagonalizable matrices
+Is there a way, using Pandoc, to set the format of \today (Markdown to PDF)?
+What is the melting point of "nuclear pasta"?
+Was Microsoft Bob really in such aggressive competition with Packard Bell Navigator as is rumoured?
+Maximum swing BJT amplifier, theorical vs simulation
+Failed to load current time zone after updating (UTC-07:00) Pacific Time (British Columbia)
+How to map out possible subfields in a discipline?
+Numbers 3 and small Israel
+Amos 3:12(c) "With the Corner of a Couch": Exegetical Divergence and Textual Cruces in Amos 3:12(c)
+Shor's algorithm and the superposition of eigenvectors -- why *those* eigenvectors?
+Unix cp -u unnecessarily copies unchanged files
+The Im-possible in Derrida
+more hot questions
+Question feed
+Report this ad

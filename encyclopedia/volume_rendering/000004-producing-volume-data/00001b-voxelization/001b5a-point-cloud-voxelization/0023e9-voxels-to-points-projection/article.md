@@ -1,0 +1,103 @@
+# Voxels to Points Projection
+
+Also called: voxel value lifting
+
+## Overview
+Voxels to Points Projection maps features stored in a dense voxel grid back to the original points in a point cloud using pre-computed segment IDs or point-to-voxel mappings [S1, S2, unofficial]. It solves the problem of recovering per-point features after they have been aggregated into voxels, enabling downstream tasks like point-wise classification or regression [S1, S2, unofficial]. Unlike [Hard Voxelization](5345-hard-voxelization.md) which aggregates points into voxels, this method reverses the flow, projecting voxel data back to points [S1, S2, unofficial]. It differs from [Point Cloud Cropping and Downsampling](7057-point-cloud-cropping-and-downsampling.md) by preserving the full feature dimensionality and spatial correspondence rather than reducing point count [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:**
+  - `voxels`: A tensor of shape $[X, Y, Z, F]$ containing voxel features, where $X, Y, Z$ are grid dimensions and $F$ is the feature dimension [S1, unofficial]. Data type is typically `float32` [S1, unofficial].
+  - `segment_ids` (or `point_to_voxel`): A 1D integer tensor of length $N$ (number of points). Each element maps a point index to a specific voxel index in the flattened grid [S1, S2, unofficial]. Data type is `int32` or `int64` [S1, S2, unofficial].
+- **Outputs:**
+  - `point_features`: A tensor of shape $[N, F]$ where each row contains the features from the voxel associated with the corresponding point [S1, unofficial].
+
+**Data Structures:**
+- The voxel grid is treated as a dense 4D tensor. For indexing, it is conceptually flattened to 2D shape $(-1, F)$, where the first dimension is $X \times Y \times Z$ [S1, unofficial].
+- The mapping tensor stores integer indices into this flattened voxel array [S1, S2, unofficial].
+
+**Steps:**
+1. **Flatten Voxel Grid:** Reshape the input voxel tensor from $[X, Y, Z, F]$ to $[X \cdot Y \cdot Z, F]$ [S1, unofficial]. This linearizes the spatial dimensions while preserving the feature dimension [S1, unofficial].
+2. **Gather Features:** Use the `segment_ids` (or `point_to_voxel`) tensor to gather features from the flattened voxel grid. For each point $i$, the feature vector is retrieved from the voxel index specified by `segment_ids[i]` [S1, S2, unofficial].
+3. **Handle Invalid Mappings:** If the mapping contains a sentinel value (typically $-1$) indicating that a point has no valid voxel association (e.g., out-of-bounds coordinates), assign a default fill value (such as an ignore label or zero vector) to that point's output features [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxels_to_points(voxels, segment_ids):
+    """
+    Projects features from a dense voxel grid back to points.
+    
+    Args:
+        voxels: tf.float32 tensor of shape [X, Y, Z, F].
+        segment_ids: tf.int32 tensor of shape [N], mapping each point to a voxel index.
+        
+    Returns:
+        point_features: tf.float32 tensor of shape [N, F].
+    """
+    # Step 1: Flatten the spatial dimensions
+    # Shape becomes [X*Y*Z, F]
+    flattened_voxels = tf.reshape(voxels, shape=(-1, voxels.shape[-1]))
+    
+    # Step 2: Gather features using segment IDs
+    # This retrieves the feature vector for each point's associated voxel
+    point_features = tf.gather(flattened_voxels, segment_ids)
+    
+    return point_features
+
+def lift_voxel_values(encoded_predictions, point_to_voxel_mapping, fill_value=255):
+    """
+    Variant: Lifts voxel predictions to points, handling invalid mappings.
+    
+    Args:
+        encoded_predictions: 1D array of voxel values (e.g., class predictions).
+        point_to_voxel_mapping: 1D array of integers mapping points to voxel indices.
+        fill_value: Value to assign for invalid mappings (default -1).
+        
+    Returns:
+        point_predictions: 1D array of predictions for each point.
+    """
+    # Initialize output with fill value
+    point_predictions = np.full_like(point_to_voxel_mapping, fill_value, dtype=encoded_predictions.dtype)
+    
+    # Identify valid mappings (non-negative indices)
+    valid_mask = point_to_voxel_mapping >= 0
+    
+    # Gather valid predictions
+    valid_indices = point_to_voxel_mapping[valid_mask]
+    point_predictions[valid_mask] = encoded_predictions[valid_indices]
+    
+    return point_predictions
+```
+
+**Parameters:**
+- `voxels`: Shape $[X, Y, Z, F]$. Typical values for $X, Y, Z$ depend on the scene scale and voxel size [S1, unofficial].
+- `segment_ids`: Length $N$. Values must be in range $[0, X \cdot Y \cdot Z - 1]$ or $-1$ [S1, S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Invalid Indices:** Points with coordinates outside the voxel grid bounds receive a mapping of $-1$ [S2, unofficial]. Failing to handle this leads to out-of-bounds access or incorrect data retrieval [S2, unofficial].
+- **Precision:** Coordinates are converted to voxel indices using floor division by voxel size. Negative coordinates are handled by floor division without origin offset or boundary epsilon [S2, unofficial].
+- **Data Types:** Coordinates and features should be normalized to `float64` for internal processing, while mappings and IDs use `int64` to prevent overflow [S2, unofficial].
+
+## Subtopics
+
+### Voxel Value Lifting
+A variant that specifically handles the projection of scalar or categorical voxel values (e.g., class predictions) back to points [S2, unofficial]. It differs from the general feature projection by explicitly managing invalid mappings ($-1$) by assigning a designated fill value (e.g., ignore label) rather than just gathering features [S2, unofficial]. Choose this when projecting classification outputs or when the voxel grid contains sparse or incomplete coverage [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ for gathering features, where $N$ is the number of points, assuming constant-time array indexing [S1, S2, unofficial].
+- **Memory Complexity:** $O(X \cdot Y \cdot Z \cdot F)$ for storing the voxel grid and $O(N)$ for the output point features [S1, S2, unofficial].
+- **Performance:** Efficient on GPUs due to tensor operations like `reshape` and `gather` [S1, unofficial].
+- **Strengths:** Simple implementation, preserves spatial correspondence, handles batched data well [S1, S2, unofficial].
+- **Limitations:** Requires dense voxel grid storage, which can be memory-intensive for large scenes [S1, unofficial]. Invalid mappings must be explicitly handled [S2, unofficial].
+- **When to Use:** When point-wise features are needed after voxel-based processing [S1, S2, unofficial].
+- **When Not to Use:** When memory is constrained and sparse voxel structures are preferred [S1, unofficial].
+
+## Background
+The method originates from TensorFlow-based 3D point cloud processing libraries, specifically `tf3d` and `pointcloud-core` [S1, S2, unofficial]. It is used in 3D object detection and segmentation pipelines where points are voxelized for efficient convolution, and then projected back for point-wise predictions [S1, S2, unofficial].
+
+## Sources
+[S1] https://github.com/google-research/google-research/blob/master/tf3d/utils/voxel_utils.py#L305, https://github.com/google-research/google-research/blob/master/tf3d/utils/voxel_utils.py, fetched 2026-10-27 (unofficial)
+[S2] ajavanma/pointcloud-core, https://github.com/ajavanma/pointcloud-core, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,936 @@
+Unified Collective Communication Library. Contribute to openucx/ucc development by creating an account on GitHub.
+
+TL/UCP: enable host-side SRA allreduce pipelining by wfaderhold21 · Pull Request #1354 · openucx/ucc · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+wfaderhold21
+commented
+Aug 31, 2026
+Copy link
+Copy Markdown
+Collaborator
+Overlap the reduce-scatter and allgather phases across fragments on the host path so fragment i's allgather (pure network) runs concurrently with fragment i+1's reduce-scatter (network + CPU reduction). Previously the host branch of the SRA-knomial pipeline heuristic disabled pipelining (n_frags=1), leaving the NIC idle during every reduce step and the CPU idle during the entire allgather.
+The host else-branch of get_pipeline_params() now sets conservative defaults: threshold 256KB, 512KB fragments, nfrags floor 2, pdepth 2, parallel order. Env override UCC_TL_UCP_ALLREDUCE_SRA_KN_PIPELINE still takes precedence. Correctness is unchanged: the CUDA in-place path already runs the identical fragmented schedule, and per-frag scratch is sized from max_frag_count (smaller frags -> smaller scratch).
+svcnbu-swx-hpcx
+commented
+Aug 31, 2026
+Copy link
+Copy Markdown
+Collaborator
+🤖 CI Triage Agent — ASAN · commit dbea8e26
+TL;DR: The gtest test_schedule.pipelined_depth_16_exact_lifecycle failed because the PR's new depth-16 pipeline tests expect UCC_SCHEDULE_PIPELINED_MAX_FRAGS to be 16, but the header still defines it as 4, so ucc_schedule_pipelined_init clamps the depth to 4 and only 4 fragments/8 subscriptions are created instead of the expected 16/32. Bump UCC_SCHEDULE_PIPELINED_MAX_FRAGS to 16 (and size frags[] accordingly).
+Full analysis
+Summary: ASAN gtest run failed 1 test — test_schedule.pipelined_depth_16_exact_lifecycle — while the build itself succeeded.
+Root cause: UCC_SCHEDULE_PIPELINED_MAX_FRAGS is still 4 in src/schedule/ucc_schedule_pipelined.h (line 14), and the frags[] array is sized to it (line 95). ucc_schedule_pipelined_init clamps any requested n_frags down to this max (ucc_schedule_pipelined.c lines 238-244). The PR's new depth-16 tests request 16 fragments and assert g_fault_frag_inits == 16 and g_fault_subscribe_attempt == 32 (test_schedule.cc lines 1102-1112), but the clamp produces only 4 fragments (8 subscribe attempts), so the EXPECT_EQ(16, ...) assertion fails. The test/source are inconsistent: the tests were written for MAX_FRAGS=16 but the constant wasn't raised.
+Implicated commit: d56c68d — "TL/UCP: enable host-side SRA allreduce pipelining" (Ferrol Aderholdt) on branch topic/ar-sra-host-pipelining; the depth-16 tests were added without bumping the max-frags constant.
+File: src/schedule/ucc_schedule_pipelined.h:14 (#define UCC_SCHEDULE_PIPELINED_MAX_FRAGS 4); array at :95; clamp at src/schedule/ucc_schedule_pipelined.c:238-244; failing assertions at test/gtest/core/test_schedule.cc:1111-1112.
+Suggested fix: Change #define UCC_SCHEDULE_PIPELINED_MAX_FRAGS 4 to 16 in src/schedule/ucc_schedule_pipelined.h so the frags[] array can hold 16 entries and the init no longer clamps a depth-16 request. (Alternatively, if 16 is not intended, adjust the new depth-16 tests to match the real max — but the PR's purpose of "host-side SRA pipelining" and the pipelined_init_depth_16_success test comment "matches UCC_SCHEDULE_PIPELINED_MAX_FRAGS" indicate the constant should become 16.) Verify no static allocations depending on the old value of 4 overflow after the bump.
+Related: PR #1354; prior schedule-pipeline fixes c8314d3 (#1262), 4f67436 (#1051).
+svcnbu-swx-hpcx
+commented
+Aug 31, 2026
+Copy link
+Copy Markdown
+Collaborator
+🤖 CI Triage Agent — Build & Test · commit dbea8e26
+TL;DR: Two new test_schedule gtests (pipelined_real_subscription_failure_first, pipelined_depth_16_exact_lifecycle) fail because the fault-injection harness installs process-global callbacks/counters in fault_reset() but never tears them down, so their exact-count assertions get corrupted by other tests in the same binary; fix by clearing the fault hooks and resetting counters in a gtest TearDown().
+Full analysis
+Summary: The gtest job (shard 0) failed: 2 of 7759 tests failed — test_schedule.pipelined_real_subscription_failure_first and test_schedule.pipelined_depth_16_exact_lifecycle. Build and all other stages passed.
+Root cause: These tests use a fault-injection harness that registers process-global hooks and counters — ucc_event_manager_set_subscribe_fault_cb(fault_subscribe_cb) and ucc_schedule_pipelined_set_lock_observer(fault_lock_observe) (test/gtest/core/test_schedule.cc:1025-1026), plus static globals g_fault_subscribe_attempt, g_fault_subscribe_fail_at, g_fault_lock_inits/destroys, etc. (lines 927-936). They are set at the start of each fault test in fault_reset() but are never uninstalled/reset in a TearDown. Once installed, fault_subscribe_cb stays active for the rest of the single gtest process and fires for every subsequent ucc_event_manager_subscribe() call — including from unrelated test_schedule tests — incrementing the shared g_fault_subscribe_attempt counter (and potentially returning a spurious UCC_ERR_NO_MEMORY when a stale g_fault_subscribe_fail_at matches). The two failing tests are exactly the ones with the tightest exact-equality oracles (EXPECT_EQ(fail_at+1, g_fault_subscribe_attempt) == 1, and EXPECT_EQ(32, g_fault_subscribe_attempt)), so cross-test contamination / gtest's non-source execution order makes them fail while the looser fault tests pass. The ucc_schedule_pipelined_init/_finalize unwind logic itself (src/schedule/ucc_schedule_pipelined.c) is internally consistent with the expected counts, confirming the defect is the leaked global test state rather than the production code path.
+Implicated commit: d56c68d1 (Ferrol Aderholdt, "TL/UCP: enable host-side SRA allreduce pipelining") which added this harness, refined by 67ae2ddd (ferrol aderholdt, "REVIEW: remove unnecessary comments") — both on PR #1354.
+File: test/gtest/core/test_schedule.cc:1013-1027 (fault_reset installs hooks; no matching teardown) and the assertions at lines 1058, 1072-1076, 1111-1119.
+Suggested fix: Make the fault harness self-contained per test. Add a TearDown() (or explicit cleanup at the end of each fault test / fault_expect_subscription_unwind) that unregisters the global hooks and resets counters, e.g.:
+```
+ucc_event_manager_set_subscribe_fault_cb(NULL);
+ucc_schedule_pipelined_set_lock_observer(NULL);
+g_fault_subscribe_fail_at = -1;
+g_fault_subscribe_attempt = 0;
+```
+so no fault callback survives into other tests and each test starts from a clean, deterministic global state. Alternatively, gate fault_subscribe_cb so it is a no-op unless a fault test is actively running. This removes the order-dependence and makes the exact-count assertions reliable.
+Related: PR #1354 (topic/ar-sra-host-pipelining); prior pipelined-schedule fixes for context — #1262 (task restart in ppln schedule) and #1051 (n_deps overflow in pipelined schedule).
+svcnbu-swx-hpcx
+commented
+Sep 8, 2026
+Copy link
+Copy Markdown
+Collaborator
+🤖 CI Triage Agent — Lint (codestyle) · commit aa14f863
+TL;DR: The codestyle lint failed only on the commit-title policy check: HEAD commit aa14f863 has a 53-character subject, exceeding the 50-char limit. Reword/amend that commit title to ≤50 chars (e.g. REVIEW: raise pipelined MAX_FRAGS back to 16) and force-push.
+Full analysis
+Summary: The "Check commit title" step of the codestyle job exited 1 because one commit in the PR range has a title longer than 50 characters.
+Root cause: .github/workflows/codestyle.yaml enforces a 50-character maximum on every non-merge commit subject in remotes/origin/$GITHUB_BASE_REF..HEAD. The log shows:
+Commit title is too long: 53
+Bad commit title: 'REVIEW: raise pipelined MAX_FRAGS capacity back to 16' (53 chars)
+The other three commits in the PR passed (REVIEW: address feedback, REVIEW: remove unnecessary comments, TL/UCP: enable host-side SRA allreduce pipelining). This is purely a commit-message policy violation — no clang-format/code issue was reported, and the later "Check code format" step never ran because the earlier step failed.
+Implicated commit: [REDACTED:Hex High Entropy String] — "REVIEW: raise pipelined MAX_FRAGS capacity back to 16" (author of PR #1354, branch topic/ar-sra-host-pipelining)
+File: .github/workflows/codestyle.yaml:39 (the ${#msg} -gt 50 check); offending artifact is the commit subject of aa14f863, not a source file.
+Suggested fix: Amend the offending commit subject to 50 characters or fewer and force-push the branch:
+```
+git rebase -i remotes/origin/master   # or: git commit --amend if it's HEAD
+# reword aa14f863 to e.g.:
+#   "REVIEW: raise pipelined MAX_FRAGS back to 16"   (44 chars)
+git push --force-with-lease
+```
+Since the three REVIEW: commits are review fixups, the cleanest option is to squash all four into the single TL/UCP: enable host-side SRA allreduce pipelining commit — that removes the long title and leaves one properly-tagged commit. Note the format check (Check code format) has not yet been validated on this branch; expect it to run only after the title check passes.
+Related: PR #1354 (openucx/ucc) — no existing issue found for this failure signature.
+🛡️ This comment had 1 potential secret(s) redacted (Hex High Entropy String). See request_id 72daf3a8-29eb-4b67-a682-58d75979eba2 in the triage console for the audit trail.
+wfaderhold21
+force-pushed
+the
+topic/ar-sra-host-pipelining
+branch
+from
+aa14f86 to
+333271f
+Compare
+September 8, 2026 23:24
+wfaderhold21
+added
+the
+ai-review
+start ai-review
+label
+Sep 11, 2026
+greptile-apps
+Bot
+commented
+Sep 11, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Confidence Score: 5/5
+[Medium impact] The PR appears safe to merge; all previous findings are addressed and no new blocking issue remains.
+Summary
+Enables automatic host-side SRA allreduce pipelining on known single-node teams.
+Large host allreduces overlap work on different fragments.
+Pipelined schedules accept deeper runs and clean up failed setup.
+Collective log strings fit their buffers safely.
+Reviews (9) · Last reviewed commit: "REVIEW: address greptile comments" · Reviewed by Greptile
+greptile-apps
+Bot
+reviewed
+Sep 11, 2026
+View reviewed changes
+Comment thread
+src/schedule/ucc_schedule.c
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+wfaderhold21
+added
+the
+Ready-for-Review
+label
+Sep 16, 2026
+wfaderhold21
+requested review from
+janjust and
+nsarka
+September 16, 2026 17:00
+janjust
+force-pushed
+the
+topic/ar-sra-host-pipelining
+branch
+from
+e5e64e7 to
+3a6f121
+Compare
+October 14, 2026 16:20
+janjust
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+/build
+greptile-apps
+Bot
+reviewed
+Oct 14, 2026
+View reviewed changes
+Comment thread
+test/gtest/coll/test_allreduce.cc
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/schedule/ucc_schedule_pipelined.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+svcnbu-swx-hpcx
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+🤖 CI Triage Agent — UCC/ucc-test-mpi · commit 3a6f121d
+TL;DR: All 8 ranks of ucc_test_mpi SIGSEGV'd at the entry (+0x34) of ucc_event_manager_notify with fault address (nil) — a stack overflow caused by unbounded notify → completed_handler → task_complete → notify → frag restart → post recursion in the pipelined schedule, newly reachable because PR #1354 turns on SRA-allreduce pipelining for host memory, where fragment tasks complete inline. Fix: make fragment restart asynchronous (enqueue the frag on the progress queue) instead of calling ucc_frag_start_handler() inline from ucc_schedule_pipelined_completed_handler().
+Full analysis
+Summary: Stage "Run UCC MPI tests (bulk)" (node 206) failed: ucc_test_mpi --mtypes host,cuda segfaulted (exit 139, core dumped) on every rank on funk17/funk18 immediately after the test banner, aborting the Slurm step.
+Root cause: The backtraces are identical on all ranks and show a mutually recursive cycle inside libucc:
+```
+ucc_context_progress
+ → libucc+0x1801a            (progress queue → ucc_task_complete)
+ → ucc_event_manager_notify+0x6b
+ → libucc+0x1cc13            (ucc_schedule_completed_handler, inlines ucc_task_complete)
+ → ucc_event_manager_notify+0x34   <-- SIGSEGV, address (nil)
+```
+Faulting at offset +0x34 (function prologue) with address (nil) "Sent by the kernel" is the signature of a guard-page hit, i.e. stack exhaustion, not a bad pointer — the 21-frame backtrace is simply the truncated top of a deep recursion.
+The recursion is structural in the pipelined scheduler:
+ucc_task_complete() → ucc_event_manager_notify(UCC_EVENT_COMPLETED_SCHEDULE) → ucc_schedule_pipelined_completed_handler() which, still inside that notify stack, synchronously restarts the next fragment via ucc_frag_start_handler(...) → task->post() (src/schedule/ucc_schedule_pipelined.c:130). If the freshly posted fragment's tasks complete inline, their completion re-enters ucc_task_complete → notify → the same handler, which restarts the next fragment, and so on. Depth grows with schedule->super.n_tasks (total fragments), so a large host allreduce blows the 8 MB stack.
+Why this only breaks now: before PR #1354 the only pipelined SRA path was CUDA, where completion is driven asynchronously through the progress queue (no inline completion, no recursion). The new host branch in ucc_tl_ucp_allreduce_sra_knomial_select_pipeline_params() enables UCC_PIPELINE_PARALLEL with threshold=262144, frag_size=524288, pdepth = (total >= 4*frag_size) ? 4 : 2 (src/components/tl/ucp/allreduce/allreduce_sra_knomial.c:218-239). For host buffers the knomial reduce-scatter/allgather tasks frequently complete inline during post()/progress, and a multi-MB allreduce yields n_frags_total in the hundreds — hundreds of nested notify/handler/post frames.
+Implicated commit: eade84c8 — "TL/UCP: enable host-side SRA allreduce pipelining", Ferrol Aderholdt (branch HEAD 3a6f121d, "REVIEW: address formatting"; same series: 4795822a, 6086aabd)
+File: src/schedule/ucc_schedule_pipelined.c:111-139 (restart loop; inline ucc_frag_start_handler call at line 130), reached via src/components/tl/ucp/allreduce/allreduce_sra_knomial.c:218-239 (new host pipeline params)
+Suggested fix:
+Break the recursion — do not post fragments from inside the completion notify chain. In ucc_schedule_pipelined_completed_handler(), mark fragments UCC_COLL_TASK_FLAG_RESTART_PENDING (already done) and let the pipelined schedule's own progress/ucc_progress_queue_enqueue path drain and restart them after the stack unwinds, instead of calling ucc_frag_start_handler() in the while loop at line 130. This keeps the depth O(1) regardless of n_frags_total.
+As a short-term mitigation while (1) is implemented, cap the number of restarts performed inline per handler invocation (e.g. restart at most one fragment and return UCC_OK), and/or bound n_frags_total for the host path by raising frag_size/lowering pdepth in ucc_tl_ucp_allreduce_sra_knomial_select_pipeline_params() so the host branch cannot generate hundreds of fragments.
+Add a regression test that drives a host-memory SRA allreduce with msgsize >> frag_size (many fragments) so inline-completing fragments exercise the restart path — the current gtest coverage clearly does not reach the deep-recursion case.
+Related: PR #1354 (this change); prior restart-path fixes in the same code: c8314d31 "SCHEDULE: fix task restart in ppln schedule (#1262)" and 4f67436b "CORE: fix n deps overflow in pipelined schedule (#1051)".
+svcnbu-swx-hpcx
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+🤖 CI Triage Agent — UCC/ucc-test-mpi · commit 1981bdc5
+TL;DR: All 8 ranks of ucc_test_mpi segfault inside ucc_event_manager_notify (NULL/freed parent_task->em_list) as soon as the bulk MPI test starts, because PR #1354 switched host-memory SRA allreduce to a multi-fragment pipelined schedule, which makes ucc_schedule_pipelined_completed_handler complete/tear down a fragment schedule while the enclosing ucc_event_manager_notify() loop is still walking that fragment's event-manager list. Fix by not touching parent_task->em_list after dispatching a COMPLETED_SCHEDULE handler (dispatch it last / snapshot the list), and in the interim default the host path back to monolithic (n_frags = 0).
+Full analysis
+Summary: Stage "Run UCC MPI tests (bulk)" (node 206) failed — ucc_test_mpi crashed with SIGSEGV (exit 139) on every rank on both funk17 and funk18, immediately after printing the test banner; srun cancelled step 106649.0.
+Root cause: The backtrace is unambiguous and identical on all 8 ranks:
+```
+4  libucc.so.1(ucc_event_manager_notify+0x34)   <-- faulting, address (nil)
+5  libucc.so.1(+0x1cc13)                        <-- static handler in ucc_schedule.c
+6  libucc.so.1(ucc_event_manager_notify+0x6b)
+7  libucc.so.1(+0x1801a)
+8  libucc.so.1(ucc_context_progress+0x7d)
+9  mca_coll_ucc.so(mca_coll_ucc_progress+0x1b)  ... PMPI_Test
+```
+ucc_event_manager_notify() → a schedule-completion handler → ucc_event_manager_notify() again, crashing at +0x34, i.e. the very first dereference of parent_task->em_list (ucc_list_for_each, src/schedule/ucc_schedule.c:203). Faulting address (nil) means the parent task / its list head is NULL or freed.
+The reentrancy hazard is documented in the code itself (src/schedule/ucc_schedule.h:229-237): after UCC_EVENT_COMPLETED_SCHEDULE is notified, "the task ptr should not be accessed." But ucc_event_manager_notify() does keep accessing it — after em->listeners[i].handler(...) returns, the loop reads em->n_listeners and advances em = em->list_elem.next (ucc_schedule.c:203-217). In the pipelined path, ucc_schedule_pipelined_completed_handler() (ucc_schedule_pipelined.c:100-107) calls ucc_task_complete(task) on the top-level schedule when the last fragment lands; the user (OMPI mca_coll_ucc → PMPI_Test) then finalizes the request in that same stack, reaching ucc_schedule_pipelined_finalize() (ucc_schedule_pipelined.c:147-172), which runs ucc_coll_task_destruct() on the pipelined schedule and every fragment and fragment task — free()ing the heap-allocated ucc_event_manager_t nodes — and returns the schedules to the mpool. Control then unwinds into the outer notify() loop, which dereferences the freed em/parent and the recursive notify() is entered with a dangling/NULL parent.
+Why now: before PR #1354 the host path of SRA allreduce was always monolithic. ucc_tl_ucp_allreduce_sra_knomial_select_pipeline_params() (allreduce_sra_knomial.c:218-239) now returns threshold=262144, frag_size=524288, n_frags=2, pdepth=2..4 for UCC_MEMORY_TYPE_HOST on a single node, so the fragment restart/completion path is exercised by default in the MPI bulk test (host+cuda mtypes, --inplace 2). Build #74 on the same nodes passed this stage in 450 s; #75 dies in the first seconds.
+Implicated commit: eade84c8 "TL/UCP: enable host-side SRA allreduce pipelining" (Ferrol Aderholdt), with follow-ups 3ee53952, 4795822a, 6086aabd, 3a6f121d — all part of PR #1354 (head [REDACTED:Hex High Entropy String]). The latent notify() loop defect dates to dc9271e9.
+File: src/schedule/ucc_schedule.c:203-217 (ucc_event_manager_notify loop), triggered via src/schedule/ucc_schedule_pipelined.c:100-107 and :147-172; enabled by src/components/tl/ucp/allreduce/allreduce_sra_knomial.c:218-239.
+Suggested fix:
+Make ucc_event_manager_notify() safe against handlers that release parent_task. For UCC_EVENT_COMPLETED_SCHEDULE there is at most one meaningful listener — find it, then return its result directly without re-reading em/parent_task->em_list afterwards. Alternatively snapshot (task, handler) pairs into a small stack array before dispatching any handler.
+Don't call ucc_task_complete(task) for the top-level schedule from inside ucc_schedule_pipelined_completed_handler() while still on the fragment's notify stack — set a "pipeline done" flag and complete it once the notify chain has unwound (e.g. from the progress-queue poll), so finalize/destruct can never run under a live em_list walk.
+Immediate unblock for CI: in ucc_tl_ucp_allreduce_sra_knomial_select_pipeline_params(), make the UCC_MEMORY_TYPE_HOST branch default to n_frags = 0 / pdepth = 1 (monolithic) and require opt-in via UCC_TL_UCP_ALLREDUCE_SRA_KN_PIPELINE until (1)/(2) land.
+Add a gtest that drives a >threshold host allreduce through a 2+ fragment pipelined schedule and finalizes the request from the completion callback — that reproduces this without needing the Slurm job.
+Related: PR #1354 (#1354); prior pipelined-restart fix PR #1262 (c8314d31 "SCHEDULE: fix task restart in ppln schedule") and PR #759 ([REDACTED:Hex High Entropy String] "CL/HIER: fix allreduce rab pipeline") touch the same restart logic.
+🛡️ This comment had 1 potential secret(s) redacted (Hex High Entropy String). See request_id bb5c0a33-178c-49e0-b176-ffbb5d552474 in the triage console for the audit trail.
+janjust
+mentioned this pull request
+Oct 14, 2026
+SCHEDULE: defer ppln completion to outer handler
+#1364
+Merged
+janjust
+force-pushed
+the
+topic/ar-sra-host-pipelining
+branch
+from
+3a6f121 to
+a005d21
+Compare
+October 14, 2026 20:33
+janjust
+commented
+Oct 14, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+@wfaderhold21, I rebased this on master (it now includes #1364) and pushed two commits on top, for the review items and for Greptile's comments:
+Rebase: the only conflict was test/gtest/core/test_schedule.cc, where SCHEDULE: defer ppln completion to outer handler #1364 also added tests. Both sets are kept and the include lists are merged.
+ucc_schedule_pipelined_finalize() no longer destructs any em lists. In THREAD_MULTIPLE, the thread that completes the collective can still be walking them in ucc_event_manager_notify() after the status is published: the frags' and tasks' lists, and the schedule's own list when it is a task of another schedule (e.g. TL/UCP SRA inside CL/HIER RAB). They stay with the pooled tasks as before. The tests that relied on finalize for this now destruct the schedule themselves, and pipelined_depth_16_exact_lifecycle no longer expects zero listeners at frag finalize.
+The fault-injection and lock-observer hooks, and the C11 atomics they use, are now built only with --enable-gtest (new ENABLE_GTEST define), so they are not in production libucc.
+The depth clamp now warns once instead of on every collective init.
+nfrags=0 with a fragsize splits by fragsize again; only nfrags=0 without a fragsize disables pipelining, and n_frags is kept >= 1.
+The SRA selection tests skip when TL/UCP is not available.
+Still open: single-node numbers for the current host defaults (single-node only, pdepth 4 at >= 2 MB). The description and commit message show 8-node data and say pdepth 4 hurt at 4 MB.
+janjust
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+/build
+greptile-apps
+Bot
+reviewed
+Oct 14, 2026
+View reviewed changes
+Comment thread
+src/schedule/ucc_schedule_pipelined.c
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+janjust
+force-pushed
+the
+topic/ar-sra-host-pipelining
+branch
+from
+41cacb5 to
+cdf456c
+Compare
+October 14, 2026 20:45
+janjust
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+/build
+svcnbu-swx-hpcx
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+🤖 CI Triage Agent — UCC/ucc-test-gtest · commit cdf456cf
+TL;DR: This is not a code failure from PR #1354 — the build_helper pod in the parallel "Setup Image" matrix never left ContainerCreating, so failFast aborted the sibling branch mid-compile with SIGTERM (exit 143); retry the build and/or fix the build_helper:gtest image pull, plus guard the scancel cleanup against an empty SLURM_JOB_ID.
+Full analysis
+Summary: UCC/ucc-test-gtest #167 was ABORTED: the Parallel → Setup Image x86_64/build_helper/1 branch never got a ready pod, which failFast-cancelled the cuda13.1.1-devel/0 branch while it was still compiling gtest objects (exit 143), and the pipeline_stop cleanup then failed with scancel: error: No job identification provided.
+Root cause: Infrastructure, not source. The whole-build log shows the agent pod hpcx/ucc-gtest-build-buildhelper-167-nqtk0-fh6fd reporting the same state three times — at 20:49:57, 20:50:27 and 20:51:27 — Container [docker] waiting [ContainerCreating], Container [jnlp] waiting [ContainerCreating], Pod [Pending][ContainersNotReady] containers with unready status: [docker jnlp]. It never became ready for the entire ~254 s life of the Parallel stage. Jenkins then printed Calling Pipeline was cancelled at 20:51:22 and Failed in branch Setup Image x86_64/build_helper/1, immediately followed by script returned exit code 143 and Failed in branch Setup Image x86_64/cuda13.1.1-devel/0.
+Gap analysis confirms the killed branch was not hung or slow: the Build Docker log has dense, continuous timestamps with no gap larger than ~40 s (the biggest, 20:50:00→20:50:39, is the legitimate ec_cpu_reduce.lo compile), and it was actively emitting CXX asym_mem/gtest-test_asymmetric_memory.o at 20:51:16, six seconds before the SIGTERM. Configure succeeded (TL modules: < cuda self ucp >, Gtest: enabled) and there are zero compiler errors or warnings-as-errors anywhere in the log. So the build on commit cdf456cf was healthy and was collateral damage from the sibling branch.
+A secondary, log-obscuring bug: after the abort, pipline stop on build_helper/pipeline_stop invoked slurm.stop with jobId: ${SLURM_JOB_ID}. Because the pipeline died before any SLURM allocation, the variable was empty and scancel errored (No job identification provided), turning the real cause (143 from a cancelled parallel branch) into a final, misleading script returned exit code 1.
+Implicated commit: None for the build failure itself — [REDACTED:Hex High Entropy String] (branch topic/ar-sra-host-pipelining, PR #1354) is not at fault. The scancel masking issue traces to the slurm-lib conversion, a444af93 "CI: convert gtest pipeline to use slurm lib" (Daniel Pressler).
+File: Pipeline infrastructure — pod template for harbor.mellanox.com/torch-ucc/x86_64/build_helper:gtest (imagePullPolicy: Always) in the gtest matrix job config; cleanup invocation referenced from .ci/Jenkinsfile.shlib:28 (matrix.main()).
+Suggested fix:
+Re-run build CORE: dbg log level for "unsupported" #167 — no change to PR TL/UCP: enable host-side SRA allreduce pipelining #1354 is warranted; the compile was clean and progressing when killed.
+Investigate why the build_helper:gtest pod stayed in ContainerCreating: check Harbor availability/pull-secret validity and node capacity. Since imagePullPolicy: Always is set, a transient Harbor outage or expired registry credential stalls every build. Consider IfNotPresent for this helper image so a cached layer can be reused.
+Add a pod-readiness timeout to the Setup Image matrix branches so a stuck pod fails fast with a clear "pod never became ready" message instead of silently consuming the stage budget and failFast-killing a healthy sibling.
+Make the cleanup stage tolerant of an unset SLURM_JOB_ID — skip slurm.stop entirely when the variable is empty, so aborted builds surface the genuine 143/cancellation instead of a spurious exit code 1.
+Related: PR #1354 (triggering PR, not the cause); a444af93, 817fc967 (slurm cleanup wiring). No existing issue found for the build_helper pod-creation stall — worth opening one against CI infra.
+🛡️ This comment had 1 potential secret(s) redacted (Hex High Entropy String). See request_id 63f3c886-bbc9-4619-8e2a-7659d0bdd7c4 in the triage console for the audit trail.
+svcnbu-swx-hpcx
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+🤖 CI Triage Agent — UCC/ucc-run-coverity · commit 5b235b0d
+TL;DR: Build #213 wasn't a real test failure — it was deliberately aborted by the CI dispatcher when a newer commit landed on PR #1354 (dispatcher #362 cancelled dispatcher #361 and all its children), killing the coverity pod while it was still in ContainerCreating. No fix needed; check the replacement build #214.
+Full analysis
+Summary: UCC/ucc-run-coverity #213 ended in ABORTED with FlowInterruptedException: Calling Pipeline was cancelled before the Coverity step ever ran.
+Root cause: Superseded-build cancellation, not a code or infrastructure defect. Evidence chain from the logs:
+ucc-run-coverity V0.1.x: TEST: Fix test_obj_size (#209) #213 log: pod run-coverity-coverity-213-vj6f7-8tljj was created at 20:47:15 and remained Pending/ContainersNotReady [coverity jnlp] through 20:50:27, then Calling Pipeline was cancelled → Failed in branch x86_64/coverity v1 at 20:51:22. The Run Coverity stage never executed — no coverity.sh, cov-build, or cov-analyze output at all.
+Upstream ucc-ci-dispatcher Topic/tl ucp kn algs #361 log: Build UCC » ucc-run-coverity #213 completed: ABORTED, same for ucc-test-gtest #167 and ucc-test-nvls #348.
+ucc-ci-dispatcher Missed Free #362 log is explicit: Aborting previous build ucc-ci-dispatcher #361 (same PR 1354), Aborting previous build ucc-run-coverity #213 (same PR 1354), plus the gtest/nvls/mpi children.
+Corroborating: the sibling jobs show the same external kill signature at the identical timestamp (20:51:22 Sending interrupt signal to process → script returned exit code 143) while actively compiling (gtest was mid-CXX asym_mem/gtest-test_asymmetric_memory.o, mpi was mid-docker build blob copy). Continuous output right up to 20:51:22 with no long silence rules out a hang; all five children died simultaneously because one external actor cancelled them.
+Build TEST: fix ucc allocations #214 was immediately scheduled by dispatcher Missed Free #362 for the same PR and is currently running Run Coverity.
+Also note: commit 5b235b0 is a merge commit and build #212 on the prior PR head ran Coverity to completion (New snapshot ID 210634 added, Finished: SUCCESS), so the Coverity pipeline itself is healthy.
+Implicated commit: none — no code commit caused this. The abort was issued by the dispatcher's same-PR supersede logic (ucc-ci-dispatcher #362) after a new push to PR #1354.
+File: n/a — no UCC source file is implicated (.ci/pipeline/run_coverity_matrix.yaml is unchanged since 52f968c, "CI: run coverity in container (#1267)", Daniel Pressler)
+Suggested fix: No action on the code. Treat #213 as a stale/superseded run and read the result of ucc-run-coverity #214 instead. Two optional CI-hygiene improvements:
+Have the dispatcher mark superseded children as NOT_BUILT/ABORTED rather than letting the parent surface them as parallel task failed, so cancelled runs don't page triage as failures.
+Secondary observation worth watching: V0.1.x: TEST: Fix test_obj_size (#209) #213's pod sat in ContainerCreating for over 4 minutes, whereas V0.1.x: CORE: bugfix in ucc_task_complete #212's identical pod went Ready in ~6 seconds. That is likely slow attachment of the hostPath mounts /hpc/local and /auto/sw_tools/Commercial/Synopsys/Coverity (run_coverity_matrix.yaml:22-24) on the scheduled node. If TEST: fix ucc allocations #214 or later builds also stall in ContainerCreating, investigate NFS/automount health on the il-ipp-blossom-prod nodes — but it did not cause this failure.
+Related: PR #1354 (the PR under test); dispatcher builds UCC/ucc-ci-dispatcher #361 (aborted) and #362 (the superseding run); replacement build UCC/ucc-run-coverity #214. No matching issues found for the pod-provisioning slowness.
+svcnbu-swx-hpcx
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+🤖 CI Triage Agent — UCC/ucc-test-nvls · commit 5b235b0d
+TL;DR: Build #348 was ABORTED, not broken by code: the aarch64 nvls Docker-build pod never left Pending/ContainerCreating (no aarch64 capacity in the il-ipp-blossom-prod/hpcx cluster) and the branch was cancelled ~4 min in, after which pipeline_stop crashed with NoSuchFileException on the Slurm job-id file that was never created. Retrigger the PR build, and harden pipeline_stop to tolerate a missing jobIdFile.
+Full analysis
+Summary: UCC/ucc-test-nvls #348 aborted during the parallel "Setup Image aarch64/nvls/0" branch; no UCC test or compile step ever ran.
+Root cause: Two things, both infrastructure-side:
+The x86_64 build_helper image built and pushed successfully (20:47:20 → 20:47:58), but the aarch64 pod ucc-test-nvls-build-nvls-348-sccz2-w1zr5 was created at 20:47:06 and stayed [Pending][ContainersNotReady] containers with unready status: [docker jnlp] with Still waiting to schedule task / … is offline through 20:51:27, i.e. the aarch64 node/agent was never provisioned. At 20:51:22 the log shows Calling Pipeline was cancelled → Failed in branch Setup Image aarch64/nvls/0, and the build ends Finished: ABORTED — an external cancellation (a newer build, Add Multi Thread Perf Tests #349, is already running for the same PR), not the 240-min timeout_minutes and not an in-job hang (the PodInfo heartbeat is continuous every 30 s right up to the cancel, largest gap ≈30 s).
+Consequent cleanup failure: because "Allocate Slurm job" never executed, /mnt/pvc/job-id-jenkins-UCC-ucc-test-nvls-348.txt does not exist, so the pipeline_stop stage's slurm.stop → readFile threw java.nio.file.NoSuchFileException, marking stages pipline stop on build_helper and pipeline_stop as failed. This is a robustness bug in the teardown path, not the real failure.
+Nothing in the PR's diff (schedule/pipelined-schedule and TL/UCP SRA allreduce changes in #1354) was ever compiled or tested in this build, so it cannot be implicated. Builds #345–#347 on the same config passed all test stages (aarch64 Build Docker ~400–425 s), confirming the config itself is sound.
+Implicated commit: unknown — no code commit implicated; infrastructure/abort. (Most recent change to the job config is ccd0fd01 "CI: NVLS tests update partition (#1361)", Daniel Pressler — unrelated to aarch64 pod scheduling.)
+File: .ci/pipeline/test_nvls_matrix.yaml:155 (pipeline_stop → jobIdFile: ${JOB_ID_FILE}); affected pod spec from .ci/pipeline/test_nvls_matrix.yaml:42-49 (aarch64 nvls image)
+Suggested fix:
+Re-run the PR build (Add Multi Thread Perf Tests #349 is already in flight) — this specific failure is not reproducible from the code change. If aarch64 pods keep sitting in ContainerCreating, escalate to the Blossom/hpcx namespace owners: check kubernetes.io/arch: arm64 node pool capacity and image-pull of nbu-harbor…/quay.io/podman/stable:v5.7.1 on the aarch64 nodes.
+Make teardown non-fatal: in pipeline_stop, guard the job-id read, e.g. only call slurm.stop when the file exists (if (fileExists(env.JOB_ID_FILE))) or wrap the step in catchError(buildResult: 'ABORTED', stageResult: 'NOT_BUILT'), so an aborted/early-failed build doesn't surface a misleading NoSuchFileException. The same guard belongs in swx-jenkins-lib's slurmCI.stop.
+Optional: add a short retry/explicit pod-provisioning timeout with a clearer message for the "Setup Image" branches so capacity starvation is distinguishable from a build error.
+Related: PR #1354 (TL/UCP: enable host-side SRA allreduce pipelining — trigger only, not the cause); #1361 (last CI config change to this job)
+svcnbu-swx-hpcx
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+🤖 CI Triage Agent — UCC/ucc-run-coverity · commit cdf456cf
+TL;DR: The coverity job never ran a single build command — its Kubernetes agent pod sat in ContainerCreating for ~3.5 minutes and was then cancelled, which failed the dispatcher's parallel branch and fail-fast-killed the sibling jobs mid-build. This is CI infrastructure (pod provisioning), not a code regression in PR #1354.
+Full analysis
+Summary: UCC/ucc-run-coverity #213 aborted because agent pod run-coverity-coverity-213-vj6f7-8tljj never became ready (Pod [Pending][ContainersNotReady] containers with unready status: [coverity jnlp]), so the Run Coverity step was never reached.
+Root cause: Pod scheduling/volume-setup failure, not a test or compile failure. Evidence:
+In the coverity build log the pod is created at 20:47:15 and every subsequent poll through 20:50:27 reports both containers stuck in ContainerCreating with "No message", plus Still waiting to schedule task / 'run-coverity-coverity-213-vj6f7-8tljj' is offline. There is no image-pull progress, no Agent ... is provisioned from template line, and no step output at all — so nothing application-level hung; the container never started.
+The job then reports Calling Pipeline was cancelled → hudson.AbortException: parallel task failed. The duration (257s) is far below the 60-minute timeout_minutes, so this was not a wall-clock timeout — raising the timeout would not help.
+The sibling aborts are collateral damage from fail-fast, all killed at the identical instant 20:51:22: ucc-test-gtest CORE: dbg log level for "unsupported" #167 was killed mid-compile (CXX asym_mem/gtest-test_asymmetric_memory.o → script returned exit code 143), ucc-test-mpi CORE: ucc status string implementation #78 was killed mid-docker build blob copy, and ucc-test-nvls API: new datatype definition #348 had its own aarch64 builder pod stuck in ContainerCreating since 20:47:06. The NoSuchFileException: /mnt/pvc/job-id-...txt in the nvls job is just its pipeline_stop cleanup running before any Slurm allocation existed.
+Critically, the PR's code is not implicated: the gtest job compiled every file changed by this PR under -Wall -Werror without error, including schedule/libucc_la-ucc_schedule.lo, schedule/libucc_la-ucc_schedule_pipelined.lo, allreduce/libucc_tl_ucp_la-allreduce_sra_knomial.lo, reduce/libucc_tl_ucp_la-reduce_srg_knomial.lo, and the cl/hier files, and linked libucc.so successfully.
+The leading suspect specific to this job is the two hostPath mounts in its pod spec — /hpc/local and /auto/sw_tools/Commercial/Synopsys/Coverity (lines 22–24 of the matrix YAML). These are NFS/automount paths that must already be present on the chosen node, but the config declares no nodeSelector/affinity to restrict scheduling to nodes that actually have them, so a pod landing on a node without those mounts can wedge kubelet in volume setup. Note that two of the five jobs in this dispatcher run had pods stuck in ContainerCreating simultaneously, which also points at a transient cluster-wide provisioning problem in the hpcx namespace / il-ipp-blossom-prod cloud.
+Implicated commit: None in PR #1354 ([REDACTED:Hex High Entropy String]) — the failure is infrastructural. The pod spec containing the unguarded hostPath mounts dates to 52f968c5 "CI: run coverity in container (#1267)", Daniel Pressler.
+File: .ci/pipeline/run_coverity_matrix.yaml:22-24 (hostPath volumes, no nodeSelector); contrast with .ci/pipeline/test_nvls_matrix.yaml which does set kubernetes.io/arch selectors.
+Suggested fix:
+Immediate: re-run build V0.1.x: TEST: Fix test_obj_size (#209) #213 — nothing in the PR diff caused this, and the two healthy jobs were making normal progress when they were killed. Confirm ucc-build-hpcsdk TL/NCCL: add scatterv #474 already passed on this commit.
+Diagnose the stuck pod: have infra check kubectl describe pod run-coverity-coverity-213-* / kubelet logs on the assigned node for FailedMount/FailedCreatePodSandBox events, and verify /hpc/local and /auto/sw_tools/Commercial/Synopsys/Coverity are mounted on all candidate x86_64 nodes in the hpcx namespace.
+Harden the config: add a nodeSelector (or node affinity label such as hpcx-tools: "true") to run_coverity_matrix.yaml so the pod can only schedule onto nodes that actually export the Coverity//hpc/local host paths; better still, replace the hostPath mounts with the pvc_volumes pattern already used by test_nvls_matrix.yaml.
+Reduce blast radius: add a pod-readiness timeout with retry around the agent provisioning, and disable fail-fast in ucc-ci-dispatcher's parallel block (or make the coverity branch non-voting) so one unschedulable pod stops nuking in-flight gtest/mpi builds and producing misleading exit-143 failures.
+Related: none found — search_issues_prs for "coverity ContainerCreating pod aborted CI" returned no matches. Upstream dispatcher run: UCC/ucc-ci-dispatcher #361; collateral aborts: ucc-test-gtest #167, ucc-test-mpi #78, ucc-test-nvls #348.
+🛡️ This comment had 1 potential secret(s) redacted (Hex High Entropy String). See request_id 3bf2df2d-755d-40ac-be24-27ea0e30a848 in the triage console for the audit trail.
+svcnbu-swx-hpcx
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+🤖 CI Triage Agent — UCC/ucc-test-gtest · commit 5b235b0d
+TL;DR: Build #167 wasn't a real test failure — it was aborted ~4 minutes in by the ucc-ci-dispatcher "abort old builds" logic when a newer event arrived for PR #1354, and the only genuine bug is that the pipeline_stop cleanup then ran scancel with an empty SLURM_JOB_ID and exited 1, converting a clean abort into a reported CI failure.
+Full analysis
+Summary: UCC/ucc-test-gtest #167 was cancelled by its upstream dispatcher while still compiling test/gtest, and the pipeline_stop/pipeline stop on build_helper stages then failed with scancel: error: No job identification provided.
+Root cause: Two distinct things, neither a code regression:
+External cancellation (the exit 143 / aborted stages). The whole-build log shows Calling Pipeline was cancelled immediately before Sending interrupt signal to process → script returned exit code 143, and the build ends Finished: ABORTED. This is Jenkins propagating an abort from the parent ucc-ci-dispatcher build (invoked with wait: true), which is explicitly designed to b.doStop() any in-flight build for the same PR number when a newer webhook for that PR arrives (.ci/proj_jjb.yaml:163-181, added in 5852377f "CI: abort old builds"). PR here is TL/UCP: enable host-side SRA allreduce pipelining #1354.
+This is not a hang or a timeout. Timestamp analysis: the stage ran 20:49:51 → 20:51:22 (~91s of logged work, 254s total parallel stage). The largest gap between consecutive lines is 20:49:55 → 20:50:39 (~44s, the ec_cpu_reduce.lo compile, which is legitimately slow). Compiler output is continuous (CXX coll/gtest-test_scatterv.o … asym_mem/gtest-test_asymmetric_memory.o at 20:51:16) right up to the kill 6s later. The job's own budget was timeout_minutes: 180, so wall time was nowhere near exhausted. Do not raise any timeout.
+Secondary observation: the other parallel branch (build_helper pod ucc-gtest-build-buildhelper-167-nqtk0-fh6fd) was stuck in Pending/ContainersNotReady [docker jnlp] from 20:49:57 through 20:51:27 and never started its steps — so no Slurm allocation ever happened. That's slow pod scheduling / image pull, not a cause of the abort.
+The cleanup stage genuinely fails (this is the real actionable bug). Because the Allocate Slurm job and Read Slurm job ID steps never ran, env.SLURM_JOB_ID was never populated. The pipeline_stop hook still executes and interpolates it empty:
+```
+Calling slurm.stop with args=[credentialsId:..., headNode:scctl, jobId:${SLURM_JOB_ID}]
+INFO: Stopping SLURM job  via scctl
+scancel: error: No job identification provided
+...
+hudson.AbortException: script returned exit code 1
+ERROR: script returned exit code 1
+```
+This exit-1 is what flipped the build into FAILURE inside Jenkinsfile.shlib's catch block and fired the CI-triage webhook (CI triage agent trigger -> HTTP 202) for what should have been a silent, expected abort. Note jobId is passed through literally as ${SLURM_JOB_ID} (unexpanded) in the log line, suggesting the variable was never defined at all rather than defined-as-empty.
+Implicated commit: 5852377f — Daniel Pressler, "CI: abort old builds (#1285)" (introduced the dispatcher abort that cancelled this build); the unguarded cleanup dates to 84d6c72d — Daniel Pressler, "CI: move gtest builds to slurm (#1280)". The triage-on-failure trigger is 71963b2b — NirWolfer. No UCC source commit is implicated; 5b235b0d is not at fault.
+File: .ci/pipeline/test_gtest_matrix.yaml:114-122 (the pipeline_stop block, jobId: "${SLURM_JOB_ID}"); related: .ci/proj_jjb.yaml:163-181, .ci/Jenkinsfile.shlib:29-50.
+Suggested fix:
+Make pipeline_stop a no-op when there is no allocation. Either guard it in the matrix config so scancel is skipped on empty/unset SLURM_JOB_ID, or set a sentinel early (SLURM_JOB_ID: "" in the env: block) and have the step short-circuit — e.g. precede the slurmCI/stop action with a groovy step that returns early:
+```
+pipeline_stop:
+  containerSelector: "{name: 'build_helper'}"
+  shell: action
+  module: groovy
+  run: |
+    if (!env.SLURM_JOB_ID?.trim()) { echo "No Slurm job allocated; skipping scancel"; return }
+    slurmCI.stop(credentialsId: SCCTL_CREDENTIALS_ID, headNode: SLURM_HEAD_NODE, jobId: env.SLURM_JOB_ID)
+```
+Alternatively fix it upstream in swx-jenkins-lib's slurm.stop to treat a blank jobId as success instead of shelling out to scancel.
+Don't report aborts as failures: in .ci/Jenkinsfile.shlib, detect FlowInterruptedException / currentBuild.result == 'ABORTED' and skip both the GitHubCommitState.FAILURE status update and the ciTriage call. This stops superseded-PR-build aborts from generating noise like this ticket.
+Optional infra follow-up: the build_helper pod took >90s stuck in ContainerCreating and the image uses imagePullPolicy: Always with --no-cache builds; pre-pulling or caching harbor.mellanox.com/torch-ucc/x86_64/build_helper:gtest would reduce the window in which an abort lands before the Slurm job ID exists.
+No action needed on PR TL/UCP: enable host-side SRA allreduce pipelining #1354 — simply re-run ucc-test-gtest for commit 5b235b0d to get a real signal.
+Related: PR #1285 (CI: abort old builds), PR #1280 (CI: move gtest builds to slurm), PR #1329 (ci: trigger CI triage agent on build failure). No existing issue tracks the empty-SLURM_JOB_ID scancel failure — worth opening one.
+svcnbu-swx-hpcx
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+🤖 CI Triage Agent — UCC/ucc-test-mpi · commit 5b235b0d
+TL;DR: Build #78 wasn't a real test failure — it was explicitly aborted mid-way through the ngc_pytorch docker image pull by the ucc-ci-dispatcher "abort old builds" logic when build #79 was queued for the same PR (#1354); the only genuine bug is that the pipeline_stop cleanup crashes with NoSuchFileException on the Slurm job-id file that was never created, and that crash is what re-raised as a FAILURE and triggered triage.
+Full analysis
+Summary: UCC/ucc-test-mpi #78 finished ABORTED: the "Setup Image x86_64/ngc_pytorch" branch was cancelled (script returned exit code 143), then the pipline stop on build_helper / pipeline_stop stages failed reading /mnt/pvc/ucc-test-mpi/job-id-78.txt.
+Root cause: Two chained issues, neither a UCC code defect:
+External cancellation, not a timeout or hang. At 20:51:22 the log shows Calling Pipeline was cancelled → Sending interrupt signal to process → script returned exit code 143, and the build ends Finished: ABORTED. The build had only run ~3.5 min against timeout_minutes: 180 (.ci/pipeline/test_mpi_matrix.yaml:66), so no time limit was hit. The ~3 min of silence from 20:48:22 to 20:51:22 is the harbor.mellanox.com/.../cuda12.9:base NGC PyTorch blob pull, which is legitimately slow — build BUILD: add libucc dependency for cl,tl,mc #79 completed the identical Build Docker stage in 638 s successfully. This is the ucc-ci-dispatcher b.doStop() loop (.ci/proj_jjb.yaml:162-181) killing in-flight builds of the same PR when a newer webhook for PR TL/UCP: enable host-side SRA allreduce pipelining #1354 arrived — working as designed.
+Non-robust Slurm cleanup (the actual bug). Because the cancel landed during the image build, the Allocate Slurm job step never ran, so JOB_ID_FILE (.ci/pipeline/test_mpi_matrix.yaml:38) was never written. The unconditional pipeline_stop → slurmCI.stop then does a readFile on it and throws java.nio.file.NoSuchFileException: /mnt/pvc/ucc-test-mpi/job-id-78.txt. That exception propagates into Jenkinsfile.shlib's catch (Exception ex), which sets currentBuild.result = 'FAILURE' and fires ciTriage — i.e. an aborted build is reported as a failure and spuriously triaged.
+Implicated commit: 817fc967 — "CI: add Slurm-based UCC MPI + DLRM test job (ucc-test-mpi) (#1318)", Daniel Pressler (added the unguarded pipeline_stop); interacting with 5852377f "CI: abort old builds (#1285)" (Daniel Pressler) and 71963b2b "ci: trigger CI triage agent on build failure (#1329)" (NirWolfer).
+File: .ci/pipeline/test_mpi_matrix.yaml:147-155 (pipeline_stop), with .ci/pipeline/test_mpi_matrix.yaml:38 (JOB_ID_FILE) and .ci/Jenkinsfile.shlib:29-50.
+Suggested fix:
+No action needed on PR TL/UCP: enable host-side SRA allreduce pipelining #1354 / commit 5b235b0d — re-check build BUILD: add libucc dependency for cl,tl,mc #79, which is the live run for this PR.
+Make Slurm teardown idempotent: have slurmCI.stop no-op when jobIdFile is absent or empty (fileExists(jobIdFile) guard before readFile), and/or wrap the pipeline_stop body so cleanup failures don't change the build result.
+In .ci/Jenkinsfile.shlib, distinguish aborts from failures — catch org.jenkinsci.plugins.workflow.steps.FlowInterruptedException separately, set currentBuild.result = 'ABORTED', and skip the ciTriage call so dispatcher-cancelled builds don't page triage.
+Related: PR #1318 (introduced test_mpi_matrix.yaml / pipeline_stop), PR #1285 (abort-old-builds), PR #1329 (triage trigger); current PR #1354, superseding build #79.
+svcnbu-swx-hpcx
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+🤖 CI Triage Agent — UCC/ucc-ci-dispatcher · commit cdf456cf
+TL;DR: Build #361 wasn't a real test or code failure — all five child jobs were killed mid-"Build Docker" by an external abort of the dispatcher (superseded by the newer poll-triggered build #362), and the resulting red status is an artifact of the pipeline_stop cleanup blowing up on a missing Slurm job-id file. Re-run/let #362 report, and make the pipeline_stop handler tolerate a missing jobIdFile.
+Full analysis
+Summary: UCC/ucc-ci-dispatcher #361 finished ABORTED after 4 of 5 child jobs (ucc-test-gtest #167, ucc-test-mpi #78, ucc-test-nvls #348, ucc-run-coverity #213) were cancelled by the upstream pipeline during image build; the post-abort cleanup stage then threw a NoSuchFileException.
+Root cause: Not a product defect. Evidence:
+Every child build logs Calling Pipeline was cancelled / Sending interrupt signal to process / script returned exit code 143 at the same instant, 2026-10-14T20:51:22Z. A simultaneous, identical kill across four independently-scheduled jobs is an upstream cancellation, not four coincident failures.
+The kill was ~4 minutes into runs with 60–240 minute timeouts (timeout_minutes: 240 for nvls, Timeout set to expire in 1 hr 0 min for coverity), so no job hit its own time limit.
+Timestamps show continuous activity right up to the kill — no gaps >2 min. ucc-test-gtest was compiling normally (CXX asym_mem/gtest-test_asymmetric_memory.o at 20:51:16, interrupted at 20:51:22) with zero compiler errors. ucc-build-hpcsdk TL/NCCL: add scatterv #474 completed SUCCESS. So nothing hung and nothing failed to build.
+fetch_jenkins_stages on ucc-ci-dispatcher Missed Free #362 shows a newer dispatcher build already running. The trigger is poll, and Topic/tl ucp kn algs #361 died the moment Missed Free #362 came up — classic "cancel superseded in-flight build" behaviour.
+ucc-run-coverity and the aarch64 nvls image pod were still stuck in Pod [Pending][ContainersNotReady] ... ContainerCreating from 20:47:15 through 20:50:27 (slow k8s scheduling / registry pull), so they had made no progress and were trivially cancellable — a contributing symptom, not the cause.
+The secondary, genuinely fixable problem is the masking: because the "Allocate Slurm job" step never ran, pipeline_stop → slurmCI.stop tried to readFile a job-id that was never written, and both pipline stop on build_helper and pipeline_stop stages are recorded as failure:
+java.nio.file.NoSuchFileException: /mnt/pvc/job-id-jenkins-UCC-ucc-test-nvls-348.txt and /mnt/pvc/ucc-test-mpi/job-id-78.txt. This turns a benign abort into a red "failure" with a Java stack trace as the top-line error, which is why this looked like a real CI break.
+Implicated commit: unknown — no commit in this PR's diff is implicated. PR #1354 (cdf456cf, merged as 5b235b0d) only touches src/schedule/*, src/components/{cl/hier,tl/ucp}/* allreduce/reduce paths and test/gtest/*; none of it was reached before the abort.
+File: .ci/pipeline/test_mpi_matrix.yaml:147-155 (and the equivalent pipeline_stop: block in .ci/pipeline/test_nvls_matrix.yaml) — the jobIdFile read is unguarded.
+Suggested fix:
+No code action for PR TL/UCP: enable host-side SRA allreduce pipelining #1354 — this is CI noise. Let dispatcher Missed Free #362 report, or re-trigger Topic/tl ucp kn algs #361; do not raise any timeout, since there was no hang and no job neared its limit.
+Make cleanup abort-safe so superseded builds don't surface as failures: have slurmCI.stop (in swx-jenkins-lib) no-op when jobIdFile is absent, e.g. wrap the readFile in a fileExists(jobIdFile) check and log "no Slurm allocation to release" instead of throwing. Alternatively guard at the call site in both matrix YAMLs.
+Optional hardening: the coverity and aarch64 nvls pods sat in ContainerCreating for 3+ minutes. If that's chronic, consider pre-pulling/caching harbor.mellanox.com/hpcx/x86_64/ubuntu24.04/builder and the aarch64 base image, or raising the k8s pod-launch retry budget, so a cancellation doesn't catch jobs that have made no progress at all.
+If "abort previous dispatcher run on new poll" is intentional, add disableConcurrentBuilds(abortPrevious: true) semantics explicitly and mark the aborted run NOT_BUILT rather than ABORTED/FAILURE, so triage isn't paged for superseded builds.
+Related: none found — search_issues_prs returned no matches for the cancellation or NoSuchFileException signatures. Nearest CI-config history: ccd0fd01 "CI: NVLS tests update partition (#1361)" (Daniel Pressler) and da623b3a "CI: fix SLURM job release in onfail/always (#1282)" (Ilya Kryukov), the latter being a prior attempt at the same cleanup-robustness class of bug.
+janjust
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+/build
+svcnbu-swx-hpcx
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+🤖 CI Triage Agent — UCC/ucc-test-mpi · commit cdf456cf
+TL;DR: Build #78 itself was aborted (a Kubernetes agent-pod launch timeout + superseded pipeline), but the same commit in build #79 exposes the real regression: ucc_test_mpi segfaults with a NULL function-pointer jump inside ucc_event_manager_notify() while posting/completing the newly-enabled multi-fragment host SRA allreduce pipeline. Fix the event-manager (em_list) lifetime in ucc_schedule_pipelined_finalize() / the frag-restart path rather than treating #78's abort as the failure.
+Full analysis
+Summary: UCC/ucc-test-mpi #78 ended ABORTED with no test ever running; the identical commit in #79 crashed MPI_Iallreduce with SIGSEGV (exit 139) in ucc_event_manager_notify.
+Root cause: Two separate things, only one of which is a real defect.
+Build CORE: ucc status string implementation #78 is infrastructure noise, not a code failure. The "Setup Image x86_64/ngc_pytorch" branch was killed mid podman pull of the cuda12.9:base layers — the log shows Calling Pipeline was cancelled → Sending interrupt signal to process → script returned exit code 143, i.e. the parallel branch was cancelled, not timed out on its own work (the last blob copy at 20:48:22 to the kill at 20:51:22 is the cancellation window). The follow-on pipline stop on build_helper / pipeline_stop stages then failed secondarily: the agent pod hit KubernetesClientTimeoutException: Timed out waiting for [1000000] milliseconds for [Pod] ucc-mpi-buildhelper-78-v0scm-11ntr (stuck in ContainerCreating), and slurm.stop threw NoSuchFileException: /mnt/pvc/ucc-test-mpi/job-id-78.txt because no Slurm job was ever allocated. Nothing in CORE: ucc status string implementation #78 reached a test.
+The genuine regression, visible in BUILD: add libucc dependency for cl,tl,mc #79 on the same commit:
+```
+=== UCC MPI slurm (job 106730 rank 4/8 nodes 2) ===
+[funk16] Caught signal 11 (Segmentation fault: Sent by the kernel at address (nil))
+ 4 libucc.so.1(ucc_event_manager_notify+0x34)
+ 5 mca_coll_ucc.so(mca_coll_ucc_iallreduce+0x76e)
+ 6 libmpi.so.40(PMPI_Iallreduce+0x39)
+srun: error: funk16: task 4: Exited with exit code 139
+```
+at address (nil) plus the tiny +0x34 offset means the very first em_list walk in ucc_event_manager_notify() (src/schedule/ucc_schedule.c:211) dereferenced a freed/zeroed event-manager and jumped through a NULL listeners[i].handler. The missing intermediate frames are consistent with the tail calls ucc_collective_post → task->post → ucc_schedule_pipelined_post → ucc_schedule_start → ucc_event_manager_notify, i.e. the top-level pipelined schedule task's listener list is being walked after it was torn down or while the same mpool object is in use twice.
+This path is newly reachable only because of this branch: ucc_tl_ucp_allreduce_sra_knomial_select_pipeline_params() now enables a real multi-fragment pipeline for host buffers (pp->n_frags = 2, pp->frag_size = 524288, pp->pdepth = 4) at allreduce_sra_knomial.c:218-239. That activates the fragment restart/completion machinery in ucc_schedule_pipelined_completed_handler() for host allreduce — exactly the MPI_Iallreduce host test that crashed. Previously host allreduce always took the monolithic single-fragment path.
+The prime suspect is ucc_schedule_pipelined_finalize(): its own comment states "frag and task em lists stay: the thread that completed the last frag may still be walking them", yet the next line does ucc_coll_task_destruct(&schedule_p->super.super) — freeing the top-level schedule task's em_list (the one holding the ucc_frag_start_handler listeners subscribed at ucc_schedule_pipelined_pipelined_init:336) before ucc_tl_ucp_put_schedule() recycles the object. Any overlap between that teardown and a walk of the same list (or a double ucc_mpool_put of a schedule, so two collectives share one object) yields precisely a NULL-handler jump at +0x34.
+Implicated commit: cdf456cf — Tomislav Janjusic, "REVIEW: fix finalize UAF, gate test hooks" (branch HEAD, touches ucc_schedule_pipelined.c), on top of 8b04194d — Ferrol Aderholdt, "TL/UCP: enable host-side SRA allreduce pipelining", and c0ca4e3c — "SCHEDULE: defer ppln completion to outer handler (#1364)".
+File: src/schedule/ucc_schedule_pipelined.c:172 (teardown of the top-level em_list in ucc_schedule_pipelined_finalize), crash site src/schedule/ucc_schedule.c:211-219; trigger src/components/tl/ucp/allreduce/allreduce_sra_knomial.c:218-239.
+Suggested fix:
+Do not destruct the pipelined schedule task's em_list in ucc_schedule_pipelined_finalize() until after all frags have been finalized and no handler can still be walking it — move ucc_coll_task_destruct(&schedule_p->super.super) below the frag-finalize loop, or defer it to the mpool obj_cleanup / ucc_coll_task_construct on reuse so a recycled object always starts with a valid empty list head.
+Audit the error paths for a double ucc_mpool_put: ucc_tl_ucp_allreduce_sra_knomial_frag_init's out: label calls task->finalize(task) and ucc_tl_ucp_put_schedule(schedule), while ucc_schedule_pipelined_init's err: label destructs frags and their tasks and then calls frags[i]->super.finalize() → ucc_schedule_finalize() → each task's finalize() again. Add an assert/poison in ucc_tl_ucp_put_schedule/ucc_tl_ucp_put_task to catch a second put.
+To confirm quickly: rerun the host allreduce test with the pipeline forced off (UCC_TL_UCP_ALLREDUCE_SRA_KN_PIPELINE=0, or temporarily make the host branch fail-closed to threshold=SIZE_MAX, n_frags=0). If the segfault disappears, the multi-fragment host path is confirmed as the trigger. Also run under valgrind/ASAN and with UCC_LOG_LEVEL=trace to capture the sched %p restarting frag sequence before the crash.
+Separately, for CI hygiene: CORE: ucc status string implementation #78 should not be reported as a code failure. Make pipeline_stop tolerate a missing job-id file (if (fileExists(jobIdFile)) before readFile, as /mnt/pvc/ucc-test-mpi/job-id-${BUILD_NUMBER}.txt legitimately does not exist when the build is cancelled before "Allocate Slurm job"), and investigate the ContainerCreating stall that exhausted the pod-launch timeout.
+Related: PR #1354 "TL/UCP: enable host-side SRA allreduce pipelining" (this branch); prior fixes in the same area: #1364 "SCHEDULE: defer ppln completion to outer handler", c8314d31 "SCHEDULE: fix task restart in ppln schedule (#1262)", 4f67436b "CORE: fix n deps overflow in pipelined schedule (#1051)".
+svcnbu-swx-hpcx
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+🤖 CI Triage Agent — UCC/ucc-test-nvls · commit 5b235b0d
+TL;DR: The build never ran any UCC test — the aarch64 Kubernetes agent pod that builds the nvls Docker image never left ContainerCreating (16.5 min, then KubernetesClientTimeoutException, then a second pod hung the same way until the run was cancelled). This is an il-ipp-blossom-prod arm64 agent/infra problem, not a code failure from PR #1354; re-run the job, and separately fix pipeline_stop so it doesn't crash when the Slurm job-id file was never created.
+Full analysis
+Summary: UCC/ucc-test-nvls #349 aborted in the Parallel stage: branch "Setup Image aarch64/nvls/0" could not provision its Kubernetes pod, so no Slurm allocation or NVLS test ever executed.
+Root cause: Infrastructure, not the commit under test. Evidence from the build log:
+hpcx/ucc-test-nvls-build-nvls-349-9vtj4-qhnt0 was created at 20:52:35 and reported Container [docker] waiting [ContainerCreating] No message / Container [jnlp] waiting [ContainerCreating] continuously until 21:09:15, when Jenkins gave up: ERROR: Failed to launch ucc-test-nvls-build-nvls-349-9vtj4-qhnt0 / io.fabric8.kubernetes.client.KubernetesClientTimeoutException: Timed out waiting for [1000000] milliseconds for [Pod] ... in namespace [hpcx].
+The retry wrapper created a replacement pod ...-9jhh5 at 21:09:25, which also sat in ContainerCreating for 10 minutes until Calling Pipeline was cancelled → Failed in branch Setup Image aarch64/nvls/0.
+The sibling x86_64 build_helper branch, with identical volumes (hpcx-pvc, jenkins-ssh-key) and resource requests, provisioned and built/pushed its image in ~35 s. The only difference is nodeSelector: kubernetes.io/arch (arm64 vs amd64), so the stall is specific to the aarch64 node pool — stuck image pull of quay.io/podman/stable:v5.7.1 / jenkins/inbound-agent:latest on arm, or a volume-attach failure for the hpcx-pvc PVC from an arm node.
+This is not a wall-clock-limit issue: the 240-minute timeout_minutes was never reached, and no test process hung — the container runtime never started. Build API: new datatype definition #348 (same commit, 5 minutes earlier) failed identically; TL/NCCL: allgatherv algs bcopy and bcast #347 passed end-to-end with the same config, confirming flakiness rather than a config regression.
+PR TL/UCP: enable host-side SRA allreduce pipelining #1354 touches only src/schedule/*, src/components/tl/ucp/allreduce/* and gtest files — nothing under .ci/ — and no UCC code was ever compiled or run in this build.
+A secondary, real repo-side defect is masking the error: pipeline_stop unconditionally does readFile on ${JOB_ID_FILE}, so when the "Allocate Slurm job" step is skipped the run ends with java.nio.file.NoSuchFileException: /mnt/pvc/job-id-jenkins-UCC-ucc-test-nvls-349.txt instead of the actual pod-provisioning error.
+Implicated commit: unknown — no code commit is implicated; the most recent .ci change to this file is ccd0fd0 (Daniel Pressler, "CI: NVLS tests update partition" #1361), but build #347 passed afterwards, so it is not causal.
+File: .ci/pipeline/test_nvls_matrix.yaml:42-49 (aarch64 nvls image-build pod) and .ci/pipeline/test_nvls_matrix.yaml:155-164 (pipeline_stop reading JOB_ID_FILE)
+Suggested fix:
+Re-trigger ucc-test-nvls for PR TL/UCP: enable host-side SRA allreduce pipelining #1354 — nothing in the PR caused this. Do not treat it as a test regression.
+Escalate to the Blossom/k8s admins for the il-ipp-blossom-prod arm64 pool in namespace hpcx: ask for kubectl describe pod ucc-test-nvls-build-nvls-349-9vtj4-qhnt0 events; the "No message" ContainerCreating for 16 min points at image-pull or hpcx-pvc volume-attach on arm nodes. If hpcx-pvc is ReadWriteOnce, it cannot be mounted by the aarch64 pod while the amd64 build_helper pod holds it — switch the claim to RWX or drop the PVC mount from the arm image-build pod, which only needs it for JOB_ID_FILE (an x86_64/build_helper concern).
+Pin jenkins/inbound-agent:latest to a digest/tag with a verified arm64 manifest, and consider imagePullPolicy: IfNotPresent for the docker container so a registry stall cannot block pod startup.
+Make pipeline_stop resilient: guard the readFile with a fileExists check (or wrap in try/catch) so a failed allocation surfaces the launch error instead of a NoSuchFileException stack trace.
+Related: PR #1354 (the PR under test, unaffected); #1361 (last .ci NVLS change); prior similar CI-infra noise discussed in #1269 ("CI: enhance NVLS tests"). No existing issue tracks the aarch64 pod-provisioning timeout — worth filing one.
+svcnbu-swx-hpcx
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+🤖 CI Triage Agent — UCC/ucc-test-mpi · commit 5b235b0d
+TL;DR: ucc_test_mpi segfaults on the first MPI_Iallreduce because ucc_schedule_pipelined_finalize frees the top-level schedule's em_list while ucc_event_manager_notify(SCHEDULE_STARTED) is still walking it — a use-after-free newly reachable now that PR #1354 enables multi-fragment host-side SRA pipelining that can complete synchronously inside post(). Drop the ucc_coll_task_destruct from ucc_schedule_pipelined_finalize (the mpool cleanup already does it) and make the notify loop safe against self-completion.
+Full analysis
+Summary: UCC/ucc-test-mpi #79 stage "Run UCC MPI tests (bulk)" crashed with SIGSEGV (exit 139) in ucc_event_manager_notify during the first PMPI_Iallreduce.
+Root cause: Use-after-free of the top-level pipelined schedule's event-manager list. With PR #1354's new host-side SRA pipelining, a host allreduce can run the entire pipeline to completion synchronously inside task->post(). The resulting ucc_task_complete → user completion callback → ucc_collective_finalize → ucc_schedule_pipelined_finalize path executes ucc_coll_task_destruct(&schedule_p->super.super) (freeing all ucc_event_manager_t nodes) and returns the schedule to the mpool, while the enclosing ucc_event_manager_notify(SCHEDULE_STARTED) loop — which uses the non-safe ucc_list_for_each and must still visit listeners for pipeline depths 2–4 — continues dereferencing that freed list. Pre-PR this was unreachable because host allreduce always used the monolithic single-fragment path (one listener, no restart loop).
+Implicated commit: cdf456cf — "REVIEW: fix finalize UAF, gate test hooks", Tomislav Janjusic (landed ~48 min before this build), on top of 8b04194d "TL/UCP: enable host-side SRA allreduce pipelining", Ferrol Aderholdt (the commit that makes the host multi-fragment path reachable).
+File: src/schedule/ucc_schedule_pipelined.c:172 (premature ucc_coll_task_destruct), with the unsafe iteration at src/schedule/ucc_schedule.c:211 and the enabling policy at src/components/tl/ucp/allreduce/allreduce_sra_knomial.c:218-239.
+Suggested fix:
+Remove the destruct from finalize. In ucc_schedule_pipelined_finalize, delete ucc_coll_task_destruct(&schedule_p->super.super); — the top-level task's em_list must survive exactly like the frag/task lists already do (per the adjacent comment). ucc_coll_task_mpool_obj_cleanup already destructs at mpool teardown, and ucc_event_manager_init (called from ucc_coll_task_init) resets n_listeners on every reuse, so nothing leaks and no stale listeners fire.
+Harden the notify loop. In ucc_event_manager_notify, switch to ucc_list_for_each_safe and break out as soon as parent_task->status != UCC_INPROGRESS, so a schedule that completes re-entrantly inside a listener's post() stops spawning further fragments. This also fixes a latent correctness bug: today, after synchronous completion, the loop keeps calling ucc_frag_start_handler for the remaining listeners, driving n_frags_started past n_tasks and passing out-of-range frag_num into ucc_tl_ucp_allreduce_sra_knomial_frag_setup.
+Optional de-risk while 1+2 are reviewed: set the host branch in ucc_tl_ucp_allreduce_sra_knomial_select_pipeline_params to pdepth = 1 / n_frags = 0 (monolithic) to restore pre-PR host behavior and unblock CI.
+Add a regression test that posts a host SRA allreduce whose fragments complete inside post() and calls ucc_collective_finalize from the completion callback — that reproduces this deterministically under ASAN.
+Related: PR #1354 ("TL/UCP: enable host-side SRA allreduce pipelining") — the PR under test; prior work in the same area: #1364 ("SCHEDULE: defer ppln completion to outer handler"), #1262 ("SCHEDULE: fix task restart in ppln schedule"), #1051 ("CORE: fix n deps overflow in pipelined schedule").
+svcnbu-swx-hpcx
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+🤖 CI Triage Agent — UCC/ucc-test-mpi · commit cdf456cf
+TL;DR: The UCC MPI test segfaulted (SIGSEGV, exit 139) inside ucc_event_manager_notify() while posting an MPI_Iallreduce, i.e. on the first post of a pipelined SRA‑allreduce schedule — the newly enabled host‑side SRA pipelining path on this branch walks an event‑manager list that ucc_schedule_pipelined_finalize() has already freed via the ucc_coll_task_destruct() added in HEAD commit cdf456cf. Remove/defer that ucc_coll_task_destruct(&schedule_p->super.super) call so the schedule's em_list is only torn down by the mpool obj_cleanup.
+Full analysis
+Summary: Stage 206 "Run UCC MPI tests (bulk)" failed: rank 4 (funk16) of ucc_test_mpi crashed with signal 11 in libucc.so.1(ucc_event_manager_notify+0x34) called from mca_coll_ucc_iallreduce, killing the whole srun step.
+Root cause: The backtrace is a tail‑call chain: mca_coll_ucc_iallreduce → ucc_collective_post → ucc_tl_ucp_allreduce_sra_knomial_start → ucc_schedule_pipelined_post → ucc_schedule_start → ucc_event_manager_notify(&schedule->super, UCC_EVENT_SCHEDULE_STARTED). All of those end in return <next>(task) and collapse into one frame, so the fault is on the very first list load of the pipelined schedule's em_list — a null/dangling em_list.next (Caught signal 11 ... at address (nil)).
+Two things on this branch combine to produce that:
+ucc_tl_ucp_allreduce_sra_knomial_select_pipeline_params() (added by 8b04194d) only disables pipelining for host buffers when topo_nnodes != 1. The MPI test runs the half and odd_even sub‑teams, which on this 2‑node × 4‑rank job are single‑node (ranks 0‑3 on funk15, 4‑7 on funk16), so topo_nnodes == 1 and the multi‑fragment host pipeline (n_frags=2, pdepth 2–4) is actually exercised for the first time. Rank 4 is exactly a rank in such a sub‑team.
+ucc_schedule_pipelined_finalize() now calls ucc_coll_task_destruct(&schedule_p->super.super) — it ucc_list_dels and free()s every ucc_event_manager_t hanging off the pipelined schedule's top‑level task, before finalizing the frags, and the object is then returned to the shared req_mp mpool by ucc_tl_ucp_put_schedule(). The same commit's own comment ("frag and task em lists stay: the thread that completed the last frag may still be walking them") acknowledges these lists are still live at finalize time, yet the top‑level list is freed anyway. Since req_mp serves both ucc_tl_ucp_task_t and ucc_tl_ucp_schedule_t and obj_init/ucc_coll_task_construct runs only once per chunk, the recycled object is re‑used with a list head whose cached em entries are gone, and the next ucc_schedule_start() dereferences it.
+The outer exit code 143 / "CANCELLED" in the pipeline log is a symptom only — slurm terminated the remaining tasks 1 s after rank 4 died. There is no multi‑minute gap anywhere in the log (test banner at 21:13:42.267, crash at 21:13:42.267, step cancelled at 21:13:44), so this is not a hang or a time‑limit problem.
+Implicated commit: [REDACTED:Hex High Entropy String] — Tomislav Janjusic, "REVIEW: fix finalize UAF, gate test hooks" (regression introduced on top of 8b04194d, Ferrol Aderholdt, "TL/UCP: enable host-side SRA allreduce pipelining")
+File: src/schedule/ucc_schedule_pipelined.c:172 (the ucc_coll_task_destruct(&schedule_p->super.super) in ucc_schedule_pipelined_finalize), with the enabling path at src/components/tl/ucp/allreduce/allreduce_sra_knomial.c:218-239
+Suggested fix:
+Drop the premature teardown in ucc_schedule_pipelined_finalize() — delete the ucc_coll_task_destruct(&schedule_p->super.super) line and let the mpool's obj_cleanup (ucc_coll_task_mpool_ops.obj_cleanup → ucc_coll_task_destruct) reclaim the em structs, exactly as the function already does for the frag and sub‑task lists. If the original UAF that commit was chasing needs addressing, move the destruct after the frag‑finalize loop and only once the object is provably unreferenced, and make it idempotent w.r.t. mpool reuse (re‑ucc_list_head_init() the head after freeing).
+To confirm quickly: rerun stage 206 with UCC_TL_UCP_ALLREDUCE_SRA_KN_PIPELINE=0 (or set pp->n_frags = 0 unconditionally for the host path). If the segfault disappears, the multi‑fragment host pipeline is confirmed as the trigger.
+Add an MPI/gtest case that posts a host in‑place allreduce >256 KB on a single‑node sub‑team and then finalizes and re‑posts, which is the recycle sequence that faults here.
+Related: PR #1354 "TL/UCP: enable host-side SRA allreduce pipelining"; prior pipeline-completion fix #1364 ("SCHEDULE: defer ppln completion to outer handler", c0ca4e3c) and #1262 ("SCHEDULE: fix task restart in ppln schedule") touch the same handler and are useful context.
+🛡️ This comment had 1 potential secret(s) redacted (Hex High Entropy String). See request_id 58ba37ab-6d2a-4136-88a2-d8cbb14b679b in the triage console for the audit trail.
+svcnbu-swx-hpcx
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+🤖 CI Triage Agent — UCC/ucc-test-gtest · commit 5b235b0d
+TL;DR: The gtest run wasn't a real test failure — the parallel x86_64/build_helper branch's Kubernetes agent pod never left ContainerCreating and hit a ~16.7 min provisioning timeout, which fail-fast-cancelled the healthy "Run UCC gtest tests" stage mid-run (SIGTERM / exit 143). Re-run the build; the fix is infra/pipeline-level (pod provisioning), not in PR #1354.
+Full analysis
+Summary: Build #168 was ABORTED because the build_helper pod failed to launch, cancelling the in-progress gtest stage after only 68s of a passing run.
+Root cause: The log shows the gtest stage was making continuous progress — timestamps advance every ~250 ms with every test reporting [ OK ] (last activity: test_reduce_host/40.single_persistent_inplace), with no gap anywhere near 2 minutes. So this was not a hang or a genuinely-slow test. The kill came from outside: Calling Pipeline was cancelled → Sending interrupt signal to process → Terminated → script returned exit code 143. The actual failure is in the sibling parallel branch, reported at the end of the build as Failed in branch x86_64/build_helper v1:
+Pod hpcx/ucc-gtest-buildhelper-168-1gvfn-v9wg9 sat in Pod [Pending][ContainersNotReady] containers with unready status: [buildhelper jnlp] with both containers stuck in ContainerCreating.
+After the configured wait it threw io.fabric8.kubernetes.client.KubernetesClientTimeoutException: Timed out waiting for [1000000] milliseconds for [Pod] ... in namespace [hpcx]. 1,000,000 ms ≈ 16.7 min, which matches the aborted Parallel stage duration of 1,100,627 ms.
+Because the parallel block is fail-fast, that branch failure raised FlowInterruptedException: Calling Pipeline was cancelled, terminating the gtest branch: hudson.AbortException: parallel task failed with msg: ... Calling Pipeline was cancelled.
+Notably both containers were stuck, including jnlp (jenkins/inbound-agent:latest, imagePullPolicy: IfNotPresent, normally node-cached). That points at a node-level setup problem shared by both containers — most likely the hpcx-pvc persistentVolumeClaim / jenkins-ssh-key secret volume mounts failing to attach, rather than a pull of harbor.mellanox.com/torch-ucc/x86_64/build_helper:gtest (whose "Build Docker" stages both succeeded earlier in this same build). No UCC test failed, and no application error appears before the termination.
+Implicated commit: unknown — no UCC source commit is implicated; this is a CI infrastructure failure. Commit [REDACTED:Hex High Entropy String] / PR #1354 is not at fault (every executed test reported [ OK ] or [ SKIPPED ]).
+File: unknown (Jenkins podTemplate definition for the ucc-gtest-buildhelper agent / hpcx namespace config; no matching Jenkinsfile was readable in-repo — .ci/Jenkinsfile.gtest and .ci/job_matrix_gtest.yaml do not exist)
+Suggested fix:
+Immediate: retrigger build V0.1.x CORE: dbg log level for "unsupported" #168. This is a transient cluster/provisioning failure with no code signal.
+Infra: have the Blossom/hpcx namespace owners check why the pod was stuck in ContainerCreating for ~17 min — kubectl describe pod events for volume attach on hpcx-pvc, the jenkins-ssh-key secret, and the memory-backed workspace-volume emptyDir, plus node disk/registry health.
+Pipeline robustness: reduce the pod launch timeout from 1000000 ms to something like 300000 ms (5 min) so provisioning failures surface quickly instead of burning 17 minutes, and add a retry on pod provisioning.
+Decouple the branches: the build_helper branch only exists to do cleanup/stop bookkeeping, yet its failure destroys a fully healthy gtest run. Set failFast false on that parallel block (or move the build_helper work into a post/sequential stage) so an agent-provisioning failure in a helper branch cannot cancel passing tests and produce a misleading exit 143.
+Related: none found — search_issues_prs for "KubernetesClientTimeoutException build_helper pod ContainerCreating gtest aborted" returned no matches. Nearest CI changes are a444af93 (Daniel Pressler, "CI: convert gtest pipeline to use slurm lib") and ccd0fd01 (Daniel Pressler, "CI: NVLS tests update partition (#1361)"), neither of which touches the pod template timeout.
+🛡️ This comment had 1 potential secret(s) redacted (Hex High Entropy String). See request_id b8c96b9e-1f26-4677-8fff-026157cfdf06 in the triage console for the audit trail.
+janjust
+approved these changes
+Oct 14, 2026
+View reviewed changes
+wfaderhold21
+and others
+added 9 commits
+October 14, 2026 18:48
+TL/UCP: enable host-side SRA allreduce pipelining
+…
+a40f053
+```
+Overlap the reduce-scatter and allgather phases across fragments on the
+host path so fragment i's allgather (pure network) runs concurrently with
+fragment i+1's reduce-scatter (network + CPU reduction). Previously the
+host branch of the SRA-knomial pipeline heuristic disabled pipelining
+(n_frags=1), leaving the NIC idle during every reduce step and the CPU
+idle during the entire allgather.
+
+The host else-branch of get_pipeline_params() now sets conservative
+defaults: threshold 256KB, 512KB fragments, nfrags floor 2, pdepth 2,
+parallel order. Env override UCC_TL_UCP_ALLREDUCE_SRA_KN_PIPELINE still
+takes precedence. Correctness is unchanged: the CUDA in-place path already
+runs the identical fragmented schedule, and per-frag scratch is sized from
+max_frag_count (smaller frags -> smaller scratch).
+
+Fragment size was tuned on thor (8 nodes, host, float32 sum, forced
+sra_knomial, mlx5_0:1) against stock HPC-X 2.25.1 UCC:
+
+  new vs hpcx (avg bus BW ratio)
+  size    2 ranks  4 ranks  6 ranks  256 ranks
+  512KB    1.34x    1.37x    1.25x    1.06x
+  1MB      1.45x    1.30x    1.22x    1.45x
+  2MB      1.45x    1.29x    1.17x    1.53x
+  4MB      1.43x    1.25x    1.31x   >1.4x
+
+512KB frags beat the initial 256KB choice by 6-17% at >=1MB across
+2-256 ranks and remove a 1-2MB regression the finer default showed at
+256 ranks; below 256KB the path is byte-identical (no regression).
+pdepth=4 gave no benefit and hurt at 4MB, so pdepth stays 2.
+```
+REVIEW: remove unnecessary comments
+cc992b6
+REVIEW: address feedback
+56068fe
+REVIEW: raise MAX_FRAGS capacity back to 16
+…
+9d528af
+```
+The earlier review commit reverted UCC_SCHEDULE_PIPELINED_MAX_FRAGS
+from 16 to 4 while keeping the tests that require depths 6, 8, and
+16. With the capacity at 4, ucc_schedule_pipelined_init() silently
+clamped those requests to 4 fragments and returned success, so
+pipelined_init_depth_16_success, pipelined_depth_16_exact_lifecycle
+(16 inits / 32 subscriptions), the depth-8 failure-injection tests,
+and the depth-6 subscription-unwind test all failed.
+
+Restore the intended limit of 16. The clamp at MAX now only triggers
+for requests above 16, which is the behavior the clamp test and the
+depth-16 lifecycle test both expect.
+```
+REVIEW: address feedback
+…
+4623b28
+```
+Strip explanatory comments that duplicate commit history, code context,
+or test assertions, per review feedback:
+
+- src/schedule/ucc_schedule_pipelined.h:
+  Drop the UCC_SCHEDULE_PIPELINED_MAX_FRAGS rationale block (history of
+  the 4 -> 16 change and the clamp-vs-reject policy). The value, the
+  clamp behavior in ucc_schedule_pipelined_init(), and the cost of the
+  inline frags[] array are all visible in the code itself; the tuning
+  history belongs to the commit log, not the source.
+
+- src/schedule/ucc_schedule_pipelined.c:
+  Remove the err: unwind comment in ucc_schedule_pipelined_init(). The
+  sequence (destruct the pipeline task first, then each built fragment
+  and its tasks) is self-documenting, and the ordering rationale is
+  covered by the pipelined_real_subscription_failure_* /
+  pipelined_fragment_failure_exact_unwind tests in test_schedule.cc.
+
+- src/schedule/ucc_schedule.c, src/schedule/ucc_schedule.h:
+  Remove the prose around the fault-injection seam
+  (ucc_event_manager_subscribe_fault_cb /
+  ucc_event_manager_set_subscribe_fault_cb). The setter's contract
+  (NULL restores production behavior) is obvious from the
+  if (cb != NULL) guard.
+
+- src/components/tl/ucp/allreduce/allreduce_sra_knomial.c:
+  Remove the inline tuning rationale in
+  ucc_tl_ucp_allreduce_sra_knomial_select_pipeline_params()
+  (threshold/frag_size/n_frags/pdepth comments). Those measurements are
+  recorded in the enabling commit message; the remaining comments in
+  the function (tagged-collective tag collision, fail-closed topology
+  guard, CUDA in-place fast-alloc size) explain non-obvious
+  correctness decisions and stay.
+
+- src/components/tl/ucp/allreduce/allreduce_sra_knomial.c,
+  src/components/tl/ucp/reduce/reduce_srg_knomial.c:
+  Split combined two-pointer declarations into one declaration per
+  line (style).
+
+No functional changes.
+```
+REVIEW: make test fi hooks atomic and test-scoped
+…
+bf8af7a
+```
+The subscribe fault cb and pipelined lock observer are process-wide
+globals read by schedule code on every subscribe/lock operation, but
+were plain pointer writes with no synchronization, and the tests
+installed them without restoring, leaving test instrumentation armed
+for later schedules in the same process.
+
+- make both hook pointers _Atomic with relaxed load/store, snapshotting
+  to a local before invocation
+- restore both hooks to NULL in the test_schedule fixture TearDown
+- document the setters as test-only install/restore-with-NULL
+```
+REVIEW: address formatting
+ed1eacb
+REVIEW: fix finalize UAF, gate test hooks
+…
+f1b1262
+```
+- Keep the em lists of the frags and their tasks in
+  ucc_schedule_pipelined_finalize(): in THREAD_MULTIPLE, the thread
+  that completed the last frag may still be walking them when the
+  owner finalizes the schedule.
+- Build the subscribe fault-injection and lock-observer hooks, and the
+  C11 atomics they use, only with --enable-gtest (ENABLE_GTEST).
+- Warn once, instead of on every init, when the depth is clamped.
+
+Signed-off-by: Tomislav Janjusic <tomislavj@nvidia.com>
+```
+REVIEW: address greptile comments
+…
+dfd6a3d
+```
+- Keep the pipelined schedule's own em list in finalize too: when the
+  schedule is a task of another schedule (e.g. TL/UCP SRA in CL/HIER
+  RAB), ucc_task_complete() walks it after the parent may complete.
+  Tests that relied on finalize for it now destruct it themselves.
+- nfrags=0 with a fragsize again splits by fragsize; only nfrags=0
+  without a fragsize disables pipelining. Keep n_frags >= 1.
+- Skip the SRA selection tests when TL/UCP is not available.
+
+Signed-off-by: Tomislav Janjusic <tomislavj@nvidia.com>
+```
+janjust
+force-pushed
+the
+topic/ar-sra-host-pipelining
+branch
+from
+fdb9c21 to
+dfd6a3d
+Compare
+October 14, 2026 23:48
+janjust
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+/build
+svcnbu-swx-hpcx
+commented
+Oct 15, 2026
+Copy link
+Copy Markdown
+Collaborator
+🤖 CI Triage Agent — UCC/ucc-test-mpi · commit 8a238b1d
+TL;DR: The -T (THREAD_MULTIPLE) CL/HIER + split_rail allreduce aborted with ucc_schedule.c:132 Assertion '0' failed — the progress queue dequeued a task whose progress pointer had been reset to ucc_dummy_progress, i.e. a frag task was finalized and recycled through the mpool while still queued; the pipelined-schedule completion bookkeeping added in this PR mutates shared pipeline state from the post path without the schedule lock, so the schedule can declare completion too early. Fix: serialize all ucc_schedule_pipelined_t state updates (n_frags_started, next_frag_to_post, n_frags_in_pipeline, n_completed_tasks, handler_depth, complete_pending) under schedule->lock, including the ucc_frag_start_handler path reached from ucc_schedule_pipelined_post.
+Full analysis
+Summary: UCC/ucc-test-mpi #84 stage "Run UCC MPI tests (bulk)" (node 206) failed: rank funk06 task 5 aborted (exit 134, SIGABRT/core dumped) in the -T pass of UCC_CL_HIER_TUNE=allreduce:@split_rail:inf -c allreduce; srun then cancelled the whole step.
+Root cause: Log evidence:
+```
+[funk06:2376738:0:2376760] ucc_schedule.c:132  Assertion `0' failed
+... ucc_fatal_error_format
+... libucc.so.1(ucc_dummy_finalize+0x0)      <- ucc_dummy_progress, src/schedule/ucc_schedule.c:132
+... ucc_context_progress+0x7d
+```
+ucc_schedule.c:132 is ucc_assert_always(0) inside ucc_dummy_progress(), reached from the progress-queue path (ucc_context_progress → ucc_pq_mt_progress → task->progress(task)), not from the enqueue path. ucc_dummy_progress is only ever installed by ucc_coll_task_init() (ucc_schedule.c:152) and is overwritten by every real TL task before it is posted. So the task that was dequeued had been freed back to its mpool and re-initialized while a stale entry for it was still in the lock-free progress queue — a premature-finalize/use-after-free: the pipelined schedule published completion, the test thread called ucc_collective_finalize, ucc_schedule_pipelined_finalize() (ucc_schedule_pipelined.c:162-182) finalized every frag and its RS/AR/AG tasks, and one of those tasks was still queued for progress.
+Why it only breaks with -T: all pipelined bookkeeping lives in ucc_schedule_pipelined_t and is guarded by schedule->lock only inside ucc_schedule_pipelined_completed_handler() (lines 92-155). The post side is unguarded: ucc_schedule_pipelined_post() → ucc_schedule_start() → ucc_event_manager_notify(SCHEDULE_STARTED) → ucc_frag_start_handler() mutates next_frag_to_post, n_frags_started, n_frags_in_pipeline (lines 65-71) with no lock, and ucc_schedule_pipelined_post() resets handler_depth/complete_pending (lines 196-197) unlocked. In UCC_THREAD_MULTIPLE the progress queue is per-context and shared, so another thread can be running the completed handler (incl. the new RESTART_PENDING restart loop and the deferred ucc_task_complete() at line 149-158) on the same schedule concurrently with the owner's post path. A torn n_frags_in_pipeline/n_completed_tasks lets n_completed_tasks == n_tasks be observed before all frag tasks are drained, which is exactly the premature completion that produces the recycled-task assert. The run also confirms the narrowing: the non--T pass of the identical config (and +pipeline, +rab, default, TL/UCP) all reported failed: 0; only the -T split_rail pass aborted.
+Implicated commit: The PR #1354 branch work on the pipelined schedule — c0ca4e3c "SCHEDULE: defer ppln completion to outer handler (#1364)" (Tommy Janjusic) and f1b1262c "REVIEW: fix finalize UAF, gate test hooks" / dfd6a3d1 (Tomislav Janjusic), on top of a40f053a "TL/UCP: enable host-side SRA allreduce pipelining" (Ferrol Aderholdt). These are the only recent changes to src/schedule/ucc_schedule.c and src/schedule/ucc_schedule_pipelined.c.
+File: src/schedule/ucc_schedule_pipelined.c:47-79 (unlocked ucc_frag_start_handler) and src/schedule/ucc_schedule_pipelined.c:92-158 (locked completed handler + deferred ucc_task_complete); assert site src/schedule/ucc_schedule.c:132; victim path src/core/ucc_progress_queue_mt.c:75-78.
+Suggested fix:
+Make the lock cover the whole pipeline state machine, not just the completion handler: acquire schedule->lock around the SCHEDULE_STARTED notify in ucc_schedule_pipelined_post() (or inside ucc_frag_start_handler() before touching next_frag_to_post/n_frags_started/n_frags_in_pipeline). The lock is recursive, so the nested call from the restart loop at line 137 is safe.
+Treat n_completed_tasks, n_frags_in_pipeline, handler_depth and complete_pending as shared: either always hold the lock (not just when UCC_TASK_THREAD_MODE == UCC_THREAD_MULTIPLE) or use ucc_atomic_fadd32 as the non-pipelined ucc_schedule_completed_handler() already does (ucc_schedule.c:236).
+Add a debug guard that catches this class of bug early: in ucc_schedule_pipelined_finalize() assert that every frag task's status != UCC_INPROGRESS before returning it to the mpool, and in ucc_pq_mt_progress() assert task->progress != ucc_dummy_progress.
+Short term, to unblock CI: gate the new deferred-completion/RESTART_PENDING path (or host-side SRA/split_rail pipelining) off when UCC_TASK_THREAD_MODE == UCC_THREAD_MULTIPLE, then re-enable once the locking above lands. Reproduce locally with UCC_CLS=basic,hier UCC_CL_HIER_TUNE=allreduce:@split_rail:inf UCC_CL_HIER_TLS=ucp ucc_test_mpi -T --triggered 0 --mtypes host,cuda -c allreduce (seed 6734 in this build).
+Related: PR #1354 (TL/UCP: enable host-side SRA allreduce pipelining) — the branch under test; PR #1364 (SCHEDULE: defer ppln completion to outer handler, closed/merged into this work) introduced the handler_depth/complete_pending/RESTART_PENDING logic implicated here.
+svcnbu-swx-hpcx
+commented
+Oct 15, 2026
+Copy link
+Copy Markdown
+Collaborator
+🤖 CI Triage Agent — UCC/ucc-test-mpi · commit dfd6a3d1
+TL;DR: The MPI test aborted on ucc_assert_always(0) in ucc_dummy_progress (src/schedule/ucc_schedule.c:132) while running CL/HIER split_rail allreduce in --thread-multiple mode — the progress queue progressed a task whose progress pointer is still the un-overridden default stub (a schedule object / recycled task), i.e. a stale progress-queue entry left by the reworked pipelined-schedule restart/finalize path in PR #1354. Fix the fragment restart/completion ordering in ucc_schedule_pipelined_completed_handler so a fragment is never re-posted (or finalized/returned to the mpool) while its tasks can still be referenced by the progress queue, and set progress = NULL on schedule tasks so this class of bug fails loudly instead of corrupting state.
+Full analysis
+Summary: Stage "Run UCC MPI tests (bulk)" (node 206) failed: rank 5 on funk06 aborted with ucc_schedule.c:132 Assertion '0' failed (SIGABRT, exit 134) during UCC_CLS=basic,hier UCC_CL_HIER_TUNE=allreduce:@split_rail:inf UCC_CL_HIER_TLS=ucp ... -T --triggered 0 --mtypes host,cuda -c allreduce, which killed the whole srun step (STEP 106813.0 CANCELLED).
+Root cause: The abort is ucc_assert_always(0) inside ucc_dummy_progress() — a function documented as "this function should never be called". The backtrace shows it was reached from ucc_context_progress → progress-queue progress → task->progress(task):
+```
+ucc_schedule.c:132  Assertion `0' failed
+[ 5] ucc_fatal_error_format
+[ 6] libucc.so.1(ucc_dummy_finalize+0x0)      <- ucc_dummy_progress
+[ 7] libucc.so.1(+0x1884c)                    <- pq progress
+[ 8] ucc_context_progress
+```
+progress = ucc_dummy_progress is only ever set by ucc_coll_task_init() (src/schedule/ucc_schedule.c:152) and is never overwritten for schedule objects (e.g. the pipelined schedule in ucc_schedule_pipelined_init(); note CL/HIER's fragment schedule explicitly sets schedule->super.progress = NULL at allreduce_split_rail.c:242, but the pipelined parent does not). So the queue dereferenced either a schedule that must never be queued, or — far more likely — a task object that had already been finalized and returned to its mpool and then re-initialized by ucc_coll_task_init() (which resets progress to the stub) while a stale entry for it was still in the progress queue. That is a double-enqueue / use-after-free of a queued task.
+Everything points at the pipelined-schedule machinery that this PR rewrites:
+Only the split_rail (pipelined-schedule based) allreduce fails; the preceding non-pipelined and even the explicitly pipelined (UCC_CL_HIER_ALLREDUCE_SPLIT_RAIL_PIPELINE=thresh=0:fragsize=256K) single-threaded runs passed. The failure appears on the -T (THREAD_MULTIPLE) iteration, i.e. the path that takes schedule->lock, handler_depth, complete_pending.
+ucc_schedule_pipelined_completed_handler() (src/schedule/ucc_schedule_pipelined.c:82-160) re-posts fragments from inside the completion chain (ucc_frag_start_handler → task->post) and defers the schedule completion to the outermost handler. On restart it resets frag->tasks[i]->status but not tasks[i]->super.status (contrast ucc_schedule_pipelined_post() lines 199-212, which resets both plus n_deps_satisfied). A fragment re-posted while a previous instance's task is still referenced by the queue leaves exactly the stale entry that produces this assert once the object is recycled.
+ucc_schedule_pipelined_finalize() (line 162) walks frags[i]->super.finalize(), which for CL/HIER puts the schedule back into the mpool — a UAF window that commit f1b1262 ("fix finalize UAF") already tried to close.
+The slurmstepd ... CANCELLED / Terminated / pmix status = -61 lines at the end are collateral from srun tearing down the step after task 5 aborted, not independent failures.
+Implicated commit: dfd6a3d1 (Tomislav Janjusic, "REVIEW: address greptile comments" — the commit under test) on top of f1b1262c (Tomislav Janjusic, "REVIEW: fix finalize UAF, gate test hooks") and a40f053a (Ferrol Aderholdt, "TL/UCP: enable host-side SRA allreduce pipelining"), all in PR #1354.
+File: src/schedule/ucc_schedule_pipelined.c:82-160 (completion/restart handler) and :162-182 (finalize); assert fires at src/schedule/ucc_schedule.c:132 via the default set at src/schedule/ucc_schedule.c:152.
+Suggested fix:
+Make the restart path symmetric with ucc_schedule_pipelined_post(): in the restart loop (lines 130-136) also reset frag->tasks[i]->super.status = UCC_OPERATION_INITIALIZED and n_deps_satisfied, and assert that each task is not currently queued before re-posting (e.g. a debug-only task->status == UCC_OK / "not in pq" check).
+Do not re-post fragments from within a nested completion handler. Defer restarts the same way completion is deferred: queue the pending restarts and execute them in the outermost handler after handler_depth drops to 0 and the lock is released (today only ucc_task_complete is deferred, ucc_frag_start_handler still runs under the lock at line 137).
+Defensively set schedule->super.super.progress = NULL in ucc_schedule_pipelined_init() (and progress = NULL in ucc_schedule_init()), matching allreduce_split_rail.c:242, so a schedule accidentally reaching the queue is a no-op rather than a fatal assert — and so this bug class surfaces as a real hang/leak rather than this misleading stub abort.
+Reproduce locally under ASAN with -T and UCC_CLS=basic,hier UCC_CL_HIER_TUNE=allreduce:@split_rail:inf UCC_CL_HIER_TLS=ucp (seed 6734 from the log) to confirm the use-after-free before re-running CI.
+Related: PR #1354 (this change); issue #1363 and PR #1364 ("pipelined schedule completes from a nested handler while its lock is held (MT use-after-free)" / "defer ppln completion to outer handler") — the same nested-handler hazard, apparently not fully closed for the fragment restart path.
+nsarka
+approved these changes
+Oct 15, 2026
+View reviewed changes
+Hide details
+View details
+janjust
+merged commit f444e74
+into
+openucx:master
+Oct 16, 2026
+23 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+This was referenced Oct 20, 2026
+UTIL: append to log file instead of truncating
+#1366
+Merged
+TOOLS: list all supported colls in ucc_info -A
+#1368
+Merged
+TL/UCP: keep src intact in reduce_scatter ring
+#1367
+Merged
+janjust
+mentioned this pull request
+Oct 23, 2026
+SCHEDULE: start ppln frags under the lock
+#1370
+Merged
+janjust
+added a commit
+that referenced
+this pull request
+Oct 23, 2026
+SCHEDULE: start ppln frags under the lock (#1370)
+…
+9ff88b0
+```
+## What
+Start the first fragments of a pipelined schedule under the schedule
+lock in `ucc_schedule_pipelined_post()`, and complete a schedule that
+finishes during post only after the unlock.
+
+## Why ?
+`ucc-test-mpi` aborts in the `-T` pass with `ucc_schedule.c:132
+Assertion '0' failed` (`ucc_dummy_progress`), for example builds 88, 90
+and 94 on #1366. #1364 made the completed handler finish the schedule
+only from its outermost frame, after unlocking, but post still starts
+the first fragments without the lock:
+
+1. Since #1354, host allreduce on a single-node team pipelines by
+default (SRA knomial, 2 MB = 4 fragments at depth 4), so post starts
+several fragments in a row.
+2. In `THREAD_MULTIPLE` another thread can complete fragment 0 during
+that loop. Its completed handler updates `n_frags_in_pipeline`,
+`next_frag_to_post` and `n_frags_started` under the lock, while the
+poster updates them without it.
+3. A lost update can restart a finished fragment after the schedule has
+completed. Its tasks stay in the progress queue after the owner frees
+them, and TL/UCP tasks and schedules share one mpool, so the stale entry
+is later progressed as a schedule and hits `ucc_dummy_progress`.
+
+In CI the abort is on the single-node `half` team in the default `-T`
+configuration.
+
+## How ?
+- `ucc_schedule_pipelined_post()` takes the recursive schedule lock
+(`THREAD_MULTIPLE` only) around `ucc_schedule_start()` and counts itself
+as the outermost `handler_depth` frame. A schedule that completes during
+post, inline or on a thread waiting for the lock, is completed after the
+unlock, as in the handler. The handler already posts restarted fragments
+while holding this lock, so posting under it is not new.
+- New checks in `test/gtest/core/test_schedule.cc`:
+- Fragment setup records whether it ran without the lock in
+`THREAD_MULTIPLE`. `nested_completion` and `nested_failure` check it,
+and `post_starts_frags_locked` covers 4 fragments at depth 4.
+- `cross_thread_completion`: fragment tasks complete on helper threads
+while post is still starting fragments, 200 reposts, checking one
+completion per post and the fragment counts.
+
+Signed-off-by: Tomislav Janjusic <tomislavj@nvidia.com>
+```
+svcnbu-swx-hpcx
+mentioned this pull request
+Oct 30, 2026
+CL/HIER: use node reduce root in RAB frag setup
+#1371
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+ai-review
+start ai-review
+Ready-for-Review
+4 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

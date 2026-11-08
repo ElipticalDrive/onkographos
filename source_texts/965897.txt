@@ -1,0 +1,265 @@
+A WebGPU engine for creative coding. Contribute to Siroko/kansei development by creating an account on GitHub.
+
+feat(post): opt-in screen-space global illumination by Siroko · Pull Request #29 · Siroko/kansei · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Siroko
+commented
+Sep 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Opt-in global illumination (screen space)
+The user asked for bounced light, "not priority, should be something that we can turn on or off, as it could be quite expensive". This adds a general, opt-in indirect-lighting effect with quality levels. It costs nothing while off.
+The new gi-box example, a Cornell box under one shadowed downlight at 1920×1080. Left: GI off, direct light only. Middle: GI on (High). Right: the indirect term alone (show_indirect), 2 stops brighter. With GI on:
+the ceiling, which the lamp does not reach, is lit by the floor;
+the red and green walls bleed onto the floor, the back wall and the blocks;
+the shadows and the blocks' unlit faces fill in.
+2× crop by the red wall. Left: off. Middle: on, as this PR first shipped. Right: on, now. The tall block's face picks up the red wall either way, but only now does the floor in its shadow and the wall above get their bounce.
+Why the first image showed almost nothing
+It wasn't only the scene: the bounce was weak. A new GPU test compares the effect with a Monte Carlo one-bounce reference of a Cornell box. It found two causes, both fixed:
+The search radius was capped at a quarter of the image's height on screen. That held it to about 0.3 × the depth in metres, whatever radius_m asked: 0.84 m for a surface 2.9 m away instead of 3 m. The box's surfaces got 10–40 % of their bounce. The cap is now the full height, and the cost is unchanged (the step count doesn't change, and I measured 0.25, 0.5 and 1.0 within noise).
+Each slice weighed its directions by the cosine alone. Over all slices, a direction's solid angle is |sin h| dh dφ, with h measured from the view vector; GTAO integrates it that way. Without that factor, directions toward the camera counted too much and a wall beside the point too little: 83 % of the exact irradiance for a floor by a wall, checked numerically. The 32 sectors now split the weight cos(h − n)·|sin h|.
+There was also a smaller one. The horizon bias shifted every occluder 5° toward the horizon, which dropped the top of a wall, exactly where the cosine weighs most. It now stretches angles toward the horizon, so those near the normal barely move.
+The indirect term alone, +2 EV. Left: as first shipped. Right: now.
+Cornell box region (bounce as a share of the one-bounce reference, r g b)
+As first shipped
+Now
+Floor by the red wall
+0.42 0.11 0.12
+0.95 0.79 0.86
+Floor by the green wall
+0.16 0.37 0.16
+0.79 0.95 0.87
+Ceiling (lit only by the bounce)
+0.10 0.10 0.11
+0.78 0.75 0.69
+Back wall
+0.09 0.10 0.10
+0.81 0.78 0.71
+What is still missing is light from the parts of the box the screen can't see: the side walls, floor and ceiling in front of the frame, behind the camera. That is the screen-space limit. Making the depth slabs thicker changes nothing here (0.5 m vs 20 m).
+The film: what it does and doesn't fix
+Left: Unreal. Middle: midsommar-web with GI off. Right: midsommar-web with GI on (High). 13 s (the verge) and 16 s (the car in its headlights). For this comparison only, I wired it locally: the film's opaque materials write normal and albedo, and GI is first in the chain. That wiring isn't part of this PR.
+I have to be honest about this one: GI does not bring these frames closer to Unreal.
+Mean linear luminance changes by −1.1 % at 13 s and +0.2 % at 16 s.
+The car body at 16 s gets 14 % darker. The occlusion takes out sky light from under and around it, and it gains almost no bounce.
+The light Unreal shows on the verge and on the car doesn't come from lit surfaces near them on screen:
+13 s. The verge the camera sees is tens of metres from the only lit surfaces, the road and the fog around the car.
+16 s. The beams light the road ahead of the car, not beside it. As a rough estimate, the whole lit patch treated as one bounce source would put about 0.5 lux on the car's side, too little to show at the film's exposure. That estimate assumes about 8 000 lm leaving the lamps, 10 % road albedo, 6–8 m and a grazing angle.
+So a cheap fallback for off-screen light, one virtual light per beam at the beam's ground hit, wouldn't fix these shots either. I looked at it for item (c) and didn't add it. I don't know exactly what lights the verge and the car in Unreal. Lumen's sky light over the whole forest is a likely candidate, which would make it a question of the ambient level rather than of a bounce.
+Why screen space
+Kansei already has a BVH path tracer with probes. Using it needs every mesh built into a BVH with path-tracer materials, which doesn't fit a forest of custom-shaded, instanced, alpha-tested geometry like the film's. A screen-space method works on any scene with no preprocessing, and its cost doesn't depend on scene size. The price is that it only sees light on screen (see Limits).
+What's in it
+ScreenSpaceGIEffect implements Therrien, Levesque and Gilet 2023, "Screen Space Indirect Lighting with Visibility Bitmasks".
+Trace. A few slices through each point search both sides for depth samples, each a slab thickness_m deep.
+The hemisphere is cut into 32 sectors of equal weight: the cosine times the slices' Jacobian.
+The first time a sector is hidden, it takes the sample's radiance from the lit scene. Sectors left open are the sky the point sees.
+Emitters facing away give nothing, when their normal is known.
+Robustness. Samples on or under the point's own plane are skipped, tested in 3D. Otherwise, rounding a sample to its pixel moves it off the slice line and a plane hides itself.
+Resolution and filtering. Tracing runs at the quality's resolution. Frames are accumulated by reprojection with a neighbourhood clamp, then upsampled by depth.
+Composite.
+Adds albedo / π × the bounce's irradiance where a material writes the GBuffer's albedo. It uses the GBuffer's normal when written and one rebuilt from depth otherwise; a material that writes no albedo is untouched.
+With set_sky_lighting, it also takes the occluded part of the sky's ambient light (albedo / π × the SH irradiance) out, so the bounce replaces the sky it blocks. That is exact for materials lit by SKY_LIGHTING_WGSL.
+Debug view. show_indirect outputs only the light the bounce adds.
+GiQuality:
+Quality
+Resolution
+Slices
+Steps per side
+Low
+¼
+2
+6
+Medium
+½
+2
+8
+High
+½
+4
+12
+Ultra
+full
+4
+16
+Toggle. A new PostProcessingEffect::is_active(), default true, lets the volume skip an effect entirely: the next effect reads what it would have read, at no cost. ScreenSpaceGIEffect::enabled drives it, and the history resets after a gap.
+Chain position. Add it first in the chain, before the atmosphere and the fogs.
+Examples.
+The new gi-box takes gi=off|low|medium|high|ultra (High by default) and view=indirect.
+The sky-atmosphere example's materials now write normal and albedo, and it takes gi= (off by default).
+Additive API: ScreenSpaceGIEffect, ScreenSpaceGIOptions, GiQuality and PostProcessingEffect::is_active.
+Verified
+GPU tests, rendering analytic scenes into a real GBuffer at 384×256:
+A material with no albedo is left exactly as it was.
+A bare floor with no occluders is unchanged.
+A black floor 0.1–0.4 m from a white wall receives 0.214 of the wall's light; the exact value within the 3 m radius is 0.223. Beyond the radius it receives none.
+In the Cornell box, every region gets 0.69–0.96 of its one-bounce reference (the table above).
+Shader validation: the WGSL validates with naga, and SsgiParams matches its Rust layout.
+Cost at 1920×1080 on the M4 Pro, as the frame interval without vsync in headless Chrome, with other work on the machine (±1 ms):
+Quality
+Added cost, Cornell box (geometry on every pixel)
+Low
+~2 ms
+Medium
+~5 ms
+High
+~11 ms
+Ultra
+~40 ms (for stills)
+About 1 ms of that is the full-resolution composite. The rest grows with the samples. The sub-millisecond figures in this PR's first description came from the sky-atmosphere frame, which is mostly sky and so traces few pixels. They were not a fair worst case.
+cargo test -p kansei-core: all pass. The new code has no clippy warnings. Both examples ran with no WebGPU errors in headless Chrome.
+Limits
+Screen space only. Light from surfaces off screen or hidden from the camera isn't seen: 70–95 % of the bounce in the box, and little in the film's shots above.
+One bounce, from the current frame's lit scene.
+Needs albedo. Materials must write the GBuffer's albedo (target 3) to receive GI, and normal (target 2) for the best results.
+For midsommar-web
+This is opt-in and off by default. Given the film frames above, I'd hold off shipping it for the verge or the car. If you want to try it:
+Add ScreenSpaceGIEffect first in the chain, and give it set_sky_lighting.
+Have the opaque materials also write normal (as n · 0.5 + 0.5) and albedo to GBuffer targets 2 and 3, with mrt_output_count: Some(4). The local comparison did this through one GiOut return struct in common.wgsl, and Shading::material setting the count for non-transparent materials.
+vercel
+Bot
+commented
+Sep 27, 2026
+Copy link
+Copy Markdown
+Deployment failed for project kansei with the following error:
+```
+Resource is limited - try again in 24 hours (more than 100, code: "api-deployments-free-per-day").
+```
+Learn More: https://vercel.com/sirokos-projects?upgradeToPro=build-rate-limit
+feat(post): opt-in screen-space global illumination
+…
+c0c6e8e
+```
+ScreenSpaceGIEffect adds one bounce of the light on screen onto every diffuse surface, and
+ambient occlusion of the sky's light, from the GBuffer, after Therrien et al. 2023 (visibility
+bitmasks): slices through each point search both sides for depth samples, each a slab
+`thickness` deep; the hemisphere is cut into 32 cosine-weighted sectors, and a sector the first
+time it is hidden takes the sample's radiance. Samples on or under the point's own plane are
+skipped in 3D, so rounding them to their pixel cannot make a surface hide itself. It works on
+any scene with no preprocessing (foliage, instancing, alpha-tested cards), traced at the
+quality's resolution, accumulated over frames by reprojection with a neighbourhood clamp, and
+upsampled by depth. It adds light where a material writes the GBuffer's albedo, using its
+normal when written and one rebuilt from depth otherwise; with the sky's lighting bound, it
+takes the occluded part of the sky's ambient light out.
+
+Opt-in with a toggle: PostProcessingEffect::is_active (default true) lets the volume skip an
+effect at no cost; ScreenSpaceGIEffect::enabled drives it. GiQuality: Low, Medium, High, Ultra.
+The sky-atmosphere example's materials write normal and albedo and take gi=.
+```
+Siroko
+force-pushed
+the
+fm/kansei-ssgi
+branch
+from
+df3f9a9 to
+c0c6e8e
+Compare
+September 27, 2026 23:26
+vercel
+Bot
+commented
+Sep 27, 2026
+Copy link
+Copy Markdown
+Deployment failed for project kansei-fluid with the following error:
+```
+Resource is limited - try again in 24 hours (more than 100, code: "api-deployments-free-per-day").
+```
+Learn More: https://vercel.com/sirokos-projects?upgradeToPro=build-rate-limit
+vercel
+Bot
+commented
+Sep 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+The latest updates on your projects. Learn more about Vercel for GitHub.
+Project
+Deployment
+Actions
+Updated
+kansei
+Ready
+Preview
+Sep 27, 2026 11:27pm UTC
+vercel
+Bot
+deployed
+to
+Preview – kansei
+September 27, 2026 23:27
+View deployment
+fix(gi): the bounce reaches what the radius asks and weighs each dire…
+…
+b550182
+```
+…ction right; a Cornell box example
+
+The bounce was weak for two reasons, both measured against a Monte Carlo one-bounce reference in
+a new GPU test of a Cornell box:
+- The search radius was capped at a quarter of the image's height on screen, which held it to
+  about 0.3 times the depth in metres whatever radius_m asked. The box's surfaces got 10-40 % of
+  their bounce. The cap is now the full height, at no extra cost (the steps stay as many).
+- Each slice weighed its directions by the cosine alone. Over all slices a direction's solid
+  angle is |sin h| dh dphi (h from the view vector), as GTAO integrates, so directions toward
+  the camera counted too much and a wall beside the point too little (83 % of the exact
+  irradiance for a floor by a wall). The sectors now split that weight.
+- The horizon bias stretches angles toward the horizon instead of shifting them all by 5
+  degrees, which dropped the top of a wall, where the cosine weighs most.
+
+Now the box gets 69-96 % of its one-bounce reference (the rest is the box's parts off screen),
+and the floor by a wall 0.214 of the exact 0.223.
+
+ScreenSpaceGIEffect::show_indirect outputs only the light the bounce adds, for inspection. The
+gi-box example is a Cornell box under a shadowed downlight with gi=off|low|medium|high|ultra
+and view=indirect.
+```
+Hide details
+View details
+Siroko
+merged commit e375e2b
+into
+development
+Sep 28, 2026
+0 of 2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+This was referenced Sep 28, 2026
+feat(clouds): quality presets and an on/off toggle
+#36
+Merged
+feat(shadows): world-space sky occlusion under the canopy, as Lumen's
+#47
+Merged
+Siroko
+mentioned this pull request
+Oct 8, 2026
+feat(ts): ScreenSpaceGIEffect, visibility bitmasks and sky AO, voxel GI near field (P-6)
+#210
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

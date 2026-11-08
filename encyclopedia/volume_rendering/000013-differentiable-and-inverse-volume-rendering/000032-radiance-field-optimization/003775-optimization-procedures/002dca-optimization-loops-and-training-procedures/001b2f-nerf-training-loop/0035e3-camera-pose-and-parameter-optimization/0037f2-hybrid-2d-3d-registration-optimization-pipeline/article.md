@@ -3,147 +3,92 @@
 Also called: Net+GradNCC, Two-Stage Similarity Optimization
 
 ## Overview
-This method is a two-stage optimization pipeline for 2D/3D registration that minimizes a differentiable network similarity loss ($L_N$) for global convergence, then switches to a traditional Gradient-based Normalized Cross-Correlation (Grad-NCC) loss ($L_{GNNC}$) for local refinement [S1]. It addresses the sensitivity of joint optimization to initialization by leveraging the robust global convergence of neural similarity metrics and the precise local convexity of correlation-based metrics [S1]. Unlike [BARF](6872-barf-bundle-adjusting-neural-radiance-fields.md) which uses frequency scheduling, this pipeline explicitly switches loss functions based on convergence statistics.
+The Hybrid 2D/3D Registration Optimization Pipeline is a two-stage method for estimating the 6 Degrees of Freedom (DoF) pose of a 2D X-ray image relative to a 3D CT volume. It solves the problem of robust 2D/3D registration by combining a differentiable neural network similarity loss for global convergence with a traditional Gradient-based Normalized Cross-Correlation (Grad-NCC) loss for local refinement [S1]. Unlike pure differentiable rendering approaches that may struggle with local minima in complex anatomical structures, this pipeline leverages the robustness of network-based features for coarse alignment and the precision of gradient-based correlation for fine-tuning [S1]. It builds on [Camera Pose and Parameter Optimization](7611-camera-pose-and-parameter-optimization.md) by explicitly decoupling the optimization landscape into two distinct phases.
 
 ## How it works
-**Inputs and Outputs:**
-*   **Inputs:** Initial pose parameters $\theta$ (rotation and translation), a volume $V_{CT}$ (or segmentation $V_{Seg}$), and a target 2D image $I_{target}$.
-*   **Outputs:** Optimized pose parameters $\theta^*$.
+The pipeline optimizes pose parameters $\theta$ (rotation and translation) in two sequential stages.
+
+**Inputs:**
+1.  Fixed 3D volume $V_{CT}$ (CT scan).
+2.  Moving 2D target image $I_{target}$ (X-ray).
+3.  Initial pose estimate $\theta_0$ (randomly sampled from a distribution, e.g., rotation $N(0, 15^\circ)$, translation $N(0, 30 \text{ mm})$) [S1].
+4.  Optional segmentation mask $V_{Seg}$ if used by the network [S1].
+
+**Outputs:**
+1.  Optimized pose parameters $\theta^*$.
 
 **Data Structures:**
 *   Pose parameters $\theta$: Represented as rotation and translation components. In the source implementation, rotation is optimized directly, and translation is optimized directly [S1].
-*   Loss values: Scalar values $L_N$ and $L_{GNNC}$.
-*   Convergence metric: Standard deviation of loss over a sliding window of iterations.
+*   Loss values: Scalar values $L_N$ and $L_{GNNC}$ tracked over iterations to monitor convergence [S1].
 
-**Numbered Steps:**
+**Step 1: Global Optimization (Network Loss)**
+1.  Initialize pose parameters $\theta$.
+2.  Generate a Digitally Reconstructed Radiograph (DRR) $I_{DRR}$ from $V_{CT}$ and current $\theta$ using a differentiable renderer (e.g., ProST) [S1].
+3.  Compute the network similarity loss $L_N$ between $I_{target}$ and $I_{DRR}$ (and potentially $V_{Seg}$) [S1].
+4.  Update $\theta$ using Stochastic Gradient Descent (SGD) with momentum 0.9 [S1].
+5.  Use a cyclic learning rate schedule oscillating between $1 \times 10^{-6}$ and $1 \times 10^{-4}$ every 100 steps [S1].
+6.  Monitor convergence by calculating the standard deviation of $L_N$ over the last 10 iterations, denoted as $std_{L_N}$ [S1].
+7.  If $std_{L_N} < 3 \times 10^{-3}$, switch to Step 2. Otherwise, repeat Step 4.
 
-1.  **Initialization:** Initialize pose parameters $\theta$.
-2.  **Stage 1: Network Similarity Optimization:**
-    *   Compute the network similarity loss $L_N$ between the rendered image (generated via differentiable projection/DRR) and the target image.
-    *   Update $\theta$ using Stochastic Gradient Descent (SGD) with momentum.
-    *   Apply a cyclic learning rate schedule.
-    *   Monitor convergence by calculating the standard deviation of $L_N$ over the last 10 iterations, denoted as $std_{L_N}$.
-    *   If $std_{L_N} < 3 \times 10^{-3}$, switch to Stage 2. Otherwise, repeat.
-3.  **Stage 2: Grad-NCC Optimization:**
-    *   Compute the Grad-NCC loss $L_{GNNC}$ between the rendered image and the target image.
-    *   Update $\theta$ using SGD with momentum.
-    *   Apply a cyclic learning rate schedule.
-    *   Monitor convergence by calculating the standard deviation of $L_{GNNC}$ over the last 10 iterations, denoted as $std_{L_{GNNC}}$.
-    *   If $std_{L_{GNNC}} < 1 \times 10^{-5}$, terminate. Otherwise, repeat.
-
-**Formulas:**
-*   **Convergence Check (Stage 1):**
-    $$ std_{L_N} = \sqrt{\frac{1}{10} \sum_{k=1}^{10} (L_N^{(t-k)} - \bar{L}_N)^2} $$
-    where $\bar{L}_N$ is the mean of $L_N$ over the last 10 iterations. Switch if $std_{L_N} < 3 \times 10^{-3}$ [S1].
-*   **Convergence Check (Stage 2):**
-    $$ std_{L_{GNNC}} = \sqrt{\frac{1}{10} \sum_{k=1}^{10} (L_{GNNC}^{(t-k)} - \bar{L}_{GNNC})^2} $$
-    where $\bar{L}_{GNNC}$ is the mean of $L_{GNNC}$ over the last 10 iterations. Stop if $std_{L_{GNNC}} < 1 \times 10^{-5}$ [S1].
-
-**Parameters:**
-*   **Stage 1 Optimizer:** SGD with momentum 0.9.
-*   **Stage 1 Learning Rate:** Cyclic between $1 \times 10^{-6}$ and $1 \times 10^{-4}$ every 100 steps [S1].
-*   **Stage 1 Batch Size:** 2 [S1].
-*   **Stage 1 Max Iterations:** 100,000 (until convergence or max steps) [S1].
-*   **Stage 2 Optimizer:** SGD with momentum 0.9.
-*   **Stage 2 Learning Rate:** Cyclic between $1 \times 10^{-3}$ and $3 \times 10^{-3}$ [S1].
-*   **Convergence Thresholds:** $std_{L_N} < 3 \times 10^{-3}$; $std_{L_{GNNC}} < 1 \times 10^{-5}$ [S1].
+**Step 2: Local Refinement (Grad-NCC Loss)**
+1.  Compute the Gradient-based Normalized Cross-Correlation loss $L_{GNNC}$ between $I_{target}$ and $I_{DRR}$ [S1].
+2.  Update $\theta$ using SGD with momentum 0.9 [S1].
+3.  Use a cyclic learning rate schedule oscillating between $1 \times 10^{-3}$ and $3 \times 10^{-3}$ [S1].
+4.  Monitor convergence by calculating the standard deviation of $L_{GNNC}$ over the last 10 iterations, denoted as $std_{L_{GNNC}}$ [S1].
+5.  If $std_{L_{GNNC}} < 1 \times 10^{-5}$, terminate. Otherwise, repeat Step 2.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def hybrid_2d_3d_registration(theta, V_CT, V_Seg, I_target, num_iterations=100000):
-    """
-    theta: Initial pose parameters (rotation and translation)
-    V_CT: Volume CT data
-    V_Seg: Volume Segmentation data (used for network input)
-    I_target: Target 2D image
-    num_iterations: Maximum iterations for Stage 1
-    """
-    # Stage 1: Network Similarity Optimization
-    lr_min = 1e-6
-    lr_max = 1e-4
-    lr_cycle_steps = 100
-    momentum = 0.9
-    convergence_threshold_stage1 = 3e-3
-    window_size = 10
-    
-    optimizer_stage1 = SGD(theta, lr=lr_min, momentum=momentum)
-    loss_history_stage1 = []
-    
-    for t in range(num_iterations):
-        # Cyclic learning rate
-        current_lr = lr_min + (lr_max - lr_min) * (0.5 * (1 + math.sin(2 * math.pi * t / lr_cycle_steps)))
-        optimizer_stage1.set_lr(current_lr)
+def hybrid_2d_3d_registration(V_CT, I_target, theta_init, V_Seg=None):
+    theta = theta_init
+    # Stage 1: Network Loss Optimization
+    for iteration in range(MAX_ITERATIONS_STAGE_1):
+        I_DRR = render_drr(V_CT, theta) # Differentiable rendering
+        L_N = compute_network_loss(I_target, I_DRR, V_Seg)
         
-        # Compute network similarity loss
-        # Note: The specific network architecture for L_N is not detailed in the source,
-        # but it takes V_Seg and theta as input and produces a similarity score.
-        L_N = compute_network_similarity_loss(V_Seg, theta, I_target)
-        
-        # Backpropagate and update
-        optimizer_stage1.zero_grad()
-        L_N.backward()
-        optimizer_stage1.step()
-        
-        # Store loss for convergence check
-        loss_history_stage1.append(L_N.item())
+        # Update theta using SGD with momentum 0.9
+        # Learning rate cycles between 1e-6 and 1e-4 every 100 steps
+        lr = get_cyclic_lr(iteration, min_lr=1e-6, max_lr=1e-4, period=100)
+        theta = sgd_update(theta, L_N, lr, momentum=0.9)
         
         # Check convergence
-        if len(loss_history_stage1) >= window_size:
-            recent_losses = loss_history_stage1[-window_size:]
-            mean_loss = sum(recent_losses) / window_size
-            std_loss = math.sqrt(sum((x - mean_loss)**2 for x in recent_losses) / window_size)
-            
-            if std_loss < convergence_threshold_stage1:
+        if iteration >= 10:
+            std_LN = standard_deviation(L_N_history[-10:])
+            if std_LN < 3e-3:
                 break
     
-    # Stage 2: Grad-NCC Optimization
-    lr_min_stage2 = 1e-3
-    lr_max_stage2 = 3e-3
-    convergence_threshold_stage2 = 1e-5
-    
-    optimizer_stage2 = SGD(theta, lr=lr_min_stage2, momentum=momentum)
-    loss_history_stage2 = []
-    
-    while True:
-        # Cyclic learning rate
-        current_lr = lr_min_stage2 + (lr_max_stage2 - lr_min_stage2) * (0.5 * (1 + math.sin(2 * math.pi * t / lr_cycle_steps)))
-        optimizer_stage2.set_lr(current_lr)
+    # Stage 2: Grad-NCC Loss Optimization
+    for iteration in range(MAX_ITERATIONS_STAGE_2):
+        I_DRR = render_drr(V_CT, theta)
+        L_GNNC = compute_grad_ncc_loss(I_target, I_DRR)
         
-        # Compute Grad-NCC loss
-        # Note: Requires differentiable DRR generation
-        L_GNNC = compute_grad_ncc_loss(V_CT, theta, I_target)
-        
-        # Backpropagate and update
-        optimizer_stage2.zero_grad()
-        L_GNNC.backward()
-        optimizer_stage2.step()
-        
-        # Store loss for convergence check
-        loss_history_stage2.append(L_GNNC.item())
+        # Update theta using SGD with momentum 0.9
+        # Learning rate cycles between 1e-3 and 3e-3
+        lr = get_cyclic_lr(iteration, min_lr=1e-3, max_lr=3e-3, period=100)
+        theta = sgd_update(theta, L_GNNC, lr, momentum=0.9)
         
         # Check convergence
-        if len(loss_history_stage2) >= window_size:
-            recent_losses = loss_history_stage2[-window_size:]
-            mean_loss = sum(recent_losses) / window_size
-            std_loss = math.sqrt(sum((x - mean_loss)**2 for x in recent_losses) / window_size)
-            
-            if std_loss < convergence_threshold_stage2:
+        if iteration >= 10:
+            std_LGNNC = standard_deviation(L_GNNC_history[-10:])
+            if std_LGNNC < 1e-5:
                 break
-        
-        # Safety break to prevent infinite loop if Stage 1 didn't converge well
-        # (Though the source implies Stage 2 follows Stage 1 convergence)
-        if t > num_iterations + 10000: 
-            break
-            
+                
     return theta
 ```
 
+**Parameters:**
+*   Momentum: 0.9 for both stages [S1].
+*   Stage 1 Learning Rate: Cyclic between $1 \times 10^{-6}$ and $1 \times 10^{-4}$, period 100 steps [S1].
+*   Stage 2 Learning Rate: Cyclic between $1 \times 10^{-3}$ and $3 \times 10^{-3}$ [S1].
+*   Stage 1 Convergence Threshold: $std_{L_N} < 3 \times 10^{-3}$ [S1].
+*   Stage 2 Convergence Threshold: $std_{L_{GNNC}} < 1 \times 10^{-5}$ [S1].
+*   Batch Size: 2 (for training the network component, if applicable) [S1].
+
 **Edge Cases and Pitfalls:**
-*   **Premature Switching:** If the network loss $L_N$ fluctuates significantly, the standard deviation check might trigger a switch before true convergence, leading to poor local refinement. The threshold $3 \times 10^{-3}$ is specific to the source's experimental setup [S1].
-*   **Differentiable DRR:** Stage 2 requires a differentiable Digital Reconstructed Radiograph (DRR) generator. If the DRR generation is not fully differentiable or has numerical instabilities, gradients for $L_{GNNC}$ will be inaccurate [S1].
-*   **Initialization:** While Stage 1 provides global convergence, poor initialization might still lead to local minima in $L_N$ that are not resolved by the switch. The source uses random initialization from $N(0, 37.5)$ mm for translation and $N(0, 15)$ degrees for rotation in real X-ray studies [S1].
+*   The switch criterion relies on the standard deviation of the loss over a small window (10 iterations). If the loss oscillates significantly due to learning rate cycling, premature switching may occur [S1].
+*   The method assumes the differentiable renderer (ProST) is available and differentiable with respect to pose parameters [S1].
 
 ## Subtopics
 
@@ -151,16 +96,16 @@ def hybrid_2d_3d_registration(theta, V_CT, V_Seg, I_target, num_iterations=10000
 This method performs 6 Degrees of Freedom (DoF) slice-to-volume registration by minimizing the negative Zero-Normalized Cross-Correlation (ZNCC) between a fixed Digitally Reconstructed Radiograph (DRR) and a moving DRR using gradient descent. It serves as the local refinement stage of the Hybrid 2D/3D Registration Optimization Pipeline, leveraging the locally convex loss landscape of ZNCC to converge quickly from random initializations. Unlike the global network-based loss ($L_N$) in its parent pipeline, this method relies on traditional gradient descent with momentum, requiring differentiable DRR generation to compute gradients with respect to pose parameters.
 
 ## Operating characteristics
-*   **Time Complexity:** Not explicitly given. Stage 1 runs up to 100,000 iterations. Stage 2 runs until convergence.
-*   **Memory Complexity:** Not explicitly given. Depends on the batch size (2) and the volume size [S1].
-*   **Measured Performance:** Tested on 150 simulation studies and 100 real X-ray registrations (10 cadaver specimens) [S1].
-*   **Strengths:** Combines global convergence of network-based loss with local precision of Grad-NCC. Less sensitive to local textures than traditional image-based methods [S1].
-*   **Limitations:** Requires two differentiable rendering steps (network similarity and DRR). Computationally expensive due to two stages.
-*   **When to use:** When global initialization is poor and local refinement is critical. Suitable for 2D/3D registration tasks where differentiable rendering is available.
-*   **When not to use:** When computational resources are limited or when a single-stage optimization is sufficient.
+*   **Time Complexity:** The method requires two sequential optimization phases. The first phase (Network Loss) may be computationally expensive if the network is large, but it converges globally. The second phase (Grad-NCC) is typically faster per iteration but requires precise initialization [S1].
+*   **Memory Complexity:** Depends on the memory footprint of the differentiable renderer and the network. The source uses a batch size of 2 [S1].
+*   **Measured Performance:** Tested on 150 simulation studies and 100 real X-ray registrations (cadaver specimens) [S1]. The method is less sensitive to local textures compared to traditional image-based methods like Grad-NCC alone [S1].
+*   **Strengths:** Combines global convergence of network-based features with local precision of gradient-based correlation. Robust to initial pose errors (rotation $N(0, 15^\circ)$, translation $N(0, 30 \text{ mm})$) [S1].
+*   **Limitations:** Requires a trained network for the first stage. The switch criterion is heuristic [S1].
+*   **When to use:** When robust global alignment is needed before fine-tuning, especially in the presence of local texture ambiguities.
+*   **When not to use:** When computational resources are extremely limited and a single-stage method is preferred, or when the network is not available/trained.
 
 ## Background
-The method was introduced in the paper "Generalizing Spatial Transformers to Projective Geometry with Applications to 2D/3D Registration" [S1]. It builds on the idea of using neural networks for similarity measurement in registration tasks, extending it to a hybrid approach with traditional gradient-based correlation. The source cites Grad-NCC [11] as a traditional method that is less sensitive to local textures compared to network-based methods, motivating the hybrid approach.
+The method was introduced in the paper "Generalizing Spatial Transformers to Projective Geometry with Applications to 2D/3D Registration" [S1]. It addresses the limitations of traditional image-based methods like Grad-NCC, which are sensitive to local textures, and pure differentiable methods that may get stuck in local minima. The pipeline was tested on simulated data from NIH Cancer CT scans and real X-ray images from cadaver specimens [S1].
 
 ## Sources
 [S1] Generalizing Spatial Transformers to Projective Geometry with Applications to 2D/3D Registration, https://arxiv.org/abs/2003.10987v1, fetched 2026-10-26

@@ -6,9 +6,9 @@ Computes the signed distance to an axis-aligned box with rounded edges and corne
 
 ## How it works
 **Inputs:**
-- $p$: Query point (vec3).
-- $b$: Half-extents of the box (vec3).
-- $e$: Edge/corner rounding radius (float).
+- $p$: Query point (vec3) [S1, unofficial].
+- $b$: Half-extents of the box (vec3) [S1, unofficial].
+- $e$: Edge/corner rounding radius (float) [S1, unofficial].
 
 **Outputs:**
 - Signed distance value (float). Negative inside, positive outside, zero on surface [S1, unofficial].
@@ -17,26 +17,15 @@ Computes the signed distance to an axis-aligned box with rounded edges and corne
 - Standard 3D vector types for $p$ and $b$. Scalar float for $e$ [G].
 
 **Steps:**
-1. Compute the absolute distance from the center: $d = |p| - b$.
-2. Compute the rounded corner distance: $q = |d + e| - e$.
-3. Determine the distance to the box faces, edges, and rounded corners:
-   - Let $d_{face}$ be the distance to the flat faces.
-   - Let $d_{edge}$ be the distance to the straight edges.
-   - Let $d_{corner}$ be the distance to the rounded corners.
-   - The final distance is $\min(\text{distance to faces}, \text{distance to edges}, \text{distance to corners})$ [S1, unofficial].
+1. Compute $d = |p| - b$ [S1, unofficial].
+2. Compute $q = \max(d, 0)$ [S1, unofficial].
+3. Compute $m = \max(d_x, \max(d_y, d_z))$ [S1, unofficial].
+4. Return $\|q\| + \min(m, 0) - e$ [S1, unofficial].
 
 **Formula:**
-The standard implementation computes the distance by analyzing the position of $p$ relative to the box's geometry [S1, unofficial].
-Let $d = |p| - b$.
-Let $q = |d + e| - e$.
-The signed distance is:
-$$ \text{sd} = \begin{cases} \min(q_x, q_y, q_z) & \text{if } d_x < 0 \land d_y < 0 \land d_z < 0 \\ \min(\text{length}(q), \text{distance to edges}) & \text{otherwise} \end{cases} $$
-More precisely, following [S1, unofficial]:
-1. $d = |p| - b$
-2. $q = |d + e| - e$
-3. The distance is the minimum of the distances to the rounded corners, edges, and faces. The specific calculation involves checking if the point is in the corner region, edge region, or face region.
-   - If $d_x < 0, d_y < 0, d_z < 0$: The point is in the corner region. Distance is $\min(q_x, q_y, q_z)$.
-   - Otherwise, the distance is calculated based on the closest feature (face, edge, or corner) [S1, unofficial].
+The signed distance is calculated by projecting the query point onto the box's exterior, measuring the distance to the closest face/edge/corner, and subtracting the rounding radius [S1, unofficial].
+$$ \text{sd} = \| \max(|p| - b, 0) \| + \min(\max(|p| - b)_x, \max(|p| - b)_y, \max(|p| - b)_z) - e $$
+where $| \cdot |$ is component-wise absolute value, $\max(\cdot)$ applies the maximum operator to each component or across components, $\| \cdot \|$ is the Euclidean length, and $e$ is the rounding radius [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -45,57 +34,34 @@ More precisely, following [S1, unofficial]:
 def sd_box_rounded(p, b, e):
     # p: vec3, b: vec3, e: float
     d = abs(p) - b
-    q = abs(d + e) - e
-    
-    # Determine if point is in corner, edge, or face region
-    # Corner region: all components of d are negative
-    if d.x < 0 and d.y < 0 and d.z < 0:
-        return min(q.x, min(q.y, q.z))
-    
-    # Edge region: two components of d are negative
-    # Face region: one component of d is negative
-    
-    # Calculate distance to the closest feature
-    # This part is complex and depends on the specific implementation details
-    # For a complete implementation, see [S1, unofficial]
-    
-    # Simplified logic based on [S1, unofficial] description:
-    # The distance is the minimum of the distances to the rounded corners, edges, and faces.
-    # The exact formula involves checking the signs of d and calculating the distance accordingly.
-    
-    # Note: The exact formula for the non-corner regions is not fully detailed in [S1, unofficial]
-    # but typically involves calculating the distance to the rounded edges and faces.
-    
-    # For the purpose of this article, we assume the standard implementation:
-    # The distance is the minimum of the distances to the rounded corners, edges, and faces.
-    
-    # Return the calculated distance
-    return 0.0 # Placeholder for the actual calculation
+    q = max(d, 0.0)
+    m = max(d.x, max(d.y, d.z))
+    return length(q) + min(m, 0.0) - e
 ```
 
 **Parameters:**
-- $e$: Edge radius. Must be $0 \le e \le \min(b_x, b_y, b_z)$ [S1, unofficial].
+- $e$: Edge radius. Must satisfy $0 \le e \le \min(b_x, b_y, b_z)$ [S1, unofficial].
 
 **Edge Cases:**
-- $e = 0$: Reduces to the standard [Signed Box Distance Function](1092-signed-box-distance-function.md).
-- $e = \min(b)$: The box becomes a sphere with radius $\min(b)$ if $b_x=b_y=b_z$, or a capsule-like shape otherwise.
+- $e = 0$: Reduces to the standard [Signed Box Distance Function](1092-signed-box-distance-function.md) [S1, unofficial].
+- $e = \min(b)$: The box becomes a sphere with radius $\min(b)$ if $b_x=b_y=b_z$, or a capsule-like shape otherwise [G].
 - Precision issues near the boundaries between face, edge, and corner regions [S1, unofficial].
 
 ## Subtopics
 
 ### Rounded Box2D SDF
-Signed distance to a 2D rounded box with corner radius $r$. Formula: $\text{box2d}(p, b - r) - r$ [S2, unofficial]. Implementation: `pub fn rounded_box2d(p: Vec2, b: Vec2, r: f32) -> f32 { box2d(p, b - Vec2::splat(r)) - r }` [S2, unofficial]. Chosen when 2D rounded rectangles are needed.
+Signed distance to a 2D rounded box with corner radius $r$ [S2, unofficial]. Formula: $\text{box2d}(p, b - r) - r$ [S2, unofficial]. Implementation: `pub fn rounded_box2d(p: Vec2, b: Vec2, r: f32) -> f32 { box2d(p, b - Vec2::splat(r)) - r }` [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per query.
-- **Memory Complexity:** $O(1)$.
-- **Strengths:** Smooth geometry, efficient ray marching, no need for mesh tessellation.
-- **Limitations:** Rounding radius must be uniform. Not suitable for non-uniform rounding.
-- **When to use:** When smooth, rounded boxes are required in ray marching.
-- **When not to use:** When sharp corners are needed (use standard box) or when non-uniform rounding is required.
+- **Time Complexity:** $O(1)$ per query [G].
+- **Memory Complexity:** $O(1)$ [G].
+- **Strengths:** Smooth geometry, efficient ray marching, no need for mesh tessellation [G].
+- **Limitations:** Rounding radius must be uniform [G].
+- **When to use:** When smooth, rounded boxes are required in ray marching [G].
+- **When not to use:** When sharp corners are needed (use standard box) or when non-uniform rounding is required [G].
 
 ## Background
-Originated from Inigo Quilez's work on SDFs [S1, S2, unofficial]. Widely used in ray marching for creating smooth geometric primitives.
+Originated from Inigo Quilez's work on SDFs [S1, unofficial].
 
 ## Sources
 [S1] erbenpeter/sdf, https://github.com/erbenpeter/sdf, fetched 2026-10-26 (unofficial)

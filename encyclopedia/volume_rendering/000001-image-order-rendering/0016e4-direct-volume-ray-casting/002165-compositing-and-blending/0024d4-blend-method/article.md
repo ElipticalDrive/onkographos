@@ -6,96 +6,128 @@ Also called: Compositing in the Frame Buffer
 The Blend Method is a texture-based volume rendering technique that offloads the compositing operation to graphics hardware by resampling volume slices parallel to the image plane into a frame buffer and using the hardware's blending unit (specifically the "over" operator) to composite them [S1]. It differs from the Planes method, which performs compositing in software on the CPU, by leveraging hardware acceleration for the accumulation step, making it significantly faster for fully translucent volumes where rays rarely reach full opacity [S1].
 
 ## How it works
-The method processes the volume by slicing it into planes parallel to the final image plane. It utilizes two frame buffers: one for storing the resampled slice data and another for the final blended image [S1].
+The method processes the volume by slicing it into planes parallel to the final image plane [S1]. It utilizes two frame buffers: one for storing the resampled slice data and another for the final blended image [S1].
 
 **Inputs and Outputs:**
-*   **Input:** Volume data, transfer function (for opacity), reflectance map (for shading/color), and camera parameters.
-*   **Output:** A 2D image in the frame buffer.
+*   **Input:** Volume data, transfer function (for opacity), reflectance map (for shading/color), camera parameters, and image resolution [S1].
+*   **Output:** A 2D image in the frame buffer [S1].
 
 **Data Structures:**
-*   **Frame Buffer 1 (Slice Buffer):** Stores the resampled slice data (color and opacity) before blending.
-*   **Frame Buffer 2 (Image Buffer):** Accumulates the final composited image.
+*   **Frame Buffer 1 (Slice Buffer):** Stores the resampled slice data (color and opacity) before blending [S1].
+*   **Frame Buffer 2 (Image Buffer):** Accumulates the final composited image [S1].
 *   **Texture Rotation Matrix:** Used to map the volume data to the slice planes [S1].
 
 **Algorithm Steps:**
 The algorithm processes slices from back to front (furthest to nearest) [S1].
 
 1.  **Initialization:** Load the texture rotation matrix [S1].
-2.  **Furthest Slice:** Resample the furthest slice of the volume into the Slice Buffer (Frame Buffer 1) [S1].
+2.  **Furthest Slice:** Resample the furthest slice of the volume into the Slice Buffer [S1].
 3.  **Readback:** Read the furthest slice from the Slice Buffer into main memory [S1].
-4.  **Loop (Back-to-Front):** For each remaining slice, starting from the one behind the current nearest slice:
+4.  **Loop (Back-to-Front):** For each remaining slice between the furthest and nearest:
     a.  Resample the next slice into the Slice Buffer [S1].
-    b.  Read the previous slice (the one just processed or the initial furthest one) from the Slice Buffer into main memory [S1].
-    c.  **Shading Loop:** Iterate over all samples in the previous slice:
+    b.  Read the current slice from the Slice Buffer into main memory [S1].
+    c.  **Shading Loop:** Iterate over all samples in the current slice:
         i.  If the sample's opacity is greater than a threshold (indicating it is not empty):
             *   Lookup the shade (color) in the reflectance map [S1].
             *   Write the shaded color back into the Slice Buffer at the corresponding position [S1].
         ii. Else (opacity is below threshold/empty):
             *   Write a clear value (transparent/black) back into the Slice Buffer [S1].
-    d.  **Blend:** Blend the contents of the Slice Buffer into the Image Buffer (Frame Buffer 2) using the graphics hardware's "over" compositing operator [S1].
-    e.  **Readback for Next Iteration:** Read the next slice from the Image Buffer into the Slice Buffer to serve as the "previous slice" for the next iteration's shading loop? *Correction based on Algorithm 2 description:* The text states "Read next slice from frame buffer into memory" inside the loop, but the logic implies the blending happens into the Image Buffer. The standard interpretation of this specific algorithm [S1] is that the "Slice Buffer" holds the current slice being shaded, and it is blended into the "Image Buffer". The step "Read next slice from frame buffer into memory" likely refers to preparing the data for the *next* iteration's shading pass or is a specific implementation detail of the cited paper where the buffers are swapped or read back for software shading of the *next* slice. However, Algorithm 2 explicitly lists: "Blend slice buffer into frame buffer" then "Read next slice from frame buffer into memory". This suggests a read-back of the *accumulated* result or the next slice data. Given the constraint of "no figures", we follow the literal steps in Algorithm 2 [S1].
-5.  **Final Step:** Shade and blend the nearest slice as described in the loop [S1].
+    d.  **Blend:** Blend the contents of the Slice Buffer into the Image Buffer using the graphics hardware's "over" compositing operator [S1].
+    e.  **Readback:** Read the next slice from the frame buffer into memory [S1].
+5.  **Final Step:** Shade and blend the nearest slice using the same shading and blending steps [S1].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Initialization
-load_texture_rotation_matrix()
-slice_buffer = create_frame_buffer()
-image_buffer = create_frame_buffer()
+def blend_method(volume, transfer_function, reflectance_map, threshold, image_width, image_height):
+    # Data structures: Two frame buffers [S1]
+    slice_buffer = [[(0.0, 0.0, 0.0, 0.0)] * image_width for _ in range(image_height)]
+    image_buffer = [[(0.0, 0.0, 0.0, 0.0)] * image_width for _ in range(image_height)]
 
-# Process furthest slice
-resample_slice_into_buffer(volume, furthest_slice_index, slice_buffer)
-read_buffer_to_memory(slice_buffer, previous_slice_data)
+    # 1. Load texture rotation matrix [S1]
+    rotation_matrix = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] # [G] Identity placeholder for view transformation
 
-# Loop over remaining slices back-to-front
-for slice_index in range(second_furthest_slice_index, nearest_slice_index, -1):
-    # Resample current slice
-    resample_slice_into_buffer(volume, slice_index, slice_buffer)
-    
-    # Read the previously processed slice (or initial furthest) for shading
-    # Note: The source algorithm reads the "previous slice" from the buffer 
-    # which was populated in the previous iteration or initialization.
-    read_buffer_to_memory(slice_buffer, current_slice_data)
-    
-    # Shading pass
-    for sample in current_slice_data:
-        if sample.opacity > threshold:
-            shade = lookup_reflectance_map(sample.position)
-            sample.color = shade
-        else:
-            sample.color = clear_color # Transparent/Black
-            
-    # Write shaded data back to slice buffer
-    write_memory_to_buffer(current_slice_data, slice_buffer)
-    
-    # Hardware Compositing
+    # 2. Resample furthest slice into slice buffer [S1]
+    resample_slice_into_buffer(volume, furthest_slice_index, rotation_matrix, slice_buffer)
+
+    # 3. Read furthest slice from frame buffer into memory [S1]
+    previous_slice_data = read_buffer_to_memory(slice_buffer)
+
+    # 4. Loop over all remaining slices back-to-front [S1]
+    for slice_idx in range(second_furthest_slice_index, nearest_slice_index, -1):
+        # a. Resample next slice into frame buffer [S1]
+        resample_slice_into_buffer(volume, slice_idx, rotation_matrix, slice_buffer)
+
+        # b. Read previous slice from frame buffer into memory [S1]
+        current_slice_data = read_buffer_to_memory(slice_buffer)
+
+        # c. Loop over all samples in previous slice [S1]
+        for y in range(image_height):
+            for x in range(image_width):
+                sample = current_slice_data[y][x]
+                if sample.opacity > threshold:
+                    # Lookup shade in reflectance map [S1]
+                    shade = lookup_reflectance_map(sample.position, reflectance_map)
+                    sample.color = shade
+                else:
+                    # Write clear back into buffer [S1]
+                    sample.color = (0.0, 0.0, 0.0)
+                # Write shaded data back to slice buffer
+                slice_buffer[y][x] = sample
+
+        # d. Blend slice buffer into frame buffer [S1]
+        blend_buffers(source=slice_buffer, destination=image_buffer, operator="over")
+
+        # e. Read next slice from frame buffer into memory [S1]
+        next_slice_data = read_buffer_to_memory(image_buffer)
+
+    # 5. Shade and blend nearest slice as above [S1]
+    resample_slice_into_buffer(volume, nearest_slice_index, rotation_matrix, slice_buffer)
+    nearest_slice_data = read_buffer_to_memory(slice_buffer)
+    for y in range(image_height):
+        for x in range(image_width):
+            sample = nearest_slice_data[y][x]
+            if sample.opacity > threshold:
+                sample.color = lookup_reflectance_map(sample.position, reflectance_map)
+            else:
+                sample.color = (0.0, 0.0, 0.0)
+            slice_buffer[y][x] = sample
     blend_buffers(source=slice_buffer, destination=image_buffer, operator="over")
-    
-    # Prepare for next iteration: Read the result or next slice?
-    # Source Algorithm 2 says: "Read next slice from frame buffer into memory"
-    # This implies reading the accumulated image or the next volume slice data.
-    # Given the context of "Shade and Blend nearest slice as above", 
-    # the loop likely prepares the data for the next shading step.
-    read_buffer_to_memory(image_buffer, next_slice_data) # Or volume slice?
-    
-# Final nearest slice
-resample_slice_into_buffer(volume, nearest_slice_index, slice_buffer)
-read_buffer_to_memory(slice_buffer, nearest_slice_data)
-for sample in nearest_slice_data:
-    if sample.opacity > threshold:
-        sample.color = lookup_reflectance_map(sample.position)
-    else:
-        sample.color = clear_color
-write_memory_to_buffer(nearest_slice_data, slice_buffer)
-blend_buffers(source=slice_buffer, destination=image_buffer, operator="over")
+
+    return image_buffer
+
+# Helper definitions [G]
+def load_texture_rotation_matrix():
+    return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+
+def resample_slice_into_buffer(volume, slice_idx, rotation_matrix, buffer):
+    for y in range(len(buffer)):
+        for x in range(len(buffer[0])):
+            pos = transform_position(x, y, slice_idx, rotation_matrix)
+            buffer[y][x] = (volume.get_color(pos), volume.get_opacity(pos))
+
+def read_buffer_to_memory(buffer):
+    return [row[:] for row in buffer]
+
+def lookup_reflectance_map(position, reflectance_map):
+    return reflectance_map.get(position, (0.0, 0.0, 0.0))
+
+def blend_buffers(source, destination, operator):
+    for y in range(len(source)):
+        for x in range(len(source[0])):
+            src = source[y][x]
+            dst = destination[y][x]
+            alpha_src = src.opacity
+            dst.color = src.color + dst.color * (1.0 - alpha_src)
+            dst.opacity = src.opacity + dst.opacity * (1.0 - alpha_src)
+            destination[y][x] = dst
 ```
 
 **Parameters:**
-*   **Threshold:** A value to determine if a sample is "empty" or opaque enough to shade. Typically close to 0 or 1 depending on normalization. Not given in the sources.
-*   **Resolution:** Image resolution affects the number of samples per ray.
+*   **Threshold:** A value to determine if a sample is "empty" or opaque enough to shade. Not given in the sources.
+*   **Resolution:** Image resolution affects the number of samples per ray [S1].
 
 **Edge Cases and Pitfalls:**
 *   **Early Ray Termination:** Cannot be directly employed because transparency values reside in the frame buffer's channel, not in main memory. Checking opacity requires a read from the frame buffer, which is expensive [S1].
@@ -105,7 +137,7 @@ blend_buffers(source=slice_buffer, destination=image_buffer, operator="over")
 *   **Time Complexity:** Faster than software compositing (Planes method) for fully translucent volumes because hardware blending is quicker than software accumulation [S1]. Slower for opaque volumes due to the overhead of shading all voxels and data transfer, and the inability to use early ray termination [S1].
 *   **Memory Complexity:** Requires two frame buffers [S1].
 *   **Performance:** In benchmarks, the Blend method produced better rendering rates for fully translucent volumes (e.g., MRI Head, Lobster CT) compared to the Planes method [S1]. For opaque volumes (e.g., Solid Sphere), the Planes method was faster [S1].
-*   **Strengths:** Efficient hardware compositing; good for translucent volumes.
+*   **Strengths:** Efficient hardware compositing; good for translucent volumes [S1].
 *   **Limitations:** No early ray termination; high memory bandwidth usage due to buffer swaps and readbacks; shading is performed for all voxels regardless of opacity (except for the threshold skip) [S1].
 
 ## Background

@@ -1,67 +1,70 @@
 # Stream Tube Generation
-
 Also called: Pentagonal Stream Tube Generation, Streamlines with Tube Geometry, Streamtube Line Integration
 
 ## Overview
-Stream Tube Generation solves the ambiguity of line position and orientation in still images by inflating thin stream lines into volumetric tubes [S1, unofficial]. Unlike [Flow Volumes](7690-flow-volumes.md), which render the entire field as a density, this method extrudes specific paths into mesh geometry that supports lighting and shading, making the flow structure visually distinct [S1, unofficial]. It builds on [Flowline Extrusion](1621-flowline-extrusion.md) by replacing point splatting with the generation of 3D tube meshes along the integrated path [S2, unofficial].
+Stream Tube Generation solves the ambiguity of line position and orientation in still images of vector fields by inflating thin stream lines into volumetric tubes [S1, unofficial]. It constructs tube geometry (vertices, normals, colors, indices) along the integrated path, enabling lighting and shading to convey spatial structure [S2, unofficial]. It sets itself apart from [Streamlines](link) by requiring face and normal computation, which consumes more GPU memory and vertices, and from [Fabric Tube Rendering](10641-fabric-tube-rendering.md) by explicitly constructing 3D geometry rather than relying on image-space analysis [S1, unofficial][S1, unofficial].
 
 ## How it works
 **Inputs:**
-- Seed points (positions) in the vector field.
-- Vector field data (velocity vectors).
-- Parameters: `radius` (tube radius), `geometrySampling` (integer, frequency of mesh generation), `useRk4` (boolean, integration method), `dt` (step size), `maxSteps` (maximum integration steps).
-- Coordinate space multiplier `volumeCoordSpaceMult` (float3) to convert grid indices to world space.
-- Magnitude Color Transfer Function texture `vectorMangitudeCtfTex` and normalization factor `mangitudeCtfNormalizeMult`.
+*   Seed points for streamlines.
+*   Vector field data (velocity).
+*   Integration parameters: `useRk4` (boolean), `geometrySampling` (integer), `dt` (step size), `maxSteps` (integer).
+*   Tube parameters: `radius` (float).
+*   Color mapping: `vectorMangitudeCtfTex` (texture), `mangitudeCtfNormalizeMult` (float).
+*   Volume bounds: `volumeSize` (width, height, depth), `volumeCoordSpaceMult` (x, y, z).
 
 **Outputs:**
-- `outVetrices`: `float3*` array of tube vertices.
-- `outVertexNormals`: `float3*` array of tube normals.
-- `outVertexColors`: `float3*` array of tube colors.
-- `outFaces`: `uint3*` array of tube indices (triangles).
-- `outComputedSteps`: `uint*` array storing the number of valid steps per seed.
+*   `outVetrices`: `float3*`, tube vertices.
+*   `outVertexNormals`: `float3*`, tube normals.
+*   `outVertexColors`: `float3*`, tube colors.
+*   `outFaces`: `uint3*`, tube indices.
+*   `outComputedSteps`: `uint*`, step count per seed.
 
 **Data Structures:**
-- The tube cross-section is a regular pentagon with 5 vertices [S1, unofficial].
-- Each tube segment (between two integration steps) consists of 5 vertices for the current slice and 5 for the previous slice, connected to form 10 triangles (2 triangles per pentagon side) [S1, unofficial].
-- Indices are stored as `uint3` (three indices per triangle) [S2, unofficial].
+*   **Tube Cross-Section:** Regular pentagon with 5 vertices.
+*   **Vertex Layout:** Each tube segment adds 5 vertices.
+*   **Index Layout:** Each tube segment adds 10 indices (2 triangles per side, 5 sides).
 
-**Numbered Steps:**
+**Parameters:**
+*   `useRk4`: Selects between Runge-Kutta 4th order (`rk4Integrate`) and Euler (`eulerIntegrate`) integration [S2, unofficial].
+*   `geometrySampling`: Integer controlling frequency of tube mesh generation. Geometry is generated every `geometrySampling` integration steps [S2, unofficial].
+*   `mangitudeCtfNormalizeMult`: Normalization factor for vector magnitude texture lookup, calculated as `vectorMangitudeCtfLength / maxMangitude` [S2, unofficial].
 
-1.  **Initialize Bounds:** Calculate the maximum world coordinates based on volume size and coordinate space multiplier [S2, unofficial]:
+**Algorithm:**
+1.  Initialize `maxWorld` bounds:
     $$
     \begin{aligned}
-    \text{maxWorld}.x &= \text{volumeSize}.width / \text{volumeCoordSpaceMult}.x \\
-    \text{maxWorld}.y &= \text{volumeSize}.height / \text{volumeCoordSpaceMult}.y \\
-    \text{maxWorld}.z &= \text{volumeSize}.depth / \text{volumeCoordSpaceMult}.z
+    maxWorld.x &= volumeSize.width / volumeCoordSpaceMult.x \\
+    maxWorld.y &= volumeSize.height / volumeCoordSpaceMult.y \\
+    maxWorld.z &= volumeSize.depth / volumeCoordSpaceMult.z
     \end{aligned}
     $$
-    Initialize `geometryStep = geometrySampling` and `step = 1` [S2, unofficial].
-
-2.  **Integration Loop:** While `step < maxSteps`:
-    a.  **Boundary Check:** If `position.x < 0` or `position.y < 0` or `position.z < 0` or `position.x > maxWorld.x` or `position.y > maxWorld.y` or `position.z > maxWorld.z`, break the loop [S2, unofficial].
+2.  Initialize `geometryStep = geometrySampling`, `step = 1`.
+3.  Loop while `step < maxSteps`:
+    a.  **Boundary Check:** If `position.x < 0 || position.y < 0 || position.z < 0 || position.x > maxWorld.x || position.y > maxWorld.y || position.z > maxWorld.z`, break loop [S2, unofficial].
     b.  **Integrate Position:**
-        - If `useRk4` is true, compute `dv = rk4Integrate(position, dt, volumeCoordSpaceMult)` [S2, unofficial].
-        - Else, compute `dv = eulerIntegrate(position, dt, volumeCoordSpaceMult)` [S2, unofficial].
-        - Update position: `position.x += dv.x`, `position.y += dv.y`, `position.z += dv.z` [S2, unofficial].
-    c.  **Geometry Generation:** Decrement `geometryStep`. If `geometryStep == 0`:
-        - Reset `geometryStep = geometrySampling` [S2, unofficial].
-        - **Color:** Sample magnitude color: `color = tex1D(vectorMangitudeCtfTex, dv.w * mangitudeCtfNormalizeMult)` [S2, unofficial].
-        - **Vertices & Normals:** Call `createTubeBaseVertices(position, dv.xyz, radius, baseIndex, color, outVetrices, outNormals, outColors)` [S1, unofficial]. This function generates 5 vertices and normals for the current pentagonal cross-section [S1, unofficial].
-        - **Indices:** Call `createTubeIndices(vertexBaseId, baseFaceId, outFaces)` [S1, unofficial]. This function generates indices connecting the current pentagon to the previous one [S1, unofficial].
-        - Increment `baseIndex` by 5 and `baseFaceId` by 10 [S1, unofficial].
-    d.  Increment `step` [S2, unofficial].
-
-3.  **Finalize:** Store `outComputedSteps[id] = step / geometrySampling` [S2, unofficial].
+        *   If `useRk4` is true, call `rk4Integrate(position, dt, volumeCoordSpaceMult)`.
+        *   Else, call `eulerIntegrate(position, dt, volumeCoordSpaceMult)`.
+        *   Result is `dv` (float4).
+        *   Update `position.x += dv.x`, `position.y += dv.y`, `position.z += dv.z` [S2, unofficial].
+    c.  **Decrement `geometryStep`.** If `geometryStep == 0`:
+        *   Reset `geometryStep = geometrySampling`.
+        *   Sample magnitude color: `color = tex1D(vectorMangitudeCtfTex, (float)(dv.w * mangitudeCtfNormalizeMult))` [S2, unofficial].
+        *   Call `createTubeBaseVertices` with `position`, `dv.xyz`, `radius`, `outputPos`, `color`, and output buffers.
+        *   Call `createTubeIndices` with `outputPos` and `(outputPos - 5 * id - 5) * 2`.
+        *   Increment `outputPos += 5` [S2, unofficial].
+    d.  Increment `step`.
+4.  After loop, store computed steps: `outComputedSteps[id] = step / geometrySampling` [S2, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def create_tube_base_vertices(pos, v, radius, base_index, color, out_vertices, out_normals, out_colors):
+def create_tube_base_vertices(pos: float3, v: float3, radius: float, base_index: int, color: float3, 
+                              out_vertices: list, out_normals: list, out_colors: list):
     """
-    Generates 5 vertices and normals for a pentagonal cross-section at pos.
-    v is the tangent vector (velocity).
+    Generates 5 vertices for a pentagonal cross-section of the tube.
     """
     # Find a perpendicular vector to v
     x_axis = normalize(find_perpendicular(v))
@@ -88,138 +91,184 @@ def create_tube_base_vertices(pos, v, radius, base_index, color, out_vertices, o
         v_sec = x_axis * cos_a + y_axis * sin_a
         
         # Normal is the direction from center to vertex
-        out_normals[base_index] = v_sec
-        # Vertex position is center + radius * direction
-        out_vertices[base_index] = pos + v_sec * radius
-        out_colors[base_index] = color
+        out_normals.append(v_sec)
+        
+        # Vertex position
+        vertex = pos + v_sec * radius
+        out_vertices.append(vertex)
+        
+        # Color
+        out_colors.append(color)
+        
         base_index += 1
 
-def create_tube_indices(vertex_base_id, base_face_id, out_faces):
+def create_tube_indices(vertex_base_id: int, base_face_id: int, out_faces: list):
     """
-    Generates indices for 10 triangles connecting the current pentagon (vertex_base_id)
-    to the previous pentagon (vertex_base_id - 5).
+    Generates indices for the 5 triangular faces of the tube segment.
+    Each face connects vertex i and i+1 of the current slice to vertex i+1 of the previous slice.
     """
     for i in range(5):
         i_next = (i + 1) % 5
         
-        # Two triangles per quad face between pentagon sides
-        # Triangle 1: current[i], current[i+1], prev[i+1]
-        out_faces[base_face_id] = (vertex_base_id + i, vertex_base_id + i_next, vertex_base_id - 5 + i_next)
-        base_face_id += 1
+        # Triangle 1: Current i, Current i+1, Previous i+1
+        out_faces.append((vertex_base_id + i, vertex_base_id + i_next, vertex_base_id - 5 + i_next))
         
-        # Triangle 2: current[i], prev[i], prev[i+1]
-        out_faces[base_face_id] = (vertex_base_id + i, vertex_base_id - 5 + i, vertex_base_id - 5 + i_next)
+        # Triangle 2: Current i, Previous i, Previous i+1
+        out_faces.append((vertex_base_id + i, vertex_base_id - 5 + i, vertex_base_id - 5 + i_next))
+        
         base_face_id += 1
 
-def generate_stream_tubes(seeds, vector_field, params):
+def generate_stream_tubes(seed_points, vector_field, params):
     """
     Main kernel logic for generating stream tubes.
     """
-    volume_size = params.volume_size
-    coord_mult = params.volume_coord_space_mult
-    max_steps = params.max_steps
-    geometry_sampling = params.geometry_sampling
-    use_rk4 = params.use_rk4
-    dt = params.dt
-    radius = params.radius
-    
-    # Output buffers
     out_vertices = []
     out_normals = []
     out_colors = []
     out_faces = []
     out_computed_steps = []
     
-    for seed in seeds:
-        position = seed.position
-        step = 1
+    volume_size = params['volume_size']
+    coord_mult = params['volume_coord_space_mult']
+    max_steps = params['max_steps']
+    geometry_sampling = params['geometry_sampling']
+    radius = params['radius']
+    use_rk4 = params['use_rk4']
+    dt = params['dt']
+    mag_tex = params['magnitude_ctf_tex']
+    mag_norm_mult = params['magnitude_ctf_normalize_mult']
+    
+    # Initialize maxWorld bounds
+    max_world = (
+        volume_size.width / coord_mult.x,
+        volume_size.height / coord_mult.y,
+        volume_size.depth / coord_mult.z
+    )
+    
+    for id, seed in enumerate(seed_points):
+        position = seed
         geometry_step = geometry_sampling
-        base_vertex_index = len(out_vertices) // 3 # Assuming flat array
-        base_face_index = len(out_faces) // 3
+        step = 1
+        output_pos = 0 # Local counter for vertices in this tube
         
-        # Store previous position for first tube segment? 
-        # Note: The source code implies geometry is generated *after* integration step.
-        # The first call to createTubeBaseVertices creates the first slice.
-        # Subsequent calls create the next slice and indices connecting to the previous.
-        # We need to track the previous vertex base index.
-        prev_vertex_base_index = base_vertex_index
+        # Store base index for faces to calculate relative indices
+        # Note: In the source, indices are calculated relative to the global output buffer
+        # Here we simulate the logic for a single tube segment generation
         
         while step < max_steps:
             # Boundary check
-            max_world_x = volume_size.width / coord_mult.x
-            max_world_y = volume_size.height / coord_mult.y
-            max_world_z = volume_size.depth / coord_mult.z
-            
             if (position.x < 0 or position.y < 0 or position.z < 0 or 
-                position.x > max_world_x or position.y > max_world_y or position.z > max_world_z):
+                position.x > max_world.x or position.y > max_world.y or position.z > max_world.z):
                 break
             
-            # Integration
+            # Integrate
             if use_rk4:
-                dv = rk4_integrate(position, dt, coord_mult)
+                dv = rk4_integrate(position, dt, coord_mult, vector_field)
             else:
-                dv = euler_integrate(position, dt, coord_mult)
+                dv = euler_integrate(position, dt, coord_mult, vector_field)
             
             position.x += dv.x
             position.y += dv.y
             position.z += dv.z
             
-            # Generate geometry every geometry_sampling steps
             geometry_step -= 1
             if geometry_step == 0:
                 geometry_step = geometry_sampling
                 
-                # Color from magnitude
-                magnitude = dv.w # Assuming dv.w is magnitude
-                color = sample_magnitude_ctf(magnitude, params.ctf_params)
+                # Sample color
+                color = tex1d_lookup(mag_tex, dv.w * mag_norm_mult)
                 
-                # Create current slice vertices
-                create_tube_base_vertices(position, dv.xyz, radius, base_vertex_index, color, out_vertices, out_normals, out_colors)
+                # Get current base index in global buffers
+                current_vertex_base = len(out_vertices)
+                current_face_base = len(out_faces)
                 
-                # If not the first slice, create indices connecting to previous slice
-                if base_vertex_index != prev_vertex_base_index:
-                    create_tube_indices(base_vertex_index, base_face_index, out_faces)
-                    base_face_index += 10 # 5 sides * 2 triangles
+                # Generate vertices and normals
+                create_tube_base_vertices(position, dv.xyz, radius, current_vertex_base, color, 
+                                          out_vertices, out_normals, out_colors)
                 
-                prev_vertex_base_index = base_vertex_index
-                base_vertex_index += 5 # 5 vertices per slice
+                # Generate indices
+                # The source uses (outputPos - 5 * id - 5) * 2 which implies a specific buffer layout.
+                # We use relative indices based on current_vertex_base and previous vertex count.
+                # Previous vertex count is current_vertex_base - 5 (if not first segment)
+                # For the first segment, we need a base. The source logic assumes a continuous buffer.
+                # We'll assume the first segment connects to a dummy previous segment or handles it separately.
+                # However, standard tube generation requires a previous slice.
+                # The source code `createTubeIndices` uses `vertexBaseId - 5`.
+                # This implies that when `createTubeIndices` is called, the previous 5 vertices are already in the buffer.
+                
+                if current_vertex_base >= 5:
+                    create_tube_indices(current_vertex_base, current_face_base, out_faces)
+                else:
+                    # First segment: no previous slice to connect to. 
+                    # Typically capped or handled differently. 
+                    # Source doesn't specify cap logic, but indices would be invalid if < 5.
+                    # We skip index generation for the very first segment if no previous exists.
+                    pass
+                
+                output_pos += 5
             
             step += 1
         
-        out_computed_steps.append(step // geometry_sampling)
+        out_computed_steps.append(step / geometry_sampling)
     
     return out_vertices, out_normals, out_colors, out_faces, out_computed_steps
+
+def find_perpendicular(v: float3) -> float3:
+    """
+    Finds a vector perpendicular to v.
+    Simple heuristic: if v is not parallel to x-axis, use cross(v, (1,0,0)).
+    Else use cross(v, (0,1,0)).
+    """
+    if abs(v.x) < 0.9:
+        return cross(v, (1.0, 0.0, 0.0))
+    else:
+        return cross(v, (0.0, 1.0, 0.0))
+
+def normalize(v: float3) -> float3:
+    mag = sqrt(v.x**2 + v.y**2 + v.z**2)
+    if mag == 0:
+        return (0.0, 0.0, 0.0)
+    return (v.x/mag, v.y/mag, v.z/mag)
+
+def cross(a: float3, b: float3) -> float3:
+    return (a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x)
+
+def rk4_integrate(pos, dt, coord_mult, field):
+    # Placeholder for RK4 integration logic
+    # Returns dv (float4) where xyz is displacement, w is magnitude
+    pass
+
+def euler_integrate(pos, dt, coord_mult, field):
+    # Placeholder for Euler integration logic
+    # Returns dv (float4) where xyz is displacement, w is magnitude
+    pass
+
+def tex1d_lookup(tex, t):
+    # Placeholder for texture lookup
+    pass
 ```
 
-**Parameters:**
-- `useRk4`: Boolean. If true, uses 4th-order Runge-Kutta integration; otherwise, uses Euler integration [S2, unofficial].
-- `geometrySampling`: Integer. Controls how often tube mesh geometry is generated. Geometry is generated every `geometrySampling` integration steps [S2, unofficial].
-- `mangitudeCtfNormalizeMult`: Normalization factor for vector magnitude texture lookup, calculated as `vectorMangitudeCtfLength / maxMangitude` during kernel launch [S2, unofficial].
-- `radius`: Float. The radius of the stream tube [S1, unofficial].
-
 **Edge Cases and Pitfalls:**
-- **Boundary Conditions:** The loop breaks if the position exceeds the volume bounds or becomes negative [S2, unofficial].
-- **Adaptive Algorithms:** Adaptive integration algorithms are not supported for stream tubes due to array index management bugs in the reference implementation [S1, unofficial].
-- **Memory Usage:** Stream tubes consume significantly more GPU memory than stream lines because they generate vertices, normals, and indices for faces, in addition to the integration computation [S1, unofficial].
-- **Precision:** The pentagonal approximation uses hardcoded cosine/sine values (e.g., 0.3090, 0.9511) which may introduce minor visual artifacts compared to a true circle, but is deemed sufficient for smooth shading [S1, unofficial].
+*   **Adaptive Algorithm Bug:** The adaptive algorithm does not work with stream tubes due to array index errors during counting [S1, unofficial].
+*   **Memory Usage:** Stream tubes consume significantly more GPU memory than stream lines due to the increased number of vertices, face indices, and normals [S1, unofficial].
+*   **Boundary Conditions:** Integration must check against `maxWorld` bounds to prevent out-of-bounds memory access or invalid geometry [S2, unofficial].
 
 ## Subtopics
 
-### Flow Volumes
-Renders the entire vector field as a volumetric density rather than discrete paths. Choose when you need to see the overall flow structure everywhere, not just along specific streamlines. [Flow Volumes](7690-flow-volumes.md)
+### [Fabric Tube Rendering](10641-fabric-tube-rendering.md)
+A post-processing technique that interprets a composited image of a tensor field as streamtubes on the surface without creating actual 3D geometry. It uses binormals derived from eigenvectors and image-plane normals to determine tube position and width, creating a tube-like effect with proper spatial impression. It sets itself apart from [Stream Tube Generation](2707-stream-tube-generation.md) by avoiding explicit geometric construction and integration along the field, instead relying on local image-space analysis to compute shading normals.
 
 ## Operating characteristics
-- **Time Complexity:** Integration time is the same as for stream lines. However, total time is higher due to the overhead of generating tube geometry (vertices, normals, indices) [S1, unofficial].
-- **Memory Complexity:** Significantly higher than stream lines. Requires storage for vertices, normals, colors, and indices for every tube segment [S1, unofficial].
-- **Performance:** On an NVIDIA Quadro K5000, 2^13 (8192) stream tubes with 2^13 (8192) samples took 240 ms [S1, unofficial].
-- **Strengths:** Provides clear visual cues for flow direction and position in still images; supports lighting and shading for better depth perception [S1, unofficial].
-- **Limitations:** High memory consumption; not suitable for adaptive integration in the reference implementation; more complex to render than lines [S1, unofficial].
-- **When to Use:** When visual clarity of flow paths in static images is critical and GPU memory is sufficient.
-- **When Not to Use:** When memory is constrained or when adaptive step sizes are required.
+*   **Time Complexity:** Computation power for integration is the same as for stream lines [S1, unofficial].
+*   **Memory Complexity:** Much higher than stream lines due to vertices, face indices, and normals [S1, unofficial].
+*   **Performance:** 2^13 stream tubes of 2^13 samples took 240 ms on NVIDIA Quadro K5000 [S1, unofficial].
+*   **Strengths:** Solves ambiguity in still images regarding line position and orientation; allows for shading and lighting [S1, unofficial].
+*   **Limitations:** High memory consumption; adaptive algorithms are not supported due to implementation bugs [S1, unofficial].
 
 ## Background
-Stream Tube Generation was developed as part of a CUDA-based realtime visualization system for 3D vector fields. The method was introduced to address the difficulty of perceiving line orientation in still images by inflating lines into shaded tubes [S1, unofficial]. The implementation details, including the pentagonal cross-section and CUDA kernel structure, are documented in Marek Fiser's blog and the associated GitHub repository [S1, S2, unofficial].
+Stream Tube Generation is a method for visualizing 3D vector fields by extruding stream lines into tubes. It was implemented using CUDA for real-time visualization [S1, unofficial]. The technique is part of a broader set of vector field visualization methods including stream lines, stream surfaces, and fabric tube rendering [S1, unofficial][S1, unofficial].
 
 ## Sources
-[S1] Realtime visualization of 3D vector fields using CUDA, https://marekfiser.com/projects/realtime-visualization-of-3D-vector-fields-using-CUDA/, fetched 2026-10-28 (unofficial)
-[S2] NightElfik/Vector-field-visualization-using-cuda, https://github.com/NightElfik/Vector-field-visualization-using-cuda, fetched 2026-10-29 (unofficial)
+[S1] Realtime visualization of 3D vector fields using CUDA | Marek's blog, https://marekfiser.com/projects/realtime-visualization-of-3D-vector-fields-using-CUDA/, fetched 2026-10-28 (unofficial)
+[S2] NightElfik/Vector-field-visualization-using-cuda NightElfik/Vector-field-visualization-using-cuda on GitHub, https://github.com/NightElfik/Vector-field-visualization-using-cuda, fetched 2026-10-29 (unofficial)
+[S1] Fabric Tube Rendering description from source notes. (unofficial)

@@ -3,93 +3,93 @@
 Also called: pokrytie
 
 ## Overview
-Linear Opacity Interpolation maps scalar volume data values to opacity using linear interpolation between two threshold values [S1, unofficial]. It serves as the simplest form of piecewise linear mapping, providing a direct, computationally inexpensive way to define opacity transitions without the complexity of multi-segment functions or gradient scaling [S1, unofficial].
+Linear Opacity Interpolation maps scalar volume data values to opacity using linear interpolation between two threshold values [S1, unofficial]. It serves as the foundational opacity mapping technique within the Piecewise Linear Mapping and Integration family, providing a simple, computationally inexpensive method to define opacity transitions [S1, unofficial]. Unlike its sibling [Piecewise Linear Opacity Mapping with Gradient Scaling](1335-piecewise-linear-opacity-mapping-with-gradient-scaling.md), which incorporates gradient magnitude to modulate opacity, this method relies solely on the scalar data value [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-- Input: scalar volume data value $i$ (typically unsigned integer, e.g., `UINT16`).
-- Parameters: lower threshold $o_a$ (`UINT16`), upper threshold $o_b$ (`UINT16`), opacity at lower threshold $f_o_a$ (`float`), opacity at upper threshold $f_o_b$ (`float`).
-- Output: resulting opacity $\alpha$ (`float`).
+**Inputs and Outputs**
+*   **Input:** A scalar data value $i$ (typically from the volume dataset).
+*   **Parameters:**
+    *   $oa, ob$: Lower and upper threshold values for the interpolation range. These are unsigned 16-bit integers (`UINT16`) [S1, unofficial].
+    *   $foa, fob$: Opacity values corresponding to thresholds $oa$ and $ob$. These are floating-point numbers, typically in the range $[0.0, 1.0]$ [S1, unofficial].
+*   **Output:** A scalar opacity $\alpha \in [0.0, 1.0]$ [S1, unofficial].
 
-**Data Structures:**
-No complex data structures are required. The method relies on four scalar parameters.
+**Data Structures**
+No complex data structures are required. The method operates on scalar values and four constant parameters.
 
-**Steps:**
-1. Check if the input value $i$ is outside the range $[o_a, o_b]$.
-2. If $i < o_a$ or $i > o_b$, return $0.0$.
-3. Otherwise, compute the linear interpolation between $f_o_a$ and $f_o_b$ based on the position of $i$ within $[o_a, o_b]$.
+**Algorithm**
+The opacity $\alpha$ is calculated based on the position of the input value $i$ relative to the thresholds $oa$ and $ob$:
 
-**Formula:**
+1.  If $i$ is outside the interval $[oa, ob]$ (i.e., $i < oa$ or $i > ob$), the opacity is zero.
+2.  If $i$ is within the interval $[oa, ob]$, linear interpolation is performed between $foa$ and $fob$.
+
+**Formula**
+The opacity $\alpha$ is defined as:
+
 $$
 \alpha = \begin{cases} 
-0.0 & i < o_a \lor i > o_b \\
-f_o_a + (f_o_b - f_o_a) \frac{i - o_a}{o_b - o_a} & \text{otherwise}
+0.0 & i < oa \lor i > ob \\
+foa + (fob - foa) \frac{i - oa}{ob - oa} & \text{otherwise}
 \end{cases}
 $$
 
-**Parameters:**
-- $o_a, o_b$: Lower and upper thresholds. Type: `UINT16` [S1, unofficial].
-- $f_o_a, f_o_b$: Opacity values at the thresholds. Type: `float`. Typical range: $0.0$ to $1.0$ [S1, unofficial].
+**Pseudocode**
+The following Python-like pseudocode implements the method. It assumes standard floating-point arithmetic.
 
-**Edge Cases and Pitfalls:**
-- **Division by Zero:** If $o_a = o_b$, the denominator in the interpolation formula becomes zero. The source code implies a check or assumption that $o_a \neq o_b$ for valid interpolation [S1, unofficial]. In implementation, this case should be handled explicitly (e.g., returning $f_o_a$ or $0.0$).
-- **Input Range:** Values outside $[o_a, o_b]$ are clamped to $0.0$ opacity [S1, unofficial].
-
-**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def linear_opacity_interpolation(i: int, oa: int, ob: int, foa: float, fob: float) -> float:
+def linear_opacity_interpolation(i, oa, ob, foa, fob):
     """
-    Computes opacity alpha for input value i using linear interpolation between thresholds oa and ob.
+    Calculate opacity alpha for scalar value i using linear interpolation
+    between thresholds oa and ob with target opacities foa and fob.
     
     Args:
-        i: Scalar volume data value (UINT16 compatible).
-        oa: Lower threshold (UINT16).
-        ob: Upper threshold (UINT16).
-        foa: Opacity at oa (float).
-        fob: Opacity at ob (float).
+        i (float): Input scalar data value.
+        oa (int): Lower threshold (UINT16).
+        ob (int): Upper threshold (UINT16).
+        foa (float): Opacity at oa.
+        fob (float): Opacity at ob.
         
     Returns:
-        Opacity alpha (float).
+        float: Opacity alpha in [0.0, 1.0].
     """
-    # Check if input is outside the threshold range
+    # Guard against division by zero if oa == ob
+    if oa == ob:
+        # If thresholds are identical, opacity is undefined by linear interpolation.
+        # Typically returns 0 or the specific value if i matches exactly.
+        # Based on standard linear interpolation behavior, if range is 0, 
+        # the fraction is undefined. We assume 0 opacity for degenerate case 
+        # or handle as edge case. [G]
+        return 0.0
+
     if i < oa or i > ob:
         return 0.0
-    
-    # Handle degenerate case where thresholds are equal
-    if oa == ob:
-        # If thresholds are equal, the range has zero width.
-        # Typically, this might return the opacity at that point if i == oa,
-        # or 0.0 if strictly outside. Based on the formula, division by zero occurs.
-        # A safe default is to return foa if i == oa, else 0.0.
-        if i == oa:
-            return foa
-        else:
-            return 0.0
-            
-    # Linear interpolation
-    # alpha = foa + (fob - foa) * (i - oa) / (ob - oa)
-    alpha = foa + (fob - foa) * (i - oa) / (ob - oa)
-    
-    return alpha
+    else:
+        # Linear interpolation: y = y1 + (y2 - y1) * (x - x1) / (x2 - x1)
+        alpha = foa + (fob - foa) * (i - oa) / (ob - oa)
+        return alpha
 ```
+
+**Edge Cases and Pitfalls**
+*   **Degenerate Range:** If $oa = ob$, the denominator in the interpolation formula becomes zero. The sources do not explicitly define the behavior for this case, but standard implementations should guard against division by zero [G].
+*   **Precision:** The input thresholds $oa, ob$ are `UINT16`, while the opacities are `float`. Care must be taken to cast $i$ to float before arithmetic operations to avoid integer division truncation.
+*   **Boundary Conditions:** The method returns exactly 0.0 for values outside the range. There is no smoothing or falloff outside $[oa, ob]$.
 
 ## Subtopics
 
 ### [Bézier Curve Opacity Mapping](8485-b-zier-curve-opacity-mapping.md)
-Maps scalar volume data values to opacity using a user-defined Bézier curve, allowing non-linear opacity control across a selected data range.
+Replaces piecewise linear segments with a smooth parametric Bézier curve, enabling complex opacity transitions that linear interpolation cannot achieve.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per voxel/sample. The operation involves a few comparisons and basic arithmetic.
-- **Memory Complexity:** $O(1)$ for parameters. No additional memory structures are needed.
-- **Strengths:** Extremely fast, simple to implement, and easy to understand. Suitable for real-time applications where computational resources are limited.
-- **Limitations:** Limited flexibility in shaping the opacity function. Cannot model complex opacity transitions or multiple distinct material ranges within a single linear segment.
-- **When to use:** When a simple, direct opacity transition is sufficient, or as a building block for more complex piecewise functions.
-- **When not to use:** When complex opacity shaping or multiple material distinctions are required within the same data range.
+*   **Time Complexity:** $O(1)$ per sample. The calculation involves a few comparisons and basic arithmetic operations.
+*   **Memory Complexity:** $O(1)$. Only four parameters ($oa, ob, foa, fob$) need to be stored per mapping segment.
+*   **Strengths:** Extremely fast to evaluate; minimal memory footprint; simple to implement and tune.
+*   **Limitations:** Produces sharp, discontinuous transitions in opacity at the thresholds $oa$ and $ob$ (unless $foa=0$ and $fob=0$ at the boundaries). Cannot model complex, non-linear opacity distributions as easily as higher-order methods.
+*   **When to use:** Suitable for simple volume datasets where distinct material boundaries are defined by scalar thresholds and performance is critical.
+*   **When not to use:** When smooth, gradual opacity transitions are required, or when gradient information is needed to enhance surface details (use [Piecewise Linear Opacity Mapping with Gradient Scaling](1335-piecewise-linear-opacity-mapping-with-gradient-scaling.md) instead).
 
 ## Background
-The method is described in the context of parallel volume rendering implementations, specifically in the `besnik/parallel-volume-rendering` repository [S1, unofficial]. It is a fundamental technique in direct volume ray casting, forming the basis for transfer function mapping in many volume rendering pipelines. The term "pokrytie" is noted as an alias, likely derived from Slavic languages meaning "coverage" or "opacity" [S1, unofficial].
+The method is described in the context of parallel volume rendering implementations, specifically within the `parallel-volume-rendering` repository [S1, unofficial]. It is also known by the alias "pokrytie" [S1, unofficial].
 
 ## Sources
 [S1] besnik/parallel-volume-rendering, https://github.com/besnik/parallel-volume-rendering, fetched 2026-10-27 (unofficial)

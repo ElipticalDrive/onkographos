@@ -1,0 +1,177 @@
+# General Mesh SDF and Occupancy Voxelization
+
+Also called: SDF voxelization, occupancy grid generation
+
+## Overview
+This method converts a solid boundary representation (B-rep) into a regular volumetric occupancy grid and optionally a signed-distance field (SDF) [S1, unofficial]. It solves the problem of discretizing continuous CAD geometry into a dense 3D grid suitable for downstream applications such as 3D-print lattice generation, finite element (FE) meshing, and collision queries [S1, unofficial]. Unlike core B-rep operations, this is an application-level capability that relies on tessellated mesh data rather than exact analytical surfaces [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A solid body identifier (`CCShapeId`), a double-precision isotropic voxel spacing ($s$) in millimeters, and an integer mode flag selecting the output type (occupancy-only or occupancy+SDF) [S1, unofficial].
+*   **Output:** A `CCVoxelGrid` structure containing the grid origin, dimensions, spacing, an occupancy array, and an optional SDF array [S1, unofficial].
+
+**Data Structures:**
+The output is defined by the following layout [S1, unofficial]:
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```c
+typedef struct {
+  double   origin[3];     /* Grid origin in mm */
+  double   spacing;       /* Isotropic voxel size in mm */
+  int      dims[3];       /* nx, ny, nz */
+  uint8_t *occupancy;     /* Array of size dims[0]*dims[1]*dims[2]. 1 = inside solid, 0 = outside */
+  float   *sdf;           /* Optional signed distance field in mm. NULL if not requested. */
+} CCVoxelGrid;
+```
+
+**Algorithm Steps:**
+1.  **Grid Initialization:** Allocate the `CCVoxelGrid` structure. Set `origin` to the desired grid start point (typically the bounding box minimum or a user-defined anchor). Set `spacing` to the input $s$. Calculate `dims` based on the bounding box of the input body and the spacing [S1, unofficial].
+2.  **Tessellation:** Convert the `CCShapeId` body into a tessellated triangle mesh. This step is a prerequisite as the voxelization operates on the discrete mesh representation rather than the exact B-rep [S1, unofficial].
+3.  **Occupancy Classification:** For each voxel center $p_i$ in the grid:
+    *   Perform an inside/outside test against the tessellated mesh.
+    *   Methods include ray-stabbing (counting intersections with mesh faces) or generalized winding numbers [S1, unofficial].
+    *   Set `occupancy[i] = 1` if the point is inside the solid, and `0` otherwise [S1, unofficial].
+    *   This step is naturally data-parallel and suitable for GPU acceleration via Metal compute [S1, unofficial].
+4.  **SDF Computation (Optional):** If the mode requests SDF:
+    *   For each voxel center $p_i$, calculate the Euclidean distance to the nearest point on the surface mesh [S1, unofficial].
+    *   Assign the sign based on the occupancy result: negative if inside, positive if outside [S1, unofficial].
+    *   Store the result in `sdf[i]` [S1, unofficial].
+    *   This can be implemented as a full SDF or a narrow-band approximation [S1, unofficial].
+5.  **Validation:** Verify that the grid meets acceptance criteria (see Pitfalls) [S1, unofficial].
+
+**Pseudocode:**
+The following pseudocode implements the core logic described in the sources. It assumes helper functions for tessellation, point-in-solid testing, and distance calculation are available.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cc_voxelize(body_id, spacing, mode, grid_origin):
+    """
+    Voxelize a solid body into an occupancy grid and optional SDF.
+    
+    Args:
+        body_id: Identifier for the solid CCShapeId.
+        spacing: Double precision isotropic voxel size in mm.
+        mode: Integer. 0 for occupancy-only, 1 for occupancy+SDF.
+        grid_origin: Array [x, y, z] of grid origin in mm.
+        
+    Returns:
+        CCVoxelGrid structure.
+    """
+    # 1. Tessellate the body to get a mesh
+    # [G] Assumes body_id can be converted to a list of triangles (vertices, normals)
+    mesh = tessellate(body_id)
+    
+    # 2. Determine grid dimensions
+    # [G] Assumes get_bounding_box returns min/max coordinates
+    bbox_min, bbox_max = get_bounding_box(mesh)
+    
+    # Calculate dimensions based on spacing and bounding box relative to origin
+    # [G] Standard rounding to ensure coverage
+    dims_x = ceil((bbox_max[0] - grid_origin[0]) / spacing)
+    dims_y = ceil((bbox_max[1] - grid_origin[1]) / spacing)
+    dims_z = ceil((bbox_max[2] - grid_origin[2]) / spacing)
+    
+    dims = [dims_x, dims_y, dims_z]
+    total_voxels = dims[0] * dims[1] * dims[2]
+    
+    # 3. Allocate output structures
+    occupancy = [0] * total_voxels
+    sdf = None
+    if mode == 1:
+        sdf = [0.0] * total_voxels
+        
+    # 4. Process each voxel
+    for z in range(dims[2]):
+        for y in range(dims[1]):
+            for x in range(dims[0]):
+                idx = x + y * dims[0] + z * dims[0] * dims[1]
+                
+                # Calculate voxel center
+                px = grid_origin[0] + (x + 0.5) * spacing
+                py = grid_origin[1] + (y + 0.5) * spacing
+                pz = grid_origin[2] + (z + 0.5) * spacing
+                p = [px, py, pz]
+                
+                # Inside/Outside test
+                is_inside = point_in_solid(p, mesh)
+                occupancy[idx] = 1 if is_inside else 0
+                
+                # SDF Calculation
+                if mode == 1:
+                    # Distance to surface mesh
+                    dist = distance_to_mesh(p, mesh)
+                    if is_inside:
+                        sdf[idx] = -dist
+                    else:
+                        sdf[idx] = dist
+                        
+    # 5. Construct and return grid
+    grid = CCVoxelGrid()
+    grid.origin = grid_origin
+    grid.spacing = spacing
+    grid.dims = dims
+    grid.occupancy = occupancy
+    grid.sdf = sdf
+    return grid
+
+def point_in_solid(point, mesh):
+    """
+    Determines if a point is inside a solid defined by a mesh.
+    Uses ray-stabbing or generalized winding number.
+    """
+    # [G] Implementation detail: Cast a ray from point in a fixed direction.
+    # Count intersections with mesh triangles. Odd count = inside.
+    # Or compute generalized winding number.
+    intersections = 0
+    for triangle in mesh.triangles:
+        if ray_intersects_triangle(point, ray_direction, triangle):
+            intersections += 1
+    return intersections % 2 == 1
+
+def distance_to_mesh(point, mesh):
+    """
+    Computes the minimum Euclidean distance from a point to the mesh surface.
+    """
+    min_dist = infinity
+    for triangle in mesh.triangles:
+        d = distance_point_to_triangle(point, triangle)
+        if d < min_dist:
+            min_dist = d
+    return min_dist
+```
+
+**Parameters:**
+*   `spacing`: Double. Isotropic voxel size in mm. Determines grid resolution [S1, unofficial].
+*   `mode`: Integer. Selects output type: occupancy-only or occupancy+SDF [S1, unofficial].
+
+**Validation Formulas:**
+*   **Volume Convergence:** Voxelizing a unit box or sphere at spacing $s$ yields an occupancy count whose implied volume converges to the analytic volume as $s \to 0$ [S1, unofficial]:
+    $$ \lim_{s \to 0} \text{Volume}_{\text{voxel}} = \text{Volume}_{\text{analytic}} $$
+*   **SDF Correctness:** The SDF sign must be correct (negative inside, positive outside) and the absolute value must match the distance-to-surface within tolerance on analytic primitives [S1, unofficial]:
+    $$ \text{sign}(SDF) = \begin{cases} -1 & \text{inside} \\ +1 & \text{outside} \end{cases} $$
+    $$ |SDF| \approx \text{dist}(p, \text{surface}) $$
+*   **GPU/CPU Parity:** If GPU-accelerated, the fp32 GPU result must match the fp64 CPU reference within tolerance $\epsilon$ [S1, unofficial]:
+    $$ |Result_{GPU} - Result_{CPU}| \leq \epsilon $$
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The CPU must be the source of truth using fp64. The GPU is used for throughput with fp32. The exact classification must remain defensible on the CPU [S1, unofficial].
+*   **Memory Management:** Large grids can cause Out Of Memory (OOM) errors. Implementation must stream or tile large grids [S1, unofficial].
+*   **Determinism:** The result must be deterministic for a fixed body, spacing, and grid origin [S1, unofficial].
+*   **Application-Level Nature:** This is not a core B-rep feature. It should be scheduled only against a concrete product driver, not on the critical path [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The occupancy classification is $O(N \cdot F)$ where $N$ is the number of voxels and $F$ is the number of faces in the tessellated mesh, assuming naive ray casting. With spatial acceleration structures (BVH) for ray tracing or mesh distance, this can be reduced. The SDF computation is similarly dependent on mesh complexity per voxel.
+*   **Memory Complexity:** $O(N)$ where $N = n_x \cdot n_y \cdot n_z$. Requires storage for occupancy (1 byte per voxel) and optionally SDF (4 bytes per voxel) [S1, unofficial].
+*   **Performance:** The method is naturally data-parallel, making it a good fit for GPU acceleration via Metal compute backend for fp32-tolerant throughput work [S1, unofficial].
+*   **Strengths:** Provides dense volumetric data for simulation, 3D printing, and spatial queries. Enables smooth booleans and offsets via SDF [S1, unofficial].
+*   **Limitations:** Resolution-dependent. High resolution leads to large memory footprints. Not suitable for exact B-rep operations. Requires a concrete driver to justify the computational cost [S1, unofficial].
+*   **When to use:** 3D-print lattice/infill generation, FE simulation meshing, collision/spatial queries, generative design, medical/CT import [S1, unofficial].
+*   **When not to use:** When exact boundary representation is required, or when memory is severely constrained without tiling strategies [S1, unofficial].
+
+## Background
+This subsystem is a net-new addition to the CyberCadKernel (CC). OCCT's historical Voxel package was dropped long ago, and there were zero references to voxel/SDF/marching-cubes/distance-field in the repository prior to this implementation [S1, unofficial]. The feature was proposed in July 2026 by leonardoaraujosantos in the CyberdyneCorp/CyberCadKernel repository [S1, unofficial]. It is designed to support downstream pipelines such as CalculiX++ FE meshing and 3D-print manufacturing features [S1, unofficial].
+
+## Sources
+[S1] Voxelization (cc_voxelize) — occupancy grid + optional SDF from a solid (planning, needs a driver), https://github.com/CyberdyneCorp/CyberCadKernel/issues/6, fetched 2026-10-26 (unofficial)

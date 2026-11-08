@@ -7,14 +7,14 @@ The Extended CLCIR method reconstructs a Piecewise Linear Interface Concept (PLI
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A computational domain of arbitrary polyhedral cells. For each cell, the fluid volume fraction $F(t_n)$ at time $t_n$. The scalar field $\tilde{\phi}$ at each vertex $i_p$, computed via interpolation.
+*   **Input:** A computational domain of arbitrary polyhedral cells. For each cell, the fluid volume fraction $F(t_n)$ at time $t_n$ [S1]. The scalar field $\tilde{\phi}$ at each vertex $i_p$, computed via interpolation [S1].
 *   **Output:** The PLIC plane defined by the unit normal vector $\mathbf{n}$ and the constant $C$, such that the interface is $\mathbf{n} \cdot \mathbf{x} + C = 0$ [S1].
 
 **Data Structures:**
-*   **Scalar Field $\tilde{\phi}$:** A value per vertex $i_p$.
-*   **Cell Geometry:** Vertices $\mathbf{x}_v$, geometric center $\mathbf{x}_c$, volume $V_\Omega$.
-*   **Isosurface Data:** A list of vertices forming the isopolygon at $\tilde{\phi}=0.5$.
-*   **Triangulated Surface:** A set of triangles forming a local or extended surface around the isosurface.
+*   **Scalar Field $\tilde{\phi}$:** A value per vertex $i_p$ [S1].
+*   **Cell Geometry:** Vertices $\mathbf{x}_v$, geometric center $\mathbf{x}_c$, volume $V_\Omega$ [S1].
+*   **Isosurface Data:** A list of vertices forming the isopolygon at $\tilde{\phi}=0.5$ [S1].
+*   **Triangulated Surface:** A set of triangles forming a local or extended surface around the isosurface [S1].
 
 **Steps:**
 
@@ -30,7 +30,7 @@ The Extended CLCIR method reconstructs a Piecewise Linear Interface Concept (PLI
     $$
     If not, the cell is not interfacial [S1].
 
-3.  **Isosurface Extraction:** If the cell is interfacial, extract the isosurface at $\tilde{\phi} = 0.5$ using an isosurface extraction algorithm (e.g., [951-isosurface-extraction-on-arbitrary-polyhedral-grids.md]) [S1].
+3.  **Isosurface Extraction:** If the cell is interfacial, extract the isosurface at $\tilde{\phi} = 0.5$ using an isosurface extraction algorithm [S1].
 
 4.  **Validity Check:** If the extracted isosurface consists of a single isopolygon, mark the cell as a "valid isosurface cell" [S1].
 
@@ -55,8 +55,8 @@ The Extended CLCIR method reconstructs a Piecewise Linear Interface Concept (PLI
     *   If the cell is *not* a valid isosurface cell (e.g., in low-resolution regions), compute $\mathbf{n}$ using a Least-Squares Gradient Interface Reconstruction (LSGIR) method [S1].
 
 10. **Volume Constant Calculation:** Compute the constant $C$ such that the plane $\mathbf{n} \cdot \mathbf{x} + C = 0$ splits the cell volume $V_\Omega$ into sub-cells of volumes $F(t_n)V_\Omega$ and $(1-F(t_n))V_\Omega$ [S1].
-    *   Use the CIBRAVE method [46] for general grids.
-    *   Use the analytical method of Scardovelli and Zaleski [54] for cubic grids [S1].
+    *   Use the CIBRAVE method for general grids.
+    *   Use the analytical method of Scardovelli and Zaleski for cubic grids [S1].
 
 11. **Vertex Update:** Move the vertices of the extended triangulated surfaces to the corresponding PLIC centers (the intersection of the PLIC plane with the cell edges) [S1].
 
@@ -68,42 +68,66 @@ The Extended CLCIR method reconstructs a Piecewise Linear Interface Concept (PLI
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
+def dot(a, b):
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+def cross(a, b):
+    return (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0])
+
+def length(v):
+    return math.sqrt(dot(v, v))
+
+def normalize(v):
+    l = length(v)
+    return (v[0]/l, v[1]/l, v[2]/l) if l > 1e-9 else (0.0, 0.0, 0.0)
+
+def triangle_normal(t):
+    v0, v1, v2 = t
+    e1 = (v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2])
+    e2 = (v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2])
+    return normalize(cross(e1, e2))
+
+def weighted_normal(triangles, grid_type):
+    sum_n = (0.0, 0.0, 0.0)
+    for t in triangles:
+        n_t = triangle_normal(t)
+        if grid_type == "cubic":
+            c, v1, v2 = t
+            e1 = (v1[0]-c[0], v1[1]-c[1], v1[2]-c[2])
+            e2 = (v2[0]-c[0], v2[1]-c[1], v2[2]-c[2])
+            l1 = length(e1)
+            l2 = length(e2)
+            if l1 > 1e-9 and l2 > 1e-9:
+                cos_angle = max(-1.0, min(1.0, dot(e1, e2) / (l1 * l2)))
+                angle = math.acos(cos_angle)
+                w_t = math.sin(angle) / (l1 * l2)
+            else:
+                w_t = 1.0
+        else:
+            w_t = 1.0
+        sum_n = (sum_n[0]+w_t*n_t[0], sum_n[1]+w_t*n_t[1], sum_n[2]+w_t*n_t[2])
+    return normalize(sum_n)
+
 def extended_clcir_reconstruction(cell, phi_field, isosurface_extractor):
-    """
-    Reconstructs PLIC plane for a single cell.
-    
-    Args:
-        cell: Object containing vertices, geometric center, volume, and neighbors.
-        phi_field: Dictionary mapping vertex_id -> scalar value.
-        isosurface_extractor: Function that returns isopolygon vertices for a cell given phi_field and isovalue.
-        
-    Returns:
-        n: Unit normal vector.
-        C: PLIC constant.
-    """
-    # Step 1: Interpolation is assumed to be done prior to this function call
-    # phi_field contains the interpolated values at vertices
-    
-    # Step 2: Interface Check
+    # Step 1: Interpolation is assumed precomputed in phi_field
     phi_vals = [phi_field[v] for v in cell.vertices]
     phi_min = min(phi_vals)
     phi_max = max(phi_vals)
     
+    # Step 2: Interface Check
     if not (phi_min < 0.5 < phi_max):
-        # Not an interfacial cell, or no interface
         return None, None
 
     # Step 3: Isosurface Extraction
     isopolygon_vertices = isosurface_extractor(cell, phi_field, isovalue=0.5)
     
     # Step 4: Validity Check
-    is_valid = (len(isopolygon_vertices) > 0) # Assuming single isopolygon check
+    is_valid = len(isopolygon_vertices) > 0
     
     # Step 5: Local Triangulation
-    # Construct triangles from geometric center of isosurface and consecutive isopolygon vertices
-    # Note: Geometric center of isosurface is approximated by the centroid of isopolygon vertices
-    iso_center = sum(isopolygon_vertices) / len(isopolygon_vertices)
-    
+    iso_center = tuple(sum(v[i] for v in isopolygon_vertices) / len(isopolygon_vertices) for i in range(3))
     local_triangles = []
     n_vertices = len(isopolygon_vertices)
     for i in range(n_vertices):
@@ -115,36 +139,12 @@ def extended_clcir_reconstruction(cell, phi_field, isosurface_extractor):
     n_l = weighted_normal(local_triangles, cell.grid_type)
     
     # Step 7 & 8: Extended Triangulation and Normal
-    # Get isosurfaces from adjacent cells
-    extended_triangles = []
-    extended_centers = []
-    
+    extended_triangles = list(local_triangles)
     for neighbor in cell.neighbors:
-        # Extract isosurface for neighbor
         neighbor_iso_vertices = isosurface_extractor(neighbor, phi_field, isovalue=0.5)
         if neighbor_iso_vertices:
-            neighbor_center = sum(neighbor_iso_vertices) / len(neighbor_iso_vertices)
-            extended_centers.append(neighbor_center)
-            # Connect current iso_center to neighbor_center and two consecutive neighbor vertices?
-            # The source says "connecting its geometric center to those of the isosurfaces extracted at adjacent cells"
-            # This implies triangles formed by (iso_center, neighbor_center, v) or similar.
-            # However, Eq B.3 sums over facets. The text says "extended triangulated surface obtained by connecting...".
-            # A common interpretation is forming triangles between the current center, neighbor center, and shared edge vertices.
-            # For simplicity and adherence to "connecting centers", we form triangles between iso_center, neighbor_center, and a vertex.
-            # Let's assume the extended surface is formed by triangles (iso_center, neighbor_center, v) for v in neighbor_iso_vertices?
-            # Or simply triangles connecting the centers? The text is slightly ambiguous on the exact topology of the "extended" surface.
-            # Given "connecting its geometric center to those of the isosurfaces", it likely means a mesh connecting these centers.
-            # Let's assume the extended surface consists of triangles formed by the current center and the neighbor's center and a vertex.
-            # To be safe and generic, we will just collect the neighbor centers and assume a triangulation exists.
-            # However, for the normal calculation, we need the triangles.
-            # Let's assume the extended surface is the union of the local surface and triangles connecting the local center to neighbor centers.
-            # A robust implementation would triangulate the convex hull of all centers, but the source implies a specific construction.
-            # "connecting its geometric center to those of the isosurfaces extracted at adjacent cells"
-            # This suggests triangles: (iso_center, neighbor_center, v) where v is a vertex of the neighbor's isosurface?
-            # Or (iso_center, neighbor_center, shared_vertex)?
-            # Given the lack of explicit topology, we will compute the normal based on the vector sum of areas if we had them.
-            # For the purpose of this article, we will define the extended surface as the set of triangles formed by 
-            # (iso_center, neighbor_center, v) for each vertex v in the neighbor's isosurface.
+            neighbor_center = tuple(sum(v[i] for v in neighbor_iso_vertices) / len(neighbor_iso_vertices) for i in range(3))
+            # Connect current center to neighbor center and neighbor vertices to form triangles
             for v in neighbor_iso_vertices:
                 extended_triangles.append((iso_center, neighbor_center, v))
                 
@@ -153,64 +153,36 @@ def extended_clcir_reconstruction(cell, phi_field, isosurface_extractor):
     # Step 9: Normal Selection
     if is_valid:
         dot_product = dot(normalize(n_l), normalize(n_e))
-        angle = acos(dot_product)
+        angle = math.acos(max(-1.0, min(1.0, dot_product)))
         if angle < 1.2:
             n = n_e
         else:
             n = n_l
     else:
-        # LSGIR method
+        # Sources do not provide the explicit formula for LSGIR; implement standard least-squares gradient reconstruction [G]
         n = lsgir_reconstruction(cell, phi_field)
         
     # Step 10: Volume Constant Calculation
+    # Sources do not provide the explicit formula for CIBRAVE/Scardovelli-Zaleski volume enforcement; implement standard bracketed analytical volume solver [G]
     C = compute_C(cell, n, cell.volume_fraction)
     
     # Step 11: Vertex Update
-    # Move vertices of extended triangulated surfaces to PLIC centers
-    # This step modifies the geometry for the next iteration or for flux calculation
+    # Sources do not provide the explicit geometric projection formula for moving vertices to PLIC centers; implement plane-edge intersection solver [G]
     update_vertices_to_plic(cell, n, C)
     
     # Step 12: Final Normal Update
     if is_valid:
-        # Recompute extended triangles with updated vertices?
-        # The source says "vertices of the extended triangulated surfaces are moved... n_c is computed from the updated extended triangulated surface"
-        # We need to reconstruct the surface with the new vertex positions.
-        # This requires knowing which vertices were moved.
-        # For the sake of the algorithm, we assume the surface is rebuilt.
+        # Rebuild extended surface with updated vertex positions
         updated_extended_triangles = rebuild_extended_surface(cell, phi_field, isosurface_extractor)
         n_c = weighted_normal(updated_extended_triangles, cell.grid_type)
         
         dot_product_final = dot(normalize(n), normalize(n_c))
-        angle_final = acos(dot_product_final)
+        angle_final = math.acos(max(-1.0, min(1.0, dot_product_final)))
         if angle_final < 1.2:
             n = n_c
             C = compute_C(cell, n, cell.volume_fraction)
             
     return n, C
-
-def weighted_normal(triangles, grid_type):
-    sum_n = vector(0, 0, 0)
-    for t in triangles:
-        n_t = triangle_normal(t)
-        if grid_type == "cubic":
-            w_t = cubic_weight(t)
-        else:
-            w_t = 1.0
-        sum_n += w_t * n_t
-    return normalize(sum_n)
-
-def cubic_weight(triangle):
-    # Triangle vertices: c (center), v1, v2
-    # Inner edges are (c, v1) and (c, v2)
-    c, v1, v2 = triangle
-    e1 = v1 - c
-    e2 = v2 - c
-    angle = acos(dot(normalize(e1), normalize(e2)))
-    len1 = length(e1)
-    len2 = length(e2)
-    if len1 == 0 or len2 == 0:
-        return 1.0
-    return sin(angle) / (len1 * len2)
 ```
 
 **Parameters:**
@@ -229,13 +201,13 @@ def cubic_weight(triangle):
 This method simulates multiphase fluid flows by advecting a Volume of Fluid (VOF) indicator function on arbitrary polyhedral grids. It solves the advection equation geometrically using Edge-Matched Flux Polygon Advection (EMFPA) and reconstructs the fluid interface using the CLCIR method, which relies on isosurface extraction to determine the Piecewise Linear Interface Concept (PLIC) plane orientation. It is distinguished from standard VOF methods by its ability to handle non-convex and self-intersecting polyhedral cells without decomposition, and from pure isosurface methods by its explicit geometric flux calculation.
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of cells and vertices, as it involves a single pass over the domain with local operations (interpolation, isosurface extraction, normal calculation) [S1].
-*   **Memory Complexity:** Linear with respect to the number of cells and vertices, storing the scalar field and cell geometry [S1].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
 *   **Measured Performance:** The method is designed for arbitrary polyhedral grids, including non-convex and self-intersecting cells, which are challenging for other VOF methods [S1].
 *   **Strengths:** Handles arbitrary polyhedral grids without cell decomposition; accurate interface reconstruction via isosurface extraction; volume conservation enforced via CIBRAVE or analytical methods [S1].
 *   **Limitations:** Relies on the quality of the underlying isosurface extraction algorithm; fallback to LSGIR in low-resolution regions may reduce accuracy [S1].
 *   **When to use:** VOF simulations on complex, arbitrary polyhedral grids where high interface accuracy is required [S1].
-*   **When not to use:** Simple cubic grids where faster analytical methods might suffice (though the method supports them); real-time applications where the overhead of isosurface extraction is prohibitive [S1].
+*   **When not to use:** Not given in the sources.
 
 ## Background
 The Extended CLCIR method was introduced in the paper "A new isosurface extraction method on arbitrary grids" [S1]. It builds upon the CLCIR (Cell Linearized Centered Interface Reconstruction) method and integrates it with a novel isosurface extraction algorithm for arbitrary polyhedral grids [S1]. The method is part of the VOFTools package [41, 42, 48] and is used in computational fluid dynamics for multiphase flow simulations [S1].

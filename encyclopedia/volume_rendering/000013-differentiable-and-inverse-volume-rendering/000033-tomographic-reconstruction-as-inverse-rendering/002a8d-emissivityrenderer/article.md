@@ -3,19 +3,19 @@
 Also called: Differentiable renderer for multi-line neural tomography
 
 ## Overview
-EmissivityRenderer is a differentiable renderer designed for multi-line neural tomography, specifically recovering 3-D coronal electron density ($n_e$) and temperature ($T_e$) from multiview, multiline spectral-intensity images [S1, unofficial]. It performs ray marching and Line-of-Sight (LOS) integration of emissivity coefficients derived from neural network models. It is distinguished from general volume renderers by its explicit physics-based emissivity computation using a Look-Up Table (LUT) for ion-specific spectral lines and its integration with occupancy grids for sparse volume representation [S1, unofficial].
+EmissivityRenderer is a differentiable renderer designed for multi-line neural tomography, specifically recovering 3-D coronal electron density ($n_e$) and temperature ($T_e$) from multiview, multiline spectral-intensity images [S1, unofficial]. It performs ray marching and Line-of-Sight (LOS) integration of emissivity coefficients derived from neural network models [S1, unofficial]. It is distinguished from general volume renderers by its explicit physics-based emissivity computation using a precomputed Look-Up Table (LUT) for ion-specific spectral lines and its integration with occupancy grids for sparse volume representation [S1, unofficial].
 
 ## How it works
-**Inputs:** Multiview spectral-intensity images (sinograms), ion specifications (wavelengths, line names), and configuration parameters for the neural network and ray marching.
-**Outputs:** Reconstructed 3-D electron density ($n_e$) and temperature ($T_e$) fields, rendered projections for loss computation.
+**Inputs:** Multiview spectral-intensity images (sinograms), ion specifications (wavelengths, line names), and configuration parameters for the neural network and ray marching [S1, unofficial].
+**Outputs:** Reconstructed 3-D electron density ($n_e$) and temperature ($T_e$) fields, rendered projections for loss computation [S1, unofficial].
 
 **Data Structures:**
-1.  **Occupancy Grid:** A hash grid storing occupancy status of voxels to accelerate ray marching.
-    *   Resolution (`occ_res`): Default 128.
-    *   Parameters: `occ_alpha` (default 1.5), `occ_decay` (default 0.01).
-2.  **DensityMLP:** A neural network mapping spatial coordinates to electron density $n_e$.
-3.  **Temperature Model:** A neural network or function mapping spatial coordinates to temperature $T_e$.
-4.  **Emissivity LUT:** Precomputed lookup table for emissivity coefficients $c_{coef}$ based on $n_e$, $T_e$, and radial distance $r$, derived from CHIANTI atomic data [S1, unofficial].
+1.  **Occupancy Grid:** A hash grid storing occupancy status of voxels to accelerate ray marching [S1, unofficial].
+    *   Resolution (`occ_res`): Default 128 [S1, unofficial].
+    *   Parameters: `occ_alpha` (default 1.5, range [1, 2]), `occ_decay` (default 0.01, range (0, 1)) [S1, unofficial].
+2.  **DensityMLP:** A neural network mapping spatial coordinates to electron density $n_e$ [S1, unofficial].
+3.  **Temperature Model:** A neural network or function mapping spatial coordinates to temperature $T_e$ [S1, unofficial].
+4.  **Emissivity LUT:** Precomputed lookup table for emissivity coefficients $c_{coef}$ based on $n_e$, $T_e$, and radial distance $r$, computed using `pycelp` (modified pyCELP) [S1, unofficial].
 
 **Parameters:**
 *   `occ_warmup`: Number of warmup steps for occupancy grid training. Default: 256 [S1, unofficial].
@@ -30,9 +30,9 @@ EmissivityRenderer is a differentiable renderer designed for multi-line neural t
 For each ray in the multiview set:
 1.  **Bounding Box Sampling:** Sample points within the axis-aligned bounding box ($x_{AABB}$) of the volume [S1, unofficial].
 2.  **Temperature Estimation:** Compute the local temperature $T(x_{llr})$ at the sampled point using the temperature model [S1, unofficial].
-3.  **Radial Distance:** Compute the radial distance $r_{xyz}$ from the center of the volume (or sun center) to the point [S1, unofficial].
+3.  **Radial Distance:** Compute the radial distance $r_{xyz}$ from the center of the volume to the point [S1, unofficial].
 4.  **Density Estimation:** Compute the electron density $n_e$ using the `DensityMLP` model at the sampled point [S1, unofficial].
-5.  **Emissivity Coefficient:** Compute the emissivity coefficient $c_{coef}(n_e, T, r)$ using the precomputed LUT or analytical approximation based on $n_e$, $T$, and $r$ [S1, unofficial].
+5.  **Emissivity Coefficient:** Compute the emissivity coefficient $c_{coef}(n_e, T, r)$ using the precomputed LUT [S1, unofficial].
 6.  **LOS Integration:** Perform the Line-of-Sight integral of $c_{coef}$ along the ray to obtain the rendered intensity [S1, unofficial].
 
 **Pseudocode:**
@@ -40,62 +40,60 @@ For each ray in the multiview set:
 
 ```python
 def render_ray(ray_origin, ray_direction, volume_params, ion_specs, lut):
-    """
-    Renders a single ray using the EmissivityRenderer method.
-    """
-    # 1. Sample points in the axis-aligned bounding box (x_AABB)
-    # Determine intersection with AABB
-    t_min, t_max = compute_aabb_intersection(ray_origin, ray_direction, volume_params.aabb)
-    
-    # Generate sample points along the ray
-    num_samples = compute_num_samples(ray_direction, volume_params.step_size, t_max - t_min)
-    if num_samples < volume_params.min_samples_per_ray:
-        num_samples = volume_params.min_samples_per_ray
-        
-    # Fallback logic if samples are too low
-    if num_samples < volume_params.fallback_when_samples:
-        # Use coarser sampling or default strategy [S1, unofficial]
-        pass
+    # 1. Compute ray-AABB intersection using the slab method
+    inv_dir = 1.0 / ray_direction
+    t_min = max((volume_params.aabb_min - ray_origin) * inv_dir)
+    t_max = min((volume_params.aabb_max - ray_origin) * inv_dir)
+    if t_min > t_max:
+        return 0.0
 
-    t_values = torch.linspace(t_min, t_max, num_samples)
-    points = ray_origin + ray_direction.unsqueeze(1) * t_values.unsqueeze(0)
-    
-    # 2. Compute temperature T(x_llr)
-    T = volume_params.temperature_model(points)
-    
-    # 3. Compute radial distance r_xyz from x_AABB (center)
-    r = torch.norm(points - volume_params.center, dim=-1)
-    
-    # 4. Compute electron density ne from the DensityMLP model
-    ne = volume_params.density_mlp(points)
-    
-    # 5. Compute emissivity coefficient ccoef(ne, T, r)
-    # Interpolate from LUT or compute using CHIANTI data
-    ccoef = compute_emissivity(ne, T, r, lut, ion_specs)
-    
-    # 6. Perform LOS integral of ccoef
-    # Simple trapezoidal or midpoint rule integration
-    dt = (t_max - t_min) / num_samples
-    intensity = torch.sum(ccoef * dt, dim=-1)
-    
+    # 2. Determine sample count based on step_size and minimum threshold
+    num_samples = max(volume_params.min_samples_per_ray, int(round((t_max - t_min) / volume_params.step_size)))
+    if num_samples < volume_params.fallback_when_samples:
+        num_samples = volume_params.min_samples_per_ray  # Fallback to minimum [G]
+
+    # 3. Generate sample points along the ray
+    t_values = [t_min + i * (t_max - t_min) / (num_samples - 1) for i in range(num_samples)]
+    points = [[ray_origin[j] + t * ray_direction[j] for j in range(3)] for t in t_values]
+
+    # 4. Compute temperature at each point
+    T = [volume_params.temperature_model(p) for p in points]
+
+    # 5. Compute radial distance from volume center
+    r = [norm(p - volume_params.center) for p in points]
+
+    # 6. Compute electron density via DensityMLP
+    ne = [volume_params.density_mlp(p) for p in points]
+
+    # 7. Compute emissivity coefficient via LUT interpolation
+    ccoef = [interpolate_lut(lut, ne[i], T[i], r[i], ion_specs) for i in range(num_samples)]
+
+    # 8. Line-of-Sight integral
+    dt = (t_max - t_min) / (num_samples - 1)
+    intensity = sum(ccoef) * dt
     return intensity
+
+def interpolate_lut(lut, ne, T, r, ion_specs):
+    # Trilinear interpolation on precomputed log10 grids [G]
+    # Sources do not specify the exact interpolation kernel.
+    return lut.query(log10(ne), log10(T), log10(r))
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Non-Determinism:** GPU hash-grid training is not bitwise-deterministic due to atomic scatter in the hash backward pass and LOS accumulation. Fixed seeds yield statistically equivalent, not identical, runs [S1, unofficial].
+*   **Non-Determinism:** GPU hash-grid training is not bitwise-deterministic due to atomic scatter in the hash backward pass and LOS accumulation [S1, unofficial]. Fixed seeds yield statistically equivalent, not identical, runs [S1, unofficial].
 *   **Low Sample Count:** If the number of samples per ray falls below `fallback_when_samples`, a fallback strategy is triggered [S1, unofficial].
-*   **Occupancy Grid Updates:** The occupancy grid uses an alpha parameter (`occ_alpha`) and decay rate (`occ_decay`) for updates, which must be carefully tuned to avoid over-smoothing or under-smoothing the volume representation [S1, unofficial].
+*   **Occupancy Grid Updates:** The occupancy grid uses an alpha parameter (`occ_alpha`) and decay rate (`occ_decay`) for updates, which must be carefully tuned to avoid over-smoothing or under-smoothing the volume representation [G].
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the number of rays, samples per ray, and the complexity of the neural networks (DensityMLP, TemperatureModel). The use of an occupancy grid reduces the number of samples needed by skipping empty space.
-*   **Memory Complexity:** Dominated by the occupancy grid and the parameters of the neural networks. The LUT size depends on the resolution of $n_e$, $T$, and $r$ grids.
-*   **Strengths:** Efficient handling of sparse volumes via occupancy grids; physics-based emissivity model allows for accurate reconstruction of coronal plasma parameters; differentiable nature enables end-to-end optimization.
-*   **Limitations:** Non-deterministic training due to GPU atomic operations; requires precomputed LUTs for emissivity coefficients; sensitive to hyperparameters like `occ_alpha` and `occ_decay`.
-*   **When to Use:** Suitable for tomographic reconstruction of coronal plasma where physical emissivity models are required, and multiview spectral data is available.
-*   **When Not to Use:** Not suitable for general-purpose volume rendering without physical emissivity models; not ideal for deterministic reproducibility requirements.
+*   **Time Complexity:** Depends on the number of rays, samples per ray, and the complexity of the neural networks (DensityMLP, TemperatureModel) [G]. The use of an occupancy grid reduces the number of samples needed by skipping empty space [S1, unofficial].
+*   **Memory Complexity:** Dominated by the occupancy grid and the parameters of the neural networks [G]. The LUT size depends on the resolution of $n_e$, $T$, and $r$ grids [S1, unofficial].
+*   **Strengths:** Efficient handling of sparse volumes via occupancy grids; physics-based emissivity model allows for accurate reconstruction of coronal plasma parameters; differentiable nature enables end-to-end optimization [S1, unofficial].
+*   **Limitations:** Non-deterministic training due to GPU atomic operations; requires precomputed LUTs for emissivity coefficients; sensitive to hyperparameters like `occ_alpha` and `occ_decay` [S1, unofficial].
+*   **When to Use:** Suitable for tomographic reconstruction of coronal plasma where physical emissivity models are required, and multiview spectral data is available [S1, unofficial].
+*   **When Not to Use:** Not suitable for general-purpose volume rendering without physical emissivity models; not ideal for deterministic reproducibility requirements [G].
 
 ## Background
-EmissivityRenderer was developed as part of the CoroNeRF project for reconstructing solar coronal plasma parameters from multi-line spectral images [S1, unofficial]. It builds on the principles of differentiable volume rendering and neural radiance fields (NeRF), adapting them for astrophysical applications. The method leverages the CHIANTI atomic database for emissivity calculations and integrates with occupancy grids for efficient rendering [S1, unofficial].
+EmissivityRenderer was developed as part of the CoroNeRF project for reconstructing solar coronal plasma parameters from multi-line spectral images [S1, unofficial]. It builds on the principles of differentiable volume rendering and neural radiance fields (NeRF), adapting them for astrophysical applications [G]. The method integrates with occupancy grids for efficient rendering [S1, unofficial].
 
 ## Sources
 [S1] AlanHsu314/CoroNeRF_public, https://github.com/AlanHsu314/CoroNeRF_public, fetched 2026-10-27 (unofficial)

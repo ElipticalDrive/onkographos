@@ -1,0 +1,592 @@
+A C++ library to generate two-dimensional terrain heightmaps for software rendering or video games. - feat: add terrain-aware point generation (#425) · ottolink-dev/HighMap@a3473bf
+
+feat: add terrain-aware point generation (#425) · ottolink-dev/HighMap@a3473bf · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+File tree
+Expand file treeCollapse file tree
+Open diff view settings
+Filter options
+HighMap
+include/highmap
+array.hpp
+features.hpp
+features
+poi.hpp
+terrain_features.hpp
+src
+array
+methods.cpp
+features
+poi.cpp
+examples/ex_poi
+CMakeLists.txt
+ex_poi.cpp
+tests/src
+test_poi.cpp
+Expand file treeCollapse file tree
+Open diff view settings
+Collapse file
+‎HighMap/include/highmap/array.hpp‎
+Copy file name to clipboardExpand all lines: HighMap/include/highmap/array.hpp
++18-4Lines changed: 18 additions & 4 deletions
+Original file line numberDiff line numberDiff line change
+@@ -575,6 +575,20 @@ class Array
+575575
+*/
+576576
+float get_value_bilinear_at(int i, int j, float u, float v) const;
+577577
+578+
+/**
+579+
+* @brief Retrieves the value at the location (x, y) within a bounded domain
+580+
+* using bilinear interpolation.
+581+
+*
+582+
+* @param x Coordinate along the x-axis.
+583+
+* @param y Coordinate along the y-axis.
+584+
+* @param bbox Bounding box defining the domain of the array {xmin, xmax,
+585+
+* ymin, ymax}.
+586+
+* @return float The bilinearly interpolated value at (x, y).
+587+
+*/
+588+
+float get_value_bilinear(float x,
+589+
+float y,
+590+
+glm::vec4 bbox = {0.f, 1.f, 0.f, 1.f}) const;
+591+
+578592
+/**
+579593
+* @brief Retrieves the nearest value at the location (x, y) within a bounded
+580594
+* domain.
+@@ -736,16 +750,16 @@ class Array
+736750
+* accumulating counts. The result is an approximation whose precision depends
+737751
+* on the number of bins.
+738752
+*
+739-
+* @param p_low Lower percentile in [0, 1]
+753+
+* @param p_low Lower percentile in [0, 1]
+740754
+* @param p_high Upper percentile in [0, 1]
+741755
+* @param bins Number of bins used for the histogram (higher = more
+742756
+* precise)
+743757
+* @param ignore_zeros If true, ignore zero values when building the
+744758
+* histogram and counting totals.
+745759
+*
+746-
+* @return glm::vec2 A vector where x contains the approximated lower
+747-
+* percentile value and y contains the approximated upper
+748-
+* percentile value
+760+
+* @return glm::vec2 A vector where x contains the approximated
+761+
+* lower percentile value and y contains the approximated
+762+
+* upper percentile value
+749763
+*/
+750764
+glm::vec2 range_percentile(float p_low,
+751765
+float p_high,
+Collapse file
+‎HighMap/include/highmap/features.hpp‎
+Copy file name to clipboardExpand all lines: HighMap/include/highmap/features.hpp
++4-225Lines changed: 4 additions & 225 deletions
+Original file line numberDiff line numberDiff line change
+@@ -5,233 +5,12 @@
+55
+/**
+66
+* @file features.hpp
+77
+* @author Otto Link (otto.link.bv@gmail.com)
+8-
+* @brief Header file defining a collection of functions for terrain analysis
+9-
+* and feature extraction from heightmaps.
+8+
+* @brief Umbrella header for terrain feature extraction, landform
+9+
+* classification, and terrain-aware points of interest.
+1010
+*
+1111
+* @copyright Copyright (c) 2023 Otto Link
+1212
+*/
+1313
+#pragma once
+14-
+#include <array>
+1514
+16-
+#include "highmap/array.hpp"
+17-
+18-
+/**
+19-
+* @brief Packs eight 2-bit values into a 16-bit integer.
+20-
+*
+21-
+* This macro takes eight 2-bit values (`a` through `h`) and packs them into a
+22-
+* single 16-bit integer. The bits are shifted into position according to their
+23-
+* specified offsets to form the final packed value.
+24-
+*
+25-
+* @param a The first 2-bit value (will be shifted left by 15 bits).
+26-
+* @param b The second 2-bit value (will be shifted left by 13 bits).
+27-
+* @param c The third 2-bit value (will be shifted left by 11 bits).
+28-
+* @param d The fourth 2-bit value (will be shifted left by 9 bits).
+29-
+* @param e The fifth 2-bit value (will be shifted left by 7 bits).
+30-
+* @param f The sixth 2-bit value (will be shifted left by 5 bits).
+31-
+* @param g The seventh 2-bit value (will be shifted left by 3 bits).
+32-
+* @param h The eighth 2-bit value (will be shifted left by 1 bit).
+33-
+*
+34-
+* @return A 16-bit integer where the input values have been packed together
+35-
+* according to their respective shifts.
+36-
+*
+37-
+* @note Each parameter (`a` through `h`) should only occupy 2 bits (values
+38-
+* between 0 and 3). If the values exceed this range, the result may be
+39-
+* incorrect.
+40-
+*/
+41-
+#define HMAP_PACK8(a, b, c, d, e, f, g, h) \
+42-
+((a << 15) + (b << 13) + (c << 11) + (d << 9) + (e << 7) + (f << 5) + \
+43-
+(g << 3) + (h << 1))
+44-
+45-
+namespace hmap
+46-
+{
+47-
+48-
+/**
+49-
+* @brief Identifies and labels connected components within a binary or labeled
+50-
+* array, with optional filtering by size.
+51-
+*
+52-
+* Connected-component labeling is a technique used to identify clusters of
+53-
+* connected pixels (or components) in an array. This function can be used in
+54-
+* image processing and spatial analysis to isolate regions of interest, such as
+55-
+* detecting distinct objects or areas within a heightmap.
+56-
+*
+57-
+* **Usage**
+58-
+* - Use this function to label distinct features within an array, such as
+59-
+* individual water bodies, forest patches, or elevation features.
+60-
+* - Apply the surface threshold to filter out small, insignificant components
+61-
+* that might be noise or irrelevant.
+62-
+*
+63-
+* @param array The input array where connected components are to
+64-
+* be identified.
+65-
+* @param surface_threshold The minimum number of pixels a component must have
+66-
+* to be retained. Components smaller than this
+67-
+* threshold will be removed. The default value is 0
+68-
+* (no filtering).
+69-
+* @param background_value The value used to represent background pixels,
+70-
+* which are not part of any component. Default is 0.
+71-
+* @return Array An array with labeled connected components,
+72-
+* where each component is assigned a unique
+73-
+* identifier.
+74-
+*
+75-
+*
+76-
+* **Example**
+77-
+* @include ex_connected_components.cpp
+78-
+*
+79-
+* **Result**
+80-
+* @image html ex_connected_components0.png
+81-
+* @image html ex_connected_components1.png
+82-
+*
+83-
+* See unit tests: @ref test_connected_components.cpp
+84-
+*/
+85-
+Array connected_components(
+86-
+const Array &array,
+87-
+float surface_threshold = 0.f,
+88-
+float background_value = 0.f,
+89-
+std::map<float, float> *p_surfaces = nullptr,
+90-
+std::map<float, std::array<float, 2>> *p_centroids = nullptr);
+91-
+92-
+/**
+93-
+* @brief Classifies terrain into geomorphological features based on the
+94-
+* geomorphons method.
+95-
+*
+96-
+* The geomorphons method classifies each point in a terrain into one of several
+97-
+* landform types (e.g., ridge, valley, plain) based on the surrounding
+98-
+* topography. This classification is useful for automated landform mapping and
+99-
+* terrain analysis.
+100-
+*
+101-
+* **Usage**
+102-
+* - Use this function to automatically categorize terrain into different
+103-
+* geomorphological units.
+104-
+* - Useful in large-scale landform mapping and environmental modeling.
+105-
+*
+106-
+* @param array The input array representing the terrain elevation data.
+107-
+* @param irmin The minimum radius (in pixels) for considering the
+108-
+* surrounding area during classification.
+109-
+* @param irmax The maximum radius (in pixels) for considering the
+110-
+* surrounding area during classification.
+111-
+* @param epsilon The slope tolerance that defines 'flat' regions, affecting
+112-
+* the classification.
+113-
+* @return Array An output array with each pixel classified into a
+114-
+* geomorphological feature.
+115-
+*
+116-
+* **Example**
+117-
+* @include ex_geomorphons.cpp
+118-
+*
+119-
+* **Result**
+120-
+* @image html ex_geomorphons0.png
+121-
+* @image html ex_geomorphons1.png
+122-
+*/
+123-
+Array geomorphons(const Array &array, int irmin, int irmax, float epsilon);
+124-
+125-
+/**
+126-
+* @brief Performs k-means clustering on two input arrays, grouping similar data
+127-
+* points into clusters.
+128-
+*
+129-
+* K-means clustering is a popular unsupervised learning algorithm used to
+130-
+* partition data into clusters. This function applies k-means clustering to two
+131-
+* arrays, which might represent different terrain attributes or environmental
+132-
+* variables.
+133-
+*
+134-
+* **Usage**:
+135-
+* - Use this function to identify regions with similar characteristics based on
+136-
+* multiple terrain features.
+137-
+* - Useful in ecological modeling, land cover classification, and resource
+138-
+* management.
+139-
+*
+140-
+* @param[in] array1 The first input array for clustering,
+141-
+* typically representing one attribute of the
+142-
+* terrain.
+143-
+* @param[in] array2 The second input array for clustering,
+144-
+* representing another attribute.
+145-
+* @param[in] nclusters The number of clusters (k) to be formed.
+146-
+* @param[out] p_scoring (optional) A pointer to a vector of arrays
+147-
+* where the clustering scores will be stored.
+148-
+* Pass nullptr if scoring is not required.
+149-
+* @param[out] p_aggregate_scoring (optional) A pointer to an array where the
+150-
+* aggregate score across all clusters will be
+151-
+* stored. Pass nullptr if not required.
+152-
+* @param[in] weights A vector of two floats representing the
+153-
+* weight given to
+154-
+* `array1` and `array2`. The default weights
+155-
+* are {1.f, 1.f}.
+156-
+* @param[in] seed A seed value for random number generation,
+157-
+* ensuring reproducibility of the clustering
+158-
+* results. The default value is 1.
+159-
+* @return Array An array representing the clustered
+160-
+* data, with each pixel assigned to a cluster.
+161-
+*
+162-
+* @return An Array containing the clustered data
+163-
+* resulting from the k-means algorithm.
+164-
+*
+165-
+* **Example**
+166-
+* @include ex_kmeans_clustering.cpp
+167-
+*
+168-
+* **Result**
+169-
+* @image html ex_kmeans_clustering0.png
+170-
+* @image html ex_kmeans_clustering1.png
+171-
+* @image html ex_kmeans_clustering2.png
+172-
+* @image html ex_kmeans_clustering3.png
+173-
+* @image html ex_kmeans_clustering4.png
+174-
+* @image html ex_kmeans_clustering5.png
+175-
+*/
+176-
+Array kmeans_clustering2(const Array &array1,
+177-
+const Array &array2,
+178-
+int nclusters,
+179-
+std::vector<Array> *p_scoring = nullptr,
+180-
+Array *p_aggregate_scoring = nullptr,
+181-
+glm::vec2 weights = {1.f, 1.f},
+182-
+std::uint32_t seed = 1);
+183-
+184-
+/**
+185-
+* @brief Performs k-means clustering on three input arrays, providing more
+186-
+* detailed cluster analysis by considering an additional dimension.
+187-
+*
+188-
+* This version of k-means clustering includes a third array, enabling more
+189-
+* complex clustering based on three terrain attributes or environmental
+190-
+* variables.
+191-
+*
+192-
+* **Usage**
+193-
+* - Apply this function to analyze the relationships between three different
+194-
+* terrain attributes, revealing complex patterns.
+195-
+* - Useful in multi-dimensional environmental modeling and resource management.
+196-
+*
+197-
+* @param[in] array1 The first input array for clustering.
+198-
+* @param[in] array2 The second input array for clustering.
+199-
+* @param[in] array3 The third input array for clustering.
+200-
+* @param[in] nclusters The number of clusters (k) to be formed.
+201-
+* @param[out] p_scoring (optional) A pointer to a vector of arrays
+202-
+* where the clustering scores will be stored.
+203-
+* Pass nullptr if scoring is not required.
+204-
+* @param[out] p_aggregate_scoring (optional) A pointer to an array where the
+205-
+* aggregate score across all clusters will be
+206-
+* stored. Pass nullptr if not required.
+207-
+* @param[in] weights A vector of three floats representing the
+208-
+* weight given to
+209-
+* `array1`, `array2`, and `array3`. The default
+210-
+* weights are {1.f, 1.f, 1.f}.
+211-
+* @param[in] seed A seed value for random number generation,
+212-
+* ensuring reproducibility of the clustering
+213-
+* results. The default value is 1.
+214-
+* @return Array An array representing the clustered
+215-
+* data, with each pixel assigned to a cluster.
+216-
+*
+217-
+* **Example**
+218-
+* @include ex_kmeans_clustering.cpp
+219-
+*
+220-
+* **Result**
+221-
+* @image html ex_kmeans_clustering0.png
+222-
+* @image html ex_kmeans_clustering1.png
+223-
+* @image html ex_kmeans_clustering2.png
+224-
+* @image html ex_kmeans_clustering3.png
+225-
+* @image html ex_kmeans_clustering4.png
+226-
+* @image html ex_kmeans_clustering5.png
+227-
+*/
+228-
+Array kmeans_clustering3(const Array &array1,
+229-
+const Array &array2,
+230-
+const Array &array3,
+231-
+int nclusters,
+232-
+std::vector<Array> *p_scoring = nullptr,
+233-
+Array *p_aggregate_scoring = nullptr,
+234-
+glm::vec3 weights = {1.f, 1.f, 1.f},
+235-
+std::uint32_t seed = 1);
+236-
+237-
+} // namespace hmap
+15+
+#include "highmap/features/poi.hpp"
+16+
+#include "highmap/features/terrain_features.hpp"
+0 commit comments
+Comments
+0 (0)
+You can’t perform that action at this time.

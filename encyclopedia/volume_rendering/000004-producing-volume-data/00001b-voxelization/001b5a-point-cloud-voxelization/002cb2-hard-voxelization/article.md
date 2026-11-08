@@ -1,6 +1,6 @@
 # Hard Voxelization
 ## Overview
-Hard Voxelization converts a continuous 3D point cloud into a discrete voxel grid by assigning each point to a specific voxel cell based on its spatial coordinates and a fixed voxel size [G]. This method serves as the foundational step for producing volume data from raw point clouds, building on [Point Cloud Voxelization](1000-point-cloud-voxelization.md).
+Hard Voxelization converts a continuous 3D point cloud into a discrete voxel grid by assigning each point to a specific voxel cell based on its spatial coordinates and a fixed voxel size [G]. This method serves as the foundational step for producing volume data from raw point clouds, building on [Point Cloud Voxelization](1000-point-cloud-voxelization.md) [G].
 
 ## Shared principles
 All variants in this family share the core mechanism of mapping continuous point coordinates $(x, y, z)$ to discrete integer voxel indices $(i, j, k)$ using floor division relative to a bounding box origin and voxel dimensions [S1, unofficial].
@@ -15,6 +15,88 @@ $$
 
 Points with coordinates outside the range $R$ are discarded or mapped to invalid indices (e.g., $-1$) [S1, unofficial]. The output is typically a set of tensors: `voxels` (point features grouped by voxel), `coors` (voxel indices), and `num_points_per_voxel` (counts) [S1, unofficial].
 
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def hard_voxelize(points, voxel_size, coors_range, max_points, max_voxels):
+    """
+    points: [N, C] array-like
+    voxel_size: [3] float array [vx, vy, vz]
+    coors_range: [6] float array [xmin, ymin, zmin, xmax, ymax, zmax]
+    max_points: int
+    max_voxels: int
+    Returns: voxels [M, max_points, C], coors [M, 3], num_points_per_voxel [M]
+    """
+    N, C = points.shape
+    vx, vy, vz = voxel_size
+    xmin, ymin, zmin, xmax, ymax, zmax = coors_range
+    grid_x = round((xmax - xmin) / vx)
+    grid_y = round((ymax - ymin) / vy)
+    grid_z = round((zmax - zmin) / vz)
+
+    coors = np.zeros((N, 3), dtype=np.int32)
+    coors[:, 0] = np.floor((points[:, 0] - xmin) / vx).astype(np.int32)
+    coors[:, 1] = np.floor((points[:, 1] - ymin) / vy).astype(np.int32)
+    coors[:, 2] = np.floor((points[:, 2] - zmin) / vz).astype(np.int32)
+
+    invalid_mask = (
+        (coors[:, 0] < 0) | (coors[:, 0] >= grid_x) |
+        (coors[:, 1] < 0) | (coors[:, 1] >= grid_y) |
+        (coors[:, 2] < 0) | (coors[:, 2] >= grid_z)
+    )
+    coors[invalid_mask] = -1
+
+    unique_coors, inverse_indices = np.unique(coors, axis=0, return_inverse=True)
+    if unique_coors[0, 0] == -1:
+        unique_coors = unique_coors[1:]
+        inverse_indices[inverse_indices == 0] = -1
+        inverse_indices[inverse_indices > 0] -= 1
+
+    valid_point_mask = (inverse_indices >= 0)
+    valid_points = points[valid_point_mask]
+    valid_voxel_indices = inverse_indices[valid_point_mask]
+
+    seen = set()
+    ordered_unique_voxels = []
+    for vid in valid_voxel_indices:
+        if vid not in seen:
+            seen.add(vid)
+            ordered_unique_voxels.append(vid)
+    ordered_unique_voxels = np.array(ordered_unique_voxels, dtype=np.int32)
+
+    voxel_to_pos = {vid.item(): i for i, vid in enumerate(ordered_unique_voxels)}
+    point_to_voxel_pos = np.array([voxel_to_pos[vid.item()] for vid in valid_voxel_indices], dtype=np.int32)
+
+    M = len(ordered_unique_voxels)
+    if M > max_voxels:
+        M = max_voxels
+        ordered_unique_voxels = ordered_unique_voxels[:M]
+        drop_mask = (point_to_voxel_pos >= M)
+        point_to_voxel_pos[drop_mask] = -1
+        valid_point_mask = valid_point_mask & ~drop_mask
+        valid_points = points[valid_point_mask]
+        point_to_voxel_pos = point_to_voxel_pos[valid_point_mask]
+
+    voxels = np.zeros((M, max_points, C), dtype=points.dtype)
+    coors_out = np.zeros((M, 3), dtype=np.int32)
+    num_points_per_voxel = np.zeros((M), dtype=np.int32)
+
+    for i in range(len(valid_points)):
+        voxel_idx = point_to_voxel_pos[i]
+        if voxel_idx == -1:
+            continue
+        count = num_points_per_voxel[voxel_idx]
+        if count < max_points:
+            voxels[voxel_idx, count] = valid_points[i]
+            num_points_per_voxel[voxel_idx] += 1
+
+    coors_out = unique_coors[ordered_unique_voxels]
+    return voxels, coors_out, num_points_per_voxel
+```
+
 ## Subtopics
 
 ### [Multiscale Hard Voxelization](3319-multiscale-hard-voxelization.md)
@@ -26,13 +108,13 @@ Hard Voxelization (Deterministic) converts a 3D point cloud into a fixed-size vo
 ### [Point Cloud Voxelization Visualization](5628-point-cloud-voxelization-visualization.md)
 A visualization pipeline that renders voxelized point clouds using the Point Cloud Library (PCL), supporting axis-aligned or custom bounding boxes with three distinct rendering modes. It differs from its siblings by providing immediate visual feedback of voxel occupancy and bounding constraints through specific geometric representations (points, solid cubes, or wireframes) rather than just generating the underlying data structure.
 
-#### Dynamic Voxelization (Coordinate Only)
+### Dynamic Voxelization (Coordinate Only)
 - **Definition**: Computes only the voxel coordinates for each point, without assigning points to a fixed voxel grid structure or handling duplicates/max points. Used when `max_points=-1` [S1, unofficial].
 - **Steps**: Calculate grid dimensions: $grid_x = \text{round}((coors\_x_{max} - coors\_x_{min}) / voxel\_x)$, etc. Launch `dynamic_voxelize_kernel` to compute voxel coordinates for each point and store them in the `coors` tensor [S1, unofficial].
 - **Parameters**: `NDim`: Number of dimensions for coordinates, default 3 [S1, unofficial].
 
 ## Background
-Origin and history: Not given in the sources.
+Origin and history: Not given in the sources. [G]
 Usage: Widely used in 3D object detection for autonomous driving to convert LiDAR point clouds into a format suitable for 3D Convolutional Neural Networks (CNNs) [G]. The deterministic variant addresses reproducibility issues in non-deterministic CUDA implementations [G]. Multiscale variants iterate over multiple scales to facilitate feature extraction networks [S1, unofficial].
 
 ## Sources

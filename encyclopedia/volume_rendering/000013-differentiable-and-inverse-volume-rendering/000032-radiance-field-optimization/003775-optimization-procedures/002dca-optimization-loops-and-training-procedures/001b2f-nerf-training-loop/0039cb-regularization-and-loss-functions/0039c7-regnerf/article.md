@@ -3,97 +3,54 @@
 Also called: Regularized NeRF
 
 ## Overview
-RegNeRF is a regularization framework for Neural Radiance Fields (NeRF) designed to improve view synthesis quality from sparse or inconsistent input views [S1, unofficial]. It addresses the problem of MLP overfitting and unrealistic interpolation in few-shot scenarios by introducing priors that constrain unobserved views [S1, unofficial]. Unlike its sibling [Geometric Baseline Regularization](7475-geometric-baseline-regularization.md), which often relies on explicit geometric constraints or depth maps, RegNeRF operates by augmenting the training loss with a Normalizing flow prior and a Smoothness prior [S1, unofficial].
+RegNeRF is a regularization framework for Neural Radiance Fields (NeRF) designed to improve view synthesis quality from sparse input views by constraining unobserved regions [S1, unofficial]. It distinguishes itself from siblings like [DiffNeRF](8572-diffnerf.md) by approximating spatial gradients via finite differences on patch-based dataloaders, whereas DiffNeRF uses automatic differentiation on ray-based representations [S1, unofficial].
 
 ## How it works
-RegNeRF modifies the standard NeRF optimization loop by adding two specific regularization terms to the photometric loss [S1, unofficial].
+RegNeRF augments the standard photometric loss with two specific regularization terms to prevent overfitting and ensure geometric plausibility in sparse scenarios [S1, unofficial].
 
 **Inputs and Outputs:**
-- Input: A set of $N$ sparse input images with known camera poses.
-- Output: A trained NeRF model (MLP mapping $(x, y, z, \theta, \phi) \to (\sigma, \mathbf{c})$) that generalizes to novel views.
+*   **Inputs:** Sparse set of input images $\{I_i\}$, corresponding camera poses, and a NeRF model parameterized by $\theta$.
+*   **Outputs:** Optimized NeRF parameters $\theta$ that render high-quality novel views.
 
 **Data Structures:**
-- The NeRF MLP parameters $\theta_{\text{MLP}}$.
-- Ray batch: $(\mathbf{o}, \mathbf{d})$ sampled from input views.
-- Ground truth colors $I$.
+*   **Patch-based Dataloader:** Unlike standard ray-sampling, RegNeRF samples spatial patches from input images to compute local smoothness constraints [S1, unofficial].
+*   **Normalizing Flow Prior:** A generative model $p(\mathbf{x})$ used to constrain the latent space of the NeRF outputs [S1, unofficial].
 
-**Total Loss Formulation:**
+**Loss Function:**
 The total loss is defined as:
-$$ \mathcal{L}_{\text{total}} = \mathcal{L}_{\text{photo}} + \lambda_{\text{flow}} \mathcal{L}_{\text{flow}} + \lambda_{\text{smooth}} \mathcal{L}_{\text{smooth}} $$
-where $\mathcal{L}_{\text{photo}}$ is the standard MSE photometric loss [S1, unofficial].
+$$ \mathcal{L}_{\text{total}} = \mathcal{L}_{\text{photo}} + \lambda_{\text{smooth}} \mathcal{L}_{\text{smooth}} + \lambda_{\text{prior}} \mathcal{L}_{\text{prior}} $$
+where $\mathcal{L}_{\text{photo}}$ is the standard MSE reconstruction loss [S1, unofficial].
 
-**Regularization Terms:**
-1.  **Normalizing Flow Prior ($\mathcal{L}_{\text{flow}}$):** This term constrains the distribution of the NeRF's output (typically density $\sigma$ or color $\mathbf{c}$) to match a learned prior distribution using a normalizing flow model [S1, unofficial]. This prevents the MLP from assigning arbitrary values to unobserved regions, enforcing statistical plausibility [S1, unofficial].
-2.  **Smoothness Prior ($\mathcal{L}_{\text{smooth}}$):** This term encourages spatial smoothness in the predicted fields. It is typically computed as the mean squared error of the gradients of the density or color fields with respect to spatial coordinates [S1, unofficial]. This reduces high-frequency noise and artifacts common in sparse data regimes [S1, unofficial].
+1.  **Smoothness Prior ($\mathcal{L}_{\text{smooth}}$):** Enforces spatial smoothness on the density and color fields. It is computed by sampling adjacent pixels in the input image space and penalizing large differences in the predicted density $\sigma$ and color $\mathbf{c}$ [S1, unofficial].
+    $$ \mathcal{L}_{\text{smooth}} = \sum_{i,j} \left( ||\nabla \sigma_i - \nabla \sigma_j||_2^2 + ||\nabla \mathbf{c}_i - \nabla \mathbf{c}_j||_2^2 \right) $$
+    Gradients are approximated using finite differences on the patch-based samples [S1, unofficial].
+
+2.  **Normalizing Flow Prior ($\mathcal{L}_{\text{prior}}$):** Constrains the distribution of the NeRF's output features to match a learned prior distribution $p(\mathbf{z})$ using a normalizing flow model [S1, unofficial].
+    $$ \mathcal{L}_{\text{prior}} = -\log p_{\text{flow}}(\mathbf{z}) $$
+    where $\mathbf{z}$ represents the latent features extracted from the NeRF [S1, unofficial].
 
 **Parameters:**
-- $\lambda_{\text{flow}}$: Weight for the flow prior. Value not given in the sources.
-- $\lambda_{\text{smooth}}$: Weight for the smoothness prior. Value not given in the sources.
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def train_regnerf(input_images, camera_poses, num_epochs):
-    # Initialize NeRF MLP
-    mlp = NeRF_MLP()
-    
-    # Initialize Normalizing Flow model for prior
-    # The flow model learns the distribution of valid NeRF outputs
-    flow_model = NormalizingFlow()
-    
-    for epoch in range(num_epochs):
-        for batch in get_ray_batches(input_images, camera_poses):
-            rays_o, rays_d, gt_colors = batch
-            
-            # 1. Render colors and densities using standard volume rendering
-            colors, densities = render_rays(mlp, rays_o, rays_d)
-            
-            # 2. Compute photometric loss
-            loss_photo = mse(colors, gt_colors)
-            
-            # 3. Compute Normalizing Flow prior loss
-            # Apply flow model to densities (or colors) to get log-probability
-            # The loss is the negative log-likelihood under the flow prior
-            # This constrains the output distribution to be realistic
-            log_probs = flow_model.log_prob(densities)
-            loss_flow = -mean(log_probs)
-            
-            # 4. Compute Smoothness prior loss
-            # Compute gradients of density with respect to 3D coordinates
-            # along the ray or in local spatial patches
-            # Note: Exact spatial gradient computation method is not specified in sources [S1, unofficial]
-            density_grads = compute_spatial_gradients(densities)
-            loss_smooth = mean(density_grads ** 2)
-            
-            # 5. Combine losses
-            # Hyperparameters lambda_flow and lambda_smooth are required
-            # Values not given in sources [S1, unofficial]
-            total_loss = loss_photo + lambda_flow * loss_flow + lambda_smooth * loss_smooth
-            
-            # 6. Backpropagate and update
-            update_parameters(mlp, flow_model, total_loss)
-```
+*   $\lambda_{\text{smooth}}$: Weight for the smoothness term. Not given in the sources.
+*   $\lambda_{\text{prior}}$: Weight for the normalizing flow prior. Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-- **Sparse Data:** The method is specifically designed for sparse inputs; performance on dense inputs may not show significant improvement over standard NeRF [S1, unofficial].
-- **Flow Model Training:** The normalizing flow model must be trained or pre-trained on a dataset of valid NeRF outputs. If the prior is mismatched, it may suppress valid details [S1, unofficial].
-- **Gradient Computation:** The smoothness prior requires differentiable spatial gradients. Implementation must ensure correct coordinate transformation from ray space to world space for gradient calculation [G].
+*   **Sparse Input:** The method is specifically designed for sparse views; performance on dense inputs may not offer significant gains over standard NeRF [S1, unofficial].
+*   **Finite Difference Approximation:** Using finite differences for smoothness may introduce discretization artifacts if patch sizes are not chosen carefully [S1, unofficial].
 
 ## Subtopics
 
 ### [DiffNeRF](8572-diffnerf.md)
-DiffNeRF is a regularization framework for Neural Radiance Fields (NeRF) that uses differential geometry to improve robustness when training with sparse or inconsistent data. It addresses the problem of MLP overfitting and unrealistic interpolation in few-shot scenarios by modifying the NeRF to represent continuous, infinitely differentiable functions. Unlike its sibling RegNeRF, which approximates gradients via finite differences on patch-based dataloaders, DiffNeRF uses automatic differentiation to compute depth gradients directly from the ray-based NeRF representation, allowing regularization of unseen views without specialized dataloader modifications.
+Uses automatic differentiation for depth gradients directly from ray-based NeRF, avoiding patch-based dataloader modifications. Choose when automatic differentiation is preferred over finite differences.
 
 ## Operating characteristics
-- **Time Complexity:** Training time increases due to the additional forward passes through the normalizing flow model and the computation of spatial gradients. The exact overhead is not given in the sources [S1, unofficial].
-- **Memory Complexity:** Requires additional memory for the normalizing flow model parameters and intermediate gradient tensors [S1, unofficial].
-- **Strengths:** Significantly improves view synthesis quality from sparse inputs by preventing overfitting and enforcing geometric plausibility [S1, unofficial].
-- **Limitations:** Requires careful tuning of regularization weights ($\lambda_{\text{flow}}, \lambda_{\text{smooth}}$). Performance on dense data is not significantly better than standard NeRF [S1, unofficial].
-- **When to use:** Use when training NeRF from a small number of input views (e.g., 1-10 images) where standard NeRF fails to generalize [S1, unofficial].
+*   **Time Complexity:** Training time increases due to the additional computation of smoothness priors via finite differences and the evaluation of the normalizing flow prior [S1, unofficial].
+*   **Memory Complexity:** Requires storing the normalizing flow model and patch-based sampling buffers [S1, unofficial].
+*   **Strengths:** Effective for sparse view synthesis; prevents overfitting and unrealistic interpolation [S1, unofficial].
+*   **Limitations:** Relies on patch-based sampling which may not capture global geometry as well as ray-based methods; requires careful tuning of regularization weights [S1, unofficial].
+*   **Performance:** Evaluated on the DTU dataset, showing improved results over standard NeRF in sparse settings [S1, unofficial].
 
 ## Background
-RegNeRF (Regularizing Neural Radiance Fields for View Synthesis from Sparse Inputs) was introduced in CVPR 2022 [S1, unofficial]. It was developed to address the limitations of standard NeRF in few-shot scenarios, where the MLP tends to overfit to the input views and produce artifacts in unobserved regions [S1, unofficial]. The method builds on the idea of using generative priors to constrain the solution space of the radiance field [S1, unofficial].
+RegNeRF was introduced in "Regularizing Neural Radiance Fields for View Synthesis from Sparse Inputs" at CVPR 2022 [S1, unofficial]. It addresses the problem of MLP overfitting and poor generalization in few-shot scenarios by incorporating generative and smoothness priors [S1, unofficial].
 
 ## Sources
 [S1] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)

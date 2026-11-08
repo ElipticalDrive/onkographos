@@ -3,106 +3,86 @@
 Also called: SMat3
 
 ## Overview
-A compact storage format for 3x3 symmetric matrices, reducing the required memory from nine values to six by exploiting the property $M_{ij} = M_{ji}$. It serves as the foundational data structure for representing covariance matrices in Gaussian Splatting variants and stress tensors in scientific visualization, eliminating redundant storage and ensuring symmetry constraints are maintained by construction.
+The Symmetric Matrix Data Structure (SMat3) is a compact storage format for 3x3 symmetric matrices, reducing memory usage by storing only the six unique elements of the upper triangular portion. It solves the problem of redundant storage in general 3x3 matrix representations where $m_{ij} = m_{ji}$, optimizing for cache efficiency and memory bandwidth in volume rendering and geometric processing pipelines. It differs from general matrix structures by enforcing symmetry constraints at the data layout level rather than at the algorithmic level.
 
 ## How it works
-### Inputs and Outputs
-- **Input**: Six scalar values representing the unique elements of a symmetric matrix.
-- **Output**: An instance of the `SMat3` structure containing these values.
+**Inputs:** Six scalar values representing the unique elements of a symmetric matrix.
+**Outputs:** An instance of the `SMat3` data structure.
 
-### Data Structures
-The structure `SMat3` consists of six public fields of type `float` (32-bit IEEE 754). The layout is fixed and ordered as follows:
-1. `m00`: Element at row 0, column 0.
-2. `m01`: Element at row 0, column 1 (equivalent to row 1, column 0).
-3. `m02`: Element at row 0, column 2 (equivalent to row 2, column 0).
-4. `m11`: Element at row 1, column 1.
-5. `m12`: Element at row 1, column 2 (equivalent to row 2, column 1).
-6. `m22`: Element at row 2, column 2.
+**Data Structure Layout:**
+The `SMat3` class consists of six public `float` fields. The layout maps directly to the upper triangular part of a 3x3 matrix:
+- `m00`: Element at row 0, column 0 ($m_{00}$)
+- `m01`: Element at row 0, column 1 ($m_{01}$)
+- `m02`: Element at row 0, column 2 ($m_{02}$)
+- `m11`: Element at row 1, column 1 ($m_{11}$)
+- `m12`: Element at row 1, column 2 ($m_{12}$)
+- `m22`: Element at row 2, column 2 ($m_{22}$)
 
-The implicit full 3x3 matrix $M$ is reconstructed as:
-$$
-M = \begin{pmatrix}
-m00 & m01 & m02 \\
-m01 & m11 & m12 \\
-m02 & m12 & m22
-\end{pmatrix}
-$$
+The implicit symmetry is defined as:
+$$ m_{10} = m_{01}, \quad m_{20} = m_{02}, \quad m_{21} = m_{12} $$
 
-### Steps
-1. **Initialization**: Create an instance of `SMat3`.
-2. **Assignment**: Assign the six input values to the corresponding fields `m00` through `m22`.
-3. **Verification**: Ensure no other fields are modified; the symmetry is enforced by the absence of fields for $M_{10}, M_{20}, M_{21}$.
+**Initialization and Construction:**
+The structure provides a constructor and a setter method `setSymmetric` to initialize the fields.
 
-### Pseudocode
+1.  **Constructor:** Accepts six float parameters corresponding to the unique elements.
+2.  **Setter:** The `setSymmetric` method assigns the input parameters to the corresponding fields.
+
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 class SMat3:
     def __init__(self, m00: float, m01: float, m02: float, m11: float, m12: float, m22: float):
-        self.m00 = m00
-        self.m01 = m01
-        self.m02 = m02
-        self.m11 = m11
-        self.m12 = m12
-        self.m22 = m22
+        """Initialize SMat3 with 6 unique elements."""
+        self.setSymmetric(m00, m01, m02, m11, m12, m22)
 
-    def set_symmetric(self, m00: float, m01: float, m02: float, m11: float, m12: float, m22: float):
-        self.m00 = m00
-        self.m01 = m01
-        self.m02 = m02
-        self.m11 = m11
-        self.m12 = m12
-        self.m22 = m22
+    def setSymmetric(self, a00: float, a01: float, a02: float, a11: float, a12: float, a22: float):
+        """Set all 6 fields from 6 parameters."""
+        self.m00 = a00
+        self.m01 = a01
+        self.m02 = a02
+        self.m11 = a11
+        self.m12 = a12
+        self.m22 = a22
 
     def clear(self):
-        self.set_symmetric(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        """Reset all fields to zero."""
+        self.setSymmetric(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
-    def get_full_matrix(self) -> list:
-        """
-        Returns the full 3x3 matrix as a list of lists for contexts requiring
-        non-symmetric operations, reconstructing the symmetric parts.
-        """
-        return [
-            [self.m00, self.m01, self.m02],
-            [self.m01, self.m11, self.m12],
-            [self.m02, self.m12, self.m22]
-        ]
+    def copy_from(self, rhs: 'SMat3'):
+        """Copy values from another SMat3 instance."""
+        self.setSymmetric(rhs.m00, rhs.m01, rhs.m02, rhs.m11, rhs.m12, rhs.m22)
 ```
 
-### Parameters
-- **Data Type**: `float` (32-bit). Using `double` increases precision but doubles memory usage.
-- **Memory Size**: 6 * 4 bytes = 24 bytes per instance (excluding object overhead).
-
-### Edge Cases and Pitfalls
-- **Precision**: Standard `float` precision may lead to slight asymmetries if the matrix is modified via arithmetic operations that do not preserve symmetry (e.g., standard matrix multiplication). When performing operations, results must be re-symmetrized (e.g., $M_{new} = (M + M^T)/2$) before storing back into `SMat3` if the intermediate result is not guaranteed symmetric.
-- **Boundary Conditions**: If the matrix represents a covariance matrix, it must remain positive semi-definite. Simply storing arbitrary floats in `SMat3` does not guarantee this property; additional constraints or projection steps are required for covariance validity.
+**Edge Cases and Pitfalls:**
+- **Symmetry Violation:** If the matrix is modified in place without updating the symmetric counterparts (e.g., changing `m01` but not `m10` in a general matrix context), the symmetry property is broken. This structure assumes the consumer respects the implicit symmetry or uses accessor methods that enforce it.
+- **Precision:** Uses `float` (32-bit) precision. For high-precision applications like SVD-based normal estimation, consider if double precision is required for intermediate calculations, though the storage remains single precision [S1, unofficial].
 
 ## Subtopics
 
-### Symmetric Matrix Stripping
-Extracts the 6 unique elements from the lower triangular part of a batch of 3x3 symmetric matrices (covariance matrices) into a flat tensor of shape `(N, 6)` on CUDA [S2, unofficial]. This is used to convert batched matrix representations into a linear format for efficient processing or storage. The mapping is: `uncertainty[:, 0] = L[:, 0, 0]`, `uncertainty[:, 1] = L[:, 0, 1]`, `uncertainty[:, 2] = L[:, 0, 2]`, `uncertainty[:, 3] = L[:, 1, 1]`, `uncertainty[:, 4] = L[:, 1, 2]`, `uncertainty[:, 5] = L[:, 2, 2]` [S2, unofficial].
+### [Stress Tensor Representation](9783-stress-tensor-representation.md)
+A stress tensor representation models the internal forces acting on a material point by defining the traction vector on any arbitrary cutting plane through that point. It is distinguished from general symmetric matrices by its specific physical interpretation of diagonal components as normal stress and off-diagonal components as shear stress, along with a defined sign convention for eigenvalues.
 
-### Stress Tensor Representation
-A symmetric second-order tensor conveying stress acting on cutting planes through a material, defined by normal stress components (diagonal) and shear stress components (off-diagonal) [S3, book]. The stress tensor $\sigma$ is represented as:
-$$
-\sigma = \begin{pmatrix}
-\sigma_{11} & \tau_{12} & \tau_{13} \\
-\tau_{12} & \sigma_{22} & \tau_{23} \\
-\tau_{13} & \tau_{23} & \sigma_{33}
-\end{pmatrix}
-$$
-[S3, book]. The traction vector $t$ on a cutting plane with normal $n$ is $t = \sigma \cdot n = \tau + \sigma_n$, decomposed into normal stress $\sigma_n$ and shear stress $\tau$ [S3, book]. Sign convention: Negative eigenvalues are interpreted as compressive forces (making volume smaller) and positive eigenvalues as tensile forces (expanding volume) [S3, book]. Pitfall: In some application areas, the sign interpretation is reversed (positive for compression, negative for tension) [S3, book].
+### Symmetric Matrix Stripping
+Extracts the 6 unique elements from the lower triangular part of a batch of 3x3 symmetric matrices (covariance matrices) into a flat tensor of shape `(N, 6)` [S2, unofficial].
+1.  Initialize `uncertainty` tensor of zeros with shape `(L.shape[0], 6)` on CUDA [S2, unofficial].
+2.  Map elements:
+    - `uncertainty[:, 0] = L[:, 0, 0]`
+    - `uncertainty[:, 1] = L[:, 0, 1]`
+    - `uncertainty[:, 2] = L[:, 0, 2]`
+    - `uncertainty[:, 3] = L[:, 1, 1]`
+    - `uncertainty[:, 4] = L[:, 1, 2]`
+    - `uncertainty[:, 5] = L[:, 2, 2]` [S2, unofficial]
+3.  Return `uncertainty` [S2, unofficial].
 
 ## Operating characteristics
-- **Memory**: 33% reduction compared to a full 3x3 matrix (6 floats vs 9 floats).
-- **Access**: Direct field access is O(1). Reconstructing the full matrix requires copying 6 values into 9 slots.
-- **Performance**: No computational overhead for storage; potential performance gain in memory-bound scenarios due to reduced cache footprint.
-- **Limitations**: Not directly compatible with libraries expecting 9-element arrays without conversion. Arithmetic operations must explicitly handle symmetry preservation.
+- **Memory:** Stores 6 floats (24 bytes) instead of 9 floats (36 bytes) for a 3x3 matrix, a 33% reduction in memory footprint.
+- **Access:** Direct field access is O(1). Implicit symmetry requires careful handling in generic matrix algorithms that assume full storage.
+- **Performance:** Improved cache locality for operations that only access unique elements. No computational overhead for symmetry enforcement during construction if the setter is used directly.
 
 ## Background
-The `SMat3` structure is implemented in the DualContouringCSharp project [S1, unofficial] as a specialized matrix type for geometric processing, likely for dual contouring or similar mesh generation techniques where symmetric matrices (such as Hessian or covariance matrices) are frequently used. The concept of storing symmetric matrices in 6-element vectors is standard in numerical linear algebra and scientific visualization, as seen in the analysis of stress tensor fields [S3, book] and the implementation of Gaussian Splatting variants like InstantSplat [S2, unofficial].
+The `SMat3` structure is implemented in the DualContouringCSharp repository, part of a C# implementation of dual contouring algorithms for volume rendering and mesh generation [S1, unofficial]. It is used to efficiently store covariance matrices and other symmetric tensors required for surface reconstruction and uncertainty estimation in 3D Gaussian Splatting pipelines [S2, unofficial].
 
 ## Sources
 [S1] tuckbone/DualContouringCSharp, https://github.com/tuckbone/DualContouringCSharp, fetched 2026-10-26 (unofficial)
 [S2] NVlabs/InstantSplat, https://github.com/NVlabs/InstantSplat, fetched 2026-10-27 (unofficial)
-[S3] A Visual Approach to Analysis of Stress Tensor Fields, https://doi.org/10.4230/dfu.vol2.sciviz.2011.188, fetched 2026-10-26 (book)

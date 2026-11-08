@@ -1,0 +1,681 @@
+🌪 Limited area LES-to-mesoscale atmosphere simulations based on Oceananigans - Reflect the gray direct beam, and update radiative fluxes between solves by kaiyuan-cheng · Pull Request #1200 · NumericalEarth/Breeze.jl
+
+Reflect the gray direct beam, and update radiative fluxes between solves by kaiyuan-cheng · Pull Request #1200 · NumericalEarth/Breeze.jl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+kaiyuan-cheng
+commented
+Nov 3, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Two fixes that let a surface model and the atmosphere exchange the same radiative fluxes. Both surfaced in NumericalEarth's coupling of a land model to Breeze's RadiativeTransferModel.
+Gray optics reflects the direct beam. The non-scattering gray shortwave solve carried no upwelling shortwave, so surface_albedo had no effect. A coupled surface that absorbs (1 - α) of the direct beam then dropped the reflected α of it from the budget: 224.6 W/m², 20% of the surface shortwave, at noon in NumericalEarth's test column. The surface now reflects direct_surface_albedo of the direct beam diffusely. The reflected beam climbs the column attenuated by exp(-D τ) per layer, with D ≈ 1.64 fixed at the diffusivity of the gray longwave solve's default quadrature (Gauss-Jacobi-5, one angle). The atmosphere absorbs its share, and the rest leaves through the top. The docs no longer say that gray optics ignores the albedo.
+Fluxes are updated between solves, following Hogan and Bozzo (2015) as in the IFS and ecRad. Between two solves the surface temperature changes and the sun moves. The surface model sees both every step, while the atmosphere's heating stays frozen at the last solve: a surface that warms from 298 to 308 K between solves loses about 60 W/m² that nothing absorbs. With any schedule other than every iteration, every state update between solves now updates the fluxes:
+Longwave. Each solve repeats the longwave solve with the surface 1 K warmer. That gives the response of every face's up- and downwelling fluxes to T₀⁴. Each update shifts the longwave fluxes by that response times the change in T₀⁴. The column absorbs its share of a change in surface emission, so surface and atmosphere agree on the boundary flux. For gray optics the update is exact, because the fluxes are linear in the surface emission. A constant surface_temperature skips the second solve. Full-spectrum RRTMGP clamps the surface temperature into its Planck tables (160 to 355 K): within 1 K of the top the second solve cools the surface instead, and above 355 K the updates hold the longwave fluxes, as a solve would.
+Shortwave. Each solve uses μ̄₀, the cosine of the solar zenith angle averaged over the sunlit part of its radiation window (Hogan and Hirahara 2015, ECMWF TM 758; ecRad's cos_sza). The average is an exact time integral clipped at sunrise and sunset, per calendar day for the apparent sun. The window runs from the start of the solving time step, since SSP RK3's third stage returns to tⁿ + Δt/2, to the start of the step that solves next. Each update scales the solved shortwave fluxes by μ₀ / μ̄₀. The incoming flux at the top then tracks the current sun, and a sun that rises between solves lights the column from sunrise.
+Re-solves. Within its window the sun stays below 4 μ̄₀ (the bound is approached only by a sun skimming the horizon around a short night). An update that finds μ₀ > 4 μ̄₀ solves again without advancing the schedule, since μ̄₀'s slant path would deposit the beam far too high in the column. This covers daylight after a night-time solve, a sun climbing far past a solve with no known interval, and an IterationInterval whose time steps grew past its estimate. A correctly estimated window never triggers it, including along the terminator of a global grid (tested).
+One mechanism, ApproximateRadiationUpdates in src/AtmosphereModels/approximate_radiation_updates.jl, serves gray, full-spectrum RRTMGP and ecCKD. Each backend only supplies its perturbed-surface longwave solve, reusing its own flux copy. The update state is checkpointed, so a restart between solves continues bitwise. With the default IterationInterval(1) there are no steps between solves: approximate_updates is nothing, and behavior and cost are unchanged.
+Cost and memory. One extra longwave solve per radiation call, when the surface temperature is not constant. Four extra ZFaceFields per model: the two longwave responses and the shortwave fluxes as solved. Per state update, a column kernel, the flux-divergence kernel, and one fused reduction whose result the host reads to decide on a re-solve.
+Behavior changes.
+Gray shortwave now reflects.
+Models solving radiation on TimeInterval or IterationInterval(N > 1) schedules now get the updates, solve with μ̄₀ instead of the instantaneous μ₀, and can solve off-schedule when sunlight falls outside the window of the last solve.
+RadiativeTransferModel has two new trailing fields and type parameters, approximate_updates and cache_valid.
+Limitations.
+Under Reactant the traced conditional only solves; fluxes are not updated between solves (documented).
+The all-sky RRTMGP response relies on the extra longwave solve drawing the same McICA cloud sample. With RRTMGP 1.1 the sample is keyed on cloud_state.mcica_key, which this direct solve_lw! path leaves fixed, so the two solves agree; the cloudy all-sky test checks this. RRTMGP 0.22 and 1.0 draw the sample from the global RNG, so there the two solves sample different clouds. Raising the RRTMGP compat floor to 1.1 would close that.
+The response comes from a finite difference. A solver-provided surface Jacobian, as in ecRad's lw_derivatives or RTE+RRTMGP's flux_up_Jac, would remove the extra solve. RRTMGP.jl and NumericalRadiation.jl do not provide one yet.
+With no known interval, a re-solve fires each time the sun climbs fourfold, so the slant path can be up to four times too long between them.
+Tests.
+New test/approximate_radiation_updates.jl, Float32 and Float64:
+longwave update against a re-solve at the new surface temperature, for gray (exact) and for clear-sky, cloudy all-sky and ecCKD (changes within 2%), and for clear-sky at and above RRTMGP's 355 K ceiling;
+top-of-atmosphere shortwave equal to -S₀ μ₀ after the solve and after an update;
+a sun rising between solves, and daylight at either end of the window;
+re-solves for a sun climbing past a solve with no known interval, and for an underestimated IterationInterval;
+a solve in the time step of sunset averaging from the start of the step, with no re-solve at SSP RK3's third stage;
+a 24×12 latitude-longitude grid solving only on schedule over two hours;
+time stepping between solves, with the column budget closing, checkpoint restarts, and every Runge-Kutta stage following the sun.
+New test/mean_solar_zenith_angle.jl checks the sunlit means against sampled ones.
+test/gray_radiative_transfer.jl now checks the reflected beam analytically.
+Run locally on CPU, all passing:
+approximate_radiation_updates.jl, mean_solar_zenith_angle.jl and gray_radiative_transfer.jl, in Float32 and Float64;
+checkpointing.jl, including the gray bitwise-restart case whose checkpoint falls between two solves;
+radiation_scheduling.jl, solar_zenith_angle.jl, clear_sky_radiative_transfer.jl, all_sky_radiative_transfer.jl and ecckd_radiative_transfer.jl;
+numerical_radiation_{column_round_trip,gray_column,overlying_atmosphere,storage}.jl;
+the ExplicitImports checks, for Breeze and its RRTMGP, NumericalRadiation and CloudMicrophysics extensions.
+Not run locally: GPU, Reactant, Aqua, and the docs build.
+🤖 Generated with Claude Code
+kaiyuan-cheng
+and others
+added 2 commits
+November 3, 2026 20:58
+Reflect the gray direct beam at the surface
+…
+7ca9043
+```
+The non-scattering gray shortwave solve carried no upwelling shortwave, so the
+direct surface albedo had no effect on the fluxes. A coupled surface that
+absorbs (1 - α) of the direct beam then lost the reflected α of it from the
+budget of the column and the surface.
+
+The surface now reflects the fraction `direct_surface_albedo` of the direct
+beam diffusely. The reflected beam climbs the column attenuated by exp(-D τ)
+across each layer of shortwave optical depth τ, with D the diffusivity of the
+gray longwave solve, so the atmosphere absorbs its share and the rest leaves
+through the top of the atmosphere.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Update radiative fluxes between solves for the surface temperature an…
+…
+3916a8f
+```
+…d the sun
+
+Between two solves the surface temperature changes and the sun moves, while
+the atmosphere's radiative heating stays at the last solve. A surface model
+that reads the current surface temperature and sun then exchanges different
+fluxes with the atmosphere than the atmosphere does with it.
+
+Following Hogan and Bozzo (2015), a RadiativeTransferModel whose schedule
+skips iterations now updates its fluxes in every time step between solves:
+
+- Longwave: each solve repeats the longwave solve with the surface 1 K warmer,
+  which gives the response of the fluxes on every face to T₀⁴. Each step
+  shifts the longwave fluxes by that response times the change in T₀⁴. A
+  constant surface temperature skips the second solve.
+- Shortwave: each solve uses the cosine of the solar zenith angle averaged
+  over the sunlit part of the radiation interval (Hogan and Hirahara, 2015),
+  and each step scales the solved shortwave fluxes by μ₀ / μ̄₀.
+
+ApproximateRadiationUpdates holds the state, which is checkpointed. Gray,
+full-spectrum RRTMGP and ecCKD radiation share the mechanism; each backend
+supplies only its warmer-surface longwave solve. Radiation solved every
+iteration (the default) has no updates and is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+codecov
+Bot
+commented
+Nov 3, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codecov Report
+❌ Patch coverage is 94.24242% with 19 lines in your changes missing coverage. Please review.
+Files with missing lines
+Patch %
+Lines
+.../AtmosphereModels/approximate_radiation_updates.jl
+96.03%
+5 Missing ⚠️
+...t/BreezeRRTMGPExt/gray_radiative_transfer_model.jl
+89.47%
+4 Missing ⚠️
+...umericalRadiationExt/radiative_transfer_kernels.jl
+92.00%
+2 Missing ⚠️
+ext/BreezeRRTMGPExt/rrtmgp_column_batching.jl
+87.50%
+2 Missing ⚠️
+src/AtmosphereModels/mean_solar_zenith_angle.jl
+97.01%
+2 Missing ⚠️
+ext/BreezeRRTMGPExt/rrtmgp_shared_utilities.jl
+90.90%
+1 Missing ⚠️
+ext/BreezeReactantExt/Timesteppers.jl
+50.00%
+1 Missing ⚠️
+src/AtmosphereModels/checkpointing.jl
+92.30%
+1 Missing ⚠️
+src/AtmosphereModels/radiation_interface.jl
+95.65%
+1 Missing ⚠️
+📢 Thoughts on this report? Let us know!
+numterra-bot
+Bot
+reviewed
+Nov 3, 2026
+View reviewed changes
+numterra-bot
+Bot
+left a comment
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Breeze.jl Benchmarks
+Details
+Benchmark suite
+Current: a832c46
+Previous: 147980f
+Ratio
+CBL; Dynamics: anelastic; Grid: 512x512x256 [Float32]/Advection: WENO5/NVIDIA L4/MixedPhaseEquilibrium
+134936806.3862896 points/s
+140092024.1512222 points/s
+1.04
+CBL; Dynamics: anelastic; Grid: 512x512x256 [Float32]/Advection: WENO5/NVIDIA L4/1M_MixedEquilibrium
+66817154.14201337 points/s
+71250719.60251184 points/s
+1.07
+CBL; Dynamics: anelastic; Grid: 512x512x256 [Float32]/Advection: WENO5/NVIDIA L4/1M_MixedNonEquilibrium
+54917225.99425355 points/s
+56540382.62220361 points/s
+1.03
+CBL; Dynamics: anelastic; Microphysics: nothing [Float32]/Compare advections/NVIDIA L4/WENO5 [256, 256, 128]
+152466310.4504406 points/s
+150592954.11989427 points/s
+0.99
+CBL; Dynamics: anelastic; Microphysics: nothing [Float32]/Advection: WENO5/NVIDIA L4/256x256x128
+152466310.4504406 points/s
+150592954.11989427 points/s
+0.99
+CBL; Dynamics: anelastic; Grid: 512x512x256 [Float32]/Advection: WENO5/NVIDIA L4/nothing
+150639713.73334783 points/s
+151099737.60473758 points/s
+1.00
+CBL; Dynamics: anelastic; Microphysics: nothing [Float32]/Compare advections/NVIDIA L4/WENO5 [512, 512, 256]
+150639713.73334783 points/s
+151099737.60473758 points/s
+1.00
+CBL; Dynamics: anelastic; Microphysics: nothing [Float32]/Advection: WENO5/NVIDIA L4/512x512x256
+150639713.73334783 points/s
+151099737.60473758 points/s
+1.00
+CBL; Dynamics: anelastic; Microphysics: nothing [Float32]/Compare advections/NVIDIA L4/WENO5 [768, 768, 256]
+127312693.10463637 points/s
+129296492.14317068 points/s
+1.02
+CBL; Dynamics: anelastic; Microphysics: nothing [Float32]/Advection: WENO5/NVIDIA L4/768x768x256
+127312693.10463637 points/s
+129296492.14317068 points/s
+1.02
+CBL; Dynamics: anelastic; Microphysics: nothing [Float32]/Compare advections/NVIDIA L4/WENO9 [256, 256, 128]
+117937933.89713734 points/s
+120540894.08569011 points/s
+1.02
+CBL; Dynamics: anelastic; Microphysics: nothing [Float32]/Advection: WENO9/NVIDIA L4/256x256x128
+117937933.89713734 points/s
+120540894.08569011 points/s
+1.02
+CBL; Dynamics: anelastic; Microphysics: nothing [Float32]/Compare advections/NVIDIA L4/WENO9 [512, 512, 256]
+115079088.20399794 points/s
+112390674.75826049 points/s
+0.98
+CBL; Dynamics: anelastic; Microphysics: nothing [Float32]/Advection: WENO9/NVIDIA L4/512x512x256
+115079088.20399794 points/s
+112390674.75826049 points/s
+0.98
+CBL; Dynamics: anelastic; Microphysics: nothing [Float32]/Compare advections/NVIDIA L4/WENO9 [768, 768, 256]
+106493901.62364013 points/s
+104891100.91766329 points/s
+0.98
+CBL; Dynamics: anelastic; Microphysics: nothing [Float32]/Advection: WENO9/NVIDIA L4/768x768x256
+106493901.62364013 points/s
+104891100.91766329 points/s
+0.98
+CBL; LatitudeLongitudeGrid; Dynamics: compressible_splitexplicit; Microphysics: nothing [Float32]/Compare backends/NVIDIA L4/vanilla 128x128x32
+31153078.976748593 points/s
+41517317.52348632 points/s
+1.33
+CBL; LatitudeLongitudeGrid; Dynamics: compressible_splitexplicit; Microphysics: nothing [Float32]/Compare backends/NVIDIA L4/reactant 128x128x32
+26830488.759435568 points/s
+26829246.80481793 points/s
+1.00
+CBL; LatitudeLongitudeGrid; Dynamics: compressible_splitexplicit; Microphysics: nothing [Float32]/Compare backends/NVIDIA L4/vanilla 256x256x128
+27542108.069999784 points/s
+27556919.68605644 points/s
+1.00
+CBL; LatitudeLongitudeGrid; Dynamics: compressible_splitexplicit; Microphysics: nothing [Float32]/Compare backends/NVIDIA L4/reactant 256x256x128
+17587173.761883557 points/s
+17570560.28549969 points/s
+1.00
+CBL; AD; Dynamics: compressible_splitexplicit; Microphysics: nothing [Float32]/Advection: WENO5/NVIDIA L4/128x128x32 binomial_2
+2002440.7588585666 points/s
+1992893.1967842765 points/s
+1.00
+CBL; AD; Dynamics: compressible_splitexplicit; Microphysics: nothing [Float32]/Advection: WENO5/NVIDIA L4/128x128x32 binomial_8
+3027283.33053289 points/s
+3005542.0431952346 points/s
+0.99
+CBL; Dynamics: compressible_splitexplicit; Microphysics: nothing [Float32]/Advection: WENO5/NVIDIA L4/512x512x256
+29101761.41254616 points/s
+29073915.542966634 points/s
+1.00
+ModelTendency; Grid: 256x256x128/Advection: WENO5/NVIDIA L4/F32 vanilla
+1362904205.86431 points/s
+1367576833.2230976 points/s
+1.00
+ModelTendency; Grid: 256x256x128/Advection: WENO5/NVIDIA L4/F32 reactant raise=true
+683182945.7058777 points/s
+679684363.458286 points/s
+0.99
+ModelTendency; Grid: 256x256x128/Advection: WENO5/NVIDIA L4/F32 reactant raise=false
+1485880201.5322516 points/s
+1485029516.0974526 points/s
+1.00
+ModelTendency; Grid: 256x256x128/Advection: WENO7/NVIDIA L4/F32 vanilla
+1103513176.7060199 points/s
+1102600520.8588357 points/s
+1.00
+ModelTendency; Grid: 256x256x128/Advection: WENO7/NVIDIA L4/F32 reactant raise=true
+372330383.135171 points/s
+371242230.3898248 points/s
+1.00
+ModelTendency; Grid: 256x256x128/Advection: WENO7/NVIDIA L4/F32 reactant raise=false
+1259731387.9092274 points/s
+1247307287.2973309 points/s
+0.99
+ModelTendency; Grid: 256x256x128/Advection: WENO9/NVIDIA L4/F32 vanilla
+908181252.1364393 points/s
+901555562.0499582 points/s
+0.99
+ModelTendency; Grid: 256x256x128/Advection: WENO9/NVIDIA L4/F32 reactant raise=true
+35458590.506604865 points/s
+35456631.041576706 points/s
+1.00
+ModelTendency; Grid: 256x256x128/Advection: WENO9/NVIDIA L4/F32 reactant raise=false
+970437579.1720412 points/s
+952829931.5029906 points/s
+0.98
+ScalarTendency; Grid: 256x256x128/Advection: WENO5/NVIDIA L4/F32 vanilla
+8319003650.367084 points/s
+8458224953.53333 points/s
+1.02
+ScalarTendency; Grid: 256x256x128/Advection: WENO5/NVIDIA L4/F32 reactant raise=true
+3005369361.7134094 points/s
+3012421207.0860744 points/s
+1.00
+ScalarTendency; Grid: 256x256x128/Advection: WENO5/NVIDIA L4/F32 reactant raise=false
+10777714822.395157 points/s
+11114905322.127367 points/s
+1.03
+ScalarTendency; Grid: 256x256x128/Advection: WENO5/NVIDIA L4/BF16 vanilla
+6216895691.726279 points/s
+6258397341.065882 points/s
+1.01
+ScalarTendency; Grid: 256x256x128/Advection: WENO5/NVIDIA L4/BF16 reactant raise=true
+8594251243.760706 points/s
+8690399503.560133 points/s
+1.01
+ScalarTendency; Grid: 256x256x128/Advection: WENO5/NVIDIA L4/BF16 reactant raise=false
+8222053855.058087 points/s
+8058832514.667299 points/s
+0.98
+ScalarTendency; Grid: 256x256x128/Advection: WENO7/NVIDIA L4/F32 vanilla
+6552473361.715221 points/s
+6697222024.417471 points/s
+1.02
+ScalarTendency; Grid: 256x256x128/Advection: WENO7/NVIDIA L4/F32 reactant raise=true
+1680152108.0394897 points/s
+1680218741.0930126 points/s
+1.00
+ScalarTendency; Grid: 256x256x128/Advection: WENO7/NVIDIA L4/F32 reactant raise=false
+7564623789.143729 points/s
+7661794819.803774 points/s
+1.01
+ScalarTendency; Grid: 256x256x128/Advection: WENO7/NVIDIA L4/BF16 vanilla
+4470336337.469411 points/s
+4491037695.146788 points/s
+1.00
+ScalarTendency; Grid: 256x256x128/Advection: WENO7/NVIDIA L4/BF16 reactant raise=true
+4561197613.646497 points/s
+4579406936.632655 points/s
+1.00
+ScalarTendency; Grid: 256x256x128/Advection: WENO7/NVIDIA L4/BF16 reactant raise=false
+5006710343.88498 points/s
+5122354206.981113 points/s
+1.02
+ScalarTendency; Grid: 256x256x128/Advection: WENO9/NVIDIA L4/F32 vanilla
+4780042906.828768 points/s
+4924092862.420516 points/s
+1.03
+ScalarTendency; Grid: 256x256x128/Advection: WENO9/NVIDIA L4/F32 reactant raise=true
+861327936.288531 points/s
+862057296.3473021 points/s
+1.00
+ScalarTendency; Grid: 256x256x128/Advection: WENO9/NVIDIA L4/F32 reactant raise=false
+5523443302.553189 points/s
+5423772999.094164 points/s
+0.98
+ScalarTendency; Grid: 256x256x128/Advection: WENO9/NVIDIA L4/BF16 vanilla
+3111334596.383012 points/s
+3171189510.308166 points/s
+1.02
+ScalarTendency; Grid: 256x256x128/Advection: WENO9/NVIDIA L4/BF16 reactant raise=true
+311197589.84029096 points/s
+311198582.6874242 points/s
+1.00
+ScalarTendency; Grid: 256x256x128/Advection: WENO9/NVIDIA L4/BF16 reactant raise=false
+3560702003.4076347 points/s
+3622324475.949647 points/s
+1.02
+This comment was automatically generated by workflow using github-action-benchmark.
+kaiyuan-cheng
+and others
+added 5 commits
+November 4, 2026 19:25
+Fix radiation updates across daylight transitions and restarts
+6b32219
+Average the sun over the solving step and re-solve far outside the wi…
+…
+9b0ebfd
+```
+…ndow
+
+The radiation window now begins at the start of the solving time step,
+since SSP RK3's third stage returns to tⁿ + Δt/2, and for TimeInterval
+schedules extends to the step that solves next. A solve in the step of
+sunset no longer finds daylight outside its window and solves again,
+which on a global grid had doubled the radiation cost.
+
+An update solves again when μ₀ > 4 μ̄₀. A correctly estimated window
+never exceeds this ratio, so the rule fires only for daylight after a
+night-time solve, a sun climbing far past a solve with no known interval,
+or an IterationInterval whose time steps outgrew its estimate. The check
+is one fused reduction and no longer writes into the sunlit duration.
+
+Full-spectrum RRTMGP clamps the surface temperature to its Planck table
+(160 to 355 K). The updates now use the same clamped temperature, and
+within 1 K of the top the perturbed longwave solve cools the surface
+instead. The batched solve restores the surface temperature from the
+field rather than subtracting the increment.
+
+The reflected-beam diffusivity of the gray shortwave is a fixed constant
+instead of being read from the longwave solver's quadrature. The legacy
+NaN checkpoint marker, which no committed format wrote, is removed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Fix radiation update precision, timing, and backend dispatch
+…
+b2fb70c
+```
+Anchor longwave corrections to the last full solve, restrict RRTMGP temperature bounds to its backend, and align solar averaging with scheduled solving steps. Save the reference fluxes in checkpoints and refresh older caches.
+
+Validation: 1,081 CPU assertions, Aqua, explicit-import checks, doctests, and whitespace checks passed. CUDA was unavailable.
+```
+Share the radiation solve sequence across backends and simplify the a…
+…
+16758ee
+```
+…pproximate updates
+
+- `_update_radiation!` for a `RadiativeTransferModel` lives in src: it checks the surface
+  temperature, sets the solve's solar zenith angle, calls the backend's
+  `solve_radiative_transfer!`, then records the solve. Backends supply only
+  `solver_cos_zenith` and `solve_radiative_transfer!`.
+- Rename the solve-time zenith update to `update_solve_cos_zenith!(cos_zenith, rtm, model)`.
+- Move the Reactant special cases into BreezeReactantExt, with an
+  `approximate_radiation_updates` builder in place of a constructor that could return nothing.
+- Define the stage abscissae once (`stage_abscissae`), used by SSP RK3 and the radiation window.
+- Fold the step-timing fallbacks of `radiation_interval` into `radiation_step_offsets`.
+- Drop the redundant cache-validity check between solves.
+- Copy only longwave fluxes after the perturbed-surface solve.
+- Pass the surface-temperature function to the batch kernel instead of a Bool flag.
+- Reuse `fill_columns!` and `solar_coordinate`; deduplicate the related tests.
+
+No change to the physics.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Check the solved reference flux in the ecCKD scheduling test
+…
+4577bd8
+```
+Between solves, each state update rewrites the output fluxes from the reference fluxes of the last
+solve, so only the reference shows whether a full solve ran.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+numterra-bot
+Bot
+reviewed
+Nov 5, 2026
+View reviewed changes
+numterra-bot
+Bot
+left a comment
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+⚠️ Performance Alert ⚠️
+Possible performance regression was detected for benchmark 'Breeze.jl Benchmarks'.
+Benchmark result of this commit is worse than the previous benchmark result exceeding threshold 1.10.
+Benchmark suite
+Current: a832c46
+Previous: 147980f
+Ratio
+CBL; LatitudeLongitudeGrid; Dynamics: compressible_splitexplicit; Microphysics: nothing [Float32]/Compare backends/NVIDIA L4/vanilla 128x128x32
+31153078.976748593 points/s
+41517317.52348632 points/s
+1.33
+This comment was automatically generated by workflow using github-action-benchmark.
+Merge branch 'main' into kai/surface-radiation-coupling
+a832c46
+kaiyuan-cheng
+commented
+Nov 5, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+@claude review
+kaiyuan-cheng
+marked this pull request as ready for review
+November 5, 2026 18:26
+Copilot
+AI
+balanced review requested due to automatic review settings
+November 5, 2026 18:26
+Copilot started reviewing on behalf of
+kaiyuan-cheng
+November 5, 2026 18:26
+View session
+Copilot
+AI
+reviewed
+Nov 5, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 Changes recommended
+Inconsistent trigonometric conventions trigger unnecessary radiation solves on every state update, while clock-rounding errors can include an extra step in the solar mean.
+2 open issues
+Use consistent trigonometry for diurnal daylight detection · New
+Match timestep boundaries using clock-rounded stage times · New
+What changed in this PR
+This PR improves radiation exchange between Breeze’s atmosphere and coupled surface models by reflecting gray shortwave radiation and updating fluxes between scheduled solves.
+Changes:
+Adds surface reflection of the gray direct beam and its absorption through the atmosphere.
+Shares temperature- and sunlight-based flux updates across radiation backends, with stage-aware solar windows and restartable caches.
+Adds regression tests and documents the algorithms, costs, and backend limitations.
+File
+Description
+test/​reactant/​radiation_schedule.jl
+Tests traced radiation-cache invalidation.
+test/​radiation_windows.jl
+Tests stage-aware radiation windows.
+test/​radiation_scheduling.jl
+Distinguishes full solves from flux updates.
+test/​mean_solar_zenith_angle.jl
+Tests sunlit solar-angle averages.
+test/​gray_radiative_transfer.jl
+Checks reflected shortwave analytically.
+test/​ecckd_radiative_transfer.jl
+Updates full-solve detection.
+test/​approximate_radiation_updates.jl
+Tests flux corrections, re-solves, and restarts.
+src/​TimeSteppers/​ssp_runge_kutta_3.jl
+Exposes and reuses stage timing.
+src/​TimeSteppers/​acoustic_runge_kutta_3.jl
+Exposes acoustic stage timing.
+src/​AtmosphereModels/​solar_position.jl
+Shares solar-coordinate lookup.
+src/​AtmosphereModels/​radiation_interface.jl
+Centralizes solve orchestration and cache validity.
+src/​AtmosphereModels/​mean_solar_zenith_angle.jl
+Implements sunlit interval averaging.
+src/​AtmosphereModels/​checkpointing.jl
+Saves update caches and handles older checkpoints.
+src/​AtmosphereModels/​AtmosphereModels.jl
+Includes the new radiation components.
+src/​AtmosphereModels/​approximate_radiation_updates.jl
+Implements windows, responses, and between-solve updates.
+ext/​BreezeRRTMGPExt/​rrtmgp_shared_utilities.jl
+Shares temperature bounds and flux-copy helpers.
+ext/​BreezeRRTMGPExt/​rrtmgp_column_batching.jl
+Adds batched perturbed-temperature solves.
+ext/​BreezeRRTMGPExt/​gray_radiative_transfer_model.jl
+Adds reflected shortwave and longwave responses.
+ext/​BreezeRRTMGPExt/​full_spectrum_radiative_transfer_model.jl
+Integrates full-spectrum solves with shared updates.
+ext/​BreezeRRTMGPExt/​BreezeRRTMGPExt.jl
+Imports shared radiation-update interfaces.
+ext/​BreezeReactantExt/​Timesteppers.jl
+Provides traced validity without between-solve updates.
+ext/​BreezeNumericalRadiationExt/​radiative_transfer_kernels.jl
+Adds ecCKD longwave-response kernels.
+ext/​BreezeNumericalRadiationExt/​ecckd_radiative_transfer_model.jl
+Initializes ecCKD update and validity state.
+ext/​BreezeNumericalRadiationExt/​BreezeNumericalRadiationExt.jl
+Imports shared update helpers.
+docs/​src/​radiative_transfer.md
+Explains reflection, updates, and limitations.
+docs/​src/​breeze.bib
+Adds references for approximate radiation updates.
+docs/​src/​appendix/​notation.md
+Defines current and solved solar cosines.
+Review effort: Balanced
+Comment thread
+src/AtmosphereModels/mean_solar_zenith_angle.jl
+Comment on lines
++46
+to
++47
+cosine_offset = sind(solar_position.latitude) * sind(solar_position.declination)
+cosine_amplitude = cosd(solar_position.latitude) * cosd(solar_position.declination)
+Comment thread
+src/AtmosphereModels/approximate_radiation_updates.jl
+Comment on lines
++157
+to
++158
+steps = max(earliest_step, ceil((remaining + current_offset - first_stage_offset) / Δt))
+return finite_radiation_interval(steps * Δt - current_offset + lead)
+claude
+Bot
+reviewed
+Nov 5, 2026
+View reviewed changes
+claude
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Nothing blocking. The comments below are optional suggestions. There is no need to push a fix for them before merging.
+Additional findings (outside the current diff — GitHub can't attach inline comments there):
+🟡 test/radiation_scheduling.jl — nit: The "flux divergence was also recomputed" checks now pass even if a scheduled solve skips the flux divergence. Between-solve updates at iterations 1 and 2 already rewrite flux_div after the test zeroes it. Fix: zero flux_div right before the scheduled update_state! (iteration 3 here, and t = 10 at lines 172-173), or compare it against a value a solve must produce.
+Why this was flagged
+The test zeroes flux_div at radiation_scheduling.jl:73, then calls update_state! at iterations 1 and 2. These are not due, so conditionally_update_radiation! calls update_radiation_between_solves!. That runs apply_radiation_updates! → compute_radiation_flux_divergence! (approximate_radiation_updates.jl), which writes a nonzero divergence from the downwelling longwave and shortwave fluxes. So @ test any(Array(interior(flux_div)) .!= 0) at line 101 holds before iteration 3 runs. The TimeInterval testset has the same pattern: it zeroes at line 153, the update at t = 5 rewrites, and the check is at line 173. On base, nothing touched flux_div between solves, so these assertions did detect a solve that failed to recompute the divergence.
+Verification: The test zeroes flux_div at line 73, but at iterations 1 and 2 update_radiation_between_solves! calls apply_radiation_updates!, which ends with compute_radiation_flux_divergence!(rtm, grid) (approximate_radiation_updates.jl:354) and writes a nonzero divergence. So the check at test/radiation_scheduling.jl:101 passes even if a scheduled solve skips the divergence. On the base branch nothing wrote flux_div between solves. The same applies at line 173.
+Comment thread
+src/AtmosphereModels/radiation_interface.jl
+function update_radiation!(rtm, model)
+isnothing(rtm) && return nothing
+due = radiation_update_due(rtm.schedule, model.clock, model)
+due = radiation_update_due(rtm.schedule, model.clock, model) | !radiation_cache_is_valid(rtm)
+claude
+Bot
+Nov 5, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 (optional) Reactant users compiling a radiation run now trace a full radiation solve into every update_state! of a step, not only the scheduled first stage. On a traced clock radiation_update_due still returns false off stage 2, but OR-ing it with !radiation_cache_is_valid(rtm) turns it into a traced Bool. That emits a @ trace if around _update_radiation! at every stage. Fix: keep the traced validity check to one place per compiled step, such as the stage-2 conditional or prepare_first_time_step!. That keeps restart recovery without copying the solve into later stages and the end-of-step update.
+Why this was flagged
+Under ReactantState, rtm.cache_valid is a traced array (radiation_cache_validity(::ReactantState) = on_architecture(arch, [false]), ext/BreezeReactantExt/Timesteppers.jl:78), and radiation_cache_is_valid(valid::AbstractArray) = @ allowscalar only(valid) returns a TracedRNumber{Bool} while tracing. update_radiation! (radiation_interface.jl:46) computes radiation_update_due(...) | !radiation_cache_is_valid(rtm). For a TracedClock, radiation_update_due returns a plain false at stages other than 2 (Timesteppers.jl:62), but the OR makes due traced. So conditionally_update_radiation!(due::TracedRNumber{Bool}, ...) (Timesteppers.jl:66) emits a traced conditional holding the full RRTMGP or ecCKD solve at stage 3, at the end-of-step update and at operator-split updates. On the base branch only the stage-2 update_state! carried that branch. Each compiled time step now holds several copies of the radiation graph, so compile time and program size grow for every Reactant radiation run. The cache is only invalid right after a checkpoint restore.
+Verification: radiation_interface.jl:46 now reads due = radiation_update_due(rtm.schedule, model.clock, model) | !radiation_cache_is_valid(rtm). So dispatch picks conditionally_update_radiation!(due::TracedRNumber{Bool}, ...) (Timesteppers.jl:67-71), which emits @ trace if due _update_radiation!(rtm, model) end. Results are not wrong.
+Comment thread
+src/AtmosphereModels/approximate_radiation_updates.jl
+Comment on lines
++72
+to
++73
+function approximate_radiation_updates(arch, grid, schedule, solar_position)
+schedule isa IterationInterval && schedule.interval == 1 && return nothing
+claude
+Bot
+Nov 5, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 (optional) Runs with a fixed sun and a constant surface temperature now do per-stage work that never changes the fluxes, and blocking host syncs, whenever radiation is scheduled. Examples are FixedCosineZenith with surface_temperature = 300 on IterationInterval(N>1) or a TimeInterval. approximate_radiation_updates returns nothing only for IterationInterval(1), so these models allocate six ZFaceFields. Every update_state! then runs a column kernel, the divergence kernel and a fused reduction whose result the host waits for. Fix: return nothing when the sun cannot move (FixedCosineZenith) and surface_temperature is a ConstantField.
+Why this was flagged
+approximate_radiation_updates (approximate_radiation_updates.jl:72-73) checks only schedule isa IterationInterval && schedule.interval == 1. With FixedCosineZenith, update_cos_zenith! is a no-op (solar_position.jl:280), and average_solve_cos_zenith! falls back to doing nothing, so μ₀ / μ̄₀ == 1 at every update. With a constant surface temperature, solves_longwave_response is false and ΔT⁴ == 0 in _update_radiation_between_solves!. Every update therefore rewrites the fluxes with their solved values. Even so, each non-solving update_state! calls update_radiation_between_solves!, which runs update_cos_zenith!, a mapreduce the host waits on (mapreduce(identity, |, daylight_solves; init=false)), _update_radiation_between_solves! and compute_radiation_flux_divergence!. On the base branch these steps did no radiation work between solves and allocated nothing extra. Users pick a sparse schedule to make radiation cheap, so the cost lands exactly where they wanted the savings, and it hurts most on GPU, where each reduction forces a device sync.
+Verification: approximate_radiation_updates.jl:73 returns nothing only for schedule isa IterationInterval && schedule.interval == 1. On the base branch, steps between solves did no radiation work. Now every RK stage pays one column kernel, one divergence kernel and one reduction with a blocking host sync, all with no change in results.
+kaiyuan-cheng
+requested a review
+from jason-aeolus
+November 5, 2026 21:48
+kaiyuan-cheng
+mentioned this pull request
+Nov 6, 2026
+Blend land and ocean surfaces in the Breeze RTM by ocean fraction
+NumericalEarth/NumericalEarth.jl#884
+Draft
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

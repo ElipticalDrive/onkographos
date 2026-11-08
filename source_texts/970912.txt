@@ -1,0 +1,433 @@
+A detailed voxel game set on a single spherical planet, built as a custom Rust + wgpu engine: sparse 8³ bricks, deterministic terrain, path-traced lighting, and a continuous zoom from the ground to orbit. - LOD rings on the GPU (#48) by theHimanshuShekhar · Pull Request #69 · theHimanshuShekhar/BhayanakVoxel
+
+LOD rings on the GPU (#48) by theHimanshuShekhar · Pull Request #69 · theHimanshuShekhar/BhayanakVoxel · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+theHimanshuShekhar
+commented
+Oct 30, 2026
+Copy link
+Copy Markdown
+Owner
+Closes #48.
+Stacked on #65 (the Material table, branch ticket-42). The two share renderer files. When #65 merges, GitHub retargets this PR to main. Bench #65 first, then this one.
+What changed
+Rings: a scene is a list of levels, where level n is mip n of the brick store (LOD pyramid in the brick store #43).
+Each level gets a 16³-region box centred on the camera, so ring n is 1024 << n Voxels wide.
+Box starts snap to even regions, so each box nests in the next.
+On the test sphere from the surface, the first three rings hold 116k, 142k and 114k bricks.
+GPU layout: still the same five bindings. The table is split per level, and regions, brick_refs and bricks are shared.
+The allocation is fixed: 65.7 MiB for 7 rings.
+Regions use a free list; words use a first-fit coalescing pool.
+The overlay shows planet memory: X of Y MiB.
+trace() and reference::trace: each level's box is walked, skipping the hole the finer ring covers, and the nearest hit wins.
+A ray starting inside a hole begins that level at the finer box's exit.
+Every point in space belongs to exactly one level, so there are no cracks.
+A coarse hit reports the level-0 Voxel on its entry face.
+Re-centring:
+Scene::recentre writes only regions entering or leaving a box. A small move writes 0 bytes.
+Hysteresis: a box stays put while the camera is in regions 6–9 of its 16. Jittering across a boundary costs nothing.
+Scene::update carries Edits into every ring and writes only the words that changed.
+A full pool is a RingsFull error that stops the client cleanly. It never panics.
+Client and bench: the client draws the Planet as 7 rings and re-centres every frame. The bench re-centres before each timed frame, outside the timings, as documented.
+Tests:
+GPU/CPU agreement on ring scenes: near, mid and far hits, plus rays from coarse rings heading inward.
+Agreement at 5 cameras from the surface to orbit.
+Upload bytes per move.
+Bounded memory on a surface→orbit flight.
+7500 rays that never reach the sky where the Planet has ground.
+A 4000-step nesting and hysteresis sweep.
+Tiny-pool error paths.
+New goldens: planet_rings_{surface,horizon,orbit}_256x144.png. The surface one matches the old single-level golden within tolerance. No existing golden changed.
+Review: Opus /code-review found no blockers and confirmed the cross-level trace, the hole and nesting logic, and the pool and patching. It requested two fixes, both applied: hysteresis (jitter was re-packing every frame at 11–13 ms) and a panic when an Edit overflowed the rings.
+Known, deferred to #49: moving a ring is still a one-frame hitch on the UI thread. Release numbers on the whole test Planet: a mean of about 25 ms per move, worst about 63 ms. Moves happen about every 64–512 Voxels of travel. Packing off the UI thread is #49's acceptance criterion. The bench doesn't time it.
+Checks: fmt and clippy -D warnings are clean, cargo t --workspace passes on lavapipe (rings.rs takes about 47 s because it generates the whole test Planet), and the server dependency check is clean.
+Benchmark: needs-benchmark. primary is expected to change, because each ray now walks up to 7 levels, though it skips hole regions. No budget line changes. Please bench after #65.
+theHimanshuShekhar
+added 4 commits
+October 30, 2026 08:27
+Merge remote-tracking branch 'origin/ticket-42' into ticket-48
+d8c2ea4
+LOD rings on the GPU (#48)
+4a9738a
+LOD rings: hysteresis, no panic when full, hole start (#48 review)
+c2860f9
+Merge remote-tracking branch 'origin/main' into ticket-48
+…
+7f2c55b
+```
+# Conflicts:
+#	Cargo.lock
+#	crates/planet-gen/Cargo.toml
+```
+theHimanshuShekhar
+added
+the
+needs-benchmark
+Touches rendering or performance: the dev runs bhayanak bench on the PR's Windows artifact
+label
+Oct 30, 2026
+theHimanshuShekhar
+mentioned this pull request
+Oct 30, 2026
+Full-size Planet from the world map (#45)
+#70
+Merged
+theHimanshuShekhar
+commented
+Oct 30, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Bench on the RTX 4090 (the dev ran this PR's artifact, build 6ec3477): over budget, so the merge is blocked.
+pass
+mean
+p95
+max
+budget
+main baseline (mean)
+primary
+0.929 ms
+2.399 ms
+3.822 ms
+1.0 ms
+0.323 ms
+reference (per sample)
+3.192 ms
+6.473 ms
+10.757 ms
+3.0 ms, over
+0.944 ms
+Walking the LOD rings costs about 2.8× on primary and 3.4× on reference compared with the single-level scene. primary is only just within budget on the mean, and its p95 is 2.4×. This needs an optimisation pass on the cross-level trace() before merge.
+The orbit screenshots also show a visual problem: the coarse rings turn the Planet's surface grey, as moiré-like rock patches. The 4-Voxel soil layer loses the majority vote to the rock below it at coarse levels.
+theHimanshuShekhar
+changed the base branch from
+ticket-42
+to
+main
+October 30, 2026 22:08
+This was referenced Oct 30, 2026
+LOD Material: prefer the exposed surface
+#79
+Closed
+Half-res tracing and TAAU upscale (#51)
+#80
+Merged
+Merge remote-tracking branch 'origin/main' into ticket-48
+f507261
+This was referenced Oct 30, 2026
+Generate bricks directly at any LOD level (#47)
+#82
+Merged
+Technique catalogue: extreme optimization without losing fidelity
+#81
+Closed
+theHimanshuShekhar
+commented
+Oct 30, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Bench on the RTX 4090
+client-windows from CI run 41053531968, merge commit 6ec3477 (head 7f2c55b). client.exe bench --out bench-out, 1280x720, planet-flyover-v1, 240 primary frames / 60 reference frames, embedded budgets. Two consecutive runs, no other GPU work.
+pass
+budget ms
+run 1 mean
+run 2 mean
+worst p95
+status
+primary/primary
+1.00
+0.750
+0.625
+1.694
+within
+primary/gpu_total
+8.60
+0.750
+0.625
+1.694
+within
+primary/frame (cpu)
+—
+6.614
+6.448
+8.172
+context
+reference/reference
+3.00
+3.963
+3.826
+9.228
+over
+reference/gpu_total
+3.00
+3.963
+3.826
+9.228
+over
+reference/frame (cpu)
+—
+23.393
+22.600
+44.980
+context
+Same machine, same session, main benchmarked as the baseline: primary 0.320–0.322 ms, reference 0.880–0.899 ms.
+Exit status 2 — over budget: reference/gpu_total, reference/reference. Per #13 a pass over its budget blocks the merge.
+Conditions: the desktop's live wallpaper was stopped for these runs — it held the GPU at about 30% and swung earlier measurements by up to 40%. With it stopped, two back-to-back runs agree within a few percent.
+This was referenced Oct 30, 2026
+LOD bands: each brick's level from its distance
+#84
+Closed
+Clip rays to the Planet's bounding sphere
+#85
+Closed
+LOD rings: clip each level to its occupied box, stop after the neares…
+…
+2ed1bb4
+```
+…t hit (#48 bench)
+```
+theHimanshuShekhar
+commented
+Oct 30, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Bench on the RTX 4090: head 2ed1bb4 (the trace optimisation)
+The orchestrator ran this over SSH on the dev's PC.
+Build: client-windows from this PR's CI run (merge build 2b2167e).
+Command: client.exe bench, 1280x720, planet-flyover-v1, embedded budgets.
+Runs: six, in two sets of three.
+run
+primary mean
+primary p95
+reference mean
+reference p95
+reference max
+reference status
+A1
+0.631
+1.082
+2.691
+4.644
+8.14
+within
+A2
+0.595
+1.442
+2.645
+4.654
+9.44
+within
+A3
+0.589
+1.028
+3.162
+12.719
+14.22
+over
+B1
+0.509
+0.926
+3.150
+13.136
+14.57
+over
+B2
+0.479
+0.950
+3.212
+4.372
+12.79
+over
+B3
+0.453
+0.948
+2.538
+3.411
+5.88
+within
+primary is within budget in every run: 0.45–0.63 ms mean, down from 0.63–0.75 ms before this commit. Main is at 0.32 ms.
+reference is on the budget line. Its mean is 2.54–3.21 ms (median about 2.9) against 3.0, down from 3.83–3.96 ms before this commit. Main is at 0.88 ms. Three runs are under and three over.
+The runs are noisy. Runs A3 and B1 have a reference p95 of 12–13 ms against 3.4–4.7 ms in the others, which looks like stalls from other GPU work. Desktop apps were running during these runs: Chrome, Discord, Steam and the Riot client. GPU load was 1% before each set.
+Verdict: not a clear pass. needs-benchmark stays. The next step is to measure the step counts of the reference pass's own rays (bounces and shadow rays, not only primary rays) and cut what they walk. Clipping to the bounding sphere (Clip rays to the Planet's bounding sphere #85) is the likely candidate.
+LOD rings: fix a false hit past the occupied box, clip rays to the bo…
+…
+6271a2b
+```
+…unding sphere (#48 review, #85)
+```
+theHimanshuShekhar
+commented
+Oct 31, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Bench on the RTX 4090: head 6271a2b (review fixes and the bounding-sphere clip): within budget
+The orchestrator ran this over SSH on the dev's PC.
+Build: client-windows from this PR's CI run (merge build 6c79331).
+Command: client.exe bench, 1280x720, planet-flyover-v1, embedded budgets.
+Runs: five. GPU load was 0% before the first.
+run
+primary mean
+primary p95
+reference mean
+reference p95
+reference max
+status
+1
+0.387
+0.770
+2.087
+2.791
+3.01
+within
+2
+0.242
+0.634
+2.089
+2.798
+2.92
+within
+3
+0.302
+0.716
+2.770
+6.339
+13.07
+within
+4
+0.373
+0.736
+2.497
+6.430
+6.56
+within
+5
+0.430
+0.776
+2.495
+12.089
+13.20
+within
+pass
+2ed1bb4
+6271a2b
+budget
+main
+primary (mean)
+0.45–0.63 ms
+0.24–0.43 ms (median 0.37)
+1.0
+0.32
+reference (mean)
+2.54–3.21 ms
+2.09–2.77 ms (median 2.50)
+3.0
+0.88
+Every run is within budget, and the report's budget check passed in all five.
+Runs 3–5 have reference p95 and max spikes of 6–13 ms that runs 1–2 don't (2.8–3.0 ms max). Desktop apps were open on the PC, so these look like interference.
+Screenshots look normal: no streaks, no holes.
+needs-benchmark is removed. The merge still waits for an Opus re-review of 6271a2b, which is rate-limited right now.
+theHimanshuShekhar
+removed
+the
+needs-benchmark
+Touches rendering or performance: the dev runs bhayanak bench on the PR's Windows artifact
+label
+Oct 31, 2026
+LOD rings: pad the sphere clip by the coarsest Voxel's diagonal (#48 …
+…
+8e0f8ee
+```
+…review)
+```
+theHimanshuShekhar
+commented
+Oct 31, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Bench on the RTX 4090: head 8e0f8ee (sphere clip padded for coarse Voxels): within budget
+Five runs, by the orchestrator over SSH, same setup as before (embedded budgets, planet-flyover-v1, 1280x720).
+run
+primary mean
+primary p95
+reference mean
+reference p95
+1
+0.628
+0.988
+2.339
+3.19
+2
+0.309
+0.761
+2.344
+3.18
+3
+0.375
+0.806
+2.824
+7.72
+4
+0.490
+0.895
+2.803
+7.22
+5
+0.454
+0.894
+2.342
+3.20
+Medians: primary 0.45 ms (budget 1.0), reference 2.34 ms (budget 3.0). The report's budget check passes in all five runs.
+The wider clip costs reference a little: 6271a2b measured 2.09–2.77 ms. Runs 3 and 4 have the same p95 spikes as before, which look like desktop apps on the PC. These runs still read back every frame; #80 moves the bench to back-to-back frames.
+Review status: the Opus re-review found the clip too tight for coarse Voxels, and padding by the coarsest Voxel's diagonal fixes it. The reviewer verified that approach, and clipping_to_the_bounding_ball_does_not_cut_into_coarse_voxels_at_the_limb tests it. This PR also delivers #85 (bounding-sphere clip).
+Merge branch 'main' into ticket-48
+ddbf2f4
+Hide details
+View details
+theHimanshuShekhar
+merged commit 40a8bcb
+into
+main
+Oct 31, 2026
+7 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+theHimanshuShekhar
+deleted the
+ticket-48
+branch
+October 31, 2026 06:13
+This was referenced Oct 31, 2026
+Brushes: dig, place, smooth and flatten
+#60
+Closed
+M1a: Walk the Planet
+#41
+Open
+LOD bands: each brick's level from its distance (#84)
+#92
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

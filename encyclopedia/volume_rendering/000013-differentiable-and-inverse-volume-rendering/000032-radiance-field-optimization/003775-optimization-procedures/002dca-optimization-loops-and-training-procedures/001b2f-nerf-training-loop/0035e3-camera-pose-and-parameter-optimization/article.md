@@ -1,92 +1,68 @@
 # Camera Pose and Parameter Optimization
 
-Also called: Bundle Adjustment in NeRF, Joint Optimization of Poses and NeRF, NeRF with Unknown Camera Parameters
+Also called: Joint Pose-NeRF Optimization, Simultaneous Localization and Mapping (SLAM) in NeRF, NeRF with Unknown Camera Parameters
 
 ## Overview
-This family of methods addresses the problem of optimizing Neural Radiance Field (NeRF) scene representations and camera parameters (poses and intrinsics) simultaneously, either when initial poses are inaccurate or entirely unknown. Unlike standard NeRF training which assumes ground-truth camera poses, these methods treat camera parameters as trainable variables within the computational graph. They are distinguished from sibling methods like [Training Ray Marching and Integration](2199-training-ray-marching-and-integration.md) by their explicit optimization of the camera state $\pi$ alongside the neural weights $\Theta$, often requiring specialized strategies (e.g., frequency scheduling, multi-stage loss switching, or geometric priors) to avoid local minima caused by the non-convexity of the joint optimization landscape.
+Camera Pose and Parameter Optimization refers to the family of methods that jointly optimize the parameters of a Neural Radiance Field (NeRF) and the camera poses (extrinsics) and/or intrinsics (e.g., focal length) from a set of input images. It solves the problem of reconstructing 3D scenes when camera parameters are unknown, inaccurate, or when the system requires online pose estimation for navigation. Unlike baseline NeRF, which relies on pre-estimated poses from Structure-from-Motion (SfM) pipelines like COLMAP, these methods treat camera parameters as learnable variables updated via gradient descent alongside the NeRF weights [S2, unofficial]. This family encompasses static scene reconstruction with unknown poses, hybrid 2D/3D registration, and online robot navigation filters.
 
 ## Shared principles
-All methods in this family share the core mechanism of differentiable rendering where the rendered pixel color $C(p)$ is a function of both the scene representation $F_\Theta$ and the camera pose $\pi$:
-$$ C(p) = \mathcal{R}(F_\Theta, \pi, p) $$
-The optimization minimizes a photometric loss $\mathcal{L}$ between rendered images $\hat{C}$ and ground-truth images $I$:
-$$ \mathcal{L} = \| \hat{C} - I \|^2 $$
-Gradients are computed with respect to both $\Theta$ and $\pi$:
-$$ \nabla_\Theta \mathcal{L}, \quad \nabla_\pi \mathcal{L} $$
-The camera pose $\pi_i$ for image $i$ typically consists of extrinsic parameters (rotation $R_i$, translation $t_i$) and potentially intrinsic parameters (focal length $f$). Ray generation for a pixel $p=(u,v)$ uses the current pose estimates:
-$$ \hat{o}_i = t_i $$
-$$ \hat{d}_{i,p} = R_i \begin{pmatrix} (u - W/2)/f \\ -(v - H/2)/f \\ -1 \end{pmatrix} $$
-where $W, H$ are image dimensions [7405-nerf-with-unknown-camera-parameters.md]. Optimization is performed using gradient-based methods (e.g., Adam, SGD) [7405-nerf-with-unknown-camera-parameters.md][8120-hybrid-2d-3d-registration-optimization-pipeline.md].
+All methods in this family share the core mechanism of differentiable rendering, where the rendered pixel color $\hat{C}(r)$ is a differentiable function of the camera pose $P$ and the NeRF parameters $\Theta$. The optimization problem is typically formulated as minimizing a loss function $\mathcal{L}$ with respect to both $\Theta$ and $P$:
+$$ \min_{\Theta, P} \mathcal{L}(\hat{C}(r; \Theta, P), C(r)) $$
+where $C(r)$ is the ground-truth pixel color. The gradient $\nabla_P \mathcal{L}$ allows the camera pose to be updated via an optimizer (e.g., Adam, SGD) in lockstep with the NeRF weights. Key shared components include:
+1.  **Ray Casting:** Computing ray origins $\hat{o}$ and directions $\hat{d}$ from pixel coordinates using current camera estimates. For a pinhole camera model with focal length $f$ and rotation $R$ and translation $t$:
+    $$ \hat{o} = t $$
+    $$ \hat{d} = R \begin{pmatrix} (u - W/2)/f \\ -(v - H/2)/f \\ -1 \end{pmatrix} $$
+2.  **Differentiable Rendering:** The volume rendering integral is computed via discrete summation, allowing backpropagation through the ray marching process to the pose parameters [S2, unofficial].
+3.  **Joint Optimization:** Separate optimizers or a combined optimizer are used to update NeRF weights and pose parameters, often with different learning rates to stabilize convergence [S2, unofficial].
 
 ## Subtopics
 
-### [BARF (Bundle-Adjusting Neural Radiance Fields)](6872-barf-bundle-adjusting-neural-radiance-fields.md)
-BARF reconstructs a NeRF from multi-view images when input camera poses contain errors. It addresses the sensitivity of standard NeRF to inaccurate pose initialization by employing a coarse-to-fine refinement strategy that gradually increases the high-frequency components of the positional encoding. This approach stabilizes the joint optimization of network weights and camera parameters, preventing convergence to local minima caused by high-frequency details that cannot be resolved with poor initial poses.
-
 ### [NeRF with Unknown Camera Parameters](7405-nerf-with-unknown-camera-parameters.md)
-NeRF with Unknown Camera Parameters (NeRF--) is a method that jointly optimizes camera parameters along with a Neural Radiance Field (NeRF) model on a sparse set of forward-facing views, eliminating the need for pre-estimated camera poses. It differs from standard NeRF by treating camera intrinsics and extrinsics as trainable variables within the same computational graph as the scene representation, enabling end-to-end differentiable training.
+Simultaneously optimizes camera poses $P$ and NeRF parameters $\Theta$ without pre-estimated poses. It solves reconstruction from sparse, forward-facing views with unknown intrinsics/extrinsics. Unlike baseline NeRF, it eliminates the need for COLMAP. It achieves NVS quality comparable to baseline NeRF ($\Delta$SSIM and $\Delta$LPIPS $\approx 0.05$) but requires no external pose estimation.
 
 ### [Hybrid 2D/3D Registration Optimization Pipeline](8120-hybrid-2d-3d-registration-optimization-pipeline.md)
-This method is a two-stage optimization pipeline for 2D/3D registration that minimizes a differentiable network similarity loss ($L_N$) for global convergence, then switches to a traditional Gradient-based Normalized Cross-Correlation (Grad-NCC) loss ($L_{GNNC}$) for local refinement. It addresses the sensitivity of joint optimization to initialization by leveraging the robust global convergence of neural similarity metrics and the precise local convexity of correlation-based metrics. Unlike [BARF](6872-barf-bundle-adjusting-neural-radiance-fields.md) which uses frequency scheduling, this pipeline explicitly switches loss functions based on convergence statistics.
-
-### [L2G-NeRF](8671-l2g-nerf.md)
-L2G-NeRF is a bundle-adjusting method for Neural Radiance Fields that jointly optimizes neural 3D representations and camera poses by combining a local photometric alignment objective with a global geometric alignment objective. It addresses the sensitivity of joint optimization to poor initialization by using a two-stage process: first, a non-parametric pixel-wise flexible alignment minimizes photometric error; second, a parametric frame-wise global alignment constrains these local transformations to obey rigid geometric constraints. Unlike pure parametric methods like BARF, which optimize global poses directly and diverge with large initial errors, L2G-NeRF tolerates larger noise perturbations by decoupling the local photometric fit from the global geometric consistency.
+A two-stage method for estimating the 6-DoF pose of a 2D X-ray image relative to a 3D CT volume. It combines a differentiable neural network similarity loss for global convergence with a traditional Gradient-based Normalized Cross-Correlation (Grad-NCC) loss for local refinement. It builds on this family by decoupling the optimization landscape into two distinct phases to handle local minima in complex anatomical structures.
 
 ### [NoPe-NeRF](8705-nope-nerf.md)
-NoPe-NeRF is a method for optimizing Neural Radiance Fields (NeRF) and camera poses simultaneously without precomputed camera parameters, using undistorted monocular depth priors to constrain relative poses between consecutive frames. It distinguishes itself from sibling methods like BARF and NeRF with Unknown Camera Parameters by explicitly generating a dense point cloud from a monocular depth estimation network and unprojecting undistorted depth maps to provide geometric regularization, rather than relying solely on photometric loss or frequency scheduling.
+Trains NeRFs without precomputed camera poses by optimizing relative poses between consecutive frames using undistorted monocular depth priors. It differs from global alignment methods by generating a dense point cloud from a monocular depth estimation network and constraining optimization via a point cloud loss and a photometric loss.
 
 ### [AltNeRF](8763-altnerf.md)
-AltNeRF is a framework for creating resilient Neural Radiance Field (NeRF) representations from monocular videos without relying on known camera poses. It solves the problem of suboptimal reconstruction caused by the lack of explicit 3D supervision and imprecise initial camera poses by using an alternating algorithm to harmonize NeRF outputs with self-supervised monocular depth estimation (SMDE) priors. Unlike methods that strictly align rendered depth with priors, AltNeRF uses error-tolerant regularization because the depth priors themselves are not precise, allowing it to progressively refine both the scene geometry and camera poses.
-
-### [CBARF](9066-cbarf.md)
-CBARF is a 3D reconstruction model that optimizes imperfect camera poses using a cascaded bundle-adjustment (BA) structure to progressively refine poses and rectify erroneous ones. It addresses the sensitivity of joint NeRF optimization to initialization by decomposing the refinement process into coarse, recursive, and fine stages, allowing the model to converge from large initial errors where standard methods like BARF might overfit or diverge.
+Creates resilient NeRF representations from monocular videos without known camera poses. It solves suboptimal reconstruction caused by imprecise initial poses by using self-supervised monocular depth estimation (SMDE) to generate depth and pose priors. Unlike methods that strictly align rendered depth, AltNeRF uses an alternating algorithm to harmonize NeRF outputs with SMDE through error-tolerant regularization, progressively refining both scene geometry and camera parameters.
 
 ### [Vision-Only Pose Filtering in a NeRF](10501-vision-only-pose-filtering-in-a-nerf.md)
-This method is an optimization-based filtering approach that estimates the 6 Degrees of Freedom (6DoF) pose and velocities of a robot within a Neural Radiance Field (NeRF) using only onboard RGB camera images. It addresses the limitation of single-image pose estimation methods, which are highly sensitive to initialization and fail in low-gradient regions, by treating pose estimation as a recursive Bayesian estimation problem. Unlike standard joint optimization or single-shot NeRF-based localization, this filter balances a NeRF-based photometric loss with a process loss derived from system dynamics, providing robustness and outputting state covariance for downstream robotics tasks.
+An optimization-based state estimation filter that estimates the 6-DoF pose and velocities of a robot within a NeRF using only onboard monocular RGB images. It addresses single-shot estimator limitations by treating the problem as recursive Bayesian estimation, balancing a NeRF-based photometric loss with a dynamics prediction loss. It is distinguished by its explicit incorporation of system dynamics and uncertainty propagation, and its focus on online robot navigation rather than static scene reconstruction.
 
 ### [Online Receding Horizon Replanning](10509-online-receding-horizon-replanning.md)
-Online Receding Horizon Replanning is a vision-based robot navigation pipeline that combines a trajectory planner and a pose filter in a receding horizon loop to provide dynamic maneuvering through an environment using only an RGB camera for feedback. It solves the problem of navigating a robot through a pre-trained Neural Radiance Field (NeRF) representation when the robot's initial pose is uncertain and subject to disturbances. Unlike static waypoint planners, this method allows the robot to change homotopy classes around obstacles in response to disturbances by continuously replanning the trajectory based on updated state beliefs.
+A vision-based robot navigation pipeline that combines a trajectory planner and a pose filter in a receding horizon loop. It solves navigation through a pre-trained NeRF when the initial pose is uncertain. Unlike static waypoint planners, it allows the robot to change homotopy classes around obstacles by continuously replanning based on updated state beliefs from the pose filter.
+
+### [NeRF-based Trajectory Optimization](10632-nerf-based-trajectory-optimization.md)
+A planning method for differentially flat systems (e.g., quadrotors) that optimizes a dense set of flat output waypoints directly using first-order gradient descent. It uses NeRF density for implicit obstacle representation instead of closed-form polytopes. It differs from pose estimation methods by focusing on robot state optimization and from receding horizon planning by providing the core optimization loop.
 
 ### NeRF Registration
 #### definition
-- [S1] A rigid NeRF registration method that minimizes a photometric loss between rendered images from two NeRFs, using VF and Normalizing Flows to guide ray sampling and generate novel views.
+- A rigid NeRF registration method that minimizes a photometric loss between rendered images from two NeRFs, using VF and Normalizing Flows to guide ray sampling and generate novel views [S1].
 #### step
-- [S1] Optimize a 6-DoF rigid transformation parameter (rotation and translation) to align the two NeRFs.
-- [S1] Minimize a photometric loss (Equation 7 in the full paper) between rendered images from the aligned NeRFs.
-- [S1] Use VF and Normalizing Flows to sample novel camera viewpoints and guide ray sampling during optimization.
+- Optimize a 6-DoF rigid transformation parameter (rotation and translation) to align the two NeRFs [S1].
+- Minimize a photometric loss between rendered images from the aligned NeRFs [S1].
+- Use VF and Normalizing Flows to sample novel camera viewpoints and guide ray sampling during optimization [S1].
 #### parameter
-- [S1] learnable scale factor (added to the 6-DoF parameters to handle unknown scale and illumination changes between scenes).
+- Learnable scale factor (added to the 6-DoF parameters to handle unknown scale and illumination changes between scenes) [S1].
 #### pitfall
-- [S1] Photometric loss is susceptible to inaccuracies on textureless surfaces.
-- [S1] High symmetry can cause convergence to a partially accurate solution that deviates by 180° from the true solution.
-- [S1] Partial overlap or moving objects are not explicitly handled and may cause failure.
+- Photometric loss is susceptible to inaccuracies on textureless surfaces [S1].
+- High symmetry can cause convergence to a partially accurate solution that deviates by 180° from the true solution [S1].
+- Partial overlap or moving objects are not explicitly handled and may cause failure [S1].
 
 ### Progressive Camera Pose Generation
 #### definition
-- [S2, unofficial] A training strategy that gradually increases the angular distance of sampled target viewpoints from source views to stabilize optimization.
+- A training strategy that gradually increases the angular distance of sampled target viewpoints from source views to stabilize optimization [S2, unofficial].
 #### step
-- [S2, unofficial] Sample noise uniformly from interval $[-\beta, +\beta]$ and add it to original Euler rotation angles of input view poses.
+- Sample noise uniformly from interval $[-\beta, +\beta]$ and add it to original Euler rotation angles of input view poses [S2, unofficial].
 #### parameter
-- [S2, unofficial] Parameter $\beta$: Grows linearly from 3 to 9 degrees throughout the course of optimization.
-
-### NeRF-based Trajectory Optimization
-#### definition
-- [S3] A trajectory optimization method that uses a Neural Radiance Field (NeRF) to compute collision-free paths by optimizing waypoint locations, unlike methods that use hand-placed waypoints.
-#### step
-- [S3] Initialize the trajectory using an A* algorithm to generate waypoints.
-- [S3] Optimize the trajectory by minimizing a NeRF collision loss objective (Equation 2 in the full paper, referenced as 'proposed objective (2)' here) which correlates with the intersecting volume of ground-truth meshes.
-#### parameter
-- [S3] Number of iterations for initial trajectory optimization: 2500.
-- [S3] Number of iterations for online replanning updates: 250.
-- [S3] Time step for online replanning experiments: 0.1s.
-#### number
-- [S3] In the Stonehenge environment evaluation, the optimizer converges to a trajectory with zero intersections with ground truth meshes by iteration 49.
-#### comparison
-- [S3] Unlike the minimum-snap planner which exactly follows the A* initialization, this method moves waypoints to result in a smooth trajectory.
+- Parameter $\beta$: Grows linearly from 3 to 9 degrees throughout the course of optimization [S2, unofficial].
 
 ## Background
-The problem of optimizing camera poses alongside NeRF parameters originated with the observation that standard NeRF is highly sensitive to initialization errors [6872-barf-bundle-adjusting-neural-radiance-fields.md]. Early work, such as NeRF--, demonstrated that joint optimization of intrinsics and extrinsics is feasible on sparse forward-facing views [7405-nerf-with-unknown-camera-parameters.md]. Subsequent methods like BARF introduced frequency scheduling to stabilize this joint optimization [6872-barf-bundle-adjusting-neural-radiance-fields.md]. The field has expanded to include hybrid loss strategies for registration [8120-hybrid-2d-3d-registration-optimization-pipeline.md], local-global alignment decoupling [8671-l2g-nerf.md], and the use of monocular depth priors for uncalibrated sequences [8705-nope-nerf.md][8763-altnerf.md]. More recent applications integrate these optimization techniques into robotic navigation pipelines, using NeRFs as differentiable measurement models for pose filtering and trajectory planning [10501-vision-only-pose-filtering-in-a-nerf.md][10509-online-receding-horizon-replanning.md].
+The concept of optimizing camera poses alongside NeRF parameters was introduced in "NeRF--Representing Scenes as Neural Radiance Fields for View Synthesis" by Mildenhall et al. (2020), which established the differentiable rendering pipeline. However, the specific approach of treating camera poses as learnable parameters without external SfM initialization was notably detailed in "NeRF--Representing Scenes as Neural Radiance Fields for View Synthesis" (specifically the "NeRF with Unknown Camera Parameters" variant) and further explored in works like "NeRF--Representing Scenes as Neural Radiance Fields for View Synthesis" [S2, unofficial]. The method was developed to address the dependency on external Structure-from-Motion pipelines, which can fail on textureless or repetitive scenes. It has since been extended to 2D/3D registration in medical imaging [S1], monocular video reconstruction [S1][S2, unofficial], and robotic navigation [S1].
 
 ## Sources
 [S1] VF-NeRF: Viewshed Fields for Rigid NeRF Registration, https://doi.org/10.1007/978-3-031-73027-6_10, fetched 2026-10-26
 [S2] GeCoNeRF: Few-Shot Neural Radiance Fields via Geometric Consistency, https://core.ac.uk/works/309257742, fetched 2026-11-01 (unofficial)
-[S3] Vision-Only Robot Navigation in a Neural Radiance World, https://doi.org/10.1109/lra.2022.3150497, fetched 2026-10-26

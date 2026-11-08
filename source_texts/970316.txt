@@ -1,0 +1,534 @@
+Contribute to taojin-6/volumetric_kit_recon development by creating an account on GitHub.
+
+feat(timing): time the extract and the decode's grid edits on core 0.20.0's rows by taojin-6 · Pull Request #272 · taojin-6/volumetric_kit_recon · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+taojin-6
+commented
+Oct 23, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Wave 1, PR 3 of the data-flow plan (plan v2, row 3): R0 of the design. It
+times what recon left untimed, inside today's submits, and moves recon's rows
+onto core 0.20.0's timing. It changes no data flow: the same submits, waits
+and results.
+Headers first
+The first commit (00090d1e) declares the API; the code follows it. The
+review round added compact_active_blocks_on_device's row (75c51bb8).
+```
+// mesh/marching_cubes.hpp
+/// metrics: a "marching cubes" row (host, wait, device: the whole call) over
+/// the rows of the phases ExtractTimings names alike: "  ..compact" (the
+/// map's compaction, when its last list no longer holds) and "  ..dispatch"
+/// (each attempt's submit). nullptr writes no timestamp and makes no timer.
+core::Result<DeviceMesh> extract_device(
+    volume::VoxelBlockGrid& grid, float iso = 0.0f,
+    ExtractTimings* timings = nullptr, core::StageMetrics* metrics = nullptr);
+core::Result<DeviceMesh> extract_device(
+    volume::VoxelBlockGrid& grid, float iso,
+    const volume::DeviceBlockList& blocks, ExtractTimings* timings = nullptr,
+    core::StageMetrics* metrics = nullptr);  // no "  ..compact"
+
+// volume/voxel_hash_map.hpp
+/// stage: the caller's scope, open across the call, whose tile every
+/// round's commands count to; null or inert times nothing.
+core::Result<std::uint32_t> allocate(const core::Buffer& coords,
+                                     std::uint32_t count,
+                                     AllocFailures* out_failures = nullptr,
+                                     core::GpuStageScope* stage = nullptr);
+core::Result<std::uint32_t> remove(
+    const core::Buffer& coords, std::uint32_t count,
+    AllocFailures* out_failures = nullptr,
+    const std::function<core::Status(core::CommandBatch&)>& first_round = {},
+    core::GpuStageScope* stage = nullptr);
+/// row: the row's name instead of "active set", for a stage whose
+/// compaction must stay apart from another stage's in one StageMetrics.
+core::Result<DeviceBlockList> compact_active_blocks_on_device(
+    core::StageMetrics* metrics = nullptr, const char* row = nullptr);
+
+// volume/voxel_block_grid.hpp
+/// stage: as VoxelHashMap::allocate's; the zeroing and every round of the
+/// removal count to it.
+core::Result<std::uint32_t> remove(const core::Buffer& coords,
+                                   std::uint32_t count,
+                                   AllocFailures* out_failures = nullptr,
+                                   core::GpuStageScope* stage = nullptr);
+/// create: a grid with attributes also builds the kernels remove and
+/// free_stale_blocks run, so neither compiles a pipeline on its first call.
+```
+Rows that change without a signature change:
+Decoder::decode's breakdowns " ..rans decode", " ..apply" and
+" ..inverse" each carry host, wait and device halves, and tile
+"codec decode". " ..apply" holds the grid's zeroing, hash deletes and
+allocations, every round. These were untimed, yet "codec decode" read as
+measured without them. " ..inverse" also holds main's deblock, which
+runs in its submit (see "Merge with feat(codec): Decoder::set_deblock, the decoder-side deblock on the device #264 and feat(codec): the deblock skips a frame only past half its blocks masked #273").
+TsdfIntegrator::allocate_and_integrate, a Fuser's steady state,
+reports its allocation round as "integrate"'s " ..allocate"
+breakdown, where it was a top-level "allocate" row.
+Merge with #264 and #273
+Main gained the decoder-side deblock (#264: Decoder::set_deblock runs the
+deblock in the decode's last submit, and Decoder::rebuild runs it again)
+and its gate (#273: a frame is skipped only when more than half its blocks
+are masked). 68cb0644 merges main at 221ac91f. CHANGELOG.md,
+codec/decoder.hpp and codec/decoder.cpp conflicted, and each was
+resolved as the union of both PRs; main's deblock code is unchanged.
+How the deblock is timed: inside " ..inverse", as main has it.
+reconstruct() records the inverse transform, the deblock's passes and the
+count readback under the scope it is given, all in one submit. In a decode
+that scope is " ..inverse"; in a rebuild it is "codec decode". With the
+deblock on, a decode still reports "codec decode" over exactly three
+breakdowns, and those three tile it.
+The merge commit first gave the deblock a " ..deblock" row of its own: a
+nested scope whose device time was subtracted from " ..inverse". Review
+found two problems with it. It changed main's documented rows and main's
+test inside a merge commit. And it showed a row even on frames the gate
+skips. 4574fbb8 returns to main's contract. Whether the deblock gets a row
+of its own is for the owner to decide, as a follow-up.
+Tests. recon_codec_deblock's rows_case is main's (four rows with the
+deblock on). Where the device can be timed, it now also checks that every
+breakdown is measured, that the breakdowns sum to "codec decode" within
+1e-9 ms, and that total_gpu_ms equals it.
+Lab (RTX 4090, Release, warnings as errors, core 0daced5 fetched,
+VKC_REQUIRE_VULKAN_DEVICE=1 VKC_TEST_VALIDATION=1, the three config entries
+excluded):
+The full suite passed, 95/95.
+With VKC_TEST_SYNC_VALIDATION=1 added, the 22 codec and timing tests
+passed, 22/22. That set is every recon_codec_* test,
+recon_tier_stage_metrics, recon_volume_block_grid,
+recon_volume_block_stamps, recon_mesh_marching_cubes_sparse,
+recon_example_stage_table, recon_example_codec_stream and
+recon_sensor_picture_readback_oom.
+With the deblock on (LG), the fixture's decode read 1.068 ms on the device,
+of which " ..inverse" was 0.053 ms.
+What and why
+The owner asked: "I want timing to be comprehensive and correct."
+Core 0.20.0's timing, adopted. A timed batch tiles its device time, so
+a stage holds every command recorded inside it, and a tile counts to every
+scope open around its tag. Both totals now skip breakdowns. This reverses
+recon's 2026-08-10 rule, which counted breakdowns in total_gpu_ms
+because no parent held a dispatch's span. The rows also carry wait_ms
+and DeviceTime. recon needs core 0.20.0 (VR_CORE_MIN_VERSION), the one
+floor of its libraries, examples, tests and viewers.
+Two breakdowns of one blocking submit nest. A blocking submit credits
+the scopes open at it, and two open at once nest. The fused set's round
+opens inside the compaction's scope, so the compaction's tiles hold the
+round's. The integrator takes them off, which is exact because the two
+tile one submit. As a top-level "allocate", the round would be counted
+twice, because "integrate" holds it.
+The extract is timed: "marching cubes" over " ..compact" and
+" ..dispatch". The command reset rides the dispatch's tile, and a
+grow's identity fill the stage's. The rows are named after the
+ExtractTimings phases they time, not the design's mesh/..compact/
+..mc: "mesh" is the player's own row around the call, and
+" ..dispatch" is the attempt's whole submit. The compaction is
+" ..compact" because the map's " ..active set" would merge with a
+fuse's or an encode's compaction timed into the same metrics. DECISIONS
+records this.
+No query pool until a call is timed. An extractor, and a grid for its
+block pass, make their GpuTimer at the first call a caller times, not at
+create. MoltenVK backs each pool with a Metal counter sample buffer, of
+which a device has few: with a pool per extractor and per grid,
+recon_mesh_marching_cubes_sparse (33 grids, 14 extractors) ran the macOS
+runner out of them, and past that MoltenVK emulates timestamps while the
+timer still reads available.
+The decode's grid edits are timed: the grid's removal and the map's
+allocation tag the decoder's " ..apply" scope in every round.
+No pipeline build at the first remove. VoxelBlockGrid::create builds
+the block kernels for a grid with attributes. Before, a player's first
+P-frame and a rig's first garbage collection compiled two pipelines inside
+the frame.
+The examples print what the rows hold. The stage table shows host
+busy, wait and device, with n/t and n/a. A codec row's device column is
+unset unless every stage with a device half was measured.
+The picture-readback OOM test was fixed for the core bump. Its injected
+failure landed on the last allocation of GpuTimer::create. Under core
+0.20.0 that allocation sits inside the validation layer's
+vkCreateQueryPool, where a throw leaks the driver's pool. The failure now
+lands on the reader's own allocation.
+DECISIONS.md records the 2026-10-23 entry. Its index entry, and the
+2026-08-10 entry, are marked reversed. DESIGN.md's timing contract, volume
+and mesh sections, and the CHANGELOG (with a migration note) say the same.
+README, config/README and the root CMakeLists state the one core floor.
+For the player (PR 4): under core 0.20.0 the player's own "decode" and
+"mesh" scopes already get recon's device time, because a tile counts to
+every scope open around it. So StreamPlayer::decode's loop that adds
+recon's device halves to "decode" would now count them twice, and the
+breakdowns have device halves too. Forward the breakdown rows instead (PL1).
+Pass extract_device its own StageMetrics beside "mesh", as decode
+does; its compaction row is now " ..compact".
+Tests
+recon_tier_stage_metrics:
+every row's wait lies inside its host span;
+" ..active set" sits inside "integrate", device time included, and
+both totals skip it;
+fused set: "integrate" holds " ..allocate" and the compaction.
+A narrow 1024² camera makes the round far longer than the fuse, so a
+compaction row that still held the round would overrun "integrate".
+There is no top-level "allocate";
+extract: "marching cubes" over " ..compact" and
+" ..dispatch", both measured and inside it, and no " ..active set".
+The first extract grows the index run, whose identity fill is the
+stage's alone, so "marching cubes" exceeds the two breakdowns. In a
+steady extract (nothing compacts, one attempt), " ..dispatch" equals
+the stage exactly. With null metrics, a scope open around the extract
+gets its waits and no device half.
+recon_codec_decoder:
+an I-frame, a P-frame on a moved sphere that removes and allocates, and
+the I-frame again into a grid holding one block more, which only
+removes: each breakdown is measured, " ..apply" is non-zero, the
+breakdowns sum to "codec decode" within 1e-9 ms, and the totals equal
+the stage;
+with null metrics, a scope around the decode has no device half.
+recon_volume_block_grid:
+the first remove leaves the device's pipeline cache its size, so it
+compiled nothing. On a device whose cache does not grow with a compile,
+the test says it cannot see a build: lavapipe's cache does not grow, and
+NVIDIA's does;
+allocate and remove each tile a caller's scope;
+with no scope, a scope around them has no device half.
+recon_volume_block_stamps: the first timed pass makes the grid's timer,
+and its "block stamps" row is measured.
+recon_example_stage_table: busy, wait and the four device cells.
+recon_example_codec_stream: a breakdown's device time is inside its
+stage's. An untimed or untimeable stage, or one beside a timed stage,
+leaves the column unset; an untimed breakdown does not.
+recon_sensor_picture_readback_oom: the injection site, as above.
+recon_mesh_marching_cubes_sparse, unchanged, is what guards the pool
+count: it failed both macOS legs while every extractor and grid made a
+pool. No lab device runs out of pools, so only the Mac legs can see it.
+Mutation tests
+Each mutant was planted, built and run on the lab RTX 4090 and on lavapipe,
+then restored with cp and checked with cmp.
+#
+Planted fault
+Killed by
+M1
+The decoder's grid edits pass no scope
+recon_codec_decoder
+M2
+The map's allocation rounds go untagged (removal kept)
+recon_codec_decoder; recon_volume_block_grid once its allocate and remove got separate rows
+M3
+The block kernels are built at the first remove again
+recon_volume_block_grid (the pipeline cache grew)
+M4
+The fused compaction keeps the round's tiles
+recon_tier_stage_metrics (round + compaction overran "integrate")
+M5
+The fused round is a top-level "allocate" again
+recon_tier_stage_metrics
+M6
+The extract's dispatch goes untagged
+recon_tier_stage_metrics
+M7
+The extract's compaction gets no metrics
+recon_tier_stage_metrics
+M8
+The command reset is tagged with the stage, splitting the dispatch's tile
+recon_tier_stage_metrics (the steady extract's equality)
+M9
+The inverse transform is tagged with "codec decode", not its breakdown
+recon_codec_decoder
+M10
+The table prints host time with the wait left in
+recon_example_stage_table
+M11
+A codec row's device column ignores an untimed stage
+recon_example_codec_stream once it had a two-stage case
+M12
+The decoder's removal passes no scope (the review's plant)
+recon_codec_decoder, the removal-only decode (both devices)
+M13
+The grow's identity fill goes untagged (the review's plant)
+recon_tier_stage_metrics, the stage exceeding its breakdowns (both)
+M14
+The extract's compaction keeps the map's row name
+recon_tier_stage_metrics (both)
+M15
+The extractor never makes its timer
+recon_tier_stage_metrics (both)
+M16
+The grid's block pass never makes its timer
+recon_volume_block_stamps (both)
+M2 and M11 first survived; the tests that kill them came in 55e4b232. M12
+and M13 survived at 55e4b232, as the review found; the tests that kill
+them came in f1c89dcf and 75c51bb8. A grid that made its timer on an
+untimed pass, the eager pool the macOS legs caught, survives on the lab:
+the earlier untimed passes make the timer the timed one then uses.
+Lab results
+All runs were Release, on the lab RTX 4090 box, under uvrun, against an
+rsynced copy of core #50's head (9b64ebb,
+FETCHCONTENT_SOURCE_DIR_VOLUMETRIC_KIT_CORE), with the other dependencies
+fetched at their pins. Every run used VKC_REQUIRE_VULKAN_DEVICE=1 VKC_TEST_VALIDATION=1 VKC_TEST_SYNC_VALIDATION=1 (validation layer
+1.4.341), and excluded recon_(fuse_orbbec|fuse_viewer|rig_viewer)_config_entry.
+Run
+Device
+Result
+Full suite, -j 8
+NVIDIA GeForce RTX 4090 (driver 615.71.10)
+94/94 passed
+Full suite, -j 8
+lavapipe (Mesa 26.0.8)
+93/94 passed; see below
+The timing tests, three times
+RTX 4090
+passed every time
+The timing tests, three times at -j 3
+lavapipe
+passed every time
+Sanitizer leg: Debug, ASan+UBSan, examples off, gcc 15.2
+lavapipe
+89/89 passed
+lavapipe. The one failure is recon_fuse_replica_run. It fails because
+fuse_replica's default grid passes lavapipe's maxStorageBufferRange in
+VoxelBlockGrid::create, before anything this PR changes. CI runs the
+test only on NVIDIA and the Mac.
+Toolchain. The lab has no clang, so the sanitizer leg ran with gcc.
+CI's clang leg is the check of record.
+Not built here. The viewers (VR_BUILD_VIEWER) were not built. Their
+change is two seed lists and a comment; CI's viewer job builds them.
+On the 4090, the decoder fixture's " ..apply" reads 0.06 ms of a
+1.79 ms decode, and 0.017 ms where it only removes; the first extract's
+"marching cubes" 0.050 ms over " ..compact" 0.007 and " ..dispatch"
+0.024, the rest its identity fill.
+MoltenVK, macOS and iOS coverage comes from CI.
+Pin
+third_party/CMakeLists.txt and the Homebrew key action in
+.github/workflows/_build.yml pin core at #50's merge
+(0daced5a3b3ef3b64ad2f8f245aa437367d3ed55). The lab results above ran
+against #50's head (9b64ebb); CI ran again at the merge. The branch merges
+main after #262 and #269 (a4605e5a), and after #264 and #273 (68cb0644,
+then 4574fbb8).
+🤖 Generated with Claude Code
+taojin-6
+and others
+added 4 commits
+October 23, 2026 00:25
+build: pin core 0.20.0 at the timing PR's head, and need it
+…
+65a6982
+```
+The core's timing PR (#50) splits a row's host time into busy and blocked
+and tiles each batch's device time, so a stage holds every command recorded
+inside it. recon's rows take both halves from it, so the libraries' floor
+moves to 0.20.0. The pin and the Homebrew key action are at #50's head
+until it merges.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(timing): the public declarations, headers first
+…
+00090d1
+```
+- MarchingCubes::extract_device takes StageMetrics: a "marching cubes"
+  row over "  ..active set" (the map's compaction) and "  ..dispatch"
+  (each attempt's submit), timed inside today's submits.
+- VoxelHashMap::allocate and remove, and VoxelBlockGrid::remove, take the
+  caller's GpuStageScope, so a decode's grid edits count to its rows.
+- VoxelBlockGrid::create builds the block kernels; the first remove builds
+  no pipeline.
+- The decoder's breakdowns carry all three halves, and a fused set's
+  allocation is a breakdown of "integrate", which now holds it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(timing): time the extract and the decode's grid edits
+…
+f01c99e
+```
+Stage rows follow core 0.20.0: a row's host time splits into busy and
+wait, and a timed batch tiles its device time, so a stage holds every
+command recorded inside it and both totals skip breakdowns (the
+2026-10-23 decision, reversing 2026-08-10's).
+
+- MarchingCubes::extract_device reports "marching cubes" over the
+  compaction's "  ..active set" and the attempts' "  ..dispatch", tiled
+  inside today's submits.
+- The decoder's breakdowns tag their own commands; "  ..apply" holds the
+  grid's zeroing, hash deletes and allocations, every round, which were
+  untimed, through the scope VoxelBlockGrid::remove and
+  VoxelHashMap::allocate/remove now take.
+- A set fused in its allocation's submit reports the round as
+  "integrate"'s "  ..allocate", and the compaction's row without it: the
+  round's scope opens inside the compaction's, so its tiles are taken off.
+- VoxelBlockGrid::create builds the block kernels, so the first remove
+  compiles no pipeline.
+- The examples' table prints host busy, wait and device (n/t, n/a); a
+  codec row's device column is unset unless every stage was measured.
+- The picture-readback OOM test injects its failure at the reader's own
+  allocation: the timer's last can sit inside the validation layer's
+  vkCreateQueryPool, where a throw leaks the driver's pool.
+
+No submit, wait or result changes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(timing): the grid's allocate and remove each tile, and a codec r…
+…
+55e4b23
+```
+…ow's partial device column
+
+The block-grid test times allocate and remove in scopes of their own, so
+an allocation whose rounds go untagged is seen; the codec-stream test
+leaves a row's device column unset beside an untimed stage. Both found by
+mutants the earlier tests let through.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+taojin-6
+self-assigned this
+Oct 23, 2026
+taojin-6
+and others
+added 7 commits
+October 23, 2026 03:30
+Merge main (#262, #269) into feat/timing
+…
+a4605e5
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+build: pin core at 9b64ebb, #50's head after its fixes, and state one…
+…
+4083870
+```
+… floor
+
+The core's #50 took its review fixes (process-wide scope serials, a scope
+closed on another thread aborts, a refused blocking submit reads NotTimed,
+resolve() after the fence). The Homebrew key action follows the pin; both
+keep TODO(timing) until #50 merges.
+
+The libraries' floor, 0.20.0, now covers every core version the examples,
+tests and viewers need, so the README, config/README and DESIGN stop
+naming 0.16.0 and 0.18.0, and third_party checks the examples' and tests'
+config tier at VR_CORE_MIN_VERSION.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(codec): a decode that only removes times its removal rounds
+…
+f1c89dc
+```
+No test showed "  ..apply" holds the grid's removal rounds: with the
+decoder's grid.remove untagged, the moved-sphere frame still read
+"  ..apply" measured through its allocations. The grid now holds the
+frame's blocks and one more, so decoding the frame again only removes, and
+"  ..apply" must be measured, non-zero and sum into "codec decode".
+
+Planted (the review's mutant): grid.remove without &apply fails this on
+the RTX 4090 and on lavapipe.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(timing): no query pool until a call is timed, and the extract's r…
+…
+75c51bb
+```
+…ows named for what they time
+
+- MarchingCubes::create made a GpuTimer, and VoxelBlockGrid::create one for
+  its block pass with the kernels it now builds there: a query pool per
+  extractor and per grid, timed or not. MoltenVK backs each pool with a
+  Metal counter sample buffer, of which a device has few; the macOS runner
+  ran out in recon_mesh_marching_cubes_sparse (33 grids, 14 extractors) and
+  failed both macOS legs. Each now makes its timer at the first call a
+  caller times; the grid still builds its kernels at create.
+- The extract's compaction was "  ..active set", the name a fuse's and an
+  encode's compactions report, so a set timing two of them would sum them
+  under one row. It is "  ..compact", as ExtractTimings::compact_ms names
+  it: VoxelHashMap::compact_active_blocks_on_device takes the row's name.
+  DECISIONS records why the extract's rows are "marching cubes" over
+  "  ..compact" and "  ..dispatch", not the design's mesh/..compact/..mc.
+- CHANGELOG folds the core 0.19.0 pin entry into the 0.20.0 one, and
+  DESIGN stops naming the examples' 0.16.0 floor.
+
+Tests: recon_tier_stage_metrics (the extract's rows by their names; the
+growing first extract's identity fill is the stage's alone, so
+"marching cubes" exceeds "  ..compact" plus "  ..dispatch"),
+recon_volume_block_stamps (the first timed pass makes the grid's timer and
+times its row).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+build: pin core at #50's merge (0daced5)
+…
+af01a93
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge origin/main into feat/timing
+…
+68cb064
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(codec): time the deblock in " ..inverse", as main has it
+…
+4574fbb
+```
+The merge with main (#264, #273) gave the deblock a "  ..deblock" row of
+its own: a nested scope into scratch metrics, its device time taken off
+"  ..inverse" by a negative add. That changed main's documented decode
+rows (the deblock inside "  ..inverse", in one submit, and exactly three
+breakdowns) inside a merge commit, and the row showed on frames the gate
+skips. The plain union of both PRs already tiles: reconstruct() records
+the inverse and the deblock under the scope it is passed, the decode's
+"  ..inverse" and the rebuild's "codec decode", so the three breakdowns
+sum to "codec decode" exactly.
+
+decoder.cpp equals main plus #272's scopes again; the decode and rebuild
+docs and main's rows_case are main's, with #272's host/wait/device
+wording and, timed, a check that the three breakdowns tile the decode
+with the deblock on. A deblock row of its own is left for the owner.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+taojin-6
+marked this pull request as ready for review
+October 23, 2026 17:41
+Hide details
+View details
+taojin-6
+merged commit fb24de7
+into
+main
+Oct 24, 2026
+9 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+taojin-6
+deleted the
+feat/timing
+branch
+October 24, 2026 20:29
+This was referenced Oct 24, 2026
+feat(codec): the deblock falls back per block, never skipping a frame
+#274
+Merged
+feat(codec): decode and mesh a frame in the caller's batch
+#277
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

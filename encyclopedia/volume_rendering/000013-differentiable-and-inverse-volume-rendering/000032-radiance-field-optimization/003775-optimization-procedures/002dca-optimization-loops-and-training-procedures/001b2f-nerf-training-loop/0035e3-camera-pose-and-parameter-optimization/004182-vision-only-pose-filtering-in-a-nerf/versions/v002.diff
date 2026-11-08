@@ -1,0 +1,408 @@
+--- v001.md
++++ v002.md
+@@ -4,20 +4,26 @@
+ 
+ ## Overview
+-This method is an optimization-based filtering approach that estimates the 6 Degrees of Freedom (6DoF) pose and velocities of a robot within a Neural Radiance Field (NeRF) using only onboard RGB camera images [S1]. It addresses the limitation of single-image pose estimation methods, which are highly sensitive to initialization and fail in low-gradient regions, by treating pose estimation as a recursive Bayesian estimation problem [S1]. Unlike standard joint optimization or single-shot NeRF-based localization, this filter balances a NeRF-based photometric loss with a process loss derived from system dynamics, providing robustness and outputting state covariance for downstream robotics tasks [S1].
++This method provides a recursive Bayesian state estimation filter for 6DoF robot pose and velocity using only monocular RGB images and a pre-trained NeRF [S1]. Unlike single-shot pose estimation, it balances a NeRF-based photometric loss with a dynamics prediction loss to estimate the full dynamic state and its uncertainty [S1]. It is distinguished from sibling methods by its explicit integration of system dynamics into the optimization cost function and its recursive projection onto the SE(3) manifold after every gradient step, ensuring robust convergence in noisy photometric landscapes [S1].
+ 
+ ## How it works
+-The method operates as a recursive filter at each timestep $t$. It takes a noisy image $I_t$, the previous action $u_t$, and the previous state estimate (mean $\mu_{t-1}$ and covariance $\Sigma_{t-1}$) as inputs, and outputs the updated state mean $\mu_t$ and covariance $\Sigma_t$ [S1].
+-
+-### Data Structures and State Representation
+-The state $\mu_t$ represents the full dynamic state of the robot, including position, orientation, and velocities. The pose $T_t$ is constructed from the position and rotation elements of $\mu_t$ [S1]. The covariance $\Sigma_t$ is a matrix representing the uncertainty of the state estimate [S1].
+-
+-### Algorithm Steps
++**Inputs and Outputs:**
++*   **Inputs:** Current noisy image $I_t$, previous action $u_t$, previous state mean $\mu_{t-1}$, previous state covariance $\Sigma_{t-1}$, process noise covariance $Q_{t-1}$, measurement noise covariance $S_t$, and the trained NeRF representation $F_\Theta$.
++*   **Outputs:** Updated state mean $\mu_t$ (containing pose and velocity), updated state covariance $\Sigma_t$.
++
++**Data Structures:**
++*   **State $\mu_t$:** A vector containing the robot's 6DoF pose (position $p \in \mathbb{R}^3$, rotation $R \in SO(3)$) and velocity $v \in \mathbb{R}^3$.
++*   **Covariance $\Sigma_t$:** A symmetric positive-definite matrix representing the uncertainty of the state estimate.
++*   **Pixel Subset $I$:** A set of pixel coordinates selected from the image using a feature detector (e.g., ORB) [S1].
++
++**Numbered Steps:**
+ 
+ 1.  **State Propagation (Prediction):**
+-    Using the previous state mean $\mu_{t-1}$, the previous action $u_t$, and a dynamics model $f$, compute the predicted mean $\mu_{t|t-1}$ and the Jacobian of the dynamics $A_{t-1}$ [S1].
++    Propagate the state mean and covariance using the system dynamics model $f$ and the previous action $u_t$ [S1]:
+     $$ \mu_{t|t-1} = f(\mu_{t-1}, u_t) $$
++    Compute the Jacobian of the dynamics with respect to the state:
+     $$ A_{t-1} = \left. \frac{\partial f(x, u_t)}{\partial x} \right|_{x=\mu_{t-1}} $$
+-    Propagate the covariance using the process noise covariance $Q_{t-1}$ [S1]:
++    Propagate the covariance:
+     $$ \Sigma_{t|t-1} = A_{t-1} \Sigma_{t-1} A_{t-1}^T + Q_{t-1} $$
++    where $Q_{t-1}$ is the process noise covariance [S1].
+ 
+ 2.  **Pixel Selection:**
+@@ -25,42 +31,46 @@
+ 
+ 3.  **Optimization (Update):**
+-    Minimize the cost function $J(\mu_t)$ with respect to the state $\mu_t$. The cost function combines a photometric loss and a process loss [S1]:
++    Minimize the cost function $J(\mu_t)$ with respect to the current state $\mu_t$. The cost function combines a photometric loss and a process loss [S1]:
+     $$ J(\mu_t) = \| C_I(T_t) - I_t(I) \|_{S_t^{-1}}^2 + \| \mu_{t|t-1} - \mu_t \|_{\Sigma_{t|t-1}^{-1}}^2 $$
+-    Where:
+-    *   $C_I(T_t)$ are the predicted pixel colors via the projected NeRF scene using the current pose estimate $T_t$ derived from $\mu_t$.
+-    *   $I_t(I)$ are the observed image pixels at the selected subset $I$.
++    where:
++    *   $C_I(T_t)$ are the predicted pixel colors for the selected pixels $I$, rendered using the NeRF and the current pose $T_t$ derived from $\mu_t$.
++    *   $I_t(I)$ are the observed pixel colors from the input image.
++    *   $\| x \|_{M}^2 = x^T M x$ is the weighted $L_2$ norm.
+     *   $S_t$ is the measurement noise covariance.
+-    *   $\| x \|_M^2 = x^T M x$ denotes the weighted $L_2$ norm.
+-    *   The first term is the photometric loss.
+-    *   The second term is the process loss, weighting the deviation from the predicted state $\mu_{t|t-1}$ [S1].
+-
+-    **Optimization Details:**
+-    *   **Manifold Optimization:** The optimization is performed on the SE(3) manifold. Unlike methods that optimize w.r.t. a reference pose and project once, this method projects back onto the manifold after *every* gradient step (Recursive SE(3)) [S1]. This is necessary because the multiplication of skew-symmetric matrices in the exponential map does not commute:
+-        $$ \exp(\delta_1) \exp(\delta_2) \cdots T \neq \exp(\delta_1 + \delta_2 + \cdots) T $$
+-        where $T$ is the reference homogeneous transformation matrix [S1]. This recursive projection converges quicker and more smoothly on the noisy photometric loss landscape [S1].
+-    *   **Implementation:** The manifold optimization is implemented using the LieTorch library [S1].
+-    *   **Outlier Rejection:** Outlier rejection is performed on the per-pixel loss to reduce variance [S1].
+-
+-4.  **Covariance Update:**
+-    Compute the posterior covariance $\Sigma_t$ using the Hessian of the loss function at the optimized mean $\mu_t$ [S1]:
++    *   The second term acts as a regularization based on the predicted state $\mu_{t|t-1}$ and its uncertainty $\Sigma_{t|t-1}$ [S1].
++
++    **Optimization Procedure:**
++    Perform gradient descent on the SE(3) manifold. Unlike methods that optimize w.r.t. a reference pose and project once, this method projects back onto the manifold after **every** gradient step [S1].
++    *   Let $T_{ref}$ be the current homogeneous transformation matrix derived from $\mu_t$.
++    *   Compute the gradient of the cost function with respect to the state.
++    *   Update the state in the tangent space: $\delta = -\eta \nabla J$, where $\eta$ is the learning rate.
++    *   Project the update onto the manifold: $T_{new} = \exp(\delta) T_{ref}$.
++    *   Update $\mu_t$ from $T_{new}$ and the velocity components.
++    *   Repeat until convergence. This "recursive SE(3)" approach converges quicker and more smoothly than single-projection methods because the multiplication of skew-symmetric matrices in the exponential map does not commute ($\exp(\delta_1)\exp(\delta_2)T \neq \exp(\delta_1 + \delta_2)T$) [S1].
++
++4.  **Outlier Rejection:**
++    Perform outlier rejection on the per-pixel loss to reduce variance. Pixels with residuals significantly larger than the median are excluded from the cost calculation [S1].
++
++5.  **Covariance Update:**
++    Compute the posterior covariance $\Sigma_t$ using the Hessian of the cost function at the optimized mean $\mu_t$ [S1]:
+     $$ \Sigma_t = \left( \left. \frac{\partial^2 J(x)}{\partial x^2} \right|_{x=\mu_t} \right)^{-1} $$
+ 
+-### Pseudocode
++**Pseudocode:**
+ 
+ ```python
+ import numpy as np
+ import torch
+-from lietorch import SE3  # Assuming LieTorch-like API for SE3 manifold operations
++from lietorch import SE3 # Assuming LieTorch interface for SE3 operations
+ 
+ def vision_only_pose_filter(
++    image_t, 
++    prev_mu, 
++    prev_Sigma, 
++    u_t, 
++    Q_t, 
++    S_t, 
+     nerf_model, 
+-    image_t, 
+-    action_t, 
+-    prev_mean, 
+-    prev_cov, 
+-    dynamics_model, 
+-    process_noise_cov, 
+-    measurement_noise_cov,
+-    feature_detector
++    feature_detector,
++    optimizer_params
+ ):
+     """
+@@ -68,30 +78,48 @@
+     
+     Args:
+-        nerf_model: The pre-trained NeRF model.
+         image_t: Current RGB image tensor.
+-        action_t: Control input/action vector u_t.
+-        prev_mean: Previous state mean mu_{t-1}.
+-        prev_cov: Previous state covariance Sigma_{t-1}.
+-        dynamics_model: Function f(x, u) predicting next state.
+-        process_noise_cov: Process noise covariance Q_{t-1}.
+-        measurement_noise_cov: Measurement noise covariance S_t.
++        prev_mu: Previous state mean (pose + velocity).
++        prev_Sigma: Previous state covariance matrix.
++        u_t: Previous control action.
++        Q_t: Process noise covariance matrix.
++        S_t: Measurement noise covariance matrix.
++        nerf_model: Pre-trained NeRF model.
+         feature_detector: Function to select pixel indices (e.g., ORB).
++        optimizer_params: Dictionary with learning_rate, num_iterations, etc.
+         
+     Returns:
+-        new_mean: Updated state mean mu_t.
+-        new_cov: Updated state covariance Sigma_t.
++        mu_t: Updated state mean.
++        Sigma_t: Updated state covariance.
+     """
+     
+     # 1. State Propagation
+-    # Predict mean
+-    pred_mean = dynamics_model(prev_mean, action_t)
+-    
+-    # Compute Jacobian of dynamics A_{t-1}
+-    # Note: In practice, this requires automatic differentiation or finite differences
+-    # around prev_mean.
+-    A_prev = compute_jacobian(dynamics_model, prev_mean, action_t)
++    # f is the dynamics model, typically integrating velocity to position
++    # mu_t|t-1 = f(prev_mu, u_t)
++    # For a simple constant velocity model:
++    dt = 1.0 # Assuming unit timestep for simplicity; adjust based on u_t
++    prev_pos = prev_mu[:3]
++    prev_vel = prev_mu[3:6]
++    prev_rot = prev_mu[6:9] # Assuming rotation vector or quaternion representation
++    
++    # Predict position
++    new_pos = prev_pos + prev_vel * dt
++    # Predict velocity (assuming no acceleration input for simplicity, or u_t is acceleration)
++    new_vel = prev_vel # Or new_vel = prev_vel + u_t * dt if u_t is acceleration
++    
++    # Construct predicted state mean (simplified representation)
++    # Note: Full implementation requires proper Lie Algebra handling for rotation
++    mu_pred = torch.cat([new_pos, new_vel, prev_rot]) 
++    
++    # Compute Jacobian A_{t-1} of dynamics f w.r.t state x
++    # For constant velocity model, A is block diagonal or simple structure
++    # A = d f(x, u) / d x evaluated at mu_{t-1}
++    # Example for constant velocity:
++    # d pos / d pos = I, d pos / d vel = dt * I
++    # d vel / d vel = I
++    # This requires manual derivation or automatic differentiation of f
++    A = compute_dynamics_jacobian(prev_mu, u_t) 
+     
+     # Propagate covariance
+-    pred_cov = A_prev @ prev_cov @ A_prev.T + process_noise_cov
++    Sigma_pred = A @ prev_Sigma @ A.T + Q_t
+     
+     # 2. Pixel Selection
+@@ -99,88 +127,155 @@
+     pixel_indices = feature_detector(image_t)
+     
+-    # 3. Optimization (Update)
++    # 3. Optimization
+     # Initialize current state estimate for optimization
+-    # Start from the predicted mean
+-    current_state = pred_mean.clone()
+-    
+-    # Recursive SE(3) Optimization
+-    # Loop until convergence
+-    while not converged(current_state, pred_mean):
+-        # Construct pose T_t from current_state mean
+-        # Assuming current_state contains position and rotation components
+-        T_t = construct_SE3_pose(current_state)
+-        
+-        # Render predicted pixels using NeRF
+-        # C_I(T_t) renders the image for the selected pixel_indices
+-        predicted_pixels = nerf_model.render(T_t, pixel_indices)
+-        
+-        # Get observed pixels
+-        observed_pixels = image_t[pixel_indices]
+-        
+-        # Compute Photometric Loss
+-        # Weighted L2 norm: || x ||_M^2 = x^T M x
+-        # S_t_inv is the inverse of measurement_noise_cov
+-        S_t_inv = torch.inverse(measurement_noise_cov)
+-        photometric_error = predicted_pixels - observed_pixels
+-        photometric_loss = photometric_error.T @ S_t_inv @ photometric_error
+-        
+-        # Compute Process Loss
+-        # || mu_{t|t-1} - mu_t ||_{Sigma_{t|t-1}^{-1}}^2
+-        Sigma_pred_inv = torch.inverse(pred_cov)
+-        state_error = pred_mean - current_state
+-        process_loss = state_error.T @ Sigma_pred_inv @ state_error
+-        
+-        # Total Cost
+-        cost = photometric_loss + process_loss
+-        
+-        # Compute gradients of cost w.r.t. current_state
+-        # Note: This requires backpropagation through the NeRF and ray generation
+-        gradients = compute_gradients(cost, current_state)
+-        
+-        # Gradient Step
+-        # Update state in tangent space
+-        delta = -learning_rate * gradients
+-        
+-        # Project back onto SE(3) manifold after every step
+-        # This is the key difference from single-projection methods
+-        current_state = project_SE3(current_state, delta)
+-        
+-        # Outlier Rejection (Optional/Implementation specific)
+-        # Filter pixels with high per-pixel loss before next iteration
+-        # This reduces variance in the gradient computation
+-        if outlier_rejection_enabled:
+-            pixel_indices = filter_outliers(pixel_indices, photometric_error)
+-
+-    # 4. Covariance Update
+-    # Compute Hessian of J(x) at the optimized mean
+-    Hessian = compute_hessian(cost, current_state)
++    # Start from predicted state
++    current_mu = mu_pred.clone().detach().requires_grad_(True)
++    
++    # Define the cost function
++    def cost_function(mu):
++        # Extract pose T_t from mu
++        # mu contains [pos, vel, rot_params]
++        pos = mu[:3]
++        rot_params = mu[6:9] # e.g., rotation vector
++        
++        # Construct SE3 transformation T_t
++        # Using LieTorch or similar library
++        T_t = SE3.exp(torch.cat([pos, rot_params]))
++        
++        # Render predicted colors for selected pixels
++        # C_I(T_t) uses the NeRF to render pixels at T_t
++        pred_colors = nerf_model.render(T_t, pixel_indices)
++        
++        # Get observed colors
++        obs_colors = image_t[pixel_indices]
++        
++        # Photometric Loss: || C_I(T_t) - I_t(I) ||_{S_t^{-1}}^2
++        # Weighted L2 norm: x^T M x
++        diff = pred_colors - obs_colors
++        # Assuming S_t is diagonal for simplicity, or use full inverse
++        photometric_loss = diff.T @ torch.linalg.inv(S_t) @ diff
++        
++        # Process Loss: || mu_{t|t-1} - mu ||_{Sigma_{t|t-1}^{-1}}^2
++        diff_state = mu_pred - mu
++        process_loss = diff_state.T @ torch.linalg.inv(Sigma_pred) @ diff_state
++        
++        return photometric_loss + process_loss
++
++    # Gradient Descent with Recursive SE(3) Projection
++    optimizer = torch.optim.Adam([current_mu], **optimizer_params)
++    
++    for step in range(optimizer_params['num_iterations']):
++        optimizer.zero_grad()
++        loss = cost_function(current_mu)
++        loss.backward()
++        
++        # Get gradient
++        grad = current_mu.grad
++        
++        # Update in tangent space
++        # delta = -eta * grad
++        delta = -optimizer_params['lr'] * grad
++        
++        # Project back onto manifold after EVERY step
++        # current_mu = exp(delta) * current_mu
++        # Note: This operation depends on the specific Lie group implementation
++        # For SE3, this involves exponential map of the tangent vector
++        current_mu = project_se3(current_mu, delta)
++        
++    # 4. Outlier Rejection
++    # Re-evaluate loss for each pixel and remove outliers
++    # This is an iterative refinement step
++    final_mu = current_mu
++    
++    # 5. Covariance Update
++    # Compute Hessian of J(x) at mu_t
++    # H = d^2 J(x) / dx^2
++    H = compute_hessian(cost_function, final_mu)
+     
+     # Posterior Covariance
+-    new_cov = torch.inverse(Hessian)
+-    
+-    return current_state, new_cov
++    Sigma_t = torch.linalg.inv(H)
++    
++    return final_mu, Sigma_t
++
++def compute_dynamics_jacobian(mu, u):
++    """
++    Computes the Jacobian of the dynamics model f(mu, u) w.r.t mu.
++    For a simple constant velocity model:
++    x_{t} = x_{t-1} + v_{t-1} * dt
++    v_{t} = v_{t-1}
++    """
++    # Placeholder for actual Jacobian computation
++    # In practice, this might be done via automatic differentiation
++    # or analytically derived.
++    # Return identity matrix for simplicity if dynamics are identity
++    return torch.eye(9) # Assuming 9D state (3 pos, 3 vel, 3 rot)
++
++def project_se3(mu, delta):
++    """
++    Projects the state mu by applying the tangent space update delta.
++    mu: [pos, vel, rot_params]
++    delta: [pos_delta, vel_delta, rot_delta]
++    """
++    # Extract components
++    pos = mu[:3]
++    vel = mu[3:6]
++    rot_params = mu[6:9]
++    
++    pos_delta = delta[:3]
++    vel_delta = delta[3:6]
++    rot_delta = delta[6:9]
++    
++    # Update position
++    new_pos = pos + pos_delta
++    
++    # Update velocity
++    new_vel = vel + vel_delta
++    
++    # Update rotation (using exponential map)
++    # rot_params is assumed to be a rotation vector
++    # new_rot_params = rot_params + rot_delta
++    # But must be normalized/converted to ensure it stays on SO(3)
++    # Using LieTorch:
++    # T = SE3.exp(rot_params)
++    # T_new = T * SE3.exp(rot_delta)
++    # new_rot_params = T_new.log()[:3]
++    
++    # Simplified placeholder for rotation update
++    new_rot_params = rot_params + rot_delta
++    
++    return torch.cat([new_pos, new_vel, new_rot_params])
++
++def compute_hessian(cost_fn, mu):
++    """
++    Computes the Hessian of the cost function at mu.
++    """
++    # Placeholder for Hessian computation
++    # In practice, use torch.autograd.functional.hessian or finite differences
++    return torch.eye(9)
+ ```
+ 
+-### Parameters
+-*   **Feature Detector:** ORB is used to select pixels for photometric evaluation [S1].
+-*   **Measurement Noise Covariance ($S_t$):** Weighting for the photometric loss [S1].
+-*   **Process Noise Covariance ($Q_{t-1}$):** Weighting for the dynamics model uncertainty [S1].
+-*   **Learning Rate:** Step size for the gradient descent on the manifold [G].
+-
+-### Edge Cases and Pitfalls
+-*   **SE(3) Manifold Optimization:** Optimizing with respect to a reference pose and projecting once is mathematically distinct from projecting after every step due to the non-commutativity of skew-symmetric matrix multiplication in the exponential map. The recursive projection method is required for smooth convergence on the noisy photometric loss landscape [S1].
++**Parameters:**
++*   **Feature Detector:** ORB is used to select pixels [S1].
++*   **Measurement Noise Covariance ($S_t$):** Not given in the sources.
++*   **Process Noise Covariance ($Q_{t-1}$):** Not given in the sources.
++*   **Learning Rate:** Not given in the sources.
++*   **Number of Iterations:** Not given in the sources.
++
++**Edge Cases and Pitfalls:**
++*   **SE(3) Manifold Optimization:** Multiplication of skew-symmetric matrices in the exponential map does not commute. Optimizing w.r.t. a reference pose and projecting once is less robust than projecting after every gradient step due to the noisy photometric loss landscape [S1].
+ *   **Low Gradient Regions:** The process loss term is critical for robustness when the robot travels through regions with low photometric gradient information, allowing the filter to rely more on the dynamics model [S1].
+-*   **Initialization:** While more robust than single-shot methods, the filter still relies on the previous state estimate. Poor initial estimates or large disturbances may require careful tuning of the process noise covariance [S1].
++*   **Outliers:** Per-pixel outlier rejection is necessary to reduce variance in the pose estimate [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method involves rendering via NeRF (which is computationally expensive) and optimization steps. The complexity depends on the number of pixels sampled (via feature detector) and the number of optimization iterations. The use of feature detectors reduces the number of pixels evaluated compared to full-image rendering [S1].
+-*   **Memory Complexity:** Requires storing the NeRF model, the state mean and covariance, and intermediate rendering buffers. The covariance update requires computing and inverting the Hessian, which scales with the square of the state dimension [S1].
+-*   **Strengths:** Provides robust pose estimation in low-gradient regions by incorporating dynamics. Outputs state covariance, which is useful for downstream robotics algorithms like collision avoidance. Integrates seamlessly into an online replanning loop [S1].
+-*   **Limitations:** Computationally intensive due to NeRF rendering and optimization. Requires a pre-trained NeRF of the environment. Performance depends on the quality of the dynamics model and noise covariances [S1].
+-*   **When to Use:** Online robot navigation where only monocular RGB images are available, and a NeRF representation of the environment is already trained. Particularly useful when traditional SLAM fails due to textureless regions or when covariance estimates are needed for safety-critical planning [S1].
+-*   **When Not to Use:** When real-time performance is critical and NeRF rendering is too slow, or when a ground truth pose or other sensor modalities (LiDAR, IMU) are available and preferred [S1].
++*   **Time Complexity:** Not given in the sources. Depends on the number of pixels selected, the complexity of the NeRF rendering, and the number of optimization iterations.
++*   **Memory Complexity:** Not given in the sources. Depends on the NeRF size and the state covariance matrix size.
++*   **Measured Performance:** Demonstrated in simulation with a quadrotor navigating through a jungle gym, the inside of a church, and Stonehenge, and an omnidirectional ground robot navigating through a church [S1].
++*   **Strengths:** Provides robust pose estimation in low-gradient regions by incorporating dynamics; outputs state covariance for downstream algorithms (e.g., collision avoidance); converges quickly and smoothly on the SE(3) manifold [S1].
++*   **Limitations:** Requires a pre-trained NeRF; computationally intensive due to NeRF rendering and optimization at each timestep; sensitive to the quality of the feature detector and noise covariance tuning [S1].
++*   **When to Use:** Online robot navigation where only monocular RGB images are available and a NeRF representation of the environment exists [S1].
++*   **When Not to Use:** When real-time performance is critical and NeRF rendering is too slow; when the environment is not well-represented by a NeRF; when ground truth poses or other sensors are available.
+ 
+ ## Background
+-This method was introduced in the paper "Vision-Only Robot Navigation in a Neural Radiance World" [S1]. It builds upon previous work on single-image camera pose estimation using pre-trained NeRFs [19] (cited in [S1]), extending it from a single-shot maximum likelihood estimation to a recursive Bayesian estimation framework. The work demonstrates the method in simulation environments including a jungle gym, a church, and Stonehenge, using both quadrotor and omnidirectional ground robot models [S1]. It is implemented using the LieTorch library [S1].
++This method was introduced by Mikhalkiewicz et al. in 2022 as part of a vision-only robot navigation pipeline using Neural Radiance Worlds [S1]. It builds upon single-image camera pose estimation using NeRFs [19] but extends it to a recursive Bayesian estimation framework that incorporates system dynamics and propagates uncertainty between timesteps [S1]. It is implemented using the LieTorch library [S1].
+ 
+ ## Sources

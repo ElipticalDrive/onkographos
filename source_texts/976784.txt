@@ -1,0 +1,36 @@
+# 3D Mesh Reconstruction Project -- ENSEEIHT 2SN Modeling course 
+
+This **MATLAB** project performs 3D point cloud reconstruction and tetrahedral mesh generation based on a series of 2D images, and displays each crucial step.
+
+The pipeline works through the following steps:
+1. **Superpixel Segmentation & Binarization**: Decomposes the 2D images into superpixels to easily separate the object from the background and generate binary masks.
+2. **Medial Axis Estimation**: Calculates the object's skeleton using Delaunay Triangulation / Voronoi diagram on the tracked contour of the 2D shapes.
+3. **3D Point Cloud Reconstruction**: Projects provided 2D tracking points (`viff.xy`) into 3D using corresponding projection matrices (`dino_Ps.mat`).
+4. **Delaunay Tetrahedralization**: Computes an initial 3D mesh volume from the 3D point cloud.
+5. **Mesh Refinement**: Evaluates barycenters of the tetrahedrons, eliminating those that project onto the image background (i.e., outside the object's binary masks), leaving the final 3D contour.
+
+## Data Requirements
+To run the script, ensure your workspace has the following files:
+- An `images/` folder containing the model sequence: `viff.000.ppm` to `viff.035.ppm` (36 images total).
+- A `Ps.mat`: The calibration/projection matrices.
+- `viff.xy`: Data array containing tracked 2D point coordinates mapped across the image sequence. 
+
+## Global Variables & Parameters
+
+You can tweak the following variables at the top of the script (or inside their respective sections) to modify the behavior, precision, and performance of the program:
+
+* `nb_images` *(Default: 36)*: The total number of images loaded and processed. Reducing it can speed up tests but will degrade the final 3D mesh quality.
+* `fichier_sauvegarde` *(Default: 'mask.mat')*: The name of the backup file used to store the binary masks. By default, the script skips the heavy superpixel loop if this file is detected, drastically improving execution speed on subsequent runs. Delete the file to force mask recalculation.
+
+**Superpixel Variables:**
+* `K` *(Default: 200)*: The target number of superpixels per image. Increasing it produces finer-grained superpixels (resulting in a more precise boundary mapping) but increases computation time.
+* `m` *(Default: 30)*: The compactness modifier. A higher `m` prioritizes spatial distance, forcing more rigid, squared grids of superpixels. A lower `m` lets them adhere more tightly to color boundaries.
+
+**Skeleton Estimation Variables:**
+* `seuil_rayon` *(Default: 8)*: Radius threshold used during the 2D Delaunay Medial Axis generation. It prevents building adjacency paths through overly large triangles that lie outside the natural geometry of the object.
+
+**Mesh Refinement Variables:**
+* `poids` *(Default: Matrix of weights)*: Barycentric weights heavily utilized during the elimination of invalid tetrahedrons. Modifying these lists adjusts how strictly a tetrahedron is evaluated against the 2D silhouette boundaries.
+
+## How to use
+Just open the project with Matlab and run the `TP_maillage.m` file. If you already have a `mask.mat` file, you can delete to force the mask recalculation.
