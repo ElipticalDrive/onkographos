@@ -3,121 +3,121 @@
 Also called: FVR, Frequency Domain Volume Rendering (FDVR)
 
 ## Overview
-Fourier Volume Rendering (FVR) is a direct volume rendering technique that computes X-ray-like attenuation-only projections of a three-dimensional dataset by exploiting the Fourier projection-slice theorem [S1][S3, S8, unofficial]. It reduces the per-view computational complexity from $O(N^3)$ to $O(N^2 \log N)$ by computing a 3D frequency transform once during preprocessing, then generating views via 2D resampling and inverse transforms [S1][S3, S8, unofficial]. Unlike [Ray Casting](52-ray-casting.md) or [Digital Compositing](53-digital-compositing.md), FVR produces line-integral projections without hidden surface effects or direct transparency control [S3, S8, unofficial].
+Fourier Volume Rendering (FVR) is a visualization technique that generates attenuation-only projections resembling X-ray radiographs by operating on the spectral representation of a 3D volume rather than its spatial representation [S1][S2, unofficial]. It exploits the Fourier projection-slice theorem to compute these projections in $O(N^2 \log N)$ time per view, avoiding the $O(N^3)$ cost of spatial domain methods like ray casting [S1][S2, S8, unofficial]. Unlike its sibling [Fourier Projection-Slice Volume Rendering](824-fourier-projection-slice-volume-rendering.md), which focuses on the theoretical basis of generating projections, FVR describes the complete algorithmic pipeline including preprocessing, resampling, and inverse transformation to produce the final image [S1][S8, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-- Input: A 3D spatial dataset $x(u_1, u_2, u_3)$ of size $N \times N \times N$.
-- Output: A 2D projection image $p_\theta(\hat{u}_2, \hat{u}_3)$ for a given viewing direction $\theta$.
+**Inputs and Outputs**
+*   **Input:** A 3D scalar volume $x(u_1, u_2, u_3)$ of size $N \times N \times N$.
+*   **Output:** A 2D projection image $p_\theta(\hat{u}_2, \hat{u}_3)$ corresponding to a viewing direction $\theta$.
 
-**Data Structures:**
-- **Frequency Domain Buffer:** Stores the 3D Fourier transform $X(U_1, U_2, U_3)$ [S8, unofficial].
-- **Resampling Buffer:** A double-buffered structure of size $2 \times 512 \times 512 \times 16$ bits (1 Mb per buffer, 2 Mb total) to hold the resampled 2D plane while one part is filled by the interpolator and the other is transformed by the IFFT block [S8, unofficial].
-- **Quantization:** Coefficients are quantized to integer precision; 16 bits are sufficient for visual quality [S8, unofficial].
+**Data Structures**
+*   **Frequency Spectrum:** A 3D complex array $X(U_1, U_2, U_3)$ of size $N \times N \times N$.
+*   **Projection Slice:** A 2D complex array $P_\theta(\hat{U}_2, \hat{U}_3)$ representing the resampled plane through the origin of the frequency spectrum.
+*   **Image Buffer:** A 2D real array $p_\theta(\hat{u}_2, \hat{u}_3)$ of size $N \times N$ (or the target resolution).
 
-**Steps:**
-1. **Preprocessing (3D Transform):** Shift the spatial volume by a 3D `fft_shift` operation to center it at the origin. Compute the forward 3D FFT to obtain $X(U_1, U_2, U_3)$. Shift the resulting spectrum again to center the zero-frequency component [S1][S8, unofficial].
-   $$X(U_1, U_2, U_3) = \int_{-\infty}^{\infty} \int_{-\infty}^{\infty} \int_{-\infty}^{\infty} x(u_1, u_2, u_3) e^{2\pi i(u_1 U_1 + u_2 U_2 + u_3 U_3)} du_1 du_2 du_3$$
-   [S8, unofficial]
-2. **Rendering Loop - Slice Extraction & Resampling:** Extract a 2D projection-slice $P_\theta(\hat{U}_2, \hat{U}_3)$ passing through the origin of the spectral volume, with a normal parallel to the viewing direction $\theta$. Resample this slice onto a regular 2D grid to reduce aliasing and ghosting artifacts, which is mandatory for non-orthogonal views. A $5 \times 5 \times 5$ POCS interpolation filter is recommended, requiring 64 voxels to compute one sample point [S1][S8, unofficial].
-3. **Rendering Loop - Inverse Transform:** Compute the 2D inverse Fourier transform of the resampled slice to produce the projection image [S8, unofficial].
-   $$p_\theta(\hat{u}_2, \hat{u}_3) = \int_{-\infty}^{\infty} \int_{-\infty}^{\infty} P_\theta(\hat{U}_2, \hat{U}_3) e^{-2\pi i(\hat{u}_2 \hat{U}_2 + \hat{u}_3 \hat{U}_3)} d\hat{U}_2 d\hat{U}_3$$
-   [S8, unofficial]
-4. **Rendering Loop - Post-processing:** Shift the resulting image by a 2D `fft_shift` operation to move the center from the edge to the origin of the display grid. Output the result to a frame buffer; the result is theoretically real, but small imaginary parts may remain due to resampling artifacts [S1][S8, unofficial].
+**Algorithm Steps**
+The method consists of a one-time preprocessing stage and a per-view rendering loop [S1][S2, unofficial].
 
-**Parameters:**
-- **Transform Choice:** DFT is often chosen for hardware to save complexity (no subtractions needed to derive DHT), though DHT yields a ~50% higher frame rate (39 fps vs 26 fps) [S8, unofficial].
-- **Input Data Width:** 16 bits, matching typical FFT chip expectations (e.g., PDSP16510/A) [S8, unofficial].
-- **Internal Precision:** 19 bits (e.g., in PDSP16510/A) to compensate for precision loss during FFT [S8, unofficial].
-- **Quantization:** $h = \text{round}\left(\frac{h}{h_{\text{max}}} \times 2^{\text{bits}}\right)$, where $h_{\text{max}}$ is the maximum value in the 3-D forward Hartley transform [S8, unofficial].
+1.  **Preprocessing:**
+    1.  **Shift:** Apply a 3D `fft-shift` to the input volume $x$ to center it at the origin of the 3D space [S1][S2, unofficial].
+    2.  **Transform:** Compute the forward 3D Discrete Fourier Transform (DFT) of the shifted volume to obtain the frequency spectrum $X(U_1, U_2, U_3)$ [S1][S2, S8, unofficial].
+        $$X(U_1, U_2, U_3) = \sum_{u_1} \sum_{u_2} \sum_{u_3} x(u_1, u_2, u_3) e^{2\pi i (u_1 U_1 + u_2 U_2 + u_3 U_3)}$$
+    3.  **Center:** Apply a 3D `fft-shift` to $X$ to center the zero-frequency component at the origin of the frequency space [S1][S2, unofficial].
 
-**Pseudocode:**
+2.  **Rendering Loop (for each viewing angle $\theta$):**
+    1.  **Extract Slice:** Extract a 2D plane $P_{raw}$ passing through the origin of the centered spectrum $X$, with a normal vector parallel to the viewing direction $\theta$ [S1][S2, S8, unofficial].
+    2.  **Resample:** If the viewing angle is not orthogonal to the grid axes, resample $P_{raw}$ onto a regular 2D grid $P_\theta(\hat{U}_2, \hat{U}_3)$ to reduce aliasing and ghosting artifacts [S1][S2, unofficial]. This step is mandatory for non-orthogonal views [S1].
+        *   *Note:* Linear interpolation causes significant artifacts. High-order interpolation filters (e.g., POCS 5x5x5) or Hamming-windowed sinc filters are required [S1][S2, S7, S8, unofficial].
+    3.  **Inverse Transform:** Compute the 2D Inverse Discrete Fourier Transform (IDFT) of $P_\theta$ to obtain the spatial projection $p_{raw}(\hat{u}_2, \hat{u}_3)$ [S1][S2, S8, unofficial].
+        $$p_\theta(\hat{u}_2, \hat{u}_3) = \sum_{\hat{U}_2} \sum_{\hat{U}_3} P_\theta(\hat{U}_2, \hat{U}_3) e^{-2\pi i (\hat{u}_2 \hat{U}_2 + \hat{u}_3 \hat{U}_3)}$$
+    4.  **Shift:** Apply a 2D `fft-shift` to $p_{raw}$ to move the center of the image from the edge to the origin of the display grid [S1][S2, unofficial].
+    5.  **Output:** The result is theoretically real. Discard small imaginary parts resulting from resampling artifacts and store the real part in the frame buffer [S8, unofficial].
+
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def fourier_volume_rendering(volume_3d, viewing_direction):
-    # Preprocessing (executed once)
-    # 1. Shift spatial volume to center at origin
-    shifted_volume = fft_shift_3d(volume_3d)
-    # 2. Compute 3D forward FFT
-    freq_3d = fft_3d(shifted_volume)
+def fourier_volume_rendering(volume, view_direction):
+    """
+    volume: 3D numpy array of shape (N, N, N)
+    view_direction: 3D vector (nx, ny, nz)
+    Returns: 2D numpy array of shape (N, N)
+    """
+    N = volume.shape[0]
+    
+    # --- Preprocessing (Execute Once) ---
+    # 1. Shift volume to center
+    shifted_volume = fft_shift_3d(volume)
+    
+    # 2. Forward 3D FFT
+    spectrum = fft_3d(shifted_volume)
+    
     # 3. Center zero-frequency component
-    centered_freq = fft_shift_3d(freq_3d)
-
-    # Rendering Loop (executed per view)
-    # 4. Extract and resample 2D projection-slice perpendicular to viewing_direction
-    # Uses a 5x5x5 POCS filter for high-order interpolation to reduce ghosting/aliasing
-    plane_2d = resample_frequency_plane(centered_freq, viewing_direction, filter_size=(5, 5, 5))
-
-    # 5. Compute 2D inverse FFT
-    projection_2d = ifft_2d(plane_2d)
-
-    # 6. Shift image center to display origin
-    final_image = fft_shift_2d(projection_2d)
-
-    # 7. Output to frame buffer (discard negligible imaginary artifacts)
-    return real_part(final_image)
-
-def fft_shift_3d(data):
-    # Standard 3D FFT-shift: swaps quadrants to center zero-frequency
-    N = data.shape[0]
-    shifted = data.copy()
-    shifted[:N//2, :N//2, :N//2] = data[N//2:, N//2:, N//2:]
-    shifted[:N//2, N//2:, :N//2] = data[N//2:, :N//2, N//2:]
-    shifted[:N//2, :N//2, N//2:] = data[N//2:, N//2:, :N//2]
-    shifted[:N//2, N//2:, N//2:] = data[N//2:, :N//2, :N//2]
-    shifted[N//2:, :N//2, :N//2] = data[:N//2, N//2:, N//2:]
-    shifted[N//2:, N//2:, :N//2] = data[:N//2, :N//2, N//2:]
-    shifted[N//2:, :N//2, N//2:] = data[:N//2, N//2:, :N//2]
-    shifted[N//2:, N//2:, N//2:] = data[:N//2, :N//2, :N//2]
-    return shifted
-
-def resample_frequency_plane(freq_3d, direction, filter_size):
-    # Interpolates the 3D frequency volume onto a 2D plane perpendicular to `direction`.
-    # Applies a 5x5x5 POCS filter kernel to compute each sample point from 64 neighboring voxels.
-    # Returns a 2D complex array.
-    # Implementation: For each grid point on the cut-plane, gather 64 neighbors from freq_3d,
-    # apply the POCS interpolation weights, and sum. Standard high-order frequency resampling.
-    pass
-
-def fft_shift_2d(data):
-    # Standard 2D FFT-shift
-    N = data.shape[0]
-    shifted = data.copy()
-    shifted[:N//2, :N//2] = data[N//2:, N//2:]
-    shifted[:N//2, N//2:] = data[N//2:, :N//2]
-    shifted[N//2:, :N//2] = data[:N//2, N//2:]
-    shifted[N//2:, N//2:] = data[:N//2, :N//2]
-    return shifted
-
-def real_part(data):
-    return data.real
+    centered_spectrum = fft_shift_3d(spectrum)
+    
+    # --- Rendering Loop (Execute Per View) ---
+    
+    # 1. Extract plane perpendicular to view_direction through origin
+    # This requires defining the coordinate system for the 2D plane
+    # and sampling the 3D spectrum at those coordinates.
+    raw_slice = extract_plane(centered_spectrum, view_direction)
+    
+    # 2. Resample if necessary (mandatory for non-orthogonal views)
+    # Use high-order interpolation (e.g., sinc or POCS) to avoid ghosting
+    if not is_orthogonal(view_direction):
+        resampled_slice = resample_slice(raw_slice, filter_order=5)
+    else:
+        resampled_slice = raw_slice
+        
+    # 3. Inverse 2D FFT
+    projected_image = ifft_2d(resampled_slice)
+    
+    # 4. Shift image center to origin
+    final_image = fft_shift_2d(projected_image)
+    
+    # 5. Return real part (discard numerical noise)
+    return final_image.real
 ```
 
-**Edge Cases and Pitfalls:**
-- **Ghosting Artifacts:** Sampling the frequency domain replicates the signal in the spatial domain. Resolved by zero-padding the volume in the spatial domain and using high-order interpolation filters in the frequency domain [S1][S2, S8, unofficial].
-- **Aliasing:** 3D aliasing occurs due to imperfect resampling filters; 2D aliasing occurs when the 2D plane is not resampled quickly enough out of the 3D frequency dataset [S8, unofficial].
-- **Opacity Control:** FVR calculates a line integral, resulting in X-ray-like images with no hidden surface effects or transparency control [S3, S8, unofficial].
-- **MIP Artifacts:** Implementing Maximum Intensity Projection (MIP) with FVR results in significant artifacts [S8, unofficial].
-- **Emission/Scattering:** The basic FVR integral does not provide a direct way of modelling emission and scattering in participating media, resulting in a lack of occlusion in reconstructions [S1][S2, unofficial].
+**Parameters**
+*   **Interpolation Filter Size:** $5 \times 5 \times 5$ POCS filter is recommended to minimize aliasing artifacts during frequency domain interpolation [S3, S8, unofficial].
+*   **Precision:** 16-bit integer precision is sufficient for visual quality in hardware implementations [S8, unofficial]. Internal precision of 19 bits may be used to compensate for FFT loss [S8, unofficial].
+*   **Zero-Padding:** Zero-padding the volume in the spatial domain before the 3D FFT is required to resolve ghosting artifacts caused by signal replication in the spatial domain [S1][S2, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Ghosting Artifacts:** Sampling the frequency domain is equivalent to replicating the signal in the spatial domain, causing ghosting. Mitigated by zero-padding and high-order interpolation [S1][S2, S7, unofficial].
+*   **Aliasing:** 3-D aliasing occurs due to imperfect resampling filters; 2-D aliasing occurs if the 2-D plane is not resampled quickly enough [S8, unofficial].
+*   **Data Structure:** Conventional FFT output is not structured for resampling. `fft-shift` stages are mandatory to rearrange data [S1][S2, unofficial].
+*   **No Occlusion:** The basic FVR integral computes line integrals (X-ray-like) and does not model emission, scattering, or opacity control directly [S1][S2, S8, unofficial].
 
 ## Subtopics
 
+### [Fourier Domain Approximate Shading](6892-fourier-domain-approximate-shading.md)
+Fourier Domain Approximate Shading is a method for approximating diffuse shading in the Fourier domain by expressing shading terms (linear, quadratic, cubic) as convolutions of the volume's Fourier transform $F$ and frequency vectors. It solves the problem of applying spatial lighting models to volume data rendered via Fourier Volume Rendering (FVR) without requiring repeated 3D Fourier transforms of the shaded volume for constant light sources. Unlike [Spherical Harmonics](6052-spherical-harmonics.md), which allows efficient relighting, this method is efficient only for constant light sources because changing the light direction requires recomputing expensive full-volume convolutions.
+
+### [Polar Coordinate Fourier Volume Rendering](7426-polar-coordinate-fourier-volume-rendering.md)
+Polar Coordinate Fourier Volume Rendering (Polar FVR) is a volume rendering technique that stores and processes frequency domain data in polar coordinates to reduce computational complexity from $O(n^2 \log n)$ to $O(n^2)$ and improve memory access efficiency. It sets itself apart from traditional Rectilinear FVR by exploiting data regularity and high sampling density near the origin, allowing slice extraction via nearest-neighbor or bilinear interpolation instead of trilinear interpolation, thereby shifting computational cost to preprocessing.
+
 ### Frequency Domain Depth Cueing
-A method to implement depth cueing (weighting voxel intensities by distance) in FVR by convolving the 3D Fourier transform with a combined filter $G(U)$ in the frequency domain, avoiding the need to recompute the 3D forward transform for every view [S8, unofficial]. This is superior to spatial domain depth cueing, which requires recomputing the expensive 3D forward transform for each view [S8, unofficial].
+Frequency Domain Depth Cueing is a method to implement depth cueing (weighting voxel intensities by distance) in FVR by convolving the 3-D Fourier transform with a combined filter $G(U)$ in the frequency domain, avoiding the need to recompute the 3-D forward transform for every view [S8, unofficial].
 
 ## Operating characteristics
-- **Complexity:** Reduces per-view complexity from $O(N^3)$ for conventional methods to $O(N^2 \log N)$, dominated by the 2D inverse transform [S3, S8, unofficial]. The initial 3D transform costs $O(N^3 \log N)$ but is executed only once [S2, S8, unofficial].
-- **Performance:** FVR is typically 100 to 1000 times faster than conventional ray casting [S8, unofficial]. On a HP 9000/735 (99 MHz, $256^3$ dataset), FVR projection with linear interpolation took 9 seconds, compared to 25 minutes for ray casting [S8, unofficial].
-- **Hardware Feasibility:** A hardware implementation using PDSP16510/A FFT chips (1024 points in 100μs, ~$1100 each) can achieve ~26 frames/sec for $N=512$, though actual rates may be lower due to array splitting time [S8, unofficial]. Scaling to $512^3$ requires 4 interpolation chips, 4 FFT chips, and faster static RAM (~9 ns for 64 voxels) [S8, unofficial].
-- **Memory:** Requires significant memory; e.g., 256 Mb for a $512^3$ dataset [S8, unofficial].
-- **Strengths:** Fast generation of multiple views from a single 3D transform; suitable for real-time X-ray-like projections [S8, unofficial].
-- **Limitations:** No opacity control; artifacts in MIP; high memory requirements; complex hardware design for accurate resampling filters [S8, unofficial].
+*   **Time Complexity:** The preprocessing stage (3D FFT) has a complexity of $O(N^3 \log N)$ but is executed only once [S2, unofficial]. The rendering loop (resampling + 2D IFFT) has a complexity of $O(N^2 \log N)$ [S1][S2, S8, unofficial]. This is significantly faster than spatial domain algorithms which are $O(N^3)$ [S1][S2, S3, S8, unofficial].
+*   **Memory Complexity:** Requires storage for the 3D frequency spectrum. For a $512^3$ dataset, this requires approximately 256 Mb of memory (assuming 2 bytes/voxel or similar density implied by the calculation) [S8, unofficial].
+*   **Performance:** On a HP 9000/735 (99 MHz, 256^3 dataset, 8-bit voxels), the 3-D Forward Hartley Transform took 5.5 minutes, while the FVR projection (linear interp) took 9 seconds and the 2-D Inverse Hartley Transform took 4 seconds [S8, unofficial]. FVR is typically 100 to 1000 times faster than conventional ray casting [S8, unofficial].
+*   **Hardware Implementation:** A hardware implementation using PDSP16510/A FFT chips (1024 points in 100μs) estimated a frame rate of 26 fps for a 512^3 dataset, with a hardware cost of ~$1100 per chip [S8, unofficial]. Scaling to 512^3 requires 4 interpolation chips and 4 FFT chips, and faster static RAM (~9 ns clock) [S8, unofficial].
+*   **Strengths:** Fast generation of arbitrary viewing angles; efficient for attenuation-only (X-ray-like) projections; suitable for compression-based rendering [S1][S2, unofficial][S4][S6, unofficial].
+*   **Limitations:** Cannot model emission, scattering, or opacity control directly; lacks occlusion; sensitive to aliasing and ghosting artifacts requiring high-quality resampling; MIP artifacts are significant [S1][S2, S8, unofficial].
 
 ## Background
-Fourier Volume Rendering was introduced independently by Malzbender [12] and another group [3] at approximately the same time [S8, unofficial]. It leverages the Fourier projection-slice theorem, which states that the 2D Fourier transform of a 2D projection of a 3D object is a 2D plane passing through the origin of the 3D Fourier transform of that object [S8, unofficial].
+FVR was introduced independently by Malzbender [12] and another group [3] at approximately the same time [S8, unofficial]. It is based on the Fourier projection-slice theorem, which states that the 2-D Fourier transform of a 2-D projection of a 3-D object is a 2-D plane passing through the origin of the 3-D Fourier transform of that object [S8, unofficial]. The method was initially explored for hardware implementation to achieve real-time performance [S3, unofficial]. It has been used in digital radiography and GPU-based implementations using CUDA [S1][S2, S6, unofficial].
 
 ## Sources
 [S1] High Performance GPU-Based Fourier Volume Rendering, https://doi.org/10.1155/2015/590727, fetched 2026-10-27
+[S2] High Performance GPU-Based Fourier Volume Rendering - PMC, https://pmc.ncbi.nlm.nih.gov/articles/PMC4381991/, fetched 2026-10-27 (unofficial)
 [S3] Fourier Volume Rendering final version, https://core.ac.uk/works/16976649, fetched 2026-10-27 (unofficial)
+[S4] PDF State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S5] Indirect volume rendering, https://slidetodoc.com/direct-volume-rendering-what-is-volume-rendering-accumulate/, fetched 2026-10-29 (unofficial)
+[S6] 体数据压缩技术综述, https://www.jcad.cn/article/id/9d3ce9cd-c97c-4fab-9291-a72fbe7ba37e, fetched 2026-10-30 (unofficial)
+[S7] (PDF) Fourier volume rendering on the GPU using a split- ..., https://www.researchgate.net/publication/220838994_Fourier_volume_rendering_on_the_GPU_using_a_split-stream-FFT, fetched 2026-10-31 (unofficial)
 [S8] Fourier volume rendering, https://shiftleft.com/mirrors/www.hpl.hp.com/techreports/95/HPL-95-73.pdf, fetched 2026-10-31 (unofficial)

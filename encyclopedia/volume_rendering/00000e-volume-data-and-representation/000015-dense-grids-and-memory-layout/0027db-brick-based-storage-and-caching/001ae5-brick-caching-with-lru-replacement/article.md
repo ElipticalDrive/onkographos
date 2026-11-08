@@ -3,112 +3,88 @@
 Also called: Block Memory Management Unit (MMU) with LRU Eviction, Brick Pool Manager, Dynamic Brick Cache, Volume Block Cache
 
 ## Overview
-Brick Caching with LRU Replacement manages a fixed-size pool of volume data blocks, mapping brick coordinates to pool indices and evicting least-recently-used blocks when the pool is full [S2, unofficial]. It solves the problem of limited GPU memory capacity and transfer bandwidth by ensuring that expensive data transfers from slower host memory are minimized [S1]. It sets itself apart from sibling methods by explicitly managing the cache lifecycle using a Last Recently Used (LRU) policy, often requiring CPU-side coordination due to the limitations of standard shader models regarding random memory writes [S1]. Unlike [Multi-Level Cache and Prefetching](4631-multi-level-cache-and-prefetching.md) which optimizes for temporal locality across multiple tiers, or [Raymarching with LOD-based Brick Caching](5776-raymarching-with-lod-based-brick-caching.md) which integrates caching with level-of-detail selection, this method focuses on the static pool management and eviction logic itself [S1].
+Brick Caching with LRU Replacement manages a fixed-size pool of volume data blocks, mapping brick coordinates to pool indices and evicting least-recently-used blocks when the pool is full [S2, unofficial]. It solves the problem of limited GPU memory capacity and transfer bandwidth by ensuring that expensive data transfers from slower host memory are minimized [S4, unofficial]. It sets itself apart from sibling methods by explicitly managing the cache lifecycle using a Last Recently Used (LRU) policy, often requiring CPU-side coordination due to the limitations of standard shader models regarding random memory writes [S1]. Unlike [Multi-Level Cache and Prefetching](4631-multi-level-cache-and-prefetching.md) which focuses on prefetching, or [Raymarching with LOD-based Brick Caching](5776-raymarching-with-lod-based-brick-caching.md) which integrates caching with LOD selection, this method focuses on the core eviction logic and memory pool management [S1].
 
 ## How it works
-The method operates on a CPU-side or host-managed pool that maps logical brick coordinates to physical memory slots in a contiguous data buffer. It uses a precomputed count buffer to quickly identify empty bricks and an LRU mechanism (often implemented via a clock or list) to handle evictions.
+**Inputs and Outputs:**
+*   **Input:** Volume dimensions, brick size, brick resolution levels, isovalue (for active brick determination), texture function (optional, for empty brick detection), file handle to volume data.
+*   **Output:** A resident brick block given a brick coordinate, or `nullptr`/null reference if not resident.
 
-### Inputs and Outputs
-*   **Inputs:**
-    *   Volume dimensions ($D_x, D_y, D_z$).
-    *   Brick dimensions ($B_x, B_y, B_z$).
-    *   Brick pool capacity ratio ($\alpha$, fraction of total bricks to keep in memory).
-    *   File handle or stream to the volume data.
-    *   (Optional) Transfer function $TF$ for active brick determination [S1].
-*   **Outputs:**
-    *   A pointer to the voxel data of a requested brick, or `nullptr` if the brick is not resident or empty.
-    *   Updates to the cache state (LRU order, residency bits).
+**Data Structures:**
+The cache is implemented as a Block Memory Management Unit (MMU) containing the following fields [S2, unofficial]:
+1.  `dims`: Vector3i, total volume dimensions.
+2.  `brick_dims`: Vector3i, calculated as `ceil(dims / brick_size)`.
+3.  `brick_size`: Vector3i, dimensions of each brick in voxels.
+4.  `entries`: Array of `Entry` structs, size `brick_dims.x * brick_dims.y * brick_dims.z`.
+    *   `Entry` layout:
+        *   `valid`: bool, indicates if the entry maps to a valid block.
+        *   `blk_idx`: int, index into the `blocks` array.
+5.  `blocks`: Array of `Block` structs, size `blk_nums`.
+    *   `Block` layout:
+        *   `data`: pointer to the voxel data buffer.
+        *   `last_access`: timestamp or counter (used for LRU).
+6.  `blk_nums`: int, total number of blocks in the pool. Calculated as `brick_dims.x * brick_dims.y * brick_dims.z * _brick_num_ratio`.
+7.  `clock_pos`: int, current position in the LRU clock (used for efficient LRU approximation) [S2, unofficial].
+8.  `blk_used`: int, number of currently used blocks in the pool.
+9.  `data`: `uchar*`, contiguous memory buffer of size `blk_nums * (brick_size.x+1)*(brick_size.y+1)*(brick_size.z+1)` [S2, unofficial].
+10. `cnt_buf`: `int*`, count buffer of size `brick_dims.x * brick_dims.y * brick_dims.z * 256`. Used to skip empty bricks based on isovalue ranges [S2, unofficial].
+11. `mutex`: `pthread_mutex_t`, for thread-safe access [S2, unofficial].
+12. `fin`: `ifstream`, file handle for loading bricks [S2, unofficial].
 
-### Data Structures
-The cache maintains the following structures [S2, unofficial]:
+**Reference Texture (GPU Side):**
+A low-resolution floating-point reference texture (e.g., $16^3$ for a $512^3$ volume with $32^3$ bricks) stores texture coordinate offsets to the brick cache [S1]. White/null references indicate bricks not in the cache [S1]. This decouples volume size from GPU resolution limits (e.g., $512^3$) and video memory limits (e.g., 256MB) [S1].
 
-1.  **Grid Dimensions:**
-    *   `dims`: Total volume dimensions $(D_x, D_y, D_z)$.
-    *   `brick_dims`: Number of bricks per axis, calculated as $\lceil D_i / B_i \rceil$ for $i \in \{x, y, z\}$.
-    *   `brick_size`: Logical brick dimensions $(B_x, B_y, B_z)$.
-
-2.  **Entries Array (`entries`):**
-    *   Size: `brick_dims.x * brick_dims.y * brick_dims.z`.
-    *   Layout: Array of `Entry` structs.
-    *   `Entry` fields:
-        *   `valid`: Boolean, true if the entry maps to a valid block in the pool.
-        *   `blk_idx`: Integer index into the `blocks` array.
-
-3.  **Blocks Array (`blocks`):**
-    *   Size: `blk_nums`, where `blk_nums = ceil(brick_dims.x * brick_dims.y * brick_dims.z * _brick_num_ratio)`.
-    *   Layout: Array of `Block` structs (implementation-specific, typically storing metadata like access timestamp or LRU position).
-
-4.  **Data Buffer (`data`):**
-    *   Size: `blk_nums * (B_x+1) * (B_y+1) * (B_z+1)` bytes.
-    *   Layout: Contiguous array of `uchar` (or appropriate voxel type). Each block occupies a chunk of this buffer. The size includes 1-voxel padding on all sides for interpolation [S1][S2, unofficial].
-
-5.  **Count Buffer (`cnt_buf`):**
-    *   Size: `brick_dims.x * brick_dims.y * brick_dims.z * 256`.
-    *   Layout: Array of integers. For a brick at index $k$, the sub-array `cnt_buf[k*256 ... k*256+255]` stores the count of voxels with intensity values $0..255$ within that brick. Used to determine if a brick is empty for a given transfer function [S2, unofficial].
-
-6.  **State Variables:**
-    *   `blk_nums`: Total number of blocks in the pool.
-    *   `blk_used`: Number of currently occupied slots in the pool.
-    *   `clock_pos`: Index pointer for the LRU clock algorithm.
-    *   `mutex`: Synchronization primitive for thread-safe access [S2, unofficial].
-    *   `fin`: File input stream for loading bricks [S2, unofficial].
-
-### Algorithm Steps
+**Numbered Steps:**
 
 1.  **Initialization:**
-    *   Calculate `brick_dims` from `dims` and `brick_size`.
-    *   Allocate `entries` array of size `brick_dims.x * brick_dims.y * brick_dims.z`, initializing all `valid` flags to false.
-    *   Calculate `blk_nums` using `_brick_num_ratio` (e.g., 0.5).
+    *   Calculate `brick_dims` from volume `dims` and `brick_size`.
+    *   Allocate `entries` array of size `brick_dims.x * brick_dims.y * brick_dims.z`. Initialize all `valid` to false.
+    *   Calculate `blk_nums` using `_brick_num_ratio` (e.g., 0.5) [S2, unofficial].
     *   Allocate `blocks` array of size `blk_nums`.
-    *   Allocate `data` buffer of size `blk_nums * (B_x+1)(B_y+1)(B_z+1)`.
-    *   Load `cnt_buf` from disk or precomputed metadata.
-    *   Initialize `blk_used = 0`, `clock_pos = 0`.
+    *   Allocate `data` buffer of size `blk_nums * (brick_size.x+1)*(brick_size.y+1)*(brick_size.z+1)` [S2, unofficial].
+    *   Load `cnt_buf` from disk. Size is `brick_dims.x * brick_dims.y * brick_dims.z * 256` [S2, unofficial].
 
-2.  **Request Brick (`getBlock(x, y, z)`):**
-    *   **Boundary Check:** If $x \ge brick\_dims.x$ or $y \ge brick\_dims.y$ or $z \ge brick\_dims.z$, return `nullptr` [S2, unofficial].
-    *   **Empty Check (Optional Optimization):** If a transfer function $TF$ is provided:
-        *   Calculate brick index $k = x + y \cdot brick\_dims.x + z \cdot brick\_dims.x \cdot brick\_dims.y$.
-        *   Iterate intensity $i$ from 0 to 255.
-        *   If `cnt_buf[k*256 + i] != 0` AND $TF.sample(i).w \neq 0$ (opacity > 0), the brick is potentially active. Break loop.
-        *   If loop completes without finding active voxels (i.e., all counts are 0 or all sampled opacities are 0), return `nullptr` [S2, unofficial].
-    *   **Cache Lookup:**
-        *   Access `entries[k]`.
-        *   If `entries[k].valid` is true:
-            *   Mark the corresponding block as "used" (update LRU position/timestamp) [S2, unofficial].
-            *   Return pointer to `data` offset by `entries[k].blk_idx * brick_volume`.
+2.  **Get Block (`getBlock(x, y, z)`):**
+    *   **Boundary Check:** If brick coordinates $(x, y, z)$ exceed `brick_dims`, return `nullptr` [S2, unofficial].
+    *   **Empty Brick Check (Optional):** If a 1D transfer function `tf1d` is provided:
+        *   Calculate `cnt_base = (x * brick_dims.y + y) * brick_dims.z + z`.
+        *   Iterate `idx` from 0 to 255:
+            *   If `cnt_buf[cnt_base + idx] != 0` AND `tf1d->sampleSimple(idx).w != 0`, break loop.
+        *   If `idx == 256`, the brick is empty for the current isovalue; return `nullptr` [S2, unofficial].
+    *   **Cache Hit Check:**
+        *   Access `entries[x * brick_dims.y * brick_dims.z + y * brick_dims.z + z]`.
+        *   If `entry.valid` is true:
+            *   Mark block as used (update `last_access` or LRU clock) [S2, unofficial].
+            *   Return pointer to `blocks[entry.blk_idx].data` [S2, unofficial].
     *   **Cache Miss / Eviction:**
         *   Lock `mutex` [S2, unofficial].
         *   If `blk_used < blk_nums`:
-            *   Find the first free slot in `blocks` (or maintain a free list). Let this be `slot_idx`.
+            *   Assign next free slot in `blocks` array.
         *   Else (Pool Full):
-            *   Perform LRU Eviction:
-                *   Start at `clock_pos`.
-                *   Iterate through `blocks` starting from `clock_pos` to find the first block where the associated `entries` entry is invalid or the block is marked as not-recently-used (depending on specific LRU implementation, e.g., clock algorithm checks a "use" bit) [S2, unofficial].
-                *   Let the evicted block index be `evict_idx`.
-                *   Invalidate the corresponding `entries` entry: set `valid = false`.
-                *   Update `clock_pos` to the next position after `evict_idx`.
-            *   Reuse `evict_idx` as `slot_idx`.
-        *   **Load Brick:**
-            *   Read brick data from `fin` at the appropriate file offset for brick $(x,y,z)$.
-            *   Write data into `data` at offset `slot_idx * brick_volume`.
-        *   **Update Entry:**
-            *   Set `entries[k].valid = true`.
-            *   Set `entries[k].blk_idx = slot_idx`.
-            *   Mark block `slot_idx` as used/updated LRU state.
-            *   Increment `blk_used` if a new slot was allocated (not reused).
+            *   Use `clock_pos` to find the first unused block (LRU-like eviction) [S2, unofficial].
+            *   Mark the old entry in `entries` as invalid.
+            *   Reuse the slot.
+        *   Load block data from file `fin` into the assigned slot in `data` buffer [S2, unofficial].
+        *   Mark `entry.valid` to true, store `blk_idx`.
+        *   Increment `blk_used` if a new slot was assigned.
         *   Unlock `mutex` [S2, unofficial].
         *   Return pointer to the loaded data.
 
-### Parameters
-*   **`brick_size`**: Dimensions of each brick in voxels (e.g., $32^3$). Smaller bricks increase overhead due to padding but allow finer granularity for empty space skipping [S1].
-*   **`_brick_num_ratio`**: Fraction of total bricks to keep in memory pool (e.g., 0.5 for 50%) [S2, unofficial].
-*   **GPU Resolution Limit**: Example constraint of $512^3$ on older hardware like NVIDIA GeForce 6 [S1].
-*   **Memory Limit**: Example constraint of 256MB [S1].
+3.  **Isovalue Change Handling:**
+    *   When the isovalue changes, perform a range query on `cnt_buf` to determine the active status of bricks [S1].
+    *   Download active bricks into the cache [S1].
+    *   Remove inactive bricks using the LRU strategy when space is needed [S1].
 
-### Edge Cases and Pitfalls
-*   **Precision:** The count buffer uses 256 bins. If the volume data has more than 256 distinct intensity levels, the empty check may be inaccurate unless the data is quantized or the check is skipped [S2, unofficial].
-*   **Concurrency:** The use of a mutex (`pthread_mutex_t`) ensures thread safety but introduces contention. For high-performance GPU-steered caching, this CPU-side lock may become a bottleneck, necessitating the GPU-steered variants [S1][S6, unofficial].
-*   **Padding:** The stored size is $(B_x+1)(B_y+1)(B_z+1)$. Failing to account for the extra voxel layer when calculating offsets or file sizes will result in data corruption [S1][S2, unofficial].
+**Parameters:**
+*   `_brick_num_ratio`: Fraction of total bricks to keep in memory pool (e.g., 0.5 for 50%) [S2, unofficial].
+*   `brick_size`: Dimensions of each brick in voxels (e.g., $32^3$) [S2, unofficial].
+*   `GPU Resolution Limit`: Example $512^3$ on NVIDIA GeForce 6 [S1].
+*   `Memory Limit`: Example 256MB [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The `cnt_buf` uses 256 bins (8-bit) for isovalue range queries. Precision depends on the isovalue normalization [S2, unofficial].
+*   **Boundaries:** Bricks are stored with 1-voxel padding on all sides to support trilinear interpolation at boundaries without accessing adjacent bricks [S1]. The stored voxel count per brick is $V_{brick} = (B_x+1)(B_y+1)(B_z+1)$ [S1].
+*   **Concurrency:** The use of `pthread_mutex_t` indicates a CPU-side implementation. GPU-side implementations may require atomic operations or separate LRU buffers [S1].
 
 ## Subtopics
 
@@ -127,32 +103,55 @@ This method enables the GPU to steer CPU-side data loading for voxel rendering b
 ### [LRU Cache Management for Voxel Bricks](4571-lru-cache-management-for-voxel-bricks.md)
 LRU Cache Management for Voxel Bricks is a memory management strategy that prioritizes reusing voxel brick data that has not been accessed for the longest time, thereby optimizing memory reuse while retaining useful data in the cache. It solves the problem of limited GPU memory capacity and transfer bandwidth by ensuring that expensive data transfers from slower host memory are minimized. Unlike sibling methods that may rely on hardware-specific features or different replacement policies, this approach explicitly manages the cache lifecycle using a Last Recently Used (LRU) policy, often requiring CPU-side coordination due to the limitations of standard shader models regarding random memory writes.
 
+### [CPU Cache with Write-Back](10163-cpu-cache-with-write-back.md)
+CPU DRAM serves as a warm cache between SSD storage and GPU VRAM, maintaining an LRU cache over volume blocks with per-block dirty bits. It decouples GPU residency from SSD write latency by staging evicted blocks in CPU memory before persisting them, turning frequent small updates into batched sequential appends. This method builds on [Brick Caching with LRU Replacement](879-brick-caching-with-lru-replacement.md) by adding a write-back policy that distinguishes between clean and dirty blocks, preventing unnecessary SSD writes for blocks that are still being actively reused.
+
 ### Brick Cache Updates
-This variant describes the dynamic update process for the brick cache during frame rendering.
-*   **Upload:** A user-defined number of brick data is uploaded from the file server to the GPU each frame. Each brick comprises its global brick ID and either the EMPTY value (if all zeros) or the pre-processed brick [S3, unofficial].
-*   **Translate ID:** The brick's global brick ID is translated to a local brick ID [S3, unofficial].
-*   **Discard:** If the brick's channel is not represented by the multi-channel page-table hierarchy, the brick is discarded [S3, unofficial].
-*   **Handle EMPTY:** If the brick is EMPTY, the corresponding page in the multi-channel page-table hierarchy is marked as EMPTY [S3, unofficial].
-*   **Handle MAPPED:** Otherwise, the corresponding page is marked as MAPPED, and the brick's data is added to the brick cache. The LRU buffer is used to find free cache entries or entries not accessed recently [S3, unofficial].
-*   **Handle Removal:** When a brick is removed from the cache, its corresponding page is marked as UNMAPPED [S3, unofficial].
-*   **Pass Lists:** Two lists of local brick IDs are passed to the residency octree: 1) IDs of bricks marked EMPTY or MAPPED, 2) IDs of bricks marked UNMAPPED [S3, unofficial].
+A variant where cache updates are driven by file server uploads. Each frame, a user-defined number of brick data is uploaded to the GPU. Each brick comprises its global brick ID and either the EMPTY value (if all zeros) or the pre-processed brick [S3, unofficial]. The global brick ID is translated to a local brick ID. If the brick's channel is not represented by the multi-channel page-table hierarchy, the brick is discarded [S3, unofficial]. If the brick is EMPTY, the corresponding page in the multi-channel page-table hierarchy is marked as EMPTY. Otherwise, the page is marked as MAPPED, and the brick's data is added to the brick cache using the LRU buffer to find free or recently unused entries [S3, unofficial]. When a brick is removed from the cache, its corresponding page is marked as UNMAPPED. Two lists of local brick IDs are passed to the residency octree: 1) IDs of bricks marked EMPTY or MAPPED, 2) IDs of bricks marked UNMAPPED [S3, unofficial].
+
+### Two-Step Eviction and Write-Back
+A variant that decouples GPU residency from SSD write latency using a two-step write-back path: VRAM → CPU → SSD [S4, unofficial]. When a block is evicted from VRAM, it is transferred via D2H and inserted into the CPU cache. Clean blocks are inserted as clean; dirty blocks as dirty [S4, unofficial]. When a dirty block is evicted from the CPU cache, it is asynchronously flushed to SSD patch segments, appending a new version and updating `Index[k]` [S4, unofficial]. On re-admission, blocks are fetched via `Index[k]` to ensure the GPU materializes the most recent version [S4, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:**
-    *   Cache Hit: $O(1)$ average [S2, unofficial].
-    *   Eviction Search: $O(1)$ amortized (using clock algorithm) [S2, unofficial].
-    *   Empty Brick Check: $O(256)$ worst-case if iterating the count buffer [S2, unofficial].
-*   **Memory Complexity:** $O(blk\_nums \times brick\_volume + brick\_count \times 256 \times sizeof(int))$ [S2, unofficial].
-*   **Performance:** The method allows rendering of volumes larger than GPU memory (e.g., $512^3$ on 256MB VRAM) by paging bricks [S1].
-*   **Strengths:** Simple implementation; effective for static or slowly changing volumes; reduces redundant data loading.
-*   **Limitations:** CPU-side locking can bottleneck high-frequency updates; LRU policy may not be optimal for highly localized access patterns compared to spatial locality-aware caches; requires precomputed count buffers for efficient empty-space skipping [S1][S2, unofficial].
-*   **When to Use:** When the volume exceeds available GPU memory and access patterns are somewhat uniform or can be managed by a fixed pool.
-*   **When Not to Use:** When extremely high temporal locality exists (consider [Block-based Ray Cache](2260-block-based-ray-cache.md)) or when GPU-driven management is required to avoid CPU bottlenecks (consider [GPU-Steered LRU Cache Management](3654-gpu-steered-lru-cache-management.md)).
+**Time and Memory Complexity:**
+*   **Time:** $O(1)$ average for cache hit. $O(1)$ for eviction search (amortized using clock algorithm). $O(256)$ worst-case for empty brick check (iterating through `cnt_buf`) [S2, unofficial].
+*   **Memory:** $O(blk\_nums \times brick\_volume + brick\_count \times 256 \times sizeof(int))$ [S2, unofficial].
+
+**Measured Performance:**
+*   Example configuration: $512^3$ volume, $32^3$ bricks, 256MB GPU memory limit [S1].
+*   Reference texture size: $16^3$ for the $512^3$ volume [S1].
+
+**Scaling:**
+*   The overhead of brick padding is inversely proportional to the brick size [S1].
+*   Using two levels of subdivision (small blocks for empty space skipping, large bricks for memory management) helps balance storage overhead and spatial coherence [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** Decouples volume size from GPU resolution and memory limits [S1]. Efficiently skips empty bricks using `cnt_buf` [S2, unofficial]. Simple LRU implementation using clock algorithm [S2, unofficial].
+*   **Limitations:** Requires CPU-side coordination for LRU updates in standard shader models [S1]. Mutex contention may occur in multi-threaded CPU implementations [S2, unofficial].
+
+**When to Use:**
+*   Use when GPU memory is limited and volume data exceeds VRAM capacity [S1].
+*   Use when isovalue changes frequently, requiring dynamic active brick determination [S1].
+
+**When Not to Use:**
+*   Not suitable when hardware-specific features (like hardware LRU caches) are available and sufficient.
+*   Not suitable when strict real-time performance is required and CPU-GPU synchronization overhead is prohibitive.
 
 ## Background
-The concept of brick-based caching with LRU replacement was introduced in the context of real-time ray-casting of discrete isosurfaces. Siggraph 2005 work by Sigg and Hadwiger demonstrated how to decouple volume size from GPU resolution and memory restrictions by using a re-arranged brick structure and a low-resolution reference texture to map to a single large brick cache texture [S1]. The method uses neighbor samples to allow filtering without complicated look-ups at boundaries, storing a brick of resolution $n^3$ with size $(n+1)^3$ [S1]. The LRU replacement strategy is a standard memory management technique applied to this specific domain to handle the limited video memory (e.g., 256MB on NVIDIA GeForce 6 at the time) [S1]. Later implementations, such as those in the hopexn/VolumeRenderingParallel repository, formalized the data structures (MMU, count buffers) and synchronization mechanisms (mutexes) for parallel access [S2, unofficial]. Web-based volume rendering systems have also adopted similar LRU-based brick caching with residency octree integration for scalable rendering of large biomedicinal datasets [S3, unofficial].
+**Origin:**
+The method originates from real-time ray-casting of discrete isosurfaces, specifically addressing the need to manage large volumes on GPUs with limited memory [S1]. The concept of using a low-resolution reference texture to map to a brick cache was introduced in [KE02] (referenced in [S1]).
+
+**History and Development:**
+*   Early implementations used a fixed-size pool with LRU eviction to manage brick residency [S2, unofficial].
+*   Variants have been developed to integrate with residency octrees [S1], multi-channel page-table hierarchies [S3, unofficial], and out-of-core optimization for large-scale training (e.g., 3D Gaussian Splatting) [S4, unofficial].
+
+**Where it is used:**
+*   Real-time volume rendering of large biomedical datasets [S3, unofficial].
+*   Out-of-core training of large-scale 3D Gaussian Splatting primitives [S4, unofficial].
+*   Web-based volume rendering systems [S3, unofficial].
 
 ## Sources
 [S1] Real-Time Ray-Casting and Advanced Shading of Discrete Isosurfaces, https://cgl.ethz.ch/people/archive/siggc/publications/eg05.pdf, fetched 2026-10-26
 [S2] hopexn/VolumeRenderingParallel, https://github.com/hopexn/VolumeRenderingParallel, fetched 2026-10-27 (unofficial)
 [S3] Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze, https://doi.org/10.34726/hss.2023.106203, fetched 2026-10-26 (unofficial)
+[S4] TideGS: Scalable Training of Over One Billion 3D Gaussian Splatting Primitives via Out-of-Core Optimization, https://doi.org/10.48550/arxiv.2605.20150, fetched 2026-10-26 (unofficial)

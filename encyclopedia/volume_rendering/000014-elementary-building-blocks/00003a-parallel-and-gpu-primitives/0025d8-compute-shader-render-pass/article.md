@@ -1,0 +1,90 @@
+# Compute Shader Render Pass
+
+Also called: Compute Shader Pass
+
+## Overview
+A Compute Shader Render Pass is a Vulkan-specific execution pattern that utilizes a compute shader to perform general-purpose rendering or data processing tasks, bypassing the traditional graphics pipeline's rasterization stage. It solves the problem of rendering complex data (such as point clouds or volumetric samples) on the GPU by mapping computational threads directly to output pixels or data elements. Unlike the [Tiled Parallel Compositing](1192-tiled-parallel-compositing.md) method which relies on fragment shaders and depth testing, this approach uses atomic operations or direct memory writes to resolve visibility and color, offering greater flexibility for non-rasterization algorithms.
+
+## How it works
+The method executes a compute shader to generate image data, managing resource layouts and synchronization explicitly.
+
+**Inputs and Outputs:**
+*   **Inputs:** Image dimensions (width, height), storage buffers for data (e.g., point attributes, histograms), and the target swapchain image.
+*   **Outputs:** A finalized image in the swapchain ready for presentation.
+
+**Data Structures:**
+*   **Push Constants:** A `uint32_t[2]` array containing `{width, height}` passed to the compute shader [S1, unofficial].
+*   **Descriptor Sets:** Bindings for storage buffers (e.g., `eStorageBuffer`) at specific set indices (0, 1, etc.) and shader stage flags (`eCompute`) [S1, unofficial].
+
+**Steps:**
+1.  **Pipeline Binding:** Bind the compute pipeline (`renderPipeline`) and its associated descriptor set, ensuring buffer bindings match the shader's expectations [S1, unofficial].
+2.  **Constant Passing:** Push the image width and height as `uint32_t[2]` constants to the compute shader [S1, unofficial].
+3.  **Image Transition:** Transition the swapchain image layout from `eUndefined` to `eGeneral` to allow compute access [S1, unofficial].
+4.  **Dispatch:** Execute the compute shader using a workgroup grid calculated as:
+    $$
+    \text{workgroups}_x = \lceil \frac{\text{width}}{16} \rceil, \quad \text{workgroups}_y = \lceil \frac{\text{height}}{16} \rceil
+    $$
+    This assumes a standard 16x16 local workgroup size [S1, unofficial].
+5.  **Final Transition:**
+    *   If a GUI is enabled: Transition the image layout to `eColorAttachmentOptimal` to allow rendering overlay elements (e.g., ImGui) [S1, unofficial].
+    *   If no GUI: Transition directly to `ePresentSrcKHR` [S1, unofficial].
+6.  **GUI Rendering (Optional):** If the GUI path was taken, draw the GUI elements, then transition the image layout back to `ePresentSrcKHR` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Assume 'renderer' context, 'pipeline', 'descriptor_set', and 'image' are initialized
+# Assume 'width' and 'height' are known integers
+
+# 1. Bind Pipeline and Descriptor Set
+renderer.bind_pipeline(pipeline)
+renderer.bind_descriptor_set(descriptor_set)
+
+# 2. Push Constants: Width and Height
+push_constants = [width, height]
+renderer.push_constants(pipeline, push_constants)
+
+# 3. Transition Image to General Layout for Compute
+image.transition_layout(vk.ImageLayout.eUndefined, vk.ImageLayout.eGeneral)
+
+# 4. Dispatch Compute Shader
+# Workgroup size is typically 16x16x1
+workgroup_x = (width + 15) // 16
+workgroup_y = (height + 15) // 16
+renderer.dispatch_compute(workgroup_x, workgroup_y, 1)
+
+# 5. Prepare for Presentation
+if gui_enabled:
+    # Transition to Color Attachment for GUI overlay
+    image.transition_layout(vk.ImageLayout.eGeneral, vk.ImageLayout.eColorAttachmentOptimal)
+    
+    # Draw GUI (e.g., ImGui)
+    draw_gui()
+    
+    # Transition back to Present Layout
+    image.transition_layout(vk.ImageLayout.eColorAttachmentOptimal, vk.ImageLayout.ePresentSrcKHR)
+else:
+    # Direct transition to Present Layout
+    image.transition_layout(vk.ImageLayout.eGeneral, vk.ImageLayout.ePresentSrcKHR)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Layout Transitions:** Failing to transition the image from `eUndefined` to `eGeneral` before dispatch causes undefined behavior or validation errors [S1, unofficial].
+*   **GUI Interference:** If a GUI is rendered, the intermediate `eColorAttachmentOptimal` state must be used; skipping this or using the wrong layout prevents GUI rendering [S1, unofficial].
+*   **Workgroup Alignment:** The dispatch dimensions must account for the local workgroup size (typically 16) to ensure all pixels are covered, hence the ceiling division [S1, unofficial].
+
+## Subtopics
+
+## Operating characteristics
+*   **Time Complexity:** $O(W \times H)$, where $W$ and $H$ are image dimensions, as each thread typically processes one pixel or data element.
+*   **Memory Complexity:** Depends on the storage buffers bound; generally $O(N)$ for $N$ data elements (e.g., points).
+*   **Performance:** High throughput for data-parallel tasks. Performance is limited by memory bandwidth and atomic contention if multiple threads write to the same pixel [S1, unofficial].
+*   **Strengths:** Flexible data processing, no rasterization overhead, direct memory access.
+*   **Limitations:** Requires manual synchronization (atomics) for visibility resolution; more complex setup than standard graphics pipelines.
+
+## Background
+This pattern is derived from Vulkan's compute shader capabilities, allowing general-purpose GPU computing to be integrated into the rendering loop. It is commonly used in modern rendering techniques like Gaussian Splatting, where point-based rendering benefits from direct compute-based accumulation [S1, unofficial].
+
+## Sources
+[S1] Show HN: 3DGS.cpp – performant, cross platform Gaussian Splatting with Vulkan, https://github.com/shg8/3DGS.cpp, fetched 2026-10-26 (unofficial)

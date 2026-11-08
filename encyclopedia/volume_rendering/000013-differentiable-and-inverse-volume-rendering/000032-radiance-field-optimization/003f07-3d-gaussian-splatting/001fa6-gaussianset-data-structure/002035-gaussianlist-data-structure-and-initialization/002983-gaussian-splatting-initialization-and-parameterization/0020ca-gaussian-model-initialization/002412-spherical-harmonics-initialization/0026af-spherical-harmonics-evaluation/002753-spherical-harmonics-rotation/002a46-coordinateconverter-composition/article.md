@@ -25,9 +25,6 @@ struct CoordinateConverter {
 };
 ```
 
-### Parameters
-- `SH_MAX_DEGREE`: A `constexpr int` set to 4, limiting the maximum SH degree handled by `rotFlipShFuncs` [S1, unofficial].
-
 ### Numbered Steps
 1. Check `needRotation` by comparing `from` and `to` [S1, unofficial]. If identical, return a default converter with identity flips and null functions [S1, unofficial].
 2. Determine backward direction via bit 3 of `from` [S1, unofficial].
@@ -41,9 +38,18 @@ struct CoordinateConverter {
 - Backward (rotated $\to$ standard): Apply `flipP`, then $R_x(-\pi/2)$ via `p[1]=z; p[2]=-y;` [S1, unofficial].
 - Forward (standard $\to$ rotated): Apply $R_x(+\pi/2)$ via `p[1]=-z; p[2]=y;` then `flipP` [S1, unofficial].
 
-**Quaternion Rotation**: Let $s = \sqrt{2}/2$. The array $p$ holds quaternion components at indices 0–3:
+**Quaternion Rotation**: Let $s = \sqrt{2}/2$ [S1, unofficial]. The array $p$ holds quaternion components at indices 0–3 ($p[0]=x, p[1]=y, p[2]=z, p[3]=w$):
 - Backward: Apply `flipQ`, then quaternion rotation: `p[0]=s*(-w+x); p[1]=s*(y+z); p[2]=s*(-y+z); p[3]=s*(w+x);` [S1, unofficial].
 - Forward: Apply quaternion rotation: `p[0]=s*(w+x); p[1]=s*(y-z); p[2]=s*(y+z); p[3]=s*(w-x);` then `flipQ` [S1, unofficial].
+
+### Parameters
+- `SH_MAX_DEGREE`: A `constexpr int` set to 4, limiting the maximum SH degree handled by `rotFlipShFuncs` [S1, unofficial].
+
+### Edge Cases and Pitfalls
+- **Precision**: The use of $\sqrt{2}/2$ introduces floating-point approximation [S1, unofficial].
+- **Quaternion W Component**: The source explicitly states `w` is never flipped by `flipQ` [S1, unofficial].
+- **SH Degree Limit**: `SH_MAX_DEGREE` is 4, so bands $b \ge 4$ are not handled by `rotFlipShFuncs` [S1, unofficial].
+- **Bit 3 Ambiguity**: The determination of "backward" relies on bit 3 of `from` [S1, unofficial].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -79,7 +85,7 @@ def coordinate_converter(from_sys: int, to_sys: int, sh_degree: int) -> Coordina
     # Step 2: Determine direction via bit 3
     is_backward = bool(from_sys & 8)
 
-    # Step 3: Inner family shift
+    # Step 3: Inner family shift (aligns with `to_sys`)
     inner_from = from_sys + 8 if is_backward else from_sys - 8
 
     # Step 4: Recursive call for base flips
@@ -139,25 +145,17 @@ def coordinate_converter(from_sys: int, to_sys: int, sh_degree: int) -> Coordina
     result.rotFlipQFunc = rot_flip_q
 
     # Step 6: SH Rotation Assignment
-    # The source does not provide the contents of sh_minus_table or sh_plus_table [G]
-    sh_minus_table = [lambda x: None] * SH_MAX_DEGREE
-    sh_plus_table = [lambda x: None] * SH_MAX_DEGREE
-
-    table = sh_minus_table if is_backward else sh_plus_table
+    # Source does not provide the contents of sh_minus_table or sh_plus_table [G]
+    # table = sh_minus_table if is_backward else sh_plus_table
     for b in range(sh_degree):
         if b < SH_MAX_DEGREE:
-            result.rotFlipShFuncs[b] = table[b]
+            # result.rotFlipShFuncs[b] = table[b]
+            result.rotFlipShFuncs[b] = lambda x: None
         else:
             result.rotFlipShFuncs[b] = lambda x: None
 
     return result
 ```
-
-### Edge Cases and Pitfalls
-- **Precision**: The use of $\sqrt{2}/2$ introduces floating-point approximation [S1, unofficial].
-- **Quaternion W Component**: The source explicitly states `w` is never flipped by `flipQ` [S1, unofficial].
-- **SH Degree Limit**: `SH_MAX_DEGREE` is 4, so bands $b \ge 4$ are not handled by `rotFlipShFuncs` [S1, unofficial].
-- **Bit 3 Ambiguity**: The determination of "backward" relies on bit 3 of `from` [S1, unofficial].
 
 ## Subtopics
 
@@ -168,9 +166,9 @@ def coordinate_converter(from_sys: int, to_sys: int, sh_degree: int) -> Coordina
 - **Link**: [CoordinateConverter Composition](52-coordinate-converter-composition.md)
 
 ## Operating characteristics
-- **Time Complexity**: Not given in the sources.
-- **Memory Complexity**: Not given in the sources.
-- **Measured Performance**: Not given in the sources.
+- **Time Complexity**: Not given in the sources [S1, unofficial].
+- **Memory Complexity**: Not given in the sources [S1, unofficial].
+- **Measured Performance**: Not given in the sources [S1, unofficial].
 - **Strengths**: Efficient, avoids matrix multiplications by using precomputed analytic rotations and flips [G].
 - **Limitations**: Limited to SH degree 4 and specific to the SPZ coordinate system encoding [S1, unofficial].
 - **When to use**: When working with SPZ files or Gaussian splatting data that requires coordinate system alignment [S1, unofficial].

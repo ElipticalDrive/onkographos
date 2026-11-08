@@ -3,53 +3,52 @@
 Also called: Gaussian Alpha Computation, Single Point Alpha
 
 ## Overview
-Computes the alpha value for a single 3D Gaussian projected onto a 2D pixel. It transforms the Gaussian to camera space, computes the 2D covariance, projects it to screen space, and evaluates the 2D Gaussian probability density at the pixel center [S1, unofficial]. It differs from its sibling [2D Gaussian Probability Density (Standard)](3466-2d-gaussian-probability-density-standard.md) by including the full projection pipeline (camera transform, Jacobian approximation) rather than assuming a pre-computed 2D covariance [S1, unofficial]. It differs from [2D Gaussian Probability Density (Conic)](3475-2d-gaussian-probability-density-conic.md) by using the explicit covariance matrix inversion and exponential form rather than the conic matrix (inverse covariance) for evaluation [S1, unofficial].
+Computes the alpha value for a single 3D Gaussian projected onto a 2D pixel [S1, unofficial]. It transforms the Gaussian to camera space, computes the 2D covariance, projects it to screen space, and evaluates the 2D Gaussian probability density at the pixel center [S1, unofficial]. It differs from its sibling [2D Gaussian Probability Density (Standard)](3466-2d-gaussian-probability-density-standard.md) by including the full projection pipeline (camera transform, Jacobian approximation) rather than assuming a pre-computed 2D covariance [S1, unofficial]. It differs from [2D Gaussian Probability Density (Conic)](3475-2d-gaussian-probability-density-conic.md) by using the explicit covariance matrix inversion and exponential form rather than the conic matrix (inverse covariance) for evaluation [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- $xyz$: 3D position of the Gaussian center in world space.
-- $q$: Quaternion $(w, x, y, z)$ representing orientation.
-- $s$: Scale vector $(s_x, s_y, s_z)$ in log-space.
-- $\sigma_{raw}$: Raw opacity value (pre-activation).
-- $T_{camera}$: $4 \times 4$ world-to-camera transformation matrix.
-- $K$: $3 \times 3$ camera intrinsic matrix.
-- $uv_{center}$: 2D screen coordinates of the pixel center.
+- $xyz$: 3D position of the Gaussian center in world space [S1, unofficial].
+- $q$: Quaternion $(w, x, y, z)$ representing orientation [S1, unofficial].
+- $s$: Scale vector $(s_x, s_y, s_z)$ in log-space [S1, unofficial].
+- $\sigma_{raw}$: Raw opacity value (pre-activation) [S1, unofficial].
+- $T_{camera}$: $4 \times 4$ world-to-camera transformation matrix [S1, unofficial].
+- $K$: $3 \times 3$ camera intrinsic matrix [S1, unofficial].
+- $uv_{center}$: 2D screen coordinates of the pixel center [S1, unofficial].
 
 **Outputs:**
-- $\alpha$: Scalar alpha value for the Gaussian at the pixel.
+- $\alpha$: Scalar alpha value for the Gaussian at the pixel [S1, unofficial].
 
 **Data Structures:**
-- Matrices are $3 \times 3$ or $4 \times 4$ standard floating-point arrays.
-- Vectors are standard 3D or 4D floating-point arrays.
+- Matrices are $3 \times 3$ or $4 \times 4$ standard floating-point arrays [G].
+- Vectors are standard 3D or 4D floating-point arrays [G].
 
 **Steps:**
-1. **Homogenize position:** Construct homogeneous coordinate $p_{world} = [xyz, 1]^T$.
-2. **Transform to camera space:** Compute $p_{camera} = T_{camera} \cdot p_{world}$.
-3. **Extract camera coordinates:** Let $xyz_{camera} = [x_c, y_c, z_c]^T$ be the first three components of $p_{camera}$.
+1. **Homogenize position:** Construct homogeneous coordinate $p_{world} = [xyz, 1]^T$ [S1, unofficial].
+2. **Transform to camera space:** Compute $p_{camera} = T_{camera} \cdot p_{world}$ [S1, unofficial].
+3. **Extract camera coordinates:** Let $xyz_{camera} = [x_c, y_c, z_c]^T$ be the first three components of $p_{camera}$ [S1, unofficial].
 4. **Project to UV:**
-   - Compute $uv1 = K \cdot xyz_{camera}$.
-   - Let $w_{proj} = uv1_z$.
-   - Compute screen coordinates $uv = [uv1_x / w_{proj}, uv1_y / w_{proj}]^T$.
+   - Compute $uv1 = K \cdot xyz_{camera}$ [S1, unofficial].
+   - Let $w_{proj} = uv1_z$ [S1, unofficial].
+   - Compute screen coordinates $uv = [uv1_x / w_{proj}, uv1_y / w_{proj}]^T$ [S1, unofficial].
 5. **Compute 3D Covariance $\Sigma$:**
-   - Compute scale matrix $S = \text{diag}(\exp(s_x), \exp(s_y), \exp(s_z))$.
-   - Compute rotation matrix $R$ from quaternion $q$.
-   - Compute $\Sigma = R S S^T R^T$.
+   - Compute scale matrix $S = \text{diag}(\exp(s_x), \exp(s_y), \exp(s_z))$ [S1, unofficial].
+   - Compute rotation matrix $R$ from quaternion $q$ [S1, unofficial].
+   - Compute $\Sigma = R S S R^T$ [S1, unofficial].
 6. **Compute Jacobian $J$:**
-   - Let $T_{camera}$ be decomposed into rotation $W$ ($3 \times 3$) and translation $t$ ($3 \times 1$).
-   - The projection Jacobian $J$ with respect to the camera-space position is derived from the pinhole camera model. For a point $xyz_{camera}$, the Jacobian of the projection $(x_c, y_c, z_c) \to (x_c/z_c, y_c/z_c)$ is:
-     $$ J = \begin{bmatrix} 1/z_c & 0 & -x_c/z_c^2 \\ 0 & 1/z_c & -y_c/z_c^2 \end{bmatrix} $$
-   - Note: Some implementations approximate this or use the full $2 \times 3$ Jacobian of the projection function. The source [S1, unofficial] specifies $J$ as the Jacobian of projection.
+   - Let $T_{camera}$ be decomposed into rotation $W$ ($3 \times 3$) and translation $t$ ($3 \times 1$) [S1, unofficial].
+   - The projection Jacobian $J$ with respect to the camera-space position is derived from the pinhole camera model [G]. For a point $xyz_{camera}$, the Jacobian of the projection $(x_c, y_c, z_c) \to (x_c/z_c, y_c/z_c)$ is:
+     $$ J = \begin{bmatrix} 1/z_c & 0 & -x_c/z_c^2 \\ 0 & 1/z_c & -y_c/z_c^2 \end{bmatrix} $$ [G].
 7. **Compute 2D Covariance $cov$:**
-   - Let $W$ be the upper-left $3 \times 3$ rotation part of $T_{camera}$.
-   - Compute $cov = J W \Sigma W^T J^T$.
+   - Let $W$ be the upper-left $3 \times 3$ rotation part of $T_{camera}$ [S1, unofficial].
+   - Compute $cov = J W \Sigma W^T J^T$ [S1, unofficial].
    - This approximates the 2D covariance in screen space by projecting the 3D covariance through the camera geometry [S1, unofficial].
 8. **Compute Probability Density $p$:**
-   - Compute the inverse of the 2D covariance matrix $cov^{-1}$.
-   - Compute the squared Mahalanobis distance: $d^2 = (uv_{center} - uv)^T \cdot cov^{-1} \cdot (uv_{center} - uv)$.
-   - Compute $p = \exp(-0.5 \cdot d^2)$.
+   - Compute the inverse of the 2D covariance matrix $cov^{-1}$ [S1, unofficial].
+   - Compute the squared Mahalanobis distance: $d^2 = (uv_{center} - uv)^T \cdot cov^{-1} \cdot (uv_{center} - uv)$ [S1, unofficial].
+   - Compute $p = \exp(-0.5 \cdot d^2)$ [S1, unofficial].
 9. **Compute Alpha:**
-   - Apply sigmoid to raw opacity: $\sigma = \frac{1}{1 + e^{-\sigma_{raw}}}$.
-   - Compute $\alpha = \sigma \cdot p$.
+   - Apply sigmoid to raw opacity: $\sigma = \frac{1}{1 + e^{-\sigma_{raw}}}$ [G].
+   - Compute $\alpha = \sigma \cdot p$ [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -95,10 +94,10 @@ def single_point_alpha_forward(xyz, q, s, sigma_raw, T_camera, K, uv_center):
     # Rotation matrix from quaternion
     R = quaternion_to_rotation_matrix(q)
     
-    # Sigma = R * S * S^T * R^T
-    # Since S is diagonal, S * S^T = diag(exp_s^2)
-    SS_T = np.diag(exp_s**2)
-    Sigma = R @ SS_T @ R.T
+    # Sigma = R * S * S * R^T
+    # Since S is diagonal, S * S = diag(exp_s^2)
+    SS = np.diag(exp_s**2)
+    Sigma = R @ SS @ R.T
     
     # 6. Compute Jacobian J
     # J is 2x3 Jacobian of projection (x/z, y/z) w.r.t (x, y, z)
@@ -147,10 +146,10 @@ def quaternion_to_rotation_matrix(q):
 ```
 
 **Parameters:**
-- $K$: Camera intrinsics, typically $3 \times 3$ matrix containing focal lengths and principal point.
-- $T_{camera}$: World-to-camera transform, typically $4 \times 4$ matrix.
-- $q$: Quaternion, normalized to unit length.
-- $s$: Log-scale, typically optimized during training.
+- $K$: Camera intrinsics, typically $3 \times 3$ matrix containing focal lengths and principal point [G].
+- $T_{camera}$: World-to-camera transform, typically $4 \times 4$ matrix [G].
+- $q$: Quaternion, normalized to unit length [G].
+- $s$: Log-scale, typically optimized during training [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
 - **Depth $z_c \le 0$:** If the Gaussian is behind the camera, the projection is invalid. The implementation should check $z_c > 0$ and return 0 or handle appropriately [G].
@@ -163,20 +162,20 @@ def quaternion_to_rotation_matrix(q):
 This method computes the alpha values for all $N$ 2D Gaussians across all $W \times H$ pixels in a single batched operation, serving as the core rasterization step in Gaussian Splatting. It builds on [Single Point Alpha Forward](3478-single-point-alpha-forward.md) by vectorizing the evaluation over the entire image grid, enabling efficient GPU execution [G]. It differs from [Explicit Intersection Alpha Compositing](4814-explicit-intersection-alpha-compositing.md) by computing raw alpha contributions for all pixel-gaussian pairs rather than identifying explicit intersection pairs for compositing.
 
 ### 3D Gaussian Point Spread Function Model
-A PSF model defined by a 3x3 symmetric positive semi-definite covariance matrix $\Sigma$. It controls the blur level in the rendered image [S2, unofficial]. The formula is $h(\mathbf{x}) = \frac{e^{-\frac{1}{2}\mathbf{x}^T \Sigma^{-1} \mathbf{x}}}{\sqrt{(2\pi)^3 \det \Sigma}}$ for $\mathbf{x} \in \mathbb{R}^3$. Its Fourier transform is $\hat{h}(\xi) = e^{-\frac{1}{2} \xi^T \Sigma^{-1} \xi}$, where $\xi \in \mathbb{R}^3$ is the wavevector [S2, unofficial]. The parameter $\Sigma$ is optimized during inference to control blur [S2, unofficial]. More photorealistic PSFs can be used (e.g., based on refractive indices or Zernike polynomials), but the Gaussian model is the baseline implemented here [S2, unofficial].
+A PSF model defined by a 3x3 symmetric positive semi-definite covariance matrix $\Sigma$ [S2, unofficial]. It controls the blur level in the rendered image [S2, unofficial]. The formula is $h(\mathbf{x}) = \frac{e^{-\frac{1}{2}\mathbf{x}^T \Sigma^{-1} \mathbf{x}}}{\sqrt{(2\pi)^3 \det \Sigma}}$ for $\mathbf{x} \in \mathbb{R}^3$ [S2, unofficial]. Its Fourier transform is $\hat{h}(\xi) = e^{-\frac{1}{2} \xi^T \Sigma^{-1} \xi}$, where $\xi \in \mathbb{R}^3$ is the wavevector [S2, unofficial]. The parameter $\Sigma$ is optimized during inference to control blur [S2, unofficial]. More photorealistic PSFs can be used (e.g., based on refractive indices or Zernike polynomials), but the Gaussian model is the baseline implemented here [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per Gaussian-pixel pair. The dominant cost is matrix inversion (constant size $2 \times 2$) and exponential evaluation.
-- **Memory Complexity:** $O(1)$ auxiliary memory per evaluation.
+- **Time Complexity:** $O(1)$ per Gaussian-pixel pair. The dominant cost is matrix inversion (constant size $2 \times 2$) and exponential evaluation [G].
+- **Memory Complexity:** $O(1)$ auxiliary memory per evaluation [G].
 - **Measured Performance:** Not given in the sources.
 - **Scaling:** Scales linearly with the number of Gaussians and pixels if batched. Vectorization on GPU significantly improves throughput [G].
-- **Strengths:** Simple, differentiable, and efficient for single-point evaluation.
-- **Limitations:** Does not handle occlusion or compositing directly. Requires careful handling of degenerate cases (singular covariance, behind-camera).
-- **When to use:** When computing the contribution of a single Gaussian to a specific pixel, e.g., in analytical derivatives or debugging.
+- **Strengths:** Simple, differentiable, and efficient for single-point evaluation [G].
+- **Limitations:** Does not handle occlusion or compositing directly. Requires careful handling of degenerate cases (singular covariance, behind-camera) [G].
+- **When to use:** When computing the contribution of a single Gaussian to a specific pixel, e.g., in analytical derivatives or debugging [G].
 - **When not to use:** For full image rasterization, use batched methods like [2D Gaussian Alpha Computation (Batched)](4273-2d-gaussian-alpha-computation-batched.md).
 
 ## Background
-Originated in the context of 3D Gaussian Splatting for novel view synthesis [S1, unofficial]. The method is a fundamental building block for rasterizing 3D Gaussians onto 2D screens. The 3D Gaussian Point Spread Function Model is also discussed in the context of differentiable rendering for 3D fluorescence microscopy, where it serves as a baseline PSF model [S2, unofficial].
+Implemented in [S1, unofficial] as part of a Taichi-based 3D Gaussian Splatting rasterizer. The method is a fundamental building block for rasterizing 3D Gaussians onto 2D screens. The related 3D Gaussian Point Spread Function Model is discussed in [S2, unofficial] for differentiable rendering of fluorescence microscopy, where it serves as a baseline PSF model [S2, unofficial].
 
 ## Sources
 [S1] wanmeihuali/taichi_3d_gaussian_splatting, https://github.com/wanmeihuali/taichi_3d_gaussian_splatting, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,215 @@
+--- v002.md
++++ v003.md
+@@ -1,107 +1,139 @@
+ # Adaptive Resolution Data Generation
++
+ Also called: AR Data Generation
+ 
+ ## Overview
+-Adaptive Resolution (AR) Data Generation creates a multiresolution volume representation by recursively subdividing the data space into an octree, where leaf nodes store data at varying resolutions based on local error metrics [S1, unofficial]. It differs from fixed-grid downsampling by pruning low-variance regions, thereby reducing memory and rendering costs while preserving detail in high-variance areas [S1, unofficial].
++Adaptive Resolution Data Generation creates a multiresolution representation of volume data by combining hierarchical subsampling with error-based pruning. It solves the problem of storing and rendering large volume datasets efficiently by discarding redundant or low-detail regions. Unlike uniform multiresolution approaches, it adapts the grid density to local data variance, storing only octree nodes where the scalar range exceeds a threshold [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A uniform scalar volume dataset $V$ of resolution $N \times N \times N$ (where $N=2^k$), and a scalar threshold $\Delta$.
+-**Outputs:** An octree structure where each node represents a cubic sub-volume. Leaf nodes store the scalar values for their respective resolution level.
++**Inputs:**
++- A uniform volume dataset of size $N^3$ (e.g., $128^3$).
++- A scalar threshold $\Delta$ for pruning.
++
++**Outputs:**
++- An octree data structure where leaf nodes represent volume regions at varying resolutions.
++- Error data associated with coarse representations (see [S1, unofficial]).
+ 
+ **Data Structures:**
+-The data is stored in an octree. Each node contains:
+-1.  `is_leaf`: Boolean flag.
+-2.  `children`: Array of 8 pointers to child nodes (only if `is_leaf` is false).
+-3.  `data`: Array of scalar values (only if `is_leaf` is true). The size of `data` depends on the node's resolution level $L$. For a node at level $L$, the resolution is $N / 2^L$. The number of vertices is $(N/2^L + 1)^3$.
++- **Octree Node:** Represents a cubic region. Contains scalar min/max values for its region.
++- **Levels:** Level 0 is the finest resolution ($N^3$). Level $k$ has resolution $(N/2^k)^3$. Level 7 is the root for $N=128$.
+ 
+-**Algorithm:**
+-1.  **Initial Coarsening:** Generate the base coarse levels by sampling. Level 0 is the finest ($N^3$). To generate Level $L+1$ from Level $L$, sample every other data point in each dimension. Level $k$ has resolution $N/2^k$. Level 7 is the root for a $128^3$ dataset [S1, unofficial].
+-2.  **Recursive Subdivision:** Start with a root node representing the entire volume at the coarsest level (Level 7).
+-3.  **Error Calculation:** For a current node at level $L$ with resolution $R = N/2^L$:
+-    *   Retrieve the scalar values of the 8 vertices of the cube represented by this node.
+-    *   Calculate the difference $\delta = \max(V_{vertices}) - \min(V_{vertices})$.
+-4.  **Pruning Decision:**
+-    *   If $\delta < \Delta$, the node is a leaf. Store the data for this resolution level.
+-    *   If $\delta \ge \Delta$, the node is an internal node. Create 8 children, each representing one octant of the current cube. Recursively apply steps 3-4 to each child.
+-5.  **Data Storage:** When a node becomes a leaf, store the scalar values for the grid points defined by its resolution level. Note that adjacent leaf nodes at different levels share boundary vertices to ensure continuity [S1, unofficial].
++**Steps:**
++1. **Generate Coarse Levels:** Create uniform subsampled grids for levels $1$ to $L_{max}$. For each dimension, sample every second data point from the finer level to generate the coarser level [S1, unofficial].
++   - Level 0: Original data ($128^3$).
++   - Level $k$: Data from Level $k-1$ sampled at stride 2.
++   - A cube at level $k$ represents $2 \times 2 \times 2 = 8$ cubes from level $k-1$.
++2. **Build Octree:** Traverse the hierarchy. For each node at level $k$, calculate the difference between the maximum and minimum scalar vertex values in its region [S1, unofficial].
++3. **Prune:** If the difference is less than $\Delta$, prune all children of the current node. The node becomes a leaf at the current resolution [S1, unofficial].
++4. **Store:** If the difference is $\ge \Delta$, keep the children and recurse. Store the coarse data for the node if it is a leaf.
+ 
+ **Pseudocode:**
+ ```python
+-def generate_ar_data(volume, threshold, level=0, max_level=7):
++def generate_ar_data(volume, threshold):
+     """
+-    volume: 3D array of scalars
+-    threshold: float, delta
+-    level: int, current resolution level
+-    max_level: int, root level
++    volume: 3D array of shape (N, N, N)
++    threshold: scalar delta for pruning
++    Returns: Octree structure
+     """
+-    # Base case: reached root or max level
+-    if level == max_level:
+-        return create_leaf_node(volume, level)
++    N = volume.shape[0]
++    levels = [volume]
++    
++    # Step 1: Generate uniform coarse levels
++    current_vol = volume
++    while current_vol.shape[0] > 1:
++        # Sample every other point in each dimension
++        next_vol = current_vol[::2, ::2, ::2]
++        levels.append(next_vol)
++        current_vol = next_vol
++        
++    # levels[0] is finest, levels[-1] is coarsest (root)
++    
++    # Step 2 & 3: Build octree and prune
++    # Root is at level 7 for N=128
++    root = build_octree(levels, 0, (0,0,0), N, threshold)
++    return root
+ 
+-    # Get current resolution size
+-    # Assuming volume is passed as the sub-volume for the current node
+-    # In practice, this requires tracking offsets or passing the full volume with bounds
+-    current_res = volume.shape[0]
++def build_octree(levels, level_idx, origin, size, threshold):
++    """
++    Recursively build octree.
++    level_idx: index in levels list (0 is finest)
++    origin: (x, y, z) start of this block
++    size: side length of this block
++    """
++    if level_idx >= len(levels):
++        return None # Should not happen for valid N=2^k
+     
+-    # Calculate max and min of the 8 corners of the current cube
+-    # The cube vertices are at indices 0 and current_res-1 in each dimension
+-    corners = [
+-        volume[0, 0, 0], volume[0, 0, current_res-1],
+-        volume[0, current_res-1, 0], volume[0, current_res-1, current_res-1],
+-        volume[current_res-1, 0, 0], volume[current_res-1, 0, current_res-1],
+-        volume[current_res-1, current_res-1, 0], volume[current_res-1, current_res-1, current_res-1]
+-    ]
++    # Get the coarse data for this level
++    # Note: levels[level_idx] contains the data for this resolution
++    # We need to extract the specific block defined by origin and size
++    # However, the source implies we check the scalar range of the 
++    # region represented by the node.
+     
+-    delta = max(corners) - min(corners)
++    # Extract region from the coarsest available level that covers this node?
++    # The source says "difference between max and min vertex scalar values".
++    # We use the finest level (0) to compute exact min/max for the region,
++    # or the level corresponding to the node's resolution.
++    # The source implies checking the node's content against the threshold.
+     
+-    if delta < threshold:
+-        return create_leaf_node(volume, level)
+-    else:
+-        # Subdivide into 8 octants
+-        half = current_res // 2
+-        children = []
++    # Let's assume we check the scalar range of the region in the finest level
++    # to determine if it needs further subdivision.
++    # Region bounds:
++    x0, y0, z0 = origin
++    x1, y1, z1 = x0 + size, y0 + size, z0 + size
++    
++    region_data = levels[0][x0:x1, y0:y1, z0:z1]
++    scalar_min = region_data.min()
++    scalar_max = region_data.max()
++    
++    # Step 3: Prune condition
++    if (scalar_max - scalar_min) < threshold:
++        # Prune children. This node is a leaf.
++        # Store the coarse representation if needed, or just the min/max
++        return NodeLeaf(min=scalar_min, max=scalar_max, level=level_idx)
++    
++    # Step 4: Keep children
++    children = []
++    half_size = size // 2
++    if half_size == 0:
++        # Leaf at finest level
++        return NodeLeaf(min=scalar_min, max=scalar_max, level=level_idx)
+         
+-        # Define octant boundaries
+-        # Octant 0: x[0,half], y[0,half], z[0,half]
+-        # ... up to Octant 7: x[half,current_res], y[half,current_res], z[half,current_res]
+-        
+-        for x in [0, half]:
+-            for y in [0, half]:
+-                for z in [0, half]:
+-                    # Extract sub-volume for child
+-                    # Note: Indices must be handled carefully to share boundaries
+-                    child_vol = volume[x:x+half+1, y:y+half+1, z:z+half+1]
+-                    children.append(generate_ar_data(child_vol, threshold, level + 1, max_level))
+-        
+-        return create_internal_node(children)
+-
+-def create_leaf_node(data, level):
+-    return Node(is_leaf=True, data=data, level=level)
+-
+-def create_internal_node(children):
+-    return Node(is_leaf=False, children=children, level=None)
++    # Generate 8 children
++    for dx in [0, 1]:
++        for dy in [0, 1]:
++            for dz in [0, 1]:
++                child_origin = (x0 + dx * half_size, 
++                                y0 + dy * half_size, 
++                                z0 + dz * half_size)
++                child = build_octree(levels, level_idx, child_origin, half_size, threshold)
++                if child is not None:
++                    children.append(child)
++                    
++    return NodeInternal(children=children, min=scalar_min, max=scalar_max, level=level_idx)
+ ```
+ 
+ **Parameters:**
+-*   $\Delta$: Threshold for variance. Typical values depend on the data range. Not given in the sources.
+-*   $N$: Base resolution. Example: $128^3$ [S1, unofficial].
++- $\Delta$: Pruning threshold. Typical value not given in sources.
++- $N$: Volume dimension. Example: $128^3$.
+ 
+ **Edge Cases:**
+-*   **Boundary Sharing:** Adjacent nodes at different levels share vertices. Implementation must ensure consistent data retrieval for shared boundaries [S1, unofficial].
+-*   **Degenerate Input:** If all vertex values are identical, $\delta=0$, and the node is pruned immediately.
++- If $N$ is not a power of 2, subsampling logic may require adjustment [G].
++- If $\Delta = 0$, no pruning occurs, resulting in full resolution storage.
++- If $\Delta$ is very large, only the root node is kept.
+ 
+ ## Subtopics
+ 
+ ### [Hierarchical Voronoi Diagrams](4112-hierarchical-voronoi-diagrams.md)
+-An adaptive clustering method for scattered data that builds a hierarchy of Voronoi diagrams. It differs by not requiring a grid structure, making it suitable for unstructured datasets.
++Hierarchical Voronoi Diagrams is an adaptive clustering method for the multiresolution representation of scattered data. It constructs a hierarchy of Voronoi diagrams from nested subsets of the original set of points. Unlike mesh-reduction algorithms, it does not require a grid structure connecting the given data points, making it suitable for unstructured datasets.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Generation is $O(N^3)$ in the worst case (no pruning), but typically faster due to pruning. Rendering complexity depends on the number of leaf nodes.
+-*   **Memory Complexity:** Proportional to the number of leaf nodes and their resolution. Significantly less than full resolution for smooth data [S1, unofficial].
+-*   **Strengths:** Reduces memory and computation time for redundant data areas. Preserves detail where needed [S1, unofficial].
+-*   **Limitations:** Requires preprocessing to build the octree. Not given in the sources for specific performance metrics.
++- **Time Complexity:** Generating coarse levels is $O(N^3)$. Building the octree is $O(N^3)$ in the worst case (no pruning).
++- **Memory Complexity:** Depends on the threshold. Can be significantly less than $O(N^3)$ if pruning is effective.
++- **Performance:** Saves memory and computation time by eliminating uninteresting cubes [S1, unofficial].
++- **Strengths:** Simple generation; adapts to data redundancy.
++- **Limitations:** Uniform subsampling may introduce aliasing; threshold selection is critical.
+ 
+ ## Background
+-Originated in the context of scientific volume visualization, specifically for IsoSurface Rendering of Adaptive Resolution Data [S1, unofficial]. The method addresses the need for efficient rendering of large volume datasets by exploiting data redundancy.
++Originated in the context of scientific volume visualization. The method is described in "IsoSurface Rendering of Adaptive Resolution Data" [S1, unofficial]. It addresses the need for efficient storage and rendering of large volume datasets by exploiting data redundancy.
+ 
+ ## Sources

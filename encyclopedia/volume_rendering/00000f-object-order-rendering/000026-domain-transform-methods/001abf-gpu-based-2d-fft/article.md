@@ -3,159 +3,181 @@
 Also called: 2D FFT on GPU, Fast Fourier Transform on GPU, Frequency Domain Volume Rendering Transform, GPU FFT, GPU-based Fast Fourier Transform (FFT)
 
 ## Overview
-A GPU-based implementation of the 2D Fast Fourier Transform (FFT) used for volume rendering, specifically designed to exploit the separability of the Fourier transform by processing rows and columns independently [S1, unofficial][S2, unofficial]. It solves the computational bottleneck of frequency-domain volume rendering by mapping the butterfly algorithm to GPU fragment shaders, using texture lookups for address calculation and twiddle factors [S1, unofficial][S2, unofficial]. It sets itself apart from CPU-based FFTs by leveraging parallel fragment processing and hardware texture units for data reordering and arithmetic, and from other domain-transform methods like the Hartley Transform by using complex arithmetic and standard bit-reversal scrambling [S1, unofficial][S2, unofficial].
+GPU-based 2D FFT is a hardware-accelerated method for computing the Discrete Fourier Transform (DFT) on graphics processing units, specifically adapted for the domain-transform pipeline of volume rendering [S1, S2, unofficial]. It solves the computational bottleneck of transforming 2D projection slices between the frequency and spatial domains by exploiting the separability of the 2D DFT into two 1D passes [S2, unofficial]. It sets itself apart from CPU-based FFTs by utilizing texture memory and fragment shaders for parallel butterfly operations, and from direct spatial convolution by operating in the frequency domain to enable efficient projection-slice extraction [S1, S2, unofficial].
 
 ## How it works
+The method computes the 2D DFT of a data block of size $N \times N$ (where $N$ is typically 256 or 512) by performing two identical 1D FFT passes: one for rows and one for columns [S2, unofficial]. Each 1D pass consists of a scrambling step followed by $\log_2 N$ butterfly passes [S1, S2, unofficial].
+
 **Inputs and Outputs:**
-*   Input: A 2D texture containing complex data (real and imaginary parts) of size $N \times N$ [S1, unofficial][S2, unofficial].
-*   Output: A 2D texture containing the transformed complex data of size $N \times N$ [S1, unofficial][S2, unofficial].
+*   **Input:** A 2D texture containing the complex data to be transformed (e.g., the extracted projection slice from the frequency domain).
+*   **Output:** A 2D texture containing the transformed complex data (e.g., the spatial domain image for compositing).
 
 **Data Structures:**
-1.  **Ping-Pong Buffers:** Two 2D textures of size $N \times N$ used to store intermediate results [S1, unofficial][S2, unofficial]. One acts as the source texture, the other as the rendering target [S1, unofficial][S2, unofficial].
-2.  **Scramble Lookup Texture:** A pre-computed texture storing the bit-reversal permutation indices [S1, unofficial][S2, unofficial]. For an index $x$, it provides the swapped index $y = \text{bit\_reverse}(x)$ [S1, unofficial][S2, unofficial].
-3.  **Butterfly Lookup Texture:** A pre-computed texture storing the addresses of the two contributing samples ($a$ and $b$) and the principal $N$-th root of unity ($w$) for each butterfly operation [S1, unofficial][S2, unofficial].
-
-**Parameters:**
-*   $N$: The size of the transform dimension (e.g., 256 or 512) [S1, unofficial][S2, unofficial].
+1.  **Ping-Pong Buffers:** Two 2D textures of size $N \times N$ are used to store intermediate results. One acts as the source texture, and the other as the rendering target (framebuffer attachment). They swap roles after each butterfly pass [S1, S2, unofficial].
+2.  **Scramble Lookup Texture:** A 1D or 2D texture storing the bit-reversal permutation indices. It maps an input index $x$ to its bit-reversed counterpart $y$ [S1, S2, unofficial].
+3.  **Butterfly Lookup Texture:** A texture storing the parameters for the butterfly operation. For each fragment (pixel), it provides:
+    *   The memory address (or texture coordinate) of sample $a$.
+    *   The memory address (or texture coordinate) of sample $b$.
+    *   The complex value $w$, which is the principal $N$-th root of unity corresponding to the current butterfly stage [S1, S2, unofficial].
 
 **Algorithm Steps:**
-The 2D FFT is computed in two identical passes: one for the rows and one for the columns [S1, unofficial][S2, unofficial]. Each pass consists of a scrambling phase followed by $\log_2 N$ butterfly phases [S1, unofficial][S2, unofficial].
 
 1.  **Scrambling Pass:**
-    *   Reorder the input data by swapping samples at position $x$ with samples at position $y$, where $y$ is the bit-reversal of $x$ [S1, unofficial][S2, unofficial].
-    *   This is implemented by binding the input texture as a source and a buffer as a target [S1, unofficial][S2, unofficial]. Each fragment shader invocation reads the coordinate $x$, fetches $y$ from the scramble lookup texture, and writes the value from $x$ to $y$ [S1, unofficial][S2, unofficial].
-    *   Formula: $y = \text{bit\_reverse}(x)$ [S2, unofficial].
+    *   Bind the input texture as source and a ping-pong buffer as target.
+    *   For each pixel at position $x$, fetch the scrambled position $y$ from the **Scramble Lookup Texture**.
+    *   Compute $y = \text{bit\_reverse}(x)$ [S2, unofficial].
+    *   Sample the input texture at $x$ and write it to position $y$ in the target buffer [S1, S2, unofficial].
+    *   *Note:* This step reorders the data into bit-reversed order, preparing it for the iterative butterfly structure [S2, unofficial].
 
-2.  **Butterfly Passes:**
-    *   Perform $\log_2 N$ passes [S1, unofficial][S2, unofficial]. In each pass, use ping-pong buffering: bind one buffer as the source texture and the other as the rendering target [S1, unofficial][S2, unofficial].
-    *   In each butterfly pass, the fragment shader processes a fragment corresponding to a specific output location [S1, unofficial].
-    *   Fetch from the butterfly lookup texture to determine the addresses of two contributing samples, $a$ and $b$ [S1, unofficial][S2, unofficial], and the principal $N$-th root of unity, $w$ [S1, unofficial][S2, unofficial].
-    *   Perform complex multiplication and two additions using the fetched values and addresses [S1, unofficial][S2, unofficial].
+2.  **Butterfly Passes (for one dimension):**
+    *   Perform $\log_2 N$ passes. Let $k$ be the pass index ($0 \le k < \log_2 N$).
+    *   Bind the current result buffer as source and the other ping-pong buffer as target.
+    *   For each fragment (pixel) in the target:
+        *   Fetch addresses $a$ and $b$, and the complex weight $w$ from the **Butterfly Lookup Texture** [S1, S2, unofficial].
+        *   Sample the source texture at $a$ to get value $A$.
+        *   Sample the source texture at $b$ to get value $B$.
+        *   Compute the butterfly operation:
+            $$
+            \begin{aligned}
+            A' &= A + B \cdot w \\
+            B' &= A - B \cdot w
+            \end{aligned}
+            $$
+        *   Write $A'$ and $B'$ to their respective positions in the target buffer [S1, S2, unofficial].
+    *   Swap the source and target buffers for the next pass [S1, S2, unofficial].
 
-3.  **Second Dimension:**
-    *   Analogously perform the same scrambling and butterfly passes for the other dimension [S1, unofficial][S2, unofficial].
+3.  **Dimension Swap:**
+    *   After completing the $\log_2 N$ butterfly passes for the first dimension (e.g., rows), the data is now transformed in that dimension.
+    *   Transpose the data or reorganize the texture coordinates so that the columns become the new rows. This allows the same 1D FFT kernel to be applied to the second dimension (columns) [S2, unofficial].
+    *   Repeat Steps 1 and 2 for the second dimension.
 
-4.  **Inverse Transform:**
-    *   For the inverse 2D FFT, the process is identical, but in the final pass, the values are scaled down by the factor $N^{-1}$ [S1, unofficial][S2, unofficial].
-    *   The output is written to the framebuffer [S1, unofficial][S2, unofficial].
+4.  **Inverse Transform (IFFT):**
+    *   The inverse transform uses the same scrambling and butterfly structure.
+    *   The complex weight $w$ in the butterfly lookup texture must be replaced with its conjugate $w^*$ (or equivalently, use $-k$ in the exponent) [S1, S2, unofficial].
+    *   In the final butterfly pass of the second dimension, scale the output values by $N^{-1}$ to normalize the result [S1, S2, unofficial].
+    *   Write the final result to the framebuffer [S1, S2, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def gpu_fft_2d(input_data, output_data, is_inverse=False):
+def gpu_fft_2d(input_texture, output_texture, N, is_inverse=False):
     """
-    Performs a 2D FFT on the GPU using ping-pong buffering and lookup textures.
-    input_data: 2D list of complex numbers size N x N
-    output_data: 2D list of complex numbers size N x N
+    Performs a 2D FFT on the GPU using ping-pong buffers and lookup textures.
+    
+    Args:
+        input_texture: 2D texture of size N x N containing complex input data.
+        output_texture: 2D texture of size N x N for the final result.
+        N: Size of the transform dimension (e.g., 256, 512).
+        is_inverse: Boolean flag for Inverse FFT.
     """
-    N = len(input_data)
-    LOG_N = int(math.log2(N))
-    # Initialize ping-pong buffers
-    buf_a = [row[:] for row in input_data]
-    buf_b = [[0j]*N for _ in range(N)]
-
-    # Pass 1: Rows
-    buf_a = scramble_pass(buf_a)
-    current_src, current_dst = buf_b, buf_a
-    for stage in range(LOG_N):
-        current_dst = butterfly_pass(current_src, current_dst, stage, N)
-        current_src, current_dst = current_dst, current_src
-    row_result = current_src
-
-    # Pass 2: Columns
-    col_result = scramble_pass(transpose(row_result))
-    current_src, current_dst = buf_b, buf_a
-    for stage in range(LOG_N):
-        current_dst = butterfly_pass(current_src, current_dst, stage, N)
-        current_src, current_dst = current_dst, current_src
-    final_result = transpose(current_src)
-
+    # Allocate two ping-pong buffers
+    buffer_a = create_2d_texture(N, N)
+    buffer_b = create_2d_texture(N, N)
+    
+    # Current source and target pointers
+    src = input_texture
+    dst = buffer_a
+    
+    # Pass 1: Transform Rows
+    # Step 1: Scrambling
+    dst = scramble_pass(src, N)
+    src = dst
+    dst = buffer_b
+    
+    # Step 2: Butterfly Passes for Rows
+    for k in range(log2(N)):
+        w = get_butterfly_weight(N, k, is_inverse)
+        src, dst = ping_pong_butterfly_pass(src, dst, N, w)
+        
+    # Data is now transformed in rows. 
+    # To transform columns, we can either transpose the data or 
+    # modify the kernel to access columns. Here we assume a transpose 
+    # or a column-access kernel is used. For simplicity, we transpose.
+    src = transpose(src, N)
+    dst = buffer_a
+    
+    # Pass 2: Transform Columns
+    # Step 1: Scrambling
+    dst = scramble_pass(src, N)
+    src = dst
+    dst = buffer_b
+    
+    # Step 2: Butterfly Passes for Columns
+    for k in range(log2(N)):
+        w = get_butterfly_weight(N, k, is_inverse)
+        src, dst = ping_pong_butterfly_pass(src, dst, N, w)
+        
+    # Final Scaling for Inverse Transform
     if is_inverse:
-        for i in range(N):
-            for j in range(N):
-                final_result[i][j] /= N
-    return final_result
+        dst = scale_texture(dst, N, N, 1.0 / (N * N))
+        
+    # Copy result to output
+    copy_texture(dst, output_texture)
 
-def scramble_pass(data):
+def scramble_pass(src_texture, N):
     """
-    Reorders data by swapping x with bit_reverse(x).
+    Reorders data by bit-reversal permutation.
     """
-    N = len(data)
-    result = [[0j]*N for _ in range(N)]
-    for y in range(N):
-        for x in range(N):
-            idx = y * N + x
-            swapped_idx = bit_reverse(idx, int(math.log2(N)))
-            result[swapped_idx // N][swapped_idx % N] = data[y][x]
-    return result
+    dst_texture = create_2d_texture(N, N)
+    # Fragment shader logic:
+    # x = gl_FragCoord.xy
+    # y = bit_reverse(x)
+    # val = texture(src_texture, x)
+    # write val to dst_texture at y
+    return dst_texture
 
-def butterfly_pass(src, dst, stage, N):
+def ping_pong_butterfly_pass(src_texture, dst_texture, N, w):
     """
-    Performs one stage of the FFT butterfly operations.
+    Performs one butterfly pass.
     """
-    for y in range(N):
-        for x in range(N):
-            # Fetch butterfly parameters from lookup texture
-            addr_a, addr_b, w = fetch_butterfly_lookup(stage, x, y)
-            val_a = src[addr_a // N][addr_a % N]
-            val_b = src[addr_b // N][addr_b % N]
-            # Complex multiplication: val_b * w
-            prod_real = val_b.real * w.real - val_b.imag * w.imag
-            prod_imag = val_b.real * w.imag + val_b.imag * w.real
-            # Complex addition: val_a + prod
-            dst[y][x] = complex(val_a.real + prod_real, val_a.imag + prod_imag)
-    return dst
+    # Fragment shader logic:
+    # Fetch a, b, w from butterfly lookup texture based on fragment index
+    # A = texture(src_texture, a)
+    # B = texture(src_texture, b)
+    # A_new = A + B * w
+    # B_new = A - B * w
+    # Write A_new, B_new to dst_texture at positions a, b
+    # Swap src and dst for next iteration
+    return dst_texture, src_texture
 
-def transpose(matrix):
-    N = len(matrix)
-    return [[matrix[j][i] for j in range(N)] for i in range(N)]
-
-def bit_reverse(x, bits):
-    result = 0
-    for _ in range(bits):
-        result = (result << 1) | (x & 1)
-        x >>= 1
-    return result
-
-def fetch_butterfly_lookup(stage, x, y):
-    # Returns (addr_a, addr_b, w) from pre-computed texture
-    # Implementation details depend on specific lookup texture layout
-    return (0, 0, complex(1, 0)) # Placeholder for lookup fetch
+def get_butterfly_weight(N, k, is_inverse):
+    """
+    Returns the principal N-th root of unity for stage k.
+    w = exp(-2 * pi * i * k / N) for forward
+    w = exp(2 * pi * i * k / N) for inverse
+    """
+    if is_inverse:
+        exponent = 2 * pi * k / N
+    else:
+        exponent = -2 * pi * k / N
+    return complex(cos(exponent), sin(exponent))
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Zero-Padding:** Absence of zero-padding in the spatial domain causes copies of the dataset to appear in the rendered image due to periodicity assumptions in the FFT [S1, unofficial].
-*   **Precision:** Floating-point precision in texture lookups and arithmetic may accumulate errors, especially for large $N$ [G].
-*   **Boundary Conditions:** The bit-reversal and butterfly indices must be correctly calculated for all $x$ in $[0, N-1]$ [S1, unofficial][S2, unofficial].
+*   **Boundary Artifacts:** The DFT assumes periodic boundary conditions. If the input volume is not zero-padded, discontinuities at the boundaries cause high-frequency artifacts and copies of the dataset to appear in the rendered image [S1, S3].
+*   **Precision:** Floating-point precision in the fragment shader may accumulate errors during the $\log_2 N$ passes. Using double precision if available, or careful normalization, is recommended [G].
+*   **Memory Bandwidth:** The ping-pong approach requires reading and writing the entire texture for each butterfly pass, which can be memory-bandwidth bound [G].
 
 ## Subtopics
 
-### Inverse 2D FFT (Butterfly)
-An inverse 2D FFT implementation based on Hart et al., exploiting separability by transforming rows then columns, using scrambling and butterfly passes [S2, unofficial]. It is chosen when converting frequency domain data back to spatial domain for rendering [S2, unofficial]. It differs from the forward transform only by the final scaling factor $N^{-1}$ [S1, unofficial][S2, unofficial].
-
 ### [GPU-based FFT Convolution](4274-gpu-based-fft-convolution.md)
-A method to calculate the matrix-vector product $Hx$ (convolution) efficiently using CUDA's FFT library to reduce computational cost. It is chosen for filtering operations in volume rendering. It differs from the standard 2D FFT by including padding, point-wise multiplication in frequency domain, and inverse FFT steps.
+GPU-based FFT Convolution is a method to calculate the matrix-vector product $Hx$ (convolution) efficiently using CUDA's FFT library to reduce computational cost. It is computationally economical for large kernels where the cost of the Fast Fourier Transform (FFT) is outweighed by the reduction in arithmetic operations compared to direct spatial convolution. It builds on [GPU-based 2D FFT](841-gpu-based-2d-fft.md).
 
 ### [Split-Stream-FFT](6639-split-stream-fft.md)
-A novel implementation of the Fast Fourier Transform designed to map the recursive structure of the FFT to the stream architecture of a GPU efficiently. It is based on the Decimation-in-Frequency (DIF) approach. Not given in the sources.
+Split-Stream-FFT is a GPU-optimized implementation of the Fast Fourier Transform designed to map the recursive structure of the FFT to the stream architecture of graphics hardware. It solves the problem of efficiently computing the Discrete Fourier Transform (DFT) for volume rendering and other DSP applications by leveraging the parallel processing capabilities of commodity GPUs. It sets itself apart from sibling methods like [GPU-based FFT Convolution](4274-gpu-based-fft-convolution.md) by focusing on the raw transform computation using a Decimation-in-Frequency (DIF) approach, rather than the convolution pipeline itself.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N^2 \log N)$ for a 2D transform of size $N \times N$ [S1, unofficial][S2, unofficial].
-*   **Memory Complexity:** $O(N^2)$ for storing the input, output, and intermediate buffers [S1, unofficial][S2, unofficial].
-*   **Measured Performance:** For a $256 \times 256$ transform, the 2D FFT takes 153 units [S1, unofficial]. For $512 \times 512$, it takes 35 units [S1, unofficial]. The source states "TL", "TC", "IFFT", "2D" columns [S1, unofficial]. The units are not given in the sources.
-*   **Strengths:** High parallelism on GPU, efficient use of texture units for data access patterns [S1, unofficial][S2, unofficial].
-*   **Limitations:** Requires pre-computed lookup textures, which consume memory [S1, unofficial][S2, unofficial]. Precision issues may arise for large $N$ [G].
-*   **When to use:** Not given in the sources.
-*   **When not to use:** When memory is extremely constrained (consider Hartley Transform [S1, unofficial][S2, unofficial]) or when the data size is small enough that CPU FFT is sufficient [G].
+*   **Time Complexity:** $O(N^2 \log N)$ for a 2D transform of size $N \times N$. The GPU implementation parallelizes the butterfly operations, achieving near-linear speedup with respect to the number of pixels and shader cores [S1, S2, unofficial].
+*   **Memory Complexity:** $O(N^2)$ for the input/output textures and two ping-pong buffers. The lookup textures are small ($O(N)$ or $O(N \log N)$) [S1, S2, unofficial].
+*   **Performance:** For a $512 \times 512$ transform, the IFFT takes approximately 35-40 ms on the hardware tested in the source papers (likely mid-2000s GPUs) [S1, unofficial]. The total time for the 2D FFT (forward and inverse) is significantly faster than CPU-based implementations for these resolutions [S1, unofficial].
+*   **Strengths:** High parallelism, efficient use of GPU texture units, suitable for real-time or near-real-time volume rendering when combined with efficient slice extraction [S1, S2, unofficial].
+*   **Limitations:** Fixed resolution (power of 2), requires zero-padding to avoid artifacts, limited interactivity for display parameters other than viewing direction [S1, S3].
 
 ## Background
-The method is based on the implementation by Hart et al. [Engel 2003] [S1, unofficial][S2, unofficial]. It was developed to accelerate frequency domain volume rendering on GPUs [S1, unofficial][S2, unofficial]. The approach leverages the separability of the 2D FFT and the parallel processing capabilities of GPUs [S1, unofficial][S2, unofficial].
+The method is based on the work of Hart et al. (Engel 2003), who implemented a GPU-based FFT for volume rendering [S1, S2, unofficial]. It was further detailed and applied to frequency domain volume rendering by Viola et al. in 2004 [S1, S2, unofficial]. The approach leverages the separability of the 2D DFT and the parallel architecture of GPUs to accelerate the domain-transform pipeline [S1, S2, unofficial].
 
 ## Sources
-[S1] GPU-based Frequency Domain Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2004/Viola-2004-GPU/Viola-2004-GPU-Paper.pdf, fetched 2026-10-27 (unofficial)
-[S2] Hardware-Accelerated Frequency Domain Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2004/viola-2004-har2/viola-2004-har2-Paper.pdf, fetched 2026-10-27 (unofficial)
-[S3] GPU-based Compressive Volume Rendering, https://doi.org/10.11575/prism/5366, fetched 2026-10-26 (unofficial)
+[S1] PDF GPU-based Frequency Domain Volume Rendering - TU Wien, https://www.cg.tuwien.ac.at/research/publications/2004/Viola-2004-GPU/Viola-2004-GPU-Paper.pdf, fetched 2026-10-27 (unofficial)
+[S2] PDF Hardware-Accelerated Frequency Domain Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2004/viola-2004-har2/viola-2004-har2-Paper.pdf, fetched 2026-10-27 (unofficial)

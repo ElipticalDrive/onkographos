@@ -16,6 +16,11 @@ The rotation is implemented using precomputed constant arrays (tables) indexed b
 - `kAnalyticRotateMinusPiHalfAboutXTable`: Stores the transformation rules for $-\pi/2$ rotation [S1, unofficial]. This table is the transpose (inverse) of the plus table [S1, unofficial].
 - Indexing: The tables are indexed by $l-1$ (i.e., band 1 is index 0, band 2 is index 1, etc.) [S1, unofficial].
 
+**Steps:**
+1. Select the appropriate rotation table based on the desired rotation direction ($+\pi/2$ or $-\pi/2$) [S1, unofficial].
+2. Index the table using $l-1$ to retrieve the transformation rules for the target band [S1, unofficial].
+3. Apply the linear combination rules to the input coefficient array $P$ to produce the output array $P'$ [S1, unofficial].
+
 **Formulas:**
 Let $p_i$ denote the input coefficient at index $i$ (corresponding to $m = i - l$) and $p_i'$ denote the output coefficient [S1, unofficial]. The source provides explicit linear combinations for bands $l=1$ to $l=4$ for the $+\pi/2$ rotation [S1, unofficial].
 
@@ -69,7 +74,7 @@ p_8' &= \frac{\sqrt{35}}{8}s_4 - \frac{\sqrt{7}}{4}s_6 + 0.125 s_8
 $$
 
 **Pseudocode:**
-The following Python-like pseudocode implements the $+\pi/2$ rotation for bands 1-4. The $-\pi/2$ rotation uses the inverse transformation (transpose of the plus table) [S1, unofficial].
+The following Python-like pseudocode implements the $+\pi/2$ rotation for bands 1-4 [S1, unofficial]. The $-\pi/2$ rotation uses the inverse transformation (transpose of the plus table) [S1, unofficial].
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
@@ -141,10 +146,13 @@ def rotate_sh_minus_pi_half_x(coeffs, band_l):
 ```
 
 **Parameters:**
-- `band_l`: Must be 1, 2, 3, or 4. Higher bands are not covered by the analytic tables [S1, unofficial].
+- `band_l`: Must be 1, 2, 3, or 4 [S1, unofficial]. Higher bands are not covered by the analytic tables [S1, unofficial].
+- Typical values: Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-- **Band Limit:** The analytic tables only cover bands 1-4. For band 0, no rotation is needed (constant). For bands > 4, this method is not applicable [S1, unofficial].
+- **Band Limit:** The analytic tables only cover bands 1-4 [S1, unofficial]. For band 0, no rotation is needed (constant) [G]. For bands > 4, this method is not applicable [S1, unofficial].
+- **Precision:** The coefficients involve square roots and fractions that should be computed in double precision before casting to float to avoid accumulation errors [G].
+- **Boundaries:** The method assumes coefficients are ordered by $m = -l, \dots, l$ [G].
 
 ## Subtopics
 
@@ -152,11 +160,11 @@ def rotate_sh_minus_pi_half_x(coeffs, band_l):
 A composite transformation pipeline used in the SPZ format to convert Gaussian splatting parameters between coordinate systems. It handles the rotation of SH coefficients alongside position and quaternion flips, solving the problem of maintaining visual consistency when the underlying 3D coordinate frame changes. It is distinct from simple affine transforms because it explicitly manages the coupling between geometric flips and SH band rotations.
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Performance:** Not given in the sources.
+- **Time Complexity:** Not given in the sources [S1, unofficial].
+- **Memory Complexity:** Not given in the sources [S1, unofficial].
+- **Performance:** Not given in the sources [S1, unofficial].
 - **Strengths:** Exact analytic solution for specific rotations; no iterative approximation; very low computational overhead [S1, unofficial].
-- **Limitations:** Only supports rotations of $\pm \pi/2$ around the X-axis. General rotations require different methods. Only supports bands 1-4 [S1, unofficial].
+- **Limitations:** Only supports rotations of $\pm \pi/2$ around the X-axis [S1, unofficial]. General rotations require different methods [G]. Only supports bands 1-4 [S1, unofficial].
 
 ## Background
 The analytic rotation tables for $\pm \pi/2$ around the X-axis are implemented in the `spz` library by Niantic Labs and Adobe Inc. [S1, unofficial].

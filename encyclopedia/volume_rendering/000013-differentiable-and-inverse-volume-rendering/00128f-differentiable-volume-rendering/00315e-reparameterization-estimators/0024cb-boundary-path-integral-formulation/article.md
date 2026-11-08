@@ -1,9 +1,9 @@
 # Boundary Path Integral Formulation
 
-Also called: Boundary Path Integral Formulation for Differentiable Rendering, Interior-to-Boundary Reparameterization, Path Integral Gradient Estimation, Reparameterized Boundary Path Integral, Volume Boundary Path Integral Formulation, Zhang et al. 2020 formulation, Zhang et al. 2020 reparameterization, Zhang et al. method
+Also called: Boundary Path Integral Formulation for Differentiable Rendering, Interior-to-Boundary Reparameterization, Volume Boundary Path Integral Formulation, Reparameterized Boundary Path Integral
 
 ## Overview
-The Boundary Path Integral Formulation is a method for estimating the derivatives of the path integral in differentiable volume rendering with respect to object shape parameters [S1, S3, unofficial]. It solves the problem of computing gradients when scene geometry depends on parameters $\theta$, by separating the differentiation of the path integral into interior and boundary terms [S1, unofficial]. Unlike its siblings [Reparameterized Volume Sampling](3309-reparameterized-volume-sampling.md) and [Reparameterized Monte Carlo Volume Rendering](4798-reparameterized-monte-carlo-volume-rendering.md), which typically rely on differentiable sampling within the volume or standard CDF inversion, this method converts interior volume integrals into boundary area integrals using the divergence theorem [S2]. This eliminates the need to evaluate the deformation mapping inside the volume, avoiding expensive tetrahedralizations [S2].
+The Boundary Path Integral Formulation is a method for estimating the derivatives of the path integral in differentiable volume rendering with respect to object shape parameters [S1, unofficial][S3, unofficial]. It solves the problem of computing gradients when scene geometry depends on parameters $\theta$ by separating the differentiation of the path integral into interior and boundary terms [S1, unofficial]. Unlike its siblings [Reparameterized Volume Sampling](3309-reparameterized-volume-sampling.md) and [Reparameterized Monte Carlo Volume Rendering](4798-reparameterized-monte-carlo-volume-rendering.md), which typically rely on differentiable sampling within the volume or standard CDF inversion, this method converts interior volume integrals into boundary area integrals using the divergence theorem [S2]. This eliminates the need to evaluate the deformation mapping inside the volume, avoiding expensive tetrahedralizations [S2].
 
 ## How it works
 The method reparameterizes the rendering integral using a reference configuration independent of the shape parameter $\theta$, then applies the divergence theorem to move derivative terms from the volume interior to the material boundary [S2][S3, unofficial].
@@ -25,16 +25,16 @@ The method reparameterizes the rendering integral using a reference configuratio
 ### Assumptions
 1.  **S.1:** Translucent objects contain no refractive or reflective boundaries (null BSDFs) and there are no visibility boundaries (shadows) dependent on $\theta$ [S2]. This ensures no visibility discontinuities and continuity of the material measurement contribution in the interior [S2].
 2.  **S.2:** $\theta$ controls only shapes, not material properties (extinction/scattering) [S2].
-3.  **Reference Configuration:** $\mathcal{B}_V = \mathcal{V}(0)$ and $\mathcal{B}_M = \mathcal{M}(0)$. The mapping $\mathbf{X}(\cdot, 0)$ is the identity, and Jacobians $J(\mathbf{p}, 0) = 1$ [S2].
+3.  **Reference Configuration:** $\mathcal{B}_V = \mathcal{V}(0)$ and $\mathcal{B}_M = \mathcal{M}(0)$ [S2]. The mapping $\mathbf{X}(\cdot, 0)$ is the identity, and Jacobians $J(\mathbf{p}, 0) = 1$ [S2].
 
 ### Formulas
 The forward intensity is $I = \int_{\Omega} f(\vec{x}) \, d\mu(\vec{x})$ [S3, unofficial]. Reparameterizing to material space $\hat{\Omega}$ yields $I = \int_{\hat{\Omega}} \hat{f}(\vec{p}) \, d\mu(\vec{p})$ [S3, unofficial].
 
 The gradient is decomposed into interior and boundary terms [S3, unofficial]:
 $$
-\frac{dI}{d\theta} = \int_{\hat{\Omega}} \frac{d\hat{f}(\vec{p})}{d\theta} d\mu(\vec{p}) + \int_{\partial \hat{\Omega}} \hat{f}^B \hat{f}^S \hat{f}^D d\mu
+\frac{dI}{d\theta} = \int_{\hat{\Omega}} \frac{d\hat{f}(\vec{p})}{d\theta} d\mu(\vec{p}) + \int_{\partial\hat{\Omega}} \hat{f}^B \hat{f}^S \hat{f}^D d\mu
 $$
-The first term is the standard interior derivative. The second term is the boundary term, unique to differentiable rendering [S3, unofficial].
+The first term is the standard interior derivative [S3, unofficial]. The second term is the boundary term, unique to differentiable rendering [S3, unofficial].
 
 The interior term $\int_{\hat{\Omega}} d_\theta \hat{f}(\vec{p}) d\mu(\vec{p})$ is converted to a boundary integral using the divergence theorem [S2]. For a function $h$ (where $\hat{f}$ is composed of such terms), the derivative is:
 $$
@@ -58,11 +58,7 @@ Here $\mathcal{B}_Y$ is the volume boundary and $\mathcal{B}_M$ is the surface b
 1.  **Define Reference:** Set reference volume $\mathcal{B}_V$ and surface $\mathcal{B}_M$ to the current geometry at $\theta=0$. Set $\mathbf{X}(\cdot, 0)$ to identity [S2].
 2.  **Sample Paths:** Generate material paths $\vec{p}$ in $\hat{\Omega}$ using standard path tracing or BDPT [S3, unofficial].
 3.  **Compute Interior Term:** For each path, compute the standard derivative of the material measurement contribution $\frac{d\hat{f}}{d\theta}$ with respect to $\theta$ [S3, unofficial]. This involves differentiating transmittance and scattering terms that depend on $\theta$ [S2].
-4.  **Compute Boundary Term:**
-    *   Identify if the path has a vertex $p_K$ on the volume boundary $\partial \mathcal{B}_V$ with $0 < K < N$ [S2].
-    *   If yes, compute the normal velocity $v_\perp(\mathbf{p}_K)$ [S2].
-    *   Evaluate the path contribution $f(\vec{p})$ at the boundary vertex [S2].
-    *   Accumulate $f(\vec{p}) v_\perp(\mathbf{p}_K)$ into the boundary integral estimate [S2].
+4.  **Compute Boundary Term:** Identify if the path has a vertex $p_K$ on the volume boundary $\partial \mathcal{B}_V$ with $0 < K < N$ [S2]. If yes, compute the normal velocity $v_\perp(\mathbf{p}_K)$ [S2]. Evaluate the path contribution $f(\vec{p})$ at the boundary vertex [S2]. Accumulate $f(\vec{p}) v_\perp(\mathbf{p}_K)$ into the boundary integral estimate [S2].
 5.  **Estimate Gradient:** Sum the Monte Carlo estimates of the interior term and the boundary term [S3, unofficial].
 
 ### Pseudocode
@@ -78,46 +74,37 @@ def compute_gradient_boundary_path_integral(scene, theta, num_samples):
     boundary_sum = 0.0
     
     for _ in range(num_samples):
-        # 1. Sample a material path p_bar in reference space
+        # 1. Sample a material path p_bar in reference space [G]
         p_bar = sample_material_path(scene.reference_config)
+        N = len(p_bar) - 1
         
         # 2. Map to ordinary space x_bar = X(p_bar, theta)
-        # At theta=0, X is identity, so x_bar = p_bar
-        x_bar = map_to_ordinary_space(p_bar, theta)
+        # At theta=0, X is identity, so x_bar = p_bar [S2]
+        x_bar = p_bar
         
-        # 3. Compute standard measurement contribution f(x_bar)
-        # This includes transmittance, scattering, BSDFs, etc.
+        # 3. Compute standard measurement contribution f(x_bar) [G]
         f_val = compute_measurement_contribution(x_bar, scene)
         
         # 4. Compute Interior Term: d(f_hat)/dtheta
-        # This requires differentiating the integrand with respect to theta.
-        # For translucent objects with null BSDFs, this captures
-        # changes in transmittance due to shape deformation.
-        # Note: This term is non-zero because transmittance depends on path length
-        # which changes with shape deformation.
+        # Formula: sum_{n=0}^N ( (grad_n f) . v(p_n) + f * dJ/dtheta ) [S2]
         interior_derivative = compute_interior_derivative(p_bar, scene, theta)
         interior_sum += interior_derivative / num_samples
         
         # 5. Compute Boundary Term
         # Check if path has exactly one vertex p_K on the volume boundary
-        # with index K such that 0 < K < N.
-        boundary_vertex_index = find_boundary_vertex_index(p_bar, scene.reference_config)
+        # with index K such that 0 < K < N [S2]
+        K = find_boundary_vertex_index(p_bar, scene.reference_config)
         
-        if boundary_vertex_index is not None:
-            K = boundary_vertex_index
+        if K is not None:
             p_K = p_bar[K]
             
             # Compute normal velocity v_perp at p_K
-            # v(p) = d_theta X(p, theta)
-            # v_perp is the component perpendicular to the boundary normal
+            # v(p) = d_theta X(p, theta) [S2]
             v = compute_velocity(p_K, theta)
             n = compute_boundary_normal(p_K, scene.reference_config)
             v_perp = dot(v, n)
             
-            # The boundary term integrand is f(p_bar) * v_perp
-            # Note: f(p_bar) here refers to the measurement contribution
-            # evaluated at the mapped path, but the measure change accounts
-            # for the boundary constraint.
+            # The boundary term integrand is f(p_bar) * v_perp [S2]
             boundary_contribution = f_val * v_perp
             boundary_sum += boundary_contribution / num_samples
             
@@ -126,30 +113,63 @@ def compute_gradient_boundary_path_integral(scene, theta, num_samples):
 def compute_interior_derivative(p_bar, scene, theta):
     """
     Computes the derivative of the material measurement contribution
-    with respect to theta. This involves chain rule application on
-    transmittance and scattering terms.
+    with respect to theta using the chain rule expansion [S2].
     """
-    # d/dtheta (f_hat) = sum over vertices of (grad_n f . v_n + f * dJ/dtheta)
-    # At theta=0, J=1, but dJ/dtheta is non-zero.
-    # For simplicity in this pseudocode, we assume a helper computes
-    # the total derivative of the path weight product.
-    return compute_path_weight_derivative(p_bar, scene, theta)
+    N = len(p_bar) - 1
+    total_derivative = 0.0
+    for n in range(N + 1):
+        p_n = p_bar[n]
+        v_n = compute_velocity(p_n, theta)
+        grad_f = compute_gradient_of_contribution(p_n, scene)
+        dJ = compute_jacobian_derivative(p_n, theta)
+        total_derivative += dot(grad_f, v_n) + p_n.contribution * dJ
+    return total_derivative
 
 def find_boundary_vertex_index(p_bar, ref_config):
     """
-    Returns the index K of the first vertex on the volume boundary
+    Returns the index K of the vertex on the volume boundary
     such that 0 < K < N. Returns None if no such vertex or multiple.
     """
     N = len(p_bar) - 1
     boundary_indices = []
-    for i in range(1, N): # 0 < K < N
+    for i in range(1, N):
         if is_on_volume_boundary(p_bar[i], ref_config):
             boundary_indices.append(i)
-    
     if len(boundary_indices) == 1:
         return boundary_indices[0]
-    else:
-        return None
+    return None
+
+# Standard helper definitions [G]
+def sample_material_path(ref_config):
+    # Standard path tracing or BDPT sampling in reference space [G]
+    return [ref_config.camera_origin, ref_config.sample_point_1, ...]
+
+def compute_measurement_contribution(x_bar, scene):
+    # Evaluates transmittance, scattering, BSDFs, and emission along path [G]
+    return 1.0
+
+def compute_velocity(p, theta):
+    # Returns d_theta X(p, theta). At theta=0, this is the deformation velocity field [S2]
+    return scene.velocity_field(p)
+
+def compute_boundary_normal(p, ref_config):
+    # Returns the geometric normal at point p on the reference boundary [G]
+    return ref_config.surface_normal(p)
+
+def compute_gradient_of_contribution(p, scene):
+    # Returns partial derivative of f with respect to vertex position [G]
+    return scene.gradient_at(p)
+
+def compute_jacobian_derivative(p, theta):
+    # Returns d_theta J(p, theta). At theta=0, J=1 but derivative is non-zero [S2]
+    return scene.jacobian_derivative_at(p)
+
+def is_on_volume_boundary(p, ref_config):
+    # Checks if point p lies on the reference volume boundary [G]
+    return ref_config.is_boundary(p)
+
+def dot(a, b):
+    return sum(x*y for x, y in zip(a, b))
 ```
 
 ### Parameters
@@ -162,16 +182,15 @@ def find_boundary_vertex_index(p_bar, ref_config):
 *   **Computational Cost:** Gradient computation for a single image takes seconds to tens of seconds, making it impractical for neural network training [S1, unofficial].
 *   **Tetrahedralization:** Previous methods required tetrahedralization to interpolate mapping $X$ into the volume interior. This method avoids that overhead [S2].
 
-## Subtopics
+### Subtopics
+#### Unidirectional Estimator
+Samples paths from camera to light. Cited as a Monte Carlo estimator for the boundary path integral [S2].
 
-### Unidirectional Estimator
-Samples paths from camera to light. Simple to implement but high variance in participating media. [Link: [Reparameterization Estimators](6499-reparameterization-estimators.md)]
+#### Bidirectional Estimator
+Samples paths from camera and light, connecting them. Cited as a Monte Carlo estimator for the boundary path integral [S2].
 
-### Bidirectional Estimator
-Samples paths from camera and light, connecting them. Better for complex lighting but more complex to implement with boundary terms. [Link: [Reparameterization Estimators](6499-reparameterization-estimators.md)]
-
-### Multiple Importance Sampling (MIS)
-Combines unidirectional and bidirectional estimates to reduce variance. Requires careful weighting of boundary terms. [Link: [Reparameterization Estimators](6499-reparameterization-estimators.md)]
+#### Multiple Importance Sampling (MIS)
+Combines unidirectional and bidirectional estimates to reduce variance. Cited as a Monte Carlo estimator for the boundary path integral [S2].
 
 ## Operating characteristics
 *   **Time Complexity:** High. Gradient computation for a single image takes seconds to tens of seconds [S1, unofficial].
@@ -179,8 +198,8 @@ Combines unidirectional and bidirectional estimates to reduce variance. Requires
 *   **Accuracy:** Unbiased [S1, unofficial]. Validated against finite-difference gradients [S2].
 *   **Strengths:** Does not require explicit silhouette edge finding [S1, unofficial]. Avoids expensive tetrahedralizations [S2]. Handles shape derivatives efficiently for translucent objects [S2].
 *   **Limitations:** Slow for iterative optimization (e.g., neural networks) [S1, unofficial]. Assumes no refractive/reflective boundaries or $\theta$-dependent shadows [S2].
-*   **When to Use:** Inverse rendering of translucent objects where shape optimization is needed and computational time per iteration is not critical.
-*   **When Not to Use:** Real-time differentiable rendering, scenes with complex refractive interfaces, or when training deep neural networks requiring many gradient steps.
+*   **When to Use:** Inverse rendering of translucent objects where shape optimization is needed and computational time per iteration is not critical [S1, unofficial][S2].
+*   **When Not to Use:** Real-time differentiable rendering, scenes with complex refractive interfaces, or when training deep neural networks requiring many gradient steps [S1, unofficial][S2].
 
 ## Background
 The Boundary Path Integral Formulation was introduced by Zhang et al. in 2020 [S1, S3, unofficial]. It extends the differential path integral framework to handle volume rendering with respect to shape parameters [S2]. Prior methods used tetrahedral meshes to interpolate deformation mappings into the volume interior, which was computationally expensive [S2]. This method applies the divergence theorem to convert interior volume integrals into boundary area integrals, eliminating the need for interior mapping evaluations [S2]. It is part of the broader class of reparameterization estimators for differentiable rendering [S1, unofficial].

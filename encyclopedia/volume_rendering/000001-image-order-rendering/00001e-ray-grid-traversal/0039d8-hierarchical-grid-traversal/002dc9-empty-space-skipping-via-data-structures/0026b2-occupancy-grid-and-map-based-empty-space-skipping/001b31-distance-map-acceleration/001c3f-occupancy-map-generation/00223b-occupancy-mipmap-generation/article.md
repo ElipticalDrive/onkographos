@@ -1,39 +1,52 @@
 # Occupancy Mipmap Generation
-Also called: JAX-based hierarchical occupancy mipmap generation
+
+Also called: JAX Convolutional Occupancy Mipmap
 
 ## Overview
-Computes a hierarchical occupancy mipmap for a 3D grid using JAX convolutions to accelerate empty-space skipping in volume rendering [S1, unofficial]. It differs from its parent [Occupancy Map Generation](1197-occupancy-map-generation.md) by constructing a multi-resolution pyramid via explicit convolutional downsampling rather than a single-level reduction, and from siblings like [Distance Map Computation (Multi-Stage)](1205-distance-map-computation-multi-stage.md) by relying on binary occupancy thresholds rather than distance metrics.
+Occupancy Mipmap Generation computes a hierarchical occupancy mipmap for a 3D grid using JAX convolutions [S1, unofficial]. It solves the problem of providing multi-resolution spatial caching for empty space skipping in volume rendering, where coarser levels allow larger step sizes in regions with low occupancy density [S1, unofficial]. Unlike [Occupancy Map Generation](1197-occupancy-map-generation.md), which produces a single-resolution map, this method builds a pyramid of resolutions to accelerate ray traversal across varying scales [S1, unofficial]. It differs from [Distance Map Computation (Multi-Stage)](1205-distance-map-computation-multi-stage.md) by using binary occupancy thresholds rather than distance metrics, and from [Brick Occupancy Recomputation](3976-brick-occupancy-recomputation.md) by generating the hierarchy via convolution rather than block-wise aggregation [S1, unofficial].
 
 ## How it works
-**Inputs and outputs:**
-- Input: `mat`, a 3D numpy array of shape $(D, H, W)$ representing the base occupancy grid. Values $> 0$ indicate occupied voxels.
-- Output: `mipmap`, a list of JAX arrays representing the mipmap levels. Level $i$ has spatial dimensions $(D/2^i, H/2^i, W/2^i)$. The final element is a scalar tensor containing the total occupied voxel count.
+**Inputs:**
+- `mat`: A 3D numpy array representing the input grid, where non-zero values indicate occupied space. Dimensions are $X \times Y \times Z$.
+- `xdim`: The width of the grid ($X$). Assumed to be a power of 2.
 
-**Data structures:**
-- `occupancy_mat`: 3D numpy array, same shape as `mat`, dtype `float32`. Binary mask where $1$ if `mat > 0`, else $0$.
-- `data`: 5D JAX array, shape $(1, D, H, W, 1)$. Batch dimension $1$, channel dimension $1$.
-- `kernel`: 5D JAX array, shape $(2^i, 2^i, 2^i, 1, 1)$. All elements are $1.0$.
-- `mipmap`: List of JAX arrays.
+**Outputs:**
+- `mipmap`: A list of JAX arrays representing the occupancy hierarchy. The list contains `levels + 1` entries.
 
-**Parameters:**
-- `xdim, ydim, zdim`: Dimensions of the input grid. Assumed to be powers of 2 for exact halving.
-- `levels`: Number of mipmap levels, calculated as $\log_2(\min(xdim, ydim, zdim))$.
+**Data Structures:**
+- `occupancy_mat`: A 3D binary mask of the same shape as `mat`, where `occupancy_mat[i,j,k] = 1` if `mat[i,j,k] > 0`, else `0`.
+- `data`: A 4D JAX tensor with shape `(1, X, Y, Z, 1)` (batch size 1, channel size 1).
+- `kernel`: A 5D tensor for convolution, shape `(2^i, 2^i, 2^i, 1, 1)`.
+- `mipmap`: A Python list of JAX arrays.
 
 **Steps:**
-1. Calculate the number of levels: $L = \lfloor \log_2(\min(xdim, ydim, zdim)) \rfloor$.
-2. Create the binary occupancy mask: $O_{ij} = 1$ if $mat_{ij} > 0$, else $0$.
-3. Convert $O$ to a JAX array and reshape to $(1, D, H, W, 1)$.
-4. Initialize an empty list `mipmap`.
-5. For each level $i$ from $0$ to $L-1$:
-   a. Define kernel size $k = 2^i$.
-   b. Create a kernel $K$ of shape $(k, k, k, 1, 1)$ filled with ones.
-   c. Compute convolution strides $S = (k, k, k)$.
-   d. Apply 3D convolution with 'SAME' padding: $M_i = \text{conv}(data, K, \text{stride}=S, \text{padding}='SAME')$.
-   e. Remove batch and channel dimensions from $M_i$ to get shape $(D/2^i, H/2^i, W/2^i)$.
-   f. Append $M_i$ to `mipmap`.
-   g. Update `data` to $M_i$ (without batch/channel dims) for the next iteration.
-6. Compute the total occupied points: $N = \sum O$.
-7. Append a scalar tensor containing $N$ to `mipmap`.
+1. Calculate the number of hierarchical levels: $L = \log_2(xdim)$. The total number of entries in the mipmap is $L + 1$ (including the root scalar).
+2. Create the binary occupancy mask:
+   $$
+   \text{occupancy\_mat}[i,j,k] = \begin{cases} 1 & \text{if } \text{mat}[i,j,k] > 0 \\ 0 & \text{otherwise} \end{cases}
+   $$
+3. Convert `occupancy_mat` to a JAX array of type `float32`.
+4. Reshape the data to add batch and channel dimensions:
+   $$
+   \text{data} = \text{occupancy\_mat}[None, :, :, :, None]
+   $$
+   The shape becomes $(1, X, Y, Z, 1)$.
+5. Initialize an empty list `mipmap`.
+6. For each level $i$ from $0$ to $L-1$:
+   a. Create a convolution kernel of ones with shape $(2^i, 2^i, 2^i, 1, 1)$.
+   b. Define the dimension numbers for `lax.conv_general_dilated`. The input and output dimensions are `'NHWDC'` (Batch, Height, Width, Depth, Channel), and the kernel dimensions are `'HWDIO'` (Kernel Height, Kernel Width, Kernel Depth, Input Channel, Output Channel).
+   c. Compute the convolution:
+      $$
+      \text{conv\_out} = \text{lax.conv\_general\_dilated}(\text{data}, \text{kernel}, \text{strides}=(2^i, 2^i, 2^i), \text{padding}='SAME', \text{dimension_numbers}=dn)
+      $$
+   d. Remove the batch and channel dimensions from `conv_out`.
+   e. Append the resulting 3D array to `mipmap`.
+   f. Update `data` to `conv_out` (without batch/channel dims) for the next iteration? *Note: The source code snippet shows `data` being used in the loop but does not explicitly reassign it. However, standard mipmap generation requires the output of level $i$ to be the input for level $i+1$. The source code snippet provided is incomplete regarding the loop variable update. Based on standard practice and the structure of `kernel_list` and `dn_list` being appended, it is implied that the convolution output becomes the input for the next level. We assume `data` is updated to the result of the convolution (stripped of batch/channel dims) for the next iteration.* [G]
+7. After the loop, compute the total number of occupied points:
+   $$
+   \text{nb\_of\_pts} = \sum \text{occupancy\_mat}
+   $$
+8. Append a final level to `mipmap` containing `nb_of_pts` as a single scalar tensor.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -43,83 +56,100 @@ import jax.numpy as jnp
 from jax.lax import conv_general_dilated
 
 def generate_occupancy_mipmap(mat):
-    # 1. Determine grid dimensions
-    xdim, ydim, zdim = mat.shape
-    levels = int(jnp.log2(min(xdim, ydim, zdim)))
+    """
+    Generates a hierarchical occupancy mipmap from a 3D grid.
     
-    # 2. Create binary occupancy mask
+    Args:
+        mat: numpy array, shape (X, Y, Z). Non-zero values indicate occupancy.
+        
+    Returns:
+        mipmap: list of jax arrays. 
+                mipmap[i] is the occupancy map at level i.
+                mipmap[-1] is a scalar tensor with the total count of occupied voxels.
+    """
+    xdim = mat.shape[0]
+    # Assume xdim == ydim == zdim and is a power of 2
+    levels = int(jnp.log2(xdim))
+    
+    # Step 2: Create binary occupancy mask
     occupancy_mat = (mat > 0).astype(jnp.float32)
     
-    # 3. Prepare data for JAX convolution (add batch and channel dims)
-    data = jnp.expand_dims(occupancy_mat, axis=(0, -1))
+    # Step 3: Convert to JAX array and add dims
+    data = jnp.array(occupancy_mat)
+    data = data[None, :, :, :, None]  # Shape: (1, X, Y, Z, 1)
     
     mipmap = []
     
-    # 4. Generate mipmap levels
+    # Step 6: Iterate through levels
     for i in range(levels):
-        # Kernel size is 2^i
-        k = 2 ** i
+        # Step 6a: Create kernel
+        kernel_size = 2**i
+        kernel = jnp.ones((kernel_size, kernel_size, kernel_size, 1, 1))
         
-        # Create kernel of ones with shape (k, k, k, 1, 1)
-        kernel = jnp.ones((k, k, k, 1, 1))
-        
-        # Define dimension numbers for NHWDC format
-        # Input: (N, H, W, D, C) -> (1, D, H, W, 1)
-        # Kernel: (H, W, D, I, O) -> (k, k, k, 1, 1)
-        # Output: (N, H, W, D, C)
-        dn = conv_general_dilated.dimension_numbers(
-            lhs_spec=(0, 1, 2, 3, 4),
-            rhs_spec=(0, 1, 2, 3, 4),
-            out_spec=(0, 1, 2, 3, 4)
+        # Step 6b: Define dimension numbers
+        # Input: NHWDC, Kernel: HWDIO, Output: NHWDC
+        dn = conv_general_dilated.default_dimension_numbers(
+            lhs_shape=data.shape, 
+            rhs_shape=kernel.shape, 
+            dimension_numbers=('NHWDC', 'HWDIO', 'NHWDC')
         )
         
-        # Apply convolution with stride k and SAME padding
+        # Step 6c: Convolve
+        # Strides are (2^i, 2^i, 2^i) for spatial dimensions
+        strides = (2**i, 2**i, 2**i)
         conv_out = conv_general_dilated(
-            lhs=data,
-            rhs=kernel,
-            window_strides=(k, k, k),
-            padding='SAME',
+            data, 
+            kernel, 
+            window_strides=strides, 
+            padding='SAME', 
             dimension_numbers=dn
         )
         
-        # Remove batch and channel dimensions
-        conv_out = conv_out.squeeze(axis=0).squeeze(axis=-1)
+        # Step 6d: Remove batch and channel dims
+        # conv_out shape: (1, X/2^i, Y/2^i, Z/2^i, 1)
+        conv_out = conv_out[0, :, :, :, 0]
         
-        # Append to mipmap
+        # Step 6e: Append to mipmap
         mipmap.append(conv_out)
         
-        # Update data for next level
+        # Step 6f: Update data for next level
         data = conv_out[None, :, :, :, None]
         
-    # 5. Add final scalar level with total occupied count
-    total_occupied = jnp.sum(occupancy_mat)
-    mipmap.append(jnp.array(total_occupied))
+    # Step 7: Compute total occupied points
+    nb_of_pts = jnp.sum(occupancy_mat)
+    
+    # Step 8: Append scalar
+    mipmap.append(jnp.array(nb_of_pts))
     
     return mipmap
 ```
 
-**Edge cases and pitfalls:**
-- Grid dimensions must be powers of 2 to ensure exact halving at each level. If not, the final resolution may not be $1 \times 1 \times 1$ before the scalar level. [G]
-- The 'SAME' padding ensures spatial dimensions are halved exactly when stride equals kernel size. [S1, unofficial]
-- Precision: Using `float32` for occupancy counts may lose precision for very large grids. [G]
+**Parameters:**
+- `mat`: Input 3D grid array.
+- `xdim`: Grid width. Must be a power of 2.
+
+**Edge Cases and Pitfalls:**
+- `xdim` must be a power of 2. If not, `jnp.log2` will not yield an integer, and the mipmap structure will be ill-defined. [S1, unofficial]
+- The method assumes a cubic grid where $X=Y=Z$. If dimensions differ, the logic needs adjustment. [G]
+- Precision: The convolution sums occupancy counts. At coarser levels, values can exceed 1, indicating multiple occupied voxels map to a single coarse voxel. [S1, unofficial]
 
 ## Subtopics
 
 ### [Occupancy Grid Update](2916-occupancy-grid-update.md)
-Periodically refreshes a 3D occupancy grid by querying a NeRF model for density values at voxel centers, marking voxels as occupied if density exceeds a threshold. Solves stale acceleration structures in evolving NeRF training.
+Periodically refreshes a 3D occupancy grid by querying a NeRF model for density at voxel centers. It solves stale spatial caching in on-the-fly NeRF training. It differs from this method by using direct density queries rather than convolutional mipmap generation.
 
 ### [Occupancy Map Generation via Ray Casting](8136-occupancy-map-generation-via-ray-casting.md)
-Generates an occupancy map by counting rays passing through each voxel in a 3D grid, identifying regions viewed by training cameras. Uses explicit ray casting rather than convolutions.
+Generates an occupancy map by counting rays passing through voxels. It differs from this method by using explicit ray traversal statistics rather than JAX convolutions.
 
 ## Operating characteristics
-- **Time Complexity:** $O(N \log N)$ where $N$ is the total number of voxels, due to the hierarchical reduction. Each level performs a convolution over the previous level's data.
-- **Memory Complexity:** $O(N)$ for storing the mipmap levels, as each level is half the size of the previous one.
-- **Performance:** Efficient on GPUs with JAX due to optimized convolution kernels. [S1, unofficial]
-- **Strengths:** Fast generation of hierarchical occupancy data; compatible with JAX-based training pipelines.
-- **Limitations:** Requires power-of-2 grid dimensions; less flexible than distance-based methods for non-uniform sampling. [S1, unofficial]
+- **Time Complexity:** $O(N \log N)$ where $N$ is the number of voxels in the base grid. Each level halves the spatial resolution, and the convolution cost is proportional to the number of output voxels times the kernel size. The total work is dominated by the finest levels.
+- **Memory Complexity:** $O(N)$ for the base grid, plus $O(N/7)$ for the mipmap levels (geometric series). The scalar root is negligible.
+- **Performance:** Depends on JAX/XLA compilation efficiency. Convolution operations are highly optimized on GPUs. [S1, unofficial]
+- **Strengths:** Efficiently generates multi-resolution data using standard convolution primitives. Suitable for differentiable rendering pipelines where gradients might be needed. [S1, unofficial]
+- **Limitations:** Requires power-of-2 dimensions. Less flexible than brick-based methods for irregular grids. [S1, unofficial]
 
 ## Background
-Originated in the Jax-Volumetric-Renderer project by szat [S1, unofficial]. It provides a JAX-native way to generate occupancy mipmaps for empty-space skipping in neural volume rendering.
+Originated in the context of JAX-based volumetric rendering, specifically in the `Jax-Volumetric-Renderer` repository [S1, unofficial]. It leverages JAX's automatic differentiation and convolution capabilities to build occupancy hierarchies for efficient ray marching. [S1, unofficial]
 
 ## Sources
 [S1] szat/Jax-Volumetric-Renderer, https://github.com/szat/Jax-Volumetric-Renderer, fetched 2026-10-27 (unofficial)

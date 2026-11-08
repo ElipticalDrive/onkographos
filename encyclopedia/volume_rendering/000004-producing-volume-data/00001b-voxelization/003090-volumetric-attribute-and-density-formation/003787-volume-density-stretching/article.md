@@ -1,0 +1,97 @@
+# Volume Density Stretching
+
+Also called: Density stretching, mass-conserving density mapping
+
+## Overview
+Volume Density Stretching adjusts voxel density values based on geometric deformation to simulate mass conservation, ensuring that density decreases when material is stretched over a greater distance [S1, unofficial]. Unlike standard voxelization which returns constant density values regardless of local volume expansion, this method ensures that thinner regions appear denser and thicker regions appear less dense, correcting the optical thickness artifact where uniform density makes thicker parts block more light than intended [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Input**: A voxel grid defined by origin, resolution, and voxel size; a deformation field or parametric surface (e.g., spline tube) describing the volume geometry; and a base density value or density field.
+- **Output**: A voxel grid where each voxel's density value is scaled by the local Jacobian determinant (or equivalent stretch factor) of the deformation mapping.
+
+**Data Structures**
+- **Voxel Grid**: Standard 3D array. Each voxel stores a scalar density value.
+- **Deformation Map**: A function or grid that maps world coordinates to local parametric coordinates (e.g., along a spline) and provides the local scaling factors.
+
+**Method Steps**
+1.  **Coordinate Mapping**: For each voxel center $v$, determine its position in the deformed space. If using a spline-based approach, map the world position to the spline's parametric space (curvilinear abscissa $s$ and angle $\theta$) [S1, unofficial].
+2.  **Jacobian Calculation**: Compute the local volume expansion factor $J$. In the context of a tube or spline, this is often derived from the change in cross-sectional area or the determinant of the transformation matrix from local to world space. For a simple radial expansion, if the radius changes from $r_0$ to $r$, the stretch factor is proportional to $(r_0/r)^2$ for area conservation or $(r_0/r)^3$ for volume conservation, depending on the specific mass conservation model assumed [S1, unofficial].
+3.  **Density Adjustment**: Calculate the stretched density $\rho_{stretched}$ using the base density $\rho_{base}$ and the stretch factor $J$:
+    $$ \rho_{stretched} = \rho_{base} \times J $$
+    Where $J < 1$ for stretching (expansion) and $J > 1$ for compression. The source notes that "density to be lower when the 'particles' are stretched over a greater distance" [S1, unofficial].
+4.  **Clamping**: Clamp $\rho_{stretched}$ to the valid range for the target data type (e.g., [0, 1] for float) [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def apply_density_stretching(voxel_grid, deformation_field, base_density):
+    """
+    Adjusts voxel density based on local deformation stretch.
+    
+    Args:
+        voxel_grid: 3D array of voxels, each with a world position.
+        deformation_field: Function or data structure providing local stretch factors.
+                           Returns a scalar stretch factor J for a given world position.
+        base_density: Scalar or 3D array of base density values before stretching.
+        
+    Returns:
+        3D array of density values after stretching.
+    """
+    stretched_grid = empty_like(voxel_grid)
+    
+    for each voxel v in voxel_grid:
+        # Get world position of the voxel center
+        pos = v.world_position
+        
+        # Get the local stretch factor J from the deformation field
+        # J represents the ratio of deformed volume to original volume
+        # If J > 1, volume expanded, density should decrease.
+        # If J < 1, volume compressed, density should increase.
+        # Note: The source implies J is the factor by which density is multiplied.
+        # If particles are stretched, density decreases. 
+        # Let's assume deformation_field returns the inverse of the volume expansion ratio
+        # or directly the density scaling factor.
+        # Based on "density to be lower when stretched", if stretch factor S > 1,
+        # density *= 1/S. Let's define J as the density scaling factor directly.
+        density_scale = deformation_field.get_density_scale(pos)
+        
+        # Apply scaling
+        new_density = base_density[v] * density_scale
+        
+        # Clamp to valid range
+        stretched_grid[v] = clamp(new_density, 0.0, 1.0)
+        
+    return stretched_grid
+```
+
+**Parameters**
+- **Base Density**: The initial density value assigned to voxels before deformation is considered.
+- **Stretch Factor Calculation**: The specific formula for $J$ depends on the geometry. For spline tubes, it may involve the radius variation and rotation [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+- **Singularity**: If the deformation causes zero volume (e.g., radius goes to zero), the stretch factor may become undefined or infinite. Guard against division by zero.
+- **Precision**: Floating-point precision issues may arise when calculating small Jacobian determinants for subtle deformations.
+
+## Subtopics
+
+### Solar Flare Model
+An animated solar flare composed of 4 Bezier segments arranged in a circle that grows and shrinks with time. The density field stretches as the flare grows, rotates, and moves along the ring. Perlin noise creates dust-cloud filaments that become anisotropic due to the stretching [S1, unofficial].
+
+### Galaxy Model
+A galaxy inspired by Centaurus A, composed of 2 Bezier segments forming an S-shape with brighter orange parts in the middle and darker sides. Uses dust-cloud noise forming filaments when stretched, with density stretching applied to maintain mass conservation [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ where $N$ is the number of voxels, as each voxel requires one evaluation of the deformation field and one multiplication.
+- **Memory Complexity**: $O(N)$ for storing the output density grid.
+- **Strengths**: Correctly simulates mass conservation in deforming volumes, preventing visual artifacts where thick parts appear too dark or thin parts too light.
+- **Limitations**: Requires accurate computation of local deformation/stretch factors, which can be complex for arbitrary geometries. Performance depends on the cost of evaluating the deformation field.
+- **When to Use**: When rendering deforming volumes (e.g., gases, fluids, animated splines) where mass conservation is visually important.
+- **When Not to Use**: For static volumes or when performance is critical and visual accuracy of density variation is less important.
+
+## Background
+Originated in the context of real-time rendering of procedural noise and interstellar dust clouds, specifically in the "Sculpting procedural noise" work by [S1, unofficial]. The method was implemented in a Shadertoy-based renderer using WebGLSL to demonstrate effects like solar flares and galaxies, where deformation of the density field needed to be accompanied by density value adjustments to maintain physical plausibility.
+
+## Sources
+[S1] Sculpting procedural noise: real-time rendering of interstellar dust clouds and solar flares, https://openalex.org/W4293584834, fetched 2026-10-26 (unofficial)

@@ -23,24 +23,21 @@ Dynamic VBO Range Allocation manages vertex buffer object (VBO) memory ranges fo
 
 ```python
 OVER_CAPACITY_INCREASE_FACTOR = 1.25
-vbo_range_exists = False
+vbo_handle = None
 vbo_capacity = 0
 
 def update_vbo_range(quad_count):
-    global vbo_range_exists, vbo_capacity
-    if vbo_range_exists:
-        # Delete existing VBO range (e.g., glDeleteBuffers)
-        vbo_range_exists = False
-    # Allocate new VBO range with over-allocated capacity (e.g., glGenBuffers, glBufferData)
+    global vbo_handle, vbo_capacity
+    if vbo_handle is not None:
+        delete_buffer(vbo_handle)
+        vbo_handle = None
     new_capacity = quad_count * OVER_CAPACITY_INCREASE_FACTOR
+    vbo_handle = create_buffer(new_capacity)
     vbo_capacity = new_capacity
-    vbo_range_exists = True
 ```
 
 **Edge Cases and Pitfalls:**
-- **Precision:** Not given in the sources.
-- **Boundaries:** Not given in the sources.
-- **Degenerate Input:** Not given in the sources.
+- Precision, boundaries, and degenerate input handling are not detailed in the sources [S1, unofficial].
 
 ## Subtopics
 
@@ -50,12 +47,8 @@ This method uses CUDA’s virtual memory management (VMM) to manage dynamically 
 ## Operating characteristics
 - **Time Complexity:** Reallocation is $O(N)$ where $N$ is the number of elements, due to buffer deletion and recreation [G]. The over-allocation factor reduces reallocation frequency [S1, unofficial].
 - **Memory Complexity:** Proportional to `quadCount * 1.25`, resulting in a 25% overhead compared to the exact required size [S1, unofficial].
-- **Measured Performance:** Not given in the sources.
-- **Scaling:** Not given in the sources.
 - **Strengths:** Simple implementation using standard OpenGL APIs; reduces reallocation frequency via over-allocation [S1, unofficial].
 - **Limitations:** Does not support in-place expansion; requires buffer deletion and recreation [S1, unofficial].
-- **When to use:** Not given in the sources.
-- **When not:** Not given in the sources.
 
 ## Background
 This method originates from the implementation details of the "Cube" project by gabkhanfig, which applies 3D Gaussian Splatting techniques [S1, unofficial]. The constant factor of 1.25 is used to over-allocate VBO capacity to reduce reallocation frequency [S1, unofficial].

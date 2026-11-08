@@ -6,12 +6,12 @@ Also called: CUDA VMM, Merging Nodes via Virtual Memory, Virtual Memory Bufferin
 This method uses CUDA’s virtual memory management (VMM) to manage dynamically sized splat buffers, allowing physical memory to grow or shrink within a single consecutive virtual address range without data copying [S1]. It specifically addresses the memory overhead of merging buffers by enabling the expansion of an existing target buffer rather than allocating a new combined buffer [S1].
 
 ## How it works
-**Inputs:** A source buffer (capacity $A$) and a target buffer (capacity $B$) containing Gaussian splat data; the size of a single splat element $S$ (in bytes).
-**Outputs:** A merged target buffer containing all splats from $A$ and $B$, with no intermediate buffer of size $A+B$ allocated.
+**Inputs:** A source buffer (capacity $A$) and a target buffer (capacity $B$) containing Gaussian splat data; the size of a single splat element $S$ (in bytes) [S1].
+**Outputs:** A merged target buffer containing all splats from $A$ and $B$, with no intermediate buffer of size $A+B$ allocated [S1].
 
 **Data Structures:**
-*   **Virtual Memory Handle:** A CUDA VMM handle representing a reserved virtual address range.
-*   **Physical Memory Map:** The mapping between virtual pages and physical GPU memory pages.
+*   **Virtual Address Range:** A reserved contiguous virtual memory region with a modest initial capacity [S1].
+*   **Physical Memory Map:** A tracking structure mapping virtual offsets to committed physical GPU memory pages [G].
 
 **Parameters:**
 *   **Physical Granularity ($G$):** The minimum unit of physical memory that can be committed or uncommitted. On an RTX 4090, $G = 2 \text{ MB}$ [S1].
@@ -19,9 +19,9 @@ This method uses CUDA’s virtual memory management (VMM) to manage dynamically 
 
 **Steps:**
 
-1.  **Initialization:** Reserve a virtual address range of size $V_{init}$ using CUDA VMM APIs. At this stage, no physical GPU memory is allocated [S1].
+1.  **Initialization:** Reserve a virtual address range of size $V_{init}$ using VMM APIs. At this stage, no physical GPU memory is allocated [S1].
 2.  **Committing Memory (Add Splats):** When splats are added, calculate the required physical memory $P_{req}$. Commit physical memory in chunks of granularity $G$ up to $P_{req}$ [S1].
-3.  **Expansion (Out of Virtual Capacity):** If $P_{req}$ exceeds the currently reserved virtual range, reserve a larger virtual address range. Remap the previously allocated physical memory to the new virtual range. This operation does not copy data [S1].
+3.  **Expansion (Out of Virtual Capacity):** If $P_{req}$ exceeds the currently reserved virtual range, reserve a larger virtual address range [S1]. Remap the previously allocated physical memory to the new virtual range [S1]. This operation does not copy data [S1].
 4.  **Uncommitting Memory (Delete Splats):** To remove splats:
     a. Sort the splat data such that deleted splats are moved to the end of the buffer [S1].
     b. De-commit (unmap) the physical memory chunks corresponding to the trailing deleted splats [S1].
@@ -35,109 +35,97 @@ This method uses CUDA’s virtual memory management (VMM) to manage dynamically 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Assume CUDA VMM API wrappers exist:
-# cudaVmmReserve(size) -> VirtualHandle
-# cudaVmmCommit(vhandle, offset, size) -> PhysicalPage
-# cudaVmmRemap(old_vhandle, new_vhandle, offset, size)
-# cudaVmmFree(vhandle, offset, size)
+GRANULARITY = 2 * 1024 * 1024  # 2 MB on RTX 4090 [S1]
+
+def reserve_virtual_range(size):
+    """Reserve a virtual address range of the given size."""
+    return {"virtual_size": size, "physical_pages": {}, "total_splat_count": 0}
+
+def commit_physical_memory(buffer, offset, size):
+    """Commit physical memory for the given virtual offset and size."""
+    aligned_size = ((size + GRANULARITY - 1) // GRANULARITY) * GRANULARITY
+    buffer["physical_pages"][offset] = aligned_size
+    return aligned_size
+
+def remap_physical_memory(old_buffer, new_buffer, offset, size):
+    """Remap existing physical pages to a new virtual range without copying data."""
+    for old_off, phys_size in old_buffer["physical_pages"].items():
+        new_buffer["physical_pages"][old_off] = phys_size
+    new_buffer["total_splat_count"] = old_buffer["total_splat_count"]
+    return new_buffer
+
+def uncommit_physical_memory(buffer, offset, size):
+    """De-allocate trailing physical memory chunks."""
+    aligned_size = ((size + GRANULARITY - 1) // GRANULARITY) * GRANULARITY
+    if offset in buffer["physical_pages"]:
+        del buffer["physical_pages"][offset]
+    return aligned_size
+
+def copy_memory(src_buffer, src_offset, dst_buffer, dst_offset, size):
+    """Copy data from source to destination buffer."""
+    # Standard memory copy operation [G]
+    src_data = src_buffer["data"][src_offset:src_offset + size]
+    dst_buffer["data"][dst_offset:dst_offset + size] = src_data
+
+def sort_deleted_to_end(buffer):
+    """Move deleted splats to the end of the buffer."""
+    # Data-aware sort or indirect indexing [G]
+    valid_splats = [s for s in buffer["data"] if not s.deleted]
+    buffer["data"] = valid_splats + [s for s in buffer["data"] if s.deleted]
 
 def init_buffer(initial_virtual_size):
-    """
-    Initialize a dynamic buffer with reserved virtual memory.
-    """
-    v_handle = cudaVmmReserve(initial_virtual_size)
-    return v_handle
+    """Initialize a dynamic buffer with reserved virtual memory."""
+    buf = reserve_virtual_range(initial_virtual_size)
+    buf["data"] = bytearray(initial_virtual_size)
+    return buf
 
-def add_splats(v_handle, splat_data, splat_size):
-    """
-    Add splats to the buffer. Commits physical memory as needed.
-    """
+def add_splats(buffer, splat_data, splat_size):
+    """Add splats to the buffer. Commits physical memory as needed."""
     num_splats = len(splat_data)
     required_bytes = num_splats * splat_size
-    
-    # Round up to granularity G (e.g., 2MB)
-    granularity = 2 * 1024 * 1024 
-    committed_bytes = ((required_bytes + granularity - 1) // granularity) * granularity
-    
-    # Commit physical memory
-    cudaVmmCommit(v_handle, 0, committed_bytes)
-    
-    # Copy data to the committed physical memory
-    # Implementation detail: Get physical pointer from VMM handle
-    dst_ptr = get_physical_pointer(v_handle, 0)
-    memcpy(dst_ptr, splat_data, required_bytes)
+    commit_physical_memory(buffer, 0, required_bytes)
+    copy_memory(splat_data, 0, buffer, 0, required_bytes)
+    buffer["total_splat_count"] += num_splats
+    return buffer
 
-def merge_buffers(v_handle_src, v_handle_dst, src_splat_count, dst_splat_count, splat_size):
-    """
-    Merge source buffer into destination buffer without allocating a new buffer.
-    """
+def merge_buffers(buffer_src, buffer_dst, src_splat_count, dst_splat_count, splat_size):
+    """Merge source buffer into destination buffer without allocating a new buffer."""
     src_bytes = src_splat_count * splat_size
-    
-    # 1. Expand virtual capacity of destination buffer
-    # Note: In practice, this involves reserving a larger virtual range
-    # and remapping existing physical pages if the old range is exceeded.
-    new_virtual_size = get_current_virtual_size(v_handle_dst) + src_bytes
-    v_handle_dst = expand_virtual_range(v_handle_dst, new_virtual_size)
-    
-    # 2. Commit physical memory in destination for source data
-    # Assuming we commit at the end of the existing data
     current_dst_bytes = dst_splat_count * splat_size
-    cudaVmmCommit(v_handle_dst, current_dst_bytes, src_bytes)
-    
-    # 3. Copy data from source to destination
-    src_ptr = get_physical_pointer(v_handle_src, 0)
-    dst_ptr = get_physical_pointer(v_handle_dst, current_dst_bytes)
-    memcpy(dst_ptr, src_ptr, src_bytes)
-    
-    return v_handle_dst
 
-def delete_splats(v_handle, splat_size, num_deleted):
-    """
-    Remove splats by sorting them to the end and uncommitting memory.
-    """
-    # Step 1: Sort splats so deleted ones are at the end
-    # This requires a data-aware sort or indirect indexing
-    sort_deleted_to_end(v_handle, splat_size)
-    
-    # Step 2: Uncommit physical memory for the deleted splats
+    # Expand virtual capacity if needed
+    new_virtual_size = buffer_dst["virtual_size"] + src_bytes
+    if new_virtual_size > buffer_dst["virtual_size"]:
+        new_buffer = reserve_virtual_range(new_virtual_size)
+        buffer_dst = remap_physical_memory(buffer_dst, new_buffer, 0, buffer_dst["virtual_size"])
+
+    # Commit physical memory in destination for source data
+    commit_physical_memory(buffer_dst, current_dst_bytes, src_bytes)
+
+    # Copy data from source to destination
+    copy_memory(buffer_src, 0, buffer_dst, current_dst_bytes, src_bytes)
+    buffer_dst["total_splat_count"] += src_splat_count
+    return buffer_dst
+
+def delete_splats(buffer, splat_size, num_deleted):
+    """Remove splats by sorting them to the end and uncommitting memory."""
+    sort_deleted_to_end(buffer)
     bytes_to_free = num_deleted * splat_size
-    # Round up to granularity
-    granularity = 2 * 1024 * 1024
-    free_bytes = ((bytes_to_free + granularity - 1) // granularity) * granularity
-    
-    # Get total current valid data size
-    total_splat_count = get_total_splat_count(v_handle)
-    valid_bytes = (total_splat_count - num_deleted) * splat_size
-    
-    # Uncommit the trailing memory
-    cudaVmmFree(v_handle, valid_bytes, free_bytes)
-
-def expand_virtual_range(v_handle, new_size):
-    """
-    Helper to handle virtual memory expansion.
-    If new_size > current reserved size, reserve new range and remap.
-    """
-    current_reserved = get_reserved_virtual_size(v_handle)
-    if new_size > current_reserved:
-        # Reserve new larger range
-        new_v_handle = cudaVmmReserve(new_size)
-        # Remap existing physical pages to new virtual handle
-        # This avoids data copy
-        cudaVmmRemap(v_handle, new_v_handle, 0, current_reserved)
-        # Free old handle
-        cudaVmmFree(v_handle, 0, current_reserved)
-        return new_v_handle
-    return v_handle
+    aligned_free_bytes = ((bytes_to_free + GRANULARITY - 1) // GRANULARITY) * GRANULARITY
+    valid_bytes = (buffer["total_splat_count"] - num_deleted) * splat_size
+    uncommit_physical_memory(buffer, valid_bytes, aligned_free_bytes)
+    buffer["total_splat_count"] -= num_deleted
+    return buffer
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Granularity Waste:** Physical memory is allocated in 2 MB chunks [S1]. For small models or few splats, this can lead to significant unused memory (e.g., a chunk holds up to $\frac{2 \text{ MB}}{\text{splat size}}$ splats) [S1]. This is negligible for models with millions of splats [S1].
-*   **Sorting Overhead:** Deleting splats requires sorting them to the end of the buffer before uncommitting memory [S1]. This adds computational cost to deletion operations.
-*   **Virtual Expansion Cost:** Expanding the virtual range requires remapping, which is fast but must be handled carefully to avoid fragmentation or invalid pointers if not done atomically [S1].
+*   **Granularity Waste:** Physical memory is allocated in 2 MB chunks [S1]. For small models, this can leave a sizeable amount of memory unused [S1]. This is negligible for models with millions to tens of millions of splats [S1].
+*   **Sorting Overhead:** Deleting splats requires sorting them to the end of the buffer before uncommitting memory [S1].
+*   **Virtual Expansion Cost:** Expanding the virtual range requires reserving a larger range and remapping physical memory, which is fast and avoids data copying [S1].
 
 ## Operating characteristics
 *   **Memory Efficiency:** Avoids doubling memory usage during merge operations compared to standard allocation methods [S1]. Standard merging creates a new buffer $C$ of size $A+B$, requiring $2(A+B)$ memory temporarily [S1]. This method reuses buffer $B$ [S1].
-*   **Performance:** As fast as regular buffer allocation for standard operations [S1]. Merging is faster than copy-based approaches due to zero-copy remapping during expansion [S1].
+*   **Performance:** As fast as regular buffer allocation for standard operations [S1].
 *   **Limitations:** Large physical granularity (2 MB) can waste memory for small datasets [S1].
 *   **Optimization Potential:** An unimplemented optimization could reduce merge memory overhead to just 2 MB by incrementally committing 2 MB chunks, copying, and freeing source memory [S1].
 

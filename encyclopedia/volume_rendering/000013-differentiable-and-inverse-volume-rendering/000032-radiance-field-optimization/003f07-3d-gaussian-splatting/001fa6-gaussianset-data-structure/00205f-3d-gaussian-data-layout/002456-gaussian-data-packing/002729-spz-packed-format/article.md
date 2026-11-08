@@ -3,7 +3,7 @@
 Also called: NGSP, Niantic Gaussian Packed
 
 ## Overview
-SPZ Packed Format is a binary storage format for 3D Gaussian splats designed for low-precision, non-interleaved memory layouts with ZSTD compression support [S1, unofficial]. It solves the problem of efficient serialization and transmission of large-scale Gaussian datasets by separating attributes into parallel buffers, allowing for optimized entropy coding (e.g., g-zipping) and variable spherical harmonics (SH) degrees up to 4 [S1, unofficial]. It is distinguished from interleaved formats by its parallel vector storage and from PNG-based compression by its native binary structure and ZSTD integration [S1, unofficial].
+SPZ Packed Format is a binary storage format for 3D Gaussian splats designed for low-precision, non-interleaved memory layouts with ZSTD compression support [S1, unofficial]. It solves the problem of efficient serialization and transmission of large-scale Gaussian datasets by separating attributes into parallel buffers, allowing for optimized entropy coding (e.g., g-zipping) and variable spherical harmonics (SH) degrees up to 4 [S1, unofficial]. It is distinguished from interleaved formats by its parallel vector storage and from [PNG-based Gaussian Compression](4834-png-based-gaussian-compression.md) by its native binary structure and ZSTD integration [S1, unofficial].
 
 ## How it works
 **Inputs:** A set of 3D Gaussians defined by position, scale, rotation (quaternion), opacity (alpha), base color, and spherical harmonics coefficients [S1, unofficial].
@@ -23,7 +23,7 @@ The format is identified by the magic number `0x5053474e` (ASCII "SPZN") [S1, un
     *   *Note:* In implementations supporting extensions, a conditional field `std::vector<SpzExtensionBasePtr> extensions` may be present, compiled only when `SPZ_BUILD_EXTENSIONS` is defined [S1, unofficial].
 
 2.  **Attribute Buffers:**
-    Data is stored in separate `std::vector<uint8_t>` buffers for: `positions`, `scales`, `rotations`, `alphas`, `colors`, and `sh` [S1, unofficial]. These buffers are concatenated or compressed individually [S1, unofficial].
+    Data is stored in separate `std::vector<uint8_t>` buffers for: `positions`, `scales`, `rotations`, `alphas`, `colors`, and `sh` [S1, unofficial].
 
 3.  **Single Gaussian View (`PackedGaussian`):**
     For indexing, a single Gaussian is viewed as a struct of 92 bytes (for SH degree 4):
@@ -41,7 +41,7 @@ The format is identified by the magic number `0x5053474e` (ASCII "SPZN") [S1, un
 3.  **Decode Attributes:** Iterate through each Gaussian index $i$ from $0$ to `numPoints` - 1 [S1, unofficial].
 
     **3a. Position, Scale, Color, Alpha:**
-    These are typically stored as fixed-point or quantized uint8 values [S1, unofficial]. The specific quantization depends on `fractionalBits` and implementation details not fully specified in the core notes, but generally involve scaling uint8 values to float ranges [S1, unofficial].
+    These are stored as quantized uint8 values [S1, unofficial]. The specific quantization depends on `fractionalBits` and implementation details not fully specified in the core notes [S1, unofficial].
 
     **3b. Rotation (Quaternion):**
     The encoding method depends on `usesQuaternionSmallestThree` and `version` [S1, unofficial].
@@ -78,9 +78,64 @@ The format is identified by the magic number `0x5053474e` (ASCII "SPZN") [S1, un
         where $x$ is the uint8 value [S1, unofficial].
 
     **3d. Alpha and Color:**
-    1.  Alpha is typically a uint8 representing opacity [S1, unofficial].
+    1.  Alpha is a uint8 representing opacity [S1, unofficial].
     2.  Color is unquantized from uint8 to [0, 1] range [S1, unofficial].
-    3.  Apply base color scale factor: $C_{base} = C_{raw} \times 0.15$. This allows out-of-range base colors that higher SH bands can correct [S1, unofficial].
+    3.  Apply base color scale factor: $C_{base} = C_{raw} \times 0.15$ (instead of 0.282) to allow out-of-range base colors that higher SH bands can correct [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def decode_gaussian(data, version, uses_smallest_three, flip_q, rot_flip_q_func):
+    # data is a flat byte buffer for one Gaussian
+    # Position, scale, color, alpha quantization depends on fractionalBits (not given in sources)
+    pos = [float(b) for b in data[0:9]]
+    scale = [float(b) for b in data[9:12]]
+    color = [float(b) for b in data[12:15]]
+    alpha = data[15]
+    sh = data[16:16 + 72] # 24 coeffs * 3 channels
+
+    rotation = [0.0] * 4
+    if uses_smallest_three and version >= 3:
+        comp = int.from_bytes(data[9:13], byteorder='little')
+        i_largest = comp >> 30
+        sum_squares = 0.0
+        for i in range(3, -1, -1):
+            if i != i_largest:
+                mag = comp & 0x1FF
+                negbit = (comp >> 9) & 1
+                comp >>= 10
+                rotation[i] = (0.5 ** 0.5) * mag / 511.0
+                if negbit:
+                    rotation[i] = -rotation[i]
+                sum_squares += rotation[i] ** 2
+        rotation[i_largest] = max(0.0, 1.0 - sum_squares) ** 0.5
+    else:
+        x, y, z = [float(b) / 127.5 - 1.0 for b in data[9:12]]
+        rotation[0] = x * flip_q
+        rotation[1] = y * flip_q
+        rotation[2] = z * flip_q
+        rotation[3] = max(0.0, 1.0 - (rotation[0]**2 + rotation[1]**2 + rotation[2]**2)) ** 0.5
+
+    rotation[0] *= flip_q
+    rotation[1] *= flip_q
+    rotation[2] *= flip_q
+    if rot_flip_q_func:
+        rot_flip_q_func(rotation)
+
+    # SH unquantization
+    sh_floats = [(b - 128.0) / 128.0 for b in sh]
+
+    # Color scaling
+    color = [c * 0.15 for c in color]
+
+    return pos, scale, rotation, alpha, color, sh_floats
+```
+
+**Formulas:**
+*   SH unquantization: $v = \frac{x - 128.0}{128.0}$ where $x$ is the uint8 value [S1, unofficial].
+*   Inverse sigmoid: $v = \ln\left(\frac{x}{1 - x}\right)$ [S1, unofficial].
+*   Color scale factor: $C_{base} = C_{raw} \times 0.15$ (instead of 0.282) to allow out-of-range base colors that higher SH bands can correct [S1, unofficial].
 
 **Parameters:**
 *   `SH_MAX_COEFFS`: 24 (for degree 4) [S1, unofficial].
@@ -98,17 +153,17 @@ The format is identified by the magic number `0x5053474e` (ASCII "SPZN") [S1, un
 ## Subtopics
 
 ### SPZ Packed Data Layout
-A variant configuration focusing on the packing options for SH coefficients. It uses `PackOptions::sh1Bits` (defaulting to `DEFAULT_SH1_BITS`=5) and `PackOptions::shRestBits` (defaulting to `DEFAULT_SH_REST_BITS`=4) to specify quantization bit depths for SH degree 1 and degree 2+ coefficients respectively. This reduces entropy for g-zipping during the packing phase [S1, unofficial].
+A variant configuration focusing on the packing options for SH coefficients [S1, unofficial]. It uses `PackOptions::sh1Bits` (defaulting to `DEFAULT_SH1_BITS`=5) and `PackOptions::shRestBits` (defaulting to `DEFAULT_SH_REST_BITS`=4) to specify quantization bit depths for SH degree 1 and degree 2+ coefficients respectively [S1, unofficial]. This reduces entropy for g-zipping during the packing phase [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Decompression is linear in the number of bytes, dominated by ZSTD decompression and per-Gaussian decoding. Quaternion decoding is constant time per Gaussian [S1, unofficial].
-*   **Memory Complexity:** Linear in the number of Gaussians. The non-interleaved layout allows for cache-friendly access patterns when processing specific attributes (e.g., all positions) but requires managing multiple buffers [S1, unofficial].
-*   **Performance:** ZSTD compression provides significant size reduction, especially for correlated Gaussian data. SmallestThree quaternion encoding offers better precision for small components compared to FirstThree, at the cost of slightly more complex decoding logic [S1, unofficial].
+*   **Time Complexity:** Decompression is linear in the number of bytes, dominated by ZSTD decompression and per-Gaussian decoding [S1, unofficial].
+*   **Memory Complexity:** Linear in the number of Gaussians [S1, unofficial].
+*   **Performance:** ZSTD compression provides significant size reduction, especially for correlated Gaussian data [S1, unofficial]. SmallestThree quaternion encoding offers better precision for small components compared to FirstThree, at the cost of slightly more complex decoding logic [S1, unofficial].
 *   **Strengths:** Low precision storage, efficient compression, support for high-degree SH, flexible extension system [S1, unofficial].
 *   **Limitations:** Requires custom decoder; non-interleaved layout may be less convenient for some rendering pipelines that expect interleaved data; WASM memory management requires careful handling [S1, unofficial].
 
 ## Background
-SPZ Packed Format was developed by Niantic Labs as part of their open-source SPZ library for efficient storage and transmission of 3D Gaussian Splatting data [S1, unofficial]. It evolved to support higher precision requirements (SmallestThree quaternions) and compression (ZSTD) in later versions. The format is used in Niantic's AR/VR applications and open-source 3D Gaussian Splatting toolchains [S1, unofficial].
+SPZ Packed Format was developed by Niantic Labs as part of their open-source SPZ library for efficient storage and transmission of 3D Gaussian Splatting data [S1, unofficial]. It evolved to support higher precision requirements (SmallestThree quaternions) and compression (ZSTD) in later versions [S1, unofficial]. The format is used in Niantic's AR/VR applications and open-source 3D Gaussian Splatting toolchains [S1, unofficial].
 
 ## Sources
 [S1] nianticlabs/spz, https://github.com/nianticlabs/spz, fetched 2026-10-27 (unofficial)

@@ -1,148 +1,154 @@
 # Hardware Volume Rendering Pipeline with Pixel Textures
 
-Also called: Dependent Texture Classification, Dependent Texture Volume Rendering, Hardware Volume Rendering Pipeline (Pixel Texture Based), Pixel Texture Classification, Pixel Texture Shading on SGI V Series, SGI Octane2 Hardware Volume Rendering with Pixel Textures, VGH/QN Pipeline
+Also called: Dependent Texture Classification, Dependent Texture Volume Rendering, Hardware Volume Rendering Pipeline (Pixel Texture Based), Hardware-Accelerated Volume Rendering Pipeline with Pixel Textures, Object Volume Rendering with Shading via Three-Dimensional Textures, Pixel Texture Classification, Pixel Texture Shading on SGI V Series, SGI Octane2 Hardware Volume Rendering with Pixel Textures, VGH/QN Pipeline, Voltx
 
 ## Overview
-This method implements volume rendering on hardware that supports the OpenGL pixel texture (dependent texture) extension, specifically targeting architectures like the SGI Octane 2 with V-series graphics cards [S1, S2]. It solves the problem of applying multi-dimensional transfer functions (classification and shading) by using color fragments from a rendered slice to generate texture coordinates for a 3D lookup texture, effectively replacing the fragment color with the result of the transfer function evaluation [S1, S2]. It differs from per-fragment dependent texture reads (e.g., GeForce3) by requiring an auxiliary scratch buffer for intermediate storage, as the pixel texture operation does not occur directly during rasterization on the target hardware [S1].
+This method implements direct volume rendering on hardware supporting 3D texture mapping (e.g., SGI V-series, NVIDIA GeForce3) by using pixel textures (dependent textures) to perform classification and shading lookups [S1][S2][S3, unofficial]. It solves the problem of applying complex, multi-dimensional transfer functions and lighting models efficiently by decoupling data storage from shading computation [S1]. Unlike [3D Texture Proxy Geometry](870-3d-proxy-geometry.md), which rasterizes geometry, this method rasterizes slabs of parallel planes and uses hardware texture interpolation to sample pre-computed color/opacity values [S3, unofficial]. It differs from [PixelFlow Volume Rendering](3443-pixelflow-volume-rendering.md) by relying on fixed-function pixel texture extensions rather than custom fragment shaders [S1].
 
 ## How it works
+The pipeline processes a rectilinear volume dataset by converting it into 3D texture maps containing pre-computed color and opacity, then compositing these maps back-to-front [S3, unofficial]. It utilizes separate data and shading volumes to allow independent updates of classification and lighting [S1].
+
 ### Inputs and Outputs
-**Inputs:**
-1.  **VGH Data Volume:** A 3D texture encoding Data Value ($V$), Gradient Magnitude ($G$), and Second Derivative ($H$) in the RGB color components. Each component uses 8-bit resolution [S1, S2].
-2.  **Quantized Normal (QN) Volume:** A 3D texture encoding surface normal direction as a 16-bit unsigned short, split into two 8-bit color components (Red and Green) [S1, S2].
-3.  **Shade Volume:** A 3D texture containing pre-computed lighting information (RGB), spatially coincident with the VGH volume [S1, S2].
-4.  **Transfer Function (TF):** Defined as a 3D pixel texture. For classification, it maps $(V, G, H)$ to $(RGBA)$. For shading, it maps quantized normals to lighting values [S1, S2].
+*   **Input:** Rectilinear volume data (scalar field), classification parameters (gradient threshold, material type), lighting parameters (direction, ambient intensity), and transfer function parameters.
+*   **Output:** A 2D image with alpha blending.
 
-**Outputs:**
-*   Final composited image in the Frame Buffer.
+### Data Structures
+The method relies on three primary 3D textures:
 
-### Data Structures and Layout
-1.  **VGH Texture:**
-    *   Format: 3D Texture.
-    *   Channels: Red = $V$ (8-bit), Green = $G$ (8-bit), Blue = $H$ (8-bit) [S1, S2].
-    *   Resolution: 256 entries per axis for $V$ and $G$; limited resolution for $H$ (see Parameters) [S2].
-2.  **QN Texture:**
-    *   Format: 3D Texture.
-    *   Channels: Red = Upper 8 bits of normal, Green = Lower 8 bits of normal [S1, S2].
-    *   Encoding: 16-bit unsigned short quantized normal [S1, S2].
-3.  **Shade Texture:**
-    *   Format: 3D Texture.
-    *   Channels: RGB lighting values [S1, S2].
-4.  **Scratch Buffer:**
-    *   An auxiliary framebuffer or texture buffer used to store the intermediate classified slice before compositing [S1].
+1.  **Data Volume (VGH):**
+    *   **Layout:** 3D texture.
+    *   **Fields:**
+        *   Red Channel: Data Value ($V$), 8-bit.
+        *   Green Channel: Gradient Magnitude ($G$), 8-bit.
+        *   Blue Channel: Second Derivative ($H$), 8-bit.
+    *   **Note:** Each voxel maps to one texel [S1][S2].
+
+2.  **Quantized Normal Volume (QN):**
+    *   **Layout:** 3D texture.
+    *   **Fields:**
+        *   Red Channel: First 8 bits of 16-bit quantized normal.
+        *   Green Channel: Second 8 bits of 16-bit quantized normal.
+    *   **Encoding:** Normal direction encoded as a 16-bit unsigned short [S1][S2].
+
+3.  **Shade Volume (Alternative to QN):**
+    *   **Layout:** 3D texture.
+    *   **Fields:**
+        *   Red, Green, Blue Channels: Scaled and biased normal components (one per channel).
+    *   **Note:** Used when hardware supports per-fragment dependent texture reads or when QN is not used [S1][S2].
+
+4.  **Lookup Table (LUT):**
+    *   **Layout:** Software array.
+    *   **Size:** Product of the number of quantized gradients and the number of reflecting materials.
+    *   **Content:** Pre-computed RGBA values (color and opacity) for each combination of gradient index and material type [S3, unofficial].
+
+5.  **3D Texture Maps (Color/Opacity):**
+    *   **Layout:** 3D texture.
+    *   **Content:** Pre-computed RGBA values resulting from the sum of ambient and reflecting components. One texel per volume voxel [S3, unofficial].
+
+### Steps
+
+1.  **Voxel Classification (Offline/Triggered):**
+    *   Compute the quantized gradient index and material classification (reflecting or ambient) for each voxel based on a client-supplied gradient-magnitude threshold [S3, unofficial].
+    *   Triggered when the transfer function or gradient parameters change [S3, unofficial].
+
+2.  **Lookup Table Creation (Offline/Triggered):**
+    *   Create a software LUT mapping each combination of quantized gradient index and reflecting material to a pre-computed color and opacity (RGBA) [S3, unofficial].
+    *   The color and opacity account for depth integration through a slab of thickness $\Delta$ [S3, unofficial].
+    *   Triggered when volume rotation or light position changes [S3, unofficial].
+
+3.  **Texture Map Filling (Offline/Triggered):**
+    *   Fill 3D texture maps with pre-computed color values, one texel per volume voxel. The color is the sum of ambient and reflecting components [S3, unofficial].
+    *   For large volumes, partition into multiple texture maps due to memory limits [S3, unofficial].
+    *   Triggered when any classification or lighting parameter changes [S3, unofficial].
+
+4.  **Rendering Slices (Per-Frame):**
+    *   Process texture maps in back-to-front visibility order of volume partitions [S3, unofficial].
+    *   Apply each texture map to many parallel planes orthogonal to screen-z. Render each plane as a square [S3, unofficial].
+    *   Specify texture coordinates only at the four corners of the square. Interpolate texture coordinates across the square; out-of-range coordinates at corners interpolate to in-range values precisely when the pixel is within the volume [S3, unofficial].
+
+5.  **Pixel Texture Classification (Per-Slice, SGI V-Series):**
+    *   Render the slice from the VGH data volume to a scratch/auxiliary buffer [S1].
+    *   Use pixel texture extension to generate texture coordinates from color fragments. Scale fragment channels to $[0,1]$ [S1].
+    *   Use these as coordinates into a 3D texture (the Color/Opacity map).
+    *   Replace color fragments with entries from the 3D texture using nearest-neighbor or linear interpolation [S1].
+    *   *Note:* On SGI V-series, pixel texture does not occur directly on a per-fragment basis during rasterization, requiring the scratch buffer [S1].
+
+6.  **Shading (Per-Slice, Optional):**
+    *   If shading is enabled, render a matching slice from the shading volume (QN or Normal) [S1].
+    *   Apply pixel texture lookup using the quantized normal texture to the rendered slice in the scratch buffer [S1].
+    *   Modulate (multiply) the classified slice with the shaded slice [S1].
+    *   *Note:* On NVIDIA GeForce3, dependent texture reads occur per-fragment, eliminating the need for a scratch buffer for shading [S1].
+
+7.  **Compositing:**
+    *   Copy the slice from the scratch buffer and blend it with previously rendered slices in the frame buffer [S1].
+
+### Formulas
+
+**Slab Integration (Ambient Component):**
+For a slab thickness $\Delta$, let $A_1$ be opacity per unit distance and $E(p)$ be color emission per unit distance for primary color $p$ (Red, Green, Blue). The absorption coefficient $\alpha$ and the resulting color $C(p)$ and opacity $A$ for the texture map entry are:
+
+$$
+\alpha = \ln\left(\frac{1}{1-A_1}\right)
+$$
+
+$$
+C(p) = E(p) \left( \frac{1-e^{-\alpha \Delta}}{\alpha \Delta} \right)
+$$
+
+$$
+A = 1-e^{-\alpha \Delta}
+$$
+
+Where $C(p)$ is well-defined as $\alpha \to 0$ via power series expansion [S3, unofficial].
+
+**Second Derivative Control (Classification):**
+The second derivative axis ($H$) is limited to three "sheets" representing negative, zero, and positive values.
+*   Opacity on the center sheet (zero second derivative) is directly controlled by classification widgets.
+*   Opacity on the outer sheets (positive/negative second derivatives) is scaled from the center sheet opacity according to a boundary emphasis slider [S2].
+*   A scale and bias are applied to maintain the sign of the second derivative for proper interpolation [S2].
 
 ### Parameters
-*   **Interpolation:** Nearest-neighbor interpolation is used for pixel texture lookups [S1].
-*   **Second Derivative ($H$) Resolution:** Limited to three "sheets" representing negative, zero, and positive values [S2].
-*   **Boundary Emphasis:** A slider controlling the opacity scaling on the outer sheets ($H \neq 0$) relative to the central sheet ($H = 0$) [S2].
-*   **Quantization:** 16-bit quantization for normals [S1].
 
-### Algorithm Steps
-The pipeline processes the volume slice-by-slice. Let $S$ be the current slice index.
-
-1.  **Render VGH Slice to Scratch Buffer:**
-    *   Render the slice from the VGH data volume into the scratch buffer.
-    *   The fragment color at this stage is $(V/255, G/255, H_{scaled}/255)$, where $H_{scaled}$ is the second derivative value scaled and biased to fit the $[0, 1]$ range required for texture coordinates [S1, S2].
-
-2.  **Apply Classification Pixel Texture:**
-    *   Perform a `glCopyPixels` (or equivalent) operation from the scratch buffer to itself (or a target texture) using the pixel texture extension.
-    *   The hardware uses the RGB color fragments from Step 1 as texture coordinates into the Classification 3D Texture.
-    *   The lookup returns a new RGBA value $(R_{out}, G_{out}, B_{out}, A_{out})$ which replaces the original fragment color [S1, S2].
-    *   *Note on H-axis:* The classification texture uses three control points for the $H$ axis. The opacity on the center sheet ($H=0$) is set by classification widgets. The opacity on the outer sheets ($H>0, H<0$) is scaled by the boundary emphasis slider [S2].
-
-3.  **Apply Shading (Optional):**
-    *   If shading is enabled:
-        a. Render the corresponding slice from the **Shade Volume** into the scratch buffer (or a temporary buffer).
-        b. Modulate (multiply) the classified slice (from Step 2) with the shading slice.
-        c. Result: $(R_{out} \cdot R_{shade}, G_{out} \cdot G_{shade}, B_{out} \cdot B_{shade}, A_{out})$ [S1].
-    *   *Alternative Shading Path (QN):* If using the Quantized Normal volume, render the QN slice to the scratch buffer and apply a Shading Pixel Texture lookup to generate the lighting values, then multiply with the classified slice [S1].
-
-4.  **Composite to Frame Buffer:**
-    *   Copy the final slice from the scratch buffer to the Frame Buffer.
-    *   Blend the slice with the existing content in the Frame Buffer using standard alpha blending (back-to-front or front-to-back depending on implementation, typically back-to-front for hardware accumulation) [S1].
-
-### Pseudocode
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def render_volume_slice(vgh_texture, shade_texture, qn_texture, classification_tf, shading_tf, scratch_buffer, frame_buffer, slice_index, use_shading, use_qn_shading):
-    """
-    Renders a single slice of the volume using the hardware pixel texture pipeline.
-    """
-    
-    # 1. Render VGH slice to scratch buffer
-    # The fragment color is V, G, H normalized to [0,1]
-    # H must be scaled/biased to maintain sign information for interpolation
-    h_scaled = scale_and_bias_second_derivative(vgh_texture[slice_index].H)
-    
-    render_to_buffer(vgh_texture[slice_index], scratch_buffer, 
-                     color_output=(vgh_texture[slice_index].V/255.0, 
-                                   vgh_texture[slice_index].G/255.0, 
-                                   h_scaled))
-    
-    # 2. Apply Classification Pixel Texture
-    # Use nearest-neighbor interpolation
-    classified_slice = apply_pixel_texture_lookup(scratch_buffer, classification_tf, interpolation='nearest')
-    
-    # 3. Apply Shading if enabled
-    if use_shading:
-        if use_qn_shading:
-            # Render QN slice to scratch buffer
-            render_to_buffer(qn_texture[slice_index], scratch_buffer, 
-                             color_output=(qn_texture[slice_index].Red/255.0, 
-                                           qn_texture[slice_index].Green/255.0, 0.0))
-            
-            # Apply Shading Pixel Texture to get lighting values
-            shading_values = apply_pixel_texture_lookup(scratch_buffer, shading_tf, interpolation='nearest')
-            
-            # Modulate classified slice with shading values
-            final_slice = multiply_colors(classified_slice, shading_values)
-        else:
-            # Use pre-computed Shade Volume
-            render_to_buffer(shade_texture[slice_index], scratch_buffer, 
-                             color_output=shade_texture[slice_index].RGB)
-            
-            # Modulate classified slice with shading slice
-            final_slice = multiply_colors(classified_slice, scratch_buffer)
-    else:
-        final_slice = classified_slice
-        
-    # 4. Composite to Frame Buffer
-    # Blend final_slice into frame_buffer using alpha blending
-    blend_into_frame_buffer(final_slice, frame_buffer, alpha=final_slice.A)
-
-def scale_and_bias_second_derivative(h_value):
-    """
-    Scales and biases the signed second derivative to [0, 1] for texture coordinate usage.
-    Maintains sign information for proper interpolation across the zero-crossing.
-    """
-    # Implementation detail: Map [-max, max] to [0, 1] such that 0 maps to 0.5
-    # This allows the 3-sheet structure (negative, zero, positive) to interpolate correctly.
-    # Not given in sources: Exact scaling factor depends on data range.
-    return (h_value + max_abs_h) / (2 * max_abs_h)
-```
+*   **Quantization Scheme for Normals:** 16-bit [S1].
+*   **Interpolation Method:** Nearest-neighbor is used for pixel texture lookup in the SGI implementation [S1].
+*   **Slab Thickness ($\Delta$):** Calculated as the total distance covered by the stack of planes divided by the number of planes [S3, unofficial].
+*   **Resolution Limits:** Data Value and Gradient Magnitude axes use full 8-bit resolution (256 entries). Second Derivative axis resolution is limited to 3 control points (sheets) [S2].
 
 ### Edge Cases and Pitfalls
-1.  **Scratch Buffer Size:** When updating the shade volume in hardware, the quantized normal slices must be smaller than the scratch buffer’s dimensions [S1].
-2.  **Hardware Flexibility:** Some hardware implementations do not support generating the shading pixel texture by rendering a point with its normal to the frame buffer and copying it [S1].
-3.  **Performance Optimization:** If the transfer function is manipulated, the viewpoint is static, allowing the pixel texture operation to be used only on the portion of the volume currently changing. Conversely, when the viewpoint rotates, the transfer function is static [S1].
-4.  **Texture Size:** Hardware flexibility in scaling color channel values allows the number of elements along a dimension of the pixel texture to differ from the number of bit planes in the component that generated the texture coordinate, preventing prohibitively large 3D pixel textures [S2].
+
+*   **Scratch Buffer Size:** When updating the shade volume in hardware (SGI V-series), the quantized normal slices must always be smaller than the scratch buffer’s dimensions [S1].
+*   **Hardware Flexibility:** Some hardware implementations do not support generating the shading pixel texture by rendering a point with its corresponding normal to the frame buffer and copying it [S1].
+*   **Perspective Viewing Error:** For perspective viewing, effective slab thickness increases with off-axis angle. The implementation ignores this, causing up to 4% error for 600-pixel width/70cm distance, and up to 14% for 1000-pixel width. Mitigation: Render concentric spherical shells instead of planes [S3, unofficial].
+*   **Texture Size Limits:** The number of elements along a dimension of the pixel texture can differ from the number of bit planes in the component generating the texture coordinate due to hardware scaling/interpolation. This prevents prohibitively large 3D pixel textures [S2].
 
 ## Subtopics
 
 ### [Multi-Pass/Multi-Texture Shading](5653-multi-pass-multi-texture-shading.md)
-Multi-Pass/Multi-Texture Shading is a technique for adding interactive shading to the hardware volume rendering pipeline by decoupling classification and lighting calculations into separate rendering passes. It distinguishes itself from single-pass methods by utilizing multiple textures and pipeline stages to handle complex lighting models, such as gradient-based enhancement, without significant performance penalties.
+Decouples classification and lighting into separate passes to handle complex lighting models like gradient-based enhancement without significant performance penalties.
 
 ## Operating characteristics
-*   **Time Complexity:** Per-slice rendering involves two main texture lookups (classification and shading) and one blend operation. The cost is dominated by the memory bandwidth required to read/write the scratch buffer and the pixel texture lookup latency.
-*   **Memory Complexity:** Requires storage for VGH, QN, and Shade volumes, plus a scratch buffer. The VGH and QN volumes are 3D textures with 8-bit components.
-*   **Measured Performance:** On SGI Octane 2 with V-series cards, the method requires a scratch buffer, leading to expensive copy operations. On nVidia GeForce3, dependent texture reads on a per-fragment basis eliminate the scratch buffer, significantly improving performance [S1].
-*   **Strengths:** Allows complex multi-dimensional transfer functions (V, G, H) to be evaluated efficiently in hardware. Supports interactive manipulation of transfer functions and viewpoint [S1, S2].
-*   **Limitations:** Requires auxiliary buffers on older hardware (SGI V-series). Limited to separable transfer functions on hardware with only 2D dependent texture reads (GeForce3) [S1].
+*   **Time Complexity:**
+    *   Lookup Table Size: Proportional to the product of the number of quantized gradients and the number of reflecting materials. Independent of volume size [S3, unofficial].
+    *   Texture Map Filling: Proportional to the size of the volume, involving few integer operations per voxel [S3, unofficial].
+*   **Memory Complexity:** Proportional to the volume size for texture maps. Large volumes require partitioning into multiple texture maps due to hardware memory limits [S3, unofficial].
+*   **Performance:**
+    *   Comparable in speed to Shear-Warp (LL) when comparable imaging options are selected [S3, unofficial].
+    *   Produces images comparable to ray-casting when voxels do not cover too many pixels [S3, unofficial].
+    *   Does not introduce artifacts on rotation, unlike Shear-Warp [S3, unofficial].
+    *   Performance impact of lighting/shading extensions is about a factor of ten compared to ambient-only rendering [S3, unofficial].
+*   **Strengths:**
+    *   High-quality images at nearly interactive speeds on hardware with 3D texture support [S3, unofficial].
+    *   Supports orthographic, perspective, and stereo views [S3, unofficial].
+    *   Robust to high-frequency or discontinuous transfer functions [S3, unofficial].
+*   **Limitations:**
+    *   Requires hardware support for 3D textures and pixel textures (dependent textures) [S1][S3, unofficial].
+    *   SGI V-series requires scratch buffers and copy operations, reducing performance compared to per-fragment dependent reads (e.g., GeForce3) [S1].
+    *   Perspective error if planar slabs are used instead of spherical shells [S3, unofficial].
 
 ## Background
-This method was developed for interactive volume rendering using multi-dimensional transfer functions on SGI Octane 2 systems with V-series graphics cards and nVidia GeForce3 series graphics adaptors [S1]. It leverages the OpenGL pixel texture (dependent texture) extension to perform arbitrary function evaluation via lookup tables, enabling real-time classification and shading of 3D volumes [S1, S2]. The approach was presented in the paper "Interactive Volume Rendering Using Multi-Dimensional Transfer Functions" by Kindlmann et al. [S1, S2].
+The method was implemented on SGI Reality Engine hardware with 3D texture mapping support [S3, unofficial]. The specific pipeline using VGH/QN volumes was implemented on SGI Octane 2 with V-series graphics cards and NVIDIA GeForce3 series [S1]. The Voltx variant was developed at the University of California, Santa Cruz [S3, unofficial].
 
 ## Sources
 [S1] Interactive Volume Rendering Using Multi-Dimensional Transfer Functions, https://publications.sci.utah.edu/publications/jmk01/simian-paper.pdf, fetched 2026-10-27
 [S2] Interactive Volume Rendering Using Multi-Dimensional Transfer Functions, https://collections.lib.utah.edu/dl_files/d4/e4/d4e47bfc09e54eee9f532e4f22b17e9214f4c755.pdf, fetched 2026-10-27
+[S3] Object Volume Rendering with Shading via Three-Dimensional Textures, https://ntrs.nasa.gov/api/citations/19970021689/downloads/19970021689.pdf?attachment=true, fetched 2026-10-29 (unofficial)

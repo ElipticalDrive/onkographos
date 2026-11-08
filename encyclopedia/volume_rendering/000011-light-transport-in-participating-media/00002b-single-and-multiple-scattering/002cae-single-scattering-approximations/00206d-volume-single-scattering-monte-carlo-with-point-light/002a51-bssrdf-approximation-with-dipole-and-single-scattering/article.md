@@ -3,236 +3,179 @@
 Also called: BSSRDF Model with Dipole Diffusion Approximation, BSSRDF Rendering with Dipole Diffusion and Single Scattering, BSSRDF approximation, Dipole BSSRDF, First-order scattering, Hanrahan and Krueger extension, Practical Model for Subsurface Light Transport, Single Scattering Term
 
 ## Overview
-This method renders translucent materials by combining a dipole diffusion approximation for multiple scattering with a first-order single scattering term, addressing the problem of light entering and exiting a medium at different positions [S1, unofficial]. It sets itself apart from pure surface BRDF models by accounting for subsurface diffusion and from full volumetric path tracing by using an analytical approximation to compute diffuse reflectance, offering a balance between physical accuracy and computational efficiency [S1, unofficial]. It builds on [Volume Single Scattering (Monte Carlo with Point Light)](2293-volume-single-scattering-monte-carlo-with-point-light.md) by replacing the pure Monte Carlo single-scattering integration with an analytical single-scattering term and adding a dipole-based multiple scattering component.
+This method approximates subsurface light transport by combining a dipole diffusion model for multiple scattering with a single-scattering term, enabling the efficient rendering of translucent materials like skin, marble, and milk [S1, unofficial]. It differs from pure volume rendering methods by evaluating the BSSRDF on the surface using virtual point sources, and from full BSSRDF approximations by specifically relying on the dipole source configuration for single-scattering dominant or low-absorption regimes [S1, unofficial].
 
 ## How it works
-The method computes outgoing radiance $L_o(x_o, \omega_o)$ at a surface point $x_o$ in direction $\omega_o$ by integrating the incident radiance over the surface area and incoming directions, using the BSSRDF $S$ [S1, unofficial]:
+**Inputs and Outputs:**
+*   **Inputs:** Surface point $x_o$, outgoing direction $\omega_o$, incident point $x_i$, incident direction $\omega_i$, material coefficients ($\sigma_a, \sigma_s, g, \eta$), incident radiance $L_i(x_i, \omega_i)$, and geometric normals $n(x_o), n(x_i)$.
+*   **Outputs:** Outgoing radiance $L_o(x_o, \omega_o)$.
 
-$$
-L_o (x_o , \omega_o) = \int_A \int_{2\pi} S(x_i , \omega_i ; x_o , \omega_o ) (\omega_i \cdot \omega_o) L_i (x_i , \omega_i ) d\omega_i dA(x_i )
-$$
+**Data Structures:**
+No specific volumetric data structures are required; the method operates on surface geometry and material parameters.
 
-The BSSRDF $S$ relates outgoing radiance at $x_o$ to incident flux at $x_i$, allowing light to enter and exit at different positions [S1, unofficial]. The model approximates $S$ using a dipole diffusion solution for the diffuse component and an analytical term for single scattering.
-
-### Inputs and Outputs
-**Inputs:**
-*   Surface point $x_o$ and outgoing direction $\omega_o$.
-*   Incident point $x_i$ and incident direction $\omega_i$ (for the single scattering term).
-*   Material properties: Absorption coefficient $\sigma_a$, scattering coefficient $\sigma_s$, mean cosine of scattering angle $g$, relative index of refraction $\eta$.
-*   Incident radiance $L_i(x_i, \omega_i)$.
-*   Random number $\xi \in ]0, 1]$ for single scattering distance sampling.
-
-**Outputs:**
-*   Outgoing radiance $L_o(x_o, \omega_o)$.
-
-### Data Structures
-No specific complex data structures are required beyond standard material property storage. The key parameters are:
+**Parameters:**
 *   $\sigma_a$: Absorption coefficient.
 *   $\sigma_s$: Scattering coefficient.
-*   $g$: Mean cosine of scattering angle.
+*   $g$: Mean cosine of the scattering angle.
 *   $\eta$: Relative index of refraction.
-*   Derived parameters:
-    *   Reduced scattering coefficient: $\sigma_{s0} = \sigma_s (1 - g)$.
-    *   Reduced extinction coefficient: $\sigma_{t0} = \sigma_{s0} + \sigma_a$.
-    *   Diffusion constant: $D = \frac{1}{3\sigma_{t0}}$.
-    *   Effective transport coefficient: $\sigma_{tr} = \sqrt{3\sigma_a \sigma_{t0}}$.
+*   $\sigma_{t0}$: Reduced extinction coefficient, $\sigma_{t0} = \sigma_{s0} + \sigma_a$, where $\sigma_{s0} = \sigma_s (1 - g)$.
+*   $D$: Diffusion constant, $D = \frac{1}{3\sigma_{t0}}$.
+*   $\sigma_{tr}$: Effective transport coefficient, $\sigma_{tr} = \sqrt{3\sigma_a \sigma_{t0}}$.
 
-### Steps
-1.  **Compute Diffuse BSSRDF ($R_d$) using Dipole Approximation:**
-    The diffuse reflectance $R_d$ is computed using a dipole source configuration with a real source at distance $z_r = 1/\sigma_{t0}$ below the surface and a virtual source at distance $z_v$ [S1, unofficial]. The fluence $\phi$ at a point $x$ is given by:
-    $$
-    \phi(x) = \frac{\Phi}{4\pi D} \left( \frac{e^{-\sigma_{tr} r(x)}}{r(x)} - \frac{e^{-\sigma_{tr} r_v(x)}}{r_v(x)} \right)
-    $$
-    where $\Phi$ is the source power, $r(x)$ is the distance to the real source, and $r_v(x)$ is the distance to the virtual source. The diffuse reflectance $R_d$ is derived from the radiant exitance at the surface, which is related to the gradient of the fluence [S1, unofficial]. For a flat surface, $R_d$ can be approximated using a rational function of $\eta$ [S1, unofficial]:
-    $$
-    F_{dr} = \frac{1.440}{\eta^2} + \frac{0.710}{\eta} + 0.668 + 0.0636\eta
-    $$
-    The final $R_d$ value depends on the distance between $x_i$ and $x_o$ and the material parameters.
+**Steps:**
 
-2.  **Compute Single Scattering Term:**
-    For the single scattering component, pick a random distance $s_{0o}$ along the refracted outgoing ray:
-    $$
-    s_{0o} = \frac{\log(\xi)}{\sigma_t(x_o)}
-    $$
-    where $\xi \in ]0, 1]$ is a uniformly distributed random number [S1, unofficial].
+1.  **Compute Reduced Coefficients:**
+    Calculate $\sigma_{s0} = \sigma_s (1 - g)$, $\sigma_{t0} = \sigma_{s0} + \sigma_a$, $D = \frac{1}{3\sigma_{t0}}$, and $\sigma_{tr} = \sqrt{3\sigma_a \sigma_{t0}}$.
 
-3.  **Approximate Refracted Distance for Incoming Ray:**
-    Approximate the refracted distance $s_{0i}$ for shadow rays that do not refract at the surface (assuming the light source is far away compared to the mean free path) using Snell's law:
-    $$
-    s_{0i} = s_i \frac{|\omega_i \cdot n_i|}{\sqrt{1 - (\eta^2 (1 - |\omega_i \cdot n(x_i)|^2))}}
-    $$
-    Here $s_i$ is the observed distance, $\eta$ is the index of refraction, $n_i$ is the normal at the outgoing point, and $n(x_i)$ is the normal at the incoming point [S1, unofficial].
+2.  **Determine Source Positions (Dipole Approximation):**
+    For the incident point $x_i$, place a real source at distance $z_r = 1/\sigma_{t0}$ along the inward normal. For the dipole approximation, a virtual source is also placed at a symmetric position or derived from boundary conditions. The fluence $\phi(x)$ at a point $x$ due to a point source of power $\Phi$ is:
+    $$ \phi(x) = \frac{\Phi e^{-\sigma_{tr} r(x)}}{4\pi D r(x)} $$
+    where $r(x)$ is the distance to the source. For a semi-infinite medium with a dipole, the fluence is the superposition of real and virtual sources [S1, unofficial].
 
-4.  **Compute Outgoing Radiance:**
-    The outscattered radiance $L_o^{(1)}(x_o, \omega_o)$ is computed as:
-    $$
-    L_o^{(1)}(x_o, \omega_o) = \left[ \frac{\sigma_s(x_o) F p(\omega_i \cdot \omega_o)}{\sigma_{tc}} \right] e^{-s_{0i} \sigma_t(x_i)} e^{-s_{0o} \sigma_t(x_o)} L_i(x_i, \omega_i)
-    $$
-    where $\sigma_s$ is the scattering coefficient, $F = F_t(\eta, \omega_o) F_t(\eta, \omega_i)$ is the product of Fresnel transmission terms, $p$ is the phase function, $\sigma_{tc}$ is the total cross section, $s_{0i}$ is the refracted distance through the material, $s_{0o}$ is the distance along the outgoing ray, and $L_i$ is the incident radiance [S1, unofficial].
+3.  **Calculate Single Scattering Term:**
+    The single scattering radiance $L_o^{(1)}(x_o, \omega_o)$ is computed as [S1, unofficial]:
+    $$ L_o^{(1)}(x_o, \omega_o) = \frac{\sigma_s(x_o) F p(\omega_i \cdot \omega_o)}{\sigma_{tc}} e^{-s_{0i} \sigma_t(x_i)} e^{-s_{0o} \sigma_t(x_o)} L_i(x_i, \omega_i) $$
+    Where:
+    *   $\sigma_{tc}$ is the total cross section (often $\sigma_t$).
+    *   $F = F_t(\eta, \omega_o) F_t(\eta, \omega_i)$ is the product of Fresnel transmission terms.
+    *   $p(\omega_i \cdot \omega_o)$ is the phase function.
+    *   $s_{0i}$ is the refracted distance through the material.
+    *   $s_{0o}$ is the distance along the outgoing ray.
+
+4.  **Compute Refracted Distances:**
+    *   **Outgoing distance ($s_{0o}$):** Pick a random distance $s_{0o} = \frac{\ln(\xi)}{\sigma_t(x_o)}$ along the refracted outgoing ray, where $\xi \in (0, 1]$ is a uniformly distributed random number [S1, unofficial].
+    *   **Incoming distance ($s_{0i}$):** Approximate the refracted distance for shadow rays using Snell's law:
+        $$ s_{0i} = s_i \frac{|\omega_i \cdot n_i|}{\sqrt{1 - \eta^2 (1 - |\omega_i \cdot n(x_i)|^2)}} $$
+        where $s_i$ is the observed distance, $\eta$ is the index of refraction, $n_i$ is the normal at the outgoing point, and $n(x_i)$ is the normal at the incoming point [S1, unofficial].
 
 5.  **Combine Terms:**
-    The total outgoing radiance is the sum of the diffuse BSSRDF contribution and the single scattering term. The BSSRDF contribution is integrated over the surface area, while the single scattering term is evaluated for specific light paths.
+    The total outgoing radiance is the sum of the diffuse BSSRDF contribution (computed via the dipole fluence and diffuse Fresnel reflectance $F_{dr}$) and the single scattering term [S1, unofficial]. The diffuse BSSRDF $R_d$ is equal to the radiant exitance divided by the incident flux:
+    $$ R_d(r) = -D \frac{(\hat{n} \cdot \nabla \phi)(x_s)}{d\Phi_i(x_i)} $$
+    where $r = ||x_s - x_i||$.
 
-### Pseudocode
+**Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import math
+import random
 
-def compute_bssrdf_dipole(sigma_a, sigma_s, g, eta, xi, xo, xo_normal, xi_pos, xo_pos):
+def compute_bssrdf_dipole_single_scattering(
+    x_o, omega_o, x_i, omega_i,
+    sigma_a, sigma_s, g, eta,
+    L_i, sigma_t,
+    n_o, n_i
+):
     """
-    Computes the diffuse BSSRDF component using the dipole approximation.
+    Computes outgoing radiance using BSSRDF dipole approximation and single scattering.
     """
+    # 1. Compute Reduced Coefficients
     sigma_s0 = sigma_s * (1 - g)
     sigma_t0 = sigma_s0 + sigma_a
     D = 1.0 / (3.0 * sigma_t0)
     sigma_tr = math.sqrt(3.0 * sigma_a * sigma_t0)
     
-    # Distance between xi and xo
-    r = math.norm(xi_pos - xo_pos)
+    # 2. Single Scattering Term
+    # Compute Fresnel transmission terms F_t
+    # Note: Exact Fresnel implementation depends on specific formulation, 
+    # using standard approximation or lookup if available.
+    F_t_o = fresnel_transmission(eta, omega_o, n_o)
+    F_t_i = fresnel_transmission(eta, omega_i, n_i)
+    F = F_t_o * F_t_i
     
-    # Real source distance
-    zr = 1.0 / sigma_t0
-    
-    # Virtual source distance (simplified dipole model)
-    # In the full Hanrahan-Krueger model, zv is derived from boundary conditions.
-    # Here we use a simplified approximation for the dipole term.
-    # The fluence at the surface is approximated by the difference of two exponentials.
-    
-    # Note: The exact calculation of Rd involves integrating the fluence gradient.
-    # A common approximation for Rd(r) is:
-    # Rd(r) = (1 / (4 * pi)) * ( (1 + sigma_tr * dr) * exp(-sigma_tr * dr) / dr^2 
-    #                           - (1 + sigma_tr * dv) * exp(-sigma_tr * dv) / dv^2 )
-    # where dr and dv are distances to real and virtual sources.
-    
-    dr = math.sqrt(r**2 + zr**2)
-    # Virtual source position is typically at -zv below the surface.
-    # For a semi-infinite medium, zv is often approximated.
-    # Using a simplified virtual source distance for demonstration.
-    zv = 1.0 / sigma_tr # Approximation
-    dv = math.sqrt(r**2 + zv**2)
-    
-    term1 = (1 + sigma_tr * dr) * math.exp(-sigma_tr * dr) / (dr**2)
-    term2 = (1 + sigma_tr * dv) * math.exp(-sigma_tr * dv) / (dv**2)
-    
-    Rd = (1.0 / (4.0 * math.pi)) * (term1 - term2)
-    
-    return Rd
-
-def compute_single_scattering(sigma_s, sigma_t, eta, p, xi, xo, xo_normal, xi_normal, Li, xi_pos, xo_pos, ray_length):
-    """
-    Computes the single scattering term.
-    """
-    # Fresnel transmission
-    Ft_o = fresnel_transmission(eta, xo_normal, xo)
-    Ft_i = fresnel_transmission(eta, xi_normal, xi)
-    F = Ft_o * Ft_i
-    
-    # Phase function
-    phase = p(xi, xo)
+    # Phase function p(omega_i . omega_o)
+    # Assuming normalized phase function
+    p_val = phase_function(omega_i, omega_o)
     
     # Refracted distances
-    # s0o is sampled randomly
-    xi_rand = random.uniform(0.001, 1.0)
-    s0o = math.log(xi_rand) / sigma_t
+    # s_0o: Random distance along outgoing ray
+    xi = random.uniform(0.0001, 1.0) # Avoid log(0)
+    s_0o = math.log(xi) / sigma_t(x_o)
     
-    # s0i is approximated using Snell's law
-    # Assuming si is the distance to the light source or intersection
-    si = ray_length 
-    dot_ni = abs(dot(xi, xi_normal))
-    dot_nxo = abs(dot(xi, xo_normal))
+    # s_0i: Refracted distance for incoming ray
+    # Snell's law approximation
+    dot_n_i = abs(dot(omega_i, n_i))
+    dot_n_o = abs(dot(omega_i, n_o)) # Normal at outgoing point for shadow ray direction?
+    # Note: Source uses n(xi) for incoming normal and ni for outgoing normal in formula
+    # s_0i = s_i * |w_i . n_i| / sqrt(1 - eta^2 * (1 - |w_i . n(xi)|^2))
+    # Here n_i is normal at outgoing point, n(xi) is normal at incoming point.
+    # The shadow ray direction is -omega_i.
     
-    denominator = math.sqrt(1 - (eta**2 * (1 - dot_nxo**2)))
-    if denominator == 0:
-        s0i = si
+    # Assuming s_i is the distance to the light source or intersection
+    s_i = distance_to_light_source(x_i, omega_i) 
+    
+    denom_sq = 1.0 - (eta**2 * (1.0 - dot_n_i**2))
+    if denom_sq <= 0:
+        s_0i = s_i # Fallback or total internal reflection handling
     else:
-        s0i = si * dot_ni / denominator
+        s_0i = s_i * dot_n_o / math.sqrt(denom_sq)
         
     # Attenuation
-    attenuation = math.exp(-s0i * sigma_t) * math.exp(-s0o * sigma_t)
+    att_in = math.exp(-s_0i * sigma_t(x_i))
+    att_out = math.exp(-s_0o * sigma_t(x_o))
     
-    # Single scattering radiance
-    # Note: sigma_tc is total cross section, often same as sigma_t in this context
-    sigma_tc = sigma_t
+    single_scattering_term = (sigma_s(x_o) * F * p_val / sigma_t(x_o)) * att_in * att_out * L_i
     
-    Lo_single = (sigma_s * F * phase / sigma_tc) * attenuation * Li
+    # 3. Diffuse BSSRDF Term (Dipole)
+    # Distance between x_i and x_o
+    r = distance(x_i, x_o)
     
-    return Lo_single
-
-def fresnel_transmission(eta, normal, direction):
-    """
-    Simplified Fresnel transmission approximation.
-    """
-    # Use Schlick's approximation for reflectance, then 1 - R for transmission
-    cos_theta = abs(dot(normal, direction))
-    R = schlick_reflectance(eta, cos_theta)
-    return 1.0 - R
-
-def schlick_reflectance(eta, cos_theta):
-    """
-    Schlick's approximation for Fresnel reflectance.
-    """
-    r0 = ((1 - eta) / (1 + eta))**2
-    return r0 + (1 - r0) * (1 - cos_theta)**5
-
-def render_bssrdf(xo, xo_normal, xi_pos, xi_normal, Li, material_params):
-    """
-    Main rendering function for BSSRDF with dipole and single scattering.
-    """
-    sigma_a = material_params['sigma_a']
-    sigma_s = material_params['sigma_s']
-    g = material_params['g']
-    eta = material_params['eta']
+    # Fluence calculation for dipole
+    # Real source at z_r = 1/sigma_t0 below x_i
+    # Virtual source at z_v = ... (typically symmetric or based on boundary conditions)
+    # Simplified: Use the analytical solution for semi-infinite medium
+    # phi(x) = Phi * (exp(-sigma_tr * r_dr) / (4 * pi * D * r_dr) - exp(-sigma_tr * r_dv) / (4 * pi * D * r_dv))
+    # where r_dr is distance to real source, r_dv to virtual source.
     
-    # Compute diffuse BSSRDF component
-    Rd = compute_bssrdf_dipole(sigma_a, sigma_s, g, eta, None, xo, xo_normal, xi_pos, xo_pos)
+    z_r = 1.0 / sigma_t0
+    # Virtual source position depends on specific boundary condition implementation.
+    # Commonly placed at -z_r or adjusted for index of refraction.
+    # For this implementation, we assume a standard dipole configuration.
+    r_dr = math.sqrt(r**2 + z_r**2) # Distance to real source (assuming normal alignment for simplicity)
+    # Virtual source distance r_dv would be calculated similarly.
+    # For a complete implementation, the exact virtual source position must be defined.
+    # Using a placeholder for the dipole fluence calculation.
+    phi = dipole_fluence(x_i, x_o, sigma_tr, D, z_r)
     
-    # Compute single scattering component
-    # Note: In a full implementation, single scattering is integrated over light paths.
-    # Here we assume a point light and a specific shadow ray.
-    Lo_single = compute_single_scattering(
-        sigma_s, sigma_a + sigma_s, eta, phase_function, 
-        xi, xo, xo_normal, xi_normal, Li, xi_pos, xo_pos, ray_length
-    )
+    # Radiant exitance M = -D * d(phi)/dn
+    # Approximated as M = phi * F_dr (simplified relation often used)
+    # Or more precisely: R_d = -D * (n . grad phi) / Phi
+    # Using the rational approximation for F_dr
+    F_dr = 1.440 / (eta**2) - 0.710 / eta + 0.668 + 0.0636 * eta
     
-    # Combine terms
-    # The BSSRDF term is integrated over the surface, so Rd is multiplied by incident flux.
-    # For a point light, this simplifies to Rd * Li * cos(theta) * solid_angle.
-    # The single scattering term is added directly.
+    # Diffuse term
+    # L_diffuse = R_d * L_i * (n_o . omega_o) ? 
+    # The BSSRDF relates dLo to dPhi.
+    # Lo = integral S(xi, wi; xo, wo) (wi . wo) Li dwi dA
+    # For a point light, dPhi = Li * dA * (wi . ni)
+    # So Lo = S * (wi . wo) / (wi . ni) * Li * (wi . ni) ? 
+    # Standard rendering equation form: Lo = Fr(1) * Li
+    # Fr(1) = alpha * F * p / (|n.wi| + |n.wo|) is a BRDF approximation.
+    # For BSSRDF, we use the diffuse reflectance Rd.
     
-    # Simplified combination for demonstration
-    Lo = Rd * Li + Lo_single
+    # Combining single scattering and diffuse
+    # Note: The exact combination depends on whether single scattering is added to the BSSRDF or replaces it.
+    # The source suggests L(1)o is computed separately.
     
-    return Lo
+    return single_scattering_term + diffuse_bssrdf_term
 ```
-
-### Parameters
-*   $\sigma_a$: Absorption coefficient. Typical values depend on the material (e.g., skin, wax).
-*   $\sigma_s$: Scattering coefficient. Typical values depend on the material.
-*   $g$: Mean cosine of scattering angle. Typical values for skin are around 0.7-0.9.
-*   $\eta$: Relative index of refraction. Typical value for skin is around 1.4.
-*   $\xi$: Random number for single scattering distance sampling.
-
-### Edge Cases and Pitfalls
-*   **Hair Darkness:** The hair at the back of the head appears slightly darker in the BSSRDF simulation compared to full Monte Carlo, attributed to the forced $1/\sigma_{t0}$ distance in the diffusion approximation [S1, unofficial].
-*   **Highly Curved Surfaces:** Special care must be taken in the presence of highly curved surfaces. The diffusion term is evaluated with a minimum distance of $1/\sigma_{t0}$ to eliminate singularities at sharp edges where the source can be placed arbitrarily close to $x_o$ [S1, unofficial].
-*   **Precision:** The exponential terms in the dipole approximation can lead to numerical instability if not handled carefully, especially for large distances or high absorption coefficients.
 
 ## Subtopics
 
 ### [BSSRDF Model](6674-bssrdf-model.md)
-The BSSRDF (Bidirectional Surface Scattering Reflectance Distribution Function) model approximates subsurface light transport by treating the surface as a boundary where light enters, diffuses within the medium, and exits at a different location. It solves the problem of rendering translucent materials (like skin, wax, or marble) where light penetrates the surface, scatters, and re-emerges. It sets itself apart from pure surface BRDF models by accounting for subsurface diffusion and from full volumetric path tracing by using an analytical approximation (typically the dipole model) to compute the diffuse reflectance, offering a balance between physical accuracy and computational efficiency.
+The BSSRDF Model approximates subsurface light transport by modeling the medium as a collection of point light sources (virtual sources) to compute the diffuse reflectance. It solves the problem of efficiently rendering translucent materials by replacing complex volumetric integration with an analytical solution based on diffusion theory, specifically using the dipole approximation for homogeneous media. It is distinguished from pure volume rendering methods by its surface-based evaluation and from the full BSSRDF Approximation by its specific reliance on the dipole source configuration for single-scattering dominant or low-absorption regimes.
 
 ## Operating characteristics
-*   **Time Complexity:** The method is significantly faster than full Monte Carlo simulation. For example, rendering a milk glass took 4 minutes with BSSRDF compared to 1250 minutes for full Monte Carlo [S1, unofficial]. Diffuse (BRDF) rendering took 2 minutes, while BSSRDF renderings took 4 minutes each, including caustics and global illumination [S1, unofficial].
-*   **Memory Complexity:** The method does not require storing photons or a full 3D description of the material, unlike photon mapping [S1, unofficial].
-*   **Strengths:** Fast rendering time, physically plausible appearance for translucent materials, handles subsurface diffusion.
-*   **Limitations:** Approximation errors in highly curved surfaces or near sharp edges, potential darkness artifacts in specific regions (e.g., hair), limited to single scattering for the non-diffuse component.
-*   **When to Use:** Suitable for rendering translucent materials like skin, wax, marble, and milk where real-time or near-real-time performance is needed, and full volumetric path tracing is too slow.
-*   **When Not to Use:** Not suitable for highly anisotropic scattering or when high accuracy in complex geometries is required without approximation errors.
+*   **Time Complexity:** Significantly faster than full Monte Carlo volume rendering. Rendering times for milk glass were 4 minutes for BSSRDF vs. 2 minutes for diffuse BRDF, and much faster than photon mapping (12 minutes scaled) or full Monte Carlo (1250 minutes) [S1, unofficial].
+*   **Memory Complexity:** Low, as it does not require storing volumetric photon maps or extensive precomputed textures, relying instead on analytical formulas.
+*   **Strengths:** Efficient approximation of subsurface scattering for translucent materials; handles complex lighting via integration over surface area.
+*   **Limitations:** Accuracy degrades in highly absorbing media or near sharp edges/corners where the dipole approximation fails; hair appears darker in simulations due to the forced $1/\sigma_{t0}$ distance in the diffusion approximation [S1, unofficial].
+*   **When to Use:** Rendering translucent materials like skin, marble, milk, and cheese where multiple scattering is significant but full volume integration is too expensive.
+*   **When Not to Use:** Highly absorbing media, very thin objects, or when high precision near boundaries is required.
 
 ## Background
-The model was presented in a paper for the SIGGRAPH conference proceedings, funded by NSF (IIS-0085864) and DARPA (DABT63-95-C-0085) [S1, unofficial]. It extends the work of Hanrahan and Krueger on subsurface scattering, providing a practical model for subsurface light transport. The diffusion approximation is based on the observation that the light distribution in highly scattering media tends to become isotropic, allowing the radiance to be approximated by a two-term expansion involving the radiant fluence and the vector irradiance [S1, unofficial].
+The model was presented in a paper for the SIGGRAPH conference proceedings, funded by NSF (IIS-0085864) and DARPA (DABT63-95-C-0085) [S1, unofficial]. It builds on the radiative transport equation and the diffusion approximation, which assumes that light distribution in highly scattering media tends to become isotropic. The diffusion equation is derived from a two-term expansion of radiance involving fluence and vector irradiance. The dipole solution for a semi-infinite medium allows for efficient computation of the BSSRDF.
 
 ## Sources
 [S1] Practical Model for Subsurface Light Transport, https://www.scribd.com/document/904578145/A-Practical-Model-for-Subsurface-Light-Transport, fetched 2026-10-29 (unofficial)

@@ -6,8 +6,8 @@ Also called: Angular Modulo, Polar Tiling
 Polar Modulo repeats a 2D pattern around the origin by a fixed angle determined by the number of repetitions [S1, unofficial]. It builds on [Domain Repetition](1218-domain-repetition.md) by applying modulo arithmetic to the angular coordinate rather than Cartesian coordinates, enabling radial symmetry [S1, unofficial]. Unlike [Space Repetition](1677-space-repetition.md) which tiles in linear space, Polar Modulo creates concentric or angular sectors [S1, unofficial].
 
 ## How it works
-**Inputs:** A 2D point $p = (x, y)$, and an integer $N$ (number of repetitions).
-**Outputs:** A wrapped 2D point $p'$ and an integer index $c$ identifying the repetition sector.
+**Inputs:** A 2D point $p = (x, y)$, and an integer $N$ (number of repetitions) [S1, unofficial].
+**Outputs:** A wrapped 2D point $p'$ and an integer index $c$ identifying the repetition sector [S1, unofficial].
 
 **Data Structures:**
 - $p$: `vec2` (float x, float y).
@@ -16,47 +16,38 @@ Polar Modulo repeats a 2D pattern around the origin by a fixed angle determined 
 - $N$: `int` (repetitions).
 
 **Steps:**
-1. Compute the angular step size: $\theta = 2\pi / N$.
-2. Compute the raw angle and radius: $\alpha = \operatorname{atan2}(y, x)$, $\rho = \sqrt{x^2 + y^2}$.
-3. Shift the angle to center the modulo window: $\alpha_{shift} = \alpha + \theta/2$.
-4. Determine the sector index: $k = \lfloor \alpha_{shift} / \theta \rfloor$.
-5. Wrap the angle into the primary sector: $\alpha' = (\alpha_{shift} \pmod \theta) - \theta/2$.
+1. Compute the angular step size: $\theta = 2\pi / N$ [S1, unofficial].
+2. Compute the raw angle and radius: $\alpha = \operatorname{atan2}(y, x)$, $\rho = \sqrt{x^2 + y^2}$ [S1, unofficial].
+3. Shift the angle to center the modulo window: $\alpha_{shift} = \alpha + \theta/2$ [S1, unofficial].
+4. Determine the sector index: $k = \lfloor \alpha_{shift} / \theta \rfloor$ [S1, unofficial].
+5. Wrap the angle into the primary sector: $\alpha' = (\alpha_{shift} \pmod \theta) - \theta/2$ [S1, unofficial].
    - Note: The modulo operation must return a result in $[0, \theta)$ [S1, unofficial].
-6. Reconstruct the point: $p' = (\cos \alpha', \sin \alpha') \cdot \rho$.
+6. Reconstruct the point: $p' = (\cos \alpha', \sin \alpha') \cdot \rho$ [S1, unofficial].
 7. Fix the sector index for symmetry: If $|k| \ge N/2$, set $k = |k|$ [S1, unofficial].
-8. Return $p'$ and $k$.
+8. Return $p'$ and $k$ [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def polar_modulo(p: vec2, N: int) -> tuple[vec2, int]:
-    theta = 2.0 * PI / N
-    alpha = atan2(p.y, p.x)
-    rho = length(p)
-    
-    # Shift angle to center the modulo interval
-    alpha_shift = alpha + theta / 2.0
-    
-    # Compute sector index
-    k = floor(alpha_shift / theta)
-    
-    # Wrap angle to [-theta/2, theta/2)
-    # Note: mod(a, b) returns result in [0, b)
-    alpha_prime = mod(alpha_shift, theta) - theta / 2.0
-    
-    # Reconstruct point
-    p_prime = vec2(cos(alpha_prime), sin(alpha_prime)) * rho
-    
-    # Fix index for symmetric wrapping
-    if abs(k) >= N / 2:
-        k = abs(k)
-        
-    return p_prime, k
+import math
+
+def polar_modulo(p: tuple[float, float], N: int) -> tuple[tuple[float, float], int]:
+    PI = 3.141592653589793
+    angle = 2.0 * PI / N
+    a = math.atan2(p[1], p[0]) + angle / 2.0
+    r = math.sqrt(p[0]**2 + p[1]**2)
+    c = math.floor(a / angle)
+    # GLSL-style mod: a - b * floor(a / b), returns [0, b)
+    a = a - angle * math.floor(a / angle) - angle / 2.0
+    p_prime = (math.cos(a) * r, math.sin(a) * r)
+    if abs(c) >= N / 2:
+        c = abs(c)
+    return p_prime, c
 ```
 
 **Parameters:**
-- $N$: Number of repetitions. Typical values depend on the desired pattern density [S1, unofficial].
+- $N$: Number of repetitions. Not given in the sources.
 
 **Edge Cases:**
 - **Origin:** If $p = (0,0)$, $\rho=0$ and $\alpha$ is undefined. The result is $p'=(0,0)$ regardless of angle [G].
@@ -79,7 +70,7 @@ The tentacle position is calculated as:
 $$ \text{ring} = R\,(0.98 - 0.06\,d_n) + (0.05 + 0.78\,d_n^{2})\,\sin(1.55\,d - 2t + \phi) $$
 where $R$ is the bell radius, $d_n$ is normalized distance along the strand, $d$ is distance, $t$ is time, and $\phi$ is the phase offset [S2, unofficial].
 
-**Operating characteristics**
+## Operating characteristics
 Not given in the sources.
 
 ## Background

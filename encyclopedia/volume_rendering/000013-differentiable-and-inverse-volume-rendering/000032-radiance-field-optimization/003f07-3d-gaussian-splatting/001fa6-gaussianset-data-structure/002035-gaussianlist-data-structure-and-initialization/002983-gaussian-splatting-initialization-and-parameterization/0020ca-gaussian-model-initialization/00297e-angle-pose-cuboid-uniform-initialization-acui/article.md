@@ -1,5 +1,6 @@
 # Angle-pose Cuboid Uniform Initialization (ACUI)
 
+
 ## Overview
 Angle-pose Cuboid Uniform Initialization (ACUI) is a deterministic initialization strategy for 3D Gaussian Splatting in X-ray novel view synthesis that replaces Structure-from-Motion (SfM) by computing camera parameters directly from scanner specifications and uniformly sampling Gaussian centers within a bounding cuboid [S1]. It solves the problem of feature detection failure in low-contrast, overlapping X-ray projections, offering a significant reduction in training time compared to SfM-based initialization [S1].
 
@@ -22,7 +23,7 @@ Angle-pose Cuboid Uniform Initialization (ACUI) is a deterministic initializatio
 - $\mathcal{P}$: Set of 3D coordinates $(x, y, z)$ [S1].
 
 **Steps:**
-1. **Compute Extrinsic Matrix:** Calculate $\mathbf{M}_{ext}$ using the azimuth angle $\phi$. The elevation angle is fixed at zero [S1].
+1. **Compute Extrinsic Matrix:** Calculate $\mathbf{M}_{ext}$ using the azimuth angle $\phi$ [S1]. The elevation angle is fixed at zero [S1].
    $$
    \mathbf{M}_{ext} = \begin{bmatrix} -\sin \phi & \cos \phi & 0 & 0 \\ 0 & -\cos \phi & -\sin \phi & 0 \\ -\cos \phi & -\sin \phi & 0 & 0 \end{bmatrix}
    $$
@@ -36,7 +37,7 @@ Angle-pose Cuboid Uniform Initialization (ACUI) is a deterministic initializatio
 
 3. **Define Bounding Cuboid:** Establish a cuboid of size $S_1 \times S_2 \times S_3$ centered at the world origin $(0,0,0)$ that completely encloses the scanned object [S1].
 
-4. **Uniform Sampling:** Divide the cuboid into a grid of $M_1 \times M_2 \times M_3$ voxels. Generate the set of sampled points $\mathcal{P}$ using integer indices $n_i$ and sampling interval $d$ [S1]:
+4. **Uniform Sampling:** Divide the cuboid into a grid of $M_1 \times M_2 \times M_3$ voxels [S1]. Generate the set of sampled points $\mathcal{P}$ using integer indices $n_i$ and sampling interval $d$ [S1]:
    $$
    \mathcal{P} = \left\{ \left( \frac{n_1 S_1}{M_1}, \frac{n_2 S_2}{M_2}, \frac{n_3 S_3}{M_3} \right) \mid - \left[ \frac{2}{3} d \right] - 1 \leq n_i \leq \left[ \frac{2}{3} d \right] + 1, i = 1, 2, 3 \right\}
    $$
@@ -74,8 +75,6 @@ def compute_acui_init(phi, L_SD, W, H, S1, S2, S3, M1, M2, M3, d):
     cos_phi = math.cos(phi)
     
     # M_ext is 3x4. The source defines a 3x3 rotation part and zeros for translation.
-    # Note: The source formula shows a 3x3 matrix embedded in a 3x4 context implicitly 
-    # or as a rotation matrix. We construct the 3x4 matrix as per source Eq. 12.
     M_ext = [
         [-sin_phi, cos_phi, 0, 0],
         [0, -cos_phi, -sin_phi, 0],
@@ -91,9 +90,7 @@ def compute_acui_init(phi, L_SD, W, H, S1, S2, S3, M1, M2, M3, d):
     ]
     
     # Step 3 & 4: Uniform Sampling
-    # Calculate bounds for n_i
-    # The source uses [2/3 d]. Assuming floor or integer truncation.
-    # We use math.floor for consistency with integer indexing.
+    # Calculate bounds for n_i using floor function as denoted by [·] in the source.
     limit = math.floor((2 / 3) * d)
     n_min = -limit - 1
     n_max = limit + 1
@@ -125,7 +122,7 @@ def compute_acui_init(phi, L_SD, W, H, S1, S2, S3, M1, M2, M3, d):
 
 **Edge Cases and Pitfalls:**
 - Standard SfM initialization fails for X-ray images because they are grayscale with low contrast and suffer from overlapping layers due to transmission imaging, which degrades feature detection and matching accuracy [S1]. ACUI avoids this by bypassing feature detection entirely [S1].
-- The sampling bounds depend on $d$. If $d$ is not provided, the range of $n_i$ cannot be determined. The source does not specify how $d$ is chosen relative to $S_i$ or $M_i$ [S1].
+- The sampling bounds depend on $d$ [S1]. If $d$ is not provided, the range of $n_i$ cannot be determined [S1].
 
 ## Subtopics
 
@@ -133,7 +130,7 @@ def compute_acui_init(phi, L_SD, W, H, S1, S2, S3, M1, M2, M3, d):
 Initializes SH coefficients for view-dependent appearance. ACUI focuses on geometry and camera pose initialization for isotropic radiative models, whereas SH initialization handles appearance. Choose ACUI for X-ray/CT scenarios where camera geometry is known from scanner specs. See [Spherical Harmonics Initialization](3163-spherical-harmonics-initialization.md).
 
 ## Operating characteristics
-- **Time Complexity**: The initialization is deterministic and scales with the number of sampled points $N_p$, which is proportional to $(2 \lfloor \frac{2}{3} d \rfloor + 3)^3$. It avoids the iterative and computationally expensive SfM pipeline [S1].
+- **Time Complexity**: The initialization is deterministic and scales with the number of sampled points $N_p$, which is proportional to $(2 \lfloor \frac{2}{3} d \rfloor + 3)^3$ [S1]. It avoids the iterative and computationally expensive SfM pipeline [S1].
 - **Memory Complexity**: Requires storage for $N_p$ Gaussian centers and the fixed-size camera matrices [S1].
 - **Measured Performance**: In X-ray novel view synthesis, ACUI-enabled X-Gaussian achieved 73× inference speed and 7× training speed compared to SOTA methods, with a 6.5 dB PSNR improvement [S1].
 - **Strengths**: Eliminates the need for feature detection in low-contrast, overlapping X-ray projections; significantly reduces training time; leverages known scanner geometry [S1].
@@ -142,7 +139,7 @@ Initializes SH coefficients for view-dependent appearance. ACUI focuses on geome
 - **When not to use**: RGB-based novel view synthesis where SfM is robust; scenarios with unknown or inaccurate camera parameters; view-dependent radiative models [S1].
 
 ## Background
-ACUI was proposed in the context of X-Gaussian, a 3D Gaussian Splatting-based framework for X-ray novel view synthesis [S1]. It was developed to address the limitations of Structure-from-Motion (SfM) in X-ray imaging, where low contrast and overlapping layers degrade feature matching [S1]. The method exploits the isotropic property of X-ray radiodensity and the known geometry of circular cone beam scanners [S1].
+ACUI was proposed in the context of X-Gaussian, a 3D Gaussian Splatting-based framework for X-ray novel view synthesis [S1]. It was developed to address the limitations of Structure-from-Motion (SfM) in X-ray imaging, where low contrast and overlapping layers degrade feature matching [S1]. The method computes camera parameters and point positions directly from scanner specifications, operating independently of the isotropic radiative model used for rendering [S1].
 
 ## Sources
 [S1] Radiative Gaussian Splatting for Efficient X-Ray Novel View Synthesis, https://doi.org/10.1007/978-3-031-73232-4_16, fetched 2026-10-26

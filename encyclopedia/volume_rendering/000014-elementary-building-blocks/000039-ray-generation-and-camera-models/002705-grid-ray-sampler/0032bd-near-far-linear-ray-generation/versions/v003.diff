@@ -1,0 +1,358 @@
+--- v002.md
++++ v003.md
+@@ -4,224 +4,174 @@
+ 
+ ## Overview
+-Near-Far Linear Ray Generation is a method for sampling 3D points along camera rays within a specified near and far depth range. It solves the problem of determining where to evaluate a volume or neural radiance field along a ray by distributing samples either linearly in depth or linearly in disparity (inverse depth). It sets itself apart from its siblings by providing the foundational coarse sampling strategy used in NeRF and its variants, distinguishing itself from [Near-Middle-Far Ray Generation](6817-near-middle-far-ray-generation.md) by using uniform spacing rather than a three-stage split, and from [Refined Ray Generation via PDF Sampling](6837-refined-ray-generation-via-pdf-sampling.md) by not using importance sampling weights for initial placement.
++Near-Far Linear Ray Generation generates a list of 3D sampling points along a ray segment defined by a near plane ($t_{min}$) and a far plane ($t_{max}$) for a specified number of points [S1, unofficial][S2, unofficial][S3, unofficial]. It serves as the foundational sampling strategy for coarse volume rendering passes, building on the ray origins and directions provided by the [Grid Ray Sampler](3930-grid-ray-sampler.md). It differs from its siblings by offering two distinct spacing modes—linear depth and linear disparity—allowing the renderer to control sample density relative to geometric depth or inverse depth, which is critical for handling scenes with varying depth scales [S2, unofficial][S3, unofficial].
+ 
+ ## How it works
+-The method generates a list of 3D sampling points along a ray segment defined by $t_{min}$ and $t_{max}$ (or near and far distances) for a given number of points [S1, S2, S3, unofficial]. It supports two primary spacing modes: linear depth and linear disparity [S2, S3, unofficial]. It may also include random jitter within segments to break symmetry and reduce aliasing [S2, S3, unofficial]. If a 3D bounding box (AABB) is provided, ray intersections are computed using the DDA slab method to constrain samples to the valid volume [S3, unofficial].
+-
+-### Inputs and Outputs
+ **Inputs:**
+-*   `rays_o`: Ray origins, shape $(N, 3)$ where $N$ is the number of rays.
++*   `rays_o`: Ray origins, shape $(N, 3)$, where $N$ is the number of rays.
+ *   `rays_d`: Ray directions, shape $(N, 3)$.
+-*   `near`: Near plane distance, shape $(N,)$ or scalar.
+-*   `far`: Far plane distance, shape $(N,)$ or scalar.
+-*   `num_samples` (or `point_count`): Number of samples per ray, integer.
+-*   `lindisp`: Boolean flag. If `True`, use linear disparity spacing; if `False`, use linear depth spacing [S3, unofficial].
+-*   `perturb` (or `jitter`): Float value controlling the amount of random jitter added to sample positions. 0.0 for no jitter, 1.0 for full jitter [S2, S3, unofficial].
+-*   `bbox_3D` (optional): Axis-aligned bounding box for clipping [S3, unofficial].
++*   `near`: Near plane distance $t_{min}$, scalar or shape $(N,)$.
++*   `far`: Far plane distance $t_{max}$, scalar or shape $(N,)$.
++*   `num_samples` ($N_s$): Number of sampling points per ray.
++*   `lindisp` (boolean): If `True`, use linear disparity sampling; if `False`, use linear depth sampling [S3, unofficial].
++*   `perturb` (float): Jitter magnitude. $0.0$ for no jitter, $1.0$ for full jitter [S3, unofficial].
++*   `bbox_3D` (optional): Axis-Aligned Bounding Box (AABB) defined by min/max corners, shape $(2, 3)$. If provided, ray intervals are clipped to the box intersection [S3, unofficial].
+ 
+ **Outputs:**
+-*   `xyz_coarse_sampled`: 3D coordinates of the sampled points, shape $(N, num\_samples, 3)$.
+-*   `ts` (optional): The normalized or depth values associated with each sample, shape $(N, num\_samples)$.
++*   `z_vals`: Sample depths along the ray, shape $(N, N_s)$.
++*   `xyz_samples`: 3D coordinates of samples, shape $(N, N_s, 3)$.
+ 
+-### Data Structures
+-*   **Ray Batch**: Tensors for origins, directions, near, and far values.
+-*   **Sample Points**: A tensor of shape $(N, num\_samples, 3)$ storing the final 3D coordinates.
+-*   **Depth Values**: A tensor of shape $(N, num\_samples)$ storing the $z$ values (depths) before conversion to 3D.
++**Data Structures:**
++*   `z_vals`: Tensor of depth values $t$ along the ray parameterization.
++*   `xyz_samples`: Tensor of Cartesian coordinates derived from $z\_vals$.
+ 
+-### Steps
++**Steps:**
+ 
+-1.  **Decompose Rays**: Extract ray origins ($rays\_o$), directions ($rays\_d$), near distances ($near$), and far distances ($far$) [S3, unofficial].
+-2.  **Generate Normalized Steps**: Create a linear space of values from 0 to 1 with `num_samples` steps. Let this be $z\_steps$ [S3, unofficial].
+-    $$ z\_steps = \text{linspace}(0, 1, num\_samples) $$
+-3.  **Compute Depth Values ($z\_vals$)**:
+-    *   If `lindisp` is `False` (Linear Depth):
+-        $$ z\_vals = near \cdot (1 - z\_steps) + far \cdot z\_steps $$
+-        [S2, S3, unofficial]
+-    *   If `lindisp` is `True` (Linear Disparity):
+-        $$ z\_vals = \frac{1}{\frac{1}{near} \cdot (1 - z\_steps) + \frac{1}{far} \cdot z\_steps} $$
+-        [S2, S3, unofficial]
+-4.  **Apply Jitter (Optional)**:
+-    If `perturb` > 0:
+-    *   Compute midpoints between adjacent samples:
+-        $$ z\_vals\_mid = \frac{z\_vals[:, :-1] + z\_vals[:, 1:]}{2} $$
+-        [S3, unofficial]
+-    *   Define lower and upper bounds for each interval. For the first sample, the lower bound is $near$. For the last, the upper bound is $far$. For intermediate samples, bounds are adjacent $z\_vals$.
+-        [S2, S3, unofficial]
+-    *   Generate random noise $rand\_vals \sim U(0, 1)$ with shape $(N, num\_samples)$.
+-    *   Perturb the values:
+-        $$ z\_vals = lower + (upper - lower) \cdot perturb \cdot rand\_vals $$
+-        [S3, unofficial]
+-        *Note: [S2, unofficial] describes a slightly different jitter mechanism using segment lengths and random offsets, but [S3, unofficial] provides the standard NeRF-style perturbation logic. Both achieve similar anti-aliasing effects.*
+-5.  **Bounding Box Clipping (Optional)**:
+-    If `bbox_3D` is provided:
+-    *   Compute inverse directions: $inv\_ray\_d = 1.0 / (rays\_d + \epsilon)$, where $\epsilon = 10^{-6}$ [S3, unofficial].
+-    *   Calculate intersection intervals $t_{min}$ and $t_{max}$ for the AABB using the slab method [S3, unofficial].
+-    *   Clamp the ray's near and far values to the valid intersection range $[t_{min}, t_{max}]$ [S3, unofficial].
+-    *   Re-compute $z\_vals$ using the clamped near and far values.
+-6.  **Compute 3D Coordinates**:
+-    Convert the depth values $z\_vals$ to 3D coordinates using the ray equation:
+-    $$ xyz\_coarse\_sampled = rays\_o.unsqueeze(1) + rays\_d.unsqueeze(1) \cdot z\_vals.unsqueeze(2) $$
+-    [S3, unofficial]
+-    *Note: [S2, unofficial] describes an alternative implementation using normalized $t$ values and cumulative sums of segment lengths, which is mathematically equivalent but structurally different. The depth-based approach ([S3, unofficial]) is more common in modern NeRF implementations.*
++1.  **Decompose Rays:** Extract origins `rays_o` and directions `rays_d`. Normalize `rays_d` if necessary to ensure unit length, as segment length calculations depend on direction norm [S2, unofficial].
++2.  **Compute Bounding Box Intersections (Optional):** If `bbox_3D` is provided, compute the intersection interval $[t_{min}, t_{max}]$ for each ray using the Slab Method (DDA) [S3, unofficial]:
++    $$ t_{min} = \max_i \left( \frac{bbox_{min}[i] - rays\_o[i]}{rays\_d[i]} \right) $$
++    $$ t_{max} = \min_i \left( \frac{bbox_{max}[i] - rays\_o[i]}{rays\_d[i]} \right) $$
++    Clamp $t_{min}$ and $t_{max}$ such that $t_{min} < t_{max}$ and $t_{min} \ge 0$. If $t_{min} \ge t_{max}$, the ray misses the box. Replace the input `near` and `far` with these computed values [S3, unofficial].
++3.  **Generate Base Parameters:** Create a linear space vector `tvals` of shape $(N_s + 1)$ or $(N_s)$ depending on the variant. For standard linear generation, create `tvals` from $0$ to $1$ with $N_s + 1$ steps [S2, unofficial].
++4.  **Map to Depth/Disparity:** Interpolate between `near` and `far` based on the `lindisp` flag [S2, unofficial][S3, unofficial]:
++    *   **Linear Depth (`lindisp=False`):**
++        $$ z\_vals = near \cdot (1 - tvals) + far \cdot tvals $$
++    *   **Linear Disparity (`lindisp=True`):**
++        $$ z\_vals = \frac{1}{\frac{1}{near} \cdot (1 - tvals) + \frac{1}{far} \cdot tvals} $$
++    This results in `z_vals` of shape $(N_s + 1)$ representing the boundaries of the segments [S2, unofficial][S3, unofficial].
++5.  **Compute Segment Midpoints:** Calculate the center of each segment to place samples. For $N_s$ samples, compute midpoints from the $N_s + 1$ boundaries:
++    $$ z\_vals\_mid = \frac{z\_vals[:, :-1] + z\_vals[:, 1:]}{2} $$
++    Shape $(N, N_s)$ [S2, unofficial][S3, unofficial].
++6.  **Apply Jitter (Optional):** If `perturb > 0`, perturb the sample positions within their segments to break symmetry and reduce aliasing [S3, unofficial]:
++    *   Compute segment bounds: $lower = z\_vals[:, :-1]$, $upper = z\_vals[:, 1:]$.
++    *   Generate random noise $r \sim U(0, 1)$ of shape $(N, N_s)$.
++    *   Update midpoints:
++        $$ z\_vals\_perturbed = lower + (upper - lower) \cdot perturb \cdot r $$
++    *   Replace $z\_vals\_mid$ with $z\_vals\_perturbed$ [S2, unofficial][S3, unofficial].
++7.  **Compute 3D Coordinates:** Transform depth values to Cartesian coordinates:
++    $$ xyz\_samples = rays\_o + rays\_d \cdot z\_vals\_perturbed $$
++    Broadcasting handles the dimensions: $(N, 1, 3) + (N, 1, 3) \cdot (N, N_s, 1)$ results in shape $(N, N_s, 3)$ [S3, unofficial].
+ 
+-### Pseudocode
++**Pseudocode:**
+ 
+ ```python
+ import torch
+ 
+-def near_far_linear_ray_generation(
+-    rays_o: torch.Tensor,  # (N, 3)
+-    rays_d: torch.Tensor,  # (N, 3)
+-    near: torch.Tensor,    # (N,) or scalar
+-    far: torch.Tensor,     # (N,) or scalar
+-    num_samples: int,
+-    lindisp: bool = False,
+-    perturb: float = 1.0,
+-    bbox_3d: torch.Tensor = None  # (2, 3) min/max corners, optional
+-) -> torch.Tensor:
++def near_far_linear_ray_generation(rays_o, rays_d, near, far, num_samples, lindisp=False, perturb=1.0, bbox_3d=None):
+     """
+-    Generates 3D sampling points along rays using near-far linear or disparity spacing.
++    Generate samples along rays using near-far linear or disparity spacing.
+     
+     Args:
+-        rays_o: Ray origins.
+-        rays_d: Ray directions.
+-        near: Near plane distances.
+-        far: Far plane distances.
+-        num_samples: Number of samples per ray.
+-        lindisp: If True, use linear disparity sampling.
+-        perturb: Amount of jitter (0.0 to 1.0).
+-        bbox_3d: Optional AABB for clipping.
++        rays_o: Tensor (N, 3), ray origins.
++        rays_d: Tensor (N, 3), ray directions.
++        near: Tensor (N,) or scalar, near plane distance.
++        far: Tensor (N,) or scalar, far plane distance.
++        num_samples: int, number of samples per ray.
++        lindisp: bool, if True use disparity sampling.
++        perturb: float, jitter magnitude (0.0 to 1.0).
++        bbox_3d: Tensor (2, 3), [min_corner, max_corner]. Optional.
+         
+     Returns:
+-        xyz_coarse_sampled: (N, num_samples, 3)
++        z_vals: Tensor (N, num_samples), sampled depths.
++        xyz_samples: Tensor (N, num_samples, 3), sampled 3D coordinates.
+     """
+-    # 1. Decompose rays
+-    # Ensure near and far are tensors of shape (N,)
+-    if near.dim() == 0:
+-        near = near.expand(rays_o.shape[0])
+-    if far.dim() == 0:
+-        far = far.expand(rays_o.shape[0])
++    # 1. Normalize directions
++    rays_d = rays_d / torch.norm(rays_d, dim=-1, keepdim=True)
++    
++    # 2. Handle Bounding Box Clipping
++    if bbox_3d is not None:
++        inv_ray_d = 1.0 / (rays_d + 1e-6)
++        t1 = (bbox_3d[0] - rays_o) * inv_ray_d
++        t2 = (bbox_3d[1] - rays_o) * inv_ray_d
++        t_min = torch.max(torch.min(t1, t2), dim=-1).values
++        t_max = torch.min(torch.max(t1, t2), dim=-1).values
+         
+-    # 2. Generate normalized steps
+-    # linspace(0, 1, num_samples) creates values [0, ..., 1]
+-    z_steps = torch.linspace(0, 1, num_samples, device=rays_o.device) # (num_samples,)
++        # Clamp to valid range
++        t_min = torch.clamp(t_min, min=0.0)
++        valid_mask = t_min < t_max
++        near = torch.where(valid_mask, t_min, near)
++        far = torch.where(valid_mask, t_max, far)
++        
++        # If ray misses box, set near=far to avoid division by zero or invalid ranges
++        near = torch.where(valid_mask, near, torch.zeros_like(near))
++        far = torch.where(valid_mask, far, torch.zeros_like(far))
++
++    # 3. Generate linear tvals from 0 to 1
++    # Using num_samples + 1 to define segment boundaries
++    t_vals = torch.linspace(0, 1, num_samples + 1, device=rays_o.device)
++    t_vals = t_vals.unsqueeze(0) # Shape (1, num_samples + 1)
+     
+-    # 3. Compute depth values
+-    # Expand near/far to (N, 1) for broadcasting
+-    near_exp = near.unsqueeze(1) # (N, 1)
+-    far_exp = far.unsqueeze(1)   # (N, 1)
++    # Broadcast near/far to (N, 1)
++    near = near.unsqueeze(-1)
++    far = far.unsqueeze(-1)
+     
+-    if not lindisp:
+-        # Linear depth
+-        z_vals = near_exp * (1 - z_steps) + far_exp * z_steps # (N, num_samples)
++    # 4. Map to Depth or Disparity
++    if lindisp:
++        # Linear Disparity: 1/z is linear
++        # z = 1 / ( (1/near)*(1-t) + (1/far)*t )
++        inv_near = 1.0 / (near + 1e-6)
++        inv_far = 1.0 / (far + 1e-6)
++        inv_z_vals = inv_near * (1 - t_vals) + inv_far * t_vals
++        z_vals = 1.0 / inv_z_vals
+     else:
+-        # Linear disparity
+-        # z_vals = 1 / (1/near * (1-z_steps) + 1/far * z_steps)
+-        inv_near = 1.0 / (near_exp + 1e-6)
+-        inv_far = 1.0 / (far_exp + 1e-6)
+-        z_vals = 1.0 / (inv_near * (1 - z_steps) + inv_far * z_steps)
++        # Linear Depth: z is linear
++        z_vals = near * (1 - t_vals) + far * t_vals
+         
+-    # 4. Apply Jitter
++    # z_vals shape: (N, num_samples + 1)
++    
++    # 5. Compute Midpoints
++    z_vals_mid = (z_vals[:, :-1] + z_vals[:, 1:]) / 2.0 # Shape (N, num_samples)
++    
++    # 6. Apply Jitter
+     if perturb > 0:
+-        # Compute midpoints
+-        # z_vals shape: (N, num_samples)
+-        # z_vals_mid shape: (N, num_samples - 1)
+-        z_vals_mid = (z_vals[:, :-1] + z_vals[:, 1:]) * 0.5
++        # Compute segment bounds
++        lower = z_vals[:, :-1]
++        upper = z_vals[:, 1:]
+         
+-        # Define bounds
+-        # Lower bound: near for first sample, z_vals[:-1] for others
+-        # Upper bound: far for last sample, z_vals[1:] for others
+-        # To simplify, we can use the midpoints to define intervals
++        # Random noise
++        rand_noise = torch.rand_like(z_vals_mid)
+         
+-        # Create a tensor for lower bounds
+-        lower = torch.cat([near_exp, z_vals[:, :-1]], dim=1) # (N, num_samples)
+-        # Create a tensor for upper bounds
+-        upper = torch.cat([z_vals[:, 1:], far_exp], dim=1)   # (N, num_samples)
++        # Perturb midpoints
++        z_vals_mid = lower + (upper - lower) * perturb * rand_noise
+         
+-        # Generate random noise
+-        rand_vals = torch.rand_like(z_vals) # (N, num_samples)
+-        
+-        # Perturb
+-        z_vals = lower + (upper - lower) * perturb * rand_vals
+-        
+-    # 5. Bounding Box Clipping (Optional)
+-    if bbox_3d is not None:
+-        # DDA Slab Method
+-        # bbox_3d: (2, 3) -> [min_x, min_y, min_z], [max_x, max_y, max_z]
+-        inv_ray_d = 1.0 / (rays_d + 1e-6) # (N, 3)
+-        
+-        # Calculate t_min and t_max for each slab
+-        t_min = (bbox_3d[0] - rays_o.unsqueeze(1)) * inv_ray_d # (N, 3)
+-        t_max = (bbox_3d[1] - rays_o.unsqueeze(1)) * inv_ray_d # (N, 3)
+-        
+-        # The intersection interval is [max(t_min), min(t_max)]
+-        t_enter = torch.max(t_min, dim=1).values # (N,)
+-        t_exit = torch.min(t_max, dim=1).values  # (N,)
+-        
+-        # Clamp near and far to the valid intersection range
+-        # If ray doesn't intersect, t_enter > t_exit, but we assume valid rays for this method
+-        near = torch.clamp(near, min=t_enter, max=t_exit)
+-        far = torch.clamp(far, min=t_enter, max=t_exit)
+-        
+-        # Re-compute z_vals with clamped near/far
+-        if not lindisp:
+-            z_vals = near.unsqueeze(1) * (1 - z_steps) + far.unsqueeze(1) * z_steps
+-        else:
+-            inv_near = 1.0 / (near.unsqueeze(1) + 1e-6)
+-            inv_far = 1.0 / (far.unsqueeze(1) + 1e-6)
+-            z_vals = 1.0 / (inv_near * (1 - z_steps) + inv_far * z_steps)
+-            
+-        # Re-apply jitter if needed (simplified: just re-perturb within new bounds)
+-        if perturb > 0:
+-            lower = torch.cat([near.unsqueeze(1), z_vals[:, :-1]], dim=1)
+-            upper = torch.cat([z_vals[:, 1:], far.unsqueeze(1)], dim=1)
+-            rand_vals = torch.rand_like(z_vals)
+-            z_vals = lower + (upper - lower) * perturb * rand_vals
+-
+-    # 6. Compute 3D Coordinates
+-    # rays_o: (N, 3), rays_d: (N, 3), z_vals: (N, num_samples)
+-    # Expand dimensions for broadcasting
+-    rays_o_exp = rays_o.unsqueeze(1) # (N, 1, 3)
+-    rays_d_exp = rays_d.unsqueeze(1) # (N, 1, 3)
+-    z_vals_exp = z_vals.unsqueeze(2) # (N, num_samples, 1)
++    # 7. Compute 3D Coordinates
++    # rays_o: (N, 3), rays_d: (N, 3), z_vals_mid: (N, num_samples)
++    # Expand dims for broadcasting
++    rays_o = rays_o.unsqueeze(1) # (N, 1, 3)
++    rays_d = rays_d.unsqueeze(1) # (N, 1, 3)
++    z_vals_mid = z_vals_mid.unsqueeze(-1) # (N, num_samples, 1)
+     
+-    xyz_coarse_sampled = rays_o_exp + rays_d_exp * z_vals_exp # (N, num_samples, 3)
++    xyz_samples = rays_o + rays_d * z_vals_mid
+     
+-    return xyz_coarse_sampled
++    return z_vals_mid, xyz_samples
+ ```
+ 
+-### Parameters
+-*   `num_samples`: Number of samples per ray. Typical values range from 48 to 256 for coarse sampling in NeRF [S1, S3, unofficial].
+-*   `perturb`: Jitter magnitude. 0.0 disables jitter; 1.0 enables full randomization within segments [S3, unofficial].
+-*   `lindisp`: Boolean. `False` for linear depth (standard), `True` for linear disparity (better for distant scenes) [S3, unofficial].
++**Parameters:**
++*   `num_samples`: Number of points per ray. Typical values range from 48 to 192 for coarse passes [S1, unofficial][S3, unofficial].
++*   `perturb`: Controls jitter. $0.0$ disables jitter; $1.0$ applies maximum jitter within segments [S3, unofficial].
++*   `lindisp`: Boolean flag. `False` for linear depth (uniform spacing in world space); `True` for linear disparity (uniform spacing in inverse depth, denser near the camera) [S3, unofficial].
+ 
+-### Edge Cases and Pitfalls
+-*   **Division by Zero**: When computing inverse disparity ($1/near$), ensure `near` is not zero. Add a small epsilon ($10^{-6}$) to denominators [S3, unofficial].
+-*   **Non-intersecting Rays**: If `bbox_3D` is used and a ray does not intersect the box, $t_{enter} > t_{exit}$. The clamping logic should handle this, or rays should be filtered out beforehand.
+-*   **Precision**: Using `float32` is standard, but `float64` may be needed for very large scenes to avoid precision loss in depth calculations [G].
+-*   **Jitter Symmetry**: Without jitter, samples are perfectly aligned across adjacent pixels, causing aliasing. Jitter breaks this symmetry [S2, S3, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Division by Zero:** When computing disparity space, if `near` is $0$, add a small epsilon ($1e-6$) to prevent division by zero [S3, unofficial].
++*   **Ray-Box Intersection:** If a ray does not intersect the bounding box, the slab method may yield $t_{min} \ge t_{max}$. These rays must be handled by clamping or masking to prevent invalid sampling intervals [S3, unofficial].
++*   **Direction Normalization:** Segment length calculations and jitter scaling assume normalized ray directions. Failure to normalize `rays_d` leads to incorrect sample spacing [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Near-Far Disparity Linear Ray Generation with Jitter
+-A variant that explicitly uses disparity spacing ($1/z$) and includes random jitter within segments. It is chosen when the scene has significant depth variation and disparity sampling provides better resolution at far distances. It differs from standard linear depth by mapping uniform steps in disparity space to non-uniform steps in depth space. Implementation involves converting linear $t$ values to disparity space before computing 3D positions [S2, unofficial].
+-
+-### Near-Far Clipping
+-A component that clips ray samples to a specified near and far plane. It ensures samples are within the valid viewing volume. Parameters include `near_plane` and `far_plane`. It is used to prevent sampling outside the region of interest or behind the far clipping plane. It is a prerequisite for bounding box intersection logic [S4, unofficial].
++A variant that explicitly combines disparity spacing with segment-based jitter. It generates `tvals` from $0$ to $1$ with `point_count` steps, converts them to disparity space using $tvals = 1. / (1. / near \cdot (1 - tvals) + 1. / far \cdot tvals)$, and applies jitter by computing midpoints, upper/lower bounds, and random offsets within segments. It returns the jittered `tvals` as the depth output. This method is often used in NeRF-style pipelines to ensure denser sampling near the camera while breaking grid artifacts [S2, unofficial].
+ 
+ ### Linear Seed Line Generation
+-A method to generate seed points along a line segment between a start point (`m_startPt`) and an end point (`m_endPt`). It calculates a delta vector and iteratively adds it to the start point. It is used in vector field visualization and glyph generation. It differs from ray generation by operating on a fixed line segment rather than camera rays. Parameter `count` determines the number of seeds [S5, unofficial].
++A simpler method that generates seed points along a line segment between a start point `m_startPt` and end point `m_endPt`. It calculates a delta vector $\Delta = (m\_endPt - m\_startPt) / count$ and iterates $i$ from $0$ to $count - 1$, setting $m\_h\_seeds[i] = m\_startPt + i \cdot \Delta$. This is used for basic line visualization or uniform sampling along a fixed vector, lacking the ray-specific near/far parameterization of the main method [S4, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N \cdot S)$, where $N$ is the number of rays and $S$ is the number of samples. The computation is vectorizable and highly parallelizable on GPUs.
+-*   **Memory Complexity**: $O(N \cdot S \cdot 3)$ for storing the 3D coordinates.
+-*   **Performance**: Very fast, as it involves only basic arithmetic operations. It is the bottleneck only if $S$ is extremely large.
+-*   **Strengths**: Simple to implement, deterministic (without jitter), provides uniform coverage of the depth range.
+-*   **Limitations**: Uniform sampling may waste samples in empty space or undersample regions of high detail. It does not adapt to the scene content.
+-*   **When to Use**: As a coarse sampling stage in multi-stage rendering pipelines (e.g., NeRF).
+-*   **When Not to Use**: When high efficiency is required in sparse scenes (use importance sampling) or when the depth range is extremely large and disparity sampling is not appropriate.
++*   **Time Complexity:** $O(N \cdot N_s)$, where $N$ is the number of rays and $N_s$ is the number of samples. The operations are vectorizable and highly parallel on GPUs.
++*   **Memory Complexity:** $O(N \cdot N_s)$ for storing `z_vals` and `xyz_samples`.
++*   **Strengths:** Simple to implement; provides explicit control over depth distribution via `lindisp`; jitter reduces aliasing artifacts in neural rendering [S2, unofficial][S3, unofficial].
++*   **Limitations:** Uniform spacing in depth/disparity may be inefficient for scenes with large empty regions or complex geometry far from the camera. It does not adapt to scene content (unlike [Refined Ray Generation via PDF Sampling](6837-refined-ray-generation-via-pdf-sampling.md)) [S2, unofficial].
++*   **When to Use:** Coarse sampling passes in neural radiance fields (NeRF) or volume rendering where computational efficiency is prioritized over adaptive density.
++*   **When Not to Use:** Final rendering passes where adaptive sampling based on variance or importance is required.
+ 
+ ## Background
+-The method originates from the NeRF (Neural Radiance Fields) paper by Mildenhall et al. (2020) [S2, S3, unofficial]. It was introduced as the standard way to sample points along rays for volume rendering with neural networks. The use of linear disparity sampling was proposed to handle scenes with large depth ranges more effectively. The jittering technique was added to reduce aliasing artifacts caused by the regular grid of samples. It has become a foundational component in many subsequent neural rendering methods, including TensoRF [S3, unofficial] and PointNeRF [S2, unofficial].
++The method originates from the Neural Radiance Fields (NeRF) paper by Mildenhall et al. (2020), which introduced stratified sampling along rays with linear disparity spacing to improve reconstruction quality for scenes with varying depth scales [S2, unofficial][S3, unofficial]. It has since become a standard component in many neural rendering pipelines, including TensoRF [S3, unofficial] and PointNeRF [S2, unofficial]. The "linear depth" variant is common in traditional volume rendering, while "linear disparity" is specific to neural rendering approaches that benefit from denser sampling near the camera.
+ 
+ ## Sources
+@@ -229,4 +179,3 @@
+ [S2] Xharlie/pointnerf, https://github.com/Xharlie/pointnerf, fetched 2026-10-26 (unofficial)
+ [S3] GitHub - apchenstu/TensoRF: [ECCV 2022] Tensorial Radiance Fields, a ..., https://github.com/apchenstu/TensoRF, fetched 2026-10-29 (unofficial)
+-[S4] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)
+-[S5] NightElfik/Vector-field-visualization-using-cuda NightElfik/Vector-field-visualization-using-cuda on GitHub, https://github.com/NightElfik/Vector-field-visualization-using-cuda, fetched 2026-10-29 (unofficial)+[S4] NightElfik/Vector-field-visualization-using-cuda NightElfik/Vector-field-visualization-using-cuda on GitHub, https://github.com/NightElfik/Vector-field-visualization-using-cuda, fetched 2026-10-29 (unofficial)

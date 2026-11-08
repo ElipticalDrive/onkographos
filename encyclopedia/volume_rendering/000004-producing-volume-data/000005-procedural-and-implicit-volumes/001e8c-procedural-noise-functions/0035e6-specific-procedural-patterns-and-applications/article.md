@@ -2,72 +2,53 @@
 
 
 ## Overview
-This family encompasses specific procedural patterns and application-specific noise implementations used to generate volumetric data, such as clouds, terrain constraints, and density fields, often deviating from standard gradient-based noise by utilizing texture lookups, mathematical thresholds, or environmental projections. It distinguishes itself from general noise functions by focusing on high-level semantic structures (e.g., "clouds," "biomes") rather than raw stochastic values, often combining base noise with post-processing steps like power functions or texture sampling to achieve organic or constrained results [S1, S2, S3, unofficial].
+This family defines specific procedural algorithms for generating volumetric density, occupancy, and structural patterns by applying mathematical transformations, geometric constraints, or fractal iterations to spatial coordinates. It solves the problem of creating diverse, organic, or structured 3D volumes without relying on explicit geometry or large texture atlases, distinguishing itself from general noise generators by focusing on the final density field's shape and physical properties [S1, S2, unofficial].
 
 ## Shared principles
-The methods in this family share the reliance on the core mechanisms of procedural noise defined in [Procedural Noise Functions](1799-procedural-noise-functions.md), specifically coordinate normalization, hashing/randomness, interpolation, FBM, and domain warping. However, they diverge by applying specific post-processing or sampling strategies to the raw noise output to achieve distinct visual or logical properties. For instance, some methods map 3D coordinates to 2D texture slices to introduce specific organic randomness [S1, unofficial], while others apply non-linear transformations (power functions) and thresholds to create sparse or patchy density fields [S2, unofficial]. Additionally, some applications project noise onto lower-dimensional manifolds (e.g., horizontal planes) to define environmental constraints rather than volumetric density directly [S3, unofficial].
+The methods in this family share a common architectural pattern: they take a spatial coordinate (and potentially auxiliary parameters) as input and produce a scalar density or boolean occupancy value as output. Unlike the base noise functions which generate raw stochastic values, these patterns impose specific structural logic:
+1.  **Geometric Confinement**: Many methods restrict the volume to specific shapes (spheres, slabs) using distance functions or ramps [S1, unofficial].
+2.  **Non-Linear Remapping**: Raw noise or turbulence values are often remapped via power functions, thresholds, or lookup tables to control sparsity and density falloff [S1, unofficial].
+3.  **Iterative Transformation**: Some methods, like fractals, apply iterative coordinate transformations to determine inclusion in the volume [S1, unofficial].
+4.  **Stateless Evaluation**: All methods are stateless and compute values on-the-fly based on input coordinates, avoiding persistent data structures for the core logic [G].
 
 ## Subtopics
 
+### [Sine-based procedural voxel generation](2477-sine-based-procedural-voxel-generation.md)
+Generates periodic 3D structures using trigonometric functions to determine occupancy and color. It differs from siblings by relying on deterministic sine waves and modulo arithmetic for periodicity rather than stochastic noise or radial ramps. Choose it for regular, repeating volumetric patterns.
+
+### [Spherical Density Ramp with Noise](2610-spherical-density-ramp-with-noise.md)
+Confines gas density to a spherical region using a distance-based ramp and noise offsets. It differs by combining a deterministic spherical falloff with precomputed lookup tables for turbulence and randomness, avoiding complex flow advection. Choose it for simulating steam or gas clouds rising from a source.
+
+### [Mandelbulb Fractal Generation](3327-mandelbulb-fractal-generation.md)
+Generates complex 3D fractal structures by iteratively applying polar coordinate power transformations. It differs by mapping coordinates through continuous spherical power functions rather than trigonometric sampling or radial ramps. Choose it for organic, self-similar fractal shapes.
+
+### [Volumetric Density Generation](4894-volumetric-density-generation.md)
+Creates sparse, organic density fields by applying power functions and thresholds to FBM noise. It differs by relying on non-linear remapping and hard cutoffs to create patchy structures like clouds or smoke. Choose it for general-purpose organic volumetric textures.
+
 ### Cloud Noise Generation
-**Definition:** A noise function designed for 3D volumetric clouds that samples a 2D texture slice based on 3D coordinates to generate organic randomness [S1, unofficial].
-
-**Steps:**
-1.  Compute the integer part `p` and fractional part `f` of the input 3D coordinate `x` using floor and fract operations [S1, unofficial].
-2.  Compute the smooth interpolation factor `u` using the formula $u = f \cdot f \cdot (3.0 - 2.0 \cdot f)$ [S1, unofficial].
-3.  Calculate 2D UV coordinates by combining `p.xy` with `p.z` scaled by `vec2(37.0, 239.0)` and adding `u.xy`: $uv = (p.xy + vec2(37.0, 239.0) \cdot p.z) + u.xy$ [S1, unofficial].
-4.  Sample the `uNoise` texture at $(uv + 0.5) / 256.0$ with LOD 0.0, returning the `.yx` components [S1, unofficial].
-5.  Mix the two texture components `tex.x` and `tex.y` using `u.z` as the weight, then scale the result to the range $[-1, 1]$ by multiplying by 2.0 and subtracting 1.0 [S1, unofficial].
-
-**Code:**
+*   **Definition**: A noise function designed for 3D volumetric clouds that samples a 2D texture slice based on 3D coordinates to generate organic randomness [S1, unofficial].
+*   **Step**: Compute integer part `p` and fractional part `f` of the input 3D coordinate `x`. Compute smooth interpolation factor `u` using the formula `f * f * (3. - 2. * f)`. Calculate 2D UV coordinates by combining `p.xy` with `p.z` scaled by `vec2(37.0, 239.0)` and adding `u.xy`. Sample the `uNoise` texture at `(uv + 0.5) / 256.0` with LOD 0.0, returning the `.yx` components. Mix the two texture components `tex.x` and `tex.y` using `u.z` as the weight, then scale the result to the range [-1, 1] by multiplying by 2.0 and subtracting 1.0 [S1, unofficial].
+*   **Code**:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-```python
-def cloud_noise(x: Vector3, uNoise: Texture2D) -> float:
-    p = floor(x)
-    f = fract(x)
-    u = f * f * (3.0 - 2.0 * f)
-    uv = (p.xy + vec2(37.0, 239.0) * p.z) + u.xy
-    tex = uNoise.sample((uv + 0.5) / 256.0, lod=0.0).yx
-    return mix(tex.x, tex.y, u.z) * 2.0 - 1.0
+```glsl
+float noise(vec3 x ) {
+vec3 p = floor(x);
+vec3 f = fract(x);
+vec2 u = f * f * (3. - 2. * f);
+vec2 uv = (p.xy + vec2(37.0, 239.0) * p.z) + u.xy;
+vec2 tex = textureLod(uNoise,(uv + 0.5) / 256.0, 0.0).yx;
+return mix( tex.x, tex.y, u.z ) * 2.0 - 1.0;
+}
 ```
 
-**When to choose:** Use this method when generating raymarched clouds or organic 3D structures where texture-based noise provides more convincing organic randomness than pure mathematical noise [S1, unofficial].
-
-### Volumetric Density Generation
-**Definition:** Generates a patchy volumetric density field from noise by applying a power function and a threshold to create sparse regions [S2, unofficial].
-
-**Steps:**
-1.  Compute FBM noise at the position `pos` with scale 3.0 and 2 octaves: $noise = \text{fbm}(pos, 3.0, 2)$ [S2, unofficial].
-2.  Remap the noise from $[-1, 1]$ to $[0, 1]$: $noise = noise \cdot 0.5 + 0.5$ [S2, unofficial].
-3.  Apply a power function with exponent 2.5 to create sparse regions near 0: $density = \text{pow}(noise, 2.5)$ [S2, unofficial].
-4.  Threshold the density: if $density < 0.15$, set $density = 0.0$ [S2, unofficial].
-5.  Scale by `base_density` (default 0.8): $density = density \cdot \text{base\_density}$ [S2, unofficial].
-6.  Clamp the result to $[0, 1]$: $density = \max(0.0, \min(1.0, density))$ [S2, unofficial].
-
-**Parameters:**
-*   `base_density`: Multiplier for final density (default 0.8) [S2, unofficial].
-*   FBM parameters: scale=3.0, octaves=2 [S2, unofficial].
-*   Power exponent: 2.5 [S2, unofficial].
-*   Threshold: 0.15 [S2, unofficial].
-
-**When to choose:** Use this method when a sparse, patchy volumetric density is required, such as for smoke, fog, or distant clouds, where most of the volume should be empty [S2, unofficial].
-
 ### Environment Constraints Generation
-**Definition:** Determines initial constraints that define the overall look of the world by projecting a smooth noise function onto the horizontal plane [S3, unofficial].
-
-**Parameters:**
-*   Noise function: Simplex noise [S3, unofficial].
-*   Inlandness: 1.0 (inland), 0.5 (coastal), 0.0 (submerged) [S3, unofficial].
-*   Temperature: 1.0 (hot), 0.5 (temperate), 0.0 (cold) [S3, unofficial].
-*   Lushness: 1.0 (densely packed with flora), 0.0 (barren) [S3, unofficial].
-
-**When to choose:** Use this method for procedural world generation where environmental factors (biomes, terrain type) need to be determined based on geographic position rather than local volumetric density [S3, unofficial].
+*   **Definition**: Determines initial constraints that define the overall look of the world by projecting a smooth noise function onto the horizontal plane [S2, unofficial].
+*   **Parameter**: Uses Simplex noise as the base function. Defines three factors: Inlandness (1.0 inland, 0.5 coastal, 0.0 submerged), Temperature (1.0 hot, 0.5 temperate, 0.0 cold), and Lushness (1.0 densely packed with flora, 0.0 barren) [S2, unofficial].
 
 ## Background
-The specific patterns described here originate from practical implementations in real-time graphics and procedural generation engines. The cloud noise function is attributed to Shadertoy demos and popularized by tutorials on real-time volumetric raymarching [S1, unofficial]. The volumetric density generation technique is derived from volumetric path tracing implementations [S2, unofficial]. The environment constraints generation is part of the DigBuild sandbox voxel game engine, which uses these constraints to define biomes and terrain features [S3, unofficial].
+The techniques in this family originate from real-time graphics and procedural generation research. Sine-based voxel generation and Mandelbulb fractals are rooted in raymarching and fractal geometry, popularized by demos and community resources like Shadertoy [S1, unofficial]. Spherical density ramps and volumetric density generation are standard techniques in volumetric raymarching for simulating atmospheric effects like clouds and smoke [S1, unofficial]. Environment constraints generation stems from procedural world-building engines, specifically the DigBuild engine, which uses noise projections to define biomes and terrain attributes [S2, unofficial].
 
 ## Sources
 [S1] Real-time dreamy Cloudscapes with Volumetric Raymarching, https://blog.maximeheckel.com/posts/real-time-cloudscapes-with-volumetric-raymarching/, fetched 2026-10-28 (unofficial)
-[S2] ainagutierrez01/Volumetric-Path-Tracing-, https://github.com/ainagutierrez01/Volumetric-Path-Tracing-, fetched 2026-10-26 (unofficial)
-[S3] DigBuild: Sandbox Voxel Game and Engine Using Vulkan, https://gredos.usal.es/handle/10366/149914, fetched 2026-10-31 (unofficial)
+[S2] DigBuild: Sandbox Voxel Game and Engine Using Vulkan, https://gredos.usal.es/handle/10366/149914, fetched 2026-10-31 (unofficial)

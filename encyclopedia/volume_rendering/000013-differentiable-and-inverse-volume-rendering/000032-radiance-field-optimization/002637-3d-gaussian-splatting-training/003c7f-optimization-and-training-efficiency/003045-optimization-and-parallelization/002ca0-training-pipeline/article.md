@@ -3,107 +3,108 @@
 Also called: Iterative optimization loop
 
 ## Overview
-The Training Pipeline is the iterative optimization loop for 3D Gaussian Splatting that uses a differentiable rasterizer and a loss function to refine a set of 3D Gaussians [S1, unofficial]. It solves the problem of reconstructing a scene from multi-view images by adjusting Gaussian parameters to minimize rendering error [S1, unofficial]. It is distinguished from its siblings by its explicit management of the training state (weights and point cloud) within the loop, contrasting with specialized gradient computation methods like MaskGaussian or distributed implementations like Grendel-GS [S1, unofficial].
+The training pipeline for 3D Gaussian Splatting is an iterative optimization process that minimizes a differentiable loss function between rendered images and ground-truth views by updating Gaussian parameters [S1, S2, unofficial]. It distinguishes itself from standard neural field optimization by using a differentiable rasterizer to compute gradients directly on explicit geometric primitives (Gaussians) rather than implicit neural networks, allowing for adaptive control (pruning, cloning, splitting) of the scene representation during training [S1, S2, unofficial].
 
 ## How it works
-The pipeline operates as a standard differentiable rendering optimization loop.
+**Inputs:**
+*   Sparse point cloud and extra features (e.g., color, SH coefficients) [S1, unofficial].
+*   Camera poses for the current batch of views [S1, unofficial].
+*   Ground-truth images from multiple views [S1, unofficial].
 
-**Inputs and Outputs:**
-*   **Inputs:** A sparse point cloud (`sparsePointCloud`), extra features associated with the points (`pointCloudExtraFeatures`), and camera poses (`cameraPose`) for the training views. Ground truth images (`ImageFromMultiViews`) are also required for loss computation.
-*   **Outputs:** Updated Gaussian parameters (position, covariance, opacity, color, SH coefficients) stored in the training state.
+**Outputs:**
+*   Updated Gaussian parameters (position, covariance, opacity, color, SH coefficients) [S1, S2, unofficial].
+*   Rasterized images for loss computation [S1, S2, unofficial].
 
 **Data Structures:**
-The core state is held in `WeightToTrain`, which contains:
-1.  `sparsePointCloud`: The geometric representation of the Gaussians (positions, covariances).
-2.  `pointCloudExtraFeatures`: Attribute data (opacity, colors, spherical harmonics coefficients).
+*   `WeightToTrain`: State container holding the current set of Gaussians (`sparsePointCloud`) and their attributes (`pointCloudExtraFeatures`) [S1, unofficial].
+*   `Rasterizer`: Differentiable module that maps 3D Gaussians to 2D pixel colors [S1, unofficial].
 
-**Steps:**
-1.  **Initialization:** Initialize `WeightToTrain` with the input `sparsePointCloud` and `pointCloudExtraFeatures` [S1, unofficial].
-2.  **Forward Pass:**
-    *   Pass `sparsePointCloud`, `pointCloudExtraFeatures`, and `cameraPose` to the Rasterizer [S1, unofficial].
-    *   The Rasterizer computes the rendered image by alpha-blending the Gaussians projected onto the image plane [S1, unofficial].
-    *   Output: `rasterized_image`.
-3.  **Loss Computation:**
-    *   Compare `rasterized_image` with the corresponding ground truth image from `ImageFromMultiViews` [S1, unofficial].
-    *   Compute the loss $\mathcal{L}$ (e.g., L1 loss, SSIM loss) [S1, unofficial].
-4.  **Backward Pass:**
-    *   Compute the gradient of the loss with respect to the trainable parameters [S1, unofficial].
-    *   Gradients flow through the rasterizer to update `WeightToTrain` [S1, unofficial].
-5.  **Update:**
-    *   Apply the gradients to update the parameters in `WeightToTrain` using an optimizer (e.g., Adam) [S1, unofficial].
-    *   Repeat steps 2-5 for a specified number of iterations.
+**Algorithm Steps:**
+1.  **Rasterization:** The `Rasterizer` takes the current `sparsePointCloud` and `cameraPose` as input. It projects the 3D Gaussians onto the 2D image plane, sorts them by depth, and alpha-blends their contributions to produce the rasterized image $\mathbf{I}_r$ [S1, S2, unofficial].
+2.  **Loss Computation:** The rasterized image $\mathbf{I}_r$ is compared against the ground-truth image $\mathbf{I}_{gt}$ (or $\mathbf{I}_{\text{tet}}$ in CT contexts) using a combination of L1 and Structural Similarity (SSIM) losses [S2, unofficial].
+    *   For FaCT-GS, a 3D total variation loss $\mathcal{L}_{TV}$ is also computed on a randomly sampled voxelized volume section $\mathbf{V}_{32^3}$ to enforce homogeneity [S2, unofficial].
+    *   The total loss $\mathcal{C}_{\text{total}}$ is calculated as:
+        $$ \mathcal{C}_{\text{total}} = \mathcal{L}_1 (\mathbf{I}_r, \mathbf{I}_{gt}) + \alpha_{\text{SSIM}} \mathcal{L}_{\text{SSIM}} (\mathbf{I}_r, \mathbf{I}_{gt}) + \alpha_{\text{TV}} \mathcal{L}_{\text{TV}} (\mathbf{V}_{32^3}) $$
+        where $\alpha_{\text{SSIM}}$ and $\alpha_{\text{TV}}$ are weighting hyperparameters [S2, unofficial].
+3.  **Backpropagation:** Gradients $\frac{\partial \mathcal{C}_{\text{total}}}{\partial \theta}$ are computed with respect to all Gaussian parameters $\theta$ (position, covariance, opacity, color, SH coefficients) via the differentiable rasterizer [S1, S2, unofficial].
+4.  **Parameter Update:** The optimizer updates the parameters in `WeightToTrain` using the computed gradients [S1, unofficial].
+5.  **Adaptive Control (FaCT-GS specific):** In the backward pass or subsequent steps, the loss gradients are used to perform adaptive control operations: pruning low-opacity Gaussians, cloning high-gradient Gaussians, or splitting Gaussians to increase density where needed [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def training_pipeline(sparse_point_cloud, point_cloud_extra_features, camera_poses, ground_truth_images, optimizer, num_iterations):
+def training_pipeline_iteration(gaussians, camera_poses, gt_images, fact_gs_mode=False):
     """
-    Iterative optimization loop for 3D Gaussian Splatting.
+    One iteration of the 3D Gaussian Splatting training loop.
     
     Args:
-        sparse_point_cloud: Initial 3D Gaussian positions and covariances.
-        point_cloud_extra_features: Initial Gaussian attributes (opacity, colors, SH).
-        camera_poses: Camera extrinsics and intrinsics for training views.
-        ground_truth_images: List of ground truth images for training views.
-        optimizer: Optimization algorithm (e.g., Adam).
-        num_iterations: Total number of training steps.
+        gaussians: Current state of Gaussians (position, covariance, opacity, color, SH).
+        camera_poses: Camera extrinsics and intrinsics for the current batch.
+        gt_images: Ground truth images corresponding to camera_poses.
+        fact_gs_mode: Boolean flag to enable FaCT-GS specific regularization and adaptive control.
+        
+    Returns:
+        Updated gaussians state.
     """
-    # Initialize training state
-    weight_to_train = {
-        "sparse_point_cloud": sparse_point_cloud,
-        "point_cloud_extra_features": point_cloud_extra_features
-    }
+    # 1. Rasterization
+    # Rasterizer projects 3D Gaussians to 2D and alpha-blends to produce rendered image
+    rendered_image = rasterizer(gaussians, camera_poses)
     
-    for iteration in range(num_iterations):
-        # Select a random training view or batch
-        view_index = random_selection(len(camera_poses))
-        camera_pose = camera_poses[view_index]
-        gt_image = ground_truth_images[view_index]
+    # 2. Loss Computation
+    # Standard L1 and SSIM losses
+    l1_loss = compute_l1_loss(rendered_image, gt_images)
+    ssim_loss = compute_ssim_loss(rendered_image, gt_images)
+    
+    total_loss = l1_loss + alpha_ssim * ssim_loss
+    
+    # FaCT-GS specific: 3D Total Variation regularization
+    if fact_gs_mode:
+        # Voxelize a random section of the volume (e.g., 32^3)
+        sampled_volume = voxelize_random_section(gaussians, volume_size=32**3)
+        tv_loss = compute_3d_total_variation(sampled_volume)
+        total_loss = total_loss + alpha_tv * tv_loss
         
-        # Forward pass: Rasterize
-        # The rasterizer projects Gaussians and alpha-blends them
-        rasterized_image = rasterize(
-            weight_to_train["sparse_point_cloud"],
-            weight_to_train["point_cloud_extra_features"],
-            camera_pose
-        )
+    # 3. Backpropagation
+    # Compute gradients of total_loss w.r.t. Gaussian parameters
+    gradients = backward_pass(total_loss, gaussians, rendered_image)
+    
+    # 4. Parameter Update
+    # Update Gaussian parameters using optimizer (e.g., Adam)
+    gaussians = optimizer_step(gaussians, gradients)
+    
+    # 5. Adaptive Control (FaCT-GS specific)
+    if fact_gs_mode:
+        # Prune, clone, or split Gaussians based on gradients and opacity
+        gaussians = adaptive_control(gaussians, gradients)
         
-        # Loss computation
-        # Compute loss between rasterized image and ground truth
-        loss = compute_loss(rasterized_image, gt_image)
-        
-        # Backward pass: Compute gradients
-        # Gradients are computed with respect to weight_to_train parameters
-        gradients = compute_gradients(loss, weight_to_train)
-        
-        # Update parameters
-        optimizer.step(gradients, weight_to_train)
-        
-        # Optional: Log metrics
-        log_metrics(iteration, loss, weight_to_train)
+    return gaussians
 ```
 
+**Parameters:**
+*   $\alpha_{\text{SSIM}}$: Weight for SSIM loss. Not given in the sources.
+*   $\alpha_{\text{TV}}$: Weight for Total Variation loss. Not given in the sources.
+*   Volume sampling size: Increased from $8^3$ to $32^3$ in FaCT-GS [S2, unofficial].
+
 **Edge Cases and Pitfalls:**
-*   **Precision:** Floating-point precision in the rasterizer and gradient computation can affect convergence, especially for small Gaussians [G].
-*   **Degenerate Input:** If the sparse point cloud is too sparse, the initial rendering may be poor, leading to slow convergence or local minima [G].
-*   **Memory:** Large scenes may exceed GPU memory during the forward/backward pass, requiring batched processing or out-of-core techniques [S1, unofficial].
+*   **Bounding Box Inefficiency:** Using square bounding boxes for Gaussian-shaped ellipses can overestimate the affected region, especially for anisotropic and transparent Gaussians, leading to computational inefficiency [S2, unofficial].
+*   **Backward Pass Stalling:** Inefficient kernels can stall the backward pass, impacting training speed [S2, unofficial].
 
 ## Subtopics
 
 ### [Mini-Splatting Pipeline](9235-mini-splatting-pipeline.md)
-A variant that manages Gaussian count through densification and simplification.
+The Mini-Splatting Pipeline is a training strategy that explicitly manages the total number of Gaussians through periodic densification, simplification, and depth-based reinitialization phases. It distinguishes itself from standard 3D Gaussian Splatting by enforcing a constrained Gaussian count to improve training efficiency and reduce memory footprint, while maintaining or improving rendering quality. See [Mini-Splatting Pipeline](9235-mini-splatting-pipeline.md).
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of Gaussians and pixels per iteration. Total time is proportional to the number of iterations.
-*   **Memory Complexity:** Linear with respect to the number of Gaussians.
-*   **Strengths:** Simple, modular, and leverages existing differentiable rendering infrastructure.
-*   **Limitations:** Standard 3D Gaussian Splatting training can be memory-intensive for large scenes. Convergence speed depends on the initial point cloud quality and learning rate schedule.
-*   **When to use:** Standard reconstruction tasks where memory is not a critical constraint.
-*   **When not to use:** When memory is severely limited (consider Mini-Splatting) or when distributed training is required (consider Grendel-GS).
+*   **Time Complexity:** Dominated by the rasterization and backpropagation steps, which scale with the number of Gaussians and pixels. The cubic growth in grid elements for voxelization in FaCT-GS can be computationally expensive [S2, unofficial].
+*   **Memory Complexity:** Scales linearly with the number of Gaussians. FaCT-GS reduces memory footprint by pruning and controlling Gaussian count [S2, unofficial].
+*   **Strengths:** Differentiable rasterization allows for end-to-end optimization of explicit 3D representations. Adaptive control enables dynamic scene representation.
+*   **Limitations:** Performance bottlenecks in rasterization kernels (bounding boxes, backward pass) can impact efficiency [S2, unofficial]. Large scenes may require significant memory management [Parent].
+*   **When to use:** Suitable for novel view synthesis and 3D reconstruction where high-quality rendering and explicit geometry are desired. FaCT-GS is suitable for CT reconstruction where homogeneity regularization is beneficial [S2, unofficial].
 
 ## Background
-The training pipeline is based on the original 3D Gaussian Splatting paper [S1, unofficial]. It represents the core optimization mechanism described in the foundational work, adapted for implementation in frameworks like Taichi [S1, unofficial].
+The training pipeline for 3D Gaussian Splatting was introduced as part of the 3D Gaussian Splatting method, leveraging differentiable rasterization for optimizing explicit 3D Gaussian primitives [S1, S2, unofficial]. FaCT-GS extended this pipeline for CT reconstruction, adding total variation regularization and adaptive control mechanisms [S2, unofficial].
 
 ## Sources
 [S1] wanmeihuali/taichi_3d_gaussian_splatting, https://github.com/wanmeihuali/taichi_3d_gaussian_splatting, fetched 2026-10-27 (unofficial)
+[S2] FaCT-GS: Fast and Scalable CT Reconstruction with Gaussian Splatting, https://doi.org/10.1007/978-3-032-37464-6_13, fetched 2026-10-26 (unofficial)
