@@ -1,0 +1,87 @@
+# Oriented Color Modification
+
+Also called: Oriented fading, Value modulation based on gradient-viewer angle
+
+## Overview
+Oriented Color Modification is a technique that adjusts the color value (brightness) of volume samples based on the orientation of the surface gradient relative to the viewer, simulating illustrative "oriented fading" [S1]. It sets itself apart from general illumination models by operating directly in the HSV color space to decouple brightness from hue and saturation, allowing for painterly effects where facing surfaces remain bright and edge-on surfaces fade [S1].
+
+## How it works
+**Inputs:**
+*   Volume sample color $C$ in RGB.
+*   Volume sample opacity $\alpha$.
+*   Gradient vector $\mathbf{g}$ at the sample point.
+*   View direction vector $\mathbf{v}$ (typically from sample to camera).
+
+**Outputs:**
+*   Modified color $C'$ and opacity $\alpha'$.
+
+**Data Structures:**
+*   Vectors $\mathbf{g}$ and $\mathbf{v}$ are 3D floating-point vectors.
+*   Color is converted to HSV space for modification.
+
+**Steps:**
+1.  Compute the angle $\theta$ between the gradient $\mathbf{g}$ and the view direction $\mathbf{v}$.
+    $$ \cos \theta = \frac{\mathbf{g} \cdot \mathbf{v}}{\|\mathbf{g}\| \|\mathbf{v}\|} $$
+    [S1]
+2.  Convert the sample color from RGB to HSV. Let the value component be $V$.
+    [S1]
+3.  Decrease $V$ as $\theta$ increases (i.e., as the surface becomes more edge-on to the viewer). The exact mapping function is not specified in the primary source, but the trend is monotonic decrease with increasing angle.
+    [S1]
+4.  Convert the modified HSV color back to RGB to obtain $C'$.
+    [S1]
+5.  (Optional/Variant) Modulate opacity $\alpha$ based on the same or similar orientation metrics.
+    [S2, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def oriented_color_modification(rgb_color, gradient, view_direction):
+    # Normalize vectors
+    g_norm = gradient / np.linalg.norm(gradient)
+    v_norm = view_direction / np.linalg.norm(view_direction)
+    
+    # Calculate cosine of the angle between gradient and view
+    cos_theta = np.dot(g_norm, v_norm)
+    
+    # Convert RGB to HSV
+    hsv_color = rgb_to_hsv(rgb_color)
+    h, s, v = hsv_color
+    
+    # Decrease value V as angle increases (cos_theta decreases)
+    # Note: Exact formula for V' vs theta is not provided in [S1]
+    # Typical implementation: V' = V * f(cos_theta) where f is decreasing
+    # [G] Assuming a linear fade for implementation completeness:
+    v_modified = v * (0.5 + 0.5 * cos_theta) 
+    
+    # Clamp value to [0, 1]
+    v_modified = max(0.0, min(1.0, v_modified))
+    
+    # Convert back to RGB
+    new_rgb = hsv_to_rgb(np.array([h, s, v_modified]))
+    
+    return new_rgb
+```
+
+**Edge Cases:**
+*   **Zero Gradient:** If $\|\mathbf{g}\| = 0$, the direction is undefined. [G] Handle by preserving original color or using a default view-aligned value.
+*   **Precision:** Floating-point errors in dot product near boundaries.
+
+## Subtopics
+
+### IDVR ColAndOpModulator
+A specific implementation of oriented color modification within the Importance-Driven Volume Rendering (IDVR) framework [S2, unofficial]. It modulates color by calculating a new specular intensity based on modified gradients along cut-away borders and modulates the opacity of the current sample point prior to adapted compositing [S2, unofficial]. It is integrated into the `IDVRMImPCompositingModelSW` class [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per sample, as it involves basic vector operations and color space conversion.
+*   **Memory Complexity:** $O(1)$ additional memory per sample.
+*   **Strengths:** Provides intuitive, painterly control over visual emphasis; decouples brightness from color identity [S1].
+*   **Limitations:** Requires gradient computation; illustrative effect may not suit photorealistic applications [S1].
+*   **When to use:** Illustrative volume rendering, medical visualization where edge-on structures need to be deemphasized [S1].
+
+## Background
+Originated in the context of non-photorealistic volume rendering, specifically in the work by Rheingans et al. (2001) on volume illustration [S1]. It adapts traditional illustration techniques of "oriented fading" to 3D volume data, leveraging the HSV color space for intuitive control [S1].
+
+## Sources
+[S1] Volume illustration: nonphotorealistic rendering of volume models, https://www.csee.umbc.edu/~rheingan/pubs/volillus.tvcg01.pdf, fetched 2026-10-27
+[S2] Implementation of Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2005/Thurner-2005-IVR/Thurner-2005-IVR-paper.pdf, fetched 2026-10-29 (unofficial)

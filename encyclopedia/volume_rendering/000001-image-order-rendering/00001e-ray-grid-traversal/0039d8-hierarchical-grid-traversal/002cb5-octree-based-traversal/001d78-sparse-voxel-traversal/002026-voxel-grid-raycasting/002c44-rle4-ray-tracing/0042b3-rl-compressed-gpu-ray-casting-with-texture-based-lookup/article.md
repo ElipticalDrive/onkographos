@@ -1,0 +1,109 @@
+# RL-compressed GPU Ray Casting with Texture-Based Lookup
+
+Also called: Run-Length Encoded GPU Renderer
+
+## Overview
+This method performs GPU-based ray casting on volume data compressed using run-length encoding (RLE), storing the compressed structure in 2D textures to facilitate efficient random access [S1]. It distinguishes itself from sibling methods by avoiding full decompression; instead, it uses a texture-based lookup system to determine if a sample point lies in an uncompressed surface region, an "inside" region, or an "outside" region, returning special markers for the latter two [S1]. This approach is particularly suited for scenarios where the volume geometry is sparse or has large uniform interior/exterior regions, allowing the renderer to skip volumetric integration in those areas [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A 3D volume dataset, compressed into a specific RLE structure.
+*   **Output:** A rendered 2D image generated via fragment shaders.
+*   **Query:** A 3D coordinate $(x, y, z)$ requested by the ray caster to determine the voxel value or classification.
+
+**Data Structures**
+The compressed data is stored in three 2D textures created by a builder and resident in graphics memory [S1]:
+
+1.  **Index Texture:** Stores offsets to the beginnings of each line in the Line Texture. It allows direct access to the RLE data corresponding to a specific $(y, z)$ plane [S1].
+2.  **Line Texture:** Contains the run-length encoded data. It stores pairs of values `(count, offset)` consecutively for each row (line) of the volume [S1].
+3.  **Surface Texture:** Stores the actual volumetric values for uncompressed regions. It is accessed via offsets provided in the Line Texture [S1].
+
+**Encoding Details:**
+*   Each entry in the Line Texture is a pair: `(count, offset)` [S1].
+*   `count`: The number of voxels in the run [S1].
+*   `offset`:
+    *   If the run is in an **uncompressed** area, this is the offset into the Surface Texture where the voxel values begin [S1].
+    *   If the run is in a **compressed** area, the offset is fictitiously set to `0` or `1` to distinguish compressed regions from uncompressed ones [S1].
+    *   Offset `0` typically denotes "Outside" and `1` denotes "Inside" (or vice versa, as they are special markers) [S1].
+*   The data is organized such that lines of the volume are stored sequentially, with the Index Texture providing the starting position for each $(y, z)$ line [S1].
+
+**Algorithm: Voxel Lookup**
+When a fragment shader needs the value for a voxel at $(x, y, z)$:
+
+1.  **Locate Line:** Use the Index Texture to retrieve the offset in the Line Texture corresponding to the $(y, z)$ coordinates [S1].
+2.  **Iterate Runs:** Read pairs `(count, offset)` from the Line Texture starting at the located offset. For each pair, check if the requested $x$ coordinate falls within the current run [S1].
+    *   Let $x_{start}$ be the cumulative count of voxels processed so far in this line.
+    *   The condition is: $x_{start} \le x < x_{start} + count$ [S1].
+    *   If the condition is met, the run containing $x$ is found.
+3.  **Determine Region:**
+    *   If the `offset` of the found pair is `0` or `1` (compressed area):
+        *   Return a special value: **C** (Inside) or **O** (Outside) [S1].
+        *   No further lookup is performed; full decompression is avoided [S1].
+    *   If the `offset` is a valid texture address (uncompressed area):
+        *   Calculate the specific index into the Surface Texture.
+        *   The index is `offset + (x - x_start)` [S1].
+        *   Retrieve the actual voxel value from the Surface Texture at this index [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def get_voxel_value(x, y, z, index_texture, line_texture, surface_texture):
+    """
+    Retrieves the voxel value or classification for (x, y, z).
+    Returns:
+        - A float value if the voxel is in an uncompressed surface region.
+        - 'O' if the voxel is in a compressed Outside region.
+        - 'I' if the voxel is in a compressed Inside region.
+    """
+    # Step 1: Get the start offset in the Line Texture for the (y, z) line
+    line_start_offset = index_texture.sample(y, z)
+    
+    # Step 2: Iterate through the run-length pairs in the Line Texture
+    current_offset = line_start_offset
+    x_start = 0
+    
+    while True:
+        # Read the next pair (count, offset) from the Line Texture
+        # Note: In a real implementation, bounds checking against the line length is required.
+        count, offset = line_texture.sample_pair(current_offset)
+        
+        # Check if the requested x falls within this run
+        if x_start <= x < x_start + count:
+            # Step 3: Determine if the region is compressed or uncompressed
+            if offset == 0 or offset == 1:
+                # Compressed region
+                if offset == 0:
+                    return 'O' # Outside
+                else:
+                    return 'I' # Inside
+            else:
+                # Uncompressed region
+                # Calculate the index in the Surface Texture
+                # The offset points to the start of the uncompressed data for this run
+                # We need the specific voxel within the run
+                relative_x = x - x_start
+                surface_index = offset + relative_x
+                return surface_texture.sample(surface_index)
+        
+        # Move to the next run
+        current_offset += size_of_pair # Advance by the size of one (count, offset) pair
+        x_start += count
+```
+
+**Edge Cases and Pitfalls**
+*   **Precision:** The method relies on integer arithmetic for indices. Ensure that the `count` and `offset` fields are large enough to represent the volume dimensions and texture sizes without overflow [S1].
+*   **Boundary Conditions:** The iteration must handle the end of the line texture correctly. If $x$ is out of bounds for the volume, the shader should handle it gracefully (e.g., return a default background color) [S1].
+*   **Compressed Region Semantics:** The distinction between "Inside" and "Outside" is binary in compressed regions. The renderer must know which offset value (`0` or `1`) corresponds to which classification [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Lookup time is proportional to the number of runs in the line segment for the given $(y, z)$ plane. In the worst case (no compression), it is $O(N)$ where $N$ is the width of the volume. In practice, with significant compression, it is much faster.
+*   **Memory Complexity:** The memory usage is the sum of the sizes of the Index Texture, Line Texture, and Surface Texture. The Line Texture size depends on the number of runs, and the Surface Texture size depends on the number of uncompressed voxels [S1].
+*   **Strengths:** Efficient for volumes with large uniform regions (inside/outside). Avoids the computational cost of decompressing the entire volume. Suitable for GPU implementation using texture lookups [S1].
+*   **Limitations:** Random access to uncompressed voxils requires iterating through the Line Texture. Not as efficient as direct indexing for fully dense volumes. The distinction between compressed and uncompressed regions is rigid [S1].
+
+## Background
+This method was implemented as part of the VRE (Volume Rendering Engine) project, which explored various rendering techniques including GPU-based rendering with run-length encoded data [S1]. It was designed to illustrate how to develop new plugins requiring special memory representations on the GPU, specifically leveraging OpenGL textures for compressed data storage [S1]. The approach was tested with simple command-line interfaces and GUI applications [S1].
+
+## Sources
+[S1] The VRE volume rendering engine, https://doi.org/10.1145/1925059.1925072, fetched 2026-11-05

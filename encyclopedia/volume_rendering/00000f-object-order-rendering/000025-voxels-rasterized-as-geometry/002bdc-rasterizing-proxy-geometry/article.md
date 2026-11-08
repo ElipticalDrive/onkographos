@@ -3,69 +3,111 @@
 Also called: Liu et al. proxy rasterization
 
 ## Overview
-Rasterizing proxy geometry converts volumetric data into simple geometric primitives (lines, planes, or view-dependent cuts) to leverage the graphics pipeline for specific sampling or visibility tasks, rather than full volume rendering. It solves the problem of efficiently performing linear probes, slicing, or hierarchical culling by mapping 3D volumetric queries to 2D rasterization outputs. It differs from standard ray casting by using hardware rasterization to determine visibility and sampling positions, and from naive voxel rendering by using abstract primitives (like a single line) instead of explicit voxel cubes.
+Rasterizing proxy geometry converts volumetric data into simplified geometric primitives (such as lines, planes, or cut octree nodes) that are submitted to the graphics pipeline to perform specific sampling or visibility tasks [S1, unofficial][S2]. Unlike standard voxel rendering which visualizes the entire volume, this method exploits the freedom in proxy geometry to perform ray-casting, arbitrary slicing, and page visibility determination without traversing hierarchy structures on the GPU [S1, unofficial][S2]. It sets itself apart by using rasterization hardware to generate per-pixel lists of non-empty ray segments or linear probes, thereby avoiding expensive empty-space skipping data structure lookups [S1, unofficial].
 
 ## How it works
-The method relies on generating specific proxy primitives that represent the desired sampling path or spatial cut through the volume.
+The method relies on generating specific proxy primitives that represent a view-dependent cut or probe through the volume, then rasterizing them to extract volumetric information into frame buffers or visibility buffers [S1, unofficial][S2].
 
 **Inputs and Outputs:**
-*   **Input:** Volumetric scalar field data, camera parameters (view/projection matrices), and proxy geometry definition (e.g., line endpoints, plane equation).
-*   **Output:** A 1D array of sampled values (for lines) or a visibility buffer (for planes/cuts), typically copied to main memory for UI interaction or further processing.
+*   **Inputs:** Volumetric data (scalar field), camera parameters, proxy geometry definition (line, plane, or octree cut), and deformation parameters (if applicable) [S1, unofficial][S2].
+*   **Outputs:** A buffer containing sampled volume data (e.g., alpha values, gradients) or a list of active page IDs/visible segments [S1, unofficial][S2].
 
 **Data Structures:**
-*   **Proxy Geometry:** Defined by vertex positions in object space. For a line probe, this is a 2-vertex line segment. For a plane slice, this is a quad or triangle covering the view frustum.
-*   **Frame Buffer:** A back buffer (typically 1D or 2D texture/render target) stores the fragment shader output. For line probes, this is a 1D texture aligned with the rasterized line.
+*   **Proxy Geometry:** Defined by the application. For linear probes, a single line segment; for slicing, a plane; for Liu et al., a view-dependent cut of octree nodes [S1, unofficial][S2].
+*   **Frame Buffer / Visibility Buffer:** Stores fragment shader outputs. For linear probes, this is the back frame buffer [S2]. For page visibility, it is a visibility buffer reduced to active page IDs [S1, unofficial].
 
 **Steps:**
-1.  **Define Proxy Geometry:** Create geometric primitives that represent the sampling path.
-    *   *Line Probe:* Define a line segment in object space.
-    *   *Plane Slice:* Define a plane intersecting the volume.
-    *   *View-Dependent Cut (Liu et al.):* Define geometry representing a cut of octree nodes based on the current view [S1, unofficial].
-2.  **Transform and Align:**
-    *   For line probes, rotate the object space (or the proxy geometry) so that the desired sampling line is parallel to the image plane (view direction) [S2]. This ensures the rasterized line traverses the volume along the desired axis in screen space.
-    *   Apply the Model-View-Projection (MVP) matrix to transform vertices to clip space [G].
-3.  **Rasterize:**
-    *   Submit the proxy geometry to the graphics pipeline.
-    *   Enable depth testing if occlusion is required (e.g., for picking the first surface).
-    *   The fragment shader samples the volume at the interpolated world position of each fragment.
-    *   Output the sampled value (e.g., density, alpha) to the back frame buffer [S2].
-4.  **Readback and Process:**
-    *   Copy the relevant portion of the frame buffer (e.g., the 1D line data) from GPU memory to main memory [S2].
-    *   Scan the resulting data array for interaction criteria:
-        *   First non-zero alpha value (surface detection) [S2].
-        *   First gradient with large magnitude (edge detection) [S2].
-        *   Sum of alpha values exceeding a threshold (e.g., 1.0 for infinite absorption) [S2].
-    *   For hierarchical culling (Liu et al.), reduce the visibility buffer to a list of active page IDs or non-empty segments [S1, unofficial].
+1.  **Define Proxy Geometry:** Create geometric primitives that represent the desired sampling path or visibility cut. For a linear probe, define a line segment [S2]. For Liu et al., define proxy geometry representing a view-dependent cut of octree nodes [S1, unofficial].
+2.  **Transform Geometry:**
+    *   For linear probes: Rotate object space to align the desired line parallel to the image plane [S2].
+    *   For Liu et al.: Transform the proxy geometry into clip space using the Model-View-Projection (MVP) matrix [G].
+3.  **Rasterize:** Submit the proxy geometry to the rasterizer.
+    *   For linear probes: Direct fragment shader output (volume sampling output) to the back frame buffer [S2].
+    *   For Liu et al.: Rasterize to determine visibility or generate per-pixel lists of non-empty ray segments [S1, unofficial].
+4.  **Sample Volume (Fragment Shader):**
+    *   For linear probes: The fragment shader samples the deformed volume along the line. This avoids encapsulating complex deformation inside the fragment shader by pre-aligning the line [S2].
+    *   For Liu et al.: Use the rasterized output to skip empty-space lookups [S1, unofficial].
+5.  **Post-Processing / Readback:**
+    *   For linear probes: Copy the line data from the frame buffer to main memory for user interface use [S2].
+    *   For Liu et al.: Reduce the visibility buffer to a list of active page IDs using a compute shader reduction step [S1, unofficial].
 
 **Formulas:**
-*   **World Position for Sampling:** The fragment shader computes the world position $P_{world}$ of the fragment to sample the volume. If the proxy line is aligned with the view, the depth buffer value $z_{clip}$ can be unprojected to find the depth in world space.
-*   **Line Alignment:** The rotation matrix $R$ is applied such that the line direction vector $v_{line}$ becomes parallel to the view vector $v_{view}$ in clip space [S2].
+*   **Linear Probe Alignment:** The object space is rotated such that the line vector $\vec{L}$ is parallel to the image plane normal $\vec{n}_{img}$ (or aligned with the view direction depending on implementation details, but specifically parallel to the image plane for the described technique) [S2].
+*   **Interaction Criteria (Linear Probe):** The user interface scans the sampled line for:
+    *   First non-zero alpha value $\alpha > 0$ [S2].
+    *   First gradient with magnitude $|\nabla V| > T_{grad}$ [S2].
+    *   Sum of alpha values $\sum \alpha > 1$ (implying infinite absorption) [S2].
 
 **Parameters:**
-*   **Resolution:** The length of the rasterized line determines the sampling resolution. Higher screen resolution yields finer sampling [S2].
-*   **Thresholds:** Alpha thresholds for absorption (e.g., 1.0) [S2].
+*   **Line Resolution:** Determined by the rasterization resolution (e.g., 512x512x106 volume resolution implies high-resolution sampling) [S2].
+*   **Thresholds:** Gradient magnitude threshold $T_{grad}$ and alpha sum threshold (1.0) [S2].
 
 **Edge Cases and Pitfalls:**
-*   **Deformation:** If the volume is deformed, the proxy geometry must account for the deformation. Relying on deforming the mesh of the proxy geometry requires complex approaches; instead, the sampling in the fragment shader should handle the deformation [S2].
-*   **Precision:** Copying data from frame buffer to main memory can be a bottleneck. Use efficient readback methods or compute shader reductions if possible [S1, unofficial].
-*   **Occlusion:** Depth testing must be enabled if only the front surface is of interest.
+*   **Deformation Complexity:** If the proxy geometry does not account for deformation, the line would need to be divided into several segments for piece-wise linear approximation, increasing complexity [S2].
+*   **Memory Bandwidth:** Liu et al. address performance bottlenecks of atomic operations in concurrent thread updates by using compute shader reduction [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def rasterize_proxy_geometry(volume_data, camera, proxy_type, deformation=None):
+    if proxy_type == "LINEAR_PROBE":
+        # 1. Define line segment in object space
+        line_segment = define_line_segment()
+        
+        # 2. Rotate object space to align line parallel to image plane
+        rotation_matrix = align_line_to_image_plane(line_segment, camera.view_direction)
+        aligned_line = apply_rotation(line_segment, rotation_matrix)
+        
+        # 3. Rasterize line and sample volume in fragment shader
+        # Fragment shader logic:
+        #   sample = volume_sample(deformed_volume, aligned_line.position)
+        #   output_alpha = sample.alpha
+        #   output_gradient = abs(sample.gradient)
+        
+        frame_buffer = rasterize(aligned_line, fragment_shader=volume_sample)
+        
+        # 4. Copy to main memory
+        line_data = read_frame_buffer(frame_buffer)
+        
+        # 5. Scan for interaction criteria
+        first_nonzero_alpha = find_first(line_data, lambda x: x.alpha > 0)
+        first_large_gradient = find_first(line_data, lambda x: x.gradient > threshold)
+        infinite_absorption = find_first(line_data, lambda x: sum_alpha_so_far > 1.0)
+        
+        return first_nonzero_alpha, first_large_gradient, infinite_absorption
+
+    elif proxy_type == "OCTREE_CUT":
+        # 1. Define proxy geometry as view-dependent cut of octree nodes
+        proxy_mesh = generate_octree_cut_proxy(volume_octree, camera)
+        
+        # 2. Rasterize to generate per-pixel lists of non-empty ray segments
+        visibility_buffer = rasterize(proxy_mesh, fragment_shader=occupancy_check)
+        
+        # 3. Reduce visibility buffer to active page IDs using compute shader
+        active_pages = compute_shader_reduce(visibility_buffer)
+        
+        return active_pages
+```
 
 ## Subtopics
 
 ### [Proxy Mesh Rendering for Page Visibility](8386-proxy-mesh-rendering-for-page-visibility.md)
 Proxy Mesh Rendering for Page Visibility determines which virtual memory pages are visible in a scene by rendering a simplified proxy mesh to a visibility buffer and reducing that buffer to a list of active page IDs. It differs from standard visibility buffers by encoding depth information to support Level of Detail (LOD) selection and by utilizing a compute shader reduction step to minimize memory bandwidth, addressing the performance bottlenecks of atomic operations in concurrent thread updates.
 
+### Linear Probe via Ray Picking
+Linear Probe via Ray Picking uses a line as proxy geometry to perform a linear probe (similar to ray casting) through the deformed volume [S2]. It involves rotating object space to align the desired line parallel to the image plane, rasterizing the line to direct fragment shader output (volume sampling) to the back frame buffer, and copying the line data to main memory for user interface use [S2]. It allows for interaction criteria such as finding the first non-zero alpha, first large gradient, or sum of alpha values exceeding one [S2].
+
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the number of fragments rasterized (proportional to screen resolution for lines/planes). The readback and scanning step is also $O(N)$.
-*   **Memory Complexity:** $O(N)$ for the frame buffer and readback buffer.
-*   **Performance:** Very fast for single-line probes or simple slices as it leverages hardware rasterization. Avoids complex ray traversal logic on the CPU or GPU compute shaders for simple queries.
-*   **Strengths:** Simple implementation, leverages existing graphics hardware, efficient for interactive picking and slicing.
-*   **Limitations:** Limited to specific sampling paths (lines, planes). Not suitable for full volume rendering. Readback to main memory can be slow if done frequently.
-*   **When to use:** Interactive picking, slicing, simple visibility culling.
-*   **When not to use:** Full volume rendering, complex multi-path sampling.
+*   **Time Complexity:** Depends on the proxy geometry size and rasterization cost. Linear probes are $O(N)$ where $N$ is the number of pixels covered by the line, avoiding full volume traversal [S2]. Liu et al. approach avoids hierarchy traversal, reducing look-ups into empty-space skipping data structures [S1, unofficial].
+*   **Memory Complexity:** Requires frame buffer storage for the proxy output [S2] or visibility buffer for page visibility [S1, unofficial].
+*   **Strengths:** Avoids expensive empty-space skipping data structure lookups [S1, unofficial]; simplifies linear probes by handling deformation alignment in object space rather than fragment shader [S2]; supports interactive user interfaces like ray picking [S2].
+*   **Limitations:** Requires careful alignment of proxy geometry for deformation [S2]; compute shader reduction is needed for page visibility to avoid atomic operation bottlenecks [S1, unofficial].
+*   **When to Use:** When interactive probing (ray picking, slicing) is required without full volume rendering overhead [S2]; when page visibility determination for virtual memory management is needed [S1, unofficial].
+*   **When Not to Use:** When full volume visualization with complex lighting and shading is required [S2].
 
 ## Background
-The concept of using proxy geometry for volume visualization was introduced by Liu et al. in "Integrating Dynamic Deformations into Interactive Volume Visualization" (2006) [S2]. They demonstrated using lines and planes as proxy geometry for linear probes and slicing. Later, Liu et al. [LCDP13] proposed rasterizing proxy geometry representing view-dependent cuts of octree nodes for efficient sparse voxel rendering [S1, unofficial]. This approach has been adopted in various systems for interactive volume exploration and hierarchical culling.
+The concept of using proxy geometry for volume rendering was proposed by Liu et al. [LCDP13] to rasterize proxy geometry representing a view-dependent cut of octree nodes, optimizing look-ups into empty-space skipping data structures [S1, unofficial]. Hadwiger et al. [HAAB+ 18] also utilized rasterization hardware to avoid hierarchy traversal on the GPU by rasterizing occupancy geometry [S1, unofficial]. The linear probe technique was discussed in the context of integrating dynamic deformations into interactive volume visualization, allowing for high-resolution sampling of deformed space without complex fragment shader deformation logic [S2].
 
 ## Sources
 [S1] Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze, https://doi.org/10.34726/hss.2023.106203, fetched 2026-10-26 (unofficial)

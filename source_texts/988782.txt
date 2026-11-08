@@ -1,0 +1,749 @@
+Explore genomes across the world   🧬🌍🧬. Contribute to genomeOS/genomeOS development by creating an account on GitHub.
+
+feat(atlas): terrain draping phase 2: the data surface drapes onto World Terrain (advances #483) by bschilder · Pull Request #488 · genomeOS/genomeOS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+bschilder
+commented
+Oct 18, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+What users get
+These changes apply when Cesium World Terrain is requested. The default smooth globe draws the same data as before, built the same way.
+The data lies on the ground. The inferred surface, its evidence-support masks and its cell outlines are drawn into map tiles and laid over the terrain. Mountains no longer hide the data, and the hillshade from phase 1 lights it. This is the Cesium World Terrain loads but has no visible effect, and hides the map data in highlands #483 repro, and it now passes.
+Restyles cross-fade. After a palette, metric, geometry or support change, the new surface fades in over the old one once its tiles have loaded, or after 3 s at most. The first load fades in over 1 s. With reduced motion, or in a background tab, it shows at once.
+Some controls do less on World Terrain. Data elevation is off: the URL keeps the setting, and the control says "Not available with World Terrain". Extruded columns draw as flat hexagons, and that option reads "Columns (smooth globe only)". Honmoon shows its fill; its contours come in phase 4.
+Loading and failures. A link with terrain=world-terrain drapes the data straight away and never builds the smooth-globe geometry first. If World Terrain cannot load, or a tile fails, the smooth globe comes back with a warning. Picking another terrain clears the warning.
+Clicks pick the cell under the cursor, through globe.pick, the ground pick from phase 1.
+Not draped yet; phase 3 does these: country borders, sampling rings, symbols, labels and the highlight still sit at fixed heights.
+Changes per task
+Task 6: contracts, protocol and client (scene/types.ts, worker/protocol.ts, worker/client.ts, worker/handlers.ts).
+Adds the draped contracts: RasterImageryProvider, DrapedImageryLayer, DrapedSurfaceGroup and DrapedRuntime.
+Adds the raster requests, prepare-raster, raster-tile and release-raster, and their client methods.
+The worker answers them with placeholders until Task 15.
+Task 7: tiling and grid index (geometry/raster/tiling.ts, grid-index.ts).
+Tiles are 256 × 256 on the geographic scheme, levels 0 to 11, with rows stored south first.
+The index finds the grid rows in a rectangle, including their ±360° copies. Each row's box is padded by 10%, enough to cover the class III distortion vertices (worst measured: 5.03%).
+Polar rows and drawn bounds are handled. Bad rectangles and bad rows throw.
+Task 8: worker raster runtime (worker/raster-handlers.ts).
+Prepare, tile and release run through a FIFO queue that yields between tiles, with the rasterisers injected.
+Drawn tiles go back as transferred ImageBitmaps made with the pinned options.
+A cancelled prepare stores nothing. A release waits for the tile in flight, so no tile-ready ever follows a raster-released.
+Task 9: provider, imagery layer, drape stats, Cesium pins (scene/draped/raster-imagery-provider.ts, draped-imagery-layer.ts, drape-stats.ts, tests/atlas-cesium-internals.test.ts).
+The provider keeps at most 8 tiles in flight, resolves a cancelled tile as empty, and raises tileLoaded, which requests a render.
+The layers keep their fixed order above the basemap.
+Below them sits a whole-globe base guard at α 0. Without it, Cesium makes the first shown layer the base layer and stretches its edge texels over the globe.
+Readiness is tilesLoaded from the second frame, or a 3 s cap.
+Every Cesium internal the layers rely on is pinned by a test.
+Task 10: resolveDrapedView and the surface controls. While draped, the controls follow the UI rule: data elevation off and extruded drawn as hexagons, with the labels above.
+Task 11: ScientificLayers over SurfaceGroup (new scene/surface-groups.ts; RevealWave.progress()).
+#show gains the draped branches.
+On a restyle, the outgoing layer stays opaque until it is retired.
+A layer toggle rebuilds the surface when it changes which cells are baked into the texture.
+A raster failure goes to onDrapeFailure.
+waitForReady counts only time the tab is visible and takes an abort signal (see "For the owner").
+Task 12: fill and mask rasteriser (geometry/raster/fill-raster.ts, mask-texels.ts, triangle-scan.ts).
+Fills for triangles, hexagons and Honmoon are drawn at the legend bytes. A parity test allows at most 1 byte of difference from the smooth-globe path.
+The Grid and Dot masks use the smooth-globe masks' st frame.
+The hatch is lighter than the plan specified (see "For the owner").
+Task 13: outline rasteriser (geometry/raster/line-raster.ts). Outlines are anti-aliased at α 0.92. Their width grows from 1.5 to 2 texels between levels 3 and 11, and below level 3 there are none.
+Task 14: DrapedSurfaceGroup and the draped runtime (scene/draped/draped-surface-group.ts, runtime.ts).
+The surface layer's α is 0.9 × surface opacity × fade × progress.
+Outlines are prepared the first time edges turn on. A new outline style replaces the old one without a gap.
+Failures are routed as follows: one during prepare() rejects it, and any later one, or a provider error, goes to onError.
+A raster with nothing to draw adds no layer.
+Task 15: worker integration. The worker imports the raster runtime on the first raster request, so it stays out of the worker's first load. ATLAS_RASTERISERS replaces the placeholders, and an import that fails is tried again on the next request.
+Task 16: scene integration (scene/atlas-scene.ts).
+The scene drapes as soon as World Terrain is requested. When the newest request settles, it follows the terrain actually on the globe.
+A failed World Terrain load rebuilds the smooth-globe geometry once.
+A raster failure reverts the terrain, shows DRAPE_FAILED_WARNING under the warning id 'drape', and logs the error.
+The draped runtime is imported once, into its own chunk. The e2e build publishes __atlasDrapeStats.
+Task 17: e2e and the performance report.
+The Cesium World Terrain loads but has no visible effect, and hides the map data in highlands #483 repro now runs without test.fail.
+atlas-drape.spec.ts covers a cold draped load, morphs, restyles, the outlines toggle and the return to the smooth globe.
+atlas-terrain-performance.spec.ts reports the World Terrain budgets on both projects, report-only, under playwright.config.ts.
+Integration follow-ups:
+A removed surface stays removed after a layer toggle.
+An aborted prepare stops its outline prepare, and the client releases the worker raster of a prepare aborted after the worker had stored it.
+The 0.9 surface α has a single owner.
+A test pins the masks of a cell that holds a pole.
+Line-segment unwrapping is done in one step.
+Docstring corrections.
+6f0708d updates the build checks for the lazy draped runtime, which is a second chunk that imports Cesium.
+Review fixes in this PR:
+c5e3eeb: a draped layer's readiness starts over when the layer is shown again. Cesium frees every tile of a hidden layer, so a layer shown again used to read ready with no tiles. A hidden layer now reads not ready and requests no frames. The group also counts its first drawn tile again.
+5fa16ce: draped groups that leave the view are destroyed, and a failed group is never reused.
+Before, a retired or superseded draped group stayed hidden in the surface cache, and a later cache hit brought it back with no tiles: World → Smooth → World, palette A → B → A, or support off then on. Meanwhile its layers, the base guard and its worker rasters stayed on the smooth globe.
+A group whose raster had failed was reused the same way, and its report latch swallowed the next failure. The result was a silent gap.
+Now ScientificLayers caches a draped group only while it is displayed or incoming, and a reported failure drops it from the cache. Smooth-globe chunk groups are cached as before.
+0d57175: the probe gains layerStack, which lists every layer, hidden or at α 0. The restyle timer now counts the incoming layer from the moment it is added at α 0. Before, under load it never saw two layers together and returned null after 60 s. The drape spec checks that a restyle, and a return to the smooth globe, leave no Atlas layer or guard behind.
+bc03f5c: the bundle tests check both lazy markers at both boundaries. The Review Focus test for World → Smooth → World now fails without the newest-request guard (checked by mutation). The runtime-import test no longer depends on test order (checked with shuffled seeds 1 to 8).
+b328a9d (CI round 1): the outlines-toggle e2e test failed on all three attempts in CI's software WebGL.
+The probe lists the outline layer from the moment it is added, before the globe has rendered the frames that request its tiles. So the request baseline could be read too early: it missed 32 outline tile requests (65, then 97).
+A probe call took over a second there, longer than the 1 s polls.
+The baseline now waits until requests settle: every tile loaded, none queued, and no new request for a second. The toggle's own frame gets 10 s. The request count still proves the toggle asks the worker for nothing.
+The restyle report waits 60 s again, as the other milestones do. With a 30 s wait, CI's desktop recorded no restyle time. The next CI run confirmed the cause: the old layer was retired after 8.7 s, but tilesLoaded held only at 47.1 s, because the oblique view loads its tiles out to the horizon.
+The report now also records when the new layer was added and when the old one was retired, so a slow restyle still shows how far it got.
+Gates
+On bc03f5c unless noted; b328a9d changes only two e2e specs.
+npm run format:check: pass. npm run check: 0 errors, 0 warnings, 0 hints (548 files).
+npm test, which rebuilds the production dist: 169 files passed and 3 skipped; 2,614 tests passed and 9 skipped. This covers atlas-bundle (both markers at both boundaries, and the Cesium gzip pin), atlas-module-size (scientific-layers.ts at 977 of its 986 logical lines), the Cesium internals pins and "production build › carries no synthetic terrain".
+npm test with ATLAS_DATA_DIR: partial, on 6f0708d. The only staging tree on disk is minimal: 2 of 30 artifacts and no grids/. Against it, the full-grid coverage suite atlas-raster-coverage ran and passed (2 tests). Three older full-tree suites fail only because the tree is incomplete: atlas-public-data, atlas-geometry-full-grid and atlas-render-precision. No later commit touches a rasteriser.
+E2E on 6f0708d through the shared runner: atlas-drape, atlas-terrain, atlas-terrain-performance, atlas-mobile, site and atlas-cross-origin on desktop-chromium and mobile-chromium. 399 passed and 14 were skipped by design (35.2 min).
+E2E after the review fixes: atlas-drape, atlas-terrain and atlas-terrain-performance on both projects: 17 passed (3.8 min). On b328a9d, atlas-drape and atlas-terrain-performance: 13 passed, and the toggle test 4 of 4 with 4 workers. This includes the new no-layer-left checks after a restyle and after the return to the smooth globe. The other specs are unaffected: the fixes change the smooth-globe path only by moving helpers unchanged. CI runs the full suite.
+World Terrain budgets, report-only until phase 4, measured under SwiftShader:
+Desktop: dataVisibleMs 3,388; restyleMs 5,031; orbitFps 3.9; raster p95 bin ≤ 1 ms; residentBytes 6,990,500.
+Mobile (CPU slowed ×4): dataVisibleMs 2,440; restyleMs 1,800; orbitFps 6.8; longestFrameMs 294; raster p95 bin ≤ 1 ms; residentBytes 4,893,350.
+Software WebGL explains the frame rates. Phase 4 asserts these budgets on hardware GPUs.
+On CI's SwiftShader runners, b328a9d:
+Desktop: dataVisibleMs 4,923; new layer added at 3,756 ms, old one retired at 8,655 ms, restyleMs 47,079; orbitFps 0.9.
+Mobile: dataVisibleMs 9,787; added at 4,684 ms, retired at 10,593 ms, restyleMs 17,227; orbitFps 1.1; longestFrameMs 825.
+CI on b328a9d: validate, performance budgets, tracked-files and all four e2e shards passed. The Python test job and build/deploy were skipped by design. Two tests in specs this PR does not touch were flaky and passed on retry. marketing-home.spec.ts:569 was also flaky in phase 1's CI. site.spec.ts:4594, the smooth-globe reveal wave, was also flaky in PR 1's CI.
+CI on bc03f5c: the outlines-toggle test failed (fixed in b328a9d). marketing-home.spec.ts:569 also failed all three attempts there and passed on b328a9d.
+python scripts/smoke.py: pass. python scripts/check_private_files.py: pass (1,686 tracked files).
+src/components/atlas/AtlasExplorer.tsx is unchanged since PR 1. No forbidden paths are in the diff.
+Not run: the smooth-globe budgets, npm run build && npm run test:performance -- tests/atlas-performance.spec.ts tests/atlas-cold-load.spec.ts.
+They need a production build that reads the full catalog's data, from the bucket base (a CI variable) or a full staging tree. Neither is available locally.
+CI does not run them either: its "performance budgets" job runs only the marketing pages.
+This phase does touch the smooth-globe path:
+The chunk operations moved into surface-groups.ts.
+waitForReady changed, as described below.
+The scene chunk grew by about 1.7 KB gzip. It now imports the small react-dom and preload-helper shared chunks, and the /app/ head preloads them ahead of Cesium. The island has already loaded the react-dom chunk.
+The Cesium chunk's gzip pin holds.
+Owner: please run the two specs against the bucket base before merging:
+```
+PUBLIC_ATLAS_DATA_BASE_URL=<bucket base> npm run build && npm run test:performance -- tests/atlas-performance.spec.ts tests/atlas-cold-load.spec.ts
+```
+Until then, "every smooth-globe budget holds" is unverified.
+For the owner
+Each of these needs a decision before phase 2 merges. The branch implements the plan as written; nothing below has been changed in code without a ruling.
+The restyle snap.
+The plan's Restyle row has the outgoing draped layer stay opaque until it is retired.
+At the default opacity its resting α is a = 0.9 × 0.58 = 0.522. While the new layer rises over it, the basemap's share falls from 1 − a ≈ 0.48 to about (1 − a)² ≈ 0.23.
+In the frame the old layer is retired, the share jumps back. The step is a(1 − a) ≈ 25% of (old colour − basemap).
+Options: accept the snap, or keep the combined coverage constant by giving the outgoing layer opacity (1 − (1 − a)/(1 − a·p)) / a. The second needs the 0.9 surface α exposed through the DrapedSurfaceGroup contract.
+The hatch colour.
+Plan Task 12 sets the draped hatch to #a8b5c9 × 0.5, which is (84, 91, 101).
+The branch (020dc0f) uses 0.5 × 2^(1/2.2), which is (115, 124, 138), so the hatch matches how the smooth-globe masks look under HDR.
+The fills follow the spec's "exact legend colour" bytes instead. So a draped tile now mixes two colour targets, and on the smooth globe the fills look lighter than draped.
+Options: pick one target for draped fills and masks, either the legend bytes or the smooth globe's HDR look, then amend Task 12's expected values.
+Readiness in a hidden tab, on the smooth globe too (c42f302). waitForReady's 30 s idle deadline now counts visible time only, and a wait can be aborted. This applies to chunk groups as well. Before, a smooth-globe build waiting in a background tab hid its group and failed with "Cesium geometry build timed out" after 30 s; now it waits for the tab to come back. I believe this is a fix (the chunk scheduler's stall timeout already works this way), but it is a smooth-globe behaviour change that no phase-2 decision lists.
+Smooth-globe budgets: see "Not run" above.
+Notes and declined findings
+The morph e2e test runs at nadir under reduced motion. Cesium's animated morphs to the 2D map and to Columbus view frame the whole globe from above (0°, 0°), where the summit is a single pixel, so the test makes each morph instant and keeps the camera over the summit. The oblique pick on a slope is covered in 3D by "an oblique click at the summit selects the summit's own cell". After each morph back to Globe, the same globe.pick branch runs at nadir. An animated or oblique pick after a morph is out of scope here.
+For phase 3, Task 24:
+observationPoints() now lives in scene/surface-groups.ts; Task 24's Consumes line still names scientific-layers.ts.
+scientific-layers.ts is at 977 of 986 logical lines, leaving Task 24 nine lines of headroom.
+Task 23's border layers call setShown, so after c5e3eeb a border layer added while hidden becomes ready only once it is shown.
+Merge commit 714740d ("Merge branch 'drape/t6' into drape/t11") lacks the "Advances Cesium World Terrain loads but has no visible effect, and hides the map data in highlands #483." paragraph and the Co-Authored-By trailer. Rewriting it would change the SHAs under the merged lanes. The repo squash-merges PRs, so this lands as one compliant commit. Lane merges since then use the full form.
+Stacked on PR #487 (phase 1); retarget to main when it merges.
+Advances #483.
+🤖 Generated with Claude Code
+bschilder
+and others
+added 30 commits
+October 18, 2026 01:49
+feat: turn data elevation off and draw columns as hexagons while the …
+…
+f893303
+```
+…data is draped
+
+resolveDrapedView gives the scene a data height of 0 and draws extruded
+as flat hexagons while the data is draped over World Terrain, and today's
+values on the smooth globe. The URL keeps the user's elevation,
+exaggeration and geometry. The surface controls follow the terrain on the
+globe: Statistical elevation and its slider are disabled, described by
+"Not available with World Terrain", and the extruded option reads
+"Columns (smooth globe only)". DRAPE_FAILED_WARNING is exported for the
+drape-failure fallback.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat: declare the draped-surface contracts and the raster protocol
+…
+376f755
+```
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat: tile draped rasters geographically and index the grid by rectangle
+…
+052b87a
+```
+Tile rectangles and the south-first texel frame follow Cesium's
+GeographicTilingScheme. The grid index boxes each row from its unwrapped
+corners, padded by 10% to cover class III distortion points, spans every
+longitude for a pole-holding row, enters a box past ±180° once more shifted
+by ∓360°, and finds rows for a rectangle grown past the antimeridian.
+The raster fixtures (Kenya, seam and pole disks, texel readers) serve the
+rasteriser tasks that follow.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat: serve worker tiles as ordered Cesium imagery layers, and pin th…
+…
+a38dd79
+```
+…e internals they use
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge branch 'drape/t6' into drape/t11
+714740d
+feat: rasterise draped tiles in the data worker through a yielding queue
+…
+52bb003
+```
+The raster runtime prepares a surface or outline raster from the loaded
+render tier and grid, answers with its own id as the raster id and the
+bounds of the cells it draws, and serves tiles first in, first out,
+yielding after each so a load-detail that arrives meanwhile goes first.
+Drawn tiles transfer an unflipped, unpremultiplied ImageBitmap; empty
+tiles post null. A release waits for a tile of that raster being drawn,
+so no tile of a released raster follows its raster-released. The
+geometry worker shares its cached topology through `prepared`.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat: rasterise cell outlines as anti-aliased draped lines
+…
+dc894db
+```
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix: keep a whole-globe base guard under the draped layers, and fail …
+…
+7c84294
+```
+…loudly on bad drape stats
+
+Cesium makes the first shown imagery layer the base layer and stretches its
+edge texels over every terrain tile outside its rectangle. The Atlas
+providers are clipped to their drawn bounds, so with the basemap hidden
+(Context off) or not yet loaded, atlas-surface smeared its edge across the
+globe. While any Atlas layer is on a collection, a shown whole-globe guard
+layer at alpha 0 now sits below them and takes the base role; it goes with
+the last Atlas layer. A pin covers the Cesium rule. The frame-request test
+now checks each preRender's request, the unreachable destroyed-collection
+branch is gone, and the drape stats reject a non-finite or negative raster
+time and throw when a watched layer lacks its imagery cache.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat: let the scientific layers show a draped surface group
+…
+12bebda
+```
+A draped style builds a DrapedSurfaceGroup from the lazily imported
+runtime instead of chunks, through the same epochs, cache and swaps. A
+cold one waits at opacity 0 until its tiles are loaded, then fades in on
+the reveal wave's new progress() timeline (at once under reduced motion,
+in a hidden tab, or with nothing drawn). A restyle cross-fades over an
+outgoing draped layer held opaque until it is retired; a toggle that
+changes the cells baked into the newest request's texture rebuilds it; a
+raster failure reports through onDrapeFailure and settles with the
+rebuild it starts. Draped groups stay out of the depth-pick hide list,
+read as draped to picks, and are destroyed with the layers so their
+worker rasters are released.
+
+The per-kind operations (chunk creation, streaming and edge builds, the
+draped spec and helpers) move to scene/surface-groups.ts, keeping
+scientific-layers.ts at or below 986 logical lines.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix: refuse a cancelled raster prepare and pin each prepare guard on …
+…
+3c1348d
+```
+…its own
+
+A prepare cancelled before it runs now fails as cancelled and stores
+nothing: the client drops any late answer to an aborted prepare, so a
+raster stored for it could never be released. The internal-error test
+now asserts each guard's own message, and loads a second grid for the
+mismatch case so only the mismatch guard can refuse it. The comment on
+GeometryWorker.prepared states the real reason it may be held unbound.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat: rasterise the surface fill and support masks into draped tiles
+…
+b5c58e2
+```
+Advances #483.
+
+rasterSurfaceTile draws a 256 x 256 surface tile from the grid index: supported
+cells as the chunk path's fans (barycentric vertex colours for smooth
+geometries, the palette-bin colour for hexagons, the Honmoon fill for both
+Honmoon geometries), then unknown and prior-dominated cells over them in the
+Grid hatch and Dot pattern. support-buffers exports the masks' st frame
+(stFrameOf, stAt) so mask texels repeat the chunk masks' pattern. The scan
+conversion lives in triangle-scan.ts: exact shared edges under the top-left
+rule, +-360 degree copies across the antimeridian, and pole-holding cells.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat: drape the surface and its outlines as a fadeable imagery group
+…
+3f024ab
+```
+DrapedSurfaceGroup serves the surface raster as atlas-surface at 0.9 x
+surface opacity x fade opacity x wave progress, and the outlines as
+atlas-outlines at fade opacity x progress while edges are on and the
+raster draws supported cells. Alphas follow the wave on each preRender
+and are written only when they change. A new outline style is prepared
+at alpha 0 above the old outlines, which keep drawing until it is ready.
+A raster with nothing to draw adds no layer and is ready at once. A
+failure while preparing rejects prepare; later ones and provider
+errorEvents go to onError. destroy aborts every prepare in flight and
+releases both rasters. drapedRuntime is the lazy entry point carrying
+the atlas-draped-v1 marker, with a stats-counted worker raster source
+that warns when a release fails.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix: show the draped hatch at the light the chunk masks show under HDR
+…
+020dc0f
+```
+Advances #483.
+
+Grid writes czm_gammaCorrect(0.5 × colour) into both diffuse and emission, and the FLAT mask
+appearance shows their sum, while imagery shows texel^γ. Under HDR, which Atlas requests, the
+hatch texel is therefore #a8b5c9 × 0.5 × 2^(1/2.2), (115, 124, 138), not × 0.5. A test checks it
+is the nearest byte to the chunk path's light, and a pin reads the Grid, Dot, GlobeFS and
+Scene.gamma terms it rests on from the installed engine.
+
+Texel writers now get every attribute's change per column and per row (exact per fan triangle,
+central differences at a pole when the mesh asks), and a mesh may carry up to four attributes, so
+a texel formula that needs a screen derivative stays in fill-raster.ts. The surface raster reads
+the grid index's row boxes (rowBox) instead of a copy of their pad and unwrap; turnsNear lives in
+tiling.ts and DRAPED_SURFACE_ALPHA in types.ts. 5,198 tiles, the full hbs-rs334 grid at levels 3
+and 5 among them, are byte-identical before and after the refactor.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix: keep draped readiness waits from failing in a hidden tab
+…
+c42f302
+```
+A hidden tab renders no frame, and readiness is read only after one, so
+waitForReady's idle deadline now counts visible time only, as the chunk
+scheduler's stall timeout does (RF1), and a signal ends the wait. A cold
+or restyled draped surface prepared while the tab is hidden then waits
+for the tab instead of timing out, hiding itself and failing. Its outline
+wait is ended by a newer edge request, by destroy() or by the group
+leaving the view, and its stall only warns: only a raster failure reverts
+the globe, never after destroy. A draped group drawing no supported cell
+has no outlines, so edges-ready fires at once, as on the chunk path. The
+surface and edge-style keys move to surface-groups.ts to keep
+scientific-layers.ts within its 986-line cap.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+merge: drape/t6
+…
+3839b51
+```
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+merge: drape/t7
+…
+1bbe031
+```
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+merge: drape/t8
+…
+c9ccb1a
+```
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+merge: drape/t9
+…
+40106ed
+```
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+merge: drape/t10
+…
+eb602de
+```
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+merge: drape/t11
+…
+4da367d
+```
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+merge: drape/t12
+…
+9e19b30
+```
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+merge: drape/t13
+…
+cc1e1c4
+```
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+merge: drape/t14
+…
+784d305
+```
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix: keep a removed draped surface from coming back on a layer toggle
+…
+e9b32e6
+```
+removeSurface left the committed epoch holding the destroyed group and the cells it drew, so a surface or support toggle under World Terrain called the destroyed group and rebuilt the surface whose cell values had failed validation. The epoch now lets go of both.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test: import drapedSurfaceSpec statically in the scientific-layers tests
+…
+da34381
+```
+The dynamic import was scaffolding so the file loaded before surface-groups.ts existed; the module is now loaded through scientific-layers anyway.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix: stop a draped group's outline prepare when its own prepare is ab…
+…
+26b4158
+```
+…orted
+
+prepare() awaited the outline raster it started on the group's own controller, so a caller's abort neither stopped that worker prepare nor rejected until the outline raster landed, and its layer was then added to a group nobody would show. The outline prepare now drops with the caller's signal, and a test pins that every setter is a no-op after destroy, which ScientificLayers relies on.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+refactor: give the draped surface alpha one owner
+…
+1cc6ec0
+```
+Tasks 12 and 14 each defined the 0.9 surface-layer alpha: the raster types for the mask texels that divide by it, and the draped surface group for the layer that scales by it. The group now re-exports the raster types' constant, so the two can never drift apart.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix: release the worker raster of a prepare aborted after the worker …
+…
+f656aac
+```
+…stored it
+
+A prepare-raster aborted after the worker had stored its raster and posted raster-ready left the raster in the worker for good: the client had already dropped the request, so it ignored the late answer, and the worker's cancel came after the handler had finished. The client now sends release-raster for the request's id (which is the raster id) after the cancel. The worker handles it after the prepare, and releasing a raster it never stored is a no-op. This covers Review Focus 1's 'every worker raster is released'.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test: pin the masks of a cell that holds a pole
+…
+ba6fcf4
+```
+No test reached the mask rasteriser's polar branch, which fans h3PolygonParts' parts and takes central-difference derivatives. The new test hatches, then dots, the north-pole disk and checks that every texel of the top row of the tile under the pole is drawn within the material's alpha range. It fails if the polar draw is removed.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix: unwrap a line segment's end in one step, however far it lies
+…
+3440985
+```
+strokePolyline brought each segment's end within 180° of its start one turn at a time, so its cost grew with the longitude gap: an end ten billion turns away took about 13 s. The turns are now worked out in closed form with the loops' rule, so an end exactly 180° away keeps its side, and every end within 540° gets the same turn as before. The texel-frame lambdas also say they are tiling's toTexel, inlined so the segment loop allocates nothing.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+bschilder
+and others
+added 11 commits
+October 18, 2026 05:26
+docs: state the draped contracts' readiness cap, edge hold and destroy
+…
+0dcae74
+```
+DrapedImageryLayer.isReady now names both of its conditions: the globe's tiles loaded with the layer in place, or DRAPED_READY_CAP_MS after the add. SurfaceGroup.setEdgesHeld says it does nothing for the draped kind. DrapedSurfaceGroup.destroy says every setter after it is a no-op, which ScientificLayers relies on when it hides a group it has already destroyed.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs: say which modules import the lazy draped provider, layer and stats
+…
+7919213
+```
+Their docstrings said only the draped runtime imports them, but the draped imagery layer imports the provider's empty tile and the page's drape stats, and the group imports the provider and the layer. The lazy rule still holds because every importer is under scene/draped/, which is what the docstrings now say.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs: correct the distortion bound, the pentagon fixtures and the con…
+…
+73f06ae
+```
+…trols' draped rule
+
+Over every res-1 and res-3 cell, the worst class III distortion point lies 5.03% of its box's extent outside the corners (81d63ffffffffff), not at most 5%. The 10% pad still covers it with room to spare. H3 pentagons sit at icosahedron vertices, not on edges, so the two class III fixtures are described that way now. The surfaceControls test helper names the controls' rule, hasPhysicalRelief(appliedTerrain), rather than the scene's.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat: load the raster runtime in the data worker on the first draped …
+…
+984b310
+```
+…tile
+
+The worker registry imports ./raster-handlers on the first prepare-raster, raster-tile or release-raster, once per worker state, and binds it to the geometry worker's cached topology, the dispatcher's port and the shared cancellation signals. ATLAS_RASTERISERS wires the fill and outline rasterisers, replacing the placeholder that failed every raster request. The raster runtime's marker stays out of the worker's first load, and a failed import is not cached, so a later raster request tries it again.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat: drape the surface whenever World Terrain is requested, and fall…
+…
+9368335
+```
+… back on a raster failure
+
+The scene drapes from the moment World Terrain is requested, so a cold load whose URL asks for it
+builds no chunks first, and follows the terrain on the globe once the newest request settles: a
+World Terrain load that fails rebuilds the chunks once. While draped, data elevation is off and
+extruded draws as hexagons, the URL keeping both. The draped runtime is imported once, on the
+first draped build, into its own chunk, and the e2e build publishes its drape stats as
+__atlasDrapeStats. A raster failure reverts to the smooth globe with the 'drape' warning, which
+the next terrain choice clears.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test: pass the #483 repro on draped data and report the World Terrain…
+…
+ea74585
+```
+… budgets
+
+The terrain probe lists the imagery layers the globe draws, bottom to top by their Atlas names
+(any other layer is 'basemap'), and says whether the surface is draped. The #483 repro runs
+without test.fail now that the surface lies on the ground, and the drape spec checks a cold
+World Terrain load that builds no chunks, the data visible and pickable after each morph, a
+palette restyle that swaps the draped layer, an outlines toggle that neither waits nor asks the
+worker for tiles, and the smooth globe bringing chunks, data elevation and extruded columns back.
+atlas-terrain-performance.spec.ts reports the World Terrain budgets on both projects, report-only
+until phase 4, under the e2e build's Playwright config.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test: allow the lazy draped runtime as a second Cesium importer in th…
+…
+6f0708d
+```
+…e build checks
+
+The scene chunk's import() of the draped runtime (Task 16) adds a second chunk that statically
+imports Cesium, which the draping design requires: the draped modules load only on demand, and
+they build Cesium imagery types. Two build-shape tests assumed atlas-scene was the only Cesium
+importer. The cold-load attribution test now requires every chunk that can root Cesium's
+evaluation (one with no importer, or with an importer that has not loaded Cesium) to be counted as
+cesium-eval, and a chunk that only Cesium-loaded chunks import (the draped runtime) to be counted
+as Atlas. Rolldown now hands the island's import() a namespace object for the scene chunk, built
+with a helper from the shared chunk it names react-dom, so ruling 44's allow-list gains the scene
+chunk, which may name that file and hold nothing else of it. Mutations (a page chunk importing
+Cesium, the runtime loaded from a chunk without Cesium, React DOM text in the scene chunk) each
+fail the tests.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix: restart a draped layer's readiness when it is shown again
+…
+c5e3eeb
+```
+Cesium frees every tile of a hidden imagery layer, yet a draped layer
+worked out `ready` once, from its first frames after the add, and never
+reset it. A layer shown again therefore read ready with no tiles, so a
+swap could fade it in over basemap. A hidden layer now reads not ready
+and requests no frame; shown again, its readiness starts over (two
+frames and tilesLoaded, or the 3 s cap counted from the show). The
+draped group likewise counts its first drawn tile again after a hide.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix: destroy draped groups that leave the view, and never reuse a fai…
+…
+5fa16ce
+```
+…led one
+
+A retired or superseded draped group stayed hidden in the surface cache.
+Its tiles were gone, so a cache hit (World, Smooth, World; palette A, B,
+A; support off and on) brought it back with none, and its layers, the
+base guard and its worker rasters stayed on the smooth globe meanwhile.
+A group whose raster had failed was reused the same way, and its
+once-per-group report latch swallowed the next failure of the same tile.
+
+ScientificLayers now caches a draped group only while it is displayed or
+incoming: the commit destroys the one it retires, a discarded epoch
+destroys its prepared group, and a reported failure drops the group from
+the cache at once. Chunk groups are cached as before. To stay within the
+986-line cap, the dataset switch's same-frame swap and the observation
+cache key move to surface-groups.ts unchanged.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test: list every imagery layer in the terrain probe, and time restyle…
+…
+0d57175
+```
+…s by it
+
+The probe's `imageryLayers` lists only shown layers at alpha > 0, so the
+restyle sampler had to catch two surface layers inside the 300 ms
+cross-fade. Under load the first swap frame can end the fade at once,
+and restyleMs came back null after a full 60 s wait. The probe gains
+`layerStack`, every layer on the collection whatever its show and alpha
+(the base guard as 'guard'), and the sampler counts the incoming layer
+from its add at alpha 0, with a 30 s cap. The draping e2e spec also
+checks that a restyle and a return to the smooth globe leave no Atlas
+layer or guard behind.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test: check both lazy markers at both boundaries, and pin the newest …
+…
+bc03f5c
+```
+…terrain request
+
+The bundle tests now assert that neither 'atlas-draped-v1' nor
+'atlas-raster-v1' is in the /app/ initial chunks or the worker's first
+load. The Review Focus test for rapid World, Smooth, World requests
+checks the state after the superseded request settles, so it fails
+without the newest-request guard, and the runtime-import test runs in a
+module registry of its own, so it passes in any test order.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+bschilder
+requested a review
+from dwgoblue
+as a code owner
+October 18, 2026 12:58
+test: settle the tile requests before the outlines toggle, and report…
+…
+b328a9d
+```
+… restyle milestones
+
+CI's software WebGL failed the outlines-toggle e2e test on all three
+attempts. The probe lists the outline layer from its add, before the
+globe has rendered the frames that ask for its tiles, so `tilesLoaded`
+could still hold from the frame before and the baseline missed 32
+outline tile requests (65, then 97). The 1 s polls also outran a main
+thread that took over a second per evaluate. The baseline now waits for
+the requests to settle (every tile loaded, none queued, no new request
+over a second), and the toggle's frame gets 10 s; the request count
+still proves the toggle asks the worker for nothing.
+
+The restyle report waits 60 s again, as the other milestones do: in CI
+the desktop's oblique view did not load its tiles to the horizon within
+30 s. It now also reports when the new layer was added and when the old
+one was retired, so a restyle that outlasts the wait says how far it got.
+
+Advances #483.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

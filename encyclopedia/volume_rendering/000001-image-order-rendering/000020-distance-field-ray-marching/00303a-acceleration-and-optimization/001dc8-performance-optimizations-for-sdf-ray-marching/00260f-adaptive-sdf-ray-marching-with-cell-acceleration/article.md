@@ -2,47 +2,48 @@
 
 
 ## Overview
-This method renders signed distance field (SDF) scenes by marching a ray through the field using an acceleration structure to skip empty space, adaptive step sizing, and sign-change detection for surface refinement [S1, unofficial]. It differs from standard sphere tracing by integrating a spatial acceleration structure that provides lower bounds on distance, allowing larger steps in empty regions while maintaining precision near surfaces. It differs from [SDF-Accelerated Volumetric Ray Marching](3681-sdf-accelerated-volumetric-ray-marching.md) by focusing on implicit surface rendering rather than volumetric density integration, and from [Aggressive Ray Marching with SDF](2326-aggressive-ray-marching-with-sdf.md) by using explicit cell-based bounds rather than heuristic aggressive stepping.
+This method renders signed distance field (SDF) scenes by marching a ray through the field using an acceleration structure to skip empty space, adaptive step sizing, and sign-change detection for surface refinement [S1, unofficial]. It differs from standard sphere tracing by integrating a spatial acceleration structure that provides lower bounds on distance, allowing larger steps in empty regions while maintaining precision near surfaces [S1, unofficial].
 
 ## How it works
-**Inputs:** Ray origin $r_o$, ray direction $r_d$, scene bounds ($boundsEnter$, $boundsExit$), acceleration structure data, maximum distance $MAX\_DIST$, maximum steps $MAX\_STEPS$.
-**Outputs:** Hit distance $dist$, termination code.
+**Inputs:** Ray origin $r_o$, ray direction $r_d$, scene bounds ($boundsEnter$, $boundsExit$), acceleration structure data, maximum distance $MAX\_DIST$, maximum steps $MAX\_STEPS$ [S1, unofficial].
+**Outputs:** Hit distance $dist$, termination code [S1, unofficial].
 
 **Data Structures:**
-*   **Acceleration Cell:** Contains `accelStart`, `accelCount`, and potentially `cellExit` (distance to cell boundary).
-*   **Shape Data:** Metadata for SDF primitives (scale, rotation, etc.) accessed via texture lookups if needed for exact evaluation.
+*   **Acceleration Cell:** Contains `accelStart`, `accelCount`, and `cellExit` (distance to cell boundary) [S1, unofficial].
+*   **Shape Data:** Metadata for SDF primitives (scale, rotation, etc.) accessed via texture lookups if needed for exact evaluation [S1, unofficial].
 
 **Parameters:**
-*   $SPHERE\_TRACE\_SAFETY$: Multiplier for sphere tracing step size to prevent overshooting. Typical value: 1.0 or slightly greater [S1, unofficial].
+*   $SPHERE\_TRACE\_SAFETY$: Multiplier for sphere tracing step size to prevent overshooting [S1, unofficial].
 *   $ACCEL\_EXACT\_REFINE\_DIST$: Threshold for $d_{Lower}$ to trigger exact SDF evaluation instead of using the lower bound [S1, unofficial].
 *   $ACCEL\_MIN\_CELL\_EXIT\_REFINE$: Minimum cell exit distance to trigger refinement [S1, unofficial].
-*   $hitEps$: Adaptive epsilon for termination, computed based on current march distance.
+*   $over\_relax$: Over-relaxation factor for step size calculation [G].
 
 **Steps:**
-1.  Compute ray origin $r_o$ and direction $r_d$.
-2.  Intersect scene bounds to get $boundsEnter$ and $boundsExit$.
-3.  Initialize $marchDist = boundsEnter$, $marchEnd = \min(MAX\_DIST, boundsExit)$.
+1.  Compute ray origin $r_o$ and direction $r_d$ [S1, unofficial].
+2.  Intersect scene bounds to get $boundsEnter$ and $boundsExit$ [S1, unofficial].
+3.  Initialize $marchDist = boundsEnter$, $marchEnd = \min(MAX\_DIST, boundsExit)$ [S1, unofficial].
 4.  Loop $i$ from 0 to $MAX\_STEPS$:
-    a.  If $i \ge marchLimit$, break.
-    b.  Evaluate current position: $hitPos = r_o + r_d \cdot marchDist$.
-    c.  Query acceleration cell: Call `getAccelCellData(hitPos, cell, accelStart, accelCount, forceFullScan)`.
+    a.  If $i \ge MAX\_STEPS$, break [S1, unofficial].
+    b.  Evaluate current position: $hitPos = r_o + r_d \cdot marchDist$ [S1, unofficial].
+    c.  Query acceleration cell: Call `getAccelCellData(hitPos, cell, accelStart, accelCount, forceFullScan)` [S1, unofficial].
     d.  Determine distance $d_{Scene}$:
         i.  If cell found and not `forceFullScan`:
             *   Compute $cellExit$.
-            *   If $accelCount > 0$, get $d_{Lower} = sceneSDFDistanceLowerBoundForAccelRange(...)$.
+            *   If $accelCount > 0$, get $d_{Lower} = sceneSDFDistanceLowerBoundForAccelRange(accelStart, accelCount, hitPos)$.
             *   If $d_{Lower} \le ACCEL\_EXACT\_REFINE\_DIST$ or $cellExit \le ACCEL\_MIN\_CELL\_EXIT\_REFINE$, set $d_{Scene} = sceneSDFDistanceExact(hitPos)$.
             *   Else, set $d_{Scene} = d_{Lower}$.
-        ii. Else (no cell or full scan), set $d_{Scene} = sceneSDFDistanceExact(hitPos)$.
-    e.  Compute adaptive epsilon: $hitEps = getAdaptiveHitEpsilon(marchDist)$.
-    f.  Check for surface hit: If $|d_{Scene}| < hitEps$, set $dist = marchDist$, $terminationCode = 1$, break.
+        ii. Else if $accelCount == 0$, set $d_{Scene} = cellExit$.
+        iii. Else (no cell or full scan), set $d_{Scene} = sceneSDFDistanceExact(hitPos)$ [S1, unofficial].
+    e.  Compute adaptive epsilon: $hitEps = getAdaptiveHitEpsilon(marchDist)$ [S1, unofficial].
+    f.  Check for surface hit: If $|d_{Scene}| < hitEps$, set $dist = marchDist$, $terminationCode = 1$, break [S1, unofficial].
     g.  Check for surface crossing: If $havePrev$ and $prevDist > 0.0$ and $d_{Scene} < 0.0$:
-        i.  Call $refineSurfaceCrossing(r_o, r_d, prevT, marchDist)$.
-        ii. Set $dist$, $terminationCode = 2$, break.
-    h.  Compute step size: $stepDist = \max(|d_{Scene}| \cdot SPHERE\_TRACE\_SAFETY \cdot overRelax, hitEps \cdot 0.33)$.
-    i.  If in cell, $stepDist = \min(stepDist, cellExit + hitEps \cdot 0.5)$.
-    j.  Update state: $havePrev = true$, $prevDist = d_{Scene}$, $prevT = marchDist$.
-    k.  $marchDist += stepDist$.
-    l.  If $marchDist > marchEnd$, break.
+        i.  Call $refineSurfaceCrossing(r_o, r_d, prevT, marchDist)$ [S1, unofficial].
+        ii. Set $dist$, $terminationCode = 2$, break [S1, unofficial].
+    h.  Compute step size: $stepDist = \max(|d_{Scene}| \cdot SPHERE\_TRACE\_SAFETY \cdot over\_relax, hitEps \cdot 0.33)$ [S1, unofficial].
+    i.  If in cell, $stepDist = \min(stepDist, cellExit + hitEps \cdot 0.5)$ [S1, unofficial].
+    j.  Update state: $havePrev = true$, $prevDist = d_{Scene}$, $prevT = marchDist$ [S1, unofficial].
+    k.  $marchDist += stepDist$ [S1, unofficial].
+    l.  If $marchDist > marchEnd$, break [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -54,16 +55,20 @@ def adaptive_sdf_ray_marching(ro, rd, bounds_enter, bounds_exit, max_dist, max_s
     have_prev = False
     prev_dist = 0.0
     prev_t = 0.0
-    
+    SPHERE_TRACE_SAFETY = 1.0  # [G] Standard sphere tracing multiplier
+    ACCEL_EXACT_REFINE_DIST = 1e-4  # [G] Typical threshold
+    ACCEL_MIN_CELL_EXIT_REFINE = 1e-4  # [G] Typical threshold
+    over_relax = 1.0  # [G] Over-relaxation factor
+
     for i in range(max_steps):
         if i >= max_steps:
             break
-            
+
         hit_pos = ro + rd * march_dist
-        
+
         # Query acceleration structure
         cell, accel_start, accel_count, force_full_scan = get_accel_cell_data(hit_pos, accel_structure)
-        
+
         # Determine distance
         if cell is not None and not force_full_scan:
             cell_exit = compute_cell_exit(cell, hit_pos, rd)
@@ -77,56 +82,82 @@ def adaptive_sdf_ray_marching(ro, rd, bounds_enter, bounds_exit, max_dist, max_s
                 d_scene = cell_exit
         else:
             d_scene = scene_sdf_distance_exact(hit_pos)
-            
+
         # Adaptive epsilon
         hit_eps = get_adaptive_hit_epsilon(march_dist)
-        
+
         # Termination: Exact hit
         if abs(d_scene) < hit_eps:
             return march_dist, 1
-            
+
         # Termination: Sign change crossing
         if have_prev and prev_dist > 0.0 and d_scene < 0.0:
             dist, _ = refine_surface_crossing(ro, rd, prev_t, march_dist)
             return dist, 2
-            
+
         # Step size calculation
         step_dist = max(abs(d_scene) * SPHERE_TRACE_SAFETY * over_relax, hit_eps * 0.33)
         if cell is not None:
             step_dist = min(step_dist, cell_exit + hit_eps * 0.5)
-            
+
         # Update state
         have_prev = True
         prev_dist = d_scene
         prev_t = march_dist
         march_dist += step_dist
-        
+
         if march_dist > march_end:
             break
-            
-    return march_dist, 0 # No hit
+
+    return march_dist, 0
+
+# Helper definitions [G]
+def get_accel_cell_data(hit_pos, accel_structure):
+    # [G] Standard spatial hash or BVH query to find containing cell
+    return None, 0, 0, False
+
+def compute_cell_exit(cell, hit_pos, rd):
+    # [G] Ray-cell intersection to find exit distance
+    return 1e9
+
+def scene_sdf_distance_lower_bound_for_accel_range(start, count, hit_pos):
+    # [G] Query precomputed lower bounds for the cell's primitives
+    return 1e9
+
+def scene_sdf_distance_exact(hit_pos):
+    # [G] Evaluate full SDF at hit_pos
+    return 1e9
+
+def get_adaptive_hit_epsilon(march_dist):
+    # [G] Scale epsilon with distance or use fixed value
+    return 1e-4
+
+def refine_surface_crossing(ro, rd, prev_t, curr_t):
+    # [G] Bisection or linear interpolation between prev_t and curr_t
+    mid = (prev_t + curr_t) / 2.0
+    return mid, 0
 ```
 
 **Edge Cases and Pitfalls:**
 *   **Surface Crossing:** Detection relies on sign change between previous and current $d_{Scene}$. If $prevDist > 0$ and $d_{Scene} < 0$, `refineSurfaceCrossing` is called to interpolate the exact hit position, preventing missed thin geometry [S1, unofficial].
-*   **Precision:** Using lower bounds from acceleration structures can lead to overshooting if not refined. The $ACCEL\_EXACT\_REFINE\_DIST$ threshold ensures exact evaluation when close to surfaces.
-*   **Cell Boundaries:** Step size is clamped by cell exit distance to ensure the ray does not skip over potential intersections within a cell.
+*   **Precision:** Using lower bounds from acceleration structures can lead to overshooting if not refined. The $ACCEL\_EXACT\_REFINE\_DIST$ threshold ensures exact evaluation when close to surfaces [S1, unofficial].
+*   **Cell Boundaries:** Step size is clamped by cell exit distance to ensure the ray does not skip over potential intersections within a cell [S1, unofficial].
 
 ## Subtopics
 
 ### [SDF Raymarching & Rendering](4753-sdf-raymarching-rendering.md)
-SDF Raymarching & Rendering is a technique for rendering signed distance field (SDF) scenes by marching a ray through the field to find surface intersections and computing lighting at the hit point. It differs from volume rendering by treating the SDF as a boundary representation (implicit surface) rather than a volumetric density, and from standard rasterization by avoiding geometry primitives in favor of procedural distance queries. This method builds on [Adaptive SDF Ray Marching with Cell Acceleration](3714-adaptive-sdf-ray-marching-with-cell-acceleration.md) by performing the final surface refinement, shading, and texturing after the acceleration structure has narrowed the search space.
+SDF Raymarching & Rendering is a fragment shader technique that renders signed distance field (SDF) scenes by marching a ray through the field to find surface intersections and computing lighting at the hit point. It samples the SDF volume via a procedural function or texture, compares the sampled distance against a threshold to determine surface intersection, and applies procedural coloring and shading. This method builds on [Adaptive SDF Ray Marching with Cell Acceleration](3714-adaptive-sdf-ray-marching-with-cell-acceleration.md) by performing the final surface refinement, shading, and texturing after the acceleration structure has narrowed the search space.
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the acceleration structure query cost and the number of steps. In empty space, steps are large due to lower bounds. Near surfaces, steps are small due to adaptive epsilon and exact evaluation.
-*   **Memory Complexity:** Requires storage for the acceleration structure and scene bounds.
-*   **Strengths:** Efficiently skips empty space, handles complex SDF scenes, precise surface detection.
-*   **Limitations:** Requires an acceleration structure, potential for missed thin geometry if sign change detection is not robust.
-*   **When to Use:** Rendering complex SDF scenes where empty space is significant.
-*   **When Not to Use:** Simple scenes where standard sphere tracing is sufficient, or when volumetric rendering is required.
+*   **Time Complexity:** Depends on the acceleration structure query cost and the number of steps. In empty space, steps are large due to lower bounds. Near surfaces, steps are small due to adaptive epsilon and exact evaluation [S1, unofficial].
+*   **Memory Complexity:** Requires storage for the acceleration structure and scene bounds [S1, unofficial].
+*   **Strengths:** Efficiently skips empty space, handles complex SDF scenes, precise surface detection [S1, unofficial].
+*   **Limitations:** Requires an acceleration structure, potential for missed thin geometry if sign change detection is not robust [S1, unofficial].
+*   **When to Use:** Rendering complex SDF scenes where empty space is significant [S1, unofficial].
+*   **When Not to Use:** Simple scenes where standard sphere tracing is sufficient, or when volumetric rendering is required [S1, unofficial].
 
 ## Background
-This method is derived from techniques described in [S1, unofficial], which combines sphere tracing with acceleration structures for efficient SDF rendering. It addresses the performance bottleneck of standard sphere tracing in large, sparse scenes.
+This method is derived from techniques described in [S1, unofficial], which combines sphere tracing with acceleration structures for efficient SDF rendering. It addresses the performance bottleneck of standard sphere tracing in large, sparse scenes [S1, unofficial].
 
 ## Sources
 [S1] TeoGrajqevci/RayMarching_tool, https://github.com/TeoGrajqevci/RayMarching_tool, fetched 2026-10-26 (unofficial)

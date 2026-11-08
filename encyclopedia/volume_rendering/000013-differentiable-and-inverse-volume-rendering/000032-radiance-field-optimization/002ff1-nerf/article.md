@@ -2,41 +2,75 @@
 
 
 ## Overview
-NeRF++ (also known as NeRF--) is a framework for novel view synthesis that jointly optimizes camera parameters (intrinsics and 6DoF poses) and the scene representation (NeRF) from a sparse set of forward-facing RGB images, eliminating the need for pre-computed camera parameters via Structure-from-Motion (SfM) [S2, unofficial]. Unlike standard NeRF which assumes known camera poses, NeRF++ treats camera parameters as learnable variables optimized end-to-end alongside the neural radiance field [S2, unofficial]. It is specifically designed for forward-facing scenes and differs from concurrent methods that either require intrinsics as input or assume a pre-trained NeRF [S2, unofficial].
+NeRF++ (also known as NeRF--) is a framework for novel view synthesis that jointly optimizes camera parameters (intrinsics and 6DoF poses) and the scene representation (Neural Radiance Field) from a sparse set of forward-facing RGB images, eliminating the need for pre-computed camera parameters via Structure-from-Motion (SfM) tools like COLMAP [S2, unofficial]. It sets itself apart from standard NeRF by treating camera poses as learnable parameters within the optimization loop, and from sibling methods like [Neural Volumes](912-neural-volumes.md) or [Direct Voxel Grid Optimization](4694-direct-voxel-grid-optimization.md) by relying on an implicit MLP representation with joint photometric backpropagation rather than explicit voxel grids or separate pose estimation stages [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A set of $N$ RGB images $I = \{I_1, \dots, I_N\}$ captured from sparse viewpoints. No camera parameters are provided.
-*   **Outputs:** A trained NeRF model $F_\Theta$ and optimized camera parameters $\Pi^* = \{\hat{f}, \{\hat{\phi}_i\}, \{\hat{t}_i\}\}_{i=1}^N$ [S2, unofficial].
+*   **Input:** A set of $N$ RGB images $I = \{I_1, \dots, I_N\}$ captured from sparse viewpoints. No camera poses or intrinsics are provided.
+*   **Output:** A trained NeRF model $F_\Theta$ and optimized camera parameters $\hat{\Pi} = \{\hat{f}, \{\hat{\phi}_i\}_{i=1}^N, \{\hat{t}_i\}_{i=1}^N\}$.
 
-**Data Structures and Layout:**
-1.  **Camera Intrinsics:** Represented by a single learnable scalar focal length $\hat{f} \in \mathbb{R}$. The principal points are fixed at the image center: $c_x \approx W/2$ and $c_y \approx H/2$, where $W$ and $H$ are image width and height [S2, unofficial].
-2.  **Camera Poses:** Represented as a camera-to-world transformation matrix $T_{wc} = [R|t] \in SE(3)$ for each image $i$.
-    *   **Translation:** $\hat{t}_i \in \mathbb{R}^3$ is a learnable vector [S2, unofficial].
-    *   **Rotation:** Represented by an axis-angle vector $\hat{\phi}_i \in \mathbb{R}^3$, where $\hat{\phi}_i = \hat{\alpha}_i \hat{\omega}_i$ ($\hat{\alpha}_i$ is rotation angle, $\hat{\omega}_i$ is normalized axis). The rotation matrix $\hat{R}_i$ is recovered using Rodrigues' formula [S2, unofficial]:
-        $$
-        \hat{R}_i = I + \frac{\sin(\hat{\alpha}_i)}{\hat{\alpha}_i} (\hat{\phi}_i^\wedge) + \frac{1-\cos(\hat{\alpha}_i)}{\hat{\alpha}_i^2} (\hat{\phi}_i^\wedge)^2
-        $$
-        where $(\cdot)^\wedge$ is the skew-symmetric operator converting a vector to a matrix [S2, unofficial].
-3.  **NeRF Model:** A Multi-Layer Perceptron (MLP) $F_\Theta: (\mathbf{x}, \mathbf{d}) \to (\sigma, \mathbf{c})$ mapping 3D position $\mathbf{x}$ and view direction $\mathbf{d}$ to volume density $\sigma$ and color $\mathbf{c}$ [S1]. The implementation uses a smaller network than the original NeRF, with all hidden layer dimensions shrunk by half, retaining the same positional encoding and skip connections [S2, unofficial].
+**Data Structures:**
+1.  **Camera Intrinsics:** Represented by a single learnable scalar focal length $\hat{f} \in \mathbb{R}$. The principal points are fixed at the image center: $c_x = W/2, c_y = H/2$, where $W, H$ are image width and height [S2, unofficial].
+2.  **Camera Poses:** Represented as a camera-to-world transformation $T_{wc} = [R|t] \in SE(3)$ for each image $i$.
+    *   **Translation:** $\hat{t}_i \in \mathbb{R}^3$ is a learnable vector.
+    *   **Rotation:** Represented by axis-angle $\hat{\phi}_i \in \mathbb{R}^3$, where $\hat{\phi}_i = \alpha \omega$ ($\alpha$ is angle, $\omega$ is unit axis). This vector is a learnable parameter [S2, unofficial].
+3.  **NeRF Model:** A Multi-Layer Perceptron (MLP) $F_\Theta$. The architecture uses hidden layer dimensions shrunk by half compared to the original NeRF paper, but retains the same positional encoding and skip connections [S2, unofficial].
 
-**Algorithm Steps:**
-The optimization minimizes the photometric loss between rendered images and ground truth images:
-$$
-\Theta^*, \Pi^* = \arg \min_{\Theta, \Pi} \mathcal{L}(\hat{I}, \hat{\Pi}|I)
-$$
-where $\mathcal{L}$ is the Mean Squared Error (MSE) [S1][S2, unofficial]:
-$$
-\mathcal{L}_{\text{MSE}} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \left\| C(\mathbf{r}) - \hat{C}(\mathbf{r}) \right\|_2^2
-$$
+**Numbered Steps:**
+
+1.  **Initialization:**
+    *   Initialize rotation angles $\hat{\phi}_i$ as learnable PyTorch parameters with shape $(N, 3)$ and gradients enabled [S2, unofficial].
+    *   Initialize translation vectors $\hat{t}_i$ as learnable parameters with shape $(N, 3)$ and gradients enabled [S2, unofficial].
+    *   Initialize focal length $\hat{f}$ as a learnable scalar parameter with shape $(1,)$ and gradients enabled [S2, unofficial].
+    *   Initialize the NeRF model $F_\Theta$ with gradients enabled. The initial camera poses are typically set to identity (or small perturbations) assuming a forward-facing setup [S2, unofficial].
+
+2.  **Ray Construction:**
+    For each image $i$ and each pixel $p$ (or sample $m$) on the image:
+    *   Calculate the ray direction $\hat{d}_{i,p}$ using the current estimates $\hat{f}, \hat{R}_i$ and pixel coordinates $(u, v)$:
+        $$
+        \hat{d}_{i,p} = \hat{R}_i \begin{pmatrix} (u - W/2)/\hat{f} \\ -(v - H/2)/\hat{f} \\ -1 \end{pmatrix}
+        $$
+        where $\hat{R}_i$ is the rotation matrix derived from $\hat{\phi}_i$ [S2, unofficial].
+    *   Calculate the ray origin $\hat{o}_i = \hat{t}_i$ [S2, unofficial].
+    *   Define the ray $\hat{r}_{i,p}(h) = \hat{o}_i + h\hat{d}_{i,p}$ [S2, unofficial].
+
+3.  **Sampling and Evaluation:**
+    *   Discretize the integration domain along the ray from near plane $t_n$ to far plane $t_f$ into $N$ segments [S3].
+    *   Sample 3D points $\{x_j\}$ along the ray. The sample point $t_i$ is drawn uniformly within each segment:
+        $$
+        t_i \sim U \left[ t_n + \frac{i-1}{N} (t_f - t_n), t_n + \frac{i}{N} (t_f - t_n) \right]
+        $$
+        [S3].
+    *   Query the NeRF model $F_\Theta$ with position $x_j$ and direction $\hat{d}_{i,p}$ to obtain color $\mathbf{c}_j$ and density $\sigma_j$ [S2, unofficial].
+
+4.  **Volume Rendering:**
+    *   Aggregate radiance and densities using the discrete volume rendering equation to get the pixel color $\hat{C}(\mathbf{r})$:
+        $$
+        \hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
+        $$
+        where $\delta_i$ is the distance between adjacent samples, and transmittance $T_i$ is:
+        $$
+        T_i = \exp \left( - \sum_{j=1}^{i-1} \sigma_j \delta_j \right)
+        $$
+        [S1, S3].
+
+5.  **Loss Computation and Optimization:**
+    *   Compute the photometric loss $\mathcal{L}$ between the rendered image $\hat{I}_i$ and the ground truth image $I_i$. The loss is typically the Mean Squared Error (MSE):
+        $$
+        \mathcal{L}_{\text{MSE}} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \left\| C(\mathbf{r}) - \hat{C}(\mathbf{r}) \right\|_2^2
+        $$
+        [S1].
+    *   Perform backpropagation to compute gradients with respect to all parameters: $\Theta$ (NeRF weights), $\hat{\phi}_i$ (rotations), $\hat{t}_i$ (translations), and $\hat{f}$ (focal length) [S2, unofficial].
+    *   Update all parameters using an optimizer (e.g., Adam) [S2, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import torch
 import torch.nn as nn
-import numpy as np
+import torch.optim as optim
 
 def rodrigues(phi):
     """
@@ -50,157 +84,133 @@ def rodrigues(phi):
     w = torch.tensor([0, -omega[2], omega[1],
                       omega[2], 0, -omega[0],
                       -omega[1], omega[0], 0])
-    w_mat = w.view(3, 3)
-    R = torch.eye(3) + torch.sin(alpha) * w_mat + (1 - torch.cos(alpha)) * torch.matmul(w_mat, w_mat)
+    W = w.view(3, 3)
+    R = torch.eye(3) + torch.sin(alpha) * W + (1 - torch.cos(alpha)) * torch.matmul(W, W)
     return R
 
-def construct_ray(phi_i, t_i, f, pixel_coords, image_dims):
+def construct_ray(phi, t, f, u, v, W, H):
     """
-    Constructs ray direction and origin from camera parameters and pixel coordinates.
-    phi_i: (3,) axis-angle rotation
-    t_i: (3,) translation
-    f: scalar focal length
-    pixel_coords: (2,) (u, v)
-    image_dims: (W, H)
+    Constructs ray direction and origin from camera parameters and pixel coords.
     """
-    W, H = image_dims
-    u, v = pixel_coords
-    # Ray direction in camera frame: (u - W/2)/f, -(v - H/2)/f, -1
-    # Note: The source uses -(v - H/2)/f. Standard pinhole often uses (v - H/2)/f depending on coordinate system.
+    R = rodrigues(phi)
+    # Pixel coordinates relative to center, scaled by focal length
+    # Note: The formula in [S2, unofficial] uses -(v-H/2)/f. Standard pinhole usually has +y up or -y down.
     # We follow the source formula exactly.
-    ray_cam = torch.tensor([(u - W/2)/f, -(v - H/2)/f, -1.0])
+    dx = (u - W/2) / f
+    dy = -(v - H/2) / f
+    dz = -1.0
     
-    # Rotation matrix from axis-angle
-    R = rodrigues(phi_i)
-    
-    # Transform to world frame
-    ray_dir = torch.matmul(R, ray_cam)
-    ray_dir = ray_dir / torch.norm(ray_dir) # Normalize to unit vector
-    
-    # Ray origin is the camera center (translation vector)
-    ray_orig = t_i
-    
-    return ray_orig, ray_dir
+    direction = torch.matmul(R, torch.tensor([dx, dy, dz]))
+    direction = direction / torch.norm(direction)
+    origin = t
+    return origin, direction
 
-def render_ray(ray_orig, ray_dir, nerf_model, near_plane, far_plane, num_samples):
+def render_ray(origin, direction, nerf_model, t_n, t_f, N_samples):
     """
-    Renders a single ray using the volume rendering equation.
+    Renders a single ray using volume rendering.
     """
-    # Sample points along the ray
-    t_vals = torch.linspace(near_plane, far_plane, num_samples)
-    points = ray_orig.unsqueeze(0) + t_vals.unsqueeze(1) * ray_dir.unsqueeze(0) # (1, N, 3)
+    # Uniform sampling
+    t_vals = torch.linspace(t_n, t_f, N_samples)
+    # Add jitter for uniform sampling within bins
+    t_jitter = torch.rand_like(t_vals) * (t_f - t_n) / N_samples
+    t_samples = t_vals + t_jitter
+    
+    # Sample points
+    points = origin.unsqueeze(0) + t_samples.unsqueeze(1) * direction.unsqueeze(0) # Shape: (1, N, 3)
     
     # Query NeRF
-    # NeRF expects (x, d) -> (sigma, color)
-    # We need to pass the view direction for each point. 
-    # In standard NeRF, the view direction is constant for all samples on a ray.
-    colors, densities = nerf_model(points, ray_dir.unsqueeze(0).expand_as(points))
+    # NeRF expects (x, y, z, theta, phi) or similar. 
+    # Assuming standard NeRF input: position and viewing direction.
+    # We need to pass the direction for each sample.
+    directions = direction.unsqueeze(0).expand_as(points)
+    
+    sigma, color = nerf_model(points, directions)
     
     # Volume Rendering
-    # delta_t is the distance between samples
-    deltas = t_vals[1:] - t_vals[:-1]
-    deltas = torch.cat([deltas, torch.tensor([1e10])]) # Last delta is large to ensure T_N -> 0
+    deltas = t_samples[1:] - t_samples[:-1]
+    # Handle last delta
+    deltas = torch.cat([deltas, torch.tensor([1e-10], device=deltas.device)])
     
-    # Transmittance T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
-    # alpha_i = 1 - exp(-sigma_i * delta_i)
-    # C = sum T_i * alpha_i * c_i
+    alpha = 1.0 - torch.exp(-sigma * deltas)
+    T = torch.cumprod(torch.exp(-sigma * deltas), dim=1)
+    T = torch.cat([torch.ones_like(T[:, :1]), T[:, :-1]], dim=1)
     
-    alpha = 1.0 - torch.exp(-densities * deltas)
-    transmittance = torch.cumprod(torch.exp(-densities * deltas), dim=1)
-    transmittance = torch.cat([torch.ones_like(transmittance[:, :1]), transmittance[:, :-1]], dim=1)
+    weights = alpha * T
+    rendered_color = torch.sum(weights.unsqueeze(-1) * color, dim=1)
     
-    weights = alpha * transmittance
-    color = torch.sum(weights.unsqueeze(-1) * colors, dim=1)
-    
-    return color
+    return rendered_color
 
-def train_nerfmm(images, nerf_model, optimizer, num_epochs, num_samples_per_ray, near_plane, far_plane):
-    """
-    Joint optimization of camera parameters and NeRF.
-    """
-    N = len(images)
-    H, W = images[0].shape[1], images[0].shape[2]
-    
-    # Initialize learnable camera parameters
-    # phi_i: (N, 3), t_i: (N, 3), f: (1,)
-    phi = nn.Parameter(torch.zeros(N, 3))
-    t = nn.Parameter(torch.zeros(N, 3))
-    f = nn.Parameter(torch.tensor([1.0]))
-    
-    # Set requires_grad to True
-    phi.requires_grad = True
-    t.requires_grad = True
-    f.requires_grad = True
-    
-    # NeRF model parameters are already in nerf_model
-    
-    for epoch in range(num_epochs):
-        total_loss = 0
-        for i in range(N):
-            img = images[i]
-            # Get pixel coordinates for all pixels in the image
-            # Flatten to list of (u, v)
-            u_coords, v_coords = torch.meshgrid(torch.arange(W), torch.arange(H), indexing='ij')
-            u_coords = u_coords.flatten().float()
-            v_coords = v_coords.flatten().float()
-            
-            # Render all pixels for image i
-            rendered_pixels = []
-            for u, v in zip(u_coords, v_coords):
-                ray_orig, ray_dir = construct_ray(phi[i], t[i], f, torch.tensor([u, v]), (W, H))
-                color = render_ray(ray_orig, ray_dir, nerf_model, near_plane, far_plane, num_samples_per_ray)
-                rendered_pixels.append(color)
-            
-            rendered_img = torch.stack(rendered_pixels).view(H, W, 3)
-            
-            # Compute Loss
-            loss = torch.mean((rendered_img - img) ** 2)
-            
-            # Backpropagation
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            
-            total_loss += loss.item()
-            
-        print(f"Epoch {epoch}, Loss: {total_loss/N}")
+# Initialization
+N_images = 10
+W, H = 512, 512
+images = [...] # List of N_images tensors
 
-    return nerf_model, phi, t, f
+# Learnable Camera Parameters
+phi = nn.Parameter(torch.zeros(N_images, 3)) # Rotation angles
+t = nn.Parameter(torch.zeros(N_images, 3))   # Translation vectors
+f = nn.Parameter(torch.tensor([1.0]))        # Focal length
+
+# NeRF Model
+nerf_model = NeRF_Module() # Smaller MLP as per [S2, unofficial]
+
+# Optimizer
+optimizer = optim.Adam(list(nerf_model.parameters()) + [phi, t, f], lr=0.001)
+
+# Training Loop
+for epoch in range(3000): # 3K epochs as per [S2, unofficial]
+    for i in range(N_images):
+        img = images[i]
+        # Iterate over pixels (or a subset/batch of pixels)
+        # For simplicity, assuming full image or random pixel sampling
+        u, v = torch.meshgrid(torch.arange(W), torch.arange(H), indexing='ij')
+        u = u.float().flatten()
+        v = v.float().flatten()
+        
+        rendered_pixels = []
+        for j in range(len(u)):
+            origin, direction = construct_ray(phi[i], t[i], f, u[j], v[j], W, H)
+            color = render_ray(origin, direction, nerf_model, t_n=0.0, t_f=10.0, N_samples=128)
+            rendered_pixels.append(color)
+            
+        rendered_img = torch.stack(rendered_pixels).reshape(H, W, 3)
+        
+        # Loss
+        loss = torch.mean((rendered_img - img) ** 2)
+        
+        # Backprop
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 ```
 
-**Parameters:**
-*   **NeRF Architecture:** Hidden layer dimensions are halved compared to the original NeRF [S2, unofficial].
-*   **Training Duration:** Typically 3,000 epochs for perturbation experiments, though full training may use 10,000 epochs [S2, unofficial].
-*   **Assumptions:** Forward-facing scenes (LLFF/NeRF style); all images share the same intrinsic parameters [S2, unofficial].
-
 **Edge Cases and Pitfalls:**
-*   **Track-to-Object Motion:** If the camera tracks an object, the object's position in the image remains nearly constant. This provides insufficient photometric supervision for blurry early-stage renders, leading to inaccurate joint optimization [S2, unofficial].
-*   **Large Rotations:** The method initializes poses from identity matrices and assumes forward-facing scenes. It fails with rotation perturbations larger than $\pm 20^\circ$ or 360-degree scenes [S2, unofficial].
-*   **Breaking Point:** Both NeRF-- and COLMAP fail when translation noise $> \pm 20\%$ and rotation noise $> \pm 20^\circ$ [S2, unofficial].
-*   **Pose Ambiguity:** In cases like the "Roundtable" scene, COLMAP may predict poses with large rotation errors (e.g., $179.10^\circ$) due to mirror image ambiguity, yet still produce high-quality NVS if the geometry is self-consistent [S2, unofficial].
-
-**Optional Refinement:**
-After initial training, the NeRF model can be dropped and re-initialized with random parameters while keeping the pre-trained camera parameters. Re-running joint optimization with these initialized camera poses can lead to sharper images and improved synthesis [S2, unofficial].
+*   **Large Rotations:** The system initializes camera poses from identity matrices and assumes forward-facing scenes. It fails to handle 360-degree scenes or rotation perturbations larger than $\pm 20^\circ$ [S2, unofficial].
+*   **Track-to-Object Motion:** If the camera tracks an object, the object's position and image composition remain almost unchanged. This results in insufficient photometric supervision from blurry rendered images during early training, leading to inaccurate joint optimization of camera parameters [S2, unofficial].
+*   **Translation Perturbations:** While NeRF-- outperforms COLMAP in large translation perturbations, it breaks down when translation noise $> \pm 20\%$ [S2, unofficial].
+*   **Pose Ambiguity:** In cases like the "Roundtable" scene, COLMAP may predict poses with large rotation errors (e.g., $179.10^\circ$) due to mirror image ambiguity, but still produce high-quality NVS. NeRF-- may struggle to resolve such ambiguities without good initialization [S2, unofficial].
 
 ## Subtopics
 
 ### [Inverted Sphere Parameterization](5573-inverted-sphere-parameterization.md)
-A spatial parameterization scheme that allows NeRF to work on 360° captures of unbounded scenes by separately modeling foreground and background, addressing the challenge of modeling unbounded 3D background content.
+Inverted Sphere Parameterization is a spatial parameterization scheme that allows Neural Radiance Fields (NeRF) to model 360° captures of unbounded scenes by separately representing foreground and background content. It solves the parameterization failure of standard NeRF, which assumes the entire scene fits within a bounded volume, leading to either missing background elements or loss of detail due to limited sampling resolution in large-scale scenes. It sets itself apart from its parent [NeRF++](6198-nerf.md) by providing the specific mathematical mapping for the outer volume, and differs from sibling [DoubleNeRF](7391-doublenerf.md) by using a single unified ray-casting framework with two MLPs rather than distinct scene representations for different viewing angles.
 
 ### [DoubleNeRF](7391-doublenerf.md)
-A modified NeRF framework that represents a dynamic scene as a superposition of two or more neural radiance fields, specifically separating a static background scene and a moving object with a static shape.
+DoubleNeRF is a method for synthesizing dynamic scenes by representing them as the superposition of two or more static neural radiance fields, specifically separating a static background from a moving object with a static shape. Unlike [NeRF++](6198-nerf.md), which separates scenes using a spherical boundary, DoubleNeRF separates content semantically (background vs. foreground object) without spherical constraints, and unlike [D-NeRF](5573-d-nerf.md) (not linked in tree but referenced in sources), it does not use time as an input or map canonical space to deformed space, assuming instead that the object's appearance is independent of its position relative to the background.
 
 ## Operating characteristics
-*   **Time Complexity:** Training is iterative and requires backpropagation through the ray construction and rendering steps for every pixel and epoch. The joint optimization increases memory usage compared to fixed-camera NeRF due to the gradient storage for camera parameters [S5].
-*   **Memory Complexity:** $O(kn)$ for intermediate states during reverse-mode AD, where $n$ is pixels and $k$ is samples, plus storage for $N$ camera pose parameters [S5].
-*   **Performance:** Achieves novel view synthesis quality comparable to COLMAP-enabled NeRF on forward-facing datasets (LLFF, BLEFF) [S2, unofficial].
-*   **Strengths:** Eliminates the need for pre-computed camera parameters (SfM); provides globally consistent reconstruction similar to bundle adjustment [S2, unofficial]. Outperforms COLMAP in large translation perturbations [S2, unofficial].
-*   **Limitations:** Fails on 360-degree scenes or large rotation perturbations ($> \pm 20^\circ$) [S2, unofficial]. Underperforms COLMAP in large rotation perturbations because feature descriptors handle appearance changes better than photometric methods [S2, unofficial]. Vulnerable to degenerate cases in translation where feature-based methods fail [S2, unofficial].
+*   **Time and Memory Complexity:** The method requires storing gradients for all camera parameters and NeRF weights. Memory usage is dominated by the NeRF model and the intermediate states for backpropagation through the rendering equation. The optimization is end-to-end, requiring joint updates.
+*   **Measured Performance:** On the LLFF-NeRF dataset, NeRF-- achieves novel view synthesis quality comparable to the COLMAP-enabled NeRF baseline [S2, unofficial]. Training duration is approximately 5.5 hours for a BLEFF scene with 27 images on a single GPU (specific hardware not detailed in sources, but implied to be a standard deep learning GPU) [S2, unofficial].
+*   **Scaling:** The method is designed for forward-facing scenes. It does not scale to 360-degree scenes or large rotation perturbations ($> \pm 20^\circ$) [S2, unofficial].
+*   **Strengths:** Eliminates the need for pre-computed camera parameters (SfM). Joint optimization ensures globally consistent reconstruction results, similar to bundle adjustment. Outperforms COLMAP in large translation perturbations [S2, unofficial].
+*   **Limitations:** Fails with large rotations ($> \pm 20^\circ$). Struggles with track-to-object motion due to lack of photometric supervision. Requires forward-facing assumption.
+*   **When to use:** When camera parameters are unknown or unreliable, and the scene is forward-facing with limited rotation.
+*   **When not to use:** For 360-degree scenes, scenes with large camera rotations, or scenes with significant track-to-object motion.
 
 ## Background
-NeRF++ (NeRF--) was introduced in 2021 by Wang et al. [S2, unofficial]. It addresses the limitation of the original NeRF, which requires accurate camera poses and intrinsics typically obtained via COLMAP. The method was developed to simplify the training pipeline by removing the pre-computation step. It was evaluated on the LLFF-NeRF, RealEstate10K, and BLEFF (Blender Forward-Facing) datasets [S2, unofficial]. The work highlights the trade-offs between photometric joint optimization and traditional feature-based SfM, particularly in degenerate motion cases [S2, unofficial].
+NeRF++ (NeRF--) was introduced by Wang et al. in 2021 [S2, unofficial]. It addresses the limitation of original NeRF, which requires known camera poses and intrinsics, typically obtained via COLMAP. The method was developed to simplify the training pipeline by removing the requirement for pre-computed camera parameters. It was benchmarked on the LLFF-NeRF dataset, RealEstate10K dataset, and the newly introduced BLEFF (Blender Forward-Facing Dataset) dataset [S2, unofficial]. The work demonstrates that camera parameters can be jointly optimized as learnable parameters with NeRF training through photometric reconstruction [S2, unofficial].
 
 ## Sources
 [S1] F2Plenoxels: fast voxel radiance fields without neural networks for few-shot view synthesis, https://doi.org/10.1007/s44443-026-00491-2, fetched 2026-10-26
 [S2] NeRF--: Neural Radiance Fields Without Known Camera Parameters, https://doi.org/10.48550/arxiv.2102.07064, fetched 2026-10-26 (unofficial)
-[S3] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)
+[S3] Drone-NeRF: Efficient NeRF based 3D scene reconstruction for large-scale drone survey, https://doi.org/10.1016/j.imavis.2024.104920, fetched 2026-10-30
+[S4] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)

@@ -1,0 +1,93 @@
+On top of #7393 (skip triangle updates that cannot improve the vertex), merged; the speed table compares with master before and after it.
+
+## Why
+
+`considerLeftTriPath_` assumes the distance field is linear inside a triangle (a plane wave, `getFieldAtC`). That is exact next to a straight line of start vertices, but around a single start point the field is circular, and the plane wave has a first-order error there. On a unit sphere, measured against the exact great-circle distance, the median relative error is 0.1-0.9% from one start vertex and 0.5-2.4% from 32 of them (each start vertex is a small circle source).
+
+Where the fronts of separate start points meet, the plane wave is fitted to distances from two different sources; with 32 start vertices it puts the 99th percentile of the relative error at 3.6-11.6%. Beyond the ends of a finite line of start vertices the field is circular too, and the plane wave overestimates there.
+
+Also, `computeSurfaceDistances` could not take start points that stay separate when they are one edge away from other starts: adjacent start vertices always make a line.
+
+## What
+
+- The builder stores for every reached vertex the index of the start point its distance came from (`vertSource_`), and for every start point its initial distance (`sourceStartDistance_`). `addStartRegion` and `addStartVertices` make one start point per vertex; `addStart( MeshTriPoint )` makes one start point for its 1-3 vertices.
+- If both known vertices `a`, `b` of a triangle come from the same start point, the distance to `c` is computed from the virtual source at distances `va - start` and `vb - start` from `a` and `b` (on the other side of `ab`), in double precision; the update is accepted only if the straight path from the source to `c` crosses `ab`.
+- The point-source distance is not clamped above `va`: in a triangle with an obtuse angle at `c`, the vertex `c` can be closer to the source than both `a` and `b`. The early return before it (`c` already has a distance not above `va`, added in #7393) stays: such `c` already got its distance from its triangles nearer to the start, and without the early return the distances on the dragon meshes are bit-identical while the computation is 14-15% slower.
+- Start points connected by mesh edges form one group (`sourceGroup_`, a `BaseUnionFind` over the new `SurfaceDistanceStartId`; `BaseUnionFind` and `UnionFind` get `add()` to append one element). A group is a region of start vertices if some of its start points has more than three start neighbors, otherwise it is a line.
+- Near a line, every reached vertex is labeled with its nearest start: a start point (`vertSource_`) or a start edge (`vertSource_` and `vertLineEnd_`). If `a` and `b` come from different start points or one of them from a start edge, then the distances of both `a` and `b` are converted to the start of `a`, to the start of `b`, and to the start edge between their start points (in the plane of the distance to the edge line and the offset along the edge). For a start point, `c` gets the point-source update; for a start edge, the plane-wave update, if `c` is beside the edge and not beyond its ends; the smallest result wins and gives `c` its label. Beyond the ends of a line the field is circular around the end point, and the plane wave there would overestimate (on master by up to 0.94 at distance 20 from a segment of start vertices in the jittered 41x41 grid).
+- Near a region, the plane-wave update is used if `a` and `b` come from different start points of the group, and `c` is marked as having a distance from the linear field: every triangle with such vertex uses the plane-wave update as well, even if both its distances come from one start point. Near a line or a region of start vertices the plane wave is exact, while the point-source update would underestimate (by 7% one edge away from a straight line).
+- If `a` and `b` come from different groups, the fronts of separate starts meet in this triangle (`considerTriBetweenGroups_`). Fitting one field to both distances would be wrong there, and the paths along the edges alone overestimate; the overestimates spread along the seam, most where the seam begins right at the starts (a start point one edge away from a line). Instead, the field of each start is extended over the seam: the distance from the start of `a` to `b` is estimated in the triangle on the other side of `ab`, then `c` gets the usual update for that start from `a` and `b`, and vice versa; the smaller result wins. Both estimates are clamped from below by the straight-line distance to the start point or the start edge, which is never larger than the distance along the surface, so this adds no underestimates (without the clamp: up to 0.37 on the planar grids). The estimate of the distance to `b` does not check that the path crosses the triangle's edge, and accepts the source on that edge (e.g. in the start vertex itself, next to another start point one edge away); the check is a template parameter of the point-source update, so the regular update compiles as before. Not done for starts inside triangles and for regions. The function is not inlined: inlining it costs 1.5-2% even with one start.
+- New overload `computeSurfaceDistances( mesh, startEdges, startPoints, maxDist, region, maxVertUpdates )` and `SurfaceDistanceBuilder::addStartEdgesAndPoints`: the given start edges make lines or regions; each given start point stays a separate point, never united with other starts, even if it is one edge away from them (unless it is an end of a start edge). The builder keeps the set of start edges (`startEdges_`); `addStartRegion` and `addStartVertices` mark the mesh edges between their start vertices, so their results do not change (with the new overload given all edges between these start vertices, the distances are identical, as the test below checks).
+- The comments of `computeSurfaceDistances` overloads and of `addStartRegion`, `addStartVertices`, `addStart` say which starts are lines or regions (start vertices connected by mesh edges) and which are points (isolated start vertices, every `MeshTriPoint`).
+
+Memory: +8 bytes per vertex, +12 bytes and 1 bit per start point, and 1 bit per undirected edge up to the largest start edge id (nothing for isolated start points).
+
+## Accuracy
+
+Median relative error vs the exact great-circle distance on unit spheres, random start vertices:
+
+| mesh | start | master | this PR |
+|---|---|---|---|
+| icosphere 10k vertices | 1 vertex | 0.88% | 0.12% |
+| icosphere 10k vertices | 32 vertices | 2.36% | 0.023% |
+| icosphere 100k vertices | 1 vertex | 0.30% | 0.041% |
+| icosphere 100k vertices | 32 vertices | 1.14% | 0.0067% |
+| icosphere 1M vertices | 1 vertex | 0.11% | 0.0078% |
+| icosphere 1M vertices | 32 vertices | 0.47% | 0.0016% |
+| icosphere 1M vertices | point inside a triangle | 0.13% | 0.0077% |
+| UV sphere 400x400 | 1 vertex | 0.29% | 0.030% |
+| UV sphere 400x400 | 32 vertices | 1.25% | 0.0039% |
+
+The tails with many start vertices, 99th percentile of the relative error (the median is in the table above):
+
+| mesh | start | master | this PR |
+|---|---|---|---|
+| icosphere 10k vertices | 32 vertices | 11.6% | 0.076% |
+| icosphere 100k vertices | 32 vertices | 8.0% | 0.043% |
+| icosphere 1M vertices | 32 vertices | 3.6% | 0.0074% |
+| UV sphere 400x400 | 32 vertices | 8.6% | 0.045% |
+| jittered planar grid 301x301 | 32 vertices | 11.0% | 0.0070% |
+| jittered planar grid 301x301 | 256 vertices | 20.0% | 0.087% |
+
+Lines of start vertices stay exact, as on master (median / 99th percentile of the relative error vs the distance to the line): a straight row of 301 start vertices in the jittered 301x301 grid 0.0000% / 0.0007%, a ring of 400 start vertices on the UV sphere 0.0008% / 0.0018%. Regions of start vertices (a disk in the jittered grid, a cap on the icosphere) keep the accuracy of master.
+
+Finite lines of start vertices (median / 99th percentile of the relative error vs the exact distance to the start edges and points):
+
+| start | master | this PR |
+|---|---|---|
+| L-shape of a straight row and a straight column of 201 start vertices, jittered 301x301 grid | 0.31% / 3.5% | 0.0000% / 0.035% |
+| half of the ring of start vertices on the UV sphere 400x400 | 0.0018% / 2.6% | 0.0018% / 0.073% |
+
+and the absolute error (mean / max) near one segment of 21 start vertices in the jittered 41x41 grid (unit step), split by where the nearest start is:
+
+| nearest | master | this PR |
+|---|---|---|
+| inside the segment | 0.018 / 0.23 | 0.0011 / 0.013 |
+| an end of the segment | 0.37 / 0.94 | 0.0020 / 0.012 |
+
+New tests:
+- `SurfaceDistancePointSource`: one start vertex in a jittered 41x41 planar grid; max error vs Euclidean distance is 1.24 on master, 0.00094 here.
+- `SurfaceDistanceLineSource`: a straight row of start vertices in a jittered 41x41 planar grid; max error vs the distance to the line is 0.001 on master and here, 0.30 with the point-source update behind the line.
+- `SurfaceDistanceTwoSources`: two start vertices in a jittered 41x41 planar grid; mean / max error vs Euclidean distance is 0.43 / 1.16 on master, 0.00062 / 0.22 with no triangle update where the fronts meet, 0.00004 / 0.0098 here.
+- `SurfaceDistanceTwoSegments`: two segments of 11 start vertices on a straight row in a jittered 41x41 planar grid; mean / max error vs the distance to the segments is 0.16 / 0.68 on master, 0.0046 / 0.42 with no triangle update where the fronts meet, 0.0024 / 0.023 here.
+- `SurfaceDistanceAdjacentPoints`: two separate start points (the new overload) at the ends of one edge in a jittered 41x41 planar grid; mean / max error vs Euclidean distance is 0.023 / 0.31 if the source in a start vertex is rejected, 0.0053 / 0.11 here.
+- `SurfaceDistanceEdgesAndPoints`: the new overload with the start edges of a segment of 11 vertices gives the same distances as these start vertices; with two start points one edge away from the segment (beyond its end and beside its middle) the max error away from where the fronts meet is 0.023, and the mean error is 0.026 (0.038 with no triangle update where the fronts meet): the fronts of the points and of the segment meet right from the start, and the remaining errors near the starts spread along the seams (0.012 if the points are united with the segment as start vertices).
+
+## Speed
+
+`computeSurfaceDistances`, Ryzen 9 3900X, min of 8 interleaved runs (each run min of 9 calls), CPU load < 20%, measured at 5420fe847 (the last commit, accepting the source on the triangle's edge in the estimate over the seam, measured -0.6..+0.1% vs it):
+
+| mesh | seeds | master, ms | #7393, ms | this PR, ms | vs #7393 | vs master |
+|---|---|---|---|---|---|---|
+| dragon 250k | 1 | 65.8 | 56.0 | 63.2 | +12.8% | -3.9% |
+| dragon 250k | 32 | 69.9 | 59.9 | 69.1 | +15.3% | -1.2% |
+| dragon 1M | 1 | 298.7 | 258.3 | 291.4 | +12.8% | -2.5% |
+| dragon 1M | 32 | 332.9 | 291.1 | 332.1 | +14.1% | -0.2% |
+
+The update where the fronts of different starts meet costs 2.0-3.9% with 32 seeds and 0.7-1.1% with one seed (code layout) vs the head before it.
+
+Remaining weakness: where two separate start points are close (e.g. at the ends of a diagonal edge, or with one vertex between them), the seam between their fronts begins at the starts, and the field extended over it by one triangle is not enough when the seam is oblique to the mesh edges: mean / max error 0.035 / 0.34 for the diagonal pair (0.14 / 0.78 before the update where the fronts meet). Carrying the field of each start several triangles over the seam would need a second distance per vertex near the seams.
+
+The surface distances change everywhere they are used (geodesic paths, cuts around vertex sets, terrain embedding), by the amount of the old update's error.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)

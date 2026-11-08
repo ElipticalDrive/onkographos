@@ -1,0 +1,308 @@
+Descripción Sistema de queries de física que permite hacer raycasts, spherecasts, boxcasts y overlaps. Los queries se encolan en CPU, se ejecutan en batch en GPU, y los resultados se leen directamente del buffer. Arquitectura Simple ┌───...
+
+Physics Queries System (Raycast, Spherecast, Overlaps) · Issue #84 · lobinuxsoft/kooch · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Physics Queries System (Raycast, Spherecast, Overlaps) #84
+New issue
+Copy link
+New issue
+Copy link
+Closed as not planned
+Closed as not planned
+Physics Queries System (Raycast, Spherecast, Overlaps)#84
+Copy link
+Labels
+area:physicsFísicas — simulación, colisiones, gravity, ragdoll, constraintsFísicas — simulación, colisiones, gravity, ragdoll, constraintsdifficulty:hardTarea compleja, requiere investigaciónTarea compleja, requiere investigaciónpriority:criticalBloqueante, debe hacerse primeroBloqueante, debe hacerse primero
+Milestone
+M6: Physics & Collision
+Description
+lobinuxsoft
+opened on Jan 31, 2026
+Issue body actions
+Descripción
+Sistema de queries de física que permite hacer raycasts, spherecasts, boxcasts y overlaps. Los queries se encolan en CPU, se ejecutan en batch en GPU, y los resultados se leen directamente del buffer.
+Arquitectura Simple
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    PHYSICS QUERIES                              │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Frame N:                                                       │
+│  ├─ CPU: physics.push_raycast(origin, dir, dist)               │
+│  ├─ CPU: physics.push_sphere_overlap(center, radius)           │
+│  └─ Queries se acumulan en query_buffer                        │
+│                                                                 │
+│  Sync CPU → GPU:                                                │
+│  └─ Upload query_buffer                                         │
+│                                                                 │
+│  GPU (compute shader):                                          │
+│  └─ Ejecuta TODOS los queries en paralelo → results_buffer     │
+│                                                                 │
+│  Frame N+1:                                                     │
+│  ├─ CPU: let hits = physics.read_raycast_results()             │
+│  └─ Resultados disponibles directamente (buffer ya mapeado)    │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+Tareas
+PhysicsQueries resource con buffers
+push_raycast(), push_spherecast(), push_boxcast()
+push_sphere_overlap(), push_box_overlap()
+read_raycast_results(), read_overlap_results()
+Compute shader raycast_batch.wgsl
+Compute shader overlap_batch.wgsl
+Layer masks para filtrar colisiones
+Staging buffer con map_async para readback eficiente
+Tipos de Queries
+Query
+Input
+Output
+push_raycast
+origin, dir, max_dist, layer_mask
+hit, entity, point, normal, distance
+push_spherecast
+origin, radius, dir, max_dist
+hit, entity, point, normal, distance
+push_boxcast
+origin, half_extents, dir, max_dist
+hit, entity, point, normal, distance
+push_sphere_overlap
+center, radius, layer_mask
+lista de entity IDs
+push_box_overlap
+center, half_extents, layer_mask
+lista de entity IDs
+Ejemplo de Código
+API Simple (Rust)
+```
+fn combat_system(
+    mut physics: ResMut<PhysicsQueries>,
+    shooters: Query<(&Transform, &Weapon), With<Shooting>>,
+) {
+    // Leer resultados del frame anterior
+    for hit in physics.read_raycast_results() {
+        if hit.entity != Entity::INVALID {
+            damage_entity(hit.entity, 10.0);
+            spawn_particles(hit.point, hit.normal);
+        }
+    }
+    
+    // Encolar nuevos queries para el próximo frame
+    for (transform, weapon) in shooters.iter() {
+        physics.push_raycast(
+            transform.position,
+            transform.forward(),
+            weapon.range,
+            CollisionLayers::ENEMIES,
+        );
+    }
+}
+
+fn explosion_system(mut physics: ResMut<PhysicsQueries>) {
+    // Leer overlaps del frame anterior
+    for overlap in physics.read_overlap_results() {
+        for entity in overlap.entities.iter() {
+            apply_explosion_force(*entity, overlap.center);
+        }
+    }
+}
+```
+API Simple (Rhai)
+```
+fn on_update(entity, delta) {
+    // Leer resultados del frame anterior
+    for hit in physics.read_raycast_results() {
+        if hit.entity != nil {
+            hit.entity.get::<Health>().current -= 25.0;
+        }
+    }
+    
+    // Encolar nuevo query
+    if input.just_pressed("fire") {
+        let pos = entity.get::<Transform>().position;
+        let dir = entity.get::<Transform>().forward();
+        physics.push_raycast(pos, dir, 100.0, LAYER_ENEMIES);
+    }
+}
+```
+Estructuras
+```
+// Query input
+#[repr(C)]
+pub struct RaycastQuery {
+    pub origin: Vec3,
+    pub direction: Vec3,
+    pub max_distance: f32,
+    pub layer_mask: u32,
+}
+
+// Query output
+#[repr(C)]
+pub struct RaycastResult {
+    pub hit: u32,           // 0 o 1
+    pub entity_id: u32,
+    pub distance: f32,
+    pub point: Vec3,
+    pub normal: Vec3,
+}
+
+// Resource principal
+pub struct PhysicsQueries {
+    // CPU → GPU
+    raycast_queries: Vec<RaycastQuery>,
+    overlap_queries: Vec<OverlapQuery>,
+    
+    // GPU buffers
+    query_buffer: Buffer,
+    results_buffer: Buffer,      // GPU escribe aquí
+    staging_buffer: Buffer,      // Para readback
+    
+    // Resultados listos para leer
+    raycast_results: Vec<RaycastResult>,
+    overlap_results: Vec<OverlapResult>,
+}
+
+impl PhysicsQueries {
+    pub fn push_raycast(&mut self, origin: Vec3, dir: Vec3, dist: f32, mask: u32) {
+        self.raycast_queries.push(RaycastQuery {
+            origin, direction: dir, max_distance: dist, layer_mask: mask,
+        });
+    }
+    
+    pub fn read_raycast_results(&self) -> &[RaycastResult] {
+        &self.raycast_results  // Ya están ahí del frame anterior
+    }
+}
+```
+Compute Shader
+```
+// shaders/raycast_batch.wgsl
+
+struct RaycastQuery {
+    origin: vec3<f32>,
+    direction: vec3<f32>,
+    max_distance: f32,
+    layer_mask: u32,
+}
+
+struct RaycastResult {
+    hit: u32,
+    entity_id: u32,
+    distance: f32,
+    _pad: f32,
+    point: vec3<f32>,
+    _pad2: f32,
+    normal: vec3<f32>,
+    _pad3: f32,
+}
+
+@group(0) @binding(0) var<storage, read> queries: array<RaycastQuery>;
+@group(0) @binding(1) var<storage, read_write> results: array<RaycastResult>;
+@group(0) @binding(2) var<storage, read> sdf_scene: array<SdfInstance>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let idx = id.x;
+    if idx >= arrayLength(&queries) { return; }
+    
+    let query = queries[idx];
+    var result: RaycastResult;
+    result.hit = 0u;
+    
+    // Ray march contra escena SDF
+    var t = 0.0;
+    for (var step = 0; step < 128; step++) {
+        let p = query.origin + query.direction * t;
+        
+        let closest = scene_sdf(p, query.layer_mask);
+        
+        if closest.distance < 0.001 {
+            result.hit = 1u;
+            result.entity_id = closest.entity_id;
+            result.distance = t;
+            result.point = p;
+            result.normal = calculate_normal(p);
+            break;
+        }
+        
+        t += closest.distance;
+        if t > query.max_distance { break; }
+    }
+    
+    results[idx] = result;
+}
+```
+Flujo Interno por Frame
+```
+1. Frame Start
+   └─ Resultados del frame anterior ya están en raycast_results/overlap_results
+
+2. CPU Systems
+   ├─ read_raycast_results() → devuelve slice, sin copia
+   ├─ Gameplay usa resultados
+   └─ push_raycast() → encola nuevos queries
+
+3. Pre-GPU Sync
+   ├─ Upload query_buffer con queries encolados
+   └─ Clear vectores de queries
+
+4. GPU Compute
+   └─ raycast_batch.wgsl procesa todo en paralelo
+
+5. Post-GPU Sync
+   ├─ Copy results_buffer → staging_buffer
+   ├─ map_async(staging_buffer)
+   └─ Poll hasta que esté listo
+
+6. Frame End
+   └─ Copiar staging a raycast_results (listo para frame siguiente)
+```
+Referencias
+📚 wgpu Buffer Mapping
+📚 SDF Ray Marching
+Dependencias
+Bloqueado por: Buffer management system #8, SDF primitivas en WGSL #20, Collision detection con SDF #40
+Bloquea: feat(scripting): ECS bindings — auto-registro por convencion + API ergonomica #76 (script bindings)
+Activity
+lobinuxsoft
+added
+priority:criticalBloqueante, debe hacerse primeroBloqueante, debe hacerse primero
+difficulty:hardTarea compleja, requiere investigaciónTarea compleja, requiere investigación
+on Jan 31, 2026
+lobinuxsoft
+added this to the M6: Physics & Collision milestone on Feb 7, 2026
+lobinuxsoft
+added
+area:physicsFísicas — simulación, colisiones, gravity, ragdoll, constraintsFísicas — simulación, colisiones, gravity, ragdoll, constraints
+on Apr 26, 2026
+lobinuxsoft commented on May 2, 2026
+lobinuxsoft
+on May 2, 2026
+OwnerAuthor
+More actions
+Cerrada por pivot de stack 2026-05-02 — physics se integra vía Rapier3D detrás de PhysicsBackend trait. Esta feature la provee Rapier nativamente, no se implementa custom.
+Ver docs/research/stack_decisions_2026-05-02.md.
+lobinuxsoft
+closed this as not plannedon May 2, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area:physicsFísicas — simulación, colisiones, gravity, ragdoll, constraintsFísicas — simulación, colisiones, gravity, ragdoll, constraintsdifficulty:hardTarea compleja, requiere investigaciónTarea compleja, requiere investigaciónpriority:criticalBloqueante, debe hacerse primeroBloqueante, debe hacerse primero
+Projects
+No projects
+Milestone
+M6: Physics & CollisionNo due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -3,28 +3,29 @@
 Also called: GPU-Driven Rendering
 
 ## Overview
-GPU-Driven Architecture is a rendering paradigm where the residency octree and the mixed-resolution multi-volume renderer are fully implemented on the GPU, while the CPU handles only high-level orchestration [S1, unofficial]. It solves the bottleneck of traditional raster engines where the host CPU controls data assembly via frequent draw calls and API overhead [S1, unofficial]. By keeping the residency octree and renderer on the device, it eliminates data transfer and API call bottlenecks between the host CPU and the device GPU [S1, unofficial].
+GPU-Driven Architecture is a rendering paradigm where the residency octree and the mixed-resolution multi-volume renderer are fully implemented on the GPU, while the CPU handles only high-level orchestration [S1, unofficial]. It solves the bottleneck of traditional raster engines where the host CPU controls data assembly via draw calls, eliminating data transfer and API call overhead between the host and device [S1, unofficial]. It builds on [Hardware and Platform Specific](2517-hardware-and-platform-specific.md) by fully implementing the residency octree and renderer on the GPU, while the CPU handles only high-level orchestration such as loading data and switching contexts [S2, unofficial].
 
 ## How it works
+The architecture separates the rendering logic into two distinct roles: the GPU executes the heavy computational kernels (ray traversal, shading, volume integration), and the CPU manages the global state and data streaming.
+
 **Inputs and Outputs:**
-*   **Input:** High-level rendering commands from the CPU; brick data streamed from a server; global cache miss limit parameter.
-*   **Output:** Rendered image frame; memory management state on the GPU.
+*   **Input:** High-level rendering commands from the CPU, brick data streamed from a server, and the current camera/view state.
+*   **Output:** The final rendered image frame.
 
 **Data Structures:**
-*   **Residency Octree:** Stored entirely on the GPU. Nodes track occupancy and validity. If a node is missing data, it generates a request for streaming [S1, unofficial].
-*   **Renderer State:** Mixed-resolution multi-volume renderer state resident in GPU memory [S1, unofficial].
-*   **Cache Miss Counter:** A global limit on the number of recorded cache misses per frame to bound buffer copies from GPU to CPU [S1, unofficial].
+*   **Residency Octree:** Stored entirely in GPU memory. It tracks which bricks are currently resident in the GPU's cache.
+*   **Command Buffer:** A structure used by the CPU to dispatch rendering and memory management commands to the GPU [S1, unofficial].
+*   **Brick Cache:** A GPU-side buffer holding active volume bricks.
 
-**Steps:**
-1.  **CPU Orchestration:** The CPU drives the overall rendering loop [S1, unofficial].
-2.  **Command Dispatch:** The CPU dispatches rendering and memory management commands to the GPU [S1, unofficial].
-3.  **Ray-Guided Traversal:** The GPU executes the renderer. During ray traversal, if data for a node is missing, the traversal logic generates a request for the missing data to be streamed in from the server [S1, unofficial].
-4.  **Brick Handling:** The CPU forwards these brick requests to the server [S1, unofficial].
-5.  **Data Upload:** Upon receiving bricks from the server, the CPU uploads them to the GPU [S1, unofficial].
-6.  **Rendering:** The GPU continues rendering using the newly uploaded data [S1, unofficial].
+**Numbered Steps:**
+1.  **CPU Orchestration:** The CPU initializes the rendering context and dispatches high-level commands to the GPU [S1, unofficial].
+2.  **Ray-Guided Traversal:** The GPU executes the renderer. During ray traversal through the residency octree, if a node is missing from the GPU cache, it generates a request for the missing data to be streamed in from the server [S1, unofficial]. This makes the method ray-guided.
+3.  **CPU Request Handling:** The CPU receives brick requests from the GPU and forwards them to the server [S1, unofficial].
+4.  **Data Upload:** The CPU receives the requested bricks from the server and uploads them to the GPU [S1, unofficial].
+5.  **Rendering:** The GPU continues rendering using the newly uploaded bricks.
 
 **Parameters:**
-*   **Global Cache Miss Limit:** A specified limit on the number of recorded cache misses per frame. This is used to keep buffer copies from the GPU to the CPU small [S1, unofficial]. Typical values are not given in the sources.
+*   **Global Cache Miss Limit:** A global limit on the number of recorded cache misses per frame is specified to keep buffer copies from the GPU to the CPU small [S1, unofficial]. Typical values are not given in the sources.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -32,25 +33,35 @@ GPU-Driven Architecture is a rendering paradigm where the residency octree and t
 ```python
 # CPU Side Orchestration
 def cpu_orchestrate():
-    # 1. Dispatch rendering and memory management commands to GPU
-    gpu.dispatch_rendering_commands()
-    gpu.dispatch_memory_management_commands()
+    # Initialize GPU context
+    gpu.init_context()
     
-    # 2. Handle brick requests generated by GPU ray traversal
-    while gpu.has_brick_requests():
-        request = gpu.get_brick_request()
+    while rendering_active:
+        # Dispatch rendering command
+        gpu.dispatch_render_command()
         
-        # 3. Forward brick requests to server
-        brick_data = server.request_brick(request)
-        
-        # 4. Upload received bricks to GPU
-        gpu.upload_brick(brick_data)
+        # Handle brick requests generated by GPU traversal
+        requests = gpu.get_brick_requests()
+        for req in requests:
+            # Forward request to server
+            brick_data = server.fetch_brick(req)
+            # Upload brick to GPU
+            gpu.upload_brick(brick_data)
 
-# GPU Side Execution (Implicit in the architecture description)
-# The residency octree and renderer run on GPU.
-# Ray traversal checks node validity.
-# If node data missing:
-#   generate_request_to_cpu()
+# GPU Side Execution (Conceptual)
+def gpu_renderer():
+    # Traverse residency octree
+    for each ray:
+        node = octree.traverse(ray)
+        if node is missing:
+            # Generate request for missing data
+            gpu.request_brick(node.id)
+            # Wait for data or continue with fallback?
+            # Note: Sources imply ray-guided streaming, 
+            # specific stall behavior not detailed.
+        else:
+            # Render using resident brick
+            render_volume(ray, node.brick)
 ```
 
 ## Subtopics
@@ -64,14 +75,14 @@ A GPU architecture designed for Sphere Tracing that uses independent cores rathe
 ## Operating characteristics
 *   **Time Complexity:** Not given in the sources.
 *   **Memory Complexity:** Not given in the sources.
-*   **Performance:** Eliminates data transfer and API call bottlenecks common in traditional raster engines [S1, unofficial].
-*   **Strengths:** Reduces CPU-GPU communication overhead; keeps residency octree and renderer on GPU [S1, unofficial].
-*   **Limitations:** Requires careful management of cache misses to avoid excessive buffer copies from GPU to CPU [S1, unofficial].
-*   **When to use:** When rendering large biomedicinal datasets where data streaming and residency management are critical [S1, unofficial].
-*   **When not to use:** Not specified.
+*   **Performance:** The architecture eliminates data transfer and API call bottlenecks between the host CPU and the device GPU [S1, unofficial].
+*   **Strengths:** Reduced CPU overhead; efficient handling of large datasets via ray-guided streaming.
+*   **Limitations:** Requires careful management of cache misses to avoid excessive CPU-GPU communication.
+*   **When to use:** Suitable for large-scale volume rendering where data cannot fit entirely in GPU memory and streaming is necessary.
+*   **When not to use:** Not suitable for small datasets where the overhead of orchestration outweighs the benefits.
 
 ## Background
-The GPU-Driven Architecture was introduced in the context of scalable web-based volume rendering of large biomedicinal datasets [S1, unofficial]. It is part of a multi-channel page-table hierarchy system where the residency octree forms the base [S1, unofficial]. The approach extends algorithms from previous work to support multiple channels [S1, unofficial].
+The GPU-Driven Architecture was introduced in the context of scalable web-based volume rendering of large biomedical datasets [S1, unofficial]. It is part of a broader effort to move rendering logic entirely to the GPU to improve performance and scalability [S1, unofficial].
 
 ## Sources
 [S1] Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze, https://doi.org/10.34726/hss.2023.106203, fetched 2026-10-26 (unofficial)

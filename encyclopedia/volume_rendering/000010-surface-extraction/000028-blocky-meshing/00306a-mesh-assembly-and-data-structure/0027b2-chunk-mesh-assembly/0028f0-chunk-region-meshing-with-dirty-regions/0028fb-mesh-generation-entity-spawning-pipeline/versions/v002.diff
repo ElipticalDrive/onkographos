@@ -1,0 +1,317 @@
+--- v001.md
++++ v002.md
+@@ -7,14 +7,13 @@
+ 
+ ## How it works
+-The pipeline operates in two distinct phases: **Mesh Generation** (asynchronous geometry construction) and **Entity Spawning** (synchronous entity instantiation). It processes `MeshChunkRequest` events, consulting a cache of chunk states to determine whether to generate new geometry, wait for neighbors, or spawn an entity.
++The pipeline processes `MeshChunkRequest` events, consulting a cache of chunk states to determine whether to generate new geometry, wait for neighbors, or spawn an entity [S2, unofficial].
+ 
+ ### Inputs and Outputs
+-*   **Input:** `MeshChunkRequest` containing `ChunkPosition` and `ZoomLevel`.
+-*   **Output:** Bevy `Entity` instances with attached `Mesh` assets, `Transform`, and `Material`.
++*   **Input:** `MeshChunkRequest` containing `ChunkPosition` and `ZoomLevel` [S2, unofficial].
++*   **Output:** Bevy `Entity` instances with attached `Mesh` assets, `Transform`, and `Material` [S1, S2, unofficial].
+ 
+ ### Data Structures
+-
+ **MeshInfo**
+-Holds the raw geometry data before being committed to a Bevy `Mesh` asset.
++Holds the raw geometry data before being committed to a Bevy `Mesh` asset [S2, unofficial].
+ *   `positions`: `Vec<[f32; 3]>`
+ *   `normals`: `Vec<[f32; 3]>`
+@@ -24,5 +23,5 @@
+ 
+ **MeshStatus**
+-Tracks the lifecycle state of a chunk's mesh in the `meshes` map (keyed by `(ChunkPosition, ZoomLevel)`).
++Tracks the lifecycle state of a chunk's mesh in the `meshes` map (keyed by `(ChunkPosition, ZoomLevel)`) [S2, unofficial].
+ *   `Meshing`: Geometry is currently being computed.
+ *   `Empty`: Chunk contains no blocks; no mesh is generated.
+@@ -30,5 +29,5 @@
+ 
+ **Quad**
+-Represents a merged face on a chunk boundary.
++Represents a merged face on a chunk boundary [S2, unofficial].
+ *   `voxel`: `[u32; 3]` Base coordinate of the quad.
+ *   `width`: `u32`
+@@ -36,53 +35,28 @@
+ 
+ ### Parameters
+-*   `MAX_DATA_TASKS`: Maximum concurrent data loading tasks. Value: `9` [S1, unofficial].
+-*   `MAX_MESH_TASKS`: Maximum concurrent mesh generation tasks. Value: `3` [S1, unofficial].
+-*   `MAX_SCANS`: Maximum chunks scanned per frame for visibility/distance checks. Value: `26000` [S1, unofficial].
++*   `MAX_DATA_TASKS`: Maximum concurrent data tasks. Value: `9` [S1, unofficial].
++*   `MAX_MESH_TASKS`: Maximum concurrent mesh tasks. Value: `3` [S1, unofficial].
++*   `MAX_SCANS`: Maximum chunks scanned per frame. Value: `26000` [S1, unofficial].
+ *   `CHUNK_SIZE`: Size of a chunk side in voxels. Value: `32` [S1, S2, unofficial].
+-*   `MESH_SPAWN_RATE`: Controls the rate at which meshed chunks are spawned as entities to prevent lag spikes. Calculated as:
++*   `MESH_SPAWN_RATE`: Controls the rate at which meshed chunks are spawned as entities to prevent lag. Formula:
+     $$ \text{MESH\_SPAWN\_RATE} = \left\lfloor 128.0 \times \frac{32.0}{\text{CHUNK\_SIZE\_F32}} \right\rfloor $$
+     Default calculation scales inversely with chunk size [S2, unofficial].
+-*   `CHUNK_REQUEST_RATE`: Rate at which mesh requests are processed.
++*   `CHUNK_REQUEST_RATE`: Rate at which mesh requests are processed. Formula:
+     $$ \text{CHUNK\_REQUEST\_RATE} = \text{MESH\_SPAWN\_RATE} \times 5 $$
+     [S2, unofficial].
+ 
+ ### Algorithm Steps
+-
+-1.  **Request Reception:** Receive a `MeshChunkRequest` with `ChunkPosition` and `ZoomLevel`.
+-2.  **Cache Check:** Look up the chunk in `world.cache` (or the `meshes` map).
+-    *   If the chunk data does not exist, issue a `GenerateChunkRequest` (to load voxel data) and schedule a `MeshChunkRerequest` for later [S2, unofficial].
+-    *   If the chunk is currently `Meshing`, schedule a `MeshChunkRerequest` [S2, unofficial].
+-3.  **Empty Check:** If the chunk data exists but is empty (no blocks), set `MeshStatus::Empty` and skip further processing [S2, unofficial].
+-4.  **Neighbor Validation:** If the chunk is generated, collect neighbor chunk faces.
+-    *   For each of the 26 adjacent directions (Moore neighborhood excluding center), determine the neighbor's status [S1, unofficial].
+-    *   If a neighbor is `Generated`, use its exposed faces.
+-    *   If a neighbor is `Empty`, use `EMPTY_CHUNK_FACES` (culling all internal faces) [S2, unofficial].
+-    *   If any neighbor is missing or `Meshing`, schedule a `MeshChunkRerequest` to avoid incorrect culling or geometry artifacts [S2, unofficial].
+-5.  **Mesh Generation:** If all neighbors are present, call the mesh generation function (`bevy_mesh_greedy_quads` or `bevy_mesh_visible_block_faces`) passing:
+-    *   The chunk voxel data.
+-    *   Neighbor face data.
+-    *   Block textures/materials.
+-    *   Visibility checker [S2, unofficial].
+-6.  **Store Result:** Insert the result into the `meshes` map with status `Meshed(MeshInfo)` or `Empty` [S2, unofficial].
+-7.  **Spawn Phase:** Iterate through chunks with status `SpawnRequested` (or `Meshed` ready for spawning). Spawn up to `MESH_SPAWN_RATE` entities per frame [S2, unofficial].
+-    *   For each chunk:
+-        a.  Create a Bevy `Mesh` asset with `PrimitiveTopology::TriangleList` and `RenderAssetUsages::RENDER_WORLD` [S1, unofficial].
+-        b.  Insert vertex attributes:
+-            *   `positions` as `ATTRIBUTE_POSITION` (or standard position attribute).
+-            *   `normals` as `ATTRIBUTE_NORMAL`.
+-            *   `colors` as `ATTRIBUTE_COLOR` (or custom attribute like `ATTRIBUTE_VOXEL` if specified by shader, but typically color is standard) [S1, S2, unofficial]. Note: S1 mentions `ATTRIBUTE_VOXEL` with mesh vertices, implying custom attributes may be used for block type data [S1, unofficial].
+-            *   `uvs` as `ATTRIBUTE_UV_0`.
+-        c.  Insert indices as `Indices::U32` [S1, unofficial].
+-        d.  Add the mesh to the asset server and retrieve the `Handle<Mesh>` [S1, unofficial].
+-        e.  Despawn any existing entity at the world position if present [S1, unofficial].
+-        f.  Spawn a new entity with:
+-            *   Transform: `world_pos.as_vec3() * Vec3::splat(32.0)` (assuming unit voxel size) [S1, unofficial].
+-            *   AABB: `from_min_max(Vec3::ZERO, Vec3::splat(32.0))` [S1, unofficial].
+-            *   Mesh Handle.
+-            *   Global Material (opaque or translucent based on block types) [S1, S2, unofficial].
+-        g.  Insert the new entity into the `chunk_entities` map [S1, unofficial].
++1.  **Request Reception:** Receive a `MeshChunkRequest` with `ChunkPosition` and `ZoomLevel` [S2, unofficial].
++2.  **Cache Check:** Look up the chunk in `world.cache` (or the `meshes` map) [S2, unofficial]. If chunk data does not exist, request generation via `GenerateChunkRequest` and schedule a rerequest [S2, unofficial].
++3.  **Generation Check:** If chunk is generating, schedule a rerequest [S2, unofficial].
++4.  **Empty Check:** If chunk is empty, mark mesh status as `Empty` and skip [S2, unofficial].
++5.  **Neighbor Validation:** If chunk is generated, collect neighbor chunk faces [S2, unofficial]. For each neighbor direction, get its opposite face data [S2, unofficial].
++6.  **Neighbor Status Check:** If any neighbor is missing or generating, schedule a rerequest [S2, unofficial].
++7.  **Mesh Generation:** If all neighbors are present, call mesh generation function (`bevy_mesh_greedy_quads` or `bevy_mesh_visible_block_faces`) with chunk, neighbor faces, block textures, and visibility checker [S2, unofficial].
++8.  **Store Result:** Store result in `meshes` map with status `Meshed` or `Empty` [S2, unofficial].
++9.  **Spawn Phase:** Take chunks with status `SpawnRequested` up to `MESH_SPAWN_RATE` [S2, unofficial].
++10. **Entity Instantiation:** Spawn Bevy entities for opaque and translucent meshes with appropriate materials and transforms [S2, unofficial]. Create Bevy mesh with `PrimitiveTopology::TriangleList` and `RenderAssetUsages::RENDER_WORLD` [S1, unofficial]. Insert vertex attribute `ATTRIBUTE_VOXEL` with mesh vertices [S1, unofficial]. Insert indices as `Indices::U32` [S1, unofficial]. Add mesh to asset server and get handle [S1, unofficial]. Despawn existing entity at world position if present [S1, unofficial]. Spawn new chunk entity with AABB `from_min_max(Vec3::ZERO, Vec3::splat(32.0))`, transform `world_pos.as_vec3() * Vec3::splat(32.0)`, mesh handle, and global material [S1, unofficial]. Insert new entity into `chunk_entities` map [S1, unofficial].
+ 
+ ### Pseudocode
+-
+ ```python
+ # Constants
+@@ -91,39 +65,43 @@
+ MAX_SCANS = 26000
+ CHUNK_SIZE = 32
+-MESH_SPAWN_RATE = int(128.0 * (32.0 / CHUNK_SIZE))
++CHUNK_SIZE_F32 = 32.0
++MESH_SPAWN_RATE = int(128.0 * (32.0 / CHUNK_SIZE_F32))
+ CHUNK_REQUEST_RATE = MESH_SPAWN_RATE * 5
+ 
+ # Data Structures
+ class MeshInfo:
+-    positions: List[List[float]] # Vec<[f32; 3]>
+-    normals: List[List[float]]   # Vec<[f32; 3]>
+-    colors: List[List[float]]    # Vec<[f32; 4]>
+-    uvs: List[List[float]]       # Vec<[f32; 2]>
+-    indices: List[int]           # Vec<u32>
++    def __init__(self, positions, normals, colors, uvs, indices):
++        self.positions = positions
++        self.normals = normals
++        self.colors = colors
++        self.uvs = uvs
++        self.indices = indices
+ 
+ class MeshStatus:
+-    Meshing
+-    Empty
+-    Meshed(info: MeshInfo)
++    Meshing = "Meshing"
++    Empty = "Empty"
++    def __init__(self, info=None):
++        self.info = info
+ 
+ # Global State
+-meshes: Dict[(ChunkPosition, ZoomLevel), MeshStatus] = {}
+-chunk_entities: Dict[ChunkPosition, Entity] = {}
+-world_cache: Dict[ChunkPosition, ChunkData] = {}
+-
+-def process_mesh_request(request: MeshChunkRequest):
++meshes = {}  # Dict[(ChunkPosition, ZoomLevel), MeshStatus]
++chunk_entities = {}  # Dict[ChunkPosition, Entity]
++world_cache = {}  # Dict[ChunkPosition, ChunkData]
++mesh_queue = []
++spawn_queue = []
++
++def process_mesh_request(request):
+     pos = request.chunk_position
+     zoom = request.zoom_level
+     key = (pos, zoom)
+ 
+-    # 1. Check Cache
++    # 1. Cache Check
+     if key not in meshes:
+         if pos not in world_cache:
+-            # Request data generation
++            # Request generation via GenerateChunkRequest and schedule rerequest
+             schedule_generate_chunk(pos)
+             schedule_rerequest_mesh(pos, zoom)
+             return
+         else:
+-            # Data exists, start meshing
+             meshes[key] = MeshStatus.Meshing
+             schedule_mesh_task(pos, zoom)
+@@ -133,51 +111,48 @@
+         return
+     elif meshes[key] == MeshStatus.Empty:
+-        return # Skip
+-
+-    # 2. Validate Neighbors
++        return
++
++    # 2. Neighbor Validation
+     neighbor_faces = collect_neighbor_faces(pos)
+     if neighbor_faces is None:
+-        # Missing or generating neighbor
+         schedule_rerequest_mesh(pos, zoom)
+         return
+ 
+-    # 3. Generate Mesh
++    # 3. Mesh Generation
+     chunk_data = world_cache[pos]
+     mesh_info = generate_mesh(chunk_data, neighbor_faces)
+-    
+-    meshes[key] = MeshStatus.Meshed(mesh_info)
+-    schedule_spawn_entity(pos, zoom)
+-
+-def collect_neighbor_faces(pos: ChunkPosition) -> Optional[List[FaceData]]:
+-    # Check 26 neighbors
++
++    meshes[key] = MeshStatus(mesh_info)
++    spawn_queue.append(key)
++
++def collect_neighbor_faces(pos):
++    # Check 26 adjacent directions (Moore neighborhood excluding center)
+     for direction in ADJACENT_CHUNK_DIRECTIONS:
+-        if direction == (0,0,0): continue
++        if direction == (0, 0, 0):
++            continue
+         neighbor_pos = pos + direction
+         neighbor_status = get_mesh_status(neighbor_pos)
+-        
++
+         if neighbor_status == MeshStatus.Meshing or neighbor_status is None:
+-            return None # Defer
++            return None  # Defer
+         elif neighbor_status == MeshStatus.Empty:
+-            # Use empty faces (cull all)
+             return EMPTY_CHUNK_FACES
+         else:
+-            # Use generated faces
+             return get_neighbor_faces(neighbor_pos)
+     return collected_faces
+ 
+-def generate_mesh(chunk: ChunkData, neighbor_faces: List[FaceData]) -> MeshInfo:
++def generate_mesh(chunk, neighbor_faces):
+     # Call greedy or visible face algorithm
+-    # Returns MeshInfo with positions, normals, colors, uvs, indices
+     return mesh_chunk_greedy_quads(chunk, neighbor_faces)
+ 
+-def spawn_entity(pos: ChunkPosition, zoom: ZoomLevel):
+-    key = (pos, zoom)
++def spawn_entity(key):
++    pos, zoom = key
+     status = meshes.get(key)
+-    
+-    if not isinstance(status, MeshStatus.Meshed):
++
++    if not isinstance(status, MeshStatus) or status.info is None:
+         return
+ 
+     mesh_info = status.info
+-    
++
+     # Create Bevy Mesh Asset
+     bevy_mesh = create_bevy_mesh()
+@@ -187,18 +162,17 @@
+     bevy_mesh.insert_attribute("uv", mesh_info.uvs)
+     bevy_mesh.set_indices(mesh_info.indices)
+-    
++
+     handle = asset_server.add(bevy_mesh)
+-    
++
+     # Despawn old entity if exists
+     if pos in chunk_entities:
+         despawn(chunk_entities[pos])
+-    
++
+     # Spawn new entity
+     transform = Transform.from_translation(pos.as_vec3() * 32.0)
+-    aabb = AABB.from_min_max(Vec3(0,0,0), Vec3(32,32,32))
+-    
+-    # Determine material (opaque/translucent)
++    aabb = AABB.from_min_max(Vec3(0, 0, 0), Vec3(32, 32, 32))
++
+     material = get_global_material(mesh_info)
+-    
++
+     entity = spawn_entity_bundle(
+         TransformBundle(transform),
+@@ -207,7 +181,7 @@
+         VisibilityBundle(aabb)
+     )
+-    
++
+     chunk_entities[pos] = entity
+-    meshes[key] = MeshStatus.Empty # Or remove from map, depending on lifecycle
++    meshes[key] = MeshStatus.Empty
+ 
+ def main_loop():
+@@ -215,21 +189,23 @@
+     scan_count = 0
+     for chunk_pos in get_chunks_in_view():
+-        if scan_count >= MAX_SCANS: break
++        if scan_count >= MAX_SCANS:
++            break
+         if chunk_pos not in chunk_entities:
+             schedule_mesh_request(chunk_pos)
+             scan_count += 1
+-            
++
+     # 2. Process Mesh Tasks (Async)
+     while active_mesh_tasks < MAX_MESH_TASKS:
+-        if mesh_queue not empty:
++        if mesh_queue:
+             task = mesh_queue.pop()
+             process_mesh_request(task)
+-            
++
+     # 3. Spawn Entities (Throttled)
+     spawn_count = 0
+-    for pos, status in meshes.items():
+-        if spawn_count >= MESH_SPAWN_RATE: break
+-        if status == MeshStatus.Meshed:
+-            spawn_entity(pos)
++    for key in list(spawn_queue):
++        if spawn_count >= MESH_SPAWN_RATE:
++            break
++        if meshes.get(key) == MeshStatus.Meshing or meshes.get(key).info is not None:
++            spawn_entity(key)
+             spawn_count += 1
+ ```
+@@ -241,9 +217,7 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Mesh generation is $O(V)$ where $V$ is the number of voxels in the chunk (typically $32^3 = 32,768$). The greedy algorithm reduces this to $O(F)$ where $F$ is the number of visible faces. Entity spawning is $O(1)$ per chunk, throttled by `MESH_SPAWN_RATE`.
+-*   **Memory Complexity:** $O(F)$ for mesh storage per chunk. `MeshInfo` stores positions, normals, colors, uvs, and indices. For a dense chunk, this is several megabytes.
+-*   **Performance:** The pipeline uses asynchronous tasks (`MAX_MESH_TASKS = 3`) to prevent blocking the main thread [S1, unofficial]. The spawn rate is dynamically scaled based on chunk size to maintain consistent frame times [S2, unofficial].
+-*   **Strengths:** Decouples heavy geometry computation from rendering; handles neighbor consistency automatically; prevents lag spikes via throttled spawning.
+-*   **Limitations:** High memory usage for large worlds with many visible chunks; asynchronous nature introduces latency between chunk generation and visibility.
++*   The pipeline uses asynchronous tasks (`MAX_MESH_TASKS = 3`) to prevent blocking the main thread [S1, unofficial].
++*   The spawn rate is dynamically scaled based on chunk size to maintain consistent frame times [S2, unofficial].
++*   The pipeline handles neighbor consistency automatically and prevents lag spikes via throttled spawning [S2, unofficial].
+ 
+ ## Background

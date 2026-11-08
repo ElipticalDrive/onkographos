@@ -1,0 +1,291 @@
+# Adaptive Point Cloud Downsampling based on Geometry and Texture Complexity
+
+
+## Overview
+This method reduces the density of a point cloud by selecting a subset of points based on local geometric curvature and color texture complexity, ensuring that visually or structurally significant regions are preserved during downsampling. It differs from uniform voxel downsampling by using probabilistic sampling weighted by complexity metrics rather than simple spatial binning, and from uniform random downsampling by biasing selection toward high-complexity areas. It builds on [Point Cloud Cropping and Downsampling](7057-point-cloud-cropping-and-downsampling.md).
+
+## How it works
+**Inputs:**
+- `pointcloud_path`: Path to the input point cloud file (e.g., PLY).
+- `target_num`: Integer, the desired number of points in the output.
+- `chunk_size`: Integer, size of processing chunks for memory efficiency.
+- `k_neighbors`: Integer, number of neighbors for local complexity estimation.
+- `geo_weight`: Float, weight for geometric complexity in the combined score.
+- `tex_weight`: Float, weight for texture complexity in the combined score.
+- `radius`: Float, search radius for neighbor queries (used if KDTree radius search is preferred, though the notes specify k-NN via KDTree).
+
+**Outputs:**
+- `output_path`: Path to save the downsampled point cloud as a text PLY file.
+- The PLY contains fields: `x, y, z` (float32), `nx, ny, nz` (float32), `r, g, b` (uint8), `geo` (float32), `tex` (float32).
+
+**Data Structures:**
+- `points`: `numpy.ndarray` of shape `(N, 3)`, float32.
+- `normals`: `numpy.ndarray` of shape `(N, 3)`, float32, or `None`.
+- `colors`: `numpy.ndarray` of shape `(N, 3)`, float32 (Lab space), or `None`.
+- `geo_scores`: `numpy.ndarray` of shape `(N,)`, float32.
+- `tex_scores`: `numpy.ndarray` of shape `(N,)`, float32.
+- `combined_scores`: `numpy.ndarray` of shape `(N,)`, float32.
+- `probabilities`: `numpy.ndarray` of shape `(N,)`, float32.
+- `selected_indices`: `numpy.ndarray` of shape `(target_num,)`, int64.
+
+**Steps:**
+
+1. **Load and Preprocess:**
+   - Read the point cloud from `pointcloud_path`. Extract points as `points` (N, 3) float32.
+   - Check for existence of colors and normals.
+   - If colors exist:
+     - Convert RGB to Lab color space.
+     - Scale RGB to 0-255 uint8.
+     - Convert using `cv2.cvtColor` with `cv2.COLOR_RGB2LAB`.
+     - Convert to float32.
+     - Normalize L channel: `L_norm = L / 100.0`.
+     - Normalize a,b channels: `ab_norm = (ab + 128) / 255.0`.
+     - Store as `colors` (N, 3) float32.
+   - If no colors, set `colors = None`.
+   - If normals do not exist:
+     - Estimate normals using Open3D's `estimate_normals` with a hybrid KDTree search parameter (radius=0.1, max_nn=k_neighbors).
+   - Build a `cKDTree` spatial index on `points`.
+
+2. **Initialize Scores:**
+   - Initialize `geo_scores` and `tex_scores` arrays of size `num_points` with zeros if respective computations are enabled.
+   - Initialize `combined_scores` to zeros.
+
+3. **Compute Complexity Scores (Chunked):**
+   - Process points in chunks of size `chunk_size`.
+   - For each chunk:
+     - Query k-nearest neighbors (k_neighbors+1 to include self) from the KDTree, obtaining `distances` and `neighbor_indices`.
+     - **Geometric Complexity:**
+       - Get neighbor points for each point in the chunk.
+       - Compute difference vectors `diffs` between neighbors and their mean.
+       - Compute covariance matrices `covs` using einsum: `np.einsum('nki,nkj->nij', diffs, diffs) / k_neighbors`.
+       - Compute eigenvalues of covariances using `np.linalg.eigvalsh`.
+       - Calculate curvature as `eigenvalues[:, 0] / (eigenvalues.sum(axis=1) + 1e-6)` (smallest eigenvalue divided by sum of eigenvalues).
+       - Store in `geo_scores`.
+     - **Texture Complexity:**
+       - Get neighbor colors.
+       - Compute center color as the first neighbor (self).
+       - Compute L2 norm of difference between neighbor colors and center color for each neighbor.
+       - Average these norms across neighbors for each point.
+       - Store in `tex_scores`.
+
+4. **Normalize and Combine Scores:**
+   - For each enabled score type (geo, tex):
+     - Normalize to [0,1] using `(score - min) / (max - min + 1e-6)`.
+     - Combine normalized scores using weighted sum: `combined_scores += weight * score` for each score/weight pair.
+   - If no scores are enabled, set `combined_scores` to ones.
+
+5. **Probabilistic Sampling:**
+   - Compute sampling probabilities: `probabilities = combined_scores / combined_scores.sum()`.
+   - Select `target_num` points using `np.random.choice` with these probabilities, without replacement.
+
+6. **Output:**
+   - Select downsampled points, normals, colors, and scores using the selected indices.
+   - Construct a structured numpy array for PLY output with fields: `x,y,z` (f4), `nx,ny,nz` (f4), `r,g,b` (u1), `geo` (f4), `tex` (f4).
+   - Write to `output_path` as text PLY.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import open3d as o3d
+import cv2
+from scipy.spatial import cKDTree
+
+def adaptive_downsample(pointcloud_path, target_num, chunk_size=1000, k_neighbors=10, geo_weight=1.0, tex_weight=1.0, output_path="output.ply"):
+    # 1. Load and Preprocess
+    pcd = o3d.io.read_point_cloud(pointcloud_path)
+    points = np.asarray(pcd.points).astype(np.float32)
+    num_points = len(points)
+    
+    has_colors = pcd.has_colors()
+    has_normals = pcd.has_normals()
+    
+    colors = None
+    if has_colors:
+        rgb_uint8 = (np.asarray(pcd.colors) * 255).astype(np.uint8)
+        rgb_uint8 = rgb_uint8.reshape(-1, 1, 3)
+        lab_uint8 = cv2.cvtColor(rgb_uint8, cv2.COLOR_RGB2LAB)
+        lab_float = lab_uint8.astype(np.float32)
+        L = lab_float[:, :, 0] / 100.0
+        ab = (lab_float[:, :, 1:] + 128) / 255.0
+        colors = np.concatenate([L.reshape(-1, 1), ab], axis=1)
+    
+    if not has_normals:
+        pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=k_neighbors))
+        normals = np.asarray(pcd.normals).astype(np.float32)
+    else:
+        normals = np.asarray(pcd.normals).astype(np.float32)
+        
+    tree = cKDTree(points)
+    
+    geo_scores = np.zeros(num_points, dtype=np.float32)
+    tex_scores = np.zeros(num_points, dtype=np.float32)
+    
+    # 2. Compute Complexity Scores (Chunked)
+    for start in range(0, num_points, chunk_size):
+        end = min(start + chunk_size, num_points)
+        chunk_indices = np.arange(start, end)
+        
+        # Query k-nearest neighbors (k_neighbors+1 to include self)
+        distances, neighbor_indices = tree.query(points[start:end], k=k_neighbors+1)
+        
+        # Geometric Complexity
+        if geo_weight > 0:
+            neighbor_points = points[neighbor_indices]
+            # Compute mean of neighbors for each point
+            mean_neighbors = np.mean(neighbor_points, axis=1, keepdims=True)
+            diffs = neighbor_points - mean_neighbors
+            # Compute covariance matrices
+            # diffs shape: (chunk_size, k_neighbors+1, 3)
+            # covs shape: (chunk_size, 3, 3)
+            covs = np.einsum('nki,nkj->nij', diffs, diffs) / k_neighbors
+            # Compute eigenvalues
+            eigenvalues = np.linalg.eigvalsh(covs)
+            # Curvature: smallest eigenvalue / sum of eigenvalues
+            # eigenvalues are sorted ascending, so eigenvalues[:, 0] is smallest
+            curvature = eigenvalues[:, 0] / (eigenvalues.sum(axis=1) + 1e-6)
+            geo_scores[start:end] = curvature
+            
+        # Texture Complexity
+        if tex_weight > 0 and colors is not None:
+            neighbor_colors = colors[neighbor_indices]
+            center_color = neighbor_colors[:, 0, :] # First neighbor is self
+            diffs_colors = neighbor_colors - center_color[:, np.newaxis, :]
+            l2_norms = np.linalg.norm(diffs_colors, axis=2)
+            avg_norm = np.mean(l2_norms, axis=1)
+            tex_scores[start:end] = avg_norm
+            
+    # 3. Normalize and Combine Scores
+    combined_scores = np.zeros(num_points, dtype=np.float32)
+    
+    if geo_weight > 0:
+        min_geo = np.min(geo_scores)
+        max_geo = np.max(geo_scores)
+        norm_geo = (geo_scores - min_geo) / (max_geo - min_geo + 1e-6)
+        combined_scores += geo_weight * norm_geo
+        
+    if tex_weight > 0 and colors is not None:
+        min_tex = np.min(tex_scores)
+        max_tex = np.max(tex_scores)
+        norm_tex = (tex_scores - min_tex) / (max_tex - min_tex + 1e-6)
+        combined_scores += tex_weight * norm_tex
+        
+    if combined_scores.sum() == 0:
+        combined_scores = np.ones(num_points, dtype=np.float32)
+        
+    # 4. Probabilistic Sampling
+    probabilities = combined_scores / combined_scores.sum()
+    selected_indices = np.random.choice(num_points, size=target_num, replace=False, p=probabilities)
+    
+    # 5. Output
+    selected_points = points[selected_indices]
+    selected_normals = normals[selected_indices]
+    selected_geo = geo_scores[selected_indices]
+    selected_tex = tex_scores[selected_indices]
+    
+    selected_colors = None
+    if colors is not None:
+        selected_colors = colors[selected_indices]
+        # Convert back to uint8 for PLY
+        # Note: The source notes say 'r,g,b (u1)', implying uint8.
+        # The colors are in Lab space, normalized. We need to convert back to RGB uint8 for storage?
+        # The source notes say: "Construct a structured numpy array for PLY output with fields: ... r,g,b (u1) ..."
+        # It does not specify converting Lab back to RGB. However, standard PLY expects RGB.
+        # The source notes say: "If colors exist, convert RGB to Lab color space... Normalize L... Normalize a,b..."
+        # And then "Write to output_path as text PLY" with r,g,b (u1).
+        # This implies we should convert the normalized Lab back to RGB uint8 for storage.
+        # Let's do that.
+        # Reverse normalization:
+        L_back = selected_colors[:, 0] * 100.0
+        ab_back = (selected_colors[:, 1:] * 255.0) - 128
+        lab_uint8 = np.stack([L_back, ab_back[:, 0], ab_back[:, 1]], axis=1).astype(np.uint8)
+        lab_uint8 = lab_uint8.reshape(1, -1, 3)
+        rgb_uint8 = cv2.cvtColor(lab_uint8, cv2.COLOR_LAB2RGB)
+        selected_colors_rgb = rgb_uint8.reshape(-1, 3)
+    else:
+        selected_colors_rgb = np.zeros((target_num, 3), dtype=np.uint8)
+        
+    # Construct structured array
+    ply_data = np.zeros(target_num, dtype=[
+        ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+        ('nx', '<f4'), ('ny', '<f4'), ('nz', '<f4'),
+        ('r', 'u1'), ('g', 'u1'), ('b', 'u1'),
+        ('geo', '<f4'), ('tex', '<f4')
+    ])
+    ply_data['x'] = selected_points[:, 0]
+    ply_data['y'] = selected_points[:, 1]
+    ply_data['z'] = selected_points[:, 2]
+    ply_data['nx'] = selected_normals[:, 0]
+    ply_data['ny'] = selected_normals[:, 1]
+    ply_data['nz'] = selected_normals[:, 2]
+    ply_data['r'] = selected_colors_rgb[:, 0]
+    ply_data['g'] = selected_colors_rgb[:, 1]
+    ply_data['b'] = selected_colors_rgb[:, 2]
+    ply_data['geo'] = selected_geo
+    ply_data['tex'] = selected_tex
+    
+    # Write PLY
+    o3d.io.write_point_cloud(output_path, o3d.geometry.PointCloud(o3d.utility.Vector3dVector(selected_points)), write_ascii=True)
+    # Note: The above write_point_cloud does not write custom fields like geo/tex.
+    # The source notes say "Construct a structured numpy array for PLY output... Write to output_path as text PLY."
+    # This implies a manual write or a library that supports custom fields.
+    # Since the source notes mention "structured numpy array", we might need to write it manually.
+    # However, the pseudocode must be self-contained. Let's assume a helper function or manual write.
+    # Given the constraint "no placeholders", and the fact that Open3D's write_point_cloud doesn't support custom float fields easily in ASCII PLY without modification,
+    # we will write a simple manual PLY writer for the structured array.
+    
+    with open(output_path, 'w') as f:
+        f.write("ply\n")
+        f.write("format ascii 1.0\n")
+        f.write("element vertex %d\n" % target_num)
+        f.write("property float x\n")
+        f.write("property float y\n")
+        f.write("property float z\n")
+        f.write("property float nx\n")
+        f.write("property float ny\n")
+        f.write("property float nz\n")
+        f.write("property uchar red\n")
+        f.write("property uchar green\n")
+        f.write("property uchar blue\n")
+        f.write("property float geo\n")
+        f.write("property float tex\n")
+        f.write("end_header\n")
+        for i in range(target_num):
+            f.write("%f %f %f %f %f %f %d %d %d %f %f\n" % (
+                ply_data['x'][i], ply_data['y'][i], ply_data['z'][i],
+                ply_data['nx'][i], ply_data['ny'][i], ply_data['nz'][i],
+                ply_data['r'][i], ply_data['g'][i], ply_data['b'][i],
+                ply_data['geo'][i], ply_data['tex'][i]
+            ))
+
+```
+
+**Parameters with typical values:**
+- `k_neighbors`: 10 (used for neighbor search and covariance estimation).
+- `radius`: 0.1 (used for normal estimation if normals are missing).
+- `geo_weight`: 1.0 (default).
+- `tex_weight`: 1.0 (default).
+
+**Edge cases and pitfalls:**
+- If `target_num` is greater than `num_points`, `np.random.choice` will fail. Ensure `target_num <= num_points`.
+- If all scores are zero, `probabilities` will be undefined (division by zero). The code handles this by setting `combined_scores` to ones if sum is zero.
+- Precision issues in eigenvalue computation: `np.linalg.eigvalsh` is used for symmetric matrices, which is stable.
+- Boundary conditions: Points with fewer than 3 neighbors (if using radius search) are handled by skipping or assigning zero complexity. In the k-NN approach, `k_neighbors+1` ensures at least `k_neighbors+1` points are found, so this is less of an issue unless the point cloud is very sparse.
+
+## Operating characteristics
+- **Time Complexity:** $O(N \log N)$ for building the KDTree, and $O(N \cdot k)$ for computing complexity scores, where $N$ is the number of points and $k$ is the number of neighbors. Sampling is $O(N)$ or $O(target\_num \cdot \log N)$ depending on implementation.
+- **Memory Complexity:** $O(N)$ for storing points, scores, and the KDTree.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Scales linearly with the number of points for the complexity computation, assuming the KDTree query is efficient.
+- **Strengths:** Preserves geometric and texture details better than uniform downsampling. Probabilistic sampling ensures a diverse set of points.
+- **Limitations:** Computationally more expensive than uniform downsampling. Requires normals and colors for full functionality.
+- **When to use:** When preserving visual and geometric fidelity is important, and the point cloud is large enough to benefit from intelligent downsampling.
+- **When not to use:** When computational resources are limited, or when the point cloud is already small.
+
+## Background
+This method is part of the AVM-GS project, which focuses on adaptive volume rendering. The specific downsampling technique is designed to prepare point clouds for further processing, such as voxelization or rendering, by reducing redundancy while maintaining key features.
+
+## Sources
+[S1] Yang-SyZng/AVM-GS, https://github.com/Yang-SyZng/AVM-GS, fetched 2026-10-27 (unofficial)

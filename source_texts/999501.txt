@@ -1,0 +1,317 @@
+Contribute to taojin-6/volumetric_kit_recon development by creating an account on GitHub.
+
+feat(core): pinhole.glsl, recon's pinhole projection as an exported GLSL include by taojin-6 · Pull Request #245 · taojin-6/volumetric_kit_recon · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+taojin-6
+commented
+Oct 16, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Plan PR RE12 of the calib views plan (plan PR 3). Based on main, not stacked; it needs no other PR. calib's GPU depth checks (CA8b) include it.
+Summary
+recon publishes the pinhole projection its kernels already use, so calib's kernels include it rather than copy it.
+src/volumetric_kit/recon/core/shaders/pinhole.glsl, beside color_common.glsl:
+vec3 vr_world_to_camera(mat4 cam_to_world, vec3 world), the rigid inverse R^T (world − t);
+vec3 vr_unproject_pinhole(vec2 px, float z, vec4 k);
+bool vr_pinhole_pixel(vec3 p_cam, vec4 k, out vec2 px), the divide wherever the pixel lands (refuses only z ≤ 0 or a NaN depth);
+bool vr_project_pinhole(vec3 p_cam, vec4 k, uvec2 size, out vec2 px), the same within [0, W) × [0, H);
+uvec2 vr_nearest_pixel(vec2 px, uvec2 size).
+k is (fx, fy, cx, cy). The functions take values, not structs, so recon's scalar-layout cameras and calib's std430 ones both pass theirs. Today's rules hold: every test negated so a NaN fails, the domain [0, W) × [0, H), and the last half pixel clamped to the edge pixel. Nothing assumes a camera count: each call takes one camera's values, so a kernel over N cameras calls it per camera.
+recon's kernels go through it.
+tsdf_common.glsl's project_pinhole and nearest_pixel are thin wrappers.
+hash_allocate_depth.comp unprojects with vr_unproject_pinhole.
+texture_common.glsl's world_to_camera and camera_to_image call vr_world_to_camera and vr_pinhole_pixel, keeping texture's extrapolating, NaN-only acceptance.
+undistort_depth.comp's colour test unprojects with vr_unproject_pinhole and divides with vr_pinhole_pixel, keeping its rounded-pixel bounds.
+tsdf, volume and texture keep their order of operations, so they change no bit. The sensor prep's colour test changes order (rounding level); its tests pass unchanged.
+Exported and installed. recon_core carries the property VR_SHADER_INCLUDE_DIR, the root a consumer passes its shader compiler:
+in the build tree (FetchContent), a generated directory holding the exported GLSL alone, so a kernel that compiles against a fetched recon cannot include recon's internal GLSL and then break against an install;
+installed, <prefix>/include, which the package config sets on the imported volumetric_kit::recon_core.
+```
+get_target_property(vr_glsl volumetric_kit::recon_core VR_SHADER_INCLUDE_DIR)
+vkc_embed_shaders(calib_depth SYMBOL_PREFIX vc_ INCLUDE_DIRS "${vr_glsl}" SHADERS ...)
+```
+Docs: README (how a consumer includes it), DESIGN (end of core), a dated DECISIONS entry ("A shared GLSL pinhole for recon and its consumers", amending the 2026-08-11 texturing entry's per-tier copies, with an amendment line there), CHANGELOG.
+Notes
+Only acceptance rules stay with callers. The plan kept texture's variant. After review, the variants are only the two acceptance rules; the arithmetic is shared.
+texture extrapolates past the image (2026-08-11) on vr_pinhole_pixel.
+The sensor prep's colour test bounds the rounded colour pixel, [−0.5, W − 0.5), as the colour pass marks coverage, on vr_pinhole_pixel.
+The first push left undistort_depth.comp's unprojection and divide as copies. Its body called them part of the lens path; they work on pinhole pixels, so they now go through the shared file.
+lens.glsl's source_pixel normalizes at z = 1 inside the lens model, the device mirror of camera::distort_rational. It stays with that mirror.
+Volume's unprojection is in scope. The plan names only tsdf's wrappers. hash_allocate_depth.comp restated the same unprojection, though, and the family rule is one home per function.
+Why recon's core tier. The core locks "No camera or sensor tier". recon's camera tier builds without Vulkan, and volume and tsdf do not depend on it, so they could not include it. gfx depends on no recon, so GF5's point shader restates the in-image test and the nearest-pixel rule on its own; its tests must hold that copy to recon's rule (DECISIONS says so).
+There is no host pinhole in recon's camera tier for the test to call. The camera tier holds only what a caller uses (2026-10-06), so the test computes the host reference in double, from camera_model.hpp's conventions, rather than add a camera function with no caller.
+The package config finds the root from its own directory. The build writes the include directory relative to the config's install directory, and the config resolves it against CMAKE_CURRENT_LIST_DIR after every return(). Two problems go away:
+On CMake 3.29 and older, a dependency's package config resets PACKAGE_PREFIX_DIR; ubuntu-24.04's Assimp gave /usr, which failed CI on the first push. Planting set(PACKAGE_PREFIX_DIR "/usr") before the targets include still gives the right root.
+The previous fix expanded the root at the top of the config, so a refused package left _vr_shader_include_dir in the caller's scope. A refused package now leaves no _vr_ variable behind.
+A target property, not a variable. It reaches both a FetchContent consumer and a find_package consumer, as the core's VKC_CORE_VERSION does on core_base.
+Test plan
+Apple M5 Max (MoltenVK), Release, VR_WARNINGS_AS_ERRORS=ON, tests and examples on, DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib, VKC_REQUIRE_VULKAN_DEVICE=1.
+ctest -j 4 with VKC_TEST_VALIDATION=1: 87/87 pass, none skipped; 87/87 again with VKC_TEST_SYNC_VALIDATION=1.
+recon_core_pinhole_gpu (new) runs the five functions in a std430 kernel (tests/shaders/pinhole_cases.comp), each case with its own camera, against the host in double:
+28 edges in exact arithmetic, each with its answer written out: u = 0, u = −0.25, the right and bottom edges, 63.5 and the last half pixel clamped, round half up and down, z = 0, −0 and behind, NaN in x, y, z and each intrinsic, ±∞, and a 1 × 1 image;
+8 unbounded projections written out, for vr_pinhole_pixel: past the right edge, before the first pixel, far outside, behind the camera, z = 0, NaN z refused, a NaN x passed through, +∞;
+2 rigid poses in exact arithmetic (identity; 90° about Z plus a translation, so R^T ≠ R) and a general rotation, for vr_world_to_camera;
+3 unprojections in exact arithmetic;
+2420 grid cases (928 accepted) around five cameras (640×576, 3840×2160, 1280×720, 320×240 and 1×1) at four depths. Every pixel sits a quarter pixel from any boundary, so decisions and nearest pixels must match exactly, pixels within 2e-3 px and points within 2e-6 relative.
+recon_subproject_glsl and recon_package_glsl (new) compile that kernel through the fetched and the installed root with the core's vkc_compile_shaders, after checking that the root holds pinhole.glsl and none of recon's internal GLSL.
+recon_package_quiet_not_found (new) finds the package QUIET against a core without the vulkan tier and checks that it is not found and leaves no _vr_ variable behind. recon_package_found checks the same when found.
+The tsdf, volume, mesh, texture and sensor suites pass, with four cases added:
+recon_tsdf_integrate: an 8 × 2 colour image, so the nearest pixel's clamp is checked against the width (every image was square before).
+recon_volume_allocate: fx 40, fy 120 and principal point (2.5, 0.5). The host checks that swapping either pair changes the expected band. At fx 100, fy 120 a swapped pair moved no point out of its block.
+recon_sensor_gpu_frame_prep: colour principal points shifted by −0.25 and +0.6 px. The first row and column must be kept and the last dropped, which pins the rounded bounds.
+recon_texture_projective: a vertex past the left border carries the clamped coordinate, as one past the right does.
+Mutation checks. Each mutation below was planted alone, the affected targets were rebuilt, and the tests ran under validation. The file was restored from git after each one, and the tree was clean at the end. Every row, the first push's included, was run against the final code.
+Mutation
+Caught by
+right edge inclusive (q.x <= width)
+core_pinhole_gpu
+left edge exclusive (q.x > 0)
+core_pinhole_gpu
+bounds test written directly, so NaN passes
+core_pinhole_gpu, tsdf_integrate
+nearest pixel not clamped
+core_pinhole_gpu, tsdf_integrate
+nearest pixel floors
+core_pinhole_gpu, tsdf_integrate
+nearest pixel rounds half down (ceil(px - 0.5))
+core_pinhole_gpu, tsdf_integrate
+unprojection swaps fx and fy
+core_pinhole_gpu, volume_allocate, sensor_gpu_frame_prep
+unprojection drops z
+core_pinhole_gpu, volume_allocate, sensor_gpu_frame_prep
+vr_pinhole_pixel's depth test written directly (z <= 0), so a NaN depth passes
+core_pinhole_gpu
+vr_pinhole_pixel adds (cy, cx)
+core_pinhole_gpu, tsdf_integrate, tsdf_integrate_cull, tsdf_integrate_dynamic_set, texture_projective, texture_multiview, texture_device_mesh, sensor_gpu_frame_prep
+vr_world_to_camera drops the transpose
+core_pinhole_gpu, tsdf_integrate, tsdf_integrate_dynamic_set, texture_projective, texture_multiview, texture_device_mesh
+vr_world_to_camera adds t
+core_pinhole_gpu, the six tsdf integrate/fuser tests, the three texture tests
+tsdf wrapper passes the height as the width
+tsdf_integrate
+tsdf nearest_pixel wrapper swaps width and height
+tsdf_integrate (its 8 × 2 colour image)
+volume packs (fy, fx)
+volume_allocate (uncaught at fx 100, fy 120)
+volume packs (cy, cx)
+volume_allocate, tsdf_integrate_cull
+volume unprojects (v, u)
+volume_allocate
+volume unprojects at depth 1
+volume_allocate, tsdf_device_input, tsdf_integrate_cull, tsdf_integrate_dynamic_set, tsdf_fuser_oom, sensor_gpu_frame_prep
+colour test unprojects with (cy, cx)
+sensor_gpu_frame_prep
+colour test divides with (fy, fx)
+sensor_gpu_frame_prep
+colour test bounds the unrounded pixel
+sensor_gpu_frame_prep (its shifted principal points; uncaught before them)
+texture refuses to extrapolate left or above
+texture_projective (its left-border vertex; uncaught before it)
+build tree: no VR_SHADER_INCLUDE_DIR
+subproject_defaults
+build tree: the root is src/, so internal GLSL is exported
+subproject_defaults
+the exported GLSL installed elsewhere
+package_found
+package config sets no VR_SHADER_INCLUDE_DIR
+package_found
+package config resolves the root without BASE_DIR
+package_found
+root made relative to the lib directory, not the config's
+package_found
+package config sets its variable before the returns
+package_quiet_not_found (uncaught until its pattern lost the ; that split it into two regexes)
+One mutant is equivalent: vr_project_pinhole's depth test written directly lets a NaN depth through, but its NaN pixel then fails the negated bounds test, so no input tells the two apart.
+pre-commit run (cmake-format skipped under Python 3.15; the CMake files were checked with cmakelang 0.6.13 on Python 3.13) and git diff --check pass.
+CI on 1e0926a: lint, camera-only, macos-26 Debug and Release, ubuntu-24.04 and 26.04 Release, sanitizers, viewer and required all pass. On ubuntu-24.04 (a GPU, 105 tests) recon_core_pinhole_gpu, recon_subproject_glsl, recon_package_glsl and recon_package_quiet_not_found ran and passed.
+Not run: sanitizers (no memory, threading or lifetime handling changed; CI runs them), and the RTX 5090. Hand checks: none in the plan for RE12. No camera or other hardware was opened.
+🤖 Generated with Claude Code
+taojin-6
+and others
+added 2 commits
+October 16, 2026 04:30
+feat(core): pinhole.glsl, recon's pinhole projection as an exported G…
+…
+a2460b7
+```
+…LSL include
+
+core/shaders/pinhole.glsl holds recon's one GLSL pinhole:
+vr_unproject_pinhole, vr_project_pinhole and vr_nearest_pixel. They take
+values (vec4 k, uvec2 size), not structs, so recon's scalar-layout
+cameras and a consumer's std430 ones both call them. The rules are
+tsdf's: negated tests so a NaN fails, the domain [0, W) x [0, H), and the
+last half pixel clamped to the edge pixel.
+
+tsdf_common.glsl's project_pinhole and nearest_pixel become thin
+wrappers, and hash_allocate_depth.comp unprojects through it, each in the
+order of operations it had, so neither changes a bit. texture keeps its
+extrapolating variant.
+
+recon_core's VR_SHADER_INCLUDE_DIR property names the include root a
+consumer compiles against: in the build tree, a copy of the exported GLSL
+alone; installed, the include directory, which the package config sets
+on the imported target.
+
+Tests: recon_core_pinhole_gpu (a std430 kernel against the host's double:
+written-out edges in exact arithmetic and a grid around five cameras up
+to 3840x2160), and recon_subproject_glsl and recon_package_glsl, which
+compile that kernel through the fetched and the installed root.
+
+Plan PR RE12 of the calib views plan.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(tsdf): a wide colour image clamps the nearest pixel to its width
+…
+a64766e
+```
+color_pixel_case's images were all 8 x 8, so nearest_pixel's wrapper
+could swap the width and the height unseen. An 8 x 2 colour image at
+cx = 7.75 reads pixel 7 only when x clamps to the width.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+taojin-6
+self-assigned this
+Oct 16, 2026
+taojin-6
+and others
+added 6 commits
+October 16, 2026 04:43
+fix(core): take the GLSL include root before the package's find_depen…
+…
+2260cca
+```
+…dency calls
+
+Under CMake 3.29 and older a dependency's package config resets
+PACKAGE_PREFIX_DIR, so the root expanded after find_dependency(assimp)
+read Assimp's prefix: on ubuntu-24.04 (CMake 3.28, Assimp in /usr)
+recon_core's VR_SHADER_INCLUDE_DIR was /usr/include and
+recon_package_found failed. The config expands it right after
+@PACKAGE_INIT@ and sets it on the target later.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+refactor(core): texture and the sensor prep project through pinhole.glsl
+…
+3a7e63a
+```
+pinhole.glsl gains vr_world_to_camera, the rigid inverse tsdf and texture
+each wrote, and vr_pinhole_pixel, the unbounded divide that
+vr_project_pinhole now bounds. texture's world_to_camera and
+camera_to_image call them and keep their extrapolating acceptance; the
+sensor prep's colour test unprojects and divides through them and keeps
+its rounded-pixel bounds. tsdf and texture keep their order of operations;
+the colour test's changes to rounding.
+
+recon_core_pinhole_gpu covers both new functions: written-out unbounded
+projections past the image, behind it and through a NaN; two exact rigid
+poses and a general rotation.
+
+DECISIONS: the entry amends the 2026-08-11 per-tier copies, says why the
+camera tier cannot hold the GLSL and that gfx's point shader restates the
+rule. DESIGN's paragraph moves to the end of `core`.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(volume): a camera that tells a mispacked fx, fy, cx or cy apart
+…
+aaa941e
+```
+hash_allocate_depth packs vec4(fx, fy, cx, cy) for vr_unproject_pinhole,
+but at fx 100, fy 120 a swapped pair moved no point out of its block. fx
+40, fy 120 and principal point (2.5, 0.5) do, and the host checks that
+the expected band changes when either pair is swapped.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(core): the package config leaves no variable behind when refused
+…
+ae374f5
+```
+The installed GLSL root was expanded at the top of the config, so every
+early return (a refused core, FFmpeg, a failed find_dependency) left
+_vr_shader_include_dir in the caller's scope. The config now resolves it
+from its own directory, relative as the build computed it, after every
+return, so a dependency resetting PACKAGE_PREFIX_DIR cannot move it either.
+
+recon_package_quiet_not_found finds the refused package QUIET and checks
+no _vr_ variable is left; recon_package_found checks the same when found.
+README: fetched, the root holds the exported GLSL alone; installed, it is
+the include directory.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(test): the leak check's expected output carries no list separator
+…
+68e7127
+```
+PASS_REGULAR_EXPRESSION is a list, so the "; left behind: ''" in
+recon_package_quiet_not_found's pattern split it in two, and "found: '0'"
+alone passed the test with a variable left behind. The message and the
+pattern now use a comma; a config that sets its variable before the
+returns fails the test.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(sensor,texture): pin the two acceptance rules pinhole.glsl leave…
+…
+1e0926a
+```
+…s to callers
+
+The sensor prep's colour test bounds the rounded colour pixel, and
+texture's projection extrapolates past the image; neither had a test that
+failed if the rule changed at the left or top edge. recon_sensor_gpu_frame_prep
+now shifts the colour principal point by -0.25 and +0.6 px and checks the
+first row and column are kept and the last dropped, and
+recon_texture_projective checks a vertex past the left border carries the
+clamped coordinate, as one past the right does.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Hide details
+View details
+taojin-6
+merged commit bdbe26e
+into
+main
+Oct 16, 2026
+9 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+taojin-6
+deleted the
+feat/pinhole-glsl
+branch
+October 16, 2026 19:38
+taojin-6
+mentioned this pull request
+Oct 16, 2026
+feat(sensor/utils): DeviceFrame depth readable from another queue family
+#246
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

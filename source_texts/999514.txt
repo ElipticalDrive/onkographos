@@ -1,0 +1,171 @@
+Summary Add optional lens distortion (plumb_bob, as in OpenCV / ROS camera_info) and Gaussian pixel noise to mrpt::opengl::CFBORender::render_RGB(), applied on the GPU as a second render pass, before reading the image back. Target: MRPT ...
+
+CFBORender: GPU lens distortion (plumb_bob) and pixel noise for render_RGB() · Issue #1464 · MRPT/mrpt · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+CFBORender: GPU lens distortion (plumb_bob) and pixel noise for render_RGB() #1464
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#1465
+Closed
+CFBORender: GPU lens distortion (plumb_bob) and pixel noise for render_RGB()#1464
+#1465
+Copy link
+Labels
+enhancement
+Description
+jlblancoc
+opened on Oct 10, 2026
+Issue body actions
+Summary
+Add optional lens distortion (plumb_bob, as in OpenCV / ROS camera_info) and Gaussian pixel noise to mrpt::opengl::CFBORender::render_RGB(), applied on the GPU as a second render pass, before reading the image back. Target: MRPT 3.6.0.
+The first user is MVSim (MRPT/mvsim#142), which simulates RGB cameras with CFBORender. That PR is on hold until this lands. It already parses the camera options and calls the API proposed below, behind #if MRPT_VERSION >= 0x030600 (MIN_MRPT_VERSION_CAMERA_DISTORTION). With older MRPT, a world using them fails to load with a clear error.
+Why on the GPU
+MVSim first did both on the CPU, after render_RGB(): a precomputed per-pixel lookup table with bilinear interpolation, plus one CRandomGenerator::drawGaussian1D() per channel value. It was far more expensive than the rendering itself. Measured on an AMD Ryzen 7 2700X with a Quadro P620, in ms per image, with k1=-0.25, k2=0.07 and noise std=2:
+Resolution
+render_RGB() (pinhole)
+render_RGB() (enlarged ideal image)
+CPU remap (float bilinear)
+CPU noise (drawGaussian1D)
+640x480
+0.6
+0.8
+7.7
+24.6
+1280x720
+1.1
+1.7
+24.7
+73.7
+1920x1080
+1.9
+2.9
+55.2
+166
+Optimized CPU versions were also benchmarked:
+Remap: a fixed-point LUT (byte offset + 4 x 14-bit weights) takes 1.75 / 6.8 / 15.1 ms on 1 thread and ~0.8 / 2.4 / 4.4 ms on 4 threads (WorkerThreadsPool). OpenCV cv::remap is similar.
+Noise: wyrand + a 64K-entry inverse-CDF table of integer samples takes 1.4 / 4.1 / 9.2 ms on 1 thread.
+They are still several ms per frame at HD resolutions and they compete with the simulation for CPU. On a real GPU the extra pass should cost well under 1 ms. It also lets the read-back shrink to the output size: today the enlarged ideal image is read back, e.g. 2432x1370 for a 1920x1080 camera.
+Proposed API (what mvsim#142 currently calls)
+```
+// mrpt/opengl/CFBORender.h
+/** Makes render_RGB() output images with this camera model, including its lens
+ * distortion (only plumb_bob for now). Its ncols/nrows must match the renderer
+ * width/height. The caller keeps setting the scene camera with
+ * setProjectiveFromPinhole(distortedCamera): only fx, fy, cx, cy are used for
+ * that, and the renderer replaces them internally with the enlarged ideal pinhole
+ * camera described below. Throws if the distortion is too strong (see below). */
+void setLensDistortion(const mrpt::img::TCamera& distortedCamera);
+void clearLensDistortion();
+
+/** Adds independent Gaussian noise to each channel of each pixel of render_RGB()
+ * output. Std in intensity levels (0-255 scale). 0 disables it. */
+void setRGBNoise(float stdIntensityLevels);
+```
+mvsim calls both once, right after constructing the renderer, and nothing else changes on its side:
+```
+fbo_renderer_rgb_ = std::make_shared<mrpt::opengl::CFBORender>(p);  // p.width/height = output size
+if (cam.distortion != mrpt::img::DistortionModel::none) fbo_renderer_rgb_->setLensDistortion(cam);
+if (noiseStd > 0) fbo_renderer_rgb_->setRGBNoise(noiseStd);
+...
+viewportCamera.setProjectiveFromPinhole(cam);
+fbo_renderer_rgb_->render_RGB(scene, obs.image);
+```
+The exact names and signatures are open: the mvsim side was never compiled against them, and will be adapted to whatever is finally merged here. Things to decide:
+A setter vs. new fields in CFBORender::Parameters.
+An optional seed for reproducible noise.
+Whether render_RGBD() should support this later. Depth would need nearest-neighbor sampling, not bilinear, to avoid blending across depth discontinuities. That is out of scope for now.
+How it works
+1. Lookup table and enlarged ideal camera (CPU, once in setLensDistortion())
+For each output (distorted) pixel (u,v), undistort it with the same intrinsics. This gives where it lands in an ideal pinhole image. Then enlarge that ideal image with margins so it covers the whole distorted field of view, which avoids black borders with barrel distortion. This is the code used in the mvsim prototype:
+```
+// cam: distorted camera, W=cam.ncols, H=cam.nrows
+std::vector<float> mapU(W*H), mapV(W*H);
+float minU = 0, maxU = W - 1, minV = 0, maxV = H - 1;
+for (int v = 0; v < H; v++)
+  for (int u = 0; u < W; u++) {
+    mrpt::img::TPixelCoordf und;
+    mrpt::img::camera_geometry::undistort_point(mrpt::img::TPixelCoordf(u, v), und, cam);
+    mapU[v*W+u] = und.x;  mapV[v*W+u] = und.y;
+    minU = std::min(minU, und.x); maxU = std::max(maxU, und.x);
+    minV = std::min(minV, und.y); maxV = std::max(maxV, und.y);
+  }
+// Bounded margins: stronger distortion is rejected (part of the image would be missing)
+auto margin = [](float m, int size) {
+  const int px = static_cast<int>(std::ceil(m)) + 1;
+  ASSERTMSG_(std::isfinite(m) && px <= size,
+    "Camera lens distortion too strong: the undistorted field of view would be more "
+    "than 3 times the image size");
+  return px;
+};
+const int left = margin(-minU, W), right = margin(maxU - (W - 1), W);
+const int top = margin(-minV, H), bottom = margin(maxV - (H - 1), H);
+idealCamera = cam;  idealCamera.distortion = none;
+idealCamera.ncols = W + left + right;  idealCamera.nrows = H + top + bottom;
+idealCamera.cx(cam.cx() + left);  idealCamera.cy(cam.cy() + top);
+// and mapU += left, mapV += top
+```
+Notes:
+Undistorting all pixels costs some ms at HD resolutions, but only once.
+In the prototype, the enlarged width had to be a multiple of 4. glReadPixels(GL_RGB, GL_UNSIGNED_BYTE) uses the default GL_PACK_ALIGNMENT=4, so rows of 3*W bytes otherwise overflowed the CImage buffer. With the GPU pass only the output image is read back, but the same concern applies to any render_RGB() width. It is worth checking glPixelStorei(GL_PACK_ALIGNMENT, 1), or matching the CImage row stride, in CFBORender in general.
+2. Rendering (GPU, every frame, inside internal_render_RGBD())
+Render the scene into the current FBO, resized to the enlarged ideal size, with the viewport pinhole intrinsics replaced by idealCamera. The caller passed the distorted camera's fx, fy, cx, cy; the renderer swaps in the enlarged camera's cx, cy and size.
+Bind a second FBO of the output size, and draw a full-screen quad with a small program built with mrpt::opengl::Program:
+The ideal color attachment is a texture with GL_LINEAR filtering, so the bilinear interpolation is done by the hardware.
+The lookup table is an RG32F texture of output size with GL_NEAREST filtering, uploaded once. It holds normalized ideal-image coordinates, (mapU+0.5)/idealW, (mapV+0.5)/idealH.
+Fragment shader: color = texture(idealTex, texture(lutTex, uv).xy), and black if the coordinates fall outside [0,1].
+Mind the vertical flip: CFBORender uses flipVerticalProjection(true) to avoid flipping on read-back. The table and the quad must follow the same convention. A test with an off-center marker catches this, as it did in mvsim.
+Noise in the same shader:
+Generate a per-pixel, per-channel hash RNG (e.g. PCG or xxhash32 of (x, y, frameCounter, seed)), then apply Box-Muller.
+Add std/255 in normalized units before the 8-bit quantization.
+Since the read-back rounds to integers, this matches the CPU semantics clamp(round(pixel + noise)).
+frameCounter must change each call so noise is not frozen.
+glReadPixels from the output FBO, as today.
+Shader version: CFBORender can create GLES contexts (Parameters::bindOpenGLES_API etc.), so the program should compile with whatever GLSL version the default MRPT shaders use (DefaultShaders.h).
+Tests (suggested, headless EGL so they also run in CI with Mesa llvmpipe)
+Geometry: a small colored marker on a plain background, seen with k1=-0.3, k2=0.05, p1=0.002, p2=-0.001. Its centroid must be within 1 px of camera_geometry::projectPoint_with_distortion() (in the mvsim prototype at 160x120: measured (116.1, 81.4) vs expected (116.9, 82.2); without distortion it would be at (121.0, 84.6)).
+No black borders with barrel distortion.
+Noise: the std of (noisy - clean) over a flat area must be close to the requested value (e.g. 10 +- 2).
+Errors: k1=-2.0 must throw the "too strong" error.
+Caveats
+With Mesa llvmpipe (no GPU, CI, headless servers), the extra pass runs on the CPU through llvmpipe, which is multithreaded. It should still be about as fast as the optimized CPU code, just not free.
+camera_info for ROS: the observation keeps the distorted camera model, so rectification gives back the pinhole image. Nothing to do in MRPT for that.
+Activity
+jlblancoc
+added
+enhancement
+on Oct 10, 2026
+jlblancoc
+closed this as completedin #1465on Oct 10, 2026
+idesign0
+added a commit that references this issue on Oct 22, 2026
+CFBORender: GPU lens distortion and pixel noise for RGB images
+...
+This issue will close once commit bd0e014 is merged into the 'develop' branch.
+bd0e014
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancement
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,317 @@
+--- v003.md
++++ v004.md
+@@ -1,157 +1,141 @@
+ # Stream Lines
+ 
+-Also called: CUDA Streamline Visualization, Euler method streamline, Optical Flow Glyphs and Particle Tracing, Particle Tracing, Particle path integration, Vector Field Trajectory Visualization
++Also called: Integral Curve, Particle Tracing
+ 
+ ## Overview
+-Stream lines visualize 3D vector fields by computing the trajectories of massless particles seeded at specific locations, integrating the field to produce continuous curves [S2, S3, unofficial]. Unlike [Arrow Glyphs for Vector Field Visualization](2663-arrow-glyphs-for-vector-field-visualization.md) which show local direction at discrete points, stream lines reveal global flow patterns and connectivity [S3, unofficial]. They differ from [Stream Surfaces](7696-stream-surfaces.md) by representing flow as discrete trajectories rather than stitched geometric surfaces, preserving individual path information [S1, unofficial].
++Stream lines visualize 3D vector fields by tracing the trajectories of massless particles through the flow, solving the initial value problem defined by the velocity field [S1, S3, S4, unofficial]. Unlike static glyphs that show direction at discrete points, stream lines reveal the continuous connectivity and topology of the flow, such as vortices and separation zones [S4, unofficial]. They are distinguished from path lines (which track particles in time-varying fields) by being tangential to the stationary flow field and generally not self-intersecting, except at cycles [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-*   Vector field data $\mathbf{V}(x,y,z)$, typically stored in a 3D texture or grid [S3, S4, unofficial].
+-*   Seed points $\mathbf{p}_0$, often arranged on a line or plane [S3, unofficial].
+-*   Integration parameters: step size $\Delta t$, maximum steps $N_{max}$, and geometry sampling rate $S_{geo}$ [S3, S4, unofficial].
+-*   Termination thresholds: minimum magnitude $v_{min}$, boundary bounds, and self-intersection checks [S2, unofficial].
+-
+-**Outputs:**
+-*   Vertex buffer containing positions $\mathbf{p}_i$ of the stream line [S3, S4, unofficial].
+-*   Color buffer mapping vector magnitude to color [S3, S4, unofficial].
+-*   Step count buffer indicating the length of each stream line [S3, S4, unofficial].
++**Inputs and Outputs:**
++*   **Input:** A 3D vector field $\mathbf{V}(x,y,z)$, a set of seed points $\mathbf{x}_0$, an integration step size $\Delta t$, and a maximum number of integration steps $N_{max}$ [S3, S4, S5, unofficial].
++*   **Output:** A sequence of 3D points (vertices) forming line strips or tubes, optionally colored by vector magnitude [S4, S5, unofficial].
+ 
+ **Data Structures:**
+-*   **Vector Field:** Stored as a 3D texture (`cudaArray` with `float4` channels) bound to a texture object with linear filtering and clamp addressing [S4, unofficial].
+-*   **Color Transfer Function:** Stored as a 1D texture (`cudaArray` with `float4` channels) mapping normalized magnitude to RGBA color [S4, unofficial].
++*   **Vector Field:** Stored as a 3D texture array (e.g., `cudaArray` with `float4` channels) to enable hardware-accelerated trilinear interpolation [S5, unofficial]. The texture is bound with linear filtering and clamp addressing [S5, unofficial].
++*   **Seeds:** An array of 3D coordinates (float3) defining the starting positions of the stream lines [S4, S5, unofficial].
+ *   **Output Buffers:**
+-    *   `outVertices`: Array of `float3` positions. Each stream line occupies $N_{max}/S_{geo} + 1$ vertices [S3, unofficial].
+-    *   `outVertexColors`: Array of `float3` colors corresponding to vertices [S3, unofficial].
+-    *   `outComputedSteps`: Array of `uint` storing the number of valid steps per seed [S3, unofficial].
++    *   `outVertices`: Array of `float3` storing the geometric positions. Each stream line occupies $N_{max} / \text{geometrySampling} + 1$ vertices [S4, S5, unofficial].
++    *   `outVertexColors`: Array of `float3` storing the color for each vertex, derived from vector magnitude [S4, S5, unofficial].
++    *   `outComputedSteps`: Array of `uint` storing the number of valid steps computed per seed [S5, unofficial].
++
++**Parameters:**
++*   $\Delta t$: Integration step size. Smaller values increase accuracy but require more steps [S4, unofficial].
++*   $N_{max}$: Maximum number of integration steps [S4, S5, unofficial].
++*   `geometrySampling`: Integer specifying how many integration steps are skipped between emitted geometry vertices. If 1, every step is emitted; if 2, every second point is emitted. This allows high-precision integration (small $\Delta t$) while reducing memory usage [S4, S5, unofficial].
++*   `volumeSize`: Dimensions of the vector field domain $(W, H, D)$ [S4, S5, unofficial].
++*   `volumeCoordSpaceMult`: A scaling factor converting world coordinates to texture coordinates for lookup [S5, unofficial].
+ 
+ **Algorithm Steps:**
+-
+-1.  **Initialization:** For each seed point $i$, initialize position $\mathbf{p}$ in double precision to maintain accuracy during integration [S3, unofficial]. Write $\mathbf{p}$ as the first vertex in `outVertices` [S4, unofficial].
++1.  **Initialization:** For each seed point $i$, initialize the current position $\mathbf{p}$ in double precision to prevent accumulation error, though output is stored in single precision [S4, S5, unofficial]. Write $\mathbf{p}$ to the first vertex slot in `outVertices` [S5, unofficial].
+ 2.  **Integration Loop:** Iterate from step $k=1$ to $N_{max}$:
+-    a.  **Boundary Check:** If $\mathbf{p}$ is outside the volume bounds ($x<0, y<0, z<0$ or $x>W, y>H, z>D$), terminate the stream line [S3, S4, unofficial].
+-    b.  **Vector Lookup:** Sample the vector field $\mathbf{v} = \mathbf{V}(\mathbf{p})$ using trilinear interpolation [S1, S2, unofficial].
+-    c.  **Termination Check:** If $|\mathbf{v}| < v_{min}$, terminate [S2, unofficial].
+-    d.  **Integration:** Compute the next position $\mathbf{p}_{next}$ using an integrator (Euler or RK4) [S3, S4, unofficial].
+-    e.  **Update:** Set $\mathbf{p} = \mathbf{p}_{next}$ [S4, unofficial].
+-    f.  **Geometry Sampling:** Decrement a counter. If the counter reaches zero, reset it to $S_{geo}$ and write $\mathbf{p}$ to `outVertices` and its color to `outVertexColors` [S3, S4, unofficial].
+-3.  **Finalization:** Record the total number of geometry samples written for seed $i$ in `outComputedSteps` [S4, unofficial].
++    a.  **Boundary Check:** If $\mathbf{p}$ is outside the volume bounds ($x<0, y<0, z<0$ or $x>W, y>H, z>D$), terminate the stream line [S4, S5, unofficial].
++    b.  **Vector Lookup:** Sample the vector field $\mathbf{v} = \mathbf{V}(\mathbf{p})$ using trilinear interpolation [S3, S5, unofficial].
++    c.  **Termination Check:** If $|\mathbf{v}| < v_{min}$ (threshold) or the particle intersects itself (enters a previously visited cell), terminate [S3, unofficial].
++    d.  **Integration:** Compute the next position $\mathbf{p}_{new}$ using an integrator (Euler or RK4) [S4, S5, unofficial].
++    e.  **Update:** Set $\mathbf{p} = \mathbf{p}_{new}$ [S5, unofficial].
++    f.  **Geometry Emission:** Decrement a counter. If the counter reaches zero, reset it to `geometrySampling` and write $\mathbf{p}$ to `outVertices` and its magnitude-based color to `outVertexColors` [S5, unofficial].
++3.  **Finalization:** Record the number of computed steps for the seed [S5, unofficial].
+ 
+ **Formulas:**
+-
+-*   **Euler Integration:**
+-    $$ \mathbf{p}_{i+1} = \mathbf{p}_i + \Delta t \cdot \mathbf{V}(\mathbf{p}_i) $$
+-    where $\mathbf{V}$ is the interpolated vector field [S1, S3, unofficial].
+-
+-*   **RK4 Integration:**
+-    $$ \mathbf{p}_{i+1} = \mathbf{p}_i + \frac{\Delta t}{6} (\mathbf{k}_1 + 2\mathbf{k}_2 + 2\mathbf{k}_3 + \mathbf{k}_4) $$
+-    where:
+-    $$ \mathbf{k}_1 = \mathbf{V}(\mathbf{p}_i) $$
+-    $$ \mathbf{k}_2 = \mathbf{V}\left(\mathbf{p}_i + \frac{\Delta t}{2} \mathbf{k}_1\right) $$
+-    $$ \mathbf{k}_3 = \mathbf{V}\left(\mathbf{p}_i + \frac{\Delta t}{2} \mathbf{k}_2\right) $$
+-    $$ \mathbf{k}_4 = \mathbf{V}(\mathbf{p}_i + \Delta t \mathbf{k}_3) $$
+-    [S4, unofficial].
+-
+-*   **Trilinear Interpolation Weights:**
+-    For a point $(x,y,z)$ in a cell defined by corners $(x_i, y_i, z_i)$ to $(x_i+dx, y_i+dy, z_i+dz)$, the weights $b_1 \dots b_8$ are:
++*   **ODE Definition:** The streamline is the solution to $\frac{d\mathbf{x}}{dt} = \mathbf{V}(\mathbf{x})$ with $\mathbf{x}(t_0) = \mathbf{x}_0$ [S1, S3, unofficial].
++*   **Euler Integration:** $\mathbf{p}_{i+1} = \mathbf{p}_i + \Delta t \cdot \mathbf{V}(\mathbf{p}_i)$ [S2, S4, unofficial].
++*   **RK4 Integration:** Uses four slope estimates ($k_1, k_2, k_3, k_4$) for higher accuracy:
++    $$ \mathbf{p}_{i+1} = \mathbf{p}_i + \frac{\Delta t}{6} (k_1 + 2k_2 + 2k_3 + k_4) $$
++    where $k_1 = \mathbf{V}(\mathbf{p}_i)$, $k_2 = \mathbf{V}(\mathbf{p}_i + \frac{\Delta t}{2}k_1)$, etc. [S5, unofficial].
++*   **Trilinear Interpolation:** For a cell defined by corners $(x_i, y_i, z_i)$ to $(x_i+dx, y_i+dy, z_i+dz)$, the weight $b_j$ for corner $j$ is calculated based on the distance of the query point $(x,y,z)$ from the corner. For example:
+     $$ b_1 = \frac{(x_i+dx-x)(y_i+dy-y)(z_i+dz-z)}{dx \cdot dy \cdot dz} $$
+-    $$ b_2 = \frac{(x-x_i)(y_i+dy-y)(z_i+dz-z)}{dx \cdot dy \cdot dz} $$
+-    $$ b_3 = \frac{(x-x_i)(y-y_i)(z_i+dz-z)}{dx \cdot dy \cdot dz} $$
+-    $$ b_4 = \frac{(x_i+dx-x)(y-y_i)(z_i+dz-z)}{dx \cdot dy \cdot dz} $$
+-    $$ b_5 = \frac{(x_i+dx-x)(y_i+dy-y)(z-z_i)}{dx \cdot dy \cdot dz} $$
+-    $$ b_6 = \frac{(x-x_i)(y_i+dy-y)(z-z_i)}{dx \cdot dy \cdot dz} $$
+-    $$ b_7 = \frac{(x-x_i)(y-y_i)(z-z_i)}{dx \cdot dy \cdot dz} $$
+-    $$ b_8 = \frac{(x_i+dx-x)(y-y_i)(z-z_i)}{dx \cdot dy \cdot dz} $$
+-    [S2, unofficial].
+-
+-*   **Coordinate Transformation (Distorted Volumes):**
+-    If the volume is distorted (e.g., horseshoe shape), vectors in computation space $\mathbf{V}_C$ must be transformed to physical space $\mathbf{V}_P$ using basis vectors $\mathbf{e}_i$ derived from the Jacobian:
+-    $$ \mathbf{V}_P = \sum_{i=x,y,t} \mathbf{e}_i v_i $$
+-    [S1, unofficial].
++    The interpolated vector is the weighted sum of the corner vectors [S3, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+-def compute_streamline_cuda_kernel(seeds, seeds_count, dt, max_steps, volume_size, geometry_sampling, vector_field_tex, magnitude_ctf_tex):
++def compute_streamlines(seeds, vector_field_tex, volume_size, dt, max_steps, geometry_sampling, use_rk4):
+     """
+-    CUDA-style kernel for computing stream lines.
+-    Each thread handles one seed.
++    Computes streamlines for a set of seed points.
++    :param seeds: List of (x, y, z) tuples.
++    :param vector_field_tex: 3D texture object supporting trilinear lookup.
++    :param volume_size: Tuple (width, height, depth).
++    :param dt: Integration step size.
++    :param max_steps: Maximum integration steps per seed.
++    :param geometry_sampling: Steps between emitted vertices.
++    :param use_rk4: Boolean flag for integrator choice.
++    :return: out_vertices (list of lists of (x,y,z)), out_colors (list of lists of (r,g,b))
+     """
+-    # Calculate global thread ID
+-    thread_id = blockIdx.x * blockDim.x + threadIdx.x
++    out_vertices = []
++    out_colors = []
+     
+-    if thread_id >= seeds_count:
+-        return
+-
+-    # Output buffer indices
+-    # Each streamline outputs max_steps / geometry_sampling + 1 vertices
+-    vertices_per_line = max_steps // geometry_sampling + 1
+-    out_vertex_idx = thread_id * vertices_per_line
+-    
+-    # Initialize position in double precision for accuracy
+-    pos_x = float(seeds[thread_id].x)
+-    pos_y = float(seeds[thread_id].y)
+-    pos_z = float(seeds[thread_id].z)
+-    
+-    # Write initial position
+-    out_vertices[out_vertex_idx].x = pos_x
+-    out_vertices[out_vertex_idx].y = pos_y
+-    out_vertices[out_vertex_idx].z = pos_z
+-    out_vertex_idx += 1
+-    
+-    geometry_step_counter = geometry_sampling
+-    step_count = 0
+-    
+-    for step in range(1, max_steps):
+-        # Boundary check
+-        if (pos_x < 0 or pos_y < 0 or pos_z < 0 or 
+-            pos_x > volume_size.width or pos_y > volume_size.height or pos_z > volume_size.depth):
+-            break
++    for seed in seeds:
++        # Initialize position in double precision for accuracy
++        pos_x, pos_y, pos_z = float(seed[0]), float(seed[1]), float(seed[2])
++        
++        line_vertices = []
++        line_colors = []
++        
++        # Emit initial vertex
++        line_vertices.append((pos_x, pos_y, pos_z))
++        # Color lookup for initial position
++        mag = get_magnitude(vector_field_tex, pos_x, pos_y, pos_z)
++        line_colors.append(magnitude_to_color(mag))
++        
++        geometry_step = geometry_sampling
++        step_count = 0
++        
++        for step in range(1, max_steps + 1):
++            # Boundary check
++            if (pos_x < 0 or pos_y < 0 or pos_z < 0 or 
++                pos_x > volume_size[0] or pos_y > volume_size[1] or pos_z > volume_size[2]):
++                break
+             
+-        # Sample vector field using trilinear interpolation
+-        # Note: In CUDA, this is done via tex3D<vectorFieldTex, float4>(pos)
+-        # Here we assume a helper function for clarity
+-        vec = sample_vector_field(pos_x, pos_y, pos_z, vector_field_tex)
+-        
+-        # Termination check: magnitude threshold
+-        mag = length(vec)
+-        if mag < 1e-6: # vmin threshold
+-            break
++            # Get vector at current position
++            vec = vector_field_tex.lookup(pos_x, pos_y, pos_z)
++            vx, vy, vz = vec.x, vec.y, vec.z
+             
+-        # Integration step (Euler for simplicity, can be swapped for RK4)
+-        # p_{i+1} = p_i + dt * V(p_i)
+-        next_x = pos_x + dt * vec.x
+-        next_y = pos_y + dt * vec.y
+-        next_z = pos_z + dt * vec.z
+-        
+-        # Update position
+-        pos_x = next_x
+-        pos_y = next_y
+-        pos_z = next_z
+-        
+-        # Geometry sampling: only emit vertex every geometry_sampling steps
+-        geometry_step_counter -= 1
+-        if geometry_step_counter == 0:
+-            geometry_step_counter = geometry_sampling
++            # Termination check: magnitude threshold
++            if sqrt(vx**2 + vy**2 + vz**2) < 1e-6:
++                break
++                
++            # Integration step
++            if use_rk4:
++                # RK4 Implementation
++                k1 = vec
++                k2 = vector_field_tex.lookup(pos_x + 0.5*dt*k1.x, pos_y + 0.5*dt*k1.y, pos_z + 0.5*dt*k1.z)
++                k3 = vector_field_tex.lookup(pos_x + 0.5*dt*k2.x, pos_y + 0.5*dt*k2.y, pos_z + 0.5*dt*k2.z)
++                k4 = vector_field_tex.lookup(pos_x + dt*k3.x, pos_y + dt*k3.y, pos_z + dt*k3.z)
++                
++                dx = (dt/6.0) * (k1.x + 2*k2.x + 2*k3.x + k4.x)
++                dy = (dt/6.0) * (k1.y + 2*k2.y + 2*k3.y + k4.y)
++                dz = (dt/6.0) * (k1.z + 2*k2.z + 2*k3.z + k4.z)
++            else:
++                # Euler Implementation
++                dx = dt * vx
++                dy = dt * vy
++                dz = dt * vz
+             
+-            # Write position
+-            out_vertices[out_vertex_idx].x = pos_x
+-            out_vertices[out_vertex_idx].y = pos_y
+-            out_vertices[out_vertex_idx].z = pos_z
++            # Update position
++            pos_x += dx
++            pos_y += dy
++            pos_z += dz
+             
+-            # Map magnitude to color
+-            # Normalize magnitude for texture lookup
+-            norm_mag = mag * magnitude_ctf_normalize_mult
+-            color = sample_color_transfer_function(norm_mag, magnitude_ctf_tex)
+-            
+-            out_vertex_colors[out_vertex_idx].x = color.x
+-            out_vertex_colors[out_vertex_idx].y = color.y
+-            out_vertex_colors[out_vertex_idx].z = color.z
+-            
+-            out_vertex_idx += 1
++            # Geometry sampling
++            geometry_step -= 1
++            if geometry_step == 0:
++                geometry_step = geometry_sampling
++                line_vertices.append((pos_x, pos_y, pos_z))
++                mag = get_magnitude(vector_field_tex, pos_x, pos_y, pos_z)
++                line_colors.append(magnitude_to_color(mag))
++                
+             step_count += 1
+             
+-    # Record the number of steps/vertices generated for this seed
+-    out_computed_steps[thread_id] = step_count
++        out_vertices.append(line_vertices)
++        out_colors.append(line_colors)
++        
++    return out_vertices, out_colors
++
++def get_magnitude(tex, x, y, z):
++    vec = tex.lookup(x, y, z)
++    return sqrt(vec.x**2 + vec.y**2 + vec.z**2)
++
++def magnitude_to_color(mag):
++    # Placeholder for transfer function logic
++    return (mag, mag, mag) # Grayscale for simplicity
+ ```
+ 
+@@ -159,27 +143,29 @@
+ 
+ ### [Adaptive Stream Line Seeding](5604-adaptive-stream-line-seeding.md)
+-Adaptive Stream Line Seeding dynamically refines the density of stream lines in regions of high flow divergence (such as turbulence or vortices) while maintaining sparse sampling in laminar areas. Unlike static seeding strategies that distribute points uniformly, this method iteratively subdivides pairs of neighboring stream lines when the distance between them exceeds a defined threshold, effectively creating denser surface representations where flow complexity is highest. It sets itself apart from [Stream Surfaces](7696-stream-surfaces.md) by focusing on the adaptive generation of individual trajectories rather than constructing continuous surfaces, and from static [Stream Lines](4796-stream-lines.md) by reacting to the geometric spread of the field during rendering.
++Adaptive Stream Line Seeding dynamically refines the density of stream lines in regions of high flow divergence, such as turbulence or vortices, while keeping sampling sparse in laminar areas. It iteratively subdivides pairs of neighboring stream lines when the distance between them exceeds a threshold, creating denser representations where flow complexity is highest. This contrasts with static seeding strategies and focuses on individual trajectory density rather than constructing continuous surfaces like [Stream Surfaces](7696-stream-surfaces.md).
+ 
+-### Directional Textured Tracelines
+-A flow visualization technique using 1D primitives (lines) to convey orientation and extent, enhanced with an animated 1D texture to indicate flow direction, which standard lines fail to show [S1, unofficial]. Each vertex of a line is assigned a texture coordinate in the range $[0, 1]$. The local texture coordinate of each vertex is shifted with a global parameter $\Delta t$ to move the texture along the line in the direction of the underlying flow field [S1, unofficial]. The 1D texture (e.g., a zebra-like pattern) is computed on the CPU once and downloaded to the GPU, requiring no updates for animation [S1, unofficial].
++### [Directional Textured Tracelines](6965-directional-textured-tracelines.md)
++Directional Textured Tracelines enhance standard 1D line primitives by overlaying an animated 1D texture (e.g., a zebra pattern) that moves along the line in the direction of the flow. This solves the ambiguity of standard lines, which indicate orientation and extent but not flow direction. It builds on [Stream Lines](4796-stream-lines.md) by adding temporal visual cues to static geometric trajectories.
++
++### [Stream Surfaces](7696-stream-surfaces.md)
++Stream surfaces visualize steady-state vector fields by stitching together adjacent streamlines to form a continuous geometric surface. This helps ascertain overall flow direction in areas where streamlines curl around each other, providing a unified geometric entity efficient for standard graphics hardware. However, they may suffer from a loss of tangential flow direction information compared to discrete lines.
+ 
+ ### Flow Geometry Bricks Rendering
+-A rendering approach for flow visualization (arrows and streamlines) using geometry bricks that hold range information of the visible region, constructed for the whole visible horseshoe region only when needed [S1, unofficial]. Streamlines are stored in a single vertex buffer and rendered as a line strip, while arrows are stored in an indexed vertex buffer to avoid redundant vertices [S1, unofficial]. All geometry buffers are rendered as opaque geometry before displaying the semi-transparent volume with back-to-front blending, using depth testing to accurately mix geometry and volume information [S1, unofficial].
++Flow Geometry Bricks Rendering is a technique for rendering flow visualization (arrows and streamlines) using geometry bricks that hold range information of the visible region [S2, unofficial]. It constructs render geometry for the whole visible region (e.g., a distorted horseshoe shape) only when needed, mapping directly from computation space to physical space [S2, unofficial]. Streamlines are stored in a single vertex buffer as a line strip, while arrows use an indexed vertex buffer [S2, unofficial]. All geometry is rendered as opaque before the semi-transparent volume to allow accurate depth testing and occlusion culling [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of seeds and $M$ is the number of integration steps per seed [S3, unofficial].
+-*   **Memory Complexity:** $O(N \cdot M / S_{geo})$ for the output vertex buffer, where $S_{geo}$ is the geometry sampling factor [S3, unofficial].
+-*   **Performance:** GPU acceleration (CUDA) allows real-time visualization of large datasets by evaluating stream lines in parallel across threads [S3, S4, unofficial].
+-*   **Strengths:** Reveals global flow structures, vortices, and connectivity; interactive seeding allows exploration [S3, unofficial].
+-*   **Limitations:** Requires careful selection of seed points to avoid clutter or missing features; integration errors can accumulate; distorted volumes require coordinate transformation [S1, S2, unofficial].
+-*   **When to use:** When understanding the global trajectory and connectivity of flow is more important than local vector direction at every point [S3, unofficial].
+-*   **When not to use:** When the field is unsteady (stream lines are for steady fields; path lines or streak lines are needed for unsteady fields, though not covered here) or when the field is too noisy for stable integration [S2, unofficial].
++*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of seeds and $M$ is the number of integration steps per seed. RK4 integration is approximately 4 times more expensive per step than Euler due to multiple texture lookups [S5, unofficial].
++*   **Memory Complexity:** $O(N \cdot M / \text{geometrySampling})$ for the output vertex buffers. Using double precision for integration positions increases register pressure but prevents error accumulation, while single precision is used for storage [S4, unofficial].
++*   **Performance:** Real-time performance is achievable on GPUs using CUDA, leveraging hardware-accelerated trilinear interpolation from 3D textures [S5, unofficial].
++*   **Strengths:** Provides clear visualization of flow topology, vortices, and connectivity. GPU implementation allows interactive rates for large datasets [S4, S5, unofficial].
++*   **Limitations:** Requires careful selection of seed points to avoid clutter or missing features. Integration errors can accumulate if step size is too large or precision is insufficient [S4, unofficial]. Self-intersection detection adds computational overhead [S3, unofficial].
+ 
+ ## Background
+-Stream lines were introduced as a fundamental technique for visualizing vector fields, computing trajectories by integrating ordinary differential equations (ODEs) [S2, unofficial]. The method has been widely implemented in GPU-based systems for real-time visualization, leveraging CUDA for parallel integration and texture-based interpolation [S3, S4, unofficial]. It is commonly used in fluid dynamics, aerodynamics, and video volume visualization to analyze optical flow and complex vector fields [S1, S3, unofficial].
++Stream lines are a fundamental technique in flow visualization, rooted in the mathematical definition of integral curves of vector fields [S1, unofficial]. The method was adapted for volume rendering and GPU acceleration in the mid-2000s, with notable implementations using CUDA for real-time visualization of 3D vector fields [S4, S5, unofficial]. Early work included interactive visualization of magnetic fields and current using Euler integration [S3, unofficial], and later extensions included handling distorted volumes (e.g., horseshoe shapes) and optical flow in video volumes [S2, unofficial].
+ 
+ ## Sources
+-[S1] GPU-assisted Multi-field Video Volume Visualization, https://www.semanticscholar.org/paper/b3eb5a9069e8d00fa52149b0ff85554801f0f917, fetched 2026-11-04 (unofficial)
+-[S2] Visualization of Surfaces and 3D Vector Fields, https://digital.library.unt.edu/ark:/67531/metadc3235/?q=vector field volume rendering, fetched 2026-10-28 (unofficial)
+-[S3] Realtime visualization of 3D vector fields using CUDA | Marek's blog, https://marekfiser.com/projects/realtime-visualization-of-3D-vector-fields-using-CUDA/, fetched 2026-10-28 (unofficial)
+-[S4] NightElfik/Vector-field-visualization-using-cuda NightElfik/Vector-field-visualization-using-cuda on GitHub, https://github.com/NightElfik/Vector-field-visualization-using-cuda, fetched 2026-10-29 (unofficial)+[S1] Multi-Field Visualization, https://kluedo.ub.rptu.de/files/2291/_diss.pdf, fetched 2026-10-27 (unofficial)
++[S2] GPU-assisted Multi-field Video Volume Visualization, https://www.semanticscholar.org/paper/b3eb5a9069e8d00fa52149b0ff85554801f0f917, fetched 2026-11-04 (unofficial)
++[S3] Visualization of Surfaces and 3D Vector Fields, https://digital.library.unt.edu/ark:/67531/metadc3235/?q=vector field volume rendering, fetched 2026-10-28 (unofficial)
++[S4] Realtime visualization of 3D vector fields using CUDA | Marek's blog, https://marekfiser.com/projects/realtime-visualization-of-3D-vector-fields-using-CUDA/, fetched 2026-10-28 (unofficial)
++[S5] NightElfik/Vector-field-visualization-using-cuda NightElfik/Vector-field-visualization-using-cuda on GitHub, https://github.com/NightElfik/Vector-field-visualization-using-cuda, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,346 @@
+Contribute to taojin-6/volumetric_kit_recon development by creating an account on GitHub.
+
+test(codec): round-trip a mesh-derived volume against its source mesh by taojin-6 · Pull Request #94 · taojin-6/volumetric_kit_recon · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+taojin-6
+commented
+Sep 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Stacked on #81, rebased onto #93's merge. This gives the codec a fixture with ground truth. A fused scan can only be measured against the volume before encoding, and room0 has no ground-truth mesh beside it.
+What the test does
+recon_codec_mesh_roundtrip runs one pipeline end to end:
+Mesh → TSDF: a mesh goes through tsdf::MeshIntegrator.
+TSDF → bytes: the forward DCT, then write_intra_frame.
+Bytes → grid: read_intra_frame, then the inverse DCT into a fresh grid.
+Grid → mesh: marching cubes.
+The decoded surface is then measured against the source mesh in two directions:
+accuracy: every decoded vertex position's distance to the source surface.
+coverage: every point of a lattice over the source surface, half a voxel apart, measured to the decoded triangles. This is where a hole shows.
+The decoded frame must also equal the one written, coefficient for coefficient, since a surface cannot see a field that was scaled as a whole.
+The uncompressed volume's surface gets the same measurement as the floor, so what the codec adds is the difference. The test uses the codec's internal headers by include path, as the other codec tests do, so it doesn't wait for Encoder / Decoder.
+Figures
+Apple M5 Max, Release, 5 mm voxels, the 40 mm band:
+fixture
+frame
+of raw
+decoded rms / max
+floor rms / max
+0.3 m sphere, K = 32 (default)
+21.7 KB
+0.8%
+0.39 / 1.42 mm
+0.018 / 0.155 mm
+same, K = 512
+37.6 KB
+1.4%
+0.22 / 1.08 mm
+same
+0.22 m cube, K = 32
+13.5 KB
+0.5%
+0.57 / 2.70 mm
+0.14 / 1.10 mm
+The cube's floor is marching cubes' error, not the field's: it cuts the edges and corners back by under a voxel (4.1 mm of coverage) before anything is compressed.
+Why a plain, axis-aligned cube. The first cut used the tsdf test's dented cube. After the rebase, Signed takes its sign from the closest face, and the dent is outside that rule: part of the region past its 56° edges reads the wrong side, and the uncompressed surface grew stray sheets up to 40 mm off. A plain cube turned off the grid's axes fails too. Beyond a corner, on the line that continues an edge, two tied faces' normals are perpendicular to the offset and rounding picks the sign (72 stray vertices, up to 26 mm off). An axis-aligned cube off the voxel lattice has no voxel on those lines. The sphere's figures did not change.
+The bounds sit at about twice these figures (1.8x at the tightest), which is enough to catch a regression and not rounding. They are what PR 4's room0 tuning can hold the defaults to.
+Cost of the test
+The reference distances go through a small spatial hash with a ring search, over unique vertex positions. The search stops at the exact distance to the cells it has not visited. Each mesh is fused and hashed once, then coded at every set of params. The test takes 0.52 s in Release and 43 s under ASan + UBSan.
+What review changed
+The frame is compared with the one written. Doubling every decoded coefficient passed before, and a reader planted to do it now fails.
+Coverage is sampled every half voxel, not every two. With one surface voxel's mask bit cleared on the sphere, the two-voxel lattice passed 3 of 12 placements. At half a voxel all 12 fail, the lowest at 4.27 mm against the 2.5 mm bound.
+The dented cube's bounds were 1.4–1.6x its figures; the plain cube's sit at about 2x. K = 512 is bounded on its own rather than against K = 32.
+The integrator's stats are checked, NaN vertices are refused, and a missing decoded block is a FAIL line, not a throw.
+The mesh fixtures and the closest point moved to tests/test_meshes.hpp, shared with the volume and tsdf triangle tests. This test's copy returned NaN for a zero-length edge.
+Verification
+macOS, M5 Max, Release: 34/34.
+The new test and the two tests that now share test_meshes.hpp pass under ASan + UBSan.
+The changed tests compile clean with GCC 13 at -O3 -Werror (ubuntu:24.04).
+Pre-commit hooks pass.
+The decision entry and CLAUDE.md record the figures.
+🤖 Generated with Claude Code
+taojin-6
+self-assigned this
+Sep 28, 2026
+taojin-6
+mentioned this pull request
+Sep 28, 2026
+feat(codec): measure the codec on room0, and take its defaults from that (4/5)
+#95
+Merged
+taojin-6
+added a commit
+that referenced
+this pull request
+Sep 28, 2026
+feat(eval): quality measurement as a tier of its own
+…
+e4ad714
+```
+The mesh-distance metric came in with the room0 measurement as a header
+in examples/common. It chose the codec's defaults, the codec's
+ground-truth test (#94) carries its own copy, and the per-band study
+will be judged on it. That makes it library code: recon_eval, namespace
+volumetric_kit::recon::eval, branching off recon_mesh. Nothing in the
+pipeline links it. It is named eval, not metrics, which core's
+StageMetrics already means.
+
+eval/mesh_distance.hpp:
+- MeshDistance: point-to-surface distance up to a reach, through a hash
+  of reach-sized cells, over a copy of the triangles (the header kept a
+  reference). create() refuses a bad reach, a ragged index count and an
+  index past the vertices, where the header read out of bounds.
+- summarize, and compare_meshes giving accuracy and coverage plus an
+  F-score at an optional threshold, which must lie in [0, reach].
+
+codec_replica (and codec_stream.hpp / codec_sweep.hpp) measure with it,
+and report the F-score at half a voxel.
+
+The 2026-09-27 decision records why this is infrastructure rather than
+one of the excluded research harnesses. It also records that a stride
+subsample varies about 0.5% run to run, because marching cubes' vertex
+order follows its atomics.
+
+Tests: recon_eval_mesh_distance replaces the header's test and adds the
+F-score (exactly 1 and 0 across a known shift, the exact recall of half
+a plane read off its extent) and every refusal. Suite 35/35 in Release;
+the new test passes under ASan + UBSan.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+taojin-6
+mentioned this pull request
+Sep 28, 2026
+feat(eval): quality measurement as a tier of its own
+#96
+Merged
+taojin-6
+added a commit
+that referenced
+this pull request
+Sep 28, 2026
+feat(eval): quality measurement as a tier of its own
+…
+6c63ffc
+```
+The mesh-distance metric came in with the room0 measurement as a header
+in examples/common. It chose the codec's defaults, the codec's
+ground-truth test (#94) carries its own copy, and the per-band study
+will be judged on it. That makes it library code: recon_eval, namespace
+volumetric_kit::recon::eval, branching off recon_mesh. Nothing in the
+pipeline links it. It is named eval, not metrics, which core's
+StageMetrics already means.
+
+eval/mesh_distance.hpp:
+- MeshDistance: point-to-surface distance up to a reach, through a hash
+  of reach-sized cells, over a copy of the triangles (the header kept a
+  reference). create() refuses a bad reach, a ragged index count and an
+  index past the vertices, where the header read out of bounds.
+- summarize, and compare_meshes giving accuracy and coverage plus an
+  F-score at an optional threshold, which must lie in [0, reach].
+
+codec_replica (and codec_stream.hpp / codec_sweep.hpp) measure with it,
+and report the F-score at half a voxel.
+
+The 2026-09-27 decision records why this is infrastructure rather than
+one of the excluded research harnesses. It also records that a stride
+subsample varies about 0.5% run to run, because marching cubes' vertex
+order follows its atomics.
+
+Tests: recon_eval_mesh_distance replaces the header's test and adds the
+F-score (exactly 1 and 0 across a known shift, the exact recall of half
+a plane read off its extent) and every refusal. Suite 35/35 in Release;
+the new test passes under ASan + UBSan.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Base automatically changed from
+feat/tsdf-mesh-integrator
+to
+feat/volume-allocate-triangles
+September 28, 2026 04:09
+taojin-6
+and others
+added 4 commits
+September 28, 2026 00:10
+test(codec): round-trip a mesh-derived volume against its source mesh
+…
+791f349
+```
+A mesh goes through tsdf::MeshIntegrator, the forward DCT, v1 frame bytes
+and back, the inverse DCT and marching cubes. The decoded surface is then
+measured against the source mesh, for accuracy (vertex to source) and
+coverage (source to decoded surface, where a hole shows). The
+uncompressed volume's surface gets the same measurement, as the floor.
+A fused scan cannot be measured this way, since room0 has no
+ground-truth mesh beside it.
+
+At the default parameters, on a 0.3 m sphere (667 blocks), the frame is
+21.7 KB, 0.8% of the raw tsdf + weight. The decoded surface is 0.39 mm
+RMS and 1.42 mm at worst from the source, against 0.018 / 0.155 mm
+uncompressed. The bounds sit at about twice those figures (M5 Max,
+Release).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+docs(codec): record the ground-truth round trip's figures
+…
+a886167
+```
+The round trip gives the codec a fixture with ground truth. At the
+default parameters a 0.3 m sphere's frame is 0.8% of the raw tsdf +
+weight and decodes to 0.39 mm RMS from the source mesh, against 0.018 mm
+uncompressed.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+test(codec): check the frame decodes losslessly, and sample coverage …
+…
+6ddf31f
+```
+…finely enough to see a hole
+
+Addresses the review of the ground-truth round trip.
+
+- The decoded frame is compared with the one written: coefficients,
+  masks, params and trunc_dist. A surface cannot see a field scaled as a
+  whole, so a reader that doubled every coefficient passed; it now fails
+  at the coefficient comparison.
+- Coverage samples every half voxel, not every two. With one surface
+  voxel's mask bit cleared on the sphere, the old lattice passed 3 of 12
+  placements; the new one reads at least 4.27 mm in all 12, against the
+  2.5 mm bound.
+- The cube's bounds were 1.4-1.6x its figures and are now about 2x, with
+  kReach raised to 4 cm to stay above them. K = 512 is bounded on its own
+  rather than against K = 32, which is not a property of this metric.
+- The integrator's stats are checked (every triangle took part, blocks
+  written == blocks coded), a NaN vertex is refused before a sort or a hash cell
+  sees it, and a missing decoded coord is a FAIL line rather than a throw.
+- Each mesh is fused and its source hashed once, then coded at every
+  params; the ring search stops at the exact distance to the unvisited
+  cells. 0.58 s in Release and 43 s under ASan + UBSan, from 128 s with
+  the finer lattice alone.
+- Mesh, corner, closest_point, orient_outward and dented_cube move to
+  tests/test_meshes.hpp, shared with the volume and tsdf triangle tests.
+  This test's copy of closest_point returned NaN for a zero-length edge.
+- grid_params() starts from VoxelGridParams::defaults(), the raw size is
+  named once, the printed voxels are coverage's, the header says coverage
+  is measured to triangles, and a TODO(codec) marks the move onto
+  Encoder / Decoder.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+test(codec): measure a plain cube, which closest-face signing handles
+…
+c5b6c77
+```
+Rebased onto #93, whose Signed now takes each voxel's sign from the
+closest face. The dented cube is outside that rule: part of the region
+past its 56-degree edges reads the wrong side, and its uncompressed
+surface grew stray sheets up to 40 mm off the source, failing the floor
+bound. The sphere's figures are unchanged.
+
+A plain cube turned off the grid's axes fails too, more quietly. Beyond
+a corner, on the line continuing an edge, two tied faces' normals are
+perpendicular to the offset and rounding picks the sign: 72 stray
+vertices up to 26 mm off. So the fixture is the plain cube, axis-aligned
+and off the voxel lattice, split out of dented_cube in test_meshes.hpp.
+It measures 0.57 / 2.70 mm decoded rms / max against a 0.14 / 1.10 mm
+floor, in a 13.5 KB frame (0.5% of raw), and its bounds are reset to
+about 2x those figures.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+taojin-6
+force-pushed
+the
+feat/codec-mesh-roundtrip
+branch
+from
+85db7bf to
+c5b6c77
+Compare
+September 28, 2026 04:16
+Hide details
+View details
+taojin-6
+merged commit ca827a1
+into
+feat/volume-allocate-triangles
+Sep 28, 2026
+22 of 24 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+taojin-6
+deleted the
+feat/codec-mesh-roundtrip
+branch
+September 28, 2026 04:25
+taojin-6
+added a commit
+that referenced
+this pull request
+Sep 28, 2026
+feat(eval): quality measurement as a tier of its own
+…
+b53af1f
+```
+The mesh-distance metric came in with the room0 measurement as a header
+in examples/common. It chose the codec's defaults, the codec's
+ground-truth test (#94) carries its own copy, and the per-band study
+will be judged on it. That makes it library code: recon_eval, namespace
+volumetric_kit::recon::eval, branching off recon_mesh. Nothing in the
+pipeline links it. It is named eval, not metrics, which core's
+StageMetrics already means.
+
+eval/mesh_distance.hpp:
+- MeshDistance: point-to-surface distance up to a reach, through a hash
+  of reach-sized cells, over a copy of the triangles (the header kept a
+  reference). create() refuses a bad reach, a ragged index count and an
+  index past the vertices, where the header read out of bounds.
+- summarize, and compare_meshes giving accuracy and coverage plus an
+  F-score at an optional threshold, which must lie in [0, reach].
+
+codec_replica (and codec_stream.hpp / codec_sweep.hpp) measure with it,
+and report the F-score at half a voxel.
+
+The 2026-09-27 decision records why this is infrastructure rather than
+one of the excluded research harnesses. It also records that a stride
+subsample varies about 0.5% run to run, because marching cubes' vertex
+order follows its atomics.
+
+Tests: recon_eval_mesh_distance replaces the header's test and adds the
+F-score (exactly 1 and 0 across a known shift, the exact recall of half
+a plane read off its extent) and every refusal. Suite 35/35 in Release;
+the new test passes under ASan + UBSan.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+taojin-6
+mentioned this pull request
+Sep 28, 2026
+feat(volume,tsdf): a triangle mesh into the TSDF volume, signed or as a shell
+#81
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

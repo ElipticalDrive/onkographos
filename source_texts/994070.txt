@@ -1,0 +1,111 @@
+A high-performance, GPU-driven voxel terrain system for Unreal Engine 5.8 featuring pluggable LOD strategies, hybrid rendering architecture, and support for multiple world modes. - G115: voxel.Mesh.RemeshAll re-meshes with streaming paused by draquel · Pull Request #250 · draquel/VoxelWorlds
+
+G115: voxel.Mesh.RemeshAll re-meshes with streaming paused by draquel · Pull Request #250 · draquel/VoxelWorlds · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+draquel
+commented
+Nov 3, 2026
+Copy link
+Copy Markdown
+Owner
+G115
+voxel.Mesh.RemeshAll did not apply a mesher cvar change in F2.9's bisect. Traced on main:
+Streaming running, it worked. It re-meshed every interior and restaled every seam. The finding's seam guess was wrong: the seam registry restales a chunk's seams whatever content version it is passed.
+Streaming paused, it did nothing. F2.9 held its scene with vox.Freeze 1 streaming. The paused tick (F3.4's) launched only the chunks a recreated scene proxy lost and ran no seam scheduler, so RemeshAll's dirtied chunks and restaled seams waited for the resume.
+Evidence. PlanetTest, 45°N 20°E, a 16:48 sun. A temporary per-job probe cvar moved every chunk and seam mesh 60 uu; shots are from the pawn's view, with the saves set aside before every PIE. Mean absolute difference out of 255 (the run-to-run floor is 0.23–0.40, the probe itself 7.5):
+Build, streaming
+Live RemeshAll vs before
+vs probe set before PIE
+main, running
+—
+0.39 (applied, shadows included)
+main, paused
+0.42 (nothing applied: the finding's 0.4)
+7.53
+this PR, paused
+7.49
+0.32 (applied)
+Change
+UVoxelChunkManager::RemeshAllLoadedChunks() marks every loaded chunk dirty. While streaming is paused it also enlists the Loaded and Meshing chunks for the paused tick and turns on its seam rebuild. A chunk already queued for a LOD change keeps that request for the resume.
+TickPausedRenderRecovery is renamed TickWhilePaused, with the set and flag renamed PausedRemeshChunks and bPausedRemeshActive. It launches the enlisted chunks' meshes and keeps a chunk that is re-queued after its mesh lands. After a paused RemeshAll it also runs TickSeamScheduler (new bPausedSeamRebuild).
+voxel.Mesh.RemeshAll calls it and says in its log when streaming is paused.
+New test VoxelWorlds.Streaming.RemeshAll.Planet / .Plane (a DC planet and an MC plane, three LOD bands), with streaming running and paused. It checks for a mesh job per loaded chunk, every chunk mesh and seam bucket submitted again, no residency or LOD change, and identical geometry. Without the fix, the paused half runs 0 jobs (verified).
+FRecordingMeshRenderer now counts submissions per chunk and per seam owner.
+Docs: STREAMING_AND_SEAMS "One tick" and its diagnostics row, and the renamed tick in RENDERING_SYSTEM.
+Normal streaming is unchanged.
+Gates (parent ec7e135 + this branch, port 8082)
+Build: no new warning (the full build has Claudius' CS0618 only, which is the baseline).
+-DisableUnity: 23 errors, the same as main's.
+Headless suite: main 774/774, this change 776/776. No warning kind differs.
+Mesh digests: 209 lines, identical.
+Editor gate: 19/19 Success; the 111 parity lines are identical to the record.
+check_docs: 0 broken links, 0 new unknown names.
+A new finding goes to the parent: G118, voxel.Mesh.MCBoundaryMorphWidth reaches no mesh the world draws or cooks.
+🤖 Generated with Claude Code
+draquel
+and others
+added 2 commits
+November 3, 2026 13:49
+G115: voxel.Mesh.RemeshAll re-meshes with streaming paused
+…
+94502bb
+```
+RemeshAll re-meshed every interior and restaled every seam whenever streaming
+ran (a per-job mesher cvar change showed in PIE), but it changed nothing while
+streaming was paused (`vox.Freeze 1 streaming`, `voxel.Stream.Enabled 0`), the
+usual way to hold a scene for an A/B: the paused tick launched only the chunks
+a recreated scene proxy lost (F3.4) and ran no seam scheduler, so the dirtied
+chunks and their restaled seams waited for the resume. F2.9's bisect held its
+scene that way, which is how G115 was seen.
+
+- UVoxelChunkManager::RemeshAllLoadedChunks: marks every loaded chunk dirty
+  (MarkChunkDirty restales its seams whatever the content version); while
+  paused it enlists the Loaded and Meshing ones for the paused tick and turns
+  on its seam rebuild. A chunk already queued (a LOD change) is not enlisted.
+- The paused tick (TickPausedRenderRecovery -> TickWhilePaused; the set and
+  flag renamed PausedRemeshChunks, bPausedRemeshActive) launches those chunks'
+  meshes, keeps a chunk re-queued after its mesh landed, and runs the seam
+  scheduler once a paused RemeshAll asked for it.
+- voxel.Mesh.RemeshAll calls it and says when streaming is paused.
+- Test Streaming.RemeshAll.Planet / .Plane (DC planet, MC plane, three LOD
+  bands): streaming running and paused, a mesh job per loaded chunk, every
+  chunk mesh and seam bucket submitted again, no residency or LOD change, the
+  geometry as before. Without the fix the paused half runs 0 jobs.
+- FRecordingMeshRenderer counts submissions per chunk and seam owner.
+
+Normal streaming is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+G115: document the paused tick's in-place re-mesh
+…
+3c59aca
+```
+STREAMING_AND_SEAMS "One tick": TickWhilePaused launches the chunks re-meshed
+in place (a recreated proxy's, F3.4; voxel.Mesh.RemeshAll's, G115) and runs the
+seam scheduler after a paused RemeshAll; the diagnostics row. RENDERING_SYSTEM:
+the renamed tick.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+draquel
+merged commit bd80cd2
+into
+main
+Nov 3, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

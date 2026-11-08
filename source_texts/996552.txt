@@ -1,0 +1,271 @@
+Cross-platform voxel sandbox engine built from scratch in C++20 with Vulkan and SDL3. - perf(chunk): replace activeVoxels bitset with compact per-section occupancy metadata by gkehren · Pull Request #115 · gkehren/ft_vox
+
+perf(chunk): replace activeVoxels bitset with compact per-section occupancy metadata by gkehren · Pull Request #115 · gkehren/ft_vox · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+gkehren
+commented
+Sep 4, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Closes #105.
+Summary
+The raw voxel type was already the canonical per-cell occupancy source (type != AIR, and ChunkManager::isVoxelActive used it directly). On top of it, every chunk maintained a std::bitset<CHUNK_VOLUME> activeVoxels (8 KiB) that generation rebuilt with a full 65,536-voxel pass, and every full remesh copied all voxel types into a 64 KiB typeScratch and rescanned it through computeOccupancyY() just to find the occupied Y range. This PR removes both redundant representations and replaces them with 32 bytes of per-section occupancy metadata, leaving the canonical voxel type as the only per-cell truth.
+Update — review pass applied (commits 0629107 + 77f9596): the first cut had prepareVoxelStorageForGeneration() air-fill the borrowed block, which silently doubled the pre-generation CHUNK_VOLUME clear and re-opened #93. That fill is removed: generateChunkInto() is again the sole authoritative reset, and the lifecycle is now an explicitly documented three-state contract. Benchmark re-measured with clean provenance; see the updated table below.
+Data model
+std::array<uint16_t, 16> m_sectionNonAir — non-air voxel count per vertical section (16 sections × 16 voxels). ~8 KiB → 32 B per chunk.
+generateTerrain() populates it with one canonical read-only pass after generateChunkInto() (the issue explicitly allows "one cheap canonical pass"; the removed pass existed solely to rebuild the bitset).
+setVoxel() maintains the count incrementally with explicit ++/-- guarded by Debug underflow/overflow asserts (a desync is a hard failure, not a silent uint16 wraparound). Type→type rewrites leave counts untouched.
+Chunk::isVoxelActive() point queries answer from the voxel type itself (still O(1)).
+Occupancy lifecycle contract (documented on prepareVoxelStorageForGeneration() and ResetMode)
+No storage — m_storage == nullptr, occupancy metadata == 0.
+Prepared for generation — storage borrowed ownership only, bytes stay stale/unspecified (prepareVoxelStorageForGeneration() does not initialize voxel bytes), metadata == 0, no consumer may inspect voxel contents. Edits targeting the chunk answer "logically empty": a placement defers while generation is in transit, a deletion is refused.
+Generated/editable — backing valid, metadata exactly matches it; generateChunkInto() remains the sole authoritative initialization; edits keep both in lockstep.
+effectiveVoxelType() implements state 2: it never reads stale backing for edit no-op decisions (issue #115 review item 3). The invariant m_storage == nullptr ⇒ metadata == 0 is restored everywhere backing changes, including both move operations zeroing the moved-from side after the transfer.
+Mesher integration
+buildMesh() derives the occupied Y span from the metadata — section-granular, then refined to byte-exact layer bounds inside the two boundary sections — so the 64 KiB copy + scan per remesh is gone (computeOccupancyY() removed).
+Empty Y slices between occupied sections are skipped outright (no vertical neighbor borders exist).
+buildLODMesh() starts each column scan at the last occupied section (Debug-asserted bound).
+buildMeshRanged/buildLODMeshRanged are probe-testable so tests force a full [0, CHUNK_HEIGHT−1] range and prove byte-identical meshes.
+Telemetry
+New telemetry::StageSample single-stage scope measures the real occupancy prepass (occupiedSpanY + refineOccupiedSpanY), including empty chunks that early-return. One recorded sample per full build attempt: mesh.occupancy n == MeshBuild n in the report.
+The empty Occupancy phase marker inside the greedy body is removed; Skylight → Blocklight → FacesGreedyAO now measure real work only. MeshSample stays untouched for the sequential chain.
+Tests (test_chunk_lifecycle)
+checkActiveCacheInSync renamed checkOccupancyMetadataInSync; brute-force validation of counts, derived mask and span after every lifecycle step.
+Deterministic property-style section: metadata vs brute force across 3,000 randomized mutations (per-edit shadow count + isVoxelActive agreement), full drain to zero, first/last-block transitions at every seam class, all-air inner section, empty-chunk meshing.
+Mesh equivalence: generated terrain and a synthetic layout (interior run of empty sections, both seam classes y=15/16 & y=239/240, isolated water section) — greedy and LOD builds via metadata bounds vs forced full range, byte-for-byte, covering the d==1 slice skip and the water path.
+New lifecycle sections: moved-from chunks carry empty metadata (ctor + assign); poison-backing proof that prepare() does not clear a recycled block while generation over poison stays deterministic ([Terrain/Performance] Avoid redundant pooled voxel clearing before generateChunkInto #93 locked); ForGeneration desync-window lifecycle; edit decisions never consult stale backing.
+Benchmark (docs/benchmarks/issue105/benchmark.txt)
+Seed 42, 60 s + 15 s warmup, vsync off, RTX 4070 Ti, clean committed trees on both sides (raw reports committed):
+Metric
+main 3bb2a65
+this PR 0629107
+Δ
+occupancy.bytes (persistent)
+72,859,648 B (~69.5 MiB)
+284,608 B
+−99.6%
+Occupancy prepass per build (measured)
+~30.4 µs (448.6 ms total)
+~1.9 µs (28.2 ms total)
+−93.7%
+MeshLOD avg
+45.7 µs
+6.7 µs
+−85.2%
+MeshBuild avg
+2.997 ms
+2.483 ms
+−17.2% (variance noted)
+TerrainGen (--gen-perf median)
+1.452 ms/chunk
+1.439 ms/chunk
+≈ parity
+isVoxelActive point query
+O(1) bitset
+O(1) canonical type
+semantics kept
+Score
+9820
+9924
+within noise
+The MeshBuild delta includes run variance — the skylight/faces phases are code-identical to main; the structural, phase-isolated wins are the prepass (−94%) and LOD (−85%). Report invariant checked: occupancy.bytes == ChunkPool capacity × 32 B (8,894 × 32 = 284,608).
+Validation
+Release ctest: 18/18; Debug assert subset (ChunkLifecycle, BorderPool, MeshResultPool, VoxelPool, StreamOpt, Terrain, WorkloadTelemetry): 7/7.
+ChunkLifecycle repeated ×20 in Release and Debug: 20/20 each (new Debug asserts fire nowhere).
+test_terrain --gen-perf A/B (item 28): branch ≈ main, no new initialization cost.
+git diff --check clean; ASan/TSan left to CI per standing agreement.
+Notes
+Acceptance item "no separate full CHUNK_VOLUME pass solely to rebuild activeVoxels" is satisfied exactly: that pass is gone. The replacement is a single read-only pass filling the 16 counters the mesher requires (sanctioned by the issue's "one cheap canonical pass if required").
+Skylight/blocklight scans are deliberately untouched: face light sampling reads skyLight one cell outside the occupied span.
+The 16 × 16-voxel section metadata is the data-model groundwork for the later section-based meshing issue.
+Update 2 — dernier blocker corrigé (d7875cc)
+Un chunk chargé mais pas encore généré prenait des edits directs dès qu'aucun job ne le possédait : écriture dans des bytes de pool stale + passage GENERATED derrière le dos du pipeline de génération. Le contrat est maintenant :
+```
+UNLOADED (in transit ou non)  -> defer (queue)
+GENERATED/MESHED + in transit -> defer (queue)
+GENERATED/MESHED + !transit   -> apply immediately
+```
+mustDeferVoxelEdit() : gate unique (!chunk || UNLOADED || inTransit), utilisée par queueOrApplyEdit() et applyPendingEdits() ; assert Debug sur le chemin apply (isVoxelBackingReadable() && !inTransit).
+Chunk::isVoxelBackingReadable() : helper public exprimant le contrat perf(chunk): replace activeVoxels bitset with compact per-section occupancy metadata #115 (state != UNLOADED), repris par effectiveVoxelType() (UNLOADED = AIR logique, inchangé) et par les asserts.
+Ordre des checks dans applyPendingEdits : le generation-stamp (staleness) est évalué avant le keep-for-UNLOADED — un chunk recyclé droppé ses edits en queue exactement comme avant.
+deferAll du groupe = mustDeferVoxelEdit(target) : une cible UNLOADED diffère ses miroirs avec elle (transaction feat(chunk): transient pooled mesh build buffers (issue #104) #114) ; une cible GENERATED applique immédiatement et chaque miroir décide selon l'état de son propre chunk.
+Aucun contournement du type « initialiser le backing pour éditer » : le defer est le comportement.
+Tests : la suite deferred-edit (13e) génère désormais ses cinq chunks manager synchrone­ment (sans thread pool, generatePendingVoxels est un no-op), conformément au contrat que ses attentes d'application immédiate supposent. Nouvelle section de bout en bout : delete refusé sans queue, place acceptée mais queue (état et backing intacts), coalescing pendant l'attente (place→delete→place = 1 entrée, dernier état gagne), UNLOADED+inTransit identique, génération complète puis application des edits (terrain plein préservé, metadata synchro), et miroir vers un voisin UNLOADED qui s'applique après la génération du voisin (shell, revision bump, metadata).
+Validation : Release ctest 18/18 ; sous-suite Debug (ChunkLifecycle, Terrain, StreamOpt, MeshResultPool, WorkloadTelemetry) 5/5 ; ChunkLifecycle ×20 Release et Debug 20/20 ; git diff --check propre ; smoke benchmark : score 9924 (identique au run de référence), occupancy.bytes 284 608 B, mesh.occupancy n == MeshBuild n — aucun invariant global cassé (pas d'A/B complet, le hot path est inchangé).
+gkehren
+added 5 commits
+September 5, 2026 01:07
+perf(chunk): replace activeVoxels bitset with compact per-section occ…
+…
+8a99a87
+```
+…upancy metadata
+
+The raw voxel type is the canonical per-cell occupancy source; the
+per-chunk std::bitset<CHUNK_VOLUME> duplicate (8 KiB, ~69 MiB across
+~8.9k pooled chunks) only mirrored it and cost a full-volume pass to
+rebuild after every generation, plus per-edit bit maintenance.
+
+Replace it with one std::array<uint16_t, 16> counting non-air voxels per
+vertical section (16 sections of 16 voxels, 32 B per chunk):
+
+- generateTerrain() fills it with one canonical read-only pass (16
+  counters, no bitset writes) after generateChunkInto();
+- setVoxel() applies an incremental +/-1 delta on air<->solid flips
+  (type->type rewrites leave counts untouched);
+- isVoxelActive() point queries now answer from the voxel type itself
+  (ChunkManager::isVoxelActive already did);
+- empty storage invariants are pinned wherever backing changes
+  (prepare/ensure/retire/reset/moves).
+
+Meshing: the full-quality mesher no longer copies all 65,536 voxel types
+into a 64 KiB typeScratch and rescans them through computeOccupancyY()
+(removed) on every build. buildMesh() derives the occupied Y span from
+the metadata (section-granular, refined to byte-exact layer bounds inside
+the two boundary sections) and skips empty Y slices outright; the LOD
+mesher starts each column scan at the last occupied section. Byte-exact
+mesh equivalence is enforced by tests against forced full-range builds.
+
+Tests (test_chunk_lifecycle): the probe/snapshot state now carries the
+section counters, sync is verified against a brute-force voxel scan after
+generation and edits, and a new deterministic property-style section
+compares metadata against brute force across 3,000 randomized
+place/delete/type mutations, a full drain back to zero, first/last-block
+section transitions at every seam class, and empty-chunk meshing.
+test_stream_opt drops the removed helper's unit test; telemetry doc and
+engine-architecture reflect the new occupancy.bytes scale.
+
+Close #105
+```
+bench(terrain): record issue #105 before/after occupancy benchmark
+…
+73970df
+```
+Raw 60s report at revision 8a99a87 plus an issue105/ summary contrasting
+main 3bb2a65: occupancy.bytes 72,859,648 -> 284,608 B (-99.6%, 8 KiB ->
+32 B per pooled chunk), mesh.occupancy prepass 448.6 -> 0.47 ms total
+(-99.9%), MeshLOD 45.7 -> 8.5 us per build (-81%), MeshBuild 2.997 ->
+2.923 ms (-2.5%), score within noise (9820 -> 9865).
+```
+fix(chunk): restore single-generation-clear contract and harden occup…
+…
+0629107
+```
+…ancy lifecycle
+
+Review pass on #115:
+
+- prepareVoxelStorageForGeneration() no longer air-fills the acquired
+  voxel block: it is ownership only and generateChunkInto() remains the
+  single authoritative CHUNK_VOLUME reset (issue #93 - the added fill had
+  doubled the clear on the load path). Logical occupancy metadata is
+  zeroed instead, and the three-state occupancy lifecycle (no storage /
+  prepared / generated) is documented on prepare() and ResetMode.
+- ChunkManager::effectiveVoxelType() no longer reads the stale backing of
+  an UNLOADED chunk to decide edit no-ops: an ungenerated chunk is
+  logically empty, so a placement defers while generation is in transit
+  and a deletion is refused. The pending-edit overlay still applies.
+- Move ctor/assignment zero the moved-from occupancy metadata after the
+  transfer, restoring "no storage => empty metadata" for moved-from
+  chunks (and only after the copy - zeroing before it would wipe the
+  destination's counts).
+- setVoxel() occupancy deltas use explicit --/++ with Debug underflow/
+  overflow asserts instead of uint16 wraparound arithmetic, plus a
+  validateOccupancyMetadata() debug helper on the span query.
+- buildLODMeshRanged() asserts its scan-top bound.
+- Telemetry: new StageSample scope measures the real occupancy prepass
+  (occupiedSpanY + refineOccupiedSpanY, including empty-chunk early
+  returns); the empty Occupancy phase marker in the greedy body is gone,
+  so Skylight/Blocklight/FacesGreedyAO measure real work only.
+- Tests: moved-from metadata checks, poison-backing proof that prepare()
+  does not clear recycled storage and that generation over poison is
+  deterministic, ForGeneration desync-window lifecycle, edit decisions
+  never consulting stale backing, and a synthetic mesh-equivalence case
+  (interior empty sections, both seam classes, isolated water section)
+  for greedy and LOD paths. checkActiveCacheInSync renamed to
+  checkOccupancyMetadataInSync.
+```
+bench(terrain): re-measure issue #105 after the lifecycle review pass
+…
+77f9596
+```
+Clean-provenance run at 0629107 (no local or untracked files at build
+time) plus a regenerated summary with the full metric table: occupancy
+prepass 30.4 -> 1.9 us/job as actually measured by the new StageSample
+scope (n equals MeshBuild n), MeshLOD 45.7 -> 6.7 us, MeshBuild 2.997 ->
+2.483 ms (variance noted - skylight/faces phases are code-identical to
+main), occupancy.bytes 284,608 B == 8894 chunk slots x 32 B, TerrainGen
+parity via --gen-perf medians (1.452 vs 1.439 ms/chunk). Telemetry doc
+describes the dedicated occupancy scope.
+```
+fix(chunk-manager): defer voxel edits on UNLOADED chunks until terrai…
+…
+d7875cc
+```
+…n generation lands
+
+Last #115 review blocker: a chunk loaded but not yet generated (or
+recycled back to UNLOADED) took direct edits as soon as no job owned it,
+writing into stale pool bytes and marking it GENERATED behind the
+generation pipeline's back.
+
+- New gate mustDeferVoxelEdit(): an edit defers when the chunk is
+  missing, UNLOADED (regardless of transit state), or in transit.
+- queueOrApplyEdit() uses it for the queue/apply decision and asserts on
+  the apply path that the backing is readable and unowned.
+- applyPendingEdits() keeps entries whose chunk is not yet generated;
+  the generation-stamp staleness check still runs first, so a recycled
+  chunk drops its queued edits exactly as before.
+- scheduleLogicalEdit() computes the group deferAll from the same gate:
+  an UNLOADED target defers its mirrors with it (transaction semantics
+  from #114), while a GENERATED target applies immediately and each
+  mirror decides on its own chunk's state.
+- effectiveVoxelType() now expresses its UNLOADED = logical-AIR rule via
+  the new Chunk::isVoxelBackingReadable() helper.
+
+Tests: the deferred-edit suite (13e) generates its five manager chunks
+synchronously, matching the contract its immediate-apply expectations
+rely on. New section covers the loaded-not-generated flow end to end:
+delete refused without queueing, place accepted but queued (state and
+stale backing untouched), coalescing while waiting, identical deferral
+for UNLOADED+inTransit, generation landing in full before the queued
+edits apply, and a boundary edit whose mirror waits for the UNLOADED
+neighbor's own generation (shell write, revision bump, metadata sync).
+```
+Hide details
+View details
+gkehren
+merged commit b924545
+into
+main
+Sep 5, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+gkehren
+deleted the
+issue-105-occupancy-metadata
+branch
+September 5, 2026 01:18
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,119 @@
+What happens. math has only Mat4. Every 3x3 operation is written by hand. Transposed 3x3 multiply: two token-identical copies. physics/src/collider.cpp:44-57 support_direction_local and physics/src/contact_clip.cpp:30-38 mul_transpose3 b...
+
+Math has no Mat3, so physics hand-writes a 3x3 kit on float[3][3]: R·diag·Rᵀ is computed four ways, and the transposed multiply and the normal matrix are copied · Issue #910 · shimakaze09/Engine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Math has no Mat3, so physics hand-writes a 3x3 kit on float[3][3]: R·diag·Rᵀ is computed four ways, and the transposed multiply and the normal matrix are copied #910
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Math has no Mat3, so physics hand-writes a 3x3 kit on float[3][3]: R·diag·Rᵀ is computed four ways, and the transposed multiply and the normal matrix are copied#910
+Copy link
+Labels
+P3Severity · low-impact debt, hygiene or cosmeticsSeverity · low-impact debt, hygiene or cosmeticsauditFound · by an audit or code readingFound · by an audit or code readingdeferredClass · real but off the normal path; rides in a change touching its filesClass · real but off the normal path; rides in a change touching its filesmathArea · vectors, matrices, bounds, deterministic scalar mathsArea · vectors, matrices, bounds, deterministic scalar mathsphysicsArea · bodies, colliders, contacts, joints, queriesArea · bodies, colliders, contacts, joints, queriesrenderArea · renderer, shaders, materials, RenderDeviceArea · renderer, shaders, materials, RenderDevicetech-debtKind · a weakness with no active defect: design, coverage, duplication, performanceKind · a weakness with no active defect: design, coverage, duplication, performance
+Description
+shimakaze09
+opened on Sep 30, 2026
+Issue body actions
+What happens. math has only Mat4. Every 3x3 operation is written by hand.
+Transposed 3x3 multiply: two token-identical copies.
+physics/src/collider.cpp:44-57 support_direction_local and physics/src/contact_clip.cpp:30-38 mul_transpose3 both compute (v·column0, v·column1, v·column2).
+Callers: collider.cpp:222, and contact_clip.cpp:56 and :202.
+math/include/engine/math/mat4.h:87 has transform_vector (M·v) but no transposed form.
+World inverse inertia: R·diag(I⁻¹)·Rᵀ computed four ways.
+Function
+Method
+Callers
+physics/src/inertia.cpp:168 apply_inverse_inertia
+rotate by the conjugate, scale, rotate back
+12 calls in contact_resolution.cpp, 2 in joint_projection.cpp, and 1 inside angular_effective_inverse_mass (which has 12 callers)
+inertia.cpp:189 inverse_inertia_world
+sum of weighted outer products into float[3][3]
+reached through joint_projection.cpp:128, 4 sites
+inertia.cpp:85 rotate_diagonal
+squared-entry diagonal only
+—
+physics/src/joints/joint_projection.cpp:119 mat3_mul
+multiply by the assembled matrix
+4 calls
+Joint position projection uses the first form and velocity projection the matrix form, so the same body's effective mass differs in the last bits between the two passes.
+The rest of the 3x3 kit, in joint_projection.cpp.
+eigen_symmetric3 (:29)
+solve_psd3 (:90, 2 calls)
+the skew matrix and 3x3 multiply in accumulate_anchor_mass (:137, 2 calls)
+a matrix sum (:278)
+Normal matrix (inverse-transpose): four copies, with different handling of a singular input.
+Site
+Singular handling
+renderer/src/command_buffer_math.cpp:16 extract_normal_matrix
+full 4x4 inverse then transpose; returns the raw model matrix (2 callers)
+physics/src/physics_query.cpp:34 transform_normal
+transpose(worldToLocal) then math::normalize (1 use, :375)
+physics/src/narrow_phase.cpp:342
+its own transpose; rejects length ≤ 1e-10
+contact_clip.cpp:36
+the transposed multiply above
+Failure scenario. No wrong result is observed today.
+The four inertia forms sit on the solver's bit-exact path. A summation-order change made to one of them silently breaks the determinism the others promise (docs/architecture.md determinism invariants).
+A scaled mesh's normals and a scaled collider's query normals degrade differently near a singular scale.
+Every new constraint (Joints cannot be authored or saved, have no motors, and any live joint makes save_scene refuse the whole scene #996 motors, the swing-twist limits in The quaternion API stops at slerp and one Euler order, so physics and animation hand-write from-to, rotate-by-inverse, integration and nlerp #1124) would extend the hand kit.
+Commercial benchmark.
+Jolt: Mat44::Multiply3x3Transposed and Mat44::GetDirectionPreservingMatrix (the normal matrix), plus Body::GetInverseInertia as one R·D·Rᵀ.
+Unity.Mathematics: a float3x3 type.
+Godot: Basis (3x3, with inverse, transposed and orthonormalized).
+Box2D: b2InvRotateVector.
+In each, the matrix type owns these operations.
+Why this class and severity. Duplicated primitives with no observable symptom: deferred, P3.
+Fix direction. Owner: math.
+Add Mat3 with mul, mul_transposed, transpose, inverse, outer, skew, from_quat, rotate_diagonal(R, d) (R·D·Rᵀ), symmetric_eigen and solve_psd, plus normal_matrix(Mat4) with one stated singular rule.
+Port physics verbatim. Choose one R·D·Rᵀ form, and re-pin engine_integration_determinism with the reason stated if bits change.
+Delete the hand kit and the four normal-matrix copies.
+Closure. Per the consolidate-primitive skill:
+2 transposed-multiply copies, 4 inertia forms and 4 normal-matrix copies found, 1 owner each remaining.
+Lines added and removed reported.
+Each behaviour change has a test, including the position and velocity passes agreeing on effective mass.
+Recurrence gate: extend the transform_point/transform_vector rule in tools/check_duplicate_primitives.py to float \w+\[3\]\[3\] outside math.
+Related. #1131 (matrix API), #1124 (rotation helpers), #169 (closed: 3D inertia model).
+Found by the 2026-09-30 commercial-grade engine audit (b626e6b); widened by the 2026-10-01 commercial-grade math audit (60cf277).
+Found by
+audit — code reading
+Activity
+shimakaze09
+added
+tech-debtKind · a weakness with no active defect: design, coverage, duplication, performanceKind · a weakness with no active defect: design, coverage, duplication, performance
+deferredClass · real but off the normal path; rides in a change touching its filesClass · real but off the normal path; rides in a change touching its files
+auditFound · by an audit or code readingFound · by an audit or code reading
+P3Severity · low-impact debt, hygiene or cosmeticsSeverity · low-impact debt, hygiene or cosmetics
+physicsArea · bodies, colliders, contacts, joints, queriesArea · bodies, colliders, contacts, joints, queries
+mathArea · vectors, matrices, bounds, deterministic scalar mathsArea · vectors, matrices, bounds, deterministic scalar maths
+on Sep 30, 2026
+shimakaze09
+changed the title [-]The transposed 3x3 matrix-vector multiply is written twice in physics with token-identical bodies[/-] [+]Math has no Mat3, so physics hand-writes a 3x3 kit on float[3][3]: R·diag·Rᵀ is computed four ways, and the transposed multiply and the normal matrix are copied[/+] on Oct 1, 2026
+shimakaze09
+added
+renderArea · renderer, shaders, materials, RenderDeviceArea · renderer, shaders, materials, RenderDevice
+on Oct 1, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+P3Severity · low-impact debt, hygiene or cosmeticsSeverity · low-impact debt, hygiene or cosmeticsauditFound · by an audit or code readingFound · by an audit or code readingdeferredClass · real but off the normal path; rides in a change touching its filesClass · real but off the normal path; rides in a change touching its filesmathArea · vectors, matrices, bounds, deterministic scalar mathsArea · vectors, matrices, bounds, deterministic scalar mathsphysicsArea · bodies, colliders, contacts, joints, queriesArea · bodies, colliders, contacts, joints, queriesrenderArea · renderer, shaders, materials, RenderDeviceArea · renderer, shaders, materials, RenderDevicetech-debtKind · a weakness with no active defect: design, coverage, duplication, performanceKind · a weakness with no active defect: design, coverage, duplication, performance
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

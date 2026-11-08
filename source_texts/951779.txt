@@ -1,0 +1,404 @@
+Contribute to taojin-6/volumetric_kit_recon development by creating an account on GitHub.
+
+feat(tsdf): write a mesh's distance field, signed or as a shell by taojin-6 · Pull Request #93 · taojin-6/volumetric_kit_recon · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+taojin-6
+commented
+Sep 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Second stage of mesh → TSDF (S1), stacked on #81 (S0, the block allocation). tsdf::MeshIntegrator writes a triangle mesh's truncated distance field into a grid's tsdf and weight, in one of two modes. The 2026-09-27 decision records it.
+Two modes
+Signed: ±distance, signed by the closest triangle's face normal. This is the research codec's rule, meant for a closed, outward-wound mesh. Nothing about the mesh is checked, and no topology is built.
+Shell: distance minus a half-thickness (1.5 voxels by default), for any mesh at all. This is the research codec's fallback for non-watertight input, and the unsigned offset field of Xu & Barbič (GI 2014).
+Both are the prior engine's MeshToSDF::computeSigned / computeShell. The acceleration structure is not.
+Why no topology
+The field is the codec's input (block SDF → DCT → drop the high frequencies → quantize → entropy-code), not a reconstruction of the mesh. An earlier revision of this PR signed by angle-weighted pseudonormals, which are correct at sharp features. That cost a host topology pass (a weld, adjacency, fans, pseudonormals), about 9.7 ms of a 22.6 ms signed call, plus a set of refusals the research codec never needed. It is gone.
+What Signed gives up, stated on MeshSdfMode::Signed:
+Near an edge or corner whose faces meet at under 90°, the lowest-indexed of the tied faces decides the sign. On the test tetrahedron that is 973 of 10 822 observed voxels.
+An open mesh grows a skirt out to trunc_dist past its rim. Use Shell for those.
+An inside-out mesh comes back inside out.
+No voxel measures the whole mesh
+The prior engine's signed pass, like the research codec's kernel, was brute force over every triangle. Its shell pass used a dense grid over the bounding box.
+Binning: mesh_bin.comp bins triangles per block, as a count dispatch and then a fill dispatch, over S0's own (triangle, candidate block) work items. The count pass records each item's slot and each binned slot's coordinate. The fill replays those slots, so every bin fills exactly, and no compaction is needed.
+Integrate: mesh_integrate.comp runs one thread per voxel over its block's bin. The write is split into dispatches of at most kMaxDispatchBinEntries (2^20) bin entries, and a bin past kMaxBinTriangles (2^16) is refused.
+Shared decomposition: both halves are shared with allocate_from_triangles: the host count (volume::triangle_candidate_offsets) and the GLSL decode and band test (triangle_candidates.glsl). So the blocks allocated and the blocks binned cannot drift apart.
+Missing blocks: a band block that isn't allocated is refused before anything is written.
+Ties break on the triangle index, so the same mesh writes the same bytes, and a soup writes the bytes of its indexed mesh.
+What stays on the host is two O(n) scans, and no topology:
+triangle_candidate_offsets: the per-triangle count and prefix sum, plus the index bounds check.
+The per-slot prefix sum after the count pass.
+A GPU scan primitive would retire both.
+What is written
+Every voxel of every band block is overwritten, not blended. Voxels within trunc_dist get weight 1; every other voxel gets tsdf = 0, weight = 0, the codec inverse's fresh zeros, so a mesh-derived grid reads like a decoded frame. color, and blocks outside the band, are untouched.
+Cost
+An 81 920-triangle sphere 1 m across at scan density (Apple M5 Max, Release, 5 mm voxels, 40 mm band, a table of 2 048 buckets of 8; 6 861 blocks, 1.97 M bin entries; medians of ten runs):
+call
+wall
+GPU
+allocate_from_triangles
+14.2 ms
+12.6 ms
+integrate, Shell
+12.8 ms
+10.8 ms
+integrate, Signed
+12.8 ms
+10.8 ms
+The write is split into two dispatches here. An earlier revision of this description quoted 8.6 ms for the allocation; this run didn't reproduce that figure, and the allocation code did not change.
+Tests
+recon_tsdf_mesh_integrate checks every voxel of every written block against a brute-force host reference. The reference uses an independent closest point, and the winding number for inside/outside. It checks the sign wherever the faces tied for nearest agree, and the distance everywhere. It covers:
+a sharp tetrahedron
+a dented cube (concave edges and a concave vertex)
+an open quad, whose field runs past its rim
+a triangle 0.87 mm across (no size threshold in the closest point)
+a metre-square sheet of 320 000 triangles, whose write splits across dispatches
+a soup, including negated zeros, which must write the same bytes as its indexed mesh
+the same mesh twice, for identical bytes
+the shell's inner wall
+blocks outside the band, which keep what they held
+every refusal, each shown to leave the grid untouched, including an 80 000-triangle patch past the bin cap
+the move rules
+Mutation-checked. Seven planted bugs in the current code, and every one fails a fixture:
+the face normal reversed
+the sign taken from the wrong closest point
+the 1e-12 threshold
+the chunk offset ignored
+the dispatch budget ignored
+the bin cap not refused
+a fill that replays nothing
+Not caught: the tie-break, since no test can force an atomic arrival order, and the barycentric clamp.
+Review fixes
+A code review returned 14 findings. 7 are fixed, 4 went with the topology pass, 2 are fixed in part and 1 is documented. DECISIONS.md records each under the 2026-09-27 entry. In short:
+A fill/count disagreement could leave a bin short, and the integrate pass would then read an unwritten entry as a triangle index. The fill now replays the count pass's recorded slots.
+Nothing bounded a bin's length or a dispatch's size. Both now have named ceilings.
+The closest point collapsed onto a corner for triangles under ~1 mm. The absolute 1e-12 guard is now against zero, with the barycentrics clamped.
+Four signed-topology findings were fixed, then removed with the pass:
+a NaN normal
+slivers dropped from the adjacency
+rim vertices refused as pinches
+inside-out meshes accepted
+Smaller fixes:
+the missing-block message counts pairs, and now says so
+the O(1) binding checks run first
+null checks
+dead includes
+device-local scratch buffers
+In part:
+the inputs stay host-visible, with a TODO(tsdf)
+one O(num_blocks) scan remains, for the prefix sum
+Documented: blocks this writes aren't reported as dirty.
+Also changed
+refactor(volume): S0's host count and shader decode moved into the shared pieces above. No allocation changes; S0's test passes unchanged.
+core: vrClosestPointOnTriangle no longer collapses sub-millimetre triangles onto a corner.
+Verification
+macOS, M5 Max, Release: 33/33.
+Debug with ASan + UBSan (halting on the first error): the new test and S0's pass.
+Pre-commit hooks pass.
+GCC 13 not run locally (Docker was unavailable). The changed files compile clean under g++-16 at -O3 -Werror, which doesn't catch everything GCC 13 does, so the ubuntu-24.04 leg is the first real check.
+🤖 Generated with Claude Code
+taojin-6
+and others
+added 3 commits
+September 27, 2026 21:55
+refactor(volume): share the triangle candidate decomposition
+…
+bd75937
+```
+allocate_from_triangles counted each triangle's candidate blocks on the
+host and decoded and pruned them in its kernel. Both halves are now
+shared, so the mesh integrator can bin triangles into exactly the blocks
+this allocates:
+
+- volume::triangle_candidate_offsets (public) is the host count, with its
+  bounds check and its degenerate / non-finite drop.
+- volume/shaders/triangle_candidates.glsl is the binary search, the
+  work-item decode and the band test.
+
+core's closest-point routine also reports which vertex, edge or face the
+point lies on (vrClosestPointOnTriangleFeature), for the signed pass.
+vrClosestPointOnTriangle wraps it, with the same arithmetic, so no
+allocation changes.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+feat(tsdf): write a mesh's distance field, signed or as a shell
+…
+76fe74b
+```
+tsdf::MeshIntegrator writes a triangle mesh's truncated distance field
+into a grid's tsdf and weight, in one of two modes:
+
+- Signed: +-distance, signed by the angle-weighted pseudonormal of the
+  closest feature (Baerentzen & Aanaes), not the nearest face's normal
+  the prior engine used, which signs sharp edges wrongly. For a closed,
+  manifold, consistently wound mesh. The host welds a soup by exact
+  position and refuses non-manifold edges and vertices and flipped
+  winding. A voxel nearest an open rim is left unobserved.
+- Shell: distance minus a half-thickness, for any mesh. This is the
+  unsigned offset field of Xu & Barbic (GI 2014).
+
+Every voxel of every band block is overwritten: weight 1 within
+trunc_dist, and the codec inverse's fresh zeros elsewhere. The band must
+be allocated by allocate_from_triangles; a missing block is refused
+before anything is written. Triangles are binned per block by a count
+and a fill dispatch over the allocation's own work items, so no voxel
+measures the whole mesh, and ties break on the triangle index so the
+same mesh writes the same bytes.
+
+The test checks every written voxel against a brute-force host
+reference: an independent closest point, and the winding number for
+inside/outside. 14 of 16 planted bugs are caught; the tie-break and one
+equivalent mutant are not.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+docs(tsdf): record what mesh integration costs on a scan-dense mesh
+…
+5d75118
+```
+Measured once on an 81 920-triangle sphere 1 m across (M5 Max, Release):
+8.6 ms to allocate, 12.9 ms to write as a shell, 22.3 ms signed. The GPU
+half is ~11 ms either way; signed's extra host time is the topology pass.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+taojin-6
+self-assigned this
+Sep 28, 2026
+taojin-6
+mentioned this pull request
+Sep 28, 2026
+test(codec): round-trip a mesh-derived volume against its source mesh
+#94
+Merged
+taojin-6
+and others
+added 2 commits
+September 27, 2026 23:40
+fix(tsdf): replay the count pass's slots, bound the bins, and close f…
+…
+9185535
+```
+…our holes in signed topology
+
+Addresses the fourteen findings of the PR 93 review; DECISIONS.md records
+each under the 2026-09-27 entry.
+
+- mesh_bin: the count pass records each work item's slot and each binned
+  slot's coordinate, and the fill replays them, so every bin fills exactly
+  and the integrate pass never reads an unwritten entry as a triangle
+  index. That also drops the fill's repeated probe, the whole-map
+  compaction and the host's copy of the counts.
+- A bin past MeshIntegrator::kMaxBinTriangles is refused, and the write is
+  split into dispatches of at most kMaxDispatchBinEntries bin entries
+  (MeshIntegrateStats::dispatches).
+- triangle_common: the face-interior guard is against zero, not 1e-12 m^4,
+  which collapsed every sub-millimetre triangle onto a corner; the
+  barycentrics are clamped onto the triangle.
+- Signed topology: a zero-length double normal contributes nothing rather
+  than a NaN; zero-area triangles keep their adjacency, so a sliver closing
+  a T-junction is not three rim edges; a rim vertex is not a pinch; and a
+  closed mesh with negative enclosed volume is refused as inside out.
+- The missing-block message counts triangle-block pairs, the O(1) binding
+  checks run first, triangle_candidate_offsets refuses a null mesh before
+  allocating and takes a null `who`, the bins and item slots are
+  device-local, and voxel_hash_map.cpp drops two dead includes.
+- The class notes that the blocks it writes are not reported as dirty.
+
+New fixtures for each fix; eight of nine planted reversions fail them.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+refactor(tsdf): sign by the closest triangle's normal, and drop the t…
+…
+d623f4b
+```
+…opology pass
+
+The mesh-to-TSDF conversion feeds the codec (a block's SDF, DCT, drop the
+high frequencies, quantize, entropy-code); it is not a reconstruction of the
+mesh to be measured against it. The research codec produced its results with
+the closest-face rule and no topology, so Signed now uses that rule too.
+
+Removed: the host topology pass (weld, edge adjacency, fans, angle-weighted
+pseudonormals in double), its refusals (non-manifold edges and vertices,
+flipped winding, inside-out), MeshIntegrateStats::boundary_edges, the
+pseudonormal bindings, and the feature-reporting closest point. Signed now
+costs what Shell does: 12.8 ms wall against 22.6 on the 82k-triangle sphere.
+
+What it gives up, stated on MeshSdfMode::Signed: past an edge sharper than
+90 degrees the lowest-indexed of the tied faces decides the sign, an open
+mesh grows a skirt past its rim, and an inside-out mesh comes back inside
+out. The test checks the sign wherever the tied faces agree and the distance
+everywhere.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Hide details
+View details
+taojin-6
+merged commit 50d9dca
+into
+feat/volume-allocate-triangles
+Sep 28, 2026
+12 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+taojin-6
+deleted the
+feat/tsdf-mesh-integrator
+branch
+September 28, 2026 04:09
+taojin-6
+added a commit
+that referenced
+this pull request
+Sep 28, 2026
+test(codec): measure a plain cube, which closest-face signing handles
+…
+c5b6c77
+```
+Rebased onto #93, whose Signed now takes each voxel's sign from the
+closest face. The dented cube is outside that rule: part of the region
+past its 56-degree edges reads the wrong side, and its uncompressed
+surface grew stray sheets up to 40 mm off the source, failing the floor
+bound. The sphere's figures are unchanged.
+
+A plain cube turned off the grid's axes fails too, more quietly. Beyond
+a corner, on the line continuing an edge, two tied faces' normals are
+perpendicular to the offset and rounding picks the sign: 72 stray
+vertices up to 26 mm off. So the fixture is the plain cube, axis-aligned
+and off the voxel lattice, split out of dented_cube in test_meshes.hpp.
+It measures 0.57 / 2.70 mm decoded rms / max against a 0.14 / 1.10 mm
+floor, in a 13.5 KB frame (0.5% of raw), and its bounds are reset to
+about 2x those figures.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+taojin-6
+added a commit
+that referenced
+this pull request
+Sep 28, 2026
+test(codec): measure a plain cube, which closest-face signing handles
+…
+b7535e6
+```
+Rebased onto #93, whose Signed now takes each voxel's sign from the
+closest face. The dented cube is outside that rule: part of the region
+past its 56-degree edges reads the wrong side, and its uncompressed
+surface grew stray sheets up to 40 mm off the source, failing the floor
+bound. The sphere's figures are unchanged.
+
+A plain cube turned off the grid's axes fails too, more quietly. Beyond
+a corner, on the line continuing an edge, two tied faces' normals are
+perpendicular to the offset and rounding picks the sign: 72 stray
+vertices up to 26 mm off. So the fixture is the plain cube, axis-aligned
+and off the voxel lattice, split out of dented_cube in test_meshes.hpp.
+It measures 0.57 / 2.70 mm decoded rms / max against a 0.14 / 1.10 mm
+floor, in a 13.5 KB frame (0.5% of raw), and its bounds are reset to
+about 2x those figures.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+taojin-6
+mentioned this pull request
+Sep 28, 2026
+feat(volume,tsdf): a triangle mesh into the TSDF volume, signed or as a shell
+#81
+Merged
+taojin-6
+added a commit
+that referenced
+this pull request
+Sep 28, 2026
+test(codec): measure a plain cube, which closest-face signing handles
+…
+6b36c77
+```
+Rebased onto #93, whose Signed now takes each voxel's sign from the
+closest face. The dented cube is outside that rule: part of the region
+past its 56-degree edges reads the wrong side, and its uncompressed
+surface grew stray sheets up to 40 mm off the source, failing the floor
+bound. The sphere's figures are unchanged.
+
+A plain cube turned off the grid's axes fails too, more quietly. Beyond
+a corner, on the line continuing an edge, two tied faces' normals are
+perpendicular to the offset and rounding picks the sign: 72 stray
+vertices up to 26 mm off. So the fixture is the plain cube, axis-aligned
+and off the voxel lattice, split out of dented_cube in test_meshes.hpp.
+It measures 0.57 / 2.70 mm decoded rms / max against a 0.14 / 1.10 mm
+floor, in a 13.5 KB frame (0.5% of raw), and its bounds are reset to
+about 2x those figures.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+taojin-6
+mentioned this pull request
+Sep 29, 2026
+feat(examples): rig_viewer, a live Orbbec rig fused and textured on the GPU
+#121
+Merged
+taojin-6
+mentioned this pull request
+Oct 12, 2026
+refactor(examples): the viewers' window glue comes from gfx_glfw
+#227
+Merged
+This was referenced Nov 3, 2026
+fix(sender): SetSender's front batch retains a set's pictures (core 0.45.0)
+#343
+Open
+docs(examples): say what the examples fuse with and cite symbols
+#359
+Merged
+test(examples): fuse_render renders the wall in CI
+#362
+Merged
+taojin-6
+added a commit
+that referenced
+this pull request
+Nov 8, 2026
+docs(examples): say what the examples fuse with and cite symbols
+…
+53cc8ca
+```
+DESIGN: the senders (codec_replica, the live loop) fuse through
+SetSender, the rest through fuse_set; config.hpp, codec_config.hpp,
+codec_quantization.hpp and stage_table.hpp are grid's. PERF: symbols for
+the stale rig_viewer and sibling line numbers, the baseline's compaction
+marked as since replaced, all three live programs named as senders, and
+D2 marked landed. The viewer CI leg runs tests, not just builds. The
+pin-floor histories shrink to the binding floors (gfx #93, #144,
+#172/#173 kept per 2026-08-11); CHANGELOG and git history have the rest,
+and README names the core floor by VR_CORE_MIN_VERSION, not a stale
+0.29.0. The bridge's TODO goes; fuse_viewer's seam-B comments name the
+wait grid's extract really blocks in (PendingBatch::wait). Comments and
+docs only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

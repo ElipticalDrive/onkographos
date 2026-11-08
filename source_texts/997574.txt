@@ -1,0 +1,415 @@
+CasparCG Server is a Windows and Linux software used to play out professional graphics, audio and video to multiple outputs. It has been in 24/7 broadcast production since 2006. Ready-to-use downloads are available under the Releases tab https://casparcg.com. - Add ACES-based color management (MIXER COLORSPACE) to the OpenGL mixer by C-alcaide · Pull Request #1758 · CasparCG/server
+
+Add ACES-based color management (MIXER COLORSPACE) to the OpenGL mixer by C-alcaide · Pull Request #1758 · CasparCG/server · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+C-alcaide
+commented
+Jun 21, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Disclamer: AI powered PR. Since we're just applying industry standards and color science it should be pretty straightforward. This will be helpful in situations where the files don't have color space metdata or it's wrong (unreal engine exporting prores files does this, for example). This is also vital for HDR pipelines, since now we have full control of the files EOTFs and OETFs. I started this work some months ago and I think it's now refined enough to join the official project if you deem it appropiate.
+There are equivalent vulkan mixer shaders that I could merge as well, but I think it's better to focus on the current state of the server for now.
+Summary
+This PR adds a per-layer ACES-based color management stage to the OpenGL image mixer, exposed through a new MIXER COLORSPACE AMCP command. It lets an operator convert a layer between transfer functions (EOTFs/OETFs) and color gamuts, apply an exposure adjustment, and optionally run a tone-mapping operator — all in linear light on the GPU.
+This is the first in a planned series of small PRs upstreaming color-grading features. It is intentionally self-contained: no channel configuration, no automatic HDR/SDR conversion, no new render-graph plumbing. When MIXER COLORSPACE is not used, the shader path is unchanged (the grading block is gated behind a color_grading uniform that defaults to off).
+What it does
+For each layer with color management enabled, the fragment shader runs this pipeline in order:
+Input EOTF — decode the source signal to linear (sRGB, Rec.709/BT.1886, PQ, HLG, ARRI LogC3, Sony S-Log3, or linear).
+Luminance adaptation — BT.2408-based scaling when crossing HDR/SDR domains.
+Input gamut → working space — 3×3 matrix into ACEScg (AP1). Direct D65↔D65 matrices are used for BT.709↔BT.2020 when no tone mapping is requested, to avoid chromatic-adaptation artifacts from the ACEScg (D60) intermediate.
+Exposure — linear multiplier.
+Tone mapping (optional) — Reinhard, ACES filmic approximation, or full ACES RRT/ODT variants (RRT, RRT+709, RRT+P3, RRT+2020 PQ).
+Working space → output gamut — 3×3 matrix.
+Clamp — only when no tone mapping is applied.
+Output OETF — encode to the target signal.
+AMCP usage
+```
+MIXER [video_channel]{-[layer]} COLORSPACE {[input_transfer] [input_gamut] [tonemapping] [output_gamut] [output_transfer] [exposure]}
+MIXER [video_channel]{-[layer]} COLORSPACE NONE
+```
+input_transfer / output_transfer: LINEAR, SRGB, REC709, PQ, HLG, LOGC3, SLOG3
+input_gamut / output_gamut: BT709, BT2020, DCIP3, ACES_AP0, ACES_AP1 (alias ACESCG), ARRI_WG3, SGAMUT3_CINE
+tonemapping: NONE, REINHARD, ACES_FILMIC, ACES_RRT, ACES_RRT_709, ACES_RRT_P3, ACES_RRT_2020_PQ
+exposure: linear multiplier (default 1.0)
+output_transfer defaults to SRGB when omitted; gamuts/tonemapping default to their first value.
+Calling COLORSPACE with no arguments queries the current state. COLORSPACE NONE disables grading for the layer.
+Examples
+```
+# Grade ARRI LogC3 / AWG3 footage through the ACES RRT to a Rec.709 deliverable
+MIXER 1-10 COLORSPACE LOGC3 ARRI_WG3 ACES_RRT BT709 REC709
+
+# Tone-map a BT.2020 PQ HDR source down to sRGB with Reinhard
+MIXER 1-10 COLORSPACE PQ BT2020 REINHARD BT709 SRGB
+
+# Disable color management on the layer
+MIXER 1-10 COLORSPACE NONE
+```
+Implementation notes
+core::color_grade struct added to image_transform (transform-tweened exposure; equality + tween wiring in frame_transform.cpp).
+Transform combination handled in accelerator/ogl/util/transforms.cpp (a child layer's grade overrides the inherited one when enabled).
+Shader work is isolated to shader.frag: EOTF/OETF/tone-map helpers plus one contiguous color-management block in main(), all gated behind color_grading.
+image_kernel.cpp sets the uniforms and the gamut matrices. Display peak luminance for the HLG OOTF path is currently fixed at 1000 nits.
+New AMCP command MIXER COLORSPACE in AMCPCommandsImpl.cpp.
+Colour matrix provenance
+The ACEScg conversion matrices (k_to_working / k_to_output) come from OpenColorIO 2.5.2
+through the ACES studio config. Each of the seven rows has also been reproduced
+independently from published primaries and a standard chromatic adaptation, in both
+directions, to within 1e-7 — Bradford for bt709, bt2020, p3-d65, ap0 and ap1;
+CAT02 for arri_wg3 and sgamut3cine, matching the ACES vendor IDTs.
+That check is there because a round trip alone cannot validate this table:
+k_to_output[i] @ k_to_working[i] returns the identity for a pair that is consistently
+wrong in both directions, which is how four of these rows were originally incorrect while
+looking self-consistent. Only an external reference catches it.
+Since these are gamut transforms — fixed by primaries and white points — they do not depend
+on which ACES revision the source config describes: AP1's primaries and the ACES white point
+are the same in 1.x and 2.0, and only the rendering transform changed between them.
+The direct BT.709↔BT.2020 matrices used when no tone-mapping operator is set (step 3 above)
+are separate, and were correct throughout.
+Unrecognised tokens are refused
+MIXER COLORSPACE answers 403 for a token it does not recognise, naming the accepted ones.
+Previously an unknown transfer, gamut or operator silently selected the first enum value —
+COLORSPACE SDR BT709 NONE BT709 REC709 returned 202 having quietly rendered LINEAR,
+which is indistinguishable from success. Omitted arguments still default as documented above.
+Testing
+Builds cleanly (Release, MSVC) — casparcg.exe links with no warnings from the changed files.
+Verified the shader path is unchanged when color_grading is off.
+100 source/target conversions driven through MIXER COLORSPACE on flat colour
+patches — no producer, no decode, no resampling in the path — each compared against a
+closed-form model of the shader. All within 1.0 LSB at 8-bit. This covers both the
+rows that route through ACEScg (a tone-mapping operator set) and the direct
+BT.709↔BT.2020 path.
+Every gamut round-trips k_to_output[i] @ k_to_working[i] to the identity within
+1e-7, and each row is independently derived from primaries — see Colour matrix
+provenance above.
+Token handling, 11 cases, 0 wrong: six legal accepted, including LINEAR, BT709
+and NONE named explicitly and a command with arguments omitted; five illegal refused
+with 403 (SDR as a transfer, SRGB and ACES_AP2 as gamuts, FILMIC as an
+operator, REC2020 as a transfer).
+Full operator documentation will be added to the wiki.
+C-alcaide
+marked this pull request as ready for review
+June 21, 2026 11:08
+This was referenced Jul 1, 2026
+Add image effects: MIXER BLUR, SHARPEN and GRAIN
+#1762
+Open
+Add primary color grading: WHITEBALANCE, LIFT/MIDTONE/GAIN, HUESHIFT, TONEBALANCE, SPLITTONE, CDL
+#1765
+Merged
+Add advanced grade tools: MIXER GAMUTCOMPRESS, QUALIFIER, RGBLEVELS
+#1766
+Open
+C-alcaide
+mentioned this pull request
+Jul 30, 2026
+Add LUT-backed grading: MIXER LUT3D, CURVES, HUECURVE
+#1768
+Open
+C-alcaide
+force-pushed
+the
+feature/ogl-aces-colorspace
+branch
+from
+fe49139 to
+e95c135
+Compare
+August 14, 2026 15:41
+C-alcaide
+and others
+added 3 commits
+August 16, 2026 16:43
+Add ACES-based color management (MIXER COLORSPACE) to the OpenGL mixer
+…
+756fd3f
+```
+Adds a per-layer ACES-based color management stage to the OpenGL image
+mixer, exposed via a new MIXER COLORSPACE AMCP command. Converts a layer
+between transfer functions (EOTFs/OETFs) and color gamuts, applies an
+exposure adjustment, and optionally runs a tone-mapping operator, all in
+linear light on the GPU.
+
+The grading path is gated behind a color_grading shader uniform that
+defaults to off, so the existing shader output is unchanged when the
+command is not used.
+
+- core::color_grade struct added to image_transform (exposure tween +
+  equality wiring in frame_transform.cpp)
+- transform combination handled in accelerator/ogl/util/transforms.cpp
+- shader.frag: EOTF/OETF/tone-map helpers + gated color-management block
+- image_kernel.cpp: gamut matrices and uniform setup
+- AMCPCommandsImpl.cpp: MIXER COLORSPACE command, parsers, registration
+```
+fix(mixer): split the ACES conversion around the grading chain
+…
+b355ef8
+```
+Merged with the grading commands that master now carries, the single color_grading
+block sits after them, which would have every MIXER grading command shaping
+display-encoded values. The chain has to run in the working space.
+
+    input half:  eotf -> luminance_scale -> input_to_working -> exposure
+                 ... grading chain ...
+    output half: tone map -> working_to_output -> clamp -> oetf
+
+Split rather than moved: with no grading command active the halves are adjacent and
+every statement between them is guarded by a uniform the kernel sets false, so MIXER
+COLORSPACE on its own is bit-identical to the block this replaces.
+
+Grading battery unchanged from master: Lmg 0.55, WhiteBalance 0.55, HueShift 0.42, six
+neutral rows exact at 0.00, Cdl 3.98 / SplitTone 5.36 / ToneBalance 4.10.
+
+Conformance is 100/100 within 1 LSB.
+
+An earlier run of that battery reported one conversion 25 LSB out at white, and a later
+one reported eight. Neither was real: every failure in every run was at #FFFFFF, and the
+count tracked the battery's own staleness re-captures -- 19 re-captures with one failure,
+147 with eight, and zero re-captures on the clean 100/100 run. A capture that grabbed the
+previous patch differs most at white, which is exactly the signature. The conversions
+were never wrong; the machine was loaded.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+feat(mixer): validate MIXER COLORSPACE's exposure argument
+…
+bc51488
+```
+The sixth argument was a raw std::stof, so `COLORSPACE ... 99` multiplied the working
+space by 99 and `... nan` put a NaN in the transform, blacking out every pixel it
+touched. It now goes through grade_param against a [0, 16] range, the same table the
+rest of the mixer commands use.
+
+grade_param and grade_require moved above the first mixer command, since COLORSPACE is
+defined earlier in the file than the grading commands that introduced them.
+
+Verified against a running server:
+
+    COLORSPACE LINEAR BT709 NONE BT709 SRGB 1.6   202 MIXER OK
+    COLORSPACE LINEAR BT709 NONE BT709 SRGB 99    403 MIXER COLORSPACE FAILED
+    COLORSPACE LINEAR BT709 NONE BT709 SRGB -1    403 MIXER COLORSPACE FAILED
+    COLORSPACE LINEAR BT709 NONE BT709 SRGB nan   403 MIXER COLORSPACE FAILED
+
+Conformance 100/100 within 1 LSB.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+C-alcaide
+force-pushed
+the
+feature/ogl-aces-colorspace
+branch
+from
+4321abb to
+f4c5735
+Compare
+August 16, 2026 15:37
+C-alcaide
+and others
+added 2 commits
+August 16, 2026 17:43
+fix(mixer): four of the seven ACEScg gamut matrices were not the matr…
+…
+124ee34
+```
+…ices they claim
+
+`k_to_working` and `k_to_output` convert into and out of the ACEScg working space, and the
+rows for bt2020, p3-d65, arri_wg3 and sgamut3cine are wrong. Maximum deviation per element
+against a correct derivation:
+
+    bt2020        0.1798
+    p3-d65        0.0867
+    arri_wg3      0.3300
+    sgamut3cine   0.4066
+    bt709         0.0002   (already agreed; refreshed so the table has one source)
+
+Replaced with values from OpenColorIO 2.5.2 through the ACES studio config.
+
+WHY IT SURVIVED. Two reasons, and both are worth knowing before trusting a check on this
+table.
+
+The direct path is unaffected: `k_direct_cg`, used when no tone-mapping operator is set, is
+correct in all four of its entries. These tables only run when an operator routes the pixel
+through ACEScg, so the common conversions look right.
+
+And the arri_wg3 and sgamut3cine pairs are consistent inverses of each other — they
+round-trip `k_to_output[i] @ k_to_working[i]` to exactly 0.000000 while both being wrong. An
+internal consistency check cannot find them; only an external reference can.
+
+VERIFIED WITHOUT REFERENCE TO THE SOURCE THEY CAME FROM. Every one of the seven rows, in
+both directions, is reproduced from published primaries and a standard chromatic adaptation
+to within 1e-7:
+
+    bt709, bt2020, p3-d65, ap0, ap1      Bradford
+    arri_wg3, sgamut3cine                CAT02, matching the ACES vendor IDTs
+
+That matters beyond arithmetic. These are gamut transforms, fixed by primaries and white
+points, so they do not depend on which ACES revision the config describes — AP1's primaries
+and the ACES white point are the same in 1.x and 2.0, and only the rendering transform
+changed. Taking them from an ACES 2.0 config introduces nothing version-specific, which the
+derivation demonstrates rather than assumes.
+
+Also: every gamut now round-trips to 1e-7, and flat-patch colour conversion over 100
+source/target combinations, including the tone-mapped rows that reach these tables, is
+within 1.0 LSB.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+fix(mixer): MIXER COLORSPACE silently accepted unknown enumeration to…
+…
+9edb2ea
+```
+…kens
+
+The three token parsers returned their first enum value for anything they did not
+recognise, so a typo selected a default and the command answered 202:
+
+    MIXER 1-1 COLORSPACE SDR BT709 NONE BT709 REC709
+
+`SDR` is not a transfer function. It became LINEAR, and the layer rendered with a
+conversion nobody asked for, indistinguishable from success. The same applied to an
+unknown gamut (silently BT709) and an unknown operator (silently NONE).
+
+They now return 403 naming the offending token and the accepted ones.
+
+THE PART THAT NEEDED CARE. Every default was reachable ONLY through the fallback: there was
+no `LINEAR` case in parse_transfer_fn, no `BT709` in parse_gamut_fn and no `NONE` in
+parse_tonemapping_fn. Erroring on the unknown without adding them first would have refused
+the most ordinary commands there are — the ones naming a default explicitly, which is what
+`MIXER 1-1 COLORSPACE LINEAR BT709 NONE BT709 REC709` does. Each is now a token in its own
+right, so anything that worked before still works. `REC709` is also accepted as a gamut
+alias for `BT709`, since the two name the same primaries.
+
+Verified against a running server: 100 source/target conversions unchanged at 202 and
+within 1.0 LSB, and each illegal form refused —
+
+    COLORSPACE SDR BT709 NONE BT709 REC709      403   (SDR is not a transfer)
+    COLORSPACE REC709 SRGB NONE BT709 REC709    403   (SRGB is not a gamut)
+    COLORSPACE REC709 BT709 FILMIC BT709 REC709 403   (not an operator)
+    COLORSPACE LINEAR BT709 NONE BT709 REC709   202   (all three ex-defaults, by name)
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+C-alcaide
+force-pushed
+the
+feature/ogl-aces-colorspace
+branch
+from
+f4c5735 to
+9edb2ea
+Compare
+August 16, 2026 15:44
+niklaspandersson
+commented
+Oct 20, 2026
+Copy link
+Copy Markdown
+Member
+How much testing have you done regarding this using html graphics? I've been made aware of an issue where a casparcg render has noticably different hues (greens) compared to davinci resolve when overlaying the exact same graphics
+C-alcaide
+commented
+Oct 21, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+How much testing have you done regarding this using html graphics? I've been made aware of an issue where a casparcg render has noticably different hues (greens) compared to davinci resolve when overlaying the exact same graphics
+I had a quick look at this. It's probably not HTML-specific.
+What I think is going on:
+Caspar mixes layers averaging the numbers stored in the pixels. Those numbers aren't brightness: like almost all video, they sit on a curve (the sRGB transfer function, i.e. gamma) that gives dark tones more of the available range.
+Resolve (in a colour-managed timeline) removes that curve from the equation first (it applies the EOTF to get linear light) averages the actual light, then re-applies the curve (the OETF) at the end.
+Those two give different answers because the curve is bent. Caspar computes src·α + dst·(1−α) on the encoded values; a light-space composite computes OETF( EOTF(src)·α + EOTF(dst)·(1−α) ). Since EOTF is non-linear, EOTF(x·α + y·(1−α)) ≠ EOTF(x)·α + EOTF(y)·(1−α). I don't fully undertstand the math, but in a nutshell: halfway between two stored numbers is not halfway between the two amounts of light.
+What it looks like, 50% green over mid-grey:
+R
+G
+B
+CasparCG
+64
+192
+64
+averaging in light
+92
+205
+92
+Taking red: encoded, 0·0.5 + 128·0.5 = 64. In light, EOTF(128/255) = 0.2158, so 0·0.5 + 0.2158·0.5 = 0.1079, and OETF(0.1079)·255 = 92.
+Red and blue move 28 steps, green only 13. When two channels shift and the third barely does, the ratio between the channels changes, and that ratio is what the eye reads as hue. So it doesn't exactly look brighter or darker, it kinda looks like a different green. Saturated colours show it better, which is why green is where it gets noticed easier.
+A plain colour producer at the same opacity gives byte-identical output to the HTML overlay, so the HTML path adds nothing specific here.
+Changing it means doing the whole composite in light, which needs float render targets and a defined conversion for every layer, and it moves how every existing result that involves blending/alpha looks, which could be a big breaking change for some setups. I already had fp16 layers in a fork for a while and it helps a lot with the test-runner harness. We could discuss opening a PR about this.
+One thing worth knowing if we move forward with it: internally the mixer carries each pixel already multiplied by its own alpha (premultiplied). The curve has to be undone on the layer's own colour and the alpha re-applied afterwards, not applied to the already-multiplied value (C(α·c) ≠ α·C(c) for any non-linear C). I took the shortcut in my fork and a 50% white overlay came back at 151 instead of 206, but now that this surfaced I should get it fixed there as well.
+Looking at your message with different assumptions:
+A second possible cause, and it may be the more likely one if the comparison was against a CasparCG recording: the FFmpeg consumer's RGB→YUV conversion.
+The consumer's buffer source declares no colour space or range, so the scale filter that converts BGRA to YUV uses libswscale's default matrix, BT.601, and the file gets no colour tags. Resolve reads an untagged HD file as Rec.709. Greys survive and saturated colours shift, greens most. Unlike the blending effect above, this hits fully opaque pixels too.
+Measured on current master with a page of flat CSS colours:
+Captured with the IMAGE consumer, every patch is exact, so the HTML render itself is fine.
+Recorded with a default ADD 1 FILE, the file is untagged and encoded BT.601. Decoded as Rec.709, (15,223,5) comes back as (0,191,0).
+With default settings the x264 file is also 4:4:4, because nothing constrains the pixel format.
+This workaround brings it within 2 code values on master:
+ADD 1 FILE out.mov -filter:v scale=out_color_matrix=bt709:out_range=tv,format=yuv420p -colorspace:v bt709 -color_primaries:v bt709 -color_trc:v bt709 -color_range:v tv
+The proper fix is to declare RGB/full range on the buffer source, constrain the sink to the channel's matrix and range, and tag the encoder. I have it in my fork and can open a separate PR.
+Two questions would tell the two causes apart:
+Is the difference visible in fully opaque parts of the graphic, or only where it's semi-transparent (edges, shadows, fades)?
+Was the CasparCG side a file recording, or an SDI capture?
+Opaque areas differing and a file recording points to the matrix. Only semi-transparent areas differing points to the blending.
+New unrelated PR #1833 that Claude Code found:
+"Unrelated but found thanks to your comment: my previous PR adding color grading tools based its behaviour in 'levels' and other existing tools, so I carried a bug into the new tools as well: main() premultiplies (color.rgb *= color.a) and then the grading chain runs on that premultiplied value. LevelsControl is non-linear — a pow for gamma plus an affine output range — so it computes C(a*c) where a*C(c) is meant. ContrastSaturationBrightness is the one that got it right: it divides alpha back out internally and re-applies it. LEVELS never did, and the tools I added copied its shape.
+Measured on a 50%-alpha mid-grey layer over black, MIXER LEVELS 0 1 2.0 0 1 renders 128 where the correct answer is 90 — sqrt(0.251) instead of 0.5*sqrt(0.5). It's identical at alpha 0 and alpha 1, which is why a flat opaque test patch can't see it. Same for the affine half (min_output), and LIFT/MIDTONE/GAIN, TONEBALANCE and SPLITTONE all move too. CDL, WHITEBALANCE and HUESHIFT share the same code shape but my test values happened to be grey-invariant, so I haven't actually confirmed those three yet.
+The fix is small: one un-premultiply before the chain and one re-premultiply after it, replacing the divide/multiply currently inside ContrastSaturationBrightness. Both shaders need it — Vulkan has the same bug in LevelsControl. With that, LEVELS lands on the predicted value on both backends and CSB is byte-identical before and after."
+C-alcaide
+commented
+Oct 21, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+And a consideration from Claude that I think is worth sharing here as well:
+"The premultiply issue (#1833) isn't a design decision. There's no convention under which C(α·c) is right — and the codebase already agrees with itself that it's wrong, because ContrastSaturationBrightness divides alpha out and has done for years. Everything added since just didn't copy that. Fix unconditionally, no flag, no discussion.
+Blending space is a real choice, and light is the more correct one — but not for aesthetic reasons. The over operator is derived as coverage-weighted mixing of light; fore + (1−α)·back is only the right formula when the values are proportional to light. Running it on gamma-encoded numbers isn't a different convention, it's the right formula applied to the wrong quantity. Resolve, Nuke and Fusion all composite in linear for that reason.
+And yet I'd argue against changing the default. CasparCG isn't an NLE — output goes to air, and the existing looks are production assets someone dialled by eye against the current maths. A global change to how every soft edge and semi-transparent graphic renders isn't a bug fix, it's a visual breaking change in every installation, with no way to notice until it's on air.
+Ordering matters more than any individual fix, and it's the part I'd push hardest:
+Premultiply in the grading chain — unconditional, narrow, and a prerequisite. We measured what happens without it: 151 instead of 206.
+Source alpha declaration (feat(ffmpeg): decode-alpha-mode, so straight-alpha media can composite correctly #1800) — until that's settled, the alpha values themselves aren't trustworthy, and both the fix above and any light-space work divide by them.
+Light-space composite, opt-in — only once 1 and 2 are solid.
+Reversed, you'd be debugging a light-space composite on untrustworthy alpha with a known-wrong grading chain: three unknowns at once, and the fork already demonstrated how that reads — a wrong picture nothing announces.
+The deeper problem, and the highest-leverage fix: the mixer has no declared domain. It has accreted conventions — BGR channel order, premultiplied RGB, display-encoded blending, plus per-function exceptions like CSB — and none of it is written down. That's precisely how #1765 inherited the bug: six new functions copied the shape of their neighbour and nobody could point at a contract saying which domain the chain runs in. A dozen lines at the top of shader.frag stating the invariant would prevent more defects than any of these patches.
+Where I'd be cautious about my own view: I've seen this codebase for a few days through one narrow lens. fp16 everywhere has a small VRAM and bandwidth increase cost on a box running many channels, and @Julusian and @niklaspandersson have years of context on why things are as they are. The alpha_mode question in #1800 — whether config overrides what FFmpeg claims or only fills in the unspecified — is exactly the kind of thing where their instinct should outrank my arithmetic."
+I think it's an interesting take for you to weight in.
+What I can confirm are some numbers on a A4000 GPU:
+VRAM: +117 MiB for 2×2160p50, visible only on the static-colour fixture. With real video the decode pool (1.4 GB at HD, 3.7 GB at UHD) swings more run-to-run than fp16 costs, so the delta is unrecoverable there.
+Bandwidth: nothing at 4×1080p50 (68–70% GPU). At 2×2160p50 the GPU is pinned at 95% and late frames go 5.9–8.4% → 13.6–14.5%, no overlap across three pairs.
+So at HD moving to fp16 costs nothing measurable. At 2160p50 on a GPU already near its limit it does — that's the case to watch, and it's bandwidth rather than VRAM.
+One more thing we ran into after posting this, which bears on point 3 of the list above:
+Compositing in light isn't one change, it's two. Suppressing the display encoding before the blend also moves the blend modes into scene-linear, and about half of them aren't defined there — screen is 1-(1-a)(1-b), overlay and hard_mix branch on < 0.5, color_dodge divides by 1-blend. Above 1.0, or negative on out-of-gamut colours, those return nonsense rather than a different look: screening two highlights at 2.0 gives black. The [0,1] clamp that would prevent it sits inside the output conversion, so the same switch that moves the blend into light also removes the clamp that kept those modes meaningful.
+over and the keyer are correct in light; the branchy modes need their display encoding back for the duration of the mode. We hit this in our own fork's implementation, so it's a real trap rather than a theoretical one — worth knowing before it's anyone's default.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,205 @@
+[WebGL] Instanced Stereo Renderingを実装してみる
+===========
+
+WebGLで、VRに関連する高速化技術を実装してみたという話です。
+
+はじめに
+-------
+
+VRを行う場合、両目の映像をレンダリングする必要があります。このため、単純な実装ですと左右それぞれに対しドローコールを発行する必要がある為、非VRの場合の少なくとも2倍のドローコールが必要となります。WebGLの場合はオーバヘッドがもっと大きくなる為、事態は一層深刻になります。
+
+1回のドローコールで両目の映像を一度に描画する手法として、以下のものが提案されています[^1]:
+
+1. ジオメトリシェーダを利用する。
+   この方法はピクセルシェーダの書き換えが不要、CPU側コードの修正量が少ない等の点で優れています。しかし、頂点シェーダの微小な修正が必要、GPUによっては著しいオーバヘッドを生じる (660 GTXで3x以上のジオメトリスループット低下) などの欠点があります。
+   一番の問題は、ジオメトリシェーダをサポートしていないAPIが多いことです。OpenGL ES 2.0/3.0は標準機能ではジオメトリシェーダがサポートされておらず、それをベースとしたWebGLでももちろんこの方法は使えません[^6]。
+
+2. ジオメトリインスタンシング (Instanced Stereo Rendering)
+   インスタンシングはベースとなるジオメトリをGPU内で複製することで、複数のオブジェクトを一回のドローコールで一度に描画できる機能です。
+   この方法は頂点シェーダの修正量が多くなりますが、ジオメトリシェーダと比べてサポートしているAPIが多く、WebGLでも1.0では[ANGLE_instanced_arrays](https://www.khronos.org/registry/webgl/extensions/ANGLE_instanced_arrays/)拡張、2.0では標準機能として提供されています。
+
+今回実装を行ったのはWebGL 1.0でも実装可能な「2. ジオメトリインスタンシング」です。昔開発した[WebGL向けレンダリングエンジン](https://github.com/Hyper3D/hyper3d)に修正を加え、ステレオレンダリングとInstanced Stereo Renderingに[対応](https://github.com/yvt/hyper3d/tree/stereo)させてみました[^3]。
+
+用語
+----
+
+- **VR** - 狭義には、ステレオレンダリングを行った画像をHMD (ヘッドマウントディスプレイ)により表示することで、リアルで高い没入感の得られる三次元環境の体験を提供する技術を指します。
+- **ステレオレンダリング** - 僅かに左右にずれた2つの映像をレンダリングし、HMD等を用いて視聴することにより人間の脳はそれに奥行きがあると錯覚しますが、そういった用途でそれらの映像をレンダリングすることをステレオレンダリングと呼びます。
+- **ジオメトリシェーダ** - 頂点シェーダとフラグメントシェーダの間に位置するシェーダステージであり、ジオメトリの増幅 (つまり、1個のプリミティブが入力されたとき、複数個のプリミティブを出力) を自由に行える唯一のシェーダステージです。
+- **(ジオメトリ)インスタンシング** - 通常のドローコールでは入力された頂点データを最初から最後まで順に読んで描画してお終いですが、インスタンシングと呼ばれる機能を用いることにより、これを**たった一度**のドローコールで、好きな回数だけ反復させること可能になります。入力となる頂点データを指定した個数だけ内部的に複製しているようなイメージとなります。
+- **ユーザクリッピング平面** - ユーザが指定した平面によりジオメトリをクリッピングする機能。昔のAPIでは平面の式をAPIに渡すことができましたが、現代のAPIでは頂点シェーダ内で平面との符号付き距離を自分で計算して所定のビルトイン変数 (e.g., `gl_ClipDistance[]`) に代入し、その値を利用して頂点処理ハードウェアにクリッピングしてもらうものがほとんどです。
+
+
+ステレオレンダリングへの対応
+-----------------------
+
+これまで各フレームに1度だけ行ってきた処理を2回するだけのことですから、ステレオレンダリングに対応すること自体は難しくありません。左目用と右目用の映像でそれぞれカメラを少し横にずらして、カメラ間の距離が66mm程度 (IPD; interpupillary distanceの平均値) になるようにするだけです。
+
+中には両目で使い回せる情報もある為、そういうのは最初に1度だけ生成するようにしても良いでしょう。例えばシャドウマップはライトから見た映像でありカメラからの映像では無い為、両目でほとんど使いまわせるはずです。(今回はHyper3Dのアーキテクチャ上の制約により、そういった最適化は行っていませんが…)
+
+
+Instanced Stereo Rendering
+--------------------------
+
+さて、本題のInstanced Stereo Renderingですが、具体的な実装は以下のようになります。
+
+1. 右目・左目の両方の画像が一度に収まるサイズのフレームバッファを用意し、フレームバッファ全体をビューポートとして設定する。
+2. 描画ライブラリが提供するAPIにより2個のインスタンスを描画する (それぞれ右目、左目用)。
+3. 頂点シェーダでインスタンスIDにより分岐し、左目用のインスタンスと右目用のそれをそれぞれフレームバッファの左半分・右半分に配置する。
+   <img width="916" alt="Screen Shot 2016-12-24 at 1.15.25.png" src="https://qiita-image-store.s3.amazonaws.com/0/38578/e09fde8d-e182-0e3e-05c8-0484658ec072.png">
+4. さらに、それぞれの映像が反対側に漏れ出てこないよう、ユーザクリッピング平面により画面の中央からはみ出た部分をクリップする。
+   <img width="917" alt="Screen Shot 2016-12-24 at 1.23.01.png" src="https://qiita-image-store.s3.amazonaws.com/0/38578/807ec3e8-410d-660e-a581-56945d773fa3.png">
+
+WebGLで実装する場合どのような感じになるか考えてみましょう。まず1はそれほど難しくありませんね。
+
+```js
+// width, height は左目・右目の **それぞれ** に対応するビューポートのサイズ。
+// したがってフレームバッファのサイズは (width * 2, height) となる。
+var width, height;
+
+// (フレームバッファ・テクスチャの作成は省略)
+
+gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+gl.viewport(0, 0, width * 2, height);
+```
+
+2は次のようになります。 (実際のコードでは、拡張が利用できない場合の対応もお忘れなく!)
+
+```js
+var ext = gl.getExtension("ANGLE_instanced_arrays");
+ext.drawElementsInstancedANGLE(gl.TRIANGLE_STRIP, count, gl.UNSIGNED_SHORT, offset, 2);
+
+// ... or, ext.drawArraysInstancedANGLE if you don't use an index buffer
+```
+
+問題は3と4です。まず3についてですが、WebGL 2.0ではインスタンスIDが `gl_instanceID` として提供されているものの、WebGL 1.0の `ANGLE_instanced_arrays` ではこのビルトイン変数は提供されていません。この為、頂点属性を使用してシミュレートします。
+
+```js
+// "Instance ID" バッファの作成
+var instanceIDBuffer = gl.createBuffer();
+var instanceIDs = new Float32Array(2); // インスタンス2個分
+for (var i = 0; i < instanceIDs.length; ++i) {
+    instanceIDs[i] = i;
+}
+gl.bindBuffer(gl.ARRAY_BUFFER, instanceIDBuffer);
+gl.bufferData(gl.ARRAY_BUFFER, instanceIDs, gl.STATIC_DRAW);
+
+// 頂点属性としてこのバッファを指定
+var instanceIDLoc = gl.getAttribLocation(program, "a_instanceID");
+gl.enableVertexAttribArray(instanceIDLoc);
+gl.bindBuffer(gl.ARRAY_BUFFER, instanceIDBuffer);
+gl.vertexAttribPointer(instanceIDLoc, 1, gl.FLOAT, false, 4, 0);
+
+var ext = gl.getExtension("ANGLE_instanced_arrays");
+ext.vertexAttribDivisorANGLE(instanceIDLoc, 1);
+```
+
+これにより、頂点バッファでは `a_instanceID` がインスタンスIDの代わりに使用できるようになります。
+
+したがって、頂点位置を左右に振り分けるコードは以下のようになります。(`gl_Position` は射影座標である為、平行移動させるときは `.w` を掛ける必要がある点に注意)
+
+```glsl:頂点シェーダ
+// (通常の頂点処理は省略)
+
+if (a_instanceID > 0.5) {
+    gl_Position.x = gl_Position.x * 0.5 + gl_Position.w * 0.5;
+} else {
+    gl_Position.x = gl_Position.x * 0.5 - gl_Position.w * 0.5;
+}
+```
+
+最後に4についてですが、残念なことにWebGLではユーザクリッピング平面に相当する機能が用意されていません[^4]！同じことを実現できる他の機能は無いのかと言うと実はあって、フラグメントシェーダの `discard` ステートメントを利用することで「ほぼ」同様のことは実現できます。
+
+```glsl:頂点シェーダ
+varying float v_clipDistance;
+
+...
+
+if (a_instanceID > 0.5) {
+    gl_Position.x = gl_Position.x * 0.5 + gl_Position.w * 0.5;
+    v_clipDistance = gl_Position.x;
+} else {
+    gl_Position.x = gl_Position.x * 0.5 - gl_Position.w * 0.5;
+    v_clipDistance = -gl_Position.x;
+}
+```
+
+```glsl:フラグメントシェーダ
+varying float v_clipDistance;
+
+...
+
+if (v_clipDistance < 0.0) {
+    discard;
+}
+```
+
+ユーザクリッピング平面では頂点処理ハードウェアにより各頂点と平面の符号付き距離を計算し、平面と辺の交点に新たな頂点を導入し、ポリゴンを切断することでクリッピングを実現しています。一方、この `discard` を使用した方法では、符号付き距離を頂点属性としてフラグメントシェーダに渡し、各フラグメントが平面のどちら側にあるかを判定し、裏側にある場合はフラグメントを破棄 (discard) しています。
+
+つまり、頂点単位ではなくフラグメント単位で判定を行う訳です。最終的には描画されないピクセルに対してもフラグメントシェーダが実行される為、シェーダ負荷は大きくなります。最悪の場合、ビューポート内の半分のピクセルに対し `discard` が行われることになります。
+
+![Screen Shot 2016-12-24 at 3.13.02.png](https://qiita-image-store.s3.amazonaws.com/0/38578/9540f3f6-4d27-2ae2-a537-fd8096a67eeb.png "Screen Shot 2016-12-24 at 3.13.02.png")
+
+
+弊害はそれだけではありません。一部のGPUでは、 `discard` を使用しないことを前提とした最適化を行う為、`discard` を使用することで[大きな悪影響が生じる](http://stackoverflow.com/questions/8509051/is-discard-bad-for-program-performance-in-opengl)ことも考えられます。以上が先程「『ほぼ』同様のことが実現できる」と述べた理由です。
+
+そうした最適化を行うGPUが全てという訳ではありません。それにこの手法により、少なくとも「ドローコールを減らす」というゴールは達成できる訳です。デスクトップ向けGPUで実際どの程度の効果が得られるかについては、この後の「ベンチマーク」セクションで検証してみることにします。
+
+
+ステレオ画像の出力
+---------------
+
+ステレオレンダリングした画像を出力する方法は複数存在します[^5]。
+
+一つはHMD向けの出力で、左右それぞれの画像に対しレンズ歪み補正・色収差補正を行い、ディスプレイデバイスに出力します。技術的には難しくないと思いますが、十分に検証ができていない為、本記事では省略します。(時間的要因もありますが、**テスト環境を用意できない**というのが一番大きな要因です)
+
+もう一つは昔ながらのアナグリフ (通称「[雑誌に付いてきた3Dメガネ](https://www.youtube.com/watch?v=mb2sX76tZwU)」) です。RGBの赤チャンネルと緑青チャンネルにそれぞれ左右の画像を書き込むことで、3Dメガネの赤・青フィルタを介して左右の目に異なった映像が届きます。今回実装したのはこちらです。
+
+![Screen Shot 2016-12-24 at 2.58.12.jpg](https://qiita-image-store.s3.amazonaws.com/0/38578/c9f18315-507b-b8fc-1c9b-9e327549a21a.jpeg "Screen Shot 2016-12-24 at 2.58.12.jpg")
+
+
+ベンチマーク
+----------
+
+Instanced Stereo Renderingを使用することで、ステレオレンダリングに必要なドローコールの個数を半分に減らすことができます (CPU負荷の削減に繋がります)。一方で、上で詳しく述べたように、GPU負荷の著しい増加が考えられます。
+
+この仮説を検証するために、[Hyper3Dサンプルの修正版](https://github.com/yvt/hyper3d-examples/tree/stereo)を使用して比較実験を行いました。CPU負荷はGoogle Chromeのタイムラインプロファイラを使用して計測し、GPU負荷は[`EXT_disjoint_timer_query`](https://www.khronos.org/registry/webgl/extensions/EXT_disjoint_timer_query/)拡張を使用して計測しました。
+
+使用したサンプルは*materials*と*materials2*の2種類です。内容はほとんど同じですが、描画するメッシュとその個数が異なり、materials2ではメッシュの個数を増やすことでドローコールの影響が大きく現れるようにしています。これらを比較した表を次に示します。
+
+|  Example   |              メッシュ              | 描画数 |
+| ---------- | ---------------------------------- | ------------ |
+| materials  | `suzanne.json` (7872 tris)         |           20 |
+| materials2 | `THREE.SphereGeometry` (1024 tris) |         2000 |
+
+詳しい実験条件やデータは[Gist](https://gist.github.com/yvt/159801e0444b8989d878aaed93fd4674)に置いておくことにして、結果の概要だけを次に示します。
+
+|  Example   | ISR | CPU ms | GPU ms | CPU relative | GPU relative |
+| ---------- | --- | ------ | ------ | ------------ | ------------ |
+| materials  | off |   0.96 |  14.78 |              |              |
+| materials  | on  |   1.07 |  16.36 | +11.4%       | +10.69%      |
+| materials2 | off |  10.97 |  15.18 |              |              |
+| materials2 | on  |   8.83 |  17.39 | -19.51%      | +14.56%      |
+
+*CPU/GPU relative*はInstanced Stereo Renderingをoffにした場合と比べて、CPU/GPUがどの程度増減したかを表しています。
+
+*CPU relative*を見ると、多数のメッシュが存在し、ドローコールの個数が非常に多い場合には、Instanced Stereo Renderingを有効にすることによりCPU負荷を削減できることが分かります。逆に元々ドローコールが少ない場合にはむしろ悪化していますが、Instanced Stereo Renderingで左右のG-Bufferを一つのフレームバッファに描画したのを再分割する処理に伴うドローコールのオーバヘッドが要因と思われます。
+
+*GPU relative*を見ると、いずれのサンプルにおいてもGPUの負荷が増加していることが確認できます。
+
+
+おわりに
+-------
+
+WebGLはGPU側では他のネイティブ向けAPIと同様のシェーダが同等のパフォーマンスで実行できるものの、CPU側のオーバヘッドが大きいため、ドローコールの削減などによりCPU側の負荷を減らすことが重要となります。Instanced Stereo RenderingはGPU負荷が増加するというデメリットはあるとは言え、VR等のステレオレンダリング環境においてドローコールを削減するのに有効な手段だと分かりました。Instanced Stereo Renderingを適切に使用することで描画パフォーマンスを改善し、より優れた体験をユーザに体験できるようになると思われます。
+
+
+脚注・参考文献
+------------
+
+[^1]: Timothy Wilson, "[*Fast Stereo Rendering for VR*](https://docs.google.com/presentation/d/19x9XDjUvkW_9gsfsMQzt3hZbRNziVsoCEHOn4AercAc/edit#slide=id.p)." San Diego Virtual Reality Meetup, January 20, 2015.
+[^2]: "[*WebGLにおけるジオメトリインスタンシング（ANGLE_instanced_arrays）を丁寧に説明してみる*](http://qiita.com/emadurandal/items/1812198d562bd1216c70)." Posted by emadurandal.
+[^3]: 正式サポートする予定はありません。Hyper3D 1の開発は中止し、現在はHyper3D 3を開発しています。
+[^4]: WebGL 2.0では[`EXT_clip_cull_distance`](https://www.khronos.org/registry/webgl/extensions/proposals/EXT_clip_cull_distance/)拡張がありますが、まだproposal段階です。
+[^5]: "[*Stereo Rendering*](https://www.blend4web.com/doc/en/stereo_rendering.html)", Blend4Web User Manual.
+[^6]: OpenGL ES 3.1では[`EXT_geometry_shader`](https://www.khronos.org/registry/gles/extensions/EXT/EXT_geometry_shader.txt)拡張としてジオメトリシェーダが提供されていますが、WebGL 2.0はOpenGL ES 3.1ではなくES 3.0ベースであり、同等の拡張さえ提供されていません。

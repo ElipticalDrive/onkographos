@@ -1,0 +1,802 @@
+Tensors and Dynamic neural networks in Python with strong GPU acceleration - [torch] Add native parallel associative scan (aten::associative_scan) · SakshamKapoor2911/pytorch@ab58a35
+
+[torch] Add native parallel associative scan (aten::associative_scan) · SakshamKapoor2911/pytorch@ab58a35 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+File tree
+Expand file treeCollapse file tree
+Open diff view settings
+Filter options
+aten/src/ATen/native
+AssociativeScan.cpp
+AssociativeScanKernel.h
+AssociativeScanUtils.h
+cpu
+AssociativeScanKernel.cpp
+cuda
+AssociativeScanKernel.cu
+native_functions.yaml
+benchmarks
+associative_scan_bench.py
+test
+test_autograd.py
+test_torch.py
+tools/autograd
+derivatives.yaml
+torch
+_decomp
+decompositions.py
+_dynamo
+trace_rules.py
+_higher_order_ops
+associative_scan.py
+_inductor
+lowering.py
+_torch_docs.py
+csrc/autograd
+FunctionsManual.cpp
+FunctionsManual.h
+Expand file treeCollapse file tree
+Open diff view settings
+Collapse file
+‎aten/src/ATen/native/AssociativeScan.cpp‎
+Copy file name to clipboard
++183Lines changed: 183 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -0,0 +1,183 @@
+1+
+#include <ATen/WrapDimUtils.h>
+2+
+#include <ATen/core/Tensor.h>
+3+
+#include <ATen/native/AssociativeScanKernel.h>
+4+
+5+
+#ifndef AT_PER_OPERATOR_HEADERS
+6+
+#include <ATen/Functions.h>
+7+
+#include <ATen/NativeFunctions.h>
+8+
+#else
+9+
+#include <ATen/ops/empty_like.h>
+10+
+#include <ATen/ops/flip.h>
+11+
+#include <ATen/ops/movedim.h>
+12+
+#endif
+13+
+14+
+#include <c10/util/Exception.h>
+15+
+#include <c10/util/string_view.h>
+16+
+17+
+#include <string>
+18+
+#include <vector>
+19+
+20+
+namespace at::native {
+21+
+22+
+DEFINE_DISPATCH(associative_scan_stub);
+23+
+DEFINE_DISPATCH(associative_scan_tensor_list_stub);
+24+
+25+
+namespace {
+26+
+27+
+bool is_supported_combine_mode(c10::string_view combine_mode) {
+28+
+return combine_mode == "add" || combine_mode == "mul" ||
+29+
+combine_mode == "max" || combine_mode == "min" ||
+30+
+combine_mode == "linear_recurrence";
+31+
+}
+32+
+33+
+void check_combine_mode(c10::string_view combine_mode) {
+34+
+TORCH_CHECK(
+35+
+is_supported_combine_mode(combine_mode),
+36+
+"associative_scan: unsupported combine_mode '",
+37+
+combine_mode,
+38+
+"'. Supported modes are 'add', 'mul', 'max', 'min', 'linear_recurrence'.");
+39+
+}
+40+
+41+
+// Inclusive scan over `wrap_dim` of a single tensor. The scan dimension is
+42+
+// moved to the innermost position so the kernels operate on contiguous
+43+
+// memory; `reverse` is implemented with a flip of the scan dimension before
+44+
+// and after the scan, which exactly matches jax.lax.associative_scan
+45+
+// semantics.
+46+
+Tensor scan_single(
+47+
+const Tensor& self,
+48+
+c10::string_view combine_mode,
+49+
+int64_t wrap_dim,
+50+
+bool reverse) {
+51+
+const int64_t ndim = self.dim();
+52+
+if (ndim == 0 || self.size(wrap_dim) <= 1) {
+53+
+return self.clone();
+54+
+}
+55+
+Tensor input = reverse ? at::flip(self, {wrap_dim}) : self;
+56+
+Tensor moved = at::movedim(input, wrap_dim, ndim - 1);
+57+
+Tensor contig = moved.contiguous();
+58+
+Tensor result_contig = at::empty_like(contig, MemoryFormat::Contiguous);
+59+
+associative_scan_stub(
+60+
+contig.device().type(),
+61+
+result_contig,
+62+
+contig,
+63+
+std::string(combine_mode));
+64+
+Tensor result = at::movedim(result_contig, ndim - 1, wrap_dim);
+65+
+if (reverse) {
+66+
+result = at::flip(result, {wrap_dim});
+67+
+}
+68+
+// The movedim/flip views are non-contiguous for scan dims other than the
+69+
+// innermost; return contiguous so the output layout matches the meta
+70+
+// implementation and stays compatible with Inductor's fallback path.
+71+
+return result.contiguous();
+72+
+}
+73+
+74+
+} // namespace
+75+
+76+
+Tensor associative_scan(
+77+
+const Tensor& self,
+78+
+c10::string_view combine_mode,
+79+
+int64_t dim,
+80+
+bool reverse) {
+81+
+check_combine_mode(combine_mode);
+82+
+TORCH_CHECK(
+83+
+combine_mode != "linear_recurrence",
+84+
+"associative_scan: combine_mode 'linear_recurrence' operates on two "
+85+
+"input tensors (a, b); call torch.associative_scan([a, b], "
+86+
+"'linear_recurrence', dim) instead.");
+87+
+if (self.numel() == 0) {
+88+
+return self.clone();
+89+
+}
+90+
+if (self.dim() == 0) {
+91+
+return self.clone();
+92+
+}
+93+
+const int64_t wrap_dim = maybe_wrap_dim(dim, self.dim());
+94+
+return scan_single(self, combine_mode, wrap_dim, reverse);
+95+
+}
+96+
+97+
+std::vector<Tensor> associative_scan_tensor_list(
+98+
+TensorList xs,
+99+
+c10::string_view combine_mode,
+100+
+int64_t dim,
+101+
+bool reverse) {
+102+
+check_combine_mode(combine_mode);
+103+
+TORCH_CHECK(
+104+
+combine_mode == "linear_recurrence",
+105+
+"associative_scan: the tensor-list overload only supports "
+106+
+"combine_mode 'linear_recurrence', got '",
+107+
+combine_mode,
+108+
+"'.");
+109+
+TORCH_CHECK(
+110+
+xs.size() == 2,
+111+
+"associative_scan: combine_mode 'linear_recurrence' requires exactly 2 "
+112+
+"input tensors (a, b), got ",
+113+
+xs.size(),
+114+
+".");
+115+
+const Tensor& a = xs[0];
+116+
+const Tensor& b = xs[1];
+117+
+TORCH_CHECK(
+118+
+a.sizes() == b.sizes(),
+119+
+"associative_scan: all inputs must have the same shape.");
+120+
+TORCH_CHECK(
+121+
+a.scalar_type() == b.scalar_type(),
+122+
+"associative_scan: all inputs must have the same dtype.");
+123+
+TORCH_CHECK(
+124+
+a.device() == b.device(),
+125+
+"associative_scan: all inputs must be on the same device.");
+126+
+127+
+if (a.numel() == 0) {
+128+
+return {a.clone(), b.clone()};
+129+
+}
+130+
+if (a.dim() == 0) {
+131+
+return {a.clone(), b.clone()};
+132+
+}
+133+
+const int64_t wrap_dim = maybe_wrap_dim(dim, a.dim());
+134+
+if (a.size(wrap_dim) <= 1) {
+135+
+return {a.clone(), b.clone()};
+136+
+}
+137+
+138+
+const int64_t ndim = a.dim();
+139+
+Tensor a_moved = at::movedim(
+140+
+reverse ? at::flip(a, {wrap_dim}) : a, wrap_dim, ndim - 1);
+141+
+Tensor b_moved = at::movedim(
+142+
+reverse ? at::flip(b, {wrap_dim}) : b, wrap_dim, ndim - 1);
+143+
+Tensor a_contig = a_moved.contiguous();
+144+
+Tensor b_contig = b_moved.contiguous();
+145+
+Tensor a_out = at::empty_like(a_contig, MemoryFormat::Contiguous);
+146+
+Tensor b_out = at::empty_like(b_contig, MemoryFormat::Contiguous);
+147+
+148+
+std::vector<TensorBase> outs{a_out, b_out};
+149+
+std::vector<TensorBase> ins{a_contig, b_contig};
+150+
+associative_scan_tensor_list_stub(
+151+
+a.device().type(), outs, ins, std::string(combine_mode));
+152+
+153+
+Tensor a_result = at::movedim(a_out, ndim - 1, wrap_dim);
+154+
+Tensor b_result = at::movedim(b_out, ndim - 1, wrap_dim);
+155+
+if (reverse) {
+156+
+a_result = at::flip(a_result, {wrap_dim});
+157+
+b_result = at::flip(b_result, {wrap_dim});
+158+
+}
+159+
+return {a_result.contiguous(), b_result.contiguous()};
+160+
+}
+161+
+162+
+Tensor associative_scan_meta(
+163+
+const Tensor& self,
+164+
+c10::string_view combine_mode,
+165+
+int64_t dim,
+166+
+bool reverse) {
+167+
+return at::empty_like(self, MemoryFormat::Contiguous);
+168+
+}
+169+
+170+
+std::vector<Tensor> associative_scan_tensor_list_meta(
+171+
+TensorList xs,
+172+
+c10::string_view combine_mode,
+173+
+int64_t dim,
+174+
+bool reverse) {
+175+
+std::vector<Tensor> out;
+176+
+out.reserve(xs.size());
+177+
+for (const auto& x : xs) {
+178+
+out.push_back(at::empty_like(x, MemoryFormat::Contiguous));
+179+
+}
+180+
+return out;
+181+
+}
+182+
+183+
+} // namespace at::native
+Collapse file
+‎aten/src/ATen/native/AssociativeScanKernel.h‎
+Copy file name to clipboard
++34Lines changed: 34 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -0,0 +1,34 @@
+1+
+#pragma once
+2+
+3+
+#include <ATen/core/TensorBase.h>
+4+
+#include <ATen/native/DispatchStub.h>
+5+
+6+
+#include <c10/core/TensorImpl.h>
+7+
+8+
+#include <string>
+9+
+#include <vector>
+10+
+11+
+namespace at::native {
+12+
+13+
+// Both input and output tensors are contiguous and the scan is always
+14+
+// performed along the innermost (contiguous) dimension. `combine_mode` is one
+15+
+// of "add", "mul", "max", "min".
+16+
+using associative_scan_fn = void (*)(
+17+
+const TensorBase& result,
+18+
+const TensorBase& self,
+19+
+const std::string& combine_mode);
+20+
+21+
+// Multi-tensor overload. Only combine_mode == "linear_recurrence" (arity 2) is
+22+
+// supported; every tensor in `result`/`self` is contiguous with the scan along
+23+
+// the innermost dimension.
+24+
+using associative_scan_tensor_list_fn = void (*)(
+25+
+const std::vector<TensorBase>& result,
+26+
+const std::vector<TensorBase>& self,
+27+
+const std::string& combine_mode);
+28+
+29+
+DECLARE_DISPATCH(associative_scan_fn, associative_scan_stub);
+30+
+DECLARE_DISPATCH(
+31+
+associative_scan_tensor_list_fn,
+32+
+associative_scan_tensor_list_stub);
+33+
+34+
+} // namespace at::native
+Collapse file
+‎aten/src/ATen/native/AssociativeScanUtils.h‎
+Copy file name to clipboard
++173Lines changed: 173 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -0,0 +1,173 @@
+1+
+#pragma once
+2+
+3+
+#include <ATen/NumericUtils.h>
+4+
+#include <c10/macros/Macros.h>
+5+
+#include <c10/util/BFloat16.h>
+6+
+#include <c10/util/Half.h>
+7+
+#include <c10/util/complex.h>
+8+
+9+
+#include <cstdint>
+10+
+#include <limits>
+11+
+#include <type_traits>
+12+
+13+
+namespace at::native {
+14+
+15+
+namespace detail {
+16+
+17+
+// Smallest representable value used as the identity element of the running
+18+
+// max/min scan. For floating point types this is -infinity so that the scan
+19+
+// behaves like jax.lax.associative_scan (NaN is propagated by combine).
+20+
+template <typename scalar_t>
+21+
+C10_HOST_DEVICE scalar_t scan_lowest() {
+22+
+if constexpr (std::is_floating_point_v<scalar_t>) {
+23+
+return -std::numeric_limits<scalar_t>::infinity();
+24+
+} else if constexpr (std::is_same_v<scalar_t, c10::Half>) {
+25+
+return c10::Half(-std::numeric_limits<float>::infinity());
+26+
+} else if constexpr (std::is_same_v<scalar_t, c10::BFloat16>) {
+27+
+return c10::BFloat16(-std::numeric_limits<float>::infinity());
+28+
+} else if constexpr (c10::is_complex<scalar_t>::value) {
+29+
+// max/min are not supported for complex types; the combine is never
+30+
+// invoked with this identity.
+31+
+return scalar_t(0);
+32+
+} else {
+33+
+return std::numeric_limits<scalar_t>::min();
+34+
+}
+35+
+}
+36+
+37+
+// Identity element of the running max/min scan. For floating point types this
+38+
+// is +infinity so the min scan seeds with a neutral element.
+39+
+template <typename scalar_t>
+40+
+C10_HOST_DEVICE scalar_t scan_highest() {
+41+
+if constexpr (std::is_floating_point_v<scalar_t>) {
+42+
+return std::numeric_limits<scalar_t>::infinity();
+43+
+} else if constexpr (std::is_same_v<scalar_t, c10::Half>) {
+44+
+return c10::Half(std::numeric_limits<float>::infinity());
+45+
+} else if constexpr (std::is_same_v<scalar_t, c10::BFloat16>) {
+46+
+return c10::BFloat16(std::numeric_limits<float>::infinity());
+47+
+} else if constexpr (c10::is_complex<scalar_t>::value) {
+48+
+// max/min are not supported for complex types; the combine is never
+49+
+// invoked with this identity.
+50+
+return scalar_t(0);
+51+
+} else {
+52+
+return std::numeric_limits<scalar_t>::max();
+53+
+}
+54+
+}
+55+
+56+
+// NaN-propagating max/min, matching the behavior of jax.lax.max/min.
+57+
+template <typename scalar_t>
+58+
+C10_HOST_DEVICE scalar_t nan_max(scalar_t a, scalar_t b) {
+59+
+if constexpr (c10::is_complex<scalar_t>::value) {
+60+
+// max/min are not supported for complex types; never reached.
+61+
+return a;
+62+
+} else {
+63+
+if (at::_isnan(a)) return a;
+64+
+if (at::_isnan(b)) return b;
+65+
+return a > b ? a : b;
+66+
+}
+67+
+}
+68+
+69+
+template <typename scalar_t>
+70+
+C10_HOST_DEVICE scalar_t nan_min(scalar_t a, scalar_t b) {
+71+
+if constexpr (c10::is_complex<scalar_t>::value) {
+72+
+// max/min are not supported for complex types; never reached.
+73+
+return a;
+74+
+} else {
+75+
+if (at::_isnan(a)) return a;
+76+
+if (at::_isnan(b)) return b;
+77+
+return a < b ? a : b;
+78+
+}
+79+
+}
+80+
+81+
+} // namespace detail
+82+
+83+
+// A scan element with L scalar components. L == 1 for the pointwise combine
+84+
+// modes (add/mul/max/min) and L == 2 for the linear recurrence mode, whose
+85+
+// combine operates on (a, b) pairs.
+86+
+template <typename scalar_t, int L>
+87+
+struct ScanVec {
+88+
+scalar_t v[L];
+89+
+};
+90+
+91+
+template <typename scalar_t, int L>
+92+
+struct CombineAdd {
+93+
+static C10_HOST_DEVICE ScanVec<scalar_t, L> identity() {
+94+
+ScanVec<scalar_t, L> res{};
+95+
+for (int i = 0; i < L; ++i) {
+96+
+res.v[i] = 0;
+97+
+}
+98+
+return res;
+99+
+}
+100+
+static C10_HOST_DEVICE ScanVec<scalar_t, L> combine(
+101+
+const ScanVec<scalar_t, L>& a,
+102+
+const ScanVec<scalar_t, L>& b) {
+103+
+ScanVec<scalar_t, L> res;
+104+
+for (int i = 0; i < L; ++i) {
+105+
+res.v[i] = a.v[i] + b.v[i];
+106+
+}
+107+
+return res;
+108+
+}
+109+
+};
+110+
+111+
+template <typename scalar_t, int L>
+112+
+struct CombineMul {
+113+
+static C10_HOST_DEVICE ScanVec<scalar_t, L> identity() {
+114+
+ScanVec<scalar_t, L> res{};
+115+
+for (int i = 0; i < L; ++i) {
+116+
+res.v[i] = 1;
+117+
+}
+118+
+return res;
+119+
+}
+120+
+static C10_HOST_DEVICE ScanVec<scalar_t, L> combine(
+121+
+const ScanVec<scalar_t, L>& a,
+122+
+const ScanVec<scalar_t, L>& b) {
+123+
+ScanVec<scalar_t, L> res;
+124+
+for (int i = 0; i < L; ++i) {
+125+
+res.v[i] = a.v[i] * b.v[i];
+126+
+}
+127+
+return res;
+128+
+}
+129+
+};
+130+
+131+
+template <typename scalar_t>
+132+
+struct CombineMax {
+133+
+using vec_t = ScanVec<scalar_t, 1>;
+134+
+static C10_HOST_DEVICE vec_t identity() {
+135+
+return vec_t{detail::scan_lowest<scalar_t>()};
+136+
+}
+137+
+static C10_HOST_DEVICE vec_t combine(const vec_t& a, const vec_t& b) {
+138+
+return vec_t{detail::nan_max(a.v[0], b.v[0])};
+139+
+}
+140+
+};
+141+
+142+
+template <typename scalar_t>
+143+
+struct CombineMin {
+144+
+using vec_t = ScanVec<scalar_t, 1>;
+145+
+static C10_HOST_DEVICE vec_t identity() {
+146+
+return vec_t{detail::scan_highest<scalar_t>()};
+147+
+}
+148+
+static C10_HOST_DEVICE vec_t combine(const vec_t& a, const vec_t& b) {
+149+
+return vec_t{detail::nan_min(a.v[0], b.v[0])};
+150+
+}
+151+
+};
+152+
+153+
+// combine((a1, b1), (a2, b2)) = (a2 * a1, a2 * b1 + b2), the associative
+154+
+// operation behind the Mamba-style SSM recurrence h_t = a_t * h_{t-1} + b_t.
+155+
+// A segment's transform maps h_{l-1} -> h_r = A * h_{l-1} + H; concatenating
+156+
+// left segment (a1, b1) then right segment (a2, b2) composes as a2 applied
+157+
+// after a1, so the accumulated A is a2 * a1 and the accumulated H is
+158+
+// a2 * b1 + b2.
+159+
+template <typename scalar_t>
+160+
+struct CombineLinearRecurrence {
+161+
+using vec_t = ScanVec<scalar_t, 2>;
+162+
+static C10_HOST_DEVICE vec_t identity() {
+163+
+return vec_t{static_cast<scalar_t>(1), static_cast<scalar_t>(0)};
+164+
+}
+165+
+static C10_HOST_DEVICE vec_t combine(const vec_t& a, const vec_t& b) {
+166+
+return vec_t{
+167+
+static_cast<scalar_t>(a.v[0] * b.v[0]),
+168+
+static_cast<scalar_t>(b.v[0] * a.v[1] + b.v[1]),
+169+
+};
+170+
+}
+171+
+};
+172+
+173+
+} // namespace at::native
+0 commit comments
+Comments
+0 (0)
+You can’t perform that action at this time.

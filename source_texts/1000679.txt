@@ -1,0 +1,556 @@
+Contribute to nique-epi/raytracer development by creating an account on GitHub.
+
+feat(rendering): ambient occlusion + universal Phong reflection model by nolanfrb · Pull Request #65 · nique-epi/raytracer · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+nolanfrb
+commented
+May 17, 2026
+Copy link
+Copy Markdown
+Contributor
+Summary
+Adds two rendering bonuses that together fix a long-standing gap in our
+direct-lighting path:
+Ambient occlusion as a multiplicative pass on primary rays, with
+cosine-weighted hemisphere sampling.
+Universal Phong reflection model in AMaterial::brdf plus a
+Principled BSDF direct-lighting override using Blinn-Phong +
+Schlick, which repairs the bug where PointLight could not produce
+highlights on Glossy/Glass/PrincipledMaterial (all three were
+invisible-under-PointLight before).
+Closes #
+Changes
+AO (bed83b1): new HemisphereSampler (thread_local mt19937,
+cosine-weighted), AmbientOcclusionSettings on World, CFG parsing
+in CFGSceneLoader, multiplicative AO factor on primary-ray radiance
+in WhittedIntegrator::castRay. Disabled by default to keep existing
+scenes pixel-identical.
+Phong universal in AMaterial (e776882): two new pure virtuals
+specularAlbedo() / shininess() on IMaterial. AMaterial stores
+both with neutral defaults (0,0,0) and 1.0 and composes
+diffuseAlbedo()/π + ks·max(0,R·V)^α inline. Integrator gate widened
+to fire on diffuseAlbedo > 0 || specularAlbedo > 0.
+Concrete materials (fb0d501): Diffuse, Textured, Glossy,
+Glass all accept two optional ctor params and forward them to the
+AMaterial base ctor. Defaults are no-op. Glass/Glossy ctor bodies
+moved from .hpp to .cpp (R1 cleanup).
+Factory parsing (23edfd3): each create*FromCfg reads optional
+specular = {…} and shininess keys; parsePhongParams helper in
+the anonymous namespace. PrincipledMaterial intentionally does
+not expose CFG keys for Phong — it computes its own.
+Principled override (4ec969d): PrincipledMaterial overrides
+specularAlbedo() (Schlick F0 = lerp(0.04, baseColor, metallic)),
+shininess() ((1 - roughness)^4 · 255 + 1, Karis 2013 mapping),
+and brdf() (Lambert diffuse weighted by (1-metallic)*alpha +
+Blinn-Phong specular via half-vector H = normalize(-L + V)).
+scatter() is untouched — the indirect chain still drives
+environment reflections.
+Tests (f1622b0): 19 new cases in AMaterialBrdfTest (6),
+PrincipledBrdfTest (8), and MaterialFactoryTest (5).
+Type of Change
+Bug fix (Principled invisible under PointLight)
+New feature (AO + Phong universel)
+Refactor (IMaterial contract widened, Glass/Glossy R1 cleanup)
+Documentation
+Testing
+`cmake --build build -j8` — clean, no new warnings.
+`ctest -j8` — 371/371 pass (352 prior + 19 new). Every existing
+scene-loader / factory / renderer / material test passes without
+modification: defaults are strictly no-op for code that doesn't opt
+into the new params.
+Manual render: `./build/raytracer scenes/phong_ao_demo.cfg`
+exercises all six material types side-by-side with AO enabled.
+Checklist
+Code compiles without errors
+No new warnings introduced
+Tests pass (371/371)
+Self-reviewed the diff
+nolanfrb
+added 10 commits
+May 16, 2026 02:02
+fix(tests): link bonus libraries into raytracer_tests when BUILD_BONU…
+…
+0eb0f08
+```
+…S=ON
+
+The test executable aggregates the raytracer_application object library,
+which references OIDDenoiser::denoise and registerAssimpLoader when
+BUILD_BONUS is defined. Those symbols live in bonus_OID_denoiser and
+bonus_assimp_loader, which were linked into the raytracer and
+raytracer_application targets but not into raytracer_tests, causing the
+test link to fail with "Undefined symbols for architecture arm64".
+```
+feat(rendering): ambient occlusion pass on primary rays
+…
+bed83b1
+```
+- World now carries an `AmbientOcclusionSettings` block (enabled,
+  samples, radius, intensity) parsed from the `world.ambientOcclusion`
+  CFG section through `SceneBuilder`.
+- New `rendering/helper/HemisphereSampler` providing
+  cosine-weighted hemisphere sampling on a thread_local `mt19937`.
+- `WhittedIntegrator` becomes the owner of `castRay` and applies the
+  AO factor multiplicatively on the primary ray's radiance only; secondary
+  bounces stay un-occluded.
+- Direct lighting now goes through a new `IMaterial::brdf(L, V, N)` whose
+  default Lambert implementation lives in `AMaterial`, so future
+  highlight models can extend it without touching the integrator.
+
+Tests: HemisphereSampler (distribution + alignment with the normal),
+AmbientOcclusion (open vs occluded geometry), CFGSceneLoader
+(parsed values + disabled-by-default fallback).
+```
+feat(material): universal Phong specular in AMaterial::brdf
+…
+e776882
+```
+- IMaterial: contract widened with two new pure virtuals
+  `specularAlbedo()` and `shininess()` (Phong ks and alpha).
+- AMaterial: explicit ctor accepts both with neutral defaults
+  ((0,0,0), 1.0). Stored in private fields, exposed via overrides.
+- AMaterial::brdf composes Lambert (diffuseAlbedo()/PI) and Phong
+  specular (specularAlbedo * max(0, R*V)^shininess) inline. The
+  PhongSpecular helper class is not introduced — formula lives
+  where it's used.
+- WhittedIntegrator: direct-lighting gate widened to fire on
+  `diffuseAlbedo > 0` OR `specularAlbedo > 0`, so future
+  specular-only material configurations can still receive
+  direct light.
+
+Defaults are no-op: every concrete material that doesn't pass
+specular params (Diffuse, Textured, Glossy, Glass, Principled
+today) keeps producing exactly diffuseAlbedo()/PI for direct
+lighting, identical to before.
+
+Tests: 352/352 pass, no regression.
+```
+feat(material): expose Phong params on Diffuse/Textured/Glossy/Glass
+…
+fb0d501
+```
+Each non-Principled concrete material now accepts two optional
+ctor parameters (`specularAlbedo`, `shininess`) that it forwards
+to the AMaterial base ctor. Defaults are neutral so all existing
+callsites compile unchanged and produce identical output.
+
+While extending Glossy and Glass, their ctors are moved from the
+.hpp to the .cpp to comply with R1 (no method bodies in headers).
+Unused `<cmath>` include dropped from Glass.cpp on the way through.
+
+Tests: 352/352 pass, no regression.
+```
+feat(factory): parse Phong params for non-Principled materials
+…
+23edfd3
+```
+Every typed creator (createDiffuse/Glossy/Glass/Textured) gains
+two optional parameters `specularAlbedo` and `shininess` that
+flow through to the AMaterial-derived ctor.
+
+CFG dispatch reads two new optional keys per material block:
+  specular  = { r = 255; g = 255; b = 255; };
+  shininess = 64.0;
+
+Defaults stay neutral (ks = (0,0,0), shininess = 1.0) so every
+existing scene parses to exactly the same materials it did
+before. PrincipledMaterial intentionally does not expose these
+CFG keys — it will compute its own ks/alpha from metallic and
+roughness in the next phase.
+
+The parser logic lives in a small `parsePhongParams` helper in
+the factory's anonymous namespace to keep each createFromCfg
+focused on its own concerns.
+
+Tests: 352/352 pass.
+```
+fix(material): Principled direct-lighting BRDF (Blinn-Phong + Schlick)
+…
+4ec969d
+```
+PrincipledMaterial used to be invisible under PointLight when
+metallic >= 1: diffuseAlbedo collapses to zero, the integrator
+gate skipped it, and scatter() rays could never see a zero-volume
+light source. Pure metal spheres rendered black where their
+highlight should be.
+
+The fix overrides three virtuals from the IMaterial contract:
+
+- specularAlbedo(): Schlick F0 interpolated between the dielectric
+  baseline (0.04) and baseColor by `metallic`.
+- shininess(): roughness mapped to a Blinn-Phong exponent via
+  `(1 - roughness)^4 * 255 + 1` (Karis 2013 mapping).
+- brdf(): Lambert diffuse (weighted by (1 - metallic) * alpha) plus
+  Blinn-Phong specular using the half-vector
+  `H = normalize(-L + V)` and the Schlick F0 above.
+
+scatter() is untouched — the stochastic metallic/Fresnel/transparent
+sampling still drives indirect bounces and alpha transparency. The
+override only fills the direct-lighting gap so primary PointLight
+rays produce a deterministic, roughness-modulated highlight.
+
+CFG schema for `principled` blocks is unchanged: the new specular
+parameters are computed automatically from metallic, roughness, and
+baseColor — Principled doesn't accept user-supplied `specular` or
+`shininess` keys, which would double-count.
+
+Tests: 352/352 pass (visible behaviour for non-Principled materials
+remains identical; Principled tests are added in the next commit).
+```
+test: Phong universal + Principled BRDF coverage
+…
+f1622b0
+```
+Three new test surfaces validate the refactoring:
+
+AMaterialBrdfTest (6 cases) — uses a local TestableMaterial
+subclass to exercise the universal Phong formula in
+AMaterial::brdf:
+- Neutral defaults produce a zero BRDF.
+- ks=(0,0,0) reproduces pure Lambert.
+- Reflection-vector alignment yields a unit Phong term.
+- Out-of-cone geometry zeroes the specular contribution.
+- High alpha narrows the highlight to a tight spike.
+- Lambert + Phong compose linearly.
+
+PrincipledBrdfTest (8 cases) — exercises the new
+PrincipledMaterial overrides:
+- specularAlbedo Schlick interpolation: pure metal returns
+  baseColor, pure dielectric returns the 0.04 constant,
+  metallic=0.5 linearly mixes.
+- Roughness-to-shininess mapping: 0 -> 256, 1 -> 1.
+- Pure mirror metal produces a deterministic highlight under
+  PointLight (this is the regression fix).
+- Full roughness collapses the Blinn-Phong term to a flat 1.
+- Alpha proportionally scales the diffuse term, leaving the
+  specular term untouched.
+
+MaterialFactoryTest (5 new cases) — verifies CFG round-trip
+of `specular`/`shininess` keys on Diffuse, Glossy, Glass and
+Textured types, plus a negative test confirming neutral
+defaults survive a CFG block without those keys.
+
+Total: 352 -> 371 tests, all green.
+```
+feat(scene): add test scene for universal Phong refactor with ambient…
+…
+70fda68
+```
+… occlusion
+```
+Merge branch 'main' into feat/add-ambiant-occlusion
+53325c2
+feat(shading): Blender-style grey clay for the Wireframe viewport mode
+…
+8341246
+```
+WireframeShader used to render the surface normal as RGB (debug
+visualizer). The user reads the geometry better in a uniform clay
+preview, matching Blender's "Solid" viewport: a flat grey whose
+brightness follows `max(0, N·V)`. Camera-facing surfaces hit the
+upper bound (0.85 grey), silhouette edges fall to the lower bound
+(0.18 grey).
+
+- WireframeShader.cpp now computes brightness = min + (max - min) * NdotV
+  inline. No external constants — kept in an anonymous namespace next
+  to the formula so the falloff range is obvious at the callsite.
+- WireframeShader.hpp Doxygen rewritten to describe the new look.
+- IShadingMode.hpp viewport-mode comment updated accordingly.
+- RendererViewportModeTest.WireframeRendersNormalsRegardlessOfLighting
+  renamed to WireframeRendersFlatGreyRegardlessOfLighting. The centre
+  pixel test (sphere apex with N = (0,0,1), V = (0,0,1)) now expects
+  the upper-bound brightness 0.85 across R/G/B instead of the old
+  normal-as-color (0.5, 0.5, 1.0).
+- tests/CMakeLists.txt: link bonus_json_loader into raytracer_tests
+  under BUILD_BONUS — the merge from main pulled in JsonSettingsLoader
+  references in Application.cpp without updating the test link list,
+  breaking the build when BUILD_BONUS=ON.
+
+Tests: 386/386 pass.
+```
+nolanfrb
+requested a review
+from Copilot
+May 17, 2026 02:22
+Copilot started reviewing on behalf of
+nolanfrb
+May 17, 2026 02:22
+View session
+Copilot
+AI
+reviewed
+May 17, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Adds ambient occlusion controls to scene/world rendering and expands material direct lighting with Phong-style specular support, including Principled BSDF BRDF behavior. Also updates related factories, tests, demo scene, and viewport shader behavior.
+Changes:
+Introduces AO settings, CFG parsing, hemisphere sampling, and Whitted integrator AO application.
+Extends material APIs/factories with specularAlbedo(), shininess(), and BRDF-based direct lighting.
+Adds BRDF/AO/sampler/factory/scene-loader tests and a phong_ao demo scene.
+Reviewed changes
+Copilot reviewed 38 out of 38 changed files in this pull request and generated 9 comments.
+Show a summary per file
+File
+Description
+tests/scene/fixtures/cfg/world_ambient_occlusion.cfg
+Adds CFG fixture for AO world settings.
+tests/scene/CFGSceneLoaderTest.cpp
+Tests AO parsing/default behavior.
+tests/rendering/HemisphereSamplerTest.cpp
+Tests cosine hemisphere sampler behavior.
+tests/rendering/AmbientOcclusionTest.cpp
+Tests AO through Whitted integrator.
+tests/renderer/RendererViewportModeTest.cpp
+Updates wireframe viewport expectations.
+tests/factory/MaterialFactoryTest.cpp
+Tests Phong parameter parsing.
+tests/components/material/PrincipledBrdfTest.cpp
+Adds Principled BRDF tests.
+tests/components/material/AMaterialBrdfTest.cpp
+Adds universal AMaterial BRDF tests.
+tests/CMakeLists.txt
+Registers new tests and bonus JSON linkage.
+src/scene/World.hpp
+Adds AO settings to World.
+src/scene/World.cpp
+Implements AO settings accessors.
+src/scene/SceneBuilder.hpp
+Adds AO setter API.
+src/scene/SceneBuilder.cpp
+Applies AO settings to World.
+src/scene/CFGSceneLoader.cpp
+Parses AO settings from CFG.
+src/rendering/shading/wireframe/WireframeShader.hpp
+Updates wireframe shader docs.
+src/rendering/shading/wireframe/WireframeShader.cpp
+Changes wireframe shading to grey facing-ratio preview.
+src/rendering/shading/IShadingMode.hpp
+Updates wireframe mode description.
+src/rendering/integrator/whittedIntegrator/WhittedIntegrator.hpp
+Adds AO/internal cast APIs and logger member.
+src/rendering/integrator/whittedIntegrator/WhittedIntegrator.cpp
+Adds BRDF direct lighting and AO computation.
+src/rendering/helper/HemisphereSampler.hpp
+Declares cosine hemisphere sampler.
+src/rendering/helper/HemisphereSampler.cpp
+Implements thread-local RNG hemisphere sampling.
+src/rendering/helper/CMakeLists.txt
+Builds HemisphereSampler.
+src/factory/material/MaterialFactory.hpp
+Extends material factory APIs with Phong parameters.
+src/factory/material/MaterialFactory.cpp
+Parses/forwards Phong material settings.
+src/components/material/textured/TexturedMaterial.hpp
+Adds Phong constructor parameters.
+src/components/material/textured/TexturedMaterial.cpp
+Forwards Phong parameters to AMaterial.
+src/components/material/principledBSDF/PrincipledBSDF.hpp
+Declares Principled specular/shininess/BRDF overrides.
+src/components/material/principledBSDF/PrincipledBSDF.cpp
+Implements Principled direct-lighting BRDF.
+src/components/material/IMaterial.hpp
+Widens material interface with specular/shininess/BRDF.
+src/components/material/glossy/Glossy.hpp
+Moves/extends Glossy constructor declaration.
+src/components/material/glossy/Glossy.cpp
+Implements Glossy constructor with Phong parameters.
+src/components/material/glass/Glass.hpp
+Extends Glass constructor declaration.
+src/components/material/glass/Glass.cpp
+Implements Glass constructor with Phong parameters.
+src/components/material/diffuse/DiffuseMaterial.hpp
+Extends Diffuse constructor declaration.
+src/components/material/diffuse/DiffuseMaterial.cpp
+Forwards Phong parameters to AMaterial.
+src/components/material/abstract/AMaterial.hpp
+Adds Phong storage and default BRDF API.
+src/components/material/abstract/AMaterial.cpp
+Implements AMaterial Phong BRDF.
+scenes/phong_ao.cfg
+Adds AO/Phong demo scene.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+src/rendering/helper/HemisphereSampler.cpp
+const double azimuth = math::constants::DOUBLE * math::constants::PI * u2;
+const double localX = radius * std::cos(azimuth);
+const double localY = radius * std::sin(azimuth);
+const double localZ = std::sqrt(std::max(0.0, 1.0 - u1));
+Comment thread
+src/scene/CFGSceneLoader.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/components/material/abstract/AMaterial.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/rendering/shading/wireframe/WireframeShader.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+tests/rendering/HemisphereSamplerTest.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/rendering/integrator/whittedIntegrator/WhittedIntegrator.hpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+scenes/phong_ao.cfg
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/rendering/integrator/whittedIntegrator/WhittedIntegrator.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/rendering/integrator/whittedIntegrator/WhittedIntegrator.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+nolanfrb
+added 3 commits
+May 17, 2026 16:42
+fix(rendering): address PR review on AO + Phong refactor
+…
+95f5324
+```
+Five reviewer-flagged issues:
+
+1. AMaterial::shininess validation. The constructor used to store
+   `shininess` verbatim while the contract said "strictly positive".
+   A zero exponent collapsed Phong to flat-ks-everywhere; a negative
+   one blew up to infinity at zero-alignment. Now validated in the
+   member initializer via a small `validateShininess` helper that
+   throws `std::invalid_argument` on `shininess <= 0`. Bad CFG values
+   surface as a parse-time error instead of silent NaN downstream.
+
+2. AO settings clamping in `World::setAmbientOcclusion`. The setter
+   accepted any input, so an out-of-range `intensity > 1` produced
+   negative AO factors and `intensity < 0` brightened the image.
+   Negative `radius` / `samples` were also accepted. The setter now
+   clamps `intensity` to [0, 1], `radius` and `samples` to >= 0.
+   Same single point of entry from CFG, builder, and tests.
+
+3. `raytracer_integrator` link-time dependency. Adding the Logger
+   member introduced a hidden dependency on `raytracer_helper` that
+   the integrator CMake target did not declare. Now PUBLIC-linked so
+   downstream consumers can link `raytracer_integrator` alone.
+
+4. AO early return on `intensity <= 0`. With intensity at zero the
+   factor was guaranteed to be 1.0 but the function still cast every
+   hemisphere sample. The early-return gate now also checks
+   `settings.intensity <= 0.0`, saving the full AO cost for a setting
+   that is documented and tested as disabling darkening.
+
+5. Integrator-level regression test. The PR shipped BRDF unit tests
+   and factory parsing tests, but nothing exercised the path
+   `WhittedIntegrator -> material.brdf -> PointLight highlight` for a
+   specular-only material. Added
+   `tests/rendering/WhittedIntegratorHighlightTest.cpp` with four
+   cases: Glossy / Glass / Principled-metallic each produce a
+   non-trivial radiance at the apex under a PointLight, and a fourth
+   case that asserts the integrator gate fires on `specularAlbedo > 0`
+   even when `diffuseAlbedo` is black.
+
+Tests: 386 -> 390, all pass.
+```
+refactor(material): throw MaterialException instead of std::invalid_a…
+…
+1be720f
+```
+…rgument
+
+The shininess validator in AMaterial used std::invalid_argument, which
+sits outside the project's exception hierarchy. The rest of the codebase
+defines a domain-specific subclass of raytracer::core::RaytracerException
+per layer (ShadingException, RendererException, ImageException,
+SceneLoaderException, etc.) so that a single catch site at the
+application boundary handles every internal failure uniformly.
+
+This commit follows that pattern:
+
+- New `components/material/MaterialException.hpp` derives from
+  `raytracer::core::RaytracerException` via the standard
+  `using base::base` ctor inheritance.
+- AMaterial::validateShininess now throws MaterialException with the
+  same message format. The validation logic and contract are unchanged.
+
+Tests: 390/390 still pass.
+```
+fix(rendering): include <algorithm> directly in HemisphereSampler.cpp
+…
+aeaca0d
+```
+`sampleCosineHemisphere` calls `std::max` but the translation unit
+included only <cmath> and <random>. The build worked on macOS/libc++
+through transitive includes, which is not portable — libstdc++ and MSVC
+can drop those transitives at any point and break the build.
+
+Added the explicit include. Audited the rest of the PR's TUs for the
+same pattern; all other files that use std::max/std::min/std::clamp
+already include <algorithm> directly.
+
+Tests: 390/390 still pass.
+```
+Yannislrg
+reviewed
+May 17, 2026
+View reviewed changes
+Comment thread
+src/scene/World.hpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+refactor(ambient-occlusion): remove redundant comments in AmbientOccl…
+…
+ddce369
+```
+…usionSettings
+```
+Hide details
+View details
+nolanfrb
+merged commit f79dcbb
+into
+main
+May 17, 2026
+3 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+nolanfrb
+deleted the
+feat/add-ambiant-occlusion
+branch
+May 17, 2026 15:13
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

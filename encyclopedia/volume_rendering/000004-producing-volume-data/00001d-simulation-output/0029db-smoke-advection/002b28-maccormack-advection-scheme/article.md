@@ -16,147 +16,110 @@ $$
 \end{aligned}
 $$
 
-Where:
-*   $\phi^n$ is the field value at the current time step.
-*   $\mathcal{A}$ is the forward semi-Lagrangian advection operator.
-*   $\mathcal{A}^R$ is the reversed (backward) semi-Lagrangian advection operator.
-*   $\hat{\phi}^{n+1}$ is the intermediate value obtained by advecting $\phi^n$ forward.
-*   $\hat{\phi}^n$ is the intermediate value obtained by advecting $\hat{\phi}^{n+1}$ backward.
-*   $\phi^{n+1}$ is the final advected value.
+Where $\mathcal{A}$ is the forward semi-Lagrangian advection operator, $\mathcal{A}^R$ is the reversed (backward) semi-Lagrangian advection operator, and $\phi^n$ is the field value at the current time step [S1, unofficial].
 
 ### Inputs and Outputs
 *   **Inputs**:
-    *   $\phi^n$: The scalar or vector field texture at the current time step.
-    *   $\mathbf{u}$: The velocity field texture.
-    *   $\Delta t$: The simulation time step.
-    *   Grid dimensions: `textureWidth`, `textureHeight`, `textureDepth`.
+    *   $\phi^n$: The scalar or vector field texture at the current time step [S1, unofficial].
+    *   $\mathbf{u}$: The velocity field texture [S1, unofficial].
+    *   $\Delta t$: The simulation time step [S1, unofficial].
+    *   Grid dimensions: `textureWidth`, `textureHeight`, `textureDepth` [S1, unofficial].
 *   **Outputs**:
-    *   $\phi^{n+1}$: The advected field texture at the next time step.
+    *   $\phi^{n+1}$: The advected field texture at the next time step [S1, unofficial].
 
 ### Data Structures
-The implementation operates on 3D textures (volumetric data). Each texel stores the field value (e.g., `float4` for RGBA or `float3` for velocity). The algorithm assumes a grid-based coordinate system where cell indices map to texture coordinates.
+The implementation operates on 3D textures (volumetric data) where each texel stores the field value (e.g., `float4` or `float3`) [S1, unofficial]. The algorithm assumes a grid-based coordinate system where cell indices map to texture coordinates via `cellIndex2TexCoord` [S1, unofficial].
 
 ### Numbered Steps
-1.  **Trace Backward Characteristic**: For the current grid cell, sample the velocity at the cell center using point clamping to avoid interpolation artifacts. Calculate the position at the previous time step by subtracting the velocity scaled by the time step from the current cell index.
-2.  **Locate Sample Corner**: Determine the cell corner closest to the traced-back "particle" position. This is done by adding 0.5 to the position (to align with grid corners) and flooring the result. Convert this integer grid position to a texture coordinate.
-3.  **Compute Half-Texel Offsets**: Calculate the offset vector `ht` corresponding to half a texel in each dimension. This offset is used to sample the centers of the 8 neighboring nodes surrounding the traced-back position.
-4.  **Sample Neighbors for Limiter**: Sample the 8 texels closest to the traced-back particle location from the current field $\phi^n$ using point clamping. These samples represent the values at the centers of the 8 surrounding grid nodes.
-5.  **Determine Valid Range**: Compute the component-wise minimum (`phiMin`) and maximum (`phiMax`) of the 8 sampled neighbor values. This range defines the bounds for the limiter.
-6.  **Forward Advection ($\hat{\phi}^{n+1}$)**: Perform a standard semi-Lagrangian advection step. Trace back from the current cell using the velocity, convert to texture coordinates, and sample $\phi^n$ using linear interpolation. Store this result as $\hat{\phi}^{n+1}$.
-7.  **Reverse Advection ($\hat{\phi}^n$)**: Perform a semi-Lagrangian advection step in reverse. Trace back from the position used in step 6 (the location where $\hat{\phi}^{n+1}$ was sampled) using the *reversed* velocity (or equivalently, tracing forward from the target if the velocity field allows, but typically implemented by tracing back from the target using the velocity at the target and negating, or by using the velocity field to trace forward). In the specific GPU implementation described, this is often conceptualized as advecting $\hat{\phi}^{n+1}$ back to the original grid position. The source code implies sampling $\hat{\phi}^{n+1}$ at the original cell center location to get $\hat{\phi}^n$ effectively, but strictly following the formula $\mathcal{A}^R(\hat{\phi}^{n+1})$, one must trace back from the original cell using the velocity field to find where $\hat{\phi}^{n+1}$ came from. *Note: The provided source code snippet for the final combination step samples `phi_n_hat` at `in.CENTERCELL`, implying $\hat{\phi}^n$ is the value of the forward-advected field sampled back at the original location, which is a specific implementation detail of the reverse step in this context.*
-8.  **Combine**: Compute the final value $\phi^{n+1}$ using the formula:
-    $$ r = \hat{\phi}^{n+1} + 0.5 \times (\phi^n_{\text{center}} - \hat{\phi}^n) $$
-    Where $\phi^n_{\text{center}}$ is the value of the original field at the current cell center.
-9.  **Clamp (Limiter)**: Clamp the result $r$ to the range `[phiMin, phiMax]` determined in step 5. This prevents overshooting and ensures stability.
+1.  **Trace Backward Characteristic**: For the current grid cell, sample the velocity at the cell center using point clamping to avoid interpolation artifacts [S1, unofficial]. Calculate the position at the previous time step by subtracting the velocity scaled by the time step from the current cell index: `npos = in.cellIndex – timestep * cellVelocity` [S1, unofficial].
+2.  **Locate Sample Corner**: Determine the cell corner closest to the traced-back "particle" position by adding 0.5 to the position (to align with grid corners) and flooring the result, then convert this integer grid position to a texture coordinate: `npos = floor(npos + float3(0.5f, 0.5f, 0.5f)); npos = cellIndex2TexCoord(npos);` [S1, unofficial].
+3.  **Compute Half-Texel Offsets**: Calculate the offset vector `ht` corresponding to half a texel in each dimension: `ht = float3(0.5f / textureWidth, 0.5f / textureHeight, 0.5f / textureDepth)` [S1, unofficial].
+4.  **Sample Neighbors for Limiter**: Sample the 8 texels closest to the traced-back particle location from the current field $\phi^n$ using point clamping at offsets relative to the cell corner: `nodeValues[k] = phi_n.Sample(samPointClamp, npos + offset)` for k=0..7 [S1, unofficial].
+5.  **Determine Valid Range**: Compute the component-wise minimum (`phiMin`) and maximum (`phiMax`) of the 8 sampled neighbor values to establish the clamping bounds [S1, unofficial].
+6.  **Forward Advection ($\hat{\phi}^{n+1}$)**: Perform a standard semi-Lagrangian advection step by sampling $\phi^n$ at the traced-back position using linear interpolation to obtain $\hat{\phi}^{n+1}$ [S1, unofficial].
+7.  **Reverse Advection & Combine**: Compute $\hat{\phi}^n$ by sampling the forward-advected field $\hat{\phi}^{n+1}$ at the original cell center using point clamping [S1, unofficial]. Combine the intermediate values using the update formula: `r = phi_n_1_hat.Sample(samLinear, nposTC) + 0.5 * (phi_n.Sample(samPointClamp, in.CENTERCELL) - phi_n_hat.Sample(samPointClamp, in.CENTERCELL))` [S1, unofficial].
+8.  **Clamp (Limiter)**: Clamp the result `r` to the range `[phiMin, phiMax]` to prevent overshooting and ensure stability: `r = max(min(r, phiMax), phiMin)` [S1, unofficial].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def macCormackAdvection(phi_n, velocity, timestep, textureWidth, textureHeight, textureDepth):
+import math
+
+def macCormack_advection(phi_n, velocity, timestep, texture_width, texture_height, texture_depth):
     """
     Performs MacCormack advection on a 3D grid.
-    phi_n: Texture3D, field at time n
-    velocity: Texture3D, velocity field
+    phi_n: dict mapping (x,y,z) to float, field at time n
+    velocity: dict mapping (x,y,z) to (vx,vy,vz), velocity field
     timestep: float, dt
-    textureWidth, textureHeight, textureDepth: int, grid dimensions
-    Returns: Texture3D, field at time n+1
+    texture_width, texture_height, texture_depth: int, grid dimensions
+    Returns: dict mapping (x,y,z) to float, field at time n+1
     """
-    # Helper to convert grid index to texture coordinate
-    def cellIndex2TexCoord(index):
-        return float3(
-            index.x / textureWidth,
-            index.y / textureHeight,
-            (index.z + 0.5) / textureDepth
-        )
+    def cell_index_to_tex_coord(index):
+        return (index[0] / texture_width, index[1] / texture_height, (index[2] + 0.5) / texture_depth)
 
-    # Precompute half-texel offsets
-    ht = float3(
-        0.5 / textureWidth,
-        0.5 / textureHeight,
-        0.5 / textureDepth
-    )
+    ht = (0.5 / texture_width, 0.5 / texture_height, 0.5 / texture_depth)
+    offsets = [
+        (-ht[0], -ht[1], -ht[2]), (-ht[0], -ht[1], ht[2]),
+        (-ht[0], ht[1], -ht[2]), (-ht[0], ht[1], ht[2]),
+        (ht[0], -ht[1], -ht[2]), (ht[0], -ht[1], ht[2]),
+        (ht[0], ht[1], -ht[2]), (ht[0], ht[1], ht[2])
+    ]
 
-    # Initialize output texture
-    phi_n_1 = create_texture_like(phi_n)
+    phi_n_1 = {}
 
-    for each cell in grid:
-        # 1. Trace back along the initial characteristic
-        # Sample velocity at the center of the current cell using point clamping
-        cellVelocity = velocity.sample_point_clamp(cell.centerTexCoord)
-        
-        # Calculate position at previous time step
-        npos = cell.index - timestep * cellVelocity
-        
-        # 2. Find the cell corner closest to the particle
-        # Add 0.5 to align with corners, then floor
-        npos_corner = floor(npos + float3(0.5, 0.5, 0.5))
-        npos_tc = cellIndex2TexCoord(npos_corner)
-        
-        # 3. Sample 8 neighboring nodes for the limiter
-        # These are the centers of the 8 cells surrounding the traced-back position
-        nodeValues = []
-        offsets = [
-            float3(-ht.x, -ht.y, -ht.z), float3(-ht.x, -ht.y, ht.z),
-            float3(-ht.x, ht.y, -ht.z), float3(-ht.x, ht.y, ht.z),
-            float3(ht.x, -ht.y, -ht.z), float3(ht.x, -ht.y, ht.z),
-            float3(ht.x, ht.y, -ht.z), float3(ht.x, ht.y, ht.z)
-        ]
-        
-        for offset in offsets:
-            samplePos = npos_tc + offset
-            val = phi_n.sample_point_clamp(samplePos)
-            nodeValues.append(val)
-            
-        # 4. Determine valid range (min/max of 8 neighbors)
-        phiMin = min(nodeValues)
-        phiMax = max(nodeValues)
-        
-        # 5. Forward Advection: Compute phi_hat^{n+1}
-        # Trace back from current cell using velocity
-        forwardPos = cell.index - timestep * cellVelocity
-        forwardPos_tc = cellIndex2TexCoord(floor(forwardPos + float3(0.5, 0.5, 0.5)))
-        phi_hat_n_1 = phi_n.sample_linear(forwardPos_tc)
-        
-        # 6. Reverse Advection: Compute phi_hat^n
-        # The source implementation samples phi_hat^{n+1} at the original cell center
-        # to approximate the reverse step in the combination formula.
-        # Strictly, A^R(phi_hat^{n+1}) involves tracing back from the current cell
-        # using the velocity field to find where phi_hat^{n+1} originated.
-        # However, the provided code snippet uses:
-        # phi_n_hat.Sample(samPointClamp, in.CENTERCELL)
-        # This implies phi_hat^n is the value of the forward-advected field
-        # sampled back at the original grid location.
-        phi_hat_n = phi_hat_n_1 # Placeholder: In the specific GPU shader, 
-                                # this is obtained by sampling the intermediate 
-                                # field at the current cell center.
-        
-        # 7. Combine
-        # phi^n at center
-        phi_n_center = phi_n.sample_point_clamp(cell.centerTexCoord)
-        
+    for cell_index in grid_cells:
+        # 1. Trace back along initial characteristic [S1, unofficial]
+        cell_center_tc = cell_index_to_tex_coord((cell_index[0] + 0.5, cell_index[1] + 0.5, cell_index[2] + 0.5))
+        cell_velocity = velocity[cell_index]
+        npos = (cell_index[0] - timestep * cell_velocity[0],
+                cell_index[1] - timestep * cell_velocity[1],
+                cell_index[2] - timestep * cell_velocity[2])
+
+        # 2. Locate sample corner [S1, unofficial]
+        npos_corner = (math.floor(npos[0] + 0.5), math.floor(npos[1] + 0.5), math.floor(npos[2] + 0.5))
+        npos_tc = cell_index_to_tex_coord(npos_corner)
+
+        # 3. Sample 8 neighbors for limiter [S1, unofficial]
+        node_values = [sample_point_clamp(phi_n, (npos_tc[0] + off[0], npos_tc[1] + off[1], npos_tc[2] + off[2])) for off in offsets]
+        phi_min = min(node_values)
+        phi_max = max(node_values)
+
+        # 4. Forward advection: phi_hat^{n+1} [S1, unofficial]
+        phi_hat_n_1 = sample_linear(phi_n, npos_tc)
+
+        # 5. Reverse advection & Combine [S1, unofficial]
+        phi_hat_n = sample_point_clamp(phi_hat_n_1, cell_center_tc)
+        phi_n_center = sample_point_clamp(phi_n, cell_center_tc)
         r = phi_hat_n_1 + 0.5 * (phi_n_center - phi_hat_n)
-        
-        # 8. Clamp result
-        r = clamp(r, phiMin, phiMax)
-        
-        phi_n_1.set(cell.index, r)
-        
+
+        # 6. Clamp (Limiter) [S1, unofficial]
+        r = max(min(r, phi_max), phi_min)
+
+        phi_n_1[cell_index] = r
+
     return phi_n_1
+
+def sample_linear(texture, coord):
+    # [G] Standard trilinear interpolation of texture at coord
+    ...
+
+def sample_point_clamp(texture, coord):
+    # [G] Point sampling with clamping to texture bounds
+    ...
 ```
 
 ### Parameters
-*   **Time Step ($\Delta t$)**: Must be small enough to satisfy the CFL condition for stability, as the scheme is not unconditionally stable [S1, unofficial].
 *   **Grid Resolution**: The scheme is particularly beneficial at lower resolutions (e.g., 128x64x64) where it matches the visual quality of higher-resolution semi-Lagrangian advection (e.g., 256x128x128) [S1, unofficial].
 
 ### Edge Cases and Pitfalls
 *   **Instability**: The MacCormack scheme is not unconditionally stable. Without the limiter, the simulation can "blow up" (values diverge to infinity) [S1, unofficial].
 *   **Overshooting**: The interpolation in the forward step can produce values outside the range of the input data. The limiter clamps the result to the min/max of the 8 neighboring nodes from the initial sampling position, preventing this overshoot [S1, unofficial].
-*   **Interpolation Artifacts**: When determining the min/max range for the limiter, point clamping must be used to access texel centers exactly. Using linear interpolation for the limiter calculation would introduce artifacts and invalidate the range bounds [S1, unofficial].
+*   **Interpolation Artifacts**: When determining the min/max range for the limiter, point clamping must be used to access texel centers exactly to avoid getting interpolated values that would invalidate the range bounds [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity**: $O(N)$, where $N$ is the number of grid cells. The scheme requires two advection steps (forward and reverse) plus neighbor sampling, making it roughly 2-3 times more expensive per step than a single semi-Lagrangian advection step.
-*   **Memory Complexity**: $O(N)$ for storing the field textures. The scheme requires storing intermediate results ($\hat{\phi}^{n+1}$) or re-sampling, which may require additional temporary storage depending on implementation.
+*   **Time Complexity**: $O(N)$, where $N$ is the number of grid cells. The scheme requires two advection steps (forward and reverse) plus neighbor sampling, making it roughly 2-3 times more expensive per step than a single semi-Lagrangian advection step [G].
+*   **Memory Complexity**: $O(N)$ for storing the field textures. The scheme requires storing intermediate results ($\hat{\phi}^{n+1}$) or re-sampling, which may require additional temporary storage depending on implementation [G].
 *   **Performance**: On GPUs, higher-order schemes like MacCormack are often more efficient than increasing grid resolution because arithmetic operations are cheaper than memory bandwidth [S1, unofficial]. A MacCormack scheme on a 128x64x64 grid produces comparable visual detail to a semi-Lagrangian scheme on a 256x128x128 grid, saving significant memory and bandwidth costs [S1, unofficial].
 *   **Strengths**: Improved visual detail on low-resolution grids; reduces numerical smoothing (dissipation) compared to first-order semi-Lagrangian advection.
 *   **Limitations**: Conditionally stable; requires careful tuning of the time step; more complex to implement than standard semi-Lagrangian advection; the limiter can introduce slight numerical diffusion if the range is tight.

@@ -1,0 +1,355 @@
+← <a href="https://qiita.com/beziex/items/d3ad67752dba8cc355c7">［前編］: WebGL でテッセレーションして、曲面パッチ間が滑らかに繋がった物体を表示（１）</a>
+
+## デモ＆ソース
+
+<a href="https://qiita.com/beziex/items/d3ad67752dba8cc355c7">前編</a> で、既にデモとソース（github）へのリンクを貼ってますが、念のため本稿（後編）にもリンクを付けておきます。
+
+**デモ**<a href="https://beziex.netlify.app/beziex_we/">
+Beziex_We : (https://beziex.netlify.app/beziex_we/)</a>
+
+**デモの使い方**<a href="https://github.com/beziex/Beziex_We/blob/master/README.md#demo--usage--%E3%83%87%E3%83%A2%E3%81%A8%E4%BD%BF%E3%81%84%E6%96%B9">
+デモと使い方 : (beziex/Beziex_We [github] のところの README.md 内)</a>
+
+**ソースコード（github）**
+<a href="https://github.com/beziex/Beziex_We">beziex/Beziex_We [github] :  (https://github.com/beziex/Beziex_We)</a>
+
+
+## gl_InstanceID の代替
+
+まず前編で述べた通り、本プログラムは 無印WebGL を使っています。そのため `gl_InstanceID` が使えないということを書きました。
+
+ちなみに `drawElementsInstancedANGLE` 関数で "複数の曲面パッチ" を表示するということは、元の曲面パッチを複製（これがインスタンス）するということになります。この場合、それぞれのインスタンスを区別するためには、ID のようなものが必要となる可能性があります。
+そしてその ID こそが `gl_InstanceID` なのですが、無印WebGL には無いのです。
+
+でも、任意のインスタンスが <a href="https://qiita.com/beziex/items/d3ad67752dba8cc355c7#%E3%83%91%E3%83%83%E3%83%81-%E3%83%91%E3%83%A9%E3%83%A1%E3%83%BC%E3%82%BF-%E3%83%86%E3%82%AF%E3%82%B9%E3%83%81%E3%83%A3">パッチパラメータテクスチャ</a> 内で、「自インスタンスに対応する情報のある場所」を探すためには、インスタンスの ID が必須です。しかも ID は、0 から始まる連番でなければなりません。
+
+そこで <a href="https://qiita.com/YVT">@YVT</a> さんが書かれた、下記の方法を参考にすることにしました。
+<a href="https://qiita.com/YVT/items/4c29293d9c24d32ee8de#instanced-stereo-rendering">Instanced Stereo Rendering</a>
+
+これに基づいて実装したのが、`BxGlShader` クラスの`setVertexBuffer` 関数です。
+
+```typescript:BxGlShader.setVertexBuffer（抜粋）
+protected setVertexBuffer(): void {
+                :
+    const instanceAry: number[] = new Array<number>(this.numSurface_);
+    for (let i=0; i<this.numSurface_; i++ )
+        instanceAry[i] = i + 0.5;
+                :
+    this.gl_.bindBuffer(this.gl_.ARRAY_BUFFER, this.buf.vbo[1]);
+    this.gl_.bufferData(this.gl_.ARRAY_BUFFER, new Float32Array(instanceAry), this.gl_.STATIC_DRAW);
+                :
+}
+```
+
+それにより本関数の `instanceAry` という配列を、`gl_InstanceID` の代わりとすることが出来ました。
+しかし 0.5 加算してますね？ これは、バーテックスシェーダまで `instanceAry` の情報を持っていく間、ずっと浮動小数点型の値になっているからです。その後、バーテックスシェーダ内で最終的に整数化されるのですが、その時の計算誤差を考慮したわけです。
+
+そして `instanceAry` を、`this.buf.vbo[1]` という VBO に入れます。この `this.buf.vbo` は 2個の配列ですが、`this.buf.vbo[0]` には前編で述べた uv値（整数値）を入れています。
+ということで、このことから本プログラムは 2個の VBO を使っていることが分かります。 
+<a href="https://qiita.com/emadurandal/items/0bb83b545670475f51a3#gpu%E3%81%A8%E8%A6%AA%E5%92%8C%E6%80%A7%E3%81%AE%E9%AB%98%E3%81%84%E3%82%A4%E3%83%B3%E3%82%BF%E3%83%BC%E3%83%AA%E3%83%BC%E3%83%96%E9%85%8D%E5%88%97%E3%81%A8%E3%81%AF">GPUと親和性の高いインターリーブ配列とは？</a> によると、VBO を 1個にしてインターリーブ配列にした方がパフォーマンスが良さそうとのことですが、敢えて 2個にしました。
+
+なぜでしょうか？ それは 2つの VBO がそれぞれ、
+
+1. 曲面パッチを 1個だけ VBO にしていて、後はインスタンスである
+2. パッチの数だけ「連番のインスタンス ID」が存在する VBO である
+
+となっているからです。ここで、1個の「曲面パッチ」や「連番のインスタンス ID」をエレメントと呼ぶことにすると、「1. の VBO はエレメントが 1個」「2. の VBO のエレメントはパッチ数だけある」ということになります。
+
+すなわちエレメント数が異なるので、1個に出来なかったのです。
+
+
+## VAO
+
+本プログラムでは `BxGlShader` クラスの`setVAO` 関数で、VAO（vertex array object）に情報を入れています。
+
+```typescript:BxGlShader.setVAO
+protected setVAO(): void {
+    this.buf.vaoHandle[0] = this.buf.glExt.vao.createVertexArrayOES();
+    this.buf.glExt.vao.bindVertexArrayOES(this.buf.vaoHandle[0]);
+
+    this.gl_.bindBuffer(this.gl_.ARRAY_BUFFER, this.buf.vbo[0]);
+
+    const programObj    = <BxGlProgramBase>this.programObj_;
+    const shaderProgram = <WebGLProgram>programObj.shaderProgram();
+
+    const vertexUVLocation = this.gl_.getAttribLocation(shaderProgram, "vertVertexUV");
+    this.gl_.enableVertexAttribArray(vertexUVLocation);
+    this.gl_.vertexAttribPointer(vertexUVLocation, 3, this.gl_.FLOAT, false, 0, 0);
+
+    this.gl_.bindBuffer(this.gl_.ARRAY_BUFFER, this.buf.vbo[1]);
+
+    const instanceIdLocation = this.gl_.getAttribLocation(shaderProgram, "vertInstanceID");
+    this.gl_.enableVertexAttribArray(instanceIdLocation);
+    this.gl_.vertexAttribPointer(instanceIdLocation, 1, this.gl_.FLOAT, false, 0, 0);
+
+    (<ANGLE_instanced_arrays>(this.buf.glExt.instancedAry)).vertexAttribDivisorANGLE(0, 0);
+    (<ANGLE_instanced_arrays>(this.buf.glExt.instancedAry)).vertexAttribDivisorANGLE(1, 1);
+
+    this.buf.glExt.vao.bindVertexArrayOES(null);
+}
+```
+
+これを見ると、
+
+- `this.buf.vbo[0]` を、シェーダの `vertVertexUV` 変数に送る
+- `this.buf.vbo[1]` を、シェーダの `vertInstanceID` 変数に送る
+
+となっていることが分かります。すなわち最終的に「uv値（整数値）」と「インスタンス ID」になるわけです。
+
+また本関数内には、`vertexAttribDivisorANGLE` という見慣れない関数も存在します。
+
+```typescript:
+    (<ANGLE_instanced_arrays>(this.buf.glExt.instancedAry)).vertexAttribDivisorANGLE(0, 0);
+    (<ANGLE_instanced_arrays>(this.buf.glExt.instancedAry)).vertexAttribDivisorANGLE(1, 1);
+```
+
+この `vertexAttribDivisorANGLE` 関数については、<a href="https://qiita.com/emadurandal/items/1812198d562bd1216c70#%E3%82%A2%E3%83%97%E3%83%AD%E3%83%BC%E3%83%81%EF%BC%91%E3%82%A4%E3%83%B3%E3%82%B9%E3%82%BF%E3%83%B3%E3%82%B9%E6%AF%8E%E3%83%87%E3%83%BC%E3%82%BF%E3%82%92vbo%E3%81%A7%E7%94%A8%E6%84%8F%E3%81%97%E3%81%A6vertexattribdivisorangle%E3%82%92%E4%BD%BF%E3%81%A3%E3%81%A6%E3%82%A2%E3%82%AF%E3%82%BB%E3%82%B9">アプローチ１：インスタンス毎データをVBOで用意して、vertexAttribDivisorANGLEを使ってアクセス</a> に詳しく書かれています。
+
+なお前項で、「2個の VBO はエレメント数が異なる」ということを述べました。実は `drawElementsInstancedANGLE` 関数では通常、このようにエレメント数が異なる複数の VBO を、同時に扱うことは出来ないのです。
+しかし `vertexAttribDivisorANGLE` 関数で適切に定義してやると、扱うことが可能となります。便利ですね！
+
+
+## バーテックスシェーダ（入力変数）
+
+ようやくシェーダ側のプログラムに入ってきました。まずは入力変数からです。
+
+```glsl:（shader.vert）
+            :
+attribute vec3   vertVertexUV;
+attribute float  vertInstanceID;
+            :
+uniform float      tessLevel;
+uniform sampler2D  vtf;
+uniform float      numSurface;
+            :
+```
+
+上記のうち、`vertVertexUV`、`vertInstanceID` は VBO から来たデータで、それぞれ「uv 値（整数の float 化）」、「インスタンス ID」となります。
+また `tessLevel`、`vtf`、`numSurface` は CPU から送られてきた定数で、それぞれ「分割数」「テクスチャデータ」「パッチ数」です。
+
+
+## バーテックスシェーダ（getPosNormal）
+
+`getPosNormal` は、「"分割して出来たポリゴン" の頂点」の頂点位置と法線を計算する関数で、本シェーダ内で一番重要な処理と言えます。ちなみにこの頂点位置と法線はその後マトリックスと乗算されますが、特に難しくないので説明は割愛します。
+
+```glsl:（shader.vert）getPosNormal
+void getPosNormal( out vec3 pos, out vec3 normalE )
+{
+    float  numTess = tessLevel / tessDenom;
+
+    float  u = vertVertexUV.x / numTess;
+    float  v = vertVertexUV.y / numTess;
+
+    int  n = int( vertInstanceID + surfaceOfs );
+
+    vec3  hPosBez0[ 4 ],  hPosBez1[ 7 ],  hPosBez2[ 7 ],  hPosBez3[ 4 ],  vPosBez0[ 4 ],  vPosBez1[ 7 ],  vPosBez2[ 7 ],  vPosBez3[ 4 ];
+    vec3  hDiffBez0[ 3 ], hDiffBez1[ 6 ], hDiffBez2[ 6 ], hDiffBez3[ 3 ], vDiffBez0[ 3 ], vDiffBez1[ 6 ], vDiffBez2[ 6 ], vDiffBez3[ 3 ];
+    fromTexel( n, hPosBez0, hPosBez1, hPosBez2, hPosBez3, vPosBez0, vPosBez1, vPosBez2, vPosBez3, hDiffBez0, hDiffBez1, hDiffBez2, hDiffBez3, vDiffBez0, vDiffBez1, vDiffBez2, vDiffBez3 );
+ 
+    vec3  posH, posV;
+    getPosition( hPosBez0, hPosBez1, hPosBez2, hPosBez3, vPosBez0, vPosBez1, vPosBez2, vPosBez3, u, v, posH, posV, pos );
+
+    getNormalE( hDiffBez0, hDiffBez1, hDiffBez2, hDiffBez3, vPosBez0, vPosBez1, vPosBez2, vPosBez3, hPosBez0, hPosBez1, hPosBez2, hPosBez3,
+                vDiffBez0, vDiffBez1, vDiffBez2, vDiffBez3, u, v, posH, posV, normalE );
+}
+```
+
+なお上記ソースコードについて、とりあえずここでは `tessDenom` は 1、`surfaceOfs` は 0 と考えてください。そうすると、`u` `v` は 0～1 の最終的な uv値、`n` はインスタンス ID ということになります。
+
+次いで `fromTexel` は、インスタンス ID に基づき、テクスチャから各種パラメータを取得する関数です。
+
+そして `getPosition` は頂点位置を計算する関数、`getNormalE` は法線を計算する関数となります。なお `getPosition` 関数は <a href="#beziex-%E3%83%91%E3%83%83%E3%83%81%E3%81%AE%E5%BC%8F%E9%A0%82%E7%82%B9%E4%BD%8D%E7%BD%AE%E3%81%AE%E5%AE%9F%E8%A3%85">Beziex パッチの式（頂点位置）の実装</a> でもう少し詳しく説明しますが、`getNormalE` 関数の説明は本稿では割愛させていただきます。
+
+
+## 独自高次元曲面パッチの概要
+
+まずこれ以降、独自高次元曲面パッチのことを便宜上「Beziex パッチ 2019」、略して「Beziex パッチ」と呼びます。
+
+なおこの Beziex パッチの全コントロールポイントを図で表すと、下記のようになります。青い点がコントロールポイントで、全部で 32個ありますね。
+<img alt="beziex-patch.png" src="https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/482181/51fdcd98-4464-99e2-19ba-82eb1f703091.png">
+
+ちなみに前編で「独自高次元曲面パッチは、高次グレゴリーパッチを変形したもの」と述べましたが、このグレゴリーパッチは「2枚のベジェ曲面を混ぜ合わせたもの」です。
+そして同様に Beziex パッチも 2枚の曲面を混ぜ合わせたものになっています。なおこの 2枚を 曲面 A と 曲面 B と呼ぶことにすると、曲面 A、B はそれぞれ下図のようなコントロールポイントを持っています。
+<img alt="beziex-patch-uv.png" src="https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/482181/d1255305-980d-9fad-57c7-d806b641da2e.png">
+ちなみに境界曲線部分のコントロールポイントの位置は 2曲面とも等しいので、混ぜ合わせると前述の図のように 32個のコントロールポイントになるわけです。
+
+
+## Beziex パッチの頂点位置に関する式
+
+ここでは頂点位置に関する「Beziex パッチの式」について述べたいと思います。なお法線計算に使用する u方向、v方向の微分値を求める式については割愛します。
+
+それでは、まず前項で述べた曲面 A にご注目ください。下図が曲面 A ですが、この中の 4本の黒い折線について考えます。
+<img alt="beziex-patch-u-mod.png" src="https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/482181/5c7b197c-723e-f97d-7180-dc7d8cfcbff6.png">
+
+実はこの黒い折線、ベジェ曲線（の制御線）です。そしてコントロールポイントが 4個ある方が「3次ベジェ曲線」、7個ある方が「6次ベジェ曲線」となっています。これを式に表すと、
+
+```math
+Q_{a0}(u) = (1-u)^3P_{a00}+3u(1-u)^2P_{a10}+3u^2(1-u)P_{a20}+u^3P_{a30}\\
+```
+```math
+Q_{a1}(u) = (1-u)^6P_{a01}+6u(1-u)^5P_{a11}+15u^2(1-u)^4P_{a21}
++20u^3(1-u)^3P_{a31}\\
++15u^4(1-u)^2P_{a41}+6u^5(1-u)P_{a51}+u^6P_{a61}
+```
+```math
+Q_{a2}(u) = (1-u)^6P_{a02}+6u(1-u)^5P_{a12}+15u^2(1-u)^4P_{a22}
++20u^3(1-u)^3P_{a32}\\
++15u^4(1-u)^2P_{a42}+6u^5(1-u)P_{a52}+u^6P_{a62}
+```
+```math
+Q_{a3}(u) = (1-u)^3P_{a03}+3u(1-u)^2P_{a13}+3u^2(1-u)P_{a23}+u^3P_{a33}\\
+```
+となります。$P_{aij}$ が各コントロールポイントで、$u$ がパラメータ（0～1）ですね。
+
+次に 4本のベジェ曲線を使って $R_{a}(u,v)$ を計算すると、これが曲面 A になります。
+
+```math
+R_{a}(u,v) = (1-v)^3Q_{a0}(u)+3v(1-v)^2Q_{a1}(u)+3v^2(1-v)Q_{a2}(u)
++v^3Q_{a3}(u)\\
+```
+
+そして今度は曲面 B ですが、これは曲面 A の $u$ と $v$ を入れ替えたものなので、同様に計算して $R_{b}(u,v)$ を求めましょう。
+
+あとは $R_{a}(u,v)$ と $R_{ｂ}(u,v)$ を混ぜ合わせることになります。この混ぜ合わせは、グレゴリーパッチの式を応用して行います。
+ちなみに、グレゴリーパッチと呼ばれる式には幾つか種類があって、本プログラムで使っているのは下記の論文で「Brown パッチ」と書かれているものです。（Brown の式と呼ばれる部分は、1次のものを使用）
+
+<a href="https://ipsj.ixsq.nii.ac.jp/ej/index.php?active_action=repository_view_main_item_detail&page_id=13&block_id=8&item_id=38934&item_no=1">Gregory系パッチの一般表現</a>
+（このページにある IPSJ-CG90048003.pdf 内に記載されています）
+
+さて、この Brown パッチを応用して $R_{a}(u,v)$ と $R_{ｂ}(u,v)$ を混ぜ合わせたのが、次の式です。
+
+```math
+S(u,v) = \frac{u(1-u)R_{a}(u,v)+v(1-v)R_{b}(u,v)}{u(1-u)+v(1-v)} \\
+```
+
+つまりこの $S(u,v)$ が最終的な曲面パッチ（Beziex パッチ）ということになります。ただしこの式は四隅が特異点になるので、四隅のみ別の方法で求めます。
+
+
+## Beziex パッチの式（頂点位置）の実装
+
+頂点位置に関して、「Beziex パッチの式」をバーテックスシェーダ内に実装したものが、次のコードです。
+
+```glsl:（shader.vert）getPosition
+const float  kEps = 1e-6;
+
+vec3 posBez3( vec3 bez[4], float t )
+{
+    float  t2  = t  * t;
+    float  t3  = t2 * t;
+    float  mt  = 1.0 - t;
+    float  mt2 = mt  * mt;
+    float  mt3 = mt2 * mt;
+
+    return            mt3 * bez[ 0 ]
+         + 3.0 * t  * mt2 * bez[ 1 ]
+         + 3.0 * t2 * mt  * bez[ 2 ]
+         +       t3       * bez[ 3 ];
+}
+
+vec3 posBez6( vec3 bez[7], float t )
+{
+    float  t2  = t  * t;
+    float  t3  = t2 * t;
+    float  t4  = t3 * t;
+    float  t5  = t4 * t;
+    float  t6  = t5 * t;
+    float  mt  = 1.0 - t;
+    float  mt2 = mt  * mt;
+    float  mt3 = mt2 * mt;
+    float  mt4 = mt3 * mt;
+    float  mt5 = mt4 * mt;
+    float  mt6 = mt5 * mt;
+
+    return             mt6 * bez[ 0 ]
+         +  6.0 * t  * mt5 * bez[ 1 ]
+         + 15.0 * t2 * mt4 * bez[ 2 ]
+         + 20.0 * t3 * mt3 * bez[ 3 ]
+         + 15.0 * t4 * mt2 * bez[ 4 ]
+         +  6.0 * t5 * mt  * bez[ 5 ]
+         +        t6       * bez[ 6 ];
+}
+
+void getPosH( vec3 hPosBez0[4], vec3 hPosBez1[7], vec3 hPosBez2[7], vec3 hPosBez3[4], float u, float v, out vec3 posH )
+{
+    vec3  bezV[ 4 ];
+
+    bezV[ 0 ] = posBez3( hPosBez0, u );
+    bezV[ 1 ] = posBez6( hPosBez1, u );
+    bezV[ 2 ] = posBez6( hPosBez2, u );
+    bezV[ 3 ] = posBez3( hPosBez3, u );
+
+    posH = posBez3( bezV, v );
+}
+
+void getPosV( vec3 vPosBez0[4], vec3 vPosBez1[7], vec3 vPosBez2[7], vec3 vPosBez3[4], float u, float v, out vec3 posV )
+{
+    vec3  bezU[ 4 ];
+
+    bezU[ 0 ] = posBez3( vPosBez0, v );
+    bezU[ 1 ] = posBez6( vPosBez1, v );
+    bezU[ 2 ] = posBez6( vPosBez2, v );
+    bezU[ 3 ] = posBez3( vPosBez3, v );
+
+    posV = posBez3( bezU, u );
+}
+
+vec3 getPosMixMain( vec3 posH, vec3 posV, float u, float v )
+{
+    float  pu = u * ( 1.0 - u );
+    float  pv = v * ( 1.0 - v );
+
+    return ( pu * posH + pv * posV ) / ( pu + pv );
+}
+
+void getPosMix( vec3 posH, vec3 posV, float u, float v, out vec3 pos )
+{
+    pos = ( ( kEps > u || u > ( 1.0 - kEps ) ) && ( kEps > v || v > ( 1.0 - kEps ) ) ) ? posH : getPosMixMain( posH, posV, u, v );
+}
+
+void getPosition( vec3 hPosBez0[4], vec3 hPosBez1[7], vec3 hPosBez2[7], vec3 hPosBez3[4], vec3 vPosBez0[4], vec3 vPosBez1[7], vec3 vPosBez2[7], vec3 vPosBez3[4],
+                  float u, float v, out vec3 posH, out vec3 posV, out vec3 pos )
+{
+    getPosH( hPosBez0, hPosBez1, hPosBez2, hPosBez3, u, v, posH );
+    getPosV( vPosBez0, vPosBez1, vPosBez2, vPosBez3, u, v, posV );
+
+    getPosMix( posH, posV, u, v, pos );
+}
+```
+
+これを見ると、`getPosition` 関数が幾つかの子関数をコールして、処理を行っていることが分かります。内容は前項の「Beziex パッチの式」そのままですね。
+
+
+## なぜベジェ曲面やグレゴリーパッチじゃダメなの？
+
+まずここでは、ベジェ曲面は 3次、グレゴリーパッチは「分子 5次、分母 2次の Brown パッチ」ということにします。ちなみに Beziex パッチは「分子 8次、分母 2次の Brown パッチの一種」ですね。
+
+最初にベジェ曲面（3次）について述べると、
+
+- ベジェ曲面は非常に制限が掛かった状態で無いと、G1 接続にはならない。
+- しかも「非常に制限が掛かった状態」だと、曲面パッチ内部の膨らみをユーザーが変えることは不可能
+
+ということで、曲面パッチ間を滑らかに繋げるという点では、とても厳しいです。もちろん C0 接続で良いということであれば、膨らみを変えることが出来ますが、その場合は PN トライアングルのように偽の法線を付けるしか無いでしょう。
+なお C0、G1 接続についての説明は、前編をご覧ください。
+
+次にグレゴリーパッチ（分子 5次、分母 2次）ですが、G1 接続を行うための制限は少ないです。しかし分子 5次、分母 2次の場合に、G1 接続の状態で「曲面パッチ内部の膨らみをユーザーが変える」ためには、やっぱり厳しい条件が付きます。
+これもパッチ内部形状の自由度を上げるためには、C0 接続とするしか無いですね。
+
+ちなみに前編で宿題となっていた「ゲーム界で曲面パッチが使われない理由」ですが、技術以外の理由や実行速度の問題を除けば、
+
+- パッチ内部形状の自由度と G1 接続の両立が難しい（思った通りの形にならない）
+
+というのが一番の問題じゃないかな？、と考えています。（あくまでも個人的な推測です）
+なお NURBS 曲面なら両立できますが、シェーダ内で動かすのは難しいですね。
+
+
+## さいごに
+
+そんなわけで、「非有理（分数で無い）の 3次」や「分子 5次、分母 2次」程度の曲面では使い物にならないのでは？、というのが私の考えです。それなら次数を増やせば良いということで、Beziex パッチでは「分子 8次、分母 2次」にしています。
+
+ただ次数を上げるとコントロールポイントも増えるわけです。そしてこの大量のコントロールポイントをユーザーに直接いじらせるというのは、現実的ではありません。
+しかし ACC（近似 Catmull-Clark）と同様、サブディビジョン形状から近似変換出来れば、次数が高くても問題無いはずと考えます。
+
+ということで、とりあえず変換できた 3Dモデルデータを本プログラムで表示してみたのでした。今後はもっと変換性能を上げていきたいな、と思っています。
+
+> （追記）番外編を公開しました。
+> <a href="https://qiita.com/beziex/items/00b614f7aa73f5124a19">WebGL でテッセレーションして、曲面パッチ間が滑らかに繋がった物体を表示（番外編：法線について）</a>

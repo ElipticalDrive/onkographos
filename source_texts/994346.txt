@@ -1,0 +1,185 @@
+free and open source voxel art tools - editor, thumbnailer and format converter - VOXEL: add lazy chunk storage behind RawVolume by alken1t15 · Pull Request #901 · vengi-voxel/vengi
+
+VOXEL: add lazy chunk storage behind RawVolume by alken1t15 · Pull Request #901 · vengi-voxel/vengi · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+alken1t15
+commented
+Nov 8, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Summary
+Keep the RawVolume interface and use lazy 32-voxel chunks for volumes of 64 MiB or more. Smaller volumes keep the existing contiguous array.
+Leave untouched chunks unallocated and represent uniform fills with a default voxel. Reads do not allocate chunks.
+Add VolumeDataAccessor as discussed in VOXEL: reduce memory for large RawVolume instances #888: borrow the buffer for a full dense volume, otherwise copy the requested region without changing source storage.
+Use the accessor for undo serialization and texture extraction. Texture snapshots include only the extraction region and a one-voxel halo.
+Performance
+Empty and uniformly filled 256^3 volumes use a 4 KiB chunk directory instead of a 64 MiB voxel array.
+Full 256^3 chunk snapshots took 15.5-19.6 ms, compared with 96-131 ms for copying voxel by voxel. A 64^3 snapshot uses 1 MiB and took 0.10-0.13 ms.
+Measured locally with GCC/WSL, three repetitions. The snapshot comparison does not measure undo compression speed.
+Test plan
+All 193 active voxel tests pass on Windows/MSVC and Linux/GCC; 3 existing tests remain disabled.
+All 29 memento tests pass on both platforms.
+All 11 accessor and texture extraction tests pass in a focused ASan/UBSan build with leak detection.
+Added coverage for chunk boundaries, concurrent publication, voxel metadata, moves, copies and snapshot ownership.
+Known limitations
+Full sampler scans are slower than dense storage. Fully allocated cyclic moves also need temporary chunk payload.
+clear() and fill() retain allocated chunks to preserve existing references.
+Legacy voxels()/data() calls still materialize the source. Internal readers use storage-independent access.
+The 64 MiB threshold is an initial choice and may need tuning based on review and further benchmarks.
+Refs #888.
+alken1t15
+added 6 commits
+November 6, 2026 20:55
+VOXEL: prototype lazy chunk storage behind RawVolume
+f7db4c9
+VOXEL: streamline chunk sampler movement and block bounds
+491f148
+VOXEL: validate shared sampler reads and add threaded benchmarks
+df30a41
+VOXEL: preserve chunk storage during cyclic volume moves
+895686e
+VOXEL: omit default-only chunks from volume copies
+6266d38
+VOXEL: add contiguous snapshots without materializing source storage
+ce10205
+alken1t15
+marked this pull request as ready for review
+November 8, 2026 16:26
+alken1t15
+mentioned this pull request
+Nov 8, 2026
+VOXEL: reduce memory for large RawVolume instances
+#888
+Open
+alken1t15
+commented
+Nov 8, 2026
+Copy link
+Copy Markdown
+Author
+@mgerhardy, could you review this when you have a chance? It includes the VolumeDataAccessor approach we discussed in #888.
+mgerhardy
+requested changes
+Nov 8, 2026
+View reviewed changes
+mgerhardy
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I am not yet done with the review
+Comment thread
+src/modules/voxel/private/ChunkedVolumeStorage.cpp
+}
+// Use native atomic loads in the sampler hot path, avoiding an out-of-line
+// SDL call per voxel. Publication still synchronizes chunk initialization.
+static_assert(std::atomic<Voxel *>::is_always_lock_free, "Chunk pointers must be lock-free");
+mgerhardy
+Nov 8, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+we are not using the STL in this project - please use src/modules/core/concurrent/Atomic.h
+Comment thread
+src/modules/voxelutil/VolumeCropper.cpp
+for (int z = 0; z < depth; ++z) {
+const int64_t zBase = z * zStride;
+for (int y = 0; y < height; ++y) {
+if (!data) {
+mgerhardy
+Nov 8, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I don't understand this - when can data be nullptr here? the core::memchr_not call doesn't make much sense - checking voxel to be null is just a check for material type being air - but why is this section needed at all?
+Comment thread
+docs/RawVolume.md
+@@ -0,0 +1,76 @@
+# RawVolume storage
+`RawVolume` is a bounded voxel volume. Regions below 64 MiB of uncompressed
+mgerhardy
+Nov 8, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+this should be doxygen on the class itself - as docs/ is more or less user-facing docu
+Comment thread
+src/tools/voxedit/modules/voxedit-ui/SlicePanel.cpp
+for (int a = 0; a < aCount; ++a, idx += strides[aAxis]) {
+voxel::Voxel voxel = data[idx];
+pos[aAxis] = minA + a;
+voxel::Voxel voxel = data ? data[idx] : volume.voxel(pos);
+mgerhardy
+Nov 8, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+why is this SlicePanel.cpp changed? Please try to reduce this to a minimum (just the linearVoxels() change maybe?
+Comment thread
+src/modules/voxel/VolumeSampler.h
+return *_currentVoxel;
+}
+if (this->currentPositionValid() && _chunkEntry) {
+if (Voxel *data = _chunkEntry->load(std::memory_order_acquire)) {
+mgerhardy
+Nov 8, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+STL is not allowed in vengi. Please extend core::Atomic for this use-case
+Comment thread
+src/modules/voxel/VolumeDataAccessor.cpp
+}
+_region = region;
+if (volume.isContiguous() && region == volume.region()) {
+_voxels = volume._data;
+mgerhardy
+Nov 8, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+_owned should be false if - and if _voxels is already set, we might have to free it first. This is because an already existing instance of VolumeDataAccessor might get init() called more than once.
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

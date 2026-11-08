@@ -1,0 +1,45 @@
+# Surface-SDF Representation
+
+Also called: SDF-based Neural Rendering, Implicit Surface NeRF
+
+## Overview
+Surface-SDF Representation methods reconstruct 3D geometry and appearance by modeling the scene as a continuous implicit surface defined by a Signed Distance Function (SDF), rather than a volumetric density field. This approach disentangles geometry from appearance, enabling high-fidelity surface reconstruction and direct mesh extraction without post-processing [6060-neus.md, 7385-surface-nerf.md]. It differs from standard NeRF-like methods by enforcing geometric consistency through the SDF constraint, and from explicit mesh methods by avoiding explicit mesh extraction during the training phase, instead rendering differentiable images directly from the implicit field [6060-neus.md].
+
+## Shared principles
+All methods in this family rely on the differentiability of the forward rendering operator and the propagation of gradients through the integration steps [44-radiance-field-optimization.md]. The core mechanism is the evaluation of the volume rendering equation and the computation of gradients with respect to scene parameters (density, geometry, transfer functions, camera poses) [44-radiance-field-optimization.md].
+
+The standard emission-absorption model computes the color $\hat{C}(\mathbf{r})$ for a ray $\mathbf{r}$ as [44-radiance-field-optimization.md]:
+
+$$
+\hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
+$$
+
+where $\sigma_i$ is the density, $\delta_i$ is the step size, $\mathbf{c}_i$ is the color, and $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the transmittance [44-radiance-field-optimization.md].
+
+Differentiation strategies fall into three main categories [44-radiance-field-optimization.md]:
+1. **Reverse-Mode Automatic Differentiation (AD):** Standard backpropagation through the computational graph. This requires storing $O(kn)$ intermediate states (where $n$ is pixels and $k$ is samples), leading to high memory usage [44-radiance-field-optimization.md].
+2. **Adjoint Method:** Computes gradients by propagating adjoint variables backward through the rendering algorithm, evaluating the chain rule from output to input. This has computational complexity largely constant in the number of parameters, making it preferable for optimizing many parameters like the transfer function [44-radiance-field-optimization.md].
+3. **Analytic Inversion / Explicit Gradients:** Uses a-priori knowledge of the DVR operations to invert the order of operations or derive closed-form gradients, reducing memory consumption to $O(n)$ by avoiding the storage of intermediate results [44-radiance-field-optimization.md].
+
+## Subtopics
+
+### NeuS
+NeuS is a volume rendering technique designed for multi-view surface reconstruction that improves geometric quality by disentangling geometry and appearance using a neural implicit signed distance function (SDF) [6060-neus.md]. It differs from standard NeRF-like methods by modeling the scene as a surface via a softplus-based density approximation of the SDF, and from explicit surface methods by avoiding the need for explicit mesh extraction during training, instead rendering differentiable images directly from the implicit field [6060-neus.md].
+
+### [Surface NeRF](7385-surface-nerf.md)
+Surface NeRF converts a pre-trained Neural Radiance Field (NeRF) into a 3D mesh and a surface light field, reducing per-pixel rendering cost by evaluating the NeRF only at the surface isosurface rather than via volumetric raycasting [7385-surface-nerf.md]. It achieves this by extracting an isosurface from the density field and optimizing both the geometry and the network parameters to maintain image quality, reducing per-pixel computational cost from 226 MFLOPS to 1.7 MFLOPS and runtime by more than 100x compared to baseline NeRF [7385-surface-nerf.md].
+
+### VolSDF
+VolSDF is a neural inverse rendering approach that decouples geometric representation and appearance by modeling scene geometry via a Signed Distance Function (SDF) and density, allowing for stable convergence and theoretical upper bounds on opacity error compared to density-based NeRF or mesh-based surface rendering [S1]. The discrete quadrature approximation of the volume rendering integral is given by [S1]:
+
+$$
+L_p \approx \sum_{i=1}^{m-1} \frac{(t_{i+1} - t_i)}{2} w(t_i) L(x(t_i), n(t_i), v)
+$$
+
+A key pitfall is that standard VolSDF cannot recover reflectance properties because material and lighting are baked into the radiance network, and self-shadows are absent in the specific colocated camera-light setup used [S1].
+
+## Background
+The concept of using implicit surfaces for rendering has roots in early computer graphics, but the integration with neural networks for inverse rendering emerged with the rise of NeRF. VolSDF [S1] was one of the early works to explicitly model the SDF for volume rendering, aiming to overcome the ambiguity of density-based representations. NeuS [6060-neus.md] and Surface NeRF [7385-surface-nerf.md] further refined this by introducing specific architectures and optimization strategies (such as hierarchical sampling and alternating optimization) to stabilize training and improve geometric fidelity. These methods are primarily used in multi-view stereo reconstruction, 3D asset creation, and augmented reality applications where accurate geometry is as important as photorealistic appearance.
+
+## Sources
+[S1] SupeRVol: Super-Resolution Shape and Reflectance Estimation in Inverse Volume Rendering, https://arxiv.org/abs/2212.04968v2, fetched 2026-10-26
