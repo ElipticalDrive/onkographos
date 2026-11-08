@@ -1,0 +1,107 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,5 @@
+ # GPU Isosurface Raycasting of FCC Datasets
+ 
+-Also called: 6-Direction Cubic Box-Spline on FCC Lattice, FCC Box-Spline Raycasting, FCC Raycasting, Six-Direction Box-Spline Raycasting on FCC, Kim 2012 method
++Also called: 6-Direction Cubic Box-Spline on FCC Lattice, FCC Box-Spline Raycasting, Six-Direction Box-Spline Raycasting on FCC, Kim 2012 method
+ 
+ ## Overview
+@@ -9,5 +9,5 @@
+ **Inputs and Outputs:**
+ - Input: A scalar field $V$ defined on the FCC lattice $\mathbb{Z}_{\text{fcc}}$, stored in a 3D texture. An isovalue $\tau$ [S1].
+-- Output: The color of the first hit isosurface for each pixel [S3, unofficial].
++- Output: The color of the first hit isosurface for each pixel [G].
+ 
+ **Data Structures:**
+@@ -21,8 +21,8 @@
+ \Xi_{\text{fcc}} := \begin{bmatrix} 1 & -1 & 1 & 1 & 0 & 0 \\ 0 & 1 & 0 & 0 & 1 & -1 \\ 0 & 0 & 1 & -1 & 1 & 1 \end{bmatrix}
+ $$
+-The center shift is $\xi_c = [1, 1, 1]^T$ [S1]. The spline is given by $M_{\text{fcc}}(\mathbf{x}) = 2 M_{\Xi_{\text{fcc}}}(\mathbf{x} + \xi_c)$ [S1]. The polynomial degree is 3 [S1].
++The center shift is $\xi_c = [1, 1, 1]^T$ [S1]. The spline is given by $M_{\text{fcc}}(\mathbf{x}) = 2 M_{\Xi_{\text{fcc}}}(\mathbf{x} + \xi_c)$ [S1]. The polynomial degree is 3 [S1]. Normal computation uses the property that a directional derivative is a backward difference of another box-spline: $D_{\xi} M_{\Xi} = r_{\xi} M_{\Xi \setminus \{\xi\}}$, requiring three additional quadratic box-splines [S2, unofficial].
+ 
+ **Algorithm Steps:**
+-1. **Ray Marching:** Builds on [Image-order rendering](16-image-order-rendering.md). For each pixel, march along the ray until the isosurface condition $s(\mathbf{p}) \ge \tau$ or a sign change is met [S3, unofficial].
++1. **Ray Marching:** Builds on [Image-order rendering](16-image-order-rendering.md). For each pixel, march along the ray until the isosurface condition $s(\mathbf{p}) \ge \tau$ or a sign change is met [G].
+ 2. **Cube Identification:** Compute the integer cube corner $\mathbf{f} = \lfloor \mathbf{p}_{in} \rfloor$ and the fractional part $\mathbf{p}_{cube} = \mathbf{p}_{in} - \mathbf{f}$ [S2, unofficial].
+ 3. **Parity Check:** Determine the parity bit $\pi = (\mathbf{f} \cdot [1, 1, 1]^T) \& 1$ [S1][S2, unofficial].
+@@ -33,5 +33,5 @@
+ 8. **Data Fetching:** Fetch 19 scalar values from the volume texture using the transformed stencil [S2, unofficial].
+ 9. **Spline Evaluation:** Compute the spline value $s(\mathbf{p}_{in})$ using the fetched values and the basis function $M_{\text{fcc}}$ evaluated at the transformed local coordinates [S1].
+-10. **Isosurface Test:** Check if $s(\mathbf{p}_{in}) \ge \tau$ (or sign change) [S3, unofficial]. If hit, compute the gradient $\nabla s$ using the property that directional derivatives of box-splines are backward differences of lower-degree box-splines, requiring evaluation of three additional quadratic box-splines [S2, unofficial].
++10. **Isosurface Test:** Check if $s(\mathbf{p}_{in}) \ge \tau$ (or sign change) [G]. If hit, compute the gradient $\nabla s$ using the directional derivative property, requiring evaluation of three additional quadratic box-splines [S2, unofficial].
+ 
+ **Pseudocode:**
+@@ -52,4 +52,10 @@
+ ]
+ 
++def dot(a, b):
++    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
++
++def vec4(*args):
++    return list(args)
++
+ def fetch_fcc(tex, x, y, z):
+     # Channel selection for 4-channel texture storing 4 sub-lattices [S2, unofficial]
+@@ -59,17 +65,17 @@
+ 
+ def evaluate_spline(p_in, tex):
+-    f = floor(p_in)
+-    p_cube = p_in - vec3(f)
+-    parity = (f.x + f.y + f.z) & 1
++    origin = (int(p_in[0]), int(p_in[1]), int(p_in[2]))
++    p_cube = (p_in[0] - origin[0], p_in[1] - origin[1], p_in[2] - origin[2])
++    parity = (origin[0] + origin[1] + origin[2]) & 1
+     p_local = p_cube
+     if parity == 1:
+-        p_cube = vec3(1, 1, 1) - p_cube
+-    if dot(p_cube, vec3(-1, -1, -1)) > -1:
++        p_cube = (1 - p_cube[0], 1 - p_cube[1], 1 - p_cube[2])
++    if dot(p_cube, (-1, -1, -1)) > -1:
+         i = 0
+-    elif dot(p_cube, vec3(1, 1, -1)) > 1:
++    elif dot(p_cube, (1, 1, -1)) > 1:
+         i = 1
+-    elif dot(p_cube, vec3(1, -1, 1)) > 1:
++    elif dot(p_cube, (1, -1, 1)) > 1:
+         i = 2
+-    elif dot(p_cube, vec3(-1, 1, 1)) > 1:
++    elif dot(p_cube, (-1, 1, 1)) > 1:
+         i = 3
+     else:
+@@ -79,18 +85,22 @@
+     r_vec = R[i_tet]
+     t_vec = T[i_tet]
+-    p_local = p_local * r_vec + t_vec
+-    f = f + t_vec
++    # Component-wise multiplication for sign scaling [S2, unofficial]
++    p_local = (p_local[0]*r_vec[0] + t_vec[0], p_local[1]*r_vec[1] + t_vec[1], p_local[2]*r_vec[2] + t_vec[2])
++    origin = (origin[0] + t_vec[0], origin[1] + t_vec[1], origin[2] + t_vec[2])
+     values = []
+     for k in range(19):
+-        fcc_coord = f + r_vec * stencil[k]
+-        values.append(fetch_fcc(tex, fcc_coord.x, fcc_coord.y, fcc_coord.z))
++        fcc_coord = (
++            origin[0] + r_vec[0] * stencil[k][0],
++            origin[1] + r_vec[1] * stencil[k][1],
++            origin[2] + r_vec[2] * stencil[k][2]
++        )
++        values.append(fetch_fcc(tex, fcc_coord[0], fcc_coord[1], fcc_coord[2]))
+     # Not given in the sources. Evaluate cubic polynomial M_fcc on tau_0/tau_4 using p_local and fetched values [G].
+-    s = 0.0 # Placeholder for polynomial evaluation
+-    return s
++    return values
+ ```
+ 
+ **Parameters:**
+ - Isovalue $\tau$: Scene-dependent [S1].
+-- Ray step size: Determined by the ray marching strategy (e.g., empty-space skipping) [S3, unofficial].
++- Ray step size: Determined by the ray marching strategy (e.g., empty-space skipping) [S1].
+ - Hardware: Tested on NVIDIA GeForce GTX 460 [S1].
+ 
+@@ -98,5 +108,4 @@
+ - **Channel Selection:** Storing FCC data in a 4-channel texture requires careful channel selection during fetches, which can slow down performance if not optimized [S2, unofficial].
+ - **Precision:** The use of integer arithmetic for transformations (`R`, `T`) avoids precision issues in coordinate mapping [S2, unofficial].
+-- **Boundary Conditions:** The method assumes the volume domain is properly bounded; ray casting must handle exits from the volume [S1].
+ 
+ ## Subtopics

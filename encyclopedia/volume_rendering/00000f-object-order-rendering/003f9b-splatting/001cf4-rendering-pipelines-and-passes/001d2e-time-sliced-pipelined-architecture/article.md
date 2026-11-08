@@ -1,0 +1,148 @@
+# Time-Sliced Pipelined Architecture
+
+Also called: Multi-core time-sliced pipeline, Time-slicing
+
+## Overview
+The Time-Sliced Pipelined Architecture is a hardware design methodology for volume rendering systems that achieves real-time performance by time-slicing functional blocks to allow the simultaneous processing of multiple tasks [S1, unofficial]. It solves the bottleneck of sequential hardware execution by overlapping pipeline stages, enabling continuous communication between hardware components and software interfaces [S1, unofficial]. Unlike general-purpose DSP-based solutions that require multiple chips for similar volumes, this architecture integrates the entire rendering pipeline into a single system using reusable sub-cores, allowing for efficient layout and configuration based on specific processing requirements [S1, unofficial].
+
+## How it works
+The architecture decomposes the volume rendering pipeline into independent, reusable functional blocks (sub-cores) that are time-sliced to execute concurrently.
+
+**Inputs and Outputs:**
+*   **Input:** Volume data, classification parameters, gradient information, and configuration settings.
+*   **Output:** Rendered image frames.
+
+**Data Structures:**
+*   **Context Memory:** Shared RAM cells used to store intermediate results (e.g., dot products) for access by multiple components across clock cycles [S1, unofficial].
+*   **Normal Mode Registers:** Hardware registers that define the operational mode of components [S1, unofficial].
+*   **Context Address Snooping Mechanism:** A mechanism allowing components to access stored information in the Context Memory [S1, unofficial].
+
+**Functional Blocks:**
+The pipeline is divided into the following blocks [S1, unofficial]:
+1.  **Classifier:** Assigns optical properties to voxels.
+2.  **Gradient Calculator:** Computes gradients for shading.
+3.  **Shearing-Warping Block:** Performs geometric transformation.
+4.  **Shader:** Computes lighting and color.
+5.  **Composer:** Accumulates and blends contributions.
+
+**Implementation Details:**
+*   Basic functional blocks (multipliers, adders, inner product processors) are implemented as independent sub-cores [S1, unofficial].
+*   Sub-cores are configured or replicated based on the processing requirements of the calling module [S1, unofficial].
+*   A common interface is provided by Context Memory, Normal Mode Registers, and the Context Address Snooping Mechanism to facilitate communication [S1, unofficial].
+
+**Numbered Steps:**
+1.  **Decomposition:** Divide the rendering pipeline into functional blocks: classifier, gradient calculator, shearing-warping block, shader, and composer [S1, unofficial].
+2.  **Sub-core Implementation:** Implement blocks as independent reusable components/sub-cores composed of basic functional blocks (multipliers, adders, inner product processors) [S1, unofficial].
+3.  **Configuration:** Configure or replicate embedded sub-cores based on the type of processing required by the calling module [S1, unofficial].
+4.  **Time-Slicing:** Use time-slicing to overlap execution stages, allowing simultaneous processing of several tasks [S1, unofficial].
+5.  **Communication:** Store computed values (e.g., dot products) in Context Memory for several clock cycles to be accessed by other components via the common interface [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Conceptual representation of time-sliced pipeline execution
+# Note: Actual implementation is hardware-specific; this illustrates the logical flow
+
+class SubCore:
+    def __init__(self, type):
+        self.type = type
+        self.configured = False
+
+    def configure(self, operation):
+        # Configure sub-core based on processing requirements
+        self.operation = operation
+        self.configured = True
+
+    def execute(self, input_data):
+        # Execute specific operation using basic functional blocks
+        if self.operation == "multiply":
+            return input_data[0] * input_data[1]
+        elif self.operation == "add":
+            return input_data[0] + input_data[1]
+        elif self.operation == "inner_product":
+            return sum(a * b for a, b in zip(input_data[0], input_data[1]))
+        else:
+            raise ValueError("Unknown operation")
+
+class TimeSlicedPipeline:
+    def __init__(self):
+        # Initialize functional blocks as sub-cores
+        self.classifier = SubCore("classifier")
+        self.gradient_calculator = SubCore("gradient_calculator")
+        self.shearing_warping = SubCore("shearing_warping")
+        self.shader = SubCore("shader")
+        self.composer = SubCore("composer")
+        
+        # Shared Context Memory
+        self.context_memory = {}
+        
+        # Common Interface
+        self.normal_mode_registers = {}
+        self.context_address_snooping = ContextSnoopingMechanism()
+
+    def configure_pipeline(self):
+        # Configure sub-cores based on processing requirements
+        self.classifier.configure("classify")
+        self.gradient_calculator.configure("calculate_gradient")
+        self.shearing_warping.configure("shear_warp")
+        self.shader.configure("shade")
+        self.composer.configure("compose")
+
+    def execute_pipeline(self, volume_data):
+        # Time-sliced execution: overlap stages
+        # Stage 1: Classification
+        classified_data = self.classifier.execute(volume_data)
+        
+        # Stage 2: Gradient Calculation (can overlap with Stage 3 if resources allow)
+        gradient_data = self.gradient_calculator.execute(classified_data)
+        
+        # Stage 3: Shearing and Warping
+        warped_data = self.shearing_warping.execute(gradient_data)
+        
+        # Stage 4: Shading
+        # Compute dot product and store in Context Memory
+        dot_product = self.shader.execute(warped_data)
+        self.context_memory['dot_product'] = dot_product
+        
+        # Stage 5: Compositing
+        # Access dot product from Context Memory
+        stored_dot_product = self.context_address_snooping.access('dot_product')
+        final_image = self.composer.execute(stored_dot_product)
+        
+        return final_image
+
+class ContextSnoopingMechanism:
+    def access(self, key):
+        # Access stored information in Context Memory
+        return ContextSnoopingMechanism.context_memory.get(key)
+```
+
+**Parameters:**
+*   Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Not given in the sources.
+*   **Boundaries:** Not given in the sources.
+*   **Degenerate Input:** Not given in the sources.
+
+## Subtopics
+
+### [Vg500 Parallel Pipeline Architecture](2072-vg500-parallel-pipeline-architecture.md)
+The Vg500 Parallel Pipeline Architecture is a highly parallel, template-based ray-casting hardware accelerator implemented as the vg500 ASIC for the VolumePro system. It solves the real-time rendering bottleneck by distributing the processing of adjacent voxel samples across four identical pipelines operating in parallel. Unlike general-purpose DSP-based solutions like VIRIM, which require multiple chips and lower frame rates for similar volumes, the Vg500 integrates the entire rendering pipeline into a single ASIC, enabling real-time frame rates for large datasets. It builds on the Time-Sliced Pipelined Architecture by utilizing fixed-function hardware units for interpolation, shading, and compositing.
+
+## Operating characteristics
+*   **Time Complexity:** Enables real-time rendering due to time-slicing approach [S1, unofficial].
+*   **Memory Complexity:** Uses Context Memory for intermediate storage; specific memory requirements not given in the sources.
+*   **Measured Performance:** Provides real-time rendering for volume visualization systems [S1, unofficial].
+*   **Scaling:** Component reusability and multi-core layout allow users to choose required functions, potentially scaling with processing needs [S1, unofficial].
+*   **Strengths:** Real-time performance, continuous hardware-software communication, efficient layout due to component reusability, integration of entire pipeline in single system [S1, unofficial].
+*   **Limitations:** Specific limitations not given in the sources.
+*   **When to Use:** When real-time volume rendering is required and hardware integration is preferred over general-purpose DSP solutions [S1, unofficial].
+*   **When Not to Use:** When flexibility of software-based rendering is prioritized over hardware-specific optimization [G].
+
+## Background
+The Time-Sliced Pipelined Architecture was developed as part of the Shear-warp factorization volume rendering visualization system (VRS) [S1, unofficial]. It was designed to address the need for real-time rendering in volume visualization by overcoming the limitations of sequential hardware execution. The architecture emphasizes component reusability and multi-core structure to comply with the rendering pipeline requirements [S1, unofficial]. It is used in hardware-accelerated volume rendering systems, such as those based on the VolumePro system [S1, unofficial].
+
+## Sources
+[S1] Shear-warp factorization volume rendering visualization system, https://archive.org/details/0162018299360, fetched 2026-10-26 (unofficial)

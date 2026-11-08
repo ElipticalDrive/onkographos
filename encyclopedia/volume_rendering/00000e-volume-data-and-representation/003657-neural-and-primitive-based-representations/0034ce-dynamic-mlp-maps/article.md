@@ -1,0 +1,219 @@
+# Dynamic MLP Maps
+
+Also called: MLP maps, Orthogonal MLP maps
+
+## Overview
+Dynamic MLP Maps is a neural representation for volumetric videos that models the radiance field of each frame as a set of shallow Multi-Layer Perceptrons (MLPs) [S1]. The parameters of these MLPs are stored in 2D grids, called MLP maps, and are dynamically predicted by a shared 2D CNN decoder using a per-frame latent code [S1]. This approach solves the problem of slow rendering speeds and high storage costs associated with dynamic neural fields by replacing a single large network with many small, spatially localized networks [S1]. It differs from spatial decomposition methods like KiloNeRF by predicting parameters on the fly via a CNN rather than storing them explicitly, and from tri-plane methods by predicting MLP maps instead of feature maps [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A multi-view video (sequence of calibrated camera views).
+*   **Output:** A volumetric video representation supporting real-time view synthesis.
+
+**Data Structures:**
+1.  **Latent Code ($z$):** A vector $z \in \mathbb{R}^D$ encoding the scene state for a specific frame.
+2.  **MLP Maps:** 2D grids where each pixel stores a parameter vector for a small MLP.
+    *   **Density MLP Map:** Resolution $256 \times 256$. Each pixel stores a vector of 32 parameters.
+    *   **Color MLP Map:** Resolution $16 \times 16$. Each pixel stores a vector of 2624 parameters.
+3.  **Hash Tables:** Three multi-level hash tables ($h_{xy}, h_{xz}, h_{yz}$) for spatial feature embedding.
+    *   Resolution: $L \times T \times F$.
+    *   Parameters: $L=19$ levels, $T=16$ table size, $F=2$ feature dimension.
+4.  **Occupancy Volume:** A low-resolution 3D binary volume indicating occupied voxels for Empty Space Skipping (ESS).
+
+**Network Architecture:**
+1.  **Encoder:** A 2D CNN that takes a subset of input views and outputs the latent code $z$ [S1].
+2.  **Decoder:** A 2D CNN that takes $z$ and outputs the MLP maps.
+    *   Fully connected layer maps $z$ to a 4096-dimensional vector.
+    *   Reshaped to a $4 \times 4$ feature map with 256 channels.
+    *   Upsampled via deconvolutional layers to a $D \times D$ feature map.
+    *   Two convolutional heads predict the density and color MLP maps respectively [S1].
+3.  **Small NeRF Network:** Constructed dynamically at query time.
+    *   **Density Head:** 1 layer.
+    *   **Color Head:** 3 layers.
+    *   **Activation:** ReLU for internal layers [S1].
+
+**Numbered Steps:**
+1.  **Encode:** For a target video frame, select a subset of camera views and pass them through the 2D CNN encoder to obtain the latent code $z$ [S1].
+2.  **Decode:** Pass $z$ through the 2D CNN decoder to generate the density and color MLP maps [S1].
+3.  **Embed:** For a 3D query point $\mathbf{p}$, project it onto three axis-aligned orthogonal planes (XY, XZ, YZ). Use the hash tables to transform these projected points into feature vectors. Aggregate these vectors via summation to get the hash feature $\gamma_{ph}(\mathbf{p})$ [S1].
+4.  **Tri-plane Feature:** Predict tri-plane feature maps using a 2D CNN (following EG3D) to assign a feature vector $\gamma_{pt}(\mathbf{p})$ to $\mathbf{p}$ [S1].
+5.  **Combine Features:** Compute the final feature vector $\gamma_{\mathbf{p}}(\mathbf{p})$ by summing the hash and tri-plane features:
+    $$ \gamma_{\mathbf{p}}(\mathbf{p}) = \gamma_{ph}(\mathbf{p}) + \gamma_{pt}(\mathbf{p}) $$
+    [S1]
+6.  **Query MLP Maps:** Project $\mathbf{p}$ onto the canonical planes defined by the MLP maps (e.g., YZ plane). Retrieve the parameter vectors from the density and color MLP maps at the projected location via spatial binning [S1].
+7.  **Construct MLP:** Use the retrieved parameters to construct the density and color heads of the small NeRF network [S1].
+8.  **Encode View Direction:** Encode the viewing direction $\mathbf{d}$ using a positional encoding function $\gamma_d(\mathbf{d})$ [S1].
+9.  **Predict:** Pass $\gamma_{\mathbf{p}}(\mathbf{p})$ and $\gamma_d(\mathbf{d})$ through the constructed MLP network $M$ to predict density $\sigma$ and color $\mathbf{c}$:
+    $$ (\sigma, \mathbf{c}) = M(\gamma_{\mathbf{p}}(\mathbf{p}), \gamma_d(\mathbf{d})) $$
+    [S1]
+10. **Aggregate (Orthogonal):** If using orthogonal MLP maps, repeat steps 3-9 for three orthogonal planes to get $\{(\sigma_i, \mathbf{c}_i) | i=1,2,3\}$ and aggregate them via summation [S1].
+11. **Empty Space Skipping (ESS):** Use the occupancy volume to skip rendering rays passing through empty space. Mark a voxel as occupied if its evaluated density exceeds a threshold [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def get_hash_features(p, hash_tables):
+    """
+    Projects point p onto XY, XZ, YZ planes and retrieves features from hash tables.
+    hash_tables: list of 3 hash table structures [h_xy, h_xz, h_yz]
+    """
+    features = []
+    # Project p onto three orthogonal planes
+    p_xy = p[[0, 1]] # x, y
+    p_xz = p[[0, 2]] # x, z
+    p_yz = p[[1, 2]] # y, z
+    
+    # Retrieve features from each hash table level and aggregate
+    for h, proj_p in zip(hash_tables, [p_xy, p_xz, p_yz]):
+        level_features = []
+        for level in h.levels:
+            # Hash the coordinates to find the feature vector
+            # Implementation detail: standard multi-resolution hash encoding
+            feat = level.lookup(proj_p)
+            level_features.append(feat)
+        # Aggregate features from all levels (e.g., sum or concat)
+        features.append(np.sum(level_features, axis=0))
+    return np.sum(features, axis=0)
+
+def get_tri_plane_features(p, tri_plane_cnn):
+    """
+    Predicts tri-plane feature maps using a 2D CNN and samples features at p.
+    """
+    # tri_plane_cnn outputs feature maps for XY, XZ, YZ planes
+    maps = tri_plane_cnn(p.frame_index) 
+    # Sample features at projected coordinates of p
+    feat_xy = maps['xy'].sample(p[[0, 1]])
+    feat_xz = maps['xz'].sample(p[[0, 2]])
+    feat_yz = maps['yz'].sample(p[[1, 2]])
+    return feat_xy + feat_xz + feat_yz
+
+def get_mlp_params(p, density_map, color_map):
+    """
+    Retrieves MLP parameters from 2D MLP maps based on projected coordinates.
+    """
+    # Project p onto the canonical plane (e.g., YZ for density)
+    # Note: The paper implies projection onto the plane defined by the map.
+    # For simplicity, assume maps are aligned with axes.
+    # Density map is typically on YZ, Color on YZ or similar.
+    # We assume the map resolution and coordinate mapping are handled by spatial binning.
+    
+    # Retrieve parameter vector for density MLP
+    # density_map is 256x256x32
+    density_params = density_map.sample(p[[1, 2]]) # Assuming YZ projection
+    
+    # Retrieve parameter vector for color MLP
+    # color_map is 16x16x2624
+    color_params = color_map.sample(p[[1, 2]])
+    
+    return density_params, color_params
+
+def build_small_nerf(density_params, color_params):
+    """
+    Constructs the small NeRF network from parameters.
+    """
+    # Density head: 1 layer
+    # Color head: 3 layers
+    # Parameters are flattened vectors. Reshape according to layer dimensions.
+    # This is a placeholder for the actual layer construction logic
+    # which depends on the specific architecture defined in the source.
+    return SmallNeRF(density_params, color_params)
+
+def render_point(p, d, hash_tables, tri_plane_cnn, density_map, color_map):
+    """
+    Renders a single 3D point.
+    """
+    # 1. Feature Embedding
+    gamma_ph = get_hash_features(p, hash_tables)
+    gamma_pt = get_tri_plane_features(p, tri_plane_cnn)
+    gamma_p = gamma_ph + gamma_pt
+    
+    # 2. View Direction Encoding
+    gamma_d = positional_encoding(d)
+    
+    # 3. Retrieve MLP Parameters
+    density_params, color_params = get_mlp_params(p, density_map, color_map)
+    
+    # 4. Build and Query MLP
+    nerf = build_small_nerf(density_params, color_params)
+    sigma, c = nerf(gamma_p, gamma_d)
+    
+    return sigma, c
+
+def render_frame(frame_index, camera, latent_code, hash_tables, tri_plane_cnn, 
+                 density_map_decoder, color_map_decoder, occupancy_volume):
+    """
+    Renders a full frame for a given latent code.
+    """
+    # 1. Decode MLP Maps
+    density_map = density_map_decoder(latent_code)
+    color_map = color_map_decoder(latent_code)
+    
+    # 2. Initialize Output Image
+    image = np.zeros((height, width, 3))
+    
+    # 3. Ray Marching with Empty Space Skipping
+    for u in range(width):
+        for v in range(height):
+            ray = camera.get_ray(u, v)
+            sigma_total = 0
+            c_total = np.zeros(3)
+            
+            # Sample along ray
+            for t in ray.sample_points(occupancy_volume):
+                # Check occupancy
+                if not occupancy_volume.is_occupied(t):
+                    continue
+                    
+                sigma, c = render_point(t, ray.direction, hash_tables, 
+                                        tri_plane_cnn, density_map, color_map)
+                
+                # Volume Rendering Accumulation
+                alpha = 1 - np.exp(-sigma * ray.step_size)
+                weight = alpha * np.exp(-sigma_total * ray.step_size)
+                c_total += weight * c
+                sigma_total += sigma
+                
+            image[v, u] = c_total
+            
+    return image
+```
+
+**Parameters:**
+*   **Hash Table Levels ($L$):** 19 [S1].
+*   **Hash Table Size ($T$):** 16 [S1].
+*   **Feature Dimension ($F$):** 2 [S1].
+*   **Density MLP Map Resolution:** $256 \times 256$ [S1].
+*   **Density MLP Parameters per Pixel:** 32 [S1].
+*   **Color MLP Map Resolution:** $16 \times 16$ [S1].
+*   **Color MLP Parameters per Pixel:** 2624 [S1].
+*   **Rendering Resolution:** $512 \times 512$ [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Resolution Trade-off:** Decreasing MLP map resolution undermines rendering performance and increases storage cost due to the need for more downsampling convolutional layers. Increasing resolution does not necessarily improve quality because it increases the number of parameters to optimize and forces smaller batch sizes due to memory limits [S1].
+*   **Orthogonality:** Using a single dynamic MLP map on one plane (e.g., XY) or three maps all on the same plane significantly degrades rendering quality. Orthogonal maps (XY, XZ, YZ) are required for high-frequency content [S1].
+*   **Training Difficulty:** High-resolution density maps are easier to train than color maps because scene geometry has lower frequency than appearance, and the parameter counts are balanced ($256 \times 256$ density map $\approx 28 \times 28$ color map) [S1].
+*   **Video Length:** The method is limited to short videos (100-300 frames) as storage cost increases with video length due to hash tables and latent vectors [S1].
+*   **Camera Views:** Requires dense camera views for training [S1].
+
+## Subtopics
+
+### [Dynamic MLP Maps with Hash Encoding](7378-dynamic-mlp-maps-with-hash-encoding.md)
+A variant that replaces the direct feature lookup with multi-level hash encoding to improve spatial resolution and detail capture, while maintaining the efficiency of the CNN-decoded parameter maps. It builds on Dynamic MLP Maps by using hash tables ($h_{xy}, h_{xz}, h_{yz}$) to embed query points into feature vectors, which are then summed with tri-plane features before being passed to the MLP maps.
+
+## Operating characteristics
+*   **Time Complexity:** Rendering speed is largely unaffected by MLP map resolution because the number of MLP evaluations is not related to the map resolution [S1].
+*   **Memory Complexity:** Storage cost scales with video length. For a 300-frame video: 300 KB for latent vectors, 103 MB for MLP map decoders, 131 MB for multi-level hash tables, and 8 MB for occupancy volumes [S1].
+*   **Performance:** Achieves 41.7 fps on an RTX 3090 GPU for $512 \times 512$ images [S1]. It is over 100 times faster than DyNeRF [S1].
+*   **Inference Breakdown:** MLP maps decoder ~4ms, querying multi-level hash tables ~7ms, color and density MLP maps total 12ms. A single shared MLP with ESS takes >80ms [S1].
+*   **Empty Space Skipping (ESS):** Improves rendering speed by 6 times while adding only 5 MB to storage cost [S1].
+*   **Strengths:** Real-time rendering, low storage cost compared to explicit storage methods, state-of-the-art quality on NHR and ZJU-MoCap datasets [S1].
+*   **Limitations:** Limited to short videos (100-300 frames), requires dense camera views, storage cost increases with video length [S1].
+
+## Background
+Dynamic MLP Maps was proposed to address the limitations of existing neural radiance fields in representing dynamic scenes, specifically their slow rendering speed and high storage cost [S1]. It builds on the idea of using shallow MLPs for fast inference, as seen in static scene decomposition methods like KiloNeRF and Block-NeRF, but extends this to the temporal domain by dynamically predicting MLP parameters via a 2D CNN [S1]. The method was evaluated on the NHR and ZJU-MoCap datasets, achieving best PSNR, SSIM, and LPIPS scores among compared methods at the time of publication [S1].
+
+## Sources
+[S1] Representing Volumetric Videos as Dynamic MLP Maps, https://arxiv.org/abs/2304.06717, fetched 2026-10-29

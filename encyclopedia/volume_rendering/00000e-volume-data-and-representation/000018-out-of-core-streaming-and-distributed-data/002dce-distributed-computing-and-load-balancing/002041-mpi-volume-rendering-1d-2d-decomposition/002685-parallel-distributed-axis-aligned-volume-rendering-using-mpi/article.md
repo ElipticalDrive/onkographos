@@ -12,12 +12,8 @@ This method performs axis-aligned volume rendering by decomposing a 3D scalar da
 
 **Data Structures:**
 - **Volume Data:** Stored as a NumPy array. For `.raw` files, dimensions are extracted from the filename pattern `_NxNxM.raw`, reshaped to $(z, x, y)$, and axes $x, y$ are reversed [S3, unofficial]. For `.vti` files, data is loaded via VTK and transposed to align the view axis with the last dimension (e.g., `transpose(data, (2, 1, 0))` for Z-view) [S2, unofficial].
-- **Transfer Functions:**
-    - **Color TF:** Parsed from text files into triplets $(scalar, r, g, b)$ [S3, unofficial] or VTK `vtkColorTransferFunction` objects [S2, unofficial].
-    - **Opacity TF:** Parsed into pairs $(scalar, opacity)$ [S3, unofficial] or VTK `vtkPiecewiseFunction` objects [S3, unofficial].
-- **Local Image Buffers:**
-    - `sub_image`: 2D array of shape $(rows, cols, 3)$ with dtype `float32`, storing accumulated RGB color [S1, unofficial].
-    - `sub_opacity`: 2D array of shape $(rows, cols)$ with dtype `float32`, storing accumulated opacity [S1, unofficial].
+- **Transfer Functions:** Color TF is parsed from text files into triplets $(scalar, r, g, b)$ [S3, unofficial] or VTK `vtkColorTransferFunction` objects [S2, unofficial]. Opacity TF is parsed into pairs $(scalar, opacity)$ [S3, unofficial] or VTK `vtkPiecewiseFunction` objects [S3, unofficial].
+- **Local Image Buffers:** `sub_image` is a 2D array of shape $(rows, cols, 3)$ with dtype `float32`, storing accumulated RGB color [S1, unofficial]. `sub_opacity` is a 2D array of shape $(rows, cols)$ with dtype `float32`, storing accumulated opacity [S1, unofficial]. Both are contiguous in memory [S1, unofficial].
 
 **Numbered Steps:**
 
@@ -128,7 +124,7 @@ def ray_cast_chunk(sub_data, step_size, color_keys, colors, opacity_keys, opacit
                     early_terminations += 1
                     break
             
-            sub_image[i, j] = c_acc
+            sub_image[i, j] = np.minimum(c_acc, 1.0)
             sub_opacity[i, j] = a_acc
 
     return sub_image, sub_opacity, early_terminations
@@ -138,9 +134,10 @@ def main():
     rank = comm.Get_rank()
     size = comm.Get_size()
     
+    # Parameters and data loading handled by rank 0
     if rank == 0:
-        # Load data, trim, partition into sub_data_chunks
-        # Calculate counts, displacements, chunk_shapes
+        # Load volume data, trim, and partition into sub_data_chunks
+        # Calculate counts, displacements, and chunk_shapes for each rank
         pass # Not given in the sources.
     
     step_size = 1.0
@@ -154,7 +151,7 @@ def main():
     
     recv_count = counts[rank]
     recv_buffer = np.empty(recv_count, dtype=np.float32)
-    comm.Scatterv([recv_buffer, counts, displacements, MPI.FLOAT], root=0)
+    comm.Scatterv([flattened_data, counts, displacements, MPI.FLOAT], recv_buffer, root=0)
     sub_data_chunk = recv_buffer.reshape(chunk_shapes[rank])
     
     color_keys, colors = parse_tf_file('color_TF.txt', is_color=True)
@@ -166,7 +163,7 @@ def main():
     comm.Gather(sub_image, all_images, root=0)
     
     if rank == 0:
-        # Assemble final image from all_images
+        # Assemble final image from all_images based on partition type
         pass # Not given in the sources.
 ```
 

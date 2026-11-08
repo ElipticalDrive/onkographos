@@ -1,14 +1,14 @@
 # Face Culling Voxel Meshing
 
-Also called: Naive Voxel Meshing with Culling, Voxel Mesh Generation with Face Culling, Voxel Chunk Mesh Generation with Face Culling, Visible Block Faces, Naive Chunk Meshing, simple meshing, Naive Meshing
+Also called: Adjacent Face Culling, Naive Voxel Meshing with Culling, Voxel Mesh Generation with Face Culling, Voxel Chunk Mesh Generation with Face Culling, Visible Block Faces
 
 ## Overview
-Face Culling Voxel Meshing generates a static triangle mesh for a 3D voxel chunk by iterating through every voxel and emitting geometry only for faces adjacent to empty space (air) or the chunk boundary [S1, S3, S5, S9, S11, unofficial]. It solves the problem of excessive geometry and draw calls inherent in naive per-voxel meshing by culling internal faces shared between adjacent solid voxels [S1, S7, S10, unofficial]. Unlike [Greedy Meshing](3670-gpu-voxel-mesh-generation.md), which merges adjacent coplanar faces into larger rectangles to reduce triangle count, Face Culling generates exactly one quad (two triangles) per exposed face, resulting in a simpler, faster algorithm that produces a larger number of triangles [S2, S7, S10, unofficial]. It serves as the "oracle" or ground-truth reference for verifying the correctness of more complex merging algorithms [S10, unofficial].
+Face Culling Voxel Meshing generates a static triangle mesh for a 3D voxel chunk by iterating through every voxel and emitting geometry only for faces adjacent to empty space (air) or the chunk boundary [S1, S7, S12, unofficial]. It solves the problem of excessive geometry and draw calls inherent in naive per-voxel meshing by culling internal faces shared between adjacent solid voxels [S1, S7, S10, unofficial]. Unlike [Greedy Meshing](3670-gpu-voxel-mesh-generation.md), which merges adjacent coplanar faces into larger rectangles to reduce triangle count, Face Culling generates exactly one quad (two triangles) per exposed face, resulting in a simpler, faster algorithm that produces a larger number of triangles [S2, S7, S10, unofficial]. It serves as the "oracle" or ground-truth reference for verifying the correctness of more complex merging algorithms [S10, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
 *   **Input:** A 3D voxel grid (chunk) where each voxel has a state (e.g., material ID or solid/empty flag). The grid dimensions are typically $W \times H \times D$ (e.g., $32 \times 32 \times 32$ or $16 \times 64 \times 16$) [S5, S6, S11, unofficial].
-*   **Output:** A list of quads (or a vertex/index buffer) representing the visible surface. Each quad corresponds to one exposed face of a solid voxel [S1, S7, S12, unofficial].
+*   **Output:** A list of quads (or a vertex/index buffer) representing the visible surface. Each quad corresponds to one exposed face of a solid voxel [S7, S12, unofficial].
 
 **Data Structures:**
 *   **Voxel Grid:** A 3D array or hash map storing voxel states. In array-based implementations, the index for $(x, y, z)$ is often linearized as $x + y \cdot W + z \cdot W \cdot H$ or similar, depending on memory layout [S2, S6, unofficial].
@@ -28,14 +28,14 @@ The behavior at chunk edges is defined by a policy parameter [S1, S2, unofficial
 
 **Algorithm Steps:**
 1.  Initialize an empty list for quads.
-2.  Iterate through every voxel $(x, y, z)$ in the chunk grid.
-3.  If the current voxel is empty (state 0), skip to the next voxel [S1, S9, S11, unofficial].
+2.  Iterate through every voxel $(x, y, z)$ in the chunk grid [S9].
+3.  If the current voxel is empty (state 0), skip to the next voxel [S1, unofficial][S9][S11, unofficial].
 4.  For each of the 6 face directions (e.g., $\pm X, \pm Y, \pm Z$):
-    a. Calculate the neighbor's coordinates $(nx, ny, nz)$.
+    a. Calculate the neighbor's coordinates $(nx, ny, nz)$ [S11, unofficial].
     b. Determine the neighbor's state:
-        i. If $(nx, ny, nz)$ is outside the chunk bounds, apply the Boundary Policy (return 0 for Air, non-0 for Solid).
-        ii. If inside bounds, lookup the voxel state at $(nx, ny, nz)$.
-    c. If the neighbor is empty (state 0), the face is exposed. Generate a quad for this face.
+        i. If $(nx, ny, nz)$ is outside the chunk bounds, apply the Boundary Policy (return 0 for Air, non-0 for Solid) [S6, unofficial].
+        ii. If inside bounds, lookup the voxel state at $(nx, ny, nz)$ [S2, unofficial].
+    c. If the neighbor is empty (state 0), the face is exposed [S1, unofficial]. Generate a quad for this face.
     d. If the neighbor is solid, the face is internal and is culled (not generated) [S1, S6, S11, unofficial].
 5.  Return the list of generated quads.
 
@@ -151,19 +151,19 @@ Voxel Visibility Map Computation is a preprocessing step in voxel meshing that d
 Represents a merged rectangular face with axis, direction, slice, position, dimensions, and material [S1, unofficial]. The interface includes fields: `axis` (0|1|2), `dir` (1|-1), `slice` (number), `u` (number), `w` (number), `v` (number), `h` (number), and `material` (number) [S1, unofficial]. The local axes $u$ and $v$ are derived from the normal axis: $u = (axis + 1) \pmod 3$, $v = (axis + 2) \pmod 3$ [S1, unofficial]. This ordering ensures the cross product $\hat{u} \times \hat{v}$ aligns with the normal direction [S1, unofficial].
 
 ### Validator Expected Faces Generation
-A method to generate expected faces for validation purposes. It iterates through all voxels, checks neighbors, and computes face tokens (axis, positive/negative, depth, u, v, material) for each exposed face [S13, unofficial]. The resulting list is sorted to allow comparison with the actual mesh output [S13, unofficial].
+A method to generate expected faces for validation purposes [S14, unofficial]. It iterates through all voxels, checks neighbors, and computes face tokens (axis, positive/negative, depth, u, v, material) for each exposed face [S13, unofficial]. The resulting list is sorted to allow comparison with the actual mesh output [S13, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$, where $N$ is the number of voxels in the chunk. Each voxel is visited once, and 6 neighbor checks are performed [S7, S11, unofficial].
-*   **Memory Complexity:** $O(F)$, where $F$ is the number of exposed faces. In the worst case (all voxels isolated), $F \approx 6N$. In typical terrain, $F \ll 6N$ but still proportional to the surface area [S7, unofficial].
-*   **Performance:** On a single core of a 2.5 GHz Intel Core i7, the algorithm can generate approximately 40 million quads per second [S7, unofficial][S8]. It is significantly faster than greedy meshing, which takes about 3 times longer to produce a mesh with 1/3 of the quads [S7, unofficial][S8].
+*   **Time Complexity:** $O(N)$, where $N$ is the number of voxels in the chunk. Each voxel is visited once, and 6 neighbor checks are performed [S1, unofficial].
+*   **Memory Complexity:** $O(F)$, where $F$ is the number of exposed faces [G]. In the worst case (all voxels isolated), $F \approx 6N$ [G]. In typical terrain, $F \ll 6N$ but still proportional to the surface area [S7, unofficial].
+*   **Performance:** On a single core of a 2.5 GHz Intel Core i7, the algorithm can generate approximately 40 million quads per second [S7, unofficial][S8, unofficial]. It is significantly faster than greedy meshing, which takes about 3 times longer to produce a mesh with 1/3 of the quads [S7, unofficial][S8, unofficial].
 *   **Strengths:** Simplicity of implementation, high speed, deterministic output, serves as a correct reference for testing [S7, S10, unofficial].
 *   **Limitations:** Generates more triangles than greedy meshing, leading to higher GPU draw call overhead and vertex buffer size [S7, S10, unofficial]. Does not merge coplanar faces [S10, unofficial].
 *   **When to use:** When mesh generation speed is critical, or as a baseline for testing more complex meshing algorithms [S7, S10, unofficial].
 *   **When not to use:** When minimizing triangle count and draw calls is more important than generation speed, such as in large-scale open worlds with limited GPU bandwidth [S7, S10, unofficial].
 
 ## Background
-Face Culling Voxel Meshing is a fundamental technique in voxel-based game development, popularized by games like Minecraft. It was originally described in early Minecraft source code analysis and tutorials, where it was used to generate chunk meshes by iterating over blocks and checking for adjacent air blocks [S3, S6, S11, unofficial]. The method is often referred to as "naive" meshing because it does not perform any face merging, distinguishing it from later optimizations like greedy meshing [S7, S10, unofficial]. It is widely used in educational contexts and as a reference implementation for more advanced voxel rendering techniques [S10, unofficial].
+Face Culling Voxel Meshing is a fundamental technique in voxel-based game development. It was originally described in early Minecraft source code analysis and tutorials, where it was used to generate chunk meshes by iterating over blocks and checking for adjacent air blocks [S3, S6, S11, unofficial]. The method is often referred to as "naive" meshing because it does not perform any face merging, distinguishing it from later optimizations like greedy meshing [S7, S10, unofficial]. It is widely used in educational contexts and as a reference implementation for more advanced voxel rendering techniques [S10, unofficial].
 
 ## Sources
 [S1] m2-md/voxel-greedy-meshing-typescript, https://github.com/m2-md/voxel-greedy-meshing-typescript, fetched 2026-10-26 (unofficial)
@@ -173,8 +173,8 @@ Face Culling Voxel Meshing is a fundamental technique in voxel-based game develo
 [S5] kvxy/exolands, https://github.com/kvxy/exolands, fetched 2026-10-27 (unofficial)
 [S6] scarlyle0/voxel-compare, https://github.com/scarlyle0/voxel-compare, fetched 2026-10-27 (unofficial)
 [S7] GitHub - bonsairobo/block-mesh-rs: Generate voxel block meshes in Rust ..., https://github.com/bonsairobo/block-mesh-rs, fetched 2026-10-27 (unofficial)
-[S8] block_mesh - Rust - Docs.rs, https://docs.rs/block-mesh/latest/block_mesh/, fetched 2026-10-27
-[S9] andrewbloese-00/web_voxel_terrain, https://github.com/andrewbloese-00/web_voxel_terrain, fetched 2026-10-27 (unofficial)
+[S8] block_mesh - Rust - Docs.rs, https://docs.rs/block-mesh/latest/block_mesh/, fetched 2026-10-27 (unofficial)
+[S9] andrewbloese-00/web_voxel_terrain, https://github.com/andrewbloese-00/web_voxel_terrain, fetched 2026-10-27
 [S10] nerima-games/mc-meshing, https://github.com/nerima-games/mc-meshing, fetched 2026-10-28 (unofficial)
 [S11] GitHub - ernerdgn/voxel-engine: A voxel engine written from scratch in ..., https://github.com/ernerdgn/voxel-engine, fetched 2026-10-29 (unofficial)
 [S12] GitHub - nicolas-goyon/Voxel-Mesh-Optimization-Library, https://github.com/nicolas-goyon/Voxel-Mesh-Optimization-Library, fetched 2026-10-29 (unofficial)

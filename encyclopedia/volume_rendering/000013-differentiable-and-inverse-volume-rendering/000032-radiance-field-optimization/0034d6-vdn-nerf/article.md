@@ -1,0 +1,182 @@
+# VDN-NeRF
+
+Also called: Ours, View-Dependence Normalization, View-Dependence Normalization NeRF
+
+## Overview
+VDN-NeRF is a method to train neural radiance fields (NeRFs) for better geometry under non-Lambertian surface and dynamic lighting conditions by normalizing view-dependence through self-distillation of invariant information encoded in the learned NeRFs [S1]. It resolves shape-radiance ambiguity by aligning the degree of view-dependent radiance variation for all scenes, allowing a single optimal capacity for the view-dependent color function to work across scenes [S1]. Unlike methods that explicitly model underlying factors of view-dependence, VDN-NeRF dilutes color variation with a view-invariant signal derived from a depth prediction network [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of posed images $\{I_k\}$ of a scene.
+*   **Outputs:** A trained scene representation consisting of an SDF network $f$, a radiance function $c$, and a feature function $F$, capable of rendering novel views and high-quality geometry.
+
+**Data Structures:**
+1.  **SDF Network $f$:** A neural network mapping 3D coordinates to signed distance values.
+2.  **Radiance Function $c$:** A 4-layer MLP with hidden dimension 256, mapping $(x, v)$ to RGB color $c \in \mathbb{R}^3$ [S1].
+3.  **Feature Function $F$:** A 4-layer MLP with hidden dimension 256, parallel to $c$, mapping $(x, v)$ to feature vectors [S1].
+4.  **Distillation Network $\psi$:** A depth prediction network using WaveletMonodepth with a DenseNet161 backbone [S1]. It takes an image $I$ and outputs a depth map $\hat{d}$ and intermediate feature maps $\psi^l(I)$ [S1].
+
+**Formulas:**
+The density $\rho(t)$ is derived from the SDF $f(p(t))$ and a scaling factor $\Phi_s$:
+$$
+\rho(t) = \max\left(\frac{s}{\Phi_s(f(p(t)))} \frac{-d}{dt}(f(p(t))), 0\right)
+$$
+where $s$ is a scaling factor and $p(t)$ is the point on the ray parameterized by $t$ [S1].
+
+The weight function $w(t)$ for volume rendering is:
+$$
+w(t) = T(t)\rho(t)
+$$
+where $T(t) = \exp\left(-\int_0^t \rho(\tau) d\tau\right)$ is the accumulated transmittance [S1].
+
+The rendered color $\hat{C}$ is computed via standard volume rendering:
+$$
+\hat{C} = \int_0^{+\infty} w(t) c(p(t), v) dt
+$$
+
+The rendered feature $\Psi(o, v)$ for a ray defined by origin $o$ and direction $v$ is:
+$$
+\Psi(o, v) = \int_0^{+\infty} w(t) F(p(t), v) dt
+$$
+[S1]
+
+**View-Dependence Normalization:**
+The core mechanism sets the rendered feature $\Psi(o, v)$ equal to the normalized feature from the distillation network:
+$$
+\Psi(o, v) = \bar{\psi}^l(I_k)[p]
+$$
+where $\bar{\psi}^l(I_k)$ is the normalized feature from the $l$-th layer of the depth prediction network $\psi$ [S1]. The index $l$ is set to 1, using features from the first Conv block of the distillation encoder [S1].
+
+**Training Objective:**
+The joint training objective is:
+$$
+\mathcal{L} = \lambda_{\text{color}} \mathcal{L}_{\text{color}} + \lambda_{\text{vdn}} \mathcal{L}_{\text{vdn}} + \lambda_{\text{reg}} \mathcal{L}_{\text{reg}}
+$$
+[S1]
+
+Where:
+1.  **Color Loss ($\mathcal{L}_{\text{color}}$):** L1 loss between rendered image $I$ and input image $I_k$:
+    $$
+    \mathcal{L}_{\text{color}} = \frac{1}{n} \sum_{i=1}^n |I_i - I_{k,i}|
+    $$
+    If masks $M_k$ are available:
+    $$
+    \mathcal{L}_{\text{color}} = \frac{1}{n} \sum_{i=1}^n |I_i - I_{k,i}| \cdot M_{k,i}
+    $$
+    [S1]
+
+2.  **View-Dependence Normalization Loss ($\mathcal{L}_{\text{vdn}}$):** L1 loss between rendered feature and normalized distillation feature:
+    $$
+    \mathcal{L}_{\text{vdn}} = \frac{1}{n} \sum_{i=1}^n |\Psi(o_i, v_i) - \bar{\psi}^l(I_k)[p_i]|
+    $$
+    [S1]
+
+3.  **Regularization Loss ($\mathcal{L}_{\text{reg}}$):** Eikonal term regularizing the gradients of the SDF network $f$:
+    $$
+    \mathcal{L}_{\text{reg}} = \frac{1}{mn} \sum_{i,j} (\|\nabla f(p_{i,j})\| - 1)^2
+    $$
+    where $m$ is the number of point samples per ray and $n$ is the batch size [S1].
+
+**Parameters:**
+*   **MLP Architecture:** $F$ and $c$ are 4-layer MLPs with hidden dimension 256 [S1].
+*   **Distillation Network:** WaveletMonodepth with DenseNet161 backbone [S1].
+*   **Layer Index $l$:** 1 (first Conv block of distillation encoder) [S1].
+*   **Batch Size:** 512 [S1].
+*   **Sampling:** Hierarchical sampling strategy from NeuS [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_vdn_nerf(images, poses, distillation_network, sdf_net, color_net, feature_net):
+    """
+    Train VDN-NeRF.
+    images: List of input images I_k.
+    poses: Camera poses corresponding to images.
+    distillation_network: Pretrained depth prediction network psi.
+    sdf_net: SDF network f.
+    color_net: Radiance function c.
+    feature_net: Feature function F.
+    """
+    # Initialize optimizers for sdf_net, color_net, feature_net
+    # distillation_network is optionally updated
+    
+    for step in range(300000):
+        # Sample rays and points
+        rays, points = sample_rays(images, poses, batch_size=512)
+        
+        # 1. Compute Density and Transmittance from SDF
+        # p(t) are the points on the rays
+        sdfs = sdf_net(points)
+        # Compute gradient of SDF for density and Eikonal loss
+        grad_sdf = compute_gradient(sdf_net, points)
+        densities = compute_density(sdfs, grad_sdf)
+        transmittances = compute_transmittance(densities)
+        weights = transmittances * densities
+        
+        # 2. Compute Rendered Color
+        colors = color_net(points, rays.directions)
+        rendered_colors = integrate(weights, colors)
+        
+        # 3. Compute Rendered Feature
+        features = feature_net(points, rays.directions)
+        rendered_features = integrate(weights, features)
+        
+        # 4. Get Distillation Features
+        # Render image from current view to get I_k for distillation input
+        # Note: In practice, distillation network takes the rendered image or input image?
+        # Source says: "takes in a rendered image I_kr" but also "input image I_k".
+        # Eq 4: d_rk = psi(I_kr). Eq 9 uses I_k.
+        # Implementation note: Use the rendered image or input image as input to psi?
+        # Source states: "takes in a rendered image I_kr". 
+        # However, Eq 9 uses I_k. Let's assume we pass the rendered image or input image.
+        # Given "self-distillation", likely the rendered image or input image.
+        # We will use the input image I_k as per Eq 9 context, but source text says "rendered image".
+        # Let's follow the text: "takes in a rendered image I_kr".
+        # But Eq 9 uses I_k. Let's assume I_k is the input image.
+        # To be safe, we compute features from the input image I_k.
+        
+        dist_features = distillation_network(images[ray.image_index])
+        # Get normalized feature from layer l=1
+        normalized_dist_features = normalize(dist_features.layer_1)
+        
+        # 5. Compute Losses
+        # Color Loss
+        color_loss = l1_loss(rendered_colors, images[ray.image_index])
+        
+        # VDN Loss
+        vdn_loss = l1_loss(rendered_features, normalized_dist_features)
+        
+        # Eikonal Loss
+        eikonal_loss = eikonal_loss(grad_sdf)
+        
+        # Total Loss
+        total_loss = lambda_color * color_loss + \
+                     lambda_vdn * vdn_loss + \
+                     lambda_reg * eikonal_loss
+        
+        # Backpropagate and update sdf_net, color_net, feature_net
+        total_loss.backward()
+        optimizer.step()
+        
+        # Optionally update distillation_network if discrepancy is large
+        if should_update_distillation_network():
+            distillation_network.train()
+            # Update distillation network using self-supervision
+            pass
+```
+
+## Operating characteristics
+*   **Time Complexity:** Training takes 300K steps, converging in about 11 hours on a single NVIDIA RTX3090 GPU [S1].
+*   **Memory Complexity:** Not explicitly given, but relies on storing intermediate states for AD [44-radiance-field-optimization.md].
+*   **Performance:** On the BlendedMVS dataset, achieves IoU of 0.854, L1 Chamfer Distance of 0.397, L2 Chamfer Distance of 0.827, Normal Consistency of 0.845, and f-score of 0.834 [S1].
+*   **Strengths:** Improves geometry without changing the volume rendering pipeline; effective under dynamic lighting and non-Lambertian surfaces; aligns optimal capacity across scenes [S1].
+*   **Limitations:** Requires a pre-trained distillation network; training time may increase if distillation network is updated [S1].
+*   **When to use:** When high-quality geometry is required from NeRFs under challenging lighting/view-dependent conditions [S1].
+*   **When not to use:** When computational resources are extremely limited and pre-training distillation network is not feasible [S1].
+
+## Background
+VDN-NeRF was introduced by Bingfan Zhu, Yanchao Yang, Xulong Wang, Youyi Zheng, and Leonidas Guibas in 2023 [S1]. It addresses the shape-radiance ambiguity inherent in NeRFs, where view-dependent appearance variations can degrade geometric reconstruction [S1]. The method builds on [NeuS](6060-neus.md) and [NeRF](4972-neural-radiance-fields.md) principles, specifically leveraging the differentiability of volume rendering [44-radiance-field-optimization.md].
+
+## Sources
+[S1] VDN-NeRF: Resolving Shape-Radiance Ambiguity via View-Dependence Normalization, https://doi.org/10.1109/CVPR52729.2023.00012, fetched 2026-10-29

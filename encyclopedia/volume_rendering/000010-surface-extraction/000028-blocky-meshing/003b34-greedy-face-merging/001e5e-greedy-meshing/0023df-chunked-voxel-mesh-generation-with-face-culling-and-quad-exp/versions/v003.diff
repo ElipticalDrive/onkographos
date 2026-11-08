@@ -1,0 +1,203 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,5 @@
+ # Chunked Voxel Mesh Generation with Face Culling and Quad Expansion
+ 
+-Also called: Chunk Mesh Builder, Chunk-based Greedy Meshing, ChunkMeshActual, Greedy Meshing / Face Culling with AO, Greedy Meshing with Chunked Processing, Greedy Voxel Meshing, GreedyMeshing.OptimizeChunk, Voxel Mesh Generation
++Also called: Chunk-based Greedy Meshing, Greedy Meshing with Chunked Processing
+ 
+ ## Overview
+@@ -30,5 +30,4 @@
+         ```python
+         def pack_data(x, y, z, voxel_id, face_id, ao_id, flip_id):
+-            # Bit widths
+             x_bits, y_bits, z_bits = 6, 6, 6
+             voxel_bits = 8
+@@ -37,5 +36,4 @@
+             flip_bits = 1
+             
+-            # Shifts calculated from LSB
+             shift_flip = 0
+             shift_ao = shift_flip + flip_bits
+@@ -53,11 +51,10 @@
+ **Algorithm Steps:**
+ 1.  **Initialization:** Allocate `vertexBuffer` and reset `visit` arrays to false [S3, S4, unofficial].
+-2.  **Voxel Iteration:** Iterate through the chunk using nested loops. The order is typically $k$ (Z), $i$ (X), $j$ (Y). Optimization: Use `minAltitude` and `maxAltitude` heightmaps to skip empty columns [S1, S4, unofficial].
++2.  **Voxel Iteration:** Iterate through the chunk using nested loops. The order is $k$ (Z), $i$ (X), $j$ (Y). Optimization: Use `minAltitude` and `maxAltitude` heightmaps to skip empty columns [S1, S4, unofficial].
+     ```python
+     for k in range(CHUNK_SIZE):
+         for i in range(CHUNK_SIZE):
+-            # Determine Y range from heightmaps
+-            min_j = minAltitude[i + k * CHUNK_SIZE]
+-            max_j = maxAltitude[i + k * CHUNK_SIZE]
++            min_j = min_altitude[i + k * CHUNK_SIZE]
++            max_j = max_altitude[i + k * CHUNK_SIZE]
+             
+             for j in range(min_j, max_j + 1):
+@@ -77,5 +74,5 @@
+     -   **Quad Expansion:**
+         -   **Primary Axis Expansion:** Iterate along the first axis perpendicular to the face normal (e.g., for X- faces, iterate along Y). Continue while the neighbor voxel is identical (same index and health) and the face is not yet visited. Mark visited faces. Calculate `length_a` [S1, S4, unofficial].
+-        -   **Secondary Axis Expansion:** Iterate along the second axis perpendicular to the face normal (e.g., for X- faces, iterate along Z). Check if the entire row of `length_a` voxels is identical and unvisited. If so, increment `length_b` and mark all faces in that row as visited. Reset pointer and repeat [S1, S4, unofficial].
++        -   **Secondary Axis Expansion:** Iterate along the second axis perpendicular to the face normal (e.g., for X- faces, iterate along Z). Check if the entire row of `length_a` voxels is identical and unvisited. If so, increment `length_b` and mark all faces in that row as visited [S1, S4, unofficial].
+     -   **Vertex Generation:** Call `AppendQuad` function with the calculated dimensions (`length_a`, `length_b`) and coordinates.
+         -   Generate 6 vertex integers for 2 triangles.
+@@ -86,60 +83,88 @@
+ **Pseudocode for Face Expansion (X- Face Example):**
+ ```python
+-def process_face_xn(voxel, i, j, k, access):
+-    # Check visibility
+-    if not is_visible_xn(i, j, k, access):
+-        return
+-    
+-    # Check if already visited
+-    if visitXN[access]:
+-        return
+-    
+-    # Mark current as visited
+-    visitXN[access] = True
+-    
+-    # Expand along Y (Primary Axis)
+-    length_a = 1
+-    current_access = access + ACCESS_STEP_Y
+-    while j + length_a < CHUNK_SIZE:
+-        if visitXN[current_access] or different_block(data[current_access], voxel):
+-            break
+-        visitXN[current_access] = True
+-        length_a += 1
+-        current_access += ACCESS_STEP_Y
+-    
+-    # Expand along Z (Secondary Axis)
+-    length_b = 1
+-    # Reset pointer to start of the Y-strip
+-    start_access = access
+-    for g in range(1, length_a):
+-        start_access += ACCESS_STEP_Y # Move to next Y in strip
+-        
+-    # Check subsequent Z rows
+-    z_offset = ACCESS_STEP_Z
+-    current_z_access = access + z_offset
+-    while k + length_b < CHUNK_SIZE:
+-        # Check if entire Y-strip at this Z is identical and unvisited
+-        strip_match = True
+-        temp_access = current_z_access
+-        for g in range(length_a):
+-            if visitXN[temp_access] or different_block(data[temp_access], voxel):
+-                strip_match = False
+-                break
+-            temp_access += ACCESS_STEP_Y
+-        
+-        if not strip_match:
+-            break
+-            
+-        # Mark all in this Z-row as visited
+-        temp_access = current_z_access
+-        for g in range(length_a):
+-            visitXN[temp_access] = True
+-            temp_access += ACCESS_STEP_Y
+-            
+-        length_b += 1
+-        current_z_access += z_offset
+-        
+-    # Generate Quad
+-    append_quad_xn(vertexBuffer, i, j, k, length_a, length_b, voxel)
++def generate_mesh(chunk_data, chunk_size, min_altitude, max_altitude, neighbor_chunks, chunk_pos):
++    CHUNK_VOL = chunk_size ** 3
++    ACCESS_STEP_X = chunk_size
++    ACCESS_STEP_Y = 1
++    ACCESS_STEP_Z = chunk_size ** 2
++
++    visitXN = [False] * CHUNK_VOL
++    visitXP = [False] * CHUNK_VOL
++    visitYN = [False] * CHUNK_VOL
++    visitYP = [False] * CHUNK_VOL
++    visitZN = [False] * CHUNK_VOL
++    visitZP = [False] * CHUNK_VOL
++
++    vertex_buffer = []
++
++    def different_block(access_a, access_b):
++        return chunk_data[access_a].index != chunk_data[access_b].index or \
++               chunk_data[access_a].health != chunk_data[access_b].health
++
++    def is_visible_xn(i, j, k, access):
++        if i == 0:
++            if chunk_pos.x == 0: return False
++            if neighbor_chunks.xn is None: return True
++            return neighbor_chunks.xn.data[31 * chunk_size + j + k * ACCESS_STEP_Z].index == 0
++        return chunk_data[access - ACCESS_STEP_X].index == 0
++
++    def append_quad_xn(buf, i, j, k, length_a, length_b, voxel):
++        # Generates 6 vertex integers for 2 triangles
++        # Corners: (i,j,k), (i,j,k+length_b), (i,j+length_a,k), (i,j+length_a,k+length_b)
++        # Normal: (-1, 0, 0)
++        # UVs: (0,0), (0,1), (1,0), (1,1)
++        # Packed with face_id and texture health
++        for corner in [(0,0), (0,1), (1,0), (1,1)]:
++            u, v = corner
++            # Calculate packed vertex attributes
++            packed = pack_data(i, j, k, voxel.index, 3, 0, 0) # face_id=3 for xn
++            buf.append(packed)
++
++    # Main iteration
++    for k in range(chunk_size):
++        for i in range(chunk_size):
++            min_j = min_altitude[i + k * chunk_size]
++            max_j = max_altitude[i + k * chunk_size]
++            for j in range(min_j, max_j + 1):
++                access = j + (i * chunk_size) + (k * ACCESS_STEP_Z)
++                voxel = chunk_data[access]
++                if voxel.index == 0: continue
++
++                # X- Face
++                if not visitXN[access] and is_visible_xn(i, j, k, access):
++                    visitXN[access] = True
++                    length_a = 1
++                    current_access = access + ACCESS_STEP_Y
++                    while j + length_a < chunk_size:
++                        if visitXN[current_access] or different_block(current_access, access):
++                            break
++                        visitXN[current_access] = True
++                        length_a += 1
++                        current_access += ACCESS_STEP_Y
++
++                    length_b = 1
++                    start_access = access
++                    for g in range(1, length_a):
++                        start_access += ACCESS_STEP_Y
++                    current_z_access = access + ACCESS_STEP_Z
++                    while k + length_b < chunk_size:
++                        strip_match = True
++                        temp_access = current_z_access
++                        for g in range(length_a):
++                            if visitXN[temp_access] or different_block(temp_access, access):
++                                strip_match = False
++                                break
++                            temp_access += ACCESS_STEP_Y
++                        if not strip_match: break
++                        temp_access = current_z_access
++                        for g in range(length_a):
++                            visitXN[temp_access] = True
++                            temp_access += ACCESS_STEP_Y
++                        length_b += 1
++                        current_z_access += ACCESS_STEP_Z
++                    append_quad_xn(vertex_buffer, i, j, k, length_a, length_b, voxel)
++
++                # Repeat visibility checks and expansion for XP, YN, YP, ZN, ZP faces
++                # using their respective visit arrays, boundary conditions, and strides
+ ```
+ 
+@@ -161,7 +186,7 @@
+ -   **Time Complexity:** $O(V)$ where $V$ is the number of voxels in the chunk. The expansion steps are amortized constant time per voxel because each face is visited and marked exactly once [S1, S4, unofficial].
+ -   **Memory Complexity:** $O(V)$ for the voxel data and $O(V)$ for the visit arrays. The vertex buffer size is proportional to the surface area, typically much smaller than $V$ for dense terrain [S3, S4, unofficial].
+--   **Performance:** Significantly reduces triangle count compared to naive meshing (5-15x reduction) [S2, unofficial]. The packed vertex format reduces memory bandwidth during rendering [S3, S4, unofficial].
++-   **Performance:** Significantly reduces triangle count compared to naive meshing (5-15x reduction) [S2, unofficial]. The packed vertex format reduces memory bandwidth during rendering [S3, S4, unofficial]. A 64³ voxel chunk produces ~50-100K triangles in ~2ms on CPU [S5, unofficial].
+ -   **Strengths:** Fast, cache-friendly due to linear iteration and packed data. Handles large chunks efficiently.
+--   **Limitations:** Only produces axis-aligned quads. Cannot merge faces with different textures or AO values unless they are identical [S3, S4, unofficial].
++-   **Limitations:** Only produces axis-aligned quads. Merges only faces with identical voxel index and health [S4, unofficial].
+ 
+ ## Background
+@@ -172,3 +197,4 @@
+ [S2] sm03854/Greedy-Voxel-Meshing, https://github.com/sm03854/Greedy-Voxel-Meshing, fetched 2026-10-26 (unofficial)
+ [S3] StanislavPetrovV/Minecraft, https://github.com/StanislavPetrovV/Minecraft, fetched 2026-10-26 (unofficial)
+-[S4] Vercidium/voxel-mesh-generation, https://github.com/Vercidium/voxel-mesh-generation, fetched 2026-10-26 (unofficial)+[S4] Vercidium/voxel-mesh-generation, https://github.com/Vercidium/voxel-mesh-generation, fetched 2026-10-26 (unofficial)
++[S5] elyssov/prometheus-engine, https://github.com/elyssov/prometheus-engine, fetched 2026-10-28 (unofficial)

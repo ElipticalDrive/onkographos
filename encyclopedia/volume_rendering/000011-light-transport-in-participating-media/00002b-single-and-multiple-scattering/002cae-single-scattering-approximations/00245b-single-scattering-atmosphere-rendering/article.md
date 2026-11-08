@@ -1,14 +1,14 @@
 # Single-Scattering Atmosphere Rendering
 
-Also called: Single-Scattering Sky Rendering, Nishita Physical Sky Model, Rayleigh-Mie Single Scattering
+Also called: Nishita Physical Sky Model, Rayleigh-Mie Single Scattering, Single Scattering Atmospheric Model, Single-Scattering Sky Rendering
 
 ## Overview
 Renders the sky and atmospheric scattering by numerically integrating single scattering along a ray through a spherical atmosphere shell, accumulating Rayleigh and Mie contributions weighted by view and light transmittance [S1, unofficial]. It solves the Radiative Transfer Equation (RTE) for a single distant light source (the sun), accounting for Rayleigh scattering (gas molecules), Mie scattering (aerosols), and Ozone absorption [S5, unofficial]. Unlike [Single-scattering homogeneous volume rendering](1135-single-scattering-homogeneous-volume-rendering.md) which assumes constant density, this method models the exponential density decay of a planetary atmosphere and the resulting wavelength-dependent color shifts (e.g., red sunsets) [S5, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-*   **Inputs:** Camera position $\mathbf{p}_{cam}$ (typically on or near the planet surface), view direction $\boldsymbol{\omega}$, sun direction $\boldsymbol{\omega}_{sun}$, planet radius $R_p$, atmosphere radius $R_a$, and physical coefficients for Rayleigh, Mie, and Ozone.
-*   **Outputs:** Final pixel color (radiance), optionally including the direct sun disk and background transmittance.
+*   **Inputs:** Camera position $\mathbf{p}_{cam}$ (typically on or near the planet surface), view direction $\boldsymbol{\omega}$, sun direction $\boldsymbol{\omega}_{sun}$, planet radius $R_p$, atmosphere radius $R_a$, and physical coefficients for Rayleigh, Mie, and Ozone [S5, unofficial].
+*   **Outputs:** Final pixel color (radiance), optionally including the direct sun disk and background transmittance [S5, unofficial].
 
 **Data Structures**
 *   **Atmosphere Constants:** Precomputed scale heights ($H_R, H_M, H_O$) and sea-level coefficients ($\sigma_{s,0}^{Rayleigh}, \sigma_{s,0}^{Mie}, \sigma_{a,0}^{Ozone}$) [S5, unofficial].
@@ -45,7 +45,7 @@ Renders the sky and atmospheric scattering by numerically integrating single sca
     This is solved via numerical integration along the view ray [S5, unofficial].
 
 **Parameters**
-*   **Integration Steps ($N$):** Typically 8 to 64 steps per ray [S1, unofficial][S5, unofficial].
+*   **Integration Steps ($N$):** Fixed at 64 in one implementation [S1, unofficial], and 8 in another [S5, unofficial].
 *   **Sun Angular Radius:** $\approx 0.0046$ rad (0.53 degrees diameter) [S5, unofficial].
 *   **Ground Illuminance:** $\approx 120,000$ lux (used to derive $L_{outerspace}$) [S5, unofficial].
 
@@ -65,10 +65,6 @@ H_O = 8000.0
 
 SIGMA_S_RAY_SEA = [5.8e-6, 13.5e-6, 33.1e-6]
 SIGMA_S_MIE_SEA = [21e-6, 21e-6, 21e-6]
-SIGMA_A_OZONE_SEA = [3.426e-6, 8.298e-6, 0.356e-6] # Note: source uses 0.06 * 1e-5 = 6e-7 scale, adjusted to match magnitude
-# Correction: Source says (3.426, 8.298, 0.356) * 0.06 * 1e-5. 
-# 3.426 * 0.06 * 1e-5 = 2.0556e-6. 
-# Let's stick to the formula structure.
 SIGMA_A_OZONE_SEA = [c * 0.06 * 1e-5 for c in [3.426, 8.298, 0.356]]
 
 STEPS = 8
@@ -77,8 +73,18 @@ SUN_ANGULAR_RADIUS = math.radians(0.53 / 2.0)
 SUN_SOLID_ANGLE = 2 * PI * (1 - math.cos(SUN_ANGULAR_RADIUS))
 ILLUMINANCE_GROUND = 120000.0
 
+def dot(a, b):
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+def length(v):
+    return math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+
+def smoothstep(edge0, edge1, x):
+    t = max(0.0, min(1.0, (x - edge0) / (edge1 - edge0)))
+    return t * t * (3.0 - 2.0 * t)
+
 def get_height(pos):
-    return math.sqrt(pos[0]**2 + pos[1]**2 + pos[2]**2) - R_EARTH
+    return length(pos) - R_EARTH
 
 def sigma_s_rayleigh(pos):
     h = get_height(pos)
@@ -98,20 +104,19 @@ def sigma_t(pos):
     so = sigma_a_ozone(pos)
     return [sr[i] + 1.11 * sm[i] + so[i] for i in range(3)]
 
-def integrate_sigma_t(from_pos, to_pos):
-    ds = [(to_pos[i] - from_pos[i]) / STEPS for i in range(3)]
+def integrate_sigma_t(from_pos, to_pos, steps):
+    ds = [(to_pos[i] - from_pos[i]) / steps for i in range(3)]
     acc = [0.0, 0.0, 0.0]
-    for i in range(STEPS):
-        # Midpoint
+    dist = length(ds)
+    for i in range(steps):
         s = [from_pos[j] + (i + 0.5) * ds[j] for j in range(3)]
         st = sigma_t(s)
-        dist = math.sqrt(sum(d**2 for d in ds))
         for j in range(3):
             acc[j] += st[j]
     return [a * dist for a in acc]
 
-def transmittance(from_pos, to_pos):
-    integral = integrate_sigma_t(from_pos, to_pos)
+def transmittance(from_pos, to_pos, steps):
+    integral = integrate_sigma_t(from_pos, to_pos, steps)
     return [math.exp(-i) for i in integral]
 
 def rayleigh_phase(cos_theta):
@@ -121,99 +126,72 @@ def mie_phase(cos_theta):
     denom = 1.0 + G_MIE**2 - 2.0 * G_MIE * cos_theta
     return (1.0 - G_MIE**2) / (4.0 * PI * (denom ** 1.5))
 
+def intersect_ray_sphere_inside(ray_origin, ray_dir, radius):
+    b = dot(ray_origin, ray_dir)
+    c = dot(ray_origin, ray_origin) - radius**2
+    disc = b*b - c
+    if disc < 0.0:
+        return -1.0
+    return -b + math.sqrt(disc)
+
 def compute_louterspace():
-    # Analytical transmittance from ground to zenith for normalization
-    # Tr_Zenith = exp( - [ Sr*Hr*(exp(-h0/Hr)-exp(-hZ/Hr)) + ... ] )
-    h0 = 1.0 # Origin height approx 1m above surface
+    h0 = 1.0
     hZ = R_ATMO - R_EARTH
-    
-    term_r = SIGMA_S_RAY_SEA[0] * H_R * (math.exp(-h0/H_R) - math.exp(-hZ/H_R))
-    # This is per channel, but Hr is same. 
-    # Actually, the formula in [S5, unofficial] sums the optical depths.
-    # We need to compute Tr_Zenith vectorially or per channel.
-    # Let's compute per channel for accuracy.
     tr_z = [0.0, 0.0, 0.0]
     for i in range(3):
         tau_r = SIGMA_S_RAY_SEA[i] * H_R * (math.exp(-h0/H_R) - math.exp(-hZ/H_R))
         tau_m = SIGMA_S_MIE_SEA[i] * H_M * (math.exp(-h0/H_M) - math.exp(-hZ/H_M))
         tau_o = SIGMA_A_OZONE_SEA[i] * H_O * (math.exp(-h0/H_O) - math.exp(-hZ/H_O))
         tr_z[i] = math.exp(-(tau_r + tau_m + tau_o))
-        
-    # L_outerspace = E_ground / (Omega_sun * Tr_Zenith)
-    # Note: E_ground is scalar illuminance, but L is radiance (vector).
-    # Assuming white sun, we scale by 1/tr_z[i]
     l_out = [0.0, 0.0, 0.0]
     for i in range(3):
         l_out[i] = ILLUMINANCE_GROUND / (SUN_SOLID_ANGLE * tr_z[i])
     return l_out
 
-def j_source(pos, view_dir, sun_dir, l_outerspace):
-    # Distance to atmosphere exit in sun direction
-    # Simplified: assume sun direction intersects atmosphere at R_ATMO
-    # Exact intersection logic required for precision, but [S5, unofficial] uses intersectRaySphereFromInside
-    # For pseudocode clarity, we assume a helper `intersect_ray_sphere_inside` exists
+def j_source(pos, view_dir, sun_dir, l_outerspace, steps):
     dist_sun = intersect_ray_sphere_inside(pos, sun_dir, R_ATMO)
     pos_out = [pos[i] + sun_dir[i] * dist_sun for i in range(3)]
-    
-    tr_to_sun = transmittance(pos, pos_out)
-    
-    cos_theta = sum(view_dir[i] * sun_dir[i] for i in range(3))
-    
+    tr_to_sun = transmittance(pos, pos_out, steps)
+    cos_theta = dot(view_dir, sun_dir)
     sr = sigma_s_rayleigh(pos)
     sm = sigma_s_mie(pos)
-    
     pr = rayleigh_phase(cos_theta)
     pm = mie_phase(cos_theta)
-    
-    # j(x) = L_out * Tr_to_sun * Omega_sun * (sr * Pr + sm * Pm)
     js = [0.0, 0.0, 0.0]
     for i in range(3):
         js[i] = l_outerspace[i] * tr_to_sun[i] * SUN_SOLID_ANGLE * (sr[i] * pr + sm[i] * pm)
     return js
 
-def compute_luminance(origin_view, view_dir, sun_dir, l_outerspace):
-    # Find exit point of view ray
+def compute_luminance(origin_view, view_dir, sun_dir, l_outerspace, steps):
     dist_view = intersect_ray_sphere_inside(origin_view, view_dir, R_ATMO)
     view_out = [origin_view[i] + view_dir[i] * dist_view for i in range(3)]
-    
-    ds = [(view_out[i] - origin_view[i]) / STEPS for i in range(3)]
-    dist_total = math.sqrt(sum(d**2 for d in ds))
-    
+    ds = [(view_out[i] - origin_view[i]) / steps for i in range(3)]
+    dist_total = length(ds)
     acc = [0.0, 0.0, 0.0]
-    for i in range(STEPS):
+    for i in range(steps):
         s = [origin_view[j] + (i + 0.5) * ds[j] for j in range(3)]
-        
-        # Tr(x -> camera)
-        tr_cam = transmittance(s, origin_view)
-        
-        js = j_source(s, view_dir, sun_dir, l_outerspace)
-        
+        tr_cam = transmittance(s, origin_view, steps)
+        js = j_source(s, view_dir, sun_dir, l_outerspace, steps)
         for j in range(3):
             acc[j] += tr_cam[j] * js[j]
-            
     return [a * dist_total for a in acc]
 
-def direct_sun(view_dir, origin_view, sun_dir, l_outerspace):
-    cos_theta = sum(view_dir[i] * sun_dir[i] for i in range(3))
+def direct_sun(view_dir, origin_view, sun_dir, l_outerspace, steps):
+    cos_theta = dot(view_dir, sun_dir)
     angle = math.acos(cos_theta)
-    
-    # Smoothstep disk mask
     disk = 1.0 - smoothstep(SUN_ANGULAR_RADIUS * 0.95, SUN_ANGULAR_RADIUS * 1.05, angle)
-    
     dist_view = intersect_ray_sphere_inside(origin_view, view_dir, R_ATMO)
     view_out = [origin_view[i] + view_dir[i] * dist_view for i in range(3)]
-    
-    tr_cam = transmittance(origin_view, view_out)
-    
+    tr_cam = transmittance(origin_view, view_out, steps)
     sun_color = [0.0, 0.0, 0.0]
     for i in range(3):
         sun_color[i] = disk * l_outerspace[i] * tr_cam[i]
     return sun_color
 
-def main(origin_view, view_dir, sun_dir):
+def main(origin_view, view_dir, sun_dir, steps=STEPS):
     l_outerspace = compute_louterspace()
-    luminance = compute_luminance(origin_view, view_dir, sun_dir, l_outerspace)
-    sun = direct_sun(view_dir, origin_view, sun_dir, l_outerspace)
+    luminance = compute_luminance(origin_view, view_dir, sun_dir, l_outerspace, steps)
+    sun = direct_sun(view_dir, origin_view, sun_dir, l_outerspace, steps)
     return [luminance[i] + sun[i] for i in range(3)]
 ```
 
@@ -224,23 +202,25 @@ def main(origin_view, view_dir, sun_dir):
 
 ## Subtopics
 
-### Sky View LUT with Angular Compression
-A technique for rendering sky and atmosphere using a precomputed Look-Up Table (LUT) with angular compression, ported from a reference implementation [S7, unofficial]. The LUT is typically 400x400 resolution and caches transmittance or scattering results based on view angle and sun angle to avoid per-pixel integration [S7, unofficial].
+### [Sky View LUT with Angular Compression](6648-sky-view-lut-with-angular-compression.md)
+A technique for rendering sky and atmosphere using a precomputed Look-Up Table (LUT) with angular compression, ported from a reference implementation.
+
+### [Spectral Scattering Model for Atmosphere](9399-spectral-scattering-model-for-atmosphere.md)
+A physically-based model for simulating light transport in planetary atmospheres and large water bodies, accounting for direct illumination, indirect scattered light, interreflections between surface and volume, and seabed reflections. It uses fully spectral data precomputed into lookup tables for real-time GPU rendering.
 
 ## Operating characteristics
 *   **Time Complexity:** $O(STEPS)$ per pixel for the luminance integral and $O(STEPS)$ for transmittance calculations, where STEPS is the number of integration segments (typically 8–64) [S5, unofficial].
-*   **Memory Complexity:** $O(1)$ per pixel for the direct integration method. LUT variants require $O(W \times H)$ memory for the table [S7, unofficial].
+*   **Memory Complexity:** $O(1)$ per pixel for the direct integration method [G].
 *   **Strengths:** Physically accurate colors (Rayleigh blue, Mie white/grey, ozone absorption); efficient enough for real-time if step count is low or LUTs are used [S5, unofficial].
-*   **Limitations:** Ignores multiple scattering, which causes inaccuracies in deep atmospheres or high optical depths (e.g., near the horizon at sunset) [S5, unofficial]. Single-step approximations (like [S2, unofficial]) lose accuracy compared to multi-sample integration.
+*   **Limitations:** Ignores multiple scattering, which causes inaccuracies in deep atmospheres or high optical depths (e.g., near the horizon at sunset) [S5, unofficial]. Single-step approximations (like [S2, unofficial]) remove the integration loop for a condensed calculation, trading accuracy for speed [S2, unofficial].
 
 ## Background
-Originating from the physical sky model by Nishita et al. (1993), this method has been adapted for real-time graphics. It is widely used in real-time sky rendering, specifically referenced in Sébastien Hillaire's 2016 course and 2020 paper, and Scratch a Pixel tutorial [S5, unofficial]. The model relies on the conservation of energy and the Radiative Transfer Equation (RTE) [S1, unofficial].
+Originating from the physical sky model by Nishita et al. (1993), this method has been adapted for real-time graphics [S6, unofficial]. It is widely used in real-time sky rendering, specifically referenced in Sébastien Hillaire's 2016 course and 2020 paper, and Scratch a Pixel tutorial [S6, unofficial]. The model relies on the conservation of energy and the Radiative Transfer Equation (RTE) [S1, unofficial].
 
 ## Sources
 [S1] Nelarius/vxray, https://github.com/Nelarius/vxray, fetched 2026-10-24 (unofficial)
 [S2] GitHub - razzle-reinizu/Voxel-World-Shader: A GLSL voxel-world shader ..., https://github.com/razzle-reinizu/Voxel-World-Shader, fetched 2026-10-25 (unofficial)
-[S3] Depersonalizc/volumetric-clouds, https://github.com/Depersonalizc/volumetric-clouds, fetched 2026-10-27 (unofficial)
-[S4] al-ro/volumetrics, https://github.com/al-ro/volumetrics, fetched 2026-10-27 (unofficial)
-[S5] Sky and Atmosphere rendering: A physical approach, https://cpp-rendering.io/sky-and-atmosphere-rendering/, fetched 2026-10-28 (unofficial)
-[S6] Add volumetric rendering, advanced materials, and imager effects, https://github.com/MihrimatriX/photon-engine/pull/3, fetched 2026-10-28 (unofficial)
-[S7] Voxel Raytracer Devlog // My thought repository, https://nelari.us/post/voxel-ray-tracing/, fetched 2026-10-24 (unofficial)
+[S4] Depersonalizc/volumetric-clouds, https://github.com/Depersonalizc/volumetric-clouds, fetched 2026-10-27 (unofficial)
+[S5] al-ro/volumetrics, https://github.com/al-ro/volumetrics, fetched 2026-10-27 (unofficial)
+[S6] Sky and Atmosphere rendering: A physical approach, https://cpp-rendering.io/sky-and-atmosphere-rendering/, fetched 2026-10-28 (unofficial)
+[S7] Add volumetric rendering, advanced materials, and imager effects, https://github.com/MihrimatriX/photon-engine/pull/3, fetched 2026-10-28 (unofficial)

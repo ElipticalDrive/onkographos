@@ -1,0 +1,127 @@
+# Improved Tetrahedral Mesh Generation for Voxelization
+
+Also called: Robust Tetrahedral Voxelization, Tetrahedral Mesh Voxelization
+
+## Overview
+This method provides a robust framework for converting triangular meshes into solid binary voxel data by generating a high-quality intermediate tetrahedral mesh [S1, unofficial]. It specifically addresses the failure of existing methods to handle low-quality, non-watertight, or topologically open meshes common in internet datasets [S1, unofficial]. Unlike state-of-the-art approaches that connect facets to a model centroid (producing faulty meshes for high-face models) or standard Delaunay triangulation (which suffers at boundaries), this method uses background grid insertion combined with mesh improvement to maintain quality and speed [S1, unofficial].
+
+## How it works
+**Inputs:**
+1.  A triangular mesh $M$ (potentially low-quality, non-watertight, or open).
+2.  A user-defined error tolerance parameter $\epsilon$.
+
+**Outputs:**
+1.  A solid binary voxel grid representing the interior of the input mesh.
+
+**Data Structures:**
+*   **Triangular Mesh:** Defined by vertices $V$ and faces $F$.
+*   **Tetrahedral Mesh:** Defined by vertices $V'$ (superset of $V$) and tetrahedra $T$.
+*   **Background Grid:** A structured grid of tetrahedra or cubes aligned with the bounding box of the input mesh.
+
+**Parameters:**
+*   $\epsilon$: The user-defined tolerance for errors in the tetrahedral mesh generation. It controls the zigzag artifact on straight lines. Typical values tested include $2 \times 10^{-3}$, $5 \times 10^{-3}$, and $1 \times 10^{-2}$ [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Input Processing:** Receive the triangular mesh $M$ and tolerance $\epsilon$.
+2.  **Pre-Insertion Mesh Improvement:** Perform mesh improvement processing on the input triangular mesh $M$. This step prepares the surface for robust insertion [S1, unofficial].
+3.  **Background Mesh Insertion:** Insert the improved triangular mesh into a background grid. This creates an initial tetrahedral mesh that includes the surface triangles as part of the tetrahedral volume [S1, unofficial].
+4.  **Post-Insertion Mesh Improvement:** Perform mesh improvement processing on the resulting tetrahedral mesh. This step refines the tetrahedra to ensure validity and quality within the error bound $\epsilon$ [S1, unofficial].
+5.  **Voxelization:** Rasterize the final tetrahedral mesh to produce the solid binary voxel data. This step utilizes a faster voxelization algorithm based on the strong assumption of a valid, high-quality tetrahedral mesh [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def robust_tetrahedral_voxelization(triangular_mesh, epsilon):
+    """
+    Converts a triangular mesh to solid binary voxels via improved tetrahedral mesh generation.
+    
+    Args:
+        triangular_mesh: Input mesh with vertices and faces.
+        epsilon: Error tolerance controlling zigzag artifacts.
+        
+    Returns:
+        voxel_grid: Binary 3D array representing the solid interior.
+    """
+    # Step 1: Pre-insertion mesh improvement
+    # Improves the quality of the input triangular mesh to handle low-quality inputs.
+    improved_tri_mesh = mesh_improvement(triangular_mesh)
+    
+    # Step 2: Background mesh insertion
+    # Inserts the improved mesh into a background grid structure.
+    # This creates an initial tetrahedral mesh containing the surface.
+    initial_tet_mesh = background_insertion(improved_tri_mesh)
+    
+    # Step 3: Post-insertion mesh improvement
+    # Refines the tetrahedral mesh to ensure validity and quality within epsilon.
+    # This step is critical for handling non-watertight or open meshes.
+    final_tet_mesh = tet_mesh_improvement(initial_tet_mesh, epsilon)
+    
+    # Step 4: Voxelization
+    # Rasterize the valid tetrahedral mesh to produce binary voxel data.
+    # Assumes a standard ray-casting or inside-outside test on the tetrahedra.
+    voxel_grid = tetrahedral_rasterize(final_tet_mesh)
+    
+    return voxel_grid
+
+def mesh_improvement(mesh):
+    """
+    [G] Placeholder for specific mesh improvement algorithm (e.g., Laplacian smoothing, 
+    edge flipping, or vertex relocation) applied to triangular meshes.
+    The source cites [32] and [33] for the specific improvement techniques but does not 
+    provide the internal pseudocode for the improvement operator itself.
+    """
+    # Implementation details depend on the specific improvement algorithm chosen.
+    # Common techniques include smoothing vertices to improve aspect ratios.
+    pass
+
+def tet_mesh_improvement(tet_mesh, epsilon):
+    """
+    [G] Placeholder for tetrahedral mesh improvement algorithm.
+    Ensures tetrahedra quality metrics (e.g., min angle, aspect ratio) stay within bounds
+    defined by epsilon.
+    """
+    pass
+
+def background_insertion(tri_mesh):
+    """
+    [G] Placeholder for background grid insertion.
+    Creates a structured grid (tetrahedral or cubic) aligned with the bounding box
+    and inserts the triangle vertices and edges into the grid structure.
+    """
+    pass
+
+def tetrahedral_rasterize(tet_mesh):
+    """
+    Converts the tetrahedral mesh into a binary voxel grid.
+    """
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Zigzag Artifacts:** Setting $\epsilon$ too large causes visible zigzag artifacts on straight lines [S1, unofficial].
+*   **Tolerance Sensitivity:** Errors up to $\epsilon = 10^{-2}$ (10x the default value) do not produce major differences in the final voxelized output, allowing for some flexibility [S1, unofficial].
+*   **Non-Watertight Meshes:** The method is specifically designed to handle meshes that are not watertight or have topological holes, which cause other methods to fail [S1, unofficial].
+
+## Subtopics
+
+### Polygon Mesh Voxelization via Union of Sets
+Uses set operations on voxel grids rather than tetrahedral meshing. Suitable for simpler geometries where boolean operations are efficient. [4605-polygon-mesh-voxelization-via-union-of-sets.md]
+
+### Labeled Volume Creation via MultiBlock Iteration
+Focuses on creating labeled volumes through iterative multi-block processing. Useful when semantic labeling is required alongside voxelization. [7389-labeled-volume-creation-via-multiblock-iteration.md]
+
+## Operating characteristics
+*   **Success Rate:** Achieved near 100% availability (success rate) on testing datasets (Princeton ModelNet and Thingi10k), whereas other methods achieved around 50% [S1, unofficial].
+*   **Performance:** The method enables a faster voxelization algorithm because the intermediate tetrahedral mesh is of higher quality, allowing for stronger assumptions during rasterization [S1, unofficial].
+*   **Scalability:** The method is computationally expensive for sparse models when using standard grid insertion alone, but the combination with mesh improvement mitigates this [S1, unofficial].
+*   **Strengths:** Robustness to low-quality, non-watertight, and topologically open meshes; high-quality intermediate tetrahedral mesh; near-perfect success rate on diverse datasets.
+*   **Limitations:** Requires careful tuning of $\epsilon$ to avoid zigzag artifacts (though the method is tolerant up to $10^{-2}$); mesh improvement steps add computational overhead compared to direct rasterization.
+
+## Background
+The method was proposed by researchers from National Taiwan University [S1, unofficial]. It is based on the work of [32] and [33], which introduced background mesh insertion with mesh improvement processing [S1, unofficial]. The paper highlights that existing methods often fail on low-quality meshes prevalent on the internet [S1, unofficial]. The authors provide a proof that their algorithm performs better than the state-of-the-art method [1] (which connects facets to a centroid) and demonstrate results compared to various other methods, including parallelization on GPU and CPU [S1, unofficial].
+
+## Sources
+[S1] Robust Voxelization and Visualization by Improved Tetrahedral Mesh Generation, https://doi.org/10.48550/arxiv.2106.01326, fetched 2026-10-26 (unofficial)

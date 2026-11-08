@@ -1,0 +1,318 @@
+--- v003.md
++++ v004.md
+@@ -1,115 +1,227 @@
+ # NeRF Network Query with Hashed Embeddings
+ 
+-Also called: HashNeRF query
++Also called: HashNeRF query, Instant-NGP NeRF, NeRF with Hash Encoding, NeRF with Multiresolution Hash Encoding, Neural Radiance and Density Fields (NeRF) with Multiresolution Hash Encoding
+ 
+ ## Overview
+-This method performs the neural network evaluation step within the NeRF training loop, mapping 3D spatial coordinates and viewing directions to density and color features using embedding functions and a network function [S1, unofficial]. It replaces expensive high-dimensional coordinate embeddings with a structured lookup process that applies position and direction embeddings before batching the concatenated features through a network function [S1, unofficial].
++This method queries a differentiable radiance field by mapping 3D spatial coordinates and view directions into a high-dimensional feature space using a multiresolution hash encoding, then decoding these features into volume density and RGB color via shallow multi-layer perceptrons (MLPs) [S2]. It solves the problem of efficient, high-frequency detail capture in neural radiance fields by replacing expensive positional encoding with learnable, sparse hash tables that support linear interpolation [S2]. It sets itself apart from its siblings by using concatenated MLPs (density followed by color) driven by hash-encoded inputs rather than direct voxel lookups or dense grids, offering a balance between quality and speed [S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A batch of 3D sample points $\mathbf{x}$ and, optionally, viewing directions $\mathbf{d}$ [S1, unofficial].
+-*   **Outputs:** Density values $\sigma$ and color features $\mathbf{c}$ [S1, unofficial].
++*   **Inputs:** A batch of 3D points $\mathbf{x} \in \mathbb{R}^3$ and, optionally, view directions $\mathbf{v} \in \mathbb{R}^3$.
++*   **Outputs:** Volume density $\sigma$ (scalar) and RGB color $\mathbf{c}$ (3-vector) for each point.
+ 
+ **Data Structures:**
+-*   **Embedding Functions:** `embed_fn` for position and `embeddirs_fn` for direction [S1, unofficial].
++*   **Hash Tables:** A set of $L$ hash tables, one for each resolution level $l \in \{0, \dots, L-1\}$. Each table maps a hash index to a feature vector of dimension $F$ (typically $F=2$) [S2].
++*   **MLPs:**
++    *   **Density MLP:** 1 hidden layer, 64 neurons [S2].
++    *   **Color MLP:** 2 hidden layers, 64 neurons [S2].
++
++**Method Steps:**
++
++1.  **Reshape Inputs:** Flatten the input positions to shape $(-1, 3)$ [S1, unofficial].
++2.  **Hash Encoding (Position):** For each resolution level $l$, compute the hash index for each point $\mathbf{x}$ using a hash function $H_l(\mathbf{x})$. Retrieve the feature vectors from the hash table at $H_l(\mathbf{x})$ and interpolate between the 8 surrounding voxel corners (trilinear interpolation) [S5]. Concatenate the $F$-dimensional features from all $L$ levels to form the position embedding $\mathbf{y}_{pos}$ [S2].
++3.  **Validity Mask:** Apply a validity mask `keep_mask` to identify points within the bounding volume or valid sampling range [S1, unofficial].
++4.  **Hash Encoding (Direction):** If view directions $\mathbf{v}$ are provided, expand them to match the input shape, reshape to flat, and apply a direction embedding function `embeddirs_fn`. This typically involves projecting $\mathbf{v}$ onto the first 16 coefficients of the spherical harmonics basis (up to degree 4) [S2].
++5.  **Concatenate Embeddings:** Concatenate $\mathbf{y}_{pos}$ and the direction embedding $\mathbf{y}_{dir}$ along the last dimension to form the full input feature vector $\mathbf{y} = [\mathbf{y}_{pos}; \mathbf{y}_{dir}]$ [S1, unofficial][S2].
++6.  **Density Prediction:** Pass $\mathbf{y}$ through the Density MLP. The output is 16 values; the first value is treated as the log-space density $\log(\sigma)$ [S2].
++7.  **Color Prediction:** Concatenate the 16 output values from the Density MLP with the direction embedding $\mathbf{y}_{dir}$ [S2]. Pass this concatenated vector through the Color MLP. The output is an RGB color triplet [S2].
++8.  **Activation:** Apply a sigmoid activation to the RGB output if training data is low dynamic-range (sRGB), or an exponential activation if high dynamic-range (linear HDR) [S2].
++9.  **Invalid Point Handling:** Set $\sigma = 0$ for points identified by `~keep_mask` [S1, unofficial].
++
++**Pseudocode:**
++
++```python
++import torch
++import torch.nn as nn
++import math
++
++class HashNeRFQuery(nn.Module):
++    def __init__(self, num_levels=16, level_dim=2, hash_size=19, 
++                 density_mlp_hidden=64, color_mlp_hidden=64, 
++                 use_sh=True, sh_degree=4):
++        super().__init__()
++        self.num_levels = num_levels
++        self.level_dim = level_dim
++        self.hash_size = hash_size
++        self.use_sh = use_sh
++        self.sh_degree = sh_degree
++        
++        # Initialize hash tables for each level
++        # Each table maps hash indices to feature vectors of size level_dim
++        self.embeddings = nn.ModuleList([
++            nn.Embedding(hash_size, level_dim) for _ in range(num_levels)
++        ])
++        
++        # Initialize MLPs
++        # Density MLP: Input -> 64 -> 16 (first is log density)
++        self.density_mlp = nn.Sequential(
++            nn.Linear(level_dim * num_levels, density_mlp_hidden),
++            nn.ReLU(),
++            nn.Linear(density_mlp_hidden, 16)
++        )
++        
++        # Color MLP: Input (16 + dir_embed_dim) -> 64 -> 64 -> 3
++        dir_embed_dim = 3 if not use_sh else (sh_degree + 1) ** 2
++        self.color_mlp = nn.Sequential(
++            nn.Linear(16 + dir_embed_dim, color_mlp_hidden),
++            nn.ReLU(),
++            nn.Linear(color_mlp_hidden, color_mlp_hidden),
++            nn.ReLU(),
++            nn.Linear(color_mlp_hidden, 3)
++        )
++        
++        # Initialize embeddings with small random values
++        for emb in self.embeddings:
++            nn.init.uniform_(emb.weight, a=-1e-4, b=1e-4)
++
++    def forward(self, x, v=None, keep_mask=None):
++        """
++        x: (N, 3) 3D points
++        v: (N, 3) view directions (optional)
++        keep_mask: (N,) boolean mask for valid points
++        """
++        # 1. Hash Encoding for Position
++        # Flatten x if necessary (assumed already flat)
++        # Compute hash indices for each level
++        # Note: In practice, this involves scaling x to [0, 1] or similar,
++        # then using a hash function like XOR of scaled coordinates mod hash_size.
++        # Here we assume a helper function `get_hash_indices` exists or is implemented.
++        # For implementation completeness, we simulate the retrieval.
++        
++        all_features = []
++        for l in range(self.num_levels):
++            # Simulate hash lookup and interpolation
++            # In real code: indices = hash_function(x, scale=scale_l)
++            # features = interpolate(emb[l], indices)
++            # For this pseudocode, we assume `get_hash_features` returns (N, level_dim)
++            features_l = self._get_hash_features(x, l)
++            all_features.append(features_l)
++            
++        y_pos = torch.cat(all_features, dim=-1) # (N, num_levels * level_dim)
++        
++        # 2. Direction Encoding
++        if v is not None:
++            if self.use_sh:
++                # Project v onto spherical harmonics basis up to degree sh_degree
++                y_dir = self._spherical_harmonics(v, self.sh_degree)
++            else:
++                y_dir = v
++        else:
++            # If no direction, use zeros or identity depending on architecture
++            # Standard NeRF requires direction for color
++            y_dir = torch.zeros_like(v) if v is not None else torch.zeros(x.shape[0], 3)
++            
++        # 3. Concatenate
++        y = torch.cat([y_pos, y_dir], dim=-1)
++        
++        # 4. Density MLP
++        density_out = self.density_mlp(y) # (N, 16)
++        log_sigma = density_out[:, 0]     # First value is log density
++        sigma = torch.exp(log_sigma)      # Convert to density
++        
++        # 5. Color MLP
++        # Concatenate density MLP output (all 16 values) with direction embedding
++        color_input = torch.cat([density_out, y_dir], dim=-1)
++        rgb = self.color_mlp(color_input) # (N, 3)
++        
++        # 6. Activation
++        # Assuming HDR training data (exponential) as preferred in [S2]
++        # For sRGB, use torch.sigmoid(rgb)
++        rgb = torch.exp(rgb)
++        
++        # 7. Handle invalid points
++        if keep_mask is not None:
++            sigma = sigma * keep_mask.float()
++            # Color for invalid points is irrelevant, but can be zeroed
++            rgb = rgb * keep_mask.unsqueeze(-1).float()
++            
++        return sigma, rgb
++
++    def _get_hash_features(self, x, level):
++        # Placeholder for actual hash function and interpolation logic
++        # This would involve:
++        # 1. Scaling x by 2^level
++        # 2. Computing floor and fractional parts
++        # 3. Hashing integer coordinates
++        # 4. Retrieving 8 corner features from self.embeddings[level]
++        # 5. Trilinear interpolation
++        # Returning dummy features for structure validity
++        return torch.zeros(x.shape[0], self.level_dim, device=x.device)
++
++    def _spherical_harmonics(self, v, degree):
++        # Implement SH projection for unit vectors
++        # Returns (N, (degree+1)^2)
++        # Standard SH basis functions for degree 0-4
++        # This is a complex mathematical operation, simplified here
++        return torch.zeros(v.shape[0], (degree + 1) ** 2, device=v.device)
++```
+ 
+ **Parameters:**
+-*   `netchunk`: Batch size for network evaluation to manage memory. Default: $1024 \times 64 = 65,536$ [S1, unofficial].
+-
+-**Steps:**
+-1.  **Reshape Inputs:** Reshape input positions to a flat list with shape `[-1, inputs.shape[-1]]` [S1, unofficial].
+-2.  **Position Embedding:** Apply the position embedding function `embed_fn` to get embedded positions and a validity mask `keep_mask` [S1, unofficial].
+-3.  **Direction Embedding (Optional):** If view directions are provided, expand them to match the input shape, reshape to flat, and apply the direction embedding function `embeddirs_fn` [S1, unofficial].
+-4.  **Concatenation:** Concatenate position and direction embeddings along the last dimension [S1, unofficial].
+-5.  **Batched Network Evaluation:** Apply the network function `fn` in batches of size `netchchunk` to avoid OOM [S1, unofficial].
+-6.  **Masking Invalid Points:** Set sigma (density) to 0 for invalid points identified by `~keep_mask` [S1, unofficial].
+-
+-**Pseudocode:**
+-```python
+-import numpy as np
+-
+-def query_hashnerf(positions, directions=None, embed_fn=None, embeddirs_fn=None, 
+-                   network_fn=None, netchunk=65536):
+-    """
+-    Query the network for density and color using hash-based embeddings.
+-    
+-    Args:
+-        positions: Array of shape (..., 3) containing 3D coordinates.
+-        directions: Array of shape (..., 3) containing viewing directions (optional).
+-        embed_fn: Function returning (embedded_positions, keep_mask).
+-        embeddirs_fn: Function returning embedded directions.
+-        network_fn: Function returning (sigma, features) for a batch.
+-        netchunk: Batch size for network evaluation.
+-        
+-    Returns:
+-        sigma: Density values.
+-        features: Color/appearance features.
+-    """
+-    # 1. Reshape input positions to flat list [-1, inputs.shape[-1]]
+-    original_shape = positions.shape
+-    positions_flat = positions.reshape(-1, positions.shape[-1])
+-    
+-    # 2. Apply position embedding function embed_fn to get embedded positions and a validity mask keep_mask
+-    # embed_fn is provided by the hash encoding module [S1, unofficial]
+-    pos_embed, keep_mask = embed_fn(positions_flat)
+-    
+-    # 3. If view directions are provided, expand them to match input shape, reshape to flat, and apply direction embedding function embeddirs_fn
+-    if directions is not None:
+-        directions_expanded = np.broadcast_to(directions, positions.shape)
+-        directions_flat = directions_expanded.reshape(-1, directions.shape[-1])
+-        # embeddirs_fn is provided by the hash encoding module [S1, unofficial]
+-        dir_embed = embeddirs_fn(directions_flat)
+-        # 4. Concatenate position and direction embeddings along the last dimension
+-        input_tensor = np.concatenate([pos_embed, dir_embed], axis=-1)
+-    else:
+-        input_tensor = pos_embed
+-        
+-    # 5. Apply the network function fn in batches of size netchchunk to avoid OOM
+-    num_points = input_tensor.shape[0]
+-    sigma_list = []
+-    features_list = []
+-    for i in range(0, num_points, netchunk):
+-        chunk = input_tensor[i:i+netchunk]
+-        sigma_chunk, features_chunk = network_fn(chunk)
+-        sigma_list.append(sigma_chunk)
+-        features_list.append(features_chunk)
+-    sigma = np.concatenate(sigma_list, axis=0)
+-    features = np.concatenate(features_list, axis=0)
+-    
+-    # 6. Set sigma (density) to 0 for invalid points identified by ~keep_mask
+-    sigma_flat = sigma.reshape(-1)
+-    sigma_flat[~keep_mask] = 0.0
+-    sigma = sigma_flat.reshape(original_shape[:-1] + (1,))
+-    
+-    return sigma, features
+-```
++*   **Hash Table Size:** Not given in the sources.
++*   **Number of Levels:** Not given in the sources.
++*   **Feature Dimension per Level ($F$):** Typically 2 [S2].
++*   **Density MLP:** 1 hidden layer, 64 neurons [S2].
++*   **Color MLP:** 2 hidden layers, 64 neurons [S2].
++*   **Direction Encoding:** Spherical harmonics up to degree 4 (16 coefficients) [S2].
++*   **Batch Size (`netchunk`):** Default 1024*64 to avoid OOM [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Hash Collisions:** Cause "grainy" microstructure artifacts, especially in learned signed distance functions. The MLP cannot fully compensate for this [S2].
++*   **Reduction vs. Concatenation:** Concatenating features from each resolution is preferred over reduction (e.g., summing) because reduction may result in a dimensionality too small to encode useful information [S2].
++*   **Direct Voxel Lookup:** Replacing the MLP with a single linear matrix multiplication compromises quality significantly, failing to capture specular effects and resolve hash collisions, despite being cheaper [S2].
+ 
+ ## Subtopics
+ 
+ ### [HybridNeRF Model Architecture](4842-hybridnerf-model-architecture.md)
+-HybridNeRF is a neural rendering architecture that combines multi-resolution 3D feature grids with triplane representations to predict color and signed distance fields (SDF) for efficient volumetric rendering. It distinguishes itself from its parent by replacing hash-based sparse storage with dense multi-resolution grids and triplanes, summing features across levels rather than concatenating them to reduce memory overhead. Unlike Tetrahedron Property Querying via Instant-NGP, which relies on tetrahedral meshes for property querying, HybridNeRF uses a continuous volumetric representation with a proposal network for sampling efficiency.
++HybridNeRF is a neural radiance field architecture that combines dense multi-resolution 3D feature grids with multi-resolution triplanes to featurize 3D sample locations. It solves the problem of balancing high-frequency detail capture with memory efficiency by using 3D grids for volumetric structure and triplanes for view-dependent appearance. It sets itself apart from its siblings by summing features across resolution levels rather than concatenating them, and by employing a spatially adaptive surfaceness field for density estimation.
+ 
+ ### [Tetrahedron Property Querying via Instant-NGP](4935-tetrahedron-property-querying-via-instant-ngp.md)
+-This method queries a differentiable radiance field parameterized by an Instant-NGP data structure to produce density and appearance features for individual tetrahedra in a volumetric mesh. It solves the problem of mapping point-based neural fields to volume-based primitives during optimization, where attaching features directly to vertices fails due to topological changes in the Delaunay tetrahedralization. It differs from standard NeRF point querying by using tetrahedron centers (centroid or circumcenter) and incorporating a radius-based downweighting to handle geometric degeneracy.
+-
+-### Instant NGP
+-Represents the scene using feature vectors in a hash table and a small MLP network [S2, unofficial]. Reduces model size using two key components: Multi-resolution and Hash table [S2, unofficial].
++This method queries a differentiable radiance field parameterized by an Instant-NGP data structure and the mip-NeRF 360 contraction function to produce density and appearance features for individual tetrahedra. It solves the problem of mapping point-based neural fields to volume-based primitives during optimization, where attaching features directly to vertices fails due to topological changes in the Delaunay tetrahedralization. It differs from standard NeRF point querying by using tetrahedron centers (centroid or circumcenter) and incorporating a radius-based downweighting to handle geometric degeneracy.
++
++### [Simple-ZipNeRF](7424-simple-zipnerf.md)
++Simple-ZipNeRF is a regularized variant of ZipNeRF designed to mitigate floater artifacts in sparse input scenarios by introducing an auxiliary "augmented" model with reduced capacity. It differs from standard ZipNeRF by training a smaller hash-table model in parallel to provide depth priors that regularize the main model, whereas siblings like HybridNeRF or VoxNeRF use different architectural constraints or multi-resolution grids without this specific dual-model depth regularization mechanism.
++
++### [MVS Network Query](7517-mvs-network-query.md)
++MVS Network Query prepares inputs for a neural network by embedding points and view directions, then applies the network in batches to generate features for multi-view stereo (MVS) rendering. It differs from standard NeRF network queries by explicitly handling multi-view geometric consistency through the generation of angle and point features derived from camera poses and depth candidates, rather than relying solely on spatial coordinates and view directions for a single viewpoint.
++
++### [HashNeRF](8678-hashnerf.md)
++A method using a hash encoding that maps inputs to a higher-dimensional space followed by a shallow neural network made of fully connected layers. It uses multiple hash tables for different resolutions and linear interpolation to embed features.
++
++### [VoxNeRF](8865-voxnerf.md)
+ 
+ ### Stratified PDF Sampling for NeRF
+-A method to resample points along a ray based on the importance (weight) of previous samples, improving detail in high-density regions [S3, unofficial]. Normalize bin weights by adding epsilon (1e-5) and dividing by sum to create a PDF [S3, unofficial]. Compute the Cumulative Distribution Function (CDF) by cumsumming the PDF and padding with zeros at the start [S3, unofficial]. Generate uniform random values u in [0, 1] (or deterministic midpoints if det=True) [S3, unofficial]. Find indices in the CDF where u falls using searchsorted [S3, unofficial]. Identify lower and upper bin indices for interpolation [S3, unofficial]. Interpolate the final sample position within the bin using linear interpolation based on u's position in the CDF interval [S3, unofficial].
++A method to resample points along a ray based on the importance (weight) of previous samples, improving detail in high-density regions [S3, unofficial]. It normalizes bin weights by adding epsilon ($10^{-5}$) and dividing by sum to create a PDF, computes the CDF by cumsumming the PDF and padding with zeros, generates uniform random values $u \in [0, 1]$ (or deterministic midpoints if `det=True`), finds indices in the CDF where $u$ falls using `searchsorted`, identifies lower and upper bin indices for interpolation, and interpolates the final sample position within the bin using linear interpolation based on $u$'s position in the CDF interval [S3, unofficial].
++
++### Grid-NeRF
++Uses plane grid features and a small MLP network to represent the 3D scene, and uses a NeRF branch to guide the optimization process of the scene [S4, unofficial].
++
++### ZipNeRF Augmentation
++An augmented version of ZipNeRF designed to prevent overfitting and distortions (floaters, incorrect object placement) when trained with sparse input views by reducing hash table size and constraining the sampling domain [S5]. It reduces the size of the hash table from $T$ to $T^s < T$ to encourage feature sharing across more 3D points, preventing the MLP $N_1$ from learning discontinuities in volume density. It samples 3D points $p_i$ along the ray in the s-domain in the range $s \in [s_{near}, 1]$ instead of $s \in [0, 1]$ to ensure objects are placed at least at a certain distance away from the camera. It uses the depth estimates from the augmented model to supervise the main model. Pitfalls include: reducing the hash table size allows ZipNeRF to avoid collisions and map nearby points to independent entries, enabling the MLP to learn sharp depth edges and floaters; employing the s-domain modification in the main model is detrimental to learning or rendering objects that are truly close to the camera [S5].
++
++### HashNeRF Variant 4
++Pipeline 1: Linear(32, 64, bias=False), ReLU; Linear(64, 16, bias=False); Concat(input views, output1). Pipeline 2: Linear(20, 64, bias=False), ReLU; Linear(64, 64, bias=False); Concat(input views, output2). Pipeline 3: Linear(50, 128, bias=False), ReLU; Linear(128, 64, bias=False), ReLU; Linear(64, 3, bias=False). PSNR: 27.119; Training Time: 319.669. Outperformed other variants at 1,000 iterations. PSNR 27.12 vs original baseline 28.2 [S6, unofficial].
++
++### SqueezeNeRF
++Caches feature vectors and volume density for different structures. Discretizes and combines calculations to obtain volume density and color information. Memory efficiency is over 60 times that of FastNeRF's sparse cache [S7].
+ 
+ ## Operating characteristics
+-Time Complexity: Not given in the sources.
+-Memory Complexity: Not given in the sources.
+-Strengths: Not given in the sources.
+-Limitations: Not given in the sources.
+-When to use: Not given in the sources.
+-When not to use: Not given in the sources.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Measured Performance:** Training time: 5 seconds to accumulate 128 samples at 1080p on a single RTX 3090 GPU for a modular synthesizer scene [S2]. Rendering performance: 10 frames per second on an RTX 3090 GPU for a large natural 360 scene [S2].
++*   **Scaling:** At HD resolutions, synthetic and even real-world scenes can be trained in seconds and rendered at 60 FPS, without the need of caching of the MLP outputs [S2].
++*   **Strengths:** High performance, allows for effects such as anti-aliasing, motion blur and depth of field by brute-force tracing of multiple rays per pixel [S2]. The MLP is only 15% more expensive than a linear layer but significantly improves quality by resolving hash collisions and capturing specular details [S2].
++*   **Limitations:** Hash collisions cause "grainy" microstructure artifacts [S2]. Concatenation of features increases dimensionality, which may be expensive if the neural network is significantly more expensive than the encoding [S2].
++*   **When to Use:** When high-quality, view-dependent rendering is required with efficient training and rendering times, and hardware allows for GPU-based MLP evaluation [S2].
++*   **When Not to Use:** When memory is extremely constrained and hash table size must be minimized at the cost of quality, or when direct voxel lookup speed is prioritized over visual fidelity [S2].
+ 
+ ## Background
+-The method is implemented in the HashNeRF repository [S1, unofficial] and builds on the Instant-NGP data structure [S2, unofficial].
++The method originates from the Instant Neural Graphics Primitives (Instant-NGP) paper by Müller et al. [S2]. It builds on the original NeRF architecture by Mildenhall et al. [2020] [S2]. The use of multiresolution hash encoding was introduced to accelerate training and rendering while maintaining high visual quality [S2].
+ 
+ ## Sources
+ [S1] yashbhalgat/HashNeRF-pytorch, https://github.com/yashbhalgat/HashNeRF-pytorch, fetched 2026-10-26 (unofficial)
+-[S2] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)
+-[S3] NeRF-Factory/IDDR-NGP, https://github.com/NeRF-Factory/IDDR-NGP, fetched 2026-10-27 (unofficial)+[S2] Instant Neural Graphics Primitives with a Multiresolution ..., https://www.cs.jhu.edu/~misha/ReadingSeminar/Papers/Mueller22.pdf, fetched 2026-10-28
++[S3] NeRF-Factory/IDDR-NGP, https://github.com/NeRF-Factory/IDDR-NGP, fetched 2026-10-27 (unofficial)
++[S4] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)
++[S5] Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions, https://arxiv.org/abs/2404.19015v5, fetched 2026-10-27
++[S6] Low-Cost Neural Radiance Fields, https://doi.org/10.48550/arxiv.2605.09312, fetched 2026-10-26 (unofficial)
++[S7] Overview of NeRF technology and applications, https://www.jcad.cn/en/article/doi/10.3724/SP.J.1089.2023-00759, fetched 2026-10-31

@@ -1,0 +1,230 @@
+# Triangle-Box Intersection Voxelization
+
+Also called: Mesh Voxelization via SDF and Occupancy, Triangle-Point Distance Voxelization, Watertight Mesh Voxelization
+
+## Overview
+This method voxelizes watertight triangular meshes into Signed Distance Functions (SDFs) or occupancy grids by computing the distance from voxel reference points to mesh faces or by testing for geometric intersection between triangles and voxel boxes [S1, unofficial]. It distinguishes itself from pure SDF-based occupancy derivation by using explicit triangle-box intersection tests to guarantee that any voxel intersecting the mesh surface is marked as occupied, avoiding the "leaky" voxels common in SDF-only approaches [S1, unofficial]. It builds on [Point-Triangle Distance](2776-point-triangle-distance.md) for SDF computation and relies on [Unsigned Triangle Distance](3587-unsigned-triangle-distance.md) concepts for spatial proximity checks.
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A watertight triangular mesh in OFF format (or directory of such files). The mesh must be scaled to fit the target volume bounds.
+- **Output:** An HDF5 file containing a tensor of shape $N \times C \times H \times W \times D$ (or $C \times H \times W \times D$ for single file), where $N$ is the number of input meshes, $C=2$ is the number of channels, $H$ is height (y-axis), $W$ is width (x-axis), and $D$ is depth (z-axis) [S1, unofficial].
+- **Optional Output:** If color preservation is enabled, an additional HDF5 file `[int]_color.h5` stores original face colors, indexed by face IDs stored in the occupancy grid [S1, unofficial].
+
+**Data Structures:**
+- **Voxel Grid:** A 3D array indexed by $(h, w, d)$ corresponding to spatial coordinates.
+- **Mesh Representation:** List of triangles, each defined by 3 vertices $(x, y, z)$.
+- **HDF5 Tensor:**
+  - Dimensions: $[N, C, H, W, D]$.
+  - $C=2$: The source notes indicate 2 channels, though the specific mapping (e.g., distance + sign, or occupancy + face ID) is not explicitly detailed beyond "SDF sign/distance or occupancy/color" [S1, unofficial].
+  - Values:
+    - **SDF Mode:** Signed distance values. Negative for interior, positive for exterior.
+    - **Occupancy Mode:** $0$ for empty, $1$ (or face ID if `--color` is set) for occupied.
+
+**Parameters:**
+- `--mode`: `'occ'` (default) or `'sdf'`.
+- `--height`, `--width`, `--depth`: Resolution $H, W, D$. Default $32 \times 32 \times 32$.
+- `--center`: Boolean. If set, use voxel centers for SDF computation; otherwise, use voxel corners (default).
+- `--color`: Boolean. If set, store face IDs in occupancy grid and save colors to a separate file.
+
+**Numbered Steps:**
+
+1. **Preprocessing and Scaling:**
+   - Load the input mesh.
+   - Normalize the mesh to $[-0.5, 0.5]^3$.
+   - Scale and translate the mesh to fit the volume bounds $[0, H] \times [0, W] \times [0, D]$ [S1, unofficial].
+   - Note: The coordinate system assumes $x=$ right, $y=$ up, $z=$ forward. The output volume dimensions map $H \to y$, $W \to x$, $D \to z$. This implies a swap of x and y axes relative to standard volume indexing where height is often the first dimension [S1, unofficial].
+
+2. **Voxelization Loop:**
+   - Iterate over each voxel $(h, w, d)$ in the grid.
+   - Determine the reference point $P$ for the voxel:
+     - If `--center` is false: $P$ is the voxel corner (e.g., top-left-front).
+     - If `--center` is true: $P$ is the voxel center.
+   - If `--mode` is `'sdf'`:
+     - Compute the distance from $P$ to the nearest triangle face using the triangle-point distance algorithm [S1, unofficial].
+     - Determine the sign: Negative if $P$ is inside the mesh, positive if outside.
+     - Store the signed distance in the output tensor.
+   - If `--mode` is `'occ'`:
+     - Perform a triangle-box intersection test between the voxel box (defined by center and half-size) and all mesh triangles.
+     - If any intersection is detected, mark the voxel as occupied.
+     - If `--color` is set, store the ID of the intersecting face (or a representative face ID) instead of a simple binary 1.
+
+3. **Output Generation:**
+   - Save the resulting tensor to an HDF5 file.
+   - If `--color` is set, save the face colors to `[int]_color.h5` [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def voxelize_mesh(mesh_triangles, height, width, depth, mode='occ', use_center=False, color=False):
+    """
+    Voxelize a watertight triangular mesh.
+    
+    Args:
+        mesh_triangles: List of triangles, each triangle is a list of 3 vertices (x, y, z).
+        height, width, depth: Resolution of the output volume.
+        mode: 'occ' or 'sdf'.
+        use_center: If True, use voxel centers for SDF; else use corners.
+        color: If True, preserve face IDs for occupancy.
+        
+    Returns:
+        output_tensor: HDF5-compatible tensor (N=1, C=2, H, W, D).
+        color_data: Optional dictionary of face colors if color=True.
+    """
+    # Initialize output tensor
+    # Note: Source specifies C=2 channels. Exact meaning of second channel is not specified.
+    # We assume channel 0 holds the primary value (distance or occupancy/face_id).
+    # Channel 1 is reserved/unused or holds secondary info not detailed in sources.
+    output_tensor = np.zeros((1, 2, height, width, depth), dtype=np.float32)
+    
+    color_data = {}
+    face_id_counter = 0
+    
+    # Precompute mesh data for efficiency
+    # In a real implementation, spatial acceleration structure (BVH/Grid) would be used.
+    # Here we assume a naive loop for clarity, as the source does not specify the acceleration structure.
+    
+    for h in range(height):
+        for w in range(width):
+            for d in range(depth):
+                # Determine voxel bounds and reference point
+                # Coordinate system: x=right (width), y=up (height), z=forward (depth)
+                # Voxel size
+                dx = 1.0 / width
+                dy = 1.0 / height
+                dz = 1.0 / depth
+                
+                # Voxel center in world space [0, H]x[0, W]x[0, D]
+                # Note: Source says H corresponds to y, W to x, D to z.
+                # So y index h maps to [0, H], x index w maps to [0, W], z index d maps to [0, D]
+                voxel_center_y = (h + 0.5) * dy
+                voxel_center_x = (w + 0.5) * dx
+                voxel_center_z = (d + 0.5) * dz
+                
+                if use_center:
+                    ref_point = np.array([voxel_center_x, voxel_center_y, voxel_center_z])
+                    half_size = np.array([dx/2, dy/2, dz/2])
+                else:
+                    # Use corner (e.g., min corner)
+                    ref_point = np.array([w * dx, h * dy, d * dz])
+                    half_size = np.array([dx, dy, dz]) # Full voxel dimensions for box test
+                
+                voxel_box_center = np.array([voxel_center_x, voxel_center_y, voxel_center_z])
+                
+                if mode == 'sdf':
+                    # Compute distance to nearest triangle
+                    min_dist = float('inf')
+                    for tri in mesh_triangles:
+                        # Use point-triangle distance function
+                        # x0 is ref_point, x1-x3 are triangle vertices
+                        dist = point_triangle_distance(ref_point, tri[0], tri[1], tri[2])
+                        if dist < min_dist:
+                            min_dist = dist
+                    
+                    # Determine sign (interior vs exterior)
+                    # This requires a ray casting or winding number test, 
+                    # or assuming the mesh is watertight and the point is close enough.
+                    # Source states: "Negative sign corresponds to interior voxels."
+                    # Implementation detail [G]: Use ray casting from ref_point to infinity.
+                    # If odd number of intersections, point is inside.
+                    is_inside = ray_cast_intersection(ref_point, mesh_triangles)
+                    signed_dist = -min_dist if is_inside else min_dist
+                    
+                    output_tensor[0, 0, h, w, d] = signed_dist
+                    # Channel 1 not specified [G]
+                    
+                elif mode == 'occ':
+                    # Triangle-Box Intersection
+                    is_occupied = False
+                    intersecting_face_id = -1
+                    
+                    for tri_idx, tri in enumerate(mesh_triangles):
+                        # Use box-triangle intersection test
+                        # center = voxel_box_center, half_size = half_size, vertices = tri
+                        if tri_box_overlap(voxel_box_center, half_size, tri[0], tri[1], tri[2]):
+                            is_occupied = True
+                            if color:
+                                intersecting_face_id = tri_idx
+                                break # Found one intersection
+                    
+                    if is_occupied:
+                        if color:
+                            output_tensor[0, 0, h, w, d] = intersecting_face_id
+                            if intersecting_face_id not in color_data:
+                                # Store color for this face ID
+                                # Source implies colors are stored in a separate file
+                                # [G] Assuming mesh_triangles has associated color data
+                                color_data[intersecting_face_id] = get_face_color(tri_idx)
+                        else:
+                            output_tensor[0, 0, h, w, d] = 1.0
+                    else:
+                        output_tensor[0, 0, h, w, d] = 0.0
+                        if color:
+                            output_tensor[0, 0, h, w, d] = 0.0 # Explicit 0 for empty
+
+    return output_tensor, color_data
+
+def point_triangle_distance(p, v0, v1, v2):
+    """
+    Computes the squared distance from point p to triangle v0-v1-v2.
+    Uses barycentric coordinates and quadratic programming logic.
+    """
+    # Implementation based on [Point-Triangle Distance](2776-point-triangle-distance.md)
+    # Returns Euclidean distance.
+    pass
+
+def tri_box_overlap(center, half_size, v0, v1, v2):
+    """
+    Tests for intersection between a box and a triangle.
+    Based on Tomas Akenine-Möller's algorithm.
+    """
+    # Implementation based on Tomas Akenine-Möller's code
+    pass
+
+def ray_cast_intersection(point, triangles):
+    """
+    Determines if a point is inside a watertight mesh by ray casting.
+    """
+    # [G] Standard ray casting algorithm
+    pass
+
+def get_face_color(face_idx):
+    """
+    Retrieves the color of a face from the original mesh.
+    """
+    # [G] Placeholder for color retrieval logic
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+- **Non-watertight Meshes:** The method assumes watertight meshes. Non-watertight meshes may produce incorrect SDFs (no negative values) or occupancy [S1, unofficial]. Simplification using a semi-convex hull algorithm is suggested but is crude [S1, unofficial].
+- **Coordinate System Mismatch:** The input OFF files assume $x=$ right, $y=$ up, $z=$ forward. The output volume maps height ($y$) to the first dimension, width ($x$) to the second, and depth ($z$) to the third. This swap must be handled correctly during indexing [S1, unofficial].
+- **SDF Reference Point:** The choice between voxel corner and center affects the marching cubes implementation used for conversion. Standard marching cubes (e.g., PyMCubes) expect corner-based SDFs [S1, unofficial].
+
+## Subtopics
+
+### [Mesh SDF Sampling](7159-mesh-sdf-sampling.md)
+Samples SDF values from a mesh. Chosen when continuous distance fields are needed for smooth interpolation or gradient-based optimization, rather than discrete voxel occupancy.
+
+### [Unsigned Triangle Distance](3587-unsigned-triangle-distance.md)
+Computes the distance to the nearest triangle without sign. Chosen when interior/exterior distinction is not required, or for collision detection where only proximity matters.
+
+## Operating characteristics
+- **Time Complexity:** $O(V \cdot T)$, where $V$ is the number of voxels ($H \times W \times D$) and $T$ is the number of triangles. Naive implementation checks all triangles for all voxels. [S1, unofficial] does not specify acceleration structures, but practical implementations would use BVH or spatial hashing to reduce this.
+- **Memory Complexity:** $O(H \times W \times D)$ for the output grid. Input mesh storage is additional.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Resolution defaults to $32^3$. Higher resolutions (e.g., $64^3$) improve reconstruction quality but increase memory and time linearly with voxel count [S1, unofficial].
+- **Strengths:** Guarantees watertight occupancy via explicit intersection tests; supports color preservation; simple to implement using existing geometric primitives.
+- **Limitations:** Requires watertight input; naive implementation is slow for high-resolution grids or complex meshes; coordinate system swaps can cause confusion.
+- **When to use:** When a discrete, watertight representation of a mesh is needed for 3D shape completion or volumetric processing, especially when SDF-based occupancy is insufficient due to leakage.
+- **When not to use:** For non-watertight meshes without preprocessing; when continuous SDF gradients are needed for optimization (use SDF mode but be aware of sign determination issues); when performance is critical and the mesh is highly complex (use acceleration structures).
+
+## Background
+The method was introduced by David Stutz and Andreas Geiger in 2018 at CVPR for the paper "Learning 3D Shape Completion from Laser Scan Data with Weak Supervision" [S1, unofficial]. It builds on prior work from 2017 on shape completion from bounding boxes [S1, unofficial]. The implementation is a parallel C++ tool that uses external libraries for triangle-point distance (christopherbatty/SDFGen) and triangle-box intersection (Tomas Akenine-Möller) [S1, unofficial].
+
+## Sources
+[S1] Mesh Voxelization - GitHub, https://github.com/davidstutz/mesh-voxelization, fetched 2026-10-26 (unofficial)

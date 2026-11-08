@@ -3,99 +3,112 @@
 Also called: Round Cube Mapping, Trianplanar Texture Projection, Triplanar Mapping, Triplanar Texture Mapping
 
 ## Overview
-Triplanar texture projection maps a 2D texture onto a 3D surface by applying planar mapping in three perpendicular planes (XY, XZ, YZ) and interpolating the results based on the surface normal's alignment [S2]. It solves the problem of texture stretching that occurs with single-axis planar mapping on complex or curved surfaces, such as spheres, by ensuring the texture orientation adapts to the local geometry [S2]. Unlike its siblings, it avoids visible seams and stretching by weighting three orthogonal projections, making it suitable for shading complex volumetric surfaces [S2]. It builds on [Texture Projection](2002-texture-projection.md).
+Triplanar texture projection is a technique for mapping 2D textures onto 3D surfaces by applying planar mapping in three perpendicular planes (XY, XZ, YZ) and interpolating the results based on surface normal alignment [S1, S3][S4, unofficial]. It solves the problem of texture stretching that occurs with simple planar projection on complex, non-planar surfaces such as spheres or organic shapes [S1, S3][S4, unofficial]. Unlike [Planar Projection Texture Mapping](2002-texture-projection.md), which uses only two coordinates, triplanar mapping uses three orthogonal projections weighted by the surface normal to ensure seamless coverage regardless of surface orientation [S2, unofficial][S3].
 
 ## How it works
 **Inputs:**
-- `p`: `vec3` position in world or local space [S1, unofficial][S2].
-- `n`: `vec3` surface normal (normalized) [S1, unofficial][S2].
-- `tex`: 2D texture sampler [S1, unofficial][S2].
-- `k`: `float` hardness parameter (default 1.0, typical 5.0) [S1, unofficial][S2].
+- `p`: A 3D position vector $(p_x, p_y, p_z)$ in world or object space.
+- `n`: A 3D surface normal vector $(n_x, n_y, n_z)$ at position `p`.
+- `tex`: A 2D texture sampler.
+- `k`: A hardness parameter (scalar), typically $k \ge 1$. Default is often 1.0 for linear weighting or higher (e.g., 5.0) for sharper blending [S2, S4, unofficial].
 
 **Outputs:**
-- `color`: `vec3` or `vec4` sampled color from the texture [S1, unofficial][S2].
+- `color`: The resulting RGB color sampled from the texture.
 
 **Data Structures:**
-None required beyond standard vector types [G].
+- The texture `tex` is a standard 2D array of color values.
+- The position `p` and normal `n` are 3D vectors.
 
 **Steps:**
-1. Compute the absolute value of the normal components: $a = |n|$ [S1, unofficial][S2].
-2. Apply the hardness parameter $k$ to the absolute normal components: $w = a^k$ [S2].
-3. Normalize the weights to sum to 1.0: $W = w / (w_x + w_y + w_z)$ [S2].
-4. Sample the texture for each of the three planes using the position components as UV coordinates, typically scaled by a texture repeat factor and offset by 0.5 [S1, unofficial]:
-   - XY plane (weighted by Z normal): $c_{xy} = \text{sample}(tex, p_{xy})$ [S2].
-   - XZ plane (weighted by Y normal): $c_{xz} = \text{sample}(tex, p_{xz})$ [S2].
-   - YZ plane (weighted by X normal): $c_{yz} = \text{sample}(tex, p_{yz})$ [S2].
-5. Blend the sampled colors using the normalized weights: $color = W_x c_{yz} + W_y c_{xz} + W_z c_{xy}$ [S2].
+1.  **Compute Absolute Normal Components:** Calculate the absolute values of the normal components: $|n_x|, |n_y|, |n_z|$.
+2.  **Apply Hardness (Optional):** Raise the absolute normal components to the power of $k$ to control the sharpness of the blending. Let $w_x = |n_x|^k$, $w_y = |n_y|^k$, $w_z = |n_z|^k$. If $k=1$, $w_i = |n_i|$.
+3.  **Sample Textures for Each Plane:**
+    -   **XY Plane:** Sample the texture using coordinates $(p_x, p_y)$. This corresponds to the projection along the Z-axis. Weight: $w_z$.
+    -   **XZ Plane:** Sample the texture using coordinates $(p_x, p_z)$. This corresponds to the projection along the Y-axis. Weight: $w_y$.
+    -   **YZ Plane:** Sample the texture using coordinates $(p_y, p_z)$. This corresponds to the projection along the X-axis. Weight: $w_x$.
+    -   *Note on UV Scaling:* In some implementations, UV coordinates are scaled by 0.5 and offset by 0.5 to handle texture tiling and wrapping correctly relative to the world origin [S2, unofficial].
+4.  **Weighted Summation:** Compute the weighted sum of the three samples:
+    $$ \text{color} = w_x \cdot \text{sample}(p_y, p_z) + w_y \cdot \text{sample}(p_x, p_z) + w_z \cdot \text{sample}(p_x, p_y) $$
+5.  **Normalization:** Divide the weighted sum by the sum of the weights to normalize the result:
+    $$ \text{color} = \frac{w_x \cdot \text{sample}(p_y, p_z) + w_y \cdot \text{sample}(p_x, p_z) + w_z \cdot \text{sample}(p_x, p_y)}{w_x + w_y + w_z} $$
+    If $w_x + w_y + w_z = 0$ (degenerate normal), return a default color or the sample from the dominant axis [G].
 
-**Formulas:**
-The general formula for triplanar mapping with hardness parameter $k$ is [S2]:
+**Formula:**
+The general formula for weighted triplanar mapping is:
+$$ \text{texture}_{\text{triplanar}}(p, n, k) = \frac{|n_x|^k \text{sample}(p_y, p_z) + |n_y|^k \text{sample}(p_x, p_z) + |n_z|^k \text{sample}(p_x, p_y)}{|n_x|^k + |n_y|^k + |n_z|^k} $$
+where $\text{sample}(u, v)$ is the texture sampling function [S1, S3][S4, unofficial].
 
-$$
-\text{texture}_{\text{triplanar}}(p, n, k) = \frac{|n_x|^k \cdot \text{sample}(p_y, p_z) + |n_y|^k \cdot \text{sample}(p_x, p_z) + |n_z|^k \cdot \text{sample}(p_x, p_y)}{|n_x|^k + |n_y|^k + |n_z|^k}
-$$
-
-Where:
-- $p = (p_x, p_y, p_z)$ is the position [S2].
-- $n = (n_x, n_y, n_z)$ is the surface normal [S2].
-- $\text{sample}(u, v)$ is the texture sampling function [S2].
-- $k$ is the hardness parameter [S2].
-
-**Parameters:**
-- $k$: Hardness parameter. Controls how sharply the texture aligns with the normal. Higher values make the texture snap more strongly to the dominant axis [S2]. Typical value: 5.0 [S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-- **Zero Normal:** If the normal is zero, the weights are undefined. Guard against this by ensuring the normal is normalized before use [G].
-- **Degenerate Normals:** If two components of the normal are zero (e.g., along an axis), the division by sum of weights is still valid as long as at least one component is non-zero [G].
-- **Memory Bandwidth:** Triplanar mapping requires three texture lookups per iteration, which is significantly more expensive than biplanar mapping. It is not suitable for sampling heightmaps during ray marching iterations where memory bandwidth is a bottleneck [S2].
+For linear weighting ($k=1$):
+$$ \text{texture}_{\text{triplanar}}(p, n) = \frac{|n_x| \text{sample}(p_y, p_z) + |n_y| \text{sample}(p_x, p_z) + |n_z| \text{sample}(p_x, p_y)}{|n_x| + |n_y| + |n_z|} $$
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def triplanar_texture_projection(p: Vec3, n: Vec3, tex: Sampler2D, k: float = 5.0) -> Vec3:
-    # Step 1: Absolute normal
+def triplanar_texture_projection(p: Vec3, n: Vec3, tex: Sampler2D, k: float = 1.0) -> Vec3:
+    # 1. Compute absolute normal components
     abs_n = abs(n)
-    # Step 2: Apply hardness
+    
+    # 2. Apply hardness parameter
     weights = pow(abs_n, k)
-    # Step 3: Normalize weights
+    
+    # 3. Sum of weights for normalization
     weight_sum = weights.x + weights.y + weights.z
-    # Guard against division by zero
+    
+    # Handle degenerate case where normal is zero vector
     if weight_sum == 0.0:
-        return sample(tex, p.xy) # Fallback to XY plane
-    normalized_weights = weights / weight_sum
-    # Step 4: Sample textures
-    # XY plane weighted by Z
-    sample_xy = sample(tex, p.xy)
-    # XZ plane weighted by Y
-    sample_xz = sample(tex, p.xz)
-    # YZ plane weighted by X
-    sample_yz = sample(tex, p.yz)
-    # Step 5: Blend
-    color = normalized_weights.x * sample_yz + \
-            normalized_weights.y * sample_xz + \
-            normalized_weights.z * sample_xy
-    return color
+        return sample_texture(tex, p.x, p.y) # Fallback to XY plane
+        
+    # 4. Sample textures for each plane
+    # XY plane: projected along Z, uses px, py, weighted by |nz|^k
+    sample_xy = sample_texture(tex, p.x, p.y)
+    
+    # XZ plane: projected along Y, uses px, pz, weighted by |ny|^k
+    sample_xz = sample_texture(tex, p.x, p.z)
+    
+    # YZ plane: projected along X, uses py, pz, weighted by |nx|^k
+    sample_yz = sample_texture(tex, p.y, p.z)
+    
+    # 5. Weighted sum
+    color = (weights.x * sample_yz + 
+             weights.y * sample_xz + 
+             weights.z * sample_xy)
+             
+    # 6. Normalize
+    return color / weight_sum
 ```
+
+**Parameters:**
+- `k`: Hardness parameter. Controls how sharply the texture blends between planes. Higher values make the transition sharper, favoring the dominant axis more strongly [S1, S3][S4, unofficial]. Typical values range from 1.0 (smooth) to 5.0 or higher (sharp) [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Zero Normal:** If the normal vector is $(0,0,0)$, the denominator becomes zero. A fallback strategy is required [G].
+- **Memory Bandwidth:** Triplanar mapping requires three texture lookups per shading point. This is significantly more expensive than biplanar mapping (two lookups) or planar mapping (one lookup) [S1, S3][S4, unofficial].
+- **Heightmap Sampling:** It is not suitable for sampling heightmaps in the distance function (`map` function) during ray marching because the texture lookups happen at every step, causing high memory bandwidth overhead [S1, S3][S4, unofficial].
 
 ## Subtopics
 
 ### Tri-Planar Mapping with Centroid Normals
-This variant addresses the hard edges that appear when texturing voxel models, where each face of a voxel shows a discrete texture snippet [S3, unofficial]. Instead of using the geometric face normal, it calculates a smooth normal by drawing a line from the voxel's center to the ray intersection point [S3, unofficial]. This centroid normal is then used with triplanar mapping to blur the hard edges between voxel faces, providing a softer transition [S3, unofficial]. This is chosen when texturing voxel-based geometry to avoid the blocky appearance of standard AABB texturing [S3, unofficial].
+This variant addresses the issue of hard edges between voxel faces in voxel-based rendering. Instead of using the axis-aligned normal of the voxel face, it computes a smooth normal by drawing a line from the voxel center to the ray intersection point. This centroid normal is then used for the triplanar weighting [S5, unofficial]. This results in a soft transition between texture patches on different faces of a voxel, avoiding the visible seams present in standard AABB texturing [S5, unofficial].
+
+### Planar Projection Texture Mapping
+A simpler technique that maps a 2D texture to a 3D point using only two of the three coordinates (e.g., $p_x, p_z$ for the XZ plane) [S4, unofficial]. It is suitable for planar surfaces like floors but causes stretching on complex surfaces [S4, unofficial]. It serves as the basis for triplanar mapping by extending the concept to three axes [S4, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per sample, but requires three texture lookups instead of one or two [G].
-- **Memory Complexity:** $O(1)$ additional memory for intermediate vectors [G].
-- **Performance:** Significantly higher memory bandwidth usage than biplanar mapping due to three texture lookups per iteration [S2]. Not suitable for heightmap sampling during ray marching where bandwidth is critical [S2].
-- **Strengths:** Eliminates texture stretching on complex surfaces; no seams or stretching artifacts [S2].
-- **Limitations:** High computational cost due to multiple texture samples; not ideal for performance-critical heightmap sampling [S2].
-- **When to Use:** Shading complex curved surfaces to avoid stretching [S2], or texturing voxel models to avoid hard edges between faces [S3, unofficial].
-- **When Not to Use:** When sampling heightmaps during ray marching iterations due to high memory bandwidth overhead [S2].
+- **Time Complexity:** $O(1)$ per shading point, but with a constant factor of 3 texture lookups and vector operations.
+- **Memory Complexity:** $O(1)$ additional memory.
+- **Performance:** Significantly slower than planar or biplanar mapping due to three texture samples per pixel/ray step [S1, S3][S4, unofficial].
+- **Strengths:** Eliminates texture stretching on arbitrary surfaces; seamless blending between axes; no need for UV unwrapping [S1, S3][S4, unofficial].
+- **Limitations:** High memory bandwidth usage; not suitable for heightmap sampling in distance functions; potential for texture aliasing if not filtered properly [S1, S3][S4, unofficial].
+- **When to Use:** Shading complex organic or curved surfaces where UV mapping is difficult or impossible [S1, S3][S4, unofficial].
+- **When Not to Use:** When performance is critical and surfaces are planar; when sampling heightmaps in the ray marching loop [S1, S3][S4, unofficial].
 
 ## Background
-Triplanar mapping, also known as round cube mapping, was introduced as a solution to texture stretching in planar mapping for complex surfaces [S2]. It is widely used in ray marching and voxel rendering to provide seamless texture application on 3D geometry [S2][S3, unofficial]. The technique is particularly relevant in real-time rendering and voxel-based environments where visual continuity is important [S3, unofficial].
+Triplanar mapping, also known as round cube mapping, was introduced as a solution to the limitations of planar projection mapping in raymarching engines [S1, S3][S4, unofficial]. It allows for procedural texture application on distance fields without explicit UV coordinates [S1][S4, unofficial]. The technique is widely used in real-time rendering and voxel-based graphics to provide consistent texturing across complex geometries [S1][S5, unofficial].
 
 ## Sources
-[S1] kushchevd/RayMarching, https://github.com/kushchevd/RayMarching, fetched 2026-10-26 (unofficial)
-[S2] Raymarching Distance Fields with CUDA, https://www.mdpi.com/2079-9292/10/22/2730, fetched 2026-10-27
-[S3] Raycasting-basiertes Voxelrendering, https://serwiss.bib.hs-hannover.de/frontdoor/index/index/docId/2250, fetched 2026-10-25 (unofficial)
+[S1] Raymarching Distance Fields with CUDA, https://doi.org/10.3390/electronics10222730, fetched 2026-10-26
+[S2] kushchevd/RayMarching, https://github.com/kushchevd/RayMarching, fetched 2026-10-26 (unofficial)
+[S3] Raymarching Distance Fields with CUDA, https://www.mdpi.com/2079-9292/10/22/2730, fetched 2026-10-27
+[S4] (PDF) Raymarching Distance Fields with CUDA - ResearchGate, https://www.researchgate.net/publication/356081826_Raymarching_Distance_Fields_with_CUDA, fetched 2026-10-27 (unofficial)
+[S5] Raycasting-basiertes Voxelrendering, https://serwiss.bib.hs-hannover.de/frontdoor/index/index/docId/2250, fetched 2026-10-25 (unofficial)

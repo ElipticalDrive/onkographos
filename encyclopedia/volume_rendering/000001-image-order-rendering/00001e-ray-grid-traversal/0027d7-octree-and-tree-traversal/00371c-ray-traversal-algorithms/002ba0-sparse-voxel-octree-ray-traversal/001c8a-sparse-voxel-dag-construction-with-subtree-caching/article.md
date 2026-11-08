@@ -29,8 +29,8 @@ The method converts a dense or sparse voxel grid into a DAG through recursive su
 2. **Recursive Construction**: Call `BuildDAG(voxelGrid, gridDepth)` to construct the DAG from the root [S2, unofficial].
 3. **Subtree Key Generation**: For each recursive call, generate a unique key for the current grid subtree using `GenerateSubtreeKey(grid)` [S2, unofficial].
 4. **Cache Lookup**: Check if the key exists in `subtreeCache`. If `TryGetValue` returns true, return the existing `VoxelNode` to reuse it [S2, unofficial].
-5. **Leaf Detection**: If `depth == 0` or the grid is homogeneous (all voxels have the same value), create a new leaf node with `IsLeaf=true` and `Value=grid[0,0,0]`. Store it in `subtreeCache` with the key and return it [S2, unofficial].
-6. **Non-Leaf Construction**: If not a leaf, create a new non-leaf node with `IsLeaf=false`. Calculate `newDepth = depth - 1` and `size = 1 << newDepth`. Iterate $i$ from 0 to 7: extract octant using `GetOctant(grid, i, size)`, recursively call `BuildDAG(octant, newDepth)`, and assign result to `node.Children[i]`. Store the new node in `subtreeCache` with the key and return it [S2, unofficial].
+5. **Leaf Detection**: If `depth == 0` or the grid is homogeneous (all voxels have the same value), create a new leaf node with `IsLeaf=true` and `Value=grid[0,0,0]` [S2, unofficial].
+6. **Non-Leaf Construction**: If not a leaf, create a new non-leaf node with `IsLeaf=false` [S2, unofficial]. Calculate `newDepth = depth - 1` and `size = 1 << newDepth` [S2, unofficial]. Iterate $i$ from 0 to 7: extract octant using `GetOctant(grid, i, size)`, recursively call `BuildDAG(octant, newDepth)`, and assign result to `node.Children[i]` [S2, unofficial]. Store the new node in `subtreeCache` with the key and return it [S2, unofficial].
 7. **LOD Generation**: For Level of Detail (LOD) generation, downsample the grid by marking a voxel as containing geometry only if any of its composing voxels contain geometry [S1, unofficial].
 
 ### Pseudocode
@@ -158,12 +158,12 @@ class SparseVoxelDAG:
 - **LOD Generation**: The source mentions downsampling for LODs by marking a voxel as containing geometry if any composing voxels do [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: Not given in the sources.
-- **Memory Complexity**: Not given in the sources.
-- **Measured Performance**: Not given in the sources.
+- **Time Complexity**: Not given in the sources [S1, S2, unofficial].
+- **Memory Complexity**: Not given in the sources [S1, S2, unofficial].
+- **Measured Performance**: Not given in the sources [S1, S2, unofficial].
 - **Strengths**: Significant memory savings for scenes with repetitive geometry. Real-time decoding is possible because the DAG structure is similar to an SVO [S1, S2, unofficial].
 - **Limitations**: Construction requires hashing and dictionary lookups for every subtree. The cache grows with the number of unique subtrees [S1, S2, unofficial].
-- **When to Use**: Ideal for voxel-based applications with repetitive structures. Not ideal for highly dynamic, non-repetitive data where construction overhead outweighs memory benefits [S1, S2, unofficial].
+- **When to Use**: Ideal for voxel-based applications with repetitive structures [S1, S2, unofficial]. Not ideal for highly dynamic, non-repetitive data where construction overhead outweighs memory benefits [S1, S2, unofficial].
 
 ## Background
 The concept of Sparse Voxel Octrees (SVOs) was introduced to address the memory inefficiency of dense voxel grids [S1, unofficial]. Kampe et al. realized that merging identical leaves could significantly compact the final level of an SVO [S1, unofficial]. The extension to Directed Acyclic Graphs (DAGs) by merging identical subtrees (not just leaves) further reduces memory usage [S1, S2, unofficial]. This method is used in voxel engines and real-time rendering applications where memory efficiency and fast traversal are critical [S1, S2, unofficial].

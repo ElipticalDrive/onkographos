@@ -1,0 +1,121 @@
+# Directional Adaptive Discrete Wavelet Transform
+
+Also called: DA-DWT
+
+## Overview
+The Directional Adaptive Discrete Wavelet Transform (DA-DWT) is a volumetric compression technique that selects optimal directional filters to maximize energy compaction into low-pass sub-bands, thereby minimizing Mean Squared Error (MSE) [S1]. Unlike conventional 3D DWT which uses fixed isotropic or anisotropic directions, DA-DWT performs an exhaustive search over a predefined set of direction vectors to find the transform basis that best decorrelates the data for each specific block or slice [S1]. This adaptivity distinguishes it from its siblings, such as [3D Integer Wavelet Transform](6956-3d-integer-wavelet-transform.md) which prioritizes reversibility, and [3-D SPIHT](8260-3-d-spiht.md) which focuses on embedded coding rather than transform selection [S1].
+
+## How it works
+**Inputs:** A 3D volumetric dataset (or 2D slice for slice-based variants) and a set of reversible/irreversible wavelet kernels (e.g., Haar, 5×3, 9×7, (6,6)) [S1].
+**Outputs:** Transformed wavelet coefficients and side-information encoding the selected direction vectors for each decomposed region [S1].
+
+**Data Structures:**
+The method relies on a predefined set of direction vectors. For the non-interpolated mode, these vectors approximate specific angular steps. For the Lanczos interpolated mode, vectors are normalized such that the leading dimension coordinate is exactly 1 (x=1 for Horizontal, y=1 for Vertical, z=1 for Axial) [S1].
+
+**Parameters:**
+*   **Direction Vectors:**
+    *   In the XY-plane: Angle steps of 22.5° [S1].
+    *   Involving the Z-dimension: Angle steps of 45° [S1].
+    *   Total set size: 9 directions along all three dimensions are used in the cited implementation [S1].
+*   **Wavelet Kernels:** Reversible Haar, 5×3, and irreversible 9×7, (6,6) kernels are supported [S1]. Coefficients for these are defined in the source literature (e.g., Table 1 in [S1]) [S1].
+
+**Algorithm Steps:**
+1.  **Partitioning:** Divide the volume into blocks or slices, depending on the mode (slice-based or axial) [S1].
+2.  **Direction Search:** For each block/slice, perform an exhaustive search over the predefined set of direction vectors [S1].
+3.  **Energy Calculation:** For each candidate direction vector, apply the directional 1D-DWT. Calculate the energy compaction metric, specifically the energy in the low-pass sub-bands [S1].
+4.  **Selection:** Select the direction vector that maximizes the energy compaction into the low-pass sub-bands [S1]. This guarantees optimal results in the MSE sense [S1].
+5.  **Transformation:** Apply the selected directional 1D-DWT to the data using the chosen direction vector and the specified wavelet kernel (e.g., lifting scheme coefficients) [S1].
+6.  **Encoding:** Encode the resulting wavelet coefficients and the side-information (the index of the selected direction vector) [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def directional_adaptive_dwt(volume, wavelet_kernel, direction_vectors):
+    """
+    Performs Directional Adaptive DWT on a volume.
+    
+    Args:
+        volume: 3D array of voxel values.
+        wavelet_kernel: Object containing lifting coefficients for the chosen kernel (e.g., 9x7).
+        direction_vectors: List of direction vectors to search. 
+                           For non-interpolated: approx 22.5 deg in XY, 45 deg involving Z.
+                           For Lanczos: normalized such that leading coord is 1.
+    
+    Returns:
+        coefficients: Transformed wavelet coefficients.
+        selected_directions: List of indices of the best direction for each block/slice.
+    """
+    coefficients = []
+    selected_directions = []
+    
+    # Assuming block-based or slice-based processing loop
+    # For each block/slice in volume:
+    for block in volume_blocks:
+        best_energy = -infinity
+        best_dir_idx = -1
+        
+        # Exhaustive search over predefined directions
+        for i, dir_vec in enumerate(direction_vectors):
+            # Apply directional 1D-DWT using dir_vec and wavelet_kernel
+            # This involves prediction and update steps along the direction
+            # Note: Interpolation may be used if Lanczos mode is active
+            transformed_block = apply_directional_dwt(block, dir_vec, wavelet_kernel)
+            
+            # Calculate energy in low-pass sub-bands
+            low_pass_coeffs = get_low_pass_subbands(transformed_block)
+            current_energy = sum(c**2 for c in low_pass_coeffs)
+            
+            if current_energy > best_energy:
+                best_energy = current_energy
+                best_dir_idx = i
+        
+        # Store the best result
+        # Re-apply or store the already computed best transformation
+        best_transformed_block = apply_directional_dwt(block, direction_vectors[best_dir_idx], wavelet_kernel)
+        coefficients.append(best_transformed_block)
+        selected_directions.append(best_dir_idx)
+        
+    return coefficients, selected_directions
+
+def apply_directional_dwt(data, direction_vector, kernel):
+    """
+    Applies 1D-DWT along a specific direction vector.
+    Uses lifting scheme based on kernel coefficients.
+    """
+    # Implementation details depend on the specific kernel (Haar, 5x3, etc.)
+    # and whether interpolation is required.
+    # For non-interpolated, direction vector components are integers.
+    # For Lanczos, interpolation is performed based on normalized vector.
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Interpolation:** Optional interpolation occurs during the direction search and within the DA-DWT blocks. This adds computational cost and potential precision issues if not handled carefully [S1].
+*   **Complexity:** The exhaustive search increases time complexity linearly with the number of direction vectors. For 9 directions, the factor is 18 per sub-band for slice-based DA-DWT and 9 for axial DA-DWT relative to conventional DWT [S1].
+*   **Degenerate Input:** The method assumes sufficient data density to make meaningful energy comparisons. Sparse or noisy data may lead to suboptimal direction selection if the energy metric is dominated by noise [G].
+
+## Subtopics
+
+### [Segmentation-Driven Directionally Adaptive DWT](7556-segmentation-driven-directionally-adaptive-dwt.md)
+Applies 2D SD-DA-DWT to volumetric datasets by segmenting slices separately and decomposing with 2D SD-DA-DWT using a (6,6) kernel.
+
+### [Block-based DA-DWT](7586-block-based-da-dwt.md)
+Generates the first two decomposition levels of slices using DA-DWT with DA-blocks, selecting optimal directions to minimize the L1-norm of high-pass coefficients.
+
+### [Non-interpolated Directional DWT](7756-non-interpolated-directional-dwt.md)
+A directional DWT where prediction and update functions use integer direction vectors to avoid interpolation, ensuring causality without sub-sampling.
+
+## Operating characteristics
+*   **Time Complexity:** The time complexity increase relative to conventional DWT is linearly dependent on the number of employed direction vectors per applied directional 1D-DWT [S1]. For the standard set of 9 directions, the factor is 18 per decomposed sub-band for slice-based DA-DWT and 9 for axial DA-DWT [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Guarantees optimal results in the MSE sense by maximizing energy compaction into low-pass sub-bands [S1].
+*   **Limitations:** Higher computational cost due to exhaustive search compared to restricted search methods [S1].
+*   **When to use:** When MSE optimization is critical and computational resources allow for the exhaustive search [S1].
+*   **When not to use:** When real-time performance is required or computational resources are limited [G].
+
+## Background
+The Directional Adaptive Discrete Wavelet Transform was introduced in the context of wavelet-based volumetric medical image compression [S1]. It builds upon the standard JP3D encoder framework, extending it with a module that handles intra-band prediction and side-information encoding [S1]. The method was developed to address the limitations of fixed-direction transforms in medical imaging, where tissue structures often exhibit strong directional correlations [S1]. Previous work [56] cited in the source suggests that the computational complexity of the direction vector search can be significantly reduced, indicating ongoing research into optimizing this approach [S1].
+
+## Sources
+[S1] Wavelet based volumetric medical image compression, https://doi.org/10.1016/j.image.2014.12.007, fetched 2026-10-26

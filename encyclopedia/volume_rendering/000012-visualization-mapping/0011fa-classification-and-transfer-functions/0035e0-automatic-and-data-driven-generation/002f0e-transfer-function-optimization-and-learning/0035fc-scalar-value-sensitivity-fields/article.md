@@ -3,150 +3,154 @@
 Also called: SVSF
 
 ## Overview
-Scalar Value Sensitivity Fields (SVSF) are visualization techniques that map the sensitivity of a volume-rendered image to modifications in the opacity transfer function (TF) onto the image domain, conditioned on specific scalar values [S1]. Unlike Region Sensitivity Plots, which show how image regions affect TF optimization, SVSFs reveal which parts of the image are most affected by changes to a specific value or range in the TF domain [S1]. This allows users to predict where visual changes will occur before applying edits, facilitating more intuitive TF design [S1].
+Scalar Value Sensitivity Fields (SVSF) are visualization techniques that map the sensitivity of a volume-rendered image to modifications in the opacity transfer function (TF) domain, conditioned on specific scalar values [S1]. They solve the problem of predicting which spatial regions of a volume will change appearance when a user edits a specific range of the TF, thereby aiding in the interactive exploration and tuning of classification parameters [S1]. Unlike Region Sensitivity Plots, which show TF sensitivity conditioned on image regions, SVSFs show image sensitivity conditioned on TF scalar values [S1].
 
 ## How it works
 **Inputs:**
-- A differentiable volume rendering pipeline capable of computing gradients of the rendered image with respect to the opacity TF values [S1].
-- A grid resolution parameter $r$ [S1].
-- A selected scalar value index $i$ from the TF domain (typically 0–255) [S1].
+*   A volume dataset and its associated rendering pipeline (typically involving a generative model or differentiable renderer capable of backpropagation) [S1].
+*   A grid resolution parameter $r$ [S1].
+*   A selected scalar value index $i$ from the TF domain (typically 0–255) [S1].
+*   A Gaussian filter bandwidth for visualization smoothing [S1].
 
 **Outputs:**
-- A 3-tensor $\Sigma \in \mathbb{R}^{256 \times r \times r}$, where each slice $\Sigma(i, \cdot, \cdot)$ is an $r \times r$ field representing the sensitivity for scalar value index $i$ [S1].
+*   A 3-tensor $\Sigma \in \mathbb{R}^{256 \times r \times r}$, where each slice $\Sigma(i, \cdot, \cdot)$ represents the sensitivity field for scalar value index $i$ [S1].
+*   A visualized sensitivity map highlighting image regions likely to change upon TF modification at the selected scalar value [S1].
 
 **Data Structures:**
-- The sensitivity tensor $\Sigma$ stores the aggregated sensitivity values for each block of the image for every possible scalar value in the opacity TF [S1].
-- The image is divided into an $r \times r$ grid of blocks [S1].
+*   **Sensitivity Tensor ($\Sigma$):** A 3-dimensional array of size $256 \times r \times r$. The first dimension corresponds to the 256 possible scalar values (assuming 8-bit intensity). The last two dimensions correspond to the spatial grid of the image, divided into $r \times r$ blocks [S1].
+*   **Image Blocks:** The rendered image is partitioned into $r \times r$ non-overlapping blocks. Each block aggregates the sensitivity of all pixels within it [S1].
 
 **Steps:**
-1. **Grid Definition:** Define the grid resolution $r$. The image is conceptually divided into $r \times r$ blocks [S1].
-2. **Sensitivity Computation:** For each scalar value index $i \in [0, 255]$ and each block $b$ in the $r \times r$ grid, compute the TF sensitivity. The sensitivity for a block is derived from Equation 11 in the source, which aggregates the gradient of the rendered image pixels within that block with respect to the opacity value at index $i$ [S1].
-   - Let $I$ be the rendered image.
-   - Let $T$ be the opacity TF vector.
-   - The sensitivity for block $b$ at value $i$ is proportional to the sum of gradients $\frac{\partial I_{p}}{\partial T_i}$ for all pixels $p$ in block $b$ [S1].
-3. **Tensor Assembly:** Store the computed sensitivity for block $b$ and value $i$ in $\Sigma(i, b_y, b_x)$ [S1].
-4. **Acceleration:** Perform the backpropagation required to compute these gradients in parallel on the GPU using minibatches of size 64 [S1].
-
-**Parameters:**
-- **Grid Resolution ($r$):** Typically set to 8 or 16 to balance computational latency and spatial detail [S1]. Setting $r=256$ (pixel-level resolution) is prohibitively costly as it requires $256^2$ backpropagation passes per scalar value [S1].
-- **Minibatch Size:** 64 [S1].
-
-**Visualization:**
-- To visualize the impact of a user-selected range of scalar values, apply a Gaussian filter to the sequence of fields $\Sigma$ centered at the selected scalar value with a given bandwidth [S1].
-- The filter weights are superimposed on the TF domain visualization in red [S1].
-- Color map the sensitivity values based on the global range of the field to provide context [S1].
-- Encode the specific range selected by the user via opacity mapping, highlighting areas of high sensitivity within that selection [S1].
+1.  **Grid Definition:** Define the grid resolution $r$. Typical values are $r=8$ or $r=16$ to balance computational latency and spatial detail. Setting $r=256$ (pixel-level sensitivity) is computationally prohibitive [S1].
+2.  **Image Partitioning:** Divide the rendered image domain into $r \times r$ blocks [S1].
+3.  **Sensitivity Computation:** For each scalar value index $i \in [0, 255]$:
+    a. Compute the Transfer Function (TF) sensitivity for each block using the gradient of the rendered image with respect to the TF value at index $i$. This is denoted as Equation 11 in the source [S1].
+    b. The result for index $i$ is a 2D field $\Sigma(i, \cdot, \cdot) \in \mathbb{R}^{r \times r}$ [S1].
+4.  **Tensor Assembly:** Assemble all 256 fields into the 3-tensor $\Sigma \in \mathbb{R}^{256 \times r \times r}$ [S1].
+5.  **Acceleration:** Perform the backpropagation required for sensitivity calculation in parallel on the GPU using minibatches of size 64 [S1].
+6.  **Visualization (Optional):**
+    a. When a user selects a specific scalar value or range, apply a Gaussian filter to the sequence of fields centered at the selected scalar value with a specified bandwidth [S1].
+    b. Superimpose the filter weight for each field onto the Sensitivity Plot in red [S1].
+    c. Color-map the sensitivity based on the global range of the field.
+    d. Encode the range specific to the user's selection via opacity mapping to provide local context against global sensitivity [S1].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_scalar_value_sensitivity_fields(render_pipeline, image_shape, r, batch_size=64):
+import torch
+import torch.nn.functional as F
+
+def compute_scalar_value_sensitivity_fields(volume_data, tf_values, grid_resolution=16, batch_size=64):
     """
-    Computes the Scalar Value Sensitivity Field tensor Sigma.
+    Computes the Scalar Value Sensitivity Field tensor.
     
     Args:
-        render_pipeline: A differentiable volume renderer that returns (image, gradient_fn).
-        image_shape: Tuple (H, W) of the rendered image dimensions.
-        r: Grid resolution for the sensitivity field (e.g., 8 or 16).
-        batch_size: Number of scalar values to process in parallel on GPU.
+        volume_data: Input volume tensor.
+        tf_values: Transfer function values (size 256).
+        grid_resolution: r, the number of blocks per image dimension.
+        batch_size: Number of scalar values to process in parallel.
         
     Returns:
-        Sigma: Tensor of shape (256, r, r).
+        sigma: Sensitivity tensor of shape (256, r, r).
     """
-    H, W = image_shape
-    # Initialize the 3-tensor Sigma: 256 scalar values, r x r blocks
-    Sigma = np.zeros((256, r, r))
+    # Assume render function is differentiable and returns image tensor
+    # Image shape: (H, W, 3) or (H, W)
+    # We need to compute d(Image) / d(tf_values[i]) for each i
     
-    # Determine block dimensions
-    block_h = H // r
-    block_w = W // r
+    # Initialize output tensor
+    sigma = torch.zeros(256, grid_resolution, grid_resolution)
     
-    # Precompute pixel indices for each block to avoid repeated lookups
-    # block_indices[b_idx] = list of (h, w) pixel coordinates in block b_idx
-    block_indices = []
-    for by in range(r):
-        for bx in range(r):
-            pixels = []
-            for dy in range(block_h):
-                for dx in range(block_w):
-                    h = by * block_h + dy
-                    w = bx * block_w + dx
-                    if h < H and w < W:
-                        pixels.append((h, w))
-            block_indices.append(pixels)
-            
-    # Process scalar values in batches for GPU acceleration
-    num_values = 256
-    for start_idx in range(0, num_values, batch_size):
-        end_idx = min(start_idx + batch_size, num_values)
-        current_batch_indices = range(start_idx, end_idx)
+    # Process in batches to save memory/time
+    num_scalar_values = 256
+    for start_idx in range(0, num_scalar_values, batch_size):
+        end_idx = min(start_idx + batch_size, num_scalar_values)
+        current_batch_indices = torch.arange(start_idx, end_idx)
         
-        # For each scalar value in the batch, compute gradients
-        # Note: In a real implementation, this would be a single GPU kernel or 
-        # batched autograd call. Here we outline the logic.
+        # Compute gradients for the current batch of TF values
+        # Note: This requires the rendering pipeline to support backpropagation
+        # through the TF evaluation into the image space.
+        gradients = compute_tf_gradients(volume_data, tf_values, current_batch_indices)
         
-        for i in current_batch_indices:
-            # 1. Forward pass to get image and gradient function
-            # The render pipeline must support gradient computation w.r.t TF
-            image, grad_fn = render_pipeline.get_image_and_grads(tf_index=i)
-            
-            # 2. Compute gradient of image w.r.t the opacity value at index i
-            # This creates a gradient map of shape (H, W)
-            # The gradient map represents d(Image) / d(TF[i])
-            grad_map = grad_fn() 
-            
-            # 3. Aggregate gradients into blocks
-            for b_idx, pixels in enumerate(block_indices):
-                sensitivity_sum = 0.0
-                for (h, w) in pixels:
-                    sensitivity_sum += grad_map[h, w]
-                
-                # Store the aggregated sensitivity in the tensor
-                # Sigma[i, by, bx] corresponds to block b_idx
-                by = b_idx // r
-                bx = b_idx % r
-                Sigma[i, by, bx] = sensitivity_sum
-                
-    return Sigma
+        # gradients shape: (batch_size, H, W) assuming grayscale or mean opacity
+        # If color, sum or select appropriate channel (e.g., opacity alpha)
+        
+        # Aggregate gradients into blocks
+        # Reshape image to (H, W)
+        img_h, img_w = gradients.shape[1], gradients.shape[2]
+        block_h, block_w = img_h // grid_resolution, img_w // grid_resolution
+        
+        # Use unfold or manual pooling to average gradients over blocks
+        # Reshape gradients to (batch_size, 1, img_h, img_w) for pooling
+        gradients_4d = gradients.unsqueeze(1)
+        
+        # Average pooling over blocks
+        # kernel_size = (block_h, block_w)
+        # stride = (block_h, block_w)
+        block_gradients = F.avg_pool2d(gradients_4d, kernel_size=(block_h, block_w), stride=(block_h, block_w))
+        
+        # block_gradients shape: (batch_size, 1, grid_resolution, grid_resolution)
+        # Squeeze the channel dimension
+        block_gradients = block_gradients.squeeze(1)
+        
+        # Assign to sigma tensor
+        sigma[start_idx:end_idx, :, :] = block_gradients
+        
+    return sigma
 
-def visualize_sensitivity(Sigma, selected_value, bandwidth=5.0):
+def visualize_sensitivity_field(sigma, selected_scalar_value, bandwidth=1.0):
     """
-    Visualizes the sensitivity field for a selected scalar value range.
+    Visualizes the sensitivity field for a selected scalar value.
     
     Args:
-        Sigma: The computed sensitivity tensor (256, r, r).
-        selected_value: The scalar value index the user is interested in.
-        bandwidth: Bandwidth for the Gaussian filter.
+        sigma: Sensitivity tensor (256, r, r).
+        selected_scalar_value: The index i in the TF domain.
+        bandwidth: Gaussian filter bandwidth.
+        
+    Returns:
+        visual_map: 2D array of sensitivity values for the selected value.
     """
-    # Apply Gaussian filter to the sequence of fields centered at selected_value
-    # This smooths the sensitivity across neighboring scalar values
-    filtered_field = apply_gaussian_filter(Sigma, center=selected_value, bandwidth=bandwidth)
+    # Extract the field for the selected scalar value
+    field = sigma[selected_scalar_value, :, :]
     
-    # Color map based on global range
-    global_min = np.min(Sigma)
-    global_max = np.max(Sigma)
+    # Apply Gaussian filter to smooth the field
+    # Reshape to 4D for convolution: (1, 1, r, r)
+    field_4d = field.unsqueeze(0).unsqueeze(0)
+    kernel_size = int(2 * bandwidth + 1)
+    gaussian_kernel = create_gaussian_kernel(kernel_size, bandwidth)
     
-    # Normalize filtered field for visualization
-    # Encode user selection range via opacity mapping
-    # (Implementation details for specific UI mapping are not provided in source)
-    pass
+    # Apply convolution
+    smoothed_field = F.conv2d(field_4d, gaussian_kernel, padding=kernel_size//2)
+    
+    # Squeeze back to 2D
+    visual_map = smoothed_field.squeeze(0).squeeze(0)
+    
+    return visual_map
+
+def create_gaussian_kernel(kernel_size, sigma):
+    """Creates a 2D Gaussian kernel."""
+    coords = torch.arange(kernel_size).float() - kernel_size // 2
+    g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+    g /= g.sum()
+    g_2d = torch.outer(g, g)
+    return g_2d.unsqueeze(0).unsqueeze(0)
 ```
 
 **Edge Cases and Pitfalls:**
-- **Resolution Cost:** Using $r=256$ is computationally prohibitive due to the need for $256^2$ backpropagation passes per scalar value [S1].
-- **Gradient Aggregation:** The sensitivity is an aggregate over a block. If a block contains both high-sensitivity and low-sensitivity pixels, the value may be averaged, potentially obscuring local details [S1].
-- **Global vs. Local Context:** The sensitivity for a specific edit might be small relative to the global sensitivity. Visual encoding must use opacity mapping to highlight the specific selection against the global context [S1].
+*   **Computational Cost:** Computing sensitivity at pixel-level resolution ($r=256$) is prohibitively expensive because it requires $256^2$ backpropagation passes. Use block aggregation ($r=8$ or $16$) [S1].
+*   **Gradient Vanishing/Exploding:** The sensitivity values depend on the differentiability of the rendering pipeline. If the renderer is not fully differentiable or uses discrete thresholds, gradients may be zero or unstable [S1].
+*   **Global vs. Local Context:** High global sensitivity might mask local changes. The visualization should encode user-specific selection ranges via opacity mapping to distinguish local impact from global noise [S1].
 
 ## Operating characteristics
-- **Time Complexity:** The computation requires backpropagation for each scalar value. With $r$ grid resolution, there are $r^2$ blocks. For 256 scalar values, the base cost is proportional to $256 \times r^2$ forward/backward passes if done sequentially. Parallelization on GPU with minibatches of 64 reduces wall-clock time but the total gradient computation remains [S1].
-- **Memory Complexity:** The output tensor $\Sigma$ is $256 \times r \times r$. For $r=16$, this is $256 \times 256 = 65,536$ floats, which is negligible. The intermediate gradient maps require $O(H \times W)$ memory per batch [S1].
-- **Performance:** The method is accelerated by GPU parallelism [S1]. The choice of $r=8$ or $16$ is a trade-off between latency and detail [S1].
-- **Strengths:** Provides immediate visual feedback on where TF edits will affect the image, aiding in the understanding of the TF latent space [S1]. Complements Region Sensitivity Plots [S1].
-- **Limitations:** Computationally expensive for high-resolution ($r=256$) fields [S1]. Relies on the differentiability of the volume rendering pipeline [S1].
+*   **Time Complexity:** $O(256 \cdot H \cdot W)$ for full pixel-level sensitivity, but reduced to $O(256 \cdot r^2)$ with block aggregation, where $r \ll H, W$. The dominant cost is backpropagation through the rendering pipeline for each scalar value (or batch thereof) [S1].
+*   **Memory Complexity:** $O(256 \cdot r^2)$ to store the sensitivity tensor $\Sigma$ [S1].
+*   **Performance:** GPU acceleration with minibatches of size 64 is used to mitigate latency [S1].
+*   **Strengths:** Provides immediate visual feedback on where TF edits will have the most impact, aiding in precise tuning of opacity TFs [S1]. Complements Region Sensitivity Plots by offering the inverse perspective (TF-to-Image vs. Image-to-TF) [S1].
+*   **Limitations:** Requires a differentiable rendering pipeline or generative model. High-resolution sensitivity is computationally prohibitive. The method is specific to opacity TFs and may not directly apply to color or emission TFs without extension [S1].
 
 ## Background
-Scalar Value Sensitivity Fields were introduced in the context of a generative model for volume rendering, specifically within the framework of exploring the opacity transfer function latent space [S1]. The method is part of a broader interface that combines Region Sensitivity Plots and SVSFs to help users understand the relationship between TF modifications and rendered image changes [S1]. It leverages the differentiability of the generative model's rendering process to compute these sensitivities [S1].
+Scalar Value Sensitivity Fields were introduced in the context of generative models for volume rendering, specifically in the paper "A Generative Model for Volume Rendering" [S1]. The method leverages the latent space encoding of opacity TFs learned by a generative adversarial network (GAN) to compute sensitivities. It was developed to help users explore the opacity TF latent space and understand the relationship between TF modifications and rendered image changes [S1]. The technique is part of a broader interface that combines Region Sensitivity Plots and Scalar Value Sensitivity Fields for interactive TF design [S1].
 
 ## Sources
 [S1] A Generative Model for Volume Rendering, https://doi.org/10.1109/tvcg.2018.2816059, fetched 2026-10-26

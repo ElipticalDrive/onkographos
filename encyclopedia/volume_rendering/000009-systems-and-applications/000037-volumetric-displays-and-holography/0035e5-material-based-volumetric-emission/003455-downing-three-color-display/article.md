@@ -1,0 +1,137 @@
+# Downing Three-Color Display
+
+Also called: Two-photon absorption volumetric display, Volumetric Display
+
+## Overview
+The Downing Three-Color Display is a volumetric display technique that generates true 3D images by addressing colored voxels within a rare-earth ion doped glass medium using two intersecting infrared laser beams [S1, S2, unofficial]. It solves the lack of ocular accommodation in 2D displays by creating light sources at arbitrary depths, allowing the viewer's eye to focus naturally at different planes within the volume [S1, unofficial]. Unlike sibling methods such as the Inkjet Printing-Based Volumetric Display which rely on mechanical layering, this method uses optical upconversion to create emissive voxels in a static transparent medium, enabling viewing from any angle without physical movement of the display material [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A 3D scene description (voxel data); two infrared laser sources with specific wavelengths.
+*   **Output:** A 3D volumetric image visible to the human eye, rendered in red, green, and blue.
+
+**Data Structures**
+The display medium consists of a stack of thin glass layers.
+*   **Layer Structure:** Alternating layers of glass doped with different rare-earth ions.
+    *   **Red Layer:** Doped with Praseodymium (Pr).
+    *   **Green Layer:** Doped with Erbium (Er).
+    *   **Blue Layer:** Doped with Thulium (Tm).
+*   **Voxel Definition:** A voxel is defined by the spatial intersection of the two scanning laser beams within a specific doped layer. No global 3D array is stored in the glass; the glass acts as a passive canvas.
+
+**Parameters**
+*   **Excitation Wavelengths:** Two infrared beams are used. Typical values are $\lambda_1 = 800 \text{ nm}$ and $\lambda_2 = 1550 \text{ nm}$ [S2, unofficial].
+*   **Dopants:**
+    *   Praseodymium (Pr) for Red emission.
+    *   Erbium (Er) for Green emission.
+    *   Thulium (Tm) for Blue emission [S1, unofficial].
+*   **Lifetime:** The intermediate energy level lifetime ($\tau_2$) determines the time window for the second photon absorption. Not given in the sources.
+
+**Method Steps**
+1.  **Beam Generation:** Two infrared laser beams are generated. In high-speed implementations, linear arrays of infrared diode lasers are used instead of single beams to increase refresh rates and manage power density [S1, unofficial].
+2.  **Scanning:** The two beams are scanned across the volume of the glass stack. The scanning mechanism moves the intersection point of the beams through the 3D space [S1, unofficial].
+3.  **Two-Photon Absorption (Upconversion):** When the intersection point coincides with a doped layer, the following quantum process occurs:
+    *   An active ion in the ground state (Energy Level $E_1$) absorbs a photon from the first infrared beam (wavelength $\lambda_{12}$), exciting it to an intermediate metastable state (Energy Level $E_2$) [S1, unofficial].
+    *   The ion remains in state $E_2$ for a lifetime $\tau_2$.
+    *   If the second infrared beam (wavelength $\lambda_{23}$) illuminates the ion while it is in state $E_2$, the ion absorbs a second photon and is excited to a higher energy state (Energy Level $E_3$) [S1, unofficial].
+    *   This two-photon process is non-linear; it only occurs where the photon flux of both beams is sufficiently high, i.e., at the intersection [S1, unofficial].
+4.  **Fluorescence Emission:** The ion relaxes from state $E_3$ back to the ground state $E_1$, emitting a photon of visible light. The wavelength of this emitted light depends on the specific dopant (Pr, Er, or Tm) in the layer where the intersection occurred [S1, unofficial].
+5.  **Layer Selection:** By controlling which layers are doped with which ions, the color of the emitted voxel is determined. The thin layers prevent cross-talk between colors, as a voxel is only generated in the specific layer where the beams intersect and the correct dopant is present [S1, unofficial].
+6.  **Refresh:** The beams continuously scan the volume to refresh the image. Linear laser arrays allow multiple voxels to be addressed simultaneously or refreshed more frequently than a single scanning pair could achieve [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+WAVELENGTH_1 = 800e-9  # meters
+WAVELENGTH_2 = 1550e-9 # meters
+LIFETIME_E2 = None     # Not given in sources, required for timing logic
+LAYERS = [
+    {"dopant": "Pr", "color": "Red", "position_z": z_red},
+    {"dopant": "Er", "color": "Green", "position_z": z_green},
+    {"dopant": "Tm", "color": "Blue", "position_z": z_blue}
+]
+
+def scan_volume(target_voxels):
+    """
+    Scans the laser beams to illuminate target voxels.
+    target_voxels: List of (x, y, z, color) tuples representing desired image.
+    """
+    # Initialize laser arrays
+    laser_array_1 = LinearLaserArray(wavelength=WAVELENGTH_1)
+    laser_array_2 = LinearLaserArray(wavelength=WAVELENGTH_2)
+    
+    # For each frame/refresh cycle
+    while True:
+        for voxel in target_voxels:
+            x, y, z, color = voxel
+            
+            # Determine if the target color exists in the layer at z
+            layer = get_layer_at_z(z)
+            if layer is None or layer.dopant != color_to_dopant(color):
+                continue # No emission if dopant doesn't match or layer missing
+            
+            # Calculate beam positions to intersect at (x, y, z)
+            # The exact scanning geometry (e.g., galvo mirrors, MEMS) is not specified
+            # [G] Assuming a generic beam steering mechanism that can direct beams to (x,y) at depth z
+            beam1_pos = calculate_beam_position(laser_array_1, x, y, z)
+            beam2_pos = calculate_beam_position(laser_array_2, x, y, z)
+            
+            # Activate lasers at specific positions in the array
+            # In a linear array, this might involve selecting specific diodes or steering
+            laser_array_1.activate(beam1_pos)
+            laser_array_2.activate(beam2_pos)
+            
+            # Wait for lifetime t2 to ensure upconversion probability
+            # [G] In practice, this is handled by the continuous scanning or pulse timing
+            # The sources state the ion remains at E2 for lifetime t2.
+            # If the second beam is present during this time, excitation occurs.
+            pass 
+            
+            # Deactivate to prevent unnecessary heating/damage
+            laser_array_1.deactivate(beam1_pos)
+            laser_array_2.deactivate(beam2_pos)
+            
+        # Refresh loop
+        sleep(refresh_period)
+
+def color_to_dopant(color):
+    if color == "Red": return "Pr"
+    if color == "Green": return "Er"
+    if color == "Blue": return "Tm"
+    return None
+
+def get_layer_at_z(z):
+    for layer in LAYERS:
+        if abs(layer.position_z - z) < layer_thickness / 2:
+            return layer
+    return None
+```
+
+**Edge Cases and Pitfalls**
+*   **Glass Damage:** High power required for single-pair scanning to achieve video rates exceeds the damage threshold of most glasses. This is mitigated by using linear arrays of lasers to refresh voxels more frequently with lower individual power per voxel [S1, unofficial].
+*   **Cross-talk:** Using a single large fully doped volume would cause cross-talk between colors. The solution is stacking thin layers of alternately doped glass [S1, unofficial].
+*   **Precision:** The intersection of the beams must be precise to address specific voxels. Not given in the sources.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. The speed is limited by the scanning mechanism and the fluorescence lifetime of the dopants.
+*   **Memory Complexity:** The display medium itself does not store image data; it is a passive medium. The "memory" is the scene data sent to the laser controllers.
+*   **Measured Performance:** A prototype system developed at Stanford created 3D color pictures in a one-inch cube [S1, unofficial].
+*   **Scaling:** The estimated cost for a ten-inch cube was $80,000, indicating significant cost barriers to scaling [S1, unofficial].
+*   **Strengths:**
+    *   Provides true ocular accommodation (eye can focus at different depths) [S1, unofficial].
+    *   Viewable from any angle (360-degree visibility) [S1, S2, unofficial].
+    *   No mechanical movement of the display screen [S2, unofficial].
+*   **Limitations:**
+    *   High cost [S1, unofficial].
+    *   The transparent medium lacks the ability to block light from behind, potentially causing issues with ambient light or background visibility (though the source cuts off, it mentions "lacks the ability to..." [S1, unofficial]).
+    *   Limited by the availability of suitable rare-earth doped glasses with appropriate energy levels and fluorescence lifetimes [S1, unofficial].
+*   **When to use:** Applications requiring true 3D perception with ocular accommodation, such as medical imaging (MRI, CAT) visualization, aircraft tracking, and CAD [S1, unofficial].
+*   **When not to use:** Cost-sensitive applications or where ambient light interference is a major issue.
+
+## Background
+The concept of volumetric displays addressing the lack of ocular accommodation in 2D displays was explored as early as the 1970s, but lacked the necessary excitation sources and display materials [S1, unofficial]. The specific technique using two-photon absorption in rare-earth doped glass was developed by Downing et al. at Stanford University, with a prototype demonstrated in 1996 [S1, S2, unofficial]. The method relies on the fiber optic industry's development of high-quality rare-earth ion doped glasses, which are transparent to visible light but efficient at absorbing infrared radiation and emitting visible light via upconversion [S1, unofficial].
+
+## Sources
+[S1] "Volumetric Display", https://web.archive.org/web/20050909205829/http://www.stanford.edu/~matteoja/volume.html, fetched 2026-10-26 (unofficial)
+[S2] ボリュメトリックディスプレイ, https://www.jstage.jst.go.jp/article/jvrsj/29/3/29_27/_pdf/-char/ja, fetched 2026-10-30 (unofficial)

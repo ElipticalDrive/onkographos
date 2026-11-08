@@ -1,0 +1,82 @@
+# MSAA Voxelization
+
+Also called: 8xMSAA Voxelization, Conservative Raster via MSAA, Conservative Rasterization with MSAA render target, Multi-Sampling Anti-Aliasing Voxelization
+
+## Overview
+MSAA Voxelization is a technique to achieve conservative rasterization on the GPU by leveraging Multi-Sampling Anti-Aliasing (MSAA) to determine voxel occupancy, thereby avoiding the computational overhead of manual primitive edge expansion in the Geometry Shader [S1, unofficial]. It approximates true conservative rasterization by invoking the pixel shader if any subsample within a pixel is covered by a primitive, which simplifies the rendering pipeline and eliminates the need for post-rasterization voxel-primitive intersection tests to remove redundant voxels [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A mesh (typically triangles) defined in world space.
+*   **Output:** A voxel grid (occupancy or attribute data) stored in a render target or buffer.
+
+**Data Structures:**
+*   **Render Target:** An MSAA-capable render target (e.g., DXGI format with MSAA sample count > 1) bound to the Output Merger stage. The resolution of this target corresponds to the desired voxel grid dimensions [S1, unofficial].
+*   **Voxel Grid:** The logical grid where each cell corresponds to a pixel in the render target. The physical size of a voxel is determined by the world-space extent of the render target divided by the render target resolution [G].
+
+**Parameters:**
+*   **MSAA Sample Count:** Typically 8x (8 subsamples per pixel) [S1, unofficial]. This provides sufficient spacing to approximate conservative rasterization.
+*   **Voxel Grid Resolution:** Must be high enough relative to the size of the voxelized primitives to avoid "holes" [S1, unofficial].
+
+**Steps:**
+1.  **Configure Render State:** Enable MSAA with the desired sample count (e.g., 8x) in the rasterizer state [S1, unofficial].
+2.  **Bind Render Target:** Bind an MSAA render target to the Output Merger stage. Alternatively, on DirectX 11.1 and later, use "Forced Sample Count" to enable MSAA rasterization without binding an MSAA render target, reducing video memory cost [S1, unofficial].
+3.  **Rasterize:** Issue draw calls for the input primitives. The GPU hardware rasterizer evaluates coverage against the subsample locations [S1, unofficial].
+4.  **Pixel Shader Invocation:** The pixel shader is invoked **once per pixel** if **any** of the subsamples within that pixel are covered by the primitive [S1, unofficial]. This is the critical approximation: it treats the pixel as "covered" if any subsample is hit, mimicking conservative rasterization behavior [S1, unofficial].
+5.  **Voxel Data Generation:** Inside the pixel shader, compute the voxel index corresponding to the pixel's position in the voxel grid. Write the voxel data (e.g., occupancy flag, color, normal) to the output buffer. Since the pixel shader is only invoked when coverage is detected, no extra voxels are generated, and no intersection tests are needed to remove them [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Vertex Shader
+def vertex_shader(vertex_position):
+    # Transform vertex to clip space
+    return clip_space_position
+
+# Geometry Shader (Simplified)
+# No edge expansion is needed. Pass through triangles as-is.
+def geometry_shader(triangle_vertices):
+    return triangle_vertices
+
+# Pixel Shader
+def pixel_shader(pixel_coverage_mask, pixel_position):
+    # pixel_coverage_mask is non-zero if any subsample is covered
+    if pixel_coverage_mask > 0:
+        # Map pixel position to voxel grid index
+        # Assuming pixel_position is in screen space [0, width-1] x [0, height-1]
+        # And voxel grid resolution is (grid_width, grid_height, grid_depth)
+        # For a 2D slice or projected voxelization:
+        voxel_x = pixel_position.x
+        voxel_y = pixel_position.y
+        
+        # Write voxel data (e.g., occupancy = 1)
+        # The actual data structure depends on the specific voxel format
+        write_voxel(voxel_x, voxel_y, occupancy=1)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Holes:** Primitives lying between subsamples may not be voxelized properly, creating "holes" in the voxel grid [S1, unofficial]. This is an inherent limitation of the approximation.
+*   **Mitigation:** Ensure the voxel grid resolution is sufficiently high relative to the size of the voxelized primitives to minimize the impact of holes [S1, unofficial].
+*   **Memory Cost:** Binding an MSAA render target increases video memory usage, though this is often considered negligible [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of pixels in the render target (or number of voxels). The pixel shader is invoked once per covered pixel, regardless of the number of subsamples covered [S1, unofficial].
+*   **Memory Complexity:** $O(V)$ where $V$ is the number of voxels. Additional memory is required for the MSAA render target (sample count $\times$ base resolution) [S1, unofficial].
+*   **Strengths:**
+    *   No primitive edge expansion in the Geometry Shader, reducing GS complexity and GPU cycles [S1, unofficial].
+    *   No extra pixel shader calls compared to standard rasterization [S1, unofficial].
+    *   No need for voxel-primitive intersection tests to remove redundant voxels generated by edge expansion [S1, unofficial].
+    *   Simpler pipeline implementation compared to manual conservative rasterization [S1, unofficial].
+*   **Limitations:**
+    *   Approximation: Not genuine conservative rasterization; holes can occur [S1, unofficial].
+    *   Resolution-dependent: Requires high voxel grid resolution to mitigate holes [S1, unofficial].
+    *   Hardware dependency: Relies on MSAA support and specific driver behaviors [S1, unofficial].
+*   **When to use:** Recommended for most cases on hardware prior to NVIDIA Maxwell architecture [S1, unofficial].
+*   **When not to use:** On Maxwell or higher GPU architectures, official conservative rasterization functions should be used instead [S1, unofficial].
+
+## Background
+MSAA Voxelization was described in NVIDIA's "Basics of GPU Voxelization" [S1, unofficial]. It was presented as a practical alternative to manual conservative rasterization via geometry shader edge expansion, which was computationally expensive. The technique leverages existing MSAA hardware capabilities to approximate conservative coverage, simplifying the voxelization pipeline. It is particularly relevant for older GPU architectures where hardware conservative rasterization was not available or efficient.
+
+## Sources
+[S1] Basics of GPU Voxelization, https://developer.nvidia.com/content/basics-gpu-voxelization, fetched 2026-10-28 (unofficial)

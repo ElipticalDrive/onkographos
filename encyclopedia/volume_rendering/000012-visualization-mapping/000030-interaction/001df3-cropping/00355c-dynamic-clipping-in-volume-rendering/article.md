@@ -1,0 +1,185 @@
+# Dynamic Clipping in Volume Rendering
+
+Also called: Clipping in Volume Rendering, Volume Rendering with Dynamic Clipping, vtk.js Volume Rendering Pipeline
+
+## Overview
+Dynamic clipping in volume rendering allows users to interactively define a viewing volume (typically a box) to suppress or reveal specific regions of a 3D dataset during rendering. It solves the problem of visual clutter and occlusion by allowing real-time adjustment of the visible domain. Unlike static cropping which cuts the volume geometry, dynamic clipping uses six axis-aligned planes in world space to mask fragments during ray casting, enabling smooth interaction without re-sampling the underlying data. It differs from [Pre-integrated Clipping Boundary Handling](7867-pre-integrated-clipping-boundary-handling.md) by not addressing the aliasing artifacts at the clipping boundaries, and from [Variance Clipping](1970-variance-clipping.md) by using geometric bounds rather than statistical thresholds.
+
+## How it works
+**Inputs:**
+- A 3D image dataset with an associated index-to-world transformation matrix.
+- A cropping widget state providing six index-space bounds: $[i_{min}, i_{max}, j_{min}, j_{max}, k_{min}, k_{max}]$.
+- A volume mapper capable of accepting clipping planes.
+
+**Outputs:**
+- A rendered image where voxels outside the defined index-space box are suppressed.
+
+**Data Structures:**
+- **Clipping Plane:** Defined by a normal vector $\mathbf{n}$ and an origin point $\mathbf{o}$. The plane equation is $\mathbf{n} \cdot (\mathbf{x} - \mathbf{o}) = 0$.
+- **Transformation Matrix:** A $4 \times 4$ matrix $M_{idx2world}$ mapping voxel indices to world coordinates.
+
+**Parameters:**
+- Sample distance: $1.0$ [S1, unofficial].
+- Color Transfer Function (CTF) points:
+  - $(0, 85/255, 0, 0)$
+  - $(95, 0.9765, 0.9647, 0.9333)$
+  - $(225, 0, 0.6, 0.2)$
+  - $(255, 1, 0, 0)$ [S1, unofficial].
+- Scalar Opacity Function (SOF) points:
+  - $(0.0, 0.0)$
+  - $(255.0, 1.0)$ [S1, unofficial].
+- Gradient Opacity: Enabled, min value $2$, min opacity $0.0$, max value $30$, max opacity $1.0$ [S1, unofficial].
+- Shading: Diffuse $0.7$, Specular $0.3$, Specular Power $8.0$, Ambient $0.2$ [S1, unofficial].
+
+**Steps:**
+1. **Initialize Rendering Pipeline:** Create a `vtkVolumeMapper` and `vtkVolume`. Set the sample distance to $1.0$. Configure the color and opacity transfer functions as specified above. Configure volume properties (shading, gradient opacity) [S1, unofficial].
+2. **Extract Index Bounds:** When the cropping widget state changes, extract the six index-space bounds $[i_{min}, i_{max}, j_{min}, j_{max}, k_{min}, k_{max}]$ from the widget [S1, unofficial].
+3. **Compute World-Space Rotation:** Extract the rotation component from the image's index-to-world transformation matrix $M_{idx2world}$. Let $R$ be the $3 \times 3$ rotation matrix derived from $M_{idx2world}$ [S1, unofficial].
+4. **Transform Normals:** Define the six axis-aligned normals in index space:
+   - $X$-min: $\mathbf{n}_x = [1, 0, 0]$
+   - $X$-max: $\mathbf{n}_x' = [-1, 0, 0]$
+   - $Y$-min: $\mathbf{n}_y = [0, 1, 0]$
+   - $Y$-max: $\mathbf{n}_y' = [0, -1, 0]$
+   - $Z$-min: $\mathbf{n}_z = [0, 0, 1]$
+   - $Z$-max: $\mathbf{n}_z' = [0, 0, -1]$
+   Transform each normal to world space using the rotation matrix: $\mathbf{n}_{world} = R \cdot \mathbf{n}_{index}$ [S1, unofficial].
+5. **Compute Plane Origins:**
+   - Calculate the world-space origin for the minimum bounds: $\mathbf{o}_{min} = M_{idx2world} \cdot [i_{min}, j_{min}, k_{min}, 1]^T$.
+   - Calculate the world-space origin for the maximum bounds: $\mathbf{o}_{max} = M_{idx2world} \cdot [i_{max}, j_{max}, k_{max}, 1]^T$ [S1, unofficial].
+6. **Define Clipping Planes:** Construct six clipping planes:
+   - Plane 1 (X-min): Origin $\mathbf{o}_{min}$, Normal $\mathbf{n}_{x, world}$.
+   - Plane 2 (X-max): Origin $\mathbf{o}_{max}$, Normal $\mathbf{n}_{x, world}'$.
+   - Plane 3 (Y-min): Origin $\mathbf{o}_{min}$, Normal $\mathbf{n}_{y, world}$.
+   - Plane 4 (Y-max): Origin $\mathbf{o}_{max}$, Normal $\mathbf{n}_{y, world}'$.
+   - Plane 5 (Z-min): Origin $\mathbf{o}_{min}$, Normal $\mathbf{n}_{z, world}$.
+   - Plane 6 (Z-max): Origin $\mathbf{o}_{max}$, Normal $\mathbf{n}_{z, world}'$ [S1, unofficial].
+7. **Apply to Mapper:** Clear any existing clipping planes from the mapper. Add the six new planes. Trigger a pipeline update [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from scipy.spatial.transform import Rotation
+
+def setup_volume_rendering(mapper, actor, image_data):
+    """
+    Initialize volume rendering properties based on [S1, unofficial].
+    """
+    mapper.set_sample_distance(1.0)
+    
+    # Color Transfer Function
+    ctfun = ColorTransferFunction()
+    ctfun.add_rgb_point(0, 85/255.0, 0, 0)
+    ctfun.add_rgb_point(95, 0.9765, 0.9647, 0.9333)
+    ctfun.add_rgb_point(225, 0, 0.6, 0.2)
+    ctfun.add_rgb_point(255, 1, 0, 0)
+    
+    # Scalar Opacity Function
+    ofun = PiecewiseFunction()
+    ofun.add_point(0.0, 0.0)
+    ofun.add_point(255.0, 1.0)
+    
+    actor.set_rgb_transfer_function(0, ctfun)
+    actor.set_scalar_opacity(0, ofun)
+    actor.set_scalar_opacity_unit_distance(0, 3.0)
+    actor.set_interpolation_type_to_linear()
+    actor.set_use_gradient_opacity(0, True)
+    actor.set_gradient_opacity_minimum_value(0, 2)
+    actor.set_gradient_opacity_minimum_opacity(0, 0.0)
+    actor.set_gradient_opacity_maximum_value(0, 30)
+    actor.set_gradient_opacity_maximum_opacity(0, 1.0)
+    actor.set_shade(True)
+    actor.set_ambient(0.2)
+    actor.set_diffuse(0.7)
+    actor.set_specular(0.3)
+    actor.set_specular_power(8.0)
+    
+    mapper.set_input_connection(image_data.get_output_port())
+
+def get_cropping_planes(image_data, ijk_bounds):
+    """
+    Compute six world-space clipping planes from index-space bounds.
+    ijk_bounds: tuple (i_min, i_max, j_min, j_max, k_min, k_max)
+    Returns: list of 6 tuples (origin, normal)
+    """
+    # Get index-to-world matrix
+    idx2world_mat = image_data.get_index_to_world()
+    
+    # Extract rotation matrix (3x3) from the 4x4 transformation matrix
+    # Assuming standard OpenGL/DirectX column-major or row-major consistency
+    # The source uses mat4.getRotation which extracts the upper-left 3x3
+    rotation_mat = idx2world_mat[:3, :3]
+    
+    i_min, i_max, j_min, j_max, k_min, k_max = ijk_bounds
+    
+    # Compute origins in world space
+    origin_min = image_data.index_to_world([i_min, j_min, k_min])
+    origin_max = image_data.index_to_world([i_max, j_max, k_max])
+    
+    # Define axis-aligned normals in index space
+    normals_index = [
+        [1, 0, 0], [-1, 0, 0],  # X
+        [0, 1, 0], [0, -1, 0],  # Y
+        [0, 0, 1], [0, 0, -1]   # Z
+    ]
+    
+    # Transform normals to world space
+    normals_world = [np.dot(rotation_mat, n) for n in normals_index]
+    
+    # Pair origins and normals
+    # X-min, X-max, Y-min, Y-max, Z-min, Z-max
+    planes = [
+        (origin_min, normals_world[0]),
+        (origin_max, normals_world[1]),
+        (origin_min, normals_world[2]),
+        (origin_max, normals_world[3]),
+        (origin_min, normals_world[4]),
+        (origin_max, normals_world[5])
+    ]
+    
+    return planes
+
+def apply_clipping(mapper, planes):
+    """
+    Apply the computed clipping planes to the volume mapper.
+    """
+    mapper.remove_all_clipping_planes()
+    for origin, normal in planes:
+        mapper.add_clipping_plane(origin, normal)
+    mapper.modified()
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Ensure the index-to-world transformation is accurate to avoid misalignment between the clipping widget and the volume.
+- **Degenerate Input:** If the cropping widget defines an invalid box (e.g., $i_{min} > i_{max}$), the resulting planes may be inverted or invalid. The implementation should validate bounds before computing planes.
+- **Boundary Artifacts:** Dynamic clipping does not handle the transition at the clipping boundary smoothly. This can result in visible aliasing or "popping" artifacts if the view changes rapidly. This is a known limitation compared to pre-integrated boundary handling [S1, unofficial].
+
+## Subtopics
+
+### Clipping plane for volume suppression
+Uses a single plane to suppress one side of the volume. Simpler than dynamic clipping but less flexible for interactive exploration. Choose when only a single cut is needed. [Link](887-clipping-plane-for-volume-suppression.md)
+
+### Clipping
+General term for cutting geometry. Dynamic clipping is a specific implementation using planes in the rendering pipeline. [Link](1444-clipping.md)
+
+### Variance Clipping
+Uses statistical variance to determine visibility. Useful for noisy data. Dynamic clipping uses geometric bounds. [Link](1970-variance-clipping.md)
+
+### Pre-integrated Clipping Boundary Handling
+Addresses the aliasing artifacts at clipping boundaries. Dynamic clipping does not. Choose this when visual quality at the cut is critical. [Link](7867-pre-integrated-clipping-boundary-handling.md)
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ to compute planes per frame update. Ray casting complexity remains $O(N)$ where $N$ is the number of samples per ray, but the effective $N$ is reduced by the clipping volume.
+- **Memory Complexity:** $O(1)$ additional memory for plane definitions.
+- **Performance:** Real-time interaction is achievable if the clipping plane update is efficient. The overhead of transforming normals and origins is negligible.
+- **Strengths:** Interactive, non-destructive (data is not modified), works with any volume data.
+- **Limitations:** No special handling for boundary artifacts. Performance may degrade if the clipping volume is very small and the ray caster is not optimized for early exit.
+- **When to use:** Interactive exploration of large volumes.
+- **When not to use:** When high-quality rendering at the clipping boundary is required (use Pre-integrated Clipping Boundary Handling).
+
+## Background
+Dynamic clipping in volume rendering is commonly implemented in visualization libraries such as VTK and its JavaScript port, vtk.js. The specific implementation described here is based on the vtk.js volume rendering pipeline, which allows users to interactively crop volumes using a widget that updates clipping planes in real-time. This approach is standard in medical imaging and scientific visualization tools where interactive exploration is key.
+
+## Sources
+[S1] SuhailaAhmed/Volume-Rendering, https://github.com/SuhailaAhmed/Volume-Rendering, fetched 2026-10-26 (unofficial)

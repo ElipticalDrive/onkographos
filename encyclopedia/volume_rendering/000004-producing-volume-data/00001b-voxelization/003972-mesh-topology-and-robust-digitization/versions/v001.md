@@ -1,0 +1,27 @@
+# Mesh Topology and Robust Digitization
+
+Also called: Topological Voxelization, Robust Mesh Voxelization
+
+## Overview
+This family addresses the fundamental challenge of converting continuous polygonal meshes into discrete volumetric data while preserving topological integrity and handling non-ideal input geometry. Unlike rasterization-based methods that rely on screen-space projections or point-cloud methods that sample sparse data, these techniques operate directly on the mesh's topological structure (vertices, edges, faces) to ensure watertightness and connectivity [S1, unofficial][S2]. They are distinguished by their ability to robustly handle low-quality, non-watertight, or topologically open meshes that cause standard scan-conversion algorithms to fail, often by employing geometric bounding volumes or intermediate tetrahedral representations [S1, unofficial][S2].
+
+## Shared principles
+All methods in this family share the goal of producing a binary or labeled `UniformGrid` or `RectilinearGrid` from a polygon mesh. They rely on the principle that voxel occupancy must be determined by the geometric relationship between the voxel cell and the mesh primitives, ensuring that the resulting volume is a faithful discrete representation of the mesh's interior. A key shared concern is "separability": ensuring that connected mesh components result in connected voxel sets. This is often achieved by expanding the geometric primitives (vertices, edges) with bounding volumes (spheres, cylinders) sized according to the voxel resolution to prevent gaps at intersections [S2]. Additionally, these methods often require the input mesh to be validated for manifoldness or watertightness, or employ preprocessing steps (such as tetrahedralization) to enforce topological validity before digitization [S1, unofficial].
+
+## Subtopics
+
+### [Polygon Mesh Voxelization via Union of Sets](4605-polygon-mesh-voxelization-via-union-of-sets.md)
+This method computes the voxel volume as the union of discrete sets associated with vertices, edges, and faces. It uses bounding spheres for vertices and cylinders for edges, with radii determined by the desired separability (6- or 26-connectivity), to ensure no gaps exist at intersections. It is chosen when strict topological connectivity is required and the mesh is watertight.
+
+### [Labeled Volume Creation via MultiBlock Iteration](7389-labeled-volume-creation-via-multiblock-iteration.md)
+This method generates a volume where each voxel is labeled with the ID of the specific sub-mesh block it encloses, rather than a binary flag. It uses enclosed-point testing on a `RectilinearGrid` for each block in a `MultiBlock` dataset. It is chosen when multiple distinct meshes need to be voxelized into a single volume while preserving their individual identities.
+
+### [Improved Tetrahedral Mesh Generation for Voxelization](7476-improved-tetrahedral-mesh-generation-for-voxelization.md)
+This method converts triangular meshes to voxels by first generating a high-quality intermediate tetrahedral mesh. It handles low-quality, non-watertight, or open meshes by inserting the surface into a background grid and improving the resulting tetrahedra. It is chosen when the input mesh is non-manifold or has holes, which would cause other methods to fail.
+
+## Background
+The problem of robust mesh voxelization has been a persistent challenge in computer graphics and scientific visualization, particularly for applications requiring simulation-ready volumetric data. Traditional scan-conversion methods often fail on non-watertight meshes or produce artifacts like "staircasing" or disconnected components. The "Union of Sets" approach, often implemented in libraries like VTK and PyVista, provides a geometrically rigorous way to ensure connectivity by explicitly modeling the voxel contributions of vertices and edges [S2]. The tetrahedral-based approach addresses the limitations of surface-only methods by creating a volumetric intermediate representation, allowing for robust handling of complex topologies [S1, unofficial]. These methods are widely used in pre-processing pipelines for finite element analysis, medical imaging, and 3D printing, where geometric fidelity and topological correctness are critical.
+
+## Sources
+[S1] PyVista Documentation, https://docs.pyvista.org/, 2023-10-01
+[S2] "Robust Voxelization of Polygon Meshes," Journal of Graphics Tools, 2020

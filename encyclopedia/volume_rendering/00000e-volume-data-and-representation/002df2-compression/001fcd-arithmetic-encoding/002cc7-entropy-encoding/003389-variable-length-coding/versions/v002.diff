@@ -1,0 +1,187 @@
+--- v001.md
++++ v002.md
+@@ -1,43 +1,33 @@
+ # Variable-Length Coding
+-Also called: Variable Bit Length Coding, Delta Encoding with Variable Bit Depth
++
++Also called: Variable Bit Length Coding, Brick-based Variable-Length Coding
+ 
+ ## Overview
+-Variable-Length Coding (VLC) is a lossless compression technique used in volume rendering that reduces storage requirements by exploiting the local value range of data bricks. It solves the problem of inefficient fixed-width storage when voxel values within a brick are clustered within a narrow range [S1]. Unlike its parent [Entropy Encoding](5360-entropy-encoding.md), which maps symbols to bit lengths based on frequency, VLC maps symbols to bit lengths based on the numerical range of the data block, storing a base value and narrow-range differences [S1].
++Variable-Length Coding (VLC) is a lossless compression technique for volume data that reduces storage by encoding voxel values relative to a base value within a data block (brick). It solves the problem of inefficient fixed-width storage when data values in a local region have a small dynamic range [S1]. Unlike its parent [Entropy Encoding](5360-entropy-encoding.md), which determines a single bit depth $n$ for the entire brick based on the global range, VLC typically employs a hierarchical structure (such as a quadtree) to determine bit lengths locally, allowing finer granularity in compression [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A brick (sub-volume) of voxel data.
+-*   **Output:** A compressed bitstream containing a base value and $n$-bit difference values for each voxel.
++*   **Input:** A brick (a sub-volume of the total dataset) containing voxel values.
++*   **Output:** A compressed representation consisting of a base value and a sequence of bit-packed differences.
+ 
+ **Data Structures:**
+-The compressed representation of a brick consists of:
+-1.  **Base Value:** The minimum value found in the brick, stored using the original data type's bit width (typically 16 bits for short integers, as $n < 16$) [S1].
+-2.  **Difference Values:** For each voxel, the difference between the voxel value and the base value, stored using $n$ bits [S1].
++The compressed brick consists of:
++1.  **Base Value:** The minimum value found in the brick, stored in full precision (typically 16-bit or 32-bit float/int, depending on the source format).
++2.  **Bit Depth ($n$):** An integer indicating the number of bits used to store each voxel's difference.
++3.  **Differences:** A bit-stream where each voxel is represented by $n$ bits, storing the difference between the voxel value and the base value.
+ 
+ **Steps:**
+-1.  Determine the minimum ($min$) and maximum ($max$) values within the brick [S1].
+-2.  Calculate the range $R = max - min$ [S1].
+-3.  Determine the smallest integer $n$ such that $R < 2^n$ and $n < 16$ [S1].
+-4.  If the brick is uniform (all voxels have the same value), store only the base value (the voxel value). The difference values are implicitly zero and omitted from the bitstream [S1].
+-5.  If the brick is not uniform:
+-    a. Store the base value ($min$) [S1].
+-    b. For each voxel $v_i$ in the brick, compute the difference $d_i = v_i - min$ [S1].
+-    c. Store $d_i$ using exactly $n$ bits [S1].
+-
+-**Formula:**
+-The condition for applying variable-length coding to reduce storage is:
+-$$ max - min < 2^n $$
+-where $n$ is the number of bits used to store each difference value, and $n < 16$ [S1].
+-
+-The storage size per voxel becomes $n$ bits, compared to the original fixed width (e.g., 16 bits) [S1].
++1.  **Determine Range:** Scan the brick to find the minimum value ($min$) and the maximum value ($max$).
++2.  **Calculate Bit Depth:** Determine the smallest integer $n$ such that the range of differences fits in $n$ bits. The condition for reduction is:
++    $$max - min < 2^n$$
++    where $n < 16$. If the range is larger than $2^{16}-1$, the brick cannot be compressed using this method with $n < 16$ and may fall back to a default storage size or a different encoding [S1].
++3.  **Compute Differences:** For each voxel $v_i$ in the brick, calculate the difference:
++    $$d_i = v_i - min$$
++4.  **Pack Bits:** Store each $d_i$ using exactly $n$ bits.
++5.  **Handle Uniform Bricks:** If all voxels in the brick have the same value (i.e., $max = min$), store only the base value. The delta values are effectively 'zero bits' and are omitted from the bit-stream [S1].
+ 
+ **Parameters:**
+-*   **Supported Bit Lengths ($n$):** 16, 8, 4, and 0 bits [S1].
+-*   **Rationale for Limited Bit Lengths:** Supporting all possible bit lengths is not justified due to hardware cost versus compression ratio gain. Analysis of test data showed that supporting only 16, 8, 4, and 0 bits achieves a compression ratio close to optimal [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Uniform Bricks:** Handled directly by storing only the base value, effectively using 0 bits for differences [S1].
+-*   **GPU Implementation:** Because different bit lengths require different addressing modes for memory access, individual CUDA kernels are implemented for each supported bit length (16, 8, 4, 0) [S1].
+-*   **Temporal Data:** VLC is often applied to delta values (temporal prediction residuals) rather than absolute values. Since delta values are typically smaller than absolute values, VLC achieves higher compression ratios on deltas [S1].
++*   **Supported Bit Lengths:** To optimize GPU kernel implementation, only specific bit lengths are supported: 16, 8, 4, and 0 bits. Supporting all possible numbers of bits is not justified due to the cost vs. compression ratio gain [S1].
++*   **Bit Length $n$:** Must be an integer $< 16$.
+ 
+ **Pseudocode:**
+@@ -45,10 +35,10 @@
+ def variable_length_encode(brick):
+     """
+-    Compress a brick of voxel data using variable-length coding.
+-    brick: list of integers (voxel values)
+-    Returns: tuple (base_value, n_bits, differences)
++    Compress a brick using variable-length coding.
++    brick: list of voxel values (integers or floats)
++    Returns: (base_value, bit_depth, packed_differences)
+     """
+     if not brick:
+-        return None, 0, []
++        return None, 0, b''
+ 
+     min_val = min(brick)
+@@ -56,59 +46,65 @@
+     range_val = max_val - min_val
+ 
+-    # Determine n such that range_val < 2^n and n < 16
+-    # If range_val is 0, n=0 (uniform brick)
++    # Handle uniform brick
+     if range_val == 0:
+-        n = 0
+-    else:
+-        n = 0
+-        while (1 << n) <= range_val:
+-            n += 1
+-            if n >= 16:
+-                # Fallback or error if range exceeds 16-bit capacity
+-                # In practice, this case might be handled by a different scheme
+-                break 
+-    
+-    # If n >= 16, VLC might not be beneficial or supported
+-    # Assuming n < 16 for valid VLC application
+-    if n >= 16:
+-        return None, 16, brick # Fallback to 16-bit storage
++        return min_val, 0, b''
+ 
+-    differences = [v - min_val for v in brick]
+-    return min_val, n, differences
++    # Determine bit depth n
++    # Find smallest n such that range_val < 2^n and n < 16
++    n = 0
++    while (1 << n) <= range_val:
++        n += 1
++        if n >= 16:
++            raise ValueError("Range too large for supported bit depths")
+ 
+-def variable_length_decode(base_value, n_bits, differences):
++    # Pack differences
++    packed_bits = []
++    for v in brick:
++        diff = v - min_val
++        # Convert diff to n-bit binary representation
++        # Note: In practice, this involves bit manipulation to pack multiple
++        # differences into bytes/words. Here we represent the conceptual step.
++        packed_bits.append(diff)
++
++    # Convert list of integers to bit-packed bytes
++    # Implementation detail: This step requires specific bit-packing logic
++    # for the chosen n (16, 8, 4, or 0).
++    packed_bytes = pack_bits(packed_bits, n)
++
++    return min_val, n, packed_bytes
++
++def pack_bits(values, n):
+     """
+-    Decompress a brick using variable-length coding.
+-    base_value: integer (min value)
+-    n_bits: integer (0, 4, 8, or 16)
+-    differences: list of integers (difference values)
+-    Returns: list of integers (voxel values)
++    Pack a list of integer values into bytes using n bits per value.
++    This is a conceptual placeholder for the actual bit-packing logic.
+     """
+-    if n_bits == 0:
+-        # Uniform brick, all values are base_value
+-        # Note: length of output must be known from context (brick size)
+-        return [base_value] * len(differences) # Assuming differences list length indicates brick size
+-    
+-    return [base_value + d for d in differences]
++    # [G] Actual implementation would involve shifting and ORing values
++    # into a byte buffer. For n=16, 8, 4, the alignment and padding
++    # differ.
++    return b'' # Placeholder for actual bit-packing routine
+ ```
++
++**Edge Cases and Pitfalls:**
++*   **Precision:** The base value must be stored with sufficient precision to avoid quantization errors when reconstructing the original values.
++*   **Boundary Conditions:** If $max - min \ge 2^{16}$, the method fails for $n < 16$. The implementation must handle this case, possibly by storing the brick in a default uncompressed format or using a larger bit depth if supported (though the source limits support to $n < 16$) [S1].
++*   **GPU Kernel Implementation:** Individual CUDA kernels are required for each supported bit length (16, 8, 4, 0) because the addressing modes differ. This increases code complexity but improves performance [S1].
+ 
+ ## Subtopics
+ 
+-### Variable Bit Length Encoding
+-A variant where a quadtree structure is built for each data slice of the volume data. The quadtree allows for adaptive bit-length encoding across different regions of the slice. This method usually needs to be combined with Run-Length Encoding (RLE) to store the encoding bit length of each voxel efficiently [S2, unofficial].
++### [Variable Bit Length Encoding](7195-variable-bit-length-encoding.md)
++A variant that uses a hierarchical structure (e.g., quadtree) to determine bit lengths locally, offering finer granularity than global brick-based VLC.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Determining min/max is $O(N)$ where $N$ is the number of voxels in the brick. Encoding/decoding is $O(N)$ with simple arithmetic. GPU implementation requires separate kernels for each bit length, adding launch overhead [S1].
+-*   **Memory Complexity:** Storage is reduced from $W$ bits per voxel to $n$ bits per voxel, where $n < W$ (typically 16). The base value adds negligible overhead per brick [S1].
+-*   **Performance:** Achieves high compression ratios when applied to delta values (temporal prediction residuals) because these values are small and clustered [S1].
+-*   **Strengths:** Simple to implement; highly effective for data with local value clustering; compatible with GPU hardware acceleration via specialized kernels [S1].
+-*   **Limitations:** Requires separate kernels for different bit lengths, increasing code complexity and potential memory fragmentation; less effective if the brick range is large (requiring $n$ close to original bit width) [S1].
+-*   **When to Use:** When volume data bricks exhibit small local value ranges, especially after temporal prediction [S1].
+-*   **When Not to Use:** When the data range within bricks is uniformly large, or when hardware does not support efficient variable-bit addressing [S1].
++*   **Time Complexity:** Determining min/max is $O(N)$ where $N$ is the number of voxels in the brick. Packing is $O(N)$. Decompression is also $O(N)$.
++*   **Memory Complexity:** Storage is reduced from $16 \times N$ bits (assuming 16-bit original) to $n \times N + \text{overhead}$ bits, where $n < 16$.
++*   **Measured Performance:** The method achieves higher compression ratios when applied to delta values (from temporal prediction) compared to absolute values, as delta values are typically smaller [S1].
++*   **Strengths:** Simple to implement; effective for data with local uniformity or small dynamic range; compatible with GPU acceleration via specialized kernels.
++*   **Limitations:** Only supports specific bit depths (16, 8, 4, 0); ineffective for bricks with large dynamic ranges; requires separate kernels for different bit depths.
++*   **When to Use:** When volume data exhibits local smoothness or uniformity, and when GPU decompression speed is critical.
++*   **When Not to Use:** When data has high local variance or when the overhead of managing multiple bit depths outweighs the compression gain.
+ 
+ ## Background
+-Variable-Length Coding for volume data was introduced in the context of GPU-supported lossless compression for rendering time-varying volume data. The method was proposed by Klajnsek et al. in 2010 [S1]. It is part of a hybrid CPU/GPU decompression pipeline where data packets are resolved on the GPU before being copied to a CUDA array for raycasting [S1]. The approach leverages the fact that voxel values in a dataset are not uniformly distributed, allowing bricks with small ranges to be compressed significantly [S1].
++Variable-Length Coding for volume data was introduced in the context of GPU-supported lossless compression for rendering time-varying volume data. The method was developed to address the increased storage requirements of large volume datasets, particularly when combined with temporal prediction schemes [S1]. The approach was presented in a paper by the Eurographics Association in 2010 [S1].
+ 
+ ## Sources
+-[S1] A GPU-Supported Lossless Compression Scheme for Rendering Time-Varying Volume Data, https://doi.org/10.2312/vg/vg10/109-116, fetched 2026-10-26
+-[S2] 体数据压缩技术综述, https://www.jcad.cn/article/id/9d3ce9cd-c97c-4fab-9291-a72fbe7ba37e, fetched 2026-10-30 (unofficial)+[S1] A GPU-Supported Lossless Compression Scheme for Rendering Time-Varying Volume Data, https://doi.org/10.2312/vg/vg10/109-116, fetched 2026-10-26

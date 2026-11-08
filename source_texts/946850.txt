@@ -1,1650 +1,466 @@
-2025 IEEE International Symposium on High-Performance Computer Architecture (HPCA)
-Gaussian Blending Unit: An Edge GPU Plug-in for
-Real-Time Gaussian-Based Rendering in AR/VR
-Zhifan Ye, Yonggan Fu, Jingqun Zhang, Leshu Li, Yongan Zhang, Sixu Li,
-Cheng Wan, Chenxi Wan, Chaojian Li, Sreemanth Prathipati, and Yingyan (Celine) Lin
-arXiv:2503.23625v1 [cs.GR] 30 Mar 2025
-Georgia Institute of Technology
-{zye327, yfu314, jzhang3368, yzhang919, sli941,
-cwan39, cli851, sreemanth, celine.lin}@gatech.edu
-Abstract—The rapidly advancing field of Augmented and
-Virtual Reality (AR/VR) demands real-time, photorealistic rendering on resource-constrained platforms. 3D Gaussian Splatting,
-delivering state-of-the-art (SOTA) performance in rendering
-efficiency and quality, has emerged as a promising solution
-across a broad spectrum of AR/VR applications. However,
-despite its effectiveness on high-end GPUs, it struggles on edge
-systems like the Jetson Orin NX Edge GPU, achieving only
-7-17 FPS—well below the over 60 FPS standard required for
-truly immersive AR/VR experiences. Addressing this challenge,
-we perform a comprehensive analysis of Gaussian-based AR/VR
-applications and identify the Gaussian Blending Stage, which
-intensively calculates each Gaussian’s contribution at every
-pixel, as the primary bottleneck. In response, we propose a
-Gaussian Blending Unit (GBU), an edge GPU plug-in module
-for real-time rendering in AR/VR applications. Notably, our GBU
-can be seamlessly integrated into conventional edge GPUs and
-collaboratively supports a wide range of AR/VR applications.
-Specifically, GBU incorporates an intra-row sequential shading
-(IRSS) dataflow that shades each row of pixels sequentially from
-left to right, utilizing a two-step coordinate transformation. This
-transformation enables (1) the sharing of intermediate values
-between adjacent pixels, reducing pixel-wise computation costs
-by up to 5.5×, and (2) the early identification and skipping
-of Gaussians that minimally contribute to the pixels, reducing
-per-pixel computation by up to 93%. When directly deployed
-on a GPU, the proposed dataflow achieved a non-trivial 1.72×
-speedup on real-world static scenes, though still falls short of realtime rendering performance. Recognizing the limited compute
-utilization in the GPU-based implementation, GBU enhances
-rendering speed with a dedicated rendering engine that balances
-the workload across rows by aggregating computations from
-multiple Gaussians. Additionally, GBU integrates a Gaussian
-Reuse Cache, reducing off-chip memory accesses by 44.9% and
-resulting in a 1.14× speedup in rendering. Experiments across
-representative AR/VR applications demonstrate that our GBU
-provides a unified solution for on-device real-time rendering while
-maintaining SOTA rendering quality.
-I. I NTRODUCTION
-The Augmented and Virtual Reality (AR/VR) sector is
-rapidly expanding, driven by substantial industry interest and
-investment [1], [3]. Edge AR/VR platforms, like headsets,
-strive to provide immersive and interactive experiences in
-various applications such as virtual meetings, tourism, and
-try-ons. These applications require real-time, photorealistic
-rendering of scenes composed of static [38] and dynamic [36],
-[42] objects, as well as human avatars with complex poses and
-expressions [35], [37], [41]. Therefore, it is crucial to develop
-Voxel-based NeRFs
-MLP-based NeRFs
-Static Scenes
-3D Gaussians
-Static Scenes
-33
-29
-1
-25
-Human
-Avatars
-Dynamic
-Scenes
-Rendering Quality (PSNR)
-Human
-Avatars
-5
-20
-Dynamic
-Scenes
-Rendering Speed (FPS)
-Fig. 1. Benchmarking 3D Gaussian Splatting [20], [46], [51] with previous
-works [6], [7], [10], [19], [40], [48] on real-world datasets [10], [16], [31].
-Here Peak-signal-to-noise-ratio (PSNR) and frames-per-second (FPS) are the
-reported ones from previous papers [20], [46], [51], and all rendering speeds
-are measured on an edge GPU [2].
-a versatile rendering pipeline that can accurately reconstruct
-diverse real-world scenes and perform efficiently on edge
-AR/VR devices.
-In the graphics and computer vision community, 3D Gaussian Splatting [20] has emerged as a highly promising 3D
-scene representation for AR/VR. It achieves SOTA reconstruction performance across various objects and scenes [20], [29],
-[49], and excels in AR/VR tasks beyond 3D reconstruction,
-including 3D asset creation [47], [52], scene editing [11], [18],
-and open vocabulary querying [44]. Compared to previous
-representations like neural radiance fields (NeRFs) [38], 3D
-Gaussians offer better balance with faster reconstruction speed
-and significantly improve rendering framerate [9], as shown
-in Fig. 1. This makes 3D Gaussian Splatting an excellent
-option for on-device 3D applications on resource-constrained
-AR/VR platforms, where edge GPUs are the primary rendering
-hardware [1], [3].
-Despite the potential of 3D Gaussians for real-time rendering on server and desktop devices, a significant performance
-gap remains for real-time rendering (i.e., ≥ 60 FPS [54]) on
-edge devices. For example, rendering real-world scenes from
-the MipNeRF-360 dataset [7] on the Jetson Orin NX [2],
-an edge GPU from NVIDIA, achieves only 7 to 17 FPS.
-This gap hinders the adoption of emerging AR/VR applications that leverage the latest in 3D reconstruction technology.
-To bridge this gap, we conducted a comprehensive analysis
-of multiple 3D Gaussian-based rendering pipelines targeting
-various AR/VR applications [20], [26], [49]. We identified
-that the Gaussian Blending stage, where the opacity of each
-Gaussian’s contribution to pixels is calculated, is consistently
-the primary latency bottleneck, accounting for 48% to 78% of
-the rendering time in these applications. This stage requires
-intensive per-pixel processing, which involves multiple matrixvector multiplications and becomes the bottleneck for overall
-latency.
-To this end, we have developed the Gaussian Blending
-Unit (GBU), a hardware module designed for edge GPUs to
-facilitate real-time rendering using 3D Gaussians, enhancing
-AR/VR applications. This unit integrates smoothly with existing edge GPUs, accelerating the common rendering bottleneck
-to improve performance across various applications, with a
-design that ensures compatibility and scalability. Specifically,
-our contributions are summarized as follows:
-We conducted a comprehensive analysis of Gaussianbased AR/VR applications, characterizing their rendering
-pipelines into common and application-specific stages.
-Through this, we identified the Gaussian Blending stage
-as the common bottleneck that prohibits real-time rendering on resource-constrained AR/VR devices.
-• We developed GBU, a plug-in module for edge GPUs that
-enhances real-time rendering for AR/VR applications. By
-offloading the shared bottleneck, the Gaussian Blending
-stage, to GBU, we ensure real-time rendering speeds.
-Meanwhile, by keeping application-specific computations
-on the GPU’s general-purpose compute units and seamless integration between GBU and GPU, the acceleration
-system maintains compatibility with a wide range of
-AR/VR applications.
-• To reduce the high computational load of the bottleneck Gaussian Blending stage, we developed an IntraRow Sequential Shading (IRSS) dataflow that sequentially
-shades each row of pixels from left to right. Enhanced
-with a two-step coordinate transformation, this dataflow
-reduces pixel-wise computational costs by up to 5.5×
-through the sharing of computations between adjacent
-pixels. Additionally, the IRSS dataflow allows the GBU
-to identify and skip redundant Gaussians that contribute
-minimally to a pixel, saving up to 92.3% of the computational workload in the Gaussian Blending stage. When
-integrated with a GPU, the proposed IRSS dataflow
-increases rendering speed on real-world static scenes
-from 13 FPS to 22 FPS.
-• To meet the real-time framerate requirements (i.e. over
-60 FPS) of AR/VR applications [54], we identified the
-imbalanced workload between pixel rows as a primary
-performance bottleneck in GPUs, resulting in only 18.9%
-GPU utilization on real-world static scenes. To address
-this issue, the GBU hardware incorporates a dedicated
-rendering engine that mitigates the problem by enabling
-asynchronous rendering of individual rows and distributing the workload across multiple Gaussians. Additionally, the GBU is equipped with a specialized Gaussian
-•
-(a)
-(b)
-Fig. 2. (a) A real-world image [7] rendered with 7 millions of 3D Gaussians;
-and (b) the corresponding 3D Gaussians. The red boxes highlight zoomed-in
-views for better visualization.
-Reuse Cache, which reduces off-chip memory accesses
-by 44.9%, leading to a 1.14× speedup on real-world static
-scenes.
-• We conducted extensive evaluations of our GBU across a
-variety of popular AR/VR rendering pipelines and applications, encompassing static and dynamic objects/scenes,
-as well as human avatars. The experiment results show
-that the GBU provides a comprehensive solution for realtime rendering, achieving speeds greater than 60 FPS on
-edge devices across a broad range of AR/VR applications,
-while consistently maintaining SOTA rendering quality.
-It is worth noting that our IRSS dataflow and GBU design
-is applicable to a wide range of 3D applications on edge
-devices beyond just AR/VR platforms, thus inspiring future
-innovations in hardware and system support for Gaussianbased rendering and facilitating ubiquitous 3D intelligence on
-edge devices.
-II. P RELIMINARIES OF 3D G AUSSIANS
-In this section, we first elaborate on reconstructing a static
-scene using 3D Gaussians and describe the corresponding
-rendering pipeline in Sec. II-A and Sec. II-B, respectively.
-We then detail how to extend the rendering pipeline to other
-popular AR/VR applications in Sec. II-C and summarize their
-common workload patterns in Sec. II-D.
-A. Gaussian Splatting for Static Scene Reconstruction
-Representing Scenes with 3D Gaussians. Recently, 3D
-Gaussian Splatting [20] has emerged as the SOTA method for
-3D reconstruction tasks, excelling in both rendering quality
-and speed. As illustrated in Fig. 2, 3D Gaussian Splatting
-reconstructs 3D objects and scenes using a set of elliptical
-3D Gaussian kernels, each described by an (unnormalized)
-Gaussian probability density function:
-1
-T
-−1
-G(x) = e− 2 (x−µ) Σ
-(x−µ)
-,
-(1)
-where the Gaussian function is characterized by a 3D covariance matrix Σ and is centered at the point µ (i.e., its
-mean). This covariance matrix can be decomposed into a
-rotation matrix R and a scaling matrix S via the decomposition
-Σ = RT S T SR, which effectively determines the orientation
-R and scale S of the Gaussian distribution in 3D space.
-To represent the color and density distribution of a 3D object
-or scene, each Gaussian kernel is further assigned an opacity
-factor o and a set of Spherical Harmonics (SH) coefficients
-Fig. 3. An illustration of the rendering pipeline for 3D Gaussian Splatting [20]. (a) A set of 3D Gaussians, each parameterized by a 3D Gaussian function
-(covariance Σ and mean µ), SH coefficients sh, and an opacity factor o. (b) Projected 2D Gaussians, each characterized by a 2D covariance Σ∗ , a 2D mean
-µ∗ , depth d, color c, and opacity factor o. (c) Each 2D Gaussian is sampled at pixels, resulting in a set of 2D fragments with color c and opacity α. (d)
-Color c and opacity α of output pixels are determined by accumulating the color and opacity of all fragments from all Gaussians that overlap each pixel.
-sh. These SH coefficients sh are utilized to determine the
-color c = f (v; sh) of a Gaussian when viewed from a specific
-direction v, where f is the spherical harmonics function [12].
-Employing SH coefficients, rather than assigning a static,
-view-independent color to each Gaussian, enables the modeling of real-world visual phenomena, e.g., specular reflection
-and the Fresnel Effect. Collectively, tens of thousands of these
-Gaussian kernels represent colored 3D objects and scenes in
-complex real-world scenarios, as shown in Fig. 2(b).
-B. The Rendering Pipeline of 3D Gaussians
-Given reconstructed 3D Gaussians and a viewing direction,
-Fig. 3 illustrates the rendering pipeline, which transforms/renders the 3D Gaussian kernels into a 2D RGB image. This
-rendering process is divided into three steps:
-Rendering Step ❶: Preprocessing. This preprocessing step
-serves two purposes: (1) projecting all 3D Gaussians onto the
-2D screen and (2) computing the depth d and RGB color c
-of each Gaussian based on the view direction. After this step,
-each 3D Gaussian is transformed into a 2D Gaussian on the
-screen with an RGB color c and a depth value d. Similar to
-3D Gaussians, each 2D Gaussian kernel is also defined by a
-covariance matrix Σ⋆ and centered at a point µ⋆ (i.e., the mean
-value):
-1
-⋆ T
-⋆ −1
-G⋆ (x) = e− 2 (x−µ ) Σ
-(x−µ⋆ )
-,
-(2)
-where its 2D covariance matrix Σ⋆ and mean value µ⋆ can be
-derived from the corresponding 3D covariance Σ and mean µ
-using the following formulas [56]:
-µ⋆ = JW µ;
-Σ⋆ = JW ΣW T J T .
-screen can occlude those farther away, the color and opacity
-of the overlapping 2D Gaussians should be blended based on a
-near-to-far depth order. Therefore, before the blending process
-in the next step, depth sorting is necessary to determine the
-blending order for the overlapping 2D Gaussians.
-Rendering Step ❸: Gaussian Blending. This step blends the
-color and opacity of 2D Gaussians at each pixel according
-to a near-to-far depth order, producing the final 2D RGB
-image. As illustrated in Fig. 3(c) and (d), this step involves
-two consecutive operations: ❸-1 opacity computation, which
-calculates the contribution, i.e., the opacity, of each Gaussian
-at the pixel; and ❸-2 α-blending, which blends the colors of
-all Gaussians overlapping a pixel, weighted by their opacity
-at that pixel.
-For ❸-1 opacity computation, each 2D Gaussian function
-is sampled at the pixel centers of the screen, resulting in a
-pixel-aligned 2D grid as shown in Fig. 3(c). Each cell of this
-grid is referred to as a fragment (i.e., the footprint of a 2D
-Gaussian on a pixel, one pixel can have multiple fragments if
-multiple 2D Gaussians are projected onto it). Specifically, for
-a fragment centered at pixel P and associated with Gaussian
-Gi , its color cP,i is the Gaussian’s color ci . Its opacity is
-determined by sampling the Gaussian function at pixel P ,
-weighted by its opacity factor oi :
-αP,i = oi G⋆i (P )
-= oi e
-.
-(5)
-Subsequently, the ❸-2 α-blending process blends the fragments overlapping the same pixel from all 2D Gaussians:
-(3)
-Here, W represents a viewing transformation matrix that
-transforms Gaussians to the view space, and J is a Jacobian
-matrix that defines the mapping from the 3D space to the
-2D screen. A byproduct of the projection W µ is the depth
-d of the Gaussian, i.e., the distance from the viewpoint to
-the Gaussian’s center. This depth is used to determine the
-occlusion relationships between Gaussians in subsequent steps.
-Concurrently, this step accounts for the viewing direction v of
-the camera to compute the RGB color c for all Gaussians, as
-specified in c = f (v; sh).
-Rendering Step ❷: Sorting by Depth. After projecting all the
-Gaussians onto the 2D screen, a pixel may overlap with multiple 2D Gaussians. Considering that Gaussians closer to the
-(4)
-T ⋆ −1
-(P −µ⋆
-− 21 (P −µ⋆
-i ) Σi
-i)
-CP =
-n
-X
-TP,i αP,i ci ,
-(6)
-i=1
-where i iterates over all fragments
-overlapping the same pixel
-Qi−1
-P , ordered by depth, and TP,i = j=1 (1−αP,j ) represents the
-accumulated transmittance, quantifying the occlusion effects
-caused by the first (i − 1) Gaussians.
-Practical Implementation of the Above Rendering Step ❸.
-It is computationally infeasible to exhaustively compute and
-blend the contribution of each Gaussian to every pixel in the
-entire image. Therefore, in practice, the implementation of 3D
-Gaussian Splatting [20] truncates the 2D Gaussian function in
-Eq. 2 at a predetermined threshold. Due to their negligible
-impact, fragments outside this truncation range (i.e. whose
-Static Scenes
-Dynamic Scenes
-Human Avatars
-Step.1: Preprocessing
-120
-Dynamic Scenes
-Human Avatars
-100%
-90
-60
-30
-60 FPS
-0
-Bicycle Bonsai Counter Kitchen Room
-Flame
-Stump
-Steak
-Sear
-Steak
-Cut
-Female-4 Male-3 Male-4
-Beef
-Fig. 4. End-to-end rendering time for three real-world datasets [5], [7], [32].
-The red line represents the maximum rendering time required to achieve realtime rendering (60 FPS).
-opacity is lower than the threshold) are not considered in αblending. In other words, each 3D Gaussian kernel is truncated
-into a 2D ellipsoid when projected onto the 2D screen.
-3D Gaussian Splatting [20] implemented a highly optimized
-CUDA kernel to blend these 2D ellipsoids. Specifically, it
-employs tile-based rendering, a strategy commonly used in
-mobile devices, which divides the screen into multiple 16×16
-tiles and runs ❸-1 and ❸-2 in a per-tile basis. Each 2D
-ellipsoid is assigned to corresponding tiles based on its overlap
-with the tile. Each tile is then managed by a Streaming
-Multiprocessor (SM) on the GPU. The SM processes all the
-assigned Gaussians following the depth order, computes their
-contributions to all the pixels within the tile in parallel (using
-one thread per pixel), and updates the pixel colors.
-C. Extend 3D Gaussians to More AR/VR Applications
-In this subsection, we introduce the extensions of 3D
-Gaussians to more AR/VR applications, using dynamic scenes
-and avatars as examples. We will demonstrate the effectiveness
-of our techniques in these AR/VR applications in Sec. VI.
-3D Gaussians for Dynamic Scene Reconstruction. Besides
-static scenes, the 3D reconstruction of dynamic scenes is a
-highly desirable functionality in AR/VR applications involving
-evolving objects and scenes, such as remote education and
-virtual meetings. The complexity lies in capturing the intricate
-motion and deformation over time. 3D Gaussians, which
-explicitly decompose a scene into 3D Gaussian kernels, can
-effectively model both aspects. Specifically, to model the
-motion and deformation in dynamic scenes, it’s crucial to make
-the Gaussian parameters time-dependent. For example, recent
-work on 4D Gaussian Splatting [51] parameterizes a dynamic
-scene with a set of 4D Gaussian functions. Each 4D Gaussian
-kernel is defined by a 4D covariance matrix and a 4D mean
-value. The kernels can be efficiently sampled at any timestep
-t, resulting in a set of 3D Gaussian kernels at the timestep.
-3D Gaussians for Human Avatar Reconstruction. Animating human avatars is another important task in AR/VR.
-Here, “animatable” means that the reconstructed human avatar
-can be deformed according to given pose and expression
-parameters θ, allowing for control over the avatar’s pose and
-expression. Rendering human avatars at real-time framerates is
-crucial for many AR/VR applications, including telecommunications, virtual meetings, and remote education. A plethora
-Percentage of Latency
-Rendering Time (ms)
-Step.3 Gaussian Blending
-Step.2: Sorting
-Static Scenes
-80%
-60%
-40%
-20%
-0%
-Bicycle Bonsai Counter Kitchen Room
-Stump
-Flame
-Steak
-Sear
-Steak
-Cut
-Female-4 Male-3 Male-4
-Beef
+# Gaussian Blending Unit: An Edge GPU Plug-in for Real-Time Gaussian-Based Rendering in AR/VR
+
+Zhifan Ye, Yonggan Fu, Jingqun Zhang, Leshu Li, Yongan Zhang, Sixu Li, Cheng Wan, Chenxi Wan, Chaojian Li, Sreemanth Prathipati, and Yingyan (Celine) Lin Georgia Institute of Technology {zye327, yfu314, jzhang3368, yzhang919, sli941, cwan39, cli851, sreemanth, celine.lin}@gatech.edu
+
+Abstract—The rapidly advancing field of Augmented and Virtual Reality (AR/VR) demands real-time, photorealistic rendering on resource-constrained platforms. 3D Gaussian Splatting, delivering state-of-the-art (SOTA) performance in rendering efficiency and quality, has emerged as a promising solution across a broad spectrum of AR/VR applications. However, despite its effectiveness on high-end GPUs, it struggles on edge systems like the Jetson Orin NX Edge GPU, achieving only 7-17 FPS—well below the over 60 FPS standard required for truly immersive AR/VR experiences. Addressing this challenge, we perform a comprehensive analysis of Gaussian-based AR/VR applications and identify the Gaussian Blending Stage, which intensively calculates each Gaussian's contribution at every pixel, as the primary bottleneck. In response, we propose a Gaussian Blending Unit (GBU), an edge GPU plug-in module for real-time rendering in AR/VR applications. Notably, our GBU can be seamlessly integrated into conventional edge GPUs and collaboratively supports a wide range of AR/VR applications. Specifically, GBU incorporates an intra-row sequential shading (IRSS) dataflow that shades each row of pixels sequentially from left to right, utilizing a two-step coordinate transformation. This transformation enables (1) the sharing of intermediate values between adjacent pixels, reducing pixel-wise computation costs by up to 5.5×, and (2) the early identification and skipping of Gaussians that minimally contribute to the pixels, reducing per-pixel computation by up to 93%. When directly deployed on a GPU, the proposed dataflow achieved a non-trivial 1.72× speedup on real-world static scenes, though still falls short of realtime rendering performance. Recognizing the limited compute utilization in the GPU-based implementation, GBU enhances rendering speed with a dedicated rendering engine that balances the workload across rows by aggregating computations from multiple Gaussians. Additionally, GBU integrates a Gaussian Reuse Cache, reducing off-chip memory accesses by 44.9% and resulting in a 1.14× speedup in rendering. Experiments across representative AR/VR applications demonstrate that our GBU provides a unified solution for on-device real-time rendering while maintaining SOTA rendering quality.
+
+# I. INTRODUCTION
+
+The Augmented and Virtual Reality (AR/VR) sector is rapidly expanding, driven by substantial industry interest and investment [1], [3]. Edge AR/VR platforms, like headsets, strive to provide immersive and interactive experiences in various applications such as virtual meetings, tourism, and try-ons. These applications require real-time, photorealistic rendering of scenes composed of static [38] and dynamic [36], [42] objects, as well as human avatars with complex poses and expressions [35], [37], [41]. Therefore, it is crucial to develop
+
+
+
+Fig. 1. Benchmarking 3D Gaussian Splatting [20], [46], [51] with previous works [6], [7], [10], [19], [40], [48] on real-world datasets [10], [16], [31]. Here Peak-signal-to-noise-ratio (PSNR) and frames-per-second (FPS) are the reported ones from previous papers [20], [46], [51], and all rendering speeds are measured on an edge GPU [2].
+
+a versatile rendering pipeline that can accurately reconstruct diverse real-world scenes and perform efficiently on edge AR/VR devices.
+
+In the graphics and computer vision community, 3D Gaussian Splatting [20] has emerged as a highly promising 3D scene representation for AR/VR. It achieves SOTA reconstruction performance across various objects and scenes [20], [29], [49], and excels in AR/VR tasks beyond 3D reconstruction, including 3D asset creation [47], [52], scene editing [11], [18], and open vocabulary querying [44]. Compared to previous representations like neural radiance fields (NeRFs) [38], 3D Gaussians offer better balance with faster reconstruction speed and significantly improve rendering framerate [9], as shown in Fig. 1. This makes 3D Gaussian Splatting an excellent option for on-device 3D applications on resource-constrained AR/VR platforms, where edge GPUs are the primary rendering hardware [1], [3].
+
+Despite the potential of 3D Gaussians for real-time rendering on server and desktop devices, a significant performance gap remains for real-time rendering (i.e., ≥ 60 FPS [54]) on edge devices. For example, rendering real-world scenes from the MipNeRF-360 dataset [7] on the Jetson Orin NX [2], an edge GPU from NVIDIA, achieves only 7 to 17 FPS. This gap hinders the adoption of emerging AR/VR applications that leverage the latest in 3D reconstruction technology. To bridge this gap, we conducted a comprehensive analysis of multiple 3D Gaussian-based rendering pipelines targeting various AR/VR applications [20], [26], [49]. We identified that the Gaussian Blending stage, where the opacity of each Gaussian's contribution to pixels is calculated, is consistently the primary latency bottleneck, accounting for 48% to 78% of the rendering time in these applications. This stage requires intensive per-pixel processing, which involves multiple matrixvector multiplications and becomes the bottleneck for overall latency.
+
+To this end, we have developed the Gaussian Blending Unit (GBU), a hardware module designed for edge GPUs to facilitate real-time rendering using 3D Gaussians, enhancing AR/VR applications. This unit integrates smoothly with existing edge GPUs, accelerating the common rendering bottleneck to improve performance across various applications, with a design that ensures compatibility and scalability. Specifically, our contributions are summarized as follows:
+
+- We conducted a comprehensive analysis of Gaussianbased AR/VR applications, characterizing their rendering pipelines into common and application-specific stages. Through this, we identified the Gaussian Blending stage as the common bottleneck that prohibits real-time rendering on resource-constrained AR/VR devices.
+- We developed GBU, a plug-in module for edge GPUs that enhances real-time rendering for AR/VR applications. By offloading the shared bottleneck, the Gaussian Blending stage, to GBU, we ensure real-time rendering speeds. Meanwhile, by keeping application-specific computations on the GPU's general-purpose compute units and seamless integration between GBU and GPU, the acceleration system maintains compatibility with a wide range of AR/VR applications.
+- To reduce the high computational load of the bottleneck Gaussian Blending stage, we developed an Intra-Row Sequential Shading (IRSS) dataflow that sequentially shades each row of pixels from left to right. Enhanced with a two-step coordinate transformation, this dataflow reduces pixel-wise computational costs by up to 5.5× through the sharing of computations between adjacent pixels. Additionally, the IRSS dataflow allows the GBU to identify and skip redundant Gaussians that contribute minimally to a pixel, saving up to 92.3% of the computational workload in the Gaussian Blending stage. When integrated with a GPU, the proposed IRSS dataflow increases rendering speed on real-world static scenes from 13 FPS to 22 FPS.
+- To meet the real-time framerate requirements (i.e. over 60 FPS) of AR/VR applications [54], we identified the imbalanced workload between pixel rows as a primary performance bottleneck in GPUs, resulting in only 18.9% GPU utilization on real-world static scenes. To address this issue, the GBU hardware incorporates a dedicated rendering engine that mitigates the problem by enabling asynchronous rendering of individual rows and distributing the workload across multiple Gaussians. Additionally, the GBU is equipped with a specialized Gaussian
+
+
+
+Fig. 2. (a) A real-world image [7] rendered with 7 millions of 3D Gaussians; and (b) the corresponding 3D Gaussians. The red boxes highlight zoomed-in views for better visualization.
+
+Reuse Cache, which reduces off-chip memory accesses by 44.9%, leading to a 1.14× speedup on real-world static scenes.
+
+- We conducted extensive evaluations of our GBU across a variety of popular AR/VR rendering pipelines and applications, encompassing static and dynamic objects/scenes, as well as human avatars. The experiment results show that the GBU provides a comprehensive solution for realtime rendering, achieving speeds greater than 60 FPS on edge devices across a broad range of AR/VR applications, while consistently maintaining SOTA rendering quality.
+
+It is worth noting that our IRSS dataflow and GBU design is applicable to a wide range of 3D applications on edge devices beyond just AR/VR platforms, thus inspiring future innovations in hardware and system support for Gaussianbased rendering and facilitating ubiquitous 3D intelligence on edge devices.
+
+## II. PRELIMINARIES OF 3D GAUSSIANS
+
+In this section, we first elaborate on reconstructing a static scene using 3D Gaussians and describe the corresponding rendering pipeline in Sec. II-A and Sec. II-B, respectively. We then detail how to extend the rendering pipeline to other popular AR/VR applications in Sec. II-C and summarize their common workload patterns in Sec. II-D.
+
+#### A. Gaussian Splatting for Static Scene Reconstruction
+
+Representing Scenes with 3D Gaussians. Recently, 3D Gaussian Splatting [20] has emerged as the SOTA method for 3D reconstruction tasks, excelling in both rendering quality and speed. As illustrated in Fig. 2, 3D Gaussian Splatting reconstructs 3D objects and scenes using a set of elliptical 3D Gaussian kernels, each described by an (unnormalized) Gaussian probability density function:
+
+$$G(x) = e^{-\frac{1}{2}(x-\mu)^T\Sigma^{-1}(x-\mu)}, \quad (1)$$
+
+where the Gaussian function is characterized by a 3D covariance matrix Σ and is centered at the point µ (i.e., its mean). This covariance matrix can be decomposed into a rotation matrix R and a scaling matrix S via the decomposition Σ = RT S T SR, which effectively determines the orientation R and scale S of the Gaussian distribution in 3D space.
+
+To represent the color and density distribution of a 3D object or scene, each Gaussian kernel is further assigned an opacity factor o and a set of Spherical Harmonics (SH) coefficients
+
+
+
+
+
+Fig. 3. An illustration of the rendering pipeline for 3D Gaussian Splatting [20]. (a) A set of 3D Gaussians, each parameterized by a 3D Gaussian function (covariance Σ and mean µ), SH coefficients sh, and an opacity factor o. (b) Projected 2D Gaussians, each characterized by a 2D covariance Σ∗, a 2D mean µ ∗, depth d, color c, and opacity factor o. (c) Each 2D Gaussian is sampled at pixels, resulting in a set of 2D fragments with color c and opacity α. (d) Color c and opacity α of output pixels are determined by accumulating the color and opacity of all fragments from all Gaussians that overlap each pixel.
+
+sh. These SH coefficients sh are utilized to determine the color c = f(v; sh) of a Gaussian when viewed from a specific direction v, where f is the spherical harmonics function [12]. Employing SH coefficients, rather than assigning a static, view-independent color to each Gaussian, enables the modeling of real-world visual phenomena, e.g., specular reflection and the Fresnel Effect. Collectively, tens of thousands of these Gaussian kernels represent colored 3D objects and scenes in complex real-world scenarios, as shown in Fig. 2\(b).
+
+#### B. The Rendering Pipeline of 3D Gaussians
+
+Given reconstructed 3D Gaussians and a viewing direction, Fig. 3 illustrates the rendering pipeline, which transforms/renders the 3D Gaussian kernels into a 2D RGB image. This rendering process is divided into three steps:
+
+Rendering Step ❶: Preprocessing. This preprocessing step serves two purposes: (1) projecting all 3D Gaussians onto the 2D screen and (2) computing the depth d and RGB color c of each Gaussian based on the view direction. After this step, each 3D Gaussian is transformed into a 2D Gaussian on the screen with an RGB color c and a depth value d. Similar to 3D Gaussians, each 2D Gaussian kernel is also defined by a covariance matrix Σ ⋆ and centered at a point µ ⋆ (i.e., the mean value):
+
+$$G^(x) = e^{-\frac{1}{2}(x-\mu^)^T\Sigma^{-1}(x-\mu^)}, \quad (2)$$
+
+where its 2D covariance matrix Σ ⋆ and mean value µ ⋆ can be derived from the corresponding 3D covariance Σ and mean µ using the following formulas [56]:
+
+$$\mu^* = JW\mu; \quad \Sigma^* = JW\Sigma W^T J^T. \quad (3)$$
+
+Here, W represents a viewing transformation matrix that transforms Gaussians to the view space, and J is a Jacobian matrix that defines the mapping from the 3D space to the 2D screen. A byproduct of the projection W µ is the depth d of the Gaussian, i.e., the distance from the viewpoint to the Gaussian's center. This depth is used to determine the occlusion relationships between Gaussians in subsequent steps. Concurrently, this step accounts for the viewing direction v of the camera to compute the RGB color c for all Gaussians, as specified in c = f(v; sh).
+
+Rendering Step ❷: Sorting by Depth. After projecting all the Gaussians onto the 2D screen, a pixel may overlap with multiple 2D Gaussians. Considering that Gaussians closer to the screen can occlude those farther away, the color and opacity of the overlapping 2D Gaussians should be blended based on a near-to-far depth order. Therefore, before the blending process in the next step, depth sorting is necessary to determine the blending order for the overlapping 2D Gaussians.
+
+Rendering Step ❸: Gaussian Blending. This step blends the color and opacity of 2D Gaussians at each pixel according to a near-to-far depth order, producing the final 2D RGB image. As illustrated in Fig. 3\(c) and (d), this step involves two consecutive operations: ❸-1 opacity computation, which calculates the contribution, i.e., the opacity, of each Gaussian at the pixel; and ❸-2 α*-blending*, which blends the colors of all Gaussians overlapping a pixel, weighted by their opacity at that pixel.
+
+For ❸-1 opacity computation, each 2D Gaussian function is sampled at the pixel centers of the screen, resulting in a pixel-aligned 2D grid as shown in Fig. 3\(c). Each cell of this grid is referred to as a fragment (i.e., the footprint of a 2D Gaussian on a pixel, one pixel can have multiple fragments if multiple 2D Gaussians are projected onto it). Specifically, for a fragment centered at pixel P and associated with Gaussian Gi , its color cP,i is the Gaussian's color ci . Its opacity is determined by sampling the Gaussian function at pixel P, weighted by its opacity factor oi :
+
+| $\alpha_{P,i} = o_i G_i^*(P)$ | (4) |
+|-------------------------------|-----|
+|-------------------------------|-----|
+
+
+$$= o_i e^{-\frac{1}{2}(P-\mu_i^)^T \Sigma_i^{-1} (P-\mu_i^*)}. \quad (5)$$
+
+Subsequently, the ❸-2 α*-blending* process blends the fragments overlapping the same pixel from all 2D Gaussians:
+
+$$\mathbb{C}_P = \sum_{i=1}^n T_{P,i} \alpha_{P,i} c_i, \quad (6)$$
+
+where i iterates over all fragments overlapping the same pixel P, ordered by depth, and TP,i = Qi−1 j=1(1−αP,j ) represents the accumulated transmittance, quantifying the occlusion effects caused by the first (i − 1) Gaussians.
+
+Practical Implementation of the Above Rendering Step ❸. It is computationally infeasible to exhaustively compute and blend the contribution of each Gaussian to every pixel in the entire image. Therefore, in practice, the implementation of 3D Gaussian Splatting [20] truncates the 2D Gaussian function in Eq. 2 at a predetermined threshold. Due to their negligible impact, fragments outside this truncation range (i.e. whose
+
+
+
+Fig. 4. End-to-end rendering time for three real-world datasets [5], [7], [32]. The red line represents the maximum rendering time required to achieve realtime rendering (60 FPS).
+
+opacity is lower than the threshold) are not considered in α*blending*. In other words, each 3D Gaussian kernel is truncated into a 2D ellipsoid when projected onto the 2D screen.
+
+3D Gaussian Splatting [20] implemented a highly optimized CUDA kernel to blend these 2D ellipsoids. Specifically, it employs tile-based rendering, a strategy commonly used in mobile devices, which divides the screen into multiple 16×16 tiles and runs ❸-1 and ❸-2 in a per-tile basis. Each 2D ellipsoid is assigned to corresponding tiles based on its overlap with the tile. Each tile is then managed by a Streaming Multiprocessor (SM) on the GPU. The SM processes all the assigned Gaussians following the depth order, computes their contributions to all the pixels within the tile in parallel (using one thread per pixel), and updates the pixel colors.
+
+#### C. Extend 3D Gaussians to More AR/VR Applications
+
+In this subsection, we introduce the extensions of 3D Gaussians to more AR/VR applications, using dynamic scenes and avatars as examples. We will demonstrate the effectiveness of our techniques in these AR/VR applications in Sec. VI.
+
+3D Gaussians for Dynamic Scene Reconstruction. Besides static scenes, the 3D reconstruction of dynamic scenes is a highly desirable functionality in AR/VR applications involving evolving objects and scenes, such as remote education and virtual meetings. The complexity lies in capturing the intricate motion and deformation over time. 3D Gaussians, which explicitly decompose a scene into 3D Gaussian kernels, can effectively model both aspects. Specifically, to model the motion and deformation in dynamic scenes, it's crucial to make the Gaussian parameters time-dependent. For example, recent work on 4D Gaussian Splatting [51] parameterizes a dynamic scene with a set of 4D Gaussian functions. Each 4D Gaussian kernel is defined by a 4D covariance matrix and a 4D mean value. The kernels can be efficiently sampled at any timestep t, resulting in a set of 3D Gaussian kernels at the timestep.
+
+3D Gaussians for Human Avatar Reconstruction. Animating human avatars is another important task in AR/VR. Here, "animatable" means that the reconstructed human avatar can be deformed according to given pose and expression parameters θ, allowing for control over the avatar's pose and expression. Rendering human avatars at real-time framerates is crucial for many AR/VR applications, including telecommunications, virtual meetings, and remote education. A plethora
+
+
+
 Fig. 5. Rendering time breakdown on three real-world datasets [5], [7], [32].
-of works [17], [26], [29], [55] has explored the application of
-3D Gaussians to this domain.
-D. Workload Summary of Gaussian-Based AR/VR
-From the aforementioned rendering pipelines, we observe
-that (1) diverse Gaussian-based AR/VR applications differ primarily in Rendering Step ❶. For instance, they may introduce
-additional transformations for the geometric parameters of 3D
-Gaussians or replace spherical harmonics functions with timeconditioned parameterizations; and (2) after Rendering Step ❶,
-all rendering pipelines involve the same set of computations
-in Rendering Step ❷ and Rendering Step ❸. This observation
-holds for even more 3D Gaussian-based applications, such
-as simulating driving scenes [53] and rendering languageembedded semantic images [44].
-III. P ROFILING AND A NALYSIS
-To understand the typical acceleration bottlenecks of
-Gaussian-based rendering pipelines, we profile popular
-Gaussian-based reconstruction algorithms on AR/VR platforms. These include 3D Gaussian Splatting [20] for reconstructing static scenes, 4D Gaussian Splatting [51] for dynamic
-scene reconstruction, and Splatting Avatar [46] for human
-avatar animation. Our profiling is conducted using real-world
-datasets [5], [7], [32]. The detailed statistics of the datasets are
-listed in Tab. I. We run the algorithms on an edge GPU device,
-the Jetson Orin NX 16GB [2], and use Nisight Systems [4] for
-a kernel-level rendering time breakdown.
-A. Overall Profiling Results
-We summarize the overall runtime and the corresponding
-rendering time breakdown into the three aforementioned rendering stages in Fig. 4 and Fig. 5, respectively. This profiling
-encompasses 12 real-world scenes of three different types: 6
-static scenes, 3 dynamic scenes, and 3 human avatars.
-TABLE I
-A LGORITHM AND DATASET S ETUP FOR P ROFILING .
-Scene Type
-Scenes
-Resolution
-Static Scene [7]
-Bicycle, Bonsai, Counter,
-Kitchen, Room, Stump
-779 × 519 to
-1245 × 825
-Dynamic Scene [32]
-flame steak, sear steak,
-cut beef
-1352 × 1014
-Human Avatar [5]
-female-4, male-3, male-4
-1080 × 1080
-11 FLOPs
-2 FLOPs
-Computational cost with
-PFS Dataflow
-Computational cost with
-IRSS Dataflow
-Computation per
-Fragment
-Fig. 6. Comparison of the computational complexity between the original
-PFS dataflow [20] and the proposed IRSS dataflow. The color depth indicates
-the per-fragment workload: red represents useful computations on fragments
-that significantly contribute to the output image, while yellow represents the
-workload on redundant fragments.
-We observe that (1) on the edge GPU, none of the three
-types of scenes achieves real-time rendering performance (≥
-60 FPS [54]). This is primarily due to the latency bottleneck
-in Rendering Step ❸. For instance, in real-world static scenes,
-this step accounts for 70% to 78% of the overall rendering
-time; (2) In dynamic scenes and animatable avatar rendering,
-although the percentage of Rendering Step ❶ increases due to
-more complex preprocessing steps for modeling motion and
-deformation, Rendering Step ❸ remains the major bottleneck,
-accounting for 62% to 65% in dynamic scenes and 48% to
-51% in human avatar animation; (3) Rendering Step ❷, which
-involves the sorting process, also consumes a non-negligible
-portion of the rendering time across all three types of scenes,
-ranging from 14% to 24%.
-threshold) to the output colors on the three types of applications [5], [7], [32]. The high redundancy is associated with
-the tile-based rendering approach. Specifically, during runtime,
-each 16 × 16 tile is assigned to a Streaming Multiprocessor (SM), and the opacity computation and α-blending are
-conducted in lockstep for all fragments in a tile in parallel.
-However, a 2D Gaussian function usually significantly contributes to only a portion of the fragments within a 16 × 16
-tile. Therefore, although this lockstep computation (referred
-to as Parallel Fragment Shading (PFS) dataflow in Sec. IV)
-makes use of the Single Instruction Multiple Thread (SIMT)
-computational capability of SMs, a large portion of computation is wasted on fragments with negligible contribution.
-IV. T HE P ROPOSED IRSS DATAFLOW
-B. Identified Challenges
-Based on the profiling results, we conducted an in-depth
-analysis to identify the challenges in accelerating the bottleneck Rendering Step ❸.
-Challenge 1: Excessive Per-Fragment Computation. As
-identified in Sec. III, Rendering Step ❸ is the primary latency bottleneck, consistently consuming more rendering time
-compared to the other two steps. Unlike the other steps,
-where computational complexity is determined by the number of Gaussians, Rendering Step ❸ involves per-fragment
-computation. Our profiling shows that the average fragmentto-Gaussian ratio is 541:1, 161:1, and 688:1 across the three
-types of applications [5], [7], [32], respectively, leading to
-significantly higher computational complexity in Rendering
-Step ❸ as compared to the other steps. Moreover, the perfragment computation in Rendering Step ❸ requires multiple
-matrix-vector multiplications in the exponent of Eq. 5:
-(P − µ⋆i )T Σ⋆i −1 (P − µ⋆i ),
-Fig. 7. Illustration of the proposed two transformations that enable compute
-sharing. In both the P ′ -space and P ′′ -space, the squared distance of a
-fragment from the origin corresponds to the value of Eq. 7 in the original
-screen space. In the P ′′ -space, the distance vector between two adjacent
-fragments in a row, ∆P ′′ , is parallel to the x′′ -axis.
-(7)
-amounting to 11 FLOPs per fragment. For real-world static
-scene rendering [7], Eq. 7 alone would require 1.1 TFLOPs
-to achieve 60 FPS, which is 58% of Jetson Orin NX’s peak
-floating-point throughput [2].
-Challenge 2: Fragment-Level Redundancy. Although a 2D
-Gaussian is sampled, on average, at hundreds of fragments,
-only 7.6%, 13.7%, and 9.9% of fragments make a nonnegligible contribution (i.e., opacity greater than a predefined
-A. IRSS Dataflow: Motivation and Overview
-Motivated by the identified Challenge 1 and Challenge 2,
-we propose an Intra-Row Sequential Shading (IRSS) dataflow
-to improve the efficiency of Rendering Step ❸. As illustrated
-in Fig. 6, this IRSS dataflow reduces the computational cost
-compared to the original PFS dataflow by sequentially shading
-(i.e. performing the computation of Rendering Step ❸ on) the
-fragments in a row, which enables compute sharing and skip
-redundant fragments:
-Compute Sharing. By shading the fragments in a row
-sequentially from left to right, we can share intermediate
-values among adjacent fragments, reducing the computational
-complexity of Eq. 7 from 11 FLOPs per fragment to 2 FLOPs
-per fragment. This computation sharing is non-trivial due to
-the multi-step geometry transformations needed as detailed in
-Sec. IV-B and Fig. 7.
-Redundancy Skipping. The IRSS dataflow also facilitates
-the efficient identification of redundant fragments and rows
-that contribute negligibly to the output image, allowing us
-to skip the associated computation. This is accomplished by
-leveraging the convex shape [56] of a truncated 2D Gaussian.
-Once the first and last fragments in a row that intersect
-the Gaussian are identified, all fragments outside this range
-can be skipped. The detailed implementation is elaborated in
-Sec. IV-C.
-Skipped Rows
-Skipped Rows
-Skipped Rows
-Skipped Rows
-Skipped Rows
-...
-Skipped
-Fragments
-Skipped
-Fragment
-(a) 2D Gaussian
-Skipped Rows
-Skipped Rows
-Skipped Rows
-Skipped Rows
-Skipped Rows
-(b) time step.1
-locate first fragment
-(c) time Step.2
-shade next fragment
-(d) time step.3
-shade next fragment
-(e) time step.4
-skip shading row-5
-(f) time step.6
-only shade row-3
-Fig. 8. Illustration of the proposed IRSS dataflow: (a) the 2D Gaussian to be rendered; (b) - (f) sequential rendering steps. In (b), during the first time step,
-fragments in the green zone are skipped as they fall outside the thresholded 2D Gaussian, and the blue box shows skipped rows that are also identified and
-omitted. In (c) - (f), the black arrow indicates compute sharing between adjacent fragments, resulting in lower computational complexity for newly shaded
-fragments compared to those shaded in (b). In (d), the last fragment of the 6th row is identified, allowing the computation for this row to be skipped in the
-next time step (red box in (e)).
-B. IRSS Dataflow: Compute Sharing
-Overview. In response to Challenge 1, the proposed IRSS
-dataflow facilitates the sharing of intermediate values between
-adjacent fragments shown in Fig. 8(c), thereby reducing computational complexity. However, these sharable intermediate
-variables are only exposed after appropriate geometric transformations illustrated in Fig. 7. A two-step transformation is
-required to achieve maximum computation reduction. The two
-transformations are elaborated below. It is important to note
-that these transformations are not approximations for Eq. 7,
-and the rendering quality remains uncompromised.
-Transformation P → P′ . To expose the sharable intermediate
-values, the first transformation converts anisotropic 2D Gaussians into isotropic circles, converting Eq. 7 into a distance
-between a fragment and the origin (i.e., Gaussian center).
-This transformation is obtained by performing an eigenvalue
-decomposition (EVD) on the matrix Σ⋆ −1 in Eq. 7:
-(P − µ⋆i )T Σ⋆i −1 (P − µ⋆i )
-1
-1
-=(P − µ⋆ )T QD 2 D 2 QT (P − µ⋆ ),
-(8)
-(9)
-where D is the diagonal eigenvalue matrix and Q is the
-eigenvector matrix. The existence of this decomposition is
-guaranteed by spectral theory [14], as Σ⋆ is a positive-definite
-symmetric matrix.
-Following the EVD, we derive our first coordinate transfor1
-mation P → P ′ as P ′ = D 2 QT (P − µ⋆ ), then:
-T
-(P − µ⋆i )T Σ⋆i −1 (P − µ⋆i ) = P ′ P ′ = ||P ′ ||22 ,
-(10)
-therefore, computing Eq. 7 is mathematically equivalent to
-measuring the squared distance ||P ′ ||22 between the fragment
-center P ′ and the origin O′ .
-Because the mapping P → P ′ is affine, the distance vector
-between any adjacent fragment in a row remains a constant.
-We denote the distance as ∆P ′ = (∆x′ , ∆y ′ )T . If we have
-mapped one fragment PM,N at row M, column N to the
-′
-transformed space PM,N → PM,N
-, it is easy to derive the
-mapped coordinate of its adjacent fragment on the right:
-′
-′
-′
-PM,N
-+1 = PM,N + ∆P .
-(11)
-Thus, there is no need to perform the transformation for every
-fragment, we can sequentially derive the mapped coordinates
-of a row of fragments by iteratively adopting Eq. 11.
-With this per-row sequential computation, the proposed
-IRSS dataflow reduces the computational cost of Eq. 7 from
-11 FLOPs per fragment to 3 FLOPs per fragment (Eq. 10)
-for all fragments in a row except the first fragment, which
-still requires 11 FLOPs. However, each iteration of Eq. 11
-increments the coordinate in both the x′ - and y ′ -axis, as ∆x′
-and ∆y ′ are usually both non-zero, so that for each fragment
-2
-2
-when computing Eq. 10, both x′ and y ′ must be recomputed.
-We can further reduce the computation cost by limiting ∆y ′
-to zero using the following transformation.
-Transformation P′ → P′′ . To address the computation for
-2
-2
-computing both the x′ and y ′ , we introduce an additional
-′′
-transformation (rotation) P = ΘP ′ , where Θ is a rotation
-matrix. Any rotation does not change the vector length, so we
-have:
-||P ′′ ||22 = ||P ′ ||22 ,
-(12)
-In other words, the squared distance between a fragment
-center and the origin in the P ′′ -space is also mathematically
-equivalent to Eq. 7.
-As shown in Fig. 7(c), we choose a Θ that aligns the
-distance vector between adjacent fragments in a row parallel
-to the x′′ -axis:
-∆P ′′ = Θ∆P ′ = (∆x′′ , 0)T .
-(13)
-As a result, when computing the squared distance ||P ′′ ||22 =
-′′ 2
-′′ 2
-′′ 2
-′′ 2
-x + y , we only need to recompute x while y stays
-constant for a row of fragments. Therefore, the computational
-cost for each fragment is further reduced to 2 FLOPs, except
-for the first fragment in a row.
-C. IRSS Dataflow: Redundancy Skipping
-Overview. Although techniques in Sec. IV-B reduce the perfragment computational cost, the large number of unnecessary
-fragments, as identified in Challenge 2, can still hinder
-real-time rendering. To efficiently identify these unnecessary
-fragments and skip the associated computations, we propose
-a row-wise redundancy skipping mechanism.
-This mechanism involves locating the first and last fragment
-in a row that significantly contributes to the output image and
-skipping all other fragments. This approach ensures that all
-significant fragments are retained while all others are skipped
-Row-1
-Row-2
-Row PEs
-Row-3
-Row
-Generation
-Engine
-Row-4
-Row-5
-Row-6
-Time
-Row-7
-(a) Input 2D Gaussians
-(b) Per-Row Rendering Workload
-Fig. 9. Illustration of the input features and per-row workload for Rendering
-Step ❸ with the proposed IRSS dataflow. One colored block on the right
-corresponds to one fragment to be shaded.
-because the 2D Gaussian function is convex. Fragments with
-an opacity higher than the predefined threshold will fall between the intersections of the thresholded (truncated) Gaussian
-and its row. Next, we illustrate how the first and last fragments
-can be located in a row-wise manner with the proposed IRSS
-dataflow.
-Locating the First Fragment. We adopt a 3-step algorithm to
-find the first fragment that falls into a truncated 2D Gaussian.
-This algorithm is facilitated by the two-step transformation in
-Sec. IV-B, in the P ′′ -space, intersection with a truncated 2D
-Gaussian is determined by whether the fragment coordinate
-2
-falls inside a 2D circle (i.e., x′′ + y ′′2 < T h), where T h is
-derived by the predefined truncation threshold.
-Step-1 Obtain the x′′ and y ′′ for the leftmost fragment in a
-2
-row. If y ′′ > T h, then this row has no intersection with this
-Gaussian and can be skipped entirely because y ′′ is constant
-for a row of fragments, which is the blue box in Fig. 8(b).
-2
-2
-Step-2 If y ′′ < T h and x′′ + y ′′2 < T h, then the leftmost
-fragment is the first fragment that falls into the truncated 2D
-Gaussian.
-2
-Step-3 If x′′ + y ′′2 > T h, we then check whether x′′ and
-′′
-∆x have the same sign. If so, no fragments in the current
-tile intersect with this 2D Gaussian. Otherwise, we perform a
-binary search to locate the first fragment in this row. All the
-fragments on the left side of the first fragment are skipped
-(the green box in Fig. 8(b)).
-Locating the Last Fragment. Locating the last fragment in
-a row is straightforward with the proposed IRSS dataflow. As
-2
-we sequentially move right, the first fragment whose x′′ +
-′′2
-y > T h is the first fragment that falls outside the truncated
-Gaussian, and all fragments on the right side can be skipped
-(the red boxes in Fig. 8(e) and (f))
-D. Direct Deployment on GPU
-We implemented the proposed IRSS dataflow as a customized CUDA kernel and benchmarked its performance on
-the real-world static scene dataset [7]. The experimental results show that the IRSS dataflow achieves a significant 59%
-reduction in latency during Rendering Step ❸, increasing the
-rendering speed from 13 FPS to 22 FPS. However, it still
-falls short of meeting the real-time rendering performance
-requirements for AR/VR applications [54]. In the next section,
-Input 2D Gaussians
-Row Buffers
-(FIFO)
-Row PEs Compute Utilization
-Fig. 10. Comparing GPU and GBU hardware utilization when executing the
-proposed IRSS dataflow.
-we identify the limitations of GPU performance and propose
-a dedicated hardware module, dubbed GBU, to overcome this
-performance bottleneck.
-V. T HE P ROPOSED G AUSSIAN B LENDING U NIT
-A. Motivating Profiling
-As discussed in Sec. IV-C, directly deploying the proposed
-IRSS dataflow on a GPU still falls short of achieving real-time
-rendering performance. Our profiling of the GPU-based implementation on the Jetson Orin NX [2] reveals two limitations
-for further speedup:
-Limitation 1: Low Compute Utilization. Further rendering
-speedup is primarily hindered by limited compute utilization
-on GPUs. As illustrated in Fig. 9(b), after skipping redundant
-fragments, the compute workloads become heavily imbalanced
-among different rows. When these rows are mapped to synchronized SIMT threads in a GPU warp, this imbalance results
-in only 18.9% utilization of GPU threads/lanes on the realworld static scene dataset [7].
-Limitation 2: High Memory Footprint. The memory footprint for reading Gaussian features (Fig. 9(a)) in the Rendering
-Step ❸ can negatively impact the throughput of the first
-two rendering steps when the three steps are pipelined. Our
-profiling of real-world static scenes [7] shows that Rendering
-Step ❸ alone requires 62.1% of DRAM bandwidth to achieve
-real-time (60 FPS) rendering performance. The experiments in
-Sec. VI-C indicate that this limitation could lead to a 13.5%
-slowdown in end-to-end rendering.
-B. Hardware System Overview
-In response to the identified limitations, we propose a
-dedicated acceleration system for Gaussian-based rendering.
-As illustrated in Fig. 11(a), this system comprises two key
-components: (1) a Gaussian Blending Unit (GBU) featuring
-a Row-Centric Tile Engine and a Gaussian Reuse Cache to
-address Limitation 1 and Limitation 2, respectively; and
-(2) seamless integration with GPU architectures. The GBU
-is deployed outside the GPU’s Graphics Processing Clusters
-(GPC) to enable independent execution and pipelining between
-the GPU and GBU. With careful workload assignment and
-pipelining, this integration allows our hardware acceleration
-system to support a wide range of AR/VR applications.
-Proposed GBU
-GPU with Proposed GBU Cores
-GPC
-(Existing Processing
-Elements in GPU)
-Row-Centric Tile Engine
-2D Gaussian Buffer
-(To G Reuse Buffer)
-Tile PE
-...
-Row PE
-Rwo Selection
-DRAM
-Shared L2 Cache
-G Reuse Buffer
-Row Generation Engine
-Threshold Computation
-GPC
-(Existing Processing
-Elements in GPU)
-Decomposition and
-Binning Engine
-Threshold Computation Units
-Row
-Buffer
-Δx''
-GPC
-(Existing Processing
-Elements in GPU)
-...
-opacity
-Row PE
-position
-×
-+ <
-LUT
-threshold
-×r +
-×
-×g +
-T
-color
-...
-y''2
-Color Computation Units
-threshold
-T
-Row Index Generation
-×
-x''
-Row PE
-Comparator Array
-D & B buffer
-(To Shared L2 Cache)
-× x'' +
-Δx''
-y''2
-...
-Proposed GBU
-Row PE
-Row PE
-×b +
-×
-1
-T new
-Row Pixel
-Buffer
-RR0
-Pix
-Pix
-0
-R
-R1
-Pix
-Pix
-1
-...
-R
-Rn
-Pix
-Pix
-n
-Position
-Fig. 11. Overview of the proposed hardware acceleration system integrating an edge GPU with the GBU. (a) shows the overall system; (b), (c), and (d)
-provide zoomed-in views of the GBU, the Tile Engine, and the Row PE, respectively.
-In the following sections, we introduce the Row-Centric Tile
-Engine (Sec. V-C) and the Gaussian Reuse Cache (Sec. V-D).
-We then elaborate on integrating the proposed GBU into commercial GPU devices ((Sec. V-E) and discuss the programming
-model (Sec. V-F) for the GBU.
-2. Compare
-& Select
-1. Precompute
-Resue Distance
-D. GBU: Gaussian Reuse Cache
-To minimize off-chip memory accesses for input Gaussian
-features (Limitation 2), we propose a Gaussian reuse cache
-that enhances feature reuse. We leverage a key insight that
-1
-RD Tag
-Input Features
-RD Tag
-Input Features
-RD 03
-Tag
-Input Features
-03
-0 01
-01
-3 01
-01
-1 01
-01
-2
-<?
-2
-C. GBU: Row-Centric Tile Engine
-Motivated by the Limitation 1, our per-tile rendering
-engine, the Row-Centric Tile Engine (shown in Fig. 11(c)),
-is designed to maximize compute utilization of the proposed
-IRSS dataflow. This engine renders the 16×16 image tiles one
-by one. Instead of shading all rows in a tile with synchronized
-SIMT lanes, which suffer from low compute utilization due to
-the imbalanced workload between rows, our tile engine assigns
-each row to a Row PE. Each Row PE balances the workload
-by aggregating tasks from multiple Gaussians. As shown in
-Fig. 10, this is supported by (1) a Row Generation Engine,
-which identifies the fragments to be shaded for each row and
-forwards them to the corresponding Row Buffer; and (2) a set
-of Row PEs that consistently poll the fragments to be rendered
-from the Row Buffer.
-Row Generation Engine. The Row Generation Engine determines which rows a Gaussian intersects and locates the
-first fragment for each row. Once identified, the position of
-the first fragment, along with the Gaussian’s color, opacity,
-2
-truncation threshold, and sharable intermediate values (y ′′ ,
-′′
-′′
-x , and ∆x ) are forwarded to the corresponding Row PE’s
-Row Buffer.
-Row PE. Each Row PE consists of a Row Buffer, a Threshold
-Computation Unit, a Color Computation Unit, and a Row
-Pixel Buffer. The Row Buffer receives the input Gaussian
-features and the first fragment of the Gaussian in the row. The
-Threshold Computation Unit and Color Computation Unit then
-update the accumulated pixel color following the proposed
-IRSS dataflow. To maximize output reuse, the accumulated
-pixel colors are kept stationary in the Row Pixel Buffer.
-Global Counter
-x
-Tile Traversal Order
-y
-(a)
-3. Load & Replace
-(b)
-Fig. 12. (a) Pre-computing the reuse distance of input Gaussian features,
-performed by the Decomposition and Binning Engine, which adapts the
-algorithm in Sec. IV-C for Gaussian-tile intersection test. (b) Demonstration
-of a cache replacement, detailed in Sec. V-D.
-the access sequence for input Gaussian features can be precomputed. This allows us to implement an optimized cache
-replacement policy to maximize the opportunity for feature
-reuse. As shown in Fig. 12, our cache replacement policy has
-the following four steps:
-Step 1: Precompute Reuse Distance The reuse distance of an
-input Gaussian feature is defined as the number of tiles
-processed before the feature is accessed again by the tile
-engine. This distance can be precomputed by testing which
-tiles a Gaussian intersects, as shown in Fig. 12(a). A dedicated
-Decomposition and Binning engine performs this Gaussian-tile
-intersection test, generating a list of intersected Gaussians with
-their corresponding reuse distances for each tile.
-Step 2: Compare & Select On a cache miss, the tile engine
-selects the Gaussian feature with the longest reuse distance
-by comparing the RD (reuse distance) fields of the Gaussian
-features. The reuse distances of all Gaussian features at the
-current tile are computed by subtracting a global counter that
-tracks the number of processed tiles.
-Step 3: Load & Replace On a cache miss, the required features are loaded from off-chip memory to replace the selected
-cache line (Gaussian feature). The global counter increments
-the RD field before cache installation.
-Step 4: Update Reuse Distance On a cache hit, the RD field of
-the corresponding Gaussian feature is updated with the next
-precomputed reuse distance of the Gaussian plus the global
-counter.
-: 3 frames
-Time
-GPU
-Step 1
-Step 2
-GBU
-D&B
-Tile PE
-Step 1
-Step 2
-Step 3
-Chunk 1
-Chunk 2
-Chunk 1
-Chunk 3
-Chunk 2
-Step 1
-...
-...
-Step 3
-Chunk 4
-Chunk 3
-Chunk5
-Chunk 5
-TABLE II
-S PECIFICATION OF GBU AND J ETSON O RIN NX.
-...
-...
-Fig. 13. Illustration of the proposed two-level pipeline: top: pipeline between
-GBU and GPU; bottom: pipeline between Decomposition & Binning Engine
-(D&B) and Tile PE.
-Technology
-Typical
-Power
-Device
-SRAM
-Area
-Frequency
-Orin NX [2]
-4 MB
-450 mm2
-918 MHz
-8 nm
-15 W
-GBU
-63 KB
-0.90 mm2
-1GHz
-28 nm
-0.22 W
-TABLE III
-A REA AND POWER BREAKDOWN OF GBU HARDWARE MODULES .
-Module
-Row PEs
-Row Gen.
-D&B Engine
-Cache & Others
-Area (mm2 )
-0.36
-0.14
-0.10
-0.30
-Power (W)
-0.11
-0.04
-0.03
-0.04
-E. Integration with GPUs for End-to-end Rendering
-As illustrated in Fig. 11(a), the proposed GBU is integrated
-with GPU for efficient end-to-end rendering. This integration
-follows two design principles: (1) Versatility to ensure compatibility with a variety of Gaussian-based AR/VR applications
-and (2) Efficiency to achieve real-time rendering performance.
-These principles necessitate careful workload assignment between the GPU and GBU and a two-level pipelined execution.
-Workload Assignment. As analyzed in Sec. II, Rendering
-Step ❸ uses a common algorithm across different Gaussianbased AR/VR applications and consistently acts as the latency bottleneck, while the algorithm in Rendering Step ❶
-varies across applications. To achieve the desired rendering
-speedup while maintaining compatibility with existing and
-future Gaussian-based rendering pipelines, we opt to accelerate
-only Rendering Step ❸ on the GBU, while offloading the other
-steps to the highly programmable GPU hardware.
-Two-level Pipeline. To enhance the overall rendering system’s
-efficiency, we implement a two-level pipeline (illustrated in
-Fig. 13) to increase the utilization of GPU and GBU compute
-units. The first-level pipeline between the GBU and GPU
-overlaps Rendering Step ❸ with the other two rendering steps
-of the next frame, supported by a pre-allocated double buffer in
-DRAM. The second-level pipeline parallelizes the execution of
-the D&B Engine and the Tile PE by dividing the 2D Gaussians
-to be rendered into chunks following the depth order. Once
-one chunk of Gaussians has been assigned (binned) to tiles,
-the Tile PE can start the rendering process for that chunk.
-F. Programming Model
-GBU’s programming model (Listing. 1) is designed to offer
-full flexibility and control, making it easy to utilize GBU for
-accelerating various AR/VR applications. GBU provides two
-function calls:
-void GBU_render_image(
-int H, int W, // image height and width
-const void* input_feature, // Gaussian features
-const unsigned* sorted_index, // depth order
-void* frame_buffer, // buffer for output image
-int ch=3, // number of color channels
-);
-int GBU_check_status(
-bool blocking //whether to wait till complete
-);
+
+of works [17], [26], [29], [55] has explored the application of 3D Gaussians to this domain.
+
+## D. Workload Summary of Gaussian-Based AR/VR
+
+From the aforementioned rendering pipelines, we observe that (1) diverse Gaussian-based AR/VR applications differ primarily in Rendering Step ❶. For instance, they may introduce additional transformations for the geometric parameters of 3D Gaussians or replace spherical harmonics functions with timeconditioned parameterizations; and (2) after Rendering Step ❶, all rendering pipelines involve the same set of computations in Rendering Step ❷ and Rendering Step ❸. This observation holds for even more 3D Gaussian-based applications, such as simulating driving scenes [53] and rendering languageembedded semantic images [44].
+
+## III. PROFILING AND ANALYSIS
+
+To understand the typical acceleration bottlenecks of Gaussian-based rendering pipelines, we profile popular Gaussian-based reconstruction algorithms on AR/VR platforms. These include 3D Gaussian Splatting [20] for reconstructing static scenes, 4D Gaussian Splatting [51] for dynamic scene reconstruction, and Splatting Avatar [46] for human avatar animation. Our profiling is conducted using real-world datasets [5], [7], [32]. The detailed statistics of the datasets are listed in Tab. I. We run the algorithms on an edge GPU device, the Jetson Orin NX 16GB [2], and use Nisight Systems [4] for a kernel-level rendering time breakdown.
+
+#### A. Overall Profiling Results
+
+We summarize the overall runtime and the corresponding rendering time breakdown into the three aforementioned rendering stages in Fig. 4 and Fig. 5, respectively. This profiling encompasses 12 real-world scenes of three different types: 6 static scenes, 3 dynamic scenes, and 3 human avatars.
+
+TABLE I ALGORITHM AND DATASET SETUP FOR PROFILING.
+
+
+
+| Scene Type         | Scenes                            | Resolution   |
+|--------------------|-----------------------------------|--------------|
+| Static Scene [7]   | Bicycle, Bonsai, Counter,         | 779 × 519 to |
+|                    | Kitchen, Room, Stump              | 1245 × 825   |
+| Dynamic Scene [32] | flame steak, sear steak, cut beef | 1352 × 1014  |
+| Human Avatar [5]   | female-4, male-3, male-4          | 1080 × 1080  |
+
+
+
+
+
+
+
+
+
+Fig. 6. Comparison of the computational complexity between the original PFS dataflow [20] and the proposed IRSS dataflow. The color depth indicates the per-fragment workload: red represents useful computations on fragments that significantly contribute to the output image, while yellow represents the workload on redundant fragments.
+
+We observe that (1) on the edge GPU, none of the three types of scenes achieves real-time rendering performance (≥ 60 FPS [54]). This is primarily due to the latency bottleneck in Rendering Step ❸. For instance, in real-world static scenes, this step accounts for 70% to 78% of the overall rendering time; (2) In dynamic scenes and animatable avatar rendering, although the percentage of Rendering Step ❶ increases due to more complex preprocessing steps for modeling motion and deformation, Rendering Step ❸ remains the major bottleneck, accounting for 62% to 65% in dynamic scenes and 48% to 51% in human avatar animation; (3) Rendering Step ❷, which involves the sorting process, also consumes a non-negligible portion of the rendering time across all three types of scenes, ranging from 14% to 24%.
+
+#### B. Identified Challenges
+
+Based on the profiling results, we conducted an in-depth analysis to identify the challenges in accelerating the bottleneck Rendering Step ❸.
+
+Challenge 1: Excessive Per-Fragment Computation. As identified in Sec. III, Rendering Step ❸ is the primary latency bottleneck, consistently consuming more rendering time compared to the other two steps. Unlike the other steps, where computational complexity is determined by the number of Gaussians, Rendering Step ❸ involves per-fragment computation. Our profiling shows that the average fragmentto-Gaussian ratio is 541:1, 161:1, and 688:1 across the three types of applications [5], [7], [32], respectively, leading to significantly higher computational complexity in Rendering Step ❸ as compared to the other steps. Moreover, the perfragment computation in Rendering Step ❸ requires multiple matrix-vector multiplications in the exponent of Eq. 5:
+
+$$(P - \mu_i^)^T \Sigma_i^{-1} (P - \mu_i^*), \quad (7)$$
+
+amounting to 11 FLOPs per fragment. For real-world static scene rendering [7], Eq. 7 alone would require 1.1 TFLOPs to achieve 60 FPS, which is 58% of Jetson Orin NX's peak floating-point throughput [2].
+
+Challenge 2: Fragment-Level Redundancy. Although a 2D Gaussian is sampled, on average, at hundreds of fragments, only 7.6%, 13.7%, and 9.9% of fragments make a nonnegligible contribution (i.e., opacity greater than a predefined
+
+Fig. 7. Illustration of the proposed two transformations that enable compute sharing. In both the P ′ -space and P ′′-space, the squared distance of a fragment from the origin corresponds to the value of Eq. 7 in the original screen space. In the P ′′-space, the distance vector between two adjacent fragments in a row, ∆P ′′, is parallel to the x ′′-axis.
+
+threshold) to the output colors on the three types of applications [5], [7], [32]. The high redundancy is associated with the tile-based rendering approach. Specifically, during runtime, each 16 × 16 tile is assigned to a Streaming Multiprocessor (SM), and the opacity computation and α-blending are conducted in lockstep for all fragments in a tile in parallel. However, a 2D Gaussian function usually significantly contributes to only a portion of the fragments within a 16 × 16 tile. Therefore, although this lockstep computation (referred to as Parallel Fragment Shading (PFS) dataflow in Sec. IV\) makes use of the Single Instruction Multiple Thread (SIMT) computational capability of SMs, a large portion of computation is wasted on fragments with negligible contribution.
+
+## IV. THE PROPOSED IRSS DATAFLOW
+
+#### A. IRSS Dataflow: Motivation and Overview
+
+Motivated by the identified Challenge 1 and Challenge 2, we propose an Intra-Row Sequential Shading (IRSS) dataflow to improve the efficiency of Rendering Step ❸. As illustrated in Fig. 6, this IRSS dataflow reduces the computational cost compared to the original PFS dataflow by sequentially shading (i.e. performing the computation of Rendering Step ❸ on) the fragments in a row, which enables compute sharing and skip redundant fragments:
+
+Compute Sharing. By shading the fragments in a row sequentially from left to right, we can share intermediate values among adjacent fragments, reducing the computational complexity of Eq. 7 from 11 FLOPs per fragment to 2 FLOPs per fragment. This computation sharing is non-trivial due to the multi-step geometry transformations needed as detailed in Sec. IV-B and Fig. 7.
+
+Redundancy Skipping. The IRSS dataflow also facilitates the efficient identification of redundant fragments and rows that contribute negligibly to the output image, allowing us to skip the associated computation. This is accomplished by leveraging the convex shape [56] of a truncated 2D Gaussian. Once the first and last fragments in a row that intersect the Gaussian are identified, all fragments outside this range can be skipped. The detailed implementation is elaborated in Sec. IV-C.
+
+
+
+Fig. 8. Illustration of the proposed IRSS dataflow: (a) the 2D Gaussian to be rendered; (b) - (f) sequential rendering steps. In (b), during the first time step, fragments in the green zone are skipped as they fall outside the thresholded 2D Gaussian, and the blue box shows skipped rows that are also identified and omitted. In (c) - (f), the black arrow indicates compute sharing between adjacent fragments, resulting in lower computational complexity for newly shaded fragments compared to those shaded in (b). In (d), the last fragment of the 6th row is identified, allowing the computation for this row to be skipped in the next time step (red box in (e)).
+
+#### B. IRSS Dataflow: Compute Sharing
+
+Overview. In response to Challenge 1, the proposed IRSS dataflow facilitates the sharing of intermediate values between adjacent fragments shown in Fig. 8\(c), thereby reducing computational complexity. However, these sharable intermediate variables are only exposed after appropriate geometric transformations illustrated in Fig. 7. A two-step transformation is required to achieve maximum computation reduction. The two transformations are elaborated below. It is important to note that these transformations are not approximations for Eq. 7, and the rendering quality remains uncompromised.
+
+Transformation P → P′ . To expose the sharable intermediate values, the first transformation converts anisotropic 2D Gaussians into isotropic circles, converting Eq. 7 into a distance between a fragment and the origin (i.e., Gaussian center). This transformation is obtained by performing an eigenvalue decomposition (EVD) on the matrix Σ ⋆−1 in Eq. 7:
+
+$$(P - \mu_i^)^T \Sigma_i^{-1} (P - \mu_i^*) \quad (8)$$
+
+$$= (P - \mu^)^T Q D^{\frac{1}{2}} D^{\frac{1}{2}} Q^T (P - \mu^), \quad (9)$$
+
+where D is the diagonal eigenvalue matrix and Q is the eigenvector matrix. The existence of this decomposition is guaranteed by spectral theory [14], as Σ ⋆ is a positive-definite symmetric matrix.
+
+Following the EVD, we derive our first coordinate transformation P → P ′ as P ′ = D 1 2 QT (P − µ ⋆ ), then:
+
+$$(P - \mu_i^)^T \Sigma_i^{-1} (P - \mu_i^) = P^T P' = \|P'\|_2^2, \quad (10)$$
+
+therefore, computing Eq. 7 is mathematically equivalent to measuring the squared distance ||P ′ ||2 2 between the fragment center P ′ and the origin O′ .
+
+Because the mapping P → P ′ is affine, the distance vector between any adjacent fragment in a row remains a constant. We denote the distance as ∆P ′ = (∆x ′ , ∆y ′ ) T . If we have mapped one fragment PM,N at row M, column N to the transformed space PM,N → P ′ M,N , it is easy to derive the mapped coordinate of its adjacent fragment on the right:
+
+$$P'_{M,N+1} = P'_{M,N} + \Delta P'. \quad (11)$$
+
+Thus, there is no need to perform the transformation for every fragment, we can sequentially derive the mapped coordinates of a row of fragments by iteratively adopting Eq. 11.
+
+With this per-row sequential computation, the proposed IRSS dataflow reduces the computational cost of Eq. 7 from 11 FLOPs per fragment to 3 FLOPs per fragment (Eq. 10\) for all fragments in a row except the first fragment, which still requires 11 FLOPs. However, each iteration of Eq. 11 increments the coordinate in both the x ′ - and y ′ -axis, as ∆x ′ and ∆y ′ are usually both non-zero, so that for each fragment when computing Eq. 10, both x ′2 and y ′2 must be recomputed. We can further reduce the computation cost by limiting ∆y ′ to zero using the following transformation.
+
+Transformation P′ → P′′ . To address the computation for computing both the x ′2 and y ′2 , we introduce an additional transformation (rotation) P ′′ = ΘP ′ , where Θ is a rotation matrix. Any rotation does not change the vector length, so we have:
+
+$$\|P''\|_2^2 = \|P'\|_2^2, \quad (12)$$
+
+In other words, the squared distance between a fragment center and the origin in the P ′′-space is also mathematically equivalent to Eq. 7.
+
+As shown in Fig. 7\(c), we choose a Θ that aligns the distance vector between adjacent fragments in a row parallel to the x ′′-axis:
+
+$$\Delta P'' = \Theta \Delta P' = (\Delta x'', 0)^T. \quad (13)$$
+
+As a result, when computing the squared distance ||P ′′||2 2 = x ′′2 + y ′′2 , we only need to recompute x ′′2 while y ′′2 stays constant for a row of fragments. Therefore, the computational cost for each fragment is further reduced to 2 FLOPs, except for the first fragment in a row.
+
+#### C. IRSS Dataflow: Redundancy Skipping
+
+Overview. Although techniques in Sec. IV-B reduce the perfragment computational cost, the large number of unnecessary fragments, as identified in Challenge 2, can still hinder real-time rendering. To efficiently identify these unnecessary fragments and skip the associated computations, we propose a row-wise redundancy skipping mechanism.
+
+This mechanism involves locating the first and last fragment in a row that significantly contributes to the output image and skipping all other fragments. This approach ensures that all significant fragments are retained while all others are skipped
+
+
+
+Fig. 9. Illustration of the input features and per-row workload for Rendering Step ❸ with the proposed IRSS dataflow. One colored block on the right corresponds to one fragment to be shaded.
+
+because the 2D Gaussian function is convex. Fragments with an opacity higher than the predefined threshold will fall between the intersections of the thresholded (truncated) Gaussian and its row. Next, we illustrate how the first and last fragments can be located in a row-wise manner with the proposed IRSS dataflow.
+
+Locating the First Fragment. We adopt a 3-step algorithm to find the first fragment that falls into a truncated 2D Gaussian. This algorithm is facilitated by the two-step transformation in Sec. IV-B, in the P ′′-space, intersection with a truncated 2D Gaussian is determined by whether the fragment coordinate falls inside a 2D circle (i.e., x ′′2 + y ′′2 < T h), where T h is derived by the predefined truncation threshold.
+
+Step-1 Obtain the x ′′ and y ′′ for the leftmost fragment in a row. If y ′′2 > T h, then this row has no intersection with this Gaussian and can be skipped entirely because y ′′ is constant for a row of fragments, which is the blue box in Fig. 8\(b). Step-2 If y ′′2 < T h and x ′′2 + y ′′2 < T h, then the leftmost fragment is the first fragment that falls into the truncated 2D Gaussian.
+
+Step-3 If x ′′2 + y ′′2 > T h, we then check whether x ′′ and ∆x ′′ have the same sign. If so, no fragments in the current tile intersect with this 2D Gaussian. Otherwise, we perform a binary search to locate the first fragment in this row. All the fragments on the left side of the first fragment are skipped (the green box in Fig. 8\(b)).
+
+Locating the Last Fragment. Locating the last fragment in a row is straightforward with the proposed IRSS dataflow. As we sequentially move right, the first fragment whose x ′′2 + y ′′2 > T h is the first fragment that falls outside the truncated Gaussian, and all fragments on the right side can be skipped (the red boxes in Fig. 8\(e) and (f))
+
+## D. Direct Deployment on GPU
+
+We implemented the proposed IRSS dataflow as a customized CUDA kernel and benchmarked its performance on the real-world static scene dataset [7]. The experimental results show that the IRSS dataflow achieves a significant 59% reduction in latency during Rendering Step ❸, increasing the rendering speed from 13 FPS to 22 FPS. However, it still falls short of meeting the real-time rendering performance requirements for AR/VR applications [54]. In the next section,
+
+
+
+Fig. 10. Comparing GPU and GBU hardware utilization when executing the proposed IRSS dataflow.
+
+we identify the limitations of GPU performance and propose a dedicated hardware module, dubbed GBU, to overcome this performance bottleneck.
+
+## V. THE PROPOSED GAUSSIAN BLENDING UNIT
+
+#### A. Motivating Profiling
+
+As discussed in Sec. IV-C, directly deploying the proposed IRSS dataflow on a GPU still falls short of achieving real-time rendering performance. Our profiling of the GPU-based implementation on the Jetson Orin NX [2] reveals two limitations for further speedup:
+
+Limitation 1: Low Compute Utilization. Further rendering speedup is primarily hindered by limited compute utilization on GPUs. As illustrated in Fig. 9\(b), after skipping redundant fragments, the compute workloads become heavily imbalanced among different rows. When these rows are mapped to synchronized SIMT threads in a GPU warp, this imbalance results in only 18.9% utilization of GPU threads/lanes on the realworld static scene dataset [7].
+
+Limitation 2: High Memory Footprint. The memory footprint for reading Gaussian features (Fig. 9\(a)) in the Rendering Step ❸ can negatively impact the throughput of the first two rendering steps when the three steps are pipelined. Our profiling of real-world static scenes [7] shows that Rendering Step ❸ alone requires 62.1% of DRAM bandwidth to achieve real-time (60 FPS) rendering performance. The experiments in Sec. VI-C indicate that this limitation could lead to a 13.5% slowdown in end-to-end rendering.
+
+#### B. Hardware System Overview
+
+In response to the identified limitations, we propose a dedicated acceleration system for Gaussian-based rendering. As illustrated in Fig. 11\(a), this system comprises two key components: (1) a Gaussian Blending Unit (GBU) featuring a Row-Centric Tile Engine and a Gaussian Reuse Cache to address Limitation 1 and Limitation 2, respectively; and (2) seamless integration with GPU architectures. The GBU is deployed outside the GPU's Graphics Processing Clusters (GPC) to enable independent execution and pipelining between the GPU and GBU. With careful workload assignment and pipelining, this integration allows our hardware acceleration system to support a wide range of AR/VR applications.
+
+
+
+Fig. 11. Overview of the proposed hardware acceleration system integrating an edge GPU with the GBU. (a) shows the overall system; (b), (c), and (d) provide zoomed-in views of the GBU, the Tile Engine, and the Row PE, respectively.
+
+In the following sections, we introduce the Row-Centric Tile Engine (Sec. V-C\) and the Gaussian Reuse Cache (Sec. V-D\). We then elaborate on integrating the proposed GBU into commercial GPU devices ((Sec. V-E\) and discuss the programming model (Sec. V-F\) for the GBU.
+
+#### C. GBU: Row-Centric Tile Engine
+
+Motivated by the Limitation 1, our per-tile rendering engine, the Row-Centric Tile Engine (shown in Fig. 11\(c)), is designed to maximize compute utilization of the proposed IRSS dataflow. This engine renders the 16×16 image tiles one by one. Instead of shading all rows in a tile with synchronized SIMT lanes, which suffer from low compute utilization due to the imbalanced workload between rows, our tile engine assigns each row to a Row PE. Each Row PE balances the workload by aggregating tasks from multiple Gaussians. As shown in Fig. 10, this is supported by (1) a Row Generation Engine, which identifies the fragments to be shaded for each row and forwards them to the corresponding Row Buffer; and (2) a set of Row PEs that consistently poll the fragments to be rendered from the Row Buffer.
+
+Row Generation Engine. The Row Generation Engine determines which rows a Gaussian intersects and locates the first fragment for each row. Once identified, the position of the first fragment, along with the Gaussian's color, opacity, truncation threshold, and sharable intermediate values (y ′′2 , x ′′, and ∆x ′′) are forwarded to the corresponding Row PE's Row Buffer.
+
+Row PE. Each Row PE consists of a Row Buffer, a Threshold Computation Unit, a Color Computation Unit, and a Row Pixel Buffer. The Row Buffer receives the input Gaussian features and the first fragment of the Gaussian in the row. The Threshold Computation Unit and Color Computation Unit then update the accumulated pixel color following the proposed IRSS dataflow. To maximize output reuse, the accumulated pixel colors are kept stationary in the Row Pixel Buffer.
+
+## D. GBU: Gaussian Reuse Cache
+
+To minimize off-chip memory accesses for input Gaussian features (Limitation 2), we propose a Gaussian reuse cache that enhances feature reuse. We leverage a key insight that
+
+
+
+Fig. 12. (a) Pre-computing the reuse distance of input Gaussian features, performed by the Decomposition and Binning Engine, which adapts the algorithm in Sec. IV-C for Gaussian-tile intersection test. (b) Demonstration of a cache replacement, detailed in Sec. V-D.
+
+the access sequence for input Gaussian features can be precomputed. This allows us to implement an optimized cache replacement policy to maximize the opportunity for feature reuse. As shown in Fig. 12, our cache replacement policy has the following four steps:
+
+Step 1: Precompute Reuse Distance The reuse distance of an input Gaussian feature is defined as the number of tiles processed before the feature is accessed again by the tile engine. This distance can be precomputed by testing which tiles a Gaussian intersects, as shown in Fig. 12\(a). A dedicated Decomposition and Binning engine performs this Gaussian-tile intersection test, generating a list of intersected Gaussians with their corresponding reuse distances for each tile.
+
+Step 2: Compare & Select On a cache miss, the tile engine selects the Gaussian feature with the longest reuse distance by comparing the RD (reuse distance) fields of the Gaussian features. The reuse distances of all Gaussian features at the current tile are computed by subtracting a global counter that tracks the number of processed tiles.
+
+Step 3: Load & Replace On a cache miss, the required features are loaded from off-chip memory to replace the selected cache line (Gaussian feature). The global counter increments the RD field before cache installation.
+
+Step 4: Update Reuse Distance On a cache hit, the RD field of the corresponding Gaussian feature is updated with the next precomputed reuse distance of the Gaussian plus the global counter.
+
+
+
+Fig. 13. Illustration of the proposed two-level pipeline: top: pipeline between GBU and GPU; bottom: pipeline between Decomposition & Binning Engine (D&B) and Tile PE.
+
+### E. Integration with GPUs for End-to-end Rendering
+
+As illustrated in Fig. 11\(a), the proposed GBU is integrated with GPU for efficient end-to-end rendering. This integration follows two design principles: (1) Versatility to ensure compatibility with a variety of Gaussian-based AR/VR applications and (2) Efficiency to achieve real-time rendering performance. These principles necessitate careful workload assignment between the GPU and GBU and a two-level pipelined execution. Workload Assignment. As analyzed in Sec. II, Rendering Step ❸ uses a common algorithm across different Gaussianbased AR/VR applications and consistently acts as the latency bottleneck, while the algorithm in Rendering Step ❶ varies across applications. To achieve the desired rendering speedup while maintaining compatibility with existing and future Gaussian-based rendering pipelines, we opt to accelerate only Rendering Step ❸ on the GBU, while offloading the other steps to the highly programmable GPU hardware.
+
+Two-level Pipeline. To enhance the overall rendering system's efficiency, we implement a two-level pipeline (illustrated in Fig. 13\) to increase the utilization of GPU and GBU compute units. The first-level pipeline between the GBU and GPU overlaps Rendering Step ❸ with the other two rendering steps of the next frame, supported by a pre-allocated double buffer in DRAM. The second-level pipeline parallelizes the execution of the D&B Engine and the Tile PE by dividing the 2D Gaussians to be rendered into chunks following the depth order. Once one chunk of Gaussians has been assigned (binned) to tiles, the Tile PE can start the rendering process for that chunk.
+
+## F. Programming Model
+
+GBU's programming model (Listing. 1\) is designed to offer full flexibility and control, making it easy to utilize GBU for accelerating various AR/VR applications. GBU provides two function calls:
+
+void GBU\_render\_image( int H, int W, // image height and width const void\* input\_feature, // Gaussian features const unsigned\* sorted\_index, // depth order void\* frame\_buffer, // buffer for output image int ch=3, // number of color channels ); int GBU\_check\_status( bool blocking //whether to wait till complete );
+
 Listing 1. C++ programming interface of GBU.
-GBU render image. This function triggers GBU to render a
-single image. It takes as input a pointer to the output of the
-first two rendering steps and writes the rendering output to a
-preallocated frame buffer. The color channel is configurable
-and is set to 3 by default.
-GBU check status. This function returns the execution status
-of GBU: 0 (idle) or 1 (in execution). It also includes an
-optional blocking flag to block a CPU thread until GBU
-becomes idle. GBU does not automatically synchronize with
-any CUDA streams and depends on this function to implement
-the aforementioned GBU-GPU pipeline.
-VI. E XPERIMENTAL R ESULTS
-A. Experiment Setup
-Datasets and Algorithms. Using the same algorithms and
-datasets as those described in Sec. III, we evaluate GBU on
-12 real-world scenes from 3 AR/VR applications: 6 scenes
-for static scene reconstruction [7], 3 scenes for dynamic
-scene reconstruction [32], and 3 scenes for human avatar
-animation [5]. All scenes are real-world captured and the
-resolution of the scenes ranges from 779×519 to 1352×1014,
-as listed in Tab. I. We adopt the following Gaussian-based
-rendering pipelines for the three types of scenes: the vanilla
-3D Gaussian splatting [20] for static scene reconstruction, 4D
-Gaussian splatting [51] for dynamic scene reconstruction, and
-SplattingAvatar [46] for animatable human avatars.
-Hardware Setup. We implemented the proposed GBU in
-Verilog and used Cadence Genus to synthesize the RTL design
-to gate-level netlist for estimating chip area, timing, and power
-consumption based on a commercial 28nm CMOS technology.
-The synthesized frequency is set to 1 GHz. We instantiate one
-Tile PE on the GPU, which renders a tile (i.e., 16 × 16 pixels)
-at a time. Each Tile PE has 8 Row PEs, and each row PE
-renders 2 rows inside the tile (i.e. 2 × 16 pixels in total). The
-area and power of GBU and the baselines are presented in
-Tab. II and Tab. III. We replace one SM on the Jetson Orin
-NX [2] with GBU and reuse the SM-to-DRAM network to
-avoid extra area.
-Simulation Setup. For simulating the rendering throughput of
-a GBU when integrated with an edge GPU, e.g., Jetson Orin
-NX [2], we build a cycle-accurate emulator on top of GPGPUSim [22]. For each of the three aforementioned rendering
-Orin NX w/ GBU
-Orin NX
-Static Scenes
-Dynamic Scenes
-Human Avatars
-20
-120
-100
-FPS
-80
-60
-40
-20
-0
-Bicycle Bonsai Counter Kitchen Room Stump
-Flame Sear
-Cut Female-4 Male-3 Male-4
-Steak Steak Steak
-Energy Efficiency Improvement (×)
-140
-Static Scenes
-Dynamic Scenes
-Human Avatars
-15
-10
-5
-1
-0
-Bicycle BonsaiCounter Kitchen Room Stump Flame Sear Cut Female-4 Male-3 Male-4
-Steak Steak Steak
-Fig. 14. Rendering speeds on the 3 different types of tasks on the baseline
-Jetson Orinx NX GPU [2] and when enhanced with our proposed GBU.
-Fig. 15. Energy efficiency improvements of our proposed GBU over the
-baseline Jetson Orinx NX GPU [2]
-pipelines used in the evaluation, we validate the emulator with
-measured runtime and power consumption of CUDA kernels
-in Rendering Step ❶ and Rendering Step ❷ on a Jetson Orin
-NX GPU. The emulated runtime and power consumption are
-within 10% error of the real-device measurement.
-❸. As a result, the average energy consumption of rendering
-60 images on the three datasets is reduced from 76 J, 52 J,
-and 23 J to 7 J, 12 J, and 9 J, respectively.
-Rendering Quality. Tab. IV compares the rendering quality
-between GBU and the original 3D Gaussian Splatting implementation on GPU. We use commonly adopted metrics
-in the algorithm community to measure rendering quality:
-Peak Signal-to-Noise Ratio (PSNR, the higher the better) and
-Learned Perceptual Image Patch Similarity (LPIPS, the lower
-the better). Across all three types of scenes, GBU hardware
-only minimally degrades rendering quality (< 0.1 PSNR and <
-0.01 LPIPS), which is mainly due to the use of FP-16 precision
-in the Row-Centric Tile PE. The proposed IRSS dataflow itself
-causes no rendering quality loss when directly deployed on a
-GPU, as detailed in the ablation study Sec. VI-C.
-B. Performance on Real-World Scenes
-Rendering Speed. Fig. 14 shows the end-to-end rendering
-speed of the GBU-enhanced edge GPU compared to the
-baseline edge GPU. Across all three types of scenes, the
-proposed Gaussian Blending Unit enables real-time rendering
-performance (over 60 FPS). On average, the GBU-enhanced
-edge GPU achieves 92 FPS for static scenes, 80 FPS for
-dynamic scenes, and 102 FPS for human avatars, while the
-edge GPU alone only reaches 13 FPS, 18 FPS, and 41 FPS
-for these respective scenes.
-Energy Efficiency. Fig. 15 shows the overall energy efficiency
-improvement. On average, when enhanced with the GBU,
-energy efficiency improves by 10.8×, 4.4×, 2.5× on the three
-types of scenes. This efficiency gain is attributed to our efficient IRSS dataflow and optimized hardware implementation,
-as empirically shown in Sec. VI-C. The improvement in energy
-efficiency for human avatar scenes is lower because these
-scenes are less bottlenecked by the accelerated Rendering Step
-TABLE IV
-R ENDERING Q UALITY B ENCHMARK .
-Static Scenes [7]
-PSNR↑ LPIPS↓
-Dynamic Scenes [31]
-PSNR↑
-LPIPS↓
-Human Avatar [6]
-PSNR↑
-LPIPS↓
-3D-GS [20]
-28.90
-0.196
-33.80
-0.976
-32.19
-0.022
-GBU
-28.84
-0.197
-33.71
-0.977
-32.17
-0.022
-TABLE V
-A BLATION S TUDY: ADDING TECHNIQUES ONE BY ONE TO THE
-ACCELERATION SYSTEM .
-Rendering
-FPS
-Energy
-Efficiency
-PSNR↑
-LPIPS↓
-Jetson Orin NX [2]
-12.8
-1×
-28.90
-0.196
-+ IRSS Dataflow
-+ GBU Tile Engine
-+ GBU D&B Engine
-+ GBU Reuse Cache
-22.0
-66.1
-80.6
-91.5
-1.71 ×
-7.22 ×
-9.40 ×
-10.8 ×
-28.90
-28.84
-28.84
-28.84
-0.196
-0.197
-0.197
-0.197
-C. Understanding Performance Gains
-To understand the rendering speed improvement described
-in Sec. VI-B, Tab. V presents the results of an ablation
-study on the proposed techniques, conducted on real-world
-static scenes [7]. We observed the following: (1) the proposed
-IRSS dataflow, when directly implemented on a GPU as a
-customized CUDA kernel, results in a 1.71× rendering speed
-boost without compromising rendering quality; (2) integration
-with the proposed Tile Engine achieves an average of 66.1
-FPS, owing to the highly optimized implementation of the
-Row-Centric Tile Engine. The slight decrease in rendering
-quality is attributed to the use of 16-bit floating-point precision; (3) the D&B Engine further increases rendering speed
-by 1.21× rendering speed increase by offloading the transformation matrix computation and Gaussian-tile intersection
-tests from the GPU; (4) the adoption of the Gaussian Reuse
-Cache, in addition to the Tile Engine and D&B Engine, further
-enhances rendering speed by 1.14×, by reducing 44.9% offchip memory accesses of Rendering Step ❸.
-D. Performance Scaling under High Rendering Resolution
-In this section, we analyze the performance of GBU under
-varying rendering resolutions (from 676 × 507 to 2704 ×
-2028) on the three dynamic scenes [32]. The rendering speeds
-are shown in Fig. 16. In particular, GBU achieves a higher
-acceleration ratio at higher rendering resolutions, e.g. 9.5× to
-Orin NX
-Flame_Steak
-TABLE VII
-B ENCHMARK WITH THE P REVIOUS N E RF ACCELERATORS ON THE
-N E RF-S YNTHETIC DATASET [38].
-Orin NX w/ GBU
-Sear_Steak
-Cut_Roasted_Beef
-100
-80
-FPS
-60
-40
-20
-0
-7
-7
-7
-40
-28
-40
-40
-28
-28
-x 50
-x 10 04 x 20 676 x 50 52 x 10 04 x 20 676 x 50 352 x 10 704 x 20
-676
-1
-2
-13
-1352
-27
-27
-Fig. 16. Benchmarking rendering speed of the baseline edge GPU [2] and
-GBU enhanced edge GPU under different resolutions.
-Avg. Hit Rate
-Static Scene
-Dynamic Scene
-Human Avatar
-Device
-ICARUS [45]
-RT-NeRF [27]
-Instant-3D [30]
-GBU-Standalone
-Algorithm
-NeRF [38]
-TensoRF [8]
-Instant-NGP [40]
-3D-GS [20]
-PSNR
-30.21
-31.79
-33.18
-33.26
-Technology
-40nm
-28nm
-28nm
-28nm
-Frequency
-0.3 GHz
-1.0 GHz
-0.8 GHz
-1.0 GHz
-Area
-N/A
-18.85 mm2
-6.8 mm2
-1.78 mm2
-Power
-0.3 W
-8W
-1.9 W
-0.78 W
-FPS
-0.03
-45
-> 30
-172
-all three datasets, with minimal further gains on cache hit rates
-(i.e., less than 0.1% improvement) beyond this point. Based on
-this analysis, we configure the Gaussian reuse cache of GBU
-to be 32 KB.
-60%
-59.7%
-50%
-47.4%
-F. Discussions
-40%
-37.7%
-Comparison with Standalone Accelerators. This section
-benchmarks the proposed GBU against standalone 3D Gaussian and Neural Radience Field (NeRF) accelerators. It is
-important to note that GBU and standalone accelerators are not
-directly comparable, as the latter [25], [28], [45] provides endto-end acceleration but typically specializes in only one type of
-scene (e.g., the static scene). In contrast, GBU accelerates only
-one rendering step and is compatible with a variety of AR/VR
-applications. For a fair comparison, we created a standalone
-version of GBU, dubbed GBU-Standalone, specifically for
-static scene rendering. GBU-Standalone is built by integrating
-GBU with dedicated hardware modules for Rendering Step
-❶ and ❷. The implementation of these modules follows the
-design of GS-Core’s Culling/Conversion/Sorting units [25]
-with the same setup in Sec. VI-A for evaluation.
-As shown in Tab. VI, under the same target rendering
-speed in both the Tanks&Temples dataset [23] and the Deep
-Blending dataset [16] used by GS-Core, GBU-Standalone
-demonstrates superior area and energy efficiency, primarily
-due to the proposed Tile Engine. Additionally, benchmarking
-against representative NeRF accelerators [27], [30], [45] on
-the NeRF-Synthetic dataset [38] (Tab. VII) shows that GBU
-achieves the highest rendering quality, thanks to the advanced
-3D Gaussian rendering algorithm, while also outperforming
-prior NeRF accelerators in rendering speed, area efficiency,
-and energy consumption, further validating the effectiveness
-of the proposed techniques.
-30%
-20%
-10%
-0%
-0 KB
-2 KB
-4 KB
-8 KB
-16 KB
-32 KB
-64 KB
-Cache Size
-Fig. 17. Average hit rates of the Gaussian Reuse Cache across three datasets
-for varying cache sizes. The dotted red line represents the cache hit rate at a
-64 KB cache size.
-13.2× speedup at 2704 × 2028 resolution, as compared to
-3.7× to 4.1× speedup at a resolution of 676 × 507. This is
-because the number of fragments grows with the increase in
-rendering resolution, therefore rendering at a higher resolution exacerbates the bottleneck per-fragment computation in
-Rendering Step ❸. As a result, the dedicated acceleration for
-Rendering Step ❸ plays a more vital role in enabling real-time
-rendering with 3D Gaussians on a higher resolution, making
-the proposed GBU even more desirable for future-generation
-AR/VR devices at higher screen resolutions.
-E. Ablation Study on Cache Sizes
-To understand the impact of cache sizes on cache hit
-rates, Fig. 17 presents the cache hit rates across varying
-Gaussian reuse cache sizes (ranging from 0 KB to 64 KB).
-The results are averaged across the static scene dataset [7], the
-dynamic scene dataset [32], and the human avatar dataset [5],
-respectively. As shown in Fig. 17, doubling the cache size
-results in a linear increase in hit rate when the cache size is
-below 8 KB. However, the hit rate saturates around 32 KB on
-TABLE VI
-S PECIFICATION OF GBU-S TANDLONE AND THE GSC ORE .
-Step ❸ PE
-Area
-Power
-Device
-SRAM
-Area
-Typical
-Power
-GS-Core [25]
-272 KB
-3.95 mm2
-0.87 W
-1.81 mm2
-0.25 W
-GBU-Standlone
-63 KB
-1.78 mm2
-0.78 W
-0.50 mm2
-0.15 W
-Limitations in extreme cases. While GBU demonstrates
-strong performance across three widely used datasets [5], [7],
-[32], it may face challenges under certain extreme conditions:
-(1) Distant camera poses. The efficiency of the IRSS dataflow
-relies on each Gaussian covering multiple pixels per row.
-However, when the camera is significantly farther from the
-scene, Gaussians may cover fewer pixels, reducing compute
-sharing. For instance, increasing the camera-to-scene distance
-by 4× in the static scene dataset [7] reduces GBU’s speedup
-over a vanilla GPU [2] from the original 10.8× to 4.7×. Future
-work could address this by adaptively merging Gaussians
-based on camera distance [21]; (2) Highly dynamic scenes.
-GBU primarily accelerates the Rendering Step ❸, but in
-highly dynamic scenes, other rendering steps may dominate
-computation. For example, multi-avatar settings [34] may
-require substantial processing in the Rendering Step ❶ for
-modeling the human bodies, limiting GBU’s overall speedup.
-A specialized accelerator for the Rendering Step ❶ could
-improve efficiency in such scenarios.
-VII. R ELATED W ORKS
-Graphics Representations in 3D Reconstruction Recently,
-NeRFs [38] have demonstrated exceptional reconstruction
-quality. NeRFs employ implicit neural representations, parameterized by multi-layer perceptrons (MLPs), to model scenes.
-In the last year, Gaussian Splatting [20] has emerged as a novel
-3D representation, striking the SOTA balance between realtime rendering and high reconstruction quality. This approach
-represents a scene as a collection of translucent 3D Gaussian
-kernels. During rendering, these 3D Gaussian kernels are projected as 2D Gaussian kernels onto a screen and then blended
-in screen space, alleviating the need for resource-intensive
-sampling in 3D. Given its effectiveness, Gaussian Splatting
-has been adapted for a variety of AR/VR applications, including video reconstruction [36], simultaneous localization and
-mapping (SLAM) [50], 3D AI-generated content (AIGC) [33],
-and virtual telepresence [43]. The applications converge on a
-shared rendering pipeline that transforms these kernels into 2D
-images. Consequently, our GBU offers a unified solution for
-enhancing the performance of these AR/VR applications that
-are highly desirable for on-device deployment.
-Graphics Hardware Researchers have developed specialized
-hardware accelerators dedicated to NeRFs [13], [15], [24],
-[28], [30], [39]. These accelerators significantly outperform
-software rendering methods in both speed and energy efficiency. However, it is commonly agreed that the rendering
-processes for NeRFs and Gaussian Splatting are fundamentally different [20]; NeRFs require extensive sampling in 3D
-space, while Gaussian Splatting streamlines this process by
-directly rasterizing Gaussians onto a 2D screen. Consequently,
-accelerators and methodologies optimized for NeRFs are not
-directly transferable to Gaussian Splatting. This discrepancy
-underscores the need for a dedicated accelerator designed
-explicitly for Gaussian Splatting, ensuring real-time and highfidelity rendering.
-VIII. C ONCLUSION
-Achieving real-time rendering speeds on edge devices remains a significant challenge due to the substantial computational demands associated with SOTA Gaussian-based
-rendering pipelines. In this work, we develop GBU, a hardware
-module specifically designed for edge systems to tackle these
-computational challenges. Our approach involves a comprehensive analysis of rendering pipelines in AR/VR applications to identify performance bottlenecks. Secondly, we develop a specialized dataflow that reduces the computational
-cost. Thirdly, we co-design a dedicated hardware module
-that seamlessly integrates into existing GPU architectures,
-improving data locality and leveraging a Gaussian Reuse
-Cache to optimize the rendering process. Extensive evaluations
-across various AR/VR applications demonstrate that the GBU
-not only addresses the primary latency bottlenecks but also
-supports a wide range of applications while maintaining SOTA
-rendering quality. These results confirm the effectiveness of
-our hardware-software co-design approach in bridging the
-performance gap on edge devices, paving the way for more
-immersive and responsive AR/VR experiences.
-ACKNOWLEDGMENTS
-This work was supported by the National Science Foundation (NSF) Computing and Communication Foundations
-(CCF) program (Award IDs: 2400511 and 2312758), and CoCoSys, one of the seven centers in JUMP 2.0, a Semiconductor
-Research Corporation (SRC) program sponsored by DARPA.
-R EFERENCES
-[1] “Apple vision pro - apple,” https://www.apple.com/apple-vision-pro/,
-(Accessed on 04/09/2024).
-[2] “Jetson orin for next-gen robotics — nvidia,” https://www.nvidia.com/
-en-us/autonomous-machines/embedded-systems/jetson-orin/, (Accessed
-on 04/02/2024).
-[3] “Meta quest 3: New mixed reality vr headset - shop now — meta
-store — meta store,” https://www.meta.com/quest/quest-3/, (Accessed
-on 04/09/2024).
-[4] “Nsight systems — nsight-systems 2024.2 documentation,” https://docs.
-nvidia.com/nsight-systems/index.html, (Accessed on 04/16/2024).
-[5] T. Alldieck, M. Magnor, W. Xu, C. Theobalt, and G. Pons-Moll, “Video
-based reconstruction of 3d people models,” in IEEE/CVF Conference
-on Computer Vision and Pattern Recognition (CVPR), Jun 2018, pp.
-8387–8397, CVPR Spotlight Paper.
-[6] B. Attal, J.-B. Huang, C. Richardt, M. Zollhoefer, J. Kopf, M. O’Toole,
-and C. Kim, “HyperReel: High-fidelity 6-DoF video with rayconditioned sampling,” arXiv preprint arXiv:2301.02238, 2023.
-[7] J. T. Barron, B. Mildenhall, M. Tancik, P. Hedman, R. Martin-Brualla,
-and P. P. Srinivasan, “Mip-nerf: A multiscale representation for antialiasing neural radiance fields,” 2021.
-[8] A. Chen, Z. Xu, A. Geiger, J. Yu, and H. Su, “Tensorf: Tensorial radiance
-fields,” in European Conference on Computer Vision (ECCV), 2022.
-[9] G. Chen and W. Wang, “A survey on 3d gaussian splatting,” arXiv
-preprint arXiv:2401.03890, 2024.
-[10] J. Chen, Y. Zhang, D. Kang, X. Zhe, L. Bao, X. Jia, and H. Lu,
-“Animatable neural radiance fields from monocular rgb videos,” 2021.
-[11] Y. Chen, Z. Chen, C. Zhang, F. Wang, X. Yang, Y. Wang, Z. Cai,
-L. Yang, H. Liu, and G. Lin, “Gaussianeditor: Swift and controllable
-3d editing with gaussian splatting,” arXiv preprint arXiv:2311.14521,
-2023.
-[12] S. Fridovich-Keil, A. Yu, M. Tancik, Q. Chen, B. Recht, and
-A. Kanazawa, “Plenoxels: Radiance fields without neural networks,” in
-CVPR, 2022.
-[13] Y. Fu, Z. Ye, J. Yuan, S. Zhang, S. Li, H. You, and Y. Lin,
-“Gen-nerf: Efficient and generalizable neural radiance fields via
-algorithm-hardware co-design,” in Proceedings of the 50th Annual
-International Symposium on Computer Architecture, ser. ISCA ’23.
-New York, NY, USA: Association for Computing Machinery, 2023.
-[Online]. Available: https://doi.org/10.1145/3579371.3589109
-[14] W. H. Greub, Linear algebra. Springer Science & Business Media,
-2012, vol. 23.
-[15] D. Han, J. Ryu, S. Kim, S. Kim, J. Park, and H.-J. Yoo, “Metavrain:
-A mobile neural 3-d rendering processor with bundle-frame-familiaritybased nerf acceleration and hybrid dnn computing,” IEEE Journal of
-Solid-State Circuits, vol. 59, no. 1, pp. 65–78, 2024.
-[16] P. Hedman, J. Philip, T. Price, J.-M. Frahm, G. Drettakis, and G. Brostow, “Deep blending for free-viewpoint image-based rendering,” vol. 37,
-no. 6, pp. 257:1–257:15, 2018.
-[17] S. Hu and Z. Liu, “Gauhuman: Articulated gaussian splatting from
-monocular human videos,” arXiv preprint arXiv:2312.02973, 2023.
-[18] Y.-H. Huang, Y.-T. Sun, Z. Yang, X. Lyu, Y.-P. Cao, and X. Qi, “Sc-gs:
-Sparse-controlled gaussian splatting for editable dynamic scenes,” arXiv
-preprint arXiv:2312.14937, 2023.
-[19] T. Jiang, X. Chen, J. Song, and O. Hilliges, “Instantavatar: Learning
-avatars from monocular video in 60 seconds,” arXiv, 2022.
-[20] B. Kerbl, G. Kopanas, T. Leimkühler, and G. Drettakis, “3d gaussian
-splatting for real-time radiance field rendering,” ACM Transactions
-on Graphics, vol. 42, no. 4, July 2023. [Online]. Available:
-https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/
-[21] B. Kerbl, A. Meuleman, G. Kopanas, M. Wimmer, A. Lanvin,
-and G. Drettakis, “A hierarchical 3d gaussian representation for
-real-time rendering of very large datasets,” ACM Transactions
-on Graphics, vol. 43, no. 4, July 2024. [Online]. Available:
-https://repo-sam.inria.fr/fungraph/hierarchical-3d-gaussians/
-[22] M. Khairy, Z. Shen, T. M. Aamodt, and T. G. Rogers, “Accel-sim:
-An extensible simulation framework for validated gpu modeling,” in
-2020 ACM/IEEE 47th Annual International Symposium on Computer
-Architecture (ISCA). IEEE, 2020, pp. 473–486.
-[23] A. Knapitsch, J. Park, Q.-Y. Zhou, and V. Koltun, “Tanks and temples:
-Benchmarking large-scale scene reconstruction,” ACM Transactions on
-Graphics, vol. 36, no. 4, 2017.
-[24] J. Lee, K. Choi, J. Lee, S. Lee, J. Whangbo, and J. Sim, “Neurex:
-A case for neural rendering acceleration,” in Proceedings of the 50th
-Annual International Symposium on Computer Architecture, 2023, pp.
-1–13.
-[25] J. Lee, S. Lee, J. Lee, J. Park, and J. Sim, “Gscore: Efficient radiance
-field rendering via architectural support for 3d gaussian splatting,” in
-Proceedings of the 29th ACM International Conference on Architectural
-Support for Programming Languages and Operating Systems, Volume 3,
-2024, pp. 497–511.
-[26] J. Lei, Y. Wang, G. Pavlakos, L. Liu, and K. Daniilidis, “Gart: Gaussian
-articulated template models,” 2023.
-[27] C. Li, S. Li, Y. Zhao, W. Zhu, and Y. Lin, “Rt-nerf: Real-time on-device
-neural radiance fields towards immersive ar/vr rendering,” in Proceedings of the 41st IEEE/ACM International Conference on Computer-Aided
-Design, 2022, pp. 1–9.
-[28] C. Li, S. Li, Y. Zhao, W. Zhu, and Y. Lin, “Rt-nerf: Real-time on-device
-neural radiance fields towards immersive ar/vr rendering,” IEEE/ACM
-International Conference on Computer-Aided Design (ICCAD 2022),
-2022.
-[29] M. Li, J. Tao, Z. Yang, and Y. Yang, “Human101: Training 100+fps
-human gaussians in 100s from 1 view,” 2023.
-[30] S. Li, C. Li, W. Zhu, B. Yu, Y. Zhao, C. Wan, H. You, H. Shi, and Y. Lin,
-“Instant-3d: Instant neural radiance field training towards on-device ar/vr
-3d reconstruction,” in Proceedings of the 50th Annual International
-Symposium on Computer Architecture, 2023, pp. 1–13.
-[31] T. Li, M. Slavcheva, M. Zollhoefer, S. Green, C. Lassner, C. Kim,
-T. Schmidt, S. Lovegrove, M. Goesele, R. Newcombe, and Z. Lv,
-“Neural 3d video synthesis from multi-view video,” 2022.
-[32] T. Li, M. Slavcheva, M. Zollhöfer, S. Green, C. Lassner, C. Kim,
-T. Schmidt, S. Lovegrove, M. Goesele, R. Newcombe, and Z. Lv,
-“Neural 3d video synthesis from multi-view video,” in Proceedings of
-the IEEE/CVF Conference on Computer Vision and Pattern Recognition
-(CVPR), June 2022, pp. 5521–5531.
-[33] X. Li, H. Wang, and K.-K. Tseng, “Gaussiandiffusion: 3d gaussian
-splatting for denoising diffusion probabilistic models with structured
-noise,” 2023.
-[34] Y. Liu, X. Huang, M. Qin, Q. Lin, and H. Wang, “Animatable
-3d gaussian: Fast and high-quality reconstruction of multiple human
-avatars,” in Proceedings of the 32nd ACM International Conference
-on Multimedia, ser. MM ’24. New York, NY, USA: Association
-for Computing Machinery, 2024, p. 1120–1129. [Online]. Available:
-https://doi.org/10.1145/3664647.3680674
-[35] S. Lombardi, J. Saragih, T. Simon, and Y. Sheikh, “Deep appearance
-models for face rendering,” ACM Transactions on Graphics (ToG),
-vol. 37, no. 4, pp. 1–13, 2018.
-[36] J. Luiten, G. Kopanas, B. Leibe, and D. Ramanan, “Dynamic 3d
-gaussians: Tracking by persistent dynamic view synthesis,” in 3DV,
-2024.
-[37] S. Ma, T. Simon, J. Saragih, D. Wang, Y. Li, F. De la Torre, and
-Y. Sheikh, “Pixel codec avatars,” in Proceedings of the IEEE/CVF
-Conference on Computer Vision and Pattern Recognition (CVPR), June
-2021, pp. 64–73.
-[38] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi,
-and R. Ng, “Nerf: Representing scenes as neural radiance fields for view
-synthesis,” Communications of the ACM, vol. 65, no. 1, pp. 99–106,
-2021.
-[39] M. H. Mubarik, R. Kanungo, T. Zirr, and R. Kumar, “Hardware
-acceleration of neural graphics,” in Proceedings of the 50th Annual
-International Symposium on Computer Architecture, 2023, pp. 1–12.
-[40] T. Müller, A. Evans, C. Schied, and A. Keller, “Instant neural graphics
-primitives with a multiresolution hash encoding,” ACM Trans. Graph.,
-vol. 41, no. 4, pp. 102:1–102:15, Jul. 2022. [Online]. Available:
-https://doi.org/10.1145/3528223.3530127
-[41] S. Orts-Escolano, C. Rhemann, S. Fanello, W. Chang, A. Kowdle,
-Y. Degtyarev, D. Kim, P. L. Davidson, S. Khamis, M. Dou, V. Tankovich,
-C. Loop, Q. Cai, P. A. Chou, S. Mennicken, J. Valentin, V. Pradeep,
-S. Wang, S. B. Kang, P. Kohli, Y. Lutchyn, C. Keskin, and S. Izadi,
-“Holoportation: Virtual 3d teleportation in real-time,” in UIST 2016,
-March 2016. [Online]. Available: https://www.microsoft.com/en-us/
-research/publication/holoportation-virtual-3d-teleportation-in-real-time/
-[42] A. Pumarola, E. Corona, G. Pons-Moll, and F. Moreno-Noguer, “Dnerf: Neural radiance fields for dynamic scenes,” in Proceedings of
-the IEEE/CVF Conference on Computer Vision and Pattern Recognition
-(CVPR), June 2021, pp. 10 318–10 327.
-[43] S. Qian, T. Kirschstein, L. Schoneveld, D. Davoli, S. Giebenhain, and
-M. Nießner, “Gaussianavatars: Photorealistic head avatars with rigged
-3d gaussians,” arXiv preprint arXiv:2312.02069, 2023.
-[44] M. Qin, W. Li, J. Zhou, H. Wang, and H. Pfister, “Langsplat: 3d language
-gaussian splatting,” arXiv preprint arXiv:2312.16084, 2023.
-[45] C. Rao, H. Yu, H. Wan, J. Zhou, Y. Zheng, M. Wu, Y. Ma, A. Chen,
-B. Yuan, P. Zhou et al., “Icarus: A specialized architecture for neural
-radiance fields rendering,” ACM Transactions on Graphics (TOG),
-vol. 41, no. 6, pp. 1–14, 2022.
-[46] Z. Shao, Z. Wang, Z. Li, D. Wang, X. Lin, Y. Zhang, M. Fan, and
-Z. Wang, “SplattingAvatar: Realistic Real-Time Human Avatars with
-Mesh-Embedded Gaussian Splatting,” in Computer Vision and Pattern
-Recognition (CVPR), 2024.
-[47] J. Tang, J. Ren, H. Zhou, Z. Liu, and G. Zeng, “Dreamgaussian:
-Generative gaussian splatting for efficient 3d content creation,” arXiv
-preprint arXiv:2309.16653, 2023.
-[48] F. Wang, S. Tan, X. Li, Z. Tian, and H. Liu, “Mixed neural voxels
-for fast multi-view video synthesis,” arXiv preprint arXiv:2212.00190,
-2022.
-[49] G. Wu, T. Yi, J. Fang, L. Xie, X. Zhang, W. Wei, W. Liu, Q. Tian,
-and W. Xinggang, “4d gaussian splatting for real-time dynamic scene
-rendering,” arXiv preprint arXiv:2310.08528, 2023.
-[50] C. Yan, D. Qu, D. Wang, D. Xu, Z. Wang, B. Zhao, and X. Li, “Gs-slam:
-Dense visual slam with 3d gaussian splatting,” 2024.
-[51] Z. Yang, H. Yang, Z. Pan, and L. Zhang, “Real-time photorealistic
-dynamic scene representation and rendering with 4d gaussian splatting,”
-2024.
-[52] B. Zhang, Y. Cheng, J. Yang, C. Wang, F. Zhao, Y. Tang, D. Chen,
-and B. Guo, “Gaussiancube: Structuring gaussian splatting using optimal
-transport for 3d generative modeling,” arXiv preprint arXiv:2403.19655,
-2024.
-[53] X. Zhou, Z. Lin, X. Shan, Y. Wang, D. Sun, and M.-H. Yang, “Drivinggaussian: Composite gaussian splatting for surrounding dynamic
-autonomous driving scenes,” 2024.
-[54] D. J. Zielinski, H. M. Rao, M. A. Sommer, and R. Kopper, “Exploring
-the effects of image persistence in low frame rate virtual environments,”
-in 2015 IEEE Virtual Reality (VR), 2015, pp. 19–26.
-[55] W. Zielonka, T. Bagautdinov, S. Saito, M. Zollhöfer, J. Thies,
-and J. Romero, “Drivable 3d gaussian avatars,” arXiv preprint
-arXiv:2311.08581, 2023.
-[56] M. Zwicker, H. Pfister, J. Van Baar, and M. Gross, “Ewa volume
-splatting,” in Proceedings Visualization, 2001. VIS’01. IEEE, 2001,
-pp. 29–538.
+
+TABLE II SPECIFICATION OF GBU AND JETSON ORIN NX.
+
+
+
+| Device      | SRAM  | Area      | Frequency | Technology | Typical |
+|-------------|-------|-----------|-----------|------------|---------|
+| Orin NX [2] | 4 MB  | 450 mm 2  | 918 MHz   | 8 nm       | 15 W    |
+| GBU         | 63 KB | 0.90 mm 2 | 1GHz      | 28 nm      | 0.22 W  |
+
+TABLE III AREA AND POWER BREAKDOWN OF GBU HARDWARE MODULES.
+
+
+
+|  | Module                  | Row PEs | Row Gen. | D&B Engine | Cache & Others |
+|--|-------------------------|---------|----------|------------|----------------|
+|  | Area (mm 2 ) | 0.36    | 0.14     | 0.10       | 0.30           |
+|  | Power (W)               | 0.11    | 0.04     | 0.03       | 0.04           |
+
+GBU render image. This function triggers GBU to render a single image. It takes as input a pointer to the output of the first two rendering steps and writes the rendering output to a preallocated frame buffer. The color channel is configurable and is set to 3 by default.
+
+GBU check status. This function returns the execution status of GBU: 0 (idle) or 1 (in execution). It also includes an optional blocking flag to block a CPU thread until GBU becomes idle. GBU does not automatically synchronize with any CUDA streams and depends on this function to implement the aforementioned GBU-GPU pipeline.
+
+## VI. EXPERIMENTAL RESULTS
+
+## A. Experiment Setup
+
+Datasets and Algorithms. Using the same algorithms and datasets as those described in Sec. III, we evaluate GBU on 12 real-world scenes from 3 AR/VR applications: 6 scenes for static scene reconstruction [7], 3 scenes for dynamic scene reconstruction [32], and 3 scenes for human avatar animation [5]. All scenes are real-world captured and the resolution of the scenes ranges from 779×519 to 1352×1014, as listed in Tab. I. We adopt the following Gaussian-based rendering pipelines for the three types of scenes: the vanilla 3D Gaussian splatting [20] for static scene reconstruction, 4D Gaussian splatting [51] for dynamic scene reconstruction, and SplattingAvatar [46] for animatable human avatars.
+
+Hardware Setup. We implemented the proposed GBU in Verilog and used Cadence Genus to synthesize the RTL design to gate-level netlist for estimating chip area, timing, and power consumption based on a commercial 28nm CMOS technology. The synthesized frequency is set to 1 GHz. We instantiate one Tile PE on the GPU, which renders a tile (i.e., 16×16 pixels) at a time. Each Tile PE has 8 Row PEs, and each row PE renders 2 rows inside the tile (i.e. 2 × 16 pixels in total). The area and power of GBU and the baselines are presented in Tab. II and Tab. III. We replace one SM on the Jetson Orin NX [2] with GBU and reuse the SM-to-DRAM network to avoid extra area.
+
+Simulation Setup. For simulating the rendering throughput of a GBU when integrated with an edge GPU, e.g., Jetson Orin NX [2], we build a cycle-accurate emulator on top of GPGPU-Sim [22]. For each of the three aforementioned rendering
+
+
+
+Fig. 14. Rendering speeds on the 3 different types of tasks on the baseline Jetson Orinx NX GPU [2] and when enhanced with our proposed GBU.
+
+pipelines used in the evaluation, we validate the emulator with measured runtime and power consumption of CUDA kernels in Rendering Step ❶ and Rendering Step ❷ on a Jetson Orin NX GPU. The emulated runtime and power consumption are within 10% error of the real-device measurement.
+
+## B. Performance on Real-World Scenes
+
+Rendering Speed. Fig. 14 shows the end-to-end rendering speed of the GBU-enhanced edge GPU compared to the baseline edge GPU. Across all three types of scenes, the proposed Gaussian Blending Unit enables real-time rendering performance (over 60 FPS). On average, the GBU-enhanced edge GPU achieves 92 FPS for static scenes, 80 FPS for dynamic scenes, and 102 FPS for human avatars, while the edge GPU alone only reaches 13 FPS, 18 FPS, and 41 FPS for these respective scenes.
+
+Energy Efficiency. Fig. 15 shows the overall energy efficiency improvement. On average, when enhanced with the GBU, energy efficiency improves by 10.8×, 4.4×, 2.5× on the three types of scenes. This efficiency gain is attributed to our efficient IRSS dataflow and optimized hardware implementation, as empirically shown in Sec. VI-C. The improvement in energy efficiency for human avatar scenes is lower because these scenes are less bottlenecked by the accelerated Rendering Step
+
+TABLE IV RENDERING QUALITY BENCHMARK.
+
+
+
+|                   | Static Sectors (6) | Dynamic Sectors (3) | Dynamic Lips (1) | Human Actor (6) | Human Lips (1) |       |
+|-------------------|---------------------------|----------------------------|-------------------------|------------------------|-----------------------|-------|
+| 3D-GS [20] | 28.90                     | 0.196                      | 33.80                   | 0.976                  | 32.19                 | 0.022 |
+| GBU        | 28.84                     | 0.197                      | 33.71                   | 0.977                  | 32.17                 | 0.022 |
+
+TABLE V ABLATION STUDY: ADDING TECHNIQUES ONE BY ONE TO THE ACCELERATION SYSTEM.
+
+|        |       |          | Rendering |      | Energy     | PSNR  | ↑ LPIPS ↓ |
+|--------|-------|----------|-----------|------|------------|-------|-----------|
+|        |       |          | FPS       |      | Efficiency |       |           |
+| Jetson | Orin  | NX [2]   | 12.8      | 1    | ×          | 28.90 | 0.196     |
+| + IRSS |       | Dataflow | 22.0      | 1.71 | ×          | 28.90 | 0.196     |
+| + GBU  | Tile  | Engine   | 66.1      | 7.22 | ×          | 28.84 | 0.197     |
+| + GBU  | D&B   | Engine   | 80.6      | 9.40 | ×          | 28.84 | 0.197     |
+| + GBU  | Reuse | Cache    | 91.5      | 10.8 | ×          | 28.84 | 0.197     |
+
+
+
+Fig. 15. Energy efficiency improvements of our proposed GBU over the baseline Jetson Orinx NX GPU [2]
+
+❸. As a result, the average energy consumption of rendering 60 images on the three datasets is reduced from 76 J, 52 J, and 23 J to 7 J, 12 J, and 9 J, respectively.
+
+Rendering Quality. Tab. IV compares the rendering quality between GBU and the original 3D Gaussian Splatting implementation on GPU. We use commonly adopted metrics in the algorithm community to measure rendering quality: Peak Signal-to-Noise Ratio (PSNR, the higher the better) and Learned Perceptual Image Patch Similarity (LPIPS, the lower the better). Across all three types of scenes, GBU hardware only minimally degrades rendering quality (< 0.1 PSNR and < 0.01 LPIPS), which is mainly due to the use of FP-16 precision in the Row-Centric Tile PE. The proposed IRSS dataflow itself causes no rendering quality loss when directly deployed on a GPU, as detailed in the ablation study Sec. VI-C.
+
+### C. Understanding Performance Gains
+
+To understand the rendering speed improvement described in Sec. VI-B, Tab. V presents the results of an ablation study on the proposed techniques, conducted on real-world static scenes [7]. We observed the following: (1) the proposed IRSS dataflow, when directly implemented on a GPU as a customized CUDA kernel, results in a 1.71× rendering speed boost without compromising rendering quality; (2) integration with the proposed Tile Engine achieves an average of 66.1 FPS, owing to the highly optimized implementation of the Row-Centric Tile Engine. The slight decrease in rendering quality is attributed to the use of 16-bit floating-point precision; (3) the D&B Engine further increases rendering speed by 1.21× rendering speed increase by offloading the transformation matrix computation and Gaussian-tile intersection tests from the GPU; (4) the adoption of the Gaussian Reuse Cache, in addition to the Tile Engine and D&B Engine, further enhances rendering speed by 1.14×, by reducing 44.9% offchip memory accesses of Rendering Step ❸.
+
+## D. Performance Scaling under High Rendering Resolution
+
+In this section, we analyze the performance of GBU under varying rendering resolutions (from 676 × 507 to 2704 × 2028) on the three dynamic scenes [32]. The rendering speeds are shown in Fig. 16. In particular, GBU achieves a higher acceleration ratio at higher rendering resolutions, e.g. 9.5× to
+
+
+
+Fig. 16. Benchmarking rendering speed of the baseline edge GPU [2] and GBU enhanced edge GPU under different resolutions.
+
+
+
+Fig. 17. Average hit rates of the Gaussian Reuse Cache across three datasets for varying cache sizes. The dotted red line represents the cache hit rate at a 64 KB cache size.
+
+13.2× speedup at 2704 × 2028 resolution, as compared to 3.7× to 4.1× speedup at a resolution of 676 × 507. This is because the number of fragments grows with the increase in rendering resolution, therefore rendering at a higher resolution exacerbates the bottleneck per-fragment computation in Rendering Step ❸. As a result, the dedicated acceleration for Rendering Step ❸ plays a more vital role in enabling real-time rendering with 3D Gaussians on a higher resolution, making the proposed GBU even more desirable for future-generation AR/VR devices at higher screen resolutions.
+
+## E. Ablation Study on Cache Sizes
+
+To understand the impact of cache sizes on cache hit rates, Fig. 17 presents the cache hit rates across varying Gaussian reuse cache sizes (ranging from 0 KB to 64 KB). The results are averaged across the static scene dataset [7], the dynamic scene dataset [32], and the human avatar dataset [5], respectively. As shown in Fig. 17, doubling the cache size results in a linear increase in hit rate when the cache size is below 8 KB. However, the hit rate saturates around 32 KB on
+
+TABLE VI SPECIFICATION OF GBU-STANDLONE AND THE GSCORE.
+
+|  | Device        | SRAM   | Area                 | Typical Area | Step ® PE Power      |        |
+|--|---------------|--------|----------------------|--------------|----------------------|--------|
+|  |               |        |                      |              |                      |        |
+|  | GB-Core [25]  | 272 KB | 3.95 mm 2 | 0.87 W       | 1.81 mm 2 | 0.25 W |
+|  | GBU-Standlock | 63 KB  | 1.78 mm 2 | 0.78 W       | 0.50 mm 2 | 0.15 W |
+
+TABLE VII BENCHMARK WITH THE PREVIOUS NERF ACCELERATORS ON THE NERF-SYNTHETIC DATASET [38].
+
+| Device Algorithm | ICARUS [45] NeRF [38] | RT-NeRF [27] TensoRF [8] | Instant-3D [30] Instant-NGP [40] | GBU-Standalone 3D-GS [20] |
+|------------------|-----------------------|--------------------------|----------------------------------|---------------------------|
+| PSNR             | 30.21                 | 31.79                    | 33.18                            | 33.26                     |
+| Technology       | 40nm                  | 28nm                     | 28nm                             | 28nm                      |
+| Frequency        | 0.3 GHz               | 1.0 GHz                  | 0.8 GHz                          | 1.0 GHz                   |
+| Area             | N/A                   | 18.85 mm 2               | 6.8 mm 2                         | 1.78 mm 2                 |
+| Power            | 0.3 W                 | 8 W                      | 1.9 W                            | 0.78 W                    |
+| FPS              | 0.03                  | 45                       | > 30                             | 172                       |
+
+all three datasets, with minimal further gains on cache hit rates (i.e., less than 0.1% improvement) beyond this point. Based on this analysis, we configure the Gaussian reuse cache of GBU to be 32 KB.
+
+#### F. Discussions
+
+Comparison with Standalone Accelerators. This section benchmarks the proposed GBU against standalone 3D Gaussian and Neural Radience Field (NeRF) accelerators. It is important to note that GBU and standalone accelerators are not directly comparable, as the latter [25], [28], [45] provides endto-end acceleration but typically specializes in only one type of scene (e.g., the static scene). In contrast, GBU accelerates only one rendering step and is compatible with a variety of AR/VR applications. For a fair comparison, we created a standalone version of GBU, dubbed GBU-Standalone, specifically for static scene rendering. GBU-Standalone is built by integrating GBU with dedicated hardware modules for Rendering Step ❶ and ❷. The implementation of these modules follows the design of GS-Core's Culling/Conversion/Sorting units [25] with the same setup in Sec. VI-A for evaluation.
+
+As shown in Tab. VI, under the same target rendering speed in both the Tanks&Temples dataset [23] and the Deep Blending dataset [16] used by GS-Core, GBU-Standalone demonstrates superior area and energy efficiency, primarily due to the proposed Tile Engine. Additionally, benchmarking against representative NeRF accelerators [27], [30], [45] on the NeRF-Synthetic dataset [38] (Tab. VII\) shows that GBU achieves the highest rendering quality, thanks to the advanced 3D Gaussian rendering algorithm, while also outperforming prior NeRF accelerators in rendering speed, area efficiency, and energy consumption, further validating the effectiveness of the proposed techniques.
+
+Limitations in extreme cases. While GBU demonstrates strong performance across three widely used datasets [5], [7], [32], it may face challenges under certain extreme conditions: (1) Distant camera poses. The efficiency of the IRSS dataflow relies on each Gaussian covering multiple pixels per row. However, when the camera is significantly farther from the scene, Gaussians may cover fewer pixels, reducing compute sharing. For instance, increasing the camera-to-scene distance by 4× in the static scene dataset [7] reduces GBU's speedup over a vanilla GPU [2] from the original 10.8× to 4.7×. Future work could address this by adaptively merging Gaussians based on camera distance [21]; (2) Highly dynamic scenes. GBU primarily accelerates the Rendering Step ❸, but in highly dynamic scenes, other rendering steps may dominate computation. For example, multi-avatar settings [34] may require substantial processing in the Rendering Step ❶ for modeling the human bodies, limiting GBU's overall speedup. A specialized accelerator for the Rendering Step ❶ could improve efficiency in such scenarios.
+
+#### VII. RELATED WORKS
+
+Graphics Representations in 3D Reconstruction Recently, NeRFs [38] have demonstrated exceptional reconstruction quality. NeRFs employ implicit neural representations, parameterized by multi-layer perceptrons (MLPs), to model scenes. In the last year, Gaussian Splatting [20] has emerged as a novel 3D representation, striking the SOTA balance between realtime rendering and high reconstruction quality. This approach represents a scene as a collection of translucent 3D Gaussian kernels. During rendering, these 3D Gaussian kernels are projected as 2D Gaussian kernels onto a screen and then blended in screen space, alleviating the need for resource-intensive sampling in 3D. Given its effectiveness, Gaussian Splatting has been adapted for a variety of AR/VR applications, including video reconstruction [36], simultaneous localization and mapping (SLAM) [50], 3D AI-generated content (AIGC) [33], and virtual telepresence [43]. The applications converge on a shared rendering pipeline that transforms these kernels into 2D images. Consequently, our GBU offers a unified solution for enhancing the performance of these AR/VR applications that are highly desirable for on-device deployment.
+
+Graphics Hardware Researchers have developed specialized hardware accelerators dedicated to NeRFs [13], [15], [24], [28], [30], [39]. These accelerators significantly outperform software rendering methods in both speed and energy efficiency. However, it is commonly agreed that the rendering processes for NeRFs and Gaussian Splatting are fundamentally different [20]; NeRFs require extensive sampling in 3D space, while Gaussian Splatting streamlines this process by directly rasterizing Gaussians onto a 2D screen. Consequently, accelerators and methodologies optimized for NeRFs are not directly transferable to Gaussian Splatting. This discrepancy underscores the need for a dedicated accelerator designed explicitly for Gaussian Splatting, ensuring real-time and highfidelity rendering.
+
+# VIII. CONCLUSION
+
+Achieving real-time rendering speeds on edge devices remains a significant challenge due to the substantial computational demands associated with SOTA Gaussian-based rendering pipelines. In this work, we develop GBU, a hardware module specifically designed for edge systems to tackle these computational challenges. Our approach involves a comprehensive analysis of rendering pipelines in AR/VR applications to identify performance bottlenecks. Secondly, we develop a specialized dataflow that reduces the computational cost. Thirdly, we co-design a dedicated hardware module that seamlessly integrates into existing GPU architectures, improving data locality and leveraging a Gaussian Reuse Cache to optimize the rendering process. Extensive evaluations across various AR/VR applications demonstrate that the GBU not only addresses the primary latency bottlenecks but also supports a wide range of applications while maintaining SOTA rendering quality. These results confirm the effectiveness of our hardware-software co-design approach in bridging the performance gap on edge devices, paving the way for more immersive and responsive AR/VR experiences.
+
+## ACKNOWLEDGMENTS
+
+This work was supported by the National Science Foundation (NSF) Computing and Communication Foundations (CCF) program (Award IDs: 2400511 and 2312758), and Co-CoSys, one of the seven centers in JUMP 2.0, a Semiconductor Research Corporation (SRC) program sponsored by DARPA.
+
+## REFERENCES
+
+- [1] "Apple vision pro - apple," [https://www.apple.com/apple-vision-pro/,](https://www.apple.com/apple-vision-pro/) (Accessed on 04/09/2024). [2] "Jetson orin for next-gen robotics — nvidia," [https://www.nvidia.com/](https://www.nvidia.com/en-us/autonomous-machines/embedded-systems/jetson-orin/) [en-us/autonomous-machines/embedded-systems/jetson-orin/,](https://www.nvidia.com/en-us/autonomous-machines/embedded-systems/jetson-orin/) (Accessed on 04/02/2024). [3] "Meta quest 3: New mixed reality vr headset - shop now — meta store — meta store," [https://www.meta.com/quest/quest-3/,](https://www.meta.com/quest/quest-3/) (Accessed on 04/09/2024). [4] "Nsight systems — nsight-systems 2024.2 documentation," [https://docs.](https://docs.nvidia.com/nsight-systems/index.html) [nvidia.com/nsight-systems/index.html,](https://docs.nvidia.com/nsight-systems/index.html) (Accessed on 04/16/2024). [5] T. Alldieck, M. Magnor, W. Xu, C. Theobalt, and G. Pons-Moll, "Video based reconstruction of 3d people models," in IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), Jun 2018, pp. 8387–8397, CVPR Spotlight Paper. [6] B. Attal, J.-B. Huang, C. Richardt, M. Zollhoefer, J. Kopf, M. O'Toole, and C. Kim, "HyperReel: High-fidelity 6-DoF video with rayconditioned sampling," arXiv preprint arXiv:2301.02238, 2023. [7] J. T. Barron, B. Mildenhall, M. Tancik, P. Hedman, R. Martin-Brualla, and P. P. Srinivasan, "Mip-nerf: A multiscale representation for antialiasing neural radiance fields," 2021. [8] A. Chen, Z. Xu, A. Geiger, J. Yu, and H. Su, "Tensorf: Tensorial radiance fields," in European Conference on Computer Vision (ECCV), 2022. [9] G. Chen and W. Wang, "A survey on 3d gaussian splatting," arXiv preprint arXiv:2401.03890, 2024. [10] J. Chen, Y. Zhang, D. Kang, X. Zhe, L. Bao, X. Jia, and H. Lu, "Animatable neural radiance fields from monocular rgb videos," 2021. [11] Y. Chen, Z. Chen, C. Zhang, F. Wang, X. Yang, Y. Wang, Z. Cai,
+- L. Yang, H. Liu, and G. Lin, "Gaussianeditor: Swift and controllable 3d editing with gaussian splatting," arXiv preprint arXiv:2311.14521, 2023. [12] S. Fridovich-Keil, A. Yu, M. Tancik, Q. Chen, B. Recht, and
+- A. Kanazawa, "Plenoxels: Radiance fields without neural networks," in CVPR, 2022. [13] Y. Fu, Z. Ye, J. Yuan, S. Zhang, S. Li, H. You, and Y. Lin, "Gen-nerf: Efficient and generalizable neural radiance fields via algorithm-hardware co-design," in Proceedings of the 50th Annual International Symposium on Computer Architecture, ser. ISCA '23. New York, NY, USA: Association for Computing Machinery, 2023. [Online]. Available: [14] W. H. Greub, Linear algebra. Springer Science & Business Media, 2012, vol. 23. [15] D. Han, J. Ryu, S. Kim, S. Kim, J. Park, and H.-J. Yoo, "Metavrain: A mobile neural 3-d rendering processor with bundle-frame-familiaritybased nerf acceleration and hybrid dnn computing," IEEE Journal of Solid-State Circuits, vol. 59, no. 1, pp. 65–78, 2024. [16] P. Hedman, J. Philip, T. Price, J.-M. Frahm, G. Drettakis, and G. Brostow, "Deep blending for free-viewpoint image-based rendering," vol. 37, no. 6, pp. 257:1–257:15, 2018.
+
+- [17] S. Hu and Z. Liu, "Gauhuman: Articulated gaussian splatting from monocular human videos," arXiv preprint arXiv:2312.02973, 2023. [18] Y.-H. Huang, Y.-T. Sun, Z. Yang, X. Lyu, Y.-P. Cao, and X. Qi, "Sc-gs: Sparse-controlled gaussian splatting for editable dynamic scenes," arXiv preprint arXiv:2312.14937, 2023. [19] T. Jiang, X. Chen, J. Song, and O. Hilliges, "Instantavatar: Learning avatars from monocular video in 60 seconds," arXiv, 2022. [20] B. Kerbl, G. Kopanas, T. Leimkuhler, and G. Drettakis, "3d gaussian ¨ splatting for real-time radiance field rendering," ACM Transactions on Graphics, vol. 42, no. 4, July 2023. [Online]. Available:  [21] B. Kerbl, A. Meuleman, G. Kopanas, M. Wimmer, A. Lanvin, and G. Drettakis, "A hierarchical 3d gaussian representation for real-time rendering of very large datasets," ACM Transactions on Graphics, vol. 43, no. 4, July 2024. [Online]. Available:  [22] M. Khairy, Z. Shen, T. M. Aamodt, and T. G. Rogers, "Accel-sim: An extensible simulation framework for validated gpu modeling," in 2020 ACM/IEEE 47th Annual International Symposium on Computer Architecture (ISCA). IEEE, 2020, pp. 473–486. [23] A. Knapitsch, J. Park, Q.-Y. Zhou, and V. Koltun, "Tanks and temples: Benchmarking large-scale scene reconstruction," ACM Transactions on Graphics, vol. 36, no. 4, 2017. [24] J. Lee, K. Choi, J. Lee, S. Lee, J. Whangbo, and J. Sim, "Neurex: A case for neural rendering acceleration," in Proceedings of the 50th Annual International Symposium on Computer Architecture, 2023, pp. 1–13. [25] J. Lee, S. Lee, J. Lee, J. Park, and J. Sim, "Gscore: Efficient radiance field rendering via architectural support for 3d gaussian splatting," in Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 3, 2024, pp. 497–511. [26] J. Lei, Y. Wang, G. Pavlakos, L. Liu, and K. Daniilidis, "Gart: Gaussian articulated template models," 2023. [27] C. Li, S. Li, Y. Zhao, W. Zhu, and Y. Lin, "Rt-nerf: Real-time on-device neural radiance fields towards immersive ar/vr rendering," in Proceedings of the 41st IEEE/ACM International Conference on Computer-Aided Design, 2022, pp. 1–9. [28] C. Li, S. Li, Y. Zhao, W. Zhu, and Y. Lin, "Rt-nerf: Real-time on-device neural radiance fields towards immersive ar/vr rendering," IEEE/ACM International Conference on Computer-Aided Design (ICCAD 2022), 2022. [29] M. Li, J. Tao, Z. Yang, and Y. Yang, "Human101: Training 100+fps human gaussians in 100s from 1 view," 2023. [30] S. Li, C. Li, W. Zhu, B. Yu, Y. Zhao, C. Wan, H. You, H. Shi, and Y. Lin, "Instant-3d: Instant neural radiance field training towards on-device ar/vr 3d reconstruction," in Proceedings of the 50th Annual International Symposium on Computer Architecture, 2023, pp. 1–13. [31] T. Li, M. Slavcheva, M. Zollhoefer, S. Green, C. Lassner, C. Kim,
+- T. Schmidt, S. Lovegrove, M. Goesele, R. Newcombe, and Z. Lv, "Neural 3d video synthesis from multi-view video," 2022. [32] T. Li, M. Slavcheva, M. Zollhofer, S. Green, C. Lassner, C. Kim, ¨
+- T. Schmidt, S. Lovegrove, M. Goesele, R. Newcombe, and Z. Lv, "Neural 3d video synthesis from multi-view video," in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), June 2022, pp. 5521–5531. [33] X. Li, H. Wang, and K.-K. Tseng, "Gaussiandiffusion: 3d gaussian splatting for denoising diffusion probabilistic models with structured noise," 2023. [34] Y. Liu, X. Huang, M. Qin, Q. Lin, and H. Wang, "Animatable 3d gaussian: Fast and high-quality reconstruction of multiple human avatars," in Proceedings of the 32nd ACM International Conference on Multimedia, ser. MM '24. New York, NY, USA: Association for Computing Machinery, 2024, p. 1120–1129. [Online]. Available:  [35] S. Lombardi, J. Saragih, T. Simon, and Y. Sheikh, "Deep appearance models for face rendering," ACM Transactions on Graphics (ToG), vol. 37, no. 4, pp. 1–13, 2018. [36] J. Luiten, G. Kopanas, B. Leibe, and D. Ramanan, "Dynamic 3d gaussians: Tracking by persistent dynamic view synthesis," in 3DV, 2024. [37] S. Ma, T. Simon, J. Saragih, D. Wang, Y. Li, F. De la Torre, and
+- Y. Sheikh, "Pixel codec avatars," in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), June 2021, pp. 64–73. [38] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi, and R. Ng, "Nerf: Representing scenes as neural radiance fields for view synthesis," Communications of the ACM, vol. 65, no. 1, pp. 99–106, 2021. [39] M. H. Mubarik, R. Kanungo, T. Zirr, and R. Kumar, "Hardware acceleration of neural graphics," in Proceedings of the 50th Annual International Symposium on Computer Architecture, 2023, pp. 1–12. [40] T. Muller, A. Evans, C. Schied, and A. Keller, "Instant neural graphics ¨ primitives with a multiresolution hash encoding," ACM Trans. Graph., vol. 41, no. 4, pp. 102:1–102:15, Jul. 2022. [Online]. Available:  [41] S. Orts-Escolano, C. Rhemann, S. Fanello, W. Chang, A. Kowdle,
+  - Y. Degtyarev, D. Kim, P. L. Davidson, S. Khamis, M. Dou, V. Tankovich,
+  - C. Loop, Q. Cai, P. A. Chou, S. Mennicken, J. Valentin, V. Pradeep,
+  - S. Wang, S. B. Kang, P. Kohli, Y. Lutchyn, C. Keskin, and S. Izadi, "Holoportation: Virtual 3d teleportation in real-time," in UIST 2016, March 2016. [Online]. Available: [https://www.microsoft.com/en-us/](https://www.microsoft.com/en-us/research/publication/holoportation-virtual-3d-teleportation-in-real-time/) [research/publication/holoportation-virtual-3d-teleportation-in-real-time/](https://www.microsoft.com/en-us/research/publication/holoportation-virtual-3d-teleportation-in-real-time/) [42] A. Pumarola, E. Corona, G. Pons-Moll, and F. Moreno-Noguer, "Dnerf: Neural radiance fields for dynamic scenes," in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), June 2021, pp. 10 318–10 327. [43] S. Qian, T. Kirschstein, L. Schoneveld, D. Davoli, S. Giebenhain, and
+  - M. Nießner, "Gaussianavatars: Photorealistic head avatars with rigged 3d gaussians," arXiv preprint arXiv:2312.02069, 2023. [44] M. Qin, W. Li, J. Zhou, H. Wang, and H. Pfister, "Langsplat: 3d language gaussian splatting," arXiv preprint arXiv:2312.16084, 2023. [45] C. Rao, H. Yu, H. Wan, J. Zhou, Y. Zheng, M. Wu, Y. Ma, A. Chen,
+  - B. Yuan, P. Zhou et al., "Icarus: A specialized architecture for neural radiance fields rendering," ACM Transactions on Graphics (TOG), vol. 41, no. 6, pp. 1–14, 2022. [46] Z. Shao, Z. Wang, Z. Li, D. Wang, X. Lin, Y. Zhang, M. Fan, and
+  - Z. Wang, "SplattingAvatar: Realistic Real-Time Human Avatars with Mesh-Embedded Gaussian Splatting," in Computer Vision and Pattern Recognition (CVPR), 2024. [47] J. Tang, J. Ren, H. Zhou, Z. Liu, and G. Zeng, "Dreamgaussian: Generative gaussian splatting for efficient 3d content creation," arXiv preprint arXiv:2309.16653, 2023. [48] F. Wang, S. Tan, X. Li, Z. Tian, and H. Liu, "Mixed neural voxels for fast multi-view video synthesis," arXiv preprint arXiv:2212.00190, 2022. [49] G. Wu, T. Yi, J. Fang, L. Xie, X. Zhang, W. Wei, W. Liu, Q. Tian, and W. Xinggang, "4d gaussian splatting for real-time dynamic scene rendering," arXiv preprint arXiv:2310.08528, 2023. [50] C. Yan, D. Qu, D. Wang, D. Xu, Z. Wang, B. Zhao, and X. Li, "Gs-slam: Dense visual slam with 3d gaussian splatting," 2024. [51] Z. Yang, H. Yang, Z. Pan, and L. Zhang, "Real-time photorealistic dynamic scene representation and rendering with 4d gaussian splatting," 2024. [52] B. Zhang, Y. Cheng, J. Yang, C. Wang, F. Zhao, Y. Tang, D. Chen, and B. Guo, "Gaussiancube: Structuring gaussian splatting using optimal transport for 3d generative modeling," arXiv preprint arXiv:2403.19655, 2024. [53] X. Zhou, Z. Lin, X. Shan, Y. Wang, D. Sun, and M.-H. Yang, "Drivinggaussian: Composite gaussian splatting for surrounding dynamic autonomous driving scenes," 2024. [54] D. J. Zielinski, H. M. Rao, M. A. Sommer, and R. Kopper, "Exploring the effects of image persistence in low frame rate virtual environments," in 2015 IEEE Virtual Reality (VR), 2015, pp. 19–26. [55] W. Zielonka, T. Bagautdinov, S. Saito, M. Zollhofer, J. Thies, ¨ and J. Romero, "Drivable 3d gaussian avatars," arXiv preprint arXiv:2311.08581, 2023. [56] M. Zwicker, H. Pfister, J. Van Baar, and M. Gross, "Ewa volume splatting," in Proceedings Visualization, 2001. VIS'01. IEEE, 2001, pp. 29–538.

@@ -1,0 +1,198 @@
+--- v004.md
++++ v005.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Naive Surface Net is a GPU-accelerated surface extraction algorithm that reconstructs a mesh by averaging intersection points on voxel edges to create smoothed feature points, then constructing quads from these points [S1, S2, unofficial]. It differs from Marching Cubes by generating feature points first and then quads, rather than triangles directly from cube configurations, and produces a smoother surface than standard voxel extraction by averaging edge midpoints instead of using raw integer grid coordinates [S1, S2, unofficial].
++Naive Surface Net is a GPU-accelerated surface extraction algorithm that reconstructs a mesh by averaging intersection points on voxel edges to create smoothed feature points, then constructing quads from these points [S1, S2, unofficial]. It differs from Marching Cubes by generating feature points first and then quads, rather than triangles directly from cube configurations, and produces a smoother surface than standard voxel extraction by averaging edge midpoints instead of using raw integer grid coordinates [S1, S2, unofficial]. It builds on [Naive Voxel Meshing](2376-naive-voxel-meshing.md) but replaces raw face placement with boundary-aware quad generation and vertex smoothing.
+ 
+ ## How it works
+@@ -19,5 +19,5 @@
+     *   `Voxels`: `StructuredBuffer<Voxel>` [S1, unofficial].
+     *   `FeaturePoints`: `RWStructuredBuffer<float3>` [S1, unofficial].
+-    *   `Quads`: `AppendStructuredBuffer` (or similar) storing `QuadVertices` [S1, unofficial].
++    *   `Quads`: `AppendStructuredBuffer` storing `QuadVertices` [S1, unofficial].
+     *   `Indices`: `RWStructuredBuffer<int>` storing triangle indices [S1, unofficial].
+     *   `VerticesArgumentBuffer`: `Buffer` of type `IndirectArguments` for indirect dispatch [S1, unofficial].
+@@ -26,5 +26,5 @@
+ The index for a voxel at coordinates $(x, y, z)$ in a 1D array is calculated as [S1, S2, unofficial]:
+ $$ index = x + y \cdot (Size.x \cdot Size.z) + z \cdot Size.z $$
+-Note: Source [S2, unofficial] uses a slightly different order for the byte array: `index = x + (z * CHUNK_SIZE) + (y * CHUNK_AREA)`. Both map 3D coordinates to 1D, but the stride differs. The GPU kernel [S1, unofficial] uses the first formula.
++Source [S2, unofficial] uses a slightly different stride for the byte array: `index = x + (z * CHUNK_SIZE) + (y * CHUNK_AREA)`. Both map 3D coordinates to 1D, but the memory layout differs. The GPU kernel [S1, unofficial] uses the first formula.
+ 
+ **Core Formulas:**
+@@ -51,5 +51,5 @@
+         *   Check if the edge crosses the surface: If `IsVoid(edgePos) != IsVoid(edgeNeighborPos)` [S2, unofficial].
+         *   If it crosses, add the midpoint to the sum: `total += (edgePos + edgeNeighborPos) / 2.0f` and increment `count` [S2, unofficial].
+-        *   After iterating all 12 edges, if `count > 0`, write `total / count` to `FeaturePoints[GetIndex(position)]` [S2, unofficial].
++        *   After iterating all 12 edges, if `count > 0`, write `total / count` to `FeaturePoints[GetIndex(position)]` [S1, unofficial].
+ 
+ 2.  **Dispatch Kernel 1 (FindVertices):**
+@@ -84,110 +84,76 @@
+ ```python
+ # Constants
+-CHUNK_SIZE = 16 # Example
++CHUNK_SIZE = 16
+ CHUNK_AREA = CHUNK_SIZE * CHUNK_SIZE
+ CHUNK_VOL = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE
+ 
+-# Lookup tables
+-voxelAxis = [
+-    [1, 0, 0],
+-    [0, 1, 0],
+-    [0, 0, 1]
++# Lookup tables from [S2, unofficial]
++AXIS_DIRS = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]
++
++VOXEL_QUADS = [
++    [(0, 0, -1), (0, -1, -1), (0, -1, 0), (0, 0, 0)],  # X-axis face
++    [(0, 0, -1), (0, 0, 0), (-1, 0, 0), (-1, 0, -1)],  # Y-axis face
++    [(0, 0, 0), (0, -1, 0), (-1, -1, 0), (-1, 0, 0)]   # Z-axis face
+ ]
+ 
+-voxelQuads = [
+-    [[0, 0, -1], [0, -1, -1], [0, -1, 0], [0, 0, 0]],
+-    [[0, 0, -1], [0, 0, 0], [-1, 0, 0], [-1, 0, -1]],
+-    [[0, 0, 0], [0, -1, 0], [-1, -1, 0], [-1, 0, 0]]
++EDGE_OFFSETS = [
++    # Edges on min Z axis
++    ((0, 0, 0), (1, 0, 0)), ((1, 0, 0), (1, 1, 0)),
++    ((1, 1, 0), (0, 1, 0)), ((0, 1, 0), (0, 0, 0)),
++    # Edges on max Z axis
++    ((0, 0, 1), (1, 0, 1)), ((1, 0, 1), (1, 1, 1)),
++    ((1, 1, 1), (0, 1, 1)), ((0, 1, 1), (0, 0, 1)),
++    # Edges connecting min Z to max Z
++    ((0, 0, 0), (0, 0, 1)), ((1, 0, 0), (1, 0, 1)),
++    ((1, 1, 0), (1, 1, 1)), ((0, 1, 0), (0, 1, 1))
+ ]
+ 
+-edgeOffsets = [
+-    # Edges on min Z axis
+-    [[0, 0, 0], [1, 0, 0]],
+-    [[1, 0, 0], [1, 1, 0]],
+-    [[1, 1, 0], [0, 1, 0]],
+-    [[0, 1, 0], [0, 0, 0]],
+-    # Edges on max Z axis
+-    [[0, 0, 1], [1, 0, 1]],
+-    [[1, 0, 1], [1, 1, 1]],
+-    [[1, 1, 1], [0, 1, 1]],
+-    [[0, 1, 1], [0, 0, 1]],
+-    # Edges connecting min Z to max Z
+-    [[0, 0, 0], [0, 0, 1]],
+-    [[1, 0, 0], [1, 0, 1]],
+-    [[1, 1, 0], [1, 1, 1]],
+-    [[0, 1, 0], [0, 1, 1]]
+-]
++VOXEL_TRIANGLES = [0, 3, 2, 0, 2, 1]
++VOXEL_TRIANGLES_REVERSE = [0, 2, 3, 0, 1, 2]
+ 
+-voxelTriangles = [0, 3, 2, 0, 2, 1]
+-voxelTrianglesReverse = [0, 2, 3, 0, 1, 2]
++def is_void(pos, voxels):
++    if not (0 <= pos[0] < CHUNK_SIZE and 0 <= pos[1] < CHUNK_SIZE and 0 <= pos[2] < CHUNK_SIZE):
++        return True
++    idx = pos[0] + (pos[2] * CHUNK_SIZE) + (pos[1] * CHUNK_AREA)
++    return voxels[idx] == 0
+ 
+-def IsVoid(pos, voxels):
+-    # Check if pos is inside chunk bounds
+-    if not (0 <= pos[0] < CHUNK_SIZE and 0 <= pos[1] < CHUNK_SIZE and 0 <= pos[2] < CHUNK_SIZE):
+-        return True # Treat out-of-bounds as void or handle via neighbor check
+-    index = pos[0] + (pos[2] * CHUNK_SIZE) + (pos[1] * CHUNK_AREA)
+-    return voxels[index] == 0
++def average_vertex(local_pos, axis_idx, voxels):
++    corners = VOXEL_QUADS[axis_idx]
++    smoothed_vertices = []
++    for corner in corners:
++        total = (0.0, 0.0, 0.0)
++        count = 0
++        for e1, e2 in EDGE_OFFSETS:
++            p1 = (local_pos[0] + e1[0], local_pos[1] + e1[1], local_pos[2] + e1[2])
++            p2 = (local_pos[0] + e2[0], local_pos[1] + e2[1], local_pos[2] + e2[2])
++            if is_void(p1) != is_void(p2):
++                mid = ((p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0, (p1[2] + p2[2]) / 2.0)
++                total = (total[0] + mid[0], total[1] + mid[1], total[2] + mid[2])
++                count += 1
++        if count > 0:
++            smoothed_vertices.append((total[0] / count, total[1] / count, total[2] / count))
++        else:
++            smoothed_vertices.append(corner)
++    return smoothed_vertices
+ 
+-def AverageVertex(localPos, axis, voxels):
+-    # Calculate smoothed position for a corner of the quad
+-    # Identify the 4 corners of the quad face defined by localPos and axis
+-    # For each corner, average the midpoints of all 12 voxel edges sharing that corner and crossing the surface
+-    # This is a simplified placeholder for the complex averaging logic described in [S2, unofficial]
+-    # In practice, this requires iterating over the 12 edges of the voxel cube and checking boundary conditions
+-    pass
+-
+-def AddQuad(localPos, axis, voxels):
+-    # Determine the 4 corners of the quad face
+-    # Compute smoothed positions for each corner
+-    # Return list of 4 vertices
+-    pass
+-
+-def GenerateMesh(voxels, chunkPos):
+-    meshData = {
+-        'vertices': [],
+-        'triangles': [],
+-        'colors': [],
+-        'uvs': []
+-    }
+-    
+-    # Iterate through all voxels, including edge quads
+-    # Note: The loop range in [S2, unofficial] is -1 to CHUNK_SIZE + 1 to include edge quads
++def generate_mesh(voxels, chunk_pos):
++    vertices = []
++    triangles = []
+     for x in range(-1, CHUNK_SIZE + 1):
+         for y in range(-1, CHUNK_SIZE + 1):
+             for z in range(-1, CHUNK_SIZE + 1):
+-                localPos = [x, y, z]
+-                
+-                # Check if voxel is void
+-                if IsVoid(localPos, voxels):
++                local_pos = (x, y, z)
++                if is_void(local_pos, voxels):
+                     continue
+-                
+-                # Iterate through positive axis directions
+-                for axis in voxelAxis:
+-                    neighborPos = [localPos[i] + axis[i] for i in range(3)]
+-                    
+-                    # Check if neighbor exists (is not void)
+-                    # Note: IsVoid returns True for void. We want to check if exactly one is void.
+-                    is_current_void = IsVoid(localPos, voxels)
+-                    is_neighbor_void = IsVoid(neighborPos, voxels)
+-                    
+-                    if is_current_void != is_neighbor_void:
+-                        # Boundary case: create surface quad
+-                        quadVertices = AddQuad(localPos, axis, voxels)
+-                        
+-                        # Split quad into two triangles
+-                        if not is_current_void: # Current voxel is solid
+-                            indices = voxelTriangles
+-                        else:
+-                            indices = voxelTrianglesReverse
+-                        
++                for axis_idx, axis in enumerate(AXIS_DIRS):
++                    neighbor_pos = (local_pos[0] + axis[0], local_pos[1] + axis[1], local_pos[2] + axis[2])
++                    if is_void(local_pos, voxels) != is_void(neighbor_pos, voxels):
++                        quad_verts = average_vertex(local_pos, axis_idx, voxels)
++                        indices = VOXEL_TRIANGLES if not is_void(local_pos, voxels) else VOXEL_TRIANGLES_REVERSE
++                        base_idx = len(vertices)
+                         for idx in indices:
+-                            meshData['triangles'].append(len(meshData['vertices']) + idx)
+-                        
+-                        meshData['vertices'].extend(quadVertices)
+-                        
+-                        # Add colors and UVs (simplified)
+-                        # ...
+-    
+-    return meshData
++                            triangles.append(base_idx + idx)
++                        vertices.extend(quad_verts)
++    return vertices, triangles
+ ```
+ 

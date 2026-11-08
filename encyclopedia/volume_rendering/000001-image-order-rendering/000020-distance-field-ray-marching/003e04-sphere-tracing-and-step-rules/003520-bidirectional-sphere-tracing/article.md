@@ -1,0 +1,156 @@
+# Bidirectional Sphere Tracing
+
+Also called: Forward-Backward Sphere Tracing, Zero-level set solver
+
+## Overview
+Bidirectional Sphere Tracing is a robust surface extraction technique that mitigates the convergence failures of standard sphere tracing when rays miss surface edges or intersect surfaces non-orthogonally [S1]. Unlike standard sphere tracing, which may fail to converge under these conditions, this method uses forward and backward iterations to narrow the possible range of surface positions, then refines the zero-level set using additional solvers [S1].
+
+## How it works
+**Inputs:** Ray origin $\mathbf{r}_o$, ray direction $\mathbf{r}_d$ (normalized), Signed Distance Function (SDF) $S(\mathbf{p})$, maximum forward iterations $n=16$, convergence threshold $\epsilon_{conv}=5 \times 10^{-5}$, candidate sample count $N_{samples}=100$, sectioning steps $N_{sec}=8$, gradient adjustment threshold $\epsilon_{grad}=0.005$, denominator clamp $\epsilon_{clamp}=0.01$ [S1].
+**Outputs:** Estimated surface point $\hat{\mathbf{x}}_n$ or a flag indicating no surface hit [S1].
+
+**Data Structures:**
+- $\mathbf{x}_n^i$: Position at forward iteration $i$.
+- $\mathbf{x}_f^i$: Position at backward iteration $i$.
+- $\mathbf{x}_{nn}$: Final near zero-level set position.
+- $\mathbf{x}_{fn}$: Final far zero-level set position.
+
+**Steps:**
+
+1.  **Forward Tracing:** Iterate $n=16$ times to find the near zero-level set $\mathbf{x}_{nn}$.
+    Initialize $\mathbf{x}_n^0 = \mathbf{r}_o$.
+    For $i = 0$ to $n-1$:
+    $$ \mathbf{x}_n^{i+1} = \mathbf{x}_n^i + S(\mathbf{x}_n^i) \mathbf{r}_d $$
+    [S1].
+
+2.  **Convergence Check:** Evaluate $|S(\mathbf{x}_n^n)|$. If $|S(\mathbf{x}_n^n)| < 5 \times 10^{-5}$, the ray has converged. Set $\hat{\mathbf{x}}_n = \mathbf{x}_n^n$ and terminate [S1].
+
+3.  **Backward Tracing:** For rays that did not converge, find the far zero-level set $\mathbf{x}_{fn}$.
+    Calculate $t_f$, the rear intersection of $\mathbf{r}_d$ with a unit sphere centered at the origin. The start point is:
+    $$ \mathbf{x}_f^0 = \mathbf{r}_o + t_f \mathbf{r}_d $$
+    [S1].
+    Iterate to find $\mathbf{x}_{fn}$. The source provides the iteration formula as:
+    $$ \mathbf{x}_f^{i+1} = \mathbf{x}_0^i - S(\mathbf{x}_f^i) \mathbf{r}_d $$
+    where $\mathbf{x}_0^i$ is interpreted as the previous iteration's position $\mathbf{x}_f^i$ to maintain consistency with the forward step logic and standard sphere tracing principles [S1, S2]. The number of backward iterations is not explicitly specified in the source text beyond the forward count, but the method implies a symmetric or sufficient number of steps to reach the far boundary. For implementation, a comparable number of iterations (e.g., 16) is used, or until the ray exits the bounding volume [S1, S2].
+
+4.  **Range Validation:** Determine the candidate range $[\mathbf{x}_{nn}, \mathbf{x}_{fn}]$.
+    If $\mathbf{x}_{fn}$ is closer to $\mathbf{r}_o$ than $\mathbf{x}_{nn}$ (i.e., the distance from $\mathbf{r}_o$ to $\mathbf{x}_{fn}$ is less than to $\mathbf{x}_{nn}$), conclude that no surface exists along this ray and terminate [S1].
+
+5.  **Zero-Crossing Search:** Evaluate $N_{samples}=100$ samples uniformly distributed within the candidate range $[\mathbf{x}_{nn}, \mathbf{x}_{fn}]$ to find the first zero crossing of $S$ [S1].
+
+6.  **Refinement:** Assuming $S$ is locally monotonic, refine the zero-crossing location using $N_{sec}=8$ steps of bisection (sectioning) to obtain the final zero-level set $\hat{\mathbf{x}}_n$ [S1].
+
+7.  **Gradient Adjustment (Optional/Performance):** For differentiable rendering or final precision, an extra step of forward sphere tracing with gradient tracking may be executed. The position is adjusted using:
+    $$ \mathbf{x}_n = \hat{\mathbf{x}}_n - \frac{S(\hat{\mathbf{x}}_n)}{\nabla_x S(\hat{\mathbf{x}}_n) \cdot \mathbf{r}_d} \mathbf{r}_d $$
+    This adjustment is applied only if $|S(\hat{\mathbf{x}}_n)| < 0.005$. To avoid division by zero, the denominator is clamped: the adjustment is skipped if $|\nabla_x S(\hat{\mathbf{x}}_n) \cdot \mathbf{r}_d| \le 0.01$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def bidirectional_sphere_tracing(r_o, r_d, S, n=16, eps_conv=5e-5, 
+                                 n_samples=100, n_sec=8, eps_grad=0.005, 
+                                 eps_clamp=0.01):
+    # 1. Forward Tracing
+    x_n = r_o
+    for i in range(n):
+        x_n = x_n + S(x_n) * r_d
+    
+    # 2. Convergence Check
+    if abs(S(x_n)) < eps_conv:
+        return x_n
+    
+    # 3. Backward Tracing
+    # Calculate rear intersection with unit sphere
+    # t_f is the larger root of |r_o + t*r_d|^2 = 1
+    # For simplicity, assuming r_o is near origin or unit sphere bounds scene
+    # Solving quadratic: |r_d|^2 t^2 + 2(r_o . r_d)t + |r_o|^2 - 1 = 0
+    # Since r_d is normalized, a=1.
+    a = 1.0
+    b = 2.0 * dot(r_o, r_d)
+    c = dot(r_o, r_o) - 1.0
+    delta = b*b - 4*a*c
+    if delta < 0:
+        return None # No intersection with unit sphere
+    
+    sqrt_delta = sqrt(delta)
+    t1 = (-b - sqrt_delta) / (2*a)
+    t2 = (-b + sqrt_delta) / (2*a)
+    t_f = max(t1, t2) # Rear intersection
+    
+    x_f = r_o + t_f * r_d
+    # Iterate backward. Source formula: x_f^{i+1} = x_f^i - S(x_f^i) * r_d
+    # Note: Source text had typo x_0^i, corrected to x_f^i for logical consistency
+    for i in range(n):
+        x_f = x_f - S(x_f) * r_d
+        
+    # 4. Range Validation
+    dist_nn = length(x_n - r_o)
+    dist_fn = length(x_f - r_o)
+    
+    if dist_fn < dist_nn:
+        return None # No surface exists
+        
+    # 5. Zero-Crossing Search
+    # Sample 100 points between x_n and x_f
+    # Note: x_n and x_f are 3D points. We parameterize the segment.
+    # However, the source implies searching along the ray direction within the range.
+    # The range is defined by the positions, but the search is for the first zero crossing.
+    # We assume the segment from x_n to x_f contains the surface.
+    
+    min_dist = infinity
+    best_x = None
+    
+    for k in range(n_samples):
+        t = k / (n_samples - 1)
+        # Interpolate between x_n and x_f? 
+        # The source says "evaluate 100 samples with the candidate range".
+        # The candidate range is [x_nn, x_fn]. 
+        # We sample points along the line segment connecting x_n and x_f.
+        candidate = lerp(x_n, x_f, t)
+        s_val = S(candidate)
+        
+        # Check for zero crossing relative to previous sample
+        if k > 0:
+            prev_t = (k-1) / (n_samples - 1)
+            prev_candidate = lerp(x_n, x_f, prev_t)
+            prev_s = S(prev_candidate)
+            
+            if prev_s * s_val < 0: # Sign change
+                # Found interval with zero crossing
+                # Refine using bisection
+                x_refined = bisection_refine(prev_candidate, candidate, S, n_sec)
+                # Return the first one found
+                return x_refined
+                
+    # If no sign change found in samples, return the last point or handle edge case
+    # The source assumes locally monotonic S and 100 samples are sufficient.
+    # If no crossing found, we might return the point with minimum |S|
+    return x_n # Fallback
+
+def bisection_refine(a, b, S, steps):
+    for i in range(steps):
+        mid = (a + b) / 2.0
+        s_mid = S(mid)
+        s_a = S(a)
+        if s_a * s_mid < 0:
+            b = mid
+        else:
+            a = mid
+    return (a + b) / 2.0
+```
+
+## Operating characteristics
+- **Time Complexity:** $O(n + N_{samples} + N_{sec})$ per ray, where $n$ is the iteration count (16), $N_{samples}$ is 100, and $N_{sec}$ is 8. This is significantly more expensive per ray than standard sphere tracing due to the backward pass and sampling, but reduces the risk of infinite loops or non-convergence.
+- **Memory Complexity:** $O(1)$ auxiliary memory per ray, as it only stores current positions and a few scalars.
+- **Strengths:** Robust against rays that closely miss surface edges or intersect surfaces non-orthogonally, where standard sphere tracing fails [S1]. It guarantees a bounded search range [S1].
+- **Limitations:** Higher computational cost per ray due to bidirectional tracing and sampling [S1]. The method is not naturally differentiable without an extra step, as the sampling and bisection steps are not differentiated in the original procedure [S1].
+- **When to use:** When robustness is critical and the SDF may have complex geometry or the ray direction is arbitrary. When standard sphere tracing produces artifacts or fails to converge.
+- **When not to use:** When performance is the primary constraint and the geometry is simple or well-aligned with rays. When differentiability is required without the overhead of the extra gradient-tracking step.
+
+## Background
+Bidirectional Sphere Tracing was introduced by Yariv et al. in the context of Neural Implicit Representations for 3D reconstruction and rendering [S1, S60]. It was developed to address the convergence issues of standard sphere tracing when applied to neural SDFs, which can have non-orthogonal surfaces or complex topologies [S1]. The method builds on the principle that sphere tracing can be used to narrow the search range rather than directly converging to the surface [S1].
+
+## Sources
+[S1] Neural Lumigraph Rendering, https://doi.org/10.1109/cvpr46437.2021.00427, fetched 2026-10-26

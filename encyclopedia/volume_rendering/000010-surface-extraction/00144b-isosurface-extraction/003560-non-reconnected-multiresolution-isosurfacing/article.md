@@ -1,0 +1,109 @@
+# Non-reconnected Multiresolution Isosurfacing
+
+Also called: Crack Suppression via Polygon Density, deliberate crack omission, non-reconnected multiresolution cells
+
+## Overview
+Non-reconnected multiresolution isosurfacing is a surface extraction technique for adaptive hierarchical grids that intentionally omits geometric reconnection between adjacent cells of differing resolutions [S1]. Unlike crack-free methods that enforce topological continuity by tracking neighbors and stitching boundaries, this method relies on sufficient polygon density to render cracks visually negligible [S1]. It is chosen when interactive frame rates are prioritized over watertight mesh integrity, particularly in dynamic environments where the surface geometry changes continuously [S1].
+
+## How it works
+The method operates on a cell hierarchy (e.g., octree or quadtree) where each cell contains scalar field data. The core deviation from standard isosurfacing is the decoupling of adjacent cells during rendering.
+
+**Inputs:**
+- Hierarchical grid data structure with scalar values at vertices or centers.
+- Isosurface threshold value.
+- Current frame's stopping level for each cell in the hierarchy.
+
+**Outputs:**
+- A set of independent surface primitives (triangles or polygons) for each active cell.
+- No global connectivity information or vertex sharing between cells.
+
+**Data Structures:**
+- **Cell Hierarchy:** Nodes representing spatial subdivisions. Each node stores its resolution level and scalar data.
+- **Primitive List:** A flat list of generated triangles. Vertices are defined locally to each cell; no global vertex buffer merging is performed across cell boundaries.
+
+**Steps:**
+1. **Traversal:** Iterate over the hierarchical grid cells.
+2. **Level Selection:** Dynamically determine the stopping level for each cell based on the current frame's requirements (e.g., performance budget or user interaction state) [S1]. This selection is per-frame and unconstrained; adjacent cells may differ by more than one resolution level [S1].
+3. **Local Isosurfacing:** For each selected cell, perform standard isosurface extraction (e.g., Marching Cubes) using the cell's local scalar data.
+4. **Primitive Generation:** Generate surface primitives for the cell.
+5. **Independent Rendering:** Render the primitives directly without attempting to match vertices or edges with adjacent cells [S1].
+6. **Gap Acceptance:** Accept that gaps (cracks) may exist between adjacent cells of different resolutions. Do not perform neighbor tracking or reconnection [S1].
+
+**Parameters:**
+- `sufficient_polygon_threshold`: An implicit threshold where the density of displayed polygons makes cracks "hardly visible" [S1]. This is not a fixed numerical value but a visual property dependent on the viewing distance and screen resolution.
+
+**Pitfalls:**
+- **Visible Cracks:** If the polygon density is insufficient (e.g., at low resolution or far viewing distances), cracks between cells of different resolutions will be visible [S1].
+- **Resolution Mismatches:** Cracks may arise because the field is not defined at the same resolution in adjacent cells; drawing more triangles does not solve this fundamental issue [S1].
+- **Non-Watertight Output:** The resulting mesh is not watertight and cannot be directly used for simulations or volume rendering without post-processing [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_non_reconnected_isosurface(hierarchy, isovalue, frame_budget):
+    """
+    Renders isosurface from a hierarchical grid without reconnection.
+    
+    Args:
+        hierarchy: Hierarchical grid structure with scalar data.
+        isovalue: Scalar threshold for surface extraction.
+        frame_budget: Performance constraint influencing level selection.
+        
+    Returns:
+        List of triangles to be rendered.
+    """
+    all_triangles = []
+    
+    # Traverse the hierarchy
+    for cell in hierarchy.traverse():
+        # Dynamically select stopping level based on frame budget
+        # This selection is unconstrained; neighbors may differ significantly
+        level = select_stopping_level(cell, frame_budget)
+        
+        # If the cell is at the selected level, extract surface
+        if cell.level == level:
+            # Perform local isosurfacing (e.g., Marching Cubes)
+            # This generates triangles using only local cell data
+            triangles = extract_isosurface_local(cell, isovalue)
+            
+            # Add to global list without merging vertices with neighbors
+            all_triangles.extend(triangles)
+            
+    return all_triangles
+
+def select_stopping_level(cell, budget):
+    """
+    Determines the resolution level for a cell based on performance constraints.
+    Implementation detail: [G]
+    """
+    # [G] In practice, this might use a heuristic based on distance to camera
+    # or a global LOD manager. The key is that it is per-frame and unconstrained.
+    return cell.max_level  # Placeholder for specific LOD logic
+```
+
+## Subtopics
+
+### Crack-free Isosurface Extraction from AMR Data
+Enforces connectivity by tracking neighbors and stitching boundaries, solving the crack problem at the cost of performance [9981-crack-free-isosurface-extraction-from-amr-data.md].
+
+### Transvoxel
+A specific multiresolution method that uses transition cells to ensure watertightness between different resolution levels [6277-transvoxel.md].
+
+### Dual Contouring and Surface Nets
+Focuses on preserving sharp features and generating watertight meshes through vertex optimization, often requiring reconnection [6319-dual-contouring-and-surface-nets.md].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of active cells. The complexity is lower than reconnection-based methods because it avoids neighbor tracking and global mesh processing [S1].
+- **Memory Complexity:** $O(N)$ for storing the independent primitives. No additional memory is required for connectivity graphs or vertex merging buffers [S1].
+- **Performance:** High interactive frame rates are maintained because the rendering pipeline is simple and parallelizable per cell [S1]. The method avoids the computational overhead of resolving topological inconsistencies [S1].
+- **Strengths:** Simplicity of implementation, high performance, suitability for dynamic sculpting where the surface changes every frame [S1].
+- **Limitations:** Non-watertight meshes, visible cracks at low densities or large resolution differences, unsuitable for applications requiring topological correctness (e.g., fluid simulation, volume rendering) [S1].
+- **When to Use:** Interactive visualization, virtual sculpting, and applications where visual continuity is less critical than frame rate [S1].
+- **When Not to Use:** Applications requiring watertight meshes, scientific visualization requiring precise volume integration, or export to standard mesh formats for downstream processing [S1].
+
+## Background
+The method was introduced by Eric Ferley, Marie-Paule Cani, and Jean-François Dufour in their 2001 paper "Resolution Adaptive Volume Sculpting" [S1]. It was developed to support an interactive volume sculpting system where users manipulate 3D shapes in real-time. The authors observed that reconnection strategies, while solving the crack problem, significantly slowed down the display rate, especially in unconstrained hierarchies where adjacent cells could differ by more than one resolution level [S1]. By deliberately omitting reconnection and relying on polygon density, they achieved the interactive frame rates necessary for the sculpting metaphor. The method is particularly relevant in the context of adaptive multiresolution rendering where dynamic LOD selection is required [S1].
+
+## Sources
+[S1] Resolution Adaptive Volume Sculpting, https://doi.org/10.1006/gmod.2001.0558, fetched 2026-10-26
